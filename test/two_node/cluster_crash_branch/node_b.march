@@ -1,0 +1,63 @@
+-- Two-node harness, scenario "cluster_crash_branch": node-b hosts role I, the
+-- DETECTOR. Its `recv_Msg_C_I_1` takes a crash callback, so when node-c is
+-- gone it continues from a LIVE state instead of being cancelled: it tells L
+-- and closes. See node_a.march.
+mod ClusterCrashBranchB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+    L -> I : Bool
+    I -> C : Bool
+  end
+
+  pfn join() : ClusterNode.ClusterHandle do
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons("127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A")), Nil), "logging-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 2, 120000) do h else panic("node-b: never joined") end
+    end
+  end
+
+  pfn role_i(s : Cap(Session.Live), st : Logging_I.S_recv_Msg_L_I_1) : Logging_I.Yield do
+    Logging_I.recv_Msg_L_I_1(s, st, fn (_trigger, st1) ->
+      println("I: got Trigger")
+      Logging_I.recv_Msg_C_I_1(s, st1,
+        fn (read, st2) ->
+          println("I: got Read(" ++ read ++ ")")
+          let st3 = Logging_I.send_Msg_I_L_2(s, st2, read)
+          Logging_I.recv_Msg_L_I_2(s, st3, fn (report, st4) ->
+            println("I: got Report(" ++ bool_to_string(report) ++ ")")
+            Logging_I.close(s, Logging_I.send_Msg_I_C_1(s, st4, report))),
+        fn (crashed, st2) ->
+          println("I: role " ++ int_to_string(crashed.role) ++ " crashed")
+          Logging_I.close(s, Logging_I.send_Msg_I_L_1(s, st2, "C crashed"))))
+  end
+
+  fn main(c : Cap(IO)) do
+    let h = join()
+    println("node-b: up")
+    match Logging_Run.cluster_I(c, h, "logging-1", fn (s, st) -> role_i(s, st)) do
+      Ok(_) -> println("I: closed")
+      Err(SessionNode.Cancelled(role, cause)) ->
+        println("I: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)
+      Err(e) -> println("I: " ++ SessionNode.run_error_message(e))
+    end
+    ClusterNode.stop(h)
+  end
+end

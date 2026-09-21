@@ -158,4 +158,41 @@ mod Session do
       None    -> no_transport()
     end
   end
+
+  -- ── a crash on the delivery route (actor-hosted roles) ──────────────────
+  --
+  -- An actor-hosted endpoint never runs the crash continuation itself: the
+  -- actor owns the session state, so the crash has to reach the actor's own
+  -- handler, and the route that already reaches it is the delivery one.
+  -- A transport that hosts a role therefore forwards a crash as a delivery
+  -- whose payload is `crash_payload(cause)` and whose sender is the crashed
+  -- role, and the generated `resume` asks `crash_cause` before it decodes.
+  -- The marker cannot collide with a message: every payload on the wire is
+  -- `Json.to_string` of a variant, which never begins with `!`.
+
+  pfn crash_marker() : String do "!session-crash!" end
+
+  doc """
+  The delivery payload that carries a crash of the sending role, with `cause`
+  as the transport knows it. A transport that hosts a role in an actor sends
+  this on the delivery route; nothing else produces it.
+  """
+  fn crash_payload(cause : String) : Bytes do
+    Bytes.from_string(crash_marker() ++ cause)
+  end
+
+  doc """
+  `Some(cause)` if `msg` is a forwarded crash rather than a protocol message,
+  `None` otherwise. The generated `resume` of an actor-hosted role asks this
+  before decoding.
+  """
+  fn crash_cause(msg : Bytes) : Option(String) do
+    let s = Bytes.to_string(msg)
+    let m = crash_marker()
+    if String.starts_with(s, m) do
+      Some(String.slice(s, String.byte_size(m), String.byte_size(s) - String.byte_size(m)))
+    else
+      None
+    end
+  end
 end

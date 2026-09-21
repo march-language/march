@@ -105,7 +105,11 @@ mod SessionNode do
   -- continuation (`Session.on_cancel`); `crash_hs` the crash continuation
   -- installed with it (`Session.on_crash`), under the endpoint AND the role
   -- it is for (`crash_key`); `forward_cancel` (key "c") is the
-  -- hosted party's way to tell its actor; `heard` counts heartbeat ticks
+  -- hosted party's way to tell its actor that its endpoint was cancelled and
+  -- `forward_crash` (key "x") its way to tell it that a role it waits on
+  -- crashed, so the actor takes the crash branch itself (the crash arrives
+  -- on the delivery route, as `Session.crash_payload`, and the generated
+  -- `resume` turns it into a `Crashed_…` event); `heard` counts heartbeat ticks
   -- since a peer's last frame. Our own endpoint's end is in `meta`: "done"
   -- once it closed or was cancelled, and for a cancellation "kind"
   -- (see `cancel_endpoint`), "cancel_role", and `why`'s "cancel_cause".
@@ -115,7 +119,8 @@ mod SessionNode do
                  forward : Vault(Int -> Bytes -> Int -> Unit), why : Vault(String),
                  gone : Vault(String), cancel_hs : Vault(Int -> String -> Int -> Int),
                  crash_hs : Vault(Int -> String -> Int -> Int),
-                 forward_cancel : Vault(Int -> String -> Int -> Unit), heard : Vault(Int),
+                 forward_cancel : Vault(Int -> String -> Int -> Unit),
+                 forward_crash : Vault(Int -> String -> Int -> Unit), heard : Vault(Int),
                  ep : Pid(EndpointState), links : List(Link), on_close : Int -> Unit }
 
   pfn ekey(ep : Int) : String do "e" ++ int_to_string(ep) end
@@ -342,7 +347,8 @@ mod SessionNode do
   -- nothing queued means waiting forever.
   --
   -- Crash branches (the protocol declared the role `may crash`, and the
-  -- receive installed a crash continuation for it, `Session.on_crash`): the
+  -- receive installed a crash continuation for it, `Session.on_crash`, which
+  -- an actor-hosted `await_…` does too): the
   -- continuation waiting on it is replaced by the crash branch, run here as
   -- a delivery would be -- in the endpoint actor's turn, then `drain` for
   -- whatever the branch installs next. The endpoint stays live and no Cancel
@@ -369,9 +375,17 @@ mod SessionNode do
                       let _ = Vault.delete(p.handlers, ekey(ep))
                       let _ = Vault.delete(p.crash_hs, crash_key(ep, role))
                       let _ = Vault.delete(p.cancel_hs, ekey(ep))
-                      let _ = h(role, cause, ep)
-                      let _ = drain(p, ep)
-                      ()
+                      match Vault.get(p.forward_crash, "x") do
+                        -- Hosted: the actor owns the session state, so it
+                        -- takes the branch, in its own turn, and its next
+                        -- `suspend` drains what is queued (as a delivery
+                        -- does). The continuation installed here is inert.
+                        Some(f) -> f(role, cause, ep)
+                        None ->
+                          let _ = h(role, cause, ep)
+                          let _ = drain(p, ep)
+                          ()
+                      end
                     None ->
                       cancel_endpoint(p, ep, role, cause, "role " ++ int_to_string(role) ++ ": " ++ cause, kind_cancelled())
                   end
@@ -729,6 +743,7 @@ mod SessionNode do
       cancel_hs: Vault.new("session_node_cancel_" ++ tag),
       crash_hs: Vault.new("session_node_crash_" ++ tag),
       forward_cancel: Vault.new("session_node_fwdcancel_" ++ tag),
+      forward_crash: Vault.new("session_node_fwdcrash_" ++ tag),
       heard: Vault.new("session_node_heard_" ++ tag),
       ep: ep, links: Nil, on_close: on_close }
   end
@@ -736,7 +751,8 @@ mod SessionNode do
   pfn with_link(p : Party, l : Link) : Party do
     { my_role: p.my_role, node_id: p.node_id, handlers: p.handlers, waiting: p.waiting,
       pending: p.pending, meta: p.meta, forward: p.forward, why: p.why, gone: p.gone,
-      cancel_hs: p.cancel_hs, crash_hs: p.crash_hs, forward_cancel: p.forward_cancel, heard: p.heard, ep: p.ep,
+      cancel_hs: p.cancel_hs, crash_hs: p.crash_hs, forward_cancel: p.forward_cancel,
+      forward_crash: p.forward_crash, heard: p.heard, ep: p.ep,
       links: List.append(p.links, Cons(l, Nil)), on_close: p.on_close }
   end
 
@@ -1452,6 +1468,10 @@ mod SessionNode do
                  cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : () do
     Vault.set(p.forward, "f", fn (from, msg, ep) -> deliver(s, from, msg, ep))
     Vault.set(p.forward_cancel, "c", fn (role, cause, ep) -> cancel(s, role, cause, ep))
+    -- A crash the actor has a branch for goes the DELIVERY way, to the same
+    -- callback, so the actor's resume handler takes it with `state` in scope
+    -- exactly as it takes a message (`Session.crash_payload`).
+    Vault.set(p.forward_crash, "x", fn (role, cause, ep) -> deliver(s, role, Session.crash_payload(cause), ep))
     let w = spawn(HostWatch)
     send(w, Watch(p, p.my_role))
     let _ = monitor(w, pid_of_int(host))
