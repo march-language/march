@@ -106,5 +106,7 @@ with a lower-case label, so an upper-case token continues the branch
   installs none). The guide says so.
 - Cluster mode is untested with crash branches; the same `check_waiting` runs there, so a
   SWIM-declared death should take the branch, but no scenario pins it.
+  CLOSED 2026-09-21 by `test/two_node/cluster_crash_branch`
+  ([[2026-09-21-cluster-crash-branch-scenario]]): it does take the branch.
 - A crash branch inside a `loop` ends the loop (the design's simplest reading).
 - The `Chan` projection refuses crash protocols rather than learning them.
