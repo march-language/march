@@ -132,6 +132,83 @@ let rec dup_bound_vars (expr : Tir.expr) : string list =
   in
   here @ sub
 
+(** Does the Perceus dec chain [chain] of a tail call with arguments [args]
+    release one of those arguments, other than a dup-bound one?
+
+    This is the shape the mutual-TCO loop cannot express.  The chain is
+    `let t = g(x, rest, why) in dec_rc why; t`: [why] is forwarded to a
+    BORROWED parameter and released after the call, which is right under real
+    recursion (the release fires once the nested call has returned) and has no
+    place in a flattened loop, where "after the call" is the next iteration:
+    emitting the DecRC frees the value the next iteration reads (a
+    use-after-free, [test/native/mutual_tco_forwarded_arg.march]), while
+    skipping it, as the self-TCO arms do, drops nothing ever (a leak, the
+    reason B7 in [test_codegen.ml] exists).  Faithful semantics would hold the
+    value until the loop exits, which is a pending-drop stack -- option 2 of
+    [specs/todos/2026-09-20-mutual-tco-borrowed-forwarded-arg.md], still
+    open.  Until then such a group is simply not flattened
+    ([group_back_edges_safe]).  A dup-bound argument ([dup_bound_vars]) is
+    exempt for the reason given there: its DecRC closes a balanced pair and
+    is safe to run on the back edge.
+
+    The forwarded-argument set is computed exactly as the self-TCO arms in
+    [Llvm_emit_tcoarm] compute theirs, so the filter and the arms agree on
+    the vocabulary. *)
+let back_edge_drops_forwarded_arg ~(dup_bound : string list)
+    (args : Tir.atom list) (chain : Tir.expr) : bool =
+  let forwarded =
+    List.filter_map (fun a -> match a with
+      | Tir.AVar v when not (List.mem v.Tir.v_name dup_bound) ->
+        Some v.Tir.v_name
+      | _ -> None) args
+  in
+  let hits op = match cleanup_target op with
+    | Some n -> List.mem n forwarded
+    | None -> false
+  in
+  let rec walk = function
+    | Tir.ESeq (op, rest) when is_cleanup_op op -> hits op || walk rest
+    | op when is_cleanup_op op -> hits op
+    | _ -> false   (* the trailing [EAtom tmp] of the ELet shape *)
+  in
+  walk chain
+
+(** True if [expr] contains a Perceus-wrapped call to a member of [group]
+    whose dec chain drops a forwarded, non-dup-bound argument -- exactly the
+    two shapes the mutual-TCO arms in [Llvm_emit] intercept
+    ([ELet (tmp, EApp (f, args), chain)] with [is_trivial_dec_chain_returning]
+    and [ESeq (EApp (f, args), chain)] with [is_trivial_dec_chain]).  Every
+    position is walked, not only tail positions: the arms fire on the shape
+    wherever it sits once the group context is installed. *)
+let rec has_unsafe_group_back_edge (group : string list)
+    ~(dup_bound : string list) (expr : Tir.expr) : bool =
+  let go = has_unsafe_group_back_edge group ~dup_bound in
+  let in_group (f : Tir.var) = List.mem f.Tir.v_name group in
+  match expr with
+  | Tir.ELet (tmp_v, Tir.EApp (f, args), body)
+    when in_group f && is_trivial_dec_chain_returning tmp_v.Tir.v_name body ->
+    back_edge_drops_forwarded_arg ~dup_bound args body
+  | Tir.ESeq (Tir.EApp (f, args), chain)
+    when in_group f && is_trivial_dec_chain chain ->
+    back_edge_drops_forwarded_arg ~dup_bound args chain
+  | Tir.ELet (_, rhs, body) -> go rhs || go body
+  | Tir.ESeq (e1, e2) -> go e1 || go e2
+  | Tir.ECase (_, branches, default_opt) ->
+    List.exists (fun br -> go br.Tir.br_body) branches
+    || (match default_opt with Some d -> go d | None -> false)
+  | Tir.ELetRec (fns, body) ->
+    List.exists (fun fn -> go fn.Tir.fn_body) fns || go body
+  | _ -> false
+
+(** A mutual-TCO group may be flattened only if none of its members has an
+    unsafe back edge.  Each member's dup-bound set is computed over its own
+    body, as [emit_fn] does for the self-TCO arms. *)
+let group_back_edges_safe (group : string list) (fns : Tir.fn_def list) : bool =
+  List.for_all (fun fn ->
+    not (has_unsafe_group_back_edge group
+           ~dup_bound:(dup_bound_vars fn.Tir.fn_body) fn.Tir.fn_body)
+  ) fns
+
 (* ── Mutual TCO: call graph analysis ────────────────────────────────── *)
 
 (** Collect all function names that are called in TAIL position in [expr].
@@ -260,7 +337,11 @@ let tarjan_sccs (fns : Tir.fn_def list) : string list list =
     1. Its functions form a non-trivial SCC in the tail-call graph (size ≥ 2).
     2. No function in the group makes a non-tail call to any other group member.
     3. All functions in the group have the same LLVM return type (required for
-       the shared loop to produce one result type). *)
+       the shared loop to produce one result type).
+    4. Every back edge is safe ([group_back_edges_safe]): no member's
+       Perceus-wrapped group call drops a forwarded, non-dup-bound argument.
+       A group failing this is emitted as ordinary functions whose tail
+       calls are real calls -- correct, at the cost of the loop. *)
 let find_mutual_tco_groups (ctx : Llvm_ctx.ctx) (fns : Tir.fn_def list) : Tir.fn_def list list =
   let fn_map = List.map (fun fn -> (fn.Tir.fn_name, fn)) fns in
   let sccs = tarjan_sccs fns in
@@ -282,7 +363,8 @@ let find_mutual_tco_groups (ctx : Llvm_ctx.ctx) (fns : Tir.fn_def list) : Tir.fn
         | [] | [_] -> true
         | h :: t   -> List.for_all (String.equal h) t
       in
-      if all_tail && all_same_ret then Some group_fns
+      if all_tail && all_same_ret && group_back_edges_safe group_names group_fns
+      then Some group_fns
       else None
     end
   ) sccs

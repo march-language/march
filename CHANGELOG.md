@@ -12,6 +12,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **Two mutually tail-recursive functions passing a string or list along no longer read
+  freed memory.** The compiled mutual-tail-call loop released a forwarded argument on the
+  back edge, one iteration before its next read (`refused: no-y; refused: no-y` for an
+  accumulator built from `"no-x"`, `"no-y"`; a heap-use-after-free under ASAN), and the
+  naive fix (skip the release) leaked it instead. A group whose back edge would drop a
+  forwarded argument is now compiled as ordinary calls; groups that forward only
+  integers or borrowed list cells keep their loop.
 - **A choreography payload type without a JSON codec is a check-time error.** A type
   declared in the module and used as a message payload without `derive Json` used to pass
   `march --check`, fail the compile with an internal "ambiguous interface-method call", and

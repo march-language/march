@@ -1,14 +1,16 @@
 -- Mutual tail recursion that forwards a heap argument. The two functions
--- become one loop (__mutco_...), and the back edge used to emit the whole
+-- used to become one loop (__mutco_...), and the back edge emitted the whole
 -- Perceus dec chain, including the DecRC of a value being stored into the
 -- next iteration's parameter slot: that freed a freshly-owned string one
 -- instruction before its reuse. ASAN called it a heap-use-after-free in
 -- march_string_eq; without ASAN the previous element's text reappeared in
 -- the accumulator ("refused: no-y; refused: no-y" for "no-x", "no-y").
--- The self-TCO arms had this rule (commit eafbd71a); the mutual twins did
--- not. A dup-bound argument must still be dropped, or the loop leaks one
--- cell per iteration -- the second half of this fixture.
--- specs/progress/2026-09-20-mutual-tco-forwarded-args.md
+-- Skipping that DecRC (the self-TCO arms' rule, commit eafbd71a) would leak
+-- it instead, so a group whose back edge drops a forwarded, non-dup-bound
+-- argument is now not flattened at all: take_next/inspect run as ordinary
+-- calls. walk/step below forwards only borrowed fields, stays a loop, and
+-- its live-allocation check pins that neither shape leaks.
+-- specs/progress/2026-09-20-mutual-tco-safety.md
 mod MutualTcoForwardedArg do
   needs IO
   needs IO.Console
