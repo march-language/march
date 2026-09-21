@@ -86,7 +86,7 @@ Measured over every `.march` file in the repo (`--check` sweep: `stdlib/`,
 
 That is the documented mid-protocol-drop leniency, not a real leak, so the
 `TChan` exclusion above is the right resolution rather than a weakening of the
-new rule. It is now pinned as `accept/t282`, so the exemption is a corpus fact
+new rule. It is now pinned as `accept/t284`, so the exemption is a corpus fact
 instead of an implementation detail.
 
 Everything else: **zero** sites. No stdlib module, no `test/native` program, no
@@ -97,10 +97,10 @@ fixture changed sides.**
 
 ## Fixtures
 
-- `reject/t281_linear_opt_in_wildcard_discard.march` — the witness the todo
+- `reject/t283_linear_opt_in_wildcard_discard.march` — the witness the todo
   asked for: `fn launder(linear val : v) : Int do let _ = val  0 end`, whose
   never-used and used-twice checks both pass.
-- `accept/t282_linear_wildcard_session_chan_midprotocol.march` — the exemption.
+- `accept/t284_linear_wildcard_session_chan_midprotocol.march` — the exemption.
 
 `specs/lang/types/INDEX.md`: 400/400 → **402/402 (168 accept, 234 reject)**,
 all three count sites plus a table row each.
