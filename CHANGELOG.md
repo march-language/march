@@ -46,6 +46,12 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **On macOS, `--cap-sandbox` now stops a program without `IO.Process` from
+  executing another program.** The embedded sandbox profile allowed `exec`
+  unconditionally and only gated `fork`, so such a program could still replace
+  itself with an arbitrary binary (directly, or through `extern` C). `exec` is
+  now granted only with `IO.Process`, as it already was on Linux. `forge cap
+  run` is unchanged: its wrapper has to exec the target, so it still allows it.
 - **`march --emit-core-ast` now reports the same verdict as `march --check`.** A program
   rejected only by an allocation contract (`cap no_alloc`) or by the stdlib-mediated
   capability ceiling was emitted as `"verdict":"accept"` with exit 0, and without the

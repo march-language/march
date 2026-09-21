@@ -18,15 +18,13 @@
    code call socket()/execve()/fork()/open() directly. See specs/lang/
    capabilities.md's "IO.Foreign -- calling unverified C" section.
 
-   macOS gates a DIFFERENT operation for the "process" class than Linux:
-   (allow process-exec) is unconditional baseline on macOS (bin/main.ml:3527)
-   -- only (allow process-fork) is conditioned on IO.Process. Linux is the
-   reverse: execve/execveat are denied, fork/clone never are. So the macOS
-   fixtures probe fork, not exec; the deny-process macOS fixture additionally
-   probes the always-allowed exec as an informational last step, documenting
-   the asymmetry rather than asserting a denial that doesn't exist -- see
-   specs/todos/2026-08-12-cap-sandbox-macos-process-exec-not-gated.md for the
-   follow-up on whether that should change. *)
+   The "process" class on the two backends: on Linux, withholding IO.Process
+   denies execve/execveat and never gates fork/clone. On macOS it denies BOTH
+   process-fork and process-exec (exec was ungated baseline until 2026-09-21;
+   see specs/progress/2026-09-21-cap-sandbox-macos-process-exec-gated.md).
+   The deny-process macOS fixture therefore probes fork AND an in-place exec,
+   and a separate hold-process fixture shows both still work with the
+   capability held. *)
 
 let compiler_exe =
   let exe_dir = Filename.dirname Sys.executable_name in
@@ -143,8 +141,9 @@ int64_t sbx_probe_write_open(void) {
     return 0;
 }
 
-/* macOS-only informational probe: process-exec is never gated by IO.Process
-   there (only process-fork is), so this always succeeds. execve()s the
+/* macOS in-place exec probe: process-exec is gated by IO.Process there (with
+   process-fork), so this returns EPERM when the capability is withheld and
+   never returns when it is held. execve()s the
    CURRENT process (no fork) into /bin/echo, which prints "exec=0" to the
    same stdout the caller was already writing to -- never returns on
    success, so callers must treat it as the last statement in main().
@@ -355,9 +354,8 @@ let test_linux_deny_write () =
     check_field "write" 1 out
   end
 
-(* ── macOS: IO.Process gates fork, not exec (see the asymmetry note in the
-   module doc comment and specs/todos/2026-08-12-cap-sandbox-macos-process-
-   exec-not-gated.md). The "socket" probe is bound to sbx_probe_bind, not
+(* ── macOS: IO.Process gates fork AND exec (see the module doc comment).
+   The "socket" probe is bound to sbx_probe_bind, not
    sbx_probe_socket -- Seatbelt's network* deny does not gate socket()
    creation, only the actual network operation (bind/connect); confirmed by
    direct inspection of the embedded profile (`strings <bin> | grep
@@ -419,6 +417,28 @@ mod SbxDenyProcessMac do
 end
 |}
 
+(* Held IO.Process: fork and an in-place exec both succeed. The exec probe
+   never returns on success; /bin/echo prints "exec=0" as the last line. *)
+let macos_hold_process_src =
+  {|
+mod SbxHoldProcessMac do
+  needs IO.Console
+  needs IO.Foreign
+  needs IO.Process
+
+  extern "raw" : Cap(IO.Foreign) do
+    fn probe_fork() : Int = "sbx_probe_fork"
+    fn probe_exec_inplace() : Int = "sbx_probe_exec_inplace"
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _p : Cap(IO.Process)) : Unit do
+    let _anchor_proc = process_pid()
+    println("fork=" ++ int_to_string(probe_fork()))
+    println("exec=" ++ int_to_string(probe_exec_inplace()))
+  end
+end
+|}
+
 let macos_deny_write_src =
   {|
 mod SbxDenyWriteMac do
@@ -459,6 +479,14 @@ let test_macos_deny_process () =
     check_field "socket" 0 out;
     check_field "fork" 1 out;
     check_field "write" 0 out;
+    check_field "exec" 1 out
+  end
+
+let test_macos_hold_process () =
+  if not is_macos then Alcotest.skip ()
+  else begin
+    let out = compile_and_run macos_hold_process_src in
+    check_field "fork" 0 out;
     check_field "exec" 0 out
   end
 
@@ -476,6 +504,7 @@ let tests : unit Alcotest.test_case list =
     Alcotest.test_case "linux: PROCESS withheld denies execve, NET/WRITE still allowed" `Slow test_linux_deny_exec;
     Alcotest.test_case "linux: FILEWRITE withheld denies write-open, NET/EXEC still allowed" `Slow test_linux_deny_write;
     Alcotest.test_case "macos: NET withheld denies socket, FORK/WRITE still allowed" `Slow test_macos_deny_net;
-    Alcotest.test_case "macos: PROCESS withheld denies fork, NET/WRITE still allowed, EXEC still allowed (documented asymmetry)" `Slow test_macos_deny_process;
+    Alcotest.test_case "macos: PROCESS withheld denies fork AND exec, NET/WRITE still allowed" `Slow test_macos_deny_process;
+    Alcotest.test_case "macos: PROCESS held allows fork and exec" `Slow test_macos_hold_process;
     Alcotest.test_case "macos: FILEWRITE withheld denies write-open, NET/FORK still allowed" `Slow test_macos_deny_write;
   ]
