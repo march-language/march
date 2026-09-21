@@ -3650,7 +3650,7 @@ let rec eval_decl (env : env) (d : decl) : env =
     (* Register the protocol roles so MPST.new can create the right endpoints. *)
     let rec collect_roles acc = function
       | [] -> acc
-      | ProtoMsg (s, r, _) :: rest ->
+      | ProtoMsg (s, r, _, _) :: rest ->
         collect_roles (s.txt :: r.txt :: acc) rest
       | ProtoLoop steps :: rest ->
         collect_roles (collect_roles acc steps) rest

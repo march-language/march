@@ -1,0 +1,35 @@
+mod Main do
+  needs IO
+  needs Session.Live
+  -- t190 with its plain step labelled `item:` (2026-09-20): every generated
+  -- name that carried the synthesised `Msg_Prod_Cons_1` now carries `Item`
+  -- (`S_send_Item`, `send_Item`, `S_recv_Item`, `recv_Item`), and both roles
+  -- are written against those names. The branch heads keep their branch
+  -- labels (`choose_more`, `offer_more_done`). Rejects: t271, t272.
+  @[endpoints]
+  protocol Stream do
+    loop do
+      item: Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Item, next : Int) : Stream_Prod.Yield do
+    let st1 = Stream_Prod.send_Item(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) -> prod(s, st2, next + 1),
+      fn (_b, st2) -> Stream_Prod.close(s, st2))
+  end
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Item, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Item(s, st, fn (_n, st1) ->
+      if budget > 1 do
+        cons(s, Stream_Cons.choose_more(s, st1, true), budget - 1)
+      else
+        Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))
+      end)
+  end
+  fn main(c : Cap(IO)) do () end
+end

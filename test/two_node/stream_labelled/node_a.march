@@ -1,0 +1,71 @@
+-- Two-node harness, scenario "stream_labelled": the "stream" scenario with
+-- its plain step labelled (`item: Prod -> Cons : Int`), so the generated
+-- names say `Item` where "stream" says the synthesised name. Same transport,
+-- same endpoint code otherwise, same goldens: the label changes names, not
+-- what crosses the wire. node-a hosts Prod; node-b (node_b.march) hosts Cons.
+--
+-- This node's trace is the Prod projection of stream_endpoints.expected, in
+-- order: one actor prints, so its order is the protocol's.
+-- Design: specs/progress/2026-09-20-choreography-message-labels.md.
+mod StreamOverNodesA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.Process
+  needs IO.Random
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop do
+      item: Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  -- ── the Prod endpoint, identical to the in-process fixtures ──────────
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Item, next : Int) : Stream_Prod.Yield do
+    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    let st1 = Stream_Prod.send_Item(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) ->
+        print_line("Prod got More")
+        prod(s, st2, next + 1),
+      fn (_b, st2) ->
+        print_line("Prod got Done")
+        Stream_Prod.close(s, st2))
+  end
+
+  pfn connect_split_retry(port : Int, attempts_left : Int) do
+    match ClusterConn.connect_split(PeerRegistry.empty(), "127.0.0.1", port, NodeIdentity.make("node-a", "pk-a", 1), "stream-secret") do
+      Ok((_reg, p)) -> Ok(p)
+      Err(e) ->
+        if attempts_left <= 1 do
+          Err(e)
+        else
+          let _ = Process.run("sleep", Cons("0.1", Nil))
+          connect_split_retry(port, attempts_left - 1)
+        end
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let conn = match connect_split_retry(Env.require_int("MARCH_PEER_PORT"), 100) do
+      Ok(p) -> p
+      Err(e) -> panic("connect: " ++ e)
+    end
+    let link = SessionNode.open(conn, "node-a", false, fn ep -> print_line("close " ++ int_to_string(ep)))
+    let s = Session.attach(c, SessionNode.ops(link))
+    -- Drive Prod to its first suspension (its first Item is on the wire),
+    -- then every resumption runs inside the endpoint actor's turn, per frame.
+    let _ = prod(s, Stream_Prod.register(s, 0), 1)
+    SessionNode.serve(link)
+    SessionNode.finish(link)
+  end
+end

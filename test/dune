@@ -2791,6 +2791,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/task_await_discarded.expected native_task_await_discarded.out)))
 
+;; A mutual-TCO group whose back edge would drop a forwarded, non-dup-bound
+;; argument (`why` passed to a borrowed parameter and released after the call)
+;; is not flattened: flattening freed the value one iteration early
+;; ("refused: no-y; refused: no-y"). The second half of the fixture pins that
+;; refusing the loop does not leak either (live_allocs delta over a 20000-walk).
+;; specs/progress/2026-09-20-mutual-tco-safety.md
+(rule
+ (targets native_mutual_tco_forwarded_arg native_mutual_tco_forwarded_arg.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/mutual_tco_forwarded_arg.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_mutual_tco_forwarded_arg
+        native/mutual_tco_forwarded_arg.march)
+   (with-stdout-to native_mutual_tco_forwarded_arg.out
+        (system "./native_mutual_tco_forwarded_arg")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/mutual_tco_forwarded_arg.expected native_mutual_tco_forwarded_arg.out)))
+
 ;; stdlib/cluster_node.march must typecheck CLEAN when checked as the entry.
 ;; A diagnostic inside a stdlib module is never printed when a program merely
 ;; loads it (bin/main.ml filters stdlib spans), and one such hidden error --

@@ -20,6 +20,13 @@ git log is authoritative for exact commits.
   is a recent count rather than a single instant's snapshot of the whole table.
 
 ### Fixed
+- **Two mutually tail-recursive functions passing a string or list along no longer read
+  freed memory.** The compiled mutual-tail-call loop released a forwarded argument on the
+  back edge, one iteration before its next read (`refused: no-y; refused: no-y` for an
+  accumulator built from `"no-x"`, `"no-y"`; a heap-use-after-free under ASAN), and the
+  naive fix (skip the release) leaked it instead. A group whose back edge would drop a
+  forwarded argument is now compiled as ordinary calls; groups that forward only
+  integers or borrowed list cells keep their loop.
 - **A choreography payload type without a JSON codec is a check-time error.** A type
   declared in the module and used as a message payload without `derive Json` used to pass
   `march --check`, fail the compile with an internal "ambiguous interface-method call", and
@@ -122,6 +129,14 @@ git log is authoritative for exact commits.
   detected by a heartbeat (`MARCH_SESSION_HEARTBEAT_MS`, `MARCH_SESSION_TIMEOUT_MS`).
 
 ### Added
+- **A protocol step can name its message.** `item: Prod -> Cons : Int` makes every
+  generated name say `Item` (`send_Item`, `recv_Item`, `S_recv_Item`, `await_Item`,
+  `Got_Item`, `Stream_Msg.Item`) instead of `Msg_Prod_Cons_1`. Unlabelled steps keep their
+  names exactly. A label on a `choose` branch's head message (the branch label already
+  names it) and a label spelling a synthesised `Msg_` name are errors; two steps may share a
+  name when their payloads agree and no single role takes both, and a role that would get
+  two functions of one name is now told so instead of the second silently shadowing the
+  first. Renaming a step changes the protocol's fingerprint.
 - **`<P>_Run.error_message(e)` and `<P>_Msg.role_name(n)`**: a `RunError` spelled with the
   protocol's role names instead of numbers. `offer_<Role>` now returns `RunError` like the
   other entry points (`AlreadyOffered(role)` when the node already offers that role).

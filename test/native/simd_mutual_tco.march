@@ -29,22 +29,34 @@
 -- at each, so every lane of `acc` ends at 4 * 2.0 = 8.0 and the horizontal
 -- sum of the 4 lanes is 32.0.
 --
+-- WHY THE ACCUMULATOR IS RETURNED, NOT SUMMED, IN THE BASE CASE (2026-09-20):
+-- a group is flattened only when no back edge would drop a forwarded
+-- argument (lib/tir/llvm_tco.ml `group_back_edges_safe`; the shape it
+-- refuses read freed memory, specs/progress/2026-09-20-mutual-tco-safety.md).
+-- Summing `acc` in the base case made it a BORROWED parameter, so each
+-- step's fresh accumulator was forwarded and then dropped after the call:
+-- that shape, and this fixture only ever produced 32.0 because the freed
+-- box still held its lanes. Returning `acc` makes it OWNED: the caller moves
+-- the fresh value into the call with no drop after it, the group is safe,
+-- and the combined dispatcher with its boxed vector slots is still emitted
+-- (the IR-shape rule in test/dune checks that). `main` does the sum.
+--
 -- specs/progress/2026-08-13-simd-closeouts-task3-mutual-tco-pin.md
 mod SimdMutualTco do
   needs IO.Console
 
-  pfn even_step(a, i : Int, n : Int, acc) : Float do
-    if i >= n do Simd.sum_f32x4(acc)
+  pfn even_step(a, i : Int, n : Int, acc) do
+    if i >= n do acc
     else odd_step(a, i + 4, n, Simd.add_f32x4(acc, Simd.load_f32x4(a, i))) end
   end
 
-  pfn odd_step(a, i : Int, n : Int, acc) : Float do
-    if i >= n do Simd.sum_f32x4(acc)
+  pfn odd_step(a, i : Int, n : Int, acc) do
+    if i >= n do acc
     else even_step(a, i + 4, n, Simd.add_f32x4(acc, Simd.load_f32x4(a, i))) end
   end
 
   fn main(_cap_console : Cap(IO.Console)) : () do
     let a = NativeArray.make_f32(16, 2.0)
-    println(even_step(a, 0, 16, Simd.splat_f32x4(0.0)))
+    println(Simd.sum_f32x4(even_step(a, 0, 16, Simd.splat_f32x4(0.0))))
   end
 end
