@@ -14,6 +14,10 @@
  * (specs/progress/2026-09-20-vault-write-partitioning.md):
  *   - one exclusive lock per table (before):  11.8x - 13.1x  (165-183ms vs 14ms)
  *   - lock sharded by bucket (after):          2.5x -  3.2x  (37-45ms vs 14ms)
+ * Both sides move with host load -- a later sample on a box busy with other
+ * suites put the sharded runtime at 4.2x -- so the pair above was taken back
+ * to back on the same box, and any re-measurement should be too.
+ *
  * Full serialisation would be 4.0x, so the before-figure was THREE TIMES
  * worse than serialising: each vault_wr_lock also stores the writer flag and
  * drains all VAULT_RD_STRIPES reader counters, so four writers bounced those

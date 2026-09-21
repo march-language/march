@@ -20,6 +20,14 @@ pre-inserted keys, **the same harness on both sides**:
 | one exclusive lock per table (before) | 165–183 ms | 14 ms | **11.8x – 13.1x** |
 | lock sharded by bucket (after) | 37–45 ms | 14–15 ms | **2.5x – 3.2x** |
 
+Both figures move with host load, like every number the sibling reader harness
+produces (its own header documents four rounds of chasing exactly that): on a
+box busy with other suites the after-figure was later sampled at 4.2x, still
+well inside the harness's 6.0x bound and still a third of the before-figure
+measured the same way. The pair above was taken back to back on the same box,
+which is what makes the comparison meaningful; treat the absolute numbers as
+indicative and re-measure both sides together before concluding anything.
+
 Plain serialisation would be 4.0x, so the before-figure was *three times worse
 than serialising*. That is the part worth recording: it was not simply "one
 writer at a time". `vault_wr_lock` also stores the writer flag and drains all
