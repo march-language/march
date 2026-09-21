@@ -305,7 +305,9 @@ absence:
 
 - **Bounded refinements** (LH's `<p, q>` with an implication constraint between
   them). A separate mechanism.
-- **Arity > 1** (`p(x, y)`), which is what a `fold`-shaped invariant would need.
+- **Arity > 1** (`p(x, y)`), which is what a `fold`-shaped invariant and
+  `Map.filter`'s `(k, v) -> Bool` callback would need; filed as
+  `specs/todos/2026-09-20-abstract-refinements-multi-arg-callbacks.md`.
 - **`p` over a type variable that is not an element** — a bare scalar return
   `(a) -> {a | p(_)}`, e.g. `Option.filter`-shaped scalars. Same judgment,
   different entry point; a follow-up like §4.5's scalar-demand item.
@@ -368,16 +370,19 @@ not inherit the first's proof).
 
 ---
 
-## 9. Open questions for review
+## 9. Decisions (settled 2026-09-20)
 
-1. **Is the `{x : a | true}` definer spelling acceptable for v1**, or should
-   phase 4's sugar move ahead of phase 2? Shipping semantics first is the
-   argument for the current order; the stdlib signature is the counter-argument,
-   since `List.filter`'s public type is read by users and would carry the
-   ceremony for one release.
-2. **Should a refuted demand ever be a violation?** §3.3 says no, following the
-   element-flow stance. A literal non-empty container argument is the case where
-   promotion would be safe, via the existing `confirm_precond_reachable` path.
-3. **`Map.filter`'s callback takes two arguments** (key and value), which arity
-   > 1 excludes. Accept the gap, or let a two-argument definer bind only its
-   first argument?
+1. **The `{x : a | true}` definer spelling ships as v1.** Semantics first; the
+   sugar stays phase 4, and `List.filter`'s public type carries the ceremony
+   until then.
+2. **A refuted demand is never a violation, for now.** §3.3's skip-with-witness
+   is the final stance for this design. Promotion through
+   `confirm_precond_reachable` on a literal non-empty container is left
+   unfiled: revisit only if the skip proves noisy in practice.
+3. **Arity > 1 is an accepted gap, filed.** `Map.filter`'s `(k, v) -> Bool`
+   callback cannot define an abstract refinement, and a two-argument definer
+   binding only its first argument was rejected as a half-measure that would
+   need its own soundness argument. Tracked in
+   `specs/todos/2026-09-20-abstract-refinements-multi-arg-callbacks.md`; phase 3
+   therefore covers `List.take_while` and `Option.filter` but not `Map.filter`.
+
