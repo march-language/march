@@ -1508,7 +1508,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
           begin
             (* Structurally smaller variables, computed over the WHOLE clause
                body so a nested match contributes its components too. *)
-            let sset = structural_subvars mparam (induction_body c.A.fc_body) in
+            let sset = structural_subvars ~params mparam (induction_body c.A.fc_body) in
             let mctx = Some (mparam, madt, mparam_idx, sset) in
             (* Every tail's verdict, for the ledger (plan step 2.4).  A tail or
                branch no query could be built for is an unreflectable subject,

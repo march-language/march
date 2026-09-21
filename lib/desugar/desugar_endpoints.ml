@@ -855,21 +855,40 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
   let idle_c = "Idle_" ^ role and closed_c = "Closed_" ^ role in
   let t_parked = tycon parked_name [] in
   let secret_v = con "Secret" [] in
+  (* The name an `LRecvCrash` state's `await_` and crash event carry: the
+     message's constructor when the state receives one message, else the
+     labels, exactly as the callback API's `recv_`/`offer_` are named. *)
+  let crash_nm brs =
+    match brs with
+    | [ (_, ctor, _, _) ] -> ctor
+    | _ -> String.concat "_" (List.map (fun (l, _, _, _) -> l) brs) ^ "_crash"
+  in
+  (* Per receiving state: its messages, and -- for a state with a crash
+     branch -- the crash event's name and the branch's first state.  A hosted
+     endpoint takes its crash branch through that event (phase B2): the
+     transport forwards the crash on the delivery route and `resume` turns it
+     into `Crashed_<name>` instead of `Got_<Ctor>`. *)
   let receiving =
     List.filter_map
       (fun (node, this) ->
          match node with
-         | LRecv (_, ctor, payload, next) -> Some (this, [ (ctor, payload, state_of next) ])
-         | LOffer (_, brs) -> Some (this, List.map (fun (_, ctor, payload, next) -> (ctor, payload, state_of next)) brs)
-         (* The messages only: a crash reaching a hosted endpoint is phase B2
-            (specs/progress/2026-09-20-crash-branches-b1.md). *)
-         | LRecvCrash (_, brs, _) -> Some (this, List.map (fun (_, ctor, payload, next) -> (ctor, payload, state_of next)) brs)
+         | LRecv (_, ctor, payload, next) -> Some (this, [ (ctor, payload, state_of next) ], None)
+         | LOffer (_, brs) -> Some (this, List.map (fun (_, ctor, payload, next) -> (ctor, payload, state_of next)) brs, None)
+         | LRecvCrash (_, brs, crash) ->
+           Some (this, List.map (fun (_, ctor, payload, next) -> (ctor, payload, state_of next)) brs,
+                 Some (crash_nm brs, state_of crash))
          | _ -> None)
       names
   in
+  (* `Crashed_<name>(Crashed_<Role>, S_<branch's first state>)`, one per
+     state with a crash branch, beside the `Got_` constructors. *)
+  let crash_ctors =
+    List.filter_map (fun (_, _, crash) -> crash) receiving
+    |> List.fold_left (fun acc (nm, nx) -> if List.mem_assoc nm acc then acc else acc @ [ (nm, nx) ]) []
+  in
   let event_ctors =
     List.fold_left
-      (fun acc (_, arms) ->
+      (fun acc (_, arms, _) ->
          List.fold_left
            (fun acc (ctor, payload, nx) ->
               match List.assoc_opt ctor acc with
@@ -891,7 +910,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
       ( Public, n parked_name, [],
         TDVariant
           ((variant idle_c [ tycon "Secret" [] ]
-            :: List.map (fun (this, _) -> variant ("Awaiting_" ^ this) [ t_int; tycon "Secret" [] ]) receiving)
+            :: List.map (fun (this, _, _) -> variant ("Awaiting_" ^ this) [ t_int; tycon "Secret" [] ]) receiving)
            @ [ variant closed_c [ tycon "Secret" [] ] ]),
         sp )
   in
@@ -899,7 +918,8 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
     if event_ctors = [] then []
     else
       [ DType (Public, n received_name, [],
-               TDVariant (List.map (fun (ctor, (payload, nx)) -> variant ("Got_" ^ ctor) [ payload; sty nx ]) event_ctors), sp) ]
+               TDVariant (List.map (fun (ctor, (payload, nx)) -> variant ("Got_" ^ ctor) [ payload; sty nx ]) event_ctors
+                          @ List.map (fun (nm, nx) -> variant ("Crashed_" ^ nm) [ t_crashed; sty nx ]) crash_ctors), sp) ]
   in
   let where = Printf.sprintf "%s, role %s" proto role in
   let idle = fn "idle" [] t_parked (con idle_c [ secret_v ]) in
@@ -919,17 +939,30 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
          [ (pcon closed_c [ PatWild sp ], ETuple ([], sp));
            (PatWild sp, panic (where ^ ": take_closed on an endpoint that has not finished")) ])
   in
-  let await_fn ~from name this =
+  let await_fn ?(crash = false) ~from name this =
     (* Suspend so the transport knows the endpoint awaits; the handler must
        never run -- the actor resumes the endpoint itself.  `ep` is bound from
        a linear scrutinee and inherits its linearity, so it is used ONCE:
-       `suspend` returns the endpoint, and that result is what gets parked. *)
+       `suspend` returns the endpoint, and that result is what gets parked.
+       A state with a crash branch also installs a CRASH continuation, so the
+       transport knows there is a branch to take rather than a session to
+       cancel; a transport that hosts the role routes the crash to the actor
+       on the delivery route instead of running this one, which is why it,
+       like the delivery handler above it, panics if it ever does run. *)
+    let on_crash ep =
+      if not crash then ep
+      else
+        app "Session.on_crash"
+          [ var "s"; ep; role_idx from;
+            lam [ "_c_role"; "_c_cause"; "_c_ep" ]
+              (panic (where ^ ": this endpoint is actor-hosted; a crash arrives through `resume`, not the transport handler")) ]
+    in
     fn name [ ("s", t_cap_session); ("st", sty this) ] t_parked
       (match_ (var "st")
          [ ( pcon this [ pvar "ep" ],
              con ("Awaiting_" ^ this)
                [ app "Session.suspend"
-                   [ var "s"; var "ep"; role_idx from;
+                   [ var "s"; on_crash (var "ep"); role_idx from;
                      lam [ "_from"; "_msg"; "_ep" ]
                        (panic (where ^ ": this endpoint is actor-hosted; deliver through `resume`, not the transport handler")) ];
                  secret_v ] ) ])
@@ -940,9 +973,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
          match node with
          | LRecv (from, ctor, _, _) -> [ await_fn ~from ("await_" ^ ctor) this ]
          | LOffer (from, brs) -> [ await_fn ~from ("await_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs)) this ]
-         | LRecvCrash (from, brs, _) ->
-           let nm = match brs with [ (_, ctor, _, _) ] -> ctor | _ -> String.concat "_" (List.map (fun (l, _, _, _) -> l) brs) ^ "_crash" in
-           [ await_fn ~from ("await_" ^ nm) this ]
+         | LRecvCrash (from, brs, _) -> [ await_fn ~crash:true ~from ("await_" ^ crash_nm brs) this ]
          | LEnd ->
            [ fn "finish" [ ("s", t_cap_session); ("st", sty this) ] t_parked
                (match_ (var "st")
@@ -959,17 +990,36 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
              [ let_wild (var "from");
                match_ (var "p")
                  ((List.map
-                     (fun (this, arms) ->
+                     (fun (this, arms, crash) ->
+                        let delivered =
+                          match_ (app (msg ^ ".decode") [ var "msg" ])
+                            (List.map
+                               (fun (ctor, _, nx) ->
+                                  (pcon (msg ^ "." ^ ctor) [ pvar "v" ], con ("Got_" ^ ctor) [ var "v"; con nx [ var "ep" ] ]))
+                               arms
+                             @ unexpected_arm (List.length arms)
+                                 (panic (Printf.sprintf "%s: unexpected message in state %s" where this)))
+                        in
+                        (* A state with a crash branch: the transport
+                           forwards a crash of the role this state waits on
+                           as a delivery carrying `Session.crash_payload`,
+                           so ask before decoding.  `from` is the crashed
+                           role. *)
+                        let body =
+                          match crash with
+                          | None -> delivered
+                          | Some (nm, crash_nx) ->
+                            match_ (app "Session.crash_cause" [ var "msg" ])
+                              [ ( pcon "Some" [ pvar "cause" ],
+                                  con ("Crashed_" ^ nm)
+                                    [ ERecord ([ (n "role", var "from"); (n "cause", var "cause") ], sp);
+                                      con crash_nx [ var "ep" ] ] );
+                                (pcon "None" [], delivered) ]
+                        in
                         ( pcon ("Awaiting_" ^ this) [ pvar "ep0"; PatWild sp ],
                           EIf
                             ( app "==" [ var "ep"; var "ep0" ],
-                              match_ (app (msg ^ ".decode") [ var "msg" ])
-                                (List.map
-                                   (fun (ctor, _, nx) ->
-                                      (pcon (msg ^ "." ^ ctor) [ pvar "v" ], con ("Got_" ^ ctor) [ var "v"; con nx [ var "ep" ] ]))
-                                   arms
-                                 @ unexpected_arm (List.length arms)
-                                     (panic (Printf.sprintf "%s: unexpected message in state %s" where this))),
+                              body,
                               panic (where ^ ": delivery for another endpoint"),
                               sp ) ))
                      receiving)
@@ -987,7 +1037,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
     fn "cancel" [ ("p", t_parked) ] t_parked
       (match_ (var "p")
          ((pcon idle_c [ PatWild sp ], con closed_c [ secret_v ])
-          :: List.map (fun (this, _) -> (pcon ("Awaiting_" ^ this) [ PatWild sp; PatWild sp ], con closed_c [ secret_v ])) receiving
+          :: List.map (fun (this, _, _) -> (pcon ("Awaiting_" ^ this) [ PatWild sp; PatWild sp ], con closed_c [ secret_v ])) receiving
           @ [ (pcon closed_c [ PatWild sp ], con closed_c [ secret_v ]) ]))
   in
   let event_api = (parked_ty :: event_ty) @ (idle :: take_idle :: take_closed :: cancel_parked :: awaits) @ resume in

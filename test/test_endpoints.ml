@@ -15,13 +15,16 @@
 open Test_helpers
 open March_ast.Ast
 
-(* The generated code calls `Session.*`, `Json.*` and `Bytes.*`, so the
-   guarantee tests typecheck with those three stdlib modules prepended, the
-   way the CLI prepends the stdlib.  Each is self-contained (verified by grep:
-   none references another module).  Without them every accept case fails on
-   an unknown module and every reject case passes for the wrong reason. *)
+(* The generated code calls `Session.*`, `Json.*` and `Bytes.*`, so those
+   stdlib modules are prepended to the guarantee tests, the way the CLI
+   prepends the stdlib -- with `String`, which `Session.crash_cause` reads the
+   crash marker with, and which `Bytes` and `Json` already need.  Between them
+   they reference no module outside this list.  Without them every accept case
+   fails on an unknown module and every reject case passes for the wrong
+   reason. *)
 let stdlib = lazy
   [ load_stdlib_file_for_test "bytes.march";
+    load_stdlib_file_for_test "string.march";
     load_stdlib_file_for_test "json.march";
     load_stdlib_file_for_test "session.march" ]
 
@@ -999,6 +1002,106 @@ let crash_choose_ok = ok "the detector of a choose with a crash branch, written 
   end
 |}))
 
+(* ── crash branches reaching an ACTOR-HOSTED role (phase B2) ──────────────
+   A role hosted in an actor takes its crash branch through the event API:
+   `await_<Msg>` of a state with a crash branch installs a crash continuation
+   too, the transport forwards the crash on the delivery route, and `resume`
+   hands back `Crashed_<Msg>(Crashed_<Role>, S_<branch's first state>)`
+   instead of `Got_<Msg>`.  End to end: test/two_node/crash_hosted. *)
+
+(** The constructors of [tname] in module [mname], in order. *)
+let variant_ctors src mname tname =
+  let m = parse_and_desugar src in
+  List.find_map
+    (function
+      | DMod (name, _, decls, _) when name.txt = mname ->
+        List.find_map
+          (function
+            | DType (_, t, _, TDVariant vs, _) | DAlwaysLinearType (_, t, _, TDVariant vs, _) when t.txt = tname ->
+              Some (List.map (fun v -> v.var_name.txt) vs)
+            | _ -> None)
+          decls
+      | _ -> None)
+    m.mod_decls
+
+let crash_hosted_shape =
+  Alcotest.test_case "Logging: the hosted detector awaits the crash receive and its event API carries Crashed_" `Quick
+    (fun () ->
+       let src = wrap logging in
+       let mods = generated src in
+       List.iter
+         (fun (m, f, expect) -> Alcotest.(check bool) (m ^ "." ^ f) expect (has_fn mods m f))
+         [ ("Logging_I", "await_Msg_L_I_1", true);
+           ("Logging_I", "await_Msg_C_I_1", true);     (* the receive with the crash branch *)
+           ("Logging_I", "resume", true);
+           ("Logging_L", "await_Msg_I_L_2_Msg_I_L_1", true) ];
+       (* the detector's events: one `Got_` per message it receives, and the
+          crash of C with the branch's first state *)
+       Alcotest.(check (option (list string))) "Received_I"
+         (Some [ "Got_Msg_L_I_1"; "Got_Msg_C_I_1"; "Got_Msg_L_I_2"; "Crashed_Msg_C_I_1" ])
+         (variant_ctors src "Logging_I" "Received_I");
+       (* L hears about the crash as one of I's messages: no crash event *)
+       Alcotest.(check (option (list string))) "Received_L"
+         (Some [ "Got_Msg_I_L_2"; "Got_Msg_I_L_1" ]) (variant_ctors src "Logging_L" "Received_L"))
+
+let crash_choose_hosted_shape =
+  Alcotest.test_case "a choose with a crash branch: the hosted detector's await and event carry the labels" `Quick
+    (fun () ->
+       let src = wrap crash_choose in
+       Alcotest.(check bool) "Q_I.await_read_done_crash" true (has_fn (generated src) "Q_I" "await_read_done_crash");
+       Alcotest.(check (option (list string))) "Received_I"
+         (Some [ "Got_Msg_L_I_1"; "Got_Read"; "Got_Done"; "Crashed_read_done_crash" ])
+         (variant_ctors src "Q_I" "Received_I"))
+
+(* The guarantee: an actor that holds I's endpoint takes every step from its
+   own handler, the crash branch included, with `state` in scope. *)
+let crash_hosted_ok = ok "an actor hosting the detector takes the crash branch from its resume handler"
+  (wrap (logging ^ {|
+  actor IActor do
+    state { parked : Logging_I.Parked_I }
+    init  { parked: Logging_I.idle() }
+    on StartI(s : Cap(Session.Live)) do
+      Logging_I.take_idle(state.parked)
+      { state with parked: Logging_I.await_Msg_L_I_1(s, Logging_I.register(s, 0)) }
+    end
+    on DeliverI(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Logging_I.resume(state.parked, from, msg, ep) do
+        Got_Msg_L_I_1(_trigger, st) ->
+          { state with parked: Logging_I.await_Msg_C_I_1(s, st) }
+        Got_Msg_C_I_1(read, st) ->
+          { state with parked: Logging_I.await_Msg_L_I_2(s, Logging_I.send_Msg_I_L_2(s, st, read)) }
+        Got_Msg_L_I_2(report, st) ->
+          { state with parked: Logging_I.finish(s, Logging_I.send_Msg_I_C_1(s, st, report)) }
+        Crashed_Msg_C_I_1(crashed, st) ->
+          { state with parked: Logging_I.finish(s, Logging_I.send_Msg_I_L_1(s, st, crashed.cause ++ int_to_string(crashed.role))) }
+      end
+    end
+  end
+|}))
+
+(* The crash event's state is the BRANCH's, as the callback's is: the normal
+   continuation's step does not typecheck against it. *)
+let crash_hosted_state_is_the_branch =
+  bad "the crash event's state cannot take the normal continuation's step" "S_send_Msg_I_L_2"
+    (wrap (logging ^ {|
+  actor IActor do
+    state { parked : Logging_I.Parked_I }
+    init  { parked: Logging_I.idle() }
+    on DeliverI(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Logging_I.resume(state.parked, from, msg, ep) do
+        Got_Msg_L_I_1(_trigger, st) ->
+          { state with parked: Logging_I.await_Msg_C_I_1(s, st) }
+        Got_Msg_C_I_1(read, st) ->
+          { state with parked: Logging_I.await_Msg_L_I_2(s, Logging_I.send_Msg_I_L_2(s, st, read)) }
+        Got_Msg_L_I_2(report, st) ->
+          { state with parked: Logging_I.finish(s, Logging_I.send_Msg_I_C_1(s, st, report)) }
+        Crashed_Msg_C_I_1(_crashed, st) ->
+          { state with parked: Logging_I.finish(s, Logging_I.send_Msg_I_L_2(s, st, "no")) }
+      end
+    end
+  end
+|}))
+
 (* The `Chan` API does not run crash branches: the typecheck-side projection
    refuses such a protocol rather than project it without them. *)
 let crash_chan_refused = bad "Chan(Role, Proto) refuses a protocol with crash branches" "only supported with `@[endpoints]`" (wrap (logging ^ {|
@@ -1016,4 +1119,5 @@ let tests =
     hosted_cancel_ok; hosted_cancel_retained;
     crash_shape; crash_roles_ok; crash_state_is_the_branch;
     crash_rule_1; crash_rule_2; crash_rule_3; crash_rule_4; crash_rule_5; crash_rule_6; crash_rule_6_twice;
-    crash_choose_shape; crash_choose_ok; crash_chan_refused ]
+    crash_choose_shape; crash_choose_ok; crash_chan_refused;
+    crash_hosted_shape; crash_choose_hosted_shape; crash_hosted_ok; crash_hosted_state_is_the_branch ]

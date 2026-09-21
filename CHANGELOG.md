@@ -27,6 +27,15 @@ git log is authoritative for exact commits.
   `Session.in_process_with(trace)` reports what the transport itself does, and
   `t.take(())` serves endpoints hosted in actors. Replaces the hand-written
   `Session.Ops` the guide used to point at.
+- **A choreography role hosted in an actor takes its crash branch.** A protocol
+  that declares `may crash C` behaved one way in a role run from callbacks (the
+  crash branch, the session continuing) and another in a role hosted in an actor
+  (cancelled, as before crash branches existed). `resume` now returns a
+  `Crashed_<Msg>` event beside the `Got_<Msg>` ones, carrying the crashed role,
+  the cause and the crash branch's first state, so the actor takes the branch
+  from the delivery handler it already has. `host_<Role>`,
+  `offer_hosted_<Role>` and `cluster_hosted_<Role>` need no new callback. See
+  `docs/choreography.md`, "When a role may crash".
 - **A signature may declare an abstract refinement** — a predicate it is
   polymorphic in, Liquid Haskell style: `fn filt(xs : List(a), keep : ({x : a |
   true}) -> {Bool | _ == p(x)}) : List({a | p(_)})`. This release checks such a
@@ -54,6 +63,15 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A false postcondition could be proved when a `match` reused a name.**
+  Structural induction trusted a variable as a component of the matched value
+  by its name alone, so `Cons(_, t)` in a `match` on a *different* list was
+  treated as a smaller piece of the first one: `copy(xs, ys) : {List(Int) |
+  len(_) == len(xs)}` proved while `copy([1], [5, 6, 7])` returns three
+  elements. The same hole let a `@[measure]` that recurses forever pass the
+  termination check. A name is now trusted only when every binding of it is a
+  structural one.
+
 - **`march --emit-core-ast` now reports the same verdict as `march --check`.** A program
   rejected only by an allocation contract (`cap no_alloc`) or by the stdlib-mediated
   capability ceiling was emitted as `"verdict":"accept"` with exit 0, and without the
