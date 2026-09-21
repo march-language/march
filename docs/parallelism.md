@@ -104,6 +104,21 @@ scheduler threads (rebuild the runtime with -DMARCH_MAX_SCHEDULERS=200 to raise 
 
 A value that is not a positive integer or `auto` is likewise reported and the default used.
 
+#### The preemption signal
+
+Compiled programs preempt long-running green threads by signalling each scheduler thread about once a millisecond. The signal is **SIGUSR1** by default; `MARCH_PREEMPT_SIGNAL` moves it at run time:
+
+```bash
+MARCH_PREEMPT_SIGNAL=USR2 ./my_program      # use SIGUSR2
+MARCH_PREEMPT_SIGNAL=RTMIN+1 ./my_program   # Linux: a real-time signal
+```
+
+Accepted values are `USR1`, `USR2`, and on Linux `RTMIN` or `RTMIN+<n>` (a `SIG` prefix or the signal number also works); anything else is reported on stderr and SIGUSR1 is used. A C host embedding March can choose with `march_sched_set_preempt_signal(signo)` before the scheduler first runs.
+
+The runtime coexists with a handler the host process already installed for that signal. The handler is called for every delivery that is not one of March's own ticks (in particular every signal sent by another process), and it is put back when the scheduler stops. This matters when March runs inside a process that uses SIGUSR1 itself: the Erlang VM, for example, writes a crash dump on SIGUSR1. If the signal was at its default action before, deliveries from elsewhere are ignored while March runs, as they always were.
+
+Two notes on choosing one. The preemption signal cannot be watched with `Signal.watch` in compiled programs (so moving it to `USR2` frees `Signal.Usr1`). And real-time signals *queue* instead of merging: while a scheduler thread has the signal masked around a slow system call, each tick adds a queued delivery that counts against the user's pending-signal limit. That is why the default stays SIGUSR1 on Linux too.
+
 ### Why parallel FBIP needs no locks
 
 The reason `preduce` over a tree (or any divide-and-conquer over a uniquely-owned structure) scales without a single mutex comes down to **ownership**. March's [memory model]({{ site.baseurl }}/docs/memory-model/) tracks each value's reference count; a structure with `RC == 1` at the root is *uniquely owned*. When you split a uniquely-owned tree at its root, the left and right subtrees are themselves uniquely owned and **disjoint**: no node is reachable from both parts.

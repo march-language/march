@@ -212,6 +212,27 @@
  (deps    (file test_scheduler_count_pinned_runner))
  (action  (run ./test_scheduler_count_pinned_runner)))
 
+; ── Preemption signal: host handler chained, restored, configurable ──────
+; A host SIGUSR1 handler keeps working while green threads run and is restored
+; after; MARCH_PREEMPT_SIGNAL moves the signal.  Pinned at 2 schedulers so the
+; cross-thread tick path runs on any box.  Each case forks, so nothing here
+; depends on an inherited MARCH_PREEMPT_SIGNAL (main() unsets it).
+(rule
+ (targets test_preempt_signal_runner)
+ (deps    test_preempt_signal.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_NUM_SCHEDULERS=2
+               -o %{targets}
+               test_preempt_signal.c ../runtime/march_scheduler.c
+               -lpthread)))
+(rule
+ (alias   runtest)
+ (deps    (file test_preempt_signal_runner))
+ (action  (run ./test_preempt_signal_runner)))
+
 ; ── C scheduler timer tests (min-heap timers + timed park) ──────────────
 ; Multi-scheduler (pinned at 4, see below): timers must work across the
 ; work-stealing/global-runq machinery, not just the single-scheduler path.

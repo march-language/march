@@ -24,6 +24,10 @@ git log is authoritative for exact commits.
   about 18 KB more, and `Vault.size`/`Vault.keys` walk shard by shard, so their result
   is a recent count rather than a single instant's snapshot of the whole table.
 ### Added
+- **`MARCH_PREEMPT_SIGNAL` chooses the green-thread preemption signal** (`USR1`,
+  the default, `USR2`, or on Linux `RTMIN[+n]`); embedders can call
+  `march_sched_set_preempt_signal`. `Signal.watch` reserves whichever signal is
+  in use, so moving preemption to `USR2` makes `Signal.Usr1` watchable.
 - **The hot-code-reload audit log records each deploy's capability set.** Every
   line now has `caps` and `cap_root` (`null` for deploys over pre-v4 protocols),
   so "when did this node last gain capability X" can be answered from the log
@@ -64,6 +68,11 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **March no longer takes over a host process's SIGUSR1.** Preemption replaced any
+  existing SIGUSR1 handler for good, so March embedded in another program (the
+  Erlang VM uses SIGUSR1 for crash dumps) silently disabled the host's handler.
+  The previous handler is now called for every signal that is not one of
+  March's own preemption ticks, and it is restored when the scheduler stops.
 - **On macOS, `--cap-sandbox` now stops a program without `IO.Process` from
   executing another program.** The embedded sandbox profile allowed `exec`
   unconditionally and only gated `fork`, so such a program could still replace

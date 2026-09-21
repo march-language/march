@@ -8362,9 +8362,9 @@ static inline void *call_closure_2(void *clo, void *a, void *b) {
  * we install plain handlers, mirroring http_signal_handler, and the drain runs
  * from the loop body, not the signal handler).
  *
- * Code 3 (Usr1) is RESERVED for the scheduler's green-thread preemption
- * (SIGUSR1, march_scheduler.c) and therefore cannot be watched in compiled
- * programs — march_signal_watch refuses it.  Term/Int (0/1) suppress the
+ * The code of the preemption signal -- Usr1 (3) unless MARCH_PREEMPT_SIGNAL
+ * moved it (march_preempt_signal, march_scheduler.c) -- is RESERVED and cannot
+ * be watched in compiled programs; march_signal_watch refuses it.  Term/Int (0/1) suppress the
  * default graceful shutdown on the first delivery while watched, and escape to
  * shutdown (g_http_shutdown) on the second. */
 static void *_Atomic g_signal_handlers[5] = { NULL, NULL, NULL, NULL, NULL };
@@ -8463,11 +8463,16 @@ void (*march_signal_watch_test_hook)(int64_t code) = NULL;
  * and release it on replace / unwatch. */
 void march_signal_watch(int64_t code, void *clo) {
     if (code < 0 || code > 4) { if (clo) march_decrc(clo); return; }
-    if (code == 3) {
+    /* The code that maps to the preemption signal is reserved: SIGUSR1 (code
+     * 3) by default, whichever signal $MARCH_PREEMPT_SIGNAL chose otherwise
+     * (none of the five if it chose a real-time signal). */
+    if (code == march_signal_code_of_os(march_preempt_signal())) {
+        static const char *names[5] = { "Term", "Int", "Hup", "Usr1", "Usr2" };
         fprintf(stderr,
-            "march: Signal.watch(Usr1) is unsupported in compiled programs — "
-            "SIGUSR1 is reserved for the scheduler's green-thread preemption; "
-            "the watcher is ignored.\n");
+            "march: Signal.watch(%s) is unsupported in compiled programs — "
+            "SIG%s is reserved for the scheduler's green-thread preemption "
+            "(set MARCH_PREEMPT_SIGNAL to move it); the watcher is ignored.\n",
+            names[code], code == 3 ? "USR1" : code == 4 ? "USR2" : names[code]);
         if (clo) march_decrc(clo);
         return;
     }
@@ -8492,7 +8497,8 @@ void march_signal_watch(int64_t code, void *clo) {
 
 /* Remove a watcher, restoring the signal's default disposition. */
 void march_signal_unwatch(int64_t code) {
-    if (code < 0 || code > 4 || code == 3) return;
+    if (code < 0 || code > 4
+        || code == march_signal_code_of_os(march_preempt_signal())) return;
     void *old = atomic_exchange_explicit(&g_signal_handlers[code], NULL,
                                          memory_order_acq_rel);
     if (old) march_decrc(old);
