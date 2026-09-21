@@ -71,7 +71,7 @@ $ march --compile --cap-sandbox -o build/myapp app.march
 ```
 
 - **macOS**: a Seatbelt (SBPL) profile via `sandbox_init()`. Deny-default, then each declared capability opens a specific hole: `IO.FileWrite` allows writes (narrowed to the path scopes you declared, otherwise blanket), `IO.Network` allows the `network*` operation class, `IO.Process` allows `process-fork`. `IO.FileRead` is **advisory** here: dyld must map system libraries before any user code exists, so the baseline allows reads unconditionally, and a scoped read rule would be decorative.
-- **Linux**: an unprivileged in-process **seccomp-bpf** filter (`PR_SET_NO_NEW_PRIVS` + `PR_SET_SECCOMP`). One syscall class is denied per *withheld* capability: no `IO.Network` blocks `socket`/`socketpair`, no `IO.Process` blocks `execve`/`execveat`, no `IO.FileWrite` blocks the write path. Denied calls return `EPERM`. `IO.FileRead` is not enforced here either, because seccomp filters syscall *numbers*, not paths; path-scoped reads come from `forge cap run`'s mount namespace instead.
+- **Linux**: an unprivileged in-process **seccomp-bpf** filter (`PR_SET_NO_NEW_PRIVS` + `PR_SET_SECCOMP`). One syscall class is denied per *withheld* capability: no `IO.Network` blocks `socket`/`socketpair`, no `IO.NetListen` blocks `bind`/`listen` (so a program holding only `IO.NetConnect` can connect but not accept connections), no `IO.Process` blocks `execve`/`execveat`, no `IO.FileWrite` blocks the write path. Denied calls return `EPERM`. `IO.FileRead` is not enforced here either, because seccomp filters syscall *numbers*, not paths; path-scoped reads come from `forge cap run`'s mount namespace instead.
 
 Installation **fails closed**: if the sandbox cannot be installed, the program will not run rather than continue unconfined.
 
@@ -93,6 +93,7 @@ The prose above names the operation classes. This is the full map, including cap
 | Capability | macOS (Seatbelt) | Linux (seccomp-bpf) |
 |---|---|---|
 | `IO.Network` | `network*`: gates `bind`/`connect`, **not** `socket()` creation | denies `socket`, `socketpair` entirely |
+| `IO.NetListen` | Not separate: any network capability, `IO.NetConnect` included, grants `network*`, which includes `bind` | denies `bind`, `listen` (a withheld `IO.NetListen` with `IO.NetConnect` held still allows `socket`/`connect`) |
 | `IO.Process` | `process-fork`: gates `fork()` only; `process-exec` always allowed | denies `execve`, `execveat`; `fork`/`clone` never gated |
 | `IO.FileWrite` | `file-write*` (blanket, or `subpath`-scoped to a declared `@[scope]`) | denies write-flagged `openat` (`O_WRONLY`/`O_RDWR`/`O_CREAT`/`O_TRUNC`/`O_APPEND`) plus the unambiguous mutators (`unlink*`, `rename*`, `mkdir*`, `rmdir`, `truncate*`, `chmod*`) |
 | `IO.FileRead` | Advisory. Baseline unconditionally allows `file-read*`/`file-read-metadata` (dyld needs it before user code exists) | Advisory. Seccomp filters syscall *numbers*, not path arguments |
