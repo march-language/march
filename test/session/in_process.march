@@ -1,0 +1,82 @@
+mod InProcess do
+  -- `Session.in_process()`, the stdlib's network-free transport: a whole
+  -- session, a role leaving (its peer's cancel handler runs), and a message
+  -- the receiver cannot decode (`Session.fail` cancels it). Parking and crash
+  -- branches are in_process_logging.march (one `@[endpoints]` protocol per
+  -- module: see specs/todos/2026-09-21-endpoints-two-protocols-one-module.md).
+  -- One transport per session; the indented `transport:` lines come from
+  -- `in_process_with`.
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  pfn traced() : Session.InProcess do
+    Session.in_process_with(fn line -> print_line("  transport: " ++ line))
+  end
+
+  -- ── Stream roles ────────────────────────────────────────────────────────
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Yield do
+    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) ->
+        print_line("Prod got More")
+        prod(s, st2, next + 1),
+      fn (_b, st2) ->
+        print_line("Prod got Done")
+        Stream_Prod.close(s, st2))
+  end
+
+  -- Cons with a cancel handler on every receive.
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1_or(s, st,
+      fn (n, st1) ->
+        print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+        if budget > 1 do
+          cons(s, Stream_Cons.choose_more(s, st1, true), budget - 1)
+        else
+          Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))
+        end,
+      fn (role, cause, c) ->
+        print_line("Cons cancelled by role " ++ int_to_string(role) ++ ": " ++ cause)
+        Stream_Cons.cancelled(s, c))
+  end
+
+  fn main(c : Cap(IO)) do
+    print_line("-- a whole session")
+    let t1 = traced()
+    let s1 = Session.attach(c, t1.ops)
+    let _ = cons(s1, Stream_Cons.register(s1, 0), 2)
+    let _ = prod(s1, Stream_Prod.register(s1, 0), 1)
+    t1.drain(())
+    print_line("queued after: " ++ int_to_string(t1.queued(())))
+
+    print_line("-- Prod leaves")
+    let t2 = traced()
+    let s2 = Session.attach(c, t2.ops)
+    let _ = cons(s2, Stream_Cons.register(s2, 0), 2)
+    let _ = Stream_Prod.leave_send_Msg_Prod_Cons_1(s2, Stream_Prod.register(s2, 0), "nothing to send")
+    t2.drain(())
+
+    print_line("-- Prod sends bytes that do not decode")
+    let t3 = traced()
+    let s3 = Session.attach(c, t3.ops)
+    let _ = cons(s3, Stream_Cons.register(s3, 0), 2)
+    let raw = Session.register(s3, 0, Stream_Msg.role_Prod())
+    let _ = Session.emit(s3, raw, Stream_Msg.role_Cons(), Bytes.from_string("not a message"))
+    t3.drain(())
+  end
+end

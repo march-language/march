@@ -286,13 +286,19 @@ operation dispatches through it:
 
 ```march
 type Ops = {
-  register : Int -> Int -> Int,                     -- access point, role -> endpoint
-  emit     : Int -> Int -> Bytes -> Int,            -- endpoint, to-role, msg -> endpoint
-  suspend  : Int -> Int -> (Int -> Bytes -> Int -> Int) -> Int,  -- install a handler for the next delivery from a role (0 = any), yield
-  close    : Int -> (),
-  fail     : Int -> String -> ()   -- a delivery the continuation cannot take; the transport decides
+  register  : Int -> Int -> Int,                     -- access point, role -> endpoint
+  emit      : Int -> Int -> Bytes -> Int,            -- endpoint, to-role, msg -> endpoint
+  suspend   : Int -> Int -> (Int -> Bytes -> Int -> Int) -> Int,  -- install a handler for the next delivery from a role (0 = any), yield
+  close     : Int -> (),
+  fail      : Int -> String -> (),                   -- a delivery the continuation cannot take; the transport decides
+  on_cancel : Int -> (Int -> String -> Int -> Int) -> Int,        -- cancel handler for the next continuation
+  leave     : Int -> String -> (),                   -- exit the session on purpose
+  on_crash  : Int -> Int -> (Int -> String -> Int -> Int) -> Int  -- crash branch for a role, with the next continuation
 }
 ```
+
+The last three carry failure (see [Choreographies]({{ site.baseurl }}/docs/choreography/)); a
+transport where nothing fails may ignore them.
 
 It is protocol-agnostic on purpose: no field is named after a protocol, a role
 or a message. Endpoints, roles and access points are opaque `Int` handles the
@@ -316,13 +322,27 @@ pfn prod_send(s : Cap(Session.Live), ep : Int, next : Int) : Int do
 end
 ```
 
-Under test, attach an in-process transport whose `emit` only *enqueues* and
-whose run queue is drained in FIFO order after every endpoint has had its turn;
-the interleaving is then fixed and the trace is the same on every run. The
-worked version, with both `Stream` roles and the deterministic trace they
-produce, is `test/session/stream_replay.march`. (A transport that delivers
-synchronously inside `emit` is wrong for this shape: an endpoint sends *before*
-it suspends, so a synchronous reply arrives before its handler exists.)
+Under test, attach the standard library's in-process transport,
+`Session.in_process()`. Its `emit` only *enqueues*, and its `drain` delivers in
+FIFO order once every endpoint has had its turn, so the interleaving is fixed
+and the trace is the same on every run:
+
+```march
+let t = Session.in_process()
+let s = Session.attach(io, t.ops)
+let _ = cons(s, cons_ep, 2)      -- run each role to its first suspension
+let _ = prod(s, prod_ep, 1)
+t.drain(())                      -- then deliver
+```
+
+It handles failure the way the network transport does: a role that closed,
+left or crashed is gone, and an endpoint waiting on it takes its crash branch
+or is cancelled. `t.crash(role, cause)` stands in for a node dying, and
+`Session.in_process_with(trace)` reports the transport's own events (closes,
+cancellations, drops) so a test can assert on them. One transport carries one
+session. (A transport that delivers synchronously inside `emit` is wrong for
+this shape: an endpoint sends *before* it suspends, so a synchronous reply
+arrives before its handler exists.)
 
 Any module that takes a `Cap(Session.Live)` parameter declares
 `needs Session.Live`, as for any proof capability.

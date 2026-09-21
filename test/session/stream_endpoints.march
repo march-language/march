@@ -1,7 +1,7 @@
 mod StreamEndpoints do
   -- stream_replay.march, written against the GENERATED endpoint API instead
-  -- of the raw `Session` transport calls.  Same protocol, same in-process
-  -- transport, same eight-line trace -- byte for byte, diffed against
+  -- of the raw `Session` transport calls.  Same protocol, an in-process
+  -- transport (the stdlib's `Session.in_process`), same eight-line trace -- byte for byte, diffed against
   -- stream_replay.expected on the compiled path.  That identity is the proof
   -- that `@[endpoints]` emits what the hand-written endpoint did.
   --
@@ -44,56 +44,6 @@ mod StreamEndpoints do
   type Marker = { n : Int }
   derive Json for Marker
 
-  -- ── the in-process transport, verbatim from stream_replay.march ───────
-  type Transport = { ops : Session.Ops, drain : () -> () }
-
-  pfn drain_loop(handlers, pending) : () do
-    let q = match Vault.get(pending, "q") do
-      Some(d) -> d
-      None    -> Deque.empty()
-    end
-    match Deque.pop_front(q) do
-      (None, _) -> ()
-      (Some((to, from, msg)), rest) ->
-        Vault.set(pending, "q", rest)
-        match Vault.get(handlers, int_to_string(to)) do
-          Some(h) ->
-            let _ = h(from, msg, to)
-            drain_loop(handlers, pending)
-          None -> panic("stream_endpoints: delivery to " ++ int_to_string(to) ++ " with no handler installed")
-        end
-    end
-  end
-
-  fn in_process() : Transport do
-    let handlers = Vault.new("stream_endpoints_handlers")
-    let pending  = Vault.new("stream_endpoints_pending")
-    Vault.set(pending, "q", Deque.empty())
-    {
-      ops: {
-        register: fn (_ap, role) -> role,
-        emit: fn (ep, to, msg) -> do
-          let q = match Vault.get(pending, "q") do
-            Some(d) -> d
-            None    -> Deque.empty()
-          end
-          Vault.set(pending, "q", Deque.push_back(q, (to, ep, msg)))
-          ep
-        end,
-        suspend: fn (ep, _from, handler) -> do
-          Vault.set(handlers, int_to_string(ep), handler)
-          ep
-        end,
-        close: fn ep -> print_line("close " ++ int_to_string(ep)),
-        fail: fn (_ep, why) -> panic(why),
-        on_cancel: fn (ep, _h) -> ep,
-        leave: fn (ep, why) -> print_line("leave " ++ int_to_string(ep) ++ ": " ++ why),
-        on_crash: fn (ep, _r, _h) -> ep
-      },
-      drain: fn _ -> drain_loop(handlers, pending)
-    }
-  end
-
   -- ── role Prod, against Stream_Prod ──────────────────────────────────────
   -- At the loop head Prod must send; after sending it must offer more/done.
   pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Yield do
@@ -123,7 +73,8 @@ mod StreamEndpoints do
   end
 
   fn main(c : Cap(IO)) do
-    let t = in_process()
+    -- The stdlib's in-process transport; it prints its own `close` lines.
+    let t = Session.in_process_with(fn line -> print_line(line))
     let s = Session.attach(c, t.ops)
     let cons_st = Stream_Cons.register(s, 0)
     let prod_st = Stream_Prod.register(s, 0)

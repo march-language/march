@@ -30,8 +30,9 @@ mod Session do
   -- parse error, which the stdlib loader reports as "Unknown module".)
   -- `fail(ep, why)`: the generated code could not deliver a message to
   -- `ep`'s continuation -- it did not decode, or it is one the state cannot
-  -- receive.  The transport decides what that means: the same-thread ones
-  -- panic (the message is a bug in the program that sent it); a network one
+  -- receive.  The transport decides what that means: a hand-written test
+  -- transport may just panic (the message is a bug in the program that sent
+  -- it); `in_process` below cancels the receiving endpoint; a network one
   -- ends the session and reports it (`SessionNode`: `RunError.Protocol`).
   -- `on_cancel(ep, h)`: install `h` as the cancel handler for the
   -- continuation `suspend` installs next on `ep`; returns `ep`. The transport
@@ -149,13 +150,355 @@ mod Session do
   A message for `ep` that its continuation cannot take (undecodable, or one
   the session state cannot receive): hand the transport [why]. The
   generated endpoint code calls this; what happens next is the transport's
-  (a same-thread transport panics, `SessionNode` ends the session with
-  `Protocol`).
+  (`in_process` cancels the endpoint, `SessionNode` ends the session with
+  `Protocol`, a hand-written test transport may panic).
   """
   fn fail(c : Cap(Session.Live), ep : Int, why : String) : () do
     match cap_dict(c) do
       Some(d) -> d.fail(ep, why)
       None    -> no_transport()
     end
+  end
+
+  -- ── the in-process transport ────────────────────────────────────────────
+  --
+  -- Every role of one session in one program, no network: what a role's unit
+  -- test attaches. `emit` only ENQUEUES; `drain` then delivers in FIFO order,
+  -- so the interleaving is fixed and a trace is the same on every run. (A
+  -- transport that delivered inside `emit` would be wrong for the generated
+  -- code: an endpoint sends before it suspends, so a synchronous reply would
+  -- arrive before its handler exists.)
+  --
+  -- Failure follows `SessionNode` (specs/todos/2026-09-18-choreography-failure-
+  -- handling.md), with every role local:
+  --   * a delivery a continuation is not waiting for (it waits on another
+  --     role) is PARKED, left in the queue until one is;
+  --   * a role that closed, left, was cancelled or crashed is GONE: messages
+  --     to it are dropped;
+  --   * an endpoint whose continuation waits on a gone role, with nothing
+  --     from that role queued, takes that receive's crash branch if it
+  --     installed one (`on_crash`), and is otherwise CANCELLED: its cancel
+  --     handler (`on_cancel`) runs, and it is gone in turn, which is how a
+  --     failure cascades;
+  --   * `leave` cancels the leaving endpoint; `fail` (a delivery its
+  --     continuation cannot take) cancels the receiving one, blaming the
+  --     sender, where the network transport reports `Protocol`.
+  -- `crash(role, cause)` makes a role gone without running any of its code:
+  -- the test's stand-in for a node dying.
+  --
+  -- Endpoint ids are role numbers (`register` returns the role, as
+  -- `SessionNode`'s does), so one transport carries ONE session, and each
+  -- role registers once.
+
+  type InProcess = {
+    ops    : Ops,
+    drain  : () -> (),
+    take   : () -> Option((Int, Int, Bytes)),
+    crash  : Int -> String -> (),
+    queued : () -> Int
+  }
+
+  type InProcessState = {
+    handlers  : Vault(Int -> Bytes -> Int -> Int),
+    waiting   : Vault(Int),
+    cancel_hs : Vault(Int -> String -> Int -> Int),
+    crash_hs  : Vault(Int -> String -> Int -> Int),
+    gone      : Vault(String),
+    meta      : Vault(Int),
+    roles     : Vault(List(Int)),
+    queue     : Vault(List((Int, Int, Bytes))),
+    trace     : String -> ()
+  }
+
+  pfn ip_key(n : Int) : String do int_to_string(n) end
+
+  pfn ip_crash_key(ep : Int, role : Int) : String do
+    int_to_string(ep) ++ "/" ++ int_to_string(role)
+  end
+
+  pfn ip_roles(st : InProcessState) : List(Int) do Vault.get_or(st.roles, "r", Nil) end
+
+  pfn ip_queue(st : InProcessState) : List((Int, Int, Bytes)) do Vault.get_or(st.queue, "q", Nil) end
+
+  pfn ip_is_gone(st : InProcessState, role : Int) : Bool do Vault.has(st.gone, ip_key(role)) end
+
+  -- Forget the continuation installed on [ep], with its cancel and crash
+  -- handlers. The "cur" cancel handler (the receive being resumed) stays:
+  -- `fail` inside that resumption needs it.
+  pfn ip_forget(st : InProcessState, ep : Int) : () do
+    let _ = Vault.delete(st.handlers, ip_key(ep))
+    let _ = Vault.delete(st.cancel_hs, ip_key(ep))
+    let _ = List.map(ip_roles(st), fn r -> Vault.delete(st.crash_hs, ip_crash_key(ep, r)))
+    ()
+  end
+
+  -- Cancel [ep] because of [role]: it is gone from now on (peers learn
+  -- `outward`), and its cancel handler runs with [cause].
+  pfn ip_cancel(st : InProcessState, ep : Int, role : Int, cause : String, outward : String) : () do
+    if ip_is_gone(st, ep) do ()
+    else
+      Vault.set(st.gone, ip_key(ep), outward)
+      let h = match Vault.get(st.cancel_hs, ip_key(ep)) do
+        Some(f) -> Some(f)
+        None -> Vault.get(st.cancel_hs, "cur" ++ ip_key(ep))
+      end
+      ip_forget(st, ep)
+      let _ = Vault.delete(st.cancel_hs, "cur" ++ ip_key(ep))
+      st.trace("cancel " ++ ip_key(ep) ++ ": " ++ outward)
+      match h do
+        Some(f) ->
+          let _ = f(role, cause, ep)
+          ()
+        None -> ()
+      end
+    end
+  end
+
+  -- The first queued delivery a continuation can take -- to an endpoint with
+  -- a handler, from the role it waits on (0 = any) -- and the queue without
+  -- it. Deliveries skipped over stay queued, in order: they are parked.
+  pfn ip_take(st : InProcessState, q : List((Int, Int, Bytes)), skipped : List((Int, Int, Bytes))) do
+    match q do
+      Nil -> None
+      Cons(d, rest) ->
+        match d do
+          (to, from, _msg) ->
+            let want = Vault.get_or(st.waiting, ip_key(to), 0)
+            if Vault.has(st.handlers, ip_key(to)) && (want == 0 || want == from) do
+              Some((d, List.append(List.reverse(skipped), rest)))
+            else
+              ip_take(st, rest, Cons(d, skipped))
+            end
+        end
+    end
+  end
+
+  -- The role [ep]'s continuation waits on, if that role is gone. Nothing
+  -- from it is queued for [ep] here: `ip_take` would have delivered it.
+  pfn ip_blocked_on(st : InProcessState, ep : Int) : Option((Int, String)) do
+    let want = Vault.get_or(st.waiting, ip_key(ep), 0)
+    if want != 0 do
+      match Vault.get(st.gone, ip_key(want)) do
+        Some(why) -> Some((want, why))
+        None -> None
+      end
+    else
+      match List.filter(ip_roles(st), fn r -> r != ep) do
+        Nil -> None
+        Cons(first, peers) ->
+          if List.all(Cons(first, peers), fn r -> ip_is_gone(st, r)) do
+            Some((first, Vault.get_or(st.gone, ip_key(first), "gone")))
+          else None end
+      end
+    end
+  end
+
+  pfn ip_stuck(st : InProcessState, eps : List(Int)) : Option((Int, Int, String)) do
+    match eps do
+      Nil -> None
+      Cons(ep, rest) ->
+        if Vault.has(st.handlers, ip_key(ep)) && !ip_is_gone(st, ep) do
+          match ip_blocked_on(st, ep) do
+            Some((role, why)) -> Some((ep, role, why))
+            None -> ip_stuck(st, rest)
+          end
+        else ip_stuck(st, rest) end
+    end
+  end
+
+  -- [to]'s continuation is being resumed by a delivery from [from]: forget
+  -- it, and make its cancel handler the current one (`fail` inside the
+  -- resumption cancels with it).
+  pfn ip_enter(st : InProcessState, to : Int, from : Int) : () do
+    let cur = Vault.get(st.cancel_hs, ip_key(to))
+    ip_forget(st, to)
+    let _ = Vault.delete(st.cancel_hs, "cur" ++ ip_key(to))
+    match cur do
+      Some(c) -> Vault.set(st.cancel_hs, "cur" ++ ip_key(to), c)
+      None -> ()
+    end
+    Vault.set(st.meta, "from", from)
+  end
+
+  pfn ip_resume(st : InProcessState, to : Int, from : Int, msg : Bytes) : () do
+    match Vault.get(st.handlers, ip_key(to)) do
+      None -> ()
+      Some(h) ->
+        ip_enter(st, to, from)
+        let _ = h(from, msg, to)
+        let _ = Vault.delete(st.cancel_hs, "cur" ++ ip_key(to))
+        ()
+    end
+  end
+
+  -- `take`: the next delivery some endpoint is waiting for, removed from the
+  -- queue with that endpoint's continuation forgotten, for a host that
+  -- resumes the endpoint itself.
+  pfn ip_take_next(st : InProcessState) : Option((Int, Int, Bytes)) do
+    let q = List.filter(ip_queue(st), fn d -> match d do (to, _f, _m) -> !ip_is_gone(st, to) end)
+    match ip_take(st, q, Nil) do
+      None ->
+        Vault.set(st.queue, "q", q)
+        None
+      Some((d, rest)) ->
+        Vault.set(st.queue, "q", rest)
+        match d do
+          (to, from, _msg) -> ip_enter(st, to, from)
+        end
+        Some(d)
+    end
+  end
+
+  pfn ip_drain(st : InProcessState) : () do
+    -- Messages to an endpoint that is gone are dropped, as `emit` drops them.
+    let q = List.filter(ip_queue(st), fn d -> match d do (to, _f, _m) -> !ip_is_gone(st, to) end)
+    match ip_take(st, q, Nil) do
+      Some((d, rest)) ->
+        Vault.set(st.queue, "q", rest)
+        match d do
+          (to, from, msg) -> ip_resume(st, to, from, msg)
+        end
+        ip_drain(st)
+      None ->
+        Vault.set(st.queue, "q", q)
+        match ip_stuck(st, ip_roles(st)) do
+          None ->
+            -- Stopped with deliveries nobody is waiting for: say so, since a
+            -- silently stalled queue is how a lost message hides.
+            match q do
+              Nil -> ()
+              _ -> st.trace("stalled: " ++ ip_key(List.length(q)) ++ " queued")
+            end
+          Some((ep, role, why)) ->
+            let cause = if why == "closed" do "role " ++ ip_key(role) ++ " closed without sending" else why end
+            match Vault.get(st.crash_hs, ip_crash_key(ep, role)) do
+              Some(h) ->
+                ip_forget(st, ep)
+                st.trace("crash branch " ++ ip_key(ep) ++ ": role " ++ ip_key(role) ++ ": " ++ cause)
+                let _ = h(role, cause, ep)
+                ip_drain(st)
+              None ->
+                ip_cancel(st, ep, role, cause, "role " ++ ip_key(role) ++ ": " ++ cause)
+                ip_drain(st)
+            end
+        end
+    end
+  end
+
+  pfn ip_ops(st : InProcessState) : Ops do
+    {
+      register: fn (_ap, role) -> do
+        let rs = ip_roles(st)
+        if List.member(rs, role) do
+          panic("Session.in_process: role " ++ ip_key(role) ++ " registered twice (one transport carries one session)")
+        else
+          Vault.set(st.roles, "r", List.append(rs, Cons(role, Nil)))
+          role
+        end
+      end,
+      emit: fn (ep, to, msg) -> do
+        if ip_is_gone(st, ep) || ip_is_gone(st, to) do
+          st.trace("dropped " ++ ip_key(ep) ++ " -> " ++ ip_key(to))
+          ep
+        else
+          Vault.set(st.queue, "q", List.append(ip_queue(st), Cons((to, ep, msg), Nil)))
+          ep
+        end
+      end,
+      suspend: fn (ep, from, handler) -> do
+        Vault.set(st.waiting, ip_key(ep), from)
+        Vault.set(st.handlers, ip_key(ep), handler)
+        ep
+      end,
+      close: fn ep -> do
+        if ip_is_gone(st, ep) do () else Vault.set(st.gone, ip_key(ep), "closed") end
+        ip_forget(st, ep)
+        st.trace("close " ++ ip_key(ep))
+      end,
+      fail: fn (ep, why) -> do
+        let from = Vault.get_or(st.meta, "from", 0)
+        ip_cancel(st, ep, from, why, "role " ++ ip_key(from) ++ ": protocol: " ++ why)
+      end,
+      on_cancel: fn (ep, h) -> do
+        Vault.set(st.cancel_hs, ip_key(ep), h)
+        ep
+      end,
+      leave: fn (ep, why) -> ip_cancel(st, ep, ep, "left: " ++ why, "left: " ++ why),
+      on_crash: fn (ep, role, h) -> do
+        Vault.set(st.crash_hs, ip_crash_key(ep, role), h)
+        ep
+      end
+    }
+  end
+
+  pfn ip_crash(st : InProcessState, role : Int, cause : String) : () do
+    if ip_is_gone(st, role) do ()
+    else
+      Vault.set(st.gone, ip_key(role), cause)
+      ip_forget(st, role)
+      st.trace("crash " ++ ip_key(role) ++ ": " ++ cause)
+    end
+  end
+
+  doc """
+  An in-process transport, for running every role of one session in one
+  program: attach its `ops`, drive each role to its first suspension, then
+  `drain` to deliver.
+
+      let t = Session.in_process()
+      let s = Session.attach(io, t.ops)
+      let _ = cons(s, Stream_Cons.register(s, 0), 2)
+      let _ = prod(s, Stream_Prod.register(s, 0), 1)
+      t.drain(())
+
+  `emit` only enqueues; `drain` delivers in FIFO order until nothing more can
+  run, so the run is deterministic. A delivery its endpoint is not yet waiting
+  for stays queued (`queued(())` counts what is left). Failure behaves as on
+  the network (`SessionNode`): a role that closed, left or crashed is gone,
+  messages to it are dropped, and an endpoint waiting on it takes its crash
+  branch or is cancelled. `crash(role, cause)` makes a role gone without
+  running it -- a node dying -- and `fail` cancels the endpoint that got the
+  bad message. One transport carries one session; each role registers once.
+
+  An endpoint hosted in an actor (the generated event API) resumes itself
+  from the actor's own turn, so its host routes deliveries instead of
+  draining: `take(())` returns the next delivery an endpoint is waiting for,
+  as `Some((to, from, msg))`, with that endpoint's continuation forgotten, or
+  `None` when nothing queued can be taken. `take` runs no failure handling;
+  `drain` does.
+  """
+  fn in_process() : InProcess do
+    in_process_with(fn _ -> ())
+  end
+
+  doc """
+  `in_process()`, reporting what the transport itself does to [trace], one
+  line per event: `close <ep>`, `cancel <ep>: <cause>`, `crash <role>:
+  <cause>`, `crash branch <ep>: role <role>: <cause>`, `dropped <from> ->
+  <to>`, and `stalled: <n> queued` when a `drain` stops with deliveries no
+  endpoint is waiting for. A test asserts on the failure paths through it.
+  """
+  fn in_process_with(trace : String -> ()) : InProcess do
+    let tag = int_to_string(Vault.incr(Vault.open("session_in_process_ids"), "n", 1))
+    let st = {
+      handlers: Vault.new("session_in_process_handlers_" ++ tag),
+      waiting: Vault.new("session_in_process_waiting_" ++ tag),
+      cancel_hs: Vault.new("session_in_process_cancel_" ++ tag),
+      crash_hs: Vault.new("session_in_process_crash_" ++ tag),
+      gone: Vault.new("session_in_process_gone_" ++ tag),
+      meta: Vault.new("session_in_process_meta_" ++ tag),
+      roles: Vault.new("session_in_process_roles_" ++ tag),
+      queue: Vault.new("session_in_process_queue_" ++ tag),
+      trace: trace
+    }
+    Vault.set(st.roles, "r", Nil)
+    Vault.set(st.queue, "q", Nil)
+    {
+      ops: ip_ops(st),
+      drain: fn _ -> ip_drain(st),
+      take: fn _ -> ip_take_next(st),
+      crash: fn (role, cause) -> ip_crash(st, role, cause),
+      queued: fn _ -> List.length(ip_queue(st))
+    }
   end
 end

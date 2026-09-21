@@ -1,18 +1,8 @@
-mod LoggingCrash do
-  -- Crash branches, in one process (design Part B, 2026-09-20): the ECOOP
-  -- logging protocol with C declared `may crash`.  The transport is the
-  -- stdlib's `Session.in_process`: `on_crash` records the crash continuation
-  -- a receive installs, and `drain`, once nothing queued can be delivered,
-  -- runs it for an endpoint waiting on a role that is gone -- what
-  -- `SessionNode.check_waiting` does on a real network when the connection
-  -- to that role has closed with nothing queued from it.
-  --
-  -- The program runs the round twice.  First C is alive: L triggers, C
-  -- sends Read, I forwards it to L, L reports, I answers C, everyone closes.
-  -- Then C "crashes": its body never runs and `crash` marks role 3
-  -- gone, so I's `recv_Msg_C_I_1` takes its crash callback with a LIVE
-  -- state, sends L the Fatal, and both close normally.  Messages to a gone
-  -- role are dropped by `emit`, as `SessionNode` drops them.
+mod InProcessLogging do
+  -- `Session.in_process()` with three roles: a delivery that arrives before
+  -- the continuation that wants it is parked, and a role that crashes
+  -- (`crash`) sends the waiting peer down its `or crash` branch. The roles
+  -- are test/session/logging_crash.march's. Companion to in_process.march.
   needs IO
   needs IO.Console
   needs IO.Mut
@@ -31,7 +21,11 @@ mod LoggingCrash do
     I -> C : Bool
   end
 
-  -- ── the roles ───────────────────────────────────────────────────────────
+  pfn traced() : Session.InProcess do
+    Session.in_process_with(fn line -> print_line("  transport: " ++ line))
+  end
+
+  -- ── Logging roles (as test/session/logging_crash.march) ────────────────
   pfn role_l(s : Cap(Session.Live), st : Logging_L.S_send_Msg_L_I_1) : Logging_L.Yield do
     print_line("L sends Trigger")
     let st1 = Logging_L.send_Msg_L_I_1(s, st, 1)
@@ -68,24 +62,26 @@ mod LoggingCrash do
   end
 
   fn main(c : Cap(IO)) do
-    print_line("-- round 1: C is alive")
-    let t1 = Session.in_process_with(fn line -> print_line("transport: " ++ line))
-    let s1 = Session.attach(c, t1.ops)
-    let i1 = Logging_I.register(s1, 0)
-    let c1 = Logging_C.register(s1, 0)
-    let l1 = Logging_L.register(s1, 0)
-    let _ = role_l(s1, l1)
-    let _ = role_i(s1, i1)
-    let _ = role_c(s1, c1)
-    t1.drain(())
-    print_line("-- round 2: C has crashed")
-    let t2 = Session.in_process_with(fn line -> print_line("transport: " ++ line))
-    let s2 = Session.attach(c, t2.ops)
-    let i2 = Logging_I.register(s2, 0)
-    let l2 = Logging_L.register(s2, 0)
-    t2.crash(Logging_Msg.role_C(), "connection lost")
-    let _ = role_l(s2, l2)
-    let _ = role_i(s2, i2)
-    t2.drain(())
+    print_line("-- C's Read is queued before L's Trigger")
+    let t5 = traced()
+    let s5 = Session.attach(c, t5.ops)
+    let i5 = Logging_I.register(s5, 0)
+    let c5 = Logging_C.register(s5, 0)
+    let l5 = Logging_L.register(s5, 0)
+    -- I waits on L first: C's Read is parked until I's next receive wants it.
+    let _ = role_c(s5, c5)
+    let _ = role_l(s5, l5)
+    let _ = role_i(s5, i5)
+    t5.drain(())
+
+    print_line("-- C crashes before sending")
+    let t4 = traced()
+    let s4 = Session.attach(c, t4.ops)
+    -- The order the roles start in does not matter: I waits on L first, and
+    -- a delivery from anyone else is parked until it does.
+    let _ = role_i(s4, Logging_I.register(s4, 0))
+    let _ = role_l(s4, Logging_L.register(s4, 0))
+    t4.crash(Logging_Msg.role_C(), "node down")
+    t4.drain(())
   end
 end

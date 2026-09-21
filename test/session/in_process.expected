@@ -1,0 +1,17 @@
+-- a whole session
+Prod sends Item(1)
+Cons got Item(1)
+Prod got More
+Prod sends Item(2)
+Cons got Item(2)
+  transport: close 2
+Prod got Done
+  transport: close 1
+queued after: 0
+-- Prod leaves
+  transport: cancel 1: left: nothing to send
+  transport: cancel 2: role 1: left: nothing to send
+Cons cancelled by role 1: left: nothing to send
+-- Prod sends bytes that do not decode
+  transport: cancel 2: role 1: protocol: Stream, role Cons: message is not JSON: expected 'null' but found 'o'
+Cons cancelled by role 1: Stream, role Cons: message is not JSON: expected 'null' but found 'o'
