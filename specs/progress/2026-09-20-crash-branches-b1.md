@@ -103,7 +103,8 @@ with a lower-case label, so an upper-case token continues the branch
 - The event API: `Received_<Role>` has no `Crashed_<Ctor>` alternative yet and a hosted
   role (`host_<Role>`) does not take crash branches; when the role it waits on crashes it is
   cancelled as before (`check_waiting` finds no crash continuation, because `await_*`
-  installs none). The guide says so.
+  installs none). The guide says so. CLOSED by
+  [[2026-09-21-crash-branches-b2]].
 - Cluster mode is untested with crash branches; the same `check_waiting` runs there, so a
   SWIM-declared death should take the branch, but no scenario pins it.
   CLOSED 2026-09-21 by `test/two_node/cluster_crash_branch`

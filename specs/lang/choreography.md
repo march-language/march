@@ -524,9 +524,28 @@ processes, with C killed before and after its send: in the first, I takes the cr
 and L gets the `Fatal`; in the second, the `Read` is delivered and the conversation completes
 without C. In both, every surviving role returns `Ok`.
 
-A role hosted in an actor (`host_<Role>`) does not take crash branches yet; if the role it
-waits on crashes, it is cancelled as above. The two-party `Chan` API does not run a protocol
-with crash branches at all: the compiler refuses to give one a channel type.
+A role [hosted in an actor](#hosting-a-role-in-an-actor) takes its crash branch too, through
+the event API. The `await_` function of a receive with a crash branch tells the transport
+there is a branch to take, and `resume` then returns a `Crashed_` event beside the `Got_`
+ones, carrying the same `Crashed_<Role>` record and the crash branch's first state:
+
+```march
+match Logging_I.resume(state.parked, from, msg, ep) do
+  Got_Msg_C_I_1(read, st) ->
+    { state with parked: Logging_I.await_Msg_L_I_2(s, Logging_I.send_Msg_I_L_2(s, st, read)) }
+  Crashed_Msg_C_I_1(crashed, st) ->
+    { state with parked: Logging_I.finish(s, Logging_I.send_Msg_I_L_1(s, st, crashed.cause)) }
+  ...
+end
+```
+
+The crash reaches the actor through the delivery callback it already has, so nothing in the
+runner changes: `host_<Role>`, `offer_hosted_<Role>` and `cluster_hosted_<Role>` all take
+crash branches. The event is named after the receive, so for a `choose` with a `crash`
+branch it is `Crashed_read_done_crash`, as the `await_` function is.
+`test/two_node/crash_hosted` is `crash_before_send` with I in an actor, and it ends the same
+way. The two-party `Chan` API does not run a protocol with crash branches at all: the
+compiler refuses to give one a channel type.
 
 ## Hosting a role in an actor
 
@@ -725,8 +744,6 @@ node's (SWIM) and the heartbeat settings do not apply.
 
 - The network runner is compiled-only for now.
 - A session cannot be resumed after a failure, and nothing restarts it for you.
-- A crash branch is taken by a role run from callbacks; a role hosted in an actor is still
-  cancelled when a role it waits on crashes.
 - Every role that exchanges messages with another needs a direct connection to it. There is
   no relaying.
 - Over a cluster node (`cluster_<Role>`), every role must be on a different node, and a
