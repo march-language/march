@@ -46,6 +46,15 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A false postcondition could be proved when a `match` reused a name.**
+  Structural induction trusted a variable as a component of the matched value
+  by its name alone, so `Cons(_, t)` in a `match` on a *different* list was
+  treated as a smaller piece of the first one: `copy(xs, ys) : {List(Int) |
+  len(_) == len(xs)}` proved while `copy([1], [5, 6, 7])` returns three
+  elements. The same hole let a `@[measure]` that recurses forever pass the
+  termination check. A name is now trusted only when every binding of it is a
+  structural one.
+
 - **Two mutually tail-recursive functions passing a string or list along no longer read
   freed memory.** The compiled mutual-tail-call loop released a forwarded argument on the
   back edge, one iteration before its next read (`refused: no-y; refused: no-y` for an
