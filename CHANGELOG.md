@@ -24,6 +24,10 @@ git log is authoritative for exact commits.
   about 18 KB more, and `Vault.size`/`Vault.keys` walk shard by shard, so their result
   is a recent count rather than a single instant's snapshot of the whole table.
 ### Added
+- **The hot-code-reload audit log records each deploy's capability set.** Every
+  line now has `caps` and `cap_root` (`null` for deploys over pre-v4 protocols),
+  so "when did this node last gain capability X" can be answered from the log
+  alone, including widenings authorized with `--grant-cap`.
 - **A choreography role hosted in an actor takes its crash branch.** A protocol
   that declares `may crash C` behaved one way in a role run from callbacks (the
   crash branch, the session continuing) and another in a role hosted in an actor
