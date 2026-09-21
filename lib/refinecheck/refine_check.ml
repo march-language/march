@@ -2552,7 +2552,11 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
               List.map
                 (function
                   | A.FPNamed p | A.FPDefault (p, _) ->
-                    let set = structural_subvars p.A.param_name.A.txt c.A.fc_body in
+                    let set =
+                      structural_subvars
+                        ~params:(List.concat_map fnparam_binders c.A.fc_params)
+                        p.A.param_name.A.txt c.A.fc_body
+                    in
                     List.iter (Hashtbl.remove set) rebound;
                     set
                   | A.FPPat _ -> Hashtbl.create 1)
