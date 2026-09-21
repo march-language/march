@@ -1,0 +1,186 @@
+mod LoggingCrash do
+  -- Crash branches, in one process (design Part B, 2026-09-20): the ECOOP
+  -- logging protocol with C declared `may crash`.  The transport is the
+  -- in-process one from stream_endpoints.march plus what a crash branch
+  -- needs: `on_crash` records the crash continuation a receive installs,
+  -- and the drain, once the queue is empty, looks for an endpoint waiting
+  -- on a role marked gone with such a continuation installed and runs it --
+  -- what `SessionNode.check_waiting` does on a real network when the
+  -- connection to that role has closed with nothing queued from it.
+  --
+  -- The program runs the round twice.  First C is alive: L triggers, C
+  -- sends Read, I forwards it to L, L reports, I answers C, everyone closes.
+  -- Then C "crashes": its body never runs and the transport marks role 3
+  -- gone, so I's `recv_Msg_C_I_1` takes its crash callback with a LIVE
+  -- state, sends L the Fatal, and both close normally.  Messages to a gone
+  -- role are dropped by `emit`, as `SessionNode` drops them.
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+    L -> I : Bool
+    I -> C : Bool
+  end
+
+  -- ── the in-process transport ────────────────────────────────────────────
+  type Transport = { ops : Session.Ops, drain : () -> () }
+
+  pfn crash_key(ep : Int, role : Int) : String do int_to_string(ep) ++ "/" ++ int_to_string(role) end
+
+  -- Deliver everything queued; then, if an endpoint waits on a gone role
+  -- and has a crash continuation for it, run that and go round again.
+  pfn drain_loop(handlers, waiting, crash_hs, gone, pending) : () do
+    let q = match Vault.get(pending, "q") do
+      Some(d) -> d
+      None    -> Deque.empty()
+    end
+    match Deque.pop_front(q) do
+      (None, _) ->
+        match List.find(Cons(1, Cons(2, Cons(3, Nil))), fn ep ->
+                Vault.get(handlers, int_to_string(ep)) != None
+                && Vault.get(gone, int_to_string(Vault.get_or(waiting, int_to_string(ep), 0))) != None
+                && Vault.get(crash_hs, crash_key(ep, Vault.get_or(waiting, int_to_string(ep), 0))) != None) do
+          None -> ()
+          Some(ep) ->
+            let role = Vault.get_or(waiting, int_to_string(ep), 0)
+            match Vault.get(crash_hs, crash_key(ep, role)) do
+              None -> ()
+              Some(h) ->
+                let _ = Vault.delete(handlers, int_to_string(ep))
+                let _ = Vault.delete(crash_hs, crash_key(ep, role))
+                print_line("transport: " ++ int_to_string(ep) ++ " waits on gone role " ++ int_to_string(role) ++ ": crash branch")
+                let _ = h(role, "connection lost", ep)
+                drain_loop(handlers, waiting, crash_hs, gone, pending)
+            end
+        end
+      (Some((to, from, msg)), rest) ->
+        Vault.set(pending, "q", rest)
+        -- This transport delivers in queue order: a delivery from a role the
+        -- continuation is not waiting on would be parked by SessionNode; here
+        -- it is a bug in the test's ordering of the role bodies.
+        let want = Vault.get_or(waiting, int_to_string(to), 0)
+        if want != 0 && want != from do
+          panic("logging_crash: " ++ int_to_string(to) ++ " waits on " ++ int_to_string(want) ++ " but got a message from " ++ int_to_string(from))
+        else () end
+        match Vault.get(handlers, int_to_string(to)) do
+          Some(h) ->
+            let _ = Vault.delete(handlers, int_to_string(to))
+            let _ = Vault.delete(crash_hs, crash_key(to, from))
+            let _ = h(from, msg, to)
+            drain_loop(handlers, waiting, crash_hs, gone, pending)
+          None -> panic("logging_crash: delivery to " ++ int_to_string(to) ++ " with no handler installed")
+        end
+    end
+  end
+
+  fn in_process(gone : Vault(Int)) : Transport do
+    let handlers = Vault.new("logging_crash_handlers")
+    let waiting  = Vault.new("logging_crash_waiting")
+    let crash_hs = Vault.new("logging_crash_crash_hs")
+    let pending  = Vault.new("logging_crash_pending")
+    Vault.set(pending, "q", Deque.empty())
+    {
+      ops: {
+        register: fn (_ap, role) -> role,
+        emit: fn (ep, to, msg) -> do
+          if Vault.get(gone, int_to_string(to)) != None do
+            print_line("transport: dropped a message from " ++ int_to_string(ep) ++ " to gone role " ++ int_to_string(to))
+            ep
+          else
+            let q = match Vault.get(pending, "q") do
+              Some(d) -> d
+              None    -> Deque.empty()
+            end
+            Vault.set(pending, "q", Deque.push_back(q, (to, ep, msg)))
+            ep
+          end
+        end,
+        suspend: fn (ep, from, handler) -> do
+          Vault.set(waiting, int_to_string(ep), from)
+          Vault.set(handlers, int_to_string(ep), handler)
+          ep
+        end,
+        close: fn ep -> print_line("close " ++ int_to_string(ep)),
+        fail: fn (_ep, why) -> panic(why),
+        on_cancel: fn (ep, _h) -> ep,
+        leave: fn (ep, why) -> print_line("leave " ++ int_to_string(ep) ++ ": " ++ why),
+        on_crash: fn (ep, role, h) -> do
+          Vault.set(crash_hs, crash_key(ep, role), h)
+          ep
+        end
+      },
+      drain: fn _ -> drain_loop(handlers, waiting, crash_hs, gone, pending)
+    }
+  end
+
+  -- ── the roles ───────────────────────────────────────────────────────────
+  pfn role_l(s : Cap(Session.Live), st : Logging_L.S_send_Msg_L_I_1) : Logging_L.Yield do
+    print_line("L sends Trigger")
+    let st1 = Logging_L.send_Msg_L_I_1(s, st, 1)
+    Logging_L.offer_Msg_I_L_2_Msg_I_L_1(s, st1,
+      fn (read, st2) ->
+        print_line("L got Read(" ++ read ++ ")")
+        Logging_L.close(s, Logging_L.send_Msg_L_I_2(s, st2, true)),
+      fn (fatal, st2) ->
+        print_line("L got Fatal(" ++ fatal ++ ")")
+        Logging_L.close(s, st2))
+  end
+
+  pfn role_i(s : Cap(Session.Live), st : Logging_I.S_recv_Msg_L_I_1) : Logging_I.Yield do
+    Logging_I.recv_Msg_L_I_1(s, st, fn (_trigger, st1) ->
+      print_line("I got Trigger")
+      Logging_I.recv_Msg_C_I_1(s, st1,
+        fn (read, st2) ->
+          print_line("I got Read(" ++ read ++ ")")
+          let st3 = Logging_I.send_Msg_I_L_2(s, st2, read)
+          Logging_I.recv_Msg_L_I_2(s, st3, fn (report, st4) ->
+            print_line("I got Report(" ++ bool_to_string(report) ++ ")")
+            Logging_I.close(s, Logging_I.send_Msg_I_C_1(s, st4, report))),
+        fn (crashed, st2) ->
+          print_line("I: role " ++ int_to_string(crashed.role) ++ " crashed: " ++ crashed.cause)
+          Logging_I.close(s, Logging_I.send_Msg_I_L_1(s, st2, "C is gone"))))
+  end
+
+  pfn role_c(s : Cap(Session.Live), st : Logging_C.S_send_Msg_C_I_1) : Logging_C.Yield do
+    print_line("C sends Read")
+    let st1 = Logging_C.send_Msg_C_I_1(s, st, "disk 42%")
+    Logging_C.recv_Msg_I_C_1(s, st1, fn (report, st2) ->
+      print_line("C got Report(" ++ bool_to_string(report) ++ ")")
+      Logging_C.close(s, st2))
+  end
+
+  fn main(c : Cap(IO)) do
+    print_line("-- round 1: C is alive")
+    let gone1 = Vault.new("logging_crash_gone1")
+    let t1 = in_process(gone1)
+    let s1 = Session.attach(c, t1.ops)
+    let i1 = Logging_I.register(s1, 0)
+    let c1 = Logging_C.register(s1, 0)
+    let l1 = Logging_L.register(s1, 0)
+    -- L's Trigger must be queued before C's Read: I hears from L first.
+    let _ = role_l(s1, l1)
+    let _ = role_i(s1, i1)
+    let _ = role_c(s1, c1)
+    t1.drain(())
+    print_line("-- round 2: C has crashed")
+    let gone2 = Vault.new("logging_crash_gone2")
+    Vault.set(gone2, int_to_string(Logging_Msg.role_C()), 1)
+    let t2 = in_process(gone2)
+    let s2 = Session.attach(c, t2.ops)
+    let i2 = Logging_I.register(s2, 0)
+    let l2 = Logging_L.register(s2, 0)
+    let _ = role_l(s2, l2)
+    let _ = role_i(s2, i2)
+    t2.drain(())
+  end
+end

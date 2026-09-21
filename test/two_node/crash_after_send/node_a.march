@@ -1,0 +1,58 @@
+-- Two-node harness scenario "crash_after_send": node-a hosts role L of Logging (see
+-- scenario.sh). L triggers, and answers I's Read only once
+-- the scenario creates LOGGING_GO_FILE, after C is dead: I's last send, the
+-- Report to C, then goes to a role that is gone and is dropped.
+mod CrashAfterSendNodeA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+    L -> I : Bool
+    I -> C : Bool
+  end
+
+  pfn wait_for(path : String) : () do
+    if File.exists(path) do ()
+    else
+      sleep_ms(50)
+      wait_for(path)
+    end
+  end
+
+  pfn role_l(s : Cap(Session.Live), st : Logging_L.S_send_Msg_L_I_1) : Logging_L.Yield do
+    println("L: sends Trigger")
+    let st1 = Logging_L.send_Msg_L_I_1(s, st, 1)
+    Logging_L.offer_Msg_I_L_2_Msg_I_L_1(s, st1,
+      fn (read, st2) ->
+        println("L: got Read(" ++ read ++ ")")
+        wait_for(Env.require("LOGGING_GO_FILE"))
+        Logging_L.close(s, Logging_L.send_Msg_L_I_2(s, st2, true)),
+      fn (fatal, st2) ->
+        println("L: got Fatal(" ++ fatal ++ ")")
+        Logging_L.close(s, st2))
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-a: up")
+    match Logging_Run.run_L(c, "node-a", "logging-secret", Logging_Run.addrs_from_env(), fn (s, st) -> role_l(s, st)) do
+      Ok(_) -> println("L: closed")
+      Err(SessionNode.Cancelled(role, cause)) ->
+        println("L: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end

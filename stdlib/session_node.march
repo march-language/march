@@ -102,7 +102,9 @@ mod SessionNode do
   -- Failure state: `gone` maps a peer role that can send nothing more to
   -- why ("closed" for a normal close, else the cancellation cause);
   -- `cancel_hs` holds the cancel handler installed with the current
-  -- continuation (`Session.on_cancel`); `forward_cancel` (key "c") is the
+  -- continuation (`Session.on_cancel`); `crash_hs` the crash continuation
+  -- installed with it (`Session.on_crash`), under the endpoint AND the role
+  -- it is for (`crash_key`); `forward_cancel` (key "c") is the
   -- hosted party's way to tell its actor; `heard` counts heartbeat ticks
   -- since a peer's last frame. Our own endpoint's end is in `meta`: "done"
   -- once it closed or was cancelled, and for a cancellation "kind"
@@ -112,10 +114,12 @@ mod SessionNode do
                  pending : Vault(List((Int, Bytes))), meta : Vault(Int),
                  forward : Vault(Int -> Bytes -> Int -> Unit), why : Vault(String),
                  gone : Vault(String), cancel_hs : Vault(Int -> String -> Int -> Int),
+                 crash_hs : Vault(Int -> String -> Int -> Int),
                  forward_cancel : Vault(Int -> String -> Int -> Unit), heard : Vault(Int),
                  ep : Pid(EndpointState), links : List(Link), on_close : Int -> Unit }
 
   pfn ekey(ep : Int) : String do "e" ++ int_to_string(ep) end
+  pfn crash_key(ep : Int, role : Int) : String do ekey(ep) ++ "/r" ++ int_to_string(role) end
 
   pfn encode_deliver(to : Int, from : Int, msg : Bytes) : List(Int) do
     Msgpack.encode(Msgpack.array(
@@ -336,6 +340,17 @@ mod SessionNode do
   -- every drain (which consumed anything that WAS queued) and whenever a
   -- peer goes. A role that closed normally counts too: waiting on it with
   -- nothing queued means waiting forever.
+  --
+  -- Crash branches (the protocol declared the role `may crash`, and the
+  -- receive installed a crash continuation for it, `Session.on_crash`): the
+  -- continuation waiting on it is replaced by the crash branch, run here as
+  -- a delivery would be -- in the endpoint actor's turn, then `drain` for
+  -- whatever the branch installs next. The endpoint stays live and no Cancel
+  -- frame goes out; messages to the crashed role are discarded by `emit`.
+  -- The `drain` here recurses into `check_waiting` only if the branch's own
+  -- first receive waits on another role that is gone: bounded by the
+  -- protocol's nesting of crash branches, hence the annotation.
+  @[no_warn_recursion]
   pfn check_waiting(p : Party, ep : Int) : () do
     if ep_done(p) do ()
     else
@@ -349,7 +364,17 @@ mod SessionNode do
               match found do
                 (role, why) ->
                   let cause = if why == "closed" do "role " ++ int_to_string(role) ++ " closed without sending" else why end
-                  cancel_endpoint(p, ep, role, cause, "role " ++ int_to_string(role) ++ ": " ++ cause, kind_cancelled())
+                  match Vault.get(p.crash_hs, crash_key(ep, role)) do
+                    Some(h) ->
+                      let _ = Vault.delete(p.handlers, ekey(ep))
+                      let _ = Vault.delete(p.crash_hs, crash_key(ep, role))
+                      let _ = Vault.delete(p.cancel_hs, ekey(ep))
+                      let _ = h(role, cause, ep)
+                      let _ = drain(p, ep)
+                      ()
+                    None ->
+                      cancel_endpoint(p, ep, role, cause, "role " ++ int_to_string(role) ++ ": " ++ cause, kind_cancelled())
+                  end
               end
           end
       end
@@ -429,6 +454,9 @@ mod SessionNode do
         ()
       None -> ()
     end
+    -- So does the crash continuation: the message arrived, so the sender
+    -- did not crash before sending it.
+    let _ = Vault.delete(p.crash_hs, crash_key(ep, from))
     match Vault.get(p.forward, "f") do
       None ->
         let _ = k(from, msg, ep)
@@ -465,6 +493,9 @@ mod SessionNode do
     end
   end
 
+  -- `check_waiting` below may run a crash branch and drain again: the
+  -- recursion is bounded by the protocol's nesting of crash branches.
+  @[no_warn_recursion]
   pfn drain(p : Party, ep : Int) : Int do
     let want = Vault.get_or(p.waiting, ekey(ep), 0)
     match Vault.get(p.handlers, ekey(ep)) do
@@ -696,6 +727,7 @@ mod SessionNode do
       why: Vault.new("session_node_why_" ++ tag),
       gone: Vault.new("session_node_gone_" ++ tag),
       cancel_hs: Vault.new("session_node_cancel_" ++ tag),
+      crash_hs: Vault.new("session_node_crash_" ++ tag),
       forward_cancel: Vault.new("session_node_fwdcancel_" ++ tag),
       heard: Vault.new("session_node_heard_" ++ tag),
       ep: ep, links: Nil, on_close: on_close }
@@ -704,7 +736,7 @@ mod SessionNode do
   pfn with_link(p : Party, l : Link) : Party do
     { my_role: p.my_role, node_id: p.node_id, handlers: p.handlers, waiting: p.waiting,
       pending: p.pending, meta: p.meta, forward: p.forward, why: p.why, gone: p.gone,
-      cancel_hs: p.cancel_hs, forward_cancel: p.forward_cancel, heard: p.heard, ep: p.ep,
+      cancel_hs: p.cancel_hs, crash_hs: p.crash_hs, forward_cancel: p.forward_cancel, heard: p.heard, ep: p.ep,
       links: List.append(p.links, Cons(l, Nil)), on_close: p.on_close }
   end
 
@@ -922,6 +954,10 @@ mod SessionNode do
       leave: fn (ep, why) -> do
         let _ = send(ep_actor, Leave(party, ep, why))
         ()
+      end,
+      on_crash: fn (ep, role, h) -> do
+        Vault.set(party.crash_hs, crash_key(ep, role), h)
+        ep
       end
     }
   end
@@ -1401,15 +1437,35 @@ mod SessionNode do
                    addrs : List(Addr), on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
                    deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
                    cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result((), RunError) do
-    run_party(io, my_role, peers, node_id, secret, addrs, on_close, fn (p, s) -> do
-      Vault.set(p.forward, "f", fn (from, msg, ep) -> deliver(s, from, msg, ep))
-      Vault.set(p.forward_cancel, "c", fn (role, cause, ep) -> cancel(s, role, cause, ep))
-      let w = spawn(HostWatch)
-      send(w, Watch(p, my_role))
-      let _ = monitor(w, pid_of_int(host))
-      Vault.set(p.meta, "watch", pid_to_int(w))
-      start(s)
-    end)
+    run_party(io, my_role, peers, node_id, secret, addrs, on_close,
+              fn (p, s) -> host_party(p, s, host, start, deliver, cancel))
+  end
+
+  -- The hosted party's setup, once the party is formed and attached as [s]:
+  -- deliveries and cancellations for the awaiting endpoint go to the actor
+  -- through the two forwards, a `HostWatch` monitors the host [host] (its
+  -- pid as an Int) for the session's whole life, and the actor is started.
+  -- Shared by the standalone runner (`run_hosted_or`) and the cluster one
+  -- (`run_cluster_hosted_with`); the session's end must `stop_host_watch`.
+  pfn host_party(p : Party, s : Cap(Session.Live), host : Int, start : Cap(Session.Live) -> Unit,
+                 deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
+                 cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : () do
+    Vault.set(p.forward, "f", fn (from, msg, ep) -> deliver(s, from, msg, ep))
+    Vault.set(p.forward_cancel, "c", fn (role, cause, ep) -> cancel(s, role, cause, ep))
+    let w = spawn(HostWatch)
+    send(w, Watch(p, p.my_role))
+    let _ = monitor(w, pid_of_int(host))
+    Vault.set(p.meta, "watch", pid_to_int(w))
+    start(s)
+  end
+
+  -- Kill the party's `HostWatch`, if it has one, so it is not left parked in
+  -- `receive` after the session ended. A no-op for a callback-mode party.
+  pfn stop_host_watch(p : Party) : () do
+    match Vault.get(p.meta, "watch") do
+      Some(w) -> kill(pid_of_int(w))
+      None -> ()
+    end
   end
 
   pfn run_party(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
@@ -1442,10 +1498,7 @@ mod SessionNode do
     let _ = serve_outcome(p)
     finish(p)
     if listen_fd >= 0 do tcp_close(listen_fd) else () end
-    match Vault.get(p.meta, "watch") do
-      Some(w) -> kill(pid_of_int(w))
-      None -> ()
-    end
+    stop_host_watch(p)
     let role = Vault.get_or(p.meta, "cancel_role", 0)
     let cause = Vault.get_or(p.why, "cancel_cause", "")
     match Vault.get(p.meta, "kind") do
@@ -1709,6 +1762,43 @@ mod SessionNode do
   -- says so (an access point's session the initiator withdrew).
   pfn run_cluster_with(io : Cap(IO), node : ClusterNode.ClusterHandle, my_role : Int, peers : List(Int), session : String,
                        on_close : Int -> Unit, body : Cap(Session.Live) -> Unit, abandoned : Int -> Bool) : Result((), RunError) do
+    run_cluster_party(io, node, my_role, peers, session, on_close, fn (_p, s) -> body(s), abandoned)
+  end
+
+  doc """
+  `run_cluster`, with the role HOSTED IN AN ACTOR [host] (its pid as an Int),
+  as `run_hosted_or` hosts it over the runner's own connections: [start]
+  gets the session capability once the party is formed, [deliver] every
+  delivery the actor's parked endpoint awaits, `(s, from, msg, ep)`, and
+  [cancel] a cancellation, `(s, role, cause, ep)`. The host is monitored:
+  its `Down` ends the session with `Err(HostGone(ep))`. The generated
+  `<P>_Run.cluster_hosted_<Role>` supplies the role and its peers and adds
+  the session id to every callback.
+  """
+  fn run_cluster_hosted(io : Cap(IO), node : ClusterNode.ClusterHandle, my_role : Int, peers : List(Int), session : String,
+                        on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
+                        deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
+                        cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result((), RunError) do
+    run_cluster_hosted_with(io, node, my_role, peers, session, on_close, host, start, deliver, cancel, fn _ -> false)
+  end
+
+  -- `run_cluster_hosted`, abandoned while still finding its peers once
+  -- [abandoned] says so (a hosted access point's session the initiator
+  -- withdrew).
+  pfn run_cluster_hosted_with(io : Cap(IO), node : ClusterNode.ClusterHandle, my_role : Int, peers : List(Int), session : String,
+                              on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
+                              deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
+                              cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit,
+                              abandoned : Int -> Bool) : Result((), RunError) do
+    run_cluster_party(io, node, my_role, peers, session, on_close,
+                      fn (p, s) -> host_party(p, s, host, start, deliver, cancel), abandoned)
+  end
+
+  -- The cluster runner proper: form the party under [session], then [drive]
+  -- it (a callback body, or a hosted party's setup) and serve it to its end.
+  pfn run_cluster_party(io : Cap(IO), node : ClusterNode.ClusterHandle, my_role : Int, peers : List(Int), session : String,
+                        on_close : Int -> Unit, drive : Party -> Cap(Session.Live) -> Unit,
+                        abandoned : Int -> Bool) : Result((), RunError) do
     let p0 = party(my_role, node.node_id, on_close)
     Vault.set(p0.why, "sid", session)
     let slot = Vault.new("session_node_slot_" ++ session ++ "." ++ int_to_string(pid_to_int(p0.ep)))
@@ -1741,16 +1831,20 @@ mod SessionNode do
                 -- twice is harmless: the first PeerGone wins, LinkEnded is once.)
                 recheck_links(node, p)
                 let s = Session.attach(io, ops(p))
-                body(s)
+                drive(p, s)
                 -- Only now, with the role driven to its first suspension and
                 -- its first handler installed, are held frames replayed (and
                 -- later ones handled as they come): one handled earlier would
                 -- find no handler and be parked where, in the callback API,
                 -- nothing drains it -- the session would wait for ever (the
                 -- standalone runner starts its readers after the drive for
-                -- the same reason).
+                -- the same reason). A hosted party may not have parked yet
+                -- when this is sent: its start message is in the actor's
+                -- mailbox; a frame replayed before the actor parks is held,
+                -- and the park's `Drain` finds it.
                 let _ = send(p.ep, Ready(p))
                 serve_cluster_outcome(p)
+                stop_host_watch(p)
                 ClusterNode.off_peer_closed(node, closer)
                 ClusterNode.unroute(node, route_key)
                 ClusterNode.unregister(node, me)
@@ -1879,13 +1973,44 @@ mod SessionNode do
   """
   fn offer_role(io : Cap(IO), node : ClusterNode.ClusterHandle, proto : String, fingerprint : String, my_role : Int,
            peers : List(Int), capacity : Int, on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result(Offer, RunError) do
+    offer_with(node, proto, fingerprint, my_role, capacity,
+               fn (sid, abandoned) -> run_cluster_with(io, node, my_role, peers, sid, on_close, body, abandoned))
+  end
+
+  doc """
+  `offer_role`, with the role HOSTED IN AN ACTOR [host] (its pid as an Int)
+  for every session at once: each accepted session runs
+  `run_cluster_hosted` in its own task, and the actor keeps one parked
+  endpoint per session id (a `LinearMap`), which is why every callback
+  carries the session id: `start(sid, s)`, `deliver(sid, s, from, msg, ep)`,
+  `cancel(sid, s, role, cause, ep)`. The host is monitored once per session;
+  if it dies, every session it hosts ends with `HostGone`. The generated
+  `<P>_Run.offer_hosted_<Role>` supplies the protocol, role and peers.
+  """
+  fn offer_hosted(io : Cap(IO), node : ClusterNode.ClusterHandle, proto : String, fingerprint : String, my_role : Int,
+                  peers : List(Int), capacity : Int, on_close : Int -> Unit, host : Int,
+                  start : String -> Cap(Session.Live) -> Unit,
+                  deliver : String -> Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
+                  cancel : String -> Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result(Offer, RunError) do
+    offer_with(node, proto, fingerprint, my_role, capacity, fn (sid, abandoned) ->
+      run_cluster_hosted_with(io, node, my_role, peers, sid, on_close, host,
+                              fn s -> start(sid, s),
+                              fn (s, from, msg, ep) -> deliver(sid, s, from, msg, ep),
+                              fn (s, role, cause, ep) -> cancel(sid, s, role, cause, ep),
+                              abandoned))
+  end
+
+  -- The offer itself: an actor that answers invitations and runs each
+  -- accepted session through [start] (under its sid, abandoned once the
+  -- second argument says so), routed and registered under the offer's name.
+  pfn offer_with(node : ClusterNode.ClusterHandle, proto : String, fingerprint : String, my_role : Int, capacity : Int,
+                 start : String -> (Int -> Bool) -> Result((), RunError)) : Result(Offer, RunError) do
     let a = spawn(OfferActor)
     let tag = proto ++ "." ++ int_to_string(my_role) ++ "." ++ int_to_string(pid_to_int(a))
     let o = { node: node, proto: proto, fingerprint: fingerprint, my_role: my_role, capacity: capacity,
               name: ap_prefix(proto, my_role) ++ node.node_id,
               flags: Vault.new("session_ap_flags_" ++ tag), strs: Vault.new("session_ap_strs_" ++ tag),
-              start: fn (sid, abandoned) -> run_cluster_with(io, node, my_role, peers, sid, on_close, body, abandoned),
-              worker: a }
+              start: start, worker: a }
     let key = ClusterNode.route(node, pid_to_int(a), fn d -> offer_frame(o, d))
     Vault.set(o.strs, "route", key)
     match ClusterNode.register(node, o.name, a) do

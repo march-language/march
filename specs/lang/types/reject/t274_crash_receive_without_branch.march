@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: needs `or crash do ... end`
+-- Crash branches, rule 1 (2026-09-20): a receive from a role declared
+-- `may crash` must say what the receiver does if that role crashes before
+-- sending. Here `C -> I : String` has no crash branch.
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    C -> I : String
+    I -> L : String
+  end
+
+  fn main(c : Cap(IO)) do () end
+end

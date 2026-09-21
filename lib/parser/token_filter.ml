@@ -23,6 +23,12 @@ type context = Match | Block | Paren | With
 type match_state = {
   mutable ms_suppress_nl : bool;  (* suppress NLs after ARROW *)
   mutable ms_in_arm_body : bool;  (* inside arm body (past first token after ARROW) *)
+  ms_is_choose : bool;            (* a protocol `choose by R: ... end` block: an
+                                     arm starts with a lower-case LABEL, never an
+                                     upper-case role, so `A -> B : T` on a new line
+                                     is the branch's next STEP, not a new arm
+                                     (2026-09-20: a branch's second message step
+                                     used to be read as an arm and fail to parse) *)
   ms_is_cond : bool;              (* cond form (`match do ... end`, no scrutinee):
                                      arm "patterns" are full boolean expressions,
                                      so the new-arm lookahead must not bail on the
@@ -109,7 +115,17 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         | Parser.INT _ | Parser.LOWER_IDENT _ -> true
         | _ -> false
       in
+      (* `may` and `or` introduce a protocol's crash forms (`may crash C`,
+         `A -> B : T or crash do ... end`) only when `crash` is the very next
+         token; `or`/`may` as identifiers, and `or` at a line's end before a
+         statement starting with `crash`, demote (NL is a token here). *)
+      let after_crash = function
+        | Parser.LOWER_IDENT "crash" -> true
+        | _ -> false
+      in
       match tok with
+      | Parser.MAY       -> demote "may"       ~keep_when:after_crash
+      | Parser.ORWORD    -> demote "or"        ~keep_when:after_crash
       | Parser.TEST      -> demote "test"      ~keep_when:after_string
       | Parser.DESCRIBE  -> demote "describe"  ~keep_when:after_string
       | Parser.SETUP     -> demote "setup"     ~keep_when:after_do
@@ -387,7 +403,7 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
        | Parser.BY ->
          (* Protocol choose block — push Match so NL works as branch separator *)
          Stack.push Match stack;
-         Stack.push { ms_suppress_nl = false; ms_in_arm_body = false; ms_is_cond = false } match_states;
+         Stack.push { ms_suppress_nl = false; ms_in_arm_body = false; ms_is_choose = true; ms_is_cond = false } match_states;
          push_buf Parser.BY lexbuf;
          tok
        | other ->
@@ -406,7 +422,7 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
           else Stack.pop pending_match_conds
         in
         Stack.push Match stack;
-        Stack.push { ms_suppress_nl = false; ms_in_arm_body = false; ms_is_cond = is_cond } match_states
+        Stack.push { ms_suppress_nl = false; ms_in_arm_body = false; ms_is_choose = false; ms_is_cond = is_cond } match_states
       end
       else if not (Stack.is_empty pending_with_depths)
          && Stack.top pending_with_depths = !paren_depth
@@ -454,7 +470,7 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
          ordinary pattern arms (not the cond form), so ms_is_cond = false. *)
       ignore (Stack.pop stack);
       Stack.push Match stack;
-      Stack.push { ms_suppress_nl = false; ms_in_arm_body = false; ms_is_cond = false } match_states;
+      Stack.push { ms_suppress_nl = false; ms_in_arm_body = false; ms_is_choose = false; ms_is_cond = false } match_states;
       tok
 
     | Parser.NL ->
@@ -487,6 +503,11 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
                gets stuck (`branch` has no production for a leading PIPE). *)
             ms.ms_in_arm_body <- false;
             Parser.PIPE
+          | Parser.UPPER_IDENT _ as tok_after when ms.ms_is_choose ->
+            (* A protocol step (`A -> B : T`) continuing this choose branch:
+               its ARROW is not an arm's. *)
+            push_buf tok_after lexbuf;
+            next lexbuf
           | tok_after when is_pattern_start tok_after ->
             (* Could be a new arm or a body continuation.
                Use lookahead: pass tok_after as the first token, then
