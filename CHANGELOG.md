@@ -12,6 +12,11 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Changed
+- **A path scope that could not take effect is now a compile error instead of
+  being silently ignored.** `needs IO.Network("/etc")` (only `IO.FileRead`,
+  `IO.FileWrite` and `IO.FileSystem` take a scope, so this includes `needs
+  IO("/srv")`; use `IO.FileSystem("/srv")`) and a relative scope such as
+  `needs IO.FileRead("etc/myapp")` are rejected with an explanation.
 - **Vault writes to unrelated keys no longer serialise on one lock per table.** The
   lock is now sharded by key, the way ETS partitions a table. Four threads writing
   their own keys went from 11.8x-13.1x the time of a single thread to 2.5x-3.2x,
@@ -23,6 +28,10 @@ git log is authoritative for exact commits.
   the default, `USR2`, or on Linux `RTMIN[+n]`); embedders can call
   `march_sched_set_preempt_signal`. `Signal.watch` reserves whichever signal is
   in use, so moving preemption to `USR2` makes `Signal.Usr1` watchable.
+- **The hot-code-reload audit log records each deploy's capability set.** Every
+  line now has `caps` and `cap_root` (`null` for deploys over pre-v4 protocols),
+  so "when did this node last gain capability X" can be answered from the log
+  alone, including widenings authorized with `--grant-cap`.
 - **A choreography role hosted in an actor takes its crash branch.** A protocol
   that declares `may crash C` behaved one way in a role run from callbacks (the
   crash branch, the session continuing) and another in a role hosted in an actor
@@ -64,6 +73,20 @@ git log is authoritative for exact commits.
   Erlang VM uses SIGUSR1 for crash dumps) silently disabled the host's handler.
   The previous handler is now called for every signal that is not one of
   March's own preemption ticks, and it is restored when the scheduler stops.
+- **On macOS, `--cap-sandbox` now stops a program without `IO.Process` from
+  executing another program.** The embedded sandbox profile allowed `exec`
+  unconditionally and only gated `fork`, so such a program could still replace
+  itself with an arbitrary binary (directly, or through `extern` C). `exec` is
+  now granted only with `IO.Process`, as it already was on Linux. `forge cap
+  run` is unchanged: its wrapper has to exec the target, so it still allows it.
+- **A hot-code-reload publish could unload a version while a caller was entering
+  it.** Reclaiming an old version's ring slot closed its shared object before
+  marking the slot retired, so a caller that had just passed the liveness check
+  could pin it and call into code being unmapped. The slot is now retired first,
+  and the object is closed only if no caller pinned it in the meantime.
+- **Re-registering a `Signal.watch` watcher could lose a signal delivered during
+  the call.** The pending flag was cleared after the new watcher was installed,
+  so a delivery in between was erased. It is now cleared first.
 - **A false postcondition could be proved when a `match` reused a name.**
   Structural induction trusted a variable as a component of the matched value
   by its name alone, so `Cons(_, t)` in a `match` on a *different* list was

@@ -1,3 +1,57 @@
+# DONE 2026-09-21: macOS `--cap-sandbox` now gates `process-exec` on `IO.Process`
+
+The embedded Seatbelt profile (`bin/main.ml`, `cap_sandbox_define`) no longer
+has `(allow process-exec)` in its baseline; it is emitted together with
+`(allow process-fork)` only when the module holds `IO.Process`. Withholding
+`IO.Process` now blocks launching a new program image on both backends (Linux
+already denied `execve`/`execveat` via `MARCH_CAP_DENY_EXEC`). The remaining
+difference is fork: macOS gates it, Linux never does (the scheduler needs
+threads).
+
+## Measurement first
+
+The worry was that some baseline exec is structurally required, the way
+`file-read*` is for dyld. It is not, for this mechanism: `march_sandbox_install`
+runs inside the already-started process (from `spawn_main_impl`), so nothing
+has to exec it again. A standalone C probe applying the exact embedded
+baseline via `sandbox_init()` (macOS 26, arm64):
+
+| profile | startup, threads, 64 MB alloc | `posix_spawn` | in-place `execve` |
+|---|---|---|---|
+| baseline WITH `process-exec` (before) | ok | EPERM (no `process-fork`) | **succeeds**: the image is replaced |
+| baseline WITHOUT `process-exec` (after) | ok | EPERM | EPERM |
+
+Then on real compiled binaries, `test/test_cap_sandbox_runtime.ml`:
+
+- `macos: PROCESS withheld denies fork AND exec` — the in-place exec probe now
+  returns EPERM (`exec=1`); previously it asserted `exec=0`, documenting the gap.
+- NEW `macos: PROCESS held allows fork and exec` — fork=0, and `/bin/echo`
+  prints `exec=0`, so granting the capability still grants exec.
+
+## Drift test
+
+`forge/lib/cap_sandbox.ml` keeps `(allow process-exec)` unconditionally, for a
+different and still-valid reason: `sandbox-exec` must exec the target itself
+(measured there: deny -> exit 71). `test/test_cap_sandbox_profile.ml` now treats
+that clause as a second legitimate forge-only extra in the baseline-equality
+test, and pins both polarities in the conditional test (forge has it; the
+embedded profile does not, without `IO.Process`). The consequence, stated in
+`specs/lang/capabilities.md` and `docs/capability-enforcement.md`: under
+`forge cap run` on macOS a program without `IO.Process` can still exec;
+`--cap-sandbox` gates it.
+
+## Red control
+
+`(allow process-exec)` put back in the embedded baseline, new tests kept:
+3 FAIL (`sbpl baselines agree`, `sbpl conditional grants agree`,
+`macos: PROCESS withheld denies fork AND exec`). With the fix: all 9 cap_sandbox
+cases pass on macOS (the 3 Linux cases skip there, as before). Linux was not
+touched and not re-verified here.
+
+---
+
+## Original todo (filed 2026-08-12)
+
 # macOS `--cap-sandbox`: `IO.Process` gates `fork`, not `exec` — unlike Linux
 
 Found 2026-08-12, while designing
