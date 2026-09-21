@@ -281,9 +281,64 @@ mod ScopeTwoPath do
 end
 |}
 
+(* ── The scope itself must be meaningful ─────────────────────────────
+   A scope that cannot constrain anything used to parse and be silently
+   ignored, which reads as enforcement that is not there. Asserted on the
+   message, so an unrelated error cannot make these pass. *)
+
+let rejects_for name needle src =
+  let rc, out = check_src src in
+  if rc = 0 then Alcotest.failf "%s should have been rejected but was accepted" name;
+  match Str.search_forward (Str.regexp_string needle) out 0 with
+  | _ -> ()
+  | exception Not_found ->
+    Alcotest.failf "%s was rejected, but not for the expected reason (%S):\n%s"
+      name needle out
+
+let scope_decl_src decl =
+  Printf.sprintf
+    {|
+mod ScopeDecl do
+  needs IO.Console
+  %s
+  fn main(_cap_console : Cap(IO.Console)) : () do
+    println("x")
+  end
+end
+|}
+    decl
+
+let test_relative_scope_is_rejected () =
+  rejects_for "relative scope" "is a relative path"
+    (scope_decl_src {|needs IO.FileRead("etc/myapp")|});
+  rejects_for "dot-relative scope" "is a relative path"
+    (scope_decl_src {|needs IO.FileWrite("./out")|})
+
+let test_scope_on_non_filesystem_cap_is_rejected () =
+  rejects_for "scope on IO.Network" "does not take a path scope"
+    (scope_decl_src {|needs IO.Network("/etc")|});
+  (* The root IO subsumes the filesystem caps, but its scope would not narrow
+     anything else it grants; say the filesystem capability explicitly. *)
+  rejects_for "scope on IO" "does not take a path scope"
+    (scope_decl_src {|needs IO("/srv")|})
+
+let test_absolute_filesystem_scope_is_accepted () =
+  (* Control for the two above: the same fixture with a well-formed scope is
+     accepted, so their failures are the scope's, not the fixture's. *)
+  accepts "absolute scope on a filesystem cap"
+    (scope_decl_src {|needs IO.FileRead("/etc/myapp")|});
+  accepts "absolute scope on IO.FileSystem"
+    (scope_decl_src {|needs IO.FileSystem("/srv")|})
+
 let tests =
   tests
   @ [
+      Alcotest.test_case "relative scope is rejected" `Slow
+        test_relative_scope_is_rejected;
+      Alcotest.test_case "scope on a non-filesystem cap is rejected" `Slow
+        test_scope_on_non_filesystem_cap_is_rejected;
+      Alcotest.test_case "absolute filesystem scope is accepted" `Slow
+        test_absolute_filesystem_scope_is_accepted;
       Alcotest.test_case "literal outside scope is rejected" `Slow
         test_literal_outside_scope_is_rejected;
       Alcotest.test_case "literal inside scope is accepted" `Slow

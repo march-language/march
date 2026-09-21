@@ -12,6 +12,11 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Changed
+- **A path scope that could not take effect is now a compile error instead of
+  being silently ignored.** `needs IO.Network("/etc")` (only `IO.FileRead`,
+  `IO.FileWrite` and `IO.FileSystem` take a scope, so this includes `needs
+  IO("/srv")`; use `IO.FileSystem("/srv")`) and a relative scope such as
+  `needs IO.FileRead("etc/myapp")` are rejected with an explanation.
 - **Vault writes to unrelated keys no longer serialise on one lock per table.** The
   lock is now sharded by key, the way ETS partitions a table. Four threads writing
   their own keys went from 11.8x-13.1x the time of a single thread to 2.5x-3.2x,
