@@ -11,6 +11,13 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+- **Vault writes to unrelated keys no longer serialise on one lock per table.** The
+  lock is now sharded by key, the way ETS partitions a table. Four threads writing
+  their own keys went from 11.8x-13.1x the time of a single thread to 2.5x-3.2x,
+  where serialising would be 4x; reads are unchanged. Two consequences: a table costs
+  about 18 KB more, and `Vault.size`/`Vault.keys` walk shard by shard, so their result
+  is a recent count rather than a single instant's snapshot of the whole table.
 ### Added
 - **A signature may declare an abstract refinement** — a predicate it is
   polymorphic in, Liquid Haskell style: `fn filt(xs : List(a), keep : ({x : a |
