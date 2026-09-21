@@ -1,0 +1,54 @@
+-- Two-node harness, scenario "cluster_crash_branch": node-c hosts role C, the
+-- role the protocol declares `may crash`. It reaches its send state and is
+-- SIGKILLed there, before sending. See node_a.march.
+mod ClusterCrashBranchC do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+    L -> I : Bool
+    I -> C : Bool
+  end
+
+  pfn join() : ClusterNode.ClusterHandle do
+    let cfg = ClusterNode.config("node-c", Env.require_int("MARCH_PORT_C"), "", Cons("127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A")), Nil), "logging-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 2, 120000) do h else panic("node-c: never joined") end
+    end
+  end
+
+  pfn role_c(s : Cap(Session.Live), st : Logging_C.S_send_Msg_C_I_1) : Logging_C.Yield do
+    println("C: in session")
+    sleep_ms(600000)           -- the scenario kills us here, before the send
+    let st1 = Logging_C.send_Msg_C_I_1(s, st, "disk 42%")
+    Logging_C.recv_Msg_I_C_1(s, st1, fn (report, st2) ->
+      println("C: got Report(" ++ bool_to_string(report) ++ ")")
+      Logging_C.close(s, st2))
+  end
+
+  fn main(c : Cap(IO)) do
+    let h = join()
+    println("node-c: up")
+    match Logging_Run.cluster_C(c, h, "logging-1", fn (s, st) -> role_c(s, st)) do
+      Ok(_) -> println("C: closed")
+      Err(e) -> println("C: " ++ SessionNode.run_error_message(e))
+    end
+    ClusterNode.stop(h)
+  end
+end
