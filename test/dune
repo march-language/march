@@ -527,6 +527,46 @@
  (deps    (file test_vault_distinct_keys_scale_runner))
  (action  (run ./test_vault_distinct_keys_scale_runner)))
 
+; ── Vault WRITE scaling (vault-ets item 2: is the write mutex a real cost?) ──
+; The writer twin of the reader test above, same shape and same alias. The
+; todo it serves (specs/todos/2026-08-12-vault-toward-ets-semantics.md) says
+; not to partition the per-table write mutex without a workload that
+; measurably serialises on it, so this exists to produce that number: T
+; threads each rewriting their OWN key, ratio against a solo run. Its
+; assertion is loose on purpose (it fails only if the result is worse than
+; plain serialisation) -- the printed ratio is the deliverable, and a
+; scaling assertion belongs here only once the lock is actually partitioned.
+(rule
+ (targets test_vault_write_scale_runner)
+ (deps    test_vault_write_scale.c
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_scheduler.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_deque.h
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_remote_registry.c
+          (glob_files ../runtime/*.h))
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets}
+               test_vault_write_scale.c ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz -lm)))
+
+(rule
+ (alias   vault-scale)
+ (deps    (file test_vault_write_scale_runner))
+ (action  (run ./test_vault_write_scale_runner)))
+
 ; ── Vault reader/writer correctness hammer (named-registry plan, task 1,
 ; fix round 5, I-3) ────────────────────────────────────────────────────────
 ; 3 reader threads loop march_vault_get() against 1 writer thread looping
