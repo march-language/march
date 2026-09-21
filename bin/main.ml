@@ -1917,12 +1917,14 @@ let compile filename =
      entry module's list).  See Typecheck.stdlib_source_files. *)
   March_typecheck.Typecheck.stdlib_source_files := stdlib_span_files stdlib_decls;
   (* Run the typecheck-side capability ceiling ONLY in typecheck-only modes
-     (`--check`/`--check-json`), where the `--compile` path's TIR-side
-     [Cap_ceiling] never runs. On a full `--compile` this stays off so the two
-     ceilings do not double-report; the TIR one is the authoritative complete
-     check there. Respects `--no-cap-strict` for parity. *)
+     (`--check`/`--check-json`/`--emit-core-ast`), where the `--compile`
+     path's TIR-side [Cap_ceiling] never runs. On a full `--compile` this
+     stays off so the two ceilings do not double-report; the TIR one is the
+     authoritative complete check there. --emit-core-ast must match --check
+     here or its "verdict" says accept on a program --check rejects. Respects
+     `--no-cap-strict` for parity. *)
   March_typecheck.Typecheck.cap_strict_ceiling :=
-    !cap_strict && (!do_check || !check_json);
+    !cap_strict && (!do_check || !check_json || !emit_core_ast_file <> None);
   (* This pipeline runs [Panic_surface_by_proof] below, so the typechecker's
      syntactic ban must leave the contracted names to it.  Set BEFORE
      [check_module_full] — the flag is read during that call.  [run_check_cmd]
@@ -2032,13 +2034,13 @@ let compile filename =
      --check-json, --emit-core-ast) sees the same de-duplicated set. *)
   let diags = dedupe_cap_hints (March_errors.Errors.sorted errors) in
   let is_user_file = user_diag ~filename ~user_files in
-  (* Same accept/reject condition --check uses below (has_user_errors ||
-     has_parse_errors || has_resolve_errors || has_desugar_errors) — hoisted
-     here (rather than left at its original position further down) so
-     --emit-core-ast can reuse the identical binding for its "verdict"
-     without re-deriving the condition or running the human-readable
+  (* The front-end half of --check's accept/reject condition (has_user_errors
+     || has_parse_errors || has_resolve_errors || has_desugar_errors), hoisted
+     here so --emit-core-ast can reuse it without running the human-readable
      diagnostic-printing loop below (mirrors --check-json's short-circuit,
-     which also runs before that loop). *)
+     which also runs before that loop).  It is NOT the whole condition:
+     --check also rejects on the post-typecheck contract stage
+     ([contract_diags] below), which --emit-core-ast folds in as well. *)
   let has_user_errors = List.exists (fun (d : March_errors.Errors.diagnostic) ->
       d.severity = March_errors.Errors.Error && is_user_file d
     ) diags in
@@ -2049,11 +2051,34 @@ let compile filename =
     ) diags;
     exit 0
   end;
-  if !emit_core_ast_file <> None then
-    Emit_core_ast.run ~filename ~user_files ~user_ast ~type_map ~diags
-      ~is_user_file ~typecheck_env
-      ~rejected:(has_user_errors || has_parse_errors || has_resolve_errors
-                 || has_desugar_errors);
+  let frontend_rejected =
+    has_user_errors || has_parse_errors || has_resolve_errors
+    || has_desugar_errors
+  in
+  (* Allocation contracts (`cap no_alloc`, @[no_alloc]) and the
+     stdlib-mediated capability ceilings are judged on lowered TIR, so their
+     diagnostics do not exist until this stage.  Shared by --check and
+     --emit-core-ast so both give the same accept/reject answer (the answer
+     `forge build` gives).  [check_contracts] lowers only when the program
+     carries an obligation; on an ordinary program it is a list scan.  A
+     lowering failure downgrades to a [no_alloc_unchecked] warning per
+     obligation.  Forced only on a front-end-clean program, as --check only
+     reaches it then. *)
+  let contract_diags = lazy (
+    List.filter is_user_file
+      (March_tir.Contract_pipeline.check_contracts ~type_map
+         ~opt:!opt_enabled ~trmc:!March_tir.Trmc.enabled
+         ~user_decls:user_contract_decls desugared)) in
+  let contract_rejected () =
+    List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Error) (Lazy.force contract_diags)
+  in
+  if !emit_core_ast_file <> None then begin
+    let contract = if frontend_rejected then [] else Lazy.force contract_diags in
+    Emit_core_ast.run ~filename ~user_files ~user_ast ~type_map
+      ~diags:(diags @ contract) ~is_user_file ~typecheck_env
+      ~rejected:(frontend_rejected || contract_rejected ())
+  end;
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d then
         Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
@@ -2073,8 +2098,7 @@ let compile filename =
   let jit_run =
     !jit_mode
     && not compile_mode && not !do_check && not !check_migration
-    && not (has_user_errors || has_parse_errors || has_resolve_errors
-            || has_desugar_errors)
+    && not frontend_rejected
     (* The time-travel debugger (--debug / --debug-tui) only exists in the
        tree-walking interpreter: [March_debug.Debug.install] hooks the eval
        loop below, and the JIT has no equivalent hook.  Route back to the
@@ -2115,28 +2139,18 @@ let compile filename =
   in
   (* In compile mode, abort on user-file errors only.  Stdlib errors
      (e.g. http_client) are tolerated since those modules are WIP. *)
-  if has_user_errors || has_parse_errors || has_resolve_errors || has_desugar_errors then exit 1
+  if frontend_rejected then exit 1
   (* --check: stop after typecheck.  Diagnostics above already printed; we just
      exit 0 so tooling (forge build / forge check) can treat a clean typecheck
      as a pass.  Warnings do not fail the exit code — consistent with eval and
      compile modes. *)
   else if !do_check then begin
-    (* Allocation contracts: lower and run the build's post-lower pipeline
-       (no emission) when, and only when, the program carries an obligation,
-       so --check gives the answer `forge build` gives.  A lowering failure
-       downgrades to a [no_alloc_unchecked] warning per obligation. *)
-    let contract_diags =
-      List.filter is_user_file
-        (March_tir.Contract_pipeline.check_contracts ~type_map
-           ~opt:!opt_enabled ~trmc:!March_tir.Trmc.enabled
-           ~user_decls:user_contract_decls desugared)
-    in
+    (* Allocation contracts / capability ceilings: see [contract_diags]. *)
+    let contract_diags = Lazy.force contract_diags in
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
         Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
       ) contract_diags;
-    if List.exists (fun (d : March_errors.Errors.diagnostic) ->
-        d.severity = March_errors.Errors.Error) contract_diags
-    then exit 1;
+    if contract_rejected () then exit 1;
     (* Cache successful check result so the next identical-source invocation
        exits immediately without re-running the typecheck pipeline (the early
        CAS hit at the top of this function does `exit 0` printing nothing).
