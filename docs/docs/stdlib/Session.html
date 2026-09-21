@@ -421,8 +421,10 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#fn-core_seed_self"><span class="sb-kind" style="color:var(--fn)">F</span>core_seed_self</a>
 <a class="sl" href="ClusterNode.html#fn-core_tick"><span class="sb-kind" style="color:var(--fn)">F</span>core_tick</a>
 <a class="sl" href="ClusterNode.html#fn-core_unregister"><span class="sb-kind" style="color:var(--fn)">F</span>core_unregister</a>
+<a class="sl" href="ClusterNode.html#fn-creation"><span class="sb-kind" style="color:var(--fn)">F</span>creation</a>
 <a class="sl" href="ClusterNode.html#fn-demonitor_remote"><span class="sb-kind" style="color:var(--fn)">F</span>demonitor_remote</a>
 <a class="sl" href="ClusterNode.html#fn-event_text"><span class="sb-kind" style="color:var(--fn)">F</span>event_text</a>
+<a class="sl" href="ClusterNode.html#fn-global_pid"><span class="sb-kind" style="color:var(--fn)">F</span>global_pid</a>
 <a class="sl" href="ClusterNode.html#fn-info_of"><span class="sb-kind" style="color:var(--fn)">F</span>info_of</a>
 <a class="sl" href="ClusterNode.html#fn-link_count"><span class="sb-kind" style="color:var(--fn)">F</span>link_count</a>
 <a class="sl" href="ClusterNode.html#fn-lookup"><span class="sb-kind" style="color:var(--fn)">F</span>lookup</a>
@@ -2031,6 +2033,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Session.html#fn-fail"><span class="sb-kind" style="color:var(--fn)">F</span>fail</a>
 <a class="sl" href="Session.html#fn-leave"><span class="sb-kind" style="color:var(--fn)">F</span>leave</a>
 <a class="sl" href="Session.html#fn-on_cancel"><span class="sb-kind" style="color:var(--fn)">F</span>on_cancel</a>
+<a class="sl" href="Session.html#fn-on_crash"><span class="sb-kind" style="color:var(--fn)">F</span>on_crash</a>
 <a class="sl" href="Session.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
 <a class="sl" href="Session.html#fn-suspend"><span class="sb-kind" style="color:var(--fn)">F</span>suspend</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="SessionNode.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="SessionNode.html">SessionNode</a></div><div class="sb-sub"><a class="sl" href="SessionNode.html#type-Link"><span class="sb-kind" style="color:var(--ty)">T</span>Link</a>
@@ -2040,15 +2043,21 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#type-Addr"><span class="sb-kind" style="color:var(--ty)">T</span>Addr</a>
 <a class="sl" href="SessionNode.html#type-Addrs"><span class="sb-kind" style="color:var(--ty)">T</span>Addrs</a>
 <a class="sl" href="SessionNode.html#type-RunError"><span class="sb-kind" style="color:var(--ty)">T</span>RunError</a>
+<a class="sl" href="SessionNode.html#type-OfferCount"><span class="sb-kind" style="color:var(--ty)">T</span>OfferCount</a>
+<a class="sl" href="SessionNode.html#type-Offer"><span class="sb-kind" style="color:var(--ty)">T</span>Offer</a>
 <a class="sl" href="SessionNode.html#fn-accept_from"><span class="sb-kind" style="color:var(--fn)">F</span>accept_from</a>
 <a class="sl" href="SessionNode.html#fn-accepts"><span class="sb-kind" style="color:var(--fn)">F</span>accepts</a>
 <a class="sl" href="SessionNode.html#fn-addr_of"><span class="sb-kind" style="color:var(--fn)">F</span>addr_of</a>
 <a class="sl" href="SessionNode.html#fn-addrs_from_env"><span class="sb-kind" style="color:var(--fn)">F</span>addrs_from_env</a>
+<a class="sl" href="SessionNode.html#fn-close_offer"><span class="sb-kind" style="color:var(--fn)">F</span>close_offer</a>
 <a class="sl" href="SessionNode.html#fn-connect_to"><span class="sb-kind" style="color:var(--fn)">F</span>connect_to</a>
 <a class="sl" href="SessionNode.html#fn-deliver"><span class="sb-kind" style="color:var(--fn)">F</span>deliver</a>
 <a class="sl" href="SessionNode.html#fn-dials"><span class="sb-kind" style="color:var(--fn)">F</span>dials</a>
 <a class="sl" href="SessionNode.html#fn-finish"><span class="sb-kind" style="color:var(--fn)">F</span>finish</a>
+<a class="sl" href="SessionNode.html#fn-initiate"><span class="sb-kind" style="color:var(--fn)">F</span>initiate</a>
 <a class="sl" href="SessionNode.html#fn-missing_addrs"><span class="sb-kind" style="color:var(--fn)">F</span>missing_addrs</a>
+<a class="sl" href="SessionNode.html#fn-offer_hosted"><span class="sb-kind" style="color:var(--fn)">F</span>offer_hosted</a>
+<a class="sl" href="SessionNode.html#fn-offer_role"><span class="sb-kind" style="color:var(--fn)">F</span>offer_role</a>
 <a class="sl" href="SessionNode.html#fn-open"><span class="sb-kind" style="color:var(--fn)">F</span>open</a>
 <a class="sl" href="SessionNode.html#fn-ops"><span class="sb-kind" style="color:var(--fn)">F</span>ops</a>
 <a class="sl" href="SessionNode.html#fn-parse_addr"><span class="sb-kind" style="color:var(--fn)">F</span>parse_addr</a>
@@ -2056,7 +2065,9 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#fn-require"><span class="sb-kind" style="color:var(--fn)">F</span>require</a>
 <a class="sl" href="SessionNode.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a>
 <a class="sl" href="SessionNode.html#fn-run_cluster"><span class="sb-kind" style="color:var(--fn)">F</span>run_cluster</a>
+<a class="sl" href="SessionNode.html#fn-run_cluster_hosted"><span class="sb-kind" style="color:var(--fn)">F</span>run_cluster_hosted</a>
 <a class="sl" href="SessionNode.html#fn-run_error_message"><span class="sb-kind" style="color:var(--fn)">F</span>run_error_message</a>
+<a class="sl" href="SessionNode.html#fn-run_error_message_named"><span class="sb-kind" style="color:var(--fn)">F</span>run_error_message_named</a>
 <a class="sl" href="SessionNode.html#fn-run_hosted"><span class="sb-kind" style="color:var(--fn)">F</span>run_hosted</a>
 <a class="sl" href="SessionNode.html#fn-run_hosted_or"><span class="sb-kind" style="color:var(--fn)">F</span>run_hosted_or</a>
 <a class="sl" href="SessionNode.html#fn-serve"><span class="sb-kind" style="color:var(--fn)">F</span>serve</a>
@@ -2552,6 +2563,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-fail"><div class="ih"><span class="badge bfn">fn</span><span class="name">fail</span><span class="sig">fail(c : Cap(Session.Live), ep : Int, why : String) : ()</span><a class="anchor-link" href="#fn-fail" title="Link">#</a></div><div class="ib"><p>A message for <code>ep</code> that its continuation cannot take (undecodable, or one the session state cannot receive): hand the transport [why]. The generated endpoint code calls this; what happens next is the transport's (a same-thread transport panics, <code>SessionNode</code> ends the session with <code>Protocol</code>).</p></div></div>
 <div class="item" id="fn-leave"><div class="ih"><span class="badge bfn">fn</span><span class="name">leave</span><span class="sig">leave(c : Cap(Session.Live), ep : Int, why : String) : ()</span><a class="anchor-link" href="#fn-leave" title="Link">#</a></div><div class="ib"><p>Leave the session from endpoint <code>ep</code> on purpose, with a reason the peers are told.</p></div></div>
 <div class="item" id="fn-on_cancel"><div class="ih"><span class="badge bfn">fn</span><span class="name">on_cancel</span><span class="sig">on_cancel(c : Cap(Session.Live), ep : Int, handler : Int -&gt; String -&gt; Int -&gt; Int) : Int</span><a class="anchor-link" href="#fn-on_cancel" title="Link">#</a></div><div class="ib"><p>Install <code>handler</code> as the cancel handler for the continuation that the next <code>suspend</code> on <code>ep</code> installs, and return <code>ep</code>. It runs as <code>handler(role, cause, ep)</code> if the role that continuation waits on can send nothing more and nothing from it is queued. The generated <code>recv_…_or</code> and <code>offer_…_or</code> call this.</p></div></div>
+<div class="item" id="fn-on_crash"><div class="ih"><span class="badge bfn">fn</span><span class="name">on_crash</span><span class="sig">on_crash(c : Cap(Session.Live), ep : Int, role : Int, handler : Int -&gt; String -&gt; Int -&gt; Int) : Int</span><a class="anchor-link" href="#fn-on_crash" title="Link">#</a></div><div class="ib"><p>Install <code>handler</code> as the crash continuation for <code>role</code> with the continuation that the next <code>suspend</code> on <code>ep</code> installs, and return <code>ep</code>. It runs as <code>handler(role, cause, ep)</code> if that continuation waits on <code>role</code> and <code>role</code> is gone with nothing from it queued; the endpoint stays live and goes on from the protocol's crash branch. The generated <code>recv_…</code> of a message step with <code>or crash do … end</code> calls this.</p></div></div>
 <div class="item" id="fn-register"><div class="ih"><span class="badge bfn">fn</span><span class="name">register</span><span class="sig">register(c : Cap(Session.Live), ap : Int, role : Int) : Int</span><a class="anchor-link" href="#fn-register" title="Link">#</a></div><div class="ib"><p>Join a session at access point <code>ap</code> in role <code>role</code>; returns the endpoint.</p></div></div>
 <div class="item" id="fn-suspend"><div class="ih"><span class="badge bfn">fn</span><span class="name">suspend</span><span class="sig">suspend(c : Cap(Session.Live), ep : Int, from : Int, handler : Int -&gt; <a href="Bytes.html#type-Bytes">Bytes</a> -&gt; Int -&gt; Int) : Int</span><a class="anchor-link" href="#fn-suspend" title="Link">#</a></div><div class="ib"><p>Install <code>handler</code> for the next delivery on <code>ep</code> and yield. <code>from</code> is the role the continuation expects to hear from -- the projection knows it at every receive -- or 0 for &quot;any&quot;, which a same-thread transport and a two-party session pass. A transport that carries several peers uses it to park a delivery that arrives before the continuation that wants it (messages from different peers race; see <code>SessionNode</code>).</p></div></div></main></div><script>
 /* Theme toggle */

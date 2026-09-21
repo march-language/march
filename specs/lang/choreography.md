@@ -452,6 +452,101 @@ starts a new session with new connections. Deciding when to do that, and making 
 node does, is up to whatever runs the nodes, for example a supervisor around
 `run_<Role>`. The runner does not restart anything by itself.
 
+## When a role may crash
+
+The rules above cancel a session when a role it needs has failed. Sometimes that is more
+than you want: a protocol may need to carry on without the failed role, if only to tell the
+others that it is gone. For that, a protocol can name the roles that may crash, and say at
+each receive from such a role what happens if it crashes instead of sending.
+
+```march
+@[endpoints]
+protocol Logging do
+  may crash C
+  L -> I : Int
+  C -> I : String
+    or crash do
+      I -> L : String
+    end
+  I -> L : String
+  L -> I : Bool
+  I -> C : Bool
+end
+```
+
+`may crash C` says that C may crash. Every other role is reliable, as every role is without
+the declaration, so a protocol that does not say `may crash` means exactly what it meant
+before. The `or crash do ... end` after `C -> I : String` is the crash branch: what happens
+if C crashes before sending. I is the role that detects the crash, because it is the one
+waiting for the message. The crash branch is the rest of the conversation in that case; it
+does not rejoin the normal continuation, which usually involves the crashed role. Inside a
+`loop`, a crash branch ends the loop. In a `choose by C` where C may crash, a branch labelled
+`crash` is the crash branch: `choose by C: read -> ... done -> ... crash -> ... end`.
+
+The compiler checks the protocol:
+
+- every receive from a role that may crash has a crash branch;
+- a crash branch is only on a step whose sender may crash;
+- the crashed role takes no part in its own crash branch;
+- any other role that takes part in the normal continuation or the crash branch is told
+  which one it is in: its first interaction in each must be a message from the detector,
+  and the two messages must differ. In `Logging`, L hears from I either way, a `Read` or a
+  `Fatal`. Without that, L could not know whether to wait for anything;
+- in a `choose` with a `crash` branch, every other branch begins with a message to the same
+  role, the detector.
+
+The runtime takes the crash branch by the same rule that decides a cancellation: the crashed
+role is gone, and nothing it sent is still waiting to be read. Messages sent before the crash
+are still delivered, so a role that crashes after its last send is no different from one that
+finished. The other roles learn of the crash only from the messages in the crash branch,
+just as they learn which branch of a `choose` was taken. Messages sent to the crashed role
+are dropped. A reliable role that fails anyway is cancelled, as above.
+
+For the detector, a receive with a crash branch takes a second callback in place of the
+`_or` form's cancel handler:
+
+```march
+Logging_I.recv_Msg_C_I_1(s, st1,
+  fn (read, st2) -> ...,             -- the message arrived
+  fn (crashed, st2) -> ...)          -- C crashed: st2 is the crash branch's first state
+```
+
+Unlike a cancel handler, the second callback gets a live state, and the conversation goes
+on. `crashed` is a `Crashed_I` record with the crashed role's number (`crashed.role`) and
+the cause (`crashed.cause`), the same information a cancel handler gets. A receive with a
+crash branch has no `_or` form: the sender may crash, and that is what the second callback
+is for. The two messages I can send L are named in reading order, `Msg_I_L_1` for the
+`Fatal` in the crash branch and `Msg_I_L_2` for the `Read` after it, and L, which can be
+sent either, gets an offer over the two, `offer_Msg_I_L_2_Msg_I_L_1`, with one callback per
+message, exactly as for a `choose`. C's module has no trace of the crash branch. In
+`test/two_node/crash_before_send` and `crash_after_send` this protocol runs over three
+processes, with C killed before and after its send: in the first, I takes the crash branch
+and L gets the `Fatal`; in the second, the `Read` is delivered and the conversation completes
+without C. In both, every surviving role returns `Ok`.
+
+A role [hosted in an actor](#hosting-a-role-in-an-actor) takes its crash branch too, through
+the event API. The `await_` function of a receive with a crash branch tells the transport
+there is a branch to take, and `resume` then returns a `Crashed_` event beside the `Got_`
+ones, carrying the same `Crashed_<Role>` record and the crash branch's first state:
+
+```march
+match Logging_I.resume(state.parked, from, msg, ep) do
+  Got_Msg_C_I_1(read, st) ->
+    { state with parked: Logging_I.await_Msg_L_I_2(s, Logging_I.send_Msg_I_L_2(s, st, read)) }
+  Crashed_Msg_C_I_1(crashed, st) ->
+    { state with parked: Logging_I.finish(s, Logging_I.send_Msg_I_L_1(s, st, crashed.cause)) }
+  ...
+end
+```
+
+The crash reaches the actor through the delivery callback it already has, so nothing in the
+runner changes: `host_<Role>`, `offer_hosted_<Role>` and `cluster_hosted_<Role>` all take
+crash branches. The event is named after the receive, so for a `choose` with a `crash`
+branch it is `Crashed_read_done_crash`, as the `await_` function is.
+`test/two_node/crash_hosted` is `crash_before_send` with I in an actor, and it ends the same
+way. The two-party `Chan` API does not run a protocol with crash branches at all: the
+compiler refuses to give one a channel type.
+
 ## Hosting a role in an actor
 
 The body in the examples above is a chain of callbacks. The session state lives inside those
@@ -552,7 +647,7 @@ actor ServerActor do
     match LinearMap.put(state.sessions, sid, parked) do
       (None, m) -> { state with sessions: m }
       (Some(old), m) ->
-        retire(old)
+        Echo_Server.take_closed(Echo_Server.cancel(old))
         panic("session " ++ sid ++ " is already hosted")
     end
   end
@@ -565,7 +660,7 @@ actor ServerActor do
             let st2 = Echo_Server.send_Msg_Server_Client_1(s, st, n * 10)
             { state with sessions: LinearMap.fill(slot, Echo_Server.await_Msg_Client_Server_2(s, st2)) }
           Got_Msg_Client_Server_2(n, st) ->
-            retire(Echo_Server.finish(s, Echo_Server.send_Msg_Server_Client_2(s, st, n * 10)))
+            Echo_Server.take_closed(Echo_Server.finish(s, Echo_Server.send_Msg_Server_Client_2(s, st, n * 10)))
             { state with done: state.done + 1, sessions: LinearMap.vacate(slot) }
         end
     end
@@ -574,7 +669,7 @@ actor ServerActor do
     match LinearMap.take(state.sessions, sid) do
       (None, m) -> { state with sessions: m }
       (Some(parked), m) ->
-        retire(Echo_Server.cancel(parked))
+        Echo_Server.take_closed(Echo_Server.cancel(parked))
         { state with sessions: m }
     end
   end
@@ -590,15 +685,9 @@ Any other state the actor keeps per session, such as a counter, goes in an ordin
 `Map` keyed by the same id.
 
 A finished or cancelled session leaves a `Closed_Server` value, which nothing can
-resume. The role module has no function that consumes one yet, and its payload type is
-private, so a one-line function with a `linear` parameter drops it:
-
-```march
-pfn retire(linear p : a) : () do
-  let _ = p
-  ()
-end
-```
+resume. `Echo_Server.take_closed(p)` is what consumes one: it takes the closed value and
+returns `()`. It panics on an endpoint that has not finished, so it cannot be used to drop
+a session that is still live.
 
 To offer the role, spawn the actor and pass it with the three callbacks:
 
@@ -655,8 +744,6 @@ node's (SWIM) and the heartbeat settings do not apply.
 
 - The network runner is compiled-only for now.
 - A session cannot be resumed after a failure, and nothing restarts it for you.
-- A cancel handler cannot keep the conversation going. A protocol that must keep talking
-  after a role fails (to send a partial result, say) cannot be written yet.
 - Every role that exchanges messages with another needs a direct connection to it. There is
   no relaying.
 - Over a cluster node (`cluster_<Role>`), every role must be on a different node, and a

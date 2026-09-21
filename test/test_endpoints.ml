@@ -15,13 +15,16 @@
 open Test_helpers
 open March_ast.Ast
 
-(* The generated code calls `Session.*`, `Json.*` and `Bytes.*`, so the
-   guarantee tests typecheck with those three stdlib modules prepended, the
-   way the CLI prepends the stdlib.  Each is self-contained (verified by grep:
-   none references another module).  Without them every accept case fails on
-   an unknown module and every reject case passes for the wrong reason. *)
+(* The generated code calls `Session.*`, `Json.*` and `Bytes.*`, so those
+   stdlib modules are prepended to the guarantee tests, the way the CLI
+   prepends the stdlib -- with `String`, which `Session.crash_cause` reads the
+   crash marker with, and which `Bytes` and `Json` already need.  Between them
+   they reference no module outside this list.  Without them every accept case
+   fails on an unknown module and every reject case passes for the wrong
+   reason. *)
 let stdlib = lazy
   [ load_stdlib_file_for_test "bytes.march";
+    load_stdlib_file_for_test "string.march";
     load_stdlib_file_for_test "json.march";
     load_stdlib_file_for_test "session.march" ]
 
@@ -134,7 +137,8 @@ let stream_shape =
            ("Stream_Cons", "register"); ("Stream_Cons", "recv_Msg_Prod_Cons_1");
            ("Stream_Cons", "choose_more"); ("Stream_Cons", "choose_done"); ("Stream_Cons", "close");
            (* the event API, beside the callback one, in the same modules *)
-           ("Stream_Prod", "idle"); ("Stream_Prod", "take_idle"); ("Stream_Prod", "await_more_done");
+           ("Stream_Prod", "idle"); ("Stream_Prod", "take_idle"); ("Stream_Prod", "take_closed");
+           ("Stream_Prod", "await_more_done");
            ("Stream_Prod", "finish"); ("Stream_Prod", "resume");
            ("Stream_Cons", "await_Msg_Prod_Cons_1"); ("Stream_Cons", "finish"); ("Stream_Cons", "resume");
            (* the role runner's typed front, one per role, and its address table *)
@@ -228,12 +232,12 @@ let stream_labelled = {|
 let stream_prod_fns =
   [ "register"; "cancelled"; "leave_send_Msg_Prod_Cons_1"; "send_Msg_Prod_Cons_1";
     "leave_offer_more_done"; "offer_more_done"; "offer_more_done_or"; "close";
-    "idle"; "take_idle"; "cancel"; "await_more_done"; "finish"; "resume" ]
+    "idle"; "take_idle"; "take_closed"; "cancel"; "await_more_done"; "finish"; "resume" ]
 
 let stream_cons_fns =
   [ "register"; "cancelled"; "leave_recv_Msg_Prod_Cons_1"; "recv_Msg_Prod_Cons_1";
     "recv_Msg_Prod_Cons_1_or"; "leave_choose_more_done"; "choose_more"; "choose_done"; "close";
-    "idle"; "take_idle"; "cancel"; "await_Msg_Prod_Cons_1"; "finish"; "resume" ]
+    "idle"; "take_idle"; "take_closed"; "cancel"; "await_Msg_Prod_Cons_1"; "finish"; "resume" ]
 
 let unlabelled_names_pinned =
   Alcotest.test_case "an unlabelled protocol's generated names are exactly what they were" `Quick
@@ -456,7 +460,7 @@ let replayed = bad "sending twice on one state is a linearity error (replay)" "i
 
 let abandoned = bad "registering and never driving the session is a linearity error (abandon)" "was never used" (wrap (stream ^ {|
   fn go(c : Cap(IO)) do
-    let s = Session.attach(c, { register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _f, _h) -> e, close: fn _e -> (), fail: fn (_e, w) -> panic(w), on_cancel: fn (e, _h) -> e, leave: fn (_e, _w) -> () })
+    let s = Session.attach(c, { register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _f, _h) -> e, close: fn _e -> (), fail: fn (_e, w) -> panic(w), on_cancel: fn (e, _h) -> e, leave: fn (_e, _w) -> (), on_crash: fn (e, _r, _h) -> e })
     let st = Stream_Prod.register(s, 0)
     ()
   end
@@ -526,6 +530,27 @@ let event_ok = ok "an actor holding a Parked endpoint in its state, resuming and
             { state with parked: Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true)) }
           end
       end
+    end
+|})
+
+let event_take_closed = ok "an actor retiring a finished session with the generated take_closed" (cons_actor {|
+    on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Stream_Cons.resume(state.parked, from, msg, ep) do
+        Got_Msg_Prod_Cons_1(_n, st) ->
+          Stream_Cons.take_closed(Stream_Cons.finish(s, Stream_Cons.choose_done(s, st, true)))
+          { state with budget: 0, parked: Stream_Cons.idle() }
+      end
+    end
+|})
+
+(* The hole `take_closed` closes: a still-parked endpoint is not retirable.
+   The panic is at run time, so what the checker can show here is that the
+   call type-checks only against a `Parked`, and that the value it consumes
+   cannot be used again. *)
+let event_take_closed_consumes = bad "retiring a parked endpoint and then re-parking the same value" "`state.parked` is used more than once" (cons_actor {|
+    on DeliverC(_s : Cap(Session.Live), _from : Int, _msg : Bytes, _ep : Int) do
+      Stream_Cons.take_closed(state.parked)
+      { state with budget: state.budget - 1 }
     end
 |})
 
@@ -745,12 +770,354 @@ end
       Alcotest.(check bool) ("no unreachable-arm warning (output: " ^ out ^ ")") false
         (contains_text out "never be reached"))
 
+(* ── crash branches (design Part B, 2026-09-20) ───────────────────────────
+   The ECOOP logging protocol: C may crash, I detects it at `C -> I`, L is
+   told by I's message.  Shape: the detector's receive takes the crash
+   callback, the third party offers over the detector's two messages, the
+   crashed role's module has no trace of the branch, and every role module
+   carries `Crashed_<Role>`.  Then the six well-formedness rules, and the
+   `choose` form of a crash branch. *)
+let logging = {|
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+    L -> I : Bool
+    I -> C : Bool
+  end
+|}
+
+let crash_shape =
+  Alcotest.test_case "Logging: the detector's recv takes a crash callback; the third party offers; the crashed role has no branch" `Quick
+    (fun () ->
+       let mods = generated (wrap logging) in
+       Alcotest.(check (list string)) "modules"
+         [ "Logging_Msg"; "Logging_L"; "Logging_I"; "Logging_C"; "Logging_Run" ] (List.map fst mods);
+       List.iter
+         (fun (m, f, expect) -> Alcotest.(check bool) (m ^ "." ^ f) expect (has_fn mods m f))
+         [ ("Logging_I", "recv_Msg_C_I_1", true);
+           ("Logging_I", "recv_Msg_C_I_1_or", false);          (* no cancel form: the sender may crash *)
+           ("Logging_I", "send_Msg_I_L_1", true);              (* the crash branch's send *)
+           ("Logging_I", "send_Msg_I_L_2", true);
+           ("Logging_I", "leave_recv_Msg_C_I_1", true);
+           ("Logging_L", "offer_Msg_I_L_2_Msg_I_L_1", true);   (* told apart by I's messages *)
+           ("Logging_L", "recv_Msg_I_L_2", false);
+           ("Logging_C", "send_Msg_C_I_1", true);
+           ("Logging_C", "recv_Msg_I_C_1", true);
+           ("Logging_C", "recv_Msg_I_L_1", false) ];
+       (* the detector's receive: (s, st, k, on_crash), with `Crashed_I` *)
+       let m = parse_and_desugar (wrap logging) in
+       let arity =
+         List.find_map
+           (function
+             | DMod (name, _, decls, _) when name.txt = "Logging_I" ->
+               List.find_map
+                 (function
+                   | DFn (fd, _) when fd.fn_name.txt = "recv_Msg_C_I_1" ->
+                     Some (List.length (List.hd fd.fn_clauses).fc_params)
+                   | _ -> None)
+                 decls
+             | _ -> None)
+           m.mod_decls
+       in
+       Alcotest.(check (option int)) "recv_Msg_C_I_1 arity" (Some 4) arity;
+       let has_type mname tname =
+         List.exists
+           (function
+             | DMod (name, _, decls, _) when name.txt = mname ->
+               List.exists (function DType (_, t, _, _, _) | DAlwaysLinearType (_, t, _, _, _) -> t.txt = tname | _ -> false) decls
+             | _ -> false)
+           m.mod_decls
+       in
+       Alcotest.(check bool) "Logging_I.Crashed_I" true (has_type "Logging_I" "Crashed_I");
+       Alcotest.(check bool) "Logging_I.S_recv_Msg_C_I_1" true (has_type "Logging_I" "S_recv_Msg_C_I_1");
+       Alcotest.(check bool) "Logging_I.S_send_Msg_I_L_1 (the crash branch's first state)" true
+         (has_type "Logging_I" "S_send_Msg_I_L_1");
+       Alcotest.(check bool) "Logging_L.S_offer_Msg_I_L_2_Msg_I_L_1" true (has_type "Logging_L" "S_offer_Msg_I_L_2_Msg_I_L_1"))
+
+let crash_roles_ok = ok "all three roles of Logging typecheck against the generated API" (wrap (logging ^ {|
+  pfn role_l(s : Cap(Session.Live), st : Logging_L.S_send_Msg_L_I_1) : Logging_L.Yield do
+    let st1 = Logging_L.send_Msg_L_I_1(s, st, 1)
+    Logging_L.offer_Msg_I_L_2_Msg_I_L_1(s, st1,
+      fn (_read, st2) -> Logging_L.close(s, Logging_L.send_Msg_L_I_2(s, st2, true)),
+      fn (_fatal, st2) -> Logging_L.close(s, st2))
+  end
+  pfn role_i(s : Cap(Session.Live), st : Logging_I.S_recv_Msg_L_I_1) : Logging_I.Yield do
+    Logging_I.recv_Msg_L_I_1(s, st, fn (_t, st1) ->
+      Logging_I.recv_Msg_C_I_1(s, st1,
+        fn (read, st2) ->
+          Logging_I.recv_Msg_L_I_2(s, Logging_I.send_Msg_I_L_2(s, st2, read), fn (r, st4) ->
+            Logging_I.close(s, Logging_I.send_Msg_I_C_1(s, st4, r))),
+        fn (crashed, st2) ->
+          Logging_I.close(s, Logging_I.send_Msg_I_L_1(s, st2, crashed.cause ++ int_to_string(crashed.role)))))
+  end
+  pfn role_c(s : Cap(Session.Live), st : Logging_C.S_send_Msg_C_I_1) : Logging_C.Yield do
+    Logging_C.recv_Msg_I_C_1(s, Logging_C.send_Msg_C_I_1(s, st, "x"), fn (_r, st2) -> Logging_C.close(s, st2))
+  end
+|}))
+
+(* The crash callback's state is the crash branch's, not the normal one's:
+   sending the normal `Read` to L from it is a type error. *)
+let crash_state_is_the_branch = bad "the crash callback cannot take the normal continuation's step"
+    "expected `S_send_Msg_I_L_2` but got `S_send_Msg_I_L_1`" (wrap (logging ^ {|
+  pfn role_i(s : Cap(Session.Live), st : Logging_I.S_recv_Msg_C_I_1) : Logging_I.Yield do
+    Logging_I.recv_Msg_C_I_1(s, st,
+      fn (read, st2) -> Logging_I.recv_Msg_L_I_2(s, Logging_I.send_Msg_I_L_2(s, st2, read), fn (r, st4) ->
+                          Logging_I.close(s, Logging_I.send_Msg_I_C_1(s, st4, r))),
+      fn (_crashed, st2) -> Logging_I.close(s, Logging_I.send_Msg_I_L_2(s, st2, "no")))
+  end
+|}))
+
+let crash_rule name needle proto = bad name needle (wrap proto)
+
+let crash_rule_1 = crash_rule "rule 1: a receive from a may-crash role needs a crash branch" "needs `or crash do ... end`" {|
+  @[endpoints]
+  protocol P do
+    may crash C
+    L -> I : Int
+    C -> I : String
+    I -> L : String
+  end
+|}
+
+let crash_rule_2 = crash_rule "rule 2: a crash branch is only for a may-crash sender" "is not declared `may crash`" {|
+  @[endpoints]
+  protocol P do
+    may crash C
+    L -> I : Int
+      or crash do
+        I -> C : Bool
+      end
+    C -> I : String
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+  end
+|}
+
+let crash_rule_3 = crash_rule "rule 3: the crashed role is not in its own crash branch" "has crashed, so it cannot take part" {|
+  @[endpoints]
+  protocol P do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        I -> C : Bool
+      end
+    I -> L : String
+  end
+|}
+
+let crash_rule_4 = crash_rule "rule 4: a third party is told by the detector in both continuations" "cannot tell whether `C` crashed" {|
+  @[endpoints]
+  protocol P do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        L -> I : Bool
+      end
+    I -> L : String
+    L -> I : Bool
+  end
+|}
+
+let crash_rule_5 = crash_rule "rule 5: a choose with a crash branch has one detector" "every other branch must begin with a message to the same role" {|
+  @[endpoints]
+  protocol P do
+    may crash C
+    L -> I : Int
+    choose by C:
+      read -> C -> I : String
+              I -> L : String
+      done -> C -> L : Bool
+      crash -> I -> L : String
+    end
+  end
+|}
+
+let crash_rule_6 = crash_rule "rule 6: may crash names a role of the protocol, once" "names a role that is not in the protocol" {|
+  @[endpoints]
+  protocol P do
+    may crash D
+    L -> I : Int
+    I -> L : String
+  end
+|}
+
+let crash_rule_6_twice = crash_rule "rule 6: may crash lists a role once" "lists `C` twice" {|
+  @[endpoints]
+  protocol P do
+    may crash C, C
+    C -> I : Int
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+  end
+|}
+
+(* A `choose by C` with a `crash` branch: I detects, `offer_read_done_crash`
+   takes one callback per label and the crash callback; L is told by I's
+   messages in every branch. *)
+let crash_choose = {|
+  @[endpoints]
+  protocol Q do
+    may crash C
+    L -> I : Int
+    choose by C:
+      read -> C -> I : String
+              I -> L : String
+      done -> C -> I : Bool
+              I -> L : Bool
+      crash -> I -> L : Int
+    end
+  end
+|}
+
+let crash_choose_shape =
+  Alcotest.test_case "a choose with a crash branch: the detector offers over the labels and crash" `Quick
+    (fun () ->
+       let mods = generated (wrap crash_choose) in
+       List.iter
+         (fun (m, f, expect) -> Alcotest.(check bool) (m ^ "." ^ f) expect (has_fn mods m f))
+         [ ("Q_I", "offer_read_done_crash", true);
+           ("Q_I", "offer_read_done", false);
+           ("Q_C", "choose_read", true); ("Q_C", "choose_done", true); ("Q_C", "choose_crash", false);
+           ("Q_L", "offer_Msg_I_L_1_Msg_I_L_2_Msg_I_L_3", true) ])
+
+let crash_choose_ok = ok "the detector of a choose with a crash branch, written against the generated API" (wrap (crash_choose ^ {|
+  pfn role_i(s : Cap(Session.Live), st : Q_I.S_recv_Msg_L_I_1) : Q_I.Yield do
+    Q_I.recv_Msg_L_I_1(s, st, fn (_t, st1) ->
+      Q_I.offer_read_done_crash(s, st1,
+        fn (r, st2) -> Q_I.close(s, Q_I.send_Msg_I_L_1(s, st2, r)),
+        fn (d, st2) -> Q_I.close(s, Q_I.send_Msg_I_L_2(s, st2, d)),
+        fn (crashed, st2) -> Q_I.close(s, Q_I.send_Msg_I_L_3(s, st2, crashed.role))))
+  end
+|}))
+
+(* ── crash branches reaching an ACTOR-HOSTED role (phase B2) ──────────────
+   A role hosted in an actor takes its crash branch through the event API:
+   `await_<Msg>` of a state with a crash branch installs a crash continuation
+   too, the transport forwards the crash on the delivery route, and `resume`
+   hands back `Crashed_<Msg>(Crashed_<Role>, S_<branch's first state>)`
+   instead of `Got_<Msg>`.  End to end: test/two_node/crash_hosted. *)
+
+(** The constructors of [tname] in module [mname], in order. *)
+let variant_ctors src mname tname =
+  let m = parse_and_desugar src in
+  List.find_map
+    (function
+      | DMod (name, _, decls, _) when name.txt = mname ->
+        List.find_map
+          (function
+            | DType (_, t, _, TDVariant vs, _) | DAlwaysLinearType (_, t, _, TDVariant vs, _) when t.txt = tname ->
+              Some (List.map (fun v -> v.var_name.txt) vs)
+            | _ -> None)
+          decls
+      | _ -> None)
+    m.mod_decls
+
+let crash_hosted_shape =
+  Alcotest.test_case "Logging: the hosted detector awaits the crash receive and its event API carries Crashed_" `Quick
+    (fun () ->
+       let src = wrap logging in
+       let mods = generated src in
+       List.iter
+         (fun (m, f, expect) -> Alcotest.(check bool) (m ^ "." ^ f) expect (has_fn mods m f))
+         [ ("Logging_I", "await_Msg_L_I_1", true);
+           ("Logging_I", "await_Msg_C_I_1", true);     (* the receive with the crash branch *)
+           ("Logging_I", "resume", true);
+           ("Logging_L", "await_Msg_I_L_2_Msg_I_L_1", true) ];
+       (* the detector's events: one `Got_` per message it receives, and the
+          crash of C with the branch's first state *)
+       Alcotest.(check (option (list string))) "Received_I"
+         (Some [ "Got_Msg_L_I_1"; "Got_Msg_C_I_1"; "Got_Msg_L_I_2"; "Crashed_Msg_C_I_1" ])
+         (variant_ctors src "Logging_I" "Received_I");
+       (* L hears about the crash as one of I's messages: no crash event *)
+       Alcotest.(check (option (list string))) "Received_L"
+         (Some [ "Got_Msg_I_L_2"; "Got_Msg_I_L_1" ]) (variant_ctors src "Logging_L" "Received_L"))
+
+let crash_choose_hosted_shape =
+  Alcotest.test_case "a choose with a crash branch: the hosted detector's await and event carry the labels" `Quick
+    (fun () ->
+       let src = wrap crash_choose in
+       Alcotest.(check bool) "Q_I.await_read_done_crash" true (has_fn (generated src) "Q_I" "await_read_done_crash");
+       Alcotest.(check (option (list string))) "Received_I"
+         (Some [ "Got_Msg_L_I_1"; "Got_Read"; "Got_Done"; "Crashed_read_done_crash" ])
+         (variant_ctors src "Q_I" "Received_I"))
+
+(* The guarantee: an actor that holds I's endpoint takes every step from its
+   own handler, the crash branch included, with `state` in scope. *)
+let crash_hosted_ok = ok "an actor hosting the detector takes the crash branch from its resume handler"
+  (wrap (logging ^ {|
+  actor IActor do
+    state { parked : Logging_I.Parked_I }
+    init  { parked: Logging_I.idle() }
+    on StartI(s : Cap(Session.Live)) do
+      Logging_I.take_idle(state.parked)
+      { state with parked: Logging_I.await_Msg_L_I_1(s, Logging_I.register(s, 0)) }
+    end
+    on DeliverI(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Logging_I.resume(state.parked, from, msg, ep) do
+        Got_Msg_L_I_1(_trigger, st) ->
+          { state with parked: Logging_I.await_Msg_C_I_1(s, st) }
+        Got_Msg_C_I_1(read, st) ->
+          { state with parked: Logging_I.await_Msg_L_I_2(s, Logging_I.send_Msg_I_L_2(s, st, read)) }
+        Got_Msg_L_I_2(report, st) ->
+          { state with parked: Logging_I.finish(s, Logging_I.send_Msg_I_C_1(s, st, report)) }
+        Crashed_Msg_C_I_1(crashed, st) ->
+          { state with parked: Logging_I.finish(s, Logging_I.send_Msg_I_L_1(s, st, crashed.cause ++ int_to_string(crashed.role))) }
+      end
+    end
+  end
+|}))
+
+(* The crash event's state is the BRANCH's, as the callback's is: the normal
+   continuation's step does not typecheck against it. *)
+let crash_hosted_state_is_the_branch =
+  bad "the crash event's state cannot take the normal continuation's step" "S_send_Msg_I_L_2"
+    (wrap (logging ^ {|
+  actor IActor do
+    state { parked : Logging_I.Parked_I }
+    init  { parked: Logging_I.idle() }
+    on DeliverI(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match Logging_I.resume(state.parked, from, msg, ep) do
+        Got_Msg_L_I_1(_trigger, st) ->
+          { state with parked: Logging_I.await_Msg_C_I_1(s, st) }
+        Got_Msg_C_I_1(read, st) ->
+          { state with parked: Logging_I.await_Msg_L_I_2(s, Logging_I.send_Msg_I_L_2(s, st, read)) }
+        Got_Msg_L_I_2(report, st) ->
+          { state with parked: Logging_I.finish(s, Logging_I.send_Msg_I_C_1(s, st, report)) }
+        Crashed_Msg_C_I_1(_crashed, st) ->
+          { state with parked: Logging_I.finish(s, Logging_I.send_Msg_I_L_2(s, st, "no")) }
+      end
+    end
+  end
+|}))
+
+(* The `Chan` API does not run crash branches: the typecheck-side projection
+   refuses such a protocol rather than project it without them. *)
+let crash_chan_refused = bad "Chan(Role, Proto) refuses a protocol with crash branches" "only supported with `@[endpoints]`" (wrap (logging ^ {|
+  pfn as_chan(ch : Chan(L, Logging)) : Int do 0 end
+|}))
+
 let tests =
   [ stream_shape; cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
     unlabelled_names_pinned; labelled_shape; label_changes_fingerprint; labelled_roles_ok;
     label_on_branch_head; label_msg_prefix; shared_label_ok; shared_label_two_payloads; shared_label_one_role;
     prod_ok; wrong_order; replayed; abandoned; callback_forge; relay_ok; payload_declared_later;
     payload_no_codec; payload_with_codec; payload_nested_no_codec;
-    event_ok; event_retained; event_not_reparked; event_idle_dropped; event_forge; event_pid_handle; builtin_under_application;
+    event_ok; event_take_closed; event_take_closed_consumes; event_retained; event_not_reparked; event_idle_dropped; event_forge; event_pid_handle; builtin_under_application;
     cancel_handler_ok; cancel_handler_reuses_state; cancel_handler_must_end; cancelled_forge;
-    hosted_cancel_ok; hosted_cancel_retained ]
+    hosted_cancel_ok; hosted_cancel_retained;
+    crash_shape; crash_roles_ok; crash_state_is_the_branch;
+    crash_rule_1; crash_rule_2; crash_rule_3; crash_rule_4; crash_rule_5; crash_rule_6; crash_rule_6_twice;
+    crash_choose_shape; crash_choose_ok; crash_chan_refused;
+    crash_hosted_shape; crash_choose_hosted_shape; crash_hosted_ok; crash_hosted_state_is_the_branch ]

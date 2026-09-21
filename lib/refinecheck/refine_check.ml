@@ -1973,7 +1973,13 @@ let warn_qualified_call (errctx : Err.ctx) ~(span : A.span) (qname : string) : u
         never reflected here, so the refinement enforces nothing.%s"
        qname remedy)
 
-let warn_predicate_expr (errctx : Err.ctx) (e : A.expr) : unit =
+let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
+    (e : A.expr) : unit =
+  (* A name this signature declares as an abstract refinement
+     (specs/2026-09-20-abstract-refinements-design.md §1) is NOT unknown
+     vocabulary: it is checked by [Refine_abstract.check], which reports its
+     own errors.  Warning here as well would tell the author to annotate `p`
+     `@[measure]`, which is exactly what it must not be. *)
   let rec go (e : A.expr) =
     match e with
     | A.EApp (A.EVar { A.txt = f; _ }, args, span)
@@ -1990,7 +1996,7 @@ let warn_predicate_expr (errctx : Err.ctx) (e : A.expr) : unit =
            f);
       List.iter go args
     | A.EApp (A.EVar { A.txt = f; _ }, args, span) ->
-      if not (known_predicate_fn f) then begin
+      if (not (known_predicate_fn f)) && not (List.mem f abstract_refs) then begin
         if String.contains f '.' then
           (* [Desugar.desugar_ty] (Task 8) now flattens a MODULE-PATH call head
              (`List.length(_)`) in predicate position into this dotted `EVar`
@@ -2043,16 +2049,18 @@ let warn_predicate_expr (errctx : Err.ctx) (e : A.expr) : unit =
   in
   go e
 
-let rec warn_predicate_ty (errctx : Err.ctx) (t : A.ty) : unit =
+let rec warn_predicate_ty ?(abstract_refs : string list = []) (errctx : Err.ctx)
+    (t : A.ty) : unit =
+  let go = warn_predicate_ty ~abstract_refs errctx in
   match t with
   | A.TyRefine (base, _binder, pred) ->
-    warn_predicate_ty errctx base;
-    warn_predicate_expr errctx pred
-  | A.TyCon (_, args) -> List.iter (warn_predicate_ty errctx) args
-  | A.TyArrow (a, b) -> warn_predicate_ty errctx a; warn_predicate_ty errctx b
-  | A.TyTuple ts -> List.iter (warn_predicate_ty errctx) ts
-  | A.TyRecord fs -> List.iter (fun (_, t) -> warn_predicate_ty errctx t) fs
-  | A.TyLinear (_, t) -> warn_predicate_ty errctx t
+    go base;
+    warn_predicate_expr ~abstract_refs errctx pred
+  | A.TyCon (_, args) -> List.iter go args
+  | A.TyArrow (a, b) -> go a; go b
+  | A.TyTuple ts -> List.iter go ts
+  | A.TyRecord fs -> List.iter (fun (_, t) -> go t) fs
+  | A.TyLinear (_, t) -> go t
   | A.TyChan _ | A.TyVar _ | A.TyNat _ | A.TyNatOp _ -> ()
 
 (* ── The single-element-type rule (strengthening design §2.4) ─────────────
@@ -2360,13 +2368,18 @@ let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl
   in
   let warn_fn (fd : A.fn_def) =
     check_set_element_types errctx ~set_fns fd;
-    Option.iter (warn_predicate_ty errctx) fd.A.fn_ret_ty;
+    (* Abstract refinements, design §1.  Runs here for the same reason the
+       vocabulary warning does: [registered_measures] is populated, so a user
+       `@[measure]` is not mistaken for a predicate variable. *)
+    Refine_abstract.check errctx ~is_known:known_predicate_fn fd;
+    let abstract_refs = Refine_abstract.names ~is_known:known_predicate_fn fd in
+    Option.iter (warn_predicate_ty ~abstract_refs errctx) fd.A.fn_ret_ty;
     List.iter
       (fun (c : A.fn_clause) ->
         List.iter
           (function
             | A.FPNamed p | A.FPDefault (p, _) ->
-              Option.iter (warn_predicate_ty errctx) p.A.param_ty
+              Option.iter (warn_predicate_ty ~abstract_refs errctx) p.A.param_ty
             | A.FPPat _ -> ())
           c.A.fc_params;
         warn_predicate_expr_tys errctx c.A.fc_body)
@@ -2539,7 +2552,11 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
               List.map
                 (function
                   | A.FPNamed p | A.FPDefault (p, _) ->
-                    let set = structural_subvars p.A.param_name.A.txt c.A.fc_body in
+                    let set =
+                      structural_subvars
+                        ~params:(List.concat_map fnparam_binders c.A.fc_params)
+                        p.A.param_name.A.txt c.A.fc_body
+                    in
                     List.iter (Hashtbl.remove set) rebound;
                     set
                   | A.FPPat _ -> Hashtbl.create 1)

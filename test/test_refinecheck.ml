@@ -16401,6 +16401,202 @@ let refine_errors src =
       then Some d.March_errors.Errors.message else None)
     ctx.March_errors.Errors.diagnostics
 
+(* Every diagnostic message [Refine_check] produced, any severity: the
+   abstract-refinement rules are errors AND warnings, and one of the things
+   phase 1 must prove is that a declared name no longer draws the
+   "not a measure" warning. *)
+let refine_diagnostics (src : string) : string list =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx
+    (March_desugar.Desugar.desugar_module (parse src));
+  List.map
+    (fun (d : March_errors.Errors.diagnostic) -> d.March_errors.Errors.message)
+    ctx.March_errors.Errors.diagnostics
+
+(* Abstract refinements, phase 1 (specs/2026-09-20-abstract-refinements-design.md
+   §1): the surface rules only.  Phase 1 is INERT — no obligation changes
+   verdict — so the cases below assert diagnostics and the ledger's silence,
+   never a proof. *)
+let abstract_refinements_suite =
+  let m body = "mod AR do\n" ^ body ^ "end\n" in
+  let definer = "({x : a | true}) -> {Bool | _ == p(x)}" in
+  let wellformed =
+    m (Printf.sprintf
+         "  fn filt(xs : List(a), keep : %s) : List({a | p(_)}) do\n    xs\n  end\n" definer)
+  in
+  let says needle msgs = List.exists (fun msg -> contains msg needle) msgs in
+  [ Alcotest.test_case "a well-formed signature is accepted and exempt from the vocabulary warning"
+      `Quick (fun () ->
+        let msgs = refine_diagnostics wellformed in
+        Alcotest.(check bool) "no abstract-refinement diagnostic" false
+          (says "abstract refinement" msgs);
+        (* The exemption: without it `p` reads as an unknown predicate name. *)
+        Alcotest.(check bool) "no `not a measure` warning for p" false
+          (says "`p` is not a measure" msgs));
+
+    Alcotest.test_case "a name with no definer keeps its unknown-vocabulary warning" `Quick
+      (fun () ->
+        (* INERTNESS: this is the shape every typo in a refinement has, and it
+           must behave exactly as it did before abstract refinements existed. *)
+        let msgs = refine_diagnostics (m "  fn g(xs : List(a)) : List({a | bogus(_)}) do xs end\n") in
+        Alcotest.(check bool) "warned as unknown vocabulary" true
+          (says "`bogus` is not a measure" msgs);
+        Alcotest.(check bool) "not treated as an abstract refinement" false
+          (says "abstract refinement" msgs));
+
+    Alcotest.test_case "applied to a name that is not the binder in scope" `Quick (fun () ->
+        let msgs =
+          refine_diagnostics
+            (m (Printf.sprintf
+                  "  fn g(xs : List({a | p(zz)}), keep : %s) : Int do 0 end\n" definer))
+        in
+        Alcotest.(check bool) "reported" true (says "is applied to `zz`" msgs));
+
+    Alcotest.test_case "applied to an expression" `Quick (fun () ->
+        let msgs =
+          refine_diagnostics
+            (m (Printf.sprintf
+                  "  fn g(xs : List(a), keep : %s) : List({a | p(q(_))}) do xs end\n" definer))
+        in
+        Alcotest.(check bool) "reported" true (says "is applied to an expression" msgs));
+
+    Alcotest.test_case "used at two different types" `Quick (fun () ->
+        let msgs =
+          refine_diagnostics
+            (m (Printf.sprintf
+                  "  fn g(ns : List({Int | p(_)}), keep : %s) : List({a | p(_)}) do ns end\n"
+                  definer))
+        in
+        Alcotest.(check bool) "reported" true (says "used at more than one type" msgs));
+
+    Alcotest.test_case "a definer nobody consumes is vacuous" `Quick (fun () ->
+        let msgs =
+          refine_diagnostics (m (Printf.sprintf "  fn g(keep : %s) : Int do 0 end\n" definer))
+        in
+        Alcotest.(check bool) "warned" true (says "never used in the signature" msgs));
+
+    Alcotest.test_case "a negative occurrence counts as a use" `Quick (fun () ->
+        let msgs =
+          refine_diagnostics
+            (m (Printf.sprintf "  fn g(xs : List({a | p(_)}), keep : %s) : Int do 0 end\n" definer))
+        in
+        Alcotest.(check bool) "not called vacuous" false (says "never used in the signature" msgs);
+        Alcotest.(check bool) "no error" false (says "abstract refinement `p` is applied" msgs));
+
+    gated "phase 1 is inert: row n still skips, nothing proves" (fun () ->
+        (* The motivating case (design row n).  Phase 2 turns this into a
+           proof; until then the ledger must be unchanged, and this case is
+           what will show that happening. *)
+        let src =
+          m (String.concat "\n"
+               [ Printf.sprintf "  fn filt(xs : List(a), keep : %s) : List({a | p(_)}) do xs end" definer;
+                 "  fn sum_pos(ys : List({Int | _ > 0})) : Int do 0 end";
+                 "  fn run(zs : List(Int), k : (Int) -> Bool) : Int do sum_pos(filt(zs, k)) end";
+                 "" ])
+        in
+        let (proved, violated, _skipped) = ledger_counts3 src in
+        Alcotest.(check int) "nothing proved" 0 proved;
+        Alcotest.(check int) "nothing violated" 0 violated);
+  ]
+
+(* Structural components are trusted BY NAME (backlog plan 2026-09-21, item
+   1).  Before the fix, a name bound as a component of the matched parameter
+   in one place and rebound to something else in another was trusted at both,
+   and Tier 2 proved a false relational postcondition: [copy_shadow] below
+   returns a list of length 3 for `copy([1], [5, 6, 7])` while its contract
+   claims 1.  The same hole let the `@[measure]` gate accept a measure that
+   recurses forever.  Every case asserts the ledger, since a skip and a proof
+   both exit 0. *)
+let tier2_component_names_suite =
+  let m name body = Printf.sprintf "mod %s do\n%send\n" name body in
+  let copy_true =
+    m "TC1"
+      "  fn copy(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do\n\
+      \    match xs do\n\
+      \    Nil -> Nil\n\
+      \    Cons(h, t) -> Cons(h, copy(t))\n\
+      \    end\n\
+      \  end\n"
+  in
+  let copy_shadow =
+    m "TC2"
+      "  fn copy(xs : List(Int), ys : List(Int)) : {List(Int) | len(_) == len(xs)} do\n\
+      \    match xs do\n\
+      \    Nil -> Nil\n\
+      \    Cons(h, t) ->\n\
+      \      match ys do\n\
+      \      Nil -> Cons(h, copy(t, ys))\n\
+      \      Cons(_, t) -> Cons(h, copy(t, t))\n\
+      \      end\n\
+      \    end\n\
+      \  end\n"
+  in
+  let copy_let =
+    m "TC4"
+      "  fn copy(xs : List(Int), ys : List(Int)) : {List(Int) | len(_) == len(xs)} do\n\
+      \    match xs do\n\
+      \    Nil -> Nil\n\
+      \    Cons(h, t) ->\n\
+      \      let t = ys\n\
+      \      Cons(h, copy(t, t))\n\
+      \    end\n\
+      \  end\n"
+  in
+  let siblings =
+    m "TCS"
+      "  type T = Leaf | One(Int, T) | Two(Int, T)\n\
+      \  @[measure]\n\
+      \  fn size(t : T) : Int do\n\
+      \    match t do\n\
+      \    Leaf -> 0\n\
+      \    One(_, r) -> 1 + size(r)\n\
+      \    Two(_, r) -> 1 + size(r)\n\
+      \    end\n\
+      \  end\n\
+      \  fn cp(t : T) : {T | size(_) == size(t)} do\n\
+      \    match t do\n\
+      \    Leaf -> Leaf\n\
+      \    One(x, r) -> One(x, cp(r))\n\
+      \    Two(x, r) -> Two(x, cp(r))\n\
+      \    end\n\
+      \  end\n"
+  in
+  let bad_measure =
+    m "TCM"
+      "  @[measure]\n\
+      \  fn bad(xs : List(Int)) : Int do\n\
+      \    match xs do\n\
+      \    Nil -> 0\n\
+      \    Cons(_, t) ->\n\
+      \      let t = xs\n\
+      \      1 + bad(t)\n\
+      \    end\n\
+      \  end\n\
+      \  fn need(xs : {List(Int) | bad(_) > 5}) : Int do 0 end\n"
+  in
+  let proved src = let (p, _, _) = ledger_counts3 src in p in
+  [ gated "control: a true structural postcondition still proves" (fun () ->
+        Alcotest.(check int) "proved" 1 (proved copy_true));
+
+    gated "a component name rebound by an inner match is not trusted" (fun () ->
+        (* The false proof.  On the unfixed checker this is 1. *)
+        Alcotest.(check int) "not proved" 0 (proved copy_shadow));
+
+    gated "a component name rebound by a let is not trusted" (fun () ->
+        Alcotest.(check int) "not proved" 0 (proved copy_let));
+
+    gated "sibling arms reusing a component name still prove" (fun () ->
+        (* The precision the fix must keep: `One(_, r)` and `Two(_, r)` both
+           bind `r` structurally.  A flat "bound more than once" filter would
+           have lost this. *)
+        Alcotest.(check int) "proved" 1 (proved siblings));
+
+    gated "a measure recursing on a rebound name fails the termination gate" (fun () ->
+        let msgs = refine_diagnostics bad_measure in
+        Alcotest.(check bool) "rejected as not structurally recursive" true
+          (List.exists (fun s -> contains s "is not structurally recursive") msgs));
+  ]
+
 let single_element_type_suite =
   let m body = "mod M do\n" ^ body ^ "\nend\n" in
   let mixes msgs =
@@ -17332,6 +17528,8 @@ let () =
       ("set-refinements", set_suite);
       ("typed-instances", typed_instances_suite);
       ("single-element-type", single_element_type_suite);
+      ("tier2-component-names", tier2_component_names_suite);
+      ("abstract-refinements", abstract_refinements_suite);
       ("list-structure", list_structure_suite);
       ("cardinality", card_suite);
       ("avl-induction", avl_suite);

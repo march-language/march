@@ -3659,6 +3659,8 @@ let rec eval_decl (env : env) (d : decl) : env =
             collect_roles [] steps) branches in
         collect_roles (ch.txt :: branch_roles @ acc) rest
       | ProtoStop _ :: rest -> collect_roles acc rest
+      | ProtoMayCrash _ :: rest -> collect_roles acc rest
+      | ProtoCrashOr (inner, crash, _) :: rest -> collect_roles acc (inner :: crash @ rest)
     in
     let roles = List.sort_uniq String.compare
         (collect_roles [] pdef.proto_steps) in

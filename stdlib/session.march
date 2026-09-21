@@ -39,6 +39,14 @@ mod Session do
   -- more (a transport where nothing fails may ignore it). `leave(ep, why)`:
   -- this endpoint exits its session on purpose; the transport tells the
   -- peers. Both: specs/todos/2026-09-18-choreography-failure-handling.md.
+  -- `on_crash(ep, role, h)`: install `h` as the CRASH continuation for
+  -- `role` with the continuation `suspend` installs next on `ep`; returns
+  -- `ep`. The transport calls `h(role, cause, ep)` if that continuation waits
+  -- on `role`, `role` can send nothing more and nothing from it is queued:
+  -- the endpoint then goes on from the crash branch instead of being
+  -- cancelled (a generated `recv_<Msg>` with a crash branch installs it;
+  -- specs/2026-09-19-choreography-access-points-and-crash-branches-design.md
+  -- Part B). A transport where nothing fails may ignore it.
   type Ops = {
     register  : Int -> Int -> Int,
     emit      : Int -> Int -> Bytes -> Int,
@@ -46,7 +54,8 @@ mod Session do
     close     : Int -> (),
     fail      : Int -> String -> (),
     on_cancel : Int -> (Int -> String -> Int -> Int) -> Int,
-    leave     : Int -> String -> ()
+    leave     : Int -> String -> (),
+    on_crash  : Int -> Int -> (Int -> String -> Int -> Int) -> Int
   }
 
   proof cap Live with Ops
@@ -113,6 +122,21 @@ mod Session do
     end
   end
 
+  doc """
+  Install `handler` as the crash continuation for `role` with the continuation
+  that the next `suspend` on `ep` installs, and return `ep`. It runs as
+  `handler(role, cause, ep)` if that continuation waits on `role` and `role`
+  is gone with nothing from it queued; the endpoint stays live and goes on
+  from the protocol's crash branch. The generated `recv_…` of a message step
+  with `or crash do … end` calls this.
+  """
+  fn on_crash(c : Cap(Session.Live), ep : Int, role : Int, handler : Int -> String -> Int -> Int) : Int do
+    match cap_dict(c) do
+      Some(d) -> d.on_crash(ep, role, handler)
+      None    -> no_transport()
+    end
+  end
+
   doc "Leave the session from endpoint `ep` on purpose, with a reason the peers are told."
   fn leave(c : Cap(Session.Live), ep : Int, why : String) : () do
     match cap_dict(c) do
@@ -132,6 +156,43 @@ mod Session do
     match cap_dict(c) do
       Some(d) -> d.fail(ep, why)
       None    -> no_transport()
+    end
+  end
+
+  -- ── a crash on the delivery route (actor-hosted roles) ──────────────────
+  --
+  -- An actor-hosted endpoint never runs the crash continuation itself: the
+  -- actor owns the session state, so the crash has to reach the actor's own
+  -- handler, and the route that already reaches it is the delivery one.
+  -- A transport that hosts a role therefore forwards a crash as a delivery
+  -- whose payload is `crash_payload(cause)` and whose sender is the crashed
+  -- role, and the generated `resume` asks `crash_cause` before it decodes.
+  -- The marker cannot collide with a message: every payload on the wire is
+  -- `Json.to_string` of a variant, which never begins with `!`.
+
+  pfn crash_marker() : String do "!session-crash!" end
+
+  doc """
+  The delivery payload that carries a crash of the sending role, with `cause`
+  as the transport knows it. A transport that hosts a role in an actor sends
+  this on the delivery route; nothing else produces it.
+  """
+  fn crash_payload(cause : String) : Bytes do
+    Bytes.from_string(crash_marker() ++ cause)
+  end
+
+  doc """
+  `Some(cause)` if `msg` is a forwarded crash rather than a protocol message,
+  `None` otherwise. The generated `resume` of an actor-hosted role asks this
+  before decoding.
+  """
+  fn crash_cause(msg : Bytes) : Option(String) do
+    let s = Bytes.to_string(msg)
+    let m = crash_marker()
+    if String.starts_with(s, m) do
+      Some(String.slice(s, String.byte_size(m), String.byte_size(s) - String.byte_size(m)))
+    else
+      None
     end
   end
 end

@@ -1,0 +1,22 @@
+-- EXPECT-ERROR: has crashed, so it cannot take part
+-- Crash branches, rule 3 (2026-09-20): the crash branch runs because its
+-- sender crashed, so that role cannot send or receive in it. Here C is
+-- sent a message inside C's own crash branch.
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        I -> L : String
+        I -> C : Bool
+      end
+    I -> L : String
+  end
+
+  fn main(c : Cap(IO)) do () end
+end

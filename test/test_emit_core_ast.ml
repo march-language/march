@@ -453,11 +453,54 @@ let test_case_matches_fixture case () =
     (normalize_for_compare expected) (normalize_for_compare actual);
   if case.fixture_name = "t01_literals.expected.json" then assert_v3 actual
 
+(* ------------------------------------------------------------------ *)
+(* Verdict parity with --check                                          *)
+(* ------------------------------------------------------------------ *)
+
+(* The emitted "verdict" must be --check's own accept/reject decision:
+   march-lean's conformance harness treats any disagreement as
+   MARCH_SELF_INCONSISTENT.  Two rejection classes used to be missed because
+   they are decided outside the front-end error set the verdict was computed
+   from: the post-typecheck contract stage (`cap no_alloc`, lowered on
+   demand) and the typecheck-side capability ceiling (enabled only for
+   --check/--check-json).  The typecheck-only reject and the plain accept
+   guard the reverse regression; t55 is an accept that DOES carry a contract
+   obligation, so the contract stage runs and must not over-reject. *)
+let verdict_cases = [
+  (* corpus file, expected verdict *)
+  ("specs/lang/types/reject/t43_cap_no_alloc_tuple.march", "reject");
+  ("specs/lang/types/reject/t180_ceiling_stdlib_mediated_under_check.march", "reject");
+  ("specs/lang/types/reject/t182_ceiling_module_let_stdlib_mediated.march", "reject");
+  ("specs/lang/types/reject/t01_int_vs_string.march", "reject");
+  ("specs/lang/types/accept/t55_cap_no_alloc_arithmetic.march", "accept");
+  ("specs/lang/types/accept/t01_literals.march", "accept");
+]
+
+let run_check rel_corpus_path =
+  let q = Filename.quote in
+  Sys.command
+    (Printf.sprintf "cd %s && %s --check %s > /dev/null 2>&1"
+       (q project_root) (q march_abs) (q rel_corpus_path))
+
+let test_verdict_matches_check (rel, expected) () =
+  let (json, emit_exit) = run_emit_core_ast rel in
+  assert_contains json (Printf.sprintf "\"verdict\":\"%s\"" expected);
+  let expected_exit = if expected = "accept" then 0 else 1 in
+  Alcotest.(check int) (rel ^ ": --emit-core-ast exit") expected_exit emit_exit;
+  Alcotest.(check int) (rel ^ ": --check exit agrees") expected_exit (run_check rel)
+
 let suite =
   List.map
     (fun case -> Alcotest.test_case case.label `Quick (test_case_matches_fixture case))
     cases
   @ [ Alcotest.test_case
         "module_caps present + format_version 3 (A3)" `Quick test_module_caps_and_v3 ]
+  @ List.map
+      (fun ((rel, expected) as c) ->
+         Alcotest.test_case
+           (Printf.sprintf "verdict %s matches --check (%s)" expected
+              (Filename.basename rel))
+           `Quick (test_verdict_matches_check c))
+      verdict_cases
 
 let () = Alcotest.run "march-emit-core-ast-golden" [ ("emit_core_ast", suite) ]

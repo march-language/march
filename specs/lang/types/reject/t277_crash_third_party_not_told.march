@@ -1,0 +1,24 @@
+-- EXPECT-ERROR: cannot tell whether `C` crashed
+-- Crash branches, rule 4 (2026-09-20): a role that takes part in both the
+-- normal continuation and the crash branch must be told which one it is in
+-- by the detector. Here L expects a message from I on the normal path but
+-- the crash branch starts with L SENDING to I: L cannot know whether to
+-- wait or to send, and its two projections do not merge.
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        L -> I : Bool
+      end
+    I -> L : String
+    L -> I : Bool
+  end
+
+  fn main(c : Cap(IO)) do () end
+end

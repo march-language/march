@@ -11,12 +11,69 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+- **Vault writes to unrelated keys no longer serialise on one lock per table.** The
+  lock is now sharded by key, the way ETS partitions a table. Four threads writing
+  their own keys went from 11.8x-13.1x the time of a single thread to 2.5x-3.2x,
+  where serialising would be 4x; reads are unchanged. Two consequences: a table costs
+  about 18 KB more, and `Vault.size`/`Vault.keys` walk shard by shard, so their result
+  is a recent count rather than a single instant's snapshot of the whole table.
+### Added
+- **A choreography role hosted in an actor takes its crash branch.** A protocol
+  that declares `may crash C` behaved one way in a role run from callbacks (the
+  crash branch, the session continuing) and another in a role hosted in an actor
+  (cancelled, as before crash branches existed). `resume` now returns a
+  `Crashed_<Msg>` event beside the `Got_<Msg>` ones, carrying the crashed role,
+  the cause and the crash branch's first state, so the actor takes the branch
+  from the delivery handler it already has. `host_<Role>`,
+  `offer_hosted_<Role>` and `cluster_hosted_<Role>` need no new callback. See
+  `docs/choreography.md`, "When a role may crash".
+- **A signature may declare an abstract refinement** — a predicate it is
+  polymorphic in, Liquid Haskell style: `fn filt(xs : List(a), keep : ({x : a |
+  true}) -> {Bool | _ == p(x)}) : List({a | p(_)})`. This release checks such a
+  signature's well-formedness (applied to the binder in scope, one type per
+  name, no nesting, and a warning when nothing consumes it) and stops reporting
+  the declared name as unknown predicate vocabulary. It does not yet prove
+  anything with it: `List.filter`'s result still carries no refinement, which
+  is the next phase. See `specs/2026-09-20-abstract-refinements-design.md`.
+
+- **`take_closed` on every `@[endpoints]` role module.** A session that has finished or
+  been cancelled leaves a linear `Closed_<Role>` value that the actor hosting it still has
+  to consume. The role module now generates `take_closed`, which takes that role's own
+  `Parked_<Role>` and returns `()`, and panics if the endpoint has not finished. The guide
+  previously told readers to write a one-line function with a `linear` parameter instead;
+  being generic, it would drop any linear value, including a live endpoint.
+- **Crash branches in choreographies.** A protocol can declare the roles that `may crash`,
+  and a receive from such a role carries `or crash do ... end` (or a `crash` branch of the
+  `choose` it heads): what the receiver does if that role crashes before sending. The
+  receiver's generated `recv_<Msg>` takes a second callback with a live state, so the
+  conversation goes on without the crashed role instead of being cancelled; other roles are
+  told by the detector's messages, as for a `choose`. Six well-formedness rules are checked at
+  the protocol, `Session.Ops` gains `on_crash`, and the network runner takes the branch by
+  the same rule that decides a cancellation (the role is gone with nothing queued). A role
+  hosted in an actor does not take crash branches yet. See the choreography guide, "When a
+  role may crash".
+
 ### Fixed
 - **A scheduler thread that cannot be created is reported instead of crashing the program at
   exit.** Under a process/thread limit (a container `pids` limit, `ulimit -u`) a compiled
   program could run to completion and then die with SIGSEGV while joining a thread that was
   never started. It now prints how many scheduler threads it is running on and carries on
   with those.
+- **A false postcondition could be proved when a `match` reused a name.**
+  Structural induction trusted a variable as a component of the matched value
+  by its name alone, so `Cons(_, t)` in a `match` on a *different* list was
+  treated as a smaller piece of the first one: `copy(xs, ys) : {List(Int) |
+  len(_) == len(xs)}` proved while `copy([1], [5, 6, 7])` returns three
+  elements. The same hole let a `@[measure]` that recurses forever pass the
+  termination check. A name is now trusted only when every binding of it is a
+  structural one.
+
+- **`march --emit-core-ast` now reports the same verdict as `march --check`.** A program
+  rejected only by an allocation contract (`cap no_alloc`) or by the stdlib-mediated
+  capability ceiling was emitted as `"verdict":"accept"` with exit 0, and without the
+  diagnostic, while `--check` rejected it. Both are now folded into the JSON's verdict and
+  `"diagnostics"`.
 - **Two mutually tail-recursive functions passing a string or list along no longer read
   freed memory.** The compiled mutual-tail-call loop released a forwarded argument on the
   back edge, one iteration before its next read (`refused: no-y; refused: no-y` for an

@@ -84,7 +84,8 @@ mod StreamActor do
         close: fn ep -> print_line("close " ++ int_to_string(ep)),
         fail: fn (_ep, why) -> panic(why),
         on_cancel: fn (ep, _h) -> ep,
-        leave: fn (ep, why) -> print_line("leave " ++ int_to_string(ep) ++ ": " ++ why)
+        leave: fn (ep, why) -> print_line("leave " ++ int_to_string(ep) ++ ": " ++ why),
+        on_crash: fn (ep, _r, _h) -> ep
       }
     }
   end

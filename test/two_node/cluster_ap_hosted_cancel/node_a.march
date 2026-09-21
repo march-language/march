@@ -23,13 +23,6 @@ mod ClusterApHostedCancelA do
     Server -> Client : Int
   end
 
-  -- A finished or cancelled session's parked value is `Closed_Server`, which
-  -- nothing resumes: drop it so its slot can be vacated.
-  pfn retire(linear p : a) : () do
-    let _ = p
-    ()
-  end
-
   actor ServerActor do
     state { done : Int, cancelled : Int, counts : Map(String, Int),
             sessions : LinearMap(String, Echo_Server.Parked_Server) }
@@ -39,7 +32,7 @@ mod ClusterApHostedCancelA do
       match LinearMap.put(state.sessions, sid, parked) do
         (None, m) -> { state with sessions: m }
         (Some(old), m) ->
-          retire(old)
+          Echo_Server.take_closed(Echo_Server.cancel(old))
           panic("Start: session " ++ sid ++ " is already hosted")
       end
     end
@@ -58,7 +51,7 @@ mod ClusterApHostedCancelA do
             Got_Msg_Client_Server_2(n, st) ->
               println("Server: got " ++ int_to_string(n) ++ " (message " ++ int_to_string(k) ++ " of its session)")
               let st2 = Echo_Server.send_Msg_Server_Client_2(s, st, n * 10)
-              retire(Echo_Server.finish(s, st2))
+              Echo_Server.take_closed(Echo_Server.finish(s, st2))
               { state with done: state.done + 1, counts: Map.remove(state.counts, sid, Map.str_cmp),
                            sessions: LinearMap.vacate(slot) }
           end
@@ -69,7 +62,7 @@ mod ClusterApHostedCancelA do
         (None, m) -> { state with sessions: m }
         (Some(parked), m) ->
           println("Server: session cancelled, " ++ Echo_Msg.role_name(role) ++ " gone")
-          retire(Echo_Server.cancel(parked))
+          Echo_Server.take_closed(Echo_Server.cancel(parked))
           { state with cancelled: state.cancelled + 1,
                        counts: Map.remove(state.counts, sid, Map.str_cmp), sessions: m }
       end
