@@ -177,7 +177,15 @@ mod Vault do
     vault_push_capped(table, key, value, max)
   end
 
-  doc "Return the number of live (non-expired) entries in the table."
+  doc """
+  Return the number of live (non-expired) entries in the table.
+
+  Counted shard by shard rather than under one table-wide lock, so the result
+  is not a single instant's snapshot: an entry added to an already-counted
+  shard while a later one is being counted is not included. Concurrent writers
+  could always change the answer, so treat it as a recent count, not a
+  guarantee.
+  """
   fn size(table) : Int do
     vault_size(table)
   end
@@ -220,7 +228,9 @@ mod Vault do
       Vault.set(t, "b", 2)
       List.length(Vault.keys(t))  -- 2
 
-  Cost: O(n) where n is the number of entries in the table.
+  Cost: O(n) where n is the number of entries in the table. Collected shard by
+  shard, so — like `size` — the list is not a single instant's snapshot of the
+  whole table, and the key order is unspecified.
   """
   fn keys(table) do
     vault_keys(table)

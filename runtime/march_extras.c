@@ -849,11 +849,63 @@ static inline void vault_wr_unlock(vault_rwlock_t *l) {
     pthread_mutex_unlock(&l->wmutex);
 }
 
+/* WRITE PARTITIONING (item 2 of
+ * specs/todos/2026-08-12-vault-toward-ets-semantics.md, done 2026-09-20).
+ *
+ * One [vault_rwlock_t] per table meant two writers to UNRELATED keys
+ * serialised -- and worse than serialised: every [vault_wr_lock] also stores
+ * the writer flag and drains all VAULT_RD_STRIPES reader counters, so N
+ * writers bounced those cache lines against each other on top of queueing on
+ * the one mutex. Measured by test/test_vault_write_scale.c on a 14-core box,
+ * 4 threads each rewriting their OWN key: 148ms against a 13ms solo run, a
+ * ratio of 11.4x where plain serialisation would be 4x.
+ *
+ * Fix: shard the lock by BUCKET index, the way Elixir's ETS partitions by
+ * key hash. Every keyed operation touches exactly one bucket, so it needs
+ * only that bucket's shard: [vault_hash] already returns the bucket index,
+ * and the shard is its low bits. Buckets divide evenly among shards, so each
+ * shard owns VAULT_BUCKETS / VAULT_WR_SHARDS of them.
+ *
+ * What this does NOT change: the reader side. A reader takes its bucket's
+ * shard lock and hashes to a stripe within it exactly as before, so the
+ * striped read scaling item 1 shipped is untouched (its own harness,
+ * test_vault_distinct_keys_scale.c, still measures it).
+ *
+ * The cost is one snapshot property: [march_vault_size] and
+ * [march_vault_keys] walk shard by shard, taking one shard's read lock at a
+ * time, so their result is no longer a single instant's view of the whole
+ * table -- a key inserted into an already-visited shard while a later shard
+ * is being walked is missed. ETS makes the same trade for a partitioned
+ * table, and neither operation promised atomicity before: both recount live
+ * entries as they walk and skip expired ones, so a concurrent writer could
+ * always change the answer. Holding all VAULT_WR_SHARDS read locks at once
+ * would restore it, at the price of blocking every writer in the table for
+ * the length of an O(n) walk. */
+#define VAULT_WR_SHARDS 16 /* power of two */
+_Static_assert((VAULT_WR_SHARDS & (VAULT_WR_SHARDS - 1)) == 0,
+               "VAULT_WR_SHARDS must be a power of two (shard = bucket & mask)");
+_Static_assert(VAULT_BUCKETS % VAULT_WR_SHARDS == 0,
+               "buckets must divide evenly among write shards");
+
 typedef struct {
-    vault_rwlock_t rwlock;
-    vault_node     *buckets[VAULT_BUCKETS];
-    int64_t         count;
+    vault_rwlock_t lock;
+    /* Entries in this shard's buckets, maintained under [lock]'s write side.
+     * Its own cache line: a shard's count must not share one with another
+     * shard's lock state, or the false sharing would undo the partitioning.
+     * Write-only bookkeeping today -- [march_vault_size] recounts live
+     * entries instead, since this counter cannot know what has expired. */
+    _Alignas(64) int64_t count;
+} vault_shard;
+
+typedef struct {
+    vault_shard  shards[VAULT_WR_SHARDS];
+    vault_node  *buckets[VAULT_BUCKETS];
 } vault_data;
+
+/* The shard owning [bucket] (a [vault_hash] result). */
+static inline vault_shard *vault_shard_for(vault_data *vd, uint32_t bucket) {
+    return &vd->shards[bucket & (VAULT_WR_SHARDS - 1)];
+}
 
 /* Named vault registry */
 typedef struct vault_reg_entry {
@@ -969,7 +1021,8 @@ static void *vault_new_handle(void) {
     /* calloc already zeroed rd[*].readers and writer; wmutex still needs a
      * real pthread_mutex_init (a zeroed pthread_mutex_t is not portably
      * equivalent to PTHREAD_MUTEX_INITIALIZER). */
-    pthread_mutex_init(&vd->rwlock.wmutex, NULL);
+    for (int i = 0; i < VAULT_WR_SHARDS; i++)
+        pthread_mutex_init(&vd->shards[i].lock.wmutex, NULL);
     /* Wrap in a March heap object: [rc=1][tag=0][pad=0][ptr_to_vd] */
     void *handle = march_alloc(16 + 8);
     *(void **)((char *)handle + 16) = vd;
@@ -1051,7 +1104,7 @@ void *march_vault_set(void *handle, void *key_val, void *value) {
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     int64_t now = vault_now_ms();
-    vault_wr_lock(&vd->rwlock);
+    vault_wr_lock(&vault_shard_for(vd, h)->lock);
     vault_node *n = vd->buckets[h];
     while (n) {
         if (strcmp(n->key, key) == 0) {
@@ -1061,7 +1114,7 @@ void *march_vault_set(void *handle, void *key_val, void *value) {
             n->value      = value;
             n->expires_ms = 0;
             (void)now;
-            vault_wr_unlock(&vd->rwlock);
+            vault_wr_unlock(&vault_shard_for(vd, h)->lock);
             free(key);
             return march_alloc(16); /* Unit */
         }
@@ -1075,8 +1128,8 @@ void *march_vault_set(void *handle, void *key_val, void *value) {
     nn->value      = value;
     nn->next       = vd->buckets[h];
     vd->buckets[h] = nn;
-    vd->count++;
-    vault_wr_unlock(&vd->rwlock);
+    vault_shard_for(vd, h)->count++;
+    vault_wr_unlock(&vault_shard_for(vd, h)->lock);
     return march_alloc(16); /* Unit */
 }
 
@@ -1087,7 +1140,7 @@ void *march_vault_set_ttl(void *handle, void *key_val, void *value, int64_t ttl_
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     int64_t expires = vault_now_ms() + ttl_secs * 1000LL;
-    vault_wr_lock(&vd->rwlock);
+    vault_wr_lock(&vault_shard_for(vd, h)->lock);
     vault_node *n = vd->buckets[h];
     while (n) {
         if (strcmp(n->key, key) == 0) {
@@ -1095,7 +1148,7 @@ void *march_vault_set_ttl(void *handle, void *key_val, void *value, int64_t ttl_
             march_incrc(value);
             n->value      = value;
             n->expires_ms = expires;
-            vault_wr_unlock(&vd->rwlock);
+            vault_wr_unlock(&vault_shard_for(vd, h)->lock);
             free(key);
             return march_alloc(16);
         }
@@ -1108,8 +1161,8 @@ void *march_vault_set_ttl(void *handle, void *key_val, void *value, int64_t ttl_
     nn->value      = value;
     nn->next       = vd->buckets[h];
     vd->buckets[h] = nn;
-    vd->count++;
-    vault_wr_unlock(&vd->rwlock);
+    vault_shard_for(vd, h)->count++;
+    vault_wr_unlock(&vault_shard_for(vd, h)->lock);
     return march_alloc(16);
 }
 
@@ -1124,13 +1177,13 @@ int64_t march_vault_put_new(void *handle, void *key_val, void *value, int64_t tt
     uint32_t h = vault_hash(key);
     int64_t now = vault_now_ms();
     int64_t expires = (ttl_secs > 0) ? (now + ttl_secs * 1000LL) : 0;
-    vault_wr_lock(&vd->rwlock);
+    vault_wr_lock(&vault_shard_for(vd, h)->lock);
     vault_node *n = vd->buckets[h];
     while (n) {
         if (strcmp(n->key, key) == 0) {
             if (n->expires_ms == 0 || now <= n->expires_ms) {
                 /* live entry already present — do not overwrite */
-                vault_wr_unlock(&vd->rwlock);
+                vault_wr_unlock(&vault_shard_for(vd, h)->lock);
                 free(key);
                 return 0;
             }
@@ -1139,7 +1192,7 @@ int64_t march_vault_put_new(void *handle, void *key_val, void *value, int64_t tt
             march_incrc(value);
             n->value      = value;
             n->expires_ms = expires;
-            vault_wr_unlock(&vd->rwlock);
+            vault_wr_unlock(&vault_shard_for(vd, h)->lock);
             free(key);
             return 1;
         }
@@ -1153,8 +1206,8 @@ int64_t march_vault_put_new(void *handle, void *key_val, void *value, int64_t tt
     nn->value      = value;
     nn->next       = vd->buckets[h];
     vd->buckets[h] = nn;
-    vd->count++;
-    vault_wr_unlock(&vd->rwlock);
+    vault_shard_for(vd, h)->count++;
+    vault_wr_unlock(&vault_shard_for(vd, h)->lock);
     return 1;
 }
 
@@ -1169,7 +1222,7 @@ int64_t march_vault_incr(void *handle, void *key_val, int64_t delta) {
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     int64_t now = vault_now_ms();
-    vault_wr_lock(&vd->rwlock);
+    vault_wr_lock(&vault_shard_for(vd, h)->lock);
     vault_node *n = vd->buckets[h];
     while (n) {
         if (strcmp(n->key, key) == 0) {
@@ -1180,7 +1233,7 @@ int64_t march_vault_incr(void *handle, void *key_val, int64_t delta) {
             int64_t nv = cur + delta;
             n->value = (void *)(((uint64_t)nv << 1) | 1u);
             if (!live) n->expires_ms = 0;
-            vault_wr_unlock(&vd->rwlock);
+            vault_wr_unlock(&vault_shard_for(vd, h)->lock);
             free(key);
             return nv;
         }
@@ -1194,8 +1247,8 @@ int64_t march_vault_incr(void *handle, void *key_val, int64_t delta) {
     nn->value      = (void *)(((uint64_t)nv << 1) | 1u);
     nn->next       = vd->buckets[h];
     vd->buckets[h] = nn;
-    vd->count++;
-    vault_wr_unlock(&vd->rwlock);
+    vault_shard_for(vd, h)->count++;
+    vault_wr_unlock(&vault_shard_for(vd, h)->lock);
     return nv;
 }
 
@@ -1210,7 +1263,7 @@ void *march_vault_push_capped(void *handle, void *key_val, void *value, int64_t 
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     int64_t now = vault_now_ms();
-    vault_wr_lock(&vd->rwlock);
+    vault_wr_lock(&vault_shard_for(vd, h)->lock);
 
     vault_node *match = NULL;
     for (vault_node *p = vd->buckets[h]; p; p = p->next) {
@@ -1257,7 +1310,7 @@ void *march_vault_push_capped(void *handle, void *key_val, void *value, int64_t 
         march_decrc(match->value);
         match->value = list;
         if (!live) match->expires_ms = 0;
-        vault_wr_unlock(&vd->rwlock);
+        vault_wr_unlock(&vault_shard_for(vd, h)->lock);
         free(key);
     } else {
         vault_node *nn = malloc(sizeof(vault_node));
@@ -1266,8 +1319,8 @@ void *march_vault_push_capped(void *handle, void *key_val, void *value, int64_t 
         nn->value      = list;
         nn->next       = vd->buckets[h];
         vd->buckets[h] = nn;
-        vd->count++;
-        vault_wr_unlock(&vd->rwlock);
+        vault_shard_for(vd, h)->count++;
+        vault_wr_unlock(&vault_shard_for(vd, h)->lock);
     }
     return march_alloc(16); /* Unit */
 }
@@ -1277,8 +1330,10 @@ void *march_vault_push_capped(void *handle, void *key_val, void *value, int64_t 
 void *march_vault_get(void *handle, void *key_val) {
     vault_data *vd = vault_get_data(handle);
     char *key = vault_key_cstr(key_val);
+    uint32_t h = vault_hash(key);
     int64_t now = vault_now_ms();
-    unsigned stripe = vault_rd_lock(&vd->rwlock);
+    /* Only this key's bucket is read, so only its shard needs locking. */
+    unsigned stripe = vault_rd_lock(&vault_shard_for(vd, h)->lock);
     vault_node *n = vault_find(vd, key, now);
     void *result;
     if (n) {
@@ -1291,7 +1346,7 @@ void *march_vault_get(void *handle, void *key_val) {
     } else {
         result = make_none();
     }
-    vault_rd_unlock(&vd->rwlock, stripe);
+    vault_rd_unlock(&vault_shard_for(vd, h)->lock, stripe);
     free(key);
     return result;
 }
@@ -1302,7 +1357,7 @@ void *march_vault_drop(void *handle, void *key_val) {
     vault_data *vd = vault_get_data(handle);
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
-    vault_wr_lock(&vd->rwlock);
+    vault_wr_lock(&vault_shard_for(vd, h)->lock);
     vault_node **pp = &vd->buckets[h];
     while (*pp) {
         if (strcmp((*pp)->key, key) == 0) {
@@ -1311,12 +1366,12 @@ void *march_vault_drop(void *handle, void *key_val) {
             march_decrc(dead->value);
             free(dead->key);
             free(dead);
-            vd->count--;
+            vault_shard_for(vd, h)->count--;
             break;
         }
         pp = &(*pp)->next;
     }
-    vault_wr_unlock(&vd->rwlock);
+    vault_wr_unlock(&vault_shard_for(vd, h)->lock);
     free(key);
     return march_alloc(16);
 }
@@ -1385,17 +1440,21 @@ void *march_vault_update(void *handle, void *key_val, void *f) {
 int64_t march_vault_size(void *handle) {
     vault_data *vd = vault_get_data(handle);
     int64_t now = vault_now_ms();
-    unsigned stripe = vault_rd_lock(&vd->rwlock);
-    /* Count live entries */
+    /* Count live entries, one shard at a time: a shard's buckets are those
+       whose index carries its number in the low bits. Not a whole-table
+       snapshot -- see the write-partitioning comment on [vault_data]. */
     int64_t count = 0;
-    for (int i = 0; i < VAULT_BUCKETS; i++) {
-        vault_node *n = vd->buckets[i];
-        while (n) {
-            if (n->expires_ms == 0 || now <= n->expires_ms) count++;
-            n = n->next;
+    for (unsigned sh = 0; sh < VAULT_WR_SHARDS; sh++) {
+        unsigned stripe = vault_rd_lock(&vd->shards[sh].lock);
+        for (unsigned i = sh; i < VAULT_BUCKETS; i += VAULT_WR_SHARDS) {
+            vault_node *n = vd->buckets[i];
+            while (n) {
+                if (n->expires_ms == 0 || now <= n->expires_ms) count++;
+                n = n->next;
+            }
         }
+        vault_rd_unlock(&vd->shards[sh].lock, stripe);
     }
-    vault_rd_unlock(&vd->rwlock, stripe);
     return count;
 }
 
@@ -1404,10 +1463,16 @@ int64_t march_vault_size(void *handle) {
 void *march_vault_keys(void *handle) {
     vault_data *vd = vault_get_data(handle);
     int64_t now = vault_now_ms();
-    unsigned stripe = vault_rd_lock(&vd->rwlock);
-    /* Build a March List of key strings */
+    /* Build a March List of key strings, one shard at a time (same
+       non-snapshot caveat as [march_vault_size]). The bucket walk stays
+       descending so a single-shard build keeps its previous order; across
+       shards the order is unspecified, as it always was -- Vault is a hash
+       table and no caller may rely on key order. */
     void *list = march_alloc(16); /* Nil */
-    for (int i = VAULT_BUCKETS - 1; i >= 0; i--) {
+    for (unsigned sh = 0; sh < VAULT_WR_SHARDS; sh++) {
+      unsigned stripe = vault_rd_lock(&vd->shards[sh].lock);
+      for (int i = (int)(VAULT_BUCKETS - VAULT_WR_SHARDS + sh); i >= 0;
+           i -= VAULT_WR_SHARDS) {
         vault_node *n = vd->buckets[i];
         while (n) {
             if (n->expires_ms == 0 || now <= n->expires_ms) {
@@ -1421,8 +1486,9 @@ void *march_vault_keys(void *handle) {
             }
             n = n->next;
         }
+      }
+      vault_rd_unlock(&vd->shards[sh].lock, stripe);
     }
-    vault_rd_unlock(&vd->rwlock, stripe);
     return list;
 }
 
