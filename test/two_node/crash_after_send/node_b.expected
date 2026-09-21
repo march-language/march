@@ -1,0 +1,5 @@
+node-b: up
+I: got Trigger
+I: got Read(disk 42%)
+I: got Report(true)
+I: closed

@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: names a role that is not in the protocol
+-- Crash branches, rule 6 (2026-09-20): `may crash` names roles of the
+-- protocol. `D` takes part in no step.
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Logging do
+    may crash D
+    L -> I : Int
+    I -> L : String
+  end
+
+  fn main(c : Cap(IO)) do () end
+end

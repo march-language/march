@@ -1,0 +1,19 @@
+-- round 1: C is alive
+L sends Trigger
+C sends Read
+I got Trigger
+I got Read(disk 42%)
+L got Read(disk 42%)
+close 1
+I got Report(true)
+close 2
+C got Report(true)
+close 3
+-- round 2: C has crashed
+L sends Trigger
+I got Trigger
+transport: 2 waits on gone role 3: crash branch
+I: role 3 crashed: connection lost
+close 2
+L got Fatal(C is gone)
+close 1

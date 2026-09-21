@@ -520,7 +520,13 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
                              (steps_text (indent ^ "    ") inner)) branches))
                    indent
                | Ast.ProtoStop _ ->
-                 Printf.sprintf "%s-- stop (loop exit)\n" indent)
+                 Printf.sprintf "%s-- stop (loop exit)\n" indent
+               | Ast.ProtoMayCrash (roles, _) ->
+                 Printf.sprintf "%s-- may crash: %s\n" indent
+                   (String.concat ", " (List.map (fun r -> r.Ast.txt) roles))
+               | Ast.ProtoCrashOr (inner, crash, _) ->
+                 steps_text indent [inner]
+                 ^ Printf.sprintf "%s-- or crash:\n%s" indent (steps_text (indent ^ "  ") crash))
              ss)
       in
       let body =

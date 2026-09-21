@@ -569,6 +569,21 @@ and solve_nat_eq env ~span ~reason op a b n =
    §2  Surface-type → internal-type conversion
    ================================================================= *)
 
+(** Whether [steps] contain `may crash` or a crash branch anywhere.  Crash
+    branches are projected only by the `@[endpoints]` generator
+    (lib/desugar/desugar_endpoints.ml); the `Chan(Role, Proto)` API refuses
+    such a protocol rather than run a projection that ignores them
+    (2026-09-20 crash branches). *)
+let rec has_crash_branches (steps : Ast.protocol_step list) : bool =
+  List.exists
+    (function
+      | Ast.ProtoMayCrash _ | Ast.ProtoCrashOr _ -> true
+      | Ast.ProtoLoop inner -> has_crash_branches inner
+      | Ast.ProtoChoice (_, brs) ->
+        List.exists (fun (l, arm) -> l.Ast.txt = "crash" || has_crash_branches arm) brs
+      | Ast.ProtoMsg _ | Ast.ProtoStop _ -> false)
+    steps
+
 (** True when [name] denotes a variant/sum type in scope — i.e. some
     constructor has it as its parent type ([ci_type], matched bare or as a
     [.name] suffix since [ci_type] may be module-qualified).
@@ -631,6 +646,13 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
         | None ->
           Err.error env.errors ~span:proto.span
             (Printf.sprintf "I don't know a protocol called `%s`." proto.txt);
+          TChan (ref SError)
+        | Some pi when has_crash_branches pi.pi_def.Ast.proto_steps ->
+          Err.error env.errors ~span:proto.span
+            (Printf.sprintf
+               "Protocol `%s` has crash branches, and those are only supported \
+                with `@[endpoints]`: `Chan(%s, %s)` cannot run them."
+               proto.txt role.txt proto.txt);
           TChan (ref SError)
         | Some pi ->
           (match List.assoc_opt role.txt pi.pi_projections with
@@ -821,6 +843,13 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
      | None ->
        Err.error env.errors ~span:proto.span
          (Printf.sprintf "I don't know a protocol called `%s`." proto.txt);
+       TChan (ref SError)
+     | Some pi when has_crash_branches pi.pi_def.Ast.proto_steps ->
+       Err.error env.errors ~span:proto.span
+         (Printf.sprintf
+            "Protocol `%s` has crash branches, and those are only supported \
+             with `@[endpoints]`: the channel API cannot run them."
+            proto.txt);
        TChan (ref SError)
      | Some pi ->
        (match List.assoc_opt role.txt pi.pi_projections with

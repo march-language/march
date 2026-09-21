@@ -456,7 +456,7 @@ let replayed = bad "sending twice on one state is a linearity error (replay)" "i
 
 let abandoned = bad "registering and never driving the session is a linearity error (abandon)" "was never used" (wrap (stream ^ {|
   fn go(c : Cap(IO)) do
-    let s = Session.attach(c, { register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _f, _h) -> e, close: fn _e -> (), fail: fn (_e, w) -> panic(w), on_cancel: fn (e, _h) -> e, leave: fn (_e, _w) -> () })
+    let s = Session.attach(c, { register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _f, _h) -> e, close: fn _e -> (), fail: fn (_e, w) -> panic(w), on_cancel: fn (e, _h) -> e, leave: fn (_e, _w) -> (), on_crash: fn (e, _r, _h) -> e })
     let st = Stream_Prod.register(s, 0)
     ()
   end
@@ -745,6 +745,244 @@ end
       Alcotest.(check bool) ("no unreachable-arm warning (output: " ^ out ^ ")") false
         (contains_text out "never be reached"))
 
+(* ── crash branches (design Part B, 2026-09-20) ───────────────────────────
+   The ECOOP logging protocol: C may crash, I detects it at `C -> I`, L is
+   told by I's message.  Shape: the detector's receive takes the crash
+   callback, the third party offers over the detector's two messages, the
+   crashed role's module has no trace of the branch, and every role module
+   carries `Crashed_<Role>`.  Then the six well-formedness rules, and the
+   `choose` form of a crash branch. *)
+let logging = {|
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+    L -> I : Bool
+    I -> C : Bool
+  end
+|}
+
+let crash_shape =
+  Alcotest.test_case "Logging: the detector's recv takes a crash callback; the third party offers; the crashed role has no branch" `Quick
+    (fun () ->
+       let mods = generated (wrap logging) in
+       Alcotest.(check (list string)) "modules"
+         [ "Logging_Msg"; "Logging_L"; "Logging_I"; "Logging_C"; "Logging_Run" ] (List.map fst mods);
+       List.iter
+         (fun (m, f, expect) -> Alcotest.(check bool) (m ^ "." ^ f) expect (has_fn mods m f))
+         [ ("Logging_I", "recv_Msg_C_I_1", true);
+           ("Logging_I", "recv_Msg_C_I_1_or", false);          (* no cancel form: the sender may crash *)
+           ("Logging_I", "send_Msg_I_L_1", true);              (* the crash branch's send *)
+           ("Logging_I", "send_Msg_I_L_2", true);
+           ("Logging_I", "leave_recv_Msg_C_I_1", true);
+           ("Logging_L", "offer_Msg_I_L_2_Msg_I_L_1", true);   (* told apart by I's messages *)
+           ("Logging_L", "recv_Msg_I_L_2", false);
+           ("Logging_C", "send_Msg_C_I_1", true);
+           ("Logging_C", "recv_Msg_I_C_1", true);
+           ("Logging_C", "recv_Msg_I_L_1", false) ];
+       (* the detector's receive: (s, st, k, on_crash), with `Crashed_I` *)
+       let m = parse_and_desugar (wrap logging) in
+       let arity =
+         List.find_map
+           (function
+             | DMod (name, _, decls, _) when name.txt = "Logging_I" ->
+               List.find_map
+                 (function
+                   | DFn (fd, _) when fd.fn_name.txt = "recv_Msg_C_I_1" ->
+                     Some (List.length (List.hd fd.fn_clauses).fc_params)
+                   | _ -> None)
+                 decls
+             | _ -> None)
+           m.mod_decls
+       in
+       Alcotest.(check (option int)) "recv_Msg_C_I_1 arity" (Some 4) arity;
+       let has_type mname tname =
+         List.exists
+           (function
+             | DMod (name, _, decls, _) when name.txt = mname ->
+               List.exists (function DType (_, t, _, _, _) | DAlwaysLinearType (_, t, _, _, _) -> t.txt = tname | _ -> false) decls
+             | _ -> false)
+           m.mod_decls
+       in
+       Alcotest.(check bool) "Logging_I.Crashed_I" true (has_type "Logging_I" "Crashed_I");
+       Alcotest.(check bool) "Logging_I.S_recv_Msg_C_I_1" true (has_type "Logging_I" "S_recv_Msg_C_I_1");
+       Alcotest.(check bool) "Logging_I.S_send_Msg_I_L_1 (the crash branch's first state)" true
+         (has_type "Logging_I" "S_send_Msg_I_L_1");
+       Alcotest.(check bool) "Logging_L.S_offer_Msg_I_L_2_Msg_I_L_1" true (has_type "Logging_L" "S_offer_Msg_I_L_2_Msg_I_L_1"))
+
+let crash_roles_ok = ok "all three roles of Logging typecheck against the generated API" (wrap (logging ^ {|
+  pfn role_l(s : Cap(Session.Live), st : Logging_L.S_send_Msg_L_I_1) : Logging_L.Yield do
+    let st1 = Logging_L.send_Msg_L_I_1(s, st, 1)
+    Logging_L.offer_Msg_I_L_2_Msg_I_L_1(s, st1,
+      fn (_read, st2) -> Logging_L.close(s, Logging_L.send_Msg_L_I_2(s, st2, true)),
+      fn (_fatal, st2) -> Logging_L.close(s, st2))
+  end
+  pfn role_i(s : Cap(Session.Live), st : Logging_I.S_recv_Msg_L_I_1) : Logging_I.Yield do
+    Logging_I.recv_Msg_L_I_1(s, st, fn (_t, st1) ->
+      Logging_I.recv_Msg_C_I_1(s, st1,
+        fn (read, st2) ->
+          Logging_I.recv_Msg_L_I_2(s, Logging_I.send_Msg_I_L_2(s, st2, read), fn (r, st4) ->
+            Logging_I.close(s, Logging_I.send_Msg_I_C_1(s, st4, r))),
+        fn (crashed, st2) ->
+          Logging_I.close(s, Logging_I.send_Msg_I_L_1(s, st2, crashed.cause ++ int_to_string(crashed.role)))))
+  end
+  pfn role_c(s : Cap(Session.Live), st : Logging_C.S_send_Msg_C_I_1) : Logging_C.Yield do
+    Logging_C.recv_Msg_I_C_1(s, Logging_C.send_Msg_C_I_1(s, st, "x"), fn (_r, st2) -> Logging_C.close(s, st2))
+  end
+|}))
+
+(* The crash callback's state is the crash branch's, not the normal one's:
+   sending the normal `Read` to L from it is a type error. *)
+let crash_state_is_the_branch = bad "the crash callback cannot take the normal continuation's step"
+    "expected `S_send_Msg_I_L_2` but got `S_send_Msg_I_L_1`" (wrap (logging ^ {|
+  pfn role_i(s : Cap(Session.Live), st : Logging_I.S_recv_Msg_C_I_1) : Logging_I.Yield do
+    Logging_I.recv_Msg_C_I_1(s, st,
+      fn (read, st2) -> Logging_I.recv_Msg_L_I_2(s, Logging_I.send_Msg_I_L_2(s, st2, read), fn (r, st4) ->
+                          Logging_I.close(s, Logging_I.send_Msg_I_C_1(s, st4, r))),
+      fn (_crashed, st2) -> Logging_I.close(s, Logging_I.send_Msg_I_L_2(s, st2, "no")))
+  end
+|}))
+
+let crash_rule name needle proto = bad name needle (wrap proto)
+
+let crash_rule_1 = crash_rule "rule 1: a receive from a may-crash role needs a crash branch" "needs `or crash do ... end`" {|
+  @[endpoints]
+  protocol P do
+    may crash C
+    L -> I : Int
+    C -> I : String
+    I -> L : String
+  end
+|}
+
+let crash_rule_2 = crash_rule "rule 2: a crash branch is only for a may-crash sender" "is not declared `may crash`" {|
+  @[endpoints]
+  protocol P do
+    may crash C
+    L -> I : Int
+      or crash do
+        I -> C : Bool
+      end
+    C -> I : String
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+  end
+|}
+
+let crash_rule_3 = crash_rule "rule 3: the crashed role is not in its own crash branch" "has crashed, so it cannot take part" {|
+  @[endpoints]
+  protocol P do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        I -> C : Bool
+      end
+    I -> L : String
+  end
+|}
+
+let crash_rule_4 = crash_rule "rule 4: a third party is told by the detector in both continuations" "cannot tell whether `C` crashed" {|
+  @[endpoints]
+  protocol P do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        L -> I : Bool
+      end
+    I -> L : String
+    L -> I : Bool
+  end
+|}
+
+let crash_rule_5 = crash_rule "rule 5: a choose with a crash branch has one detector" "every other branch must begin with a message to the same role" {|
+  @[endpoints]
+  protocol P do
+    may crash C
+    L -> I : Int
+    choose by C:
+      read -> C -> I : String
+              I -> L : String
+      done -> C -> L : Bool
+      crash -> I -> L : String
+    end
+  end
+|}
+
+let crash_rule_6 = crash_rule "rule 6: may crash names a role of the protocol, once" "names a role that is not in the protocol" {|
+  @[endpoints]
+  protocol P do
+    may crash D
+    L -> I : Int
+    I -> L : String
+  end
+|}
+
+let crash_rule_6_twice = crash_rule "rule 6: may crash lists a role once" "lists `C` twice" {|
+  @[endpoints]
+  protocol P do
+    may crash C, C
+    C -> I : Int
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+  end
+|}
+
+(* A `choose by C` with a `crash` branch: I detects, `offer_read_done_crash`
+   takes one callback per label and the crash callback; L is told by I's
+   messages in every branch. *)
+let crash_choose = {|
+  @[endpoints]
+  protocol Q do
+    may crash C
+    L -> I : Int
+    choose by C:
+      read -> C -> I : String
+              I -> L : String
+      done -> C -> I : Bool
+              I -> L : Bool
+      crash -> I -> L : Int
+    end
+  end
+|}
+
+let crash_choose_shape =
+  Alcotest.test_case "a choose with a crash branch: the detector offers over the labels and crash" `Quick
+    (fun () ->
+       let mods = generated (wrap crash_choose) in
+       List.iter
+         (fun (m, f, expect) -> Alcotest.(check bool) (m ^ "." ^ f) expect (has_fn mods m f))
+         [ ("Q_I", "offer_read_done_crash", true);
+           ("Q_I", "offer_read_done", false);
+           ("Q_C", "choose_read", true); ("Q_C", "choose_done", true); ("Q_C", "choose_crash", false);
+           ("Q_L", "offer_Msg_I_L_1_Msg_I_L_2_Msg_I_L_3", true) ])
+
+let crash_choose_ok = ok "the detector of a choose with a crash branch, written against the generated API" (wrap (crash_choose ^ {|
+  pfn role_i(s : Cap(Session.Live), st : Q_I.S_recv_Msg_L_I_1) : Q_I.Yield do
+    Q_I.recv_Msg_L_I_1(s, st, fn (_t, st1) ->
+      Q_I.offer_read_done_crash(s, st1,
+        fn (r, st2) -> Q_I.close(s, Q_I.send_Msg_I_L_1(s, st2, r)),
+        fn (d, st2) -> Q_I.close(s, Q_I.send_Msg_I_L_2(s, st2, d)),
+        fn (crashed, st2) -> Q_I.close(s, Q_I.send_Msg_I_L_3(s, st2, crashed.role))))
+  end
+|}))
+
+(* The `Chan` API does not run crash branches: the typecheck-side projection
+   refuses such a protocol rather than project it without them. *)
+let crash_chan_refused = bad "Chan(Role, Proto) refuses a protocol with crash branches" "only supported with `@[endpoints]`" (wrap (logging ^ {|
+  pfn as_chan(ch : Chan(L, Logging)) : Int do 0 end
+|}))
+
 let tests =
   [ stream_shape; cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
     unlabelled_names_pinned; labelled_shape; label_changes_fingerprint; labelled_roles_ok;
@@ -753,4 +991,7 @@ let tests =
     payload_no_codec; payload_with_codec; payload_nested_no_codec;
     event_ok; event_retained; event_not_reparked; event_idle_dropped; event_forge; event_pid_handle; builtin_under_application;
     cancel_handler_ok; cancel_handler_reuses_state; cancel_handler_must_end; cancelled_forge;
-    hosted_cancel_ok; hosted_cancel_retained ]
+    hosted_cancel_ok; hosted_cancel_retained;
+    crash_shape; crash_roles_ok; crash_state_is_the_branch;
+    crash_rule_1; crash_rule_2; crash_rule_3; crash_rule_4; crash_rule_5; crash_rule_6; crash_rule_6_twice;
+    crash_choose_shape; crash_choose_ok; crash_chan_refused ]

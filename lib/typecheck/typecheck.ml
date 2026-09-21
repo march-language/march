@@ -4818,6 +4818,244 @@ include Typecheck_reorder
    ================================================================= *)
 include Typecheck_modcaps
 
+(* ── crash branches: well-formedness (2026-09-20) ──────────────────────────
+   Design: specs/2026-09-19-choreography-access-points-and-crash-branches-design.md,
+   Part B.  A protocol names the roles that `may crash`; a receive from one
+   of them must carry a crash branch (`or crash do ... end`, or a `crash`
+   branch of the `choose` it heads), which is what the receiver -- the
+   DETECTOR -- does instead if that role crashes before sending.  Six rules,
+   each with a corpus fixture (specs/lang/types/reject/t271-t276):
+
+   1. every receive from a `may crash` role has a crash branch;
+   2. a crash branch is only for a `may crash` sender;
+   3. the crashed role does not appear in its own crash branch;
+   4. a third party that takes part in the normal continuation or the crash
+      branch is told which one it is in: its first interaction in each is a
+      receive from the detector, with distinct labels (the generator's merge
+      is an offer from the detector; this is what makes it exist);
+   5. a `choose` with a `crash` branch has ONE detector: every other branch
+      heads to the same receiver;
+   6. `may crash` names roles of the protocol, once each, at the top.
+
+   The generator (desugar) has already run when this is checked; it projects
+   an ill-formed protocol into something, and this reports why the program is
+   still refused. *)
+let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
+  let err ~span msg = Err.error env.errors ~span (Printf.sprintf "Protocol `%s`: %s" proto msg) in
+  let rec roles_in (steps : Ast.protocol_step list) : string list =
+    List.concat_map
+      (function
+        | Ast.ProtoMsg (s, r, _, _) -> [ s.Ast.txt; r.Ast.txt ]
+        | Ast.ProtoLoop inner -> roles_in inner
+        | Ast.ProtoChoice (c, brs) -> c.Ast.txt :: List.concat_map (fun (_, arm) -> roles_in arm) brs
+        | Ast.ProtoStop _ | Ast.ProtoMayCrash _ -> []
+        | Ast.ProtoCrashOr (inner, crash, _) -> roles_in (inner :: crash))
+      steps
+  in
+  let all_roles = List.sort_uniq String.compare (roles_in pdef.Ast.proto_steps) in
+  (* rule 6: the declarations, at the top level only *)
+  let crashers = ref [] in
+  List.iter
+    (function
+      | Ast.ProtoMayCrash (roles, _) ->
+        List.iter
+          (fun (r : Ast.name) ->
+             if not (List.mem r.txt all_roles) then
+               err ~span:r.span (Printf.sprintf "`may crash %s` names a role that is not in the protocol." r.txt)
+             else if List.mem r.txt !crashers then
+               err ~span:r.span (Printf.sprintf "`may crash` lists `%s` twice." r.txt)
+             else crashers := r.txt :: !crashers)
+          roles
+      | _ -> ())
+    pdef.Ast.proto_steps;
+  let crashers = !crashers in
+  let may_crash r = List.mem r crashers in
+  let rec nested_may_crash = function
+    | [] -> ()
+    | Ast.ProtoMayCrash (_, msp) :: rest ->
+      err ~span:msp "`may crash` must be a top-level step of the protocol, before the steps it applies to.";
+      nested_may_crash rest
+    | Ast.ProtoLoop inner :: rest -> nested_may_crash inner; nested_may_crash rest
+    | Ast.ProtoChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> nested_may_crash arm) brs; nested_may_crash rest
+    | Ast.ProtoCrashOr (_, crash, _) :: rest -> nested_may_crash crash; nested_may_crash rest
+    | _ :: rest -> nested_may_crash rest
+  in
+  let rec top_only = function
+    | [] -> ()
+    | Ast.ProtoLoop inner :: rest -> nested_may_crash inner; top_only rest
+    | Ast.ProtoChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> nested_may_crash arm) brs; top_only rest
+    | Ast.ProtoCrashOr (_, crash, _) :: rest -> nested_may_crash crash; top_only rest
+    | _ :: rest -> top_only rest
+  in
+  top_only pdef.Ast.proto_steps;
+  let step_text (s : Ast.name) (r : Ast.name) = Printf.sprintf "`%s -> %s : ...`" s.txt r.txt in
+  (* A role's FIRST interaction in a continuation, for rule 4: what it does,
+     and the label it can tell the branch by (a `choose` head's label; a plain
+     message step is its own label, distinct from every other step). *)
+  let rec first_interaction (p : string) (steps : Ast.protocol_step list) =
+    match steps with
+    | [] -> None
+    | Ast.ProtoMsg (s, r, _, _) :: rest ->
+      if s.Ast.txt = p then Some (`Send r.Ast.txt, None)
+      else if r.Ast.txt = p then Some (`Recv s.Ast.txt, None)
+      else first_interaction p rest
+    | Ast.ProtoCrashOr (inner, _, _) :: rest -> first_interaction p (inner :: rest)
+    | Ast.ProtoLoop inner :: rest ->
+      (match first_interaction p inner with Some x -> Some x | None -> first_interaction p rest)
+    | Ast.ProtoStop _ :: _ -> None
+    | Ast.ProtoMayCrash _ :: rest -> first_interaction p rest
+    | Ast.ProtoChoice (c, brs) :: rest ->
+      if c.Ast.txt = p then Some (`Choose, None)
+      else
+        let in_branches =
+          List.find_map
+            (fun ((lbl : Ast.name), arm) ->
+               match arm with
+               | Ast.ProtoMsg (s, r, _, _) :: _ when r.Ast.txt = p && s.Ast.txt = c.Ast.txt ->
+                 Some (`Recv s.Ast.txt, Some lbl.txt)
+               | _ -> first_interaction p arm)
+            brs
+        in
+        (match in_branches with Some x -> Some x | None -> first_interaction p rest)
+  in
+  (* rule 4, for one crash branch: [normals] are the normal continuations
+     (one per branch of a `choose`, else one), [crash] the crash branch. *)
+  let check_third_parties ~span ~detector ~crashed ~(normals : Ast.protocol_step list list) ~crash =
+    let parties = List.filter (fun p -> p <> detector && p <> crashed) all_roles in
+    List.iter
+      (fun p ->
+         let in_crash = first_interaction p crash in
+         let in_normals = List.map (first_interaction p) normals in
+         if in_crash = None && List.for_all (fun x -> x = None) in_normals then ()
+         else begin
+           (match in_crash with
+            | Some (`Recv from, _) when from = detector -> ()
+            | _ ->
+              err ~span
+                (Printf.sprintf
+                   "`%s` cannot tell whether `%s` crashed: the crash branch must begin, for `%s`, with a message from `%s` to `%s`."
+                   p crashed p detector p));
+           List.iter
+             (function
+               | Some (`Recv from, lbl) when from = detector ->
+                 (match in_crash, lbl with
+                  | Some (_, Some l1), Some l2 when l1 = l2 ->
+                    err ~span
+                      (Printf.sprintf
+                         "`%s` cannot tell whether `%s` crashed: its first message from `%s` carries the label `%s` in both the crash branch and the normal continuation."
+                         p crashed detector l1)
+                  | _ -> ())
+               | _ ->
+                 err ~span
+                   (Printf.sprintf
+                      "`%s` cannot tell whether `%s` crashed: once `%s` has detected it, `%s`'s first interaction must be a message from `%s`, in the crash branch and in the normal continuation alike."
+                      p crashed detector p detector))
+             in_normals
+         end)
+      parties
+  in
+  (* [tail]: what follows at every enclosing level (a `choose` branch's
+     continuation is its steps then the post-`choose` tail; a loop body's is
+     the body again).  [dead]: roles that have crashed on this path. *)
+  let rec walk ~tail ~(dead : string list) (steps : Ast.protocol_step list) =
+    match steps with
+    | [] -> ()
+    | Ast.ProtoMayCrash _ :: rest -> walk ~tail ~dead rest
+    | Ast.ProtoStop _ :: rest -> walk ~tail ~dead rest
+    | Ast.ProtoLoop inner :: rest -> walk ~tail:inner ~dead inner; walk ~tail ~dead rest
+    | Ast.ProtoMsg (s, r, _, _) :: rest ->
+      List.iter
+        (fun (x : Ast.name) ->
+           if List.mem x.txt dead then
+             err ~span:x.span (Printf.sprintf "`%s` has crashed, so it cannot take part in its own crash branch (%s)." x.txt (step_text s r)))
+        [ s; r ];
+      if may_crash s.txt && not (List.mem s.txt dead) then
+        err ~span:s.span
+          (Printf.sprintf
+             "`%s` may crash, so %s needs `or crash do ... end`: what does `%s` do if `%s` crashes before sending?"
+             s.txt (step_text s r) r.txt s.txt);
+      walk ~tail ~dead rest
+    | Ast.ProtoCrashOr (inner, crash, csp) :: rest ->
+      (match inner with
+       | Ast.ProtoMsg (s, r, _, _) ->
+         List.iter
+           (fun (x : Ast.name) ->
+              if List.mem x.txt dead then
+                err ~span:x.span (Printf.sprintf "`%s` has crashed, so it cannot take part in its own crash branch (%s)." x.txt (step_text s r)))
+           [ s; r ];
+         if not (may_crash s.txt) then
+           err ~span:csp (Printf.sprintf "`%s` is not declared `may crash`, so %s cannot have a crash branch." s.txt (step_text s r))
+         else begin
+           if List.mem s.txt (roles_in crash) then
+             err ~span:csp
+               (Printf.sprintf "`%s` has crashed, so it cannot take part in the crash branch of %s." s.txt (step_text s r));
+           check_third_parties ~span:csp ~detector:r.txt ~crashed:s.txt ~normals:[ rest @ tail ] ~crash
+         end;
+         walk ~tail:[] ~dead:(s.txt :: dead) crash
+       | _ -> ());
+      walk ~tail ~dead rest
+    | Ast.ProtoChoice (chooser, branches) :: rest ->
+      if List.mem chooser.txt dead then
+        err ~span:chooser.span (Printf.sprintf "`%s` has crashed, so it cannot choose in its own crash branch." chooser.txt);
+      let crash_arm = List.find_opt (fun ((l : Ast.name), _) -> l.txt = "crash") branches in
+      let normals = List.filter (fun ((l : Ast.name), _) -> l.txt <> "crash") branches in
+      (match crash_arm with
+       | None ->
+         if may_crash chooser.txt && not (List.mem chooser.txt dead) then
+           err ~span:chooser.span
+             (Printf.sprintf
+                "`%s` may crash, so `choose by %s` needs a `crash` branch: what do the others do if `%s` crashes before choosing?"
+                chooser.txt chooser.txt chooser.txt)
+       | Some ((lbl : Ast.name), crash) ->
+         if not (may_crash chooser.txt) then
+           err ~span:lbl.span
+             (Printf.sprintf "`%s` is not declared `may crash`, so `choose by %s` cannot have a `crash` branch." chooser.txt chooser.txt)
+         else begin
+           if List.mem chooser.txt (roles_in crash) then
+             err ~span:lbl.span
+               (Printf.sprintf "`%s` has crashed, so it cannot take part in the `crash` branch of `choose by %s`." chooser.txt chooser.txt);
+           (* rule 5: one detector *)
+           let heads =
+             List.filter_map
+               (fun ((l : Ast.name), arm) ->
+                  match arm with
+                  | Ast.ProtoMsg (s, r, _, _) :: _ when s.Ast.txt = chooser.txt -> Some (l.txt, r.Ast.txt)
+                  | Ast.ProtoCrashOr (Ast.ProtoMsg (s, r, _, _), _, _) :: _ when s.Ast.txt = chooser.txt -> Some (l.txt, r.Ast.txt)
+                  | _ -> None)
+               normals
+           in
+           (match heads with
+            | (l1, detector) :: more ->
+              (match List.find_opt (fun (_, r) -> r <> detector) more with
+               | Some (l2, r2) ->
+                 err ~span:lbl.span
+                   (Printf.sprintf
+                      "`choose by %s` has a `crash` branch, so every other branch must begin with a message to the same role, the one that detects the crash; branch `%s` goes to `%s` but branch `%s` goes to `%s`."
+                      chooser.txt l1 detector l2 r2)
+               | None ->
+                 check_third_parties ~span:lbl.span ~detector ~crashed:chooser.txt
+                   ~normals:(List.map (fun (_, arm) -> arm @ rest @ tail) normals) ~crash)
+            | [] -> ())
+         end);
+      List.iter (fun ((l : Ast.name), arm) ->
+          if l.txt = "crash" then walk ~tail:[] ~dead:(chooser.txt :: dead) arm
+          else
+            (* A branch's head is the chooser's own message: whether the
+               chooser may crash is judged at the `choose` (a `crash`
+               branch), not at the head, so rule 1 skips it. *)
+            match arm with
+            | Ast.ProtoMsg (s, r, _, _) :: arm_rest when s.Ast.txt = chooser.txt ->
+              List.iter
+                (fun (x : Ast.name) ->
+                   if List.mem x.txt dead then
+                     err ~span:x.span (Printf.sprintf "`%s` has crashed, so it cannot take part in its own crash branch (%s)." x.txt (step_text s r)))
+                [ s; r ];
+              walk ~tail:(rest @ tail) ~dead arm_rest
+            | _ -> walk ~tail:(rest @ tail) ~dead arm) branches;
+      walk ~tail ~dead rest
+  in
+  walk ~tail:[] ~dead:[] pdef.Ast.proto_steps
+
 let rec check_decl env (d : Ast.decl) : env =
   match d with
   | Ast.DFn (def, sp) ->
@@ -5427,8 +5665,13 @@ let rec check_decl env (d : Ast.decl) : env =
                "Protocol `%s`: `stop` outside of a `loop` has no effect — the \
                 protocol already ends here if you just write nothing."
                name.txt)
+      | Ast.ProtoMayCrash _ -> ()
+      | Ast.ProtoCrashOr (inner, crash, _) ->
+        validate_step ~in_loop inner;
+        List.iter (validate_step ~in_loop) crash
     in
     List.iter (validate_step ~in_loop:false) pdef.proto_steps;
+    check_crash_branches env ~proto:name.txt pdef;
     (* A `loop` never exits (its projection is `Rec X. S[X]`), so any step that
        follows one at the same nesting level is unreachable. *)
     (* [tail] is what follows at every ENCLOSING level.  A `choose` branch's
@@ -5477,6 +5720,11 @@ let rec check_decl env (d : Ast.decl) : env =
       | Ast.ProtoChoice (_, branches) :: rest ->
         List.iter (fun (_, arm) ->
             check_unreachable_after_loop ~tail:(rest @ tail) arm) branches;
+        check_unreachable_after_loop ~tail rest
+      | Ast.ProtoCrashOr (_, crash, _) :: rest ->
+        (* A crash branch ENDS the protocol (or the loop it is in): it has no
+           tail of its own to fall into. *)
+        check_unreachable_after_loop ~tail:[] crash;
         check_unreachable_after_loop ~tail rest
       | _ :: rest -> check_unreachable_after_loop ~tail rest
       | [] -> ()

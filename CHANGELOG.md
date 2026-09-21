@@ -11,6 +11,18 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+- **Crash branches in choreographies.** A protocol can declare the roles that `may crash`,
+  and a receive from such a role carries `or crash do ... end` (or a `crash` branch of the
+  `choose` it heads): what the receiver does if that role crashes before sending. The
+  receiver's generated `recv_<Msg>` takes a second callback with a live state, so the
+  conversation goes on without the crashed role instead of being cancelled; other roles are
+  told by the detector's messages, as for a `choose`. Six well-formedness rules are checked at
+  the protocol, `Session.Ops` gains `on_crash`, and the network runner takes the branch by
+  the same rule that decides a cancellation (the role is gone with nothing queued). A role
+  hosted in an actor does not take crash branches yet. See the choreography guide, "When a
+  role may crash".
+
 ### Fixed
 - **Two mutually tail-recursive functions passing a string or list along no longer read
   freed memory.** The compiled mutual-tail-call loop released a forwarded argument on the

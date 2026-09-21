@@ -1,0 +1,44 @@
+-- Two-node harness scenario "crash_before_send": node-c hosts role C, the role that
+-- `may crash`. It is SIGKILLed after connecting and
+-- before it sends Read.
+mod CrashBeforeSendNodeC do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+    L -> I : Bool
+    I -> C : Bool
+  end
+
+  pfn role_c(s : Cap(Session.Live), st : Logging_C.S_send_Msg_C_I_1) : Logging_C.Yield do
+    println("C: connected")
+    sleep_ms(600000)           -- the scenario kills us here, before the send
+    let st1 = Logging_C.send_Msg_C_I_1(s, st, "disk 42%")
+    Logging_C.recv_Msg_I_C_1(s, st1, fn (report, st2) ->
+      println("C: got Report(" ++ bool_to_string(report) ++ ")")
+      Logging_C.close(s, st2))
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-c: up")
+    match Logging_Run.run_C(c, "node-c", "logging-secret", Logging_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
+      Ok(_) -> println("C: closed")
+      Err(SessionNode.Cancelled(role, cause)) ->
+        println("C: cancelled waiting on role " ++ int_to_string(role) ++ ": " ++ cause)
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+end
