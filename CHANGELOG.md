@@ -12,6 +12,11 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **A scheduler thread that cannot be created is reported instead of crashing the program at
+  exit.** Under a process/thread limit (a container `pids` limit, `ulimit -u`) a compiled
+  program could run to completion and then die with SIGSEGV while joining a thread that was
+  never started. It now prints how many scheduler threads it is running on and carries on
+  with those.
 - **Two mutually tail-recursive functions passing a string or list along no longer read
   freed memory.** The compiled mutual-tail-call loop released a forwarded argument on the
   back edge, one iteration before its next read (`refused: no-y; refused: no-y` for an

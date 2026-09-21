@@ -401,6 +401,15 @@ typedef struct march_scheduler {
                                    * read). */
     int             id;           /* Scheduler index (0..N-1)                    */
     pthread_t       thread;       /* OS thread handle (for schedulers 1..N-1)    */
+    /* What this scheduler thread has done since the last march_sched_init;
+     * see march_sched_thread_stat.  `started` is written by march_sched_run
+     * before the thread exists; the rest only by the owning thread, so they
+     * are plain fields, exact once march_sched_run has returned and a racy
+     * snapshot before that. */
+    int             started;      /* thread exists (scheduler 0: always)         */
+    int             entered;      /* sched_loop was reached                      */
+    int64_t         stat_dispatches;  /* green-thread dispatches                 */
+    int64_t         stat_idle_polls;  /* loop turns that found nothing to run    */
 #ifdef MARCH_ASAN_BUILD
     /* ASan fiber-switch bookkeeping for THIS scheduler's own native-thread
      * "fiber" (see march_proc.asan_fake_stack for the full rationale). */
@@ -559,6 +568,16 @@ extern _Atomic int64_t march_stat_counters[8];
  * march_stat_counters' comment above and stdlib/scheduler.march's `stat`
  * doc. Unknown indices return 0 (forward-compatible with new counters). */
 int64_t      march_sched_stat(int64_t which);
+
+/* Per-scheduler-thread counters, for answering "did scheduler N ever run
+ * anything" from outside the runtime (test/test_scheduler_count.c prints them
+ * when a thread goes unobserved).  Returns -1 for a scheduler index outside
+ * the current count or an unknown `which`. */
+#define MARCH_THREAD_STAT_STARTED     0   /* 1 if its OS thread was created    */
+#define MARCH_THREAD_STAT_ENTERED     1   /* 1 if it reached its dispatch loop */
+#define MARCH_THREAD_STAT_DISPATCHES  2   /* green-thread dispatches           */
+#define MARCH_THREAD_STAT_IDLE_POLLS  3   /* loop turns with nothing to run    */
+int64_t      march_sched_thread_stat(int sched_id, int which);
 
 /* Sentinel returned by march_sched_recv when the process was woken without a
  * message (killed or spurious wakeup).  This is the address of a static C

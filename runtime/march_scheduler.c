@@ -385,6 +385,18 @@ int64_t march_sched_stat(int64_t which) {
     }
 }
 
+int64_t march_sched_thread_stat(int sched_id, int which) {
+    if (sched_id < 0 || sched_id >= g_num_scheds) return -1;
+    const march_scheduler *s = &g_scheds[sched_id];
+    switch (which) {
+    case MARCH_THREAD_STAT_STARTED:    return s->started;
+    case MARCH_THREAD_STAT_ENTERED:    return s->entered;
+    case MARCH_THREAD_STAT_DISPATCHES: return s->stat_dispatches;
+    case MARCH_THREAD_STAT_IDLE_POLLS: return s->stat_idle_polls;
+    default: return -1;
+    }
+}
+
 static _Thread_local march_scheduler *tl_sched = NULL;
 
 /* Definition of the sentinel exported via march_scheduler.h. */
@@ -1609,6 +1621,7 @@ static void sched_loop(march_scheduler *sched) {
     march_tls_reductions = MARCH_REDUCTION_BUDGET;
 
     tl_sched = sched;
+    sched->entered = 1;
     atomic_store_explicit(&sched->running, 1, memory_order_release);
     unsigned int steal_seed = (unsigned int)sched->id;
     /* When the previous task cooperatively yielded (PROC_RUNNABLE after running),
@@ -1707,6 +1720,7 @@ static void sched_loop(march_scheduler *sched) {
                     && wake_idle_daemons() > 0)
                 continue;  /* woken procs are in the global runq — next
                             * iteration's global_runq_pop picks them up */
+            sched->stat_idle_polls++;
             /* No runnable process: sleep 1ms to avoid burning CPU at idle.
              * sched_yield() alone causes ~99% CPU on a waiting server. */
             struct timespec idle_sleep = { 0, 1000000 }; /* 1ms */
@@ -1767,6 +1781,7 @@ static void sched_loop(march_scheduler *sched) {
         p->reductions   = MARCH_REDUCTION_BUDGET;
         p->owner_sched  = sched;
         sched->current  = p;
+        sched->stat_dispatches++;
 
         dbg_mark_dispatched(p, sched->id);
         /* A dispatched proc must have a context: NULL means it was reaped,
@@ -2000,6 +2015,7 @@ void march_sched_run(void) {
      * sibling merely ran on another OS thread (parallelism, not preemption). */
     if (g_num_scheds <= 1) {
         g_scheds[0].thread = pthread_self();
+        g_scheds[0].started = 1;
         march_sched_preempt_start();
         sched_loop(&g_scheds[0]);
         /* Final drain: a Signal.watch delivery that landed just before shutdown
@@ -2014,11 +2030,35 @@ void march_sched_run(void) {
     /* Scheduler 0 runs on the calling thread — record its pthread_t so the
      * preemption daemon can send SIGUSR1 to it like any other worker. */
     g_scheds[0].thread = pthread_self();
+    g_scheds[0].started = 1;
 
-    /* Spawn N-1 worker threads; scheduler 0 runs on the calling thread. */
+    /* Spawn N-1 worker threads; scheduler 0 runs on the calling thread.
+     *
+     * A create can fail (EAGAIN under a pids cgroup limit or RLIMIT_NPROC),
+     * and its result used to be dropped.  glibc stores the new handle BEFORE
+     * it clones and frees the thread's stack when the clone fails, so the
+     * pthread_join below then read a dangling descriptor: SIGSEGV at exit,
+     * after a run that was otherwise correct (reproduced with
+     * `docker run --pids-limit 6`).  A scheduler that did not start is left
+     * out of the join and of the preemption daemon's signalling -- its deque
+     * is initialised and stays empty, so the others' steal attempts on it
+     * just miss -- and the shortfall is reported rather than hidden. */
+    int n_started = 1;
     for (int i = 1; i < g_num_scheds; i++) {
-        pthread_create(&g_scheds[i].thread, NULL, sched_thread_entry, &g_scheds[i]);
+        int rc = pthread_create(&g_scheds[i].thread, NULL, sched_thread_entry, &g_scheds[i]);
+        if (rc != 0) {
+            memset(&g_scheds[i].thread, 0, sizeof g_scheds[i].thread);
+            fprintf(stderr, "march: could not start scheduler thread %d of %d "
+                            "(pthread_create: %s)\n",
+                    i + 1, g_num_scheds, strerror(rc));
+            continue;
+        }
+        g_scheds[i].started = 1;
+        n_started++;
     }
+    if (n_started < g_num_scheds)
+        fprintf(stderr, "march: running on %d scheduler threads, not the %d "
+                        "requested\n", n_started, g_num_scheds);
 
     /* Start the preemption daemon now that all pthread_t handles are stored. */
     march_sched_preempt_start();
@@ -2026,7 +2066,7 @@ void march_sched_run(void) {
     sched_loop(&g_scheds[0]);
 
     for (int i = 1; i < g_num_scheds; i++) {
-        pthread_join(g_scheds[i].thread, NULL);
+        if (g_scheds[i].started) pthread_join(g_scheds[i].thread, NULL);
     }
 
     /* Final drain (see the single-scheduler path above): catch any Signal.watch
