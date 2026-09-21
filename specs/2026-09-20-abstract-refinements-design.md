@@ -90,10 +90,15 @@ Scoping and well-formedness, checked once per signature (`Refine_abstract.collec
    named form) or the domain binder of the arrow whose codomain it refines.
    Anything else is a **hard error** at the declaration: `abstract refinement
    `p` is applied to `y`, which is not this signature's element binder`.
-3. Exactly one defining occurrence is required. Zero definers with a positive
-   occurrence is a hard error (the function would promise a predicate nobody
-   can instantiate). A definer with no positive occurrence is a **warning**:
-   the refinement is vacuous.
+3. **A definer is what makes a name abstract at all** (revised while building
+   phase 1). With no definer in the signature, `p(_)` is not an abstract
+   refinement: it stays what it has always been, a predicate calling a name the
+   checker does not know, and keeps its existing "not a measure, so this
+   refinement is not checked" warning. Making that an error would reject
+   programs that compile today, which phase 1 must not do — a probe caught the
+   first draft of this rule swallowing the warning for every typo in a
+   refinement. A definer with no consumer (no positive and no negative
+   occurrence) is a **warning**: the refinement is vacuous.
 4. All occurrences must sit at the *same* element sort. Mixed sorts are a hard
    error, not a skip — a signature is small and the author can see it.
 5. Several abstract refinements per signature are allowed (`p`, `q`), each
