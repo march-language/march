@@ -1,0 +1,123 @@
+-- Two-node scenario "cluster_ap_hosted": node-a offers role Server of Echo
+-- HOSTED IN ONE ACTOR (`offer_hosted_Server`, capacity 4). The actor keeps
+-- one parked endpoint per session id in a `LinearMap`, and a per-session
+-- message counter in an ordinary `Map` beside it. Three sessions run at
+-- once, then one more; each answers its number times 10, twice. It stops
+-- once four sessions are done. See scenario.sh and
+-- specs/2026-09-20-hosted-offers-implementation.md.
+mod ClusterApHostedA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  -- A finished or cancelled session's parked value is `Closed_Server`, which
+  -- nothing resumes: drop it so its slot can be vacated.
+  pfn retire(linear p : a) : () do
+    let _ = p
+    ()
+  end
+
+  actor ServerActor do
+    state { done : Int, cancelled : Int, counts : Map(String, Int),
+            sessions : LinearMap(String, Echo_Server.Parked_Server) }
+    init  { done: 0, cancelled: 0, counts: Map.empty(), sessions: LinearMap.empty_string() }
+    on Start(sid : String, s : Cap(Session.Live)) do
+      let parked = Echo_Server.await_Msg_Client_Server_1(s, Echo_Server.register(s, 0))
+      match LinearMap.put(state.sessions, sid, parked) do
+        (None, m) -> { state with sessions: m }
+        (Some(old), m) ->
+          retire(old)
+          panic("Start: session " ++ sid ++ " is already hosted")
+      end
+    end
+    on Deliver(sid : String, s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match LinearMap.take_slot(state.sessions, sid) do
+        -- A delivery for a session that already ended or was cancelled.
+        (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
+        (Some(parked), slot) ->
+          let k = Map.get_or(state.counts, sid, 0, Map.str_cmp) + 1
+          match Echo_Server.resume(parked, from, msg, ep) do
+            Got_Msg_Client_Server_1(n, st) ->
+              println("Server: got " ++ int_to_string(n) ++ " (message " ++ int_to_string(k) ++ " of its session)")
+              let st2 = Echo_Server.send_Msg_Server_Client_1(s, st, n * 10)
+              { state with counts: Map.insert(state.counts, sid, k, Map.str_cmp),
+                           sessions: LinearMap.fill(slot, Echo_Server.await_Msg_Client_Server_2(s, st2)) }
+            Got_Msg_Client_Server_2(n, st) ->
+              println("Server: got " ++ int_to_string(n) ++ " (message " ++ int_to_string(k) ++ " of its session)")
+              let st2 = Echo_Server.send_Msg_Server_Client_2(s, st, n * 10)
+              retire(Echo_Server.finish(s, st2))
+              { state with done: state.done + 1, counts: Map.remove(state.counts, sid, Map.str_cmp),
+                           sessions: LinearMap.vacate(slot) }
+          end
+      end
+    end
+    on Cancel(sid : String, _s : Cap(Session.Live), role : Int, _cause : String, _ep : Int) do
+      match LinearMap.take(state.sessions, sid) do
+        (None, m) -> { state with sessions: m }
+        (Some(parked), m) ->
+          println("Server: session cancelled, " ++ Echo_Msg.role_name(role) ++ " gone")
+          retire(Echo_Server.cancel(parked))
+          { state with cancelled: state.cancelled + 1,
+                       counts: Map.remove(state.counts, sid, Map.str_cmp), sessions: m }
+      end
+    end
+  end
+
+  pfn field(a, name : String) : Int do
+    match get_actor_field(a, name) do
+      Some(n) -> n
+      None -> panic("node-a: no actor field " ++ name)
+    end
+  end
+
+  pfn wait_done(a, want : Int, left : Int) : Bool do
+    if field(a, "done") >= want do true
+    else if left <= 0 do false else
+      sleep_ms(50)
+      wait_done(a, want, left - 50)
+    end end
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "aph-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let srv = spawn(ServerActor)
+        let start = fn (sid, s) ->
+          let _ = send(srv, Start(sid, s))
+          ()
+        let deliver = fn (sid, s, from, msg, ep) ->
+          let _ = send(srv, Deliver(sid, s, from, msg, ep))
+          ()
+        let cancel = fn (sid, s, role, cause, ep) ->
+          let _ = send(srv, Cancel(sid, s, role, cause, ep))
+          ()
+        -- Printed BEFORE the offer: it is live as soon as it registers.
+        println("node-a: offering")
+        match Echo_Run.offer_hosted_Server(c, h, 4, srv, start, deliver, cancel) do
+          Err(e) -> panic(Echo_Run.error_message(e))
+          Ok(o) ->
+            if wait_done(srv, 4, 120000) do () else panic("node-a: never served four sessions") end
+            -- Let the last session's close reach node-b before stopping.
+            sleep_ms(500)
+            println("Server: " ++ int_to_string(field(srv, "done")) ++ " sessions done")
+            SessionNode.close_offer(o)
+            ClusterNode.stop(h)
+        end
+    end
+  end
+end

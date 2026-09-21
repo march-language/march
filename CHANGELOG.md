@@ -121,6 +121,14 @@ git log is authoritative for exact commits.
   detected by a heartbeat (`MARCH_SESSION_HEARTBEAT_MS`, `MARCH_SESSION_TIMEOUT_MS`).
 
 ### Added
+- **Hosted access points: one actor serving many choreography sessions.**
+  `<P>_Run.offer_hosted_<Role>(io, node, capacity, actor, start, deliver, cancel)` offers
+  a role over a cluster node with every accepted session hosted in one actor, which keeps
+  one `Parked_<Role>` per session id in a `LinearMap`; the callbacks carry the session id
+  (`start(sid, s)`, `deliver(sid, s, from, msg, ep)`, `cancel(sid, s, role, cause, ep)`).
+  `cluster_hosted_<Role>(io, node, session, actor, ...)` is the same for one session under
+  an agreed id. `SessionNode.offer_hosted` and `run_cluster_hosted` underneath. The guide's
+  "Many sessions in one actor" shows the actor shape.
 - **A protocol step can name its message.** `item: Prod -> Cons : Int` makes every
   generated name say `Item` (`send_Item`, `recv_Item`, `S_recv_Item`, `await_Item`,
   `Got_Item`, `Stream_Msg.Item`) instead of `Msg_Prod_Cons_1`. Unlabelled steps keep their

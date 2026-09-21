@@ -1,0 +1,59 @@
+-- Two-node scenario "cluster_ap_hosted": node-b initiates three Echo
+-- sessions as Client AT ONCE (three tasks), each filled from node-a's hosted
+-- access point, then one more once they are done.
+mod ClusterApHostedB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  pfn ask(s : Cap(Session.Live), st : Echo_Client.S_send_Msg_Client_Server_1, n : Int) : Echo_Client.Yield do
+    let st1 = Echo_Client.send_Msg_Client_Server_1(s, st, n)
+    Echo_Client.recv_Msg_Server_Client_1(s, st1, fn (m, st2) ->
+      println("Client: got " ++ int_to_string(m))
+      let st3 = Echo_Client.send_Msg_Client_Server_2(s, st2, n + 100)
+      Echo_Client.recv_Msg_Server_Client_2(s, st3, fn (m2, st4) ->
+        println("Client: got " ++ int_to_string(m2))
+        Echo_Client.close(s, st4)))
+  end
+
+  fn session(c : Cap(IO), h : ClusterNode.ClusterHandle, n : Int) : Int do
+    match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, n)) do
+      Ok(_) ->
+        println("Client: session " ++ int_to_string(n) ++ " done")
+        1
+      Err(e) ->
+        println("Client: " ++ SessionNode.run_error_message(e))
+        0
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "aph-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
+        let t1 = task_spawn(fn _ -> session(c, h, 1))
+        let t2 = task_spawn(fn _ -> session(c, h, 2))
+        let t3 = task_spawn(fn _ -> session(c, h, 3))
+        let ok = task_await_unwrap(t1) + task_await_unwrap(t2) + task_await_unwrap(t3)
+        println("Client: concurrent sessions completed " ++ int_to_string(ok))
+        let _ = session(c, h, 4)
+        ClusterNode.stop(h)
+    end
+  end
+end

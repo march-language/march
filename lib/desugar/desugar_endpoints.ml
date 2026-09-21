@@ -978,6 +978,54 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
                 var "deliver"; var "cancel" ]))
       roles
   in
+  (* `offer_hosted_<Role>(io, node, capacity, host, start, deliver, cancel)`
+     and `cluster_hosted_<Role>(io, node, session, host, start, deliver,
+     cancel)`: the access point and the one-session cluster runner with the
+     role hosted in the actor [host], as `host_<Role>_or` hosts it over the
+     runner's own connections.  A hosted offer runs many sessions in ONE
+     actor (one `Parked_<Role>` per session id, in a `LinearMap`), so every
+     callback carries the session id: `start(sid, s)`, `deliver(sid, s, from,
+     msg, ep)`, `cancel(sid, s, role, cause, ep)`; `cluster_hosted_<Role>`
+     takes the same callbacks so one actor serves both.  Design:
+     specs/2026-09-20-hosted-offers-implementation.md. *)
+  let t_start_sid = TyArrow (t_string, TyArrow (t_cap_session, t_unit)) in
+  let t_deliver_sid =
+    TyArrow (t_string, TyArrow (t_cap_session, TyArrow (t_int, TyArrow (t_bytes, TyArrow (t_int, t_unit)))))
+  in
+  let t_cancel_sid =
+    TyArrow (t_string, TyArrow (t_cap_session, TyArrow (t_int, TyArrow (t_string, TyArrow (t_int, t_unit)))))
+  in
+  let hosted_callbacks =
+    [ ("host", tycon "Pid" [ TyVar (n "a") ]); ("start", t_start_sid); ("deliver", t_deliver_sid); ("cancel", t_cancel_sid) ]
+  in
+  let offers_hosted =
+    List.map
+      (fun (role, _entry) ->
+         fn ("offer_hosted_" ^ role)
+           ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []); ("capacity", t_int) ]
+            @ hosted_callbacks)
+           (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
+           (app "SessionNode.offer_hosted"
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
+                app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ];
+                var "start"; var "deliver"; var "cancel" ]))
+      roles
+  in
+  let clusters_hosted =
+    List.map
+      (fun (role, _entry) ->
+         fn ("cluster_hosted_" ^ role)
+           ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []); ("session", t_string) ]
+            @ hosted_callbacks)
+           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (app "SessionNode.run_cluster_hosted"
+              [ var "io"; var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "session";
+                lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ];
+                lam [ "s" ] (app "start" [ var "session"; var "s" ]);
+                lam [ "s"; "from"; "m"; "ep" ] (app "deliver" [ var "session"; var "s"; var "from"; var "m"; var "ep" ]);
+                lam [ "s"; "role"; "cause"; "ep" ] (app "cancel" [ var "session"; var "s"; var "role"; var "cause"; var "ep" ]) ]))
+      roles
+  in
   let addrs =
     fn "addrs_from_env" [] t_addrs (app "SessionNode.addrs_from_env" [ lit_str proto; app (msg ^ ".role_names") [] ])
   in
@@ -996,7 +1044,9 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
             [ "Session"; "Live" ] ],
         sp )
   in
-  DMod (n mname, Public, (needs :: addrs :: error_message :: runners) @ clusters @ offers @ initiators @ hosters @ hosters_or, sp)
+  DMod (n mname, Public,
+        (needs :: addrs :: error_message :: runners) @ clusters @ offers @ initiators @ hosters @ hosters_or
+        @ offers_hosted @ clusters_hosted, sp)
 
 (** Whether [expand] emits `<P>_Run`.  On for every real compile.  A test that
     typechecks generated code against a thin stdlib without `SessionNode`
