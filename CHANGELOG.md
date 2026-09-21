@@ -11,6 +11,13 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Removed
+- **`MARCH_NO_TRMC` is gone; use `--no-trmc`.** The environment variable turned off
+  tail-recursion-modulo-cons for every compile in the process, including the
+  stdlib, which increasingly depends on the transform to avoid overflowing the
+  stack on long lists. The `--no-trmc` flag still works, one invocation at a time.
+  `MARCH_TRMC` (already a no-op) is unchanged.
+
 ### Changed
 - **Vault writes to unrelated keys no longer serialise on one lock per table.** The
   lock is now sharded by key, the way ETS partitions a table. Four threads writing

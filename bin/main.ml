@@ -4492,18 +4492,17 @@ let () =
     ("--emit-core-ast", Arg.String (fun f -> emit_core_ast_file := Some f),
      " <file.march>  Emit desugared core AST + verdict + diagnostics as JSON to stdout");
   ] in
-  (* Env-var forms of --trmc / --no-trmc.  Seeded BEFORE Arg.parse so they act
-     as DEFAULTS — an explicit --trmc or --no-trmc on the command line
-     overrides either.  (Applying them after parsing would silently clobber the
-     flag.)
+  (* Env-var form of --trmc.  Seeded BEFORE Arg.parse so it acts as a DEFAULT
+     and an explicit --no-trmc on the command line still wins.
 
      MARCH_TRMC=1 predates --trmc and is now a no-op against the default;
-     it is kept because external scripts set it.  MARCH_NO_TRMC=1 is the one
-     that earns its keep: since TRMC became the default, --no-trmc is the only
-     way back, and it is what gives CI a way to exercise that path over a whole
-     suite run rather than one compile at a time. *)
+     it is kept because external scripts set it.  There is deliberately no
+     MARCH_NO_TRMC any more (removed 2026-09-21): its only user was CI's
+     whole-suite trmc-suite job, and an ambient switch that turns off a
+     transform the stdlib now depends on is a crash waiting on a large list
+     (specs/todos/2026-09-09-rewrite-stdlib-list-producers-into-natural-style.md).
+     --no-trmc, per invocation, is the one way to turn it off. *)
   if Sys.getenv_opt "MARCH_TRMC" <> None then March_tir.Trmc.enabled := true;
-  if Sys.getenv_opt "MARCH_NO_TRMC" <> None then March_tir.Trmc.enabled := false;
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   (* --target js implies --compile (skip JIT, emit .mjs) *)
   if !target_str = "js" || !target_str = "javascript" then do_compile := true;

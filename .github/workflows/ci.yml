@@ -11,7 +11,9 @@
 # single slowest one rather than their sum:
 #
 #   doc-lint                            (standalone, ~10s)
-#   test          (ubuntu, macos)       `dune runtest`
+#   test          (ubuntu, macos) × 4   `dune runtest`, sharded: codegen, refinecheck,
+#                                       compiler, rest (see the job's comment)
+#   two-node      (ubuntu)              node_discovery soak + two-node scenarios
 #   conformance   (ubuntu, macos)       @types-check, @grammar-check, @vault-scale, docs, fmt
 #   sanitize-gate (ubuntu)              ASAN gate: golden corpus + curated native + two-node
 #   ocaml-build   (ubuntu, macos) ─┬─ property-tests × 3 (per OS)
@@ -36,6 +38,15 @@ on:
   push:
     branches: [main]
   pull_request:
+
+# One live run per pull request: a newer push cancels the older run instead of
+# letting both hold runner slots. The org is on GitHub's free plan (20 concurrent
+# Linux jobs, 5 macOS, org-wide) and one run of this workflow alone asks for
+# more than that, so a superseded run is queue time for every other PR. Pushes
+# to main group by run_id, i.e. never cancel: every main commit gets a full run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   doc-lint:
@@ -94,19 +105,31 @@ jobs:
       - name: Check no plain store to an actor record's refcount word
         run: scripts/check-actor-rc-stores.sh
 
-  # The long pole. Kept as its own job so nothing else waits behind it.
+  # The long pole, sharded. One `dune runtest` here took ~36 min on ubuntu
+  # (September 2026), and it was ~9 min of build followed by three suites
+  # running side by side on a 4-vCPU runner: march-codegen ~24 min,
+  # march-refinecheck ~23, march-compiler ~17; everything else together
+  # finished in under 10. Each of those three is now its own shard, run
+  # through its per-test alias; `rest` is `dune runtest` with
+  # MARCH_CI_RUNTEST_SPLIT=1, which drops exactly those three stanzas (see the
+  # comment above the test runners in test/dune). Together the four shards run
+  # the same set as one `dune runtest`. If you add a fifth shard, gate its
+  # stanza in test/dune the same way or it runs twice.
   test:
+    name: test (${{ matrix.os }}, ${{ matrix.shard }})
     strategy:
       fail-fast: false
       matrix:
         os: [macos-15, ubuntu-24.04]
+        shard: [codegen, refinecheck, compiler, rest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 80
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
 
       # cross-tools: `dune runtest` includes a linux/amd64 TLS+gzip test that
-      # shells out to `zig cc` against the fetched sysroot.
+      # shells out to `zig cc` against the fetched sysroot. Installed for every
+      # shard (~10s) rather than tracking which suite that test lives in.
       - name: Set up toolchain
         timeout-minutes: 12
         uses: ./.github/actions/march-setup
@@ -133,14 +156,42 @@ jobs:
           # caught, just one step later.
           dune build bin/main.exe
 
-      - name: Test
-        # 30 was already the edge on main (27 min on the last green run in
-        # September 2026); the cluster node service's suites and native rules
-        # pushed a run past it. The job cap moves with it.
+      - name: Test (${{ matrix.shard }})
+        # Sized for the unsharded run (27 min on main in September 2026, then
+        # past 30); each shard is now well under it.
         timeout-minutes: 45
         run: |
           eval $(opam env)
-          dune runtest
+          case "${{ matrix.shard }}" in
+            codegen)     dune build @test/runtest-run_codegen ;;
+            refinecheck) dune build @test/runtest-test_refinecheck ;;
+            compiler)    dune build @test/runtest-run_compiler ;;
+            rest)        MARCH_CI_RUNTEST_SPLIT=1 dune runtest ;;
+            *) echo "::error::unknown test shard '${{ matrix.shard }}'"; exit 1 ;;
+          esac
+
+  # Distributed-plane guards that used to run after `dune runtest` in the ubuntu
+  # `test` leg, adding ~15 min to it serially. They need no test exe, only the
+  # compiler and the staged runtime/stdlib, so they get their own runner.
+  two-node:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
+      - name: Build
+        timeout-minutes: 10
+        run: |
+          eval $(opam env)
+          dune shutdown 2>/dev/null || true
+          # stage-source-trees refreshes _build's copies of runtime/ and
+          # stdlib/, which every native compile below links and reads (see the
+          # rule in test/dune); on this job nothing else builds them first.
+          dune build bin/main.exe @test/stage-source-trees
 
       # node_discovery was quarantined 2026-08-08 for a torn-stdout race seen
       # ~1-in-2 on THIS runner and fixed 2026-08-21 (march_stdout_mu). It is
@@ -149,7 +200,6 @@ jobs:
       # output diffed against the golden, the first tear or crash reported
       # verbatim. ~40s. See specs/todos/2026-09-14-distributed-plane-known-gaps.md.
       - name: Soak node_discovery (torn-stdout guard)
-        if: matrix.os == 'ubuntu-24.04'
         timeout-minutes: 5
         run: |
           eval $(opam env)
@@ -172,11 +222,9 @@ jobs:
       # with a new creation), per-node goldens. ~5s per scenario. Each scenario
       # is test/two_node/<name>/; see specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
       - name: Two-node scenarios
-        if: matrix.os == 'ubuntu-24.04'
         timeout-minutes: 25
         run: |
           eval $(opam env)
-          dune build bin/main.exe
           for s in $(scripts/two-node.sh --list); do scripts/two-node.sh "$s" || exit 1; done
 
   # Static-semantics + grammar corpora, doc notebooks and formatting: all
@@ -585,51 +633,6 @@ jobs:
           dune build bin/main.exe
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             ./specs/lang/golden/sanitize.sh
-
-  # Runs the full test suite with TRMC DISABLED on its own fresh runner.
-  #
-  # This job used to run MARCH_TRMC=1. Since TRMC became the default (2026-09-09)
-  # that is what the ordinary `test` job already does, so the direction that
-  # needs its own coverage is the other one: --no-trmc is now the only escape
-  # hatch and nothing else exercises it over a whole suite run. MARCH_NO_TRMC=1
-  # is the env spelling of that flag (bin/main.ml).
-  #
-  # It stays a separate runner rather than a phase inside sanitize-gate, where
-  # it began: two ASAN sweeps already run there, which confounded resource
-  # exhaustion with the TRMC variable itself and made failures non-reproducible.
-  trmc-suite:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 85
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up toolchain
-        timeout-minutes: 12
-        uses: ./.github/actions/march-setup
-
-      # This job was split out of sanitize-gate (see comment above), where the
-      # build was implicit — inherited from an earlier step in that job. Standalone,
-      # nothing builds the compiler first, so it needs its own Build step.
-      - name: Build
-        timeout-minutes: 10
-        run: |
-          eval $(opam env)
-          dune shutdown 2>/dev/null || true
-          dune build bin/main.exe
-
-      - name: Test suite with TRMC disabled
-        # 45 -> 60 (2026-09-18): main itself timed out here on consecutive
-        # runs (44:53 on the last green one) before the cluster node service
-        # added its suites.
-        timeout-minutes: 60
-        # Cold build + full test suite with TRMC turned off. 35 minutes stopped
-        # being enough in September 2026: the run on main at 16e27ab1, and
-        # PR #449's, printed "All suites passed." in the same second the step
-        # timed out (the z3-backed refinecheck suite alone takes ~11 minutes
-        # here). The job cap moves with it: setup 12 + build 10 + this 45.
-        run: |
-          eval $(opam env)
-          MARCH_NO_TRMC=1 ./scripts/run-tests.sh
 
   # Build once, fan out via same-run artifacts (not a persistent actions/cache):
   # cross-linux-oracle and all 8 property-oracle shards below each used to
