@@ -11,8 +11,9 @@
 # single slowest one rather than their sum:
 #
 #   doc-lint                            (standalone, ~10s)
-#   test          (ubuntu, macos) × 4   `dune runtest`, sharded: codegen, refinecheck,
+#   test          (ubuntu) × 4          `dune runtest`, sharded: codegen, refinecheck,
 #                                       compiler, rest (see the job's comment)
+#                 (macos)               `dune runtest`, unsharded
 #   two-node      (ubuntu)              node_discovery soak + two-node scenarios
 #   conformance   (ubuntu, macos)       @types-check, @grammar-check, @vault-scale, docs, fmt
 #   sanitize-gate (ubuntu)              ASAN gate: golden corpus + curated native + two-node
@@ -117,13 +118,23 @@ jobs:
   # comment above the test runners in test/dune). Together the four shards run
   # the same set as one `dune runtest`. If you add a fifth shard, gate its
   # stanza in test/dune the same way or it runs twice.
+  #
+  # Ubuntu only. macOS stays ONE `dune runtest` job (`all`): there the unsharded
+  # run took ~32 min, off the critical path, and the same split measured 67
+  # job-minutes across four jobs (each shard rebuilds and loses the in-job
+  # parallelism) against a 5-job org-wide macOS cap. Splitting macOS bought no
+  # wall time and doubled what it costs every other PR's queue.
   test:
     name: test (${{ matrix.os }}, ${{ matrix.shard }})
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, ubuntu-24.04]
-        shard: [codegen, refinecheck, compiler, rest]
+        include:
+          - { os: ubuntu-24.04, shard: codegen }
+          - { os: ubuntu-24.04, shard: refinecheck }
+          - { os: ubuntu-24.04, shard: compiler }
+          - { os: ubuntu-24.04, shard: rest }
+          - { os: macos-15,     shard: all }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 70
     steps:
@@ -169,6 +180,7 @@ jobs:
             refinecheck) dune build @test/runtest-test_refinecheck ;;
             compiler)    dune build @test/runtest-run_compiler ;;
             rest)        MARCH_CI_RUNTEST_SPLIT=1 dune runtest ;;
+            all)         dune runtest ;;
             *) echo "::error::unknown test shard '${{ matrix.shard }}'"; exit 1 ;;
           esac
 

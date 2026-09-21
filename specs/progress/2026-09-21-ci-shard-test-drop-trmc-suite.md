@@ -26,7 +26,7 @@ contention. The wall time was set by two jobs:
   a whole-suite TRMC-off run is the "green for the wrong reason" job described
   in specs/todos/2026-09-09-rewrite-stdlib-list-producers-into-natural-style.md.
   `--no-trmc` stays.
-- **`test` sharded 4 ways per OS**: `codegen`, `refinecheck`, `compiler` run
+- **`test` sharded 4 ways on ubuntu** (macOS: see below): `codegen`, `refinecheck`, `compiler` run
   their per-test dune aliases (`@test/runtest-run_codegen`, ...); `rest` runs
   `dune runtest` with `MARCH_CI_RUNTEST_SPLIT=1`, which an `enabled_if` on
   those three `(test)` stanzas in test/dune turns into "everything except
@@ -46,8 +46,16 @@ passed because another rule staged `runtime/` first. Declared now, the same way
 `run_compiler` does. Same run, the other shards and jobs were green, and wall
 time was 30 min against a 67 min median before.
 
+## macOS un-split
+
+The same first run measured job-minutes per pool: Linux 224 (down from ~250,
+`trmc-suite` gone), macOS 94 (up from ~57). The four macOS shards summed to 67
+min against 32 for one `dune runtest`, and macOS was never the critical path,
+so the split cost the 5-slot macOS pool for no wall-time gain. macOS is back to
+one `test (macos-15, all)` job; only ubuntu is sharded. Per run: 29 jobs
+(23 Linux, 6 macOS).
+
 ## Not verified locally
 
 CI wall-clock after the change: the new numbers come from the first runs on
-this branch. Net job count per run goes from 26 to 32 (Linux 20 -> 23, macOS 6
--> 9); the macOS legs are the likeliest to queue now.
+this branch.
