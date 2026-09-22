@@ -120,6 +120,12 @@ git log is authoritative for exact commits.
   refused until every actor has switched. Also fixed: with more than 2048 live
   actors of a type, the ones past the 2048th were never migrated at all. See
   `docs/hot-code-reload.md`, "Messages queued during a deploy".
+- **A function with a default argument no longer inherits the capabilities of an
+  interface method with the same name.** In a module that declares both an
+  interface method `f` (with a default body, or implemented by an `impl`) and a
+  plain `fn f(x, y \\ 1)`, the inferred capability closure of the pure `f`, and
+  of every function calling it, picked up whatever the method's body used (for
+  example `IO.Console`). The non-defaulted case was already handled correctly.
 - **`float_nan`, `float_infinity`, `float_neg_infinity`, `float_epsilon`,
   `float_is_nan`, `float_is_infinite` and `typed_array_slice` now work in
   compiled programs.** They typechecked and ran interpreted, but `--compile`

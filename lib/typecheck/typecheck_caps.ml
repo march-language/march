@@ -601,14 +601,6 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     | Ast.TyRecord _ -> "$Record"
     | _ -> "$Unknown"
   in
-  (* [DFn]s declared directly in this module — the guard that keeps the impl
-     DISPATCH node below from ever claiming a plain function's key. *)
-  let module_fn_names =
-    List.filter_map (function
-        | Ast.DFn (def, _) -> Some def.Ast.fn_name.Ast.txt
-        | _ -> None)
-      decls
-  in
   (* Append a single reference edge without a body walk. Used only for the
      impl dispatch node, which owns no expression of its own. *)
   let record_dispatch_edge (dispatch_qname : string) (target : string) =
@@ -636,6 +628,29 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          && String.for_all (fun c -> c >= '0' && c <= '9') suffix
       then Some (String.sub n 0 i)
       else None
+  in
+  (* [DFn]s declared directly in this module — the guard that keeps the
+     interface-default and impl DISPATCH nodes below from ever claiming a
+     plain function's key.
+
+     A defaulted [fn f(x \\ d)] reaches here only as its arity-mangled
+     variants ([f$1]/[f$2]), with no base [DFn] named [f] — yet the [DFn] arm
+     further down records every variant's caps and edges under the bare [f]
+     too (via [arity_mangled_base] above).  So "this module declares a [fn]
+     called [f]" has to count the mangled variants, or the guard misses them
+     and the dispatch edge lands on the very key the real function's callers
+     resolve through: a pure defaulted [f] then inherits the method's
+     capabilities in the transitive closure (measured 2026-09-22: bare
+     [greet_loud] closed over [IO.Console]).  Both sites now agree on what
+     declaring [f] means.  Pinned by
+     [test_interface_default_does_not_capture_a_defaulted_fn]. *)
+  let module_fn_names =
+    List.concat_map (function
+        | Ast.DFn (def, _) ->
+          let n = def.Ast.fn_name.Ast.txt in
+          n :: Option.to_list (arity_mangled_base n)
+        | _ -> [])
+      decls
   in
   List.iter (fun (d : Ast.decl) ->
       match d with
