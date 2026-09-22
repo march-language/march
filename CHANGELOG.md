@@ -32,6 +32,31 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **`Config` values are read through typed keys (breaking).** The untyped
+  `Config.put(:ns, :name, value)` / `Config.get(:ns, :name)` let a value
+  stored as an `Int` be read back as any type, e.g. handed to `is_alive` as a
+  `Pid` (interpreted: `is_alive: expected Pid`; compiled, every tuple-keyed
+  Config call panicked in `Vault` before getting that far). A key now names
+  its value type: `let port = Config.key(:myapp, :port, Config.int())` is a
+  `Config.Key(Int)`, `Config.put(port, 4000)` only accepts an `Int`, and
+  `Config.get(port)` is an `Option(Int)`. Storage stays heterogeneous; each
+  value is stored tagged, so a key minted for the same path with a different
+  codec reads `None` from `get` and `Err(Config.KeyWrongType(path, expected,
+  found))` from the new `Config.fetch`, never a value at the wrong type.
+  Codecs: `Config.int()`, `float()`, `string()`, `bool()`, `atom()`,
+  `list(c)`, and `Config.codec(name, encode, decode)` for your own types.
+  Migration: `Config.put(:a, :b, v)` → `Config.put(Config.key(:a, :b,
+  <codec>), v)`; `Config.get(:a, :b)` → `Config.get(<that key>)`;
+  `put_in`/`get_in`/`get_in_with_default`/`require_in`/`validate_in` →
+  the same call on `Config.key_in(:a, :section, :b, <codec>)`;
+  `store_put(s, :a, :b, v)`/`store_get(s, :a, :b)` (and their `_in` forms) →
+  `store_put(s, key, v)`/`store_get(s, key)`; `from_env*`, `validate`,
+  `get_with_default` and `require` take the key in place of `ns, key`.
+  `validate`'s not-set message now names the key
+  (`"Config: key :a/:b not set"`). `put_endpoint`, `endpoint_port`,
+  `endpoint_host`, `secret_key_base` and `env`/`is_*` are unchanged. The old
+  forms fail to typecheck (a misleading "This is not a function" on
+  `Config.put(a, b, c)`: it is the arity change).
 - **A malformed `forge.toml` is an error that names its line, and an unknown key is a
   warning.** forge used to drop any line it could not parse, ignore a `[section`
   header with no `]` and any text after a value, and ignore keys it did not know, so a
@@ -177,6 +202,16 @@ git log is authoritative for exact commits.
   counts records freed and `stat(9)` those waiting to be. An `Actor.reply`
   whose caller has already given up and exited is now dropped cleanly, as
   is a reply to a value that is not a reply reference.
+- **`OrderedMap.keys`, `OrderedMap.values` and `OrderedMap.from_list` work.**
+  All three passed a two-parameter lambda where a pair callback was expected
+  (and `from_list` had `List.fold_left`'s arguments in the wrong order), so
+  they returned a list of functions: `List.each(OrderedMap.values(m), println)`
+  failed with "expected `a -> a` but got `String`" at the caller's own line.
+  The test meant to catch this typechecked `ordered_map.march` in isolation,
+  where a call into another stdlib module resolves to an unconstrained type
+  variable and checks nothing; it now typechecks each file inside the whole
+  stdlib, as the compiler does.
+
 - **A `MARCH_SANITIZE=1` compile no longer returns a cached ThreadSanitizer
   binary.** The compile cache recorded only *whether* `MARCH_SANITIZE` was
   set, not which sanitizer it selected, so building a program with
