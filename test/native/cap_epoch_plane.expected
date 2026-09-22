@@ -1,0 +1,8 @@
+valid: true
+send_checked live: :ok
+valid after revoke: false
+send_checked revoked: :error
+send dead: None
+get_cap dead: None
+stale cap valid: false
+send_checked stale: :error

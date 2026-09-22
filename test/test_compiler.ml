@@ -4197,8 +4197,9 @@ let test_nested_actor_bare_spawn_from_entry_is_charged () =
    genuinely cannot tell which case a given function is.
 
    So this pins the CONDITION: the message must name the constructor-argument
-   shape, must say TRMC is on by default, must still warn about O(depth) stack
-   for the other case, and must NOT tell the user to pass `--trmc`. The
+   shape, must say TRMC always runs, must still warn about O(depth) stack
+   for the other case, and must NOT mention a TRMC flag (--trmc/--no-trmc were
+   removed 2026-09-22; TRMC cannot be turned off). The
    detection itself is unchanged; the warning still fires either way. *)
 let test_structural_recursion_warning_states_trmc_is_opt_in () =
   let ctx = typecheck {|mod W do
@@ -4228,8 +4229,11 @@ end|} in
     "the warning states the condition under which the loop happens"
     true (mentions "direct argument of a constructor in tail position");
   Alcotest.(check bool)
-    "the warning says the transformation is on by default"
-    true (mentions "on by default");
+    "the warning says the transformation always runs"
+    true (mentions "it always runs");
+  Alcotest.(check bool)
+    "the warning names no TRMC flag (none exists)"
+    false (mentions "trmc`");
   Alcotest.(check bool)
     "the warning does NOT tell the user to enable an opt-in flag"
     false (mentions "enable it with");
@@ -7999,8 +8003,7 @@ let test_policy_noalloc_alloc_violation () =
   Alcotest.(check bool) "Alloc_contract sees the allocation" true
     (Hashtbl.mem allocating "process");
   Alcotest.(check bool) "and reports it against the policy" true
-    (March_tir.Alloc_contract.check ~decls:[] ~allocating ~opt:true ~trmc:false
-       ~trmc_eligible:(fun _ -> false) m <> [])
+    (March_tir.Alloc_contract.check ~decls:[] ~allocating ~opt:true m <> [])
 
 let test_policy_noalloc_clean () =
   let m = mk_module [mk_tagged_fn "NoAlloc" (tir_int_lit 42)] in

@@ -8222,6 +8222,30 @@ int64_t march_revoke_cap(void *cap) {
     return march_atom_of_name("ok");
 }
 
+/* Resolve a cap's (pid_index, epoch) to the meta of the incarnation it names,
+ * or NULL if the cap no longer validates: revoked, unknown pid index, that
+ * incarnation dead (terminal_set), or an epoch mismatch.
+ *
+ * NEVER dereferences the actor pointer the cap carries (word[2]), and never
+ * reads the actor record's alive word: a cap holds no reference on its actor,
+ * so once the actor is dead and the program has dropped its last Pid, the
+ * record is freed and its memory reused.  Reading the alive word from that
+ * reused memory made a cap on a killed actor validate intermittently (is_cap_valid
+ * -> true, send_checked -> :ok, and a send into freed memory).  The meta, by
+ * contrast, is never freed (see g_actor_tbl) and terminal_set is claimed by
+ * do_actor_death under g_tbl_mu before the actor thread drops its own
+ * reference on the record.
+ *
+ * Caller must hold g_tbl_mu: that is what makes "terminal_set == 0" imply
+ * "the actor thread still holds its reference, so meta->actor is live" for
+ * as long as the lock is held. */
+static march_actor_meta *cap_live_meta_locked(int64_t pid_index, int64_t epoch) {
+    march_actor_meta *m = find_meta_by_pid_index(pid_index);
+    if (!m || !m->actor || m->terminal_set) return NULL;
+    if (atomic_load_explicit(&m->epoch, memory_order_acquire) != epoch) return NULL;
+    return m;
+}
+
 /* is_cap_valid(cap): return 1 if the capability is valid, 0 otherwise.
  * A capability is invalid if it is in the revocation table, the actor is dead,
  * or the actor's current epoch differs.  Takes the March-level Cap object,
@@ -8232,52 +8256,57 @@ int64_t march_is_cap_valid(void *cap) {
     int64_t pid_index = w[3];
     int64_t epoch     = w[4];
     if (revoc_contains(pid_index, epoch)) return 0;
-    march_actor_meta *m = find_meta_by_pid_index(pid_index);
-    if (!m || !march_is_alive(m->actor)) return 0;
-    if (atomic_load_explicit(&m->epoch, memory_order_acquire) != epoch) return 0;
-    return 1;
+    pthread_mutex_lock(&g_tbl_mu);
+    int valid = cap_live_meta_locked(pid_index, epoch) != NULL;
+    pthread_mutex_unlock(&g_tbl_mu);
+    return valid;
 }
 
 /* send_checked: send a message to an actor with capability check.
- * Validates liveness, epoch match, and revocation before enqueuing.
+ * Validates revocation, liveness and epoch match, then enqueues.
  *
  * Cap object layout (compiled VCap heap object):
  *   word[0] = rc (int64)
  *   word[1] = tag/pad (int64)
- *   word[2] = actor ptr (stored as int64, reinterpret as void*)
+ *   word[2] = actor ptr (NOT a counted reference; not read here, see
+ *             cap_live_meta_locked)
  *   word[3] = pid_index (int64)
  *   word[4] = epoch (int64)
  *
- * If cap is not a heap pointer (e.g. None/null), silently drop the message.
- */
+ * Returns the :ok atom only when march_send actually accepted the message,
+ * :error on any validation failure or when the send itself was refused (the
+ * actor died, or started draining, between validation and enqueue).  The
+ * validation and the send act on the same record: under g_tbl_mu we take our
+ * own reference on the live actor, so it cannot be freed before march_send
+ * reads it. */
 int64_t march_send_checked(void *cap, void *msg) {
-    /* Returns the :ok atom on delivery, :error on any validation failure —
-     * matching the interpreter's `send_checked : Cap(a) -> a -> Atom`
-     * (previously returned void; the call site then read garbage as the
-     * atom, so the result compared equal to neither :ok nor :error). */
     if (!cap || !IS_HEAP_PTR(cap)) {
         march_decrc(msg);
         return march_atom_of_name("error");
     }
     int64_t *cap_words = (int64_t *)cap;
-    void    *actor     = (void *)(uintptr_t)cap_words[2];
     int64_t  pidx      = cap_words[3];
     int64_t  epoch     = cap_words[4];
     if (revoc_contains(pidx, epoch)) {
         march_decrc(msg);
         return march_atom_of_name("error");
     }
-    march_actor_meta *meta = find_meta(actor);
-    if (!meta ||
-        atomic_load_explicit(&meta->pid_index, memory_order_relaxed) != pidx ||
-        atomic_load_explicit(&meta->epoch, memory_order_acquire) != epoch
-        || !march_is_alive(actor)) {
+    pthread_mutex_lock(&g_tbl_mu);
+    march_actor_meta *meta = cap_live_meta_locked(pidx, epoch);
+    void *actor = meta ? meta->actor : NULL;
+    if (actor) march_incrc(actor);
+    pthread_mutex_unlock(&g_tbl_mu);
+    if (!actor) {
         march_decrc(msg);
         return march_atom_of_name("error");
     }
+    /* march_send returns Option(Unit) as a boxed cell: Some(()) carries tag 1
+     * at offset 8, None is a bare tag-0 header.  It consumes msg either way. */
     void *result = march_send(actor, msg);
+    int delivered = ((int32_t *)((char *)result + 8))[0] == 1;
     march_decrc(result);
-    return march_atom_of_name("ok");
+    march_decrc(actor);
+    return march_atom_of_name(delivered ? "ok" : "error");
 }
 
 /* march_pid_of_int(n) is an escape hatch: March code that stores a child's

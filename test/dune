@@ -3051,7 +3051,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ;; TRMC's reuse_hole on a SHARED scrutinee moved the cell's fields out with
 ;; no dup (the case arm's rb_shared path recognised only EReuse): the next
 ;; iteration reused a cell another holder still had. Pre-fix: RC underflow;
-;; --no-trmc was fine. Expected output is the interpreter's.
+;; the non-TRMC build (a since-removed flag) was fine. Expected output is the interpreter's.
 (rule
  (targets native_trmc_shared_tail_reuse native_trmc_shared_tail_reuse.out)
  (deps (file %{exe:../bin/main.exe})
@@ -4602,6 +4602,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/supervisor_spawn_children.expected native_supervisor_spawn_children.out)))
+
+; ── Regression: compiled send_checked / is_cap_valid on a cap whose actor was
+; killed intermittently reported :ok / true (~20% of runs).  A cap holds no
+; reference on its actor, so once the actor was dead and the program dropped
+; its last Pid the record was freed and reused, and both calls read the alive
+; word out of that reused memory (send_checked also ignored march_send's own
+; result).  They now validate against the never-freed meta (terminal_set,
+; epoch) under g_tbl_mu and send through a reference taken there.  The golden
+; is the interpreter's output; because the old bug was a flake, the program
+; runs once for the golden and 50 more times, each of which must print exactly
+; the same.  See specs/progress/2026-09-22-send-checked-stale-cap.md.
+(rule
+ (targets native_cap_epoch_plane native_cap_epoch_plane.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/cap_epoch_plane.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_cap_epoch_plane
+        native/cap_epoch_plane.march)
+   (with-stdout-to native_cap_epoch_plane.out
+        (system "first=$(./native_cap_epoch_plane) && echo \"$first\" && i=0 && while [ $i -lt 50 ]; do again=$(./native_cap_epoch_plane); [ \"$again\" = \"$first\" ] || { echo \"-- run $i differed:\"; echo \"$again\"; }; i=$((i+1)); done")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/cap_epoch_plane.expected native_cap_epoch_plane.out)))
 
 ; ── Regression: the crash trap must restore the actor record's refcount that
 ; the dispatch loop clobbers to 1 for FBIP.  march_panic's longjmp used to

@@ -886,14 +886,9 @@ let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -
 let codegen_cas_tags () =
   "rtcflags2"
   :: (if Sys.getenv_opt "MARCH_SANITIZE" <> None then ["sanitize"] else [])
-  (* TRMC rewrites eligible functions into destination-passing style, so it
-     changes the emitted binary.  Without this tag a cached non-TRMC artifact
-     silently satisfies a TRMC build and vice versa — which is exactly how the
-     first TRMC benchmark run reported a 0.06s "TRMC off" number that was
-     really the TRMC binary served from the cache.  Reads the ref, not the env
-     var, so --trmc/--no-trmc are also CAS-distinct; every cas_flags site is
-     inside [compile], which runs after Arg.parse has set it. *)
-  @ (if !March_tir.Trmc.enabled then ["trmc"] else [])
+  (* No "trmc" tag: TRMC always runs (--trmc/--no-trmc were removed
+     2026-09-22), so there is no non-TRMC artifact for a TRMC build to be
+     confused with.  Dropping the tag changed every CAS key once. *)
   @ (if (try Sys.getenv "MARCH_HTTP_EVLOOP" = "1" with Not_found -> false)
      then ["evloop"] else [])
   @ (if !fast_math then ["fast-math"] else [])
@@ -2111,7 +2106,7 @@ let compile filename =
   let contract_diags = lazy (
     List.filter is_user_file
       (March_tir.Contract_pipeline.check_contracts ~type_map
-         ~opt:!opt_enabled ~trmc:!March_tir.Trmc.enabled
+         ~opt:!opt_enabled
          ~user_decls:user_contract_decls desugared)) in
   let contract_rejected () =
     List.exists (fun (d : March_errors.Errors.diagnostic) ->
@@ -2658,7 +2653,7 @@ let compile filename =
                       then List.map (fun (d : March_tir.Alloc_contract.decl_info) ->
                           d.March_tir.Alloc_contract.d_name) contract_decls
                       else [])
-        ~opt:!opt_enabled ~trmc:!March_tir.Trmc.enabled tir
+        ~opt:!opt_enabled tir
       with March_tir.Mono.Repr_disagreement msg ->
         (* A real defect in the program or the stdlib manifest, not a compiler
            bug: render it as one clean error rather than letting it reach the
@@ -4117,7 +4112,7 @@ let run_check_cmd ?(emit_caps = false) files =
     let contract_diags =
       List.filter is_user_file
         (March_tir.Contract_pipeline.check_contracts ~type_map:check_type_map
-           ~opt:!opt_enabled ~trmc:!March_tir.Trmc.enabled
+           ~opt:!opt_enabled
            ~user_decls:(March_tir.Alloc_contract.collect (program all_decls))
            (program (stdlib_decls @ all_decls)))
     in
@@ -4525,15 +4520,11 @@ let () =
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");
     ("--no-opt",    Arg.Clear opt_enabled,  " Skip TIR optimization passes");
     ("--fast-math",  Arg.Set fast_math,  " Emit 'fast' on all FP LLVM instructions");
-    ("--trmc", Arg.Unit (fun () -> March_tir.Trmc.enabled := true),
-     " Enable tail-recursion-modulo-cons (destination-passing rewrite)");
     ("--pin-main",
      Arg.Unit (fun () -> March_tir.Llvm_toplevel.pin_main := true),
      " pin `main` to the process main thread (Cocoa/GLFW need it); bakes in\n\
      \      what MARCH_PIN_MAIN=1 does at run time, so a double-clickable app\n\
      \      does not depend on the environment");
-    ("--no-trmc", Arg.Unit (fun () -> March_tir.Trmc.enabled := false),
-     " Disable tail-recursion-modulo-cons");
     ("--pmap-threshold", Arg.Set_int pmap_threshold, "<N>  List.pmap/pfilter/preduce fall back to sequential below N elements (default 1024)");
     ("--opt",        Arg.Set_int opt_level, "<N>  Optimization level passed to clang (0-3)");
     ("--debug",     Arg.Set debug_mode,     " Enable time-travel debugger (simple mode)");
@@ -4549,17 +4540,11 @@ let () =
     ("--emit-core-ast", Arg.String (fun f -> emit_core_ast_file := Some f),
      " <file.march>  Emit desugared core AST + verdict + diagnostics as JSON to stdout");
   ] in
-  (* Env-var form of --trmc.  Seeded BEFORE Arg.parse so it acts as a DEFAULT
-     and an explicit --no-trmc on the command line still wins.
-
-     MARCH_TRMC=1 predates --trmc and is now a no-op against the default;
-     it is kept because external scripts set it.  There is deliberately no
-     MARCH_NO_TRMC any more (removed 2026-09-21): its only user was CI's
-     whole-suite trmc-suite job, and an ambient switch that turns off a
-     transform the stdlib now depends on is a crash waiting on a large list
-     (specs/todos/2026-09-09-rewrite-stdlib-list-producers-into-natural-style.md).
-     --no-trmc, per invocation, is the one way to turn it off. *)
-  if Sys.getenv_opt "MARCH_TRMC" <> None then March_tir.Trmc.enabled := true;
+  (* Tail-recursion-modulo-cons always runs; there is no flag or env var
+     to turn it off (--trmc/--no-trmc removed 2026-09-22, MARCH_NO_TRMC
+     2026-09-21).  The stdlib's list producers depend on it to be loops:
+     specs/todos/2026-09-09-rewrite-stdlib-list-producers-into-natural-style.md.
+     A leftover MARCH_TRMC=1 in the environment is simply ignored. *)
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   (* --target js implies --compile (skip JIT, emit .mjs) *)
   if !target_str = "js" || !target_str = "javascript" then do_compile := true;

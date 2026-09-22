@@ -20,8 +20,11 @@ type reason =
      rendered by [pred_str], rides in [reason_detail] only; [reason_name]
      stays payload-free so `--refine-report` groups every
      unreflectable-predicate skip into one bucket instead of one per distinct
-     sub-expression. *)
-  | Unreflectable_predicate of string
+     sub-expression.  The optional second field is a sentence saying WHY
+     that leaf did not translate, when the reflector knows a reason more
+     specific than "it has no translation" — today only a `/`/`%` outside
+     the truncation-safe fragment ([Refine_scope.division_outside_fragment_hint]). *)
+  | Unreflectable_predicate of string * string option
   (* The SUBJECT did not reflect: a call's actual argument, or a
      postcondition's own return expression, whichever is being checked. Filed
      before the predicate is ever reached, so a subject failure never gets
@@ -296,8 +299,10 @@ let reason_name = function
    predicate would have been told to rewrite it and sent chasing the wrong
    thing.  Nothing but a debug count depended on the conflation. *)
 let reason_detail = function
-  | Unreflectable_predicate sub ->
+  | Unreflectable_predicate (sub, None) ->
     Printf.sprintf "the predicate's `%s` has no SMT translation" sub
+  | Unreflectable_predicate (sub, Some why) ->
+    Printf.sprintf "the predicate's `%s` has no SMT translation: %s" sub why
   | Unreflectable_subject phrase ->
     Printf.sprintf "%s could not be translated to SMT, so no goal was built" phrase
   | Sort_conflict -> "reflecting it would declare one symbol at two different sorts"

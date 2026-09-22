@@ -161,7 +161,8 @@ let rec collect_consts (acc : (string, unit) Hashtbl.t) (t : Smt.term) : unit =
   | Smt.Lt (a, b) | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) ->
     collect_consts acc a; collect_consts acc b
-  | Smt.MulLit (_, t) | Smt.Neg t | Smt.Not t -> collect_consts acc t
+  | Smt.MulLit (_, t) | Smt.DivLit (t, _) | Smt.ModLit (t, _) | Smt.Neg t | Smt.Not t ->
+    collect_consts acc t
   | Smt.App (_, ts) | Smt.Ctor (_, _, ts) -> List.iter (collect_consts acc) ts
   | _ -> ()
 

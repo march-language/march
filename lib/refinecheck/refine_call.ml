@@ -2607,8 +2607,9 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
              | `Other when sibling_failures <> [] ->
                Obligation.Unreflectable_subject sibling_display
              | `Other | `Record _ ->
+               let leaf = Option.value !pred_fail_expr ~default:rp.pred in
                Obligation.Unreflectable_predicate
-                 (pred_str (Option.value !pred_fail_expr ~default:rp.pred))))
+                 (pred_str leaf, division_outside_fragment_hint leaf)))
      | Some goal when not (wellsorted (Hashtbl.mem str_names) goal) ->
        note (Obligation.Skipped Obligation.Sort_conflict)
      | Some goal ->

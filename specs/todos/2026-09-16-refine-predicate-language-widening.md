@@ -1,38 +1,36 @@
-# `[P3]` Refinement predicates: `/` and `%` are outside the fragment
+# `[P3]` Refinement predicates: general truncating `/` and `%`
 
-Filed 2026-09-16. Two of this item's three original parts have landed:
-non-linear `*` (`specs/progress/2026-09-16-refine-nonlinear-multiplication.md`)
-and the empty-string length fact
-(`specs/progress/2026-09-16-refine-empty-string-length.md`). What remains:
+Filed 2026-09-16. Three parts of this item have landed: non-linear `*`
+(`specs/progress/2026-09-16-refine-nonlinear-multiplication.md`), the
+empty-string length fact (`specs/progress/2026-09-16-refine-empty-string-length.md`),
+and increment 1 of division, the truncation-safe fragment
+(`specs/progress/2026-09-22-refine-predicate-division-fragment.md`): `/` and
+`%` reflect to `Smt.DivLit`/`Smt.ModLit` when the divisor is a non-zero
+integer literal and the dividend is known non-negative
+(`Refine_scope.known_nonneg`). What remains is increment 2.
 
-`smt_of_r_marked` (`lib/refinecheck/refine_scope.ml`) has no `/` or `%` arm, so
-a predicate using either is an `unreflectable-predicate` skip
-(pinned at `test/test_refinecheck.ml`'s `_ / 2` fixture, which any
-implementation must rewrite).
+**General truncation.** Outside that fragment (a possibly-negative dividend,
+or a non-literal divisor) a predicate using `/`/`%` is still an
+`unreflectable-predicate` skip, pinned by `test/test_refinecheck.ml`'s UP2
+(`_ / 2 > 0`) and the "division outside the fragment" cases, which any
+implementation must rewrite.
 
-**The semantics, not the plumbing, are the work.** March's `/` and `%`
-truncate toward zero (`specs/lang/core-march.md:1040-1058`, implemented by
-OCaml's native operators in `lib/eval/eval_builtins.ml:30-42` and mirrored in
-`runtime/march_runtime.mjs:326-340`); SMT-LIB's `div`/`mod` are Euclidean, so
-`(-7) / 2` is `-3` in March and `-4` in the logic. Rendering one as the other
-is unsound in the false-positive direction — it would make the checker certify
-code that can fail.
+March's `/` and `%` truncate toward zero (`specs/lang/core-march.md:1040-1058`);
+SMT-LIB's `div`/`mod` are Euclidean, so `(-7) / 2` is `-3` in March and `-4`
+in the logic. The general encoding is
+`ite(a >= 0, div a b, -(div (-a) b))` (and the matching remainder), which
+needs:
 
-Direction, in two increments:
+- an `Ite` constructor that `lib/refine/smt.ml` does not have, plus arms in
+  every exhaustive term walk (the `DivLit`/`ModLit` arms added by increment 1
+  mark each site) and a case in `formula_wellsorted`'s Bool-vs-Int structure;
+- for a non-literal divisor, a side condition that it is non-zero (a zero
+  divisor panics at run time; the predicate has no value there), which
+  `Division_safety.syntactic_nonzero` can serve for the easy shapes;
+- the SMT-side non-negativity question could then replace the syntactic
+  `known_nonneg` context entirely, or be kept as the fast path that keeps
+  queries free of `ite`.
 
-1. **Restricted fragment.** Admit `/` and `%` only with a non-zero integer
-   literal divisor and a provably non-negative dividend, where truncating and
-   Euclidean agree. The `@[measure]` totality gate
-   (`lib/refinecheck/refine_encode.ml`, the `/`/`%` arm) already implements the
-   literal-divisor half and is a tested precedent; `Division_safety`'s
-   `syntactic_nonzero` is directly reusable for the divisor side.
-2. **General truncation**, as `ite(a >= 0, div a b, -(div (-a) b))`. Needs an
-   `Ite` constructor that `lib/refine/smt.ml` does not have, plus an arm in
-   `formula_wellsorted`'s Bool-vs-Int structure. Separate PR.
-
-**The trap that makes this silent if missed:** `witness.ml`'s `eval_operand`
-is a hand-written evaluator, not the interpreter, and its integer arithmetic
-arm handles only `+ - *`. Without matching arms implementing OCaml's
-*truncating* semantics (and returning `None` on a zero divisor rather than
-raising), a refuted obligation becomes unconfirmable and the checker reports
-nothing at all.
+`witness.ml`'s `eval_operand` already evaluates truncating `/`/`%` (returning
+`None` on a zero divisor), so refutations under the general encoding will be
+confirmable without further work there.

@@ -42,8 +42,12 @@ nothing in it reads the repo's Markdown. Mix in any other file and it all runs.
 read Markdown.
 
 A newer push to a PR cancels that PR's older run (`concurrency`,
-`cancel-in-progress`). Pushes to `main` never cancel each other, so every
-`main` commit gets a verdict; the nightly gate reads those verdicts.
+`cancel-in-progress`). Pushes to `main` share one concurrency group without
+cancel-in-progress: the run already in flight finishes and gets its verdict,
+but only the newest merge stays queued behind it (GitHub cancels the older
+pending run in a group). So a burst of merges costs one run, not one per
+merge, and intermediate `main` commits get no verdict of their own; the
+nightly gate skips cancelled runs and reads the next completed one.
 
 Every check is its own job so the critical path is the slowest job, not the
 sum. There is no required-check list in branch protection; "green" means every

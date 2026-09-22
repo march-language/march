@@ -617,6 +617,16 @@ let name_is_variant env name =
    chain can pass through either. *)
 let expanding_records : StringSet.t ref = ref StringSet.empty
 
+(* Transparent aliases currently being expanded on the current [surface_ty]
+   call path, innermost first. Unlike a record, an alias has no nominal form to
+   fall back on: `type A = A`, or a cycle `type A = B` / `type B = A`, names no
+   type at all, and expanding it would recurse forever. On a repeat [surface_ty]
+   reports the cycle and returns [TError]. No source syntax builds an alias
+   today (the only ones are `@[endpoints]`'s generated `Entry`s, whose
+   right-hand sides are never aliases), so this guards whoever adds alias
+   syntax rather than anything reachable now. *)
+let expanding_aliases : string list ref = ref []
+
 (** Convert a surface [Ast.ty] to an internal [ty].
     [tvars] accumulates a mapping from type-variable *names* to fresh
     unification-variable ids (so that two mentions of [a] in the same
@@ -673,7 +683,21 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
           `always_linear` discipline, which reads the expanded type's name. *)
        let params, rhs = StrMap.find name.Ast.txt env.ty_aliases in
        let args' = List.map (surface_ty env ~tvars) args in
-       if List.length params <> List.length args' then begin
+       if List.mem name.Ast.txt !expanding_aliases then begin
+         (* [expanding_aliases] is innermost-first; the cycle is the stretch
+            from this alias's outer occurrence in to here. *)
+         let rec upto acc = function
+           | [] -> acc
+           | n :: _ when n = name.Ast.txt -> n :: acc
+           | n :: rest -> upto (n :: acc) rest
+         in
+         let cycle = upto [] !expanding_aliases @ [name.Ast.txt] in
+         Err.error env.errors ~span:name.Ast.span
+           (Printf.sprintf "`%s` is defined in terms of itself (%s)."
+              name.Ast.txt
+              (String.concat " -> " (List.map (Printf.sprintf "`%s`") cycle)));
+         TError
+       end else if List.length params <> List.length args' then begin
          Err.error env.errors ~span:name.Ast.span
            (Printf.sprintf "`%s` expects %d type argument(s) but got %d."
               name.Ast.txt (List.length params) (List.length args'));
@@ -681,7 +705,13 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
        end else begin
          let saved = !tvars in
          List.iter2 (fun pname arg -> tvars := (pname, arg) :: !tvars) params args';
-         let t = surface_ty env ~tvars rhs in
+         let outer = !expanding_aliases in
+         expanding_aliases := name.Ast.txt :: outer;
+         let t =
+           Fun.protect
+             ~finally:(fun () -> expanding_aliases := outer)
+             (fun () -> surface_ty env ~tvars rhs)
+         in
          tvars := saved;
          t
        end

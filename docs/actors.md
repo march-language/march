@@ -15,7 +15,7 @@ March's concurrency model is built on **actors** and **tasks**. Actors are isola
 
 **What matches exactly interpreted vs compiled, and what does NOT.** The **live-message plane** (`spawn` / `send` (to a live actor) / `receive` / `run_until_idle` / `is_alive` / `kill`) produces identical observable output on both backends for a program with output that does not depend on scheduler interleaving; this is mechanically pinned by the golden conformance corpus (`specs/lang/golden/g35`–`g37`, verified `MATCH` interpreted-vs-compiled; see the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.5). The **`Actor.call` plane** is also backend-identical as of 2026-07-13: both backends tag-route the zero-arg sentinel positionally to the handler at its ctor index, and both enforce `timeout_ms` (compiled via a deadline-bounded park in `march_actor_call`, `runtime/march_runtime.c`; `timeout_ms <= 0` means wait indefinitely); pinned by `test/native/actor_counter` and `test/native/actor_call_timeout`. The two formerly-diverging planes are also backend-identical now (their historical findings are closed in the `specs/todos/` ledger):
 
-- **Capabilities / dead-`send`** (`get_cap`, `send_checked`, `revoke_cap`, `is_cap_valid`, plain `send` to a *dead* pid): an exact byte match as of 2026-07-18: compiled `get_cap` builds the real epoch cap (niche `None` for a dead/unknown pid), `send_checked`/`revoke_cap` return the same `:ok`/`:error` atoms as the interpreter, and `send` to a dead pid returns `None` on both backends. Exercised by `test/native/cap_epoch_plane.march` (a fixture with no `.expected` and no `test/dune` rule, so nothing runs it in CI); one known exception, below under [Capability-Based Messaging](#capability-based-messaging): compiled `send_checked` on a stale cap after `kill` intermittently returns `:ok`. See [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6.
+- **Capabilities / dead-`send`** (`get_cap`, `send_checked`, `revoke_cap`, `is_cap_valid`, plain `send` to a *dead* pid): an exact byte match as of 2026-07-18: compiled `get_cap` builds the real epoch cap (niche `None` for a dead/unknown pid), `send_checked`/`revoke_cap` return the same `:ok`/`:error` atoms as the interpreter, and `send` to a dead pid returns `None` on both backends. Until 2026-09-22 compiled `is_cap_valid`/`send_checked` on a cap whose actor had been *killed* intermittently answered `true`/`:ok` (about one run in five), because they read the actor record after it had been freed; fixed, and `test/native/cap_epoch_plane` now runs the program 51 times per test run so a flake of that shape fails. See [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6.
 - **Supervision / external state inspection**: `get_actor_field`/`pid_of_int` and the full compiled supervision plane (spawn-time child `init`, crash isolation, all three restart strategies) work compiled as of 2026-07-08 (`examples/supervision_strategies.march` runs clean). See [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.7.
 
 The rest of this tutorial marks each interp-only surface where it appears. For the typing side (actor declaration, `spawn`/`Pid` typing, message-payload typing) see the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6; for the scheduler and lowering internals, see the implementation reference (`specs/impl/index.md`).
@@ -389,14 +389,15 @@ The epoch-`Cap` validation plane is an exact match on both backends as of 2026-0
 compiled `get_cap` gates on liveness (niche `None` for a dead/unknown pid) and compiled
 `send_checked` returns the same `:ok`/`:error` atoms as the interpreter after checking
 revocation, epoch match, and liveness (`march_send_checked`/`march_get_cap`,
-`runtime/march_runtime.c`). `revoke_cap` and
+`runtime/march_runtime.c`); pinned by `test/native/cap_epoch_plane`. A cap holds no
+reference on its actor, so both calls validate against the actor's runtime metadata
+(its terminal flag and epoch), never the actor record itself, and `send_checked`
+returns `:ok` only when the underlying send actually accepted the message (an actor
+that dies or starts draining between the check and the enqueue gives `:error`). Before
+2026-09-22 the compiled backend read the record's alive word after the record could
+already be freed and reused, so a cap on a killed actor intermittently validated. `revoke_cap` and
 `is_cap_valid` are registered in the typechecker (`lib/typecheck/typecheck_builtins.ml`) and
-surface-callable on both backends. **Known compiled gap (observed 2026-09-22):** a
-`send_checked` on a cap captured while the actor was alive, sent after `kill`,
-intermittently returns `:ok` compiled (5 of 40 runs of `test/native/cap_epoch_plane.march`)
-where the interpreter always returns `:error`, even though `is_cap_valid` on the same cap has
-just returned `false`. `test/native/cap_epoch_plane.march` has no `.expected` and no
-`test/dune` rule, so CI does not catch it. See [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6 for the full
+surface-callable on both backends. See [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6 for the full
 epoch-invalidation model.
 
 ---

@@ -930,17 +930,6 @@ let source_name (n : string) : string =
       (String.sub n (j + 1) (String.length n - j - 1))
   | _ -> n
 
-(* Fires only when TRMC is OFF, which since 2026-09-09 means the user passed
-   --no-trmc. The note used to read "compiling with --trmc
-   turns the constructor into an in-place write", which was correct while the
-   transform was opt-in and is now backwards: the allocation this diagnostic is
-   complaining about exists BECAUSE the default was turned off. Say that, so
-   the reader knows the fix is to drop their flag, not to add one. *)
-let trmc_note = "This function is TRMC-eligible: with tail-recursion-modulo-cons \
-                 the constructor would be an in-place write and this function \
-                 would not allocate. It is on by default and something turned it \
-                 off here — check for `--no-trmc`."
-
 (* ── Generation scope (LSP quick fix and forge fix --contracts) ───────── *)
 
 (* A glob is a module/function pattern with `*` standing for any run of
@@ -1008,15 +997,17 @@ let generation_candidates ~decls ~(allocating : (string, reason) Hashtbl.t)
 let has_noalloc_policy (fd : Tir.fn_def) : bool =
   List.exists (fun c -> c = Policy_dce.NoAlloc) (Policy_dce.policies_of_fn fd)
 
-(** [check ~decls ~allocating ~retaining ~opt ~trmc ~trmc_eligible m]: one
-    diagnostic per failing contract, from its first failing monomorphised
-    clone.  [retaining] carries the @[no_alloc(transient)] verdicts.  [opt =
-    false] (--no-opt) downgrades the hard form to a warning that names the
-    flag; a direct constructor allocation in a TRMC-eligible function gets
-    [trmc_note] while TRMC is off, which now means the user disabled it. *)
+(** [check ~decls ~allocating ~retaining ~opt m]: one diagnostic per failing
+    contract, from its first failing monomorphised clone.  [retaining]
+    carries the @[no_alloc(transient)] verdicts.  [opt = false] (--no-opt)
+    downgrades the hard form to a warning that names the flag.
+
+    There used to be a TRMC note here too, for a constructor allocation in a
+    TRMC-eligible function; it could only fire with TRMC off, and TRMC can no
+    longer be turned off. *)
 let check ~decls ~(allocating : (string, reason) Hashtbl.t)
-    ?(retaining : (string, retain) Hashtbl.t = Hashtbl.create 0) ~opt ~trmc
-    ~(trmc_eligible : string -> bool) (m : Tir.tir_module)
+    ?(retaining : (string, retain) Hashtbl.t = Hashtbl.create 0) ~opt
+    (m : Tir.tir_module)
   : March_errors.Errors.diagnostic list =
   let seen = Hashtbl.create 16 in
   let policy_diags =
@@ -1054,15 +1045,10 @@ let check ~decls ~(allocating : (string, reason) Hashtbl.t)
           | (Assume | Transient), _ ->
             assert false (* excluded by the pattern above *)
         in
-        let notes =
-          match reason with
-          | Ctor _ when (not trmc) && trmc_eligible d.d_name -> [ trmc_note ]
-          | _ -> []
-        in
         let head = match d.d_cap with
           | Some m -> Printf.sprintf "`%s` is in `cap no_alloc` module `%s`" name m
           | None -> Printf.sprintf "`%s` is marked @[no_alloc]" name in
-        Some (diag ~severity ~span:d.d_name_span ~code:"no_alloc" ~notes
+        Some (diag ~severity ~span:d.d_name_span ~code:"no_alloc"
                 (failure_message ~head ~name ~suffix reason))
       | _ -> None) m.Tir.tm_fns
   @

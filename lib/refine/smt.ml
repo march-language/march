@@ -96,6 +96,15 @@ type term =
      tactic and decides these instantly.  Where it cannot, the answer is
      `unknown`, which every caller already treats as *not proved*. *)
   | Mul of term * term
+  (* Integer `div`/`mod` by a NON-ZERO integer literal (the int is the
+     divisor).  SMT-LIB's `div`/`mod` are Euclidean; March's `/`/`%`
+     truncate toward zero.  The two agree exactly when the dividend is
+     non-negative (for either sign of divisor), so these are constructed
+     ONLY where the reflector has established that — see [smt_of_r_marked]'s
+     division arm in lib/refinecheck/refine_scope.ml.  Anywhere else,
+     rendering one as the other would certify code that can fail. *)
+  | DivLit of term * int
+  | ModLit of term * int
   | Neg of term
   | Not of term
   | And of term * term
@@ -148,8 +157,8 @@ let children (t : term) : term list =
   match t with
   | Const _ | IntLit _ | BoolLit _ | FloatLit _ | SetEmpty _ -> []
   | App (_, args) | Ctor (_, _, args) -> args
-  | IsCtor (_, a) | IsCtorAt (_, _, _, a) | MulLit (_, a) | Neg a | Not a | SetSng (_, a)
-  | SetCard (_, a) -> [ a ]
+  | IsCtor (_, a) | IsCtorAt (_, _, _, a) | MulLit (_, a) | DivLit (a, _) | ModLit (a, _)
+  | Neg a | Not a | SetSng (_, a) | SetCard (_, a) -> [ a ]
   | Add (a, b) | Sub (a, b) | Mul (a, b) | And (a, b) | Or (a, b) | Implies (a, b) | Eq (a, b)
   | Ne (a, b) | Lt (a, b) | Le (a, b) | Gt (a, b) | Ge (a, b) | FpEq (a, b) | FpLt (a, b)
   | FpLe (a, b) | FpGt (a, b) | FpGe (a, b) | SetMem (a, b) | SetUnion (a, b) | SetInter (a, b)
@@ -275,6 +284,8 @@ let rec render = function
   | Sub (a, b) -> Printf.sprintf "(- %s %s)" (render a) (render b)
   | MulLit (k, a) -> Printf.sprintf "(* %d %s)" k (render a)
   | Mul (a, b) -> Printf.sprintf "(* %s %s)" (render a) (render b)
+  | DivLit (a, k) -> Printf.sprintf "(div %s %s)" (render a) (render (IntLit k))
+  | ModLit (a, k) -> Printf.sprintf "(mod %s %s)" (render a) (render (IntLit k))
   | Neg a -> Printf.sprintf "(- %s)" (render a)
   | Not a -> Printf.sprintf "(not %s)" (render a)
   | And (a, b) -> Printf.sprintf "(and %s %s)" (render a) (render b)
