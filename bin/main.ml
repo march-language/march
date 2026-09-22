@@ -3110,8 +3110,10 @@ let compile filename =
                  case `forge cap run` cannot reach.  Externally imposed
                  enforcement stays the stronger mechanism.
 
-                 Baseline mirrors forge/lib/cap_sandbox.ml's sbpl_baseline;
-                 the two are kept in step by test/test_cap_sandbox_profile.ml. *)
+                 Baseline mirrors forge/lib/cap_sandbox.ml's sbpl_baseline,
+                 minus process-exec (gated on IO.Process below; forge needs it
+                 unconditionally for a different reason); the two are kept in
+                 step by test/test_cap_sandbox_profile.ml. *)
               if not !cap_sandbox then ""
               else begin
                 (* Filter to THIS module's own functions.  Using the whole
@@ -3131,7 +3133,6 @@ let compile filename =
                 in
                 let b = Buffer.create 512 in
                 Buffer.add_string b "(version 1)(deny default)";
-                Buffer.add_string b "(allow process-exec)";
                 Buffer.add_string b "(allow file-read* file-read-metadata)";
                 Buffer.add_string b
                   "(allow file-write-data (literal \\\"/dev/null\\\") \
@@ -3184,7 +3185,18 @@ let compile filename =
                       write_scopes
                 end;
                 if holds "IO.Network"   then Buffer.add_string b "(allow network*)";
-                if holds "IO.Process"   then Buffer.add_string b "(allow process-fork)";
+                (* process-exec is gated with process-fork, NOT baseline.
+                   forge's profile_for keeps it unconditional because
+                   sandbox-exec must itself exec the target (deny -> exit 71);
+                   here the profile is applied from INSIDE the already-running
+                   process (march_sandbox_install), so nothing needs to exec
+                   it again.  Measured 2026-09-21 (macOS 26, arm64): without
+                   process-exec a sandboxed binary starts, spawns threads and
+                   allocates normally, and execve() returns EPERM.  This makes
+                   IO.Process cover exec on both backends (Linux denies
+                   execve/execveat via MARCH_CAP_DENY_EXEC below). *)
+                if holds "IO.Process"   then
+                  Buffer.add_string b "(allow process-fork)(allow process-exec)";
                 (* Per-capability DENY flags, consumed by the Linux
                    seccomp-bpf builder in runtime/march_runtime.c.  Emitted on
                    both platforms so the two backends are driven by one

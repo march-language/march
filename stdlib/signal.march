@@ -18,6 +18,10 @@
 -- Ctrl-C-twice escape hatch).  Hup / Usr1 / Usr2 have no default action while
 -- watched, and their default OS disposition is restored on `unwatch`.
 --
+-- In compiled programs the scheduler's preemption signal cannot be watched:
+-- Usr1 by default, or whichever signal MARCH_PREEMPT_SIGNAL selects (setting it
+-- to USR2 frees Usr1; a Linux RTMIN signal frees both).
+--
 -- Example:
 --
 --     Signal.watch(Signal.Term, fn ->
