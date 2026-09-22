@@ -175,9 +175,13 @@ control reader feeding CREDIT back. Two things it taught:
   after the local endpoint has closed is a clean end (the peer's Bye may
   still be in its writer when it closes).
 
-Witness `test/native/credit_backpressure_loopback`: budget 100, two 44-byte
-frames admitted, the third `Backpressure`; the receiver consumes after a
-"go" on control, its CREDIT re-admits the third; receiver consumed 3.
+Witness `test/native/credit_backpressure_loopback`: budget 100, 44-byte
+frames; frames 1-2 are written under the initial credit (the test waits for
+`depth == 0`), 3-4 sit queued behind the credit line (`depth == 88`), the
+fifth is `Backpressure`; the receiver consumes after a "go" on control, its
+CREDIT re-admits the fifth; receiver consumed 5. (Reworked 2026-09-22 from a
+three-frame version that raced the writer actor; see
+`2026-09-22-flake-credit-backpressure-loopback-timing.md`.)
 Unit tests in `test/stdlib/test_node_queue.march`.
 
 ---
