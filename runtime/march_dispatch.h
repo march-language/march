@@ -59,6 +59,14 @@ int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
  * a concurrent publish advances "current". Returns NULL if out of range. */
 void *march_dispatch_enter(uint32_t name_id, uint32_t *out_version);
 
+/* Pin one SPECIFIC ring version of [name_id] (not "current"), for a caller
+ * that must keep running an older version after a newer one is published:
+ * a hot-reload actor stays on the code its state layout belongs to until it
+ * reaches its migrate marker (march_actor_publish_migrating).  Returns NULL,
+ * pinning nothing, if the version is out of range or not live. */
+void *march_dispatch_enter_version(uint32_t name_id, uint32_t version,
+                                   uint32_t *out_version);
+
 /* Unpin a version previously returned by enter. */
 void march_dispatch_leave(uint32_t name_id, uint32_t version);
 

@@ -5,11 +5,79 @@ on:
   schedule:
     - cron: "0 0 * * *"  # midnight UTC daily
   workflow_dispatch:        # allow manual trigger
+    inputs:
+      force:
+        description: "Build main's HEAD even if it is not green or nothing changed since the last nightly"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+  actions: read   # gate: read CI's runs on main
 
 jobs:
+  # Decides whether tonight's nightly runs at all, and which commit it builds.
+  # Every other job needs it and checks out `needs.gate.outputs.sha`.
+  #
+  #   main is green: walk CI's push runs on main newest-first. Runs still in
+  #     progress are skipped over (a merge minutes before midnight must not
+  #     cost the night); the first COMPLETED run decides: success -> that
+  #     commit is the candidate; failure / timed_out / startup_failure -> main
+  #     is red, no nightly. Cancelled runs are skipped over (main runs do not
+  #     cancel each other, so one is a manual cancel, not a verdict).
+  #   new changes: the candidate must be strictly ahead of the rolling
+  #     `nightly` tag, which `publish` moves to the commit it shipped. A failed
+  #     build never moves it, so the next night retries.
+  #
+  # workflow_dispatch with force=true builds main's HEAD and skips both checks.
+  gate:
+    runs-on: ubuntu-24.04
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      sha: ${{ steps.decide.outputs.sha }}
+    steps:
+      - name: Decide
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+        run: |
+          set -euo pipefail
+          out() { echo "run=$1" >> "$GITHUB_OUTPUT"; echo "sha=$2" >> "$GITHUB_OUTPUT"
+                  echo "$3"; echo "### Nightly gate: $3" >> "$GITHUB_STEP_SUMMARY"; }
+
+          if [ "$FORCE" = "true" ]; then
+            head=$(gh api "repos/$REPO/commits/main" --jq .sha)
+            out true "$head" "forced: building main HEAD $head"; exit 0
+          fi
+
+          cand=""
+          while read -r sha status conclusion; do
+            [ "$status" = "completed" ] || continue
+            case "$conclusion" in
+              success) cand=$sha; break ;;
+              failure|timed_out|startup_failure)
+                out false "" "skipped: main is red (CI $conclusion on $sha)"; exit 0 ;;
+              *) continue ;;
+            esac
+          done < <(gh api "repos/$REPO/actions/workflows/ci.yml/runs?branch=main&event=push&per_page=50" \
+                     --jq '.workflow_runs[] | "\(.head_sha) \(.status) \(.conclusion)"')
+          if [ -z "$cand" ]; then
+            out false "" "skipped: no completed green CI run among main's last 50"; exit 0
+          fi
+
+          last=$(gh api "repos/$REPO/commits/nightly" --jq .sha 2>/dev/null || true)
+          if [ -z "$last" ]; then
+            out true "$cand" "building $cand (no previous nightly tag)"; exit 0
+          fi
+          # compare BASE...HEAD: "ahead" = cand has commits last does not.
+          rel=$(gh api "repos/$REPO/compare/$last...$cand" --jq .status)
+          case "$rel" in
+            ahead|diverged) out true "$cand" "building $cand (green, $rel of last nightly $last)" ;;
+            *)              out false "" "skipped: newest green commit $cand is $rel relative to last nightly $last" ;;
+          esac
+
   # The tests quarantined out of `dune runtest` (scheduler missed-wakeup
   # deadlock; Signal.watch dispatch race) run in NO other workflow, so nothing
   # would ever tell us the underlying races got fixed — they'd be effectively
@@ -18,11 +86,15 @@ jobs:
   # un-quarantine (restore `(alias runtest)` in test/dune). Never blocks the
   # nightly release. See specs/todos/ for the open items.
   quarantined:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-24.04
     continue-on-error: true
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Set up toolchain
         timeout-minutes: 12
@@ -76,10 +148,14 @@ jobs:
   # 2026-08). A red run here means march_doc needs updating for a compiler
   # change — fix it in the march_doc repo, not here.
   stdlib-docs-smoke:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Set up toolchain
         timeout-minutes: 12
@@ -105,6 +181,8 @@ jobs:
         run: CHECK_STDLIB_HTML=1 scripts/check-docs.sh
 
   version:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -112,6 +190,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Compute nightly version
         id: version
@@ -127,18 +207,20 @@ jobs:
           echo "date=${DATE}" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: version
+    needs: [gate, version]
     uses: ./.github/workflows/build.yml
     with:
       version: ${{ needs.version.outputs.version }}
-      ref: main
+      ref: ${{ needs.gate.outputs.sha }}
 
   publish:
-    needs: [version, build]
+    needs: [gate, version, build]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4

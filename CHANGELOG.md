@@ -11,6 +11,13 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Removed
+- **`MARCH_NO_TRMC` is gone; use `--no-trmc`.** The environment variable turned off
+  tail-recursion-modulo-cons for every compile in the process, including the
+  stdlib, which increasingly depends on the transform to avoid overflowing the
+  stack on long lists. The `--no-trmc` flag still works, one invocation at a time.
+  `MARCH_TRMC` (already a no-op) is unchanged.
+
 ### Changed
 - **A path scope that could not take effect is now a compile error instead of
   being silently ignored.** `needs IO.Network("/etc")` (only `IO.FileRead`,
@@ -85,6 +92,16 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A hot deploy that changes an actor's state no longer runs new handlers on
+  old state.** Messages already in an actor's mailbox when the deploy landed
+  were handled by the new code against the old-shaped state, which could read
+  the wrong fields. Now they finish on the old code, and the actor runs
+  `migrate_state` and switches to the new code when it reaches them. Old
+  messages still waiting after a drain deadline (5 s, or `MARCH_HCR_DRAIN_MS`)
+  are dropped and reported on stderr. A second schema-changing deploy is
+  refused until every actor has switched. Also fixed: with more than 2048 live
+  actors of a type, the ones past the 2048th were never migrated at all. See
+  `docs/hot-code-reload.md`, "Messages queued during a deploy".
 - **A linear value can no longer be discarded with `let _ = …`.** A `_` binding
   counted as the value's one use whenever the value was linear because of how it
   was *bound* rather than what its type says — a `linear x : a` parameter or a

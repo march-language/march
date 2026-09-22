@@ -87,32 +87,35 @@ user's real input. There is no diagnostic — exit 138 with no output.
 
 ### What it does to CI
 
-`trmc-suite` currently runs the whole suite with `MARCH_NO_TRMC=1`. It will not
-fail at the first rewrite, because the suite's lists are small; it will fail
-whenever some test grows past the cliff, and that failure will look like an
+**Resolved 2026-09-21:** the `trmc-suite` job and the `MARCH_NO_TRMC` env var
+were removed (specs/progress/2026-09-21-ci-shard-test-drop-trmc-suite.md). The
+`--no-trmc` flag remains, so the scoping question below is still open; what is
+gone is the CI job the next paragraph worried about and the ambient switch.
+
+Previously: `trmc-suite` ran the whole suite with `MARCH_NO_TRMC=1`. It would not
+fail at the first rewrite, because the suite's lists are small; it would fail
+whenever some test grew past the cliff, and that failure would look like an
 unrelated flake. A job that is green for the wrong reason and then fails for a
 confusing one is worse than no job.
 
 ### Options
 
-1. **Drop `--no-trmc`, `MARCH_NO_TRMC` and the `trmc-suite` job.** Honest: the
+1. **Drop `--no-trmc` (the env var and the job are already gone).** Honest: the
    transform is load-bearing, not optional, and a flag that produces crashing
    binaries should not exist. Cost: loses the only differential coverage of the
    non-TRMC path, and loses a genuinely useful bisection tool — "is this
    miscompile TRMC's fault?" is a question worth being able to ask cheaply.
 
 2. **Keep the flag as debugging-only; weaken the job.** Document it as unsound
-   against a natural-style stdlib and have `trmc-suite` assert something less
-   than a green suite. Cost: the job's remaining value is close to zero, and its
-   green becomes misleading rather than informative.
+   against a natural-style stdlib. (This option originally also kept a weakened
+   `trmc-suite` job; that job no longer exists.)
 
 3. **Scope the flag to user code instead of dropping it — probably the right
    answer, and not yet investigated.** The real defect is the flag's *scope*,
    not its existence: it disables the transform globally, including for the
    stdlib that now depends on it. A `--no-trmc` that skipped TRMC only for the
    entry program's own functions would keep every bit of its debugging value
-   (that is the code you are bisecting) while leaving the stdlib correct, and
-   `trmc-suite` would keep asserting a green suite.
+   (that is the code you are bisecting) while leaving the stdlib correct.
 
    Feasibility is plausible but unverified. `Trmc.transform_module` walks
    `m.tm_fns` after linking, and stdlib functions carry qualified names

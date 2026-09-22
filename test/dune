@@ -46,6 +46,15 @@
 ; ── Parallel test runners (dune executes these concurrently) ─────────────
 ; -e: show test-case error details inline (no digging through log files).
 ; Run binaries directly for agent-safe, RPC-free execution: see scripts/run-tests.sh.
+;
+; CI sharding: run_compiler, run_codegen and test_refinecheck are the three
+; slowest suites (~17, ~24 and ~23 min under a full `dune runtest` on a GitHub
+; ubuntu runner), so ci.yml runs each as its own job via its per-test alias
+; (`dune build @test/runtest-run_codegen`, ...) and runs everything else with
+; MARCH_CI_RUNTEST_SPLIT=1 set, which drops exactly these three stanzas (exe
+; and alias both) from `dune runtest`. Unset -- every local run -- nothing
+; changes. Do not set it outside that CI job: a local `dune runtest` with it
+; set runs none of the three and still reports success.
 ; cap_strip / cap_markers shell out to the real compiler and inspect the
 ; linked binary, so main.exe AND the staged runtime tree must exist before
 ; this runner starts.  Without these deps the tests resolved nothing and
@@ -53,6 +62,7 @@
 ; be the CWD).
 (test
  (name run_compiler)
+ (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))
  (modules run_compiler)
  (libraries march_test_compiler alcotest)
  (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
@@ -66,8 +76,17 @@
 
 (test
  (name run_codegen)
+ (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))
  (modules run_codegen)
  (libraries march_test_codegen alcotest)
+ ; The repl_jit_* groups build the JIT runtime from the STAGED runtime/ tree
+ ; (setup_jit_runtime looks for _build/default/runtime/march_runtime.c) and
+ ; several cases shell out to bin/main.exe. Undeclared, these passed under a
+ ; full `dune runtest` only because some other rule happened to stage runtime/
+ ; first; run alone (`dune build @test/runtest-run_codegen`, the CI codegen
+ ; shard) every repl_jit case failed with "could not find
+ ; runtime/march_runtime.c".
+ (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
  (action (run %{test} -e)))
 
 (test
@@ -379,6 +398,43 @@
  (alias   runtest)
  (deps    (file test_broadcast_migrate_leak_runner))
  (action  (run ./test_broadcast_migrate_leak_runner)))
+
+; ── HCR actor migration: ordering, coverage, drain, pin lifetime ─────────
+; Real actor green threads through the real receive loop and the real
+; migrating-activation entry point (march_actor_publish_migrating, the one
+; runtime/march_reload.c calls): queued messages run the old code against
+; the old state until each actor's migrate marker; >2048 actors all migrate;
+; the drain deadline drops and counts late pre-marker messages; the old
+; version stays pinned until every actor passes its marker or dies.
+(rule
+ (targets test_hcr_migrate_order_runner)
+ (deps    test_hcr_migrate_order.c
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_scheduler.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_deque.h
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_remote_registry.c
+          (glob_files ../runtime/*.h))
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets}
+               test_hcr_migrate_order.c ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz -lm)))
+(rule
+ (alias   runtest)
+ (deps    (file test_hcr_migrate_order_runner))
+ (action  (run ./test_hcr_migrate_order_runner)))
 
 ; ── HCR versioned dispatch table unit test ───────────────────────────────
 (rule
@@ -1127,6 +1183,7 @@
 
 (test
  (name test_refinecheck)
+ (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))
  (modules test_refinecheck)
  ; march_typecheck: the `no-panic-by-proof` group runs the REAL pipeline
  ; (typecheck -> refine_check -> division_safety -> panic_surface_by_proof),

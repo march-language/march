@@ -83,8 +83,11 @@ times it is 4.8× faster than the same source compiled without the transform.
 ### If you need the old behaviour
 
 ```
-march --compile --no-trmc …      # or: MARCH_NO_TRMC=1
+march --compile --no-trmc …
 ```
+
+0.4.0 also accepted `MARCH_NO_TRMC=1` as an environment spelling; later
+versions removed it, so pass the flag.
 
 ### Will this change my existing code?
 
