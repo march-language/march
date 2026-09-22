@@ -96,7 +96,9 @@ solver is complete and fast. A product of two non-constant terms is accepted
 too — `v * v > 0` is exactly `v != 0` over the integers, and refusing it only
 turned a decidable predicate into a skip — but the solver is *incomplete*
 there, so a non-linear goal it cannot settle is reported as the skip reason
-`nonlinear-goal` rather than as a violation.
+`nonlinear-goal` rather than as a violation. The same holds for a call-site
+ARGUMENT: `need_pos(y * y + 1)` against `{Int | _ > 0}` reflects the product
+as a subject and proves.
 
 Integer division (`/`, `%`) is in the fragment only where March's
 truncating division agrees with the solver's Euclidean one: the divisor is a
@@ -1987,7 +1989,7 @@ moment the measure alias stops working, which is exactly what the unit-global
 glob-import bug did to every March program, invisibly, while `t118` still exited
 0 (a skip and a proof are both exit 0; only the count tells them apart).
 
-Each skip is attributed to one of nine reasons:
+Each skip is attributed to one of eleven reasons:
 
 | Reason | What happened |
 |---|---|
@@ -1999,10 +2001,12 @@ Each skip is attributed to one of nine reasons:
 | `unconstrained-subject` | no fact the checker derived constrains the argument the predicate talks about |
 | `partial-conjunct` | the predicate is a top-level `&&`, and the checker proved some conjuncts but not others; the message names which held and which did not |
 | `opaque-application` | the goal names a function the checker has no meaning for, so it cannot reason through it |
+| `nonlinear-goal` | the goal multiplies two non-constant terms (`y * y + 1`, `x * k`), and the solver, which is incomplete on non-linear integer arithmetic, settled it neither way |
+| `parametric-source-unproved` | a polymorphic call's result meets an element demand only if every source of the demanded type variable does, and the source the message names did not |
 | `solver-undecided` | the solver proved neither the predicate nor its negation |
 
-`unconstrained-subject`, `partial-conjunct`, and `opaque-application` are also
-refinements of `solver-undecided`: the VC was built and the solver ran, and each
+`unconstrained-subject`, `partial-conjunct`, `opaque-application`, and
+`nonlinear-goal` are also refinements of `solver-undecided`: the VC was built and the solver ran, and each
 names a more specific reason the solver could not decide it.
 
 `alias-withdrawn` is a further refinement of `solver-undecided`, not a separate

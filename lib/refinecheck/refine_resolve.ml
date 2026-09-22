@@ -637,7 +637,24 @@ let rec reflect_scalar
         with
         | Some (te, de, ae) -> Some (Smt.MulLit (k, te), de, ae)
         | None -> plain actual)
-     | _ -> plain actual)
+     (* A product of two non-literal operands reflects to a general
+        [Smt.Mul], exactly as [Refine_scope.smt_of] has for a PREDICATE since
+        2026-09-16: refusing it left the obligation with no subject at all
+        (`need_pos(y * y + 1)` was `unreflectable-subject`) while the same
+        expression proved as a postcondition.  z3 is incomplete, not unsound,
+        on non-linear integer arithmetic: a goal it cannot settle comes back
+        `unknown`, which [Undecided.diagnose] reports as `nonlinear-goal`, and
+        a definite failure is still confirmed by [Witness] before it is
+        reported. *)
+     | _ ->
+       (match
+          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field
+            ~sort sc a,
+          reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call ~foreign_field
+            ~sort sc b
+        with
+        | Some (ta, da, aa), Some (tb, db, ab) -> Some (Smt.Mul (ta, tb), da @ db, aa @ ab)
+        | _ -> plain actual))
   (* A direct named call: stand its result up as a fresh constant carrying the
      callee's declared postcondition.  `.` is a legal SMT-LIB simple-symbol
      character, so a qualified name needs no mangling. *)
