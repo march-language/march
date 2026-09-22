@@ -42,7 +42,7 @@ let run () =
       Printf.sprintf "MARCH_LIB_PATH=%s MARCH_REPL_INTERP=1"
         (String.concat ":" all_lib_paths)
     in
-    let entry = Filename.concat lib_dir (proj.Project.name ^ ".march") in
+    let entry = Result.to_option (Project.entry proj) in
     (* Link the same FFI shims as `forge run` / `forge build` (see
        Cmd_run.run).  The REPL preloads the project entry through the
        interpreter, so without --ffi-c the compiler builds no shim .so and any
@@ -57,7 +57,7 @@ let run () =
     | Ok ffi_flags ->
     let cmd =
       repl_command ~lib_path_env ~ffi_flags
-        ~entry:(if Sys.file_exists entry then Some entry else None)
+        ~entry
     in
     let rc = Sys.command cmd in
     if rc = 0 then Ok ()

@@ -16,9 +16,17 @@ let synthetic_file = "<none>"
 
 (** Whether a diagnostic at file [f] belongs to the user's program: the entry
     file, a module loaded as user code (source dir / MARCH_LIB_PATH), a
-    string-parsed fixture's spelling, or generated code (above). *)
+    string-parsed fixture's spelling, or generated code (above).
+
+    A standard-library file is never the user's unless it is the entry file
+    itself (`march --check stdlib/<mod>.march`).  "Is this the stdlib?" is
+    answered by [Typecheck_builtins.file_is_stdlib], the same predicate the
+    stdlib-only builtin gate uses, so the gate and this filter cannot drift
+    apart. *)
 let user_diag_file ~filename ~user_files f =
-  f = filename || f = "" || f = "<unknown>" || f = synthetic_file || List.mem f user_files
+  f = filename
+  || (not (March_typecheck.Typecheck_builtins.file_is_stdlib f)
+      && (f = "" || f = "<unknown>" || f = synthetic_file || List.mem f user_files))
 
 (** Whether to show diagnostic [d] to the user.  A HINT inside generated code
     is dropped: a hint asks for an edit (qualify this constructor, rename

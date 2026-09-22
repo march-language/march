@@ -452,12 +452,9 @@ let run ?(all = false) ?(apply = false) ?(fixpoint = false) ?(postconditions = f
       match proj.P.project_type with
       | P.Lib -> fs
       | P.App | P.Tool ->
-        let entry =
-          match proj.P.entrypoint with
-          | Some ep -> Filename.concat root ep
-          | None -> Filename.concat lib_dir (proj.P.name ^ ".march")
-        in
-        if List.mem entry fs || not (Sys.file_exists entry) then fs else entry :: fs
+        (match P.entry proj with
+         | Ok entry when not (List.mem entry fs) -> entry :: fs
+         | _ -> fs)
     in
     if files = [] then Error (Printf.sprintf "no .march files found under %s" root)
     else begin
