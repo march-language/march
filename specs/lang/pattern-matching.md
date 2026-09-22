@@ -107,7 +107,7 @@ end
 match pair do
   (0, _) -> "starts with zero"
   (_, 0) -> "ends with zero"
-  (a, b) -> int_to_string(a + b)
+  (a, b) -> String.from_int(a + b)
 end
 ```
 
@@ -136,8 +136,8 @@ type Point = { x : Float, y : Float }
 fn describe_point(p : Point) : String do
   match p do
     { x: 0.0, y: 0.0 } -> "origin"
-    { x: x, y: 0.0 }   -> "on x-axis at " ++ float_to_string(x)
-    { x: x, y: y }     -> "at " ++ float_to_string(x) ++ ", " ++ float_to_string(y)
+    { x: x, y: 0.0 }   -> "on x-axis at " ++ String.from_float(x)
+    { x: x, y: y }     -> "at " ++ String.from_float(x) ++ ", " ++ String.from_float(y)
   end
 end
 ```
@@ -189,7 +189,7 @@ type Route  = { origin : Origin, secure : Bool }
 
 fn where_to(r : Route) : String do
   match r do
-    { origin: { host: "localhost", port: p } } -> "local:" ++ int_to_string(p)
+    { origin: { host: "localhost", port: p } } -> "local:" ++ String.from_int(p)
     { origin: { host: h } }                    -> "remote:" ++ h
   end
 end
@@ -204,7 +204,7 @@ type Reply = { status : Int, body : String }
 fn handle(r : Option(Reply)) : String do
   match r do
     Some({ status: 200, body: b }) -> "ok " ++ b
-    Some({ status: s })            -> "http " ++ int_to_string(s)
+    Some({ status: s })            -> "http " ++ String.from_int(s)
     None                           -> "no response"
   end
 end
@@ -244,7 +244,7 @@ And inside a tuple, which is how you dispatch on two values at once:
 match (reply, retries) do
   ({ status: 200 }, _) -> "done"
   (_, 0)               -> "giving up"
-  (_, n)               -> "retrying, " ++ int_to_string(n) ++ " left"
+  (_, n)               -> "retrying, " ++ String.from_int(n) ++ " left"
 end
 ```
 
@@ -271,14 +271,16 @@ end
 
 Record arms take part in exhaustiveness and redundancy checking like any
 other pattern. `spat` (the exhaustiveness checker's internal pattern shape,
-`typecheck.ml`) includes `SPRec`, an
+`typecheck_exhaustive.ml`) includes `SPRec`, an
 assoc-list of field name to sub-shape sorted by name. A record is
 single-shape, so `find_missing_mc` and `is_useful` handle it exactly as they
 handle a tuple (specialize into one column per field, recurse) with one
 difference: the field list is taken from the scrutinee's **type**, not from
 any one pattern, since patterns may name open subsets. `spec_rec_mc` fills a
 field an arm didn't mention with `SPWild`, which is what lets `{ code: 404 }`
-and `{ msg: m }` occupy the same matrix column.
+and `{ msg: m }` occupy the same matrix column. A match that handles only
+some values of a field is reported non-exhaustive rather than failing at
+runtime:
 
 ```march
 match p do
@@ -343,19 +345,10 @@ fn describe_json(x : Json.JResult) : String do
 end
 ```
 
-> **Compiler bug (verified live, compiled backend only):** the qualified form
-> is only reliably safe here because both colliding `Ok`/`Err` constructors
-> above carry a `String` payload (same runtime representation). If the two
-> colliding types' same-named constructor has payloads with a *different*
-> representation (e.g. one module's `Ok(Int)` vs another's `Ok(String)`), the
-> compiled backend nondeterministically crashes (`march: out of memory`) or
-> returns garbage data even though every reference is correctly
-> module-qualified and the interpreter is always correct. Minimal repro:
-> nest `mod A do type TA = Ok(Int) | Err(String) end` and
-> `mod B do type TB = Ok(String) | Err(String) end` in one file, then compile
-> and run a function that pattern-matches `B.Ok(data) -> data` on a
-> `B.Ok("hi")` value; the same-shape-payload case (both `Ok(Int)`, or both
-> `Ok(String)`, as above) is unaffected.
+Qualification also holds when the colliding constructors carry payloads of
+*different* runtime representations: with `mod A` declaring `Ok(Int)` and
+`mod B` declaring `Ok(String)`, a `B.Ok(data) -> data` arm extracts the
+right payload on both backends.
 
 ### Negative Integer Patterns
 
@@ -762,6 +755,6 @@ A guard that fails causes the clause to be skipped and the next clause is tried.
 
 ## Next Steps
 
-- [Type System](types.md): the types you're matching against
+- [Type System](../../docs/types.md): the types you're matching against
 - [Tour](../../docs/tour.md): language overview with more examples
 - [Interfaces](interfaces.md): polymorphic dispatch with `interface`
