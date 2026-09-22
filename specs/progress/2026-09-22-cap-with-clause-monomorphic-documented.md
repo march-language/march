@@ -1,3 +1,27 @@
+# CLOSED 2026-09-22: a monomorphic `with` clause is a documented limitation
+
+**Decision (repo owner, 2026-09-22): close as a documented limitation.** The limitation is
+real: `Cap_dict_resolve.dict_ty_of_cap` builds the dictionary type with zero type
+arguments, so a parameterised dictionary record can never be attached. But nothing needs
+one. The design this file said it blocked, the session-transport dictionary in
+`2026-08-31-cap-runtime-dictionaries`, has shipped
+(`specs/progress/2026-08-31-cap-runtime-dictionaries.md`), and it took this file's own
+option 1: messages are erased to `Bytes` at the dictionary boundary, keeping `Session.Ops`
+monomorphic and protocol-agnostic. Option 2, a parameterised `with` clause, would make a
+dictionary protocol-specific, which that design explicitly rejects.
+
+Documented in `specs/lang/capabilities.md` ("Runtime dictionaries"): the dictionary type
+is monomorphic, and the way around it is a concrete representation at the boundary, as
+`Session.Ops` does. The arity-rendering diagnostic from 2026-09-02 already tells a user
+who hits it what is wrong.
+
+Re-open if a design appears that genuinely needs one capability to carry a dictionary
+generic in a type the capability itself does not fix.
+
+---
+
+The original filing follows.
+
 # `proof cap X with T` only accepts a MONOMORPHIC dictionary type
 
 `[P3]` Filed 2026-09-02. Limitation of the `with` clause shipped in PR #388.

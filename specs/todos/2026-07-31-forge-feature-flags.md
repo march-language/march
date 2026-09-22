@@ -1,5 +1,10 @@
 `[P3]` # forge: optional dependencies / feature flags — needs a language decision first
 
+**Parked 2026-09-22 (repo owner decision): no workload needs this yet.** Leave it
+until someone hits the need; the first step is still to find out which question users are
+actually asking, and no user is blocked. Re-open by removing this note and saying
+what hit it.
+
 Split 2026-09-18 out of `2026-07-31-p1-tooling-forge-build-tool.md` per
 `specs/2026-09-18-forge-p1-design.md` §2, which lays out the options.
 
