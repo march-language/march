@@ -1,0 +1,35 @@
+mod Main do
+  needs IO
+  needs Session.Live
+  -- A RECURSIVE payload type (2026-09-21). Since
+  -- `2026-09-21-protocol-fingerprint-payload-definitions`, `<P>_Msg.fingerprint()`
+  -- digests what a payload type is MADE OF, not only its name, so two nodes
+  -- whose `Tree` differs below the name refuse each other at setup instead of
+  -- discovering the skew mid-session as an undecodable message. Folding the
+  -- definition in means WALKING it, and a tree walks into itself: the digest
+  -- keeps the type names already expanded on the current path and emits a
+  -- back-reference for a repeat. A protocol carrying a recursive payload is
+  -- an ordinary protocol, not an edge case, so this program's whole job is to
+  -- be compiled at all -- a non-terminating digest hangs the desugarer here
+  -- rather than failing a check.
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  derive Json for Tree
+
+  @[endpoints]
+  protocol Sync do
+    A -> B : Tree
+    B -> A : Int
+  end
+
+  pfn a(s : Cap(Session.Live), st : Sync_A.Entry, t : Tree) : Sync_A.Yield do
+    Sync_A.recv_Msg_B_A_1(s, Sync_A.send_Msg_A_B_1(s, st, t),
+      fn (_n, st2) -> Sync_A.close(s, st2))
+  end
+
+  pfn b(s : Cap(Session.Live), st : Sync_B.Entry) : Sync_B.Yield do
+    Sync_B.recv_Msg_A_B_1(s, st,
+      fn (_t, st1) -> Sync_B.close(s, Sync_B.send_Msg_B_A_1(s, st1, 1)))
+  end
+
+  fn main(c : Cap(IO)) do () end
+end

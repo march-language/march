@@ -1,0 +1,33 @@
+-- Scenario "fingerprint_skew": node-b's `Thing` is `{ x : String }` where
+-- node-a's is `{ x : Int }`. See scenario.sh.
+mod FingerprintSkewB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  type Thing = { x : String }
+  derive Json for Thing
+
+  @[endpoints]
+  protocol Q do
+    A -> B : Thing
+    B -> A : Int
+  end
+
+  fn main(c : Cap(IO)) do
+    match Q_Run.run_B(c, "node-b", "skew-secret", Q_Run.addrs_from_env(), fn (s, st) ->
+      println("B: RAN THE BODY")
+      Q_B.recv_Msg_A_B_1(s, st, fn (_t, st1) -> Q_B.close(s, Q_B.send_Msg_B_A_1(s, st1, 1)))) do
+      Ok(_) -> println("B: ok")
+      Err(e) ->
+        let m = Q_Run.error_message(e)
+        if String.contains(m, "built from DIFFERENT versions of the protocol") do
+          println("B: refused at setup: the protocol versions differ")
+        else println("B: " ++ m) end
+    end
+  end
+end

@@ -1,5 +1,11 @@
 # DataFrame: narrow-width (F32/I32) column storage — deferred
 
+**Parked 2026-09-22 (repo owner decision): no workload needs this yet.** Leave it
+until someone hits the need; the 35-site migration and the scoping choice below are the
+cost to weigh then, and the all-null `StrCol` bug noted below is separate and could be
+fixed on its own. Re-open by removing this note and saying
+what hit it.
+
 Filed 2026-08-13, as part of the SIMD follow-ups sweep (Task 3 of
 `.superpowers/sdd/2026-08-13-simd-followups/`). Recorded here rather than
 attempted: the migration touches too much surface for an incidental change,

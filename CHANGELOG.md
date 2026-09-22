@@ -147,6 +147,35 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Renaming a linear value with `let` no longer lets it be dropped.** In
+  `fn f(linear h : Res) ... let h2 = h`, the rename consumed `h` but left `h2`
+  ordinary, so `h2` could be ignored with no error. `h2` now takes over `h`'s
+  obligation and must be used exactly once, whether `h` is a `linear` parameter
+  or a `linear let` local.
+- **A protocol whose payload types differ in their DEFINITIONS is now caught when
+  the session is set up, not as an undecodable message once it is running.**
+  `<P>_Msg.fingerprint()` digested each payload type by NAME, so two nodes whose
+  `Thing` was `{ x : Int }` on one and `{ x : String }` on the other shared a
+  fingerprint: the session formed and the skew surfaced mid-session, on the
+  receiving side, as `Protocol(role, "undecodable message: ...")`. The digest now
+  folds a payload type's definition in, recursively, for every type declared in
+  the same module — a variant's constructors and a record's fields in declaration
+  order, with type parameters substituted. A payload type from ANOTHER module is
+  out of reach when the digest is computed and is still recorded by name (marked
+  `extern:` so the digest at least says the definition was unavailable), so a
+  change below such a type's name remains invisible to the check.
+  **Compatibility:** every fingerprint changed. A node built before this change
+  and a node built after will now refuse each other at the access point — and, on
+  the direct runner, at the handshake. That is the check working, not a
+  regression; rebuild both sides from the same source.
+- **The direct runner (`<P>_Run.run_<Role>`, `host_<Role>`, `host_<Role>_or`) now
+  exchanges the protocol fingerprint too, not only access points.** It rides the
+  session hello as an optional trailing field, so a node built before this change
+  is read rather than deadlocked on — and is refused with a message saying it sent
+  no fingerprint. A mismatch is a setup error (`Connect`/`Accept`) naming both
+  fingerprints, not a retry loop. The cluster runner (`cluster_<Role>`) finds its
+  peers through the cluster registry rather than a hello and is NOT yet covered;
+  an access point still checks every cluster session it brokers.
 - **`OrderedMap.keys`, `OrderedMap.values` and `OrderedMap.from_list` work.**
   Each passed a two-parameter lambda (`fn (k, _) -> k`) where a callback over
   a (key, value) pair was expected. `values` was typed `List(v -> v)` for its
@@ -376,6 +405,10 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **A capability's dictionary type must be monomorphic, and the capabilities chapter now says
+  so.** `proof cap Live with Ops` cannot attach a parameterised `Ops(m)`; the "Runtime
+  dictionaries" section explains the limitation and the way around it (a concrete
+  representation at the boundary, as `Session.Ops` does with `Bytes`).
 - **The language-reference pages on march-lang.org are now generated from
   `specs/lang/`, and the two copies have been reconciled.** Each chapter used to exist
   twice, as independent prose that had drifted both ways, so corrections made in one copy
