@@ -68,6 +68,108 @@ let rec float_const_of (e : A.expr) : float option =
 let float_lit_term (f : float) : Smt.term option =
   Option.map (fun (neg, d) -> Smt.FloatLit (neg, d)) (Smt.float_decimal f)
 
+(* ── Integer division: the fragment where truncation and Euclid agree ─────
+   March's `/` and `%` truncate toward zero (`-7 / 2` is `-3`, `-7 % 2` is
+   `-1`); SMT-LIB's `div`/`mod` are Euclidean (`(div (- 7) 2)` is `-4`,
+   `(mod (- 7) 2)` is `1`).  Rendering one as the other on a negative dividend
+   would certify code that can fail.  For a NON-NEGATIVE dividend `a` and a
+   non-zero divisor `k` of EITHER sign the two coincide: truncation gives
+   `q = sign(k) * (a div |k|)`, `r = a - k*q = a mod |k|`, which satisfies
+   `a = k*q + r` with `0 <= r < |k|` — the Euclidean definition, whose
+   quotient and remainder are unique.  So `a / k` reflects to
+   [Smt.DivLit (a, k)] (and `%` to [Smt.ModLit]) exactly when [k] is a
+   non-zero integer literal ([nonzero_int_literal]) and [a] is KNOWN
+   non-negative, by one of the syntactic rules in [known_nonneg].
+
+   The subtle rule is the contextual one: `{Int | _ >= 0 && _ / 2 < 10}`.
+   Inside a conjunction chain, a conjunct `t >= c` (with `c >= 0`, [t] a
+   variable, a field of one, or a measure over one) makes `t` usable as a
+   non-negative dividend ANYWHERE in the chain, including under `||`/`not`
+   further down.  Soundness: the fact conjunct contains no division, so it
+   reflects exactly.  Where it holds, every division it guards reflects
+   exactly.  Where it fails, the exact reflection of the fact is `false`, so
+   the whole chain reflects to `false` — which is also the chain's true
+   value.  Either way the chain's reflection equals its meaning, and a
+   subterm with an exact reflection may sit under any context.  (A predicate
+   has no binders, so the same [t] denotes the same value everywhere in it.)
+
+   Everything outside the fragment keeps today's behaviour — an [Error] naming
+   the division, i.e. an `unreflectable-predicate` skip — with
+   [division_outside_fragment_hint] explaining why. *)
+let int_lit_of (e : A.expr) : int option =
+  match e with
+  | A.ELit (A.LitInt n, _) -> Some n
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ A.ELit (A.LitInt n, _) ], _) -> Some (-n)
+  | _ -> None
+
+(* The syntactic identity a non-negativity fact is recorded under.  Only
+   division-free shapes, so the fact conjunct itself always reflects exactly. *)
+let nonneg_atom_key (e : A.expr) : string option =
+  match e with
+  | A.EVar { A.txt; _ } -> Some ("v:" ^ txt)
+  | A.EField (A.EVar { A.txt = x; _ }, { A.txt = f; _ }, _) -> Some ("f:" ^ x ^ "." ^ f)
+  | A.EApp (A.EVar { A.txt = m; _ }, [ A.EVar { A.txt = x; _ } ], _) when is_measure_app m ->
+    Some ("m:" ^ measure_name m ^ ":" ^ x)
+  | _ -> None
+
+(* The atoms one conjunct proves non-negative: `t >= c`/`t == c` (c >= 0),
+   `t > c` (c >= -1), and the mirrored spellings. *)
+let nonneg_facts_of_conjunct (c : A.expr) : string list =
+  match c with
+  | A.EApp (A.EVar { A.txt = op; _ }, [ a; b ], _) ->
+    (match op, nonneg_atom_key a, int_lit_of b, int_lit_of a, nonneg_atom_key b with
+     | (">=" | "=="), Some k, Some n, _, _ when n >= 0 -> [ k ]
+     | ">", Some k, Some n, _, _ when n >= -1 -> [ k ]
+     | ("<=" | "=="), _, _, Some n, Some k when n >= 0 -> [ k ]
+     | "<", _, _, Some n, Some k when n >= -1 -> [ k ]
+     | _ -> [])
+  | _ -> []
+
+let rec conjuncts_of (e : A.expr) : A.expr list =
+  match e with
+  | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> conjuncts_of a @ conjuncts_of b
+  | e -> [ e ]
+
+(* Is [e] non-negative in every environment where the facts [ctx] hold? *)
+let rec known_nonneg ~vocab (ctx : string list) (e : A.expr) : bool =
+  let go = known_nonneg ~vocab ctx in
+  match e with
+  | A.ELit (A.LitInt n, _) -> n >= 0
+  | A.EApp (A.EVar { A.txt = "+" | "*"; _ }, [ a; b ], _) -> go a && go b
+  (* A quotient of a non-negative dividend by a POSITIVE literal, and any
+     in-fragment remainder (which lies in [0, |k|)), are non-negative. *)
+  | A.EApp (A.EVar { A.txt = "/"; _ }, [ a; d ], _) ->
+    (match nonzero_int_literal d with Some k when k > 0 -> go a | _ -> false)
+  | A.EApp (A.EVar { A.txt = "%"; _ }, [ a; d ], _) -> nonzero_int_literal d <> None && go a
+  (* A measure the checker already axiomatises as `m(x) >= 0` ([len], or a
+     user measure whose body is syntactically non-negative), and a set's
+     cardinality. *)
+  | A.EApp (A.EVar { A.txt = m; _ }, [ _ ], _)
+    when is_measure_app m && is_nonneg_measure (measure_name m) -> true
+  | A.EApp (A.EVar { A.txt = "card"; _ }, [ _ ], _) when vocab -> true
+  | _ -> (match nonneg_atom_key e with Some k -> List.mem k ctx | None -> false)
+
+(* Would the reflector translate `a / d` (or `a % d`) under the facts [ctx]? *)
+let division_in_fragment ~vocab (ctx : string list) (a : A.expr) (d : A.expr) : bool =
+  nonzero_int_literal d <> None && known_nonneg ~vocab ctx a
+
+(* Why a `/`/`%` leaf did not reflect, for the `unreflectable-predicate`
+   detail; [None] for any other leaf. *)
+let division_outside_fragment_hint (e : A.expr) : string option =
+  match e with
+  | A.EApp (A.EVar { A.txt = ("/" | "%") as op; _ }, [ _; d ], _) ->
+    let why =
+      if nonzero_int_literal d = None then "the divisor is not a non-zero integer literal"
+      else "the dividend is not known to be non-negative"
+    in
+    Some
+      (Printf.sprintf
+         "`%s` is translated only when its divisor is a non-zero integer literal and its \
+          dividend is known to be non-negative (e.g. `_ >= 0 && _ %s 2 < 10`), where \
+          March's truncating division agrees with SMT's; here %s"
+         op op why)
+  | _ -> None
+
 (* [smt_of_r] is [smt_of]'s body, made to name its failure: [Error e] carries
    the innermost sub-expression that returned [None] in the [option] version —
    the leaf itself where reflection bottoms out (an opaque call, an unhandled
@@ -76,14 +178,19 @@ let float_lit_term (f : float) : Smt.term option =
    down still names the leaf, not each ancestor on the way up. [smt_of] is now
    this function with [Result.to_option] on the outside; the 18 existing
    callers, which want only the [option], are unchanged. *)
-let rec smt_of_r_marked ?(vocab = true) ~resolve_var ~resolve_measure
+let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ~resolve_var ~resolve_measure
     ?(resolve_field = fun _ _ -> None)
     ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
     ?(resolve_str_lit = fun _ -> None)
     ?(resolve_measure_call = fun _ _ _ -> None)
     (e : A.expr) : (Smt.term, A.expr) result =
-  let r = smt_of_r_marked ~vocab ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
-            ~resolve_tester ~resolve_str_lit ~resolve_measure_call in
+  (* [nonneg]: atoms ([nonneg_atom_key]) an enclosing `&&` chain proves
+     non-negative — the context the division arm consults. *)
+  let r_in nonneg =
+    smt_of_r_marked ~vocab ~nonneg ~resolve_var ~resolve_measure ~resolve_field
+      ~resolve_measure_app ~resolve_tester ~resolve_str_lit ~resolve_measure_call
+  in
+  let r = r_in nonneg in
   let b2 f a b =
     match r a, r b with
     | Ok x, Ok y -> Ok (f x y)
@@ -193,7 +300,14 @@ let rec smt_of_r_marked ?(vocab = true) ~resolve_var ~resolve_measure
      None — safe under the definite-failure soundness stance. *)
   | A.EField (A.EVar { A.txt = x; _ }, { A.txt = fname; _ }, _) ->
     (match resolve_field x fname with Some t -> Ok t | None -> Error e)
-  | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.And (x, y)) a b
+  | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) ->
+    let facts = List.concat_map nonneg_facts_of_conjunct (conjuncts_of e) in
+    if facts = [] then b2 (fun x y -> Smt.And (x, y)) a b
+    else
+      let r' = r_in (facts @ nonneg) in
+      (match r' a, r' b with
+       | Ok x, Ok y -> Ok (Smt.And (x, y))
+       | Error e, _ | _, Error e -> Error e)
   | A.EApp (A.EVar { A.txt = "||"; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Or (x, y)) a b
   | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> Result.map (fun x -> Smt.Not x) (r a)
   | A.EApp (A.EVar { A.txt = ">="; _ }, [ a; b ], _) -> b2 (fun x y -> Smt.Ge (x, y)) a b
@@ -220,6 +334,14 @@ let rec smt_of_r_marked ?(vocab = true) ~resolve_var ~resolve_measure
      | A.ELit (A.LitInt k, _), _ -> Result.map (fun y -> Smt.MulLit (k, y)) (r b)
      | _, A.ELit (A.LitInt k, _) -> Result.map (fun x -> Smt.MulLit (k, x)) (r a)
      | _ -> b2 (fun x y -> Smt.Mul (x, y)) a b)
+  (* Integer `/` and `%`, in the fragment where truncating and Euclidean
+     division agree (see [known_nonneg]'s header).  Outside it, the division
+     node itself is the failing leaf. *)
+  | A.EApp (A.EVar { A.txt = ("/" | "%") as op; _ }, [ a; d ], _) ->
+    (match nonzero_int_literal d with
+     | Some k when known_nonneg ~vocab nonneg a ->
+       Result.map (fun x -> if op = "/" then Smt.DivLit (x, k) else Smt.ModLit (x, k)) (r a)
+     | _ -> Error e)
   | _ -> Error e
 
 (* Every predicate and guard is marked once, here at the entry, so the

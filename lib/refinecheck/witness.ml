@@ -590,6 +590,18 @@ and eval_operand ~(lookup : string -> V.value option) (e : A.expr) : V.value opt
      | Some (V.VInt x), Some (V.VInt y) ->
        Some (V.VInt (match op with "+" -> x + y | "-" -> x - y | _ -> x * y))
      | _ -> None)
+  (* Integer `/` and `%` with March's semantics, which are OCaml's: truncate
+     toward zero, remainder takes the dividend's sign.  NOT SMT-LIB's
+     Euclidean `div`/`mod` — this evaluator is the check on the solver's
+     model, so it must say what the program would do.  A zero divisor is
+     [None] (unconfirmable), never an exception and never a guessed value.
+     Without these arms a refuted predicate mentioning `/` could never be
+     confirmed, and an unconfirmed refutation is reported as NOTHING. *)
+  | A.EApp (A.EVar { A.txt = ("/" | "%") as op; _ }, [ a; b ], _) ->
+    (match eval_operand ~lookup a, eval_operand ~lookup b with
+     | Some (V.VInt _), Some (V.VInt 0) -> None
+     | Some (V.VInt x), Some (V.VInt y) -> Some (V.VInt (if op = "/" then x / y else x mod y))
+     | _ -> None)
   | A.EApp (A.EVar { A.txt = ("+." | "-." | "*." | "/.") as op; _ }, [ a; b ], _) ->
     (match eval_operand ~lookup a, eval_operand ~lookup b with
      | Some (V.VFloat x), Some (V.VFloat y) ->

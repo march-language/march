@@ -651,7 +651,10 @@ let check_post ~root errctx ~span ?(record_sort : string option = None)
      with
      | Error e ->
        if enum_witness_error () then note Obligation.Violated
-       else note (Obligation.Skipped (Obligation.Unreflectable_predicate (pred_str e)));
+       else
+         note
+           (Obligation.Skipped
+              (Obligation.Unreflectable_predicate (pred_str e, division_outside_fragment_hint e)));
        false
      | Ok goal ->
        let decls =

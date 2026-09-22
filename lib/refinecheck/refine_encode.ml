@@ -231,7 +231,7 @@ let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
      "mentions a string" if its subject somehow does. *)
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) -> m a
   | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> false
-  | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> m a
+  | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> m a
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.And (a, b)
   | Smt.Or (a, b)
   | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b)
@@ -279,7 +279,7 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
        w a && w b
      | _ -> int_side a && int_side b)
   | Smt.Not a -> w a
-  | Smt.Neg a | Smt.MulLit (_, a) -> int_side a
+  | Smt.Neg a | Smt.MulLit (_, a) | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> int_side a
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) -> w a && w b
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.Lt (a, b)
   | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b) -> int_side a && int_side b
@@ -339,7 +339,8 @@ let rec mentions_float (is_float : string -> bool) (t : Smt.term) : bool =
   | Smt.Const c -> is_float c
   | Smt.IntLit _ | Smt.BoolLit _ -> false
   | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.exists m args
-  | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> m a
+  | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a)
+  | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> m a
   | Smt.Mul (a, b)
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.And (a, b) | Smt.Or (a, b)
   | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b)
@@ -399,7 +400,7 @@ let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) 
      (measures and selectors return Int or a datatype), so an application in
      Boolean position is a sort error just as arithmetic and literals are. *)
   | Smt.App _ | Smt.Ctor _ | Smt.IntLit _ | Smt.FloatLit _ | Smt.Add _ | Smt.Sub _
-  | Smt.MulLit _ | Smt.Mul _ | Smt.Neg _
+  | Smt.MulLit _ | Smt.Mul _ | Smt.DivLit _ | Smt.ModLit _ | Smt.Neg _
   | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetUnion _ | Smt.SetInter _ | Smt.SetDiff _
   | Smt.SetCard _ -> false
 
@@ -910,6 +911,21 @@ let display_measures (text : string) : string =
 let measure_name (m : string) : string =
   match measure_alias m with Some m' -> m' | None -> m
 
+(* The divisor of a `/` or `%` when it is a NON-ZERO integer literal (`2`, or
+   `-2`, which parses as `negate(2)`), else [None].  Shared by the two places
+   that reason about division syntactically: the `@[measure]` totality gate
+   (a literal non-zero divisor cannot divide by zero) and the predicate
+   reflector's division arm in [Refine_scope.smt_of_r_marked] (a literal
+   divisor is half of the fragment where truncating and Euclidean division
+   agree).  A non-literal divisor — a variable, a constant function, an
+   expression — is never admitted here, whatever the solver could prove about
+   it: that is [Division_safety]'s job, not a syntactic check's. *)
+let nonzero_int_literal (d : A.expr) : int option =
+  match d with
+  | A.ELit (A.LitInt n, _) when n <> 0 -> Some n
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ A.ELit (A.LitInt n, _) ], _) when n <> 0 -> Some (-n)
+  | _ -> None
+
 let is_measure_app (m : string) : bool = measure_alias m <> None || is_measure m
 
 (* Measures known to be non-negative (so `m(x) >= 0` is a sound axiom).  `len`
@@ -942,7 +958,12 @@ let predicate_operators =
      only over LITERALS: a predicate using one symbolically is skipped by
      design, and warning "this has no effect" about a deliberate scope boundary
      would be misleading. *)
-  ; "+."; "-."; "*."; "/." ]
+  ; "+."; "-."; "*."; "/."
+  (* Integer division is vocabulary, translated only in the fragment where
+     March's truncation agrees with SMT's Euclidean `div`/`mod`
+     ([Refine_scope.known_nonneg]); a use outside it gets its own, specific
+     warning ([Refine_check.warn_predicate_expr]), not the generic one. *)
+  ; "/"; "%" ]
 
 let is_predicate_operator (m : string) : bool =
   List.mem m predicate_operators || is_set_operator m
@@ -1114,6 +1135,8 @@ let rec pin_set_sorts (elem : Smt.sort) (t : Smt.term) : Smt.term =
   | Smt.Add (a, b) -> Smt.Add (p a, p b)
   | Smt.Sub (a, b) -> Smt.Sub (p a, p b)
   | Smt.MulLit (k, a) -> Smt.MulLit (k, p a)
+  | Smt.DivLit (a, k) -> Smt.DivLit (p a, k)
+  | Smt.ModLit (a, k) -> Smt.ModLit (p a, k)
   | Smt.Eq (a, b) -> Smt.Eq (p a, p b)
   | Smt.Ne (a, b) -> Smt.Ne (p a, p b)
   | Smt.And (a, b) -> Smt.And (p a, p b)
@@ -1140,7 +1163,8 @@ let vc_set_elem_sorts (vc : Smt.vc) : Smt.sort list =
     | Smt.SetCard (e, a) -> add e; go a
     | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> ()
     | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.iter go args
-    | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) -> go a
+    | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a)
+    | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> go a
     | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.And (a, b) | Smt.Or (a, b)
     | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b) | Smt.Le (a, b)
     | Smt.Gt (a, b) | Smt.Ge (a, b) | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b)
@@ -2990,7 +3014,8 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       let ta = infer a in
       let tb = infer b in
       unify ta IInt; unify tb IInt; IInt
-    | Smt.MulLit (_, a) | Smt.Neg a -> unify (infer a) IInt; IInt
+    | Smt.MulLit (_, a) | Smt.DivLit (a, _) | Smt.ModLit (a, _) | Smt.Neg a ->
+      unify (infer a) IInt; IInt
     | Smt.Not a -> ignore (infer a); IBool
     | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) ->
       let _ = infer a in
@@ -3114,6 +3139,8 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       | Smt.Sub (a, b) -> let a' = rewrite a in Smt.Sub (a', rewrite b)
       | Smt.Mul (a, b) -> let a' = rewrite a in Smt.Mul (a', rewrite b)
       | Smt.MulLit (k, a) -> Smt.MulLit (k, rewrite a)
+      | Smt.DivLit (a, k) -> Smt.DivLit (rewrite a, k)
+      | Smt.ModLit (a, k) -> Smt.ModLit (rewrite a, k)
       | Smt.Neg a -> Smt.Neg (rewrite a)
       | Smt.Not a -> Smt.Not (rewrite a)
       | Smt.And (a, b) -> let a' = rewrite a in Smt.And (a', rewrite b)
@@ -3220,7 +3247,8 @@ let rec term_sorts (acc : Smt.sort list) (t : Smt.term) : Smt.sort list =
   | Smt.IsCtorAt (_, s, _, a) -> term_sorts (s :: acc) a
   | Smt.SetEmpty e -> e :: acc
   | Smt.SetSng (e, a) -> term_sorts (e :: acc) a
-  | Smt.MulLit (_, a) | Smt.Neg a | Smt.Not a -> term_sorts acc a
+  | Smt.MulLit (_, a) | Smt.DivLit (a, _) | Smt.ModLit (a, _) | Smt.Neg a | Smt.Not a ->
+    term_sorts acc a
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.And (a, b) | Smt.Or (a, b)
   | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b) | Smt.Le (a, b)
   | Smt.Gt (a, b) | Smt.Ge (a, b) | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b)
@@ -3807,9 +3835,9 @@ let measure_gate_errors (fd : A.fn_def) : string list =
           | A.EApp (A.EVar { A.txt; _ }, _, _) when List.mem txt measure_partial_calls ->
             add (Printf.sprintf "must be total (it calls `%s`, which does not return)" txt)
           | A.EApp (A.EVar { A.txt = ("/" | "%") as op; _ }, [ _; d ], _) -> (
-            match d with
-            | A.ELit (A.LitInt n, _) when n <> 0 -> ()
-            | _ -> add (Printf.sprintf "must be total (`%s` can divide by zero)" op))
+            match nonzero_int_literal d with
+            | Some _ -> ()
+            | None -> add (Printf.sprintf "must be total (`%s` can divide by zero)" op))
           | _ -> ())
         body;
       (* (2) Termination via structural recursion. *)

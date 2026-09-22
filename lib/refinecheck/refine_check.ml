@@ -1980,8 +1980,26 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
      vocabulary: it is checked by [Refine_abstract.check], which reports its
      own errors.  Warning here as well would tell the author to annotate `p`
      `@[measure]`, which is exactly what it must not be. *)
+  (* The non-negativity facts of the enclosing `&&` chains, exactly as
+     [Refine_scope.smt_of_r_marked] accumulates them, so the division warning
+     below fires precisely where the reflector would refuse. *)
+  let nonneg_ctx = ref [] in
   let rec go (e : A.expr) =
     match e with
+    | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) ->
+      let saved = !nonneg_ctx in
+      nonneg_ctx := List.concat_map nonneg_facts_of_conjunct (conjuncts_of e) @ saved;
+      go a;
+      go b;
+      nonneg_ctx := saved
+    | A.EApp (A.EVar { A.txt = "/" | "%"; _ }, ([ a; d ] as args), span) ->
+      if not (division_in_fragment ~vocab:true !nonneg_ctx a d) then
+        Option.iter
+          (fun why ->
+            Err.warning errctx ~span
+              (Printf.sprintf "This refinement is not checked: %s." why))
+          (division_outside_fragment_hint e);
+      List.iter go args
     | A.EApp (A.EVar { A.txt = f; _ }, args, span)
       when List.mem f set_vocabulary && not (set_app_well_formed f args) ->
       (* A set-vocabulary name applied in some other shape: most likely the
