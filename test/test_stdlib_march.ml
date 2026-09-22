@@ -150,6 +150,7 @@ let all_stdlib_decls =
     "crypto.march";
     "deque.march";
     "sorted_set.march";
+    "ordered_map.march";
     "gen.march";
     "check.march";
     "ring_buf.march";
@@ -557,6 +558,10 @@ let () =
     ("sorted_set", [
       Alcotest.test_case "SortedSet module"
         `Quick (run_stdlib_test "test_sorted_set.march" "TestSortedSet");
+    ]);
+    ("ordered_map", [
+      Alcotest.test_case "OrderedMap module"
+        `Quick (run_stdlib_test "test_ordered_map.march" "TestOrderedMap");
     ]);
     ("ring_buf", [
       Alcotest.test_case "RingBuf module"

@@ -1,0 +1,43 @@
+-- Tests for the OrderedMap stdlib module (AVL tree keyed by a comparator)
+-- Run with: dune exec march -- test test/stdlib/test_ordered_map.march
+--
+-- keys, values and from_list each passed a two-parameter lambda
+-- (`fn (k, _) -> k`) where a one-argument callback over a (key, value) pair
+-- was expected, so `values` was typed `List(v -> v)` for callers and `keys` /
+-- `from_list` failed to typecheck, hidden by the stdlib diagnostic filter.
+-- The annotated-type-variable warning found `values`
+-- (specs/progress/2026-09-22-annotated-tyvar-fixed-warning.md).
+
+mod TestOrderedMap do
+
+pfn icmp(a : Int, b : Int) : Int do a - b end
+
+pfn sample() do
+  OrderedMap.put(OrderedMap.put(OrderedMap.put(OrderedMap.new(icmp), 3, "c"), 1, "a"), 2, "b")
+end
+
+describe "ordered traversal" do
+  test "keys are in comparator order" do
+    assert (OrderedMap.keys(sample()) == [1, 2, 3])
+  end
+
+  test "values follow key order and keep their own type" do
+    let vs : List(String) = OrderedMap.values(sample())
+    assert (vs == ["a", "b", "c"])
+  end
+end
+
+describe "from_list" do
+  test "builds a map from pairs; a later pair wins" do
+    let m = OrderedMap.from_list([(2, "two"), (1, "one"), (2, "deux")], icmp)
+    assert (OrderedMap.size(m) == 2)
+    assert (OrderedMap.keys(m) == [1, 2])
+    assert (OrderedMap.get(m, 2) == Some("deux"))
+  end
+
+  test "empty list gives an empty map" do
+    assert (OrderedMap.is_empty(OrderedMap.from_list([], icmp)))
+  end
+end
+
+end
