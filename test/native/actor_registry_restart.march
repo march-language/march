@@ -16,6 +16,7 @@
 --     lands at ctor tag 0 -- Actor.call routes its zero-arg sentinel to
 --     whichever handler occupies tag 0.
 mod Main do
+  needs IO
   needs IO.Console
 
   type PingReq = PingReq
@@ -52,10 +53,11 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let boss = spawn(Boss)
     let first_int = current_child(boss)
-    let first = pid_of_int(first_int)
+    let first = Actor.pid_from_int(intro, first_int)
     println("registered: " ++ bool_to_string(Actor.register(first, "fragile")))
     -- A SECOND name on the same actor. This is the case that used to crash the
     -- process outright (EXC_BAD_ACCESS in strdup, under march_respawn_child,
@@ -74,11 +76,11 @@ mod Main do
     run_until_idle()
 
     let second_int = current_child(boss)
-    let second = pid_of_int(second_int)
+    let second = Actor.pid_from_int(intro, second_int)
     println("respawned with new pid: " ++ bool_to_string(second_int != first_int))
 
     -- Resolve by NAME, from a holder ("fragile") that never saw `second`.
-    match Actor.whereis("fragile") do
+    match Actor.whereis(intro, "fragile") do
       None -> println("lost after restart")
       Some(p) ->
         match Actor.call(p, PingReq, 5000) do
@@ -90,7 +92,7 @@ mod Main do
     -- BOTH names must survive, and both must land on the SAME replacement:
     -- the reply carries `handled`, which the call above already bumped to 1,
     -- so a 1 here proves it is that same actor and not a second incarnation.
-    match Actor.whereis("fragile2") do
+    match Actor.whereis(intro, "fragile2") do
       None -> println("second name lost after restart")
       Some(p2) ->
         match Actor.call(p2, PingReq, 5000) do
@@ -107,7 +109,7 @@ mod Main do
     let third_int = current_child(boss)
     println("respawned again with new pid: " ++ bool_to_string(third_int != second_int))
 
-    match Actor.whereis("fragile") do
+    match Actor.whereis(intro, "fragile") do
       None -> println("lost after second restart")
       Some(p2) ->
         match Actor.call(p2, PingReq, 5000) do

@@ -19,6 +19,17 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **Reaching an actor you were never handed a Pid for now takes a capability.**
+  `Actor.whereis`, `Actor.registered`, `Actor.list`, `Actor.top_by_mailbox` and
+  `Actor.over_mailbox` take a `Cap(Actor.Introspect)` as their first argument, and the
+  `pid_of_int` builtin is replaced by `Actor.pid_from_int(c, n)`. The cap is minted once
+  from the root capability: `let c = Actor.introspect(io)` in `main(io : Cap(IO))`, then
+  forward `c` (a function that takes it declares `needs Actor.Introspect`). A Pid is
+  thereby an unforgeable reference: code that holds neither a Pid nor the cap can message
+  nobody it was not introduced to. The raw builtins (`pid_of_int`, `actor_pid_indices`,
+  `actor_whereis`, `actor_registered`) are internal to the standard library; calling one
+  is a typecheck error naming the wrapper to use. `Actor.register` and `unregister` are
+  unchanged.
 - **A malformed `forge.toml` is an error that names its line, and an unknown key is a
   warning.** forge used to drop any line it could not parse, ignore a `[section`
   header with no `]` and any text after a value, and ignore keys it did not know, so a

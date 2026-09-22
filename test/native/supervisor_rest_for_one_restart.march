@@ -1,4 +1,5 @@
 mod SupervisorRestForOneRestart do
+  needs IO
   needs IO.Console
 
   actor Worker do
@@ -30,13 +31,14 @@ mod SupervisorRestForOneRestart do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let sup = spawn(Sup)
     let r1 = child_int(sup, "reader")
     let p1 = child_int(sup, "parser")
     let w1 = child_int(sup, "writer")
 
-    kill(pid_of_int(p1))
+    kill(Actor.pid_from_int(intro, p1))
 
     let r2 = child_int(sup, "reader")
     let p2 = child_int(sup, "parser")
@@ -45,9 +47,9 @@ mod SupervisorRestForOneRestart do
     println(bool_to_string(r2 == r1))
     println(bool_to_string(p2 != p1))
     println(bool_to_string(w2 != w1))
-    println(bool_to_string(is_alive(pid_of_int(r2))))
-    println(bool_to_string(is_alive(pid_of_int(p2))))
-    println(bool_to_string(is_alive(pid_of_int(w2))))
+    println(bool_to_string(is_alive(Actor.pid_from_int(intro, r2))))
+    println(bool_to_string(is_alive(Actor.pid_from_int(intro, p2))))
+    println(bool_to_string(is_alive(Actor.pid_from_int(intro, w2))))
   end
 
 end
