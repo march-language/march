@@ -13,6 +13,18 @@ mod ProtocolNodeB do
   needs IO.Spawn
   needs Session.Live
 
+  -- The SAME protocol declaration as node-a's, purely so this node can
+  -- compute the fingerprint `SessionNode.run` now puts in the hello
+  -- (2026-09-21): the two sides must agree on the PROTOCOL to get as far as
+  -- exchanging a message at all. The generated modules are unused here --
+  -- the body below is the raw `Session` API, which is the point of this
+  -- scenario -- but `Bad_Msg.fingerprint()` is node-a's own.
+  @[endpoints]
+  protocol Bad do
+    A -> B : Int
+    B -> A : Int
+  end
+
   pfn body(s : Cap(Session.Live)) : Unit do
     let ep = Session.register(s, 0, 2)
     let _ = Session.suspend(s, ep, 1, fn (_from, _msg, ep1) ->
@@ -29,7 +41,7 @@ mod ProtocolNodeB do
       Ok(a) -> Cons(a, Nil)
       Err(e) -> panic(e)
     end
-    match SessionNode.run(c, 2, Cons(1, Nil), "node-b", "bad-secret", addrs, fn _ep -> (), fn s -> body(s)) do
+    match SessionNode.run(c, 2, Cons(1, Nil), "node-b", "bad-secret", addrs, Bad_Msg.fingerprint(), fn _ep -> (), fn s -> body(s)) do
       Ok(_) -> println("B: done")
       Err(e) -> panic(SessionNode.run_error_message(e))
     end
