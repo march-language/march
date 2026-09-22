@@ -337,6 +337,18 @@ within the setup time (`MARCH_SESSION_CONNECT_MS`, 20 seconds). If a role cannot
 filled, `Err(NoOffer(role, why))` says what each offer said, and the offers that had
 already accepted are released.
 
+**What the fingerprint covers.** A protocol's fingerprint digests its roles, its steps,
+and — since 2026-09-21 — what each payload type is MADE OF, not only its name: two nodes
+whose `Thing` is `{ x : Int }` on one and `{ x : String }` on the other no longer agree,
+so the skew is refused when the session is set up instead of surfacing mid-session as an
+undecodable message. A payload type declared in ANOTHER module is out of reach when the
+digest is computed and is recorded by name alone, so a change below such a type's name is
+still invisible to the check. The direct runner (`run_<Role>`) exchanges the fingerprint
+in its handshake too, not only the access points, and a peer built before that change --
+which sends no fingerprint -- is refused with a message saying so rather than joining
+unchecked. Every fingerprint changed when the digest widened: a node built before the
+change and one built after will refuse each other, which is the check working.
+
 **Capacity** is the second argument to `offer_<Role>`: how many sessions it will run at
 once. Past that it answers "full" and the initiator looks elsewhere.
 
