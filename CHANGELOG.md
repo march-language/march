@@ -129,6 +129,19 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Two `@[endpoints]` protocols in one module no longer break the first one's
+  sends.** Every protocol generated a `<P>_Msg` module whose message type was a
+  bare `Msg`, and impl dispatch for its derived `Json` codec keys on the type's
+  short name, so a second protocol in the same module captured the first one's
+  `to_json`. The two backends disagreed about it: interpreted, the first send
+  encoded through the other protocol's codec and died inside generated code with
+  a match failure; compiled, the build was refused ("ambiguous interface-method
+  call to `JsonFrom$Msg.from_json`"). The generated message type is now named
+  after its protocol (`<P>_Message`), so two protocols in one module each run
+  their own sessions on both backends. `@[endpoints] protocol P` accordingly
+  reserves the type name `P_Message`: a type of your own by that name deriving
+  the same interface the generated codec derives is now rejected as an
+  overlapping implementation.
 - **On Linux, `--cap-sandbox` now stops a program without `IO.NetListen` from
   accepting connections.** Holding only `IO.NetConnect` (an HTTP client, say)
   allowed `socket()`, and nothing denied `bind`/`listen`, so such a program

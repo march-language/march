@@ -539,23 +539,36 @@ let fingerprint_of ~proto (roles : string list) (steps : astep list) : string =
 
 (** `<P>_Msg`: the message type, its `Json` codec over `Bytes`, and the role
     indices.  The derive is expanded HERE, inside the generated module, so it
-    rebinds nobody's bare `to_json`/`from_json` in the user's module. *)
+    rebinds nobody's bare `to_json`/`from_json` in the user's module.
+
+    The message type is named [<P>_Message], NOT a bare `Msg`, because impl
+    dispatch for the derived `Json` codec keys on the type's SHORT name in both
+    backends.  Two `@[endpoints]` protocols in one module each generated a type
+    whose short name was `Msg`, so the first protocol's `send` encoded through
+    the SECOND protocol's `to_json` (interpreted: a match failure inside the
+    generated `send_…`; compiled: a hard "ambiguous interface-method call to
+    `JsonFrom$Msg.from_json`").  Protocol-unique short names remove the
+    collision at the source (see the record dated 2026-09-22 under
+    specs/progress/).  The name is not user-visible: nothing outside
+    this function spells the type -- role modules reach the message only
+    through `<P>_Msg.<Ctor>` and `<P>_Msg.{encode,decode,try_decode}`. *)
 let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint (ctors : (string * ty) list) (roles : string list)
     (peers : (string * string list) list) : decl =
   let mname = proto ^ "_Msg" in
+  let tname = proto ^ "_Message" in
   let msg_td = TDVariant (List.map (fun (c, t) -> variant c [ t ]) ctors) in
-  let msg_decl = DType (Public, n "Msg", [], msg_td, sp) in
-  let json_fns = D.expand_derive errors [ ("Msg", ([], msg_td)) ] (n "Msg") [ n "Json" ] span in
+  let msg_decl = DType (Public, n tname, [], msg_td, sp) in
+  let json_fns = D.expand_derive errors [ (tname, ([], msg_td)) ] (n tname) [ n "Json" ] span in
   let encode =
-    fn "encode" [ ("m", tycon "Msg" []) ] t_bytes
+    fn "encode" [ ("m", tycon tname []) ] t_bytes
       (app "Bytes.from_string" [ app "Json.to_string" [ app "to_json" [ var "m" ] ] ])
   in
   let decode =
-    fn "decode" [ ("b", t_bytes) ] (tycon "Msg" [])
+    fn "decode" [ ("b", t_bytes) ] (tycon tname [])
       (match_ (app "Json.parse" [ app "Bytes.to_string" [ var "b" ] ])
          [ ( pcon "Ok" [ pvar "jv" ],
              block
-               [ let_ ~ty:(tycon "Result" [ tycon "Msg" []; t_string ]) "r" (app "from_json" [ var "jv" ]);
+               [ let_ ~ty:(tycon "Result" [ tycon tname []; t_string ]) "r" (app "from_json" [ var "jv" ]);
                  match_ (var "r")
                    [ (pcon "Ok" [ pvar "m" ], var "m");
                      ( pcon "Err" [ pvar "e" ],
@@ -568,11 +581,11 @@ let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint (ctors : (string * t
      than a panic in whatever turn the delivery runs in.  `decode` stays for
      callers that want the panic. *)
   let try_decode =
-    fn "try_decode" [ ("b", t_bytes) ] (tycon "Result" [ tycon "Msg" []; t_string ])
+    fn "try_decode" [ ("b", t_bytes) ] (tycon "Result" [ tycon tname []; t_string ])
       (match_ (app "Json.parse" [ app "Bytes.to_string" [ var "b" ] ])
          [ ( pcon "Ok" [ pvar "jv" ],
              block
-               [ let_ ~ty:(tycon "Result" [ tycon "Msg" []; t_string ]) "r" (app "from_json" [ var "jv" ]);
+               [ let_ ~ty:(tycon "Result" [ tycon tname []; t_string ]) "r" (app "from_json" [ var "jv" ]);
                  match_ (var "r")
                    [ (pcon "Ok" [ pvar "m" ], con "Ok" [ var "m" ]);
                      (pcon "Err" [ pvar "e" ], con "Err" [ string_concat (lit_str "undecodable message: ") (var "e") ]) ] ] );
