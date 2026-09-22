@@ -10,10 +10,13 @@ permalink: /docs/memory-model/
 # Memory Model: How FBIP Works
 
 March's headline promise is **functional code that runs in place**: you write
-pure transformations over immutable data, and the compiler turns them into
-mutation when it can prove no one will notice. There is no tracing garbage
-collector, no stop-the-world collection, and, in the common "transform and
-return" case, no allocation at all. This page explains the mechanism end to end.
+pure transformations over immutable data (the style where you never mutate
+anything, you just build new values from old ones), and the compiler turns them
+into ordinary in-place mutation wherever it can prove no one will notice the
+difference. There is no tracing garbage collector, no stop-the-world collection,
+and, in the common "transform and return" case, no allocation at all. This page
+explains the mechanism end to end, from first principles, so you don't need a
+compilers background to follow it.
 
 The claim to hold onto is **deterministic, not pauseless**. No collector scans
 your heap and no pause stops your program at a time it picks. But freeing is real work
@@ -22,22 +25,29 @@ to its size; see [drop cascades](#drop-cascades-freeing-is-work-you-scheduled)
 below. The difference from a tracing GC is not that the work disappears; it is
 that you choose when it happens, and it is the same every run.
 
-The two ingredients are **Perceus reference counting** (deterministic, compiled
-in) and **FBIP, Functional But In-Place** (the reuse optimization that builds on
-top of it). The same uniqueness property that makes FBIP work also makes
-*parallel* FBIP lock-free.
+The two ingredients are **[Perceus](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/)
+reference counting** (deterministic, compiled in; the technique comes from the
+2021 paper *"Perceus: Garbage Free Reference Counting with Reuse"* by Reinking,
+Xie, de Moura, and Leijen, if you want the formal treatment) and **FBIP,
+Functional But In-Place** (the reuse optimization that builds on top of it). The
+same uniqueness property that makes FBIP work also makes *parallel* FBIP
+lock-free: no thread coordination needed.
 
 ---
 
 ## Perceus: deterministic reference counting
 
-Every heap value includes a small reference count (RC). The classic problem with
+Every heap value includes a small **reference count (RC)**: a running count of
+how many places in the program currently hold a pointer to it. The classic problem with
 reference counting is throughput: naively, every time a value is passed,
 returned, or bound, you pay an increment, and every time a reference dies you pay
-a decrement. **Perceus** eliminates almost all of that cost with a compile-time
-dataflow analysis that inserts `inc` and `dec` operations *exactly* at the
-points where ownership actually changes, and then fuses, cancels, and elides
-them:
+a decrement, and those add up fast.
+
+**Perceus** eliminates almost all of that cost. Instead of inserting an
+`inc`/`dec` around every single use, a compile-time dataflow analysis traces
+where each value is created and where it is used for the last time, inserts
+`inc` and `dec` operations *only* at the points where ownership actually
+changes, and then fuses, cancels, and elides as many of them as it can:
 
 - A function that receives a value and immediately returns a transformed version
   often needs **no increment at all**: the caller's reference is transferred.
@@ -144,10 +154,13 @@ observe later), there is no observer to fool. The language semantics say "old
 value gone, new value fresh"; the runtime states "same bytes, rewritten." Both
 agree because no one else is looking.
 
-> This is why `tree_transform` (the FBIP benchmark) runs roughly 15× faster than
-> the equivalent C that allocates and frees a fresh tree each pass, and several
-> times faster than OCaml's tracing GC: it does no allocator work at all in
-> steady state.
+> This is why [`tree_transform`](https://github.com/march-language/march/blob/main/bench/tree_transform.march)
+> (the FBIP benchmark) runs about 6× faster than the OCaml version and about 8×
+> faster than the Rust version, both of which allocate a fresh tree each pass
+> (OCaml under its tracing GC): March does no allocator work at all in steady
+> state. See the
+> [benchmark results](https://github.com/march-language/march/blob/main/bench/RESULTS.md)
+> for the full numbers.
 
 **Try it.** The `TreeDemo` module above is runnable: this cell builds the sample
 tree `Node(Leaf(1), Node(Leaf(2), Leaf(3)))`, runs `inc_leaves`, and sums the
@@ -346,13 +359,17 @@ Two things to know about the boundary:
   worth knowing which side of the line a hot type sits on.
 
 Compiler internals, including why the class stops where it does:
-`docs/value-representation.md` §7.5.
+[Value Representation]({{ site.baseurl }}/docs/value-representation/) §7.5.
 
 ---
 
 ## Parallel FBIP needs no locks
 
-The uniqueness that powers FBIP also makes it **lock-free across cores**.
+Normally, running code on two threads at once means you need locks or atomic
+operations to stop them from corrupting the same memory at the same time; even
+something as simple as two threads incrementing the same reference count needs
+synchronization, or you can lose an update. The uniqueness that powers FBIP
+sidesteps this and makes it **lock-free across cores**.
 
 Consider summing or transforming the two children of a tree in parallel:
 
@@ -381,16 +398,22 @@ locking. The same idea scales to actor message passing; see the
 
 FBIP is one layer of a stratified memory model. The others reinforce it:
 
-- **`linear` / `affine` values** have statically known lifetimes: the compiler
-  inserts `free` at the last use with zero RC bookkeeping (see
-  [linear types]({{ site.baseurl }}/docs/linear-types/)). A `linear` value is
-  the *strongest* FBIP case: RC == 1 by construction.
+- **[`linear` / `affine` values]({{ site.baseurl }}/docs/linear-types/)** have
+  statically known lifetimes: the compiler knows, from the type alone, *exactly*
+  where each one is used for the last time, so it inserts `free` there directly
+  with zero RC bookkeeping. A `linear` value is the *strongest* FBIP case:
+  RC == 1 by construction, guaranteed by the type system rather than inferred by
+  the compiler.
 - **Immutable-by-default** means pointer fields are never written after
   construction, which is what eliminates write barriers, and what makes in-place
   reuse unobservable.
-- **Whole-program monomorphization and defunctionalization** make types concrete
-  and remove heap-allocated closures, so escape analysis can stack-allocate the
-  many values that never outlive their call (`⚡ stack-allocated`).
+- **Whole-program monomorphization and defunctionalization**, two compile-time
+  passes that turn generic, closure-using code into plain, concrete code (a
+  separate copy of a generic function per concrete type it's used with; closures
+  turned into ordinary data instead of heap-allocated function values), make
+  types concrete and remove heap-allocated closures. That lets escape analysis
+  prove that many values never outlive the call that created them and
+  stack-allocate them (`⚡ stack-allocated`).
 
 The net effect: most values never touch the heap, the ones that do are usually
 reused rather than reallocated, and the residual frees are deterministic `dec`
@@ -404,12 +427,14 @@ Deterministic does not mean free. When the last reference to a structure dies,
 its children's references die with it, and *that work happens right there*.
 
 March frees an aggregate in one of two ways. Usually the structure is
-**destructured**: a `case` arm that owns its scrutinee releases the box and
-hands the children to the extracted bindings, so the cost is spread across the
-traversal you were doing anyway. But when a structure is released **without**
-being taken apart (you borrowed it, or ignored it, and the owner simply drops
-it), the compiler synthesizes a deep-drop function for its type
-(`lib/tir/drop.ml`) and calls that instead:
+**destructured**: a `match` arm that owns the value it matched on releases the
+box and hands the children to the extracted bindings, so the cost is spread
+across the traversal you were doing anyway. But when a structure is released
+**without** being taken apart (you borrowed it, or ignored it, and the owner
+simply drops it at the end of its scope), the compiler synthesizes a deep-drop
+function for its type (`lib/tir/drop.ml`) and calls that instead. In TIR it
+looks like this (conceptually: free this cell, then drop its element, then drop
+the rest):
 
 ```
 fn __drop$List(x : List(String)) : Unit =
@@ -418,11 +443,11 @@ fn __drop$List(x : List(String)) : Unit =
   | Cons(h, t) -> dec_rc x ; __drop$String(h) ; __drop$List(t)
 ```
 
-So dropping a 1M-element list walks 1M cells. The practical consequences:
+So dropping a one-million-element list walks one million cells. The practical consequences:
 
 - **Cost is proportional to what actually dies**, not to heap size and not to
-  live data. A drop of a shared structure (RC > 1) is O(1); only the last owner
-  pays the walk.
+  how much data is still live. A drop of a shared structure (RC > 1: someone
+  else still retains it) is O(1); only the last owner pays the walk.
 - **It is not a stack overflow risk.** The recursive drop is in tail position,
   so it is turned into a loop by `llvm_tco.ml`; long spines iterate rather than
   recurse.
@@ -441,7 +466,8 @@ So dropping a 1M-element list walks 1M cells. The practical consequences:
 ## Cycles: not collected, and not reachable from ordinary code
 
 **March has no cycle collector.** Perceus is reference counting, and reference
-counting cannot reclaim a reference cycle. If one were to form, it would leak:
+counting cannot reclaim a reference cycle: each object in the loop is still
+referenced, so no count can fall to zero. If one were to form, it would leak:
 silently and permanently, with no diagnostic.
 
 The reason this is not a practical hazard is that the language makes cycles hard
@@ -449,7 +475,7 @@ to construct rather than cleaning them up afterwards:
 
 - **Immutable data cannot close a cycle.** A cycle needs a back-pointer written
   into an already-constructed value. March values are built once and never
-  mutated, so ordinary data forms DAGs, not graphs.
+  mutated, so ordinary data forms trees and DAGs, never cycles.
 - **Linear values cannot participate in one.** A cycle requires at least two
   references to the same value; `linear` means exactly one owner.
 - **Actors do not share pointers.** Inter-actor references are capabilities, not

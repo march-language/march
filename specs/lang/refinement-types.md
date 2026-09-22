@@ -25,6 +25,16 @@ wrong, it stays silent.
 > `PATH`. Without it, the predicates type-check as their base type and no
 > refinement diagnostics are produced (the build still succeeds).
 
+**New to this?** Read [Syntax](#syntax) through
+[A Parameter's Own Contract Is a Fact Inside Its Body](#a-parameters-own-contract-is-a-fact-inside-its-body)
+and you'll be able to write and read everyday refinements. Everything after
+[Postconditions](#postconditions) goes deeper: measures over your own data
+structures, `String`/`Bool`/`Float`/tag refinements, the strict `cap verified` /
+[`cap no_panic`](#cap-no_panic--divisions-that-cant-panic) modes, and the full
+[Limitations](#limitations) list. If you just want to know why a specific
+contract *isn't* catching something, jump straight to Limitations or to
+[`--refine-report`](#counting-the-obligations---refine-report).
+
 ---
 
 ## The Problem They Solve
@@ -846,6 +856,41 @@ fn bad(n : Int) : {Int | _ >= 0} do
 end
 ```
 
+A postcondition is checked the same way a precondition is: a **compile
+error** when it is demonstrably violated (the solver proves it can never hold,
+or a [counterexample](#counterexamples-the-failing-input-in-source-terms) is
+run and observed to fail), silent **proof** when it always holds, and a silent
+**skip** when the checker can't decide either way. It also counts toward
+[`--refine-report`](#counting-the-obligations---refine-report) (tagged
+`postcondition` rather than `precondition` in the report's `by kind` line)
+and, inside a `cap verified` module, an undischarged postcondition is a
+compile error exactly like an undischarged precondition:
+
+```march
+mod Checked do
+  cap verified
+
+  fn cube(z : Int) : Int do z * z * z end
+
+  fn mk(z : Int) : {Int | _ > 0} do
+    cube(z) * 0 + 1 + cube(z) - cube(z)   -- error under cap verified: the
+  end                                     -- return expression is unreflectable
+end
+```
+
+Without `cap verified` the same `mk` compiles: its obligation is skipped
+(`unreflectable-subject`), not reported.
+
+`@[trusted]` rescues a postcondition the same way it rescues a precondition;
+see [`@[trusted]`](#trusted-a-scoped-conspicuous-escape-hatch) below.
+
+**What doesn't carry through:** proving a *plain* postcondition (as above) is
+different from proving a **relational** one that relates a measure across an
+operation (`size(insert(t, x)) == size(t) + 1`), which needs the checker to
+supply an induction hypothesis at each structurally-recursive call. That
+narrower, more powerful case is covered in [Limitations](#limitations), under
+"Structural induction (Tier 2)".
+
 ---
 
 ## Measures: Refining over Data Structures
@@ -1653,10 +1698,20 @@ unwrap(Some(1))   -- fine
 unwrap(None)      -- error: `None` can never satisfy `is_Some(_)`
 ```
 
+This is what backs the standard library's `Option.unwrap`/`expect` and
+`Result.unwrap`/`unwrap_err`/`expect` (`stdlib/option.march`,
+`stdlib/result.march`), so `Option.unwrap(None)` and
+`Result.unwrap(Err("boom"))` are compile errors rather than runtime panics.
+
 The name is **exact-case**: `is_Some` is the tester for the constructor `Some`;
 `is_some` is not a tester at all (it happens to be the lowercase stdlib helper
 `Option.is_some`), so a misspelling draws the unrecognized-predicate warning
-rather than silently meaning something else.
+rather than silently meaning something else:
+
+```
+`is_some` is not a measure or known predicate, so this refinement is not
+checked. Annotate the function `@[measure]`, or use a supported predicate.
+```
 
 There are two sources of tag facts.
 
@@ -1934,7 +1989,32 @@ end
 
 A bare call binds to the nearest enclosing module that defines it (with
 shadowing), so a local helper is never confused with a same-named function
-elsewhere.
+elsewhere. Resolution is scope-aware about imports: at each enclosing scope the
+checker consults that scope's own definition and then that *same* scope's
+`use`-imports before falling outward. So a `use` written **inside** a nested
+module beats an enclosing module's own definition of the same name, matching
+how the call really dispatches, while an enclosing module's `use` still loses
+to a nested module's *own* definition: an import never reaches in and
+overrides a local one.
+
+```march
+mod Outer do
+  fn take_pos(n : {Int | n >= 0}) : Int do n end   -- Outer's own contract
+
+  mod Inner do
+    use Lib.{take_pos}                              -- Lib's take_pos, unrefined
+
+    fn go() : Int do
+      take_pos(-1)   -- resolves to Lib.take_pos, NOT Outer's: no error
+    end
+  end
+end
+```
+
+Checking this call against the enclosing `Outer.take_pos` instead would be a
+false positive on correct code, since `Inner.go` never actually calls it. (This
+was a live false positive until 2026-07-31; see item 6 in
+[Open holes](#open-holes-stated-as-of-2026-07-29).)
 
 ---
 
@@ -2141,10 +2221,12 @@ below for the exact rendering.
 The ledger records both **precondition obligations raised at call sites** and
 **postcondition obligations**: a function's own return value checked against
 its declared return refinement. Each obligation includes a `kind` (precondition
-or postcondition), printed as a `by kind` breakdown line under each slice's
-headline; the headline totals themselves do not distinguish kinds; a proved
-postcondition is a proved obligation like any other. `cap verified` still
-escalates precondition obligations only; see below.
+or postcondition; the line's third column, `division`, is the kind
+`Obligation.Division` reserves for a `cap no_panic` divisor), printed as a `by kind`
+breakdown line under each slice's headline; the headline totals themselves do
+not distinguish kinds; a proved postcondition is a proved obligation like any
+other. `cap verified` escalates an undischarged precondition *and* an
+undischarged postcondition; see below.
 
 ---
 
@@ -2927,6 +3009,112 @@ sense; each is a check that does not happen.
 
 ---
 
+## `cap no_panic`: Divisions That Can't Panic
+{: #cap-no_panic--divisions-that-cant-panic}
+
+`cap verified`'s sibling takes the same "silence is not good enough" stance and points
+it at one specific runtime panic: integer division by zero. Declare `cap no_panic` in a
+module and **every** `/` and `%` in it must have a divisor the checker can prove
+non-zero. Anything short of a proof is a compile error: that's the whole promise, and
+it's why this capability fails closed where the default refinement stance fails open.
+(The implementation history of each rule below is in the `cap no_panic` bullets under
+[`@[trusted]`](#trusted-a-scoped-conspicuous-escape-hatch)'s "Scope and limits".)
+
+A divisor is discharged by a literal, by a path condition, or by a refinement on the
+parameter it came from. Both sides of a guard count:
+
+```march
+mod NonlinearDivisor do
+  needs IO.Console
+  cap no_panic
+
+  fn scale(d : {v : Int | v * v > 0}) : Int do
+    10 / d
+  end
+
+  fn guarded(d : {v : Int | v * v > 0}) : Int do
+    if d == 0 do 0 else 10 / d end
+  end
+
+  fn main(_cap : Cap(IO.Console)) do
+    println(int_to_string(scale(2) + guarded(5)))
+  end
+end
+```
+
+Both of those are accepted. `v * v > 0` is exactly `v != 0` over the integers, and the
+checker passes such a predicate to the solver rather than declining to read it:
+rejecting a *complete* proof for being written unusually was a false positive on
+correct code. The stance itself hasn't moved: a predicate that reflects but proves
+no fact (`v * v >= 0`, true of every integer) is still an error, and so is one the
+solver can't settle. And on the `else` side of `if d == 0` the fact in scope is
+`not (d == 0)`, which discharges the division on its own.
+
+**It covers the whole module.** The division walk descends into every declaration form,
+not just `fn` and nested `mod` bodies, so this program is a compile error rather than a
+runtime "division by zero":
+
+```march
+mod ImplDiv do
+  needs IO.Console
+  cap no_panic
+
+  type Box = Box(Int)
+
+  interface Runner(a) do
+    fn run : a -> Int
+  end
+
+  impl Runner(Box) do
+    fn run(b) do
+      match b do
+        Box(n) -> 100 / n
+      end
+    end
+  end
+
+  fn main(_cap : Cap(IO.Console)) do
+    println(int_to_string(run(Box(2))))
+  end
+end
+```
+
+Add an `if n != 0` guard and it's accepted: the walk reads the body, it doesn't just
+distrust it. Top-level `let`s, `interface` defaults, actor handlers, `app` hooks and
+`test` bodies are covered the same way.
+
+**A rebound name inherits no fact from the old one.** Every fact the divisor check reads
+is keyed by a bare variable name (the path condition, the parameter's refinement, a
+`let`'s value), so rebinding that name retires all of them. Each of these is caught
+rather than silently accepted:
+
+```march
+if d == 0 do 0 else (let d = 0; 10 / d) end     -- else side
+if d != 0 do (let d = 0; 10 / d) else 0 end     -- then side
+if d == 0 do 0 else ap(fn d -> 10 / d) end      -- lambda parameter
+if d == 0 do 0 else match o do Some(d) -> 10 / d ... end   -- match binder
+```
+
+(Compressed onto one line each for comparison; March has no `;`, so the `let` really
+sits on its own line inside the branch.)
+
+A `let`, a local `fn`, a lambda parameter, a `let?` pattern or a `match` binder
+drops everything known about the outer variable of that name. Note which way this
+errs: in the ordinary refinement checker, losing a fact means silence, but here it
+means an *error*, so the retirement is intentionally over-eager. If you need the guard
+inside the rebinding scope, re-state it there. Correct code is unaffected:
+`let d = 5` followed by `10 / d` still passes, because the new binding replaces the old
+fact rather than just erasing it.
+
+**One imbalance to know:** a refinement on an `impl` method's parameter can discharge a
+division inside that method's body only when callers are actually obliged to establish
+it; the two passes share one adoption rule (`Refine_check.adoptable_impl_methods`) so
+they can't drift apart. See the "What 'traversed' does and does not buy you" note under
+[`@[trusted]`](#trusted-a-scoped-conspicuous-escape-hatch) for when that adoption
+happens.
+
+---
+
 ## Limitations
 
 Refinements are intentionally a *pragmatic slice* of dependent typing. Know the
@@ -2964,7 +3152,10 @@ edges:
   Body](#a-parameters-own-contract-is-a-fact-inside-its-body).
 - **A refined `let` annotation is CHECKED against its bound expression**
   (since 2026-07-30). `let ys : {List(Int) | len(_) > 0} = []` is a refinement
-  violation reported at the `let`, not a fact the checker adopts. Until that
+  violation reported at the `let` ("bound expression does not satisfy type
+  annotation `len(_) > 0`"), not a fact the checker adopts. Conversely, a
+  `let` annotation that *is* proved does grant its fact: `let ys : {List(Int) |
+  len(_) > 0} = [1]` followed by `inner(ys)` proves both obligations. Until that
   date the annotation was believed on sight: it entered the scope channel
   unconditionally, so a later call needing a non-empty list was reported
   **proved** off an assumption no one had established, and `cap verified` (its
@@ -3392,6 +3583,6 @@ golden corpus itself remains 46/46 MATCH.
 
 ## Next Steps
 
-- [Type System](types.md): the types refinements attach to
+- [Type System](type-system.md): the types refinements attach to
 - [Linear Types](linear-types.md): the other compile-time safety layer
 - [Pattern Matching](pattern-matching.md): `match` guards feed path sensitivity

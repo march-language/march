@@ -358,6 +358,25 @@ git log is authoritative for exact commits.
   could be read twice. Both are now errors, as they already were for a field whose own type
   is linear.
 
+### Documentation
+- **The language-reference pages on march-lang.org are now generated from
+  `specs/lang/`, and the two copies have been reconciled.** Each chapter used to exist
+  twice, as independent prose that had drifted both ways, so corrections made in one copy
+  never reached readers of the other. The published pages gain sections that had existed
+  only in the spec, including supervision restart types and graceful stop, the
+  `cap no_panic` division section, and loop/stop session protocols. Several claims that
+  were wrong in one copy or both are corrected:
+  - an unhandled `offer` branch is a compile error, not a warning;
+  - compiled `MPST` programs run;
+  - interface method names can be module-qualified in compiled code;
+  - supervisor backoff doubles from `2 × base`, at most 7 times;
+  - `pmap` stays sequential for a list of exactly the threshold length;
+  - the `opaque type` constructor bypass is closed;
+  - `docs/types.md`'s `parse_int` example now typechecks.
+
+  Edit `specs/lang/`, run `scripts/gen-lang-docs.py`, and commit both. Doc-lint fails on a
+  hand-edited or stale `docs/` chapter.
+
 ### Changed
 - Cluster membership records a node's creation, name and advertised address: a restarted
   node outranks every verdict about its previous life, and `GlobalRegistry` bindings carry
