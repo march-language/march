@@ -21,6 +21,8 @@
 -- victim is a supervised child so its true count exceeds 1 by construction;
 -- the first line is the non-vacuity guard for the last.
 mod Main do
+  needs Actor.Introspect
+  needs IO
   needs IO.Console
   needs Ffi
   needs IO.Foreign
@@ -83,23 +85,24 @@ mod Main do
 
   -- Takes the pid INDEX and mints a fresh pid per send, so no pid is live
   -- across a send (see the leak note in main).
-  fn pump(idx : Int, n : Int) : () do
+  fn pump(intro : Cap(Actor.Introspect), idx : Int, n : Int) : () do
     if n <= 0 do ()
     else
-      send(pid_of_int(idx), Lend())
-      send(pid_of_int(idx), Quiet())
-      pump(idx, n - 1)
+      send(Actor.pid_from_int(intro, idx), Lend())
+      send(Actor.pid_from_int(intro, idx), Quiet())
+      pump(intro, idx, n - 1)
     end
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let boss = spawn(Boss)
     let victim = current_child(boss)
 
-    send(pid_of_int(victim), Advance())
+    send(Actor.pid_from_int(intro, victim), Advance())
     run_until_idle()
 
-    let steps = match get_actor_field(pid_of_int(victim), "steps") do
+    let steps = match get_actor_field(Actor.pid_from_int(intro, victim), "steps") do
       None    -> -1
       Some(n) -> n
     end
@@ -121,7 +124,7 @@ mod Main do
     -- sends and by nothing the handlers do.
     let rc_before = actor_rc(victim)
     println("victim is multiply owned: " ++ bool_to_string(rc_before > 1))
-    pump(victim, 5)
+    pump(intro, victim, 5)
     run_until_idle()
     -- Ten sends from `pump`, each with a fresh owned pid (pid_of_int) handed
     -- to a BORROWING `send` and dropped after it: net zero. Until 2026-09-14

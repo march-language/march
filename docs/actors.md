@@ -306,7 +306,7 @@ registry hands out a stable string name instead:
 
 ```march
 mod Main do
-  needs IO.Console
+  needs IO
 
   actor Counter do
     state { n : Int }
@@ -314,13 +314,14 @@ mod Main do
     on Bump() do { n: state.n + 1 } end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
     let pid = spawn(Counter)
     println("registered: " ++ bool_to_string(Actor.register(pid, "counter")))
-    println("names: " ++ int_to_string(List.length(Actor.registered())))
+    println("names: " ++ int_to_string(List.length(Actor.registered(c))))
 
     -- Resolve the name once, then reuse the Pid for the whole burst.
-    match Actor.whereis("counter") do
+    match Actor.whereis(c, "counter") do
       None -> println("counter is unavailable right now — retry")
       Some(here) ->
         let _ = send(here, Bump())
@@ -337,11 +338,57 @@ end
 |----------|---------|-------------|
 | `Actor.register(pid, name)` | `Bool` | Bind `name` to `pid`. `false` if `pid` is already dead, or if `name` is currently held by a *live* actor. |
 | `Actor.unregister(name)` | `Bool` | Release the name. `false` if it was not registered. |
-| `Actor.whereis(name)` | `Option(Pid)` | The actor currently holding `name`. |
-| `Actor.registered()` | `List(String)` | Every name currently bound; order unspecified. |
+| `Actor.whereis(c, name)` | `Option(Pid)` | The actor currently holding `name`. `c : Cap(Actor.Introspect)`. |
+| `Actor.registered(c)` | `List(String)` | Every name currently bound; order unspecified. |
 
 A name is released automatically when its actor dies, so a name never resolves to a dead
 Pid and you do not have to unregister from a crash path.
+
+### Introspection is a capability
+
+A Pid is an unforgeable reference: code that was never handed one cannot message the
+actor behind it. Four operations would break that, since each turns something anyone
+can write down (an integer, a name, nothing at all) into a Pid: `Actor.pid_from_int`,
+`Actor.whereis`, `Actor.list` and `Actor.registered`. They take a
+`Cap(Actor.Introspect)`, a proof capability that only `Actor.introspect(io : Cap(IO))`
+mints. Mint it once in `main`, which holds the root capability, and forward it to the
+code that needs it:
+
+```march
+mod Main do
+  needs IO
+  needs Actor.Introspect
+
+  fn child_of(c : Cap(Actor.Introspect), sup, field : String) do
+    match get_actor_field(sup, field) do
+      Some(n) -> Actor.pid_from_int(c, n)
+      None    -> Actor.pid_from_int(c, -1)
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
+    let sup = spawn(Sup)
+    send(child_of(c, sup, "worker"), Work())
+  end
+end
+```
+
+A function that forwards the cap through its signature declares `needs Actor.Introspect`,
+as with any proof capability declared elsewhere. `Actor.register` and `Actor.unregister`
+stay unprivileged: registering a Pid you hold is not authority; resolving a name you were
+never handed is. The raw builtins behind these wrappers (`pid_of_int`,
+`actor_pid_indices`, `actor_whereis`, `actor_registered`) are internal to the standard
+library; a program that calls one is rejected at typecheck time with the wrapper to use:
+
+```
+`pid_of_int` is internal to the standard library; use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)
+```
+
+Because `Actor.introspect` takes `Cap(IO)`, a role body or hook under a narrower grant
+(say `Cap(IO.NetConnect)`) cannot mint the cap itself; the composition root does, and
+hands it down. Cross-node references (`GlobalPid.make`, `GlobalRegistry.lookup`) are not
+covered: unforgeability is a process property first.
 
 `whereis` returns an `Option` because a name can be *momentarily* unresolvable. While a
 supervised child is being respawned (in particular while it waits out its restart backoff)
@@ -728,8 +775,8 @@ compiled programs use `supervise`.
 
 Supervision observation is an exact match on both backends as of 2026-07-08: the compiled
 supervisor runs each declared child's `init` at `spawn(Sup)`, and `get_actor_field(sup, …)`
-+ `pid_of_int(…)` (the surface way to read a supervised child's pid out of the supervisor
-state) resolve correctly compiled (a real shape-registry lookup and a safe dead-actor
++ `Actor.pid_from_int(c, …)` (the surface way to read a supervised child's pid out of the
+supervisor state; `c` is the `Cap(Actor.Introspect)` minted by `Actor.introspect`) resolve correctly compiled (a real shape-registry lookup and a safe dead-actor
 fallback, respectively, in `runtime/march_extras.c`/`runtime/march_runtime.c`; no longer
 stubs). `examples/supervision_strategies.march` runs clean (exit 0) compiled, exercising
 all three restart strategies (`one_for_one`/`one_for_all`/`rest_for_one`).
@@ -834,15 +881,16 @@ end
 | `Scheduler.runq_depth()` | `Int` | Cross-thread global run-queue depth (instantaneous) |
 | `Scheduler.dropped_messages()` | `Int` | Messages dropped by bounded-mailbox overflow policies |
 | `Scheduler.stat(i)` | `Int` | Raw stat by index (`0`=live procs, `1`=total spawned, `2`=runq depth, `3`=stack-alloc failures, `4`=dropped messages, `5`=stacks recycled, `6`=pending timers; unknown index reads `0`) |
-| `Actor.top_by_mailbox(n)` | `List((Pid, Int))` | The `n` deepest mailboxes right now, deepest first, as `(pid, depth)` pairs |
-| `Actor.over_mailbox(t)` | `List((Pid, Int))` | Every actor whose mailbox is deeper than `t`, in spawn order: the growing-mailbox alarm, polled |
+| `Actor.top_by_mailbox(c, n)` | `List((Pid, Int))` | The `n` deepest mailboxes right now, deepest first, as `(pid, depth)` pairs; `c : Cap(Actor.Introspect)` |
+| `Actor.over_mailbox(c, t)` | `List((Pid, Int))` | Every actor whose mailbox is deeper than `t`, in spawn order: the growing-mailbox alarm, polled |
 
 The interpreted backend reports the subset that's meaningful without the C scheduler
 (live actor count); everything else reads `0` on both backends rather than erroring.
 
 `Scheduler` answers "is the system behind?". "*Which* actor is behind?" is
-`Actor.top_by_mailbox(n)` and `Actor.over_mailbox(threshold)`, built on `Actor.list()`
-and `mailbox_size`: both are snapshots (an actor can die or drain between the walk and
+`Actor.top_by_mailbox(c, n)` and `Actor.over_mailbox(c, threshold)`, built on
+`Actor.list(c)` and `mailbox_size` (`c` from `Actor.introspect`, see
+[Introspection is a capability](#introspection-is-a-capability)): both are snapshots (an actor can die or drain between the walk and
 your reaction) and cost one pass over every live actor, so poll them from a timer, not a
 hot path. There is no push-style alarm that fires when a queue crosses a threshold, and no
 per-actor state inspection or tracing; see
@@ -870,7 +918,7 @@ to diverge or crash compiled (see the compiled-actor status note at the top of t
 | `send_checked(cap, msg)` | `→ :ok \| :error` | both | Epoch-validated send; checks revocation, epoch match, and liveness (payload is checked for non-sendable types at construction, same rule as `send`) |
 | `revoke_cap(cap)` | `→ Atom` | both | Revoke a capability; a later `send_checked` on it returns `:error` |
 | `is_cap_valid(cap)` | `→ Bool` | both | Boolean form of the epoch/revocation/liveness check |
-| `pid_of_int(n)` | `→ Pid` | both | Convert Int to Pid (an unknown index resolves to a safe already-dead sentinel) |
+| `Actor.pid_from_int(c, n)` | `→ Pid` | both | Convert Int to Pid; `c : Cap(Actor.Introspect)` from `Actor.introspect(io)` (an unknown index resolves to a safe already-dead sentinel; the raw `pid_of_int` builtin is stdlib-internal) |
 | `pid_to_int(pid)` | `→ Int` | both | The inverse: a Pid's spawn index, the `N` in its `Pid(N)` display (what `GlobalPid.make` takes for a local actor) |
 | `get_actor_field(pid, name)` | `→ Option(a)` | both | Read an actor's state field via the runtime shape registry |
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |

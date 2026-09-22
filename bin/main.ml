@@ -58,45 +58,13 @@ let render_user_diag ~src ~filename ~read_file (d : March_errors.Errors.diagnost
     in
     March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d
 
-(** The set of source files a batch of stdlib declarations actually came from.
-
-    The refinement checker needs to know whether a `List.length` in scope is
-    the real stdlib one before it may treat it as the `len` measure (see
-    [Refine_check.stdlib_source_files]); a wrong answer there is a false
-    positive on correct code. Reading the identity off the declarations we are
-    about to prepend — rather than pattern-matching the path — is what makes it
-    agree with [find_stdlib_dir]'s resolution order (repo `stdlib/`, an
-    installed `share/march`, `MARCH_STDLIB`) AND with the marshalled stdlib-AST
-    cache, whose spans carry whatever directory the entry was written from.
-    Declarations arriving via `MARCH_LIB_PATH` are user decls, not stdlib
-    decls, so a vendored or forked `List` is correctly not in this set. *)
-let stdlib_span_files (decls : March_ast.Ast.decl list) : string list =
-  let seen = Hashtbl.create 64 in
-  (* Both no-file spellings are excluded. `""` is what a string-parsed fixture
-     carries; `"<none>"` is [Ast.dummy_span]'s, and [load_stdlib_file] gives
-     every stdlib module's wrapping [DMod] a dummy span — so without this the
-     sentinel would be a member of the identity set on every production run,
-     and any `fn length` inside a `mod List` that happened to carry a dummy
-     span would be certified as the standard library's. No such declaration is
-     reachable today (desugar's synthesized `DFn`s all reuse their source
-     declaration's real span), but admitting the sentinel is precisely the
-     class of wrong fact this gate exists to prevent, so the route is closed
-     rather than argued about. *)
-  let add (sp : March_ast.Ast.span) =
-    let f = sp.March_ast.Ast.file in
-    if f <> "" && f <> March_ast.Ast.dummy_span.March_ast.Ast.file then
-      Hashtbl.replace seen f ()
-  in
-  let rec go ds =
-    List.iter
-      (function
-        | March_ast.Ast.DMod (_, _, inner, sp) -> add sp; go inner
-        | March_ast.Ast.DFn (_, sp) -> add sp
-        | _ -> ())
-      ds
-  in
-  go decls;
-  Hashtbl.fold (fun f () acc -> f :: acc) seen []
+(* The set of source files the loaded stdlib declarations came from: the
+   identity [Typecheck.stdlib_source_files] wants. Lives in the typechecker
+   ([Typecheck_builtins.stdlib_span_files]) since every stdlib loader (this
+   driver's [Toolchain.load_stdlib], the LSP's) registers what it loaded
+   through [Typecheck_builtins.note_stdlib_decls]; the driver still sets the
+   ref itself at its own check sites. *)
+let stdlib_span_files = March_typecheck.Typecheck_builtins.stdlib_span_files
 
 (** The module names a batch of stdlib declarations defines.
 
@@ -1984,6 +1952,15 @@ let compile filename =
      module (prelude is unwrapped into global scope, so its decls ride in the
      entry module's list).  See Typecheck.stdlib_source_files. *)
   March_typecheck.Typecheck.stdlib_source_files := stdlib_span_files stdlib_decls;
+  (* A shipped stdlib module checked AS THE ENTRY (`march --check
+     stdlib/<mod>.march`) is spelled the way the command line spelled it, not
+     the way [load_stdlib] stamped its own copy, so the set above does not
+     contain it; add it, or the stdlib-only builtin gate rejects the module's
+     own legitimate calls to `pid_of_int` and friends. [user_diag_file] tests
+     the entry file first, so its diagnostics are still shown. *)
+  if is_shipped_stdlib_file filename then
+    March_typecheck.Typecheck.stdlib_source_files :=
+      filename :: !March_typecheck.Typecheck.stdlib_source_files;
   (* Run the typecheck-side capability ceiling ONLY in typecheck-only modes
      (`--check`/`--check-json`/`--emit-core-ast`), where the `--compile`
      path's TIR-side [Cap_ceiling] never runs. On a full `--compile` this
@@ -4055,6 +4032,14 @@ let run_check_cmd ?(emit_caps = false) files =
   let no_shadowing = List.length stdlib_decls = stdlib_decls_unshadowed_count in
   if not (List.for_all is_shipped_stdlib_file files) then
     check_no_prelude_collision_decls ~stdlib_decls all_decls;
+  (* As in [compile]: a shipped stdlib module named on the command line is
+     the stdlib's for the stdlib-only builtin gate, whatever spelling the
+     command line used. *)
+  List.iter (fun f ->
+      if is_shipped_stdlib_file f then
+        March_typecheck.Typecheck.stdlib_source_files :=
+          f :: !March_typecheck.Typecheck.stdlib_source_files)
+    files;
   (* Build a synthetic module of just the user's own decls and type-check it,
      seeded from the cached stdlib typecheck env (see [get_stdlib_tc_env])
      instead of re-typechecking stdlib combined with user code from scratch —

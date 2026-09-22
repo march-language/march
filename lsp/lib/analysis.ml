@@ -81,9 +81,17 @@ let load_stdlib () =
     let prelude = "prelude.march" in
     let rest = List.filter (fun f -> f <> prelude) all_files in
     let ordered = if List.mem prelude all_files then prelude :: rest else rest in
-    List.concat_map
-      (fun name -> load_stdlib_file (Filename.concat stdlib_dir name))
-      ordered
+    let decls =
+      List.concat_map
+        (fun name -> load_stdlib_file (Filename.concat stdlib_dir name))
+        ordered
+    in
+    (* These are the stdlib's declarations: say so to the typechecker before
+       [Typecheck_cache.base_env] checks them, or the stdlib-only builtin
+       gate would reject the stdlib's own calls to `pid_of_int` and friends
+       (the gate exempts a declaration by its span's file). *)
+    March_typecheck.Typecheck_builtins.note_stdlib_decls decls;
+    decls
 
 (* Route stdlib loading through the process-lifetime memo so the parse/desugar
    happens once, not on every keystroke. *)

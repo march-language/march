@@ -1,4 +1,6 @@
 mod PidRoundtrip do
+  needs Actor.Introspect
+  needs IO
   needs IO.Console
 
   actor Echo do
@@ -10,11 +12,18 @@ mod PidRoundtrip do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  -- The cap is minted once in main and FORWARDED: a function that holds no
+  -- Pid can still reach one only because it was handed the authority.
+  fn stale_of(intro : Cap(Actor.Introspect), n : Int) do
+    Actor.pid_from_int(intro, n)
+  end
+
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let p = spawn(Echo)
     println(bool_to_string(is_alive(p)))
 
-    let stale = pid_of_int(999999)
+    let stale = stale_of(intro, 999999)
     println(bool_to_string(is_alive(stale)))
 
     kill(stale)
