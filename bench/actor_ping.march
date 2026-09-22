@@ -1,0 +1,99 @@
+-- Actor ping-pong benchmark: two actors exchange 1,000,000 messages.
+--
+-- Written for the hot-reload boundary-cost measurement (G1 in
+-- specs/plans/2026-09-21-distributed-deploys-groundwork-plan.md, parent II.7).
+-- The actors and the helper live in the nested module `ActorPing.Game`, so
+-- under `--hot-reload Game` every message crosses two dispatch
+-- boundaries: the actor loop enters the handler through the versioned
+-- dispatch table, and the handler calls `Game.relay`, whose call to
+-- `Game.step` is a boundary-to-boundary call (see `relay` for why the
+-- handler's own call is not). Nested
+-- functions are named `Game.<fn>` (the entry module's own name is dropped)
+-- and entry-module functions get bare names, so the boundary prefix is
+-- `Game`, and the code under test has to be nested.
+--
+-- Usage: march --compile --opt 2 bench/actor_ping.march -o /tmp/actor_ping
+--        /tmp/actor_ping                  -- prints "1000000"
+-- Hot-reload build: add `--hot-reload Game`.
+mod ActorPing do
+  needs IO.Console
+  needs IO.Spawn
+
+  mod Game do
+    needs IO.Console
+
+    -- The module-level helpers every handler invocation goes through.
+    fn step(n : Int) : Int do
+      n - 1
+    end
+
+    -- Actor handlers are emitted as `Player_Ball`, with no module prefix, so
+    -- a handler's own call is never boundary-to-boundary: it is a direct call
+    -- even under `--hot-reload`. `relay`'s call to `step` is the one ordinary
+    -- boundary call each message makes.
+    fn relay(n : Int) : Int do
+      step(n)
+    end
+
+    actor Player do
+      state { hits : Int }
+      init  { hits: 0 }
+
+      -- Declared first so it lands at ctor tag 0 (Actor.call's route).
+      on GetHits(reply_to) do
+        Actor.reply(reply_to, state.hits)
+        state
+      end
+
+      -- `me` is this actor, `other` its partner: forward the ball to the
+      -- partner with the roles swapped until the count runs out.
+      on Ball(n : Int, me, other) do
+        let m = Game.relay(n)
+        if m > 0 do
+          send(other, Ball(m, other, me))
+          { hits: state.hits + 1 }
+        else
+          { hits: state.hits + 1 }
+        end
+      end
+    end
+
+    -- Spawning from the parent module as `spawn(Game.Player)` typechecks but
+    -- fails to link (`Game.Player_spawn` undefined), so spawn from here.
+    fn new_player() do
+      spawn(Player)
+    end
+
+    -- Serve the first ball. A nested actor's message constructors are not
+    -- visible outside its module, so the entry module goes through here.
+    fn serve(n : Int, a, b) do
+      send(a, Ball(n, a, b))
+    end
+  end
+
+  type GetHitsReq = GetHitsReq
+
+  fn hits(pid) : Int do
+    match Actor.call(pid, GetHitsReq, 60000) do
+      Ok(n)  -> n
+      Err(_) -> -1
+    end
+  end
+
+  -- `run_until_idle()` alone is not enough: it has been seen to return while
+  -- the ball was still in flight between the two actors (a run printed
+  -- 730492), so wait until every message has been handled.
+  fn wait_done(a, b, n : Int) : Int do
+    run_until_idle()
+    let total = hits(a) + hits(b)
+    if total >= n do total else wait_done(a, b, n) end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+    let n = 1000000
+    let a = Game.new_player()
+    let b = Game.new_player()
+    Game.serve(n, a, b)
+    println(int_to_string(wait_done(a, b, n)))
+  end
+end

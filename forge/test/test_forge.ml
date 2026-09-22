@@ -770,6 +770,173 @@ let test_project_pin_main_non_bool_is_error () =
   | Error e ->
     Alcotest.(check bool) "error names the key" true (contains e "pin_main")
 
+(* ---- positions and no silent drops (G4, 2026-09-22) ---- *)
+
+let has_sub s sub =
+  let n = String.length sub and m = String.length s in
+  let rec go i = i + n <= m && (String.sub s i n = sub || go (i + 1)) in
+  go 0
+
+let parse_error_line text =
+  match Toml.parse_located text with
+  | Ok _ -> Alcotest.fail "expected a parse error"
+  | Error (line, _) -> line
+
+let test_toml_bad_line_reports_its_number () =
+  Alcotest.(check int) "a line with no '='" 3
+    (parse_error_line "[package]\nname = \"x\"\nthis is not toml\n");
+  Alcotest.(check int) "an unterminated header" 2
+    (parse_error_line "# c\n[package\nname = \"x\"\n");
+  Alcotest.(check int) "an unterminated [[header]]" 1
+    (parse_error_line "[[hot-reload.env]\nname = \"a\"\n");
+  Alcotest.(check int) "an unterminated string" 2
+    (parse_error_line "[p]\nname = \"x\n");
+  Alcotest.(check int) "text after the value" 2
+    (parse_error_line "[p]\nname = \"x\" \"y\"\n");
+  Alcotest.(check int) "an unterminated array" 2
+    (parse_error_line "[p]\nxs = [\"a\",\n\"b\"\n");
+  (match Toml.parse "[p]\nbad line\n" with
+   | _ -> Alcotest.fail "parse should raise"
+   | exception Toml.Parse_error m ->
+     Alcotest.(check bool) "parse's message leads with the line" true
+       (has_sub m "line 2:"))
+
+let test_toml_project_error_names_forge_toml_line () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml")
+    "[package]\nname = \"x\"\nversion = \"0.1.0\n";
+  match Project.load_from_dir dir with
+  | Ok _ -> Alcotest.fail "an unterminated string must not load"
+  | Error e ->
+    Alcotest.(check bool) ("error is forge.toml:3: ..., got " ^ e) true
+      (String.length e > 12 && String.sub e 0 12 = "forge.toml:3")
+
+let capture_warnings f =
+  let got = ref [] in
+  let saved = !Project.warning_sink in
+  Project.warning_sink := (fun w -> got := w :: !got);
+  Fun.protect ~finally:(fun () -> Project.warning_sink := saved)
+    (fun () -> f (); List.rev !got)
+
+let test_toml_unknown_package_key_warns_with_line () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml")
+    "[package]\nname = \"x\"\nreplica = 3\n\n[deps]\nanything = \"1.0\"\n\n\
+     [[hot-reload.env]]\nname = \"a\"\nssh_host = \"h\"\nport = 1\n";
+  let ws = capture_warnings (fun () ->
+      match Project.load_from_dir dir with
+      | Error e -> Alcotest.failf "unknown keys must warn, not fail: %s" e
+      | Ok _ -> ()) in
+  Alcotest.(check (list string)) "one warning per unknown key, with its line"
+    [ "forge.toml:3: warning: unknown key 'replica' in [package]";
+      "forge.toml:11: warning: unknown key 'port' in [hot-reload.env]" ]
+    ws
+
+let test_toml_known_keys_are_silent () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml")
+    "[package]\nname = \"x\"\nversion = \"0.1.0\"\ntype = \"app\"\n\
+     description = \"d\"\nauthor = \"a\"\nlicense = \"MIT\"\n\
+     entrypoint = \"lib/x.march\"\npin_main = false\n\n\
+     [deps.v]\npath = \"../v\"\n\n[ffi]\nsources = [\"a.c\"]\nlink = [\"-lz\"]\n\n\
+     [archive.task.x.y]\ncommand = \"x.y\"\nmodule = \"m.march\"\ndoc = \"d\"\n";
+  let ws = capture_warnings (fun () ->
+      match Project.load_from_dir dir with
+      | Error e -> Alcotest.failf "load failed: %s" e
+      | Ok _ -> ()) in
+  Alcotest.(check (list string)) "no warnings" [] ws
+
+let test_toml_inline_tables_in_arrays_round_trip () =
+  let doc = Toml.parse "[t]\nhosts = [{ host = \"a\", labels = [\"db\"] }, \"b\"]\n" in
+  match List.assoc_opt "hosts" (Toml.get_section doc "t") with
+  | Some (Toml.Array [ Toml.InlineTable tbl; Toml.Str "b" ]) ->
+    Alcotest.(check (option string)) "host" (Some "a") (Toml.get_string tbl "host");
+    Alcotest.(check (list string)) "labels" [ "db" ] (Toml.get_string_list tbl "labels")
+  | _ -> Alcotest.fail "expected [InlineTable; Str \"b\"]"
+
+let test_toml_multiline_array_and_lines () =
+  let text =
+    "# top\n\n[ffi]\nsources = [\n  \"a.c\",  # first\n  \"b.c\",\n]\nlink = [\"-lz\"]\n" in
+  let doc = Toml.parse text in
+  Alcotest.(check (list string)) "array across lines, comments and trailing comma"
+    [ "a.c"; "b.c" ] (Toml.get_string_list (Toml.get_section doc "ffi") "sources");
+  match Toml.get_section_at doc "ffi" with
+  | None -> Alcotest.fail "no [ffi]"
+  | Some ls ->
+    Alcotest.(check int) "header line" 3 ls.Toml.sec_line;
+    Alcotest.(check (option (pair (list string) int))) "sources at its key's line"
+      (Some ([ "a.c"; "b.c" ], 4)) (Toml.get_string_list_at ls "sources");
+    Alcotest.(check (option (pair (list string) int))) "the key after it"
+      (Some ([ "-lz" ], 8)) (Toml.get_string_list_at ls "link")
+
+(* ---- Hosts.run_on (G7, 2026-09-22) ---- *)
+
+let mk_host n =
+  { Hosts.name = n; ssh = "root@" ^ n; socket = "/tmp/" ^ n ^ ".sock"; pubkey = ""; labels = [] }
+
+let three_hosts = List.map mk_host [ "a"; "b"; "c" ]
+
+(* A fake step that records the order it ran in and fails on [fail_on]. *)
+let fake_step ~fail_on calls h =
+  calls := h.Hosts.name :: !calls;
+  if h.Hosts.name = fail_on then Error ("boom on " ^ h.Hosts.name) else Ok h.Hosts.name
+
+let names_and_results rs =
+  List.map (fun (h, r) ->
+      (h.Hosts.name, match r with Ok v -> "ok " ^ v | Error e -> "error " ^ e)) rs
+
+let test_hosts_all_reports_every_host () =
+  let calls = ref [] in
+  let rs = Hosts.run_on ~strategy:`All three_hosts (fake_step ~fail_on:"b" calls) in
+  Alcotest.(check (list string)) "ran on all three, in order" [ "a"; "b"; "c" ]
+    (List.rev !calls);
+  Alcotest.(check (list (pair string string))) "each reported"
+    [ ("a", "ok a"); ("b", "error boom on b"); ("c", "ok c") ] (names_and_results rs)
+
+let test_hosts_rolling_stops_on_failure () =
+  let calls = ref [] and skipped = ref [] and gated = ref [] in
+  let health h = gated := h.Hosts.name :: !gated; true in
+  let rs =
+    Hosts.run_on ~on_skip:(fun h -> skipped := h.Hosts.name :: !skipped)
+      ~strategy:(`Rolling health) three_hosts (fake_step ~fail_on:"b" calls) in
+  Alcotest.(check (list string)) "stopped after b" [ "a"; "b" ] (List.rev !calls);
+  Alcotest.(check (list (pair string string))) "only attempted hosts reported"
+    [ ("a", "ok a"); ("b", "error boom on b") ] (names_and_results rs);
+  Alcotest.(check (list string)) "c skipped" [ "c" ] !skipped;
+  Alcotest.(check (list string)) "gate asked only after a success" [ "a" ] !gated
+
+let test_hosts_rolling_health_gate_stops () =
+  let calls = ref [] and skipped = ref [] in
+  let rs =
+    Hosts.run_on ~on_skip:(fun h -> skipped := h.Hosts.name :: !skipped)
+      ~strategy:(`Rolling (fun h -> h.Hosts.name <> "a")) three_hosts
+      (fake_step ~fail_on:"none" calls) in
+  Alcotest.(check (list (pair string string))) "a's failed gate is its result"
+    [ ("a", "error health_check_failed") ] (names_and_results rs);
+  Alcotest.(check (list string)) "b and c skipped" [ "b"; "c" ] (List.rev !skipped)
+
+let test_hosts_rolling_all_ok () =
+  let calls = ref [] in
+  let rs = Hosts.run_on ~strategy:(`Rolling (fun _ -> true)) three_hosts
+      (fake_step ~fail_on:"none" calls) in
+  Alcotest.(check (list (pair string string))) "all ok"
+    [ ("a", "ok a"); ("b", "ok b"); ("c", "ok c") ] (names_and_results rs)
+
+let test_hosts_from_config () =
+  let env = { Project.hre_name = "prod"; hre_ssh_host = "root@h";
+              hre_socket = "/s"; hre_public_key = Some "k" } in
+  let h = Hosts.of_hot_reload_env env in
+  Alcotest.(check (list string)) "from [[hot-reload.env]]" [ "prod"; "root@h"; "/s"; "k" ]
+    [ h.Hosts.name; h.Hosts.ssh; h.Hosts.socket; h.Hosts.pubkey ];
+  let flat = { Project.hr_socket = "/f"; hr_ssh_host = ""; hr_public_key = None;
+               hr_envs = []; hr_health_check_url = None; hr_strategy = "rolling" } in
+  Alcotest.(check bool) "no ssh_host -> no host" true (Hosts.of_flat_config flat = None);
+  match Hosts.of_flat_config { flat with Project.hr_ssh_host = "root@x" } with
+  | Some h -> Alcotest.(check (list string)) "flat host is 'default'"
+                [ "default"; "root@x"; "/f"; "" ]
+                [ h.Hosts.name; h.Hosts.ssh; h.Hosts.socket; h.Hosts.pubkey ]
+  | None -> Alcotest.fail "expected the flat host"
+
 (* -------------------------------------------------------------------- ffi *)
 
 let test_ffi_gen_c () =
@@ -2191,6 +2358,13 @@ let () =
       Alcotest.test_case "module name is PascalCase"          `Quick test_module_name_is_pascal_case;
       Alcotest.test_case "generated files use do/end syntax"  `Quick test_generated_march_uses_do_end;
     ];
+    "hosts", [
+      Alcotest.test_case "`All reports every host" `Quick test_hosts_all_reports_every_host;
+      Alcotest.test_case "`Rolling stops on failure" `Quick test_hosts_rolling_stops_on_failure;
+      Alcotest.test_case "`Rolling health gate stops" `Quick test_hosts_rolling_health_gate_stops;
+      Alcotest.test_case "`Rolling all ok" `Quick test_hosts_rolling_all_ok;
+      Alcotest.test_case "hosts from forge.toml config" `Quick test_hosts_from_config;
+    ];
     "toml", [
       Alcotest.test_case "simple key/value pairs"   `Quick test_toml_simple;
       Alcotest.test_case "inline table (git dep)"   `Quick test_toml_inline_table;
@@ -2200,6 +2374,12 @@ let () =
       Alcotest.test_case "bare true/false are Bool" `Quick test_toml_bool;
       Alcotest.test_case "Bool in inline table/array" `Quick test_toml_bool_in_inline_table_and_array;
       Alcotest.test_case "other bare values stay Str" `Quick test_toml_bare_non_bool_stays_string;
+      Alcotest.test_case "bad line reports its number" `Quick test_toml_bad_line_reports_its_number;
+      Alcotest.test_case "project error is forge.toml:<line>" `Quick test_toml_project_error_names_forge_toml_line;
+      Alcotest.test_case "unknown key warns with its line" `Quick test_toml_unknown_package_key_warns_with_line;
+      Alcotest.test_case "known keys are silent" `Quick test_toml_known_keys_are_silent;
+      Alcotest.test_case "inline tables in arrays round-trip" `Quick test_toml_inline_tables_in_arrays_round_trip;
+      Alcotest.test_case "multi-line array, with lines" `Quick test_toml_multiline_array_and_lines;
     ];
     "toolchain", [
       Alcotest.test_case "platform: darwin arm64"            `Quick test_platform_darwin_arm;
