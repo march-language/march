@@ -382,6 +382,10 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **A design for distributed authority, topology and hot deploys, and its groundwork
+  plan** (`specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md`,
+  `specs/plans/2026-09-21-distributed-deploys-groundwork-plan.md`). The remaining
+  build steps are filed as `specs/todos/2026-09-22-dd-*.md`.
 - **The language-reference pages on march-lang.org are now generated from
   `specs/lang/`, and the two copies have been reconciled.** Each chapter used to exist
   twice, as independent prose that had drifted both ways, so corrections made in one copy
