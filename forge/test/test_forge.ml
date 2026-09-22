@@ -1594,6 +1594,58 @@ let test_interp_command_file_with_no_args_still_emits_args_flag () =
   Alcotest.(check string) "bare --args is still emitted"
     "MARCH_LIB_PATH=/p/lib march '/p/lib/app.march' --args" cmd
 
+(* ------------------------------------------ [ffi.rust] under the interpreter *)
+
+(* A [[ffi.rust]]-only project cannot run interpreted: cargo produces a static
+   lib<name>.a that cannot be dlopen'ed, and with no [[ffi] sources] the
+   compiler builds no interpreter shim, so every Rust extern used to die at
+   its call site with the generic "symbol not found for interpreter FFI".
+   forge now says so once, up front.  These pin WHEN it says so, on a real
+   forge.toml parsed by [Project.load_from_dir]; no cargo build runs. *)
+
+let load_ffi_project toml =
+  let dir = Filename.temp_dir "forge_ffi_rust_diag_" "" in
+  write_file (Filename.concat dir "forge.toml") toml;
+  match Project.load_from_dir dir with
+  | Error msg -> Alcotest.failf "forge.toml did not load: %s" msg
+  | Ok proj -> proj
+
+let pkg_header = "[package]\nname = \"rusty\"\nversion = \"0.1.0\"\ntype = \"app\"\n"
+let rust_section = "\n[ffi.rust]\ncrate = \"native/rusty_ffi\"\nlib = \"rusty_ffi\"\n"
+let c_section = "\n[ffi]\nsources = [\"native/shim.c\"]\n"
+
+let test_rust_only_interpreted_gets_diagnostic () =
+  let proj = load_ffi_project (pkg_header ^ rust_section) in
+  match Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:true proj with
+  | None -> Alcotest.fail "expected the compile-only diagnostic for a [ffi.rust]-only project"
+  | Some msg ->
+    Alcotest.(check bool) "says it is compiled-only" true
+      (contains msg "only available in compiled mode");
+    Alcotest.(check bool) "names the crate" true (contains msg "native/rusty_ffi");
+    Alcotest.(check bool) "names the static archive" true (contains msg "librusty_ffi.a");
+    Alcotest.(check bool) "tells the user what to run instead" true
+      (contains msg "forge run --compiled");
+    Alcotest.(check bool) "is a warning, not an error" true
+      (String.length msg >= 8 && String.sub msg 0 8 = "warning:")
+
+let test_rust_only_compiled_no_diagnostic () =
+  let proj = load_ffi_project (pkg_header ^ rust_section) in
+  Alcotest.(check (option string)) "compiled builds link the archive fine" None
+    (Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:false proj)
+
+let test_rust_with_c_sources_no_diagnostic () =
+  let proj = load_ffi_project (pkg_header ^ c_section ^ rust_section) in
+  Alcotest.(check (option string)) "a C shim exists, so the interpreter path is live" None
+    (Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:true proj)
+
+let test_c_only_and_no_ffi_no_diagnostic () =
+  let c_only = load_ffi_project (pkg_header ^ c_section) in
+  Alcotest.(check (option string)) "C-only [ffi]" None
+    (Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:true c_only);
+  let bare = load_ffi_project pkg_header in
+  Alcotest.(check (option string)) "no [ffi] at all" None
+    (Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:true bare)
+
 let test_output_ext_by_target () =
   (* Pinned because the single-file compiled run names a temp output with this,
      and running a .mjs as if it were a native binary fails confusingly. *)
@@ -2203,6 +2255,14 @@ let () =
         test_repl_command_includes_ffi_flags_after_entry;
       Alcotest.test_case "bare REPL still gets the ffi flags" `Quick
         test_repl_command_bare_includes_ffi_flags;
+      Alcotest.test_case "[ffi.rust]-only interpreted run: compile-only diagnostic" `Quick
+        test_rust_only_interpreted_gets_diagnostic;
+      Alcotest.test_case "[ffi.rust]-only compiled run: no diagnostic" `Quick
+        test_rust_only_compiled_no_diagnostic;
+      Alcotest.test_case "[ffi.rust] plus [ffi] C sources: no diagnostic" `Quick
+        test_rust_with_c_sources_no_diagnostic;
+      Alcotest.test_case "C-only / no-FFI projects: no diagnostic" `Quick
+        test_c_only_and_no_ffi_no_diagnostic;
       Alcotest.test_case "output extension follows the target" `Quick
         test_output_ext_by_target;
       Alcotest.test_case "compiled single-file run: real compile, real run" `Slow
