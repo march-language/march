@@ -12,6 +12,13 @@
 --   * bytes read past a frame boundary carry to the next frame instead of
 --     being dropped with the pair (NodeCall/NodeSend.serve_one both dropped
 --     the leftover), which is why three frames in one recv() all arrive.
+--
+-- node-a's line is printed by main and node-b's by the server task, two
+-- green threads whose println calls are each atomic but not ordered against
+-- each other: under load the reader could print its first frame before main
+-- printed "wrote". So node-b records its lines in a Vault and main prints
+-- them after task_await (the session_node_fan_loopback pattern). The order
+-- within node-b's lines, which IS what this pins, is still the reader's.
 -- Design: specs/progress/2026-09-14-distributed-plane-flow-control-and-control-channel.md.
 mod PeerReaderLoopback do
   needs IO.Console
@@ -50,7 +57,7 @@ mod PeerReaderLoopback do
       end
     match outcome do
       Ok(line) ->
-        println(line)
+        note(line)
         Ok(seen + 1 < 3)
       Err(e) -> Err(e)
     end
@@ -59,8 +66,8 @@ mod PeerReaderLoopback do
   pfn serve_b(conn_fd : Int, listen_fd : Int, sink_pid) do
     let r = PeerReader.serve(conn_fd, Nil, fn (tag, frame) -> on_frame(sink_pid, frame_count(), tag, frame))
     match r do
-      Ok(_) -> println("node-b: reader stopped after 3 frames")
-      Err(e) -> println("node-b: reader error: " ++ e)
+      Ok(_) -> note("node-b: reader stopped after 3 frames")
+      Err(e) -> note("node-b: reader error: " ++ e)
     end
     tcp_close(conn_fd)
     tcp_close(listen_fd)
@@ -76,6 +83,12 @@ mod PeerReaderLoopback do
     end
     Vault.set(v, "n", n + 1)
     n
+  end
+
+  -- node-b's output, in the order it happened; main prints it at the end.
+  pfn note(line : String) : () do
+    let v = Vault.open("peer_reader_log")
+    Vault.set(v, "lines", List.append(Vault.get_or(v, "lines", Nil), Cons(line, Nil)))
   end
 
   pfn run_server(listen_fd : Int, sink_pid) do
@@ -97,6 +110,7 @@ mod PeerReaderLoopback do
 
   fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
     let _ = Vault.new("peer_reader_frames")
+    let _ = Vault.new("peer_reader_log")
     let listen_fd = match tcp_listen(0) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)
@@ -122,6 +136,7 @@ mod PeerReaderLoopback do
     println("node-a: wrote 3 frames in one burst")
 
     let _ = task_await(srv)
+    let _ = List.map(Vault.get_or(Vault.open("peer_reader_log"), "lines", Nil), fn l -> println(l))
     tcp_close(conn_fd)
     run_until_idle()
     match get_actor_field(sink_pid, "got") do
