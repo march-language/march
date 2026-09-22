@@ -334,6 +334,13 @@ A linear value has to stay traceable wherever it goes:
 - **`_` can't discard one.** `let _ = token` or `fn _ -> …` receiving a linear value
   would drop it, and so would a `_` over something holding one
   (`let (_, n) = (Some(token), 1)`). Discarding a non-linear part (`Token(_)`) is fine.
+  This holds however the value became linear: not only when its *type* says so, but
+  also when only its *binding* does — a `linear x : a` parameter or a `linear let`
+  local, whose type stays a plain type variable or `Int`. `let _ = x` on one of those
+  is rejected too, so no generic function can launder a linear value away by binding
+  it to a wildcard. Session endpoints are the exception: a `Chan` has its own, narrower
+  must-close rule (only an endpoint at `End` must be closed), so dropping one
+  mid-protocol stays legal.
 - **A container holding one is linear itself.** `(token, 1)`, `Some(token)` and
   `[token]` must be used exactly once, like what they hold. Records are the exception:
   their fields are tracked one by one. Taking one apart consumes it, and each part is
