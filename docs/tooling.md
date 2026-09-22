@@ -629,6 +629,10 @@ forge cap run --allow-only IO.Console ./untrusted          # run untrusted code 
 
 ---
 
+## forge topology: the topology file
+
+`forge topology check` validates a `topology.toml` (which function or actor serves each protocol role, which pools of nodes serve which roles, hosts per environment) against your sources with `file:line` errors, and runs automatically in `forge build`, `forge run` and `forge deploy hot`. `forge topology export --json` prints the digested topology with the pool connectivity graph; `forge topology gen systemd|ufw|do-firewall|compose` writes deployment files from it, and any `forge-topology-<target>` on `PATH` is a generator plugin. See the [Topology](topology.md) page.
+
 ## Dependency Management
 
 ### Adding Dependencies

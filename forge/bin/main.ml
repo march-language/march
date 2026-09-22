@@ -18,7 +18,7 @@ let known_builtin_names =
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
     "licenses"; "tree"; "outdated"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "audit"; "ffi"; "fix"; "help";
-    "completions"; "deploy"; "hot-reload" ]
+    "completions"; "deploy"; "hot-reload"; "topology" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
    Archive tasks look like "bastion.new" — dotted namespaces not used by any
@@ -1303,6 +1303,115 @@ let hot_reload_cmd =
 
 (* --------------------------------------------------------- forge completions *)
 
+
+(* ---------------------------------------------------------- forge topology *)
+
+let topology_env =
+  Arg.(value & opt (some string) None &
+       info ["env"] ~docv:"NAME"
+         ~doc:"Merge the $(b,topology.NAME.toml) overlay onto topology.toml.")
+
+(* Load + check, printing every diagnostic; the digest is written when the
+   check passes. Shared by check/export/gen so none of them acts on a
+   topology the check rejects. *)
+let topology_load_checked env =
+  match Project.load () with
+  | Error m -> Error m
+  | Ok proj ->
+    let root = proj.Project.root in
+    if not (Topology.exists ~root) then
+      Error "no topology.toml in the project root"
+    else
+      match Topology.load ~root ?env () with
+      | Error ds ->
+        List.iter (fun d -> prerr_endline (Topology.render_diag d)) ds;
+        Error (Printf.sprintf "topology check failed (%d error%s)"
+                 (List.length ds) (if List.length ds = 1 then "" else "s"))
+      | Ok t ->
+        let index = Topology.index_project ~root in
+        let ds = Topology.check ~index t in
+        List.iter (fun d -> prerr_endline (Topology.render_diag d)) ds;
+        if Topology.has_errors ds then begin
+          let n = List.length (List.filter (fun (d : Topology.diag) -> d.Topology.severity = Topology.Error) ds) in
+          Error (Printf.sprintf "topology check failed (%d error%s)" n (if n = 1 then "" else "s"))
+        end else begin
+          let path = Topology.write_digest ~root t in
+          Ok (proj, t, index, path)
+        end
+
+let topology_check_cmd =
+  let run env =
+    match topology_load_checked env with
+    | Ok (_, t, _, path) ->
+      Printf.printf "topology ok: %d role%s, %d pool%s; digest written to %s\n%!"
+        (List.length t.Topology.roles) (if List.length t.Topology.roles = 1 then "" else "s")
+        (List.length t.Topology.pools) (if List.length t.Topology.pools = 1 then "" else "s")
+        path
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "check"
+           ~doc:"Check topology.toml (and an --env overlay) against the project's \
+                 sources and write .forge/topology.json")
+    Term.(const run $ topology_env)
+
+let topology_export_cmd =
+  let json = Arg.(value & flag & info ["json"] ~doc:"Print the export as JSON (the only format today).") in
+  let run env _json =
+    match topology_load_checked env with
+    | Ok (_, t, index, _) ->
+      print_endline (Yojson.Safe.pretty_to_string (Topology.export_json ~index t))
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "export"
+           ~doc:"Print the digested topology plus the derived facts (each pool's \
+                 initiated roles, the pool connectivity graph, public ports) as JSON")
+    Term.(const run $ topology_env $ json)
+
+let topology_gen_cmd =
+  let target =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"TARGET"
+           ~doc:"A built-in generator (systemd, ufw, do-firewall, compose) or the name \
+                 of a $(b,forge-topology-TARGET) executable on PATH, which is fed the \
+                 export JSON on stdin.")
+  in
+  let out =
+    Arg.(value & opt (some string) None &
+         info ["out"; "o"] ~docv:"DIR"
+           ~doc:"Write the generated files under DIR instead of printing them \
+                 (built-in generators only).")
+  in
+  let run env target out =
+    match topology_load_checked env with
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+    | Ok (proj, t, index, _) ->
+      let json = Topology.export_json ~index t in
+      match Topology.export_of_json json with
+      | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+      | Ok ex ->
+        match Topology.Gen.builtin ~project:proj.Project.name target ex with
+        | Some files -> Topology.Gen.emit ?out files
+        | None ->
+          match Cli_ext.external_subcommand ~known:Topology.Gen.builtins
+                  ~argv1:("topology-" ^ target) ~path_lookup:Topology.Gen.path_lookup with
+          | Some exe ->
+            let rc = Topology.Gen.run_external exe json in
+            if rc <> 0 then exit rc
+          | None ->
+            Printf.eprintf "error: no generator '%s': not a built-in (%s) and no forge-topology-%s on PATH\n%!"
+              target (String.concat ", " Topology.Gen.builtins) target;
+            exit 1
+  in
+  Cmd.v (Cmd.info "gen"
+           ~doc:"Generate deployment files from the topology: a built-in target or \
+                 a forge-topology-<target> plugin")
+    Term.(const run $ topology_env $ target $ out)
+
+let topology_cmd =
+  Cmd.group (Cmd.info "topology"
+               ~doc:"The topology file: check, export as JSON, generate deployment files")
+    [topology_check_cmd; topology_export_cmd; topology_gen_cmd]
+
 let completions_cmd =
   let shell =
     Arg.(required & pos 0 (some string) None &
@@ -1388,7 +1497,7 @@ let () =
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
       licenses_cmd; tree_cmd; outdated_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
-      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; completions_cmd; help_cmd ]
+      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; topology_cmd; completions_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
