@@ -189,6 +189,19 @@ type env = {
   ctors   : ctor_info list StrMap.t;       (** Data constructor name → all infos (head = most recent) *)
   records : (string list * (string * Ast.ty) list) StrMap.t;
     (** Named record type definitions: name → (type_params, [(field, surface_ty)]) *)
+  ty_aliases : (string list * Ast.ty) StrMap.t;
+    (** Transparent type aliases ([Ast.TDAlias]): name → (type_params, right-hand
+        surface type).  [surface_ty] substitutes the arguments for the parameters
+        and resolves the right-hand side instead of building a nominal [TCon], so
+        an alias is the type it names — including its `always_linear` discipline,
+        which belongs to the type the alias expands to, not to the alias.
+
+        The parser has no alias syntax; the only aliases today are generated
+        (`@[endpoints]` emits `Entry` per role module, naming that role's first
+        state).  Generated aliases are registered under their QUALIFIED name
+        only, never the bare one: every role module of a protocol declares
+        `Entry`, and types share one flat namespace, so a bare `Entry` would
+        resolve to whichever role happened to be registered first. *)
   level   : int;                           (** Current generalization level *)
   lin     : lin_entry list;                (** Linear/affine use tracking *)
   errors  : Err.ctx;
@@ -634,6 +647,7 @@ type env = {
 
 let make_env errors type_map = {
   vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
+  ty_aliases = StrMap.empty;
   level = 0; lin = [];
   errors; pending_constraints = ref []; type_map; record_names_snapshot = [];
   refs = ref []; current_decl = ref "";

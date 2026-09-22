@@ -3245,6 +3245,11 @@ let compile filename =
                   if held then "" else " -DMARCH_CAP_DENY_" ^ name in
                 let deny_flags =
                   deny "NET"   (holds "IO.Network")
+                  (* holds is bidirectional, so IO.NetConnect alone makes
+                     holds "IO.Network" true and clears NET (socket() is
+                     needed to connect).  LISTEN is the narrower deny that
+                     still stops such a program from binding a listener. *)
+                  ^ deny "LISTEN" (holds "IO.NetListen")
                   ^ deny "EXEC"  (holds "IO.Process")
                   ^ deny "WRITE" (holds "IO.FileWrite")
                 in

@@ -39,6 +39,15 @@ git log is authoritative for exact commits.
   about 18 KB more, and `Vault.size`/`Vault.keys` walk shard by shard, so their result
   is a recent count rather than a single instant's snapshot of the whole table.
 ### Added
+- **A choreography role's first state now has a name: `<P>_<Role>.Entry`.** A role
+  body's signature used to have to spell the state `register` yields, which meant
+  working out `S_` plus the first step of that role's own projection
+  (`Fan_C.S_recv_Msg_A_C_1`). Every generated role module now also declares `Entry`,
+  a transparent alias for that state, so the body reads
+  `st : Fan_C.Entry`. Being an alias, it is the state type at every later step: the
+  linearity that stops a session being replayed or abandoned is unchanged, and each
+  role's `Entry` still resolves to its own state rather than to one type shared
+  across roles. The `S_` spellings keep working.
 - **`Session.in_process()`: a network-free session transport in the standard library.**
   Attach it with `Session.attach(io, t.ops)`, run every role in one program, and
   `t.drain(())` to deliver. Failure paths work as on the network: a role that leaves
@@ -63,6 +72,12 @@ git log is authoritative for exact commits.
   dependency whose tree was deleted is re-extracted from the cached tarball.
   Every read re-hashes the tarball, and a corrupt one is discarded instead of
   being extracted.
+- **`forge.toml` `[package] pin_main = true` runs a program's `main` on the
+  process main thread** (what Cocoa and GLFW need to open a window) by compiling
+  with `march --pin-main`, so a double-clicked app no longer depends on
+  `MARCH_PIN_MAIN=1` being set. It covers `forge build`, `forge run --compiled`,
+  `forge bench` and `forge install`. forge's TOML reader now understands bare
+  `true`/`false`; a non-boolean `pin_main` is an error.
 - **`MARCH_PREEMPT_SIGNAL` chooses the green-thread preemption signal** (`USR1`,
   the default, `USR2`, or on Linux `RTMIN[+n]`); embedders can call
   `march_sched_set_preempt_signal`. `Signal.watch` reserves whichever signal is
@@ -107,6 +122,11 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **On Linux, `--cap-sandbox` now stops a program without `IO.NetListen` from
+  accepting connections.** Holding only `IO.NetConnect` (an HTTP client, say)
+  allowed `socket()`, and nothing denied `bind`/`listen`, so such a program
+  could still open a listener. Both are now denied unless `IO.NetListen` is
+  held; connecting is unaffected. macOS does not separate the two yet.
 - **A scheduler thread that cannot be created is reported instead of crashing the program at
   exit.** Under a process/thread limit (a container `pids` limit, `ulimit -u`) a compiled
   program could run to completion and then die with SIGSEGV while joining a thread that was
@@ -128,6 +148,20 @@ git log is authoritative for exact commits.
   own dependencies. The build's transitive walk ignored `forge.lock`, so it
   dropped the dependencies of any dependency that had more than one version
   cached.
+- **A refinement check on an argument that multiplies two variables is no longer
+  skipped.** `need_pos(y * y + 1)` against `{Int | _ > 0}` was reported as
+  "the argument could not be translated to SMT", even though predicates and
+  postconditions already accepted the same product. It now proves, so
+  `List.map(ys, fn y -> y * y + 1)` meets a positive-element demand too. A
+  product that really breaks the contract (`need_pos(y * y - 1)` under
+  `y == 0`) is reported with a counterexample. A product goal the solver cannot
+  settle is skipped with the reason `nonlinear-goal`.
+- **A function with a default argument no longer inherits the capabilities of an
+  interface method with the same name.** In a module that declares both an
+  interface method `f` (with a default body, or implemented by an `impl`) and a
+  plain `fn f(x, y \\ 1)`, the inferred capability closure of the pure `f`, and
+  of every function calling it, picked up whatever the method's body used (for
+  example `IO.Console`). The non-defaulted case was already handled correctly.
 - **`float_nan`, `float_infinity`, `float_neg_infinity`, `float_epsilon`,
   `float_is_nan`, `float_is_infinite` and `typed_array_slice` now work in
   compiled programs.** They typechecked and ran interpreted, but `--compile`

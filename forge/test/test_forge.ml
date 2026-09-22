@@ -237,6 +237,58 @@ name = "bar"
   let deps = Toml.get_section doc "deps" in
   Alcotest.(check int) "empty deps section" 0 (List.length deps)
 
+(* TOML booleans: bare [true]/[false] are a [Bool], never a [Str] -- the
+   pin_main key (and anything after it) reads them through [get_bool]. *)
+let test_toml_bool () =
+  let text = {|
+[package]
+pin_main = true
+other = false
+commented = true   # trailing comment
+quoted = "true"
+|} in
+  let doc = Toml.parse text in
+  let pkg = Toml.get_section doc "package" in
+  Alcotest.(check (option bool)) "bare true"  (Some true)  (Toml.get_bool pkg "pin_main");
+  Alcotest.(check (option bool)) "bare false" (Some false) (Toml.get_bool pkg "other");
+  Alcotest.(check (option bool)) "true before a comment" (Some true)
+    (Toml.get_bool pkg "commented");
+  Alcotest.(check (option bool)) "quoted \"true\" is a string, not a bool" None
+    (Toml.get_bool pkg "quoted");
+  Alcotest.(check (option string)) "quoted \"true\" still reads as a string"
+    (Some "true") (Toml.get_string pkg "quoted");
+  Alcotest.(check (option string)) "a bool is not a string" None
+    (Toml.get_string pkg "pin_main");
+  Alcotest.(check (option bool)) "absent key" None (Toml.get_bool pkg "missing")
+
+let test_toml_bool_in_inline_table_and_array () =
+  let text = {|
+[x]
+t = { a = true, b = false, c = "s" }
+xs = [true, false]
+|} in
+  let doc = Toml.parse text in
+  let x = Toml.get_section doc "x" in
+  (match Toml.get_table x "t" with
+   | None -> Alcotest.fail "expected inline table"
+   | Some t ->
+     Alcotest.(check (option bool)) "a" (Some true)  (Toml.get_bool t "a");
+     Alcotest.(check (option bool)) "b" (Some false) (Toml.get_bool t "b");
+     Alcotest.(check (option string)) "c" (Some "s") (Toml.get_string t "c"));
+  (match List.assoc_opt "xs" x with
+   | Some (Toml.Array [ Toml.Bool true; Toml.Bool false ]) -> ()
+   | _ -> Alcotest.fail "expected [Bool true; Bool false]")
+
+(* Only the exact bare words are booleans: anything else bare keeps its old
+   [Str] reading, so no existing forge.toml changes meaning. *)
+let test_toml_bare_non_bool_stays_string () =
+  let text = "[p]\nv = True\nw = 1.2.3\n" in
+  let p = Toml.get_section (Toml.parse text) "p" in
+  Alcotest.(check (option string)) "True (capitalised) is a bare string"
+    (Some "True") (Toml.get_string p "v");
+  Alcotest.(check (option string)) "bare version is a string"
+    (Some "1.2.3") (Toml.get_string p "w")
+
 (* ---------------------------------------------------------------- toolchain *)
 
 let test_platform_darwin_arm () =
@@ -683,6 +735,40 @@ let test_project_metadata_absent () =
   match Project.load_from_dir dir with
   | Error e -> Alcotest.failf "load failed: %s" e
   | Ok p -> Alcotest.(check (option string)) "absent license -> None" None p.Project.license
+
+(* [package] pin_main: baked into the binary via `march --pin-main`. *)
+let test_project_pin_main_true () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml")
+    "[package]\nname = \"x\"\npin_main = true\n";
+  match Project.load_from_dir dir with
+  | Error e -> Alcotest.failf "load failed: %s" e
+  | Ok p -> Alcotest.(check bool) "pin_main = true" true p.Project.pin_main
+
+let test_project_pin_main_default_and_false () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml") "[package]\nname = \"x\"\n";
+  (match Project.load_from_dir dir with
+   | Error e -> Alcotest.failf "load failed: %s" e
+   | Ok p -> Alcotest.(check bool) "absent -> false" false p.Project.pin_main);
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml")
+    "[package]\nname = \"x\"\npin_main = false\n";
+  match Project.load_from_dir dir with
+  | Error e -> Alcotest.failf "load failed: %s" e
+  | Ok p -> Alcotest.(check bool) "pin_main = false" false p.Project.pin_main
+
+(* A non-boolean value is an error, not a silent "off": the failure mode of a
+   GUI app that silently did not pin is a window that never appears, with no
+   diagnostic anywhere. *)
+let test_project_pin_main_non_bool_is_error () =
+  let dir = fresh_dir () in
+  write_file (Filename.concat dir "forge.toml")
+    "[package]\nname = \"x\"\npin_main = \"yes\"\n";
+  match Project.load_from_dir dir with
+  | Ok _ -> Alcotest.fail "pin_main = \"yes\" should be rejected"
+  | Error e ->
+    Alcotest.(check bool) "error names the key" true (contains e "pin_main")
 
 (* -------------------------------------------------------------------- ffi *)
 
@@ -1532,6 +1618,25 @@ let index_of haystack needle =
 
 let ffi_flags_sample = " --ffi-c '/dep/native/sqlite_shim.c' --ffi-link '-lsqlite3'"
 
+(* `forge build` / `forge run --compiled` / `forge bench`: the compile command carries
+   --pin-main exactly when the project asks for it, and is byte-identical to
+   the pre-pin_main command otherwise. *)
+let test_compile_command_pin_main () =
+  let cmd pin_main =
+    Cmd_build.compile_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib "
+      ~ffi_flags:"" ~output:"/p/out" ~release:false ~dump_phases:false
+      ~pin_main "/p/lib/app.march"
+  in
+  Alcotest.(check bool) "pin_main -> --pin-main" true (contains (cmd true) " --pin-main");
+  Alcotest.(check bool) "no pin_main -> no --pin-main" false
+    (contains (cmd false) "--pin-main");
+  Alcotest.(check string) "unpinned command shape unchanged"
+    "MARCH_LIB_PATH=/p/lib march --compile -o '/p/out' --opt 0 '/p/lib/app.march'"
+    (cmd false);
+  Alcotest.(check string) "pinned command shape"
+    "MARCH_LIB_PATH=/p/lib march --compile -o '/p/out' --opt 0 --pin-main '/p/lib/app.march'"
+    (cmd true)
+
 let test_interp_command_includes_ffi_flags () =
   let cmd =
     Cmd_run.interp_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib "
@@ -2092,6 +2197,9 @@ let () =
       Alcotest.test_case "inline table (path dep)"  `Quick test_toml_path_dep;
       Alcotest.test_case "comments are ignored"     `Quick test_toml_comments_ignored;
       Alcotest.test_case "missing section is empty" `Quick test_toml_missing_section;
+      Alcotest.test_case "bare true/false are Bool" `Quick test_toml_bool;
+      Alcotest.test_case "Bool in inline table/array" `Quick test_toml_bool_in_inline_table_and_array;
+      Alcotest.test_case "other bare values stay Str" `Quick test_toml_bare_non_bool_stays_string;
     ];
     "toolchain", [
       Alcotest.test_case "platform: darwin arm64"            `Quick test_platform_darwin_arm;
@@ -2140,6 +2248,9 @@ let () =
     "metadata", [
       Alcotest.test_case "parses license/repository/homepage" `Quick test_project_metadata_fields;
       Alcotest.test_case "absent metadata -> None"            `Quick test_project_metadata_absent;
+      Alcotest.test_case "pin_main = true"                    `Quick test_project_pin_main_true;
+      Alcotest.test_case "pin_main absent/false -> false"     `Quick test_project_pin_main_default_and_false;
+      Alcotest.test_case "pin_main non-bool -> error"         `Quick test_project_pin_main_non_bool_is_error;
     ];
     "workspace", [
       Alcotest.test_case "parse_members: extracts list"    `Quick test_workspace_parse_members;
@@ -2231,6 +2342,9 @@ let () =
       Alcotest.test_case "branch: caps present, no flag -> ACTIVATE4" `Quick test_branch_caps_present_no_flag_selects_activate4;
       Alcotest.test_case "branch: --no-cap-gate forces ACTIVATE3" `Quick test_branch_no_cap_gate_flag_forces_activate3;
       Alcotest.test_case "branch: legacy manifest forces ACTIVATE3" `Quick test_branch_legacy_manifest_forces_activate3;
+    ];
+    "pin_main", [
+      Alcotest.test_case "build command carries --pin-main iff set" `Quick test_compile_command_pin_main;
     ];
     "interp_command", [
       Alcotest.test_case "forge run threads [ffi] flags to march" `Quick

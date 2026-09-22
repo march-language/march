@@ -10,9 +10,10 @@
 type context = {
   lib_path_env : string;  (** MARCH_LIB_PATH=... prefix, incl. the toolchain PATH *)
   ffi_flags    : string;  (** --ffi-c/--ffi-link flags, each with a leading space *)
+  pin_main     : bool;    (** forge.toml [package] pin_main; compiled runs only *)
 }
 
-let empty_context = { lib_path_env = ""; ffi_flags = "" }
+let empty_context = { lib_path_env = ""; ffi_flags = ""; pin_main = false }
 
 (** Install the resolved toolchain if absent (so the PATH prefix
     [Cmd_build.lib_path_env] builds actually points at something), then collect
@@ -30,7 +31,9 @@ let context_of_project ~interpreted proj =
     if interpreted then Cmd_build.warn_interpreted_rust_ffi proj;
     match Cmd_build.ffi_flags_full proj with
     | Error msg -> Error msg
-    | Ok ffi_flags -> Ok { lib_path_env = Cmd_build.lib_path_env proj; ffi_flags }
+    | Ok ffi_flags ->
+      Ok { lib_path_env = Cmd_build.lib_path_env proj; ffi_flags;
+           pin_main = proj.Project.pin_main }
 
 (** Resolve what to run and the context to run it in.
 
@@ -182,7 +185,7 @@ let run ?(dump_phases = false) ?(compiled = false) ?target ?file ?(args = []) ()
             let (rc, _errors, _warnings) =
               Cmd_build.compile_entry ~lib_path_env:ctx.lib_path_env
                 ~ffi_flags:ctx.ffi_flags ~output ~release:false ~dump_phases
-                ?target entry
+                ?target ~pin_main:ctx.pin_main entry
             in
             if rc <> 0 then
               Error (Printf.sprintf "march compiler exited with code %d" rc)

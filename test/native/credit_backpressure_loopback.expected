@@ -1,4 +1,8 @@
 node-a: two frames admitted: true
-node-a: third refused with Backpressure: true
-node-a: third admitted after credit: true
-node-b: consumed 3 frames
+node-a: both written under the initial credit: true
+node-a: two more queued behind the credit line: true
+node-a: depth held at 88 without credit: true
+node-a: fifth refused with Backpressure: true
+node-a: refused frame not charged: true
+node-a: fifth admitted after credit: true
+node-b: consumed 5 frames
