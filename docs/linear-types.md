@@ -341,6 +341,9 @@ A linear value has to stay traceable wherever it goes:
   it to a wildcard. Session endpoints are the exception: a `Chan` has its own, narrower
   must-close rule (only an endpoint at `End` must be closed), so dropping one
   mid-protocol stays legal.
+- **Renaming one moves the obligation.** `let h2 = h` consumes `h` and makes `h2`
+  linear in its place, even when `h` is linear only because of its binding (a
+  `linear h : Res` parameter of a plain type), so `h2` must be consumed exactly once.
 - **A container holding one is linear itself.** `(token, 1)`, `Some(token)` and
   `[token]` must be used exactly once, like what they hold. Records are the exception:
   their fields are tracked one by one. Taking one apart consumes it, and each part is

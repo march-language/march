@@ -122,6 +122,11 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Renaming a linear value with `let` no longer lets it be dropped.** In
+  `fn f(linear h : Res) ... let h2 = h`, the rename consumed `h` but left `h2`
+  ordinary, so `h2` could be ignored with no error. `h2` now takes over `h`'s
+  obligation and must be used exactly once, whether `h` is a `linear` parameter
+  or a `linear let` local.
 - **On Linux, `--cap-sandbox` now stops a program without `IO.NetListen` from
   accepting connections.** Holding only `IO.NetConnect` (an HTTP client, say)
   allowed `socket()`, and nothing denied `bind`/`listen`, so such a program

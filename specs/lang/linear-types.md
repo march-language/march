@@ -412,6 +412,11 @@ enforce the rule:
   must-close rule (only an endpoint at `End` must be closed — see
   [session-types.md](session-types.md)), so dropping one mid-protocol stays
   legal (`accept/t282`).
+- **Renaming one moves the obligation.** `let h2 = h` consumes `h` and makes
+  `h2` linear in its place, even when `h` is linear only because of its
+  binding (a `linear h : Res` parameter of a plain type): `h2` must then be
+  consumed exactly once, so a rename can't launder a value any more than a `_`
+  can (`reject/t285`, `accept/t286`).
 - **A container holding one is linear itself.** A tuple, list or ADT value
   with a linear value inside (`(token, 1)`, `Some(token)`, `[token]`) must be
   used exactly once, like the value it holds. Records are the exception: their
