@@ -409,7 +409,13 @@ let dep_coords ~project_root : (string, string) Hashtbl.t =
        lockfile entry, but no ambiguity either, so use it.
     4. Otherwise [None]. In particular a container with SEVERAL coordinates and
        no lockfile entry is ambiguous, and guessing which version a project
-       wanted is exactly the mistake this layout exists to prevent. *)
+       wanted is exactly the mistake this layout exists to prevent.
+
+    Under offline mode ([Net_gate.is_offline]) only step 1 applies: a dep is
+    resolved from forge.lock or not at all (design §3.2, §3.5). Picking the
+    one cached version of a dep the lockfile does not name is choosing a
+    version, which offline mode never does even when the choice looks
+    unambiguous. *)
 let dep_cache_dir ?coords dep_name =
   match Sys.getenv_opt "HOME" with
   | None -> None
@@ -431,6 +437,7 @@ let dep_cache_dir ?coords dep_name =
     in
     (match coord_dir with
      | Some d -> Some d
+     | None when Net_gate.is_offline () -> None
      | None ->
        if not (Sys.file_exists base) then None
        else if Sys.file_exists (Filename.concat base "lib")

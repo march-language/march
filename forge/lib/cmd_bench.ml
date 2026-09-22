@@ -50,6 +50,10 @@ let run ?(filter = "") ?(json = false) () =
       (Printf.printf "no benchmarks found in bench/%s\n%!"
          (if filter = "" then "" else Printf.sprintf " matching %S" filter); Ok ())
     else begin
+      match Cmd_build.offline_preflight
+              ~scope:(Cmd_build.build_scope ~release:false proj) proj with
+      | Error e -> Error e
+      | Ok () ->
       let lib_path_env = Cmd_build.lib_path_env proj in
       let out_dir = Filename.concat proj.Project.root ".march/bench" in
       Project.mkdir_p out_dir;

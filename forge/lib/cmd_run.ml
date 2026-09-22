@@ -24,6 +24,10 @@ let context_of_project ~interpreted proj =
   match Toolchain.ensure_installed () with
   | Error e -> Error e
   | Ok () ->
+    match Cmd_build.offline_preflight
+            ~scope:(Cmd_build.build_scope ~release:false proj) proj with
+    | Error e -> Error e
+    | Ok () ->
     if interpreted then Cmd_build.warn_interpreted_rust_ffi proj;
     match Cmd_build.ffi_flags_full proj with
     | Error msg -> Error msg

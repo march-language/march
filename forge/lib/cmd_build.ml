@@ -187,7 +187,7 @@ let dep_to_lib_paths ?coords ~root (dep_name, dep) =
     root, not the top-level one).  Dedup is by dep name, nearest-wins (a
     project's own direct dep shadows the same name pulled in transitively),
     and a [visited] set guards against dependency cycles. *)
-let collect_transitive_deps visited (root, deps) =
+let collect_transitive_deps ?coords visited (root, deps) =
   (* Walk the dependency graph BREADTH-FIRST by depth, so a SHALLOWER dep
      always shadows a same-named dep reachable only through a deeper path.
      In particular every DIRECT dep of the root is claimed before any
@@ -226,7 +226,11 @@ let collect_transitive_deps visited (root, deps) =
     (* Pass B: enqueue the next depth from the deps just claimed. *)
     frontier :=
       List.filter_map (fun (root, dep_name, dep) ->
-          match Project.dep_root_dir ~project_root:root (dep_name, dep) with
+          (* [coords]: descend into the LOCKED version of each dep. Without
+             it the locator only has its fallbacks, which refuse a container
+             holding several versions (and, offline, find nothing at all), so
+             a dep's own deps were silently missed. *)
+          match Project.dep_root_dir ?coords ~project_root:root (dep_name, dep) with
           | Some dep_dir when Sys.file_exists (Filename.concat dep_dir "forge.toml") ->
             (match Project.load_from_dir dep_dir with
              | Ok dep_proj -> Some (dep_dir, dep_proj.Project.deps)
@@ -235,6 +239,12 @@ let collect_transitive_deps visited (root, deps) =
         level_entries
   done;
   !out
+
+(** The declared dependencies a build sees: prod [deps] for a release build,
+    plus [dev-deps] and [dev-only-deps] otherwise. *)
+let build_scope ~release proj =
+  if release then proj.Project.deps
+  else proj.Project.deps @ proj.Project.dev_deps @ proj.Project.dev_only_deps
 
 (** Assemble the MARCH_LIB_PATH environment prefix used for every invocation
     of the [march] compiler.  Contains the project's own lib/, any dep lib
@@ -247,21 +257,20 @@ let lib_path_env ?(release=false) proj =
   let lib_dir    = Filename.concat proj.Project.root "lib" in
   let config_dir = Filename.concat proj.Project.root "config" in
   (* Collect deps for the current build scope. *)
-  let scoped_deps =
-    if release then proj.Project.deps
-    else proj.Project.deps @ proj.Project.dev_deps @ proj.Project.dev_only_deps
-  in
+  let scoped_deps = build_scope ~release proj in
+  (* The dep coordinates this project locked, read once: they locate each
+     version-keyed dep directory for both the transitive walk and the lib
+     paths. *)
+  let coords = Project.dep_coords ~project_root:proj.Project.root in
   let visited = Hashtbl.create 16 in
-  let transitive_deps = collect_transitive_deps visited (proj.Project.root, scoped_deps) in
+  let transitive_deps =
+    collect_transitive_deps ~coords visited (proj.Project.root, scoped_deps) in
   (* A dependency's lib/ may group modules into subfolders exactly like the
      primary package (e.g. lib/api, lib/wire).  The module resolver searches
      each lib path flatly, so expand every dep lib root into the root plus all
      of its descendant directories — mirroring [collect_lib_dirs lib_dir] for
      the primary package below.  Without this, a reorganised dependency's
      internal cross-module imports fail with "Module not found" in consumers. *)
-  (* The dep coordinates this project locked. Read once per lib_path_env call,
-     not once per dep. *)
-  let coords = Project.dep_coords ~project_root:proj.Project.root in
   let dep_lib_paths = List.concat_map
     (fun (root, dep_name, dep) -> dep_to_lib_paths ~coords ~root (dep_name, dep))
     transitive_deps in
@@ -277,6 +286,85 @@ let lib_path_env ?(release=false) proj =
   let toolchain_pfx = match Toolchain.path_prefix () with Ok p -> p | Error _ -> "" in
   let quoted = String.concat ":" (List.map Filename.quote all_lib_paths) in
   Printf.sprintf "%sMARCH_LIB_PATH=%s " toolchain_pfx quoted
+
+(** Offline-mode dependency preflight, run by every compile-shaped command
+    (build, check, run, test, bench) before it assembles MARCH_LIB_PATH. A
+    no-op returning [Ok ()] when not offline.
+
+    Offline, the lockfile is the only source of dependency identity, so this
+    - reports an unusable lockfile ONCE (absent, or not a lockfile at all)
+      rather than one warning per dependency that buries the cause;
+    - warns once if forge.toml has drifted from forge.lock;
+    - re-extracts any registry dep whose tree is gone but whose tarball is in
+      the tarball cache;
+    - warns, per dependency, about each one it will leave off MARCH_LIB_PATH
+      (not locked, or locked but not cached), predicting the `Unknown module`
+      error that will follow if it is imported;
+    - re-hashes every cached git/registry tree it will use against forge.lock
+      and returns [Error] on a mismatch: a missing dep fails loudly later, but
+      a WRONG one would build quietly.
+    [scope] is the command's declared dependency set (e.g. deps + dev-deps);
+    the check walks it transitively, exactly as [lib_path_env] does.
+    `specs/2026-09-11-forge-offline-and-versioned-dep-cache-design.md` §3, §4. *)
+let offline_preflight ~scope proj =
+  if not (Net_gate.is_offline ()) || scope = [] then Ok ()
+  else begin
+    let root = proj.Project.root in
+    let toml_content =
+      try Project.read_file (Filename.concat root "forge.toml") with Sys_error _ -> "" in
+    let state = Offline_deps.read_state ~project_root:root ~toml_content in
+    let needs_lock = List.exists (fun (_, d) -> not (Offline_deps.is_path_dep d)) scope in
+    let state_ok =
+      match Offline_deps.state_error ~project_root:root state with
+      | Some msg when needs_lock -> Printf.eprintf "error: %s\n%!" msg; false
+      | _ -> true
+    in
+    (match state with
+     | Offline_deps.Lockfile { drifted = true; _ } ->
+       Printf.eprintf "%s\n%!" Offline_deps.drift_warning
+     | _ -> ());
+    (match state with
+     | Offline_deps.Lockfile { entries; format; _ } ->
+       List.iter (fun (name, v, r) ->
+           match r with
+           | Ok dir ->
+             Printf.eprintf "note: offline: restored %s %s from the tarball cache into %s\n%!"
+               name v dir
+           | Error msg -> Printf.eprintf "warning: %s\n%!" msg)
+         (Offline_deps.restore_registry_trees ~format entries)
+     | _ -> ());
+    let coords = Project.dep_coords ~project_root:root in
+    let closure = collect_transitive_deps ~coords (Hashtbl.create 16) (root, scope) in
+    let report = Offline_deps.assess ~verify:true ~state closure in
+    let mismatches = ref [] and unverified = ref [] in
+    List.iter (fun (name, _dep, status) ->
+        match status with
+        | Offline_deps.Present { dir; label; verdict } ->
+          (match verdict with
+           | Offline_deps.Verified -> ()
+           | Offline_deps.Mismatch { expected; actual } ->
+             mismatches :=
+               Offline_deps.mismatch_error ~name ~label ~dir ~expected ~actual
+               :: !mismatches
+           | Offline_deps.Unverifiable why ->
+             unverified := Printf.sprintf "%s (%s)" name why :: !unverified)
+        | Offline_deps.Path_present _ | Offline_deps.Path_absent _ -> ()
+        | (Offline_deps.Missing _ | Offline_deps.Not_locked _) as st ->
+          (* With no usable lockfile, the single state error above already
+             explains every one of these. *)
+          if state_ok then
+            Option.iter (fun w -> Printf.eprintf "%s\n%!" w)
+              (Offline_deps.skip_warning name st))
+      report;
+    if !unverified <> [] then
+      Printf.eprintf "note: offline: %d dependenc%s could not be integrity-checked: %s\n%!"
+        (List.length !unverified)
+        (if List.length !unverified = 1 then "y" else "ies")
+        (String.concat ", " (List.rev !unverified));
+    match List.rev !mismatches with
+    | [] -> Ok ()
+    | errs -> Error (String.concat "\n" errs)
+  end
 
 (** Run [cmd] with its stderr captured to a temp file.
     Re-emits the captured content to forge's own stderr (with colour when the
@@ -680,10 +768,16 @@ let ensure_js_deps ~root (proj : Project.project) =
        with Sys_error msg ->
          Printf.eprintf "  [js_deps] warning: could not write package.json: %s\n%!" msg)
     end;
-    Printf.printf "  [js_deps] npm install...\n%!";
-    let rc = Sys.command (Printf.sprintf "cd %s && npm install --silent 2>&1" (Filename.quote root)) in
-    if rc = 0 then Ok ()
-    else Error (Printf.sprintf "npm install failed (exit %d)" rc)
+    match
+      Net_gate.command ~what:"run `npm install` for [js_deps]"
+        ~remedy:"Build once with network access so npm can populate node_modules/."
+        (Printf.sprintf "cd %s && npm install --silent 2>&1" (Filename.quote root))
+    with
+    | Error e -> Error e
+    | Ok rc ->
+      Printf.printf "  [js_deps] npm install...\n%!";
+      if rc = 0 then Ok ()
+      else Error (Printf.sprintf "npm install failed (exit %d)" rc)
   end
 
 let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
@@ -765,6 +859,9 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
     if files = [] then
       Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
+      match offline_preflight ~scope:(build_scope ~release proj) proj with
+      | Error e -> Error e
+      | Ok () ->
       let lib_path_env = lib_path_env ~release proj in
       let entry_path = match proj.Project.entrypoint with
         | Some ep -> Filename.concat proj.Project.root ep

@@ -89,6 +89,23 @@ let run ~name ~git ~tag ~branch ~rev ~path ~dev ~dev_only ~test_dep ~force () =
       | None, None ->
         Ok (Project.RegistryDep { version = "*" })
     in
+    (* Offline, a registry or remote dependency cannot be added: resolving
+       it is a fetch (and for the registry, version solving). Refuse before
+       forge.toml is touched, so a refused add leaves no half-added entry. A
+       path dependency needs nothing remote and is still accepted. *)
+    let dep_result = match dep_result with
+      | Ok (Project.PathDep _) | Error _ -> dep_result
+      | Ok dep ->
+        let what = match dep with
+          | Project.RegistryDep _ ->
+            Printf.sprintf "add registry dependency `%s` (it must be resolved against the registry)" name
+          | _ -> Printf.sprintf "add dependency `%s` (it must be fetched)" name
+        in
+        Result.map (fun () -> dep)
+          (Net_gate.permit ~what
+             ~remedy:"Run `forge add` with network access, or add a path \
+                      dependency (--path) instead.")
+    in
     match dep_result with
     | Error msg -> Error msg
     | Ok dep ->

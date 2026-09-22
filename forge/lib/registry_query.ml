@@ -58,8 +58,21 @@ let run_with_timeout ~timeout ~prog ~args ~env =
   (try wait ()
    with Unix.Unix_error (Unix.ECHILD, _, _) -> `Exited 0)
 
-(** Compile the registry client to a temp native binary; returns its path. *)
+let registry_remedy =
+  "The registry cannot be queried offline. A registry dependency already in \
+   forge.lock is used from the local cache; anything that needs version \
+   solving or fresh metadata needs network access."
+
+(** Compile the registry client to a temp native binary; returns its path.
+
+    Gated by [Net_gate] even though compiling is local: the client exists only
+    to talk to the registry, so under offline mode reaching this point is
+    already a bug, and refusing here keeps an offline `forge outdated` / `forge
+    add` from spending minutes in a `march --compile` before failing. *)
 let compile_client () =
+  match Net_gate.permit ~what:"query the package registry" ~remedy:registry_remedy with
+  | Error e -> Error e
+  | Ok () ->
   let tmp_src =
     let t = Filename.temp_file "forge_registry_" ".march" in
     let oc = open_out t in
@@ -92,6 +105,9 @@ let compile_client () =
 
 (** Fetch [url] to [out] by running the compiled client [binary]. *)
 let fetch ~binary ~url ~out =
+  match Net_gate.permit ~what:("fetch " ^ url) ~remedy:registry_remedy with
+  | Error e -> Error e
+  | Ok () ->
   let env = Registry_client.fetch_env ~url ~out in
   match run_with_timeout ~timeout:30.0 ~prog:binary ~args:[] ~env with
   | `Exited 0 -> Ok ()

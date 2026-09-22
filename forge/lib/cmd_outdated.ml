@@ -62,6 +62,16 @@ let status_string = function
   | Fetch_failed m    -> Printf.sprintf "unknown (%s)" m
 
 let run () =
+  (* Asking the registry what is newer is the whole command, so offline it
+     refuses up front — before reading the lockfile, and in particular before
+     [RQ.compile_client] would spend a `march --compile` getting there. *)
+  match
+    Net_gate.permit ~what:"check for newer dependency versions"
+      ~remedy:"`forge outdated` has no offline mode: it asks the registry what \
+               has been published since forge.lock was written."
+  with
+  | Error e -> Error e
+  | Ok () ->
   match Project.load () with
   | Error e -> Error e
   | Ok proj ->
