@@ -5329,7 +5329,16 @@ let rec check_decl env (d : Ast.decl) : env =
          ) fields in
        register_record_name ~name:name.txt (List.map fst field_pairs);
        { env1 with records = StrMap.add name.txt (param_names, field_pairs) env1.records }
-     | Ast.TDAlias _ -> env1)
+     | Ast.TDAlias rhs ->
+       (* A transparent alias: record the right-hand side so [surface_ty]
+          resolves a mention of this name to it.  Keyed by the QUALIFIED name
+          inside a module — see [ty_aliases]'s comment for why the bare key is
+          deliberately not registered there. *)
+       let key =
+         if env.current_module = "" then name.txt else env.current_module ^ "." ^ name.txt
+       in
+       let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+       { env1 with ty_aliases = StrMap.add key (param_names, rhs) env1.ty_aliases })
 
   | Ast.DActor (_vis, name, actor, _sp) ->
     (* Build the state record type from field declarations *)
@@ -7296,7 +7305,13 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
              register_record_name ~name:qname (List.map fst field_pairs);
              let e2 = { e1 with records = StrMap.add name.txt (param_names, field_pairs) e1.records } in
              { e2 with records = StrMap.add qname (param_names, field_pairs) e2.records }
-           | _ -> e1)
+           | Ast.TDAlias rhs ->
+             (* Seed the alias for a SIBLING that mentions it: the declaring
+                module's own [check_decl] runs later, so a referrer checked
+                before it would otherwise see `Mod.Entry` as an unknown type.
+                Qualified key only — see [ty_aliases]'s comment. *)
+             let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+             { e1 with ty_aliases = StrMap.add qname (param_names, rhs) e1.ty_aliases })
         | Ast.DInterface (idef, _) -> prebind_interface_decl ~prefix idef e
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
           let child_opaque = Option.value ~default:StringSet.empty
@@ -7677,7 +7692,13 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
              register_record_name ~name:qname (List.map fst field_pairs);
              let e2 = { e1 with records = StrMap.add name.txt (param_names, field_pairs) e1.records } in
              { e2 with records = StrMap.add qname (param_names, field_pairs) e2.records }
-           | _ -> e1)
+           | Ast.TDAlias rhs ->
+             (* Seed the alias for a SIBLING that mentions it: the declaring
+                module's own [check_decl] runs later, so a referrer checked
+                before it would otherwise see `Mod.Entry` as an unknown type.
+                Qualified key only — see [ty_aliases]'s comment. *)
+             let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+             { e1 with ty_aliases = StrMap.add qname (param_names, rhs) e1.ty_aliases })
         | Ast.DInterface (idef, _) -> prebind_interface_decl ~prefix idef e
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
           let child_opaque = Option.value ~default:StringSet.empty

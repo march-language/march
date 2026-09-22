@@ -308,6 +308,33 @@ let gated name f =
   Alcotest.test_case name `Quick (fun () ->
       if z3_available () then f () else Alcotest.skip ())
 
+(* Did the last check record a Tier 2 refutation it could not reproduce? *)
+let has_refuted_unconfirmed () =
+  List.exists
+    (fun (o : March_refinecheck.Obligation.t) ->
+      o.March_refinecheck.Obligation.verdict
+      = March_refinecheck.Obligation.Skipped March_refinecheck.Obligation.Refuted_unconfirmed)
+    (March_refinecheck.Obligation.all ())
+
+(* Every error message the (undesugared) check reports, in order. *)
+let refine_error_msgs src =
+  let ctx = March_errors.Errors.create () in
+  March_refinecheck.Refine_check.check_module ctx (parse src);
+  List.filter_map
+    (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Error then
+        Some d.March_errors.Errors.message
+      else None)
+    ctx.March_errors.Errors.diagnostics
+
+(* Substring test, for asserting on diagnostic text. *)
+module Astring_contains = struct
+  let contains hay needle =
+    let n = String.length needle and h = String.length hay in
+    let rec at i = i + n <= h && (String.sub hay i n = needle || at (i + 1)) in
+    at 0
+end
+
 let decl n =
   Printf.sprintf
     "mod M do\n\
@@ -2646,9 +2673,10 @@ end|}
 
 (* A FALSE relational postcondition.  The IH makes the Node arm go through, but
    the BASE case is `1 == 0 + 2`, which fails — so the postcondition is not
-   proven and must not travel.  The definition side stays silent (definite
-   failure reports only what can never hold, and this is checked with
-   diagnostics suppressed), and the call site learns nothing. *)
+   proven and must not travel: the call site learns nothing.  The definition
+   side REPORTS it, since 2026-09-22: `ins2(Leaf, 0)` is executed and observed
+   to return a tree of size 1, so the violation is confirmed (before, Tier 2
+   counted it `violated` in `--refine-report` and printed nothing). *)
 let tier2_false_post =
   {|mod P do
   type Tree = Leaf | Node(Tree, Int, Tree)
@@ -2696,10 +2724,17 @@ let tier2_suite =
         Alcotest.(check bool) "no error" false (has_refine_error tier2_nonstructural));
 
     (* A FALSE relational postcondition must remain unproven and must not
-       propagate — the definition side stays silent (definite-failure), and the
-       call site learns nothing. *)
+       propagate: the call site learns nothing.  The ONE error is the
+       definition's own witness-confirmed violation; a propagated fact would
+       add a second, at `needs_empty(ins2(Leaf, 5))`. *)
     gated "a false relational postcondition does not propagate" (fun () ->
-        Alcotest.(check bool) "no error" false (has_refine_error tier2_false_post));
+        match refine_error_msgs tier2_false_post with
+        | [ msg ] ->
+          Alcotest.(check bool) "the error is the definition's confirmed violation" true
+            (Astring_contains.contains msg "`ins2` does not satisfy its return type constraint")
+        | msgs ->
+          Alcotest.failf "expected exactly the definition-side error, got %d: %s"
+            (List.length msgs) (String.concat " | " msgs));
 
     (* ── Task 2: other shapes ───────────────────────────────────────────── *)
 
@@ -5491,6 +5526,114 @@ end|} post body
         Alcotest.(check int) "the EMatch path records one proved obligation" 1 proved;
         Alcotest.(check int) "…and no skip" 0
           (List.fold_left (fun a (_, n) -> a + n) 0 skips))
+  ]
+
+(* ── Tier 2: the ledger and the diagnostics must AGREE ───────────────────────
+   [check_post_induction] used to record a tail as [Violated] whenever its
+   negated goal was valid under the facts the VC built, and Tier 2 emits no
+   diagnostic of its own, so `--refine-report` could count `1 violated` for a
+   program that compiled clean with exit 0.  Worse, the refutation was only as
+   sound as the encoding: `copy2`'s inner `Cons(h2, t)` rebinds the `t` the
+   outer pattern equation `xs = Cons(h, t)` is about, so the TRUE contract
+   `len(_) == len(xs)` was read as `2 + len(t) == 1 + len(t)`.
+
+   Now a refutation is a candidate: it counts as violated only once the
+   interpreter reproduces it, and then it is reported as an error.  Every case
+   here asserts BOTH channels, because the bug was their disagreement: a test
+   that only reads the counts, or only the error flag, passes either way. *)
+let tier2_ledger_agrees_suite =
+  let run src =
+    March_refinecheck.Obligation.reset ();
+    let err = has_refine_error_d src in
+    let proved, violated, skips = March_refinecheck.Obligation.summary () in
+    (err, proved, violated, List.fold_left (fun a (_, n) -> a + n) 0 skips)
+  in
+  [ gated "copy2: a TRUE postcondition is neither violated nor an error" (fun () ->
+        (* Before: `1 violated`, no error, exit 0. *)
+        let err, proved, violated, skipped =
+          run
+            {|
+mod C do
+  fn copy2(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) ->
+      match t do
+      Nil -> Cons(h, Nil)
+      Cons(h2, t) -> Cons(h, Cons(h2, copy2(t)))
+      end
+    end
+  end
+end|}
+        in
+        Alcotest.(check bool) "no error" false err;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "proved" 0 proved;
+        Alcotest.(check int) "one skip: undecided, not refuted" 1 skipped)
+  ; gated "shadowing: a FALSE postcondition is not PROVED through a rebound name"
+      (fun () ->
+        (* The same conflation in the other direction: `drop1([1, 2])` is `[1]`,
+           yet reading the inner `t` as the outer one made the IH `len(r) ==
+           len(t)` close `1 + len(r) == 1 + len(t)`, and the ledger said
+           `1 proved`. *)
+        let err, proved, violated, skipped =
+          run
+            {|
+mod D do
+  fn drop1(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) ->
+      match t do
+      Nil -> Cons(h, t)
+      Cons(h2, t) -> Cons(h, drop1(t))
+      end
+    end
+  end
+end|}
+        in
+        Alcotest.(check int) "proved" 0 proved;
+        (* The battery ([] and a one-element list) never reaches the
+           two-element arm, so this stays an unconfirmed skip, not an error. *)
+        Alcotest.(check bool) "no error" false err;
+        Alcotest.(check int) "violated" 0 violated;
+        Alcotest.(check int) "skipped" 1 skipped)
+  ; gated "a GENUINELY false postcondition counts 1 violated AND errors" (fun () ->
+        (* `grow([])` is `[]`, of length 0, not 1.  Before: `1 violated` with
+           no error; the witness now reproduces it and reports it. *)
+        let err, proved, violated, _ =
+          run
+            {|
+mod G do
+  fn grow(xs : List(Int)) : {List(Int) | len(_) == len(xs) + 1} do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> Cons(h, grow(t))
+    end
+  end
+end|}
+        in
+        Alcotest.(check bool) "an error is reported" true err;
+        Alcotest.(check int) "violated" 1 violated;
+        Alcotest.(check int) "proved" 0 proved)
+  ; gated "a false postcondition refuted only in a recursive arm also errors"
+      (fun () ->
+        (* `dup([0])` is `[0, 0]`.  Only the Cons arm is wrong, so the witness
+           has to come from a one-element input, not the base case. *)
+        let err, _, violated, _ =
+          run
+            {|
+mod P do
+  fn dup(xs : List(Int)) : {List(Int) | len(_) == len(xs)} do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> Cons(h, Cons(h, dup(t)))
+    end
+  end
+end|}
+        in
+        Alcotest.(check bool) "an error is reported" true err;
+        Alcotest.(check int) "violated" 1 violated)
   ]
 
 (* NOTE ON GATING: none of these cases reaches the solver, so they must NOT be
@@ -16435,11 +16578,14 @@ let avl_suite =
              (m (replace ~sub:"let c = compare_by(cmp, x, k)" ~by:"let c = cmp(x, k)" avl))));
 
     gated "a false insert contract is refuted, not proved" (fun () ->
-        Alcotest.(check (triple int int int)) "ledger" (4, 1, 0)
+        (* Refuted but unconfirmable (a set-valued measure has no interpreter
+           meaning), so a `refuted-unconfirmed` skip, never a proof. *)
+        Alcotest.(check (triple int int int)) "ledger" (4, 0, 1)
           (ledger_counts3
              (m (replace
                    ~sub:"{Tree(a) | tree_elts(_) == union(tree_elts(t), singleton(x))}"
-                   ~by:"{Tree(a) | tree_elts(_) == tree_elts(t)}" avl)))) ]
+                   ~by:"{Tree(a) | tree_elts(_) == tree_elts(t)}" avl)));
+        Alcotest.(check bool) "the skip is a refutation" true (has_refuted_unconfirmed ())) ]
 
 (* ── The single-element-type rule (plan step 1.5) ─────────────────────────
    A set predicate whose operands have known, different element types is an
@@ -17411,8 +17557,14 @@ let module_qualified_measure_and_sort_suite =
           (ledger_counts3_with_ordered_map (fixture ~pred:"member(3, tree_elts(_))")));
 
     gated "...and refutes a literal that is not a member, not merely skipping" (fun () ->
-        Alcotest.(check (triple int int int)) "ledger" (0, 1, 0)
-          (ledger_counts3_with_ordered_map (fixture ~pred:"member(99, tree_elts(_))")));
+        (* Refuted, but a set-valued measure has no interpreter meaning, so
+           the refutation cannot be REPRODUCED and is a `refuted-unconfirmed`
+           skip rather than a violation (a Tier 2 violation now always comes
+           with an error; see [tier2_ledger_agrees_suite]).  The reason is what
+           still distinguishes "refuted" from "merely skipping". *)
+        Alcotest.(check (triple int int int)) "ledger" (0, 0, 1)
+          (ledger_counts3_with_ordered_map (fixture ~pred:"member(99, tree_elts(_))"));
+        Alcotest.(check bool) "the skip is a refutation" true (has_refuted_unconfirmed ()));
   ]
 
 (* ── Generic set-measure instances (P3, 2026-09-15) ────────────────────────
@@ -17514,6 +17666,7 @@ let () =
       ("divsafety-hole", divsafety_hole_suite);
       ("divsafety-entailment", divsafety_entailment_suite);
       ("post-nonmatch-body", post_nonmatch_body_suite);
+      ("tier2-ledger-agrees", tier2_ledger_agrees_suite);
       ("divsafety-boolean-guard", divsafety_boolean_guard_suite);
       ("divsafety-shadowing", divsafety_shadowing_suite);
       ("walk-coverage", walk_coverage_suite);

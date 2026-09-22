@@ -297,88 +297,6 @@ let list_len (v : V.value) : int option =
   in
   go 0 v
 
-(* Evaluate a refinement predicate structurally over runtime values.
-   Covers the reflectable fragment and a little more (nonlinear `*`);
-   anything it does not recognise is [None] — unconfirmable, NEVER a
-   silent true/false. *)
-let rec eval_pred ~(lookup : string -> V.value option) (e : A.expr) : bool option =
-  match e with
-  | A.ELit (A.LitBool b, _) -> Some b
-  | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) ->
-    (match eval_pred ~lookup a, eval_pred ~lookup b with
-     | Some false, _ | _, Some false -> Some false
-     | Some true, Some true -> Some true
-     | _ -> None)
-  | A.EApp (A.EVar { A.txt = "||"; _ }, [ a; b ], _) ->
-    (match eval_pred ~lookup a, eval_pred ~lookup b with
-     | Some true, _ | _, Some true -> Some true
-     | Some false, Some false -> Some false
-     | _ -> None)
-  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) ->
-    Option.map not (eval_pred ~lookup a)
-  | A.EApp (A.EVar { A.txt = ("==" | "!=" | "<" | "<=" | ">" | ">=") as op; _ }, [ a; b ], _) ->
-    (match eval_operand ~lookup a, eval_operand ~lookup b with
-     | Some va, Some vb ->
-       (match op with
-        | "==" -> value_eq va vb
-        | "!=" -> Option.map not (value_eq va vb)
-        | _ ->
-          (match va, vb with
-           | V.VInt x, V.VInt y ->
-             Some (match op with "<" -> x < y | "<=" -> x <= y | ">" -> x > y | _ -> x >= y)
-           | V.VFloat x, V.VFloat y ->
-             Some (match op with "<" -> x < y | "<=" -> x <= y | ">" -> x > y | _ -> x >= y)
-           | _ -> None))
-     | _ -> None)
-  (* A bare boolean-valued operand position: `{Bool | _}`-shaped or a tester. *)
-  | _ ->
-    (match eval_operand ~lookup e with
-     | Some (V.VBool b) -> Some b
-     | _ -> None)
-
-and eval_operand ~(lookup : string -> V.value option) (e : A.expr) : V.value option =
-  match e with
-  | A.ELit (A.LitInt n, _) -> Some (V.VInt n)
-  | A.ELit (A.LitFloat f, _) -> Some (V.VFloat f)
-  | A.ELit (A.LitBool b, _) -> Some (V.VBool b)
-  | A.ELit (A.LitString s, _) -> Some (V.VString s)
-  | A.EVar { A.txt; _ } -> lookup txt
-  | A.EField (recv, { A.txt = fname; _ }, _) ->
-    (match eval_operand ~lookup recv with
-     | Some (V.VRecord fields) -> List.assoc_opt fname fields
-     | _ -> None)
-  | A.ECon ({ A.txt = ctor; _ }, args, _) ->
-    let vs = List.map (eval_operand ~lookup) args in
-    if List.for_all Option.is_some vs then
-      Some (V.VCon (ctor, List.map Option.get vs))
-    else None
-  | A.EApp (A.EVar { A.txt = ("len" | "List.length" | "String.length"); _ }, [ a ], _) ->
-    (match eval_operand ~lookup a with
-     | Some (V.VString s) -> Some (V.VInt (String.length s))
-     | Some v -> Option.map (fun n -> V.VInt n) (list_len v)
-     | None -> None)
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) ->
-    (match eval_operand ~lookup a with
-     | Some (V.VInt n) -> Some (V.VInt (-n))
-     | Some (V.VFloat f) -> Some (V.VFloat (-.f))
-     | _ -> None)
-  | A.EApp (A.EVar { A.txt = ("+" | "-" | "*") as op; _ }, [ a; b ], _) ->
-    (match eval_operand ~lookup a, eval_operand ~lookup b with
-     | Some (V.VInt x), Some (V.VInt y) ->
-       Some (V.VInt (match op with "+" -> x + y | "-" -> x - y | _ -> x * y))
-     | _ -> None)
-  | A.EApp (A.EVar { A.txt = ("+." | "-." | "*." | "/.") as op; _ }, [ a; b ], _) ->
-    (match eval_operand ~lookup a, eval_operand ~lookup b with
-     | Some (V.VFloat x), Some (V.VFloat y) ->
-       Some (V.VFloat (match op with "+." -> x +. y | "-." -> x -. y | "*." -> x *. y | _ -> x /. y))
-     | _ -> None)
-  | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _)
-    when Refine_scope.ctor_of_tester m <> None ->
-    (match eval_operand ~lookup a, Refine_scope.ctor_of_tester m with
-     | Some (V.VCon (c, _)), Some tc -> Some (V.VBool (String.equal c tc))
-     | _ -> None)
-  | _ -> None
-
 (* =================================================================
    §4  Rendering: runtime value -> March source syntax
    ================================================================= *)
@@ -599,6 +517,103 @@ let call_fn ~(name : string) ~(args : V.value list) : exec_result =
        (match with_harness (fun () -> March_eval.Eval.apply f args) with
         | Ok v -> Ret v
         | Error e -> e))
+
+(* Defined after [call_fn]: a user measure in a predicate is evaluated by
+   running its definition. *)
+(* Evaluate a refinement predicate structurally over runtime values.
+   Covers the reflectable fragment and a little more (nonlinear `*`);
+   anything it does not recognise is [None] — unconfirmable, NEVER a
+   silent true/false. *)
+let rec eval_pred ~(lookup : string -> V.value option) (e : A.expr) : bool option =
+  match e with
+  | A.ELit (A.LitBool b, _) -> Some b
+  | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) ->
+    (match eval_pred ~lookup a, eval_pred ~lookup b with
+     | Some false, _ | _, Some false -> Some false
+     | Some true, Some true -> Some true
+     | _ -> None)
+  | A.EApp (A.EVar { A.txt = "||"; _ }, [ a; b ], _) ->
+    (match eval_pred ~lookup a, eval_pred ~lookup b with
+     | Some true, _ | _, Some true -> Some true
+     | Some false, Some false -> Some false
+     | _ -> None)
+  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) ->
+    Option.map not (eval_pred ~lookup a)
+  | A.EApp (A.EVar { A.txt = ("==" | "!=" | "<" | "<=" | ">" | ">=") as op; _ }, [ a; b ], _) ->
+    (match eval_operand ~lookup a, eval_operand ~lookup b with
+     | Some va, Some vb ->
+       (match op with
+        | "==" -> value_eq va vb
+        | "!=" -> Option.map not (value_eq va vb)
+        | _ ->
+          (match va, vb with
+           | V.VInt x, V.VInt y ->
+             Some (match op with "<" -> x < y | "<=" -> x <= y | ">" -> x > y | _ -> x >= y)
+           | V.VFloat x, V.VFloat y ->
+             Some (match op with "<" -> x < y | "<=" -> x <= y | ">" -> x > y | _ -> x >= y)
+           | _ -> None))
+     | _ -> None)
+  (* A bare boolean-valued operand position: `{Bool | _}`-shaped or a tester. *)
+  | _ ->
+    (match eval_operand ~lookup e with
+     | Some (V.VBool b) -> Some b
+     | _ -> None)
+
+and eval_operand ~(lookup : string -> V.value option) (e : A.expr) : V.value option =
+  match e with
+  | A.ELit (A.LitInt n, _) -> Some (V.VInt n)
+  | A.ELit (A.LitFloat f, _) -> Some (V.VFloat f)
+  | A.ELit (A.LitBool b, _) -> Some (V.VBool b)
+  | A.ELit (A.LitString s, _) -> Some (V.VString s)
+  | A.EVar { A.txt; _ } -> lookup txt
+  | A.EField (recv, { A.txt = fname; _ }, _) ->
+    (match eval_operand ~lookup recv with
+     | Some (V.VRecord fields) -> List.assoc_opt fname fields
+     | _ -> None)
+  | A.ECon ({ A.txt = ctor; _ }, args, _) ->
+    let vs = List.map (eval_operand ~lookup) args in
+    if List.for_all Option.is_some vs then
+      Some (V.VCon (ctor, List.map Option.get vs))
+    else None
+  | A.EApp (A.EVar { A.txt = ("len" | "List.length" | "String.length"); _ }, [ a ], _) ->
+    (match eval_operand ~lookup a with
+     | Some (V.VString s) -> Some (V.VInt (String.length s))
+     | Some v -> Option.map (fun n -> V.VInt n) (list_len v)
+     | None -> None)
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], _) ->
+    (match eval_operand ~lookup a with
+     | Some (V.VInt n) -> Some (V.VInt (-n))
+     | Some (V.VFloat f) -> Some (V.VFloat (-.f))
+     | _ -> None)
+  | A.EApp (A.EVar { A.txt = ("+" | "-" | "*") as op; _ }, [ a; b ], _) ->
+    (match eval_operand ~lookup a, eval_operand ~lookup b with
+     | Some (V.VInt x), Some (V.VInt y) ->
+       Some (V.VInt (match op with "+" -> x + y | "-" -> x - y | _ -> x * y))
+     | _ -> None)
+  | A.EApp (A.EVar { A.txt = ("+." | "-." | "*." | "/.") as op; _ }, [ a; b ], _) ->
+    (match eval_operand ~lookup a, eval_operand ~lookup b with
+     | Some (V.VFloat x), Some (V.VFloat y) ->
+       Some (V.VFloat (match op with "+." -> x +. y | "-." -> x -. y | "*." -> x *. y | _ -> x /. y))
+     | _ -> None)
+  | A.EApp (A.EVar { A.txt = m; _ }, [ a ], _)
+    when Refine_scope.ctor_of_tester m <> None ->
+    (match eval_operand ~lookup a, Refine_scope.ctor_of_tester m with
+     | Some (V.VCon (c, _)), Some tc -> Some (V.VBool (String.equal c tc))
+     | _ -> None)
+  (* A user measure (`size(_)`): the predicate means what the program's own
+     definition computes, so run that definition, under the same harness
+     (fuel, effect veto) as the function itself.  Anything that does not
+     return (an unknown name, a set-vocabulary measure the interpreter has no
+     meaning for) is [None], i.e. unconfirmable. *)
+  | A.EApp (A.EVar { A.txt = m; _ }, (_ :: _ as args), _)
+    when Refine_scope.is_measure_app m ->
+    let vs = List.map (eval_operand ~lookup) args in
+    if not (List.for_all Option.is_some vs) then None
+    else (
+      match call_fn ~name:m ~args:(List.map Option.get vs) with
+      | Ret v -> Some v
+      | Panicked _ | Unconfirmable -> None)
+  | _ -> None
 
 (* =================================================================
    §6  Confirmation: admissibility + execute + check

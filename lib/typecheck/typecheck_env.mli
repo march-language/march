@@ -129,6 +129,7 @@ type env = {
   records :
     (string list * (string * Typecheck_types.Ast.ty) list)
     StrMap.t;
+  ty_aliases : (string list * Typecheck_types.Ast.ty) StrMap.t;
   level : int;
   lin : lin_entry list;
   errors : Typecheck_types.Err.ctx;

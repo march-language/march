@@ -95,6 +95,34 @@ int64_t sbx_probe_bind(void) {
     return 0;
 }
 
+/* Linux listen probes.  listen() on an UNBOUND socket auto-binds an
+   ephemeral port, so a filter that denied only bind() would still let a
+   program listen: both syscalls are probed. connect() to a closed loopback
+   port must fail with ECONNREFUSED, not EPERM -- that is what shows the
+   listen deny did not also take out the client half. */
+int64_t sbx_probe_listen_unbound(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return (int64_t)errno;
+    int rc = listen(fd, 1);
+    int e = errno;
+    close(fd);
+    return rc < 0 ? (int64_t)e : 0;
+}
+
+int64_t sbx_probe_connect_refused(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return (int64_t)errno;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(1);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int rc = connect(fd, (struct sockaddr *)&addr, sizeof addr);
+    int e = errno;
+    close(fd);
+    return rc < 0 ? (int64_t)e : 0;
+}
+
 /* Linux process probe: fork (never gated on Linux -- the scheduler needs
    threads), then execve in the child. The seccomp filter is inherited
    across both fork and execve, so if IO.Process is withheld the child's
@@ -327,6 +355,74 @@ mod SbxDenyWrite do
 end
 |}
 
+(* ── Linux: IO.NetListen gates bind/listen separately from IO.Network ──
+   Holding only IO.NetConnect makes `holds "IO.Network"` true (holds is
+   bidirectional), so socket() stays allowed for connect(); LISTEN is the
+   narrower deny. Anchors: tcp_connect for NetConnect, tcp_listen for
+   NetListen, as with the other classes above. *)
+let linux_deny_listen_src =
+  {|
+mod SbxDenyListen do
+  needs IO.Console
+  needs IO.Foreign
+  needs IO.NetConnect
+
+  extern "raw" : Cap(IO.Foreign) do
+    fn probe_socket() : Int = "sbx_probe_socket"
+    fn probe_bind() : Int = "sbx_probe_bind"
+    fn probe_listen() : Int = "sbx_probe_listen_unbound"
+    fn probe_connect() : Int = "sbx_probe_connect_refused"
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect)) : Unit do
+    let _anchor_net = tcp_connect("127.0.0.1", 1)
+    println("socket=" ++ int_to_string(probe_socket()))
+    println("bind=" ++ int_to_string(probe_bind()))
+    println("listen=" ++ int_to_string(probe_listen()))
+    println("connect=" ++ int_to_string(probe_connect()))
+  end
+end
+|}
+
+let linux_hold_listen_src =
+  {|
+mod SbxHoldListen do
+  needs IO.Console
+  needs IO.Foreign
+  needs IO.NetListen
+
+  extern "raw" : Cap(IO.Foreign) do
+    fn probe_bind() : Int = "sbx_probe_bind"
+    fn probe_listen() : Int = "sbx_probe_listen_unbound"
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _l : Cap(IO.NetListen)) : Unit do
+    let _anchor_listen = tcp_listen(0)
+    println("bind=" ++ int_to_string(probe_bind()))
+    println("listen=" ++ int_to_string(probe_listen()))
+  end
+end
+|}
+
+let test_linux_deny_listen () =
+  if not is_linux then Alcotest.skip ()
+  else begin
+    let out = compile_and_run linux_deny_listen_src in
+    check_field "socket" 0 out;
+    check_field "bind" 1 out;
+    check_field "listen" 1 out;
+    (* ECONNREFUSED is 111 on both x86_64 and aarch64 Linux. *)
+    check_field "connect" 111 out
+  end
+
+let test_linux_hold_listen () =
+  if not is_linux then Alcotest.skip ()
+  else begin
+    let out = compile_and_run linux_hold_listen_src in
+    check_field "bind" 0 out;
+    check_field "listen" 0 out
+  end
+
 let test_linux_deny_net () =
   if not is_linux then Alcotest.skip ()
   else begin
@@ -503,6 +599,8 @@ let tests : unit Alcotest.test_case list =
   [ Alcotest.test_case "linux: NET withheld denies socket, EXEC/WRITE still allowed" `Slow test_linux_deny_net;
     Alcotest.test_case "linux: PROCESS withheld denies execve, NET/WRITE still allowed" `Slow test_linux_deny_exec;
     Alcotest.test_case "linux: FILEWRITE withheld denies write-open, NET/EXEC still allowed" `Slow test_linux_deny_write;
+    Alcotest.test_case "linux: NETLISTEN withheld (NetConnect held) denies bind/listen, connect still works" `Slow test_linux_deny_listen;
+    Alcotest.test_case "linux: NETLISTEN held allows bind/listen" `Slow test_linux_hold_listen;
     Alcotest.test_case "macos: NET withheld denies socket, FORK/WRITE still allowed" `Slow test_macos_deny_net;
     Alcotest.test_case "macos: PROCESS withheld denies fork AND exec, NET/WRITE still allowed" `Slow test_macos_deny_process;
     Alcotest.test_case "macos: PROCESS held allows fork and exec" `Slow test_macos_hold_process;

@@ -1,0 +1,54 @@
+-- constants
+nan = nan
+inf = inf
+-inf = -inf
+eps == 2^-52 literal: true
+1 + eps != 1: true
+1 + eps/2 == 1: true
+inf > 1e308: true
+-inf < -1e308: true
+inf == -(-inf): true
+nan == nan: false
+nan != nan: true
+-- float_is_nan
+is_nan(nan): true
+is_nan(inf): false
+is_nan(-inf): false
+is_nan(1.5): false
+is_nan(0.0): false
+is_nan(inf - inf): true
+is_nan(0 * inf): true
+is_nan(id(nan)): true
+is_nan(id(2.0)): false
+-- float_is_infinite
+is_infinite(inf): true
+is_infinite(-inf): true
+is_infinite(nan): false
+is_infinite(1e308): false
+is_infinite(1e308 * 10): true
+is_infinite(-1e308 * 10): true
+is_infinite(0.0): false
+is_infinite(id(-inf)): true
+-- through a List(Float) (boxed elements)
+nan flags: false,true,false,false,false
+inf flags: false,false,true,true,false
+-- typed_array_slice bounds (String elements)
+slice(1, 2) = [11,12] len 2
+slice(0, 5) = [10,11,12,13,14] len 5
+slice(0, 0) = [] len 0
+slice(3, 10) = [13,14] len 2
+slice(-2, 3) = [10,11,12] len 3
+slice(-9, 2) = [10,11] len 2
+slice(2, -1) = [] len 0
+slice(5, 1) = [] len 0
+slice(7, 2) = [] len 0
+slice(4, 1) = [14] len 1
+-- typed_array_slice (Int and Float elements)
+ints [2..5): 3,4,5
+floats [1..4): nan,inf,-2.25
+float slice get(2) + 1.0: -1.25
+-- the slice outlives its source
+churn 4
+kept = [2000,3000]
+-- leak leg
+iterations 10000, flat: true

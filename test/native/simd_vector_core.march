@@ -7,8 +7,8 @@
 -- for the register-resident op lowerings this fixture covers.
 --
 -- NaN is produced via sqrt_f32x4(splat_f32x4(-1.0)) rather than float_nan()
--- — float_nan() has no compiled lowering (pre-existing gap, unrelated to
--- SIMD) — which doubles as sqrt op coverage.
+-- — float_nan() had no compiled lowering when this was written (lowered
+-- since 2026-09-22) — which doubles as sqrt op coverage.
 mod Main do
   needs IO.Console
 

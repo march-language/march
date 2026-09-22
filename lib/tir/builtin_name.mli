@@ -7,6 +7,12 @@ type t =
   | Bool_to_string
   | Chan_choose
   | Chan_send
+  | Float_epsilon
+  | Float_infinity
+  | Float_is_infinite
+  | Float_is_nan
+  | Float_nan
+  | Float_neg_infinity
   | Float_to_string
   | Get_work_pool
   | Html_auto_escape
