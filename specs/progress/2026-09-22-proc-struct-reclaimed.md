@@ -68,7 +68,8 @@ The rule is also in the header, next to `march_proc` and the meta's `green_threa
   only.
 - **The driver's CAS key does not distinguish `MARCH_SANITIZE=thread` from any other
   value.** An "ASAN" build returned the cached TSAN binary (`nm`: `__tsan_init`, no
-  `__asan_init`). Filed separately. Every sanitizer build below cleared
+  `__asan_init`). Fixed separately on main the same day (#586, the tag now carries
+  the mode). Every sanitizer build below predates that fix, so each one cleared
   `.march/cas` first and was checked with `nm`.
 
 ## Evidence
