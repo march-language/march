@@ -245,10 +245,9 @@ they get only one.
 
 The warning covers only type variables you wrote in a function's parameter or
 return annotations (or its bounds). It is skipped when the function's body has
-a type error, since that error is the one to fix first. A common way to trigger
-it by accident is `fn (k, v) -> …` used where a callback over a pair is
-expected: that is a **two-parameter** lambda, not a tuple pattern (write
-`fn pair -> match pair do (k, v) -> … end`).
+a type error, since that error is the one to fix first — including the
+`curried_lambda_over_tuple` error for `fn (k, v) -> …` passed where a callback
+over a pair is expected, which names that mistake directly.
 
 A later release plans to make these variables rigid, which turns this warning
 into an error.

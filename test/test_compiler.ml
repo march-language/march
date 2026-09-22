@@ -11392,9 +11392,35 @@ let test_tyvar_aliased_warns () =
   Alcotest.(check bool) "names both variables" true
     (has_warning_with ctx "type variables `a` and `b` in `second`'s signature are not independent")
 
-let test_tyvar_two_param_lambda_warns () =
-  (* The OrderedMap.values shape: `fn (_, v) -> v` is a TWO-parameter lambda,
-     not a tuple pattern, so the signature's `v` becomes a function type. *)
+let test_tyvar_fixed_to_function_type_warns () =
+  (* The variable is fixed to a type that still MENTIONS variables (`b -> b`),
+     so the hint cannot name a type to write and says so instead.  This was
+     the `OrderedMap.values` shape until the `curried_lambda_over_tuple`
+     diagnostic (2026-09-22) made `fn (_, w) -> w` in a pair callback an error
+     of its own; reached here through a plain application instead. *)
+  let ctx = typecheck {|mod TvFn do
+    fn apply_it(f : a, x : b) : b do f(x) end
+  end|} in
+  Alcotest.(check bool) "no error: the signature merely over-claims" false (has_errors ctx);
+  match tyvar_fixed_warnings ctx with
+  | [ d ] ->
+    (* The fixing type prints with a fresh-counter variable name (`b -> b`,
+       `j2 -> j2`, … depending on what was checked before), so match the
+       stable prefix and assert the arrow shape separately. *)
+    Alcotest.(check bool) "names the variable and the function" true
+      (has_warning_with ctx "type variable `a` in `apply_it`'s signature is not generic: the body fixes it to");
+    Alcotest.(check bool) "the fixing type is an arrow" true
+      (has_warning_with ctx " -> ");
+    Alcotest.(check bool) "hint does not try to name internal variables" true
+      (List.exists (fun n -> n = "hint: write the type the body needs in place \
+                                  of `a`, or make the body generic in `a`.")
+         d.notes)
+  | ds -> Alcotest.failf "expected exactly one tyvar warning, got %d" (List.length ds)
+
+let test_tyvar_warning_yields_to_curried_lambda_error () =
+  (* `fn (_, w) -> w` where a callback over a pair is expected is now its own
+     error (`curried_lambda_over_tuple`), so the tyvar warning stands down —
+     the error names the real mistake. *)
   let ctx = typecheck {|mod TvLambda do
     fn map1(xs : List(a), f : a -> b) : List(b) do
       match xs do
@@ -11406,8 +11432,9 @@ let test_tyvar_two_param_lambda_warns () =
       map1(xs, fn (_, w) -> w)
     end
   end|} in
-  Alcotest.(check bool) "no error: the mistake typechecks" false (has_errors ctx);
-  Alcotest.(check int) "the variable fixed to a function type warns" 1
+  Alcotest.(check bool) "the curried-lambda error is reported" true
+    (has_error_with ctx "2-parameter (curried) lambda");
+  Alcotest.(check int) "no tyvar warning on top of it" 0
     (List.length (tyvar_fixed_warnings ctx))
 
 let test_tyvar_warning_skipped_after_body_error () =
@@ -16960,7 +16987,8 @@ let compiler_suites =
           Alcotest.test_case "generic signatures do not warn"      `Quick test_tyvar_generic_does_not_warn;
           Alcotest.test_case "unwritten type variables do not warn" `Quick test_tyvar_unannotated_does_not_warn;
           Alcotest.test_case "two variables made equal warns"      `Quick test_tyvar_aliased_warns;
-          Alcotest.test_case "two-param lambda for a pair warns"   `Quick test_tyvar_two_param_lambda_warns;
+          Alcotest.test_case "fixed to a function type warns"      `Quick test_tyvar_fixed_to_function_type_warns;
+          Alcotest.test_case "yields to curried-lambda error"      `Quick test_tyvar_warning_yields_to_curried_lambda_error;
           Alcotest.test_case "skipped after a body error"          `Quick test_tyvar_warning_skipped_after_body_error;
         ] );
       ( "cap_unknown_name", [

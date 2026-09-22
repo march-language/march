@@ -59,9 +59,19 @@ gains a warning.
 
 ## Tests
 
-`test/test_compiler.ml` group `annotated_tyvar_fixed` (6 cases): the todo's
+`test/test_compiler.ml` group `annotated_tyvar_fixed` (7 cases): the todo's
 example warns (span, message, hint); a generic set (`id`, `swap`, recursive
 `len`, `apply`, `pick`) does not; unannotated parameters do not; an aliased
 pair warns; the two-parameter-lambda shape warns; a body with a type error
 does not. On the pre-change typechecker the three positive cases fail and the
 three negative controls pass.
+
+## Follow-up landed the same day
+
+`specs/progress/2026-09-22-curried-lambda-over-tuple-diagnostic.md` gives
+`fn (k, v) -> …` passed where a pair callback is expected its own error
+(`curried_lambda_over_tuple`). That is the shape behind the OrderedMap bugs
+this warning found. The two do not overlap: the error fires first and this
+warning is skipped for a body with an error, so the user sees the diagnostic
+that names the actual mistake. `test_tyvar_warning_yields_to_curried_lambda_error`
+pins that.
