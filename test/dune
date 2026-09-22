@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_alloc_contract test_builtin_borrow_classification)
+ (modules test_compiler test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
@@ -2210,6 +2210,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/builtin_borrow_leak_probe.expected native_builtin_borrow_leak_probe.out)))
+
+; ── Regression: float_nan / float_infinity / float_neg_infinity /
+; float_epsilon / float_is_nan / float_is_infinite / typed_array_slice
+; typechecked and ran interpreted, but `--compile` failed at LINK time with
+; `Undefined symbols: _float_nan` (etc.): no compiled lowering existed. The
+; golden is the INTERPRETER's output for the same file, so each line is a
+; compiled-vs-interpreted parity check (NaN/inf edge cases, boxed Floats
+; through a List and a generic fn, every slice clamp case, a slice read after
+; its source is released, and a flat leak leg for the borrowed source array).
+; See specs/progress/2026-09-22-compiled-lowering-float-builtins.md.
+(rule
+ (targets native_float_consts_typed_array_slice native_float_consts_typed_array_slice.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/float_consts_typed_array_slice.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_float_consts_typed_array_slice
+        native/float_consts_typed_array_slice.march)
+   (with-stdout-to native_float_consts_typed_array_slice.out
+        (system "./native_float_consts_typed_array_slice")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/float_consts_typed_array_slice.expected native_float_consts_typed_array_slice.out)))
 
 ; ── Regression: send(self, m) inside a handler delivers, and binding `self`
 ; does not move the actor record's refcount. `self` was never BOUND by either
@@ -8455,6 +8481,43 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/csv_niche_row.expected native_csv_niche_row.out)))
+
+; ── file_close / csv_close return :ok on BOTH backends ─────────────────
+; The typechecker said Unit (file_close) / Atom (csv_close), the interpreter
+; returned :ok, and compiled C returned a heap Ok(()) cell, so a compiled
+; `csv_close(h) == :ok` was false and rendered `:<atom>`. The fixture uses
+; both results, and is run interpreted AND compiled against the SAME
+; .expected, so the two backends cannot drift apart again. Red before the fix:
+; the file_close use was a type error; compiled csv_close printed false.
+(rule
+ (targets native_close_returns_ok_atom native_close_returns_ok_atom.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/close_returns_ok_atom.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_close_returns_ok_atom
+        native/close_returns_ok_atom.march)
+   (with-stdout-to native_close_returns_ok_atom.out
+        (system "./native_close_returns_ok_atom")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/close_returns_ok_atom.expected native_close_returns_ok_atom.out)))
+
+(rule
+ (targets native_close_returns_ok_atom.interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/close_returns_ok_atom.march))
+ (action
+  (with-stdout-to native_close_returns_ok_atom.interp.out
+   (run %{exe:../bin/main.exe} native/close_returns_ok_atom.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/close_returns_ok_atom.expected native_close_returns_ok_atom.interp.out)))
 
 ; ── Regression: a CPU-bound green thread must not starve its siblings ──────
 ; MARCH_NUM_SCHEDULERS=1 is essential and not incidental: it is the only

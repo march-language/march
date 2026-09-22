@@ -864,11 +864,13 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
                   site of the same callee — which is exactly the case the
                   throttle exists for. *)
                | Obligation.Nonlinear_goal
+               | Obligation.Refuted_unconfirmed
                | Obligation.Solver_undecided
                | Obligation.Sort_conflict
                | Obligation.Float_sort_gate -> not !unverified_hinted) ->
       (match r with
        | Obligation.Nonlinear_goal
+       | Obligation.Refuted_unconfirmed
        | Obligation.Solver_undecided
        | Obligation.Sort_conflict
        | Obligation.Float_sort_gate -> unverified_hinted := true
@@ -890,6 +892,7 @@ let check_call (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
           Printf.sprintf "%s `%s` on `%s` was NOT verified here.\n%s"
             obligation_noun (pred_str rp.pred) callee (Obligation.reason_detail r)
         | Obligation.Nonlinear_goal
+        | Obligation.Refuted_unconfirmed
         | Obligation.Solver_undecided
         | Obligation.Sort_conflict
         | Obligation.Float_sort_gate

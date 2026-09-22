@@ -13511,7 +13511,7 @@ declare ptr  @march_ws_select(i64 %fd, ptr %pipe, i64 %timeout)
 declare i64  @march_file_exists(ptr %s)
 declare i64  @march_dir_exists(ptr %s)
 declare ptr  @march_file_open(ptr %path)
-declare ptr  @march_file_close(ptr %handle)
+declare i64  @march_file_close(ptr %handle)
 declare ptr  @march_file_read(ptr %path)
 declare ptr  @march_file_read_line(ptr %handle)
 declare ptr  @march_file_read_chunk(ptr %handle, i64 %size)
@@ -13570,6 +13570,7 @@ declare ptr  @march_typed_array_set(ptr %arr, i64 %i, ptr %val)
 declare ptr  @march_typed_array_map(ptr %arr, ptr %f)
 declare ptr  @march_typed_array_filter(ptr %arr, ptr %f)
 declare ptr  @march_typed_array_fold(ptr %arr, ptr %acc, ptr %f)
+declare ptr  @march_typed_array_slice(ptr %arr, i64 %start, i64 %len)
 ; NativeIntArr builtins — flat i64 arrays for vectorizable loops
 declare ptr    @native_int_arr_make(i64 %len, i64 %def)
 declare i64    @native_int_arr_length(ptr %arr)
@@ -13671,7 +13672,7 @@ declare ptr  @march_http_parse_response(ptr %raw)
 ; CSV builtins
 declare ptr  @march_csv_open(ptr %path, ptr %delim, ptr %mode)
 declare ptr  @march_csv_next_row(ptr %handle)
-declare ptr  @march_csv_close(ptr %handle)
+declare i64  @march_csv_close(ptr %handle)
 ; Resource ownership
 declare void @march_own(ptr %pid, ptr %value)
 ; Capability builtins
@@ -13814,7 +13815,7 @@ let test_builtin_group_total () =
          (fun c -> March_tir.Llvm_emit.builtin_group c = g)
          March_tir.Builtin_name.all)
   in
-  Alcotest.(check int) "arith" 16 (count March_tir.Llvm_emit.Bg_arith);
+  Alcotest.(check int) "arith" 22 (count March_tir.Llvm_emit.Bg_arith);
   Alcotest.(check int) "task" 24 (count March_tir.Llvm_emit.Bg_task);
   Alcotest.(check int) "record" 17 (count March_tir.Llvm_emit.Bg_record)
 
@@ -13829,7 +13830,7 @@ let test_builtin_name_roundtrip () =
         Alcotest.failf "builtin %S round-tripped to a different constructor" s
       | None -> Alcotest.failf "builtin %S has no of_string entry" s)
     March_tir.Builtin_name.all;
-  Alcotest.(check int) "constructor count" 58
+  Alcotest.(check int) "constructor count" 64
     (List.length March_tir.Builtin_name.all);
   (* Distinct names: two constructors mapping to one string would make the
      Hashtbl silently drop one direction of the round trip. *)

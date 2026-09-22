@@ -231,6 +231,13 @@ let extern_borrow_table : (string * bool list) list = [
   ("native_float_arr_length", [true]);
   ("native_float_arr_sum",    [true]);
   ("native_float_arr_to_list",[true]);
+  (* ── TypedArray: slice COPIES its range into a fresh array, taking its own
+     reference on each element, and never stores or frees the source array
+     (march_typed_array_slice), so the source is borrowed. Every producer of
+     a TypedArray (create/from_list/set/map/filter/slice) returns a fresh,
+     owned array, so nothing hands it an unowned reference. The rest of the
+     family is still in [extern_owned_builtins], unaudited. ── *)
+  ("typed_array_slice",    [true; false; false]);
   (* ── Synthetic C names used directly in lower.ml wrappers ──────────────── *)
   ("march_compare_string", [true; true]);
   ("march_hash_string",    [true]);

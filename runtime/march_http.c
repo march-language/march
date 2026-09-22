@@ -2472,8 +2472,10 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
 
     /* Ignore broken-pipe signals — send errors are handled explicitly. */
     signal(SIGPIPE, SIG_IGN);
-    signal(SIGTERM, http_signal_handler);
-    signal(SIGINT,  http_signal_handler);
+    /* SA_ONSTACK: these can arrive on a green thread's 4 KiB stack; see
+     * march_install_async_signal. */
+    march_install_async_signal(SIGTERM, http_signal_handler);
+    march_install_async_signal(SIGINT,  http_signal_handler);
 
     /* Pre-populate response caches (Date header, etc.) before accepting. */
     march_http_response_module_init();

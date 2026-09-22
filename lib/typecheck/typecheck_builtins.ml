@@ -930,7 +930,9 @@ let builtin_bindings : (string * scheme) list =
     ("file_open",       Mono (TArrow (t_string, t_result t_int (TCon ("FileError", [])))));
     ("file_read_line",  Mono (TArrow (t_int, t_option t_string)));
     ("file_read_chunk", Mono (TArrow (t_int, TArrow (t_int, t_option t_string))));
-    ("file_close",      Mono (TArrow (t_int, t_unit)));
+    (* file_close returns :ok on both backends (it was declared Unit while
+       the interpreter returned :ok and compiled C a heap Ok(()) cell). *)
+    ("file_close",      Mono (TArrow (t_int, t_atom)));
     (* Structured cleanup: try_finally(action: () -> a, cleanup: () -> b) : a *)
     ("try_finally",
       poly2 (fun a b -> TArrow (TArrow (t_int, a),
