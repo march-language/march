@@ -193,7 +193,11 @@ let named_builtin_allocates : Builtin_name.t -> bool = function
   | Builtin_name.Int_mod_euclid | Builtin_name.Int_not | Builtin_name.Int_popcount
   | Builtin_name.Int_pow | Builtin_name.Negate | Builtin_name.Not
   | Builtin_name.Pmap_threshold | Builtin_name.Task_is_cancelled
-  | Builtin_name.Task_reductions | Builtin_name.Signal_raise_self -> false
+  | Builtin_name.Task_reductions | Builtin_name.Signal_raise_self
+  (* Inline IEEE-754 constants and `fcmp` predicates: no call, no heap. *)
+  | Builtin_name.Float_epsilon | Builtin_name.Float_infinity
+  | Builtin_name.Float_is_infinite | Builtin_name.Float_is_nan
+  | Builtin_name.Float_nan | Builtin_name.Float_neg_infinity -> false
   | Builtin_name.Bool_to_string | Builtin_name.Float_to_string
   | Builtin_name.Int_to_string | Builtin_name.To_string
   | Builtin_name.Html_auto_escape | Builtin_name.Html_escape_ctx
@@ -591,6 +595,9 @@ let named_builtin_retains : Builtin_name.t -> bool = function
   | Builtin_name.Int_pow | Builtin_name.Negate | Builtin_name.Not
   | Builtin_name.Pmap_threshold | Builtin_name.Task_is_cancelled
   | Builtin_name.Task_reductions | Builtin_name.Signal_raise_self
+  | Builtin_name.Float_epsilon | Builtin_name.Float_infinity
+  | Builtin_name.Float_is_infinite | Builtin_name.Float_is_nan
+  | Builtin_name.Float_nan | Builtin_name.Float_neg_infinity
   | Builtin_name.Receive | Builtin_name.Record_from_list
   | Builtin_name.Record_get | Builtin_name.Record_has_key | Builtin_name.Record_put
   | Builtin_name.Remote_ref_hashes

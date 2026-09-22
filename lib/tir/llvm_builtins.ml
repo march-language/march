@@ -674,6 +674,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_typed_array_filter(ptr %arr, ptr %f)" };
   { march_name = "typed_array_fold"; c_name = Some "march_typed_array_fold"; ret_ty = Some (Tir.TVar "a");
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_typed_array_fold(ptr %arr, ptr %acc, ptr %f)" };
+  { march_name = "typed_array_slice"; c_name = Some "march_typed_array_slice"; ret_ty = Some (Tir.TVar "a");
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_typed_array_slice(ptr %arr, i64 %start, i64 %len)" };
   { march_name = "native_int_arr_make"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_make(i64 %len, i64 %def)" };
   { march_name = "native_int_arr_length"; c_name = None; ret_ty = Some Tir.TInt;
@@ -1556,6 +1558,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_typed_array_map";
   PDeclare "march_typed_array_filter";
   PDeclare "march_typed_array_fold";
+  PDeclare "march_typed_array_slice";
   PComment "; NativeIntArr builtins — flat i64 arrays for vectorizable loops";
   PDeclare "native_int_arr_make";
   PDeclare "native_int_arr_length";

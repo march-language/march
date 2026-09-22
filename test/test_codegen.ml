@@ -13570,6 +13570,7 @@ declare ptr  @march_typed_array_set(ptr %arr, i64 %i, ptr %val)
 declare ptr  @march_typed_array_map(ptr %arr, ptr %f)
 declare ptr  @march_typed_array_filter(ptr %arr, ptr %f)
 declare ptr  @march_typed_array_fold(ptr %arr, ptr %acc, ptr %f)
+declare ptr  @march_typed_array_slice(ptr %arr, i64 %start, i64 %len)
 ; NativeIntArr builtins — flat i64 arrays for vectorizable loops
 declare ptr    @native_int_arr_make(i64 %len, i64 %def)
 declare i64    @native_int_arr_length(ptr %arr)
@@ -13814,7 +13815,7 @@ let test_builtin_group_total () =
          (fun c -> March_tir.Llvm_emit.builtin_group c = g)
          March_tir.Builtin_name.all)
   in
-  Alcotest.(check int) "arith" 16 (count March_tir.Llvm_emit.Bg_arith);
+  Alcotest.(check int) "arith" 22 (count March_tir.Llvm_emit.Bg_arith);
   Alcotest.(check int) "task" 24 (count March_tir.Llvm_emit.Bg_task);
   Alcotest.(check int) "record" 17 (count March_tir.Llvm_emit.Bg_record)
 
@@ -13829,7 +13830,7 @@ let test_builtin_name_roundtrip () =
         Alcotest.failf "builtin %S round-tripped to a different constructor" s
       | None -> Alcotest.failf "builtin %S has no of_string entry" s)
     March_tir.Builtin_name.all;
-  Alcotest.(check int) "constructor count" 58
+  Alcotest.(check int) "constructor count" 64
     (List.length March_tir.Builtin_name.all);
   (* Distinct names: two constructors mapping to one string would make the
      Hashtbl silently drop one direction of the round trip. *)

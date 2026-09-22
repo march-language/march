@@ -8889,6 +8889,35 @@ void *march_typed_array_create(int64_t len, void *default_val) {
     return arr;
 }
 
+/* typed_array_slice(arr, start, len): a fresh array holding a COPY of the
+ * clamped range, never an alias of [arr].
+ *
+ * Bounds CLAMP, matching the interpreter (eval_builtins.ml) exactly, and never
+ * fail:  s = max 0 (min start alen);  e = max s (min (s + len) alen).
+ * So a negative start reads from 0, a start at/after the end or a
+ * non-positive len gives an empty array, and a len running past the end
+ * stops at the end. [s + len] is computed without overflow (the interpreter's
+ * 63-bit ints wrap there; a huge len here simply means "to the end").
+ *
+ * RC contract: [arr] is BORROWED (borrow.ml's extern_borrow_table): this
+ * function neither stores nor releases it, and the caller drops it after its
+ * last use. Each copied element gets its own reference (march_incrc; a no-op
+ * on a tagged immediate), since the slice owns its slots independently of
+ * [arr], which may be freed first. */
+void *march_typed_array_slice(void *arr, int64_t start, int64_t len) {
+    int64_t alen = march_typed_array_length(arr);
+    int64_t s = start < 0 ? 0 : (start > alen ? alen : start);
+    int64_t avail = alen - s;                       /* >= 0 */
+    int64_t n = len <= 0 ? 0 : (len > avail ? avail : len);
+    void *out = typed_array_alloc(n);
+    for (int64_t i = 0; i < n; i++) {
+        void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + (s + i) * 8);
+        march_incrc(elem);
+        *(void **)((char *)out + TYPED_ARRAY_HDR_SIZE + i * 8) = elem;
+    }
+    return out;
+}
+
 /* RC contract: [f] arrives as ONE transferred (owned) reference — Perceus
  * inserts an EIncRC at the March call site iff the caller still needs [f]
  * afterward (confirmed via TIR: `inc_rc closure; NativeArray.map_int(a1,
