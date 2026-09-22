@@ -177,6 +177,37 @@ static void expected_cap_root(const char **sorted_caps, int n, char out_hex[65])
 static const char *SOCK_PATH;
 static uint32_t g_epoch = 1;
 
+/* ── Audit log: main() points $MARCH_AUDIT_LOG at a per-run temp file (it
+ *   used to land in the real ~/.local/share/march/audit.jsonl).  The server
+ *   appends each line BEFORE writing its response, so after read_resp the
+ *   line for that request is the file's last. ── */
+static char g_audit_path[128];
+
+static void last_audit_line(char *out, size_t max) {
+    out[0] = '\0';
+    FILE *f = fopen(g_audit_path, "r");
+    if (!f) return;
+    char line[4096];
+    while (fgets(line, sizeof(line), f)) snprintf(out, max, "%s", line);
+    fclose(f);
+}
+
+static void check_audit(const char *fn, const char *caps_json,
+                        const char *cap_root, const char *result) {
+    char line[4096]; last_audit_line(line, sizeof(line));
+    char want[512];
+    snprintf(want, sizeof(want), "\"fn\":\"%s\"", fn);
+    CHECK(strstr(line, want) != NULL, "audit: last line is for this fn");
+    snprintf(want, sizeof(want), "\"caps\":%s,", caps_json);
+    CHECK(strstr(line, want) != NULL, "audit: caps recorded");
+    if (cap_root) snprintf(want, sizeof(want), "\"cap_root\":\"%s\"", cap_root);
+    else          snprintf(want, sizeof(want), "\"cap_root\":null");
+    CHECK(strstr(line, want) != NULL, "audit: cap_root recorded");
+    snprintf(want, sizeof(want), "\"result\":\"%s\"", result);
+    CHECK(strstr(line, want) != NULL, "audit: result recorded");
+    if (g_failed) fprintf(stderr, "    audit line: %s", line);
+}
+
 /* Build+send one ACTIVATE4 line for (name, caps_csv, cap_root) and return the
  * server's response line in `resp` (caller-provided buffer). */
 static void do_activate4(int fd, const char *name, const char *caps_csv,
@@ -221,6 +252,7 @@ static void test_tamper_check_matching_root_admits(void) {
     do_activate4(fd, "test_fn_ok", "IO.Console,IO.FileRead", root, "", resp, sizeof(resp));
     CHECK(strncmp(resp, "ERR missing_artifact", 20) == 0,
           "matching cap_root passes both cap gates, falls through to CAS-miss (not cap_tamper/cap_policy)");
+    check_audit("test_fn_ok", "[\"IO.Console\",\"IO.FileRead\"]", root, "err_cas_miss");
     close(fd);
 }
 
@@ -242,6 +274,8 @@ static void test_tamper_check_mutated_caps_rejected(void) {
     do_activate4(fd, "test_fn_tamper", "IO.NetListen", root, "", resp, sizeof(resp));
     CHECK(strcmp(resp, "ERR cap_tamper") == 0,
           "mutated caps (root mismatch) rejected with ERR cap_tamper");
+    /* Recorded AS RECEIVED: the rejected request's claimed caps. */
+    check_audit("test_fn_tamper", "[\"IO.NetListen\"]", root, "err_cap_tamper");
     close(fd);
 }
 
@@ -317,6 +351,8 @@ static void test_empty_caps_real_empty_root_admitted(void) {
     do_activate4(fd, "test_fn_legacy_ok", "", real_empty_root, "", resp, sizeof(resp));
     CHECK(strncmp(resp, "ERR missing_artifact", 20) == 0,
           "empty caps:<csv> with the real cap_root=blake3(\"\") admits (falls through to CAS-miss)");
+    /* An empty ACTIVATE4 cap set is [], distinct from a legacy line's null. */
+    check_audit("test_fn_legacy_ok", "[]", real_empty_root, "err_cas_miss");
     close(fd);
 }
 
@@ -346,6 +382,32 @@ static void test_activate3_regression(void) {
     read_resp(fd, resp, sizeof(resp));
     CHECK(strncmp(resp, "ERR missing_artifact", 20) == 0,
           "ACTIVATE3 (no caps/cap_root) unaffected by ACTIVATE4 changes");
+    check_audit("test_fn_v3", "null", NULL, "err_cas_miss");
+    close(fd);
+}
+
+/* 5b. A BATCHED ACTIVATE4 carries its caps through staging to the audit line
+ *     written at COMMIT_BATCH (staged entries hold heap copies). */
+static void test_batch_audit_carries_caps(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "connected to reload server");
+    if (fd < 0) return;
+    char resp[512];
+    send_line(fd, "BEGIN_BATCH");
+    read_resp(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "OK") == 0, "BEGIN_BATCH ok");
+
+    const char *caps[] = { "IO.FileWrite" };
+    char root[65];
+    expected_cap_root(caps, 1, root);
+    do_activate4(fd, "test_fn_batch", "IO.FileWrite", root, "", resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "ACTIVATE4 inside a batch is staged");
+
+    send_line(fd, "COMMIT_BATCH");
+    read_resp(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR commit_partial_failure") == 0,
+          "commit reaches activation (CAS-miss, no artifact staged)");
+    check_audit("test_fn_batch", "[\"IO.FileWrite\"]", root, "err_cas_miss");
     close(fd);
 }
 
@@ -369,6 +431,11 @@ int main(int argc, char **argv) {
         return 2;
     }
 
+    snprintf(g_audit_path, sizeof(g_audit_path),
+             "/tmp/march_reload_audit_%d.jsonl", (int)getpid());
+    unlink(g_audit_path);
+    setenv("MARCH_AUDIT_LOG", g_audit_path, 1);
+
     char sock_path[64];
     snprintf(sock_path, sizeof(sock_path), "/tmp/march_reload_test_%d.sock", (int)getpid());
     SOCK_PATH = sock_path;
@@ -386,6 +453,7 @@ int main(int argc, char **argv) {
     march_dispatch_register_name(6, "test_fn_within_policy");
     march_dispatch_register_name(7, "test_fn_exceeds_policy");
     march_dispatch_register_name(8, "test_fn_legacy_ok");
+    march_dispatch_register_name(9, "test_fn_batch");
     march_reload_server_start(sock_path);
 
     int policy_mode = (argc >= 3 && strcmp(argv[2], "policy") == 0);
@@ -397,6 +465,7 @@ int main(int argc, char **argv) {
         test_empty_caps_bogus_root_rejected();
         test_empty_caps_real_empty_root_admitted();
         test_activate3_regression();
+        test_batch_audit_carries_caps();
     } else {
         /* $MARCH_DEPLOY_POLICY must already be set by the caller (dune rule)
          * before this process started, since the server loads it lazily on
@@ -431,12 +500,14 @@ int main(int argc, char **argv) {
                 do_activate4(fd, "test_fn_exceeds_policy", "IO.Process", root, "", resp, sizeof(resp));
                 CHECK(strcmp(resp, "ERR cap_policy IO.Process") == 0,
                       "cap exceeding policy => ERR cap_policy IO.Process");
+                check_audit("test_fn_exceeds_policy", "[\"IO.Process\"]", root, "err_cap_policy");
                 close(fd);
             }
         }
     }
 
     unlink(sock_path);
+    unlink(g_audit_path);
     if (g_failed == 0) {
         printf("test_reload_activate4%s: all checks passed\n", policy_mode ? "_policy" : "");
         return 0;

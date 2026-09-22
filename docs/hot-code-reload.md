@@ -304,7 +304,9 @@ A useful pattern is to size the policy from the app's own manifest: build the ap
 
 ### `--grant-cap`
 
-`--grant-cap <CAP>` is repeatable and subsumption-matched: `--grant-cap IO.FileSystem` authorizes a widening to the narrower `IO.FileWrite`. The granted capability becomes part of the deployed function's own signed capability set, so it can't be stripped or altered without breaking the signature; the server's audit log separately records who deployed which function, and when, so a widening is always traceable back to the person who authorized it.
+`--grant-cap <CAP>` is repeatable and subsumption-matched: `--grant-cap IO.FileSystem` authorizes a widening to the narrower `IO.FileWrite`. The granted capability becomes part of the deployed function's own signed capability set, so it can't be stripped or altered without breaking the signature; the server's audit log records who deployed which function, when, and with which capability set, so a widening is always traceable back to the person who authorized it.
+
+Each `ACTIVATE` appends one JSON line to `$MARCH_AUDIT_LOG` (default `${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl`) with `ts`, `fn`, `impl_hash`, `signer`, `cas_hash`, `caps`, `cap_root` and `result`. `caps` is the deploy's capability list (`[]` for a capless artifact) and `cap_root` its signed root; both are `null` for deploys over pre-v4 protocols, which carry no capability data. They are recorded as received, so on a rejected request (`err_sig`, `err_cap_tamper`) they show what the request claimed, not a verified set. To find when a node last gained a capability: `jq -c 'select(.result == "ok" and (.caps // [] | index("IO.Network")))' audit.jsonl | tail -1`.
 
 ```sh
 forge deploy hot --grant-cap IO.FileWrite --grant-cap IO.Process --so v2.so

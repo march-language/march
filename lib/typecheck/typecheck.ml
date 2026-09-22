@@ -453,6 +453,48 @@ let report_wildcard_discard env ~span t =
         Linear values must be consumed exactly once. Bind it to a name \
         and pass it to something that consumes it." (pp_ty (repr t)))
 
+(* ── `let _ = <linear value>` ────────────────────────────────────────
+   [check_wildcard_discards] judges a wildcard by its TYPE, which catches a
+   value whose type says it is linear ([TLin], or an `always_linear type`).
+   It cannot catch a value that is linear because of how it was BOUND: a
+   `linear p : a` parameter, or a `linear let x = …` local, is tracked by name
+   in [env.lin] while its type stays a plain `a` / `Int`.  For those, `let _ =
+   p` used to typecheck, and the `_` registered as p's one use — so a single
+   generic function could launder any linear value in the program out of
+   existence (specs/progress/2026-09-21-linear-wildcard-discard.md).  A
+   wildcard is not a use: it drops the value, and March has no destructor to
+   run.  Judged on the expression, since the type cannot say it. *)
+
+(** The tracked linear binding a `let _ = e` would drop, when [e]'s value IS
+    that binding: the variable itself, a linear field read off a record
+    variable (its "r#f" sentinel), or either of those under an annotation or
+    parenthesised passthrough.  [None] for anything else — notably a call,
+    whose own result type is what [check_wildcard_discards] judges. *)
+let discarded_linear_binding env (e : Ast.expr) =
+  let tracked key =
+    match List.find_opt (fun le -> le.le_name = key) env.lin with
+    | Some le when effective_lin env le = Ast.Linear ->
+      Some (lin_display_name key)
+    | _ -> None
+  in
+  let rec go (e : Ast.expr) =
+    match e with
+    | Ast.EVar n -> tracked n.Ast.txt
+    | Ast.EField (Ast.EVar r, f, _) -> tracked (r.Ast.txt ^ "#" ^ f.Ast.txt)
+    | Ast.EAnnot (inner, _, _) -> go inner
+    | _ -> None
+  in
+  go e
+
+let report_linear_wildcard_discard env ~span ~name t =
+  Err.error env.errors ~span
+    (Printf.sprintf
+       "This `_` discards the linear value `%s` of type `%s`.\n\
+        Linear values must be consumed exactly once, and binding to `_` is \
+        not a use — it drops the value. Pass it to something that consumes \
+        it, or match on it. For a session endpoint, the generated \
+        `take_closed` / `take_idle` are its consumers." name (pp_ty (repr t)))
+
 (** Does [t] still contain an unresolved type variable? *)
 let rec has_unbound t =
   match t with
@@ -1231,6 +1273,28 @@ let check_wildcard_discards env (wilds : (Ast.span * ty) list) =
   List.iter (fun (sp, t) ->
       if contains_linear env t then report_wildcard_discard env ~span:sp t)
     (List.rev wilds)
+
+(** `let _ = e` where [e]'s value is a tracked linear binding whose type does
+    not itself say so ([discarded_linear_binding]).  Guarded on
+    [contains_linear] so it fires only where [check_wildcard_discards] is
+    silent — a type-carrying linear value stays that one's report, not two.
+
+    Session endpoints are excluded, the same exclusion [ELet]'s [auto_lin]
+    already makes: a [TChan] has its own, deliberately narrower must-close
+    accounting (only a channel that reached [End] must be closed; a
+    mid-protocol drop is out of scope, and the accept corpus creates-and-drops
+    such endpoints on purpose — t42/t44). *)
+let is_session_chan t =
+  match repr t with TChan _ | TLin (_, TChan _) -> true | _ -> false
+
+let check_wildcard_let_discard env (pat : Ast.pattern) rhs_expr rhs_ty =
+  match pat with
+  | Ast.PatWild sp
+    when not (contains_linear env rhs_ty) && not (is_session_chan rhs_ty) ->
+    (match discarded_linear_binding env rhs_expr with
+     | Some name -> report_linear_wildcard_discard env ~span:sp ~name rhs_ty
+     | None -> ())
+  | _ -> ()
 
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
@@ -2403,6 +2467,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       let reason = Some (RLetBind sp) in
       unify env ~span:sp ~reason rhs_ty pat_ty;
       check_wildcard_discards env wilds;
+      check_wildcard_let_discard env b.bind_pat b.bind_expr rhs_ty;
       (* Record variable name type for hover even in tail position *)
       (match b.bind_pat with
        | Ast.PatVar name -> Hashtbl.replace env.type_map name.span (repr rhs_ty)
@@ -3410,6 +3475,7 @@ and infer_block env exprs =
       with_wildcards (fun () -> infer_pattern ~expected:rhs_ty env_rhs b.bind_pat) in
     unify env_rhs ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
     check_wildcard_discards env_rhs wilds;
+    check_wildcard_let_discard env_rhs b.bind_pat b.bind_expr rhs_ty;
     (* Record the binding type in type_map so LSP hover over `let x = …` shows
        the RHS type rather than the enclosing block's return type. *)
     Hashtbl.replace env.type_map sp (repr rhs_ty);
@@ -6173,12 +6239,43 @@ let rec check_decl env (d : Ast.decl) : env =
     end;
     bind_vars new_bindings env
 
-  | Ast.DNeeds (caps, _sp) ->
+  | Ast.DNeeds (caps, sp) ->
     (* Record declared capability paths in env for DMod validation.
        Each path is a list of names e.g. ["IO"; "Network"] → "IO.Network" *)
     let scoped = List.map (fun (names, scope) ->
         (String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names), scope)
       ) caps in
+    (* A path scope is only meaningful on a filesystem capability, and only
+       when absolute.  Both are errors rather than warnings: the scope would
+       otherwise be kept and silently ignored (non-filesystem) or mean a
+       different directory per working directory (relative), and either reads
+       as enforcement that is not there.  Reported at the capability name. *)
+    List.iter2 (fun (names, _) (cap, scope) ->
+        match scope with
+        | None -> ()
+        | Some path ->
+          let span = match List.rev names with
+            | (n : Ast.name) :: _ -> n.span
+            | [] -> sp
+          in
+          if not (March_caps.Cap_scope.is_scopable cap) then
+            Err.error env.errors ~span
+              (Printf.sprintf
+                 "`%s` does not take a path scope; only filesystem \
+                  capabilities do (`IO.FileRead`, `IO.FileWrite`, \
+                  `IO.FileSystem`), so `(\"%s\")` would be ignored.\n\
+                  hint: remove the scope, or scope the filesystem capability \
+                  you mean, e.g. `needs IO.FileSystem(\"%s\")`."
+                 cap path path)
+          else if not (March_caps.Cap_scope.is_absolute path) then
+            Err.error env.errors ~span
+              (Printf.sprintf
+                 "The scope `%s` on `%s` is a relative path, so it would \
+                  name a different directory depending on the working \
+                  directory at run time.\n\
+                  hint: give an absolute path, one starting with `/`."
+                 path cap))
+      caps scoped;
     let paths = List.map fst scoped in
     { env with mod_needs = paths @ env.mod_needs;
                mod_need_scopes = scoped @ env.mod_need_scopes }

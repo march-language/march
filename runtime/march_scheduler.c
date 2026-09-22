@@ -3383,17 +3383,137 @@ void march_sched_requeue_user_front(void *const *msgs, const uint64_t *seqs,
     mbox_lock_release(p);
 }
 
-/* SIGUSR1 handler: zero the local reduction counter.  The handler is
- * registered with SA_RESTART so that interruptible syscalls are retried
- * automatically on platforms that support it. */
-static void march_preempt_signal_handler(int sig) {
-    (void)sig;
-    /* Both writes are async-signal-safe (volatile scalar stores).
-     * march_preempt_request is what compiled code actually polls;
-     * march_tls_reductions is kept in sync so task_reductions() and any
-     * interpreter-side budget logic still see a spent quantum. */
-    march_preempt_request = 1;
-    march_tls_reductions  = 0;
+/* ── Preemption signal selection and chaining ─────────────────────────
+ * See march_scheduler.h.  g_preempt_signo is 0 until first resolved. */
+static _Atomic int       g_preempt_signo = 0;
+static struct sigaction  g_prev_preempt_sa;      /* host's disposition, saved at start */
+static _Atomic int       g_prev_preempt_valid = 0; /* 1: g_prev_preempt_sa is a real handler to chain to */
+static int               g_prev_preempt_saved = 0; /* 1: g_prev_preempt_sa holds a disposition to restore */
+static _Atomic int       g_daemon_wake = 0;      /* preempt_stop's wake-the-daemon delivery */
+
+static void march_preempt_signal_handler(int sig, siginfo_t *si, void *uctx);
+
+static int preempt_signal_usable(int signo) {
+    if (signo == SIGUSR1 || signo == SIGUSR2) return 1;
+#ifdef SIGRTMIN
+    if (signo >= SIGRTMIN && signo <= SIGRTMAX) return 1;
+#endif
+    return 0;
+}
+
+/* "USR1", "SIGUSR2", "RTMIN", "RTMIN+3", or a number.  0 = unparseable. */
+static int parse_preempt_signal(const char *v) {
+    if (!v || !*v) return 0;
+    if (strncmp(v, "SIG", 3) == 0) v += 3;
+    if (strcmp(v, "USR1") == 0) return SIGUSR1;
+    if (strcmp(v, "USR2") == 0) return SIGUSR2;
+#ifdef SIGRTMIN
+    if (strncmp(v, "RTMIN", 5) == 0) {
+        if (v[5] == '\0') return SIGRTMIN;
+        if (v[5] == '+') {
+            char *end = NULL;
+            long k = strtol(v + 6, &end, 10);
+            if (end && *end == '\0' && k >= 0 && k <= SIGRTMAX - SIGRTMIN)
+                return SIGRTMIN + (int)k;
+        }
+        return 0;
+    }
+#endif
+    char *end = NULL;
+    long n = strtol(v, &end, 10);
+    if (end && *end == '\0' && n > 0 && n < 256) return (int)n;
+    return 0;
+}
+
+int march_preempt_signal(void) {
+    int s = atomic_load_explicit(&g_preempt_signo, memory_order_acquire);
+    if (s) return s;
+    const char *env = getenv("MARCH_PREEMPT_SIGNAL");
+    int want = SIGUSR1;
+    if (env && *env) {
+        int p = parse_preempt_signal(env);
+        if (p && preempt_signal_usable(p)) want = p;
+        else fprintf(stderr,
+                     "march: MARCH_PREEMPT_SIGNAL=%s is not a usable preemption "
+                     "signal (USR1, USR2, RTMIN[+n]); using SIGUSR1\n", env);
+    }
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(&g_preempt_signo, &expected, want,
+            memory_order_acq_rel, memory_order_acquire))
+        return expected;   /* lost the race: someone else resolved it */
+    return want;
+}
+
+int march_sched_set_preempt_signal(int signo) {
+    if (!preempt_signal_usable(signo)) return -1;
+    if (atomic_load_explicit(&g_preempt_active, memory_order_acquire)) return -1;
+    atomic_store_explicit(&g_preempt_signo, signo, memory_order_release);
+    return 0;
+}
+
+/* Hand a delivery that is not ours to the disposition that was installed
+ * before preemption started.  SIG_DFL/SIG_IGN were not saved as chainable
+ * (SIG_DFL for SIGUSR1 terminates), so nothing runs for those. */
+static void chain_prev_preempt_handler(int sig, siginfo_t *si, void *uctx) {
+    if (!atomic_load_explicit(&g_prev_preempt_valid, memory_order_acquire)) return;
+    if (g_prev_preempt_sa.sa_flags & SA_SIGINFO) {
+        if (g_prev_preempt_sa.sa_sigaction) g_prev_preempt_sa.sa_sigaction(sig, si, uctx);
+    } else if (g_prev_preempt_sa.sa_handler != SIG_DFL
+               && g_prev_preempt_sa.sa_handler != SIG_IGN) {
+        g_prev_preempt_sa.sa_handler(sig);
+    }
+}
+
+/* Preemption handler: zero the local reduction counter, on a tick that is
+ * ours; chain anything else to the host's handler.
+ *
+ * "Ours" is decided WITHOUT touching TLS first.  A host's process-directed
+ * signal can land on any thread, including one March never initialised, and
+ * on Darwin the first TLS access on a thread mallocs (see sched_loop) -- not
+ * async-signal-safe.  So: find this thread in g_scheds by pthread_self(), and
+ * consume that scheduler's preempt_tick flag, which the daemon sets just
+ * before it signals.  Only a scheduler thread (TLS already materialised in
+ * sched_loop) with a pending tick writes TLS.
+ *
+ * A delivery from another process (si_pid > 0 and != getpid()) is chained
+ * without consulting the flag; that also covers a host signal that coalesced
+ * with our tick into one delivery (at the cost of that one tick).  "> 0" matters: under this scheduler macOS delivers many
+ * of our own pthread_kill ticks with si_pid == 0 (measured: ~250 of ~650 per
+ * 400ms on two schedulers), and treating 0 as "another process" chained our
+ * own ticks to the host.  A real sending process always has a nonzero pid.  A host's in-process use of the signal (its own pthread_kill)
+ * carries our pid, but finds no pending tick, so it is chained too. */
+static void march_preempt_signal_handler(int sig, siginfo_t *si, void *uctx) {
+    /* From another process: the host's, full stop.  Decided BEFORE looking at
+     * the tick flag, and without consuming it: a host signal landing on a
+     * scheduler thread between the daemon setting that thread's flag and its
+     * tick arriving would otherwise eat the flag, and the tick itself would
+     * then be chained to the host (measured: 2 in 30 runs of the test). */
+    if (si && si->si_pid > 0 && si->si_pid != getpid()) {
+        chain_prev_preempt_handler(sig, si, uctx);
+        return;
+    }
+    int ours = 0;
+    pthread_t me = pthread_self();
+    for (int i = 0; i < g_num_scheds; i++) {
+        if (pthread_equal(g_scheds[i].thread, me)) {
+            if (atomic_exchange_explicit(&g_scheds[i].preempt_tick, 0,
+                                         memory_order_acquire)) {
+                /* Both writes are async-signal-safe (volatile scalar stores).
+                 * march_preempt_request is what compiled code actually polls;
+                 * march_tls_reductions is kept in sync so task_reductions()
+                 * and any interpreter-side budget logic see a spent quantum. */
+                march_preempt_request = 1;
+                march_tls_reductions  = 0;
+                ours = 1;
+            }
+            break;
+        }
+    }
+    if (!ours && pthread_equal(g_preempt_thread, me)
+        && atomic_exchange_explicit(&g_daemon_wake, 0, memory_order_relaxed))
+        ours = 1;
+    if (!ours)
+        chain_prev_preempt_handler(sig, si, uctx);
 }
 
 /* ── fd readiness: park a green thread on a socket ────────────────────────
@@ -3751,7 +3871,7 @@ int march_sched_getaddrinfo(const char *host, const char *port,
      * signal masked -- getaddrinfo is not async-signal-safe on macOS. */
     sigset_t block, saved;
     sigemptyset(&block);
-    sigaddset(&block, SIGUSR1);
+    sigaddset(&block, march_preempt_signal());
     pthread_sigmask(SIG_BLOCK, &block, &saved);
     int rc = getaddrinfo(host, port, hints, res);
     pthread_sigmask(SIG_SETMASK, &saved, NULL);
@@ -3760,6 +3880,7 @@ int march_sched_getaddrinfo(const char *host, const char *port,
 
 static void *preempt_daemon(void *arg) {
     (void)arg;
+    const int signo = march_preempt_signal();
     struct timespec ts;
     ts.tv_sec  = 0;
     ts.tv_nsec = (long)MARCH_QUANTUM_US * 1000L;   /* µs → ns */
@@ -3774,7 +3895,17 @@ static void *preempt_daemon(void *arg) {
         for (int i = 0; i < g_num_scheds; i++) {
             if (atomic_load_explicit(&g_scheds[i].running, memory_order_acquire)
                     && g_scheds[i].thread) {
-                pthread_kill(g_scheds[i].thread, SIGUSR1);
+                /* Signal only on the 0 -> 1 transition.  Still 1 means the
+                 * previous tick has not been handled yet, and a second kill
+                 * would coalesce into it anyway.  This pairs every kill with
+                 * exactly one flag consumption; the naive "store 1, kill"
+                 * let a LATE handler for tick N consume tick N+1's flag
+                 * (stored, not yet sent), so N+1's own delivery found no
+                 * flag and was chained to the host (Linux, under full-suite
+                 * load). */
+                if (!atomic_exchange_explicit(&g_scheds[i].preempt_tick, 1,
+                                              memory_order_acq_rel))
+                    pthread_kill(g_scheds[i].thread, signo);
             }
         }
 
@@ -3785,9 +3916,13 @@ static void *preempt_daemon(void *arg) {
 }
 
 void march_sched_preempt_start(void) {
-    /* Install the SIGUSR1 handler once, process-wide. */
+    /* Install the preemption handler process-wide, saving whatever was there
+     * so a host's handler is chained to (see march_preempt_signal_handler)
+     * and restored by march_sched_preempt_stop. */
+    const int signo = march_preempt_signal();
     struct sigaction sa;
-    sa.sa_handler = march_preempt_signal_handler;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = march_preempt_signal_handler;
     sigemptyset(&sa.sa_mask);
     /* SA_ONSTACK: deliver on the per-thread alternate signal stack.  Scheduler
      * threads run green threads on lazily-grown, guard-page-protected stacks; a
@@ -3797,12 +3932,31 @@ void march_sched_preempt_start(void) {
      * an unrecoverable crash on glibc/Linux (macOS masks it by mapping the
      * frame differently).  Delivering on the alt stack (set up per thread in
      * sched_loop) keeps preemption off the green stack. */
-    sa.sa_flags = SA_RESTART | SA_ONSTACK;
-    if (sigaction(SIGUSR1, &sa, NULL) != 0) {
-        perror("march_sched: sigaction(SIGUSR1)");
+    sa.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
+    struct sigaction prev;
+    if (sigaction(signo, &sa, &prev) != 0) {
+        perror("march_sched: sigaction(preemption signal)");
         return;   /* preemption unavailable but scheduler still works */
     }
+    /* Chainable only if it is a real handler and not ours (a start without a
+     * matching stop would otherwise chain to itself forever). */
+    int chainable =
+        (prev.sa_flags & SA_SIGINFO)
+            ? (prev.sa_sigaction != NULL
+               && prev.sa_sigaction != march_preempt_signal_handler)
+            : (prev.sa_handler != SIG_DFL && prev.sa_handler != SIG_IGN);
+    if (!((prev.sa_flags & SA_SIGINFO)
+          && prev.sa_sigaction == march_preempt_signal_handler)) {
+        g_prev_preempt_sa = prev;   /* keep the real previous one for restore */
+        g_prev_preempt_saved = 1;
+        atomic_store_explicit(&g_prev_preempt_valid, chainable, memory_order_release);
+    }
 
+    /* A flag left at 1 by a previous run (its delivery consumed by stop's
+     * drain, or its thread gone) would make the daemon skip that scheduler
+     * forever; start every scheduler at "nothing outstanding". */
+    for (int i = 0; i < MARCH_MAX_SCHEDULERS + 1; i++)
+        atomic_store_explicit(&g_scheds[i].preempt_tick, 0, memory_order_relaxed);
     atomic_store_explicit(&g_preempt_active, 1, memory_order_release);
     if (pthread_create(&g_preempt_thread, NULL, preempt_daemon, NULL) != 0) {
         perror("march_sched: pthread_create (preempt daemon)");
@@ -3814,9 +3968,37 @@ void march_sched_preempt_stop(void) {
     if (!atomic_load_explicit(&g_preempt_active, memory_order_acquire))
         return;
     atomic_store_explicit(&g_preempt_active, 0, memory_order_release);
-    /* Wake the daemon so it does not sleep through the entire remaining quantum. */
-    pthread_kill(g_preempt_thread, SIGUSR1);
+    /* Wake the daemon so it does not sleep through the entire remaining
+     * quantum.  Flagged, so the handler does not mistake it for a host's. */
+    atomic_store_explicit(&g_daemon_wake, 1, memory_order_relaxed);
+    pthread_kill(g_preempt_thread, march_preempt_signal());
     pthread_join(g_preempt_thread, NULL);
+    /* Give the signal back to whoever had it before preemption started.
+     * The previous disposition is usually SIG_DFL, which for SIGUSR1
+     * TERMINATES, so a tick still pending on this thread would kill the
+     * process once delivered under it.  DEFENSIVE: no path we know of leaves
+     * one pending -- swapcontext restores the scheduler context's unblocked
+     * mask, and a tick sent before the daemon was joined is delivered on the
+     * join's return -- and a test that masks the signal inside a green thread
+     * cannot reach this (tried: removing the drain stayed green).  Kept as a
+     * cheap guard: mask it, consume one pending delivery, restore, unmask.
+     * (A host's process-directed signal pending at this exact instant would
+     * be consumed too; the window is the few instructions below.) */
+    if (g_prev_preempt_saved) {
+        const int signo = march_preempt_signal();
+        sigset_t blk, old, pend;
+        sigemptyset(&blk);
+        sigaddset(&blk, signo);
+        pthread_sigmask(SIG_BLOCK, &blk, &old);
+        if (sigpending(&pend) == 0 && sigismember(&pend, signo)) {
+            int got;
+            sigwait(&blk, &got);
+        }
+        atomic_store_explicit(&g_prev_preempt_valid, 0, memory_order_release);
+        sigaction(signo, &g_prev_preempt_sa, NULL);
+        g_prev_preempt_saved = 0;
+        pthread_sigmask(SIG_SETMASK, &old, NULL);
+    }
 }
 
 /* ── Phase 5B: cancellation tokens ──────────────────────────────────── */
