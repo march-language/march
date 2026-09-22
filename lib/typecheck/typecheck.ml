@@ -486,6 +486,32 @@ let discarded_linear_binding env (e : Ast.expr) =
   in
   go e
 
+(* ── `let x = <linear binding>` ───────────────────────────────────────
+   The same binding-not-type gap as `let _ = p` above, on the NAMED path.
+   [ELet]'s linearity auto-promotion reads the RHS's TYPE, so `let h2 = h`
+   with `h` a `linear h : Res` parameter bound an Unrestricted [h2]: the read
+   of [h] was its one use, and [h2] could then be dropped (or duplicated)
+   without a diagnostic.  The new binder inherits the tracked binding's
+   linearity instead: the value moved, its obligation moves with it. *)
+
+(** The linearity a `let x = e` binder inherits from [e] when [e]'s value IS
+    a tracked linear/affine binding (the variable, a linear field's sentinel,
+    or either under an annotation); [Ast.Unrestricted] otherwise. *)
+let rebound_binding_lin env (e : Ast.expr) =
+  let tracked key =
+    match List.find_opt (fun le -> le.le_name = key) env.lin with
+    | Some le -> effective_lin env le
+    | None -> Ast.Unrestricted
+  in
+  let rec go (e : Ast.expr) =
+    match e with
+    | Ast.EVar n -> tracked n.Ast.txt
+    | Ast.EField (Ast.EVar r, f, _) -> tracked (r.Ast.txt ^ "#" ^ f.Ast.txt)
+    | Ast.EAnnot (inner, _, _) -> go inner
+    | _ -> Ast.Unrestricted
+  in
+  go e
+
 let report_linear_wildcard_discard env ~span ~name t =
   Err.error env.errors ~span
     (Printf.sprintf
@@ -3523,7 +3549,18 @@ and infer_block env exprs =
             before — promoting it to strict-linear would regress that. *)
          | TLin (lin, inner) when lin <> Ast.Unrestricted
              && (match repr inner with TChan _ -> false | _ -> true) -> lin
-         | t -> if holds_linear env t then Ast.Linear else Ast.Unrestricted)
+         | t when holds_linear env t -> Ast.Linear
+         (* A plain-typed RHS that IS a linear binding (`let h2 = h`, `h` a
+            `linear h : Res` parameter) hands its obligation to the new
+            binder — see [rebound_binding_lin].  Channels keep their own
+            accounting, as above. *)
+         | TLin (_, inner) when (match repr inner with TChan _ -> true | _ -> false) ->
+           Ast.Unrestricted
+         | TChan _ -> Ast.Unrestricted
+         | _ ->
+           (match b.bind_pat with
+            | Ast.PatVar _ -> rebound_binding_lin env b.bind_expr
+            | _ -> Ast.Unrestricted))
       | lin -> lin
     in
     let env' = match auto_lin with

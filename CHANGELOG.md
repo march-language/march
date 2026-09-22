@@ -137,19 +137,11 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
-- **Two `@[endpoints]` protocols in one module no longer break the first one's
-  sends.** Every protocol generated a `<P>_Msg` module whose message type was a
-  bare `Msg`, and impl dispatch for its derived `Json` codec keys on the type's
-  short name, so a second protocol in the same module captured the first one's
-  `to_json`. The two backends disagreed about it: interpreted, the first send
-  encoded through the other protocol's codec and died inside generated code with
-  a match failure; compiled, the build was refused ("ambiguous interface-method
-  call to `JsonFrom$Msg.from_json`"). The generated message type is now named
-  after its protocol (`<P>_Message`), so two protocols in one module each run
-  their own sessions on both backends. `@[endpoints] protocol P` accordingly
-  reserves the type name `P_Message`: a type of your own by that name deriving
-  the same interface the generated codec derives is now rejected as an
-  overlapping implementation.
+- **Renaming a linear value with `let` no longer lets it be dropped.** In
+  `fn f(linear h : Res) ... let h2 = h`, the rename consumed `h` but left `h2`
+  ordinary, so `h2` could be ignored with no error. `h2` now takes over `h`'s
+  obligation and must be used exactly once, whether `h` is a `linear` parameter
+  or a `linear let` local.
 - **A protocol whose payload types differ in their DEFINITIONS is now caught when
   the session is set up, not as an undecodable message once it is running.**
   `<P>_Msg.fingerprint()` digested each payload type by NAME, so two nodes whose
