@@ -11,6 +11,19 @@ permalink: /docs/clustering/
 
 March's distributed layer lets multiple nodes form a cluster, discover each other, detect failures, and call functions across node boundaries with type-safety guarantees. The full stack is built from composable pure modules layered on top of the [actor runtime]({{ site.baseurl }}/docs/actors/) and its [supervision trees]({{ site.baseurl }}/docs/supervision/).
 
+> **This page is an API reference, not a runnable quickstart.** The code below shows how
+> the layers fit together, but the end-to-end examples are *skeletons*; two things can
+> only come from a real build, not from copy-paste: the actual byte transport over each
+> socket, and the `sig_hash` / `impl_hash` values the compiler bakes into your binary for
+> the specific functions you enroll (see [Putting It Together](#putting-it-together)). For
+> a complete executing example, the cluster integration tests under the project's `test/`
+> tree run the whole accept → handshake → enroll → call → reply loop.
+>
+> **New to March concurrency?** Don't start here. Begin with
+> [Actors]({{ site.baseurl }}/docs/actors/) (`spawn` / `send`) and
+> [Supervision Trees]({{ site.baseurl }}/docs/supervision/): clustering is the
+> distributed generalization of those, and this page assumes them throughout.
+
 ---
 
 ## From one node to a cluster
@@ -741,6 +754,9 @@ post-heal sync picks the same winner on both sides (a `REGISTRY_SYNC_RESP`
 leaf carries the entry's `VectorClock`; the merge orders by it). `partition`
 needs Linux and root for iptables; `scripts/two-node-docker.sh` runs it from
 any host (`specs/progress/2026-09-14-two-node-failure-semantics-harness.md`).
+All of these run on one host over loopback; failure semantics across real
+machines and networks aren't covered by an automated test, so treat them as
+less battle-tested than the single-process core.
 
 **A compiled memory-safety gap, FIXED (finding C1, `specs/todos/`, 2026-07-11).**
 `VectorClock.compare` (and, transitively, `.concurrent`/`.happens_before` on
