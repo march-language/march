@@ -19,6 +19,10 @@ let check ?(_quiet = false) () =
     if files = [] then
       Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
+      match Cmd_build.offline_preflight
+              ~scope:(Cmd_build.build_scope ~release:false proj) proj with
+      | Error e -> Error e
+      | Ok () ->
       let lib_path_env = Cmd_build.lib_path_env proj in
       (* For app/tool: include the entry even if it lives outside lib/.
          For lib: files already covers everything. *)

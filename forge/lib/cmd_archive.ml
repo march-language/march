@@ -148,7 +148,10 @@ let install_from_git ~name ~url ~fragment ~force =
       (match fragment with Some b -> Printf.sprintf " (%s)" b | None -> "");
     let clone_cmd = Printf.sprintf "git clone --depth 1 %s %s %s"
         branch_arg (Filename.quote url) (Filename.quote tmp) in
-    let rc = Sys.command clone_cmd in
+    match Net_gate.command ~what:(Printf.sprintf "clone archive %s" url)
+            ~remedy:"Installing an archive from a remote needs network access." clone_cmd with
+    | Error e -> Error e
+    | Ok rc ->
     if rc <> 0 then
       Error (Printf.sprintf "git clone failed for %s" url)
     else begin
@@ -296,7 +299,10 @@ let update_one name entry =
     Printf.printf "  %s: fetching latest from %s...\n%!" name url;
     let clone_cmd = Printf.sprintf "git clone --depth 1 %s %s %s"
         branch_arg (Filename.quote url) (Filename.quote tmp) in
-    let rc = Sys.command clone_cmd in
+    match Net_gate.command ~what:(Printf.sprintf "fetch archive %s from %s" name url)
+            ~remedy:"Updating an archive from a remote needs network access." clone_cmd with
+    | Error e -> Error e
+    | Ok rc ->
     if rc <> 0 then
       Error (Printf.sprintf "failed to fetch %s" name)
     else begin

@@ -23,8 +23,13 @@
           info.toml  — name, version, source URL (informational only)
 
     Build-time integrity verification:
-      On every build, forge re-hashes each dep's CAS entry and checks it
-      against the hash recorded in forge.lock.  Mismatch → build aborts.
+      Under offline mode (`--offline` / FORGE_OFFLINE), forge re-hashes each
+      cached dependency TREE it is about to use (~/.march/cas/deps/<name>/
+      <coord>, via [hash_directory]) and checks it against the hash recorded
+      in forge.lock; a mismatch aborts the build, as does a mismatch reported
+      by `forge deps --offline` (Offline_deps.verify_tree). Online builds do
+      not check yet. The archives stored below are not what gets verified;
+      nothing reads them.
 *)
 
 (* ------------------------------------------------------------------ *)

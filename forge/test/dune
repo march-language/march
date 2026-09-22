@@ -72,6 +72,24 @@
   (setenv MARCH_TEST_BIN %{bin:march}
    (run %{exe:test_build_check.exe}))))
 
+; test_offline.ml: `forge --offline` and the registry tarball cache
+; (specs/2026-09-11-forge-offline-and-versioned-dep-cache-design.md §3/§4/§2.4).
+; Its end-to-end cases run the real forge binary (FORGE_TEST_BIN) against the
+; just-built compiler (MARCH_TEST_BIN) under a private HOME, with sentinel
+; network tools first on PATH, so "offline starts no network process" is
+; asserted from a recorded log rather than inferred from a green build.
+(executable
+ (name test_offline)
+ (modules test_offline)
+ (libraries march_forge alcotest unix digestif))
+
+(rule
+ (alias runtest)
+ (action
+  (setenv MARCH_TEST_BIN %{bin:march}
+   (setenv FORGE_TEST_BIN %{bin:forge}
+    (run %{exe:test_offline.exe})))))
+
 (executable
  (name bench_solver)
  (libraries march_forge unix))

@@ -2,8 +2,16 @@
 -- a sender whose receiver has not yet consumed anything fills its budget,
 -- gets Backpressure under drop_new, and is admitted again once CREDIT
 -- arrives on the control connection. Two connections per peer (the split);
--- the receiver reads the data connection only after a "go" on control, so
--- the budget is really what refuses the third frame.
+-- the receiver reads the data connection only after a "go" on control.
+--
+-- The budget bounds ADMITTED-BUT-UNWRITTEN bytes, and the initial credit
+-- lets the writer put one budget (100) on the wire before the receiver has
+-- consumed anything. So frames 1-2 (88 bytes) are written at once and only
+-- frames queued BEHIND the credit line count against the budget. Every
+-- step below waits for that state through `NodeQueue.depth` rather than
+-- racing the writer actor: an earlier version refused the third frame and
+-- flaked whenever the writer had already drained frames 1-2 (CI saw
+-- "third refused with Backpressure: false").
 -- Design: specs/progress/2026-09-15-credit-based-flow-control.md.
 mod CreditBackpressureLoopback do
   needs IO.Console
@@ -25,7 +33,7 @@ mod CreditBackpressureLoopback do
   end
 
   -- node-b: takes the peer's two connections, waits for a "go" ping on
-  -- control, then consumes three data frames, announcing credit as it goes.
+  -- control, then consumes five data frames, announcing credit as it goes.
   pfn read_n(data_fd : Int, control_fd : Int, buf : List(Int), n : Int, got : Int) : Int do
     if n <= 0 do got
     else
@@ -43,7 +51,7 @@ mod CreditBackpressureLoopback do
       Err(e) -> panic("node-b accept: " ++ e)
       Ok((_reg, peer)) ->
         let _ = NetKernel.recv_frame(peer.fd, Nil)   -- the "go"
-        let got = read_n(peer.data_fd, peer.fd, Nil, 3, 0)
+        let got = read_n(peer.data_fd, peer.fd, Nil, 5, 0)
         tcp_close(peer.data_fd)
         tcp_close(peer.fd)
         tcp_close(listen_fd)
@@ -52,18 +60,30 @@ mod CreditBackpressureLoopback do
   end
 
   -- node-a's control reader: CREDIT frames feed the queue; stop once the
-  -- receiver has consumed all three frames.
+  -- receiver has consumed all five frames (5 * 44 = 220 bytes).
   pfn on_control(q, tag : Int, fr : List(Int)) : Result(Bool, String) do
     if tag == NodeQueue.tag_credit() do
       match NodeQueue.decode_credit(fr) do
         Ok(total) ->
           NodeQueue.credit(q, total)
-          Ok(total < 132)
+          Ok(total < 220)
         Err(e) -> Err(e)
       end
     else
       Err("unexpected tag " ++ int_to_string(tag))
     end
+  end
+
+  -- Poll `depth` until it reads [want] (10 ms apart, [attempts] times).
+  -- Not run_until_idle: the receiver task is parked in a socket read, and
+  -- that call never returns while any task is.
+  pfn wait_depth(q, want : Int, attempts : Int) : Bool do
+    if NodeQueue.depth(q) == want do true
+    else if attempts <= 0 do false
+    else
+      let _ = Process.run("sleep", Cons("0.01", Nil))
+      wait_depth(q, want, attempts - 1)
+    end end
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_random : Cap(IO.Random), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) do
@@ -81,22 +101,34 @@ mod CreditBackpressureLoopback do
       Ok((_reg, p)) -> p
     end
     let q = NodeQueue.start(peer.data_fd, budget())
-    -- Budget 100: two 44-byte frames fit, the third does not.
+    -- Frames 1-2 (88 bytes) fit the budget whatever the writer has done, and
+    -- the initial credit (100) lets the writer put both on the wire: wait
+    -- until it has, so the rest does not depend on how fast it ran.
     let r1 = NodeQueue.enqueue(q, 1, frame(), NodeQueue.DropNew)
     let r2 = NodeQueue.enqueue(q, 2, frame(), NodeQueue.DropNew)
-    let r3 = NodeQueue.enqueue(q, 3, frame(), NodeQueue.DropNew)
     println("node-a: two frames admitted: " ++ bool_to_string(r1 == Ok(()) && r2 == Ok(())))
-    println("node-a: third refused with Backpressure: " ++ bool_to_string(r3 == Err(NodeQueue.Backpressure)))
-    -- Let the receiver consume; its CREDIT frames arrive on control.
+    println("node-a: both written under the initial credit: " ++ bool_to_string(wait_depth(q, 0, 500)))
+    -- 88 of 100 bytes of credit are in flight and the receiver has consumed
+    -- nothing (no "go" yet), so no CREDIT can exist: frames 3-4 are admitted
+    -- and stay queued -- depth reads 88 for as long as we look.
+    let r3 = NodeQueue.enqueue(q, 3, frame(), NodeQueue.DropNew)
+    let r4 = NodeQueue.enqueue(q, 4, frame(), NodeQueue.DropNew)
+    println("node-a: two more queued behind the credit line: " ++ bool_to_string(r3 == Ok(()) && r4 == Ok(())))
+    let _ = Process.run("sleep", Cons("0.05", Nil))
+    println("node-a: depth held at 88 without credit: " ++ bool_to_string(NodeQueue.depth(q) == 88))
+    -- Budget 100: the fifth frame (88 + 44) does not fit.
+    let r5 = NodeQueue.enqueue(q, 5, frame(), NodeQueue.DropNew)
+    println("node-a: fifth refused with Backpressure: " ++ bool_to_string(r5 == Err(NodeQueue.Backpressure)))
+    println("node-a: refused frame not charged: " ++ bool_to_string(NodeQueue.depth(q) == 88))
+    -- Let the receiver consume; its CREDIT frames arrive on control, the
+    -- writer drains 3-4, and the fifth fits again.
     let ctl = task_spawn(fn _ -> match PeerReader.serve(peer.fd, Nil, fn (tag, fr) -> on_control(q, tag, fr)) do
       Ok(_) -> 0
       Err(e) -> panic("control reader: " ++ e)
     end)
     let _ = NetKernel.send_frame(peer.fd, SwimDriver.encode_msg(SwimDriver.SwimPing("node-a")))
-    -- The receiver consumes the two frames it was sent (88 >= budget/4, so a
-    -- CREDIT comes back); retry the third until credit lets it in.
-    let r3b = retry_enqueue(q, 3, 200)
-    println("node-a: third admitted after credit: " ++ bool_to_string(r3b))
+    let r5b = retry_enqueue(q, 5, 200)
+    println("node-a: fifth admitted after credit: " ++ bool_to_string(r5b))
     let _ = task_await(ctl)
     let got = match task_await(srv) do
       Ok(n) -> n

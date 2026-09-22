@@ -63,6 +63,28 @@ git log is authoritative for exact commits.
   counterexample like any other; a division outside that fragment is still not
   checked, and now says why (in a warning at the definition and in the skip
   detail).
+- **`forge --offline` (or `FORGE_OFFLINE=1`) builds with no network access.**
+  The global flag starts no network process of any kind (no `git clone`, no
+  registry query or registry-client compile, no toolchain download, no
+  `npm install`). Git and registry dependencies resolve only through
+  `forge.lock` to their cached commit or version. Each cached tree is re-hashed
+  against the lockfile, and a mismatch fails the build. A dependency missing
+  from the cache is warned about by name and skipped. A missing `forge.lock`,
+  or one that is not a lockfile, gets a single error. `forge deps --offline`
+  lists each dependency as cached or missing and exits non-zero on a miss.
+  `forge add` (registry or git) and `forge outdated` refuse offline.
+- **forge caches registry tarballs** at `~/.march/cas/tarballs/<sha256>.tar.gz`,
+  keyed by the registry's published checksum. Installing the same version again
+  reuses the cached tarball instead of downloading it. Offline, a registry
+  dependency whose tree was deleted is re-extracted from the cached tarball.
+  Every read re-hashes the tarball, and a corrupt one is discarded instead of
+  being extracted.
+- **`forge.toml` `[package] pin_main = true` runs a program's `main` on the
+  process main thread** (what Cocoa and GLFW need to open a window) by compiling
+  with `march --pin-main`, so a double-clicked app no longer depends on
+  `MARCH_PIN_MAIN=1` being set. It covers `forge build`, `forge run --compiled`,
+  `forge bench` and `forge install`. forge's TOML reader now understands bare
+  `true`/`false`; a non-boolean `pin_main` is an error.
 - **`MARCH_PREEMPT_SIGNAL` chooses the green-thread preemption signal** (`USR1`,
   the default, `USR2`, or on Linux `RTMIN[+n]`); embedders can call
   `march_sched_set_preempt_signal`. `Signal.watch` reserves whichever signal is
@@ -127,6 +149,12 @@ git log is authoritative for exact commits.
   refused until every actor has switched. Also fixed: with more than 2048 live
   actors of a type, the ones past the 2048th were never migrated at all. See
   `docs/hot-code-reload.md`, "Messages queued during a deploy".
+- **forge finds a dependency's own dependencies again under the version-keyed
+  cache.** `forge deps` looked for an installed registry package's `forge.toml`
+  in the old flat `deps/<name>` directory, so it never installed that package's
+  own dependencies. The build's transitive walk ignored `forge.lock`, so it
+  dropped the dependencies of any dependency that had more than one version
+  cached.
 - **A refinement check on an argument that multiplies two variables is no longer
   skipped.** `need_pos(y * y + 1)` against `{Int | _ > 0}` was reported as
   "the argument could not be translated to SMT", even though predicates and

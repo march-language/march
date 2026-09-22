@@ -19,7 +19,10 @@ let clone_to_tmp url =
       ("forge-install-" ^ string_of_int (Random.int 1_000_000)) in
   let cmd = Printf.sprintf "git clone --depth 1 %s %s"
       (Filename.quote url) (Filename.quote tmp) in
-  let rc = Sys.command cmd in
+  match Net_gate.command ~what:(Printf.sprintf "clone %s" url)
+          ~remedy:"Install from a local path instead, or retry with network access." cmd with
+  | Error e -> Error e
+  | Ok rc ->
   if rc <> 0 then Error (Printf.sprintf "git clone failed (exit %d)" rc)
   else Ok tmp
 
@@ -74,8 +77,11 @@ let run source =
         in
         let lib_path_env = Printf.sprintf "MARCH_LIB_PATH=%s"
             (String.concat ":" all_lib_paths) in
-        let cmd = Printf.sprintf "%s march --compile -o %s --opt 2 %s"
-            lib_path_env (Filename.quote output) (Filename.quote entry) in
+        (* [package] pin_main: an installed binary is exactly the
+           launched-without-MARCH_PIN_MAIN case the key exists for. *)
+        let pin_flag = if proj.Project.pin_main then " --pin-main" else "" in
+        let cmd = Printf.sprintf "%s march --compile -o %s --opt 2%s %s"
+            lib_path_env (Filename.quote output) pin_flag (Filename.quote entry) in
         let rc = Sys.command cmd in
         if rc <> 0 then
           Error (Printf.sprintf "build failed (exit %d)" rc)
