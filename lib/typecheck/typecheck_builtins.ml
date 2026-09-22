@@ -83,8 +83,33 @@ let stdlib_source_files : string list ref = ref []
    build `--compile` accepts. *)
 let cap_strict_ceiling : bool ref = ref false
 
+(** Whether source file [f] is one of the standard library's. The ONE
+    predicate for "this code is the stdlib's": [span_is_stdlib] below, the
+    stdlib-only builtin gate ([Typecheck_caps.check_stdlib_only_refs]) and the
+    driver's diagnostic filter (bin/main.ml, [user_diag_file]) all go through
+    it, so the gate can never admit code the filter shows as the user's, or
+    reject code whose error the filter then hides. *)
+let file_is_stdlib (f : string) : bool =
+  List.mem f !stdlib_source_files
+
 let span_is_stdlib (sp : Ast.span) : bool =
-  List.mem sp.Ast.file !stdlib_source_files
+  file_is_stdlib sp.Ast.file
+
+(** Builtins only the standard library may reference, each with the
+    suggestion the error gives user code instead (e.g.
+    [("pid_of_int", "use `Actor.list(cap)` (see `Actor.introspect`)")]).
+
+    A call or value reference to one of these names from code outside the
+    stdlib ([span_is_stdlib]) is a type error; the check is
+    [Typecheck_caps.check_stdlib_only_refs]. It exists for builtins that
+    forge authority, which user code must reach through a capability-taking
+    stdlib wrapper (specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md,
+    II.1 and II.4.4). Search and docs are unaffected: the gate is at the
+    reference, not the listing.
+
+    Empty until those plans populate it. A ref so tests can install an entry
+    around a single check. *)
+let stdlib_only : (string * string) list ref = ref []
 
 (** Maps builtin function names to the IO capability they require.
     Used by the body-scanning pass (Phase 2) to detect missing [needs] declarations. *)

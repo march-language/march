@@ -1,0 +1,83 @@
+-- bench/list_ops.march with its helpers moved into a nested module.
+--
+-- For the hot-reload boundary-cost measurement (G1 in
+-- specs/plans/2026-09-21-distributed-deploys-groundwork-plan.md). In
+-- list_ops.march every helper is an entry-module `pfn`, emitted with a bare
+-- name, so `--hot-reload` puts nothing on the boundary and emits no dispatch
+-- call. Here the helpers are `Ops.*`, so `--hot-reload Ops` makes each a
+-- boundary function. The only boundary-to-boundary calls are the three
+-- helper-to-`irev` calls: self tail calls become loops and the per-element
+-- work is closure calls, neither of which goes through dispatch.
+--
+-- Usage: march --compile --opt 2 bench/list_ops_nested.march -o /tmp/lon
+--        Hot-reload build: add `--hot-reload Ops`.
+
+mod ListOpsNested do
+  needs IO.Console
+
+mod Ops do
+  ptype IntList = INil | ICons(Int, IntList)
+
+  -- Tail-recursive reverse
+  fn irev(xs : IntList, acc : IntList) : IntList do
+    match xs do
+    INil        -> acc
+    ICons(h, t) -> irev(t, ICons(h, acc))
+    end
+  end
+
+  -- Tail-recursive range (builds reversed, then reverses)
+  fn irange_acc(lo : Int, hi : Int, acc : IntList) : IntList do
+    if lo > hi do acc
+    else irange_acc(lo + 1, hi, ICons(lo, acc)) end
+  end
+
+  fn irange(lo : Int, hi : Int) : IntList do
+    irev(irange_acc(lo, hi, INil), INil)
+  end
+
+  -- Tail-recursive map (builds reversed, then reverses)
+  fn imap_acc(xs : IntList, f : Int -> Int, acc : IntList) : IntList do
+    match xs do
+    INil        -> acc
+    ICons(h, t) -> imap_acc(t, f, ICons(f(h), acc))
+    end
+  end
+
+  fn imap(xs : IntList, f : Int -> Int) : IntList do
+    irev(imap_acc(xs, f, INil), INil)
+  end
+
+  -- Tail-recursive filter (builds reversed, then reverses)
+  fn ifilter_acc(xs : IntList, pred : Int -> Bool, acc : IntList) : IntList do
+    match xs do
+    INil        -> acc
+    ICons(h, t) ->
+      if pred(h) do ifilter_acc(t, pred, ICons(h, acc))
+      else ifilter_acc(t, pred, acc) end
+    end
+  end
+
+  fn ifilter(xs : IntList, pred : Int -> Bool) : IntList do
+    irev(ifilter_acc(xs, pred, INil), INil)
+  end
+
+  -- Fold is already tail-recursive
+  fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+    match xs do
+    INil        -> acc
+    ICons(h, t) -> ifold(t, f(acc, h), f)
+    end
+  end
+end
+
+pfn main(_cap_console : Cap(IO.Console)) : Unit do
+  let n     = 1000000
+  let xs    = Ops.irange(1, n)
+  let ys    = Ops.imap(xs, fn x -> x * 2)
+  let zs    = Ops.ifilter(ys, fn x -> x % 3 == 0)
+  let total = Ops.ifold(zs, 0, fn (a, b) -> a + b)
+  println(int_to_string(total))
+end
+
+end
