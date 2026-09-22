@@ -8569,6 +8569,43 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/close_returns_ok_atom.expected native_close_returns_ok_atom.interp.out)))
 
+; ── Config typed keys: heterogeneous storage, checked reads, BOTH backends ──
+; specs/progress/2026-09-22-config-typed-keys.md's witness stored an Int with
+; the untyped Config.put and read it back as a Pid (interpreted:
+; `is_alive: expected Pid`; compiled: a Vault panic on the tuple key, so the
+; two backends did not even agree on HOW it failed). With typed keys the
+; fixture's mismatched read (same path, another codec) is None / KeyWrongType,
+; and it runs interpreted AND compiled against the SAME .expected.
+(rule
+ (targets native_config_typed_keys native_config_typed_keys.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/config_typed_keys.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_config_typed_keys
+        native/config_typed_keys.march)
+   (with-stdout-to native_config_typed_keys.out
+        (system "./native_config_typed_keys")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/config_typed_keys.expected native_config_typed_keys.out)))
+
+(rule
+ (targets native_config_typed_keys.interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/config_typed_keys.march))
+ (action
+  (with-stdout-to native_config_typed_keys.interp.out
+   (run %{exe:../bin/main.exe} native/config_typed_keys.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/config_typed_keys.expected native_config_typed_keys.interp.out)))
+
 ; ── Regression: a CPU-bound green thread must not starve its siblings ──────
 ; MARCH_NUM_SCHEDULERS=1 is essential and not incidental: it is the only
 ; configuration in which this test measures PREEMPTION rather than

@@ -29,7 +29,8 @@
 --     handle, so there is no handle to carry `v`.  Prefer the handle API.
 --
 -- Writing the type out (`fn table() : Vault(v)`) is the explicit opt back
--- into an element-erased table, which `Config` uses on purpose.
+-- into an element-erased table. (`Config` no longer needs it: its tables are
+-- `Vault(Config.Value)`, a tagged sum read back through typed keys.)
 --
 -- Basic operations:
 --   Vault.new(name)                      — create a named table
