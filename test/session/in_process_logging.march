@@ -1,0 +1,87 @@
+mod InProcessLogging do
+  -- `Session.in_process()` with three roles: a delivery that arrives before
+  -- the continuation that wants it is parked, and a role that crashes
+  -- (`crash`) sends the waiting peer down its `or crash` branch. The roles
+  -- are test/session/logging_crash.march's. Companion to in_process.march.
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+    L -> I : Bool
+    I -> C : Bool
+  end
+
+  pfn traced() : Session.InProcess do
+    Session.in_process_with(fn line -> print_line("  transport: " ++ line))
+  end
+
+  -- ── Logging roles (as test/session/logging_crash.march) ────────────────
+  pfn role_l(s : Cap(Session.Live), st : Logging_L.S_send_Msg_L_I_1) : Logging_L.Yield do
+    print_line("L sends Trigger")
+    let st1 = Logging_L.send_Msg_L_I_1(s, st, 1)
+    Logging_L.offer_Msg_I_L_2_Msg_I_L_1(s, st1,
+      fn (read, st2) ->
+        print_line("L got Read(" ++ read ++ ")")
+        Logging_L.close(s, Logging_L.send_Msg_L_I_2(s, st2, true)),
+      fn (fatal, st2) ->
+        print_line("L got Fatal(" ++ fatal ++ ")")
+        Logging_L.close(s, st2))
+  end
+
+  pfn role_i(s : Cap(Session.Live), st : Logging_I.S_recv_Msg_L_I_1) : Logging_I.Yield do
+    Logging_I.recv_Msg_L_I_1(s, st, fn (_trigger, st1) ->
+      print_line("I got Trigger")
+      Logging_I.recv_Msg_C_I_1(s, st1,
+        fn (read, st2) ->
+          print_line("I got Read(" ++ read ++ ")")
+          let st3 = Logging_I.send_Msg_I_L_2(s, st2, read)
+          Logging_I.recv_Msg_L_I_2(s, st3, fn (report, st4) ->
+            print_line("I got Report(" ++ bool_to_string(report) ++ ")")
+            Logging_I.close(s, Logging_I.send_Msg_I_C_1(s, st4, report))),
+        fn (crashed, st2) ->
+          print_line("I: role " ++ int_to_string(crashed.role) ++ " crashed: " ++ crashed.cause)
+          Logging_I.close(s, Logging_I.send_Msg_I_L_1(s, st2, "C is gone"))))
+  end
+
+  pfn role_c(s : Cap(Session.Live), st : Logging_C.S_send_Msg_C_I_1) : Logging_C.Yield do
+    print_line("C sends Read")
+    let st1 = Logging_C.send_Msg_C_I_1(s, st, "disk 42%")
+    Logging_C.recv_Msg_I_C_1(s, st1, fn (report, st2) ->
+      print_line("C got Report(" ++ bool_to_string(report) ++ ")")
+      Logging_C.close(s, st2))
+  end
+
+  fn main(c : Cap(IO)) do
+    print_line("-- C's Read is queued before L's Trigger")
+    let t5 = traced()
+    let s5 = Session.attach(c, t5.ops)
+    let i5 = Logging_I.register(s5, 0)
+    let c5 = Logging_C.register(s5, 0)
+    let l5 = Logging_L.register(s5, 0)
+    -- I waits on L first: C's Read is parked until I's next receive wants it.
+    let _ = role_c(s5, c5)
+    let _ = role_l(s5, l5)
+    let _ = role_i(s5, i5)
+    t5.drain(())
+
+    print_line("-- C crashes before sending")
+    let t4 = traced()
+    let s4 = Session.attach(c, t4.ops)
+    -- The order the roles start in does not matter: I waits on L first, and
+    -- a delivery from anyone else is parked until it does.
+    let _ = role_i(s4, Logging_I.register(s4, 0))
+    let _ = role_l(s4, Logging_L.register(s4, 0))
+    t4.crash(Logging_Msg.role_C(), "node down")
+    t4.drain(())
+  end
+end

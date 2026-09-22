@@ -2165,6 +2165,29 @@ typedef struct march_actor_meta {
      * Used by actor_green_thread for dispatch-table lookup (enabling function
      * hot-swap) and by march_actor_broadcast_migrate to target only the right actors. */
     uint32_t                    dispatch_name_id;
+    /* Code-version pin for a migrating hot reload (march_actor_publish_
+     * migrating): 0 = follow the slot's current version; otherwise ring
+     * version + 1, held (one dispatch ref) until this actor reaches its
+     * migrate marker, so every message queued ahead of the marker runs the
+     * code its state layout belongs to.  Taken by the activator BEFORE the
+     * new version is published; released exactly once, by whichever of
+     * hcr_release_pin's callers wins its CAS (marker processed, marker
+     * disposed undelivered, or the actor's own death).  The remaining hcr_
+     * fields are meaningful only while the pin is held. */
+    _Atomic(uint32_t)           hcr_pin;
+    /* The marker was consumed without being processed as one (evicted by
+     * DROP_OLD, rejected by DROP_NEW, or eaten by a nested receive()): the
+     * actor migrates at its next message boundary instead. */
+    _Atomic int                 hcr_marker_lost;
+    /* migrate fn for the lost-marker path; the marker carries its own copy. */
+    _Atomic(void *)             hcr_migrate_fn;
+    /* march_now_ms() after which pre-marker messages are dropped; 0 = none.
+     * Reset to 0 by the actor BEFORE it releases its pin (hcr_switch), so a
+     * later migration's pin is never read alongside a stale, already-past
+     * deadline. */
+    _Atomic int64_t             hcr_drain_deadline_ms;
+    /* Pre-marker messages this actor dropped (actor thread only). */
+    int64_t                     hcr_drained;
     /* Global tag of this actor's FIRST message constructor (the F19
      * memory-safety fix gives actor _Msg ctors globally-unique tags,
      * base 0x0100_0000 — see lib/tir/llvm_toplevel.ml build_ctor_info).
@@ -3131,6 +3154,93 @@ static void capture_reg_names_pending(void *actor) {
 /* Each actor runs as a green thread that loops on recv→dispatch.
  * The thread parks (PROC_WAITING) when no messages are available and
  * is woken by march_sched_send when a message arrives. */
+/* ── Hot-reload code-version pin (see march_actor_publish_migrating) ───── */
+
+static void march_actor_msg_dispose(void *msg);
+static _Atomic int64_t g_hcr_drain_dropped = 0;
+
+int64_t march_hcr_drain_dropped(void) {
+    return atomic_load_explicit(&g_hcr_drain_dropped, memory_order_relaxed);
+}
+
+/* Release [pin] if it is still m's pin. Idempotent across the three release
+ * sites (marker processed, marker orphaned, actor death): only the CAS winner
+ * drops the dispatch ref. */
+static void hcr_release_pin(march_actor_meta *m, uint32_t pin) {
+    if (!pin) return;
+    uint32_t expect = pin;
+    if (atomic_compare_exchange_strong_explicit(&m->hcr_pin, &expect, 0,
+                                                memory_order_acq_rel,
+                                                memory_order_acquire))
+        march_dispatch_leave(m->dispatch_name_id, pin - 1);
+}
+
+/* A pinned marker that will never be processed as one. A live actor then
+ * migrates at its next message boundary instead (hcr_marker_lost); a dead
+ * one just gives the old version back. [target_dead]: the caller knows the
+ * target proc is dead (a MARCH_SEND_DEAD send). */
+static void hcr_marker_orphaned(march_migrate_msg_t *mm, int target_dead) {
+    march_actor_meta *m = (march_actor_meta *)mm->meta;
+    if (!m || !mm->pin) return;
+    if (target_dead
+            || !atomic_load_explicit(&m->green_thread, memory_order_acquire))
+        hcr_release_pin(m, mm->pin);
+    else
+        atomic_store_explicit(&m->hcr_marker_lost, 1, memory_order_release);
+}
+
+/* Actor thread, at its migrate marker (or its stand-in, a lost marker):
+ * migrate the state, then leave the old code version. The order matters
+ * only in that both happen before this actor's next dispatch, which enters
+ * the current version once the pin is gone. */
+static void hcr_switch(march_actor_meta *meta, int64_t *a, uint32_t pin,
+                       void *(*migrate_fn)(void *), int alive) {
+    if (alive && migrate_fn) {
+        /* a[4] is the state record pointer (state indirection layout).
+         * migrate_fn receives the old state ptr and returns the new one. */
+        void *new_state = migrate_fn((void *)(uintptr_t)a[4]);
+        a[4] = (int64_t)(uintptr_t)new_state;
+    }
+    if (!pin) return;
+    /* Clear this migration's state before the pin goes: the next activation
+     * may pin this actor the moment it is released. */
+    atomic_store_explicit(&meta->hcr_marker_lost, 0, memory_order_relaxed);
+    atomic_store_explicit(&meta->hcr_drain_deadline_ms, 0, memory_order_relaxed);
+    if (meta->hcr_drained) {
+        fprintf(stderr, "[hcr] migrate: actor on dispatch slot %u missed the "
+                "drain deadline; %lld pre-migration message(s) dropped\n",
+                meta->dispatch_name_id, (long long)meta->hcr_drained);
+        meta->hcr_drained = 0;
+    }
+    hcr_release_pin(meta, pin);
+}
+
+/* Enter the code version this actor must run: its pin if it has one, else
+ * the slot's current version. The activator pins BEFORE it publishes, so an
+ * enter that observed the newly published current is ordered after that pin
+ * and the re-read below sees it; without the re-read, a pin landing between
+ * the first load and the enter would let one old message run the new code. */
+static void *hcr_enter(march_actor_meta *meta, uint32_t *out_version) {
+    uint32_t id = meta->dispatch_name_id;
+    uint32_t pin = atomic_load_explicit(&meta->hcr_pin, memory_order_acquire);
+    if (pin) {
+        void *fn = march_dispatch_enter_version(id, pin - 1, out_version);
+        if (fn) return fn;
+    }
+    void *fn = march_dispatch_enter(id, out_version);
+    uint32_t pin2 = atomic_load_explicit(&meta->hcr_pin, memory_order_acquire);
+    if (fn && pin2 && *out_version != pin2 - 1) {
+        uint32_t v2;
+        void *fn2 = march_dispatch_enter_version(id, pin2 - 1, &v2);
+        if (fn2) {
+            march_dispatch_leave(id, *out_version);
+            *out_version = v2;
+            return fn2;
+        }
+    }
+    return fn;
+}
+
 static void actor_green_thread(void *arg) {
     march_actor_meta *meta = (march_actor_meta *)arg;
     void *actor = meta->actor;
@@ -3246,6 +3356,10 @@ static void actor_green_thread(void *arg) {
          * march_actor_call / do_actor_death / mailbox_size /
          * set_mbox_limit). */
         atomic_store_explicit(&meta->green_thread, NULL, memory_order_release);
+        /* A dead actor holds no code version (after the NULL store, so an
+         * orphaned marker disposed later sees a dead target). */
+        hcr_release_pin(meta, atomic_load_explicit(&meta->hcr_pin,
+                                                   memory_order_acquire));
         /* The live actor's own reference (taken in march_spawn_common):
          * nothing on this thread touches the record after this. */
         march_decrc(actor);
@@ -3306,13 +3420,12 @@ static void actor_green_thread(void *arg) {
         if (meta->dispatch_name_id
                 && IS_HEAP_PTR(msg)
                 && ((int64_t *)msg)[1] == MARCH_MIGRATE_TAG) {
+            /* Every message ahead of this marker ran on the pinned (old)
+             * code against the old state; migrate and move to the current
+             * version for everything behind it. */
             march_migrate_msg_t *mm = (march_migrate_msg_t *)msg;
-            if (actor_alive_load(actor) && mm->migrate_fn) {
-                /* a[4] is the state record pointer (state indirection layout).
-                 * migrate_fn receives the old state ptr and returns the new one. */
-                void *new_state = mm->migrate_fn((void *)(uintptr_t)a[4]);
-                a[4] = (int64_t)(uintptr_t)new_state;
-            }
+            hcr_switch(meta, a, mm->pin, mm->migrate_fn,
+                       (int)actor_alive_load(actor));
             migrate_msg_free(mm);
             march_sched_tick();
             continue;
@@ -3321,6 +3434,33 @@ static void actor_green_thread(void *arg) {
         if (!actor_alive_load(actor)) {
             march_decrc(msg);
             break;
+        }
+
+        /* Still pinned to the old code by a migrating hot reload. */
+        if (meta->dispatch_name_id) {
+            uint32_t pin = atomic_load_explicit(&meta->hcr_pin,
+                                                memory_order_acquire);
+            if (pin && atomic_load_explicit(&meta->hcr_marker_lost,
+                                            memory_order_acquire)) {
+                /* The marker will never arrive: migrate here instead. */
+                hcr_switch(meta, a, pin,
+                           (void *(*)(void *))atomic_load_explicit(
+                               &meta->hcr_migrate_fn, memory_order_acquire),
+                           1);
+            } else if (pin) {
+                int64_t dl = atomic_load_explicit(&meta->hcr_drain_deadline_ms,
+                                                  memory_order_acquire);
+                if (dl > 0 && march_now_ms() >= dl) {
+                    /* Past the drain deadline: this pre-marker message is
+                     * dropped, not run; hcr_switch reports the count. */
+                    march_actor_msg_dispose(msg);
+                    meta->hcr_drained++;
+                    atomic_fetch_add_explicit(&g_hcr_drain_dropped, 1,
+                                              memory_order_relaxed);
+                    march_sched_tick();
+                    continue;
+                }
+            }
         }
 
         uint32_t tbl_version = 0;
@@ -3380,7 +3520,7 @@ static void actor_green_thread(void *arg) {
             /* march_dispatch_enter takes a plain uint32_t* out-param, so the
              * pin's version lands in a non-volatile local first and is then
              * published to the volatile copy the crash branch reads. */
-            void *fn_raw = march_dispatch_enter(meta->dispatch_name_id, &tbl_version);
+            void *fn_raw = hcr_enter(meta, &tbl_version);
             pinned_version = tbl_version;
             dispatch_pinned = 1;
             dispatch_fn_t dispatch_fn;
@@ -3451,6 +3591,8 @@ stopped:
     /* Same rationale as the crash-trap exit above: the mutex protected only
      * this field, now converted to a release store. */
     atomic_store_explicit(&meta->green_thread, NULL, memory_order_release);
+    hcr_release_pin(meta, atomic_load_explicit(&meta->hcr_pin,
+                                               memory_order_acquire));
     /* The live actor's own reference (taken in march_spawn_common). */
     march_decrc(actor);
 }
@@ -3463,6 +3605,16 @@ stopped:
  * through stop_jmp; a task or main simply ends this green thread. */
 void *march_actor_recv(void) {
     void *msg = march_sched_recv();
+    /* A migrate marker belongs to the actor loop, which is suspended in the
+     * middle of the handler making this call; it must not reach user code
+     * as a value. Treat it as lost: the actor migrates at its next message
+     * boundary (hcr_marker_orphaned). */
+    while (msg != MARCH_RECV_NO_MSG && IS_HEAP_PTR(msg)
+            && ((int64_t *)msg)[1] == MARCH_MIGRATE_TAG) {
+        hcr_marker_orphaned((march_migrate_msg_t *)msg, 0);
+        migrate_msg_free(msg);
+        msg = march_sched_recv();
+    }
     if (msg != MARCH_RECV_NO_MSG) return msg;
     march_proc *p = march_sched_current();
     if (p && p->stop_jmp) longjmp(*p->stop_jmp, 1);
@@ -4739,6 +4891,7 @@ void march_dist_monitor_register_pid(int64_t target_pid, void *node_str,
  * rejected. */
 static void march_actor_msg_dispose(void *msg) {
     if (IS_HEAP_PTR(msg) && ((int64_t *)msg)[1] == MARCH_MIGRATE_TAG) {
+        hcr_marker_orphaned((march_migrate_msg_t *)msg, 0);
         migrate_msg_free(msg);
         return;
     }
@@ -4870,8 +5023,6 @@ void march_actor_set_call_base(void *actor, int64_t base) {
     meta->call_tag_base = base;
 }
 
-#define MARCH_MIGRATE_SNAPSHOT 2048
-
 /* Live (allocated, not yet disposed) migrate messages. See
  * march_actor_inject_migrate_msg below. */
 static _Atomic int64_t g_migrate_msgs_live = 0;
@@ -4880,54 +5031,177 @@ static void migrate_msg_free(void *mm) {
     free(mm);
 }
 
-void march_actor_broadcast_migrate(uint32_t dispatch_name_id,
-                                   void *(*migrate_fn)(void *)) {
-    if (!dispatch_name_id) return;
+typedef struct {
+    march_actor_meta *meta;
+    uint32_t          pin;   /* the pin this migration took (version + 1), or 0 */
+} hcr_target;
 
-    /* Phase 1: snapshot matching actors under lock.
-     * We incrc each actor so it stays alive while we hold the snapshot.
-     * The lock is released before injecting messages to avoid holding
-     * g_tbl_mu while calling march_sched_send (which may block). */
-    march_actor_meta *snaps[MARCH_MIGRATE_SNAPSHOT];
-    int n = 0;
-
+/* Every live actor whose dispatch_name_id matches, each incrc'd so it stays
+ * alive until the caller's matching decrc. Heap-grown, so there is no cap:
+ * a fixed snapshot array (2048 entries, until 2026-09-21) silently skipped
+ * every actor past it, leaving them on the new code with the old state for
+ * good. Exits on OOM like find_or_create_meta: a partial snapshot would be
+ * that same silent skip. */
+static hcr_target *hcr_snapshot(uint32_t dispatch_name_id, size_t *out_n) {
+    hcr_target *t = NULL;
+    size_t n = 0, cap = 0;
     pthread_mutex_lock(&g_tbl_mu);
-    for (int b = 0; b < MARCH_SCHED_BUCKETS && n < MARCH_MIGRATE_SNAPSHOT; b++) {
-        for (march_actor_meta *m = g_actor_tbl[b];
-             m && n < MARCH_MIGRATE_SNAPSHOT;
-             m = m->tbl_next) {
-            if (m->dispatch_name_id == dispatch_name_id && m->actor && m->green_thread) {
-                march_incrc(m->actor);
-                snaps[n++] = m;
+    for (int b = 0; b < MARCH_SCHED_BUCKETS; b++) {
+        for (march_actor_meta *m = g_actor_tbl[b]; m; m = m->tbl_next) {
+            if (m->dispatch_name_id != dispatch_name_id || !m->actor
+                    || !atomic_load_explicit(&m->green_thread,
+                                             memory_order_acquire))
+                continue;
+            if (n == cap) {
+                cap = cap ? cap * 2 : 64;
+                hcr_target *g = (hcr_target *)realloc(t, cap * sizeof(*t));
+                if (!g) {
+                    fputs("march: out of memory (hot-reload migrate)\n", stderr);
+                    exit(1);
+                }
+                t = g;
             }
+            march_incrc(m->actor);
+            t[n].meta = m;
+            t[n].pin  = 0;
+            n++;
         }
     }
     pthread_mutex_unlock(&g_tbl_mu);
+    *out_n = n;
+    return t;
+}
 
-    /* Phase 2: inject migrate messages outside the lock.
-     *
-     * march_sched_send's contract (march_scheduler.h) is: MARCH_SEND_OK
-     * means mm was enqueued (the mailbox now owns it — freed later either
-     * by actor_green_thread's receive loop or, if the proc dies with it
-     * still queued, by march_actor_msg_dispose at reap time); MARCH_SEND_
-     * DROPPED means mm was rejected by an overflow policy but already
-     * handed to march_actor_msg_dispose (registered via
-     * march_sched_set_msg_dtor), which frees() it since it recognizes
-     * MARCH_MIGRATE_TAG — so both of those leave mm's disposal to someone
-     * else. Only MARCH_SEND_DEAD (target died in the snapshot-to-send
-     * window) leaves mm un-enqueued AND undisposed, per march_send's own
-     * handling of the same return value just above: we still own the one
-     * reference we allocated, so we must free() it ourselves. free(),
-     * never march_decrc, matching march_actor_msg_dispose's mirror-image
-     * disposal of this same malloc'd (not march-heap-allocated) shape. */
-    for (int i = 0; i < n; i++) {
-        march_actor_inject_migrate_msg(snaps[i]->green_thread, migrate_fn);
-        march_decrc(snaps[i]->actor);
+/* malloc a marker for [m] (NULL for the test entry point) and send it to
+ * [green_thread]. march_sched_send's contract (march_scheduler.h):
+ * MARCH_SEND_OK means the mailbox owns it (freed by the receive loop, or by
+ * march_actor_msg_dispose if the proc dies with it queued); MARCH_SEND_
+ * DROPPED means an overflow policy already handed it to march_actor_msg_
+ * dispose. Only MARCH_SEND_DEAD leaves it with us, so we free it -- with
+ * free(), never march_decrc: it is malloc'd, not march-heap. Any path that
+ * disposes a pinned marker unprocessed goes through hcr_marker_orphaned. */
+static int hcr_inject_marker(march_actor_meta *m, march_proc *green_thread,
+                             void *(*migrate_fn)(void *), uint32_t pin) {
+    march_migrate_msg_t *mm = (march_migrate_msg_t *)malloc(sizeof(*mm));
+    if (!mm) {
+        /* No marker: the actor migrates at its next message boundary. */
+        if (m && pin)
+            atomic_store_explicit(&m->hcr_marker_lost, 1, memory_order_release);
+        return -1;
+    }
+    mm->_rc        = 1;
+    mm->_tag       = MARCH_MIGRATE_TAG;
+    mm->migrate_fn = migrate_fn;
+    mm->meta       = m;
+    mm->pin        = pin;
+    atomic_fetch_add_explicit(&g_migrate_msgs_live, 1, memory_order_relaxed);
+    int st = green_thread ? march_sched_send(green_thread, mm) : MARCH_SEND_DEAD;
+    if (st == MARCH_SEND_DEAD) {
+        hcr_marker_orphaned(mm, 1);
+        migrate_msg_free(mm);
+    }
+    return st;
+}
+
+static void hcr_send_markers(hcr_target *t, size_t n,
+                             void *(*migrate_fn)(void *)) {
+    for (size_t i = 0; i < n; i++) {
+        march_actor_meta *m = t[i].meta;
+        /* Re-read at send time, as march_send does: the actor may have died
+         * since the snapshot. */
+        march_proc *gt = atomic_load_explicit(&m->green_thread,
+                                              memory_order_acquire);
+        hcr_inject_marker(m, gt, migrate_fn, t[i].pin);
+        march_decrc(m->actor);
     }
 }
 
-/* Phase 2's per-target body, split out so test/test_broadcast_migrate_leak.c
- * can drive the REAL send + conditional-free against an already-dead proc
+static int64_t hcr_default_drain_ms(void) {
+    const char *e = getenv("MARCH_HCR_DRAIN_MS");
+    if (e && *e) {
+        char *end;
+        long long v = strtoll(e, &end, 10);
+        if (*end == '\0' && v >= 0) return (int64_t)v;
+    }
+    return MARCH_HCR_DRAIN_MS_DEFAULT;
+}
+
+int march_actor_publish_migrating(uint32_t dispatch_name_id, void *fn_ptr,
+                                  const char *impl_hash, const char *sig_hash,
+                                  uint8_t kind, uint32_t epoch,
+                                  void *(*migrate_fn)(void *), int64_t drain_ms) {
+    if (drain_ms < 0) drain_ms = hcr_default_drain_ms();
+    size_t n = 0;
+    hcr_target *t = dispatch_name_id ? hcr_snapshot(dispatch_name_id, &n) : NULL;
+
+    /* 1. Pin every live actor to the version it runs now, BEFORE the new one
+     * is published: from here on its dispatch enters this version (hcr_enter)
+     * until it reaches its marker, so no message queued ahead of the marker
+     * can run the new code against the old state. The pin is also a dispatch
+     * ref, which keeps the old ring slot from being reclaimed while any actor
+     * still needs it. */
+    uint32_t cur = march_dispatch_current(dispatch_name_id);
+    int busy = 0;
+    for (size_t i = 0; i < n && !busy; i++) {
+        uint32_t v;
+        if (!march_dispatch_enter_version(dispatch_name_id, cur, &v)) continue;
+        uint32_t expect = 0;
+        if (atomic_compare_exchange_strong_explicit(&t[i].meta->hcr_pin,
+                                                    &expect, v + 1,
+                                                    memory_order_acq_rel,
+                                                    memory_order_acquire)) {
+            t[i].pin = v + 1;
+            /* Read only once the marker is lost, which is after step 3's
+             * send. hcr_marker_lost and hcr_drain_deadline_ms are already 0:
+             * the actor cleared them before releasing its previous pin. */
+            atomic_store_explicit(&t[i].meta->hcr_migrate_fn,
+                                  (void *)migrate_fn, memory_order_relaxed);
+        } else {
+            /* Still draining a previous migration: its old version is held,
+             * and stacking a third layout on this actor is not supported. */
+            march_dispatch_leave(dispatch_name_id, v);
+            busy = 1;
+        }
+    }
+
+    /* 2. Publish. */
+    int idx = busy ? -1
+            : epoch > 0 ? march_dispatch_publish_epoch(dispatch_name_id, fn_ptr,
+                                                       impl_hash, sig_hash,
+                                                       kind, epoch)
+                        : march_dispatch_publish(dispatch_name_id, fn_ptr,
+                                                 impl_hash, sig_hash, kind);
+    if (idx < 0) {
+        for (size_t i = 0; i < n; i++) {
+            hcr_release_pin(t[i].meta, t[i].pin);
+            march_decrc(t[i].meta->actor);
+        }
+        free(t);
+        return -1;
+    }
+
+    /* 3. Arm the drain deadline and append each actor's marker. */
+    int64_t deadline = drain_ms > 0 ? march_now_ms() + drain_ms : 0;
+    for (size_t i = 0; i < n; i++)
+        if (t[i].pin && deadline)
+            atomic_store_explicit(&t[i].meta->hcr_drain_deadline_ms, deadline,
+                                  memory_order_release);
+    hcr_send_markers(t, n, migrate_fn);
+    free(t);
+    return idx;
+}
+
+void march_actor_broadcast_migrate(uint32_t dispatch_name_id,
+                                   void *(*migrate_fn)(void *)) {
+    if (!dispatch_name_id) return;
+    size_t n = 0;
+    hcr_target *t = hcr_snapshot(dispatch_name_id, &n);
+    hcr_send_markers(t, n, migrate_fn);
+    free(t);
+}
+
+/* The per-target send, exposed so test/test_broadcast_migrate_leak.c can
+ * drive the real send + conditional-free against an already-dead proc
  * (specs/todos/2026-08-18-broadcast-migrate-no-end-to-end-guard.md, option
  * 2). Returns march_sched_send's status, or -1 if the malloc failed. Every
  * migrate message ever allocated is counted in g_migrate_msgs_live and
@@ -4936,15 +5210,7 @@ void march_actor_broadcast_migrate(uint32_t dispatch_name_id,
  * non-zero march_migrate_msgs_live() after the fact. */
 int march_actor_inject_migrate_msg(void *green_thread,
                                    void *(*migrate_fn)(void *)) {
-    march_migrate_msg_t *mm = (march_migrate_msg_t *)malloc(sizeof(*mm));
-    if (!mm) return -1;
-    mm->_rc        = 1;
-    mm->_tag       = MARCH_MIGRATE_TAG;
-    mm->migrate_fn = migrate_fn;
-    atomic_fetch_add_explicit(&g_migrate_msgs_live, 1, memory_order_relaxed);
-    int st = march_sched_send((march_proc *)green_thread, mm);
-    if (st == MARCH_SEND_DEAD) migrate_msg_free(mm);
-    return st;
+    return hcr_inject_marker(NULL, (march_proc *)green_thread, migrate_fn, 0);
 }
 
 int64_t march_migrate_msgs_live(void) {

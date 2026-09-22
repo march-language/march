@@ -555,12 +555,22 @@ void    march_register_supervisor(void *supervisor, int64_t strategy,
 /* System message injected into an actor's mailbox to trigger state migration.
  * Layout: standard 16-byte march object header (rc at 0, tag at 8) so that
  * actor_green_thread can detect it by checking ((int64_t*)msg)[1].
- * Allocated with malloc() by march_actor_broadcast_migrate; freed with free()
- * (NOT march_decrc) by actor_green_thread after handling. */
+ * Allocated with malloc() by march_actor_publish_migrating /
+ * march_actor_broadcast_migrate; freed with free() (NOT march_decrc) by
+ * actor_green_thread after handling.
+ *
+ * The message is also a MARKER: its position in the mailbox separates the
+ * messages queued before the switch (handled by the old code against the old
+ * state) from those queued after it.  [pin] is the code-version pin the
+ * activator took on the target actor (ring version + 1; 0 = none, the legacy
+ * march_actor_broadcast_migrate shape) and [meta] the actor's meta (metas are
+ * never freed), so whichever path disposes the marker can release the pin. */
 typedef struct {
     int64_t  _rc;              /* always 1 (not reference-counted) */
     int64_t  _tag;             /* MARCH_MIGRATE_TAG */
     void    *(*migrate_fn)(void *);  /* migrate_fn(old_state_ptr) → new_state_ptr, or NULL */
+    void    *meta;             /* target's march_actor_meta, or NULL */
+    uint32_t pin;              /* pinned ring version + 1, or 0 */
 } march_migrate_msg_t;
 
 /* Set the dispatch-table NAME_ID for a hot-reload actor.  Must be called
@@ -574,9 +584,40 @@ void march_actor_set_dispatch_id(void *actor, uint32_t name_id);
  * address the handler positionally under F19's globally-unique msg tags. */
 void march_actor_set_call_base(void *actor, int64_t base);
 
+/* Publish a new version of a hot-reload actor's dispatch fn whose state
+ * layout changed, and migrate every live actor of that type.
+ *
+ * Each live actor keeps running the version it was on, against its old
+ * state, for every message already in its mailbox.  A migrate marker is
+ * appended to each mailbox; when an actor reaches its marker it runs
+ * [migrate_fn] on its state (skipped if NULL) and switches to the new
+ * version.  The old version stays pinned in the dispatch ring until every
+ * actor has passed its marker, so a second migrating publish before that
+ * fails (-1) rather than reclaiming code that is still running.
+ *
+ * [drain_ms] bounds how long old messages are honoured: once it has elapsed,
+ * an actor that has still not reached its marker drops (and reports on
+ * stderr) each remaining pre-marker message instead of running it.  < 0 uses
+ * $MARCH_HCR_DRAIN_MS, else MARCH_HCR_DRAIN_MS_DEFAULT; 0 = no deadline.
+ *
+ * [epoch] > 0 publishes with march_dispatch_publish_epoch.  Returns the ring
+ * index published, or -1 if the publish failed (nothing is changed then). */
+#define MARCH_HCR_DRAIN_MS_DEFAULT 5000
+int march_actor_publish_migrating(uint32_t dispatch_name_id, void *fn_ptr,
+                                  const char *impl_hash, const char *sig_hash,
+                                  uint8_t kind, uint32_t epoch,
+                                  void *(*migrate_fn)(void *), int64_t drain_ms);
+
+/* Pre-marker messages dropped by an expired drain deadline, process-wide. */
+int64_t march_hcr_drain_dropped(void);
+
 /* Walk all live actors whose dispatch_name_id equals [dispatch_name_id] and
  * inject a MARCH_MIGRATE_TAG message so each actor migrates its state on
- * the next turn.  migrate_fn may be NULL (skip state transform). */
+ * the next turn.  migrate_fn may be NULL (skip state transform).
+ *
+ * No ordering guarantee: it takes no code-version pin, so if the new version
+ * is already published, messages queued ahead of the marker run the NEW code
+ * against the OLD state.  A deploy must use march_actor_publish_migrating. */
 void march_actor_broadcast_migrate(uint32_t dispatch_name_id,
                                    void *(*migrate_fn)(void *));
 

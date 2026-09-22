@@ -495,11 +495,10 @@ let test_trmc_hint_present_when_off () =
      note present iff the transform is off: that is exactly the guard
      `(not trmc) && trmc_eligible name`, with nothing else varying.
 
-     `--trmc` EXPLICITLY, not the ambient default: ci.yml's `trmc-suite` job
-     runs the whole suite under `MARCH_NO_TRMC=1`, where `flags:""` means TRMC
-     is OFF and this assertion inverts. The env forms are seeded before
-     Arg.parse precisely so an explicit flag wins, which is what makes this
-     case configuration-independent. *)
+     `--trmc` EXPLICITLY, not the ambient default, so the case does not depend
+     on what the default is. (It was written for ci.yml's since-removed
+     `trmc-suite` job, which ran the whole suite with TRMC off, where
+     `flags:""` meant TRMC OFF and this assertion inverted.) *)
   let (_, out_on) = compile ~flags:"--trmc" trmc_note_src in
   Alcotest.(check bool) "no_alloc still fires with TRMC on" true
     (contains "marked @[no_alloc] but allocates" out_on);
