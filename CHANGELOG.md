@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
   `MARCH_TRMC` (already a no-op) is unchanged.
 
 ### Changed
+- **An interpreted run of a `[ffi.rust]`-only project now says up front that
+  Rust FFI is compiled-only.** `forge run`, `forge interactive` and interpreted
+  `forge test` (`--coverage` / `MARCH_TEST_INTERPRETER=1`) print one warning
+  naming the crate and pointing at `forge run --compiled` / `forge build` /
+  `forge test`, instead of leaving only the generic "symbol not found for
+  interpreter FFI" at the first extern call. Cargo's static archive cannot be
+  loaded by the interpreter; projects that also have `[ffi] sources` are not
+  warned.
 - **A path scope that could not take effect is now a compile error instead of
   being silently ignored.** `needs IO.Network("/etc")` (only `IO.FileRead`,
   `IO.FileWrite` and `IO.FileSystem` take a scope, so this includes `needs
