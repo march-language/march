@@ -137,6 +137,11 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Renaming a linear value with `let` no longer lets it be dropped.** In
+  `fn f(linear h : Res) ... let h2 = h`, the rename consumed `h` but left `h2`
+  ordinary, so `h2` could be ignored with no error. `h2` now takes over `h`'s
+  obligation and must be used exactly once, whether `h` is a `linear` parameter
+  or a `linear let` local.
 - **A protocol whose payload types differ in their DEFINITIONS is now caught when
   the session is set up, not as an undecodable message once it is running.**
   `<P>_Msg.fingerprint()` digested each payload type by NAME, so two nodes whose

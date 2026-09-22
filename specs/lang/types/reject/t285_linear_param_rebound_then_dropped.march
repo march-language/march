@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: The linear value `h2` was never used.
+mod Main do
+  -- A value linear because of its BINDING (a `linear h : Res` parameter of a
+  -- plain ADT type) moved into a plain `let`: the read of `h` is its one use,
+  -- so the obligation must move to `h2`. `let` linearity was judged only on
+  -- the RHS TYPE (a plain `Res`), so `h2` was Unrestricted and could be
+  -- dropped silently -- the named twin of `let _ = h` (reject/t283).
+  -- Accepted before 2026-09-22. Consumed twin: accept/t286.
+  type Res = Res(Int)
+  fn rebind(linear h : Res) : Int do
+    let h2 = h
+    0
+  end
+  fn main() : () do
+    ()
+  end
+end
