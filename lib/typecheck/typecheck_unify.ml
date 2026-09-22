@@ -666,6 +666,25 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
              TChan (ref SError)
            | Some sty ->
              TLin (Ast.Linear, TChan (ref sty))))
+     | _ when StrMap.mem name.Ast.txt env.ty_aliases ->
+       (* A transparent alias stands for its right-hand side: substitute the
+          arguments for the parameters and resolve THAT, so the alias is the
+          type it names at every later step -- unification, and the
+          `always_linear` discipline, which reads the expanded type's name. *)
+       let params, rhs = StrMap.find name.Ast.txt env.ty_aliases in
+       let args' = List.map (surface_ty env ~tvars) args in
+       if List.length params <> List.length args' then begin
+         Err.error env.errors ~span:name.Ast.span
+           (Printf.sprintf "`%s` expects %d type argument(s) but got %d."
+              name.Ast.txt (List.length params) (List.length args'));
+         TError
+       end else begin
+         let saved = !tvars in
+         List.iter2 (fun pname arg -> tvars := (pname, arg) :: !tvars) params args';
+         let t = surface_ty env ~tvars rhs in
+         tvars := saved;
+         t
+       end
      | "Chan", _ when name.txt = "Chan" ->
        Err.error env.errors ~span:name.span
          "Chan expects exactly two type arguments: Chan(RoleName, ProtocolName)";

@@ -1,0 +1,39 @@
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  -- `Entry`: the alias each generated role module carries for that role's
+  -- FIRST state (2026-09-21). Spelling the state by hand means working out
+  -- `S_` plus the first step of the role's own projection, which differs per
+  -- role (`Stream_Prod.Entry` is `S_send_Msg_Prod_Cons_1`,
+  -- `Stream_Cons.Entry` is `S_recv_Msg_Prod_Cons_1`); this is the same pair
+  -- of bodies as `t190`, written against the alias instead. The alias is
+  -- transparent, so each one still names its OWN role's state: the reject
+  -- twin `t282` is the double-use witness that the state's `always_linear`
+  -- discipline survives it.
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.Entry, next : Int) : Stream_Prod.Yield do
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) -> prod(s, st2, next + 1),
+      fn (_b, st2) -> Stream_Prod.close(s, st2))
+  end
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.Entry, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (_n, st1) ->
+      if budget > 1 do
+        cons(s, Stream_Cons.choose_more(s, st1, true), budget - 1)
+      else
+        Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))
+      end)
+  end
+  fn main(c : Cap(IO)) do () end
+end

@@ -1,0 +1,41 @@
+-- Regression: file_close / csv_close returned three different things.
+-- The typechecker said `Int -> Unit` (file_close) and `Int -> Atom`
+-- (csv_close), the interpreter returned `:ok` for both, and the compiled C
+-- returned a heap `Ok(())` Result cell for both. A compiled
+-- `csv_close(h) == :ok` compared a heap pointer against an atom (false), and
+-- rendering the result printed `Ok(())`. All three layers now agree on
+-- `Atom` (`:ok`). This fixture USES the results, so it is run on BOTH
+-- backends against one .expected (see test/dune).
+mod Test do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.FileWrite
+
+  fn main(_c : Cap(IO.Console), _r : Cap(IO.FileRead), _w : Cap(IO.FileWrite)) : Unit do
+    let path = "/tmp/march_native_close_returns_ok_atom.csv"
+    match File.write(path, "a,b\n1,2\n") do
+    Err(_) -> panic("write failed")
+    Ok(_) -> :ok
+    end
+
+    match file_open(path) do
+    Err(_) -> println("file_open err")
+    Ok(fd) ->
+      let r = file_close(fd)
+      println("file_close == :ok: " ++ bool_to_string(r == :ok))
+      println("file_close renders: " ++ to_string(r))
+    end
+
+    match csv_open(path, ",", :rfc4180) do
+    Err(_) -> println("csv_open err")
+    Ok(h) ->
+      let r = csv_close(h)
+      println("csv_close == :ok: " ++ bool_to_string(r == :ok))
+      println("csv_close renders: " ++ to_string(r))
+      let again = csv_close(h)
+      println("csv_close twice == :ok: " ++ bool_to_string(again == :ok))
+    end
+
+    match File.delete(path) do _ -> () end
+  end
+end

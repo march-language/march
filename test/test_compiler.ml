@@ -15795,6 +15795,7 @@ let compiler_suites =
       ("cap_strip", Test_cap_strip.tests);
       ("cap_symbols", Test_cap_symbols.tests);
       ("builtin_borrow_classification", Test_builtin_borrow_classification.tests);
+      ("builtin_compiled_lowering", Test_builtin_compiled_lowering.tests);
       ("cap_markers", Test_cap_markers.tests);
       ("prog_argv", Test_prog_argv.tests);
       ("cap_package", Test_cap_package.tests);
