@@ -54,8 +54,7 @@ type target_config =
     A ref rather than a [ctx] field because the entry point is emitted from a
     module-level buffer walk that does not carry one, and because bin/main.ml
     must also read it for the CAS tag: the choice changes the emitted binary,
-    so a non-pinned cached artifact must never satisfy a --pin-main build.
-    Same shape, and the same reason, as [March_tir.Trmc.enabled]. *)
+    so a non-pinned cached artifact must never satisfy a --pin-main build. *)
 let pin_main = ref false
 
 let is_wasm_target = function

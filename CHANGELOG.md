@@ -12,13 +12,21 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Removed
-- **`MARCH_NO_TRMC` is gone; use `--no-trmc`.** The environment variable turned off
+- **`MARCH_NO_TRMC` is gone.** The environment variable turned off
   tail-recursion-modulo-cons for every compile in the process, including the
   stdlib, which increasingly depends on the transform to avoid overflowing the
-  stack on long lists. The `--no-trmc` flag still works, one invocation at a time.
-  `MARCH_TRMC` (already a no-op) is unchanged.
+  stack on long lists. (The `--no-trmc` flag that briefly replaced it is gone
+  too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **Tail-recursion-modulo-cons always runs; `--no-trmc` and `--trmc` are
+  removed.** Passing either is now the ordinary "unknown option" error. There
+  is no supported way to turn TRMC off: the stdlib's list producers are being
+  written in natural recursive style, which is a loop only because TRMC runs,
+  and with it off they would overflow the green-thread stack on lists of
+  20k-30k elements (exit 138, no output). The `@[no_alloc]` "TRMC-eligible …
+  check for `--no-trmc`" note and the flag mention in the "not in tail
+  position" warning (compiler and language server) are gone with it.
 - **An interpreted run of a `[ffi.rust]`-only project now says up front that
   Rust FFI is compiled-only.** `forge run`, `forge interactive` and interpreted
   `forge test` (`--coverage` / `MARCH_TEST_INTERPRETER=1`) print one warning

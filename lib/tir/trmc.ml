@@ -314,9 +314,10 @@ let report (m : Tir.tir_module) : unit =
    constructor loop writes the same field.  See the Phase 2 note in
    specs/todos/2026-08-07-trmc-tail-recursion-modulo-cons.md.
 
-   GATED on [enabled] (set by --trmc, or by the legacy MARCH_TRMC env var) —
-   this is a work-in-progress measurement vehicle, not yet a default pipeline
-   stage. *)
+   Always on: there is no switch.  The stdlib's list producers are written to
+   be loops only BECAUSE this pass runs, so turning it off would make them
+   overflow the green-thread stack on long lists
+   (specs/todos/2026-09-09-rewrite-stdlib-list-producers-into-natural-style.md). *)
 
 let trmc_ctr = ref 0
 
@@ -480,37 +481,29 @@ let transform_fn ?(on_decline = fun (_ : string) -> ())
   | Mixed, _ -> decline "mixed"
   | _ -> None
 
-(** Whether the destination-passing transform runs.  A [ref] rather than an
-    env-var read so the driver owns the decision and a CLI flag can set it;
-    [bin/main.ml] is the only writer.  Default ON since 2026-09-09;
-    [--no-trmc] disables it. *)
-let enabled : bool ref = ref true
-
-(** Apply TRMC across a module.  Gated on [enabled] (see [--trmc]). *)
-let transform_module ?(enabled = !enabled) (m : Tir.tir_module) : Tir.tir_module =
-  if not enabled then m
-  else begin
-    reset_counter ();
-    let report = Sys.getenv_opt "MARCH_TRMC_REPORT" <> None in
-    let out = List.concat_map (fun fn ->
-      (* No silent caps: a function the ANALYSIS considers transformable but
-         the TRANSFORM declines is a coverage gap, and it must be visible in
-         the report rather than inferred from a missing TRMCXFORM line.  The
-         reason comes from transform_fn itself so the two cannot drift. *)
-      let on_decline reason =
-        if report then begin
-          let r = report_of_fn fn.Tir.fn_name fn.Tir.fn_body in
-          Printf.eprintf "TRMCSKIP\t%s\t%s\t%s\tmodcons=%d other=%d\n%!"
-            fn.Tir.fn_name reason (string_of_verdict (verdict_of r))
-            (List.length r.r_modcons) r.r_other
-        end
-      in
-      match transform_fn ~on_decline m.Tir.tm_types fn with
-      | Some (entry, helper) ->
-        if report then
-          Printf.eprintf "TRMCXFORM\t%s -> %s\n%!" fn.Tir.fn_name helper.Tir.fn_name;
-        [entry; helper]
-      | None -> [fn]
-    ) m.Tir.tm_fns in
-    { m with Tir.tm_fns = out }
-  end
+(** Apply TRMC across a module.  Unconditional: every pipeline that lowers
+    runs it (compiled, REPL-JIT, LSP, contract check). *)
+let transform_module (m : Tir.tir_module) : Tir.tir_module =
+  reset_counter ();
+  let report = Sys.getenv_opt "MARCH_TRMC_REPORT" <> None in
+  let out = List.concat_map (fun fn ->
+    (* No silent caps: a function the ANALYSIS considers transformable but
+       the TRANSFORM declines is a coverage gap, and it must be visible in
+       the report rather than inferred from a missing TRMCXFORM line.  The
+       reason comes from transform_fn itself so the two cannot drift. *)
+    let on_decline reason =
+      if report then begin
+        let r = report_of_fn fn.Tir.fn_name fn.Tir.fn_body in
+        Printf.eprintf "TRMCSKIP\t%s\t%s\t%s\tmodcons=%d other=%d\n%!"
+          fn.Tir.fn_name reason (string_of_verdict (verdict_of r))
+          (List.length r.r_modcons) r.r_other
+      end
+    in
+    match transform_fn ~on_decline m.Tir.tm_types fn with
+    | Some (entry, helper) ->
+      if report then
+        Printf.eprintf "TRMCXFORM\t%s -> %s\n%!" fn.Tir.fn_name helper.Tir.fn_name;
+      [entry; helper]
+    | None -> [fn]
+  ) m.Tir.tm_fns in
+  { m with Tir.tm_fns = out }

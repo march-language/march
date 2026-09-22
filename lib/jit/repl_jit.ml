@@ -486,8 +486,8 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
      differently in the REPL than when compiled.  The position matters as much
      as the call — by defun the stdlib's nested `go` helpers are closures
      invoked via ECallPtr, so self-recursion is no longer syntactically visible
-     and the transform would silently see nothing.  Gated by the same
-     [Trmc.enabled] ref, and idempotent, so re-lowering an already-transformed
+     and the transform would silently see nothing.  Unconditional, like the
+     compiled pipeline, and idempotent, so re-lowering an already-transformed
      module is a no-op. *)
   let tir = March_tir.Trmc.transform_module tir in
   let iface_methods = March_tir.Lower.get_iface_methods () in
