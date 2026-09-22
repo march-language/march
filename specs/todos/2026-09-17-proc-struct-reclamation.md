@@ -6,8 +6,14 @@ replacing leak-don't-free"), the last open item in that file. Written survey-fir
 parent asked.
 
 **Phase 1 shipped 2026-09-17** ([[2026-09-17-proc-ctx-released-at-death]]): the
-execution context is freed at proc death. What remains below is Phase 2 and the decision
-in front of it, with the measurements now taken.
+execution context is freed at proc death.
+
+**Mechanism PR 1 (the reclaim module + procs) shipped 2026-09-22**
+([[2026-09-22-proc-struct-reclaimed]]): `runtime/march_reclaim.{c,h}` exists, a dead
+proc's struct is freed after its grace period, and every holder in the survey below was
+converted or argued bounded. **Still open: mechanism PR 2 (metas and tombstones)**, step 3
+of "Chosen mechanism", with the notes for it in "Notes for the metas PR" at the end of
+that section.
 
 **The survey changed the item.** Three findings, each of which moves the design:
 
@@ -254,6 +260,84 @@ tombstone per pid ever. Both are O(pids spawned) by the language's semantics (a 
 `Int` pid can be asked for its terminal reason forever). Both are ≥10× smaller than
 today's residue.
 
+### Mechanism PR 1 as landed (2026-09-22)
+
+Built as specified above. Evidence, measurements and the per-site argument are in
+[[2026-09-22-proc-struct-reclaimed]]. Where it differs from the text above, or found
+something the survey did not:
+
+- **A quiescent state needs no fence.** Only an offline-to-online transition does (the
+  store-then-load Dekker pair with the reclaimer). An already-online scheduler thread
+  that announces a newer epoch late only looks older to the reclaimer, which is
+  conservative. So the per-dispatch cost is one release store, and only when the epoch
+  has moved. The design text allowed a fence per dispatch.
+- **`march_sched_find` had a dormant data race.** It read `g_registry` slots with a plain
+  load while the reaper NULLs them under `g_registry_mu`. Harmless while it had no
+  callers; it is now the resolver for every pid-holder, and ThreadSanitizer reported it
+  on the first run. The slots are atomic now (release on add/remove, acquire on find).
+  A reader holding a pre-growth snapshot can still get a DEAD proc back. That is safe:
+  it cannot be freed inside the reader's critical section, and every caller treats DEAD
+  as gone.
+- **`march_task_cancel_by_id` could make sched_loop reap a parked proc.** It stored
+  `PROC_DEAD` blindly. Landing between a park's `PROC_PARKED` store and its
+  `swapcontext`, that store made sched_loop reap a proc still registered as a waiter
+  (Task word 5, a BLOCK list, an fd-wait entry, a timer). Before reclamation that
+  already recycled a live stack. With reclamation it becomes a use-after-free. It is now
+  a compare-exchange from RUNNABLE or RUNNING only. Both documented behaviours (a queued
+  proc still runs to completion; a running one's next yield overwrites the DEAD) are
+  unchanged.
+- **The BLOCK sender needed a flag.** After its park, the sender must know without
+  dereferencing the target whether it is still linked in the target's waiter list,
+  because the target may have been reaped and freed meanwhile. `march_proc.send_wait_linked`
+  is set under the target's lock at registration and cleared by every unlinker after its
+  last touch of the link. The reap drain is one of those unlinkers, and it clears the flag
+  before the retire. Reading 1 inside a critical section therefore proves the target is
+  not yet freeable.
+- **`march_actor_reply`'s "legacy raw proc pointer" path is gone.** Nothing produces a
+  bare proc pointer, and storing one is what reclamation forbids. A non-reply-ref value
+  is now dropped.
+- **Every suspending `swapcontext` checks the critical-section depth**, and so does every
+  quiescent state. Stubbing out `march_reclaim_suspend` during the benchmark ablations
+  aborted every run at the next dispatch, which is the check working.
+- **Not converted, by argument:** the `MARCH_DEBUG` fault handler's registry walk. It
+  runs in signal context, so it cannot enter a critical section (entering may allocate).
+  On a scheduler thread it is already inside the implicit one. On any other thread it is
+  a best-effort diagnostic on the way to `_exit`. There is a comment at the walk.
+
+**Open: a fan-in throughput cost the design did not predict.** On
+`bench/actors/fanin_flood.march`, A/B against base on the same box (shuffled, load
+average 11–50):
+
+- **+8%** median wall time (129.8 → 140.7 ms, n=60).
+- **+19%** on a 10× variant.
+- **+1.9%** with one scheduler thread.
+
+A build with every `march_reclaim_*` call a no-op matches base, so the cost is the calls
+themselves, not the pid conversions. Single-threaded that is ~2 ns per send: the two
+TLS-touching enter/exit calls in `march_send`, which the design accepted as "a TLS depth
+counter". It could not be attributed to one entry point at 8 threads, and `sample` shows
+no self time in them. The run is `mbox_lock` spinning on the sink, so the multi-thread
+gap is probably contention timing, but that is not proven. Decide whether this is
+acceptable, or whether scheduler-thread sites should drop the depth bookkeeping and keep
+it only on foreign threads. The latter loses the "critical section held across a switch"
+assertion for those sites. Details: [[2026-09-22-proc-struct-reclaimed]].
+
+**Notes for the metas PR (still open).**
+
+- The procs PR relies on "`green_thread` is NULLed by the actor's own thread before its
+  proc can die". The metas PR must keep an equivalent unpublish-before-retire order for
+  `g_actor_tbl`.
+- The same critical sections that now cover each `green_thread` load also cover the
+  `find_meta` just before it, *except* in `march_send`, `march_actor_call`,
+  `deliver_monitor_down`, `march_mailbox_size` and `march_actor_set_mbox_limit`. There,
+  `find_meta` runs before `march_reclaim_enter`. Widen those sections to start before
+  `find_meta` when metas become reclaimable.
+- `march_actor_call` still reads `meta->call_tag_base` after its critical section.
+- `stop_await_death`, `march_supervisor_notify` and the `m->actor` sites in "Survey
+  additions" have no critical section at all yet.
+- The kill-then-respawn fixture (`test/native/proc_reclaim_kill_respawn.march`) and its
+  TSAN/ASAN recipe and red control are reusable as-is. Add meta traffic to it.
+
 ## Survey: every holder of a `march_proc *`
 
 The question that decides the design is which holders can still be dereferencing after the
@@ -386,7 +470,9 @@ the need:
    2026-09-22: no. The send path needs the whole live proc, and the record has no word to
    reach it by. Question 1 is also answered no. See "Analysis, 2026-09-22".
 5. The epoch scheme, for the holders question 4 leaves hot. Design recorded in "Chosen
-   mechanism": procs first (one PR), then metas and tombstones (one PR).
+   mechanism": ~~procs first (one PR)~~ **landed 2026-09-22**
+   ([[2026-09-22-proc-struct-reclaimed]]), then metas and tombstones (one PR), **still
+   open**.
 
 ## Evidence any reclamation phase must produce
 
