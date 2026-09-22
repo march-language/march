@@ -137,6 +137,16 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **`OrderedMap.keys`, `OrderedMap.values` and `OrderedMap.from_list` work.**
+  All three passed a two-parameter lambda where a pair callback was expected
+  (and `from_list` had `List.fold_left`'s arguments in the wrong order), so
+  they returned a list of functions: `List.each(OrderedMap.values(m), println)`
+  failed with "expected `a -> a` but got `String`" at the caller's own line.
+  The test meant to catch this typechecked `ordered_map.march` in isolation,
+  where a call into another stdlib module resolves to an unconstrained type
+  variable and checks nothing; it now typechecks each file inside the whole
+  stdlib, as the compiler does.
+
 - **Renaming a linear value with `let` no longer lets it be dropped.** In
   `fn f(linear h : Res) ... let h2 = h`, the rename consumed `h` but left `h2`
   ordinary, so `h2` could be ignored with no error. `h2` now takes over `h`'s
