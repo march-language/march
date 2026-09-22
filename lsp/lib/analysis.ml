@@ -521,8 +521,16 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
     match decl with
     | Ast.DFn (fn, _) -> List.iter walk_clause fn.Ast.fn_clauses
     | Ast.DLet (_, b, _) -> walk [] b.Ast.bind_expr
-    | Ast.DActor (_, _, adef, _) ->
-      walk [] adef.Ast.actor_init;
+    | Ast.DActor (_, _, adef, asp) ->
+      (* `init(p : T, …)` (D24): the params scope over the init expression
+         and over the supervise block's child `init` arguments. *)
+      let frame = List.map param_binder adef.Ast.actor_init_params in
+      set_scope frame asp;
+      walk [ frame ] adef.Ast.actor_init;
+      Option.iter (fun (sc : Ast.supervise_config) ->
+          List.iter (fun (sf : Ast.supervise_field) ->
+              List.iter (walk [ frame ]) sf.Ast.sf_init_args) sc.Ast.sc_fields)
+        adef.Ast.actor_supervise;
       List.iter (fun (h : Ast.actor_handler) -> walk [] h.Ast.ah_body)
         adef.Ast.actor_handlers
     | Ast.DMod (_, _, decls, _) -> List.iter walk_decl decls

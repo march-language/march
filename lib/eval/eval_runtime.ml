@@ -209,6 +209,12 @@ type actor_inst = {
   ai_name    : string;           (** Actor type name, e.g. "Counter" *)
   ai_def     : actor_def;
   ai_env_ref : env ref;         (** Module environment at spawn time *)
+  ai_init_args : value list;
+  (** The `init` arguments this incarnation was spawned with (D24), in
+      declaration order; [] for an actor with the bare `init { … }`.  A
+      supervisor restart re-supplies them verbatim to the replacement, the
+      interpreter's mirror of the argument the compiled runtime holds beside
+      the child's respawn closure. *)
   mutable ai_state    : value;
   mutable ai_alive    : bool;
   mutable ai_terminal_reason : monitor_down_reason;
@@ -710,15 +716,41 @@ let fresh_monitor_id () =
   next_monitor_id := id + 1;
   id
 
+(** Evaluate an actor's `init` expression with its `init(p1 : T1, …)`
+    parameters (D24) bound to [args], in the actor's own module environment.
+    The typechecker has already matched the arity for `spawn(A, …)` and for
+    supervise-block child specs; the check here catches the dynamic
+    `Supervisor.spec` path, which names the actor by string. *)
+let eval_actor_init_state (env_ref : env ref) (def : actor_def) (actor_name : string)
+    (args : value list) : value =
+  let names = List.map (fun (p : param) -> p.param_name.txt) def.actor_init_params in
+  if List.length names <> List.length args then
+    eval_error "actor %s: its init takes %d argument%s, but %d %s supplied"
+      actor_name (List.length names) (if List.length names = 1 then "" else "s")
+      (List.length args) (if List.length args = 1 then "was" else "were");
+  !eval_expr_hook (List.combine names args @ !env_ref) def.actor_init
+
 (** Spawn a fresh child actor instance (for supervisor restarts).
     [crashed_pid] is the pid of the actor being replaced; its epoch is
     inherited and incremented so that old VCap values become stale.
     Returns the new pid. *)
-let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : string) (supervisor_pid : int) : int =
+let spawn_child_actor ?(crashed_pid : int option = None) ?(init_args : value list option = None)
+    (child_actor_name : string) (supervisor_pid : int) : int =
   match Hashtbl.find_opt actor_defs_tbl child_actor_name with
   | None -> eval_error "restart: unknown child actor '%s'" child_actor_name
   | Some (child_def, child_env_ref) ->
-    let child_init_state = !eval_expr_hook !child_env_ref child_def.actor_init in
+    (* The replacement gets the crashed incarnation's `init` arguments (D24)
+       unless the caller supplies its own (a first spawn from a child spec). *)
+    let init_args = match init_args, crashed_pid with
+      | Some args, _ -> args
+      | None, Some old_pid ->
+        (match Hashtbl.find_opt actor_registry old_pid with
+         | Some old_inst -> old_inst.ai_init_args
+         | None -> [])
+      | None, None -> []
+    in
+    let child_init_state =
+      eval_actor_init_state child_env_ref child_def child_actor_name init_args in
     let child_pid = !next_pid in
     next_pid := child_pid + 1;
     (* Inherit epoch from crashed actor + 1 for proper stale-cap detection. *)
@@ -731,7 +763,7 @@ let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : str
     in
     let child_inst = {
       ai_name = child_actor_name; ai_def = child_def;
-      ai_env_ref = child_env_ref;
+      ai_env_ref = child_env_ref; ai_init_args = init_args;
       ai_state = child_init_state; ai_alive = true;
       ai_terminal_reason = Normal;
       ai_monitors = []; ai_mailbox = Queue.create ();

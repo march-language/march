@@ -1,0 +1,2 @@
+schema has Counter with label and value, no init params
+check-migration ok

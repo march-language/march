@@ -217,14 +217,16 @@ let rec scan (f : facts) (owner : string) (bound : StrSet.t) (e : T.expr) : unit
 (** The actors [e] spawns as SUPERVISED CHILDREN.  A `supervise` block's
     children are spawned inside the supervisor's own spawn glue
     (`lower_actor.ml`'s [spawn_with_fields]), as
-      let $sup_child_raw_f = Child_spawn() in
+      let $sup_child_raw_f = Child_spawn(<init args, D24>) in
       let $sup_child_ptr_f = spawn_supervised($sup_child_raw_f) in …
-    which is a different shape from a plain `spawn(Child)` at a user site. *)
+    which is a different shape from a plain `spawn(Child)` at a user site.
+    Matched by shape, not arity: a child with `init` parameters is spawned
+    with arguments. *)
 let supervised_children (e : T.expr) : string list =
   let acc = ref [] in
   let rec go (e : T.expr) =
     match e with
-    | T.ELet (raw, T.EApp (cs, []), (T.ELet (_, T.EApp (ss, [ T.AVar raw' ]), _) as rest))
+    | T.ELet (raw, T.EApp (cs, _), (T.ELet (_, T.EApp (ss, [ T.AVar raw' ]), _) as rest))
       when ss.T.v_name = "spawn_supervised" && raw'.T.v_name = raw.T.v_name ->
       (match actor_of_spawn cs.T.v_name with
        | Some child -> acc := child :: !acc
@@ -606,7 +608,7 @@ let rec thread ?(dispatch = false) ?(spawn_caps = Hashtbl.create 1)
      record build (Perceus dups an owned copy of every field into it), NOT
      from the builtin's owned argument as it did for the bare pointer; that is
      what lets a mock outlive the `with_cap` scope that supplied it. *)
-  | T.ELet (raw, (T.EApp (sf, []) as spawn_call), T.EApp (sp, [ T.AVar raw' ]))
+  | T.ELet (raw, (T.EApp (sf, _) as spawn_call), T.EApp (sp, [ T.AVar raw' ]))
     when sp.T.v_name = "spawn" && raw'.T.v_name = raw.T.v_name
       && (match actor_of_spawn sf.T.v_name with Some _ -> true | None -> false) ->
     let actor = Option.get (actor_of_spawn sf.T.v_name) in
@@ -641,7 +643,7 @@ let rec thread ?(dispatch = false) ?(spawn_caps = Hashtbl.create 1)
      Kept distinct from the plain pattern above on purpose: they share
      [spawn_caps] (so they cannot disagree about which caps a child needs)
      and nothing else. *)
-  | T.ELet (raw, (T.EApp (cs, []) as child_call),
+  | T.ELet (raw, (T.EApp (cs, _) as child_call),
             T.ELet (ptr, (T.EApp (ss, [ T.AVar raw' ]) as sup_call), rest))
     when ss.T.v_name = "spawn_supervised" && raw'.T.v_name = raw.T.v_name
       && (match actor_of_spawn cs.T.v_name with Some _ -> true | None -> false) ->

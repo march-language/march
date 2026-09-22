@@ -2837,8 +2837,23 @@ let rec infer_expr env (e : Ast.expr) : ty =
          `send(dead_pid, M)` decoded as Some while the interpreter said None. *)
       TCon ("Option", [t_unit])
 
-    | Ast.ESpawn (actor, _) ->
+    | Ast.ESpawn (actor, sp) ->
+      (* spawn(A, a, b) carries the `init` arguments as the name ctor's args
+         (see ast.ml).  Peel them off before inferring the bare name: the
+         actor's nullary ctor registration would otherwise report them as a
+         constructor-arity mismatch instead of against `init`'s signature. *)
+      let actor, init_args = match actor with
+        | Ast.ECon (n, (_ :: _ as args), csp) -> (Ast.ECon (n, [], csp), args)
+        | other -> (other, [])
+      in
       ignore (infer_expr env actor);
+      (match actor with
+       | Ast.ECon (n, [], _) | Ast.EVar n ->
+         check_spawn_args env ~site_span:sp
+           ~spelling:(Printf.sprintf "`spawn(%s%s)`" n.txt
+                        (if init_args = [] then "" else ", …"))
+           n.txt init_args
+       | _ -> List.iter (fun a -> ignore (infer_expr env a)) init_args);
       (* Both backends dispatch `spawn` by the actor's *name*, resolved at
          compile time (it selects a statically generated `<Actor>_spawn`
          function).  There is no runtime actor-descriptor value, so the argument
@@ -3808,7 +3823,48 @@ and infer_block env exprs =
     ignore (infer_expr env e);
     infer_block env rest
 
-(** Bind lambda parameters into the environment, returning (types, env). *)
+(** Check the `init` arguments supplied for actor [actor_name] — by
+    `spawn(A, args)` or by a supervise block's `A field(args)` — against the
+    signature the [DActor] arm recorded (D24).  An unknown actor is not
+    reported here: the name itself is inferred by the caller and gets the
+    unknown-constructor diagnostic there. *)
+and check_spawn_args env ~site_span ~spelling (actor_name : string)
+    (args : Ast.expr list) : unit =
+  match Hashtbl.find_opt env.actor_init_sigs actor_name with
+  | None -> List.iter (fun a -> ignore (infer_expr env a)) args
+  | Some sig_ ->
+    let n_sig = List.length sig_ and n_args = List.length args in
+    if n_sig <> n_args then begin
+      List.iter (fun a -> ignore (infer_expr env a)) args;
+      let show_sig =
+        if sig_ = [] then "init { … }"
+        else
+          Printf.sprintf "init(%s) { … }"
+            (String.concat ", "
+               (List.map (fun (p, t) -> Printf.sprintf "%s : %s" p (pp_ty (repr t))) sig_))
+      in
+      let plural n = if n = 1 then "" else "s" in
+      Err.error env.errors ~span:site_span
+        (if sig_ = [] then
+           Printf.sprintf
+             "actor `%s` declares no `init` parameters, but %s supplies %d argument%s.\n\
+              Its init is `%s`; to take a value at spawn time, declare the \
+              parameters: `init(config : Config) { … }`."
+             actor_name spelling n_args (plural n_args) show_sig
+         else
+           Printf.sprintf
+             "actor `%s`'s init takes %d argument%s, but %s supplies %d.\n\
+              Its signature is `%s`."
+             actor_name n_sig (plural n_sig) spelling n_args show_sig)
+    end else
+      List.iter2 (fun a (p, t) ->
+          check_expr env a t
+            ~reason:(Some (RBuiltin
+                             (Printf.sprintf "the `init` parameter `%s` of actor `%s`"
+                                p actor_name))))
+        args sig_
+
+(* Bind lambda parameters into the environment, returning (types, env). *)
 and bind_lam_params env params =
   List.fold_right
     (fun p (tys, env) ->
@@ -5470,12 +5526,47 @@ let rec check_decl env (d : Ast.decl) : env =
                    ci_is_actor_msg = true } in
         { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
       ) env_with_actor_ctor actor.actor_handlers in
+    (* `init(env : T, …)` (D24): the parameters are in scope in the init
+       expression (and in a supervise block's child `init` arguments, below),
+       and their types are recorded for `spawn(A, …)` to check against.  They
+       are bound exactly as a handler's parameters are ([bind_lam_param]), so
+       a linear parameter is tracked the same way. *)
+    let init_tvars = ref [] in
+    let init_sig =
+      List.map (fun (p : Ast.param) ->
+          let t = match p.param_ty with
+            | Some ann -> surface_ty env_with_ctors ~tvars:init_tvars ann
+            | None -> fresh_var env.level   (* the grammar requires one *)
+          in
+          (p.param_name.txt, t)) actor.actor_init_params
+    in
+    Hashtbl.replace env.actor_init_sigs name.txt init_sig;
+    let init_env =
+      List.fold_left2
+        (fun e (p : Ast.param) (_, t) -> bind_lam_param e p.param_name.span p (Some t))
+        env_with_ctors actor.actor_init_params init_sig
+    in
     (* Check init expression — must return the state record type.  Neither
        the init expr nor any handler body below is checked via [check_fn], so
        there is no enclosing function — see [with_no_caller]. *)
-    with_no_caller env_with_ctors (fun () ->
-      check_expr env_with_ctors actor.actor_init state_ty
+    with_no_caller init_env (fun () ->
+      check_expr init_env actor.actor_init state_ty
         ~reason:(Some (RBuiltin "actor init must return the initial state record")));
+    (* A supervise block's `Child name(args)` (D24): the args are the child's
+       `init` arguments, evaluated in the supervisor's spawn glue where the
+       supervisor's own `init` params are in scope.  Checked against the
+       child's recorded signature exactly as `spawn(Child, args)` is. *)
+    (match actor.actor_supervise with
+     | None -> ()
+     | Some sc ->
+       List.iter (fun (sf : Ast.supervise_field) ->
+           match sf.sf_ty with
+           | Ast.TyCon (child, []) ->
+             with_no_caller init_env (fun () ->
+               check_spawn_args init_env ~site_span:sf.sf_name.span
+                 ~spelling:(Printf.sprintf "`%s %s(…)`" child.txt sf.sf_name.txt)
+                 child.txt sf.sf_init_args)
+           | _ -> ()) sc.sc_fields);
     (* Check handlers with state and message params in scope *)
     List.iter (fun (h : Ast.actor_handler) ->
         let handler_env = bind_var "state" (Mono state_ty) env_with_ctors in

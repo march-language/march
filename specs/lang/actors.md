@@ -48,6 +48,42 @@ actor Counter do
 end
 ```
 
+### Parameterised `init`
+
+`init` may take a parameter list, supplied at `spawn`. Every parameter carries a
+type annotation, and the parameters are in scope in the init expression only
+(not in handlers; put what a handler needs into the state):
+
+```march
+actor Counter do
+  state { value : Int, label : String }
+  init(start : Int, label : String) { value: start, label: label }
+
+  on Increment(n : Int) do
+    { state with value: state.value + n }
+  end
+end
+
+fn main() do
+  let c = spawn(Counter, 41, "answer")   -- start = 41, label = "answer"
+  send(c, Increment(1))
+end
+```
+
+`spawn(Counter, 41, "answer")` checks each argument against the matching
+parameter. Supplying the wrong number of arguments is an error that names the
+actor's `init` signature; `spawn(Counter)` on an actor whose `init` takes
+parameters is rejected, as is `spawn(Plain, 1)` on an actor whose `init` takes
+none. `init()` is the zero-parameter spelling of the bare `init { ... }` form.
+The design rationale is decision D24 of the distributed-deploys plan: an actor
+that needs a value to start with (a database handle, an `Env` of capabilities)
+receives it as a value at spawn time, rather than as a first message that would
+leave the actor with an "uninitialised" state every handler has to cope with.
+
+A supervised child can be given its `init` arguments in the supervisor's
+`supervise` block, and a restart re-supplies them; see
+[Supervision](supervision.md#declaring-a-supervisor).
+
 Inside a handler, `state` refers to the current state record. Each handler must return the new state (same type as `state`). The typechecker enforces exactly this: the `init` block must produce the declared state record, and every handler body is checked to *return* the state type; see the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6.1 for the precise checks the actor declaration performs (state-record construction, duplicate-handler rejection, message-constructor registration, `init`/handler conformance).
 
 ---

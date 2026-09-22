@@ -121,6 +121,7 @@ type actor_inst =
   ai_name : string;
   ai_def : March_ast.Ast.actor_def;
   ai_env_ref : Eval_types.env ref;
+  ai_init_args : Eval_types.value list;
   mutable ai_state : Eval_types.value;
   mutable ai_alive : bool;
   mutable ai_terminal_reason : monitor_down_reason;

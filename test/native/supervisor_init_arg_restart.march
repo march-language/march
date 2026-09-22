@@ -1,0 +1,66 @@
+mod SupervisorInitArgRestart do
+  needs IO.Console
+
+  -- D24: a supervised child declared `Worker w(expr)` gets its init argument
+  -- from the supervisor's spawn glue, where the supervisor's own init params
+  -- are in scope, and every RESTART re-supplies the same value: the runtime
+  -- holds the evaluated argument (captured by the respawn closure) beside the
+  -- child's slot.  Two restarts of the same slot, so the closure is called
+  -- more than once (the second call is where a dropped reference would show).
+  actor Worker do
+    state { label : String, n : Int, count : Int }
+    init(label : String, n : Int) { label: label, n: n, count: 0 }
+
+    on Work() do
+      { state with count: state.count + 1 }
+    end
+  end
+
+  actor Sup do
+    state { w : Int, tag : String }
+    init(tag : String) { w: 0, tag: tag }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 10 within 60
+      Worker w(tag ++ "-child", 5)
+    end
+  end
+
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+    None    -> -1
+    Some(n) -> n
+    end
+  end
+
+  -- A repeat crash of the same slot restarts after the backoff delay; poll
+  -- for the replacement rather than sleeping a fixed time.
+  fn wait_replaced(sup, old, tries) do
+    let cur = child_int(sup, "w")
+    if cur != old || tries == 0 do
+      cur
+    else
+      sleep_ms(20)
+      wait_replaced(sup, old, tries - 1)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let sup = spawn(Sup, "root")
+    let w1 = child_int(sup, "w")
+    println(int_to_string(child_int(pid_of_int(w1), "n")))
+
+    kill(pid_of_int(w1))
+    let w2 = wait_replaced(sup, w1, 500)
+    println(bool_to_string(w2 != w1))
+    println(int_to_string(child_int(pid_of_int(w2), "n")))
+
+    kill(pid_of_int(w2))
+    let w3 = wait_replaced(sup, w2, 500)
+    println(bool_to_string(w3 != w2))
+    println(int_to_string(child_int(pid_of_int(w3), "n")))
+    println(int_to_string(child_int(pid_of_int(w3), "count")))
+    println(bool_to_string(is_alive(pid_of_int(w3))))
+  end
+end

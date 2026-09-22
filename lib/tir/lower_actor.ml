@@ -323,7 +323,58 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
   } in
 
   (* ── 5. Spawn function ───────────────────────────────────── *)
-  (* fn Name_spawn() : ptr =
+  (* `init(p1 : T1, …)` (D24): the spawn glue takes the params, and they are
+     in scope in the init expression and in the supervise block's child
+     `init` arguments.  Registered in [_fn_param_types] while those lower,
+     for the same reason [lower_handler] registers a handler's params: it is
+     the shield that keeps a bare name local instead of resolving through a
+     `use` alias to a global function of the same name.  Additive
+     save/restore, as there. *)
+  let init_params : Tir.var list =
+    List.map (fun (p : Ast.param) ->
+        { Tir.v_name = p.param_name.txt;
+          v_ty = (match p.param_ty with
+              | Some t -> Lower_types.lower_ty t
+              | None -> Lower_types.unknown_ty);
+          v_lin = Tir.Unr }) actor.actor_init_params
+  in
+  let with_init_params (f : unit -> 'a) : 'a =
+    let saved = List.filter_map (fun (v : Tir.var) ->
+        Option.map (fun ty -> (v.Tir.v_name, ty))
+          (Hashtbl.find_opt Lower_state._fn_param_types v.Tir.v_name)) init_params in
+    List.iter (fun (v : Tir.var) ->
+        Hashtbl.replace Lower_state._fn_param_types v.Tir.v_name v.Tir.v_ty) init_params;
+    Fun.protect f ~finally:(fun () ->
+        List.iter (fun (v : Tir.var) ->
+            Hashtbl.remove Lower_state._fn_param_types v.Tir.v_name) init_params;
+        List.iter (fun (n, ty) -> Hashtbl.replace Lower_state._fn_param_types n ty) saved)
+  in
+  let init_lowered = with_init_params (fun () -> Lower_match.lower_expr env actor.actor_init) in
+  (* A supervised child's `init` arguments (`Child f(e1, e2)`), each lowered
+     once and bound to a named var `$sup_init_arg_<f>_<i>` in the glue, so the
+     first spawn and the respawn closure below read the SAME values: a restart
+     re-supplies exactly what the first spawn got, never a re-evaluation. *)
+  let child_init_arg_tbl : (string, (Tir.var * Tir.expr) list) Hashtbl.t = Hashtbl.create 4 in
+  let child_init_arg_vars (sf : Ast.supervise_field) : (Tir.var * Tir.expr) list =
+    (* Memoised per field: the spawn and the registration below both need the
+       vars, and the args must lower exactly once. *)
+    match Hashtbl.find_opt child_init_arg_tbl sf.Ast.sf_name.txt with
+    | Some binds -> binds
+    | None ->
+      let binds = List.mapi (fun i (a : Ast.expr) ->
+          let v = actor_var (Printf.sprintf "$sup_init_arg_%s_%d" sf.Ast.sf_name.txt i)
+              (Lower_state.ty_of_expr env a) in
+          (v, with_init_params (fun () -> Lower_match.lower_expr env a)))
+          sf.Ast.sf_init_args in
+      Hashtbl.replace child_init_arg_tbl sf.Ast.sf_name.txt binds;
+      binds
+  in
+  let child_spawn_fn_var (child_actor_name : string) (arg_vars : Tir.var list) : Tir.var =
+    { v_name = child_actor_name ^ Tir_names.actor_spawn_suffix;
+      v_ty   = Tir.TFn (List.map (fun (v : Tir.var) -> v.Tir.v_ty) arg_vars, Tir.TPtr Tir.TUnit);
+      v_lin  = Tir.Unr }
+  in
+  (* fn Name_spawn(p1, …) : ptr =
        let $init_state = <lowered init expr>
        let $sf1 = EField($init_state, "sf1")
        ...
@@ -362,13 +413,13 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
      of loading it from `init`. The child's raw pointer is also bound
      ($sup_child_ptr_<fname>) and stays in lexical scope all the way past
      the EAlloc below, for wrap_sup (below) to register against $spawned. *)
-  let supervised_child_name (fname : string) : string option =
+  let supervised_child (fname : string) : (string * Ast.supervise_field) option =
     match actor.actor_supervise with
     | None -> None
     | Some sc ->
       List.find_opt (fun (sf : Ast.supervise_field) -> sf.Ast.sf_name.txt = fname) sc.Ast.sc_fields
       |> Option.map (fun sf -> match sf.Ast.sf_ty with
-          | Ast.TyCon (n, []) -> n.txt
+          | Ast.TyCon (n, []) -> (n.txt, sf)
           | _ -> failwith ("supervise field " ^ fname ^ ": child type must be a bare actor name"))
   in
   let spawn_with_fields =
@@ -376,14 +427,12 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
       spawn_inner
     else
       List.fold_right (fun (fname, ifv) acc ->
-          match supervised_child_name fname with
+          match supervised_child fname with
           | None -> Tir.ELet (ifv, Tir.EField (Tir.AVar init_var, fname), acc)
-          | Some child_actor_name ->
-            let child_spawn_var : Tir.var = {
-              v_name = child_actor_name ^ Tir_names.actor_spawn_suffix;
-              v_ty   = Tir.TFn ([], Tir.TPtr Tir.TUnit);
-              v_lin  = Tir.Unr;
-            } in
+          | Some (child_actor_name, sf) ->
+            let arg_binds = child_init_arg_vars sf in
+            let arg_vars = List.map fst arg_binds in
+            let child_spawn_var = child_spawn_fn_var child_actor_name arg_vars in
             (* A supervise-block child must not enter its actor loop before
                register_supervisor_child publishes the supervisor pointer.
                The deferred runtime spawn assigns its Pid now (needed in the
@@ -396,10 +445,12 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
             let pid_index_of_var : Tir.var = { v_name = "pid_index_of"; v_ty = Tir.TInt; v_lin = Tir.Unr } in
             let raw_var = actor_var ("$sup_child_raw_" ^ fname) (Tir.TPtr Tir.TUnit) in
             let child_ptr_var = actor_var ("$sup_child_ptr_" ^ fname) (Tir.TPtr Tir.TUnit) in
-            Tir.ELet (raw_var, Tir.EApp (child_spawn_var, []),
-              Tir.ELet (child_ptr_var, Tir.EApp (march_spawn_var, [Tir.AVar raw_var]),
-                Tir.ELet (ifv, Tir.EApp (pid_index_of_var, [Tir.AVar child_ptr_var]),
-                  acc)))
+            List.fold_right (fun (v, rhs) inner -> Tir.ELet (v, rhs, inner)) arg_binds
+              (Tir.ELet (raw_var,
+                 Tir.EApp (child_spawn_var, List.map (fun v -> Tir.AVar v) arg_vars),
+                 Tir.ELet (child_ptr_var, Tir.EApp (march_spawn_var, [Tir.AVar raw_var]),
+                   Tir.ELet (ifv, Tir.EApp (pid_index_of_var, [Tir.AVar child_ptr_var]),
+                     acc))))
         ) init_field_vars spawn_inner
   in
   (* ── 5b. Supervision registration ───────────────────────────────── *)
@@ -445,7 +496,7 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
   (* Wrap the spawn body: after allocating the actor, register supervision if needed. *)
   let spawn_body_with_sup =
     match actor.actor_supervise with
-    | None -> Tir.ELet (init_var, Lower_match.lower_expr env actor.actor_init, spawn_with_fields)
+    | None -> Tir.ELet (init_var, init_lowered, spawn_with_fields)
     | Some sc ->
       let field_word_idx (fname : string) : int =
         let rec find i = function
@@ -462,27 +513,57 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
               | _ -> failwith ("supervise field " ^ fname ^ ": child type must be a bare actor name")
             in
             let child_ptr_var = actor_var ("$sup_child_ptr_" ^ fname) (Tir.TPtr Tir.TUnit) in
-            let child_spawn_fn_var : Tir.var = {
-              v_name = child_actor_name ^ Tir_names.actor_spawn_suffix;
-              v_ty   = Tir.TFn ([], Tir.TPtr Tir.TUnit);
-              v_lin  = Tir.Unr;
-            } in
+            let arg_vars = List.map fst (child_init_arg_vars sf) in
+            let child_spawn_fn_var = child_spawn_fn_var child_actor_name arg_vars in
             let reg_child_var : Tir.var = {
               v_name = "register_supervisor_child";
               v_ty   = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit;
                                  Tir.TInt; Tir.TInt; Tir.TInt], Tir.TUnit);
               v_lin  = Tir.Unr;
             } in
-            Tir.ELet ({ v_name = "$reg_child_" ^ fname; v_ty = Tir.TUnit; v_lin = Tir.Unr },
-              Tir.EApp (reg_child_var, [
-                sup_atom; Tir.AVar child_ptr_var; Tir.AVar child_spawn_fn_var;
-                Tir.ALit (Ast.LitInt (field_word_idx fname));
-                Tir.ALit (Ast.LitInt (restart_type_int sf.Ast.sf_restart));
-                (* -1 infinity, 0 brutal, else the millisecond budget; read by
-                   march_actor_stop when it tears the tree down. *)
-                Tir.ALit (Ast.LitInt (Ast.shutdown_ms sf.Ast.sf_shutdown));
-              ]),
-              acc)
+            let reg_call (respawn : Tir.atom) =
+              Tir.ELet ({ v_name = "$reg_child_" ^ fname; v_ty = Tir.TUnit; v_lin = Tir.Unr },
+                Tir.EApp (reg_child_var, [
+                  sup_atom; Tir.AVar child_ptr_var; respawn;
+                  Tir.ALit (Ast.LitInt (field_word_idx fname));
+                  Tir.ALit (Ast.LitInt (restart_type_int sf.Ast.sf_restart));
+                  (* -1 infinity, 0 brutal, else the millisecond budget; read by
+                     march_actor_stop when it tears the tree down. *)
+                  Tir.ALit (Ast.LitInt (Ast.shutdown_ms sf.Ast.sf_shutdown));
+                ]),
+                acc)
+            in
+            if arg_vars = [] then
+              (* No init arguments: the static <Child>_spawn reference, the
+                 cheapest thing to pass and the shape every supervisor
+                 compiled to before D24. *)
+              reg_call (Tir.AVar child_spawn_fn_var)
+            else begin
+              (* `Child f(args)` (D24): the runtime re-runs whatever it is
+                 handed with no arguments on every respawn
+                 (`march_respawn_child` reads the `$clo_wrap` pointer out of
+                 the closure cell and calls it with the cell as its only
+                 argument), so hand it a zero-argument closure that calls the
+                 glue with the SAME `$sup_init_arg_*` values the first spawn
+                 used.  Built the way lower's [ELam] case builds a lambda thunk
+                 and the way cap_passing.ml builds its capability-carrying
+                 respawn thunk: Defun lifts it, its free variables are exactly
+                 the arg vars, which Defun captures and Perceus dups at the
+                 capture.  The cell is the "init argument held beside the
+                 spawn pointer": `march_actor_register_child` takes ownership
+                 of it and keeps it for the supervisor's lifetime, and
+                 `march_respawn_child` incs it before each call because every
+                 apply function drops the closure it is handed. *)
+              let respawn_name = Lower_state.fresh_name "respawn" in
+              let fn_var : Tir.var =
+                { v_name = respawn_name; v_ty = Tir.TFn ([], Tir.TPtr Tir.TUnit); v_lin = Tir.Unr } in
+              let fd : Tir.fn_def = {
+                fn_name = respawn_name; fn_params = []; fn_ret_ty = Tir.TPtr Tir.TUnit;
+                fn_body = Tir.EApp (child_spawn_fn_var, List.map (fun v -> Tir.AVar v) arg_vars);
+                fn_kind = Tir.FnLambda } in
+              Tir.ELet (fn_var, Tir.ELetRec ([fd], Tir.EAtom (Tir.AVar fn_var)),
+                        reg_call (Tir.AVar fn_var))
+            end
           ) sc.Ast.sc_fields rest
       in
       (* Replace the final EAtom($spawned) with:
@@ -501,11 +582,11 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
         | Tir.ELet (v, rhs, body) -> Tir.ELet (v, rhs, wrap_sup body)
         | other -> other
       in
-      Tir.ELet (init_var, Lower_match.lower_expr env actor.actor_init, wrap_sup spawn_with_fields)
+      Tir.ELet (init_var, init_lowered, wrap_sup spawn_with_fields)
   in
   let spawn_fn : Tir.fn_def = {
     fn_name   = name ^ Tir_names.actor_spawn_suffix;
-    fn_params = [];
+    fn_params = init_params;
     fn_ret_ty = Tir.TPtr Tir.TUnit;
     fn_body   = spawn_body_with_sup;
     fn_kind   = Tir.FnNormal;  (* actor glue — see lower_handler's comment *)

@@ -1239,6 +1239,7 @@ let make_stdlib_module stdlib_decls (e : March_ast.Ast.expr) : March_ast.Ast.mod
     mark_compiled_fns runs only after successful compile. *)
 let dummy_actor_def = March_ast.Ast.{
   actor_state     = [];
+  actor_init_params = [];
   actor_init      = ELit (LitInt 0, dummy_span);
   actor_handlers  = [];
   actor_supervise = None;
@@ -1251,6 +1252,7 @@ let mk_actor_inst name alive st = March_eval.Eval.{
   ai_name          = name;
   ai_def           = dummy_actor_def;
   ai_env_ref       = ref [];
+  ai_init_args     = [];
   ai_state         = st;
   ai_alive         = alive;
   ai_terminal_reason = March_eval.Eval.Normal;
