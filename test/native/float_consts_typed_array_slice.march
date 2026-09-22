@@ -1,0 +1,140 @@
+-- Compiled lowerings for seven builtins that used to typecheck, run
+-- interpreted, and then fail `--compile` at LINK time with an undefined
+-- symbol named after the builtin (`_float_nan`, `_typed_array_slice`, ...):
+--   float_nan / float_infinity / float_neg_infinity / float_epsilon
+--     -> inline IEEE-754 constants, bit-identical to the interpreter's OCaml
+--        values (Float.nan is 0x7FF8000000000001 there, epsilon is 2^-52);
+--   float_is_nan      -> `fcmp uno x, x`;
+--   float_is_infinite -> `fcmp oeq |x|, +inf`;
+--   typed_array_slice -> march_typed_array_slice (runtime/march_runtime.c),
+--     which COPIES the clamped range and takes a reference per element.
+-- The golden is the interpreter's own output for this file (the test diffs
+-- the compiled binary against it), so every line is a parity check.
+-- See specs/progress/2026-09-22-compiled-lowering-float-builtins.md.
+mod Main do
+  needs IO.Console
+
+  -- A generic identity: the Float crosses an erased (ptr) slot and comes back
+  -- boxed, so the predicates are also exercised on an unboxed-from-ptr value.
+  pfn id(x) do x end
+
+  pfn b(x : Bool) : String do bool_to_string(x) end
+
+  pfn join_acc(xs : List(String), acc : String) : String do
+    match xs do
+      Nil -> acc
+      Cons(x, rest) -> join_acc(rest, if acc == "" do x else acc ++ "," ++ x end)
+    end
+  end
+
+  pfn join(xs : List(String)) : String do join_acc(xs, "") end
+
+  pfn ints(xs : List(Int)) : String do join(List.map(xs, fn x -> int_to_string(x))) end
+
+  pfn show_slice(arr : TypedArray(String), start : Int, len : Int) : String do
+    let sl = typed_array_slice(arr, start, len)
+    "slice(" ++ int_to_string(start) ++ ", " ++ int_to_string(len) ++ ") = ["
+      ++ join(typed_array_to_list(sl)) ++ "] len "
+      ++ int_to_string(typed_array_length(typed_array_slice(arr, start, len)))
+  end
+
+  -- Slices a FRESH array every iteration and never reads the slice.
+  -- typed_array_slice borrows its array, so the caller releases the array
+  -- right after the call and the slice dies unread: the loop is flat. If the
+  -- array argument were consumed without the C side releasing it, every
+  -- iteration would leak it.
+  pfn leak_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let arr = typed_array_create(4, n)
+      let sl = typed_array_slice(arr, 1, 2)
+      leak_leg(n - 1, acc + (if n > 0 do 1 else 0 end) + (if n < 0 do typed_array_length(sl) else 0 end))
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let nan = float_nan()
+    let inf = float_infinity()
+    let ninf = float_neg_infinity()
+    let eps = float_epsilon()
+    -- March float literals have no exponent syntax.
+    let big = math_pow(10.0, 308.0)
+
+    println("-- constants")
+    println("nan = " ++ float_to_string(nan))
+    println("inf = " ++ float_to_string(inf))
+    println("-inf = " ++ float_to_string(ninf))
+    println("eps == 2^-52 literal: " ++ b(eps == 0.0000000000000002220446049250313080847263336181640625))
+    println("1 + eps != 1: " ++ b(1.0 +. eps != 1.0))
+    println("1 + eps/2 == 1: " ++ b(1.0 +. eps /. 2.0 == 1.0))
+    println("inf > 1e308: " ++ b(inf > big))
+    println("-inf < -1e308: " ++ b(ninf < 0.0 -. big))
+    println("inf == -(-inf): " ++ b(inf == 0.0 -. ninf))
+    println("nan == nan: " ++ b(nan == nan))
+    println("nan != nan: " ++ b(nan != nan))
+
+    println("-- float_is_nan")
+    println("is_nan(nan): " ++ b(float_is_nan(nan)))
+    println("is_nan(inf): " ++ b(float_is_nan(inf)))
+    println("is_nan(-inf): " ++ b(float_is_nan(ninf)))
+    println("is_nan(1.5): " ++ b(float_is_nan(1.5)))
+    println("is_nan(0.0): " ++ b(float_is_nan(0.0)))
+    println("is_nan(inf - inf): " ++ b(float_is_nan(inf -. inf)))
+    println("is_nan(0 * inf): " ++ b(float_is_nan(0.0 *. inf)))
+    println("is_nan(id(nan)): " ++ b(float_is_nan(id(nan))))
+    println("is_nan(id(2.0)): " ++ b(float_is_nan(id(2.0))))
+
+    println("-- float_is_infinite")
+    println("is_infinite(inf): " ++ b(float_is_infinite(inf)))
+    println("is_infinite(-inf): " ++ b(float_is_infinite(ninf)))
+    println("is_infinite(nan): " ++ b(float_is_infinite(nan)))
+    println("is_infinite(1e308): " ++ b(float_is_infinite(big)))
+    println("is_infinite(1e308 * 10): " ++ b(float_is_infinite(big *. 10.0)))
+    println("is_infinite(-1e308 * 10): " ++ b(float_is_infinite((0.0 -. big) *. 10.0)))
+    println("is_infinite(0.0): " ++ b(float_is_infinite(0.0)))
+    println("is_infinite(id(-inf)): " ++ b(float_is_infinite(id(ninf))))
+
+    println("-- through a List(Float) (boxed elements)")
+    let fs = [1.0, nan, inf, ninf, eps]
+    println("nan flags: " ++ join(List.map(fs, fn x -> b(float_is_nan(x)))))
+    println("inf flags: " ++ join(List.map(fs, fn x -> b(float_is_infinite(x)))))
+
+    println("-- typed_array_slice bounds (String elements)")
+    let arr = typed_array_from_list([int_to_string(10), int_to_string(11), int_to_string(12),
+                                     int_to_string(13), int_to_string(14)])
+    println(show_slice(arr, 1, 2))
+    println(show_slice(arr, 0, 5))
+    println(show_slice(arr, 0, 0))
+    println(show_slice(arr, 3, 10))
+    println(show_slice(arr, -2, 3))
+    println(show_slice(arr, -9, 2))
+    println(show_slice(arr, 2, -1))
+    println(show_slice(arr, 5, 1))
+    println(show_slice(arr, 7, 2))
+    println(show_slice(arr, 4, 1))
+
+    println("-- typed_array_slice (Int and Float elements)")
+    let ia = typed_array_from_list([1, 2, 3, 4, 5, 6])
+    println("ints [2..5): " ++ ints(typed_array_to_list(typed_array_slice(ia, 2, 3))))
+    let fa = typed_array_from_list([0.5, nan, inf, -2.25])
+    let fsl = typed_array_slice(fa, 1, 3)
+    println("floats [1..4): " ++ join(List.map(typed_array_to_list(fsl), fn x -> float_to_string(x))))
+    println("float slice get(2) + 1.0: " ++ float_to_string(typed_array_get(typed_array_slice(fa, 1, 3), 2) +. 1.0))
+
+    println("-- the slice outlives its source")
+    let src = typed_array_from_list([int_to_string(1000), int_to_string(2000), int_to_string(3000),
+                                     int_to_string(4000)])
+    let kept = typed_array_slice(src, 1, 2)
+    -- `src` is dead from here: the call above was its last use, so it is
+    -- released. Churn same-sized strings so a freed slot would be reused.
+    let churn = [int_to_string(9999), int_to_string(8888), int_to_string(7777), int_to_string(6666)]
+    println("churn " ++ int_to_string(List.length(churn)))
+    println("kept = [" ++ join(typed_array_to_list(kept)) ++ "]")
+
+    println("-- leak leg")
+    let n = 10000
+    let before = live_allocs()
+    let ran = leak_leg(n, 0)
+    let grew = live_allocs() - before
+    println("iterations " ++ int_to_string(ran) ++ ", flat: " ++ b(grew < n / 2))
+  end
+end

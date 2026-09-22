@@ -128,6 +128,7 @@ void   *march_typed_array_get(void *arr, int64_t i);
 void   *march_typed_array_set(void *arr, int64_t i, void *val);
 void   *march_typed_array_create(int64_t len, void *default_val);
 void   *march_typed_array_map(void *arr, void *f);
+void   *march_typed_array_slice(void *arr, int64_t start, int64_t len);
 void   *march_typed_array_filter(void *arr, void *f);
 void   *march_typed_array_fold(void *arr, void *acc, void *f);
 
@@ -697,6 +698,9 @@ void    march_signal_watch(int64_t code, void *clo);
 void    march_signal_unwatch(int64_t code);
 void    march_signal_raise_self(int64_t code);
 void    march_signal_drain(void);
+/* sigaction(SA_ONSTACK|SA_RESTART) for a handler that may fire on a green
+ * thread's small stack — never plain signal(); see its definition. */
+void    march_install_async_signal(int sig, void (*handler)(int));
 /* Spawn a March thunk closure (fn () -> T) as an async green thread.
  * Returns a boxed Task handle (32 bytes: header + proc ptr + result ptr). */
 void   *march_task_spawn_thunk(void *clo_ptr);
@@ -766,7 +770,7 @@ void *march_list_concat(void *lists);
 int64_t march_file_exists(void *s);
 int64_t march_dir_exists(void *s);
 void   *march_file_open(void *path);
-void   *march_file_close(void *handle);
+int64_t march_file_close(void *handle);
 void   *march_file_read(void *path);
 void   *march_file_read_line(void *handle);
 void   *march_file_read_chunk(void *handle, int64_t size);
@@ -780,7 +784,7 @@ void   *march_file_stat(void *path);
 /* CSV builtins. */
 void   *march_csv_open(void *path, void *delim, void *mode);
 void   *march_csv_next_row(void *handle);
-void   *march_csv_close(void *handle);
+int64_t march_csv_close(void *handle);
 
 /* Resource ownership. */
 void    march_own(void *pid, void *value);

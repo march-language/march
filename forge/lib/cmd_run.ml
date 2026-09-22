@@ -16,8 +16,10 @@ let empty_context = { lib_path_env = ""; ffi_flags = "" }
 
 (** Install the resolved toolchain if absent (so the PATH prefix
     [Cmd_build.lib_path_env] builds actually points at something), then collect
-    the project's search path and FFI shims. *)
-let context_of_project proj =
+    the project's search path and FFI shims.  [interpreted] runs also get the
+    [[ffi.rust]]-is-compile-only warning (see
+    [Cmd_build.interpreted_rust_ffi_diagnostic]) before anything else runs. *)
+let context_of_project ~interpreted proj =
   match Toolchain.ensure_installed () with
   | Error e -> Error e
   | Ok () ->
@@ -25,6 +27,7 @@ let context_of_project proj =
             ~scope:(Cmd_build.build_scope ~release:false proj) proj with
     | Error e -> Error e
     | Ok () ->
+    if interpreted then Cmd_build.warn_interpreted_rust_ffi proj;
     match Cmd_build.ffi_flags_full proj with
     | Error msg -> Error msg
     | Ok ffi_flags -> Ok { lib_path_env = Cmd_build.lib_path_env proj; ffi_flags }
@@ -36,8 +39,9 @@ let context_of_project proj =
     import that project's own modules; with no project it runs bare, the same
     fallback [Cmd_test.run_files] uses for ad-hoc test files.
 
-    Without [file], the project's entry is used and a project is required. *)
-let resolve_entry ?file () =
+    Without [file], the project's entry is used and a project is required.
+    [interpreted] (default false) only controls the [[ffi.rust]] warning. *)
+let resolve_entry ?(interpreted = false) ?file () =
   match file with
   | Some f ->
     if not (Sys.file_exists f) then
@@ -47,7 +51,7 @@ let resolve_entry ?file () =
     else
       (match Project.load () with
        | Error _   -> Ok (f, empty_context)
-       | Ok proj   -> Result.map (fun ctx -> (f, ctx)) (context_of_project proj))
+       | Ok proj   -> Result.map (fun ctx -> (f, ctx)) (context_of_project ~interpreted proj))
   | None ->
     match Project.load () with
     | Error msg -> Error msg
@@ -60,7 +64,7 @@ let resolve_entry ?file () =
       in
       if not (Sys.file_exists entry) then
         Error (Printf.sprintf "entry point not found: %s" entry)
-      else Result.map (fun ctx -> (entry, ctx)) (context_of_project proj)
+      else Result.map (fun ctx -> (entry, ctx)) (context_of_project ~interpreted proj)
 
 (** The shell command for an interpreted run.
 
@@ -144,7 +148,7 @@ let run ?(dump_phases = false) ?(compiled = false) ?target ?file ?(args = []) ()
      | Error msg -> Error msg
      | Ok output -> exec_output ~target ~args output)
   | false, _ ->
-    (match resolve_entry ?file () with
+    (match resolve_entry ~interpreted:true ?file () with
      | Error msg -> Error msg
      | Ok (entry, ctx) ->
        let dump_flag = if dump_phases then " --dump-phases" else "" in

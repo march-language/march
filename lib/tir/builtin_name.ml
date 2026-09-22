@@ -22,6 +22,12 @@ type t =
   | Bool_to_string
   | Chan_choose
   | Chan_send
+  | Float_epsilon
+  | Float_infinity
+  | Float_is_infinite
+  | Float_is_nan
+  | Float_nan
+  | Float_neg_infinity
   | Float_to_string
   | Get_work_pool
   | Html_auto_escape
@@ -85,6 +91,12 @@ let to_string = function
   | Bool_to_string -> "bool_to_string"
   | Chan_choose -> "chan_choose"
   | Chan_send -> "chan_send"
+  | Float_epsilon -> "float_epsilon"
+  | Float_infinity -> "float_infinity"
+  | Float_is_infinite -> "float_is_infinite"
+  | Float_is_nan -> "float_is_nan"
+  | Float_nan -> "float_nan"
+  | Float_neg_infinity -> "float_neg_infinity"
   | Float_to_string -> "float_to_string"
   | Get_work_pool -> "get_work_pool"
   | Html_auto_escape -> "html_auto_escape"
@@ -141,6 +153,8 @@ let to_string = function
 
 let all =
   [ Actor_register; Actor_reply; Bool_to_string; Chan_choose; Chan_send;
+    Float_epsilon; Float_infinity; Float_is_infinite; Float_is_nan;
+    Float_nan; Float_neg_infinity;
     Float_to_string; Get_work_pool; Html_auto_escape; Html_escape_ctx;
     String_concat_n;
     Int_abs; Int_div; Int_div_euclid; Int_max_value; Int_min_value;

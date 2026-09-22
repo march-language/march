@@ -191,6 +191,103 @@ let test_fix_contracts_inserts_and_is_idempotent () =
       Alcotest.(check string) "file unchanged by the second run" after
         (read_file_text f))
 
+(* Every place a function's leading prose can sit, one reuse-candidate
+   function per shape.  `contracts_module` has none of them, which is how the
+   doc-string parse error (specs/progress/2026-09-22-forge-fix-contracts-
+   comment-block.md) survived: an attribute is legal ONLY directly before
+   `fn` -- after the `doc` string and below any `--` comment -- and a fix
+   that lands anywhere else either reads wrong or does not parse. *)
+let contracts_documented_module ~mod_name =
+  let fn_ name k =
+    Printf.sprintf
+      "fn %s(b : Box) : Box do\n\
+      \    match b do\n\
+      \      Box(x, y) -> Box(x + %d, y)\n\
+      \    end\n\
+      \  end\n\n" name k in
+  Printf.sprintf
+    "mod %s do\n\n\
+    \  ptype Box = Box(Int, String)\n\n\
+    \  -- A leading comment block,\n\
+    \  -- two lines long.\n\
+    \  %s\
+    \  doc \"A documented function.\"\n\
+    \  %s\
+    \  -- A comment above a doc string.\n\
+    \  doc \"Documented and commented.\"\n\
+    \  %s\
+    \  doc \"A doc string above a comment.\"\n\
+    \  -- The comment between them.\n\
+    \  %s\
+    \  doc \"The doc on the fn's own line.\" %s\
+    \  @[no_warn_recursion] %s\
+     end\n"
+    mod_name
+    (fn_ "commented" 1) (fn_ "documented" 2) (fn_ "comment_then_doc" 3)
+    (fn_ "doc_then_comment" 4) (fn_ "same_line_doc" 5) (fn_ "same_line_attr" 6)
+
+let test_fix_contracts_documented_result_compiles () =
+  setup_hermetic_march ();
+  with_project ~project_type:Project.Lib (fun name root ->
+      ignore name;
+      let f = Filename.concat (Filename.concat root "lib") "docs.march" in
+      write_file f (contracts_documented_module ~mod_name:"Docs");
+      (* The fixture itself must compile, or a later parse failure proves
+         nothing about the fix. *)
+      let check_rc () =
+        let tmp = Filename.temp_file "fix_contracts_check" ".out" in
+        let rc = Sys.command
+            (Printf.sprintf "march --check %s > %s 2>&1"
+               (Filename.quote f) (Filename.quote tmp)) in
+        let out = read_file_text tmp in
+        (try Sys.remove tmp with Sys_error _ -> ());
+        (rc, out) in
+      (match check_rc () with
+       | (0, _) -> ()
+       | (rc, out) -> Alcotest.failf "fixture does not check (rc=%d):\n%s" rc out);
+      let names = [ "commented"; "documented"; "comment_then_doc";
+                    "doc_then_comment"; "same_line_doc"; "same_line_attr" ] in
+      let (rc, out) = report_contracts_output f in
+      List.iter (fun n ->
+          if rc <> 0 || not (contains out ("`" ^ n ^ "`")) then
+            Alcotest.failf "--report-contracts did not report `%s` (rc=%d):\n%s"
+              n rc out) names;
+      (match Cmd_fix.run ~contracts:true () with
+       | Ok _ -> ()
+       | Error e -> Alcotest.failf "forge fix --contracts failed: %s" e);
+      let after = read_file_text f in
+      (* The fixed file must still parse and typecheck. *)
+      (match check_rc () with
+       | (0, _) -> ()
+       | (rc, out) ->
+         Alcotest.failf "the fixed file does not check (rc=%d):\n%s\n--- file ---\n%s"
+           rc out after);
+      (* ...with the attribute on the right function, below the prose. *)
+      List.iter (fun (what, frag) ->
+          if not (contains after frag) then
+            Alcotest.failf "%s: expected %S in\n%s" what frag after)
+        [ "below the comment block",
+          "  -- two lines long.\n  @[no_alloc]\n  fn commented(";
+          "below the doc string",
+          "  doc \"A documented function.\"\n  @[no_alloc]\n  fn documented(";
+          "below comment and doc",
+          "  doc \"Documented and commented.\"\n  @[no_alloc]\n  fn comment_then_doc(";
+          "below doc and comment",
+          "  -- The comment between them.\n  @[no_alloc]\n  fn doc_then_comment(";
+          "inline after a same-line doc",
+          "  doc \"The doc on the fn's own line.\" @[no_alloc] fn same_line_doc(";
+          "inline after a same-line attribute",
+          "  @[no_warn_recursion] @[no_alloc] fn same_line_attr(" ];
+      (* Every function now carries the attribute, so nothing is left to
+         report and a second run is a no-op. *)
+      let (rc2, out2) = report_contracts_output f in
+      if rc2 <> 0 || contains out2 "no_alloc_candidate" then
+        Alcotest.failf "second --report-contracts still reports (rc=%d):\n%s" rc2 out2;
+      (match Cmd_fix.run ~contracts:true () with
+       | Ok _ -> () | Error e -> Alcotest.failf "second run failed: %s" e);
+      Alcotest.(check string) "file unchanged by the second run" after
+        (read_file_text f))
+
 let test_fix_without_contracts_inserts_nothing () =
   setup_hermetic_march ();
   with_project ~project_type:Project.Lib (fun name root ->
@@ -790,6 +887,8 @@ let () =
     "forge fix --contracts", [
       Alcotest.test_case "inserts @[no_alloc] and is idempotent" `Quick
         test_fix_contracts_inserts_and_is_idempotent;
+      Alcotest.test_case "documented and commented fns: result compiles" `Quick
+        test_fix_contracts_documented_result_compiles;
       Alcotest.test_case "plain forge fix inserts no contract" `Quick
         test_fix_without_contracts_inserts_nothing;
       Alcotest.test_case "forge.toml globs widen the scope" `Quick

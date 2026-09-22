@@ -839,6 +839,9 @@ type builtin_group =
 
 let builtin_group : Builtin_name.t -> builtin_group = function
   | Builtin_name.Bool_to_string | Builtin_name.Float_to_string
+  | Builtin_name.Float_epsilon | Builtin_name.Float_infinity
+  | Builtin_name.Float_is_infinite | Builtin_name.Float_is_nan
+  | Builtin_name.Float_nan | Builtin_name.Float_neg_infinity
   | Builtin_name.Int_abs | Builtin_name.Int_div
   | Builtin_name.Int_div_euclid | Builtin_name.Int_max_value
   | Builtin_name.Int_min_value | Builtin_name.Int_mod
@@ -1630,6 +1633,58 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, _)
     when Builtin_name.is Builtin_name.Int_min_value f.Tir.v_name ->
     ("i64", "-9223372036854775808")
+
+  (* ── Float constants and classification predicates ──────────────────
+     float_nan / float_infinity / float_neg_infinity / float_epsilon are
+     inline IEEE-754 constants in LLVM's 16-hex-digit double syntax (the
+     same spelling [emit_atom] uses for a Float literal).  The bits are
+     taken from OCaml's own values, which are exactly what the interpreter
+     returns (Eval_builtins: Float.nan / Float.infinity / Float.neg_infinity
+     / epsilon_float), so the two backends agree bit-for-bit, NaN payload
+     included (OCaml's Float.nan is 0x7FF8000000000001, not the canonical
+     0x7FF8000000000000).  Before these arms the names fell through to the
+     generic extern-call path and the link failed on `_float_nan` & co.
+
+     float_is_nan is `fcmp uno x, x` (true iff x is NaN); float_is_infinite
+     is `x == +inf || x == -inf` with ORDERED predicates, so NaN answers
+     false, as OCaml's Float.is_infinite does (two compares rather than
+     llvm.fabs, which would need a new preamble declare).  Both return a
+     March Bool, i.e. an i64 0/1, like the comparison operators.  The operand is
+     coerced to double, which unboxes a Float arriving through an erased
+     (ptr) slot.  No fast-math flags: `nnan`/`ninf` would let LLVM fold
+     these tests to a constant. *)
+  | Tir.EApp (f, _)
+    when Builtin_name.(is Float_nan f.Tir.v_name || is Float_infinity f.Tir.v_name
+                       || is Float_neg_infinity f.Tir.v_name
+                       || is Float_epsilon f.Tir.v_name) ->
+    let v = match f.Tir.v_name with
+      | "float_nan"          -> Float.nan
+      | "float_infinity"     -> Float.infinity
+      | "float_neg_infinity" -> Float.neg_infinity
+      | "float_epsilon"      -> Float.epsilon
+      | _                    -> assert false
+    in
+    ("double", Printf.sprintf "0x%016LX" (Int64.bits_of_float v))
+
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Float_is_nan f.Tir.v_name ->
+    let va = emit_atom_as ctx "double" a in
+    let c = fresh ctx "fisnan" in
+    let r = fresh ctx "ar" in
+    emit ctx (Printf.sprintf "%s = fcmp uno double %s, %s" c va va);
+    emit ctx (Printf.sprintf "%s = zext i1 %s to i64" r c);
+    ("i64", r)
+
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Float_is_infinite f.Tir.v_name ->
+    let va = emit_atom_as ctx "double" a in
+    let cp = fresh ctx "fisinf" in
+    let cn = fresh ctx "fisinf" in
+    let c = fresh ctx "fisinf" in
+    let r = fresh ctx "ar" in
+    emit ctx (Printf.sprintf "%s = fcmp oeq double %s, 0x7FF0000000000000" cp va);
+    emit ctx (Printf.sprintf "%s = fcmp oeq double %s, 0xFFF0000000000000" cn va);
+    emit ctx (Printf.sprintf "%s = or i1 %s, %s" c cp cn);
+    emit ctx (Printf.sprintf "%s = zext i1 %s to i64" r c);
+    ("i64", r)
 
   (* ── Vault stores: the value is a heterogeneous void pointer and MUST be the
      uniform tagged representation so it round-trips through Vault.get →

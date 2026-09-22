@@ -1,0 +1,5 @@
+file_close == :ok: true
+file_close renders: :ok
+csv_close == :ok: true
+csv_close renders: :ok
+csv_close twice == :ok: true

@@ -49,7 +49,9 @@ let run () =
        extern from a dependency's [[ffi]] sources dies with "symbol not found
        for interpreter FFI".  The flags go AFTER the entry file so an older
        `march` — which reads argv.(2) as the preload file — still behaves
-       exactly as before. *)
+       exactly as before.  The REPL is interpreted, so a [[ffi.rust]]-only
+       project gets the compile-only warning first. *)
+    Cmd_build.warn_interpreted_rust_ffi proj;
     match Cmd_build.ffi_flags_full proj with
     | Error msg -> Error msg
     | Ok ffi_flags ->

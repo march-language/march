@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
   `MARCH_TRMC` (already a no-op) is unchanged.
 
 ### Changed
+- **An interpreted run of a `[ffi.rust]`-only project now says up front that
+  Rust FFI is compiled-only.** `forge run`, `forge interactive` and interpreted
+  `forge test` (`--coverage` / `MARCH_TEST_INTERPRETER=1`) print one warning
+  naming the crate and pointing at `forge run --compiled` / `forge build` /
+  `forge test`, instead of leaving only the generic "symbol not found for
+  interpreter FFI" at the first extern call. Cargo's static archive cannot be
+  loaded by the interpreter; projects that also have `[ffi] sources` are not
+  warned.
 - **A path scope that could not take effect is now a compile error instead of
   being silently ignored.** `needs IO.Network("/etc")` (only `IO.FileRead`,
   `IO.FileWrite` and `IO.FileSystem` take a scope, so this includes `needs
@@ -99,6 +107,11 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A scheduler thread that cannot be created is reported instead of crashing the program at
+  exit.** Under a process/thread limit (a container `pids` limit, `ulimit -u`) a compiled
+  program could run to completion and then die with SIGSEGV while joining a thread that was
+  never started. It now prints how many scheduler threads it is running on and carries on
+  with those.
 - **A hot deploy that changes an actor's state no longer runs new handlers on
   old state.** Messages already in an actor's mailbox when the deploy landed
   were handled by the new code against the old-shaped state, which could read
@@ -115,6 +128,31 @@ git log is authoritative for exact commits.
   own dependencies. The build's transitive walk ignored `forge.lock`, so it
   dropped the dependencies of any dependency that had more than one version
   cached.
+- **`float_nan`, `float_infinity`, `float_neg_infinity`, `float_epsilon`,
+  `float_is_nan`, `float_is_infinite` and `typed_array_slice` now work in
+  compiled programs.** They typechecked and ran interpreted, but `--compile`
+  failed at link time with `Undefined symbols: _float_nan` (and so on). The
+  compiled results match the interpreter exactly, including the NaN bits and
+  `typed_array_slice`'s clamping of out-of-range bounds. A new test fails when a
+  typechecked builtin has no compiled lowering and is not explicitly listed as
+  interpreter-only.
+- **`forge fix --contracts` no longer breaks a function whose `doc` string
+  shares its line.** On `doc "…" fn f(…)` (or `@[attr] fn f(…)`) the fix put
+  `@[no_alloc]` on the line above, in front of the `doc`, and the file stopped
+  parsing. It now goes inline, just before `fn`. A function whose `fn` starts
+  its own line still gets the attribute on the line directly above it, below
+  any `--` comment block and after the `doc` string, which is how the stdlib
+  writes it.
+- **`--refine-report` and the compiler's errors now agree on inductive
+  postconditions.** For a recursive function over a list or tree, the report
+  could count a postcondition as `violated` while the program compiled cleanly,
+  including for true contracts such as a `copy2` that walks a list two elements
+  at a time. A violation now counts only when running the function reproduces it,
+  and it is then reported as an error naming the failing call (for example
+  `grow([]) returns []`). Anything the checker cannot reproduce is counted as
+  skipped (`refuted-unconfirmed`). Relatedly, an inner pattern that reuses an
+  outer name (`Cons(h2, t)` inside the arm that bound `t`) no longer lets a false
+  contract count as proved; that return is now skipped.
 - **A linear value can no longer be discarded with `let _ = …`.** A `_` binding
   counted as the value's one use whenever the value was linear because of how it
   was *bound* rather than what its type says — a `linear x : a` parameter or a
@@ -126,6 +164,12 @@ git log is authoritative for exact commits.
   own, narrower rule — only a `Chan` that reached `End` must be closed, so a
   mid-protocol drop is still legal. See `docs/linear-types.md`.
 
+- **A watched signal no longer crashes a compiled program on Linux/aarch64.**
+  Any signal handled by the runtime (`Signal.watch`, or SIGTERM/SIGINT while an
+  HTTP server is listening) could arrive on a green thread's small stack, and
+  an arm64 Linux signal frame does not fit there. `Signal.raise` of a watched
+  signal died every time with `fatal SIGSEGV si_code=128 addr=0x0`. The
+  handlers now run on the scheduler thread's alternate signal stack.
 - **March no longer takes over a host process's SIGUSR1.** Preemption replaced any
   existing SIGUSR1 handler for good, so March embedded in another program (the
   Erlang VM uses SIGUSR1 for crash dumps) silently disabled the host's handler.
@@ -159,6 +203,11 @@ git log is authoritative for exact commits.
   capability ceiling was emitted as `"verdict":"accept"` with exit 0, and without the
   diagnostic, while `--check` rejected it. Both are now folded into the JSON's verdict and
   `"diagnostics"`.
+- **`file_close` and `csv_close` return `:ok` compiled, as they always did interpreted.**
+  Compiled code returned a heap `Ok(())` cell, so `csv_close(h) == :ok` was `false` and
+  the result printed as `:<atom>`. `file_close`'s declared type changes from `Unit` to
+  `Atom` to match; code that ignores the result is unaffected. A second `file_close`
+  on the same handle is now a no-op rather than a double close.
 - **Two mutually tail-recursive functions passing a string or list along no longer read
   freed memory.** The compiled mutual-tail-call loop released a forwarded argument on the
   back edge, one iteration before its next read (`refused: no-y; refused: no-y` for an
