@@ -58,7 +58,8 @@ let run ?(filter = "") ?(json = false) () =
           let bin = Filename.concat out_dir name in
           Printf.eprintf "  compiling %s ...\n%!" name;
           let (crc, _, _) =
-            Cmd_build.compile_entry ~lib_path_env ~ffi_flags:"" ~output:bin ~release:true ~dump_phases:false path
+            Cmd_build.compile_entry ~lib_path_env ~ffi_flags:"" ~output:bin ~release:true ~dump_phases:false
+              ~pin_main:proj.Project.pin_main path
           in
           if crc <> 0 then (name, 0.0, false)
           else begin
