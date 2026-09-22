@@ -14,7 +14,7 @@ mod Main do
   -- (two protocols project, and the generated `<P>_Message` types coexist);
   -- the REGRESSION witness is test/session/in_process.march, which runs two
   -- protocols on both backends against one golden. Its twin here is
-  -- reject/t286, which does move.
+  -- reject/t292, which does move.
   needs IO
   needs IO.Console
   needs IO.Mut

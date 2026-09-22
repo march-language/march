@@ -3,7 +3,7 @@ mod Main do
   -- `@[endpoints] protocol P` reserves the type name `P_Message` (the message
   -- type inside the generated `P_Msg` module, named after its protocol since
   -- 2026-09-22 so that two protocols in one module do not share the short
-  -- name `Msg` that impl dispatch keys on -- see accept/t285).
+  -- name `Msg` that impl dispatch keys on -- see accept/t291).
   --
   -- The cost of that reservation, pinned here: a user type called
   -- `Stream_Message` that derives an interface the generated codec also

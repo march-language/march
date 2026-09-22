@@ -4507,6 +4507,13 @@ close) ∧ (a second use errors immediately).
   `Linear values must be consumed exactly once, did you mean to pass it somewhere?`
 - **(T-AffDrop)**: the same check FILTERS to `Linear` only: an affine value
   may be silently dropped (verified accept: an unused `c : affine T` param).
+- **(T-LinMove)**: a plain `let x = e` whose `e` IS a tracked binding (a
+  variable, a linear field's `r#f` sentinel, or either under an annotation)
+  consumes it and binds `x` at that binding's linearity, even when `e`'s TYPE
+  is plain (a `linear h : Res` parameter). `ELet`'s auto-promotion used to
+  read only the RHS type, so `let h2 = h` bound an Unrestricted `h2` that
+  could be dropped silently (fixed 2026-09-22; `reject/t285`, `accept/t286`).
+  Session channels are excluded: they keep their own must-close accounting.
 
 A message `send(pid, Ctor(x))` is an ordinary consuming use of `x` (the
 `EVar` inside the payload triggers `record_use`); a linear value MAY be

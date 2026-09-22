@@ -100,7 +100,7 @@ What this fix *does* add is one reserved name per protocol: `<P>_Message`. A
 user type called `Stream_Message` deriving the same interface the generated
 codec derives is now an **overlapping implementation** — a loud typecheck error,
 exit 1 on both backends. That is the trade being made deliberately: a loud
-rejection replaces a silent misdispatch. Pinned by `reject/t286` and documented
+rejection replaces a silent misdispatch. Pinned by `reject/t292` and documented
 in `specs/lang/choreography.md` / `docs/choreography.md` ("Names `P` reserves").
 
 ## Witnesses
@@ -119,11 +119,11 @@ in `specs/lang/choreography.md` / `docs/choreography.md` ("Names `P` reserves").
   this bug. They are recombined; `in_process_logging.{march,expected}` and its
   `test/dune` rules are deleted, and the golden is the concatenation of the two
   old ones, unchanged line for line.
-- `specs/lang/types/accept/t285_endpoints_two_protocols_one_module.march` — two
+- `specs/lang/types/accept/t291_endpoints_two_protocols_one_module.march` — two
   protocols in one module, both used, `--check` exit 0. Honestly labelled in its
   own header and in the INDEX row: `--check` was green before AND after, so this
   is a well-typedness witness, not a regression detector.
-- `specs/lang/types/reject/t286_endpoints_message_type_name_reserved.march` — the
+- `specs/lang/types/reject/t292_endpoints_message_type_name_reserved.march` — the
   reserved-name cost. This one does move: it is accepted pre-fix and rejected
   post-fix.
 - `test/test_endpoints.ml` — three generator-shape cases: the message type is
