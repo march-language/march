@@ -144,8 +144,59 @@ The interpreter executes spawned tasks eagerly, so `pmap` there is *correct but 
 
 Parallelism isn't free: spawning and joining tasks costs something. For a short list, sequential `map` wins decisively. So `pmap`, `pfilter`, and `preduce` consult a **cutoff** before deciding:
 
-- **Below the cutoff** → they delegate to the plain sequential version. No tasks, no overhead.
-- **At or above the cutoff** → they chunk and parallelize as described above.
+- **At or below the cutoff** → they delegate to the plain sequential version. No tasks, no overhead.
+- **Above the cutoff** → they chunk and parallelize as described above.
+
+### What actually happens when you call `pmap`
+
+`pmap` isn't a special compiler intrinsic; it's ordinary March code in the stdlib,
+built on the exact same [`task_spawn`/`task_await_unwrap`]({{ site.baseurl }}/docs/actors/)
+primitives you could call yourself. Stripped down, `List.pmap(xs, f)` does this:
+
+```march
+fn pmap(xs : List(a), f : a -> b) : List(b) do
+  let t = pmap_threshold()
+  if length(xs) <= t do
+    map(xs, f)                                              -- at/below cutoff: plain sequential map
+  else do
+    let cs    = chunks(xs, t)                                -- split into t-sized chunks
+    let tasks = map(cs, fn c -> task_spawn(fn _ -> map(c, f)))  -- one task per chunk
+    concat(map(tasks, fn tk -> task_await_unwrap(tk)))       -- await in order, join results
+  end
+  end
+end
+```
+
+(`pfilter` and `preduce` follow the identical shape, swapping `map` for `filter` /
+`fold_left`.) Walking through it:
+
+1. **The check is one length count and comparison, done fresh on every call.** `length(xs)`
+   is a runtime value (the compiler has no way to know it ahead of time), so this
+   comparison against the threshold has to happen live, each time `pmap` runs. Counting a
+   list is a single O(n) walk with no calls to `f`, so it is cheap next to the work being
+   parallelized.
+2. **At or below the cutoff, it's *literally* `map`.** No task, no scheduler involvement, no
+   overhead beyond the length check you just paid for.
+3. **Above it, the chunk size *is* the threshold.** `chunks(xs, t)` splits the
+   list into pieces of `t` elements each; this is why the earlier diagram shows a
+   4000-element list splitting into 4 chunks at the default threshold of 1024
+   (`⌈4000 / 1024⌉ = 4`). Each chunk becomes one `task_spawn`, so the number of tasks
+   tracks `length(xs) / t`, not `length(xs)`.
+4. **The tasks are awaited in order, which is what keeps the result order-preserving.**
+   `task_await_unwrap` runs on chunk 0's task, then chunk 1's, and so on. But all the
+   tasks were already spawned before any awaiting starts, so this doesn't serialize the
+   *work*, only the order results are collected in.
+5. **What "spawn" means depends on the backend**, exactly as in [The
+   scheduler](#the-scheduler) above. Compiled, `task_spawn` starts a real green thread
+   that the M:N scheduler can run on any OS thread. Interpreted, `task_spawn` evaluates
+   its function **immediately, synchronously, right there**, so even the "parallel"
+   branch above the threshold runs chunk 0 to completion, then chunk 1, then chunk 2, in
+   plain left-to-right order, on one thread. That's *why* the interpreter is guaranteed
+   to produce the same result as the sequential version: it isn't a special case, just
+   the same code evaluated by a backend that has no concurrency to offer. And it's *why*
+   the interpreter never gets faster no matter how large the list is.
+
+### The threshold value itself
 
 The cutoff is returned by the builtin `pmap_threshold()` and defaults to **1024 elements**. You can change it at compile time:
 
@@ -156,6 +207,11 @@ MARCH_PMAP_THRESHOLD=256 forge build
 ```
 
 The value is baked into the binary as a compile-time constant; there's no per-call runtime configuration to read.
+The same `--pmap-threshold` flag also works when running **interpreted**
+(`march --pmap-threshold=256 app.march`, no `--compile`); there it just sets the value
+`pmap_threshold()` returns for that one run, which is occasionally useful for testing how
+your code behaves at a different cutoff without a full compile, even though it won't
+affect wall-clock time either way in the interpreter.
 
 ### Why a runtime cutoff instead of the type system?
 
@@ -224,7 +280,8 @@ byte interpreted and compiled (stress-verified 0/15 crashes), the first compiled
 witness for the `Parallel` module. One documented exception: **`psum_float`
 is not backend-portable**: IEEE-754 `+.` is not associative, and the two
 backends pick different worker/chunk counts, so results can differ in the
-last bit (finding P1, `specs/todos/`). Prefer `psum`/integer accumulation,
+last bit (finding P1, closed 2026-09-09 by a doc-comment warning on `psum_float`;
+see `specs/progress/2026-07-10-p2-compiler-parallelism-clustering-found-during-core-march.md`). Prefer `psum`/integer accumulation,
 or pin `psum_float` inputs that are exact in binary, when portability matters.
 
 ---
