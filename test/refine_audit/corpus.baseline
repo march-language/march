@@ -64,6 +64,8 @@ native_cap_dictionary: coverage audit (user + stdlib): 114 enforced, 0 inert (wa
 native_cap_dictionary: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_cap_epoch_plane: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_cap_epoch_plane: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_close_returns_ok_atom: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_close_returns_ok_atom: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_closure_bool_field: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_closure_bool_field: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_closure_call_arg_ownership_probe: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced

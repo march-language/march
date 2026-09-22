@@ -158,6 +158,11 @@ git log is authoritative for exact commits.
   capability ceiling was emitted as `"verdict":"accept"` with exit 0, and without the
   diagnostic, while `--check` rejected it. Both are now folded into the JSON's verdict and
   `"diagnostics"`.
+- **`file_close` and `csv_close` return `:ok` compiled, as they always did interpreted.**
+  Compiled code returned a heap `Ok(())` cell, so `csv_close(h) == :ok` was `false` and
+  the result printed as `:<atom>`. `file_close`'s declared type changes from `Unit` to
+  `Atom` to match; code that ignores the result is unaffected. A second `file_close`
+  on the same handle is now a no-op rather than a double close.
 - **Two mutually tail-recursive functions passing a string or list along no longer read
   freed memory.** The compiled mutual-tail-call loop released a forwarded argument on the
   back edge, one iteration before its next read (`refused: no-y; refused: no-y` for an
