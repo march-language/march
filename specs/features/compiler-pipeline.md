@@ -130,8 +130,9 @@ Source Code
 >   `@[vectorize]` attributes can be matched by name equality. Skipped for the
 >   JS target.
 > - **`Trmc.report` + `Trmc.transform_module`** run between Lower and Mono. The
->   transform is **off by default** (gated on `--trmc` / `MARCH_TRMC`); the
->   report is gated on `MARCH_TRMC_REPORT`. It must run this early because by
+>   transform **always runs** (there is no flag or env var to turn it off since
+>   2026-09-22: the stdlib's list producers depend on it); the report is gated
+>   on `MARCH_TRMC_REPORT`. It must run this early because by
 >   Perceus the stdlib's nested `go` helpers are closures invoked via
 >   `ECallPtr`, so self-recursion is no longer syntactically visible.
 > - **`Policy_dce.audit`** runs after Fusion. It is an audit, not a transform:
@@ -1254,7 +1255,7 @@ Renders TIR expressions and types as readable text for debugging (`--dump-tir`).
 | Allocation contracts | `lib/tir/alloc_contract.ml` | ✓ Complete (`@[no_alloc]`; runs last, immediately before Llvm_emit) |
 | Shared pipeline tail | `lib/tir/contract_pipeline.ml` | ✓ Complete (Trmc→Native_map_inline; used by both `bin/main.ml` and the LSP) |
 | Policy-DCE audit | `lib/tir/policy_dce.ml` | ✓ Complete (audit only: reports and exits, does not transform; its `NoAlloc` arm defers to `alloc_contract.ml`) |
-| TRMC | `lib/tir/trmc.ml` | ⚠ **Off by default**: opt-in via `--trmc` / `MARCH_TRMC`; report gated on `MARCH_TRMC_REPORT` |
+| TRMC | `lib/tir/trmc.ml` | ✓ Always on (no off switch); report gated on `MARCH_TRMC_REPORT` |
 | LLVM Emission | `lib/tir/llvm_emit.ml` | ✓ Substantial (constructor collision & arity mismatch fixed) |
 | Code Generation | `lib/codegen/codegen.ml` | ⚠ Stub, **but see §17: code generation ships, it just does not live here** |
 | Effects System | `lib/effects/effects.ml` | ⚠ Shim, not on the compile path; capabilities **are** enforced, via `Typecheck.check_module_needs` (§19) |
@@ -1337,7 +1338,7 @@ Type Checking → (type_map)
                ↓
          Vectorize_mark (names still == source names here)
                ↓
-            TRMC (off by default; --trmc / MARCH_TRMC)
+            TRMC (always on)
                ↓
          Monomorphization (eliminates TVar)
                ↓

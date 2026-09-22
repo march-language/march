@@ -40,27 +40,12 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     ?(after_fusion = fun _ -> ()) ?(before_perceus = fun ~k_table:_ _ -> ())
     ?(before_opt = fun _ -> ()) ?(extra_roots = [])
     ?(wasm_island = false) ?(is_js = false) ?(hot_reload = None)
-    ?iface_methods ?(decls = []) ~opt ~trmc (tir : Tir.tir_module) : result =
+    ?iface_methods ?(decls = []) ~opt (tir : Tir.tir_module) : result =
   let decls = Alloc_contract.resolve_names decls tir in
   (* TRMC eligibility analysis (gated on MARCH_TRMC_REPORT).  Must run here:
      by tir-perceus the stdlib's nested `go` helpers are closures invoked via
      ECallPtr, so self-recursion is no longer syntactically visible. *)
   Trmc.report tir;
-  (* The same analysis feeds the @[no_alloc] --trmc hint: which annotated
-     functions TRMC would transform.  Taken on the pre-transform TIR, by the
-     pre-Mono name the contract is keyed on. *)
-  let trmc_eligible =
-    let contracts = List.filter (fun d -> d.Alloc_contract.d_form <> None) decls in
-    if contracts = [] then (fun _ -> false)
-    else begin
-      let eligible = Hashtbl.create 16 in
-      List.iter (fun r ->
-          if Trmc.verdict_of r = Trmc.Eligible then
-            Hashtbl.replace eligible r.Trmc.r_fn ())
-        (Trmc.analyze_module tir);
-      fun n -> Hashtbl.mem eligible n
-    end
-  in
   (* Annotated functions must survive DCE so their own (optimised) bodies
      can be judged even when every caller inlined them. *)
   let extra_roots =
@@ -71,7 +56,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
                | Alloc_contract.Transient) -> Some d.Alloc_contract.d_name
         | _ -> None) decls
   in
-  let tir = Trmc.transform_module ~enabled:trmc tir in
+  let tir = Trmc.transform_module tir in
   (* For WASM island targets, mark render/update/init as exported.
      Set exports BEFORE monomorphization so the functions get mono'd. *)
   let tir =
@@ -247,7 +232,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let allocating = Alloc_contract.allocating_fns ~k_table ~decls tir in
   let retaining = Alloc_contract.retaining_fns ~k_table ~decls tir in
   let contract_diags =
-    Alloc_contract.check ~decls ~allocating ~retaining ~opt ~trmc ~trmc_eligible tir in
+    Alloc_contract.check ~decls ~allocating ~retaining ~opt tir in
   { pre_opt; final = tir; vectorize_diags; contract_diags; allocating; retaining; k_table }
 
 (** The allocation contracts, judged without emitting anything: what `march
@@ -263,7 +248,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     compiled backend does not support), each obligation gets a
     [no_alloc_unchecked] warning instead of a rejection: the check could not
     run, which is not evidence the contract is broken. *)
-let check_contracts ?type_map ~opt ~trmc ~(user_decls : Alloc_contract.decl_info list)
+let check_contracts ?type_map ~opt ~(user_decls : Alloc_contract.decl_info list)
     (m : March_ast.Ast.module_) : March_errors.Errors.diagnostic list =
   if not (List.exists Alloc_contract.is_obligation user_decls) then []
   else
@@ -271,7 +256,7 @@ let check_contracts ?type_map ~opt ~trmc ~(user_decls : Alloc_contract.decl_info
       (try
          let tir = Lower.lower_module ?type_map m in
          let iface_methods = Lower.get_iface_methods () in
-         let pipe = run ~iface_methods ~decls:(Alloc_contract.collect m) ~opt ~trmc tir in
+         let pipe = run ~iface_methods ~decls:(Alloc_contract.collect m) ~opt tir in
          Ok pipe.contract_diags
        with
        | (Out_of_memory | Stack_overflow) as e -> raise e
