@@ -722,11 +722,24 @@ through its session, and only that session is cancelled.
 ## Testing without a network
 
 The generated role modules do not know about sockets. They talk to whatever transport the
-session was created with. For unit tests, attach an in-process transport with
-`Session.attach` and run every role in one program; the [Session Types]({{ site.baseurl }}/docs/session-types/#swapping-the-transport-session)
-page shows how, and `test/session/stream_actor_events.march` in the compiler repository has a
-complete in-process transport in about sixty lines. The same role functions then run
-unchanged on the network.
+session was created with. For unit tests, attach the standard library's in-process transport
+and run every role in one program:
+
+```march
+let t = Session.in_process()
+let s = Session.attach(io, t.ops)
+let _ = cons(s, Stream_Cons.register(s, 0), 2)
+let _ = prod(s, Stream_Prod.register(s, 0), 1)
+t.drain(())
+```
+
+Failure paths are testable in-process too. A role that leaves or is cancelled cancels the
+peers waiting on it, a message the receiver cannot decode cancels the receiver, and
+`t.crash(role, cause)` makes a role crash without running it, so a peer's `or crash`
+branch runs. `Session.in_process_with(print_line)` prints what the transport itself does.
+The [Session Types]({{ site.baseurl }}/docs/session-types/#swapping-the-transport-session)
+page has the details, and `test/session/in_process.march` in the compiler repository runs
+each case. The same role functions then run unchanged on the network.
 
 ## Configuration
 

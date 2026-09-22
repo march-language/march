@@ -33,6 +33,14 @@ git log is authoritative for exact commits.
   linearity that stops a session being replayed or abandoned is unchanged, and each
   role's `Entry` still resolves to its own state rather than to one type shared
   across roles. The `S_` spellings keep working.
+- **`Session.in_process()`: a network-free session transport in the standard library.**
+  Attach it with `Session.attach(io, t.ops)`, run every role in one program, and
+  `t.drain(())` to deliver. Failure paths work as on the network: a role that leaves
+  cancels the peers waiting on it, an undecodable message cancels its receiver, and
+  `t.crash(role, cause)` sends a waiting peer down its `or crash` branch.
+  `Session.in_process_with(trace)` reports what the transport itself does, and
+  `t.take(())` serves endpoints hosted in actors. Replaces the hand-written
+  `Session.Ops` the guide used to point at.
 - **`MARCH_PREEMPT_SIGNAL` chooses the green-thread preemption signal** (`USR1`,
   the default, `USR2`, or on Linux `RTMIN[+n]`); embedders can call
   `march_sched_set_preempt_signal`. `Signal.watch` reserves whichever signal is

@@ -1,0 +1,20 @@
+-- C's Read is queued before L's Trigger
+C sends Read
+L sends Trigger
+I got Trigger
+I got Read(disk 42%)
+L got Read(disk 42%)
+  transport: close 1
+I got Report(true)
+  transport: close 2
+C got Report(true)
+  transport: close 3
+-- C crashes before sending
+L sends Trigger
+  transport: crash 3: node down
+I got Trigger
+  transport: crash branch 2: role 3: node down
+I: role 3 crashed: node down
+  transport: close 2
+L got Fatal(C is gone)
+  transport: close 1
