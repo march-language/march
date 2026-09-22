@@ -14,3 +14,14 @@ unified with a concrete type, or (c) document the current semantics in
 `specs/lang/types.md`. The refinement checker does not depend on the choice:
 its Phase 0 fix reads the inferred type (`2026-09-18-refine-parametric-rule-trusts-flexible-tyvars.md`).
 Before choosing (a), measure how much of the stdlib and ecosystem relies on it.
+
+## Decision (repo owner, 2026-09-22)
+
+Option **(b) now, moving to (a) later**: warn when an annotated type variable
+is unified with a concrete type, and later make annotation type variables
+rigid. **Measurement first**: before the warning lands, count the sites in
+`stdlib/`, `specs/lang/types/accept`, `test/stdlib`, and `test/native` whose
+signature type variables the body fixes (to a concrete type, or to another
+annotation variable of the same function). That count sizes (b)'s noise and
+(a)'s breakage. (c), documenting the flexible semantics as intended, is
+rejected.
