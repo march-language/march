@@ -226,10 +226,79 @@ let parse_patches doc =
       end else None
     ) doc.Toml.sections
 
+(* ── Unknown keys ─────────────────────────────────────────────────────
+   Every key [load_from] reads, per section it owns. A key outside these is a
+   misspelling or a key this forge does not understand; both used to be
+   silent no-ops. Unknown keys WARN rather than fail: an error would break
+   every existing project with a stray key at once. Sections whose keys are
+   names ([deps], [preprocessors], ...) are not checked. *)
+let dep_table_keys = [ "git"; "path"; "registry"; "version"; "tag"; "branch"; "rev" ]
+
+let package_keys =
+  [ "name"; "version"; "type"; "description"; "author"; "entrypoint"; "march";
+    "license"; "repository"; "homepage"; "pin_main" ]
+
+let known_keys_of_section (name : string) : string list option =
+  let has_prefix p =
+    String.length name > String.length p
+    && String.sub name 0 (String.length p) = p
+  in
+  match name with
+  | "package" | "project" -> Some package_keys
+  | "ffi" -> Some [ "sources"; "link" ]
+  | "ffi.rust" -> Some [ "crate"; "lib" ]
+  | "hot-reload" ->
+    Some [ "socket"; "ssh_host"; "public_key"; "health_check_url"; "strategy" ]
+  | "hot-reload.env" -> Some [ "name"; "ssh_host"; "socket"; "public_key" ]
+  | "contracts" -> Some [ "no_alloc" ]
+  | _ when has_prefix "archive.task." -> Some [ "command"; "module"; "doc" ]
+  | _ when has_prefix "patch." -> Some dep_table_keys
+  | _ when List.exists has_prefix
+             [ "deps."; "dev-deps."; "dev-only-deps."; "test-deps."; "archive-deps." ] ->
+    Some dep_table_keys
+  | _ -> None
+
+(** Unknown-key warnings for a parsed forge.toml, as
+    [forge.toml:<line>: warning: unknown key '<k>' in [<section>]]. *)
+let unknown_key_warnings (doc : Toml.document) : string list =
+  let seen = Hashtbl.create 8 in
+  List.concat_map (fun (ls : Toml.located_section) ->
+      if Hashtbl.mem seen ls.Toml.sec_name then []
+      else begin
+        Hashtbl.replace seen ls.Toml.sec_name ();
+        match known_keys_of_section ls.Toml.sec_name with
+        | None -> []
+        | Some known ->
+          List.map (fun (k, line) ->
+              Printf.sprintf "forge.toml:%d: warning: unknown key '%s' in [%s]"
+                line k ls.Toml.sec_name)
+            (Toml.check_keys ~section:ls.Toml.sec_name ~known doc)
+      end)
+    doc.Toml.located
+
+(** Where warnings go. A ref so tests can capture them. *)
+let warning_sink : (string -> unit) ref = ref prerr_endline
+
+(* One warning per (file, line, text) per process: several commands load the
+   same forge.toml more than once. *)
+let warned : (string, unit) Hashtbl.t = Hashtbl.create 8
+
 let load_from root =
   let path = Filename.concat root "forge.toml" in
   let text = read_file path in
-  let doc  = Toml.parse text in
+  let doc =
+    match Toml.parse_located text with
+    | Ok doc -> doc
+    | Error (line, msg) ->
+      raise (Toml.Parse_error (Printf.sprintf "forge.toml:%d: %s" line msg))
+  in
+  List.iter (fun w ->
+      let key = path ^ "\000" ^ w in
+      if not (Hashtbl.mem warned key) then begin
+        Hashtbl.replace warned key ();
+        !warning_sink w
+      end)
+    (unknown_key_warnings doc);
   (* Support both [package] and [project] section names *)
   let pkg =
     let p = Toml.get_section doc "package" in
@@ -354,7 +423,7 @@ let load_from_dir dir =
   with
   | Sys_error msg -> Error msg
   | Failure msg   -> Error msg
-  | Toml.Parse_error msg -> Error ("forge.toml parse error: " ^ msg)
+  | Toml.Parse_error msg -> Error msg
 
 let load () =
   match find_forge_toml () with
@@ -364,7 +433,7 @@ let load () =
      with
      | Sys_error msg -> Error msg
      | Failure msg   -> Error msg
-     | Toml.Parse_error msg -> Error ("forge.toml parse error: " ^ msg))
+     | Toml.Parse_error msg -> Error msg)
 
 (** Read a project's forge.lock into a [name -> coordinate] table: the commit
     for a git dep, the exact resolved version for a registry dep. This is the

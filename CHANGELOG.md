@@ -19,6 +19,16 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **A malformed `forge.toml` is an error that names its line, and an unknown key is a
+  warning.** forge used to drop any line it could not parse, ignore a `[section`
+  header with no `]` and any text after a value, and ignore keys it did not know, so a
+  typo was silently a no-op. A bad line now fails with `forge.toml:<line>: <reason>`,
+  and an unknown key in a section forge reads (`[package]`, `[ffi]`, `[hot-reload]`,
+  `[[hot-reload.env]]`, `[deps.<name>]`, ...) prints
+  `forge.toml:<line>: warning: unknown key '<key>' in [<section>]`. Arrays may now
+  span lines and end with a trailing comma, and a quoted key loses its quotes. A
+  malformed TOML file read by any other forge command is reported as an error rather
+  than an internal-error backtrace.
 - **Tail-recursion-modulo-cons always runs; `--no-trmc` and `--trmc` are
   removed.** Passing either is now the ordinary "unknown option" error. There
   is no supported way to turn TRMC off: the stdlib's list producers are being
