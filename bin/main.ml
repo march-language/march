@@ -876,9 +876,30 @@ let hr_config () =
   Option.map March_tir.Hot_reload.default_config !hot_reload_prefix
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
 let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []
+(* The sanitizer MARCH_SANITIZE selects, or [None] when it is unset.
+   [Some "thread"] is TSAN; every other value (1, address, "", ...) is
+   ASAN+UBSan.  THE one reading of MARCH_SANITIZE: the clang flag
+   ([sanitize_clang_flag]) and the CAS tag ([codegen_cas_tags]) both derive
+   from it, so the key can never be coarser than the build.  It was: the tag
+   was a bare "sanitize" for any value, so a MARCH_SANITIZE=1 compile after a
+   MARCH_SANITIZE=thread one of the same program hit the cache and was handed
+   the TSAN binary, reported as "(cached)". *)
+let sanitize_mode () =
+  match Sys.getenv_opt "MARCH_SANITIZE" with
+  | None -> None
+  | Some "thread" -> Some "thread"
+  | Some _ -> Some "address"
+
+let sanitize_clang_flag () =
+  match sanitize_mode () with
+  | Some "thread" -> " -fsanitize=thread -g"
+  | Some _ -> " -fsanitize=address,undefined"
+  | None -> ""
+
 (* CAS cache-key fragments for the remaining toggles that alter the emitted
-   binary: MARCH_SANITIZE adds -fsanitize to the clang link, MARCH_HTTP_EVLOOP
-   adds -DMARCH_HTTP_USE_EVLOOP, --fast-math changes IR emission, and
+   binary: MARCH_SANITIZE adds -fsanitize to the clang link (the tag carries
+   the mode; see [sanitize_mode]), MARCH_HTTP_EVLOOP adds
+   -DMARCH_HTTP_USE_EVLOOP, --fast-math changes IR emission, and
    --debug/--debug-tui add -g. Any toggle missing here lets a cached artifact
    silently shadow the requested codegen. (MARCH_DEBUG_RUNTIME is deliberately
    absent: it only affects the interpreter/JIT runtime .so, which is keyed by
@@ -893,7 +914,7 @@ let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -
    v2 = runtime now built with -fno-strict-aliasing -fwrapv. *)
 let codegen_cas_tags () =
   "rtcflags2"
-  :: (if Sys.getenv_opt "MARCH_SANITIZE" <> None then ["sanitize"] else [])
+  :: (match sanitize_mode () with Some m -> ["sanitize=" ^ m] | None -> [])
   (* No "trmc" tag: TRMC always runs (--trmc/--no-trmc were removed
      2026-09-22), so there is no non-TRMC artifact for a TRMC build to be
      confused with.  Dropping the tag changed every CAS key once. *)
@@ -3093,12 +3114,7 @@ let compile filename =
                threads; glibc has them in libc. See ucontext_link_flags. *)
             let ucontext_flag = ucontext_link_flags () in
             let dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
-            let san_flag =
-              match Sys.getenv_opt "MARCH_SANITIZE" with
-              | Some "thread" -> " -fsanitize=thread -g"
-              | Some _ -> " -fsanitize=address,undefined"
-              | None -> ""
-            in
+            let san_flag = sanitize_clang_flag () in
             (* BLAKE3 flags: needed when march_blake3.c is included (server-only,
                guarded by not !compile_so above, same as march_reload.c). *)
             let blake3_c2 = Filename.concat runtime_dir "march_blake3.c" in

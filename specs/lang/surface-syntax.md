@@ -130,6 +130,37 @@ Single-expression lambdas are unchanged: no `let` bindings means no `EBlock` wra
 
 Both `fn -> expr` and `fn () -> expr` are valid zero-arg lambdas; they are identical.
 
+### `fn (a, b) -> …` takes TWO arguments, it does not destructure a pair
+
+The parenthesized parameter list is a *curried* parameter list, not a tuple
+pattern: `fn (a, b) -> …` is a two-argument lambda, exactly like
+`fn(a, b)` at the top level. Nested patterns (`fn ((a, b)) -> …`) are a parse
+error. So a callback that receives a PAIR cannot be written that way:
+
+```march
+-- WRONG: a 2-argument lambda where a 1-argument callback over a pair is wanted
+List.map(pairs, fn (k, v) -> v)
+
+-- RIGHT: one parameter, matched on
+List.map(pairs, fn pair -> match pair do (k, v) -> v end)
+```
+
+The compiler reports the wrong form directly ("This lambda takes 2 arguments,
+but it is passed where a function of ONE argument, a 2-tuple `(K, V)`, is
+expected") and suggests the `match` rewrite. Before that diagnostic existed the
+mistake either typechecked to a nonsense type (the callback's result variable
+absorbed the extra arrow, so `List.map(xs, fn (_, w) -> w)` produced
+`List(b -> b)`) or failed with a misleading "this type would have to be
+infinitely recursive" message.
+
+A genuinely curried callback is unaffected — `List.fold_left`'s function
+parameter is `b -> a -> b`, so two parameters are correct there even when the
+accumulator itself is a tuple:
+
+```march
+List.fold_left(xs, (0, 0), fn (acc, x) -> ...)   -- fine: really two arguments
+```
+
 ---
 
 ## Let Bindings

@@ -3123,7 +3123,48 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
         let inferred = infer_expr env (Ast.ELam (params, body, lsp)) in
         unify env ~span:lsp ~reason inferred expected
     in
-    peel params expected env
+    (* `fn (a, b) -> e` is a TWO-parameter (curried) lambda, not a lambda over
+       a pair.  Checked against a ONE-argument callback over an n-tuple
+       (`List.map(pairs, fn (k, v) -> v)`, expected `(K, V) -> r`), the plain
+       peel binds `a` to the whole tuple and then unifies the result variable
+       with an arrow: either a silently nonsense type (`List(b -> b)`) or the
+       misleading "infinitely recursive … forget to apply it" error.  Fire only
+       when the expected arrow chain is SHORTER than the parameter list, so a
+       genuinely curried callback — `fold_left`'s `b -> a -> b`, even with a
+       tuple accumulator — is untouched.  To avoid cascading errors, recover by
+       checking the body with each parameter bound to its tuple component,
+       which is what the author meant. *)
+    let n_params = List.length params in
+    let rec arrow_depth t =
+      match repr t with TArrow (_, r) -> 1 + arrow_depth r | _ -> 0
+    in
+    (match repr expected with
+     | TArrow (param_ty, ret_ty)
+       when n_params >= 2 && arrow_depth expected < n_params
+            && (match repr param_ty with
+                | TTuple comps -> List.length comps = n_params
+                | _ -> false) ->
+       let comps = match repr param_ty with TTuple cs -> cs | _ -> [] in
+       let names =
+         String.concat ", "
+           (List.map (fun (p : Ast.param) -> p.param_name.Ast.txt) params) in
+       Err.report env.errors
+         { Err.severity = Err.Error; span = lsp; labels = []; notes = [];
+           code = Some "curried_lambda_over_tuple"; fix = None;
+           message = Printf.sprintf
+             "This lambda takes %d arguments, but it is passed where a \
+              function of ONE argument, a %d-tuple `%s`, is expected.\n\
+              `fn (%s) -> …` is a %d-parameter (curried) lambda, not a lambda \
+              over a tuple.\n\
+              To destructure the tuple, match on it:\n    \
+              fn pair -> match pair do (%s) -> … end"
+             n_params n_params (pp_ty param_ty) names n_params names };
+       let env' =
+         List.fold_left2 (fun env p t -> bind_lam_param env lsp p (Some t))
+           env params comps in
+       check_expr env' body ret_ty ~reason;
+       close env'
+     | _ -> peel params expected env)
 
   (* Match in check mode: check each arm against expected *)
   | Ast.EMatch (scrut, branches, msp), _ ->
