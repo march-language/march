@@ -6239,12 +6239,43 @@ let rec check_decl env (d : Ast.decl) : env =
     end;
     bind_vars new_bindings env
 
-  | Ast.DNeeds (caps, _sp) ->
+  | Ast.DNeeds (caps, sp) ->
     (* Record declared capability paths in env for DMod validation.
        Each path is a list of names e.g. ["IO"; "Network"] → "IO.Network" *)
     let scoped = List.map (fun (names, scope) ->
         (String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names), scope)
       ) caps in
+    (* A path scope is only meaningful on a filesystem capability, and only
+       when absolute.  Both are errors rather than warnings: the scope would
+       otherwise be kept and silently ignored (non-filesystem) or mean a
+       different directory per working directory (relative), and either reads
+       as enforcement that is not there.  Reported at the capability name. *)
+    List.iter2 (fun (names, _) (cap, scope) ->
+        match scope with
+        | None -> ()
+        | Some path ->
+          let span = match List.rev names with
+            | (n : Ast.name) :: _ -> n.span
+            | [] -> sp
+          in
+          if not (March_caps.Cap_scope.is_scopable cap) then
+            Err.error env.errors ~span
+              (Printf.sprintf
+                 "`%s` does not take a path scope; only filesystem \
+                  capabilities do (`IO.FileRead`, `IO.FileWrite`, \
+                  `IO.FileSystem`), so `(\"%s\")` would be ignored.\n\
+                  hint: remove the scope, or scope the filesystem capability \
+                  you mean, e.g. `needs IO.FileSystem(\"%s\")`."
+                 cap path path)
+          else if not (March_caps.Cap_scope.is_absolute path) then
+            Err.error env.errors ~span
+              (Printf.sprintf
+                 "The scope `%s` on `%s` is a relative path, so it would \
+                  name a different directory depending on the working \
+                  directory at run time.\n\
+                  hint: give an absolute path, one starting with `/`."
+                 path cap))
+      caps scoped;
     let paths = List.map fst scoped in
     { env with mod_needs = paths @ env.mod_needs;
                mod_need_scopes = scoped @ env.mod_need_scopes }

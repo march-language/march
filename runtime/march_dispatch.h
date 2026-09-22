@@ -94,6 +94,12 @@ const char *march_dispatch_callers(uint32_t name_id);
  * Baseline slots (main binary) never call this; their handle stays NULL. */
 void march_dispatch_set_handle(uint32_t name_id, uint32_t version, void *handle);
 
+/* Test seam: when hook is non-NULL, reclaiming a ring slot calls hook(handle)
+ * INSTEAD of dlclose(handle).  Lets a unit test observe the exact moment a
+ * handle is released without loading real shared objects.  NULL restores the
+ * real dlclose.  Not for production use. */
+void march_dispatch_set_close_hook(void (*hook)(void *handle));
+
 /* Phase 9: epoch-tagged dispatch.
  *
  * Each MarchFnVersion now carries a uint32_t epoch (0 = pre-Phase-9 / no epoch).

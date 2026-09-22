@@ -1,6 +1,7 @@
 /* runtime/march_preempt.h — guard blocking syscalls against preemption signals.
  *
- * The scheduler preempts green threads by delivering SIGUSR1 to every scheduler
+ * The scheduler preempts green threads by delivering SIGUSR1 (or the signal
+ * configured by $MARCH_PREEMPT_SIGNAL; "SIGUSR1" below means that signal) to every scheduler
  * thread roughly every MARCH_QUANTUM_US (1ms); see runtime/march_scheduler.c.
  * That signal must NOT interrupt a blocking libc call, for three distinct
  * reasons:
@@ -38,10 +39,14 @@
 #include <pthread.h>
 #include <signal.h>
 
+/* The preemption signal actually in use (SIGUSR1 unless configured); defined
+ * in march_scheduler.c, see march_scheduler.h. */
+int march_preempt_signal(void);
+
 static inline void march_block_preempt(sigset_t *saved) {
     sigset_t blk;
     sigemptyset(&blk);
-    sigaddset(&blk, SIGUSR1);
+    sigaddset(&blk, march_preempt_signal());
     pthread_sigmask(SIG_BLOCK, &blk, saved);
 }
 

@@ -401,6 +401,11 @@ typedef struct march_scheduler {
                                    * read). */
     int             id;           /* Scheduler index (0..N-1)                    */
     pthread_t       thread;       /* OS thread handle (for schedulers 1..N-1)    */
+    _Atomic int     preempt_tick; /* Set by the preemption daemon just before it
+                                   * signals this thread; consumed by the
+                                   * handler.  How the handler tells OUR tick
+                                   * from a host's delivery of the same signal
+                                   * (which it chains to the host's handler). */
 #ifdef MARCH_ASAN_BUILD
     /* ASan fiber-switch bookkeeping for THIS scheduler's own native-thread
      * "fiber" (see march_proc.asan_fake_stack for the full rationale). */
@@ -431,6 +436,30 @@ int          march_sched_num_schedulers(void);
  * is deliberately NOT sysconf(_SC_NPROCESSORS_ONLN), which reports the
  * machine and ignores both container mechanisms. */
 int          march_sched_usable_cpus(void);
+
+/* ── Preemption signal ─────────────────────────────────────────────────
+ * The signal the preemption daemon delivers to scheduler threads.  SIGUSR1
+ * unless configured, by $MARCH_PREEMPT_SIGNAL (read once, at first use) or by
+ * march_sched_set_preempt_signal before the scheduler first runs.  Accepted:
+ * USR1, USR2, and (Linux) RTMIN, RTMIN+<n>, or the equivalent numbers.  An
+ * unusable value is reported on stderr and SIGUSR1 is used.
+ *
+ * Real-time signals QUEUE rather than coalesce: while a scheduler thread has
+ * the signal masked (march_block_preempt around a slow syscall), every ~1ms
+ * tick adds a queued delivery, counted against the user's RLIMIT_SIGPENDING.
+ * That is why the default stays SIGUSR1 even on Linux.
+ *
+ * The runtime saves the signal's previous disposition when preemption starts,
+ * chains to it for deliveries that are not its own ticks (another process's
+ * kill, or a host's own use of the signal), and restores it when preemption
+ * stops.  A previous SIG_DFL/SIG_IGN is not "chained" (SIG_DFL for SIGUSR1
+ * would terminate the process): those deliveries are ignored, as before. */
+int          march_preempt_signal(void);
+
+/* Choose the preemption signal explicitly (an embedder that knows which
+ * signals its host uses).  Returns 0, or -1 if the signal is not usable or
+ * preemption is already running. */
+int          march_sched_set_preempt_signal(int signo);
 
 /* Run the scheduler loop until all spawned processes are DEAD.
  * Returns to the caller once all work drains.  Spawns N-1 worker threads

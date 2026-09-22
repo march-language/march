@@ -14,16 +14,22 @@
 
    The comparison is on NORMALIZED CLAUSE SETS, not raw text: forge writes
    one clause per line while the embedded define is a single unbroken string,
-   and each side has one legitimate extra —
+   and each side has legitimate extras —
 
    - forge adds [(allow file-read* (literal <binary>))], the explicit
      launch-target read (redundant with the baseline's [file-read*], stated
      so a future read-tightening cannot silently make the target unmappable);
      the embedded profile has no path to name, the binary IS the profile.
+   - forge's baseline has [(allow process-exec)] unconditionally, because
+     sandbox-exec must itself exec the target (denying it: exit 71).  The
+     embedded profile is applied from inside the already-running process, so
+     it grants process-exec only with IO.Process (since 2026-09-21).  The
+     fixture does not hold IO.Process, so forge's clause is dropped here and
+     its ABSENCE from the embedded side is pinned in the conditional test.
    - the embedded side may add scoped [(allow file-write* (subpath …))]
      grants from `@[scope]` declarations; the fixture declares none.
 
-   The test drops exactly the forge binary-read clause and then requires SET
+   The test drops exactly those two forge clauses and then requires SET
    EQUALITY — both directions, so a clause added to one builder and not the
    other fails whichever way the drift runs.  Conditional grants are pinned
    separately in both polarities (FileWrite held means "allow file-write" is
@@ -140,18 +146,19 @@ let test_baselines_agree () =
     in
     let forge_clauses =
       List.filter
-        (fun c -> not (is_forge_binary_read ~binary c))
+        (fun c -> not (is_forge_binary_read ~binary c)
+                  && c <> "(allow process-exec)")
         (clauses_of forge_profile)
     in
     let embedded_clauses = clauses_of (embedded_profile ()) in
     (* Two empty lists agree too — a broken [clauses_of] must fail here, not
-       certify.  10 = version + deny + 8 baseline clauses, the floor either
-       builder can emit. *)
+       certify.  9 = version + deny + 7 baseline clauses, the floor both
+       builders emit (forge's 8th, process-exec, is filtered above). *)
     Alcotest.(check bool)
       (Printf.sprintf "clause parse is non-trivial (%d clauses)"
          (List.length embedded_clauses))
       true
-      (List.length embedded_clauses >= 10);
+      (List.length embedded_clauses >= 9);
     Alcotest.(check (list string))
       "the embedded --cap-sandbox profile and forge's profile_for emit the \
        same clause set for the same capability set"
@@ -179,7 +186,14 @@ let test_conditional_grants_agree () =
     Alcotest.(check bool) "network* NOT granted by forge" false
       (has forge_clauses "(allow network*)");
     Alcotest.(check bool) "network* NOT granted by the embedded profile" false
-      (has embedded_clauses "(allow network*)")
+      (has embedded_clauses "(allow network*)");
+    (* process-exec: forge keeps it for its own launch of the target; the
+       embedded profile must NOT grant it without IO.Process. *)
+    Alcotest.(check bool) "process-exec kept by forge (it execs the target)" true
+      (has forge_clauses "(allow process-exec)");
+    Alcotest.(check bool) "process-exec NOT granted by the embedded profile \
+                           without IO.Process" false
+      (has embedded_clauses "(allow process-exec)")
   end
 
 (* ── The belongs filter must see every closure key shape ────────────────────
