@@ -425,6 +425,6 @@ So "no vtables or runtime type lookups" is accurate for the compiled backend's s
 
 ## Next Steps
 
-- [Types](../../docs/types.md): types you implement interfaces for
+- [Types](type-system.md): types you implement interfaces for
 - [Standard Library](../../docs/stdlib.md): stdlib types and their interface implementations
 - [Pattern Matching](pattern-matching.md): using `match` with interface-dispatched values

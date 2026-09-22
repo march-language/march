@@ -755,6 +755,6 @@ A guard that fails causes the clause to be skipped and the next clause is tried.
 
 ## Next Steps
 
-- [Type System](../../docs/types.md): the types you're matching against
+- [Type System](type-system.md): the types you're matching against
 - [Tour](../../docs/tour.md): language overview with more examples
 - [Interfaces](interfaces.md): polymorphic dispatch with `interface`

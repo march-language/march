@@ -550,7 +550,7 @@ might be affine: the operation is valid with or without it.
 
 ## Next Steps
 
-- [Type System](../../docs/types.md): the broader type system context
+- [Type System](type-system.md): the broader type system context
 - `core-march-types.md` §2.9: the rule-by-rule static-semantics account of everything in this chapter (with `typecheck.ml` citations and the conformance corpus)
 - `core-march.md` §4.12: linearity at runtime (there is none: annotations are compile-time-erased; golden witness `g41`)
 - [Refinement Types](refinement-types.md): the other compile-time safety layer: value predicates checked by an SMT solver

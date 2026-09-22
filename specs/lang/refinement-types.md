@@ -3564,6 +3564,6 @@ golden corpus itself remains 46/46 MATCH.
 
 ## Next Steps
 
-- [Type System](types.md): the types refinements attach to
+- [Type System](type-system.md): the types refinements attach to
 - [Linear Types](linear-types.md): the other compile-time safety layer
 - [Pattern Matching](pattern-matching.md): `match` guards feed path sensitivity
