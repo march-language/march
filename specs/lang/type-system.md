@@ -218,6 +218,40 @@ map_option(Some(42), fn x -> x * 2)     -- Option(Int)
 map_option(Some("hi"), String.byte_size) -- Option(Int) — there is no `String.length`
 ```
 
+### A signature's type variables must stay generic
+
+A type variable in a signature is not yet a promise the compiler enforces: the
+body can fix it. This typechecks, and every caller sees `List(Int) -> List(Int)`:
+
+```march
+fn bad(xs : List(a)) : List(a) do [0 - 5] end
+```
+
+The compiler warns at the variable in the signature (warning code
+`annotated_tyvar_fixed`), naming the type the body gave it:
+
+```
+The type variable `a` in `bad`'s signature is not generic: the body fixes it
+to `Int`, so every caller gets `Int` in its place.
+    hint: write `Int` in place of `a` if that is what you mean, or make the
+    body generic in `a`.
+```
+
+It also warns when the body makes two of the signature's variables the same
+type, as in `fn second(x : a, y : b) : a do y end` (the body returns `y`, so
+`b` must be `a`). That signature promises callers two independent types, and
+they get only one.
+
+The warning covers only type variables you wrote in a function's parameter or
+return annotations (or its bounds). It is skipped when the function's body has
+a type error, since that error is the one to fix first. A common way to trigger
+it by accident is `fn (k, v) -> …` used where a callback over a pair is
+expected: that is a **two-parameter** lambda, not a tuple pattern (write
+`fn pair -> match pair do (k, v) -> … end`).
+
+A later release plans to make these variables rigid, which turns this warning
+into an error.
+
 ---
 
 ## Type Aliases

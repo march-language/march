@@ -47,6 +47,16 @@ git log is authoritative for exact commits.
   about 18 KB more, and `Vault.size`/`Vault.keys` walk shard by shard, so their result
   is a recent count rather than a single instant's snapshot of the whole table.
 ### Added
+- **A warning when a function's body fixes a type variable its signature
+  names.** `fn bad(xs : List(a)) : List(a) do [0 - 5] end` used to typecheck
+  silently as `List(Int) -> List(Int)`, with the mistake surfacing only as a
+  mismatch at some caller. It now warns at the `a` in the signature, naming
+  the type the body gave it (`Int`) with a hint to write that type or make the
+  body generic. Two signature variables that the body makes equal
+  (`fn second(x : a, y : b) : a do y end`) warn too. Only variables you wrote
+  in the signature are checked, and not when the body already has a type
+  error. The warning code is `annotated_tyvar_fixed`. Signature type variables
+  are planned to become rigid later, which will make this an error.
 - **A choreography role's first state now has a name: `<P>_<Role>.Entry`.** A role
   body's signature used to have to spell the state `register` yields, which meant
   working out `S_` plus the first step of that role's own projection
@@ -137,6 +147,13 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **`OrderedMap.keys`, `OrderedMap.values` and `OrderedMap.from_list` work.**
+  Each passed a two-parameter lambda (`fn (k, _) -> k`) where a callback over
+  a (key, value) pair was expected. `values` was typed `List(v -> v)` for its
+  callers, so `let vs : List(String) = OrderedMap.values(m)` was rejected.
+  `keys` and `from_list` did not typecheck at all (`from_list` also passed
+  `List.fold_left`'s arguments out of order), and the stdlib diagnostic
+  filter hid those errors.
 - **Compiled `send_checked` and `is_cap_valid` no longer intermittently accept a cap
   whose actor was killed.** About one run in five, a cap taken while the actor was
   alive still validated after `kill`: `is_cap_valid` answered `true` and
