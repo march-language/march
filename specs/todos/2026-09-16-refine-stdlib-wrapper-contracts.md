@@ -25,6 +25,18 @@ panic (`specs/todos/`, its own item) would have been caught at compile time —
 but it is a breaking change to a public signature and should be decided
 deliberately, ideally for the whole `Stats` surface at once.
 
+## Decision (repo owner, 2026-09-22)
+
+- **`Stats`: yes, for the whole surface.** Every `Stats` function whose callee
+  requires a non-empty list restates `{List(Float) | len(_) > 0}` (and any other
+  forwarded contract, e.g. `quantile_default`'s `q` range) on its own
+  parameter, so the public API is consistent. Shipped with `--refine-suggest`
+  as the documented migration path for callers.
+- **`aho_corasick` (11 sites): decided separately — do NOT change it.** Its
+  contract is relational (`_ < pvec_length(nodes)`) and would push unprovable
+  obligations onto the helpers' callers.
+- **`seq`/`flow`/`gen` (3 sites): not part of the decision** — still open.
+
 `--refine-suggest <fn>` already proposes these; start there rather than by
 hand. Re-run the census afterwards: the expectation is that these skips turn
 into PROVED at the wrapper and reappear at whichever caller genuinely cannot
