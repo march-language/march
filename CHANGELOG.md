@@ -100,6 +100,11 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **On Linux, `--cap-sandbox` now stops a program without `IO.NetListen` from
+  accepting connections.** Holding only `IO.NetConnect` (an HTTP client, say)
+  allowed `socket()`, and nothing denied `bind`/`listen`, so such a program
+  could still open a listener. Both are now denied unless `IO.NetListen` is
+  held; connecting is unaffected. macOS does not separate the two yet.
 - **A scheduler thread that cannot be created is reported instead of crashing the program at
   exit.** Under a process/thread limit (a container `pids` limit, `ulimit -u`) a compiled
   program could run to completion and then die with SIGSEGV while joining a thread that was

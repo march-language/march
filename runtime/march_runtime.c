@@ -2467,6 +2467,10 @@ void march_sandbox_install(void) {
  *
  * What is enforced here, and what is not:
  *   IO.Network    -> socket/socketpair denied            ENFORCED
+ *   IO.NetListen  -> bind/listen denied                  ENFORCED
+ *                    (separate from IO.Network: holding only IO.NetConnect
+ *                    allows socket() for connect(), which is also the first
+ *                    step of a listener, so bind/listen need their own deny)
  *   IO.Process    -> execve/execveat denied              ENFORCED
  *                    (NOT clone/fork: the scheduler needs threads)
  *   IO.FileWrite  -> openat with write flags, plus the
@@ -2542,6 +2546,18 @@ void march_sandbox_install(void) {
 #ifdef MARCH_CAP_DENY_NET
     DENY_NR(__NR_socket);
     DENY_NR(__NR_socketpair);
+#endif
+
+#ifdef MARCH_CAP_DENY_LISTEN
+    /* A NetConnect-only program (an HTTP client) needs socket() + connect();
+     * without these two it could also accept connections.  bind() covers
+     * AF_UNIX as well, which is correct: a Unix-domain listener is still a
+     * listener.  Threads created BEFORE this call (the hot-reload server,
+     * started in @main ahead of march_spawn_main) are not covered, since
+     * PR_SET_SECCOMP filters only the calling thread and its later
+     * children. */
+    DENY_NR(__NR_bind);
+    DENY_NR(__NR_listen);
 #endif
 
 #ifdef MARCH_CAP_DENY_EXEC
