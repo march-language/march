@@ -367,6 +367,41 @@ let role_named_entry_ok =
   end
 |}))
 
+(* ── alias cycles ─────────────────────────────────────────────────────── *)
+
+(** [surface_ty] expands a transparent alias by resolving its right-hand side,
+    so an alias defined in terms of itself would recurse forever.  No source
+    syntax builds an alias (the parser reads `type A = B` as a one-constructor
+    variant), so these build the [TDAlias] declarations directly and put them in
+    front of a module that mentions them.  A module's aliases are registered
+    under their qualified name only, so every mention is spelled `Main.X`.  Without the cycle guard the reject
+    cases hang the suite instead of failing. *)
+let with_aliases aliases body =
+  let m = parse_and_desugar ("mod Main do\n" ^ body ^ "\nend\n") in
+  let alias (name, rhs) =
+    DType (Public, { txt = name; span = dummy_span }, [],
+           TDAlias (TyCon ({ txt = "Main." ^ rhs; span = dummy_span }, [])), dummy_span)
+  in
+  let m = { m with mod_decls = List.map alias aliases @ m.mod_decls } in
+  let (errors, _) = March_typecheck.Typecheck.check_module m in
+  error_messages errors
+
+let alias_user = "  fn f(x : (Main.A, Main.A)) : Int do 0 end"
+
+let alias_cycles =
+  Alcotest.test_case "a cyclic alias is an error, not a hang" `Quick (fun () ->
+      Alcotest.(check (list string)) "type A = A"
+        [ "`Main.A` is defined in terms of itself (`Main.A` -> `Main.A`)." ]
+        (List.sort_uniq compare (with_aliases [ ("A", "A") ] alias_user));
+      Alcotest.(check (list string)) "type A = B / type B = A"
+        [ "`Main.A` is defined in terms of itself (`Main.A` -> `Main.B` -> `Main.A`)." ]
+        (List.sort_uniq compare (with_aliases [ ("A", "B"); ("B", "A") ] alias_user));
+      (* Not a false positive: a chain of aliases, and the same alias twice
+         side by side in one type, are no cycle. *)
+      Alcotest.(check (list string)) "type A = B / type B = Int" []
+        (with_aliases [ ("A", "B"); ("B", "C") ]
+           (alias_user ^ "\n  type C = C(Int)")))
+
 let entry_roles_ok = ok "both roles written against `Entry` typecheck" (wrap (stream ^ {|
   pfn prod(s : Cap(Session.Live), st : Stream_Prod.Entry, next : Int) : Stream_Prod.Yield do
     let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
@@ -1217,7 +1252,7 @@ let crash_chan_refused = bad "Chan(Role, Proto) refuses a protocol with crash br
 let tests =
   [ stream_shape; cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
     unlabelled_names_pinned; labelled_shape; label_changes_fingerprint; labelled_roles_ok;
-    entry_alias_shape; entry_roles_ok; entry_wrong_role; entry_keeps_linearity;
+    entry_alias_shape; alias_cycles; entry_roles_ok; entry_wrong_role; entry_keeps_linearity;
     role_named_entry_shape; role_named_entry_ok;
     label_on_branch_head; label_msg_prefix; shared_label_ok; shared_label_two_payloads; shared_label_one_role;
     prod_ok; wrong_order; replayed; abandoned; callback_forge; relay_ok; payload_declared_later;
