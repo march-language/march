@@ -41,10 +41,17 @@ pfn run_chunked(src, off, st, n) do
   end
 end
 
-pfn count_list(evs) do
+-- Accumulator-passing, so it runs in constant stack under every backend. The
+-- naive `count_list(t) + 1` needs one native frame per event (~13k per 64 KiB
+-- chunk), which overflows the 1 MiB green-thread stack under --jit, whose
+-- fragments get no LLVM optimisation (see
+-- specs/progress/2026-09-22-json-stream-bench-count-tail-recursive.md).
+pfn count_list(evs) do count_go(evs, 0) end
+
+pfn count_go(evs, acc) do
   match evs do
-  Nil -> 0
-  Cons(_, t) -> count_list(t) + 1
+  Nil -> acc
+  Cons(_, t) -> count_go(t, acc + 1)
   end
 end
 

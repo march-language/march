@@ -1,3 +1,36 @@
+# CLOSED 2026-09-22: the json_stream benchmark counts with an accumulator; `--jit` passes
+
+Option 1 below, chosen by the repo owner on 2026-09-22. The four `--jit` defects this
+file tracked were fixed on 2026-08-25; what remained was the benchmark's own
+`count_list`, which recursed one native frame per event.
+
+## Change
+
+`bench/interp/json_stream.march`: `count_list` now calls an accumulator-passing
+`count_go`, so it runs in constant stack under every backend. The benchmark measures
+`JsonStream.feed` throughput; counting the events is incidental, so the change does not
+alter what is measured, and the checksum is unchanged.
+
+## Verification (same build, back to back)
+
+| file | `--jit` | `--compile --opt 2` |
+|---|---|---|
+| before (origin/main) | **rc=138** | rc=0, checksum=28000 |
+| after | rc=0, checksum=28000 | rc=0, checksum=28000 |
+
+The compiler's "structurally recursive but not tail-recursive" warning for this file is
+gone too.
+
+Options 2 (raise `MARCH_STACK_MAX`, a density trade-off) and 3 (an LLVM pipeline for
+JIT fragments, a feature in `lib/jit/jit_orc_stubs.c`) were not taken. Option 3 remains
+a real limitation: any user program with deep non-tail recursion that only survives
+under clang's `-O2` will still overflow under `--jit`. It is not tracked separately
+because nothing currently hits it.
+
+---
+
+The original filing follows.
+
 # `--jit` exit 138 on json_stream (bench/interp/json_stream.march)
 
 Filed: 2026-08-25
