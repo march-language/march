@@ -30,6 +30,10 @@ structure, organized by altitude:
 - **Per-topic chapters**: one canonical chapter per language topic
   (modules, pattern matching, interfaces, actors, capabilities, and so on),
   migrating in from `docs/` and `specs/features/` per the chapter map below.
+  Every chapter with Jekyll front matter is also *published*: the site's
+  `docs/<chapter>.md` page is generated from it by `scripts/gen-lang-docs.py`
+  (never edit the `docs/` copy; `scripts/check-docs.sh` Check F fails if it
+  drifts from its source here).
 
 For **compiler internals** (value representation, Perceus/RC, TIR, the
 scheduler, the content-addressed build cache, the C runtime, the compiler
@@ -81,6 +85,7 @@ document outside `specs/lang/` and linked from here rather than duplicated.
 | Session types | [`session-types.md`](session-types.md) | canonical |
 | Choreography | [`choreography.md`](choreography.md) | canonical |
 | Capabilities | [`capabilities.md`](capabilities.md) | canonical |
+| Capability enforcement (OS sandbox, hot-deploy admission) | [`capability-enforcement.md`](capability-enforcement.md) | canonical |
 | Memory model (Perceus/FBIP, user-facing) | [`memory-model.md`](memory-model.md) | canonical |
 | Safety by construction | [`safety-by-construction.md`](safety-by-construction.md) | canonical |
 | Actors | [`actors.md`](actors.md) | canonical |
