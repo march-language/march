@@ -13511,7 +13511,7 @@ declare ptr  @march_ws_select(i64 %fd, ptr %pipe, i64 %timeout)
 declare i64  @march_file_exists(ptr %s)
 declare i64  @march_dir_exists(ptr %s)
 declare ptr  @march_file_open(ptr %path)
-declare ptr  @march_file_close(ptr %handle)
+declare i64  @march_file_close(ptr %handle)
 declare ptr  @march_file_read(ptr %path)
 declare ptr  @march_file_read_line(ptr %handle)
 declare ptr  @march_file_read_chunk(ptr %handle, i64 %size)
@@ -13672,7 +13672,7 @@ declare ptr  @march_http_parse_response(ptr %raw)
 ; CSV builtins
 declare ptr  @march_csv_open(ptr %path, ptr %delim, ptr %mode)
 declare ptr  @march_csv_next_row(ptr %handle)
-declare ptr  @march_csv_close(ptr %handle)
+declare i64  @march_csv_close(ptr %handle)
 ; Resource ownership
 declare void @march_own(ptr %pid, ptr %value)
 ; Capability builtins

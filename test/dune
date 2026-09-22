@@ -8482,6 +8482,43 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/csv_niche_row.expected native_csv_niche_row.out)))
 
+; ── file_close / csv_close return :ok on BOTH backends ─────────────────
+; The typechecker said Unit (file_close) / Atom (csv_close), the interpreter
+; returned :ok, and compiled C returned a heap Ok(()) cell, so a compiled
+; `csv_close(h) == :ok` was false and rendered `:<atom>`. The fixture uses
+; both results, and is run interpreted AND compiled against the SAME
+; .expected, so the two backends cannot drift apart again. Red before the fix:
+; the file_close use was a type error; compiled csv_close printed false.
+(rule
+ (targets native_close_returns_ok_atom native_close_returns_ok_atom.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/close_returns_ok_atom.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_close_returns_ok_atom
+        native/close_returns_ok_atom.march)
+   (with-stdout-to native_close_returns_ok_atom.out
+        (system "./native_close_returns_ok_atom")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/close_returns_ok_atom.expected native_close_returns_ok_atom.out)))
+
+(rule
+ (targets native_close_returns_ok_atom.interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/close_returns_ok_atom.march))
+ (action
+  (with-stdout-to native_close_returns_ok_atom.interp.out
+   (run %{exe:../bin/main.exe} native/close_returns_ok_atom.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/close_returns_ok_atom.expected native_close_returns_ok_atom.interp.out)))
+
 ; ── Regression: a CPU-bound green thread must not starve its siblings ──────
 ; MARCH_NUM_SCHEDULERS=1 is essential and not incidental: it is the only
 ; configuration in which this test measures PREEMPTION rather than
