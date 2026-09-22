@@ -271,24 +271,123 @@ let labelled_shape =
          [ ("Stream_Prod", "send_Item"); ("Stream_Cons", "recv_Item"); ("Stream_Cons", "recv_Item_or");
            ("Stream_Cons", "await_Item"); ("Stream_Cons", "leave_recv_Item") ])
 
+(** The fingerprint of the FIRST `@[endpoints]` protocol in [src], digested
+    the way [expand] does it: payload types expanded against the module's own
+    type declarations. *)
+let fingerprint_of_src ?(proto = "Stream") src =
+  let m = parse_module (wrap src) in
+  let steps =
+    List.find_map (function DProtocol (_, pd, _) -> Some pd.proto_steps | _ -> None) m.mod_decls
+    |> Option.get
+  in
+  let errors = March_errors.Errors.create () in
+  let open March_desugar.Desugar_endpoints in
+  let annotated = Option.get (annotate errors ~proto ~span:dummy_span steps) in
+  fingerprint_of ~proto ~types:(ty_defs_of m.mod_decls) (roles_of annotated) annotated
+
 (** The fingerprint keys on the constructor, so labelling a step changes it:
     two nodes built before and after the rename refuse each other. *)
 let label_changes_fingerprint =
   Alcotest.test_case "labelling a step changes the protocol's fingerprint" `Quick
     (fun () ->
-       let fingerprint src =
-         let m = parse_module (wrap src) in
-         let steps =
-           List.find_map (function DProtocol (_, pd, _) -> Some pd.proto_steps | _ -> None) m.mod_decls
-           |> Option.get
-         in
-         let errors = March_errors.Errors.create () in
-         let open March_desugar.Desugar_endpoints in
-         let annotated = Option.get (annotate errors ~proto:"Stream" ~span:dummy_span steps) in
-         fingerprint_of ~proto:"Stream" (roles_of annotated) annotated
-       in
+       let fingerprint = fingerprint_of_src in
        Alcotest.(check bool) "differs" true (fingerprint stream <> fingerprint stream_labelled);
        Alcotest.(check string) "stable" (fingerprint stream) (fingerprint stream))
+
+(* ── the fingerprint digests what a payload type is MADE OF ─────────────── *)
+
+(* A protocol whose payload is a user type declared alongside it, in four
+   versions that differ ONLY below the type's name.  Before
+   [2026-09-21-protocol-fingerprint-payload-definitions], all four digested
+   to the same `Thing`, so two nodes built from different ones accepted each
+   other and the skew surfaced mid-session as an undecodable message. *)
+let payload_proto body = {|
+  derive Json for Thing
+  |} ^ body ^ {|
+  @[endpoints]
+  protocol Pay do
+    A -> B : Thing
+    stop
+  end
+|}
+
+let thing_int    = payload_proto "type Thing = { x : Int }"
+let thing_string = payload_proto "type Thing = { x : String }"
+let thing_swapped = payload_proto "type Thing = { y : String, x : Int }"
+let thing_two    = payload_proto "type Thing = { x : Int, y : String }"
+let thing_variant = payload_proto "type Thing = One | Two(Int)"
+let thing_variant2 = payload_proto "type Thing = One | Two(String)"
+
+let fp_pay src = fingerprint_of_src ~proto:"Pay" src
+
+let payload_definition_in_fingerprint =
+  Alcotest.test_case "a payload type's DEFINITION is part of the fingerprint" `Quick
+    (fun () ->
+       Alcotest.(check string) "stable" (fp_pay thing_int) (fp_pay thing_int);
+       Alcotest.(check bool) "{x:Int} vs {x:String}" true (fp_pay thing_int <> fp_pay thing_string);
+       Alcotest.(check bool) "one field vs two" true (fp_pay thing_int <> fp_pay thing_two);
+       Alcotest.(check bool) "a variant's payload type" true
+         (fp_pay thing_variant <> fp_pay thing_variant2);
+       Alcotest.(check bool) "a variant is not a record" true
+         (fp_pay thing_variant <> fp_pay thing_int))
+
+(* Field ORDER is part of it: `derive Json` writes the fields in declaration
+   order, so a reordering is a wire change even though the type is the same. *)
+let payload_field_order_in_fingerprint =
+  Alcotest.test_case "reordering a record payload's fields changes the fingerprint" `Quick
+    (fun () -> Alcotest.(check bool) "differs" true (fp_pay thing_two <> fp_pay thing_swapped))
+
+(* Hazard 1: a recursive payload type must terminate through a
+   back-reference, not expand for ever.  A protocol carrying a tree is
+   ordinary, so reaching this test at all is most of the assertion. *)
+let recursive_payload_terminates =
+  Alcotest.test_case "a recursive payload type terminates (and still digests its shape)" `Quick
+    (fun () ->
+       let tree a = payload_proto ("type Thing = Leaf | Node(Thing, Thing, " ^ a ^ ")") in
+       Alcotest.(check string) "stable" (fp_pay (tree "Int")) (fp_pay (tree "Int"));
+       Alcotest.(check bool) "the non-recursive field still counts" true
+         (fp_pay (tree "Int") <> fp_pay (tree "String")))
+
+(* A parameterised type's arguments are positional and substituted, not
+   spelled: `Box(Int)` and `Box(String)` are different payloads. *)
+let payload_type_arguments_substituted =
+  Alcotest.test_case "a parameterised payload's arguments are substituted" `Quick
+    (fun () ->
+       let boxed a = {|
+  derive Json for Box
+  type Box(a) = { inner : a }
+  @[endpoints]
+  protocol Pay do
+    A -> B : Box(|} ^ a ^ {|)
+    stop
+  end
+|}
+       in
+       Alcotest.(check bool) "Box(Int) vs Box(String)" true
+         (fingerprint_of_src ~proto:"Pay" (boxed "Int") <> fingerprint_of_src ~proto:"Pay" (boxed "String")))
+
+(* Hazard 2: a payload type from ANOTHER module is out of reach at desugar
+   time.  It must fall back without crashing, and VISIBLY -- the digest
+   records that the definition was not available -- rather than silently to
+   the name-only key this change exists to remove. *)
+let imported_payload_falls_back =
+  Alcotest.test_case "an imported payload type falls back to a marked name-only key" `Quick
+    (fun () ->
+       let src = {|
+  @[endpoints]
+  protocol Pay do
+    A -> B : Elsewhere.Thing
+    stop
+  end
+|}
+       in
+       Alcotest.(check string) "stable" (fingerprint_of_src ~proto:"Pay" src) (fingerprint_of_src ~proto:"Pay" src);
+       let open March_desugar.Desugar_endpoints in
+       Alcotest.(check string) "marked extern" "extern:Elsewhere.Thing"
+         (ty_key_deep ~types:[] (TyCon (March_ast.Ast.{ txt = "Elsewhere.Thing"; span = dummy_span }, [])));
+       (* A builtin is NOT marked: both nodes agree on what `Int` is. *)
+       Alcotest.(check string) "a builtin is plain" "Int"
+         (ty_key_deep ~types:[] (TyCon (March_ast.Ast.{ txt = "Int"; span = dummy_span }, []))))
 
 let labelled_roles_ok = ok "both roles written against the labelled names typecheck" (wrap (stream_labelled ^ {|
   pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Item, next : Int) : Stream_Prod.Yield do
@@ -1249,9 +1348,73 @@ let crash_chan_refused = bad "Chan(Role, Proto) refuses a protocol with crash br
   pfn as_chan(ch : Chan(L, Logging)) : Int do 0 end
 |}))
 
+
+(* ── two protocols in one module ───────────────────────────────────────── *)
+
+(** The type names each generated nested module declares. *)
+let generated_types src : (string * string list) list =
+  let m = parse_and_desugar src in
+  List.filter_map
+    (function
+      | DMod (name, _, decls, _) ->
+        let tys =
+          List.filter_map
+            (function
+              | DType (_, nm, _, _, _) | DAlwaysLinearType (_, nm, _, _, _) -> Some nm.txt
+              | _ -> None)
+            decls
+        in
+        Some (name.txt, tys)
+      | _ -> None)
+    m.mod_decls
+
+(* The message type is named after its PROTOCOL, not a bare `Msg`.  Impl
+   dispatch for the derived `Json` codec keys on the type's SHORT name in both
+   backends, so two protocols in one module each declaring a `Msg` made the
+   first protocol's sends encode through the second's `to_json`: a match
+   failure inside generated code interpreted, and a refused build compiled
+   ("ambiguous interface-method call to `JsonFrom$Msg.from_json`").  This is
+   the generator-side pin; the runtime one is test/session/in_process.march.
+   See the record dated 2026-09-22 under specs/progress/. *)
+let msg_type_named_after_protocol =
+  Alcotest.test_case "the message type is <P>_Message, not a bare Msg" `Quick
+    (fun () ->
+       let tys = generated_types (wrap stream) in
+       let msg_tys = match List.assoc_opt "Stream_Msg" tys with Some t -> t | None -> [] in
+       Alcotest.(check bool) "Stream_Msg declares Stream_Message" true
+         (List.mem "Stream_Message" msg_tys);
+       Alcotest.(check bool) "Stream_Msg declares no bare `Msg`" false (List.mem "Msg" msg_tys))
+
+let two_protocols = {|
+  @[endpoints]
+  protocol Other do
+    A -> B : Int
+    B -> A : String
+  end
+|}
+
+(* Two protocols in one module generate two DISTINCT message types, so their
+   derived codecs cannot collide. *)
+let two_protocols_distinct_msg_types =
+  Alcotest.test_case "two protocols in one module: distinct message type names" `Quick
+    (fun () ->
+       let tys = generated_types (wrap (stream ^ two_protocols)) in
+       let get m = match List.assoc_opt m tys with Some t -> t | None -> [] in
+       Alcotest.(check bool) "Stream_Msg.Stream_Message" true (List.mem "Stream_Message" (get "Stream_Msg"));
+       Alcotest.(check bool) "Other_Msg.Other_Message" true (List.mem "Other_Message" (get "Other_Msg"));
+       Alcotest.(check bool) "no shared short name" true
+         (not (List.exists (fun t -> List.mem t (get "Other_Msg")) (get "Stream_Msg"))))
+
+(* And the pair typechecks: both codecs' `derive Json` coexist. *)
+let two_protocols_ok =
+  ok "two protocols in one module typecheck together" (wrap (stream ^ two_protocols))
+
 let tests =
-  [ stream_shape; cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
+  [ stream_shape; msg_type_named_after_protocol; two_protocols_distinct_msg_types; two_protocols_ok;
+    cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
     unlabelled_names_pinned; labelled_shape; label_changes_fingerprint; labelled_roles_ok;
+    payload_definition_in_fingerprint; payload_field_order_in_fingerprint;
+    recursive_payload_terminates; payload_type_arguments_substituted; imported_payload_falls_back;
     entry_alias_shape; alias_cycles; entry_roles_ok; entry_wrong_role; entry_keeps_linearity;
     role_named_entry_shape; role_named_entry_ok;
     label_on_branch_head; label_msg_prefix; shared_label_ok; shared_label_two_payloads; shared_label_one_role;

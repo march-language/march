@@ -486,6 +486,32 @@ let discarded_linear_binding env (e : Ast.expr) =
   in
   go e
 
+(* ── `let x = <linear binding>` ───────────────────────────────────────
+   The same binding-not-type gap as `let _ = p` above, on the NAMED path.
+   [ELet]'s linearity auto-promotion reads the RHS's TYPE, so `let h2 = h`
+   with `h` a `linear h : Res` parameter bound an Unrestricted [h2]: the read
+   of [h] was its one use, and [h2] could then be dropped (or duplicated)
+   without a diagnostic.  The new binder inherits the tracked binding's
+   linearity instead: the value moved, its obligation moves with it. *)
+
+(** The linearity a `let x = e` binder inherits from [e] when [e]'s value IS
+    a tracked linear/affine binding (the variable, a linear field's sentinel,
+    or either under an annotation); [Ast.Unrestricted] otherwise. *)
+let rebound_binding_lin env (e : Ast.expr) =
+  let tracked key =
+    match List.find_opt (fun le -> le.le_name = key) env.lin with
+    | Some le -> effective_lin env le
+    | None -> Ast.Unrestricted
+  in
+  let rec go (e : Ast.expr) =
+    match e with
+    | Ast.EVar n -> tracked n.Ast.txt
+    | Ast.EField (Ast.EVar r, f, _) -> tracked (r.Ast.txt ^ "#" ^ f.Ast.txt)
+    | Ast.EAnnot (inner, _, _) -> go inner
+    | _ -> Ast.Unrestricted
+  in
+  go e
+
 let report_linear_wildcard_discard env ~span ~name t =
   Err.error env.errors ~span
     (Printf.sprintf
@@ -3097,7 +3123,48 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
         let inferred = infer_expr env (Ast.ELam (params, body, lsp)) in
         unify env ~span:lsp ~reason inferred expected
     in
-    peel params expected env
+    (* `fn (a, b) -> e` is a TWO-parameter (curried) lambda, not a lambda over
+       a pair.  Checked against a ONE-argument callback over an n-tuple
+       (`List.map(pairs, fn (k, v) -> v)`, expected `(K, V) -> r`), the plain
+       peel binds `a` to the whole tuple and then unifies the result variable
+       with an arrow: either a silently nonsense type (`List(b -> b)`) or the
+       misleading "infinitely recursive … forget to apply it" error.  Fire only
+       when the expected arrow chain is SHORTER than the parameter list, so a
+       genuinely curried callback — `fold_left`'s `b -> a -> b`, even with a
+       tuple accumulator — is untouched.  To avoid cascading errors, recover by
+       checking the body with each parameter bound to its tuple component,
+       which is what the author meant. *)
+    let n_params = List.length params in
+    let rec arrow_depth t =
+      match repr t with TArrow (_, r) -> 1 + arrow_depth r | _ -> 0
+    in
+    (match repr expected with
+     | TArrow (param_ty, ret_ty)
+       when n_params >= 2 && arrow_depth expected < n_params
+            && (match repr param_ty with
+                | TTuple comps -> List.length comps = n_params
+                | _ -> false) ->
+       let comps = match repr param_ty with TTuple cs -> cs | _ -> [] in
+       let names =
+         String.concat ", "
+           (List.map (fun (p : Ast.param) -> p.param_name.Ast.txt) params) in
+       Err.report env.errors
+         { Err.severity = Err.Error; span = lsp; labels = []; notes = [];
+           code = Some "curried_lambda_over_tuple"; fix = None;
+           message = Printf.sprintf
+             "This lambda takes %d arguments, but it is passed where a \
+              function of ONE argument, a %d-tuple `%s`, is expected.\n\
+              `fn (%s) -> …` is a %d-parameter (curried) lambda, not a lambda \
+              over a tuple.\n\
+              To destructure the tuple, match on it:\n    \
+              fn pair -> match pair do (%s) -> … end"
+             n_params n_params (pp_ty param_ty) names n_params names };
+       let env' =
+         List.fold_left2 (fun env p t -> bind_lam_param env lsp p (Some t))
+           env params comps in
+       check_expr env' body ret_ty ~reason;
+       close env'
+     | _ -> peel params expected env)
 
   (* Match in check mode: check each arm against expected *)
   | Ast.EMatch (scrut, branches, msp), _ ->
@@ -3523,7 +3590,18 @@ and infer_block env exprs =
             before — promoting it to strict-linear would regress that. *)
          | TLin (lin, inner) when lin <> Ast.Unrestricted
              && (match repr inner with TChan _ -> false | _ -> true) -> lin
-         | t -> if holds_linear env t then Ast.Linear else Ast.Unrestricted)
+         | t when holds_linear env t -> Ast.Linear
+         (* A plain-typed RHS that IS a linear binding (`let h2 = h`, `h` a
+            `linear h : Res` parameter) hands its obligation to the new
+            binder — see [rebound_binding_lin].  Channels keep their own
+            accounting, as above. *)
+         | TLin (_, inner) when (match repr inner with TChan _ -> true | _ -> false) ->
+           Ast.Unrestricted
+         | TChan _ -> Ast.Unrestricted
+         | _ ->
+           (match b.bind_pat with
+            | Ast.PatVar _ -> rebound_binding_lin env b.bind_expr
+            | _ -> Ast.Unrestricted))
       | lin -> lin
     in
     let env' = match auto_lin with
@@ -7575,6 +7653,10 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
      place to carry the exemption rather than a flag threaded from the CLI. *)
   let env = { env with root_cap_allowed = true } in
   record_names_load env.record_names_snapshot;   (* per-check, see [record_names_dump] *)
+  (* REPL input is user code: the stdlib-only builtin gate applies. Its
+     top-level declarations never pass through [check_module_needs] (nested
+     modules do), so run the gate here. *)
+  check_stdlib_only_refs env m.Ast.mod_decls;
   let errors = env.errors in
   let type_map = env.type_map in
   let rec prebind_mod_members_inc ?(opaque = StringSet.empty) prefix e decls =

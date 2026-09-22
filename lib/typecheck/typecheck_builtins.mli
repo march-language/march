@@ -31,7 +31,15 @@ val t_result : ty -> ty -> ty
     a check has started will not retroactively reclassify spans. *)
 
 val stdlib_source_files : string list ref
+
+(** The one "is this a stdlib file?" predicate: [span_is_stdlib], the
+    stdlib-only builtin gate and the driver's diagnostic filter all use it. *)
+val file_is_stdlib : string -> bool
 val span_is_stdlib : Ast.span -> bool
+
+(** Builtins only the standard library may reference, with the suggestion
+    shown to user code instead. Empty; see [Typecheck_caps.check_stdlib_only_refs]. *)
+val stdlib_only : (string * string) list ref
 
 (** {1 Capabilities} *)
 

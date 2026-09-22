@@ -11,6 +11,19 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+- **A targeted diagnostic for `fn (a, b) -> …` used as a callback over a
+  tuple.** `fn (a, b) -> …` is a two-parameter (curried) lambda, not a lambda
+  that destructures a pair, so `List.map(pairs, fn (k, v) -> v)` was wrong in a
+  way the typechecker used to report badly: either it was accepted with a
+  nonsense type (the result variable absorbed the extra arrow, giving
+  `List(b -> b)`) or it failed with the misleading "this type would have to be
+  infinitely recursive … Did you forget to apply it". A multi-parameter lambda
+  checked against a one-argument callback over a tuple of the same arity now
+  says so and suggests `fn pair -> match pair do (a, b) -> … end`. Genuinely
+  curried callbacks such as `List.fold_left`'s `b -> a -> b` are unaffected,
+  including when the accumulator is itself a tuple.
+
 ### Removed
 - **`MARCH_NO_TRMC` is gone.** The environment variable turned off
   tail-recursion-modulo-cons for every compile in the process, including the
@@ -19,6 +32,16 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **A malformed `forge.toml` is an error that names its line, and an unknown key is a
+  warning.** forge used to drop any line it could not parse, ignore a `[section`
+  header with no `]` and any text after a value, and ignore keys it did not know, so a
+  typo was silently a no-op. A bad line now fails with `forge.toml:<line>: <reason>`,
+  and an unknown key in a section forge reads (`[package]`, `[ffi]`, `[hot-reload]`,
+  `[[hot-reload.env]]`, `[deps.<name>]`, ...) prints
+  `forge.toml:<line>: warning: unknown key '<key>' in [<section>]`. Arrays may now
+  span lines and end with a trailing comma, and a quoted key loses its quotes. A
+  malformed TOML file read by any other forge command is reported as an error rather
+  than an internal-error backtrace.
 - **Tail-recursion-modulo-cons always runs; `--no-trmc` and `--trmc` are
   removed.** Passing either is now the ordinary "unknown option" error. There
   is no supported way to turn TRMC off: the stdlib's list producers are being
@@ -47,6 +70,12 @@ git log is authoritative for exact commits.
   about 18 KB more, and `Vault.size`/`Vault.keys` walk shard by shard, so their result
   is a recent count rather than a single instant's snapshot of the whole table.
 ### Added
+- **The type checker can reserve a builtin for the standard library.** A reference to
+  a reserved builtin from user code, the REPL included, is an error that names the
+  stdlib function to use instead:
+  `` `pid_of_int` is internal to the standard library; use `Actor.list(cap)` ``. No
+  builtin is reserved yet: the raw actor-reference builtins will be once their
+  capability-taking wrappers exist.
 - **A choreography role's first state now has a name: `<P>_<Role>.Entry`.** A role
   body's signature used to have to spell the state `register` yields, which meant
   working out `S_` plus the first step of that role's own projection
@@ -148,6 +177,51 @@ git log is authoritative for exact commits.
   counts records freed and `stat(9)` those waiting to be. An `Actor.reply`
   whose caller has already given up and exited is now dropped cleanly, as
   is a reply to a value that is not a reply reference.
+- **A `MARCH_SANITIZE=1` compile no longer returns a cached ThreadSanitizer
+  binary.** The compile cache recorded only *whether* `MARCH_SANITIZE` was
+  set, not which sanitizer it selected, so building a program with
+  `MARCH_SANITIZE=thread` and then with `MARCH_SANITIZE=1` printed
+  `compiled ... (cached)` and handed back the TSAN build instead of an
+  ASan+UBSan one. Anything checked that way was checked by the wrong
+  sanitizer. The cache key now includes the sanitizer, so the two builds are
+  cached separately. Each such key changes once, so the first sanitized build
+  after upgrading is not a cache hit.
+- **`forge deploy hot` builds the same entry file as `forge build`.** `forge build`,
+  `check` and `run` defaulted to `lib/<name>.march` and the hot-deploy build step to
+  `src/<name>.march`, so a project that built could not be hot-deployed without an
+  explicit `entrypoint`, and the other way round. Every forge command now uses
+  `[package] entrypoint` if set, else the first of `lib/<name>.march` and
+  `src/<name>.march` that exists, and reports a missing entry the same way.
+  `forge install` and `forge interactive` now honour `entrypoint` too.
+- **Renaming a linear value with `let` no longer lets it be dropped.** In
+  `fn f(linear h : Res) ... let h2 = h`, the rename consumed `h` but left `h2`
+  ordinary, so `h2` could be ignored with no error. `h2` now takes over `h`'s
+  obligation and must be used exactly once, whether `h` is a `linear` parameter
+  or a `linear let` local.
+- **A protocol whose payload types differ in their DEFINITIONS is now caught when
+  the session is set up, not as an undecodable message once it is running.**
+  `<P>_Msg.fingerprint()` digested each payload type by NAME, so two nodes whose
+  `Thing` was `{ x : Int }` on one and `{ x : String }` on the other shared a
+  fingerprint: the session formed and the skew surfaced mid-session, on the
+  receiving side, as `Protocol(role, "undecodable message: ...")`. The digest now
+  folds a payload type's definition in, recursively, for every type declared in
+  the same module — a variant's constructors and a record's fields in declaration
+  order, with type parameters substituted. A payload type from ANOTHER module is
+  out of reach when the digest is computed and is still recorded by name (marked
+  `extern:` so the digest at least says the definition was unavailable), so a
+  change below such a type's name remains invisible to the check.
+  **Compatibility:** every fingerprint changed. A node built before this change
+  and a node built after will now refuse each other at the access point — and, on
+  the direct runner, at the handshake. That is the check working, not a
+  regression; rebuild both sides from the same source.
+- **The direct runner (`<P>_Run.run_<Role>`, `host_<Role>`, `host_<Role>_or`) now
+  exchanges the protocol fingerprint too, not only access points.** It rides the
+  session hello as an optional trailing field, so a node built before this change
+  is read rather than deadlocked on — and is refused with a message saying it sent
+  no fingerprint. A mismatch is a setup error (`Connect`/`Accept`) naming both
+  fingerprints, not a retry loop. The cluster runner (`cluster_<Role>`) finds its
+  peers through the cluster registry rather than a hello and is NOT yet covered;
+  an access point still checks every cluster session it brokers.
 - **Compiled `send_checked` and `is_cap_valid` no longer intermittently accept a cap
   whose actor was killed.** About one run in five, a cap taken while the actor was
   alive still validated after `kill`: `is_cap_valid` answered `true` and
@@ -370,6 +444,14 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **A design for distributed authority, topology and hot deploys, and its groundwork
+  plan** (`specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md`,
+  `specs/plans/2026-09-21-distributed-deploys-groundwork-plan.md`). The remaining
+  build steps are filed as `specs/todos/2026-09-22-dd-*.md`.
+- **A capability's dictionary type must be monomorphic, and the capabilities chapter now says
+  so.** `proof cap Live with Ops` cannot attach a parameterised `Ops(m)`; the "Runtime
+  dictionaries" section explains the limitation and the way around it (a concrete
+  representation at the boundary, as `Session.Ops` does with `Bytes`).
 - **The language-reference pages on march-lang.org are now generated from
   `specs/lang/`, and the two copies have been reconciled.** Each chapter used to exist
   twice, as independent prose that had drifted both ways, so corrections made in one copy

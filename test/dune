@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering)
+ (modules test_compiler test_stdlib_only test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
@@ -1755,20 +1755,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/stream_endpoints.expected stream_endpoints.out)))
 
-; Session.in_process(), the stdlib's network-free transport (stdlib/session.march).
-; in_process: a whole session, a role leaving (the peer's cancel handler runs)
-; and an undecodable message (Session.fail cancels the receiver).
-; in_process_logging: a delivery parked until the continuation that wants it
-; is installed, and a crash (the waiting peer takes its `or crash` branch).
+; Session.in_process(), the stdlib's network-free transport (stdlib/session.march):
+; a whole session, a role leaving (the peer's cancel handler runs), an
+; undecodable message (Session.fail cancels the receiver), a delivery parked
+; until the continuation that wants it is installed, and a crash (the waiting
+; peer takes its `or crash` branch).
 ; The `transport:` lines are the transport's own trace (in_process_with).
+;
+; TWO `@[endpoints]` protocols in ONE module, each running its own sessions --
+; the regression recorded under specs/progress/ dated 2026-09-22, which is why
+; this was two files (in_process_logging.march) until then.  Run on BOTH
+; backends against the one golden, because the bug's
+; signature was the two backends DISAGREEING: interpreted took the other
+; protocol's derived `to_json` and died in a generated `send_…` with a match
+; failure, while compiled refused to build ("ambiguous interface-method call
+; to `JsonFrom$Msg.from_json`").  A compiled-only rule would have seen only
+; half of it.
 (rule
- (targets in_process_bin in_process.out)
+ (targets in_process_bin in_process.out in_process_interp.out)
  (deps (file %{exe:../bin/main.exe})
        (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (source_tree ../stdlib)
        (file session/in_process.march))
  (action
   (progn
+   (with-stdout-to in_process_interp.out
+     (run %{exe:../bin/main.exe} session/in_process.march))
    (run %{exe:../bin/main.exe} --compile -o in_process_bin
         session/in_process.march)
    (with-stdout-to in_process.out (system "./in_process_bin")))))
@@ -1778,20 +1790,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (diff session/in_process.expected in_process.out)))
 
 (rule
- (targets in_process_logging_bin in_process_logging.out)
- (deps (file %{exe:../bin/main.exe})
-       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
-       (source_tree ../stdlib)
-       (file session/in_process_logging.march))
- (action
-  (progn
-   (run %{exe:../bin/main.exe} --compile -o in_process_logging_bin
-        session/in_process_logging.march)
-   (with-stdout-to in_process_logging.out (system "./in_process_logging_bin")))))
-
-(rule
  (alias runtest)
- (action (diff session/in_process_logging.expected in_process_logging.out)))
+ (action (diff session/in_process.expected in_process_interp.out)))
 
 ; Crash branches in one process (design Part B, 2026-09-20): the logging
 ; protocol with `may crash C`, run twice on a transport that can mark a role
