@@ -90,7 +90,7 @@ module that runs roles on the network. For `Fan`:
 **Names `P` reserves.** The generated modules are `P_Msg`, `P_<Role>` and `P_Run`, and the
 message type inside `P_Msg` is `P_Message`. Those names are yours to avoid: a type of your
 own called `P_Message` that also derives an interface the generated codec derives is
-rejected as an overlapping implementation. Two protocols in one module is fine — each one's
+rejected as an overlapping implementation. Two protocols in one module is fine: each one's
 message type is named after its own protocol, which is what keeps their `Json` codecs apart
 (before 2026-09-22 both were called `Msg`, and the first protocol's sends encoded through the
 second's codec).
