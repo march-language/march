@@ -21,6 +21,7 @@ let rec consts (t : Smt.term) : string list =
   | Smt.App (_, ts) | Smt.Ctor (_, _, ts) -> List.concat_map consts ts
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> consts a
   | Smt.MulLit (_, a) -> consts a
+  | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> consts a
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b)
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b)
   | Smt.Eq (a, b) | Smt.Ne (a, b)
@@ -39,6 +40,7 @@ let rec app_heads (t : Smt.term) : string list =
   | Smt.App (f, ts) | Smt.Ctor (f, _, ts) -> f :: List.concat_map app_heads ts
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> app_heads a
   | Smt.MulLit (_, a) -> app_heads a
+  | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> app_heads a
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b)
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b)
   | Smt.Eq (a, b) | Smt.Ne (a, b)
@@ -111,6 +113,8 @@ let rec nonlinear (t : Smt.term) : bool =
   | Smt.App (_, ts) | Smt.Ctor (_, _, ts) -> List.exists nonlinear ts
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> nonlinear a
   | Smt.MulLit (_, a) -> nonlinear a
+  (* Division by a literal keeps the query linear, like [MulLit]. *)
+  | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> nonlinear a
   | Smt.Add (a, b) | Smt.Sub (a, b)
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b)
   | Smt.Eq (a, b) | Smt.Ne (a, b)

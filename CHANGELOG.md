@@ -39,6 +39,13 @@ git log is authoritative for exact commits.
   `Session.in_process_with(trace)` reports what the transport itself does, and
   `t.take(())` serves endpoints hosted in actors. Replaces the hand-written
   `Session.Ops` the guide used to point at.
+- **Refinement predicates can use `/` and `%`** where March's truncating
+  division agrees with the solver's: a non-zero integer-literal divisor over a
+  dividend known to be non-negative, e.g. `{Int | _ >= 0 && _ / 2 < 10}` or
+  `{Int | _ < len(xs) / 2}`. Violations are confirmed with a concrete
+  counterexample like any other; a division outside that fragment is still not
+  checked, and now says why (in a warning at the definition and in the skip
+  detail).
 - **`MARCH_PREEMPT_SIGNAL` chooses the green-thread preemption signal** (`USR1`,
   the default, `USR2`, or on Linux `RTMIN[+n]`); embedders can call
   `march_sched_set_preempt_signal`. `Signal.watch` reserves whichever signal is

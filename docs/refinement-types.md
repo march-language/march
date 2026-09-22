@@ -106,7 +106,27 @@ Multiplying by a literal keeps the question in linear arithmetic, where the
 solver always has an answer. You can multiply two variables as well — `v * v > 0`
 is just `v != 0` over the integers — but there the solver may run out of road, and
 a question it can't settle is skipped (reported as `nonlinear-goal`), never turned
-into a complaint. Division (`/`, `%`) isn't part of the fragment.
+into a complaint.
+
+Integer division (`/`, `%`) is in the fragment only where March's
+truncating division agrees with the solver's Euclidean one: the divisor is a
+non-zero integer literal (`2`, `-2`) and the dividend is **known to be
+non-negative**. A dividend counts as non-negative when it is a non-negative
+literal, a `len(...)` (or another measure the checker knows is non-negative),
+a sum, product, or in-fragment `/`/`%` of such terms, or a variable, field, or
+measure that a conjunct of the same `&&` chain bounds below by 0:
+
+```march
+fn half(n : {Int | _ >= 0 && _ / 2 < 10}) : Int do n end        -- checked
+fn mid(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs) / 2}) : Int do i end
+fn f(n : {Int | _ / 2 > 0}) : Int do n end                      -- not checked
+```
+
+Outside that (a variable divisor, or a dividend that may be negative, where
+`-7 / 2` is `-3` in March but `-4` in the solver's logic) the predicate is not
+translated: it gets a warning at the definition, and a use is filed as the
+skip reason `unreflectable-predicate`, with the detail naming which condition
+failed.
 
 ---
 

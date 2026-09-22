@@ -854,6 +854,34 @@ let gate_suite =
       \      Succ(m) -> 1 + sz(m)\n\
       \    end\n\
       \  end\n\
+       end\n";
+
+    (* The gate's division arm and the predicate reflector share one
+       literal-divisor test ([Refine_encode.nonzero_int_literal]).  A negative
+       literal parses as `negate(2)`; it cannot divide by zero either, and the
+       gate used to call it partial. *)
+    case "a measure dividing by a negative literal passes the gate" false
+      "mod M do\n\
+      \  type Nat = Zero | Succ(Nat)\n\
+      \  @[measure]\n\
+      \  fn sz(n : Nat) : Int do\n\
+      \    match n do\n\
+      \      Zero -> 0\n\
+      \      Succ(m) -> (1 + sz(m)) / -2\n\
+      \    end\n\
+      \  end\n\
+       end\n";
+
+    case "a measure dividing by a variable is rejected" true
+      "mod M do\n\
+      \  type Nat = Zero | Succ(Nat)\n\
+      \  @[measure]\n\
+      \  fn sz(n : Nat) : Int do\n\
+      \    match n do\n\
+      \      Zero -> 0\n\
+      \      Succ(m) -> 1 / sz(m)\n\
+      \    end\n\
+      \  end\n\
        end\n" ]
 
 (* M-b: the built-in List(a) is axiomatised, so a user `length` measure computes
@@ -4981,7 +5009,8 @@ end|}
        The corpus has no genuine [unreflectable-predicate] case (Task 2 routed
        every corpus skip to a subject or a diagnosed reason), so these four are
        synthetic, one per shape from [smt_of_r]'s [None]/[Error] enumeration:
-       an opaque call, an unsupported operator (no `/` arm in [smt_of_r]),
+       an opaque call, an operator outside the fragment (`/` on a dividend not
+       known to be non-negative -- see the division cases just after UP2),
        symbolic float arithmetic, and a string literal a postcondition-side
        resolver does not cover.  Each asserts the slug AND the EXACT detail
        phrase [reason_detail] renders (`` the predicate's `<leaf>` has no SMT
@@ -5017,6 +5046,11 @@ end|} in
           (contains (refine_error_text_d src)
              "the predicate's `is_prime(_)` has no SMT translation"));
 
+    (* Since the truncation-safe division fragment landed (2026-09-22), `/`
+       reflects when its divisor is a non-zero literal and its dividend is
+       KNOWN non-negative.  `_ / 2 > 0` has no such fact about `_`, so it is
+       still outside the fragment -- and the detail now says which half of
+       the fragment it missed. *)
     gated "a genuine unreflectable predicate names the failing sub-expression: division"
       (fun () ->
         let src = {|mod UP2 do
@@ -5025,8 +5059,127 @@ end|} in
   fn go() : Int do f(7) end
 end|} in
         Alcotest.(check (list string)) "slug" [ "unreflectable-predicate" ] (skip_reasons src);
+        let text = refine_error_text_d src in
         Alcotest.(check bool) "exact detail" true
-          (contains (refine_error_text_d src) "the predicate's `_ / 2` has no SMT translation"));
+          (contains text "the predicate's `_ / 2` has no SMT translation");
+        Alcotest.(check bool) "says why: the dividend" true
+          (contains text "here the dividend is not known to be non-negative"));
+
+    (* ── `/` and `%` in the truncation-safe fragment ─────────────────────────
+       March's `/`/`%` truncate; SMT-LIB's `div`/`mod` are Euclidean.  They
+       agree on a non-negative dividend and a non-zero divisor of either sign,
+       so a literal divisor over a dividend the predicate's own `&&` chain (or
+       a `len`) bounds below by 0 reflects.  RED on the pre-fragment checker:
+       every accepting case below was an `unreflectable-predicate` skip ("the
+       predicate's `_ / 2` has no SMT translation"), a `cap verified` error. *)
+    gated "division in the fragment: a satisfied precondition proves" (fun () ->
+        let src = {|mod DivOk do
+  cap verified
+  fn half(n : {Int | _ >= 0 && _ / 2 < 10}) : Int do n end
+  fn rem(n : {Int | 0 <= _ && _ % 3 == 1}) : Int do n end
+  fn go() : Int do half(19) + rem(7) end
+end|} in
+        Alcotest.(check (list string)) "no skips" [] (skip_reasons src);
+        Alcotest.(check (triple int int int)) "(proved, violated, skipped)" (2, 0, 0)
+          (ledger_counts3 src);
+        Alcotest.(check string) "no errors" "" (refine_error_text_d src);
+        Alcotest.(check (list string)) "no vocabulary warning" [] (refine_warnings src));
+
+    gated "division in the fragment: a violated precondition is rejected" (fun () ->
+        (* 20 / 2 = 10, not < 10. *)
+        let src = {|mod DivBad do
+  fn half(n : {Int | _ >= 0 && _ / 2 < 10}) : Int do n end
+  fn go() : Int do half(20) end
+end|} in
+        Alcotest.(check (triple int int int)) "(proved, violated, skipped)" (0, 1, 0)
+          (ledger_counts3 src);
+        Alcotest.(check bool) "reported" true
+          (contains (refine_error_text_d src) "does not satisfy precondition `_ >= 0 && _ / 2 < 10`"));
+
+    gated "division in the fragment: a length is a non-negative dividend" (fun () ->
+        let src = {|mod DivLen do
+  fn f(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs) / 2}) : Int do i end
+  fn ok() : Int do f([1, 2, 3, 4], 1) end
+  fn bad() : Int do f([1, 2, 3, 4], 2) end
+end|} in
+        Alcotest.(check (triple int int int)) "(proved, violated, skipped)" (1, 1, 0)
+          (ledger_counts3 src));
+
+    gated "division in the fragment: a negative literal divisor truncates" (fun () ->
+        (* 7 / -2 is -3 under truncation AND under Euclid (the dividend is
+           non-negative); 8 / -2 is -4. *)
+        let src = {|mod DivNeg do
+  fn f(n : {Int | _ >= 0 && _ / -2 == -3 && _ % -2 == 1}) : Int do n end
+  fn ok() : Int do f(7) end
+  fn bad() : Int do f(8) end
+end|} in
+        Alcotest.(check (triple int int int)) "(proved, violated, skipped)" (1, 1, 0)
+          (ledger_counts3 src));
+
+    (* THE witness case.  The solver's refutation of a postcondition is a
+       CANDIDATE counterexample; it is reported only once [Witness] runs the
+       function on it and evaluates the predicate on the result.  Without
+       truncating `/`/`%` arms in [Witness.eval_operand], the predicate is
+       unevaluable, the candidate is unconfirmable, and -- outside `cap
+       verified` -- the checker reports NOTHING.  Mutation: delete the
+       `("/" | "%")` arm of [eval_operand] -> both assertions below go red (no
+       error; the obligation lands as a solver-undecided skip). *)
+    gated "division in the fragment: a violated postcondition is confirmed by a witness"
+      (fun () ->
+        let src = {|mod DivPost do
+  fn f(n : {Int | _ >= 0}) : {Int | _ >= 0 && _ / 2 <= 5} do n end
+  fn g(n : {Int | _ >= 0}) : {Int | _ >= 0 && _ % 4 != 3} do n end
+end|} in
+        let text = refine_error_text_d src in
+        Alcotest.(check bool) "f's counterexample is executed and shown" true
+          (contains text "but f(");
+        Alcotest.(check bool) "g's counterexample is executed and shown" true
+          (contains text "but g(");
+        Alcotest.(check (triple int int int)) "(proved, violated, skipped)" (0, 2, 0)
+          (ledger_counts3 src));
+
+    gated "division in the fragment: a satisfied postcondition proves" (fun () ->
+        let src = {|mod DivPostOk do
+  fn f(n : {Int | _ >= 0 && _ <= 11}) : {Int | _ >= 0 && _ / 2 <= 5} do n end
+end|} in
+        Alcotest.(check (triple int int int)) "(proved, violated, skipped)" (1, 0, 0)
+          (ledger_counts3 src));
+
+    (* Outside the fragment the behaviour is today's skip, with a reason.
+       Each of these would be UNSOUND to translate as Euclidean division:
+       `-7 / 2` is -3 in March and -4 in SMT-LIB. *)
+    gated "division outside the fragment: a variable divisor is skipped, and says why"
+      (fun () ->
+        let src = {|mod DivVar do
+  cap verified
+  fn f(d : {Int | _ > 0}, n : {Int | _ >= 0 && _ / d > 0}) : Int do n + d end
+  fn go() : Int do f(2, 7) end
+end|} in
+        Alcotest.(check (list string)) "slug" [ "unreflectable-predicate" ] (skip_reasons src);
+        Alcotest.(check bool) "says why: the divisor" true
+          (contains (refine_error_text_d src)
+             "the predicate's `_ / d` has no SMT translation: `/` is translated only when its \
+              divisor is a non-zero integer literal");
+        Alcotest.(check bool) "and warns at the definition" true
+          (List.exists
+             (fun w -> contains w "This refinement is not checked: `/` is translated only")
+             (refine_warnings src)));
+
+    gated "division outside the fragment: a possibly-negative dividend is skipped" (fun () ->
+        (* `-7 / 2 == -3` holds in March; a Euclidean translation would call
+           it false and report a violation that is not one.  The `||` does
+           not establish `_ >= 0` for its right operand -- only an `&&` chain
+           does -- so this stays out. *)
+        let src = {|mod DivNegDividend do
+  cap verified
+  fn f(n : {Int | _ / 2 == -3 || _ > 100}) : Int do n end
+  fn g(n : {Int | _ < 0 || _ % 2 == 0}) : Int do n end
+  fn go() : Int do f(-7) + g(4) end
+end|} in
+        Alcotest.(check (list string)) "slugs"
+          [ "unreflectable-predicate"; "unreflectable-predicate" ] (skip_reasons src);
+        Alcotest.(check bool) "never a violation" true
+          (not (contains (refine_error_text_d src) "does not satisfy")));
 
     gated
       "a genuine unreflectable predicate names the failing sub-expression: symbolic float \
