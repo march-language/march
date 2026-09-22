@@ -137,6 +137,15 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A `MARCH_SANITIZE=1` compile no longer returns a cached ThreadSanitizer
+  binary.** The compile cache recorded only *whether* `MARCH_SANITIZE` was
+  set, not which sanitizer it selected, so building a program with
+  `MARCH_SANITIZE=thread` and then with `MARCH_SANITIZE=1` printed
+  `compiled ... (cached)` and handed back the TSAN build instead of an
+  ASan+UBSan one. Anything checked that way was checked by the wrong
+  sanitizer. The cache key now includes the sanitizer, so the two builds are
+  cached separately. Each such key changes once, so the first sanitized build
+  after upgrading is not a cache hit.
 - **Renaming a linear value with `let` no longer lets it be dropped.** In
   `fn f(linear h : Res) ... let h2 = h`, the rename consumed `h` but left `h2`
   ordinary, so `h2` could be ignored with no error. `h2` now takes over `h`'s
