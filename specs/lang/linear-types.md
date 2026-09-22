@@ -402,7 +402,16 @@ enforce the rule:
   value that must be consumed, and so does a `_` over something that *holds*
   one (`let (_, n) = (Some(token), 1)`). Discarding a non-linear part
   (`Token(_)`) is fine, and so is a `_` arm that ends in `panic(…)`
-  (`reject/t203`–`t206`, `t256`).
+  (`reject/t203`–`t206`, `t256`). This holds however the value became linear:
+  not only when its *type* says so, but also when only its *binding* does —
+  a `linear x : a` parameter or a `linear let` local, whose type stays a plain
+  type variable or `Int`. `let _ = x` on one of those is rejected too
+  (`` This `_` discards the linear value `x` ``), so no generic function can
+  launder a linear value away by binding it to a wildcard (`reject/t281`).
+  The one exception is a session endpoint: a `Chan` has its own, narrower
+  must-close rule (only an endpoint at `End` must be closed — see
+  [session-types.md](session-types.md)), so dropping one mid-protocol stays
+  legal (`accept/t282`).
 - **A container holding one is linear itself.** A tuple, list or ADT value
   with a linear value inside (`(token, 1)`, `Some(token)`, `[token]`) must be
   used exactly once, like the value it holds. Records are the exception: their

@@ -32,6 +32,14 @@ git log is authoritative for exact commits.
   `Session.in_process_with(trace)` reports what the transport itself does, and
   `t.take(())` serves endpoints hosted in actors. Replaces the hand-written
   `Session.Ops` the guide used to point at.
+- **`MARCH_PREEMPT_SIGNAL` chooses the green-thread preemption signal** (`USR1`,
+  the default, `USR2`, or on Linux `RTMIN[+n]`); embedders can call
+  `march_sched_set_preempt_signal`. `Signal.watch` reserves whichever signal is
+  in use, so moving preemption to `USR2` makes `Signal.Usr1` watchable.
+- **The hot-code-reload audit log records each deploy's capability set.** Every
+  line now has `caps` and `cap_root` (`null` for deploys over pre-v4 protocols),
+  so "when did this node last gain capability X" can be answered from the log
+  alone, including widenings authorized with `--grant-cap`.
 - **A choreography role hosted in an actor takes its crash branch.** A protocol
   that declares `may crash C` behaved one way in a role run from callbacks (the
   crash branch, the session continuing) and another in a role hosted in an actor
@@ -68,6 +76,36 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A linear value can no longer be discarded with `let _ = …`.** A `_` binding
+  counted as the value's one use whenever the value was linear because of how it
+  was *bound* rather than what its type says — a `linear x : a` parameter or a
+  `linear let` local, whose type stays a plain type variable or `Int`. One generic
+  `fn launder(linear v : a) : () do let _ = v  () end` was therefore enough to drop
+  any linear value in the program, silently. A wildcard is not a use: such a `let`
+  is now rejected, naming the value and pointing at how to consume it (for a session
+  endpoint, the generated `take_closed` / `take_idle`). Session endpoints keep their
+  own, narrower rule — only a `Chan` that reached `End` must be closed, so a
+  mid-protocol drop is still legal. See `docs/linear-types.md`.
+
+- **March no longer takes over a host process's SIGUSR1.** Preemption replaced any
+  existing SIGUSR1 handler for good, so March embedded in another program (the
+  Erlang VM uses SIGUSR1 for crash dumps) silently disabled the host's handler.
+  The previous handler is now called for every signal that is not one of
+  March's own preemption ticks, and it is restored when the scheduler stops.
+- **On macOS, `--cap-sandbox` now stops a program without `IO.Process` from
+  executing another program.** The embedded sandbox profile allowed `exec`
+  unconditionally and only gated `fork`, so such a program could still replace
+  itself with an arbitrary binary (directly, or through `extern` C). `exec` is
+  now granted only with `IO.Process`, as it already was on Linux. `forge cap
+  run` is unchanged: its wrapper has to exec the target, so it still allows it.
+- **A hot-code-reload publish could unload a version while a caller was entering
+  it.** Reclaiming an old version's ring slot closed its shared object before
+  marking the slot retired, so a caller that had just passed the liveness check
+  could pin it and call into code being unmapped. The slot is now retired first,
+  and the object is closed only if no caller pinned it in the meantime.
+- **Re-registering a `Signal.watch` watcher could lose a signal delivered during
+  the call.** The pending flag was cleared after the new watcher was installed,
+  so a delivery in between was erased. It is now cleared first.
 - **A false postcondition could be proved when a `match` reused a name.**
   Structural induction trusted a variable as a component of the matched value
   by its name alone, so `Cons(_, t)` in a `match` on a *different* list was

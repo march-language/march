@@ -896,7 +896,7 @@ Compiling with `--cap-sandbox` embeds a **deny-default** profile, derived from *
 $ march --compile --cap-sandbox -o build/myapp app.march
 ```
 
-- **macOS**: a Seatbelt (SBPL) profile via `sandbox_init()`. Deny-default, then each declared capability opens a specific hole: `IO.FileWrite` allows writes (narrowed to the path scopes you declared, otherwise blanket), `IO.Network` allows the `network*` operation class, `IO.Process` allows `process-fork`. `IO.FileRead` is **advisory** here: dyld must map system libraries before any user code exists, so the baseline allows reads unconditionally and a scoped read rule would be decorative.
+- **macOS**: a Seatbelt (SBPL) profile via `sandbox_init()`. Deny-default, then each declared capability opens a specific hole: `IO.FileWrite` allows writes (narrowed to the path scopes you declared, otherwise blanket), `IO.Network` allows the `network*` operation class, `IO.Process` allows `process-fork` and `process-exec`. `IO.FileRead` is **advisory** here: dyld must map system libraries before any user code exists, so the baseline allows reads unconditionally and a scoped read rule would be decorative.
 - **Linux**: an unprivileged in-process **seccomp-bpf** filter (`PR_SET_NO_NEW_PRIVS` + `PR_SET_SECCOMP`). One syscall class is denied per *withheld* capability: no `IO.Network` blocks `socket`/`socketpair`, no `IO.Process` blocks `execve`/`execveat`, no `IO.FileWrite` blocks the write path; denied calls return `EPERM`. `IO.FileRead` is not enforced here either, because seccomp filters syscall *numbers*, not paths; path-scoped reads come from `forge cap run`'s mount namespace instead.
 
 Installation **fails closed**: if the sandbox cannot be installed, the program will not run rather than continue unconfined.
@@ -910,7 +910,7 @@ Because both mechanisms confine the **whole process**, they bound even the code 
 **Two platform asymmetries, confirmed against real running binaries rather than assumed from source:**
 
 - On macOS, `IO.Network`'s `network*` grant does not gate `socket()` creation itself: only the actual network operation, `bind()`/`connect()`. A withheld `IO.Network` still lets a program open a socket; it just can't do anything with it. Linux denies `socket`/`socketpair` entirely.
-- On macOS, `IO.Process`'s `process-fork` grant gates `fork()` only: `process-exec` is unconditionally allowed in the baseline regardless of capability, so a withheld `IO.Process` still lets a program `execve()` a new one. Linux is the reverse: `execve`/`execveat` are denied, `fork`/`clone` never are (the scheduler needs threads). Tracked as an open question, not settled behavior: [specs/todos/2026-08-12-cap-sandbox-macos-process-exec-not-gated.md](https://github.com/march-language/march/blob/main/specs/todos/2026-08-12-cap-sandbox-macos-process-exec-not-gated.md).
+- On macOS, a withheld `IO.Process` denies both `process-fork` and `process-exec`, so a program can neither `fork()` nor `execve()` a new image. Linux denies `execve`/`execveat` but never `fork`/`clone` (the scheduler needs threads). (Before 2026-09-21 macOS left `process-exec` in the baseline, so exec was ungated there; the embedded profile is applied from inside the already-running process, so nothing needs that grant. Measured: without it a sandboxed binary starts normally and `execve()` returns `EPERM`.)
 
 ### OS primitives, capability by capability
 
@@ -921,7 +921,7 @@ The prose above names the operation classes; this is the full map, including cap
 | Capability | macOS (Seatbelt) | Linux (seccomp-bpf) |
 |---|---|---|
 | `IO.Network` | `network*`: gates `bind`/`connect`, **not** `socket()` creation | denies `socket`, `socketpair` entirely |
-| `IO.Process` | `process-fork`: gates `fork()` only; `process-exec` always allowed | denies `execve`, `execveat`; `fork`/`clone` never gated |
+| `IO.Process` | `process-fork` and `process-exec`: gates `fork()` and `execve()` | denies `execve`, `execveat`; `fork`/`clone` never gated |
 | `IO.FileWrite` | `file-write*` (blanket, or `subpath`-scoped to a declared `@[scope]`) | denies write-flagged `openat` (`O_WRONLY`/`O_RDWR`/`O_CREAT`/`O_TRUNC`/`O_APPEND`) plus the unambiguous mutators (`unlink*`, `rename*`, `mkdir*`, `rmdir`, `truncate*`, `chmod*`) |
 | `IO.FileRead` | Advisory: baseline unconditionally allows `file-read*`/`file-read-metadata` (dyld needs it before user code exists) | Advisory: seccomp filters syscall *numbers*, not path arguments |
 
@@ -932,7 +932,7 @@ The prose above names the operation classes; this is the full map, including cap
 | `IO.FileWrite` / `IO.FileSystem` | `file-write*` | `--ro-bind / /` (whole tree read-only) unless granted, then full read-write |
 | `IO.Network` / `IO.NetConnect` / `.TLS` / `IO.WebSocket` / `IO.Database` | `network*` | `--unshare-net` (network namespace) |
 | `IO.NetListen` | Folded into `network*`: Enforced, no separate bind/listen split | Advisory: a network namespace isolates rather than denies: `bind()` still succeeds, it's just unreachable |
-| `IO.Process` | `process-fork` (Enforced overall, but exec of the target itself can't be denied: same underlying gap as `--cap-sandbox`) | `--unshare-pid` |
+| `IO.Process` | `process-fork` only. `process-exec` stays in the baseline because `sandbox-exec` must itself exec the target (denying it: exit 71), so under `forge cap run` a program without `IO.Process` can still exec; `--cap-sandbox` does gate it | `--unshare-pid` |
 | `IO.FileRead` | Advisory: dyld must read system libraries before user code runs | Enforced: an allow-list mount namespace (`--ro-bind-try` on only the loader's paths and the binary); anything else is *absent*, not just forbidden |
 | `IO.Clock`, `IO.Spawn`, `IO.Console`, `IO.Random`, `IO.Foreign`(`.Blocking`) | Advisory everywhere, both platforms: no way to tell each one from the runtime's own baseline traffic (`clock_gettime`, thread creation, stdout/stderr needed to report violations, `/dev/urandom` read at startup, foreign C code being outside the capability model entirely) | (same) |
 
