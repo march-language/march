@@ -1302,17 +1302,16 @@ let ping_server ~ssh_host ~remote_socket : bool =
 (** Deploy the given pre-built artifact to one server entry; print status line.
     Pass [~provided_epoch] to use a pre-fetched cluster-wide epoch (Phase 10)
     instead of calling GET_EPOCH on the server. *)
-let deploy_one ~(srv : Project.hot_reload_env) ~sk ~manifest ~so_path
+let deploy_one ~(host : Hosts.host) ~sk ~manifest ~so_path
     ~old_schemas_path ~new_schemas_path ?(entry_path="") ?(old_manifest_path="")
     ?(provided_epoch=0) ?(grant_caps=([] : string list)) ?(no_cap_gate=false) ()
     : (int, string) result =
-  let label = Printf.sprintf "%s [%s]" srv.Project.hre_ssh_host srv.Project.hre_name in
-  let pubkey = Option.value ~default:"" srv.Project.hre_public_key in
+  let label = Printf.sprintf "%s [%s]" host.Hosts.ssh host.Hosts.name in
   Printf.printf "\n── %s\n%!" label;
   run
-    ~ssh_host:srv.Project.hre_ssh_host
-    ~remote_socket:srv.Project.hre_socket
-    ~signing_pubkey:pubkey
+    ~ssh_host:host.Hosts.ssh
+    ~remote_socket:host.Hosts.socket
+    ~signing_pubkey:host.Hosts.pubkey
     ~sk ~manifest ~so_path ~old_schemas_path ~new_schemas_path ~entry_path
     ~old_manifest_path
     ~provided_epoch
@@ -1346,15 +1345,12 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
     match proj.Project.hot_reload with
     | None -> Error "no [hot-reload] section in forge.toml — add ssh_host, socket, public_key"
     | Some hr ->
-      let servers : Project.hot_reload_env list =
-        if env = "" then
-          if hr.Project.hr_ssh_host = "" then []
-          else [{ Project.hre_name = "default";
-                  hre_ssh_host = hr.Project.hr_ssh_host;
-                  hre_socket = hr.Project.hr_socket;
-                  hre_public_key = hr.Project.hr_public_key }]
+      let servers : Hosts.host list =
+        if env = "" then Option.to_list (Hosts.of_flat_config hr)
         else
-          List.filter (fun e -> e.Project.hre_name = env) hr.Project.hr_envs
+          List.filter_map (fun e ->
+              if e.Project.hre_name = env then Some (Hosts.of_hot_reload_env e) else None)
+            hr.Project.hr_envs
       in
       if servers = [] then
         Error (if env = ""
@@ -1410,11 +1406,11 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
                 | _ :: _ :: _ ->
                   let first = List.hd servers in
                   let e = get_epoch_from_server
-                    ~ssh_host:first.Project.hre_ssh_host
-                    ~remote_socket:first.Project.hre_socket in
+                    ~ssh_host:first.Hosts.ssh
+                    ~remote_socket:first.Hosts.socket in
                   if e > 0 then begin
                     Printf.printf "==> Shared epoch %d (epoch master: %s)\n%!"
-                      e first.Project.hre_ssh_host
+                      e first.Hosts.ssh
                   end;
                   e
                 | _ -> 0
@@ -1423,51 +1419,32 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
               let strategy = hr.Project.hr_strategy in
               let health_url = hr.Project.hr_health_check_url in
 
-              (* Simultaneous: deploy to all servers without the rolling stop-on-failure gate.
-                 NOTE: List.map is left-to-right sequential in OCaml — this is NOT parallel.
-                 The distinction vs rolling is the absence of health-check stops, not concurrency. *)
-              let simultaneous_deploy srvs =
-                List.map (fun srv ->
-                  (srv, deploy_one ~srv ~sk ~manifest ~so_path:so_path2
-                          ~old_schemas_path:prev_schemas_path
-                          ~new_schemas_path ~entry_path ~old_manifest_path:prev_manifest_path
-                          ~provided_epoch:shared_epoch ~grant_caps ~no_cap_gate ())
-                ) srvs
+              let deploy_step host =
+                deploy_one ~host ~sk ~manifest ~so_path:so_path2
+                  ~old_schemas_path:prev_schemas_path
+                  ~new_schemas_path ~entry_path ~old_manifest_path:prev_manifest_path
+                  ~provided_epoch:shared_epoch ~grant_caps ~no_cap_gate ()
               in
-
-              (* Rolling: one server at a time; optional HTTP health-check between. *)
-              let rolling_deploy srvs =
-                let results = ref [] in
-                let stop = ref false in
-                List.iter (fun srv ->
-                  if not !stop then begin
-                    let r = deploy_one ~srv ~sk ~manifest ~so_path:so_path2
-                        ~old_schemas_path:prev_schemas_path
-                        ~new_schemas_path ~entry_path ~old_manifest_path:prev_manifest_path
-                        ~provided_epoch:shared_epoch ~grant_caps ~no_cap_gate () in
-                    results := (srv, r) :: !results;
-                    (match r with
-                    | Error _ -> stop := true
-                    | Ok _ ->
-                      (match health_url with
-                      | Some url ->
-                        Printf.printf "  health check %s ... %!" url;
-                        if http_health_check ~url ~timeout_s:10 then
-                          Printf.printf "ok\n%!"
-                        else begin
-                          Printf.eprintf "failed!\n%!";
-                          Printf.eprintf "  Health check failed after %s — stopping deploy.\n%!"
-                            srv.Project.hre_ssh_host;
-                          results := (srv, Error "health_check_failed") :: !results;
-                          stop := true
-                        end
-                      | None -> ()))
-                  end else
-                    Printf.printf "  skipping %s (prior step failed)\n%!"
-                      srv.Project.hre_ssh_host
-                ) srvs;
-                List.rev !results
+              (* Every host, each reported; one after another (Hosts.run_on). *)
+              let simultaneous_deploy hosts = Hosts.run_on ~strategy:`All hosts deploy_step in
+              (* One host at a time, stopping at a failure; the optional HTTP
+                 health check is the gate between hosts. *)
+              let health : Hosts.health =
+                match health_url with
+                | None -> fun _ -> true
+                | Some url -> fun host ->
+                  Printf.printf "  health check %s ... %!" url;
+                  if http_health_check ~url ~timeout_s:10 then begin
+                    Printf.printf "ok\n%!"; true
+                  end else begin
+                    Printf.eprintf "failed!\n%!";
+                    Printf.eprintf "  Health check failed after %s — stopping deploy.\n%!"
+                      host.Hosts.ssh;
+                    false
+                  end
               in
+              let rolling_deploy hosts =
+                Hosts.run_on ~strategy:(`Rolling health) hosts deploy_step in
 
               let canary_n = if canary > 0 then min canary (List.length servers) else 0 in
               if canary_n > 0 then begin
@@ -1489,12 +1466,12 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
                   while Unix.gettimeofday () < deadline && !failed_host = "" do
                     let remaining = deadline -. Unix.gettimeofday () in
                     Unix.sleepf (min 2.0 (max 0.0 remaining));
-                    List.iter (fun (srv : Project.hot_reload_env) ->
+                    List.iter (fun (host : Hosts.host) ->
                       if !failed_host = "" then begin
-                        let alive = ping_server ~ssh_host:srv.Project.hre_ssh_host
-                                                ~remote_socket:srv.Project.hre_socket in
+                        let alive = ping_server ~ssh_host:host.Hosts.ssh
+                                                ~remote_socket:host.Hosts.socket in
                         if not alive then
-                          failed_host := srv.Project.hre_ssh_host
+                          failed_host := host.Hosts.ssh
                       end
                     ) canary_srvs
                   done;
@@ -1504,7 +1481,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
                     Printf.printf "\n==> Canary healthy. Rolling out to %d remaining server(s)...\n%!" (List.length rest_srvs);
                     let rest_res = simultaneous_deploy rest_srvs in
                     let failed = List.filter_map (fun (srv, r) -> match r with
-                        | Error m -> Some (srv.Project.hre_ssh_host, m) | Ok _ -> None) rest_res in
+                        | Error m -> Some (srv.Hosts.ssh, m) | Ok _ -> None) rest_res in
                     if failed = [] then begin
                       save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
                       save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path;
@@ -1520,7 +1497,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
                     (List.length servers) env;
                 let results = simultaneous_deploy servers in
                 let failed = List.filter_map (fun (srv, r) -> match r with
-                    | Error m -> Some (srv.Project.hre_ssh_host, m) | Ok _ -> None) results in
+                    | Error m -> Some (srv.Hosts.ssh, m) | Ok _ -> None) results in
                 if failed = [] then begin
                   save_schemas_baseline ~new_schemas_path ~prev_schemas_path;
                   save_manifest_baseline ~new_manifest_path:manifest_path2 ~prev_manifest_path;
@@ -1538,7 +1515,7 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
                     (match health_url with Some u -> Printf.sprintf " with health check %s" u | None -> "");
                 let results = rolling_deploy servers in
                 let failed = List.filter_map (fun (srv, r) -> match r with
-                    | Error m -> Some (srv.Project.hre_ssh_host, m) | Ok _ -> None) results in
+                    | Error m -> Some (srv.Hosts.ssh, m) | Ok _ -> None) results in
                 if failed = [] then begin
                   (* Only advance the schema baseline when all servers succeeded. *)
                   save_schemas_baseline ~new_schemas_path ~prev_schemas_path;

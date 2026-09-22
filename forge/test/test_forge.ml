@@ -869,6 +869,74 @@ let test_toml_multiline_array_and_lines () =
     Alcotest.(check (option (pair (list string) int))) "the key after it"
       (Some ([ "-lz" ], 8)) (Toml.get_string_list_at ls "link")
 
+(* ---- Hosts.run_on (G7, 2026-09-22) ---- *)
+
+let mk_host n =
+  { Hosts.name = n; ssh = "root@" ^ n; socket = "/tmp/" ^ n ^ ".sock"; pubkey = ""; labels = [] }
+
+let three_hosts = List.map mk_host [ "a"; "b"; "c" ]
+
+(* A fake step that records the order it ran in and fails on [fail_on]. *)
+let fake_step ~fail_on calls h =
+  calls := h.Hosts.name :: !calls;
+  if h.Hosts.name = fail_on then Error ("boom on " ^ h.Hosts.name) else Ok h.Hosts.name
+
+let names_and_results rs =
+  List.map (fun (h, r) ->
+      (h.Hosts.name, match r with Ok v -> "ok " ^ v | Error e -> "error " ^ e)) rs
+
+let test_hosts_all_reports_every_host () =
+  let calls = ref [] in
+  let rs = Hosts.run_on ~strategy:`All three_hosts (fake_step ~fail_on:"b" calls) in
+  Alcotest.(check (list string)) "ran on all three, in order" [ "a"; "b"; "c" ]
+    (List.rev !calls);
+  Alcotest.(check (list (pair string string))) "each reported"
+    [ ("a", "ok a"); ("b", "error boom on b"); ("c", "ok c") ] (names_and_results rs)
+
+let test_hosts_rolling_stops_on_failure () =
+  let calls = ref [] and skipped = ref [] and gated = ref [] in
+  let health h = gated := h.Hosts.name :: !gated; true in
+  let rs =
+    Hosts.run_on ~on_skip:(fun h -> skipped := h.Hosts.name :: !skipped)
+      ~strategy:(`Rolling health) three_hosts (fake_step ~fail_on:"b" calls) in
+  Alcotest.(check (list string)) "stopped after b" [ "a"; "b" ] (List.rev !calls);
+  Alcotest.(check (list (pair string string))) "only attempted hosts reported"
+    [ ("a", "ok a"); ("b", "error boom on b") ] (names_and_results rs);
+  Alcotest.(check (list string)) "c skipped" [ "c" ] !skipped;
+  Alcotest.(check (list string)) "gate asked only after a success" [ "a" ] !gated
+
+let test_hosts_rolling_health_gate_stops () =
+  let calls = ref [] and skipped = ref [] in
+  let rs =
+    Hosts.run_on ~on_skip:(fun h -> skipped := h.Hosts.name :: !skipped)
+      ~strategy:(`Rolling (fun h -> h.Hosts.name <> "a")) three_hosts
+      (fake_step ~fail_on:"none" calls) in
+  Alcotest.(check (list (pair string string))) "a's failed gate is its result"
+    [ ("a", "error health_check_failed") ] (names_and_results rs);
+  Alcotest.(check (list string)) "b and c skipped" [ "b"; "c" ] (List.rev !skipped)
+
+let test_hosts_rolling_all_ok () =
+  let calls = ref [] in
+  let rs = Hosts.run_on ~strategy:(`Rolling (fun _ -> true)) three_hosts
+      (fake_step ~fail_on:"none" calls) in
+  Alcotest.(check (list (pair string string))) "all ok"
+    [ ("a", "ok a"); ("b", "ok b"); ("c", "ok c") ] (names_and_results rs)
+
+let test_hosts_from_config () =
+  let env = { Project.hre_name = "prod"; hre_ssh_host = "root@h";
+              hre_socket = "/s"; hre_public_key = Some "k" } in
+  let h = Hosts.of_hot_reload_env env in
+  Alcotest.(check (list string)) "from [[hot-reload.env]]" [ "prod"; "root@h"; "/s"; "k" ]
+    [ h.Hosts.name; h.Hosts.ssh; h.Hosts.socket; h.Hosts.pubkey ];
+  let flat = { Project.hr_socket = "/f"; hr_ssh_host = ""; hr_public_key = None;
+               hr_envs = []; hr_health_check_url = None; hr_strategy = "rolling" } in
+  Alcotest.(check bool) "no ssh_host -> no host" true (Hosts.of_flat_config flat = None);
+  match Hosts.of_flat_config { flat with Project.hr_ssh_host = "root@x" } with
+  | Some h -> Alcotest.(check (list string)) "flat host is 'default'"
+                [ "default"; "root@x"; "/f"; "" ]
+                [ h.Hosts.name; h.Hosts.ssh; h.Hosts.socket; h.Hosts.pubkey ]
+  | None -> Alcotest.fail "expected the flat host"
+
 (* -------------------------------------------------------------------- ffi *)
 
 let test_ffi_gen_c () =
@@ -2289,6 +2357,13 @@ let () =
       Alcotest.test_case "README.md contains project name"    `Quick test_readme_has_name;
       Alcotest.test_case "module name is PascalCase"          `Quick test_module_name_is_pascal_case;
       Alcotest.test_case "generated files use do/end syntax"  `Quick test_generated_march_uses_do_end;
+    ];
+    "hosts", [
+      Alcotest.test_case "`All reports every host" `Quick test_hosts_all_reports_every_host;
+      Alcotest.test_case "`Rolling stops on failure" `Quick test_hosts_rolling_stops_on_failure;
+      Alcotest.test_case "`Rolling health gate stops" `Quick test_hosts_rolling_health_gate_stops;
+      Alcotest.test_case "`Rolling all ok" `Quick test_hosts_rolling_all_ok;
+      Alcotest.test_case "hosts from forge.toml config" `Quick test_hosts_from_config;
     ];
     "toml", [
       Alcotest.test_case "simple key/value pairs"   `Quick test_toml_simple;
