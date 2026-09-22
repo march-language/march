@@ -4853,6 +4853,171 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_stop_tree.expected interp_actor_stop_tree.out)))
 
+; ── Actor `on_stop` (terminate) callback ─────────────────────────────────
+; specs/lang/actors.md "on_stop"; semantics decided 2026-09-22 on OTP's
+; terminate/2 (specs/progress/2026-09-22-actor-on-stop-terminate-callback.md).
+; Each fixture runs compiled AND interpreted against one .expected; every
+; observation goes through a Log actor read with a synchronous Actor.call
+; after a synchronous stop, so neither backend has a second legal ordering.
+; actor_on_stop_panic also pins the logged failure line on stderr.
+
+(rule
+ (targets native_actor_on_stop native_actor_on_stop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_on_stop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_on_stop
+        native/actor_on_stop.march)
+   (with-stdout-to native_actor_on_stop.out
+        (system "./native_actor_on_stop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_on_stop.expected native_actor_on_stop.out)))
+
+(rule
+ (targets interp_actor_on_stop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_on_stop.march))
+ (action
+  (with-stdout-to interp_actor_on_stop.out
+    (run %{exe:../bin/main.exe} native/actor_on_stop.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_on_stop.expected interp_actor_on_stop.out)))
+
+(rule
+ (targets native_actor_on_stop_panic native_actor_on_stop_panic.out native_actor_on_stop_panic.err)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_on_stop_panic.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_on_stop_panic
+        native/actor_on_stop_panic.march)
+   (with-stdout-to native_actor_on_stop_panic.out
+        (system "./native_actor_on_stop_panic 2> native_actor_on_stop_panic.err")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_on_stop_panic.expected native_actor_on_stop_panic.out)))
+
+(rule
+ (targets interp_actor_on_stop_panic.out interp_actor_on_stop_panic.err)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_on_stop_panic.march))
+ (action
+  (with-stdout-to interp_actor_on_stop_panic.out
+    (with-stderr-to interp_actor_on_stop_panic.err
+      (run %{exe:../bin/main.exe} native/actor_on_stop_panic.march)))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_on_stop_panic.expected interp_actor_on_stop_panic.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_on_stop_panic.stderr.expected native_actor_on_stop_panic.err)))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_on_stop_panic.stderr.expected interp_actor_on_stop_panic.err)))
+
+(rule
+ (targets native_actor_on_stop_deadline native_actor_on_stop_deadline.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_on_stop_deadline.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_on_stop_deadline
+        native/actor_on_stop_deadline.march)
+   (with-stdout-to native_actor_on_stop_deadline.out
+        (system "./native_actor_on_stop_deadline")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_on_stop_deadline.expected native_actor_on_stop_deadline.out)))
+
+(rule
+ (targets interp_actor_on_stop_deadline.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_on_stop_deadline.march))
+ (action
+  (with-stdout-to interp_actor_on_stop_deadline.out
+    (run %{exe:../bin/main.exe} native/actor_on_stop_deadline.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_on_stop_deadline.expected interp_actor_on_stop_deadline.out)))
+
+(rule
+ (targets native_actor_on_stop_tree native_actor_on_stop_tree.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_on_stop_tree.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_on_stop_tree
+        native/actor_on_stop_tree.march)
+   (with-stdout-to native_actor_on_stop_tree.out
+        (system "./native_actor_on_stop_tree")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_on_stop_tree.expected native_actor_on_stop_tree.out)))
+
+(rule
+ (targets interp_actor_on_stop_tree.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_on_stop_tree.march))
+ (action
+  (with-stdout-to interp_actor_on_stop_tree.out
+    (run %{exe:../bin/main.exe} native/actor_on_stop_tree.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_on_stop_tree.expected interp_actor_on_stop_tree.out)))
+
 ; ── A file error's constructor can be matched, on both backends ──────────
 ; The file_*/dir_* builtins denote the canonical BARE `FileError`; a
 ; cross-module ctor used to register a QUALIFIED parent type, which could

@@ -10,9 +10,8 @@
 --
 -- Only main prints. A child that printed from its handler would race main on
 -- the compiled backend, where children run concurrently. The ORDER of the
--- teardown is asserted separately, off MARCH_SUP_TRACE, because until actors
--- get a terminate callback there is no in-language event at teardown time to
--- observe it with.
+-- teardown is asserted separately, off MARCH_SUP_TRACE; the in-language
+-- witness, via each child's `on_stop`, is actor_on_stop_tree.march.
 mod Main do
   needs IO.Console
 

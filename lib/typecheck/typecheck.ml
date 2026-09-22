@@ -5462,6 +5462,18 @@ let rec check_decl env (d : Ast.decl) : env =
               notes = actor_handler_hints (repr state_ty) (repr inferred);
               code = None; fix = None }
       ) actor.actor_handlers;
+    (* The `on_stop` terminate callback: `state` (the final state) and `self`
+       in scope, exactly as in a handler, but no message params and no
+       return-type obligation — its value is discarded, because a dying actor
+       has no next state to install. It reads [state] rather than owning it
+       for a turn, so the linear-field sentinels a handler binds do not
+       apply. *)
+    Option.iter (fun (h : Ast.actor_handler) ->
+        let stop_env = bind_var "state" (Mono state_ty) env_with_ctors in
+        let stop_env = bind_var "self" (Mono (TCon ("Pid", [state_ty]))) stop_env in
+        ignore (with_deferred_pending stop_env (fun () ->
+            with_no_caller stop_env (fun () -> infer_expr stop_env h.ah_body))))
+      actor.actor_on_stop;
     bind_var name.txt (Mono (TCon ("Pid", [state_ty]))) env_with_ctors
 
   | Ast.DMod (name, _vis, decls, _sp) ->

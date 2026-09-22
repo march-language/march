@@ -47,6 +47,17 @@ git log is authoritative for exact commits.
   about 18 KB more, and `Vault.size`/`Vault.keys` walk shard by shard, so their result
   is a recent count rather than a single instant's snapshot of the whole table.
 ### Added
+- **Actors can declare an `on_stop do ... end` terminate callback.** It runs
+  once on a graceful stop (`Actor.stop`, a self-stop, or a supervisor's
+  tree teardown), on the actor's own thread after the queued messages have
+  drained, with the final `state` and `self` in scope, so an actor can flush,
+  checkpoint, or hand work back before it dies. Semantics follow OTP's
+  `terminate/2`: it may send (and wait on an `Actor.call`); a panic inside it
+  is logged to stderr and the actor still dies normally (no restart, and a
+  tree teardown carries on); it never runs on `kill`, a crash, or a
+  `shutdown brutal` child; and it counts against the stop's `timeout_ms` /
+  child `shutdown` budget, past which the actor is killed. Same behaviour
+  interpreted and compiled. See "Stopping an Actor" in the actors chapter.
 - **A choreography role's first state now has a name: `<P>_<Role>.Entry`.** A role
   body's signature used to have to spell the state `register` yields, which meant
   working out `S_` plus the first step of that role's own projection
@@ -137,6 +148,11 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A self-stop in the interpreter now drains like the compiled backend.**
+  `Actor.stop(self, t)` from a handler used to kill the actor on the spot in
+  `march run`, discarding its queue and the state the handler was about to
+  return; it now finishes the handler, drains, and then dies, as compiled
+  binaries already did.
 - **Compiled `send_checked` and `is_cap_valid` no longer intermittently accept a cap
   whose actor was killed.** About one run in five, a cap taken while the actor was
   alive still validated after `kill`: `is_cap_valid` answered `true` and
@@ -359,6 +375,9 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **The actors chapter now documents `Actor.stop`** (graceful, synchronous,
+  reverse-order supervisor teardown), which shipped 2026-09-08 without a
+  section of its own.
 - **The language-reference pages on march-lang.org are now generated from
   `specs/lang/`, and the two copies have been reconciled.** Each chapter used to exist
   twice, as independent prose that had drifted both ways, so corrections made in one copy

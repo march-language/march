@@ -1,0 +1,98 @@
+-- Stopping a supervision tree runs each child's `on_stop` in REVERSE
+-- declaration order, then the supervisor's own; a `shutdown brutal` child is
+-- killed and runs nothing. specs/lang/actors.md, "on_stop".
+--
+-- This is the in-language witness of teardown order that
+-- actor_stop_tree.march could only assert off MARCH_SUP_TRACE: every on_stop
+-- runs on its own actor's thread, but each finishes before the next child is
+-- stopped (stop is synchronous per child), so the Log receives them in
+-- teardown order on both backends.
+mod Main do
+  needs IO.Console
+
+  type GetLog = GetLog
+
+  actor Log do
+    state { lines : List(String) }
+    init  { lines: [] }
+
+    on Read(reply_to) do
+      Actor.reply(reply_to, List.reverse(state.lines))
+      state
+    end
+
+    on Note(s : String) do
+      { lines: Cons(s, state.lines) }
+    end
+  end
+
+  fn note(s : String) do
+    match Actor.whereis("log") do
+      Some(l) -> send(l, Note(s))
+      None    -> None
+    end
+  end
+
+  actor W do
+    state { tag : String, n : Int }
+    init  { tag: "?", n: 0 }
+
+    on Name(t : String) do
+      { state with tag: t }
+    end
+
+    on Work(k : Int) do
+      { state with n: state.n + k }
+    end
+
+    on_stop do
+      note(state.tag ++ ": on_stop, n=" ++ int_to_string(state.n))
+    end
+  end
+
+  actor Sup do
+    state { a : Int, b : Int, c : Int, d : Int }
+    init  { a: 0, b: 0, c: 0, d: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      W a
+      W b shutdown infinity
+      W c shutdown 1000
+      W d shutdown brutal
+    end
+
+    on_stop do
+      note("sup: on_stop")
+    end
+  end
+
+  fn child(sup, field) do
+    match get_actor_field(sup, field) do
+      None    -> pid_of_int(-1)
+      Some(n) -> pid_of_int(n)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let log = spawn(Log)
+    Actor.register(log, "log")
+    let sup = spawn(Sup)
+    send(child(sup, "a"), Name("a"))
+    send(child(sup, "b"), Name("b"))
+    send(child(sup, "c"), Name("c"))
+    send(child(sup, "d"), Name("d"))
+    send(child(sup, "a"), Work(1))
+    send(child(sup, "b"), Work(2))
+    send(child(sup, "c"), Work(3))
+    send(child(sup, "d"), Work(4))
+
+    println("stop: " ++ bool_to_string(Actor.stop(sup, 5000)))
+    println("supervisor dead: " ++ bool_to_string(is_alive(sup) == false))
+    match Actor.call(log, GetLog, 5000) do
+      Ok(ls) -> List.each(ls, fn l -> println("  log: " ++ l))
+      Err(e) -> println("  log error: " ++ e)
+    end
+  end
+end

@@ -1,0 +1,129 @@
+-- The `on_stop` (terminate) callback: runs on a graceful stop, sees the final
+-- state, may send -- and does NOT run on kill.
+-- specs/lang/actors.md, "on_stop"; decided 2026-09-22 on OTP's terminate/2.
+--
+-- Every observation goes through the Log actor, read with a synchronous
+-- Actor.call after the stop has returned: on_stop's send lands in Log's
+-- mailbox BEFORE `stop` returns (stop waits for the death, and on_stop runs
+-- before it), so FIFO order puts it ahead of the call. Only main prints, so
+-- nothing races main on the compiled backend.
+mod Main do
+  needs IO.Console
+
+  type GetLog = GetLog
+
+  actor Log do
+    state { lines : List(String) }
+    init  { lines: [] }
+
+    -- The call handler must be first (tag 0): see stdlib/actor.march.
+    on Read(reply_to) do
+      Actor.reply(reply_to, List.reverse(state.lines))
+      state
+    end
+
+    on Note(s : String) do
+      { lines: Cons(s, state.lines) }
+    end
+  end
+
+  fn note(s : String) do
+    match Actor.whereis("log") do
+      Some(l) -> send(l, Note(s))
+      None    -> None
+    end
+  end
+
+  actor W do
+    state { tag : String, n : Int }
+    init  { tag: "?", n: 0 }
+
+    on Name(t : String) do
+      { state with tag: t }
+    end
+
+    on Work(k : Int) do
+      { state with n: state.n + k }
+    end
+
+    -- A NORMAL death the actor asks for itself.
+    on Quit() do
+      Actor.stop(self, 5000)
+      { state with n: state.n + 100 }
+    end
+
+    on_stop do
+      note(state.tag ++ ": on_stop saw n=" ++ int_to_string(state.n)
+           ++ ", alive=" ++ bool_to_string(is_alive(self)))
+    end
+  end
+
+  -- on_stop can also BLOCK on a reply: an Actor.call from inside it waits
+  -- for the answer (within the stop budget) instead of being cut short.
+  actor Flusher do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Bump() do
+      { n: state.n + 1 }
+    end
+
+    on_stop do
+      match Actor.whereis("log") do
+        Some(l) ->
+          match Actor.call(l, GetLog, 5000) do
+            Ok(ls) -> note("flusher: call from on_stop answered, log had "
+                           ++ int_to_string(List.length(ls)) ++ " lines")
+            Err(e) -> note("flusher: call from on_stop failed: " ++ e)
+          end
+        None -> None
+      end
+    end
+  end
+
+  fn dump(log) do
+    match Actor.call(log, GetLog, 5000) do
+      Ok(ls) -> List.each(ls, fn l -> println("  log: " ++ l))
+      Err(e) -> println("  log error: " ++ e)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let log = spawn(Log)
+    Actor.register(log, "log")
+
+    println("-- Actor.stop: on_stop runs after the drain, with the final state")
+    let a = spawn(W)
+    send(a, Name("a"))
+    send(a, Work(1))
+    send(a, Work(2))
+    println("stop: " ++ bool_to_string(Actor.stop(a, 5000)))
+    println("dead: " ++ bool_to_string(is_alive(a) == false))
+    dump(log)
+
+    println("-- self-stop (a NORMAL death from inside): the handler's state is final")
+    let b = spawn(W)
+    send(b, Name("b"))
+    send(b, Work(5))
+    send(b, Quit())
+    run_until_idle()
+    println("dead: " ++ bool_to_string(is_alive(b) == false))
+    dump(log)
+
+    println("-- on_stop can wait on an Actor.call")
+    let f = spawn(Flusher)
+    send(f, Bump())
+    println("stop: " ++ bool_to_string(Actor.stop(f, 5000)))
+    dump(log)
+
+    println("-- kill: on_stop does NOT run")
+    let c = spawn(W)
+    send(c, Name("c"))
+    send(c, Work(7))
+    run_until_idle()
+    kill(c)
+    run_until_idle()
+    println("dead: " ++ bool_to_string(is_alive(c) == false))
+    dump(log)
+  end
+end

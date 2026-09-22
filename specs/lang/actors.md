@@ -29,6 +29,9 @@ An actor declaration has three parts:
 - `init { ... }`: the initial state value
 - `on Msg(...) do ... end`: message handlers, each returning the new state
 
+and, optionally, `on_stop do ... end`: a terminate callback run on a graceful stop
+(see [Stopping an Actor](#stopping-an-actor)).
+
 ```march
 actor Counter do
   state { value : Int }
@@ -239,6 +242,82 @@ both backends. `is_alive` is a pure registry lookup and
 is the one lifecycle observation that is **an exact byte match interpreted vs compiled** (the
 golden witness `g37_actor_lifecycle` pins `spawn → is_alive true → kill → is_alive false`).
 The operational rules for `kill`/`is_alive` are in [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6.
+
+### Graceful stop: `Actor.stop`
+
+`kill` is immediate and drops whatever is queued. `Actor.stop(pid, timeout_ms)` is the
+lossless form: the actor accepts no new messages (a `send` to it returns `None`), works
+off the messages already queued, and then dies a **Normal** death, which no restart type
+restarts. `stop` is synchronous: it returns once the actor is dead, or once `timeout_ms`
+has passed and the actor has been killed. A negative timeout waits indefinitely; `0`
+discards the queue as soon as the in-flight handler returns. It returns `false` for an
+actor that was already dead or already stopping.
+
+Stopping a supervisor stops its children first, in **reverse declaration order**, each
+with its own `shutdown` budget from the child spec (`W w shutdown 5000`, `shutdown
+infinity`, `shutdown brutal`; default 5 seconds), and detaches each child before stopping
+it so the teardown runs no restart strategy.
+
+An actor may stop itself from a handler (`Actor.stop(self, 1000)`): the handler finishes,
+its returned state is installed, the rest of the queue drains, and the actor dies.
+
+### `on_stop`: the terminate callback
+
+An actor can run code of its own at shutdown (flush a buffer, checkpoint state, hand
+unfinished work back to a queue) by declaring one `on_stop` block among its handlers:
+
+```march
+actor Batcher do
+  state { buf : List(String) }
+  init  { buf: [] }
+
+  on Append(s : String) do
+    { buf: Cons(s, state.buf) }
+  end
+
+  -- Hand whatever was batched to the store before dying.
+  on_stop do
+    match Actor.whereis("store") do
+      Some(store) -> send(store, Save(List.reverse(state.buf)))
+      None        -> None
+    end
+  end
+end
+```
+
+Inside `on_stop`, `state` is the **final** state (after the drain) and `self` is the
+actor's own Pid, exactly as in a handler; there are no message parameters, and the
+block's value is discarded (a dying actor has no next state). The semantics follow
+OTP's `terminate/2`:
+
+1. **It runs on a graceful stop:** `Actor.stop` on the actor, a self-stop, or its
+   supervisor's teardown with a non-`brutal` `shutdown`. It runs on the actor's own
+   thread, after the drain and before the Normal death, so it has finished by the
+   time `Actor.stop` returns.
+2. **It may send messages**, and may block on a reply (`Actor.call`), within the budget
+   below. The actor itself is draining, so messages sent *to* it are refused.
+3. **A failure inside it is logged and the shutdown continues.** A panic in `on_stop`
+   prints `march: actor on_stop callback failed (the actor still stops): panic: ...`
+   to stderr and the actor dies Normal as if `on_stop` had returned: it is not a crash,
+   so no supervisor restarts it, and a tree teardown proceeds to the next child.
+4. **It does not run on the brutal path.** `kill(pid)`, a crash, and a child spec's
+   `shutdown brutal` end the actor without running it. That is what brutal means.
+5. **It is bounded by the stop timeout.** The `timeout_ms` of `Actor.stop` (or the
+   child spec's `shutdown` budget) covers the drain and `on_stop` together; if
+   `on_stop` has not finished when it runs out, the actor is killed there. A stop
+   whose deadline has already passed after the drain skips `on_stop` entirely.
+
+Both backends implement the same rules, and each is pinned compiled and interpreted by
+`test/native/actor_on_stop*.march`. Limits to know:
+
+- A **self-stop** has no outside waiter to enforce the deadline, so it bounds the drain
+  but cannot cut a blocked `on_stop` short.
+- The interpreter cannot preempt running code, so there the deadline binds only an
+  `on_stop` that *blocks* (a `receive()` it cannot satisfy waits out the deadline and
+  the actor is killed); a compute loop in `on_stop` runs to completion.
+- Under `--hot-reload`, the callback registered is the one from the code the actor was
+  spawned with; draining across a reload is still open
+  (`specs/todos/2026-08-12-graceful-shutdown-and-drain.md`).
 
 ## Monitoring Actor Death
 
@@ -861,7 +940,9 @@ to diverge or crash compiled (see the compiled-actor status note at the top of t
 | `spawn(Actor)` | `→ Pid` | both | Start a new actor (literal actor name only) |
 | `send(pid, msg)` | `→ Option(())` | both | Send a message; `None` if actor is dead |
 | `receive()` | `→ Msg` | both | Pop the next mailbox message (only the first `receive()` per handler may block) |
-| `kill(pid)` | `→ ()` | both | Stop an actor |
+| `kill(pid)` | `→ ()` | both | Stop an actor immediately (queue dropped, `on_stop` not run) |
+| `Actor.stop(pid, timeout_ms)` | `→ Bool` | both | Graceful stop: refuse new messages, drain, run `on_stop`, die Normal; see [Stopping an Actor](#stopping-an-actor) |
+| `Actor.is_draining(pid)` | `→ Bool` | both | Stopping but not yet dead |
 | `is_alive(pid)` | `→ Bool` | both | Check if actor is running (registry lookup) |
 | `monitor(watcher, target)` | `→ Int` | both | Deliver `Down(ref, target_pid, reason)` on target exit; local reasons are `Normal`, `Killed`, and `Crash(String)` |
 | `self()` | `→ Pid` | both | Current actor's Pid |

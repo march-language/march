@@ -751,13 +751,34 @@ actor_decl:
     INIT; init_expr = expr;
     mb = option(mailbox_clause);
     sup = option(supervise_block);
-    handlers = list(actor_handler);
+    items = list(actor_item);
     END
-    { DActor (Public, name,
+    { let handlers = List.filter_map (function `H h -> Some h | `S _ -> None) items in
+      let stops = List.filter_map (function `S s -> Some s | `H _ -> None) items in
+      let on_stop = match stops with
+        | [] -> None
+        | [(h, _)] -> Some h
+        | _ :: (_, pos2) :: _ ->
+          error_raise
+            "An actor can declare only one `on_stop` block; this is the second:"
+            (Some "on_stop do\n      flush(state)\n    end")
+            pos2
+      in
+      DActor (Public, name,
               { actor_state = fields; actor_init = init_expr; actor_handlers = handlers;
                 actor_supervise = sup; actor_compat = "full"; actor_invariant = None;
-                actor_mailbox = mb; actor_remote = false },
+                actor_mailbox = mb; actor_remote = false; actor_on_stop = on_stop },
               mk_span ($loc)) }
+
+(** An actor body item: an `on Msg(...)` handler, or the `on_stop do ... end`
+    terminate callback (reusing the `app` block's keyword). `on_stop` may sit
+    anywhere among the handlers; at most one is allowed. It is kept as a
+    zero-param handler named `on_stop` (see Ast.actor_on_stop). *)
+actor_item:
+  | h = actor_handler { `H h }
+  | ON_STOP; DO; body = block_body; END
+    { `S ({ ah_msg = { txt = "on_stop"; span = mk_span ($loc($1)) };
+            ah_params = []; ah_body = body }, $startpos($1)) }
 
 (** mailbox N policy — a bound on the actor's mailbox, declared with the
     actor rather than at every spawn site. Lowers to

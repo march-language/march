@@ -490,7 +490,7 @@ let own_caps_of_this_module ~stdlib_files typecheck_env
                 add prefix
                   (name.March_ast.Ast.txt ^ "_"
                    ^ h.March_ast.Ast.ah_msg.March_ast.Ast.txt))
-              actor.March_ast.Ast.actor_handlers
+              (March_ast.Ast.actor_body_handlers actor)
           end
         | March_ast.Ast.DMod (nm, _, inner, _) ->
           walk (qname prefix nm.March_ast.Ast.txt) inner

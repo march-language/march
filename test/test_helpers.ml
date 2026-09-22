@@ -1242,7 +1242,7 @@ let dummy_actor_def = March_ast.Ast.{
   actor_init      = ELit (LitInt 0, dummy_span);
   actor_handlers  = [];
   actor_supervise = None;
-  actor_mailbox = None; actor_remote = false;
+  actor_mailbox = None; actor_remote = false; actor_on_stop = None;
   actor_compat    = "full";
   actor_invariant = None;
 }
@@ -1257,6 +1257,7 @@ let mk_actor_inst name alive st = March_eval.Eval.{
   ai_monitors      = [];
   ai_mailbox       = Queue.create ();
   ai_draining    = false;
+  ai_self_stop   = None;
   ai_supervisor    = None;
   ai_restart_count = [];
   ai_epoch         = 0;

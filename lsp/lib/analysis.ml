@@ -206,7 +206,7 @@ let rec collect_decl ~def_map ~use_map ~doc_map ~calls ~actors_tbl ?(prefix = ""
     collect_expr ~def_map ~use_map ~calls adef.actor_init;
     List.iter (fun (h : Ast.actor_handler) ->
         collect_expr ~def_map ~use_map ~calls h.ah_body
-      ) adef.actor_handlers
+      ) (Ast.actor_body_handlers adef)
 
   | Ast.DMod (name, _, decls, _) ->
     Hashtbl.replace def_map name.txt name.span;
@@ -524,7 +524,7 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
     | Ast.DActor (_, _, adef, _) ->
       walk [] adef.Ast.actor_init;
       List.iter (fun (h : Ast.actor_handler) -> walk [] h.Ast.ah_body)
-        adef.Ast.actor_handlers
+        (Ast.actor_body_handlers adef)
     | Ast.DMod (_, _, decls, _) -> List.iter walk_decl decls
     | Ast.DImpl (impl, _) ->
       List.iter (fun (_, (fn : Ast.fn_def)) -> List.iter walk_clause fn.Ast.fn_clauses)
@@ -931,7 +931,7 @@ let collect_fold_ranges (m : Ast.module_) : (int * int * string) list =
       add sp "region";
       go_expr adef.actor_init;
       List.iter (fun (h : Ast.actor_handler) -> go_expr h.ah_body)
-        adef.actor_handlers
+        (Ast.actor_body_handlers adef)
     | Ast.DDescribe (_, decls, sp) ->
       add sp "region";
       go_decls decls

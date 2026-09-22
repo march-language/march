@@ -919,6 +919,22 @@ actor Worker do
 end
 ```
 
+A terminate callback, run once on a graceful `Actor.stop` (after the drain,
+never on `kill`); `state` and `self` are in scope, its value is discarded. At
+most one per actor, anywhere among the handlers (`on_stop` is the keyword the
+`app` block already uses):
+
+```march
+actor Tally do
+  state { n : Int }
+  init { n: 0 }
+  on Bump() do { n: state.n + 1 } end
+  on_stop do
+    println("tally stopped at " ++ int_to_string(state.n))
+  end
+end
+```
+
 Supervision block inside an actor:
 
 ```march
