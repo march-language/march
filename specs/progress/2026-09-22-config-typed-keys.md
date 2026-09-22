@@ -138,8 +138,8 @@ filter.
 - **After:** the same program is rejected by `--check` (the untyped
   `Config.put(:ns, :name, 42)` no longer exists; the arity mismatch reads
   "This is not a function — it has type `()`"). Spelled with typed keys it is
-  `specs/lang/types/reject/t285_config_typed_key_read_as_pid.march`:
-  ``expected `Pid(s2)` but got `Int` ``. Accept twin `t286`.
+  `specs/lang/types/reject/t291_config_typed_key_read_as_pid.march`:
+  ``expected `Pid(s2)` but got `Int` ``. Accept twin `t292`.
 - **Runtime half, both backends:** `test/native/config_typed_keys.march`
   writes through `key(..., int())` and reads the same path through
   `key(..., string())` (`None`, and `fetch` names both types), plus

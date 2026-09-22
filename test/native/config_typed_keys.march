@@ -9,7 +9,7 @@
 -- on the tuple key before it got that far). Now the reading key's codec
 -- rejects the stored tag: `get` is None and `fetch` names both types.
 -- The statically rejected half (reading a Key(Int) as a Pid) is
--- specs/lang/types/reject/t285_config_typed_key_read_as_pid.march.
+-- specs/lang/types/reject/t291_config_typed_key_read_as_pid.march.
 mod M do
   needs IO.Console
   needs IO.Mut

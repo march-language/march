@@ -1100,6 +1100,14 @@ ambient implementation". That is what every capability written before
 dictionaries existed reads as, which is why the default path stays visible in
 the source rather than being implied.
 
+**The dictionary type is monomorphic.** `proof cap Live with Ops` names `Ops`
+with no type arguments, so a parameterised record (`type Ops(m) = …`) cannot be
+attached: the checker reports that `Ops` is declared with a type parameter but
+used with none. Give the varying part a concrete representation at the
+boundary instead. `Session.Ops`, the stdlib session transport, carries every
+message as `Bytes` for exactly this reason, which also keeps one dictionary
+type serving every protocol.
+
 `cap_narrow` carries a dictionary across attenuation: a narrowed capability is
 the same authority, reduced. `mint_cap` does **not** — a mint produces a *new*
 capability, so inheriting the dictionary of the `Cap(IO)` it was minted from
