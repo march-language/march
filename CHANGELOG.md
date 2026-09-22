@@ -93,6 +93,14 @@ git log is authoritative for exact commits.
   refused until every actor has switched. Also fixed: with more than 2048 live
   actors of a type, the ones past the 2048th were never migrated at all. See
   `docs/hot-code-reload.md`, "Messages queued during a deploy".
+- **A refinement check on an argument that multiplies two variables is no longer
+  skipped.** `need_pos(y * y + 1)` against `{Int | _ > 0}` was reported as
+  "the argument could not be translated to SMT", even though predicates and
+  postconditions already accepted the same product. It now proves, so
+  `List.map(ys, fn y -> y * y + 1)` meets a positive-element demand too. A
+  product that really breaks the contract (`need_pos(y * y - 1)` under
+  `y == 0`) is reported with a counterexample. A product goal the solver cannot
+  settle is skipped with the reason `nonlinear-goal`.
 - **A linear value can no longer be discarded with `let _ = …`.** A `_` binding
   counted as the value's one use whenever the value was linear because of how it
   was *bound* rather than what its type says — a `linear x : a` parameter or a

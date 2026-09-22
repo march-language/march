@@ -11997,7 +11997,55 @@ end|}
           (Some "unconstrained-subject")
           (Option.map March_refinecheck.Obligation.reason_name
              (March_refinecheck.Undecided.diagnose ~subject_sym:(Some "x")
-                ~subject_name:(Some "x") vc)))
+                ~subject_name:(Some "x") vc)));
+
+    (* Non-linear ARGUMENTS (2026-09-22).  The 2026-09-16 widening taught the
+       PREDICATE translator [Smt.Mul]; the call-site argument reflector
+       ([Refine_resolve.reflect_scalar]) still demanded a literal factor, so
+       `need_pos(y * y + 1)` built no goal at all (`unreflectable-subject`)
+       while the same expression proved as a postcondition.  Each of the next
+       three cases was an `unreflectable-subject` skip before the change. *)
+    gated "a non-linear argument is reflected and proved" (fun () ->
+        let src =
+          {|mod NLA1 do
+  fn need_pos(n : {Int | _ > 0}) : Int do n end
+  fn t(y : Int) : Int do need_pos(y * y + 1) end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "proved" (1, 0, 0) (ledger_counts3 src);
+        Alcotest.(check bool) "no unreflectable-subject" false
+          (List.mem "unreflectable-subject" (skip_reasons src)));
+
+    (* A definite failure through a non-linear argument must still be
+       reported, with a witness [Witness.eval_operand] actually executed
+       (its `*` arm): under `y == 0`, `y * y - 1` is -1. *)
+    gated "a definitely-false non-linear argument is a violation with a witness" (fun () ->
+        let text =
+          refine_error_text_d
+            {|mod NLA2 do
+  fn need_pos(n : {Int | _ > 0}) : Int do n end
+  fn t(y : Int) : Int do if y == 0 do need_pos(y * y - 1) else 1 end end
+end|}
+        in
+        Alcotest.(check bool) "violation reported" true
+          (contains text "need_pos" && contains text "_ > 0");
+        Alcotest.(check bool) "with the confirmed counterexample" true (contains text "y = 0"));
+
+    (* Unguarded, the same argument is not a DEFINITE failure (an unguarded
+       parameter never is), so it stays a skip, and the skip names the
+       non-linear goal rather than the argument's translation.  This is the
+       [Undecided.diagnose] classification over a real goal, not a pinned z3
+       `unknown`: see the slug test above for why a fixture does not drive
+       one. *)
+    gated "an unsettled non-linear argument goal is skipped as nonlinear-goal" (fun () ->
+        let src =
+          {|mod NLA3 do
+  fn need_pos(n : {Int | _ > 0}) : Int do n end
+  fn t(y : Int) : Int do need_pos(y * y - 1) end
+end|}
+        in
+        Alcotest.(check (triple int int int)) "skipped" (0, 0, 1) (ledger_counts3 src);
+        Alcotest.(check (list string)) "reason" [ "nonlinear-goal" ] (skip_reasons src))
   ]
 
 let arith_actual_suite =
@@ -15810,6 +15858,12 @@ let demand_flow_suite =
         in
         Alcotest.(check (triple int int int)) "proved" (1, 0, 0) (p, v, s);
         ignore l;
+        (* The design's own row l, a non-linear tail: an `unreflectable-subject`
+           until the argument reflector admitted [Smt.Mul] (2026-09-22). *)
+        let (p, v, s, _) =
+          ledger (m "  fn g(ys : List(Int)) : Int do f(mapl(ys, fn y -> y * y + 1)) end\n")
+        in
+        Alcotest.(check (triple int int int)) "fn y -> y * y + 1 proves" (1, 0, 0) (p, v, s);
         let (p, v, s, _) as l = ledger (m "  fn g(ys : List(Int)) : Int do f(mapl(ys, fn y -> y)) end\n") in
         Alcotest.(check (triple int int int)) "control: fn y -> y is skipped" (0, 0, 1) (p, v, s);
         Alcotest.(check bool) "with the parametric reason" true (only_param_skips l));
