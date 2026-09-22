@@ -340,7 +340,7 @@ filled, `Err(NoOffer(role, why))` says what each offer said, and the offers that
 already accepted are released.
 
 **What the fingerprint covers.** A protocol's fingerprint digests its roles, its steps,
-and — since 2026-09-21 — what each payload type is MADE OF, not only its name: two nodes
+and, since 2026-09-21, what each payload type is MADE OF, not only its name: two nodes
 whose `Thing` is `{ x : Int }` on one and `{ x : String }` on the other no longer agree,
 so the skew is refused when the session is set up instead of surfacing mid-session as an
 undecodable message. A payload type declared in ANOTHER module is out of reach when the
