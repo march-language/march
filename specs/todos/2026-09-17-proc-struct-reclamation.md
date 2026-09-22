@@ -179,8 +179,11 @@ the need:
 1. ~~Measure `sizeof(march_actor_meta)`~~ (272 B, above). Still open: `sizeof(ucontext_t)`
    on ubuntu-24.04 and alpine/aarch64 — one command each, once Docker is up.
 2. ~~Phase 1~~ — **shipped 2026-09-17**: [[2026-09-17-proc-ctx-released-at-death]].
-3. **Decide whether to continue, and record the decision here either way.** A closed item
-   with a measurement is a better outcome than an epoch nobody needed.
+3. ~~Decide whether to continue, and record the decision here either way.~~ **Decided
+   2026-09-22 by the repo owner: continue past Phase 1.** The unit of work stays all three
+   structures (procs, metas, pididx entries); steps 4–5 below proceed in order, and closing
+   the item with measurements remains an acceptable outcome if the analysis says
+   reclamation is not worth its risk.
 4. If continuing: cost question 2 above (mailbox reachable without the proc). It is a
    read of `march_send` / `march_actor_call` / `march_sched_send`, not a change.
 5. Only then the epoch scheme, and only for whichever holders question 4 leaves hot.
