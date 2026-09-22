@@ -491,9 +491,12 @@ pipelines (list-ops), where LLVM's fusion of Rust iterators is unmatched.
 **Preemption overhead:** compiled green threads stay preemptible via a
 per-function-entry check. It is now a single load of a plain global plus a
 predictable branch; it used to be a thread-local access, i.e. an indirect
-resolver call on every entry, which cost ~1.4x on call-dense code. A residual
-~25% gap to the 2026-03-24 `fib` figure is still unexplained and tracked in
-`specs/todos.md`.
+resolver call on every entry, which cost ~1.4x on call-dense code. The residual
+~25% gap to the 2026-03-24 `fib` figure (~390 vs 288 ms) is that check plus its
+call frame, about 2 cycles per iteration over ~165M post-TRE iterations. It is
+accepted as the price of preemptibility (decision 2026-09-22,
+`specs/progress/2026-09-22-fib-residual-accepted-preemption-cost.md`); recovering it
+would mean checking less often, which trades away preemption granularity.
 
 ---
 

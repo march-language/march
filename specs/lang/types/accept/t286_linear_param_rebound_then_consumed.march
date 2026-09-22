@@ -1,0 +1,24 @@
+mod Main do
+  -- The accept twin of reject/t285: a `linear` parameter moved into a plain
+  -- `let` and then consumed exactly once through the new name. `h2` inherits
+  -- `h`'s linearity; one use of each is exactly right. Also covers a chain of
+  -- rebinds.
+  type Res = Res(Int)
+  fn take(linear r : Res) : Int do
+    match r do
+      Res(n) -> n
+    end
+  end
+  fn rebind(linear h : Res) : Int do
+    let h2 = h
+    take(h2)
+  end
+  fn chain(linear h : Res) : Int do
+    let a = h
+    let b = a
+    take(b)
+  end
+  fn main() : () do
+    ()
+  end
+end

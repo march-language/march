@@ -1,5 +1,10 @@
 # `[P4]` Stdlib: JsonStream
 
+**Parked 2026-09-22 (repo owner decision): no workload needs this yet.** Leave it
+until someone hits the need; the file already says a measurement should motivate
+`feed_fold`, and none has. Re-open by removing this note and saying
+what hit it.
+
 - [ ] **JsonStream Component 5 — `feed_fold`, removing the per-event `List(Event)` allocation.** Phase 2's re-measurement (`specs/2026-07-31-json-streaming-phase2-design.md`, verdict recorded 2026-07-31) found a residual ~3x gap to `Json.parse` on tiny-token JSON (2-6 byte keys, ~11 byte values) even after run-slicing closed the gap to parity on string-heavy input — that residual is per-*token* overhead (state transitions, `feed`'s `List(Event)` allocation, a cons + a join even for a single-piece token), not scanning, so SIMD cannot address it. `feed_fold(st, chunk, z, f)` — additive, with `feed` kept and reimplemented on top of it so there is one code path — is the indicated next step if small-token throughput matters. Not committed to being built; a measurement should motivate it, per the phase 1 risk section that first flagged this shape.
 
 Component 4 (decoder-combinator layer) is CLOSED, superseded rather than built — see `specs/progress/2026-07-31-jsonstream-component-4-decoder-combinator-closed-superseded.md`.
