@@ -1599,6 +1599,50 @@ let cap_ceiling_fix_indent ~src ~filename ~read_file ~is_header
   in
   if is_header then base + 2 else base
 
+(** [contract_attr_fix ~src ~filename ~read_file decl_span attr] is the
+    [--report-contracts] fix that attaches [attr] (e.g. [@[no_alloc]]) to the
+    function whose [DFn] span is [decl_span] (it starts at the [fn]/[pfn]
+    keyword, never at a leading [doc] or attribute).
+
+    The only position an attribute is legal in is IMMEDIATELY before the
+    [fn] keyword: after a [doc] string, after any other attributes
+    ([decl: DOC STRING attrs fn_decl] in lib/parser/parser.mly; the reverse
+    order is a parse error).  A line inserted above the declaration line is
+    exactly that position when the [fn] keyword starts its own line, which
+    is also where hand-written stdlib code puts it: below the leading [--]
+    comment block and below the [doc] string (e.g. stdlib/array.march's
+    [@[assume]]s).  When the [fn] line is NOT blank before the keyword --
+    [doc "..." fn f], or an attribute on the same line -- the line above is
+    the wrong side of the [doc], so the attribute goes inline, just before
+    [fn], as a one-line [FReplace] of the empty span there.
+
+    The source line is read from [src], or from [read_file decl_span.file]
+    for a declaration in a sibling file pulled in via [MARCH_LIB_PATH]. *)
+let contract_attr_fix ~src ~filename ~read_file
+    (decl : March_ast.Ast.span) (attr : string) : March_errors.Errors.fix_kind =
+  let file_src =
+    if decl.March_ast.Ast.file = filename || decl.March_ast.Ast.file = "" then src
+    else (try read_file decl.March_ast.Ast.file with Sys_error _ -> src)
+  in
+  let idx = decl.March_ast.Ast.start_line - 1 in
+  let col = decl.March_ast.Ast.start_col in
+  let line =
+    if idx < 0 then None
+    else List.nth_opt (String.split_on_char '\n' file_src) idx in
+  let above indent =
+    March_errors.Errors.FInsert {
+      after_line = decl.March_ast.Ast.start_line - 1; text = indent ^ attr } in
+  match line with
+  | Some l when col <= String.length l ->
+    let prefix = String.sub l 0 col in
+    if String.for_all (fun c -> c = ' ' || c = '\t') prefix then above prefix
+    else
+      March_errors.Errors.FReplace {
+        span = { decl with March_ast.Ast.end_line = decl.March_ast.Ast.start_line;
+                           end_col = col };
+        text = attr ^ " " }
+  | _ -> above (String.make (max 0 col) ' ')
+
 let compile filename =
   (* Enable backtraces so an internal-error report (below) is actionable
      even without OCAMLRUNPARAM=b. *)
@@ -2639,9 +2683,9 @@ let compile filename =
         d.severity = March_errors.Errors.Error) vectorize_diags
     then exit 1;
     (* --report-contracts: the generation half of the contract feature.  Emits
-       the same NDJSON shape --check-json does, with an FInsert fix placing
-       @[no_alloc] on the line above each verified-clean in-scope declaration,
-       and stops before code generation (no binary, no CAS artifact). *)
+       the same NDJSON shape --check-json does, with a fix placing @[no_alloc]
+       directly before each verified-clean in-scope declaration's `fn` (see
+       [contract_attr_fix] for where that is), and stops before code generation (no binary, no CAS artifact). *)
     if !report_contracts then begin
       let globs =
         List.filter (fun g -> g <> "")
@@ -2658,8 +2702,6 @@ let compile filename =
           ~globs ~is_user tir
       in
       List.iter (fun ((d : March_tir.Alloc_contract.decl_info), form) ->
-          let indent =
-            String.make d.March_tir.Alloc_contract.d_decl_span.March_ast.Ast.start_col ' ' in
           let attr = March_tir.Alloc_contract.attr_of_form form in
           let verdict = match form with
             | March_tir.Alloc_contract.Transient ->
@@ -2672,10 +2714,8 @@ let compile filename =
                   "`%s` is %s; add %s to keep it that way."
                   d.March_tir.Alloc_contract.d_name verdict attr;
               labels = []; notes = []; code = Some "no_alloc_candidate";
-              fix = Some (March_errors.Errors.FInsert {
-                  after_line =
-                    d.March_tir.Alloc_contract.d_decl_span.March_ast.Ast.start_line - 1;
-                  text = indent ^ attr }) }
+              fix = Some (contract_attr_fix ~src ~filename ~read_file
+                            d.March_tir.Alloc_contract.d_decl_span attr) }
           in
           print_string (March_errors.Errors.render_diagnostic_json diag ^ "\n"))
         cands;

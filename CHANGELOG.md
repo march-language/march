@@ -106,6 +106,13 @@ git log is authoritative for exact commits.
   refused until every actor has switched. Also fixed: with more than 2048 live
   actors of a type, the ones past the 2048th were never migrated at all. See
   `docs/hot-code-reload.md`, "Messages queued during a deploy".
+- **`forge fix --contracts` no longer breaks a function whose `doc` string
+  shares its line.** On `doc "…" fn f(…)` (or `@[attr] fn f(…)`) the fix put
+  `@[no_alloc]` on the line above, in front of the `doc`, and the file stopped
+  parsing. It now goes inline, just before `fn`. A function whose `fn` starts
+  its own line still gets the attribute on the line directly above it, below
+  any `--` comment block and after the `doc` string, which is how the stdlib
+  writes it.
 - **`--refine-report` and the compiler's errors now agree on inductive
   postconditions.** For a recursive function over a list or tree, the report
   could count a postcondition as `violated` while the program compiled cleanly,
