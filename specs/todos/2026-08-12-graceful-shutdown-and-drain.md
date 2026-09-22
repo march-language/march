@@ -27,6 +27,22 @@ unfinished work back to a queue. That needs a new actor-level declaration (an
 send, whether its own failure aborts the shutdown, and whether it runs on the
 brutal path as well as the drained one.
 
+**Semantics decided (repo owner, 2026-09-22), modelled on OTP's `terminate/2`:**
+
+1. **It may send messages.** A terminate callback is ordinary handler code;
+   `send` works from it (to hand work back, notify a peer, flush to a sink).
+2. **A failure inside it is logged and shutdown continues.** The actor is dying
+   anyway; a panic/exception in terminate is reported and the death proceeds
+   as if terminate had returned. A broken terminate must never wedge a
+   shutdown, and it does not turn a NORMAL death into a crash that a
+   supervisor would restart.
+3. **It does NOT run on the brutal-kill path.** `kill` (and a child spec's
+   `shutdown brutal`) means "stop now, run nothing" — that is what brutal is.
+4. **It is bounded by the existing stop timeout.** `Actor.stop(pid,
+   timeout_ms)` (and a supervisor's per-child `shutdown <ms>`) is the budget
+   for drain AND terminate together: if terminate has not finished by the
+   deadline, the actor is killed.
+
 It is also the missing observability channel for teardown ORDER. Reverse
 declaration order is implemented and asserted today only via a
 `MARCH_SUP_TRACE` stderr line (`test/native/actor_stop_tree.order.expected`),
@@ -81,6 +97,16 @@ type, so design them together.
 
 ## Acceptance
 
-An actor with N queued messages that is `stop`ped processes all N (or hits a
-stated deadline) before dying; a supervision tree stops children in reverse
-declaration order; `kill` keeps today's immediate semantics.
+The drain half is met and shipped (2026-09-08, see the progress file above):
+`Actor.stop` works a queued mailbox off (or hits its deadline) before a NORMAL
+death, a supervision tree stops children in reverse declaration order, and
+`kill` keeps its immediate semantics.
+
+Still to meet:
+
+- **terminate:** an actor-level on-stop callback that runs on `Actor.stop` and
+  on a NORMAL death, sees the final state, may send; a failure inside it is
+  logged and the actor still dies (its supervisor proceeds); it does not run
+  on brutal kill; it is cut off by the stop deadline. Both backends agree.
+- **reload drain:** a reload waits for the in-flight handler and queue under a
+  pause state (sends still accepted) before swapping code.
