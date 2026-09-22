@@ -1,0 +1,30 @@
+-- EXPECT-ERROR: used more than once
+-- `Entry` (2026-09-21) is a transparent alias for a role's first state, and
+-- that state is `always_linear`: reaching the state through the alias must
+-- not launder the linearity away. `st` is consumed by the first `send` and
+-- used again by the second, which is the same rejection, with the same
+-- wording, that `t187`'s directly spelled `S_send_Msg_Prod_Cons_1` gets.
+-- Accept twin: `accept/t281`.
+mod Main do
+  needs IO
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.Entry, next : Int) : Stream_Prod.Yield do
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    let _st2 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) -> prod(s, st2, next + 1),
+      fn (_b, st2) -> Stream_Prod.close(s, st2))
+  end
+  fn main(c : Cap(IO)) do () end
+end
