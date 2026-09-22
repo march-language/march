@@ -39,6 +39,15 @@ git log is authoritative for exact commits.
   about 18 KB more, and `Vault.size`/`Vault.keys` walk shard by shard, so their result
   is a recent count rather than a single instant's snapshot of the whole table.
 ### Added
+- **A choreography role's first state now has a name: `<P>_<Role>.Entry`.** A role
+  body's signature used to have to spell the state `register` yields, which meant
+  working out `S_` plus the first step of that role's own projection
+  (`Fan_C.S_recv_Msg_A_C_1`). Every generated role module now also declares `Entry`,
+  a transparent alias for that state, so the body reads
+  `st : Fan_C.Entry`. Being an alias, it is the state type at every later step: the
+  linearity that stops a session being replayed or abandoned is unchanged, and each
+  role's `Entry` still resolves to its own state rather than to one type shared
+  across roles. The `S_` spellings keep working.
 - **`Session.in_process()`: a network-free session transport in the standard library.**
   Attach it with `Session.attach(io, t.ops)`, run every role in one program, and
   `t.drain(())` to deliver. Failure paths work as on the network: a role that leaves

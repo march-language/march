@@ -1042,6 +1042,18 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
   in
   let event_api = (parked_ty :: event_ty) @ (idle :: take_idle :: take_closed :: cancel_parked :: awaits) @ resume in
   let entry = state_of root in
+  (* `Entry`: a name for the role's FIRST state, what `register` yields and
+     what `<P>_Run` types the role's body by.  Without it a body's signature
+     has to spell `S_` + the first step (`Stream_Cons.S_recv_Msg_Prod_Cons_1`),
+     which a user can only work out by reading the projection.  The alias is
+     transparent, so a value reached through it keeps the state's
+     `always_linear` discipline; the name cannot collide with a generated
+     state, which is always `S_`-prefixed, nor with any other name this module
+     emits (`Yield`, `Secret`, `Parked_<Role>`, `Received_<Role>`,
+     `Crashed_<Role>`, `Cancelled_<Role>` and the functions).  A role
+     literally named `Entry` is no clash either: role names only ever appear
+     as a SUFFIX here. *)
+  let entry_alias = DType (Public, n "Entry", [], TDAlias (sty entry), sp) in
   let register =
     fn "register" [ ("s", t_cap_session); ("ap", t_int) ] (sty entry)
       (con entry [ app "Session.register" [ var "s"; var "ap"; role_idx role ] ])
@@ -1052,7 +1064,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
      manifest -- the capability checker asks each module for its own. *)
   let needs = DNeeds ([ ([ n "Session"; n "Live" ], None) ], sp) in
   (DMod (n mname, Public,
-         (needs :: secret :: yield_ty :: cancelled_ty :: crashed_ty :: state_types) @ (register :: cancelled_fn :: transitions) @ event_api, sp),
+         (needs :: secret :: yield_ty :: cancelled_ty :: crashed_ty :: state_types) @ [ entry_alias ] @ (register :: cancelled_fn :: transitions) @ event_api, sp),
    entry)
 
 (** `<P>_Run`: the role runner's typed front.  Per role,

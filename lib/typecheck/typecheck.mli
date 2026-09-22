@@ -237,6 +237,7 @@ type env = {
   types : int StrMap.t;
   ctors : ctor_info list StrMap.t;
   records : (string list * (string * Ast.ty) list) StrMap.t;
+  ty_aliases : (string list * Ast.ty) StrMap.t;
   level : int;
   lin : lin_entry list;
   errors : Err.ctx;
