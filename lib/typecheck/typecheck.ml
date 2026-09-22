@@ -4214,7 +4214,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
              type — that is the same erasure as an unannotated `let`, moved
              one call frame out.  Annotating the return (`: Vault(v)`) is the
              deliberate opt-out and is what the handle factories
-             (Vault.new/open/whereis, Config's table getters) use.  See
+             (Vault.new/open/whereis) use.  See
              [demote_vault_handle_vars]. *)
           demote_vault_handle_vars t;
           t
