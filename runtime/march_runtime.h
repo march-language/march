@@ -128,6 +128,7 @@ void   *march_typed_array_get(void *arr, int64_t i);
 void   *march_typed_array_set(void *arr, int64_t i, void *val);
 void   *march_typed_array_create(int64_t len, void *default_val);
 void   *march_typed_array_map(void *arr, void *f);
+void   *march_typed_array_slice(void *arr, int64_t start, int64_t len);
 void   *march_typed_array_filter(void *arr, void *f);
 void   *march_typed_array_fold(void *arr, void *acc, void *f);
 

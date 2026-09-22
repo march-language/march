@@ -93,6 +93,14 @@ git log is authoritative for exact commits.
   refused until every actor has switched. Also fixed: with more than 2048 live
   actors of a type, the ones past the 2048th were never migrated at all. See
   `docs/hot-code-reload.md`, "Messages queued during a deploy".
+- **`float_nan`, `float_infinity`, `float_neg_infinity`, `float_epsilon`,
+  `float_is_nan`, `float_is_infinite` and `typed_array_slice` now work in
+  compiled programs.** They typechecked and ran interpreted, but `--compile`
+  failed at link time with `Undefined symbols: _float_nan` (and so on). The
+  compiled results match the interpreter exactly, including the NaN bits and
+  `typed_array_slice`'s clamping of out-of-range bounds. A new test fails when a
+  typechecked builtin has no compiled lowering and is not explicitly listed as
+  interpreter-only.
 - **A linear value can no longer be discarded with `let _ = …`.** A `_` binding
   counted as the value's one use whenever the value was linear because of how it
   was *bound* rather than what its type says — a `linear x : a` parameter or a
