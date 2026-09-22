@@ -26,7 +26,12 @@ let stdlib = lazy
   [ load_stdlib_file_for_test "bytes.march";
     load_stdlib_file_for_test "string.march";
     load_stdlib_file_for_test "json.march";
-    load_stdlib_file_for_test "session.march" ]
+    load_stdlib_file_for_test "session.march";
+    (* the chaos peer (D36) draws its payloads from `Gen` and seeds with
+       `Random.seed`; both lean on `List` *)
+    load_stdlib_file_for_test "list.march";
+    load_stdlib_file_for_test "random.march";
+    load_stdlib_file_for_test "gen.march" ]
 
 (* The stdlib here has no `SessionNode`, so the generated `<P>_Run` (whose
    every function calls `SessionNode.run`) cannot typecheck against it: turn
@@ -232,12 +237,17 @@ let stream_labelled = {|
 let stream_prod_fns =
   [ "register"; "cancelled"; "leave_send_Msg_Prod_Cons_1"; "send_Msg_Prod_Cons_1";
     "leave_offer_more_done"; "offer_more_done"; "offer_more_done_or"; "close";
-    "idle"; "take_idle"; "take_closed"; "cancel"; "await_more_done"; "finish"; "resume" ]
+    "idle"; "take_idle"; "take_closed"; "cancel"; "await_more_done"; "finish"; "resume";
+    (* the scripted and chaos peers (D36), one private walker per state *)
+    "step_name"; "script_S_send_Msg_Prod_Cons_1"; "script_S_offer_more_done"; "script_S_end"; "script";
+    "chaos_S_send_Msg_Prod_Cons_1"; "chaos_S_offer_more_done"; "chaos_S_end"; "chaos" ]
 
 let stream_cons_fns =
   [ "register"; "cancelled"; "leave_recv_Msg_Prod_Cons_1"; "recv_Msg_Prod_Cons_1";
     "recv_Msg_Prod_Cons_1_or"; "leave_choose_more_done"; "choose_more"; "choose_done"; "close";
-    "idle"; "take_idle"; "take_closed"; "cancel"; "await_Msg_Prod_Cons_1"; "finish"; "resume" ]
+    "idle"; "take_idle"; "take_closed"; "cancel"; "await_Msg_Prod_Cons_1"; "finish"; "resume";
+    "step_name"; "script_S_recv_Msg_Prod_Cons_1"; "script_S_choose_more_done"; "script_S_end"; "script";
+    "chaos_S_recv_Msg_Prod_Cons_1"; "chaos_S_choose_more_done"; "chaos_S_end"; "chaos" ]
 
 let unlabelled_names_pinned =
   Alcotest.test_case "an unlabelled protocol's generated names are exactly what they were" `Quick
@@ -1796,8 +1806,133 @@ let cli_dump_role_authority =
           "root: the body passed to `Stream_Run.run_Cons`, in `main`"; "reaches: IO.Console, IO.FileWrite";
           "values: none"; "actors: none" ])
 
+(* ── scripted and chaos peers (D36) ──────────────────────────────────── *)
+
+let peers_shape =
+  Alcotest.test_case "each role module carries Step (one ctor per send, expect and choice), script and chaos" `Quick
+    (fun () ->
+       let src = wrap stream in
+       Alcotest.(check (list string)) "Stream_Prod.Step"
+         [ "Send_Msg_Prod_Cons_1"; "Expect_More"; "Expect_Done" ] (Option.get (variant_ctors src "Stream_Prod" "Step"));
+       Alcotest.(check (list string)) "Stream_Cons.Step"
+         [ "Expect_Msg_Prod_Cons_1"; "Choose_more"; "Choose_done" ] (Option.get (variant_ctors src "Stream_Cons" "Step"));
+       (* bodies of the role's type, plus the steps / the seed *)
+       Alcotest.(check string) "script"
+         (session ^ " -> S_recv_Msg_Prod_Cons_1 -> List(Step) -> Stream_Cons.Yield")
+         (String.concat " -> "
+            (List.map (fun p -> param_ty src "Stream_Cons" "script" p) [ "s"; "st"; "steps" ] @ [ "Stream_Cons.Yield" ]));
+       Alcotest.(check string) "chaos seed" "Int" (param_ty src "Stream_Cons" "chaos" "seed");
+       (* the crash branch: the detector expects a crash as a step *)
+       let lsrc = wrap logging in
+       Alcotest.(check (list string)) "Logging_I.Step"
+         [ "Expect_Msg_L_I_1"; "Expect_Msg_C_I_1"; "Expect_crash_Msg_C_I_1"; "Send_Msg_I_L_2";
+           "Expect_Msg_L_I_2"; "Send_Msg_I_C_1"; "Send_Msg_I_L_1" ]
+         (Option.get (variant_ctors lsrc "Logging_I" "Step")))
+
+let granted_peers_take_the_caps =
+  Alcotest.test_case "a granted role's script and chaos take its Cap parameters after the session" `Quick
+    (fun () ->
+       let src = wrap stream_granted in
+       Alcotest.(check string) "script cap 1" "Cap(IO.Console)" (param_ty src "Stream_Cons" "script" "_cap1");
+       Alcotest.(check string) "script cap 2" "Cap(IO.FileWrite)" (param_ty src "Stream_Cons" "script" "_cap2");
+       Alcotest.(check string) "chaos cap 1" "Cap(IO.Console)" (param_ty src "Stream_Cons" "chaos" "_cap1"))
+
+(* The rule for user payload types: the chaos peer takes one
+   `Gen.Generator(T)` per distinct non-builtin type the role SENDS, in order
+   of first appearance, named `gen_<T>`.  A receiver of `Thing` needs none. *)
+let chaos_user_payload_generator =
+  Alcotest.test_case "chaos takes a generator parameter per user payload type the role sends" `Quick
+    (fun () ->
+       let src = wrap {|
+  type Thing = { x : Int }
+  derive Json for Thing
+  @[endpoints]
+  protocol Pay do
+    A -> B : Thing
+    B -> A : List(Thing)
+    A -> B : Int
+  end
+|} in
+       Alcotest.(check string) "A sends Thing" "Gen.Generator(Thing)" (param_ty src "Pay_A" "chaos" "gen_Thing");
+       Alcotest.(check string) "B sends List(Thing): the element's generator, once"
+         "Gen.Generator(Thing)" (param_ty src "Pay_B" "chaos" "gen_Thing"))
+
+let peers_typecheck = ok "the generated peers typecheck for Stream, Relay and the crash-branch Logging"
+    (wrap (stream ^ relay ^ logging))
+
+(* A wrong script fails the TEST: the program panics with the state, what
+   was expected and what came. Run, not checked: the panic is at run time. *)
+let cli_script_mismatch_panics =
+  Alcotest.test_case "CLI: a script step the state cannot take panics with state, expected and actual" `Quick (fun () ->
+      let src = {|
+mod Mismatch do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  fn main(c : Cap(IO)) do
+    let t = Session.in_process()
+    let s = Session.attach(c, t.ops)
+    let _ = Stream_Cons.script(s, Stream_Cons.register(s, 0), [ Stream_Cons.Choose_more(true) ])
+    let _ = Stream_Prod.script(s, Stream_Prod.register(s, 0), [ Stream_Prod.Send_Msg_Prod_Cons_1(1) ])
+    t.drain(())
+  end
+end
+|} in
+      let rc, out = check_cli ~flags:"" src in
+      Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 1 rc;
+      Alcotest.(check bool) ("names the state, expected and actual (output: " ^ out ^ ")") true
+        (contains_text out
+           "Stream, role Cons: script: in state S_recv_Msg_Prod_Cons_1 expected Expect_Msg_Prod_Cons_1, but the next step is Choose_more"))
+
+let cli_script_runs_out_panics =
+  Alcotest.test_case "CLI: a script that ends before the protocol panics, and so does one that goes on after it" `Quick (fun () ->
+      let base = {|
+mod Short do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+  @[endpoints]
+  protocol Ping do
+    A -> B : Int
+  end
+  fn main(c : Cap(IO)) do
+    let t = Session.in_process()
+    let s = Session.attach(c, t.ops)
+    let _ = Ping_B.script(s, Ping_B.register(s, 0), [ Ping_B.Expect_Msg_A_B_1(fn _ -> ()) ])
+    let _ = Ping_A.script(s, Ping_A.register(s, 0), STEPS)
+    t.drain(())
+  end
+end
+|} in
+      let rc, out = check_cli ~flags:"" (replace_all ~needle:"STEPS" ~by:"[]" base) in
+      Alcotest.(check int) "short: exit code" 1 rc;
+      Alcotest.(check bool) ("short (output: " ^ out ^ ")") true
+        (contains_text out "in state S_send_Msg_A_B_1 expected Send_Msg_A_B_1, but the script has no steps left");
+      let rc, out =
+        check_cli ~flags:""
+          (replace_all ~needle:"STEPS" ~by:"[ Ping_A.Send_Msg_A_B_1(1), Ping_A.Send_Msg_A_B_1(2) ]" base)
+      in
+      Alcotest.(check int) "long: exit code" 1 rc;
+      Alcotest.(check bool) ("long (output: " ^ out ^ ")") true
+        (contains_text out "the protocol has ended, but the script goes on with Send_Msg_A_B_1"))
+
 let tests =
   [ stream_shape;
+    peers_shape; granted_peers_take_the_caps; chaos_user_payload_generator; peers_typecheck;
+    cli_script_mismatch_panics; cli_script_runs_out_panics;
     cli_role_grant_violation; cli_role_grant_named_body; cli_role_grant_widened_ok; cli_role_grant_wider_than_main;
     cli_role_grant_hosted_actor; cli_dump_role_authority;
     granted_body_type; ungranted_body_type_unchanged; cli_granted_body_ok; cli_granted_body_missing_caps;

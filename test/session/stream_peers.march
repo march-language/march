@@ -1,0 +1,258 @@
+mod StreamPeers do
+  -- The generated SCRIPTED and CHAOS peers (D36, distributed-deploys step
+  -- 4): every role module carries `Step`, `script(s, st, steps)` and
+  -- `chaos(s, st, seed)`, two bodies of the role's own type derived from
+  -- its local type, so a protocol is its own test oracle.  This fixture
+  -- drives the real Stream roles of test/session/in_process.march against
+  -- them over the in-process transport -- no sockets -- and the three-role
+  -- Fan and the may-crash Logging protocols besides:
+  --
+  --   * a scripted Cons against the real Prod, and a scripted Prod against
+  --     the real Cons: each expected receive hands the payload to a callback;
+  --   * the real Cons against chaos Prods for 50 seeds, the real Prod against
+  --     chaos Conses for 50 seeds, and chaos against chaos for 50 more; the
+  --     transport reports every session closed and nothing left queued;
+  --   * Fan: scripted A and B against the real C, and chaos for all three;
+  --   * Logging (`may crash C`): chaos C leaves the session at its crash
+  --     point when the seed says so, and the real I takes its crash branch.
+  --
+  -- A script that does not match the protocol PANICS (the test fails, not
+  -- the session); that path is pinned by test/test_endpoints.ml, since a
+  -- panic ends this program.  Only aggregate counts are printed for the
+  -- chaos runs, so the golden does not pin `Gen`'s stream.
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  @[endpoints]
+  protocol Fan do
+    number: A -> C : Int
+    second: B -> C : Int
+    verdict: C -> A : Bool
+  end
+
+  @[endpoints]
+  protocol Logging do
+    may crash C
+    L -> I : Int
+    C -> I : String
+      or crash do
+        I -> L : String
+      end
+    I -> L : String
+    L -> I : Bool
+    I -> C : Bool
+  end
+
+  -- ── the real Stream roles (test/session/in_process.march) ─────────────
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.Entry, next : Int) : Stream_Prod.Yield do
+    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) ->
+        print_line("Prod got More")
+        prod(s, st2, next + 1),
+      fn (_b, st2) ->
+        print_line("Prod got Done")
+        Stream_Prod.close(s, st2))
+  end
+
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.Entry, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+      print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+      if budget > 1 do
+        cons(s, Stream_Cons.choose_more(s, st1, true), budget - 1)
+      else
+        Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))
+      end)
+  end
+
+  -- Quiet twins for the chaos runs: the same roles, printing nothing.
+  pfn quiet_prod(s : Cap(Session.Live), st : Stream_Prod.Entry, next : Int) : Stream_Prod.Yield do
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) -> quiet_prod(s, st2, next + 1),
+      fn (_b, st2) -> Stream_Prod.close(s, st2))
+  end
+
+  pfn quiet_cons(s : Cap(Session.Live), st : Stream_Cons.Entry, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (_n, st1) ->
+      if budget > 1 do
+        quiet_cons(s, Stream_Cons.choose_more(s, st1, true), budget - 1)
+      else
+        Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))
+      end)
+  end
+
+  -- ── the real Fan C and Logging I ───────────────────────────────────────
+  pfn role_c(s : Cap(Session.Live), st : Fan_C.Entry) : Fan_C.Yield do
+    Fan_C.recv_Number(s, st, fn (a, st1) ->
+      print_line("C: got " ++ int_to_string(a) ++ " from A")
+      Fan_C.recv_Second(s, st1, fn (b, st2) ->
+        print_line("C: got " ++ int_to_string(b) ++ " from B")
+        Fan_C.close(s, Fan_C.send_Verdict(s, st2, a + b == 16))))
+  end
+
+  pfn quiet_c(s : Cap(Session.Live), st : Fan_C.Entry) : Fan_C.Yield do
+    Fan_C.recv_Number(s, st, fn (a, st1) ->
+      Fan_C.recv_Second(s, st1, fn (b, st2) ->
+        Fan_C.close(s, Fan_C.send_Verdict(s, st2, a + b == 16))))
+  end
+
+  -- I counts how the session went: the crash branch or the normal one.
+  pfn role_i(s : Cap(Session.Live), st : Logging_I.Entry, tally : Vault(Int)) : Logging_I.Yield do
+    Logging_I.recv_Msg_L_I_1(s, st, fn (_trigger, st1) ->
+      Logging_I.recv_Msg_C_I_1(s, st1,
+        fn (read, st2) ->
+          bump(tally, "normal")
+          let st3 = Logging_I.send_Msg_I_L_2(s, st2, read)
+          Logging_I.recv_Msg_L_I_2(s, st3, fn (report, st4) ->
+            Logging_I.close(s, Logging_I.send_Msg_I_C_1(s, st4, report))),
+        fn (_crashed, st2) ->
+          bump(tally, "crashed")
+          Logging_I.close(s, Logging_I.send_Msg_I_L_1(s, st2, "C is gone"))))
+  end
+
+  -- ── a transport that counts closes and stalls ──────────────────────────
+  pfn bump(tally : Vault(Int), key : String) : () do
+    let _ = Vault.incr(tally, key, 1)
+    ()
+  end
+
+  pfn counting(tally : Vault(Int)) : Session.InProcess do
+    Session.in_process_with(fn line ->
+      if String.starts_with(line, "close ") do bump(tally, "close")
+      else if String.starts_with(line, "stalled") do bump(tally, "stalled")
+      else if String.starts_with(line, "cancel ") do bump(tally, "cancel")
+      else if String.starts_with(line, "crash branch") do bump(tally, "crash_branch")
+      else () end end end end)
+  end
+
+  pfn count(tally : Vault(Int), key : String) : Int do Vault.get_or(tally, key, 0) end
+
+  pfn stream_seeds(c : Cap(IO), tally : Vault(Int), seed : Int, mode : Int) : () do
+    if seed == 50 do ()
+    else
+      let t = counting(tally)
+      let s = Session.attach(c, t.ops)
+      let _ = if mode == 0 do
+        -- real Cons against a chaos Prod
+        let _ = quiet_cons(s, Stream_Cons.register(s, 0), 3)
+        Stream_Prod.chaos(s, Stream_Prod.register(s, 0), seed)
+      else if mode == 1 do
+        -- real Prod against a chaos Cons
+        let _ = Stream_Cons.chaos(s, Stream_Cons.register(s, 0), seed)
+        quiet_prod(s, Stream_Prod.register(s, 0), 1)
+      else
+        -- chaos against chaos
+        let _ = Stream_Cons.chaos(s, Stream_Cons.register(s, 0), seed)
+        Stream_Prod.chaos(s, Stream_Prod.register(s, 0), seed + 1000)
+      end end
+      t.drain(())
+      let _ = if t.queued(()) > 0 do
+        print_line("seed " ++ int_to_string(seed) ++ " mode " ++ int_to_string(mode) ++ ": " ++ int_to_string(t.queued(())) ++ " left queued")
+      else () end
+      stream_seeds(c, tally, seed + 1, mode)
+    end
+  end
+
+  pfn fan_seeds(c : Cap(IO), tally : Vault(Int), seed : Int) : () do
+    if seed == 50 do ()
+    else
+      let t = counting(tally)
+      let s = Session.attach(c, t.ops)
+      let _ = Fan_C.chaos(s, Fan_C.register(s, 0), seed)
+      let _ = Fan_A.chaos(s, Fan_A.register(s, 0), seed + 100)
+      let _ = Fan_B.chaos(s, Fan_B.register(s, 0), seed + 200)
+      t.drain(())
+      fan_seeds(c, tally, seed + 1)
+    end
+  end
+
+  pfn logging_seeds(c : Cap(IO), tally : Vault(Int), seed : Int) : () do
+    if seed == 50 do ()
+    else
+      let t = counting(tally)
+      let s = Session.attach(c, t.ops)
+      let _ = role_i(s, Logging_I.register(s, 0), tally)
+      let _ = Logging_L.chaos(s, Logging_L.register(s, 0), seed)
+      let _ = Logging_C.chaos(s, Logging_C.register(s, 0), seed + 500)
+      t.drain(())
+      logging_seeds(c, tally, seed + 1)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    print_line("-- scripted Cons against the real Prod")
+    let t1 = Session.in_process()
+    let s1 = Session.attach(c, t1.ops)
+    let _ = Stream_Cons.script(s1, Stream_Cons.register(s1, 0), [
+      Stream_Cons.Expect_Msg_Prod_Cons_1(fn n -> print_line("script: Cons expected Item, got " ++ int_to_string(n))),
+      Stream_Cons.Choose_more(true),
+      Stream_Cons.Expect_Msg_Prod_Cons_1(fn n -> print_line("script: Cons expected Item, got " ++ int_to_string(n))),
+      Stream_Cons.Choose_done(false)
+    ])
+    let _ = prod(s1, Stream_Prod.register(s1, 0), 1)
+    t1.drain(())
+    print_line("queued after: " ++ int_to_string(t1.queued(())))
+
+    print_line("-- scripted Prod against the real Cons")
+    let t2 = Session.in_process()
+    let s2 = Session.attach(c, t2.ops)
+    let _ = cons(s2, Stream_Cons.register(s2, 0), 2)
+    let _ = Stream_Prod.script(s2, Stream_Prod.register(s2, 0), [
+      Stream_Prod.Send_Msg_Prod_Cons_1(10),
+      Stream_Prod.Expect_More(fn b -> print_line("script: Prod expected More, got " ++ bool_to_string(b))),
+      Stream_Prod.Send_Msg_Prod_Cons_1(20),
+      Stream_Prod.Expect_Done(fn b -> print_line("script: Prod expected Done, got " ++ bool_to_string(b)))
+    ])
+    t2.drain(())
+    print_line("queued after: " ++ int_to_string(t2.queued(())))
+
+    print_line("-- Fan: scripted A and B against the real C")
+    let t3 = Session.in_process()
+    let s3 = Session.attach(c, t3.ops)
+    let _ = role_c(s3, Fan_C.register(s3, 0))
+    let _ = Fan_A.script(s3, Fan_A.register(s3, 0), [
+      Fan_A.Send_Number(7),
+      Fan_A.Expect_Verdict(fn ok -> print_line("script: A expected Verdict, got " ++ bool_to_string(ok)))
+    ])
+    let _ = Fan_B.script(s3, Fan_B.register(s3, 0), [ Fan_B.Send_Second(9) ])
+    t3.drain(())
+
+    print_line("-- chaos: Stream, 50 seeds each way and both ways")
+    let tally = Vault.new("stream_peers_tally")
+    stream_seeds(c, tally, 0, 0)
+    stream_seeds(c, tally, 0, 1)
+    stream_seeds(c, tally, 0, 2)
+    print_line("closes: " ++ int_to_string(count(tally, "close")) ++ " of 300, cancels: "
+      ++ int_to_string(count(tally, "cancel")) ++ ", stalls: " ++ int_to_string(count(tally, "stalled")))
+
+    print_line("-- chaos: Fan, all three roles, 50 seeds")
+    let tally2 = Vault.new("stream_peers_tally_fan")
+    fan_seeds(c, tally2, 0)
+    print_line("closes: " ++ int_to_string(count(tally2, "close")) ++ " of 150, cancels: "
+      ++ int_to_string(count(tally2, "cancel")) ++ ", stalls: " ++ int_to_string(count(tally2, "stalled")))
+
+    print_line("-- chaos: Logging, C may crash, 50 seeds")
+    let tally3 = Vault.new("stream_peers_tally_logging")
+    logging_seeds(c, tally3, 0)
+    print_line("normal: " ++ int_to_string(count(tally3, "normal")) ++ ", crashed: " ++ int_to_string(count(tally3, "crashed"))
+      ++ ", crash branches: " ++ int_to_string(count(tally3, "crash_branch")) ++ ", stalls: " ++ int_to_string(count(tally3, "stalled")))
+    let _ = if count(tally3, "normal") + count(tally3, "crashed") == 50 do print_line("every Logging session decided") else print_line("MISSING Logging sessions") end
+    ()
+  end
+end

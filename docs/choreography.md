@@ -859,6 +859,52 @@ The [Session Types]({{ site.baseurl }}/docs/session-types/#swapping-the-transpor
 page has the details, and `test/session/in_process.march` in the compiler repository runs
 each case. The same role functions then run unchanged on the network.
 
+### Scripted and chaos peers
+
+You do not have to write the other side of a conversation to test one role. Every role
+module carries two bodies of the role's own type, derived from its projection, so the
+protocol is its own test oracle:
+
+- `Stream_Cons.script(s, st, steps)` runs a list of `Stream_Cons.Step`: `Send_<Msg>(v)`
+  and `Choose_<label>(v)` send, `Expect_<Msg>(fn v -> ...)` receives and hands the payload
+  to the callback, and `Expect_crash_<Msg>(fn c -> ...)` takes a crash branch. Each step is
+  checked against the state the role is in when it runs. A step the state cannot take, a
+  message the peer sent that the script did not expect, a script that runs out before the
+  protocol ends or that has steps left after it: each panics, naming the state, what was
+  expected and what came. That fails the test, not the session.
+- `Stream_Cons.chaos(s, st, seed)` walks the projection by a seeded generator: every
+  choice is taken by the seed, every payload is generated, and at every point the role
+  `may crash` (a send with an `or crash` branch, a `choose` with a `crash` branch) the
+  seed decides, one time in four, to leave the session instead. Run the real role against
+  `chaos` peers for fifty seeds and you have a property test of its protocol handling,
+  crash branches included. Payloads of built-in types are generated for you; for each of
+  your own types a role sends, `chaos` takes one more argument, a `Gen.Generator` for it,
+  in order of first appearance and named after the type (`gen_Thing`).
+
+```march
+let t = Session.in_process()
+let s = Session.attach(io, t.ops)
+let _ = Stream_Cons.script(s, Stream_Cons.register(s, 0), [
+  Stream_Cons.Expect_Msg_Prod_Cons_1(fn n -> assert(n == 1)),
+  Stream_Cons.Choose_done(true)
+])
+let _ = prod(s, Stream_Prod.register(s, 0), 1)
+t.drain(())
+
+let t2 = Session.in_process()
+let s2 = Session.attach(io, t2.ops)
+let _ = cons(s2, Stream_Cons.register(s2, 0), 2)
+let _ = Stream_Prod.chaos(s2, Stream_Prod.register(s2, 0), seed)
+t2.drain(())
+```
+
+A granted role's peers take its capabilities too, after the session:
+`Checkout_Ledger.script(s, fw, nc, st, steps)`. Both peers are ordinary bodies, so they
+also run over the network; a chaos "crash" is a `leave` there, which cancels the peers,
+while the in-process transport treats a role that has left as gone, so a peer waiting on
+it takes its crash branch. `test/session/stream_peers.march` in the compiler repository
+runs the real Stream, Fan and Logging roles against both kinds of peer.
+
 ## Configuration
 
 | Variable | Default | Meaning |
