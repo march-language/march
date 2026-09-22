@@ -207,10 +207,9 @@ let run ?(dry_run = false) ?(contracts = false) () =
       match proj.Project.project_type with
       | Project.Lib -> files
       | Project.App | Project.Tool ->
-        let entry_path = match proj.Project.entrypoint with
-          | Some ep -> Filename.concat proj.Project.root ep
-          | None    -> Filename.concat lib_dir (proj.Project.name ^ ".march")
-        in
+        match Project.entry proj with
+        | Error _ -> files
+        | Ok entry_path ->
         let entry_abs = try Unix.realpath entry_path with _ -> entry_path in
         let already   = List.exists (fun f ->
           (try Unix.realpath f with _ -> f) = entry_abs) files in

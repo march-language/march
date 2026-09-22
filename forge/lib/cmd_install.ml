@@ -53,10 +53,9 @@ let run source =
       in
       Project.mkdir_p build_dir;
       let lib_dir = Filename.concat abs_dir "lib" in
-      let entry = Filename.concat lib_dir (proj.Project.name ^ ".march") in
-      if not (Sys.file_exists entry) then
-        Error (Printf.sprintf "entry point not found: %s" entry)
-      else begin
+      match Project.entry proj with
+      | Error e -> Error e
+      | Ok entry -> begin
         let output = Filename.concat build_dir proj.Project.name in
         (* Collect dep lib paths *)
         let dep_lib_paths = List.filter_map (fun (_, dep) ->

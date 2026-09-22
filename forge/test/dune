@@ -46,6 +46,25 @@
      (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
       (run %{exe:test_cap_sandbox.exe})))))))
 
+; test_entry_rule.ml: `forge build`/`check`/`run` and the hot-deploy build
+; step must pick the same entry file (Project.entry). It runs a REAL native
+; compile, so it takes the test_cap_sandbox shape above: the just-built march
+; (MARCH_TEST_BIN) plus the staged runtime/ and stdlib/ trees, exported as
+; MARCH_RUNTIME_DIR / MARCH_STDLIB by its setup_hermetic_toolchain.
+(executable
+ (name test_entry_rule)
+ (modules test_entry_rule)
+ (libraries march_forge alcotest unix))
+
+(rule
+ (alias runtest)
+ (deps (source_tree %{workspace_root}/runtime) (source_tree %{workspace_root}/stdlib))
+ (action
+  (setenv MARCH_TEST_BIN %{bin:march}
+   (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
+    (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
+     (run %{exe:test_entry_rule.exe}))))))
+
 ; test_build_check.ml's "forge check"/"forge build"/"forge test" cases shell
 ; out to a real `march check` subprocess (forge/lib/cmd_build.ml's check_all).
 ; It was QUARANTINED (2026-07-24) on two problems, both now resolved:

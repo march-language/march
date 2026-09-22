@@ -418,6 +418,33 @@ let load_from root =
     preprocessors; ffi_sources; ffi_link; ffi_rust; js_deps; hot_reload;
     contracts_no_alloc }
 
+(** The project's entry file: [package] entrypoint when set, else the first
+    of lib/<name>.march and src/<name>.march that exists. Every command that
+    needs the entry calls this, so `forge build` and `forge deploy hot` can no
+    longer disagree about which file it is (they did: build/check/run used
+    lib/, the hot-deploy paths src/). *)
+let entry (proj : project) : (string, string) result =
+  match proj.entrypoint with
+  | Some ep ->
+    let p = Filename.concat proj.root ep in
+    if Sys.file_exists p then Ok p
+    else
+      Error (Printf.sprintf
+               "entry point not found: %s (set by [package] entrypoint in forge.toml)" p)
+  | None ->
+    let candidates =
+      List.map (fun dir ->
+          Filename.concat (Filename.concat proj.root dir) (proj.name ^ ".march"))
+        [ "lib"; "src" ]
+    in
+    match List.find_opt Sys.file_exists candidates with
+    | Some p -> Ok p
+    | None ->
+      Error (Printf.sprintf
+               "no entry file: expected %s (set [package] entrypoint in forge.toml \
+                to use another file)"
+               (String.concat " or " candidates))
+
 let load_from_dir dir =
   try Ok (load_from dir)
   with

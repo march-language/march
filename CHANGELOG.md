@@ -153,6 +153,13 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **`forge deploy hot` builds the same entry file as `forge build`.** `forge build`,
+  `check` and `run` defaulted to `lib/<name>.march` and the hot-deploy build step to
+  `src/<name>.march`, so a project that built could not be hot-deployed without an
+  explicit `entrypoint`, and the other way round. Every forge command now uses
+  `[package] entrypoint` if set, else the first of `lib/<name>.march` and
+  `src/<name>.march` that exists, and reports a missing entry the same way.
+  `forge install` and `forge interactive` now honour `entrypoint` too.
 - **Compiled `send_checked` and `is_cap_valid` no longer intermittently accept a cap
   whose actor was killed.** About one run in five, a cap taken while the actor was
   alive still validated after `kill`: `is_cap_valid` answered `true` and

@@ -856,17 +856,15 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
       if Sys.file_exists gen_dir then find_march_files gen_dir else []
     in
     let files = find_march_files lib_dir @ gen_files in
-    if files = [] then
+    let has_entry = proj.Project.project_type <> Project.Lib
+                    && Result.is_ok (Project.entry proj) in
+    if files = [] && not has_entry then
       Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
       match offline_preflight ~scope:(build_scope ~release proj) proj with
       | Error e -> Error e
       | Ok () ->
       let lib_path_env = lib_path_env ~release proj in
-      let entry_path = match proj.Project.entrypoint with
-        | Some ep -> Filename.concat proj.Project.root ep
-        | None    -> Filename.concat lib_dir (proj.Project.name ^ ".march")
-      in
       let do_islands () =
         let islands_dir = Filename.concat proj.Project.root "islands" in
         let (built, total) = build_islands ~lib_path_env ~islands_dir ~release lib_dir in
@@ -885,6 +883,9 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
           Ok (Printf.sprintf "checked %d file(s) in %s" (List.length files) lib_dir)
         end
       | Project.App | Project.Tool ->
+        match Project.entry proj with
+        | Error e -> Error e
+        | Ok entry_path ->
         (* Check every lib/ file individually before compilation so that orphan
            modules (not imported by the entry) don't silently rot.  This runs
            before compile_entry so failures report "typecheck failed" rather

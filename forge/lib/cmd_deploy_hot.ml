@@ -1155,12 +1155,9 @@ let build_so ~proj ~output : (string * string, string) result =
   let manifest_path = output ^ ".so.hcr_manifest" in
   let lib_env = Cmd_build.lib_path_env proj in
   let ffi_flags = Cmd_build.ffi_flags_of ~root:proj.Project.root proj in
-  let entry = match proj.Project.entrypoint with
-    | Some e -> Filename.concat proj.Project.root e
-    | None ->
-      let src = Filename.concat proj.Project.root "src" in
-      Filename.concat src (proj.Project.name ^ ".march")
-  in
+  match Project.entry proj with
+  | Error e -> Error e
+  | Ok entry ->
   let cmd = Printf.sprintf
     "%smarch --compile --compile-so -o %s%s %s"
     lib_env (Filename.quote so_path) ffi_flags (Filename.quote entry)
@@ -1242,11 +1239,8 @@ let deploy ?(output="") ?(so="") ?(grant_caps=([] : string list)) ?(no_cap_gate=
                   (Filename.concat proj.Project.root ".march")
                   (proj.Project.name ^ "_hot.so.hcr_manifest.prev") in
               let entry_path =
-                match proj.Project.entrypoint with
-                | Some e -> Filename.concat proj.Project.root e
-                | None ->
-                  Filename.concat (Filename.concat proj.Project.root "src")
-                    (proj.Project.name ^ ".march")
+                (* build_so above already resolved it; Ok here. *)
+                Result.value (Project.entry proj) ~default:""
               in
               let result2 =
                 run
@@ -1403,11 +1397,8 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
               let prev_manifest_path = out_prefix ^ ".so.hcr_manifest.prev" in
 
               let entry_path =
-                match proj.Project.entrypoint with
-                | Some e -> Filename.concat proj.Project.root e
-                | None ->
-                  Filename.concat (Filename.concat proj.Project.root "src")
-                    (proj.Project.name ^ ".march")
+                (* build_so above already resolved it; Ok here. *)
+                Result.value (Project.entry proj) ~default:""
               in
               (* Phase 10: shared epoch — call GET_EPOCH once on the first server
                  so all nodes in this batch get the same epoch N, making epoch a
