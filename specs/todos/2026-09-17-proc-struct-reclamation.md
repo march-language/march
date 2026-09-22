@@ -36,7 +36,7 @@ macOS/arm64, today:
 sizeof(march_proc)        = 1136 B   of which ucontext_t = 880 B (77%)   residue = 256 B
 sizeof(march_actor_meta)  =  272 B   (the pid_index chain lives inside it)
 registry slot             =    8 B
-sizeof(ucontext_t) on ubuntu-24.04 / alpine-aarch64 = NOT MEASURED (Docker was down)
+sizeof(ucontext_t) on ubuntu-24.04 / alpine-aarch64 = measured 2026-09-22, see below
 ```
 
 Retained per dead proc, before and after Phase 1:
@@ -58,6 +58,201 @@ At 1136 B, 50 000 peak procs retain 57 MB forever; 1 M spawns over a week retain
 plus the meta and pididx terms, unmeasured. It is not reachable garbage (it is bounded by
 peak concurrency and intentional), which is why nothing has forced it; a long-lived node
 simply pays its high-water mark permanently.
+
+## Analysis, 2026-09-22: the open measurements and both cost questions
+
+### Measurements
+
+`sizeof` read by compiling a two-line probe against `runtime/march_scheduler.h` in each
+environment. The meta size came from the same compile-time diagnostic as before. It has
+**grown from 272 to 304 B** since 2026-09-17.
+
+| environment | `ucontext_t` | `march_proc` (Phase 1 residue) | `march_actor_meta` |
+|---|---|---|---|
+| macOS 26 / arm64 | 880 | 256 | 304 |
+| ubuntu 24.04 / aarch64 (glibc, `march-sbx-test-ubuntu`) | **4560** | 256 | 304 |
+| alpine 3.21 / aarch64 (musl) | **4560** | 256 | 304 |
+| ubuntu 24.04 / x86_64 (glibc, emulated) | 968 | 256 | — |
+| alpine 3.21 / x86_64 (musl, emulated) | 936 | 256 | — |
+
+So on the Linux/aarch64 legs Phase 1 released 4560 of 4816 B per proc (95%), as the
+earlier note predicted. What remains is the same everywhere, because none of it is
+context:
+
+- **Dead actor: 256 (proc) + 304 (meta) + 8 (registry slot) = 568 B.**
+- **Dead task or `main`: 256 + 8 = 264 B.**
+
+Measured slope of peak RSS against churn count, compiled `--opt 2`, macOS:
+
+- **Actors:** spawn, send, kill. 50k → 122 MB, 200k → 212 MB, so about **600 B per dead
+  actor**.
+- **Tasks:** `Task.async` then `Task.await`, run sequentially, so there is never more than
+  one live task. 200k → 65 MB, 400k → 127 MB, so about **308 B per finished task**.
+
+That is 1M awaited tasks ≈ 300 MB and 1M churned actors ≈ 570 MB, never returned.
+
+**A finding the survey did not predict: the leak is also a CPU cliff on the hottest
+path.** `g_actor_tbl` has 256 fixed buckets whose chains are insert-only. Every meta
+ever created stays linked, including the fresh meta `replace_stale_meta_locked` prepends
+on address reuse. `find_meta`, which `march_send` and `march_actor_call` call on every
+message, therefore walks O(actors ever spawned / 256) nodes. A long-lived server actor
+sits at the *tail* of its bucket, behind every meta created after it.
+
+Measured with 200k sends to one long-lived actor, before and after churning N short-lived
+actors (same binary, same run):
+
+| actors churned first | 200k sends |
+|---|---|
+| 0 | 46–56 ms |
+| 50 000 | 127 ms |
+| 200 000 | **3064 ms (60× slower)** |
+
+`sample` during the slow phase puts about 606 of the roughly 700 non-idle samples in
+`march_send` self time, which is the inlined chain walk. A node that has churned 1M actors
+pays about 4000 cache-missing pointer chases per send.
+
+### Cost question 1: does Phase 1 plus shrinking the meta suffice? **No.**
+
+The survey of every meta reader (all 35 `find_meta*` / `find_or_create_meta` call sites
+and the direct table walkers in `march_runtime.c`; no other runtime file resolves metas)
+separates the fields into two groups.
+
+- **Needed indefinitely after death,** because a dead pid can be queried by `pid_index`
+  (an `Int` that holds no reference) at any later time:
+  - `pid_index`
+  - `terminal_set`, `terminal_reason`, `terminal_message`, `terminal_message_len`
+  - `epoch`
+  - the key the dead actor is found by
+
+  The readers are `march_actor_terminal_reason` (distribution, no time bound),
+  `march_monitor` on an already-dead target (it must deliver the right Down reason),
+  `march_value_to_string` (a dead Pid still prints `Pid(n)`), and
+  `march_is_cap_valid` / `march_send_checked`.
+- **Needed only transiently after death:**
+  - `green_thread`, `hcr_pin`, `dispatch_name_id`: the exiting green thread's own
+    epilogue, and orphaned migrate markers disposed at the reap.
+  - `supervisor`, `sup_child_index`: `march_supervisor_notify` during the death.
+  - `spawn_cap`, `reg_names_pending`: `march_respawn_child`, up to the backoff cap after
+    death.
+- **Everything else** (about 230 of the 304 B: the drain, hot-reload, supervision
+  bookkeeping, name index and cleanup/monitor lists) is meaningful only while the actor
+  lives.
+
+So the indefinite residue is a **tombstone of about 56 B** (plus any crash message, which
+is retained today too). That is the same order as the 8 B registry slot per pid that
+"Out of scope" already accepts. Shrinking the meta in place, without reclamation, would
+take a dead actor from 568 to about 320 B (the 256 B proc struct stays). That is 1.8×,
+not a fix. It also leaves the tombstones linked in `g_actor_tbl`, so the send-path cliff
+above is untouched: the cliff scales with *entry count*, not entry size. Shrinking is part
+of the answer, not an alternative to reclaiming.
+
+### Cost question 2: can the hot readers avoid resolving a proc? **No, not without a compiler change.**
+
+Read of `march_send` → `march_sched_send`, `march_actor_call`, and `march_actor_reply`:
+
+- **`march_sched_send` needs the proc, not a mailbox.** Per message it touches:
+  - `status`, for the DEAD check and again for the reap-vs-push recheck;
+  - `mbox_lock`, `mailbox`, `mbox_tail` and the counts;
+  - `mbox_limit` / `mbox_policy`;
+  - `mbox_send_waiters`, for the BLOCK registration;
+  - and then `march_sched_wake(target)`, which enqueues the proc itself: `next`, the
+    deques, `owner_sched`, `pinned`, `wake_pending`.
+
+  The reap-vs-push protocol is defined by `status` under `mbox_lock`, and the wake needs
+  the run-queue linkage. Everything the send path reads *is* the live proc. A mailbox
+  object split out of it would have to carry status, the lock, the waiter list and a way
+  to wake its owner, which is the proc again under another name.
+- **The caller's actor record cannot reach the meta or proc without a layout change.**
+  The record is `[rc][tag|shape][dispatch][alive][state…]`. There is no spare word:
+  - The pad holds the shape id.
+  - `$e_alive` is a TIR `Bool` field that every compiled handler loads and writes back
+    in its in-place `EReuse` (`lib/tir/lower_actor.ml`), so no runtime data can be packed
+    into it.
+  - Nothing marks an actor record at free time. `march_decrc` frees it like any record,
+    so "free the meta when the record dies" has no hook.
+
+  Adding a runtime-owned word is a lowering, `EReuse`, `get_actor_field`, migrate and
+  `@compat` change for a runtime problem. It would also not help the `pid_index` readers,
+  which hold no record at all.
+- **The reply path is a third hot reader the survey missed.** `march_actor_call` stores
+  the *caller's* `march_proc *` in the reply-ref (field 0). `march_actor_reply` sends to
+  it with no liveness protocol at all. A handler may keep that ref in its state across
+  turns (`march_actor_reply_retain`), and a caller can time out and exit first, so this
+  holder is unbounded. It fires once per `Actor.call`.
+
+So the hot readers stay hot, and the epoch is justified for them, as the survey argued.
+
+### Survey additions (holders the 2026-09-17 table missed)
+
+| Holder | Bounded by | Under reclamation |
+|---|---|---|
+| reply-ref field 0 (caller proc) | nothing: a handler may retain the ref | convert to the caller's **pid**, resolved via `g_registry` inside a critical section |
+| Task word 5 (in-scheduler waiter) | the waiter's park, *except* that `task_wait_done`'s loop-top "done" return leaves word 5 naming the waiter | clear it on that path too; the trampoline loads and wakes inside a critical section |
+| `march_task_cancel_by_id` via Task word 2 | nothing (already in the table as "Task object word 2") | store the **pid** and resolve via `g_registry` |
+| BLOCK-policy sender holding `target` across `march_sched_park_self` | the target's reap drains the waiter list, but the *pointer* is used again after the park (`mbox_unlink_send_waiter(target, …)`) | re-resolve by pid after the park |
+| `march_is_cap_valid`, `march_pid_of_int`, the one_for_all / rest_for_one strategies, `march_actor_stop`'s child walk, `delayed_restart_thread` | nothing: all dereference **`m->actor`** of a meta found by `pid_index`, whose record may already have been freed (the live actor's own reference is dropped at green-thread exit) | **by reading, a use-after-free today, not only under reclamation.** `march_pid_of_int` `incrc`s a record that may be freed. Not yet reproduced; the metas PR must reproduce it under ASAN before claiming the fix. A tombstone that carries no dereferenceable actor pointer closes all of these. |
+
+### Chosen mechanism
+
+**Epoch reclamation, quiescent-state flavoured on scheduler threads and explicit on every
+other thread; stored raw pointers converted to pids; dead metas collapsed to a tombstone.**
+Recorded here before implementation, as step 5 required.
+
+1. **`runtime/march_reclaim.{c,h}`.**
+   - Every OS thread that can resolve an actor-lifetime structure owns a slot. Slots are
+     registered lazily on first use (any thread, since `march_send` can be called from
+     anywhere) and recycled at thread exit through a `pthread_key` destructor. Slots are
+     never freed.
+   - A **scheduler thread** announces a quiescent state at the top of every `sched_loop`
+     iteration (one store and a fence per *dispatch*) and goes offline while idle-sleeping.
+     No green thread is running at that point, so no resolved pointer can be live. Its
+     readers pay nothing per message.
+   - **Any other thread** brackets a read with `march_reclaim_enter` / `march_reclaim_exit`
+     (a store and a full fence on entry, a release store on exit). Enter/exit are also
+     written at scheduler-thread sites; there they cost a TLS depth counter.
+   - Retired objects go on an epoch-stamped list and are freed once every online slot has
+     passed a later epoch. The list is polled from the retire path (amortised) and from the
+     preemption daemon's tick, so a quiesced node drains completely.
+   - The rule **"a resolved pointer is valid only inside the critical section"** becomes
+     **"… and never across a context switch."** Every `swapcontext` that suspends a proc
+     aborts if the thread's critical-section depth is non-zero, so a violation crashes at
+     its cause. A path that must wait (the BLOCK sender, a foreign thread's sleep-poll)
+     suspends its critical section around the wait and re-resolves by pid afterwards.
+   - Why not a lock: the lock on the hot path is what finding 2 ruled out, and the
+     scheduler-thread path here costs *less* than today's `find_meta`. Why not reader
+     refcounts: that is two contended RMWs per send on the target's cache line, which
+     fan-in (`fanin_flood`) concentrates.
+2. **Procs (first mechanism PR).** At the reap, after `registry_remove` and the drain, the
+   struct is retired rather than leaked. Before that, every unbounded holder is converted
+   so that nothing can reach a dead proc after it is retired:
+   - reply-ref field 0 and Task word 2 become **pids**, and `march_sched_find` (today
+     caller-less) becomes their resolver;
+   - timer WAKE/SEND entries carry the pid and resolve at fire time;
+   - Task word 5 is cleared on every waiter exit;
+   - `green_thread` readers run inside a critical section. The field is NULLed by the
+     actor's own thread before its proc can die, so a new reader cannot reach a retired
+     proc.
+
+   This PR alone removes the 264 B per finished task and 256 of the 568 B per dead actor.
+3. **Metas (second mechanism PR).**
+   - `g_actor_tbl` holds **live** metas only. The meta is unlinked at death and retired,
+     which removes the send-path cliff because chain length becomes O(live actors).
+   - What a dead pid still needs moves into a ~56 B **tombstone**, reachable by
+     `pid_index` through a dense, grow-only slot array (the same shape and accepted cost
+     as `g_registry`, since `pid_index` is a dense counter) and by address through a cold
+     secondary chain that only miss paths consult.
+   - The tombstone carries the address as a key only and never dereferences it, which
+     closes the `m->actor` use-after-free sites above.
+   - The transient post-death fields (respawn's `spawn_cap` / pending names) move to the
+     restart request that consumes them.
+
+   Behaviour a test pins today (Down reason on a dead target, `Pid(n)` display, terminal
+     reason by pid, cap epoch) is preserved.
+
+What this deliberately does not change: the 8 B registry slot per pid ever, and the
+tombstone per pid ever. Both are O(pids spawned) by the language's semantics (a dead
+`Int` pid can be asked for its terminal reason forever). Both are ≥10× smaller than
+today's residue.
 
 ## Survey: every holder of a `march_proc *`
 
@@ -148,8 +343,11 @@ resolve `green_thread` on every send. A global mutex there would show up immedia
 for exactly this path.
 
 **This is where the epoch scheme item 5 named earns its place**, and the reason to state
-it precisely: reader-side cost is two relaxed stores (enter / exit a critical section)
-versus a contended mutex acquisition, and the reclaimer does the waiting. The shape:
+it precisely: reader-side cost is two stores (enter / exit a critical section)
+versus a contended mutex acquisition, and the reclaimer does the waiting. (Correction,
+2026-09-22: the entry store needs a full fence after it, since the announcement must be
+visible before the pointer load, and release/acquire does not order a store before a later
+load. See "Chosen mechanism" for how scheduler threads avoid paying that per message.) The shape:
 
 - Each OS thread that can dereference an actor-lifetime structure registers a slot
   (scheduler threads have one already; the helper and caller threads do not — `march_send`
@@ -176,17 +374,19 @@ the need:
 
 ## Order of work
 
-1. ~~Measure `sizeof(march_actor_meta)`~~ (272 B, above). Still open: `sizeof(ucontext_t)`
-   on ubuntu-24.04 and alpine/aarch64 — one command each, once Docker is up.
+1. ~~Measure `sizeof(march_actor_meta)`~~ (272 B then, 304 B now) ~~and `sizeof(ucontext_t)`
+   on ubuntu-24.04 and alpine/aarch64~~ (4560 B on both; see "Analysis, 2026-09-22").
 2. ~~Phase 1~~ — **shipped 2026-09-17**: [[2026-09-17-proc-ctx-released-at-death]].
 3. ~~Decide whether to continue, and record the decision here either way.~~ **Decided
    2026-09-22 by the repo owner: continue past Phase 1.** The unit of work stays all three
    structures (procs, metas, pididx entries); steps 4–5 below proceed in order, and closing
    the item with measurements remains an acceptable outcome if the analysis says
    reclamation is not worth its risk.
-4. If continuing: cost question 2 above (mailbox reachable without the proc). It is a
-   read of `march_send` / `march_actor_call` / `march_sched_send`, not a change.
-5. Only then the epoch scheme, and only for whichever holders question 4 leaves hot.
+4. ~~If continuing: cost question 2 above (mailbox reachable without the proc).~~ Answered
+   2026-09-22: no. The send path needs the whole live proc, and the record has no word to
+   reach it by. Question 1 is also answered no. See "Analysis, 2026-09-22".
+5. The epoch scheme, for the holders question 4 leaves hot. Design recorded in "Chosen
+   mechanism": procs first (one PR), then metas and tombstones (one PR).
 
 ## Evidence any reclamation phase must produce
 
