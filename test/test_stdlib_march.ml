@@ -149,8 +149,8 @@ let all_stdlib_decls =
     "sigil.march";
     "crypto.march";
     "deque.march";
-    "sorted_set.march";
     "ordered_map.march";
+    "sorted_set.march";
     "gen.march";
     "check.march";
     "ring_buf.march";
@@ -555,13 +555,13 @@ let () =
       Alcotest.test_case "LinearMap module"
         `Quick (run_stdlib_test "test_linear_map.march" "TestLinearMap");
     ]);
-    ("sorted_set", [
-      Alcotest.test_case "SortedSet module"
-        `Quick (run_stdlib_test "test_sorted_set.march" "TestSortedSet");
-    ]);
     ("ordered_map", [
       Alcotest.test_case "OrderedMap module"
         `Quick (run_stdlib_test "test_ordered_map.march" "TestOrderedMap");
+    ]);
+    ("sorted_set", [
+      Alcotest.test_case "SortedSet module"
+        `Quick (run_stdlib_test "test_sorted_set.march" "TestSortedSet");
     ]);
     ("ring_buf", [
       Alcotest.test_case "RingBuf module"

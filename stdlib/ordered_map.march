@@ -238,12 +238,20 @@ mod OrderedMap do
 
   doc "Returns an in-order list of all keys."
   fn keys(m : {cmp: k -> k -> Int, tree: Tree(k, v)}) : List(k) do
-    List.map(tree_to_list(m.tree, Nil), fn pair -> match pair do (k, _) -> k end)
+    List.map(tree_to_list(m.tree, Nil), fn pair ->
+      match pair do
+        (k, _) -> k
+      end
+    )
   end
 
   doc "Returns an in-order list of all values."
   fn values(m : {cmp: k -> k -> Int, tree: Tree(k, v)}) : List(v) do
-    List.map(tree_to_list(m.tree, Nil), fn pair -> match pair do (_, v) -> v end)
+    List.map(tree_to_list(m.tree, Nil), fn pair ->
+      match pair do
+        (_, v) -> v
+      end
+    )
   end
 
   doc "Returns an in-order list of (key, value) pairs."
@@ -253,7 +261,11 @@ mod OrderedMap do
 
   doc "Builds a map from a list of (key, value) pairs."
   fn from_list(pairs : List((k, v)), cmp : k -> k -> Int) : {cmp: k -> k -> Int, tree: Tree(k, v)} do
-    List.fold_left(pairs, new(cmp), fn (m, pair) -> match pair do (k, v) -> put(m, k, v) end)
+    List.fold_left(pairs, new(cmp), fn (m, pair) ->
+      match pair do
+        (k, v) -> put(m, k, v)
+      end
+    )
   end
 
   doc "Returns the number of entries in the map."

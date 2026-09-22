@@ -51,6 +51,14 @@ order). All three now destructure the pair in a `match`. New
 `test/stdlib/test_ordered_map.march` (Alcotest `ordered_map` group, plus a
 `dune runtest` rule) is red on the pre-change stdlib and green after.
 
+`#591` landed the same fix independently, from the other direction: it made
+the stdlib self-check typecheck each file inside the whole stdlib rather than
+in isolation, which exposed the same three functions. Merging kept its
+formatting of `ordered_map.march` (identical behaviour) and its test file,
+plus the two cases only this branch had — an annotated
+`let vs : List(String) = OrderedMap.values(m)`, which pins the fix at the TYPE
+level rather than by runtime equality, and the empty-`from_list` case.
+
 Behaviour identity: all 124 stdlib modules were `--check`ed with the
 pre-change compiler + stdlib and the post-change ones, using separate HOMEs.
 After normalizing paths and fresh type-variable names, the only difference

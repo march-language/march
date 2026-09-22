@@ -1,42 +1,65 @@
--- Tests for the OrderedMap stdlib module (AVL tree keyed by a comparator)
+-- Tests for the OrderedMap stdlib module (AVL tree keyed by a comparator).
 -- Run with: dune exec march -- test test/stdlib/test_ordered_map.march
 --
--- keys, values and from_list each passed a two-parameter lambda
--- (`fn (k, _) -> k`) where a one-argument callback over a (key, value) pair
--- was expected, so `values` was typed `List(v -> v)` for callers and `keys` /
--- `from_list` failed to typecheck, hidden by the stdlib diagnostic filter.
--- The annotated-type-variable warning found `values`
--- (specs/progress/2026-09-22-annotated-tyvar-fixed-warning.md).
+-- keys/values/from_list were unusable until 2026-09-22: each passed a
+-- TWO-PARAMETER lambda where List.map wanted a one-parameter pair callback
+-- (and from_list additionally had List.fold_left's arguments in the wrong
+-- order), so the functions returned a list of FUNCTIONS. Nothing caught it:
+-- the compiler drops diagnostics spanned in stdlib, and the one test that
+-- typechecked the file did so in isolation, where List.map resolves through
+-- the module registry as an unconstrained type variable that accepts any
+-- callback. These tests exercise the three at runtime.
+--
+-- `values` was found independently by the `annotated_tyvar_fixed` warning,
+-- which saw the signature's `v` fixed to a function type
+-- (specs/progress/2026-09-22-annotated-tyvar-fixed-warning.md). The annotated
+-- binding below pins that at the TYPE level, not just by runtime equality.
 
 mod TestOrderedMap do
 
 pfn icmp(a : Int, b : Int) : Int do a - b end
 
-pfn sample() do
-  OrderedMap.put(OrderedMap.put(OrderedMap.put(OrderedMap.new(icmp), 3, "c"), 1, "a"), 2, "b")
-end
-
-describe "ordered traversal" do
-  test "keys are in comparator order" do
-    assert (OrderedMap.keys(sample()) == [1, 2, 3])
-  end
-
-  test "values follow key order and keep their own type" do
-    let vs : List(String) = OrderedMap.values(sample())
-    assert (vs == ["a", "b", "c"])
-  end
-end
-
-describe "from_list" do
-  test "builds a map from pairs; a later pair wins" do
-    let m = OrderedMap.from_list([(2, "two"), (1, "one"), (2, "deux")], icmp)
+describe "basic operations" do
+  test "put, get, size, member, delete" do
+    let m = OrderedMap.put(OrderedMap.put(OrderedMap.new(icmp), 2, "b"), 1, "a")
     assert (OrderedMap.size(m) == 2)
-    assert (OrderedMap.keys(m) == [1, 2])
-    assert (OrderedMap.get(m, 2) == Some("deux"))
+    assert (OrderedMap.get(m, 1) == Some("a"))
+    assert (OrderedMap.get(m, 9) == None)
+    assert OrderedMap.member(m, 2)
+    assert (OrderedMap.size(OrderedMap.delete(m, 2)) == 1)
+  end
+end
+
+describe "list conversions" do
+  test "from_list builds the map its pairs describe" do
+    let m = OrderedMap.from_list([(3, "c"), (1, "a"), (2, "b")], icmp)
+    assert (OrderedMap.size(m) == 3)
+    assert (OrderedMap.get(m, 1) == Some("a"))
+    assert (OrderedMap.get(m, 3) == Some("c"))
   end
 
-  test "empty list gives an empty map" do
+  test "keys and values come back in key order" do
+    let m = OrderedMap.from_list([(3, "c"), (1, "a"), (2, "b")], icmp)
+    assert (OrderedMap.keys(m) == [1, 2, 3])
+    assert (OrderedMap.values(m) == ["a", "b", "c"])
+    assert (OrderedMap.to_list(m) == [(1, "a"), (2, "b"), (3, "c")])
+  end
+
+  test "values keeps the map's own value type" do
+    -- While `values` was typed `List(v -> v)`, this annotation was rejected.
+    let m = OrderedMap.from_list([(1, "a"), (2, "b")], icmp)
+    let vs : List(String) = OrderedMap.values(m)
+    assert (vs == ["a", "b"])
+  end
+
+  test "an empty list gives an empty map" do
     assert (OrderedMap.is_empty(OrderedMap.from_list([], icmp)))
+  end
+
+  test "a later pair wins over an earlier one for the same key" do
+    let m = OrderedMap.from_list([(1, "first"), (1, "second")], icmp)
+    assert (OrderedMap.size(m) == 1)
+    assert (OrderedMap.values(m) == ["second"])
   end
 end
 
