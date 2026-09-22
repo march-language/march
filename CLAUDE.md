@@ -14,6 +14,13 @@ March is a statically-typed functional language (ML/Elixir hybrid) compiled with
 These directories are the canonical record of what exists. Do not let them go stale. One item, one file; this
 structure exists specifically so two PRs filing or closing different items never conflict with each other.
 
+**Language reference: edit `specs/lang/`, never `docs/`.** `specs/lang/` is the canonical
+language reference. The chapter pages the site serves (`docs/actors.md`, `docs/types.md`, …;
+every `specs/lang/*.md` with Jekyll front matter) are GENERATED from it by
+`scripts/gen-lang-docs.py` and committed. Edit the `specs/lang/` chapter, run
+`scripts/gen-lang-docs.py`, and commit both; doc-lint Check F fails on a hand-edited or
+un-regenerated `docs/` chapter. `docs/pagefind/` is still bot-owned: don't regenerate it in a PR.
+
 **Doc freshness lint.** `scripts/check-docs.sh` (run in CI) guards the current-truth docs
 (root guides, `docs/`, `specs/features/`, the agent SKILL) against two kinds of rot: dead
 compiler-source pointers (e.g. a path that moved) and stale stdlib module counts. It also

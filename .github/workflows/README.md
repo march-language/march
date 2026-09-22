@@ -42,8 +42,12 @@ nothing in it reads the repo's Markdown. Mix in any other file and it all runs.
 read Markdown.
 
 A newer push to a PR cancels that PR's older run (`concurrency`,
-`cancel-in-progress`). Pushes to `main` never cancel each other, so every
-`main` commit gets a verdict; the nightly gate reads those verdicts.
+`cancel-in-progress`). Pushes to `main` share one concurrency group without
+cancel-in-progress: the run already in flight finishes and gets its verdict,
+but only the newest merge stays queued behind it (GitHub cancels the older
+pending run in a group). So a burst of merges costs one run, not one per
+merge, and intermediate `main` commits get no verdict of their own; the
+nightly gate skips cancelled runs and reads the next completed one.
 
 Every check is its own job so the critical path is the slowest job, not the
 sum. There is no required-check list in branch protection; "green" means every
@@ -64,7 +68,7 @@ ocaml-build (ubuntu, macos) ─┬─ property-tests (per OS) × soundness | tir
 
 | Job | What it checks | If it's red |
 |---|---|---|
-| `doc-lint` (in `doc-lint.yml`) | `scripts/check-docs.sh` (dead source pointers, stale stdlib counts, corpus INDEX counts, quarantine inventory); `scripts/test-run-tests.sh` (the test runner's own failure reporting); PRs must not touch the bot-owned `docs/pagefind/`; `runtime/sources.list` agrees with every C link list; no plain store to an actor's refcount word. | Almost always a doc/manifest edit you forgot. The error names the file. |
+| `doc-lint` (in `doc-lint.yml`) | `scripts/check-docs.sh` (dead source pointers, stale stdlib counts, corpus INDEX counts, quarantine inventory, `docs/` language chapters match `scripts/gen-lang-docs.py` output); `scripts/test-run-tests.sh` (the test runner's own failure reporting); PRs must not touch the bot-owned `docs/pagefind/`; `runtime/sources.list` agrees with every C link list; no plain store to an actor's refcount word. | Almost always a doc/manifest edit you forgot. The error names the file. |
 | `test (macos-15, all)` | Plain `dune runtest`: all four ubuntu shards' work in one job on macOS. | Whatever suite failed; reproduce as for the matching ubuntu shard. |
 | `test (ubuntu, codegen)` | `dune build @test/runtest-run_codegen`: the LLVM codegen suite (`test/test_codegen.ml` and friends), including native compile-and-run cases. | A codegen or runtime regression; reproduce with `scripts/run-tests.sh codegen`. |
 | `test (ubuntu, refinecheck)` | `@test/runtest-test_refinecheck`: the z3-backed refinement checker corpus. | `scripts/run-tests.sh refinecheck` (needs z3 on PATH). |

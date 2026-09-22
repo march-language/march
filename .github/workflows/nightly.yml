@@ -23,8 +23,9 @@ jobs:
   #     progress are skipped over (a merge minutes before midnight must not
   #     cost the night); the first COMPLETED run decides: success -> that
   #     commit is the candidate; failure / timed_out / startup_failure -> main
-  #     is red, no nightly. Cancelled runs are skipped over (main runs do not
-  #     cancel each other, so one is a manual cancel, not a verdict).
+  #     is red, no nightly. Cancelled runs are skipped over (ci.yml's main
+  #     concurrency group cancels a superseded PENDING run when a newer merge
+  #     arrives, and a human may cancel one by hand; neither is a verdict).
   #   new changes: the candidate must be strictly ahead of the rolling
   #     `nightly` tag, which `publish` moves to the commit it shipped. A failed
   #     build never moves it, so the next night retries.

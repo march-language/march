@@ -367,6 +367,23 @@ else
   echo "  note: $inventory not found — skipping"
 fi
 
+# ─── Check F: generated language chapters match their specs/lang/ sources ────
+#
+# specs/lang/ is the canonical language reference; the docs/ copies the site
+# serves (docs/actors.md, docs/types.md, …) are rendered from it by
+# scripts/gen-lang-docs.py and committed. This fails if any committed page
+# differs from what the generator would write (a hand-edit of a docs/ chapter,
+# or a specs/lang/ edit that was not regenerated), if a chapter's relative link
+# is dead, or if a specs/lang/ page with front matter is missing from the
+# generator's chapter table. Unlike Check D this runs on every PR: the
+# generator is pure text, so the source edit and its regenerated page must land
+# together. (specs/progress/2026-09-22-docs-lang-duplicate-chapters.md.)
+
+echo "== Check F: docs/ language chapters vs scripts/gen-lang-docs.py output =="
+if ! python3 scripts/gen-lang-docs.py --check; then
+  fail=1
+fi
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "doc-lint FAILED — fix the references above, or add a doc-lint:ignore-* marker"

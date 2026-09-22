@@ -12,13 +12,21 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Removed
-- **`MARCH_NO_TRMC` is gone; use `--no-trmc`.** The environment variable turned off
+- **`MARCH_NO_TRMC` is gone.** The environment variable turned off
   tail-recursion-modulo-cons for every compile in the process, including the
   stdlib, which increasingly depends on the transform to avoid overflowing the
-  stack on long lists. The `--no-trmc` flag still works, one invocation at a time.
-  `MARCH_TRMC` (already a no-op) is unchanged.
+  stack on long lists. (The `--no-trmc` flag that briefly replaced it is gone
+  too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **Tail-recursion-modulo-cons always runs; `--no-trmc` and `--trmc` are
+  removed.** Passing either is now the ordinary "unknown option" error. There
+  is no supported way to turn TRMC off: the stdlib's list producers are being
+  written in natural recursive style, which is a loop only because TRMC runs,
+  and with it off they would overflow the green-thread stack on lists of
+  20k-30k elements (exit 138, no output). The `@[no_alloc]` "TRMC-eligible …
+  check for `--no-trmc`" note and the flag mention in the "not in tail
+  position" warning (compiler and language server) are gone with it.
 - **An interpreted run of a `[ffi.rust]`-only project now says up front that
   Rust FFI is compiled-only.** `forge run`, `forge interactive` and interpreted
   `forge test` (`--coverage` / `MARCH_TEST_INTERPRETER=1`) print one warning
@@ -56,6 +64,13 @@ git log is authoritative for exact commits.
   `Session.in_process_with(trace)` reports what the transport itself does, and
   `t.take(())` serves endpoints hosted in actors. Replaces the hand-written
   `Session.Ops` the guide used to point at.
+- **Refinement predicates can use `/` and `%`** where March's truncating
+  division agrees with the solver's: a non-zero integer-literal divisor over a
+  dividend known to be non-negative, e.g. `{Int | _ >= 0 && _ / 2 < 10}` or
+  `{Int | _ < len(xs) / 2}`. Violations are confirmed with a concrete
+  counterexample like any other; a division outside that fragment is still not
+  checked, and now says why (in a warning at the definition and in the skip
+  detail).
 - **`forge --offline` (or `FORGE_OFFLINE=1`) builds with no network access.**
   The global flag starts no network process of any kind (no `git clone`, no
   registry query or registry-client compile, no toolchain download, no
@@ -127,6 +142,13 @@ git log is authoritative for exact commits.
   ordinary, so `h2` could be ignored with no error. `h2` now takes over `h`'s
   obligation and must be used exactly once, whether `h` is a `linear` parameter
   or a `linear let` local.
+- **Compiled `send_checked` and `is_cap_valid` no longer intermittently accept a cap
+  whose actor was killed.** About one run in five, a cap taken while the actor was
+  alive still validated after `kill`: `is_cap_valid` answered `true` and
+  `send_checked` returned `:ok`, and the message went into freed memory. The
+  interpreter was always right. Both now check the actor's runtime metadata instead
+  of its (possibly freed) record, and `send_checked` returns `:ok` only when the send
+  was actually accepted.
 - **On Linux, `--cap-sandbox` now stops a program without `IO.NetListen` from
   accepting connections.** Holding only `IO.NetConnect` (an HTTP client, say)
   allowed `socket()`, and nothing denied `bind`/`listen`, so such a program
@@ -340,6 +362,25 @@ git log is authoritative for exact commits.
   could overwrite it with `None` and silently drop the value inside, and a record's field
   could be read twice. Both are now errors, as they already were for a field whose own type
   is linear.
+
+### Documentation
+- **The language-reference pages on march-lang.org are now generated from
+  `specs/lang/`, and the two copies have been reconciled.** Each chapter used to exist
+  twice, as independent prose that had drifted both ways, so corrections made in one copy
+  never reached readers of the other. The published pages gain sections that had existed
+  only in the spec, including supervision restart types and graceful stop, the
+  `cap no_panic` division section, and loop/stop session protocols. Several claims that
+  were wrong in one copy or both are corrected:
+  - an unhandled `offer` branch is a compile error, not a warning;
+  - compiled `MPST` programs run;
+  - interface method names can be module-qualified in compiled code;
+  - supervisor backoff doubles from `2 × base`, at most 7 times;
+  - `pmap` stays sequential for a list of exactly the threshold length;
+  - the `opaque type` constructor bypass is closed;
+  - `docs/types.md`'s `parse_int` example now typechecks.
+
+  Edit `specs/lang/`, run `scripts/gen-lang-docs.py`, and commit both. Doc-lint fails on a
+  hand-edited or stale `docs/` chapter.
 
 ### Changed
 - Cluster membership records a node's creation, name and advertised address: a restarted

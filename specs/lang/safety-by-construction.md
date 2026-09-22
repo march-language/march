@@ -11,7 +11,7 @@ permalink: /docs/safety-by-construction/
 
 March's safety features aren't a grab-bag: each one checks a *different,
 orthogonal axis* of correctness, and they compose on the same function. This page
-walks one realistic function through all four layers at once, then maps each
+walks one realistic function through all three layers at once, then maps each
 layer to the exact bug class it eliminates and when.
 
 The example: a **bounded file-chunk reader**. It must (1) only run in code allowed
@@ -30,6 +30,8 @@ mod ChunkReader do
   -- (2) typestate: a linear handle that tracks Open vs Closed
   always_linear type File(s) = File(Int)
 
+  -- `tag` declares a zero-arg type used purely as a state label: Open and
+  -- Closed carry no data, they just fill the `s` slot in `File(s)` above.
   tag Open
   tag Closed
 
@@ -57,7 +59,7 @@ mod ChunkReader do
 end
 ```
 
-Every line of `read_first` is checked against all four layers simultaneously.
+Every line of `read_first` is checked against all three layers simultaneously.
 Now watch what each layer *rejects*.
 
 ### What the capability layer rejects
@@ -80,7 +82,11 @@ let again = read_chunk(f0, 0, 4096)   -- ERROR: `f0` was already consumed
 `f0` after `read_chunk` consumed it is a compile error; so is dropping a handle
 without closing it. And reordering (calling `close` before `read_chunk`, or
 `read_chunk` on a `File(Closed)`) fails because the *state* is in the type:
-`read_chunk` demands `File(Open)`.
+`read_chunk` demands `File(Open)`. `Open` and `Closed` are declared with
+`tag`, March's shorthand for a zero-argument type that exists only to be a
+label; see [Capabilities: `tag`]({{ site.baseurl }}/docs/capabilities/#tag--zero-arg-phantom-label-types)
+for the full typestate picture, including how `transitions` blocks declare
+which functions move a handle between states.
 
 ### What the refinement layer rejects
 
@@ -113,7 +119,7 @@ handle uses.
 
 ---
 
-## The punchline: four orthogonal axes
+## Three orthogonal axes
 
 That's the whole idea. Each layer answers a different question about the same
 call, and a real bug usually lives on exactly one of these axes:
@@ -135,9 +141,16 @@ are the ones that satisfy every axis at once.
 
 - [Capabilities]({{ site.baseurl }}/docs/capabilities/): the `needs` / `Cap(X)`
   system and typestate handles in full.
+- [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/):
+  turning a declared capability set into an OS-level sandbox and a hot-deploy
+  admission gate.
 - [Linear Types]({{ site.baseurl }}/docs/linear-types/): `linear` / `affine`
   ownership and why `always_linear` handles can't be dropped.
+- [Session Types]({{ site.baseurl }}/docs/session-types/): the linearity
+  discipline applied to two-party communication protocols.
 - [Refinement Types]({{ site.baseurl }}/docs/refinement-types/): value
   predicates, the SMT checker, and its definite-failure semantics.
+- [Memory Model]({{ site.baseurl }}/docs/memory-model/): how the same ownership
+  facts drive in-place reuse (FBIP) with no tracing garbage collector.
 - [Type System]({{ site.baseurl }}/docs/types/): the "which safety tool for
   which job" table that indexes all of these.

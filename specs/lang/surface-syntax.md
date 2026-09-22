@@ -332,7 +332,8 @@ fields or pass the value to a measure.
 {v : Tree | size(v) < 100}         -- a @[measure] over a structure
 ```
 
-The predicate fragment is `+ - *` (literal coefficients), the comparisons
+The predicate fragment is `+ - *`, `/ %` (a non-zero literal divisor over a
+dividend known to be non-negative), the comparisons
 `== != < <= > >=`, the connectives `&& || not`, literals, field projection,
 `len`, `is_<Ctor>` testers, and `@[measure]` functions. A predicate may also
 mention **another parameter**, which makes it *relational*:

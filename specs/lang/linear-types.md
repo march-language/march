@@ -11,6 +11,12 @@ permalink: /docs/linear-types/
 
 March's type system tracks ownership through **linear** and **affine** qualifiers. These let the compiler catch resource leaks and use-after-free bugs **at compile time**, not at runtime, and not by relying on a garbage collector.
 
+Think of a **linear** value as a claim ticket: you're given it once, and the
+compiler requires you to hand it in exactly once: not zero times, not twice. An
+**affine** value is a looser cousin: you're allowed to lose it, but you still can't use
+it twice. Both are checked entirely by the compiler, with no runtime cost and no
+runtime tracking.
+
 ---
 
 ## The Problem They Solve
@@ -74,10 +80,10 @@ Linear values must be consumed exactly once — they cannot be copied or ignored
 ```
 
 (Both verified live, 2026-07-10; these are the exact diagnostics; corpus
-witnesses `specs/lang/types/reject/t58` and `t60`. Caveat for the name
-`Handle` specifically: because the stdlib declares `always_linear type
-Handle`, a user type NAMED `Handle` inherits linearity even without the
-`linear` keyword; see "always_linear types" below.)
+witnesses `specs/lang/types/reject/t58` and `t60`.) The stdlib's own
+`Handle` type (`stdlib/handle.march`) is always linear, even without the
+`linear` keyword; a plain type of your own that happens to be called `Handle`
+is not. See [`always_linear` types](#always_linear-types) below.
 
 ### Linear Let Bindings
 
@@ -198,8 +204,13 @@ pattern, and `core-march-types.md` §2.9.1 for the promotion rule.
 
 ## Linearity and Memory
 
+*You don't need this section to use linear types correctly; skip ahead to [Linear
+Types and Actors](#linear-types-and-actors) if you just want the safety picture.*
+
 Linearity isn't only about correctness; it also feeds March's in-place
-memory model. A `linear` value has a single owner by construction, which the
+memory model. Normally the compiler has to track "is anyone else still holding
+onto this value?" before it can safely reuse or drop its memory; a `linear`
+value answers that question for free: it has a single owner by construction, which the
 compiled backend exploits as an **optimization**: the linearity flag on a TIR
 variable (`v_lin`) lets Perceus elide reference-count traffic where uniqueness
 is guaranteed, and a `send` of a linear message compiles to a zero-copy
@@ -213,8 +224,9 @@ These are performance facts, not semantic ones: linearity is
 
 ## Linear Types and Actors
 
-Sending a linear value to an actor **is allowed, and the send is the
-consuming use**:
+If you haven't read [Actors](actors.md) yet, the short version:
+`send(pid, msg)` delivers a message to another actor asynchronously. Sending a
+linear value to an actor **is allowed, and the send is the consuming use**:
 
 ```march
 linear let r : Res = R(7)
@@ -261,6 +273,11 @@ session types on top of the same linearity infrastructure.
 
 ## Session Types
 
+March also uses linearity to enforce **conversation protocols** between two
+parties: a strict two-party "who sends what, in what order" agreement, checked
+at compile time. This is linear types applied to a channel instead of a file
+handle.
+
 Session types use binary typed channels: the two endpoints have **dual** types. If one end sends, the other must receive.
 
 Define a protocol:
@@ -301,19 +318,24 @@ the protocol.
 
 > **What session types catch, and the current enforcement scope:** sending
 > when you should receive, receiving the wrong type, and reusing a consumed
-> `let`-bound endpoint are compile errors. But enforcement runs on the same
-> generic linear tracker described in this chapter, applied to `let`-threaded
-> continuations **in one scope**; two shapes currently slip through
-> (finding F7, `specs/todos/`): reusing a linear *parameter* endpoint at a
-> state that coincidentally still matches, and abandoning an unclosed channel
-> (never calling `Chan.close`) both typecheck and run cleanly today. See
-> `core-march-types.md` §2.7.8 for the precise account, and
-> [Session Types]({{ site.baseurl }}/docs/session-types/) for the full
-> protocol syntax and duality rules.
+> endpoint (a `let`-bound continuation *or* a channel parameter) are compile
+> errors, and so is dropping an endpoint that has reached `End` without
+> calling `Chan.close` (`` Session channel `ch3` reached `End` but was never
+> closed. ``). One shape still slips through (the F7 residual, logged in
+> `specs/todos/`): abandoning a channel *mid*-protocol, before it reaches
+> `End`, typechecks and runs cleanly. An endpoint is tracked as affine plus
+> that must-close-at-`End` rule, not as fully linear. See
+> [Session Types]({{ site.baseurl }}/docs/session-types/) for the full protocol syntax, duality
+> rules and the precise guarantees.
 
 ---
 
 ## Capabilities as Linear Types
+
+*A quick reminder if you haven't read [Capabilities](capabilities.md) yet: a
+`Cap(X)` value is proof that your code is allowed to perform the effect `X`
+(like `Cap(IO.Network)` for opening sockets); it's how March makes permissions
+part of the type system instead of a runtime check.*
 
 `Cap(X)` is, by default, an **ordinary unrestricted type**: `cap_narrow` is
 free and side-effect-free, and a plain `Cap(X)` value can be passed to as
@@ -351,6 +373,9 @@ end
 ---
 
 ## FFI and Native Resources
+
+*This section only matters if you're binding to a C library; skip ahead to
+[Practical Rules](#practical-rules) otherwise.*
 
 There is no `Ptr` type in March, and no `linear Ptr(a)` spelling. The actual
 mechanism for safe manual memory management across the FFI boundary is the
@@ -522,15 +547,15 @@ Many systems have only one kind of linear type. March has both because they solv
 - `affine` ensures you can't **duplicate** something, while allowing graceful abandonment
 
 For example, a session channel is *meant* to be completed; it is linear by
-construction (though note F7 above: the "can't abandon it midway" part is not
-fully enforced today for unclosed channels). An optional permission token
+construction (though note the F7 residual above: an endpoint must be closed
+once it reaches `End`, but abandoning a channel midway is not rejected today). An optional permission token
 might be affine: the operation is valid with or without it.
 
 ---
 
 ## Next Steps
 
-- [Type System](types.md): the broader type system context
+- [Type System](type-system.md): the broader type system context
 - `core-march-types.md` §2.9: the rule-by-rule static-semantics account of everything in this chapter (with `typecheck.ml` citations and the conformance corpus)
 - `core-march.md` §4.12: linearity at runtime (there is none: annotations are compile-time-erased; golden witness `g41`)
 - [Refinement Types](refinement-types.md): the other compile-time safety layer: value predicates checked by an SMT solver

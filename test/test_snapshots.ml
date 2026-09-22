@@ -182,11 +182,11 @@ let dump_post_lower src =
   render_module (Test_helpers.lower_module_typed src)
 
 (* TRMC runs post-lower / pre-mono, exactly as [Contract_pipeline] runs it,
-   and reads [Trmc.enabled] — so these snapshots pin the DEFAULT behaviour and
-   a change to that default shows up here as a diff.  Before this was wired in,
-   the harness skipped the pass entirely and TRMC's emitted shape had no golden
-   coverage at all: flipping the default moved zero snapshot lines, which reads
-   as "nothing changed" when it actually meant "nothing was looking". *)
+   and it always runs — so these snapshots pin TRMC's emitted shape.  Before
+   this was wired in, the harness skipped the pass entirely and TRMC's
+   emitted shape had no golden coverage at all: flipping the default moved
+   zero snapshot lines, which reads as "nothing changed" when it actually
+   meant "nothing was looking". *)
 let dump_post_perceus src =
   March_tir.Defun.set_lambda_counter 0;
   let tir = Test_helpers.lower_module_typed src in

@@ -52,11 +52,18 @@ on:
 # One live run per pull request: a newer push cancels the older run instead of
 # letting both hold runner slots. The org is on GitHub's free plan (20 concurrent
 # Linux jobs, 5 macOS, org-wide) and one run of this workflow alone asks for
-# more than that, so a superseded run is queue time for every other PR. Pushes
-# to main group by run_id, i.e. never cancel: every main commit gets a full run.
+# more than that, so a superseded run is queue time for every other PR.
+#
+# Pushes to main share one group WITHOUT cancel-in-progress. GitHub keeps at
+# most one running plus one pending run per group and cancels the older pending
+# run when a newer one arrives, so: the main run already in flight finishes and
+# gets its verdict, but a burst of merges collapses to a single queued run
+# instead of a dozen each holding ~35 job slots (a 12-merge burst on 2026-09-22
+# left PR jobs queued for 80+ minutes). Intermediate main commits therefore get
+# no CI verdict of their own; the nightly gate already skips cancelled runs.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # The long pole, sharded. One `dune runtest` here took ~36 min on ubuntu
