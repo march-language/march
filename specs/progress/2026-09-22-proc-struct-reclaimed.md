@@ -120,6 +120,15 @@ An instrumented copy of the runtime confirmed each converted path runs on every 
   no ptrace, so no backtrace. The 40 runs since, on the final build, all completed.
   macOS native: 100/100 at 4 schedulers.
 
+**Suites.** `scripts/run-tests.sh` (every alcotest suite, including the z3-backed
+refinement suite) and `dune build @runtest` (the dune-rule tests the script skips). The
+new fixture had to be added to `test/refine_audit/corpus.baseline`, which is what its
+audit sweep covers. One golden, `native_actor_monitor_down_reason`, was SIGKILLed (137)
+at iteration 55 of its 100-run loop **with correct output**, while three other sessions
+were running their own full suites at load average 143. Re-measured at load 11-17,
+alternating with a base-runtime build of the same fixture: **0 of 300 failures on each**.
+That is the documented load artifact, not a finding.
+
 **Retained memory**, compiled `--opt 2`, macOS, peak RSS:
 
 | workload | base | this change |
