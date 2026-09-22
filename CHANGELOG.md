@@ -19,6 +19,25 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **Breaking: every `Stats` function that needs a non-empty list now says so
+  in its signature.** `Stats.median`, `std_dev`, `iqr`, `iqr_default` and
+  `quantile_default` take `{List(Float) | len(_) > 0}` (joining `mean`,
+  `min_val`, `max_val`, `percentile`, `quantile`, `quantiles`, `variance`,
+  `five_number_summary` and `mode`), and `quantile_default`'s `q` is now
+  `{Float | _ >= 0.0 && _ <= 1.0}`, the same as `quantile`'s. Previously these
+  five forwarded to a contracted function without restating the contract, so
+  the checker could not see through them: `Stats.median([])` compiled and
+  panicked at run time. **What breaks:** a call with a provably empty list (or
+  an out-of-range literal `q`) is now a compile error; a function that passes
+  its own unrefined `List(Float)` parameter gets a "propagates a requirement
+  it doesn't declare" warning (an error in a `cap verified` module). **How to
+  migrate:** `march --check --refine-suggest <your_fn> file.march` prints the
+  refinement to declare on your function's parameter
+  (`xs : {List(Float) | len(_) > 0}`), or guard the call with `match xs do
+  Nil -> … _ -> Stats.median(xs) end`, which the checker proves. `sum`,
+  `count`, `variance_pop`, `std_dev_pop` and the `*_safe` variants still
+  accept any list. `DataFrame`'s `Median` aggregation now yields a null value
+  for an empty group instead of reaching `Stats.median` with one.
 - **Tail-recursion-modulo-cons always runs; `--no-trmc` and `--trmc` are
   removed.** Passing either is now the ordinary "unknown option" error. There
   is no supported way to turn TRMC off: the stdlib's list producers are being

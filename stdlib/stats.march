@@ -3,8 +3,14 @@
 -- All functions are pure — no side effects.
 -- Primary input type: List(Float).
 --
--- Functions that require non-empty input panic on empty list.
--- sum and count always succeed (return 0.0 / 0 for empty).
+-- Functions that require non-empty input declare it in their signature as
+-- `{List(Float) | len(_) > 0}` (a refinement the compiler checks at every
+-- call site) and still panic on an empty list as the runtime backstop.
+-- sum, count, variance_pop, std_dev_pop and the *_safe variants accept any
+-- list. To migrate a caller the checker flags, run
+-- `march --check --refine-suggest <caller> file.march`: it proposes the
+-- parameter refinement to restate upward, or guard the call with `match xs do
+-- Nil -> ... _ -> ... end`.
 --
 -- Design: all sorting uses List.sort_by with Float comparison.
 -- Variance uses Welford's online algorithm for numerical stability.
@@ -86,8 +92,12 @@ mod Stats do
     end
   end
 
-  doc "Median (50th percentile). Panics on empty list."
-  fn median(xs : List(Float)) : Float do
+  doc """
+  Median (50th percentile).
+  Precondition: `xs` is non-empty (`{List(Float) | len(_) > 0}`, checked at
+  compile time); panics on an empty list if the checker could not decide it.
+  """
+  fn median(xs : {List(Float) | len(_) > 0}) : Float do
     percentile(xs, 50.0)
   end
 
@@ -265,9 +275,10 @@ mod Stats do
 
   doc """
   Quantile with `Linear` interpolation (Type 7, R/numpy default).
-  Convenience alias for `quantile(xs, q, Linear)`.
+  Convenience alias for `quantile(xs, q, Linear)`, and carries the same
+  preconditions: `xs` is non-empty and `q` is in [0.0, 1.0].
   """
-  fn quantile_default(xs : List(Float), q : Float) : Float do
+  fn quantile_default(xs : {List(Float) | len(_) > 0}, q : {Float | _ >= 0.0 && _ <= 1.0}) : Float do
     quantile(xs, q, Linear)
   end
 
@@ -292,17 +303,21 @@ mod Stats do
   Interquartile range: Q3 − Q1 using the given method.
 
   Uses the same sorted list for both quartiles (one sort, not two).
-  Panics on empty input.
+  Precondition: `xs` is non-empty (`{List(Float) | len(_) > 0}`); panics on
+  empty input.
   """
-  fn iqr(xs : List(Float), method : QuantileMethod) : Float do
+  fn iqr(xs : {List(Float) | len(_) > 0}, method : QuantileMethod) : Float do
     match quantiles(xs, [0.25, 0.75], method) do
     Cons(q1, Cons(q3, Nil)) -> q3 -. q1
     _ -> panic("Stats.iqr: unexpected quantiles result")
     end
   end
 
-  doc "Interquartile range using `Linear` (Type 7) interpolation."
-  fn iqr_default(xs : List(Float)) : Float do
+  doc """
+  Interquartile range using `Linear` (Type 7) interpolation.
+  Precondition: `xs` is non-empty (`{List(Float) | len(_) > 0}`).
+  """
+  fn iqr_default(xs : {List(Float) | len(_) > 0}) : Float do
     iqr(xs, Linear)
   end
 
@@ -316,15 +331,15 @@ mod Stats do
     _ -> do
       let sorted = sort_floats(xs)
       let n = List.length(sorted)
-      let qs = quantiles(sorted, [0.25, 0.5, 0.75], method)
-      match qs do
-      Cons(q1, Cons(q2, Cons(q3, Nil))) -> do
-        let lo = List.nth(sorted, 0)
-        let hi = List.nth(sorted, n - 1)
-        (lo, q1, q2, q3, hi)
-      end
-      _ -> panic("Stats.five_number_summary: unexpected quantiles")
-      end
+      -- Query the already-sorted list directly: `quantiles(sorted, ...)`
+      -- would re-sort it, and `sort_floats` declares no length-preserving
+      -- postcondition, so its non-emptiness could not be proved there.
+      let q1 = quantile_sorted(sorted, n, 0.25, method)
+      let q2 = quantile_sorted(sorted, n, 0.5, method)
+      let q3 = quantile_sorted(sorted, n, 0.75, method)
+      let lo = List.nth(sorted, 0)
+      let hi = List.nth(sorted, n - 1)
+      (lo, q1, q2, q3, hi)
     end
     end
   end
@@ -361,7 +376,8 @@ mod Stats do
   doc """
   Sample variance (denominator n-1).
   Returns 0.0 for a single element.
-  Panics on empty list.
+  Precondition: `xs` is non-empty (`{List(Float) | len(_) > 0}`); panics on an
+  empty list.
 
   Uses Welford's online algorithm for numerical stability on inputs
   where the naive two-pass sum-of-squares would suffer catastrophic
@@ -395,8 +411,12 @@ mod Stats do
     end
   end
 
-  doc "Sample standard deviation. Returns 0.0 for single element. Panics on empty."
-  fn std_dev(xs : List(Float)) : Float do
+  doc """
+  Sample standard deviation. Returns 0.0 for a single element.
+  Precondition: `xs` is non-empty (`{List(Float) | len(_) > 0}`); panics on an
+  empty list.
+  """
+  fn std_dev(xs : {List(Float) | len(_) > 0}) : Float do
     math_sqrt(variance(xs))
   end
 
