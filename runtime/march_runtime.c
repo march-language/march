@@ -8624,9 +8624,9 @@ static inline void *call_closure_2(void *clo, void *a, void *b) {
  * The OS handler `march_signal_dispatch` runs in async-signal context and does
  * ONLY atomic flag stores — no allocation, no March code.  A drain point in
  * the scheduler / HTTP loops calls `march_signal_drain`, which runs the March
- * closure inline on a normal stack (never a guard-paged green-thread stack:
- * we install plain handlers, mirroring http_signal_handler, and the drain runs
- * from the loop body, not the signal handler).
+ * closure inline on a normal stack (the drain runs from the loop body, never
+ * from the signal handler).  The OS handler itself is installed SA_ONSTACK —
+ * see march_install_async_signal for why that is not optional.
  *
  * The code of the preemption signal -- Usr1 (3) unless MARCH_PREEMPT_SIGNAL
  * moved it (march_preempt_signal, march_scheduler.c) -- is RESERVED and cannot
@@ -8657,6 +8657,34 @@ static int march_signal_code_of_os(int sig) {
         case SIGTERM: return 0; case SIGINT: return 1; case SIGHUP: return 2;
         case SIGUSR1: return 3; case SIGUSR2: return 4; default: return -1;
     }
+}
+
+/* Install [handler] for [sig] so the kernel builds its signal frame on the
+ * per-thread alternate stack (SA_ONSTACK), with signal()'s BSD restart
+ * semantics (SA_RESTART).  Used for every runtime handler of a signal that can
+ * arrive while a green thread is running (Signal.watch, the HTTP server's
+ * Term/Int shutdown handler).
+ *
+ * SA_ONSTACK is load-bearing, not a nicety.  A signal delivered on a scheduler
+ * thread lands on whatever stack is current, and that is usually a green
+ * thread's: only MARCH_STACK_INITIAL (4 KiB) of it is committed, the rest is
+ * PROT_NONE and grows lazily through the SIGSEGV handler.  The kernel cannot
+ * take that fault while building the frame, so a frame that does not fit
+ * below SP is fatal: Linux force-sends SIGSEGV with si_code SI_KERNEL (128)
+ * and si_addr 0, which the growth handler rightly reports as "fault outside
+ * its stack".  On linux/aarch64 the rt_sigframe alone is ~4.6 KiB (its
+ * uc_mcontext reserves a full 4096-byte __reserved area), so it can NEVER fit
+ * in a fresh green stack and test/native/signal_watch.march died 40/40 there;
+ * x86_64 and macOS frames are small enough to fit by luck of headroom.
+ * Scheduler threads all have a 64 KiB altstack (setup_alt_stack); a thread
+ * without one simply gets the frame on its current (ordinary) stack. */
+void march_install_async_signal(int sig, void (*handler)(int)) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_ONSTACK | SA_RESTART;
+    sigaction(sig, &sa, NULL);
 }
 
 /* Async-signal-safe: only atomic stores; no alloc, no March code. */
@@ -8756,9 +8784,10 @@ void march_signal_watch(int64_t code, void *clo) {
                                          memory_order_acq_rel);
     if (march_signal_watch_test_hook) march_signal_watch_test_hook(code);
     if (old) march_decrc(old);
-    /* Install a plain handler (no SA_ONSTACK), mirroring http_signal_handler;
-     * overrides any prior Term/Int shutdown handler with the watcher-aware one. */
-    signal(march_signal_os_of_code((int)code), march_signal_dispatch);
+    /* Overrides any prior Term/Int shutdown handler with the watcher-aware
+     * one.  Must be SA_ONSTACK: see march_install_async_signal. */
+    march_install_async_signal(march_signal_os_of_code((int)code),
+                               march_signal_dispatch);
 }
 
 /* Remove a watcher, restoring the signal's default disposition. */
