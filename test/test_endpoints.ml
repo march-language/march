@@ -1485,8 +1485,166 @@ let role_needs_nested = bad "a grant line inside a loop is refused"
   end
 |})
 
+(* ── grants as values (D34): the body type carries the grant ──────────── *)
+
+let rec show_ty (t : ty) : string =
+  match t with
+  | TyCon (c, []) -> c.txt
+  | TyCon (c, args) -> c.txt ^ "(" ^ String.concat ", " (List.map show_ty args) ^ ")"
+  | TyArrow (a, b) -> show_ty a ^ " -> " ^ show_ty b
+  | TyTuple [] -> "()"
+  | TyTuple ts -> "(" ^ String.concat ", " (List.map show_ty ts) ^ ")"
+  | TyVar v -> "'" ^ v.txt
+  | _ -> "?"
+
+(** The declared type of parameter [p] of [f] in generated module [m]. *)
+let param_ty src m f p : string =
+  let mod_ = parse_and_desugar src in
+  let decls =
+    List.find_map (function DMod (nm, _, ds, _) when nm.txt = m -> Some ds | _ -> None) mod_.mod_decls
+    |> Option.get
+  in
+  let fd = List.find_map (function DFn (fd, _) when fd.fn_name.txt = f -> Some fd | _ -> None) decls |> Option.get in
+  let clause = List.hd fd.fn_clauses in
+  List.find_map
+    (function
+      | FPNamed pr when pr.param_name.txt = p -> Option.map show_ty pr.param_ty
+      | _ -> None)
+    clause.fc_params
+  |> Option.get
+
+(** How many `cap_narrow(...)` calls [f] in [m] makes: one per granted cap. *)
+let narrow_count src m f : int =
+  let mod_ = parse_and_desugar src in
+  let decls =
+    List.find_map (function DMod (nm, _, ds, _) when nm.txt = m -> Some ds | _ -> None) mod_.mod_decls
+    |> Option.get
+  in
+  let fd = List.find_map (function DFn (fd, _) when fd.fn_name.txt = f -> Some fd | _ -> None) decls |> Option.get in
+  let n = ref 0 in
+  let rec go (e : expr) =
+    (match e with
+     | EApp (EVar v, _, _) when v.txt = "cap_narrow" -> incr n
+     | _ -> ());
+    match e with
+    | EApp (f, args, _) -> go f; List.iter go args
+    | ELam (_, b, _) -> go b
+    | EBlock (es, _) -> List.iter go es
+    | ELet (b, _) -> go b.bind_expr
+    | ETuple (es, _) | ECon (_, es, _) -> List.iter go es
+    | _ -> ()
+  in
+  go (List.hd fd.fn_clauses).fc_body;
+  !n
+
+let session = "Cap(Session.Live)"
+
+let granted_body_type =
+  Alcotest.test_case "a granted role's body takes one Cap per `needs` path, in order, before the entry state" `Quick
+    (fun () ->
+       let src = wrap stream_granted in
+       Alcotest.(check string) "run_Cons body"
+         (session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> Stream_Cons.S_recv_Msg_Prod_Cons_1 -> Stream_Cons.Yield")
+         (param_ty src "Stream_Run" "run_Cons" "body");
+       Alcotest.(check string) "run_Prod body"
+         (session ^ " -> Cap(IO.Console) -> Stream_Prod.S_send_Msg_Prod_Cons_1 -> Stream_Prod.Yield")
+         (param_ty src "Stream_Run" "run_Prod" "body");
+       (* every front, not only run_ *)
+       List.iter
+         (fun f ->
+            Alcotest.(check string) (f ^ " body")
+              (param_ty src "Stream_Run" "run_Cons" "body") (param_ty src "Stream_Run" f "body"))
+         [ "cluster_Cons"; "offer_Cons"; "initiate_Cons" ];
+       (* the hosted fronts thread the grant through `start` *)
+       Alcotest.(check string) "host_Cons start"
+         (session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> ()") (param_ty src "Stream_Run" "host_Cons" "start");
+       Alcotest.(check string) "host_Cons_or start"
+         (session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> ()") (param_ty src "Stream_Run" "host_Cons_or" "start");
+       Alcotest.(check string) "offer_hosted_Cons start"
+         ("String -> " ^ session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> ()")
+         (param_ty src "Stream_Run" "offer_hosted_Cons" "start");
+       Alcotest.(check string) "cluster_hosted_Cons start"
+         ("String -> " ^ session ^ " -> Cap(IO.Console) -> Cap(IO.FileWrite) -> ()")
+         (param_ty src "Stream_Run" "cluster_hosted_Cons" "start");
+       (* the fronts narrow from `io` once per cap *)
+       Alcotest.(check int) "run_Cons narrows twice" 2 (narrow_count src "Stream_Run" "run_Cons");
+       Alcotest.(check int) "run_Prod narrows once" 1 (narrow_count src "Stream_Run" "run_Prod");
+       Alcotest.(check int) "host_Cons narrows twice" 2 (narrow_count src "Stream_Run" "host_Cons"))
+
+let ungranted_body_type_unchanged =
+  Alcotest.test_case "a role with no `needs` line keeps the two-parameter body type and narrows nothing" `Quick
+    (fun () ->
+       let src = wrap stream in
+       Alcotest.(check string) "run_Cons body"
+         (session ^ " -> Stream_Cons.S_recv_Msg_Prod_Cons_1 -> Stream_Cons.Yield")
+         (param_ty src "Stream_Run" "run_Cons" "body");
+       Alcotest.(check string) "host_Cons start" (session ^ " -> ()") (param_ty src "Stream_Run" "host_Cons" "start");
+       Alcotest.(check string) "offer_hosted_Cons start"
+         ("String -> " ^ session ^ " -> ()") (param_ty src "Stream_Run" "offer_hosted_Cons" "start");
+       Alcotest.(check int) "no narrowing" 0 (narrow_count src "Stream_Run" "run_Cons"))
+
+(* Against the real stdlib (`SessionNode` is not in the thin one): a body
+   written with the grant typechecks at the runner, one written without it
+   does not, and the error names the cap the body did not take. *)
+let granted_cli_src = {|
+mod GOk do
+  needs IO
+  needs IO.Console
+  needs IO.FileWrite
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    role Cons needs IO.Console, IO.FileWrite
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  pfn cons(s : Cap(Session.Live), con : Cap(IO.Console), fw : Cap(IO.FileWrite), st : Stream_Cons.Entry) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+      print_line(int_to_string(n))
+      Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
+  end
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.Entry) : Stream_Prod.Yield do
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, 1)
+    Stream_Prod.offer_more_done(s, st1, fn (_b, st2) -> prod(s, st2), fn (_b, st2) -> Stream_Prod.close(s, st2))
+  end
+  actor Host do
+    state { n : Int }
+    init { n: 0 }
+    on Start(s : Cap(Session.Live), con : Cap(IO.Console), fw : Cap(IO.FileWrite)) do state end
+  end
+  fn main(c : Cap(IO)) do
+    let _ = Stream_Run.run_Cons(c, "n", "s", Stream_Run.addrs_from_env(), fn (s, con, fw, st) -> cons(s, con, fw, st))
+    let _ = Stream_Run.run_Prod(c, "n", "s", Stream_Run.addrs_from_env(), fn (s, st) -> prod(s, st))
+    let h = spawn(Host)
+    let _ = Stream_Run.host_Cons(c, "n", "s", Stream_Run.addrs_from_env(), h,
+      fn (s, con, fw) -> do let _ = send(h, Start(s, con, fw)) () end, fn (_s, _f, _m, _e) -> ())
+    ()
+  end
+end
+|}
+
+let cli_granted_body_ok =
+  Alcotest.test_case "CLI: a body taking the granted caps typechecks at run_/host_" `Quick (fun () ->
+      let rc, out = check_cli granted_cli_src in
+      Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc)
+
+let cli_granted_body_missing_caps =
+  Alcotest.test_case "CLI: a body without the granted caps is refused at the runner" `Quick (fun () ->
+      let src = replace_all ~needle:"fn (s, con, fw, st) -> cons(s, con, fw, st)" ~by:"fn (s, st) -> prod(s, st)" granted_cli_src in
+      let rc, out = check_cli src in
+      Alcotest.(check int) "exit code" 1 rc;
+      Alcotest.(check bool) ("names the cap (output: " ^ out ^ ")") true
+        (contains_text out "got `Cap(IO.Console)`"))
+
 let tests =
   [ stream_shape;
+    granted_body_type; ungranted_body_type_unchanged; cli_granted_body_ok; cli_granted_body_missing_caps;
     grants_not_in_fingerprint; role_needs_ok; role_identifier_ok; role_needs_unknown_cap;
     role_needs_unknown_role; role_needs_twice; role_needs_after_message; role_needs_nested; msg_type_named_after_protocol; two_protocols_distinct_msg_types; two_protocols_ok;
     cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;

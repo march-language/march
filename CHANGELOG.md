@@ -18,7 +18,11 @@ git log is authoritative for exact commits.
   before the first message step and is not part of the protocol's
   fingerprint: a grant is about the role's code, not the wire, so two nodes
   built with different grants still talk. `role` stays an ordinary identifier
-  everywhere else.
+  everywhere else. The grant is a value (D34): a granted role's body takes one
+  `Cap(P)` per path, in order, after `Cap(Session.Live)` and before its entry
+  state, every `<P>_Run` front narrows them from its `io` and passes them, and
+  a hosted role receives them through `start`. A role with no grant line is
+  unchanged.
 - **A targeted diagnostic for `fn (a, b) -> …` used as a callback over a
   tuple.** `fn (a, b) -> …` is a two-parameter (curried) lambda, not a lambda
   that destructures a pair, so `List.map(pairs, fn (k, v) -> v)` was wrong in a

@@ -247,6 +247,48 @@ says why it did not.
 
 `<P>_Run.error_message(e)` turns any `RunError` into a line that names the roles.
 
+## Per-role grants
+
+A protocol's grant lines (see [Writing a protocol](#writing-a-protocol)) become parameters
+of the role's body. For
+
+```march
+@[endpoints]
+protocol Checkout do
+  role Ledger needs IO.FileWrite, IO.NetConnect
+  ...
+end
+```
+
+the body `run_Ledger` and every other front takes is
+
+```march
+(Cap(Session.Live), Cap(IO.FileWrite), Cap(IO.NetConnect), Checkout_Ledger.Entry) -> Checkout_Ledger.Yield
+```
+
+one capability per path, in the order the line lists them, after the session and before
+the entry state. The runner narrows them from the `Cap(IO)` it was given and passes them,
+so a body is written as
+
+```march
+pfn ledger(s : Cap(Session.Live), fw : Cap(IO.FileWrite), nc : Cap(IO.NetConnect), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
+  ...
+end
+
+Checkout_Run.run_Ledger(c, "ledger-1", secret, addrs, fn (s, fw, nc, st) -> ledger(s, fw, nc, st))
+```
+
+and a body with a different parameter list does not compile against the runner. For a role
+hosted in an actor, the grant arrives through `start`: `start(s, fw, nc)`, or
+`start(sid, s, fw, nc)` for the many-session fronts. A role with no grant line keeps the
+plain `(s, st)` body.
+
+Because the grant is a value, the composition root is explicit from `main` to every role,
+and a test can hand a body any dictionary it likes in place of the runner's (the
+[Capabilities]({{ site.baseurl }}/docs/capabilities/) page, "Mocking an IO capability in
+tests"). It is also checked: what a body reaches must fit under its grant, as described
+next.
+
 ## Telling the nodes where to find each other
 
 Every pair of roles that exchange a message needs a connection, and one side of each pair
