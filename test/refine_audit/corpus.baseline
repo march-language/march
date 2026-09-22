@@ -90,6 +90,8 @@ native_cluster_accept_silent_peer: coverage audit (user + stdlib): 114 enforced,
 native_cluster_accept_silent_peer: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_compare_builtins: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_compare_builtins: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_config_typed_keys: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_config_typed_keys: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_control_channel_loopback: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_control_channel_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_credit_backpressure_loopback: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
