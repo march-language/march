@@ -1,0 +1,41 @@
+-- EXPECT-ERROR: but the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body: body → cons → save)
+-- Per-role grants (distributed-deploys step 4, 2026-09-22): `Cons` is granted
+-- the console only, and its body reaches `file_write` through `save`.  The
+-- TYPE cannot catch this -- `save` takes no capability value; `needs
+-- IO.FileWrite` covers the ambient call -- so the walk does, from the body
+-- passed to the runner, and names the chain.  Accept twin: `accept/t291`.
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.FileWrite
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    role Cons needs IO.Console
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  pfn save(n : Int) : () do
+    let _ = file_write("/tmp/n", int_to_string(n))
+    ()
+  end
+
+  pfn cons(s : Cap(Session.Live), con : Cap(IO.Console), st : Stream_Cons.Entry) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+      save(n)
+      Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
+  end
+
+  fn main(c : Cap(IO)) do
+    let _ = Stream_Run.run_Cons(c, "cons", "secret", Stream_Run.addrs_from_env(),
+      fn (s, con, st) -> cons(s, con, st))
+    ()
+  end
+end

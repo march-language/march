@@ -22,7 +22,13 @@ git log is authoritative for exact commits.
   `Cap(P)` per path, in order, after `Cap(Session.Live)` and before its entry
   state, every `<P>_Run` front narrows them from its `io` and passes them, and
   a hosted role receives them through `start`. A role with no grant line is
-  unchanged.
+  unchanged. The grant is checked: at every call of a runner front, everything
+  the callback reaches (helpers, values, spawned or hosted actors) must sit
+  under the role's grant, reported with the chain from the body, as `main`'s
+  grant is; and a role's grant must fit within `main`'s.
+  `march --dump-role-authority` prints, per runner call, what the role's code
+  reaches and the functions and actors it holds references to, with their
+  capabilities: the effective-authority report, a report rather than a check.
 - **A targeted diagnostic for `fn (a, b) -> …` used as a callback over a
   tuple.** `fn (a, b) -> …` is a two-parameter (curried) lambda, not a lambda
   that destructures a pair, so `List.map(pairs, fn (k, v) -> v)` was wrong in a

@@ -6811,10 +6811,15 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
 let render_cap_chain (chain : string list) : string =
   String.concat " \xe2\x86\x92 " chain
 
-let cap_reach_chain (env : env) ~(from : string) ~(cap : string)
+let cap_reach_chain ?own_caps ?fn_refs (env : env) ~(from : string) ~(cap : string)
   : string list option =
+  (* [own_caps]/[fn_refs] let [check_role_grants] search a COPY of the tables
+     that carries its synthetic per-callback roots; the default is the env's
+     own tables, exactly as before. *)
+  let own_caps = Option.value ~default:env.own_cap_closures own_caps in
+  let fn_refs = Option.value ~default:env.fn_refs fn_refs in
   let holds k =
-    match Hashtbl.find_opt env.own_cap_closures k with
+    match Hashtbl.find_opt own_caps k with
     | Some own -> List.mem cap own
     | None -> false
   in
@@ -6837,12 +6842,12 @@ let cap_reach_chain (env : env) ~(from : string) ~(cap : string)
         List.iter
           (fun r ->
              let known n =
-               Hashtbl.mem env.own_cap_closures n || Hashtbl.mem env.fn_refs n
+               Hashtbl.mem own_caps n || Hashtbl.mem fn_refs n
              in
              if known r then Queue.push (r, path) queue;
              let q = prefix ^ r in
              if q <> r && known q then Queue.push (q, path) queue)
-          (Option.value ~default:[] (Hashtbl.find_opt env.fn_refs k))
+          (Option.value ~default:[] (Hashtbl.find_opt fn_refs k))
     end
   done;
   !result
@@ -7052,6 +7057,412 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                  | _ -> "")
                 c c param_hint))
       (List.sort_uniq String.compare closure)
+
+(* ── Per-role grants: the same walk from more roots (distributed-deploys
+   plan, section 2 and II.2; build step 4) ─────────────────────────────────
+
+   `role R needs IO.X` (`env.role_grants`) bounds the role's CODE the way
+   `main`'s parameters bound the program: every capability the role's body
+   reaches must sit under the grant.  Two lines of defence, of which this is
+   the second:
+
+   1. The TYPE.  The generator makes the grant the body's own signature
+      (D34): a granted body takes `Cap(IO.X)`, not `Cap(IO)`, and `Cap` is an
+      ordinary type constructor, so handing that value to anything typed
+      `Cap(IO)` is a type error before this check runs.  G2 measured this
+      (specs/progress/2026-09-22-cap-narrowed-signature-grant-test.md):
+      amplifying a narrowed capability is refused by the checker, and the
+      plan's assumption that `Cap` types unify across the lattice is wrong.
+   2. The WALK, here.  A body that never touches its `Cap` parameter can
+      still reach `file_write` ambiently through any helper, because
+      builtins take no capability value; the reach of the body's code is
+      what this bounds.
+
+   Roots (II.2, "find the roots"): every call to a runner front of a role
+   with a grant -- `<P>_Run.run_R`, `cluster_R`, `offer_R`, `initiate_R`
+   (the `body` argument), `host_R`, `host_R_or`, `offer_hosted_R`,
+   `cluster_hosted_R` (the `start`, `deliver` and `cancel` callbacks, and the
+   actor behind `host` when it is `spawn(A)` or a variable bound to one in
+   the same function).  Each callback gets a SYNTHETIC row key whose own
+   caps are the builtins its body calls and whose refs are its free
+   variables (what [record_fn_refs] records for a lambda), solved by the
+   same [Cap_rows.solve] over a copy of the tables; a named function passed
+   as the body is one free variable, so its whole row flows in.  The key
+   carries the calling function's module prefix so the solver's
+   owner-prefix-first resolution reads bare references the way the
+   calling code did, and it uses characters no identifier can
+   (`role@Stream_Run/run_Cons:12:5`) so it cannot shadow a real function.
+
+   Charged the way `main` charges: spawned actors through their name node
+   (so a hosted actor's handlers count), non-IO roots skipped, `unknown`
+   ignored (the program is closed; see [check_main_grant]).  Delegation
+   (D1/D14) is not a violation: messaging a pid the body was handed, or
+   calling a closure it received, is charged to whoever created it.  That is
+   what the effective-authority REPORT (`--dump-role-authority`) exists to
+   show, and it is a report, not a check.
+
+   Not run by the REPL path, like [check_main_grant]. *)
+
+let dump_role_authority : bool ref = ref false
+
+(* `main`'s declared grant, as [check_main_grant] reads it: [Some (caps,
+   span)] when there is a `main`, its caps possibly empty. *)
+let main_grant_of_decls (decls : Ast.decl list) : (string list * Ast.span) option =
+  List.find_map
+    (function
+      | Ast.DFn (def, _) when def.Ast.fn_name.txt = "main" -> (
+        match def.Ast.fn_clauses with
+        | clause :: _ ->
+          let grants =
+            List.concat_map
+              (function
+                | Ast.FPNamed p | Ast.FPDefault (p, _) -> (
+                  match p.Ast.param_ty with
+                  | Some ty -> March_caps.Cap_surface_ty.caps_in_ty ty
+                  | None -> [])
+                | Ast.FPPat _ -> [])
+              clause.Ast.fc_params
+          in
+          Some (List.sort_uniq String.compare grants, clause.Ast.fc_params_span)
+        | [] -> None)
+      | _ -> None)
+    decls
+
+(* Visit every sub-expression.  Exhaustive on purpose (no wildcard): a new
+   expression form must be placed here, not silently skipped. *)
+let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) : unit =
+  f e;
+  let go = iter_expr f in
+  match e with
+  | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> ()
+  | Ast.EDbg (Some inner, _) -> go inner
+  | Ast.EApp (h, args, _) -> go h; List.iter go args
+  | Ast.EPipe (l, r, _) -> go l; go r
+  | Ast.ECon (_, args, _) | Ast.EAtom (_, args, _) | Ast.ETuple (args, _) -> List.iter go args
+  | Ast.ELam (_, body, _) -> go body
+  | Ast.EBlock (es, _) -> List.iter go es
+  | Ast.ELet (b, _) -> go b.Ast.bind_expr
+  | Ast.EMatch (scrut, branches, _) ->
+    go scrut;
+    List.iter (fun (br : Ast.branch) -> Option.iter go br.Ast.branch_guard; go br.Ast.branch_body) branches
+  | Ast.ERecord (fields, _) -> List.iter (fun (_, ex) -> go ex) fields
+  | Ast.ERecordUpdate (base, fields, _) -> go base; List.iter (fun (_, ex) -> go ex) fields
+  | Ast.EField (ex, _, _) -> go ex
+  | Ast.EIf (c, t, e, _) -> go c; go t; go e
+  | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
+  | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) -> go ex
+  | Ast.ESend (a, b, _) -> go a; go b
+  | Ast.ELetFn (_, _, _, body, _) -> go body
+  | Ast.ELetQ (_, r, k, _) | Ast.ELetStar (_, r, k, _) -> go r; go k
+
+type role_root = {
+  rr_proto : string;
+  rr_role : string;
+  rr_grant : string list;
+  rr_front : string;  (** the runner front as the call spells it, `Stream_Run.run_Cons` *)
+  rr_what : string;  (** `body`, `start`, `deliver`, `cancel` *)
+  rr_owner : string;  (** the function whose body makes the call *)
+  rr_expr : Ast.expr;  (** the callback expression *)
+  rr_span : Ast.span;
+  rr_host : string option;  (** the actor behind a hosted front's `host`, when resolvable *)
+}
+
+(* The runner front a called name is, if any: (protocol, role, callback
+   positions).  A hosted front's callbacks start at [start]; a body front's
+   is the last argument ([-1]). *)
+let role_front_of (name : string) : (string * string * [ `Body | `Hosted of int ]) option =
+  match String.rindex_opt name '.' with
+  | None -> None
+  | Some i ->
+    let modpath = String.sub name 0 i and fn = String.sub name (i + 1) (String.length name - i - 1) in
+    let modname =
+      match String.rindex_opt modpath '.' with
+      | Some j -> String.sub modpath (j + 1) (String.length modpath - j - 1)
+      | None -> modpath
+    in
+    let ml = String.length modname in
+    if ml <= 4 || String.sub modname (ml - 4) 4 <> "_Run" then None
+    else
+      let proto = String.sub modname 0 (ml - 4) in
+      let strip prefix =
+        let pl = String.length prefix in
+        if String.length fn > pl && String.sub fn 0 pl = prefix then Some (String.sub fn pl (String.length fn - pl))
+        else None
+      in
+      let strip_or r =
+        let rl = String.length r in
+        if rl > 3 && String.sub r (rl - 3) 3 = "_or" then String.sub r 0 (rl - 3) else r
+      in
+      (* longer prefixes first *)
+      match strip "offer_hosted_" with
+      | Some r -> Some (proto, r, `Hosted 4)
+      | None -> (
+        match strip "cluster_hosted_" with
+        | Some r -> Some (proto, r, `Hosted 4)
+        | None -> (
+          match strip "host_" with
+          | Some r -> Some (proto, strip_or r, `Hosted 5)
+          | None -> (
+            match List.find_map strip [ "run_"; "cluster_"; "offer_"; "initiate_" ] with
+            | Some r -> Some (proto, r, `Body)
+            | None -> None)))
+
+let find_role_roots (env : env) : role_root list =
+  let roots = ref [] in
+  Hashtbl.iter
+    (fun owner bodies ->
+       List.iter
+         (fun (_params, body) ->
+            (* `let h = spawn(A)` in this body, for a hosted front's `host`. *)
+            let spawned_by_var : (string, string) Hashtbl.t = Hashtbl.create 4 in
+            iter_expr
+              (function
+                | Ast.ELet ({ bind_pat = Ast.PatVar v; bind_expr; _ }, _) -> (
+                  match March_ast.Calls.spawned_actor_names [] bind_expr with
+                  | a :: _ -> Hashtbl.replace spawned_by_var v.Ast.txt a
+                  | [] -> ())
+                | _ -> ())
+              body;
+            let host_of (e : Ast.expr) =
+              match March_ast.Calls.spawned_actor_names [] e with
+              | a :: _ -> Some a
+              | [] -> (match e with Ast.EVar v -> Hashtbl.find_opt spawned_by_var v.Ast.txt | _ -> None)
+            in
+            iter_expr
+              (function
+                | Ast.EApp (Ast.EVar f, args, _) -> (
+                  match role_front_of f.Ast.txt with
+                  | None -> ()
+                  | Some (proto, role, kind) -> (
+                    match Hashtbl.find_opt env.role_grants (proto, role) with
+                    | None -> ()
+                    | Some (grant, _) ->
+                      let root what host e =
+                        roots :=
+                          { rr_proto = proto; rr_role = role; rr_grant = grant; rr_front = f.Ast.txt;
+                            rr_what = what; rr_owner = owner; rr_expr = e; rr_span = span_of_expr e;
+                            rr_host = host }
+                          :: !roots
+                      in
+                      let nth i = List.nth_opt args i in
+                      (match kind with
+                       | `Body -> (
+                         match List.rev args with
+                         | e :: _ -> root "body" None e
+                         | [] -> ())
+                       | `Hosted start ->
+                         let host = Option.bind (nth (start - 1)) host_of in
+                         List.iteri
+                           (fun j what -> Option.iter (root what host) (nth (start + j)))
+                           [ "start"; "deliver"; "cancel" ])))
+                | _ -> ())
+              body)
+         bodies)
+    env.fn_row_bodies;
+  List.rev !roots
+
+let check_role_grants (env : env) (decls : Ast.decl list) : unit =
+  if Hashtbl.length env.role_grants = 0 then ()
+  else begin
+    (* 4. Every role's grant fits within `main`'s (section 2, "Relation to
+       `main`").  Only IO-lattice caps are compared, as [check_main_grant]
+       compares; a module without a `main` (a library) is bounded by whoever
+       links it. *)
+    (match main_grant_of_decls decls with
+     | None -> ()
+     | Some (main_grants, _) ->
+       Hashtbl.iter
+         (fun (proto, role) (caps, sp) ->
+            List.iter
+              (fun c ->
+                 if not (cap_subsumes "IO" c) then ()
+                 else if List.exists (fun g -> cap_subsumes g c) main_grants then ()
+                 else
+                   let show_main =
+                     match main_grants with
+                     | [] -> "nothing (`main` has no capability parameter)"
+                     | gs -> String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) gs)
+                   in
+                   let leaf =
+                     match String.rindex_opt c '.' with
+                     | Some i -> String.sub c (i + 1) (String.length c - i - 1)
+                     | None -> c
+                   in
+                   Err.error env.errors ~span:sp
+                     (Printf.sprintf
+                        "Protocol `%s`: `role %s needs %s` is wider than `main`'s grant, which is %s. \
+                         A role's grant must fit within the program's: the runner narrows the role's \
+                         capabilities from what `main` holds.\n\
+                         help: add a `Cap(%s)` parameter to `main` (e.g. `_cap_%s : Cap(%s)`), or take \
+                         `%s` out of the role's grant."
+                        proto role c show_main c (String.lowercase_ascii leaf) c c))
+              caps)
+         env.role_grants);
+    let roots = find_role_roots env in
+    if roots = [] then ()
+    else begin
+      let own = Hashtbl.copy env.own_cap_closures in
+      let refs = Hashtbl.copy env.fn_refs in
+      (* A builtin called directly in the callback body, unless a user
+         function of that name shadows it (recorded under its bare key). *)
+      let cap_of_call name =
+        if Hashtbl.mem env.own_cap_closures name then None
+        else List.assoc_opt name builtin_cap_table
+      in
+      let key_of (r : role_root) =
+        let prefix =
+          match String.rindex_opt r.rr_owner '.' with
+          | Some i -> String.sub r.rr_owner 0 (i + 1)
+          | None -> ""
+        in
+        Printf.sprintf "%srole@%s/%s:%d:%d" prefix
+          (String.map (fun ch -> if ch = '.' then '/' else ch) r.rr_front)
+          r.rr_what r.rr_span.Ast.start_line r.rr_span.Ast.start_col
+      in
+      let keyed = List.map (fun r -> (key_of r, r)) roots in
+      List.iter
+        (fun (k, r) ->
+           let bound, body =
+             match r.rr_expr with
+             | Ast.ELam (ps, b, _) -> (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps, b)
+             | e -> ([], e)
+           in
+           let own_caps =
+             List.filter_map (fun (call_name, _) -> cap_of_call call_name) (March_ast.Calls.names_and_name_spans body)
+           in
+           let rs =
+             free_vars_expr bound body @ March_ast.Calls.spawned_actor_names [] body
+             @ Option.to_list r.rr_host
+           in
+           Hashtbl.replace own k (March_caps.Cap_lattice.normalize own_caps);
+           Hashtbl.replace refs k (List.sort_uniq compare rs))
+        keyed;
+      let rows =
+        March_caps.Cap_rows.solve ~with_rows:false ~own_caps:own ~refs ~seeds:(Hashtbl.create 1) ()
+      in
+      let caps_of k = match Hashtbl.find_opt rows k with Some (row : March_caps.Cap_rows.row) -> row.caps | None -> [] in
+      let label (r : role_root) = Printf.sprintf "the %s passed to `%s`" r.rr_what r.rr_front in
+      List.iter
+        (fun (k, r) ->
+           let covered c = List.exists (fun g -> cap_subsumes g c) r.rr_grant in
+           let show_grant =
+             String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) r.rr_grant)
+           in
+           List.iter
+             (fun c ->
+                if not (cap_subsumes "IO" c) || covered c then ()
+                else
+                  let chain =
+                    match cap_reach_chain ~own_caps:own ~fn_refs:refs env ~from:k ~cap:c with
+                    | Some (_ :: _ as chain) ->
+                      Printf.sprintf " (reached from the %s: %s)" r.rr_what
+                        (render_cap_chain (r.rr_what :: chain))
+                    | _ -> ""
+                  in
+                  Err.error env.errors ~span:r.rr_span
+                    (Printf.sprintf
+                       "Role `%s.%s` is granted %s (`role %s needs %s`), but %s reaches `%s`%s. \
+                        A role's grant bounds everything its code reaches, as `main`'s grant bounds \
+                        the program.\n\
+                        help: add `%s` to `role %s needs ...` in protocol `%s`, or remove the use."
+                       r.rr_proto r.rr_role show_grant r.rr_role (String.concat ", " r.rr_grant)
+                       (label r) c chain c r.rr_role r.rr_proto))
+             (List.sort_uniq String.compare (caps_of k)))
+        keyed;
+      (* ── the effective-authority report ─────────────────────────────────
+         What the grant does NOT bound, made visible: for each root, the
+         functions its reachable code references as VALUES (closures it may
+         hand on or receive back) and the actors it spawns or hosts, each
+         with the capabilities behind it.  Under D1/D14 those are delegated
+         authority, charged to their creator; a reader of `role Cons needs
+         IO.Console` would otherwise take the narrow grant for narrow
+         authority. *)
+      if !dump_role_authority then begin
+        let resolve owner r =
+          let qualified =
+            match String.rindex_opt owner '.' with
+            | Some i -> String.sub owner 0 i ^ "." ^ r
+            | None -> r
+          in
+          if Hashtbl.mem rows qualified then Some qualified
+          else if Hashtbl.mem rows r then Some r
+          else None
+        in
+        let show_caps = function [] -> "nothing" | cs -> String.concat ", " cs in
+        List.iter
+          (fun (k, r) ->
+             (* reachable keys, BFS over the solved refs *)
+             let seen = Hashtbl.create 32 in
+             let queue = Queue.create () in
+             Queue.push k queue;
+             while not (Queue.is_empty queue) do
+               let x = Queue.pop queue in
+               if not (Hashtbl.mem seen x) then begin
+                 Hashtbl.replace seen x ();
+                 List.iter
+                   (fun d -> match resolve x d with Some key -> Queue.push key queue | None -> ())
+                   (Option.value ~default:[] (Hashtbl.find_opt refs x))
+               end
+             done;
+             let values = ref [] and actors = ref [] in
+             let note_body owner bound body =
+               let called = List.map fst (March_ast.Calls.names_and_name_spans body) in
+               List.iter
+                 (fun v ->
+                    if not (List.mem v called) then
+                      match resolve owner v with
+                      | Some key when key <> k && not (List.mem_assoc key !values) ->
+                        values := (key, caps_of key) :: !values
+                      | _ -> ())
+                 (free_vars_expr bound body);
+               List.iter
+                 (fun a ->
+                    match resolve owner a with
+                    | Some key when not (List.mem_assoc key !actors) -> actors := (key, caps_of key) :: !actors
+                    | _ -> ())
+                 (March_ast.Calls.spawned_actor_names [] body)
+             in
+             Hashtbl.iter
+               (fun x () ->
+                  if x = k then
+                    let bound, body =
+                      match r.rr_expr with
+                      | Ast.ELam (ps, b, _) -> (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps, b)
+                      | e -> ([], e)
+                    in
+                    note_body r.rr_owner bound body
+                  else
+                    List.iter
+                      (fun (bound, body) -> note_body x bound body)
+                      (Option.value ~default:[] (Hashtbl.find_opt env.fn_row_bodies x)))
+               seen;
+             Option.iter
+               (fun a ->
+                  match resolve r.rr_owner a with
+                  | Some key when not (List.mem_assoc key !actors) -> actors := (key, caps_of key) :: !actors
+                  | _ -> ())
+               r.rr_host;
+             let sorted xs = List.sort (fun (a, _) (b, _) -> String.compare a b) xs in
+             Printf.printf "role authority: %s.%s\n" r.rr_proto r.rr_role;
+             Printf.printf "  grant: %s\n" (show_caps r.rr_grant);
+             Printf.printf "  root: %s, in `%s` (%s:%d)\n" (label r) r.rr_owner r.rr_span.Ast.file
+               r.rr_span.Ast.start_line;
+             (* the IO lattice only, as the check itself judges: proof caps
+                such as `Session.Live` are not authority the grant bounds *)
+             Printf.printf "  reaches: %s\n"
+               (show_caps (List.filter (cap_subsumes "IO") (List.sort_uniq String.compare (caps_of k))));
+             Printf.printf "  values: %s\n"
+               (match sorted !values with
+                | [] -> "none"
+                | vs -> String.concat ", " (List.map (fun (v, cs) -> Printf.sprintf "%s -> %s" v (show_caps cs)) vs));
+             Printf.printf "  actors: %s\n"
+               (match sorted !actors with
+                | [] -> "none"
+                | xs -> String.concat ", " (List.map (fun (a, cs) -> Printf.sprintf "%s -> %s" a (show_caps cs)) xs)))
+          keyed
+      end
+    end
+  end
 
 (* ── R1 stage C: per-function grants — REMOVED 2026-08-13 ──────────────────
    Formerly specs/2026-08-10-r1-stage-c-effect-rows-design.md; the removal is
@@ -7653,6 +8064,10 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   let cap_rows = fn_capability_rows_tbl ~with_rows:false final_env in
   dump_cap_rows final_env;
   check_main_grant ~rows:cap_rows final_env m.Ast.mod_decls;
+  (* Per-role grants: the same walk from each runner-entry callback, bounded
+     by `role R needs ...` (distributed-deploys step 4).  No-op for a
+     program with no grant line. *)
+  check_role_grants final_env m.Ast.mod_decls;
   (* The `--check`-side capability ceiling (opt-in via [cap_strict_ceiling],
      set by the driver on the `--check`/`--check-json` path). Build a
      module -> diagnostic-span map: each module's first [DNeeds] span, or its

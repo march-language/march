@@ -286,8 +286,45 @@ plain `(s, st)` body.
 Because the grant is a value, the composition root is explicit from `main` to every role,
 and a test can hand a body any dictionary it likes in place of the runner's (the
 [Capabilities]({{ site.baseurl }}/docs/capabilities/) page, "Mocking an IO capability in
-tests"). It is also checked: what a body reaches must fit under its grant, as described
-next.
+tests"). It is also checked: what a body reaches must fit under its grant.
+
+### What the grant checks
+
+Two things stop a role from doing more than its line says. The first is the type: a
+granted body holds `Cap(IO.FileWrite)`, not `Cap(IO)`, and `Cap(IO.FileWrite)` does not
+unify with `Cap(IO)`, so it cannot hand its capability to anything that wants the wider
+one. The second is a walk, because a body that never touches its capability value can
+still call `file_write` through any helper. At every call of a runner front the compiler
+walks everything the callback reaches (helpers, functions passed as values, actors it
+spawns; for a hosted role, `start`, `deliver`, `cancel` and the actor behind `host`) and
+requires every capability in that reach to sit under the role's grant, exactly as
+`main`'s grant bounds the program:
+
+```
+Role `Stream.Cons` is granted `Cap(IO.Console)` (`role Cons needs IO.Console`), but the
+body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body:
+body → cons → save). A role's grant bounds everything its code reaches, as `main`'s
+grant bounds the program.
+help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.
+```
+
+A role's grant must also fit within `main`'s: the runner narrows the role's capabilities
+from what `main` holds, so `role Cons needs IO.FileWrite` under `fn main(c :
+Cap(IO.Console))` is an error at the grant line.
+
+The grant bounds the role's *code*, not its *authority*. A body handed a pid to an actor
+with wider capabilities can message it, and a closure it receives can do whatever its
+creator could; both are delegation, charged to whoever created the reference, and the
+walk does not refuse them. So the compiler can also show what a role can reach that way:
+
+```bash
+march --dump-role-authority app.march
+```
+
+prints, per runner call, the role's grant, what its code reaches, the functions it
+references as values and the actors it spawns or hosts, each with the capabilities behind
+it. It is a report, not a check; it exists so that a narrow grant is never mistaken for
+narrow authority.
 
 ## Telling the nodes where to find each other
 

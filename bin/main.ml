@@ -1993,6 +1993,7 @@ let compile filename =
      `--no-cap-strict` for parity. *)
   March_typecheck.Typecheck.cap_strict_ceiling :=
     !cap_strict && (!do_check || !check_json || !emit_core_ast_file <> None);
+  March_typecheck.Typecheck.dump_role_authority := !dump_role_authority;
   (* This pipeline runs [Panic_surface_by_proof] below, so the typechecker's
      syntactic ban must leave the contracted names to it.  Set BEFORE
      [check_module_full] — the flag is read during that call.  [run_check_cmd]
@@ -4490,6 +4491,8 @@ let () =
   let prog_args = ref None in
   let specs = [
     ("--dump-tir",     Arg.Set dump_tir,     " Print TIR instead of evaluating");
+    ("--dump-role-authority", Arg.Set dump_role_authority,
+     " Typecheck and print the effective-authority report per granted protocol role (implies --check)");
     ("--dump-phases",  Arg.Set dump_phases,  " Serialize each IR stage to march-phases/phases.json");
     ("--timings",      Arg.Set do_timings,   " Print per-stage compilation times to stderr");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
@@ -4572,6 +4575,8 @@ let () =
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   (* --target js implies --compile (skip JIT, emit .mjs) *)
   if !target_str = "js" || !target_str = "javascript" then do_compile := true;
+  (* --dump-role-authority is a report the typechecker prints; nothing runs. *)
+  if !dump_role_authority then do_check := true;
   (* Propagate --pmap-threshold to the interpreter (codegen reads it via
      emit_module's ~pmap_threshold argument below). *)
   (* --emit-io-ops regenerates stdlib/io_ops.march from builtin_cap_table; the

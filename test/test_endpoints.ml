@@ -929,7 +929,7 @@ let compiler_exe =
   let exe_dir = Filename.dirname Sys.executable_name in
   Filename.concat exe_dir "../bin/main.exe"
 
-let check_cli src_text =
+let check_cli ?(flags = "--check") src_text =
   if not (Sys.file_exists compiler_exe) then Alcotest.failf "compiler not found at %s" compiler_exe;
   let src = Filename.temp_file "endpoints_cli" ".march" in
   let oc = open_out src in
@@ -938,7 +938,7 @@ let check_cli src_text =
   let out = Filename.temp_file "endpoints_cli" ".out" in
   let rc =
     Sys.command
-      (Printf.sprintf "%s --check %s > %s 2>&1" (Filename.quote compiler_exe) (Filename.quote src) (Filename.quote out))
+      (Printf.sprintf "%s %s %s > %s 2>&1" (Filename.quote compiler_exe) flags (Filename.quote src) (Filename.quote out))
   in
   let ic = open_in out in
   let text = really_input_string ic (in_channel_length ic) in
@@ -1642,8 +1642,164 @@ let cli_granted_body_missing_caps =
       Alcotest.(check bool) ("names the cap (output: " ^ out ^ ")") true
         (contains_text out "got `Cap(IO.Console)`"))
 
+(* ── check_role_grants: the walk from each runner callback ────────────── *)
+
+(* `Cons` is granted the console only; `save` writes a file ambiently (no
+   capability value changes hands, `needs` covers it), so the TYPE cannot
+   catch it and the walk must: the chain names how the body reaches it. *)
+let violation_src = {|
+mod GBad do
+  needs IO
+  needs IO.Console
+  needs IO.FileWrite
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    role Cons needs IO.Console
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  pfn save(n : Int) : () do
+    let _ = file_write("/tmp/n", int_to_string(n))
+    ()
+  end
+  pfn cons(s : Cap(Session.Live), con : Cap(IO.Console), st : Stream_Cons.Entry) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+      save(n)
+      Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
+  end
+  fn main(c : Cap(IO)) do
+    let _ = Stream_Run.run_Cons(c, "n", "s", Stream_Run.addrs_from_env(), fn (s, con, st) -> cons(s, con, st))
+    ()
+  end
+end
+|}
+
+let cli_role_grant_violation =
+  Alcotest.test_case "CLI: a body reaching a capability outside its role's grant is refused, with the chain" `Quick
+    (fun () ->
+       let rc, out = check_cli violation_src in
+       Alcotest.(check int) "exit code" 1 rc;
+       Alcotest.(check bool) ("names the role, the cap and the chain (output: " ^ out ^ ")") true
+         (contains_text out "Role `Stream.Cons` is granted `Cap(IO.Console)`"
+          && contains_text out "reaches `IO.FileWrite`"
+          && contains_text out "body → cons → save"))
+
+let cli_role_grant_named_body =
+  Alcotest.test_case "CLI: a named function passed as the body is walked too" `Quick (fun () ->
+      let src = replace_all ~needle:"fn (s, con, st) -> cons(s, con, st)" ~by:"cons" violation_src in
+      let rc, out = check_cli src in
+      Alcotest.(check int) "exit code" 1 rc;
+      Alcotest.(check bool) ("chain through cons (output: " ^ out ^ ")") true
+        (contains_text out "body → cons → save"))
+
+let cli_role_grant_widened_ok =
+  Alcotest.test_case "CLI: widening the role's grant to what it reaches accepts the program" `Quick (fun () ->
+      let src = replace_all ~needle:"role Cons needs IO.Console
+" ~by:"role Cons needs IO.Console, IO.FileWrite
+" violation_src in
+      let src = replace_all ~needle:"con : Cap(IO.Console), st" ~by:"con : Cap(IO.Console), fw : Cap(IO.FileWrite), st" src in
+      let src = replace_all ~needle:"fn (s, con, st) -> cons(s, con, st)" ~by:"fn (s, con, fw, st) -> cons(s, con, fw, st)" src in
+      let rc, out = check_cli src in
+      Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc)
+
+let cli_role_grant_wider_than_main =
+  Alcotest.test_case "CLI: a role grant wider than `main`'s grant is refused" `Quick (fun () ->
+      let src = {|
+mod GWide do
+  needs IO
+  needs IO.Console
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    role Cons needs IO.FileWrite
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  fn main(c : Cap(IO.Console)) do () end
+end
+|} in
+      let rc, out = check_cli src in
+      Alcotest.(check int) "exit code" 1 rc;
+      Alcotest.(check bool) ("names main's grant (output: " ^ out ^ ")") true
+        (contains_text out "`role Cons needs IO.FileWrite` is wider than `main`'s grant, which is `Cap(IO.Console)`"))
+
+(* A hosted role: `start` is charged, and so is the actor behind `host`
+   when it is spawned in the same function. *)
+let cli_role_grant_hosted_actor =
+  Alcotest.test_case "CLI: a hosted role's actor handlers are charged to the role" `Quick (fun () ->
+      let src = {|
+mod GHost do
+  needs IO
+  needs IO.Console
+  needs IO.FileWrite
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    role Cons needs IO.Console
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  actor Host do
+    state { n : Int }
+    init { n: 0 }
+    on Start(s : Cap(Session.Live), con : Cap(IO.Console)) do
+      let _ = file_write("/tmp/n", "0")
+      state
+    end
+  end
+  fn main(c : Cap(IO)) do
+    let h = spawn(Host)
+    let _ = Stream_Run.host_Cons(c, "n", "s", Stream_Run.addrs_from_env(), h,
+      fn (s, con) -> do let _ = send(h, Start(s, con)) () end, fn (_s, _f, _m, _e) -> ())
+    ()
+  end
+end
+|} in
+      let rc, out = check_cli src in
+      Alcotest.(check int) "exit code" 1 rc;
+      Alcotest.(check bool) ("reaches FileWrite through Host (output: " ^ out ^ ")") true
+        (contains_text out "the start passed to `Stream_Run.host_Cons` reaches `IO.FileWrite`"
+         && contains_text out "Host"))
+
+let cli_dump_role_authority =
+  Alcotest.test_case "CLI: --dump-role-authority reports each root's grant, reach, values and actors" `Quick (fun () ->
+      let src = replace_all ~needle:"role Cons needs IO.Console
+" ~by:"role Cons needs IO.Console, IO.FileWrite
+" violation_src in
+      let src = replace_all ~needle:"con : Cap(IO.Console), st" ~by:"con : Cap(IO.Console), fw : Cap(IO.FileWrite), st" src in
+      let src = replace_all ~needle:"fn (s, con, st) -> cons(s, con, st)" ~by:"fn (s, con, fw, st) -> cons(s, con, fw, st)" src in
+      let rc, out = check_cli ~flags:"--dump-role-authority" src in
+      Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc;
+      List.iter
+        (fun needle ->
+           Alcotest.(check bool) (needle ^ " (output: " ^ out ^ ")") true (contains_text out needle))
+        [ "role authority: Stream.Cons"; "grant: IO.Console, IO.FileWrite";
+          "root: the body passed to `Stream_Run.run_Cons`, in `main`"; "reaches: IO.Console, IO.FileWrite";
+          "values: none"; "actors: none" ])
+
 let tests =
   [ stream_shape;
+    cli_role_grant_violation; cli_role_grant_named_body; cli_role_grant_widened_ok; cli_role_grant_wider_than_main;
+    cli_role_grant_hosted_actor; cli_dump_role_authority;
     granted_body_type; ungranted_body_type_unchanged; cli_granted_body_ok; cli_granted_body_missing_caps;
     grants_not_in_fingerprint; role_needs_ok; role_identifier_ok; role_needs_unknown_cap;
     role_needs_unknown_role; role_needs_twice; role_needs_after_message; role_needs_nested; msg_type_named_after_protocol; two_protocols_distinct_msg_types; two_protocols_ok;

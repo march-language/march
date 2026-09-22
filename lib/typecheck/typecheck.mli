@@ -309,6 +309,13 @@ val add_ctor :
 val instantiate : ?use_span:Ast.span -> ?use_name:string -> int -> env -> scheme -> ty
 val stdlib_source_files : string list ref
 val cap_strict_ceiling : bool ref
+
+(** [--dump-role-authority]: print the effective-authority report for every
+    role with a `role R needs ...` grant (the callbacks passed to the runner
+    fronts, what they reach, the functions they reference as values and the
+    actors behind them, each with its capabilities).  A report, not a check;
+    set by the driver. *)
+val dump_role_authority : bool ref
 val builtin_cap_table : (string * string) list
 val locally_declared_names_of : Ast.decl list -> (string, unit) Hashtbl.t
 val builtin_interface_bindings : (string * scheme) list

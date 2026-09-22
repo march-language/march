@@ -33,7 +33,7 @@ Run the whole corpus:
 MARCH_BIN=$PWD/_build/default/bin/main.exe bash specs/lang/grammar/check_grammar.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 52/52, 38 parse, 14
+Exit 0 iff every program behaves as declared (currently 53/53, 39 parse, 14
 reject).
 
 **Naming note:** this corpus uses `parse/` + `reject/` (not `accept/` +
@@ -132,7 +132,7 @@ p29 and retired r08; the same pass, closing the record-pattern
 reachability gap, added p30/p31 and retired r02/r07; the same pass, adding
 or-patterns, added p32 (the binding-rejection witness is a type error, not a
 parse error, so it lives in `specs/lang/types/reject/t82` instead):
-52 programs total (38 `parse/`, 14 `reject/`). See
+53 programs total (39 `parse/`, 14 `reject/`). See
 `specs/plans/archive/2026-07-06-resolved-grammar-plan.md` for the task-by-task
 breakdown that built the first 27; the DSL-resolution pass and the
 `f(1)(2)` fix are tracked in their own commits rather than numbered plan
