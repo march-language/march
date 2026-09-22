@@ -65,6 +65,23 @@
     (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
      (run %{exe:test_entry_rule.exe}))))))
 
+; test_procs.ml: Procs (process supervision). Its main case runs three copies
+; of a natively compiled March program, so it takes the same hermetic shape as
+; test_entry_rule above.
+(executable
+ (name test_procs)
+ (modules test_procs)
+ (libraries march_forge alcotest unix))
+
+(rule
+ (alias runtest)
+ (deps (source_tree %{workspace_root}/runtime) (source_tree %{workspace_root}/stdlib))
+ (action
+  (setenv MARCH_TEST_BIN %{bin:march}
+   (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
+    (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
+     (run %{exe:test_procs.exe}))))))
+
 ; test_build_check.ml's "forge check"/"forge build"/"forge test" cases shell
 ; out to a real `march check` subprocess (forge/lib/cmd_build.ml's check_all).
 ; It was QUARANTINED (2026-07-24) on two problems, both now resolved:
