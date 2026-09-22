@@ -4063,6 +4063,52 @@ let test_actor_init_io_is_charged_to_grant () =
   Alcotest.(check bool) "init-reached IO.FileWrite is charged to main's grant"
     true (has_error_with ctx "granted `Cap(IO.Console)`")
 
+(* ── A narrowed cap cannot reach a `Cap(IO)` signature (2026-09-22) ─────────
+   The fact, pinned because a design (specs/plans/2026-09-21-distributed-
+   authority-and-deploys-plan.md, D31) leans on it and first assumed the
+   opposite: `Cap(IO.NetListen)` does NOT unify with `Cap(IO)` (`Cap` is a
+   plain type constructor, so amplifying a cap is a type error), AND,
+   independently, a `Cap(IO)` in a signature puts `IO` in that function's own
+   capability closure, so the grant walk rejects a narrowed `main` that
+   reaches it, naming the chain.  Either check alone refuses the program. *)
+let test_narrowed_cap_cannot_reach_wide_signature () =
+  let ctx = typecheck {|mod Narrow do
+    needs IO
+    fn wants_io(c : Cap(IO)) : () do
+      ()
+    end
+    fn narrow(c : Cap(IO.NetListen)) : () do
+      wants_io(c)
+    end
+    fn main(c : Cap(IO.NetListen)) : () do
+      narrow(c)
+    end
+  end|} in
+  Alcotest.(check bool) "passing Cap(IO.NetListen) as Cap(IO) is a type error"
+    true (has_error_with ctx "expected `IO` but got `IO.NetListen`");
+  Alcotest.(check bool) "the grant walk rejects it too, naming the cap"
+    true (has_error_with ctx "granted `Cap(IO.NetListen)`, but the program reaches `IO`");
+  Alcotest.(check bool) "and the chain main -> narrow -> wants_io"
+    true (has_error_with ctx "main \xe2\x86\x92 narrow \xe2\x86\x92 wants_io")
+
+(* The accepting counterpart: under `Cap(IO)`, `main` may call the wide
+   function directly and hand a narrowed cap down with `cap_narrow`. *)
+let test_wide_grant_reaches_wide_signature () =
+  let ctx = typecheck {|mod Wide do
+    needs IO
+    fn wants_io(c : Cap(IO)) : () do
+      ()
+    end
+    fn narrow(c : Cap(IO.NetListen)) : () do
+      ()
+    end
+    fn main(c : Cap(IO)) : () do
+      wants_io(c)
+      narrow(cap_narrow(c))
+    end
+  end|} in
+  Alcotest.(check bool) "no errors at all" false (has_errors ctx)
+
 (* ── Same-named actors in different modules (2026-08-17) ────────────────────
    Handler capability closures used to be keyed by the actor's BARE name
    (`Worker_Go`), matching TIR's synthesized symbol.  TIR does not disambiguate
@@ -16393,6 +16439,8 @@ let compiler_suites =
           Alcotest.test_case "actor spawned not sent: charged" `Quick test_actor_spawned_not_sent_still_charged;
           Alcotest.test_case "actor defined never spawned: free" `Quick test_actor_defined_never_spawned_is_free;
           Alcotest.test_case "actor init IO charged to grant" `Quick test_actor_init_io_is_charged_to_grant;
+          Alcotest.test_case "narrowed cap cannot reach a Cap(IO) signature" `Quick test_narrowed_cap_cannot_reach_wide_signature;
+          Alcotest.test_case "Cap(IO) grant reaches a Cap(IO) signature" `Quick test_wide_grant_reaches_wide_signature;
           (* Same-named actors across modules (2026-08-17): distinct closures *)
           Alcotest.test_case "same-named actors: only spawned one charged" `Quick test_same_named_actors_only_spawned_one_charged;
           Alcotest.test_case "same-named actors: spawned one still rejected" `Quick test_same_named_actors_spawned_one_still_rejected;

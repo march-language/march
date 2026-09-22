@@ -1397,4 +1397,17 @@ let () =
          ~man:(offline_man_blocks @ archive_man_blocks ()))
       cmds
   in
-  exit (Cmd.eval ~argv main)
+  (* A malformed TOML file (a dependency's forge.toml, an archive manifest,
+     lint config) is a user error, not an internal one: report it like the
+     other command errors. Project.load reports its own forge.toml errors with
+     the file name; this catches the other readers. Everything else keeps
+     cmdliner's internal-error report and exit code. *)
+  let code =
+    try Cmd.eval ~catch:false ~argv main with
+    | Toml.Parse_error m -> Printf.eprintf "error: TOML parse error, %s\n%!" m; 1
+    | e ->
+      Printf.eprintf "forge: internal error, uncaught exception:\n%s\n%!"
+        (Printexc.to_string e);
+      125
+  in
+  exit code
