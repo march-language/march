@@ -924,7 +924,7 @@ let source_name (n : string) : string =
   | _ -> n
 
 (* Fires only when TRMC is OFF, which since 2026-09-09 means the user passed
-   --no-trmc (or MARCH_NO_TRMC=1). The note used to read "compiling with --trmc
+   --no-trmc. The note used to read "compiling with --trmc
    turns the constructor into an in-place write", which was correct while the
    transform was opt-in and is now backwards: the allocation this diagnostic is
    complaining about exists BECAUSE the default was turned off. Say that, so
@@ -932,7 +932,7 @@ let source_name (n : string) : string =
 let trmc_note = "This function is TRMC-eligible: with tail-recursion-modulo-cons \
                  the constructor would be an in-place write and this function \
                  would not allocate. It is on by default and something turned it \
-                 off here — check for `--no-trmc` or `MARCH_NO_TRMC`."
+                 off here — check for `--no-trmc`."
 
 (* ── Generation scope (LSP quick fix and forge fix --contracts) ───────── *)
 

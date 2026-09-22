@@ -11361,7 +11361,7 @@ let test_signal_watch_capturing_handler_repeated_delivery_compiled () =
        attempts, so a single retry cannot mask it; what it absorbs is a
        one-off environmental kill.
 
-       That distinction is the whole point.  This test reddened trmc-suite
+       That distinction is the whole point.  This test reddened the (since-removed) trmc-suite
        (ubuntu-24.04) twice on PR #316 — a test-only PR with an empty
        lib/runtime/bin diff — while passing on main's runs of #315 and #317
        (specs/progress/2026-08-21-signal-watch-capturing-handler-trmc-suite-flake.md).

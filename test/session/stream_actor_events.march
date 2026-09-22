@@ -1,7 +1,7 @@
 mod StreamActorEvents do
   -- The event-shaped endpoint API: the SESSION STATE LIVES IN ACTOR STATE.
-  -- Same `Stream` protocol, same generated `@[endpoints]` module, same
-  -- mailbox transport shape as stream_actor.march, and the same eight-line
+  -- Same `Stream` protocol, same generated `@[endpoints]` module as
+  -- stream_actor.march, the stdlib's `Session.in_process()` transport, and the same eight-line
   -- trace -- but here nothing is captured in a continuation.  Each role is an
   -- actor whose state holds a `Parked` endpoint (an always_linear value the
   -- generated module hands out), and every session step runs inside the
@@ -38,40 +38,12 @@ mod StreamActorEvents do
     end
   end
 
-  -- ── the mailbox transport, as in stream_actor.march ────────────────────
-  -- `await_*` still calls `Session.suspend`, so `handlers` records which
-  -- endpoints await and the router's guard keeps working; the installed
-  -- handler is never called (the actor resumes the endpoint itself), and
-  -- panics if a transport tries.
-  type Transport = { ops : Session.Ops }
-
-  pfn ekey(ep : Int) : String do "e" ++ int_to_string(ep) end
-
-  fn mailbox(handlers, pending) : Transport do
-    Vault.set(pending, "q", Deque.empty())
-    {
-      ops: {
-        register: fn (_ap, role) -> role,
-        emit: fn (ep, to, msg) -> do
-          let q = match Vault.get(pending, "q") do
-            Some(d) -> d
-            None    -> Deque.empty()
-          end
-          Vault.set(pending, "q", Deque.push_back(q, (to, ep, msg)))
-          ep
-        end,
-        suspend: fn (ep, _from, handler) -> do
-          Vault.set(handlers, ekey(ep), handler)
-          ep
-        end,
-        close: fn ep -> print_line("close " ++ int_to_string(ep)),
-        fail: fn (_ep, why) -> panic(why),
-        on_cancel: fn (ep, _h) -> ep,
-        leave: fn (ep, why) -> print_line("leave " ++ int_to_string(ep) ++ ": " ++ why),
-        on_crash: fn (ep, _r, _h) -> ep
-      }
-    }
-  end
+  -- ── the transport: the stdlib's in-process one ─────────────────────────
+  -- The actors resume their own `Parked` endpoints, so the router does not
+  -- `drain` (which would run the continuations `await_*` installed); it
+  -- `take`s the next delivery an endpoint is waiting for and sends it to
+  -- the actor that owns the destination role. `in_process_with` prints the
+  -- transport's `close` lines.
 
   -- ── the endpoint actors ───────────────────────────────────────────────
   actor ProdActor do
@@ -126,39 +98,33 @@ mod StreamActorEvents do
   end
 
   -- One delivery per turn, to the actor that owns the destination role.
-  pfn route(s : Cap(Session.Live), pp, pc, handlers, pending) : () do
-    let q = match Vault.get(pending, "q") do
-      Some(d) -> d
-      None    -> Deque.empty()
-    end
-    match Deque.pop_front(q) do
-      (None, _) -> ()
-      (Some((to, from, msg)), rest) ->
-        Vault.set(pending, "q", rest)
-        match Vault.get(handlers, ekey(to)) do
-          None -> panic("stream_actor_events: delivery to " ++ int_to_string(to) ++ " with no endpoint awaiting")
-          Some(_) ->
-            if to == Stream_Msg.role_Prod() do
-              send(pp, DeliverP(s, from, msg, to))
-            else
-              send(pc, DeliverC(s, from, msg, to))
-            end
-            run_until_idle()
-            route(s, pp, pc, handlers, pending)
+  -- A queued delivery no endpoint is waiting for is a PANIC here, not a
+  -- silent end of the trace.
+  pfn route(s : Cap(Session.Live), pp, pc, t : Session.InProcess) : () do
+    match t.take(()) do
+      None ->
+        if t.queued(()) > 0 do
+          panic("stream_actor_events: " ++ int_to_string(t.queued(())) ++ " deliveries with no endpoint awaiting")
+        else () end
+      Some((to, from, msg)) ->
+        if to == Stream_Msg.role_Prod() do
+          send(pp, DeliverP(s, from, msg, to))
+        else
+          send(pc, DeliverC(s, from, msg, to))
         end
+        run_until_idle()
+        route(s, pp, pc, t)
     end
   end
 
   fn main(c : Cap(IO)) do
-    let handlers = Vault.new("stream_actor_events_handlers")
-    let pending  = Vault.new("stream_actor_events_pending")
-    let t = mailbox(handlers, pending)
+    let t = Session.in_process_with(fn line -> print_line(line))
     let s = Session.attach(c, t.ops)
     let pc = spawn(ConsActor)
     let pp = spawn(ProdActor)
     send(pc, StartC(s))
     send(pp, StartP(s))
     run_until_idle()
-    route(s, pp, pc, handlers, pending)
+    route(s, pp, pc, t)
   end
 end

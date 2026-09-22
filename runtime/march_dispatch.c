@@ -323,6 +323,26 @@ void *march_dispatch_enter(uint32_t name_id, uint32_t *out_version) {
     return s->ring[v].fn_ptr;
 }
 
+void *march_dispatch_enter_version(uint32_t name_id, uint32_t version,
+                                   uint32_t *out_version) {
+    if (out_version) *out_version = 0;
+    if (name_id >= atomic_load_explicit(&g_n_slots, memory_order_acquire)
+            || version >= MARCH_MAX_LIVE_VERSIONS)
+        return NULL;
+    MarchDispatchSlot *slots = atomic_load_explicit(&g_slots, memory_order_acquire);
+    MarchFnVersion *v = &slots[name_id].ring[version];
+    if (!atomic_load_explicit(&v->live, memory_order_acquire)) return NULL;
+    /* Pin, then re-validate: the same seq_cst Dekker pair with the
+       reclaimer's retire-store/refs-load as march_dispatch_enter. */
+    atomic_fetch_add_explicit(&v->refs, 1, memory_order_seq_cst);
+    if (!atomic_load_explicit(&v->live, memory_order_seq_cst)) {
+        atomic_fetch_sub_explicit(&v->refs, 1, memory_order_acq_rel);
+        return NULL;
+    }
+    if (out_version) *out_version = version;
+    return v->fn_ptr;
+}
+
 void march_dispatch_leave(uint32_t name_id, uint32_t version) {
     if (name_id >= g_n_slots || version >= MARCH_MAX_LIVE_VERSIONS) return;
     atomic_fetch_sub_explicit(&g_slots[name_id].ring[version].refs, 1,
