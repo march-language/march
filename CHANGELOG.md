@@ -122,6 +122,13 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Compiled `send_checked` and `is_cap_valid` no longer intermittently accept a cap
+  whose actor was killed.** About one run in five, a cap taken while the actor was
+  alive still validated after `kill`: `is_cap_valid` answered `true` and
+  `send_checked` returned `:ok`, and the message went into freed memory. The
+  interpreter was always right. Both now check the actor's runtime metadata instead
+  of its (possibly freed) record, and `send_checked` returns `:ok` only when the send
+  was actually accepted.
 - **On Linux, `--cap-sandbox` now stops a program without `IO.NetListen` from
   accepting connections.** Holding only `IO.NetConnect` (an HTTP client, say)
   allowed `socket()`, and nothing denied `bind`/`listen`, so such a program
