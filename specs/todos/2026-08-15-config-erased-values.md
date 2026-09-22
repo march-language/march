@@ -42,3 +42,18 @@ making an `Int`-as-`Pid` read fail before an actor builtin receives the value.
 - The failure is explicit and recoverable rather than a runtime representation
   error or process crash.
 - Both interpreter and compiled execution agree on the behavior.
+
+## Decision (repo owner, 2026-09-22): typed keys
+
+Of the two shapes offered above, the owner chose an **explicitly typed Config
+API** over a tagged/dynamic value representation exposed to callers: typed keys,
+the same idea as `Vault(v)`'s phantom element type. A key is minted as
+`Config.key(:ns, :name, …) : Config.Key(v)`, and `Config.put(key, value : v)` /
+`Config.get(key) : Option(v)` take the key instead of a bare `(ns, name)` pair,
+so each key carries its value type while the underlying storage stays
+heterogeneous.
+
+Minting a key from a name has the same door as `Vault.new/open/whereis` (see
+`specs/progress/2026-08-14-vault-typed-handles.md`, "Honest limits" item 1):
+two mints of one `(ns, name)` can choose different `v`. How that door is closed
+is recorded in the progress entry that lands the fix.
