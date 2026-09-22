@@ -4063,6 +4063,52 @@ let test_actor_init_io_is_charged_to_grant () =
   Alcotest.(check bool) "init-reached IO.FileWrite is charged to main's grant"
     true (has_error_with ctx "granted `Cap(IO.Console)`")
 
+(* ── A narrowed cap cannot reach a `Cap(IO)` signature (2026-09-22) ─────────
+   The fact, pinned because a design (specs/plans/2026-09-21-distributed-
+   authority-and-deploys-plan.md, D31) leans on it and first assumed the
+   opposite: `Cap(IO.NetListen)` does NOT unify with `Cap(IO)` (`Cap` is a
+   plain type constructor, so amplifying a cap is a type error), AND,
+   independently, a `Cap(IO)` in a signature puts `IO` in that function's own
+   capability closure, so the grant walk rejects a narrowed `main` that
+   reaches it, naming the chain.  Either check alone refuses the program. *)
+let test_narrowed_cap_cannot_reach_wide_signature () =
+  let ctx = typecheck {|mod Narrow do
+    needs IO
+    fn wants_io(c : Cap(IO)) : () do
+      ()
+    end
+    fn narrow(c : Cap(IO.NetListen)) : () do
+      wants_io(c)
+    end
+    fn main(c : Cap(IO.NetListen)) : () do
+      narrow(c)
+    end
+  end|} in
+  Alcotest.(check bool) "passing Cap(IO.NetListen) as Cap(IO) is a type error"
+    true (has_error_with ctx "expected `IO` but got `IO.NetListen`");
+  Alcotest.(check bool) "the grant walk rejects it too, naming the cap"
+    true (has_error_with ctx "granted `Cap(IO.NetListen)`, but the program reaches `IO`");
+  Alcotest.(check bool) "and the chain main -> narrow -> wants_io"
+    true (has_error_with ctx "main \xe2\x86\x92 narrow \xe2\x86\x92 wants_io")
+
+(* The accepting counterpart: under `Cap(IO)`, `main` may call the wide
+   function directly and hand a narrowed cap down with `cap_narrow`. *)
+let test_wide_grant_reaches_wide_signature () =
+  let ctx = typecheck {|mod Wide do
+    needs IO
+    fn wants_io(c : Cap(IO)) : () do
+      ()
+    end
+    fn narrow(c : Cap(IO.NetListen)) : () do
+      ()
+    end
+    fn main(c : Cap(IO)) : () do
+      wants_io(c)
+      narrow(cap_narrow(c))
+    end
+  end|} in
+  Alcotest.(check bool) "no errors at all" false (has_errors ctx)
+
 (* ── Same-named actors in different modules (2026-08-17) ────────────────────
    Handler capability closures used to be keyed by the actor's BARE name
    (`Worker_Go`), matching TIR's synthesized symbol.  TIR does not disambiguate
@@ -15789,6 +15835,106 @@ let test_parse_supervise_child_restart_types () =
     Alcotest.(check string) "restart transient" "transient" (restart_of "b");
     Alcotest.(check string) "restart temporary" "temporary" (restart_of "c")
 
+(* ── `fn (a, b) -> e` passed where a callback over a PAIR is expected ────────
+   `fn (a, b) -> e` is a TWO-parameter (curried) lambda, not a lambda over a
+   tuple. Checked against `(K, V) -> r`, the first param took the whole pair and
+   the second bound the result variable to an arrow: silently a nonsense type
+   (`List(b -> b)`) or the misleading "infinitely recursive ... Did you forget
+   to apply it" error. This broke `OrderedMap.keys`/`values`/`from_list`
+   (fixed 2026-09-22). The targeted diagnostic names the real mistake. The
+   local `map`/`fold_left` mirror the stdlib signatures. *)
+let curried_pair_prelude = {|
+    fn map(xs : List(a), f : a -> b) : List(b) do
+      match xs do
+        Nil -> Nil
+        Cons(h, t) -> Cons(f(h), map(t, f))
+      end
+    end
+    fn fold_left(xs : List(a), acc : b, f : b -> a -> b) : b do
+      match xs do
+        Nil -> acc
+        Cons(h, t) -> fold_left(t, f(acc, h), f)
+      end
+    end
+|}
+
+let curried_pair_msg = "takes 2 arguments"
+
+(* The silent case: typechecked with v := b -> b before the fix. *)
+let test_curried_lambda_over_pair_silent_case_errors () =
+  let ctx = typecheck ("mod Test do" ^ curried_pair_prelude ^ {|
+    fn snds(xs : List((Int, v))) : List(v) do
+      map(xs, fn (_, w) -> w)
+    end
+  end|}) in
+  Alcotest.(check bool) "curried-lambda-over-pair diagnostic" true
+    (has_error_with ctx curried_pair_msg);
+  Alcotest.(check bool) "suggests destructuring with match" true
+    (has_error_with ctx "fn pair -> match pair do")
+
+(* The misleading case: "infinitely recursive" before the fix. *)
+let test_curried_lambda_over_pair_occurs_case_errors () =
+  let ctx = typecheck ("mod Test do" ^ curried_pair_prelude ^ {|
+    fn fsts(xs : List((k, Int))) : List(k) do
+      map(xs, fn (k, _) -> k)
+    end
+  end|}) in
+  Alcotest.(check bool) "curried-lambda-over-pair diagnostic" true
+    (has_error_with ctx curried_pair_msg);
+  Alcotest.(check bool) "no misleading infinite-type error" false
+    (has_error_with ctx "infinitely recursive")
+
+(* Three params against a 3-tuple callback: same mistake, same diagnostic. *)
+let test_curried_lambda_over_triple_errors () =
+  let ctx = typecheck ("mod Test do" ^ curried_pair_prelude ^ {|
+    fn sums(xs : List((Int, Int, Int))) : List(Int) do
+      map(xs, fn (a, b, c) -> a + b + c)
+    end
+  end|}) in
+  Alcotest.(check bool) "curried-lambda-over-triple diagnostic" true
+    (has_error_with ctx "takes 3 arguments")
+
+(* The legitimate curried use: fold's callback is `b -> a -> b`, so two params
+   are right even when the accumulator itself is a 2-tuple. *)
+let test_curried_lambda_fold_over_pair_acc_ok () =
+  let ctx = typecheck ("mod Test do" ^ curried_pair_prelude ^ {|
+    fn sum_and_count(xs : List(Int)) : (Int, Int) do
+      fold_left(xs, (0, 0), fn (acc, x) ->
+        match acc do
+          (s, n) -> (s + x, n + 1)
+        end)
+    end
+    fn pairs_sum(xs : List((Int, Int))) : Int do
+      fold_left(xs, 0, fn (acc, p) ->
+        match p do
+          (a, b) -> acc + a + b
+        end)
+    end
+  end|}) in
+  Alcotest.(check bool) "curried fold: no error" false (has_errors ctx)
+
+(* The suggested rewrite is accepted. *)
+let test_curried_lambda_match_rewrite_ok () =
+  let ctx = typecheck ("mod Test do" ^ curried_pair_prelude ^ {|
+    fn snds(xs : List((Int, v))) : List(v) do
+      map(xs, fn pair -> match pair do (_, w) -> w end)
+    end
+  end|}) in
+  Alcotest.(check bool) "match rewrite: no error" false (has_errors ctx)
+
+(* A pair-taking callback that legitimately returns a function stays accepted:
+   the expected arrow chain is as long as the lambda's parameter list. *)
+let test_curried_lambda_pair_then_arg_ok () =
+  let ctx = typecheck {|mod Test do
+    fn apply2(f : (Int, Int) -> Int -> Int, p : (Int, Int), x : Int) : Int do
+      f(p, x)
+    end
+    fn main() : Int do
+      apply2(fn (p, x) -> match p do (a, b) -> a + b + x end, (1, 2), 3)
+    end
+  end|} in
+  Alcotest.(check bool) "(pair) -> Int -> Int: no error" false (has_errors ctx)
+
 let compiler_suites =
   [
       sigil_interp_suite;
@@ -16289,6 +16435,8 @@ let compiler_suites =
           Alcotest.test_case "actor spawned not sent: charged" `Quick test_actor_spawned_not_sent_still_charged;
           Alcotest.test_case "actor defined never spawned: free" `Quick test_actor_defined_never_spawned_is_free;
           Alcotest.test_case "actor init IO charged to grant" `Quick test_actor_init_io_is_charged_to_grant;
+          Alcotest.test_case "narrowed cap cannot reach a Cap(IO) signature" `Quick test_narrowed_cap_cannot_reach_wide_signature;
+          Alcotest.test_case "Cap(IO) grant reaches a Cap(IO) signature" `Quick test_wide_grant_reaches_wide_signature;
           (* Same-named actors across modules (2026-08-17): distinct closures *)
           Alcotest.test_case "same-named actors: only spawned one charged" `Quick test_same_named_actors_only_spawned_one_charged;
           Alcotest.test_case "same-named actors: spawned one still rejected" `Quick test_same_named_actors_spawned_one_still_rejected;
@@ -16940,5 +17088,13 @@ let compiler_suites =
           Alcotest.test_case "dependency mod, structural recursion: no error"       `Quick test_tce_non_entry_structural_recursion_no_error;
           Alcotest.test_case "supervise child restart types"                       `Quick test_parse_supervise_child_restart_types;
           Alcotest.test_case "restart usable as identifier"                       `Quick test_restart_still_usable_as_identifier;
+        ] );
+      ( "curried_lambda_over_tuple", [
+          Alcotest.test_case "fn (_, w) over a pair (silent case): error"       `Quick test_curried_lambda_over_pair_silent_case_errors;
+          Alcotest.test_case "fn (k, _) over a pair (occurs case): error"       `Quick test_curried_lambda_over_pair_occurs_case_errors;
+          Alcotest.test_case "fn (a, b, c) over a triple: error"                `Quick test_curried_lambda_over_triple_errors;
+          Alcotest.test_case "fold's b -> a -> b with a pair acc: no error"     `Quick test_curried_lambda_fold_over_pair_acc_ok;
+          Alcotest.test_case "fn pair -> match pair rewrite: no error"          `Quick test_curried_lambda_match_rewrite_ok;
+          Alcotest.test_case "(pair) -> Int -> Int callback: no error"          `Quick test_curried_lambda_pair_then_arg_ok;
         ] );
   ]

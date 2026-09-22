@@ -1348,8 +1348,70 @@ let crash_chan_refused = bad "Chan(Role, Proto) refuses a protocol with crash br
   pfn as_chan(ch : Chan(L, Logging)) : Int do 0 end
 |}))
 
+
+(* ── two protocols in one module ───────────────────────────────────────── *)
+
+(** The type names each generated nested module declares. *)
+let generated_types src : (string * string list) list =
+  let m = parse_and_desugar src in
+  List.filter_map
+    (function
+      | DMod (name, _, decls, _) ->
+        let tys =
+          List.filter_map
+            (function
+              | DType (_, nm, _, _, _) | DAlwaysLinearType (_, nm, _, _, _) -> Some nm.txt
+              | _ -> None)
+            decls
+        in
+        Some (name.txt, tys)
+      | _ -> None)
+    m.mod_decls
+
+(* The message type is named after its PROTOCOL, not a bare `Msg`.  Impl
+   dispatch for the derived `Json` codec keys on the type's SHORT name in both
+   backends, so two protocols in one module each declaring a `Msg` made the
+   first protocol's sends encode through the second's `to_json`: a match
+   failure inside generated code interpreted, and a refused build compiled
+   ("ambiguous interface-method call to `JsonFrom$Msg.from_json`").  This is
+   the generator-side pin; the runtime one is test/session/in_process.march.
+   See the record dated 2026-09-22 under specs/progress/. *)
+let msg_type_named_after_protocol =
+  Alcotest.test_case "the message type is <P>_Message, not a bare Msg" `Quick
+    (fun () ->
+       let tys = generated_types (wrap stream) in
+       let msg_tys = match List.assoc_opt "Stream_Msg" tys with Some t -> t | None -> [] in
+       Alcotest.(check bool) "Stream_Msg declares Stream_Message" true
+         (List.mem "Stream_Message" msg_tys);
+       Alcotest.(check bool) "Stream_Msg declares no bare `Msg`" false (List.mem "Msg" msg_tys))
+
+let two_protocols = {|
+  @[endpoints]
+  protocol Other do
+    A -> B : Int
+    B -> A : String
+  end
+|}
+
+(* Two protocols in one module generate two DISTINCT message types, so their
+   derived codecs cannot collide. *)
+let two_protocols_distinct_msg_types =
+  Alcotest.test_case "two protocols in one module: distinct message type names" `Quick
+    (fun () ->
+       let tys = generated_types (wrap (stream ^ two_protocols)) in
+       let get m = match List.assoc_opt m tys with Some t -> t | None -> [] in
+       Alcotest.(check bool) "Stream_Msg.Stream_Message" true (List.mem "Stream_Message" (get "Stream_Msg"));
+       Alcotest.(check bool) "Other_Msg.Other_Message" true (List.mem "Other_Message" (get "Other_Msg"));
+       Alcotest.(check bool) "no shared short name" true
+         (not (List.exists (fun t -> List.mem t (get "Other_Msg")) (get "Stream_Msg"))))
+
+(* And the pair typechecks: both codecs' `derive Json` coexist. *)
+let two_protocols_ok =
+  ok "two protocols in one module typecheck together" (wrap (stream ^ two_protocols))
+
 let tests =
-  [ stream_shape; cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
+  [ stream_shape; msg_type_named_after_protocol; two_protocols_distinct_msg_types; two_protocols_ok;
+    cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
     unlabelled_names_pinned; labelled_shape; label_changes_fingerprint; labelled_roles_ok;
     payload_definition_in_fingerprint; payload_field_order_in_fingerprint;
     recursive_payload_terminates; payload_type_arguments_substituted; imported_payload_falls_back;
