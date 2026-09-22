@@ -1,0 +1,25 @@
+-- Session endpoints are exempt from t281's rule, on purpose. A `Chan` has its
+-- own, deliberately NARROWER must-close accounting: only an endpoint that
+-- reached `End` must be passed to `Chan.close` (reject/t75); a mid-protocol
+-- drop is out of scope (F6), and the corpus creates-and-drops such endpoints
+-- elsewhere (t42/t44). `let _ = ch2` below hands back a channel still at
+-- Send/Recv, so it stays legal — t281's check skips `TChan`, the same
+-- exclusion `ELet`'s linearity auto-promotion already makes.
+mod Main do
+  needs IO.Console
+  protocol PingLoop do
+    loop do
+      Client -> Server : Int
+      Server -> Client : Bool
+    end
+  end
+  fn client_step(ch : Chan(Client, PingLoop), val : Int) : Bool do
+    let ch1 = Chan.send(ch, val)
+    let (b, ch2) = Chan.recv(ch1)
+    let _ = ch2
+    b
+  end
+  fn main(c : Cap(IO.Console)) do
+    println("ok")
+  end
+end
