@@ -10925,11 +10925,14 @@ let test_interface_default_does_not_capture_a_same_named_fn () =
      was a DIRECT write to that table rather than a reference edge. *)
   let (_errors, _tm, env) =
     March_typecheck.Typecheck.check_module_full (parse_and_desugar src) in
-  Alcotest.(check (list string)) "its OWN caps entry — what the manifest reads — is empty"
-    []
-    (Option.value ~default:[]
-       (List.assoc_opt "greet_loud"
-          (March_typecheck.Typecheck.fn_own_capability_closures env)));
+  (* [Some []], not [Option.value ~default:[]]: the latter could not tell "key
+     present and empty" (the right state — the [DFn] arm always records a
+     plain fn) from "key absent" (the fn was never recorded at all). *)
+  Alcotest.(check (option (list string)))
+    "its OWN caps entry — what the manifest reads — is present and empty"
+    (Some [])
+    (List.assoc_opt "greet_loud"
+       (March_typecheck.Typecheck.fn_own_capability_closures env));
   Alcotest.(check (list string))
     "and a plain fn named like an interface method absorbs nothing"
     [] (transitive_caps_of src "greet_loud");
@@ -10938,6 +10941,85 @@ let test_interface_default_does_not_capture_a_same_named_fn () =
      about the interface arm having stopped recording anything. *)
   Alcotest.(check (list string)) "while the default body itself still holds it"
     [ "IO.Console" ] (transitive_caps_of src "Greeter$default.greet_loud")
+
+(* The same false positive through a DEFAULTED plain fn, which the guard above
+   used to miss. Desugar's [expand_defaults_decl] turns
+   [fn greet_loud(n, bump \\ 1)] into [greet_loud$1]/[greet_loud$2] and emits
+   no base [DFn] named [greet_loud], so [module_fn_names] never contained the
+   bare name and the interface-default dispatch edge was recorded on it —
+   while the [DFn] arm's arity alias records the real function's caps and
+   edges under that SAME bare key. Measured before the fix on exactly this
+   program: own [greet_loud] = [], but transitive [greet_loud] = [IO.Console].
+   The own table was never affected (a dispatch edge is a reference, not a
+   direct caps write); the transitive one — what a caller's closure is built
+   from — was. *)
+let test_interface_default_does_not_capture_a_defaulted_fn () =
+  let src = {|mod Clash do
+    interface Greeter(a) do
+      fn greet : a -> Unit
+      fn greet_loud : a -> Unit do fn (x) -> print("loud") end
+    end
+    fn greet_loud(n, bump \\ 1) do n + bump end
+  end|} in
+  let (_errors, _tm, env) =
+    March_typecheck.Typecheck.check_module_full (parse_and_desugar src) in
+  Alcotest.(check (option (list string)))
+    "the bare key exists (arity alias) and its own caps are empty"
+    (Some [])
+    (List.assoc_opt "greet_loud"
+       (March_typecheck.Typecheck.fn_own_capability_closures env));
+  Alcotest.(check (list string))
+    "a pure defaulted fn named like an interface method absorbs nothing"
+    [] (transitive_caps_of src "greet_loud");
+  Alcotest.(check (list string)) "nor does either arity variant"
+    [] (transitive_caps_of src "greet_loud$1" @ transitive_caps_of src "greet_loud$2");
+  Alcotest.(check (list string)) "while the default body itself still holds it"
+    [ "IO.Console" ] (transitive_caps_of src "Greeter$default.greet_loud")
+
+(* REJECT companion: suppressing the dispatch edge must not suppress the
+   defaulted fn's OWN capability. A defaulted fn that really prints is still
+   charged IO.Console under the bare name (through the arity alias), in both
+   tables. Without this, "the bare key is empty" above could be satisfied by
+   a fix that stopped recording defaulted fns under the bare name at all. *)
+let test_defaulted_fn_beside_interface_default_keeps_own_caps () =
+  let src = {|mod Clash do
+    interface Greeter(a) do
+      fn greet : a -> Unit
+      fn greet_loud : a -> Unit do fn (x) -> print("loud") end
+    end
+    fn greet_loud(n, bump \\ 1) do
+      print("bumping")
+      n + bump
+    end
+  end|} in
+  let (_errors, _tm, env) =
+    March_typecheck.Typecheck.check_module_full (parse_and_desugar src) in
+  Alcotest.(check (option (list string)))
+    "own caps of the bare key carry the fn's real IO.Console"
+    (Some [ "IO.Console" ])
+    (List.assoc_opt "greet_loud"
+       (March_typecheck.Typecheck.fn_own_capability_closures env));
+  Alcotest.(check (list string)) "and so does its transitive closure"
+    [ "IO.Console" ] (transitive_caps_of src "greet_loud")
+
+(* The [DImpl] arm consults the same guard, so the same miss applied to an impl
+   method sharing its name with a defaulted plain fn. *)
+let test_impl_method_does_not_capture_a_defaulted_fn () =
+  let src = {|mod ImplClash do
+    type Widget = MkWidget
+    interface Render(a) do
+      fn render : a -> Unit
+    end
+    impl Render(Widget) do
+      fn render(_w) do print("w") end
+    end
+    fn render(n, bump \\ 1) do n + bump end
+  end|} in
+  Alcotest.(check (list string))
+    "a pure defaulted fn named like an impl method absorbs nothing"
+    [] (transitive_caps_of src "render");
+  Alcotest.(check (list string)) "while the impl method itself still holds it"
+    [ "IO.Console" ] (transitive_caps_of src "Render$Widget.render")
 
 (* Form 3 — an impl method body.  The impl method itself is keyed by TIR's
    [Iface$Ty.method] mangling so it can never collide with a [DFn] of the same
@@ -16583,6 +16665,9 @@ let compiler_suites =
           Alcotest.test_case "a cap reached only via a module-level let propagates"  `Quick test_transitive_cap_via_module_let;
           Alcotest.test_case "a cap reached only via an interface default method"    `Quick test_transitive_cap_via_interface_default_method;
           Alcotest.test_case "an interface default does not capture a same-named fn" `Quick test_interface_default_does_not_capture_a_same_named_fn;
+          Alcotest.test_case "an interface default does not capture a defaulted fn" `Quick test_interface_default_does_not_capture_a_defaulted_fn;
+          Alcotest.test_case "a defaulted fn beside an interface default keeps its own caps" `Quick test_defaulted_fn_beside_interface_default_keeps_own_caps;
+          Alcotest.test_case "an impl method does not capture a defaulted fn" `Quick test_impl_method_does_not_capture_a_defaulted_fn;
           Alcotest.test_case "a cap reached only via an impl method"                 `Quick test_transitive_cap_via_impl_method;
           Alcotest.test_case "the impl dispatch node does not capture a same-named fn" `Quick test_impl_dispatch_node_does_not_capture_a_same_named_fn;
           Alcotest.test_case "a cap reached only via a default argument"             `Quick test_transitive_cap_via_default_argument;

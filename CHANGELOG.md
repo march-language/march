@@ -93,6 +93,12 @@ git log is authoritative for exact commits.
   refused until every actor has switched. Also fixed: with more than 2048 live
   actors of a type, the ones past the 2048th were never migrated at all. See
   `docs/hot-code-reload.md`, "Messages queued during a deploy".
+- **A function with a default argument no longer inherits the capabilities of an
+  interface method with the same name.** In a module that declares both an
+  interface method `f` (with a default body, or implemented by an `impl`) and a
+  plain `fn f(x, y \\ 1)`, the inferred capability closure of the pure `f`, and
+  of every function calling it, picked up whatever the method's body used (for
+  example `IO.Console`). The non-defaulted case was already handled correctly.
 - **A linear value can no longer be discarded with `let _ = …`.** A `_` binding
   counted as the value's one use whenever the value was linear because of how it
   was *bound* rather than what its type says — a `linear x : a` parameter or a
