@@ -96,6 +96,9 @@ let gated : (string * string * compare_mode) list = [
   (* ── core compute / codegen ── *)
   "fib",              "102334155",    Exact;
   "list_ops",         "333333666666", Exact;
+  (* list_ops with its helpers in a nested module, for the hot-reload
+     boundary-cost measurement (#587). Same program, same answer. *)
+  "list_ops_nested",  "333333666666", Exact;
   "merkle",           "6400",         Exact;
   "string_build",     "2888895",      Exact;
   "mutual_recursion",
@@ -128,6 +131,10 @@ let gated : (string * string * compare_mode) list = [
   "par_worksteal", "102334155", Exact;
   "par_map",       "849666",    Exact;
   "parallel",      "16777216",  Exact;
+  (* Two actors exchange 1,000,000 messages (#587). The count is the number of
+     handled messages, and wait_done loops until all have landed, so it does
+     not depend on how the scheduler interleaves them. *)
+  "actor_ping",    "1000000",   Exact;
 
   (* ── pure checksums: one stable line, no timing ──
      Captured 2026-09-16 by compiling each with --opt 2 and running it twice,
