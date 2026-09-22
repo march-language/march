@@ -11,6 +11,19 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+- **A targeted diagnostic for `fn (a, b) -> …` used as a callback over a
+  tuple.** `fn (a, b) -> …` is a two-parameter (curried) lambda, not a lambda
+  that destructures a pair, so `List.map(pairs, fn (k, v) -> v)` was wrong in a
+  way the typechecker used to report badly: either it was accepted with a
+  nonsense type (the result variable absorbed the extra arrow, giving
+  `List(b -> b)`) or it failed with the misleading "this type would have to be
+  infinitely recursive … Did you forget to apply it". A multi-parameter lambda
+  checked against a one-argument callback over a tuple of the same arity now
+  says so and suggests `fn pair -> match pair do (a, b) -> … end`. Genuinely
+  curried callbacks such as `List.fold_left`'s `b -> a -> b` are unaffected,
+  including when the accumulator is itself a tuple.
+
 ### Removed
 - **`MARCH_NO_TRMC` is gone.** The environment variable turned off
   tail-recursion-modulo-cons for every compile in the process, including the
