@@ -10,7 +10,7 @@ name: Sync Docs Search Index
 # no build hook, so the index can only reach production by being committed. See the header
 # of scripts/gen-docs-search-index.sh for the full explanation.
 #
-# ci.yml's doc-lint job runs `gen-docs-search-index.sh --check`, whose digest is a content
+# doc-lint.yml runs `gen-docs-search-index.sh --check`, whose digest is a content
 # hash of EVERY tracked docs/*.{md,html}. That digest goes stale in a way no PR check can
 # prevent: two docs PRs that are each individually green (each regenerated its own index)
 # produce a STALE digest once BOTH merge — the merged tree contains both edits, but the

@@ -17,7 +17,7 @@
 #
 # WHO WRITES IT: bots only. sync-docs-search-index.yml regenerates and pushes on every
 # push to main touching docs/**, and gen-stdlib-docs.yml does the same after a stdlib
-# change. A pull request must NOT carry docs/pagefind/ changes — ci.yml's doc-lint
+# change. A pull request must NOT carry docs/pagefind/ changes — doc-lint.yml
 # rejects one that does — because two PRs that each regenerated the index conflict on
 # every hash-named file plus pagefind-entry.json, and the index is not reproducible so
 # the conflict has no textual resolution. If you regenerated it locally, drop it before

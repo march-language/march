@@ -43,6 +43,8 @@ don't backfill history for versions that predate the file.
 
 ## Build & test
 
+What CI runs, and what each job is for: `.github/workflows/README.md`.
+
 The opam switch is `march`. `opam` and `dune` are available directly in PATH; no wrapper needed.
 
 **NEVER use `eval $(opam env ...)` or any opam env setup prefix.** Run `dune`, `opam`, etc. directly without any preamble.
