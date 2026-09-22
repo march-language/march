@@ -1,3 +1,28 @@
+# CLOSED 2026-09-22: the residual `fib` gap is accepted as the cost of preemptibility
+
+The regression this file tracked was root-caused and fixed on 2026-07-24: the per-call
+preemption check had become a thread-local resolver call. What was left open was the
+residual ~25% gap on `fib` against the 2026-03-24 table (~390 vs 288 ms). That residual is
+not unexplained: it is the per-iteration volatile check plus its call frame, about 2
+cycles per iteration over ~165M post-TRE iterations.
+
+**Decision (repo owner, 2026-09-22): accept it.** Recovering it means checking less often
+(unrolling the TRE loop, or a check-every-N scheme), which trades away preemption
+granularity and re-opens the counter-cost question. Two cheaper-looking variants have
+already been measured and rejected elsewhere: a thread-local throttle counter (+65%
+worse) and in-register reduction counting (not pursued, 2026-08-04; see
+`specs/todos/2026-08-04-x86-benchmark-findings.md`).
+
+`bench/RESULTS.md` no longer calls the gap "unexplained"; it now states the cause and
+points here.
+
+The CAS-cache methodology warning below is still correct and still worth reading before
+any compiled A/B.
+
+---
+
+The original file follows.
+
 # Performance regressions vs the 2026-03-24 benchmark table (OPEN, 2026-07-24)
 
 

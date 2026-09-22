@@ -359,6 +359,10 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **A capability's dictionary type must be monomorphic, and the capabilities chapter now says
+  so.** `proof cap Live with Ops` cannot attach a parameterised `Ops(m)`; the "Runtime
+  dictionaries" section explains the limitation and the way around it (a concrete
+  representation at the boundary, as `Session.Ops` does with `Bytes`).
 - **The language-reference pages on march-lang.org are now generated from
   `specs/lang/`, and the two copies have been reconciled.** Each chapter used to exist
   twice, as independent prose that had drifted both ways, so corrections made in one copy
