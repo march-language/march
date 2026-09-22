@@ -106,7 +106,8 @@ Multiplying by a literal keeps the question in linear arithmetic, where the
 solver always has an answer. You can multiply two variables as well — `v * v > 0`
 is just `v != 0` over the integers — but there the solver may run out of road, and
 a question it can't settle is skipped (reported as `nonlinear-goal`), never turned
-into a complaint. Division (`/`, `%`) isn't part of the fragment.
+into a complaint. The same goes for the argument you pass: `need_pos(y * y + 1)`
+against `{Int | _ > 0}` proves. Division (`/`, `%`) isn't part of the fragment.
 
 ---
 
@@ -1357,7 +1358,7 @@ obligations at all, and the floor is read from a small fixture with one obligati
 alias stops working. This is the failure mode the report exists to expose: a skip and a
 proof both exit 0, and only the count can tell them apart.
 
-Every skip states *why*, one of nine reasons: the predicate's own
+Every skip states *why*, one of eleven reasons: the predicate's own
 sub-expression named in the message has no SMT translation
 (`unreflectable-predicate`), the argument named in the message could not be
 translated (`unreflectable-subject`), a symbol would have needed two
@@ -1367,11 +1368,15 @@ different sorts (`sort-conflict`), the float wellsortedness gate rejected it
 argument the predicate talks about (`unconstrained-subject`), the predicate is
 a top-level `&&` and only some of its conjuncts were proved
 (`partial-conjunct`; the message names which held and which did not), the goal
-names a function the checker has no meaning for (`opaque-application`), or the
-solver simply didn't decide either way (`solver-undecided`).
+names a function the checker has no meaning for (`opaque-application`), the
+goal multiplies two non-constant terms and the solver, incomplete on
+non-linear integer arithmetic, settled it neither way (`nonlinear-goal`), a
+source of a polymorphic call's demanded element did not meet the demand
+(`parametric-source-unproved`), or the solver simply didn't decide either way
+(`solver-undecided`).
 
-`unconstrained-subject`, `partial-conjunct`, and `opaque-application` are all
-more specific answers to the same question `solver-undecided` asks: they fire
+`unconstrained-subject`, `partial-conjunct`, `opaque-application`, and
+`nonlinear-goal` are all more specific answers to the same question `solver-undecided` asks: they fire
 only where the VC was built and the solver ran, and each names a narrower
 reason the proof didn't go through.
 

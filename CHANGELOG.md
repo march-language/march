@@ -120,6 +120,14 @@ git log is authoritative for exact commits.
   refused until every actor has switched. Also fixed: with more than 2048 live
   actors of a type, the ones past the 2048th were never migrated at all. See
   `docs/hot-code-reload.md`, "Messages queued during a deploy".
+- **A refinement check on an argument that multiplies two variables is no longer
+  skipped.** `need_pos(y * y + 1)` against `{Int | _ > 0}` was reported as
+  "the argument could not be translated to SMT", even though predicates and
+  postconditions already accepted the same product. It now proves, so
+  `List.map(ys, fn y -> y * y + 1)` meets a positive-element demand too. A
+  product that really breaks the contract (`need_pos(y * y - 1)` under
+  `y == 0`) is reported with a counterexample. A product goal the solver cannot
+  settle is skipped with the reason `nonlinear-goal`.
 - **A function with a default argument no longer inherits the capabilities of an
   interface method with the same name.** In a module that declares both an
   interface method `f` (with a default body, or implemented by an `impl`) and a
