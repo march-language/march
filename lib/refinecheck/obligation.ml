@@ -109,6 +109,15 @@ type reason =
      source ever runs depends on the caller's data (`List.map([], f)` is
      fine). *)
   | Parametric_source_unproved of string
+  (* The solver REFUTED the goal on some path (its negation was valid under
+     the facts the checker built), but no concrete input could be found that
+     makes the function actually return a value violating the predicate.  A
+     refutation is only as sound as the VC encoding it was drawn from, so an
+     unconfirmed one is not reported: [Violated] is reserved for a failure the
+     interpreter reproduced, which is also what gets an error.  Filed by Tier 2
+     ([Refine_post.check_post_induction]), whose refutations carry no
+     diagnostic of their own. *)
+  | Refuted_unconfirmed
 
 (* [Trusted]: the obligation was [Skipped] for some ordinary reason, but the
    enclosing function carries `@[trusted]`, so under `cap verified` it is
@@ -279,6 +288,7 @@ let reason_name = function
   | Opaque_application _ -> "opaque-application"
   | Partial_conjunct _ -> "partial-conjunct"
   | Parametric_source_unproved _ -> "parametric-source-unproved"
+  | Refuted_unconfirmed -> "refuted-unconfirmed"
 
 (* One clause of plain English per reason, for the `cap verified` error text.
    [reason_name] alone is a debug-report slug; once a reason reaches a USER it
@@ -317,6 +327,9 @@ let reason_detail = function
       (String.concat " and " (List.map (Printf.sprintf "`%s`") held))
       (String.concat " and " (List.map (Printf.sprintf "`%s`") missing))
   | Parametric_source_unproved what -> what
+  | Refuted_unconfirmed ->
+    "the solver refuted the predicate on some path, but no concrete input was \
+     found on which the function returns a value violating it"
 
 (* Deliberately still a 3-tuple: (proved, violated, skips-by-reason).  Every
    existing caller destructures it that way, and [Trusted] does not belong in

@@ -68,8 +68,15 @@ let return_refine_ext (fd : A.fn_def) : (string * A.expr * string option) option
     Some (binder_name binder, pred, Some (meas_sort_name "List"))
   | _ -> None
 
-(* Return-position expressions of a body, each with the path reaching it. *)
-let rec tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list * A.expr) list =
+(* Return-position expressions of a body, each with the path reaching it and
+   the names bound on the way down (by an inner `match` arm's pattern or a
+   `let` in a block ahead of the tail), innermost first.  [check_post_induction]
+   needs the binders: a tail reached under an inner pattern that REBINDS a name
+   its VC already gives a meaning to (`Cons(h2, t)` inside the arm that bound
+   `t` from the scrutinee) must not be checked as if its `t` were the outer
+   one — see [check_tails] there. *)
+let rec tails_bound (path : (A.expr * bool) list) (bound : string list) (e : A.expr) :
+    ((A.expr * bool) list * A.expr * string list) list =
   match e with
   | A.EBlock (es, _) ->
     (match List.rev es with
@@ -77,26 +84,35 @@ let rec tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list
        (* A `let` before the tail REBINDS its names, so any fact the path
           context holds about them is about the outer value — retire it
           (see [path_shadow]). *)
-       let path =
+       let path, bound =
          List.fold_left
-           (fun p e ->
+           (fun (p, bd) e ->
              match e with
-             | A.ELet (b, _) -> path_shadow p (pat_binders b.A.bind_pat)
-             | _ -> p)
-           path es
+             | A.ELet (b, _) ->
+               let ns = pat_binders b.A.bind_pat in
+               (path_shadow p ns, ns @ bd)
+             | A.ELetFn (n, _, _, _, _) -> (p, n.A.txt :: bd)
+             | _ -> (p, bd))
+           (path, bound) es
        in
-       tails path last
-     | [] -> [ (path, e) ])
-  | A.EIf (c, t, el, _) -> tails ((c, false) :: path) t @ tails ((c, true) :: path) el
-  | A.ECond (arms, _) -> List.concat_map (fun (c, b) -> tails ((c, false) :: path) b) arms
+       tails_bound path bound last
+     | [] -> [ (path, e, bound) ])
+  | A.EIf (c, t, el, _) ->
+    tails_bound ((c, false) :: path) bound t @ tails_bound ((c, true) :: path) bound el
+  | A.ECond (arms, _) -> List.concat_map (fun (c, b) -> tails_bound ((c, false) :: path) bound b) arms
   | A.EMatch (_, branches, _) ->
     List.concat_map
       (fun (br : A.branch) ->
-        let path = path_shadow path (pat_binders br.A.branch_pat) in
+        let ns = pat_binders br.A.branch_pat in
+        let path = path_shadow path ns in
         let p = match br.A.branch_guard with Some g -> (g, false) :: path | None -> path in
-        tails p br.A.branch_body)
+        tails_bound p (ns @ bound) br.A.branch_body)
       branches
-  | _ -> [ (path, e) ]
+  | _ -> [ (path, e, bound) ]
+
+(* Return-position expressions of a body, each with the path reaching it. *)
+let tails (path : (A.expr * bool) list) (e : A.expr) : ((A.expr * bool) list * A.expr) list =
+  List.map (fun (p, t, _) -> (p, t)) (tails_bound path [] e)
 
 (* Facts true throughout the body: each refined param contributes its predicate. *)
 (* Returns (decls, assumptions, has_record).
@@ -1031,13 +1047,64 @@ let post_induction_checks (fd : A.fn_def) : bool =
       induction_match_adt c sv.A.txt <> None
     | _ -> false)
 
-let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
+let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_def) : bool =
   let self = fd.A.fn_name.A.txt in
   let dummy_span = fd.A.fn_name.A.span in
   let evar x = A.EVar { A.txt = x; A.span = dummy_span } in
   match post_induction_shape fd with
   | None -> false
   | Some (ret_adt, binder, params, pred, c, ps) ->
+      (* The positive-goal models of every tail [check_tail] REFUTED, as
+         candidate counterexamples for [settle_refutation]. *)
+      let refuted_models : (string * string) list list ref = ref [] in
+      (* ── A refutation is a CANDIDATE, not a verdict ─────────────────────
+         [check_tail] calls a tail violated when the negated goal is valid
+         under the facts it built.  That is exactly as sound as the encoding
+         of those facts, and an encoding slip turns a TRUE contract into a
+         "violation": `copy2`'s inner `Cons(h2, t)` once rebound the `t` the
+         outer pattern equation was about, which made `len(_) == len(xs)`
+         read as `2 + len(t) == 1 + len(t)`.  The ledger then counted a
+         violation that no diagnostic ever reported.
+
+         So a refuted obligation counts as [Violated] only once the
+         interpreter REPRODUCES it (a decoded model of a refuted tail, or the
+         small-value battery, run through the function and observed to return
+         a value outside the predicate), and then it is reported, exactly as
+         [check_post] reports a witness-confirmed failure.  Anything else is a
+         [Refuted_unconfirmed] skip: the ledger and the diagnostics agree
+         either way.  Recording pass only ([record]), like the ledger. *)
+      let settle_refutation () : Obligation.verdict =
+        let fn_params = List.map (fun fp -> (param_name_of fp, param_ty_of fp)) c.A.fc_params in
+        let witness =
+          match
+            List.find_map
+              (fun model -> Witness.confirm_post ~fn_name:self ~fn_params ~binder ~ret_pred:pred ~model)
+              (List.rev !refuted_models)
+          with
+          | Some w -> Some w
+          | None -> Witness.confirm_enumerative ~fn_name:self ~fn_params ~binder ~ret_pred:pred
+        in
+        match witness with
+        | None -> Obligation.Skipped Obligation.Refuted_unconfirmed
+        | Some (args, ret) ->
+          let p = pred_str pred in
+          let but =
+            match Witness.render_call self args, Witness.render_value ret with
+            | Some call, Some ret_str -> Printf.sprintf "\n\nbut %s returns %s." call ret_str
+            | _ -> ""
+          in
+          Err.report errctx
+            { March_errors.Errors.severity = March_errors.Errors.Error
+            ; span = c.A.fc_span
+            ; message =
+                Printf.sprintf
+                  "`%s` does not satisfy its return type constraint on all code paths.\n\nThe return type requires:\n\n    %s%s"
+                  self p but
+            ; labels = []
+            ; notes = [ Printf.sprintf "Every branch must produce a return value satisfying `%s`." p ]
+            ; code = None; fix = None };
+          Obligation.Violated
+      in
       (* ── The single VC builder, shared by every accepted body shape ────────
          [mctx] is the INDUCTION context — the matched parameter, its ADT sort,
          its index in the parameter list, and the structurally-smaller variables
@@ -1434,10 +1501,14 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
                   (* DEFINITE failure only: "not proved" is not "violated".  The
                      predicate is reported as violated only when its NEGATION is
                      itself Verified — i.e. it can never hold. *)
-                  | _ ->
+                  | first ->
                     if Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal }
                        = Refine.Verified
-                    then Some Obligation.Violated
+                    then begin
+                      (* A CANDIDATE only: [settle_refutation] decides. *)
+                      refuted_models := model_of first :: !refuted_models;
+                      Some Obligation.Violated
+                    end
                     else Some (Obligation.Skipped Obligation.Solver_undecided))
       in
       (match induction_body c.A.fc_body with
@@ -1487,6 +1558,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
             in
             Obligation.Skipped (Obligation.Unreflectable_subject body_display)
         in
+        let v = if record && v = Obligation.Violated then settle_refutation () else v in
         if record then
           Obligation.record
             { Obligation.span = fd.A.fn_name.A.span
@@ -1574,10 +1646,36 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
               in
               (* Fold, not for_all: no short-circuit, so the VC cache is warmed
                  uniformly and the verdict is order-independent. *)
+              (* A tail under an inner binder that REBINDS a name this VC
+                 already gives a meaning to (a parameter, or a binder of the
+                 arm's own pattern, which the pattern EQUATION is about) is
+                 not checked: its `t` is not the equation's `t`, and reading
+                 it as one both refuted the true `copy2` contract and proved a
+                 false one.  A skip, never a proof or a violation. *)
               let check_tails ~pat body =
-                let ts = tails base_path body in
+                let outer =
+                  params @ (match pat with Some (bs, _) -> List.map fst bs | None -> [])
+                in
+                let ts = tails_bound base_path [] body in
                 (ts <> [] || reject ())
-                && List.fold_left (fun acc t -> proved_tail ~mctx ~pat t && acc) true ts
+                && List.fold_left
+                     (fun acc (path, t, bound) ->
+                       (match
+                          List.find_opt (fun n -> List.mem n outer && expr_mentions [ n ] t) bound
+                        with
+                        | Some n ->
+                          verdicts :=
+                            Obligation.Skipped
+                              (Obligation.Unreflectable_subject
+                                 (Printf.sprintf
+                                    "the return expression of `%s` under an inner binding that \
+                                     rebinds `%s`"
+                                    self n))
+                            :: !verdicts;
+                          false
+                        | None -> proved_tail ~mctx ~pat (path, t))
+                       && acc)
+                     true ts
               in
               match br.A.branch_pat with
               | A.PatCon (ct, subpats) when ctor_belongs ct.A.txt madt -> (
@@ -1607,7 +1705,7 @@ let check_post_induction ~root ?(record = true) (fd : A.fn_def) : bool =
               let vs = List.rev !verdicts in
               let v =
                 if ok then Obligation.Proved
-                else if List.mem Obligation.Violated vs then Obligation.Violated
+                else if List.mem Obligation.Violated vs then settle_refutation ()
                 else
                   match List.find_opt (fun v -> v <> Obligation.Proved) vs with
                   | Some v -> v
@@ -1725,20 +1823,20 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
     true
   | _ ->
   match return_refine_ext fd with
-  | None -> check_post_induction ~root ~record:emit fd
+  | None -> check_post_induction ~root errctx ~record:emit fd
   (* A LIST return takes the elts path ONLY when its predicate uses `elts`;
      a list contract over an Int measure (`llen(_) == llen(xs) + 1`) keeps
      the Tier 2 induction path it always had, which the elts path cannot
      replace (it never reduces a measure through the recursion). *)
   | Some (_, ret_pred, Some marker) when is_meas_sort marker && not (pred_mentions_elts ret_pred) ->
-    check_post_induction ~root ~record:emit fd
+    check_post_induction ~root errctx ~record:emit fd
   (* An `elts` list contract whose body recurses over a list parameter is
      proved by induction when it can be (plan step 2.3); the elts path below,
      which reports definite failures but never reduces through the
      recursion, still runs when induction does not prove it. *)
   | Some (_, ret_pred, Some marker)
     when is_meas_sort marker && post_induction_checks fd
-         && check_post_induction ~root ~record:false fd ->
+         && check_post_induction ~root errctx ~record:false fd ->
     (* Recorded here, once: the elts path records its own verdict when it runs
        instead, so the induction attempt itself must not. *)
     if emit then
