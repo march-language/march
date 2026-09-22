@@ -42,6 +42,12 @@ let load_config path =
                  Printf.eprintf
                    "forge lint: unknown severity %S for rule %S in .march-lint.toml\n%!"
                    v key)
+            | Toml.Bool b ->
+              (* Bare true/false used to lex as a Str and land in the arm
+                 above; keep telling the user it is not a severity. *)
+              Printf.eprintf
+                "forge lint: unknown severity %S for rule %S in .march-lint.toml\n%!"
+                (string_of_bool b) key
             | _ -> ()
           ) pairs));
   cfg

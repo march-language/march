@@ -1,8 +1,14 @@
 (** Minimal TOML parser for forge.toml.
-    Supports: quoted strings, bare values, inline tables, sections, comments. *)
+    Supports: quoted strings, booleans, bare values, inline tables, sections,
+    comments. *)
 
 type value =
   | Str of string
+    (** A quoted string, or any bare value that is not a boolean (bare
+        values such as versions have always read as strings). *)
+  | Bool of bool
+    (** The bare words [true] / [false] exactly (TOML booleans are
+        lowercase). A quoted ["true"] stays a [Str]. *)
   | InlineTable of (string * value) list
   | Array of value list
 
@@ -87,7 +93,12 @@ let rec parse_value s i =
       incr i
     done;
     let v = String.trim (String.sub s start (!i - start)) in
-    (Str v, !i)
+    let v = match v with
+      | "true"  -> Bool true
+      | "false" -> Bool false
+      | v       -> Str v
+    in
+    (v, !i)
 
 and parse_array s i =
   let n = String.length s in
@@ -195,6 +206,11 @@ let get_all_sections doc name =
 let get_string pairs key =
   match List.assoc_opt key pairs with
   | Some (Str s) -> Some s
+  | _ -> None
+
+let get_bool pairs key =
+  match List.assoc_opt key pairs with
+  | Some (Bool b) -> Some b
   | _ -> None
 
 let get_table pairs key =

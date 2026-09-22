@@ -72,6 +72,11 @@ type project = {
   license       : string option;  (** SPDX license id, e.g. "MIT" *)
   repository    : string option;  (** source repository URL *)
   homepage      : string option;  (** project homepage URL *)
+  pin_main      : bool;
+  (** [package] pin_main = true: compile with `march --pin-main`, so the
+      binary runs `main` on the process main thread (scheduler 0) without
+      needing MARCH_PIN_MAIN=1 in the environment -- Cocoa/GLFW windows must
+      be created there. Default false. *)
   deps          : (string * dep) list;
   dev_deps      : (string * dep) list;  (** dev + test — don't ship *)
   dev_only_deps : (string * dep) list;  (** dev only — not available in test *)
@@ -171,7 +176,7 @@ let parse_deps_section dep_pairs =
         (* Bare-string shorthand `name = "0.2.1"` is a registry dep with that
            version constraint — the most common declaration form. *)
         Some (dep_name, RegistryDep { version })
-      | Toml.Array _ -> None
+      | Toml.Array _ | Toml.Bool _ -> None
     ) dep_pairs
 
 (** Parse deps from dot-sections like [deps.depot] and [dev-deps.name]. *)
@@ -240,6 +245,16 @@ let load_from root =
   let license     = Toml.get_string pkg "license" in
   let repository  = Toml.get_string pkg "repository" in
   let homepage    = Toml.get_string pkg "homepage" in
+  (* A non-boolean pin_main is an error rather than a silent "off": a GUI app
+     that quietly did not pin fails as a window that never appears, with no
+     diagnostic anywhere. *)
+  let pin_main =
+    match List.assoc_opt "pin_main" pkg with
+    | None -> false
+    | Some (Toml.Bool b) -> b
+    | Some _ ->
+      failwith "forge.toml: [package] pin_main must be true or false (unquoted)"
+  in
   (* [deps] inline + section forms *)
   let inline_deps   = parse_deps_section (Toml.get_section doc "deps") in
   let section_deps  = parse_section_deps "deps" doc in
@@ -330,7 +345,7 @@ let load_from root =
     Toml.get_string_list (Toml.get_section doc "contracts") "no_alloc" in
   { name; version; project_type = project_type_of_string type_str;
     description; author; root; entrypoint; march_req; license; repository; homepage;
-    deps; dev_deps; dev_only_deps; test_deps; patches; archive_tasks; archive_deps;
+    pin_main; deps; dev_deps; dev_only_deps; test_deps; patches; archive_tasks; archive_deps;
     preprocessors; ffi_sources; ffi_link; ffi_rust; js_deps; hot_reload;
     contracts_no_alloc }
 

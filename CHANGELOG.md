@@ -56,6 +56,12 @@ git log is authoritative for exact commits.
   `Session.in_process_with(trace)` reports what the transport itself does, and
   `t.take(())` serves endpoints hosted in actors. Replaces the hand-written
   `Session.Ops` the guide used to point at.
+- **`forge.toml` `[package] pin_main = true` runs a program's `main` on the
+  process main thread** (what Cocoa and GLFW need to open a window) by compiling
+  with `march --pin-main`, so a double-clicked app no longer depends on
+  `MARCH_PIN_MAIN=1` being set. It covers `forge build`, `forge run --compiled`,
+  `forge bench` and `forge install`. forge's TOML reader now understands bare
+  `true`/`false`; a non-boolean `pin_main` is an error.
 - **`MARCH_PREEMPT_SIGNAL` chooses the green-thread preemption signal** (`USR1`,
   the default, `USR2`, or on Linux `RTMIN[+n]`); embedders can call
   `march_sched_set_preempt_signal`. `Signal.watch` reserves whichever signal is

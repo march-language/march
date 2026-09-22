@@ -522,13 +522,17 @@ let output_ext = function
   | Some t when String.length t >= 4 && String.sub t 0 4 = "wasm" -> ".wasm"
   | _ -> ""
 
-(** Compile the entry file to [output]. [target] is passed as --target <t>;
-    omitting it compiles to a native binary.
-    Returns [(exit_code, n_errors, n_warnings)]. *)
-let compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target entry =
+(** The shell command that compiles the entry file to [output]. [target] is
+    passed as --target <t>; omitting it compiles to a native binary.
+    [pin_main] (from forge.toml's [package] pin_main) adds --pin-main; when it
+    is false the command is byte-identical to what forge ran before the key
+    existed (pinned by forge/test/test_forge.ml's "pin_main" group). *)
+let compile_command ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target
+    ~pin_main entry =
   let opt_flag    = if release then " --opt 2" else " --opt 0" in
   let dump_flag   = if dump_phases then " --dump-phases" else "" in
   let target_flag = match target with Some t -> " --target " ^ t | None -> "" in
+  let pin_flag    = if pin_main then " --pin-main" else "" in
   (* Optional List.pmap sequential-fallback cutoff, passed through to the
      compiler.  Sourced from MARCH_PMAP_THRESHOLD so the value can flow
      without a forge.toml schema change. *)
@@ -537,9 +541,17 @@ let compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target
     | Some v when v <> "" -> " --pmap-threshold=" ^ v
     | _ -> ""
   in
+  Printf.sprintf "%smarch --compile -o %s%s%s%s%s%s%s %s"
+    lib_path_env (Filename.quote output) opt_flag pmap_flag target_flag
+    pin_flag dump_flag ffi_flags (Filename.quote entry)
+
+(** Compile the entry file to [output] (see [compile_command]).
+    Returns [(exit_code, n_errors, n_warnings)]. *)
+let compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target
+    ~pin_main entry =
   let cmd =
-    Printf.sprintf "%smarch --compile -o %s%s%s%s%s%s %s"
-      lib_path_env (Filename.quote output) opt_flag pmap_flag target_flag dump_flag ffi_flags (Filename.quote entry)
+    compile_command ~lib_path_env ~ffi_flags ~output ~release ~dump_phases
+      ?target ~pin_main entry
   in
   let (rc, content) = run_capturing_stderr cmd in
   let (e, w) = count_diagnostics content in
@@ -809,7 +821,8 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
           match npm_result with
           | Error e -> Error e
           | Ok () ->
-          let (rc, ce, cw) = compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target entry_path in
+          let (rc, ce, cw) = compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target
+              ~pin_main:proj.Project.pin_main entry_path in
           print_build_summary ~t0 ~errors:(te + ce) ~warnings:(tw + cw);
           if rc = 0 then begin
             do_islands ();

@@ -98,6 +98,28 @@ code; outside a project it runs standalone. Arguments after `--` reach the
 program as `System.argv()`, with `argv[0]` the script path when interpreted and
 the binary path when compiled. Passing arguments requires naming a FILE.
 
+#### GUI apps: `main` on the process main thread
+
+Cocoa and GLFW only create windows from the process main thread. Setting
+`pin_main` in `[package]` compiles the project with `march --pin-main`, so the
+binary runs `main` there on its own, without `MARCH_PIN_MAIN=1` in the
+environment (a double-clicked app has no such environment):
+
+```toml
+[package]
+name = "my_gui_app"
+version = "0.1.0"
+pin_main = true   # unquoted boolean; default false
+```
+
+It applies to every command that compiles the project's program: `forge build`,
+`forge run --compiled` (including a named FILE inside the project),
+`forge bench` and `forge install`. It does not change `forge test`, whose
+compiled test binary already runs every test on the process main thread, or
+interpreted runs, which have no compiled entry point. Any value other than
+`true` or `false`, including the quoted string `"true"`, is a `forge.toml`
+error rather than a silent "off".
+
 In a workspace, build a single member:
 
 ```sh
