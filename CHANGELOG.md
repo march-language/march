@@ -47,6 +47,12 @@ git log is authoritative for exact commits.
   about 18 KB more, and `Vault.size`/`Vault.keys` walk shard by shard, so their result
   is a recent count rather than a single instant's snapshot of the whole table.
 ### Added
+- **The type checker can reserve a builtin for the standard library.** A reference to
+  a reserved builtin from user code, the REPL included, is an error that names the
+  stdlib function to use instead:
+  `` `pid_of_int` is internal to the standard library; use `Actor.list(cap)` ``. No
+  builtin is reserved yet: the raw actor-reference builtins will be once their
+  capability-taking wrappers exist.
 - **A choreography role's first state now has a name: `<P>_<Role>.Entry`.** A role
   body's signature used to have to spell the state `register` yields, which meant
   working out `S_` plus the first step of that role's own projection

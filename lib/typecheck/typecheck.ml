@@ -7575,6 +7575,10 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
      place to carry the exemption rather than a flag threaded from the CLI. *)
   let env = { env with root_cap_allowed = true } in
   record_names_load env.record_names_snapshot;   (* per-check, see [record_names_dump] *)
+  (* REPL input is user code: the stdlib-only builtin gate applies. Its
+     top-level declarations never pass through [check_module_needs] (nested
+     modules do), so run the gate here. *)
+  check_stdlib_only_refs env m.Ast.mod_decls;
   let errors = env.errors in
   let type_map = env.type_map in
   let rec prebind_mod_members_inc ?(opaque = StringSet.empty) prefix e decls =

@@ -23,6 +23,11 @@ val is_migrate_fn_name : string -> bool
 val check_module_needs :
   env -> Ast.name -> cap_qname_prefix:string -> Ast.decl list -> unit
 
+(** Report every reference to a [Typecheck_builtins.stdlib_only] builtin from
+    a declaration outside the standard library. Called by
+    [check_module_needs]; the REPL path calls it for its top-level fragment. *)
+val check_stdlib_only_refs : env -> Ast.decl list -> unit
+
 (** Single-purpose capability passes, each run once per [check_module]. *)
 
 val check_cap_narrow_sites : env -> unit
