@@ -444,11 +444,12 @@ let rec check_tail_position
                condition rather than a verdict.
 
                It first promised the loop unconditionally, which was false while
-               `Trmc.enabled` defaulted to false. It was then reworded to say
+               TRMC was off by default. It was then reworded to say
                the transform is opt-in and to pass `--trmc` — which became false
                on 2026-09-09 when the default flipped, and which is the worse
                error of the two: it tells the user to work around a problem the
-               compiler has already solved.
+               compiler has already solved. Since 2026-09-22 TRMC cannot be
+               turned off at all, so no flag is mentioned.
 
                The typechecker runs before TIR and has no eligibility
                information, so it cannot say WHICH of the two cases this
@@ -459,8 +460,8 @@ let rec check_tail_position
                  "Warning: function `%s` is structurally recursive but not \
                   tail-recursive. If the recursive call is the direct argument \
                   of a constructor in tail position, tail-recursion-modulo-cons \
-                  compiles it to a loop with no extra stack (on by default; \
-                  `--no-trmc` disables it). Otherwise it uses O(depth) stack \
+                  compiles it to a loop with no extra stack (it always runs). \
+                  Otherwise it uses O(depth) stack \
                   space and deep input can overflow the stack — consider an \
                   accumulator parameter."
                  fn_name)

@@ -82,12 +82,10 @@ times it is 4.8× faster than the same source compiled without the transform.
 
 ### If you need the old behaviour
 
-```
-march --compile --no-trmc …
-```
-
-0.4.0 also accepted `MARCH_NO_TRMC=1` as an environment spelling; later
-versions removed it, so pass the flag.
+0.4.0 accepted `--no-trmc` (and `MARCH_NO_TRMC=1`) to turn the transform off.
+Later versions removed both: TRMC always runs and cannot be disabled, because
+the stdlib's own list producers rely on it to run as loops instead of
+overflowing the stack on long lists.
 
 ### Will this change my existing code?
 

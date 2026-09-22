@@ -3051,7 +3051,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ;; TRMC's reuse_hole on a SHARED scrutinee moved the cell's fields out with
 ;; no dup (the case arm's rb_shared path recognised only EReuse): the next
 ;; iteration reused a cell another holder still had. Pre-fix: RC underflow;
-;; --no-trmc was fine. Expected output is the interpreter's.
+;; the non-TRMC build (a since-removed flag) was fine. Expected output is the interpreter's.
 (rule
  (targets native_trmc_shared_tail_reuse native_trmc_shared_tail_reuse.out)
  (deps (file %{exe:../bin/main.exe})

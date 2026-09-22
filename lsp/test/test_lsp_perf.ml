@@ -180,7 +180,9 @@ end
   (* The editor's copy of the compiler's structural-recursion warning. It has
      tracked that message through two wrong versions -- first "No rewrite
      needed" (false while TRMC was opt-in), then "OFF BY DEFAULT; enable it
-     with --trmc" (false since the default flipped on 2026-09-09). Both were
+     with --trmc" (false since the default flipped on 2026-09-09), and after
+     that "on by default (`--no-trmc` disables it)" (false since the flag was
+     removed on 2026-09-22). All three were
      verdicts; the analysis has no eligibility information and cannot give one.
      Pin the CONDITION instead, matching test_compiler.ml's case on the
      compiler-side copy. *)
@@ -188,10 +190,10 @@ end
     false (has "No rewrite needed" ctor);
   Alcotest.(check bool) "constructor case states the shape TRMC handles"
     true (has "direct argument of a constructor in tail position" ctor);
-  Alcotest.(check bool) "constructor case says TRMC is on by default"
-    true (has "on by default" ctor);
-  Alcotest.(check bool) "constructor case does not tell the user to pass --trmc"
-    false (has "enable it with `--trmc`" ctor);
+  Alcotest.(check bool) "constructor case says TRMC always runs"
+    true (has "always runs" ctor);
+  Alcotest.(check bool) "constructor case names no TRMC flag (none exists)"
+    false (has "trmc`" ctor);
   Alcotest.(check bool) "constructor case no longer says TRMC is off by default"
     false (has "off by default" ctor);
   (* Non-vacuousness: the arithmetic case still gives the old advice, so the

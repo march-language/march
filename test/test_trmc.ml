@@ -427,14 +427,8 @@ let test_transform_is_idempotent_on_a_transformed_module () =
                           [Tir.AVar h; Tir.AVar t]))
   in
   let m = module_of [fn "f" [v "xs" list_int] body] in
-  (* Save and restore rather than forcing false: the default is a compiler-wide
-     setting that may flip, and a test must not silently redefine it for every
-     case that runs after this one. *)
-  let saved = !Trmc.enabled in
-  Trmc.enabled := true;
   let once = Trmc.transform_module m in
   let twice = Trmc.transform_module once in
-  Trmc.enabled := saved;
   (* Non-vacuousness: the first pass must actually have added the helper. *)
   Alcotest.(check int) "first transform adds the $dps helper"
     2 (List.length once.Tir.tm_fns);
@@ -468,8 +462,6 @@ let render (m : Tir.tir_module) =
   String.concat "\n" (List.map Pp.string_of_fn_def m.Tir.tm_fns)
 
 let test_fresh_names_are_independent_of_run_order () =
-  let saved = !Trmc.enabled in
-  Trmc.enabled := true;
   let target = trmc_fixture_module "f" in
   (* Reset explicitly first so this case does not inherit whatever earlier
      cases in this process left in the counter — the point under test is
@@ -479,7 +471,6 @@ let test_fresh_names_are_independent_of_run_order () =
   (* Burn counter values on an unrelated module. *)
   ignore (Trmc.transform_module (trmc_fixture_module "g"));
   let after_other = render (Trmc.transform_module target) in
-  Trmc.enabled := saved;
   (* Non-vacuousness: the fixture must actually mint at least one $trmc name,
      otherwise both sides are equal no matter what the counter does. *)
   let mentions_trmc s =
