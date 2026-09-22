@@ -170,6 +170,12 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
         (* `may crash` is a declaration, checked by the typechecker (rule 6);
            the roles it names reach [project] through [crashers_of]. *)
         | ProtoMayCrash _ -> []
+        (* `role R needs ...` is a claim about the role's code, not about the
+           wire: it is read by [grants_of] (for the body type, D34) and by the
+           typechecker, and never reaches the annotated steps, so
+           [fingerprint_of] cannot see it.  Two nodes built with different
+           grants must still talk (plan II.2). *)
+        | ProtoRoleNeeds _ -> []
         (* The message is named first, its crash branch after it, in reading
            order. *)
         | ProtoCrashOr (inner, crash, _) ->
@@ -217,6 +223,16 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
 (** The roles a protocol declares `may crash`. *)
 let crashers_of (steps : protocol_step list) : string list =
   List.concat_map (function ProtoMayCrash (rs, _) -> List.map (fun (r : name) -> r.txt) rs | _ -> []) steps
+
+(** Each role's declared grant (`role R needs ...`), as dot-joined capability
+    paths in declaration order; a role with no line is absent.  Read from the
+    raw steps, not the annotated ones, which drop the line. *)
+let grants_of (steps : protocol_step list) : (string * string list) list =
+  List.concat_map
+    (function
+      | ProtoRoleNeeds (r, caps, _) -> [ (r.txt, List.map (fun (c : name) -> c.txt) caps) ]
+      | _ -> [])
+    steps
 
 (** All roles, in order of FIRST APPEARANCE.  The typechecker sorts them, but
     the order here is user-visible -- it is the role index a transport is

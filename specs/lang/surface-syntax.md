@@ -1071,7 +1071,12 @@ end
 -- label: `@[endpoints]` then names the message `Item` (`send_Item`,
 -- `recv_Item`) instead of `Msg_Prod_Cons_1`. A branch's head message is
 -- named by the branch label and takes no label of its own.
+-- `role R needs IO.X, ...` grants the role's code those capabilities (see
+-- choreography.md, "Per-role grants"); it must come before the first
+-- message step, and `role` is a soft keyword, an identifier elsewhere.
 protocol Stream do
+  role Prod needs IO.Console
+  role Cons needs IO.Console, IO.FileWrite
   loop do
     item: Prod -> Cons : Int
     choose by Cons:

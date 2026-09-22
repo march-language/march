@@ -1271,6 +1271,8 @@ and emit_proto_step ctx = function
     line ctx "stop"
   | ProtoMayCrash (roles, _) ->
     line ctx (Printf.sprintf "may crash %s" (String.concat ", " (List.map (fun r -> r.txt) roles)))
+  | ProtoRoleNeeds (role, caps, _) ->
+    line ctx (Printf.sprintf "role %s needs %s" role.txt (String.concat ", " (List.map (fun c -> c.txt) caps)))
   | ProtoCrashOr (inner, crash, _) ->
     (match inner with
      | ProtoMsg (s, r, t, label) ->

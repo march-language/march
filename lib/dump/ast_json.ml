@@ -974,6 +974,12 @@ and protocol_step_to_json (ps : protocol_step) : string =
       ("kind", Dump.json_string "ProtoMayCrash");
       ("roles", Dump.json_list (List.map name_to_json roles));
     ]
+  | ProtoRoleNeeds (role, caps, _) ->
+    Dump.json_obj [
+      ("kind", Dump.json_string "ProtoRoleNeeds");
+      ("role", name_to_json role);
+      ("caps", Dump.json_list (List.map name_to_json caps));
+    ]
   | ProtoCrashOr (inner, crash, _) ->
     Dump.json_obj [
       ("kind", Dump.json_string "ProtoCrashOr");

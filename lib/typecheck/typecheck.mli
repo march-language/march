@@ -295,6 +295,7 @@ type env = {
   ceiling_extra_roots : (string, unit) Hashtbl.t;
   fn_refs : (string, string list) Hashtbl.t;
   fn_row_bodies : (string, (string list * Ast.expr) list) Hashtbl.t;
+  role_grants : (string * string, string list * Ast.span) Hashtbl.t;
   fn_grant_points : (string, string list * Ast.span) Hashtbl.t;
   local_mods : string list StrMap.t;
   offer_conts : (session_ty ref * (string * session_ty) list) list ref;

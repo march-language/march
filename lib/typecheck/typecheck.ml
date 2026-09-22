@@ -4984,6 +4984,88 @@ include Typecheck_modcaps
    The generator (desugar) has already run when this is checked; it projects
    an ill-formed protocol into something, and this reports why the program is
    still refused. *)
+(* `role R needs IO.X, ...` (distributed-deploys plan, section 2 and II.2):
+   the role's capability GRANT.  Checked here for what the grammar leaves
+   open, and recorded into [env.role_grants] for [check_role_grants] and the
+   authority report:
+   - it is a top-level step and comes BEFORE the first message step, which
+     is what lets [Desugar_endpoints.fingerprint_of] leave it out: a grant is
+     a claim about the role's code, not about the wire, and two nodes with
+     different grants must still talk;
+   - it names a role of the protocol, once;
+   - every path is a known capability, with the same did-you-mean as a
+     module's `needs` (Check 0, [Typecheck_caps.check_module_needs]): a typo
+     here would otherwise surface as a body "reaching" a capability that its
+     grant spells almost right. *)
+let check_role_needs env ~proto (pdef : Ast.protocol_def) : unit =
+  let err ~span msg = Err.error env.errors ~span (Printf.sprintf "Protocol `%s`: %s" proto msg) in
+  let rec roles_in (steps : Ast.protocol_step list) : string list =
+    List.concat_map
+      (function
+        | Ast.ProtoMsg (s, r, _, _) -> [ s.Ast.txt; r.Ast.txt ]
+        | Ast.ProtoLoop inner -> roles_in inner
+        | Ast.ProtoChoice (c, brs) -> c.Ast.txt :: List.concat_map (fun (_, arm) -> roles_in arm) brs
+        | Ast.ProtoStop _ | Ast.ProtoMayCrash _ | Ast.ProtoRoleNeeds _ -> []
+        | Ast.ProtoCrashOr (inner, crash, _) -> roles_in (inner :: crash))
+      steps
+  in
+  let all_roles = List.sort_uniq String.compare (roles_in pdef.Ast.proto_steps) in
+  let rec nested = function
+    | [] -> ()
+    | Ast.ProtoRoleNeeds (_, _, sp) :: rest ->
+      err ~span:sp "`role ... needs` must be a top-level step of the protocol, before its first message.";
+      nested rest
+    | Ast.ProtoLoop inner :: rest -> nested inner; nested rest
+    | Ast.ProtoChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> nested arm) brs; nested rest
+    | Ast.ProtoCrashOr (_, crash, _) :: rest -> nested crash; nested rest
+    | _ :: rest -> nested rest
+  in
+  let seen = Hashtbl.create 4 in
+  let rec top ~after_message = function
+    | [] -> ()
+    | Ast.ProtoRoleNeeds (r, caps, sp) :: rest ->
+      let ok = ref true in
+      if after_message then begin
+        ok := false;
+        err ~span:sp
+          (Printf.sprintf
+             "`role %s needs ...` must come before the protocol's first message step. \
+              A grant is about the role's code, not the conversation, so it is not part \
+              of the protocol's fingerprint; keeping it at the top keeps that visible."
+             r.Ast.txt)
+      end;
+      if not (List.mem r.Ast.txt all_roles) then begin
+        ok := false;
+        err ~span:r.Ast.span (Printf.sprintf "`role %s needs ...` names a role that is not in the protocol." r.Ast.txt)
+      end;
+      if Hashtbl.mem seen r.Ast.txt then begin
+        ok := false;
+        err ~span:r.Ast.span
+          (Printf.sprintf "`role %s needs ...` is declared twice. List every capability on one line." r.Ast.txt)
+      end;
+      Hashtbl.replace seen r.Ast.txt ();
+      List.iter
+        (fun (c : Ast.name) ->
+           match March_caps.Cap_lattice.suggest_cap c.txt with
+           | None -> ()
+           | Some known ->
+             ok := false;
+             Err.error_with_fix env.errors ~span:c.span
+               ~fix:(Err.FReplace { span = c.span; text = known })
+               (Printf.sprintf "`%s` is not a known capability.\nhelp: did you mean `%s`?" c.txt known))
+        caps;
+      if !ok then
+        Hashtbl.replace env.role_grants (proto, r.Ast.txt)
+          (List.map (fun (c : Ast.name) -> c.txt) caps, sp);
+      top ~after_message rest
+    | Ast.ProtoMayCrash _ :: rest -> top ~after_message rest
+    | Ast.ProtoLoop inner :: rest -> nested inner; top ~after_message:true rest
+    | Ast.ProtoChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> nested arm) brs; top ~after_message:true rest
+    | Ast.ProtoCrashOr (_, crash, _) :: rest -> nested crash; top ~after_message:true rest
+    | (Ast.ProtoMsg _ | Ast.ProtoStop _) :: rest -> top ~after_message:true rest
+  in
+  top ~after_message:false pdef.Ast.proto_steps
+
 let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
   let err ~span msg = Err.error env.errors ~span (Printf.sprintf "Protocol `%s`: %s" proto msg) in
   let rec roles_in (steps : Ast.protocol_step list) : string list =
@@ -4992,7 +5074,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
         | Ast.ProtoMsg (s, r, _, _) -> [ s.Ast.txt; r.Ast.txt ]
         | Ast.ProtoLoop inner -> roles_in inner
         | Ast.ProtoChoice (c, brs) -> c.Ast.txt :: List.concat_map (fun (_, arm) -> roles_in arm) brs
-        | Ast.ProtoStop _ | Ast.ProtoMayCrash _ -> []
+        | Ast.ProtoStop _ | Ast.ProtoMayCrash _ | Ast.ProtoRoleNeeds _ -> []
         | Ast.ProtoCrashOr (inner, crash, _) -> roles_in (inner :: crash))
       steps
   in
@@ -5047,7 +5129,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
     | Ast.ProtoLoop inner :: rest ->
       (match first_interaction p inner with Some x -> Some x | None -> first_interaction p rest)
     | Ast.ProtoStop _ :: _ -> None
-    | Ast.ProtoMayCrash _ :: rest -> first_interaction p rest
+    | Ast.ProtoMayCrash _ :: rest | Ast.ProtoRoleNeeds _ :: rest -> first_interaction p rest
     | Ast.ProtoChoice (c, brs) :: rest ->
       if c.Ast.txt = p then Some (`Choose, None)
       else
@@ -5104,7 +5186,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
   let rec walk ~tail ~(dead : string list) (steps : Ast.protocol_step list) =
     match steps with
     | [] -> ()
-    | Ast.ProtoMayCrash _ :: rest -> walk ~tail ~dead rest
+    | Ast.ProtoMayCrash _ :: rest | Ast.ProtoRoleNeeds _ :: rest -> walk ~tail ~dead rest
     | Ast.ProtoStop _ :: rest -> walk ~tail ~dead rest
     | Ast.ProtoLoop inner :: rest -> walk ~tail:inner ~dead inner; walk ~tail ~dead rest
     | Ast.ProtoMsg (s, r, _, _) :: rest ->
@@ -5818,13 +5900,14 @@ let rec check_decl env (d : Ast.decl) : env =
                "Protocol `%s`: `stop` outside of a `loop` has no effect — the \
                 protocol already ends here if you just write nothing."
                name.txt)
-      | Ast.ProtoMayCrash _ -> ()
+      | Ast.ProtoMayCrash _ | Ast.ProtoRoleNeeds _ -> ()
       | Ast.ProtoCrashOr (inner, crash, _) ->
         validate_step ~in_loop inner;
         List.iter (validate_step ~in_loop) crash
     in
     List.iter (validate_step ~in_loop:false) pdef.proto_steps;
     check_crash_branches env ~proto:name.txt pdef;
+    check_role_needs env ~proto:name.txt pdef;
     (* A `loop` never exits (its projection is `Rec X. S[X]`), so any step that
        follows one at the same nesting level is unreachable. *)
     (* [tail] is what follows at every ENCLOSING level.  A `choose` branch's

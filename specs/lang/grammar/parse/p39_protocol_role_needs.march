@@ -1,0 +1,32 @@
+-- §9.4 protocol_step: `role R needs cap_path, ...`, a role's capability grant
+-- (distributed-deploys step 4, 2026-09-22).  ROLE is a soft keyword: the
+-- token filter keeps it only before an uppercase name, so `role` as an
+-- identifier (below) still parses.  The grant lines sit before the first
+-- message step; the typechecker owns that rule, the grammar only parses.
+mod P39 do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    role Prod needs IO.Console
+    role Cons needs IO.Console, IO.FileWrite
+    loop do
+      item: Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  fn pick(role : Int) : Int do
+    let role2 = role
+    role2
+  end
+
+  fn main(c : Cap(IO)) do
+    println(int_to_string(pick(1)))
+  end
+end

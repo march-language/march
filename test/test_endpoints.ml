@@ -1409,8 +1409,86 @@ let two_protocols_distinct_msg_types =
 let two_protocols_ok =
   ok "two protocols in one module typecheck together" (wrap (stream ^ two_protocols))
 
+(* ── `role R needs ...`: per-role grants (distributed-deploys step 4) ──── *)
+
+(* [stream] with a grant line per role.  The grant is a claim about the
+   role's CODE (checked by [check_role_grants]), not about the wire, so the
+   fingerprint must not see it: two nodes built with different grants still
+   talk. *)
+let stream_granted = {|
+  @[endpoints]
+  protocol Stream do
+    role Prod needs IO.Console
+    role Cons needs IO.Console, IO.FileWrite
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+|}
+
+let stream_granted_other = replace_all ~needle:"IO.Console, IO.FileWrite" ~by:"IO.NetConnect" stream_granted
+
+let grants_not_in_fingerprint =
+  Alcotest.test_case "two protocols differing only in `role ... needs` fingerprint alike" `Quick
+    (fun () ->
+       let fp = fingerprint_of_src in
+       Alcotest.(check string) "no grants vs grants" (fp stream) (fp stream_granted);
+       Alcotest.(check string) "one grant vs another" (fp stream_granted) (fp stream_granted_other))
+
+let role_needs_ok = ok "a protocol with a grant line per role typechecks" (wrap stream_granted)
+
+(* `role` is a soft keyword: the identifier stays available. *)
+let role_identifier_ok = ok "`role` is still an ordinary identifier outside a protocol" (wrap {|
+  fn pick(role : Int) : Int do
+    let role2 = role
+    role2
+  end
+|})
+
+let role_needs_unknown_cap = bad "a grant naming an unknown capability gets `needs`' did-you-mean"
+    "`IO.Consol` is not a known capability" (wrap (replace_all ~needle:"role Prod needs IO.Console" ~by:"role Prod needs IO.Consol" stream_granted))
+
+let role_needs_unknown_role = bad "a grant for a role not in the protocol is refused"
+    "names a role that is not in the protocol" (wrap (replace_all ~needle:"role Prod needs" ~by:"role Nobody needs" stream_granted))
+
+let role_needs_twice = bad "two grant lines for one role are refused"
+    "is declared twice" (wrap (replace_all ~needle:"role Cons needs" ~by:"role Prod needs" stream_granted))
+
+let role_needs_after_message = bad "a grant line after the first message step is refused"
+    "must come before the protocol's first message step" (wrap {|
+  @[endpoints]
+  protocol Stream do
+    Prod -> Cons : Int
+    role Cons needs IO.Console
+    Cons -> Prod : Bool
+  end
+|})
+
+let role_needs_nested = bad "a grant line inside a loop is refused"
+    "must be a top-level step" (wrap {|
+  @[endpoints]
+  protocol Stream do
+    loop do
+      role Cons needs IO.Console
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+|})
+
 let tests =
-  [ stream_shape; msg_type_named_after_protocol; two_protocols_distinct_msg_types; two_protocols_ok;
+  [ stream_shape;
+    grants_not_in_fingerprint; role_needs_ok; role_identifier_ok; role_needs_unknown_cap;
+    role_needs_unknown_role; role_needs_twice; role_needs_after_message; role_needs_nested; msg_type_named_after_protocol; two_protocols_distinct_msg_types; two_protocols_ok;
     cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
     unlabelled_names_pinned; labelled_shape; label_changes_fingerprint; labelled_roles_ok;
     payload_definition_in_fingerprint; payload_field_order_in_fingerprint;

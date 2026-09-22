@@ -76,6 +76,23 @@ Cons picks. Each branch starts with a label (`more`, `done`) and must begin with
 from the chooser. That first message is how the other side learns which branch was
 picked. The compiler rejects a branch that starts any other way.
 
+A protocol may also say what each role's code is allowed to do:
+
+```march
+@[endpoints]
+protocol Checkout do
+  role Client needs IO.NetConnect
+  role Ledger needs IO.FileWrite, IO.NetConnect
+  ...
+end
+```
+
+These grant lines come before the first message step, one per role, and take the same
+capability paths as a module's `needs` (a misspelt one gets the same did-you-mean). A grant
+is a claim about the role's code, not about the conversation, so it is not part of the
+protocol's fingerprint: two nodes built with different grants still talk. What a grant
+does is the subject of [Per-role grants](#per-role-grants) below.
+
 ## What the compiler generates
 
 For a protocol `P` you get one module of shared definitions, one module per role, and one

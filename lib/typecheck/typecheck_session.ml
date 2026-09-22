@@ -95,7 +95,7 @@ let rec project_steps env ~proto_name ~multiparty steps role cont =
           any steps that follow it (those are rejected as unreachable at
           protocol-declaration time — see [check_unreachable_after_loop]). *)
        SEnd
-     | Ast.ProtoMayCrash _ -> rest_ty ()
+     | Ast.ProtoMayCrash _ | Ast.ProtoRoleNeeds _ -> rest_ty ()
      | Ast.ProtoCrashOr (inner, _crash, _) ->
        (* This projection serves the `Chan(Role, Proto)` API, which refuses a
           protocol with crash branches ([has_crash_branches]); the
@@ -151,7 +151,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
       List.concat_map (fun (_, steps) -> roles_of_steps steps) branches @
       roles_of_steps rest
     | Ast.ProtoStop _ :: rest -> roles_of_steps rest
-    | Ast.ProtoMayCrash (_, _) :: rest -> roles_of_steps rest
+    | Ast.ProtoMayCrash (_, _) :: rest | Ast.ProtoRoleNeeds _ :: rest -> roles_of_steps rest
     | Ast.ProtoCrashOr (inner, crash, _) :: rest -> roles_of_steps (inner :: crash @ rest)
   in
   let roles = List.sort_uniq String.compare (roles_of_steps pdef.proto_steps) in
@@ -194,7 +194,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
              gather_msgs [] steps) branches in
          gather_msgs (branch_msgs @ acc) rest
        | Ast.ProtoStop _ :: rest -> gather_msgs acc rest
-       | Ast.ProtoMayCrash _ :: rest -> gather_msgs acc rest
+       | Ast.ProtoMayCrash _ :: rest | Ast.ProtoRoleNeeds _ :: rest -> gather_msgs acc rest
        (* The crash branch is not projected here (see [project_steps]), so
           its messages are not gathered either: they are the generator's. *)
        | Ast.ProtoCrashOr (inner, _crash, _) :: rest -> gather_msgs acc (inner :: rest)

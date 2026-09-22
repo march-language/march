@@ -85,6 +85,10 @@ let () =
          `... : T or crash do`), the two crash-branch forms of a protocol step. *)
       ("may",       MAY);
       ("or",        ORWORD);
+      (* `role` is SOFT too: it opens a protocol's grant line (`role Ledger
+         needs IO.FileWrite`) only when an uppercase name follows; `role` as
+         an identifier (`let role = ...`, `role.name`, `f(role)`) demotes. *)
+      ("role",      ROLE);
       ("permanent", PERMANENT);
       ("transient", TRANSIENT);
       ("temporary", TEMPORARY);

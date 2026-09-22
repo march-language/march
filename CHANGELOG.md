@@ -12,6 +12,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Per-role grants in protocols: `role R needs IO.X, ...`.** A protocol can
+  now say what each role's code may do, with the same capability paths (and
+  the same did-you-mean on a typo) as a module's `needs`. The line comes
+  before the first message step and is not part of the protocol's
+  fingerprint: a grant is about the role's code, not the wire, so two nodes
+  built with different grants still talk. `role` stays an ordinary identifier
+  everywhere else.
 - **A targeted diagnostic for `fn (a, b) -> …` used as a callback over a
   tuple.** `fn (a, b) -> …` is a two-parameter (curried) lambda, not a lambda
   that destructures a pair, so `List.map(pairs, fn (k, v) -> v)` was wrong in a
