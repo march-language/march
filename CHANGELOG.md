@@ -93,6 +93,16 @@ git log is authoritative for exact commits.
   refused until every actor has switched. Also fixed: with more than 2048 live
   actors of a type, the ones past the 2048th were never migrated at all. See
   `docs/hot-code-reload.md`, "Messages queued during a deploy".
+- **`--refine-report` and the compiler's errors now agree on inductive
+  postconditions.** For a recursive function over a list or tree, the report
+  could count a postcondition as `violated` while the program compiled cleanly,
+  including for true contracts such as a `copy2` that walks a list two elements
+  at a time. A violation now counts only when running the function reproduces it,
+  and it is then reported as an error naming the failing call (for example
+  `grow([]) returns []`). Anything the checker cannot reproduce is counted as
+  skipped (`refuted-unconfirmed`). Relatedly, an inner pattern that reuses an
+  outer name (`Cons(h2, t)` inside the arm that bound `t`) no longer lets a false
+  contract count as proved; that return is now skipped.
 - **A linear value can no longer be discarded with `let _ = …`.** A `_` binding
   counted as the value's one use whenever the value was linear because of how it
   was *bound* rather than what its type says — a `linear x : a` parameter or a
