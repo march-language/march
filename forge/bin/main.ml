@@ -60,12 +60,27 @@ let print_archive_help name =
         ) tasks
     end
 
+(* ------------------------------------------------------------- --offline ---
+   A GLOBAL flag, accepted anywhere before a bare `--` and by every command
+   (`forge --offline build`, `forge build --offline`, `forge deps --offline`).
+   It is taken out of argv here, before cmdliner or any pre-dispatch sees it,
+   and recorded in Net_gate — the one module that decides whether forge may
+   touch the network. Exporting FORGE_OFFLINE=1 as well makes archive tasks
+   and external `forge-<cmd>` subcommands inherit it. *)
+let argv =
+  let (offline, argv) = Net_gate.extract_flag Sys.argv in
+  if offline then begin
+    Net_gate.set_offline true;
+    Unix.putenv Net_gate.env_var "1"
+  end;
+  argv
+
 let () =
-  if Array.length Sys.argv >= 2 then begin
-    let cmd = Sys.argv.(1) in
+  if Array.length argv >= 2 then begin
+    let cmd = argv.(1) in
     (* "forge help <archive>" — show tasks for a named archive *)
-    if cmd = "help" && Array.length Sys.argv >= 3 then begin
-      let topic = Sys.argv.(2) in
+    if cmd = "help" && Array.length argv >= 3 then begin
+      let topic = argv.(2) in
       let entries = Archive_store.load_registry () in
       if List.mem_assoc topic entries then begin
         print_archive_help topic;
@@ -76,8 +91,8 @@ let () =
     (* Intercept dotted namespace commands like "bastion.new" *)
     if String.length cmd > 0 && cmd.[0] <> '-' && String.contains cmd '.' then begin
       let args =
-        if Array.length Sys.argv > 2 then
-          Array.to_list (Array.sub Sys.argv 2 (Array.length Sys.argv - 2))
+        if Array.length argv > 2 then
+          Array.to_list (Array.sub argv 2 (Array.length argv - 2))
         else []
       in
       (match Archive_store.find_task cmd with
@@ -102,7 +117,7 @@ let () =
       match Cli_ext.external_subcommand
               ~known:known_builtin_names ~argv1:cmd ~path_lookup with
       | Some exe ->
-        let rest = Array.sub Sys.argv 2 (max 0 (Array.length Sys.argv - 2)) in
+        let rest = Array.sub argv 2 (max 0 (Array.length argv - 2)) in
         let argv = Array.append [| exe |] rest in
         Unix.execv exe argv
       | None -> ()
@@ -1342,6 +1357,23 @@ let archive_man_blocks () =
         @ [`P ("See $(b,forge help " ^ name ^ ") for details.")]
     ) entries)
 
+let offline_man_blocks = [
+  `S "OFFLINE MODE";
+  `P "$(b,--offline) is a global flag, accepted by every command in any \
+      position before a bare $(b,--) (e.g. $(b,forge build --offline), \
+      $(b,forge --offline deps)). Setting $(b,FORGE_OFFLINE=1) has the same \
+      effect; either one turns offline mode on and nothing turns it off.";
+  `P "Offline, forge starts no process that talks to the network: no git \
+      clone, no registry query (not even the registry-client compile), no \
+      toolchain download, no npm install. Git and registry dependencies are \
+      resolved only through $(b,forge.lock) to \
+      $(b,~/.march/cas/deps/<name>/<commit-or-version>) and re-hashed against \
+      the lockfile; a missing one is warned about and skipped. \
+      $(b,forge deps --offline) reports cached/missing per dependency and \
+      exits non-zero if any is missing. $(b,forge add) (registry or remote) \
+      and $(b,forge outdated) refuse.";
+]
+
 let default_term =
   Term.(const (fun () ->
     match Cmd_build.build ~release:false () with
@@ -1362,7 +1394,7 @@ let () =
     Cmd.group ~default:default_term
       (Cmd.info "forge" ~version:Version.version
          ~doc:"The March package manager and build tool"
-         ~man:(archive_man_blocks ()))
+         ~man:(offline_man_blocks @ archive_man_blocks ()))
       cmds
   in
-  exit (Cmd.eval main)
+  exit (Cmd.eval ~argv main)

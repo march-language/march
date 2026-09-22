@@ -110,6 +110,10 @@ let fetch_env ~url ~out =
     `token` and every value in `extra_env` are passed ONLY via the child's
     environment array, never via argv or a shell string. *)
 let run_action ~action ~token ~registry ~pkg_dir ~extra_env =
+  match Net_gate.permit ~what:(Printf.sprintf "%s to %s" action registry)
+          ~remedy:"Publishing to or retiring from a registry needs network access." with
+  | Error e -> prerr_endline ("error: " ^ e); 1
+  | Ok () ->
   let tmp_src = write_temp Registry_march_src.content ".march" in
   match compile_registry_task tmp_src with
   | Error _rc ->

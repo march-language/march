@@ -174,14 +174,21 @@ let capture cmd =
 let run cmd =
   if Sys.command cmd = 0 then Ok () else Error (Printf.sprintf "command failed: %s" cmd)
 
-(* GET a URL with curl, forwarding GITHUB_TOKEN if present (API rate limit). *)
+let toolchain_remedy =
+  "Installing a March toolchain downloads it. Run `forge toolchain install` \
+   with network access, or unpin (.march-version) to use a toolchain that is \
+   already installed."
+
+(* GET a URL with curl, forwarding GITHUB_TOKEN if present (API rate limit).
+   Gated by [Net_gate], like every other network access in forge. *)
 let curl_get url =
   let auth =
     match Sys.getenv_opt "GITHUB_TOKEN" with
     | Some t when t <> "" -> Printf.sprintf "-H %s " (Filename.quote ("Authorization: Bearer " ^ t))
     | _ -> ""
   in
-  capture (Printf.sprintf "curl -fsSL %s%s" auth (Filename.quote url))
+  Result.bind (Net_gate.permit ~what:("fetch " ^ url) ~remedy:toolchain_remedy)
+    (fun () -> capture (Printf.sprintf "curl -fsSL %s%s" auth (Filename.quote url)))
 
 (* Pure platform mapping (unit-tested). *)
 let platform_of_uname os arch =
@@ -447,6 +454,8 @@ let install spec =
     (fun () ->
        let tarball = Filename.concat tmp (Filename.basename tarball_url) in
        Printf.eprintf "Downloading %s ...\n%!" (Filename.basename tarball_url);
+       let* () = Net_gate.permit ~what:("download " ^ tarball_url)
+           ~remedy:toolchain_remedy in
        let* () = run (Printf.sprintf "curl -fsSL -o %s %s"
                         (Filename.quote tarball) (Filename.quote tarball_url)) in
        Printf.eprintf "Verifying checksum ...\n%!";

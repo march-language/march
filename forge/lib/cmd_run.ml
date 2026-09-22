@@ -21,6 +21,10 @@ let context_of_project proj =
   match Toolchain.ensure_installed () with
   | Error e -> Error e
   | Ok () ->
+    match Cmd_build.offline_preflight
+            ~scope:(Cmd_build.build_scope ~release:false proj) proj with
+    | Error e -> Error e
+    | Ok () ->
     match Cmd_build.ffi_flags_full proj with
     | Error msg -> Error msg
     | Ok ffi_flags -> Ok { lib_path_env = Cmd_build.lib_path_env proj; ffi_flags }

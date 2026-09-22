@@ -660,6 +660,29 @@ forge deps update depot   # update a specific package
 
 `forge.lock` pins exact versions for reproducible builds. Commit it to version control.
 
+### Offline Builds
+
+`--offline` is a global flag: every command accepts it, in any position before a bare `--` (`forge build --offline`, `forge --offline test`). Setting `FORGE_OFFLINE=1` does the same; either one turns offline mode on, and neither can turn it off once the other has.
+
+```sh
+forge deps                 # once, with network access: fills the local cache
+forge deps --offline       # "can I build on a plane?": cached / missing per dep
+forge build --offline      # build using only what is cached
+```
+
+Offline, forge starts no process that talks to the network: no `git clone`, no registry query (it does not even compile the registry client), no toolchain download, no `npm install`. Anything that needs one refuses with a message naming what it would have fetched and which command, run with network access, fills the cache.
+
+- **Dependencies come from `forge.lock` only.** Each git or registry dependency is looked up at `~/.march/cas/deps/<name>/<commit-or-version>`, using the commit or exact version the lockfile recorded. Offline mode never chooses a version: a registry dependency that is not in `forge.lock` is skipped even when some version of it is cached.
+- **A missing dependency is a warning, not an error.** The build, check, test or run goes ahead without it; if your code imports it, the compiler's `Unknown module` error follows the warning, which names the dependency and its cache directory.
+- **An unusable lockfile is reported once.** A missing `forge.lock`, or a `forge.lock` that is not a lockfile (for example one holding `forge.toml` syntax), gets one error, and only path dependencies are used. If `forge.toml` has changed since `forge deps`, you get one warning that the locked versions may be stale.
+- **Cached trees are checked.** Each cached dependency is re-hashed against the `hash` in `forge.lock` before an offline build uses it. A mismatch fails the build, and the error names the dependency, the expected hash and the actual hash.
+- **`forge deps --offline`** fetches and rewrites nothing. It prints one line per dependency and exits non-zero if any is missing or fails its hash check.
+- **`forge add`** (registry or git) and **`forge outdated`** refuse offline. `forge add --path` still works.
+
+Registry tarballs are cached as well, at `~/.march/cas/tarballs/<sha256>.tar.gz`, keyed by the checksum the registry publishes. A re-install of the same version reuses the cached tarball instead of downloading it again. Offline, a registry dependency whose extracted tree was deleted is re-extracted from the cached tarball. Every read re-hashes the tarball. A corrupt one is reported and discarded, never extracted.
+
+`forge vendor` (committing dependencies in-tree) is not implemented.
+
 ### Semver Constraints
 
 | Syntax | Meaning |
@@ -1095,6 +1118,7 @@ Each `bench/*.march` file is a standalone benchmark program with a `main()` func
 | `MARCH_HISTORY_FILE` | REPL history file path (default: `~/.march_history`) |
 | `MARCH_HISTORY_SIZE` | Max REPL history entries (default: 1000) |
 | `MARCH_ENV` | `development` / `test` / `production` (read by `Config.env`) |
+| `FORGE_OFFLINE` | `1` (or any value but `0`/`false`/`no`/`off`) runs forge in [offline mode](#offline-builds), same as `--offline` |
 
 ---
 

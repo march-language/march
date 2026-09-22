@@ -19,7 +19,10 @@ let clone_to_tmp url =
       ("forge-install-" ^ string_of_int (Random.int 1_000_000)) in
   let cmd = Printf.sprintf "git clone --depth 1 %s %s"
       (Filename.quote url) (Filename.quote tmp) in
-  let rc = Sys.command cmd in
+  match Net_gate.command ~what:(Printf.sprintf "clone %s" url)
+          ~remedy:"Install from a local path instead, or retry with network access." cmd with
+  | Error e -> Error e
+  | Ok rc ->
   if rc <> 0 then Error (Printf.sprintf "git clone failed (exit %d)" rc)
   else Ok tmp
 

@@ -39,6 +39,22 @@ git log is authoritative for exact commits.
   `Session.in_process_with(trace)` reports what the transport itself does, and
   `t.take(())` serves endpoints hosted in actors. Replaces the hand-written
   `Session.Ops` the guide used to point at.
+- **`forge --offline` (or `FORGE_OFFLINE=1`) builds with no network access.**
+  The global flag starts no network process of any kind (no `git clone`, no
+  registry query or registry-client compile, no toolchain download, no
+  `npm install`). Git and registry dependencies resolve only through
+  `forge.lock` to their cached commit or version. Each cached tree is re-hashed
+  against the lockfile, and a mismatch fails the build. A dependency missing
+  from the cache is warned about by name and skipped. A missing `forge.lock`,
+  or one that is not a lockfile, gets a single error. `forge deps --offline`
+  lists each dependency as cached or missing and exits non-zero on a miss.
+  `forge add` (registry or git) and `forge outdated` refuse offline.
+- **forge caches registry tarballs** at `~/.march/cas/tarballs/<sha256>.tar.gz`,
+  keyed by the registry's published checksum. Installing the same version again
+  reuses the cached tarball instead of downloading it. Offline, a registry
+  dependency whose tree was deleted is re-extracted from the cached tarball.
+  Every read re-hashes the tarball, and a corrupt one is discarded instead of
+  being extracted.
 - **`MARCH_PREEMPT_SIGNAL` chooses the green-thread preemption signal** (`USR1`,
   the default, `USR2`, or on Linux `RTMIN[+n]`); embedders can call
   `march_sched_set_preempt_signal`. `Signal.watch` reserves whichever signal is
@@ -93,6 +109,12 @@ git log is authoritative for exact commits.
   refused until every actor has switched. Also fixed: with more than 2048 live
   actors of a type, the ones past the 2048th were never migrated at all. See
   `docs/hot-code-reload.md`, "Messages queued during a deploy".
+- **forge finds a dependency's own dependencies again under the version-keyed
+  cache.** `forge deps` looked for an installed registry package's `forge.toml`
+  in the old flat `deps/<name>` directory, so it never installed that package's
+  own dependencies. The build's transitive walk ignored `forge.lock`, so it
+  dropped the dependencies of any dependency that had more than one version
+  cached.
 - **A linear value can no longer be discarded with `let _ = …`.** A `_` binding
   counted as the value's one use whenever the value was linear because of how it
   was *bound* rather than what its type says — a `linear x : a` parameter or a

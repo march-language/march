@@ -111,14 +111,15 @@ let project_env proj =
      a dep's own prod deps must be on MARCH_LIB_PATH too, or a test calling
      into a transitive dep's module fails with "Unknown module ..." while the
      identical call in lib/ typechecks under `forge build`/`forge check`. *)
-  let visited = Hashtbl.create 16 in
-  let transitive_deps =
-    Cmd_build.collect_transitive_deps visited (proj.Project.root, test_scope_deps) in
   (* Same version-aware coordinates as the build path: without them a
      version-keyed dep directory is only found by Project.dep_cache_dir's
      fallbacks, so a project with two cached versions of one dep would drop it
      from the test MARCH_LIB_PATH entirely. *)
   let coords = Project.dep_coords ~project_root:proj.Project.root in
+  let visited = Hashtbl.create 16 in
+  let transitive_deps =
+    Cmd_build.collect_transitive_deps ~coords visited
+      (proj.Project.root, test_scope_deps) in
   let dep_lib_paths = List.concat_map
     (fun (root, dep_name, dep) -> Cmd_build.dep_to_lib_paths ~coords ~root (dep_name, dep))
     transitive_deps in
@@ -155,6 +156,11 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
     let lib_dir_pp = Filename.concat proj.Project.root "lib" in
     let _pp = Cmd_build.run_preprocessors ~proj ~src_dir ~gen_dir in
     let _pp2 = Cmd_build.run_preprocessors ~proj ~src_dir:lib_dir_pp ~gen_dir in
+    match Cmd_build.offline_preflight
+            ~scope:(proj.Project.deps @ proj.Project.dev_deps @ proj.Project.test_deps)
+            proj with
+    | Error e -> Error e
+    | Ok () ->
     let (lib_path_env, output, all_lib_paths, toolchain_pfx) = project_env proj in
     if use_interp then
       (* Link the same FFI shims as the compiled path below (and `forge build`)

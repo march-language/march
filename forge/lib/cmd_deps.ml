@@ -51,55 +51,6 @@ let looks_like_flat_install dir =
   || Sys.file_exists (Filename.concat dir "lib")
   || Sys.file_exists (Filename.concat dir ".git")
 
-(* ------------------------------------------------------------------ *)
-(*  Timeout-guarded subprocess runner                                  *)
-(* ------------------------------------------------------------------ *)
-
-(** Run [prog] with [args] and [env] as a child in its OWN process group, and
-    kill the WHOLE group if it does not finish within [timeout] seconds.
-
-    Why a process group and not a bare [kill pid]: the registry client itself
-    shells out to `march`, which shells out to `clang`/the linker, so a naive
-    kill of the direct child would orphan those grandchildren and leave them
-    running.  The child calls [setsid] to become a new session/group leader
-    (its pgid == its pid), so on timeout we [kill (-pid)] — signalling the
-    entire group — which reaps the whole tree.
-
-    The child inherits our stdin/stdout/stderr directly, so the client's own
-    progress output reaches the terminal.  Returns:
-      [`Exited n]    — child exited with code [n]
-      [`Signaled n]  — child died on signal [n]
-      [`Timeout]     — group was killed after [timeout]s *)
-let run_with_timeout ~timeout ~prog ~args ~env =
-  let pid = Unix.fork () in
-  if pid = 0 then begin
-    (* Child: become a session leader so our pid is our process-group id, then
-       exec the target.  Any failure here exits with a distinctive code. *)
-    (try ignore (Unix.setsid ()) with Unix.Unix_error _ -> ());
-    (try Unix.execve prog (Array.of_list (prog :: args)) env
-     with _ -> exit 127)
-  end;
-  (* Parent: poll for completion, killing the group on timeout. *)
-  let deadline = Unix.gettimeofday () +. timeout in
-  let rec wait () =
-    match Unix.waitpid [ Unix.WNOHANG ] pid with
-    | 0, _ ->
-      if Unix.gettimeofday () >= deadline then begin
-        (* Kill the whole group (pgid == child pid via setsid). *)
-        (try Unix.kill (- pid) Sys.sigkill with Unix.Unix_error _ -> ());
-        (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ());
-        `Timeout
-      end else begin
-        ignore (Unix.select [] [] [] 0.05);
-        wait ()
-      end
-    | _, Unix.WEXITED n   -> `Exited n
-    | _, Unix.WSIGNALED n -> `Signaled n
-    | _, Unix.WSTOPPED _  -> wait ()
-  in
-  (try wait ()
-   with Unix.Unix_error (Unix.ECHILD, _, _) -> `Exited 0)
-
 (** Run a shell command and return (exit_code, stdout). *)
 let run_cmd cmd =
   let ic = Unix.open_process_in cmd in
@@ -196,157 +147,64 @@ let content_hash ~name ~source dir =
 module VC = Resolver_constraint
 module RR = Resolver_registry
 module PG = Resolver_pubgrub
+module RQ = Registry_query
 
-(** Registry base URL: FORGE_REGISTRY env var, else the public default. *)
-let registry_base_url () =
-  match Sys.getenv_opt "FORGE_REGISTRY" with
-  | Some r when r <> "" -> r
-  | _ -> "https://forgepm.org"
-
-(** Strip any trailing '/' so URL joins don't double up. *)
-let no_trailing_slash s =
-  let n = String.length s in
-  if n > 0 && s.[n - 1] = '/' then String.sub s 0 (n - 1) else s
-
-let metadata_url ~base name =
-  Printf.sprintf "%s/api/v1/packages/%s" (no_trailing_slash base) name
-
-let release_url ~base name version =
-  Printf.sprintf "%s/api/v1/packages/%s/releases/%s"
-    (no_trailing_slash base) name version
+(* The registry client compile, the metadata fetch and the tarball fetch all
+   go through [Registry_query], whose [compile_client] / [fetch] are gated by
+   [Net_gate]. This file used to carry private copies of both (and of the JSON
+   parsing); two copies of a network path is one more place for an offline
+   check to be missing. *)
 
 let download_url ~base name version =
   Printf.sprintf "%s/api/v1/packages/%s/releases/%s/download"
-    (no_trailing_slash base) name version
-
-(** Read a whole file into a string (empty on error). *)
-let read_whole path =
-  try
-    let ic = open_in_bin path in
-    Fun.protect ~finally:(fun () -> close_in_noerr ic) (fun () ->
-      let n = in_channel_length ic in
-      let b = Bytes.create n in
-      really_input ic b 0 n;
-      Bytes.to_string b)
-  with Sys_error _ -> ""
-
-(** Fetch [url] to [out] by running the pre-compiled registry client [binary]
-    under a timeout, killing the whole process group if it hangs.  Returns
-    [Ok ()] on success or [Error msg]. *)
-let fetch ~binary ~url ~out =
-  let env = Registry_client.fetch_env ~url ~out in
-  match run_with_timeout ~timeout:30.0 ~prog:binary ~args:[] ~env with
-  | `Exited 0 -> Ok ()
-  | `Exited 4 -> Error (Printf.sprintf "registry returned HTTP 4xx for %s" url)
-  | `Exited 3 -> Error (Printf.sprintf "transport error fetching %s" url)
-  | `Exited n -> Error (Printf.sprintf "fetch of %s failed (exit %d)" url n)
-  | `Signaled n -> Error (Printf.sprintf "fetch of %s killed by signal %d" url n)
-  | `Timeout -> Error (Printf.sprintf "fetch of %s timed out" url)
-
-(** Extract a top-level string value for [key] from flat registry JSON of the
-    form `..."key":"value"...`.  Tolerant of whitespace after the colon. *)
-let json_str_after body key =
-  let needle = Printf.sprintf "\"%s\":" key in
-  let nl = String.length needle and bl = String.length body in
-  let rec find i =
-    if i + nl > bl then None
-    else if String.sub body i nl = needle then Some (i + nl)
-    else find (i + 1)
-  in
-  match find 0 with
-  | None -> None
-  | Some j ->
-    (* skip whitespace, then require an opening quote *)
-    let j = ref j in
-    while !j < bl && (body.[!j] = ' ' || body.[!j] = '\t') do incr j done;
-    if !j >= bl || body.[!j] <> '"' then None
-    else begin
-      incr j;
-      let start = !j in
-      while !j < bl && body.[!j] <> '"' do incr j done;
-      Some (String.sub body start (!j - start))
-    end
-
-(** A parsed registry version summary from the metadata endpoint. *)
-type reg_version = { rv_version : string; rv_checksum : string; rv_retired : bool }
-
-(** Split the `versions` array of the metadata JSON into per-object substrings
-    and parse each into a [reg_version].  We match on the `"versions":[` marker
-    and walk to the matching ']', then split top-level objects by depth. *)
-let parse_versions body =
-  match json_str_after body "versions" with
-  | Some _ -> []  (* "versions" is an array, never a string — fall through below *)
-  | None ->
-    let marker = "\"versions\":" in
-    let ml = String.length marker and bl = String.length body in
-    let rec find i =
-      if i + ml > bl then None
-      else if String.sub body i ml = marker then Some (i + ml)
-      else find (i + 1)
-    in
-    (match find 0 with
-     | None -> []
-     | Some j ->
-       let j = ref j in
-       while !j < bl && body.[!j] <> '[' do incr j done;
-       if !j >= bl then []
-       else begin
-         incr j;  (* past '[' *)
-         let objs = ref [] in
-         let depth = ref 0 in
-         let obj_start = ref (-1) in
-         let stop = ref false in
-         while not !stop && !j < bl do
-           (match body.[!j] with
-            | '{' -> if !depth = 0 then obj_start := !j; incr depth
-            | '}' ->
-              decr depth;
-              if !depth = 0 && !obj_start >= 0 then begin
-                objs := String.sub body !obj_start (!j - !obj_start + 1) :: !objs;
-                obj_start := -1
-              end
-            | ']' when !depth = 0 -> stop := true
-            | _ -> ());
-           incr j
-         done;
-         List.filter_map (fun obj ->
-             match json_str_after obj "version", json_str_after obj "checksum" with
-             | Some v, Some c ->
-               let retired =
-                 (* retired is a bare boolean, not a string *)
-                 let m = "\"retired\":" in
-                 let rec has i =
-                   if i + String.length m > String.length obj then false
-                   else if String.sub obj i (String.length m) = m then
-                     let rest = String.sub obj (i + String.length m)
-                         (String.length obj - i - String.length m) in
-                     String.length rest >= 4 && String.sub (String.trim rest) 0 4 = "true"
-                   else has (i + 1)
-                 in has 0
-               in
-               Some { rv_version = v; rv_checksum = c; rv_retired = retired }
-             | _ -> None
-           ) (List.rev !objs)
-       end)
-
-(** Compute the raw sha256 hex of a file's bytes (matching how the registry
-    stores a release checksum: [Crypto.sha256(tarball)] over the raw .tar.gz). *)
-let sha256_hex_of_file path =
-  let content = read_whole path in
-  Digestif.SHA256.to_hex (Digestif.SHA256.digest_string content)
+    (RQ.no_trailing_slash base) name version
 
 (** Extract a .tar.gz into [dest], stripping the single top-level directory so
     the package's own `lib/` lands directly at [dest]/lib. *)
-let extract_tarball ~tarball ~dest =
-  Project.mkdir_p dest;
-  let cmd = Printf.sprintf "tar xzf %s -C %s --strip-components=1"
-      (Filename.quote tarball) (Filename.quote dest) in
-  Sys.command cmd
+let extract_tarball ~tarball ~dest = Offline_deps.extract ~tarball ~dest
+
+(** A verified copy of [name] [vstr]'s tarball in [Tarball_cache], downloading
+    it only when the cache has no intact copy. The download goes to a temp
+    file, is checked against the registry's published [expected_cs], and only
+    then enters the cache (atomically), so the cache never holds bytes that
+    failed verification. *)
+let cached_or_download ~binary ~base ~name ~vstr ~expected_cs =
+  let label = name ^ " " ^ vstr in
+  let cached =
+    match Tarball_cache.lookup expected_cs with
+    | Tarball_cache.Hit p -> Some p
+    | Tarball_cache.Miss -> None
+    | Tarball_cache.Corrupt { path; actual } ->
+      prerr_endline (Tarball_cache.corrupt_warning ~label ~path
+                       ~expected:expected_cs ~actual);
+      None
+  in
+  match cached with
+  | Some p ->
+    Printf.printf "  %s: using cached tarball\n%!" label;
+    Ok p
+  | None ->
+    let tmp = Filename.temp_file ("forge_" ^ name ^ "_") ".tar.gz" in
+    Fun.protect ~finally:(fun () -> try Sys.remove tmp with Sys_error _ -> ())
+      (fun () ->
+         Printf.printf "  %s: downloading...\n%!" label;
+         match RQ.fetch ~binary ~url:(download_url ~base name vstr) ~out:tmp with
+         | Error e -> Error (Printf.sprintf "%s: %s" label e)
+         | Ok () ->
+           let actual_cs = Tarball_cache.sha256_file tmp in
+           if actual_cs <> expected_cs then
+             Error (Printf.sprintf
+                      "%s: checksum mismatch\n  expected: %s\n  got:      %s"
+                      label expected_cs actual_cs)
+           else
+             Result.map_error (fun e -> label ^ ": " ^ e)
+               (Tarball_cache.store ~checksum:expected_cs ~src:tmp))
 
 (** Fetch metadata for each registry dep, version-solve with PubGrub (pinning
     path/git deps as overrides), then download+verify+extract each solved
-    registry package into ~/.march/cas/deps/<name>.  Returns lockfile entries
-    for the registry deps (or an error string on the first hard failure).
+    registry package into ~/.march/cas/deps/<name>/<version>.  Returns lockfile
+    entries for the registry deps (or an error string on the first hard
+    failure).
 
     [reg_deps]     : (name, version_constraint_string) registry deps to solve.
     [override_deps]: (name, Project.dep) path/git/branch deps that must NOT be
@@ -354,47 +212,13 @@ let extract_tarball ~tarball ~dest =
 let resolve_registry_deps ~reg_deps ~override_deps =
   if reg_deps = [] then Ok []
   else begin
-    let base = registry_base_url () in
+    let base = RQ.registry_base_url () in
     Printf.printf "resolving %d registry dependenc%s from %s...\n%!"
       (List.length reg_deps)
       (if List.length reg_deps = 1 then "y" else "ies") base;
     (* 1. Compile the registry client ONCE (native TLS only works compiled). *)
     Printf.printf "  compiling registry client...\n%!";
-    match
-      (* compile_client itself shells out to `march`; guard it with a timeout
-         and process-group kill so a hung compile can't wedge `forge deps`. *)
-      let tmp_src =
-        let t = Filename.temp_file "forge_registry_" ".march" in
-        let oc = open_out t in
-        output_string oc Registry_march_src.content; close_out oc; t
-      in
-      let stdlib_pfx =
-        match Archive_store.find_stdlib_dir () with
-        | None -> ""
-        | Some p -> Printf.sprintf "MARCH_STDLIB=%s " (Filename.quote p)
-      in
-      let march =
-        let exe_dir = Filename.dirname Sys.executable_name in
-        let sibling = Filename.concat exe_dir "march" in
-        if Sys.file_exists sibling then sibling else "march"
-      in
-      let out = Filename.temp_file "forge_registry_bin_" "" in
-      let toolchain_pfx =
-        match Toolchain.path_prefix () with Ok p -> p | Error _ -> "" in
-      let cmd = Printf.sprintf "%s%s%s --compile -o %s %s"
-          toolchain_pfx stdlib_pfx (Filename.quote march)
-          (Filename.quote out) (Filename.quote tmp_src) in
-      let env = Unix.environment () in
-      let res = run_with_timeout ~timeout:180.0
-          ~prog:"/bin/sh" ~args:["-c"; cmd] ~env in
-      (try Sys.remove tmp_src with Sys_error _ -> ());
-      (match res with
-       | `Exited 0 when Sys.file_exists out ->
-         (try Unix.chmod out 0o755 with Unix.Unix_error _ -> ());
-         Ok out
-       | `Timeout -> Error "registry client compilation timed out"
-       | _ -> Error "registry client failed to compile")
-    with
+    match RQ.compile_client () with
     | Error e -> Error e
     | Ok binary ->
       Fun.protect ~finally:(fun () -> try Sys.remove binary with Sys_error _ -> ())
@@ -407,34 +231,28 @@ let resolve_registry_deps ~reg_deps ~override_deps =
       let meta_error = ref None in
       List.iter (fun (name, _constr) ->
           if !meta_error = None && not (Hashtbl.mem checksums name) then begin
-            let tmp = Filename.temp_file "forge_meta_" ".json" in
-            (match fetch ~binary ~url:(metadata_url ~base name) ~out:tmp with
-             | Error e ->
-               meta_error := Some (Printf.sprintf "%s: %s" name e)
-             | Ok () ->
-               let body = read_whole tmp in
-               let vers = parse_versions body in
-               if vers = [] then
-                 meta_error := Some
-                     (Printf.sprintf "%s: no versions found in registry metadata" name)
-               else begin
-                 let cs_tbl = Hashtbl.create 8 in
-                 Hashtbl.replace checksums name cs_tbl;
-                 List.iter (fun rv ->
-                     if not rv.rv_retired then
-                       match Resolver_version.parse rv.rv_version with
-                       | Error _ -> ()
-                       | Ok v ->
-                         Hashtbl.replace cs_tbl rv.rv_version rv.rv_checksum;
-                         (* Requirements are fetched lazily only if needed; the
-                            common case (leaf packages) has none, and the
-                            metadata endpoint does not include them.  Register
-                            each version with empty deps for now. *)
-                         RR.add_version idx
-                           { RR.name; version = v; deps = [] }
-                   ) vers
-               end);
-            (try Sys.remove tmp with Sys_error _ -> ())
+            match RQ.available_versions ~binary ~registry:base name with
+            | Error e ->
+              meta_error := Some (Printf.sprintf "%s: %s" name e)
+            | Ok [] ->
+              meta_error := Some
+                  (Printf.sprintf "%s: no versions found in registry metadata" name)
+            | Ok vers ->
+              let cs_tbl = Hashtbl.create 8 in
+              Hashtbl.replace checksums name cs_tbl;
+              List.iter (fun (rv : RQ.reg_version) ->
+                  if not rv.RQ.rv_retired then
+                    match Resolver_version.parse rv.RQ.rv_version with
+                    | Error _ -> ()
+                    | Ok v ->
+                      Hashtbl.replace cs_tbl rv.RQ.rv_version rv.RQ.rv_checksum;
+                      (* Requirements are fetched lazily only if needed; the
+                         common case (leaf packages) has none, and the
+                         metadata endpoint does not include them.  Register
+                         each version with empty deps for now. *)
+                      RR.add_version idx
+                        { RR.name; version = v; deps = [] }
+                ) vers
           end
         ) reg_deps;
       (match !meta_error with
@@ -461,7 +279,8 @@ let resolve_registry_deps ~reg_deps ~override_deps =
             (match PG.solve idx ~root_deps ~overrides with
              | Error err -> Error (PG.format_error err)
              | Ok solution ->
-               (* 4. Download + verify + extract each solved registry package. *)
+               (* 4. Download (or reuse the cached tarball) + verify + extract
+                  each solved registry package. *)
                let deps_dir = cas_deps_dir () in
                Project.mkdir_p deps_dir;
                let entries = ref [] in
@@ -481,48 +300,38 @@ let resolve_registry_deps ~reg_deps ~override_deps =
                           destroyed whatever OTHER version was cached there. *)
                        ignore (migrate_flat_install ~name ~coord:None);
                        let dest = dep_coord_dir ~name ~coord:vstr in
-                       let tarball =
-                         Filename.temp_file ("forge_" ^ name ^ "_") ".tar.gz" in
-                       Printf.printf "  %s %s: downloading...\n%!" name vstr;
-                       (match fetch ~binary
-                                ~url:(download_url ~base name vstr) ~out:tarball with
-                        | Error e -> install_error := Some (Printf.sprintf "%s %s: %s" name vstr e)
-                        | Ok () ->
-                          let actual_cs = sha256_hex_of_file tarball in
-                          if actual_cs <> expected_cs then
+                       (match cached_or_download ~binary ~base ~name ~vstr ~expected_cs with
+                        | Error e -> install_error := Some e
+                        | Ok tarball ->
+                          (* Fresh extract. Removing [dest] is safe now that
+                             it is version-keyed: it can only ever hold a
+                             previous extract of THIS same version, never a
+                             sibling version another project depends on. *)
+                          if Sys.file_exists dest then
+                            ignore (Sys.command
+                                      (Printf.sprintf "rm -rf %s" (Filename.quote dest)));
+                          let rc = extract_tarball ~tarball ~dest in
+                          if rc <> 0 then
                             install_error := Some (Printf.sprintf
-                                "%s %s: checksum mismatch\n  expected: %s\n  got:      %s"
-                                name vstr expected_cs actual_cs)
+                                "%s %s: tar extraction failed (exit %d)" name vstr rc)
                           else begin
-                            (* Fresh extract. Removing [dest] is safe now that
-                               it is version-keyed: it can only ever hold a
-                               previous extract of THIS same version, never a
-                               sibling version another project depends on. *)
-                            if Sys.file_exists dest then
-                              ignore (Sys.command
-                                        (Printf.sprintf "rm -rf %s" (Filename.quote dest)));
-                            let rc = extract_tarball ~tarball ~dest in
-                            if rc <> 0 then
-                              install_error := Some (Printf.sprintf
-                                  "%s %s: tar extraction failed (exit %d)" name vstr rc)
-                            else begin
-                              Printf.printf "  %s %s: installed to %s\n%!" name vstr dest;
-                              (* Format 2: [hash] is the tree hash, in the
-                                 same domain as every other dep kind, so one
-                                 integrity check covers all of them;
-                                 [checksum] keeps the registry's published
-                                 tarball digest as provenance. *)
-                              let e = Resolver_lockfile.{
-                                  name;
-                                  version = Some vstr;
-                                  source  = "registry:forge";
-                                  commit  = None;
-                                  hash    = content_hash ~name ~source:"registry:forge" dest;
-                                  checksum = Some ("sha256:" ^ expected_cs) } in
-                              entries := e :: !entries
-                            end
-                          end);
-                       (try Sys.remove tarball with Sys_error _ -> ())
+                            Printf.printf "  %s %s: installed to %s\n%!" name vstr dest;
+                            (* Format 2: [hash] is the tree hash, in the
+                               same domain as every other dep kind, so one
+                               integrity check covers all of them;
+                               [checksum] keeps the registry's published
+                               tarball digest as provenance — and, since the
+                               tarball is now cached under it, the key that
+                               lets `forge deps --offline` re-extract it. *)
+                            let e = Resolver_lockfile.{
+                                name;
+                                version = Some vstr;
+                                source  = "registry:forge";
+                                commit  = None;
+                                hash    = content_hash ~name ~source:"registry:forge" dest;
+                                checksum = Some ("sha256:" ^ expected_cs) } in
+                            entries := e :: !entries
+                          end)
                    end
                  ) solution;
                (match !install_error with
@@ -534,6 +343,13 @@ let resolve_registry_deps ~reg_deps ~override_deps =
 (* ------------------------------------------------------------------ *)
 (*  Install / update per dep type                                      *)
 (* ------------------------------------------------------------------ *)
+
+(** What a refused fetch tells the user: where the cache lives and which
+    command, run with network access, fills it. *)
+let populate_remedy name =
+  Printf.sprintf
+    "Cached copies live in %s/; run `forge deps` with network access to populate it."
+    (Filename.concat (cas_deps_dir ()) name)
 
 (** Clone a git dep into its COMMIT-keyed directory.
 
@@ -558,7 +374,8 @@ let clone_git_dep ~name ~url ~ref_name ~depth1 ~version =
     Filename.concat (cas_deps_dir ())
       (Printf.sprintf ".staging-%s-%d" name (Unix.getpid ())) in
   ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote staging)));
-  Printf.printf "  %s: cloning %s @ %s...\n%!" name url ref_name;
+  if not (Net_gate.is_offline ()) then
+    Printf.printf "  %s: cloning %s @ %s...\n%!" name url ref_name;
   let cmd =
     if depth1 then
       Printf.sprintf "git clone --depth 1 --branch %s %s %s"
@@ -568,7 +385,13 @@ let clone_git_dep ~name ~url ~ref_name ~depth1 ~version =
         (Filename.quote url) (Filename.quote staging)
         (Filename.quote staging) (Filename.quote ref_name)
   in
-  let rc = Sys.command cmd in
+  match
+    Net_gate.command
+      ~what:(Printf.sprintf "clone dependency `%s` from %s @ %s" name url ref_name)
+      ~remedy:(populate_remedy name) cmd
+  with
+  | Error e -> Error e
+  | Ok rc ->
   if rc <> 0 then begin
     ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote staging)));
     Error (Printf.sprintf "failed to clone %s @ %s (exit %d)" url ref_name rc)
@@ -782,6 +605,98 @@ let rec bfs_install visited ~reg_acc ~project_root wave =
 (*  forge deps                                                         *)
 (* ------------------------------------------------------------------ *)
 
+(** `forge deps --offline`: the "can I build on a plane?" check (design §3.6).
+
+    Fetches nothing and rewrites nothing. It resolves every declared
+    dependency (transitively) from forge.lock to its cache directory,
+    re-extracts any registry dep whose tree is gone but whose tarball is
+    cached, re-hashes each cached tree against forge.lock, and prints one line
+    per dependency. Unlike a build, where a missing dep is a warning, here a
+    miss IS the answer: the command exits non-zero if any dependency is
+    missing or fails its integrity check. *)
+let run_offline proj ~toml_content ~all_deps =
+  let root = proj.Project.root in
+  let state = Offline_deps.read_state ~project_root:root ~toml_content in
+  let needs_lock =
+    List.exists (fun (_, d) -> not (Offline_deps.is_path_dep d)) all_deps in
+  match
+    if needs_lock then Offline_deps.state_error ~project_root:root state else None
+  with
+  | Some msg -> Error msg
+  | None ->
+    (match state with
+     | Offline_deps.Lockfile { drifted = true; _ } ->
+       Printf.eprintf "%s\n%!" Offline_deps.drift_warning
+     | _ -> ());
+    let restore_errors = ref [] in
+    (match state with
+     | Offline_deps.Lockfile { entries; format; _ } ->
+       List.iter (fun (name, v, r) ->
+           match r with
+           | Ok dir ->
+             Printf.printf "  %s %s: restored from the tarball cache into %s\n%!"
+               name v dir
+           | Error msg -> restore_errors := msg :: !restore_errors)
+         (Offline_deps.restore_registry_trees ~format entries)
+     | _ -> ());
+    let coords = Project.dep_coords ~project_root:root in
+    let closure =
+      Cmd_build.collect_transitive_deps ~coords (Hashtbl.create 16) (root, all_deps) in
+    let report = Offline_deps.assess ~verify:true ~state closure in
+    let missing = ref [] and corrupt = ref [] and ok = ref 0 in
+    Printf.printf "offline: checking %d dependenc%s against the local cache\n%!"
+      (List.length report) (if List.length report = 1 then "y" else "ies");
+    List.iter (fun (name, _dep, status) ->
+        match status with
+        | Offline_deps.Path_present p ->
+          incr ok; Printf.printf "  %s: path dependency at %s\n%!" name p
+        | Offline_deps.Path_absent p ->
+          missing := name :: !missing;
+          Printf.printf "  %s: MISSING — path dependency not found at %s\n%!" name p
+        | Offline_deps.Not_locked cached ->
+          missing := name :: !missing;
+          Printf.printf "  %s: MISSING — no entry in forge.lock%s\n%!" name
+            (match cached with
+             | [] -> ""
+             | vs -> Printf.sprintf " (cached versions %s not used: \
+                                     choosing one is version solving)"
+                       (String.concat ", " vs))
+        | Offline_deps.Missing { coord; label } ->
+          missing := name :: !missing;
+          Printf.printf "  %s: MISSING — %s is not in the local cache (%s)\n%!"
+            name label (Offline_deps.coord_dir ~name ~coord)
+        | Offline_deps.Present { dir; label; verdict } ->
+          (match verdict with
+           | Offline_deps.Verified ->
+             incr ok; Printf.printf "  %s: cached (%s), verified\n%!" name label
+           | Offline_deps.Unverifiable why ->
+             incr ok;
+             Printf.printf "  %s: cached (%s), not integrity-checked: %s\n%!"
+               name label why
+           | Offline_deps.Mismatch { expected; actual } ->
+             corrupt :=
+               Offline_deps.mismatch_error ~name ~label ~dir ~expected ~actual
+               :: !corrupt;
+             Printf.printf "  %s: CORRUPT — cached tree does not match forge.lock\n%!"
+               name))
+      report;
+    let problems =
+      List.rev !restore_errors
+      @ (match List.rev !missing with
+          | [] -> []
+          | ms ->
+            [Printf.sprintf
+               "offline: %d dependenc%s not available locally: %s\n  \
+                Run `forge deps` with network access to populate the cache."
+               (List.length ms) (if List.length ms = 1 then "y is" else "ies are")
+               (String.concat ", " ms)])
+      @ List.rev !corrupt
+    in
+    if problems = [] then begin
+      Printf.printf "offline: all %d dependencies available\n%!" !ok;
+      Ok ()
+    end else Error (String.concat "\n" problems)
+
 let run () =
   match Project.load () with
   | Error msg -> Error msg
@@ -799,7 +714,7 @@ let run () =
         Bytes.to_string buf
       with Sys_error _ -> ""
     in
-    if Sys.file_exists lock_path &&
+    if not (Net_gate.is_offline ()) && Sys.file_exists lock_path &&
        Resolver_lockfile.has_drifted lock_path toml_content then
       Printf.printf
         "note: forge.toml has changed since last `forge deps` — updating lockfile\n%!";
@@ -826,7 +741,9 @@ let run () =
     let all_deps = effective_deps @ extra_patches @ non_prod_deps in
     ignore patch_names;
     (* Install all deps *)
-    if all_deps = [] then begin
+    if Net_gate.is_offline () then
+      run_offline proj ~toml_content ~all_deps
+    else if all_deps = [] then begin
       Printf.printf "no dependencies declared\n%!";
       Resolver_lockfile.write ~toolchain:(Toolchain.resolve_version ())
         lock_path [] ~manifest_hash:
@@ -894,7 +811,13 @@ let run () =
              let next_reg = ref [] in
              let next_nonreg = ref [] in
              List.iter (fun e ->
-                 let dep_dir = Filename.concat (cas_deps_dir ()) e.Resolver_lockfile.name in
+                 (* The version-keyed directory this entry was just
+                    extracted to. This read deps/<name> — the pre-2026-09-12
+                    flat path, now a container with no forge.toml — so a
+                    registry package's own deps were never discovered. *)
+                 let dep_dir = match e.Resolver_lockfile.version with
+                   | Some v -> dep_coord_dir ~name:e.Resolver_lockfile.name ~coord:v
+                   | None -> Filename.concat (cas_deps_dir ()) e.Resolver_lockfile.name in
                  if Sys.file_exists (Filename.concat dep_dir "forge.toml") then
                    match Project.load_from_dir dep_dir with
                    | Ok p ->

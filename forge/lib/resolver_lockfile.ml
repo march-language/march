@@ -45,8 +45,9 @@
     - [checksum] is the SOURCE ARTIFACT's own published digest, present only
       where an upstream publishes one — today that is a registry dep's
       `.tar.gz` sha256. It is provenance: it says "this is the artifact the
-      registry served", and it stays verifiable only if the tarball itself is
-      cached (not yet — same design doc, §2.4).
+      registry served", and the tarball itself is kept under that digest in
+      `Tarball_cache` (same design doc, §2.4), so it stays verifiable and a
+      deleted tree can be re-extracted offline.
 
     A format-1 lockfile is still READ (so an upgrade does not break a build),
     but its registry [hash] values are in the old domain and must not be
