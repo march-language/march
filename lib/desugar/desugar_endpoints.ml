@@ -518,8 +518,91 @@ let rec ty_key (t : ty) : string =
   | TyNat k -> string_of_int k
   | _ -> "?"
 
-let fingerprint_of ~proto (roles : string list) (steps : astep list) : string =
+(** The type names a payload may mention without the fingerprint being able
+    to expand them, and without that being a gap: they are the compiler's
+    own, so both nodes agree on what they mean by construction.  Anything
+    else that is not declared in the module being expanded is a type from
+    ANOTHER module, out of reach at desugar time
+    ([2026-09-21-protocol-fingerprint-payload-definitions-implementation.md],
+    hazard 2); [ty_key_deep] marks those `extern:` so the digest at least
+    records that the definition was not available. *)
+let payload_builtin_types =
+  [ "Int"; "Float"; "Bool"; "String"; "Char"; "Byte"; "Atom"; "Unit"; "Bytes";
+    "List"; "Option"; "Array"; "Set"; "Seq"; "Result"; "Map"; "Json"; "Pid"; "Cap" ]
+
+(** The type declarations of the module being expanded, by name: what
+    [ty_key_deep] expands a payload type against. *)
+type ty_defs = (string * (string list * type_def)) list
+
+let ty_defs_of (decls : decl list) : ty_defs =
+  List.filter_map
+    (function
+      | DType (_, nm, ps, td, _) | DAlwaysLinearType (_, nm, ps, td, _) ->
+        Some (nm.txt, (List.map (fun (p : name) -> p.txt) ps, td))
+      | _ -> None)
+    decls
+
+(** [ty_key], but a `TyCon` naming a type declared in THIS module carries its
+    definition, recursively, rather than only its name: two protocols whose
+    `Thing` is `{ x : Int }` on one node and `{ x : String }` on the other
+    must not share a fingerprint.  A variant contributes its constructors in
+    declaration order, a record its fields in declaration order (reordering
+    them changes the JSON the `derive Json` codec emits).
+
+    [seen] holds the type names already expanded on the current path, so
+    `type Tree = Leaf | Node(Tree, Tree)` emits a back-reference `@Tree`
+    instead of recurring forever.  [subst] carries the already-computed keys
+    of a parameterised type's arguments, positionally, so `Box(Int)` and
+    `Box(String)` differ.  The non-`TyCon` cases match [ty_key]: they already
+    describe structure. *)
+let rec ty_key_in ~(types : ty_defs) ~(seen : string list) ~(subst : (string * string) list) (t : ty) : string =
+  match t with
+  | TyCon (c, args) ->
+    let argk = List.map (ty_key_in ~types ~seen ~subst) args in
+    let base = if args = [] then c.txt else c.txt ^ "(" ^ String.concat "," argk ^ ")" in
+    if List.mem c.txt seen then "@" ^ c.txt
+    else (
+      match List.assoc_opt c.txt types with
+      | Some (params, td) ->
+        let subst' =
+          if List.length params = List.length argk then List.combine params argk else []
+        in
+        base ^ "<" ^ td_key_in ~types ~seen:(c.txt :: seen) ~subst:subst' td ^ ">"
+      | None -> if List.mem c.txt payload_builtin_types then base else "extern:" ^ base)
+  | TyVar v -> (match List.assoc_opt v.txt subst with Some k -> k | None -> "'" ^ v.txt)
+  | TyArrow (a, b) -> "(" ^ ty_key_in ~types ~seen ~subst a ^ "->" ^ ty_key_in ~types ~seen ~subst b ^ ")"
+  | TyTuple ts -> "(" ^ String.concat "," (List.map (ty_key_in ~types ~seen ~subst) ts) ^ ")"
+  | TyRecord fs ->
+    "{" ^ String.concat "," (List.map (fun (f, t) -> f.txt ^ ":" ^ ty_key_in ~types ~seen ~subst t) fs) ^ "}"
+  | TyLinear (_, t) -> "lin " ^ ty_key_in ~types ~seen ~subst t
+  | TyNat k -> string_of_int k
+  | _ -> "?"
+
+and td_key_in ~types ~seen ~subst (td : type_def) : string =
+  match td with
+  | TDAlias t -> "=" ^ ty_key_in ~types ~seen ~subst t
+  | TDVariant vs ->
+    String.concat "|"
+      (List.map
+         (fun v ->
+            v.var_name.txt ^ "("
+            ^ String.concat "," (List.map (ty_key_in ~types ~seen ~subst) v.var_args)
+            ^ ")")
+         vs)
+  | TDRecord fs ->
+    "{"
+    ^ String.concat ","
+        (List.map (fun f -> f.fld_name.txt ^ ":" ^ ty_key_in ~types ~seen ~subst f.fld_ty) fs)
+    ^ "}"
+
+let ty_key_deep ~(types : ty_defs) (t : ty) : string = ty_key_in ~types ~seen:[] ~subst:[] t
+
+(* [types] is REQUIRED, not optional with a `[]` default: an empty table is
+   exactly the name-only digest this change exists to remove, and a caller
+   that forgot it would silently get the old behaviour back. *)
+let fingerprint_of ~proto ~(types : ty_defs) (roles : string list) (steps : astep list) : string =
   let b = Buffer.create 256 in
+  let ty_key ty = ty_key_deep ~types ty in
   let rec go = function
     | [] -> ()
     | AMsg (f, t, ty, c) :: rest ->
@@ -1109,7 +1192,7 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
            (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
-                var "secret"; var "addrs"; lam [ "_ep" ] unit;
+                var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
                 lam [ "s" ]
                   (block [ let_wild (app "body" [ var "s"; app (rm ^ ".register") [ var "s"; lit_int 0 ] ]); unit ]) ]))
       roles
@@ -1194,8 +1277,8 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
            (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_hosted"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
-                var "secret"; var "addrs"; lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ]; var "start";
-                var "deliver" ]))
+                var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
+                app "pid_to_int" [ var "host" ]; var "start"; var "deliver" ]))
       roles
   in
   (* `host_<Role>_or(…, start, deliver, cancel)`: the same, and the actor is
@@ -1213,8 +1296,8 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
            (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_hosted_or"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
-                var "secret"; var "addrs"; lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ]; var "start";
-                var "deliver"; var "cancel" ]))
+                var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
+                app "pid_to_int" [ var "host" ]; var "start"; var "deliver"; var "cancel" ]))
       roles
   in
   (* `offer_hosted_<Role>(io, node, capacity, host, start, deliver, cancel)`
@@ -1369,7 +1452,7 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
                 | d -> d
               in
               let peers = List.map (fun r -> (r, peers_of steps roles r)) roles in
-              let fingerprint = fingerprint_of ~proto roles steps in
+              let fingerprint = fingerprint_of ~proto ~types:(ty_defs_of decls) roles steps in
               let msg = msg_module errors ~proto ~span ~fingerprint ctors roles peers in
               let role_mods =
                 List.map

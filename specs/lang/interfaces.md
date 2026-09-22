@@ -56,8 +56,7 @@ end
 > re-evaluate correctly per call, returning the same answer regardless of the
 > actual arguments, on the COMPILED backend only. **That bug is also FIXED**
 > (`lib/desugar/desugar.ml`'s `inject_defaults`, 2026-07-18): reverified live
-> with the exact `MyOrd`/`AppColor` repro from `specs/todos/` ("Compiler:
-> interfaces/impls declaration checking, Task 6 closeout"): `mylt(Red, Green)`
+> with the `MyOrd`/`AppColor` repro that motivated the fix: `mylt(Red, Green)`
 > / `mylt(Green, Red)` now print `true` / `false` compiled with `--opt 2`,
 > matching the interpreter, and the `Eq`-shaped `neq`-calling-`eq` case above
 > likewise gives correct, argument-dependent answers compiled. See
@@ -332,17 +331,11 @@ derive Show for AppColor
 
 A file may have only one top-level `mod`, so `main` lives inside `MyStack`
 here (a separate entry file could instead `import MyStack` and call the
-qualified names from outside). The `pop` match arm below also binds the
-returned pair with a `let` rather than the nested pattern `Some((top, rest))
--> ...` directly. The reason is a real, verified compiled-only bug: destructuring a tuple
-pattern nested directly inside a constructor pattern silently reads the
-tuple elements' raw tagged representation instead of untagging them (e.g. an
-`Int` `3` comes back as `7`) on the compiled backend only; binding the whole
-payload first and destructuring it with a separate `let` avoids the bug and
-works correctly on both backends.
+qualified names from outside).
 
 ```march
 mod MyStack do
+  needs IO.Console
 
   type Stack(a) = Stack(List(a))
 
@@ -371,7 +364,7 @@ mod MyStack do
   end
 
   -- Using the stack:
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let s0 = MyStack.empty()
     let s1 = MyStack.push(s0, 1)
     let s2 = MyStack.push(s1, 2)
@@ -382,7 +375,7 @@ mod MyStack do
     match MyStack.pop(s3) do
       Some(pair) ->
         let (top, rest) = pair
-        println("popped: " ++ int_to_string(top))
+        println("popped: " ++ String.from_int(top))
         println("remaining: " ++ show(rest))
       None ->
         println("empty stack")
@@ -401,17 +394,20 @@ For the **compiled backend**, the compiler resolves most interface dispatch at c
 That compile-time-resolved picture is not the whole story, though: it describes the compiled backend's common case, not a single dispatch mechanism the whole language shares. See `core-march.md` §4.4.2 ("Method dispatch: `impl_tbl` vs. ordinary lexical `env` binding") for the full, precise operational account, which this section summarizes:
 
 - The **built-in type-directed interfaces** (`Show`, `Eq`, `Ord`, `Hash`) dispatch, in the **interpreter**, through a real **runtime hashtable** (`impl_tbl`, keyed `(interface, type_name)`) looked up by the argument's dynamic type at the call site. This is real runtime type-directed dispatch, not something resolved ahead of time.
-- **User-defined interfaces** used to get no dispatch table at all and overlapping impls were silently "last one wins"; that's no longer the case. **Impl coherence** (checked at declaration) now rejects a second `impl Speak(Dog)` for the same `(interface, type)` pair as an immediate compile error ("Overlapping implementation ... A type may implement an interface at most once"), so it's a diagnostic, not silent shadowing. Separately, **FQN dispatch identity** (`specs/todos/`, "FQN dispatch identity" entries) lets two truly distinct types that happen to share a short name across different modules (e.g. an unrelated `Thing` declared in two library modules) each `impl` the same general interface and dispatch correctly by the value's runtime type, in *both* backends, when the collision is present: the interpreter qualifies its dispatch table by declaring module and the compiled backend generates a runtime ctor-tag dispatch function for the ambiguous call sites. One narrow, pre-existing gap remains in the **interpreter only**: calling an interface method unqualified from a module other than the one that declared the `impl` can fail to resolve (`unbound variable`) even when the identical call compiles and runs correctly. This shows up again even with no short-name collision at all, so it's a general interpreter scoping limitation, not specific to the collision-dispatch mechanism. See `core-march.md` §4.4.2/§4.4.3 for the full operational account.
+- **User-defined interfaces** used to get no dispatch table at all and overlapping impls were silently "last one wins"; that's no longer the case. **Impl coherence** (checked at declaration) now rejects a second `impl Speak(Dog)` for the same `(interface, type)` pair as an immediate compile error ("Overlapping implementation ... A type may implement an interface at most once"), so it's a diagnostic, not silent shadowing. Separately, **FQN dispatch identity** (commit `44e7a6bb7`, #57; `core-march.md` §4.4.3) lets two truly distinct types that happen to share a short name across different modules (e.g. an unrelated `Thing` declared in two library modules) each `impl` the same general interface and dispatch correctly by the value's runtime type, in *both* backends, when the collision is present: the interpreter qualifies its dispatch table by declaring module and the compiled backend generates a runtime ctor-tag dispatch function for the ambiguous call sites. One narrow, pre-existing gap remains in the **interpreter only**: calling an interface method unqualified from a module other than the one that declared the `impl` can fail to resolve (`unbound variable`) even when the identical call compiles and runs correctly. This shows up again even with no short-name collision at all, so it's a general interpreter scoping limitation, not specific to the collision-dispatch mechanism. See `core-march.md` §4.4.2/§4.4.3 for the full operational account.
 
 A related, separate limitation: **interface method names are not
-module-qualifiable at all**, in either backend. `Foo.speak(x)` never resolves,
-for a nested module or the entry module alike, even when `Foo` declares
+module-qualifiable in the interpreter**. When `Foo` declares
 `interface Speak(a) do fn speak : a -> String end` and dispatches it via
-`impl Speak(...)`, because dispatch works through the method's bare name,
-not module-member lookup; the working spelling is always the unqualified
-`speak(x)`. Closing this needs interface methods to become qualifiable in
-general (a dispatch-side redesign), which was tried and **measured to
-regress working code**; see
+`impl Speak(...)`, `Foo.speak(x)` fails at run time with `unbound variable:
+Foo.speak`, for a nested module or the entry module alike, because the
+interpreter dispatches through the method's bare name, not module-member
+lookup. `--check` accepts the qualified spelling and the compiled backend
+runs it correctly, so the failure only surfaces when the program is
+interpreted; the spelling that works everywhere is the unqualified
+`speak(x)`. Closing the interpreter gap needs interface methods to become
+qualifiable in general (a dispatch-side redesign), which was tried and
+**measured to regress working code**; see
 `specs/progress/2026-08-03-interface-method-names-qualifiability-disposition.md`
 for the measurement and why it was closed as won't-fix rather than attempted
 again. As a bounded consolation, the **interpreter** now recognizes this
@@ -429,6 +425,6 @@ So "no vtables or runtime type lookups" is accurate for the compiled backend's s
 
 ## Next Steps
 
-- [Types](types.md): types you implement interfaces for
+- [Types](type-system.md): types you implement interfaces for
 - [Standard Library](../../docs/stdlib.md): stdlib types and their interface implementations
 - [Pattern Matching](pattern-matching.md): using `match` with interface-dispatched values

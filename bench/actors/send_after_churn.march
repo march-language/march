@@ -1,0 +1,77 @@
+-- Send throughput to ONE long-lived actor, before and after churning N
+-- short-lived actors (env CHURN, default 100000). Every dead actor's
+-- march_actor_meta stays linked in g_actor_tbl's fixed 256-bucket chains, and
+-- find_meta (on every send) walks them: before metas were reclaimed, 200k
+-- churned actors made the same 200k sends ~60x slower.
+-- See specs/todos/2026-09-17-proc-struct-reclamation.md, "Analysis, 2026-09-22".
+--
+--   march --compile --opt 2 bench/actors/send_after_churn.march -o /tmp/sac
+--   CHURN=200000 /tmp/sac
+mod SendAfterChurn do
+  needs IO
+
+  actor Sink do
+    state { seen : Int }
+    init  { seen: 0 }
+    on GetSeen(reply_to) do
+      Actor.reply(reply_to, state.seen)
+      state
+    end
+    on Tick(n : Int) do
+      { seen: state.seen + n }
+    end
+  end
+
+  actor Cell do
+    state { v : Int }
+    init  { v: 0 }
+    on Set(n : Int) do { v: n } end
+  end
+
+  type GetSeenReq = GetSeenReq
+
+  fn churn(i, limit) do
+    if i == limit do
+      ()
+    else
+      let pid = spawn(Cell)
+      let _ = send(pid, Set(i))
+      kill(pid)
+      churn(i + 1, limit)
+    end
+  end
+
+  fn sends(pid, n) do
+    if n == 0 do
+      ()
+    else
+      let _ = send(pid, Tick(1))
+      sends(pid, n - 1)
+    end
+  end
+
+  fn timed_sends(pid, label) do
+    let t0 = System.monotonic_time()
+    sends(pid, 200000)
+    let _ = Actor.call(pid, GetSeenReq, 60000)
+    let t1 = System.monotonic_time()
+    println(label ++ " 200k sends ms=" ++ int_to_string(t1 - t0))
+  end
+
+  fn main(_cap : Cap(IO)) do
+    let sink = spawn(Sink)
+    timed_sends(sink, "churn=0")
+    let n = match System.env("CHURN") do
+      Some(s) -> match string_to_int(s) do
+        Some(v) -> v
+        None -> 100000
+      end
+      None -> 100000
+    end
+    let t0 = System.monotonic_time()
+    churn(0, n)
+    run_until_idle()
+    println("churn " ++ int_to_string(n) ++ " ms=" ++ int_to_string(System.monotonic_time() - t0))
+    timed_sends(sink, "churn=" ++ int_to_string(n))
+  end
+end

@@ -6,7 +6,7 @@
 -- still had. An append whose first argument shares its tail, walked twice,
 -- is the smallest trigger; Msgpack.encode of a Bin inside an Array with a
 -- reused payload is where it was found (the cluster node service's session
--- frames). Pre-fix: RC underflow / non-exhaustive match; --no-trmc was fine.
+-- frames). Pre-fix: RC underflow / non-exhaustive match; the non-TRMC build was fine.
 mod TrmcSharedTailReuse do
   needs IO.Console
 

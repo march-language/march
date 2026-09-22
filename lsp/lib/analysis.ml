@@ -1210,7 +1210,7 @@ let rec tco_check (fn_name : string) (blocking : string option) (e : Ast.expr) a
                  only partly transformable), so state the shape TRMC does
                  handle rather than promising this particular call becomes a
                  loop. *)
-              "This recursive call is not in tail position — %s, so the stack grows by one frame per call. Tail-recursion-modulo-cons compiles a call that is the direct argument of a constructor in tail position into a loop with no extra stack, and is on by default (`--no-trmc` disables it)."
+              "This recursive call is not in tail position — %s, so the stack grows by one frame per call. Tail-recursion-modulo-cons compiles a call that is the direct argument of a constructor in tail position into a loop with no extra stack, and always runs."
               b
           else if is_boolop_blocked b then
             (* `&&`/`||` are STRICT in March (specs/lang/core-march.md 4.4.1):
@@ -3424,7 +3424,7 @@ let run_tir_pass (a : t) : t =
               borrow_snapshot := Some (March_tir.Borrow.infer_module ~k_table pre, pre, k_table))
           ~extra_roots:user_names
           ~decls:(March_tir.Alloc_contract.collect desugared)
-          ~opt:true ~trmc:!March_tir.Trmc.enabled tir
+          ~opt:true tir
       in
       let consume_modes =
         match !borrow_snapshot with

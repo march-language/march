@@ -84,7 +84,26 @@ A few rules the type checker enforces, so they never reach runtime:
 
 ## A worked example: request–reply
 
-Here is the `Echo` protocol fully implemented. Each role's side is a function that takes its endpoint as `Chan(Role, Echo)` and threads it through `send` → `recv` → `close`:
+Here is the `Echo` protocol, fully implemented and **runnable**. Because a channel's two directional queues have no scheduler behind them (`Chan.recv` never suspends; see the Runtime note below), a working program interleaves both sides' *steps* into a single control flow, so every `send` runs before its matching `recv`:
+
+```march
+fn main() do
+  let (alice, bob) = Chan.new(Echo)
+  let alice = Chan.send(alice, "hello")     -- Alice sends first
+  let (msg, bob) = Chan.recv(bob)           -- Bob receives
+  let bob = Chan.send(bob, "echo: " ++ msg) -- Bob replies
+  let (reply, alice) = Chan.recv(alice)     -- Alice receives the echo
+  Chan.close(bob)
+  Chan.close(alice)
+  println(reply)   -- echo: hello
+end
+```
+
+`Chan.new(Echo)` takes the protocol as a bare name and returns Alice's and Bob's dual endpoints; each `Chan.send`/`Chan.recv` advances one of them, and both are closed once the protocol reaches `end`. Every operation is checked against the protocol: a `send` out of order, or a `recv` of a value that isn't due yet, simply wouldn't compile.
+
+### Each role's view
+
+The same protocol can be written as two functions, one per role; each takes its own endpoint as `Chan(Role, Echo)` and threads it through `send` → `recv` → `close`. This is the shape you'd use if each side ran as its own actor or under an external scheduler:
 
 ```march
 mod EchoDemo do
@@ -111,26 +130,11 @@ mod EchoDemo do
 end
 ```
 
-Notice what you *can't* write here. If `client` tried to `Chan.recv` before `Chan.send`, the projected type for Alice's endpoint states "send next," so the receive is a type error. If `server` forgot to `Chan.close`, the linear endpoint would be left unconsumed, also an error. The protocol is enforced through the type system, not by discipline. (`Chan.new(Echo)` takes the protocol as a bare name, and returns Alice's and Bob's dual endpoints to hand to the two functions.)
+Each function documents *one role's own view* of the protocol, enforced through the type system rather than by discipline. If `client` tried to `Chan.recv` before `Chan.send`, the projected type for Alice's endpoint states "send next," so the receive is a type error; if `server` forgot to `Chan.close`, the linear endpoint would be left unconsumed, also an error.
 
-**A caveat this shape hides: `client` and `server` are each individually well-typed, but calling them as two ordinary, uninterrupted function calls from one `main`, in *either* order, is not runnable.** `client` starts with a `send`; `server` starts with a `recv`. Because `Chan.recv` never suspends (there is no scheduler backing a channel; see the Runtime note below), calling `server(bob)` before `client(alice)` has sent anything crashes at `server`'s first `recv`, and calling `client(alice)` before `server(bob)` has sent its reply crashes at `client`'s `recv` of the echo, on *both* backends. The two-function form here documents *what each role's own view of the protocol looks like* (useful on its own, and directly usable if each side runs as its own actor or is driven by an external scheduler); it is not, by itself, a call sequence you can drop into one `main`. The example immediately below shows the form that actually runs: the two sides' *steps* interleaved by hand into a single control flow, every `send` before its matching `recv`.
+**But these two functions are not, by themselves, a call sequence you can drop into one `main`.** `client` starts with a `send`, `server` with a `recv`; because `Chan.recv` never suspends, calling them as two ordinary uninterrupted calls, in *either* order, crashes at the first `recv` for which the value hasn't been sent yet, on both backends. The two-function form documents each role's view; the interleaved `main` above is the form that actually runs. (The function-structured form is exactly that interleaving split across two functions; it does not run the two sides concurrently on separate green threads.)
 
-> **Runtime note.** A channel is backed by two directional queues (one per direction), on **both** backends. Session *safety* (correct order, no use-after-close) is checked entirely at compile time; the runtime does not re-verify it. `Chan.recv` does **not** block or suspend on *either* backend: if the matching value hasn't been sent yet, `recv` fails immediately with a runtime error (interpreted) or aborts (compiled); there is no scheduler backing channels the way there is for actor mailboxes. So every runnable program, on **both** backends, must interleave the two sides in a single control flow so that each `send` runs before its matching `recv`:
->
-> ```march
-> fn main() do
->   let (alice, bob) = Chan.new(Echo)
->   let alice = Chan.send(alice, "hello")     -- Alice sends first
->   let (msg, bob) = Chan.recv(bob)           -- Bob receives
->   let bob = Chan.send(bob, "echo: " ++ msg) -- Bob replies
->   let (reply, alice) = Chan.recv(alice)     -- Alice receives the echo
->   Chan.close(bob)
->   Chan.close(alice)
->   println(reply)   -- echo: hello
-> end
-> ```
->
-> The function-structured `client`/`server` form above is exactly this shape split into two functions called in the right order from `main`; it does not run the two sides concurrently on separate green threads. See the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.1–§4.11.3 for the queue representation and §4.11.6 (finding F6) for why recv-before-send is a scope boundary, not a bug: session types here are a linear protocol-conformance checker over a same-thread mailbox, not a concurrent scheduler.
+> **Runtime note.** A channel is backed by two directional queues (one per direction), on **both** backends. Session *safety* (correct order, no use-after-close) is checked entirely at compile time; the runtime does not re-verify it. `Chan.recv` does **not** block or suspend on *either* backend: if the matching value hasn't been sent yet, `recv` fails immediately with a runtime error (interpreted) or aborts (compiled); there is no scheduler backing channels the way there is for actor mailboxes. Session types here are a linear protocol-conformance checker over a same-thread mailbox, not a concurrent scheduler: the compiler checks that operations happen in the right order, not that they happen on different threads at the same time. See the [operational reference](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.11.1–§4.11.3 for the queue representation and §4.11.6 (finding F6) for why recv-before-send is a scope boundary, not a bug.
 
 ---
 

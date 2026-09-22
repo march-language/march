@@ -12,13 +12,21 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Removed
-- **`MARCH_NO_TRMC` is gone; use `--no-trmc`.** The environment variable turned off
+- **`MARCH_NO_TRMC` is gone.** The environment variable turned off
   tail-recursion-modulo-cons for every compile in the process, including the
   stdlib, which increasingly depends on the transform to avoid overflowing the
-  stack on long lists. The `--no-trmc` flag still works, one invocation at a time.
-  `MARCH_TRMC` (already a no-op) is unchanged.
+  stack on long lists. (The `--no-trmc` flag that briefly replaced it is gone
+  too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **Tail-recursion-modulo-cons always runs; `--no-trmc` and `--trmc` are
+  removed.** Passing either is now the ordinary "unknown option" error. There
+  is no supported way to turn TRMC off: the stdlib's list producers are being
+  written in natural recursive style, which is a loop only because TRMC runs,
+  and with it off they would overflow the green-thread stack on lists of
+  20k-30k elements (exit 138, no output). The `@[no_alloc]` "TRMC-eligible …
+  check for `--no-trmc`" note and the flag mention in the "not in tail
+  position" warning (compiler and language server) are gone with it.
 - **An interpreted run of a `[ffi.rust]`-only project now says up front that
   Rust FFI is compiled-only.** `forge run`, `forge interactive` and interpreted
   `forge test` (`--coverage` / `MARCH_TEST_INTERPRETER=1`) print one warning
@@ -142,6 +150,37 @@ git log is authoritative for exact commits.
   reserves the type name `P_Message`: a type of your own by that name deriving
   the same interface the generated codec derives is now rejected as an
   overlapping implementation.
+- **A protocol whose payload types differ in their DEFINITIONS is now caught when
+  the session is set up, not as an undecodable message once it is running.**
+  `<P>_Msg.fingerprint()` digested each payload type by NAME, so two nodes whose
+  `Thing` was `{ x : Int }` on one and `{ x : String }` on the other shared a
+  fingerprint: the session formed and the skew surfaced mid-session, on the
+  receiving side, as `Protocol(role, "undecodable message: ...")`. The digest now
+  folds a payload type's definition in, recursively, for every type declared in
+  the same module — a variant's constructors and a record's fields in declaration
+  order, with type parameters substituted. A payload type from ANOTHER module is
+  out of reach when the digest is computed and is still recorded by name (marked
+  `extern:` so the digest at least says the definition was unavailable), so a
+  change below such a type's name remains invisible to the check.
+  **Compatibility:** every fingerprint changed. A node built before this change
+  and a node built after will now refuse each other at the access point — and, on
+  the direct runner, at the handshake. That is the check working, not a
+  regression; rebuild both sides from the same source.
+- **The direct runner (`<P>_Run.run_<Role>`, `host_<Role>`, `host_<Role>_or`) now
+  exchanges the protocol fingerprint too, not only access points.** It rides the
+  session hello as an optional trailing field, so a node built before this change
+  is read rather than deadlocked on — and is refused with a message saying it sent
+  no fingerprint. A mismatch is a setup error (`Connect`/`Accept`) naming both
+  fingerprints, not a retry loop. The cluster runner (`cluster_<Role>`) finds its
+  peers through the cluster registry rather than a hello and is NOT yet covered;
+  an access point still checks every cluster session it brokers.
+- **Compiled `send_checked` and `is_cap_valid` no longer intermittently accept a cap
+  whose actor was killed.** About one run in five, a cap taken while the actor was
+  alive still validated after `kill`: `is_cap_valid` answered `true` and
+  `send_checked` returned `:ok`, and the message went into freed memory. The
+  interpreter was always right. Both now check the actor's runtime metadata instead
+  of its (possibly freed) record, and `send_checked` returns `:ok` only when the send
+  was actually accepted.
 - **On Linux, `--cap-sandbox` now stops a program without `IO.NetListen` from
   accepting connections.** Holding only `IO.NetConnect` (an HTTP client, say)
   allowed `socket()`, and nothing denied `bind`/`listen`, so such a program
@@ -355,6 +394,29 @@ git log is authoritative for exact commits.
   could overwrite it with `None` and silently drop the value inside, and a record's field
   could be read twice. Both are now errors, as they already were for a field whose own type
   is linear.
+
+### Documentation
+- **A capability's dictionary type must be monomorphic, and the capabilities chapter now says
+  so.** `proof cap Live with Ops` cannot attach a parameterised `Ops(m)`; the "Runtime
+  dictionaries" section explains the limitation and the way around it (a concrete
+  representation at the boundary, as `Session.Ops` does with `Bytes`).
+- **The language-reference pages on march-lang.org are now generated from
+  `specs/lang/`, and the two copies have been reconciled.** Each chapter used to exist
+  twice, as independent prose that had drifted both ways, so corrections made in one copy
+  never reached readers of the other. The published pages gain sections that had existed
+  only in the spec, including supervision restart types and graceful stop, the
+  `cap no_panic` division section, and loop/stop session protocols. Several claims that
+  were wrong in one copy or both are corrected:
+  - an unhandled `offer` branch is a compile error, not a warning;
+  - compiled `MPST` programs run;
+  - interface method names can be module-qualified in compiled code;
+  - supervisor backoff doubles from `2 × base`, at most 7 times;
+  - `pmap` stays sequential for a list of exactly the threshold length;
+  - the `opaque type` constructor bypass is closed;
+  - `docs/types.md`'s `parse_int` example now typechecks.
+
+  Edit `specs/lang/`, run `scripts/gen-lang-docs.py`, and commit both. Doc-lint fails on a
+  hand-edited or stale `docs/` chapter.
 
 ### Changed
 - Cluster membership records a node's creation, name and advertised address: a restarted

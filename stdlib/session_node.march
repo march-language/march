@@ -633,28 +633,67 @@ mod SessionNode do
 
   -- ── hello: role + endpoint pid ──────────────────────────────────────────
 
-  pfn encode_hello(role : Int, me : GlobalPid.Pid) : List(Int) do
+  -- The protocol fingerprint rides the hello as an OPTIONAL THIRD element
+  -- (2026-09-21). A node built before this sends the two-element hello it
+  -- always sent, and a node built after can still read it -- otherwise an
+  -- old and a new node would deadlock at the handshake instead of reporting
+  -- the skew. `""` means "nothing to say": the raw party API
+  -- (`accept_from` / `connect_to` / `open`) has no protocol identity of its
+  -- own, so it neither sends nor demands one. See `hello_verdict`.
+  pfn encode_hello(role : Int, me : GlobalPid.Pid, fingerprint : String) : List(Int) do
+    let head = Cons(Msgpack.int(role), Cons(Msgpack.bin(GlobalPid.encode(me)), Nil))
     Msgpack.encode(Msgpack.array(
-      Cons(Msgpack.int(role), Cons(Msgpack.bin(GlobalPid.encode(me)), Nil))))
+      if fingerprint == "" do head
+      else List.append(head, Cons(Msgpack.str(fingerprint), Nil)) end))
   end
 
-  pfn decode_hello(payload : List(Int)) : Result((Int, GlobalPid.Pid), String) do
+  pfn decode_hello(payload : List(Int)) : Result((Int, GlobalPid.Pid, String), String) do
     match Msgpack.decode(payload) do
-      Ok(Msgpack.Array(Cons(Msgpack.Int(role), Cons(Msgpack.Bin(pid_bytes), Nil)))) ->
+      Ok(Msgpack.Array(Cons(Msgpack.Int(role), Cons(Msgpack.Bin(pid_bytes), rest)))) ->
+        let fp = match rest do
+          Cons(Msgpack.Str(s), Nil) -> s
+          _ -> ""
+        end
         match GlobalPid.decode(pid_bytes) do
-          Ok(pid) -> Ok((role, pid))
+          Ok(pid) -> Ok((role, pid, fp))
           Err(e) -> Err("session_node: hello pid: " ++ e)
         end
       _ -> Err("session_node: bad Hello payload")
     end
   end
 
-  pfn announce(fd : Int, role : Int, me : GlobalPid.Pid) : () do
-    let _ = NodeSend.cast(fd, 0, GlobalPid.make("peer", 0, 0), "SessionNode.Hello", encode_hello(role, me))
+  doc """
+  Whether a peer that announced [theirs] may join a session this node runs
+  under the protocol fingerprint [mine] (`<P>_Msg.fingerprint()`).
+
+  [mine] is `""` when this side has no protocol identity to compare (the raw
+  party API), and then anything is accepted -- that path never had a check.
+  [theirs] is `""` when the peer sent a hello with no fingerprint in it,
+  which since 2026-09-21 means the peer is older than the check itself; that
+  is a REFUSAL with a clear reason, not a silent accept. The `Handshake:`
+  prefix is the one `dial_retry` stops on, so a skew is reported at once
+  instead of retried until the connect budget runs out.
+  """
+  pfn hello_verdict(mine : String, theirs : String) : Result((), String) do
+    if mine == "" do Ok(())
+    else if theirs == "" do
+      Err("Handshake: the peer sent no protocol fingerprint, so it was built before the session "
+          ++ "handshake carried one; the two sides cannot be shown to run the same protocol. "
+          ++ "Rebuild both from the same source.")
+    else if mine != theirs do
+      Err("Handshake: this node and its peer were built from DIFFERENT versions of the protocol "
+          ++ "(fingerprint " ++ mine ++ " here, " ++ theirs ++ " there). Rebuild both from the "
+          ++ "same source.")
+    else Ok(()) end end end
+  end
+
+  pfn announce(fd : Int, role : Int, me : GlobalPid.Pid, fingerprint : String) : () do
+    let _ = NodeSend.cast(fd, 0, GlobalPid.make("peer", 0, 0), "SessionNode.Hello",
+                          encode_hello(role, me, fingerprint))
     ()
   end
 
-  pfn read_hello(fd : Int) : Result((Int, GlobalPid.Pid), String) do
+  pfn read_hello(fd : Int) : Result((Int, GlobalPid.Pid, String), String) do
     match NetKernel.recv_frame_exact(fd) do
       Err(e) -> Err("session_node: hello: " ++ e)
       Ok(frame) ->
@@ -667,9 +706,9 @@ mod SessionNode do
     end
   end
 
-  pfn await_hello(fd : Int) : (Int, GlobalPid.Pid) do
+  pfn await_hello(fd : Int) : (Int, GlobalPid.Pid, String) do
     match read_hello(fd) do
-      Ok(pair) -> pair
+      Ok(hello) -> hello
       Err(e) -> panic(e)
     end
   end
@@ -677,7 +716,7 @@ mod SessionNode do
   -- `read_hello` bounded by [timeout_ms] (> 0): the control socket's receive
   -- timeout covers the read and is cleared again before the control reader
   -- takes the socket over.
-  pfn read_hello_within(fd : Int, timeout_ms : Int) : Result((Int, GlobalPid.Pid), String) do
+  pfn read_hello_within(fd : Int, timeout_ms : Int) : Result((Int, GlobalPid.Pid, String), String) do
     let _ = if timeout_ms > 0 do tcp_set_recv_timeout(fd, timeout_ms) else Ok(()) end
     let r = read_hello(fd)
     let _ = if timeout_ms > 0 do tcp_set_recv_timeout(fd, 0) else Ok(()) end
@@ -781,9 +820,9 @@ mod SessionNode do
   does not know which role connects next.
   """
   fn accept_from(p : Party, conn : Peer) : Party do
-    announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1))
+    announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1), "")
     match await_hello(conn.fd) do
-      (their_role, peer_pid) -> start_link(p, their_role, conn, peer_pid)
+      (their_role, peer_pid, _fp) -> start_link(p, their_role, conn, peer_pid)
     end
   end
 
@@ -794,11 +833,11 @@ mod SessionNode do
   """
   fn connect_to(p : Party, their_role : Int, conn : Peer) : Party do
     match await_hello(conn.fd) do
-      (announced, peer_pid) ->
+      (announced, peer_pid, _fp) ->
         if announced != their_role && announced != 0 && their_role != 0 do
           panic("session_node: connected to role " ++ int_to_string(their_role) ++ " but it announced role " ++ int_to_string(announced))
         else () end
-        announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1))
+        announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1), "")
         start_link(p, their_role, conn, peer_pid)
     end
   end
@@ -818,27 +857,42 @@ mod SessionNode do
   -- goes quiet or sends something else, so `run` can report it. A role that
   -- announces the wrong number is still a wiring mistake and panics. The
   -- connection is closed on `Err`.
-  pfn join_accepted(p : Party, conn : Peer, timeout_ms : Int) : Result(Party, String) do
-    announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1))
+  pfn join_accepted(p : Party, conn : Peer, timeout_ms : Int, fingerprint : String) : Result(Party, String) do
+    announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1), fingerprint)
     match read_hello_within(conn.fd, timeout_ms) do
       Err(e) ->
         close_peer(conn)
         Err(e)
-      Ok((their_role, peer_pid)) -> Ok(start_link(p, their_role, conn, peer_pid))
+      Ok((their_role, peer_pid, their_fp)) ->
+        match hello_verdict(fingerprint, their_fp) do
+          Err(e) ->
+            close_peer(conn)
+            Err(e)
+          Ok(_) -> Ok(start_link(p, their_role, conn, peer_pid))
+        end
     end
   end
 
-  pfn join_dialed(p : Party, their_role : Int, conn : Peer, timeout_ms : Int) : Result(Party, String) do
+  pfn join_dialed(p : Party, their_role : Int, conn : Peer, timeout_ms : Int, fingerprint : String) : Result(Party, String) do
     match read_hello_within(conn.fd, timeout_ms) do
       Err(e) ->
         close_peer(conn)
         Err(e)
-      Ok((announced, peer_pid)) ->
+      Ok((announced, peer_pid, their_fp)) ->
         if announced != their_role && announced != 0 && their_role != 0 do
           panic("session_node: connected to role " ++ int_to_string(their_role) ++ " but it announced role " ++ int_to_string(announced))
         else () end
-        announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1))
-        Ok(start_link(p, their_role, conn, peer_pid))
+        -- Announce BEFORE refusing: the peer is parked in its own
+        -- `read_hello_within` and would otherwise wait out its whole
+        -- timeout, reporting a quiet peer rather than the skew both sides
+        -- can see from the two fingerprints.
+        announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1), fingerprint)
+        match hello_verdict(fingerprint, their_fp) do
+          Err(e) ->
+            close_peer(conn)
+            Err(e)
+          Ok(_) -> Ok(start_link(p, their_role, conn, peer_pid))
+        end
     end
   end
 
@@ -1315,7 +1369,7 @@ mod SessionNode do
 
   -- Every setup failure below tears down the connections made so far
   -- (`abort_links`), so the peers already reached learn of it at once.
-  pfn dial_all(p : Party, roles : List(Int), addrs : List(Addr), me, secret : String) : Result(Party, RunError) do
+  pfn dial_all(p : Party, roles : List(Int), addrs : List(Addr), me, secret : String, fingerprint : String) : Result(Party, RunError) do
     match roles do
       Nil -> Ok(p)
       Cons(r, rest) ->
@@ -1331,11 +1385,11 @@ mod SessionNode do
                 abort_links(p)
                 Err(RunError.Connect(r, e))
               Ok(conn) ->
-                match join_dialed(p, r, conn, t) do
+                match join_dialed(p, r, conn, t, fingerprint) do
                   Err(e) ->
                     abort_links(p)
                     Err(RunError.Connect(r, e))
-                  Ok(p2) -> dial_all(p2, rest, addrs, me, secret)
+                  Ok(p2) -> dial_all(p2, rest, addrs, me, secret, fingerprint)
                 end
             end
         end
@@ -1356,7 +1410,7 @@ mod SessionNode do
   -- role connects within connect_ms (each accept waits that long, so a
   -- cluster whose roles keep arriving is never cut off): a role that never
   -- starts, or failed its own setup, no longer holds this one for ever.
-  pfn accept_all(p : Party, expected : List(Int), listen_fd : Int, me, secret : String) : Result(Party, RunError) do
+  pfn accept_all(p : Party, expected : List(Int), listen_fd : Int, me, secret : String, fingerprint : String) : Result(Party, RunError) do
     match expected do
       Nil -> Ok(p)
       _ ->
@@ -1368,7 +1422,7 @@ mod SessionNode do
               Err(RunError.Accept("no connection from role(s) " ++ show_roles(expected) ++ " within " ++ int_to_string(t) ++ " ms"))
             else Err(RunError.Accept(e)) end
           Ok((_reg, conn)) ->
-            match join_accepted(p, conn, t) do
+            match join_accepted(p, conn, t, fingerprint) do
               Err(e) ->
                 abort_links(p)
                 Err(RunError.Accept(e))
@@ -1378,7 +1432,7 @@ mod SessionNode do
                   panic("session_node: role " ++ int_to_string(p.my_role) ++ " accepted a connection from role "
                         ++ int_to_string(got) ++ " but expects role(s) " ++ show_roles(expected))
                 else () end
-                accept_all(p2, List.filter(expected, fn r -> r != got), listen_fd, me, secret)
+                accept_all(p2, List.filter(expected, fn r -> r != got), listen_fd, me, secret, fingerprint)
             end
         end
     end
@@ -1407,15 +1461,21 @@ mod SessionNode do
   must hold this role's own entry iff it accepts anyone and an entry for
   every peer it dials; a missing one panics by role before any socket opens.
   [node_id] names this node in the handshake and [secret] is the cluster
-  secret every node shares. The generated `<P>_Run.run_<Role>` supplies the
-  role, its peers and the typed entry state.
+  secret every node shares. [fingerprint] is the protocol's own
+  (`<P>_Msg.fingerprint()`): it rides the hello, and a peer whose own differs
+  -- or that is too old to send one at all -- is refused at setup with a
+  `Connect`/`Accept` error rather than discovered mid-session as an
+  undecodable message (2026-09-21). `""` asks for no check. The generated
+  `<P>_Run.run_<Role>` supplies the role, its peers, the fingerprint and the
+  typed entry state.
 
   `Ok(())` when every peer's endpoint closed; else the `RunError` that ended
   the session, after the party has been torn down.
   """
   fn run(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
-         addrs : List(Addr), on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result((), RunError) do
-    run_party(io, my_role, peers, node_id, secret, addrs, on_close, fn (_p, s) -> body(s))
+         addrs : List(Addr), fingerprint : String, on_close : Int -> Unit,
+         body : Cap(Session.Live) -> Unit) : Result((), RunError) do
+    run_party(io, my_role, peers, node_id, secret, addrs, fingerprint, on_close, fn (_p, s) -> body(s))
   end
 
   doc """
@@ -1436,9 +1496,10 @@ mod SessionNode do
   generated `<P>_Run.host_<Role>` supplies the role and its peers.
   """
   fn run_hosted(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
-                addrs : List(Addr), on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
+                addrs : List(Addr), fingerprint : String, on_close : Int -> Unit, host : Int,
+                start : Cap(Session.Live) -> Unit,
                 deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit) : Result((), RunError) do
-    run_hosted_or(io, my_role, peers, node_id, secret, addrs, on_close, host, start, deliver,
+    run_hosted_or(io, my_role, peers, node_id, secret, addrs, fingerprint, on_close, host, start, deliver,
                   fn (_s, _role, _cause, _ep) -> ())
   end
 
@@ -1450,10 +1511,11 @@ mod SessionNode do
   the rest of its state; it cannot communicate in the cancelled session.
   """
   fn run_hosted_or(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
-                   addrs : List(Addr), on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
+                   addrs : List(Addr), fingerprint : String, on_close : Int -> Unit, host : Int,
+                   start : Cap(Session.Live) -> Unit,
                    deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
                    cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result((), RunError) do
-    run_party(io, my_role, peers, node_id, secret, addrs, on_close,
+    run_party(io, my_role, peers, node_id, secret, addrs, fingerprint, on_close,
               fn (p, s) -> host_party(p, s, host, start, deliver, cancel))
   end
 
@@ -1489,7 +1551,8 @@ mod SessionNode do
   end
 
   pfn run_party(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
-                addrs : List(Addr), on_close : Int -> Unit, drive : Party -> Cap(Session.Live) -> Unit) : Result((), RunError) do
+                addrs : List(Addr), fingerprint : String, on_close : Int -> Unit,
+                drive : Party -> Cap(Session.Live) -> Unit) : Result((), RunError) do
     match missing_addrs(my_role, peers, addrs) do
       Nil -> ()
       missing -> panic("session_node: role " ++ int_to_string(my_role) ++ " needs an address for role(s) " ++ show_roles(missing))
@@ -1498,9 +1561,9 @@ mod SessionNode do
     let higher = accepts(my_role, peers)
     let? listen_fd = open_listener(my_role, higher, addrs)
     let p0 = party(my_role, node_id, on_close)
-    let joined = match dial_all(p0, dials(my_role, peers), addrs, me, secret) do
+    let joined = match dial_all(p0, dials(my_role, peers), addrs, me, secret, fingerprint) do
       Err(e) -> Err(e)
-      Ok(p1) -> accept_all(p1, higher, listen_fd, me, secret)
+      Ok(p1) -> accept_all(p1, higher, listen_fd, me, secret, fingerprint)
     end
     match joined do
       Err(e) ->

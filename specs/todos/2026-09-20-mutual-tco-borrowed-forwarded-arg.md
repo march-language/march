@@ -1,4 +1,11 @@
-# `[P1]` Mutual TCO frees a forwarded argument one iteration early (or leaks it)
+# `[P3]` Mutual TCO frees a forwarded argument one iteration early (or leaks it)
+
+**Downgraded P1 -> P3 on 2026-09-22 (repo owner decision).** The P1 was the
+use-after-free, and option 1 closed it: the unsafe shape is no longer flattened,
+so it is correct and leak-free. What remains is option 2, winning the loop back for
+that shape at a runtime cost on the path the transform exists to make cheap. That is
+an optimisation with no workload asking for it; take it up if a real program needs
+deep mutual recursion in exactly this shape.
 
 **Status: option 1 shipped (`claude/mutual-tco-safety`,
 [[../progress/2026-09-20-mutual-tco-safety]]); option 2 still open.** A group whose

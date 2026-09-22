@@ -20,7 +20,7 @@ March has an Elixir-inspired module system. Modules are the primary unit of code
 > ("Module visibility, the opaque-type imbalance, and the
 > no-per-module-type-namespace design point") documents the TYPING rules,
 > including the precise visibility enforcement described below and the
-> opaque-type constructor-hiding gap noted in the "Opaque Types" section.
+> `ptype`/`opaque type` behaviour described under "Visibility".
 
 ---
 
@@ -59,6 +59,7 @@ Modules can also be nested inline:
 ```march
 mod Outer do
   mod Inner do
+    needs IO.Console
     fn greet() do println("from Inner") end
   end
 
@@ -92,31 +93,41 @@ end
 referenced from outside their declaring module: a qualified cross-module
 reference to one is a hard typecheck error, `` Function `name` is private to
 module `Mod`. `` (`load_module_into_env`'s `ex_public` gate,
-`lib/typecheck/typecheck.ml:657–692`; cross-referenced in full, with the
+`lib/typecheck/typecheck_env.ml`; cross-referenced in full, with the
 exact commit that landed the enforcement, in `core-march-types.md` §2.5).
 This is enforced identically whether the private member lives in the same
 file (a nested `mod`) or a separate file reached by qualification.
 
-**`ptype` hides the type from OUTSIDE annotation use less than the name
-above suggests, and does not hide the constructor at all.** Specifically, per
-live verification (`core-march-types.md` §2.5): a `ptype`'s bare type NAME is
-never gated (`ExType` is intentionally left with no gate in `load_module_into_env`,
-so it remains usable in a cross-module annotation regardless of `Public`/
-`Private`); this is the "opaque-type imbalance" the typing reference names
-explicitly. And a plain `ptype`'s constructor is **not actually private
-either**: the grammar defaults every variant's own visibility (`var_vis`) to
-`Public` regardless of the enclosing type's `Private` marking; only the
-separate `opaque type` form (below) forces `var_vis = Private` on its
-variants. So a plain `ptype`'s privacy currently only affects whether the
-bare type name is added to its module's `pub_set` (which the `ExType` gate
-ignores anyway), meaning a plain `ptype` and a public `type` are, today,
-observably identical to code outside the module. Use `opaque type` (below)
-if hiding the constructor is the actual goal.
+**What `ptype` hides depends on how the defining module reaches the
+checker.** The parser marks a `ptype` itself `Private` but leaves every
+variant's own visibility (`var_vis`) `Public`; only the separate `opaque type`
+form (below) forces `var_vis = Private` on its variants
+(`lib/parser/parser.mly`, `type_decl`).
+
+- **A module checked from source** (a nested `mod` in the same file, or a
+  sibling `.march` file discovered via `MARCH_LIB_PATH`): the forward-reference
+  pass `prebind_mod_members` (`lib/typecheck/typecheck.ml`) seeds a type's
+  qualified name and constructors only for a `Public` type, so outside the
+  module both a `T.Tok` annotation and a `T.Tok(...)` construction are
+  rejected. The diagnostic is currently a misleading ``Unknown module `T`.``
+  rather than a privacy message.
+- **A module loaded from the compiled module registry** (the stdlib):
+  `load_module_into_env`'s `ExType` arm is deliberately ungated, and its
+  `ExCtor` arm gates only on the variant's own visibility, which a plain
+  `ptype` leaves `Public`. So from user code `BigInt.BigInt` is usable in an
+  annotation and `BigInt.BigInt(true, [1])` constructs a value, even though
+  `stdlib/bigint.march` declares it `ptype`. This is the "opaque-type
+  imbalance" `core-march-types.md` §2.5 names.
+
+Use `opaque type` (below) if hiding the constructor is the actual goal. (No
+stdlib module declares an `opaque type` today, so only the source path is
+exercised for it.)
 
 For types that should expose the name but hide the constructors, use `opaque`:
 
 ```march
 mod Main do
+  needs IO.Console
   mod Token do
     opaque type Token = Token(String)
 
@@ -126,9 +137,9 @@ mod Main do
     end
   end
 
-  -- Outside Token: the INTENT is that values flow only through the module's
-  -- own functions and Token(_) itself is inaccessible outside the defining
-  -- module — see the enforcement gap noted below, which currently allows it.
+  -- Outside Token: values flow through the module's own functions. Callers
+  -- use `Token.make` to build one and `Token.value` to read it; `Token(_)`
+  -- itself is not accessible outside the defining module.
   fn process(t) do
     println(Token.value(t))
   end
@@ -139,28 +150,19 @@ mod Main do
 end
 ```
 
-> **Resolved:** an explicit qualified annotation like `t : Token.Token` in a
-> caller outside the `Token` module now unifies correctly with the bare
-> `Token` type `Token.make` returns, in both directions (`9001e4c0`,
-> `core-march-types.md` §2.5's "Qualified-type-path unification"). Writing
-> the qualified annotation explicitly is no longer necessary to work around
-> a unification failure; either form works.
+An explicit qualified annotation like `t : Token.Token` in a caller outside
+the `Token` module unifies with the bare `Token` type `Token.make` returns, in
+both directions (`9001e4c0`, `core-march-types.md` §2.5's "Qualified-type-path
+unification"), so either form works.
 
-> **Known enforcement gap (logged, not fixed; `specs/todos/`):**
-> `opaque type`'s constructor-hiding is intended (and, for a same-file
-> reference, believed correct) but is **not actually enforced against a
-> qualified reference to the constructor from a separate file** reached via
-> `MARCH_LIB_PATH`/auto-discovery. Live-verified: `OqToken.Token("bypass")`
-> from an unrelated sibling file typechecks and runs, constructing a real
-> value, even though `Token`'s constructor is declared with `opaque type`
-> (`test/imports/opaque_qual/`). Root cause: a same-compilation-unit
-> forward-reference pass (`prebind_mod_members`, `typecheck.ml:8032–8087`)
-> registers the qualified constructor key unconditionally on `var_vis`,
-> before the later, correctly `ci_vis`-filtered `DMod` export step's result
-> is merged in; the same class of bug the cross-module `pfn`/value gate
-> above was fixed for, but on a different registration path and for the
-> `ExCtor`/`ci_vis` check instead of `ExFn`/`ExValue`. See
-> `core-march-types.md` §2.5 for the full trace.
+`opaque type`'s constructor-hiding holds both for a same-file reference and
+for a qualified reference from a separate file reached via
+`MARCH_LIB_PATH`/auto-discovery: `OqToken.Token("bypass")` from an unrelated
+sibling file is rejected. That cross-file bypass used to typecheck, because
+`prebind_mod_members` seeded the qualified constructor key without checking
+`var_vis`; it was fixed in `48cf9263f` and is guarded by
+`test_opaque_ctor_qualified_bypass_rejected` in `test/test_compiler.ml` (the
+accepting control is `test/imports/opaque_qual/`).
 
 ---
 
@@ -170,6 +172,7 @@ Call functions or access types from another module using `.`:
 
 ```march
 mod Main do
+  needs IO.Console
   mod Math do
     fn square(n : Int) : Int do n * n end
     fn cube(n : Int) : Int do n * n * n end
@@ -296,6 +299,7 @@ be reached by qualification; the `import`/`alias` demos below instead target
 
 ```march
 mod Example do
+  needs IO.Console
 
   mod MathUtils do
     fn square(x : Int) : Int do x * x end
@@ -362,7 +366,7 @@ In a `forge` project, each file typically contains one module. Files are discove
 
 ```
 my_app/
-├── src/
+├── lib/
 │   ├── my_app.march          -- mod MyApp do ... end
 │   ├── my_app/router.march   -- mod MyApp.Router do ... end
 │   └── my_app/templates.march-- mod MyApp.Templates do ... end
@@ -370,7 +374,7 @@ my_app/
 
 Build with:
 ```sh
-MARCH_LIB_PATH=src ./_build/default/bin/main.exe --compile -o my_app src/my_app.march
+MARCH_LIB_PATH=lib march --compile -o my_app lib/my_app.march
 ```
 
 `forge build` handles this automatically.
@@ -385,6 +389,7 @@ Module names map to file paths by convention: `MyApp.Router` → `my_app/router.
 
 ```march
 mod Main do
+  needs IO.Console
   mod Config do
     let version   = "1.0.0"
     let max_items = 1000
