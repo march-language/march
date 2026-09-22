@@ -12330,6 +12330,91 @@ let test_compiled_sanitize_clean_exit () =
     Alcotest.(check string)
       "sanitized binary prints its output" "sanitize ok" output
 
+(* Regression: the CAS tag for MARCH_SANITIZE was a bare "sanitize" for ANY
+   value, but the driver links -fsanitize=thread for MARCH_SANITIZE=thread and
+   -fsanitize=address,undefined for every other value.  So compiling a program
+   with MARCH_SANITIZE=thread and then the same program with MARCH_SANITIZE=1
+   printed "compiled ... (cached)" and handed back the TSAN binary (found on
+   ubuntu: `nm` showed __tsan_init and no __asan_init in the "ASAN" binary),
+   and any sanitizer evidence gathered that way came from the wrong sanitizer.
+   Guard: in a fresh project dir (the CAS lives in cwd's .march/cas), the
+   second-mode compile must MISS the cache -- no "(cached)", and new
+   artifacts-v2 entries.  Counting entries, not cmp-ing binaries: two fresh
+   links differ anyway on macOS (random LC_UUID), so cmp proves nothing.  A
+   third compile repeating the first mode must HIT, which proves the count
+   and the "(cached)" marker actually observe the cache in this dir. *)
+let test_sanitize_modes_do_not_share_cas_artifact () =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file "march_sankey" "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "sankey.march" in
+  let oc = open_out src in
+  output_string oc
+    "mod SanKey do\n\
+    \  needs IO.Console\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do println(\"sanitize key\") end\n\
+     end\n";
+  close_out oc;
+  (* The TSAN and ASAN runtimes are not on every clang (musl has neither), so
+     probe each with a trivial C program first: a missing sanitizer runtime is
+     a tool-absence skip, same class as clang being missing. *)
+  let sanitizer_links flag =
+    clang_available ()
+    && Sys.command
+         (Printf.sprintf
+            "cd %s && printf 'int main(void){return 0;}\\n' > probe.c && \
+             clang %s probe.c -o probe >/dev/null 2>&1"
+            (Filename.quote tmp) flag) = 0
+  in
+  if not (sanitizer_links "-fsanitize=thread"
+          && sanitizer_links "-fsanitize=address,undefined") then
+    record_jit_skip "clang cannot link -fsanitize=thread and \
+                     -fsanitize=address,undefined (sanitize CAS-key test)"
+  else begin
+    let rec count_files dir =
+      if not (Sys.file_exists dir) then 0
+      else
+        Array.fold_left (fun n e ->
+            let p = Filename.concat dir e in
+            if Sys.is_directory p then n + count_files p else n + 1)
+          0 (Sys.readdir dir)
+    in
+    let artifacts () =
+      count_files (Filename.concat tmp ".march/cas/artifacts-v2") in
+    let compile mode =
+      let bin = Filename.concat tmp ("bin_" ^ mode) in
+      let cmd = Printf.sprintf "cd %s && MARCH_SANITIZE=%s %s --compile -o %s %s"
+          (Filename.quote tmp) mode (Filename.quote main_exe)
+          (Filename.quote bin) (Filename.quote src) in
+      let (rc, out) = run_capture cmd in
+      if rc <> 0 then
+        Alcotest.failf "MARCH_SANITIZE=%s compile failed (rc=%d):\n%s" mode rc out;
+      let contains s sub =
+        let n = String.length s and m = String.length sub in
+        let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
+        go 0
+      in
+      contains out "(cached)"
+    in
+    Alcotest.(check bool) "first (thread) build is not cached" false
+      (compile "thread");
+    let after_thread = artifacts () in
+    Alcotest.(check bool) "thread build stored artifacts" true (after_thread > 0);
+    Alcotest.(check bool)
+      "MARCH_SANITIZE=1 after =thread misses the cache (not handed the TSAN binary)"
+      false (compile "1");
+    let after_address = artifacts () in
+    Alcotest.(check bool)
+      (Printf.sprintf "address build stored its own artifacts (%d -> %d)"
+         after_thread after_address)
+      true (after_address > after_thread);
+    Alcotest.(check bool) "control: repeating =thread hits the cache" true
+      (compile "thread");
+    Alcotest.(check int) "control: a cache hit stores nothing new"
+      after_address (artifacts ())
+  end
+
 (* IO.read_byte: reads raw stdin bytes one at a time, returns -1 on EOF.
    Compiled end-to-end (not eval-mode) because it exercises the real
    runtime read(0, &c, 1) syscall wrapper, not the interpreter. *)
@@ -14745,6 +14830,8 @@ let stdlib_suites =
           test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union;
         Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow
           test_compiled_sanitize_clean_exit;
+        Alcotest.test_case "MARCH_SANITIZE=thread and =1 builds do not share a CAS artifact" `Slow
+          test_sanitize_modes_do_not_share_cas_artifact;
         Alcotest.test_case "string stats: size histogram is exact" `Slow
           test_string_stats_histogram_exact;
         Alcotest.test_case "string stats: off unless MARCH_STRING_STATS is set" `Slow
