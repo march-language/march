@@ -83,6 +83,11 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A scheduler thread that cannot be created is reported instead of crashing the program at
+  exit.** Under a process/thread limit (a container `pids` limit, `ulimit -u`) a compiled
+  program could run to completion and then die with SIGSEGV while joining a thread that was
+  never started. It now prints how many scheduler threads it is running on and carries on
+  with those.
 - **A hot deploy that changes an actor's state no longer runs new handlers on
   old state.** Messages already in an actor's mailbox when the deploy landed
   were handled by the new code against the old-shaped state, which could read

@@ -165,6 +165,16 @@ static void burn(int64_t iters) {
     for (int64_t i = 0; i < iters; i++) x += i;
 }
 
+/* The OS thread this green thread is on RIGHT NOW.  glibc declares
+ * pthread_self `__attribute__((const))`, so an optimising compiler may call it
+ * once per function and reuse the answer across a march_sched_yield() that
+ * moved the green thread to another OS thread -- every worker would then
+ * report only the thread that first ran it, and a scheduler that started
+ * after the global run queue drained could never be observed.  The -O0 build
+ * in test/dune does not do that (checked in the object code); the volatile
+ * pointer keeps it true if the flags ever change. */
+static pthread_t (*volatile current_os_thread)(void) = pthread_self;
+
 static void seen_record(pthread_t t) {
     while (atomic_exchange_explicit(&g_seen_lock, 1, memory_order_acquire)) { /* spin */ }
     int len = atomic_load_explicit(&g_seen_len, memory_order_relaxed);
@@ -197,18 +207,28 @@ static void seen_record(pthread_t t) {
  *     the workers had waited SEEN_WAIT_S was not something the test could
  *     know.
  *
+ *  3. With the wait measured alone and raised to 120 s it failed once more on
+ *     the same runner ("... 6, requested 7; ran 120.0 s of a 120 s wait;
+ *     224/224 workers left by deadline").  So it is not a late thread either:
+ *     no OS scheduler withholds a runnable thread for two minutes.  Reading
+ *     the runtime rules out the usual suspect -- there is no park/wake to
+ *     lose; an idle scheduler polls every 1 ms and makes six steal attempts
+ *     per poll against deques that hold ~37 procs each -- and a further 2000
+ *     runs (arm64 and emulated amd64, cpuset and quota limits, 8x contention)
+ *     did not fail once.  What the failure line could not say is what the
+ *     seventh scheduler was DOING, so it now does: see report_thread_stats.
+ *
  * The CI failure itself was never reproduced: 0 failures in about 500 runs of
  * the old test on 4 CPUs, most under 6x contention.  What those runs did
  * establish is that it is not work distribution.  The last thread is first
  * seen within 90 ms in 180/180 runs, and the seven threads' dispatch counts
  * stay within ~25% of each other: a scheduler that just ran a yielder steals
  * before it pops its own deque, so procs keep migrating and a thread that is
- * running cannot go without.  Nor did a thread fail to start --
- * pthread_create's result is unchecked in march_sched_run, but on glibc a
- * failed create would have crashed in pthread_join(0), not reported 6.  What
- * is left is one OS thread that a shared runner did not run for seconds,
- * which only a long bound that measures the wait alone can absorb, and which
- * the failure line now reports well enough to confirm or refute next time.
+ * running cannot go without.  Nor did a thread fail to start: at the
+ * time pthread_create's result was unchecked in march_sched_run, and a failed
+ * create crashed in pthread_join rather than reporting 6 (confirmed under
+ * `docker run --pids-limit 6`; the runtime now checks it, and reports the
+ * shortfall on stderr).
  *
  * So: a small floor, then every worker stays RUNNABLE -- yielding, so it
  * stays stealable -- until all N_REQUESTED threads have dispatched one, or a
@@ -218,7 +238,7 @@ static void seen_record(pthread_t t) {
 static void worker_fn(void *arg) {
     (void)arg;
     for (int round = 0; round < FLOOR_ROUNDS; round++) {
-        seen_record(pthread_self());
+        seen_record(current_os_thread());
         burn(200000);
         march_sched_yield();
     }
@@ -227,12 +247,27 @@ static void worker_fn(void *arg) {
             atomic_fetch_add(&g_gave_up, 1);
             break;
         }
-        seen_record(pthread_self());
+        seen_record(current_os_thread());
         burn(20000);
         march_sched_yield();
     }
-    seen_record(pthread_self());
+    seen_record(current_os_thread());
     atomic_fetch_add(&g_work_done, 1);
+}
+
+/* One line per scheduler saying how far it got, which separates the four ways
+ * a thread can go unobserved: never created (started=0), created but never
+ * reached its loop (entered=0), looping without ever finding work
+ * (idle_polls in the tens of thousands, dispatches=0), or dispatching without
+ * being recorded (dispatches>0 on all seven -- a bug in this file). */
+static void report_thread_stats(void) {
+    for (int i = 0; i < march_sched_num_schedulers(); i++)
+        fprintf(stderr, "  (scheduler %d: started=%lld entered=%lld "
+                        "dispatches=%lld idle_polls=%lld)\n", i,
+                (long long)march_sched_thread_stat(i, MARCH_THREAD_STAT_STARTED),
+                (long long)march_sched_thread_stat(i, MARCH_THREAD_STAT_ENTERED),
+                (long long)march_sched_thread_stat(i, MARCH_THREAD_STAT_DISPATCHES),
+                (long long)march_sched_thread_stat(i, MARCH_THREAD_STAT_IDLE_POLLS));
 }
 
 static void test_live_scheduler_threads_match_request(void) {
@@ -258,11 +293,19 @@ static void test_live_scheduler_threads_match_request(void) {
                         "usable CPUs %d)\n",
                 distinct, N_REQUESTED, elapsed, (double)SEEN_WAIT_S,
                 atomic_load(&g_gave_up), N_WORKERS, march_sched_usable_cpus());
+    if (distinct != N_REQUESTED || getenv("SCHED_COUNT_STATS")) report_thread_stats();
     TEST_ASSERT(distinct == N_REQUESTED,
                 "green threads must be dispatched by exactly as many OS threads as "
                 "requested -- every worker stayed runnable for the whole of "
                 "SEEN_WAIT_S waiting for the missing thread (see the line above), "
                 "so this is a real shortfall, not a thread that merely started late");
+    /* The runtime's own account must agree with what the workers saw. */
+    for (int i = 0; i < N_REQUESTED; i++) {
+        TEST_ASSERT(march_sched_thread_stat(i, MARCH_THREAD_STAT_STARTED) == 1,
+                    "every requested scheduler thread was created");
+        TEST_ASSERT(march_sched_thread_stat(i, MARCH_THREAD_STAT_DISPATCHES) > 0,
+                    "every scheduler the workers saw has a non-zero dispatch count");
+    }
     TEST_PASS();
 }
 
