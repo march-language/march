@@ -743,12 +743,9 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
        constructor name to its bare suffix whenever that suffix denotes a type
        of the same arity in scope. *)
     let canon_name =
-      (* The bare suffix is the component after the LAST '.' (the type's own
-         name); everything before is the module path.  Uses its own rindex
-         here rather than calling [split_qualified] (same rindex convention
-         as of this writing, but this call's purpose — extracting the bare
-         type-name suffix — is independent of module-load resolution, so it
-         stays deliberately decoupled from that function's behavior.
+      (* [canon_type_name] takes the component after the LAST '.' (the
+         type's own name) as the bare suffix; it is shared with the builtin
+         signatures' [canon_qualified_tcons] so both routes agree.
          Look up the bare suffix in [env_loaded] (not the pre-resolution
          [env]): when [name.txt] needed [resolve_qualified_type] to lazily
          load its module, [load_module_into_env]'s [ExType]/[ExRecord] arms
@@ -760,11 +757,7 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
          skipping canonicalization and leaving a real value (whose actual
          type uses the bare `TCon`) unable to unify against the qualified
          annotation. *)
-      match String.rindex_opt name.txt '.' with
-      | Some i ->
-        let bare = String.sub name.txt (i + 1) (String.length name.txt - i - 1) in
-        (match lookup_type bare env_loaded with Some a when a = arity -> bare | _ -> name.txt)
-      | None -> name.txt
+      canon_type_name env_loaded name.txt arity
     in
     let args' = List.map (surface_ty env ~tvars) args in
     (* `Pid(a)` is the actor pid, a builtin whose one parameter is the actor's

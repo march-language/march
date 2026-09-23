@@ -927,6 +927,53 @@ let test_build = ref false
 let lookup_var  name env = StrMap.find_opt name env.vars
 let lookup_type name env = StrMap.find_opt name env.types
 
+(** The canonical spelling of a type-constructor name that denotes a type of
+    [arity] parameters.  March has a single global type namespace: a type
+    declared inside a module has its BARE name as its identity, so a qualified
+    `Mod.T` collapses to `T` whenever `T` is a type of the same arity in scope
+    (otherwise the name is returned unchanged).  Shared by [surface_ty] (a
+    written annotation) and [canon_qualified_tcons] (a builtin signature typed
+    in OCaml), so the two routes can never disagree about a type's identity. *)
+let canon_type_name env name arity =
+  match String.rindex_opt name '.' with
+  | Some i ->
+    let bare = String.sub name (i + 1) (String.length name - i - 1) in
+    (match lookup_type bare env with Some a when a = arity -> bare | _ -> name)
+  | None -> name
+
+(** [ty] with every qualified [TCon] name put through [canon_type_name].  A
+    builtin's signature is a hand-built [ty], never a surface annotation, so it
+    bypasses [surface_ty]; and it is bound in [base_env], before the type it
+    names (e.g. `Csv.CsvRow`, declared by stdlib/csv.march) exists at all, so
+    the rewrite can only happen where the builtin is USED.  Without it a
+    builtin returning `Csv.CsvRow` fails to unify with the bare `CsvRow` that
+    matching on `CsvEof`/`Row` produces, in both directions.  Returns [ty]
+    itself (physically) when nothing changes. *)
+let rec canon_qualified_tcons env ty =
+  match ty with
+  | TRefine (base, b, p) ->
+    let base' = canon_qualified_tcons env base in
+    if base' == base then ty else TRefine (base', b, p)
+  | _ ->
+  match repr ty with
+  | TCon (n, args) as t ->
+    let args' = List.map (canon_qualified_tcons env) args in
+    let n' = canon_type_name env n (List.length args) in
+    if n' == n && List.for_all2 (==) args args' then t else TCon (n', args')
+  | TArrow (a, b) as t ->
+    let a' = canon_qualified_tcons env a and b' = canon_qualified_tcons env b in
+    if a' == a && b' == b then t else TArrow (a', b')
+  | TTuple ts as t ->
+    let ts' = List.map (canon_qualified_tcons env) ts in
+    if List.for_all2 (==) ts ts' then t else TTuple ts'
+  | TRecord flds as t ->
+    let flds' = List.map (fun (n, ft) -> (n, canon_qualified_tcons env ft)) flds in
+    if List.for_all2 (fun (_, a) (_, b) -> a == b) flds flds' then t else TRecord flds'
+  | TLin (l, t0) as t ->
+    let t0' = canon_qualified_tcons env t0 in
+    if t0' == t0 then t else TLin (l, t0')
+  | t -> t
+
 (** The last segment of a capability path: the name as WRITTEN in its
     declaration.  A `proof cap Live` inside `mod Session` has the path
     "Session.Live", so a hint spelled from the path suggests
