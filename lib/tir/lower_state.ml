@@ -456,7 +456,36 @@ let ty_of_span (env : env) (sp : Ast.span) : Tir.ty =
      | None   -> Lower_types.unknown_ty)
 
 let ty_of_expr (env : env) (e : Ast.expr) : Tir.ty =
-  ty_of_span env (Typecheck.span_of_expr e)
+  let ty = ty_of_span env (Typecheck.span_of_expr e) in
+  (* A builtin whose signature names a type QUALIFIED (csv_next_row :
+     Int -> Csv.CsvRow; see [Typecheck_builtins.qualified_type_builtins]).
+     The typechecker canonicalizes that to the bare `CsvRow` so it unifies
+     with the module's own constructors, but the TIR registers stdlib types
+     under their qualified name, and the C runtime hands back a NICHE-encoded
+     value (raw NULL for CsvEof).  Only the qualified name finds the
+     niche-shaped typedef; under the bare one [Kind.repr_of] says Boxed and
+     the compiled match reads a tag byte out of NULL.  So the call's result
+     keeps the builtin table's qualified spelling here.  Guarded on the
+     type_map agreeing up to qualification, so a user fn that shadows the
+     builtin (a different return type) is left alone. *)
+  let module TB = March_typecheck.Typecheck_builtins in
+  let module TT = March_typecheck.Typecheck_types in
+  match e, ty with
+  | Ast.EApp (Ast.EVar { txt; _ }, _, _), Tir.TCon (bare, args)
+    when TT.StringSet.mem txt TB.qualified_type_builtins ->
+    (match List.assoc_opt txt TB.builtin_bindings with
+     | Some (TT.Mono t | TT.Poly (_, _, t)) ->
+       let rec ret = function TT.TArrow (_, b) -> ret b | t -> t in
+       (match ret t with
+        | TT.TCon (q, qargs)
+          when q <> bare && List.length qargs = List.length args
+               && (match String.rindex_opt q '.' with
+                   | Some i -> String.sub q (i + 1) (String.length q - i - 1) = bare
+                   | None -> false) ->
+          Tir.TCon (q, args)
+        | _ -> ty)
+     | None -> ty)
+  | _ -> ty
 
 (* ── Use import resolution ───────────────────────────────────────── *)
 

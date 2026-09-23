@@ -927,6 +927,53 @@ let test_build = ref false
 let lookup_var  name env = StrMap.find_opt name env.vars
 let lookup_type name env = StrMap.find_opt name env.types
 
+(** The canonical spelling of a type-constructor name that denotes a type of
+    [arity] parameters.  March has a single global type namespace: a type
+    declared inside a module has its BARE name as its identity, so a qualified
+    `Mod.T` collapses to `T` whenever `T` is a type of the same arity in scope
+    (otherwise the name is returned unchanged).  Shared by [surface_ty] (a
+    written annotation) and [canon_qualified_tcons] (a builtin signature typed
+    in OCaml), so the two routes can never disagree about a type's identity. *)
+let canon_type_name env name arity =
+  match String.rindex_opt name '.' with
+  | Some i ->
+    let bare = String.sub name (i + 1) (String.length name - i - 1) in
+    (match lookup_type bare env with Some a when a = arity -> bare | _ -> name)
+  | None -> name
+
+(** [ty] with every qualified [TCon] name put through [canon_type_name].  A
+    builtin's signature is a hand-built [ty], never a surface annotation, so it
+    bypasses [surface_ty]; and it is bound in [base_env], before the type it
+    names (e.g. `Csv.CsvRow`, declared by stdlib/csv.march) exists at all, so
+    the rewrite can only happen where the builtin is USED.  Without it a
+    builtin returning `Csv.CsvRow` fails to unify with the bare `CsvRow` that
+    matching on `CsvEof`/`Row` produces, in both directions.  Returns [ty]
+    itself (physically) when nothing changes. *)
+let rec canon_qualified_tcons env ty =
+  match ty with
+  | TRefine (base, b, p) ->
+    let base' = canon_qualified_tcons env base in
+    if base' == base then ty else TRefine (base', b, p)
+  | _ ->
+  match repr ty with
+  | TCon (n, args) as t ->
+    let args' = List.map (canon_qualified_tcons env) args in
+    let n' = canon_type_name env n (List.length args) in
+    if n' == n && List.for_all2 (==) args args' then t else TCon (n', args')
+  | TArrow (a, b) as t ->
+    let a' = canon_qualified_tcons env a and b' = canon_qualified_tcons env b in
+    if a' == a && b' == b then t else TArrow (a', b')
+  | TTuple ts as t ->
+    let ts' = List.map (canon_qualified_tcons env) ts in
+    if List.for_all2 (==) ts ts' then t else TTuple ts'
+  | TRecord flds as t ->
+    let flds' = List.map (fun (n, ft) -> (n, canon_qualified_tcons env ft)) flds in
+    if List.for_all2 (fun (_, a) (_, b) -> a == b) flds flds' then t else TRecord flds'
+  | TLin (l, t0) as t ->
+    let t0' = canon_qualified_tcons env t0 in
+    if t0' == t0 then t else TLin (l, t0')
+  | t -> t
+
 (** The last segment of a capability path: the name as WRITTEN in its
     declaration.  A `proof cap Live` inside `mod Session` has the path
     "Session.Live", so a hint spelled from the path suggests
@@ -941,19 +988,49 @@ let cap_bare_name (cap_path : string) : string =
     `proof cap X with T`.  [None] when the capability declares no dictionary,
     or when the type it names is not a record in scope.
 
-    Tries the bare spelling first and then the declaring module's
-    qualification, because [DType] registers a record under both spellings
-    depending on how deeply the module is nested (typecheck.ml:5900-5901). *)
+    Tries the declaring module's qualification first and falls back to the
+    bare spelling only when that is absent.  The order matters: March has one
+    global type namespace, so when two modules each declare `type Ops` the
+    bare key "Ops" holds whichever was registered LAST, and a bare-first
+    lookup hands one module's capability the other module's record ("expected
+    `Ops` but got `Ops`", PR #601).  The bare fallback is still needed while
+    the declaring module is being checked: a module's own records are
+    registered under the bare name inside it and gain the qualified spelling
+    only when the module is exported (typecheck.ml, [new_records]).
+
+    When the bare key holds the SAME record as the qualified one (the usual,
+    collision-free case) the bare spelling is returned, so the dictionary type
+    prints and unifies exactly as the module's own references to it do; the
+    parameterised-record arity note in [report_mismatch] keys on the two sides
+    printing alike.  The qualified spelling is returned only when the bare key
+    has been taken over by another module's record.  "Same" compares the
+    field lists with each field's own linearity wrapper stripped: the prebind
+    pass registers the qualified key before [check_decl] re-registers the bare
+    one with [TyLinear]-wrapped fields.  Type names in [Ast.ty] carry their
+    source spans, so two separate declarations never compare equal, even
+    textually identical ones; if the comparison cannot be made the qualified
+    spelling, always correct, is used. *)
 let resolve_cap_dict_type env cap_path =
   match List.assoc_opt cap_path env.cap_dicts with
   | None -> None
   | Some d ->
-    if StrMap.mem d env.records then Some d
-    else
+    let bare = StrMap.find_opt d env.records in
+    let qualified =
       match List.assoc_opt cap_path env.proof_caps with
-      | Some m when m <> "" && StrMap.mem (m ^ "." ^ d) env.records ->
-        Some (m ^ "." ^ d)
+      | Some m when m <> "" ->
+        Option.map (fun r -> (m ^ "." ^ d, r)) (StrMap.find_opt (m ^ "." ^ d) env.records)
       | _ -> None
+    in
+    let same_decl (_, f1) (_, f2) =
+      let unlin = List.map (fun (n, t) ->
+          (n, match t with Ast.TyLinear (_, t) -> t | t -> t)) in
+      try unlin f1 = unlin f2 with Invalid_argument _ -> false
+    in
+    match qualified, bare with
+    | Some (_, r), Some b when same_decl b r -> Some d
+    | Some (q, _), _ -> Some q
+    | None, Some _ -> Some d
+    | None, None -> None
 
 (** True iff the bare type name [name] resolves to an `always_linear` type *here*
     — i.e. it is registered always_linear AND the current module does NOT declare
