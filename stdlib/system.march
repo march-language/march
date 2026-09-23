@@ -4,8 +4,8 @@
 -- and subprocess execution under a unified System namespace.
 --
 -- Usage:
---   System.os()          -- :macos | :linux | :windows | :unknown
---   System.arch()        -- :x86_64 | :aarch64 | :x86 | ...
+--   System.os()          -- "macos" | "linux" | "windows" | "unknown" | ...
+--   System.arch()        -- "x86_64" | "aarch64" | "x86" | ...
 --   System.cpu_count()   -- number of logical CPUs
 --   System.monotonic_time()  -- milliseconds since process start
 --   System.env("PATH")   -- Some(value) | None
@@ -15,7 +15,7 @@
 --   System.pid()         -- Int
 --   System.exit(0)       -- terminate process
 --   System.cmd("ls", ["-la"])  -- Ok(ProcessResult) | Err(msg)
---   System.version()     -- "0.1.0"
+--   System.version()     -- the compiler's version, e.g. "0.4.0"
 
 mod System do
   needs IO.Process
@@ -26,18 +26,20 @@ mod System do
   -- ---- Platform detection ----
 
   doc """
-  Return the host operating system as an atom.
-  Possible values: :macos, :linux, :windows, :unknown.
+  Return the host operating system as a lowercase String:
+  "macos", "linux", "windows", "unknown", or the lowercased uname sysname.
+
+      if System.os() == "macos" do "brew" else "apt" end
   """
-  fn os() do
+  fn os() : String do
     sys_os()
   end
 
   doc """
-  Return the host CPU architecture as an atom.
-  Possible values: :x86_64, :aarch64, :x86, or a lowercase uname string.
+  Return the host CPU architecture as a lowercase String:
+  "x86_64", "aarch64", "x86", or the lowercased uname machine name.
   """
-  fn arch() do
+  fn arch() : String do
     sys_arch()
   end
 
@@ -187,9 +189,8 @@ mod System do
   -- ---- Runtime version ----
 
   doc """
-  Return the March runtime version string.
-
-      System.version()  -- "0.1.0"
+  Return the version of the March compiler that built (or is running) this
+  program, e.g. "0.4.0".  Interpreted and compiled runs agree.
   """
   fn version() : String do
     march_version()

@@ -317,6 +317,18 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Fourteen stdlib wrappers over builtins the typechecker did not know now
+  typecheck**, and the interpreter and compiled backends agree on each.
+  `System.os()`/`System.arch()` return a lowercase `String` (`"macos"`,
+  `"aarch64"`), and misusing one is a type error instead of a runtime crash;
+  compiled programs calling them previously failed to link. Compiled
+  `Crypto.sha512` returned the SHA-256 digest, compiled `UUID.v5` crashed with
+  SIGBUS, compiled `IO.warn`/`Logger.appender_stderr` printed a blank line after
+  every message, and `System.version()` said `march/dev` compiled and `0.1.0`
+  interpreted; it now reports the compiler's real version in both. Compiled
+  `IO.read_line` no longer splits lines longer than 4096 bytes. `print_stderr`
+  now requires `IO.Console` and `sys_uptime_ms` requires `IO.Clock`, like
+  `print` and `unix_time_ms`.
 - **A nested module can use its own `proof cap` without declaring it in
   `needs`.** `proof cap Key` in `mod Vault` has always meant `Vault` may take a
   `Cap(Vault.Key)` without also writing `needs Vault.Key`, but that only worked

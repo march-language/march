@@ -35,6 +35,7 @@ let cap_table : (string * string) list = [
   (* IO.Console *)
   ("println",               "IO.Console");
   ("print",                 "IO.Console");
+  ("print_stderr",          "IO.Console");
   (* IO.FileRead *)
   ("file_exists",           "IO.FileRead");
   ("file_read",             "IO.FileRead");
@@ -100,6 +101,7 @@ let cap_table : (string * string) list = [
   (* IO.Clock *)
   ("unix_time",             "IO.Clock");
   ("unix_time_ms",          "IO.Clock");
+  ("sys_uptime_ms",         "IO.Clock");
   ("uuid_v7",               "IO.Clock");
   (* IO.Random *)
   ("random_bytes",          "IO.Random");
