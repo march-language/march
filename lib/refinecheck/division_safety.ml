@@ -662,7 +662,7 @@ and check_decl ~root errctx ~no_panic ~adoptable (d : A.decl) : unit =
     List.iter
       (fun (h : A.actor_handler) ->
         body (List.map (fun p -> A.FPNamed p) h.A.ah_params) h.A.ah_body)
-      ad.A.actor_handlers;
+      (A.actor_body_handlers ad);
     Option.iter expr ad.A.actor_invariant
   | A.DApp (app, _) ->
     expr app.A.app_body;

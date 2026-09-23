@@ -61,8 +61,41 @@ The `supervise` block:
 - `max_restarts N within S`: if more than N restarts occur in S seconds, the supervisor itself crashes (escalates to its own supervisor)
 - `backoff base <ms> cap <ms> jitter <n>%` (optional): tunes the delay between repeated restarts of the same child — see [Restart backoff](#restart-backoff)
 - Each line `ActorName field_name`: a child to supervise, with `field_name` being the state field that stores its current `Pid`, optionally followed by `restart <type>` (see [Restart types](#restart-types)) and/or `shutdown <ms> | infinity | brutal` (see [Stopping a tree](#stopping-a-tree))
+- `ActorName field_name(arg, ...)`: the same, for a child whose `init` takes parameters (see [Parameterised `init`](actors.md#parameterised-init)). The arguments are evaluated once, when the supervisor spawns, and may use the supervisor's own `init` parameters.
 
 When the supervisor starts (via `spawn(AppSupervisor)`), it automatically spawns all listed children.
+
+### Children with `init` arguments
+
+```march
+actor Worker do
+  state { db : Pid(Db), count : Int }
+  init(db : Pid(Db)) { db: db, count: 0 }
+  ...
+end
+
+actor Pool do
+  state { w : Int, db : Pid(Db) }
+  init(db : Pid(Db)) { w: 0, db: db }
+
+  supervise do
+    strategy one_for_one
+    max_restarts 5 within 30
+    Worker w(db)          -- the child's init argument, from the supervisor's own
+  end
+end
+
+let pool = spawn(Pool, spawn(Db))
+```
+
+The argument list is checked against the child's `init` signature exactly as
+`spawn(Worker, db)` would be. A restart of the child **re-supplies the same
+values** the first spawn received: the supervisor keeps the evaluated arguments
+beside the child's slot (compiled, as the environment of the respawn closure it
+registers with the runtime; interpreted, on the child's instance), so a
+replacement never re-evaluates the expression and never starts without its
+argument. Everything else about the replacement is as for any restart: fresh
+state from `init`, a new `Pid`, the old capabilities stale.
 
 ---
 
@@ -229,6 +262,7 @@ verified directly against the compiler.)
 
 ```march
 mod BasicSupervision do
+  needs IO
   needs IO.Console
 
   actor Counter do
@@ -265,7 +299,8 @@ mod BasicSupervision do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
     -- Spawn supervisor: it auto-starts Counter and Logger
     let sup = spawn(AppSupervisor)
 
@@ -274,7 +309,7 @@ mod BasicSupervision do
                    None    -> -1
                    Some(n) -> n
                  end
-    let c1 = pid_of_int(c1_int)
+    let c1 = Actor.pid_from_int(c, c1_int)
 
     println("Counter alive: " ++ bool_to_string(is_alive(c1)))
 
@@ -292,7 +327,7 @@ mod BasicSupervision do
                    None    -> -1
                    Some(n) -> n
                  end
-    let c2 = pid_of_int(c2_int)
+    let c2 = Actor.pid_from_int(c, c2_int)
     println("New counter PID: " ++ int_to_string(c2_int))
     println("New counter alive: " ++ bool_to_string(is_alive(c2)))
 
@@ -537,6 +572,7 @@ Wrap the worker in a `one_for_one` supervisor. Now a crash is *recovered from*: 
 
 ```march
 mod JobProcessorV2 do
+  needs IO
   needs IO.Console
 
   actor Worker do
@@ -560,13 +596,14 @@ mod JobProcessorV2 do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
     let sup = spawn(JobSupervisor)
     let w_int = match get_actor_field(sup, "worker") do
                   None    -> -1
                   Some(n) -> n
                 end
-    let w = pid_of_int(w_int)
+    let w = Actor.pid_from_int(c, w_int)
     send(w, Process(1))
     run_until_idle()
 
@@ -577,7 +614,7 @@ mod JobProcessorV2 do
                    Some(n) -> n
                  end
     println("worker restarted, alive: "
-            ++ bool_to_string(is_alive(pid_of_int(w2_int))))
+            ++ bool_to_string(is_alive(Actor.pid_from_int(c, w2_int))))
     run_until_idle()
   end
 

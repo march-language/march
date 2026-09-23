@@ -4396,6 +4396,128 @@ let test_spawn_computed_actor_rejected () =
   Alcotest.(check bool)
     "diagnostic explains spawn needs a plain actor name" true explains_spawn
 
+
+(* ── Parameterised actor `init` (D24) ───────────────────────────────────
+   `init(env : T, …) { … }` takes parameters supplied at `spawn(A, …)`; a
+   supervise block's child spec `Child f(args)` supplies them for a child.
+   specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md, D24. *)
+let init_params_actor = {|
+    actor Counter do
+      state { value : Int, label : String }
+      init(start : Int, label : String) { value: start, label: label }
+      on Inc(n : Int) do { state with value: state.value + n } end
+    end
+    actor Plain do
+      state { v : Int }
+      init() { v: 0 }
+    end
+|}
+
+let diag_mentions ctx needle =
+  (* The message AND its notes: a [check_expr ~reason] renders its reason as a
+     note under the mismatch, not in the message line. *)
+  List.exists (fun d ->
+      let m = String.concat "\n" (d.March_errors.Errors.message :: d.March_errors.Errors.notes) in
+      try ignore (Str.search_forward (Str.regexp_string needle) m 0); true
+      with Not_found -> false)
+    (March_errors.Errors.sorted ctx)
+
+let test_actor_init_params_accepted () =
+  let ctx = typecheck ("mod Test do" ^ init_params_actor ^ {|
+    fn main() : Unit do
+      let c = spawn(Counter, 41, "answer")
+      let p = spawn(Plain)
+      send(c, Inc(1))
+      kill(p)
+    end
+  end|}) in
+  Alcotest.(check bool) "init params used in init; spawn with matching args; init() accepted"
+    false (has_errors ctx)
+
+let test_actor_init_params_arity_missing () =
+  let ctx = typecheck ("mod Test do" ^ init_params_actor ^ {|
+    fn main() : Unit do
+      let c = spawn(Counter)
+      kill(c)
+    end
+  end|}) in
+  Alcotest.(check bool) "spawn(Counter) with no args: error" true (has_errors ctx);
+  Alcotest.(check bool) "names the init signature" true
+    (diag_mentions ctx "init(start : Int, label : String)");
+  Alcotest.(check bool) "states the counts" true
+    (diag_mentions ctx "takes 2 arguments, but `spawn(Counter)` supplies 0")
+
+let test_actor_init_params_arity_extra () =
+  let ctx = typecheck ("mod Test do" ^ init_params_actor ^ {|
+    fn main() : Unit do
+      let p = spawn(Plain, 1)
+      kill(p)
+    end
+  end|}) in
+  Alcotest.(check bool) "spawn(Plain, 1) on a param-less actor: error" true (has_errors ctx);
+  Alcotest.(check bool) "explains how to declare parameters" true
+    (diag_mentions ctx "declares no `init` parameters")
+
+let test_actor_init_params_arg_type () =
+  let ctx = typecheck ("mod Test do" ^ init_params_actor ^ {|
+    fn main() : Unit do
+      let c = spawn(Counter, "not an int", "x")
+      kill(c)
+    end
+  end|}) in
+  Alcotest.(check bool) "wrong arg type: error" true (has_errors ctx);
+  Alcotest.(check bool) "blames the init parameter" true
+    (diag_mentions ctx "the `init` parameter `start` of actor `Counter`")
+
+let test_actor_init_param_needs_type () =
+  let parsed =
+    try ignore (parse_and_desugar {|mod Test do
+      actor Counter do
+        state { value : Int }
+        init(start) { value: start }
+      end
+    end|}); true
+    with _ -> false
+  in
+  Alcotest.(check bool) "untyped init param is a parse error" false parsed
+
+let test_supervise_child_init_args () =
+  let sup = {|
+    actor Worker do
+      state { base : Int, count : Int }
+      init(base : Int) { base: base, count: 0 }
+      on Work() do { state with count: state.count + 1 } end
+    end
+  |} in
+  let ok = typecheck ("mod Test do" ^ sup ^ {|
+    actor Sup do
+      state { w : Int, seed : Int }
+      init(seed : Int) { w: 0, seed: seed }
+      supervise do
+        strategy one_for_one
+        max_restarts 5 within 60
+        Worker w(seed * 10)
+      end
+    end
+    fn main() : Unit do kill(spawn(Sup, 7)) end
+  end|}) in
+  Alcotest.(check bool) "child spec supplies the child's init arg from the supervisor's param"
+    false (has_errors ok);
+  let bad = typecheck ("mod Test do" ^ sup ^ {|
+    actor Sup do
+      state { w : Int }
+      init { w: 0 }
+      supervise do
+        strategy one_for_one
+        max_restarts 5 within 60
+        Worker w
+      end
+    end
+    fn main() : Unit do kill(spawn(Sup)) end
+  end|}) in
+  Alcotest.(check bool) "child spec missing the child's init arg: error" true (has_errors bad);
+  Alcotest.(check bool) "names the child spec" true (diag_mentions bad "`Worker w(…)`")
+
 (* Counterpart: a bare actor name still typechecks cleanly — the guard must
    not flag the valid `spawn(Counter)` form. *)
 let test_spawn_plain_actor_name_ok () =
@@ -11319,6 +11441,137 @@ let test_ordinary_unused_param_still_warned () =
   Alcotest.(check bool) "an ordinary unused parameter still warns"
     true (has_warning_with ctx "Unused variable `x`")
 
+(* ── Annotated type variable fixed by the body (warning) ──────────────────
+   specs/progress/2026-09-22-annotated-tyvar-fixed-warning.md: a signature
+   type variable is an ordinary unification variable, so a body can fix it
+   (`fn bad(xs : List(a)) : List(a) do [0 - 5] end` is `List(Int) ->
+   List(Int)`); the warning names that at the definition instead of leaving
+   it to surface as a mismatch at some caller. *)
+let tyvar_fixed_warnings ctx =
+  List.filter (fun (d : March_errors.Errors.diagnostic) ->
+      d.severity = March_errors.Errors.Warning
+      && d.code = Some "annotated_tyvar_fixed")
+    ctx.March_errors.Errors.diagnostics
+
+let test_tyvar_fixed_concrete_warns () =
+  let ctx = typecheck {|mod TvFixed do
+    fn bad(xs : List(a)) : List(a) do
+      [0 - 5]
+    end
+  end|} in
+  match tyvar_fixed_warnings ctx with
+  | [ d ] ->
+    Alcotest.(check bool) "names the variable, the function and the type" true
+      (has_warning_with ctx "type variable `a` in `bad`'s signature is not generic: the body fixes it to `Int`");
+    Alcotest.(check (pair int int)) "points at the variable in the signature"
+      (2, 21) (d.span.start_line, d.span.start_col);
+    Alcotest.(check bool) "hints at writing the concrete type" true
+      (List.exists (fun n -> n = "hint: write `Int` in place of `a` if that is \
+                                  what you mean, or make the body generic in `a`.")
+         d.notes);
+    Alcotest.(check bool) "a warning, not an error" false (has_errors ctx)
+  | ds -> Alcotest.failf "expected exactly one tyvar warning, got %d" (List.length ds)
+
+let test_tyvar_generic_does_not_warn () =
+  let ctx = typecheck {|mod TvGeneric do
+    fn id(x : a) : a do x end
+    fn swap(p : (a, b)) : (b, a) do
+      match p do (x, y) -> (y, x) end
+    end
+    fn len(xs : List(a)) : Int do
+      match xs do
+        Nil -> 0
+        Cons(_, rest) -> 1 + len(rest)
+      end
+    end
+    fn apply(f : a -> b, x : a) : b do f(x) end
+    fn pick(x : a, y : a, first : Bool) : a do
+      if first do x else y end
+    end
+  end|} in
+  Alcotest.(check int) "no warning for genuinely generic signatures" 0
+    (List.length (tyvar_fixed_warnings ctx))
+
+let test_tyvar_unannotated_does_not_warn () =
+  (* Only variables the user WROTE: an unannotated parameter's inferred type
+     is the body's to decide. *)
+  let ctx = typecheck {|mod TvInferred do
+    fn inc(x) do x + 1 end
+    fn half(x : Int) : Int do x / 2 end
+  end|} in
+  Alcotest.(check int) "no warning without a written type variable" 0
+    (List.length (tyvar_fixed_warnings ctx))
+
+let test_tyvar_aliased_warns () =
+  (* Two written variables the body makes equal: the signature promises
+     callers independent types it does not give them; rigid annotation
+     variables would reject it just as they would the concrete case. *)
+  let ctx = typecheck {|mod TvAliased do
+    fn second(x : a, y : b) : a do y end
+  end|} in
+  Alcotest.(check int) "one warning, on the later variable" 1
+    (List.length (tyvar_fixed_warnings ctx));
+  Alcotest.(check bool) "names both variables" true
+    (has_warning_with ctx "type variables `a` and `b` in `second`'s signature are not independent")
+
+let test_tyvar_fixed_to_function_type_warns () =
+  (* The variable is fixed to a type that still MENTIONS variables (`b -> b`),
+     so the hint cannot name a type to write and says so instead.  This was
+     the `OrderedMap.values` shape until the `curried_lambda_over_tuple`
+     diagnostic (2026-09-22) made `fn (_, w) -> w` in a pair callback an error
+     of its own; reached here through a plain application instead. *)
+  let ctx = typecheck {|mod TvFn do
+    fn apply_it(f : a, x : b) : b do f(x) end
+  end|} in
+  Alcotest.(check bool) "no error: the signature merely over-claims" false (has_errors ctx);
+  match tyvar_fixed_warnings ctx with
+  | [ d ] ->
+    (* The fixing type prints with a fresh-counter variable name (`b -> b`,
+       `j2 -> j2`, … depending on what was checked before), so match the
+       stable prefix and assert the arrow shape separately. *)
+    Alcotest.(check bool) "names the variable and the function" true
+      (has_warning_with ctx "type variable `a` in `apply_it`'s signature is not generic: the body fixes it to");
+    Alcotest.(check bool) "the fixing type is an arrow" true
+      (has_warning_with ctx " -> ");
+    Alcotest.(check bool) "hint does not try to name internal variables" true
+      (List.exists (fun n -> n = "hint: write the type the body needs in place \
+                                  of `a`, or make the body generic in `a`.")
+         d.notes)
+  | ds -> Alcotest.failf "expected exactly one tyvar warning, got %d" (List.length ds)
+
+let test_tyvar_warning_yields_to_curried_lambda_error () =
+  (* `fn (_, w) -> w` where a callback over a pair is expected is now its own
+     error (`curried_lambda_over_tuple`), so the tyvar warning stands down —
+     the error names the real mistake. *)
+  let ctx = typecheck {|mod TvLambda do
+    fn map1(xs : List(a), f : a -> b) : List(b) do
+      match xs do
+        Nil -> Nil
+        Cons(x, rest) -> Cons(f(x), map1(rest, f))
+      end
+    end
+    fn snds(xs : List((Int, v))) : List(v) do
+      map1(xs, fn (_, w) -> w)
+    end
+  end|} in
+  Alcotest.(check bool) "the curried-lambda error is reported" true
+    (has_error_with ctx "2-parameter (curried) lambda");
+  Alcotest.(check int) "no tyvar warning on top of it" 0
+    (List.length (tyvar_fixed_warnings ctx))
+
+let test_tyvar_warning_skipped_after_body_error () =
+  (* A body with a type error has unreliable unifications; the error is the
+     diagnostic to read. *)
+  let ctx = typecheck {|mod TvErr do
+    fn bad(x : a) : a do
+      let y : Int = "no"
+      x
+    end
+  end|} in
+  Alcotest.(check bool) "the body error is reported" true (has_errors ctx);
+  Alcotest.(check int) "no tyvar warning on top of it" 0
+    (List.length (tyvar_fixed_warnings ctx))
+
 let test_main_is_not_nagged_about_root_cap () =
   let ctx = typecheck {|mod EntryPoint do
     needs IO
@@ -14175,46 +14428,18 @@ let test_entry_qual_from_nested_sibling () =
    like a browser/playground compile target) surfaces it.  `fold_left`
    (prelude.march, iterable.march), `cmp`/`fold` (ordered_map.march,
    sorted_set.march), and `reduce` (range.march) all had this typo; fixed
-   to curried-arrow form.  Guard each by typechecking the file completely
-   standalone (no other stdlib siblings) via [check_module_core], mirroring
-   how `bin/main.ml`'s `get_stdlib_tc_env` typechecks stdlib. *)
+   to curried-arrow form.  Guard each with
+   [assert_stdlib_file_typechecks_cleanly] (defined below, after
+   [stdlib_dir_for_test]), which typechecks the file INSIDE the whole stdlib.
 
-let assert_stdlib_file_typechecks_cleanly name =
-  let dmod = load_stdlib_file_for_test name in
-  let m = March_ast.Ast.{
-    mod_name = { txt = "StdlibSelfCheck"; span = dummy_span };
-    mod_decls = [dmod];
-  } in
-  (* Register this file as stdlib, exactly as bin/main.ml does before checking
-     the standard library.  Without it, [span_is_stdlib] answers false here and
-     the 2026-08-06 body-scan ERROR fires on the stdlib's own builtin calls —
-     prelude's `print`, say.
-
-     Declaring the capability in the stdlib instead is NOT the alternative: a
-     `needs IO.Console` on Prelude satisfies the console use AT THE PRELUDE, so
-     a user's own `println` stops being attributed to the user's module and
-     --cap-strict stops catching it (measured 2026-08-06; test_cap_ceiling's
-     "undeclared console use" is the guard).
-
-     The point of this test is unaffected — it exists to surface INTERNAL type
-     errors in a stdlib file that bin/main.ml's user-file diagnostic filter
-     hides, and those still surface. *)
-  let saved = !March_typecheck.Typecheck.stdlib_source_files in
-  (* [load_stdlib_file_for_test] wraps the file in a DMod carrying dummy_span,
-     so the real path is only on the INNER decls — it comes from the lexbuf's
-     pos_fname, which the loader sets to whichever candidate path exists.
-     Register all three candidates rather than guessing which one resolved. *)
-  let candidates = [
-    Filename.concat "stdlib" name;
-    Filename.concat "../../../stdlib" name;
-    Filename.concat "../../stdlib" name;
-  ] in
-  March_typecheck.Typecheck.stdlib_source_files := candidates @ saved;
-  let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
-  March_typecheck.Typecheck.stdlib_source_files := saved;
-  Alcotest.(check bool)
-    (Printf.sprintf "stdlib/%s typechecks with no internal errors" name)
-    false (has_errors errors)
+   It used to check the file completely standalone, and that was vacuous for
+   any error involving a call into another stdlib module: `List.map` in a lone
+   ordered_map.march resolves through [Module_registry.ensure_loaded], and
+   [load_module_into_env] binds every registry export as `Mono (fresh_var 0)`
+   -- an unconstrained type variable that accepts any call.  So
+   ordered_map.march's five real errors (a two-parameter lambda passed to
+   `List.map`, and `List.fold_left` with its arguments out of order) passed it
+   GREEN.  See specs/progress/2026-09-22-stdlib-typecheck-helper-vacuous.md. *)
 
 (* ── The stdlib load manifest must be exhaustive ─────────────────────────────
 
@@ -14283,6 +14508,162 @@ let test_stdlib_manifest_has_no_phantom_entries () =
   in
   Alcotest.(check (list string))
     "every manifest entry has a file behind it" [] phantom
+
+(* ── Typecheck the stdlib the way the compiler does ─────────────────────────
+
+   [stdlib_decls_like_toolchain] mirrors bin/toolchain.ml's [load_stdlib_file]
+   over [Stdlib_manifest.stdlib_file_list]: prelude.march is desugared as the
+   entry and UNWRAPPED into global scope, every other file is desugared with
+   [~is_entry:false] and wrapped in its own [DMod].  [check_stdlib_like_cli]
+   then typechecks all of it as ONE module with every file registered in
+   [stdlib_source_files] -- exactly bin/main.ml's [get_stdlib_tc_env], which
+   runs on every compile and silently DISCARDS these diagnostics.  That is why
+   this check has to live in a test: nothing else looks at them.
+
+   The check runs once per file list (it is the expensive part) and is shared
+   by every [assert_stdlib_file_typechecks_cleanly] call and the sweep. *)
+let stdlib_decls_like_toolchain dir files =
+  List.concat_map (fun name ->
+      let path = Filename.concat dir name in
+      let src = In_channel.with_open_bin path In_channel.input_all in
+      let lexbuf = Lexing.from_string src in
+      lexbuf.Lexing.lex_curr_p <-
+        { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+      let m = March_parser.Parser.module_
+          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+      let is_prelude = name = "prelude.march" in
+      let m = March_desugar.Desugar.desugar_module ~is_entry:is_prelude m in
+      if is_prelude then
+        (match m.March_ast.Ast.mod_decls with
+         | [March_ast.Ast.DMod (_, _, inner, _)] -> inner
+         | decls -> decls)
+      else
+        [March_ast.Ast.DMod (m.March_ast.Ast.mod_name, March_ast.Ast.Public,
+                             m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span)])
+    files
+
+let stdlib_check_cache : (string list, March_errors.Errors.diagnostic list) Hashtbl.t =
+  Hashtbl.create 2
+
+(** Every diagnostic from typechecking [files] (default: the native manifest)
+    together, as the compiler does.  Spans carry "<dir>/<file>". *)
+let check_stdlib_like_cli ?(files = March_modules.Stdlib_manifest.stdlib_file_list) () =
+  match Hashtbl.find_opt stdlib_check_cache files with
+  | Some ds -> ds
+  | None ->
+    let dir = stdlib_dir_for_test () in
+    let decls = stdlib_decls_like_toolchain dir files in
+    let m = March_ast.Ast.{
+      mod_name = { txt = "StdlibBaseline"; span = dummy_span };
+      mod_decls = decls;
+    } in
+    let saved = !March_typecheck.Typecheck.stdlib_source_files in
+    March_typecheck.Typecheck.stdlib_source_files :=
+      List.map (Filename.concat dir) files @ saved;
+    let (errors, _type_map, _env) =
+      Fun.protect
+        ~finally:(fun () -> March_typecheck.Typecheck.stdlib_source_files := saved)
+        (fun () -> March_typecheck.Typecheck.check_module_core m) in
+    let ds = errors.March_errors.Errors.diagnostics in
+    Hashtbl.replace stdlib_check_cache files ds;
+    ds
+
+let stdlib_errors_in ?files name =
+  let path = Filename.concat (stdlib_dir_for_test ()) name in
+  List.filter (fun (d : March_errors.Errors.diagnostic) ->
+      d.severity = March_errors.Errors.Error && d.span.March_ast.Ast.file = path)
+    (check_stdlib_like_cli ?files ())
+
+let show_stdlib_errors ds =
+  String.concat "\n" (List.map (fun (d : March_errors.Errors.diagnostic) ->
+      let first_line = List.hd (String.split_on_char '\n' d.message) in
+      Printf.sprintf "  %s:%d: %s" d.span.March_ast.Ast.file
+        d.span.March_ast.Ast.start_line first_line) ds)
+
+let assert_stdlib_file_typechecks_cleanly name =
+  if not (List.mem name March_modules.Stdlib_manifest.stdlib_file_list) then
+    Alcotest.failf "stdlib/%s is not in the native stdlib manifest" name;
+  match stdlib_errors_in name with
+  | [] -> ()
+  | ds ->
+    Alcotest.failf "stdlib/%s has %d internal type error(s):\n%s" name
+      (List.length ds) (show_stdlib_errors ds)
+
+
+(* ── The stdlib-wide ratchet ────────────────────────────────────────────────
+
+   [assert_stdlib_file_typechecks_cleanly] guards five files by name.  This
+   guards ALL of them at once: the same single whole-stdlib check, bucketed by
+   file, against the counts that were there when the check was first made
+   non-vacuous (2026-09-22).  Those 98 errors are a real backlog, not harness
+   noise -- every one of them is a diagnostic `bin/main.ml` produces on every
+   compile and discards because its span points into stdlib.  What they cost is
+   not a message nobody reads: a stdlib function whose body failed to check is
+   still CALLABLE, and its call sites resolve it through
+   [Module_registry.ensure_loaded] as `Mono (fresh_var 0)` -- an unconstrained
+   type variable.  `System.os()` type-checks against `string_length` and fails
+   at RUNTIME; a generic one reaches monomorphization unresolved, which is the
+   silent-wrong-value class [Stdlib_manifest] already documents.
+
+   One todo per class is filed under specs/todos/2026-09-22-stdlib-*.md.  The
+   ratchet is two-sided on purpose: fixing a file FAILS this test until its
+   count comes down here, so the table cannot quietly describe a fixed tree. *)
+let stdlib_known_internal_errors = [
+  (* file, errors -- see specs/todos/2026-09-22-stdlib-internal-type-errors.md *)
+  "actor.march", 2;
+  "aho_corasick.march", 11;
+  "cluster_node.march", 1;
+  "compress.march", 19;
+  "crypto.march", 1;
+  "csv.march", 12;
+  "io.march", 3;
+  "logger.march", 2;
+  "node_call.march", 5;
+  "plot.march", 1;
+  "rrb_vec.march", 19;
+  "session.march", 9;
+  "session_node.march", 3;
+  "system.march", 8;
+  "uuid.march", 2;
+]
+
+let test_stdlib_internal_errors_ratchet () =
+  let dir = stdlib_dir_for_test () in
+  let actual = Hashtbl.create 32 in
+  List.iter (fun (d : March_errors.Errors.diagnostic) ->
+      if d.severity = March_errors.Errors.Error then begin
+        let f = Filename.basename d.span.March_ast.Ast.file in
+        if Filename.dirname d.span.March_ast.Ast.file = dir then
+          Hashtbl.replace actual f (1 + Option.value ~default:0 (Hashtbl.find_opt actual f))
+      end)
+    (check_stdlib_like_cli ());
+  let files =
+    List.sort_uniq String.compare
+      (List.map fst stdlib_known_internal_errors
+       @ Hashtbl.fold (fun f _ acc -> f :: acc) actual []) in
+  let drift = List.filter_map (fun f ->
+      let expected = Option.value ~default:0
+          (List.assoc_opt f stdlib_known_internal_errors) in
+      let got = Option.value ~default:0 (Hashtbl.find_opt actual f) in
+      if got = expected then None
+      else Some (Printf.sprintf "  stdlib/%s: expected %d internal error(s), found %d"
+                   f expected got))
+      files in
+  if drift <> [] then
+    Alcotest.failf
+      "The stdlib internal-type-error ratchet moved:\n%s\n\n\
+       More than expected: a stdlib file stopped typechecking. The compiler \n\
+       hides these (bin/main.ml drops any diagnostic spanned in stdlib), but a \n\
+       function whose body failed to check is still callable, and its call \n\
+       sites bind it as an unconstrained type variable.\n\
+       Run `march --check stdlib/<file>` to see them.\n\n\
+       Fewer than expected: a file was FIXED -- lower its count in \n\
+       [stdlib_known_internal_errors] (or drop the row) in the same commit.\n\n\
+       The full list of errors:\n%s"
+      (String.concat "\n" drift)
+      (show_stdlib_errors
+         (List.filter (fun (d : March_errors.Errors.diagnostic) ->
+              d.severity = March_errors.Errors.Error) (check_stdlib_like_cli ())))
 
 (* ── postcond_infer: propose a RETURN refinement that helps the CALLERS ──────
 
@@ -16448,6 +16829,12 @@ let compiler_suites =
           Alcotest.test_case "tcp_listen body, NetConnect does not satisfy" `Quick test_netlisten_not_satisfied_by_netconnect;
           (* spawn argument must be a plain actor name (not a computed expr) *)
           Alcotest.test_case "spawn computed actor: rejected"          `Quick test_spawn_computed_actor_rejected;
+          Alcotest.test_case "actor init params: accepted (D24)"       `Quick test_actor_init_params_accepted;
+          Alcotest.test_case "actor init params: missing args"         `Quick test_actor_init_params_arity_missing;
+          Alcotest.test_case "actor init params: extra args"           `Quick test_actor_init_params_arity_extra;
+          Alcotest.test_case "actor init params: arg type"             `Quick test_actor_init_params_arg_type;
+          Alcotest.test_case "actor init params: param needs a type"   `Quick test_actor_init_param_needs_type;
+          Alcotest.test_case "supervise child init args (D24)"         `Quick test_supervise_child_init_args;
           Alcotest.test_case "spawn plain actor name: ok"              `Quick test_spawn_plain_actor_name_ok;
           (* Actor handler return type checking — gap fills *)
           Alcotest.test_case "actor handler duplicate name"            `Quick test_actor_handler_duplicate_name;
@@ -16852,6 +17239,15 @@ let compiler_suites =
           Alcotest.test_case "tuple-of-Cap(...) param still warned"       `Quick test_unused_tuple_of_cap_param_still_warned;
           Alcotest.test_case "Cap(...) -> () closure param still warned"  `Quick test_unused_cap_arrow_param_still_warned;
         ] );
+      ( "annotated_tyvar_fixed", [
+          Alcotest.test_case "fixed to a concrete type warns"      `Quick test_tyvar_fixed_concrete_warns;
+          Alcotest.test_case "generic signatures do not warn"      `Quick test_tyvar_generic_does_not_warn;
+          Alcotest.test_case "unwritten type variables do not warn" `Quick test_tyvar_unannotated_does_not_warn;
+          Alcotest.test_case "two variables made equal warns"      `Quick test_tyvar_aliased_warns;
+          Alcotest.test_case "fixed to a function type warns"      `Quick test_tyvar_fixed_to_function_type_warns;
+          Alcotest.test_case "yields to curried-lambda error"      `Quick test_tyvar_warning_yields_to_curried_lambda_error;
+          Alcotest.test_case "skipped after a body error"          `Quick test_tyvar_warning_skipped_after_body_error;
+        ] );
       ( "cap_unknown_name", [
           Alcotest.test_case "unknown capability rejected with suggestion" `Quick test_unknown_capability_is_rejected_with_suggestion;
           Alcotest.test_case "wrong-case capability rejected"              `Quick test_wrong_case_capability_is_rejected;
@@ -17046,6 +17442,7 @@ let compiler_suites =
           Alcotest.test_case "Main.id forges Cap(IO) -> Cap(Db.P): error"         `Quick test_entry_qual_forges_proof_cap;
           Alcotest.test_case "Main.launder (a->b) launders Int -> String: error"  `Quick test_entry_qual_distinct_tvar_launders;
           Alcotest.test_case "T.id from nested App launders Int -> String: error" `Quick test_entry_qual_from_nested_sibling;
+          Alcotest.test_case "stdlib internal-type-error ratchet"                  `Quick test_stdlib_internal_errors_ratchet;
           Alcotest.test_case "prelude.march fold_left: curried, no internal error"    `Quick test_stdlib_prelude_fold_left_curried;
           Alcotest.test_case "iterable.march fold: curried, no internal error"        `Quick test_stdlib_iterable_fold_curried;
           Alcotest.test_case "ordered_map.march cmp/fold: curried, no internal error" `Quick test_stdlib_ordered_map_cmp_curried;

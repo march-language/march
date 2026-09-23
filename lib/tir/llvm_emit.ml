@@ -247,9 +247,13 @@ let clo_wrap_define = Llvm_calls.clo_wrap_define
    An actor's dispatch function releases nothing: the runtime's message loop
    ([actor_green_thread]) calls its trampoline with the actor record and the
    message without handing over a reference to either, so a release there
-   freed the live actor (ASAN, specs/lang/golden/g35_actor_spawn_send). *)
+   freed the live actor (ASAN, specs/lang/golden/g35_actor_spawn_send). The
+   same holds for an actor's `on_stop` fn, which the runtime calls the same
+   way once, at a graceful death: releasing the actor there freed a record
+   the stopper was still polling (found by libgmalloc on the first draft). *)
 let clo_wrap_borrowed (name : string) (nparams : int) : bool list =
-  if Tir_names.is_actor_dispatch_fn name then [] else
+  if Tir_names.is_actor_dispatch_fn name
+     || Tir_names.is_actor_on_stop_fn name then [] else
   match Clo_flags.borrowed_params name with
   | Some modes -> modes
   | None -> List.init nparams (fun i -> Borrow.is_borrowed Borrow.empty name i)

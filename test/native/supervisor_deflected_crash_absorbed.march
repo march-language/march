@@ -20,6 +20,7 @@
 -- would then be asserting nothing -- so it fails there rather than passing
 -- vacuously.
 mod SupervisorDeflectedCrashAbsorbed do
+  needs IO
   needs IO.Console
 
   actor Worker do
@@ -51,7 +52,7 @@ mod SupervisorDeflectedCrashAbsorbed do
     init  { done: 0 }
 
     on Go(target) do
-      kill(pid_of_int(target))
+      kill(target)
       { done: 1 }
     end
   end
@@ -63,7 +64,8 @@ mod SupervisorDeflectedCrashAbsorbed do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let sup = spawn(Sup)
     let killer = spawn(Killer)
     let lo1 = child_int(sup, "lo")
@@ -71,8 +73,8 @@ mod SupervisorDeflectedCrashAbsorbed do
 
     -- Order matters: the Killer's crash of `lo` must arrive while main is
     -- stalled inside `hi`'s restart, so queue it first and crash `hi` next.
-    send(killer, Go(lo1))
-    kill(pid_of_int(hi1))
+    send(killer, Go(Actor.pid_from_int(intro, lo1)))
+    kill(Actor.pid_from_int(intro, hi1))
 
     -- kill() returns only once the synchronous restart -- both passes --
     -- has completed, so everything below reads settled state.
@@ -80,8 +82,8 @@ mod SupervisorDeflectedCrashAbsorbed do
     let hi2 = child_int(sup, "hi")
     println("lo restarted: " ++ bool_to_string(lo2 != lo1))
     println("hi restarted: " ++ bool_to_string(hi2 != hi1))
-    println("lo alive: " ++ bool_to_string(is_alive(pid_of_int(lo2))))
-    println("hi alive: " ++ bool_to_string(is_alive(pid_of_int(hi2))))
-    println("old lo dead: " ++ bool_to_string(!is_alive(pid_of_int(lo1))))
+    println("lo alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, lo2))))
+    println("hi alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, hi2))))
+    println("old lo dead: " ++ bool_to_string(!is_alive(Actor.pid_from_int(intro, lo1))))
   end
 end

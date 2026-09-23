@@ -907,6 +907,7 @@ and supervise_field_to_json (sf : supervise_field) : string =
   Dump.json_obj [
     ("name", name_to_json sf.sf_name);
     ("ty", ty_to_json sf.sf_ty);
+    ("init_args", Dump.json_list (List.map expr_to_json sf.sf_init_args));
     ("restart", Dump.json_string
        (match sf.sf_restart with
         | Permanent -> "permanent" | Transient -> "transient"
@@ -927,14 +928,19 @@ and supervise_config_to_json (sc : supervise_config) : string =
   ]
 
 and actor_def_to_json (ad : actor_def) : string =
-  Dump.json_obj [
+  Dump.json_obj ([
     ("state", Dump.json_list (List.map field_to_json ad.actor_state));
+    ("init_params", Dump.json_list (List.map param_to_json ad.actor_init_params));
     ("init", expr_to_json ad.actor_init);
     ("handlers", Dump.json_list (List.map actor_handler_to_json ad.actor_handlers));
     ("supervise", json_opt supervise_config_to_json ad.actor_supervise);
     ("compat", Dump.json_string ad.actor_compat);
     ("invariant", json_opt expr_to_json ad.actor_invariant);
   ]
+  (* Only when present, so an actor without one dumps byte-identically. *)
+  @ (match ad.actor_on_stop with
+     | None -> []
+     | Some h -> [("on_stop", expr_to_json h.ah_body)]))
 
 and actor_handler_to_json (ah : actor_handler) : string =
   Dump.json_obj [

@@ -1,0 +1,18 @@
+-- Actor.stop: on_stop runs after the drain, with the final state
+stop: true
+dead: true
+  log: a: on_stop saw n=3, alive=true
+-- self-stop (a NORMAL death from inside): the handler's state is final
+dead: true
+  log: a: on_stop saw n=3, alive=true
+  log: b: on_stop saw n=105, alive=true
+-- on_stop can wait on an Actor.call
+stop: true
+  log: a: on_stop saw n=3, alive=true
+  log: b: on_stop saw n=105, alive=true
+  log: flusher: call from on_stop answered, log had 2 lines
+-- kill: on_stop does NOT run
+dead: true
+  log: a: on_stop saw n=3, alive=true
+  log: b: on_stop saw n=105, alive=true
+  log: flusher: call from on_stop answered, log had 2 lines

@@ -8042,6 +8042,63 @@ let test_ctor_arity_mismatch_raises () =
 (** Compiled path: the generated @main() C wrapper must call
     march_run_scheduler() after march_main() so that actor mailboxes
     are drained even when main() never calls run_until_idle(). *)
+
+(* Parameterised actor `init` (D24): the spawn glue takes the init params,
+   and a supervised child with init args is registered with a respawn
+   CLOSURE (a lifted lambda that captures the evaluated args) rather than
+   the static `<Child>_spawn` reference, so a restart re-supplies them.
+   The end-to-end behaviour is pinned by test/native/actor_init_params and
+   test/native/supervisor_init_arg_restart; this pins the IR shape. *)
+let test_compiled_actor_init_params_ir_shape () =
+  let src = {|mod Test do
+    actor Worker do
+      state { label : String, n : Int }
+      init(label : String, n : Int) { label: label, n: n }
+      on Ping() do state end
+    end
+    actor Sup do
+      state { w : Int, tag : String }
+      init(tag : String) { w: 0, tag: tag }
+      supervise do
+        strategy one_for_one
+        max_restarts 5 within 60
+        Worker w(tag, 5)
+      end
+    end
+    fn main() do
+      let s = spawn(Sup, "root")
+      let w = spawn(Worker, "solo", 1)
+      send(w, Ping())
+      kill(s)
+    end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  (* Through Defun: the respawn thunk is a lambda that Defun lifts into a
+     top-level `$respawnN$apply$M` function, which is what the IR names. *)
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let k_table = March_tir.Kind.of_module tir in
+  let tir = March_tir.Perceus.perceus ~k_table tir in
+  let tir = March_tir.Drop.run ~k_table tir in
+  let tir = March_tir.Escape.escape_analysis ~k_table tir in
+  let ir  = March_tir.Llvm_emit.emit_module ~k_table tir in
+  let has re =
+    try ignore (Str.search_forward (Str.regexp re) ir 0); true with Not_found -> false in
+  (* Parameter attributes (`ptr nonnull dereferenceable(16) %label.arg`)
+     contain parentheses, so match the type keywords loosely. *)
+  Alcotest.(check bool) "Worker_spawn takes (ptr, i64)" true
+    (has "define ptr @Worker_spawn(ptr .*, i64 .*) {");
+  Alcotest.(check bool) "Sup_spawn takes (ptr)" true
+    (has "define ptr @Sup_spawn(ptr .*) {");
+  Alcotest.(check bool) "no zero-arg spawn glue for an actor with init params" false
+    (has "define ptr @Worker_spawn() {");
+  Alcotest.(check bool) "a respawn thunk is lifted for the child with init args" true
+    (has "define ptr @.respawn[0-9]*.apply");   (* `$respawnN$apply$M` *)
+  Alcotest.(check bool) "register_child is called" true
+    (has "call void @march_actor_register_child")
+
 let test_compiled_main_calls_march_run_scheduler () =
   let src = {|mod Test do
     actor Counter do
@@ -13709,6 +13766,7 @@ declare ptr  @march_pid_of_int(i64 %n)
 declare ptr  @march_get_actor_field(ptr %pid, ptr %name)
 declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs, i64 %backoff_base_ms, i64 %backoff_cap_ms, i64 %backoff_jitter_pct)
 declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx, i64 %restart_type, i64 %shutdown_ms)
+declare void @march_register_actor_on_stop(ptr %dispatch, ptr %on_stop)
 declare i64  @march_pid_index_of(ptr %actor)
 declare ptr  @march_value_to_string(ptr %v)
 ; Session-typed channel builtins (binary)
@@ -15461,6 +15519,8 @@ let codegen_suites =
           test_ctor_arity_mismatch_raises;
         Alcotest.test_case "compiled main calls march_run_scheduler" `Quick
           (with_reset test_compiled_main_calls_march_run_scheduler);
+        Alcotest.test_case "actor init params: spawn glue + respawn thunk IR (D24)" `Quick
+          (with_reset test_compiled_actor_init_params_ir_shape);
         Alcotest.test_case "string_chars llvm emit" `Quick
           test_string_chars_llvm_emit;
         Alcotest.test_case "int tag coerce IR (shl+or+ashr)" `Quick

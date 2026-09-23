@@ -27,6 +27,8 @@
 --     Poison messages to the ORIGINAL pid, so only the first one would
 --     land -- the rest silently drop once that pid is dead).
 mod CrashLoop do
+  needs Actor.Introspect
+  needs IO
   needs IO.Console
 
   actor Fragile do
@@ -63,23 +65,24 @@ mod CrashLoop do
     end
   end
 
-  fn poison_loop(boss, n) do
+  fn poison_loop(intro : Cap(Actor.Introspect), boss, n) do
     if n == 0 do
       ()
     else
-      let child = pid_of_int(current_child(boss))
+      let child = Actor.pid_from_int(intro, current_child(boss))
       send(child, Poison())
       run_until_idle()
-      poison_loop(boss, n - 1)
+      poison_loop(intro, boss, n - 1)
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let boss = spawn(Boss)
-    poison_loop(boss, 20)
+    poison_loop(intro, boss, 20)
     -- after 20 crash/restart cycles, the CURRENT child incarnation must
     -- still answer -- the process as a whole must have survived.
-    let healed = pid_of_int(current_child(boss))
+    let healed = Actor.pid_from_int(intro, current_child(boss))
     match Actor.call(healed, PingReq, 5000) do
       Ok(_)  -> println("self-healed")
       Err(e) -> println("still dead: " ++ e)

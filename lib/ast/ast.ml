@@ -70,7 +70,10 @@ type expr =
   | EHole of name option * span            (** Typed hole: ?name or ? *)
   | EAtom of string * expr list * span     (** Atom expression: :ok(x), :error *)
   | ESend of expr * expr * span            (** send(cap, msg) *)
-  | ESpawn of expr * span                  (** spawn(Actor) *)
+  | ESpawn of expr * span                  (** spawn(Actor) / spawn(Actor, a, b): the
+                                               inner expr is [ECon (Actor, init_args, _)];
+                                               the ctor's args are the actor's `init`
+                                               arguments (D24), NOT a variant payload *)
   | EResultRef of int option               (** REPL magic: v or v(N) — last/Nth result *)
   | EDbg of expr option * span
       (** Debugger: dbg() pauses unconditionally; dbg(bool_expr) pauses when true;
@@ -324,6 +327,10 @@ and shutdown_spec =
 and supervise_field = {
   sf_name     : name;
   sf_ty       : ty;
+  sf_init_args : expr list;
+  (** `Child name(e1, e2)`: the child's `init` arguments (D24), evaluated once
+      in the supervisor's spawn glue (where the supervisor's own `init`
+      params are in scope) and re-supplied verbatim on every respawn. *)
   sf_restart  : restart_type;   (** [Permanent] when the modifier is omitted *)
   sf_shutdown : shutdown_spec;  (** [default_shutdown] when the modifier is omitted *)
 }
@@ -354,6 +361,9 @@ and supervise_config = {
 
 and actor_def = {
   actor_state    : field list;
+  actor_init_params : param list;
+  (** `init(env : T, …) { … }` (D24): parameters supplied at `spawn(A, …)`,
+      in scope in [actor_init] only.  [] for the bare `init { … }` form. *)
   actor_init     : expr;
   actor_handlers : actor_handler list;
   actor_supervise : supervise_config option;   (** Some = supervisor actor *)
@@ -361,6 +371,15 @@ and actor_def = {
   actor_invariant : expr option;               (** @invariant predicate, if any *)
   actor_mailbox  : (int * int) option;         (** `mailbox N policy`: (limit, policy int) *)
   actor_remote   : bool;                       (** `@[remote]`: generate `<Actor>_Remote.dispatch` (Desugar_remote) *)
+  actor_on_stop  : actor_handler option;
+  (** `on_stop do ... end`: the terminate callback (OTP's terminate/2). Runs
+      on the actor's own thread after a graceful [Actor.stop] drain, with
+      [state] and [self] in scope; its value is discarded. Never runs on
+      [kill]/`shutdown brutal`, is cut off by the stop deadline, and a panic
+      inside it is logged and the NORMAL death proceeds. Stored as a handler
+      named [on_stop] with no params so body walkers can treat it like one
+      ([actor_body_handlers]) — it is NOT a message constructor.
+      See specs/lang/actors.md. *)
 }
 
 and actor_handler = {
@@ -547,3 +566,13 @@ let shutdown_ms = function
   | ShutdownInfinity -> -1
   | ShutdownBrutal   -> 0
   | ShutdownMs n     -> n
+
+(** Every handler-shaped body of an actor: its message handlers, then its
+    `on_stop` callback if it has one. For walkers that only care about the
+    CODE an actor runs (capability, lint, refinement, LSP walks). Anything
+    that treats [ah_msg] as a message constructor must use [actor_handlers]
+    instead: `on_stop` is not a message. *)
+let actor_body_handlers (a : actor_def) : actor_handler list =
+  match a.actor_on_stop with
+  | None -> a.actor_handlers
+  | Some h -> a.actor_handlers @ [h]

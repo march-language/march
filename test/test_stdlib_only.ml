@@ -2,15 +2,17 @@
    specs/plans/2026-09-21-distributed-deploys-groundwork-plan.md).
 
    [Typecheck_builtins.stdlib_only] lists builtins user code may not reference;
-   the gate is [Typecheck_caps.check_stdlib_only_refs]. The table lands EMPTY,
-   so every test here installs a throwaway entry for the duration of one check
-   and restores both refs afterwards. *)
+   the gate is [Typecheck_caps.check_stdlib_only_refs]. The table landed EMPTY
+   and build step 2 (unforgeable references) populated it, so the gate tests
+   here still install their own single entry for the duration of one check
+   (they pin the MECHANISM, not the shipped table) and restore both refs
+   afterwards; the last case pins the shipped table itself. *)
 
 open Test_helpers
 
 module TB = March_typecheck.Typecheck_builtins
 
-let hint = "use `Actor.list(cap)` (see `Actor.introspect`)"
+let hint = "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)"
 
 let with_gate ?(stdlib_files = []) f =
   let saved_gate = !TB.stdlib_only and saved_files = !TB.stdlib_source_files in
@@ -96,11 +98,30 @@ let test_repl_is_user_code () =
   Alcotest.(check bool) "the REPL path runs the gate" true
     (has_error_with ctx message)
 
-let test_lands_empty () =
-  Alcotest.(check (list (pair string string))) "no builtin is gated yet" []
+(* The shipped table: the four reference-forging builtins, each pointing at
+   the `Actor` wrapper that takes a `Cap(Actor.Introspect)`. Every suggestion
+   names `Actor.introspect`, the one minting function, so a user who hits the
+   gate is told where the cap comes from. *)
+let test_shipped_table () =
+  let gated = List.map fst !TB.stdlib_only in
+  Alcotest.(check (list string)) "the four forging builtins are gated"
+    [ "pid_of_int"; "actor_pid_indices"; "actor_whereis"; "actor_registered" ]
+    gated;
+  List.iter (fun (name, hint) ->
+      Alcotest.(check bool) (name ^ " suggestion names Actor.introspect") true
+        (let n = String.length "`Actor.introspect`" in
+         let rec go i = i + n <= String.length hint && (String.sub hint i n = "`Actor.introspect`" || go (i + 1)) in go 0))
     !TB.stdlib_only;
-  Alcotest.(check bool) "so user code may still call pid_of_int" false
-    (has_error_with (typecheck caller) "internal to the standard library")
+  (* No throwaway entry installed: the shipped table itself gates user code. *)
+  Alcotest.(check bool) "user code may no longer call pid_of_int" true
+    (has_error_with (typecheck caller)
+       "`pid_of_int` is internal to the standard library; use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)");
+  Alcotest.(check bool) "nor actor_whereis" true
+    (has_error_with (typecheck {|mod App do
+  fn find(n : String) do
+    actor_whereis(n)
+  end
+end|}) "`actor_whereis` is internal to the standard library; use `Actor.whereis(cap, name)`")
 
 let tests =
   [ ("stdlib-only builtins",
@@ -113,4 +134,5 @@ let tests =
        Alcotest.test_case "stdlib-looking path is not stdlib" `Quick
          test_user_file_named_like_stdlib_is_not_stdlib;
        Alcotest.test_case "REPL is user code" `Quick test_repl_is_user_code;
-       Alcotest.test_case "lands with an empty table" `Quick test_lands_empty ]) ]
+       Alcotest.test_case "shipped table gates the four forging builtins" `Quick
+         test_shipped_table ]) ]

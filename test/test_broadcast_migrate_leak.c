@@ -13,9 +13,14 @@
  *
  * What this test drives: the REAL code, twice over.
  *   1. march_actor_inject_migrate_msg (Phase 2's per-target body, split out
- *      of the loop) against a proc driven to PROC_DEAD deterministically on
- *      this thread via the raw scheduler API — no background scheduler
- *      thread, no timing window.
+ *      of the loop) against a PROC_DEAD target.  Since procs are reclaimed
+ *      (specs/todos/2026-09-17-proc-struct-reclamation.md), a proc driven to
+ *      PROC_DEAD by the real scheduler is FREED once march_sched_run returns,
+ *      so it can no longer be the target: holding its pointer past its death
+ *      is exactly what reclamation forbids.  The target is a stand-in struct
+ *      in the state a dead proc is observed in by a reader still inside its
+ *      critical section (status PROC_DEAD), and the real run is kept to check
+ *      that the scheduler did reap and free the one it ran.
  *   2. march_actor_broadcast_migrate itself: a fake actor record is given a
  *      dispatch id (so Phase 1's filter matches it) and, through the
  *      march_test_actor_bind_green_thread seam, a green_thread that IS the
@@ -59,11 +64,17 @@ int main(void) {
      * march_sched_run() runs to completion on THIS thread and returns only
      * once every proc is retired, so there is no window to race here. */
     march_sched_init();
-    march_proc *victim = march_sched_spawn_daemon(die_immediately, NULL);
+    int64_t freed_before = march_sched_stat(MARCH_STAT_PROCS_FREED);
+    (void)march_sched_spawn_daemon(die_immediately, NULL);
     march_sched_request_shutdown();
     march_sched_run();
-    CHECK(atomic_load(&victim->status) == PROC_DEAD,
-          "victim proc reached PROC_DEAD deterministically");
+    CHECK(march_sched_stat(MARCH_STAT_PROCS_FREED) == freed_before + 1,
+          "the real proc reached PROC_DEAD and was reaped and freed");
+
+    /* The dead target: see the header comment (1). */
+    march_proc *victim = (march_proc *)calloc(1, sizeof(march_proc));
+    victim->pid = -1;
+    atomic_store(&victim->status, PROC_DEAD);
 
     CHECK(march_migrate_msgs_live() == 0, "no migrate messages live at start");
 

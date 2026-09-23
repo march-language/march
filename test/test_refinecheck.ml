@@ -12662,7 +12662,7 @@ module Audit_fixture = struct
         bind_expr = A.ELit (A.LitInt 0, dummy) }
     in
     let supervise_cfg : A.supervise_config =
-      { A.sc_fields = [ { A.sf_name = nm "child"; sf_ty = refine_or_plain 35 int_ty; sf_restart = A.Permanent;
+      { A.sc_fields = [ { A.sf_name = nm "child"; sf_ty = refine_or_plain 35 int_ty; sf_init_args = []; sf_restart = A.Permanent;
                                   sf_shutdown = A.default_shutdown } ];
         sc_strategy = A.OneForOne;
         sc_max_restarts = 0;
@@ -12672,10 +12672,11 @@ module Audit_fixture = struct
     in
     let actor_def : A.actor_def =
       { A.actor_state = [ { A.fld_name = nm "value"; fld_ty = refine_or_plain 34 int_ty; fld_lin = A.Unrestricted } ];
+        actor_init_params = [];
         actor_init = A.ELet (init_binding, dummy);
         actor_handlers = [ { A.ah_msg = nm "Bump"; ah_params = [ actor_param ]; ah_body = A.ELit (A.LitInt 0, dummy) } ];
         actor_supervise = Some supervise_cfg;
-        actor_mailbox = None; actor_remote = false;
+        actor_mailbox = None; actor_remote = false; actor_on_stop = None;
         actor_compat = "full";
         actor_invariant = Some (A.EAnnot (A.ELit (A.LitBool true, dummy), refine_or_plain 33 int_ty, dummy)) }
     in

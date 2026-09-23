@@ -15,6 +15,7 @@
 # jit: `jit` if test/test_helpers.ml's REPL/JIT .so link list must include it, else `-`.
 march_runtime.c              core            jit
 march_scheduler.c            core            jit
+march_reclaim.c              core            jit
 march_extras.c               core            jit
 march_compress.c             core            -
 march_ctx_escape.c           core            jit

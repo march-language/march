@@ -1238,7 +1238,15 @@ let rec desugar_decl (d : decl) : decl =
     let init'     = desugar_expr actor.actor_init in
     let handlers' = List.map (fun h ->
         { h with ah_body = desugar_expr h.ah_body }) actor.actor_handlers in
-    DActor (vis, name, { actor with actor_init = init'; actor_handlers = handlers' }, sp)
+    (* A supervised child's `init` arguments (D24) are expressions too. *)
+    let sup' = Option.map (fun sc ->
+        { sc with sc_fields = List.map (fun sf ->
+              { sf with sf_init_args = List.map desugar_expr sf.sf_init_args })
+              sc.sc_fields }) actor.actor_supervise in
+    let on_stop' = Option.map (fun h ->
+        { h with ah_body = desugar_expr h.ah_body }) actor.actor_on_stop in
+    DActor (vis, name, { actor with actor_init = init'; actor_handlers = handlers';
+                                    actor_supervise = sup'; actor_on_stop = on_stop' }, sp)
 
   | DMod (name, vis, decls, sp) ->
     DMod (name, vis, List.map desugar_decl decls, sp)
@@ -1939,11 +1947,20 @@ let qualify_level (prefix : string) (own_names : string list) (decls : decl list
     | DLet (vis, b, sp) ->
       DLet (vis, { b with bind_expr = go [] b.bind_expr }, sp)
     | DActor (vis, name, actor, sp) ->
+      (* The init params (D24) are bound in the init expression and in the
+         supervised children's init arguments, nowhere else. *)
+      let init_bound = List.map (fun p -> p.param_name.txt) actor.actor_init_params in
       let actor' = { actor with
-        actor_init     = go [] actor.actor_init
+        actor_init     = go init_bound actor.actor_init
+      ; actor_supervise = Option.map (fun sc ->
+            { sc with sc_fields = List.map (fun sf ->
+                  { sf with sf_init_args = List.map (go init_bound) sf.sf_init_args })
+                  sc.sc_fields }) actor.actor_supervise
       ; actor_handlers = List.map (fun h ->
             let bound = List.map (fun p -> p.param_name.txt) h.ah_params in
             { h with ah_body = go bound h.ah_body }) actor.actor_handlers
+      ; actor_on_stop = Option.map (fun h ->
+            { h with ah_body = go [] h.ah_body }) actor.actor_on_stop
       } in
       DActor (vis, name, actor', sp)
     | d -> d
@@ -2103,8 +2120,14 @@ let strip_entry_self_qual (mod_name : string) (decls : decl list) : decl list =
       | DActor (vis, name, actor, sp) ->
         let actor' = { actor with
           actor_init      = rw actor.actor_init
+        ; actor_supervise = Option.map (fun sc ->
+              { sc with sc_fields = List.map (fun sf ->
+                    { sf with sf_init_args = List.map rw sf.sf_init_args })
+                    sc.sc_fields }) actor.actor_supervise
         ; actor_handlers  = List.map (fun h -> { h with ah_body = rw h.ah_body })
                               actor.actor_handlers
+        ; actor_on_stop   = Option.map (fun h -> { h with ah_body = rw h.ah_body })
+                              actor.actor_on_stop
         ; actor_invariant = Option.map rw actor.actor_invariant } in
         DActor (vis, name, actor', sp)
       | DMod (name, vis, inner, sp) -> DMod (name, vis, strip_decls inner, sp)
