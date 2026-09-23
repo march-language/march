@@ -93,6 +93,18 @@ its message; handlers cannot mint and a test actor has no reason to hold the cap
   the compiled acceptance program; all four migrated cap-mock/session goldens match their
   expected output through their dune rules.
 
+## Follow-up (same day)
+
+`mod Actor` also declares `needs Actor.Introspect`. #591's whole-stdlib ratchet
+(`test_compiler.ml`, `check_stdlib_like_cli`) checks every module under a
+`StdlibBaseline` wrapper, where a `proof cap` registers as
+`StdlibBaseline.Actor.Introspect`, so the declaring-module exemption in Check 1
+misses the bare `Actor.Introspect` and counted 7 "not declared in `needs`"
+errors for `actor.march` (the same class as all 9 of `session.march`'s
+ratchet entries). The declaration is honest on its own and puts the count back
+at the 2 pre-existing errors; the harness/registration mismatch is #591's to
+revisit.
+
 ## Not done
 
 - Cross-node references (`GlobalPid.make`, `GlobalRegistry.lookup`) are untouched until
