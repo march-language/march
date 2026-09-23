@@ -156,6 +156,12 @@ let test_hot_reload_emits_dispatch_call () =
              (two_boundary_module ()) in
   check "boundary→boundary emits dispatch enter" true
     (contains ir "call ptr @march_dispatch_enter");
+  (* D33: the base binary resolves against the running proc's epoch, the same
+     call a .so makes; never the plain current-version enter. *)
+  check "base binary boundary call uses enter_unit" true
+    (contains ir "call ptr @march_dispatch_enter_unit(i32 2,");
+  check "base binary has no plain current-version enter call" false
+    (contains ir "call ptr @march_dispatch_enter(");
   check "boundary→boundary emits dispatch leave" true
     (contains ir "call void @march_dispatch_leave");
   (* Startup-warmup guard: march_dispatch_enter returns NULL while the target
@@ -221,8 +227,17 @@ let test_compile_so_with_hot_reload_epoch () =
     (contains ir "@__march_hcr_epoch = private global i32 0");
   check "__march_init exported for reload server" true
     (contains ir "define void @__march_init(i32 %epoch)");
-  check "epoch-aware enter used in .so (not bare enter)" true
-    (contains ir "march_dispatch_enter_gen");
+  (* D33 (plan II.4.1): a .so resolves against the running proc's epoch,
+     exactly as the base binary does; the per-.so epoch cell is written by
+     __march_init but no longer read.  Asserted on the CALL form: the preamble
+     declares every dispatch entry point, so a bare substring would pass
+     vacuously. *)
+  check "proc-epoch enter used in .so" true
+    (contains ir "call ptr @march_dispatch_enter_unit(");
+  check "per-.so epoch cell not read in .so" false
+    (contains ir "load i32, ptr @__march_hcr_epoch");
+  check "no enter_gen call in .so" false
+    (contains ir "call ptr @march_dispatch_enter_gen(");
   check "leave still emitted" true
     (contains ir "call void @march_dispatch_leave")
 

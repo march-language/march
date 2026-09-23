@@ -385,18 +385,14 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
       let vslot = fresh ctx "hrver" in
       emit ctx (Printf.sprintf "%s = alloca i32" vslot);
       let fp = fresh ctx "hrfp" in
-      if ctx.compile_so then begin
-        (* Phase 9: in a .so patch, read the per-.so epoch cell and use the
-           epoch-aware enter so old callers route to the version they were
-           deployed with rather than always the newest slot. *)
-        let epoch = fresh ctx "hrepoch" in
-        emit ctx (Printf.sprintf "%s = load i32, ptr @__march_hcr_epoch" epoch);
-        emit ctx (Printf.sprintf
-          "%s = call ptr @march_dispatch_enter_gen(i32 %d, i32 %s, ptr %s)"
-          fp name_id epoch vslot)
-      end else
-        emit ctx (Printf.sprintf
-          "%s = call ptr @march_dispatch_enter(i32 %d, ptr %s)" fp name_id vslot);
+      (* D33 (plan II.4.1): every boundary call, in the base binary and in
+         every .so alike, resolves against the RUNNING PROC's code epoch.
+         march_dispatch_enter_unit reads it and picks the newest live
+         version at or before it (current, for an unpinned proc).  The
+         per-.so @__march_hcr_epoch cell is still defined and still written
+         by __march_init, but nothing reads it any more. *)
+      emit ctx (Printf.sprintf
+        "%s = call ptr @march_dispatch_enter_unit(i32 %d, ptr %s)" fp name_id vslot);
       (* Startup-warmup guard.  march_dispatch_enter returns NULL when the target
          slot has not been published yet (or the publish is not yet visible to
          this thread) — e.g. an HTTP worker thread serving a request during the

@@ -13273,6 +13273,7 @@ let golden_preamble_core : string = {|; Runtime declarations
 ; Hot Code Reload versioned dispatch (runtime/march_dispatch.c)
 declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)
 declare ptr  @march_dispatch_enter_gen(i32 %name_id, i32 %caller_epoch, ptr %out_version)
+declare ptr  @march_dispatch_enter_unit(i32 %name_id, ptr %out_version)
 declare void @march_dispatch_leave(i32 %name_id, i32 %version)
 declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind)
 declare i32  @march_dispatch_publish_epoch(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind, i32 %epoch)

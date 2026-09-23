@@ -15,6 +15,12 @@
  *     a reader runs INSIDE the close hook, i.e. while "dlclose" is in flight)
  *  9. the same property under real threads: readers pin the version about to
  *     be reclaimed while a publisher cycles; no pin may overlap its close
+ * 10. the per-slot reclaim condition (II.4.2): a unit pinned to epoch 5 that
+ *     calls a function last changed at epoch 2 keeps the epoch-2 version
+ *     alive although epoch 2 itself has no pins
+ * 11. equal epochs (epoch-less publishes): enter_gen prefers current
+ * 12. a staged version is invisible to every reader until it is committed
+ * 13. the epoch pin table: pin/unpin/reserve/advance and a full table
  */
 #include "../runtime/march_dispatch.h"
 #include <stdio.h>
@@ -106,23 +112,31 @@ static void test_old_version_stays_pinned(void) {
     march_dispatch_shutdown();
 }
 
+static void *FN4 = (void *)0x4444;
+
 static void test_publish_blocked_then_unblocked(void) {
     march_dispatch_init(4);
     march_dispatch_publish(0, FN1, H1, NULL, MARCH_NATIVE); /* v0, current 0 */
-    uint32_t v0;
+    uint32_t v0, v1;
     march_dispatch_enter(0, &v0);                     /* pin v0 */
     march_dispatch_publish(0, FN2, H2, NULL, MARCH_NATIVE); /* v1, current 1 */
+    march_dispatch_enter(0, &v1);                     /* pin v1 */
+    CHECK(march_dispatch_publish(0, FN3, H1, NULL, MARCH_NATIVE) == 2,
+          "third publish takes the free third ring slot");
 
-    /* Cap is 2; both ring slots are now occupied: slot 1 is current, slot 0 is
-       pinned. A third publish has no reclaimable slot -> -1. */
-    int idx3 = march_dispatch_publish(0, FN3, H1, NULL, MARCH_NATIVE);
-    CHECK(idx3 == -1, "publish blocked while old version pinned");
-    CHECK(march_dispatch_current(0) == 1, "current unchanged after blocked publish");
+    /* Cap is 3 (D32); every ring slot is occupied: slot 2 is current, slots 0
+       and 1 have calls in flight.  A fourth publish has no reclaimable slot. */
+    CHECK(!march_dispatch_can_stage(0), "can_stage reports no slot");
+    int idx4 = march_dispatch_publish(0, FN4, H1, NULL, MARCH_NATIVE);
+    CHECK(idx4 == -1, "publish blocked while old versions are pinned");
+    CHECK(march_dispatch_current(0) == 2, "current unchanged after blocked publish");
 
     march_dispatch_leave(0, v0);                      /* free slot 0 */
-    int idx3b = march_dispatch_publish(0, FN3, H1, NULL, MARCH_NATIVE);
-    CHECK(idx3b == 0, "publish reclaims the freed slot");
+    CHECK(march_dispatch_can_stage(0), "can_stage sees the freed slot");
+    int idx4b = march_dispatch_publish(0, FN4, H1, NULL, MARCH_NATIVE);
+    CHECK(idx4b == 0, "publish reclaims the freed slot");
     CHECK(march_dispatch_current(0) == 0, "current advanced to reclaimed slot");
+    march_dispatch_leave(0, v1);
     march_dispatch_shutdown();
 }
 
@@ -272,7 +286,15 @@ static void close_hook_reader(void *handle) {
     if (g_hook_reader_fn) march_dispatch_leave(0, v);
 }
 
+/* Make [e] the current epoch the way an activation does (reserve its entry,
+ * then advance), so older epochs lose the current-role pin. */
+static void advance_to(uint32_t e) {
+    CHECK(march_epoch_reserve(e) == 0, "epoch entry reserved");
+    march_epoch_advance(e);
+}
+
 static void test_reclaim_retires_before_dlclose(void) {
+    march_epoch_reset_for_test();
     march_dispatch_init(1);
     march_dispatch_set_close_hook(close_hook_reader);
     g_hook_calls = 0; g_hook_reader_fn = NULL;
@@ -281,15 +303,19 @@ static void test_reclaim_retires_before_dlclose(void) {
     march_dispatch_set_handle(0, 0, H_OLD);
     CHECK(march_dispatch_publish_epoch(0, FN2, H2, NULL, MARCH_NATIVE, 2) == 1, "v1 at slot 1");
     march_dispatch_set_handle(0, 1, H_NEW);
+    CHECK(march_dispatch_publish_epoch(0, FN3, H2, NULL, MARCH_NATIVE, 3) == 2, "v2 at slot 2");
+    march_dispatch_set_handle(0, 2, H_NEW);
+    advance_to(3);   /* nothing is pinned to epochs 1 or 2 any more */
 
     /* Before the reclaim, an epoch-1 caller legitimately reaches v0. */
     uint32_t v = 99;
     CHECK(march_dispatch_enter_gen(0, 1, &v) == FN1 && v == 0, "epoch-1 caller reaches v0");
     march_dispatch_leave(0, v);
 
-    /* Third publish reclaims slot 0 and closes H_OLD. */
-    int idx = march_dispatch_publish_epoch(0, FN3, H1, NULL, MARCH_NATIVE, 3);
-    CHECK(idx == 0, "third publish reclaims slot 0");
+    /* Fourth publish reclaims slot 0 (the lowest reclaimable epoch) and
+       closes H_OLD. */
+    int idx = march_dispatch_publish_epoch(0, FN4, H1, NULL, MARCH_NATIVE, 4);
+    CHECK(idx == 0, "fourth publish reclaims slot 0");
     CHECK(g_hook_calls == 1, "reclaim closed exactly one handle");
     CHECK(g_hook_refs_at_close == 0, "no pin on v0 when its handle is closed");
     CHECK(g_hook_reader_fn != FN1,
@@ -298,9 +324,10 @@ static void test_reclaim_retires_before_dlclose(void) {
           "hook reader's pins balanced");
 
     march_dispatch_set_close_hook(NULL);
-    march_dispatch_set_handle(0, 0, NULL);   /* fake handles: keep shutdown off dlclose */
-    march_dispatch_set_handle(0, 1, NULL);
+    for (uint32_t i = 0; i < MARCH_MAX_LIVE_VERSIONS; i++)
+        march_dispatch_set_handle(0, i, NULL);  /* fake handles: keep shutdown off dlclose */
     march_dispatch_shutdown();
+    march_epoch_reset_for_test();
     if (g_failed == 0) printf("PASS: test_reclaim_retires_before_dlclose\n");
 }
 
@@ -363,6 +390,7 @@ static void *recl_reader(void *arg) {
 }
 
 static void test_reclaim_race_threads(void) {
+    march_epoch_reset_for_test();
     march_dispatch_init(1);
     march_dispatch_set_close_hook(recl_close_hook);
     pthread_t th[RECL_READERS];
@@ -388,6 +416,10 @@ static void test_reclaim_race_threads(void) {
         int idx = march_dispatch_publish_epoch(0, recl_fn(k), H1, NULL, MARCH_NATIVE, k);
         if (idx < 0) { blocked++; sched_yield(); continue; }  /* a reader holds the old version */
         march_dispatch_set_handle(0, (uint32_t)idx, recl_handle(k));
+        /* Epoch k is now current, as an activation would leave it; the
+           previous epochs keep no role pin, so only the readers' per-call
+           refs stand between a version and its reclaim. */
+        if (k > 1 && march_epoch_reserve(k) == 0) march_epoch_advance(k);
         atomic_store_explicit(&g_recl_k, k, memory_order_release);
         k++;
     }
@@ -408,8 +440,127 @@ static void test_reclaim_race_threads(void) {
     march_dispatch_set_close_hook(NULL);
     for (uint32_t i = 0; i < MARCH_MAX_LIVE_VERSIONS; i++) march_dispatch_set_handle(0, i, NULL);
     march_dispatch_shutdown();
+    march_epoch_reset_for_test();
     printf("%s: test_reclaim_race_threads (publishes=%u pins=%ld blocked_publishes=%ld overlap=%ld)\n",
            bad == 0 ? "PASS" : "FAIL", k - 1, pins, blocked, bad);
+}
+
+/* ── 10. the per-slot reclaim condition (II.4.2) ──────────────────────────
+ * Slot history: v0 baseline (epoch 0), v1 changed at epoch 2, v2 changed at
+ * epoch 6 (current).  A unit pinned to epoch 5 resolves to v1 ("newest at or
+ * before 5").  Epoch 2 itself has NO pins.  The wrong rule ("a version is free
+ * when its own epoch is retired") would reclaim v1 and unmap the code the
+ * epoch-5 unit is running; the right one keeps it: 5 lies in [2, 6).  v0 is
+ * kept by a call in flight (refs), which blocks both rules, so v1 is the only
+ * candidate the wrong rule could take.  Checked RED under the wrong rule. */
+static void test_reclaim_respects_newer_pinned_epoch(void) {
+    march_epoch_reset_for_test();
+    march_dispatch_init(1);
+    CHECK(march_dispatch_publish(0, FN1, H1, NULL, MARCH_NATIVE) == 0, "baseline at epoch 0");
+    advance_to(2);
+    CHECK(march_dispatch_publish_epoch(0, FN2, H2, NULL, MARCH_NATIVE, 2) == 1, "v1 at epoch 2");
+    CHECK(march_epoch_pin(1) == -1, "epoch 1 lost its holder when 2 became current");
+    advance_to(5);
+    CHECK(march_epoch_pin(5) == 0, "a unit pins epoch 5");
+    advance_to(6);
+    CHECK(march_dispatch_publish_epoch(0, FN3, H1, NULL, MARCH_NATIVE, 6) == 2, "v2 at epoch 6");
+    CHECK(march_epoch_pins(2) == 0, "epoch 2 itself has no pins");
+    CHECK(march_epoch_pins(5) == 1, "epoch 5 has one unit");
+
+    /* Keep v0 alive with a call in flight. */
+    uint32_t v0 = 99;
+    CHECK(march_dispatch_enter_gen(0, 1, &v0) == FN1 && v0 == 0, "a call holds v0");
+
+    uint32_t v = 99;
+    CHECK(march_dispatch_enter_gen(0, 5, &v) == FN2 && v == 1,
+          "the epoch-5 unit resolves to the epoch-2 version");
+    march_dispatch_leave(0, v);
+
+    CHECK(!march_dispatch_can_stage(0),
+          "no version reclaimable: v1 is in use by epoch 5, v0 by a call");
+    CHECK(march_dispatch_publish_epoch(0, FN4, H2, NULL, MARCH_NATIVE, 7) == -1,
+          "the publish waits instead of reclaiming the epoch-2 version");
+    CHECK(march_dispatch_live(0, 1), "the epoch-2 version is still live");
+    CHECK(march_dispatch_enter_gen(0, 5, &v) == FN2 && v == 1,
+          "the epoch-5 unit still reaches it");
+    march_dispatch_leave(0, v);
+
+    march_epoch_unpin(5);   /* the unit exits */
+    CHECK(march_dispatch_can_stage(0), "with epoch 5 retired, v1 is reclaimable");
+    CHECK(march_dispatch_publish_epoch(0, FN4, H2, NULL, MARCH_NATIVE, 7) == 1,
+          "the waiting publish reclaims v1, not v0");
+    CHECK(march_dispatch_live(0, 0), "v0 (its call still in flight) survives");
+    march_dispatch_leave(0, v0);
+    march_dispatch_shutdown();
+    march_epoch_reset_for_test();
+    if (g_failed == 0) printf("PASS: test_reclaim_respects_newer_pinned_epoch\n");
+}
+
+/* ── 11. equal epochs prefer current ─────────────────────────────────────── */
+static void test_equal_epochs_prefer_current(void) {
+    march_epoch_reset_for_test();
+    march_dispatch_init(1);
+    march_dispatch_publish(0, FN1, H1, NULL, MARCH_NATIVE);   /* epoch 0 */
+    march_dispatch_publish(0, FN2, H2, NULL, MARCH_NATIVE);   /* epoch 0, current */
+    uint32_t v;
+    CHECK(march_dispatch_enter_gen(0, 1, &v) == FN2 && v == 1,
+          "an epoch-less redeploy is what every unit sees");
+    march_dispatch_leave(0, v);
+    CHECK(march_dispatch_enter_unit(0, &v) == FN2,
+          "enter_unit with no proc follows current");
+    march_dispatch_leave(0, v);
+    march_dispatch_shutdown();
+}
+
+/* ── 12. staged versions are invisible ───────────────────────────────────── */
+static void test_staged_version_invisible(void) {
+    march_epoch_reset_for_test();
+    march_dispatch_init(1);
+    march_dispatch_publish(0, FN1, H1, NULL, MARCH_NATIVE);
+    int idx = march_dispatch_stage(0, FN2, H2, NULL, MARCH_NATIVE, 3);
+    CHECK(idx == 1, "stage takes the free slot");
+    uint32_t v;
+    CHECK(march_dispatch_enter(0, &v) == FN1, "enter does not see the staged version");
+    march_dispatch_leave(0, v);
+    CHECK(march_dispatch_enter_gen(0, 9, &v) == FN1,
+          "enter_gen at a later epoch does not see it either");
+    march_dispatch_leave(0, v);
+    CHECK(march_dispatch_can_stage(0), "a staged slot is not counted as free, one left");
+    CHECK(march_dispatch_stage(0, FN3, H1, NULL, MARCH_NATIVE, 3) == 2, "second stage");
+    march_dispatch_unstage(0, 2);
+    march_dispatch_commit(0, (uint32_t)idx);
+    CHECK(march_dispatch_current(0) == 1, "commit makes it current");
+    CHECK(march_dispatch_enter_gen(0, 3, &v) == FN2, "and selectable at its epoch");
+    march_dispatch_leave(0, v);
+    CHECK(march_dispatch_enter_gen(0, 2, &v) == FN1, "older units keep the old version");
+    march_dispatch_leave(0, v);
+    march_dispatch_shutdown();
+}
+
+/* ── 13. the pin table ────────────────────────────────────────────────────── */
+static void test_epoch_pin_table(void) {
+    march_epoch_reset_for_test();
+    CHECK(march_epoch_current() == MARCH_EPOCH_BASE, "fresh process starts at the base epoch");
+    CHECK(march_epoch_pins(MARCH_EPOCH_BASE) == 1, "the current role holds one pin");
+    CHECK(march_epoch_next(0) == MARCH_EPOCH_BASE + 1, "next is above current");
+    CHECK(march_epoch_next(40) == 40, "a larger client epoch is kept");
+    CHECK(march_epoch_pin(7) == -1, "an epoch with no holder cannot be pinned");
+    CHECK(march_epoch_pin(MARCH_EPOCH_BASE) == 0, "the current epoch can");
+    advance_to(2);
+    CHECK(march_epoch_pins(MARCH_EPOCH_BASE) == 1, "advance dropped only the role pin");
+    march_epoch_unpin(MARCH_EPOCH_BASE);
+    CHECK(march_epoch_pins(MARCH_EPOCH_BASE) == 0, "epoch 1 retired");
+    CHECK(march_epoch_pin(MARCH_EPOCH_BASE) == -1, "and cannot be revived by a pin");
+    /* Fill the table: 8 entries, 2 is current; pin 3..9 so none can recycle. */
+    for (uint32_t e = 3; e <= 9; e++) CHECK(march_epoch_reserve(e) == 0, "reserve");
+    CHECK(march_epoch_reserve(10) == -1, "a full table refuses a new epoch");
+    uint32_t eps[MARCH_EPOCH_PIN_SLOTS]; int64_t cnt[MARCH_EPOCH_PIN_SLOTS];
+    CHECK(march_epoch_pin_table(eps, cnt, MARCH_EPOCH_PIN_SLOTS) == MARCH_EPOCH_PIN_SLOTS,
+          "the snapshot lists every pinned epoch");
+    march_epoch_unpin(3);
+    CHECK(march_epoch_reserve(10) == 0, "a retired entry is reused");
+    march_epoch_reset_for_test();
+    if (g_failed == 0) printf("PASS: test_epoch_pin_table\n");
 }
 
 int main(void) {
@@ -424,6 +575,10 @@ int main(void) {
     test_startup_publish_enter_race();
     test_reclaim_retires_before_dlclose();
     test_reclaim_race_threads();
+    test_reclaim_respects_newer_pinned_epoch();
+    test_equal_epochs_prefer_current();
+    test_staged_version_invisible();
+    test_epoch_pin_table();
     if (g_failed == 0) { printf("test_dispatch: all checks passed\n"); return 0; }
     fprintf(stderr, "test_dispatch: %d check(s) failed\n", g_failed);
     return 1;

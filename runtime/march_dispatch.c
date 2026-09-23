@@ -50,6 +50,11 @@ typedef struct {
                                            `live`.  Atomic because the scan can
                                            read a slot a reclaim is rewriting. */
     void              *handle;          /* dlopen handle for this .so; NULL for baseline */
+    uint8_t            keep_for_older;  /* see march_dispatch_set_keep_for_older */
+    uint8_t            staged;          /* 1 between march_dispatch_stage and commit/
+                                           unstage: occupied but not yet live.  Read
+                                           and written by the publisher only (the
+                                           reload thread, or startup). */
 } MarchFnVersion;
 
 typedef struct {
@@ -59,6 +64,8 @@ typedef struct {
     long long         activated_at_ms;                 /* Phase 7: Unix ms of last ACTIVATE */
     char              signer_hex[65];                  /* Phase 7: pubkey hex of last ACTIVATE signer */
     char             *callers_str;                     /* Phase 8: comma-separated caller names, or NULL */
+    _Atomic(uint32_t) msg_schema_epoch;                /* D30: epoch of the actor's last message-type
+                                                          change (0 = never); see march_dispatch.h */
 } MarchDispatchSlot;
 
 /* g_slots / g_n_slots are written once by march_dispatch_init (startup, main
@@ -174,17 +181,106 @@ void march_dispatch_shutdown(void) {
     }
 }
 
-/* epoch == NULL: leave the ring slot's epoch as it is (plain publish). */
-static int publish_impl(uint32_t name_id, void *fn_ptr,
-                        const char *impl_hash, const char *sig_hash,
-                        uint8_t kind, const uint32_t *epoch) {
+/* ── Ring-slot selection (II.4.2) ─────────────────────────────────────── */
+
+/* True if ring version [i] can never be selected by enter_gen because another
+ * live version has the same epoch and wins the tie (the current one, else the
+ * lowest index -- enter_gen's scan order). */
+static int version_shadowed(MarchDispatchSlot *s, uint32_t i, uint32_t cur,
+                            uint32_t ep) {
+    for (uint32_t j = 0; j < MARCH_MAX_LIVE_VERSIONS; j++) {
+        if (j == i) continue;
+        if (!atomic_load_explicit(&s->ring[j].live, memory_order_acquire)) continue;
+        if (atomic_load_explicit(&s->ring[j].epoch, memory_order_relaxed) != ep) continue;
+        if (i == cur) return 0;
+        if (j == cur || j < i) return 1;
+    }
+    return 0;
+}
+
+/* The epoch of the next newer live version than [i] in this slot, or
+ * UINT32_MAX when [i] is the newest. */
+static uint32_t next_newer_epoch(MarchDispatchSlot *s, uint32_t i, uint32_t ep) {
+    uint32_t best = UINT32_MAX;
+    for (uint32_t j = 0; j < MARCH_MAX_LIVE_VERSIONS; j++) {
+        if (j == i) continue;
+        if (!atomic_load_explicit(&s->ring[j].live, memory_order_acquire)) continue;
+        uint32_t ej = atomic_load_explicit(&s->ring[j].epoch, memory_order_relaxed);
+        if (ej > ep && ej < best) best = ej;
+    }
+    return best;
+}
+
+/* Reclaim condition, per slot: refs == 0 and no pinned epoch in
+ * [e, e_next).  The current version is never reclaimed: the current epoch
+ * always holds its role pin, and current's interval reaches it. */
+static int version_reclaimable(MarchDispatchSlot *s, uint32_t i, uint32_t cur) {
+    MarchFnVersion *v = &s->ring[i];
+    if (i == cur || v->staged) return 0;
+    if (!atomic_load_explicit(&v->live, memory_order_acquire)) return 0;
+    if (atomic_load_explicit(&v->refs, memory_order_acquire) != 0) return 0;
+    uint32_t ep = atomic_load_explicit(&v->epoch, memory_order_relaxed);
+    if (v->keep_for_older && ep > 0 && march_epoch_pinned_in(1, ep)) return 0;
+    if (version_shadowed(s, i, cur, ep)) return 1;
+    return !march_epoch_pinned_in(ep, next_newer_epoch(s, i, ep));
+}
+
+/* A ring slot that holds nothing live, nothing staged and no racing reader. */
+static int version_free(MarchDispatchSlot *s, uint32_t i) {
+    MarchFnVersion *v = &s->ring[i];
+    return !v->staged
+        && !atomic_load_explicit(&v->live, memory_order_acquire)
+        && atomic_load_explicit(&v->refs, memory_order_acquire) == 0;
+}
+
+/* Pick the ring slot a stage would use: a free one first, else the
+ * reclaimable version with the lowest epoch.  -1: none (the activation
+ * waits). *out_reclaim is 1 when the choice holds a live version. */
+static int pick_ring_slot(MarchDispatchSlot *s, int *out_reclaim) {
+    uint32_t cur = atomic_load_explicit(&s->current, memory_order_acquire);
+    *out_reclaim = 0;
+    for (uint32_t i = 0; i < MARCH_MAX_LIVE_VERSIONS; i++)
+        if (version_free(s, i)) return (int)i;
+    int best = -1;
+    uint32_t best_ep = 0;
+    for (uint32_t i = 0; i < MARCH_MAX_LIVE_VERSIONS; i++) {
+        if (!version_reclaimable(s, i, cur)) continue;
+        uint32_t ep = atomic_load_explicit(&s->ring[i].epoch, memory_order_relaxed);
+        if (best < 0 || ep < best_ep) { best = (int)i; best_ep = ep; }
+    }
+    if (best >= 0) *out_reclaim = 1;
+    return best;
+}
+
+int march_dispatch_can_stage(uint32_t name_id) {
+    if (name_id >= n_slots_relaxed()) return 0;
+    MarchDispatchSlot *s = &slots_relaxed()[name_id];
+    int any_live = 0;
+    for (uint32_t i = 0; i < MARCH_MAX_LIVE_VERSIONS; i++)
+        if (atomic_load_explicit(&s->ring[i].live, memory_order_relaxed)
+                || s->ring[i].staged)
+            { any_live = 1; break; }
+    if (!any_live) return 1;
+    int reclaim;
+    return pick_ring_slot(s, &reclaim) >= 0;
+}
+
+int march_dispatch_live(uint32_t name_id, uint32_t version) {
+    if (name_id >= n_slots_relaxed() || version >= MARCH_MAX_LIVE_VERSIONS) return 0;
+    return atomic_load_explicit(&slots_relaxed()[name_id].ring[version].live,
+                                memory_order_acquire) != 0;
+}
+
+int march_dispatch_stage(uint32_t name_id, void *fn_ptr,
+                         const char *impl_hash, const char *sig_hash,
+                         uint8_t kind, uint32_t epoch) {
     if (name_id >= g_n_slots) return -1;
     MarchDispatchSlot *s = &g_slots[name_id];
-    uint32_t cur = atomic_load_explicit(&s->current, memory_order_acquire);
 
     int any_live = 0;
     for (uint32_t i = 0; i < MARCH_MAX_LIVE_VERSIONS; i++)
-        if (atomic_load_explicit(&s->ring[i].live, memory_order_relaxed))
+        if (atomic_load_explicit(&s->ring[i].live, memory_order_relaxed)
+                || s->ring[i].staged)
             { any_live = 1; break; }
 
     int idx;
@@ -198,58 +294,49 @@ static int publish_impl(uint32_t name_id, void *fn_ptr,
             s->baseline_impl_hash[0] = '\0';
         }
     } else {
-        /* Reclaim a ring slot that is neither current nor pinned. With a cap of
-           2 this is "the other slot, iff its refs have drained". No free slot
-           means every live version is still in use -> caller must purge. */
-        idx = -1;
-        for (uint32_t i = 0; i < MARCH_MAX_LIVE_VERSIONS; i++) {
-            if (i == cur) continue;
-            if (atomic_load_explicit(&s->ring[i].refs, memory_order_acquire) == 0) {
-                idx = (int)i;
-                break;
-            }
-        }
+        int reclaim;
+        idx = pick_ring_slot(s, &reclaim);
         if (idx < 0) return -1;
         MarchFnVersion *old = &s->ring[idx];
-        /* Retire, THEN re-check refs, THEN dlclose.  The refs==0 test above is
-         * only a filter: a reader (enter/enter_gen) that passed its live-check
-         * just before it can still pin afterwards, and its post-pin re-validation
-         * would pass as long as `live` is still 1 — handing it a fn_ptr into a
-         * .so we are about to unload.  So store live=0 first; after that, any
-         * reader that pins either shows up in the refs re-check below or sees
-         * live==0 on re-validation and backs out without touching fn_ptr.
-         *
-         * This is a store-buffering (Dekker) pair: we store `live` then load
-         * `refs`; the reader RMWs `refs` then loads `live`.  Release/acquire does
-         * NOT forbid both sides reading the stale value (each load may be
-         * satisfied before the other thread's store is visible), so all four
-         * accesses are seq_cst; the single total order then guarantees at least
-         * one side observes the other.  The reader-side seq_cst costs nothing
-         * extra on x86 (lock xadd / plain mov) or AArch64 (ldaddal / ldar).
-         *
-         * If a reader did pin in the window, leave the handle open: the version
-         * is retired (no new reader can select it), and the next publish reclaims
-         * it once those pins drain.  This keeps one .so mapped a little longer in
-         * the racing case, which beats unmapping code under a caller.  The full
-         * fix — epoch/grace reclamation, so the reclaimer never needs a racing
-         * reader to back out — is not built yet. */
-        atomic_store_explicit(&old->live, 0, memory_order_seq_cst);
-        if (atomic_load_explicit(&old->refs, memory_order_seq_cst) != 0)
-            return -1;
+        if (reclaim) {
+            /* Retire, THEN re-check refs, THEN dlclose.  The refs==0 test in
+             * pick_ring_slot is only a filter: a reader (enter/enter_gen)
+             * that passed its live-check just before it can still pin
+             * afterwards, and its post-pin re-validation would pass as long
+             * as `live` is still 1 -- handing it a fn_ptr into a .so we are
+             * about to unload.  So store live=0 first; after that, any reader
+             * that pins either shows up in the refs re-check below or sees
+             * live==0 on re-validation and backs out without touching fn_ptr.
+             *
+             * This is a store-buffering (Dekker) pair: we store `live` then
+             * load `refs`; the reader RMWs `refs` then loads `live`.
+             * Release/acquire does NOT forbid both sides reading the stale
+             * value, so all four accesses are seq_cst; the single total order
+             * then guarantees at least one side observes the other.
+             *
+             * If a reader did pin in the window, leave the handle open: the
+             * version is retired (no new reader can select it), and a later
+             * stage reuses it as a free slot once those pins drain. */
+            atomic_store_explicit(&old->live, 0, memory_order_seq_cst);
+            if (atomic_load_explicit(&old->refs, memory_order_seq_cst) != 0)
+                return -1;
+        }
+        /* A free slot can still hold the handle of a version retired while a
+         * racing reader held it (the -1 above, on an earlier stage). */
         slot_dlclose(old->handle);
         old->handle = NULL;
     }
 
     MarchFnVersion *v = &s->ring[idx];
-    /* Reclaim case: already retired above.  Fresh slot: already 0.  The store is
-       kept so the slot is provably not live while its fields are rewritten. */
+    /* Not live while its fields are rewritten (reclaim: retired above; fresh
+     * or free: already 0). */
     atomic_store_explicit(&v->live, 0, memory_order_release);
     v->fn_ptr = fn_ptr;
     /* Do NOT reset `refs` here.  It is already 0 on a fresh (calloc'd) slot and
-       was verified 0 on reclaim — but a reader can still be mid-back-out (pinned,
-       about to see live==0 and fetch_sub).  A plain store of 0 would erase its
-       increment and its decrement would then wrap refs to UINT64_MAX, pinning
-       the slot forever. */
+       was verified 0 on reclaim -- but a reader can still be mid-back-out
+       (pinned, about to see live==0 and fetch_sub).  A plain store of 0 would
+       erase its increment and its decrement would then wrap refs to
+       UINT64_MAX, pinning the slot forever. */
     v->kind = kind;
     if (impl_hash) {
         strncpy(v->impl_hash, impl_hash, 64);
@@ -263,18 +350,50 @@ static int publish_impl(uint32_t name_id, void *fn_ptr,
     } else {
         v->sig_hash[0] = '\0';
     }
-    /* Stamp the epoch BEFORE the publication store, so enter_gen never selects
-       this slot by its previous occupant's epoch. */
-    if (epoch)
-        atomic_store_explicit(&v->epoch, *epoch, memory_order_relaxed);
-    /* Mark the slot live with a release store AFTER every field (fn_ptr, kind,
-       hashes) is written.  This is the slot-level publication point: enter/
-       enter_gen acquire-load `live` and only trust the slot once they observe
-       this store, so they can never read a zeroed or half-initialised slot. */
+    /* The epoch is written before the version can become live (commit's
+       release store of `live` orders it), so enter_gen never selects this
+       slot by its previous occupant's epoch (#551's fix, kept by
+       construction). */
+    atomic_store_explicit(&v->epoch, epoch, memory_order_relaxed);
+    v->keep_for_older = 0;
+    v->staged = 1;
+    return idx;
+}
+
+void march_dispatch_commit(uint32_t name_id, uint32_t version) {
+    if (name_id >= g_n_slots || version >= MARCH_MAX_LIVE_VERSIONS) return;
+    MarchDispatchSlot *s = &g_slots[name_id];
+    MarchFnVersion *v = &s->ring[version];
+    if (!v->staged) return;
+    v->staged = 0;
+    /* The slot-level publication point: enter/enter_gen acquire-load `live`
+       and only trust the slot once they observe this store. */
     atomic_store_explicit(&v->live, 1, memory_order_release);
-    /* Publish with release so a reader that acquires `current` sees the fully
-       initialised version. */
-    atomic_store_explicit(&s->current, (uint32_t)idx, memory_order_release);
+    atomic_store_explicit(&s->current, version, memory_order_release);
+}
+
+void march_dispatch_set_keep_for_older(uint32_t name_id, uint32_t version) {
+    if (name_id >= g_n_slots || version >= MARCH_MAX_LIVE_VERSIONS) return;
+    g_slots[name_id].ring[version].keep_for_older = 1;
+}
+
+void march_dispatch_unstage(uint32_t name_id, uint32_t version) {
+    if (name_id >= g_n_slots || version >= MARCH_MAX_LIVE_VERSIONS) return;
+    MarchFnVersion *v = &g_slots[name_id].ring[version];
+    if (!v->staged) return;
+    v->staged = 0;
+    v->handle = NULL;   /* the caller still owns (and closes) its handle */
+}
+
+/* epoch == NULL: a plain (epoch-less) publish, ring epoch 0 -- the baseline's
+ * epoch.  Stage and commit in one step. */
+static int publish_impl(uint32_t name_id, void *fn_ptr,
+                        const char *impl_hash, const char *sig_hash,
+                        uint8_t kind, const uint32_t *epoch) {
+    int idx = march_dispatch_stage(name_id, fn_ptr, impl_hash, sig_hash, kind,
+                                   epoch ? *epoch : 0);
+    if (idx < 0) return -1;
+    march_dispatch_commit(name_id, (uint32_t)idx);
     return idx;
 }
 
@@ -455,17 +574,21 @@ void *march_dispatch_enter_gen(uint32_t name_id, uint32_t caller_epoch,
     MarchDispatchSlot *slots = atomic_load_explicit(&g_slots, memory_order_acquire);
     MarchDispatchSlot *s = &slots[name_id];
 
-    /* Scan the 2-slot ring for the best match: live, epoch <= caller_epoch,
-     * maximum epoch value.  This is 2 iterations, no lock needed. */
+    /* Scan the ring for the best match: live, epoch <= caller_epoch,
+     * maximum epoch value.  MARCH_MAX_LIVE_VERSIONS iterations, no lock. */
     int    best_idx   = -1;
     uint32_t best_ep = 0;
+    uint32_t cur = atomic_load_explicit(&s->current, memory_order_acquire);
     for (uint32_t i = 0; i < MARCH_MAX_LIVE_VERSIONS; i++) {
         /* Acquire-load `live`: same publication gate as march_dispatch_enter, so
            a slot's epoch/fn_ptr are only read once the publishing release-store
            of `live` is visible. */
         if (!atomic_load_explicit(&s->ring[i].live, memory_order_acquire)) continue;
         uint32_t ep = atomic_load_explicit(&s->ring[i].epoch, memory_order_relaxed);
-        if (ep <= caller_epoch && (best_idx < 0 || ep > best_ep)) {
+        /* Equal epochs (epoch-less publishes all carry 0): the current
+           version wins, so an epoch-less redeploy behaves as it always did. */
+        if (ep <= caller_epoch
+                && (best_idx < 0 || ep > best_ep || (ep == best_ep && i == cur))) {
             best_idx = (int)i;
             best_ep  = ep;
         }
@@ -485,4 +608,142 @@ void *march_dispatch_enter_gen(uint32_t name_id, uint32_t caller_epoch,
     }
     if (out_version) *out_version = v;
     return s->ring[v].fn_ptr;
+}
+
+
+/* ── The unified epoch model (see march_dispatch.h) ─────────────────────── */
+
+/* Entry word: epoch in the high 32 bits, pinned-unit count in the low 32.
+ * One atomic word per entry, so "is this entry still epoch E" and "take a
+ * pin" are a single CAS. */
+static inline uint32_t pin_epoch(uint64_t w) { return (uint32_t)(w >> 32); }
+static inline uint32_t pin_count(uint64_t w) { return (uint32_t)w; }
+static inline uint64_t pin_word(uint32_t e, uint32_t c) {
+    return ((uint64_t)e << 32) | (uint64_t)c;
+}
+
+static _Atomic(uint64_t) g_epoch_pins[MARCH_EPOCH_PIN_SLOTS] = {
+    ((uint64_t)MARCH_EPOCH_BASE << 32) | 1u    /* the current role's pin */
+};
+static _Atomic(uint32_t) g_current_epoch = MARCH_EPOCH_BASE;
+
+uint32_t march_epoch_current(void) {
+    return atomic_load_explicit(&g_current_epoch, memory_order_acquire);
+}
+
+uint32_t march_epoch_next(uint32_t requested) {
+    uint32_t cur = march_epoch_current();
+    return requested > cur ? requested : cur + 1;
+}
+
+int march_epoch_pin(uint32_t epoch) {
+    if (!epoch) return -1;
+    for (int i = 0; i < MARCH_EPOCH_PIN_SLOTS; i++) {
+        uint64_t w = atomic_load_explicit(&g_epoch_pins[i], memory_order_acquire);
+        while (pin_epoch(w) == epoch && pin_count(w) > 0) {
+            if (atomic_compare_exchange_weak_explicit(
+                    &g_epoch_pins[i], &w, w + 1,
+                    memory_order_seq_cst, memory_order_acquire))
+                return 0;
+        }
+    }
+    return -1;
+}
+
+void march_epoch_unpin(uint32_t epoch) {
+    if (!epoch) return;
+    for (int i = 0; i < MARCH_EPOCH_PIN_SLOTS; i++) {
+        uint64_t w = atomic_load_explicit(&g_epoch_pins[i], memory_order_acquire);
+        while (pin_epoch(w) == epoch && pin_count(w) > 0) {
+            if (atomic_compare_exchange_weak_explicit(
+                    &g_epoch_pins[i], &w, w - 1,
+                    memory_order_seq_cst, memory_order_acquire))
+                return;
+        }
+    }
+    fprintf(stderr, "march: epoch %u unpinned more times than pinned\n", epoch);
+}
+
+int64_t march_epoch_pins(uint32_t epoch) {
+    for (int i = 0; i < MARCH_EPOCH_PIN_SLOTS; i++) {
+        uint64_t w = atomic_load_explicit(&g_epoch_pins[i], memory_order_acquire);
+        if (pin_epoch(w) == epoch && pin_count(w) > 0) return pin_count(w);
+    }
+    return 0;
+}
+
+int march_epoch_reserve(uint32_t epoch) {
+    if (!epoch) return -1;
+    for (int i = 0; i < MARCH_EPOCH_PIN_SLOTS; i++) {
+        uint64_t w = atomic_load_explicit(&g_epoch_pins[i], memory_order_acquire);
+        /* count 0: no holder, so no march_epoch_pin can race this CAS into a
+           win (it requires count > 0). */
+        if (pin_count(w) == 0
+                && atomic_compare_exchange_strong_explicit(
+                       &g_epoch_pins[i], &w, pin_word(epoch, 1),
+                       memory_order_seq_cst, memory_order_acquire))
+            return 0;
+    }
+    return -1;
+}
+
+void march_epoch_advance(uint32_t epoch) {
+    uint32_t old = atomic_exchange_explicit(&g_current_epoch, epoch,
+                                            memory_order_seq_cst);
+    if (old != epoch) march_epoch_unpin(old);
+}
+
+int march_epoch_pin_table(uint32_t *epochs, int64_t *counts, int max) {
+    int n = 0;
+    for (int i = 0; i < MARCH_EPOCH_PIN_SLOTS && n < max; i++) {
+        uint64_t w = atomic_load_explicit(&g_epoch_pins[i], memory_order_acquire);
+        if (pin_count(w) == 0) continue;
+        epochs[n] = pin_epoch(w);
+        counts[n] = pin_count(w);
+        n++;
+    }
+    return n;
+}
+
+int march_epoch_pinned_in(uint32_t lo, uint32_t hi) {
+    for (int i = 0; i < MARCH_EPOCH_PIN_SLOTS; i++) {
+        uint64_t w = atomic_load_explicit(&g_epoch_pins[i], memory_order_seq_cst);
+        if (pin_count(w) == 0) continue;
+        uint32_t e = pin_epoch(w);
+        if (e >= lo && (hi == UINT32_MAX || e < hi)) return 1;
+    }
+    return 0;
+}
+
+void march_epoch_reset_for_test(void) {
+    for (int i = 0; i < MARCH_EPOCH_PIN_SLOTS; i++)
+        atomic_store_explicit(&g_epoch_pins[i], 0, memory_order_seq_cst);
+    atomic_store_explicit(&g_epoch_pins[0], pin_word(MARCH_EPOCH_BASE, 1),
+                          memory_order_seq_cst);
+    atomic_store_explicit(&g_current_epoch, MARCH_EPOCH_BASE,
+                          memory_order_seq_cst);
+}
+
+/* The running proc's code epoch.  The STRONG definition is in
+ * march_scheduler.c; this WEAK one (0 = no proc, follow current) lets the
+ * dispatch table link on its own (test/test_dispatch.c) -- the same weak
+ * discipline as march_signal_drain in march_scheduler.c. */
+__attribute__((weak)) uint32_t march_sched_current_epoch(void) { return 0; }
+
+void *march_dispatch_enter_unit(uint32_t name_id, uint32_t *out_version) {
+    return march_dispatch_enter_gen(name_id, march_sched_current_epoch(),
+                                    out_version);
+}
+
+void march_dispatch_set_msg_schema_epoch(uint32_t name_id, uint32_t epoch) {
+    if (name_id >= n_slots_relaxed()) return;
+    atomic_store_explicit(&slots_relaxed()[name_id].msg_schema_epoch, epoch,
+                          memory_order_release);
+}
+
+uint32_t march_dispatch_msg_schema_epoch(uint32_t name_id) {
+    if (name_id >= atomic_load_explicit(&g_n_slots, memory_order_acquire)) return 0;
+    MarchDispatchSlot *slots = atomic_load_explicit(&g_slots, memory_order_acquire);
+    return atomic_load_explicit(&slots[name_id].msg_schema_epoch,
+                                memory_order_acquire);
 }

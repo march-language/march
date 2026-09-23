@@ -1093,6 +1093,7 @@ type preamble_item =
 let runtime_only_declares : (string * string) list = [
   ("march_dispatch_enter", "declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)");
   ("march_dispatch_enter_gen", "declare ptr  @march_dispatch_enter_gen(i32 %name_id, i32 %caller_epoch, ptr %out_version)");
+  ("march_dispatch_enter_unit", "declare ptr  @march_dispatch_enter_unit(i32 %name_id, ptr %out_version)");
   ("march_dispatch_leave", "declare void @march_dispatch_leave(i32 %name_id, i32 %version)");
   ("march_dispatch_publish", "declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind)");
   ("march_dispatch_publish_epoch", "declare i32  @march_dispatch_publish_epoch(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind, i32 %epoch)");
@@ -1206,6 +1207,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PComment "; Hot Code Reload versioned dispatch (runtime/march_dispatch.c)";
   PDeclare "march_dispatch_enter";
   PDeclare "march_dispatch_enter_gen";
+  PDeclare "march_dispatch_enter_unit";
   PDeclare "march_dispatch_leave";
   PDeclare "march_dispatch_publish";
   PDeclare "march_dispatch_publish_epoch";
