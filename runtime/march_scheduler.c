@@ -1010,11 +1010,29 @@ static inline void mbox_lock_release(march_proc *p) {
 
 /* ── Mailbox helpers (FIFO) ──────────────────────────────────────────── */
 
+uint32_t march_epoch_current(void);   /* march_dispatch.c (weak fallback below) */
+
+/* D29: the stamp a message sent from here carries -- the sending proc's code
+ * epoch, or the current epoch when the sender is unpinned (main) or not a
+ * proc at all (the event loop, a foreign thread). */
+_Atomic(uint32_t) march_sched_test_stamp = 0;
+
+uint32_t march_sched_send_epoch(void) {
+    uint32_t forced = atomic_load_explicit(&march_sched_test_stamp,
+                                           memory_order_relaxed);
+    if (forced) return forced;
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    uint32_t e = p ? atomic_load_explicit(&p->code_epoch, memory_order_relaxed) : 0;
+    return e ? e : march_epoch_current();
+}
+
 static march_mbox_node *mbox_node_new(void *msg) {
     march_mbox_node *node = malloc(sizeof(march_mbox_node));
     if (!node) { fputs("march_sched: OOM (mbox node)\n", stderr); abort(); }
     node->msg = msg;
     node->next = NULL;
+    node->epoch = march_sched_send_epoch();
+    node->marker = 0;
     return node;
 }
 
@@ -1035,30 +1053,66 @@ static void mbox_push_node(march_proc *p, march_mbox_node *node,
                                   memory_order_relaxed);
 }
 
-static void *mbox_pop_queue(march_proc *p, march_mbox_node **head,
-                            march_mbox_node **tail, int is_control) {
-    march_mbox_node *node = *head;
-    if (!node) return NULL;
-    void *msg = node->msg;
-    *head = node->next;
-    if (!*head) *tail = NULL;
+/* Unlink [node] (whose predecessor is [prev], NULL for the head) from a
+ * queue, fix the counts, and return it; the caller frees it. */
+static march_mbox_node *mbox_unlink(march_proc *p, march_mbox_node **head,
+                                    march_mbox_node **tail,
+                                    march_mbox_node *prev,
+                                    march_mbox_node *node, int is_control) {
+    if (prev) prev->next = node->next; else *head = node->next;
+    if (*tail == node) *tail = prev;
+    node->next = NULL;
     atomic_fetch_sub_explicit(&p->mbox_count, 1, memory_order_relaxed);
-    if (!is_control)
+    if (!is_control) {
         atomic_fetch_sub_explicit(&p->user_mbox_count, 1,
                                   memory_order_relaxed);
+        if (node->marker) p->mbox_markers--;
+    }
+    return node;
+}
+
+/* The first user-mailbox node a receive can see: markers are skipped, since
+ * only the actor loop consumes them.  NULL = no visible user message (a NULL
+ * msg is a legitimate message value, so emptiness is always decided on the
+ * node, never on the payload). */
+static march_mbox_node *mbox_user_visible(march_proc *p,
+                                          march_mbox_node **prev_out) {
+    march_mbox_node *prev = NULL, *n = p->mailbox;
+    if (p->mbox_markers)
+        while (n && n->marker) { prev = n; n = n->next; }
+    if (prev_out) *prev_out = prev;
+    return n;
+}
+
+static void *mbox_take_node_msg(march_proc *p, march_mbox_node *node) {
+    void *msg = node->msg;
+    p->last_recv_epoch = node->epoch;
     free(node);
     return msg;
 }
 
+static void *mbox_pop_queue(march_proc *p, march_mbox_node **head,
+                            march_mbox_node **tail, int is_control) {
+    march_mbox_node *node = *head;
+    if (!node) return NULL;
+    return mbox_take_node_msg(p, mbox_unlink(p, head, tail, NULL, node,
+                                             is_control));
+}
+
+/* Pop the oldest VISIBLE user message (markers stay queued, in place). */
 static void *mbox_pop_user(march_proc *p) {
-    return mbox_pop_queue(p, &p->mailbox, &p->mbox_tail, 0);
+    march_mbox_node *prev;
+    march_mbox_node *node = mbox_user_visible(p, &prev);
+    if (!node) return NULL;
+    return mbox_take_node_msg(p, mbox_unlink(p, &p->mailbox, &p->mbox_tail,
+                                             prev, node, 0));
 }
 
 static void *mbox_pop_any(march_proc *p) {
+    march_mbox_node *uh = mbox_user_visible(p, NULL);
     if (p->control_mailbox
-            && (!p->mailbox
-                || p->control_mailbox->enqueue_seq
-                     < p->mailbox->enqueue_seq))
+            && (!uh
+                || p->control_mailbox->enqueue_seq < uh->enqueue_seq))
         return mbox_pop_queue(p, &p->control_mailbox,
                               &p->control_mbox_tail, 1);
     return mbox_pop_user(p);
@@ -1068,13 +1122,27 @@ static void *mbox_pop_any(march_proc *p) {
  * USER message is popped, its enqueue_seq is written there so the message can
  * later be put back exactly where it was (march_sched_requeue_user_front). */
 static void *mbox_pop_for_recv(march_proc *p, int user_only, uint64_t *seq_out) {
-    if (seq_out && user_only && p->mailbox)
-        *seq_out = p->mailbox->enqueue_seq;
+    if (seq_out && user_only) {
+        march_mbox_node *uh = mbox_user_visible(p, NULL);
+        if (uh) *seq_out = uh->enqueue_seq;
+    }
     return user_only ? mbox_pop_user(p) : mbox_pop_any(p);
+}
+
+/* A receive has something to pop (see mbox_user_visible). */
+static int mbox_recv_ready(march_proc *p, int user_only) {
+    return mbox_user_visible(p, NULL) != NULL
+        || (!user_only && p->control_mailbox != NULL);
 }
 
 static int64_t mbox_user_count(march_proc *p) {
     return atomic_load_explicit(&p->user_mbox_count, memory_order_relaxed);
+}
+
+/* User MESSAGES (markers excluded): what mbox_limit and the BLOCK low-water
+ * mark are about.  Under mbox_lock. */
+static int64_t mbox_user_msgs(march_proc *p) {
+    return mbox_user_count(p) - p->mbox_markers;
 }
 
 static int mbox_waiting_has_deliverable(march_proc *p) {
@@ -1088,6 +1156,13 @@ static int mbox_waiting_has_deliverable(march_proc *p) {
  * down, alongside march_sched_set_msg_dtor) is needed by sched_loop's
  * PROC_DEAD reap branch, which appears earlier in this file. */
 static void march_mbox_dispose(void *msg);
+static void (*g_marker_dispose)(void *, uint32_t) = NULL;
+void march_sched_set_marker_dtor(void (*fn)(void *msg, uint32_t epoch)) {
+    g_marker_dispose = fn;
+}
+static void march_marker_dispose(void *msg, uint32_t epoch) {
+    if (g_marker_dispose) g_marker_dispose(msg, epoch);
+}
 
 /* ── Task 8: MARCH_MBOX_BLOCK sender-parking helpers ────────────────────
  *
@@ -1154,7 +1229,7 @@ static void march_mbox_dispose(void *msg);
 static void mbox_wake_send_waiters_if_low(march_proc *p) {
     if (!p->mbox_send_waiters
             || !(p->mbox_limit == 0
-                 || mbox_user_count(p) <= p->mbox_limit / 2))
+                 || mbox_user_msgs(p) <= p->mbox_limit / 2))
         return;
     march_proc *w = p->mbox_send_waiters;
     p->mbox_send_waiters = NULL;
@@ -1454,8 +1529,39 @@ void march_sched_init(void) {
 
 int march_sched_num_schedulers(void) { return g_num_scheds; }
 
+/* The epoch pin table lives in march_dispatch.c (its reclaim condition reads
+ * it).  These WEAK fallbacks let the standalone scheduler tests, which link
+ * march_scheduler.c without the dispatch table, resolve the symbols: with no
+ * dispatch table there is nothing to pin (same discipline as
+ * march_signal_drain below). */
+__attribute__((weak)) uint32_t march_epoch_current(void) { return 1; }
+__attribute__((weak)) int      march_epoch_pin(uint32_t e) { (void)e; return 0; }
+__attribute__((weak)) void     march_epoch_unpin(uint32_t e) { (void)e; }
+
+uint32_t march_sched_current_epoch(void) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    return p ? atomic_load_explicit(&p->code_epoch, memory_order_relaxed) : 0;
+}
+
+/* The epoch a new proc runs at: its spawner's (II.4.3: a task spawned by an
+ * old handler runs old code), else the current one; with one pin taken on
+ * it.  The spawner holds a pin on its own epoch, so that pin cannot fail; the
+ * current epoch holds its role pin, so a failure there only means an
+ * activation advanced it between the load and the pin -- reload and retry. */
+static uint32_t spawn_code_epoch(int from_parent) {
+    march_proc *parent = (from_parent && tl_sched) ? tl_sched->current : NULL;
+    uint32_t pe = parent
+        ? atomic_load_explicit(&parent->code_epoch, memory_order_relaxed) : 0;
+    if (pe && march_epoch_pin(pe) == 0) return pe;
+    for (;;) {
+        uint32_t e = march_epoch_current();
+        if (march_epoch_pin(e) == 0) return e;
+    }
+}
+
 static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
-                                      int is_daemon, int pinned) {
+                                      int is_daemon, int pinned,
+                                      int follow_current) {
     march_proc *p = (march_proc *)calloc(1, sizeof(march_proc));
     if (!p) {
         fputs("march_sched: out of memory (process alloc)\n", stderr);
@@ -1536,6 +1642,12 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
     int       arg_lo = (int)(uint32_t)(addr & 0xFFFFFFFFu);
     makecontext(p->ctx, (void (*)(void))proc_trampoline, 2, arg_hi, arg_lo);
 
+    /* After every failure return above: the pin is dropped only at the reap. */
+    /* follow_current: 1 = unpinned (main), 2 = the current epoch (a
+     * supervisor restart), 0 = inherit (everything else). */
+    atomic_init(&p->code_epoch,
+                follow_current == 1 ? 0u : spawn_code_epoch(follow_current == 0));
+
     registry_add(p);
     atomic_fetch_add_explicit(&g_live_procs, 1, memory_order_relaxed);
     if (!is_daemon)
@@ -1577,15 +1689,24 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
 }
 
 march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
-    return sched_spawn_common(fn, arg, 0, 0);
+    return sched_spawn_common(fn, arg, 0, 0, 0);
 }
 
 march_proc *march_sched_spawn_pinned(void (*fn)(void *), void *arg) {
-    return sched_spawn_common(fn, arg, 0, 1);
+    return sched_spawn_common(fn, arg, 0, 1, 0);
 }
 
 march_proc *march_sched_spawn_daemon(void (*fn)(void *), void *arg) {
-    return sched_spawn_common(fn, arg, 1, 0);
+    return sched_spawn_common(fn, arg, 1, 0, 0);
+}
+
+march_proc *march_sched_spawn_main(void (*fn)(void *), void *arg,
+                                   int sched_pinned) {
+    return sched_spawn_common(fn, arg, 0, sched_pinned, 1);
+}
+
+march_proc *march_sched_spawn_current(void (*fn)(void *), void *arg) {
+    return sched_spawn_common(fn, arg, 0, 0, 2);
 }
 
 /* ── Per-thread scheduler loop with work-stealing ────────────────────── */
@@ -1895,6 +2016,14 @@ static void sched_loop(march_scheduler *sched) {
             atomic_store_explicit(&p->status, PROC_WAITING, memory_order_release);
         } else if (st == PROC_DEAD) {
             registry_remove(p);
+            /* The epoch pin taken at spawn (or moved there by an advance):
+             * dropped exactly once, here.  The PROC_DEAD release store
+             * orders the proc's last code_epoch write before this read. */
+            {
+                uint32_t ce = atomic_load_explicit(&p->code_epoch,
+                                                   memory_order_relaxed);
+                if (ce) march_epoch_unpin(ce);
+            }
             atomic_fetch_sub_explicit(&g_live_procs, 1, memory_order_release);
             if (!p->is_daemon)
                 atomic_fetch_sub_explicit(&g_live_nondaemon, 1, memory_order_release);
@@ -1950,21 +2079,29 @@ static void sched_loop(march_scheduler *sched) {
              * of the proc's stack mapping, so the two have no ordering
              * dependency on each other. */
             {
-                struct march_drain_node { void *msg; struct march_drain_node *next; };
-                struct march_drain_node *drained = NULL;
+                /* Raw node pops (markers included): an epoch marker is
+                 * disposed through the marker dtor, which gives back the
+                 * epoch pin it holds; everything else through the message
+                 * dtor. */
+                march_mbox_node *drained = NULL;
                 mbox_lock_acquire(p);
                 while (p->control_mailbox || p->mailbox) {
-                    void *m = mbox_pop_any(p);
-                    struct march_drain_node *dn = malloc(sizeof(*dn));
-                    if (!dn) { fputs("march_sched: OOM (mbox drain)\n", stderr); abort(); }
-                    dn->msg = m;
+                    int ctl = p->control_mailbox != NULL;
+                    march_mbox_node *dn = ctl
+                        ? mbox_unlink(p, &p->control_mailbox,
+                                      &p->control_mbox_tail, NULL,
+                                      p->control_mailbox, 1)
+                        : mbox_unlink(p, &p->mailbox, &p->mbox_tail, NULL,
+                                      p->mailbox, 0);
                     dn->next = drained;
                     drained = dn;
                 }
                 mbox_lock_release(p);
                 while (drained) {
-                    struct march_drain_node *next = drained->next;
-                    march_mbox_dispose(drained->msg);
+                    march_mbox_node *next = drained->next;
+                    if (drained->marker) march_marker_dispose(drained->msg,
+                                                              drained->epoch);
+                    else march_mbox_dispose(drained->msg);
                     free(drained);
                     drained = next;
                 }
@@ -2668,7 +2805,7 @@ int march_sched_send(march_proc *target, void *msg) {
         }
         mbox_lock_acquire(target);
         if (target->mbox_limit > 0
-                && mbox_user_count(target) >= target->mbox_limit) {
+                && mbox_user_msgs(target) >= target->mbox_limit) {
             switch (target->mbox_policy) {
             case MARCH_MBOX_DROP_NEW:
                 mbox_lock_release(target);
@@ -2842,6 +2979,124 @@ int march_sched_send_control(march_proc *target, void *msg) {
     return MARCH_SEND_OK;
 }
 
+static void mbox_recv_park_once(march_proc *p);   /* defined below */
+
+int march_sched_send_marker(march_proc *target, void *msg, uint32_t epoch) {
+    march_mbox_node *node = mbox_node_new(msg);
+    node->epoch = epoch;
+    node->marker = 1;
+    if (!target
+            || atomic_load_explicit(&target->status,
+                                    memory_order_acquire) == PROC_DEAD) {
+        free(node);
+        return MARCH_SEND_DEAD;
+    }
+    mbox_lock_acquire(target);
+    /* The reap-vs-push recheck, as in march_sched_send. */
+    if (atomic_load_explicit(&target->status,
+                             memory_order_acquire) == PROC_DEAD) {
+        mbox_lock_release(target);
+        free(node);
+        return MARCH_SEND_DEAD;
+    }
+    /* No overflow policy: a marker is never dropped, evicted, or made to
+     * wait (the activation that sends it must not block on a full
+     * mailbox), and it does not count against mbox_limit. */
+    mbox_push_node(target, node, 0);
+    target->mbox_markers++;
+    march_proc_status st = atomic_load_explicit(&target->status,
+                                                memory_order_acquire);
+    int wait_mode = atomic_load_explicit(&target->mbox_wait_mode,
+                                         memory_order_relaxed);
+    mbox_lock_release(target);
+    /* Only the actor loop (wait mode 2) consumes markers; a nested receive
+     * would wake, see nothing it can take, and park again. */
+    if ((st == PROC_WAITING || st == PROC_PARKED) && wait_mode == 2)
+        march_sched_wake(target);
+    return MARCH_SEND_OK;
+}
+
+/* The actor loop's receive: march_sched_recv_mode(user_only) semantics, but
+ * the head node is taken even when it is a marker. */
+__attribute__((noinline))
+void *march_sched_recv_actor(uint32_t *epoch_out, int *marker_out) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    if (!p) return MARCH_RECV_NO_MSG;
+    for (;;) {
+        mbox_lock_acquire(p);
+        if (p->mailbox != NULL) {
+            march_mbox_node *node = mbox_unlink(p, &p->mailbox, &p->mbox_tail,
+                                                NULL, p->mailbox, 0);
+            mbox_wake_send_waiters_if_low(p);
+            atomic_store_explicit(&p->mbox_wait_mode, 0, memory_order_relaxed);
+            mbox_lock_release(p);
+            if (epoch_out) *epoch_out = node->epoch;
+            if (marker_out) *marker_out = node->marker;
+            void *msg = node->msg;
+            free(node);
+            return msg;
+        }
+        if (atomic_load_explicit(&p->stop_requested, memory_order_acquire)
+                || atomic_load_explicit(&p->status, memory_order_acquire) == PROC_DEAD) {
+            atomic_store_explicit(&p->mbox_wait_mode, 0, memory_order_relaxed);
+            mbox_lock_release(p);
+            return MARCH_RECV_NO_MSG;
+        }
+        atomic_store_explicit(&p->mbox_wait_mode, 2, memory_order_relaxed);
+        atomic_store_explicit(&p->status, PROC_PARKED, memory_order_release);
+        mbox_lock_release(p);
+        mbox_recv_park_once(p);
+        atomic_store_explicit(&p->mbox_wait_mode, 0, memory_order_relaxed);
+    }
+}
+
+int march_sched_take_markers(uint32_t upto, void **msgs, uint32_t *epochs,
+                             int max) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    if (!p || max <= 0) return 0;
+    int n = 0;
+    mbox_lock_acquire(p);
+    march_mbox_node *prev = NULL, *node = p->mailbox;
+    while (node && p->mbox_markers && n < max) {
+        march_mbox_node *next = node->next;
+        if (node->marker && node->epoch <= upto) {
+            mbox_unlink(p, &p->mailbox, &p->mbox_tail, prev, node, 0);
+            msgs[n] = node->msg;
+            epochs[n] = node->epoch;
+            n++;
+            free(node);
+        } else {
+            prev = node;
+        }
+        node = next;
+    }
+    mbox_lock_release(p);
+    return n;
+}
+
+int64_t march_sched_stop_epoch(uint32_t upto) {
+    int64_t n = 0;
+    pthread_mutex_lock(&g_registry_mu);
+    march_registry *r = atomic_load_explicit(&g_registry, memory_order_relaxed);
+    for (int64_t i = 0; r && i < r->cap; i++) {
+        march_proc *p = atomic_load_explicit(&r->slots[i], memory_order_acquire);
+        if (!p || p->actor) continue;
+        uint32_t ce = atomic_load_explicit(&p->code_epoch, memory_order_relaxed);
+        if (!ce || ce > upto) continue;
+        if (atomic_load_explicit(&p->status, memory_order_acquire) == PROC_DEAD)
+            continue;
+        march_sched_request_stop(p);
+        n++;
+    }
+    pthread_mutex_unlock(&g_registry_mu);
+    return n;
+}
+
+uint32_t march_sched_last_recv_epoch(void) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    return p ? p->last_recv_epoch : 0;
+}
+
 int64_t march_sched_mbox_count(march_proc *p) {
     if (!p) return 0;
     return atomic_load_explicit(&p->mbox_count, memory_order_relaxed);
@@ -2937,8 +3192,7 @@ static void *march_sched_recv_mode(int user_only, uint64_t *seq_out) {
      * reads it and wakes us). */
     for (;;) {
         mbox_lock_acquire(p);
-        if (user_only ? p->mailbox != NULL
-                      : (p->control_mailbox != NULL || p->mailbox != NULL)) {
+        if (mbox_recv_ready(p, user_only)) {
             void *msg = mbox_pop_for_recv(p, user_only, seq_out);
             mbox_wake_send_waiters_if_low(p);
             atomic_store_explicit(&p->mbox_wait_mode, 0, memory_order_relaxed);
@@ -2987,7 +3241,7 @@ void *march_sched_try_recv(void) {
     if (!p) return NULL;
     mbox_lock_acquire(p);
     void *msg = NULL;
-    if (p->control_mailbox || p->mailbox) {
+    if (mbox_recv_ready(p, 0)) {
         msg = mbox_pop_any(p);
         mbox_wake_send_waiters_if_low(p);
     }
@@ -2999,7 +3253,7 @@ int march_sched_try_recv2(void **out) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return 0;
     mbox_lock_acquire(p);
-    if (!p->control_mailbox && !p->mailbox) { /* node existence, not msg value */
+    if (!mbox_recv_ready(p, 0)) { /* node existence, not msg value */
         mbox_lock_release(p);
         return 0;
     }
@@ -3418,8 +3672,7 @@ static void *march_sched_recv_until_mode(int64_t deadline_ms, int user_only,
      * that window: march_sched_send cannot observe PROC_RUNNING while
      * mbox_push has already happened but our PROC_PARKED store has not. */
     mbox_lock_acquire(p);
-    if (user_only ? p->mailbox != NULL
-                  : (p->control_mailbox != NULL || p->mailbox != NULL)) {
+    if (mbox_recv_ready(p, user_only)) {
         void *msg = mbox_pop_for_recv(p, user_only, seq_out);
         mbox_wake_send_waiters_if_low(p);
         mbox_lock_release(p);
@@ -3478,8 +3731,7 @@ static void *march_sched_recv_until_mode(int64_t deadline_ms, int user_only,
     mbox_lock_acquire(p);
     atomic_store_explicit(&p->mbox_wait_mode, 0, memory_order_relaxed);
     void *msg;
-    if (user_only ? p->mailbox != NULL
-                  : (p->control_mailbox != NULL || p->mailbox != NULL)) {
+    if (mbox_recv_ready(p, user_only)) {
         msg = mbox_pop_for_recv(p, user_only, seq_out);
         mbox_wake_send_waiters_if_low(p);
     } else {
@@ -3518,12 +3770,20 @@ void *march_sched_recv_user_until_seq(int64_t deadline_ms, uint64_t *seq_out) {
  * limit is not enforced: these messages were already admitted once. */
 void march_sched_requeue_user_front(void *const *msgs, const uint64_t *seqs,
                                     int64_t n) {
+    march_sched_requeue_user_front_epochs(msgs, seqs, NULL, n);
+}
+
+void march_sched_requeue_user_front_epochs(void *const *msgs,
+                                           const uint64_t *seqs,
+                                           const uint32_t *epochs,
+                                           int64_t n) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p || n <= 0) return;
     march_mbox_node *first = NULL, *last = NULL;
     for (int64_t i = 0; i < n; i++) {
         march_mbox_node *node = mbox_node_new(msgs[i]);
         node->enqueue_seq = seqs[i];
+        if (epochs) node->epoch = epochs[i];
         if (last) last->next = node; else first = node;
         last = node;
     }
