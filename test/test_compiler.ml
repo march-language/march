@@ -6143,6 +6143,36 @@ let test_qualified_opaque_type_evals () =
   let v = call_fn env "main" [] in
   Alcotest.(check string) "qualified opaque round-trip evaluates to \"hi\"" "hi" (vstr v)
 
+(* Regression: a BUILTIN typed with a qualified type name must unify with the
+   bare constructors, exactly as a written `Token.Token` annotation does above.
+   `csv_next_row` is typed `Int -> Csv.CsvRow` in the builtin table (the TIR
+   needs the qualified spelling to find the niche-shaped typedef), but builtin
+   signatures are hand-built types that never pass through [surface_ty]'s
+   qualified->bare canonicalization, so matching the call against `CsvEof` /
+   `Row` failed in both directions ("expected `CsvRow` but got `Csv.CsvRow`"
+   and its mirror).  stdlib/csv.march carried 12 such hidden errors.  The
+   module here declares its own bare `CsvRow`; canonicalization keys on the
+   bare suffix, the same rule [surface_ty] applies. *)
+let test_qualified_builtin_type_unifies_bare () =
+  let ctx = typecheck {|mod CsvDemo do
+    needs IO.FileRead
+    type CsvRow = CsvEof | Row(List(String))
+
+    fn count(handle : Int, n : Int) : Int do
+      match csv_next_row(handle) do
+      CsvEof -> n
+      Row(_) -> count(handle, n + 1)
+      end
+    end
+
+    fn first(handle : Int) : CsvRow do
+      csv_next_row(handle)
+    end
+  end|} in
+  Alcotest.(check bool)
+    "builtin returning `Csv.CsvRow` unifies with bare `CsvRow`: no errors"
+    false (has_errors ctx)
+
 (* F5: linear let binding — used exactly once is ok *)
 let test_linear_let_ok () =
   let ctx = typecheck {|mod Test do
@@ -14681,7 +14711,6 @@ let stdlib_known_internal_errors = [
   "aho_corasick.march", 11;
   "cluster_node.march", 1;
   "compress.march", 19;
-  "csv.march", 12;
   "logger.march", 1;
   "node_call.march", 5;
   "plot.march", 1;
@@ -16810,6 +16839,7 @@ let compiler_suites =
           Alcotest.test_case "cross-module public fn accepted"   `Quick test_cross_module_public_fn_accepted;
           (* Regression: qualified type path `Mod.Type` ≡ bare `Type` *)
           Alcotest.test_case "qualified opaque type unifies with bare" `Quick test_qualified_opaque_type_unifies_bare;
+          Alcotest.test_case "qualified builtin type unifies bare" `Quick test_qualified_builtin_type_unifies_bare;
           Alcotest.test_case "qualified opaque type evaluates"         `Quick test_qualified_opaque_type_evals;
           (* F5: linear let bindings *)
           Alcotest.test_case "linear let ok"                 `Quick test_linear_let_ok;
