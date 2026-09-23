@@ -7,7 +7,10 @@ done: G5 (`Project.entry`), G6 (`forge/lib/procs.ml`).
 - Prerequisites: a ClusterNode loopback link (`queue_for(h, own_id)`), `initiate` no
   longer excluding its own node, prefer-local `candidates`; the `Entry` state alias;
   parameterised actor `init` (D24) through parser, typecheck, lowering, supervised
-  child specs (`march_actor_register_child` gains an `init_arg`) and the interpreter.
+  child specs and the interpreter — **landed 2026-09-22**
+  (`specs/progress/2026-09-22-parameterised-actor-init-d24.md`; the child's init
+  arguments ride in the respawn closure the runtime already holds, so
+  `march_actor_register_child` did not need an `init_arg` parameter).
 - `[roles]` in the topology (functions and actors, D23); `lib/desugar/desugar_topology.ml`
   generating `main` from `--topology .forge/topology.json` (forge pre-digests the TOML);
   `stdlib/topology.march` (`place`, `drain_on_signal`, `supervise`); hook timeout

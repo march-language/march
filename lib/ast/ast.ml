@@ -70,7 +70,10 @@ type expr =
   | EHole of name option * span            (** Typed hole: ?name or ? *)
   | EAtom of string * expr list * span     (** Atom expression: :ok(x), :error *)
   | ESend of expr * expr * span            (** send(cap, msg) *)
-  | ESpawn of expr * span                  (** spawn(Actor) *)
+  | ESpawn of expr * span                  (** spawn(Actor) / spawn(Actor, a, b): the
+                                               inner expr is [ECon (Actor, init_args, _)];
+                                               the ctor's args are the actor's `init`
+                                               arguments (D24), NOT a variant payload *)
   | EResultRef of int option               (** REPL magic: v or v(N) — last/Nth result *)
   | EDbg of expr option * span
       (** Debugger: dbg() pauses unconditionally; dbg(bool_expr) pauses when true;
@@ -324,6 +327,10 @@ and shutdown_spec =
 and supervise_field = {
   sf_name     : name;
   sf_ty       : ty;
+  sf_init_args : expr list;
+  (** `Child name(e1, e2)`: the child's `init` arguments (D24), evaluated once
+      in the supervisor's spawn glue (where the supervisor's own `init`
+      params are in scope) and re-supplied verbatim on every respawn. *)
   sf_restart  : restart_type;   (** [Permanent] when the modifier is omitted *)
   sf_shutdown : shutdown_spec;  (** [default_shutdown] when the modifier is omitted *)
 }
@@ -354,6 +361,9 @@ and supervise_config = {
 
 and actor_def = {
   actor_state    : field list;
+  actor_init_params : param list;
+  (** `init(env : T, …) { … }` (D24): parameters supplied at `spawn(A, …)`,
+      in scope in [actor_init] only.  [] for the bare `init { … }` form. *)
   actor_init     : expr;
   actor_handlers : actor_handler list;
   actor_supervise : supervise_config option;   (** Some = supervisor actor *)

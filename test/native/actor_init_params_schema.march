@@ -1,0 +1,20 @@
+mod SchemaProbe do
+  -- D24 + state migration: an actor whose init takes parameters still has
+  -- its state schema written to <patch>.schemas.json (the params are not
+  -- state and must not appear there), and --check-migration still runs over
+  -- the module.  Exercised by the actor_init_params_schema rule in test/dune.
+  actor Counter do
+    state { value : Int, label : String }
+    init(start : Int, label : String) { value: start, label: label }
+    on Inc(n : Int) do { state with value: state.value + n } end
+  end
+
+  fn counter_migrate_state(old : { value : Int, label : String }) : { value : Int, label : String } do
+    old
+  end
+
+  fn main() do
+    let _c = spawn(Counter, 1, "x")
+    ()
+  end
+end

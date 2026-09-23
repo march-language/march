@@ -61,8 +61,41 @@ The `supervise` block:
 - `max_restarts N within S`: if more than N restarts occur in S seconds, the supervisor itself crashes (escalates to its own supervisor)
 - `backoff base <ms> cap <ms> jitter <n>%` (optional): tunes the delay between repeated restarts of the same child — see [Restart backoff](#restart-backoff)
 - Each line `ActorName field_name`: a child to supervise, with `field_name` being the state field that stores its current `Pid`, optionally followed by `restart <type>` (see [Restart types](#restart-types)) and/or `shutdown <ms> | infinity | brutal` (see [Stopping a tree](#stopping-a-tree))
+- `ActorName field_name(arg, ...)`: the same, for a child whose `init` takes parameters (see [Parameterised `init`](actors.md#parameterised-init)). The arguments are evaluated once, when the supervisor spawns, and may use the supervisor's own `init` parameters.
 
 When the supervisor starts (via `spawn(AppSupervisor)`), it automatically spawns all listed children.
+
+### Children with `init` arguments
+
+```march
+actor Worker do
+  state { db : Pid(Db), count : Int }
+  init(db : Pid(Db)) { db: db, count: 0 }
+  ...
+end
+
+actor Pool do
+  state { w : Int, db : Pid(Db) }
+  init(db : Pid(Db)) { w: 0, db: db }
+
+  supervise do
+    strategy one_for_one
+    max_restarts 5 within 30
+    Worker w(db)          -- the child's init argument, from the supervisor's own
+  end
+end
+
+let pool = spawn(Pool, spawn(Db))
+```
+
+The argument list is checked against the child's `init` signature exactly as
+`spawn(Worker, db)` would be. A restart of the child **re-supplies the same
+values** the first spawn received: the supervisor keeps the evaluated arguments
+beside the child's slot (compiled, as the environment of the respawn closure it
+registers with the runtime; interpreted, on the child's instance), so a
+replacement never re-evaluates the expression and never starts without its
+argument. Everything else about the replacement is as for any restart: fresh
+state from `init`, a new `Pid`, the old capabilities stale.
 
 ---
 

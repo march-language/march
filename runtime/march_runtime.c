@@ -2028,7 +2028,12 @@ typedef struct {
      * $d_dispatch is stored/consumed for actors, and how do_actor_death's
      * cleanup callbacks are invoked), never a raw C function pointer.
      * march_respawn_child unwraps it the same way. Called fresh on every
-     * restart. */
+     * restart.  For a child declared with `init` arguments (`Worker w(e)`,
+     * D24) the compiler passes a CAPTURING closure instead of the static
+     * reference: its environment holds the evaluated arguments, so every
+     * restart re-supplies the values the first spawn got.  Ownership of the
+     * cell transfers to this slot at registration (see
+     * march_actor_register_child); nothing here ever frees it. */
     void *spawn_clo;
     int64_t word_idx;         /* position among this supervisor's alphabetically-sorted
                                   state fields; this child's Int-encoded pid lives at
@@ -3902,10 +3907,12 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
 
     /* spawn_clo is a March closure cell (offset-16 word = $clo_wrap function
      * pointer), NOT a raw C function pointer — see march_sup_child's field
-     * comment. <ActorName>_spawn is a zero-arg function, so its wrapper's
-     * only parameter is the closure cell itself (contrast the 2-arg
-     * cleanup-closure convention in do_actor_death, whose underlying
-     * function is Unit -> Unit). */
+     * comment. The cell is always a ZERO-ARG thunk — the static
+     * <ActorName>_spawn reference for a child without `init` arguments, or a
+     * lifted lambda that calls <ActorName>_spawn with the captured arguments
+     * (D24) — so its wrapper's only parameter is the closure cell itself
+     * (contrast the 2-arg cleanup-closure convention in do_actor_death, whose
+     * underlying function is Unit -> Unit). */
     typedef void *(*spawn_clo_fn_t)(void *);
     void **clo_fields = (void **)((char *)child->spawn_clo + 16);
     spawn_clo_fn_t fn_ptr = (spawn_clo_fn_t)(*clo_fields);
@@ -3914,9 +3921,10 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
      * the slot, so keep our reference: without the inc the first respawn
      * frees the cell and the second is a use-after-free.  For the static
      * <Actor>_spawn reference a non-capturing child passes, IS_HEAP_PTR
-     * makes this a no-op, exactly as the drop is.  (A --test build passes a
-     * heap closure here when the child is itself a supervisor whose spawn
-     * glue carries capabilities; see cap_passing.ml.) */
+     * makes this a no-op, exactly as the drop is.  (A heap closure arrives
+     * here when the child has `init` arguments — lower_actor.ml's respawn
+     * thunk, D24 — and in a --test build when the child is itself a
+     * supervisor whose spawn glue carries capabilities; see cap_passing.ml.) */
     march_incrc(child->spawn_clo);
     void *raw = fn_ptr(child->spawn_clo);
     void *new_child = march_spawn_supervised(raw);

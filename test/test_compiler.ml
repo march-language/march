@@ -4396,6 +4396,128 @@ let test_spawn_computed_actor_rejected () =
   Alcotest.(check bool)
     "diagnostic explains spawn needs a plain actor name" true explains_spawn
 
+
+(* ── Parameterised actor `init` (D24) ───────────────────────────────────
+   `init(env : T, …) { … }` takes parameters supplied at `spawn(A, …)`; a
+   supervise block's child spec `Child f(args)` supplies them for a child.
+   specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md, D24. *)
+let init_params_actor = {|
+    actor Counter do
+      state { value : Int, label : String }
+      init(start : Int, label : String) { value: start, label: label }
+      on Inc(n : Int) do { state with value: state.value + n } end
+    end
+    actor Plain do
+      state { v : Int }
+      init() { v: 0 }
+    end
+|}
+
+let diag_mentions ctx needle =
+  (* The message AND its notes: a [check_expr ~reason] renders its reason as a
+     note under the mismatch, not in the message line. *)
+  List.exists (fun d ->
+      let m = String.concat "\n" (d.March_errors.Errors.message :: d.March_errors.Errors.notes) in
+      try ignore (Str.search_forward (Str.regexp_string needle) m 0); true
+      with Not_found -> false)
+    (March_errors.Errors.sorted ctx)
+
+let test_actor_init_params_accepted () =
+  let ctx = typecheck ("mod Test do" ^ init_params_actor ^ {|
+    fn main() : Unit do
+      let c = spawn(Counter, 41, "answer")
+      let p = spawn(Plain)
+      send(c, Inc(1))
+      kill(p)
+    end
+  end|}) in
+  Alcotest.(check bool) "init params used in init; spawn with matching args; init() accepted"
+    false (has_errors ctx)
+
+let test_actor_init_params_arity_missing () =
+  let ctx = typecheck ("mod Test do" ^ init_params_actor ^ {|
+    fn main() : Unit do
+      let c = spawn(Counter)
+      kill(c)
+    end
+  end|}) in
+  Alcotest.(check bool) "spawn(Counter) with no args: error" true (has_errors ctx);
+  Alcotest.(check bool) "names the init signature" true
+    (diag_mentions ctx "init(start : Int, label : String)");
+  Alcotest.(check bool) "states the counts" true
+    (diag_mentions ctx "takes 2 arguments, but `spawn(Counter)` supplies 0")
+
+let test_actor_init_params_arity_extra () =
+  let ctx = typecheck ("mod Test do" ^ init_params_actor ^ {|
+    fn main() : Unit do
+      let p = spawn(Plain, 1)
+      kill(p)
+    end
+  end|}) in
+  Alcotest.(check bool) "spawn(Plain, 1) on a param-less actor: error" true (has_errors ctx);
+  Alcotest.(check bool) "explains how to declare parameters" true
+    (diag_mentions ctx "declares no `init` parameters")
+
+let test_actor_init_params_arg_type () =
+  let ctx = typecheck ("mod Test do" ^ init_params_actor ^ {|
+    fn main() : Unit do
+      let c = spawn(Counter, "not an int", "x")
+      kill(c)
+    end
+  end|}) in
+  Alcotest.(check bool) "wrong arg type: error" true (has_errors ctx);
+  Alcotest.(check bool) "blames the init parameter" true
+    (diag_mentions ctx "the `init` parameter `start` of actor `Counter`")
+
+let test_actor_init_param_needs_type () =
+  let parsed =
+    try ignore (parse_and_desugar {|mod Test do
+      actor Counter do
+        state { value : Int }
+        init(start) { value: start }
+      end
+    end|}); true
+    with _ -> false
+  in
+  Alcotest.(check bool) "untyped init param is a parse error" false parsed
+
+let test_supervise_child_init_args () =
+  let sup = {|
+    actor Worker do
+      state { base : Int, count : Int }
+      init(base : Int) { base: base, count: 0 }
+      on Work() do { state with count: state.count + 1 } end
+    end
+  |} in
+  let ok = typecheck ("mod Test do" ^ sup ^ {|
+    actor Sup do
+      state { w : Int, seed : Int }
+      init(seed : Int) { w: 0, seed: seed }
+      supervise do
+        strategy one_for_one
+        max_restarts 5 within 60
+        Worker w(seed * 10)
+      end
+    end
+    fn main() : Unit do kill(spawn(Sup, 7)) end
+  end|}) in
+  Alcotest.(check bool) "child spec supplies the child's init arg from the supervisor's param"
+    false (has_errors ok);
+  let bad = typecheck ("mod Test do" ^ sup ^ {|
+    actor Sup do
+      state { w : Int }
+      init { w: 0 }
+      supervise do
+        strategy one_for_one
+        max_restarts 5 within 60
+        Worker w
+      end
+    end
+    fn main() : Unit do kill(spawn(Sup)) end
+  end|}) in
+  Alcotest.(check bool) "child spec missing the child's init arg: error" true (has_errors bad);
+  Alcotest.(check bool) "names the child spec" true (diag_mentions bad "`Worker w(…)`")
+
 (* Counterpart: a bare actor name still typechecks cleanly — the guard must
    not flag the valid `spawn(Counter)` form. *)
 let test_spawn_plain_actor_name_ok () =
@@ -16706,6 +16828,12 @@ let compiler_suites =
           Alcotest.test_case "tcp_listen body, NetConnect does not satisfy" `Quick test_netlisten_not_satisfied_by_netconnect;
           (* spawn argument must be a plain actor name (not a computed expr) *)
           Alcotest.test_case "spawn computed actor: rejected"          `Quick test_spawn_computed_actor_rejected;
+          Alcotest.test_case "actor init params: accepted (D24)"       `Quick test_actor_init_params_accepted;
+          Alcotest.test_case "actor init params: missing args"         `Quick test_actor_init_params_arity_missing;
+          Alcotest.test_case "actor init params: extra args"           `Quick test_actor_init_params_arity_extra;
+          Alcotest.test_case "actor init params: arg type"             `Quick test_actor_init_params_arg_type;
+          Alcotest.test_case "actor init params: param needs a type"   `Quick test_actor_init_param_needs_type;
+          Alcotest.test_case "supervise child init args (D24)"         `Quick test_supervise_child_init_args;
           Alcotest.test_case "spawn plain actor name: ok"              `Quick test_spawn_plain_actor_name_ok;
           (* Actor handler return type checking — gap fills *)
           Alcotest.test_case "actor handler duplicate name"            `Quick test_actor_handler_duplicate_name;

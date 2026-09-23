@@ -12,6 +12,16 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Parameterised actor `init`.** `init(env : T, n : Int) { … }` declares
+  parameters that `spawn(A, env, 3)` supplies; they are in scope in the init
+  expression, and every argument is checked against the matching parameter.
+  Arity mistakes are reported with the actor's `init` signature (`spawn(A)` on
+  an actor that takes parameters, or extra arguments on one that takes none).
+  A supervised child can be given its arguments in the `supervise` block
+  (`Worker w(db)`, with the supervisor's own `init` params in scope), and a
+  restart re-supplies the same values. `init()` is the zero-parameter spelling
+  of the bare form. Decision D24 of the distributed-deploys plan; see the
+  actors and supervision chapters of the language reference.
 - **A targeted diagnostic for `fn (a, b) -> …` used as a callback over a
   tuple.** `fn (a, b) -> …` is a two-parameter (curried) lambda, not a lambda
   that destructures a pair, so `List.map(pairs, fn (k, v) -> v)` was wrong in a
