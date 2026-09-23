@@ -1592,6 +1592,37 @@ let test_activate4_wire_line_orders_cap_root_and_caps_before_callers () =
   Alcotest.(check bool) "wire starts with ACTIVATE4" true
     (String.length wire >= 9 && String.sub wire 0 9 = "ACTIVATE4")
 
+(* ─── The epoch model: ACTIVATE5 and WAIT (plan II.4.2, II.4.6) ─────────── *)
+
+let test_activate5_signed_shape () =
+  let (signed, wire_head) =
+    Cmd_deploy_hot.build_activate5_lines
+      ~name:"Counter_dispatch" ~impl:"implhash" ~cas:"cashash"
+      ~migrate:3 ~epoch:9 ~cap_root:cap_root_hex ~callers_csv:""
+  in
+  Alcotest.(check string) "wire_head" "ACTIVATE5 Counter_dispatch implhash cashash" wire_head;
+  Alcotest.(check string) "signed message carries the bitmask"
+    (Printf.sprintf "ACTIVATE5 Counter_dispatch implhash cashash 3 epoch:9 cap_root:%s callers:"
+       cap_root_hex)
+    signed
+
+let test_parse_wait () =
+  Alcotest.(check (option (pair int (pair int (pair int bool)))))
+    "a WAIT line"
+    (Some (5, (3, (40000, false))))
+    (Option.map (fun (e, p, d, f) -> (e, (p, (d, f))))
+       (Cmd_deploy_hot.parse_wait "WAIT epoch:5 pins:3 deadline_ms:40000"));
+  Alcotest.(check (option (pair int (pair int (pair int bool)))))
+    "a full pin table, no deadline"
+    (Some (2, (1, (-1, true))))
+    (Option.map (fun (e, p, d, f) -> (e, (p, (d, f))))
+       (Cmd_deploy_hot.parse_wait "WAIT epoch:2 pins:1 deadline_ms:-1 table_full"));
+  Alcotest.(check bool) "OK is not a WAIT" true
+    (Cmd_deploy_hot.parse_wait "OK 1" = None);
+  Alcotest.(check string) "described as the plan words it"
+    "waiting on 3 unit(s) pinned to epoch 5, hard deadline in 40s"
+    (Cmd_deploy_hot.describe_wait (5, 3, 40000, false))
+
 let test_activate3_signed_shape_unchanged () =
   let (signed, wire_head) =
     Cmd_deploy_hot.build_activate3_lines
@@ -2518,6 +2549,8 @@ let () =
       Alcotest.test_case "ACTIVATE4: signed excludes caps, includes cap_root" `Quick test_activate4_signed_excludes_caps_includes_cap_root;
       Alcotest.test_case "ACTIVATE4: wire orders cap_root+caps before callers" `Quick test_activate4_wire_line_orders_cap_root_and_caps_before_callers;
       Alcotest.test_case "ACTIVATE3: signed/wire shape unchanged" `Quick test_activate3_signed_shape_unchanged;
+      Alcotest.test_case "ACTIVATE5: signed shape carries the migrate bitmask" `Quick test_activate5_signed_shape;
+      Alcotest.test_case "WAIT: parsed and described" `Quick test_parse_wait;
       Alcotest.test_case "ACTIVATE4: caps csv is sorted own caps per function" `Quick test_activate4_caps_csv_is_sorted_own_caps_per_function;
       Alcotest.test_case "branch: caps present, no flag -> ACTIVATE4" `Quick test_branch_caps_present_no_flag_selects_activate4;
       Alcotest.test_case "branch: --no-cap-gate forces ACTIVATE3" `Quick test_branch_no_cap_gate_flag_forces_activate3;
