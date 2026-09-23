@@ -3025,6 +3025,7 @@ let compile filename =
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "tweetnacl.c")       else "")  (* ed25519 for ACTIVATE verification *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
+              ^ (opt_file2 (Filename.concat runtime_dir "march_reclaim.c"))  (* epoch reclamation of dead procs; referenced by march_scheduler.c *)
             in
             (* User FFI shim sources from forge.toml [[ffi]] (--ffi-c). *)
             let user_ffi_c =

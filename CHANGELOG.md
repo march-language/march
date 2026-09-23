@@ -213,6 +213,17 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A finished task or a dead actor no longer keeps its process record
+  forever.** Every green thread's bookkeeping record (256 bytes) used to be
+  kept for the life of the program once the thread ended, so a server that
+  churns tasks or actors grew without bound: 400,000 awaited tasks held
+  about 120 MB, and each dead actor about 600 bytes. The record is now freed
+  once no other thread can still be reading it, so the same 400,000 tasks
+  peak at about 23 MB and a dead actor costs about 350 bytes (the actor's
+  own metadata is the remaining term, still to come). `Scheduler.stat(8)`
+  counts records freed and `stat(9)` those waiting to be. An `Actor.reply`
+  whose caller has already given up and exited is now dropped cleanly, as
+  is a reply to a value that is not a reply reference.
 - **A self-stop in the interpreter now drains like the compiled backend.**
   `Actor.stop(self, t)` from a handler used to kill the actor on the spot in
   `march run`, discarding its queue and the state the handler was about to
