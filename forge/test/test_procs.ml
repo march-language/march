@@ -141,13 +141,29 @@ let test_own_sigterm_stops_everything () =
   let log = log_sink () in
   let a = Procs.spawn ~name:"a" ~env:[] ~argv:[| exe |] ~log in
   let c = Procs.spawn ~name:"c" ~env:[] ~argv:[| exe |] ~log in
-  (* Something outside signals forge itself; it exits cleanly, which without
-     fail_fast is not a reason to stop. *)
-  let killer = Procs.spawn ~name:"killer" ~env:[] ~log
-      ~argv:[| "sh"; "-c"; Printf.sprintf "sleep 1; kill -TERM %d" (Unix.getpid ()) |] in
-  let statuses = Procs.supervise ~grace_ms:2000 [ a; c; killer ] in
-  Alcotest.(check bool) "the killer exited 0" true
-    (List.assoc "killer" statuses = Unix.WEXITED 0);
+  (* A supervised child that has already exited cleanly: without fail_fast
+     that is not a reason to stop, so only the signal below ends supervise.
+     Waited for up front so its status cannot depend on scheduling. *)
+  let quick = Procs.spawn ~name:"quick" ~env:[] ~argv:[| "true" |] ~log in
+  if not (Procs.wait_all ~timeout:30. [ quick ]) then
+    Alcotest.fail "the quick proc never exited";
+  (* Something outside signals forge itself. The killer is deliberately NOT a
+     supervised proc: supervise's stop-all SIGTERMs every supervised child,
+     and on a slow runner that raced the killer's own exit (it was sometimes
+     WSIGNALED rather than WEXITED 0). Unsupervised, nothing signals it. *)
+  let devnull = Unix.openfile "/dev/null" [ Unix.O_RDWR ] 0 in
+  let killer =
+    Fun.protect ~finally:(fun () -> Unix.close devnull) (fun () ->
+        Unix.create_process "sh"
+          [| "sh"; "-c"; Printf.sprintf "sleep 1; kill -TERM %d" (Unix.getpid ()) |]
+          devnull devnull devnull) in
+  let statuses = Procs.supervise ~grace_ms:2000 [ a; c; quick ] in
+  let rec wait_killer () =
+    try snd (Unix.waitpid [] killer)
+    with Unix.Unix_error (Unix.EINTR, _, _) -> wait_killer () in
+  Alcotest.(check bool) "the killer exited 0" true (wait_killer () = Unix.WEXITED 0);
+  Alcotest.(check bool) "the quick proc exited 0" true
+    (List.assoc "quick" statuses = Unix.WEXITED 0);
   List.iter (fun n ->
       Alcotest.(check bool) (n ^ " was stopped") true
         (List.assoc n statuses = Unix.WSIGNALED Sys.sigterm))
