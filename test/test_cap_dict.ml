@@ -305,7 +305,7 @@ let io_console_shape =
   Alcotest.test_case "IO.Console excludes the stdlib-shadowed println" `Quick
     (fun () ->
       Alcotest.(check (list string)) "fields"
-        [ "print"; "print_line" ] (field_names "IO.Console");
+        [ "print"; "print_line"; "print_stderr" ] (field_names "IO.Console");
       Alcotest.(check (list string)) "println is reported as excluded"
         [ "println" ] (G.excluded_ops "IO.Console"))
 

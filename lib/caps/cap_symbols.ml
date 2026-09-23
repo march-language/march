@@ -93,7 +93,6 @@ let table : (string * string) list = [
   ("march_process_wait_proc",      "IO.Process");
   (* IO.Clock *)
   ("march_unix_time",              "IO.Clock");
-  ("march_sys_uptime_ms",          "IO.Clock");
   (* IO.Random *)
   ("march_random_bytes",           "IO.Random");
   ("march_uuid_v4",                "IO.Random");

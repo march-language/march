@@ -253,7 +253,6 @@ let builtin_cap_table : (string * string) list = [
   (* IO.Clock *)
   ("unix_time",             "IO.Clock");
   ("unix_time_ms",          "IO.Clock");
-  ("sys_uptime_ms",         "IO.Clock");
   ("uuid_v7",               "IO.Clock");
   (* IO.Random *)
   ("random_bytes",          "IO.Random");
@@ -777,9 +776,11 @@ let builtin_bindings : (string * scheme) list =
        generators (march_uuid_v4 / the interpreter's /dev/urandom body), and
        UUID.v4 / UUID.v7 wrap one each.  Capability: IO.Random (table above). *)
     ("uuid_v4",         Mono (TArrow (t_unit,  t_string)));
-    (* System introspection (stdlib/system.march).  Ambient like
-       peak_rss_bytes, except sys_uptime_ms, which reads a clock and is gated
-       to IO.Clock beside unix_time_ms.  sys_os / sys_arch return a lowercase
+    (* System introspection (stdlib/system.march).  All ambient, like
+       peak_rss_bytes.  sys_uptime_ms (System.monotonic_time) stays ambient
+       too: it is process-relative elapsed time, not the wall clock
+       unix_time_ms reads, and gating it would break every existing timing
+       caller granted only IO.Console.  sys_os / sys_arch return a lowercase
        String ("macos", "aarch64", ...): the codegen row always said TString,
        and a String is what march_sys_os/march_sys_arch can build. *)
     ("sys_os",                  Mono (TArrow (t_unit, t_string)));
