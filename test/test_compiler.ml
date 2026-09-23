@@ -3870,6 +3870,38 @@ let test_check1b_keeps_caps_not_subsumed_by_check1 () =
   Alcotest.(check bool) "the surviving capability is IO.FileWrite, not IO.Console"
     true (has_error_with ctx "IO.FileWrite")
 
+(* Check 1's declaring-module exemption (`proof cap X` in `mod M` covers
+   `Cap(M.X)` without `needs M.X`) must hold for a NESTED module, not only the
+   entry one.  A nested [DMod] used to run [check_module_needs] against the
+   OUTER env, which does not yet hold the module's own proof caps, so every
+   `Cap(Vault.Key)` in `Vault` drew a false "not declared in `needs`".  This
+   is how stdlib/session.march (checked nested, inside the stdlib wrapper)
+   carried 9 phantom ratchet errors that `march --check` never showed. *)
+let test_nested_module_own_proof_cap_needs_no_needs () =
+  let ctx = typecheck {|mod App do
+    mod Vault do
+      proof cap Key
+      fn use_key(_k : Cap(Vault.Key)) : Int do 1 end
+    end
+  end|} in
+  Alcotest.(check int) "nested module may use its own proof cap without `needs`"
+    0 (count_errors_with ctx "not declared in `needs`")
+
+(* The other side: the exemption is the DECLARING module's only.  A sibling
+   that takes the same capability must still declare it. *)
+let test_sibling_module_proof_cap_still_needs_needs () =
+  let ctx = typecheck {|mod App do
+    mod Vault do
+      proof cap Key
+      fn use_key(_k : Cap(Vault.Key)) : Int do 1 end
+    end
+    mod Client do
+      fn borrow(_k : Cap(Vault.Key)) : Int do 2 end
+    end
+  end|} in
+  Alcotest.(check bool) "a sibling module's use of Cap(Vault.Key) still errors"
+    true (has_error_with ctx "Add `needs Vault.Key` to module `Client`")
+
 let test_actor_handler_cap_missing_needs_error () =
   (* An actor handler with a Cap parameter, but no needs declaration, should error. *)
   let ctx = typecheck {|mod Test do
@@ -14621,7 +14653,6 @@ let stdlib_known_internal_errors = [
   "node_call.march", 5;
   "plot.march", 1;
   "rrb_vec.march", 19;
-  "session.march", 9;
   "session_node.march", 3;
   "system.march", 8;
   "uuid.march", 2;
@@ -16808,6 +16839,8 @@ let compiler_suites =
           Alcotest.test_case "missing needs dedup: no orphan hint with main(cap : Cap(IO))" `Quick test_missing_needs_dedup_no_orphan_hint_main_cap_param;
           Alcotest.test_case "Check 1b omits caps subsumed by Check 1" `Quick test_check1b_omits_caps_subsumed_by_check1;
           Alcotest.test_case "Check 1b keeps caps not subsumed by Check 1" `Quick test_check1b_keeps_caps_not_subsumed_by_check1;
+          Alcotest.test_case "nested module uses its own proof cap without needs" `Quick test_nested_module_own_proof_cap_needs_no_needs;
+          Alcotest.test_case "sibling module's use of a proof cap still needs needs" `Quick test_sibling_module_proof_cap_still_needs_needs;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;
           (* C1 fix: actor handler body IO caps flow into manifest / missing-needs diagnostic *)
           Alcotest.test_case "actor handler body IO, no needs: warns"    `Quick test_actor_handler_body_io_missing_needs_warns;

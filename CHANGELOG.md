@@ -253,6 +253,13 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A nested module can use its own `proof cap` without declaring it in
+  `needs`.** `proof cap Key` in `mod Vault` has always meant `Vault` may take a
+  `Cap(Vault.Key)` without also writing `needs Vault.Key`, but that only worked
+  when `Vault` was the file's top module. Nested inside another module, every
+  such use was rejected with "`Cap(Vault.Key)` used in module `Vault` but
+  `Vault.Key` is not declared in `needs`". Uses from any other module still
+  need the `needs` line.
 - **A finished task or a dead actor no longer keeps its process record
   forever.** Every green thread's bookkeeping record (256 bytes) used to be
   kept for the life of the program once the thread ended, so a server that

@@ -49,7 +49,6 @@
 
 mod Actor do
   needs IO
-  needs Actor.Introspect
 
   -- Introspection authority: the right to reach an actor you were never
   -- handed a Pid for. `pid_from_int`, `list`, `whereis` and `registered`

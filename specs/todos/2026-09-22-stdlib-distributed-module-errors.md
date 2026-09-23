@@ -1,13 +1,13 @@
-# `[P2]` 20 internal type errors across the distributed/actor stdlib modules
+# `[P2]` 11 internal type errors across the distributed/actor stdlib modules
 
 Filed 2026-09-22 from the stdlib internal-error sweep
 (`2026-09-22-stdlib-internal-type-errors.md`). Grouped because they are all in
 the same cluster of modules and several may share a cause.
 
-- `session.march` (9): `Cap(Session.Live)` used in module `Session` but
-  `Session.Live` is not declared in `needs` — :65, :74, :82, :97, :105, :119,
-  :134, :142, :156. Likely one missing `needs Session.Live` in the module body,
-  or a capability the module is supposed to receive rather than declare.
+(`session.march`'s 9 `Cap(Session.Live)` "not declared in `needs`" errors were
+filed here too; they were a typechecker bug, not stdlib's, and are fixed; see
+`specs/progress/2026-09-23-nested-module-own-proof-cap-exemption.md`.)
+
 - `node_call.march` (5): `CallError` vs `EnqueueError` in both directions
   (:30, :33, :44) and `Constructor `NoConnection` is ambiguous between multiple
   modules` (:32, :44) — the two error enums both define `NoConnection`, so the

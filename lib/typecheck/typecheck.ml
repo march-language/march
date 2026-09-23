@@ -5859,8 +5859,14 @@ let rec check_decl env (d : Ast.decl) : env =
         (* Return the list of opaque type names for constructor hiding below *)
         List.map (fun ((tname : Ast.name), _) -> tname.txt) sdef.sig_types
     in
-    (* Validate capability declarations for this module *)
-    check_module_needs env name decls
+    (* Validate capability declarations for this module.  [env] is the OUTER
+       scope, which does not yet hold this module's own `proof cap`s -- they
+       are registered into [inner_env] by the [DProofCap] arm above -- so
+       Check 1's declaring-module exemption (`proof cap X` in `mod M` covers
+       `Cap(M.X)` without `needs M.X`) would miss every one of them and report
+       a false "not declared in `needs`".  The entry module never hit this: it
+       is checked against its [final_env] (see [check_module_core]). *)
+    check_module_needs { env with proof_caps = inner_env.proof_caps } name decls
       ~cap_qname_prefix:(if env.cap_qual_prefix = "" then name.txt
                          else env.cap_qual_prefix ^ "." ^ name.txt);
     (* Validate island module protocol if applicable *)
