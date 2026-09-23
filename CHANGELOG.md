@@ -322,6 +322,15 @@ git log is authoritative for exact commits.
   failed to link with `Undefined symbols: "_Inner.Box_spawn"`. It now links and runs.
   A `mailbox N policy` declared on such an actor is also applied at a qualified spawn;
   before, it was silently skipped there.
+- **`csv_next_row`'s result now matches against `CsvEof` / `Row`.** The builtin
+  is typed with the qualified `Csv.CsvRow`, and builtin signatures skipped the
+  qualified-to-bare canonicalization that written type annotations get, so
+  matching its result against the bare constructors was a type error both ways.
+  `stdlib/csv.march` carried 12 such errors, hidden because stdlib diagnostics
+  are filtered, which left `Csv.each_row`, `Csv.read_all` and
+  `Csv.each_row_with_header` unchecked. Builtin signatures now go through the
+  same canonicalization, so any future builtin typed with a qualified name is
+  covered too.
 - **Two modules can each name their capability dictionary `Ops`.** A
   `proof cap X with T` resolved `T` by its bare name first, so when two modules
   each declared a same-named dictionary record, one module's `cap_impl` /
