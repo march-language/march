@@ -11,9 +11,16 @@ G6 (`forge/lib/procs.ml`). Four commits, in the order the task asked for.
 - `Topology.place(node, roles)`: one `Role` per served role (`role(name, place, open)`
   for a function binding, `actor_role(name, place, mk, open)` for an actor binding; an
   actor spawned for an offer that failed to open is kept for the next attempt). A task
-  re-evaluates every `MARCH_PLACEMENT_TICK_MS` (200): `Everywhere`; `On(l)` from
-  `MARCH_NODE_LABELS`; `Count(n)` / `CountOn(l, n)` by rendezvous ranking over the
+  re-evaluates every `MARCH_PLACEMENT_TICK_MS` (200): `everywhere()`; `on_label(l)` from
+  `MARCH_NODE_LABELS`; `count(n)` / `count_on(l, n)` by rendezvous ranking over the
   eligible live nodes. A lost role is drained through `SessionNode.close_offer`.
+  The constructors behind them are `Place`-prefixed (`PlaceCount`, ...): a bare
+  `Count` broke user code writing DataFrame's nullary `Count` unqualified
+  (`test/native/dataframe_groupby_count` in the IR validity gate), and the anchor
+  actor's state record got a unique field name because `{ n : Int }` made the
+  `@[remote]` codec choice for a user's `type Hit = { n : Int }` ambiguous
+  (`remote_actor_dispatch`). Both were caught by `run_codegen`, not by any
+  topology test.
 - **Eligibility is a cluster name.** Membership does not carry other nodes' pools or
   labels, so every node eligible for a ranked role registers `topo:<role>/<node_id>`
   (bound to a small anchor actor) and the ranking reads those names back; a dead node's

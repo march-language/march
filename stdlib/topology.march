@@ -13,20 +13,20 @@
 --
 -- Placement rules (4.2), evaluated by every node for itself, with no control
 -- plane:
---   Everywhere      offered on every node that serves the role (D18);
---   On(label)       offered when this node's labels (MARCH_NODE_LABELS, a
+--   everywhere()        offered on every node that serves the role (D18);
+--   on_label(label)     offered when this node's labels (MARCH_NODE_LABELS, a
 --                   comma-separated list set by the launcher) include it;
---   Count(n)        offered on n of the eligible live nodes, chosen by
+--   count(n)            offered on n of the eligible live nodes, chosen by
 --                   rendezvous hashing: every node ranks the candidates by
 --                   hash(role, node_id) and offers when it is in the top n (D19);
---   CountOn(l, n)   Count(n) among the nodes carrying label l.
+--   count_on(l, n)      count(n) among the nodes carrying label l.
 -- "Eligible" for a Count role means: a live member (or this node) that serves
 -- the role and carries its label. Other nodes' pools and labels are not in
 -- the membership table, so each eligible node registers a cluster name,
 -- `topo:<role>/<node_id>`, and the ranking reads those names back; a dead
 -- node's names become invisible with its membership. A node that REJOINS
 -- counts only after MARCH_PLACEMENT_SETTLE_MS (default 15000), so a flapping
--- node does not pull a role back and forth (hysteresis). `Count(1)` is not a
+-- node does not pull a role back and forth (hysteresis). `count(1)` is not a
 -- lock: during a partition each side may offer, as with any global name.
 --
 -- The hash is SHA-256 (Crypto.sha256), not the plan's BLAKE3: the runtime's
@@ -49,16 +49,18 @@ mod Topology do
 
   -- ── placement rules and roles ─────────────────────────────────────────
 
-  type Placement = Everywhere | On(String) | Count(Int) | CountOn(String, Int)
+  -- Constructor names are prefixed: a bare `Count` collided with DataFrame's
+  -- nullary `Count` aggregate in user code that writes it unqualified.
+  type Placement = PlaceEverywhere | PlaceOn(String) | PlaceCount(Int) | PlaceCountOn(String, Int)
 
   doc "Offer the role on every node that serves it (no `place` in the topology)."
-  fn everywhere() : Placement do Everywhere end
+  fn everywhere() : Placement do PlaceEverywhere end
   doc "Offer the role on the nodes whose MARCH_NODE_LABELS include [label] (`place = { on = label }`)."
-  fn on_label(label : String) : Placement do On(label) end
+  fn on_label(label : String) : Placement do PlaceOn(label) end
   doc "Offer the role on [n] of the eligible live nodes, by rendezvous hashing (`place = { count = n }`)."
-  fn count(n : Int) : Placement do Count(n) end
+  fn count(n : Int) : Placement do PlaceCount(n) end
   doc "`count(n)` among the nodes carrying [label] (`place = { on = label, count = n }`)."
-  fn count_on(label : String, n : Int) : Placement do CountOn(label, n) end
+  fn count_on(label : String, n : Int) : Placement do PlaceCountOn(label, n) end
 
   -- What an open offer needs to be supervised: the offer, and whether
   -- whatever serves its sessions is still alive (a hosted role's actor; a
@@ -147,18 +149,18 @@ mod Topology do
   doc "Whether this node may take part in [p] at all: it carries the label, if any."
   fn eligible_here(p : Placement, labels : List(String)) : Bool do
     match p do
-      Everywhere -> true
-      On(l) -> List.member(labels, l)
-      Count(_) -> true
-      CountOn(l, _) -> List.member(labels, l)
+      PlaceEverywhere -> true
+      PlaceOn(l) -> List.member(labels, l)
+      PlaceCount(_) -> true
+      PlaceCountOn(l, _) -> List.member(labels, l)
     end
   end
 
   doc "Whether [p] ranks nodes (and so needs the eligible set)."
   fn ranked(p : Placement) : Bool do
     match p do
-      Count(_) -> true
-      CountOn(_, _) -> true
+      PlaceCount(_) -> true
+      PlaceCountOn(_, _) -> true
       _ -> false
     end
   end
@@ -172,8 +174,8 @@ mod Topology do
     if not(eligible_here(p, labels)) do false
     else
       match p do
-        Count(n) -> List.member(List.take(rank(role_name, Cons(me, eligible)), n), me)
-        CountOn(_, n) -> List.member(List.take(rank(role_name, Cons(me, eligible)), n), me)
+        PlaceCount(n) -> List.member(List.take(rank(role_name, Cons(me, eligible)), n), me)
+        PlaceCountOn(_, n) -> List.member(List.take(rank(role_name, Cons(me, eligible)), n), me)
         _ -> true
       end
     end
@@ -207,11 +209,15 @@ mod Topology do
   -- ── per-node state ────────────────────────────────────────────────────
 
   -- The process a node's placement markers are bound to.
-  type AnchorState = { n : Int }
+  -- A field name no other stdlib or user record is likely to share: a
+  -- declared record type is found by its SHAPE in places (the `@[remote]`
+  -- codec choice), and `{ n : Int }` made a user's `type Hit = { n : Int }`
+  -- ambiguous.
+  type AnchorState = { topology_anchor_marks : Int }
 
   actor Anchor do
-    state { n : Int }
-    init  { n: 0 }
+    state { topology_anchor_marks : Int }
+    init  { topology_anchor_marks: 0 }
     on Nop() do state end
   end
 
