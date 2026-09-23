@@ -2219,6 +2219,9 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
      (Desugar_remote): its dispatch names the actor's message constructors,
      which a nested module sees only once the actor is declared. *)
   let m = { m with mod_decls = Desugar_remote.expand errors m.mod_decls } in
+  (* Hot-reload `<actor>_migrate_msg` gets its C-ABI wrapper right after it
+     (Desugar_migrate). *)
+  let m = { m with mod_decls = Desugar_migrate.expand m.mod_decls } in
   (* Collect interfaces and fns for satisfy expansion. *)
   let raw_ifaces = collect_interfaces m.mod_decls in
   let raw_fns    = collect_fns m.mod_decls in

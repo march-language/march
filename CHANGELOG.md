@@ -12,6 +12,30 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Hot reload: the unified epoch model and drains** (build step 6 of the
+  distributed-deploys plan). Every unit of work (actor, task, session) runs at the
+  epoch of the deploy it started under, and every call it makes, from the base
+  binary or a hot patch, resolves to the newest version at or before that epoch.
+  A deploy puts a marker in every live actor's mailbox; the actor finishes its
+  queued messages on the old code, then applies each passed deploy's
+  `migrate_state` in order and moves. The marker ignores mailbox overflow
+  policies, so a full `DROP_NEW` mailbox no longer loses it. A sender that already
+  moved can make a receiver move early when the message type changed, keeping
+  FIFO order. New `<actor>_migrate_msg(m : Old) : Option(<Actor>.Msg)` converts
+  old-format messages that arrive after an actor moved (else they are dropped and
+  counted); `<Actor>.Msg` names an actor's message type; `forge hot-reload
+  migrate-msg-stub <Actor>` writes one from the running version's handlers, and
+  `forge deploy hot` refuses a `migrate_msg` whose old type does not match them.
+  Drains retire old epochs: a soft deadline (`MARCH_HCR_DRAIN_MS`, 5 s) moves
+  stragglers at once, an optional hard deadline (`MARCH_HCR_HARD_DRAIN_MS`, or the
+  reload server's `DRAIN epoch:<E> soft_ms:<n> hard_ms:<n>`) kills actors still on
+  the old epoch for their supervisor to restart on the new code. Session parties
+  and generated hosted endpoints take epoch holds, so an actor with a live old
+  session stays old until it ends. Up to three live versions per function; a
+  deploy that needs a fourth while all are in use gets `WAIT epoch:<E> pins:<n>
+  deadline_ms:<t>` and stays queued, which `forge deploy hot` prints and polls.
+  New reload-server verbs `PINS`, `DRAIN`, `ACTIVATE5`; `forge hot-reload status`
+  shows the pinned epochs and the deferred/converted/dropped/killed counters.
 - **The topology file, static half** (build step 7 of the distributed-deploys plan).
   `topology.toml` next to `forge.toml` binds each offered `Protocol.Role` to a
   `body` function or an `actor`, groups roles into `[pool.*]` sections
@@ -89,6 +113,13 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **Hot reload: a second deploy while actors are still migrating is accepted**
+  (it used to be refused with `ERR publish_failed`); each actor applies both
+  migrations in order. Past the soft drain deadline, messages in an unchanged
+  format now run on the new code against the migrated state instead of being
+  dropped; only old-format messages are dropped (or converted by `migrate_msg`).
+  The compiled `main` follows the newest code; every other unit keeps the code it
+  started with.
 - **Breaking: a running cluster node is a capability, `Cap(ClusterNode.Live)`.**
   `ClusterNode.start` takes the root capability first, `start(io, cfg)`, and returns
   `Result(Cap(ClusterNode.Live), String)`; the `ClusterNode.ClusterHandle` type is gone.

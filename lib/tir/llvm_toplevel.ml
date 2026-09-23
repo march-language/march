@@ -254,14 +254,9 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
                          the exemption's blast radius stays small. *)
   let vis_prefix =
     let fname = fn.Tir.fn_name in
-    let flen  = String.length fname in
-    let ends_with sfx =
-      let sl = String.length sfx in
-      flen > sl && String.sub fname (flen - sl) sl = sfx
-    in
     if ctx.Llvm_ctx.compile_so
        && not (Tir_names.is_actor_dispatch_fn fname)
-       && not (ends_with "_migrate_state")
+       && not (Tir_names.is_migrate_fn_name fname)
        && Hot_reload.Name_table.id_of ctx.Llvm_ctx.hr_names fname = None
     then "hidden "
     else ""
@@ -1058,6 +1053,33 @@ let emit_module ~emit_expr
              → alias "@__migrate_Counter"
            The march_reload.c runtime forms the same name by stripping
            "_dispatch" from the ACTIVATE name "Counter_dispatch". *)
+        (* DD step 6 (plan II.4.8): the generated message-migration wrapper
+           `<actor>_migrate_msg__hcr` (Desugar_migrate) is exported as
+           @__migrate_msg_<Actor>, found by march_reload.c the same way.  The
+           runtime calls it as fn(old_msg, none) with two pointer-sized
+           words; the alias carries the wrapper's own emitted types (a
+           message is a ptr or a tagged i64, both integer-register words). *)
+        if Tir_names.is_migrate_msg_wrapper_name fname then begin
+          let sfx = Tir_names.migrate_msg_wrapper_suffix in
+          let before = String.sub fname 0 (flen - String.length sfx) in
+          let last = match String.rindex_opt before '.' with
+            | None -> before
+            | Some i -> String.sub before (i + 1) (String.length before - i - 1) in
+          if last <> "" then begin
+            let actor = String.capitalize_ascii last in
+            let ret = Llvm_ctx.llvm_ret_ty ctx fn.Tir.fn_ret_ty in
+            (* The bare type: parameter attributes (nonnull, ...) are not
+               valid in an alias's function type. *)
+            let bare t = match String.index_opt t ' ' with
+              | Some i -> String.sub t 0 i | None -> t in
+            let ps = List.map (fun (v : Tir.var) ->
+                bare (Llvm_ctx.llvm_param_ty ~k_table:ctx.Llvm_ctx.k_table v.Tir.v_ty))
+                fn.Tir.fn_params in
+            Buffer.add_string ctx.Llvm_ctx.buf (Printf.sprintf
+              "@__migrate_msg_%s = alias %s (%s), ptr @%s\n"
+              actor ret (String.concat ", " ps) (Llvm_builtins.mangle_extern fname))
+          end
+        end;
         if flen > migrate_suffix_len
            && String.sub fname (flen - migrate_suffix_len) migrate_suffix_len = migrate_suffix
         then begin

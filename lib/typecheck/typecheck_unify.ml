@@ -627,6 +627,25 @@ let expanding_records : StringSet.t ref = ref StringSet.empty
    syntax rather than anything reachable now. *)
 let expanding_aliases : string list ref = ref []
 
+(** [Some "<Actor>_Msg"] when [name] is `<Actor>.Msg` (or `M.<Actor>.Msg`)
+    for an actor whose message constructors are in scope, and no real type of
+    that name exists. *)
+let actor_msg_alias env (name : string) : string option =
+  let sfx = ".Msg" in
+  let n = String.length name and k = String.length sfx in
+  if n <= k || String.sub name (n - k) k <> sfx || lookup_type name env <> None
+  then None
+  else
+    let prefix = String.sub name 0 (n - k) in
+    let actor = match String.rindex_opt prefix '.' with
+      | None -> prefix
+      | Some i -> String.sub prefix (i + 1) (String.length prefix - i - 1) in
+    let target = actor ^ "_Msg" in
+    if StrMap.exists (fun _ cis ->
+        List.exists (fun ci -> ci.ci_is_actor_msg && ci.ci_type = target) cis)
+        env.ctors
+    then Some target else None
+
 (** Convert a surface [Ast.ty] to an internal [ty].
     [tvars] accumulates a mapping from type-variable *names* to fresh
     unification-variable ids (so that two mentions of [a] in the same
@@ -715,6 +734,13 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
          tvars := saved;
          t
        end
+     | _ when args = [] && actor_msg_alias env name.Ast.txt <> None ->
+       (* `<Actor>.Msg` (DD step 6, plan II.4.8): the source name of an
+          actor's message type, a typecheck-side alias of the lowered
+          `<Actor>_Msg` its message constructors already have. *)
+       (match actor_msg_alias env name.Ast.txt with
+        | Some t -> TCon (t, [])
+        | None -> TError)
      | "Chan", _ when name.txt = "Chan" ->
        Err.error env.errors ~span:name.span
          "Chan expects exactly two type arguments: Chan(RoleName, ProtocolName)";

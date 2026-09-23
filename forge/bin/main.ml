@@ -1296,10 +1296,24 @@ let hot_reload_status_cmd =
       | Ok () -> ()
       | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1) $ env_name)
 
+let hot_reload_migrate_msg_stub_cmd =
+  let actor = Arg.(required & pos 0 (some string) None &
+                   info [] ~docv:"ACTOR" ~doc:"The actor whose message type changed") in
+  let old_p = Arg.(value & opt (some string) None & info ["old"] ~docv:"PATH"
+                     ~doc:"The running version's .schemas.json (default: the last deploy's .prev)") in
+  let new_p = Arg.(value & opt (some string) None & info ["new"] ~docv:"PATH"
+                     ~doc:"The new build's .schemas.json: kept handlers map to themselves, removed or changed ones to None") in
+  Cmd.v (Cmd.info "migrate-msg-stub"
+           ~doc:"Write an <actor>_migrate_msg stub from the running version's handler signatures")
+    Term.(const (fun a o n ->
+      match Cmd_deploy_hot.run_migrate_msg_stub ~actor:a ?old_path:o ?new_path:n () with
+      | Ok path -> Printf.printf "wrote %s\n%!" path
+      | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1) $ actor $ old_p $ new_p)
+
 let hot_reload_cmd =
   Cmd.group (Cmd.info "hot-reload" ~doc:"Hot code reload key management and status")
     [ hot_reload_keygen_cmd; hot_reload_show_pubkey_cmd; hot_reload_use_key_cmd;
-      hot_reload_init_cmd; hot_reload_status_cmd ]
+      hot_reload_init_cmd; hot_reload_status_cmd; hot_reload_migrate_msg_stub_cmd ]
 
 (* --------------------------------------------------------- forge completions *)
 
