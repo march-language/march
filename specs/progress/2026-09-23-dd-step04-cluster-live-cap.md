@@ -8,7 +8,7 @@ Logged as a todo on 2026-09-22 (this file, moved).
 
 ## What landed
 
-- **`stdlib/cluster_node.march`** declares `type Ops` and `proof cap Live with Ops`, on the
+- **`stdlib/cluster_node.march`** declares `type ClusterOps` and `proof cap Live with ClusterOps`, on the
   model of `Cap(Session.Live)`. `ClusterNode.attach(io : Cap(IO), ops) : Cap(ClusterNode.Live)`
   is `cap_impl(mint_cap(io), ops)`. `start(io, cfg)` builds the node exactly as before and
   returns `attach(io, ops_of(h))`, where `ops_of` closes the real dictionary over the
@@ -63,6 +63,14 @@ function keeps its polymorphic `pid` and converts.
 - **`start` takes `Cap(IO)` as a new first parameter**, as the step-2 entry predicted
   (`config_from_env` has no cap to thread). All 41 cluster fixtures already had
   `main(c : Cap(IO))` or `main(_c : Cap(IO))`; the underscore ones were renamed to `c`.
+- **The dictionary type is `ClusterOps`, not `Ops`.** March has one global type namespace,
+  and `Typecheck_env.resolve_cap_dict_type` tries a dictionary's BARE name first. With a
+  second `type Ops` in the stdlib, `Session.attach`'s `cap_impl` resolved the wrong one and
+  failed with `expected Ops but got Ops` (stdlib/session.march:66). The compiler hides
+  stdlib-spanned diagnostics, so only the whole-stdlib ratchet (`entry_mod_qual_erasure`
+  case 5 in the `compiler` suite) saw it; the first push of this PR had the collision.
+  The resolver preferring the declaring module's qualified name would fix the class; it is
+  filed separately rather than changed here.
 - **`ClusterHandle` is gone, not aliased.** A `type ClusterHandle = Cap(Live)` alias would
   have kept fixtures compiling, but a capability hidden behind an alias is exactly what the
   `needs` check should see, so the migration names the cap.
@@ -107,17 +115,16 @@ calls (#591), so the whole-stdlib ratchet in the `compiler` suite
 
 ## Tests
 
-Run before the PR was opened (2026-09-23):
-
 - `scripts/run-tests.sh stdlib`: 886 tests, all passed (322 s).
 - `scripts/run-tests.sh stdlib_march`: 71 tests, all passed.
+- `scripts/run-tests.sh compiler`, first run: 1239 tests, 1 failure, the whole-stdlib
+  ratchet (`entry_mod_qual_erasure` 5: `stdlib/session.march: expected 0 internal
+  error(s), found 1`), the `Ops` collision described above. After the rename to
+  `ClusterOps`, that case passes.
 - `test/cluster_placement.out` and `cluster_placement_interp.out` built through their dune
-  rules; both match the golden. Perturbation check above.
+  rules; both match the golden, before and after the rename. Perturbation check above.
 - `march --check` on all 41 migrated `test/two_node/cluster_*` node files: no errors.
+- Two-node cluster scenarios (`scripts/two-node.sh`, `MARCH_STDLIB` at the source tree):
+  17 of 18 pass. `cluster_partition` exits 3, "skipped: needs root (Linux iptables) to
+  drop packets", by design on macOS; it runs on CI's Linux leg.
 - `scripts/check-docs.sh`: passed (Check F: the 16 generated chapters match).
-
-Not yet complete when the PR was opened, at the author's request: the `compiler` suite
-(which holds the whole-stdlib ratchet) was still running with no failures so far; the
-18 two-node cluster scenarios (`scripts/two-node.sh --list | grep cluster`) and the full
-`scripts/run-tests.sh` had not been run. CI covers the suites; the two-node scenarios run
-there too.

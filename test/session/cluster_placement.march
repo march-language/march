@@ -48,7 +48,7 @@ mod ClusterPlacement do
     tell(fk, ClusterNode.NodeUp(info(id)))
   end
 
-  pfn fake_ops(fk : Fake) : ClusterNode.Ops do
+  pfn fake_ops(fk : Fake) : ClusterNode.ClusterOps do
     { ClusterNode.ops_stub("n0") with
       members: fn _ -> fake_members(fk),
       subscribe: fn f -> fake_subscribe(fk, f),

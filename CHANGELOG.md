@@ -99,7 +99,7 @@ git log is authoritative for exact commits.
   `needs ClusterNode.Live` to a module whose signatures name it. A function of yours can no
   longer return the node it started (only `ClusterNode` may produce the capability): start
   it in `main` and pass it down. Every operation goes through the capability's dictionary
-  (`ClusterNode.Ops`), so a test can attach its own with `ClusterNode.attach(io, ops)`
+  (`ClusterNode.ClusterOps`), so a test can attach its own with `ClusterNode.attach(io, ops)`
   (`ClusterNode.ops_stub(id)` panics on every operation it is not given) and inject
   membership events with no sockets. New accessors: `ClusterNode.node_id(node)` and
   `ClusterNode.next_id(node, key)`.

@@ -847,7 +847,7 @@ Three levels, one mechanism:
 3. **The cluster (D35).** DONE 2026-09-23
    ([../progress/2026-09-23-dd-step04-cluster-live-cap.md](../progress/2026-09-23-dd-step04-cluster-live-cap.md)).
    `ClusterHandle` (stdlib/cluster_node.march) was a plain record; it is now
-   `Cap(ClusterNode.Live)` with an `Ops` dictionary (one field per operation: `members`,
+   `Cap(ClusterNode.Live)` with a `ClusterOps` dictionary (one field per operation: `members`,
    `subscribe`, `register`, `lookup`, `queue_for`, `route`, `creation` and the rest),
    minted by `ClusterNode.start(io, cfg)` and swappable by `ClusterNode.attach(io, ops)` in
    tests. The cap lives in `ClusterNode`, not `Cluster` (an unrelated module), because only

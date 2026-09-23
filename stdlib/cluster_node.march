@@ -54,7 +54,7 @@
 -- the actor.
 --
 -- The node is a capability: `start(io, cfg)` returns a `Cap(ClusterNode.Live)`
--- whose dictionary (`Ops`) every public operation calls through, and a test
+-- whose dictionary (`ClusterOps`) every public operation calls through, and a test
 -- can `attach(io, ops)` its own (D35; see "the capability" below).
 mod ClusterNode do
   needs IO
@@ -1489,7 +1489,7 @@ mod ClusterNode do
   -- (from `node_id`/`creation` and from `members`). `node_id` is this node's
   -- id; `next_id(key)` is a per-node counter (SessionAP numbers its sessions
   -- with it).
-  type Ops = {
+  type ClusterOps = {
     node_id            : String,
     stop               : () -> (),
     subscribe          : (NodeEvent -> Unit) -> Int,
@@ -1520,7 +1520,7 @@ mod ClusterNode do
     demonitor_remote   : GlobalPid.Pid -> Int -> ()
   }
 
-  proof cap Live with Ops
+  proof cap Live with ClusterOps
 
   doc """
   Attach a cluster dictionary. With `start`, the only way to obtain a
@@ -1528,7 +1528,7 @@ mod ClusterNode do
   (usually `{ ClusterNode.ops_stub(id) with members: ..., subscribe: ... }`)
   and hands the cap to code written against a real node.
   """
-  fn attach(io : Cap(IO), ops : Ops) : Cap(ClusterNode.Live) do
+  fn attach(io : Cap(IO), ops : ClusterOps) : Cap(ClusterNode.Live) do
     cap_impl(mint_cap(io), ops)
   end
 
@@ -1540,7 +1540,7 @@ mod ClusterNode do
   A dictionary for node [node_id] in which every operation panics, naming
   itself. Override the fields a test uses with record update.
   """
-  fn ops_stub(node_id : String) : Ops do
+  fn ops_stub(node_id : String) : ClusterOps do
     { node_id: node_id,
       stop: fn _ -> unsupported("stop"),
       subscribe: fn _ -> unsupported("subscribe"),
@@ -1572,7 +1572,7 @@ mod ClusterNode do
   end
 
   -- The real dictionary: every operation over the node's backing record.
-  pfn ops_of(h : CnHandle) : Ops do
+  pfn ops_of(h : CnHandle) : ClusterOps do
     { node_id: h.node_id,
       stop: fn _ -> h_stop(h),
       subscribe: fn f -> h_subscribe(h, f),
@@ -1607,7 +1607,7 @@ mod ClusterNode do
     panic("ClusterNode: no cluster dictionary attached to this capability")
   end
 
-  pfn ops(c : Cap(ClusterNode.Live)) : Ops do
+  pfn ops(c : Cap(ClusterNode.Live)) : ClusterOps do
     match cap_dict(c) do
       Some(d) -> d
       None -> no_cluster()

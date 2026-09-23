@@ -162,7 +162,7 @@ end
 ```
 
 **Testing without a network.** Every operation above goes through the capability's
-dictionary, a record of functions (`ClusterNode.Ops`, one field per operation). `start`
+dictionary, a record of functions (`ClusterNode.ClusterOps`, one field per operation). `start`
 attaches the real one. A test attaches its own with `ClusterNode.attach(io, ops)`, and code
 written against a real node then runs against it. `ClusterNode.ops_stub(node_id)` is a
 dictionary whose every operation panics with its own name; override the ones the code under
