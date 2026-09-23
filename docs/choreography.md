@@ -379,8 +379,9 @@ You can also build the list yourself instead of reading the environment. It is a
 
 If your nodes already run a [`ClusterNode`]({{ site.baseurl }}/docs/clustering/#a-running-node-clusternode),
 a role can use it instead of opening connections of its own. The generated
-`<P>_Run.cluster_<Role>(io, node, session, body)` takes the running node and a session id,
-which is any string the roles agree on, fresh for each session:
+`<P>_Run.cluster_<Role>(io, node, session, body)` takes the running node (the
+`Cap(ClusterNode.Live)` that `ClusterNode.start` returned) and a session id, which is any
+string the roles agree on, fresh for each session:
 
 ```march
 match Fan_Run.cluster_C(c, node, "fan-" ++ int_to_string(round), fn (s, st) -> role_c(s, st)) do

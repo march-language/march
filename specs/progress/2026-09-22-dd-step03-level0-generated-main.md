@@ -101,7 +101,16 @@ the process group drains the one process), export.
 ## 4. Loopback and prefer-local
 
 `origin/main` had not moved when this item started (3656afd99) and D35 had not landed,
-so it is built on the current `ClusterHandle`. Diff kept small: `NodeQueue.start_local
+so it was first built on `ClusterHandle`. D35 landed right after (35e8e77ce, #601), and
+the branch merged it: the loopback moved into `h_queue_for` over the backing `CnHandle`
+(so it is behind the `Ops` dictionary like every other operation), and everything in
+this step now takes `Cap(ClusterNode.Live)`. Two consequences for the generated code:
+`ClusterNode.start` takes `Cap(IO)`, and a module other than `ClusterNode` may not
+return the cap it mints, so the generated `main` calls `ClusterNode.start(io,
+Topology.config_from_env())` itself (`Topology.start_failed` reports a failure); a hook
+takes the node as `Cap(ClusterNode.Live)` and its module declares `needs
+ClusterNode.Live`. `Topology.stop(node)` replaces reading the handle's `stopped` flag,
+which the cap no longer exposes. The diff to the D35 files stayed small: `NodeQueue.start_local
 (sink)` (a writer whose negative "fd" names a sink; budget effectively unbounded, so
 credit is bypassed); `ClusterNode` creates one loopback queue at `start` and
 `queue_for(h, own_id)` returns it, its sink routing like the data reader
@@ -109,6 +118,15 @@ credit is bypassed); `ClusterNode` creates one loopback queue at `start` and
 seeds `used` with nothing and no longer adds chosen nodes, and `candidates` puts a
 local offer first (the rest keep their rotation, not rendezvous order: changing that
 would change which node every existing scenario picks).
+
+With D35, placement is also tested through the dictionary, as the plan's 7.2 asks:
+`test/session/topology_placement.march` attaches a fake `ClusterOps` (member table,
+name registry, subscribers) and runs `Topology.place` with real `SessionNode` offers over
+it; a `count(1)` role moves to the node when the peers ranked above it are declared
+dead, and stays while a rejoined peer settles (with `MARCH_PLACEMENT_SETTLE_MS=0` the
+rejoined peer takes it back, which is the perturbation that turns it red). Compiled
+only: the interpreter runs `place`'s background task to completion at spawn.
+`Topology.reconcile_now` exists for such tests.
 
 Acceptance: `test/two_node/cluster_ap_local` (one node: two Echo sessions, a hosted
 session, and a `cluster_<Role>` pair, all local). Restoring the own-node exclusion

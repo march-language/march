@@ -15,6 +15,7 @@ mod TopologyMoveA do
   needs IO.Spawn
   needs IO.Clock
   needs Session.Live
+  needs ClusterNode.Live
 
   @[endpoints]
   protocol Echo do
@@ -28,7 +29,7 @@ mod TopologyMoveA do
 
   -- Print [me]'s offering state each time it changes and then holds for
   -- 1.5 s, until the stop file exists.
-  pfn watch(h : ClusterNode.ClusterHandle, me : String, shown : Bool, seen : Bool, since : Int, stop : String) : () do
+  pfn watch(h : Cap(ClusterNode.Live), me : String, shown : Bool, seen : Bool, since : Int, stop : String) : () do
     if File.exists(stop) do () else
       let now = Topology.offered(h) == ["Echo.Server"]
       let t = unix_time_ms()
@@ -42,7 +43,7 @@ mod TopologyMoveA do
     end
   end
 
-  pfn wait_marker(h : ClusterNode.ClusterHandle, name : String, left : Int) : () do
+  pfn wait_marker(h : Cap(ClusterNode.Live), name : String, left : Int) : () do
     if ClusterNode.lookup(h, name) != None || left <= 0 do () else
       sleep_ms(50)
       wait_marker(h, name, left - 50)
@@ -54,7 +55,7 @@ mod TopologyMoveA do
     let other = "node-b"
     let seeds = Nil
     let port = Env.require_int("MARCH_PORT_A")
-    match ClusterNode.start(ClusterNode.config(me, port, "", seeds, "topo-move-secret", 1)) do
+    match ClusterNode.start(c, ClusterNode.config(me, port, "", seeds, "topo-move-secret", 1)) do
       Err(e) -> panic(e)
       Ok(h) ->
         println(me ++ ": up")
@@ -70,7 +71,7 @@ mod TopologyMoveA do
                               fn () -> Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st))) ])
         watch(h, me, false, false, unix_time_ms(), Env.require("TOPOLOGY_STOP_FILE"))
         println(me ++ ": stopping")
-        ClusterNode.stop(h)
+        Topology.stop(h)
     end
   end
 end

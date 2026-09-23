@@ -15,6 +15,7 @@ mod ClusterJoinB do
   needs IO.NetListen
   needs IO.Spawn
   needs IO.Clock
+  needs ClusterNode.Live
 
   pfn me() : String do "node-b" end
 
@@ -31,7 +32,7 @@ mod ClusterJoinB do
     end
   end
 
-  pfn converged(h : ClusterNode.ClusterHandle, left : Int) : Bool do
+  pfn converged(h : Cap(ClusterNode.Live), left : Int) : Bool do
     if List.length(ClusterNode.members(h)) >= 2 && ClusterNode.link_count(h) >= 2 do true
     else if left <= 0 do false
     else
@@ -40,10 +41,10 @@ mod ClusterJoinB do
     end end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main(c : Cap(IO)) do
     let port = port_of(me())
     let cfg = ClusterNode.config(me(), port, "", Cons("127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A")), Nil), "join-secret", 1)
-    match ClusterNode.start(cfg) do
+    match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         println(me() ++ ": up")

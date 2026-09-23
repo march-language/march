@@ -11627,6 +11627,41 @@ let test_non_main_still_hinted_about_root_cap () =
   Alcotest.(check bool) "a non-main function is still hinted"
     true (has_hint_with ctx "root capability")
 
+(* A proof-cap factory must take the root cap: `mint_cap` is typed
+   `Cap(IO) -> Cap(a)` and amplifying a narrowed cap is a type error, so the
+   narrowing hint could not be acted on (D35: `ClusterNode.start`/`attach`,
+   whose module must `--check` with empty output). Only the module's OWN
+   proof cap counts: a function returning another module's cap is still
+   hinted. *)
+let test_proof_cap_factory_not_hinted_about_root_cap () =
+  let ctx = typecheck {|mod Factory do
+    needs IO
+    proof cap Tok
+    fn mint(io : Cap(IO)) : Cap(Factory.Tok) do
+      mint_cap(io)
+    end
+    fn start(io : Cap(IO)) : Result(Cap(Factory.Tok), String) do
+      Ok(mint(io))
+    end
+  end|} in
+  Alcotest.(check bool) "a factory of the module's own proof cap is not hinted"
+    false (has_hint_with ctx "root capability");
+  let ctx2 = typecheck {|mod Factory2 do
+    needs IO
+    proof cap Tok
+    fn mint(io : Cap(IO)) : Cap(Factory2.Tok) do
+      mint_cap(io)
+    end
+    fn pass(io : Cap(IO), t : Cap(Factory2.Tok)) : Cap(Factory2.Tok) do
+      t
+    end
+    fn other(io : Cap(IO)) : Int do
+      1
+    end
+  end|} in
+  Alcotest.(check bool) "a non-factory in the same module is still hinted"
+    true (has_hint_with ctx2 "root capability")
+
 (* ── Fix round 1: the unused-param exemption must be the DIRECT `Cap(X)`
    form only, not "a capability appears anywhere in the type." A
    `List(Cap(IO.Console))`, a tuple containing a `Cap(IO.Console))`, or a
@@ -17268,6 +17303,7 @@ let compiler_suites =
           Alcotest.test_case "ordinary unused param still warned"         `Quick test_ordinary_unused_param_still_warned;
           Alcotest.test_case "main not nagged about root cap"             `Quick test_main_is_not_nagged_about_root_cap;
           Alcotest.test_case "non-main still hinted about root cap"       `Quick test_non_main_still_hinted_about_root_cap;
+          Alcotest.test_case "proof-cap factory not hinted about root cap" `Quick test_proof_cap_factory_not_hinted_about_root_cap;
           Alcotest.test_case "List(Cap(...)) param still warned"          `Quick test_unused_list_of_cap_param_still_warned;
           Alcotest.test_case "tuple-of-Cap(...) param still warned"       `Quick test_unused_tuple_of_cap_param_still_warned;
           Alcotest.test_case "Cap(...) -> () closure param still warned"  `Quick test_unused_cap_arrow_param_still_warned;

@@ -18,6 +18,7 @@ mod ClusterApLocal do
   needs IO.Spawn
   needs IO.Clock
   needs Session.Live
+  needs ClusterNode.Live
 
   @[endpoints]
   protocol Echo do
@@ -80,7 +81,7 @@ mod ClusterApLocal do
 
   -- An offer registers its name asynchronously (through the node actor):
   -- wait until it is visible before inviting it.
-  pfn visible(h : ClusterNode.ClusterHandle, o : SessionNode.Offer, left : Int) : () do
+  pfn visible(h : Cap(ClusterNode.Live), o : SessionNode.Offer, left : Int) : () do
     if ClusterNode.lookup(h, o.name) != None do ()
     else if left <= 0 do panic("the offer never became visible") else
       sleep_ms(20)
@@ -88,7 +89,7 @@ mod ClusterApLocal do
     end end
   end
 
-  fn session(c : Cap(IO), h : ClusterNode.ClusterHandle, n : Int) : () do
+  fn session(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int) : () do
     match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, n)) do
       Ok(_) -> println("Client: session " ++ int_to_string(n) ++ " done")
       Err(e) -> println("Client: " ++ Echo_Run.error_message(e))
@@ -97,7 +98,7 @@ mod ClusterApLocal do
 
   fn main(c : Cap(IO)) do
     let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "local-secret", 1)
-    match ClusterNode.start(cfg) do
+    match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do

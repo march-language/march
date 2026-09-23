@@ -13,6 +13,7 @@ mod TopologyApp do
   needs IO.Spawn
   needs IO.Clock
   needs Session.Live
+  needs ClusterNode.Live
 
   @[endpoints]
   protocol Echo do
@@ -32,11 +33,12 @@ mod TopologyApp do
   mod Back do
     needs IO.Console
     needs Session.Live
+    needs ClusterNode.Live
 
     type Env = { factor : Int }
 
     -- The pool hook: runs on every node of the pool before any offer opens.
-    fn start(_con : Cap(IO.Console), _node : ClusterNode.ClusterHandle) : Env do
+    fn start(_con : Cap(IO.Console), _node : Cap(ClusterNode.Live)) : Env do
       println("back: hook ran")
       { factor: 10 }
     end
@@ -95,17 +97,18 @@ mod TopologyApp do
     needs IO.Clock
     needs IO.Spawn
     needs Session.Live
+    needs ClusterNode.Live
 
     type Env = { started : Bool }
 
     -- The front hook starts its work in a task and returns at once: offers
     -- open only after every hook has returned.
-    fn start(io : Cap(IO), node : ClusterNode.ClusterHandle) : Env do
+    fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Env do
       let _ = task_spawn(fn _ -> run(io, node))
       { started: true }
     end
 
-    fn run(io : Cap(IO), node : ClusterNode.ClusterHandle) : Int do
+    fn run(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do
       let a = retry(fn _ -> echo(io, node, 4), 200)
       let b = retry(fn _ -> count(io, node, 1), 200)
       let c = retry(fn _ -> count(io, node, 2), 200)
@@ -127,7 +130,7 @@ mod TopologyApp do
       end
     end
 
-    fn echo(io : Cap(IO), node : ClusterNode.ClusterHandle, n : Int) : Option(Int) do
+    fn echo(io : Cap(IO), node : Cap(ClusterNode.Live), n : Int) : Option(Int) do
       let got = Vault.new("front_echo")
       match Echo_Run.initiate_Client(io, node, fn (s, st) ->
           Echo_Client.recv_Answer(s, Echo_Client.send_Ask(s, st, n), fn (m, st2) ->
@@ -138,7 +141,7 @@ mod TopologyApp do
       end
     end
 
-    fn count(io : Cap(IO), node : ClusterNode.ClusterHandle, n : Int) : Option(Int) do
+    fn count(io : Cap(IO), node : Cap(ClusterNode.Live), n : Int) : Option(Int) do
       let got = Vault.new("front_count")
       match Count_Run.initiate_Client(io, node, fn (s, st) ->
           Count_Client.recv_Total(s, Count_Client.send_Add(s, st, n), fn (m, st2) ->

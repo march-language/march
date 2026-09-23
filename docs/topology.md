@@ -148,7 +148,7 @@ modules, that:
   entry state;
 - a bound actor's `init` takes the pool's environment, and the actor handles `Start`,
   `Deliver` and `Cancel` (below);
-- a hook takes `Cap(P)` parameters, then the `ClusterNode.ClusterHandle`, and declares
+- a hook takes `Cap(P)` parameters, then the `Cap(ClusterNode.Live)`, and declares
   its return type;
 - a role's grant, and a hook's `Cap` parameters, fit within a written `caps`;
 - after typechecking, what a pool's hook and roles actually **reach** fits within a
@@ -229,7 +229,7 @@ the pool receives:
 mod Back do
   type Env = { factor : Int }
 
-  fn start(_con : Cap(IO.Console), _node : ClusterNode.ClusterHandle) : Env do
+  fn start(_con : Cap(IO.Console), _node : Cap(ClusterNode.Live)) : Env do
     { factor: 10 }
   end
 end

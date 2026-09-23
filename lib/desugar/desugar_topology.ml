@@ -215,7 +215,7 @@ let cap_of_ty (t : ty) : string option =
 
 let is_handle_ty (t : ty) =
   match t with
-  | TyCon ({ txt = ("ClusterNode.ClusterHandle" | "ClusterHandle"); _ }, []) -> true
+  | TyCon ({ txt = "Cap"; _ }, [ TyCon ({ txt = ("ClusterNode.Live" | "Live"); _ }, []) ]) -> true
   | _ -> false
 
 let is_unit_ty (t : ty) =
@@ -251,7 +251,11 @@ let hook_info f (p : pool) = match p.p_start with Some s -> Hashtbl.find_opt f.f
 
 (** The hook's leading [Cap(P)] parameters, in order. *)
 let hook_caps (hi : fn_info) =
-  List.filter_map (fun (_, t) -> Option.bind t cap_of_ty) hi.fi_params
+  List.filter_map (fun (_, t) ->
+      match t with
+      | Some t when is_handle_ty t -> None
+      | _ -> Option.bind t cap_of_ty)
+    hi.fi_params
 
 (** The pool's environment type, as text: the hook's declared return type,
     or [()] for a pool with no hook. *)
@@ -291,10 +295,10 @@ let check ?(foreign_isolated = false) ?pools (f : facts) (t : t) : string list =
          List.iteri (fun i (pn, ty) ->
              let last = i = n - 1 in
              match ty with
-             | None -> err "pool \"%s\": hook '%s': parameter `%s` needs a type annotation (a hook takes `Cap(P)` parameters and then the `ClusterNode.ClusterHandle`)" p.p_name s pn
+             | None -> err "pool \"%s\": hook '%s': parameter `%s` needs a type annotation (a hook takes `Cap(P)` parameters and then the node, `Cap(ClusterNode.Live)`)" p.p_name s pn
              | Some ty when last ->
                if not (is_handle_ty ty) then
-                 err "pool \"%s\": hook '%s': its last parameter must be the `ClusterNode.ClusterHandle`, not `%s`" p.p_name s (show_ty ty)
+                 err "pool \"%s\": hook '%s': its last parameter must be the node, `Cap(ClusterNode.Live)`, not `%s`" p.p_name s (show_ty ty)
              | Some ty ->
                (match cap_of_ty ty with
                 | None -> err "pool \"%s\": hook '%s': parameter `%s : %s` is not a capability; a hook takes `Cap(P)` parameters and then the handle" p.p_name s pn (show_ty ty)
@@ -304,7 +308,7 @@ let check ?(foreign_isolated = false) ?pools (f : facts) (t : t) : string list =
                      err "pool \"%s\": hook '%s' takes `Cap(%s)`, beyond the pool's written caps [%s]" p.p_name s c (String.concat ", " written)
                    | _ -> ())))
            ps;
-         if n = 0 then err "pool \"%s\": hook '%s' takes no parameters; it takes `Cap(P)` parameters and then the `ClusterNode.ClusterHandle`" p.p_name s;
+         if n = 0 then err "pool \"%s\": hook '%s' takes no parameters; it takes `Cap(P)` parameters and then the node, `Cap(ClusterNode.Live)`" p.p_name s;
          if hi.fi_ret = None then
            err "pool \"%s\": hook '%s' needs a declared return type: it is the environment its roles' bodies receive" p.p_name s;
          if foreign_isolated && not p.p_isolate && List.mem "IO.Foreign" (hook_caps hi) then
@@ -433,7 +437,12 @@ let main_source ?pools (f : facts) (t : t) : string =
   let add fmt = Printf.bprintf b fmt in
   let pools = selected_pools ?pools t in
   add "fn main(topology_io : Cap(IO)) do\n";
-  add "  let topology_node = Topology.start_node()\n";
+  (* Only ClusterNode may hand out a Cap(ClusterNode.Live) (D35), so the
+     node is started here, not by a Topology helper. *)
+  add "  let topology_node = match ClusterNode.start(topology_io, Topology.config_from_env()) do\n";
+  add "    Ok(topology_n) -> topology_n\n";
+  add "    Err(topology_e) -> Topology.start_failed(topology_e)\n";
+  add "  end\n";
   List.iteri (fun i (p : pool) ->
       let env = Printf.sprintf "topology_env_%d" i in
       add "  let topology_roles_%d = if Topology.runs_pool(%S) do\n" i p.p_name;
@@ -441,6 +450,9 @@ let main_source ?pools (f : facts) (t : t) : string =
        | Some s, Some hi ->
          let args =
            List.map (fun (_, ty) ->
+               match ty with
+               | Some t when is_handle_ty t -> "topology_node"
+               | _ ->
                match Option.bind ty cap_of_ty with
                | Some "IO" -> "topology_io"
                | Some _ -> "cap_narrow(topology_io)"

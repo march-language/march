@@ -46,6 +46,7 @@ mod Topology do
   needs IO.NetConnect
   needs IO.NetListen
   needs Session.Live
+  needs ClusterNode.Live
 
   -- ── placement rules and roles ─────────────────────────────────────────
 
@@ -221,13 +222,13 @@ mod Topology do
     on Nop() do state end
   end
 
-  -- Everything `place`, `drain_on_signal` and `supervise` share, found by
-  -- the node's id so the three need only the handle.
+  -- Everything `place`, `drain_on_signal` and `supervise_offers` share,
+  -- found by the node's id so the three need only the node.
   type State = { meta : Vault(Int), offers : Vault(Opened), draining : Vault(Opened),
                  roles : Vault(List(Role)), anchor : Vault(Pid(AnchorState)) }
 
-  pfn state_of(node : ClusterNode.ClusterHandle) : State do
-    let k = node.node_id
+  pfn state_of(node : Cap(ClusterNode.Live)) : State do
+    let k = ClusterNode.node_id(node)
     { meta: Vault.open("topology_meta_" ++ k), offers: Vault.open("topology_offers_" ++ k),
       draining: Vault.open("topology_draining_" ++ k), roles: Vault.open("topology_roles_" ++ k),
       anchor: Vault.open("topology_anchor_" ++ k) }
@@ -245,6 +246,15 @@ mod Topology do
 
   -- Reports go to stdout, prefixed: `print_stderr` exists in both backends
   -- but not in the typechecker's builtin table.
+  -- The node's name for messages: its own membership entry, else its id.
+  pfn label(node : Cap(ClusterNode.Live)) : String do
+    let me = ClusterNode.node_id(node)
+    match List.find(ClusterNode.all_members(node), fn m -> m.node_id == me) do
+      Some(m) -> m.name
+      None -> me
+    end
+  end
+
   pfn report(msg : String) : () do println("topology: " ++ msg) end
 
   -- ── placement ─────────────────────────────────────────────────────────
@@ -257,7 +267,7 @@ mod Topology do
   events are recorded as they arrive; a node that rejoins counts after the
   settling period. Returns once the first evaluation has opened its offers.
   """
-  fn place(node : ClusterNode.ClusterHandle, roles : List(Role)) : () do
+  fn place(node : Cap(ClusterNode.Live), roles : List(Role)) : () do
     let st = state_of(node)
     Vault.set(st.roles, "roles", roles)
     let meta = st.meta
@@ -271,10 +281,10 @@ mod Topology do
     ()
   end
 
-  pfn place_loop(node : ClusterNode.ClusterHandle, st : State) : Int do
+  pfn place_loop(node : Cap(ClusterNode.Live), st : State) : Int do
     sleep_ms(tick_ms())
     if Vault.get(st.meta, "closing") != None do 0
-    else if Vault.get(node.meta, "stopped") != None do 0
+    else if Vault.get(st.meta, "stopped") != None do 0
     else
       reconcile(node, st)
       place_loop(node, st)
@@ -282,7 +292,7 @@ mod Topology do
   end
 
   -- The other nodes eligible for [r], settled, as this node sees them.
-  pfn eligible_others(node : ClusterNode.ClusterHandle, st : State, r : Role, now : Int) : List(String) do
+  pfn eligible_others(node : Cap(ClusterNode.Live), st : State, r : Role, now : Int) : List(String) do
     -- A suspect member still counts: a role moves only once SWIM declares
     -- its node Dead (4.2), not on every missed probe.
     let alive = List.filter_map(ClusterNode.all_members(node), fn m ->
@@ -292,27 +302,34 @@ mod Topology do
       end)
     let settle = settle_ms()
     List.filter(marked(r.name, ClusterNode.names(node)), fn id ->
-      id != node.node_id && List.member(alive, id) && settled(now, Vault.get(st.meta, "r:" ++ id), settle))
+      id != ClusterNode.node_id(node) && List.member(alive, id) && settled(now, Vault.get(st.meta, "r:" ++ id), settle))
   end
 
-  pfn reconcile(node : ClusterNode.ClusterHandle, st : State) : () do
+  doc """
+  Re-evaluate [node]'s placement now, as the next tick would. For tests that
+  drive membership through a fake dictionary and should not wait for a tick
+  (run them with a long MARCH_PLACEMENT_TICK_MS).
+  """
+  fn reconcile_now(node : Cap(ClusterNode.Live)) : () do reconcile(node, state_of(node)) end
+
+  pfn reconcile(node : Cap(ClusterNode.Live), st : State) : () do
     let labels = node_labels()
     let now = unix_time_ms()
     let roles = Vault.get_or(st.roles, "roles", Nil)
     List.each(roles, fn r -> reconcile_role(node, st, labels, now, r))
   end
 
-  pfn reconcile_role(node : ClusterNode.ClusterHandle, st : State, labels : List(String), now : Int, r : Role) : () do
+  pfn reconcile_role(node : Cap(ClusterNode.Live), st : State, labels : List(String), now : Int, r : Role) : () do
     let here = eligible_here(r.place, labels)
     if ranked(r.place) do mark(node, st, r.name, here) else () end
     let others = if ranked(r.place) do eligible_others(node, st, r, now) else Nil end
-    let want = wants(r.place, r.name, node.node_id, labels, others)
+    let want = wants(r.place, r.name, ClusterNode.node_id(node), labels, others)
     match Vault.get(st.offers, r.name) do
       None ->
         if want do open_role(st, r) else () end
       Some(o) ->
         if not(want) do
-          report(r.name ++ ": no longer placed on " ++ node.name ++ "; draining its offer")
+          report(r.name ++ ": no longer placed on " ++ label(node) ++ "; draining its offer")
           retire(st, r.name, o)
         else if Vault.get(st.meta, "supervise") != None && not(healthy(o)) do
           report(r.name ++ ": its offer or hosting actor died; offering it again")
@@ -322,8 +339,8 @@ mod Topology do
   end
 
   -- Register (or release) this node's marker for a ranked role.
-  pfn mark(node : ClusterNode.ClusterHandle, st : State, role_name : String, here : Bool) : () do
-    let name = marker(role_name, node.node_id)
+  pfn mark(node : Cap(ClusterNode.Live), st : State, role_name : String, here : Bool) : () do
+    let name = marker(role_name, ClusterNode.node_id(node))
     let held = ClusterNode.lookup(node, name) != None
     if here && not(held) do
       let _ = ClusterNode.register(node, name, anchor(st))
@@ -361,13 +378,13 @@ mod Topology do
   end
 
   doc "The roles [node] offers right now, by name, sorted."
-  fn offered(node : ClusterNode.ClusterHandle) : List(String) do
+  fn offered(node : Cap(ClusterNode.Live)) : List(String) do
     let st = state_of(node)
     List.sort_by(Vault.keys(st.offers), fn (a, b) -> a < b)
   end
 
   doc "The actor answering invitations for [role_name]'s open offer on [node], if one is open."
-  fn offer_worker(node : ClusterNode.ClusterHandle, role_name : String) : Option(Pid(SessionNode.OfferCount)) do
+  fn offer_worker(node : Cap(ClusterNode.Live), role_name : String) : Option(Pid(SessionNode.OfferCount)) do
     let st = state_of(node)
     match Vault.get(st.offers, role_name) do
       Some(o) -> Some(o.ap.worker)
@@ -384,7 +401,7 @@ mod Topology do
   end
 
   doc "Sessions still running on [node]'s offers, open or draining."
-  fn running(node : ClusterNode.ClusterHandle) : Int do
+  fn running(node : Cap(ClusterNode.Live)) : Int do
     let st = state_of(node)
     let sum = fn (acc, kv) -> match kv do (_, o) -> acc + active(o) end
     List.fold_left(Vault.all(st.draining), List.fold_left(Vault.all(st.offers), 0, sum), sum)
@@ -396,7 +413,7 @@ mod Topology do
   Stop placing and close every offer of [node] (running sessions finish):
   what SIGTERM does under `drain_on_signal`. Returns at once.
   """
-  fn close_all(node : ClusterNode.ClusterHandle) : () do
+  fn close_all(node : Cap(ClusterNode.Live)) : () do
     let st = state_of(node)
     Vault.set(st.meta, "closing", 1)
     List.each(Vault.all(st.offers), fn kv -> match kv do (name, o) -> retire(st, name, o) end)
@@ -409,16 +426,16 @@ mod Topology do
   exits 1, naming how many sessions it cut. (Epoch drains are build step 6.)
   A second signal escapes the watcher and stops the process at once.
   """
-  fn drain_on_signal(node : ClusterNode.ClusterHandle, soft_ms : Int, hard_ms : Int) : () do
+  fn drain_on_signal(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int) : () do
     Signal.watch(Signal.Term, fn -> drain(node, soft_ms, hard_ms))
     Signal.watch(Signal.Int, fn -> drain(node, soft_ms, hard_ms))
   end
 
   doc "Drain [node] now, as SIGTERM does under `drain_on_signal`."
-  fn drain(node : ClusterNode.ClusterHandle, soft_ms : Int, hard_ms : Int) : () do
+  fn drain(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int) : () do
     let st = state_of(node)
     if Vault.get(st.meta, "closing") != None do () else
-      report("draining " ++ node.name ++ " (soft " ++ int_to_string(soft_ms) ++ " ms, hard "
+      report("draining " ++ label(node) ++ " (soft " ++ int_to_string(soft_ms) ++ " ms, hard "
              ++ int_to_string(hard_ms) ++ " ms)")
       close_all(node)
       let t0 = unix_time_ms()
@@ -427,15 +444,15 @@ mod Topology do
     end
   end
 
-  pfn drain_wait(node : ClusterNode.ClusterHandle, soft_ms : Int, hard_ms : Int, t0 : Int, warned : Bool) : Int do
+  pfn drain_wait(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int, t0 : Int, warned : Bool) : Int do
     let n = running(node)
     let spent = unix_time_ms() - t0
     if n == 0 do
-      report("drained " ++ node.name)
+      report("drained " ++ label(node))
       process_exit(0)
       0
     else if spent >= hard_ms do
-      report("hard deadline: stopping " ++ node.name ++ " with " ++ int_to_string(n) ++ " session(s) still running")
+      report("hard deadline: stopping " ++ label(node) ++ " with " ++ int_to_string(n) ++ " session(s) still running")
       process_exit(1)
       1
     else
@@ -456,18 +473,31 @@ mod Topology do
   drains. A process whose `main` returned would exit, taking its offers
   with it.
   """
-  fn supervise_offers(node : ClusterNode.ClusterHandle) : () do
+  fn supervise_offers(node : Cap(ClusterNode.Live)) : () do
     let st = state_of(node)
     Vault.set(st.meta, "supervise", 1)
-    supervise_wait(node)
+    supervise_wait(st)
   end
 
-  pfn supervise_wait(node : ClusterNode.ClusterHandle) : () do
-    if Vault.get(node.meta, "stopped") != None do ()
+  pfn supervise_wait(st : State) : () do
+    if Vault.get(st.meta, "stopped") != None do ()
     else
       sleep_ms(250)
-      supervise_wait(node)
+      supervise_wait(st)
     end
+  end
+
+  doc """
+  Stop [node] and everything placed on it: close every offer (running
+  sessions are cut when the node goes), end placement and `supervise_offers`,
+  then `ClusterNode.stop`. For a program (a test, say) that ends on its own
+  rather than on a signal.
+  """
+  fn stop(node : Cap(ClusterNode.Live)) : () do
+    let st = state_of(node)
+    close_all(node)
+    Vault.set(st.meta, "stopped", 1)
+    ClusterNode.stop(node)
   end
 
   -- ── hooks ─────────────────────────────────────────────────────────────
@@ -517,15 +547,16 @@ mod Topology do
                        Env.get("MARCH_CLUSTER_SECRET", "march-cluster"), creation)
   end
 
-  doc "Start the node from the environment (`config_from_env`), or stop the program saying why."
-  fn start_node() : ClusterNode.ClusterHandle do
-    match ClusterNode.start(config_from_env()) do
-      Ok(h) -> h
-      Err(e) ->
-        report(e)
-        process_exit(1)
-        panic(e)
-    end
+  doc """
+  Report that the node could not start ([why]) and stop the program with
+  status 1. The generated `main` starts the node itself --
+  `ClusterNode.start(io, Topology.config_from_env())` -- because only
+  `ClusterNode` may hand out a `Cap(ClusterNode.Live)`.
+  """
+  fn start_failed(why : String) : a do
+    report(why)
+    process_exit(1)
+    panic(why)
   end
 
   doc """

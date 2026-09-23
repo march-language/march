@@ -1825,6 +1825,34 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/stream_peers.expected stream_peers_interp.out)))
 
+; `Cap(ClusterNode.Live)` as a seam (D35, distributed-deploys step 4,
+; 2026-09-23): a toy placement written against the cluster capability only,
+; driven by a fake dictionary attached with `ClusterNode.attach(io, ops)`.
+; The test injects NodeDead/NodeUp through the subscribers the dictionary
+; collected and asserts which roles moved. No sockets, no node actor. Both
+; backends, one golden: the dictionary's closures cross `cap_dict` on both.
+(rule
+ (targets cluster_placement_bin cluster_placement.out cluster_placement_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file session/cluster_placement.march))
+ (action
+  (progn
+   (with-stdout-to cluster_placement_interp.out
+     (run %{exe:../bin/main.exe} session/cluster_placement.march))
+   (run %{exe:../bin/main.exe} --compile -o cluster_placement_bin
+        session/cluster_placement.march)
+   (with-stdout-to cluster_placement.out (system "./cluster_placement_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/cluster_placement.expected cluster_placement.out)))
+
+(rule
+ (alias runtest)
+ (action (diff session/cluster_placement.expected cluster_placement_interp.out)))
+
 ; Crash branches in one process (design Part B, 2026-09-20): the logging
 ; protocol with `may crash C`, run twice on a transport that can mark a role
 ; gone -- once with C alive, once with C "crashed", where I takes its crash
@@ -9930,3 +9958,21 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/topology_hook_timeout.expected native_topology_hook_timeout.out)))
+
+; ── Topology.place over a FAKE cluster dictionary (D35's seam): a count(1)
+; ── role moves to this node when the peers ranked above it are declared
+; ── dead, and stays while a rejoined peer settles. No sockets; compiled only
+; ── (place runs a background task).
+(rule
+ (targets topology_placement_bin topology_placement.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib) (source_tree ../runtime)
+       (file session/topology_placement.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o topology_placement_bin session/topology_placement.march)
+   (with-stdout-to topology_placement.out
+    (system "MARCH_PLACEMENT_TICK_MS=600000 MARCH_PLACEMENT_SETTLE_MS=600000 ./topology_placement_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/topology_placement.expected topology_placement.out)))

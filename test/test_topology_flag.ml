@@ -35,6 +35,7 @@ let entry_src ?(back = "") ?(extra = "") ?(needs = "") () =
   needs IO
   needs IO.Console
   needs Session.Live
+  needs ClusterNode.Live
 %s
   @[endpoints]
   protocol Checkout do
@@ -46,6 +47,7 @@ let entry_src ?(back = "") ?(extra = "") ?(needs = "") () =
   mod Back do
     needs IO.Console
     needs Session.Live
+    needs ClusterNode.Live
     type Env = { factor : Int }
 %s
   end
@@ -53,11 +55,12 @@ let entry_src ?(back = "") ?(extra = "") ?(needs = "") () =
   mod Front do
     needs IO
     needs Session.Live
-    fn start(io : Cap(IO), node : ClusterNode.ClusterHandle) : Int do
+    needs ClusterNode.Live
+    fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do
       let _ = task_spawn(fn _ -> buy(io, node))
       0
     end
-    fn buy(io : Cap(IO), node : ClusterNode.ClusterHandle) : Int do
+    fn buy(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do
       match Checkout_Run.initiate_Client(io, node, fn (s, st) ->
           Checkout_Client.recv_Receipt(s, Checkout_Client.send_Order(s, st, 1), fn (_m, st2) ->
             Checkout_Client.close(s, st2))) do
@@ -71,7 +74,7 @@ end
 |} needs back extra
 
 let hook = {|
-    fn start(_c : Cap(IO.Console), _node : ClusterNode.ClusterHandle) : Env do { factor: 10 } end
+    fn start(_c : Cap(IO.Console), _node : Cap(ClusterNode.Live)) : Env do { factor: 10 } end
 |}
 
 let serve_one = {|
@@ -261,7 +264,7 @@ let test_actor_shape () =
 
 let test_hook_signature () =
   let h = {|
-    fn start(n : Int, _node : ClusterNode.ClusterHandle) : Env do { factor: n } end
+    fn start(n : Int, _node : Cap(ClusterNode.Live)) : Env do { factor: n } end
 |} in
   expect_error (run ~src:(entry_src ~back:(h ^ serve_one) ()) ~digest_text:(digest ()) ())
     "hook 'App.Back.start': parameter `n : Int` is not a capability"
@@ -278,7 +281,7 @@ let test_reach_beyond_written_caps () =
   (* The hook takes only the handle but prints: its REACH is IO.Console,
      which the pool's written caps do not cover. Found after typechecking. *)
   let h = {|
-    fn start(_node : ClusterNode.ClusterHandle) : Env do
+    fn start(_node : Cap(ClusterNode.Live)) : Env do
       println("hi")
       { factor: 1 }
     end

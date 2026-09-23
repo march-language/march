@@ -17,6 +17,7 @@ mod ClusterFanLateCrashA do
   needs IO.Spawn
   needs IO.Clock
   needs Session.Live
+  needs ClusterNode.Live
 
   @[endpoints]
   protocol Fan do
@@ -26,13 +27,8 @@ mod ClusterFanLateCrashA do
   end
 
 
-  pfn join() : ClusterNode.ClusterHandle do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "fan-secret", 1)
-    match ClusterNode.start(cfg) do
-      Err(e) -> panic(e)
-      Ok(h) ->
-        if ClusterNode.await_members(h, 2, 120000) do h else panic("node-a: never joined") end
-    end
+  pfn joined(h : Cap(ClusterNode.Live)) : () do
+    if ClusterNode.await_members(h, 2, 120000) do () else panic("node-a: never joined") end
   end
 
   pfn wait_for(path : String) : () do
@@ -52,7 +48,12 @@ mod ClusterFanLateCrashA do
   end
 
   fn main(c : Cap(IO)) do
-    let h = join()
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "fan-secret", 1)
+    let h = match ClusterNode.start(c, cfg) do
+      Ok(h0) -> h0
+      Err(e) -> panic(e)
+    end
+    joined(h)
     println("node-a: up")
     match Fan_Run.cluster_A(c, h, "fan-1", fn (s, st) -> role_a(s, st)) do
       Ok(_) -> println("A: closed")

@@ -15,6 +15,7 @@ mod TopologyPlace do
   needs IO.Process
   needs IO.Signal
   needs Session.Live
+  needs ClusterNode.Live
 
   @[endpoints]
   protocol Echo do
@@ -29,7 +30,7 @@ mod TopologyPlace do
 
   pfn show(xs : List(String)) : String do "[" ++ String.join(xs, ", ") ++ "]" end
 
-  pfn wait_offered(h : ClusterNode.ClusterHandle, want : List(String), left : Int) : Bool do
+  pfn wait_offered(h : Cap(ClusterNode.Live), want : List(String), left : Int) : Bool do
     if Topology.offered(h) == want do true
     else if left <= 0 do false else
       sleep_ms(20)
@@ -38,7 +39,7 @@ mod TopologyPlace do
   end
 
   fn main(c : Cap(IO)) do
-    let h = match ClusterNode.start(ClusterNode.config("topo-1", 0, "", Nil, "topo-secret", 1)) do
+    let h = match ClusterNode.start(c, ClusterNode.config("topo-1", 0, "", Nil, "topo-secret", 1)) do
       Ok(h) -> h
       Err(e) -> panic(e)
     end
@@ -49,7 +50,7 @@ mod TopologyPlace do
                         mk("Echo.Counted", Topology.count(1)) ])
     println("offered: " ++ show(Topology.offered(h)))
     -- A ranked role registers this node's marker (asynchronously).
-    let marker = Topology.marker("Echo.Counted", h.node_id)
+    let marker = Topology.marker("Echo.Counted", ClusterNode.node_id(h))
     if wait_marker(h, marker, 5000) do println("marker registered") else println("marker missing") end
     -- Supervision: kill one offer's actor; the role is offered again.
     let _ = task_spawn(fn _ -> do
@@ -71,7 +72,7 @@ mod TopologyPlace do
     println("the drain never exited")
   end
 
-  pfn wait_marker(h : ClusterNode.ClusterHandle, name : String, left : Int) : Bool do
+  pfn wait_marker(h : Cap(ClusterNode.Live), name : String, left : Int) : Bool do
     if ClusterNode.lookup(h, name) != None do true
     else if left <= 0 do false else
       sleep_ms(20)
@@ -79,7 +80,7 @@ mod TopologyPlace do
     end end
   end
 
-  pfn wait_reoffered(h : ClusterNode.ClusterHandle, role : String, old : Int, left : Int) : Bool do
+  pfn wait_reoffered(h : Cap(ClusterNode.Live), role : String, old : Int, left : Int) : Bool do
     let now = match Topology.offer_worker(h, role) do
       Some(p) -> pid_to_int(p)
       None -> old
