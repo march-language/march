@@ -262,6 +262,7 @@ verified directly against the compiler.)
 
 ```march
 mod BasicSupervision do
+  needs IO
   needs IO.Console
 
   actor Counter do
@@ -298,7 +299,8 @@ mod BasicSupervision do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
     -- Spawn supervisor: it auto-starts Counter and Logger
     let sup = spawn(AppSupervisor)
 
@@ -307,7 +309,7 @@ mod BasicSupervision do
                    None    -> -1
                    Some(n) -> n
                  end
-    let c1 = pid_of_int(c1_int)
+    let c1 = Actor.pid_from_int(c, c1_int)
 
     println("Counter alive: " ++ bool_to_string(is_alive(c1)))
 
@@ -325,7 +327,7 @@ mod BasicSupervision do
                    None    -> -1
                    Some(n) -> n
                  end
-    let c2 = pid_of_int(c2_int)
+    let c2 = Actor.pid_from_int(c, c2_int)
     println("New counter PID: " ++ int_to_string(c2_int))
     println("New counter alive: " ++ bool_to_string(is_alive(c2)))
 
@@ -570,6 +572,7 @@ Wrap the worker in a `one_for_one` supervisor. Now a crash is *recovered from*: 
 
 ```march
 mod JobProcessorV2 do
+  needs IO
   needs IO.Console
 
   actor Worker do
@@ -593,13 +596,14 @@ mod JobProcessorV2 do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
     let sup = spawn(JobSupervisor)
     let w_int = match get_actor_field(sup, "worker") do
                   None    -> -1
                   Some(n) -> n
                 end
-    let w = pid_of_int(w_int)
+    let w = Actor.pid_from_int(c, w_int)
     send(w, Process(1))
     run_until_idle()
 
@@ -610,7 +614,7 @@ mod JobProcessorV2 do
                    Some(n) -> n
                  end
     println("worker restarted, alive: "
-            ++ bool_to_string(is_alive(pid_of_int(w2_int))))
+            ++ bool_to_string(is_alive(Actor.pid_from_int(c, w2_int))))
     run_until_idle()
   end
 

@@ -1,0 +1,118 @@
+-- `on_stop` is bounded by the stop timeout: a callback still running at the
+-- deadline is killed there, and `stop` returns. specs/lang/actors.md,
+-- "on_stop".
+--
+-- The callback blocks in `receive()`, which it can never satisfy: a draining
+-- actor accepts no new messages. What it managed before blocking is kept (its
+-- first note reaches the log); nothing after the block runs.
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+
+  type GetLog = GetLog
+  type LogState = { lines : List(String) }
+
+  actor Log do
+    state { lines : List(String) }
+    init  { lines: [] }
+
+    on Read(reply_to) do
+      Actor.reply(reply_to, List.reverse(state.lines))
+      state
+    end
+
+    on Note(s : String) do
+      { lines: Cons(s, state.lines) }
+    end
+  end
+
+  -- Each actor is handed the Log's Pid in a message and keeps it in state:
+  -- a handler has no capability in scope, so it cannot look the Log up by
+  -- name (Actor.whereis takes a Cap(Actor.Introspect)).
+  fn note(log : Option(Pid(LogState)), s : String) do
+    match log do
+      Some(l) -> send(l, Note(s))
+      None    -> None
+    end
+  end
+
+  actor Stuck do
+    state { n : Int, log : Option(Pid(LogState)) }
+    init  { n: 0, log: None }
+
+    on StuckLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
+
+    on Work(k : Int) do
+      { state with n: state.n + k }
+    end
+
+    on_stop do
+      note(state.log, "stuck: before the block, n=" ++ int_to_string(state.n))
+      let _m = receive()
+      note(state.log, "stuck: after the block (must never appear)")
+    end
+  end
+
+  actor Sup do
+    state { s : Int, log : Option(Pid(LogState)) }
+    init  { s: 0, log: None }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Stuck s shutdown 200
+    end
+
+    on SupLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
+
+    on_stop do
+      note(state.log, "sup: on_stop, after its child was cut off")
+    end
+  end
+
+  fn child(intro, sup, field) do
+    match get_actor_field(sup, field) do
+      None    -> Actor.pid_from_int(intro, -1)
+      Some(n) -> Actor.pid_from_int(intro, n)
+    end
+  end
+
+  fn dump(log) do
+    match Actor.call(log, GetLog, 5000) do
+      Ok(ls) -> List.each(ls, fn l -> println("  log: " ++ l))
+      Err(e) -> println("  log error: " ++ e)
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
+    let log = spawn(Log)
+
+    println("-- Actor.stop(pid, 200): the blocked on_stop is killed at the deadline")
+    let w = spawn(Stuck)
+    send(w, StuckLog(log))
+    send(w, Work(9))
+    let t0 = unix_time_ms()
+    println("stop: " ++ bool_to_string(Actor.stop(w, 200)))
+    let took = unix_time_ms() - t0
+    -- Waited out the budget (it did not give up on the callback early), and
+    -- no longer (it did not wait for a callback that can never finish).
+    println("waited for the deadline: " ++ bool_to_string(took >= 190))
+    println("returned at the deadline: " ++ bool_to_string(took < 3000))
+    println("dead: " ++ bool_to_string(is_alive(w) == false))
+    dump(log)
+
+    println("-- a child spec's `shutdown 200` bounds the child's on_stop the same way")
+    let sup = spawn(Sup)
+    send(sup, SupLog(log))
+    send(child(intro, sup, "s"), StuckLog(log))
+    println("stop: " ++ bool_to_string(Actor.stop(sup, 5000)))
+    println("supervisor dead: " ++ bool_to_string(is_alive(sup) == false))
+    dump(log)
+  end
+end

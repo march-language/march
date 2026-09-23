@@ -1,4 +1,5 @@
 mod Main do
+  needs IO
   needs IO.Console
 
   actor Counter do
@@ -7,20 +8,21 @@ mod Main do
     on Bump() do { n: state.n + 1 } end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let a = spawn(Counter)
     println("register a: " ++ bool_to_string(Actor.register(a, "worker")))
-    println("listed before kill: " ++ bool_to_string(List.member(Actor.registered(), "worker")))
+    println("listed before kill: " ++ bool_to_string(List.member(Actor.registered(intro), "worker")))
     kill(a)
     run_until_idle()
     -- Task 5: registry_retire_actor must have dropped "worker" from the
     -- forward table (and a's reverse index) by now, so it no longer shows
     -- up in Actor.registered() even though nothing explicitly unregistered
     -- it. Before this task the entry would linger forever.
-    println("listed after kill: " ++ bool_to_string(List.member(Actor.registered(), "worker")))
+    println("listed after kill: " ++ bool_to_string(List.member(Actor.registered(intro), "worker")))
     let b = spawn(Counter)
     println("register b: " ++ bool_to_string(Actor.register(b, "worker")))
-    match Actor.whereis("worker") do
+    match Actor.whereis(intro, "worker") do
       Some(_) -> println("resolved after reuse: true")
       None    -> println("resolved after reuse: false")
     end

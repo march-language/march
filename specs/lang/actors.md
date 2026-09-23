@@ -29,6 +29,9 @@ An actor declaration has three parts:
 - `init { ... }`: the initial state value
 - `on Msg(...) do ... end`: message handlers, each returning the new state
 
+and, optionally, `on_stop do ... end`: a terminate callback run on a graceful stop
+(see [Stopping an Actor](#stopping-an-actor)).
+
 ```march
 actor Counter do
   state { value : Int }
@@ -276,6 +279,92 @@ is the one lifecycle observation that is **an exact byte match interpreted vs co
 golden witness `g37_actor_lifecycle` pins `spawn → is_alive true → kill → is_alive false`).
 The operational rules for `kill`/`is_alive` are in [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.6.
 
+### Graceful stop: `Actor.stop`
+
+`kill` is immediate and drops whatever is queued. `Actor.stop(pid, timeout_ms)` is the
+lossless form: the actor accepts no new messages (a `send` to it returns `None`), works
+off the messages already queued, and then dies a **Normal** death, which no restart type
+restarts. `stop` is synchronous: it returns once the actor is dead, or once `timeout_ms`
+has passed and the actor has been killed. A negative timeout waits indefinitely; `0`
+discards the queue as soon as the in-flight handler returns. It returns `false` for an
+actor that was already dead or already stopping.
+
+Stopping a supervisor stops its children first, in **reverse declaration order**, each
+with its own `shutdown` budget from the child spec (`W w shutdown 5000`, `shutdown
+infinity`, `shutdown brutal`; default 5 seconds), and detaches each child before stopping
+it so the teardown runs no restart strategy.
+
+An actor may stop itself from a handler (`Actor.stop(self, 1000)`): the handler finishes,
+its returned state is installed, the rest of the queue drains, and the actor dies.
+
+### `on_stop`: the terminate callback
+
+An actor can run code of its own at shutdown (flush a buffer, checkpoint state, hand
+unfinished work back to a queue) by declaring one `on_stop` block among its handlers:
+
+```march
+type StoreState = { saved : Int }   -- the Store actor's state record
+
+actor Batcher do
+  state { buf : List(String), store : Option(Pid(StoreState)) }
+  init  { buf: [], store: None }
+
+  on UseStore(s : Pid(StoreState)) do
+    { state with store: Some(s) }
+  end
+
+  on Append(s : String) do
+    { state with buf: Cons(s, state.buf) }
+  end
+
+  -- Hand whatever was batched to the store before dying.
+  on_stop do
+    match state.store do
+      Some(store) -> send(store, Save(List.reverse(state.buf)))
+      None        -> None
+    end
+  end
+end
+```
+
+The Store's Pid arrives in a message and is kept in state: a handler has no
+capability in scope, so it cannot look an actor up by name with
+`Actor.whereis`, which takes a `Cap(Actor.Introspect)`.
+
+Inside `on_stop`, `state` is the **final** state (after the drain) and `self` is the
+actor's own Pid, exactly as in a handler; there are no message parameters, and the
+block's value is discarded (a dying actor has no next state). The semantics follow
+OTP's `terminate/2`:
+
+1. **It runs on a graceful stop:** `Actor.stop` on the actor, a self-stop, or its
+   supervisor's teardown with a non-`brutal` `shutdown`. It runs on the actor's own
+   thread, after the drain and before the Normal death, so it has finished by the
+   time `Actor.stop` returns.
+2. **It may send messages**, and may block on a reply (`Actor.call`), within the budget
+   below. The actor itself is draining, so messages sent *to* it are refused.
+3. **A failure inside it is logged and the shutdown continues.** A panic in `on_stop`
+   prints `march: actor on_stop callback failed (the actor still stops): panic: ...`
+   to stderr and the actor dies Normal as if `on_stop` had returned: it is not a crash,
+   so no supervisor restarts it, and a tree teardown proceeds to the next child.
+4. **It does not run on the brutal path.** `kill(pid)`, a crash, and a child spec's
+   `shutdown brutal` end the actor without running it. That is what brutal means.
+5. **It is bounded by the stop timeout.** The `timeout_ms` of `Actor.stop` (or the
+   child spec's `shutdown` budget) covers the drain and `on_stop` together; if
+   `on_stop` has not finished when it runs out, the actor is killed there. A stop
+   whose deadline has already passed after the drain skips `on_stop` entirely.
+
+Both backends implement the same rules, and each is pinned compiled and interpreted by
+`test/native/actor_on_stop*.march`. Limits to know:
+
+- A **self-stop** has no outside waiter to enforce the deadline, so it bounds the drain
+  but cannot cut a blocked `on_stop` short.
+- The interpreter cannot preempt running code, so there the deadline binds only an
+  `on_stop` that *blocks* (a `receive()` it cannot satisfy waits out the deadline and
+  the actor is killed); a compute loop in `on_stop` runs to completion.
+- Under `--hot-reload`, the callback registered is the one from the code the actor was
+  spawned with; draining across a reload is still open
+  (`specs/todos/2026-08-12-graceful-shutdown-and-drain.md`).
+
 ## Monitoring Actor Death
 
 `monitor(watcher, target)` delivers a control-plane `Down(ref, target_pid, reason)`
@@ -342,7 +431,7 @@ registry hands out a stable string name instead:
 
 ```march
 mod Main do
-  needs IO.Console
+  needs IO
 
   actor Counter do
     state { n : Int }
@@ -350,13 +439,14 @@ mod Main do
     on Bump() do { n: state.n + 1 } end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
     let pid = spawn(Counter)
     println("registered: " ++ bool_to_string(Actor.register(pid, "counter")))
-    println("names: " ++ int_to_string(List.length(Actor.registered())))
+    println("names: " ++ int_to_string(List.length(Actor.registered(c))))
 
     -- Resolve the name once, then reuse the Pid for the whole burst.
-    match Actor.whereis("counter") do
+    match Actor.whereis(c, "counter") do
       None -> println("counter is unavailable right now — retry")
       Some(here) ->
         let _ = send(here, Bump())
@@ -373,11 +463,57 @@ end
 |----------|---------|-------------|
 | `Actor.register(pid, name)` | `Bool` | Bind `name` to `pid`. `false` if `pid` is already dead, or if `name` is currently held by a *live* actor. |
 | `Actor.unregister(name)` | `Bool` | Release the name. `false` if it was not registered. |
-| `Actor.whereis(name)` | `Option(Pid)` | The actor currently holding `name`. |
-| `Actor.registered()` | `List(String)` | Every name currently bound; order unspecified. |
+| `Actor.whereis(c, name)` | `Option(Pid)` | The actor currently holding `name`. `c : Cap(Actor.Introspect)`. |
+| `Actor.registered(c)` | `List(String)` | Every name currently bound; order unspecified. |
 
 A name is released automatically when its actor dies, so a name never resolves to a dead
 Pid and you do not have to unregister from a crash path.
+
+### Introspection is a capability
+
+A Pid is an unforgeable reference: code that was never handed one cannot message the
+actor behind it. Four operations would break that, since each turns something anyone
+can write down (an integer, a name, nothing at all) into a Pid: `Actor.pid_from_int`,
+`Actor.whereis`, `Actor.list` and `Actor.registered`. They take a
+`Cap(Actor.Introspect)`, a proof capability that only `Actor.introspect(io : Cap(IO))`
+mints. Mint it once in `main`, which holds the root capability, and forward it to the
+code that needs it:
+
+```march
+mod Main do
+  needs IO
+  needs Actor.Introspect
+
+  fn child_of(c : Cap(Actor.Introspect), sup, field : String) do
+    match get_actor_field(sup, field) do
+      Some(n) -> Actor.pid_from_int(c, n)
+      None    -> Actor.pid_from_int(c, -1)
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
+    let sup = spawn(Sup)
+    send(child_of(c, sup, "worker"), Work())
+  end
+end
+```
+
+A function that forwards the cap through its signature declares `needs Actor.Introspect`,
+as with any proof capability declared elsewhere. `Actor.register` and `Actor.unregister`
+stay unprivileged: registering a Pid you hold is not authority; resolving a name you were
+never handed is. The raw builtins behind these wrappers (`pid_of_int`,
+`actor_pid_indices`, `actor_whereis`, `actor_registered`) are internal to the standard
+library; a program that calls one is rejected at typecheck time with the wrapper to use:
+
+```
+`pid_of_int` is internal to the standard library; use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)
+```
+
+Because `Actor.introspect` takes `Cap(IO)`, a role body or hook under a narrower grant
+(say `Cap(IO.NetConnect)`) cannot mint the cap itself; the composition root does, and
+hands it down. Cross-node references (`GlobalPid.make`, `GlobalRegistry.lookup`) are not
+covered: unforgeability is a process property first.
 
 `whereis` returns an `Option` because a name can be *momentarily* unresolvable. While a
 supervised child is being respawned (in particular while it waits out its restart backoff)
@@ -764,8 +900,8 @@ compiled programs use `supervise`.
 
 Supervision observation is an exact match on both backends as of 2026-07-08: the compiled
 supervisor runs each declared child's `init` at `spawn(Sup)`, and `get_actor_field(sup, …)`
-+ `pid_of_int(…)` (the surface way to read a supervised child's pid out of the supervisor
-state) resolve correctly compiled (a real shape-registry lookup and a safe dead-actor
++ `Actor.pid_from_int(c, …)` (the surface way to read a supervised child's pid out of the
+supervisor state; `c` is the `Cap(Actor.Introspect)` minted by `Actor.introspect`) resolve correctly compiled (a real shape-registry lookup and a safe dead-actor
 fallback, respectively, in `runtime/march_extras.c`/`runtime/march_runtime.c`; no longer
 stubs). `examples/supervision_strategies.march` runs clean (exit 0) compiled, exercising
 all three restart strategies (`one_for_one`/`one_for_all`/`rest_for_one`).
@@ -870,15 +1006,16 @@ end
 | `Scheduler.runq_depth()` | `Int` | Cross-thread global run-queue depth (instantaneous) |
 | `Scheduler.dropped_messages()` | `Int` | Messages dropped by bounded-mailbox overflow policies |
 | `Scheduler.stat(i)` | `Int` | Raw stat by index (`0`=live procs, `1`=total spawned, `2`=runq depth, `3`=stack-alloc failures, `4`=dropped messages, `5`=stacks recycled, `6`=pending timers; unknown index reads `0`) |
-| `Actor.top_by_mailbox(n)` | `List((Pid, Int))` | The `n` deepest mailboxes right now, deepest first, as `(pid, depth)` pairs |
-| `Actor.over_mailbox(t)` | `List((Pid, Int))` | Every actor whose mailbox is deeper than `t`, in spawn order: the growing-mailbox alarm, polled |
+| `Actor.top_by_mailbox(c, n)` | `List((Pid, Int))` | The `n` deepest mailboxes right now, deepest first, as `(pid, depth)` pairs; `c : Cap(Actor.Introspect)` |
+| `Actor.over_mailbox(c, t)` | `List((Pid, Int))` | Every actor whose mailbox is deeper than `t`, in spawn order: the growing-mailbox alarm, polled |
 
 The interpreted backend reports the subset that's meaningful without the C scheduler
 (live actor count); everything else reads `0` on both backends rather than erroring.
 
 `Scheduler` answers "is the system behind?". "*Which* actor is behind?" is
-`Actor.top_by_mailbox(n)` and `Actor.over_mailbox(threshold)`, built on `Actor.list()`
-and `mailbox_size`: both are snapshots (an actor can die or drain between the walk and
+`Actor.top_by_mailbox(c, n)` and `Actor.over_mailbox(c, threshold)`, built on
+`Actor.list(c)` and `mailbox_size` (`c` from `Actor.introspect`, see
+[Introspection is a capability](#introspection-is-a-capability)): both are snapshots (an actor can die or drain between the walk and
 your reaction) and cost one pass over every live actor, so poll them from a timer, not a
 hot path. There is no push-style alarm that fires when a queue crosses a threshold, and no
 per-actor state inspection or tracing; see
@@ -897,7 +1034,9 @@ to diverge or crash compiled (see the compiled-actor status note at the top of t
 | `spawn(Actor)` | `→ Pid` | both | Start a new actor (literal actor name only) |
 | `send(pid, msg)` | `→ Option(())` | both | Send a message; `None` if actor is dead |
 | `receive()` | `→ Msg` | both | Pop the next mailbox message (only the first `receive()` per handler may block) |
-| `kill(pid)` | `→ ()` | both | Stop an actor |
+| `kill(pid)` | `→ ()` | both | Stop an actor immediately (queue dropped, `on_stop` not run) |
+| `Actor.stop(pid, timeout_ms)` | `→ Bool` | both | Graceful stop: refuse new messages, drain, run `on_stop`, die Normal; see [Stopping an Actor](#stopping-an-actor) |
+| `Actor.is_draining(pid)` | `→ Bool` | both | Stopping but not yet dead |
 | `is_alive(pid)` | `→ Bool` | both | Check if actor is running (registry lookup) |
 | `monitor(watcher, target)` | `→ Int` | both | Deliver `Down(ref, target_pid, reason)` on target exit; local reasons are `Normal`, `Killed`, and `Crash(String)` |
 | `self()` | `→ Pid` | both | Current actor's Pid |
@@ -906,7 +1045,7 @@ to diverge or crash compiled (see the compiled-actor status note at the top of t
 | `send_checked(cap, msg)` | `→ :ok \| :error` | both | Epoch-validated send; checks revocation, epoch match, and liveness (payload is checked for non-sendable types at construction, same rule as `send`) |
 | `revoke_cap(cap)` | `→ Atom` | both | Revoke a capability; a later `send_checked` on it returns `:error` |
 | `is_cap_valid(cap)` | `→ Bool` | both | Boolean form of the epoch/revocation/liveness check |
-| `pid_of_int(n)` | `→ Pid` | both | Convert Int to Pid (an unknown index resolves to a safe already-dead sentinel) |
+| `Actor.pid_from_int(c, n)` | `→ Pid` | both | Convert Int to Pid; `c : Cap(Actor.Introspect)` from `Actor.introspect(io)` (an unknown index resolves to a safe already-dead sentinel; the raw `pid_of_int` builtin is stdlib-internal) |
 | `pid_to_int(pid)` | `→ Int` | both | The inverse: a Pid's spawn index, the `N` in its `Pid(N)` display (what `GlobalPid.make` takes for a local actor) |
 | `get_actor_field(pid, name)` | `→ Option(a)` | both | Read an actor's state field via the runtime shape registry |
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |

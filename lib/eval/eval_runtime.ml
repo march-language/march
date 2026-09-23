@@ -226,6 +226,14 @@ type actor_inst = {
   (** Graceful shutdown (actor_stop): the actor is finishing its queued
       messages and accepting no new ones. Parity with the compiled runtime's
       march_actor_meta.draining. *)
+  mutable ai_self_stop : float option option;
+  (** [Some deadline] while an actor that stopped ITSELF (Actor.stop(self, t)
+      from its own handler) is still working off its queue: [stop_actor]
+      cannot drain inline from inside the handler that is running, so the
+      scheduler finishes the job ([finish_self_stop]) once that handler has
+      returned — the compiled runtime's behaviour, where a self-stop marks
+      draining and the receive loop does the rest. The deadline is absolute
+      Unix ms; [None] inside means no deadline. *)
   mutable ai_supervisor : int option;        (** pid of supervising actor, if any *)
   mutable ai_restart_count : (float * int) list; (** (timestamp, count) restart history *)
   (* Phase 3: epoch-based capability tracking *)
@@ -767,7 +775,7 @@ let spawn_child_actor ?(crashed_pid : int option = None) ?(init_args : value lis
       ai_state = child_init_state; ai_alive = true;
       ai_terminal_reason = Normal;
       ai_monitors = []; ai_mailbox = Queue.create ();
-      ai_draining = false;
+      ai_draining = false; ai_self_stop = None;
       ai_supervisor = Some supervisor_pid;
       ai_restart_count = []; ai_epoch = inherited_epoch;
       ai_resources = [];
@@ -1261,9 +1269,71 @@ and stop_actor (pid : int) (timeout_ms : int) : bool =
         if Queue.length inst.ai_mailbox < before then drain ()
       end
     in
-    if timeout_ms <> 0 then drain ();
-    crash_actor_with_reason pid "stopped" Normal;
-    true
+    if !current_pid = Some pid then begin
+      (* Stopping ITSELF, from inside one of its own handlers: that handler
+         has not returned yet, so neither the rest of the queue nor on_stop
+         (which must see the state the handler returns) can run here. The
+         scheduler finishes it — see [finish_self_stop]. *)
+      inst.ai_self_stop <- Some deadline;
+      true
+    end else begin
+      if timeout_ms <> 0 then drain ();
+      if not (past_deadline ()) then run_on_stop pid inst deadline;
+      crash_actor_with_reason pid "stopped" Normal;
+      true
+    end
+
+(** Run [inst]'s `on_stop` callback, if it has one: the last step of a graceful
+    stop, after the drain and before the NORMAL death.
+
+    Semantics (specs/lang/actors.md, decided 2026-09-22 on OTP's terminate/2):
+    it may send; a failure inside it is logged and the death proceeds as if it
+    had returned; it never runs on kill; and it is bounded by the stop
+    deadline. The interpreter cannot preempt a running callback, so the
+    deadline binds only where the callback BLOCKS: a `receive()` it cannot
+    satisfy (a draining actor accepts no new messages) waits out the deadline
+    and the actor is then killed, as the compiled runtime kills it. *)
+and run_on_stop (pid : int) (inst : actor_inst) (deadline : float option) : unit =
+  match inst.ai_def.actor_on_stop with
+  | None -> ()
+  | Some h ->
+    let prev_pid = !current_pid in
+    current_pid := Some pid;
+    let env = [("state", inst.ai_state); ("self", VPid pid)] @ !(inst.ai_env_ref) in
+    (match !eval_expr_hook env h.ah_body with
+     | _ -> ()
+     | exception BlockedOnReceive ->
+       (match deadline with
+        | Some d ->
+          let wait = d -. Unix.gettimeofday () *. 1000. in
+          if wait > 0. then Unix.sleepf (wait /. 1000.)
+        | None -> ());
+       current_pid := prev_pid;
+       crash_actor_with_reason pid "shutdown" Killed
+     | exception exn ->
+       Printf.eprintf "march: actor on_stop callback failed (the actor still stops): %s\n%!"
+         (match exn with
+          | Eval_error m -> m
+          | e -> Printexc.to_string e));
+    current_pid := prev_pid
+
+(** The second half of a self-stop ([ai_self_stop]), called by the scheduler
+    after each of [pid]'s handlers returns: once the queue is empty (or the
+    deadline has passed) run on_stop and die NORMAL. *)
+and finish_self_stop (pid : int) : unit =
+  match Hashtbl.find_opt actor_registry pid with
+  | Some ({ ai_alive = true; ai_self_stop = Some deadline; _ } as inst) ->
+    let past =
+      match deadline with
+      | None -> false
+      | Some d -> Unix.gettimeofday () *. 1000. >= d
+    in
+    if Queue.is_empty inst.ai_mailbox || past then begin
+      inst.ai_self_stop <- None;
+      if not past then run_on_stop pid inst deadline;
+      crash_actor_with_reason pid "stopped" Normal
+    end
+  | _ -> ()
 
 (** Task 9: interpreter-side counter for messages dropped by bounded-mailbox
     overflow policies. Mirrors the compiled runtime's

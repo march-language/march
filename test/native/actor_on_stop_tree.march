@@ -1,0 +1,116 @@
+-- Stopping a supervision tree runs each child's `on_stop` in REVERSE
+-- declaration order, then the supervisor's own; a `shutdown brutal` child is
+-- killed and runs nothing. specs/lang/actors.md, "on_stop".
+--
+-- This is the in-language witness of teardown order that
+-- actor_stop_tree.march could only assert off MARCH_SUP_TRACE: every on_stop
+-- runs on its own actor's thread, but each finishes before the next child is
+-- stopped (stop is synchronous per child), so the Log receives them in
+-- teardown order on both backends.
+mod Main do
+  needs IO
+  needs IO.Console
+
+  type GetLog = GetLog
+  type LogState = { lines : List(String) }
+
+  actor Log do
+    state { lines : List(String) }
+    init  { lines: [] }
+
+    on Read(reply_to) do
+      Actor.reply(reply_to, List.reverse(state.lines))
+      state
+    end
+
+    on Note(s : String) do
+      { lines: Cons(s, state.lines) }
+    end
+  end
+
+  -- Each actor is handed the Log's Pid in a message and keeps it in state:
+  -- a handler has no capability in scope, so it cannot look the Log up by
+  -- name (Actor.whereis takes a Cap(Actor.Introspect)).
+  fn note(log : Option(Pid(LogState)), s : String) do
+    match log do
+      Some(l) -> send(l, Note(s))
+      None    -> None
+    end
+  end
+
+  actor W do
+    state { tag : String, n : Int, log : Option(Pid(LogState)) }
+    init  { tag: "?", n: 0, log: None }
+
+    on WLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
+
+    on Name(t : String) do
+      { state with tag: t }
+    end
+
+    on Work(k : Int) do
+      { state with n: state.n + k }
+    end
+
+    on_stop do
+      note(state.log, state.tag ++ ": on_stop, n=" ++ int_to_string(state.n))
+    end
+  end
+
+  actor Sup do
+    state { a : Int, b : Int, c : Int, d : Int, log : Option(Pid(LogState)) }
+    init  { a: 0, b: 0, c: 0, d: 0, log: None }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      W a
+      W b shutdown infinity
+      W c shutdown 1000
+      W d shutdown brutal
+    end
+
+    on SupLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
+
+    on_stop do
+      note(state.log, "sup: on_stop")
+    end
+  end
+
+  fn child(intro, sup, field) do
+    match get_actor_field(sup, field) do
+      None    -> Actor.pid_from_int(intro, -1)
+      Some(n) -> Actor.pid_from_int(intro, n)
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
+    let log = spawn(Log)
+    let sup = spawn(Sup)
+    send(sup, SupLog(log))
+    send(child(intro, sup, "a"), WLog(log))
+    send(child(intro, sup, "a"), Name("a"))
+    send(child(intro, sup, "b"), WLog(log))
+    send(child(intro, sup, "b"), Name("b"))
+    send(child(intro, sup, "c"), WLog(log))
+    send(child(intro, sup, "c"), Name("c"))
+    send(child(intro, sup, "d"), WLog(log))
+    send(child(intro, sup, "d"), Name("d"))
+    send(child(intro, sup, "a"), Work(1))
+    send(child(intro, sup, "b"), Work(2))
+    send(child(intro, sup, "c"), Work(3))
+    send(child(intro, sup, "d"), Work(4))
+
+    println("stop: " ++ bool_to_string(Actor.stop(sup, 5000)))
+    println("supervisor dead: " ++ bool_to_string(is_alive(sup) == false))
+    match Actor.call(log, GetLog, 5000) do
+      Ok(ls) -> List.each(ls, fn l -> println("  log: " ++ l))
+      Err(e) -> println("  log error: " ++ e)
+    end
+  end
+end

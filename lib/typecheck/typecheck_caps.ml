@@ -918,7 +918,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           record_fn_refs fn_qname
             [ (List.map (fun (p : Ast.param) -> p.param_name.txt) h.Ast.ah_params,
                h.Ast.ah_body) ]
-        ) actor.actor_handlers;
+        ) (Ast.actor_body_handlers actor);
       (* Bridge the actor-NAME node to its handler functions, so a `spawn(A)`
          site — which [record_fn_refs] records as a reference to the name as
          WRITTEN (see its [spawn_refs]) — reaches [A]'s handlers in the closure
@@ -927,7 +927,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          [actor_qname] through the referring key's prefix. *)
       let handler_qnames =
         List.map (fun (h : Ast.actor_handler) -> actor_qname ^ "_" ^ h.Ast.ah_msg.txt)
-          actor.actor_handlers
+          (Ast.actor_body_handlers actor)
       in
       (* The `init { ... }` initializer runs at spawn time, so its transitive
          IO is reachable exactly when a handler's is.  Fold its own builtin
@@ -1204,7 +1204,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               | Some cap_name -> Some (cap_name, call_span)
               | None -> None
             ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body)
-          ) actor.actor_handlers
+          ) (Ast.actor_body_handlers actor)
       | _ -> []
     ) decls in
     (* Drop capability uses that belong to the standard library rather than to

@@ -94,8 +94,17 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
                       v_lin = Tir.Lin } in
   let actor_atom  = Tir.AVar actor_param in
 
-  let lower_handler (h : Ast.actor_handler) : Tir.fn_def =
-    let fn_name = name ^ "_" ^ h.ah_msg.txt in
+  (* [~on_stop:true] lowers the `on_stop` callback through the same glue: a
+     zero-param handler named [Name_on_stop] whose body is [user_body; state],
+     so the state fields it loads are written straight back exactly as a
+     handler's are. The callback's own value is discarded — there is no next
+     state for a dying actor — but reusing the write-back keeps the field
+     ownership balanced: the loads MOVE fields out of the Lin actor record, and
+     without the EReuse the actor would still point at fields [state] freed. *)
+  let lower_handler ?(on_stop = false) (h : Ast.actor_handler) : Tir.fn_def =
+    let fn_name =
+      if on_stop then name ^ Tir_names.actor_on_stop_suffix
+      else name ^ "_" ^ h.ah_msg.txt in
 
     (* Handler params (after the implicit $actor) *)
     let params : Tir.var list =
@@ -167,6 +176,11 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
         Hashtbl.replace Lower_state._fn_param_types n ty) saved_shadowed;
 
     let state_ty = Tir.TCon (name ^ Tir_names.actor_state_suffix, []) in
+    let state_var = actor_var "state" state_ty in
+    let body_tir =
+      if on_stop then Tir.ESeq (body_tir, Tir.EAtom (Tir.AVar state_var))
+      else body_tir
+    in
     (* Step 2: let $result = body_tir *)
     let result_var = actor_var "$result" state_ty in
 
@@ -227,7 +241,6 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
     let state_record_fields : (string * Tir.atom) list =
       List.map (fun (fname, v) -> (fname, Tir.AVar v)) state_field_vars
     in
-    let state_var = actor_var "state" state_ty in
     let inner_with_state =
       Tir.ELet (state_var, Tir.ERecord state_record_fields, inner_with_result)
     in
@@ -266,6 +279,11 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
   in
 
   let handler_fns = List.map lower_handler actor.actor_handlers in
+  let on_stop_fns =
+    match actor.actor_on_stop with
+    | None -> []
+    | Some h -> [lower_handler ~on_stop:true h]
+  in
 
   (* ── 4. Dispatch function ────────────────────────────────── *)
   (* fn Name_dispatch(actor:ptr, msg:ptr) : Unit =
@@ -584,11 +602,46 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
       in
       Tir.ELet (init_var, init_lowered, wrap_sup spawn_with_fields)
   in
+  (* ── 5c. on_stop registration ───────────────────────────────────── *)
+  (* An actor with an `on_stop` block registers its callback with the runtime,
+     keyed by its dispatch closure (the value every one of its records holds in
+     word 2), right after the record is allocated:
+       let $reg_on_stop = register_actor_on_stop(Name_dispatch, Name_on_stop)
+     Keyed by TYPE rather than by record because the runtime metadata does not
+     exist yet here (march_spawn creates it), and so a supervisor's restart —
+     which re-runs this glue — needs nothing further. actor_green_thread looks
+     it up after a graceful drain. *)
+  let spawn_body_final =
+    match actor.actor_on_stop with
+    | None -> spawn_body_with_sup
+    | Some _ ->
+      let reg_var : Tir.var = {
+        v_name = "register_actor_on_stop";
+        v_ty   = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit], Tir.TUnit);
+        v_lin  = Tir.Unr;
+      } in
+      let on_stop_fn_var : Tir.var = {
+        v_name = name ^ Tir_names.actor_on_stop_suffix;
+        v_ty   = Tir.TFn ([Tir.TPtr Tir.TUnit], Tir.TUnit);
+        v_lin  = Tir.Unr;
+      } in
+      let rec wrap (e : Tir.expr) : Tir.expr =
+        match e with
+        | Tir.ELet (v, (Tir.EAlloc _ as alloc), rest) when v.Tir.v_name = "$spawned" ->
+          Tir.ELet (v, alloc,
+            Tir.ELet ({ v_name = "$reg_on_stop"; v_ty = Tir.TUnit; v_lin = Tir.Unr },
+              Tir.EApp (reg_var, [Tir.AVar dispatch_fn_ptr_var; Tir.AVar on_stop_fn_var]),
+              rest))
+        | Tir.ELet (v, rhs, body) -> Tir.ELet (v, rhs, wrap body)
+        | other -> other
+      in
+      wrap spawn_body_with_sup
+  in
   let spawn_fn : Tir.fn_def = {
     fn_name   = name ^ Tir_names.actor_spawn_suffix;
     fn_params = init_params;
     fn_ret_ty = Tir.TPtr Tir.TUnit;
-    fn_body   = spawn_body_with_sup;
+    fn_body   = spawn_body_final;
     fn_kind   = Tir.FnNormal;  (* actor glue — see lower_handler's comment *)
   } in
 
@@ -598,5 +651,5 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
   let state_record = Tir.TDRecord (name ^ Tir_names.actor_state_suffix, state_fields_sorted) in
 
   let type_defs = [state_record; msg_variant; actor_record] in
-  let fn_defs   = handler_fns @ [dispatch_fn; spawn_fn] in
+  let fn_defs   = handler_fns @ on_stop_fns @ [dispatch_fn; spawn_fn] in
   (type_defs, fn_defs)

@@ -371,6 +371,15 @@ and actor_def = {
   actor_invariant : expr option;               (** @invariant predicate, if any *)
   actor_mailbox  : (int * int) option;         (** `mailbox N policy`: (limit, policy int) *)
   actor_remote   : bool;                       (** `@[remote]`: generate `<Actor>_Remote.dispatch` (Desugar_remote) *)
+  actor_on_stop  : actor_handler option;
+  (** `on_stop do ... end`: the terminate callback (OTP's terminate/2). Runs
+      on the actor's own thread after a graceful [Actor.stop] drain, with
+      [state] and [self] in scope; its value is discarded. Never runs on
+      [kill]/`shutdown brutal`, is cut off by the stop deadline, and a panic
+      inside it is logged and the NORMAL death proceeds. Stored as a handler
+      named [on_stop] with no params so body walkers can treat it like one
+      ([actor_body_handlers]) — it is NOT a message constructor.
+      See specs/lang/actors.md. *)
 }
 
 and actor_handler = {
@@ -557,3 +566,13 @@ let shutdown_ms = function
   | ShutdownInfinity -> -1
   | ShutdownBrutal   -> 0
   | ShutdownMs n     -> n
+
+(** Every handler-shaped body of an actor: its message handlers, then its
+    `on_stop` callback if it has one. For walkers that only care about the
+    CODE an actor runs (capability, lint, refinement, LSP walks). Anything
+    that treats [ah_msg] as a message constructor must use [actor_handlers]
+    instead: `on_stop` is not a message. *)
+let actor_body_handlers (a : actor_def) : actor_handler list =
+  match a.actor_on_stop with
+  | None -> a.actor_handlers
+  | Some h -> a.actor_handlers @ [h]

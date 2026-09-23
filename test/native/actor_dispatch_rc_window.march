@@ -41,6 +41,8 @@
 -- has stopped proving anything, and this test needs a new shape rather than a
 -- new .expected.
 mod Main do
+  needs Actor.Introspect
+  needs IO
   needs IO.Console
   needs Ffi
   needs IO.Foreign
@@ -78,21 +80,22 @@ mod Main do
     end
   end
 
-  fn seen_by(child) do
-    match get_actor_field(pid_of_int(child), "seen") do
+  fn seen_by(intro : Cap(Actor.Introspect), child) do
+    match get_actor_field(Actor.pid_from_int(intro, child), "seen") do
       None    -> -1
       Some(n) -> n
     end
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let boss = spawn(Boss)
     let victim = current_child(boss)
     -- Minted BEFORE the reading: pid_of_int takes a reference, and `send`
     -- keeps the one it is handed
     -- (specs/progress/2026-09-14-pid-ownership-settled-send-borrows-self-owned.md), so a
     -- pid minted inside the window would read one above the true count.
-    let victim_pid = pid_of_int(victim)
+    let victim_pid = Actor.pid_from_int(intro, victim)
     let rc_outside = actor_rc(victim)
     println("victim is multiply owned: " ++ bool_to_string(rc_outside > 1))
 
@@ -102,11 +105,11 @@ mod Main do
     -- The load-bearing line.  With the clobber present this reads 1 while
     -- rc_outside reads the true owner count, on every single run.
     println("rc inside handler matches rc outside: "
-            ++ bool_to_string(seen_by(victim) == rc_outside))
+            ++ bool_to_string(seen_by(intro, victim) == rc_outside))
 
     -- And the handler really did run, so a probe that silently never fired
     -- cannot masquerade as a pass.
-    println("handler observed something: " ++ bool_to_string(seen_by(victim) > 0))
+    println("handler observed something: " ++ bool_to_string(seen_by(intro, victim) > 0))
     -- `victim_pid` is still held here, so its reference was part of both
     -- counts above (a borrowing `send` does not release it; its drop is at
     -- this last use, after the measurement).

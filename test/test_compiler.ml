@@ -14297,46 +14297,18 @@ let test_entry_qual_from_nested_sibling () =
    like a browser/playground compile target) surfaces it.  `fold_left`
    (prelude.march, iterable.march), `cmp`/`fold` (ordered_map.march,
    sorted_set.march), and `reduce` (range.march) all had this typo; fixed
-   to curried-arrow form.  Guard each by typechecking the file completely
-   standalone (no other stdlib siblings) via [check_module_core], mirroring
-   how `bin/main.ml`'s `get_stdlib_tc_env` typechecks stdlib. *)
+   to curried-arrow form.  Guard each with
+   [assert_stdlib_file_typechecks_cleanly] (defined below, after
+   [stdlib_dir_for_test]), which typechecks the file INSIDE the whole stdlib.
 
-let assert_stdlib_file_typechecks_cleanly name =
-  let dmod = load_stdlib_file_for_test name in
-  let m = March_ast.Ast.{
-    mod_name = { txt = "StdlibSelfCheck"; span = dummy_span };
-    mod_decls = [dmod];
-  } in
-  (* Register this file as stdlib, exactly as bin/main.ml does before checking
-     the standard library.  Without it, [span_is_stdlib] answers false here and
-     the 2026-08-06 body-scan ERROR fires on the stdlib's own builtin calls —
-     prelude's `print`, say.
-
-     Declaring the capability in the stdlib instead is NOT the alternative: a
-     `needs IO.Console` on Prelude satisfies the console use AT THE PRELUDE, so
-     a user's own `println` stops being attributed to the user's module and
-     --cap-strict stops catching it (measured 2026-08-06; test_cap_ceiling's
-     "undeclared console use" is the guard).
-
-     The point of this test is unaffected — it exists to surface INTERNAL type
-     errors in a stdlib file that bin/main.ml's user-file diagnostic filter
-     hides, and those still surface. *)
-  let saved = !March_typecheck.Typecheck.stdlib_source_files in
-  (* [load_stdlib_file_for_test] wraps the file in a DMod carrying dummy_span,
-     so the real path is only on the INNER decls — it comes from the lexbuf's
-     pos_fname, which the loader sets to whichever candidate path exists.
-     Register all three candidates rather than guessing which one resolved. *)
-  let candidates = [
-    Filename.concat "stdlib" name;
-    Filename.concat "../../../stdlib" name;
-    Filename.concat "../../stdlib" name;
-  ] in
-  March_typecheck.Typecheck.stdlib_source_files := candidates @ saved;
-  let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
-  March_typecheck.Typecheck.stdlib_source_files := saved;
-  Alcotest.(check bool)
-    (Printf.sprintf "stdlib/%s typechecks with no internal errors" name)
-    false (has_errors errors)
+   It used to check the file completely standalone, and that was vacuous for
+   any error involving a call into another stdlib module: `List.map` in a lone
+   ordered_map.march resolves through [Module_registry.ensure_loaded], and
+   [load_module_into_env] binds every registry export as `Mono (fresh_var 0)`
+   -- an unconstrained type variable that accepts any call.  So
+   ordered_map.march's five real errors (a two-parameter lambda passed to
+   `List.map`, and `List.fold_left` with its arguments out of order) passed it
+   GREEN.  See specs/progress/2026-09-22-stdlib-typecheck-helper-vacuous.md. *)
 
 (* ── The stdlib load manifest must be exhaustive ─────────────────────────────
 
@@ -14405,6 +14377,162 @@ let test_stdlib_manifest_has_no_phantom_entries () =
   in
   Alcotest.(check (list string))
     "every manifest entry has a file behind it" [] phantom
+
+(* ── Typecheck the stdlib the way the compiler does ─────────────────────────
+
+   [stdlib_decls_like_toolchain] mirrors bin/toolchain.ml's [load_stdlib_file]
+   over [Stdlib_manifest.stdlib_file_list]: prelude.march is desugared as the
+   entry and UNWRAPPED into global scope, every other file is desugared with
+   [~is_entry:false] and wrapped in its own [DMod].  [check_stdlib_like_cli]
+   then typechecks all of it as ONE module with every file registered in
+   [stdlib_source_files] -- exactly bin/main.ml's [get_stdlib_tc_env], which
+   runs on every compile and silently DISCARDS these diagnostics.  That is why
+   this check has to live in a test: nothing else looks at them.
+
+   The check runs once per file list (it is the expensive part) and is shared
+   by every [assert_stdlib_file_typechecks_cleanly] call and the sweep. *)
+let stdlib_decls_like_toolchain dir files =
+  List.concat_map (fun name ->
+      let path = Filename.concat dir name in
+      let src = In_channel.with_open_bin path In_channel.input_all in
+      let lexbuf = Lexing.from_string src in
+      lexbuf.Lexing.lex_curr_p <-
+        { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+      let m = March_parser.Parser.module_
+          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+      let is_prelude = name = "prelude.march" in
+      let m = March_desugar.Desugar.desugar_module ~is_entry:is_prelude m in
+      if is_prelude then
+        (match m.March_ast.Ast.mod_decls with
+         | [March_ast.Ast.DMod (_, _, inner, _)] -> inner
+         | decls -> decls)
+      else
+        [March_ast.Ast.DMod (m.March_ast.Ast.mod_name, March_ast.Ast.Public,
+                             m.March_ast.Ast.mod_decls, March_ast.Ast.dummy_span)])
+    files
+
+let stdlib_check_cache : (string list, March_errors.Errors.diagnostic list) Hashtbl.t =
+  Hashtbl.create 2
+
+(** Every diagnostic from typechecking [files] (default: the native manifest)
+    together, as the compiler does.  Spans carry "<dir>/<file>". *)
+let check_stdlib_like_cli ?(files = March_modules.Stdlib_manifest.stdlib_file_list) () =
+  match Hashtbl.find_opt stdlib_check_cache files with
+  | Some ds -> ds
+  | None ->
+    let dir = stdlib_dir_for_test () in
+    let decls = stdlib_decls_like_toolchain dir files in
+    let m = March_ast.Ast.{
+      mod_name = { txt = "StdlibBaseline"; span = dummy_span };
+      mod_decls = decls;
+    } in
+    let saved = !March_typecheck.Typecheck.stdlib_source_files in
+    March_typecheck.Typecheck.stdlib_source_files :=
+      List.map (Filename.concat dir) files @ saved;
+    let (errors, _type_map, _env) =
+      Fun.protect
+        ~finally:(fun () -> March_typecheck.Typecheck.stdlib_source_files := saved)
+        (fun () -> March_typecheck.Typecheck.check_module_core m) in
+    let ds = errors.March_errors.Errors.diagnostics in
+    Hashtbl.replace stdlib_check_cache files ds;
+    ds
+
+let stdlib_errors_in ?files name =
+  let path = Filename.concat (stdlib_dir_for_test ()) name in
+  List.filter (fun (d : March_errors.Errors.diagnostic) ->
+      d.severity = March_errors.Errors.Error && d.span.March_ast.Ast.file = path)
+    (check_stdlib_like_cli ?files ())
+
+let show_stdlib_errors ds =
+  String.concat "\n" (List.map (fun (d : March_errors.Errors.diagnostic) ->
+      let first_line = List.hd (String.split_on_char '\n' d.message) in
+      Printf.sprintf "  %s:%d: %s" d.span.March_ast.Ast.file
+        d.span.March_ast.Ast.start_line first_line) ds)
+
+let assert_stdlib_file_typechecks_cleanly name =
+  if not (List.mem name March_modules.Stdlib_manifest.stdlib_file_list) then
+    Alcotest.failf "stdlib/%s is not in the native stdlib manifest" name;
+  match stdlib_errors_in name with
+  | [] -> ()
+  | ds ->
+    Alcotest.failf "stdlib/%s has %d internal type error(s):\n%s" name
+      (List.length ds) (show_stdlib_errors ds)
+
+
+(* ── The stdlib-wide ratchet ────────────────────────────────────────────────
+
+   [assert_stdlib_file_typechecks_cleanly] guards five files by name.  This
+   guards ALL of them at once: the same single whole-stdlib check, bucketed by
+   file, against the counts that were there when the check was first made
+   non-vacuous (2026-09-22).  Those 98 errors are a real backlog, not harness
+   noise -- every one of them is a diagnostic `bin/main.ml` produces on every
+   compile and discards because its span points into stdlib.  What they cost is
+   not a message nobody reads: a stdlib function whose body failed to check is
+   still CALLABLE, and its call sites resolve it through
+   [Module_registry.ensure_loaded] as `Mono (fresh_var 0)` -- an unconstrained
+   type variable.  `System.os()` type-checks against `string_length` and fails
+   at RUNTIME; a generic one reaches monomorphization unresolved, which is the
+   silent-wrong-value class [Stdlib_manifest] already documents.
+
+   One todo per class is filed under specs/todos/2026-09-22-stdlib-*.md.  The
+   ratchet is two-sided on purpose: fixing a file FAILS this test until its
+   count comes down here, so the table cannot quietly describe a fixed tree. *)
+let stdlib_known_internal_errors = [
+  (* file, errors -- see specs/todos/2026-09-22-stdlib-internal-type-errors.md *)
+  "actor.march", 2;
+  "aho_corasick.march", 11;
+  "cluster_node.march", 1;
+  "compress.march", 19;
+  "crypto.march", 1;
+  "csv.march", 12;
+  "io.march", 3;
+  "logger.march", 2;
+  "node_call.march", 5;
+  "plot.march", 1;
+  "rrb_vec.march", 19;
+  "session.march", 9;
+  "session_node.march", 3;
+  "system.march", 8;
+  "uuid.march", 2;
+]
+
+let test_stdlib_internal_errors_ratchet () =
+  let dir = stdlib_dir_for_test () in
+  let actual = Hashtbl.create 32 in
+  List.iter (fun (d : March_errors.Errors.diagnostic) ->
+      if d.severity = March_errors.Errors.Error then begin
+        let f = Filename.basename d.span.March_ast.Ast.file in
+        if Filename.dirname d.span.March_ast.Ast.file = dir then
+          Hashtbl.replace actual f (1 + Option.value ~default:0 (Hashtbl.find_opt actual f))
+      end)
+    (check_stdlib_like_cli ());
+  let files =
+    List.sort_uniq String.compare
+      (List.map fst stdlib_known_internal_errors
+       @ Hashtbl.fold (fun f _ acc -> f :: acc) actual []) in
+  let drift = List.filter_map (fun f ->
+      let expected = Option.value ~default:0
+          (List.assoc_opt f stdlib_known_internal_errors) in
+      let got = Option.value ~default:0 (Hashtbl.find_opt actual f) in
+      if got = expected then None
+      else Some (Printf.sprintf "  stdlib/%s: expected %d internal error(s), found %d"
+                   f expected got))
+      files in
+  if drift <> [] then
+    Alcotest.failf
+      "The stdlib internal-type-error ratchet moved:\n%s\n\n\
+       More than expected: a stdlib file stopped typechecking. The compiler \n\
+       hides these (bin/main.ml drops any diagnostic spanned in stdlib), but a \n\
+       function whose body failed to check is still callable, and its call \n\
+       sites bind it as an unconstrained type variable.\n\
+       Run `march --check stdlib/<file>` to see them.\n\n\
+       Fewer than expected: a file was FIXED -- lower its count in \n\
+       [stdlib_known_internal_errors] (or drop the row) in the same commit.\n\n\
+       The full list of errors:\n%s"
+      (String.concat "\n" drift)
+      (show_stdlib_errors
+         (List.filter (fun (d : March_errors.Errors.diagnostic) ->
+              d.severity = March_errors.Errors.Error) (check_stdlib_like_cli ())))
 
 (* ── postcond_infer: propose a RETURN refinement that helps the CALLERS ──────
 
@@ -17173,6 +17301,7 @@ let compiler_suites =
           Alcotest.test_case "Main.id forges Cap(IO) -> Cap(Db.P): error"         `Quick test_entry_qual_forges_proof_cap;
           Alcotest.test_case "Main.launder (a->b) launders Int -> String: error"  `Quick test_entry_qual_distinct_tvar_launders;
           Alcotest.test_case "T.id from nested App launders Int -> String: error" `Quick test_entry_qual_from_nested_sibling;
+          Alcotest.test_case "stdlib internal-type-error ratchet"                  `Quick test_stdlib_internal_errors_ratchet;
           Alcotest.test_case "prelude.march fold_left: curried, no internal error"    `Quick test_stdlib_prelude_fold_left_curried;
           Alcotest.test_case "iterable.march fold: curried, no internal error"        `Quick test_stdlib_iterable_fold_curried;
           Alcotest.test_case "ordered_map.march cmp/fold: curried, no internal error" `Quick test_stdlib_ordered_map_cmp_curried;

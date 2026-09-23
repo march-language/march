@@ -663,7 +663,7 @@ let restore_actors (snap : actor_state_snapshot) : unit =
                      ai_terminal_reason = s.ais_terminal_reason;
                      ai_monitors = [];
                      ai_mailbox  = Queue.create ();
-                     ai_draining = false;
+                     ai_draining = false; ai_self_stop = None;
                      ai_supervisor = None;
                      ai_restart_count = [];
                      ai_epoch = 0;
@@ -2199,7 +2199,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
                  ai_state = child_init_state; ai_alive = true;
                  ai_terminal_reason = Normal;
                  ai_monitors = []; ai_mailbox = Queue.create ();
-                 ai_draining = false;
+                 ai_draining = false; ai_self_stop = None;
                  ai_supervisor = Some pid;
                  ai_restart_count = []; ai_epoch = 0;
                  ai_resources = [];
@@ -2234,7 +2234,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
                     ai_state    = init_state; ai_alive = true;
                     ai_terminal_reason = Normal;
                     ai_monitors = []; ai_mailbox = Queue.create ();
-                    ai_draining = false;
+                    ai_draining = false; ai_self_stop = None;
                     ai_supervisor = None; ai_restart_count = [];
                     ai_epoch = 0; ai_resources = [];
                     ai_linear_values = [];
@@ -2682,7 +2682,13 @@ let run_scheduler () =
                 with
                 | new_state ->
                   inst.ai_state <- new_state;
-                  changed := true   (* mark progress only on success *)
+                  changed := true;  (* mark progress only on success *)
+                  (* A handler that stopped its own actor: finish the stop
+                     now that the state it returned is installed. *)
+                  if inst.ai_self_stop <> None then begin
+                    current_pid := prev_pid;
+                    Eval_runtime.finish_self_stop pid
+                  end
                 | exception BlockedOnReceive ->
                   (* The handler called receive() but the mailbox was empty at
                      that point.  Put the triggering message back at the front
@@ -3267,7 +3273,7 @@ let spawn_from_spec (spec : value) : unit =
                 ai_state = init_state; ai_alive = true;
                 ai_terminal_reason = Normal;
                 ai_monitors = []; ai_mailbox = Queue.create ();
-                ai_draining = false;
+                ai_draining = false; ai_self_stop = None;
                 ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
                 ai_resources = []; ai_linear_values = [];
                 ai_mbox_limit = 0; ai_mbox_policy = 0 } in

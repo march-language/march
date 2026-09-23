@@ -13,6 +13,7 @@ mod StreamActorSupervised do
   -- Design: specs/todos/2026-09-13-endpoint-actors-under-a-supervisor.md.
   -- Non-vacuous: routing by the pid captured at spawn instead delivers to a
   -- dead actor and the trace stops after the marker.
+  needs Actor.Introspect
   needs IO
   needs IO.Console
   needs IO.Mut
@@ -81,7 +82,7 @@ mod StreamActorSupervised do
   -- One delivery per turn: hand it to the owning actor's mailbox, let the
   -- scheduler run that turn to completion, then take the next.  The fixed
   -- order is what makes the trace reproducible.
-  pfn route(handlers, pending) : () do
+  pfn route(intro : Cap(Actor.Introspect), handlers, pending) : () do
     let q = match Vault.get(pending, "q") do
       Some(d) -> d
       None    -> Deque.empty()
@@ -100,11 +101,11 @@ mod StreamActorSupervised do
         match Vault.get(handlers, ekey(to)) do
           None -> panic("stream_actor_supervised: delivery to " ++ int_to_string(to) ++ " with no continuation installed")
           Some(_) ->
-            match Actor.whereis(ekey(to)) do
+            match Actor.whereis(intro, ekey(to)) do
               Some(p) ->
                 send(p, Deliver(handlers, to, from, msg))
                 run_until_idle()
-                route(handlers, pending)
+                route(intro, handlers, pending)
               None -> panic("stream_actor_supervised: delivery to " ++ int_to_string(to) ++ " with no live owner")
             end
         end
@@ -159,23 +160,24 @@ mod StreamActorSupervised do
     end
   end
 
-  fn child(sup, field : String) do
+  fn child(intro : Cap(Actor.Introspect), sup, field : String) do
     match get_actor_field(sup, field) do
-      Some(n) -> pid_of_int(n)
+      Some(n) -> Actor.pid_from_int(intro, n)
       None    -> panic("stream_actor_supervised: no child " ++ field)
     end
   end
 
   fn main(c : Cap(IO)) do
+    let intro = Actor.introspect(c)
     let handlers = Vault.new("stream_actor_sup_handlers")
     let pending  = Vault.new("stream_actor_sup_pending")
     let t = mailbox(handlers, pending)
     let s = Session.attach(c, t.ops)
 
     let sup = spawn(EpSup)
-    let pc = child(sup, "cons")
+    let pc = child(intro, sup, "cons")
     claim(2, pc)
-    claim(1, child(sup, "prod"))
+    claim(1, child(intro, sup, "prod"))
 
     let cons_st = Stream_Cons.register(s, 0)
     let _ = cons(s, cons_st, 2)
@@ -184,14 +186,14 @@ mod StreamActorSupervised do
 
     -- Drain one delivery, then kill the Cons host.  The supervisor restarts
     -- it (first restart: no backoff); the name follows the replacement.
-    route_one(handlers, pending)
+    route_one(intro, handlers, pending)
     kill(pc)
     run_until_idle()
     print_line("-- Cons host killed; supervisor restarted it --")
-    route(handlers, pending)
+    route(intro, handlers, pending)
   end
 
-  pfn route_one(handlers, pending) : () do
+  pfn route_one(intro : Cap(Actor.Introspect), handlers, pending) : () do
     let q = match Vault.get(pending, "q") do
       Some(d) -> d
       None    -> Deque.empty()
@@ -200,7 +202,7 @@ mod StreamActorSupervised do
       (None, _) -> ()
       (Some((to, from, msg)), rest) ->
         Vault.set(pending, "q", rest)
-        match Actor.whereis(ekey(to)) do
+        match Actor.whereis(intro, ekey(to)) do
           Some(p) ->
             send(p, Deliver(handlers, to, from, msg))
             run_until_idle()

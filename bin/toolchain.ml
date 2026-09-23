@@ -607,7 +607,9 @@ let load_stdlib ?(for_js=false) () =
         Some data
       end else None
     with _ -> None) with
-    | Some decls -> decls
+    | Some decls ->
+      March_typecheck.Typecheck_builtins.note_stdlib_decls decls;
+      decls
     | None ->
       (* Cache miss: parse all files, then cache *)
       let decls = List.concat_map (fun name ->
@@ -623,6 +625,13 @@ let load_stdlib ?(for_js=false) () =
         close_out oc;
         Sys.rename tmp cache_path
       with _ -> ());
+      (* Register these declarations' files as the stdlib's BEFORE any
+         typecheck sees them: the stdlib-only builtin gate
+         ([Typecheck_caps.check_stdlib_only_refs]) exempts a declaration by
+         its span's file, and every path that typechecks the stdlib (compile,
+         `march test`, `march check`, the REPL and its JIT, warm-cache) loads
+         it here. *)
+      March_typecheck.Typecheck_builtins.note_stdlib_decls decls;
       decls
 
 (* clang cflags/libs to make libblake3 linkable into the runtime. These come
@@ -824,6 +833,7 @@ let ensure_runtime_so () =
       ^ (opt_file (Filename.concat runtime_dir "march_ctx_escape.c"))  (* ~H contextual escapers; referenced by march_extras.c *)
       ^ (opt_file (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
       ^ (opt_file (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
+      ^ (opt_file (Filename.concat runtime_dir "march_reclaim.c"))  (* epoch reclamation of dead procs; referenced by march_scheduler.c *)
     in
     (* OpenSSL flags: needed when march_tls.c is included. *)
     let tls_c = Filename.concat runtime_dir "march_tls.c" in

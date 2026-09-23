@@ -290,7 +290,7 @@ let check_style ~config ~file ~acc ~type_map:_ decls =
 
     | Ast.DActor (_, _, adef, _) ->
       List.iter (fun (h : Ast.actor_handler) -> walk_expr h.Ast.ah_body)
-        adef.Ast.actor_handlers
+        (Ast.actor_body_handlers adef)
 
     | _ -> ()
 
@@ -473,7 +473,7 @@ let check_safety ~config ~file ~acc ~type_map decls =
     | Ast.DMod (_, _, inner, _) -> List.iter walk_decl inner
     | Ast.DActor (_, _, adef, _) ->
       List.iter (fun (h : Ast.actor_handler) -> walk_expr h.Ast.ah_body)
-        adef.Ast.actor_handlers
+        (Ast.actor_body_handlers adef)
     | _ -> ()
   in
   List.iter walk_decl decls
@@ -547,7 +547,7 @@ let check_dead_code ~config ~file ~acc ~type_map decls =
     | Ast.DActor (_, _, adef, _)   ->
       add_root adef.Ast.actor_init;
       List.iter (fun (h : Ast.actor_handler) -> add_root h.Ast.ah_body)
-        adef.Ast.actor_handlers
+        (Ast.actor_body_handlers adef)
     | Ast.DApp (adef, _)           ->
       add_root adef.Ast.app_body;
       Option.iter add_root adef.Ast.app_on_start;
