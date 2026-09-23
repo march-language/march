@@ -156,6 +156,86 @@ let dict_no_declaration = bad "cap_dict on a cap with no `with` clause is reject
   end
 end|}
 
+(* ── two modules, one bare dictionary name ───────────────────────────── *)
+
+(* March has one global type namespace, so two modules that each declare
+   `type Ops` both register the bare key "Ops" in [env.records], the later one
+   winning.  The resolver used to try that bare key FIRST, so the earlier
+   module's `cap_impl`/`cap_dict` resolved to the OTHER module's record and
+   failed with "expected `Ops` but got `Ops`".  Hit in PR #601, where adding
+   `type Ops` to ClusterNode broke Session.attach (worked around by renaming
+   to ClusterOps).  Both modules attach AND read, and a third module reads
+   each through its qualified cap, so the post-module sweep
+   ([check_cap_impl_sites]) and the inline inference arm ([cap_dict]) are
+   both covered, whichever module was declared last. *)
+let two_mods_src = {|mod Top do
+  mod Alpha do
+    type Ops = { tick : (Int) -> Int }
+    proof cap Live with Ops
+    needs IO
+    fn boot(c : Cap(IO)) : Cap(Alpha.Live) do
+      cap_impl(mint_cap(c), { tick: fn n -> n + 1 })
+    end
+    fn run(c : Cap(Alpha.Live), n : Int) : Int do
+      match cap_dict(c) do
+        Some(d) -> d.tick(n)
+        None    -> n
+      end
+    end
+  end
+  mod Beta do
+    type Ops = { name : (Int) -> String }
+    proof cap Live with Ops
+    needs IO
+    fn boot(c : Cap(IO)) : Cap(Beta.Live) do
+      cap_impl(mint_cap(c), { name: fn n -> int_to_string(n) })
+    end
+    fn run(c : Cap(Beta.Live), n : Int) : String do
+      match cap_dict(c) do
+        Some(d) -> d.name(n)
+        None    -> ""
+      end
+    end
+  end
+  mod User do
+    needs Alpha.Live, Beta.Live
+    fn a(c : Cap(Alpha.Live)) : Int do
+      match cap_dict(c) do
+        Some(d) -> d.tick(1)
+        None    -> 0
+      end
+    end
+    fn b(c : Cap(Beta.Live)) : String do
+      match cap_dict(c) do
+        Some(d) -> d.name(1)
+        None    -> ""
+      end
+    end
+  end
+end|}
+
+let two_mods_same_dict_name =
+  ok "two modules each declaring `proof cap Live with Ops` both resolve"
+    two_mods_src
+
+(* The declaring module's record is not just "some Ops": handing Alpha's cap
+   Beta's field still fails, so the fix did not loosen the check to a bare
+   name match. *)
+let two_mods_wrong_dict = bad "a same-named dictionary from the other module is still rejected" {|mod Top do
+  mod Alpha do
+    type Ops = { tick : (Int) -> Int }
+    proof cap Live with Ops
+    needs IO
+    fn boot(c : Cap(IO)) : Cap(Alpha.Live) do
+      cap_impl(mint_cap(c), { name: fn n -> int_to_string(n) })
+    end
+  end
+  mod Beta do
+    type Ops = { name : (Int) -> String }
+    proof cap Live with Ops
+  end
+end|}
+
 (* ── attenuation propagates the dictionary, but cannot attach one ─────── *)
 
 let narrow_keeps_dict_type = ok "cap_narrow of a dictionaried cap still reads its dictionary" {|mod App do
@@ -669,6 +749,7 @@ let tests = [
   impl_io_cap; impl_io_cap_test_build; impl_unpinned;
   dict_reads_option; dict_not_bare; dict_no_declaration;
   narrow_keeps_dict_type;
+  two_mods_same_dict_name; two_mods_wrong_dict;
   rt_dispatch; rt_swap; rt_default; rt_narrow_propagates;
   io_console_shape; shadow_list_matches_stdlib; io_clock_zero_arg; io_mut_has_no_dictionary;
   excluded_ops_are_documented; dict_fields_sorted;
