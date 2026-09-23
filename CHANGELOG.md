@@ -317,6 +317,10 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A protocol `choose` branch can now continue with a labelled message step.** A branch
+  body line such as `tick: A -> B : Int` after the branch's first message was read as the
+  start of the next branch and failed with "I got stuck here"; it now continues the branch,
+  as an unlabelled `A -> B : Int` line already did.
 - **A nested module can use its own `proof cap` without declaring it in
   `needs`.** `proof cap Key` in `mod Vault` has always meant `Vault` may take a
   `Cap(Vault.Key)` without also writing `needs Vault.Key`, but that only worked

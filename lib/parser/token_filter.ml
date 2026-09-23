@@ -28,7 +28,9 @@ type match_state = {
                                      upper-case role, so `A -> B : T` on a new line
                                      is the branch's next STEP, not a new arm
                                      (2026-09-20: a branch's second message step
-                                     used to be read as an arm and fail to parse) *)
+                                     used to be read as an arm and fail to parse);
+                                     likewise a LABELLED step `tick: A -> B : T`,
+                                     told apart by its COLON (2026-09-23) *)
   ms_is_cond : bool;              (* cond form (`match do ... end`, no scrutinee):
                                      arm "patterns" are full boolean expressions,
                                      so the new-arm lookahead must not bail on the
@@ -293,8 +295,13 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
      instead of bailing. The structural bail-outs (EQUALS/DO/LET/IF/MATCH/FN/
      PFN/ASSERT) stay unconditional: those only ever appear in a body
      continuation, and they guard against a spurious depth-0 ARROW from a
-     nested lambda/construct being mistaken for an arm separator. *)
-  let lookahead_is_new_arm ~is_cond first_tok lexbuf =
+     nested lambda/construct being mistaken for an arm separator.
+
+     [is_choose] is true inside a protocol `choose by R: ... end`, whose arms
+     are exactly `label -> ...`. There a depth-0 COLON before any ARROW means
+     the line is a LABELLED message step (`tick: A -> B : T`) continuing the
+     current branch, never a new arm (2026-09-23). *)
+  let lookahead_is_new_arm ~is_cond ~is_choose first_tok lexbuf =
     let buffered_tokens : tok_with_pos Queue.t = Queue.create () in
     (* first_tok was just returned by raw lexbuf, so current positions are its *)
     Queue.push {
@@ -335,6 +342,9 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
           result := false;
           done_ := true
         end
+      | Parser.COLON when !depth = 0 && is_choose ->
+        result := false;
+        done_ := true
       | Parser.WHEN when !depth = 0 ->
         (* Entering a match arm's guard expression. *)
         seen_when := true
@@ -536,7 +546,8 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
             (* Could be a new arm or a body continuation.
                Use lookahead: pass tok_after as the first token, then
                scan for ARROW vs NL *)
-            if lookahead_is_new_arm ~is_cond:ms.ms_is_cond tok_after lexbuf then begin
+            if lookahead_is_new_arm ~is_cond:ms.ms_is_cond
+                 ~is_choose:ms.ms_is_choose tok_after lexbuf then begin
               (* New arm — emit NL as arm separator *)
               ms.ms_in_arm_body <- false;
               Parser.NL
