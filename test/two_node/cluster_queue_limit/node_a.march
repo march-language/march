@@ -38,7 +38,7 @@ mod ClusterQueueLimitA do
     -- SWIM's suspect timeout is raised to 15 s here: this scenario is about
     -- the queue limit giving up on a peer that stops reading, and under the
     -- sanitizer the default 3 s could declare node-b dead first.
-    match ClusterNode.start({ cfg with swim: Swim.config(500, 15000, 2) }) do
+    match ClusterNode.start(c, { cfg with swim: Swim.config(500, 15000, 2) }) do
       Err(e) -> panic(e)
       Ok(h) ->
         println("node-a: up")

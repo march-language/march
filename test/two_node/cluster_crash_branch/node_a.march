@@ -18,6 +18,7 @@ mod ClusterCrashBranchA do
   needs IO.Spawn
   needs IO.Clock
   needs Session.Live
+  needs ClusterNode.Live
 
   @[endpoints]
   protocol Logging do
@@ -32,13 +33,8 @@ mod ClusterCrashBranchA do
     I -> C : Bool
   end
 
-  pfn join() : ClusterNode.ClusterHandle do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "logging-secret", 1)
-    match ClusterNode.start(cfg) do
-      Err(e) -> panic(e)
-      Ok(h) ->
-        if ClusterNode.await_members(h, 2, 120000) do h else panic("node-a: never joined") end
-    end
+  pfn joined(h : Cap(ClusterNode.Live)) : () do
+    if ClusterNode.await_members(h, 2, 120000) do () else panic("node-a: never joined") end
   end
 
   pfn role_l(s : Cap(Session.Live), st : Logging_L.S_send_Msg_L_I_1) : Logging_L.Yield do
@@ -54,7 +50,12 @@ mod ClusterCrashBranchA do
   end
 
   fn main(c : Cap(IO)) do
-    let h = join()
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "logging-secret", 1)
+    let h = match ClusterNode.start(c, cfg) do
+      Ok(h0) -> h0
+      Err(e) -> panic(e)
+    end
+    joined(h)
     println("node-a: up")
     match Logging_Run.cluster_L(c, h, "logging-1", fn (s, st) -> role_l(s, st)) do
       Ok(_) -> println("L: closed")

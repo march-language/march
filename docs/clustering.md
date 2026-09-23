@@ -75,10 +75,11 @@ assemble by hand. `ClusterNode` is the assembled node, and most programs should 
 ```march
 -- MARCH_NODE_NAME=a MARCH_NODE_PORT=4001 MARCH_CLUSTER_NODES=10.0.0.2:4001 \
 -- MARCH_CLUSTER_SECRET=... MARCH_NODE_ADVERTISE=10.0.0.1:4001
+-- inside `fn main(io : Cap(IO))`, in a module that declares `needs ClusterNode.Live`
 match ClusterNode.config_from_env() do
   Err(e) -> panic(e)
   Ok(cfg) ->
-    match ClusterNode.start(cfg) do
+    match ClusterNode.start(io, cfg) do
       Err(e) -> panic(e)
       Ok(node) ->
         let _ = ClusterNode.subscribe(node, fn ev -> println(ClusterNode.event_text(ev)))
@@ -140,6 +141,44 @@ the other is causally newer and wins; otherwise a deterministic tiebreak picks. 
 whose binding lost gets `Lost(name, winner)` on its watchers. It should stop acting as the
 holder and must not unregister (the name is not its own any more). Use a global name for
 discovery, where a brief duplicate is harmless, and never for mutual exclusion.
+
+**The node is a capability.** `start(io, cfg)` returns a `Cap(ClusterNode.Live)`, minted
+from the program's `Cap(IO)`: code that holds it can use the cluster, and code that does not
+cannot. A module whose signatures name it declares `needs ClusterNode.Live`, as for any
+capability. Like every proof capability, only `ClusterNode` can create one, so your own
+function cannot return a node it started. Start the node in `main` (or wherever you hold
+`Cap(IO)`) and pass the capability down; a helper that waits for peers takes it as a
+parameter:
+
+```march
+fn main(io : Cap(IO)) do
+  let node = match ClusterNode.start(io, cfg) do
+    Ok(n) -> n
+    Err(e) -> panic(e)
+  end
+  joined(node)          -- pfn joined(n : Cap(ClusterNode.Live)) : () do ... end
+  ...
+end
+```
+
+**Testing without a network.** Every operation above goes through the capability's
+dictionary, a record of functions (`ClusterNode.ClusterOps`, one field per operation). `start`
+attaches the real one. A test attaches its own with `ClusterNode.attach(io, ops)`, and code
+written against a real node then runs against it. `ClusterNode.ops_stub(node_id)` is a
+dictionary whose every operation panics with its own name; override the ones the code under
+test uses:
+
+```march
+let ops = { ClusterNode.ops_stub("n0") with
+  members: fn _ -> fake_members(fake),
+  subscribe: fn f -> fake_subscribe(fake, f) }
+let node = ClusterNode.attach(io, ops)
+-- the test now calls the subscribers itself: NodeDead(info, "suspect timeout"), ...
+```
+
+A zero-argument operation takes `()`: `members: fn _ -> ...`. This is how membership
+reactions are tested with no sockets: `test/session/cluster_placement.march` injects
+`NodeDead` into a placement that moves roles off dead nodes.
 
 ---
 

@@ -1456,9 +1456,30 @@ let check_module_needs (env : env) (mod_name : Ast.name)
   ) (List.filter (fun need -> not (List.mem need unknown_needs)) declared_needs);
   (* Check 3 (hint): Cap(IO) root — suggest narrowing.  Not on `main`: the
      reference calls `fn main(cap : Cap(IO))` the entry-point convention, so
-     hinting there tells users to stop following the documented advice. *)
+     hinting there tells users to stop following the documented advice.  Not
+     on a proof-cap FACTORY either: a function whose declared return type
+     names a proof cap its own module declares (`Session.attach`,
+     `Actor.introspect`, `ClusterNode.start`) mints it, `mint_cap` is typed
+     `Cap(IO) -> Cap(a)`, and amplifying a narrowed cap is a type error, so
+     the root cap is the only parameter it can take and the hint could not be
+     acted on. *)
+  let own_proof_cap path =
+    match List.assoc_opt path env.proof_caps with
+    | Some m -> m <> "" && (m = mod_name.txt || m = env.current_module)
+    | None -> false
+  in
+  let proof_cap_factories =
+    List.filter_map (function
+      | Ast.DFn (def, _) ->
+        (match def.fn_ret_ty with
+         | Some t when List.exists own_proof_cap (cap_paths_in_surface_ty t) ->
+           Some def.fn_name.txt
+         | _ -> None)
+      | _ -> None) decls
+  in
   List.iter (fun (cap_path, fn_name, sp) ->
-    if cap_path = "IO" && fn_name <> "main" then
+    if cap_path = "IO" && fn_name <> "main"
+       && not (List.mem fn_name proof_cap_factories) then
       Err.hint env.errors ~span:sp
         (render_parts [
           MPText "this function takes "; cap "IO";

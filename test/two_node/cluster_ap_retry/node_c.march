@@ -26,7 +26,7 @@ mod ClusterApRetryC do
   fn main(c : Cap(IO)) do
     let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
     let cfg = ClusterNode.config("node-c", Env.require_int("MARCH_PORT_C"), "", Cons(seed, Nil), "ap-secret", 1)
-    match ClusterNode.start(cfg) do
+    match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-c: never joined") end

@@ -9,6 +9,7 @@ mod ClusterApWithdrawA do
   needs IO.Spawn
   needs IO.Clock
   needs Session.Live
+  needs ClusterNode.Live
 
   @[endpoints]
   protocol Ring do
@@ -24,14 +25,14 @@ mod ClusterApWithdrawA do
       Ring_A.close(s, st2))
   end
 
-  pfn attempt(c : Cap(IO), h : ClusterNode.ClusterHandle) : Bool do
+  pfn attempt(c : Cap(IO), h : Cap(ClusterNode.Live)) : Bool do
     match Ring_Run.initiate_A(c, h, fn (s, st) -> role_a(s, st)) do
       Ok(_) -> true
       Err(_) -> false
     end
   end
 
-  pfn attempt_retry(c : Cap(IO), h : ClusterNode.ClusterHandle, left : Int) : Bool do
+  pfn attempt_retry(c : Cap(IO), h : Cap(ClusterNode.Live), left : Int) : Bool do
     if attempt(c, h) do true
     else if left <= 0 do false else
       sleep_ms(500)
@@ -41,7 +42,7 @@ mod ClusterApWithdrawA do
 
   fn main(c : Cap(IO)) do
     let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "apw-secret", 1)
-    match ClusterNode.start(cfg) do
+    match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         println("node-a: up")

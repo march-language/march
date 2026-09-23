@@ -1637,6 +1637,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
          [ let_wild (app "body" ((var "s" :: narrowed role) @ [ app (rm ^ ".register") [ var "s"; lit_int 0 ] ]));
            unit ])
   in
+  (* A running cluster node is `Cap(ClusterNode.Live)` (D35). *)
+  let t_cluster = tycon "Cap" [ tycon "ClusterNode.Live" [] ] in
   let runners =
     List.map
       (fun (role, entry) ->
@@ -1659,7 +1661,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
     List.map
       (fun (role, entry) ->
          fn ("cluster_" ^ role)
-           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []);
+           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster);
              ("session", t_string); ("body", t_body role entry) ]
            (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_cluster"
@@ -1679,7 +1681,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
     List.map
       (fun (role, entry) ->
          fn ("offer_" ^ role)
-           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []);
+           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster);
              ("capacity", t_int); ("body", t_body role entry) ]
            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_role"
@@ -1691,7 +1693,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
     List.map
       (fun (role, entry) ->
          fn ("initiate_" ^ role)
-           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []); ("body", t_body role entry) ]
+           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("body", t_body role entry) ]
            (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.initiate"
               [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
@@ -1776,7 +1778,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
     List.map
       (fun (role, _entry) ->
          fn ("offer_hosted_" ^ role)
-           ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []); ("capacity", t_int) ]
+           ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("capacity", t_int) ]
             @ hosted_callbacks role)
            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_hosted"
@@ -1789,7 +1791,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
     List.map
       (fun (role, _entry) ->
          fn ("cluster_hosted_" ^ role)
-           ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []); ("session", t_string) ]
+           ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("session", t_string) ]
             @ hosted_callbacks role)
            (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_cluster_hosted"
@@ -1815,7 +1817,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
     DNeeds
       ( List.map (fun path -> (List.map n path, None))
           [ [ "IO" ]; [ "IO"; "Mut" ]; [ "IO"; "NetConnect" ]; [ "IO"; "NetListen" ]; [ "IO"; "Spawn" ];
-            [ "Session"; "Live" ] ],
+            [ "Session"; "Live" ]; [ "ClusterNode"; "Live" ] ],
         sp )
   in
   DMod (n mname, Public,
