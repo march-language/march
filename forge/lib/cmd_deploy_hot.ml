@@ -34,7 +34,11 @@ type fn_manifest = {
 }
 
 type manifest = {
+  version  : int;
   cas_hash  : string;
+  target : string option;
+  hcr_abi : string option;
+  module_prefix : string option;
   functions : fn_manifest list;
 }
 
@@ -42,13 +46,22 @@ let parse_manifest path : (manifest, string) result =
   try
     let ic = open_in path in
     let cas_hash = ref "" in
+    let version = ref 1 in
+    let target = ref None and hcr_abi = ref None and module_prefix = ref None in
     let fns = ref [] in
     (try while true do
        let line = String.trim (input_line ic) in
        if String.length line = 0 || line.[0] = '#' then begin
+         if line = "# march-hcr-manifest v2" then version := 2;
          (* # cas_hash <hex> *)
          if String.length line > 10 && String.sub line 0 10 = "# cas_hash" then
            cas_hash := String.trim (String.sub line 10 (String.length line - 10))
+         else if String.length line > 8 && String.sub line 0 8 = "# target" then
+           target := Some (String.trim (String.sub line 8 (String.length line - 8)))
+         else if String.length line > 8 && String.sub line 0 8 = "# hcr_abi" then
+           hcr_abi := Some (String.trim (String.sub line 8 (String.length line - 8)))
+         else if String.length line > 14 && String.sub line 0 14 = "# module_prefix" then
+           module_prefix := Some (String.trim (String.sub line 14 (String.length line - 14)))
        end else if String.length line >= 5 && String.sub line 0 5 = "ROOT " then begin
          (* Legacy pre-2026-07-04 manifests may still carry a
             "ROOT cap_root=<hex>" line (whole-artifact union, now retired).
@@ -107,7 +120,9 @@ let parse_manifest path : (manifest, string) result =
      done with End_of_file -> ());
     close_in ic;
     if !cas_hash = "" then Error (path ^ ": missing # cas_hash line")
-    else Ok { cas_hash = !cas_hash; functions = List.rev !fns }
+    else Ok { version = !version; cas_hash = !cas_hash; target = !target;
+              hcr_abi = !hcr_abi; module_prefix = !module_prefix;
+              functions = List.rev !fns }
   with Sys_error m -> Error m
 
 (** True iff [manifest] is a genuine pre-Phase-5C legacy manifest — i.e. NO
