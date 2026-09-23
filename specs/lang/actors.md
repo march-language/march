@@ -267,23 +267,33 @@ An actor can run code of its own at shutdown (flush a buffer, checkpoint state, 
 unfinished work back to a queue) by declaring one `on_stop` block among its handlers:
 
 ```march
+type StoreState = { saved : Int }   -- the Store actor's state record
+
 actor Batcher do
-  state { buf : List(String) }
-  init  { buf: [] }
+  state { buf : List(String), store : Option(Pid(StoreState)) }
+  init  { buf: [], store: None }
+
+  on UseStore(s : Pid(StoreState)) do
+    { state with store: Some(s) }
+  end
 
   on Append(s : String) do
-    { buf: Cons(s, state.buf) }
+    { state with buf: Cons(s, state.buf) }
   end
 
   -- Hand whatever was batched to the store before dying.
   on_stop do
-    match Actor.whereis("store") do
+    match state.store do
       Some(store) -> send(store, Save(List.reverse(state.buf)))
       None        -> None
     end
   end
 end
 ```
+
+The Store's Pid arrives in a message and is kept in state: a handler has no
+capability in scope, so it cannot look an actor up by name with
+`Actor.whereis`, which takes a `Cap(Actor.Introspect)`.
 
 Inside `on_stop`, `state` is the **final** state (after the drain) and `self` is the
 actor's own Pid, exactly as in a handler; there are no message parameters, and the

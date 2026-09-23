@@ -6,10 +6,12 @@
 -- actor accepts no new messages. What it managed before blocking is kept (its
 -- first note reaches the log); nothing after the block runs.
 mod Main do
+  needs IO
   needs IO.Console
   needs IO.Clock
 
   type GetLog = GetLog
+  type LogState = { lines : List(String) }
 
   actor Log do
     state { lines : List(String) }
@@ -25,31 +27,38 @@ mod Main do
     end
   end
 
-  fn note(s : String) do
-    match Actor.whereis("log") do
+  -- Each actor is handed the Log's Pid in a message and keeps it in state:
+  -- a handler has no capability in scope, so it cannot look the Log up by
+  -- name (Actor.whereis takes a Cap(Actor.Introspect)).
+  fn note(log : Option(Pid(LogState)), s : String) do
+    match log do
       Some(l) -> send(l, Note(s))
       None    -> None
     end
   end
 
   actor Stuck do
-    state { n : Int }
-    init  { n: 0 }
+    state { n : Int, log : Option(Pid(LogState)) }
+    init  { n: 0, log: None }
+
+    on StuckLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
 
     on Work(k : Int) do
-      { n: state.n + k }
+      { state with n: state.n + k }
     end
 
     on_stop do
-      note("stuck: before the block, n=" ++ int_to_string(state.n))
+      note(state.log, "stuck: before the block, n=" ++ int_to_string(state.n))
       let _m = receive()
-      note("stuck: after the block (must never appear)")
+      note(state.log, "stuck: after the block (must never appear)")
     end
   end
 
   actor Sup do
-    state { s : Int }
-    init  { s: 0 }
+    state { s : Int, log : Option(Pid(LogState)) }
+    init  { s: 0, log: None }
 
     supervise do
       strategy one_for_one
@@ -57,8 +66,19 @@ mod Main do
       Stuck s shutdown 200
     end
 
+    on SupLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
+
     on_stop do
-      note("sup: on_stop, after its child was cut off")
+      note(state.log, "sup: on_stop, after its child was cut off")
+    end
+  end
+
+  fn child(intro, sup, field) do
+    match get_actor_field(sup, field) do
+      None    -> Actor.pid_from_int(intro, -1)
+      Some(n) -> Actor.pid_from_int(intro, n)
     end
   end
 
@@ -69,12 +89,13 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let log = spawn(Log)
-    Actor.register(log, "log")
 
     println("-- Actor.stop(pid, 200): the blocked on_stop is killed at the deadline")
     let w = spawn(Stuck)
+    send(w, StuckLog(log))
     send(w, Work(9))
     let t0 = unix_time_ms()
     println("stop: " ++ bool_to_string(Actor.stop(w, 200)))
@@ -88,6 +109,8 @@ mod Main do
 
     println("-- a child spec's `shutdown 200` bounds the child's on_stop the same way")
     let sup = spawn(Sup)
+    send(sup, SupLog(log))
+    send(child(intro, sup, "s"), StuckLog(log))
     println("stop: " ++ bool_to_string(Actor.stop(sup, 5000)))
     println("supervisor dead: " ++ bool_to_string(is_alive(sup) == false))
     dump(log)
