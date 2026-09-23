@@ -123,6 +123,16 @@ git log is authoritative for exact commits.
   `` `pid_of_int` is internal to the standard library; use `Actor.list(cap)` ``. No
   builtin is reserved yet: the raw actor-reference builtins will be once their
   capability-taking wrappers exist.
+- **A warning when a function's body fixes a type variable its signature
+  names.** `fn bad(xs : List(a)) : List(a) do [0 - 5] end` used to typecheck
+  silently as `List(Int) -> List(Int)`, with the mistake surfacing only as a
+  mismatch at some caller. It now warns at the `a` in the signature, naming
+  the type the body gave it (`Int`) with a hint to write that type or make the
+  body generic. Two signature variables that the body makes equal
+  (`fn second(x : a, y : b) : a do y end`) warn too. Only variables you wrote
+  in the signature are checked, and not when the body already has a type
+  error. The warning code is `annotated_tyvar_fixed`. Signature type variables
+  are planned to become rigid later, which will make this an error.
 - **A choreography role's first state now has a name: `<P>_<Role>.Entry`.** A role
   body's signature used to have to spell the state `register` yields, which meant
   working out `S_` plus the first step of that role's own projection
@@ -244,7 +254,10 @@ git log is authoritative for exact commits.
   The test meant to catch this typechecked `ordered_map.march` in isolation,
   where a call into another stdlib module resolves to an unconstrained type
   variable and checks nothing; it now typechecks each file inside the whole
-  stdlib, as the compiler does.
+  stdlib, as the compiler does. `values` was found independently by the new
+  `annotated_tyvar_fixed` warning, which saw the signature's `v` fixed to a
+  function type; annotating a call (`let vs : List(String) =
+  OrderedMap.values(m)`) was rejected outright.
 
 - **A `MARCH_SANITIZE=1` compile no longer returns a cached ThreadSanitizer
   binary.** The compile cache recorded only *whether* `MARCH_SANITIZE` was

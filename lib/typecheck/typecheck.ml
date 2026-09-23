@@ -3961,6 +3961,112 @@ let mark_trusted_linear_vars env (def : Ast.fn_def) ~fn_span ~fn_tvars vars =
                   v v def.fn_name.txt (pp_ty t'))))
       vars
 
+(** How a body failed to leave a signature type variable generic.
+    [Tyvar_concrete t]: the body fixed it to the non-variable type [t].
+    [Tyvar_aliased other]: the body unified it with [other], an
+    earlier-written type variable of the same signature. *)
+type tyvar_fixing =
+  | Tyvar_concrete of ty
+  | Tyvar_aliased of string
+
+(** The first span at which the signature of [def] mentions type variable
+    [v], searching the parameter annotations, the return annotation, and
+    the bounds in source order. *)
+let signature_tyvar_span (def : Ast.fn_def) v =
+  let rec find (t : Ast.ty) = match t with
+    | Ast.TyVar n when n.txt = v -> Some n.span
+    | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> None
+    | Ast.TyCon (_, ts) | Ast.TyTuple ts -> List.find_map find ts
+    | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) ->
+      (match find a with Some s -> Some s | None -> find b)
+    | Ast.TyRecord fs -> List.find_map (fun (_, t) -> find t) fs
+    | Ast.TyLinear (_, t) | Ast.TyRefine (t, _, _) -> find t
+  in
+  let params = match def.fn_clauses with
+    | c :: _ -> List.filter_map (function
+        | Ast.FPNamed p | Ast.FPDefault (p, _) -> p.param_ty
+        | Ast.FPPat _ -> None) c.Ast.fc_params
+    | [] -> [] in
+  let bounds = List.filter_map (fun ((n : Ast.name), _) ->
+      if n.txt = v then Some n.span else None) def.fn_bounds in
+  match List.find_map find (params @ Option.to_list def.fn_ret_ty) with
+  | Some s -> Some s
+  | None -> (match bounds with s :: _ -> Some s | [] -> None)
+
+(** The signature type variables of [def] ([fn_tvars], as [check_fn] built
+    them) that its now-checked body did not leave generic, in the order the
+    signature writes them.  Only variables written in the signature are
+    considered: a variable with no source occurrence there (none today, but
+    a desugar-synthesised annotation would be one) is skipped. *)
+let annotated_tyvar_fixings (def : Ast.fn_def) fn_tvars =
+  let seen = Hashtbl.create 8 in
+  let written = List.filter_map (fun (v, t) ->
+      if Hashtbl.mem seen v then None
+      else begin
+        Hashtbl.replace seen v ();
+        match signature_tyvar_span def v with
+        | Some sp -> Some (v, sp, t)
+        | None -> None
+      end) fn_tvars in
+  let ordered = List.sort (fun (_, (a : Ast.span), _) (_, (b : Ast.span), _) ->
+      compare (a.start_line, a.start_col) (b.start_line, b.start_col)) written in
+  let ids = Hashtbl.create 8 in
+  List.filter_map (fun (v, sp, t) ->
+      match repr t with
+      | TError -> None
+      | TVar { contents = Unbound (id, _) } ->
+        (match Hashtbl.find_opt ids id with
+         | Some other -> Some (v, sp, Tyvar_aliased other)
+         | None -> Hashtbl.replace ids id v; None)
+      | t' -> Some (v, sp, Tyvar_concrete t'))
+    ordered
+
+let rec ty_mentions_var t = match repr t with
+  | TVar _ -> true
+  | TCon (_, ts) | TTuple ts -> List.exists ty_mentions_var ts
+  | TArrow (a, b) | TNatOp (_, a, b) -> ty_mentions_var a || ty_mentions_var b
+  | TRecord fs -> List.exists (fun (_, t) -> ty_mentions_var t) fs
+  | TLin (_, t) | TRefine (t, _, _) -> ty_mentions_var t
+  | TError | TNat _ | TChan _ -> false
+
+(** Warn, at its first mention in the signature, about each type variable
+    of [def] that its body did not leave generic
+    (specs/todos/2026-09-18-typecheck-annotated-tyvars-flexible.md, option
+    (b)).  Both a variable fixed to a concrete type and one made equal to
+    another of the signature's variables are reported: each is a signature
+    that promises callers a freedom the body does not give them, and each
+    would be an error were annotation variables rigid. *)
+let warn_annotated_tyvar_fixings env (def : Ast.fn_def) fn_tvars =
+  List.iter (fun (v, span, fixing) ->
+      let message, note = match fixing with
+        | Tyvar_concrete t ->
+          let shown = pp_ty t in
+          Printf.sprintf
+            "The type variable `%s` in `%s`'s signature is not generic: the \
+             body fixes it to `%s`, so every caller gets `%s` in its place."
+            v def.fn_name.txt shown shown,
+          if ty_mentions_var t then
+            Printf.sprintf
+              "hint: write the type the body needs in place of `%s`, or make \
+               the body generic in `%s`." v v
+          else
+            Printf.sprintf
+              "hint: write `%s` in place of `%s` if that is what you mean, or \
+               make the body generic in `%s`." shown v v
+        | Tyvar_aliased other ->
+          Printf.sprintf
+            "The type variables `%s` and `%s` in `%s`'s signature are not \
+             independent: the body makes `%s` the same type as `%s`."
+            other v def.fn_name.txt v other,
+          Printf.sprintf
+            "hint: write `%s` in place of `%s` if they are meant to be the \
+             same type, or make the body generic in each." other v
+      in
+      Err.report env.errors
+        { Err.severity = Err.Warning; span; message; labels = [];
+          notes = [ note ]; code = Some "annotated_tyvar_fixed"; fix = None })
+    (annotated_tyvar_fixings def fn_tvars)
+
 (** Check a function definition.
 
     Strategy:
@@ -4049,6 +4155,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
          in `fn foo(x : a, y : a) : a when Eq(a)` maps to the same
          unification variable everywhere. *)
       let fn_tvars = ref [] in
+      let diag_mark = Err.mark env.errors in
 
       (* Pre-register explicit bound type variables from fn_bounds and build
          bound constraints.  Bounds like [s : ConnState] pre-register `s` in
@@ -4356,6 +4463,14 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       Hashtbl.replace env.type_map def.fn_name.span (repr fn_ty);
       (* Unify self_ty so recursive calls get the correct type *)
       unify env' ~span:fn_span self_ty fn_ty;
+
+      (* A signature type variable the body fixed is a signature that claims
+         more genericity than the function has; say so at the definition,
+         rather than leaving the first caller at another type to report a
+         mismatch at the call.  Skipped when the body reported an error: its
+         unifications are then unreliable evidence of what the author meant. *)
+      if not (Err.error_since env.errors diag_mark) then
+        warn_annotated_tyvar_fixings env def !fn_tvars;
 
       (* Generalize; attach bound constraints and any when-clause class constraints *)
       let all_constraints = bound_constraints @ class_constraints in
