@@ -1,0 +1,10 @@
+  {{pool}}:
+    image: {{image}}
+    environment:
+      MARCH_POOL: {{pool}}
+      MARCH_TOPOLOGY: /etc/march/topology.json
+    volumes:
+      - ./.forge/topology.json:/etc/march/topology.json:ro
+    deploy:
+      replicas: {{replicas}}
+{{ports}}

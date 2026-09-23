@@ -16335,6 +16335,7 @@ let compiler_suites =
       ("cap_unforgeable", Test_cap_unforgeable.tests);
       ("cap_dict", Test_cap_dict.tests);
       ("endpoints", Test_endpoints.tests);
+      ("topology_flag", Test_topology_flag.tests);
       ("cap_attrib_agreement", Test_cap_attrib_agreement.tests);
       ("cap_sandbox_profile", Test_cap_sandbox_profile.tests);
       ("cap_sandbox_runtime", Test_cap_sandbox_runtime.tests);

@@ -129,3 +129,16 @@
 (executable
  (name bench_solver)
  (libraries march_forge unix))
+
+; test_topology.ml: the topology file (forge/lib/topology.ml). In-process
+; only (the fixture project is parsed, never compiled), so no toolchain env;
+; the generator goldens under topology_golden/ are its only inputs.
+; Regenerate them on purpose with
+;   UPDATE_TOPOLOGY_GOLDEN=$PWD/forge/test/topology_golden \
+;     ./_build/default/forge/test/test_topology.exe
+; and review the diff.
+(test
+ (name test_topology)
+ (modules test_topology)
+ (deps (glob_files topology_golden/*.expected))
+ (libraries march_forge march_parser march_lexer alcotest unix yojson))

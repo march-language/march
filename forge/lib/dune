@@ -42,3 +42,56 @@
     (echo "let content = {forge_registry_march|\n")
     (cat %{dep:../tasks/forge_registry.march})
     (echo "\n|forge_registry_march}\n")))))
+
+; `forge topology gen` built-in generators: the templates under
+; forge/templates/topology/ embedded as OCaml strings ({{key}} placeholders,
+; substituted by Topology.Gen.render).
+(rule
+ (target topology_tmpl_systemd.ml)
+ (deps ../templates/topology/systemd.service.tmpl)
+ (action
+  (with-stdout-to %{target}
+   (progn
+    (echo "let content = {tmpl|\n")
+    (cat %{dep:../templates/topology/systemd.service.tmpl})
+    (echo "\n|tmpl}\n")))))
+
+(rule
+ (target topology_tmpl_ufw.ml)
+ (deps ../templates/topology/ufw.sh.tmpl)
+ (action
+  (with-stdout-to %{target}
+   (progn
+    (echo "let content = {tmpl|\n")
+    (cat %{dep:../templates/topology/ufw.sh.tmpl})
+    (echo "\n|tmpl}\n")))))
+
+(rule
+ (target topology_tmpl_do_firewall.ml)
+ (deps ../templates/topology/do-firewall.json.tmpl)
+ (action
+  (with-stdout-to %{target}
+   (progn
+    (echo "let content = {tmpl|\n")
+    (cat %{dep:../templates/topology/do-firewall.json.tmpl})
+    (echo "\n|tmpl}\n")))))
+
+(rule
+ (target topology_tmpl_compose.ml)
+ (deps ../templates/topology/compose.yml.tmpl)
+ (action
+  (with-stdout-to %{target}
+   (progn
+    (echo "let content = {tmpl|\n")
+    (cat %{dep:../templates/topology/compose.yml.tmpl})
+    (echo "\n|tmpl}\n")))))
+
+(rule
+ (target topology_tmpl_compose_service.ml)
+ (deps ../templates/topology/compose-service.yml.tmpl)
+ (action
+  (with-stdout-to %{target}
+   (progn
+    (echo "let content = {tmpl|\n")
+    (cat %{dep:../templates/topology/compose-service.yml.tmpl})
+    (echo "\n|tmpl}\n")))))

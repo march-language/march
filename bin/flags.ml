@@ -26,6 +26,12 @@ let ffi_c_files    : string list ref = ref []      (* C source paths, in declara
 let ffi_link_flags : string list ref = ref []      (* extra linker flags, e.g. "-lz" *)
 
 let do_check       = ref false   (* --check: typecheck only, no codegen or eval *)
+let topology_file  : string option ref = ref None
+(* --topology <json>: a forge topology digest (.forge/topology.json, schema
+   version 1). Step 7 of the distributed-deploys plan: the compiler only
+   validates the digest's version and that every name it binds is declared in
+   the loaded modules. The generated `main`, role grants and the derived caps
+   (steps 3 and 4) do not exist yet, so nothing else happens. *)
 
 let cap_sandbox    = ref false   (* --cap-sandbox: embed a self-imposed capability sandbox profile *)
 (* `needs` is a hard ceiling, checked against attributed use.  ON by default

@@ -12,6 +12,26 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **The topology file, static half** (build step 7 of the distributed-deploys plan).
+  `topology.toml` next to `forge.toml` binds each offered `Protocol.Role` to a
+  `body` function or an `actor`, groups roles into `[pool.*]` sections
+  (`start` hook, `serves` incl. `"*"`, `initiates`, `caps`, `isolate`, `public`
+  ports, `place = { on = "label" }` / `{ count = n }` placement rules), with
+  `[drain]` deadlines and `[backend]`; `topology.<env>.toml` overlays deep-merge
+  tables and replace arrays. `forge topology check` validates it against the
+  project's sources with `file:line` errors (unknown keys are errors, unbound
+  served roles, names that resolve to nothing, labels no host carries, `count`
+  above the host count, isolated pools sharing a role, a written `initiates`
+  narrower than the code) and warns about unlabelled protocol steps; it runs
+  automatically in `forge build`, `forge run` and `forge deploy hot` and writes
+  the digest `.forge/topology.json` (schema version 1, documented in
+  `specs/features/topology.md`). `forge topology export --json` adds each pool's
+  derived `initiates` and the pool connectivity graph; `forge topology gen`
+  writes `systemd` units, `ufw` scripts, DigitalOcean firewall JSON
+  (`do-firewall`) or a `compose` file, or runs a `forge-topology-<target>`
+  plugin from PATH with the export on stdin. `march --topology <json>` reads the
+  digest and checks its version and bound names (nothing more yet). See
+  `docs/topology.md`.
 - **Parameterised actor `init`.** `init(env : T, n : Int) { … }` declares
   parameters that `spawn(A, env, 3)` supplies; they are in scope in the init
   expression, and every argument is checked against the matching parameter.
