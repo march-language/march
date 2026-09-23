@@ -1,0 +1,158 @@
+-- `Cap(ClusterNode.Live)` as a seam (D35, distributed-deploys step 4): a
+-- consumer written against the cluster capability only -- a toy placement
+-- that keeps each role on one Alive member and moves it when SWIM declares
+-- that member dead -- driven by a FAKE cluster dictionary attached with
+-- `ClusterNode.attach(io, ops)`. The test injects `NodeDead`/`NodeUp`
+-- through the subscribers the dictionary collected and asserts which roles
+-- moved where. No sockets, no node actor: every operation the consumer
+-- calls goes through `cap_dict`.
+mod ClusterPlacement do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs ClusterNode.Live
+
+  -- ── the fake cluster ──────────────────────────────────────────────────
+
+  -- The member table and the subscribers, which the test drives directly.
+  type Fake = { members : Vault(ClusterNode.NodeInfo), subs : Vault(ClusterNode.NodeEvent -> Unit),
+                meta : Vault(Int) }
+
+  pfn info(id : String) : ClusterNode.NodeInfo do
+    { node_id: id, name: "node-" ++ id, addr: "", creation: 1, incarnation: 0 }
+  end
+
+  pfn fake_members(fk : Fake) : List(ClusterNode.NodeInfo) do
+    List.map(Vault.all(fk.members), fn kv -> match kv do (_k, i) -> i end)
+  end
+
+  -- As the real node: a late subscriber hears `NodeUp` for every Alive member.
+  pfn fake_subscribe(fk : Fake, f : ClusterNode.NodeEvent -> Unit) : Int do
+    let id = Vault.incr(fk.meta, "next_sub", 1)
+    Vault.set(fk.subs, int_to_string(id), f)
+    List.each(fake_members(fk), fn i -> f(ClusterNode.NodeUp(i)))
+    id
+  end
+
+  pfn tell(fk : Fake, ev : ClusterNode.NodeEvent) : () do
+    List.each(Vault.all(fk.subs), fn kv -> match kv do (_k, f) -> f(ev) end)
+  end
+
+  pfn inject_dead(fk : Fake, id : String, cause : String) : () do
+    Vault.drop(fk.members, id)
+    tell(fk, ClusterNode.NodeDead(info(id), cause))
+  end
+
+  pfn inject_up(fk : Fake, id : String) : () do
+    Vault.set(fk.members, id, info(id))
+    tell(fk, ClusterNode.NodeUp(info(id)))
+  end
+
+  pfn fake_ops(fk : Fake) : ClusterNode.Ops do
+    { ClusterNode.ops_stub("n0") with
+      members: fn _ -> fake_members(fk),
+      subscribe: fn f -> fake_subscribe(fk, f),
+      unsubscribe: fn id -> Vault.drop(fk.subs, int_to_string(id)),
+      creation: fn _ -> 3 }
+  end
+
+  -- ── the consumer: written against the capability only ─────────────────
+
+  -- Each role sits on one Alive member. A new role goes to the least
+  -- loaded member (ties: the lowest node id). A member joining moves
+  -- nothing; a member declared dead moves every role it held.
+  type Placement = { c : Cap(ClusterNode.Live), roles : List(String), at : Vault(String), moves : Vault(Int) }
+
+  pfn load(p : Placement, id : String) : Int do
+    List.length(List.filter(p.roles, fn r -> Vault.get(p.at, r) == Some(id)))
+  end
+
+  pfn best(p : Placement, cands : List(ClusterNode.NodeInfo), acc : Option(String)) : Option(String) do
+    match cands do
+      Nil -> acc
+      Cons(i, rest) ->
+        match acc do
+          None -> best(p, rest, Some(i.node_id))
+          Some(b) ->
+            let li = load(p, i.node_id)
+            let lb = load(p, b)
+            if li < lb || (li == lb && i.node_id < b) do best(p, rest, Some(i.node_id))
+            else best(p, rest, acc) end
+        end
+    end
+  end
+
+  pfn place(p : Placement, role : String) : () do
+    Vault.drop(p.at, role)
+    match best(p, ClusterNode.members(p.c), None) do
+      Some(id) -> Vault.set(p.at, role, id)
+      None -> ()
+    end
+  end
+
+  pfn on_event(p : Placement, ev : ClusterNode.NodeEvent) : () do
+    match ev do
+      ClusterNode.NodeDead(i, cause) ->
+        List.each(p.roles, fn r ->
+          if Vault.get(p.at, r) == Some(i.node_id) do
+            place(p, r)
+            let _ = Vault.incr(p.moves, "n", 1)
+            let dest = match Vault.get(p.at, r) do Some(d) -> d | None -> "nowhere" end
+            println("  " ++ r ++ ": " ++ i.node_id ++ " -> " ++ dest ++ " (" ++ cause ++ ")")
+          else () end)
+      _ -> ()
+    end
+  end
+
+  pfn start_placement(c : Cap(ClusterNode.Live), roles : List(String)) : (Placement, Int) do
+    let p = { c: c, roles: roles, at: Vault.new("placement_at"), moves: Vault.new("placement_moves") }
+    List.each(roles, fn r -> place(p, r))
+    let sub = ClusterNode.subscribe(c, fn ev -> on_event(p, ev))
+    (p, sub)
+  end
+
+  pfn show(p : Placement) : () do
+    List.each(p.roles, fn r ->
+      match Vault.get(p.at, r) do
+        Some(id) -> println("  " ++ r ++ " @ " ++ id)
+        None -> println("  " ++ r ++ " unplaced")
+      end)
+  end
+
+  pfn moves(p : Placement) : Int do Vault.get_or(p.moves, "n", 0) end
+
+  -- ── the test ───────────────────────────────────────────────────────────
+
+  fn main(io : Cap(IO)) do
+    let fk = { members: Vault.new("fake_members"), subs: Vault.new("fake_subs"), meta: Vault.new("fake_meta") }
+    Vault.set(fk.members, "n1", info("n1"))
+    Vault.set(fk.members, "n2", info("n2"))
+    Vault.set(fk.members, "n3", info("n3"))
+    let c = ClusterNode.attach(io, fake_ops(fk))
+    println("node " ++ ClusterNode.node_id(c) ++ ", creation " ++ int_to_string(ClusterNode.creation(c)))
+    let g = ClusterNode.global_pid(c, 7)
+    println("global pid " ++ g.node_id ++ "/" ++ int_to_string(g.local_pid) ++ "@" ++ int_to_string(g.creation))
+    match start_placement(c, Cons("api", Cons("db", Cons("cache", Nil)))) do
+      (p, sub) ->
+        println("placed:")
+        show(p)
+        println("n2 dead:")
+        inject_dead(fk, "n2", "suspect timeout")
+        println("n4 up (nothing moves):")
+        inject_up(fk, "n4")
+        println("n3 dead:")
+        inject_dead(fk, "n3", "refused")
+        println("placed:")
+        show(p)
+        println("n1 dead:")
+        inject_dead(fk, "n1", "suspect timeout")
+        println("placed:")
+        show(p)
+        println("moves: " ++ int_to_string(moves(p)))
+        ClusterNode.unsubscribe(c, sub)
+        println("unsubscribed; n4 dead:")
+        inject_dead(fk, "n4", "suspect timeout")
+        println("moves: " ++ int_to_string(moves(p)))
+    end
+  end
+end

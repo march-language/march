@@ -19,6 +19,7 @@ mod ClusterPartitionA do
   needs IO.NetListen
   needs IO.Spawn
   needs IO.Clock
+  needs ClusterNode.Live
 
   actor Holder do
     state { n : Int }
@@ -44,16 +45,16 @@ mod ClusterPartitionA do
     end
   end
 
-  pfn holder_name(h : ClusterNode.ClusterHandle, p : GlobalPid.Pid) : String do
+  pfn holder_name(h : Cap(ClusterNode.Live), p : GlobalPid.Pid) : String do
     match ClusterNode.name_of(h, p.node_id) do
       Some(n) -> n
       None -> "?"
     end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main(c : Cap(IO)) do
     let cfg = ClusterNode.config(me(), Env.require_int("MARCH_PORT_A"), "", Nil, "partition-secret", 1)
-    match ClusterNode.start(cfg) do
+    match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         let flags = Vault.new("scenario_flags")

@@ -69,7 +69,7 @@ about the others' unit, and most of the design below lives in that gap.
 | D32 | **Units are pinned per epoch, separately from per-call `refs`; three live versions per slot; an activation that cannot reclaim a slot waits instead of failing.** | `refs` is what makes `dlclose` safe and must stay per call; the hard deadline bounds the wait (II.4.2). |
 | D33 | **Boundary calls resolve against the running proc's epoch** (`march_dispatch_enter_unit`), in the base binary and in every `.so` alike; the per-`.so` epoch global is retired. | Today's split (per-`.so` for patched code, current for the base binary and the actor loop) is exactly what D12 replaces (II.4.1). |
 | D34 | **Role grants are passed as values:** the generated body type carries one `Cap(P)` parameter per cap in `role R needs …`, narrowed by the runner. | The check becomes `main`'s check from another root; the composition root is explicit from `main` to every actor; tests substitute dictionaries (section 7). |
-| D35 | **`ClusterHandle` becomes `Cap(Cluster.Live)` with an `Ops` dictionary.** | Placement, membership reactions and access points become unit-testable by injecting membership events, with no sockets (7.2). |
+| D35 | **`ClusterHandle` becomes `Cap(ClusterNode.Live)` with an `Ops` dictionary.** (Landed 2026-09-23; the plan first wrote `Cluster.Live`, but `mod Cluster` is the unrelated address-discovery module and only the declaring module may mint.) | Placement, membership reactions and access points become unit-testable by injecting membership events, with no sockets (7.2). |
 | D36 | **The generator emits a scripted peer and a chaos peer per role,** derived from the local type. | The protocol is its own test oracle; crash branches, cancellation and drains get property tests instead of only hand-written two-node scenarios (7.2). |
 
 ## 1. References are unforgeable (object capabilities)
@@ -844,14 +844,18 @@ Three levels, one mechanism:
      scenarios alone (II.5.4 names this as the place to pin the three-role rule).
    Both are ordinary bodies of the role's type, so they also run over the network in
    `test/two_node/*` unchanged.
-3. **The cluster (D35).** `ClusterHandle` (stdlib/cluster_node.march:893) is a plain
-   record; make it `Cap(Cluster.Live)` with an `Ops` dictionary (`members`, `subscribe`,
-   `register`, `lookup`, `queue_for`, `route`, `creation`), minted by `ClusterNode.start`
-   and swappable by `Cluster.attach(io, ops)` in tests. A placement test then injects
-   `NodeDead` and asserts a role moved, with no sockets; `Topology.place` (II.3),
-   rendezvous placement and hysteresis (4.2) become unit-testable. `SessionAP` and
-   `SessionNode` already take the handle everywhere, so the change is the type of one
-   parameter plus the dictionary indirection at its use sites.
+3. **The cluster (D35).** DONE 2026-09-23
+   ([../progress/2026-09-23-dd-step04-cluster-live-cap.md](../progress/2026-09-23-dd-step04-cluster-live-cap.md)).
+   `ClusterHandle` (stdlib/cluster_node.march) was a plain record; it is now
+   `Cap(ClusterNode.Live)` with an `Ops` dictionary (one field per operation: `members`,
+   `subscribe`, `register`, `lookup`, `queue_for`, `route`, `creation` and the rest),
+   minted by `ClusterNode.start(io, cfg)` and swappable by `ClusterNode.attach(io, ops)` in
+   tests. The cap lives in `ClusterNode`, not `Cluster` (an unrelated module), because only
+   the declaring module may mint it. A placement test then injects `NodeDead` and asserts a
+   role moved, with no sockets; `Topology.place` (II.3), rendezvous placement and
+   hysteresis (4.2) become unit-testable. `SessionAP` and `SessionNode` already took the
+   handle everywhere, so the change was the type of one parameter plus the dictionary
+   indirection at its use sites.
 
 ### 7.3 What goes in the protocol, and what does not
 
@@ -1501,7 +1505,7 @@ and lands first.
    process. Prerequisites: two roles of one session on the same node, the `Entry` state
    alias, and parameterised actor `init` (D24).
 4. **Per-role grants as values** (section 2, 7.1), the effective-authority report, the
-   scripted and chaos peers (7.2, D36), and `Cap(Cluster.Live)` (D35). The peers are the
+   scripted and chaos peers (7.2, D36), and `Cap(ClusterNode.Live)` (D35). The peers are the
    test harness for every later step, which is why they sit here.
 5. **The Model B performance spike plus the per-unit epoch cost** (6.7). Its result can
    change later steps.

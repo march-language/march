@@ -1,0 +1,123 @@
+# Distributed deploys, step 4 remainder: `ClusterHandle` as `Cap(ClusterNode.Live)` (D35)
+
+**DONE 2026-09-23.** Parent:
+[../plans/2026-09-21-distributed-authority-and-deploys-plan.md](../plans/2026-09-21-distributed-authority-and-deploys-plan.md),
+D35 and section 7.2 (level 3). The rest of step 4:
+[2026-09-22-dd-step04-per-role-grants.md](2026-09-22-dd-step04-per-role-grants.md).
+Logged as a todo on 2026-09-22 (this file, moved).
+
+## What landed
+
+- **`stdlib/cluster_node.march`** declares `type Ops` and `proof cap Live with Ops`, on the
+  model of `Cap(Session.Live)`. `ClusterNode.attach(io : Cap(IO), ops) : Cap(ClusterNode.Live)`
+  is `cap_impl(mint_cap(io), ops)`. `start(io, cfg)` builds the node exactly as before and
+  returns `attach(io, ops_of(h))`, where `ops_of` closes the real dictionary over the
+  node's backing record. The record is still the backing value (renamed from
+  `ClusterHandle` to `CnHandle`, beside `CnState`/`CnLink`): the node actor, readers,
+  writers and Vault mirrors are untouched, and every Vault read (`members`, `lookup`,
+  `queue_for`, `names`, ...) is what it was plus one indirect call. Every public operation
+  is `let d = ops(c)` then `d.<op>(...)`, where `ops(c)` is `cap_dict(c)` or a panic
+  ("no cluster dictionary attached"), as in `Session`. The implementations moved into
+  `h_*` private functions over `CnHandle`.
+- **`ClusterNode.ops_stub(node_id)`**: a dictionary whose every operation panics naming
+  itself, so a test overrides only what the code under test uses with record update.
+- **Consumers.** `stdlib/session_node.march` (SessionNode and SessionAP): 18 places
+  naming the type (17 parameters and the `Offer` record's `node` field), five raw
+  `node_id` reads became `ClusterNode.node_id(...)`, and the session
+  counter `Vault.incr(node.meta, "ap_sessions", 1)` became
+  `ClusterNode.next_id(node, "ap_sessions")`; the module declares `needs ClusterNode.Live`.
+  `Desugar_endpoints.run_module`: the five `<P>_Run` front families (`cluster_`, `offer_`,
+  `initiate_`, `offer_hosted_`, `cluster_hosted_`) take `Cap(ClusterNode.Live)`, and the
+  generated module's `needs` lists `ClusterNode.Live`. `forge/lib/topology.ml` never
+  mentioned the type; unchanged.
+
+## The dictionary's fields, and which were added beyond the todo's list
+
+The todo listed `members`, `subscribe`, `register`, `lookup`, `queue_for`, `route`,
+`creation`. Every public operation that reads the node is a field, because an operation
+that bypassed the dictionary would not work on an attached cap at all (there is no record
+behind it). Added, and why:
+
+| Field | Why |
+|---|---|
+| `node_id` (a value, not a function) | SessionNode reads it for party ids, access-point names, answers and session ids; it was a raw record read. |
+| `next_id(key)` | SessionAP numbered its sessions by bumping `node.meta` directly. A named counter keeps that out of the record. |
+| `send_msg` | SessionAP sends Invite/Withdraw/Answer through it; a fake that captures sends needs it. |
+| `unroute`, `route_type` | `route`'s inverse (SessionNode calls it 7 times) and its typed sibling. |
+| `on_peer_closed`, `off_peer_closed` | `run_cluster_party` reacts to a peer's data connection ending. |
+| `monitor_remote`, `demonitor_remote` | Public API over the record (links and control writers). |
+| `register`'s siblings `unregister`, `names`, `watch`, `unwatch`, `stale_bindings` | The name registry: SessionAP's offer registry is `names` + `lookup`. |
+| `stop`, `unsubscribe`, `all_members`, `addr_of`, `name_of`, `link_count`, `on_delivery_failed` | The rest of the public API over the record. |
+
+`global_pid` (from `node_id` and `creation`) and `await_members` (from `members`) are
+derived, not fields. `register` takes the pid as `Int` in the dictionary; the public
+function keeps its polymorphic `pid` and converts.
+
+## Deviations from the todo, and why
+
+- **`Cap(ClusterNode.Live)` and `ClusterNode.attach`, not `Cap(Cluster.Live)` and
+  `Cluster.attach`.** `mod Cluster` already exists (`stdlib/cluster.march`, peer address
+  discovery from `MARCH_CLUSTER_NODES`), unrelated to the node. And Check 6 lets only the
+  declaring module mint or `cap_impl` a proof cap, so the cap and `attach` must live in
+  the module whose record backs it. The plan's D35 row and 7.2 now say so.
+- **`start` takes `Cap(IO)` as a new first parameter**, as the step-2 entry predicted
+  (`config_from_env` has no cap to thread). All 41 cluster fixtures already had
+  `main(c : Cap(IO))` or `main(_c : Cap(IO))`; the underscore ones were renamed to `c`.
+- **`ClusterHandle` is gone, not aliased.** A `type ClusterHandle = Cap(Live)` alias would
+  have kept fixtures compiling, but a capability hidden behind an alias is exactly what the
+  `needs` check should see, so the migration names the cap.
+- **Zero-argument dictionary operations take `()`** (`members: fn _ -> ...`, called
+  `d.members(())`): a `fn () -> e` lambda does not check against a `() -> T` field, and
+  `ops(c).members()` does not parse. `Session.InProcess.drain` has the same shape.
+- **Six fixtures had a helper `join() : ClusterNode.ClusterHandle` that started and
+  waited.** A user function may not return a proof cap it did not mint ("Only public
+  functions of `ClusterNode` can construct `Cap(ClusterNode.Live)`"), so `main` now binds
+  the started node itself and the helper became `joined(h) : ()`. Same behaviour; the
+  clustering chapter documents the pattern. (`cluster_crash_branch`, `cluster_fan_late_crash`,
+  three nodes each.) `cluster_fd_release`'s `cycle` gained the `Cap(IO)` parameter.
+- **A module that only binds the node in `let`s needs no `needs ClusterNode.Live`**; one
+  whose signatures name it does (Check 1). The migration added the line to exactly the
+  fixtures whose signatures name it.
+
+## Acceptance
+
+- **`test/session/cluster_placement.march`**, both backends against one golden (dune
+  rules beside `stream_peers`). A toy placement written only against
+  `Cap(ClusterNode.Live)` (`members`, `subscribe`, `unsubscribe`) keeps each of three roles
+  on the least-loaded Alive member. The test attaches a fake dictionary
+  (`{ ClusterNode.ops_stub("n0") with members, subscribe, unsubscribe, creation }` over
+  Vaults it drives), injects `NodeDead` for n2, `NodeUp` for n4, `NodeDead` for n3 and n1,
+  and asserts the moves (`db: n2 -> n1`, `cache: n3 -> n4`, `api`/`db: n1 -> n4`; a join
+  moves nothing; four moves in all; after `unsubscribe` another death moves nothing). It
+  also checks `node_id`, `creation` and the derived `global_pid` through the dictionary.
+  No sockets, no node actor. Proved non-vacuous: making the public `members` drop its
+  first element changed the golden's placement lines; restoring it went green.
+  SessionAP's offer registry was not driven directly: `candidates` is private and a full
+  fake of invite/answer needs a real `NodeQueue` writer for `queue_for`; the step-3
+  `Topology.place` is the natural next consumer of this seam.
+- **The two-node cluster scenarios**: see "Tests" for each run's result.
+
+## Verification of the stdlib modules
+
+`march --check stdlib/cluster_node.march` and `stdlib/session_node.march` (with
+`MARCH_STDLIB` at the source tree): no errors, only the root-capability hints every
+`Cap(IO)`-taking stdlib function gets. Checked alone they prove nothing for cross-module
+calls (#591), so the whole-stdlib ratchet in the `compiler` suite
+(`check_stdlib_like_cli`) is the real check; see "Tests".
+
+## Tests
+
+Run before the PR was opened (2026-09-23):
+
+- `scripts/run-tests.sh stdlib`: 886 tests, all passed (322 s).
+- `scripts/run-tests.sh stdlib_march`: 71 tests, all passed.
+- `test/cluster_placement.out` and `cluster_placement_interp.out` built through their dune
+  rules; both match the golden. Perturbation check above.
+- `march --check` on all 41 migrated `test/two_node/cluster_*` node files: no errors.
+- `scripts/check-docs.sh`: passed (Check F: the 16 generated chapters match).
+
+Not yet complete when the PR was opened, at the author's request: the `compiler` suite
+(which holds the whole-stdlib ratchet) was still running with no failures so far; the
+18 two-node cluster scenarios (`scripts/two-node.sh --list | grep cluster`) and the full
+`scripts/run-tests.sh` had not been run. CI covers the suites; the two-node scenarios run
+there too.

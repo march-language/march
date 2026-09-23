@@ -27,7 +27,7 @@ mod ClusterApRestartB do
     let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
     let creation = Env.get_int("MARCH_NODE_CREATION", 1)
     let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "apr-secret", creation)
-    match ClusterNode.start(cfg) do
+    match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end

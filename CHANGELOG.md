@@ -89,6 +89,20 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **Breaking: a running cluster node is a capability, `Cap(ClusterNode.Live)`.**
+  `ClusterNode.start` takes the root capability first, `start(io, cfg)`, and returns
+  `Result(Cap(ClusterNode.Live), String)`; the `ClusterNode.ClusterHandle` type is gone.
+  Every `ClusterNode` operation, and the generated `<P>_Run.cluster_*`, `offer_*`,
+  `initiate_*` fronts, take the capability where they took the handle. Migration: call
+  `ClusterNode.start(io, cfg)` from `main(io : Cap(IO))` (or wherever you hold `Cap(IO)`),
+  write `Cap(ClusterNode.Live)` where you wrote `ClusterNode.ClusterHandle`, and add
+  `needs ClusterNode.Live` to a module whose signatures name it. A function of yours can no
+  longer return the node it started (only `ClusterNode` may produce the capability): start
+  it in `main` and pass it down. Every operation goes through the capability's dictionary
+  (`ClusterNode.Ops`), so a test can attach its own with `ClusterNode.attach(io, ops)`
+  (`ClusterNode.ops_stub(id)` panics on every operation it is not given) and inject
+  membership events with no sockets. New accessors: `ClusterNode.node_id(node)` and
+  `ClusterNode.next_id(node, key)`.
 - **Breaking: every `Stats` function that needs a non-empty list now says so
   in its signature.** `Stats.median`, `std_dev`, `iqr`, `iqr_default` and
   `quantile_default` take `{List(Float) | len(_) > 0}` (joining `mean`,
