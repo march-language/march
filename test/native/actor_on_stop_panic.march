@@ -8,9 +8,11 @@
 -- backend), the siblings stopped after it still ran their own on_stop, and the
 -- NORMAL death restarted nothing.
 mod Main do
+  needs IO
   needs IO.Console
 
   type GetLog = GetLog
+  type LogState = { lines : List(String) }
 
   actor Log do
     state { lines : List(String) }
@@ -26,56 +28,71 @@ mod Main do
     end
   end
 
-  fn note(s : String) do
-    match Actor.whereis("log") do
+  -- Each actor is handed the Log's Pid in a message and keeps it in state:
+  -- a handler has no capability in scope, so it cannot look the Log up by
+  -- name (Actor.whereis takes a Cap(Actor.Introspect)).
+  fn note(log : Option(Pid(LogState)), s : String) do
+    match log do
       Some(l) -> send(l, Note(s))
       None    -> None
     end
   end
 
   actor Bad do
-    state { n : Int }
-    init  { n: 0 }
+    state { n : Int, log : Option(Pid(LogState)) }
+    init  { n: 0, log: None }
+
+    on BadLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
 
     on BadWork(k : Int) do
-      { n: state.n + k }
+      { state with n: state.n + k }
     end
 
     on_stop do
-      note("bad: on_stop starts, n=" ++ int_to_string(state.n))
+      note(state.log, "bad: on_stop starts, n=" ++ int_to_string(state.n))
       panic("on_stop blew up")
     end
   end
 
   actor First do
-    state { n : Int }
-    init  { n: 0 }
+    state { n : Int, log : Option(Pid(LogState)) }
+    init  { n: 0, log: None }
+
+    on FirstLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
 
     on FirstWork(k : Int) do
-      { n: state.n + k }
+      { state with n: state.n + k }
     end
 
     on_stop do
-      note("first: on_stop")
+      note(state.log, "first: on_stop")
     end
   end
 
   actor Last do
-    state { n : Int }
-    init  { n: 0 }
+    state { n : Int, log : Option(Pid(LogState)) }
+    init  { n: 0, log: None }
+
+    on LastLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
 
     on LastWork(k : Int) do
-      { n: state.n + k }
+      { state with n: state.n + k }
     end
 
     on_stop do
-      note("last: on_stop")
+      note(state.log, "last: on_stop")
     end
   end
 
   actor Sup do
-    state { a : Int, b : Int, c : Int }
-    init  { a: 0, b: 0, c: 0 }
+    state { a : Int, b : Int, c : Int, log : Option(Pid(LogState)) }
+    init  { a: 0, b: 0, c: 0, log: None }
 
     supervise do
       strategy one_for_one
@@ -85,8 +102,12 @@ mod Main do
       Last c
     end
 
+    on SupLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
+
     on_stop do
-      note("sup: on_stop")
+      note(state.log, "sup: on_stop")
     end
   end
 
@@ -104,12 +125,13 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let log = spawn(Log)
-    Actor.register(log, "log")
 
     println("-- unsupervised: the panic is logged, the actor still dies")
     let p = spawn(Bad)
+    send(p, BadLog(log))
     send(p, BadWork(4))
     println("stop: " ++ bool_to_string(Actor.stop(p, 5000)))
     println("dead: " ++ bool_to_string(is_alive(p) == false))
@@ -118,10 +140,14 @@ mod Main do
 
     println("-- supervised: the tree teardown proceeds past the panic")
     let sup = spawn(Sup)
+    send(sup, SupLog(log))
+    send(Actor.pid_from_int(intro, child_int(sup, "a")), FirstLog(log))
+    send(Actor.pid_from_int(intro, child_int(sup, "b")), BadLog(log))
+    send(Actor.pid_from_int(intro, child_int(sup, "c")), LastLog(log))
     let b1 = child_int(sup, "b")
     println("stop: " ++ bool_to_string(Actor.stop(sup, 5000)))
     println("supervisor dead: " ++ bool_to_string(is_alive(sup) == false))
-    println("bad child dead: " ++ bool_to_string(is_alive(pid_of_int(b1)) == false))
+    println("bad child dead: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, b1)) == false))
     println("bad child not restarted: " ++ bool_to_string(child_int(sup, "b") == b1))
     dump(log)
   end

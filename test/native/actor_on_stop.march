@@ -11,6 +11,7 @@ mod Main do
   needs IO.Console
 
   type GetLog = GetLog
+  type LogState = { lines : List(String) }
 
   actor Log do
     state { lines : List(String) }
@@ -27,16 +28,23 @@ mod Main do
     end
   end
 
-  fn note(s : String) do
-    match Actor.whereis("log") do
+  -- Each actor is handed the Log's Pid in a message and keeps it in state:
+  -- a handler has no capability in scope, so it cannot look the Log up by
+  -- name (Actor.whereis takes a Cap(Actor.Introspect)).
+  fn note(log : Option(Pid(LogState)), s : String) do
+    match log do
       Some(l) -> send(l, Note(s))
       None    -> None
     end
   end
 
   actor W do
-    state { tag : String, n : Int }
-    init  { tag: "?", n: 0 }
+    state { tag : String, n : Int, log : Option(Pid(LogState)) }
+    init  { tag: "?", n: 0, log: None }
+
+    on WLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
 
     on Name(t : String) do
       { state with tag: t }
@@ -53,7 +61,7 @@ mod Main do
     end
 
     on_stop do
-      note(state.tag ++ ": on_stop saw n=" ++ int_to_string(state.n)
+      note(state.log, state.tag ++ ": on_stop saw n=" ++ int_to_string(state.n)
            ++ ", alive=" ++ bool_to_string(is_alive(self)))
     end
   end
@@ -61,20 +69,24 @@ mod Main do
   -- on_stop can also BLOCK on a reply: an Actor.call from inside it waits
   -- for the answer (within the stop budget) instead of being cut short.
   actor Flusher do
-    state { n : Int }
-    init  { n: 0 }
+    state { n : Int, log : Option(Pid(LogState)) }
+    init  { n: 0, log: None }
+
+    on FlusherLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
 
     on Bump() do
-      { n: state.n + 1 }
+      { state with n: state.n + 1 }
     end
 
     on_stop do
-      match Actor.whereis("log") do
+      match state.log do
         Some(l) ->
           match Actor.call(l, GetLog, 5000) do
-            Ok(ls) -> note("flusher: call from on_stop answered, log had "
+            Ok(ls) -> note(state.log, "flusher: call from on_stop answered, log had "
                            ++ int_to_string(List.length(ls)) ++ " lines")
-            Err(e) -> note("flusher: call from on_stop failed: " ++ e)
+            Err(e) -> note(state.log, "flusher: call from on_stop failed: " ++ e)
           end
         None -> None
       end
@@ -90,10 +102,10 @@ mod Main do
 
   fn main(_c : Cap(IO.Console)) do
     let log = spawn(Log)
-    Actor.register(log, "log")
 
     println("-- Actor.stop: on_stop runs after the drain, with the final state")
     let a = spawn(W)
+    send(a, WLog(log))
     send(a, Name("a"))
     send(a, Work(1))
     send(a, Work(2))
@@ -103,6 +115,7 @@ mod Main do
 
     println("-- self-stop (a NORMAL death from inside): the handler's state is final")
     let b = spawn(W)
+    send(b, WLog(log))
     send(b, Name("b"))
     send(b, Work(5))
     send(b, Quit())
@@ -112,12 +125,14 @@ mod Main do
 
     println("-- on_stop can wait on an Actor.call")
     let f = spawn(Flusher)
+    send(f, FlusherLog(log))
     send(f, Bump())
     println("stop: " ++ bool_to_string(Actor.stop(f, 5000)))
     dump(log)
 
     println("-- kill: on_stop does NOT run")
     let c = spawn(W)
+    send(c, WLog(log))
     send(c, Name("c"))
     send(c, Work(7))
     run_until_idle()
