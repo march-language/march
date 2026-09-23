@@ -129,3 +129,8 @@
 (executable
  (name bench_solver)
  (libraries march_forge unix))
+
+(executable
+ (name test_cross_hcr_e2e)
+ (modules test_cross_hcr_e2e)
+ (libraries march_forge alcotest unix))

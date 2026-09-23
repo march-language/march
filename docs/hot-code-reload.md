@@ -86,12 +86,10 @@ forge deploy hot
 forge deploy hot --so /path/to/my_app.so
 ```
 
-> **Cross-host note.** `forge deploy hot` (no `--so`) builds the reload
-> `.so` for your **host** platform, so deploying from macOS to a Linux server
-> needs a Linux-built artifact passed via `--so`. Native cross-compilation of
-> reload units (`--compile-so --target linux/…`) is planned; today, cross builds
-> cover the initial binary; see
-> [Cross-compiling to Linux]({{ site.baseurl }}/docs/tooling/#cross-compiling-to-linux).
+> **Cross-host note.** Cross-target reload units are supported for
+> `linux/amd64` and `linux/arm64`. Set `[hot-reload].target` and
+> `module_prefix` in `forge.toml`; the running baseline advertises its target,
+> ABI, prefix, and signing key, and rejects mismatched patches before loading.
 
 On a successful deploy you see:
 

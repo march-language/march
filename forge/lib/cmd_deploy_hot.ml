@@ -336,6 +336,21 @@ type conn = {
   buf : Buffer.t;
 }
 
+type hcr_info = { target : string; abi : string; prefix : string; key_hex : string }
+
+let parse_hcr_info line : (hcr_info, string) result =
+  match String.split_on_char ' ' line with
+  | ["HCR_INFO"; t; a; p; k] ->
+    let field prefix s =
+      if String.length s >= String.length prefix && String.sub s 0 (String.length prefix) = prefix
+      then Some (String.sub s (String.length prefix) (String.length s - String.length prefix)) else None
+    in
+    (match field "target:" t, field "abi:" a, field "prefix:" p, field "key:" k with
+     | Some target, Some abi, Some prefix, Some key_hex -> Ok { target; abi; prefix; key_hex }
+     | _ -> Error "malformed HCR_INFO response")
+  | ["ERR"; "unknown_command"] -> Error "legacy server: target identity cannot be verified"
+  | _ -> Error "invalid HCR_INFO response"
+
 let conn_of_fd fd = { fd; buf = Buffer.create 256 }
 
 let send_line conn s =
@@ -363,6 +378,10 @@ let recv_line conn =
       loop ()
   in
   loop ()
+
+let query_hcr_info_connected conn : (hcr_info, string) result =
+  try send_line conn "HCR_INFO"; parse_hcr_info (recv_line conn)
+  with Failure msg -> Error msg
 
 let send_binary conn data offset len =
   let rec loop off remaining =
@@ -543,6 +562,13 @@ let so_exports_symbol (so_path : string) (sym : string) : bool =
   let cmd = Printf.sprintf "nm -D %s 2>/dev/null | grep -q ' T %s$'"
     (Filename.quote so_path) (Filename.quote sym) in
   Sys.command cmd = 0
+
+let deploy_connected (_conn : conn) ~signing_pubkey:_ ~sk:_ ~manifest:_
+    ~so_path:_ ?(old_schemas_path="") ?(new_schemas_path="") ?(entry_path="")
+    ?(old_manifest_path="") ?(provided_epoch=0) ?(grant_caps=[]) ?(no_cap_gate=false) () =
+  ignore old_schemas_path; ignore new_schemas_path; ignore entry_path;
+  ignore old_manifest_path; ignore provided_epoch; ignore grant_caps; ignore no_cap_gate;
+  Error "deploy_connected is unavailable in this build"
 
 let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
     ?(old_schemas_path="") ?(new_schemas_path="") ?(entry_path="")
