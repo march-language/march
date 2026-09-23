@@ -9518,3 +9518,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias stdlib-march-properties)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_properties.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_properties.march)))
+
+(test
+ (name test_hcr_abi)
+ (modules test_hcr_abi)
+ (libraries march_tir alcotest))

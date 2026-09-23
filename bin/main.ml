@@ -2774,6 +2774,13 @@ let compile filename =
         ) tir.tm_fns
     end else begin
       let target = parse_target !target_str in
+      if !hot_reload_prefix <> None || !compile_so then begin
+        match March_tir.Hcr_abi.of_target target with
+        | Ok _ -> ()
+        | Error msg ->
+          Printf.eprintf "march: %s\n" msg;
+          exit 1
+      end;
       let basename = Filename.remove_extension filename in
       let ll_file  = basename ^ ".ll" in
       if !do_compile then begin
