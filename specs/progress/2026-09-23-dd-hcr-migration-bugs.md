@@ -1,3 +1,11 @@
+**CLOSED 2026-09-23 by build step 6** (`specs/progress/2026-09-23-dd-step06-epoch-model-and-drains.md`):
+the marker is now a mailbox-node flag that bypasses every overflow policy, so a
+`DROP_NEW` actor whose mailbox is full at deploy time handles its pre-deploy
+messages on the old version, then migrates (`test/test_hcr_migrate_order.c`,
+"DROP_NEW actor whose mailbox is full at deploy time"; RED when the marker is
+made to obey the policy). `hcr_marker_lost` survives as `hcr_lost_epoch`, reachable
+only when malloc fails; the test asserts it never fired.
+
 # `[P2]` The four HCR migration bugs from the distributed-deploys plan: status, and the one gap left
 
 **Parent:** [../plans/2026-09-21-distributed-authority-and-deploys-plan.md](../plans/2026-09-21-distributed-authority-and-deploys-plan.md),
@@ -22,7 +30,7 @@ message boundary, so the messages still queued from before the deploy run on the
 code (against the migrated state, so no layout mismatch). D10 says they run on the old
 code. The parent's II.4.6 closes this by making the marker a `march_mbox_node` flag
 that bypasses overflow policies. That belongs to build step 6
-(`specs/todos/2026-09-22-dd-step06-epoch-model-and-drains.md`), not a separate patch.
+(`specs/progress/2026-09-23-dd-step06-epoch-model-and-drains.md`), not a separate patch.
 
 **Acceptance.** In step 6: a `DROP_NEW` actor whose mailbox is full at deploy time
 handles its pre-deploy messages on the old version, then migrates; the test beside
