@@ -296,7 +296,7 @@
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT INIT_PAREN PROTOCOL LOOP
 %token LINEAR AFFINE
-%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA CAP_NO_PANIC CAP_PURE CAP_NO_EXTERN CAP_DETERMINISTIC CAP_NO_ALLOC CAP_VERIFIED
+%token INTERFACE IMPL SIG EXTERN AS USE NEEDS ROLE REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA CAP_NO_PANIC CAP_PURE CAP_NO_EXTERN CAP_DETERMINISTIC CAP_NO_ALLOC CAP_VERIFIED
 %token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE SATISFY FOR IN OPAQUE GETS DSLASH
 %token RESOURCE
 %token APP ON_START ON_STOP
@@ -1033,6 +1033,22 @@ protocol_step:
           (Printf.sprintf "I don't recognize `or %s` here — a message step can only be followed by `or crash do ... end`." c.txt)
           None $startpos(c)
       else ProtoCrashOr (ProtoMsg (sender, receiver, t, Some label), crash, mk_span $loc) }
+  (* `role R needs IO.FileWrite, IO.NetConnect`: the role's capability grant
+     (ROLE is soft: Token_filter keeps it only before an uppercase name).
+     Each path is dot-joined into one name carrying the path's span, so the
+     typechecker can point a did-you-mean at the exact path.  Ordering (before
+     every message step) and the role's existence are the typechecker's
+     checks, not the grammar's, so the message can name the protocol. *)
+  | ROLE; r = upper_name; NEEDS; caps = separated_nonempty_list(COMMA, cap_path)
+    { let join (p : name list) : name =
+        match p with
+        | [] -> assert false
+        | first :: _ ->
+          let last = List.nth p (List.length p - 1) in
+          { txt = String.concat "." (List.map (fun (n : name) -> n.txt) p);
+            span = { first.span with end_line = last.span.end_line; end_col = last.span.end_col } }
+      in
+      ProtoRoleNeeds (r, List.map join caps, mk_span $loc) }
   (* `may crash A, B`: the roles that may crash (MAY likewise soft). *)
   | MAY; c = lower_name; roles = separated_nonempty_list(COMMA, upper_name)
     { if c.txt <> "crash" then

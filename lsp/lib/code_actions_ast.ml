@@ -524,6 +524,9 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
                | Ast.ProtoMayCrash (roles, _) ->
                  Printf.sprintf "%s-- may crash: %s\n" indent
                    (String.concat ", " (List.map (fun r -> r.Ast.txt) roles))
+               | Ast.ProtoRoleNeeds (role, caps, _) ->
+                 Printf.sprintf "%s-- role %s needs: %s\n" indent role.Ast.txt
+                   (String.concat ", " (List.map (fun c -> c.Ast.txt) caps))
                | Ast.ProtoCrashOr (inner, crash, _) ->
                  steps_text indent [inner]
                  ^ Printf.sprintf "%s-- or crash:\n%s" indent (steps_text (indent ^ "  ") crash))

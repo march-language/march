@@ -1793,6 +1793,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/in_process.expected in_process_interp.out)))
 
+; The generated SCRIPTED and CHAOS peers (D36, distributed-deploys step 4,
+; 2026-09-22): every role module carries `Step`, `script(s, st, steps)` and
+; `chaos(s, st, seed)`, bodies of the role's type derived from its local
+; type. This fixture drives the real Stream roles against a scripted peer
+; and against chaos peers for 50 seeds (each way, and chaos against chaos),
+; the three-role Fan the same way, and the may-crash Logging protocol with a
+; chaos C that leaves at its crash point when the seed says so, all over
+; Session.in_process(): no sockets. Both backends, one golden: the peers are
+; generated code, and the two backends disagreeing on generated code is the
+; failure mode in_process.march above pinned once already.
+(rule
+ (targets stream_peers_bin stream_peers.out stream_peers_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file session/stream_peers.march))
+ (action
+  (progn
+   (with-stdout-to stream_peers_interp.out
+     (run %{exe:../bin/main.exe} session/stream_peers.march))
+   (run %{exe:../bin/main.exe} --compile -o stream_peers_bin
+        session/stream_peers.march)
+   (with-stdout-to stream_peers.out (system "./stream_peers_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/stream_peers.expected stream_peers.out)))
+
+(rule
+ (alias runtest)
+ (action (diff session/stream_peers.expected stream_peers_interp.out)))
+
 ; Crash branches in one process (design Part B, 2026-09-20): the logging
 ; protocol with `may crash C`, run twice on a transport that can mark a role
 ; gone -- once with C alive, once with C "crashed", where I takes its crash

@@ -42,6 +42,33 @@ git log is authoritative for exact commits.
   restart re-supplies the same values. `init()` is the zero-parameter spelling
   of the bare form. Decision D24 of the distributed-deploys plan; see the
   actors and supervision chapters of the language reference.
+- **Per-role grants in protocols: `role R needs IO.X, ...`.** A protocol can
+  now say what each role's code may do, with the same capability paths (and
+  the same did-you-mean on a typo) as a module's `needs`. The line comes
+  before the first message step and is not part of the protocol's
+  fingerprint: a grant is about the role's code, not the wire, so two nodes
+  built with different grants still talk. `role` stays an ordinary identifier
+  everywhere else. The grant is a value (D34): a granted role's body takes one
+  `Cap(P)` per path, in order, after `Cap(Session.Live)` and before its entry
+  state, every `<P>_Run` front narrows them from its `io` and passes them, and
+  a hosted role receives them through `start`. A role with no grant line is
+  unchanged. The grant is checked: at every call of a runner front, everything
+  the callback reaches (helpers, values, spawned or hosted actors) must sit
+  under the role's grant, reported with the chain from the body, as `main`'s
+  grant is; and a role's grant must fit within `main`'s.
+  `march --dump-role-authority` prints, per runner call, what the role's code
+  reaches and the functions and actors it holds references to, with their
+  capabilities: the effective-authority report, a report rather than a check.
+- **Scripted and chaos peers for every `@[endpoints]` role.** Each role
+  module now carries `Step`, `script(s, st, steps)` and `chaos(s, st, seed)`,
+  two bodies of the role's own type derived from its projection. A script is
+  a list of expected receives and canned sends checked against the state as
+  it runs; a mismatch panics with the state, what was expected and what came,
+  failing the test rather than the session. A chaos peer takes every choice
+  by the seed, generates every payload (a `Gen.Generator` argument per user
+  payload type the role sends) and leaves the session at its `may crash`
+  points when the seed says so. Both run over the in-process transport with
+  no sockets, and unchanged over the network.
 - **A targeted diagnostic for `fn (a, b) -> …` used as a callback over a
   tuple.** `fn (a, b) -> …` is a two-parameter (curried) lambda, not a lambda
   that destructures a pair, so `List.map(pairs, fn (k, v) -> v)` was wrong in a

@@ -604,6 +604,17 @@ type env = {
       [fn_transitive_capability_closures_tbl] can be its caps projection
       rather than a second implementation.  See
       [specs/2026-08-10-r1-stage-c-effect-rows-design.md]. *)
+  role_grants : (string * string, string list * Ast.span) Hashtbl.t;
+  (** `role R needs ...` lines of every checked `protocol`, keyed by
+      (protocol, role) → (the declared capability paths, in declaration
+      order; the line's span).  Recorded by [check_decl]'s [DProtocol] arm
+      once the line has passed its own checks (a real role, a known
+      capability, before any message step); read by [check_role_grants],
+      which bounds each role's bodies by it the way [check_main_grant] bounds
+      the program by `main`'s parameters, and by the generator's caller
+      through [Desugar_endpoints.grants_of] (the generator runs before the
+      typechecker, so it reads the raw steps itself).  Shared (mutated in
+      place) across every env copy, like the closure tables above. *)
   fn_grant_points : (string, string list * Ast.span) Hashtbl.t;
   (** Functions whose signature carries a concrete [Cap(P)] parameter —
       qualified name → (the concrete capability paths their PARAMETERS grant,
@@ -702,6 +713,7 @@ let make_env errors type_map = {
   ceiling_extra_roots = Hashtbl.create 16;
   fn_refs = Hashtbl.create 64;
   fn_row_bodies = Hashtbl.create 64;
+  role_grants = Hashtbl.create 8;
   fn_grant_points = Hashtbl.create 16;
   local_mods = StrMap.empty;
   offer_conts = ref [];

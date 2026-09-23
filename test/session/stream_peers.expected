@@ -1,0 +1,25 @@
+-- scripted Cons against the real Prod
+Prod sends Item(1)
+script: Cons expected Item, got 1
+Prod got More
+Prod sends Item(2)
+script: Cons expected Item, got 2
+Prod got Done
+queued after: 0
+-- scripted Prod against the real Cons
+Cons got Item(10)
+script: Prod expected More, got true
+Cons got Item(20)
+script: Prod expected Done, got true
+queued after: 0
+-- Fan: scripted A and B against the real C
+C: got 7 from A
+C: got 9 from B
+script: A expected Verdict, got true
+-- chaos: Stream, 50 seeds each way and both ways
+closes: 300 of 300, cancels: 0, stalls: 0
+-- chaos: Fan, all three roles, 50 seeds
+closes: 150 of 150, cancels: 0, stalls: 0
+-- chaos: Logging, C may crash, 50 seeds
+normal: 37, crashed: 13, crash branches: 13, stalls: 0
+every Logging session decided

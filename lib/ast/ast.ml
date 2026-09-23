@@ -408,6 +408,16 @@ and protocol_step =
   | ProtoCrashOr of protocol_step * protocol_step list * span
       (** A -> B : T or crash do ... end: a [ProtoMsg] with the steps that follow
           if its sender crashes before sending (2026-09-20 crash branches) *)
+  | ProtoRoleNeeds of name * name list * span
+      (** role R needs IO.FileWrite, IO.NetConnect: the role's capability
+          GRANT, each path dot-joined into one [name] ([txt] = "IO.FileWrite",
+          its span the path's).  A claim about the role's CODE, not the wire:
+          it must precede every message step, the typechecker collects it into
+          [env.role_grants] and bounds the role's bodies by it
+          ([check_role_grants]), the generator threads one [Cap(P)] parameter
+          per path through the role's body type (D34), and the protocol
+          fingerprint EXCLUDES it, so two nodes with different grants still
+          talk (distributed-deploys plan, II.2). *)
 
 (** Interface (typeclass) definition:
     interface Eq(a) do ... end *)

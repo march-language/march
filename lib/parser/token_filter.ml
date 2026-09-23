@@ -123,6 +123,15 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         | Parser.LOWER_IDENT "crash" -> true
         | _ -> false
       in
+      (* `role` opens a protocol grant line (`role Ledger needs IO.FileWrite`)
+         only when a role NAME follows directly; every use of `role` as an
+         identifier is followed by something else (`=`, `.`, `)`, `,`, `:`,
+         NL), so it demotes.  Session code names variables `role` all over
+         (stdlib/session_node.march), which is why the word cannot be hard. *)
+      let after_upper_ident = function
+        | Parser.UPPER_IDENT _ -> true
+        | _ -> false
+      in
       (* `init` followed by `(` is the parameterised actor init
          (`init(env : T) { ... }`, D24), a distinct token so the grammar can
          tell it from a bare `init` expression without an LR(1) conflict; see
@@ -137,6 +146,7 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         | _ -> Parser.INIT
       in
       match tok with
+      | Parser.ROLE      -> demote "role"      ~keep_when:after_upper_ident
       | Parser.INIT      -> promote_init ()
       | Parser.MAY       -> demote "may"       ~keep_when:after_crash
       | Parser.ORWORD    -> demote "or"        ~keep_when:after_crash

@@ -224,6 +224,9 @@ type env = {
   fn_row_bodies :
     (string, (string list * Typecheck_types.Ast.expr) list)
     Hashtbl.t;
+  role_grants :
+    (string * string, string list * Typecheck_types.Ast.span)
+    Hashtbl.t;
   fn_grant_points :
     (string, string list * Typecheck_types.Ast.span)
     Hashtbl.t;

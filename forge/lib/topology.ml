@@ -685,7 +685,7 @@ let rec proto_msgs (steps : Ast.protocol_step list) : (string * string * bool) l
             | [] -> [])
           branches
       | Ast.ProtoCrashOr (inner, crash, _) -> proto_msgs [ inner ] @ proto_msgs crash
-      | Ast.ProtoStop _ | Ast.ProtoMayCrash _ -> [])
+      | Ast.ProtoStop _ | Ast.ProtoMayCrash _ | Ast.ProtoRoleNeeds _ -> [])
     steps
 
 let proto_roles (def : Ast.protocol_def) : string list =

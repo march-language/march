@@ -76,6 +76,23 @@ Cons picks. Each branch starts with a label (`more`, `done`) and must begin with
 from the chooser. That first message is how the other side learns which branch was
 picked. The compiler rejects a branch that starts any other way.
 
+A protocol may also say what each role's code is allowed to do:
+
+```march
+@[endpoints]
+protocol Checkout do
+  role Client needs IO.NetConnect
+  role Ledger needs IO.FileWrite, IO.NetConnect
+  ...
+end
+```
+
+These grant lines come before the first message step, one per role, and take the same
+capability paths as a module's `needs` (a misspelt one gets the same did-you-mean). A grant
+is a claim about the role's code, not about the conversation, so it is not part of the
+protocol's fingerprint: two nodes built with different grants still talk. What a grant
+does is the subject of [Per-role grants](#per-role-grants) below.
+
 ## What the compiler generates
 
 For a protocol `P` you get one module of shared definitions, one module per role, and one
@@ -229,6 +246,85 @@ says why it did not.
 | `cluster_hosted_<Role>(io, node, session, actor, start, deliver, cancel)` | a running `ClusterNode`, one session under a given id | an actor, with the same callbacks | `Result((), RunError)` |
 
 `<P>_Run.error_message(e)` turns any `RunError` into a line that names the roles.
+
+## Per-role grants
+
+A protocol's grant lines (see [Writing a protocol](#writing-a-protocol)) become parameters
+of the role's body. For
+
+```march
+@[endpoints]
+protocol Checkout do
+  role Ledger needs IO.FileWrite, IO.NetConnect
+  ...
+end
+```
+
+the body `run_Ledger` and every other front takes is
+
+```march
+(Cap(Session.Live), Cap(IO.FileWrite), Cap(IO.NetConnect), Checkout_Ledger.Entry) -> Checkout_Ledger.Yield
+```
+
+one capability per path, in the order the line lists them, after the session and before
+the entry state. The runner narrows them from the `Cap(IO)` it was given and passes them,
+so a body is written as
+
+```march
+pfn ledger(s : Cap(Session.Live), fw : Cap(IO.FileWrite), nc : Cap(IO.NetConnect), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
+  ...
+end
+
+Checkout_Run.run_Ledger(c, "ledger-1", secret, addrs, fn (s, fw, nc, st) -> ledger(s, fw, nc, st))
+```
+
+and a body with a different parameter list does not compile against the runner. For a role
+hosted in an actor, the grant arrives through `start`: `start(s, fw, nc)`, or
+`start(sid, s, fw, nc)` for the many-session fronts. A role with no grant line keeps the
+plain `(s, st)` body.
+
+Because the grant is a value, the composition root is explicit from `main` to every role,
+and a test can hand a body any dictionary it likes in place of the runner's (the
+[Capabilities]({{ site.baseurl }}/docs/capabilities/) page, "Mocking an IO capability in
+tests"). It is also checked: what a body reaches must fit under its grant.
+
+### What the grant checks
+
+Two things stop a role from doing more than its line says. The first is the type: a
+granted body holds `Cap(IO.FileWrite)`, not `Cap(IO)`, and `Cap(IO.FileWrite)` does not
+unify with `Cap(IO)`, so it cannot hand its capability to anything that wants the wider
+one. The second is a walk, because a body that never touches its capability value can
+still call `file_write` through any helper. At every call of a runner front the compiler
+walks everything the callback reaches (helpers, functions passed as values, actors it
+spawns; for a hosted role, `start`, `deliver`, `cancel` and the actor behind `host`) and
+requires every capability in that reach to sit under the role's grant, exactly as
+`main`'s grant bounds the program:
+
+```
+Role `Stream.Cons` is granted `Cap(IO.Console)` (`role Cons needs IO.Console`), but the
+body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body:
+body → cons → save). A role's grant bounds everything its code reaches, as `main`'s
+grant bounds the program.
+help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.
+```
+
+A role's grant must also fit within `main`'s: the runner narrows the role's capabilities
+from what `main` holds, so `role Cons needs IO.FileWrite` under `fn main(c :
+Cap(IO.Console))` is an error at the grant line.
+
+The grant bounds the role's *code*, not its *authority*. A body handed a pid to an actor
+with wider capabilities can message it, and a closure it receives can do whatever its
+creator could; both are delegation, charged to whoever created the reference, and the
+walk does not refuse them. So the compiler can also show what a role can reach that way:
+
+```bash
+march --dump-role-authority app.march
+```
+
+prints, per runner call, the role's grant, what its code reaches, the functions it
+references as values and the actors it spawns or hosts, each with the capabilities behind
+it. It is a report, not a check; it exists so that a narrow grant is never mistaken for
+narrow authority.
 
 ## Telling the nodes where to find each other
 
@@ -762,6 +858,52 @@ branch runs. `Session.in_process_with(print_line)` prints what the transport its
 The [Session Types]({{ site.baseurl }}/docs/session-types/#swapping-the-transport-session)
 page has the details, and `test/session/in_process.march` in the compiler repository runs
 each case. The same role functions then run unchanged on the network.
+
+### Scripted and chaos peers
+
+You do not have to write the other side of a conversation to test one role. Every role
+module carries two bodies of the role's own type, derived from its projection, so the
+protocol is its own test oracle:
+
+- `Stream_Cons.script(s, st, steps)` runs a list of `Stream_Cons.Step`: `Send_<Msg>(v)`
+  and `Choose_<label>(v)` send, `Expect_<Msg>(fn v -> ...)` receives and hands the payload
+  to the callback, and `Expect_crash_<Msg>(fn c -> ...)` takes a crash branch. Each step is
+  checked against the state the role is in when it runs. A step the state cannot take, a
+  message the peer sent that the script did not expect, a script that runs out before the
+  protocol ends or that has steps left after it: each panics, naming the state, what was
+  expected and what came. That fails the test, not the session.
+- `Stream_Cons.chaos(s, st, seed)` walks the projection by a seeded generator: every
+  choice is taken by the seed, every payload is generated, and at every point the role
+  `may crash` (a send with an `or crash` branch, a `choose` with a `crash` branch) the
+  seed decides, one time in four, to leave the session instead. Run the real role against
+  `chaos` peers for fifty seeds and you have a property test of its protocol handling,
+  crash branches included. Payloads of built-in types are generated for you; for each of
+  your own types a role sends, `chaos` takes one more argument, a `Gen.Generator` for it,
+  in order of first appearance and named after the type (`gen_Thing`).
+
+```march
+let t = Session.in_process()
+let s = Session.attach(io, t.ops)
+let _ = Stream_Cons.script(s, Stream_Cons.register(s, 0), [
+  Stream_Cons.Expect_Msg_Prod_Cons_1(fn n -> assert(n == 1)),
+  Stream_Cons.Choose_done(true)
+])
+let _ = prod(s, Stream_Prod.register(s, 0), 1)
+t.drain(())
+
+let t2 = Session.in_process()
+let s2 = Session.attach(io, t2.ops)
+let _ = cons(s2, Stream_Cons.register(s2, 0), 2)
+let _ = Stream_Prod.chaos(s2, Stream_Prod.register(s2, 0), seed)
+t2.drain(())
+```
+
+A granted role's peers take its capabilities too, after the session:
+`Checkout_Ledger.script(s, fw, nc, st, steps)`. Both peers are ordinary bodies, so they
+also run over the network; a chaos "crash" is a `leave` there, which cancels the peers,
+while the in-process transport treats a role that has left as gone, so a peer waiting on
+it takes its crash branch. `test/session/stream_peers.march` in the compiler repository
+runs the real Stream, Fan and Logging roles against both kinds of peer.
 
 ## Configuration
 
