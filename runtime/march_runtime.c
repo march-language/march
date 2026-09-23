@@ -2072,7 +2072,14 @@ typedef struct march_actor_meta {
      * mailbox_size / set_mbox_limit. Release-store on every write, acquire-
      * load on every read — see the Task 10 commit message for the full
      * site table. */
-    _Atomic(march_proc *)      green_thread;  /* Green thread running this actor's loop */
+    _Atomic(march_proc *)      green_thread;  /* Green thread running this actor's loop.
+                                                * NULLed by that thread itself before its
+                                                * proc can die.  A proc loaded from here is
+                                                * valid ONLY inside the reader's critical
+                                                * section (march_reclaim_enter/exit), never
+                                                * across a context switch: the proc is freed
+                                                * after its grace period (march_proc's
+                                                * LIFETIME comment). */
     struct march_actor_meta    *tbl_next;   /* Hash-table chain (by actor ptr) */
     struct march_actor_meta    *pididx_next; /* Hash-table chain (by pid_index) */
     /* Sequential spawn index for Pid(n) display. _Atomic: written once by
@@ -3241,6 +3248,95 @@ static void *hcr_enter(march_actor_meta *meta, uint32_t *out_version) {
     return fn;
 }
 
+/* ── on_stop (terminate) callbacks ─────────────────────────────────────
+ * specs/lang/actors.md, "on_stop". One entry per actor TYPE that declares
+ * `on_stop do ... end`, keyed by that type's dispatch closure — the value
+ * lower_actor's spawn glue stores in word 2 of every record it allocates, so
+ * a record identifies its type without any layout change. Registered from
+ * the spawn glue (which a supervisor restart re-runs), before march_spawn
+ * creates the record's metadata; looked up once, at a graceful death. A
+ * handful of actor types per program at most, so a locked linear table. */
+typedef struct { void *dispatch; void *on_stop; } march_on_stop_entry;
+static march_on_stop_entry *g_on_stop_tbl = NULL;
+static int g_on_stop_len = 0, g_on_stop_cap = 0;
+static pthread_mutex_t g_on_stop_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void march_register_actor_on_stop(void *dispatch_clo, void *on_stop_clo) {
+    pthread_mutex_lock(&g_on_stop_mu);
+    for (int i = 0; i < g_on_stop_len; i++) {
+        if (g_on_stop_tbl[i].dispatch == dispatch_clo) {
+            pthread_mutex_unlock(&g_on_stop_mu);
+            return;
+        }
+    }
+    if (g_on_stop_len == g_on_stop_cap) {
+        int ncap = g_on_stop_cap ? g_on_stop_cap * 2 : 8;
+        march_on_stop_entry *n = realloc(g_on_stop_tbl, (size_t)ncap * sizeof *n);
+        if (!n) {
+            pthread_mutex_unlock(&g_on_stop_mu);
+            fputs("march: out of memory registering an on_stop callback\n", stderr);
+            exit(1);
+        }
+        g_on_stop_tbl = n;
+        g_on_stop_cap = ncap;
+    }
+    g_on_stop_tbl[g_on_stop_len].dispatch = dispatch_clo;
+    g_on_stop_tbl[g_on_stop_len].on_stop = on_stop_clo;
+    g_on_stop_len++;
+    pthread_mutex_unlock(&g_on_stop_mu);
+}
+
+static void *on_stop_lookup(void *dispatch_clo) {
+    void *cb = NULL;
+    pthread_mutex_lock(&g_on_stop_mu);
+    for (int i = 0; i < g_on_stop_len; i++) {
+        if (g_on_stop_tbl[i].dispatch == dispatch_clo) {
+            cb = g_on_stop_tbl[i].on_stop;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_on_stop_mu);
+    return cb;
+}
+
+/* Run [actor]'s on_stop callback [clo] on its own green thread [self].
+ *
+ * A panic inside it is LOGGED and the death proceeds as if it had returned
+ * (decided 2026-09-22, on OTP's terminate/2): the actor is dying anyway, and
+ * a broken terminate must neither wedge a shutdown nor turn a NORMAL death
+ * into a crash a supervisor would restart. So the callback gets its own crash
+ * trap for its duration — for EVERY actor, not only supervised ones, whose
+ * handler panics are otherwise process-fatal.
+ *
+ * The stop deadline is enforced from outside: march_actor_stop's waiter kills
+ * the actor when it passes. A callback parked in `receive()` then leaves
+ * through the actor loop's stop_jmp (march_actor_recv), which lands at
+ * actor_green_thread's `stopped:` — still live below this frame — and that
+ * path restores crash_jmp. */
+static void actor_run_on_stop(march_proc *self, void *actor, void *clo) {
+    jmp_buf on_stop_jmp;
+    jmp_buf *saved_crash = self->crash_jmp;
+    self->crash_jmp = &on_stop_jmp;
+    if (setjmp(on_stop_jmp) == 0) {
+        /* Same closure convention (and the same immortal static closure) as
+         * the dispatch call in actor_green_thread: fn(closure, actor). */
+        typedef void (*on_stop_fn_t)(void *, void *);
+        on_stop_fn_t fn = *(on_stop_fn_t *)((char *)clo + 16);
+        march_incrc(clo);
+        fn(clo, actor);
+    } else {
+        const char *m = self->crash_message ? self->crash_message : "panic";
+        size_t mlen = self->crash_message ? self->crash_message_len
+                                          : sizeof("panic") - 1;
+        fprintf(stderr, "march: actor on_stop callback failed (the actor still"
+                " stops): panic: %.*s\n", (int)mlen, m);
+        free(self->crash_message);
+        self->crash_message = NULL;
+        self->crash_message_len = 0;
+    }
+    self->crash_jmp = saved_crash;
+}
+
 static void actor_green_thread(void *arg) {
     march_actor_meta *meta = (march_actor_meta *)arg;
     void *actor = meta->actor;
@@ -3577,6 +3673,36 @@ static void actor_green_thread(void *arg) {
         }
 
         march_sched_tick();
+    }
+
+    /* on_stop: the loop left because a graceful stop finished its drain —
+     * still alive, draining, with the deadline armed and not yet passed. Not
+     * after a kill (the actor is no longer alive), not at scheduler shutdown
+     * (not draining), and not once the deadline has gone: the stopper is
+     * about to kill it, so the callback would only race that. */
+    if (self && actor_alive_load(actor)
+            && atomic_load_explicit(&meta->draining, memory_order_acquire)) {
+        int64_t deadline = atomic_load_explicit(&meta->drain_deadline_ms,
+                                                memory_order_relaxed);
+        if (deadline != MARCH_DRAIN_NOT_ARMED
+                && (deadline < 0 || march_now_ms() < deadline)) {
+            void *cb = on_stop_lookup((void *)(uintptr_t)a[2]);
+            if (cb) {
+                /* Consume the stop request that woke this loop. It is a
+                 * sticky flag on the proc, so left set it would make the
+                 * callback's first blocking receive — a `receive()`, or the
+                 * reply wait inside an Actor.call used to flush somewhere —
+                 * return "stop" at once instead of blocking until the
+                 * deadline. Cleared FIRST and liveness re-checked AFTER: a
+                 * kill (the deadline, or anyone's kill) that lands in
+                 * between re-sets the flag and is seen here or by the
+                 * callback's next receive, never lost. */
+                atomic_store_explicit(&self->stop_requested, 0,
+                                      memory_order_seq_cst);
+                if (actor_alive_load(actor))
+                    actor_run_on_stop(self, actor, cb);
+            }
+        }
     }
 
     /* The loop has exited (actor killed, or woken without a message at
@@ -4520,10 +4646,12 @@ static void deliver_monitor_down(void *watcher, int64_t mon_ref, void *target,
      * does not call a message disposer, so this lock order has no inverse. */
     int send_result = MARCH_SEND_DEAD;
     pthread_mutex_lock(&g_tbl_mu);
+    march_reclaim_enter();   /* gt: resolved and used inside */
     march_proc *gt = atomic_load_explicit(&watcher_meta->green_thread,
                                           memory_order_acquire);
     if (!watcher_meta->terminal_set && actor_alive_load(watcher) && gt)
         send_result = march_sched_send_control(gt, down);
+    march_reclaim_exit();
     pthread_mutex_unlock(&g_tbl_mu);
 
     if (send_result != MARCH_SEND_OK)
@@ -4681,6 +4809,7 @@ static void do_actor_death(void *actor, march_death_reason reason,
      * proper acquire load, paired with the release stores in march_spawn
      * and actor_green_thread's exit paths. */
     if (meta) {
+        march_reclaim_enter();   /* gt: resolved and used inside */
         march_proc *gt = atomic_load_explicit(&meta->green_thread,
                                               memory_order_acquire);
         /* request_stop, not a bare wake: since the untimed recv re-parks on a
@@ -4688,6 +4817,7 @@ static void do_actor_death(void *actor, march_death_reason reason,
          * a plain march_sched_wake would leave a killed actor parked forever
          * instead of letting actor_green_thread observe NO_MSG and exit. */
         if (gt) march_sched_request_stop(gt);
+        march_reclaim_exit();
     }
 
     if (meta && meta->supervisor && reason != MARCH_DEATH_NORMAL) {
@@ -4808,9 +4938,15 @@ int64_t march_actor_stop(void *actor, int64_t timeout_ms) {
      * mailbox must be able to LEAVE the untimed recv (which otherwise re-parks
      * on a wake it cannot attribute to a message), and an empty mailbox is
      * precisely the case where draining is already finished. */
+    /* gt is resolved and used inside the critical section, including the
+     * identity test against the current proc: outside it, a freed proc's
+     * address could have been reused by the caller's own. */
+    march_reclaim_enter();
     march_proc *gt = atomic_load_explicit(&meta->green_thread,
                                           memory_order_acquire);
     if (gt) march_sched_request_stop(gt);
+    int stopping_self = (gt == march_sched_current());
+    march_reclaim_exit();
 
     /* Then WAIT for it, up to the same deadline. `stop` is a synchronous
      * operation on purpose: a deploy sequence's whole point is to know when
@@ -4825,7 +4961,7 @@ int64_t march_actor_stop(void *actor, int64_t timeout_ms) {
      * itself cannot wait for its own green thread to finish the queue it is
      * currently standing in. That call marks it draining and returns, and the
      * receive loop does the rest as soon as the handler returns. */
-    if (gt != march_sched_current())
+    if (!stopping_self)
         stop_await_death(actor, deadline);
     return 1;
 }
@@ -5109,9 +5245,11 @@ static void hcr_send_markers(hcr_target *t, size_t n,
         march_actor_meta *m = t[i].meta;
         /* Re-read at send time, as march_send does: the actor may have died
          * since the snapshot. */
+        march_reclaim_enter();   /* gt: resolved and used inside */
         march_proc *gt = atomic_load_explicit(&m->green_thread,
                                               memory_order_acquire);
         hcr_inject_marker(m, gt, migrate_fn, t[i].pin);
+        march_reclaim_exit();
         march_decrc(m->actor);
     }
 }
@@ -5252,16 +5390,24 @@ typedef struct {
  * The Task object layout (48 bytes):
  *   word 0 (offset  0): ref count  (i64)
  *   word 1 (offset  8): tag+pad    (i32+i32)
- *   word 2 (offset 16): march_proc* handle  (field 0, for cancel)
+ *   word 2 (offset 16): the task proc's PID, tagged (pid << 1 | 1; 0 = not
+ *                        recorded yet) (field 0, for cancel).  A PID, never
+ *                        the proc: the program holds a Task as long as it
+ *                        likes, far past the proc's death, and a proc is
+ *                        freed after its grace period.  Resolved by
+ *                        march_task_cancel_by_id inside a critical section.
  *   word 3 (offset 24): result ptr  (field 1, written on completion)
  *   word 4 (offset 32): done flag   (_Atomic int64_t, 0=running, 1=done)
  *   word 5 (offset 40): in-scheduler waiter (_Atomic march_proc*, 0=none) —
  *                        see task_wait_done / march_thunk_trampoline below.
+ *                        Bounded by the waiter's wait: it clears the word on
+ *                        EVERY exit from task_wait_done, so a waiter that has
+ *                        left (and may die) is never named here.
  *
  * Completion signalling: we write result to word 3 then release-store 1
  * into word 4, then wake any registered waiter (word 5).
- * march_task_await acquire-loads word 4, never dereferencing
- * the proc ptr (word 2) after the proc may have been freed by sched_loop.
+ * march_task_await acquire-loads word 4 and never touches word 2 (which
+ * names the proc by pid precisely because it outlives it).
  */
 /* Foreign-thread task_await support: green threads park-and-wait (they must
  * never block an OS scheduler thread), but foreign threads (evloop pthreads)
@@ -5296,8 +5442,20 @@ static void task_wait_done(int64_t *task) {
         march_proc *self = march_sched_current();
         for (;;) {
             if (atomic_load_explicit((_Atomic int64_t *)&task[4],
-                                     memory_order_acquire) != 0)
+                                     memory_order_acquire) != 0) {
+                /* Done: leave word 5 naming nobody.  On the first pass it
+                 * holds no registration of ours (compare-exchange, so a
+                 * second waiter's own registration is not erased); after a
+                 * park it may still name us, and we are about to leave and
+                 * may die, so the trampoline must not find us there.  (The
+                 * trampoline loads and wakes inside a critical section, so a
+                 * wake it already started is covered by the grace period.) */
+                int64_t mine = (int64_t)(uintptr_t)self;
+                atomic_compare_exchange_strong_explicit(
+                    (_Atomic int64_t *)&task[5], &mine, 0,
+                    memory_order_acq_rel, memory_order_relaxed);
                 return;
+            }
             /* SEQ_CST ON THE NEXT TWO OPERATIONS IS THE WHOLE FIX for the
              * long-standing ~1-in-20 missed-wakeup deadlock (specs/todos.md
              * "Scheduler fork-join").  This store-then-load and the
@@ -5326,8 +5484,10 @@ static void task_wait_done(int64_t *task) {
                                   memory_order_seq_cst);
             if (atomic_load_explicit((_Atomic int64_t *)&task[4],
                                      memory_order_seq_cst) != 0) {
-                atomic_store_explicit((_Atomic int64_t *)&task[5], 0,
-                                      memory_order_relaxed);
+                int64_t mine = (int64_t)(uintptr_t)self;
+                atomic_compare_exchange_strong_explicit(
+                    (_Atomic int64_t *)&task[5], &mine, 0,
+                    memory_order_acq_rel, memory_order_relaxed);
                 return;
             }
             march_sched_park_self();
@@ -5358,7 +5518,7 @@ static void march_thunk_trampoline(void *arg) {
      * AFTER march_sched_spawn returns — a work-stealing scheduler can run
      * (and complete) this proc before the spawner gets CPU back. */
     if (task) {
-        task[2] = (int64_t)(uintptr_t)march_sched_current();
+        task[2] = (march_sched_current()->pid << 1) | 1;   /* tagged pid */
     }
     typedef void *(*apply_fn_t)(void *, int64_t);
     apply_fn_t apply = *(apply_fn_t *)((char *)clo + 16);
@@ -5392,9 +5552,15 @@ static void march_thunk_trampoline(void *arg) {
          * safe no-op if the waiter is NULL or not yet parked. */
         atomic_store_explicit((_Atomic int64_t *)&task[4], 1,
                               memory_order_seq_cst);
+        /* Load and wake inside one critical section: the waiter may leave
+         * task_wait_done (spurious wake, sees done) and die between our load
+         * and our wake; the section keeps its proc from being freed until
+         * the wake is over. */
+        march_reclaim_enter();
         march_proc *waiter = (march_proc *)(uintptr_t)atomic_load_explicit(
             (_Atomic int64_t *)&task[5], memory_order_seq_cst);
         if (waiter) march_sched_wake(waiter);
+        march_reclaim_exit();
         /* Wake any foreign (non-scheduler) threads parked in task_wait_done's
          * timed wait.  Touches no task fields, so it is safe to do before or
          * after the decrc below; placed here to keep the "signal completion"
@@ -5432,7 +5598,7 @@ static void march_thunk_trampoline(void *arg) {
  *   offset  0..7 : ref count (i64)
  *   offset  8..11: tag = 0 (i32)
  *   offset 12..15: padding
- *   offset 16..23: field 0 = march_proc* (green thread handle, for cancel)
+ *   offset 16..23: field 0 = tagged PID of the green thread (for cancel)
  *   offset 24..31: field 1 = result ptr (written by trampoline on exit)
  *   offset 32..39: done flag (atomic, 0=running, 1=done)
  *   offset 40..47: in-scheduler waiter (atomic march_proc*, 0=none)
@@ -5486,10 +5652,10 @@ void *march_task_spawn_thunk(void *clo_ptr) {
 /* Wait for a task to complete and return Ok(result).
  *
  * Spins on the task-embedded done flag (word 4) until the trampoline
- * release-stores 1 into it.  We never dereference the proc ptr (word 2)
- * after the proc may have been freed by sched_loop — doing so caused a
- * use-after-free where calloc reuse zeroed the freed memory, making
- * p->status read as PROC_RUNNABLE (0) forever. */
+ * release-stores 1 into it.  It never looks at the proc (word 2, now a pid):
+ * reading a dead proc's status here once caused a use-after-free where
+ * calloc reuse zeroed the freed memory, making p->status read as
+ * PROC_RUNNABLE (0) forever. */
 void *march_task_await(void *task_obj) {
     if (!task_obj) return mk_err_cstr("task_await: null task");
     int64_t *task = (int64_t *)task_obj;
@@ -5547,12 +5713,32 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
 void march_task_cancel_by_id(void *task_obj) {
     if (!task_obj) return;
     int64_t *task = (int64_t *)task_obj;
-    march_proc *p = (march_proc *)(uintptr_t)task[2];
-    if (!p) return;
+    int64_t handle = task[2];
+    if (!(handle & 1)) return;           /* proc not recorded yet */
     /* Store the cancelled sentinel before the status flip so the await side
-     * always sees a valid error result when it observes PROC_DEAD. */
+     * always sees a valid error result when it observes PROC_DEAD.  (Written
+     * whether or not the proc is still around, as it always was.) */
     task[3] = (int64_t)(uintptr_t)mk_err_cstr("task cancelled");
-    atomic_store_explicit(&p->status, PROC_DEAD, memory_order_release);
+    march_reclaim_enter();
+    march_proc *p = march_sched_find(handle >> 1);   /* NULL: already reaped */
+    if (p) {
+        /* Only from RUNNABLE or RUNNING (compare-exchange, not a blind
+         * store).  A blind DEAD landing between a park's PROC_PARKED store
+         * and its swapcontext made sched_loop REAP a proc that was still
+         * registered as a waiter (Task word 5, a BLOCK waiter list, an
+         * fd-wait entry, a timer): with reclaimed procs that is a
+         * use-after-free, and before them it already recycled a live
+         * stack.  From RUNNABLE the dispatch claim runs the proc to
+         * completion as before; from RUNNING its next yield overwrites the
+         * DEAD as before. */
+        march_proc_status st = atomic_load_explicit(&p->status, memory_order_acquire);
+        while ((st == PROC_RUNNABLE || st == PROC_RUNNING)
+               && !atomic_compare_exchange_weak_explicit(
+                      &p->status, &st, PROC_DEAD,
+                      memory_order_acq_rel, memory_order_acquire))
+            ;
+    }
+    march_reclaim_exit();
 }
 
 /* Read an int64 state field by 0-based index from an actor struct.
@@ -5647,16 +5833,16 @@ void *march_send(void *actor, void *msg) {
         void *none = march_alloc(16);
         return none;
     }
+    /* The hot path's whole reclamation cost: gt is resolved and handed to
+     * march_sched_send inside one critical section (a TLS counter on a
+     * scheduler thread), and not used after it.  A reaped target's
+     * green_thread is already NULL, which reads as DEAD. */
+    march_reclaim_enter();
     march_proc *gt = meta ? atomic_load_explicit(&meta->green_thread,
                                                   memory_order_acquire)
                           : NULL;
-    if (!gt) {
-        march_decrc(msg);
-        void *none = march_alloc(16);
-        return none;
-    }
-
-    int send_rc = march_sched_send(gt, msg);
+    int send_rc = gt ? march_sched_send(gt, msg) : MARCH_SEND_DEAD;
+    march_reclaim_exit();
     if (send_rc == MARCH_SEND_DEAD) {
         /* Actor died in the window between the checks above and the send;
          * march_sched_send did not enqueue or dispose the message (dead
@@ -5755,9 +5941,6 @@ static void march_register_sched_callbacks(void) {
  * delay_ms <= 0 fires on the next timer_service tick (deadline = now). */
 void *march_send_after(void *actor, void *msg, int64_t delay_ms) {
     march_actor_meta *meta = find_meta(actor);
-    march_proc *gt = meta ? atomic_load_explicit(&meta->green_thread,
-                                                  memory_order_acquire)
-                          : NULL;
 
     void *tok = march_alloc(16 + 8);
     ((march_hdr *)tok)->tag = MARCH_TIMER_TOKEN_TAG;
@@ -5769,7 +5952,14 @@ void *march_send_after(void *actor, void *msg, int64_t delay_ms) {
     march_incrc(tok);
 
     int64_t deadline = march_now_ms() + (delay_ms > 0 ? delay_ms : 0);
+    /* The entry keeps gt's pid, not gt (march_sched_send_after), so gt is
+     * needed only inside this critical section. */
+    march_reclaim_enter();
+    march_proc *gt = meta ? atomic_load_explicit(&meta->green_thread,
+                                                  memory_order_acquire)
+                          : NULL;
     march_sched_send_after(gt, msg, tok, deadline);
+    march_reclaim_exit();
     return tok;
 }
 
@@ -5912,10 +6102,9 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
      * thread yet" either way). Lock-free lookup + atomic green_thread load
      * takes march_actor_call off g_tbl_mu too. */
     march_actor_meta *meta = find_meta(actor);
-    march_proc *gt = meta ? atomic_load_explicit(&meta->green_thread,
-                                                  memory_order_acquire)
-                          : NULL;
-    if (!gt) {
+    /* A NULL test only (no dereference): the proc itself is resolved again,
+     * inside a critical section, right before the send below. */
+    if (!meta || !atomic_load_explicit(&meta->green_thread, memory_order_acquire)) {
         march_decrc(inner_msg);
         return mk_err_cstr("actor not found");
     }
@@ -5957,10 +6146,15 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
 
     int64_t corr = atomic_fetch_add_explicit(&g_next_call_corr, 1,
                                              memory_order_relaxed);
-    /* reply-ref: heap obj, field0 = caller proc, field1 = corr. */
+    /* reply-ref: heap obj, field0 = caller PID (tagged), field1 = corr.
+     * The PID, not the proc: a handler may keep the ref across turns
+     * (march_actor_reply_retain) and the caller may time out and exit, so
+     * this holder is unbounded; march_actor_reply resolves it inside a
+     * critical section.  Tagged odd so nothing mistakes it for a heap
+     * pointer. */
     void *reply_ref = march_alloc(16 + 16);
     MARCH_SET_TAG(reply_ref, MARCH_CALL_REPLY_TAG);
-    MARCH_FIELD(reply_ref, 0) = (int64_t)(uintptr_t)caller;
+    MARCH_FIELD(reply_ref, 0) = (caller->pid << 1) | 1;
     MARCH_FIELD(reply_ref, 1) = corr;
 
     /* Build the augmented call message: same tag, field 0 = reply-ref.
@@ -5969,7 +6163,14 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
     MARCH_SET_TAG(call_msg, msg_tag);
     MARCH_FIELD(call_msg, 0) = (int64_t)(uintptr_t)reply_ref;
 
-    march_sched_send(gt, call_msg);
+    /* Resolve, send, leave: the waits below park, and a critical section
+     * must not be held across a park.  A target that died since the NULL
+     * test above is a dead send, as it always was (gt was loaded once, and
+     * a dead proc's send reported DEAD). */
+    march_reclaim_enter();
+    march_proc *gt = atomic_load_explicit(&meta->green_thread, memory_order_acquire);
+    if (gt) march_sched_send(gt, call_msg);
+    march_reclaim_exit();
 
     call_held held = {0};
     uint64_t seq = 0;
@@ -6092,18 +6293,27 @@ void *march_actor_reply_retain(void *ref_ptr) {
 void march_actor_reply(void *ref_ptr, void *result) {
     if (!IS_HEAP_PTR(ref_ptr)
             || ((march_hdr *)ref_ptr)->tag != MARCH_CALL_REPLY_TAG) {
-        /* Legacy path: raw proc ptr (interpreter parity / old callers). */
-        march_sched_send((march_proc *)ref_ptr, result);
+        /* Not a reply-ref.  This used to be a "legacy path" that treated the
+         * value as a raw march_proc * and sent to it; nothing produces one
+         * (march_actor_call builds every reply-ref, and `self` returns the
+         * actor, not its proc), and a stored proc pointer is exactly what
+         * reclamation forbids.  Nobody can receive this reply: drop it. */
+        march_decrc(result);
         return;
     }
-    march_proc *caller = (march_proc *)(uintptr_t)MARCH_FIELD(ref_ptr, 0);
+    int64_t caller_pid = MARCH_FIELD(ref_ptr, 0) >> 1;
     int64_t corr = MARCH_FIELD(ref_ptr, 1);
     void *env = march_alloc(16 + 16);
     MARCH_SET_TAG(env, MARCH_CALL_REPLY_TAG);
     MARCH_FIELD(env, 0) = corr;
     MARCH_FIELD(env, 1) = (int64_t)(uintptr_t)result;
     march_decrc(ref_ptr);
-    march_sched_send(caller, env);
+    /* A caller that has exited (timed out and gone) resolves to NULL: a dead
+     * send, exactly as sending to its dead proc was. */
+    march_reclaim_enter();
+    march_proc *caller = march_sched_find(caller_pid);
+    if (caller) march_sched_send(caller, env);
+    march_reclaim_exit();
 }
 
 /* ── Float builtins ──────────────────────────────────────────────────── */
@@ -8047,9 +8257,11 @@ int64_t march_mailbox_size(void *pid) {
     if (!meta) return 0;
     int64_t depth = 0;
     /* Lock only ever protected this field read; now an acquire load. */
+    march_reclaim_enter();   /* gt: resolved and used inside */
     march_proc *gt = atomic_load_explicit(&meta->green_thread,
                                           memory_order_acquire);
     if (gt) depth = march_sched_mbox_count(gt);
+    march_reclaim_exit();
     return depth;
 }
 
@@ -8062,9 +8274,11 @@ void march_actor_set_mbox_limit(void *actor, int64_t limit, int64_t policy) {
     march_actor_meta *meta = find_meta(actor);
     if (!meta) return;
     /* Lock only ever protected this field read; now an acquire load. */
+    march_reclaim_enter();   /* gt: resolved and used inside */
     march_proc *gt = atomic_load_explicit(&meta->green_thread,
                                           memory_order_acquire);
     if (gt) march_sched_set_mbox_limit(gt, limit, (march_mbox_policy)policy);
+    march_reclaim_exit();
 }
 
 /* run_until_idle: flush the async message queue.

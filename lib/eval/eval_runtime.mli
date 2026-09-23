@@ -67,6 +67,9 @@ type actor_inst = {
   mutable ai_monitors : (int * int) list;
   mutable ai_mailbox : value Queue.t;
   mutable ai_draining : bool;
+  mutable ai_self_stop : float option option;
+  (** [Some deadline] while a self-stopped actor works off its queue; see the
+      .ml. *)
   mutable ai_supervisor : int option;
   mutable ai_restart_count : (float * int) list;
   mutable ai_epoch : int;
@@ -115,6 +118,11 @@ val crash_actor_with_reason : int -> string -> monitor_down_reason -> unit
     indefinitely, 0 discards what is queued), then die NORMAL. Stops a
     supervisor's children first, in reverse declaration order. *)
 val stop_actor : int -> int -> bool
+
+(** Finish a self-stop once the handler that requested it has returned:
+    when the queue is empty (or the deadline passed) run `on_stop` and die
+    NORMAL. Called by the scheduler after each handler. *)
+val finish_self_stop : int -> unit
 
 (** Set by eval.ml to [run_scheduler]; [stop_actor] pumps it to work the queue
     off. This module is compiled below the scheduler, hence the hook. *)

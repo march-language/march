@@ -1,0 +1,15 @@
+-- unsupervised: the panic is logged, the actor still dies
+stop: true
+dead: true
+main still running
+  log: bad: on_stop starts, n=4
+-- supervised: the tree teardown proceeds past the panic
+stop: true
+supervisor dead: true
+bad child dead: true
+bad child not restarted: true
+  log: bad: on_stop starts, n=4
+  log: last: on_stop
+  log: bad: on_stop starts, n=0
+  log: first: on_stop
+  log: sup: on_stop

@@ -1,0 +1,117 @@
+-- Kill-then-immediately-respawn under proc reclamation
+-- (specs/todos/2026-09-17-proc-struct-reclamation.md, mechanism PR 1).
+--
+-- The corruption the leak-don't-free discipline was added for appeared ONLY
+-- under this pattern: a proc dies while other threads still hold its
+-- pointer, and the very next spawn reuses the freed address. Procs are now
+-- freed after a grace period, so this drives every holder the survey found
+-- against a proc that is dying while it is being used, round after round,
+-- with each round's traffic still in flight when the next round spawns:
+--
+--   - senders loaded from green_thread (send; the BLOCK policy, so some are
+--     PARKED on the dying worker's full mailbox when it dies and must
+--     re-resolve it by pid),
+--   - timed Actor.calls whose callers give up and EXIT, so a reply-ref names
+--     a dead caller (reply-ref field 0),
+--   - send_after to a worker that dies before the timer fires (timer SEND),
+--   - tasks awaited from another task (Task word 5) and cancelled after they
+--     finished (Task word 2 naming a reaped proc).
+--
+-- The golden output is deliberately boring. The evidence is the run under
+-- ThreadSanitizer and ASAN (see the todo), and that a green run here also
+-- frees procs: `freed` would read false with reclamation disabled.
+mod ProcReclaimKillRespawn do
+  needs IO.Console
+  needs IO.Spawn
+
+  -- Call sentinels route by constructor index: GetReq -> Get, SlowReq -> Slow.
+  type Req = GetReq | SlowReq
+
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Get(reply_to) do
+      Actor.reply(reply_to, state.n)
+      state
+    end
+
+    -- Replies well after the caller's 1 ms timeout: the caller has given up
+    -- and usually exited, so the reply-ref names a dead (reaped) proc.
+    on Slow(reply_to) do
+      Actor.reply(reply_to, busy(2000000, state.n))
+      state
+    end
+
+    on Tick(k : Int) do
+      { n: state.n + k }
+    end
+  end
+
+  fn busy(k, acc) do
+    if k == 0 do acc else busy(k - 1, acc + 1) end
+  end
+
+  fn hammer(pid, count) do
+    if count == 0 do
+      0
+    else
+      send(pid, Tick(1))
+      hammer(pid, count - 1)
+    end
+  end
+
+  fn caller(pid, req, count, ok) do
+    if count == 0 do
+      ok
+    else
+      match Actor.call(pid, req, 1) do
+      Ok(_)  -> caller(pid, req, count - 1, ok + 1)
+      Err(_) -> caller(pid, req, count - 1, ok)
+      end
+    end
+  end
+
+  fn settle(tasks) do
+    match tasks do
+    Nil -> 0
+    Cons(t, rest) ->
+      let _ = Task.await(t)
+      -- The task is finished (and usually reaped): cancel resolves a pid
+      -- that no longer names a proc.
+      task_cancel_by_id(t)
+      settle(rest)
+    end
+  end
+
+  -- Each round spawns a worker, starts traffic at it, and then kills the
+  -- PREVIOUS round's worker, whose traffic is still in flight, before the
+  -- next spawn: kill-then-immediately-respawn with live readers.
+  fn round(i, total, prev, pending) do
+    if i == total do
+      kill(prev)
+      settle(pending)
+    else
+      let w = spawn(Worker)
+      Actor.set_queue_limit(w, 4, 3)
+      let t_send = Task.async(fn -> hammer(w, 256))
+      let req = if i % 10 == 0 do SlowReq else GetReq end
+      let t_call = Task.async(fn -> caller(w, req, 3, 0))
+      let t_wait = Task.async(fn ->
+        let _ = Task.await(t_send)
+        1)
+      let _ = Actor.send_after(w, Tick(1), 1)
+      kill(prev)
+      let _ = settle(pending)
+      round(i + 1, total, w, Cons(t_call, Cons(t_wait, Nil)))
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+    let first = spawn(Worker)
+    let _ = round(0, 1500, first, Nil)
+    run_until_idle()
+    println("rounds done")
+    println("freed " ++ bool_to_string(Scheduler.stat(8) > 0))
+  end
+end

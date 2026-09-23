@@ -18,6 +18,14 @@ native_actor_mailbox_alarm: coverage audit (user + stdlib): 114 enforced, 0 iner
 native_actor_mailbox_alarm: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_monitor_down_reason: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_actor_monitor_down_reason: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_on_stop: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_actor_on_stop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_on_stop_deadline: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_actor_on_stop_deadline: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_on_stop_panic: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_actor_on_stop_panic: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_on_stop_tree: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_actor_on_stop_tree: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_basic: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_basic: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_registry_restart: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
@@ -82,6 +90,8 @@ native_cluster_accept_silent_peer: coverage audit (user + stdlib): 114 enforced,
 native_cluster_accept_silent_peer: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_compare_builtins: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_compare_builtins: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_config_typed_keys: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_config_typed_keys: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_control_channel_loopback: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_control_channel_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_credit_backpressure_loopback: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
@@ -324,6 +334,8 @@ native_prelude_scope_user_shadow: coverage audit (user + stdlib): 114 enforced, 
 native_prelude_scope_user_shadow: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_println_line_atomic: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_println_line_atomic: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_proc_reclaim_kill_respawn: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
+native_proc_reclaim_kill_respawn: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_qualified_ctor_pattern: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced
 native_qualified_ctor_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_qualified_type_name_render: coverage audit (user + stdlib): 114 enforced, 0 inert (warned), 0 unenforced

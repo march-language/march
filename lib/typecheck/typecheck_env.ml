@@ -816,7 +816,7 @@ let rec demote_to_monomorphic (t : ty) : unit =
     without the user saying what it holds: block [let] and top-level [let] with
     no annotation, and a [fn] with no return annotation.  Writing the
     annotation ([fn open(name) : Vault(v)]) is the deliberate opt-out and is
-    what [Vault.new]/[Vault.open]/[Vault.whereis] and [Config]'s table getters
+    what [Vault.new]/[Vault.open]/[Vault.whereis]
     use — a name-keyed global table genuinely mints handles at any element
     type, and that erasure is now explicit and greppable instead of ambient.
 

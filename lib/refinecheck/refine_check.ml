@@ -2433,7 +2433,7 @@ let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl
         expr b.A.bind_expr
       | A.DActor (_, _, ad, _) ->
         expr ad.A.actor_init;
-        List.iter (fun (h : A.actor_handler) -> expr h.A.ah_body) ad.A.actor_handlers;
+        List.iter (fun (h : A.actor_handler) -> expr h.A.ah_body) (A.actor_body_handlers ad);
         Option.iter expr ad.A.actor_invariant
       | A.DApp (app, _) ->
         expr app.A.app_body;
@@ -3762,7 +3762,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
         | A.DLet (_, b, _) -> expr b.A.bind_expr
         | A.DActor (_, _, ad, _) ->
           expr ad.A.actor_init;
-          List.iter (fun (h : A.actor_handler) -> expr h.A.ah_body) ad.A.actor_handlers
+          List.iter (fun (h : A.actor_handler) -> expr h.A.ah_body) (A.actor_body_handlers ad)
         | A.DApp (app, _) ->
           expr app.A.app_body;
           Option.iter expr app.A.app_on_start;

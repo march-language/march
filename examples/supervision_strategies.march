@@ -10,6 +10,8 @@
 -- Run: march examples/supervision_strategies.march
 
 mod StrategyDemo do
+  needs Actor.Introspect
+  needs IO
   needs IO.Console
 
   -- Generic worker actor used across all demos.
@@ -81,54 +83,54 @@ mod StrategyDemo do
     println("─── " ++ title ++ " ───")
   end
 
-  fn demo_one_for_one() do
+  fn demo_one_for_one(intro : Cap(Actor.Introspect)) do
     section("Strategy: one_for_one")
     let sup = spawn(OneForOneSup)
     let wa1 = child_int(sup, "wa")
     let wb1 = child_int(sup, "wb")
     println("wa=" ++ String.from_int(wa1) ++ "  wb=" ++ String.from_int(wb1))
 
-    send(pid_of_int(wa1), Work())
-    send(pid_of_int(wb1), Work())
+    send(Actor.pid_from_int(intro, wa1), Work())
+    send(Actor.pid_from_int(intro, wb1), Work())
     run_until_idle()
 
     println("Crashing wa (pid " ++ String.from_int(wa1) ++ ")...")
-    kill(pid_of_int(wa1))
+    kill(Actor.pid_from_int(intro, wa1))
 
     let wa2 = child_int(sup, "wa")
     let wb2 = child_int(sup, "wb")
 
     println("wa restarted with new pid: " ++ bool_to_string(wa2 != wa1) ++ " (" ++ String.from_int(wa2) ++ ")")
     println("wb unchanged (same pid):   " ++ bool_to_string(wb2 == wb1))
-    println("wa alive: " ++ bool_to_string(is_alive(pid_of_int(wa2))))
-    println("wb alive: " ++ bool_to_string(is_alive(pid_of_int(wb2))))
+    println("wa alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, wa2))))
+    println("wb alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, wb2))))
   end
 
-  fn demo_one_for_all() do
+  fn demo_one_for_all(intro : Cap(Actor.Introspect)) do
     section("Strategy: one_for_all")
     let sup = spawn(OneForAllSup)
     let wa1 = child_int(sup, "wa")
     let wb1 = child_int(sup, "wb")
     println("wa=" ++ String.from_int(wa1) ++ "  wb=" ++ String.from_int(wb1))
 
-    send(pid_of_int(wa1), Work())
-    send(pid_of_int(wa1), Work())
-    send(pid_of_int(wb1), Work())
+    send(Actor.pid_from_int(intro, wa1), Work())
+    send(Actor.pid_from_int(intro, wa1), Work())
+    send(Actor.pid_from_int(intro, wb1), Work())
     run_until_idle()
 
     println("Crashing wa (pid " ++ String.from_int(wa1) ++ ")...")
-    kill(pid_of_int(wa1))
+    kill(Actor.pid_from_int(intro, wa1))
 
     let wa2 = child_int(sup, "wa")
     let wb2 = child_int(sup, "wb")
 
     println("wa restarted: " ++ bool_to_string(wa2 != wa1) ++ " (new pid=" ++ String.from_int(wa2) ++ ")")
     println("wb restarted: " ++ bool_to_string(wb2 != wb1) ++ " (new pid=" ++ String.from_int(wb2) ++ ")")
-    println("wa alive: " ++ bool_to_string(is_alive(pid_of_int(wa2))))
-    println("wb alive: " ++ bool_to_string(is_alive(pid_of_int(wb2))))
+    println("wa alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, wa2))))
+    println("wb alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, wb2))))
   end
 
-  fn demo_rest_for_one() do
+  fn demo_rest_for_one(intro : Cap(Actor.Introspect)) do
     section("Strategy: rest_for_one  [reader -> parser -> writer]")
     let sup = spawn(PipelineSup)
     let r1  = child_int(sup, "reader")
@@ -136,13 +138,13 @@ mod StrategyDemo do
     let w1  = child_int(sup, "writer")
     println("reader=" ++ String.from_int(r1) ++ "  parser=" ++ String.from_int(p1) ++ "  writer=" ++ String.from_int(w1))
 
-    send(pid_of_int(r1), Work())
-    send(pid_of_int(p1), Work())
-    send(pid_of_int(w1), Work())
+    send(Actor.pid_from_int(intro, r1), Work())
+    send(Actor.pid_from_int(intro, p1), Work())
+    send(Actor.pid_from_int(intro, w1), Work())
     run_until_idle()
 
     println("Crashing parser (pid " ++ String.from_int(p1) ++ ")...")
-    kill(pid_of_int(p1))
+    kill(Actor.pid_from_int(intro, p1))
 
     let r2 = child_int(sup, "reader")
     let p2 = child_int(sup, "parser")
@@ -151,17 +153,18 @@ mod StrategyDemo do
     println("reader unchanged: " ++ bool_to_string(r2 == r1) ++ " (pid=" ++ String.from_int(r2) ++ ")")
     println("parser restarted: " ++ bool_to_string(p2 != p1) ++ " (new pid=" ++ String.from_int(p2) ++ ")")
     println("writer restarted: " ++ bool_to_string(w2 != w1) ++ " (new pid=" ++ String.from_int(w2) ++ ")")
-    println("reader alive: " ++ bool_to_string(is_alive(pid_of_int(r2))))
-    println("parser alive: " ++ bool_to_string(is_alive(pid_of_int(p2))))
-    println("writer alive: " ++ bool_to_string(is_alive(pid_of_int(w2))))
+    println("reader alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, r2))))
+    println("parser alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, p2))))
+    println("writer alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, w2))))
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     println("=== Supervision Strategies Demo ===")
 
-    demo_one_for_one()
-    demo_one_for_all()
-    demo_rest_for_one()
+    demo_one_for_one(intro)
+    demo_one_for_all(intro)
+    demo_rest_for_one(intro)
 
     println("")
     println("=== Done ===")

@@ -97,7 +97,7 @@ let span_is_stdlib (sp : Ast.span) : bool =
 
 (** Builtins only the standard library may reference, each with the
     suggestion the error gives user code instead (e.g.
-    [("pid_of_int", "use `Actor.list(cap)` (see `Actor.introspect`)")]).
+    [("pid_of_int", "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)")]).
 
     A call or value reference to one of these names from code outside the
     stdlib ([span_is_stdlib]) is a type error; the check is
@@ -107,9 +107,71 @@ let span_is_stdlib (sp : Ast.span) : bool =
     II.1 and II.4.4). Search and docs are unaffected: the gate is at the
     reference, not the listing.
 
-    Empty until those plans populate it. A ref so tests can install an entry
-    around a single check. *)
-let stdlib_only : (string * string) list ref = ref []
+    Populated by build step 2 of that plan (unforgeable local references,
+    specs/progress/2026-09-22-dd-step02-unforgeable-references.md): the four
+    reference-forging builtins, reachable from user code only through the
+    `Actor` wrappers that take a `Cap(Actor.Introspect)` minted by
+    `Actor.introspect(io)`. A ref so tests can install an entry around a
+    single check. *)
+let stdlib_only : (string * string) list ref =
+  ref
+    [ ("pid_of_int",
+       "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)");
+      ("actor_pid_indices", "use `Actor.list(cap)` (see `Actor.introspect`)");
+      ("actor_whereis", "use `Actor.whereis(cap, name)` (see `Actor.introspect`)");
+      ("actor_registered", "use `Actor.registered(cap)` (see `Actor.introspect`)") ]
+
+(** The source files a list of loaded stdlib declarations came from: every
+    file named by a [DFn] span or a [DMod] span, recursively. A file is what
+    the driver's [load_stdlib_file] stamps on every span of one stdlib
+    module, so this is the identity [stdlib_source_files] wants: a set
+    derived from what was actually loaded, whether from disk or from the
+    AST cache (whose spans carry whatever directory the entry was written
+    from), rather than from a hand-maintained list. Declarations arriving
+    via `MARCH_LIB_PATH` are user decls, not stdlib decls, so a vendored or
+    forked `List` is correctly not in this set.
+
+    Both no-file spellings are excluded. `""` is what a string-parsed
+    fixture carries; `"<none>"` is [Ast.dummy_span]'s, and the loaders give
+    every stdlib module's wrapping [DMod] a dummy span; so without this the
+    sentinel would be a member of the identity set on every production run,
+    and any `fn length` inside a `mod List` that happened to carry a dummy
+    span would be certified as the standard library's. No such declaration
+    is reachable today (desugar's synthesized [DFn]s all reuse their source
+    declaration's real span), but admitting the sentinel is precisely the
+    class of wrong fact this gate exists to prevent, so the route is closed
+    rather than argued about. *)
+let stdlib_span_files (decls : Ast.decl list) : string list =
+  let seen = Hashtbl.create 64 in
+  let add (sp : Ast.span) =
+    let f = sp.Ast.file in
+    if f <> "" && f <> Ast.dummy_span.Ast.file then Hashtbl.replace seen f ()
+  in
+  let rec go ds =
+    List.iter
+      (function
+        | Ast.DMod (_, _, inner, sp) -> add sp; go inner
+        | Ast.DFn (_, sp) -> add sp
+        | _ -> ())
+      ds
+  in
+  go decls;
+  Hashtbl.fold (fun f () acc -> f :: acc) seen []
+
+(** Record [decls] as the standard library's: their files join
+    [stdlib_source_files]. Every loader of the stdlib (the driver's
+    [Toolchain.load_stdlib], the LSP's [Analysis.load_stdlib]) calls this on
+    what it loaded, so every entry point that then typechecks those
+    declarations (driver, `march test`, `march check`, the REPL and its JIT,
+    the LSP's cached base env) exempts the stdlib's own calls to a
+    [stdlib_only] builtin without each having to remember to. A union, so a
+    second loader (or a driver that also sets the ref itself) never narrows
+    what an earlier one recorded. *)
+let note_stdlib_decls (decls : Ast.decl list) : unit =
+  List.iter
+    (fun f -> if not (List.mem f !stdlib_source_files) then
+        stdlib_source_files := f :: !stdlib_source_files)
+    (stdlib_span_files decls)
 
 (** Maps builtin function names to the IO capability they require.
     Used by the body-scanning pass (Phase 2) to detect missing [needs] declarations. *)

@@ -1,0 +1,17 @@
+int read: Some(42)
+string read: None
+string fetch: Err(Config: key :config_erased_witness/:value holds a value of type Int, expected String)
+missing fetch: Err(Config: key :config_erased_witness/:nope not set)
+port: 4000
+host: db.local
+debug: true
+ratio: 0.5
+mode is fast: true
+tags: a,b
+tags as List(Int): true
+endpoint: 0.0.0.0:8080
+validate: Ok(4000)
+validate wrong type: Err(Config: key :cfg_parity/:port holds a value of type Int, expected Bool)
+store port: Some(5432)
+global port: Some(4000)
+store host: Err(Config: key :cfg_parity/:db/:host not set)
