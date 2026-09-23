@@ -2433,7 +2433,7 @@ let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl
         expr b.A.bind_expr
       | A.DActor (_, _, ad, _) ->
         expr ad.A.actor_init;
-        List.iter (fun (h : A.actor_handler) -> expr h.A.ah_body) ad.A.actor_handlers;
+        List.iter (fun (h : A.actor_handler) -> expr h.A.ah_body) (A.actor_body_handlers ad);
         Option.iter expr ad.A.actor_invariant
       | A.DApp (app, _) ->
         expr app.A.app_body;
@@ -2725,7 +2725,26 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
       | _ -> ()
     in
     check_state_literal ~path:[] ad.A.actor_init;
-    visit_expr ad.A.actor_init;
+    (* `init(p : T, …)` parameters (D24) bind like handler parameters, but
+       with their refinements STRIPPED: a `spawn(A, arg)` site is not an
+       obliged position, so nothing has proved them.  The supervise block's
+       child `init` arguments run in the same scope. *)
+    let init_ps = List.map (fun p -> A.FPNamed p) ad.A.actor_init_params in
+    let init_assumed =
+      List.map (fun p -> A.FPNamed p) (strip_params_refinements ad.A.actor_init_params) in
+    let init_sc = List.fold_left scope_add_fnparam [] init_assumed in
+    let init_re = List.fold_left recenv_add_fnparam [] init_ps in
+    let init_cb = List.fold_left cb_add_fnparam [] init_ps in
+    let init_ctx =
+      local_shadow ~spans:(List.concat_map fnparam_spans init_ps) ctx
+        (List.concat_map fnparam_binders init_ps)
+    in
+    let init_cont = List.fold_left cont_add_fnparam [] init_ps in
+    let visit_init e = visit ~root errctx defs init_ctx [] [] init_sc init_re init_cb init_cont e in
+    visit_init ad.A.actor_init;
+    Option.iter (fun (sc : A.supervise_config) ->
+        List.iter (fun (sf : A.supervise_field) -> List.iter visit_init sf.A.sf_init_args)
+          sc.A.sc_fields) ad.A.actor_supervise;
     List.iter
       (fun (h : A.actor_handler) ->
         (* Handler parameters bind exactly like named function parameters.
@@ -3762,7 +3781,7 @@ let check_module ?(root = Sys.getcwd ()) ?(measure_axioms = true)
         | A.DLet (_, b, _) -> expr b.A.bind_expr
         | A.DActor (_, _, ad, _) ->
           expr ad.A.actor_init;
-          List.iter (fun (h : A.actor_handler) -> expr h.A.ah_body) ad.A.actor_handlers
+          List.iter (fun (h : A.actor_handler) -> expr h.A.ah_body) (A.actor_body_handlers ad)
         | A.DApp (app, _) ->
           expr app.A.app_body;
           Option.iter expr app.A.app_on_start;

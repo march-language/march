@@ -81,9 +81,17 @@ let load_stdlib () =
     let prelude = "prelude.march" in
     let rest = List.filter (fun f -> f <> prelude) all_files in
     let ordered = if List.mem prelude all_files then prelude :: rest else rest in
-    List.concat_map
-      (fun name -> load_stdlib_file (Filename.concat stdlib_dir name))
-      ordered
+    let decls =
+      List.concat_map
+        (fun name -> load_stdlib_file (Filename.concat stdlib_dir name))
+        ordered
+    in
+    (* These are the stdlib's declarations: say so to the typechecker before
+       [Typecheck_cache.base_env] checks them, or the stdlib-only builtin
+       gate would reject the stdlib's own calls to `pid_of_int` and friends
+       (the gate exempts a declaration by its span's file). *)
+    March_typecheck.Typecheck_builtins.note_stdlib_decls decls;
+    decls
 
 (* Route stdlib loading through the process-lifetime memo so the parse/desugar
    happens once, not on every keystroke. *)
@@ -206,7 +214,7 @@ let rec collect_decl ~def_map ~use_map ~doc_map ~calls ~actors_tbl ?(prefix = ""
     collect_expr ~def_map ~use_map ~calls adef.actor_init;
     List.iter (fun (h : Ast.actor_handler) ->
         collect_expr ~def_map ~use_map ~calls h.ah_body
-      ) adef.actor_handlers
+      ) (Ast.actor_body_handlers adef)
 
   | Ast.DMod (name, _, decls, _) ->
     Hashtbl.replace def_map name.txt name.span;
@@ -521,10 +529,18 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
     match decl with
     | Ast.DFn (fn, _) -> List.iter walk_clause fn.Ast.fn_clauses
     | Ast.DLet (_, b, _) -> walk [] b.Ast.bind_expr
-    | Ast.DActor (_, _, adef, _) ->
-      walk [] adef.Ast.actor_init;
+    | Ast.DActor (_, _, adef, asp) ->
+      (* `init(p : T, …)` (D24): the params scope over the init expression
+         and over the supervise block's child `init` arguments. *)
+      let frame = List.map param_binder adef.Ast.actor_init_params in
+      set_scope frame asp;
+      walk [ frame ] adef.Ast.actor_init;
+      Option.iter (fun (sc : Ast.supervise_config) ->
+          List.iter (fun (sf : Ast.supervise_field) ->
+              List.iter (walk [ frame ]) sf.Ast.sf_init_args) sc.Ast.sc_fields)
+        adef.Ast.actor_supervise;
       List.iter (fun (h : Ast.actor_handler) -> walk [] h.Ast.ah_body)
-        adef.Ast.actor_handlers
+        (Ast.actor_body_handlers adef)
     | Ast.DMod (_, _, decls, _) -> List.iter walk_decl decls
     | Ast.DImpl (impl, _) ->
       List.iter (fun (_, (fn : Ast.fn_def)) -> List.iter walk_clause fn.Ast.fn_clauses)
@@ -931,7 +947,7 @@ let collect_fold_ranges (m : Ast.module_) : (int * int * string) list =
       add sp "region";
       go_expr adef.actor_init;
       List.iter (fun (h : Ast.actor_handler) -> go_expr h.ah_body)
-        adef.actor_handlers
+        (Ast.actor_body_handlers adef)
     | Ast.DDescribe (_, decls, sp) ->
       add sp "region";
       go_decls decls

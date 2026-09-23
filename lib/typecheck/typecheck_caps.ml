@@ -22,6 +22,14 @@ open Typecheck_types
 open Typecheck_env
 open Typecheck_builtins
 
+(** The `init` arguments of an actor's supervise-block children
+    (`Child f(e1, e2)`, D24): expressions that run in the actor's own spawn
+    glue, so they are scanned and charged exactly like its init expression. *)
+let child_init_args (actor : Ast.actor_def) : Ast.expr list =
+  match actor.Ast.actor_supervise with
+  | None -> []
+  | Some sc -> List.concat_map (fun (sf : Ast.supervise_field) -> sf.Ast.sf_init_args) sc.Ast.sc_fields
+
 (** [cap_annots_in_expr acc e] collects every capability named by a type
     ANNOTATION inside an expression: a [let] binding's [bind_ty], a lambda or
     local-function parameter type, a local function's return type, and
@@ -242,7 +250,13 @@ let check_stdlib_only_refs (env : env) (decls : Ast.decl list) : unit =
             def.Ast.fn_clauses
         | Ast.DLet (_, b, sp) -> scan ~owner_span:sp [] [ b.Ast.bind_expr ]
         | Ast.DActor (_, _, actor, sp) ->
-          scan ~owner_span:sp [] [ actor.Ast.actor_init ];
+          (* The `init` params (D24) are bound in the init expression and in
+             the supervise block's child `init` arguments, which run in this
+             actor's spawn glue. *)
+          let init_bound =
+            List.map (fun (p : Ast.param) -> p.Ast.param_name.txt) actor.Ast.actor_init_params
+          in
+          scan ~owner_span:sp init_bound (actor.Ast.actor_init :: child_init_args actor);
           List.iter (fun (h : Ast.actor_handler) ->
               let bound =
                 List.map (fun (p : Ast.param) -> p.Ast.param_name.txt) h.Ast.ah_params
@@ -904,7 +918,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           record_fn_refs fn_qname
             [ (List.map (fun (p : Ast.param) -> p.param_name.txt) h.Ast.ah_params,
                h.Ast.ah_body) ]
-        ) actor.actor_handlers;
+        ) (Ast.actor_body_handlers actor);
       (* Bridge the actor-NAME node to its handler functions, so a `spawn(A)`
          site — which [record_fn_refs] records as a reference to the name as
          WRITTEN (see its [spawn_refs]) — reaches [A]'s handlers in the closure
@@ -913,7 +927,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          [actor_qname] through the referring key's prefix. *)
       let handler_qnames =
         List.map (fun (h : Ast.actor_handler) -> actor_qname ^ "_" ^ h.Ast.ah_msg.txt)
-          actor.actor_handlers
+          (Ast.actor_body_handlers actor)
       in
       (* The `init { ... }` initializer runs at spawn time, so its transitive
          IO is reachable exactly when a handler's is.  Fold its own builtin
@@ -921,17 +935,22 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          `main -> A` charges init alongside the handlers.  Without this an
          `init` that calls a file-writing helper escaped the grant entirely
          (the handler bridge alone did not cover it). *)
+      let init_exprs = actor.Ast.actor_init :: child_init_args actor in
+      let init_bound =
+        List.map (fun (p : Ast.param) -> p.Ast.param_name.txt) actor.Ast.actor_init_params
+      in
       let init_caps =
-        List.filter_map (fun (call_name, _) -> cap_of_builtin_call call_name)
-          (March_ast.Calls.names_and_name_spans actor.Ast.actor_init)
+        List.concat_map (fun e ->
+            List.filter_map (fun (call_name, _) -> cap_of_builtin_call call_name)
+              (March_ast.Calls.names_and_name_spans e)) init_exprs
       in
       record_fn_caps actor_qname init_caps;
       let prior_actor_refs =
         Option.value ~default:[] (Hashtbl.find_opt env.fn_refs actor_qname)
       in
-      let init_refs = free_vars_expr [] actor.Ast.actor_init in
+      let init_refs = List.concat_map (free_vars_expr init_bound) init_exprs in
       let init_spawn_refs =
-        March_ast.Calls.spawned_actor_names [] actor.Ast.actor_init
+        List.fold_left March_ast.Calls.spawned_actor_names [] init_exprs
       in
       Hashtbl.replace env.fn_refs actor_qname
         (List.sort_uniq compare
@@ -1185,7 +1204,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               | Some cap_name -> Some (cap_name, call_span)
               | None -> None
             ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body)
-          ) actor.actor_handlers
+          ) (Ast.actor_body_handlers actor)
       | _ -> []
     ) decls in
     (* Drop capability uses that belong to the standard library rather than to
@@ -1437,9 +1456,30 @@ let check_module_needs (env : env) (mod_name : Ast.name)
   ) (List.filter (fun need -> not (List.mem need unknown_needs)) declared_needs);
   (* Check 3 (hint): Cap(IO) root — suggest narrowing.  Not on `main`: the
      reference calls `fn main(cap : Cap(IO))` the entry-point convention, so
-     hinting there tells users to stop following the documented advice. *)
+     hinting there tells users to stop following the documented advice.  Not
+     on a proof-cap FACTORY either: a function whose declared return type
+     names a proof cap its own module declares (`Session.attach`,
+     `Actor.introspect`, `ClusterNode.start`) mints it, `mint_cap` is typed
+     `Cap(IO) -> Cap(a)`, and amplifying a narrowed cap is a type error, so
+     the root cap is the only parameter it can take and the hint could not be
+     acted on. *)
+  let own_proof_cap path =
+    match List.assoc_opt path env.proof_caps with
+    | Some m -> m <> "" && (m = mod_name.txt || m = env.current_module)
+    | None -> false
+  in
+  let proof_cap_factories =
+    List.filter_map (function
+      | Ast.DFn (def, _) ->
+        (match def.fn_ret_ty with
+         | Some t when List.exists own_proof_cap (cap_paths_in_surface_ty t) ->
+           Some def.fn_name.txt
+         | _ -> None)
+      | _ -> None) decls
+  in
   List.iter (fun (cap_path, fn_name, sp) ->
-    if cap_path = "IO" && fn_name <> "main" then
+    if cap_path = "IO" && fn_name <> "main"
+       && not (List.mem fn_name proof_cap_factories) then
       Err.hint env.errors ~span:sp
         (render_parts [
           MPText "this function takes "; cap "IO";

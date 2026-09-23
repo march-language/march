@@ -170,6 +170,12 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
         (* `may crash` is a declaration, checked by the typechecker (rule 6);
            the roles it names reach [project] through [crashers_of]. *)
         | ProtoMayCrash _ -> []
+        (* `role R needs ...` is a claim about the role's code, not about the
+           wire: it is read by [grants_of] (for the body type, D34) and by the
+           typechecker, and never reaches the annotated steps, so
+           [fingerprint_of] cannot see it.  Two nodes built with different
+           grants must still talk (plan II.2). *)
+        | ProtoRoleNeeds _ -> []
         (* The message is named first, its crash branch after it, in reading
            order. *)
         | ProtoCrashOr (inner, crash, _) ->
@@ -217,6 +223,47 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
 (** The roles a protocol declares `may crash`. *)
 let crashers_of (steps : protocol_step list) : string list =
   List.concat_map (function ProtoMayCrash (rs, _) -> List.map (fun (r : name) -> r.txt) rs | _ -> []) steps
+
+(** The messages [role] may crash instead of sending: the head of every
+    `A -> B : T or crash` step it sends, and every branch head of a `choose by
+    A` with a `crash` branch.  The projection drops this for the crasher (its
+    own local type is a plain send), so the chaos peer reads it from the
+    annotated steps. *)
+let crash_ctors_of (steps : astep list) (role : string) : string list =
+  let acc = ref [] in
+  let rec go = function
+    | [] -> ()
+    | AMsg _ :: rest -> go rest
+    | ALoop inner :: rest -> go inner; go rest
+    | AStop :: rest -> go rest
+    | ACrashOr (AMsg (s, _, _, ctor), crash) :: rest ->
+      if s = role then acc := ctor :: !acc;
+      go crash; go rest
+    | ACrashOr (other, crash) :: rest -> go (other :: crash); go rest
+    | AChoice (chooser, brs) :: rest ->
+      let has_crash = List.exists (fun (l, _) -> l = "crash") brs in
+      List.iter
+        (fun (lbl, arm) ->
+           (if has_crash && chooser = role && lbl <> "crash" then
+              match arm with
+              | AMsg (_, _, _, ctor) :: _ | ACrashOr (AMsg (_, _, _, ctor), _) :: _ -> acc := ctor :: !acc
+              | _ -> ());
+           go arm)
+        brs;
+      go rest
+  in
+  go steps;
+  List.rev !acc
+
+(** Each role's declared grant (`role R needs ...`), as dot-joined capability
+    paths in declaration order; a role with no line is absent.  Read from the
+    raw steps, not the annotated ones, which drop the line. *)
+let grants_of (steps : protocol_step list) : (string * string list) list =
+  List.concat_map
+    (function
+      | ProtoRoleNeeds (r, caps, _) -> [ (r.txt, List.map (fun (c : name) -> c.txt) caps) ]
+      | _ -> [])
+    steps
 
 (** All roles, in order of FIRST APPEARANCE.  The typechecker sorts them, but
     the order here is user-visible -- it is the role index a transport is
@@ -399,9 +446,9 @@ let param ?(lin = Unrestricted) name ty = FPNamed { param_name = n name; param_t
 
 (** A public single-clause function with typed parameters and a return type.
     [linear] names the parameters declared `linear` (used exactly once). *)
-let fn ?(linear = []) name params ret body : decl =
+let fn ?(linear = []) ?(vis = Public) name params ret body : decl =
   DFn
-    ( { fn_name = n name; fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = Some ret;
+    ( { fn_name = n name; fn_vis = vis; fn_doc = None; fn_attrs = []; fn_ret_ty = Some ret;
         fn_bounds = [];
         fn_clauses =
           [ { fc_params =
@@ -709,7 +756,8 @@ let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint (ctors : (string * t
     transition, plus the unforgeable [Yield].  Also returns the name of the
     role's ENTRY state (what `register` yields), which `<P>_Run` types the
     role's body by. *)
-let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors : int) (role : string) (root : lty)
+let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors : int)
+    ~(grants : string list) ~(crash_points : string list) (role : string) (root : lty)
     : decl * string =
   let mname = proto ^ "_" ^ role in
   let msg = proto ^ "_Msg" in
@@ -1137,6 +1185,372 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
           @ [ (pcon closed_c [ PatWild sp ], con closed_c [ secret_v ]) ]))
   in
   let event_api = (parked_ty :: event_ty) @ (idle :: take_idle :: take_closed :: cancel_parked :: awaits) @ resume in
+  (* ── scripted and chaos peers (D36, distributed-deploys plan 7.2) ──────
+     Two bodies of the role's type, derived from the local type, so the
+     protocol is its own test oracle:
+
+     `script(s, caps..., st, steps)` runs a `List(Step)`: `Send_<Ctor>(v)`
+     and `Choose_<label>(v)` send, `Expect_<Ctor>(k)` receives and hands the
+     payload to `k`, `Expect_crash_<name>(k)` takes a crash branch; the walk
+     is one private function per state, so each step is checked against the
+     state the role is in.  A step the state cannot take, a message the peer
+     sends that the script did not expect, a script that runs out before the
+     protocol ends or has steps left after it: each PANICS with the state,
+     what was expected and what came, which fails the test, not the session
+     (a `leave` would tell the peers a story about the protocol; a wrong
+     script is a wrong test).  The state is consumed on the panic path by
+     matching it, since the panic never returns but linearity is static.
+
+     `chaos(s, caps..., st, seed, gens...)` walks the local type by a seeded
+     `Gen.GenRng`: every choice is taken by the seed, every payload comes
+     from a generator (the built-in payload types have one here; each
+     distinct user type the role SENDS is one extra `Gen.Generator(T)`
+     parameter, in order of first appearance, named `gen_<T>` -- explicit
+     rather than looked up, because a generated module cannot call a
+     function its enclosing module defines after it: the interpreter binds
+     nested modules eagerly and reports "stub called before initialisation"),
+     and at each point this role `may crash` (a send with an `or crash`
+     branch, a `choose` with a `crash` branch) the seed decides, one in four,
+     to crash instead: the peer leaves the session there.  Over the
+     in-process transport a role that has left is gone, so a peer waiting on
+     it with a crash branch takes it (and one without is cancelled); over
+     `SessionNode` a leave cancels the peers, and a real crash is the
+     two-node harness's `kill_node`.  A loop is taken as often as the seed
+     says, so a protocol whose loop has no `stop` runs until the transport
+     stops it.
+
+     Both are ordinary bodies of the role's type, so they run over any
+     transport unchanged. *)
+  let cap_params = List.mapi (fun i p -> (Printf.sprintf "_cap%d" (i + 1), tycon "Cap" [ tycon p [] ])) grants in
+  let t_step = tycon "Step" [] in
+  let t_steps = tycon "List" [ t_step ] in
+  let t_unit = TyTuple [] in
+  let step_ctors : (string * ty) list =
+    let acc = ref [] in
+    let add c t = if not (List.mem_assoc c !acc) then acc := (c, t) :: !acc in
+    List.iter
+      (fun (node, _) ->
+         match node with
+         | LSend (_, ctor, payload, _) -> add ("Send_" ^ ctor) payload
+         | LChoose brs -> List.iter (fun (lbl, _, _, payload, _) -> add ("Choose_" ^ lbl) payload) brs
+         | LRecv (_, ctor, payload, _) -> add ("Expect_" ^ ctor) (TyArrow (payload, t_unit))
+         | LOffer (_, brs) -> List.iter (fun (_, ctor, payload, _) -> add ("Expect_" ^ ctor) (TyArrow (payload, t_unit))) brs
+         | LRecvCrash (_, brs, _) ->
+           List.iter (fun (_, ctor, payload, _) -> add ("Expect_" ^ ctor) (TyArrow (payload, t_unit))) brs;
+           add ("Expect_crash_" ^ crash_nm brs) (TyArrow (t_crashed, t_unit))
+         | LEnd | LRec _ | LVar _ -> ())
+      names;
+    List.rev !acc
+  in
+  let step_ty = DType (Public, n "Step", [], TDVariant (List.map (fun (c, t) -> variant c [ t ]) step_ctors), sp) in
+  let step_name_fn =
+    fn ~vis:Private "step_name" [ ("step", t_step) ] t_string
+      (match_ (var "step") (List.map (fun (c, _) -> (pcon c [ PatWild sp ], lit_str c)) step_ctors))
+  in
+  let script_fn this = "script_" ^ this and chaos_fn this = "chaos_" ^ this in
+  let short_of this = if String.length this > 2 && String.sub this 0 2 = "S_" then String.sub this 2 (String.length this - 2) else this in
+  (* Consume the state and panic: the only way off the script on a mismatch. *)
+  let consume_panic this msg = match_ (var "st") [ (pcon this [ PatWild sp ], app "panic" [ msg ]) ] in
+  let consume_panic_st1 st_nm msg = match_ (var "st1") [ (pcon st_nm [ PatWild sp ], app "panic" [ msg ]) ] in
+  let expecting cs = String.concat " or " cs in
+  (* [covered]: how many `Step` constructors the state's own arms take.  The
+     wrong-step arm is emitted only when some constructor is left, else it
+     is unreachable and the checker says so (a warning the user can neither
+     see nor fix, as [unexpected_arm] notes). *)
+  let mismatch_arms ~covered this expected =
+    (if covered >= List.length step_ctors then []
+     else
+       [ ( pcon "Cons" [ pvar "other"; PatWild sp ],
+           consume_panic this
+             (string_concat
+                (lit_str (Printf.sprintf "%s: script: in state %s expected %s, but the next step is " where this expected))
+                (app "step_name" [ var "other" ])) ) ])
+    @ [ ( pcon "Nil" [],
+          consume_panic this
+            (lit_str (Printf.sprintf "%s: script: in state %s expected %s, but the script has no steps left" where this expected)) ) ]
+  in
+  let continue_ nx = app (script_fn nx) [ var "s"; var "st1"; var "rest" ] in
+  (* `fn (v, st1) -> do let _ = k(v) script_<next>(s, st1, rest) end` *)
+  let expect_cb nx = lam [ "v"; "st1" ] (block [ let_wild (app "k" [ var "v" ]); continue_ nx ]) in
+  let wrong_msg_cb nx expected got =
+    lam [ "_v"; "st1" ]
+      (consume_panic_st1 nx (lit_str (Printf.sprintf "%s: script: expected %s, but the peer sent %s" where expected got)))
+  in
+  let script_states =
+    List.filter_map
+      (fun (node, this) ->
+         let body =
+           match node with
+           | LRec _ | LVar _ -> None
+           | LSend (_, ctor, _, next) ->
+             let nx = state_of next in
+             Some
+               (match_ (var "steps")
+                  (( pcon "Cons" [ pcon ("Send_" ^ ctor) [ pvar "v" ]; pvar "rest" ],
+                     app (script_fn nx) [ var "s"; app ("send_" ^ ctor) [ var "s"; var "st"; var "v" ]; var "rest" ] )
+                   :: mismatch_arms ~covered:1 this ("Send_" ^ ctor)))
+           | LChoose brs ->
+             Some
+               (match_ (var "steps")
+                  (List.map
+                     (fun (lbl, _, _, _, next) ->
+                        let nx = state_of next in
+                        ( pcon "Cons" [ pcon ("Choose_" ^ lbl) [ pvar "v" ]; pvar "rest" ],
+                          app (script_fn nx) [ var "s"; app ("choose_" ^ lbl) [ var "s"; var "st"; var "v" ]; var "rest" ] ))
+                     brs
+                   @ mismatch_arms ~covered:(List.length brs) this (expecting (List.map (fun (lbl, _, _, _, _) -> "Choose_" ^ lbl) brs))))
+           | LRecv (_, ctor, _, next) ->
+             let nx = state_of next in
+             Some
+               (match_ (var "steps")
+                  (( pcon "Cons" [ pcon ("Expect_" ^ ctor) [ pvar "k" ]; pvar "rest" ],
+                     app ("recv_" ^ ctor) [ var "s"; var "st"; expect_cb nx ] )
+                   :: mismatch_arms ~covered:1 this ("Expect_" ^ ctor)))
+           | LOffer (_, brs) ->
+             let cbs = List.map (fun (lbl, ctor, _, next) -> (lbl, ctor, state_of next)) brs in
+             let offer_name = "offer_" ^ String.concat "_" (List.map (fun (l, _, _) -> l) cbs) in
+             Some
+               (match_ (var "steps")
+                  (List.map
+                     (fun (_, ctor_i, nx_i) ->
+                        ( pcon "Cons" [ pcon ("Expect_" ^ ctor_i) [ pvar "k" ]; pvar "rest" ],
+                          app offer_name
+                            ([ var "s"; var "st" ]
+                             @ List.map
+                                 (fun (_, ctor_j, nx_j) ->
+                                    if ctor_j = ctor_i then expect_cb nx_i
+                                    else wrong_msg_cb nx_j ("Expect_" ^ ctor_i) ctor_j)
+                                 cbs) ))
+                     cbs
+                   @ mismatch_arms ~covered:(List.length cbs) this (expecting (List.map (fun (_, c, _) -> "Expect_" ^ c) cbs))))
+           | LRecvCrash (from, brs, crash) ->
+             let cbs = List.map (fun (lbl, ctor, _, next) -> (lbl, ctor, state_of next)) brs in
+             let crash_nx = state_of crash in
+             let cname = "Expect_crash_" ^ crash_nm brs in
+             let fn_name =
+               match cbs with
+               | [ (_, ctor, _) ] -> "recv_" ^ ctor
+               | _ -> "offer_" ^ String.concat "_" (List.map (fun (l, _, _) -> l) cbs) ^ "_crash"
+             in
+             let crashed_cb expected =
+               lam [ "_c"; "st1" ]
+                 (consume_panic_st1 crash_nx
+                    (lit_str (Printf.sprintf "%s: script: expected %s, but %s crashed" where expected from)))
+             in
+             Some
+               (match_ (var "steps")
+                  (List.map
+                     (fun (_, ctor_i, nx_i) ->
+                        ( pcon "Cons" [ pcon ("Expect_" ^ ctor_i) [ pvar "k" ]; pvar "rest" ],
+                          app fn_name
+                            ([ var "s"; var "st" ]
+                             @ List.map
+                                 (fun (_, ctor_j, nx_j) ->
+                                    if ctor_j = ctor_i then expect_cb nx_i
+                                    else wrong_msg_cb nx_j ("Expect_" ^ ctor_i) ctor_j)
+                                 cbs
+                             @ [ crashed_cb ("Expect_" ^ ctor_i) ]) ))
+                     cbs
+                   @ [ ( pcon "Cons" [ pcon cname [ pvar "k" ]; pvar "rest" ],
+                         app fn_name
+                           ([ var "s"; var "st" ]
+                            @ List.map
+                                (fun (_, ctor_j, nx_j) -> wrong_msg_cb nx_j (Printf.sprintf "a crash of %s" from) ctor_j)
+                                cbs
+                            @ [ lam [ "c"; "st1" ] (block [ let_wild (app "k" [ var "c" ]); continue_ crash_nx ]) ]) ) ]
+                   @ mismatch_arms ~covered:(List.length cbs + 1) this (expecting (List.map (fun (_, c, _) -> "Expect_" ^ c) cbs @ [ cname ]))))
+           | LEnd ->
+             Some
+               (match_ (var "steps")
+                  [ (pcon "Nil" [], app "close" [ var "s"; var "st" ]);
+                    ( pcon "Cons" [ pvar "other"; PatWild sp ],
+                      consume_panic this
+                        (string_concat
+                           (lit_str (Printf.sprintf "%s: script: the protocol has ended, but the script goes on with " where))
+                           (app "step_name" [ var "other" ])) ) ])
+         in
+         Option.map
+           (fun body -> fn ~vis:Private (script_fn this) [ ("s", t_cap_session); ("st", sty this); ("steps", t_steps) ] t_yield body)
+           body)
+      names
+  in
+  let entry_nm = state_of root in
+  let script =
+    fn "script" ([ ("s", t_cap_session) ] @ cap_params @ [ ("st", sty entry_nm); ("steps", t_steps) ]) t_yield
+      (app (script_fn entry_nm) [ var "s"; var "st"; var "steps" ])
+  in
+  (* ── chaos ── *)
+  let t_rng = tycon "Gen.GenRng" [] in
+  let size = lit_int 10 in
+  (* Generators for the payloads this role sends.  A built-in type has one
+     here; anything else is a parameter of `chaos`, keyed by its printed
+     type so `Box(Int)` and `Box(String)` are two. *)
+  let gen_params : (string * ty) list ref = ref [] in
+  let rec gen_of (t : ty) : expr =
+    let user () =
+      match List.find_opt (fun (_, t') -> ty_equal t t') !gen_params with
+      | Some (p, _) -> var p
+      | None ->
+        let base =
+          match t with
+          | TyCon (c, _) -> (
+            match String.rindex_opt c.txt '.' with
+            | Some i -> String.sub c.txt (i + 1) (String.length c.txt - i - 1)
+            | None -> c.txt)
+          | _ -> "payload"
+        in
+        let taken = List.length (List.filter (fun (p, _) -> p = "gen_" ^ base || (String.length p > String.length base + 5 && String.sub p 0 (String.length base + 5) = "gen_" ^ base ^ "_")) !gen_params) in
+        let p = if taken = 0 then "gen_" ^ base else Printf.sprintf "gen_%s_%d" base (taken + 1) in
+        gen_params := !gen_params @ [ (p, t) ];
+        var p
+    in
+    match t with
+    | TyCon (c, []) when c.txt = "Int" -> app "Gen.int" [ lit_int (-1000); lit_int 1000 ]
+    | TyCon (c, []) when c.txt = "Bool" -> app "Gen.bool" []
+    | TyCon (c, []) when c.txt = "String" -> app "Gen.string" []
+    | TyCon (c, []) when c.txt = "Float" -> app "Gen.float" [ ELit (LitFloat (-1000.0), sp); ELit (LitFloat 1000.0, sp) ]
+    | TyCon (c, []) when c.txt = "Bytes" -> app "Gen.map" [ app "Gen.string" []; lam [ "x" ] (app "Bytes.from_string" [ var "x" ]) ]
+    | TyCon (c, [ a ]) when c.txt = "List" -> app "Gen.list" [ gen_of a ]
+    | TyCon (c, [ a ]) when c.txt = "Option" -> app "Gen.option" [ gen_of a ]
+    | TyTuple [] -> app "Gen.constant" [ ETuple ([], sp) ]
+    | TyTuple [ a; b ] -> app "Gen.tuple2" [ gen_of a; gen_of b ]
+    | TyTuple [ a; b; c ] -> app "Gen.tuple3" [ gen_of a; gen_of b; gen_of c ]
+    | _ -> user ()
+  in
+  (* `let (t, rng') = Gen.run(g, rng, 10)` then [body] *)
+  let with_gen ~g ~rng ~tree ~rng' body =
+    block
+      [ ELet
+          ( { bind_pat = PatTuple ([ pvar tree; pvar rng' ], sp); bind_ty = None; bind_lin = Unrestricted;
+              bind_expr = app "Gen.run" [ g; var rng; size ] },
+            sp );
+        body ]
+  in
+  let root_of tree = app "Gen.tree_root" [ var tree ] in
+  let may_crash_here ctors = List.exists (fun c -> List.mem c crash_points) ctors in
+  (* one in four: crash (leave) instead of taking [go] *)
+  let crash_or this ctors go =
+    if not (may_crash_here ctors) then go "rng"
+    else
+      with_gen ~g:(app "Gen.int" [ lit_int 0; lit_int 3 ]) ~rng:"rng" ~tree:"ct" ~rng':"rng0"
+        (EIf
+           ( app "==" [ root_of "ct"; lit_int 0 ],
+             app ("leave_" ^ short_of this)
+               [ var "s"; var "st"; lit_str (Printf.sprintf "chaos: crashed in state %s" this) ],
+             go "rng0",
+             sp ))
+  in
+  let chaos_states =
+    List.filter_map
+      (fun (node, this) ->
+         let rng_param = match node with LEnd -> "_rng" | _ -> "rng" in
+         let body =
+           match node with
+           | LRec _ | LVar _ -> None
+           | LSend (_, ctor, payload, next) ->
+             let nx = state_of next in
+             let g = gen_of payload in
+             Some
+               (crash_or this [ ctor ] (fun rng ->
+                    with_gen ~g ~rng ~tree:"t" ~rng':"rng2"
+                      (app (chaos_fn nx) [ var "s"; app ("send_" ^ ctor) [ var "s"; var "st"; root_of "t" ]; var "rng2" ])))
+           | LChoose brs ->
+             let arms = List.map (fun (lbl, _, ctor, payload, next) -> (lbl, ctor, gen_of payload, state_of next)) brs in
+             let n_arms = List.length arms in
+             let branch (lbl, _, g, nx) =
+               with_gen ~g ~rng:"rng1" ~tree:"t" ~rng':"rng2"
+                 (app (chaos_fn nx) [ var "s"; app ("choose_" ^ lbl) [ var "s"; var "st"; root_of "t" ]; var "rng2" ])
+             in
+             let rec chain i = function
+               | [] -> assert false
+               | [ a ] -> branch a
+               | a :: more -> EIf (app "==" [ var "i"; lit_int i ], branch a, chain (i + 1) more, sp)
+             in
+             Some
+               (crash_or this (List.map (fun (_, c, _, _) -> c) arms) (fun rng ->
+                    with_gen ~g:(app "Gen.int" [ lit_int 0; lit_int (n_arms - 1) ]) ~rng ~tree:"it" ~rng':"rng1"
+                      (block [ let_ "i" (root_of "it"); chain 0 arms ])))
+           | LRecv (_, ctor, _, next) ->
+             let nx = state_of next in
+             Some (app ("recv_" ^ ctor) [ var "s"; var "st"; lam [ "_v"; "st1" ] (app (chaos_fn nx) [ var "s"; var "st1"; var "rng" ]) ])
+           | LOffer (_, brs) ->
+             let cbs = List.map (fun (lbl, _, _, next) -> (lbl, state_of next)) brs in
+             let offer_name = "offer_" ^ String.concat "_" (List.map fst cbs) in
+             Some
+               (app offer_name
+                  ([ var "s"; var "st" ]
+                   @ List.map (fun (_, nx) -> lam [ "_v"; "st1" ] (app (chaos_fn nx) [ var "s"; var "st1"; var "rng" ])) cbs))
+           | LRecvCrash (_, brs, crash) ->
+             let cbs = List.map (fun (lbl, ctor, _, next) -> (lbl, ctor, state_of next)) brs in
+             let crash_nx = state_of crash in
+             let fn_name =
+               match cbs with
+               | [ (_, ctor, _) ] -> "recv_" ^ ctor
+               | _ -> "offer_" ^ String.concat "_" (List.map (fun (l, _, _) -> l) cbs) ^ "_crash"
+             in
+             Some
+               (app fn_name
+                  ([ var "s"; var "st" ]
+                   @ List.map (fun (_, _, nx) -> lam [ "_v"; "st1" ] (app (chaos_fn nx) [ var "s"; var "st1"; var "rng" ])) cbs
+                   @ [ lam [ "_c"; "st1" ] (app (chaos_fn crash_nx) [ var "s"; var "st1"; var "rng" ]) ]))
+           | LEnd -> Some (app "close" [ var "s"; var "st" ])
+         in
+         Option.map (fun body -> (this, rng_param, body)) body)
+      names
+  in
+  (* The generator parameters are known only once every state's payloads
+     have been visited, so the per-state functions take them all and the
+     public `chaos` threads them through. *)
+  let gen_params = !gen_params in
+  let gen_names = List.map fst gen_params in
+  let chaos_state_fns =
+    List.map
+      (fun (this, rng_param, body) ->
+         (* the per-state functions pass the whole generator list along *)
+         let rec thread (e : expr) : expr =
+           match e with
+           | EApp (EVar f, args, s) when String.length f.txt > 6 && String.sub f.txt 0 6 = "chaos_" ->
+             EApp (EVar f, List.map thread args @ List.map var gen_names, s)
+           | EApp (f, args, s) -> EApp (thread f, List.map thread args, s)
+           | ELam (ps, b, s) -> ELam (ps, thread b, s)
+           | EBlock (es, s) -> EBlock (List.map thread es, s)
+           | ELet (b, s) -> ELet ({ b with bind_expr = thread b.bind_expr }, s)
+           | EIf (c, t, f, s) -> EIf (thread c, thread t, thread f, s)
+           | EMatch (scrut, branches, s) ->
+             EMatch (thread scrut, List.map (fun br -> { br with branch_body = thread br.branch_body }) branches, s)
+           | ECon (c, args, s) -> ECon (c, List.map thread args, s)
+           | e -> e
+         in
+         let body = thread body in
+         (* A state that sends nothing (or forwards only) never reads a
+            generator: underscore the parameter so the unused-variable
+            warning stays quiet; the arity, and the positional calls, stay. *)
+         let rec mentions p (e : expr) : bool =
+           match e with
+           | EVar v -> v.txt = p
+           | EApp (f, args, _) -> mentions p f || List.exists (mentions p) args
+           | ELam (_, b, _) -> mentions p b
+           | EBlock (es, _) -> List.exists (mentions p) es
+           | ELet (b, _) -> mentions p b.bind_expr
+           | EIf (c, t, f, _) -> mentions p c || mentions p t || mentions p f
+           | EMatch (scrut, branches, _) -> mentions p scrut || List.exists (fun br -> mentions p br.branch_body) branches
+           | ECon (_, args, _) | ETuple (args, _) -> List.exists (mentions p) args
+           | _ -> false
+         in
+         fn ~vis:Private (chaos_fn this)
+           ([ ("s", t_cap_session); ("st", sty this); (rng_param, t_rng) ]
+            @ List.map (fun (p, t) -> ((if mentions p body then p else "_" ^ p), tycon "Gen.Generator" [ t ])) gen_params)
+           t_yield body)
+      chaos_states
+  in
+  let chaos =
+    fn "chaos"
+      ([ ("s", t_cap_session) ] @ cap_params @ [ ("st", sty entry_nm); ("seed", t_int) ]
+       @ List.map (fun (p, t) -> (p, tycon "Gen.Generator" [ t ])) gen_params)
+      t_yield
+      (app (chaos_fn entry_nm) ([ var "s"; var "st"; app "Random.seed" [ var "seed" ] ] @ List.map var gen_names))
+  in
+  let peers = (step_ty :: step_name_fn :: script_states) @ [ script ] @ chaos_state_fns @ [ chaos ] in
   let entry = state_of root in
   (* `Entry`: a name for the role's FIRST state, what `register` yields and
      what `<P>_Run` types the role's body by.  Without it a body's signature
@@ -1158,9 +1572,16 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
   (* Every transition takes `Cap(Session.Live)`, so the module acknowledges
      the dependency itself rather than leaning on the enclosing module's
      manifest -- the capability checker asks each module for its own. *)
-  let needs = DNeeds ([ ([ n "Session"; n "Live" ], None) ], sp) in
+  (* The scripted and chaos peers take the role's grant as `Cap(P)`
+     parameters (D34), and a module that names `Cap(P)` must declare `P`. *)
+  let needs =
+    DNeeds
+      ( ([ n "Session"; n "Live" ], None)
+        :: List.map (fun p -> (List.map n (String.split_on_char '.' p), None)) grants,
+        sp )
+  in
   (DMod (n mname, Public,
-         (needs :: secret :: yield_ty :: cancelled_ty :: crashed_ty :: state_types) @ [ entry_alias ] @ (register :: cancelled_fn :: transitions) @ event_api, sp),
+         (needs :: secret :: yield_ty :: cancelled_ty :: crashed_ty :: state_types) @ [ entry_alias ] @ (register :: cancelled_fn :: transitions) @ event_api @ peers, sp),
    entry)
 
 (** `<P>_Run`: the role runner's typed front.  Per role,
@@ -1174,27 +1595,61 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
     wiring itself -- who listens, who dials, in what order, the `require`
     check -- is `SessionNode.run`, a stdlib function: it names no protocol
     constructor, so nothing about it needs generating, only these types.
-    Design: specs/progress/2026-09-16-role-runner.md. *)
-let run_module ~proto ~(roles : (string * string) list) : decl =
+    Design: specs/progress/2026-09-16-role-runner.md.
+
+    Grants as values (D34, distributed-deploys plan 7.1): a role declared
+    `role R needs IO.X, IO.Y` has the body type
+
+      (Cap(Session.Live), Cap(IO.X), Cap(IO.Y), <P>_R.Entry) -> <P>_R.Yield
+
+    one `Cap(P)` per path in declaration order, after the session and before
+    the entry state, and every front narrows them from the `Cap(IO)` it holds
+    (`cap_narrow(io)`, which the checker accepts because `IO` subsumes every
+    node) and passes them.  The hosted fronts thread them through `start`
+    the same way, since that is the callback the actor's session code begins
+    from.  So the grant is visible in the signature, a body with the wrong
+    parameter list is a type error at the runner, and a test can pass any
+    dictionary it likes in place of the runner's.  A role with no `needs`
+    line keeps the old two-parameter type exactly.  [grants] is the
+    protocol's `role ... needs` lines ([grants_of]). *)
+let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * string list) list) : decl =
   let mname = proto ^ "_Run" in
   let msg = proto ^ "_Msg" in
   let t_unit = TyTuple [] in
   let unit = ETuple ([], sp) in
   let t_addrs = tycon "List" [ tycon "SessionNode.Addr" [] ] in
+  let caps_of role = Option.value ~default:[] (List.assoc_opt role grants) in
+  let t_caps role = List.map (fun p -> tycon "Cap" [ tycon p [] ]) (caps_of role) in
+  (* `(Cap(Session.Live), Cap(P)..., <entry>) -> Yield`, as a curried arrow. *)
+  let t_body role entry =
+    let rm = proto ^ "_" ^ role in
+    List.fold_right (fun t acc -> TyArrow (t, acc))
+      (t_cap_session :: t_caps role @ [ tycon (rm ^ "." ^ entry) [] ])
+      (tycon (rm ^ ".Yield") [])
+  in
+  let narrowed role = List.map (fun _ -> app "cap_narrow" [ var "io" ]) (caps_of role) in
+  (* The body's call from a front: the session, the narrowed grant, the entry
+     state. *)
+  let call_body role =
+    let rm = proto ^ "_" ^ role in
+    lam [ "s" ]
+      (block
+         [ let_wild (app "body" ((var "s" :: narrowed role) @ [ app (rm ^ ".register") [ var "s"; lit_int 0 ] ]));
+           unit ])
+  in
+  (* A running cluster node is `Cap(ClusterNode.Live)` (D35). *)
+  let t_cluster = tycon "Cap" [ tycon "ClusterNode.Live" [] ] in
   let runners =
     List.map
       (fun (role, entry) ->
-         let rm = proto ^ "_" ^ role in
-         let t_body = TyArrow (t_cap_session, TyArrow (tycon (rm ^ "." ^ entry) [], tycon (rm ^ ".Yield") [])) in
          fn ("run_" ^ role)
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node_id", t_string); ("secret", t_string);
-             ("addrs", t_addrs); ("body", t_body) ]
+             ("addrs", t_addrs); ("body", t_body role entry) ]
            (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
                 var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
-                lam [ "s" ]
-                  (block [ let_wild (app "body" [ var "s"; app (rm ^ ".register") [ var "s"; lit_int 0 ] ]); unit ]) ]))
+                call_body role ]))
       roles
   in
   (* `cluster_<Role>(io, node, session, body)`: the same role over a running
@@ -1205,17 +1660,13 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
   let clusters =
     List.map
       (fun (role, entry) ->
-         let rm = proto ^ "_" ^ role in
-         let t_body = TyArrow (t_cap_session, TyArrow (tycon (rm ^ "." ^ entry) [], tycon (rm ^ ".Yield") [])) in
          fn ("cluster_" ^ role)
-           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []);
-             ("session", t_string); ("body", t_body) ]
+           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster);
+             ("session", t_string); ("body", t_body role entry) ]
            (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_cluster"
               [ var "io"; var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) [];
-                var "session"; lam [ "_ep" ] unit;
-                lam [ "s" ]
-                  (block [ let_wild (app "body" [ var "s"; app (rm ^ ".register") [ var "s"; lit_int 0 ] ]); unit ]) ]))
+                var "session"; lam [ "_ep" ] unit; call_body role ]))
       roles
   in
   (* `offer_<Role>(io, node, capacity, body)`: an ACCESS POINT -- this node
@@ -1229,32 +1680,24 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
   let offers =
     List.map
       (fun (role, entry) ->
-         let rm = proto ^ "_" ^ role in
-         let t_body = TyArrow (t_cap_session, TyArrow (tycon (rm ^ "." ^ entry) [], tycon (rm ^ ".Yield") [])) in
          fn ("offer_" ^ role)
-           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []);
-             ("capacity", t_int); ("body", t_body) ]
+           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster);
+             ("capacity", t_int); ("body", t_body role entry) ]
            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_role"
               [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
-                app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit;
-                lam [ "s" ]
-                  (block [ let_wild (app "body" [ var "s"; app (rm ^ ".register") [ var "s"; lit_int 0 ] ]); unit ]) ]))
+                app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; call_body role ]))
       roles
   in
   let initiators =
     List.map
       (fun (role, entry) ->
-         let rm = proto ^ "_" ^ role in
-         let t_body = TyArrow (t_cap_session, TyArrow (tycon (rm ^ "." ^ entry) [], tycon (rm ^ ".Yield") [])) in
          fn ("initiate_" ^ role)
-           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []); ("body", t_body) ]
+           [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("body", t_body role entry) ]
            (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.initiate"
               [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
-                app (msg ^ ".peers_" ^ role) []; app (msg ^ ".others_" ^ role) []; lam [ "_ep" ] unit;
-                lam [ "s" ]
-                  (block [ let_wild (app "body" [ var "s"; app (rm ^ ".register") [ var "s"; lit_int 0 ] ]); unit ]) ]))
+                app (msg ^ ".peers_" ^ role) []; app (msg ^ ".others_" ^ role) []; lam [ "_ep" ] unit; call_body role ]))
       roles
   in
   (* `host_<Role>(io, node_id, secret, addrs, host, start, deliver)`: the
@@ -1266,19 +1709,26 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
      [host] is the actor's pid; `Pid(a)`'s parameter is phantom to the
      linearity checker (typecheck.ml, [consumed_var_ids]), which is what lets
      an actor whose state holds the linear `Parked_<Role>` be passed here. *)
+  (* A hosted role's grant travels through `start`: `start(s, caps...)` (and
+     `start(sid, s, caps...)` for the many-session fronts), narrowed by the
+     front exactly as the callback fronts narrow for `body`.  With no grant
+     the callback is passed through untouched. *)
+  let t_start_of role = List.fold_right (fun t acc -> TyArrow (t, acc)) (t_cap_session :: t_caps role) t_unit in
+  let start_of role =
+    if caps_of role = [] then var "start" else lam [ "s" ] (app "start" (var "s" :: narrowed role))
+  in
   let hosters =
     List.map
       (fun (role, _entry) ->
-         let t_start = TyArrow (t_cap_session, t_unit) in
          let t_deliver = TyArrow (t_cap_session, TyArrow (t_int, TyArrow (t_bytes, TyArrow (t_int, t_unit)))) in
          fn ("host_" ^ role)
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node_id", t_string); ("secret", t_string);
-             ("addrs", t_addrs); ("host", tycon "Pid" [ TyVar (n "a") ]); ("start", t_start); ("deliver", t_deliver) ]
+             ("addrs", t_addrs); ("host", tycon "Pid" [ TyVar (n "a") ]); ("start", t_start_of role); ("deliver", t_deliver) ]
            (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_hosted"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
                 var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
-                app "pid_to_int" [ var "host" ]; var "start"; var "deliver" ]))
+                app "pid_to_int" [ var "host" ]; start_of role; var "deliver" ]))
       roles
   in
   (* `host_<Role>_or(…, start, deliver, cancel)`: the same, and the actor is
@@ -1286,18 +1736,17 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
   let hosters_or =
     List.map
       (fun (role, _entry) ->
-         let t_start = TyArrow (t_cap_session, t_unit) in
          let t_deliver = TyArrow (t_cap_session, TyArrow (t_int, TyArrow (t_bytes, TyArrow (t_int, t_unit)))) in
          let t_cancel = TyArrow (t_cap_session, TyArrow (t_int, TyArrow (t_string, TyArrow (t_int, t_unit)))) in
          fn ("host_" ^ role ^ "_or")
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node_id", t_string); ("secret", t_string);
-             ("addrs", t_addrs); ("host", tycon "Pid" [ TyVar (n "a") ]); ("start", t_start); ("deliver", t_deliver);
+             ("addrs", t_addrs); ("host", tycon "Pid" [ TyVar (n "a") ]); ("start", t_start_of role); ("deliver", t_deliver);
              ("cancel", t_cancel) ]
            (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_hosted_or"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
                 var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
-                app "pid_to_int" [ var "host" ]; var "start"; var "deliver"; var "cancel" ]))
+                app "pid_to_int" [ var "host" ]; start_of role; var "deliver"; var "cancel" ]))
       roles
   in
   (* `offer_hosted_<Role>(io, node, capacity, host, start, deliver, cancel)`
@@ -1310,40 +1759,45 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
      msg, ep)`, `cancel(sid, s, role, cause, ep)`; `cluster_hosted_<Role>`
      takes the same callbacks so one actor serves both.  Design:
      specs/2026-09-20-hosted-offers-implementation.md. *)
-  let t_start_sid = TyArrow (t_string, TyArrow (t_cap_session, t_unit)) in
+  let t_start_sid role =
+    TyArrow (t_string, List.fold_right (fun t acc -> TyArrow (t, acc)) (t_cap_session :: t_caps role) t_unit)
+  in
+  let start_sid_of role =
+    if caps_of role = [] then var "start" else lam [ "sid"; "s" ] (app "start" (var "sid" :: var "s" :: narrowed role))
+  in
   let t_deliver_sid =
     TyArrow (t_string, TyArrow (t_cap_session, TyArrow (t_int, TyArrow (t_bytes, TyArrow (t_int, t_unit)))))
   in
   let t_cancel_sid =
     TyArrow (t_string, TyArrow (t_cap_session, TyArrow (t_int, TyArrow (t_string, TyArrow (t_int, t_unit)))))
   in
-  let hosted_callbacks =
-    [ ("host", tycon "Pid" [ TyVar (n "a") ]); ("start", t_start_sid); ("deliver", t_deliver_sid); ("cancel", t_cancel_sid) ]
+  let hosted_callbacks role =
+    [ ("host", tycon "Pid" [ TyVar (n "a") ]); ("start", t_start_sid role); ("deliver", t_deliver_sid); ("cancel", t_cancel_sid) ]
   in
   let offers_hosted =
     List.map
       (fun (role, _entry) ->
          fn ("offer_hosted_" ^ role)
-           ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []); ("capacity", t_int) ]
-            @ hosted_callbacks)
+           ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("capacity", t_int) ]
+            @ hosted_callbacks role)
            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_hosted"
               [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ];
-                var "start"; var "deliver"; var "cancel" ]))
+                start_sid_of role; var "deliver"; var "cancel" ]))
       roles
   in
   let clusters_hosted =
     List.map
       (fun (role, _entry) ->
          fn ("cluster_hosted_" ^ role)
-           ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", tycon "ClusterNode.ClusterHandle" []); ("session", t_string) ]
-            @ hosted_callbacks)
+           ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("session", t_string) ]
+            @ hosted_callbacks role)
            (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_cluster_hosted"
               [ var "io"; var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "session";
                 lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ];
-                lam [ "s" ] (app "start" [ var "session"; var "s" ]);
+                lam [ "s" ] (app "start" (var "session" :: var "s" :: narrowed role));
                 lam [ "s"; "from"; "m"; "ep" ] (app "deliver" [ var "session"; var "s"; var "from"; var "m"; var "ep" ]);
                 lam [ "s"; "role"; "cause"; "ep" ] (app "cancel" [ var "session"; var "s"; var "role"; var "cause"; var "ep" ]) ]))
       roles
@@ -1363,7 +1817,7 @@ let run_module ~proto ~(roles : (string * string) list) : decl =
     DNeeds
       ( List.map (fun path -> (List.map n path, None))
           [ [ "IO" ]; [ "IO"; "Mut" ]; [ "IO"; "NetConnect" ]; [ "IO"; "NetListen" ]; [ "IO"; "Spawn" ];
-            [ "Session"; "Live" ] ],
+            [ "Session"; "Live" ]; [ "ClusterNode"; "Live" ] ],
         sp )
   in
   DMod (n mname, Public,
@@ -1454,15 +1908,20 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
               let peers = List.map (fun r -> (r, peers_of steps roles r)) roles in
               let fingerprint = fingerprint_of ~proto ~types:(ty_defs_of decls) roles steps in
               let msg = msg_module errors ~proto ~span ~fingerprint ctors roles peers in
+              let grants = grants_of pdef.proto_steps in
               let role_mods =
                 List.map
                   (fun role ->
-                     role_module errors ~proto ~span ~roles ~nctors:(List.length ctors) role
+                     role_module errors ~proto ~span ~roles ~nctors:(List.length ctors)
+                       ~grants:(Option.value ~default:[] (List.assoc_opt role grants))
+                       ~crash_points:(crash_ctors_of steps role) role
                        (project ~proto ~multiparty steps role LEnd))
                   roles
               in
               let run =
-                if !emit_runner then [ run_module ~proto ~roles:(List.map2 (fun r (_, e) -> (r, e)) roles role_mods) ]
+                if !emit_runner then
+                  [ run_module ~proto ~roles:(List.map2 (fun r (_, e) -> (r, e)) roles role_mods)
+                      ~grants:(grants_of pdef.proto_steps) ]
                 else []
               in
               List.map respan_mod ((msg :: List.map fst role_mods) @ run)))

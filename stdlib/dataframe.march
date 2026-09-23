@@ -2230,6 +2230,9 @@ mod DataFrame do
     Median(col_name_) -> do
       match float_list(sub_df, col_name_) do
       Err(_) -> NullVal
+      -- Stats.median declares {List(Float) | len(_) > 0}; an empty group or a
+      -- zero-row frame yields NullVal, like First/Last below.
+      Ok(Nil) -> NullVal
       Ok(xs) -> FloatVal(Stats.median(xs))
       end
 

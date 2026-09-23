@@ -184,6 +184,9 @@ type env = {
      string * int list * Typecheck_types.ty list * Typecheck_types.ty * bool) Hashtbl.t;
   cap_producer_ivars :
     (int, Typecheck_types.Ast.span) Hashtbl.t;
+  actor_init_sigs : (string, (string * Typecheck_types.ty) list) Hashtbl.t;
+  (** Actor name -> its `init(p : T, …)` parameters (D24); [] for the bare
+      form.  Shared hashtable, written by [DActor], read at `spawn` sites. *)
   cap_narrow_factory_fns :
     (string, Typecheck_types.Ast.span) Hashtbl.t;
   cap_dicts : (string * string) list;
@@ -220,6 +223,9 @@ type env = {
   fn_refs : (string, string list) Hashtbl.t;
   fn_row_bodies :
     (string, (string list * Typecheck_types.Ast.expr) list)
+    Hashtbl.t;
+  role_grants :
+    (string * string, string list * Typecheck_types.Ast.span)
     Hashtbl.t;
   fn_grant_points :
     (string, string list * Typecheck_types.Ast.span)

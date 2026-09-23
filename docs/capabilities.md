@@ -520,6 +520,15 @@ opposite of March's module-scoped design. A `Cap(X)` parameter is an authority
 marker at a module boundary; the *checks* are `needs`, the module upper limit, and
 `main`'s grant.
 
+**Per-role grants** are the one other place a grant is checked. An `@[endpoints]`
+protocol can say `role Ledger needs IO.FileWrite, IO.NetConnect`; the role's body then
+takes those capabilities as parameters, narrowed by the runner from `main`'s, and the same
+walk that bounds the program by `main`'s grant bounds the role's code by its line, from
+each call of the role's runner. A role's grant must fit within `main`'s. See
+[Choreography]({{ site.baseurl }}/docs/choreography/#per-role-grants), including
+`--dump-role-authority`, the report of what a role can reach through references it is
+handed rather than through its own code.
+
 ### When *not* to use IO caps
 
 **Pure functions need no declaration.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. The absence of `needs` is a machine-verified guarantee of the ERROR-level kind above **only for the signature/`use`/`extern` surface**: the compiler cannot force you to declare a capability that never appears in a signature and is never transitively required by an import, so this guarantee is strongest when the functions in question actually take `Cap(X)` parameters (or `use` something that does). Since 2026-08-06 a module with no `needs` that calls IO builtins directly in function bodies is REJECTED (`--check` exits 1), not just warned. A stdlib-mediated call is outside *this* check but, since 2026-08-17, is caught by the upper-limit subset that now runs under `--check`. See above.

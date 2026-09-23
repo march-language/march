@@ -1,0 +1,93 @@
+-- Config typed keys: run interpreted AND compiled against one .expected
+-- (specs/progress/2026-09-22-config-typed-keys.md).
+--
+-- The minting-door half of the filed todo's witness (kept in that file): a
+-- value stored through `key(..., int())` and read back through a key minted
+-- for the SAME path with another codec. Before typed keys the
+-- untyped `Config.get(:ns, :name)` handed the stored Int to whatever type the
+-- reader asked for (interpreted: `is_alive: expected Pid`; compiled: a panic
+-- on the tuple key before it got that far). Now the reading key's codec
+-- rejects the stored tag: `get` is None and `fetch` names both types.
+-- The statically rejected half (reading a Key(Int) as a Pid) is
+-- specs/lang/types/reject/t291_config_typed_key_read_as_pid.march.
+mod M do
+  needs IO.Console
+  needs IO.Mut
+  needs IO.Process
+
+  fn show_opt_int(o : Option(Int)) : String do
+    match o do
+      Some(n) -> "Some(" ++ int_to_string(n) ++ ")"
+      None    -> "None"
+    end
+  end
+
+  fn show_opt_string(o : Option(String)) : String do
+    match o do
+      Some(s) -> "Some(" ++ s ++ ")"
+      None    -> "None"
+    end
+  end
+
+  fn show_fetch_string(r : Result(String, Config.Error)) : String do
+    match r do
+      Ok(s)  -> "Ok(" ++ s ++ ")"
+      Err(e) -> "Err(" ++ Config.error_to_string(e) ++ ")"
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut), _p : Cap(IO.Process)) do
+    -- the todo's witness path, through typed keys
+    let as_int = Config.key(:config_erased_witness, :value, Config.int())
+    let as_string = Config.key(:config_erased_witness, :value, Config.string())
+    Config.put(as_int, 42)
+    println("int read: " ++ show_opt_int(Config.get(as_int)))
+    println("string read: " ++ show_opt_string(Config.get(as_string)))
+    println("string fetch: " ++ show_fetch_string(Config.fetch(as_string)))
+    println("missing fetch: " ++ show_fetch_string(Config.fetch(Config.key(:config_erased_witness, :nope, Config.string()))))
+
+    -- heterogeneous storage in the one global table
+    let port = Config.key(:cfg_parity, :port, Config.int())
+    let host = Config.key_in(:cfg_parity, :db, :host, Config.string())
+    let debug = Config.key(:cfg_parity, :debug, Config.bool())
+    let ratio = Config.key(:cfg_parity, :ratio, Config.float())
+    let mode = Config.key(:cfg_parity, :mode, Config.atom())
+    let tags = Config.key(:cfg_parity, :tags, Config.list(Config.string()))
+    Config.put(port, 4000)
+    Config.put(host, "db.local")
+    Config.put(debug, true)
+    Config.put(ratio, 0.5)
+    Config.put(mode, :fast)
+    Config.put(tags, ["a", "b"])
+    println("port: " ++ int_to_string(Config.get_with_default(port, 0)))
+    println("host: " ++ Config.get_with_default(host, "?"))
+    println("debug: " ++ bool_to_string(Config.get_with_default(debug, false)))
+    println("ratio: " ++ float_to_string(Config.get_with_default(ratio, 0.0)))
+    println("mode is fast: " ++ bool_to_string(Config.get_with_default(mode, :slow) == :fast))
+    println("tags: " ++ String.join(Config.get_with_default(tags, []), ","))
+    let tags_as_ints = Config.key(:cfg_parity, :tags, Config.list(Config.int()))
+    println("tags as List(Int): " ++ bool_to_string(Config.get(tags_as_ints) == None))
+
+    -- endpoint shorthand and validation
+    Config.put_endpoint(8080, "0.0.0.0", "s3cret")
+    println("endpoint: " ++ Config.endpoint_host("x") ++ ":" ++ int_to_string(Config.endpoint_port(1)))
+    match Config.validate(port, fn p -> p > 0 && p < 65536) do
+      Ok(p)  -> println("validate: Ok(" ++ int_to_string(p) ++ ")")
+      Err(e) -> println("validate: Err(" ++ e ++ ")")
+    end
+    match Config.validate(Config.key(:cfg_parity, :port, Config.bool()), fn b -> b) do
+      Ok(_)  -> println("validate wrong type: Ok")
+      Err(e) -> println("validate wrong type: Err(" ++ e ++ ")")
+    end
+
+    -- named stores stay isolated from the global table and each other
+    let s = Config.new_store("cfg_parity_store")
+    Config.store_put(s, port, 5432)
+    println("store port: " ++ show_opt_int(Config.store_get(s, port)))
+    println("global port: " ++ show_opt_int(Config.get(port)))
+    match Config.store_fetch(s, host) do
+      Ok(h)  -> println("store host: Ok(" ++ h ++ ")")
+      Err(e) -> println("store host: Err(" ++ Config.error_to_string(e) ++ ")")
+    end
+  end
+end

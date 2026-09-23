@@ -1,0 +1,44 @@
+mod ActorInitParams do
+  needs IO.Console
+
+  -- Parameterised actor `init` (D24): the arguments of spawn(A, ...) are
+  -- bound to the init parameters and reach the state; read back through
+  -- handlers (Inc adds to value; Fold mixes the String param's length in).
+  actor Counter do
+    state { value : Int, label : String }
+    init(start : Int, label : String) { value: start, label: label }
+
+    on Inc(n : Int) do
+      { state with value: state.value + n }
+    end
+
+    on Fold() do
+      { state with value: state.value * 100 + string_length(state.label) }
+    end
+  end
+
+  -- init() is the zero-parameter spelling of the bare form.
+  actor Plain do
+    state { v : Int }
+    init() { v: 5 }
+    on Bump() do { v: state.v + 1 } end
+  end
+
+  fn field_int(pid, field) do
+    match get_actor_field(pid, field) do
+    None    -> -1
+    Some(n) -> n
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let c = spawn(Counter, 41, "ab")
+    send(c, Inc(1))
+    send(c, Fold())
+    let p = spawn(Plain)
+    send(p, Bump())
+    run_until_idle()
+    println(int_to_string(field_int(c, "value")))
+    println(int_to_string(field_int(p, "v")))
+  end
+end

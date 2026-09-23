@@ -411,6 +411,12 @@ type env = {
       IO-lattice narrowing ([Cap(IO) -> Cap(IO.Network)]) is unaffected in every
       position, including laundering through a polymorphic function.  A shared
       hashtable (like [cap_closures]) so every env copy sees the same tags. *)
+  actor_init_sigs : (string, (string * ty) list) Hashtbl.t;
+  (** Actor name -> its `init(p1 : T1, …)` parameters (D24), recorded by the
+      [DActor] arm and read by `spawn(A, …)` and by a supervise block's
+      `Child name(args)` spec to check the supplied arguments.  An actor with
+      the bare `init { … }` form has the entry [].  Shared hashtable, like
+      [cap_narrow_factory_fns], so every env copy sees it. *)
   cap_narrow_factory_fns : (string, Ast.span) Hashtbl.t;
   (** Names of user functions whose body IS (or launders) a [cap_narrow] result —
       a "cap-narrow factory" (e.g. `fn mk(cap) do cap_narrow(cap) end`).  A
@@ -598,6 +604,17 @@ type env = {
       [fn_transitive_capability_closures_tbl] can be its caps projection
       rather than a second implementation.  See
       [specs/2026-08-10-r1-stage-c-effect-rows-design.md]. *)
+  role_grants : (string * string, string list * Ast.span) Hashtbl.t;
+  (** `role R needs ...` lines of every checked `protocol`, keyed by
+      (protocol, role) → (the declared capability paths, in declaration
+      order; the line's span).  Recorded by [check_decl]'s [DProtocol] arm
+      once the line has passed its own checks (a real role, a known
+      capability, before any message step); read by [check_role_grants],
+      which bounds each role's bodies by it the way [check_main_grant] bounds
+      the program by `main`'s parameters, and by the generator's caller
+      through [Desugar_endpoints.grants_of] (the generator runs before the
+      typechecker, so it reads the raw steps itself).  Shared (mutated in
+      place) across every env copy, like the closure tables above. *)
   fn_grant_points : (string, string list * Ast.span) Hashtbl.t;
   (** Functions whose signature carries a concrete [Cap(P)] parameter —
       qualified name → (the concrete capability paths their PARAMETERS grant,
@@ -675,6 +692,7 @@ let make_env errors type_map = {
   linear_ok_ids = Hashtbl.create 16;
   linear_generic_uses = Hashtbl.create 256;
   cap_producer_ivars = Hashtbl.create 16;
+  actor_init_sigs = Hashtbl.create 16;
   cap_narrow_factory_fns = Hashtbl.create 16;
   cap_dicts = [];
   cap_dict_decl_sites = ref [];
@@ -695,6 +713,7 @@ let make_env errors type_map = {
   ceiling_extra_roots = Hashtbl.create 16;
   fn_refs = Hashtbl.create 64;
   fn_row_bodies = Hashtbl.create 64;
+  role_grants = Hashtbl.create 8;
   fn_grant_points = Hashtbl.create 16;
   local_mods = StrMap.empty;
   offer_conts = ref [];
@@ -804,7 +823,7 @@ let rec demote_to_monomorphic (t : ty) : unit =
     without the user saying what it holds: block [let] and top-level [let] with
     no annotation, and a [fn] with no return annotation.  Writing the
     annotation ([fn open(name) : Vault(v)]) is the deliberate opt-out and is
-    what [Vault.new]/[Vault.open]/[Vault.whereis] and [Config]'s table getters
+    what [Vault.new]/[Vault.open]/[Vault.whereis]
     use — a name-keyed global table genuinely mints handles at any element
     type, and that erasure is now explicit and greppable instead of ambient.
 

@@ -12,6 +12,63 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **The topology file, static half** (build step 7 of the distributed-deploys plan).
+  `topology.toml` next to `forge.toml` binds each offered `Protocol.Role` to a
+  `body` function or an `actor`, groups roles into `[pool.*]` sections
+  (`start` hook, `serves` incl. `"*"`, `initiates`, `caps`, `isolate`, `public`
+  ports, `place = { on = "label" }` / `{ count = n }` placement rules), with
+  `[drain]` deadlines and `[backend]`; `topology.<env>.toml` overlays deep-merge
+  tables and replace arrays. `forge topology check` validates it against the
+  project's sources with `file:line` errors (unknown keys are errors, unbound
+  served roles, names that resolve to nothing, labels no host carries, `count`
+  above the host count, isolated pools sharing a role, a written `initiates`
+  narrower than the code) and warns about unlabelled protocol steps; it runs
+  automatically in `forge build`, `forge run` and `forge deploy hot` and writes
+  the digest `.forge/topology.json` (schema version 1, documented in
+  `specs/features/topology.md`). `forge topology export --json` adds each pool's
+  derived `initiates` and the pool connectivity graph; `forge topology gen`
+  writes `systemd` units, `ufw` scripts, DigitalOcean firewall JSON
+  (`do-firewall`) or a `compose` file, or runs a `forge-topology-<target>`
+  plugin from PATH with the export on stdin. `march --topology <json>` reads the
+  digest and checks its version and bound names (nothing more yet). See
+  `docs/topology.md`.
+- **Parameterised actor `init`.** `init(env : T, n : Int) { … }` declares
+  parameters that `spawn(A, env, 3)` supplies; they are in scope in the init
+  expression, and every argument is checked against the matching parameter.
+  Arity mistakes are reported with the actor's `init` signature (`spawn(A)` on
+  an actor that takes parameters, or extra arguments on one that takes none).
+  A supervised child can be given its arguments in the `supervise` block
+  (`Worker w(db)`, with the supervisor's own `init` params in scope), and a
+  restart re-supplies the same values. `init()` is the zero-parameter spelling
+  of the bare form. Decision D24 of the distributed-deploys plan; see the
+  actors and supervision chapters of the language reference.
+- **Per-role grants in protocols: `role R needs IO.X, ...`.** A protocol can
+  now say what each role's code may do, with the same capability paths (and
+  the same did-you-mean on a typo) as a module's `needs`. The line comes
+  before the first message step and is not part of the protocol's
+  fingerprint: a grant is about the role's code, not the wire, so two nodes
+  built with different grants still talk. `role` stays an ordinary identifier
+  everywhere else. The grant is a value (D34): a granted role's body takes one
+  `Cap(P)` per path, in order, after `Cap(Session.Live)` and before its entry
+  state, every `<P>_Run` front narrows them from its `io` and passes them, and
+  a hosted role receives them through `start`. A role with no grant line is
+  unchanged. The grant is checked: at every call of a runner front, everything
+  the callback reaches (helpers, values, spawned or hosted actors) must sit
+  under the role's grant, reported with the chain from the body, as `main`'s
+  grant is; and a role's grant must fit within `main`'s.
+  `march --dump-role-authority` prints, per runner call, what the role's code
+  reaches and the functions and actors it holds references to, with their
+  capabilities: the effective-authority report, a report rather than a check.
+- **Scripted and chaos peers for every `@[endpoints]` role.** Each role
+  module now carries `Step`, `script(s, st, steps)` and `chaos(s, st, seed)`,
+  two bodies of the role's own type derived from its projection. A script is
+  a list of expected receives and canned sends checked against the state as
+  it runs; a mismatch panics with the state, what was expected and what came,
+  failing the test rather than the session. A chaos peer takes every choice
+  by the seed, generates every payload (a `Gen.Generator` argument per user
+  payload type the role sends) and leaves the session at its `may crash`
+  points when the seed says so. Both run over the in-process transport with
+  no sockets, and unchanged over the network.
 - **A targeted diagnostic for `fn (a, b) -> …` used as a callback over a
   tuple.** `fn (a, b) -> …` is a two-parameter (curried) lambda, not a lambda
   that destructures a pair, so `List.map(pairs, fn (k, v) -> v)` was wrong in a
@@ -32,6 +89,79 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **Breaking: a running cluster node is a capability, `Cap(ClusterNode.Live)`.**
+  `ClusterNode.start` takes the root capability first, `start(io, cfg)`, and returns
+  `Result(Cap(ClusterNode.Live), String)`; the `ClusterNode.ClusterHandle` type is gone.
+  Every `ClusterNode` operation, and the generated `<P>_Run.cluster_*`, `offer_*`,
+  `initiate_*` fronts, take the capability where they took the handle. Migration: call
+  `ClusterNode.start(io, cfg)` from `main(io : Cap(IO))` (or wherever you hold `Cap(IO)`),
+  write `Cap(ClusterNode.Live)` where you wrote `ClusterNode.ClusterHandle`, and add
+  `needs ClusterNode.Live` to a module whose signatures name it. A function of yours can no
+  longer return the node it started (only `ClusterNode` may produce the capability): start
+  it in `main` and pass it down. Every operation goes through the capability's dictionary
+  (`ClusterNode.ClusterOps`), so a test can attach its own with `ClusterNode.attach(io, ops)`
+  (`ClusterNode.ops_stub(id)` panics on every operation it is not given) and inject
+  membership events with no sockets. New accessors: `ClusterNode.node_id(node)` and
+  `ClusterNode.next_id(node, key)`.
+- **The "consider narrowing `Cap(IO)`" hint skips proof-capability factories.** A function
+  that returns its own module's proof capability (`Session.attach`, `Actor.introspect`,
+  `ClusterNode.start`) must take the root capability, because `mint_cap` only accepts
+  `Cap(IO)`, so the hint could not be acted on.
+- **Breaking: every `Stats` function that needs a non-empty list now says so
+  in its signature.** `Stats.median`, `std_dev`, `iqr`, `iqr_default` and
+  `quantile_default` take `{List(Float) | len(_) > 0}` (joining `mean`,
+  `min_val`, `max_val`, `percentile`, `quantile`, `quantiles`, `variance`,
+  `five_number_summary` and `mode`), and `quantile_default`'s `q` is now
+  `{Float | _ >= 0.0 && _ <= 1.0}`, the same as `quantile`'s. Previously these
+  five forwarded to a contracted function without restating the contract, so
+  the checker could not see through them: `Stats.median([])` compiled and
+  panicked at run time. **What breaks:** a call with a provably empty list (or
+  an out-of-range literal `q`) is now a compile error; a function that passes
+  its own unrefined `List(Float)` parameter gets a "propagates a requirement
+  it doesn't declare" warning (an error in a `cap verified` module). **How to
+  migrate:** `march --check --refine-suggest <your_fn> file.march` prints the
+  refinement to declare on your function's parameter
+  (`xs : {List(Float) | len(_) > 0}`), or guard the call with `match xs do
+  Nil -> … _ -> Stats.median(xs) end`, which the checker proves. `sum`,
+  `count`, `variance_pop`, `std_dev_pop` and the `*_safe` variants still
+  accept any list. `DataFrame`'s `Median` aggregation now yields a null value
+  for an empty group instead of reaching `Stats.median` with one.
+- **Reaching an actor you were never handed a Pid for now takes a capability.**
+  `Actor.whereis`, `Actor.registered`, `Actor.list`, `Actor.top_by_mailbox` and
+  `Actor.over_mailbox` take a `Cap(Actor.Introspect)` as their first argument, and the
+  `pid_of_int` builtin is replaced by `Actor.pid_from_int(c, n)`. The cap is minted once
+  from the root capability: `let c = Actor.introspect(io)` in `main(io : Cap(IO))`, then
+  forward `c` (a function that takes it declares `needs Actor.Introspect`). A Pid is
+  thereby an unforgeable reference: code that holds neither a Pid nor the cap can message
+  nobody it was not introduced to. The raw builtins (`pid_of_int`, `actor_pid_indices`,
+  `actor_whereis`, `actor_registered`) are internal to the standard library; calling one
+  is a typecheck error naming the wrapper to use. `Actor.register` and `unregister` are
+  unchanged.
+- **`Config` values are read through typed keys (breaking).** The untyped
+  `Config.put(:ns, :name, value)` / `Config.get(:ns, :name)` let a value
+  stored as an `Int` be read back as any type, e.g. handed to `is_alive` as a
+  `Pid` (interpreted: `is_alive: expected Pid`; compiled, every tuple-keyed
+  Config call panicked in `Vault` before getting that far). A key now names
+  its value type: `let port = Config.key(:myapp, :port, Config.int())` is a
+  `Config.Key(Int)`, `Config.put(port, 4000)` only accepts an `Int`, and
+  `Config.get(port)` is an `Option(Int)`. Storage stays heterogeneous; each
+  value is stored tagged, so a key minted for the same path with a different
+  codec reads `None` from `get` and `Err(Config.KeyWrongType(path, expected,
+  found))` from the new `Config.fetch`, never a value at the wrong type.
+  Codecs: `Config.int()`, `float()`, `string()`, `bool()`, `atom()`,
+  `list(c)`, and `Config.codec(name, encode, decode)` for your own types.
+  Migration: `Config.put(:a, :b, v)` → `Config.put(Config.key(:a, :b,
+  <codec>), v)`; `Config.get(:a, :b)` → `Config.get(<that key>)`;
+  `put_in`/`get_in`/`get_in_with_default`/`require_in`/`validate_in` →
+  the same call on `Config.key_in(:a, :section, :b, <codec>)`;
+  `store_put(s, :a, :b, v)`/`store_get(s, :a, :b)` (and their `_in` forms) →
+  `store_put(s, key, v)`/`store_get(s, key)`; `from_env*`, `validate`,
+  `get_with_default` and `require` take the key in place of `ns, key`.
+  `validate`'s not-set message now names the key
+  (`"Config: key :a/:b not set"`). `put_endpoint`, `endpoint_port`,
+  `endpoint_host`, `secret_key_base` and `env`/`is_*` are unchanged. The old
+  forms fail to typecheck (a misleading "This is not a function" on
+  `Config.put(a, b, c)`: it is the arity change).
 - **A malformed `forge.toml` is an error that names its line, and an unknown key is a
   warning.** forge used to drop any line it could not parse, ignore a `[section`
   header with no `]` and any text after a value, and ignore keys it did not know, so a
@@ -70,12 +200,33 @@ git log is authoritative for exact commits.
   about 18 KB more, and `Vault.size`/`Vault.keys` walk shard by shard, so their result
   is a recent count rather than a single instant's snapshot of the whole table.
 ### Added
+- **Actors can declare an `on_stop do ... end` terminate callback.** It runs
+  once on a graceful stop (`Actor.stop`, a self-stop, or a supervisor's
+  tree teardown), on the actor's own thread after the queued messages have
+  drained, with the final `state` and `self` in scope, so an actor can flush,
+  checkpoint, or hand work back before it dies. Semantics follow OTP's
+  `terminate/2`: it may send (and wait on an `Actor.call`); a panic inside it
+  is logged to stderr and the actor still dies normally (no restart, and a
+  tree teardown carries on); it never runs on `kill`, a crash, or a
+  `shutdown brutal` child; and it counts against the stop's `timeout_ms` /
+  child `shutdown` budget, past which the actor is killed. Same behaviour
+  interpreted and compiled. See "Stopping an Actor" in the actors chapter.
 - **The type checker can reserve a builtin for the standard library.** A reference to
   a reserved builtin from user code, the REPL included, is an error that names the
   stdlib function to use instead:
   `` `pid_of_int` is internal to the standard library; use `Actor.list(cap)` ``. No
   builtin is reserved yet: the raw actor-reference builtins will be once their
   capability-taking wrappers exist.
+- **A warning when a function's body fixes a type variable its signature
+  names.** `fn bad(xs : List(a)) : List(a) do [0 - 5] end` used to typecheck
+  silently as `List(Int) -> List(Int)`, with the mistake surfacing only as a
+  mismatch at some caller. It now warns at the `a` in the signature, naming
+  the type the body gave it (`Int`) with a hint to write that type or make the
+  body generic. Two signature variables that the body makes equal
+  (`fn second(x : a, y : b) : a do y end`) warn too. Only variables you wrote
+  in the signature are checked, and not when the body already has a type
+  error. The warning code is `annotated_tyvar_fixed`. Signature type variables
+  are planned to become rigid later, which will make this an error.
 - **A choreography role's first state now has a name: `<P>_<Role>.Entry`.** A role
   body's signature used to have to spell the state `register` yields, which meant
   working out `S_` plus the first step of that role's own projection
@@ -166,6 +317,42 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A nested module can use its own `proof cap` without declaring it in
+  `needs`.** `proof cap Key` in `mod Vault` has always meant `Vault` may take a
+  `Cap(Vault.Key)` without also writing `needs Vault.Key`, but that only worked
+  when `Vault` was the file's top module. Nested inside another module, every
+  such use was rejected with "`Cap(Vault.Key)` used in module `Vault` but
+  `Vault.Key` is not declared in `needs`". Uses from any other module still
+  need the `needs` line.
+- **A finished task or a dead actor no longer keeps its process record
+  forever.** Every green thread's bookkeeping record (256 bytes) used to be
+  kept for the life of the program once the thread ended, so a server that
+  churns tasks or actors grew without bound: 400,000 awaited tasks held
+  about 120 MB, and each dead actor about 600 bytes. The record is now freed
+  once no other thread can still be reading it, so the same 400,000 tasks
+  peak at about 23 MB and a dead actor costs about 350 bytes (the actor's
+  own metadata is the remaining term, still to come). `Scheduler.stat(8)`
+  counts records freed and `stat(9)` those waiting to be. An `Actor.reply`
+  whose caller has already given up and exited is now dropped cleanly, as
+  is a reply to a value that is not a reply reference.
+- **A self-stop in the interpreter now drains like the compiled backend.**
+  `Actor.stop(self, t)` from a handler used to kill the actor on the spot in
+  `march run`, discarding its queue and the state the handler was about to
+  return; it now finishes the handler, drains, and then dies, as compiled
+  binaries already did.
+- **`OrderedMap.keys`, `OrderedMap.values` and `OrderedMap.from_list` work.**
+  All three passed a two-parameter lambda where a pair callback was expected
+  (and `from_list` had `List.fold_left`'s arguments in the wrong order), so
+  they returned a list of functions: `List.each(OrderedMap.values(m), println)`
+  failed with "expected `a -> a` but got `String`" at the caller's own line.
+  The test meant to catch this typechecked `ordered_map.march` in isolation,
+  where a call into another stdlib module resolves to an unconstrained type
+  variable and checks nothing; it now typechecks each file inside the whole
+  stdlib, as the compiler does. `values` was found independently by the new
+  `annotated_tyvar_fixed` warning, which saw the signature's `v` fixed to a
+  function type; annotating a call (`let vs : List(String) =
+  OrderedMap.values(m)`) was rejected outright.
+
 - **A `MARCH_SANITIZE=1` compile no longer returns a cached ThreadSanitizer
   binary.** The compile cache recorded only *whether* `MARCH_SANITIZE` was
   set, not which sanitizer it selected, so building a program with
@@ -433,6 +620,9 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **The actors chapter now documents `Actor.stop`** (graceful, synchronous,
+  reverse-order supervisor teardown), which shipped 2026-09-08 without a
+  section of its own.
 - **A design for distributed authority, topology and hot deploys, and its groundwork
   plan** (`specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md`,
   `specs/plans/2026-09-21-distributed-deploys-groundwork-plan.md`). The remaining

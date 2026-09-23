@@ -61,12 +61,16 @@ type actor_inst = {
   ai_name : string;
   ai_def : March_ast.Ast.actor_def;
   ai_env_ref : env ref;
+  ai_init_args : value list;
   mutable ai_state : value;
   mutable ai_alive : bool;
   mutable ai_terminal_reason : monitor_down_reason;
   mutable ai_monitors : (int * int) list;
   mutable ai_mailbox : value Queue.t;
   mutable ai_draining : bool;
+  mutable ai_self_stop : float option option;
+  (** [Some deadline] while a self-stopped actor works off its queue; see the
+      .ml. *)
   mutable ai_supervisor : int option;
   mutable ai_restart_count : (float * int) list;
   mutable ai_epoch : int;
@@ -101,7 +105,12 @@ type dyn_sup_state = {
 val dyn_sup_registry : (string, dyn_sup_state) Hashtbl.t
 val dyn_sup_vpid_map : (int, string) Hashtbl.t
 
-val spawn_child_actor : ?crashed_pid:int option -> string -> int -> int
+val eval_actor_init_state : env ref -> March_ast.Ast.actor_def -> string -> value list -> value
+(** [eval_actor_init_state env_ref def name args] evaluates [def]'s `init`
+    with its `init(...)` parameters (D24) bound to [args]; arity-checked. *)
+
+val spawn_child_actor :
+  ?crashed_pid:int option -> ?init_args:value list option -> string -> int -> int
 
 (** [crash_actor pid reason] tears the actor down and runs whatever
     supervision applies — restart strategy, monitor DOWN messages, resource
@@ -115,6 +124,11 @@ val crash_actor_with_reason : int -> string -> monitor_down_reason -> unit
     indefinitely, 0 discards what is queued), then die NORMAL. Stops a
     supervisor's children first, in reverse declaration order. *)
 val stop_actor : int -> int -> bool
+
+(** Finish a self-stop once the handler that requested it has returned:
+    when the queue is empty (or the deadline passed) run `on_stop` and die
+    NORMAL. Called by the scheduler after each handler. *)
+val finish_self_stop : int -> unit
 
 (** Set by eval.ml to [run_scheduler]; [stop_actor] pumps it to work the queue
     off. This module is compiled below the scheduler, hence the hook. *)

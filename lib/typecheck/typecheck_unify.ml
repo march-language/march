@@ -581,7 +581,7 @@ let rec has_crash_branches (steps : Ast.protocol_step list) : bool =
       | Ast.ProtoLoop inner -> has_crash_branches inner
       | Ast.ProtoChoice (_, brs) ->
         List.exists (fun (l, arm) -> l.Ast.txt = "crash" || has_crash_branches arm) brs
-      | Ast.ProtoMsg _ | Ast.ProtoStop _ -> false)
+      | Ast.ProtoMsg _ | Ast.ProtoStop _ | Ast.ProtoRoleNeeds _ -> false)
     steps
 
 (** True when [name] denotes a variant/sum type in scope — i.e. some

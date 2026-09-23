@@ -10,10 +10,10 @@
 --
 -- Only main prints. A child that printed from its handler would race main on
 -- the compiled backend, where children run concurrently. The ORDER of the
--- teardown is asserted separately, off MARCH_SUP_TRACE, because until actors
--- get a terminate callback there is no in-language event at teardown time to
--- observe it with.
+-- teardown is asserted separately, off MARCH_SUP_TRACE; the in-language
+-- witness, via each child's `on_stop`, is actor_on_stop_tree.march.
 mod Main do
+  needs IO
   needs IO.Console
 
   actor W do
@@ -45,20 +45,21 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let sup = spawn(Sup)
     let a1 = child_int(sup, "a")
     let b1 = child_int(sup, "b")
     let c1 = child_int(sup, "c")
-    send(pid_of_int(a1), Work("a"))
-    send(pid_of_int(b1), Work("b"))
-    send(pid_of_int(c1), Work("c"))
+    send(Actor.pid_from_int(intro, a1), Work("a"))
+    send(Actor.pid_from_int(intro, b1), Work("b"))
+    send(Actor.pid_from_int(intro, c1), Work("c"))
 
     println("stop: " ++ bool_to_string(Actor.stop(sup, 5000)))
     println("supervisor dead: " ++ bool_to_string(is_alive(sup) == false))
-    println("child a dead: " ++ bool_to_string(is_alive(pid_of_int(a1)) == false))
-    println("child b dead: " ++ bool_to_string(is_alive(pid_of_int(b1)) == false))
-    println("child c dead: " ++ bool_to_string(is_alive(pid_of_int(c1)) == false))
+    println("child a dead: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, a1)) == false))
+    println("child b dead: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, b1)) == false))
+    println("child c dead: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, c1)) == false))
     -- Not respawned: only an actual restart rewrites a supervisor's state
     -- field, so the slot still names the child that was stopped.
     println("child a not restarted: " ++ bool_to_string(child_int(sup, "a") == a1))

@@ -1,0 +1,72 @@
+# ==> do-firewalls.json <==
+[
+  {
+    "name": "march-edge",
+    "tags": [ "march-edge" ],
+    "inbound_rules": [
+      {
+        "protocol": "tcp",
+        "ports": "443",
+        "sources": { "addresses": [ "0.0.0.0/0", "::/0" ] }
+      },
+      {
+        "protocol": "tcp",
+        "ports": "7946",
+        "sources": { "tags": [ "march-ledger" ] }
+      }
+    ],
+    "outbound_rules": [
+      {
+        "protocol": "tcp",
+        "ports": "all",
+        "destinations": { "addresses": [ "0.0.0.0/0", "::/0" ] }
+      },
+      {
+        "protocol": "udp",
+        "ports": "all",
+        "destinations": { "addresses": [ "0.0.0.0/0", "::/0" ] }
+      }
+    ]
+  },
+  {
+    "name": "march-ledger",
+    "tags": [ "march-ledger" ],
+    "inbound_rules": [
+      {
+        "protocol": "tcp",
+        "ports": "7946",
+        "sources": { "tags": [ "march-edge" ] }
+      }
+    ],
+    "outbound_rules": [
+      {
+        "protocol": "tcp",
+        "ports": "all",
+        "destinations": { "addresses": [ "0.0.0.0/0", "::/0" ] }
+      },
+      {
+        "protocol": "udp",
+        "ports": "all",
+        "destinations": { "addresses": [ "0.0.0.0/0", "::/0" ] }
+      }
+    ]
+  },
+  {
+    "name": "march-imaging",
+    "tags": [ "march-imaging" ],
+    "inbound_rules": [],
+    "outbound_rules": [
+      {
+        "protocol": "tcp",
+        "ports": "all",
+        "destinations": { "addresses": [ "0.0.0.0/0", "::/0" ] }
+      },
+      {
+        "protocol": "udp",
+        "ports": "all",
+        "destinations": { "addresses": [ "0.0.0.0/0", "::/0" ] }
+      }
+    ]
+  }
+]
+

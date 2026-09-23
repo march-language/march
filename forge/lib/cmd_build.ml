@@ -806,6 +806,11 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
       "cross target %s requires `zig` (used as the C cross-compiler).\n  Install: brew install zig"
       (Option.value ~default:"" target))
   | Ok proj ->
+    (* A project with a topology.toml: check it first (section 4 of the
+       distributed-deploys plan). Its errors point into the TOML. *)
+    match Topology.gate ~proj () with
+    | Error m -> Error m
+    | Ok () ->
     (* --frozen: a lockfile out of date with forge.toml is an error, not a
        silent re-resolve (CI reproducibility). *)
     let lock = Filename.concat proj.Project.root "forge.lock" in

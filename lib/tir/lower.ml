@@ -250,7 +250,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         List.concat_map (fun (_, steps) -> collect_roles [] steps) branches in
       collect_roles (ch.txt :: branch_roles @ acc) rest
     | Ast.ProtoStop _ :: rest -> collect_roles acc rest
-    | Ast.ProtoMayCrash _ :: rest -> collect_roles acc rest
+    | Ast.ProtoMayCrash _ :: rest | Ast.ProtoRoleNeeds _ :: rest -> collect_roles acc rest
     | Ast.ProtoCrashOr (inner, crash, _) :: rest -> collect_roles acc (inner :: crash @ rest)
   in
   let rec register_protocols decls =

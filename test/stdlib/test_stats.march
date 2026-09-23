@@ -348,4 +348,14 @@ test "five_number_summary on 1..5 with Linear" do
   assert approx_eq(hi, 5.0)
 end
 
+test "five_number_summary on unsorted input matches quantile per method" do
+  let xs = [9.0, 1.0, 7.0, 3.0, 5.0, 2.0]
+  let (lo, q1, q2, q3, hi) = Stats.five_number_summary(xs, Weibull)
+  assert approx_eq(lo, 1.0)
+  assert approx_eq(q1, Stats.quantile(xs, 0.25, Weibull))
+  assert approx_eq(q2, Stats.quantile(xs, 0.5, Weibull))
+  assert approx_eq(q3, Stats.quantile(xs, 0.75, Weibull))
+  assert approx_eq(hi, 9.0)
+end
+
 end

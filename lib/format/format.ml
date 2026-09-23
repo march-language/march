@@ -1102,7 +1102,10 @@ and emit_decl ctx = function
         line ctx (Printf.sprintf "state { %s }" (String.concat ", " fstrs))
       end;
       nl ctx;
-      line ctx "init do";
+      (if actor.actor_init_params = [] then line ctx "init do"
+       else
+         line ctx (Printf.sprintf "init(%s) do"
+                     (String.concat ", " (List.map fmt_param actor.actor_init_params))));
       indented ctx (fun () -> emit_body ctx actor.actor_init);
       line ctx "end";
       List.iter (fun h ->
@@ -1111,7 +1114,13 @@ and emit_decl ctx = function
         line ctx (Printf.sprintf "on %s(%s) do" h.ah_msg.txt ps);
         indented ctx (fun () -> emit_body ctx h.ah_body);
         line ctx "end"
-      ) actor.actor_handlers
+      ) actor.actor_handlers;
+      Option.iter (fun h ->
+        nl ctx;
+        line ctx "on_stop do";
+        indented ctx (fun () -> emit_body ctx h.ah_body);
+        line ctx "end"
+      ) actor.actor_on_stop
     );
     line ctx "end"
 
@@ -1271,6 +1280,8 @@ and emit_proto_step ctx = function
     line ctx "stop"
   | ProtoMayCrash (roles, _) ->
     line ctx (Printf.sprintf "may crash %s" (String.concat ", " (List.map (fun r -> r.txt) roles)))
+  | ProtoRoleNeeds (role, caps, _) ->
+    line ctx (Printf.sprintf "role %s needs %s" role.txt (String.concat ", " (List.map (fun c -> c.txt) caps)))
   | ProtoCrashOr (inner, crash, _) ->
     (match inner with
      | ProtoMsg (s, r, t, label) ->

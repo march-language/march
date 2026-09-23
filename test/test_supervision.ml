@@ -16,10 +16,11 @@
 
 let dummy_actor_def = March_ast.Ast.{
   actor_state     = [];
+  actor_init_params = [];
   actor_init      = ELit (LitInt 0, March_ast.Ast.dummy_span);
   actor_handlers  = [];
   actor_supervise = None;
-  actor_mailbox = None; actor_remote = false;
+  actor_mailbox = None; actor_remote = false; actor_on_stop = None;
   actor_compat    = "full";
   actor_invariant = None;
 }
@@ -28,12 +29,14 @@ let mk_actor_inst name alive st = March_eval.Eval.{
   ai_name          = name;
   ai_def           = dummy_actor_def;
   ai_env_ref       = ref [];
+  ai_init_args     = [];
   ai_state         = st;
   ai_alive         = alive;
   ai_terminal_reason = March_eval.Eval.Normal;
   ai_monitors      = [];
   ai_mailbox       = Queue.create ();
   ai_draining    = false;
+  ai_self_stop   = None;
   ai_supervisor    = None;
   ai_restart_count = [];
   ai_epoch         = 0;
@@ -233,6 +236,38 @@ let test_one_for_one_basic () =
   Alcotest.(check bool) "new child has different pid" true (w2 <> w1);
   Alcotest.(check bool) "new child is alive" true (is_alive w2);
   Alcotest.(check bool) "old child is dead" false (is_alive w1)
+
+
+(** D24: a supervised child declared `Worker w(expr)` is restarted with the
+    SAME init argument it was first spawned with, not a re-evaluation and not
+    none.  The argument is computed from the supervisor's own init param. *)
+let test_restart_keeps_init_arg () =
+  let _env = eval_module {|mod T do
+    actor W do
+      state { base : Int, count : Int }
+      init(base : Int) { base: base, count: 0 }
+      on Inc() do { state with count: state.count + 1 } end
+    end
+    actor Sup do
+      state { w : Int, seed : Int }
+      init(seed : Int) { w: 0, seed: seed }
+      supervise do
+        strategy one_for_one
+        max_restarts 5 within 60
+        W w(seed * 10)
+      end
+    end
+    fn main() do spawn(Sup, 7) end
+  end|} in
+  let sup = match call_fn _env "main" [] with
+    | March_eval.Eval.VPid p -> p | _ -> -1 in
+  let w1 = sup_child_int sup "w" in
+  Alcotest.(check int) "child spawned with seed * 10" 70 (sup_child_int w1 "base");
+  March_eval.Eval.crash_actor w1 "test";
+  let w2 = sup_child_int sup "w" in
+  Alcotest.(check bool) "new child has different pid" true (w2 <> w1);
+  Alcotest.(check int) "restarted child keeps its init argument" 70 (sup_child_int w2 "base");
+  Alcotest.(check int) "restarted child state is otherwise fresh" 0 (sup_child_int w2 "count")
 
 (** one_for_one: sibling of crashed child keeps its pid. *)
 let test_one_for_one_sibling_unchanged () =
@@ -753,6 +788,7 @@ let () =
       Alcotest.test_case "rest_for_one downstream only"  `Quick (with_reset test_rest_for_one_downstream_only);
       Alcotest.test_case "max_restarts escalation"       `Quick (with_reset test_max_restarts_escalation);
       Alcotest.test_case "restart fresh state"           `Quick (with_reset test_restart_fresh_state);
+      Alcotest.test_case "restart keeps init arg (D24)"  `Quick (with_reset test_restart_keeps_init_arg);
     ]);
     ("phase3 epoch propagation", [
       Alcotest.test_case "epoch increments on restart"   `Quick (with_reset test_epoch_increments_on_restart);

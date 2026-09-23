@@ -13,6 +13,7 @@
 #include <setjmp.h>
 
 #include "march_deque.h"
+#include "march_reclaim.h"
 
 /* Portable AddressSanitizer detection (clang's __has_feature vs. GCC's
  * __SANITIZE_ADDRESS__ define) — guards the fiber-switch annotations below. */
@@ -156,7 +157,8 @@ typedef enum {
     PROC_RUNNABLE = 0, /* In exactly one run queue, waiting for a CPU turn  */
     PROC_RUNNING = 1,  /* Currently executing on one scheduler thread       */
     PROC_WAITING = 2,  /* Blocked on receive/I/O; not in any run queue      */
-    PROC_DEAD    = 3,  /* Finished; never re-enqueued (leak-don't-free)     */
+    PROC_DEAD    = 3,  /* Finished; never re-enqueued.  Reaped by sched_loop
+                        * and retired to march_reclaim (see march_proc). */
     PROC_PARKED  = 4   /* Transitioning to WAITING: status set but swapcontext
                         * not yet called.  Wakers must spin-wait on this state
                         * before enqueueing, to avoid resuming a process
@@ -195,6 +197,24 @@ typedef enum {
 struct march_scheduler;
 
 /* ── Green thread process descriptor ─────────────────────────────────── */
+/* LIFETIME.  A proc is freed: sched_loop's PROC_DEAD reap unlinks it from the
+ * registry, drains it, and retires it to march_reclaim, which frees it after a
+ * grace period.
+ *
+ *   A resolved `march_proc *` is valid ONLY inside the reader's critical
+ *   section (march_reclaim_enter/exit; implicit on a scheduler thread between
+ *   two dispatches), and never across a context switch.
+ *
+ * The exceptions are the proc's OWN green thread (march_sched_current()), and
+ * holders bounded by the proc's life: the run queues, the registry under
+ * g_registry_mu, a BLOCK target's waiter list, an fd-wait entry under
+ * g_fdwait_mu, a resolver request before its `woke` handshake.  Everything
+ * that can outlive a proc stores its PID and resolves it with
+ * march_sched_find inside a critical section: a Task's handle (word 2), a
+ * reply-ref (field 0), a timer entry.  The original corruption this guards
+ * against was a pointer that outlived the fact it named; read every new
+ * holder against the sentence above.
+ * specs/todos/2026-09-17-proc-struct-reclamation.md has the per-site survey. */
 typedef struct march_proc {
     int64_t                    pid;          /* Unique process ID (monotonic counter) */
     _Atomic march_proc_status  status;       /* Process lifecycle state (atomic)      */
@@ -238,6 +258,15 @@ typedef struct march_proc {
                                                  mbox_take_waiters_if_low / the PROC_DEAD
                                                  reap branch in sched_loop). calloc
                                                  zero-inits to NULL. */
+    /* 1 while THIS proc is linked in some target's mbox_send_waiters.  Set
+     * under the target's mbox_lock at registration; cleared (release) under
+     * that same lock by whoever unlinks it (the low-water drain, the reap's
+     * drain, or the sender itself), AFTER the last touch of send_wait_next.
+     * The parked sender reads it (acquire) after its park, inside a critical
+     * section, to learn without dereferencing the target whether it still
+     * has to unlink itself -- the target may have died and been retired
+     * while it was parked (see mbox_block_register_and_park). */
+    _Atomic int                send_wait_linked;
     struct march_proc         *send_wait_next;     /* Intrusive link for the above list on
                                                  THIS proc when IT is a parked sender
                                                  waiting on some OTHER proc's mailbox.
@@ -283,13 +312,13 @@ typedef struct march_proc {
                                               * Its own allocation, not embedded: it is 880 of
                                               * this struct's 1136 bytes (macOS/arm64), it is
                                               * meaningful only while the proc can be
-                                              * dispatched, and the struct itself is never freed
-                                              * (see the PROC_DEAD reap branch).  Allocated in
-                                              * sched_spawn_common, freed and NULLed at the reap
-                                              * beside the stack retire, under the same argument:
-                                              * a DEAD proc is never dispatched again, and the
-                                              * stale cross-thread readers of a dead proc touch
-                                              * status/pid/mailbox, never this.  NULL = dead. */
+                                              * dispatched.  Allocated in sched_spawn_common,
+                                              * freed and NULLed at the reap beside the stack
+                                              * retire -- at once, not after the grace period
+                                              * the struct itself waits for: a DEAD proc is
+                                              * never dispatched again, and a reader still in
+                                              * its critical section touches status/pid/mailbox,
+                                              * never this.  NULL = dead. */
     void                     (*fn)(void *);  /* Entry function */
     void                      *arg;          /* Argument passed to fn */
     struct march_proc         *next;         /* Intrusive link for the global run queue (mutex FIFO);
@@ -544,6 +573,14 @@ int64_t      march_sched_total_spawned(void);
  * it outright; MARCH_SEND_DROPPED is only ever produced once a caller has
  * opted in via march_sched_set_mbox_limit. */
 int          march_sched_send(march_proc *target, void *msg);
+/* Every entry point below that takes a `march_proc *` other than the caller's
+ * own (send, send_control, wake, request_stop, set_mbox_limit, mbox_count)
+ * requires the caller to hold it under the rule on march_proc: resolved in a
+ * critical section the caller is still in.  march_sched_send may WAIT (a
+ * MARCH_MBOX_BLOCK mailbox at capacity); it then suspends the caller's
+ * critical section around the wait and re-resolves [target] by pid
+ * afterwards, so after it returns the caller must treat every pointer it
+ * resolved before the call as stale. */
 
 /* Enqueue a reserved runtime control value. The message bypasses every user
  * mailbox capacity/overflow policy and is stored outside the user FIFO, so a
@@ -585,13 +622,17 @@ int64_t      march_sched_mbox_count(march_proc *p);
  * Reserved slots bumped from outside march_scheduler.c (march_runtime.c and
  * later scheduler features) — exposed as a raw array so new counters don't
  * need new symbols, just a new reserved index. */
-extern _Atomic int64_t march_stat_counters[8];
+extern _Atomic int64_t march_stat_counters[16];
 #define MARCH_STAT_STACK_FAIL       3
 #define MARCH_STAT_MSGS_DROPPED     4
 #define MARCH_STAT_STACKS_RECYCLED  5
 /* Index 6 of march_sched_stat is pending timers, read from the timer heap,
  * not from this array. */
 #define MARCH_STAT_CTX_RELEASED     7   /* execution contexts freed at proc death */
+#define MARCH_STAT_PROCS_FREED      8   /* proc structs freed after their grace period */
+/* Index 9 of march_sched_stat is proc structs retired and still waiting for
+ * their grace period: retired (reap count) minus freed. */
+#define MARCH_STAT_PROCS_RETIRED    9
 
 /* Observability: a single raw stat read by index. See the index contract in
  * march_stat_counters' comment above and stdlib/scheduler.march's `stat`
@@ -753,8 +794,17 @@ int march_errno_now(void);
  * scheduler thread that is running something else. */
 void march_errno_set(int e);
 
-/* Return the process with the given PID, or NULL if not found.
- * O(1) array lookup by PID. */
+/* Return the process with the given PID, or NULL if it has been reaped (or
+ * was never spawned).  O(1) array lookup by PID, lock-free.
+ *
+ * The CALLER MUST BE INSIDE A CRITICAL SECTION (march_reclaim_enter, or any
+ * scheduler thread between dispatches), and the result is valid only until
+ * that critical section ends: this is the resolver for every holder that
+ * stores a pid because it can outlive the proc (see march_proc's LIFETIME
+ * comment).  A non-NULL result cannot be freed before the critical section
+ * ends, but it may already be DEAD (its reap can race the lookup, and a
+ * reader holding a pre-growth registry snapshot still sees a slot the reaper
+ * cleared in the new array): every caller treats DEAD as "gone". */
 march_proc  *march_sched_find(int64_t pid);
 
 /* ── send_after / cancel_timer (specs/progress/2026-08-12-language-level-
@@ -791,6 +841,10 @@ march_proc  *march_sched_find(int64_t pid);
  * march_sched_wait_idle's body for the corresponding kind check. */
 void march_sched_send_after(march_proc *target, void *msg, void *token,
                             int64_t deadline_ms);
+/* The entry stores [target]'s PID, never the pointer (a timer outlives the
+ * proc it names), and resolves it at fire time.  [target] itself follows the
+ * usual rule: the caller resolved it inside a critical section it still
+ * holds, or NULL. */
 
 /* march_timer_cancel (the March-facing cancel_timer builtin) is declared in
  * march_runtime.h, not here -- it needs march_decrc to release the token's

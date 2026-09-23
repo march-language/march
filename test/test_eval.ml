@@ -86,6 +86,31 @@ let test_eval_let_binding () =
   Alcotest.(check int) "double(5) = 10" 10
     (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
 
+
+(* Parameterised actor `init` (D24): the arguments given to `spawn(A, …)`
+   reach the state, read back through a handler. *)
+let test_eval_spawn_init_args () =
+  let env = eval_module {|mod Test do
+    actor Counter do
+      state { value : Int, label : String }
+      init(start : Int, label : String) { value: start, label: label }
+      on Inc(n : Int) do { state with value: state.value + n } end
+      on Fold() do { state with value: state.value * 100 + string_length(state.label) } end
+    end
+    fn main() do
+      let c = spawn(Counter, 41, "ab")
+      send(c, Inc(1))
+      send(c, Fold())
+      run_until_idle()
+      match get_actor_field(c, "value") do
+      Some(v) -> v
+      None -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "init(41, \"ab\") then Inc(1), Fold() = 4202" 4202
+    (vint (call_fn env "main" []))
+
 let test_eval_closure () =
   let env = eval_module {|mod Test do
     fn make_adder(n) do fn x -> x + n end
@@ -5413,6 +5438,7 @@ let eval_suites =
           Alcotest.test_case "let* repl Err binds nothing" `Quick test_letstar_repl_err_binds_nothing;
           Alcotest.test_case "let* repl [] binds nothing" `Quick test_letstar_repl_empty_list_binds_nothing;
           Alcotest.test_case "closure"             `Quick test_eval_closure;
+          Alcotest.test_case "spawn with init args (D24)" `Quick test_eval_spawn_init_args;
           Alcotest.test_case "unary minus"         `Quick test_eval_unary_minus;
           Alcotest.test_case "list literal"        `Quick test_eval_list_literal;
           Alcotest.test_case "negative pattern"    `Quick test_eval_negative_pattern;

@@ -653,12 +653,17 @@ let restore_actors (snap : actor_state_snapshot) : unit =
         let inst = { ai_name     = s.ais_name;
                      ai_def      = def;
                      ai_env_ref  = env_r;
+                     (* A snapshot does not carry init arguments (D24): a
+                        restored instance restarts under its supervisor with
+                        none, which is the pre-D24 behaviour for every actor
+                        whose init takes none. *)
+                     ai_init_args = [];
                      ai_state    = s.ais_state;
                      ai_alive    = s.ais_alive;
                      ai_terminal_reason = s.ais_terminal_reason;
                      ai_monitors = [];
                      ai_mailbox  = Queue.create ();
-                     ai_draining = false;
+                     ai_draining = false; ai_self_stop = None;
                      ai_supervisor = None;
                      ai_restart_count = [];
                      ai_epoch = 0;
@@ -2143,21 +2148,33 @@ and eval_expr_inner (env : env) (e : expr) : value =
     VCon (a, arg_vals)
 
   | ESpawn (actor_expr, _) ->
-    let actor_name = match actor_expr with
-      | EVar n           -> n.txt
-      | ECon (n, [], _)  -> n.txt
+    (* spawn(A, a, b): the `init` arguments (D24) ride as the name ctor's
+       args (see ast.ml) and are evaluated here, at the spawn site. *)
+    let actor_name, init_arg_exprs = match actor_expr with
+      | EVar n            -> (n.txt, [])
+      | ECon (n, args, _) -> (n.txt, args)
       | _ -> eval_error "spawn: expected actor name (got complex expression)"
     in
+    let init_args = List.map (eval_expr env) init_arg_exprs in
     (match Hashtbl.find_opt actor_defs_tbl actor_name with
      | None -> eval_error "spawn: unknown actor '%s'" actor_name
      | Some (def, env_ref) ->
        let pid = !next_pid in
        next_pid := pid + 1;
+       (* The actor's own `init` params, in scope in its init expression and
+          in its supervise block's child `init` arguments. *)
+       let init_names =
+         List.map (fun (p : param) -> p.param_name.txt) def.actor_init_params in
+       if List.length init_names <> List.length init_args then
+         eval_error "actor %s: its init takes %d argument%s, but spawn supplied %d"
+           actor_name (List.length init_names)
+           (if List.length init_names = 1 then "" else "s") (List.length init_args);
+       let init_env = List.combine init_names init_args @ !env_ref in
        (* Phase 2: if this actor is a supervisor, spawn children first and
           inject their pids into the init state. *)
        let init_state = match def.actor_supervise with
          | None ->
-           eval_expr !env_ref def.actor_init
+           eval_expr init_env def.actor_init
          | Some sup_cfg ->
            (* Spawn each child and collect (field_name -> pid) *)
            let child_pids = List.map (fun sf ->
@@ -2168,16 +2185,21 @@ and eval_expr_inner (env : env) (e : expr) : value =
              match Hashtbl.find_opt actor_defs_tbl child_actor_name with
              | None -> eval_error "spawn supervisor: unknown child actor '%s'" child_actor_name
              | Some (child_def, child_env_ref) ->
-               let child_init_state = eval_expr !child_env_ref child_def.actor_init in
+               (* `Child name(args)`: the child's init arguments (D24),
+                  evaluated once here and kept on the instance so a restart
+                  re-supplies them. *)
+               let child_args = List.map (eval_expr init_env) sf.sf_init_args in
+               let child_init_state =
+                 eval_actor_init_state child_env_ref child_def child_actor_name child_args in
                let child_pid = !next_pid in
                next_pid := child_pid + 1;
                let child_inst = {
                  ai_name = child_actor_name; ai_def = child_def;
-                 ai_env_ref = child_env_ref;
+                 ai_env_ref = child_env_ref; ai_init_args = child_args;
                  ai_state = child_init_state; ai_alive = true;
                  ai_terminal_reason = Normal;
                  ai_monitors = []; ai_mailbox = Queue.create ();
-                 ai_draining = false;
+                 ai_draining = false; ai_self_stop = None;
                  ai_supervisor = Some pid;
                  ai_restart_count = []; ai_epoch = 0;
                  ai_resources = [];
@@ -2187,7 +2209,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
                (sf.sf_name.txt, child_pid)
            ) sup_cfg.sc_fields in
            (* Build init state: start from declared init, then overlay child pids *)
-           let base_state = eval_expr !env_ref def.actor_init in
+           let base_state = eval_expr init_env def.actor_init in
            (match base_state with
             | VRecord fields ->
               (* Replace fields that correspond to child actors with their pids *)
@@ -2208,10 +2230,11 @@ and eval_expr_inner (env : env) (e : expr) : value =
               base_state)
        in
        let inst = { ai_name     = actor_name; ai_def = def; ai_env_ref = env_ref;
+                    ai_init_args = init_args;
                     ai_state    = init_state; ai_alive = true;
                     ai_terminal_reason = Normal;
                     ai_monitors = []; ai_mailbox = Queue.create ();
-                    ai_draining = false;
+                    ai_draining = false; ai_self_stop = None;
                     ai_supervisor = None; ai_restart_count = [];
                     ai_epoch = 0; ai_resources = [];
                     ai_linear_values = [];
@@ -2659,7 +2682,13 @@ let run_scheduler () =
                 with
                 | new_state ->
                   inst.ai_state <- new_state;
-                  changed := true   (* mark progress only on success *)
+                  changed := true;  (* mark progress only on success *)
+                  (* A handler that stopped its own actor: finish the stop
+                     now that the state it returned is installed. *)
+                  if inst.ai_self_stop <> None then begin
+                    current_pid := prev_pid;
+                    Eval_runtime.finish_self_stop pid
+                  end
                 | exception BlockedOnReceive ->
                   (* The handler called receive() but the mailbox was empty at
                      that point.  Put the triggering message back at the front
@@ -3234,13 +3263,17 @@ let spawn_from_spec (spec : value) : unit =
             | Some (def, env_ref) ->
               let pid = !next_pid in
               next_pid := pid + 1;
-              let init_state = eval_expr !env_ref def.actor_init in
+              (* A `Supervisor.spec` child names its actor by string and
+                 carries no init arguments: an actor whose init takes some
+                 is reported by [eval_actor_init_state]'s arity check. *)
+              let init_state = eval_actor_init_state env_ref def actor_name [] in
               let inst = {
                 ai_name = actor_name; ai_def = def; ai_env_ref = env_ref;
+                ai_init_args = [];
                 ai_state = init_state; ai_alive = true;
                 ai_terminal_reason = Normal;
                 ai_monitors = []; ai_mailbox = Queue.create ();
-                ai_draining = false;
+                ai_draining = false; ai_self_stop = None;
                 ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
                 ai_resources = []; ai_linear_values = [];
                 ai_mbox_limit = 0; ai_mbox_policy = 0 } in
@@ -3659,7 +3692,7 @@ let rec eval_decl (env : env) (d : decl) : env =
             collect_roles [] steps) branches in
         collect_roles (ch.txt :: branch_roles @ acc) rest
       | ProtoStop _ :: rest -> collect_roles acc rest
-      | ProtoMayCrash _ :: rest -> collect_roles acc rest
+      | ProtoMayCrash _ :: rest | ProtoRoleNeeds _ :: rest -> collect_roles acc rest
       | ProtoCrashOr (inner, crash, _) :: rest -> collect_roles acc (inner :: crash @ rest)
     in
     let roles = List.sort_uniq String.compare

@@ -13,10 +13,11 @@ mod ClusterMuxA do
   needs IO.NetListen
   needs IO.Spawn
   needs IO.Clock
+  needs ClusterNode.Live
 
   pfn total() : Int do 2000 end
 
-  pfn wait_name(h : ClusterNode.ClusterHandle, name : String, left : Int) : GlobalPid.Pid do
+  pfn wait_name(h : Cap(ClusterNode.Live), name : String, left : Int) : GlobalPid.Pid do
     match ClusterNode.lookup(h, name) do
       Some(p) -> p
       None ->
@@ -45,7 +46,7 @@ mod ClusterMuxA do
 
   pfn payload(k : Int) : List(Int) do Bytes.to_list(Bytes.from_string(int_to_string(k))) end
 
-  pfn stream(h : ClusterNode.ClusterHandle, sx : GlobalPid.Pid, sy : GlobalPid.Pid, k : Int, refused : Int) : Int do
+  pfn stream(h : Cap(ClusterNode.Live), sx : GlobalPid.Pid, sy : GlobalPid.Pid, k : Int, refused : Int) : Int do
     if k > total() do refused else
       let pol = NodeQueue.BlockSender(10000)
       let a = ClusterNode.send_msg(h, sx, "Mux.N", payload(k), pol)
@@ -64,9 +65,9 @@ mod ClusterMuxA do
     end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main(c : Cap(IO)) do
     let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "mux-secret", 1)
-    match ClusterNode.start(cfg) do
+    match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         let flags = Vault.new("scenario_flags")

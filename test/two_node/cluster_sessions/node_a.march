@@ -13,6 +13,7 @@ mod ClusterSessionsA do
   needs IO.Spawn
   needs IO.Clock
   needs Session.Live
+  needs ClusterNode.Live
 
   @[endpoints]
   protocol Echo do
@@ -25,14 +26,14 @@ mod ClusterSessionsA do
   -- below). Taken after the sessions, it raced node-b's ClusterNode.stop and
   -- read 0 under the sanitizer's slowdown.
   pfn role_a(s : Cap(Session.Live), st : Echo_A.S_send_Msg_A_B_1, n : Int, out : Vault(Int), key : String,
-             h : ClusterNode.ClusterHandle) : Echo_A.Yield do
+             h : Cap(ClusterNode.Live)) : Echo_A.Yield do
     Echo_A.recv_Msg_B_A_1(s, Echo_A.send_Msg_A_B_1(s, st, n), fn (m, st1) ->
       Vault.set(out, key, m)
       Vault.set(out, "links_" ++ key, ClusterNode.link_count(h))
       Echo_A.close(s, st1))
   end
 
-  pfn session(c : Cap(IO), h : ClusterNode.ClusterHandle, sid : String, n : Int, out : Vault(Int)) : Int do
+  pfn session(c : Cap(IO), h : Cap(ClusterNode.Live), sid : String, n : Int, out : Vault(Int)) : Int do
     match Echo_Run.cluster_A(c, h, sid, fn (s, st) -> role_a(s, st, n, out, sid, h)) do
       Ok(_) -> 1
       Err(e) ->
@@ -43,7 +44,7 @@ mod ClusterSessionsA do
 
   fn main(c : Cap(IO)) do
     let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "echo-secret", 1)
-    match ClusterNode.start(cfg) do
+    match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         println("node-a: up")

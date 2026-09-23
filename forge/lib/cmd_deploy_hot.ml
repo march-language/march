@@ -1234,6 +1234,9 @@ let deploy ?(output="") ?(so="") ?(grant_caps=([] : string list)) ?(no_cap_gate=
   match Project.load () with
   | Error m -> Error m
   | Ok proj ->
+    match Topology.gate ~proj () with
+    | Error m -> Error m
+    | Ok () ->
     match proj.Project.hot_reload with
     | None -> Error "no [hot-reload] section in forge.toml — add ssh_host, socket, public_key"
     | Some hr ->
@@ -1395,6 +1398,10 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
   match Project.load () with
   | Error m -> Error m
   | Ok proj ->
+    (* The topology overlay of the same name applies when one exists. *)
+    match Topology.gate ?env:(if env = "" then None else Some env) ~proj () with
+    | Error m -> Error m
+    | Ok () ->
     match proj.Project.hot_reload with
     | None -> Error "no [hot-reload] section in forge.toml — add ssh_host, socket, public_key"
     | Some hr ->

@@ -2837,8 +2837,23 @@ let rec infer_expr env (e : Ast.expr) : ty =
          `send(dead_pid, M)` decoded as Some while the interpreter said None. *)
       TCon ("Option", [t_unit])
 
-    | Ast.ESpawn (actor, _) ->
+    | Ast.ESpawn (actor, sp) ->
+      (* spawn(A, a, b) carries the `init` arguments as the name ctor's args
+         (see ast.ml).  Peel them off before inferring the bare name: the
+         actor's nullary ctor registration would otherwise report them as a
+         constructor-arity mismatch instead of against `init`'s signature. *)
+      let actor, init_args = match actor with
+        | Ast.ECon (n, (_ :: _ as args), csp) -> (Ast.ECon (n, [], csp), args)
+        | other -> (other, [])
+      in
       ignore (infer_expr env actor);
+      (match actor with
+       | Ast.ECon (n, [], _) | Ast.EVar n ->
+         check_spawn_args env ~site_span:sp
+           ~spelling:(Printf.sprintf "`spawn(%s%s)`" n.txt
+                        (if init_args = [] then "" else ", …"))
+           n.txt init_args
+       | _ -> List.iter (fun a -> ignore (infer_expr env a)) init_args);
       (* Both backends dispatch `spawn` by the actor's *name*, resolved at
          compile time (it selects a statically generated `<Actor>_spawn`
          function).  There is no runtime actor-descriptor value, so the argument
@@ -3808,7 +3823,48 @@ and infer_block env exprs =
     ignore (infer_expr env e);
     infer_block env rest
 
-(** Bind lambda parameters into the environment, returning (types, env). *)
+(** Check the `init` arguments supplied for actor [actor_name] — by
+    `spawn(A, args)` or by a supervise block's `A field(args)` — against the
+    signature the [DActor] arm recorded (D24).  An unknown actor is not
+    reported here: the name itself is inferred by the caller and gets the
+    unknown-constructor diagnostic there. *)
+and check_spawn_args env ~site_span ~spelling (actor_name : string)
+    (args : Ast.expr list) : unit =
+  match Hashtbl.find_opt env.actor_init_sigs actor_name with
+  | None -> List.iter (fun a -> ignore (infer_expr env a)) args
+  | Some sig_ ->
+    let n_sig = List.length sig_ and n_args = List.length args in
+    if n_sig <> n_args then begin
+      List.iter (fun a -> ignore (infer_expr env a)) args;
+      let show_sig =
+        if sig_ = [] then "init { … }"
+        else
+          Printf.sprintf "init(%s) { … }"
+            (String.concat ", "
+               (List.map (fun (p, t) -> Printf.sprintf "%s : %s" p (pp_ty (repr t))) sig_))
+      in
+      let plural n = if n = 1 then "" else "s" in
+      Err.error env.errors ~span:site_span
+        (if sig_ = [] then
+           Printf.sprintf
+             "actor `%s` declares no `init` parameters, but %s supplies %d argument%s.\n\
+              Its init is `%s`; to take a value at spawn time, declare the \
+              parameters: `init(config : Config) { … }`."
+             actor_name spelling n_args (plural n_args) show_sig
+         else
+           Printf.sprintf
+             "actor `%s`'s init takes %d argument%s, but %s supplies %d.\n\
+              Its signature is `%s`."
+             actor_name n_sig (plural n_sig) spelling n_args show_sig)
+    end else
+      List.iter2 (fun a (p, t) ->
+          check_expr env a t
+            ~reason:(Some (RBuiltin
+                             (Printf.sprintf "the `init` parameter `%s` of actor `%s`"
+                                p actor_name))))
+        args sig_
+
+(* Bind lambda parameters into the environment, returning (types, env). *)
 and bind_lam_params env params =
   List.fold_right
     (fun p (tys, env) ->
@@ -3961,6 +4017,112 @@ let mark_trusted_linear_vars env (def : Ast.fn_def) ~fn_span ~fn_tvars vars =
                   v v def.fn_name.txt (pp_ty t'))))
       vars
 
+(** How a body failed to leave a signature type variable generic.
+    [Tyvar_concrete t]: the body fixed it to the non-variable type [t].
+    [Tyvar_aliased other]: the body unified it with [other], an
+    earlier-written type variable of the same signature. *)
+type tyvar_fixing =
+  | Tyvar_concrete of ty
+  | Tyvar_aliased of string
+
+(** The first span at which the signature of [def] mentions type variable
+    [v], searching the parameter annotations, the return annotation, and
+    the bounds in source order. *)
+let signature_tyvar_span (def : Ast.fn_def) v =
+  let rec find (t : Ast.ty) = match t with
+    | Ast.TyVar n when n.txt = v -> Some n.span
+    | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> None
+    | Ast.TyCon (_, ts) | Ast.TyTuple ts -> List.find_map find ts
+    | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) ->
+      (match find a with Some s -> Some s | None -> find b)
+    | Ast.TyRecord fs -> List.find_map (fun (_, t) -> find t) fs
+    | Ast.TyLinear (_, t) | Ast.TyRefine (t, _, _) -> find t
+  in
+  let params = match def.fn_clauses with
+    | c :: _ -> List.filter_map (function
+        | Ast.FPNamed p | Ast.FPDefault (p, _) -> p.param_ty
+        | Ast.FPPat _ -> None) c.Ast.fc_params
+    | [] -> [] in
+  let bounds = List.filter_map (fun ((n : Ast.name), _) ->
+      if n.txt = v then Some n.span else None) def.fn_bounds in
+  match List.find_map find (params @ Option.to_list def.fn_ret_ty) with
+  | Some s -> Some s
+  | None -> (match bounds with s :: _ -> Some s | [] -> None)
+
+(** The signature type variables of [def] ([fn_tvars], as [check_fn] built
+    them) that its now-checked body did not leave generic, in the order the
+    signature writes them.  Only variables written in the signature are
+    considered: a variable with no source occurrence there (none today, but
+    a desugar-synthesised annotation would be one) is skipped. *)
+let annotated_tyvar_fixings (def : Ast.fn_def) fn_tvars =
+  let seen = Hashtbl.create 8 in
+  let written = List.filter_map (fun (v, t) ->
+      if Hashtbl.mem seen v then None
+      else begin
+        Hashtbl.replace seen v ();
+        match signature_tyvar_span def v with
+        | Some sp -> Some (v, sp, t)
+        | None -> None
+      end) fn_tvars in
+  let ordered = List.sort (fun (_, (a : Ast.span), _) (_, (b : Ast.span), _) ->
+      compare (a.start_line, a.start_col) (b.start_line, b.start_col)) written in
+  let ids = Hashtbl.create 8 in
+  List.filter_map (fun (v, sp, t) ->
+      match repr t with
+      | TError -> None
+      | TVar { contents = Unbound (id, _) } ->
+        (match Hashtbl.find_opt ids id with
+         | Some other -> Some (v, sp, Tyvar_aliased other)
+         | None -> Hashtbl.replace ids id v; None)
+      | t' -> Some (v, sp, Tyvar_concrete t'))
+    ordered
+
+let rec ty_mentions_var t = match repr t with
+  | TVar _ -> true
+  | TCon (_, ts) | TTuple ts -> List.exists ty_mentions_var ts
+  | TArrow (a, b) | TNatOp (_, a, b) -> ty_mentions_var a || ty_mentions_var b
+  | TRecord fs -> List.exists (fun (_, t) -> ty_mentions_var t) fs
+  | TLin (_, t) | TRefine (t, _, _) -> ty_mentions_var t
+  | TError | TNat _ | TChan _ -> false
+
+(** Warn, at its first mention in the signature, about each type variable
+    of [def] that its body did not leave generic
+    (specs/todos/2026-09-18-typecheck-annotated-tyvars-flexible.md, option
+    (b)).  Both a variable fixed to a concrete type and one made equal to
+    another of the signature's variables are reported: each is a signature
+    that promises callers a freedom the body does not give them, and each
+    would be an error were annotation variables rigid. *)
+let warn_annotated_tyvar_fixings env (def : Ast.fn_def) fn_tvars =
+  List.iter (fun (v, span, fixing) ->
+      let message, note = match fixing with
+        | Tyvar_concrete t ->
+          let shown = pp_ty t in
+          Printf.sprintf
+            "The type variable `%s` in `%s`'s signature is not generic: the \
+             body fixes it to `%s`, so every caller gets `%s` in its place."
+            v def.fn_name.txt shown shown,
+          if ty_mentions_var t then
+            Printf.sprintf
+              "hint: write the type the body needs in place of `%s`, or make \
+               the body generic in `%s`." v v
+          else
+            Printf.sprintf
+              "hint: write `%s` in place of `%s` if that is what you mean, or \
+               make the body generic in `%s`." shown v v
+        | Tyvar_aliased other ->
+          Printf.sprintf
+            "The type variables `%s` and `%s` in `%s`'s signature are not \
+             independent: the body makes `%s` the same type as `%s`."
+            other v def.fn_name.txt v other,
+          Printf.sprintf
+            "hint: write `%s` in place of `%s` if they are meant to be the \
+             same type, or make the body generic in each." other v
+      in
+      Err.report env.errors
+        { Err.severity = Err.Warning; span; message; labels = [];
+          notes = [ note ]; code = Some "annotated_tyvar_fixed"; fix = None })
+    (annotated_tyvar_fixings def fn_tvars)
+
 (** Check a function definition.
 
     Strategy:
@@ -4049,6 +4211,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
          in `fn foo(x : a, y : a) : a when Eq(a)` maps to the same
          unification variable everywhere. *)
       let fn_tvars = ref [] in
+      let diag_mark = Err.mark env.errors in
 
       (* Pre-register explicit bound type variables from fn_bounds and build
          bound constraints.  Bounds like [s : ConnState] pre-register `s` in
@@ -4292,7 +4455,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
              type — that is the same erasure as an unannotated `let`, moved
              one call frame out.  Annotating the return (`: Vault(v)`) is the
              deliberate opt-out and is what the handle factories
-             (Vault.new/open/whereis, Config's table getters) use.  See
+             (Vault.new/open/whereis) use.  See
              [demote_vault_handle_vars]. *)
           demote_vault_handle_vars t;
           t
@@ -4356,6 +4519,14 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       Hashtbl.replace env.type_map def.fn_name.span (repr fn_ty);
       (* Unify self_ty so recursive calls get the correct type *)
       unify env' ~span:fn_span self_ty fn_ty;
+
+      (* A signature type variable the body fixed is a signature that claims
+         more genericity than the function has; say so at the definition,
+         rather than leaving the first caller at another type to report a
+         mismatch at the call.  Skipped when the body reported an error: its
+         unifications are then unreliable evidence of what the author meant. *)
+      if not (Err.error_since env.errors diag_mark) then
+        warn_annotated_tyvar_fixings env def !fn_tvars;
 
       (* Generalize; attach bound constraints and any when-clause class constraints *)
       let all_constraints = bound_constraints @ class_constraints in
@@ -4984,6 +5155,88 @@ include Typecheck_modcaps
    The generator (desugar) has already run when this is checked; it projects
    an ill-formed protocol into something, and this reports why the program is
    still refused. *)
+(* `role R needs IO.X, ...` (distributed-deploys plan, section 2 and II.2):
+   the role's capability GRANT.  Checked here for what the grammar leaves
+   open, and recorded into [env.role_grants] for [check_role_grants] and the
+   authority report:
+   - it is a top-level step and comes BEFORE the first message step, which
+     is what lets [Desugar_endpoints.fingerprint_of] leave it out: a grant is
+     a claim about the role's code, not about the wire, and two nodes with
+     different grants must still talk;
+   - it names a role of the protocol, once;
+   - every path is a known capability, with the same did-you-mean as a
+     module's `needs` (Check 0, [Typecheck_caps.check_module_needs]): a typo
+     here would otherwise surface as a body "reaching" a capability that its
+     grant spells almost right. *)
+let check_role_needs env ~proto (pdef : Ast.protocol_def) : unit =
+  let err ~span msg = Err.error env.errors ~span (Printf.sprintf "Protocol `%s`: %s" proto msg) in
+  let rec roles_in (steps : Ast.protocol_step list) : string list =
+    List.concat_map
+      (function
+        | Ast.ProtoMsg (s, r, _, _) -> [ s.Ast.txt; r.Ast.txt ]
+        | Ast.ProtoLoop inner -> roles_in inner
+        | Ast.ProtoChoice (c, brs) -> c.Ast.txt :: List.concat_map (fun (_, arm) -> roles_in arm) brs
+        | Ast.ProtoStop _ | Ast.ProtoMayCrash _ | Ast.ProtoRoleNeeds _ -> []
+        | Ast.ProtoCrashOr (inner, crash, _) -> roles_in (inner :: crash))
+      steps
+  in
+  let all_roles = List.sort_uniq String.compare (roles_in pdef.Ast.proto_steps) in
+  let rec nested = function
+    | [] -> ()
+    | Ast.ProtoRoleNeeds (_, _, sp) :: rest ->
+      err ~span:sp "`role ... needs` must be a top-level step of the protocol, before its first message.";
+      nested rest
+    | Ast.ProtoLoop inner :: rest -> nested inner; nested rest
+    | Ast.ProtoChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> nested arm) brs; nested rest
+    | Ast.ProtoCrashOr (_, crash, _) :: rest -> nested crash; nested rest
+    | _ :: rest -> nested rest
+  in
+  let seen = Hashtbl.create 4 in
+  let rec top ~after_message = function
+    | [] -> ()
+    | Ast.ProtoRoleNeeds (r, caps, sp) :: rest ->
+      let ok = ref true in
+      if after_message then begin
+        ok := false;
+        err ~span:sp
+          (Printf.sprintf
+             "`role %s needs ...` must come before the protocol's first message step. \
+              A grant is about the role's code, not the conversation, so it is not part \
+              of the protocol's fingerprint; keeping it at the top keeps that visible."
+             r.Ast.txt)
+      end;
+      if not (List.mem r.Ast.txt all_roles) then begin
+        ok := false;
+        err ~span:r.Ast.span (Printf.sprintf "`role %s needs ...` names a role that is not in the protocol." r.Ast.txt)
+      end;
+      if Hashtbl.mem seen r.Ast.txt then begin
+        ok := false;
+        err ~span:r.Ast.span
+          (Printf.sprintf "`role %s needs ...` is declared twice. List every capability on one line." r.Ast.txt)
+      end;
+      Hashtbl.replace seen r.Ast.txt ();
+      List.iter
+        (fun (c : Ast.name) ->
+           match March_caps.Cap_lattice.suggest_cap c.txt with
+           | None -> ()
+           | Some known ->
+             ok := false;
+             Err.error_with_fix env.errors ~span:c.span
+               ~fix:(Err.FReplace { span = c.span; text = known })
+               (Printf.sprintf "`%s` is not a known capability.\nhelp: did you mean `%s`?" c.txt known))
+        caps;
+      if !ok then
+        Hashtbl.replace env.role_grants (proto, r.Ast.txt)
+          (List.map (fun (c : Ast.name) -> c.txt) caps, sp);
+      top ~after_message rest
+    | Ast.ProtoMayCrash _ :: rest -> top ~after_message rest
+    | Ast.ProtoLoop inner :: rest -> nested inner; top ~after_message:true rest
+    | Ast.ProtoChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> nested arm) brs; top ~after_message:true rest
+    | Ast.ProtoCrashOr (_, crash, _) :: rest -> nested crash; top ~after_message:true rest
+    | (Ast.ProtoMsg _ | Ast.ProtoStop _) :: rest -> top ~after_message:true rest
+  in
+  top ~after_message:false pdef.Ast.proto_steps
+
 let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
   let err ~span msg = Err.error env.errors ~span (Printf.sprintf "Protocol `%s`: %s" proto msg) in
   let rec roles_in (steps : Ast.protocol_step list) : string list =
@@ -4992,7 +5245,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
         | Ast.ProtoMsg (s, r, _, _) -> [ s.Ast.txt; r.Ast.txt ]
         | Ast.ProtoLoop inner -> roles_in inner
         | Ast.ProtoChoice (c, brs) -> c.Ast.txt :: List.concat_map (fun (_, arm) -> roles_in arm) brs
-        | Ast.ProtoStop _ | Ast.ProtoMayCrash _ -> []
+        | Ast.ProtoStop _ | Ast.ProtoMayCrash _ | Ast.ProtoRoleNeeds _ -> []
         | Ast.ProtoCrashOr (inner, crash, _) -> roles_in (inner :: crash))
       steps
   in
@@ -5047,7 +5300,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
     | Ast.ProtoLoop inner :: rest ->
       (match first_interaction p inner with Some x -> Some x | None -> first_interaction p rest)
     | Ast.ProtoStop _ :: _ -> None
-    | Ast.ProtoMayCrash _ :: rest -> first_interaction p rest
+    | Ast.ProtoMayCrash _ :: rest | Ast.ProtoRoleNeeds _ :: rest -> first_interaction p rest
     | Ast.ProtoChoice (c, brs) :: rest ->
       if c.Ast.txt = p then Some (`Choose, None)
       else
@@ -5104,7 +5357,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
   let rec walk ~tail ~(dead : string list) (steps : Ast.protocol_step list) =
     match steps with
     | [] -> ()
-    | Ast.ProtoMayCrash _ :: rest -> walk ~tail ~dead rest
+    | Ast.ProtoMayCrash _ :: rest | Ast.ProtoRoleNeeds _ :: rest -> walk ~tail ~dead rest
     | Ast.ProtoStop _ :: rest -> walk ~tail ~dead rest
     | Ast.ProtoLoop inner :: rest -> walk ~tail:inner ~dead inner; walk ~tail ~dead rest
     | Ast.ProtoMsg (s, r, _, _) :: rest ->
@@ -5470,12 +5723,47 @@ let rec check_decl env (d : Ast.decl) : env =
                    ci_is_actor_msg = true } in
         { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
       ) env_with_actor_ctor actor.actor_handlers in
+    (* `init(env : T, …)` (D24): the parameters are in scope in the init
+       expression (and in a supervise block's child `init` arguments, below),
+       and their types are recorded for `spawn(A, …)` to check against.  They
+       are bound exactly as a handler's parameters are ([bind_lam_param]), so
+       a linear parameter is tracked the same way. *)
+    let init_tvars = ref [] in
+    let init_sig =
+      List.map (fun (p : Ast.param) ->
+          let t = match p.param_ty with
+            | Some ann -> surface_ty env_with_ctors ~tvars:init_tvars ann
+            | None -> fresh_var env.level   (* the grammar requires one *)
+          in
+          (p.param_name.txt, t)) actor.actor_init_params
+    in
+    Hashtbl.replace env.actor_init_sigs name.txt init_sig;
+    let init_env =
+      List.fold_left2
+        (fun e (p : Ast.param) (_, t) -> bind_lam_param e p.param_name.span p (Some t))
+        env_with_ctors actor.actor_init_params init_sig
+    in
     (* Check init expression — must return the state record type.  Neither
        the init expr nor any handler body below is checked via [check_fn], so
        there is no enclosing function — see [with_no_caller]. *)
-    with_no_caller env_with_ctors (fun () ->
-      check_expr env_with_ctors actor.actor_init state_ty
+    with_no_caller init_env (fun () ->
+      check_expr init_env actor.actor_init state_ty
         ~reason:(Some (RBuiltin "actor init must return the initial state record")));
+    (* A supervise block's `Child name(args)` (D24): the args are the child's
+       `init` arguments, evaluated in the supervisor's spawn glue where the
+       supervisor's own `init` params are in scope.  Checked against the
+       child's recorded signature exactly as `spawn(Child, args)` is. *)
+    (match actor.actor_supervise with
+     | None -> ()
+     | Some sc ->
+       List.iter (fun (sf : Ast.supervise_field) ->
+           match sf.sf_ty with
+           | Ast.TyCon (child, []) ->
+             with_no_caller init_env (fun () ->
+               check_spawn_args init_env ~site_span:sf.sf_name.span
+                 ~spelling:(Printf.sprintf "`%s %s(…)`" child.txt sf.sf_name.txt)
+                 child.txt sf.sf_init_args)
+           | _ -> ()) sc.sc_fields);
     (* Check handlers with state and message params in scope *)
     List.iter (fun (h : Ast.actor_handler) ->
         let handler_env = bind_var "state" (Mono state_ty) env_with_ctors in
@@ -5540,6 +5828,18 @@ let rec check_decl env (d : Ast.decl) : env =
               notes = actor_handler_hints (repr state_ty) (repr inferred);
               code = None; fix = None }
       ) actor.actor_handlers;
+    (* The `on_stop` terminate callback: `state` (the final state) and `self`
+       in scope, exactly as in a handler, but no message params and no
+       return-type obligation — its value is discarded, because a dying actor
+       has no next state to install. It reads [state] rather than owning it
+       for a turn, so the linear-field sentinels a handler binds do not
+       apply. *)
+    Option.iter (fun (h : Ast.actor_handler) ->
+        let stop_env = bind_var "state" (Mono state_ty) env_with_ctors in
+        let stop_env = bind_var "self" (Mono (TCon ("Pid", [state_ty]))) stop_env in
+        ignore (with_deferred_pending stop_env (fun () ->
+            with_no_caller stop_env (fun () -> infer_expr stop_env h.ah_body))))
+      actor.actor_on_stop;
     bind_var name.txt (Mono (TCon ("Pid", [state_ty]))) env_with_ctors
 
   | Ast.DMod (name, _vis, decls, _sp) ->
@@ -5641,8 +5941,14 @@ let rec check_decl env (d : Ast.decl) : env =
         (* Return the list of opaque type names for constructor hiding below *)
         List.map (fun ((tname : Ast.name), _) -> tname.txt) sdef.sig_types
     in
-    (* Validate capability declarations for this module *)
-    check_module_needs env name decls
+    (* Validate capability declarations for this module.  [env] is the OUTER
+       scope, which does not yet hold this module's own `proof cap`s -- they
+       are registered into [inner_env] by the [DProofCap] arm above -- so
+       Check 1's declaring-module exemption (`proof cap X` in `mod M` covers
+       `Cap(M.X)` without `needs M.X`) would miss every one of them and report
+       a false "not declared in `needs`".  The entry module never hit this: it
+       is checked against its [final_env] (see [check_module_core]). *)
+    check_module_needs { env with proof_caps = inner_env.proof_caps } name decls
       ~cap_qname_prefix:(if env.cap_qual_prefix = "" then name.txt
                          else env.cap_qual_prefix ^ "." ^ name.txt);
     (* Validate island module protocol if applicable *)
@@ -5818,13 +6124,14 @@ let rec check_decl env (d : Ast.decl) : env =
                "Protocol `%s`: `stop` outside of a `loop` has no effect — the \
                 protocol already ends here if you just write nothing."
                name.txt)
-      | Ast.ProtoMayCrash _ -> ()
+      | Ast.ProtoMayCrash _ | Ast.ProtoRoleNeeds _ -> ()
       | Ast.ProtoCrashOr (inner, crash, _) ->
         validate_step ~in_loop inner;
         List.iter (validate_step ~in_loop) crash
     in
     List.iter (validate_step ~in_loop:false) pdef.proto_steps;
     check_crash_branches env ~proto:name.txt pdef;
+    check_role_needs env ~proto:name.txt pdef;
     (* A `loop` never exits (its projection is `Rec X. S[X]`), so any step that
        follows one at the same nesting level is unreachable. *)
     (* [tail] is what follows at every ENCLOSING level.  A `choose` branch's
@@ -6728,10 +7035,15 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
 let render_cap_chain (chain : string list) : string =
   String.concat " \xe2\x86\x92 " chain
 
-let cap_reach_chain (env : env) ~(from : string) ~(cap : string)
+let cap_reach_chain ?own_caps ?fn_refs (env : env) ~(from : string) ~(cap : string)
   : string list option =
+  (* [own_caps]/[fn_refs] let [check_role_grants] search a COPY of the tables
+     that carries its synthetic per-callback roots; the default is the env's
+     own tables, exactly as before. *)
+  let own_caps = Option.value ~default:env.own_cap_closures own_caps in
+  let fn_refs = Option.value ~default:env.fn_refs fn_refs in
   let holds k =
-    match Hashtbl.find_opt env.own_cap_closures k with
+    match Hashtbl.find_opt own_caps k with
     | Some own -> List.mem cap own
     | None -> false
   in
@@ -6754,12 +7066,12 @@ let cap_reach_chain (env : env) ~(from : string) ~(cap : string)
         List.iter
           (fun r ->
              let known n =
-               Hashtbl.mem env.own_cap_closures n || Hashtbl.mem env.fn_refs n
+               Hashtbl.mem own_caps n || Hashtbl.mem fn_refs n
              in
              if known r then Queue.push (r, path) queue;
              let q = prefix ^ r in
              if q <> r && known q then Queue.push (q, path) queue)
-          (Option.value ~default:[] (Hashtbl.find_opt env.fn_refs k))
+          (Option.value ~default:[] (Hashtbl.find_opt fn_refs k))
     end
   done;
   !result
@@ -6969,6 +7281,412 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                  | _ -> "")
                 c c param_hint))
       (List.sort_uniq String.compare closure)
+
+(* ── Per-role grants: the same walk from more roots (distributed-deploys
+   plan, section 2 and II.2; build step 4) ─────────────────────────────────
+
+   `role R needs IO.X` (`env.role_grants`) bounds the role's CODE the way
+   `main`'s parameters bound the program: every capability the role's body
+   reaches must sit under the grant.  Two lines of defence, of which this is
+   the second:
+
+   1. The TYPE.  The generator makes the grant the body's own signature
+      (D34): a granted body takes `Cap(IO.X)`, not `Cap(IO)`, and `Cap` is an
+      ordinary type constructor, so handing that value to anything typed
+      `Cap(IO)` is a type error before this check runs.  G2 measured this
+      (specs/progress/2026-09-22-cap-narrowed-signature-grant-test.md):
+      amplifying a narrowed capability is refused by the checker, and the
+      plan's assumption that `Cap` types unify across the lattice is wrong.
+   2. The WALK, here.  A body that never touches its `Cap` parameter can
+      still reach `file_write` ambiently through any helper, because
+      builtins take no capability value; the reach of the body's code is
+      what this bounds.
+
+   Roots (II.2, "find the roots"): every call to a runner front of a role
+   with a grant -- `<P>_Run.run_R`, `cluster_R`, `offer_R`, `initiate_R`
+   (the `body` argument), `host_R`, `host_R_or`, `offer_hosted_R`,
+   `cluster_hosted_R` (the `start`, `deliver` and `cancel` callbacks, and the
+   actor behind `host` when it is `spawn(A)` or a variable bound to one in
+   the same function).  Each callback gets a SYNTHETIC row key whose own
+   caps are the builtins its body calls and whose refs are its free
+   variables (what [record_fn_refs] records for a lambda), solved by the
+   same [Cap_rows.solve] over a copy of the tables; a named function passed
+   as the body is one free variable, so its whole row flows in.  The key
+   carries the calling function's module prefix so the solver's
+   owner-prefix-first resolution reads bare references the way the
+   calling code did, and it uses characters no identifier can
+   (`role@Stream_Run/run_Cons:12:5`) so it cannot shadow a real function.
+
+   Charged the way `main` charges: spawned actors through their name node
+   (so a hosted actor's handlers count), non-IO roots skipped, `unknown`
+   ignored (the program is closed; see [check_main_grant]).  Delegation
+   (D1/D14) is not a violation: messaging a pid the body was handed, or
+   calling a closure it received, is charged to whoever created it.  That is
+   what the effective-authority REPORT (`--dump-role-authority`) exists to
+   show, and it is a report, not a check.
+
+   Not run by the REPL path, like [check_main_grant]. *)
+
+let dump_role_authority : bool ref = ref false
+
+(* `main`'s declared grant, as [check_main_grant] reads it: [Some (caps,
+   span)] when there is a `main`, its caps possibly empty. *)
+let main_grant_of_decls (decls : Ast.decl list) : (string list * Ast.span) option =
+  List.find_map
+    (function
+      | Ast.DFn (def, _) when def.Ast.fn_name.txt = "main" -> (
+        match def.Ast.fn_clauses with
+        | clause :: _ ->
+          let grants =
+            List.concat_map
+              (function
+                | Ast.FPNamed p | Ast.FPDefault (p, _) -> (
+                  match p.Ast.param_ty with
+                  | Some ty -> March_caps.Cap_surface_ty.caps_in_ty ty
+                  | None -> [])
+                | Ast.FPPat _ -> [])
+              clause.Ast.fc_params
+          in
+          Some (List.sort_uniq String.compare grants, clause.Ast.fc_params_span)
+        | [] -> None)
+      | _ -> None)
+    decls
+
+(* Visit every sub-expression.  Exhaustive on purpose (no wildcard): a new
+   expression form must be placed here, not silently skipped. *)
+let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) : unit =
+  f e;
+  let go = iter_expr f in
+  match e with
+  | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> ()
+  | Ast.EDbg (Some inner, _) -> go inner
+  | Ast.EApp (h, args, _) -> go h; List.iter go args
+  | Ast.EPipe (l, r, _) -> go l; go r
+  | Ast.ECon (_, args, _) | Ast.EAtom (_, args, _) | Ast.ETuple (args, _) -> List.iter go args
+  | Ast.ELam (_, body, _) -> go body
+  | Ast.EBlock (es, _) -> List.iter go es
+  | Ast.ELet (b, _) -> go b.Ast.bind_expr
+  | Ast.EMatch (scrut, branches, _) ->
+    go scrut;
+    List.iter (fun (br : Ast.branch) -> Option.iter go br.Ast.branch_guard; go br.Ast.branch_body) branches
+  | Ast.ERecord (fields, _) -> List.iter (fun (_, ex) -> go ex) fields
+  | Ast.ERecordUpdate (base, fields, _) -> go base; List.iter (fun (_, ex) -> go ex) fields
+  | Ast.EField (ex, _, _) -> go ex
+  | Ast.EIf (c, t, e, _) -> go c; go t; go e
+  | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
+  | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) -> go ex
+  | Ast.ESend (a, b, _) -> go a; go b
+  | Ast.ELetFn (_, _, _, body, _) -> go body
+  | Ast.ELetQ (_, r, k, _) | Ast.ELetStar (_, r, k, _) -> go r; go k
+
+type role_root = {
+  rr_proto : string;
+  rr_role : string;
+  rr_grant : string list;
+  rr_front : string;  (** the runner front as the call spells it, `Stream_Run.run_Cons` *)
+  rr_what : string;  (** `body`, `start`, `deliver`, `cancel` *)
+  rr_owner : string;  (** the function whose body makes the call *)
+  rr_expr : Ast.expr;  (** the callback expression *)
+  rr_span : Ast.span;
+  rr_host : string option;  (** the actor behind a hosted front's `host`, when resolvable *)
+}
+
+(* The runner front a called name is, if any: (protocol, role, callback
+   positions).  A hosted front's callbacks start at [start]; a body front's
+   is the last argument ([-1]). *)
+let role_front_of (name : string) : (string * string * [ `Body | `Hosted of int ]) option =
+  match String.rindex_opt name '.' with
+  | None -> None
+  | Some i ->
+    let modpath = String.sub name 0 i and fn = String.sub name (i + 1) (String.length name - i - 1) in
+    let modname =
+      match String.rindex_opt modpath '.' with
+      | Some j -> String.sub modpath (j + 1) (String.length modpath - j - 1)
+      | None -> modpath
+    in
+    let ml = String.length modname in
+    if ml <= 4 || String.sub modname (ml - 4) 4 <> "_Run" then None
+    else
+      let proto = String.sub modname 0 (ml - 4) in
+      let strip prefix =
+        let pl = String.length prefix in
+        if String.length fn > pl && String.sub fn 0 pl = prefix then Some (String.sub fn pl (String.length fn - pl))
+        else None
+      in
+      let strip_or r =
+        let rl = String.length r in
+        if rl > 3 && String.sub r (rl - 3) 3 = "_or" then String.sub r 0 (rl - 3) else r
+      in
+      (* longer prefixes first *)
+      match strip "offer_hosted_" with
+      | Some r -> Some (proto, r, `Hosted 4)
+      | None -> (
+        match strip "cluster_hosted_" with
+        | Some r -> Some (proto, r, `Hosted 4)
+        | None -> (
+          match strip "host_" with
+          | Some r -> Some (proto, strip_or r, `Hosted 5)
+          | None -> (
+            match List.find_map strip [ "run_"; "cluster_"; "offer_"; "initiate_" ] with
+            | Some r -> Some (proto, r, `Body)
+            | None -> None)))
+
+let find_role_roots (env : env) : role_root list =
+  let roots = ref [] in
+  Hashtbl.iter
+    (fun owner bodies ->
+       List.iter
+         (fun (_params, body) ->
+            (* `let h = spawn(A)` in this body, for a hosted front's `host`. *)
+            let spawned_by_var : (string, string) Hashtbl.t = Hashtbl.create 4 in
+            iter_expr
+              (function
+                | Ast.ELet ({ bind_pat = Ast.PatVar v; bind_expr; _ }, _) -> (
+                  match March_ast.Calls.spawned_actor_names [] bind_expr with
+                  | a :: _ -> Hashtbl.replace spawned_by_var v.Ast.txt a
+                  | [] -> ())
+                | _ -> ())
+              body;
+            let host_of (e : Ast.expr) =
+              match March_ast.Calls.spawned_actor_names [] e with
+              | a :: _ -> Some a
+              | [] -> (match e with Ast.EVar v -> Hashtbl.find_opt spawned_by_var v.Ast.txt | _ -> None)
+            in
+            iter_expr
+              (function
+                | Ast.EApp (Ast.EVar f, args, _) -> (
+                  match role_front_of f.Ast.txt with
+                  | None -> ()
+                  | Some (proto, role, kind) -> (
+                    match Hashtbl.find_opt env.role_grants (proto, role) with
+                    | None -> ()
+                    | Some (grant, _) ->
+                      let root what host e =
+                        roots :=
+                          { rr_proto = proto; rr_role = role; rr_grant = grant; rr_front = f.Ast.txt;
+                            rr_what = what; rr_owner = owner; rr_expr = e; rr_span = span_of_expr e;
+                            rr_host = host }
+                          :: !roots
+                      in
+                      let nth i = List.nth_opt args i in
+                      (match kind with
+                       | `Body -> (
+                         match List.rev args with
+                         | e :: _ -> root "body" None e
+                         | [] -> ())
+                       | `Hosted start ->
+                         let host = Option.bind (nth (start - 1)) host_of in
+                         List.iteri
+                           (fun j what -> Option.iter (root what host) (nth (start + j)))
+                           [ "start"; "deliver"; "cancel" ])))
+                | _ -> ())
+              body)
+         bodies)
+    env.fn_row_bodies;
+  List.rev !roots
+
+let check_role_grants (env : env) (decls : Ast.decl list) : unit =
+  if Hashtbl.length env.role_grants = 0 then ()
+  else begin
+    (* 4. Every role's grant fits within `main`'s (section 2, "Relation to
+       `main`").  Only IO-lattice caps are compared, as [check_main_grant]
+       compares; a module without a `main` (a library) is bounded by whoever
+       links it. *)
+    (match main_grant_of_decls decls with
+     | None -> ()
+     | Some (main_grants, _) ->
+       Hashtbl.iter
+         (fun (proto, role) (caps, sp) ->
+            List.iter
+              (fun c ->
+                 if not (cap_subsumes "IO" c) then ()
+                 else if List.exists (fun g -> cap_subsumes g c) main_grants then ()
+                 else
+                   let show_main =
+                     match main_grants with
+                     | [] -> "nothing (`main` has no capability parameter)"
+                     | gs -> String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) gs)
+                   in
+                   let leaf =
+                     match String.rindex_opt c '.' with
+                     | Some i -> String.sub c (i + 1) (String.length c - i - 1)
+                     | None -> c
+                   in
+                   Err.error env.errors ~span:sp
+                     (Printf.sprintf
+                        "Protocol `%s`: `role %s needs %s` is wider than `main`'s grant, which is %s. \
+                         A role's grant must fit within the program's: the runner narrows the role's \
+                         capabilities from what `main` holds.\n\
+                         help: add a `Cap(%s)` parameter to `main` (e.g. `_cap_%s : Cap(%s)`), or take \
+                         `%s` out of the role's grant."
+                        proto role c show_main c (String.lowercase_ascii leaf) c c))
+              caps)
+         env.role_grants);
+    let roots = find_role_roots env in
+    if roots = [] then ()
+    else begin
+      let own = Hashtbl.copy env.own_cap_closures in
+      let refs = Hashtbl.copy env.fn_refs in
+      (* A builtin called directly in the callback body, unless a user
+         function of that name shadows it (recorded under its bare key). *)
+      let cap_of_call name =
+        if Hashtbl.mem env.own_cap_closures name then None
+        else List.assoc_opt name builtin_cap_table
+      in
+      let key_of (r : role_root) =
+        let prefix =
+          match String.rindex_opt r.rr_owner '.' with
+          | Some i -> String.sub r.rr_owner 0 (i + 1)
+          | None -> ""
+        in
+        Printf.sprintf "%srole@%s/%s:%d:%d" prefix
+          (String.map (fun ch -> if ch = '.' then '/' else ch) r.rr_front)
+          r.rr_what r.rr_span.Ast.start_line r.rr_span.Ast.start_col
+      in
+      let keyed = List.map (fun r -> (key_of r, r)) roots in
+      List.iter
+        (fun (k, r) ->
+           let bound, body =
+             match r.rr_expr with
+             | Ast.ELam (ps, b, _) -> (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps, b)
+             | e -> ([], e)
+           in
+           let own_caps =
+             List.filter_map (fun (call_name, _) -> cap_of_call call_name) (March_ast.Calls.names_and_name_spans body)
+           in
+           let rs =
+             free_vars_expr bound body @ March_ast.Calls.spawned_actor_names [] body
+             @ Option.to_list r.rr_host
+           in
+           Hashtbl.replace own k (March_caps.Cap_lattice.normalize own_caps);
+           Hashtbl.replace refs k (List.sort_uniq compare rs))
+        keyed;
+      let rows =
+        March_caps.Cap_rows.solve ~with_rows:false ~own_caps:own ~refs ~seeds:(Hashtbl.create 1) ()
+      in
+      let caps_of k = match Hashtbl.find_opt rows k with Some (row : March_caps.Cap_rows.row) -> row.caps | None -> [] in
+      let label (r : role_root) = Printf.sprintf "the %s passed to `%s`" r.rr_what r.rr_front in
+      List.iter
+        (fun (k, r) ->
+           let covered c = List.exists (fun g -> cap_subsumes g c) r.rr_grant in
+           let show_grant =
+             String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) r.rr_grant)
+           in
+           List.iter
+             (fun c ->
+                if not (cap_subsumes "IO" c) || covered c then ()
+                else
+                  let chain =
+                    match cap_reach_chain ~own_caps:own ~fn_refs:refs env ~from:k ~cap:c with
+                    | Some (_ :: _ as chain) ->
+                      Printf.sprintf " (reached from the %s: %s)" r.rr_what
+                        (render_cap_chain (r.rr_what :: chain))
+                    | _ -> ""
+                  in
+                  Err.error env.errors ~span:r.rr_span
+                    (Printf.sprintf
+                       "Role `%s.%s` is granted %s (`role %s needs %s`), but %s reaches `%s`%s. \
+                        A role's grant bounds everything its code reaches, as `main`'s grant bounds \
+                        the program.\n\
+                        help: add `%s` to `role %s needs ...` in protocol `%s`, or remove the use."
+                       r.rr_proto r.rr_role show_grant r.rr_role (String.concat ", " r.rr_grant)
+                       (label r) c chain c r.rr_role r.rr_proto))
+             (List.sort_uniq String.compare (caps_of k)))
+        keyed;
+      (* ── the effective-authority report ─────────────────────────────────
+         What the grant does NOT bound, made visible: for each root, the
+         functions its reachable code references as VALUES (closures it may
+         hand on or receive back) and the actors it spawns or hosts, each
+         with the capabilities behind it.  Under D1/D14 those are delegated
+         authority, charged to their creator; a reader of `role Cons needs
+         IO.Console` would otherwise take the narrow grant for narrow
+         authority. *)
+      if !dump_role_authority then begin
+        let resolve owner r =
+          let qualified =
+            match String.rindex_opt owner '.' with
+            | Some i -> String.sub owner 0 i ^ "." ^ r
+            | None -> r
+          in
+          if Hashtbl.mem rows qualified then Some qualified
+          else if Hashtbl.mem rows r then Some r
+          else None
+        in
+        let show_caps = function [] -> "nothing" | cs -> String.concat ", " cs in
+        List.iter
+          (fun (k, r) ->
+             (* reachable keys, BFS over the solved refs *)
+             let seen = Hashtbl.create 32 in
+             let queue = Queue.create () in
+             Queue.push k queue;
+             while not (Queue.is_empty queue) do
+               let x = Queue.pop queue in
+               if not (Hashtbl.mem seen x) then begin
+                 Hashtbl.replace seen x ();
+                 List.iter
+                   (fun d -> match resolve x d with Some key -> Queue.push key queue | None -> ())
+                   (Option.value ~default:[] (Hashtbl.find_opt refs x))
+               end
+             done;
+             let values = ref [] and actors = ref [] in
+             let note_body owner bound body =
+               let called = List.map fst (March_ast.Calls.names_and_name_spans body) in
+               List.iter
+                 (fun v ->
+                    if not (List.mem v called) then
+                      match resolve owner v with
+                      | Some key when key <> k && not (List.mem_assoc key !values) ->
+                        values := (key, caps_of key) :: !values
+                      | _ -> ())
+                 (free_vars_expr bound body);
+               List.iter
+                 (fun a ->
+                    match resolve owner a with
+                    | Some key when not (List.mem_assoc key !actors) -> actors := (key, caps_of key) :: !actors
+                    | _ -> ())
+                 (March_ast.Calls.spawned_actor_names [] body)
+             in
+             Hashtbl.iter
+               (fun x () ->
+                  if x = k then
+                    let bound, body =
+                      match r.rr_expr with
+                      | Ast.ELam (ps, b, _) -> (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps, b)
+                      | e -> ([], e)
+                    in
+                    note_body r.rr_owner bound body
+                  else
+                    List.iter
+                      (fun (bound, body) -> note_body x bound body)
+                      (Option.value ~default:[] (Hashtbl.find_opt env.fn_row_bodies x)))
+               seen;
+             Option.iter
+               (fun a ->
+                  match resolve r.rr_owner a with
+                  | Some key when not (List.mem_assoc key !actors) -> actors := (key, caps_of key) :: !actors
+                  | _ -> ())
+               r.rr_host;
+             let sorted xs = List.sort (fun (a, _) (b, _) -> String.compare a b) xs in
+             Printf.printf "role authority: %s.%s\n" r.rr_proto r.rr_role;
+             Printf.printf "  grant: %s\n" (show_caps r.rr_grant);
+             Printf.printf "  root: %s, in `%s` (%s:%d)\n" (label r) r.rr_owner r.rr_span.Ast.file
+               r.rr_span.Ast.start_line;
+             (* the IO lattice only, as the check itself judges: proof caps
+                such as `Session.Live` are not authority the grant bounds *)
+             Printf.printf "  reaches: %s\n"
+               (show_caps (List.filter (cap_subsumes "IO") (List.sort_uniq String.compare (caps_of k))));
+             Printf.printf "  values: %s\n"
+               (match sorted !values with
+                | [] -> "none"
+                | vs -> String.concat ", " (List.map (fun (v, cs) -> Printf.sprintf "%s -> %s" v (show_caps cs)) vs));
+             Printf.printf "  actors: %s\n"
+               (match sorted !actors with
+                | [] -> "none"
+                | xs -> String.concat ", " (List.map (fun (a, cs) -> Printf.sprintf "%s -> %s" a (show_caps cs)) xs)))
+          keyed
+      end
+    end
+  end
 
 (* ── R1 stage C: per-function grants — REMOVED 2026-08-13 ──────────────────
    Formerly specs/2026-08-10-r1-stage-c-effect-rows-design.md; the removal is
@@ -7570,6 +8288,10 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   let cap_rows = fn_capability_rows_tbl ~with_rows:false final_env in
   dump_cap_rows final_env;
   check_main_grant ~rows:cap_rows final_env m.Ast.mod_decls;
+  (* Per-role grants: the same walk from each runner-entry callback, bounded
+     by `role R needs ...` (distributed-deploys step 4).  No-op for a
+     program with no grant line. *)
+  check_role_grants final_env m.Ast.mod_decls;
   (* The `--check`-side capability ceiling (opt-in via [cap_strict_ceiling],
      set by the driver on the `--check`/`--check-json` path). Build a
      module -> diagnostic-span map: each module's first [DNeeds] span, or its

@@ -1,0 +1,25 @@
+node n0, creation 3
+global pid n0/7@3
+placed:
+  api @ n1
+  db @ n2
+  cache @ n3
+n2 dead:
+  db: n2 -> n1 (suspect timeout)
+n4 up (nothing moves):
+n3 dead:
+  cache: n3 -> n4 (refused)
+placed:
+  api @ n1
+  db @ n1
+  cache @ n4
+n1 dead:
+  api: n1 -> n4 (suspect timeout)
+  db: n1 -> n4 (suspect timeout)
+placed:
+  api @ n4
+  db @ n4
+  cache @ n4
+moves: 4
+unsubscribed; n4 dead:
+moves: 4

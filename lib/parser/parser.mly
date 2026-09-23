@@ -294,9 +294,9 @@
 %token <string> UPPER_IDENT
 %token FN LET DO END IF THEN ELSE MATCH WITH WHEN
 %token TYPE MOD ACTOR ON SEND SPAWN
-%token STATE INIT PROTOCOL LOOP
+%token STATE INIT INIT_PAREN PROTOCOL LOOP
 %token LINEAR AFFINE
-%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA CAP_NO_PANIC CAP_PURE CAP_NO_EXTERN CAP_DETERMINISTIC CAP_NO_ALLOC CAP_VERIFIED
+%token INTERFACE IMPL SIG EXTERN AS USE NEEDS ROLE REQUIRES PROOFCAP ALWAYSLINEAR TAG TRANSITIONS VIA CAP_NO_PANIC CAP_PURE CAP_NO_EXTERN CAP_DETERMINISTIC CAP_NO_ALLOC CAP_VERIFIED
 %token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE SATISFY FOR IN OPAQUE GETS DSLASH
 %token RESOURCE
 %token APP ON_START ON_STOP
@@ -748,16 +748,72 @@ actor_decl:
         $startpos($3) }
   | ACTOR; name = upper_name; DO;
     STATE; LBRACE; fields = separated_list(COMMA, field); RBRACE;
-    INIT; init_expr = expr;
+    init = actor_init;
     mb = option(mailbox_clause);
     sup = option(supervise_block);
-    handlers = list(actor_handler);
+    items = list(actor_item);
     END
-    { DActor (Public, name,
-              { actor_state = fields; actor_init = init_expr; actor_handlers = handlers;
+    { let (init_params, init_expr) = init in
+      let handlers = List.filter_map (function `H h -> Some h | `S _ -> None) items in
+      let stops = List.filter_map (function `S s -> Some s | `H _ -> None) items in
+      let on_stop = match stops with
+        | [] -> None
+        | [(h, _)] -> Some h
+        | _ :: (_, pos2) :: _ ->
+          error_raise
+            "An actor can declare only one `on_stop` block; this is the second:"
+            (Some "on_stop do\n      flush(state)\n    end")
+            pos2
+      in
+      DActor (Public, name,
+              { actor_state = fields; actor_init_params = init_params;
+                actor_init = init_expr; actor_handlers = handlers;
                 actor_supervise = sup; actor_compat = "full"; actor_invariant = None;
-                actor_mailbox = mb; actor_remote = false },
+                actor_mailbox = mb; actor_remote = false; actor_on_stop = on_stop },
               mk_span ($loc)) }
+
+(** `init { ... }`, or the parameterised form `init(env : T, n : Int) { ... }`
+    (D24): the parameters are supplied at `spawn(A, env, n)` and are in scope
+    in the init expression only.  `init()` is the zero-parameter spelling of
+    the bare form.  Every parameter carries a type annotation: `spawn`'s
+    arguments are checked against it, and the annotation is what a reader of
+    the actor sees without hunting for spawn sites.  A parenthesised bare
+    init expression (`init (mk())`) is therefore read as a parameter list and
+    rejected with a hint; the state is a record, so nothing real wrote it.
+
+    [INIT_PAREN] is `init` immediately followed by `(`: the token filter
+    splits the two spellings (keyed on the NEXT token, like its soft-keyword
+    demotions) because `init ()` followed by an expression start is otherwise
+    an LR(1) shift/reduce conflict between the zero-parameter form and the
+    unit literal as a bare init expression.  Outside an actor the token is an
+    ordinary identifier (see [soft_lower_name]), so a function named `init`
+    can still be called. *)
+actor_init:
+  | INIT_PAREN; LPAREN; RPAREN; e = expr
+    { ([], e) }
+  | INIT_PAREN; LPAREN; ps = separated_nonempty_list(COMMA, init_param); RPAREN; e = expr
+    { (ps, e) }
+  | INIT; e = expr
+    { ([], e) }
+
+init_param:
+  | name = soft_lower_name; COLON; t = ty
+    { { param_name = name; param_ty = Some t; param_lin = Unrestricted } }
+  | name = soft_lower_name; error
+    { error_raise
+        (Printf.sprintf "I need a type for the `init` parameter `%s`:" name.txt)
+        (Some "init(env : Config) { count: env.start }")
+        $startpos($2) }
+
+(** An actor body item: an `on Msg(...)` handler, or the `on_stop do ... end`
+    terminate callback (reusing the `app` block's keyword). `on_stop` may sit
+    anywhere among the handlers; at most one is allowed. It is kept as a
+    zero-param handler named `on_stop` (see Ast.actor_on_stop). *)
+actor_item:
+  | h = actor_handler { `H h }
+  | ON_STOP; DO; body = block_body; END
+    { `S ({ ah_msg = { txt = "on_stop"; span = mk_span ($loc($1)) };
+            ah_params = []; ah_body = body }, $startpos($1)) }
 
 (** mailbox N policy — a bound on the actor's mailbox, declared with the
     actor rather than at every spawn site. Lowers to
@@ -866,9 +922,9 @@ supervise_block:
     bo = option(backoff_clause);
     children = list(supervise_child);
     END
-    { let names = List.map (fun (n, _, _) -> n) children in
-      let tyfields = List.map (fun (n, t, (r, sd)) ->
-        { sf_name = n; sf_ty = t; sf_restart = r; sf_shutdown = sd }) children in
+    { let names = List.map (fun (n, _, _, _) -> n) children in
+      let tyfields = List.map (fun (n, t, args, (r, sd)) ->
+        { sf_name = n; sf_ty = t; sf_init_args = args; sf_restart = r; sf_shutdown = sd }) children in
       { sc_fields = tyfields;
         sc_strategy = strat;
         sc_max_restarts = max_r;
@@ -889,7 +945,15 @@ backoff_kv:
 supervise_child:
   | actor_type = upper_name; field_name = lower_name;
     mods = list(child_modifier)
-    { (field_name, TyCon (actor_type, []),
+    { (field_name, TyCon (actor_type, []), [],
+       mk_child_spec field_name.txt mods $startpos) }
+  (* `Child name(e1, e2)`: the child's `init` arguments (D24), evaluated once
+     when the supervisor spawns and re-supplied on every respawn.  The
+     supervisor's own `init` parameters are in scope here. *)
+  | actor_type = upper_name; field_name = lower_name;
+    LPAREN; args = separated_list(COMMA, expr); RPAREN;
+    mods = list(child_modifier)
+    { (field_name, TyCon (actor_type, []), args,
        mk_child_spec field_name.txt mods $startpos) }
 
 (* Optional per-child restart policy. Placed as a labelled trailing modifier so
@@ -969,6 +1033,22 @@ protocol_step:
           (Printf.sprintf "I don't recognize `or %s` here — a message step can only be followed by `or crash do ... end`." c.txt)
           None $startpos(c)
       else ProtoCrashOr (ProtoMsg (sender, receiver, t, Some label), crash, mk_span $loc) }
+  (* `role R needs IO.FileWrite, IO.NetConnect`: the role's capability grant
+     (ROLE is soft: Token_filter keeps it only before an uppercase name).
+     Each path is dot-joined into one name carrying the path's span, so the
+     typechecker can point a did-you-mean at the exact path.  Ordering (before
+     every message step) and the role's existence are the typechecker's
+     checks, not the grammar's, so the message can name the protocol. *)
+  | ROLE; r = upper_name; NEEDS; caps = separated_nonempty_list(COMMA, cap_path)
+    { let join (p : name list) : name =
+        match p with
+        | [] -> assert false
+        | first :: _ ->
+          let last = List.nth p (List.length p - 1) in
+          { txt = String.concat "." (List.map (fun (n : name) -> n.txt) p);
+            span = { first.span with end_line = last.span.end_line; end_col = last.span.end_col } }
+      in
+      ProtoRoleNeeds (r, List.map join caps, mk_span $loc) }
   (* `may crash A, B`: the roles that may crash (MAY likewise soft). *)
   | MAY; c = lower_name; roles = separated_nonempty_list(COMMA, upper_name)
     { if c.txt <> "crash" then
@@ -1813,6 +1893,19 @@ expr_atom:
   (* Actor primitives *)
   | SPAWN; LPAREN; e = expr; RPAREN
     { ESpawn (e, mk_span ($loc)) }
+  (* spawn(Actor, a, b): the trailing arguments are the actor's `init`
+     parameters (D24).  Carried as the actor-name constructor's args — see
+     the ESpawn comment in ast.ml. *)
+  | SPAWN; LPAREN; e = expr; COMMA; args = separated_nonempty_list(COMMA, expr); RPAREN
+    { let sp = mk_span ($loc) in
+      (match e with
+       | ECon (n, [], csp) -> ESpawn (ECon (n, args, csp), sp)
+       | EVar n -> ESpawn (ECon (n, args, n.span), sp)
+       | _ ->
+         error_raise
+           "`spawn` with `init` arguments needs the actor's name written directly:"
+           (Some "spawn(Worker, config, 3)")
+           $startpos(e)) }
   | SEND; LPAREN; cap = expr; COMMA; msg = expr; RPAREN
     { ESend (cap, msg, mk_span ($loc)) }
   (* Debugger: dbg() unconditional pause; dbg(expr) conditional/trace *)
@@ -1962,6 +2055,7 @@ soft_lower_name:
   | id = LOWER_IDENT  { mk_name id $loc }
   | STATE             { mk_name "state"    $loc }
   | INIT              { mk_name "init"     $loc }
+  | INIT_PAREN        { mk_name "init"     $loc }
   | LOOP              { mk_name "loop"     $loc }
   | ON                { mk_name "on"       $loc }
   | PROTOCOL          { mk_name "protocol" $loc }

@@ -58,45 +58,13 @@ let render_user_diag ~src ~filename ~read_file (d : March_errors.Errors.diagnost
     in
     March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d
 
-(** The set of source files a batch of stdlib declarations actually came from.
-
-    The refinement checker needs to know whether a `List.length` in scope is
-    the real stdlib one before it may treat it as the `len` measure (see
-    [Refine_check.stdlib_source_files]); a wrong answer there is a false
-    positive on correct code. Reading the identity off the declarations we are
-    about to prepend — rather than pattern-matching the path — is what makes it
-    agree with [find_stdlib_dir]'s resolution order (repo `stdlib/`, an
-    installed `share/march`, `MARCH_STDLIB`) AND with the marshalled stdlib-AST
-    cache, whose spans carry whatever directory the entry was written from.
-    Declarations arriving via `MARCH_LIB_PATH` are user decls, not stdlib
-    decls, so a vendored or forked `List` is correctly not in this set. *)
-let stdlib_span_files (decls : March_ast.Ast.decl list) : string list =
-  let seen = Hashtbl.create 64 in
-  (* Both no-file spellings are excluded. `""` is what a string-parsed fixture
-     carries; `"<none>"` is [Ast.dummy_span]'s, and [load_stdlib_file] gives
-     every stdlib module's wrapping [DMod] a dummy span — so without this the
-     sentinel would be a member of the identity set on every production run,
-     and any `fn length` inside a `mod List` that happened to carry a dummy
-     span would be certified as the standard library's. No such declaration is
-     reachable today (desugar's synthesized `DFn`s all reuse their source
-     declaration's real span), but admitting the sentinel is precisely the
-     class of wrong fact this gate exists to prevent, so the route is closed
-     rather than argued about. *)
-  let add (sp : March_ast.Ast.span) =
-    let f = sp.March_ast.Ast.file in
-    if f <> "" && f <> March_ast.Ast.dummy_span.March_ast.Ast.file then
-      Hashtbl.replace seen f ()
-  in
-  let rec go ds =
-    List.iter
-      (function
-        | March_ast.Ast.DMod (_, _, inner, sp) -> add sp; go inner
-        | March_ast.Ast.DFn (_, sp) -> add sp
-        | _ -> ())
-      ds
-  in
-  go decls;
-  Hashtbl.fold (fun f () acc -> f :: acc) seen []
+(* The set of source files the loaded stdlib declarations came from: the
+   identity [Typecheck.stdlib_source_files] wants. Lives in the typechecker
+   ([Typecheck_builtins.stdlib_span_files]) since every stdlib loader (this
+   driver's [Toolchain.load_stdlib], the LSP's) registers what it loaded
+   through [Typecheck_builtins.note_stdlib_decls]; the driver still sets the
+   ref itself at its own check sites. *)
+let stdlib_span_files = March_typecheck.Typecheck_builtins.stdlib_span_files
 
 (** The module names a batch of stdlib declarations defines.
 
@@ -498,7 +466,7 @@ let own_caps_of_this_module ~stdlib_files typecheck_env
                 add prefix
                   (name.March_ast.Ast.txt ^ "_"
                    ^ h.March_ast.Ast.ah_msg.March_ast.Ast.txt))
-              actor.March_ast.Ast.actor_handlers
+              (March_ast.Ast.actor_body_handlers actor)
           end
         | March_ast.Ast.DMod (nm, _, inner, _) ->
           walk (qname prefix nm.March_ast.Ast.txt) inner
@@ -1699,6 +1667,10 @@ let compile filename =
     if
       refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
       || !report_contracts
+      (* --dump-role-authority prints from inside the typechecker, which a warm
+         `check` artifact skips entirely: CI saw an empty report after an
+         earlier plain --check of the same source (PR #596). *)
+      || !dump_role_authority
     then None
     else if not !do_compile && not !do_check then None
     else try
@@ -1875,6 +1847,25 @@ let compile filename =
         span.March_ast.Ast.start_col msg
     ) resolve_errors;
   let has_resolve_errors = resolve_errors <> [] in
+  (* --topology: validate the digest against what is loaded (see Flags). The
+     entry module's declarations are flat under its own name; imports arrive
+     wrapped in DMod, so an empty prefix qualifies them by their module. *)
+  (match !topology_file with
+   | None -> ()
+   | Some path ->
+     (match March_forge.Topology.read_digest path with
+      | Error m -> Printf.eprintf "error: --topology: %s\n" m; exit 1
+      | Ok topo ->
+        let entry_name = desugared.March_ast.Ast.mod_name.March_ast.Ast.txt in
+        let index =
+          March_forge.Topology.index_of_decls
+            [ (entry_name, desugared.March_ast.Ast.mod_decls); ("", extra_decls) ]
+        in
+        (match March_forge.Topology.unresolved_names ~index topo with
+         | [] -> ()
+         | errs ->
+           List.iter (fun e -> Printf.eprintf "%s: error: topology: %s\n" path e) errs;
+           exit 1)));
   let desugared =
     { desugared with
       March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
@@ -1984,6 +1975,15 @@ let compile filename =
      module (prelude is unwrapped into global scope, so its decls ride in the
      entry module's list).  See Typecheck.stdlib_source_files. *)
   March_typecheck.Typecheck.stdlib_source_files := stdlib_span_files stdlib_decls;
+  (* A shipped stdlib module checked AS THE ENTRY (`march --check
+     stdlib/<mod>.march`) is spelled the way the command line spelled it, not
+     the way [load_stdlib] stamped its own copy, so the set above does not
+     contain it; add it, or the stdlib-only builtin gate rejects the module's
+     own legitimate calls to `pid_of_int` and friends. [user_diag_file] tests
+     the entry file first, so its diagnostics are still shown. *)
+  if is_shipped_stdlib_file filename then
+    March_typecheck.Typecheck.stdlib_source_files :=
+      filename :: !March_typecheck.Typecheck.stdlib_source_files;
   (* Run the typecheck-side capability ceiling ONLY in typecheck-only modes
      (`--check`/`--check-json`/`--emit-core-ast`), where the `--compile`
      path's TIR-side [Cap_ceiling] never runs. On a full `--compile` this
@@ -1993,6 +1993,7 @@ let compile filename =
      `--no-cap-strict` for parity. *)
   March_typecheck.Typecheck.cap_strict_ceiling :=
     !cap_strict && (!do_check || !check_json || !emit_core_ast_file <> None);
+  March_typecheck.Typecheck.dump_role_authority := !dump_role_authority;
   (* This pipeline runs [Panic_surface_by_proof] below, so the typechecker's
      syntactic ban must leave the contracted names to it.  Set BEFORE
      [check_module_full] — the flag is read during that call.  [run_check_cmd]
@@ -3074,6 +3075,7 @@ let compile filename =
               ^ (opt_file2 (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
               ^ (if hcr_identity_flags <> "" then opt_file2 hcr_identity_c2 else "")
+              ^ (opt_file2 (Filename.concat runtime_dir "march_reclaim.c"))  (* epoch reclamation of dead procs; referenced by march_scheduler.c *)
             in
             (* User FFI shim sources from forge.toml [[ffi]] (--ffi-c). *)
             let user_ffi_c =
@@ -4099,6 +4101,14 @@ let run_check_cmd ?(emit_caps = false) files =
   let no_shadowing = List.length stdlib_decls = stdlib_decls_unshadowed_count in
   if not (List.for_all is_shipped_stdlib_file files) then
     check_no_prelude_collision_decls ~stdlib_decls all_decls;
+  (* As in [compile]: a shipped stdlib module named on the command line is
+     the stdlib's for the stdlib-only builtin gate, whatever spelling the
+     command line used. *)
+  List.iter (fun f ->
+      if is_shipped_stdlib_file f then
+        March_typecheck.Typecheck.stdlib_source_files :=
+          f :: !March_typecheck.Typecheck.stdlib_source_files)
+    files;
   (* Build a synthetic module of just the user's own decls and type-check it,
      seeded from the cached stdlib typecheck env (see [get_stdlib_tc_env])
      instead of re-typechecking stdlib combined with user code from scratch —
@@ -4534,6 +4544,8 @@ let () =
   let prog_args = ref None in
   let specs = [
     ("--dump-tir",     Arg.Set dump_tir,     " Print TIR instead of evaluating");
+    ("--dump-role-authority", Arg.Set dump_role_authority,
+     " Typecheck and print the effective-authority report per granted protocol role (implies --check)");
     ("--dump-phases",  Arg.Set dump_phases,  " Serialize each IR stage to march-phases/phases.json");
     ("--timings",      Arg.Set do_timings,   " Print per-stage compilation times to stderr");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
@@ -4555,6 +4567,8 @@ let () =
     ("--args",       Arg.Rest_all (fun l -> prog_args := Some l),
                      " Pass every remaining argument to the program as its argv; must come last");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
+    ("--topology",   Arg.String (fun p -> topology_file := Some p),
+     "<json>  Read a forge topology digest (.forge/topology.json, schema version 1) and check that every name it binds is declared in the loaded modules");
     ("--cap-strict", Arg.Set cap_strict, " Treat `needs` as a hard ceiling (the DEFAULT since 2026-08-08; accepted for compatibility and to state the intent explicitly)");
     ("--no-cap-strict", Arg.Clear cap_strict, " Do not enforce `needs` as a ceiling: allow a module's emitted code to use capabilities it does not declare");
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
@@ -4616,6 +4630,8 @@ let () =
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   (* --target js implies --compile (skip JIT, emit .mjs) *)
   if !target_str = "js" || !target_str = "javascript" then do_compile := true;
+  (* --dump-role-authority is a report the typechecker prints; nothing runs. *)
+  if !dump_role_authority then do_check := true;
   (* Propagate --pmap-threshold to the interpreter (codegen reads it via
      emit_module's ~pmap_threshold argument below). *)
   (* --emit-io-ops regenerates stdlib/io_ops.march from builtin_cap_table; the
