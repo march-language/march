@@ -32,6 +32,17 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **Reaching an actor you were never handed a Pid for now takes a capability.**
+  `Actor.whereis`, `Actor.registered`, `Actor.list`, `Actor.top_by_mailbox` and
+  `Actor.over_mailbox` take a `Cap(Actor.Introspect)` as their first argument, and the
+  `pid_of_int` builtin is replaced by `Actor.pid_from_int(c, n)`. The cap is minted once
+  from the root capability: `let c = Actor.introspect(io)` in `main(io : Cap(IO))`, then
+  forward `c` (a function that takes it declares `needs Actor.Introspect`). A Pid is
+  thereby an unforgeable reference: code that holds neither a Pid nor the cap can message
+  nobody it was not introduced to. The raw builtins (`pid_of_int`, `actor_pid_indices`,
+  `actor_whereis`, `actor_registered`) are internal to the standard library; calling one
+  is a typecheck error naming the wrapper to use. `Actor.register` and `unregister` are
+  unchanged.
 - **`Config` values are read through typed keys (breaking).** The untyped
   `Config.put(:ns, :name, value)` / `Config.get(:ns, :name)` let a value
   stored as an `Int` be read back as any type, e.g. handed to `is_alive` as a
@@ -95,6 +106,17 @@ git log is authoritative for exact commits.
   about 18 KB more, and `Vault.size`/`Vault.keys` walk shard by shard, so their result
   is a recent count rather than a single instant's snapshot of the whole table.
 ### Added
+- **Actors can declare an `on_stop do ... end` terminate callback.** It runs
+  once on a graceful stop (`Actor.stop`, a self-stop, or a supervisor's
+  tree teardown), on the actor's own thread after the queued messages have
+  drained, with the final `state` and `self` in scope, so an actor can flush,
+  checkpoint, or hand work back before it dies. Semantics follow OTP's
+  `terminate/2`: it may send (and wait on an `Actor.call`); a panic inside it
+  is logged to stderr and the actor still dies normally (no restart, and a
+  tree teardown carries on); it never runs on `kill`, a crash, or a
+  `shutdown brutal` child; and it counts against the stop's `timeout_ms` /
+  child `shutdown` budget, past which the actor is killed. Same behaviour
+  interpreted and compiled. See "Stopping an Actor" in the actors chapter.
 - **The type checker can reserve a builtin for the standard library.** A reference to
   a reserved builtin from user code, the REPL included, is an error that names the
   stdlib function to use instead:
@@ -202,6 +224,11 @@ git log is authoritative for exact commits.
   counts records freed and `stat(9)` those waiting to be. An `Actor.reply`
   whose caller has already given up and exited is now dropped cleanly, as
   is a reply to a value that is not a reply reference.
+- **A self-stop in the interpreter now drains like the compiled backend.**
+  `Actor.stop(self, t)` from a handler used to kill the actor on the spot in
+  `march run`, discarding its queue and the state the handler was about to
+  return; it now finishes the handler, drains, and then dies, as compiled
+  binaries already did.
 - **`OrderedMap.keys`, `OrderedMap.values` and `OrderedMap.from_list` work.**
   All three passed a two-parameter lambda where a pair callback was expected
   (and `from_list` had `List.fold_left`'s arguments in the wrong order), so
@@ -479,6 +506,9 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **The actors chapter now documents `Actor.stop`** (graceful, synchronous,
+  reverse-order supervisor teardown), which shipped 2026-09-08 without a
+  section of its own.
 - **A design for distributed authority, topology and hot deploys, and its groundwork
   plan** (`specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md`,
   `specs/plans/2026-09-21-distributed-deploys-groundwork-plan.md`). The remaining

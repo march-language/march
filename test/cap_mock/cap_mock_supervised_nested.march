@@ -16,6 +16,8 @@ mod CapMockSupervisedNested do
   --           makes possible (the apply fn drops what it is handed)
   --   out   : the grandchild of a Top spawned outside, sent to AFTER the
   --           block closes -> real
+  needs Actor.Introspect
+  needs IO
   needs IO.Console
 
   actor Leaf do
@@ -47,34 +49,35 @@ mod CapMockSupervisedNested do
     end
   end
 
-  fn field_pid(p, name) do
+  fn field_pid(intro : Cap(Actor.Introspect), p, name) do
     match get_actor_field(p, name) do
-      None    -> pid_of_int(-1)
-      Some(n) -> pid_of_int(n)
+      None    -> Actor.pid_from_int(intro, -1)
+      Some(n) -> Actor.pid_from_int(intro, n)
     end
   end
 
-  fn mid_of(top) do field_pid(top, "m") end
-  fn leaf_of(top) do field_pid(mid_of(top), "l") end
+  fn mid_of(intro : Cap(Actor.Introspect), top) do field_pid(intro, top, "m") end
+  fn leaf_of(intro : Cap(Actor.Introspect), top) do field_pid(intro, mid_of(intro, top), "l") end
 
-  fn main(c : Cap(IO.Console)) do
+  fn main(c : Cap(IO.Console), io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let outside = spawn(Top)
     let mock = cap_impl(c, { cap_ops_empty(c) with
       print_line: Some(fn s -> print("MOCK[" ++ s ++ "]\n")) })
     with_cap(mock, fn _ -> do
       let inside = spawn(Top)
-      send(leaf_of(inside), Say("in"))
+      send(leaf_of(intro, inside), Say("in"))
       run_until_idle()
-      kill(mid_of(inside))
+      kill(mid_of(intro, inside))
       run_until_idle()
-      send(leaf_of(inside), Say("again"))
+      send(leaf_of(intro, inside), Say("again"))
       run_until_idle()
-      kill(mid_of(inside))
+      kill(mid_of(intro, inside))
       run_until_idle()
-      send(leaf_of(inside), Say("third"))
+      send(leaf_of(intro, inside), Say("third"))
       run_until_idle()
     end)
-    send(leaf_of(outside), Say("out"))
+    send(leaf_of(intro, outside), Say("out"))
     run_until_idle()
   end
 end

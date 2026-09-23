@@ -3248,6 +3248,95 @@ static void *hcr_enter(march_actor_meta *meta, uint32_t *out_version) {
     return fn;
 }
 
+/* ── on_stop (terminate) callbacks ─────────────────────────────────────
+ * specs/lang/actors.md, "on_stop". One entry per actor TYPE that declares
+ * `on_stop do ... end`, keyed by that type's dispatch closure — the value
+ * lower_actor's spawn glue stores in word 2 of every record it allocates, so
+ * a record identifies its type without any layout change. Registered from
+ * the spawn glue (which a supervisor restart re-runs), before march_spawn
+ * creates the record's metadata; looked up once, at a graceful death. A
+ * handful of actor types per program at most, so a locked linear table. */
+typedef struct { void *dispatch; void *on_stop; } march_on_stop_entry;
+static march_on_stop_entry *g_on_stop_tbl = NULL;
+static int g_on_stop_len = 0, g_on_stop_cap = 0;
+static pthread_mutex_t g_on_stop_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void march_register_actor_on_stop(void *dispatch_clo, void *on_stop_clo) {
+    pthread_mutex_lock(&g_on_stop_mu);
+    for (int i = 0; i < g_on_stop_len; i++) {
+        if (g_on_stop_tbl[i].dispatch == dispatch_clo) {
+            pthread_mutex_unlock(&g_on_stop_mu);
+            return;
+        }
+    }
+    if (g_on_stop_len == g_on_stop_cap) {
+        int ncap = g_on_stop_cap ? g_on_stop_cap * 2 : 8;
+        march_on_stop_entry *n = realloc(g_on_stop_tbl, (size_t)ncap * sizeof *n);
+        if (!n) {
+            pthread_mutex_unlock(&g_on_stop_mu);
+            fputs("march: out of memory registering an on_stop callback\n", stderr);
+            exit(1);
+        }
+        g_on_stop_tbl = n;
+        g_on_stop_cap = ncap;
+    }
+    g_on_stop_tbl[g_on_stop_len].dispatch = dispatch_clo;
+    g_on_stop_tbl[g_on_stop_len].on_stop = on_stop_clo;
+    g_on_stop_len++;
+    pthread_mutex_unlock(&g_on_stop_mu);
+}
+
+static void *on_stop_lookup(void *dispatch_clo) {
+    void *cb = NULL;
+    pthread_mutex_lock(&g_on_stop_mu);
+    for (int i = 0; i < g_on_stop_len; i++) {
+        if (g_on_stop_tbl[i].dispatch == dispatch_clo) {
+            cb = g_on_stop_tbl[i].on_stop;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_on_stop_mu);
+    return cb;
+}
+
+/* Run [actor]'s on_stop callback [clo] on its own green thread [self].
+ *
+ * A panic inside it is LOGGED and the death proceeds as if it had returned
+ * (decided 2026-09-22, on OTP's terminate/2): the actor is dying anyway, and
+ * a broken terminate must neither wedge a shutdown nor turn a NORMAL death
+ * into a crash a supervisor would restart. So the callback gets its own crash
+ * trap for its duration — for EVERY actor, not only supervised ones, whose
+ * handler panics are otherwise process-fatal.
+ *
+ * The stop deadline is enforced from outside: march_actor_stop's waiter kills
+ * the actor when it passes. A callback parked in `receive()` then leaves
+ * through the actor loop's stop_jmp (march_actor_recv), which lands at
+ * actor_green_thread's `stopped:` — still live below this frame — and that
+ * path restores crash_jmp. */
+static void actor_run_on_stop(march_proc *self, void *actor, void *clo) {
+    jmp_buf on_stop_jmp;
+    jmp_buf *saved_crash = self->crash_jmp;
+    self->crash_jmp = &on_stop_jmp;
+    if (setjmp(on_stop_jmp) == 0) {
+        /* Same closure convention (and the same immortal static closure) as
+         * the dispatch call in actor_green_thread: fn(closure, actor). */
+        typedef void (*on_stop_fn_t)(void *, void *);
+        on_stop_fn_t fn = *(on_stop_fn_t *)((char *)clo + 16);
+        march_incrc(clo);
+        fn(clo, actor);
+    } else {
+        const char *m = self->crash_message ? self->crash_message : "panic";
+        size_t mlen = self->crash_message ? self->crash_message_len
+                                          : sizeof("panic") - 1;
+        fprintf(stderr, "march: actor on_stop callback failed (the actor still"
+                " stops): panic: %.*s\n", (int)mlen, m);
+        free(self->crash_message);
+        self->crash_message = NULL;
+        self->crash_message_len = 0;
+    }
+    self->crash_jmp = saved_crash;
+}
+
 static void actor_green_thread(void *arg) {
     march_actor_meta *meta = (march_actor_meta *)arg;
     void *actor = meta->actor;
@@ -3584,6 +3673,36 @@ static void actor_green_thread(void *arg) {
         }
 
         march_sched_tick();
+    }
+
+    /* on_stop: the loop left because a graceful stop finished its drain —
+     * still alive, draining, with the deadline armed and not yet passed. Not
+     * after a kill (the actor is no longer alive), not at scheduler shutdown
+     * (not draining), and not once the deadline has gone: the stopper is
+     * about to kill it, so the callback would only race that. */
+    if (self && actor_alive_load(actor)
+            && atomic_load_explicit(&meta->draining, memory_order_acquire)) {
+        int64_t deadline = atomic_load_explicit(&meta->drain_deadline_ms,
+                                                memory_order_relaxed);
+        if (deadline != MARCH_DRAIN_NOT_ARMED
+                && (deadline < 0 || march_now_ms() < deadline)) {
+            void *cb = on_stop_lookup((void *)(uintptr_t)a[2]);
+            if (cb) {
+                /* Consume the stop request that woke this loop. It is a
+                 * sticky flag on the proc, so left set it would make the
+                 * callback's first blocking receive — a `receive()`, or the
+                 * reply wait inside an Actor.call used to flush somewhere —
+                 * return "stop" at once instead of blocking until the
+                 * deadline. Cleared FIRST and liveness re-checked AFTER: a
+                 * kill (the deadline, or anyone's kill) that lands in
+                 * between re-sets the flag and is seen here or by the
+                 * callback's next receive, never lost. */
+                atomic_store_explicit(&self->stop_requested, 0,
+                                      memory_order_seq_cst);
+                if (actor_alive_load(actor))
+                    actor_run_on_stop(self, actor, cb);
+            }
+        }
     }
 
     /* The loop has exited (actor killed, or woken without a message at

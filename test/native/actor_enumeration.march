@@ -1,4 +1,4 @@
--- Process enumeration: Actor.list() / actor_pid_indices().
+-- Process enumeration: Actor.list(c), with c minted by Actor.introspect(io).
 -- specs/todos/2026-08-12-per-actor-introspection-and-alarms.md
 --
 -- docs/overload-resilience.md tells readers to poll mailbox_size(pid) to
@@ -14,6 +14,7 @@
 -- spawned, but its own green thread has not necessarily run yet, so is_alive
 -- can still be false for a few microseconds after spawn.
 mod Main do
+  needs IO
   needs IO.Console
 
   actor W do
@@ -25,24 +26,25 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let a = spawn(W)
     let b = spawn(W)
     let c = spawn(W)
     run_until_idle()
 
-    println("indices: " ++ to_string(actor_pid_indices()))
-    println("count: " ++ int_to_string(List.length(Actor.list())))
-    println("depths: " ++ to_string(List.map(Actor.list(), fn p -> mailbox_size(p))))
+    println("indices: " ++ to_string(List.map(Actor.list(intro), fn p -> pid_to_int(p))))
+    println("count: " ++ int_to_string(List.length(Actor.list(intro))))
+    println("depths: " ++ to_string(List.map(Actor.list(intro), fn p -> mailbox_size(p))))
 
     -- A dead actor leaves the snapshot.
     kill(b)
     run_until_idle()
-    println("after kill: " ++ to_string(actor_pid_indices()))
-    println("count: " ++ int_to_string(List.length(Actor.list())))
+    println("after kill: " ++ to_string(List.map(Actor.list(intro), fn p -> pid_to_int(p))))
+    println("count: " ++ int_to_string(List.length(Actor.list(intro))))
 
     -- And a stopped one does too, so a shutdown is visible to monitoring.
     println("stopped c: " ++ bool_to_string(Actor.stop(c, 5000)))
-    println("after stop: " ++ to_string(actor_pid_indices()))
+    println("after stop: " ++ to_string(List.map(Actor.list(intro), fn p -> pid_to_int(p))))
   end
 end

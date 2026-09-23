@@ -13,6 +13,8 @@
 -- restart, BOTH names must still resolve and answer, not just the one that
 -- actually crashed.
 mod Main do
+  needs Actor.Introspect
+  needs IO
   needs IO.Console
 
   type PingReq = PingReq
@@ -50,8 +52,8 @@ mod Main do
     end
   end
 
-  fn resolve_and_call(name) do
-    match Actor.whereis(name) do
+  fn resolve_and_call(intro : Cap(Actor.Introspect), name) do
+    match Actor.whereis(intro, name) do
       None -> println(name ++ ": lost after restart")
       Some(p) ->
         match Actor.call(p, PingReq, 5000) do
@@ -61,10 +63,11 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let boss = spawn(Boss)
-    let a1 = pid_of_int(child_int(boss, "a"))
-    let b1 = pid_of_int(child_int(boss, "b"))
+    let a1 = Actor.pid_from_int(intro, child_int(boss, "a"))
+    let b1 = Actor.pid_from_int(intro, child_int(boss, "b"))
     println("registered a: " ++ bool_to_string(Actor.register(a1, "child-a")))
     println("registered b: " ++ bool_to_string(Actor.register(b1, "child-b")))
 
@@ -72,7 +75,7 @@ mod Main do
     send(b1, Poison())
     run_until_idle()
 
-    resolve_and_call("child-a")
-    resolve_and_call("child-b")
+    resolve_and_call(intro, "child-a")
+    resolve_and_call(intro, "child-b")
   end
 end

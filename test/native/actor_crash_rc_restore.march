@@ -28,6 +28,7 @@
 -- false, the second line has stopped proving anything and this test needs a
 -- new shape, not a new .expected.
 mod Main do
+  needs IO
   needs IO.Console
   needs Ffi
   needs IO.Foreign
@@ -63,13 +64,14 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let boss = spawn(Boss)
     let victim = current_child(boss)
     -- Minted BEFORE the reading: pid_of_int takes a reference, and `send`
     -- keeps the one it is handed
     -- (specs/progress/2026-09-14-pid-ownership-settled-send-borrows-self-owned.md).
-    let victim_pid = pid_of_int(victim)
+    let victim_pid = Actor.pid_from_int(intro, victim)
     let rc_before = actor_rc(victim)
     println("victim is multiply owned: " ++ bool_to_string(rc_before > 1))
 
@@ -91,7 +93,7 @@ mod Main do
     -- means for supervision.
     let replacement = current_child(boss)
     println("restarted: " ++ bool_to_string(replacement != victim))
-    println("replacement alive: " ++ bool_to_string(is_alive(pid_of_int(replacement))))
+    println("replacement alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, replacement))))
     -- `victim_pid` is still held here, so the program's own reference was
     -- part of both counts above; only the live actor's own went at death.
     println("victim pid still held: " ++ bool_to_string(is_alive(victim_pid) == false))

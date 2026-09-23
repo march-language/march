@@ -803,9 +803,10 @@ entry state (and after the pool `Env`, 4.1, in a topology app). Consequences:
   against its own `Cap` parameters, exactly as `main` does today; a body with the wrong
   parameter list does not typecheck against `run_R`. `check_role_grants` (II.2) reduces
   to "walk from the body with its parameters as the grant", which is `check_main_grant`
-  with a different root, and the parser addition is all that is new. `Cap` types unify
-  across the lattice (verified, II.3), so the enforcement is the walk's, never the type's;
-  the parameters make the grant visible and give tests something to substitute.
+  with a different root, and the parser addition is all that is new. `Cap` types do NOT
+  unify across the lattice (corrected 2026-09-22, see II.3: amplifying a cap is a type
+  error), so the type and the walk each enforce it on their own; the parameters make the
+  grant visible and give tests something to substitute.
 - **The composition root is explicit end to end**: generated `main` → hook `Env` → role
   caps → actor `init(env)` (D24). Every role-bound actor receives its authority as values,
   so the interception limitation "an actor captures one cap at its spawn site"
@@ -915,17 +916,30 @@ declaring module mint it. So:
 - stdlib/actor.march declares `proof cap Introspect` and one minting function,
   `Actor.introspect(io : Cap(IO)) : Cap(Introspect)`. The `Cap(IO)` parameter puts `IO`
   in the closure of everything that reaches `introspect`, so a role body or hook under a
-  narrower grant fails the grant walk (II.2); `Cap` types themselves unify across the
-  lattice, so this is the walk's doing, not the type's. The composition root (`main`, or
-  the generated `main`) holds `Cap(IO)`, which is the object-capability shape: authority
-  is handed out from the root.
+  narrower grant fails the grant walk (II.2). **Corrected 2026-09-22:** it also fails to
+  typecheck before the walk runs. `Cap(IO.NetListen)` does not unify with `Cap(IO)`
+  (`Cap` is an ordinary type constructor); amplifying a cap is a type error, and the walk
+  rejects the program independently. G2 pins both
+  (specs/progress/2026-09-22-cap-narrowed-signature-grant-test.md). D31's conclusion
+  stands; the earlier sentence "`Cap` types themselves unify across the lattice, so this
+  is the walk's doing" was wrong. The composition root (`main`, or the generated `main`)
+  holds `Cap(IO)`, which is the object-capability shape: authority is handed out from the
+  root.
 - The forging builtins take the cap: `pid_of_int(c : Cap(Actor.Introspect), n)`,
   `Actor.list(c)`, `Actor.whereis(c, name)`, `Actor.registered(c)`. The raw builtins
-  become stdlib-internal. **Open:** there is no "builtin callable only from the stdlib"
-  mechanism today; the cheapest is a typecheck rule keyed on the builtin's name and the
-  caller's module being under the stdlib root, next to Check 6.
-- `cluster_node.march` mints once in `start` (it already needs `Cap(IO)` there) and keeps
-  the cap in its `ClusterHandle`. `session_node.march`'s two sites get it from the node.
+  become stdlib-internal: `Typecheck_builtins.stdlib_only` (G3,
+  specs/progress/2026-09-22-stdlib-only-builtins.md), a reference gate keyed on the
+  builtin's name and the referencing declaration's file being the stdlib's. **Landed
+  2026-09-22** (specs/progress/2026-09-22-dd-step02-unforgeable-references.md); the
+  wrapper is `Actor.pid_from_int(c, n)`, since a module-level `fn pid_of_int` shadows
+  the builtin for its own body at runtime.
+- `cluster_node.march` and `session_node.march` keep their raw `pid_of_int` calls: they
+  are the stdlib, which the gate exempts by construction. `ClusterNode.start(cfg)` takes
+  no `Cap(IO)` (this plan said it did), so it cannot mint, and `ClusterNodeActor`'s
+  `init` must build a placeholder `ClusterHandle` before `Boot`, which no code outside
+  `Actor` could give a cap field. Threading the cap would have changed `start`'s arity
+  for every caller for no enforcement gain (the cap is erased at runtime and the gate is
+  the boundary).
 - `Actor.register(pid, name)` stays unprivileged: registering is not authority.
   `whereis` is.
 
@@ -1065,12 +1079,14 @@ per entry in its pool's `caps`**, in the order the topology lists them (or a sin
 passes `cap_narrow(c)` for each. `caps` is the written list, or the derived one from the
 role/hook solve (D22). `forge topology check` verifies the hook's signature against it, so
 a hook cannot receive more than its pool allows, and cannot call `Actor.introspect`
-(II.1) unless the pool's `caps` is `IO`. **Verified 2026-09-21:** `Cap(IO.NetListen)`
-*does* unify with `Cap(IO)` (a narrowed cap passes where `Cap(IO)` is expected; the
-checker only hints). So the check is not a type error: a signature `Cap(IO)` position
-counts toward the callee's own capability closure, so a hook or role body that reaches
-`Actor.introspect` carries `IO` in its closure and fails the grant walk (II.2). D31 holds
-through the walk, not through unification.
+(II.1) unless the pool's `caps` is `IO`. **Corrected 2026-09-22 (G2):** `Cap(IO.NetListen)`
+does *not* unify with `Cap(IO)`; a narrowed cap passed where `Cap(IO)` is expected is a
+type error (`expected IO but got IO.NetListen`), so amplifying a cap is refused by the
+checker. Independently, a signature `Cap(IO)` position counts toward the callee's own
+capability closure, so a hook or role body that reaches `Actor.introspect` carries `IO`
+in its closure and fails the grant walk (II.2) as well. D31 holds through both; the
+2026-09-21 "verified: does unify" note here was wrong
+(specs/progress/2026-09-22-cap-narrowed-signature-grant-test.md).
 The generated `main` itself is excluded from HCR boundaries (`is_entry_fn`,
 lib/tir/llvm_toplevel.ml:840), which is right: it never reloads, it restarts.
 

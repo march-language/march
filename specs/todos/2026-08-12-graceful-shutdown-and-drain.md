@@ -1,4 +1,4 @@
-`[P2]` # Graceful shutdown: the `terminate` callback and reload drain-first
+`[P2]` # Graceful shutdown: reload drain-first (the `terminate` callback landed)
 
 > **Partially landed 2026-09-08.** `Actor.stop(pid, timeout_ms)` now marks an
 > actor draining (new sends refused), works off the queued messages until the
@@ -6,32 +6,29 @@
 > supervisor stops its children first in reverse declaration order, each with
 > its own `shutdown` budget from the child spec. See
 > `specs/progress/2026-09-08-graceful-shutdown-and-drain.md`. This file is
-> trimmed to the two pieces that did NOT land.
+> trimmed to what did NOT land (the `terminate` callback followed on
+> 2026-09-22).
 
 ## What remains
 
-> Reviewed 2026-09-10, unchanged: both pieces below are still open. The
-> `terminate` callback is a full pipeline feature (parser, desugar,
-> typecheck, eval, lower, codegen, runtime) and the reload drain-first story
-> needs a *pause* state distinct from `draining` (a reloading actor must keep
-> accepting sends, not refuse them), so neither fit the batch that closed the
-> neighbouring actor todos.
+> Updated 2026-09-22: the `terminate` callback (piece 1) has landed; only the
+> reload drain-first story remains. It needs a *pause* state distinct from
+> `draining` (a reloading actor must keep accepting sends, not refuse them).
 
 
-### 1. No `terminate`-style callback
+### 1. ~~No `terminate`-style callback~~ — landed 2026-09-22
 
-An actor can finish the messages it has queued, but it cannot run code of its
-own at shutdown — it cannot flush a buffer, checkpoint state, or hand
-unfinished work back to a queue. That needs a new actor-level declaration (an
-`on_stop`-shaped handler) and a decision about what it may do: whether it can
-send, whether its own failure aborts the shutdown, and whether it runs on the
-brutal path as well as the drained one.
-
-It is also the missing observability channel for teardown ORDER. Reverse
-declaration order is implemented and asserted today only via a
-`MARCH_SUP_TRACE` stderr line (`test/native/actor_stop_tree.order.expected`),
-because there is no in-language event at teardown time to observe it with: a
-child that printed from a handler races main on the compiled backend.
+Actors now declare `on_stop do ... end`; see
+`specs/progress/2026-09-22-actor-on-stop-terminate-callback.md` and "Stopping an
+Actor" in `specs/lang/actors.md`. Semantics decided 2026-09-22 on OTP's
+`terminate/2`: it may send; a failure inside it is logged and the NORMAL death
+proceeds; it does not run on the brutal path; it is bounded by the stop
+timeout. One interaction with the item below: under `--hot-reload` the
+callback the runtime holds (`march_register_actor_on_stop`, keyed by the
+dispatch closure) is the one from the code the actor was spawned with, so
+after a reload that changes the state layout it would run against migrated
+state. The reload work should look the callback up through the current code
+version (as dispatch does via `hcr_enter`) or skip it for a migrated actor.
 
 ### 2. Hot code reload has no drain-first story
 
@@ -81,6 +78,12 @@ type, so design them together.
 
 ## Acceptance
 
-An actor with N queued messages that is `stop`ped processes all N (or hits a
-stated deadline) before dying; a supervision tree stops children in reverse
-declaration order; `kill` keeps today's immediate semantics.
+The drain half is met and shipped (2026-09-08, see the progress file above):
+`Actor.stop` works a queued mailbox off (or hits its deadline) before a NORMAL
+death, a supervision tree stops children in reverse declaration order, and
+`kill` keeps its immediate semantics.
+
+Still to meet (the `terminate` bullet was met 2026-09-22):
+
+- **reload drain:** a reload waits for the in-flight handler and queue under a
+  pause state (sends still accepted) before swapping code.

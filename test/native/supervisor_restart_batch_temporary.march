@@ -8,6 +8,7 @@
 -- so filtering only at notify leaves the respawn loop resurrecting the
 -- temporary child every time an unrelated sibling crashes.
 mod Main do
+  needs IO
   needs IO.Console
 
   actor Worker do
@@ -42,20 +43,21 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let boss = spawn(Boss)
     let a1 = child_int(boss, "a")
     let t1 = child_int(boss, "t")
 
     -- Crash the permanent child; one_for_all sweeps both.
-    send(pid_of_int(a1), Poison())
+    send(Actor.pid_from_int(intro, a1), Poison())
     run_until_idle()
 
     let a2 = child_int(boss, "a")
     let t2 = child_int(boss, "t")
     println("permanent sibling respawned: " ++ bool_to_string(a2 != a1))
-    println("permanent sibling alive: " ++ bool_to_string(is_alive(pid_of_int(a2))))
+    println("permanent sibling alive: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, a2))))
     println("temporary sibling not respawned: " ++ bool_to_string(t2 == t1))
-    println("temporary sibling dead: " ++ bool_to_string(is_alive(pid_of_int(t1)) == false))
+    println("temporary sibling dead: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, t1)) == false))
   end
 end

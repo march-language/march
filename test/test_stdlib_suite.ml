@@ -1249,20 +1249,26 @@ let test_eval_actor_terminal_reason () =
   | v -> Alcotest.fail ("unexpected result: " ^ March_eval.Eval_runtime.value_to_string v)
 
 let test_eval_pid_to_int_roundtrip () =
-  let env = eval_module {|mod Test do
+  (* `Actor.pid_from_int` needs the stdlib `Actor` module in scope, and takes
+     the `Cap(Actor.Introspect)` that `main` mints from its `Cap(IO)`; an IO
+     capability is erased to unit at runtime, so `main` is applied to VUnit. *)
+  let actor_decl = load_stdlib_file_for_test "actor.march" in
+  let env = eval_with_stdlib [actor_decl] {|mod Test do
+    needs IO
     actor A do
       state { x : Int }
       init { x: 0 }
       on Noop() do { x: state.x } end
     end
-    fn main() do
+    fn main(io : Cap(IO)) do
+      let intro = Actor.introspect(io)
       let pa = spawn(A)
       let n = pid_to_int(pa)
-      let back = pid_of_int(n)
+      let back = Actor.pid_from_int(intro, n)
       (n, to_string(pa) == "Pid(" ++ int_to_string(n) ++ ")", is_alive(back))
     end
   end|} in
-  match call_fn env "main" [] with
+  match call_fn env "main" [March_eval.Eval.VUnit] with
   | March_eval.Eval.VTuple [March_eval.Eval.VInt _; March_eval.Eval.VBool disp; March_eval.Eval.VBool alive] ->
     Alcotest.(check bool) "pid_to_int is the Pid(N) display index" true disp;
     Alcotest.(check bool) "pid_of_int(pid_to_int(p)) is p" true alive

@@ -1,0 +1,128 @@
+-- A panic inside `on_stop` is logged and the actor still dies; a supervisor
+-- tearing down its tree carries on past it. specs/lang/actors.md, "on_stop".
+--
+-- The failure is reported on stderr ("march: actor on_stop callback failed
+-- ..."), which this golden does not capture; what it pins is the part a
+-- program can observe: stop returns, the actor is dead, the process is still
+-- running (an unsupervised handler panic would have ended it on the compiled
+-- backend), the siblings stopped after it still ran their own on_stop, and the
+-- NORMAL death restarted nothing.
+mod Main do
+  needs IO.Console
+
+  type GetLog = GetLog
+
+  actor Log do
+    state { lines : List(String) }
+    init  { lines: [] }
+
+    on Read(reply_to) do
+      Actor.reply(reply_to, List.reverse(state.lines))
+      state
+    end
+
+    on Note(s : String) do
+      { lines: Cons(s, state.lines) }
+    end
+  end
+
+  fn note(s : String) do
+    match Actor.whereis("log") do
+      Some(l) -> send(l, Note(s))
+      None    -> None
+    end
+  end
+
+  actor Bad do
+    state { n : Int }
+    init  { n: 0 }
+
+    on BadWork(k : Int) do
+      { n: state.n + k }
+    end
+
+    on_stop do
+      note("bad: on_stop starts, n=" ++ int_to_string(state.n))
+      panic("on_stop blew up")
+    end
+  end
+
+  actor First do
+    state { n : Int }
+    init  { n: 0 }
+
+    on FirstWork(k : Int) do
+      { n: state.n + k }
+    end
+
+    on_stop do
+      note("first: on_stop")
+    end
+  end
+
+  actor Last do
+    state { n : Int }
+    init  { n: 0 }
+
+    on LastWork(k : Int) do
+      { n: state.n + k }
+    end
+
+    on_stop do
+      note("last: on_stop")
+    end
+  end
+
+  actor Sup do
+    state { a : Int, b : Int, c : Int }
+    init  { a: 0, b: 0, c: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      First a
+      Bad b
+      Last c
+    end
+
+    on_stop do
+      note("sup: on_stop")
+    end
+  end
+
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn dump(log) do
+    match Actor.call(log, GetLog, 5000) do
+      Ok(ls) -> List.each(ls, fn l -> println("  log: " ++ l))
+      Err(e) -> println("  log error: " ++ e)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let log = spawn(Log)
+    Actor.register(log, "log")
+
+    println("-- unsupervised: the panic is logged, the actor still dies")
+    let p = spawn(Bad)
+    send(p, BadWork(4))
+    println("stop: " ++ bool_to_string(Actor.stop(p, 5000)))
+    println("dead: " ++ bool_to_string(is_alive(p) == false))
+    println("main still running")
+    dump(log)
+
+    println("-- supervised: the tree teardown proceeds past the panic")
+    let sup = spawn(Sup)
+    let b1 = child_int(sup, "b")
+    println("stop: " ++ bool_to_string(Actor.stop(sup, 5000)))
+    println("supervisor dead: " ++ bool_to_string(is_alive(sup) == false))
+    println("bad child dead: " ++ bool_to_string(is_alive(pid_of_int(b1)) == false))
+    println("bad child not restarted: " ++ bool_to_string(child_int(sup, "b") == b1))
+    dump(log)
+  end
+end

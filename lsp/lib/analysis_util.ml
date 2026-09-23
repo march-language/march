@@ -399,7 +399,7 @@ let rec iter_decl_exprs (f : Ast.expr -> unit) (d : Ast.decl) =
   | Ast.DActor (_, _, adef, _) ->
     iter_expr f adef.Ast.actor_init;
     List.iter (fun (h : Ast.actor_handler) -> iter_expr f h.ah_body)
-      adef.Ast.actor_handlers
+      (Ast.actor_body_handlers adef)
   | Ast.DTest (t, _) -> iter_expr f t.Ast.test_body
   | Ast.DDescribe (_, decls, _) -> List.iter (iter_decl_exprs f) decls
   | Ast.DMod (_, _, decls, _) -> List.iter (iter_decl_exprs f) decls
