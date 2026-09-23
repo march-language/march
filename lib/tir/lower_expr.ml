@@ -951,13 +951,17 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
   (* Actor names are upper-case identifiers, parsed as ECon.  Its args, if
      any, are the actor's `init` arguments (D24; see ast.ml's ESpawn).
      Lower spawn(ActorName, a, b) → call to ActorName_spawn(a, b) *)
-  | Ast.ESpawn ((Ast.ECon ({ txt = actor_name; _ }, _, _) | Ast.EVar { txt = actor_name; _ }), _) ->
+  | Ast.ESpawn ((Ast.ECon ({ txt = actor_ref; _ }, _, _) | Ast.EVar { txt = actor_ref; _ }), _) ->
+    (* [actor_ref] is qualified when spawning a nested actor from outside its
+       module ([spawn(Inner.Box)]); the glue and the mailbox table use the
+       declared bare name. *)
+    let actor_name = Tir_names.actor_decl_name actor_ref in
     let init_args = match e with
       | Ast.ESpawn (Ast.ECon (_, args, _), _) -> args
       | _ -> [] in
     lower_atoms_k env init_args (fun init_atoms ->
     let spawn_fn : Tir.var = {
-      v_name = actor_name ^ Tir_names.actor_spawn_suffix;
+      v_name = Tir_names.actor_spawn_fn_name actor_name;
       v_ty = Tir.TPtr Tir.TUnit;
       v_lin = Tir.Unr
     } in
