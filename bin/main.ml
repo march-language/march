@@ -3019,6 +3019,10 @@ let compile filename =
             let http_c      = Filename.concat runtime_dir "march_http.c" in
             let extras_c2   = Filename.concat runtime_dir "march_extras.c" in
             let compress_c2 = Filename.concat runtime_dir "march_compress.c" in
+            let blake3_c2 = Filename.concat runtime_dir "march_blake3.c" in
+            let blake3_impl_c2 = Filename.concat runtime_dir "third_party/blake3/blake3.c" in
+            let blake3_dispatch_c2 = Filename.concat runtime_dir "third_party/blake3/blake3_dispatch.c" in
+            let blake3_portable_c2 = Filename.concat runtime_dir "third_party/blake3/blake3_portable.c" in
             let opt_file2 f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
             let sched_c2  = Filename.concat runtime_dir "march_scheduler.c" in
             let ffi_c2    = Filename.concat runtime_dir "march_ffi.c" in
@@ -3049,7 +3053,10 @@ let compile filename =
               ^ (opt_file2 ffi_c2)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_dispatch.c") else "")  (* HCR dispatch table *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_reload.c")    else "")  (* HCR reload server *)
-              ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_blake3.c")    else "")  (* BLAKE3 for server-side cap_root recompute *)
+              ^ (if not !compile_so then
+                   opt_file2 blake3_c2 ^ opt_file2 blake3_impl_c2
+                   ^ opt_file2 blake3_dispatch_c2 ^ opt_file2 blake3_portable_c2
+                 else "")  (* BLAKE3 for server-side cap_root recompute *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_cap_lattice.c") else "")  (* cap subsumption/normalize for ACTIVATE4 admission *)
               ^ opt_file2 (Filename.concat runtime_dir "march_ctx_escape.c")  (* ~H contextual escapers; referenced by march_extras.c *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "tweetnacl.c")       else "")  (* ed25519 for ACTIVATE verification *)
@@ -3122,10 +3129,14 @@ let compile filename =
             let ucontext_flag = ucontext_link_flags () in
             let dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
             let san_flag = sanitize_clang_flag () in
-            (* BLAKE3 flags: needed when march_blake3.c is included (server-only,
-               guarded by not !compile_so above, same as march_reload.c). *)
-            let blake3_c2 = Filename.concat runtime_dir "march_blake3.c" in
-            let blake3_flags2 = if not !compile_so && Sys.file_exists blake3_c2 then blake3_link_flags () else "" in
+            (* BLAKE3 is compiled from the vendored portable sources.  Disable
+               target-specific assembly so one source set cross-compiles on
+               every supported Linux architecture. *)
+            let blake3_flags2 =
+              if not !compile_so && Sys.file_exists blake3_c2 then
+                " -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2"
+                ^ " -DBLAKE3_NO_AVX512 -DBLAKE3_USE_NEON=0"
+              else "" in
             (* User FFI linker flags from forge.toml [[ffi]] (--ffi-link), e.g. -lz. *)
             let ffi_link = String.concat "" (List.rev_map (fun f -> " " ^ f) !ffi_link_flags) in
             (* When compiling user FFI shims, put the runtime dir on the include
@@ -3388,7 +3399,8 @@ let compile filename =
               else
                 (* Keep march_tls.c + march_compress.c (they link against the
                    target sysroot); drop the blake3/reload HCR pair. *)
-                let dropped = ["march_blake3.c"; "march_reload.c"] in
+                let dropped = ["march_blake3.c"; "blake3.c"; "blake3_dispatch.c";
+                               "blake3_portable.c"; "march_reload.c"] in
                 extra_c_files
                 |> String.split_on_char ' '
                 |> List.filter (fun p ->
