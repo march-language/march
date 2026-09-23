@@ -63,10 +63,15 @@ mod TopologyMoveA do
         let ranked = Topology.rank("Echo.Server", [ClusterNode.node_id_of(me), ClusterNode.node_id_of(other)])
         let first = if List.take(ranked, 1) == [ClusterNode.node_id_of(me)] do "first" else "second" end
         println(me ++ ": ranked " ++ first)
-        -- Wait (up to 3 s) for the other node's placement marker: the node
-        -- that places second then decides with the first one's marker
-        -- already visible, and never offers the role even briefly.
-        wait_marker(h, Topology.marker("Echo.Server", ClusterNode.node_id_of(other)), 3000)
+        -- The node ranked second waits for the first one's placement marker
+        -- before placing, so it decides with that marker visible and never
+        -- offers the role even briefly (a bounded wait on both sides raced
+        -- under load: both placed before seeing each other). The first
+        -- places at once. Without such a wait a brief duplicate offer is
+        -- correct behaviour (count = 1 is not a lock), just not a golden.
+        if first == "second" do
+          wait_marker(h, Topology.marker("Echo.Server", ClusterNode.node_id_of(other)), 60000)
+        else () end
         Topology.place(h, [ Topology.role("Echo.Server", Topology.count(1),
                               fn () -> Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st))) ])
         watch(h, me, false, false, unix_time_ms(), Env.require("TOPOLOGY_STOP_FILE"))
