@@ -321,6 +321,12 @@ git log is authoritative for exact commits.
   body line such as `tick: A -> B : Int` after the branch's first message was read as the
   start of the next branch and failed with "I got stuck here"; it now continues the branch,
   as an unlabelled `A -> B : Int` line already did.
+- **Two modules can each name their capability dictionary `Ops`.** A
+  `proof cap X with T` resolved `T` by its bare name first, so when two modules
+  each declared a same-named dictionary record, one module's `cap_impl` /
+  `cap_dict` bound to the other's record and failed with "expected `Ops` but got
+  `Ops`" (or, worse, accepted the other module's fields). The declaring module's
+  own record now wins.
 - **A nested module can use its own `proof cap` without declaring it in
   `needs`.** `proof cap Key` in `mod Vault` has always meant `Vault` may take a
   `Cap(Vault.Key)` without also writing `needs Vault.Key`, but that only worked
