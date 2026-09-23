@@ -9536,3 +9536,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (name test_hcr_abi)
  (modules test_hcr_abi)
  (libraries march_tir alcotest))
+
+; Cross-target HCR smoke (requires the configured Linux sysroots for baseline
+; artifacts; the patch half is sysroot-independent).  Keep this off the
+; default runtest alias because it intentionally exercises external toolchains.
+(rule
+ (alias cross-hcr)
+ (deps ../bin/main.exe cross_hcr_compile.sh native/hcr_smoke.march)
+ (action (run sh %{dep:cross_hcr_compile.sh})))

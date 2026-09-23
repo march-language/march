@@ -3129,14 +3129,6 @@ let compile filename =
             let ucontext_flag = ucontext_link_flags () in
             let dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
             let san_flag = sanitize_clang_flag () in
-            (* BLAKE3 is compiled from the vendored portable sources.  Disable
-               target-specific assembly so one source set cross-compiles on
-               every supported Linux architecture. *)
-            let blake3_flags2 =
-              if not !compile_so && Sys.file_exists blake3_c2 then
-                " -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2"
-                ^ " -DBLAKE3_NO_AVX512 -DBLAKE3_USE_NEON=0"
-              else "" in
             (* User FFI linker flags from forge.toml [[ffi]] (--ffi-link), e.g. -lz. *)
             let ffi_link = String.concat "" (List.rev_map (fun f -> " " ^ f) !ffi_link_flags) in
             (* When compiling user FFI shims, put the runtime dir on the include
@@ -3148,11 +3140,19 @@ let compile filename =
                build host: a cross Linux .so/binary needs Linux linker flags even
                when built on macOS, and vice versa. *)
             let xtarget = parse_target !target_str in
+            let hcr_abi =
+              match March_tir.Hcr_abi.of_target xtarget with
+              | Ok abi -> Some abi
+              | Error _ -> None
+            in
             let link_is_linux =
-              March_tir.Llvm_emit.target_is_linux xtarget
-              || (match xtarget with
-                  | March_tir.Llvm_emit.Native -> Sys.file_exists "/proc/version"
-                  | _ -> false) in
+              match hcr_abi with
+              | Some abi -> abi.platform = March_tir.Hcr_abi.Elf
+              | None ->
+                March_tir.Llvm_emit.target_is_linux xtarget
+                || (match xtarget with
+                    | March_tir.Llvm_emit.Native -> Sys.file_exists "/proc/version"
+                    | _ -> false) in
             let rdynamic_flag =
               (* Export all symbols so dlopen'd patch .so can resolve back to server.
                  Pass via -Wl, so the flag goes straight to the linker, not the clang driver.
@@ -3356,7 +3356,7 @@ let compile filename =
                §5 (P3). *)
             let is_cross = March_tir.Llvm_emit.target_is_linux xtarget in
             let cross_sysroot =
-              if not is_cross then None
+              if not is_cross || !compile_so then None
               else match linux_arch_str xtarget with
                 | None -> None
                 | Some arch ->
@@ -3381,26 +3381,32 @@ let compile filename =
                correct DT_NEEDED soname.  zstd/brotli stay off for cross (zlib is
                the only mandatory codec; gzip/deflate is pure zlib). *)
             let openssl_flags2 = match cross_sysroot with
-              | None -> openssl_flags2
+              | None -> if is_cross && !compile_so then "" else openssl_flags2
               | Some sr ->
                 Printf.sprintf " -I%s/include %s/lib/libssl.so.3 %s/lib/libcrypto.so.3"
                   sr sr sr
             in
             let compress_flags2 = match cross_sysroot with
-              | None -> compress_flags2
+              | None -> if is_cross && !compile_so then "" else compress_flags2
               | Some sr ->
                 Printf.sprintf " -I%s/include %s/lib/libz.so.1" sr sr
             in
-            (* blake3 stays host-discovered for native; zeroed for cross (its .c
-               is dropped below — no target libblake3). *)
-            let blake3_flags2 = if is_cross then "" else blake3_flags2 in
+            (* The vendored portable implementation is used for every target;
+               never probe or link a host libblake3 during a cross build. *)
+            let blake3_flags2 =
+              if Sys.file_exists blake3_c2 then
+                " -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2"
+                ^ " -DBLAKE3_NO_AVX512 -DBLAKE3_USE_NEON=0"
+              else "" in
             let extra_c_files =
-              if not is_cross then extra_c_files
+              if not is_cross || not !compile_so then extra_c_files
               else
-                (* Keep march_tls.c + march_compress.c (they link against the
-                   target sysroot); drop the blake3/reload HCR pair. *)
+                (* A patch keeps the undefined-symbol model: optional host
+                   libraries and the HCR server are supplied by the baseline,
+                   so do not compile their target-specific implementations. *)
                 let dropped = ["march_blake3.c"; "blake3.c"; "blake3_dispatch.c";
-                               "blake3_portable.c"; "march_reload.c"] in
+                               "blake3_portable.c"; "march_reload.c";
+                               "march_tls.c"; "march_compress.c"] in
                 extra_c_files
                 |> String.split_on_char ' '
                 |> List.filter (fun p ->
