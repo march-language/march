@@ -344,6 +344,21 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **`csv_next_row`'s result now matches against `CsvEof` / `Row`.** The builtin
+  is typed with the qualified `Csv.CsvRow`, and builtin signatures skipped the
+  qualified-to-bare canonicalization that written type annotations get, so
+  matching its result against the bare constructors was a type error both ways.
+  `stdlib/csv.march` carried 12 such errors, hidden because stdlib diagnostics
+  are filtered, which left `Csv.each_row`, `Csv.read_all` and
+  `Csv.each_row_with_header` unchecked. Builtin signatures now go through the
+  same canonicalization, so any future builtin typed with a qualified name is
+  covered too.
+- **Two modules can each name their capability dictionary `Ops`.** A
+  `proof cap X with T` resolved `T` by its bare name first, so when two modules
+  each declared a same-named dictionary record, one module's `cap_impl` /
+  `cap_dict` bound to the other's record and failed with "expected `Ops` but got
+  `Ops`" (or, worse, accepted the other module's fields). The declaring module's
+  own record now wins.
 - **A nested module can use its own `proof cap` without declaring it in
   `needs`.** `proof cap Key` in `mod Vault` has always meant `Vault` may take a
   `Cap(Vault.Key)` without also writing `needs Vault.Key`, but that only worked
