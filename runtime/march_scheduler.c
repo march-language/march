@@ -1709,6 +1709,10 @@ march_proc *march_sched_spawn_current(void (*fn)(void *), void *arg) {
     return sched_spawn_common(fn, arg, 0, 0, 2);
 }
 
+march_proc *march_sched_spawn_daemon_unpinned(void (*fn)(void *), void *arg) {
+    return sched_spawn_common(fn, arg, 1, 0, 1);
+}
+
 /* ── Per-thread scheduler loop with work-stealing ────────────────────── */
 
 /* Wake every parked daemon proc that has an empty mailbox.  Called from the

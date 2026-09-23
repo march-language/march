@@ -3408,15 +3408,17 @@ static void hcr_hard_kill(uint32_t upto);
 
 typedef struct { uint64_t gen; int64_t at; } hcr_hard_arg;
 
-static void *hcr_hard_thread(void *arg) {
+/* The hard deadline's timer: a green proc parked until the deadline (the
+ * delayed_restart_thread pattern), not an OS thread -- march_hcr_drain can be
+ * called from a green thread, and an ASAN build of the actor harness died
+ * whenever a pthread was created from one (the thread itself did nothing).
+ * A daemon and unpinned: it neither keeps the process alive nor holds an
+ * epoch, and a drain never stops it. */
+static void hcr_hard_proc(void *arg) {
     hcr_hard_arg h = *(hcr_hard_arg *)arg;
     free(arg);
-    for (;;) {
-        int64_t left = h.at - march_now_ms();
-        if (left <= 0) break;
-        struct timespec ts = { (time_t)(left / 1000), (long)(left % 1000) * 1000000L };
-        nanosleep(&ts, NULL);
-    }
+    while (march_now_ms() < h.at)
+        march_sched_park_self_until(h.at);
     uint32_t upto = 0;
     pthread_mutex_lock(&g_hcr_drain_mu);
     for (int i = 0; i < g_hcr_ndrains; i++)
@@ -3426,7 +3428,6 @@ static void *hcr_hard_thread(void *arg) {
         }
     pthread_mutex_unlock(&g_hcr_drain_mu);
     if (upto) hcr_hard_kill(upto);
-    return NULL;
 }
 
 void march_hcr_drain(uint32_t upto, int64_t soft_ms, int64_t hard_ms) {
@@ -3461,11 +3462,7 @@ void march_hcr_drain(uint32_t upto, int64_t soft_ms, int64_t hard_ms) {
         hcr_hard_arg *h = (hcr_hard_arg *)malloc(sizeof(*h));
         if (!h) return;
         h->gen = gen; h->at = now + hard_ms;
-        pthread_t tid; pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        if (pthread_create(&tid, &attr, hcr_hard_thread, h) != 0) free(h);
-        pthread_attr_destroy(&attr);
+        if (!march_sched_spawn_daemon_unpinned(hcr_hard_proc, h)) free(h);
     }
 }
 
@@ -3499,6 +3496,7 @@ uint32_t march_epoch_holds(void) {
  * caller already holds a pin on [target] (a marker's), which the actor takes
  * over; otherwise one is taken here, and a target that has lost every holder
  * is replaced by the current epoch. */
+__attribute__((noinline))
 static void hcr_advance(march_actor_meta *meta, int64_t *a, march_proc *self,
                         uint32_t target, int have_pin, int alive) {
     uint32_t cur = atomic_load_explicit(&self->code_epoch, memory_order_relaxed);
@@ -3550,6 +3548,7 @@ static void hcr_advance(march_actor_meta *meta, int64_t *a, march_proc *self,
 }
 
 /* The actor dequeued a marker for [epoch]. */
+__attribute__((noinline))
 static void hcr_on_marker(march_actor_meta *meta, int64_t *a, march_proc *self,
                           uint32_t epoch, int alive) {
     atomic_fetch_sub_explicit(&g_hcr_markers_live, 1, memory_order_relaxed);
@@ -3568,6 +3567,7 @@ static void hcr_on_marker(march_actor_meta *meta, int64_t *a, march_proc *self,
 
 /* A forced marker (the soft drain deadline): take every marker still queued,
  * in order, as if it were at the front, then catch up to current. */
+__attribute__((noinline))
 static void hcr_force_advance(march_actor_meta *meta, int64_t *a,
                               march_proc *self, int alive) {
     void *msgs[64]; uint32_t eps[64];
@@ -3592,11 +3592,21 @@ static void hcr_force_advance(march_actor_meta *meta, int64_t *a,
 
 /* At every message boundary, before the next receive.  Cheap when the actor
  * is at the current epoch (the steady state). */
-static void hcr_boundary(march_actor_meta *meta, int64_t *a, march_proc *self,
-                         int alive) {
+static void hcr_boundary_slow(march_actor_meta *meta, int64_t *a,
+                              march_proc *self, int alive);
+
+static inline void hcr_boundary(march_actor_meta *meta, int64_t *a,
+                                march_proc *self, int alive) {
     uint32_t cur = atomic_load_explicit(&self->code_epoch, memory_order_relaxed);
     if (!cur) return;
     if (cur >= march_epoch_current() && !meta->hcr_pending_epoch) return;
+    hcr_boundary_slow(meta, a, self, alive);
+}
+
+__attribute__((noinline))
+static void hcr_boundary_slow(march_actor_meta *meta, int64_t *a,
+                              march_proc *self, int alive) {
+    uint32_t cur;
     if (atomic_load_explicit(&self->epoch_holds, memory_order_relaxed) > 0) return;
     if (meta->hcr_pending_epoch) {
         uint32_t p = meta->hcr_pending_epoch;
@@ -3613,6 +3623,7 @@ static void hcr_boundary(march_actor_meta *meta, int64_t *a, march_proc *self,
         hcr_force_advance(meta, a, self, alive);
 }
 
+__attribute__((noinline))
 static void hcr_defer(march_actor_meta *meta, void *msg, uint32_t epoch) {
     hcr_deferred *d = (hcr_deferred *)malloc(sizeof(*d));
     if (!d) { fputs("march: out of memory (hot-reload defer)\n", stderr); exit(1); }
@@ -3647,11 +3658,27 @@ static int64_t g_hcr_none_cell[3] __attribute__((aligned(16))) = {
 /* Apply II.4.6's message rules to a dequeued user message stamped
  * [mepoch].  HCR_DISPATCH: dispatch *msgp (possibly converted) at the
  * actor's epoch; HCR_CONSUMED: deferred, or dropped. */
-static int hcr_route(march_actor_meta *meta, int64_t *a, march_proc *self,
-                     void **msgp, uint32_t mepoch, int alive) {
+static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
+                          void **msgp, uint32_t mepoch, int alive,
+                          uint32_t slot, uint32_t cur);
+
+/* The cold helpers above and hcr_route_slow are noinline on purpose: inlined
+ * into actor_green_thread (an ASAN -O1 build does it) their locals -- the
+ * forced marker's two 64-entry arrays among them -- grew the actor loop's
+ * frame past a green thread's initial stack, so every actor paid a stack
+ * growth for a path that runs once per deploy. */
+static inline int hcr_route(march_actor_meta *meta, int64_t *a, march_proc *self,
+                            void **msgp, uint32_t mepoch, int alive) {
     uint32_t slot = meta->dispatch_name_id;
     uint32_t cur = atomic_load_explicit(&self->code_epoch, memory_order_relaxed);
     if (!slot || !cur || mepoch == cur) return HCR_DISPATCH;
+    return hcr_route_slow(meta, a, self, msgp, mepoch, alive, slot, cur);
+}
+
+__attribute__((noinline))
+static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
+                          void **msgp, uint32_t mepoch, int alive,
+                          uint32_t slot, uint32_t cur) {
     uint32_t mse = march_dispatch_msg_schema_epoch(slot);
     if (mepoch > cur) {
         /* D30: a sender that has already advanced, and a message type that
@@ -3703,6 +3730,7 @@ static int hcr_route(march_actor_meta *meta, int64_t *a, march_proc *self,
 
 /* The actor is dying: give back the pending marker's pin and dispose of the
  * deferred queue.  (The proc's own epoch pin is dropped at the reap.) */
+__attribute__((noinline))
 static void hcr_actor_exit(march_actor_meta *meta) {
     if (meta->hcr_pending_epoch) {
         march_epoch_unpin(meta->hcr_pending_epoch);

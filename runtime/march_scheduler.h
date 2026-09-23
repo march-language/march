@@ -811,6 +811,10 @@ int64_t march_sched_stop_epoch(uint32_t upto);
 /* Spawn with the CURRENT epoch rather than the spawner's: a supervisor
  * restart, which D11 says runs the new code. */
 march_proc *march_sched_spawn_current(void (*fn)(void *), void *arg);
+/* A runtime-internal timer proc: a daemon (does not keep the scheduler alive)
+ * that is unpinned (code_epoch 0: holds no epoch, and a drain never stops
+ * it).  The hot-reload hard drain deadline runs on one. */
+march_proc *march_sched_spawn_daemon_unpinned(void (*fn)(void *), void *arg);
 void *march_sched_recv_user_seq(uint64_t *seq_out);
 void *march_sched_recv_user_until_seq(int64_t deadline_ms, uint64_t *seq_out);
 /* As march_sched_requeue_user_front, restoring each message's stamp. */
