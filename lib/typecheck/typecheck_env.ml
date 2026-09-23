@@ -411,6 +411,12 @@ type env = {
       IO-lattice narrowing ([Cap(IO) -> Cap(IO.Network)]) is unaffected in every
       position, including laundering through a polymorphic function.  A shared
       hashtable (like [cap_closures]) so every env copy sees the same tags. *)
+  actor_init_sigs : (string, (string * ty) list) Hashtbl.t;
+  (** Actor name -> its `init(p1 : T1, …)` parameters (D24), recorded by the
+      [DActor] arm and read by `spawn(A, …)` and by a supervise block's
+      `Child name(args)` spec to check the supplied arguments.  An actor with
+      the bare `init { … }` form has the entry [].  Shared hashtable, like
+      [cap_narrow_factory_fns], so every env copy sees it. *)
   cap_narrow_factory_fns : (string, Ast.span) Hashtbl.t;
   (** Names of user functions whose body IS (or launders) a [cap_narrow] result —
       a "cap-narrow factory" (e.g. `fn mk(cap) do cap_narrow(cap) end`).  A
@@ -686,6 +692,7 @@ let make_env errors type_map = {
   linear_ok_ids = Hashtbl.create 16;
   linear_generic_uses = Hashtbl.create 256;
   cap_producer_ivars = Hashtbl.create 16;
+  actor_init_sigs = Hashtbl.create 16;
   cap_narrow_factory_fns = Hashtbl.create 16;
   cap_dicts = [];
   cap_dict_decl_sites = ref [];

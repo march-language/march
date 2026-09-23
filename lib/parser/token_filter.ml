@@ -132,8 +132,22 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         | Parser.UPPER_IDENT _ -> true
         | _ -> false
       in
+      (* `init` followed by `(` is the parameterised actor init
+         (`init(env : T) { ... }`, D24), a distinct token so the grammar can
+         tell it from a bare `init` expression without an LR(1) conflict; see
+         parser.mly's [actor_init].  Same one-token lookahead, opposite
+         direction: this PROMOTES rather than demotes. *)
+      let promote_init () =
+        let nxt = orig lexbuf in
+        pending := Some (nxt, lexbuf.Lexing.lex_start_p, lexbuf.Lexing.lex_curr_p);
+        restore ();
+        match nxt with
+        | Parser.LPAREN -> Parser.INIT_PAREN
+        | _ -> Parser.INIT
+      in
       match tok with
       | Parser.ROLE      -> demote "role"      ~keep_when:after_upper_ident
+      | Parser.INIT      -> promote_init ()
       | Parser.MAY       -> demote "may"       ~keep_when:after_crash
       | Parser.ORWORD    -> demote "or"        ~keep_when:after_crash
       | Parser.TEST      -> demote "test"      ~keep_when:after_string
@@ -253,7 +267,7 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     | Parser.LPAREN | Parser.LBRACKET | Parser.LBRACE | Parser.MINUS
     | Parser.ATOM _
     (* soft_lower_name keywords also usable as a var-pattern binder *)
-    | Parser.STATE | Parser.INIT | Parser.LOOP | Parser.ON
+    | Parser.STATE | Parser.INIT | Parser.INIT_PAREN | Parser.LOOP | Parser.ON
     | Parser.PROTOCOL | Parser.APP | Parser.AS | Parser.WITH
     | Parser.WHEN | Parser.USE | Parser.IN | Parser.FOR
     | Parser.TAG -> true

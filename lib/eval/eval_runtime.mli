@@ -61,6 +61,7 @@ type actor_inst = {
   ai_name : string;
   ai_def : March_ast.Ast.actor_def;
   ai_env_ref : env ref;
+  ai_init_args : value list;
   mutable ai_state : value;
   mutable ai_alive : bool;
   mutable ai_terminal_reason : monitor_down_reason;
@@ -104,7 +105,12 @@ type dyn_sup_state = {
 val dyn_sup_registry : (string, dyn_sup_state) Hashtbl.t
 val dyn_sup_vpid_map : (int, string) Hashtbl.t
 
-val spawn_child_actor : ?crashed_pid:int option -> string -> int -> int
+val eval_actor_init_state : env ref -> March_ast.Ast.actor_def -> string -> value list -> value
+(** [eval_actor_init_state env_ref def name args] evaluates [def]'s `init`
+    with its `init(...)` parameters (D24) bound to [args]; arity-checked. *)
+
+val spawn_child_actor :
+  ?crashed_pid:int option -> ?init_args:value list option -> string -> int -> int
 
 (** [crash_actor pid reason] tears the actor down and runs whatever
     supervision applies — restart strategy, monitor DOWN messages, resource

@@ -12,6 +12,36 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **The topology file, static half** (build step 7 of the distributed-deploys plan).
+  `topology.toml` next to `forge.toml` binds each offered `Protocol.Role` to a
+  `body` function or an `actor`, groups roles into `[pool.*]` sections
+  (`start` hook, `serves` incl. `"*"`, `initiates`, `caps`, `isolate`, `public`
+  ports, `place = { on = "label" }` / `{ count = n }` placement rules), with
+  `[drain]` deadlines and `[backend]`; `topology.<env>.toml` overlays deep-merge
+  tables and replace arrays. `forge topology check` validates it against the
+  project's sources with `file:line` errors (unknown keys are errors, unbound
+  served roles, names that resolve to nothing, labels no host carries, `count`
+  above the host count, isolated pools sharing a role, a written `initiates`
+  narrower than the code) and warns about unlabelled protocol steps; it runs
+  automatically in `forge build`, `forge run` and `forge deploy hot` and writes
+  the digest `.forge/topology.json` (schema version 1, documented in
+  `specs/features/topology.md`). `forge topology export --json` adds each pool's
+  derived `initiates` and the pool connectivity graph; `forge topology gen`
+  writes `systemd` units, `ufw` scripts, DigitalOcean firewall JSON
+  (`do-firewall`) or a `compose` file, or runs a `forge-topology-<target>`
+  plugin from PATH with the export on stdin. `march --topology <json>` reads the
+  digest and checks its version and bound names (nothing more yet). See
+  `docs/topology.md`.
+- **Parameterised actor `init`.** `init(env : T, n : Int) { … }` declares
+  parameters that `spawn(A, env, 3)` supplies; they are in scope in the init
+  expression, and every argument is checked against the matching parameter.
+  Arity mistakes are reported with the actor's `init` signature (`spawn(A)` on
+  an actor that takes parameters, or extra arguments on one that takes none).
+  A supervised child can be given its arguments in the `supervise` block
+  (`Worker w(db)`, with the supervisor's own `init` params in scope), and a
+  restart re-supplies the same values. `init()` is the zero-parameter spelling
+  of the bare form. Decision D24 of the distributed-deploys plan; see the
+  actors and supervision chapters of the language reference.
 - **Per-role grants in protocols: `role R needs IO.X, ...`.** A protocol can
   now say what each role's code may do, with the same capability paths (and
   the same did-you-mean on a typo) as a module's `needs`. The line comes
@@ -150,6 +180,16 @@ git log is authoritative for exact commits.
   `` `pid_of_int` is internal to the standard library; use `Actor.list(cap)` ``. No
   builtin is reserved yet: the raw actor-reference builtins will be once their
   capability-taking wrappers exist.
+- **A warning when a function's body fixes a type variable its signature
+  names.** `fn bad(xs : List(a)) : List(a) do [0 - 5] end` used to typecheck
+  silently as `List(Int) -> List(Int)`, with the mistake surfacing only as a
+  mismatch at some caller. It now warns at the `a` in the signature, naming
+  the type the body gave it (`Int`) with a hint to write that type or make the
+  body generic. Two signature variables that the body makes equal
+  (`fn second(x : a, y : b) : a do y end`) warn too. Only variables you wrote
+  in the signature are checked, and not when the body already has a type
+  error. The warning code is `annotated_tyvar_fixed`. Signature type variables
+  are planned to become rigid later, which will make this an error.
 - **A choreography role's first state now has a name: `<P>_<Role>.Entry`.** A role
   body's signature used to have to spell the state `register` yields, which meant
   working out `S_` plus the first step of that role's own projection
@@ -240,6 +280,13 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A nested module can use its own `proof cap` without declaring it in
+  `needs`.** `proof cap Key` in `mod Vault` has always meant `Vault` may take a
+  `Cap(Vault.Key)` without also writing `needs Vault.Key`, but that only worked
+  when `Vault` was the file's top module. Nested inside another module, every
+  such use was rejected with "`Cap(Vault.Key)` used in module `Vault` but
+  `Vault.Key` is not declared in `needs`". Uses from any other module still
+  need the `needs` line.
 - **A finished task or a dead actor no longer keeps its process record
   forever.** Every green thread's bookkeeping record (256 bytes) used to be
   kept for the life of the program once the thread ended, so a server that
@@ -264,7 +311,10 @@ git log is authoritative for exact commits.
   The test meant to catch this typechecked `ordered_map.march` in isolation,
   where a call into another stdlib module resolves to an unconstrained type
   variable and checks nothing; it now typechecks each file inside the whole
-  stdlib, as the compiler does.
+  stdlib, as the compiler does. `values` was found independently by the new
+  `annotated_tyvar_fixed` warning, which saw the signature's `v` fixed to a
+  function type; annotating a call (`let vs : List(String) =
+  OrderedMap.values(m)`) was rejected outright.
 
 - **A `MARCH_SANITIZE=1` compile no longer returns a cached ThreadSanitizer
   binary.** The compile cache recorded only *whether* `MARCH_SANITIZE` was

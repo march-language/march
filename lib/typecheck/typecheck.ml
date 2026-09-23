@@ -2837,8 +2837,23 @@ let rec infer_expr env (e : Ast.expr) : ty =
          `send(dead_pid, M)` decoded as Some while the interpreter said None. *)
       TCon ("Option", [t_unit])
 
-    | Ast.ESpawn (actor, _) ->
+    | Ast.ESpawn (actor, sp) ->
+      (* spawn(A, a, b) carries the `init` arguments as the name ctor's args
+         (see ast.ml).  Peel them off before inferring the bare name: the
+         actor's nullary ctor registration would otherwise report them as a
+         constructor-arity mismatch instead of against `init`'s signature. *)
+      let actor, init_args = match actor with
+        | Ast.ECon (n, (_ :: _ as args), csp) -> (Ast.ECon (n, [], csp), args)
+        | other -> (other, [])
+      in
       ignore (infer_expr env actor);
+      (match actor with
+       | Ast.ECon (n, [], _) | Ast.EVar n ->
+         check_spawn_args env ~site_span:sp
+           ~spelling:(Printf.sprintf "`spawn(%s%s)`" n.txt
+                        (if init_args = [] then "" else ", …"))
+           n.txt init_args
+       | _ -> List.iter (fun a -> ignore (infer_expr env a)) init_args);
       (* Both backends dispatch `spawn` by the actor's *name*, resolved at
          compile time (it selects a statically generated `<Actor>_spawn`
          function).  There is no runtime actor-descriptor value, so the argument
@@ -3808,7 +3823,48 @@ and infer_block env exprs =
     ignore (infer_expr env e);
     infer_block env rest
 
-(** Bind lambda parameters into the environment, returning (types, env). *)
+(** Check the `init` arguments supplied for actor [actor_name] — by
+    `spawn(A, args)` or by a supervise block's `A field(args)` — against the
+    signature the [DActor] arm recorded (D24).  An unknown actor is not
+    reported here: the name itself is inferred by the caller and gets the
+    unknown-constructor diagnostic there. *)
+and check_spawn_args env ~site_span ~spelling (actor_name : string)
+    (args : Ast.expr list) : unit =
+  match Hashtbl.find_opt env.actor_init_sigs actor_name with
+  | None -> List.iter (fun a -> ignore (infer_expr env a)) args
+  | Some sig_ ->
+    let n_sig = List.length sig_ and n_args = List.length args in
+    if n_sig <> n_args then begin
+      List.iter (fun a -> ignore (infer_expr env a)) args;
+      let show_sig =
+        if sig_ = [] then "init { … }"
+        else
+          Printf.sprintf "init(%s) { … }"
+            (String.concat ", "
+               (List.map (fun (p, t) -> Printf.sprintf "%s : %s" p (pp_ty (repr t))) sig_))
+      in
+      let plural n = if n = 1 then "" else "s" in
+      Err.error env.errors ~span:site_span
+        (if sig_ = [] then
+           Printf.sprintf
+             "actor `%s` declares no `init` parameters, but %s supplies %d argument%s.\n\
+              Its init is `%s`; to take a value at spawn time, declare the \
+              parameters: `init(config : Config) { … }`."
+             actor_name spelling n_args (plural n_args) show_sig
+         else
+           Printf.sprintf
+             "actor `%s`'s init takes %d argument%s, but %s supplies %d.\n\
+              Its signature is `%s`."
+             actor_name n_sig (plural n_sig) spelling n_args show_sig)
+    end else
+      List.iter2 (fun a (p, t) ->
+          check_expr env a t
+            ~reason:(Some (RBuiltin
+                             (Printf.sprintf "the `init` parameter `%s` of actor `%s`"
+                                p actor_name))))
+        args sig_
+
+(* Bind lambda parameters into the environment, returning (types, env). *)
 and bind_lam_params env params =
   List.fold_right
     (fun p (tys, env) ->
@@ -3961,6 +4017,112 @@ let mark_trusted_linear_vars env (def : Ast.fn_def) ~fn_span ~fn_tvars vars =
                   v v def.fn_name.txt (pp_ty t'))))
       vars
 
+(** How a body failed to leave a signature type variable generic.
+    [Tyvar_concrete t]: the body fixed it to the non-variable type [t].
+    [Tyvar_aliased other]: the body unified it with [other], an
+    earlier-written type variable of the same signature. *)
+type tyvar_fixing =
+  | Tyvar_concrete of ty
+  | Tyvar_aliased of string
+
+(** The first span at which the signature of [def] mentions type variable
+    [v], searching the parameter annotations, the return annotation, and
+    the bounds in source order. *)
+let signature_tyvar_span (def : Ast.fn_def) v =
+  let rec find (t : Ast.ty) = match t with
+    | Ast.TyVar n when n.txt = v -> Some n.span
+    | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> None
+    | Ast.TyCon (_, ts) | Ast.TyTuple ts -> List.find_map find ts
+    | Ast.TyArrow (a, b) | Ast.TyNatOp (_, a, b) ->
+      (match find a with Some s -> Some s | None -> find b)
+    | Ast.TyRecord fs -> List.find_map (fun (_, t) -> find t) fs
+    | Ast.TyLinear (_, t) | Ast.TyRefine (t, _, _) -> find t
+  in
+  let params = match def.fn_clauses with
+    | c :: _ -> List.filter_map (function
+        | Ast.FPNamed p | Ast.FPDefault (p, _) -> p.param_ty
+        | Ast.FPPat _ -> None) c.Ast.fc_params
+    | [] -> [] in
+  let bounds = List.filter_map (fun ((n : Ast.name), _) ->
+      if n.txt = v then Some n.span else None) def.fn_bounds in
+  match List.find_map find (params @ Option.to_list def.fn_ret_ty) with
+  | Some s -> Some s
+  | None -> (match bounds with s :: _ -> Some s | [] -> None)
+
+(** The signature type variables of [def] ([fn_tvars], as [check_fn] built
+    them) that its now-checked body did not leave generic, in the order the
+    signature writes them.  Only variables written in the signature are
+    considered: a variable with no source occurrence there (none today, but
+    a desugar-synthesised annotation would be one) is skipped. *)
+let annotated_tyvar_fixings (def : Ast.fn_def) fn_tvars =
+  let seen = Hashtbl.create 8 in
+  let written = List.filter_map (fun (v, t) ->
+      if Hashtbl.mem seen v then None
+      else begin
+        Hashtbl.replace seen v ();
+        match signature_tyvar_span def v with
+        | Some sp -> Some (v, sp, t)
+        | None -> None
+      end) fn_tvars in
+  let ordered = List.sort (fun (_, (a : Ast.span), _) (_, (b : Ast.span), _) ->
+      compare (a.start_line, a.start_col) (b.start_line, b.start_col)) written in
+  let ids = Hashtbl.create 8 in
+  List.filter_map (fun (v, sp, t) ->
+      match repr t with
+      | TError -> None
+      | TVar { contents = Unbound (id, _) } ->
+        (match Hashtbl.find_opt ids id with
+         | Some other -> Some (v, sp, Tyvar_aliased other)
+         | None -> Hashtbl.replace ids id v; None)
+      | t' -> Some (v, sp, Tyvar_concrete t'))
+    ordered
+
+let rec ty_mentions_var t = match repr t with
+  | TVar _ -> true
+  | TCon (_, ts) | TTuple ts -> List.exists ty_mentions_var ts
+  | TArrow (a, b) | TNatOp (_, a, b) -> ty_mentions_var a || ty_mentions_var b
+  | TRecord fs -> List.exists (fun (_, t) -> ty_mentions_var t) fs
+  | TLin (_, t) | TRefine (t, _, _) -> ty_mentions_var t
+  | TError | TNat _ | TChan _ -> false
+
+(** Warn, at its first mention in the signature, about each type variable
+    of [def] that its body did not leave generic
+    (specs/todos/2026-09-18-typecheck-annotated-tyvars-flexible.md, option
+    (b)).  Both a variable fixed to a concrete type and one made equal to
+    another of the signature's variables are reported: each is a signature
+    that promises callers a freedom the body does not give them, and each
+    would be an error were annotation variables rigid. *)
+let warn_annotated_tyvar_fixings env (def : Ast.fn_def) fn_tvars =
+  List.iter (fun (v, span, fixing) ->
+      let message, note = match fixing with
+        | Tyvar_concrete t ->
+          let shown = pp_ty t in
+          Printf.sprintf
+            "The type variable `%s` in `%s`'s signature is not generic: the \
+             body fixes it to `%s`, so every caller gets `%s` in its place."
+            v def.fn_name.txt shown shown,
+          if ty_mentions_var t then
+            Printf.sprintf
+              "hint: write the type the body needs in place of `%s`, or make \
+               the body generic in `%s`." v v
+          else
+            Printf.sprintf
+              "hint: write `%s` in place of `%s` if that is what you mean, or \
+               make the body generic in `%s`." shown v v
+        | Tyvar_aliased other ->
+          Printf.sprintf
+            "The type variables `%s` and `%s` in `%s`'s signature are not \
+             independent: the body makes `%s` the same type as `%s`."
+            other v def.fn_name.txt v other,
+          Printf.sprintf
+            "hint: write `%s` in place of `%s` if they are meant to be the \
+             same type, or make the body generic in each." other v
+      in
+      Err.report env.errors
+        { Err.severity = Err.Warning; span; message; labels = [];
+          notes = [ note ]; code = Some "annotated_tyvar_fixed"; fix = None })
+    (annotated_tyvar_fixings def fn_tvars)
+
 (** Check a function definition.
 
     Strategy:
@@ -4049,6 +4211,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
          in `fn foo(x : a, y : a) : a when Eq(a)` maps to the same
          unification variable everywhere. *)
       let fn_tvars = ref [] in
+      let diag_mark = Err.mark env.errors in
 
       (* Pre-register explicit bound type variables from fn_bounds and build
          bound constraints.  Bounds like [s : ConnState] pre-register `s` in
@@ -4356,6 +4519,14 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       Hashtbl.replace env.type_map def.fn_name.span (repr fn_ty);
       (* Unify self_ty so recursive calls get the correct type *)
       unify env' ~span:fn_span self_ty fn_ty;
+
+      (* A signature type variable the body fixed is a signature that claims
+         more genericity than the function has; say so at the definition,
+         rather than leaving the first caller at another type to report a
+         mismatch at the call.  Skipped when the body reported an error: its
+         unifications are then unreliable evidence of what the author meant. *)
+      if not (Err.error_since env.errors diag_mark) then
+        warn_annotated_tyvar_fixings env def !fn_tvars;
 
       (* Generalize; attach bound constraints and any when-clause class constraints *)
       let all_constraints = bound_constraints @ class_constraints in
@@ -5552,12 +5723,47 @@ let rec check_decl env (d : Ast.decl) : env =
                    ci_is_actor_msg = true } in
         { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
       ) env_with_actor_ctor actor.actor_handlers in
+    (* `init(env : T, …)` (D24): the parameters are in scope in the init
+       expression (and in a supervise block's child `init` arguments, below),
+       and their types are recorded for `spawn(A, …)` to check against.  They
+       are bound exactly as a handler's parameters are ([bind_lam_param]), so
+       a linear parameter is tracked the same way. *)
+    let init_tvars = ref [] in
+    let init_sig =
+      List.map (fun (p : Ast.param) ->
+          let t = match p.param_ty with
+            | Some ann -> surface_ty env_with_ctors ~tvars:init_tvars ann
+            | None -> fresh_var env.level   (* the grammar requires one *)
+          in
+          (p.param_name.txt, t)) actor.actor_init_params
+    in
+    Hashtbl.replace env.actor_init_sigs name.txt init_sig;
+    let init_env =
+      List.fold_left2
+        (fun e (p : Ast.param) (_, t) -> bind_lam_param e p.param_name.span p (Some t))
+        env_with_ctors actor.actor_init_params init_sig
+    in
     (* Check init expression — must return the state record type.  Neither
        the init expr nor any handler body below is checked via [check_fn], so
        there is no enclosing function — see [with_no_caller]. *)
-    with_no_caller env_with_ctors (fun () ->
-      check_expr env_with_ctors actor.actor_init state_ty
+    with_no_caller init_env (fun () ->
+      check_expr init_env actor.actor_init state_ty
         ~reason:(Some (RBuiltin "actor init must return the initial state record")));
+    (* A supervise block's `Child name(args)` (D24): the args are the child's
+       `init` arguments, evaluated in the supervisor's spawn glue where the
+       supervisor's own `init` params are in scope.  Checked against the
+       child's recorded signature exactly as `spawn(Child, args)` is. *)
+    (match actor.actor_supervise with
+     | None -> ()
+     | Some sc ->
+       List.iter (fun (sf : Ast.supervise_field) ->
+           match sf.sf_ty with
+           | Ast.TyCon (child, []) ->
+             with_no_caller init_env (fun () ->
+               check_spawn_args init_env ~site_span:sf.sf_name.span
+                 ~spelling:(Printf.sprintf "`%s %s(…)`" child.txt sf.sf_name.txt)
+                 child.txt sf.sf_init_args)
+           | _ -> ()) sc.sc_fields);
     (* Check handlers with state and message params in scope *)
     List.iter (fun (h : Ast.actor_handler) ->
         let handler_env = bind_var "state" (Mono state_ty) env_with_ctors in
@@ -5735,8 +5941,14 @@ let rec check_decl env (d : Ast.decl) : env =
         (* Return the list of opaque type names for constructor hiding below *)
         List.map (fun ((tname : Ast.name), _) -> tname.txt) sdef.sig_types
     in
-    (* Validate capability declarations for this module *)
-    check_module_needs env name decls
+    (* Validate capability declarations for this module.  [env] is the OUTER
+       scope, which does not yet hold this module's own `proof cap`s -- they
+       are registered into [inner_env] by the [DProofCap] arm above -- so
+       Check 1's declaring-module exemption (`proof cap X` in `mod M` covers
+       `Cap(M.X)` without `needs M.X`) would miss every one of them and report
+       a false "not declared in `needs`".  The entry module never hit this: it
+       is checked against its [final_env] (see [check_module_core]). *)
+    check_module_needs { env with proof_caps = inner_env.proof_caps } name decls
       ~cap_qname_prefix:(if env.cap_qual_prefix = "" then name.txt
                          else env.cap_qual_prefix ^ "." ^ name.txt);
     (* Validate island module protocol if applicable *)

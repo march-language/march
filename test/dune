@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_stdlib_only test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering)
+ (modules test_compiler test_stdlib_only test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
@@ -4800,6 +4800,121 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/supervisor_one_for_all_restart.expected native_supervisor_one_for_all_restart.out)))
+
+; ── Parameterised actor `init` (D24): spawn(A, args) binds the init ──────
+; ── params; the state reads back through handlers (compiled leg) ─────────
+(rule
+ (targets native_actor_init_params native_actor_init_params.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_reclaim.c) (file ../runtime/march_reclaim.h) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_init_params.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_init_params
+        native/actor_init_params.march)
+   (with-stdout-to native_actor_init_params.out
+        (system "./native_actor_init_params")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_init_params.expected native_actor_init_params.out)))
+
+; Same fixture interpreted: D24 is backend parity, not a compiled-only feature.
+(rule
+ (targets native_actor_init_params_interp.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib)
+       (file native/actor_init_params.march))
+ (action
+  (with-stdout-to native_actor_init_params_interp.out
+   (run %{exe:../bin/main.exe} native/actor_init_params.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_init_params.expected native_actor_init_params_interp.out)))
+
+; ── D24: a supervised child declared `Worker w(expr)` is RESTARTED with ───
+; ── the same init argument it was first spawned with (two restarts, so ────
+; ── the respawn closure the runtime holds is called more than once) ──────
+(rule
+ (targets native_supervisor_init_arg_restart native_supervisor_init_arg_restart.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_reclaim.c) (file ../runtime/march_reclaim.h) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/supervisor_init_arg_restart.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_supervisor_init_arg_restart
+        native/supervisor_init_arg_restart.march)
+   (with-stdout-to native_supervisor_init_arg_restart.out
+        (system "./native_supervisor_init_arg_restart")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_init_arg_restart.expected native_supervisor_init_arg_restart.out)))
+
+(rule
+ (targets native_supervisor_init_arg_restart_interp.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib)
+       (file native/supervisor_init_arg_restart.march))
+ (action
+  (with-stdout-to native_supervisor_init_arg_restart_interp.out
+   (run %{exe:../bin/main.exe} native/supervisor_init_arg_restart.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/supervisor_init_arg_restart.expected native_supervisor_init_arg_restart_interp.out)))
+
+; ── D24 + state migration: the .schemas.json writer (a --compile-so ───────
+; ── --hot-reload patch) records an init-param actor's STATE fields and ────
+; ── nothing about its params; --check-migration then runs over the module. ─
+; The schema file also lists every stdlib actor the prelude links in, so it
+; is grepped for the fixture's actor rather than diffed whole.  Migration
+; with no @invariant needs no z3 (the checker verifies invariants only), so
+; this pins the tool's plumbing over an init-param actor, not an SMT proof.
+(rule
+ (targets native_actor_init_params_schema.so native_actor_init_params_schema.so.schemas.json
+          native_actor_init_params_schema.so.hcr_manifest native_actor_init_params_schema.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_reclaim.c) (file ../runtime/march_reclaim.h) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (file native/actor_init_params_schema.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --compile-so --hot-reload SchemaProbe
+        -o native_actor_init_params_schema.so native/actor_init_params_schema.march)
+   (with-stdout-to native_actor_init_params_schema.out
+    (system "j=native_actor_init_params_schema.so.schemas.json; \
+             if grep -q '\"Counter\"' $j && grep -q '\"label\"' $j && grep -q '\"value\"' $j \
+                && ! grep -q '\"start\"' $j; \
+             then echo 'schema has Counter with label and value, no init params'; \
+             else echo 'schema check FAILED'; cat $j; fi; \
+             if %{exe:../bin/main.exe} --check-migration --prior-schema $j --new-schema $j \
+                  native/actor_init_params_schema.march; \
+             then echo 'check-migration ok'; else echo 'check-migration FAILED'; fi")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_init_params_schema.expected native_actor_init_params_schema.out)))
 
 ; ── Regression: rest_for_one — crashing a middle child must restart it and
 ; every child declared AFTER it, but leave earlier siblings untouched.
@@ -9734,6 +9849,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_sorted_set.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_sorted_set.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_ordered_map.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_ordered_map.march)))
 
 (rule
  (alias runtest)

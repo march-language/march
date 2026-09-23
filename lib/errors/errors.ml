@@ -134,6 +134,20 @@ let has_errors ctx =
 
 let has_diagnostics ctx = ctx.diagnostics <> []
 
+(** A mark for [error_since]: the diagnostics reported so far. *)
+let mark ctx = ctx.diagnostics
+
+(** Whether an error was reported after [mark] was taken.  [report] only
+    prepends, so the diagnostics since the mark are the prefix of the list
+    ending at the (physically) marked list. *)
+let error_since ctx mark =
+  let rec go = function
+    | l when l == mark -> false
+    | [] -> false
+    | d :: rest -> d.severity = Error || go rest
+  in
+  go ctx.diagnostics
+
 let has_hints ctx =
   List.exists (fun d -> d.severity = Hint) ctx.diagnostics
 
