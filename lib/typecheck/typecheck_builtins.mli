@@ -78,6 +78,7 @@ val builtin_bindings : (string * scheme) list
 val variadic_builtins : (string * ty * ty * int) list
 val variadic_builtin : string -> (ty * ty * int) option
 val prelude_collision_builtin_names : string list
+val qualified_type_builtins : StringSet.t
 val prelude_collision_iface_arities : (string * int) list
 val noncallable_builtin_values : StringSet.t
 

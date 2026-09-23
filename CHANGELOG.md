@@ -317,6 +317,15 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **`csv_next_row`'s result now matches against `CsvEof` / `Row`.** The builtin
+  is typed with the qualified `Csv.CsvRow`, and builtin signatures skipped the
+  qualified-to-bare canonicalization that written type annotations get, so
+  matching its result against the bare constructors was a type error both ways.
+  `stdlib/csv.march` carried 12 such errors, hidden because stdlib diagnostics
+  are filtered, which left `Csv.each_row`, `Csv.read_all` and
+  `Csv.each_row_with_header` unchecked. Builtin signatures now go through the
+  same canonicalization, so any future builtin typed with a qualified name is
+  covered too.
 - **A nested module can use its own `proof cap` without declaring it in
   `needs`.** `proof cap Key` in `mod Vault` has always meant `Vault` may take a
   `Cap(Vault.Key)` without also writing `needs Vault.Key`, but that only worked
