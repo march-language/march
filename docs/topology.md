@@ -14,11 +14,12 @@ it against your sources with errors that point into the file; `forge topology ex
 turns it into JSON for other tools; `forge topology gen` writes systemd units, firewall
 rules or a compose file from it.
 
-This page covers the **static** half that exists today (build step 7 of the
-[distributed-deploys plan](https://github.com/march-language/march/blob/main/specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md)).
-The generated `main` that opens offers from the topology, placement at run time,
-derived capabilities and `forge deploy --plan` are later steps; until they land, a
-topology file is checked and exported, but a program still runs its hand-written `main`.
+A topology app has **no hand-written `main`**: the compiler generates it from the
+topology (see [Running a topology app](#running-a-topology-app)). `forge run` runs every
+pool in one process; `forge run --processes` runs one process per pool as a local
+cluster. This is build steps 7 and 3 of the
+[distributed-deploys plan](https://github.com/march-language/march/blob/main/specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md);
+`forge deploy --plan`, epoch drains and the reconciler are later steps.
 
 ## The file
 
@@ -64,7 +65,7 @@ inside `mod Shop`).
 | `[pool.<name>]` | `start` | The pool's hook: hand-written startup, called by the generated `main` on every node. |
 | | `serves` | `["P.R", ...]`, or `"*"` for every role in `[roles]`. |
 | | `initiates` | Roles the pool's code may initiate. Omitted: derived from `<P>_Run.initiate_<R>` call sites reachable from the hook and the served roles' bodies. Written: an upper limit the check enforces. |
-| | `caps` | Capabilities the pool's user code may use. Written: an upper limit. Derivation is the compiler's job and is not implemented yet. |
+| | `caps` | Capabilities the pool's user code (its hook and its roles) may use. Omitted: derived by the compiler from what that code reaches. Written: an upper limit the compiler enforces. |
 | | `isolate` | `true`: its own build and sandbox; no role it serves may be served elsewhere. |
 | | `public` | Internet-facing ports. |
 | | `main` | Escape hatch: a hand-written entry file for this pool. Warns, since it gives up `forge run`'s single-process composition and runtime-owned offers. |
@@ -103,8 +104,13 @@ hosts = [{ host = "root@render-1", labels = ["gpu"] }, "root@render-2"]
 
 - **No `place`:** offered on every node of the pool.
 - **`on = "label"`:** offered on the nodes whose host carries that label.
-- **`count = n`:** offered on n of the pool's live members (at run time, chosen by
-  rendezvous hashing over cluster membership; not implemented yet).
+- **`count = n`:** offered on n of the live nodes that serve the role, chosen at run
+  time by rendezvous hashing over cluster membership: every node ranks the candidates
+  the same way and offers when it is in the top n. When a node is declared dead, the
+  next one in the ranking takes the role over. A node that rejoins counts again only
+  after `MARCH_PLACEMENT_SETTLE_MS` (default 15000), so a flapping node does not pull
+  roles back and forth. `count = 1` is not a lock: during a partition each side may
+  offer.
 - **Both:** `count` ranks only the labelled nodes.
 
 ## `forge topology check`
@@ -132,16 +138,36 @@ protocol the topology names, **unlabelled steps**: a step without a label gets a
 positional name (`Msg_A_B_2`) that renumbers when a step is added before it, which
 changes its wire tag on a hot deploy. Label each step: `order: Client -> Ledger : Int`.
 
-The compiler side, `march --topology .forge/topology.json`, reads the digest, refuses
-any schema version but 1, and checks that every bound name exists in the modules it
-loaded. It does nothing else yet.
+The compiler side, `march --topology .forge/topology.json` (which `forge build` and
+`forge run` pass), refuses any schema version but 1 and checks, against the loaded
+modules, that:
+
+- every bound name exists;
+- a `body` takes the pool's environment (its hook's return type, or `()` without a
+  hook), the session, one `Cap(P)` per `role R needs` entry of its protocol, and the
+  entry state;
+- a bound actor's `init` takes the pool's environment, and the actor handles `Start`,
+  `Deliver` and `Cancel` (below);
+- a hook takes `Cap(P)` parameters, then the `ClusterNode.ClusterHandle`, and declares
+  its return type;
+- a role's grant, and a hook's `Cap` parameters, fit within a written `caps`;
+- after typechecking, what a pool's hook and roles actually **reach** fits within a
+  written `caps`, naming the hook or role that reaches beyond it;
+- with `--topology-isolate-foreign`, no role or hook needing `IO.Foreign` sits in a
+  pool that is not `isolate = true`.
+
+A hand-written `main` is kept, with a warning: it gives up running every pool in one
+process and the node-owned offers.
 
 ## `forge topology export --json`
 
 Prints the digest plus the derived facts:
 
-- `derived.<pool>.initiates`: what the pool's reachable code initiates (`caps` is
-  `null` until the compiler derives it);
+- `derived.<pool>.caps` and `derived.<pool>.initiates`: the capabilities the pool's
+  hook and roles reach and the roles its code initiates, as the compiler derives them
+  (`"source": "compiler"`). When the compiler cannot run (the program does not
+  typecheck, say), `caps` is `null`, `initiates` falls back to a by-name search of the
+  sources (`"source": "names"`), and forge says why;
 - `connectivity`: which pools talk to which, and over which protocols. Two pools are
   connected when a role one of them serves or initiates exchanges a message with a
   role the other does, the same rule the generated `peers_<Role>()` uses. A pool whose
@@ -173,3 +199,93 @@ forge topology gen systemd --env prod --out deploy/systemd
 forge topology gen ufw --env prod
 forge topology gen k8s        # runs forge-topology-k8s if it is on PATH
 ```
+
+## Running a topology app
+
+In a topology app the compiler generates `main`. For each pool it contains, the
+generated `main`:
+
+1. starts the cluster node from the environment (`MARCH_NODE_NAME`, default
+   `local-1`; `MARCH_NODE_PORT`, default 7946; `MARCH_CLUSTER_NODES`, the seeds);
+2. runs the pool's hook, passing one narrowed capability per `Cap(P)` parameter it
+   declares, then the node handle;
+3. opens the offers the topology places on this node, re-evaluating as nodes join
+   and leave;
+4. on SIGTERM or SIGINT, closes every offer, lets running sessions finish, and exits
+   (`[drain] hard_ms` is the most it waits);
+5. offers a role again if its offer, or the actor serving it, dies.
+
+A process of a shared build runs the pools named in `MARCH_POOLS` (comma-separated),
+or every pool when it is unset. `MARCH_NODE_LABELS` (comma-separated) are the labels
+`place = { on = ... }` looks for.
+
+### Hooks
+
+A pool's `start` is where hand-written startup goes. It runs on every node of the
+pool, before any offer opens, and its return value is the environment every role of
+the pool receives:
+
+```march
+mod Back do
+  type Env = { factor : Int }
+
+  fn start(_con : Cap(IO.Console), _node : ClusterNode.ClusterHandle) : Env do
+    { factor: 10 }
+  end
+end
+```
+
+**A hook must return promptly.** Start long-lived work (a server, a loop that
+initiates sessions) in a task or actor. A hook still running after
+`MARCH_HOOK_TIMEOUT_MS` (default 10000) is reported by name and the process exits 1.
+
+### Role bindings
+
+A **function** binding serves one session: the pool's environment, the session, the
+role's granted capabilities, the entry state:
+
+```march
+-- protocol Echo do  role Server needs IO.Console  ...  end
+fn serve_one(env : Env, s : Cap(Session.Live), con : Cap(IO.Console),
+             st : Echo_Server.Entry) : Echo_Server.Yield do ... end
+```
+
+An **actor** binding (`actor = "..."`) holds state across sessions. The generated code
+spawns one per offer with the pool's environment as its `init` argument, and forwards
+each session to it:
+
+```march
+actor CounterActor do
+  state { total : Int, sessions : LinearMap(String, Count_Counter.Parked_Counter) }
+  init(env : Env) { total: 0, sessions: LinearMap.empty_string() }
+  on Start(sid : String, s : Cap(Session.Live)) do ... end   -- plus the role's granted caps
+  on Deliver(sid : String, s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do ... end
+  on Cancel(sid : String, s : Cap(Session.Live), role : Int, cause : String, ep : Int) do ... end
+end
+```
+
+These are the three messages a hosted access point's actor takes
+(`offer_hosted_<Role>`, see the Choreography chapter).
+
+### `forge run`
+
+```bash
+forge run               # every pool in one process
+forge run --processes   # one process per pool, a cluster on this machine
+```
+
+A topology app always runs **compiled**, even when `forge run` would otherwise
+interpret: the runner that serves roles is compiled-only, and forge says so. In one
+process, every pool's roles are served by the same node, and a session whose roles
+are all local runs over the node's loopback link. An initiator prefers an offer on its
+own node.
+
+`--processes` builds once for the pools that share a build and once per isolated pool,
+then starts one process per pool (one per host, when an `--env` overlay lists hosts),
+named `<pool>-<n>`, each on a free port with every other process as a seed, and prints
+their output prefixed with the process name. Logs are kept under `.forge/run/`.
+Ctrl-C drains and stops every process; `--fail-fast` stops them all as soon as one
+exits.
+
+[examples/topology_app](https://github.com/march-language/march/tree/main/examples/topology_app)
+is a complete two-pool app.

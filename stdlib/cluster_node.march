@@ -1496,6 +1496,11 @@ mod ClusterNode do
                   meta: Vault.new("cluster_node_meta_" ++ tag) }
         Vault.set(h.meta, "listen_fd", listen_fd)
         Vault.set(h.meta, "creation", cfg.creation)
+        match NodeQueue.start_local(fn frame -> deliver_loopback(h, frame)) do
+          (w, fd) ->
+            Vault.set(h.qs, "loop", pid_to_int(w))
+            Vault.set(h.meta, "loop_fd", fd)
+        end
         let st0 = core_new(cfg, cfg.creation)
         mirror(st0, h)
         send(node, Boot(st0, h))
@@ -1685,12 +1690,50 @@ mod ClusterNode do
   and would interleave with the queue.
   """
   fn queue_for(h : ClusterHandle, node_id : String) : Option((Pid(NodeQueue.WriterState), Int)) do
+    if node_id == h.node_id do loopback(h) else
     match Vault.get(h.links, node_id) do
       None -> None
       Some(l) ->
         match Vault.get(h.qs, "q" ++ int_to_string(l.cfd)) do
           Some(w) -> Some((pid_of_int(w), l.dfd))
           None -> None
+        end
+    end end
+  end
+
+  -- The LOOPBACK link: a node's queue to itself (made once, at `start`, so
+  -- every sender to this node shares one queue and one order). Its writer
+  -- hands each frame to `deliver_loopback` instead of a socket, and credit
+  -- is bypassed: there is no peer to grant it. Two roles of one session on
+  -- one node, and an initiator inviting its own node's offer, go through it
+  -- (distributed-deploys plan II.3).
+  pfn loopback(h : ClusterHandle) : Option((Pid(NodeQueue.WriterState), Int)) do
+    match Vault.get(h.qs, "loop") do
+      Some(w) -> Some((pid_of_int(w), Vault.get_or(h.meta, "loop_fd", -1)))
+      None -> None
+    end
+  end
+
+  -- An ACTOR_MSG this node sent itself: routed as the data reader routes one
+  -- from a peer; a failure goes to the DELIVERY_FAILED handler directly.
+  pfn deliver_loopback(h : ClusterHandle, frame : Bytes) : () do
+    match NetFrame.decode(Bytes.to_list(frame)) do
+      None -> ()
+      Some((body, _)) ->
+        match NodeSend.decode_msg(body) do
+          Err(_) -> ()
+          Ok(d) ->
+            let outcome = if d.to_creation != creation(h) do
+              Err("stale creation " ++ int_to_string(d.to_creation) ++ ", node is at " ++ int_to_string(creation(h)))
+            else deliver_local(h, d) end
+            match outcome do
+              Ok(_) -> ()
+              Err(reason) ->
+                match Vault.get(h.failed, "f") do
+                  Some(f) -> f(d.seq, reason)
+                  None -> ()
+                end
+            end
         end
     end
   end

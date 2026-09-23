@@ -12,6 +12,33 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Topology apps run: a generated `main`, placement, `forge run` and
+  `forge run --processes`** (build step 3 of the distributed-deploys plan). A
+  project with a `topology.toml` needs no `main`: `march --topology` generates one
+  that starts the cluster node from the environment, runs each pool's `start` hook
+  (with one narrowed `Cap(P)` per capability it declares, then the node handle;
+  a hook still running after `MARCH_HOOK_TIMEOUT_MS` stops the process), opens the
+  offers the topology places on the node, drains on SIGTERM/SIGINT and re-offers a
+  role whose offer or actor died. A `body` binding receives the hook's environment,
+  the session, the role's granted caps and its entry state; an `actor` binding is
+  spawned per offer with the environment as its `init` argument and receives
+  `Start`/`Deliver`/`Cancel`. The new `Topology` stdlib module does the placement:
+  `on` labels from `MARCH_NODE_LABELS`, `count = n` by rendezvous hashing over the
+  live members that serve the role (a dead node's role moves; a rejoined node
+  counts after `MARCH_PLACEMENT_SETTLE_MS`), a lost role drained rather than cut.
+  `march --topology` now also checks each binding's shape, role grants and hooks
+  against a pool's written `caps`, and a pool's actual reach after typechecking
+  (`--topology-isolate-foreign` adds the `IO.Foreign` isolation check);
+  `--emit-core-ast` reports each pool's derived `caps` and `initiates`, which
+  `forge topology export` now prints instead of `"caps": null`. `forge run` on a
+  topology app always compiles and runs every pool in one process; `--processes`
+  runs one process per pool as a local cluster (`--fail-fast`, `--env` for host
+  labels), and Ctrl-C drains and stops them all. See `docs/topology.md` and
+  `examples/topology_app`.
+- **A cluster node can talk to itself.** `ClusterNode.queue_for(node, own_id)` is
+  now a loopback link (ordered, no credit flow control), so two roles of one
+  session can run on the same node: `initiate_<Role>` may pick its own node's
+  offer, and prefers it.
 - **The topology file, static half** (build step 7 of the distributed-deploys plan).
   `topology.toml` next to `forge.toml` binds each offered `Protocol.Role` to a
   `body` function or an `actor`, groups roles into `[pool.*]` sections

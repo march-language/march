@@ -5,6 +5,9 @@
       front pool's hook initiates sessions of both roles the back pool
       serves; a Ctrl-C to forge (SIGINT) drains and stops every process,
       each exiting 0, and none is left running.
+    - `forge run` (level 0, every pool in one process): the same sessions
+      through the ClusterNode loopback link, and a Ctrl-C to the terminal's
+      process group drains the one process.
     - `forge topology export`: the derived caps come from the compiler.
 
     Hermetic like test_procs.ml: the just-built march and forge on a private
@@ -136,6 +139,19 @@ let test_processes () =
    | _ -> Alcotest.failf "forge ended %s:\n%s" (March_forge.Procs.string_of_status st) out);
   Alcotest.(check (list string)) "no process left running" [] (leftovers dir)
 
+let test_level0 () =
+  let dir = fresh_project () in
+  let (st, out) = run_until ~dir ~ready:"front: done" ~group:true [ "run" ] in
+  let expect s = if not (contains out s) then Alcotest.failf "expected %S in:\n%s" s out in
+  expect "forge run: this is a topology app (topology.toml), so it runs compiled";
+  expect "back: hook ran";
+  expect "front: echo 40, totals 1 then 3";
+  expect "topology: drained local-1";
+  (match st with
+   | Unix.WEXITED 0 -> ()
+   | _ -> Alcotest.failf "forge ended %s:\n%s" (March_forge.Procs.string_of_status st) out);
+  Alcotest.(check (list string)) "no process left running" [] (leftovers dir)
+
 let test_export_caps_from_compiler () =
   let dir = fresh_project () in
   let out = Filename.concat dir "export.json" in
@@ -158,6 +174,7 @@ let () =
   Alcotest.run "topology-run" [
     ("forge run", [
         Alcotest.test_case "--processes: one process per pool; SIGINT drains and stops all" `Slow test_processes;
+        Alcotest.test_case "level 0: every pool in one process; Ctrl-C drains it" `Slow test_level0;
         Alcotest.test_case "topology export: derived caps from the compiler" `Slow test_export_caps_from_compiler;
       ]);
   ]

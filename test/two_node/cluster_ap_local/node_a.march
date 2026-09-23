@@ -1,0 +1,154 @@
+-- One-node scenario "cluster_ap_local": BOTH roles of an Echo session in one
+-- binary, on one ClusterNode (the level-0 prerequisite of the
+-- distributed-deploys plan, II.3). The node offers role Server, then
+-- initiates two sessions as Client: each invitation, answer and session
+-- frame goes over the node's loopback link (`ClusterNode.queue_for(h,
+-- own_id)`), and the initiator picks its own node's offer
+-- (`SessionNode.initiate` no longer excludes it, and prefers it). A third
+-- session runs hosted (`offer_hosted_Server` in an actor) to cover the
+-- hosted path over loopback too, and a last one through the one-session
+-- runner (`cluster_Server` / `cluster_Client` under an agreed id). The
+-- two-node counterpart is cluster_ap.
+mod ClusterApLocal do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  @[endpoints]
+  protocol Hosted do
+    ping: Client -> Server : Int
+    pong: Server -> Client : Int
+  end
+
+  pfn serve_one(s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
+    Echo_Server.recv_Msg_Client_Server_1(s, st, fn (n, st1) ->
+      println("Server: got " ++ int_to_string(n))
+      Echo_Server.close(s, Echo_Server.send_Msg_Server_Client_1(s, st1, n * 10)))
+  end
+
+  pfn ask(s : Cap(Session.Live), st : Echo_Client.Entry, n : Int) : Echo_Client.Yield do
+    let st1 = Echo_Client.send_Msg_Client_Server_1(s, st, n)
+    Echo_Client.recv_Msg_Server_Client_1(s, st1, fn (m, st2) ->
+      println("Client: got " ++ int_to_string(m))
+      Echo_Client.close(s, st2))
+  end
+
+  actor PingServer do
+    state { sessions : LinearMap(String, Hosted_Server.Parked_Server) }
+    init  { sessions: LinearMap.empty_string() }
+    on Start(sid : String, s : Cap(Session.Live)) do
+      let parked = Hosted_Server.await_Ping(s, Hosted_Server.register(s, 0))
+      match LinearMap.put(state.sessions, sid, parked) do
+        (None, m) -> { sessions: m }
+        (Some(old), m) ->
+          Hosted_Server.take_closed(Hosted_Server.cancel(old))
+          { sessions: m }
+      end
+    end
+    on Deliver(sid : String, s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match LinearMap.take_slot(state.sessions, sid) do
+        (None, slot) -> { sessions: LinearMap.vacate(slot) }
+        (Some(parked), slot) ->
+          match Hosted_Server.resume(parked, from, msg, ep) do
+            Got_Ping(n, st) ->
+              println("PingServer: got " ++ int_to_string(n))
+              Hosted_Server.take_closed(Hosted_Server.finish(s, Hosted_Server.send_Pong(s, st, n + 1)))
+              { sessions: LinearMap.vacate(slot) }
+          end
+      end
+    end
+    on Cancel(sid : String, _s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
+      match LinearMap.take(state.sessions, sid) do
+        (None, m) -> { sessions: m }
+        (Some(parked), m) ->
+          Hosted_Server.take_closed(Hosted_Server.cancel(parked))
+          { sessions: m }
+      end
+    end
+  end
+
+  -- An offer registers its name asynchronously (through the node actor):
+  -- wait until it is visible before inviting it.
+  pfn visible(h : ClusterNode.ClusterHandle, o : SessionNode.Offer, left : Int) : () do
+    if ClusterNode.lookup(h, o.name) != None do ()
+    else if left <= 0 do panic("the offer never became visible") else
+      sleep_ms(20)
+      visible(h, o, left - 20)
+    end end
+  end
+
+  fn session(c : Cap(IO), h : ClusterNode.ClusterHandle, n : Int) : () do
+    match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, n)) do
+      Ok(_) -> println("Client: session " ++ int_to_string(n) ++ " done")
+      Err(e) -> println("Client: " ++ Echo_Run.error_message(e))
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "local-secret", 1)
+    match ClusterNode.start(cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do
+          Err(e) -> panic(Echo_Run.error_message(e))
+          Ok(o) ->
+            visible(h, o, 10000)
+            session(c, h, 1)
+            session(c, h, 2)
+            SessionNode.close_offer(o)
+        end
+        let srv = spawn(PingServer)
+        match Hosted_Run.offer_hosted_Server(c, h, 4, srv,
+                fn (sid, s) -> do
+                  let _ = send(srv, Start(sid, s))
+                  ()
+                end,
+                fn (sid, s, from, msg, ep) -> do
+                  let _ = send(srv, Deliver(sid, s, from, msg, ep))
+                  ()
+                end,
+                fn (sid, s, role, cause, ep) -> do
+                  let _ = send(srv, Cancel(sid, s, role, cause, ep))
+                  ()
+                end) do
+          Err(e) -> panic(Hosted_Run.error_message(e))
+          Ok(o) ->
+            visible(h, o, 10000)
+            match Hosted_Run.initiate_Client(c, h, fn (s, st) ->
+                Hosted_Client.recv_Pong(s, Hosted_Client.send_Ping(s, st, 41), fn (m, st2) ->
+                  println("Client: pong " ++ int_to_string(m))
+                  Hosted_Client.close(s, st2))) do
+              Ok(_) -> println("Client: hosted session done")
+              Err(e) -> println("Client: " ++ Hosted_Run.error_message(e))
+            end
+            SessionNode.close_offer(o)
+        end
+        -- The one-session runner too: both roles under one agreed session
+        -- id, on this node.
+        let server = task_spawn(fn _ ->
+          match Echo_Run.cluster_Server(c, h, "local-pair", fn (s, st) -> serve_one(s, st)) do
+            Ok(_) -> 1
+            Err(e) ->
+              println("Server: " ++ Echo_Run.error_message(e))
+              0
+          end)
+        match Echo_Run.cluster_Client(c, h, "local-pair", fn (s, st) -> ask(s, st, 3)) do
+          Ok(_) -> println("Client: pair session done")
+          Err(e) -> println("Client: " ++ Echo_Run.error_message(e))
+        end
+        let _ = task_await_unwrap(server)
+        ClusterNode.stop(h)
+    end
+  end
+end
