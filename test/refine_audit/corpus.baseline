@@ -180,6 +180,12 @@ native_h_sigil_safe_collision: coverage audit (user + stdlib): 120 enforced, 0 i
 native_h_sigil_safe_collision: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_h_tag_hardening: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_h_tag_hardening: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_hcr_e2e_patch: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_hcr_e2e_patch: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_hcr_e2e_server: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_hcr_e2e_server: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_hcr_smoke: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_hcr_smoke: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_h_trusted_context: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_h_trusted_context: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_hash_cross_backend: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced

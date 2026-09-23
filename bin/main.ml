@@ -3030,7 +3030,7 @@ let compile filename =
               match target_hcr_abi, !hot_reload_prefix with
               | Ok abi, Some prefix ->
                 let macro name value =
-                  " -D" ^ name ^ "=" ^ Filename.quote ("\\\"" ^ value ^ "\\\"") in
+                  " -D" ^ name ^ "=" ^ Filename.quote ("\"" ^ value ^ "\"") in
                 macro "MARCH_HCR_TRIPLE" abi.llvm_triple
                 ^ macro "MARCH_HCR_TARGET" abi.canonical_target
                 ^ macro "MARCH_HCR_PREFIX" prefix
