@@ -1,0 +1,95 @@
+-- `on_stop` is bounded by the stop timeout: a callback still running at the
+-- deadline is killed there, and `stop` returns. specs/lang/actors.md,
+-- "on_stop".
+--
+-- The callback blocks in `receive()`, which it can never satisfy: a draining
+-- actor accepts no new messages. What it managed before blocking is kept (its
+-- first note reaches the log); nothing after the block runs.
+mod Main do
+  needs IO.Console
+  needs IO.Clock
+
+  type GetLog = GetLog
+
+  actor Log do
+    state { lines : List(String) }
+    init  { lines: [] }
+
+    on Read(reply_to) do
+      Actor.reply(reply_to, List.reverse(state.lines))
+      state
+    end
+
+    on Note(s : String) do
+      { lines: Cons(s, state.lines) }
+    end
+  end
+
+  fn note(s : String) do
+    match Actor.whereis("log") do
+      Some(l) -> send(l, Note(s))
+      None    -> None
+    end
+  end
+
+  actor Stuck do
+    state { n : Int }
+    init  { n: 0 }
+
+    on Work(k : Int) do
+      { n: state.n + k }
+    end
+
+    on_stop do
+      note("stuck: before the block, n=" ++ int_to_string(state.n))
+      let _m = receive()
+      note("stuck: after the block (must never appear)")
+    end
+  end
+
+  actor Sup do
+    state { s : Int }
+    init  { s: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Stuck s shutdown 200
+    end
+
+    on_stop do
+      note("sup: on_stop, after its child was cut off")
+    end
+  end
+
+  fn dump(log) do
+    match Actor.call(log, GetLog, 5000) do
+      Ok(ls) -> List.each(ls, fn l -> println("  log: " ++ l))
+      Err(e) -> println("  log error: " ++ e)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+    let log = spawn(Log)
+    Actor.register(log, "log")
+
+    println("-- Actor.stop(pid, 200): the blocked on_stop is killed at the deadline")
+    let w = spawn(Stuck)
+    send(w, Work(9))
+    let t0 = unix_time_ms()
+    println("stop: " ++ bool_to_string(Actor.stop(w, 200)))
+    let took = unix_time_ms() - t0
+    -- Waited out the budget (it did not give up on the callback early), and
+    -- no longer (it did not wait for a callback that can never finish).
+    println("waited for the deadline: " ++ bool_to_string(took >= 190))
+    println("returned at the deadline: " ++ bool_to_string(took < 3000))
+    println("dead: " ++ bool_to_string(is_alive(w) == false))
+    dump(log)
+
+    println("-- a child spec's `shutdown 200` bounds the child's on_stop the same way")
+    let sup = spawn(Sup)
+    println("stop: " ++ bool_to_string(Actor.stop(sup, 5000)))
+    println("supervisor dead: " ++ bool_to_string(is_alive(sup) == false))
+    dump(log)
+  end
+end

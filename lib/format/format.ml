@@ -1111,7 +1111,13 @@ and emit_decl ctx = function
         line ctx (Printf.sprintf "on %s(%s) do" h.ah_msg.txt ps);
         indented ctx (fun () -> emit_body ctx h.ah_body);
         line ctx "end"
-      ) actor.actor_handlers
+      ) actor.actor_handlers;
+      Option.iter (fun h ->
+        nl ctx;
+        line ctx "on_stop do";
+        indented ctx (fun () -> emit_body ctx h.ah_body);
+        line ctx "end"
+      ) actor.actor_on_stop
     );
     line ctx "end"
 

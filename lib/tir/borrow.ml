@@ -366,7 +366,7 @@ let extern_owned_builtins : string list = [
     "actor_set_mailbox_limit"; "register_resource";
     "actor_register"; "actor_unregister"; "actor_whereis";
     "send_checked"; "revoke_cap"; "is_cap_valid"; "get_actor_field";
-    "register_supervisor"; "register_supervisor_child"; "pid_index_of";
+    "register_supervisor"; "register_supervisor_child"; "register_actor_on_stop"; "pid_index_of";
     "pid_to_int";
 ]
 

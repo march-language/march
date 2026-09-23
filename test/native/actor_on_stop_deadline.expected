@@ -1,0 +1,12 @@
+-- Actor.stop(pid, 200): the blocked on_stop is killed at the deadline
+stop: true
+waited for the deadline: true
+returned at the deadline: true
+dead: true
+  log: stuck: before the block, n=9
+-- a child spec's `shutdown 200` bounds the child's on_stop the same way
+stop: true
+supervisor dead: true
+  log: stuck: before the block, n=9
+  log: stuck: before the block, n=0
+  log: sup: on_stop, after its child was cut off

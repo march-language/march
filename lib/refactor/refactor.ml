@@ -227,7 +227,9 @@ let iter_names (f : site -> Ast.name -> unit) (m : Ast.module_) : unit =
       expr adef.Ast.actor_init;
       List.iter (fun (h : Ast.actor_handler) ->
           f SCtor h.ah_msg; List.iter param h.ah_params; expr h.ah_body)
-        adef.Ast.actor_handlers
+        adef.Ast.actor_handlers;
+      Option.iter (fun (h : Ast.actor_handler) -> expr h.ah_body)
+        adef.Ast.actor_on_stop
     | Ast.DMod (n, _, ds, _) -> f SModule n; List.iter decl ds
     | Ast.DInterface (i, _) ->
       f SType i.Ast.iface_name; f SType i.Ast.iface_param;

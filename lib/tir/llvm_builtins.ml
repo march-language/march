@@ -972,6 +972,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs, i64 %backoff_base_ms, i64 %backoff_cap_ms, i64 %backoff_jitter_pct)" };
   { march_name = "register_supervisor_child"; c_name = Some "march_actor_register_child"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx, i64 %restart_type, i64 %shutdown_ms)" };
+  (* Internal: emitted by lower_actor's spawn glue for an actor with an
+     `on_stop` block (dispatch closure, on_stop closure). *)
+  { march_name = "register_actor_on_stop"; c_name = Some "march_register_actor_on_stop"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_register_actor_on_stop(ptr %dispatch, ptr %on_stop)" };
   { march_name = "pid_index_of"; c_name = Some "march_pid_index_of"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_pid_index_of(ptr %actor)" };
   (* The surface name for the same C symbol (pid_index_of is the lowering's
@@ -1697,6 +1701,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_get_actor_field";
   PDeclare "march_register_supervisor";
   PDeclare "march_actor_register_child";
+  PDeclare "march_register_actor_on_stop";
   PDeclare "march_pid_index_of";
   PDeclare "march_value_to_string";
   PComment "; Session-typed channel builtins (binary)";

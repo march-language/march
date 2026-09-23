@@ -1,0 +1,6 @@
+stop: true
+supervisor dead: true
+  log: c: on_stop, n=3
+  log: b: on_stop, n=2
+  log: a: on_stop, n=1
+  log: sup: on_stop
