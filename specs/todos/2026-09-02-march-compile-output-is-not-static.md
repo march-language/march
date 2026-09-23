@@ -1,3 +1,5 @@
+> Design: [specs/2026-09-23-static-compile-output-design.md](../2026-09-23-static-compile-output-design.md)
+
 `[P2]` # `march --compile` output is dynamically linked — no `scratch`/distroless deploy
 
 Filed 2026-09-02 while correcting `specs/docker_images.md`, which asserted the
