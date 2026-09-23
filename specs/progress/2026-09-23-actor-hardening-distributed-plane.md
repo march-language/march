@@ -36,10 +36,18 @@ items 1–3 below, with designs),
 the torn-stdout race that quarantines `node_discovery`). Item 5 (epoch proc
 reclamation) is single-node and stays here.
 
+## Status 2026-09-23: closed
+
+Item 5, the last open item, is done: procs are freed after a grace period
+([[2026-09-22-proc-struct-reclaimed]]) and so are dead actors' metas, with a ~56 B
+tombstone per pid left behind ([[2026-09-23-proc-struct-reclamation-metas]], which is
+also where its design and survey now live). Every item in this file has shipped or been
+resolved, so it moved to `specs/progress/`.
+
 ## Status 2026-09-17
 
 Validated against what shipped: **only item 5 is still open**, and it is now specced as
-[[2026-09-17-proc-struct-reclamation]] (survey-first, as this file asked; the survey found
+[[2026-09-23-proc-struct-reclamation-metas]] (survey-first, as this file asked; the survey found
 that "epoch-based" is the wrong shape and proposes shrinking the struct, then pid handles). Items 1–3 landed with the
 distributed plane -- 1 as `NodeQueue`'s credit-based flow control
 ([[2026-09-15-credit-based-flow-control]]), 2 as the control/data connection split

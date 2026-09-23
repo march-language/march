@@ -317,6 +317,19 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A dead actor's metadata is now returned, and sends no longer slow down
+  after actor churn.** Each actor's runtime bookkeeping (about 300 bytes) used
+  to be kept for the life of the program, and it stayed on the lookup path of
+  every `send` and `Actor.call`, so a node that had churned 200,000 short-lived
+  actors took 3 seconds instead of 45 ms to send 200,000 messages to one
+  long-lived actor. It is now freed once no other thread can still be reading
+  it, leaving a 56-byte record per pid for what a dead pid can still be asked
+  (its terminal reason, `Pid(n)` display, capability epoch): 200,000 churned
+  actors retain 18.5 MB instead of 65.6 MB, and send speed no longer depends on
+  how many actors have died. `Scheduler.stat(10)` counts freed actor metadata
+  and `stat(11)` that waiting to be freed. `Actor.pid_from_int` on the pid of an
+  actor that has died now returns a dead Pid; it used to return a pointer to
+  the dead actor's record, which could already have been freed.
 - **A nested module can use its own `proof cap` without declaring it in
   `needs`.** `proof cap Key` in `mod Vault` has always meant `Vault` may take a
   `Cap(Vault.Key)` without also writing `needs Vault.Key`, but that only worked
