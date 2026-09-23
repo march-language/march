@@ -941,19 +941,49 @@ let cap_bare_name (cap_path : string) : string =
     `proof cap X with T`.  [None] when the capability declares no dictionary,
     or when the type it names is not a record in scope.
 
-    Tries the bare spelling first and then the declaring module's
-    qualification, because [DType] registers a record under both spellings
-    depending on how deeply the module is nested (typecheck.ml:5900-5901). *)
+    Tries the declaring module's qualification first and falls back to the
+    bare spelling only when that is absent.  The order matters: March has one
+    global type namespace, so when two modules each declare `type Ops` the
+    bare key "Ops" holds whichever was registered LAST, and a bare-first
+    lookup hands one module's capability the other module's record ("expected
+    `Ops` but got `Ops`", PR #601).  The bare fallback is still needed while
+    the declaring module is being checked: a module's own records are
+    registered under the bare name inside it and gain the qualified spelling
+    only when the module is exported (typecheck.ml, [new_records]).
+
+    When the bare key holds the SAME record as the qualified one (the usual,
+    collision-free case) the bare spelling is returned, so the dictionary type
+    prints and unifies exactly as the module's own references to it do; the
+    parameterised-record arity note in [report_mismatch] keys on the two sides
+    printing alike.  The qualified spelling is returned only when the bare key
+    has been taken over by another module's record.  "Same" compares the
+    field lists with each field's own linearity wrapper stripped: the prebind
+    pass registers the qualified key before [check_decl] re-registers the bare
+    one with [TyLinear]-wrapped fields.  Type names in [Ast.ty] carry their
+    source spans, so two separate declarations never compare equal, even
+    textually identical ones; if the comparison cannot be made the qualified
+    spelling, always correct, is used. *)
 let resolve_cap_dict_type env cap_path =
   match List.assoc_opt cap_path env.cap_dicts with
   | None -> None
   | Some d ->
-    if StrMap.mem d env.records then Some d
-    else
+    let bare = StrMap.find_opt d env.records in
+    let qualified =
       match List.assoc_opt cap_path env.proof_caps with
-      | Some m when m <> "" && StrMap.mem (m ^ "." ^ d) env.records ->
-        Some (m ^ "." ^ d)
+      | Some m when m <> "" ->
+        Option.map (fun r -> (m ^ "." ^ d, r)) (StrMap.find_opt (m ^ "." ^ d) env.records)
       | _ -> None
+    in
+    let same_decl (_, f1) (_, f2) =
+      let unlin = List.map (fun (n, t) ->
+          (n, match t with Ast.TyLinear (_, t) -> t | t -> t)) in
+      try unlin f1 = unlin f2 with Invalid_argument _ -> false
+    in
+    match qualified, bare with
+    | Some (_, r), Some b when same_decl b r -> Some d
+    | Some (q, _), _ -> Some q
+    | None, Some _ -> Some d
+    | None, None -> None
 
 (** True iff the bare type name [name] resolves to an `always_linear` type *here*
     — i.e. it is registered always_linear AND the current module does NOT declare
