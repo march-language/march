@@ -140,3 +140,12 @@ calls (#591), so the whole-stdlib ratchet in the `compiler` suite
   17 of 18 pass. `cluster_partition` exits 3, "skipped: needs root (Linux iptables) to
   drop packets", by design on macOS; it runs on CI's Linux leg.
 - `scripts/check-docs.sh`: passed (Check F: the 16 generated chapters match).
+- Full `scripts/run-tests.sh` after the fixes: 11 of 12 suites passed (compiler 1239,
+  eval 282, codegen 626, stdlib_march 71, test_jit 24, lsp 361, utf16 5, jsonrpc 36,
+  incremental 10, query_cli 7, refinecheck 959). `run_stdlib` reported 19 failures in a
+  contiguous block of unrelated compiled regressions (adversarial-regressions 35 to 54),
+  in a run that overlapped rebuilds of `bin/main.exe`; rerun alone it passed 886 of 886.
+- `test/dune` goldens `cluster_node_check.out` (empty) and `session_node_check.out` built
+  and matched locally after the hint fix.
+- CI on the PR's third commit (`f7bf8945e`): the whole CI workflow succeeded, both the
+  macOS and the Linux test legs included.
