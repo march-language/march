@@ -5769,7 +5769,12 @@ static void hcr_hard_kill(uint32_t upto) {
                     "killing actor on dispatch slot %u (epoch %u)\n",
                     upto, m->dispatch_name_id, ce);
             atomic_fetch_add_explicit(&g_hcr_killed, 1, memory_order_relaxed);
-            do_actor_death(m->actor, MARCH_DEATH_KILLED, NULL, 0);
+            /* A crash with the reason "draining": every supervisor restart
+             * type restarts it (a KILLED transient child would stay dead),
+             * and a monitor sees Crash("draining") -- SessionNode ends a
+             * hosted session as drained on it. */
+            do_actor_death(m->actor, MARCH_DEATH_CRASH, "draining",
+                           sizeof("draining") - 1);
         }
         march_decrc(m->actor);
     }

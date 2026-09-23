@@ -441,8 +441,14 @@ mod SessionNode do
       -- rather than messaging it (a message would be read here as a
       -- `Down`, `receive()` being typed by this pattern).
       match receive() do
-        Down.Down(_, _, _) ->
-          let _ = send(p.ep, HostDown(p, ep))
+        Down.Down(_, _, reason) ->
+          -- A hot-reload hard drain kills the host with Crash("draining").
+          let _ = match reason do
+            DownReason.Crash(why) ->
+              if why == "draining" do send(p.ep, HostDrained(p, ep))
+              else send(p.ep, HostDown(p, ep)) end
+            _ -> send(p.ep, HostDown(p, ep))
+          end
           ()
       end
       { n: state.n + 1 }
@@ -596,6 +602,26 @@ mod SessionNode do
     -- The hosting actor died: our endpoint's session state died with it.
     on HostDown(p : Party, ep : Int) do
       cancel_endpoint(p, ep, p.my_role, "host gone", "host gone", kind_host_gone())
+      state
+    end
+    -- Hot reload (DD step 6, plan II.4.4, D28): this actor runs the party's
+    -- session callbacks, so it holds the session's epoch -- the code version
+    -- the session formed under -- until `finish`.  Sent by `party` and
+    -- `finish`; handled in this actor's own turn, where the hold belongs.
+    -- Appended after every other handler: `Actor.call` addresses the first
+    -- two by position (see the note above the actor).
+    on HoldEpoch() do
+      epoch_hold()
+      state
+    end
+    on ReleaseEpoch() do
+      epoch_release()
+      state
+    end
+    -- The hosting actor was killed by a hot-reload hard drain deadline
+    -- (II.4.7): the session ends as `Left("draining")`, not as a crash.
+    on HostDrained(p : Party, ep : Int) do
+      cancel_endpoint(p, ep, p.my_role, "draining", "draining", kind_left())
       state
     end
     -- `Session.leave`: this role exits the session on purpose.
@@ -771,6 +797,9 @@ mod SessionNode do
   """
   fn party(my_role : Int, node_id : String, on_close : Int -> Unit) : Party do
     let ep = spawn(Endpoint)
+    -- The Endpoint inherits this proc's code epoch at spawn, and holds it
+    -- until `finish` (hot reload's nesting rule, D28).
+    let _ = send(ep, HoldEpoch())
     let tag = node_id ++ "." ++ int_to_string(my_role) ++ "." ++ int_to_string(pid_to_int(ep))
     { my_role: my_role, node_id: node_id,
       handlers: Vault.new("session_node_handlers_" ++ tag),
@@ -1189,6 +1218,7 @@ mod SessionNode do
 
   doc "Tear every connection down: close data, Bye on control, await the control reader, close control. (A cluster-mode party owns no connection: nothing to do.)"
   fn finish(p : Party) : Unit do
+    let _ = send(p.ep, ReleaseEpoch())
     let _ = if is_cluster(p) do Nil else List.map(p.links, fn l -> do
       -- Its reader has ended, which stopped its heartbeat; a party that
       -- never served stops it here.

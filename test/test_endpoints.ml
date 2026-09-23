@@ -256,6 +256,34 @@ let unlabelled_names_pinned =
        Alcotest.(check (list string)) "Stream_Prod" stream_prod_fns (List.assoc "Stream_Prod" mods);
        Alcotest.(check (list string)) "Stream_Cons" stream_cons_fns (List.assoc "Stream_Cons" mods))
 
+(* Hot reload (DD step 6, plan II.4.4, D28): a started hosted endpoint holds
+   the hosting actor's epoch -- taken when the actor starts it (take_idle),
+   released when it closes (finish, and cancel of a started one). *)
+let hosted_endpoint_epoch_holds =
+  Alcotest.test_case "hosted endpoint: take_idle holds the epoch, finish/cancel release it" `Quick
+    (fun () ->
+       let m = parse_and_desugar (wrap stream) in
+       let body_calls modname fname =
+         List.concat_map (function
+             | DMod (n, _, decls, _) when n.txt = modname ->
+               List.concat_map (function
+                   | DFn (fd, _) when fd.fn_name.txt = fname ->
+                     List.concat_map (fun (c : fn_clause) ->
+                         List.map fst (March_ast.Calls.names_and_name_spans c.fc_body))
+                       fd.fn_clauses
+                   | _ -> []) decls
+             | _ -> []) m.mod_decls in
+       let calls m f n = List.length (List.filter (( = ) n) (body_calls m f)) in
+       Alcotest.(check int) "take_idle holds once" 1
+         (calls "Stream_Cons" "take_idle" "Session.hold_epoch");
+       Alcotest.(check int) "finish releases once" 1
+         (calls "Stream_Cons" "finish" "Session.release_epoch");
+       Alcotest.(check int) "cancel releases once per awaiting state, not for idle or closed" 1
+         (calls "Stream_Cons" "cancel" "Session.release_epoch");
+       Alcotest.(check int) "an await neither holds nor releases" 0
+         (calls "Stream_Cons" "await_Msg_Prod_Cons_1" "Session.hold_epoch"
+          + calls "Stream_Cons" "await_Msg_Prod_Cons_1" "Session.release_epoch"))
+
 (** Replace every occurrence of [needle] in [s] by [by]. *)
 let replace_all ~needle ~by s =
   let n = String.length needle in
@@ -1939,7 +1967,7 @@ let tests =
     grants_not_in_fingerprint; role_needs_ok; role_identifier_ok; role_needs_unknown_cap;
     role_needs_unknown_role; role_needs_twice; role_needs_after_message; role_needs_nested; msg_type_named_after_protocol; two_protocols_distinct_msg_types; two_protocols_ok;
     cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
-    unlabelled_names_pinned; labelled_shape; label_changes_fingerprint; labelled_roles_ok;
+    unlabelled_names_pinned; hosted_endpoint_epoch_holds; labelled_shape; label_changes_fingerprint; labelled_roles_ok;
     payload_definition_in_fingerprint; payload_field_order_in_fingerprint;
     recursive_payload_terminates; payload_type_arguments_substituted; imported_payload_falls_back;
     entry_alias_shape; alias_cycles; entry_roles_ok; entry_wrong_role; entry_keeps_linearity;

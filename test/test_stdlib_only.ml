@@ -104,14 +104,16 @@ let test_repl_is_user_code () =
    gate is told where the cap comes from. *)
 let test_shipped_table () =
   let gated = List.map fst !TB.stdlib_only in
-  Alcotest.(check (list string)) "the four forging builtins are gated"
-    [ "pid_of_int"; "actor_pid_indices"; "actor_whereis"; "actor_registered" ]
+  Alcotest.(check (list string)) "the four forging builtins and the epoch holds are gated"
+    [ "pid_of_int"; "actor_pid_indices"; "actor_whereis"; "actor_registered";
+      "epoch_hold"; "epoch_release" ]
     gated;
   List.iter (fun (name, hint) ->
       Alcotest.(check bool) (name ^ " suggestion names Actor.introspect") true
         (let n = String.length "`Actor.introspect`" in
          let rec go i = i + n <= String.length hint && (String.sub hint i n = "`Actor.introspect`" || go (i + 1)) in go 0))
-    !TB.stdlib_only;
+    (List.filter (fun (name, _) -> name <> "epoch_hold" && name <> "epoch_release")
+       !TB.stdlib_only);
   (* No throwaway entry installed: the shipped table itself gates user code. *)
   Alcotest.(check bool) "user code may no longer call pid_of_int" true
     (has_error_with (typecheck caller)

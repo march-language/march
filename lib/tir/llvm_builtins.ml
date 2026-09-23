@@ -946,6 +946,12 @@ let builtins : builtin list = [
     ret_ty = Some (Tir.TCon ("Option", [Tir.TPtr Tir.TUnit]));
     in_is_builtin = true;
     declare_sig = Some "declare ptr  @march_actor_whereis(ptr %name)" };
+  (* Epoch holds (DD step 6, plan II.4.4): on the running proc; stdlib-only
+     (Typecheck_builtins.stdlib_only). *)
+  { march_name = "epoch_hold"; c_name = Some "march_epoch_hold"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_epoch_hold()" };
+  { march_name = "epoch_release"; c_name = Some "march_epoch_release"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_epoch_release()" };
   { march_name = "actor_registered"; c_name = Some "march_actor_registered";
     ret_ty = Some (Tir.TCon ("List", [Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_registered()" };
@@ -1694,6 +1700,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_actor_unregister";
   PDeclare "march_actor_whereis";
   PDeclare "march_actor_registered";
+  PDeclare "march_epoch_hold";
+  PDeclare "march_epoch_release";
   PDeclare "march_get_cap";
   PDeclare "march_send_checked";
   PDeclare "march_revoke_cap";

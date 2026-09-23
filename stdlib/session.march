@@ -101,6 +101,22 @@ mod Session do
     end
   end
 
+  doc """
+  For generated `@[endpoints]` code only: take an epoch hold on the running
+  actor while it hosts a started endpoint, so it stays on the code version the
+  session formed under until the endpoint closes (hot reload's nesting rule).
+  Paired with `release_epoch`; calling it anywhere else only delays a deploy
+  (up to its hard drain deadline).
+  """
+  fn hold_epoch() : () do
+    epoch_hold()
+  end
+
+  doc "For generated `@[endpoints]` code only: release the hold `hold_epoch` took."
+  fn release_epoch() : () do
+    epoch_release()
+  end
+
   doc "Close endpoint `ep`."
   fn close(c : Cap(Session.Live), ep : Int) : () do
     match cap_dict(c) do

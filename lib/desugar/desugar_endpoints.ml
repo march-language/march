@@ -1067,10 +1067,18 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
   in
   let where = Printf.sprintf "%s, role %s" proto role in
   let idle = fn "idle" [] t_parked (con idle_c [ secret_v ]) in
+  (* Epoch holds (DD step 6, plan II.4.4, D28): a started endpoint keeps the
+     HOSTING actor on the epoch the session formed in, so its parked state --
+     typed by that version's protocol -- is never resumed by newer code.  One
+     hold per started endpoint: taken here, when the actor starts it, and
+     released when it closes (`finish`, or `cancel` of a started one).  All
+     three run in the host actor's own turn, so the hold is on its proc.
+     Through `Session`: the builtins are stdlib-only. *)
   let take_idle =
     fn "take_idle" [ ("p", t_parked) ] (TyTuple [])
       (match_ (var "p")
-         [ (pcon idle_c [ PatWild sp ], ETuple ([], sp));
+         [ (pcon idle_c [ PatWild sp ],
+            block [ let_wild (app "Session.hold_epoch" []); ETuple ([], sp) ]);
            (PatWild sp, panic (where ^ ": take_idle on an endpoint that was already started")) ])
   in
   (* `take_closed(p)`: retire a finished or cancelled endpoint.  Without it the
@@ -1122,7 +1130,9 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
            [ fn "finish" [ ("s", t_cap_session); ("st", sty this) ] t_parked
                (match_ (var "st")
                   [ (pcon this [ pvar "ep" ],
-                     block [ let_wild (app "Session.close" [ var "s"; var "ep" ]); con closed_c [ secret_v ] ]) ]) ]
+                     block [ let_wild (app "Session.close" [ var "s"; var "ep" ]);
+                             let_wild (app "Session.release_epoch" []);
+                             con closed_c [ secret_v ] ]) ]) ]
          | _ -> [])
       names
   in
@@ -1181,7 +1191,10 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
     fn "cancel" [ ("p", t_parked) ] t_parked
       (match_ (var "p")
          ((pcon idle_c [ PatWild sp ], con closed_c [ secret_v ])
-          :: List.map (fun (this, _, _) -> (pcon ("Awaiting_" ^ this) [ PatWild sp; PatWild sp ], con closed_c [ secret_v ])) receiving
+          :: List.map (fun (this, _, _) ->
+              (pcon ("Awaiting_" ^ this) [ PatWild sp; PatWild sp ],
+               block [ let_wild (app "Session.release_epoch" []); con closed_c [ secret_v ] ]))
+            receiving
           @ [ (pcon closed_c [ PatWild sp ], con closed_c [ secret_v ]) ]))
   in
   let event_api = (parked_ty :: event_ty) @ (idle :: take_idle :: take_closed :: cancel_parked :: awaits) @ resume in
