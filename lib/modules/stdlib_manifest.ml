@@ -182,7 +182,10 @@ let stdlib_file_list = [
   "cluster_node.march";
   (* the Session.Ops network transport over a split peer connection: after
      session (Ops), node_queue, node_send, peer_reader and global_pid. *)
-  "session_node.march"
+  "session_node.march";
+  (* the runtime side of a topology app (placement, drain, supervision, hook
+     watchdog): after cluster_node and session_node, whose offers it opens. *)
+  "topology.march"
 ]
 
 let js_only_stdlib_file_list = ["dom.march"; "canvas.march"; "audio.march"]

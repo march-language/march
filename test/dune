@@ -9895,3 +9895,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias stdlib-march-properties)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_properties.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_properties.march)))
+
+; ── Topology.place over one real ClusterNode (distributed deploys, build ──
+; ── step 3): placement rules, a ranked role's marker, re-offering after ────
+; ── an offer dies, and a SIGTERM drain that exits 0 ─────────────────────────
+(rule
+ (targets native_topology_place native_topology_place.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib) (source_tree ../runtime)
+       (file native/topology_place.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_topology_place
+        native/topology_place.march)
+   (with-stdout-to native_topology_place.out
+        (system "./native_topology_place")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/topology_place.expected native_topology_place.out)))
+
+; ── Topology.hook's watchdog: a hook still running after ───────────────────
+; ── MARCH_HOOK_TIMEOUT_MS is named and the process exits 1 ─────────────────
+(rule
+ (targets native_topology_hook_timeout native_topology_hook_timeout.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib) (source_tree ../runtime)
+       (file native/topology_hook_timeout.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_topology_hook_timeout
+        native/topology_hook_timeout.march)
+   (with-stdout-to native_topology_hook_timeout.out
+        (system "MARCH_HOOK_TIMEOUT_MS=300 ./native_topology_hook_timeout; echo exit=$?")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/topology_hook_timeout.expected native_topology_hook_timeout.out)))

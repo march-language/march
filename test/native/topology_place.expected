@@ -1,0 +1,6 @@
+offered: [Echo.Counted, Echo.Server]
+marker registered
+topology: Echo.Server: its offer or hosting actor died; offering it again
+re-offered after its offer died
+topology: draining topo-1 (soft 1000 ms, hard 5000 ms)
+topology: drained topo-1
