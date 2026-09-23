@@ -37,9 +37,9 @@ mod ClusterTakeoverA do
     end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main(c : Cap(IO)) do
     let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "takeover-secret", 1)
-    match ClusterNode.start(cfg) do
+    match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         let flags = Vault.new("scenario_flags")

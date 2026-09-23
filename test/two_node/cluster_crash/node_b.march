@@ -18,11 +18,11 @@ mod ClusterCrashB do
     end
   end
 
-  fn main(_c : Cap(IO)) do
+  fn main(c : Cap(IO)) do
     let port = Env.require_int("MARCH_PORT_B")
     let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
     let cfg = ClusterNode.config("node-b", port, "", Cons(seed, Nil), "stall-secret", Env.require_int("MARCH_NODE_CREATION"))
-    match ClusterNode.start(cfg) do
+    match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 120000) do println("node-b: joined") else println("node-b: never joined") end

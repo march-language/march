@@ -1,8 +1,8 @@
 # Distributed deploys, build step 4: per-role grants as values, authority report, scripted and chaos peers
 
 **DONE 2026-09-22, minus D35** (`ClusterHandle` as `Cap(Cluster.Live)`, which touches
-`stdlib/cluster_node.march`; it stays open as
-[2026-09-22-dd-step04-cluster-live-cap.md](../todos/2026-09-22-dd-step04-cluster-live-cap.md)).
+`stdlib/cluster_node.march`; it stayed open and landed 2026-09-23 as
+[2026-09-23-dd-step04-cluster-live-cap.md](2026-09-23-dd-step04-cluster-live-cap.md)).
 Parent: [../plans/2026-09-21-distributed-authority-and-deploys-plan.md](../plans/2026-09-21-distributed-authority-and-deploys-plan.md),
 sections 2, 7.1, 7.2, II.2, D2, D34, D36. Four commits, in the plan's order.
 
