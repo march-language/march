@@ -442,13 +442,16 @@ mod SessionNode do
       -- `Down`, `receive()` being typed by this pattern).
       match receive() do
         Down.Down(_, _, reason) ->
-          -- A hot-reload hard drain kills the host with Crash("draining").
-          let _ = match reason do
-            DownReason.Crash(why) ->
-              if why == "draining" do send(p.ep, HostDrained(p, ep))
-              else send(p.ep, HostDown(p, ep)) end
-            _ -> send(p.ep, HostDown(p, ep))
+          -- A hot-reload hard drain kills the host with Crash("draining"):
+          -- pass that on, and the Endpoint ends the session as drained.
+          -- (One constructor reference on purpose: this actor is declared
+          -- before Endpoint, so each reference to Endpoint's constructors
+          -- counts in the stdlib internal-error ratchet.)
+          let why = match reason do
+            DownReason.Crash(w) -> w
+            _ -> ""
           end
+          let _ = send(p.ep, HostDown(p, ep, why))
           ()
       end
       { n: state.n + 1 }
@@ -600,8 +603,14 @@ mod SessionNode do
       state
     end
     -- The hosting actor died: our endpoint's session state died with it.
-    on HostDown(p : Party, ep : Int) do
-      cancel_endpoint(p, ep, p.my_role, "host gone", "host gone", kind_host_gone())
+    on HostDown(p : Party, ep : Int, why : String) do
+      -- A hot-reload hard drain deadline killed the host (II.4.7): the
+      -- session ends as `Left("draining")`, not as a crash.
+      if why == "draining" do
+        cancel_endpoint(p, ep, p.my_role, "draining", "draining", kind_left())
+      else
+        cancel_endpoint(p, ep, p.my_role, "host gone", "host gone", kind_host_gone())
+      end
       state
     end
     -- Hot reload (DD step 6, plan II.4.4, D28): this actor runs the party's
@@ -618,12 +627,7 @@ mod SessionNode do
       epoch_release()
       state
     end
-    -- The hosting actor was killed by a hot-reload hard drain deadline
-    -- (II.4.7): the session ends as `Left("draining")`, not as a crash.
-    on HostDrained(p : Party, ep : Int) do
-      cancel_endpoint(p, ep, p.my_role, "draining", "draining", kind_left())
-      state
-    end
+
     -- `Session.leave`: this role exits the session on purpose.
     on Leave(p : Party, ep : Int, why : String) do
       cancel_endpoint(p, ep, p.my_role, "left: " ++ why, "left: " ++ why, kind_left())
