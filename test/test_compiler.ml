@@ -3870,6 +3870,38 @@ let test_check1b_keeps_caps_not_subsumed_by_check1 () =
   Alcotest.(check bool) "the surviving capability is IO.FileWrite, not IO.Console"
     true (has_error_with ctx "IO.FileWrite")
 
+(* Check 1's declaring-module exemption (`proof cap X` in `mod M` covers
+   `Cap(M.X)` without `needs M.X`) must hold for a NESTED module, not only the
+   entry one.  A nested [DMod] used to run [check_module_needs] against the
+   OUTER env, which does not yet hold the module's own proof caps, so every
+   `Cap(Vault.Key)` in `Vault` drew a false "not declared in `needs`".  This
+   is how stdlib/session.march (checked nested, inside the stdlib wrapper)
+   carried 9 phantom ratchet errors that `march --check` never showed. *)
+let test_nested_module_own_proof_cap_needs_no_needs () =
+  let ctx = typecheck {|mod App do
+    mod Vault do
+      proof cap Key
+      fn use_key(_k : Cap(Vault.Key)) : Int do 1 end
+    end
+  end|} in
+  Alcotest.(check int) "nested module may use its own proof cap without `needs`"
+    0 (count_errors_with ctx "not declared in `needs`")
+
+(* The other side: the exemption is the DECLARING module's only.  A sibling
+   that takes the same capability must still declare it. *)
+let test_sibling_module_proof_cap_still_needs_needs () =
+  let ctx = typecheck {|mod App do
+    mod Vault do
+      proof cap Key
+      fn use_key(_k : Cap(Vault.Key)) : Int do 1 end
+    end
+    mod Client do
+      fn borrow(_k : Cap(Vault.Key)) : Int do 2 end
+    end
+  end|} in
+  Alcotest.(check bool) "a sibling module's use of Cap(Vault.Key) still errors"
+    true (has_error_with ctx "Add `needs Vault.Key` to module `Client`")
+
 let test_actor_handler_cap_missing_needs_error () =
   (* An actor handler with a Cap parameter, but no needs declaration, should error. *)
   let ctx = typecheck {|mod Test do
@@ -4395,6 +4427,128 @@ let test_spawn_computed_actor_rejected () =
   in
   Alcotest.(check bool)
     "diagnostic explains spawn needs a plain actor name" true explains_spawn
+
+
+(* ── Parameterised actor `init` (D24) ───────────────────────────────────
+   `init(env : T, …) { … }` takes parameters supplied at `spawn(A, …)`; a
+   supervise block's child spec `Child f(args)` supplies them for a child.
+   specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md, D24. *)
+let init_params_actor = {|
+    actor Counter do
+      state { value : Int, label : String }
+      init(start : Int, label : String) { value: start, label: label }
+      on Inc(n : Int) do { state with value: state.value + n } end
+    end
+    actor Plain do
+      state { v : Int }
+      init() { v: 0 }
+    end
+|}
+
+let diag_mentions ctx needle =
+  (* The message AND its notes: a [check_expr ~reason] renders its reason as a
+     note under the mismatch, not in the message line. *)
+  List.exists (fun d ->
+      let m = String.concat "\n" (d.March_errors.Errors.message :: d.March_errors.Errors.notes) in
+      try ignore (Str.search_forward (Str.regexp_string needle) m 0); true
+      with Not_found -> false)
+    (March_errors.Errors.sorted ctx)
+
+let test_actor_init_params_accepted () =
+  let ctx = typecheck ("mod Test do" ^ init_params_actor ^ {|
+    fn main() : Unit do
+      let c = spawn(Counter, 41, "answer")
+      let p = spawn(Plain)
+      send(c, Inc(1))
+      kill(p)
+    end
+  end|}) in
+  Alcotest.(check bool) "init params used in init; spawn with matching args; init() accepted"
+    false (has_errors ctx)
+
+let test_actor_init_params_arity_missing () =
+  let ctx = typecheck ("mod Test do" ^ init_params_actor ^ {|
+    fn main() : Unit do
+      let c = spawn(Counter)
+      kill(c)
+    end
+  end|}) in
+  Alcotest.(check bool) "spawn(Counter) with no args: error" true (has_errors ctx);
+  Alcotest.(check bool) "names the init signature" true
+    (diag_mentions ctx "init(start : Int, label : String)");
+  Alcotest.(check bool) "states the counts" true
+    (diag_mentions ctx "takes 2 arguments, but `spawn(Counter)` supplies 0")
+
+let test_actor_init_params_arity_extra () =
+  let ctx = typecheck ("mod Test do" ^ init_params_actor ^ {|
+    fn main() : Unit do
+      let p = spawn(Plain, 1)
+      kill(p)
+    end
+  end|}) in
+  Alcotest.(check bool) "spawn(Plain, 1) on a param-less actor: error" true (has_errors ctx);
+  Alcotest.(check bool) "explains how to declare parameters" true
+    (diag_mentions ctx "declares no `init` parameters")
+
+let test_actor_init_params_arg_type () =
+  let ctx = typecheck ("mod Test do" ^ init_params_actor ^ {|
+    fn main() : Unit do
+      let c = spawn(Counter, "not an int", "x")
+      kill(c)
+    end
+  end|}) in
+  Alcotest.(check bool) "wrong arg type: error" true (has_errors ctx);
+  Alcotest.(check bool) "blames the init parameter" true
+    (diag_mentions ctx "the `init` parameter `start` of actor `Counter`")
+
+let test_actor_init_param_needs_type () =
+  let parsed =
+    try ignore (parse_and_desugar {|mod Test do
+      actor Counter do
+        state { value : Int }
+        init(start) { value: start }
+      end
+    end|}); true
+    with _ -> false
+  in
+  Alcotest.(check bool) "untyped init param is a parse error" false parsed
+
+let test_supervise_child_init_args () =
+  let sup = {|
+    actor Worker do
+      state { base : Int, count : Int }
+      init(base : Int) { base: base, count: 0 }
+      on Work() do { state with count: state.count + 1 } end
+    end
+  |} in
+  let ok = typecheck ("mod Test do" ^ sup ^ {|
+    actor Sup do
+      state { w : Int, seed : Int }
+      init(seed : Int) { w: 0, seed: seed }
+      supervise do
+        strategy one_for_one
+        max_restarts 5 within 60
+        Worker w(seed * 10)
+      end
+    end
+    fn main() : Unit do kill(spawn(Sup, 7)) end
+  end|}) in
+  Alcotest.(check bool) "child spec supplies the child's init arg from the supervisor's param"
+    false (has_errors ok);
+  let bad = typecheck ("mod Test do" ^ sup ^ {|
+    actor Sup do
+      state { w : Int }
+      init { w: 0 }
+      supervise do
+        strategy one_for_one
+        max_restarts 5 within 60
+        Worker w
+      end
+    end
+    fn main() : Unit do kill(spawn(Sup)) end
+  end|}) in
+  Alcotest.(check bool) "child spec missing the child's init arg: error" true (has_errors bad);
+  Alcotest.(check bool) "names the child spec" true (diag_mentions bad "`Worker w(…)`")
 
 (* Counterpart: a bare actor name still typechecks cleanly — the guard must
    not flag the valid `spawn(Counter)` form. *)
@@ -14499,7 +14653,6 @@ let stdlib_known_internal_errors = [
   "node_call.march", 5;
   "plot.march", 1;
   "rrb_vec.march", 19;
-  "session.march", 9;
   "session_node.march", 3;
   "system.march", 8;
   "uuid.march", 2;
@@ -16213,6 +16366,7 @@ let compiler_suites =
       ("cap_unforgeable", Test_cap_unforgeable.tests);
       ("cap_dict", Test_cap_dict.tests);
       ("endpoints", Test_endpoints.tests);
+      ("topology_flag", Test_topology_flag.tests);
       ("cap_attrib_agreement", Test_cap_attrib_agreement.tests);
       ("cap_sandbox_profile", Test_cap_sandbox_profile.tests);
       ("cap_sandbox_runtime", Test_cap_sandbox_runtime.tests);
@@ -16685,6 +16839,8 @@ let compiler_suites =
           Alcotest.test_case "missing needs dedup: no orphan hint with main(cap : Cap(IO))" `Quick test_missing_needs_dedup_no_orphan_hint_main_cap_param;
           Alcotest.test_case "Check 1b omits caps subsumed by Check 1" `Quick test_check1b_omits_caps_subsumed_by_check1;
           Alcotest.test_case "Check 1b keeps caps not subsumed by Check 1" `Quick test_check1b_keeps_caps_not_subsumed_by_check1;
+          Alcotest.test_case "nested module uses its own proof cap without needs" `Quick test_nested_module_own_proof_cap_needs_no_needs;
+          Alcotest.test_case "sibling module's use of a proof cap still needs needs" `Quick test_sibling_module_proof_cap_still_needs_needs;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;
           (* C1 fix: actor handler body IO caps flow into manifest / missing-needs diagnostic *)
           Alcotest.test_case "actor handler body IO, no needs: warns"    `Quick test_actor_handler_body_io_missing_needs_warns;
@@ -16706,6 +16862,12 @@ let compiler_suites =
           Alcotest.test_case "tcp_listen body, NetConnect does not satisfy" `Quick test_netlisten_not_satisfied_by_netconnect;
           (* spawn argument must be a plain actor name (not a computed expr) *)
           Alcotest.test_case "spawn computed actor: rejected"          `Quick test_spawn_computed_actor_rejected;
+          Alcotest.test_case "actor init params: accepted (D24)"       `Quick test_actor_init_params_accepted;
+          Alcotest.test_case "actor init params: missing args"         `Quick test_actor_init_params_arity_missing;
+          Alcotest.test_case "actor init params: extra args"           `Quick test_actor_init_params_arity_extra;
+          Alcotest.test_case "actor init params: arg type"             `Quick test_actor_init_params_arg_type;
+          Alcotest.test_case "actor init params: param needs a type"   `Quick test_actor_init_param_needs_type;
+          Alcotest.test_case "supervise child init args (D24)"         `Quick test_supervise_child_init_args;
           Alcotest.test_case "spawn plain actor name: ok"              `Quick test_spawn_plain_actor_name_ok;
           (* Actor handler return type checking — gap fills *)
           Alcotest.test_case "actor handler duplicate name"            `Quick test_actor_handler_duplicate_name;

@@ -105,6 +105,12 @@ ratchet entries). The declaration is honest on its own and puts the count back
 at the 2 pre-existing errors; the harness/registration mismatch is #591's to
 revisit.
 
+(Correction, 2026-09-23: the diagnosis above is wrong. The cap registers as
+`Actor.Introspect`; the exemption missed it because a NESTED module's Check 1
+ran against the outer env, before its own proof caps were registered. Fixed in
+the typechecker and the `needs Actor.Introspect` line removed; see
+`2026-09-23-nested-module-own-proof-cap-exemption.md`.)
+
 ## Not done
 
 - Cross-node references (`GlobalPid.make`, `GlobalRegistry.lookup`) are untouched until

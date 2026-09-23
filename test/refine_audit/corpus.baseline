@@ -14,6 +14,10 @@ native_actor_dispatch_rc_window: coverage audit (user + stdlib): 120 enforced, 0
 native_actor_dispatch_rc_window: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_enumeration: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_actor_enumeration: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_init_params: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_actor_init_params: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_init_params_schema: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_actor_init_params_schema: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_mailbox_alarm: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_actor_mailbox_alarm: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_monitor_down_reason: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
@@ -428,6 +432,8 @@ native_string_to_float_option: coverage audit (user + stdlib): 120 enforced, 0 i
 native_string_to_float_option: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_deflected_crash_absorbed: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_deflected_crash_absorbed: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_init_arg_restart: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_supervisor_init_arg_restart: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_one_for_all_restart: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_one_for_all_restart: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_one_for_one_restart: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced

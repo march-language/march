@@ -948,10 +948,14 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
           v_lin = Tir.Unr } in
         Tir.EApp (send_var, [cap'; msg'])))
 
-  (* Actor names are upper-case identifiers, parsed as ECon with no args.
-     Lower spawn(ActorName) → call to ActorName_spawn() *)
-  | Ast.ESpawn (Ast.ECon ({ txt = actor_name; _ }, [], _), _)
-  | Ast.ESpawn (Ast.EVar { txt = actor_name; _ }, _) ->
+  (* Actor names are upper-case identifiers, parsed as ECon.  Its args, if
+     any, are the actor's `init` arguments (D24; see ast.ml's ESpawn).
+     Lower spawn(ActorName, a, b) → call to ActorName_spawn(a, b) *)
+  | Ast.ESpawn ((Ast.ECon ({ txt = actor_name; _ }, _, _) | Ast.EVar { txt = actor_name; _ }), _) ->
+    let init_args = match e with
+      | Ast.ESpawn (Ast.ECon (_, args, _), _) -> args
+      | _ -> [] in
+    lower_atoms_k env init_args (fun init_atoms ->
     let spawn_fn : Tir.var = {
       v_name = actor_name ^ Tir_names.actor_spawn_suffix;
       v_ty = Tir.TPtr Tir.TUnit;
@@ -969,7 +973,7 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     } in
     (match Hashtbl.find_opt Lower_state._actor_mailboxes actor_name with
      | None ->
-       Tir.ELet (raw_var, Tir.EApp (spawn_fn, []),
+       Tir.ELet (raw_var, Tir.EApp (spawn_fn, init_atoms),
                  Tir.EApp (march_spawn, [Tir.AVar raw_var]))
      | Some (limit, policy) ->
        (* `mailbox N policy` on the declaration: bind the limit right after
@@ -981,11 +985,11 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
          v_ty = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TInt; Tir.TInt], Tir.TUnit);
          v_lin = Tir.Unr } in
        let unit_var : Tir.var = { v_name = fresh_name "mbox_set"; v_ty = Tir.TUnit; v_lin = Tir.Unr } in
-       Tir.ELet (raw_var, Tir.EApp (spawn_fn, []),
+       Tir.ELet (raw_var, Tir.EApp (spawn_fn, init_atoms),
          Tir.ELet (pid_var, Tir.EApp (march_spawn, [Tir.AVar raw_var]),
            Tir.ELet (unit_var,
              Tir.EApp (set_var, [Tir.AVar pid_var; Tir.ALit (Ast.LitInt limit); Tir.ALit (Ast.LitInt policy)]),
-             Tir.EAtom (Tir.AVar pid_var)))))
+             Tir.EAtom (Tir.AVar pid_var))))))
 
   | Ast.ESpawn _ ->
     failwith "TIR lower: ESpawn argument must be a plain actor name"

@@ -139,12 +139,21 @@ let exec_output ~target ~args output =
     "[compiled] and [file] is somehow [None] after all" arm to fill with a
     placeholder; the impossible case simply isn't expressible. *)
 let run ?(dump_phases = false) ?(compiled = false) ?target ?file ?(args = []) () =
+  (* The topology check runs before an interpreted or single-file run; the
+     compiled project run goes through Cmd_build.build, which gates itself.
+     A run outside any project (no forge.toml) has no topology to check. *)
+  let gated k =
+    match Project.load () with
+    | Ok proj -> (match Topology.gate ~proj () with Error m -> Error m | Ok () -> k ())
+    | Error _ -> k ()
+  in
   match compiled, file with
   | true, None ->
     (match Cmd_build.build ~release:false ~dump_phases ?target () with
      | Error msg -> Error msg
      | Ok output -> exec_output ~target ~args output)
   | false, _ ->
+    gated @@ fun () ->
     (match resolve_entry ~interpreted:true ?file () with
      | Error msg -> Error msg
      | Ok (entry, ctx) ->
@@ -161,6 +170,7 @@ let run ?(dump_phases = false) ?(compiled = false) ?target ?file ?(args = []) ()
        if rc = 0 then Ok ()
        else Error (Printf.sprintf "program exited with code %d" rc))
   | true, Some _ ->
+    gated @@ fun () ->
     (match resolve_entry ?file () with
      | Error msg -> Error msg
      | Ok (entry, ctx) ->

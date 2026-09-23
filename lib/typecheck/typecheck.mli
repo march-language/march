@@ -275,6 +275,7 @@ type env = {
   linear_ok_ids : (int, unit) Hashtbl.t;
   linear_generic_uses : (Ast.span, string * int list * ty list * ty * bool) Hashtbl.t;
   cap_producer_ivars : (int, Ast.span) Hashtbl.t;
+  actor_init_sigs : (string, (string * ty) list) Hashtbl.t;
   cap_narrow_factory_fns : (string, Ast.span) Hashtbl.t;
   cap_dicts : (string * string) list;
   cap_dict_decl_sites : (Ast.span * string * string) list ref;

@@ -1102,7 +1102,10 @@ and emit_decl ctx = function
         line ctx (Printf.sprintf "state { %s }" (String.concat ", " fstrs))
       end;
       nl ctx;
-      line ctx "init do";
+      (if actor.actor_init_params = [] then line ctx "init do"
+       else
+         line ctx (Printf.sprintf "init(%s) do"
+                     (String.concat ", " (List.map fmt_param actor.actor_init_params))));
       indented ctx (fun () -> emit_body ctx actor.actor_init);
       line ctx "end";
       List.iter (fun h ->
