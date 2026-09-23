@@ -12675,7 +12675,7 @@ module Audit_fixture = struct
         actor_init = A.ELet (init_binding, dummy);
         actor_handlers = [ { A.ah_msg = nm "Bump"; ah_params = [ actor_param ]; ah_body = A.ELit (A.LitInt 0, dummy) } ];
         actor_supervise = Some supervise_cfg;
-        actor_mailbox = None; actor_remote = false;
+        actor_mailbox = None; actor_remote = false; actor_on_stop = None;
         actor_compat = "full";
         actor_invariant = Some (A.EAnnot (A.ELit (A.LitBool true, dummy), refine_or_plain 33 int_ty, dummy)) }
     in

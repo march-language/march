@@ -12,7 +12,8 @@
  *   1. Pop the next RUNNABLE process from the local deque.
  *   2. If empty, attempt to steal from a random other scheduler.
  *   3. If stolen or local: reset reduction budget, swapcontext into process.
- *   4. On return: if RUNNABLE, push back to local deque; if DEAD, leak-don't-free.
+ *   4. On return: if RUNNABLE, push back to local deque; if DEAD, reap it and
+ *      retire the struct to march_reclaim (freed after a grace period).
  *      If WAITING, leave parked — a sender will re-enqueue via wake.
  *   5. If all deques empty and g_live_procs == 0, set g_all_done and exit.
  *
@@ -147,9 +148,16 @@ static _Atomic int      g_sched_shutdown = 0;
  * both kinds avoids a second mutex-guarded structure for what is otherwise
  * an identical "sorted by deadline, popped by timer_service" data shape. */
 typedef enum { MARCH_TIMER_WAKE = 0, MARCH_TIMER_SEND = 1 } march_timer_kind;
+/* An entry names its proc by PID, never by pointer: the heap has no
+ * cancellation, so an entry routinely outlives the proc it names (a timed
+ * park that woke early, a send_after to an actor that has since died), and
+ * a proc is freed after its grace period.  timer_service and
+ * march_sched_wait_idle resolve it with march_sched_find inside a critical
+ * section; a reaped proc resolves to NULL, which reads as "not waiting" /
+ * "dead target". */
 typedef struct {
     int64_t            deadline_ms;
-    struct march_proc *proc;    /* WAKE: proc to wake. SEND: delivery target (may be NULL). */
+    int64_t            pid;     /* WAKE: proc to wake. SEND: delivery target (-1: none). */
     int64_t            gen;     /* WAKE only. */
     march_timer_kind   kind;
     void              *msg;     /* SEND only: owned message reference. */
@@ -365,15 +373,20 @@ static inline int proc_is_pinned(const march_proc *p) {
 /* Cross-file stat counters (indices 3-5 bumped from march_runtime.c /
  * later scheduler features). Exposed raw so new counters don't need new
  * symbols. See MARCH_STAT_* in march_scheduler.h. */
-_Atomic int64_t march_stat_counters[8];
+_Atomic int64_t march_stat_counters[16];
 
 int64_t march_sched_stat(int64_t which) {
     switch (which) {
     case 0: return atomic_load_explicit(&g_live_procs, memory_order_relaxed);
     case 1: return atomic_load_explicit(&g_next_pid,   memory_order_relaxed);
     case 2: return atomic_load_explicit(&g_runq_len,   memory_order_relaxed);
-    case 3: case 4: case 5: case 7:
+    case 3: case 4: case 5: case 7: case 8:
         return atomic_load_explicit(&march_stat_counters[which],
+                                    memory_order_relaxed);
+    case 9:
+        return atomic_load_explicit(&march_stat_counters[MARCH_STAT_PROCS_RETIRED],
+                                    memory_order_relaxed)
+             - atomic_load_explicit(&march_stat_counters[MARCH_STAT_PROCS_FREED],
                                     memory_order_relaxed);
     case 6: {
         pthread_mutex_lock(&g_timer_mu);
@@ -425,13 +438,21 @@ static size_t g_page_size = 0;
  * memcpy the old slots in, zero the rest, release-store the new pointer, and
  * deliberately LEAK the old array — an unlocked reader (the SIGSEGV-handler
  * walker in particular, which runs in signal context and cannot take
- * g_registry_mu) may still hold a pointer to it. This is the same
- * leak-don't-free discipline already used for retired procs; capacity
+ * g_registry_mu) may still hold a pointer to it. (Procs themselves were
+ * leak-don't-free too until march_reclaim; these arrays still are.) Capacity
  * doubles each time, so the number of leaked arrays is O(log2(max pid)),
  * not O(pid). */
 typedef struct {
     int64_t      cap;
-    march_proc  *slots[];
+    /* Atomic: march_sched_find reads a slot with no lock while the reaper
+     * NULLs it under g_registry_mu.  That was a dormant plain-load race while
+     * march_sched_find had no callers; it is now the resolver for every
+     * holder that stores a pid (ThreadSanitizer found it on the
+     * kill-then-respawn fixture).  Publication is release (add) / acquire
+     * (find); NULLing is release, and is sequenced before the reap's
+     * march_reclaim_retire, which is what makes a NULL-or-live result safe
+     * inside a critical section. */
+    march_proc *_Atomic slots[];
 } march_registry;
 
 static _Atomic(march_registry *) g_registry = NULL;
@@ -469,12 +490,15 @@ static void registry_add(march_proc *p) {
         if (new_cap < p->pid + 1) new_cap = p->pid + 1;
         if (new_cap < MARCH_MAX_PROCS) new_cap = MARCH_MAX_PROCS;
         march_registry *nr = registry_alloc(new_cap);
-        if (r) memcpy(nr->slots, r->slots, (size_t)old_cap * sizeof(march_proc *));
+        for (int64_t i = 0; r && i < old_cap; i++)   /* under g_registry_mu */
+            atomic_store_explicit(&nr->slots[i],
+                atomic_load_explicit(&r->slots[i], memory_order_relaxed),
+                memory_order_relaxed);
         atomic_store_explicit(&g_registry, nr, memory_order_release);
         /* Deliberately leaked: see the discipline note above `g_registry`. */
         r = nr;
     }
-    r->slots[p->pid] = p;
+    atomic_store_explicit(&r->slots[p->pid], p, memory_order_release);
     g_proc_count++;
     pthread_mutex_unlock(&g_registry_mu);
 }
@@ -483,7 +507,7 @@ static void registry_remove(march_proc *p) {
     pthread_mutex_lock(&g_registry_mu);
     march_registry *r = atomic_load_explicit(&g_registry, memory_order_relaxed);
     if (r && p->pid < r->cap) {
-        r->slots[p->pid] = NULL;
+        atomic_store_explicit(&r->slots[p->pid], NULL, memory_order_release);
     }
     g_proc_count--;
     pthread_mutex_unlock(&g_registry_mu);
@@ -878,12 +902,20 @@ fatal:
          * pointer once with acquire and bound the walk by THAT snapshot's
          * own cap — safe even if a growth is racing this handler, because
          * the old array (if that's what we see) is never freed, only
-         * superseded. */
+         * superseded.
+         *
+         * Proc reclamation: on a scheduler thread (the usual faulting
+         * thread) this runs inside that thread's implicit critical section,
+         * so no proc it reads can be freed under it.  On any other thread it
+         * cannot enter one (march_reclaim_enter may allocate, which is not
+         * async-signal-safe), and a proc reaped concurrently could be freed
+         * mid-read: accepted for a MARCH_DEBUG-only diagnostic printed on
+         * the way to _exit. */
         march_registry *reg = atomic_load_explicit(&g_registry, memory_order_acquire);
         int64_t hi_pid = atomic_load_explicit(&g_next_pid, memory_order_acquire);
         if (reg && hi_pid > reg->cap) hi_pid = reg->cap;
         for (int64_t i = 0; reg && i < hi_pid; i++) {
-            march_proc *q = reg->slots[i];
+            march_proc *q = atomic_load_explicit(&reg->slots[i], memory_order_acquire);
             if (!q || !q->stack_mmap_base) continue;
             char *lo = (char *)q->stack_mmap_base;
             char *hi = lo + q->stack_alloc;
@@ -1129,6 +1161,8 @@ static void mbox_wake_send_waiters_if_low(march_proc *p) {
     while (w) {
         march_proc *next = w->send_wait_next;
         w->send_wait_next = NULL;
+        /* After the last touch of w's link: see march_proc.send_wait_linked. */
+        atomic_store_explicit(&w->send_wait_linked, 0, memory_order_release);
         march_sched_wake(w);
         w = next;
     }
@@ -1168,6 +1202,7 @@ static void mbox_unlink_send_waiter(march_proc *target, march_proc *self) {
         if (*link == self) {
             *link = self->send_wait_next;
             self->send_wait_next = NULL;
+            atomic_store_explicit(&self->send_wait_linked, 0, memory_order_release);
             return;
         }
         link = &(*link)->send_wait_next;
@@ -1202,6 +1237,7 @@ static void proc_trampoline(int arg_hi, int arg_lo) {
     /* Function returned — mark dead and hand control back to the scheduler.
      * This proc never resumes after this switch, so there is no matching
      * MARCH_ASAN_SWITCH_DONE call. */
+    march_reclaim_check_switch("proc exit");
     atomic_store_explicit(&proc->status, PROC_DEAD, memory_order_release);
     MARCH_ASAN_SWITCH_TO_SCHED(proc);
     MARCH_TSAN_SWITCH_TO_SCHED(proc->owner_sched);
@@ -1331,7 +1367,8 @@ void march_sched_init(void) {
      * unregistered again. */
     {
         march_registry *r = atomic_load_explicit(&g_registry, memory_order_relaxed);
-        if (r) memset(r->slots, 0, (size_t)r->cap * sizeof(march_proc *));
+        for (int64_t i = 0; r && i < r->cap; i++)
+            atomic_store_explicit(&r->slots[i], NULL, memory_order_relaxed);
     }
     g_proc_count = 0;
     g_timer_len = 0;   /* keep the heap allocation; the mutex is static */
@@ -1568,7 +1605,7 @@ static int wake_idle_daemons(void) {
     int64_t hi = atomic_load_explicit(&g_next_pid, memory_order_acquire);
     if (r && hi > r->cap) hi = r->cap;
     for (int64_t i = 0; r && i < hi; i++) {
-        march_proc *q = r->slots[i];
+        march_proc *q = atomic_load_explicit(&r->slots[i], memory_order_relaxed);
         if (!q || !q->is_daemon) continue;
         if (atomic_load_explicit(&q->status, memory_order_acquire) == PROC_WAITING
                 && !mbox_waiting_has_deliverable(q)) {
@@ -1596,6 +1633,20 @@ __attribute__((weak)) void march_signal_drain(void) { }
  * failing to link. */
 __attribute__((weak)) void march_incrc(void *p) { (void)p; }
 
+/* march_reclaim's free function for a reaped proc: runs once no thread can
+ * still hold a pointer it resolved before the reap (see the retire call in
+ * sched_loop's PROC_DEAD branch).  Its context and stack were released at
+ * the reap already. */
+static void proc_free(void *v) {
+    march_proc *p = (march_proc *)v;
+#ifdef MARCH_TSAN_BUILD
+    if (p->tsan_fiber) __tsan_destroy_fiber(p->tsan_fiber);
+#endif
+    free(p);
+    atomic_fetch_add_explicit(&march_stat_counters[MARCH_STAT_PROCS_FREED], 1,
+                              memory_order_relaxed);
+}
+
 static void sched_loop(march_scheduler *sched) {
     /* Set up the per-thread alternate signal stack before running any green
      * threads.  The SIGSEGV handler for lazy stack growth requires SA_ONSTACK
@@ -1621,6 +1672,9 @@ static void sched_loop(march_scheduler *sched) {
     march_tls_reductions = MARCH_REDUCTION_BUDGET;
 
     tl_sched = sched;
+    /* This thread is now a quiescent-state reader for march_reclaim: online,
+     * with a quiescent state announced at the top of every iteration below. */
+    march_reclaim_sched_attach();
     sched->entered = 1;
     atomic_store_explicit(&sched->running, 1, memory_order_release);
     unsigned int steal_seed = (unsigned int)sched->id;
@@ -1632,6 +1686,14 @@ static void sched_loop(march_scheduler *sched) {
     int last_yielded = 0;
 
     while (!atomic_load_explicit(&g_all_done, memory_order_acquire)) {
+        /* Quiescent state: no green thread is running on this thread, so no
+         * pointer anything resolved in the previous slice can still be live
+         * (a resolved pointer never survives a context switch -- the
+         * suspending swapcontexts check it).  One release store when the
+         * epoch has moved, nothing otherwise; this is the whole per-dispatch
+         * cost of reclamation on a scheduler thread. */
+        march_reclaim_quiescent();
+
         /* Run any pending Signal.watch handlers on this normal stack before
          * dispatching green threads.  Cheap when idle (five atomic loads). */
         march_signal_drain();
@@ -1724,7 +1786,11 @@ static void sched_loop(march_scheduler *sched) {
             /* No runnable process: sleep 1ms to avoid burning CPU at idle.
              * sched_yield() alone causes ~99% CPU on a waiting server. */
             struct timespec idle_sleep = { 0, 1000000 }; /* 1ms */
+            /* Offline while asleep, so an idle scheduler never holds back a
+             * grace period; online (store + fence) before touching anything. */
+            march_reclaim_offline();
             nanosleep(&idle_sleep, NULL);
+            march_reclaim_online();
             continue;
         }
 
@@ -1852,6 +1918,11 @@ static void sched_loop(march_scheduler *sched) {
             while (dead_w) {
                 march_proc *dead_next = dead_w->send_wait_next;
                 dead_w->send_wait_next = NULL;
+                /* After the last touch of the link, and before `p` can be
+                 * retired below: a parked sender that reads 0 here knows it
+                 * need not (and must not) dereference `p` again. */
+                atomic_store_explicit(&dead_w->send_wait_linked, 0,
+                                      memory_order_release);
                 march_sched_wake(dead_w);
                 dead_w = dead_next;
             }
@@ -1943,7 +2014,24 @@ static void sched_loop(march_scheduler *sched) {
                     &march_stat_counters[MARCH_STAT_CTX_RELEASED], 1,
                     memory_order_relaxed);
             }
-            /* Deliberately NOT munmap(p->stack_mmap_base, ...) / free(p) here.
+            /* Retire the struct itself.  It is unreachable to NEW readers:
+             * registry_remove ran above, the actor's own thread NULLed its
+             * meta's green_thread before its fn returned, and every holder
+             * that can outlive a proc (Task word 2, reply-ref field 0, timer
+             * entries) stores a pid and resolves it through the registry.
+             * A reader that resolved it earlier is inside a critical section,
+             * and march_reclaim frees `p` only after every such section has
+             * ended.  `p` is not touched below this line.
+             *
+             * The history the comment below records is why this cannot be a
+             * plain free(p): it was one, and a stale cross-thread reader
+             * corrupted the heap. */
+            atomic_fetch_add_explicit(
+                &march_stat_counters[MARCH_STAT_PROCS_RETIRED], 1,
+                memory_order_relaxed);
+            march_reclaim_retire(p, proc_free);
+            /* Why not free(p) here (historical, 2026-08; what march_reclaim
+             * replaced):
              *
              * march_actor_meta.green_thread (march_runtime.c) holds a
              * march_proc* that is read from OTHER OS threads (do_actor_death,
@@ -1970,12 +2058,15 @@ static void sched_loop(march_scheduler *sched) {
              * (bounded by total actors ever spawned+killed over a program's
              * lifetime) for eliminating the crash; proper reclamation
              * (e.g. reference counting or an epoch/hazard-pointer scheme)
-             * is a separate, larger undertaking — see specs/todos.md. */
+             * was the separate, larger undertaking that is now
+             * march_reclaim (specs/todos/2026-09-17-proc-struct-
+             * reclamation.md). */
         }
         /* PROC_WAITING: process parked itself; a wakeup call re-enqueues it. */
     }
 
     atomic_store_explicit(&sched->running, 0, memory_order_release);
+    march_reclaim_sched_detach();
     tl_sched = NULL;
 }
 
@@ -2075,6 +2166,10 @@ void march_sched_run(void) {
     march_signal_drain();
 
     march_sched_preempt_stop();
+    /* Every scheduler thread is offline now; free what the daemon's last
+     * tick left behind (any thread still inside a critical section holds
+     * its own share back). */
+    march_reclaim_poll();
 }
 
 /* NOINLINE — this is a green-thread MIGRATION BARRIER, and that attribute is
@@ -2123,6 +2218,7 @@ void march_sched_yield(void) {
             memory_order_acq_rel, memory_order_acquire)) {
         atomic_store_explicit(&p->status, PROC_RUNNABLE, memory_order_release);
     }
+    march_reclaim_check_switch("march_sched_yield");
     MARCH_ASAN_SWITCH_TO_SCHED(p);
     MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
     swapcontext(p->ctx, &tl_sched->sched_ctx);
@@ -2155,7 +2251,7 @@ void march_sched_wait_idle(void) {
         int64_t hi = atomic_load_explicit(&g_next_pid, memory_order_acquire);
         if (r && hi > r->cap) hi = r->cap;
         for (int64_t i = 0; r && i < hi && !busy; i++) {
-            march_proc *q = r->slots[i];
+            march_proc *q = atomic_load_explicit(&r->slots[i], memory_order_relaxed);
             if (!q || q == self) continue;
             march_proc_status st =
                 atomic_load_explicit(&q->status, memory_order_acquire);
@@ -2219,11 +2315,15 @@ void march_sched_wait_idle(void) {
              * other non-daemon/actor-daemon procs keeping the process up —
              * and still gets its message delivered on schedule regardless
              * of what this function reports. */
+            /* Entries name procs by pid (see march_timer_ent); resolve inside
+             * a critical section.  A reaped proc resolves to NULL: not
+             * waiting. */
+            march_reclaim_enter();
             pthread_mutex_lock(&g_timer_mu);
             int timers_pending = 0;
             for (int ti = 0; ti < g_timer_len && !timers_pending; ti++) {
                 if (g_timer_heap[ti].kind != MARCH_TIMER_WAKE) continue;
-                march_proc *tp = g_timer_heap[ti].proc;
+                march_proc *tp = march_sched_find(g_timer_heap[ti].pid);
                 if (!tp) continue;
                 if (atomic_load_explicit(&tp->park_gen, memory_order_relaxed)
                         != g_timer_heap[ti].gen)
@@ -2233,6 +2333,7 @@ void march_sched_wait_idle(void) {
                 if (tst == PROC_WAITING || tst == PROC_PARKED) timers_pending = 1;
             }
             pthread_mutex_unlock(&g_timer_mu);
+            march_reclaim_exit();
             if (!timers_pending) return;
         }
         /* Still busy after yielding: the procs we wait on are runnable only on
@@ -2265,6 +2366,7 @@ void march_sched_tick(void) {
 void march_sched_exit(void) {
     if (!tl_sched || !tl_sched->current) return;
     march_proc *p = tl_sched->current;
+    march_reclaim_check_switch("march_sched_exit");
     atomic_store_explicit(&p->status, PROC_DEAD, memory_order_release);
     /* This proc never resumes after this switch, so there is no matching
      * MARCH_ASAN_SWITCH_DONE call. */
@@ -2323,7 +2425,7 @@ march_proc *march_sched_find(int64_t pid) {
     if (pid < 0) return NULL;
     march_registry *r = atomic_load_explicit(&g_registry, memory_order_acquire);
     if (!r || pid >= r->cap) return NULL;
-    return r->slots[pid];
+    return atomic_load_explicit(&r->slots[pid], memory_order_acquire);
 }
 
 /* ── Phase 4: compiled-code reduction counting ────────────────────────── */
@@ -2422,8 +2524,14 @@ static int mbox_block_register_and_park(march_proc *target) {
          * OTHER, independent OS thread (a real scheduler) can still run
          * sched_loop and drain the mailbox while this one naps. */
         mbox_lock_release(target);
+        /* Not while holding the caller's critical section: a foreign thread
+         * that stays online for the whole backpressure episode would hold
+         * back every grace period.  The caller re-resolves `target` by pid
+         * when we return (march_sched_send's BLOCK case). */
+        int depth = march_reclaim_suspend();
         struct timespec ts = { 0, 1000000 }; /* 1ms */
         nanosleep(&ts, NULL);
+        march_reclaim_resume(depth);
         return MARCH_SEND_OK;   /* caller retries unconditionally */
     }
 
@@ -2465,8 +2573,17 @@ static int mbox_block_register_and_park(march_proc *target) {
     /* Register as waiter, release lock, park. */
     self->send_wait_next = target->mbox_send_waiters;
     target->mbox_send_waiters = self;
+    atomic_store_explicit(&self->send_wait_linked, 1, memory_order_relaxed);
     mbox_lock_release(target);
+    /* The park is a context switch: suspend the caller's critical section
+     * around it (march_reclaim_check_switch in park_self would abort
+     * otherwise).  While we are parked `target` may die, be reaped, and be
+     * freed -- so after the park it is dereferenced only if we are still
+     * linked in its waiter list, and the caller re-resolves it by pid before
+     * retrying. */
+    int depth = march_reclaim_suspend();
     march_sched_park_self();
+    march_reclaim_resume(depth);
 
     /* UNCONDITIONALLY deregister self from target->mbox_send_waiters
      * before returning to the caller's retry, regardless of WHY
@@ -2495,9 +2612,24 @@ static int mbox_block_register_and_park(march_proc *target) {
      * march_sched_wake -- so this call finds nothing and is a no-op.
      * mbox_unlink_send_waiter's own comment has the full argument for
      * why "not found" is always safe to treat as "already handled". */
-    mbox_lock_acquire(target);
-    mbox_unlink_send_waiter(target, self);
-    mbox_lock_release(target);
+    /* Only if still linked, and that is also what makes `target` safe to
+     * touch here: every unlinker clears send_wait_linked (release) BEFORE the
+     * target can be retired (the reap's drain runs before its retire), so
+     * reading 1 (acquire) inside a critical section means the target had not
+     * been retired when that section began, and cannot be freed before it
+     * ends.  Reading 0 means somebody already unlinked us and `target` must
+     * not be dereferenced at all.
+     *
+     * The critical section here is the resumed caller's, and on a scheduler
+     * thread it is the implicit one: this green thread was re-dispatched
+     * after the park, so its thread announced a quiescent state before
+     * resuming us and announces the next one only once we switch out
+     * again. */
+    if (atomic_load_explicit(&self->send_wait_linked, memory_order_acquire)) {
+        mbox_lock_acquire(target);
+        mbox_unlink_send_waiter(target, self);
+        mbox_lock_release(target);
+    }
     return MARCH_SEND_OK;   /* caller retries unconditionally */
 }
 
@@ -2526,6 +2658,9 @@ int march_sched_send(march_proc *target, void *msg) {
      * for both the green-thread (parked) and foreign-thread (sleep-polled)
      * BLOCK paths. Deviation from the brief's literal snippet; behavior is
      * identical. */
+    /* The identity a BLOCK wait re-resolves by: the wait suspends the
+     * caller's critical section, so `target` may be freed across it. */
+    const int64_t target_pid = target ? target->pid : -1;
     for (;;) {
         if (!target || atomic_load_explicit(&target->status, memory_order_acquire) == PROC_DEAD) {
             free(node);
@@ -2616,6 +2751,10 @@ int march_sched_send(march_proc *target, void *msg) {
                     free(node);
                     return MARCH_SEND_DEAD;
                 }
+                /* We waited outside any critical section: the old pointer is
+                 * stale.  Back inside one now; a reaped target resolves to
+                 * NULL and the top of the loop reports it DEAD. */
+                target = march_sched_find(target_pid);
                 continue;   /* retry from the top */
             }
             default: break;
@@ -2732,6 +2871,7 @@ int64_t march_sched_mbox_count(march_proc *p) {
 __attribute__((noinline))
 static void mbox_recv_park_once(march_proc *p) {
     march_scheduler *s = tl_sched;
+    march_reclaim_check_switch("march_sched_recv");
     MARCH_ASAN_SWITCH_TO_SCHED(p);
     MARCH_TSAN_SWITCH_TO_SCHED(s);
     swapcontext(p->ctx, &s->sched_ctx);
@@ -3017,6 +3157,7 @@ void march_sched_park_self(void) {
         return;
     }
 
+    march_reclaim_check_switch("march_sched_park_self");
     MARCH_ASAN_SWITCH_TO_SCHED(p);
     MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
     swapcontext(p->ctx, &tl_sched->sched_ctx);
@@ -3026,10 +3167,10 @@ void march_sched_park_self(void) {
      * before swapping back into our context.  Status is now RUNNING. */
 }
 
-/* ── Timers: binary min-heap of (deadline, proc) ─────────────────────── */
+/* ── Timers: binary min-heap of (deadline, pid) ──────────────────────── */
 /* No cancellation by design: a stale fire is a spurious wake, which every
- * park site already tolerates by looping; procs are leak-don't-free so the
- * proc pointer is always dereferenceable (Task 12 recycles stacks ONLY).
+ * park site already tolerates by looping.  Because an entry outlives its
+ * proc, it names the proc by pid, resolved at use (see march_timer_ent).
  * State (g_timer_mu/g_timer_heap/g_timer_len/g_timer_cap) is forward-declared
  * near the other global state, above, so march_sched_init can reset it. */
 
@@ -3065,14 +3206,14 @@ static void timer_heap_push_ent(march_timer_ent ent) {
 
 static void timer_heap_push(int64_t deadline_ms, march_proc *p, int64_t gen) {
     timer_heap_push_ent((march_timer_ent){
-        .deadline_ms = deadline_ms, .proc = p, .gen = gen,
+        .deadline_ms = deadline_ms, .pid = p->pid, .gen = gen,
         .kind = MARCH_TIMER_WAKE, .msg = NULL, .token = NULL });
 }
 
 static void timer_heap_push_send(int64_t deadline_ms, march_proc *target,
                                  void *msg, void *token) {
     timer_heap_push_ent((march_timer_ent){
-        .deadline_ms = deadline_ms, .proc = target, .gen = 0,
+        .deadline_ms = deadline_ms, .pid = target ? target->pid : -1, .gen = 0,
         .kind = MARCH_TIMER_SEND, .msg = msg, .token = token });
 }
 
@@ -3106,6 +3247,12 @@ static void timer_service(int64_t now_ms) {
         march_timer_ent ent;
         int have_ent = 0;
         int stale = 0;
+        march_proc *tp = NULL;
+        /* One critical section per entry: the resolve, the gen check and the
+         * wake/send below all use `tp`, and nothing here parks (a SEND to a
+         * full BLOCK mailbox sleep-polls, and march_sched_send suspends this
+         * critical section around that itself). */
+        march_reclaim_enter();
         pthread_mutex_lock(&g_timer_mu);
         if (g_timer_len > 0 && g_timer_heap[0].deadline_ms <= now_ms) {
             ent = g_timer_heap[0];
@@ -3122,13 +3269,16 @@ static void timer_service(int64_t now_ms) {
                 g_timer_heap[i] = t;
                 i = m;
             }
+            tp = march_sched_find(ent.pid);
+            /* A reaped proc (NULL) is the stalest entry there is. */
             if (ent.kind == MARCH_TIMER_WAKE)
-                stale = (atomic_load_explicit(&ent.proc->park_gen, memory_order_relaxed) != ent.gen);
+                stale = !tp || (atomic_load_explicit(&tp->park_gen, memory_order_relaxed) != ent.gen);
         }
         pthread_mutex_unlock(&g_timer_mu);
-        if (!have_ent) return;
+        if (!have_ent) { march_reclaim_exit(); return; }
         if (ent.kind == MARCH_TIMER_WAKE) {
-            if (!stale) march_sched_wake(ent.proc);   /* outside the lock: wake can spin */   /* outside the lock: wake can spin */
+            if (!stale) march_sched_wake(tp);   /* outside the lock: wake can spin */
+            march_reclaim_exit();
             continue;
         }
         /* MARCH_TIMER_SEND: deliver, or dispose msg if cancelled/dead. Both
@@ -3137,7 +3287,7 @@ static void timer_service(int64_t now_ms) {
          * march_sched_set_msg_dtor's re-entrancy contract, which
          * march_sched_set_timer_token_ops mirrors.
          *
-         * KNOWN LIMITATION: if ent.proc's mailbox is bounded under
+         * KNOWN LIMITATION: if the target's mailbox is bounded under
          * MARCH_MBOX_BLOCK and currently full, march_sched_send blocks THIS
          * thread (the preempt daemon, a genuine foreign OS thread from the
          * scheduler's point of view — see mbox_block_register_and_park's
@@ -3159,9 +3309,11 @@ static void timer_service(int64_t now_ms) {
         int cancelled = (ent.token && g_timer_token_is_cancelled)
             ? g_timer_token_is_cancelled(ent.token) : 0;
         if (cancelled) {
+            march_reclaim_exit();
             march_mbox_dispose(ent.msg);
         } else {
-            int rc = march_sched_send(ent.proc, ent.msg);
+            int rc = march_sched_send(tp, ent.msg);
+            march_reclaim_exit();
             if (rc == MARCH_SEND_DEAD) march_mbox_dispose(ent.msg);
             /* MARCH_SEND_DROPPED: march_sched_send already disposed msg via
              * the DROP_NEW overflow policy. MARCH_SEND_OK: ownership
@@ -3313,6 +3465,7 @@ static void *march_sched_recv_until_mode(int64_t deadline_ms, int user_only,
     atomic_store_explicit(&p->status, PROC_PARKED, memory_order_release);
     mbox_lock_release(p);
 
+    march_reclaim_check_switch("march_sched_recv_until");
     MARCH_ASAN_SWITCH_TO_SCHED(p);
     MARCH_TSAN_SWITCH_TO_SCHED(tl_sched);
     swapcontext(p->ctx, &tl_sched->sched_ctx);
@@ -3911,6 +4064,10 @@ static void *preempt_daemon(void *arg) {
 
         timer_service(march_now_ms());
         fdwait_service();
+        /* Free retired procs whose grace period has passed.  From here, not
+         * only from the retire path, so a node that stops churning still
+         * returns everything. */
+        march_reclaim_poll();
     }
     return NULL;
 }

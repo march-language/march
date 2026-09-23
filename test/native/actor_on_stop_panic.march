@@ -1,0 +1,154 @@
+-- A panic inside `on_stop` is logged and the actor still dies; a supervisor
+-- tearing down its tree carries on past it. specs/lang/actors.md, "on_stop".
+--
+-- The failure is reported on stderr ("march: actor on_stop callback failed
+-- ..."), which this golden does not capture; what it pins is the part a
+-- program can observe: stop returns, the actor is dead, the process is still
+-- running (an unsupervised handler panic would have ended it on the compiled
+-- backend), the siblings stopped after it still ran their own on_stop, and the
+-- NORMAL death restarted nothing.
+mod Main do
+  needs IO
+  needs IO.Console
+
+  type GetLog = GetLog
+  type LogState = { lines : List(String) }
+
+  actor Log do
+    state { lines : List(String) }
+    init  { lines: [] }
+
+    on Read(reply_to) do
+      Actor.reply(reply_to, List.reverse(state.lines))
+      state
+    end
+
+    on Note(s : String) do
+      { lines: Cons(s, state.lines) }
+    end
+  end
+
+  -- Each actor is handed the Log's Pid in a message and keeps it in state:
+  -- a handler has no capability in scope, so it cannot look the Log up by
+  -- name (Actor.whereis takes a Cap(Actor.Introspect)).
+  fn note(log : Option(Pid(LogState)), s : String) do
+    match log do
+      Some(l) -> send(l, Note(s))
+      None    -> None
+    end
+  end
+
+  actor Bad do
+    state { n : Int, log : Option(Pid(LogState)) }
+    init  { n: 0, log: None }
+
+    on BadLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
+
+    on BadWork(k : Int) do
+      { state with n: state.n + k }
+    end
+
+    on_stop do
+      note(state.log, "bad: on_stop starts, n=" ++ int_to_string(state.n))
+      panic("on_stop blew up")
+    end
+  end
+
+  actor First do
+    state { n : Int, log : Option(Pid(LogState)) }
+    init  { n: 0, log: None }
+
+    on FirstLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
+
+    on FirstWork(k : Int) do
+      { state with n: state.n + k }
+    end
+
+    on_stop do
+      note(state.log, "first: on_stop")
+    end
+  end
+
+  actor Last do
+    state { n : Int, log : Option(Pid(LogState)) }
+    init  { n: 0, log: None }
+
+    on LastLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
+
+    on LastWork(k : Int) do
+      { state with n: state.n + k }
+    end
+
+    on_stop do
+      note(state.log, "last: on_stop")
+    end
+  end
+
+  actor Sup do
+    state { a : Int, b : Int, c : Int, log : Option(Pid(LogState)) }
+    init  { a: 0, b: 0, c: 0, log: None }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      First a
+      Bad b
+      Last c
+    end
+
+    on SupLog(l : Pid(LogState)) do
+      { state with log: Some(l) }
+    end
+
+    on_stop do
+      note(state.log, "sup: on_stop")
+    end
+  end
+
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn dump(log) do
+    match Actor.call(log, GetLog, 5000) do
+      Ok(ls) -> List.each(ls, fn l -> println("  log: " ++ l))
+      Err(e) -> println("  log error: " ++ e)
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
+    let log = spawn(Log)
+
+    println("-- unsupervised: the panic is logged, the actor still dies")
+    let p = spawn(Bad)
+    send(p, BadLog(log))
+    send(p, BadWork(4))
+    println("stop: " ++ bool_to_string(Actor.stop(p, 5000)))
+    println("dead: " ++ bool_to_string(is_alive(p) == false))
+    println("main still running")
+    dump(log)
+
+    println("-- supervised: the tree teardown proceeds past the panic")
+    let sup = spawn(Sup)
+    send(sup, SupLog(log))
+    send(Actor.pid_from_int(intro, child_int(sup, "a")), FirstLog(log))
+    send(Actor.pid_from_int(intro, child_int(sup, "b")), BadLog(log))
+    send(Actor.pid_from_int(intro, child_int(sup, "c")), LastLog(log))
+    let b1 = child_int(sup, "b")
+    println("stop: " ++ bool_to_string(Actor.stop(sup, 5000)))
+    println("supervisor dead: " ++ bool_to_string(is_alive(sup) == false))
+    println("bad child dead: " ++ bool_to_string(is_alive(Actor.pid_from_int(intro, b1)) == false))
+    println("bad child not restarted: " ++ bool_to_string(child_int(sup, "b") == b1))
+    dump(log)
+  end
+end

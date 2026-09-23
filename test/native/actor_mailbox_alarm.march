@@ -8,6 +8,7 @@
 -- interpreter case happens to see the exact depths 0 / 5 / 50, which the
 -- ordering check exercises fully.
 mod ActorMailboxAlarm do
+  needs IO
   needs IO.Console
 
   actor W do
@@ -38,28 +39,29 @@ mod ActorMailboxAlarm do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let a = spawn(W)
     let b = spawn(W)
     let c = spawn(W)
     send_n(b, 5)
     send_n(c, 50)
 
-    let top = Actor.top_by_mailbox(2)
+    let top = Actor.top_by_mailbox(intro, 2)
     println("top(2) length: " ++ int_to_string(List.length(top)))
     println("top(2) deepest first: " ++ bool_to_string(non_increasing(depths_of(top))))
-    println("top(10) covers all: " ++ int_to_string(List.length(Actor.top_by_mailbox(10))))
+    println("top(10) covers all: " ++ int_to_string(List.length(Actor.top_by_mailbox(intro, 10))))
 
-    println("over(-1) is everyone: " ++ int_to_string(List.length(Actor.over_mailbox(-1))))
-    println("over(1000000) is empty: " ++ bool_to_string(Actor.over_mailbox(1000000) == Nil))
-    let hot = Actor.over_mailbox(10)
+    println("over(-1) is everyone: " ++ int_to_string(List.length(Actor.over_mailbox(intro, -1))))
+    println("over(1000000) is empty: " ++ bool_to_string(Actor.over_mailbox(intro, 1000000) == Nil))
+    let hot = Actor.over_mailbox(intro, 10)
     println("over(10) at most one: " ++ bool_to_string(List.length(hot) <= 1))
     println("over(10) depths all > 10: " ++ bool_to_string(
       List.all(depths_of(hot), fn d -> d > 10)))
 
     run_until_idle()
-    println("drained top(1): " ++ int_to_string(List.length(Actor.top_by_mailbox(1))))
-    println("drained over(0): " ++ int_to_string(List.length(Actor.over_mailbox(0))))
+    println("drained top(1): " ++ int_to_string(List.length(Actor.top_by_mailbox(intro, 1))))
+    println("drained over(0): " ++ int_to_string(List.length(Actor.over_mailbox(intro, 0))))
     let _ = a
     ()
   end

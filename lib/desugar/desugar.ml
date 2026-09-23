@@ -1238,7 +1238,10 @@ let rec desugar_decl (d : decl) : decl =
     let init'     = desugar_expr actor.actor_init in
     let handlers' = List.map (fun h ->
         { h with ah_body = desugar_expr h.ah_body }) actor.actor_handlers in
-    DActor (vis, name, { actor with actor_init = init'; actor_handlers = handlers' }, sp)
+    let on_stop' = Option.map (fun h ->
+        { h with ah_body = desugar_expr h.ah_body }) actor.actor_on_stop in
+    DActor (vis, name, { actor with actor_init = init'; actor_handlers = handlers';
+                                    actor_on_stop = on_stop' }, sp)
 
   | DMod (name, vis, decls, sp) ->
     DMod (name, vis, List.map desugar_decl decls, sp)
@@ -1944,6 +1947,8 @@ let qualify_level (prefix : string) (own_names : string list) (decls : decl list
       ; actor_handlers = List.map (fun h ->
             let bound = List.map (fun p -> p.param_name.txt) h.ah_params in
             { h with ah_body = go bound h.ah_body }) actor.actor_handlers
+      ; actor_on_stop = Option.map (fun h ->
+            { h with ah_body = go [] h.ah_body }) actor.actor_on_stop
       } in
       DActor (vis, name, actor', sp)
     | d -> d
@@ -2105,6 +2110,8 @@ let strip_entry_self_qual (mod_name : string) (decls : decl list) : decl list =
           actor_init      = rw actor.actor_init
         ; actor_handlers  = List.map (fun h -> { h with ah_body = rw h.ah_body })
                               actor.actor_handlers
+        ; actor_on_stop   = Option.map (fun h -> { h with ah_body = rw h.ah_body })
+                              actor.actor_on_stop
         ; actor_invariant = Option.map rw actor.actor_invariant } in
         DActor (vis, name, actor', sp)
       | DMod (name, vis, inner, sp) -> DMod (name, vis, strip_decls inner, sp)

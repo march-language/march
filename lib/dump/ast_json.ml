@@ -927,7 +927,7 @@ and supervise_config_to_json (sc : supervise_config) : string =
   ]
 
 and actor_def_to_json (ad : actor_def) : string =
-  Dump.json_obj [
+  Dump.json_obj ([
     ("state", Dump.json_list (List.map field_to_json ad.actor_state));
     ("init", expr_to_json ad.actor_init);
     ("handlers", Dump.json_list (List.map actor_handler_to_json ad.actor_handlers));
@@ -935,6 +935,10 @@ and actor_def_to_json (ad : actor_def) : string =
     ("compat", Dump.json_string ad.actor_compat);
     ("invariant", json_opt expr_to_json ad.actor_invariant);
   ]
+  (* Only when present, so an actor without one dumps byte-identically. *)
+  @ (match ad.actor_on_stop with
+     | None -> []
+     | Some h -> [("on_stop", expr_to_json h.ah_body)]))
 
 and actor_handler_to_json (ah : actor_handler) : string =
   Dump.json_obj [

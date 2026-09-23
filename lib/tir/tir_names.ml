@@ -464,6 +464,21 @@ let is_actor_dispatch_fn (fn_name : string) : bool =
   let nl = String.length fn_name and sl = String.length sfx in
   nl > sl && String.sub fn_name (nl - sl) sl = sfx
 
+(** Suffix for an actor's `on_stop` callback fn ("Name" -> "Name_on_stop").
+    Like dispatch, the runtime calls it through its [$clo_wrap] trampoline
+    ([actor_green_thread] -> [actor_run_on_stop]) without handing over a
+    reference to the actor record, so that trampoline must release nothing —
+    see [Llvm_emit.clo_wrap_borrowed]. *)
+let actor_on_stop_suffix = "_on_stop"
+
+(** Is [fn_name] an actor's `on_stop` callback fn? Suffix check, with the same
+    looseness as [is_actor_dispatch_fn]: a user fn that happens to end in the
+    suffix only loses its trampoline's release (a leak, never a crash). *)
+let is_actor_on_stop_fn (fn_name : string) : bool =
+  let sfx = actor_on_stop_suffix in
+  let nl = String.length fn_name and sl = String.length sfx in
+  nl > sl && String.sub fn_name (nl - sl) sl = sfx
+
 (* ── State-migration fn naming convention (Phase5C-C.5) ─────────────────
    Hot-reload state migrations follow a `{actor_lower}_migrate_state`
    suffix convention (parent design: hcr-phase5-design.md; TIR/llvm_emit's
