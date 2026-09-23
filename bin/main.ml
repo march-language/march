@@ -1667,6 +1667,10 @@ let compile filename =
     if
       refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
       || !report_contracts
+      (* --dump-role-authority prints from inside the typechecker, which a warm
+         `check` artifact skips entirely: CI saw an empty report after an
+         earlier plain --check of the same source (PR #596). *)
+      || !dump_role_authority
     then None
     else if not !do_compile && not !do_check then None
     else try
