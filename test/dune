@@ -854,6 +854,7 @@
           ../runtime/march_dispatch.c ../runtime/march_dispatch.h
           ../runtime/march_cap_lattice.c ../runtime/march_cap_lattice.h
           ../runtime/march_blake3.c ../runtime/march_blake3.h
+          ../runtime/march_hcr_identity.c ../runtime/march_hcr_identity.h
           ../runtime/third_party/blake3/blake3.c
           ../runtime/third_party/blake3/blake3.h
           ../runtime/third_party/blake3/blake3_dispatch.c
@@ -877,10 +878,13 @@
     %{cc} -std=gnu11 -Wall -I../runtime -I../runtime/third_party/blake3 -O2 \
       -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 \
       -DBLAKE3_NO_AVX512 -DBLAKE3_USE_NEON=0 \
+      -DMARCH_HCR_TRIPLE=arm64-apple-macosx26.0.0 \
+      -DMARCH_HCR_TARGET=\\\"native\\\" -DMARCH_HCR_PREFIX=\\\"Test\\\" \
       -DMARCH_SIGNING_PUBKEY_HEX=\\\"$PK\\\" \
       -o %{targets} test_reload_activate4.c \
       ../runtime/march_reload.c ../runtime/march_dispatch.c \
       ../runtime/march_cap_lattice.c ../runtime/march_blake3.c \
+      ../runtime/march_hcr_identity.c \
       ../runtime/third_party/blake3/blake3.c \
       ../runtime/third_party/blake3/blake3_dispatch.c \
       ../runtime/third_party/blake3/blake3_portable.c \
