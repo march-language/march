@@ -1377,7 +1377,16 @@ let rec infer_expr env (e : Ast.expr) : ty =
                           ref_kind = `Call;
                           ref_file = name.span.Ast.file;
                           ref_line = name.span.Ast.start_line } :: !(env.refs));
-         instantiate ~use_span:name.span ~use_name:name.txt env.level env sch
+         let t = instantiate ~use_span:name.span ~use_name:name.txt env.level env sch in
+         (* A builtin typed with a qualified name (`Csv.CsvRow`) gets the same
+            qualified->bare canonicalization [surface_ty] gives an annotation;
+            the physical-equality check leaves a user binding that shadows
+            the builtin alone. *)
+         if StringSet.mem name.txt qualified_type_builtins
+            && (match List.assoc_opt name.txt builtin_bindings with
+                | Some b -> b == sch | None -> false)
+         then canon_qualified_tcons env t
+         else t
        | None     ->
          (* Try qualified module resolution: "Mod.func" *)
          match resolve_qualified_var name.txt env with

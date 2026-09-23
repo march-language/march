@@ -265,6 +265,8 @@ val test_build : bool ref
 val lookup_var :
   StrMap.key -> env -> Typecheck_types.scheme option
 val lookup_type : StrMap.key -> env -> int option
+val canon_type_name : env -> string -> int -> string
+val canon_qualified_tcons : env -> Typecheck_types.ty -> Typecheck_types.ty
 val cap_bare_name : string -> string
 val resolve_cap_dict_type : env -> string -> string option
 val resolves_always_linear : string -> env -> bool

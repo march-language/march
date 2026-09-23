@@ -321,6 +321,16 @@ git log is authoritative for exact commits.
   body line such as `tick: A -> B : Int` after the branch's first message was read as the
   start of the next branch and failed with "I got stuck here"; it now continues the branch,
   as an unlabelled `A -> B : Int` line already did.
+
+- **`csv_next_row`'s result now matches against `CsvEof` / `Row`.** The builtin
+  is typed with the qualified `Csv.CsvRow`, and builtin signatures skipped the
+  qualified-to-bare canonicalization that written type annotations get, so
+  matching its result against the bare constructors was a type error both ways.
+  `stdlib/csv.march` carried 12 such errors, hidden because stdlib diagnostics
+  are filtered, which left `Csv.each_row`, `Csv.read_all` and
+  `Csv.each_row_with_header` unchecked. Builtin signatures now go through the
+  same canonicalization, so any future builtin typed with a qualified name is
+  covered too.
 - **Two modules can each name their capability dictionary `Ops`.** A
   `proof cap X with T` resolved `T` by its bare name first, so when two modules
   each declared a same-named dictionary record, one module's `cap_impl` /

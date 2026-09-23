@@ -1032,7 +1032,11 @@ let builtin_bindings : (string * scheme) list =
        CsvRow is niche-shaped (CsvEof nullary + Row single-payload). Under
        Boxed the compiled match reads a heap object's tag byte, but the C
        runtime returns raw NULL for EOF (a Niche-only convention) — so every
-       row is misread against an uninitialized tag. *)
+       row is misread against an uninitialized tag.
+       The typechecker itself sees the BARE `CsvRow` (so the result unifies
+       with csv.march's own `CsvEof`/`Row`): the EVar arm canonicalizes every
+       [qualified_type_builtins] entry, and [Lower_state.ty_of_expr] restores
+       this qualified spelling for the TIR. *)
     (* csv_open's error is always a concrete Csv.CsvError value at runtime
        (see eval.ml's csv_open_impl) — Mono, not a polymorphic `e`. CsvError
        isn't niche-shaped (both variants carry a payload) so, unlike CsvRow
@@ -1732,6 +1736,27 @@ let builtin_bindings : (string * scheme) list =
 let prelude_collision_builtin_names : string list =
   List.filter_map (fun (name, _) -> if String.contains name '.' then None else Some name)
     builtin_bindings
+
+(** Builtins whose signature names a type by its QUALIFIED spelling (today
+    only [csv_next_row] : Int -> Csv.CsvRow, which the TIR needs qualified to
+    find the niche-shaped typedef).  [infer_expr]'s EVar arm canonicalizes
+    these at each use via [canon_qualified_tcons], exactly as [surface_ty]
+    canonicalizes a written `Csv.CsvRow`; computed from [builtin_bindings]
+    itself so a future builtin typed with a qualified name is covered with no
+    list to maintain. *)
+let qualified_type_builtins : StringSet.t =
+  let rec mentions_qualified = function
+    | TCon (n, args) -> String.contains n '.' || List.exists mentions_qualified args
+    | TArrow (a, b) -> mentions_qualified a || mentions_qualified b
+    | TTuple ts -> List.exists mentions_qualified ts
+    | TRecord flds -> List.exists (fun (_, t) -> mentions_qualified t) flds
+    | TLin (_, t) | TRefine (t, _, _) -> mentions_qualified t
+    | _ -> false
+  in
+  List.fold_left (fun acc (name, sch) ->
+      let ty = match sch with Mono t -> t | Poly (_, _, t) -> t in
+      if mentions_qualified ty then StringSet.add name acc else acc)
+    StringSet.empty builtin_bindings
 
 (* [show]/[eq]/[compare]/[hash] are NOT in the list above — they are
    structural interface methods with their OWN type-directed dispatch
