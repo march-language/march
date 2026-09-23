@@ -3023,6 +3023,17 @@ let compile filename =
             let blake3_impl_c2 = Filename.concat runtime_dir "third_party/blake3/blake3.c" in
             let blake3_dispatch_c2 = Filename.concat runtime_dir "third_party/blake3/blake3_dispatch.c" in
             let blake3_portable_c2 = Filename.concat runtime_dir "third_party/blake3/blake3_portable.c" in
+            let hcr_identity_c2 = Filename.concat runtime_dir "march_hcr_identity.c" in
+            let target_hcr_abi = March_tir.Hcr_abi.of_target target in
+            let hcr_identity_flags =
+              match target_hcr_abi, !hot_reload_prefix with
+              | Ok abi, Some prefix ->
+                let macro name value =
+                  " -D" ^ name ^ "=\\\"" ^ value ^ "\\\"" in
+                macro "MARCH_HCR_TRIPLE" abi.llvm_triple
+                ^ macro "MARCH_HCR_TARGET" abi.canonical_target
+                ^ macro "MARCH_HCR_PREFIX" prefix
+              | _ -> "" in
             let opt_file2 f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
             let sched_c2  = Filename.concat runtime_dir "march_scheduler.c" in
             let ffi_c2    = Filename.concat runtime_dir "march_ffi.c" in
@@ -3062,6 +3073,7 @@ let compile filename =
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "tweetnacl.c")       else "")  (* ed25519 for ACTIVATE verification *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
+              ^ (if hcr_identity_flags <> "" then opt_file2 hcr_identity_c2 else "")
             in
             (* User FFI shim sources from forge.toml [[ffi]] (--ffi-c). *)
             let user_ffi_c =
@@ -3489,8 +3501,8 @@ let compile filename =
               | None      -> runtime ^ extra_c_files
             in
             let cmd = Printf.sprintf
-              "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s %s%s%s%s%s %s -o %s%s%s%s%s"
-              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag ucontext_flag reload_ldl strip_flag in
+              "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s%s %s%s%s%s%s %s -o %s%s%s%s%s"
+              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define hcr_identity_flags runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag ucontext_flag reload_ldl strip_flag in
             (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
             let rc = Sys.command cmd in
@@ -3624,7 +3636,14 @@ let compile filename =
           let mf = out_bin ^ ".hcr_manifest" in
           (try
              let oc = open_out mf in
-             Printf.fprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch;
+             (match March_tir.Hcr_abi.of_target target with
+              | Ok abi ->
+                Printf.fprintf oc
+                  "# march-hcr-manifest v2\n# cas_hash %s\n# target %s\n# hcr_abi %s\n# module_prefix %s\n"
+                  ch abi.canonical_target (March_tir.Hcr_abi.abi_id abi)
+                  (Option.value ~default:"" !hot_reload_prefix)
+              | Error _ ->
+                Printf.fprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch);
              Hashtbl.iter (fun name impl_h ->
                let sig_h = Option.value ~default:""
                    (Hashtbl.find_opt remote_sig_hashes name) in

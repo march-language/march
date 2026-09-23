@@ -15,6 +15,9 @@ for target in linux/amd64 linux/arm64; do
     -o "$base" test/native/hcr_smoke.march
   dune exec ./bin/main.exe -- --compile --compile-so --target "$target" \
     --hot-reload HcrSmoke -o "$base.so" test/native/hcr_smoke.march
+  grep -q '^# march-hcr-manifest v2$' "$base.so.hcr_manifest"
+  grep -q "^# target $target$" "$base.so.hcr_manifest"
+  grep -q '^# module_prefix HcrSmoke$' "$base.so.hcr_manifest"
   base_info=$(file "$base")
   so_info=$(file "$base.so")
   case "$arch:$base_info:$so_info" in

@@ -9537,6 +9537,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (modules test_hcr_abi)
  (libraries march_tir alcotest))
 
+(rule
+ (targets hcr_identity_amd64.so hcr_identity_arm64.so)
+ (deps ../runtime/march_hcr_identity.c ../runtime/march_hcr_identity.h)
+ (action
+  (progn
+   (run bash -c
+    "%{cc} -shared -fPIC -I../runtime \
+     -DMARCH_HCR_TRIPLE=x86_64-unknown-linux-gnu \
+     -DMARCH_HCR_TARGET=\\\"linux/amd64\\\" -DMARCH_HCR_PREFIX=\\\"HcrSmoke\\\" \
+     -o hcr_identity_amd64.so ../runtime/march_hcr_identity.c")
+   (run bash -c
+    "%{cc} -shared -fPIC -I../runtime \
+     -DMARCH_HCR_TRIPLE=aarch64-unknown-linux-gnu \
+     -DMARCH_HCR_TARGET=\\\"linux/arm64\\\" -DMARCH_HCR_PREFIX=\\\"HcrSmoke\\\" \
+     -o hcr_identity_arm64.so ../runtime/march_hcr_identity.c"))))
+
+(rule
+ (targets test_hcr_identity_runner)
+ (alias runtest)
+ (deps test_hcr_identity.c hcr_identity_amd64.so hcr_identity_arm64.so)
+ (action (run %{cc} -std=c11 -Wall -Wextra -o test_hcr_identity_runner test_hcr_identity.c -ldl)))
+
+(rule
+ (alias runtest)
+ (deps test_hcr_identity_runner hcr_identity_amd64.so hcr_identity_arm64.so)
+ (action (run %{dep:test_hcr_identity_runner} %{dep:hcr_identity_amd64.so} %{dep:hcr_identity_arm64.so})))
+
 ; Cross-target HCR smoke (requires the configured Linux sysroots for baseline
 ; artifacts; the patch half is sysroot-independent).  Keep this off the
 ; default runtest alias because it intentionally exercises external toolchains.
