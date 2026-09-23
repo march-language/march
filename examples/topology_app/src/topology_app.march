@@ -1,0 +1,152 @@
+-- A topology app: two pools, no `main`. `forge run` generates `main` from
+-- topology.toml (the distributed-deploys plan, 4.1): it starts the cluster
+-- node, runs each pool's hook, and opens the offers the topology places on
+-- this node. `back` serves two roles: Echo.Server, bound to a function, and
+-- Count.Counter, bound to an actor that keeps a running total across
+-- sessions. `front`'s hook initiates sessions of both.
+mod TopologyApp do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Echo do
+    role Server needs IO.Console
+    ask: Client -> Server : Int
+    answer: Server -> Client : Int
+  end
+
+  @[endpoints]
+  protocol Count do
+    add: Client -> Counter : Int
+    total: Counter -> Client : Int
+  end
+
+  -- ── the back pool ────────────────────────────────────────────────────
+
+  mod Back do
+    needs IO.Console
+    needs Session.Live
+
+    type Env = { factor : Int }
+
+    -- The pool hook: runs on every node of the pool before any offer opens.
+    fn start(_con : Cap(IO.Console), _node : ClusterNode.ClusterHandle) : Env do
+      println("back: hook ran")
+      { factor: 10 }
+    end
+
+    -- Echo.Server, bound to a function: the pool's environment, the session,
+    -- the role's grant (`role Server needs IO.Console`), the entry state.
+    fn serve_one(env : Env, s : Cap(Session.Live), con : Cap(IO.Console), st : Echo_Server.Entry) : Echo_Server.Yield do
+      Echo_Server.recv_Ask(s, st, fn (n, st1) ->
+        println("back: echo " ++ int_to_string(n))
+        Echo_Server.close(s, Echo_Server.send_Answer(s, st1, n * env.factor)))
+    end
+
+    -- Count.Counter, bound to an actor: one per offer, spawned with the
+    -- pool's environment; the generated code forwards Start, Deliver and
+    -- Cancel to it.
+    actor CounterActor do
+      state { total : Int, factor : Int, sessions : LinearMap(String, Count_Counter.Parked_Counter) }
+      init(env : Env) { total: 0, factor: env.factor, sessions: LinearMap.empty_string() }
+      on Start(sid : String, s : Cap(Session.Live)) do
+        let parked = Count_Counter.await_Add(s, Count_Counter.register(s, 0))
+        match LinearMap.put(state.sessions, sid, parked) do
+          (None, m) -> { state with sessions: m }
+          (Some(old), m) ->
+            Count_Counter.take_closed(Count_Counter.cancel(old))
+            { state with sessions: m }
+        end
+      end
+      on Deliver(sid : String, s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+        match LinearMap.take_slot(state.sessions, sid) do
+          (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
+          (Some(parked), slot) ->
+            match Count_Counter.resume(parked, from, msg, ep) do
+              Got_Add(n, st) ->
+                let t = state.total + n
+                Count_Counter.take_closed(Count_Counter.finish(s, Count_Counter.send_Total(s, st, t)))
+                { state with total: t, sessions: LinearMap.vacate(slot) }
+            end
+        end
+      end
+      on Cancel(sid : String, _s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
+        match LinearMap.take(state.sessions, sid) do
+          (None, m) -> { state with sessions: m }
+          (Some(parked), m) ->
+            Count_Counter.take_closed(Count_Counter.cancel(parked))
+            { state with sessions: m }
+        end
+      end
+    end
+  end
+
+  -- ── the front pool ───────────────────────────────────────────────────
+
+  mod Front do
+    needs IO
+    needs IO.Console
+    needs IO.Clock
+    needs IO.Spawn
+    needs Session.Live
+
+    type Env = { started : Bool }
+
+    -- The front hook starts its work in a task and returns at once: offers
+    -- open only after every hook has returned.
+    fn start(io : Cap(IO), node : ClusterNode.ClusterHandle) : Env do
+      let _ = task_spawn(fn _ -> run(io, node))
+      { started: true }
+    end
+
+    fn run(io : Cap(IO), node : ClusterNode.ClusterHandle) : Int do
+      let a = retry(fn _ -> echo(io, node, 4), 200)
+      let b = retry(fn _ -> count(io, node, 1), 200)
+      let c = retry(fn _ -> count(io, node, 2), 200)
+      println("front: echo " ++ int_to_string(a) ++ ", totals " ++ int_to_string(b) ++ " then " ++ int_to_string(c))
+      println("front: done")
+      0
+    end
+
+    -- Offers take a moment to register (and, across processes, to reach
+    -- this node): try again until one answers.
+    fn retry(f : Int -> Option(Int), left : Int) : Int do
+      match f(0) do
+        Some(v) -> v
+        None ->
+          if left <= 0 do -1 else
+            sleep_ms(100)
+            retry(f, left - 1)
+          end
+      end
+    end
+
+    fn echo(io : Cap(IO), node : ClusterNode.ClusterHandle, n : Int) : Option(Int) do
+      let got = Vault.new("front_echo")
+      match Echo_Run.initiate_Client(io, node, fn (s, st) ->
+          Echo_Client.recv_Answer(s, Echo_Client.send_Ask(s, st, n), fn (m, st2) ->
+            Vault.set(got, "v", m)
+            Echo_Client.close(s, st2))) do
+        Ok(_) -> Vault.get(got, "v")
+        Err(_) -> None
+      end
+    end
+
+    fn count(io : Cap(IO), node : ClusterNode.ClusterHandle, n : Int) : Option(Int) do
+      let got = Vault.new("front_count")
+      match Count_Run.initiate_Client(io, node, fn (s, st) ->
+          Count_Client.recv_Total(s, Count_Client.send_Add(s, st, n), fn (m, st2) ->
+            Vault.set(got, "v", m)
+            Count_Client.close(s, st2))) do
+        Ok(_) -> Vault.get(got, "v")
+        Err(_) -> None
+      end
+    end
+  end
+end

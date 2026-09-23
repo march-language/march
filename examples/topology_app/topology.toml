@@ -1,0 +1,23 @@
+# A two-pool topology app (distributed-deploys plan, build step 3).
+#
+#   forge run               every pool in one process (level 0)
+#   forge run --processes   one process per pool, a cluster on this machine
+#
+# There is no `main` in src/topology_app.march: it is generated from this file.
+
+[roles]
+"Echo.Server"   = { body = "TopologyApp.Back.serve_one", capacity = 8 }
+"Count.Counter" = { actor = "TopologyApp.Back.CounterActor", capacity = 8 }
+
+[pool.back]
+start  = "TopologyApp.Back.start"
+serves = ["Echo.Server", "Count.Counter"]
+caps   = ["IO.Console"]        # written: the back pool's code may only print
+
+[pool.front]
+start = "TopologyApp.Front.start"
+# serves nothing: its hook initiates sessions. `caps` and `initiates` derived.
+
+[drain]
+soft_ms = 2000
+hard_ms = 5000
