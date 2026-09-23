@@ -60,8 +60,8 @@ let parse_manifest path : (manifest, string) result =
            target := Some (String.trim (String.sub line 8 (String.length line - 8)))
          else if String.length line > 8 && String.sub line 0 8 = "# hcr_abi" then
            hcr_abi := Some (String.trim (String.sub line 8 (String.length line - 8)))
-         else if String.length line > 14 && String.sub line 0 14 = "# module_prefix" then
-           module_prefix := Some (String.trim (String.sub line 14 (String.length line - 14)))
+        else if String.length line > 15 && String.sub line 0 15 = "# module_prefix" then
+           module_prefix := Some (String.trim (String.sub line 15 (String.length line - 15)))
        end else if String.length line >= 5 && String.sub line 0 5 = "ROOT " then begin
          (* Legacy pre-2026-07-04 manifests may still carry a
             "ROOT cap_root=<hex>" line (whole-artifact union, now retired).
@@ -1196,12 +1196,24 @@ let build_so ~proj ~output : (string * string, string) result =
   let manifest_path = output ^ ".so.hcr_manifest" in
   let lib_env = Cmd_build.lib_path_env proj in
   let ffi_flags = Cmd_build.ffi_flags_of ~root:proj.Project.root proj in
+  let target_flag, hcr_flags =
+    match proj.Project.hot_reload with
+    | Some hr ->
+      let target = match hr.Project.hr_target with
+        | Some t -> " --target " ^ Filename.quote t | None -> "" in
+      let hcr = match hr.Project.hr_module_prefix, hr.Project.hr_public_key with
+        | Some p, Some k -> " --hot-reload " ^ Filename.quote p ^
+                            " --signing-pubkey " ^ Filename.quote k
+        | _ -> "" in
+      target, hcr
+    | None -> "", ""
+  in
   match Project.entry proj with
   | Error e -> Error e
   | Ok entry ->
   let cmd = Printf.sprintf
-    "%smarch --compile --compile-so -o %s%s %s"
-    lib_env (Filename.quote so_path) ffi_flags (Filename.quote entry)
+    "%smarch --compile --compile-so%s%s -o %s%s %s"
+    lib_env target_flag hcr_flags (Filename.quote so_path) ffi_flags (Filename.quote entry)
   in
   let rc = Sys.command cmd in
   if rc <> 0 then Error (Printf.sprintf "build failed (exit %d)" rc)
