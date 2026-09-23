@@ -677,7 +677,7 @@ let setup_jit_runtime () =
        march_compress.c: those pull in libssl/libz and aren't referenced by
        the symbols these tests need. *)
     let extra_src_list = List.filter_map opt_path [
-      "march_scheduler.c"; "march_message.c"; "march_heap.c";
+      "march_scheduler.c"; "march_reclaim.c"; "march_message.c"; "march_heap.c";
       "march_gc.c"; "sha1.c"; "march_extras.c"; "march_ctx_escape.c";
       "base64.c"; "march_ffi.c";
       "march_dispatch.c"; "march_reload.c"; "march_remote_registry.c";
@@ -1242,7 +1242,7 @@ let dummy_actor_def = March_ast.Ast.{
   actor_init      = ELit (LitInt 0, dummy_span);
   actor_handlers  = [];
   actor_supervise = None;
-  actor_mailbox = None; actor_remote = false;
+  actor_mailbox = None; actor_remote = false; actor_on_stop = None;
   actor_compat    = "full";
   actor_invariant = None;
 }
@@ -1257,6 +1257,7 @@ let mk_actor_inst name alive st = March_eval.Eval.{
   ai_monitors      = [];
   ai_mailbox       = Queue.create ();
   ai_draining    = false;
+  ai_self_stop   = None;
   ai_supervisor    = None;
   ai_restart_count = [];
   ai_epoch         = 0;

@@ -59,15 +59,9 @@ let resolve_entry ?(interpreted = false) ?file () =
     match Project.load () with
     | Error msg -> Error msg
     | Ok proj ->
-      let entry = match proj.Project.entrypoint with
-        | Some ep -> Filename.concat proj.Project.root ep
-        | None    ->
-          Filename.concat proj.Project.root
-            (Filename.concat "lib" (proj.Project.name ^ ".march"))
-      in
-      if not (Sys.file_exists entry) then
-        Error (Printf.sprintf "entry point not found: %s" entry)
-      else Result.map (fun ctx -> (entry, ctx)) (context_of_project ~interpreted proj)
+      match Project.entry proj with
+      | Error e -> Error e
+      | Ok entry -> Result.map (fun ctx -> (entry, ctx)) (context_of_project ~interpreted proj)
 
 (** The shell command for an interpreted run.
 

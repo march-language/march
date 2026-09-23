@@ -1,0 +1,35 @@
+-- Unforgeable local references (2026-09-22, distributed-deploys build step 2):
+-- the composition root mints `Cap(Actor.Introspect)` from its `Cap(IO)` and
+-- forwards it; a function that takes the cap declares `needs
+-- Actor.Introspect`, as for any proof capability declared elsewhere. Every
+-- cap-taking wrapper is exercised: `pid_from_int`, `whereis`, `registered`,
+-- `list`, `top_by_mailbox`, `over_mailbox`. Reject twin: reject/t287.
+mod IntrospectForwarded do
+  needs IO
+  needs Actor.Introspect
+
+  actor Counter do
+    state { n : Int }
+    init  { n: 0 }
+    on Bump() do { n: state.n + 1 } end
+  end
+
+  fn probe(c : Cap(Actor.Introspect), idx : Int) : Bool do
+    is_alive(Actor.pid_from_int(c, idx))
+  end
+
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
+    let pid = spawn(Counter)
+    let _ = Actor.register(pid, "counter")
+    let names = List.length(Actor.registered(c))
+    let found = match Actor.whereis(c, "counter") do
+      Some(_) -> true
+      None    -> false
+    end
+    let live = List.length(Actor.list(c))
+    let top = List.length(Actor.top_by_mailbox(c, 1))
+    let over = List.length(Actor.over_mailbox(c, -1))
+    println(bool_to_string(probe(c, pid_to_int(pid)) && found && names + live + top + over > 0))
+  end
+end

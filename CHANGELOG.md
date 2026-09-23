@@ -11,6 +11,19 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+- **A targeted diagnostic for `fn (a, b) -> …` used as a callback over a
+  tuple.** `fn (a, b) -> …` is a two-parameter (curried) lambda, not a lambda
+  that destructures a pair, so `List.map(pairs, fn (k, v) -> v)` was wrong in a
+  way the typechecker used to report badly: either it was accepted with a
+  nonsense type (the result variable absorbed the extra arrow, giving
+  `List(b -> b)`) or it failed with the misleading "this type would have to be
+  infinitely recursive … Did you forget to apply it". A multi-parameter lambda
+  checked against a one-argument callback over a tuple of the same arity now
+  says so and suggests `fn pair -> match pair do (a, b) -> … end`. Genuinely
+  curried callbacks such as `List.fold_left`'s `b -> a -> b` are unaffected,
+  including when the accumulator is itself a tuple.
+
 ### Removed
 - **`MARCH_NO_TRMC` is gone.** The environment variable turned off
   tail-recursion-modulo-cons for every compile in the process, including the
@@ -38,6 +51,52 @@ git log is authoritative for exact commits.
   `count`, `variance_pop`, `std_dev_pop` and the `*_safe` variants still
   accept any list. `DataFrame`'s `Median` aggregation now yields a null value
   for an empty group instead of reaching `Stats.median` with one.
+- **Reaching an actor you were never handed a Pid for now takes a capability.**
+  `Actor.whereis`, `Actor.registered`, `Actor.list`, `Actor.top_by_mailbox` and
+  `Actor.over_mailbox` take a `Cap(Actor.Introspect)` as their first argument, and the
+  `pid_of_int` builtin is replaced by `Actor.pid_from_int(c, n)`. The cap is minted once
+  from the root capability: `let c = Actor.introspect(io)` in `main(io : Cap(IO))`, then
+  forward `c` (a function that takes it declares `needs Actor.Introspect`). A Pid is
+  thereby an unforgeable reference: code that holds neither a Pid nor the cap can message
+  nobody it was not introduced to. The raw builtins (`pid_of_int`, `actor_pid_indices`,
+  `actor_whereis`, `actor_registered`) are internal to the standard library; calling one
+  is a typecheck error naming the wrapper to use. `Actor.register` and `unregister` are
+  unchanged.
+- **`Config` values are read through typed keys (breaking).** The untyped
+  `Config.put(:ns, :name, value)` / `Config.get(:ns, :name)` let a value
+  stored as an `Int` be read back as any type, e.g. handed to `is_alive` as a
+  `Pid` (interpreted: `is_alive: expected Pid`; compiled, every tuple-keyed
+  Config call panicked in `Vault` before getting that far). A key now names
+  its value type: `let port = Config.key(:myapp, :port, Config.int())` is a
+  `Config.Key(Int)`, `Config.put(port, 4000)` only accepts an `Int`, and
+  `Config.get(port)` is an `Option(Int)`. Storage stays heterogeneous; each
+  value is stored tagged, so a key minted for the same path with a different
+  codec reads `None` from `get` and `Err(Config.KeyWrongType(path, expected,
+  found))` from the new `Config.fetch`, never a value at the wrong type.
+  Codecs: `Config.int()`, `float()`, `string()`, `bool()`, `atom()`,
+  `list(c)`, and `Config.codec(name, encode, decode)` for your own types.
+  Migration: `Config.put(:a, :b, v)` → `Config.put(Config.key(:a, :b,
+  <codec>), v)`; `Config.get(:a, :b)` → `Config.get(<that key>)`;
+  `put_in`/`get_in`/`get_in_with_default`/`require_in`/`validate_in` →
+  the same call on `Config.key_in(:a, :section, :b, <codec>)`;
+  `store_put(s, :a, :b, v)`/`store_get(s, :a, :b)` (and their `_in` forms) →
+  `store_put(s, key, v)`/`store_get(s, key)`; `from_env*`, `validate`,
+  `get_with_default` and `require` take the key in place of `ns, key`.
+  `validate`'s not-set message now names the key
+  (`"Config: key :a/:b not set"`). `put_endpoint`, `endpoint_port`,
+  `endpoint_host`, `secret_key_base` and `env`/`is_*` are unchanged. The old
+  forms fail to typecheck (a misleading "This is not a function" on
+  `Config.put(a, b, c)`: it is the arity change).
+- **A malformed `forge.toml` is an error that names its line, and an unknown key is a
+  warning.** forge used to drop any line it could not parse, ignore a `[section`
+  header with no `]` and any text after a value, and ignore keys it did not know, so a
+  typo was silently a no-op. A bad line now fails with `forge.toml:<line>: <reason>`,
+  and an unknown key in a section forge reads (`[package]`, `[ffi]`, `[hot-reload]`,
+  `[[hot-reload.env]]`, `[deps.<name>]`, ...) prints
+  `forge.toml:<line>: warning: unknown key '<key>' in [<section>]`. Arrays may now
+  span lines and end with a trailing comma, and a quoted key loses its quotes. A
+  malformed TOML file read by any other forge command is reported as an error rather
+  than an internal-error backtrace.
 - **Tail-recursion-modulo-cons always runs; `--no-trmc` and `--trmc` are
   removed.** Passing either is now the ordinary "unknown option" error. There
   is no supported way to turn TRMC off: the stdlib's list producers are being
@@ -66,6 +125,33 @@ git log is authoritative for exact commits.
   about 18 KB more, and `Vault.size`/`Vault.keys` walk shard by shard, so their result
   is a recent count rather than a single instant's snapshot of the whole table.
 ### Added
+- **Actors can declare an `on_stop do ... end` terminate callback.** It runs
+  once on a graceful stop (`Actor.stop`, a self-stop, or a supervisor's
+  tree teardown), on the actor's own thread after the queued messages have
+  drained, with the final `state` and `self` in scope, so an actor can flush,
+  checkpoint, or hand work back before it dies. Semantics follow OTP's
+  `terminate/2`: it may send (and wait on an `Actor.call`); a panic inside it
+  is logged to stderr and the actor still dies normally (no restart, and a
+  tree teardown carries on); it never runs on `kill`, a crash, or a
+  `shutdown brutal` child; and it counts against the stop's `timeout_ms` /
+  child `shutdown` budget, past which the actor is killed. Same behaviour
+  interpreted and compiled. See "Stopping an Actor" in the actors chapter.
+- **The type checker can reserve a builtin for the standard library.** A reference to
+  a reserved builtin from user code, the REPL included, is an error that names the
+  stdlib function to use instead:
+  `` `pid_of_int` is internal to the standard library; use `Actor.list(cap)` ``. No
+  builtin is reserved yet: the raw actor-reference builtins will be once their
+  capability-taking wrappers exist.
+- **A warning when a function's body fixes a type variable its signature
+  names.** `fn bad(xs : List(a)) : List(a) do [0 - 5] end` used to typecheck
+  silently as `List(Int) -> List(Int)`, with the mistake surfacing only as a
+  mismatch at some caller. It now warns at the `a` in the signature, naming
+  the type the body gave it (`Int`) with a hint to write that type or make the
+  body generic. Two signature variables that the body makes equal
+  (`fn second(x : a, y : b) : a do y end`) warn too. Only variables you wrote
+  in the signature are checked, and not when the body already has a type
+  error. The warning code is `annotated_tyvar_fixed`. Signature type variables
+  are planned to become rigid later, which will make this an error.
 - **A choreography role's first state now has a name: `<P>_<Role>.Entry`.** A role
   body's signature used to have to spell the state `register` yields, which meant
   working out `S_` plus the first step of that role's own projection
@@ -156,6 +242,80 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A finished task or a dead actor no longer keeps its process record
+  forever.** Every green thread's bookkeeping record (256 bytes) used to be
+  kept for the life of the program once the thread ended, so a server that
+  churns tasks or actors grew without bound: 400,000 awaited tasks held
+  about 120 MB, and each dead actor about 600 bytes. The record is now freed
+  once no other thread can still be reading it, so the same 400,000 tasks
+  peak at about 23 MB and a dead actor costs about 350 bytes (the actor's
+  own metadata is the remaining term, still to come). `Scheduler.stat(8)`
+  counts records freed and `stat(9)` those waiting to be. An `Actor.reply`
+  whose caller has already given up and exited is now dropped cleanly, as
+  is a reply to a value that is not a reply reference.
+- **A self-stop in the interpreter now drains like the compiled backend.**
+  `Actor.stop(self, t)` from a handler used to kill the actor on the spot in
+  `march run`, discarding its queue and the state the handler was about to
+  return; it now finishes the handler, drains, and then dies, as compiled
+  binaries already did.
+- **`OrderedMap.keys`, `OrderedMap.values` and `OrderedMap.from_list` work.**
+  All three passed a two-parameter lambda where a pair callback was expected
+  (and `from_list` had `List.fold_left`'s arguments in the wrong order), so
+  they returned a list of functions: `List.each(OrderedMap.values(m), println)`
+  failed with "expected `a -> a` but got `String`" at the caller's own line.
+  The test meant to catch this typechecked `ordered_map.march` in isolation,
+  where a call into another stdlib module resolves to an unconstrained type
+  variable and checks nothing; it now typechecks each file inside the whole
+  stdlib, as the compiler does. `values` was found independently by the new
+  `annotated_tyvar_fixed` warning, which saw the signature's `v` fixed to a
+  function type; annotating a call (`let vs : List(String) =
+  OrderedMap.values(m)`) was rejected outright.
+
+- **A `MARCH_SANITIZE=1` compile no longer returns a cached ThreadSanitizer
+  binary.** The compile cache recorded only *whether* `MARCH_SANITIZE` was
+  set, not which sanitizer it selected, so building a program with
+  `MARCH_SANITIZE=thread` and then with `MARCH_SANITIZE=1` printed
+  `compiled ... (cached)` and handed back the TSAN build instead of an
+  ASan+UBSan one. Anything checked that way was checked by the wrong
+  sanitizer. The cache key now includes the sanitizer, so the two builds are
+  cached separately. Each such key changes once, so the first sanitized build
+  after upgrading is not a cache hit.
+- **`forge deploy hot` builds the same entry file as `forge build`.** `forge build`,
+  `check` and `run` defaulted to `lib/<name>.march` and the hot-deploy build step to
+  `src/<name>.march`, so a project that built could not be hot-deployed without an
+  explicit `entrypoint`, and the other way round. Every forge command now uses
+  `[package] entrypoint` if set, else the first of `lib/<name>.march` and
+  `src/<name>.march` that exists, and reports a missing entry the same way.
+  `forge install` and `forge interactive` now honour `entrypoint` too.
+- **Renaming a linear value with `let` no longer lets it be dropped.** In
+  `fn f(linear h : Res) ... let h2 = h`, the rename consumed `h` but left `h2`
+  ordinary, so `h2` could be ignored with no error. `h2` now takes over `h`'s
+  obligation and must be used exactly once, whether `h` is a `linear` parameter
+  or a `linear let` local.
+- **A protocol whose payload types differ in their DEFINITIONS is now caught when
+  the session is set up, not as an undecodable message once it is running.**
+  `<P>_Msg.fingerprint()` digested each payload type by NAME, so two nodes whose
+  `Thing` was `{ x : Int }` on one and `{ x : String }` on the other shared a
+  fingerprint: the session formed and the skew surfaced mid-session, on the
+  receiving side, as `Protocol(role, "undecodable message: ...")`. The digest now
+  folds a payload type's definition in, recursively, for every type declared in
+  the same module — a variant's constructors and a record's fields in declaration
+  order, with type parameters substituted. A payload type from ANOTHER module is
+  out of reach when the digest is computed and is still recorded by name (marked
+  `extern:` so the digest at least says the definition was unavailable), so a
+  change below such a type's name remains invisible to the check.
+  **Compatibility:** every fingerprint changed. A node built before this change
+  and a node built after will now refuse each other at the access point — and, on
+  the direct runner, at the handshake. That is the check working, not a
+  regression; rebuild both sides from the same source.
+- **The direct runner (`<P>_Run.run_<Role>`, `host_<Role>`, `host_<Role>_or`) now
+  exchanges the protocol fingerprint too, not only access points.** It rides the
+  session hello as an optional trailing field, so a node built before this change
+  is read rather than deadlocked on — and is refused with a message saying it sent
+  no fingerprint. A mismatch is a setup error (`Connect`/`Accept`) naming both
+  fingerprints, not a retry loop. The cluster runner (`cluster_<Role>`) finds its
+  peers through the cluster registry rather than a hello and is NOT yet covered;
+  an access point still checks every cluster session it brokers.
 - **Compiled `send_checked` and `is_cap_valid` no longer intermittently accept a cap
   whose actor was killed.** About one run in five, a cap taken while the actor was
   alive still validated after `kill`: `is_cap_valid` answered `true` and
@@ -378,6 +538,17 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **The actors chapter now documents `Actor.stop`** (graceful, synchronous,
+  reverse-order supervisor teardown), which shipped 2026-09-08 without a
+  section of its own.
+- **A design for distributed authority, topology and hot deploys, and its groundwork
+  plan** (`specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md`,
+  `specs/plans/2026-09-21-distributed-deploys-groundwork-plan.md`). The remaining
+  build steps are filed as `specs/todos/2026-09-22-dd-*.md`.
+- **A capability's dictionary type must be monomorphic, and the capabilities chapter now says
+  so.** `proof cap Live with Ops` cannot attach a parameterised `Ops(m)`; the "Runtime
+  dictionaries" section explains the limitation and the way around it (a concrete
+  representation at the boundary, as `Session.Ops` does with `Bytes`).
 - **The language-reference pages on march-lang.org are now generated from
   `specs/lang/`, and the two copies have been reconciled.** Each chapter used to exist
   twice, as independent prose that had drifted both ways, so corrections made in one copy

@@ -16,9 +16,17 @@ let synthetic_file = "<none>"
 
 (** Whether a diagnostic at file [f] belongs to the user's program: the entry
     file, a module loaded as user code (source dir / MARCH_LIB_PATH), a
-    string-parsed fixture's spelling, or generated code (above). *)
+    string-parsed fixture's spelling, or generated code (above).
+
+    A standard-library file is never the user's unless it is the entry file
+    itself (`march --check stdlib/<mod>.march`).  "Is this the stdlib?" is
+    answered by [Typecheck_builtins.file_is_stdlib], the same predicate the
+    stdlib-only builtin gate uses, so the gate and this filter cannot drift
+    apart. *)
 let user_diag_file ~filename ~user_files f =
-  f = filename || f = "" || f = "<unknown>" || f = synthetic_file || List.mem f user_files
+  f = filename
+  || (not (March_typecheck.Typecheck_builtins.file_is_stdlib f)
+      && (f = "" || f = "<unknown>" || f = synthetic_file || List.mem f user_files))
 
 (** Whether to show diagnostic [d] to the user.  A HINT inside generated code
     is dropped: a hint asks for an edit (qualify this constructor, rename
@@ -50,45 +58,13 @@ let render_user_diag ~src ~filename ~read_file (d : March_errors.Errors.diagnost
     in
     March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d
 
-(** The set of source files a batch of stdlib declarations actually came from.
-
-    The refinement checker needs to know whether a `List.length` in scope is
-    the real stdlib one before it may treat it as the `len` measure (see
-    [Refine_check.stdlib_source_files]); a wrong answer there is a false
-    positive on correct code. Reading the identity off the declarations we are
-    about to prepend — rather than pattern-matching the path — is what makes it
-    agree with [find_stdlib_dir]'s resolution order (repo `stdlib/`, an
-    installed `share/march`, `MARCH_STDLIB`) AND with the marshalled stdlib-AST
-    cache, whose spans carry whatever directory the entry was written from.
-    Declarations arriving via `MARCH_LIB_PATH` are user decls, not stdlib
-    decls, so a vendored or forked `List` is correctly not in this set. *)
-let stdlib_span_files (decls : March_ast.Ast.decl list) : string list =
-  let seen = Hashtbl.create 64 in
-  (* Both no-file spellings are excluded. `""` is what a string-parsed fixture
-     carries; `"<none>"` is [Ast.dummy_span]'s, and [load_stdlib_file] gives
-     every stdlib module's wrapping [DMod] a dummy span — so without this the
-     sentinel would be a member of the identity set on every production run,
-     and any `fn length` inside a `mod List` that happened to carry a dummy
-     span would be certified as the standard library's. No such declaration is
-     reachable today (desugar's synthesized `DFn`s all reuse their source
-     declaration's real span), but admitting the sentinel is precisely the
-     class of wrong fact this gate exists to prevent, so the route is closed
-     rather than argued about. *)
-  let add (sp : March_ast.Ast.span) =
-    let f = sp.March_ast.Ast.file in
-    if f <> "" && f <> March_ast.Ast.dummy_span.March_ast.Ast.file then
-      Hashtbl.replace seen f ()
-  in
-  let rec go ds =
-    List.iter
-      (function
-        | March_ast.Ast.DMod (_, _, inner, sp) -> add sp; go inner
-        | March_ast.Ast.DFn (_, sp) -> add sp
-        | _ -> ())
-      ds
-  in
-  go decls;
-  Hashtbl.fold (fun f () acc -> f :: acc) seen []
+(* The set of source files the loaded stdlib declarations came from: the
+   identity [Typecheck.stdlib_source_files] wants. Lives in the typechecker
+   ([Typecheck_builtins.stdlib_span_files]) since every stdlib loader (this
+   driver's [Toolchain.load_stdlib], the LSP's) registers what it loaded
+   through [Typecheck_builtins.note_stdlib_decls]; the driver still sets the
+   ref itself at its own check sites. *)
+let stdlib_span_files = March_typecheck.Typecheck_builtins.stdlib_span_files
 
 (** The module names a batch of stdlib declarations defines.
 
@@ -490,7 +466,7 @@ let own_caps_of_this_module ~stdlib_files typecheck_env
                 add prefix
                   (name.March_ast.Ast.txt ^ "_"
                    ^ h.March_ast.Ast.ah_msg.March_ast.Ast.txt))
-              actor.March_ast.Ast.actor_handlers
+              (March_ast.Ast.actor_body_handlers actor)
           end
         | March_ast.Ast.DMod (nm, _, inner, _) ->
           walk (qname prefix nm.March_ast.Ast.txt) inner
@@ -868,9 +844,30 @@ let hr_config () =
   Option.map March_tir.Hot_reload.default_config !hot_reload_prefix
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
 let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []
+(* The sanitizer MARCH_SANITIZE selects, or [None] when it is unset.
+   [Some "thread"] is TSAN; every other value (1, address, "", ...) is
+   ASAN+UBSan.  THE one reading of MARCH_SANITIZE: the clang flag
+   ([sanitize_clang_flag]) and the CAS tag ([codegen_cas_tags]) both derive
+   from it, so the key can never be coarser than the build.  It was: the tag
+   was a bare "sanitize" for any value, so a MARCH_SANITIZE=1 compile after a
+   MARCH_SANITIZE=thread one of the same program hit the cache and was handed
+   the TSAN binary, reported as "(cached)". *)
+let sanitize_mode () =
+  match Sys.getenv_opt "MARCH_SANITIZE" with
+  | None -> None
+  | Some "thread" -> Some "thread"
+  | Some _ -> Some "address"
+
+let sanitize_clang_flag () =
+  match sanitize_mode () with
+  | Some "thread" -> " -fsanitize=thread -g"
+  | Some _ -> " -fsanitize=address,undefined"
+  | None -> ""
+
 (* CAS cache-key fragments for the remaining toggles that alter the emitted
-   binary: MARCH_SANITIZE adds -fsanitize to the clang link, MARCH_HTTP_EVLOOP
-   adds -DMARCH_HTTP_USE_EVLOOP, --fast-math changes IR emission, and
+   binary: MARCH_SANITIZE adds -fsanitize to the clang link (the tag carries
+   the mode; see [sanitize_mode]), MARCH_HTTP_EVLOOP adds
+   -DMARCH_HTTP_USE_EVLOOP, --fast-math changes IR emission, and
    --debug/--debug-tui add -g. Any toggle missing here lets a cached artifact
    silently shadow the requested codegen. (MARCH_DEBUG_RUNTIME is deliberately
    absent: it only affects the interpreter/JIT runtime .so, which is keyed by
@@ -885,7 +882,7 @@ let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -
    v2 = runtime now built with -fno-strict-aliasing -fwrapv. *)
 let codegen_cas_tags () =
   "rtcflags2"
-  :: (if Sys.getenv_opt "MARCH_SANITIZE" <> None then ["sanitize"] else [])
+  :: (match sanitize_mode () with Some m -> ["sanitize=" ^ m] | None -> [])
   (* No "trmc" tag: TRMC always runs (--trmc/--no-trmc were removed
      2026-09-22), so there is no non-TRMC artifact for a TRMC build to be
      confused with.  Dropping the tag changed every CAS key once. *)
@@ -1955,6 +1952,15 @@ let compile filename =
      module (prelude is unwrapped into global scope, so its decls ride in the
      entry module's list).  See Typecheck.stdlib_source_files. *)
   March_typecheck.Typecheck.stdlib_source_files := stdlib_span_files stdlib_decls;
+  (* A shipped stdlib module checked AS THE ENTRY (`march --check
+     stdlib/<mod>.march`) is spelled the way the command line spelled it, not
+     the way [load_stdlib] stamped its own copy, so the set above does not
+     contain it; add it, or the stdlib-only builtin gate rejects the module's
+     own legitimate calls to `pid_of_int` and friends. [user_diag_file] tests
+     the entry file first, so its diagnostics are still shown. *)
+  if is_shipped_stdlib_file filename then
+    March_typecheck.Typecheck.stdlib_source_files :=
+      filename :: !March_typecheck.Typecheck.stdlib_source_files;
   (* Run the typecheck-side capability ceiling ONLY in typecheck-only modes
      (`--check`/`--check-json`/`--emit-core-ast`), where the `--compile`
      path's TIR-side [Cap_ceiling] never runs. On a full `--compile` this
@@ -3019,6 +3025,7 @@ let compile filename =
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "tweetnacl.c")       else "")  (* ed25519 for ACTIVATE verification *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
+              ^ (opt_file2 (Filename.concat runtime_dir "march_reclaim.c"))  (* epoch reclamation of dead procs; referenced by march_scheduler.c *)
             in
             (* User FFI shim sources from forge.toml [[ffi]] (--ffi-c). *)
             let user_ffi_c =
@@ -3085,12 +3092,7 @@ let compile filename =
                threads; glibc has them in libc. See ucontext_link_flags. *)
             let ucontext_flag = ucontext_link_flags () in
             let dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
-            let san_flag =
-              match Sys.getenv_opt "MARCH_SANITIZE" with
-              | Some "thread" -> " -fsanitize=thread -g"
-              | Some _ -> " -fsanitize=address,undefined"
-              | None -> ""
-            in
+            let san_flag = sanitize_clang_flag () in
             (* BLAKE3 flags: needed when march_blake3.c is included (server-only,
                guarded by not !compile_so above, same as march_reload.c). *)
             let blake3_c2 = Filename.concat runtime_dir "march_blake3.c" in
@@ -4031,6 +4033,14 @@ let run_check_cmd ?(emit_caps = false) files =
   let no_shadowing = List.length stdlib_decls = stdlib_decls_unshadowed_count in
   if not (List.for_all is_shipped_stdlib_file files) then
     check_no_prelude_collision_decls ~stdlib_decls all_decls;
+  (* As in [compile]: a shipped stdlib module named on the command line is
+     the stdlib's for the stdlib-only builtin gate, whatever spelling the
+     command line used. *)
+  List.iter (fun f ->
+      if is_shipped_stdlib_file f then
+        March_typecheck.Typecheck.stdlib_source_files :=
+          f :: !March_typecheck.Typecheck.stdlib_source_files)
+    files;
   (* Build a synthetic module of just the user's own decls and type-check it,
      seeded from the cached stdlib typecheck env (see [get_stdlib_tc_env])
      instead of re-typechecking stdlib combined with user code from scratch —

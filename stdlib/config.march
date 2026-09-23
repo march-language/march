@@ -1,24 +1,43 @@
--- Config module: layered application configuration backed by Vault.
+-- Config module: layered application configuration with typed keys.
 --
--- Configuration is stored in a global, process-wide Vault table named
--- "__march_config__", accessed via 2-atom or 3-atom tuple keys:
+-- Every configuration value lives under a typed KEY. A key names a path
+-- (`(ns, name)` or `(ns, section, name)`, all atoms) and carries a codec that
+-- fixes the value's type:
 --
---   Config.put(:myapp, :port, 4000)
---   Config.get(:myapp, :port)                   -- => Some(4000)
---   Config.put_in(:myapp, :db, :host, "localhost")
---   Config.get_in(:myapp, :db, :host)           -- => Some("localhost")
+--   let port = Config.key(:myapp, :port, Config.int())         -- Key(Int)
+--   let host = Config.key_in(:myapp, :db, :host, Config.string()) -- Key(String)
+--   Config.put(port, 4000)
+--   Config.get(port)                 -- => Some(4000)
+--   Config.put(host, "localhost")
+--   Config.get(host)                 -- => Some("localhost")
+--
+-- Storage is heterogeneous (an Int port and a String host share one table),
+-- but a read can never hand back a value at the wrong type. Two things
+-- guarantee that:
+--
+--   * statically, `put(key : Key(v), value : v)` and `get(key : Key(v)) :
+--     Option(v)` tie the value to the key's type, so storing an Int through
+--     `port` and using the result of `get(port)` as a Pid is a type error;
+--   * at runtime, each value is stored as a tagged `Config.Value` and decoded
+--     by the READING key's codec. Two keys minted for the same path with
+--     different codecs (`key(:a, :b, int())` and `key(:a, :b, string())`)
+--     therefore disagree safely: the read is `None` from `get` and
+--     `Err(KeyWrongType(...))` from `fetch`, never an unchecked value.
+--
+-- Built-in codecs: int(), float(), string(), bool(), atom(), list(codec).
+-- Custom types: Config.codec(name, encode, decode), mapping onto Value.
 --
 -- Load from environment at startup:
---   Config.from_env(:myapp, :port, "PORT", 4000)
---   Config.from_env(:myapp, :secret, "SECRET_KEY_BASE", "")
+--   Config.from_env(Config.key(:myapp, :secret, Config.string()), "SECRET_KEY_BASE", "")
+--   Config.from_env_int(port, "PORT", 4000)
 --
 -- Validate values:
---   Config.validate(:myapp, :port, fn p -> p > 0 && p < 65536)
+--   Config.validate(port, fn p -> p > 0 && p < 65536)
 --
 -- Detect current environment (reads MARCH_ENV):
 --   Config.env()   -- :dev | :test | :prod
 --
--- Endpoint config shorthand (for Bastion web server):
+-- Endpoint config shorthand (for web servers):
 --   Config.put_endpoint(4000, "localhost", my_secret)
 --   Config.endpoint_port(4000)
 --   Config.endpoint_host("localhost")
@@ -26,134 +45,321 @@
 --
 -- Named stores (for isolation in tests):
 --   let store = Config.new_store("my_test_store")
---   Config.store_put(store, :myapp, :key, value)
---   Config.store_get(store, :myapp, :key)
+--   Config.store_put(store, port, 4000)
+--   Config.store_get(store, port)
 
 mod Config do
+  needs IO.Mut
+  needs IO.Process
+
+  -- ── Types ─────────────────────────────────────────────────────────────────
+
+  -- A stored configuration value. This closed, tagged sum is what the config
+  -- table actually holds, which is what makes a heterogeneous table safe to
+  -- read: a key's codec decodes a `Value` back to its own type and rejects any
+  -- other tag.
+  type Value = CfgInt(Int) | CfgFloat(Float) | CfgString(String)
+             | CfgBool(Bool) | CfgAtom(Atom) | CfgList(List(Value))
+
+  -- How a key's values are stored and read back: a type name (used in error
+  -- messages), an encoder into `Value`, and a decoder that returns `None` for a
+  -- `Value` of any other shape. Build one with `int()`, `float()`, `string()`,
+  -- `bool()`, `atom()`, `list(codec)`, or `codec(name, encode, decode)`.
+  type Codec(v) = Codec(String, v -> Value, Value -> Option(v))
+
+  -- A typed configuration key: a path plus the codec fixing its value type.
+  type Key(v) = Key(String, Codec(v))
+
+  -- Why a typed read produced no value. `KeyMissing(path)` means nothing is
+  -- stored under the path; `KeyWrongType(path, expected, found)` means a value is
+  -- stored there, but it was written through a key of another type.
+  type Error = KeyMissing(String) | KeyWrongType(String, String, String)
+
+  -- ── Codecs ────────────────────────────────────────────────────────────────
+
+  pfn decode_int(d : Value) : Option(Int) do
+    match d do
+      CfgInt(n) -> Some(n)
+      _         -> None
+    end
+  end
+
+  pfn decode_float(d : Value) : Option(Float) do
+    match d do
+      CfgFloat(f) -> Some(f)
+      _           -> None
+    end
+  end
+
+  pfn decode_string(d : Value) : Option(String) do
+    match d do
+      CfgString(s) -> Some(s)
+      _            -> None
+    end
+  end
+
+  pfn decode_bool(d : Value) : Option(Bool) do
+    match d do
+      CfgBool(b) -> Some(b)
+      _          -> None
+    end
+  end
+
+  pfn decode_atom(d : Value) : Option(Atom) do
+    match d do
+      CfgAtom(a) -> Some(a)
+      _          -> None
+    end
+  end
+
+  doc "Codec for `Int` values."
+  fn int() : Codec(Int) do Codec("Int", fn n -> CfgInt(n), decode_int) end
+
+  doc "Codec for `Float` values."
+  fn float() : Codec(Float) do Codec("Float", fn f -> CfgFloat(f), decode_float) end
+
+  doc "Codec for `String` values."
+  fn string() : Codec(String) do Codec("String", fn s -> CfgString(s), decode_string) end
+
+  doc "Codec for `Bool` values."
+  fn bool() : Codec(Bool) do Codec("Bool", fn b -> CfgBool(b), decode_bool) end
+
+  doc "Codec for `Atom` values."
+  fn atom() : Codec(Atom) do Codec("Atom", fn a -> CfgAtom(a), decode_atom) end
+
+  pfn decode_all(ds : List(Value), dec : Value -> Option(v), acc : List(v)) : Option(List(v)) do
+    match ds do
+      Nil -> Some(List.reverse(acc))
+      Cons(d, rest) ->
+        match dec(d) do
+          Some(x) -> decode_all(rest, dec, Cons(x, acc))
+          None    -> None
+        end
+    end
+  end
+
+  doc """
+  Codec for a list whose elements use `elem`. Decoding fails (`None`) unless
+  every element decodes.
+  """
+  fn list(elem : Codec(v)) : Codec(List(v)) do
+    match elem do
+      Codec(name, enc, dec) ->
+        Codec("List(" ++ name ++ ")",
+              fn xs -> CfgList(List.map(xs, enc)),
+              fn d -> decode_list(d, dec))
+    end
+  end
+
+  pfn decode_list(d : Value, dec : Value -> Option(v)) : Option(List(v)) do
+    match d do
+      CfgList(ds) -> decode_all(ds, dec, Nil)
+      _           -> None
+    end
+  end
+
+  doc """
+  A custom codec: store a `v` as a `Value` and read it back. `name` appears in
+  `KeyWrongType` errors. Because `Value` is a closed sum, any codec that
+  typechecks is safe; a decoder can only produce a `v` it can build from a
+  `Value`.
+
+      type Mode = Fast | Safe
+
+      fn encode_mode(m : Mode) : Config.Value do
+        match m do
+          Fast -> CfgAtom(:fast)
+          Safe -> CfgAtom(:safe)
+        end
+      end
+
+      fn decode_mode(d : Config.Value) : Option(Mode) do
+        match d do
+          CfgAtom(:fast) -> Some(Fast)
+          CfgAtom(:safe) -> Some(Safe)
+          _              -> None
+        end
+      end
+
+      let mode = Config.key(:myapp, :mode, Config.codec("Mode", encode_mode, decode_mode))
+  """
+  fn codec(name : String, encode : v -> Value, decode : Value -> Option(v)) : Codec(v) do
+    Codec(name, encode, decode)
+  end
+
+  doc "The type name of a stored `Value`, as shown in `KeyWrongType`."
+  fn value_type_name(d : Value) : String do
+    match d do
+      CfgInt(_)    -> "Int"
+      CfgFloat(_)  -> "Float"
+      CfgString(_) -> "String"
+      CfgBool(_)   -> "Bool"
+      CfgAtom(_)   -> "Atom"
+      CfgList(_)   -> "List"
+    end
+  end
+
+  -- ── Keys ──────────────────────────────────────────────────────────────────
+
+  doc """
+  A typed key for the 2-level path `(ns, name)`. The codec fixes the value
+  type: `Config.key(:myapp, :port, Config.int()) : Key(Int)`.
+  """
+  fn key(ns : Atom, name : Atom, c : Codec(v)) : Key(v) do
+    Key(to_string(ns) ++ "/" ++ to_string(name), c)
+  end
+
+  doc """
+  A typed key for the 3-level path `(ns, section, name)`:
+  `Config.key_in(:myapp, :db, :host, Config.string()) : Key(String)`.
+  """
+  fn key_in(ns : Atom, section : Atom, name : Atom, c : Codec(v)) : Key(v) do
+    Key(to_string(ns) ++ "/" ++ to_string(section) ++ "/" ++ to_string(name), c)
+  end
+
+  doc "The key's path as stored, e.g. `\":myapp/:port\"`."
+  fn path(k : Key(v)) : String do
+    match k do
+      Key(p, _) -> p
+    end
+  end
+
+  doc "Render an `Error` as a one-line message."
+  fn error_to_string(e : Error) : String do
+    match e do
+      KeyMissing(p) -> "Config: key " ++ p ++ " not set"
+      KeyWrongType(p, expected, found) ->
+        "Config: key " ++ p ++ " holds a value of type " ++ found ++ ", expected " ++ expected
+    end
+  end
 
   -- ── Internal ──────────────────────────────────────────────────────────────
 
-  -- Get or create the global config vault.
-  -- First call creates the table; subsequent calls retrieve it by name.
-  --
-  -- The `: Vault(v)` return annotation is deliberate and is Config's
-  -- documented opt-out from Vault's typed handles: a config store is
-  -- heterogeneous BY DESIGN (an Int port and a String host live under
-  -- (:bastion, :port) and (:bastion, :host) in this one table), so its
-  -- element type cannot be pinned. Annotating keeps the factory polymorphic;
-  -- an unannotated handle factory is monomorphic — see
-  -- `demote_vault_handle_vars` in lib/typecheck/typecheck.ml.
-  --
-  -- The consequence is that Config.get is as element-erased as Vault.get was
-  -- before typed handles: `Config.get(:ns, :key)` returns whatever the caller
-  -- asks for. Use a real Vault(v) handle when you want the check.
-  pfn global_table() : Vault(v) do
+  -- Get or create the global config vault. Its element type is `Value`, the
+  -- tagged sum every key encodes into, so the table is heterogeneous without
+  -- being element-erased (it no longer needs the `: Vault(v)` opt-out).
+  pfn global_table() : Vault(Value) do
     match vault_whereis("__march_config__") do
-    Some(tbl) -> tbl
-    None      -> vault_new("__march_config__")
+      Some(tbl) -> tbl
+      None      -> vault_new("__march_config__")
     end
   end
 
-  -- ── 2-level put / get ─────────────────────────────────────────────────────
-
-  doc "Store a configuration value under (ns, key). ns is an atom naming your app."
-  fn put(ns, key, value) do
-    vault_set(global_table(), (ns, key), value)
-  end
-
-  doc "Look up a configuration value. Returns Some(value) or None."
-  fn get(ns, key) do
-    vault_get(global_table(), (ns, key))
-  end
-
-  doc "Get a configuration value, returning default if absent."
-  fn get_with_default(ns, key, default_val) do
-    match vault_get(global_table(), (ns, key)) do
-    Some(v) -> v
-    None    -> default_val
+  pfn table_put(tbl : Vault(Value), k : Key(v), value : v) : Unit do
+    match k do
+      Key(p, Codec(_, enc, _)) -> vault_set(tbl, p, enc(value))
     end
   end
 
-  doc "Get a required configuration value. Panics if not set."
-  fn require(ns, key) do
-    match vault_get(global_table(), (ns, key)) do
-    Some(v) -> v
-    None    -> panic("Config: missing required key")
+  pfn table_fetch(tbl : Vault(Value), k : Key(v)) : Result(v, Error) do
+    match k do
+      Key(p, Codec(name, _, dec)) ->
+        match vault_get(tbl, p) do
+          None -> Err(KeyMissing(p))
+          Some(d) ->
+            match dec(d) do
+              Some(x) -> Ok(x)
+              None    -> Err(KeyWrongType(p, name, value_type_name(d)))
+            end
+        end
     end
   end
 
-  -- ── 3-level put / get ─────────────────────────────────────────────────────
-
-  doc "Store a configuration value under (ns, section, key)."
-  fn put_in(ns, section, key, value) do
-    vault_set(global_table(), (ns, section, key), value)
-  end
-
-  doc "Look up a 3-level configuration value. Returns Some(value) or None."
-  fn get_in(ns, section, key) do
-    vault_get(global_table(), (ns, section, key))
-  end
-
-  doc "Get a 3-level configuration value, returning default if absent."
-  fn get_in_with_default(ns, section, key, default_val) do
-    match vault_get(global_table(), (ns, section, key)) do
-    Some(v) -> v
-    None    -> default_val
+  pfn result_to_option(r : Result(v, Error)) : Option(v) do
+    match r do
+      Ok(x)  -> Some(x)
+      Err(_) -> None
     end
   end
 
-  doc "Get a required 3-level configuration value. Panics if not set."
-  fn require_in(ns, section, key) do
-    match vault_get(global_table(), (ns, section, key)) do
-    Some(v) -> v
-    None    -> panic("Config: missing required nested key")
+  -- ── put / get ─────────────────────────────────────────────────────────────
+
+  doc "Store `value` under `key` in the global config table."
+  fn put(k : Key(v), value : v) : Unit do
+    table_put(global_table(), k, value)
+  end
+
+  doc """
+  Look up `key`. Returns `Some(value)`, or `None` when the key is unset OR
+  holds a value written through a key of another type. Use `fetch` to tell
+  the two apart.
+  """
+  fn get(k : Key(v)) : Option(v) do
+    result_to_option(table_fetch(global_table(), k))
+  end
+
+  doc """
+  Look up `key`, returning `Ok(value)`, `Err(KeyMissing(path))`, or
+  `Err(KeyWrongType(path, expected, found))`.
+  """
+  fn fetch(k : Key(v)) : Result(v, Error) do
+    table_fetch(global_table(), k)
+  end
+
+  doc "Get `key`'s value, or `default_val` when it is unset or of another type."
+  fn get_with_default(k : Key(v), default_val : v) : v do
+    match get(k) do
+      Some(x) -> x
+      None    -> default_val
+    end
+  end
+
+  doc """
+  Get a required configuration value. Panics with the `error_to_string`
+  message when the key is unset or holds a value of another type; use
+  `fetch` for a recoverable read.
+  """
+  fn require(k : Key(v)) : v do
+    match fetch(k) do
+      Ok(x)  -> x
+      Err(e) -> panic(error_to_string(e))
     end
   end
 
   -- ── Environment variable loading ──────────────────────────────────────────
 
   doc """
-  Load a String value from an environment variable and store it in config.
+  Load a String value from an environment variable and store it under `key`.
   Uses default if the env var is not set. Returns the value stored.
   """
-  fn from_env(ns, key, env_var, default_val) do
+  fn from_env(k : Key(String), env_var : String, default_val : String) : String do
     let value = match process_env(env_var) do
       Some(v) -> v
       None    -> default_val
     end
-    vault_set(global_table(), (ns, key), value)
+    put(k, value)
     value
   end
 
   doc """
-  Load an Int value from an environment variable.
+  Load an Int value from an environment variable and store it under `key`.
   Parses the string as an integer; uses default if absent or unparseable.
   Returns the value stored.
   """
-  fn from_env_int(ns, key, env_var, default_val) do
+  fn from_env_int(k : Key(Int), env_var : String, default_val : Int) : Int do
     let value = match process_env(env_var) do
       Some(s) ->
         match string_to_int(s) do
-        Some(n) -> n
-        None    -> default_val
+          Some(n) -> n
+          None    -> default_val
         end
       None -> default_val
     end
-    vault_set(global_table(), (ns, key), value)
+    put(k, value)
     value
   end
 
   doc """
-  Load a Bool value from an environment variable.
+  Load a Bool value from an environment variable and store it under `key`.
   "true", "1", "yes" are parsed as true; uses default if absent.
   Returns the value stored.
   """
-  fn from_env_bool(ns, key, env_var, default_val) do
+  fn from_env_bool(k : Key(Bool), env_var : String, default_val : Bool) : Bool do
     let value = match process_env(env_var) do
       Some(s) -> s == "true" || s == "1" || s == "yes"
       None    -> default_val
     end
-    vault_set(global_table(), (ns, key), value)
+    put(k, value)
     value
   end
 
@@ -203,103 +409,85 @@ mod Config do
 
   doc """
   Validate a config value with a predicate function.
-  Returns Ok(value) if the key is set and predicate returns true.
-  Returns Err(reason) otherwise.
+  Returns Ok(value) if the key is set and the predicate returns true;
+  otherwise Err with the `error_to_string` message for an unset or wrong-typed
+  key, or "Config: validation failed".
   """
-  fn validate(ns, key, predicate) do
-    match vault_get(global_table(), (ns, key)) do
-    None    -> Err("Config: key not set")
-    Some(v) -> if predicate(v) do Ok(v) else Err("Config: validation failed") end
-    end
-  end
-
-  doc """
-  Validate a 3-level config value with a predicate function.
-  Returns Ok(value) or Err(reason).
-  """
-  fn validate_in(ns, section, key, predicate) do
-    match vault_get(global_table(), (ns, section, key)) do
-    None    -> Err("Config: key not set")
-    Some(v) -> if predicate(v) do Ok(v) else Err("Config: validation failed") end
+  fn validate(k : Key(v), predicate : v -> Bool) : Result(v, String) do
+    match fetch(k) do
+      Err(e) -> Err(error_to_string(e))
+      Ok(x)  -> if predicate(x) do Ok(x) else Err("Config: validation failed") end
     end
   end
 
   -- ── Endpoint config ───────────────────────────────────────────────────────
 
+  doc "The key `put_endpoint` stores the HTTP port under: `(:bastion, :port)`."
+  fn endpoint_port_key() : Key(Int) do key(:bastion, :port, int()) end
+
+  doc "The key `put_endpoint` stores the host under: `(:bastion, :host)`."
+  fn endpoint_host_key() : Key(String) do key(:bastion, :host, string()) end
+
+  doc "The key `put_endpoint` stores the secret under: `(:bastion, :secret_key_base)`."
+  fn secret_key_base_key() : Key(String) do key(:bastion, :secret_key_base, string()) end
+
   doc """
-  Store Bastion endpoint configuration.
+  Store web endpoint configuration.
   Typically called during application startup.
     Config.put_endpoint(4000, "localhost", secret)
   """
-  fn put_endpoint(port, host, secret) do
-    -- Three separate `global_table()` calls rather than one `let tbl = …`:
-    -- these three values have three different types (Int, String, String) and
-    -- a bound handle has ONE element type. Each call re-instantiates the
-    -- erased factory, which is the escape hatch this module opted into above.
-    vault_set(global_table(), (:bastion, :port), port)
-    vault_set(global_table(), (:bastion, :host), host)
-    vault_set(global_table(), (:bastion, :secret_key_base), secret)
+  fn put_endpoint(port : Int, host : String, secret : String) : Unit do
+    put(endpoint_port_key(), port)
+    put(endpoint_host_key(), host)
+    put(secret_key_base_key(), secret)
   end
 
   doc "Get the configured HTTP port. Returns default_port if not set."
-  fn endpoint_port(default_port) do
-    match vault_get(global_table(), (:bastion, :port)) do
-    Some(p) -> p
-    None    -> default_port
-    end
+  fn endpoint_port(default_port : Int) : Int do
+    get_with_default(endpoint_port_key(), default_port)
   end
 
   doc "Get the configured host. Returns default_host if not set."
-  fn endpoint_host(default_host) do
-    match vault_get(global_table(), (:bastion, :host)) do
-    Some(h) -> h
-    None    -> default_host
-    end
+  fn endpoint_host(default_host : String) : String do
+    get_with_default(endpoint_host_key(), default_host)
   end
 
   doc "Get the secret key base. Returns empty string if not configured."
-  fn secret_key_base() do
-    match vault_get(global_table(), (:bastion, :secret_key_base)) do
-    Some(s) -> s
-    None    -> ""
-    end
+  fn secret_key_base() : String do
+    get_with_default(secret_key_base_key(), "")
   end
 
   -- ── Named config stores ───────────────────────────────────────────────────
 
   doc """
-  Create an isolated named config store.
+  Create (or reopen) an isolated named config store.
   Useful for testing or multi-tenant configurations.
-  Returns an opaque store handle (a Vault table).
-
-  Element-erased for the same reason as `global_table` — a config store holds
-  values of many types.
+  Returns a store handle holding tagged `Value`s; use it with `store_put`,
+  `store_get` and `store_fetch` and the same typed keys as the global table.
   """
-  fn new_store(name) : Vault(v) do
+  fn new_store(name : String) : Vault(Value) do
     match vault_whereis(name) do
-    Some(tbl) -> tbl
-    None      -> vault_new(name)
+      Some(tbl) -> tbl
+      None      -> vault_new(name)
     end
   end
 
-  doc "Store a 2-level value in a named config store."
-  fn store_put(store, ns, key, value) do
-    vault_set(store, (ns, key), value)
+  doc "Store `value` under `key` in a named config store."
+  fn store_put(store : Vault(Value), k : Key(v), value : v) : Unit do
+    table_put(store, k, value)
   end
 
-  doc "Look up a 2-level value from a named config store. Returns Some(v) or None."
-  fn store_get(store, ns, key) do
-    vault_get(store, (ns, key))
+  doc """
+  Look up `key` in a named config store. `None` when unset or of another type
+  (see `get`).
+  """
+  fn store_get(store : Vault(Value), k : Key(v)) : Option(v) do
+    result_to_option(table_fetch(store, k))
   end
 
-  doc "Store a 3-level value in a named config store."
-  fn store_put_in(store, ns, section, key, value) do
-    vault_set(store, (ns, section, key), value)
-  end
-
-  doc "Look up a 3-level value from a named config store."
-  fn store_get_in(store, ns, section, key) do
-    vault_get(store, (ns, section, key))
+  doc "Look up `key` in a named config store, with an `Error` on failure (see `fetch`)."
+  fn store_fetch(store : Vault(Value), k : Key(v)) : Result(v, Error) do
+    table_fetch(store, k)
   end
 
 end -- mod Config

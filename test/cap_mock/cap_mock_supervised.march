@@ -16,6 +16,8 @@ mod CapMockSupervised do
   --           replacement (a respawn does not go through the spawn glue)
   --   out   : the child of a supervisor spawned outside, sent to AFTER the
   --           block closes -> real
+  needs Actor.Introspect
+  needs IO
   needs IO.Console
 
   actor Logger do
@@ -37,27 +39,28 @@ mod CapMockSupervised do
     end
   end
 
-  fn child_of(sup) do
+  fn child_of(intro : Cap(Actor.Introspect), sup) do
     match get_actor_field(sup, "w") do
-      None    -> pid_of_int(-1)
-      Some(n) -> pid_of_int(n)
+      None    -> Actor.pid_from_int(intro, -1)
+      Some(n) -> Actor.pid_from_int(intro, n)
     end
   end
 
-  fn main(c : Cap(IO.Console)) do
+  fn main(c : Cap(IO.Console), io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let outside = spawn(Sup)
     let mock = cap_impl(c, { cap_ops_empty(c) with
       print_line: Some(fn s -> print("MOCK[" ++ s ++ "]\n")) })
     with_cap(mock, fn _ -> do
       let inside = spawn(Sup)
-      send(child_of(inside), Say("in"))
+      send(child_of(intro, inside), Say("in"))
       run_until_idle()
-      kill(child_of(inside))
+      kill(child_of(intro, inside))
       run_until_idle()
-      send(child_of(inside), Say("again"))
+      send(child_of(intro, inside), Say("again"))
       run_until_idle()
     end)
-    send(child_of(outside), Say("out"))
+    send(child_of(intro, outside), Say("out"))
     run_until_idle()
   end
 end

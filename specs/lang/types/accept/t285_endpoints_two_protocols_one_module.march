@@ -1,0 +1,68 @@
+mod Main do
+  -- Two `@[endpoints]` protocols in ONE module, both projected and both used.
+  -- Each protocol generates a `<P>_Msg` module whose message type derives
+  -- `Json`; impl dispatch for that derived codec keys on the type's SHORT
+  -- name in BOTH backends, so while both types were called `Msg` the two
+  -- codecs collided: interpreted, `Stream`'s first send encoded through
+  -- `Other`'s `to_json` and died in the generated `send_…` with a match
+  -- failure; compiled, the build was refused outright ("ambiguous
+  -- interface-method call to `JsonFrom$Msg.from_json`"). The generated type
+  -- is `<P>_Message` since 2026-09-22.
+  --
+  -- HONEST SCOPE: `--check` was exit 0 both before and after that fix -- the
+  -- bug lived past the typechecker. This fixture is a well-typedness witness
+  -- (two protocols project, and the generated `<P>_Message` types coexist);
+  -- the REGRESSION witness is test/session/in_process.march, which runs two
+  -- protocols on both backends against one golden. Its twin here is
+  -- reject/t286, which does move.
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    Prod -> Cons : Int
+    Cons -> Prod : Bool
+  end
+
+  @[endpoints]
+  protocol Other do
+    A -> B : Int
+    B -> A : String
+  end
+
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1) : Stream_Prod.Yield do
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, 1)
+    Stream_Prod.recv_Msg_Cons_Prod_1(s, st1, fn (_b, st2) -> Stream_Prod.close(s, st2))
+  end
+
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (_n, st1) ->
+      Stream_Cons.close(s, Stream_Cons.send_Msg_Cons_Prod_1(s, st1, true)))
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Other_A.S_send_Msg_A_B_1) : Other_A.Yield do
+    let st1 = Other_A.send_Msg_A_B_1(s, st, 7)
+    Other_A.recv_Msg_B_A_1(s, st1, fn (_t, st2) -> Other_A.close(s, st2))
+  end
+
+  pfn role_b(s : Cap(Session.Live), st : Other_B.S_recv_Msg_A_B_1) : Other_B.Yield do
+    Other_B.recv_Msg_A_B_1(s, st, fn (_n, st1) ->
+      Other_B.close(s, Other_B.send_Msg_B_A_1(s, st1, "ok")))
+  end
+
+  fn main(c : Cap(IO)) do
+    let t1 = Session.in_process()
+    let s1 = Session.attach(c, t1.ops)
+    let _ = cons(s1, Stream_Cons.register(s1, 0))
+    let _ = prod(s1, Stream_Prod.register(s1, 0))
+    t1.drain(())
+
+    let t2 = Session.in_process()
+    let s2 = Session.attach(c, t2.ops)
+    let _ = role_b(s2, Other_B.register(s2, 0))
+    let _ = role_a(s2, Other_A.register(s2, 0))
+    t2.drain(())
+  end
+end

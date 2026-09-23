@@ -156,9 +156,11 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 </style></head><body><header id="topbar"><div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg> March Docs</div><div class="actions"><button id="search-trigger" onclick="openSearch()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Search&hellip;<kbd>&#8984;K</kbd></button><button id="theme-toggle" onclick="toggleTheme()"><svg id="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><svg id="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button></div></header><div id="search-overlay" onclick="closeSearch()"><div id="search-modal" onclick="event.stopPropagation()"><input id="search-input" type="text" placeholder="Search modules, functions, types&hellip;" autocomplete="off"><div id="sr"></div></div></div><div class="content-wrap"><nav id="sb"><div class="sb-section"><a href="index.html" class="sl">Overview</a><div class="sb-heading">Modules</div><div class="sb-group"><div class="sb-group-hdr" data-href="Actor.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Actor.html">Actor</a></div><div class="sb-sub"><a class="sl" href="Actor.html#fn-call"><span class="sb-kind" style="color:var(--fn)">F</span>call</a>
 <a class="sl" href="Actor.html#fn-cancel_timer"><span class="sb-kind" style="color:var(--fn)">F</span>cancel_timer</a>
 <a class="sl" href="Actor.html#fn-cast"><span class="sb-kind" style="color:var(--fn)">F</span>cast</a>
+<a class="sl" href="Actor.html#fn-introspect"><span class="sb-kind" style="color:var(--fn)">F</span>introspect</a>
 <a class="sl" href="Actor.html#fn-is_draining"><span class="sb-kind" style="color:var(--fn)">F</span>is_draining</a>
 <a class="sl" href="Actor.html#fn-list"><span class="sb-kind" style="color:var(--fn)">F</span>list</a>
 <a class="sl" href="Actor.html#fn-over_mailbox"><span class="sb-kind" style="color:var(--fn)">F</span>over_mailbox</a>
+<a class="sl" href="Actor.html#fn-pid_from_int"><span class="sb-kind" style="color:var(--fn)">F</span>pid_from_int</a>
 <a class="sl" href="Actor.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
 <a class="sl" href="Actor.html#fn-registered"><span class="sb-kind" style="color:var(--fn)">F</span>registered</a>
 <a class="sl" href="Actor.html#fn-reply"><span class="sb-kind" style="color:var(--fn)">F</span>reply</a>
@@ -458,32 +460,46 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Compress.html#type-Level"><span class="sb-kind" style="color:var(--ty)">T</span>Level</a>
 <a class="sl" href="Compress.html#fn-accept_encoding"><span class="sb-kind" style="color:var(--fn)">F</span>accept_encoding</a>
 <a class="sl" href="Compress.html#fn-best_encoding"><span class="sb-kind" style="color:var(--fn)">F</span>best_encoding</a></div></div>
-<div class="sb-group"><div class="sb-group-hdr" data-href="Config.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Config.html">Config</a></div><div class="sb-sub"><a class="sl" href="Config.html#fn-endpoint_host"><span class="sb-kind" style="color:var(--fn)">F</span>endpoint_host</a>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Config.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Config.html">Config</a></div><div class="sb-sub"><a class="sl" href="Config.html#type-Value"><span class="sb-kind" style="color:var(--ty)">T</span>Value</a>
+<a class="sl" href="Config.html#type-Codec"><span class="sb-kind" style="color:var(--ty)">T</span>Codec</a>
+<a class="sl" href="Config.html#type-Key"><span class="sb-kind" style="color:var(--ty)">T</span>Key</a>
+<a class="sl" href="Config.html#type-Error"><span class="sb-kind" style="color:var(--ty)">T</span>Error</a>
+<a class="sl" href="Config.html#fn-atom"><span class="sb-kind" style="color:var(--fn)">F</span>atom</a>
+<a class="sl" href="Config.html#fn-bool"><span class="sb-kind" style="color:var(--fn)">F</span>bool</a>
+<a class="sl" href="Config.html#fn-codec"><span class="sb-kind" style="color:var(--fn)">F</span>codec</a>
+<a class="sl" href="Config.html#fn-endpoint_host"><span class="sb-kind" style="color:var(--fn)">F</span>endpoint_host</a>
+<a class="sl" href="Config.html#fn-endpoint_host_key"><span class="sb-kind" style="color:var(--fn)">F</span>endpoint_host_key</a>
 <a class="sl" href="Config.html#fn-endpoint_port"><span class="sb-kind" style="color:var(--fn)">F</span>endpoint_port</a>
+<a class="sl" href="Config.html#fn-endpoint_port_key"><span class="sb-kind" style="color:var(--fn)">F</span>endpoint_port_key</a>
 <a class="sl" href="Config.html#fn-env"><span class="sb-kind" style="color:var(--fn)">F</span>env</a>
+<a class="sl" href="Config.html#fn-error_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>error_to_string</a>
+<a class="sl" href="Config.html#fn-fetch"><span class="sb-kind" style="color:var(--fn)">F</span>fetch</a>
+<a class="sl" href="Config.html#fn-float"><span class="sb-kind" style="color:var(--fn)">F</span>float</a>
 <a class="sl" href="Config.html#fn-from_env"><span class="sb-kind" style="color:var(--fn)">F</span>from_env</a>
 <a class="sl" href="Config.html#fn-from_env_bool"><span class="sb-kind" style="color:var(--fn)">F</span>from_env_bool</a>
 <a class="sl" href="Config.html#fn-from_env_int"><span class="sb-kind" style="color:var(--fn)">F</span>from_env_int</a>
 <a class="sl" href="Config.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
-<a class="sl" href="Config.html#fn-get_in"><span class="sb-kind" style="color:var(--fn)">F</span>get_in</a>
-<a class="sl" href="Config.html#fn-get_in_with_default"><span class="sb-kind" style="color:var(--fn)">F</span>get_in_with_default</a>
 <a class="sl" href="Config.html#fn-get_with_default"><span class="sb-kind" style="color:var(--fn)">F</span>get_with_default</a>
+<a class="sl" href="Config.html#fn-int"><span class="sb-kind" style="color:var(--fn)">F</span>int</a>
 <a class="sl" href="Config.html#fn-is_dev"><span class="sb-kind" style="color:var(--fn)">F</span>is_dev</a>
 <a class="sl" href="Config.html#fn-is_prod"><span class="sb-kind" style="color:var(--fn)">F</span>is_prod</a>
 <a class="sl" href="Config.html#fn-is_test"><span class="sb-kind" style="color:var(--fn)">F</span>is_test</a>
+<a class="sl" href="Config.html#fn-key"><span class="sb-kind" style="color:var(--fn)">F</span>key</a>
+<a class="sl" href="Config.html#fn-key_in"><span class="sb-kind" style="color:var(--fn)">F</span>key_in</a>
+<a class="sl" href="Config.html#fn-list"><span class="sb-kind" style="color:var(--fn)">F</span>list</a>
 <a class="sl" href="Config.html#fn-new_store"><span class="sb-kind" style="color:var(--fn)">F</span>new_store</a>
+<a class="sl" href="Config.html#fn-path"><span class="sb-kind" style="color:var(--fn)">F</span>path</a>
 <a class="sl" href="Config.html#fn-put"><span class="sb-kind" style="color:var(--fn)">F</span>put</a>
 <a class="sl" href="Config.html#fn-put_endpoint"><span class="sb-kind" style="color:var(--fn)">F</span>put_endpoint</a>
-<a class="sl" href="Config.html#fn-put_in"><span class="sb-kind" style="color:var(--fn)">F</span>put_in</a>
 <a class="sl" href="Config.html#fn-require"><span class="sb-kind" style="color:var(--fn)">F</span>require</a>
-<a class="sl" href="Config.html#fn-require_in"><span class="sb-kind" style="color:var(--fn)">F</span>require_in</a>
 <a class="sl" href="Config.html#fn-secret_key_base"><span class="sb-kind" style="color:var(--fn)">F</span>secret_key_base</a>
+<a class="sl" href="Config.html#fn-secret_key_base_key"><span class="sb-kind" style="color:var(--fn)">F</span>secret_key_base_key</a>
+<a class="sl" href="Config.html#fn-store_fetch"><span class="sb-kind" style="color:var(--fn)">F</span>store_fetch</a>
 <a class="sl" href="Config.html#fn-store_get"><span class="sb-kind" style="color:var(--fn)">F</span>store_get</a>
-<a class="sl" href="Config.html#fn-store_get_in"><span class="sb-kind" style="color:var(--fn)">F</span>store_get_in</a>
 <a class="sl" href="Config.html#fn-store_put"><span class="sb-kind" style="color:var(--fn)">F</span>store_put</a>
-<a class="sl" href="Config.html#fn-store_put_in"><span class="sb-kind" style="color:var(--fn)">F</span>store_put_in</a>
+<a class="sl" href="Config.html#fn-string"><span class="sb-kind" style="color:var(--fn)">F</span>string</a>
 <a class="sl" href="Config.html#fn-validate"><span class="sb-kind" style="color:var(--fn)">F</span>validate</a>
-<a class="sl" href="Config.html#fn-validate_in"><span class="sb-kind" style="color:var(--fn)">F</span>validate_in</a></div></div>
+<a class="sl" href="Config.html#fn-value_type_name"><span class="sb-kind" style="color:var(--fn)">F</span>value_type_name</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="ConsistentHash.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="ConsistentHash.html">ConsistentHash</a></div><div class="sb-sub"><a class="sl" href="ConsistentHash.html#type-HashRing"><span class="sb-kind" style="color:var(--ty)">T</span>HashRing</a>
 <a class="sl" href="ConsistentHash.html#fn-add"><span class="sb-kind" style="color:var(--fn)">F</span>add</a>
 <a class="sl" href="ConsistentHash.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
@@ -2027,10 +2043,16 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Seq.html#fn-unfold_until"><span class="sb-kind" style="color:var(--fn)">F</span>unfold_until</a>
 <a class="sl" href="Seq.html#fn-zip"><span class="sb-kind" style="color:var(--fn)">F</span>zip</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Session.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Session.html">Session</a></div><div class="sb-sub"><a class="sl" href="Session.html#type-Ops"><span class="sb-kind" style="color:var(--ty)">T</span>Ops</a>
+<a class="sl" href="Session.html#type-InProcess"><span class="sb-kind" style="color:var(--ty)">T</span>InProcess</a>
+<a class="sl" href="Session.html#type-InProcessState"><span class="sb-kind" style="color:var(--ty)">T</span>InProcessState</a>
 <a class="sl" href="Session.html#fn-attach"><span class="sb-kind" style="color:var(--fn)">F</span>attach</a>
 <a class="sl" href="Session.html#fn-close"><span class="sb-kind" style="color:var(--fn)">F</span>close</a>
+<a class="sl" href="Session.html#fn-crash_cause"><span class="sb-kind" style="color:var(--fn)">F</span>crash_cause</a>
+<a class="sl" href="Session.html#fn-crash_payload"><span class="sb-kind" style="color:var(--fn)">F</span>crash_payload</a>
 <a class="sl" href="Session.html#fn-emit"><span class="sb-kind" style="color:var(--fn)">F</span>emit</a>
 <a class="sl" href="Session.html#fn-fail"><span class="sb-kind" style="color:var(--fn)">F</span>fail</a>
+<a class="sl" href="Session.html#fn-in_process"><span class="sb-kind" style="color:var(--fn)">F</span>in_process</a>
+<a class="sl" href="Session.html#fn-in_process_with"><span class="sb-kind" style="color:var(--fn)">F</span>in_process_with</a>
 <a class="sl" href="Session.html#fn-leave"><span class="sb-kind" style="color:var(--fn)">F</span>leave</a>
 <a class="sl" href="Session.html#fn-on_cancel"><span class="sb-kind" style="color:var(--fn)">F</span>on_cancel</a>
 <a class="sl" href="Session.html#fn-on_crash"><span class="sb-kind" style="color:var(--fn)">F</span>on_crash</a>
@@ -2557,10 +2579,36 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Session</span></nav><h1>Session</h1><h2>Types</h2><div class="item" id="type-Ops"><div class="ih"><span class="badge bty">type</span><span class="name">Ops</span><span class="sig"><a href="#type-Ops">Ops</a> = {</span><a class="anchor-link" href="#type-Ops" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-attach"><div class="ih"><span class="badge bfn">fn</span><span class="name">attach</span><span class="sig">attach(io : Cap(IO), ops : <a href="#type-Ops">Ops</a>) : Cap(Session.Live)</span><a class="anchor-link" href="#fn-attach" title="Link">#</a></div><div class="ib"><p>Attach a transport. The only way to obtain a <code>Cap(Session.Live)</code>.</p></div></div>
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Session</span></nav><h1>Session</h1><h2>Types</h2><div class="item" id="type-Ops"><div class="ih"><span class="badge bty">type</span><span class="name">Ops</span><span class="sig"><a href="#type-Ops">Ops</a> = {</span><a class="anchor-link" href="#type-Ops" title="Link">#</a></div><div class="ib"></div></div>
+<div class="item" id="type-InProcess"><div class="ih"><span class="badge bty">type</span><span class="name">InProcess</span><span class="sig"><a href="#type-InProcess">InProcess</a> = {</span><a class="anchor-link" href="#type-InProcess" title="Link">#</a></div><div class="ib"></div></div>
+<div class="item" id="type-InProcessState"><div class="ih"><span class="badge bty">type</span><span class="name">InProcessState</span><span class="sig"><a href="#type-InProcessState">InProcessState</a> = {</span><a class="anchor-link" href="#type-InProcessState" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-attach"><div class="ih"><span class="badge bfn">fn</span><span class="name">attach</span><span class="sig">attach(io : Cap(IO), ops : <a href="#type-Ops">Ops</a>) : Cap(Session.Live)</span><a class="anchor-link" href="#fn-attach" title="Link">#</a></div><div class="ib"><p>Attach a transport. The only way to obtain a <code>Cap(Session.Live)</code>.</p></div></div>
 <div class="item" id="fn-close"><div class="ih"><span class="badge bfn">fn</span><span class="name">close</span><span class="sig">close(c : Cap(Session.Live), ep : Int) : ()</span><a class="anchor-link" href="#fn-close" title="Link">#</a></div><div class="ib"><p>Close endpoint <code>ep</code>.</p></div></div>
+<div class="item" id="fn-crash_cause"><div class="ih"><span class="badge bfn">fn</span><span class="name">crash_cause</span><span class="sig">crash_cause(msg : <a href="Bytes.html#type-Bytes">Bytes</a>) : Option(String)</span><a class="anchor-link" href="#fn-crash_cause" title="Link">#</a></div><div class="ib"><p><code>Some(cause)</code> if <code>msg</code> is a forwarded crash rather than a protocol message, <code>None</code> otherwise. The generated <code>resume</code> of an actor-hosted role asks this before decoding.</p></div></div>
+<div class="item" id="fn-crash_payload"><div class="ih"><span class="badge bfn">fn</span><span class="name">crash_payload</span><span class="sig">crash_payload(cause : String) : <a href="Bytes.html#type-Bytes">Bytes</a></span><a class="anchor-link" href="#fn-crash_payload" title="Link">#</a></div><div class="ib"><p>The delivery payload that carries a crash of the sending role, with <code>cause</code> as the transport knows it. A transport that hosts a role in an actor sends this on the delivery route; nothing else produces it.</p></div></div>
 <div class="item" id="fn-emit"><div class="ih"><span class="badge bfn">fn</span><span class="name">emit</span><span class="sig">emit(c : Cap(Session.Live), ep : Int, to : Int, msg : <a href="Bytes.html#type-Bytes">Bytes</a>) : Int</span><a class="anchor-link" href="#fn-emit" title="Link">#</a></div><div class="ib"><p>Send <code>msg</code> from <code>ep</code> to role <code>to</code>; returns the continuation endpoint.</p></div></div>
-<div class="item" id="fn-fail"><div class="ih"><span class="badge bfn">fn</span><span class="name">fail</span><span class="sig">fail(c : Cap(Session.Live), ep : Int, why : String) : ()</span><a class="anchor-link" href="#fn-fail" title="Link">#</a></div><div class="ib"><p>A message for <code>ep</code> that its continuation cannot take (undecodable, or one the session state cannot receive): hand the transport [why]. The generated endpoint code calls this; what happens next is the transport's (a same-thread transport panics, <code>SessionNode</code> ends the session with <code>Protocol</code>).</p></div></div>
+<div class="item" id="fn-fail"><div class="ih"><span class="badge bfn">fn</span><span class="name">fail</span><span class="sig">fail(c : Cap(Session.Live), ep : Int, why : String) : ()</span><a class="anchor-link" href="#fn-fail" title="Link">#</a></div><div class="ib"><p>A message for <code>ep</code> that its continuation cannot take (undecodable, or one the session state cannot receive): hand the transport [why]. The generated endpoint code calls this; what happens next is the transport's (<code>in_process</code> cancels the endpoint, <code>SessionNode</code> ends the session with <code>Protocol</code>, a hand-written test transport may panic).</p></div></div>
+<div class="item" id="fn-in_process"><div class="ih"><span class="badge bfn">fn</span><span class="name">in_process</span><span class="sig">in_process() : <a href="#type-InProcess">InProcess</a></span><a class="anchor-link" href="#fn-in_process" title="Link">#</a></div><div class="ib"><p>An in-process transport, for running every role of one session in one program: attach its <code>ops</code>, drive each role to its first suspension, then <code>drain</code> to deliver.</p><pre><code>    let t = Session.in_process()
+    let s = Session.attach(io, t.ops)
+    let _ = cons(s, Stream_Cons.register(s, 0), 2)
+    let _ = prod(s, Stream_Prod.register(s, 0), 1)
+    t.drain(())
+
+`emit` only enqueues; `drain` delivers in FIFO order until nothing more can
+run, so the run is deterministic. A delivery its endpoint is not yet waiting
+for stays queued (`queued(())` counts what is left). Failure behaves as on
+the network (`SessionNode`): a role that closed, left or crashed is gone,
+messages to it are dropped, and an endpoint waiting on it takes its crash
+branch or is cancelled. `crash(role, cause)` makes a role gone without
+running it -- a node dying -- and `fail` cancels the endpoint that got the
+bad message. One transport carries one session; each role registers once.
+
+An endpoint hosted in an actor (the generated event API) resumes itself
+from the actor's own turn, so its host routes deliveries instead of
+draining: `take(())` returns the next delivery an endpoint is waiting for,
+as `Some((to, from, msg))`, with that endpoint's continuation forgotten, or
+`None` when nothing queued can be taken. `take` runs no failure handling;
+`drain` does.</code></pre></div></div>
+<div class="item" id="fn-in_process_with"><div class="ih"><span class="badge bfn">fn</span><span class="name">in_process_with</span><span class="sig">in_process_with(trace : String -&gt; ()) : <a href="#type-InProcess">InProcess</a></span><a class="anchor-link" href="#fn-in_process_with" title="Link">#</a></div><div class="ib"><p><code>in_process()</code>, reporting what the transport itself does to [trace], one line per event: <code>close &lt;ep&gt;</code>, <code>cancel &lt;ep&gt;: &lt;cause&gt;</code>, <code>crash &lt;role&gt;: &lt;cause&gt;</code>, <code>crash branch &lt;ep&gt;: role &lt;role&gt;: &lt;cause&gt;</code>, <code>dropped &lt;from&gt; -&gt; &lt;to&gt;</code>, and <code>stalled: &lt;n&gt; queued</code> when a <code>drain</code> stops with deliveries no endpoint is waiting for. A test asserts on the failure paths through it.</p></div></div>
 <div class="item" id="fn-leave"><div class="ih"><span class="badge bfn">fn</span><span class="name">leave</span><span class="sig">leave(c : Cap(Session.Live), ep : Int, why : String) : ()</span><a class="anchor-link" href="#fn-leave" title="Link">#</a></div><div class="ib"><p>Leave the session from endpoint <code>ep</code> on purpose, with a reason the peers are told.</p></div></div>
 <div class="item" id="fn-on_cancel"><div class="ih"><span class="badge bfn">fn</span><span class="name">on_cancel</span><span class="sig">on_cancel(c : Cap(Session.Live), ep : Int, handler : Int -&gt; String -&gt; Int -&gt; Int) : Int</span><a class="anchor-link" href="#fn-on_cancel" title="Link">#</a></div><div class="ib"><p>Install <code>handler</code> as the cancel handler for the continuation that the next <code>suspend</code> on <code>ep</code> installs, and return <code>ep</code>. It runs as <code>handler(role, cause, ep)</code> if the role that continuation waits on can send nothing more and nothing from it is queued. The generated <code>recv_…_or</code> and <code>offer_…_or</code> call this.</p></div></div>
 <div class="item" id="fn-on_crash"><div class="ih"><span class="badge bfn">fn</span><span class="name">on_crash</span><span class="sig">on_crash(c : Cap(Session.Live), ep : Int, role : Int, handler : Int -&gt; String -&gt; Int -&gt; Int) : Int</span><a class="anchor-link" href="#fn-on_crash" title="Link">#</a></div><div class="ib"><p>Install <code>handler</code> as the crash continuation for <code>role</code> with the continuation that the next <code>suspend</code> on <code>ep</code> installs, and return <code>ep</code>. It runs as <code>handler(role, cause, ep)</code> if that continuation waits on <code>role</code> and <code>role</code> is gone with nothing from it queued; the endpoint stays live and goes on from the protocol's crash branch. The generated <code>recv_…</code> of a message step with <code>or crash do … end</code> calls this.</p></div></div>

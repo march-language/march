@@ -16,7 +16,12 @@ let check ?(_quiet = false) () =
   | Ok proj ->
     let lib_dir = Filename.concat proj.Project.root "lib" in
     let files   = Cmd_build.find_march_files lib_dir in
-    if files = [] then
+    let entry =
+      match proj.Project.project_type with
+      | Project.Lib -> None
+      | Project.App | Project.Tool -> Some (Project.entry proj)
+    in
+    if files = [] && not (match entry with Some (Ok _) -> true | _ -> false) then
       Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
       match Cmd_build.offline_preflight
@@ -26,14 +31,13 @@ let check ?(_quiet = false) () =
       let lib_path_env = Cmd_build.lib_path_env proj in
       (* For app/tool: include the entry even if it lives outside lib/.
          For lib: files already covers everything. *)
+      match (match entry with Some (Error e) -> Error e | _ -> Ok ()) with
+      | Error e -> Error e
+      | Ok () ->
       let all_files =
-        match proj.Project.project_type with
-        | Project.Lib -> files
-        | Project.App | Project.Tool ->
-          let entry_path = match proj.Project.entrypoint with
-            | Some ep -> Filename.concat proj.Project.root ep
-            | None    -> Filename.concat lib_dir (proj.Project.name ^ ".march")
-          in
+        match entry with
+        | None | Some (Error _) -> files
+        | Some (Ok entry_path) ->
           (* Avoid duplicate-checking the entry if it already lives under lib/. *)
           let entry_abs = try Unix.realpath entry_path with _ -> entry_path in
           let already_included = List.exists (fun f ->

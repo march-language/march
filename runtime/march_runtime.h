@@ -525,6 +525,12 @@ typedef enum {
    declaration order, each with its own `shutdown` budget from the child spec.
    Contrast march_kill, which is immediate and drops the mailbox. */
 int64_t march_actor_stop(void *actor, int64_t timeout_ms);
+/* An actor type's `on_stop` callback (its terminate), keyed by the dispatch
+   closure every record of that type holds in word 2. Emitted by the spawn
+   glue of an actor that declares `on_stop do ... end`; idempotent. The
+   callback runs on the actor's own green thread after a graceful drain
+   (march_actor_stop) and before the NORMAL death; never after a kill. */
+void    march_register_actor_on_stop(void *dispatch_clo, void *on_stop_clo);
 /* The `receive()` builtin: march_sched_recv, but a stop ends the proc
  * (an actor: through its stop_jmp) instead of returning the no-message
  * sentinel to user code.  See actor_green_thread. */

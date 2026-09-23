@@ -5,6 +5,7 @@
 -- runtime, so both monitored workers belong to Boss.  Unsupervised panics keep
 -- their existing process-fatal semantics.
 mod ActorMonitorDownReason do
+  needs IO
   needs IO.Console
 
   -- Deliberately reuse the runtime-reserved short type/constructor name under
@@ -163,17 +164,18 @@ mod ActorMonitorDownReason do
     end
   end
 
-  fn main(_console : Cap(IO.Console)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
     let watcher = spawn(Watcher)
     let boss = spawn(Boss)
-    let crashed = pid_of_int(child_int(boss, "crashed"))
+    let crashed = Actor.pid_from_int(intro, child_int(boss, "crashed"))
     monitor(watcher, crashed)
     send(crashed, Poison(crashed))
     send(crashed, UserValues.Down(7))
     send(watcher, ReadDown(crashed, "crashed"))
     run_until_idle()
 
-    let killed = pid_of_int(child_int(boss, "killed"))
+    let killed = Actor.pid_from_int(intro, child_int(boss, "killed"))
     Actor.set_queue_limit(watcher, 1, 1)
     monitor(watcher, killed)
     send(watcher, PrimeBounded(killed, watcher))
@@ -184,7 +186,7 @@ mod ActorMonitorDownReason do
     send(watcher, ReadLateDown(killed))
     run_until_idle()
 
-    let nulled = pid_of_int(child_int(boss, "nulled"))
+    let nulled = Actor.pid_from_int(intro, child_int(boss, "nulled"))
     monitor(watcher, nulled)
     send(nulled, PoisonNul())
     send(watcher, ReadNulDown(nulled))

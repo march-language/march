@@ -1,0 +1,25 @@
+-- Config typed keys (specs/progress/2026-09-22-config-typed-keys.md): one
+-- heterogeneous table, several value types, each read back at the type its
+-- key names. Also: two keys minted for ONE path with different codecs both
+-- typecheck (the minting door is open to the typechecker, as it is for
+-- `Vault.open`) -- what closes it is the runtime codec, which makes the
+-- mismatched read `None`/`Err(KeyWrongType(...))` rather than a value at the
+-- wrong type. Reject companion: reject/t291.
+mod M do
+  needs IO.Mut
+  needs IO.Process
+
+  fn main(_m : Cap(IO.Mut), _p : Cap(IO.Process)) : Bool do
+    let port = Config.key(:app, :port, Config.int())
+    let host = Config.key_in(:app, :db, :host, Config.string())
+    let flags = Config.key(:app, :flags, Config.list(Config.bool()))
+    Config.put(port, 4000)
+    Config.put(host, "localhost")
+    Config.put(flags, [true, false])
+    let port_as_string = Config.key(:app, :port, Config.string())
+    let n : Option(Int) = Config.get(port)
+    let h : String = Config.get_with_default(host, "")
+    let s : Result(String, Config.Error) = Config.fetch(port_as_string)
+    n == Some(4000) && h == "localhost" && s != Ok("4000")
+  end
+end
