@@ -71,6 +71,18 @@ function keeps its polymorphic `pid` and converts.
   case 5 in the `compiler` suite) saw it; the first push of this PR had the collision.
   The resolver preferring the declaring module's qualified name would fix the class; it is
   filed separately rather than changed here.
+- **The root-capability hint no longer fires on a proof-cap factory**
+  (lib/typecheck/typecheck_caps.ml, Check 3). `test/dune`'s `cluster_node_check.out`
+  requires `march --check stdlib/cluster_node.march` to print NOTHING, and the new
+  `attach(io, ...)` and `start(io, ...)` drew "this function takes `Cap(IO)` (the root
+  capability); consider narrowing". They cannot narrow: `mint_cap` is typed
+  `Cap(IO) -> Cap(a)` and amplifying a narrowed cap is a type error. A function whose
+  declared return type names a proof cap its own module declares is now exempt, like
+  `main`; `Session.attach` and `Actor.introspect` lose the same unactionable hint. Pinned
+  by `cap_ux_no_nag` "proof-cap factory not hinted about root cap" (a non-factory in the
+  same module is still hinted), proved red with the exemption disabled. This golden is a
+  dune rule, which `scripts/run-tests.sh` does not run: both CI test legs failed on it
+  after the PR was opened.
 - **`ClusterHandle` is gone, not aliased.** A `type ClusterHandle = Cap(Live)` alias would
   have kept fixtures compiling, but a capability hidden behind an alias is exactly what the
   `needs` check should see, so the migration names the cap.

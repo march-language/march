@@ -103,6 +103,10 @@ git log is authoritative for exact commits.
   (`ClusterNode.ops_stub(id)` panics on every operation it is not given) and inject
   membership events with no sockets. New accessors: `ClusterNode.node_id(node)` and
   `ClusterNode.next_id(node, key)`.
+- **The "consider narrowing `Cap(IO)`" hint skips proof-capability factories.** A function
+  that returns its own module's proof capability (`Session.attach`, `Actor.introspect`,
+  `ClusterNode.start`) must take the root capability, because `mint_cap` only accepts
+  `Cap(IO)`, so the hint could not be acted on.
 - **Breaking: every `Stats` function that needs a non-empty list now says so
   in its signature.** `Stats.median`, `std_dev`, `iqr`, `iqr_default` and
   `quantile_default` take `{List(Float) | len(_) > 0}` (joining `mean`,
