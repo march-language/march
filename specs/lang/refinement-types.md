@@ -1000,6 +1000,32 @@ is derived from that function's own panic message, so the contract is never
 stronger than the check the code already performs, and the `panic` remains as the
 runtime safety net for the arguments the checker skips.
 
+**The whole `Stats` surface states its non-empty precondition** (2026-09-22).
+Beyond `mean`/`min_val`/`max_val`, every `Stats` function that needs a
+non-empty list declares `{List(Float) | len(_) > 0}` on it: `percentile`,
+`median`, `quantile`, `quantile_default`, `quantiles`, `iqr`, `iqr_default`,
+`five_number_summary`, `variance`, `std_dev` and `mode` (`covariance`,
+`correlation` and `linear_regression` require `len(_) >= 2`). Before this,
+`median`, `quantile_default`, `iqr`, `iqr_default` and `std_dev` forwarded to a
+contracted callee without restating the contract, so the checker had nothing to
+carry to *their* callers: `Stats.median([])` compiled and panicked at run time.
+It is now a compile error, and a caller that cannot establish non-emptiness gets
+the propagation warning described under
+[Promoting a skip](#promoting-a-skip-a-demonstrated-precondition-failure) below (an error under
+`cap verified`). The migration path is `--refine-suggest`:
+
+```
+$ march --check --refine-suggest summarize app.march
+summarize (app.march:3)
+    xs : List(Float)  ->  xs : {List(Float) | len(_) > 0}
+  discharges all 1 unproven obligation(s)
+```
+
+Either restate the proposed refinement upward (the caller's own callers then
+carry it), or guard the call with `match xs do Nil -> … _ -> Stats.median(xs)
+end`, which the checker proves. `Stats.sum`, `count`, `variance_pop`,
+`std_dev_pop` and the `*_safe` variants still accept any list.
+
 `List.nth` is the fourteenth, and the only one with a contract that is
 **cross-parameter** rather than over the refined value itself (2026-08-04):
 
@@ -2571,10 +2597,11 @@ it, the same message is a compile error, worded identically apart from the
 on the caller, and `forge fix` can rewrite the signature for you. Not every
 promotion gets a `help:` block: when the callee has more than one unforwarded
 precondition and no single-parameter fix is unambiguously correct, the
-promotion still fires but the `help:` is omitted. `Stats.quantile_default`
-(`stdlib/stats.march`) is exactly this shape: `quantile` requires both
-`len(_) > 0` on its list and `_ >= 0.0 && _ <= 1.0` on its float, and it reports
-with no `help:` block.
+promotion still fires but the `help:` is omitted. A wrapper forwarding both
+arguments of `Stats.quantile`, which requires `len(_) > 0` on its list and
+`_ >= 0.0 && _ <= 1.0` on its float, is exactly this shape and reports with no
+`help:` block. (`Stats.quantile_default` itself used to be that wrapper; since
+2026-09-22 it declares both preconditions.)
 
 ### Promotion and the standard library
 

@@ -525,6 +525,25 @@ describe "group_by and agg" do
     Ok(agg) -> assert (DataFrame.row_count(agg) == 2)
     end
   end
+
+  -- Median goes through Stats.median, which declares {List(Float) | len(_) > 0};
+  -- eval_agg guards the empty case (NullVal) so the call is proved.
+  test "group_by Median aggregates correctly" do
+    let df = DataFrame.make_df([
+      StrCol("cat", typed_array_from_list(["a", "a", "a"])),
+      IntCol("val", native_int_arr_from_list([10, 30, 20]))
+    ])
+    match DataFrame.agg(DataFrame.group_by(df, ["cat"]), [Median("val")]) do
+    Err(_)  -> assert false
+    Ok(agg) -> do
+      assert (DataFrame.row_count(agg) == 1)
+      match DataFrame.col_value_at_by_name(agg, "val", 0) do
+      FloatVal(m) -> assert (m == 20.0)
+      _           -> assert false
+      end
+      end
+    end
+  end
 end
 
 -- ── Phase 5: inner_join ────────────────────────────────────────────────────
