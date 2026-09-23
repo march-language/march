@@ -322,6 +322,12 @@ git log is authoritative for exact commits.
   failed to link with `Undefined symbols: "_Inner.Box_spawn"`. It now links and runs.
   A `mailbox N policy` declared on such an actor is also applied at a qualified spawn;
   before, it was silently skipped there.
+- **Two modules can each name their capability dictionary `Ops`.** A
+  `proof cap X with T` resolved `T` by its bare name first, so when two modules
+  each declared a same-named dictionary record, one module's `cap_impl` /
+  `cap_dict` bound to the other's record and failed with "expected `Ops` but got
+  `Ops`" (or, worse, accepted the other module's fields). The declaring module's
+  own record now wins.
 - **A nested module can use its own `proof cap` without declaring it in
   `needs`.** `proof cap Key` in `mod Vault` has always meant `Vault` may take a
   `Cap(Vault.Key)` without also writing `needs Vault.Key`, but that only worked
