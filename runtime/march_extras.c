@@ -1017,7 +1017,9 @@ static char *vault_key_cstr(void *key) {
 
 /* Create a new vault_data wrapped in a March heap handle. */
 static void *vault_new_handle(void) {
-    vault_data *vd = calloc(1, sizeof(vault_data));
+    vault_data *vd = aligned_alloc(_Alignof(vault_data), sizeof(vault_data));
+    if (!vd) abort();
+    memset(vd, 0, sizeof(vault_data));
     /* calloc already zeroed rd[*].readers and writer; wmutex still needs a
      * real pthread_mutex_init (a zeroed pthread_mutex_t is not portably
      * equivalent to PTHREAD_MUTEX_INITIALIZER). */
