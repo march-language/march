@@ -18,8 +18,8 @@ end
 `go : Unit -> Int` fails the same way. Passing `fn () -> 3` as an ARGUMENT to a
 parameter declared `() -> Int` works (`Signal.watch`, `Topology.hook`), so the
 checking-mode path for a record field / let-bound zero-parameter lambda is the
-suspect. Workaround in use: `Topology.Role.open` is `Int -> ...` called with a
+suspect. Workaround in use: `Topology.TopoRole.open` is `Int -> ...` called with a
 dummy argument.
 
 **Acceptance:** the repro typechecks and `(r.go)()` returns 3 on both backends; then
-`Topology.Role.open` can drop its dummy argument.
+`Topology.TopoRole.open` can drop its dummy argument.

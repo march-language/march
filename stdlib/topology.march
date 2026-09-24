@@ -51,37 +51,40 @@ mod Topology do
   -- ── placement rules and roles ─────────────────────────────────────────
 
   -- Constructor names are prefixed: a bare `Count` collided with DataFrame's
-  -- nullary `Count` aggregate in user code that writes it unqualified.
-  type Placement = PlaceEverywhere | PlaceOn(String) | PlaceCount(Int) | PlaceCountOn(String, Int)
+  -- nullary `Count` aggregate in user code that writes it unqualified. Type
+  -- names are prefixed too (`TopoPlacement`, `TopoRole`, ...): March has one
+  -- global type namespace, and a bare `Placement` broke a user program that
+  -- declares its own (test/session/cluster_placement).
+  type TopoPlacement = PlaceEverywhere | PlaceOn(String) | PlaceCount(Int) | PlaceCountOn(String, Int)
 
   doc "Offer the role on every node that serves it (no `place` in the topology)."
-  fn everywhere() : Placement do PlaceEverywhere end
+  fn everywhere() : TopoPlacement do PlaceEverywhere end
   doc "Offer the role on the nodes whose MARCH_NODE_LABELS include [label] (`place = { on = label }`)."
-  fn on_label(label : String) : Placement do PlaceOn(label) end
+  fn on_label(label : String) : TopoPlacement do PlaceOn(label) end
   doc "Offer the role on [n] of the eligible live nodes, by rendezvous hashing (`place = { count = n }`)."
-  fn count(n : Int) : Placement do PlaceCount(n) end
+  fn count(n : Int) : TopoPlacement do PlaceCount(n) end
   doc "`count(n)` among the nodes carrying [label] (`place = { on = label, count = n }`)."
-  fn count_on(label : String, n : Int) : Placement do PlaceCountOn(label, n) end
+  fn count_on(label : String, n : Int) : TopoPlacement do PlaceCountOn(label, n) end
 
   -- What an open offer needs to be supervised: the offer, and whether
   -- whatever serves its sessions is still alive (a hosted role's actor; a
   -- function role has nothing beyond the offer itself).
-  type Opened = { ap : SessionNode.Offer, alive : Int -> Bool }
+  type TopoOpened = { ap : SessionNode.Offer, alive : Int -> Bool }
 
   -- One served role: its "Protocol.Role" name, its placement, and how to
   -- open one offer of it on this node. The generated `main` builds these
   -- with `role` and `actor_role`; `open` is called (with a dummy argument:
   -- a zero-parameter closure cannot be stored in a record field today) once
   -- per offer.
-  type Role = { name : String, place : Placement,
-                open : Int -> Result(Opened, SessionNode.RunError) }
+  type TopoRole = { name : String, place : TopoPlacement,
+                open : Int -> Result(TopoOpened, SessionNode.RunError) }
 
   doc """
   A role bound to a function (`body = "M.f"` in `[roles]`). [open] is the
   generated `<P>_Run.offer_<R>(io, node, capacity, fn (s, caps..., st) ->
   M.f(env, s, caps..., st))`.
   """
-  fn role(name : String, place : Placement, open : () -> Result(SessionNode.Offer, SessionNode.RunError)) : Role do
+  fn role(name : String, place : TopoPlacement, open : () -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
     { name: name, place: place,
       open: fn _ ->
         match open() do
@@ -98,8 +101,8 @@ mod Topology do
   that could not be opened is kept for the next attempt rather than spawned
   again. Supervision re-offers the role when its actor dies.
   """
-  fn actor_role(name : String, place : Placement, mk : () -> Pid(a),
-                open : Pid(a) -> Result(SessionNode.Offer, SessionNode.RunError)) : Role do
+  fn actor_role(name : String, place : TopoPlacement, mk : () -> Pid(a),
+                open : Pid(a) -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
     let spare = Vault.new("topology_spare_" ++ name ++ "_" ++ int_to_string(next_id()))
     { name: name, place: place,
       open: fn _ ->
@@ -148,7 +151,7 @@ mod Topology do
   end
 
   doc "Whether this node may take part in [p] at all: it carries the label, if any."
-  fn eligible_here(p : Placement, labels : List(String)) : Bool do
+  fn eligible_here(p : TopoPlacement, labels : List(String)) : Bool do
     match p do
       PlaceEverywhere -> true
       PlaceOn(l) -> List.member(labels, l)
@@ -158,7 +161,7 @@ mod Topology do
   end
 
   doc "Whether [p] ranks nodes (and so needs the eligible set)."
-  fn ranked(p : Placement) : Bool do
+  fn ranked(p : TopoPlacement) : Bool do
     match p do
       PlaceCount(_) -> true
       PlaceCountOn(_, _) -> true
@@ -171,7 +174,7 @@ mod Topology do
   settled eligible nodes [eligible] (other nodes; [me] is added when it is
   eligible itself).
   """
-  fn wants(p : Placement, role_name : String, me : String, labels : List(String), eligible : List(String)) : Bool do
+  fn wants(p : TopoPlacement, role_name : String, me : String, labels : List(String), eligible : List(String)) : Bool do
     if not(eligible_here(p, labels)) do false
     else
       match p do
@@ -214,7 +217,7 @@ mod Topology do
   -- declared record type is found by its SHAPE in places (the `@[remote]`
   -- codec choice), and `{ n : Int }` made a user's `type Hit = { n : Int }`
   -- ambiguous.
-  type AnchorState = { topology_anchor_marks : Int }
+  type TopoAnchorState = { topology_anchor_marks : Int }
 
   actor Anchor do
     state { topology_anchor_marks : Int }
@@ -224,17 +227,17 @@ mod Topology do
 
   -- Everything `place`, `drain_on_signal` and `supervise_offers` share,
   -- found by the node's id so the three need only the node.
-  type State = { meta : Vault(Int), offers : Vault(Opened), draining : Vault(Opened),
-                 roles : Vault(List(Role)), anchor : Vault(Pid(AnchorState)) }
+  type TopoState = { meta : Vault(Int), offers : Vault(TopoOpened), draining : Vault(TopoOpened),
+                 roles : Vault(List(TopoRole)), anchor : Vault(Pid(TopoAnchorState)) }
 
-  pfn state_of(node : Cap(ClusterNode.Live)) : State do
+  pfn state_of(node : Cap(ClusterNode.Live)) : TopoState do
     let k = ClusterNode.node_id(node)
     { meta: Vault.open("topology_meta_" ++ k), offers: Vault.open("topology_offers_" ++ k),
       draining: Vault.open("topology_draining_" ++ k), roles: Vault.open("topology_roles_" ++ k),
       anchor: Vault.open("topology_anchor_" ++ k) }
   end
 
-  pfn anchor(st : State) : Pid(AnchorState) do
+  pfn anchor(st : TopoState) : Pid(TopoAnchorState) do
     match Vault.get(st.anchor, "a") do
       Some(a) -> a
       None ->
@@ -267,7 +270,7 @@ mod Topology do
   events are recorded as they arrive; a node that rejoins counts after the
   settling period. Returns once the first evaluation has opened its offers.
   """
-  fn place(node : Cap(ClusterNode.Live), roles : List(Role)) : () do
+  fn place(node : Cap(ClusterNode.Live), roles : List(TopoRole)) : () do
     let st = state_of(node)
     Vault.set(st.roles, "roles", roles)
     let meta = st.meta
@@ -281,7 +284,7 @@ mod Topology do
     ()
   end
 
-  pfn place_loop(node : Cap(ClusterNode.Live), st : State) : Int do
+  pfn place_loop(node : Cap(ClusterNode.Live), st : TopoState) : Int do
     sleep_ms(tick_ms())
     if Vault.get(st.meta, "closing") != None do 0
     else if Vault.get(st.meta, "stopped") != None do 0
@@ -292,7 +295,7 @@ mod Topology do
   end
 
   -- The other nodes eligible for [r], settled, as this node sees them.
-  pfn eligible_others(node : Cap(ClusterNode.Live), st : State, r : Role, now : Int) : List(String) do
+  pfn eligible_others(node : Cap(ClusterNode.Live), st : TopoState, r : TopoRole, now : Int) : List(String) do
     -- A suspect member still counts: a role moves only once SWIM declares
     -- its node Dead (4.2), not on every missed probe.
     let alive = List.filter_map(ClusterNode.all_members(node), fn m ->
@@ -312,14 +315,14 @@ mod Topology do
   """
   fn reconcile_now(node : Cap(ClusterNode.Live)) : () do reconcile(node, state_of(node)) end
 
-  pfn reconcile(node : Cap(ClusterNode.Live), st : State) : () do
+  pfn reconcile(node : Cap(ClusterNode.Live), st : TopoState) : () do
     let labels = node_labels()
     let now = unix_time_ms()
     let roles = Vault.get_or(st.roles, "roles", Nil)
     List.each(roles, fn r -> reconcile_role(node, st, labels, now, r))
   end
 
-  pfn reconcile_role(node : Cap(ClusterNode.Live), st : State, labels : List(String), now : Int, r : Role) : () do
+  pfn reconcile_role(node : Cap(ClusterNode.Live), st : TopoState, labels : List(String), now : Int, r : TopoRole) : () do
     let here = eligible_here(r.place, labels)
     if ranked(r.place) do mark(node, st, r.name, here) else () end
     let others = if ranked(r.place) do eligible_others(node, st, r, now) else Nil end
@@ -339,7 +342,7 @@ mod Topology do
   end
 
   -- Register (or release) this node's marker for a ranked role.
-  pfn mark(node : Cap(ClusterNode.Live), st : State, role_name : String, here : Bool) : () do
+  pfn mark(node : Cap(ClusterNode.Live), st : TopoState, role_name : String, here : Bool) : () do
     let name = marker(role_name, ClusterNode.node_id(node))
     let held = ClusterNode.lookup(node, name) != None
     if here && not(held) do
@@ -349,7 +352,7 @@ mod Topology do
     else () end end
   end
 
-  pfn open_role(st : State, r : Role) : () do
+  pfn open_role(st : TopoState, r : TopoRole) : () do
     match (r.open)(0) do
       Ok(o) ->
         Vault.drop(st.meta, "e:" ++ r.name)
@@ -367,13 +370,13 @@ mod Topology do
   end
 
   -- Close [o] (sessions already running finish) and keep it for the drain.
-  pfn retire(st : State, role_name : String, o : Opened) : () do
+  pfn retire(st : TopoState, role_name : String, o : TopoOpened) : () do
     SessionNode.close_offer(o.ap)
     Vault.drop(st.offers, role_name)
     Vault.set(st.draining, role_name ++ "#" ++ int_to_string(next_id()), o)
   end
 
-  pfn healthy(o : Opened) : Bool do
+  pfn healthy(o : TopoOpened) : Bool do
     is_alive(o.ap.worker) && (o.alive)(0)
   end
 
@@ -393,7 +396,7 @@ mod Topology do
   end
 
   -- Sessions still running under [o].
-  pfn active(o : Opened) : Int do
+  pfn active(o : TopoOpened) : Int do
     match get_actor_field(o.ap.worker, "active") do
       Some(n) -> n
       None -> 0
@@ -479,7 +482,7 @@ mod Topology do
     supervise_wait(st)
   end
 
-  pfn supervise_wait(st : State) : () do
+  pfn supervise_wait(st : TopoState) : () do
     if Vault.get(st.meta, "stopped") != None do ()
     else
       sleep_ms(250)

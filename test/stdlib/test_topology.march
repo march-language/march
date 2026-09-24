@@ -19,7 +19,7 @@ mod TestTopology do
 
   -- How many of [ids] offer [role] under [p], each deciding with the others
   -- as its eligible set.
-  pfn offering(p : Topology.Placement, role : String, ids : List(String), labels : List(String)) : List(String) do
+  pfn offering(p : Topology.TopoPlacement, role : String, ids : List(String), labels : List(String)) : List(String) do
     List.filter(ids, fn me -> Topology.wants(p, role, me, labels, List.filter(ids, fn o -> o != me)))
   end
 

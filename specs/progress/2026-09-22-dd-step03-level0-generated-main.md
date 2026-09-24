@@ -21,6 +21,11 @@ G6 (`forge/lib/procs.ml`). Four commits, in the order the task asked for.
   `@[remote]` codec choice for a user's `type Hit = { n : Int }` ambiguous
   (`remote_actor_dispatch`). Both were caught by `run_codegen`, not by any
   topology test.
+  The module's types are `Topo`-prefixed as well (`TopoPlacement`, `TopoRole`,
+  `TopoOpened`, `TopoState`, `TopoAnchorState`): March has one global type
+  namespace, and PR CI caught `Topology.Placement` breaking D35's
+  `test/session/cluster_placement.march`, which declares its own `Placement`.
+  That fixture is a dune rule, which `scripts/run-tests.sh` does not run.
 - **Eligibility is a cluster name.** Membership does not carry other nodes' pools or
   labels, so every node eligible for a ranked role registers `topo:<role>/<node_id>`
   (bound to a small anchor actor) and the ranking reads those names back; a dead node's
@@ -77,7 +82,7 @@ is therefore checked like hand-written code (grant walk, linearity, endpoint typ
 - `--emit-core-ast` gains a `topology` object (`caps`, `reached_from`, typed
   `initiates`, `generated_main`), only with `--topology`.
 - Zero-parameter closures stored in a record field or `let`-bound with an expected
-  type are mistyped (`expected () -> Int but got Int`); `Topology.Role.open` takes a
+  type are mistyped (`expected () -> Int but got Int`); `Topology.TopoRole.open` takes a
   dummy `Int`. Filed: `../todos/2026-09-23-zero-arg-lambda-checked-against-thunk-type.md`.
 
 Tests: `test/test_topology_flag.ml`, 17 cases (was 5; its fixtures used placeholder

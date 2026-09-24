@@ -93,11 +93,14 @@ let wait_exit pid timeout =
   in
   go ()
 
-(** Processes whose command line names [dir] (the built binaries live under it). *)
+(** Processes whose command line names [dir] (the built binaries live under
+    it). pgrep runs directly, not through a shell: `sh -c "pgrep -f DIR > f"`
+    matched its own shell on Linux, whose sh does not exec the last command
+    (macOS's does), and reported that shell as a leftover. *)
 let leftovers dir =
-  let tmp = Filename.temp_file "pgrep" ".txt" in
-  ignore (Sys.command (Printf.sprintf "pgrep -f %s > %s 2>/dev/null" (Filename.quote dir) (Filename.quote tmp)));
-  let s = String.trim (read_file tmp) in
+  let ic = Unix.open_process_args_in "pgrep" [| "pgrep"; "-f"; dir |] in
+  let s = String.trim (In_channel.input_all ic) in
+  ignore (Unix.close_process_in ic);
   if s = "" then [] else String.split_on_char '\n' s
 
 let cleanup pid =
