@@ -1,0 +1,19 @@
+-- A three-pool topology app with no `main` (it is generated): every pool
+-- serves Echo.Server, placed on one node at a time by `place` in
+-- topology.toml. Used by forge/test/test_topology_reconcile.ml.
+mod ReconcileApp do
+  needs IO
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    ask: Client -> Server : Int
+    answer: Server -> Client : Int
+  end
+
+  fn serve_one(_env : (), s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
+    Echo_Server.recv_Ask(s, st, fn (n, st1) ->
+      Echo_Server.close(s, Echo_Server.send_Answer(s, st1, n + 1)))
+  end
+end

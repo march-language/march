@@ -173,3 +173,26 @@
      (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
       (setenv TOPOLOGY_APP_DIR %{workspace_root}/examples/topology_app
        (run %{exe:test_topology_run.exe}))))))))
+
+; test_topology_reconcile.ml: the reconciler against a real three-node local
+; cluster (distributed-deploys build step 8): fixtures/reconcile_app, three
+; pools each serving a `count = 1` role, run by `forge run --processes --env
+; dev`. A SIGKILLed holder's role moves once SWIM declares it dead; a pushed
+; topology (SIGHUP) moves it again with no restart; `forge topology apply`.
+; Real native compiles and real processes: test_topology_run's hermetic shape.
+(executable
+ (name test_topology_reconcile)
+ (modules test_topology_reconcile)
+ (libraries march_forge alcotest unix str))
+
+(rule
+ (alias runtest)
+ (deps (source_tree %{workspace_root}/runtime) (source_tree %{workspace_root}/stdlib)
+       (source_tree fixtures/reconcile_app))
+ (action
+  (setenv MARCH_TEST_BIN %{bin:march}
+   (setenv FORGE_TEST_BIN %{bin:forge}
+    (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
+     (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
+      (setenv RECONCILE_APP_DIR fixtures/reconcile_app
+       (run %{exe:test_topology_reconcile.exe}))))))))
