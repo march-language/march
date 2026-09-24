@@ -1583,7 +1583,8 @@ let offline_man_blocks = [
       toolchain download, no npm install. Git and registry dependencies are \
       resolved only through $(b,forge.lock) to \
       $(b,~/.march/cas/deps/<name>/<commit-or-version>) and re-hashed against \
-      the lockfile; a missing one is warned about and skipped. \
+      the lockfile (a mismatch is an error offline; online builds re-fetch \
+      the dependency instead); a missing one is warned about and skipped. \
       $(b,forge deps --offline) reports cached/missing per dependency and \
       exits non-zero if any is missing. $(b,forge add) (registry or remote) \
       and $(b,forge outdated) refuse.";

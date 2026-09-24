@@ -1,8 +1,10 @@
 (** Resolving, restoring and verifying dependencies with no network access.
 
-    Shared by the offline preflight of every compile-shaped command
-    ([Cmd_build.offline_preflight]: build, check, run, test, bench) and by
-    `forge deps --offline` ([Cmd_deps.run_offline]). Nothing here fetches:
+    Shared by the dependency preflight of every compile-shaped command
+    ([Cmd_build.deps_preflight]: build, check, run, test, bench) and by
+    `forge deps --offline` ([Cmd_deps.run_offline]). The integrity check
+    ([verify_tree]) also runs online, where a mismatch is repaired by
+    [Dep_refetch] instead of failing. Nothing here fetches:
     the only inputs are forge.toml, forge.lock and what is already under
     [~/.march/cas/]. `specs/2026-09-11-forge-offline-and-versioned-dep-cache-design.md`
     §3 is the contract and §4 the integrity rules. *)
@@ -105,9 +107,9 @@ let mismatch_error ~name ~label ~dir ~expected ~actual =
      cached tree: %s\n  \
      expected (forge.lock): %s\n  \
      actual:                %s\n  \
-     The cached copy has been modified or corrupted. Delete %s and run \
-     `forge deps` with network access to reinstall it."
-    name label dir expected actual dir
+     The cached copy has been modified or corrupted. Run the command again \
+     without --offline: an online build re-fetches it."
+    name label dir expected actual
 
 (* ------------------------------------------------------------------ *)
 (*  Restoring registry trees from the tarball cache (§2.4)             *)
