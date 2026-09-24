@@ -162,8 +162,40 @@ let slot_envs ~secret (slots : slot list) (ports : int list) : (slot * (string *
             ("MARCH_CLUSTER_SECRET", secret) ]))
     (List.combine slots ports) addrs
 
-(** [forge run --processes]: one process per pool replica. *)
-let run_processes ?env ~(proj : Project.project) ~compiled ~dump_phases ~fail_fast ~args () : (unit, string) result =
+(** The module a hot-reload build reloads: the entry file's top module
+    ([--hot-reload <Prefix>] makes every module under it a boundary). *)
+let entry_module (proj : Project.project) : (string, string) result =
+  let* entry = Project.entry proj in
+  match Topology.parse_module entry with
+  | Ok m -> Ok m.March_ast.Ast.mod_name.txt
+  | Error e -> Error (Printf.sprintf "%s does not parse: %s" entry e)
+
+(** Compiler flags for a hot-reload base build of [proj]: the boundary
+    prefix and, when one is known, the public key activations must be
+    signed with. *)
+let hot_reload_flags ?pubkey (proj : Project.project) : (string, string) result =
+  let* prefix = entry_module proj in
+  let pubkey = match pubkey with
+    | Some k -> k
+    | None -> (match proj.Project.hot_reload with
+        | Some { Project.hr_public_key = Some k; _ } -> k
+        | _ -> "")
+  in
+  Ok (" --hot-reload " ^ Filename.quote prefix
+      ^ (if pubkey = "" then "" else " --signing-pubkey " ^ Filename.quote pubkey))
+
+(** What [start_processes] started: the procs, in start order, and the
+    recorded run. *)
+type started = { procs : Procs.proc list; state : Reconcile.state; topology : Topology.t }
+
+(** Build and start one process per pool replica, record them in
+    [.forge/run/state.json], and return without waiting. Each process gets
+    [MARCH_TOPOLOGY_FILE] (the digest, which it re-reads on SIGHUP) and
+    [MARCH_TOPOLOGY_STATUS] (where it reports its offers); with
+    [hot_reload], a reload socket ([MARCH_HOT_RELOAD_SOCKET]). [extra_env]
+    is added to every process. *)
+let start_processes ?env ?(hot_reload = false) ?pubkey ?(extra_env = []) ?log
+    ~(proj : Project.project) ~compiled ~dump_phases ~args () : (started, string) result =
   if not compiled then prerr_string interpreted_notice;
   let root = proj.Project.root in
   let* t = match Topology.load ~root ?env () with
@@ -172,12 +204,13 @@ let run_processes ?env ~(proj : Project.project) ~compiled ~dump_phases ~fail_fa
       List.iter (fun d -> prerr_endline (Topology.render_diag d)) ds;
       Error "topology check failed"
   in
+  let* extra_flags = if hot_reload then hot_reload_flags ?pubkey proj else Ok "" in
   let* outputs =
     List.fold_left (fun acc (build, pools) ->
         let* acc = acc in
         let* out =
           Cmd_build.build ~release:false ~dump_phases ~topology_pools:pools ~output_suffix:("-" ^ build)
-            ?topology_env:env ()
+            ?topology_env:env ~extra_flags ()
         in
         Ok ((build, out) :: acc))
       (Ok []) (builds_of t)
@@ -185,15 +218,48 @@ let run_processes ?env ~(proj : Project.project) ~compiled ~dump_phases ~fail_fa
   let slots = slots_of t in
   let ports = List.map (fun _ -> Procs.free_port ()) slots in
   let secret = Sys.getenv_opt "MARCH_CLUSTER_SECRET" |> Option.value ~default:("forge-run-" ^ proj.Project.name) in
-  let log = { (Procs.default_log_sink ~root) with Procs.follow = Some (fun line -> print_string line; flush stdout) } in
-  let procs =
+  let log = match log with
+    | Some l -> l
+    | None -> { (Procs.default_log_sink ~root) with Procs.follow = Some (fun line -> print_string line; flush stdout) }
+  in
+  let digest = Topology.digest_file ~root in
+  Reconcile.mkdir_p (Reconcile.run_dir ~root);
+  let started =
     List.map (fun (s, env) ->
         let binary = List.assoc s.s_build outputs in
-        Printf.printf "forge run: starting %s (pool %s, port %s)\n%!" s.s_name s.s_pool (List.assoc "MARCH_NODE_PORT" env);
-        Procs.spawn ~name:s.s_name ~env ~argv:(Array.of_list (binary :: args)) ~log)
+        let status_path = Reconcile.status_file ~root s.s_name in
+        (try Sys.remove status_path with Sys_error _ -> ());
+        let socket = if hot_reload then Some (Reconcile.socket_path ~root s.s_name) else None in
+        Option.iter (fun p -> try Sys.remove p with Sys_error _ -> ()) socket;
+        let env =
+          env
+          @ [ ("MARCH_TOPOLOGY_FILE", digest); ("MARCH_TOPOLOGY_STATUS", status_path) ]
+          @ (match socket with Some p -> [ ("MARCH_HOT_RELOAD_SOCKET", p) ] | None -> [])
+          @ extra_env
+        in
+        let port = int_of_string (List.assoc "MARCH_NODE_PORT" env) in
+        Printf.printf "forge run: starting %s (pool %s, port %d)\n%!" s.s_name s.s_pool port;
+        let p = Procs.spawn ~name:s.s_name ~env ~argv:(Array.of_list (binary :: args)) ~log in
+        (p, { Reconcile.name = s.s_name; pool = s.s_pool; pid = Procs.pid p; port; socket;
+              labels = s.s_labels; status_path; log = Procs.log_path p }))
       (slot_envs ~secret slots ports)
   in
-  let results = Procs.supervise ~fail_fast ~grace_ms:(drain_hard_ms t + 2000) procs in
+  let state = { Reconcile.forge_pid = Unix.getpid (); env; started_at = Unix.gettimeofday ();
+                nodes = List.map snd started } in
+  Reconcile.write_state ~root state;
+  Ok { procs = List.map fst started; state; topology = t }
+
+(** [forge run --processes]: one process per pool replica, supervised until
+    they all exit; the run is recorded for [forge topology apply|status]
+    while it lasts. *)
+let run_processes ?env ?(hot_reload = false) ~(proj : Project.project) ~compiled ~dump_phases ~fail_fast ~args ()
+  : (unit, string) result =
+  let root = proj.Project.root in
+  let* st = start_processes ?env ~hot_reload ~proj ~compiled ~dump_phases ~args () in
+  let results =
+    Fun.protect ~finally:(fun () -> Reconcile.remove_state ~root)
+      (fun () -> Procs.supervise ~fail_fast ~grace_ms:(drain_hard_ms st.topology + 2000) st.procs)
+  in
   let bad =
     List.filter (fun (_, st) -> match st with Unix.WEXITED 0 -> false | _ -> true) results
   in

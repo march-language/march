@@ -143,6 +143,15 @@
  (deps (glob_files topology_golden/*.expected))
  (libraries march_forge march_parser march_lexer alcotest unix yojson))
 
+; test_reconcile.ml: the reconciler's local backend (forge/lib/reconcile.ml,
+; distributed-deploys build step 8): state.json, the single-writer lock,
+; push_topology's SIGHUP to stand-in shell nodes, status against a forked
+; fake reload server. In-process, no toolchain.
+(test
+ (name test_reconcile)
+ (modules test_reconcile)
+ (libraries march_forge alcotest unix yojson))
+
 ; test_topology_run.ml: `forge run` / `forge run --processes` / `forge topology
 ; export` on examples/topology_app, a two-pool topology app with a generated
 ; `main` (distributed-deploys build step 3). Real native compiles and real

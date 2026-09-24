@@ -271,7 +271,13 @@ let run_cmd =
     Arg.(value & opt (some string) None & info ["env"] ~docv:"ENV"
            ~doc:"For a topology app: apply the topology.$(docv).toml overlay (host labels).")
   in
-  let run d c tgt fs p ff e =
+  let run_hot_reload =
+    Arg.(value & flag & info ["hot-reload"]
+           ~doc:"With $(b,--processes): build with hot reload and give every process a \
+                 reload socket under .forge/run/, so $(b,forge topology status) reports \
+                 its code versions and epoch pins.")
+  in
+  let run d c tgt fs p ff e hr =
     (* The first positional is always the FILE; everything after it belongs to
        the program.  There is deliberately no spelling that passes arguments to
        the PROJECT entry: cmdliner records the positionals but not where `--`
@@ -282,10 +288,11 @@ let run_cmd =
       | []          -> (None, [])
       | f :: rest   -> (Some f, rest)
     in
-    handle (Cmd_run.run ~dump_phases:d ~compiled:c ?target:tgt ?file ~args ~processes:p ~fail_fast:ff ?env:e ())
+    handle (Cmd_run.run ~dump_phases:d ~compiled:c ?target:tgt ?file ~args ~processes:p ~fail_fast:ff
+              ~hot_reload:hr ?env:e ())
   in
   Cmd.v (Cmd.info "run" ~doc:"Build and run the current project, or a single file")
-    Term.(const run $ dump_phases $ compiled $ target $ files $ processes $ fail_fast $ run_env)
+    Term.(const run $ dump_phases $ compiled $ target $ files $ processes $ fail_fast $ run_env $ run_hot_reload)
 
 (* ------------------------------------------------------------------ forge test *)
 
@@ -1445,10 +1452,26 @@ let topology_gen_cmd =
                  a forge-topology-<target> plugin")
     Term.(const run $ topology_env $ target $ out)
 
+let topology_status_cmd =
+  let run () =
+    match Project.load () with
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+    | Ok proj ->
+      match Reconcile.local_backend ~root:proj.Project.root with
+      | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+      | Ok (b, _) -> print_string (Reconcile.render_status (b.Reconcile.status ()))
+  in
+  Cmd.v (Cmd.info "status"
+           ~doc:"Report each node of the running local cluster ($(b,forge run --processes)): \
+                 alive, the topology it applied, the offers it holds, and, for a hot-reload \
+                 build, its code versions and epoch pins")
+    Term.(const run $ const ())
+
 let topology_cmd =
   Cmd.group (Cmd.info "topology"
-               ~doc:"The topology file: check, export as JSON, generate deployment files")
-    [topology_check_cmd; topology_export_cmd; topology_gen_cmd]
+               ~doc:"The topology file: check, export as JSON, generate deployment files, \
+                     status of the running cluster")
+    [topology_check_cmd; topology_export_cmd; topology_gen_cmd; topology_status_cmd]
 
 let completions_cmd =
   let shell =
