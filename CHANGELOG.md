@@ -420,6 +420,15 @@ git log is authoritative for exact commits.
   now reports the missing codec even when no type in the program derives
   `Json`. `task_spawn_link(f, pid)` is now typed with the two arguments the
   interpreter takes. Before, no typechecked program could call it.
+- **A zero-argument lambda is a `() -> T` everywhere.** `fn () -> 3` (or `fn -> 3`)
+  in a record literal, or bound with `let` and passed on, was typed as its result,
+  so it could not fill a `() -> Int` record field ("expected `() -> Int` but got
+  `Int`"). It is now `() -> T` wherever it appears and `f()` calls it, on both
+  backends. Passing a zero-argument named fn by bare name where a generic
+  function calls it with `()` (`apply(answer)` with `fn apply(f) do f() end`) is
+  now a type error; it used to crash compiled code. Also fixed: a fn with a
+  required parameter after a defaulted one (`fn f(a, b \\ "x", c)`) forwarded
+  the short call `f(1, 2)` with its arguments out of order.
 - **Compiled `Base64.encode` and `sha256` on a `Bytes` no longer crash.** Since
   boxed constructor cells began carrying a runtime type id (0.4.0), a compiled
   `Base64.encode(Bytes.from_string("x"))`, `Base64.url_encode`/`mime_encode`, or
