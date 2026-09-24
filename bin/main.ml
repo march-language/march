@@ -2944,6 +2944,11 @@ let compile filename =
           let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
           stamp "llvm-emit";
+          (* A previous invocation can leave the generated IR read-only (in
+             particular under Dune's source-tree sandbox).  It is always a
+             compiler output, so replace it rather than requiring callers to
+             clean their source directory before compiling again. *)
+          if Sys.file_exists ll_file then Sys.remove ll_file;
           let oc = open_out ll_file in
           output_string oc ir;
           close_out oc;
