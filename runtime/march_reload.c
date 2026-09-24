@@ -39,6 +39,28 @@
  *     dropped).  A new verb because the signed message changes meaning
  *     (the ACTIVATE3/4 precedent): an older server rejects it outright
  *     instead of misreading "3" as "no migration".
+ *   ACTIVATE6 <name> <impl_hash> <cas_hash> <sig64> <migrate> epoch:<N> cap_root:<hex>
+ *             role_caps:<Proto.Role>=<hex>;... caps:<sorted-csv>
+ *             roles:<Proto.Role>=<sorted-csv>;... callers:<sorted-csv>
+ *                                                   → OK | WAIT … | ERR <reason>  (v6)
+ *     As ACTIVATE5, plus per-role capability closures (distributed-deploys
+ *     build step 10, plan section 5 "Admission"): `role_caps:` holds one
+ *     root per role, `;`-separated, strictly sorted by role name, and is
+ *     INSIDE the signed message (between cap_root and callers).  The
+ *     unsigned `roles:` block carries each role's closure; the server
+ *     recomputes every root from it exactly as it does cap_root
+ *     (compute_cap_root) and rejects any mismatch, a role missing from
+ *     `roles:` or a role `roles:` names that `role_caps:` does not with
+ *     ERR role_cap_tamper.  $MARCH_DEPLOY_POLICY then applies to every
+ *     role closure (ERR role_cap_policy <role> <cap>), after the
+ *     function's own caps (ERR cap_policy <cap>).  A role closure is
+ *     everything the role's code reaches, so a patch that only calls an
+ *     existing, more powerful helper is caught here where the own-caps
+ *     gate misses it.  A new verb, not a field appended to ACTIVATE5: an
+ *     older server rebuilds the signed line without role_caps (the
+ *     signature would fail with a misleading ERR bad_signature) and its
+ *     `callers:` parse runs to end of line.  A client whose manifest has
+ *     no ROLE lines keeps sending ACTIVATE4/ACTIVATE5 unchanged.
  *   BEGIN_BATCH                                       → OK
  *   COMMIT_BATCH                                      → OK <n> | WAIT … | ERR <reason>
  *   ROLLBACK_BATCH                                    → OK
@@ -155,7 +177,7 @@ static int b64_decode(const char *in, size_t inlen, unsigned char *out) {
 }
 
 #define RELOAD_BACKLOG  4
-#define RELOAD_LINE_MAX 4096
+#define RELOAD_LINE_MAX 16384   /* an ACTIVATE6 line carries every role's closure */
 #define CAS_HASH_LEN    64      /* compilation_hash: 64 hex chars */
 #define CAS_MAX_ARTIFACT (64 * 1024 * 1024)  /* 64 MB sanity limit */
 
@@ -275,6 +297,9 @@ static void pubkey_to_hex(char out[65]) {
 typedef struct {
     const char *caps;       /* comma-separated, as received on the wire */
     const char *cap_root;   /* signed 64-hex root */
+    const char *roles;      /* ACTIVATE6 only: the `roles:` block as received
+                               ("R=csv;R2=csv"); NULL otherwise, and then the
+                               line has no "roles" key at all */
 } audit_caps_t;
 
 /* Write s as a JSON string literal (quotes included). */
@@ -355,6 +380,11 @@ static void write_audit_log(const char *fn, const char *impl_hash,
         json_write_str(f, ac->cap_root ? ac->cap_root : "",
                        ac->cap_root ? strlen(ac->cap_root) : 0);
         fputc(',', f);
+        if (ac->roles) {
+            fputs("\"roles\":", f);
+            json_write_str(f, ac->roles, strlen(ac->roles));
+            fputc(',', f);
+        }
     } else {
         fputs("\"caps\":null,\"cap_root\":null,", f);
     }
@@ -691,6 +721,166 @@ static const char *check_cap_policy(char *tokens[], int n) {
     return NULL;
 }
 
+/* ── ACTIVATE6: per-role closures (DD build step 10) ───────────────────── */
+
+#define MARCH_ROLE_MAX       64
+#define MARCH_ROLE_NAME_MAX  128
+
+static int role_name_ok(const char *s, size_t n) {
+    if (n == 0 || n >= MARCH_ROLE_NAME_MAX) return 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+              || c == '_' || c == '.' || c == '\''))
+            return 0;
+    }
+    return 1;
+}
+
+/* Copy the value of " <key>" out of [line] into out[outsz]: from just after
+ * the key up to the earliest of the [stops] (each a " <next-key>:" marker),
+ * else up to the next space when [to_space], else to end of line.  Returns
+ * 1 (found), 0 (absent) or -1 (value longer than outsz-1). */
+static int extract_field(const char *line, const char *key, const char *const *stops,
+                         int to_space, char *out, size_t outsz) {
+    const char *k = strstr(line, key);
+    out[0] = '\0';
+    if (!k) return 0;
+    const char *v = k + strlen(key);
+    size_t n = strlen(v);
+    if (to_space) {
+        const char *sp = strchr(v, ' ');
+        if (sp) n = (size_t)(sp - v);
+    }
+    for (int i = 0; stops && stops[i]; i++) {
+        const char *e = strstr(v, stops[i]);
+        if (e && (size_t)(e - v) < n) n = (size_t)(e - v);
+    }
+    if (n >= outsz) return -1;
+    memcpy(out, v, n);
+    out[n] = '\0';
+    return 1;
+}
+
+/* Split "R=val;R2=val" (mutating [buf]) into names[]/vals[].  Names must be
+ * well formed; when [sorted] they must be strictly increasing (the signed
+ * `role_caps:` block is canonical).  Returns the count, or -1. */
+static int split_role_block(char *buf, char *names[], char *vals[], int sorted) {
+    int n = 0;
+    if (buf[0] == '\0') return 0;
+    char *p = buf;
+    while (p) {
+        if (n >= MARCH_ROLE_MAX) return -1;
+        char *semi = strchr(p, ';');
+        if (semi) *semi = '\0';
+        char *eq = strchr(p, '=');
+        if (!eq || !role_name_ok(p, (size_t)(eq - p))) return -1;
+        *eq = '\0';
+        names[n] = p;
+        vals[n] = eq + 1;
+        if (sorted && n > 0 && strcmp(names[n - 1], names[n]) >= 0) return -1;
+        n++;
+        p = semi ? semi + 1 : NULL;
+    }
+    return n;
+}
+
+/* The role checks of an ACTIVATE6, on copies of the received blocks.
+ * [role_roots] is the SIGNED `role_caps:` value, [roles] the unsigned
+ * `roles:` one.  [policy_phase] 0 runs the format and tamper checks, 1 the
+ * policy check (the handler runs every tamper check before any policy
+ * check).  Returns NULL when the phase passes; otherwise writes the ERR
+ * line into resp and returns the audit result string. */
+static const char *check_role_closures(const char *role_roots, const char *roles,
+                                       int policy_phase, char *resp, size_t rsz) {
+    size_t lr = strlen(role_roots) + 1, lc = strlen(roles) + 1;
+    char *rbuf = (char *)malloc(lr), *cbuf = (char *)malloc(lc);
+    if (!rbuf || !cbuf) {
+        free(rbuf); free(cbuf);
+        snprintf(resp, rsz, "ERR oom\n");
+        return "err_oom";
+    }
+    memcpy(rbuf, role_roots, lr);
+    memcpy(cbuf, roles, lc);
+    char *rn[MARCH_ROLE_MAX], *rv[MARCH_ROLE_MAX], *cn[MARCH_ROLE_MAX], *cv[MARCH_ROLE_MAX];
+    const char *result = NULL;
+    int nr = split_role_block(rbuf, rn, rv, 1);
+    int nc = split_role_block(cbuf, cn, cv, 0);
+    if (nr < 0) {
+        snprintf(resp, rsz, "ERR bad_format bad_role_caps\n");
+        result = "err_bad_format";
+        goto out;
+    }
+    if (nc < 0) {
+        /* the unsigned block is malformed: it cannot be the one signed */
+        snprintf(resp, rsz, "ERR role_cap_tamper\n");
+        result = "err_role_cap_tamper";
+        goto out;
+    }
+    for (int i = 0; i < nr; i++) {
+        if (!is_hex64(rv[i])) {
+            snprintf(resp, rsz, "ERR bad_format bad_role_caps\n");
+            result = "err_bad_format";
+            goto out;
+        }
+    }
+    if (policy_phase) goto policy;
+    /* Every role the unsigned block names must be signed. */
+    for (int j = 0; j < nc; j++) {
+        int signed_role = 0;
+        for (int i = 0; i < nr; i++) if (strcmp(rn[i], cn[j]) == 0) { signed_role = 1; break; }
+        if (!signed_role) {
+            snprintf(resp, rsz, "ERR role_cap_tamper\n");
+            result = "err_role_cap_tamper";
+            goto out;
+        }
+    }
+    /* Recompute every signed root.  A role absent from `roles:` recomputes
+     * over the empty set, so it only matches a signed blake3(""). */
+    for (int i = 0; i < nr; i++) {
+        const char *csv = "";
+        for (int j = 0; j < nc; j++) if (strcmp(rn[i], cn[j]) == 0) { csv = cv[j]; break; }
+        char scratch[MARCH_CAP_MAX_TOKENS * 16];
+        if (strlen(csv) >= sizeof(scratch)) {
+            snprintf(resp, rsz, "ERR bad_format roles_too_long\n");
+            result = "err_bad_format";
+            goto out;
+        }
+        snprintf(scratch, sizeof(scratch), "%s", csv);
+        char root[65];
+        if (!compute_cap_root(scratch, root) || strcmp(root, rv[i]) != 0) {
+            snprintf(resp, rsz, "ERR role_cap_tamper\n");
+            result = "err_role_cap_tamper";
+            goto out;
+        }
+    }
+    goto out;
+policy:
+    /* The node's policy bounds every role closure. */
+    for (int i = 0; i < nr; i++) {
+        const char *csv = "";
+        for (int j = 0; j < nc; j++) if (strcmp(rn[i], cn[j]) == 0) { csv = cv[j]; break; }
+        if (!csv[0]) continue;
+        char scratch[MARCH_CAP_MAX_TOKENS * 16];
+        snprintf(scratch, sizeof(scratch), "%s", csv);
+        char *tok[MARCH_CAP_MAX_TOKENS]; int nt = 0;
+        if (!split_cap_csv(scratch, tok, &nt)) {
+            snprintf(resp, rsz, "ERR bad_format bad_roles\n");
+            result = "err_bad_format";
+            goto out;
+        }
+        const char *violation = check_cap_policy(tok, nt);
+        if (violation) {
+            snprintf(resp, rsz, "ERR role_cap_policy %s %s\n", rn[i], violation);
+            result = "err_role_cap_policy";
+            goto out;
+        }
+    }
+out:
+    free(rbuf); free(cbuf);
+    return result;
+}
+
 static void handle_client(int fd) {
     char line[RELOAD_LINE_MAX];
 
@@ -705,6 +895,7 @@ static void handle_client(int fd) {
         int      migrate_required;
         char    *caps;       /* ACTIVATE4 only (heap, may be ""); NULL otherwise */
         char    *cap_root;   /* ACTIVATE4 only (heap); NULL otherwise */
+        char    *roles;      /* ACTIVATE6 only (heap); NULL otherwise */
     } staged[MARCH_MAX_BATCH];
     int n_staged  = 0;
     int in_batch  = 0;
@@ -1125,6 +1316,7 @@ static void handle_client(int fd) {
                 staged[n_staged].callers[1023]  = '\0';
                 staged[n_staged].caps     = NULL;   /* no cap data pre-ACTIVATE4 */
                 staged[n_staged].cap_root = NULL;
+                staged[n_staged].roles    = NULL;
                 n_staged++;
                 char resp[256];
                 int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
@@ -1142,11 +1334,15 @@ static void handle_client(int fd) {
          * Signed message: "ACTIVATE4 <name> <impl_hash> <cas_hash> <migrate>
          *                  epoch:<N> cap_root:<hex> callers:<sorted-csv>" */
         } else if (strncmp(line, "ACTIVATE4 ", 10) == 0
-                   || strncmp(line, "ACTIVATE5 ", 10) == 0) {
+                   || strncmp(line, "ACTIVATE5 ", 10) == 0
+                   || strncmp(line, "ACTIVATE6 ", 10) == 0) {
             /* ACTIVATE5 differs only in <migrate> being a bitmask (see the
-             * file header) and in the verb inside the signed message. */
-            const int v5 = line[8] == '5';
-            const char *verb = v5 ? "ACTIVATE5" : "ACTIVATE4";
+             * file header) and in the verb inside the signed message;
+             * ACTIVATE6 adds the signed role_caps: and the unsigned roles:
+             * blocks (DD build step 10). */
+            const int v6 = line[8] == '6';
+            const int v5 = line[8] == '5' || v6;
+            const char *verb = v6 ? "ACTIVATE6" : v5 ? "ACTIVATE5" : "ACTIVATE4";
             char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
             char migrate_str[8] = {0};
             if (sscanf(line + 10, "%255s %127s %127s %255s %7s",
@@ -1197,6 +1393,9 @@ static void handle_client(int fd) {
                 if (cp) {
                     const char *csv = cp + 6;
                     const char *end = strstr(csv, " callers:");
+                    /* ACTIVATE6: `roles:` sits between caps and callers. */
+                    const char *rend = v6 ? strstr(csv, " roles:") : NULL;
+                    if (rend && (!end || rend < end)) end = rend;
                     size_t clen = end ? (size_t)(end - csv) : strlen(csv);
                     /* Also stop at CR/LF in case callers: is absent (shouldn't
                      * happen given the protocol, but bound defensively). */
@@ -1214,9 +1413,31 @@ static void handle_client(int fd) {
                 }
             }
 
+            /* ACTIVATE6: the signed role roots and the unsigned closures.
+             * File-static: handle_client runs on the one server thread, one
+             * client at a time, and this frame already holds the batch
+             * array. */
+            char *role_roots = NULL, *roles_buf = NULL;
+            if (v6) {
+                static char s_role_roots[RELOAD_LINE_MAX], s_roles[RELOAD_LINE_MAX];
+                static const char *const rc_stops[] = { NULL };
+                static const char *const roles_stops[] = { " callers:", NULL };
+                role_roots = s_role_roots;
+                roles_buf  = s_roles;
+                int a = extract_field(line, " role_caps:", rc_stops, 1,
+                                      role_roots, RELOAD_LINE_MAX);
+                int b = extract_field(line, " roles:", roles_stops, 0,
+                                      roles_buf, RELOAD_LINE_MAX);
+                if (a != 1 || b != 1) {
+                    wresp(fd, a != 1 ? "ERR bad_format missing_role_caps\n"
+                                     : "ERR bad_format missing_roles\n");
+                    continue;
+                }
+            }
+
             /* Audit context for every log line from here on (see
              * write_audit_log for when these values are verified). */
-            audit_caps_t ac4 = { caps_buf, cap_root };
+            audit_caps_t ac4 = { caps_buf, cap_root, roles_buf };
 
             /* Parse mandatory callers:<csv>, then sort for canonical form. */
             char callers_sorted[1024] = {0};
@@ -1266,11 +1487,16 @@ static void handle_client(int fd) {
 
             /* Reconstruct the canonical signed message — cap_root is signed,
              * caps is NOT (see file-header note above). */
-            char signed_msg[2048];
-            int smlen = snprintf(signed_msg, sizeof(signed_msg),
-                                 "%s %s %s %s %d epoch:%u cap_root:%s callers:%s",
-                                 verb, name, impl_hash, cas_hash, migrate_required,
-                                 activate_epoch, cap_root, callers_sorted);
+            char signed_msg[RELOAD_LINE_MAX];
+            int smlen = v6
+                ? snprintf(signed_msg, sizeof(signed_msg),
+                           "%s %s %s %s %d epoch:%u cap_root:%s role_caps:%s callers:%s",
+                           verb, name, impl_hash, cas_hash, migrate_required,
+                           activate_epoch, cap_root, role_roots, callers_sorted)
+                : snprintf(signed_msg, sizeof(signed_msg),
+                           "%s %s %s %s %d epoch:%u cap_root:%s callers:%s",
+                           verb, name, impl_hash, cas_hash, migrate_required,
+                           activate_epoch, cap_root, callers_sorted);
             if (smlen < 0 || smlen >= (int)sizeof(signed_msg)) {
                 wresp(fd, "ERR signed_msg_truncated\n"); continue;
             }
@@ -1325,6 +1551,18 @@ static void handle_client(int fd) {
                 }
             }
 
+            /* ACTIVATE6: every signed role root recomputes from the unsigned
+             * closures (unconditional, like the cap_root check above). */
+            if (v6) {
+                char rresp[256];
+                const char *bad = check_role_closures(role_roots, roles_buf, 0,
+                                                      rresp, sizeof(rresp));
+                if (bad) {
+                    write_audit_log(name, impl_hash, cas_hash, &ac4, bad);
+                    wresp(fd, rresp); continue;
+                }
+            }
+
             /* Policy check may remain gated on a non-empty received cap set:
              * an empty set trivially satisfies any policy (nothing to
              * violate), and the tamper check above already guarantees an
@@ -1344,6 +1582,18 @@ static void handle_client(int fd) {
                     int n = snprintf(resp, sizeof(resp), "ERR cap_policy %s\n", violation);
                     write_safe(fd, resp, n, sizeof(resp));
                     continue;
+                }
+            }
+
+            /* ACTIVATE6: the node's policy bounds every role's closure
+             * (plan section 5, "Admission"). */
+            if (v6) {
+                char rresp[512];
+                const char *bad = check_role_closures(role_roots, roles_buf, 1,
+                                                      rresp, sizeof(rresp));
+                if (bad) {
+                    write_audit_log(name, impl_hash, cas_hash, &ac4, bad);
+                    wresp(fd, rresp); continue;
                 }
             }
 
@@ -1367,6 +1617,7 @@ static void handle_client(int fd) {
                  * rollback and disconnect. */
                 staged[n_staged].caps     = strdup(caps_buf);
                 staged[n_staged].cap_root = strdup(cap_root);
+                staged[n_staged].roles    = roles_buf ? strdup(roles_buf) : NULL;
                 n_staged++;
                 char resp[256];
                 int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
@@ -1404,6 +1655,7 @@ static void handle_client(int fd) {
             for (int i = 0; i < n_staged; i++) {
                 acs[i].caps = staged[i].caps;
                 acs[i].cap_root = staged[i].cap_root;
+                acs[i].roles = staged[i].roles;
                 items[i].name      = staged[i].name;
                 items[i].impl_hash = staged[i].impl_hash;
                 items[i].cas_hash  = staged[i].cas_hash;
@@ -1421,7 +1673,7 @@ static void handle_client(int fd) {
             }
             int committed = r == 0 ? n_staged : 0;
             for (int k = 0; k < n_staged; k++) {
-                free(staged[k].caps); free(staged[k].cap_root);
+                free(staged[k].caps); free(staged[k].cap_root); free(staged[k].roles);
             }
             in_batch = 0; n_staged = 0;
             if (r == 0) {
@@ -1479,7 +1731,7 @@ static void handle_client(int fd) {
         /* ── ROLLBACK_BATCH ───────────────────────────────────────────── */
         } else if (strcmp(line, "ROLLBACK_BATCH") == 0) {
             for (int k = 0; k < n_staged; k++) {
-                free(staged[k].caps); free(staged[k].cap_root);
+                free(staged[k].caps); free(staged[k].cap_root); free(staged[k].roles);
             }
             in_batch = 0; n_staged = 0;
             wresp(fd, "OK\n");
@@ -1490,7 +1742,7 @@ static void handle_client(int fd) {
     }
     /* Discard any uncommitted staged activations (connection dropped mid-batch) */
     for (int k = 0; k < n_staged; k++) {
-        free(staged[k].caps); free(staged[k].cap_root);
+        free(staged[k].caps); free(staged[k].cap_root); free(staged[k].roles);
     }
     close(fd);
 }

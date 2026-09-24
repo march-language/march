@@ -1705,6 +1705,33 @@ let test_activate5_signed_shape () =
        cap_root_hex)
     signed
 
+(* DD build step 10: ACTIVATE6 signs the role roots between cap_root and
+   callers; the unsigned roles: block carries the closures in the same
+   (sorted) role order, each root the cap_root recipe over its closure. *)
+let test_activate6_signed_shape_and_role_blocks () =
+  let roles = [
+    { Cmd_deploy_hot.role_name = "Stream.Prod"; role_caps = ["IO.Console"]; role_chains = [] };
+    { Cmd_deploy_hot.role_name = "Stream.Cons"; role_caps = ["IO.FileWrite"; "IO.Console"];
+      role_chains = [] } ] in
+  let (role_caps, roles_csv) = Cmd_deploy_hot.role_blocks roles in
+  Alcotest.(check string) "roots sorted by role, cap_root recipe"
+    (Printf.sprintf "Stream.Cons=%s;Stream.Prod=%s"
+       (Cmd_deploy_hot.fn_cap_root ["IO.Console"; "IO.FileWrite"])
+       (Cmd_deploy_hot.fn_cap_root ["IO.Console"]))
+    role_caps;
+  Alcotest.(check string) "closures in the same order, each sorted"
+    "Stream.Cons=IO.Console,IO.FileWrite;Stream.Prod=IO.Console" roles_csv;
+  let (signed, wire_head) =
+    Cmd_deploy_hot.build_activate6_lines
+      ~name:"Main.cons" ~impl:"implhash" ~cas:"cashash" ~migrate:0 ~epoch:4
+      ~cap_root:cap_root_hex ~role_caps ~callers_csv:"Main.a"
+  in
+  Alcotest.(check string) "wire_head" "ACTIVATE6 Main.cons implhash cashash" wire_head;
+  Alcotest.(check string) "role_caps signed, between cap_root and callers"
+    (Printf.sprintf "ACTIVATE6 Main.cons implhash cashash 0 epoch:4 cap_root:%s role_caps:%s callers:Main.a"
+       cap_root_hex role_caps)
+    signed
+
 let test_parse_wait () =
   Alcotest.(check (option (pair int (pair int (pair int bool)))))
     "a WAIT line"
@@ -2711,6 +2738,7 @@ let () =
       Alcotest.test_case "ACTIVATE4: wire orders cap_root+caps before callers" `Quick test_activate4_wire_line_orders_cap_root_and_caps_before_callers;
       Alcotest.test_case "ACTIVATE3: signed/wire shape unchanged" `Quick test_activate3_signed_shape_unchanged;
       Alcotest.test_case "ACTIVATE5: signed shape carries the migrate bitmask" `Quick test_activate5_signed_shape;
+      Alcotest.test_case "ACTIVATE6: role roots signed, closures unsigned" `Quick test_activate6_signed_shape_and_role_blocks;
       Alcotest.test_case "WAIT: parsed and described" `Quick test_parse_wait;
       Alcotest.test_case "schemas: handlers, migrate_msg_from, message diff" `Quick test_schema_handlers_and_message_diff;
       Alcotest.test_case "migrate_msg stub from handler signatures" `Quick test_migrate_msg_stub;

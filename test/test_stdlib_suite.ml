@@ -11563,7 +11563,7 @@ let test_hcr_manifest_emits_caps_and_cap_root () =
    still names IO.FileWrite and the chain body -> cons -> save.  A second
    version of the program whose body never calls `save` has the narrower
    closure, which is the pair forge's per-role gate compares. *)
-let role_manifest_src ~uses_save =
+let role_manifest_src ?(serve = false) ~uses_save () =
   Printf.sprintf {|mod Main do
   needs IO
   needs IO.Console
@@ -11594,12 +11594,43 @@ let role_manifest_src ~uses_save =
   end
 
   fn main(c : Cap(IO)) do
-    let _ = Stream_Run.run_Cons(c, "cons", "secret", Stream_Run.addrs_from_env(),
-      fn (s, con, fw, st) -> cons(s, con, st))
-    ()
+    %s
   end
 end
 |} (if uses_save then "save(n)" else "let _ = n")
+    (if serve then
+       (* The base binary of the end-to-end test: it only has to stay up
+          with its reload server; the role's root still exists statically. *)
+       "if List.length(Process.argv()) > 99 do\n\
+       \      let _ = Stream_Run.run_Cons(c, \"cons\", \"secret\", Stream_Run.addrs_from_env(),\n\
+       \        fn (s, con, fw, st) -> cons(s, con, st))\n\
+       \      ()\n\
+       \    else\n\
+       \      sleep_ms(60000)\n\
+       \    end"
+     else
+       "let _ = Stream_Run.run_Cons(c, \"cons\", \"secret\", Stream_Run.addrs_from_env(),\n\
+       \      fn (s, con, fw, st) -> cons(s, con, st))\n\
+       \    ()")
+
+(* Compile [src_text] in a fresh directory (own cwd and HOME, so no CAS hit
+   skips the manifest write; see test_hcr_manifest_emits_caps_and_cap_root).
+   [Some (dir, bin)], or [None] when the toolchain is missing (counted skip). *)
+let build_role_fixture ~tag ~extra_args src_text =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file (Printf.sprintf "march_hcrrole_%s" tag) "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "main.march" in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  let bin = Filename.concat tmp "rolebin" in
+  let cmd_prefix = Printf.sprintf "cd %s && env HOME=%s "
+      (Filename.quote tmp) (Filename.quote tmp) in
+  match compile_march_or_skip ~cmd_prefix ~main_exe ~bin ~src ~extra_args () with
+  | None -> None
+  | Some bin -> Some (tmp, bin)
 
 let role_lines_of_build ~tag src_text =
   let main_exe = find_main_exe () in
@@ -11629,18 +11660,129 @@ let role_lines_of_build ~tag src_text =
     Some (List.rev !lines)
 
 let test_hcr_manifest_role_closure_lines () =
-  match role_lines_of_build ~tag:"wide" (role_manifest_src ~uses_save:true) with
+  match role_lines_of_build ~tag:"wide" (role_manifest_src ~uses_save:true ()) with
   | None -> ()
   | Some lines ->
     Alcotest.(check (list string)) "one ROLE line, the full closure with its chains"
       [ "ROLE Stream.Cons caps=IO.Console,IO.FileWrite \
          via=IO.Console:body>cons;IO.FileWrite:body>cons>save" ]
       lines;
-    (match role_lines_of_build ~tag:"narrow" (role_manifest_src ~uses_save:false) with
+    (match role_lines_of_build ~tag:"narrow" (role_manifest_src ~uses_save:false ()) with
      | None -> ()
      | Some lines ->
        Alcotest.(check (list string)) "without the save call the closure is narrower"
          [ "ROLE Stream.Cons caps=IO.Console via=IO.Console:body>cons" ] lines)
+
+(* The step-10 acceptance end to end: a role whose closure widens in a hot
+   patch is refused.  Without --grant-cap forge's per-role gate stops it
+   (the baseline is the running build's manifest); with --grant-cap it gets
+   past the client, and the SERVER refuses it: a real compiled base binary
+   running its reload server under a node policy (IO.Console, not
+   IO.FileWrite) answers the signed ACTIVATE6 with ERR role_cap_policy.  A
+   control patch whose closure stays inside the policy is admitted. *)
+let e2e_connect sock =
+  let fd = Unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  let rec go n =
+    match Unix.connect fd (Unix.ADDR_UNIX sock) with
+    | () -> Some fd
+    | exception Unix.Unix_error _ when n > 0 -> Unix.sleepf 0.1; go (n - 1)
+    | exception Unix.Unix_error _ -> Unix.close fd; None
+  in
+  go 150
+
+let e2e_activate6 conn ~sk ~(manifest : March_forge.Cmd_deploy_hot.manifest) ~fn_name =
+  let module H = March_forge.Cmd_deploy_hot in
+  let fm = List.find (fun f -> f.H.fn_name = fn_name) manifest.H.functions in
+  let (role_caps, roles) = H.role_blocks manifest.H.roles in
+  let cap_root = H.fn_cap_root fm.H.fn_caps in
+  let callers = String.concat "," (List.sort String.compare fm.H.fn_callers) in
+  let (signed, wire_head) =
+    H.build_activate6_lines ~name:fm.H.fn_name ~impl:fm.H.fn_impl_hash ~cas:manifest.H.cas_hash
+      ~migrate:0 ~epoch:0 ~cap_root ~role_caps ~callers_csv:callers in
+  let sig_b64 = March_ed25519.Ed25519.(sig_to_base64 (sign_str signed sk)) in
+  H.send_line conn
+    (Printf.sprintf "%s %s 0 epoch:0 cap_root:%s role_caps:%s caps:%s roles:%s callers:%s"
+       wire_head sig_b64 cap_root role_caps
+       (String.concat "," (List.sort String.compare fm.H.fn_caps)) roles callers);
+  H.recv_line conn
+
+let with_reload_server ~dir ~bin ~sock ~extra_env f =
+  let env = Array.append [|
+      "MARCH_HOT_RELOAD_SOCKET=" ^ sock;
+      "HOME=" ^ dir;
+      "MARCH_AUDIT_LOG=" ^ Filename.concat dir "audit.jsonl";
+      "PATH=" ^ (try Sys.getenv "PATH" with Not_found -> "/usr/bin:/bin") |] extra_env in
+  let log = Unix.openfile (Filename.concat dir "server.log")
+      [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND ] 0o644 in
+  let pid = Unix.create_process_env bin [| bin |] env Unix.stdin log log in
+  Unix.close log;
+  Fun.protect
+    ~finally:(fun () ->
+        (try Unix.kill pid Sys.sigterm with Unix.Unix_error _ -> ());
+        (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ());
+        (try Sys.remove sock with Sys_error _ -> ()))
+    (fun () -> f pid)
+
+let test_hcr_role_widening_refused_end_to_end () =
+  let module H = March_forge.Cmd_deploy_hot in
+  let (pk, sk) = March_ed25519.Ed25519.keygen () in
+  let pk_b64 = March_ed25519.Ed25519.pk_to_base64 pk in
+  let base =
+    build_role_fixture ~tag:"e2ebase"
+      ~extra_args:("--hot-reload Main --signing-pubkey " ^ Filename.quote pk_b64)
+      (role_manifest_src ~serve:true ~uses_save:false ()) in
+  let narrow =
+    build_role_fixture ~tag:"e2enarrow" ~extra_args:"--hot-reload Main --compile-so"
+      (role_manifest_src ~serve:true ~uses_save:false ()) in
+  let wide =
+    build_role_fixture ~tag:"e2ewide" ~extra_args:"--hot-reload Main --compile-so"
+      (role_manifest_src ~serve:true ~uses_save:true ()) in
+  match base, narrow, wide with
+  | Some (dir, bin), Some (_, nbin), Some (_, wbin) ->
+    let parse p = match H.parse_manifest (p ^ ".hcr_manifest") with
+      | Ok m -> m | Error e -> Alcotest.fail e in
+    let prior = parse nbin and current = parse wbin in
+    Alcotest.(check (list string)) "the running build's role closure"
+      ["IO.Console"] (List.concat_map (fun r -> r.H.role_caps) prior.H.roles);
+    Alcotest.(check (list string)) "the patch widens it through `save`"
+      ["IO.Console"; "IO.FileWrite"] (List.concat_map (fun r -> r.H.role_caps) current.H.roles);
+    (* 1. The client gate. *)
+    Alcotest.(check bool) "forge's per-role gate stops it without --grant-cap" true
+      (H.role_gate ~prior:(Some prior) ~current ~grant_caps:[]);
+    Alcotest.(check bool) "--grant-cap IO.FileWrite lets it past the client" false
+      (H.role_gate ~prior:(Some prior) ~current ~grant_caps:["IO.FileWrite"]);
+    (* 2. The server, under a node policy. *)
+    let policy = Filename.concat dir "policy.txt" in
+    let oc = open_out policy in
+    output_string oc "IO.Console\nIO.NetConnect\nIO.NetListen\nSession.Live\n";
+    close_out oc;
+    let sock = Printf.sprintf "/tmp/march_role_e2e_%d.sock" (Unix.getpid ()) in
+    with_reload_server ~dir ~bin ~sock ~extra_env:[| "MARCH_DEPLOY_POLICY=" ^ policy |]
+      (fun _pid ->
+         match e2e_connect sock with
+         | None -> Alcotest.failf "reload server never listened on %s (see %s/server.log)" sock dir
+         | Some fd ->
+           let conn = H.conn_of_fd fd in
+           H.cas_put conn current.H.cas_hash (wbin);
+           let resp = e2e_activate6 conn ~sk ~manifest:current ~fn_name:"cons" in
+           Alcotest.(check string) "the server refuses the widened role closure"
+             "ERR role_cap_policy Stream.Cons IO.FileWrite" resp;
+           H.cas_put conn prior.H.cas_hash nbin;
+           (* The control activates a function the running server registered
+              (a boundary function of the base binary). *)
+           H.send_line conn "ABI_QUERY";
+           let slots = H.parse_abi_query conn in
+           let known = List.filter_map (fun (f : H.fn_manifest) ->
+               if List.exists (fun sl -> sl.H.slot_name = f.H.fn_name) slots
+               then Some f.H.fn_name else None) prior.H.functions in
+           let target =
+             if List.mem "cons" known then "cons"
+             else match known with n :: _ -> n | [] -> Alcotest.fail "no registered slot in the manifest" in
+           let resp = e2e_activate6 conn ~sk ~manifest:prior ~fn_name:target in
+           Alcotest.(check bool) ("a closure inside the policy is admitted: " ^ resp) true
+             (String.length resp >= 3 && String.sub resp 0 3 = "OK ");
+           Unix.close fd)
+  | _ -> ()  (* toolchain missing: counted skip inside compile_march_or_skip *)
 
 (* C1 fix (final whole-branch review, HCR Phase 5C): actor handler caps were
    silently dropped from the manifest — [record_fn_caps] was called for
@@ -14921,6 +15063,8 @@ let stdlib_suites =
           test_hcr_manifest_actor_handler_caps_populated;
         Alcotest.test_case "HCR manifest: ROLE lines carry each role's full capability closure (DD step 10)" `Slow
           test_hcr_manifest_role_closure_lines;
+        Alcotest.test_case "HCR ACTIVATE6: a widened role closure is refused by the client gate and the server (DD step 10)" `Slow
+          test_hcr_role_widening_refused_end_to_end;
         Alcotest.test_case "HCR manifest: disjoint fn caps stay separate, not the whole-artifact union (granularity revision)" `Slow
           test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union;
         Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow

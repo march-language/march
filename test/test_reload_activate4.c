@@ -537,6 +537,163 @@ static void test_epoch_model_wait_pins_drain(void) {
     close(fd);
 }
 
+/* ── ACTIVATE6 (DD build step 10): per-role closures ─────────────────────
+ * Build+send one ACTIVATE6.  [role_caps] is the SIGNED block ("R=hex;...");
+ * [roles] the unsigned one ("R=csv;...").  [cas] may be NULL (a fake hash:
+ * admission then falls through to CAS-miss). */
+static void do_activate6(int fd, const char *name, const char *cas,
+                         const char *role_caps, const char *roles,
+                         char *resp, int resp_max) {
+    char impl_hash[65], cas_hash[65];
+    memset(impl_hash, '7', 64); impl_hash[64] = '\0';
+    if (cas) snprintf(cas_hash, sizeof(cas_hash), "%s", cas);
+    else { memset(cas_hash, '8', 64); cas_hash[64] = '\0'; }
+    char root[65];
+    expected_cap_root(NULL, 0, root);
+    char signed_msg[4096];
+    snprintf(signed_msg, sizeof(signed_msg),
+             "ACTIVATE6 %s %s %s %d epoch:%u cap_root:%s role_caps:%s callers:%s",
+             name, impl_hash, cas_hash, 0, 0u, root, role_caps, "");
+    char sig_b64[128];
+    sign_b64(signed_msg, sig_b64);
+    char line[8192];
+    snprintf(line, sizeof(line),
+             "ACTIVATE6 %s %s %s %s %d epoch:%u cap_root:%s role_caps:%s caps: roles:%s callers:",
+             name, impl_hash, cas_hash, sig_b64, 0, 0u, root, role_caps, roles);
+    send_line(fd, line);
+    read_resp(fd, resp, resp_max);
+}
+
+/* "Stream.Cons=<root(caps)>" for one role. */
+static void role_root_entry(const char *role, const char **caps, int n, char *out, size_t max) {
+    char root[65];
+    expected_cap_root(caps, n, root);
+    snprintf(out, max, "%s=%s", role, root);
+}
+
+static void test_activate6_role_closures(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "connected to reload server (ACTIVATE6)");
+    if (fd < 0) return;
+    char resp[512];
+    const char *cons[] = { "IO.Console", "IO.FileWrite" };
+    const char *prod[] = { "IO.Console" };
+    char rc_cons[256], rc_prod[256], rc_both[600];
+    role_root_entry("Stream.Cons", cons, 2, rc_cons, sizeof(rc_cons));
+    role_root_entry("Stream.Prod", prod, 1, rc_prod, sizeof(rc_prod));
+    snprintf(rc_both, sizeof(rc_both), "%s;%s", rc_cons, rc_prod);
+
+    do_activate6(fd, "test_fn_role", NULL, rc_both,
+                 "Stream.Cons=IO.Console,IO.FileWrite;Stream.Prod=IO.Console",
+                 resp, sizeof(resp));
+    CHECK(strncmp(resp, "ERR missing_artifact", 20) == 0,
+          "ACTIVATE6: matching role roots pass admission (falls through to CAS-miss)");
+    {
+        char line[4096]; last_audit_line(line, sizeof(line));
+        CHECK(strstr(line, "\"roles\":\"Stream.Cons=IO.Console,IO.FileWrite;Stream.Prod=IO.Console\"") != NULL,
+              "ACTIVATE6: the audit line records the role closures");
+    }
+
+    /* The unsigned closure narrowed by a MITM (drop IO.FileWrite): the
+     * signed root no longer recomputes. */
+    do_activate6(fd, "test_fn_role", NULL, rc_both,
+                 "Stream.Cons=IO.Console;Stream.Prod=IO.Console", resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR role_cap_tamper") == 0,
+          "ACTIVATE6: a stripped role closure is ERR role_cap_tamper");
+    check_audit("test_fn_role", "[]",
+                "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+                "err_role_cap_tamper");
+
+    do_activate6(fd, "test_fn_role", NULL, rc_both,
+                 "Stream.Cons=IO.Console,IO.FileWrite", resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR role_cap_tamper") == 0,
+          "ACTIVATE6: a signed role missing from roles: is ERR role_cap_tamper");
+
+    do_activate6(fd, "test_fn_role", NULL, rc_cons,
+                 "Stream.Cons=IO.Console,IO.FileWrite;Stream.Prod=IO.Console", resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR role_cap_tamper") == 0,
+          "ACTIVATE6: an unsigned role in roles: is ERR role_cap_tamper");
+
+    char rc_unsorted[600];
+    snprintf(rc_unsorted, sizeof(rc_unsorted), "%s;%s", rc_prod, rc_cons);
+    do_activate6(fd, "test_fn_role", NULL, rc_unsorted,
+                 "Stream.Cons=IO.Console,IO.FileWrite;Stream.Prod=IO.Console", resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR bad_format bad_role_caps") == 0,
+          "ACTIVATE6: role_caps: must be strictly sorted (canonical)");
+
+    /* The signature covers role_caps: swap in another root, keep the sig. */
+    {
+        char impl_hash[65], cas_hash[65], root[65];
+        memset(impl_hash, '7', 64); impl_hash[64] = '\0';
+        memset(cas_hash, '8', 64); cas_hash[64] = '\0';
+        expected_cap_root(NULL, 0, root);
+        char signed_msg[4096], sig_b64[128], line[8192];
+        snprintf(signed_msg, sizeof(signed_msg),
+                 "ACTIVATE6 %s %s %s %d epoch:%u cap_root:%s role_caps:%s callers:%s",
+                 "test_fn_role", impl_hash, cas_hash, 0, 0u, root, rc_cons, "");
+        sign_b64(signed_msg, sig_b64);
+        char rc_other[256];
+        role_root_entry("Stream.Cons", prod, 1, rc_other, sizeof(rc_other));
+        snprintf(line, sizeof(line),
+                 "ACTIVATE6 %s %s %s %s 0 epoch:0 cap_root:%s role_caps:%s caps: roles:%s callers:",
+                 "test_fn_role", impl_hash, cas_hash, sig_b64, root, rc_other,
+                 "Stream.Cons=IO.Console");
+        send_line(fd, line);
+        read_resp(fd, resp, sizeof(resp));
+        CHECK(strcmp(resp, "ERR bad_signature") == 0,
+              "ACTIVATE6: role_caps: is inside the signed message");
+    }
+
+    /* The old verbs still work beside it (ACTIVATE4 path unchanged). */
+    {
+        const char *caps[] = { "IO.Console" };
+        char root[65];
+        expected_cap_root(caps, 1, root);
+        do_activate4(fd, "test_fn_role", "IO.Console", root, "", resp, sizeof(resp));
+        CHECK(strncmp(resp, "ERR missing_artifact", 20) == 0,
+              "ACTIVATE4 unchanged beside ACTIVATE6");
+    }
+
+    /* A real activation through ACTIVATE6 (the stub patch is in the CAS). */
+    do_activate6(fd, "test_fn_epoch", STUB_CAS, rc_both,
+                 "Stream.Cons=IO.Console,IO.FileWrite;Stream.Prod=IO.Console",
+                 resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "ACTIVATE6 activates a real patch");
+    if (strncmp(resp, "OK ", 3) != 0) fprintf(stderr, "    got: %s\n", resp);
+    close(fd);
+}
+
+/* Policy mode: the node policy (IO.Console, IO.NetConnect) bounds every
+ * role closure.  A closure that widened to IO.FileWrite (a patch whose role
+ * body now reaches file_write through an existing helper) is refused by the
+ * SERVER, whatever the client's gate did. */
+static void test_activate6_role_policy(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "connected to reload server (ACTIVATE6 policy)");
+    if (fd < 0) return;
+    char resp[512];
+    const char *narrow[] = { "IO.Console" };
+    const char *wide[] = { "IO.Console", "IO.FileWrite" };
+    char rc[256];
+    role_root_entry("Stream.Cons", narrow, 1, rc, sizeof(rc));
+    do_activate6(fd, "test_fn_role", NULL, rc, "Stream.Cons=IO.Console", resp, sizeof(resp));
+    CHECK(strncmp(resp, "ERR missing_artifact", 20) == 0,
+          "ACTIVATE6: a role closure within policy is admitted");
+    role_root_entry("Stream.Cons", wide, 2, rc, sizeof(rc));
+    do_activate6(fd, "test_fn_role", NULL, rc, "Stream.Cons=IO.Console,IO.FileWrite",
+                 resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR role_cap_policy Stream.Cons IO.FileWrite") == 0,
+          "ACTIVATE6: a widened role closure outside policy is ERR role_cap_policy");
+    if (strcmp(resp, "ERR role_cap_policy Stream.Cons IO.FileWrite") != 0)
+        fprintf(stderr, "    got: %s\n", resp);
+    {
+        char line[4096]; last_audit_line(line, sizeof(line));
+        CHECK(strstr(line, "\"result\":\"err_role_cap_policy\"") != NULL,
+              "ACTIVATE6: the refusal is audited");
+    }
+    close(fd);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <keys_file> [policy]\n", argv[0]);
@@ -578,6 +735,7 @@ int main(int argc, char **argv) {
     march_dispatch_register_name(8, "test_fn_legacy_ok");
     march_dispatch_register_name(9, "test_fn_batch");
     march_dispatch_register_name(10, "test_fn_epoch");
+    march_dispatch_register_name(11, "test_fn_role");
     march_dispatch_publish(10, (void *)0x1010, "baseline", NULL, MARCH_NATIVE);
     march_reload_server_start(sock_path);
 
@@ -592,6 +750,7 @@ int main(int argc, char **argv) {
         test_activate3_regression();
         test_batch_audit_carries_caps();
         test_epoch_model_wait_pins_drain();
+        test_activate6_role_closures();
     } else {
         /* $MARCH_DEPLOY_POLICY must already be set by the caller (dune rule)
          * before this process started, since the server loads it lazily on
@@ -630,6 +789,7 @@ int main(int argc, char **argv) {
                 close(fd);
             }
         }
+        test_activate6_role_policy();
     }
 
     unlink(sock_path);

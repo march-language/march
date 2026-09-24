@@ -288,6 +288,31 @@ let build_activate5_lines ~name ~impl ~cas ~migrate ~epoch ~cap_root ~callers_cs
   let wire_head = Printf.sprintf "ACTIVATE5 %s %s %s" name impl cas in
   (signed, wire_head)
 
+(** ACTIVATE6 (distributed-deploys build step 10): ACTIVATE5 plus the
+    per-role closures.  [role_caps] is the SIGNED block,
+    ["<Proto.Role>=<root>;..."] sorted by role; [roles] the unsigned
+    ["<Proto.Role>=<csv>;..."] the server recomputes each root from (see
+    {!role_blocks}).  Returns [(signed, wire_head)]; the caller appends
+    [" <sig_b64> <migrate> epoch:<N> cap_root:<hex> role_caps:<..> caps:<csv> roles:<..> callers:<csv>"].
+    A new verb because an older server rebuilds the signed line without
+    [role_caps] and parses [callers:] to end of line. *)
+let build_activate6_lines ~name ~impl ~cas ~migrate ~epoch ~cap_root ~role_caps ~callers_csv
+  : string * string =
+  let signed = Printf.sprintf "ACTIVATE6 %s %s %s %d epoch:%d cap_root:%s role_caps:%s callers:%s"
+    name impl cas migrate epoch cap_root role_caps callers_csv in
+  let wire_head = Printf.sprintf "ACTIVATE6 %s %s %s" name impl cas in
+  (signed, wire_head)
+
+(** The two role blocks of an ACTIVATE6 from a manifest's ROLE lines:
+    [(role_caps, roles)], both sorted by role name.  Each root is
+    {!fn_cap_root} over the role's closure, the recipe the server's
+    [compute_cap_root] reproduces; each closure is sent sorted. *)
+let role_blocks (roles : role_manifest list) : string * string =
+  let sorted = List.sort (fun a b -> String.compare a.role_name b.role_name) roles in
+  let root r = r.role_name ^ "=" ^ fn_cap_root r.role_caps in
+  let csv r = r.role_name ^ "=" ^ String.concat "," (List.sort String.compare r.role_caps) in
+  (String.concat ";" (List.map root sorted), String.concat ";" (List.map csv sorted))
+
 (** A reload-server WAIT answer (plan II.4.2):
     ["WAIT epoch:<E> pins:<n> deadline_ms:<t>"], optionally followed by
     [" table_full"].  [Some (epoch, pins, deadline_ms, table_full)], or
@@ -1115,23 +1140,61 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
               let fn_caps_sorted = List.sort String.compare fm.fn_caps in
               let caps_csv = String.concat "," fn_caps_sorted in
               let this_cap_root = fn_cap_root fm.fn_caps in
-              (* A message-type change (bit 2) needs ACTIVATE5; otherwise
-                 ACTIVATE4, so an older server keeps working. *)
-              let build = if migrate_required land 2 <> 0
-                then build_activate5_lines else build_activate4_lines in
-              let (signed, wire_head) =
-                build ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
-                  ~migrate:migrate_required ~epoch:epoch_n ~cap_root:this_cap_root
-                  ~callers_csv
+              (* A manifest with ROLE lines needs ACTIVATE6 (the server's
+                 per-role admission); else a message-type change (bit 2)
+                 needs ACTIVATE5; otherwise ACTIVATE4, so an older server
+                 keeps working. *)
+              let (signed, wire_head, role_fields) =
+                if manifest.roles <> [] then begin
+                  let (role_caps, roles) = role_blocks manifest.roles in
+                  let (signed, wire_head) =
+                    build_activate6_lines ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
+                      ~migrate:migrate_required ~epoch:epoch_n ~cap_root:this_cap_root
+                      ~role_caps ~callers_csv in
+                  (signed, wire_head, Some (role_caps, roles))
+                end else begin
+                  let build = if migrate_required land 2 <> 0
+                    then build_activate5_lines else build_activate4_lines in
+                  let (signed, wire_head) =
+                    build ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
+                      ~migrate:migrate_required ~epoch:epoch_n ~cap_root:this_cap_root
+                      ~callers_csv
+                  in
+                  (signed, wire_head, None)
+                end
               in
               let sig_bytes = March_ed25519.Ed25519.sign_str signed sk in
               let sig_b64 = March_ed25519.Ed25519.sig_to_base64 sig_bytes in
-              let cmd = Printf.sprintf "%s %s %d epoch:%d cap_root:%s caps:%s callers:%s"
-                wire_head sig_b64 migrate_required epoch_n this_cap_root caps_csv callers_csv in
+              let cmd = match role_fields with
+                | None ->
+                  Printf.sprintf "%s %s %d epoch:%d cap_root:%s caps:%s callers:%s"
+                    wire_head sig_b64 migrate_required epoch_n this_cap_root caps_csv callers_csv
+                | Some (role_caps, roles) ->
+                  Printf.sprintf "%s %s %d epoch:%d cap_root:%s role_caps:%s caps:%s roles:%s callers:%s"
+                    wire_head sig_b64 migrate_required epoch_n this_cap_root role_caps
+                    caps_csv roles callers_csv in
               let resp = send_waiting ~send_line ~recv_line conn cmd in
               if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin
                 Printf.printf "  activated: %s\n%!" fm.fn_name;
                 incr activated
+              end else if resp = "ERR unknown_command" && role_fields <> None then begin
+                Printf.eprintf
+                  "  FAILED %s: server predates per-role admission (ACTIVATE6); upgrade the server or re-run with --no-cap-gate\n%!"
+                  fm.fn_name;
+                incr failed
+              end else if resp = "ERR role_cap_tamper" then begin
+                Printf.eprintf
+                  "  FAILED %s: role_cap_tamper — a server-recomputed role closure root did not match the signed value; deploy rejected\n%!"
+                  fm.fn_name;
+                incr failed
+              end else if String.length resp >= 20 && String.sub resp 0 20 = "ERR role_cap_policy " then begin
+                (match String.split_on_char ' ' resp with
+                 | [_; _; role; cap] ->
+                   Printf.eprintf
+                     "  FAILED %s: role %s's capability closure reaches %s, which this node's capability policy does not allow; deploy rejected\n%!"
+                     fm.fn_name role cap
+                 | _ -> Printf.eprintf "  FAILED %s: %s\n%!" fm.fn_name resp);
+                incr failed
               end else if resp = "ERR unknown_command" then begin
                 Printf.eprintf
                   "  FAILED %s: server predates capability admission (Phase 5C); upgrade the server or re-run with --no-cap-gate\n%!"
