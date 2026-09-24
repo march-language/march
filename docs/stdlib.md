@@ -912,11 +912,14 @@ NodeCert.is_revoked(cert, revocations)       -- Bool
 
 ### ClusterAuth
 
-`cluster_auth.march`: Shared-secret HMAC challenge/response.
+`cluster_auth.march`: how a node authenticates in the cluster handshake, in
+either mode, and the per-connection MAC keys the handshake derives.
 
 ```march
+ClusterAuth.Secret(secret) / ClusterAuth.Certified(credentials)  -- Auth
 ClusterAuth.prove(secret, nonce)         -- String (HMAC-SHA256 hex)
 ClusterAuth.verify(secret, nonce, proof) -- Bool
+ClusterAuth.frame_keys(ikm, transcript, my_nonce, peer_nonce)  -- FrameKeys (HKDF-SHA256)
 ```
 
 ### Handshake

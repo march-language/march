@@ -182,6 +182,15 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **Programs that use the cluster transport directly need `IO.Mut` and
+  `IO.Clock` in their grant.** `NetKernel`, `ClusterConn`, `PeerReader`,
+  `NodeSend`, `NodeCall` and `NodeQueue` now reach a process-wide table (the
+  per-connection MAC state) and the clock (handshake deadline, certificate
+  expiry), and the capability check is a ceiling on the whole program. A
+  `main(io : Cap(IO))` program sees no change; one with a narrow grant must add
+  `needs IO.Mut` / `needs IO.Clock` and the matching `Cap(IO.Mut)` /
+  `Cap(IO.Clock)` parameters (nine `test/native` loopback fixtures and the
+  `restart` two-node scenario did).
 - **Hot reload: a second deploy while actors are still migrating is accepted**
   (it used to be refused with `ERR publish_failed`); each actor applies both
   migrations in order. Past the soft drain deadline, messages in an unchanged
@@ -772,6 +781,10 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Cluster certificates** operator guide (`docs/cluster-certificates.md`):
+  keys, issuing, configuring nodes, renewal, revocation, what the MAC does and
+  does not protect. The clustering reference's "Authentication & Handshake"
+  section covers both modes, the per-frame MAC and the threat model.
 - **The actors chapter now documents `Actor.stop`** (graceful, synchronous,
   reverse-order supervisor teardown), which shipped 2026-09-08 without a
   section of its own.

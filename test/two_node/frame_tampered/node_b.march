@@ -1,0 +1,53 @@
+-- Two-node harness, scenario "frame_tampered": node-b. Shared-secret mode,
+-- so the per-frame MAC is the secret-derived one. node-a reaches node-b
+-- only through node-c, a proxy that flips one byte in one of node-a's
+-- sealed data frames. node-b must drop that frame, count it
+-- (ClusterNode.frames_rejected), report it (FrameRejected), and keep the
+-- link: the other nine pings and the final Done still arrive.
+mod FrameTamperedB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Nil, "tamper-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let seen = Vault.new("tamper_seen")
+        let _ = ClusterNode.on_security_event(h, fn ev ->
+          match ev do
+            ClusterNode.FrameRejected(id, n) ->
+              let who = if id == ClusterNode.node_id_of("node-a") do "node-a" else id end
+              println("node-b: dropped a frame from " ++ who ++ " (" ++ int_to_string(n) ++ " on that connection)")
+            ClusterNode.HandshakeRejected(_, why) -> println("node-b: handshake rejected: " ++ why)
+          end)
+        let _ = ClusterNode.route_type(h, "Tamper.Ping", fn _d -> do
+          let _ = Vault.incr(seen, "n", 1)
+          Ok(())
+        end)
+        let _ = ClusterNode.route_type(h, "Tamper.Done", fn _d -> do
+          println("node-b: " ++ int_to_string(Vault.get_or(seen, "n", 0)) ++ " of 10 pings arrived, frames rejected: "
+                  ++ int_to_string(ClusterNode.frames_rejected(h)) ++ ", links: " ++ int_to_string(ClusterNode.link_count(h)))
+          Ok(())
+        end)
+        println("node-b: up")
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        ClusterNode.stop(h)
+        println("node-b: done")
+    end
+  end
+end
