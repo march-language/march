@@ -42,6 +42,12 @@ involved returns an owned reference (spawn, spawn_supervised, pid_of_int).
 - `defun.ml`: `register_supervisor` and `register_supervisor_child` added to
   `builtin_names`, so they stay `EApp` and Perceus consults the table. The glue now reads
   `register_supervisor_child($spawned, $sup_child_ptr_child, …); dec_rc $sup_child_ptr_child`.
+- `purity.ml`: the same two names added to `impure_named`. As `ECallPtr`s they were
+  impure by construction; as `EApp`s of a builtin not on the impure lists, their discarded
+  `Unit` results let DCE delete both calls, so no supervisor ever restarted a child. The
+  leak probe could not see that (it only reads counts), but eleven existing native
+  supervisor tests did (`supervisor_one_for_one_restart` & co. printed `false` for
+  "restarted"); all pass with the purity entry.
 
 ### Not changed: `get_actor_field`
 
