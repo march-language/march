@@ -398,6 +398,14 @@ git log is authoritative for exact commits.
   provenance (the file lives under the stdlib directory the compiler loaded),
   plus an explicit `--stdlib-source` flag for checking a stdlib file by another
   path, which is also part of the `--check` cache key.
+- **`--cap-sandbox` write scopes behind a symlink no longer deny every write.** On
+  macOS, `needs IO.FileWrite("/tmp/myapp")` refused even in-scope writes, because
+  the kernel matches the resolved path (`/private/tmp/myapp`) and the scope was
+  baked into the profile as written. The binary now resolves each scope with
+  `realpath()` at startup, on the machine it runs on, before installing the
+  sandbox. A scope that does not exist yet resolves through its longest existing
+  parent, and a scope that is itself a symlink resolves to its target. Writes
+  outside the scope are still refused.
 - **`Compress` decoders and encoders return the `Compress.Error` their signatures
   promise.** They used to pass the codec's message string straight through as the
   error, so matching `Err(Compress.InvalidInput(_))` never matched. Now corrupt or
