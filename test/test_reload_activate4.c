@@ -209,6 +209,21 @@ static void check_audit(const char *fn, const char *caps_json,
     if (g_failed) fprintf(stderr, "    audit line: %s", line);
 }
 
+static void test_hcr_info(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "HCR_INFO connects");
+    send_line(fd, "HCR_INFO\n");
+    char resp[1024];
+    int n = read_resp(fd, resp, sizeof(resp));
+    CHECK(n > 0 && strncmp(resp, "HCR_INFO target:", 16) == 0,
+          "HCR_INFO returns identity");
+    CHECK(strstr(resp, " abi:march-hcr-v2;triple:") == NULL,
+          "HCR_INFO uses abi field");
+    CHECK(strstr(resp, " prefix:") != NULL && strstr(resp, " key:") != NULL,
+          "HCR_INFO includes prefix and key");
+    close(fd);
+}
+
 /* Build+send one ACTIVATE4 line for (name, caps_csv, cap_root) and return the
  * server's response line in `resp` (caller-provided buffer). */
 static void do_activate4(int fd, const char *name, const char *caps_csv,
@@ -580,6 +595,7 @@ int main(int argc, char **argv) {
     march_dispatch_register_name(10, "test_fn_epoch");
     march_dispatch_publish(10, (void *)0x1010, "baseline", NULL, MARCH_NATIVE);
     march_reload_server_start(sock_path);
+    test_hcr_info();
 
     int policy_mode = (argc >= 3 && strcmp(argv[2], "policy") == 0);
 
