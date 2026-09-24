@@ -26,6 +26,12 @@ git log is authoritative for exact commits.
   `test/upgrade_*.march` through it, hot-deploys the working tree into the running
   processes, and fails on the reload servers' counters (messages dropped, actors
   killed by a hard deadline, markers lost) or the test file's own checks.
+- **`forge audit --inferred --allow-unanalyzable`** gates on the dependencies
+  that typecheck, so a project can adopt the capability gate before its whole
+  dependency graph checks cleanly. Every unanalyzable dependency is still listed
+  with its reason on every run, and none is treated as asking for nothing.
+  `--record` leaves unanalyzable dependencies out of `forge.caps.lock` and keeps
+  any set recorded for them earlier.
 - **`NativeArray.sort_float` — a `Float` array can now be sorted.** Same
   algorithm and ownership as `sort_int` (unstable, in place when uniquely owned,
   copy-on-write when shared), 1.9–18x faster than libc `qsort` at 5 million
@@ -166,6 +172,9 @@ git log is authoritative for exact commits.
   including when the accumulator is itself a tuple.
 
 ### Removed
+- **The `respond` builtin is gone.** It was an interpreter no-op stub
+  (`respond(x)` returned `()`), had no callers, and never had a compiled
+  lowering.
 - **`MARCH_NO_TRMC` is gone.** The environment variable turned off
   tail-recursion-modulo-cons for every compile in the process, including the
   stdlib, which increasingly depends on the transform to avoid overflowing the
@@ -173,6 +182,16 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **`forge audit --inferred` caches each dependency's result** under
+  `.forge/audit-cache/`, keyed on the dependency's files, the files on its lib
+  path and the compiler. A repeat audit re-analyzes only the dependencies whose
+  inputs changed, instead of rerunning `march caps` (minutes each) for all of
+  them. A cached result prints the same output as a fresh one.
+- **An unanalyzable dependency now fails `forge audit --inferred`.** A dependency
+  that does not typecheck is listed as `NOT ANALYZABLE` with the compiler's
+  reason, the check exits 1, and `--record` refuses to write a baseline.
+  Previously the audit printed the error to stderr, used the dependency's
+  declared `needs` set in its place and passed.
 - **forge checks cached dependencies on online builds too.** `forge build`,
   `check`, `run`, `test` and `bench` re-hash each cached git or registry
   dependency against `forge.lock`, once per command. Before, only `--offline`
@@ -418,6 +437,52 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Compiled `to_string` no longer quotes strings inside a List or Result of
+  unknown static type.** When the type was erased, for example when the value
+  reached `to_string` through a closure stored in a container, a compiled
+  program printed `["a", "b"]` and `Ok("x")` where the interpreter prints
+  `[a, b]` and `Ok(x)`. Compiled output now matches the interpreter. Strings
+  inside a user constructor or record are still quoted (`B("x")`), as the
+  interpreter quotes them. `~H` interpolation still quotes every nested string.
+- **Floats at the JIT REPL print correctly and no longer crash the session.** Any
+  Float inside a list, `Option`, `Result` or tuple printed as garbage like
+  `[2.15e-313, 2.15e-313]` at the (default, JIT-backed) REPL prompt, including
+  `NativeArray.to_list_float` and `to_list_f32` results and a plain `[3.5, 1.25]`
+  literal; they now print their values. Separately, an expression that returned a
+  Float, followed by any expression returning a list, string or other heap value
+  (`3.5` then `[1, 2]`, or `NativeArray.get_float(a, 0)` then
+  `NativeArray.to_list_float(a)`), killed the REPL with a segmentation fault; it now
+  runs. The interpreter, `--compile` and `march --jit file.march` were not affected.
+- **`forge audit --inferred` names a toolchain too old for `march caps`.** When
+  the toolchain's `march` predated the `caps` subcommand (before 0.3.0), it read
+  `caps` as a file name and failed, so every dependency showed as unanalyzable
+  and nothing pointed at the compiler. The audit now checks the compiler before
+  analyzing anything and stops with one error that gives the toolchain's path,
+  its version and the version it needs. A `.march-version` pin whose toolchain
+  is not installed is also an error now; the audit used to fall back to
+  whatever `march` was on `PATH`.
+- **Sixteen builtins that ran interpreted but failed to link when compiled now
+  compile or give a clear error.** A `--compile`d call used to fail at link time
+  with `Undefined symbols: _<name>` and no March location. `char_is_alpha`,
+  `char_is_uppercase`, `char_is_lowercase`, `char_to_uppercase`,
+  `char_to_lowercase`, `float_from_string`, `print_int`, `print_float` and `tap`
+  now compile, and the compiled output matches the interpreter. The
+  dynamic-supervisor queries (`Supervisor.stop_child`, `which_children`,
+  `count_children`), `App.stop` and `task_spawn_link` only work in the
+  interpreter, so a compiled call is now an error at the call site that says so
+  and names the compiled alternative. `to_json` on a type with no `derive Json`
+  now reports the missing codec even when no type in the program derives
+  `Json`. `task_spawn_link(f, pid)` is now typed with the two arguments the
+  interpreter takes. Before, no typechecked program could call it.
+- **A zero-argument lambda is a `() -> T` everywhere.** `fn () -> 3` (or `fn -> 3`)
+  in a record literal, or bound with `let` and passed on, was typed as its result,
+  so it could not fill a `() -> Int` record field ("expected `() -> Int` but got
+  `Int`"). It is now `() -> T` wherever it appears and `f()` calls it, on both
+  backends. Passing a zero-argument named fn by bare name where a generic
+  function calls it with `()` (`apply(answer)` with `fn apply(f) do f() end`) is
+  now a type error; it used to crash compiled code. Also fixed: a fn with a
+  required parameter after a defaulted one (`fn f(a, b \\ "x", c)`) forwarded
+  the short call `f(1, 2)` with its arguments out of order.
 - **Compiled `Base64.encode` and `sha256` on a `Bytes` no longer crash.** Since
   boxed constructor cells began carrying a runtime type id (0.4.0), a compiled
   `Base64.encode(Bytes.from_string("x"))`, `Base64.url_encode`/`mime_encode`, or

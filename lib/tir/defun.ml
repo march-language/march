@@ -25,7 +25,7 @@ let builtin_names : StringSet.t =
       "read_line"; "io_read_line"; "read_byte"; "io_read_byte"; "not";
       "panic";
       "head"; "tail"; "is_nil";
-      "to_string"; "respond"; "kill"; "is_alive";
+      "to_string"; "kill"; "is_alive";
       "actor_stop"; "actor_is_draining"; "actor_pid_indices";
       "send"; "spawn"; "actor_get_int";
       "task_spawn"; "task_await"; "task_await_unwrap";

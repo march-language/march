@@ -1,0 +1,125 @@
+-- Compiled lowerings for builtins that used to typecheck, run interpreted,
+-- and then fail `--compile` at LINK time with an undefined symbol named after
+-- the builtin (`_char_is_alpha`, `_print_int`, `_tap`, ...):
+--   char_is_alpha / char_is_uppercase / char_is_lowercase
+--   char_to_uppercase / char_to_lowercase
+--     -> march_char_* in runtime/march_runtime.c (ASCII, first byte, like
+--        char_is_digit); the case maps return a FRESH string and the argument
+--        is borrowed;
+--   float_from_string -> march_string_to_float, the C function string_to_float
+--     already uses (the interpreter implements the two names identically);
+--   print_int / print_float -> march_print_int / march_print_float, no
+--     newline, float formatted exactly like float_to_string ("3." for 3.0);
+--   tap(x) -> x, rewritten at lowering (the tap bus it also feeds interpreted
+--     is drained only by the REPL).
+-- The golden is the interpreter's own output for this file (the test diffs
+-- the compiled binary against it), so every line is a parity check.
+-- See specs/progress/2026-09-24-interpreter-only-builtins.md.
+mod Main do
+  needs IO.Console
+
+  pfn b(x : Bool) : String do bool_to_string(x) end
+
+  -- A generic identity: values cross an erased (ptr) slot on the way to tap.
+  pfn via_generic(x) do tap(x) end
+
+  pfn classify(c : String) : String do
+    "'" ++ c ++ "' alpha=" ++ b(char_is_alpha(c))
+      ++ " upper=" ++ b(char_is_uppercase(c))
+      ++ " lower=" ++ b(char_is_lowercase(c))
+      ++ " up=" ++ char_to_uppercase(c)
+      ++ " down=" ++ char_to_lowercase(c)
+  end
+
+  pfn classify_all(cs : List(String)) : Unit do
+    match cs do
+      Nil -> ()
+      Cons(c, rest) ->
+        println(classify(c))
+        classify_all(rest)
+    end
+  end
+
+  pfn show_float_opt(s : String) : String do
+    match float_from_string(s) do
+      Some(f) -> "float_from_string(\"" ++ s ++ "\") = Some(" ++ float_to_string(f) ++ ")"
+      None -> "float_from_string(\"" ++ s ++ "\") = None"
+    end
+  end
+
+  pfn show_all_floats(ss : List(String)) : Unit do
+    match ss do
+      Nil -> ()
+      Cons(s, rest) ->
+        println(show_float_opt(s))
+        show_all_floats(rest)
+    end
+  end
+
+  -- A FRESH char every iteration, run through all five char builtins and
+  -- never kept. They borrow their argument, so the caller releases it right
+  -- after the calls: the loop is flat. Were the argument consumed without the
+  -- C side releasing it, every iteration would leak it.
+  pfn leak_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let c = char_from_int(97 + n % 26)
+      let hits = (if char_is_alpha(c) do 1 else 0 end)
+        + (if char_is_uppercase(c) do 1 else 0 end)
+        + (if char_is_lowercase(c) do 1 else 0 end)
+        + string_length(char_to_uppercase(c))
+        + string_length(char_to_lowercase(c))
+      leak_leg(n - 1, acc + hits)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    println("-- char predicates and case maps")
+    -- '@' '[' '`' '{' sit one byte outside each ASCII letter range.
+    classify_all(string_chars("aZm9 _!@[`{~Qz"))
+
+    println("-- float_from_string")
+    show_all_floats(["3.14", "-2.5", "42", "1e3", "0.1", "abc", "", "1.5x"])
+
+    println("-- print_int / print_float (no newline)")
+    print_int(0)
+    print(" ")
+    print_int(-7)
+    print(" ")
+    print_int(123456789012)
+    println("")
+    print_float(3.0)
+    print(" ")
+    print_float(-2.5)
+    print(" ")
+    print_float(0.1)
+    print(" ")
+    print_float(1.0 /. 3.0)
+    print(" ")
+    print_float(100000000000000000000.0)
+    print(" ")
+    print_float(float_infinity())
+    print(" ")
+    print_float(float_neg_infinity())
+    println("")
+
+    println("-- tap")
+    let x = tap(41) + 1
+    println("tap int " ++ int_to_string(x))
+    let s = tap("ab" ++ "cd")
+    println("tap string " ++ s ++ " " ++ s)
+    let xs = tap([1, 2, 3])
+    println("tap list " ++ int_to_string(List.length(xs)))
+    println("tap generic " ++ int_to_string(via_generic(7)) ++ " " ++ via_generic("g"))
+    println("tap float " ++ float_to_string(tap(2.5)))
+    -- A local named `tap` shadows the builtin on both backends.
+    let tap = fn n -> n * 10
+    println("local tap " ++ int_to_string(tap(2)))
+
+    println("-- leak leg")
+    let n = 10000
+    let before = live_allocs()
+    let hits = leak_leg(n, 0)
+    let grew = live_allocs() - before
+    println("hits " ++ int_to_string(hits) ++ ", flat: " ++ b(grew < n / 2))
+  end
+end

@@ -1,0 +1,78 @@
+-- Regression: an ERASED (TVar) `to_string` quoted strings nested in a
+-- List/Result, where the interpreter -- which reaches `to_string` through
+-- Show -- prints them bare.  specs/progress/2026-09-24-erased-render-nested-strings.md.
+--
+-- The runtime's constructor-table renderer (ctor_render, runtime/
+-- march_extras.c) serves two conventions:
+--   show  `to_string`: a nested string is bare inside List/Option/Result
+--         (their prelude Show impls show each element), quoted inside any
+--         other constructor or record (no Show impl -> the interpreter's
+--         repr-form value_to_string, which quotes everything beneath it).
+--   repr  a `~H` hole: every nested string quoted, as the interpreter's
+--         value_to_string does (test/native/h_sigil_adt_interp pins it).
+-- Before the fix ctor_render ALWAYS quoted, so every erased_* line with a
+-- string inside a List/Result printed `["a", "b"]` compiled.
+--
+-- Every value is routed through a closure stored in a container so mono
+-- cannot specialise it: the hole's type is a TVar and the render is decided
+-- from the cell's header type id at runtime.  `.expected` is the
+-- interpreter's own output.
+
+mod ErasedRenderShow do
+  needs IO.Console
+  type Multi = A | B(String) | C(String, String)
+  type Pair = P(Int, List(String))
+  type Box = Bx(List(b))
+
+  pfn apply_first(box, v) do
+    match box do
+    Bx(fs) ->
+      match fs do
+      Cons(f, _) -> f(v)
+      Nil        -> panic("empty box")
+      end
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    -- show convention: strings bare inside List/Result
+    let e1 = Bx(Cons(fn x -> to_string(x), Nil))
+    println("erased_list=" ++ apply_first(e1, Cons("a", Cons("b", Nil))))
+    let e2 = Bx(Cons(fn x -> to_string(x), Nil))
+    println("erased_c_built_list=" ++ apply_first(e2, String.split("a,b", ",")))
+    let e3 = Bx(Cons(fn x -> to_string(x), Nil))
+    println("erased_list_list=" ++ apply_first(e3, Cons(Cons("a", Nil), Cons(Nil, Nil))))
+    let e4 = Bx(Cons(fn x -> to_string(x), Nil))
+    println("erased_ok=" ++ apply_first(e4, Ok("x")))
+    let e5 = Bx(Cons(fn x -> to_string(x), Nil))
+    println("erased_results=" ++ apply_first(e5, Cons(Ok("a"), Cons(Err("b"), Nil))))
+    let e6 = Bx(Cons(fn x -> to_string(x), Nil))
+    println("erased_empty_str=" ++ apply_first(e6, Cons("", Nil)))
+
+    -- beneath a type with no Show impl the interpreter falls back to repr:
+    -- quoted, all the way down
+    let e7 = Bx(Cons(fn x -> to_string(x), Nil))
+    println("erased_adt=" ++ apply_first(e7, C("x", "y")))
+    let e8 = Bx(Cons(fn x -> to_string(x), Nil))
+    println("erased_adt_holding_list=" ++ apply_first(e8, P(1, Cons("a", Nil))))
+    let e9 = Bx(Cons(fn x -> to_string(x), Nil))
+    println("erased_list_of_adt=" ++ apply_first(e9, Cons(B("x"), Cons(A, Nil))))
+    let e10 = Bx(Cons(fn x -> to_string(x), Nil))
+    println("erased_ok_of_adt=" ++ apply_first(e10, Ok(P(2, Cons("b", Nil)))))
+
+    -- statically typed: must be unchanged
+    println("typed_list=" ++ to_string(Cons("a", Cons("b", Nil))))
+    println("typed_list_of_adt=" ++ to_string(Cons(B("x"), Nil)))
+    println("typed_adt_holding_list=" ++ to_string(P(3, Cons("c", Nil))))
+
+    -- repr convention: a `~H` hole quotes every nested string, typed or erased
+    let hl = Cons("a", Nil)
+    println("html_typed_list=" ++ IOList.to_string(~H"<p>${hl}</p>"))
+    let h1 = Bx(Cons(fn x -> IOList.to_string(~H"<p>${x}</p>"), Nil))
+    println("html_erased_list=" ++ apply_first(h1, Cons("a", Cons("b", Nil))))
+    let h2 = Bx(Cons(fn x -> IOList.to_string(~H"<p>${x}</p>"), Nil))
+    println("html_erased_ok=" ++ apply_first(h2, Ok("a")))
+    let h3 = Bx(Cons(fn x -> IOList.to_string(~H"<p>${x}</p>"), Nil))
+    println("html_erased_adt=" ++ apply_first(h3, B("a")))
+  end
+end
