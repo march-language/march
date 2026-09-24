@@ -169,6 +169,8 @@ class march_server =
         | Lsp.Client_request.TextDocumentDiagnostic params ->
           let uri = params.Lsp.Types.DocumentDiagnosticParams.textDocument.uri in
           let items =
+            if is_topology_uri uri then topology_diagnostics_safe (path_of_uri uri)
+            else
             match get_analysis uri with
             | Some a -> a.Analysis.diagnostics
             | None ->
@@ -324,7 +326,20 @@ class march_server =
     method on_notif_doc_did_open ~notify_back doc ~content =
       let uri = doc.Lsp.Types.TextDocumentItem.uri in
       let uri_str = Lsp.Types.DocumentUri.to_string uri in
+      let path = path_of_uri uri in
+      if Topology_doc.is_topology_path path then begin
+        (* topology.toml / topology.<env>.toml: TOML, served by
+           [Topology_doc] (forge's parser and checks), never analysed as
+           March. Opening one can change a sibling's diagnostics too (an
+           overlay's hosts feed the base's placement checks). *)
+        ignore (bump_version versions uri_str);
+        Topology_doc.set_open path content;
+        Hashtbl.replace topology_uris path uri;
+        publish_topology_dependents ~notify_back path
+      end else
       let v = bump_version versions uri_str in
+      if Filename.check_suffix path ".march" then
+        Topology_doc.set_march_buffer path content;
       let a = analyse_and_cache uri content in
       (* Surface analysis activity in the editor's LSP log (the only observability
          the server previously had was stderr, which editors rarely show). *)
@@ -359,15 +374,24 @@ class march_server =
            Printf.eprintf "march-lsp: TIR fiber error: %s\n%!"
              (Printexc.to_string exn));
       (* Push AST-level diagnostics immediately so the editor is responsive.
-         Diagnostic ranges are byte columns; remap to UTF-16. *)
-      notify_back#send_diagnostic
-        (List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics)
+         Diagnostic ranges are byte columns; remap to UTF-16. Then the open
+         topology documents that name this file's declarations. *)
+      Lwt.bind
+        (notify_back#send_diagnostic
+           (List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics))
+        (fun () -> publish_topology_dependents ~notify_back path)
 
-    method on_notif_doc_did_close ~notify_back:_ doc =
-      Hashtbl.remove doc_cache
-        (Lsp.Types.DocumentUri.to_string
-           doc.Lsp.Types.TextDocumentIdentifier.uri);
-      Lwt.return_unit
+    method on_notif_doc_did_close ~notify_back doc =
+      let uri = doc.Lsp.Types.TextDocumentIdentifier.uri in
+      Hashtbl.remove doc_cache (Lsp.Types.DocumentUri.to_string uri);
+      let path = path_of_uri uri in
+      if Topology_doc.is_topology_path path then begin
+        Topology_doc.close path;
+        Hashtbl.remove topology_uris path
+      end else
+        Topology_doc.close_march_buffer path;
+      (* The closed buffer is read from the disk again from now on. *)
+      publish_topology_dependents ~notify_back path
 
     (* A document was saved → its on-disk content changed, so the workspace
        index (built by reading files from disk) is stale. Clear it; the next
@@ -381,11 +405,15 @@ class march_server =
        watch the workspace send workspace/didChangeWatchedFiles, routed here by
        linol as an "unhandled" notification. Drop the cross-file caches + the
        cached deps env so the next query re-reads from disk. *)
-    method! on_notification_unhandled ~notify_back:_ n =
+    method! on_notification_unhandled ~notify_back n =
       (match n with
        | Lsp.Client_notification.DidChangeWatchedFiles _ ->
          invalidate_workspace_index ();
-         Typecheck_cache.clear_deps ()
+         Typecheck_cache.clear_deps ();
+         (* A `.march` file (or an overlay) changed on disk: every open
+            topology document may resolve differently now. *)
+         Lwt.async (fun () ->
+             publish_topology ~notify_back (Topology_doc.open_paths ()))
        | Lsp.Client_notification.ChangeConfiguration params ->
          (match perf_annotations_from_settings
                   params.Lsp.Types.DidChangeConfigurationParams.settings with
@@ -403,6 +431,24 @@ class march_server =
       let uri = vdoc.Lsp.Types.VersionedTextDocumentIdentifier.uri in
       let uri_str = Lsp.Types.DocumentUri.to_string uri in
       let v = bump_version versions uri_str in
+      let path = path_of_uri uri in
+      if Topology_doc.is_topology_path path then begin
+        (* The text is current at once (hover and completion read it); the
+           diagnostics are debounced like a March document's. *)
+        Topology_doc.set_open path new_content;
+        Lwt.dont_wait
+          (fun () ->
+             Lwt.bind (Lwt_unix.sleep debounce_window) (fun () ->
+                 if is_current versions uri_str v then
+                   publish_topology_dependents ~notify_back path
+                 else Lwt.return_unit))
+          (fun exn ->
+             Printf.eprintf "march-lsp: topology did_change fiber error: %s\n%!"
+               (Printexc.to_string exn));
+        Lwt.return_unit
+      end else begin
+      if Filename.check_suffix path ".march" then
+        Topology_doc.set_march_buffer path new_content;
       (* Debounced + version-guarded: defer the analyse by [debounce_window];
          a newer keystroke supersedes this one (is_current becomes false) so
          only the latest edit in a burst is analysed. Then the same two-phase
@@ -416,8 +462,10 @@ class march_server =
              else begin
                let a = analyse_and_cache uri new_content in
                Lwt.bind
-                 (notify_back#send_diagnostic
-                    (List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics))
+                 (Lwt.bind
+                    (notify_back#send_diagnostic
+                       (List.map (Pos.remap_diagnostic a.Analysis.doc) a.Analysis.diagnostics))
+                    (fun () -> publish_topology_dependents ~notify_back path))
                  (fun () ->
                     if is_current versions uri_str v then begin
                       let a2 = Analysis.run_tir_pass a in
@@ -440,6 +488,7 @@ class march_server =
            Printf.eprintf "march-lsp: did_change fiber error: %s\n%!"
              (Printexc.to_string exn));
       Lwt.return_unit
+      end
 
     (* -------------------------------------------------------------- *)
     (* Hover                                                           *)
@@ -448,6 +497,11 @@ class march_server =
     method on_req_hover ~notify_back:_ ~id:_ ~uri ~pos ~workDoneToken:_ _doc =
       let open Lsp.Types in
       let (line, utf16_char) = Pos.lsp_pos_to_pair pos in
+      if is_topology_uri uri then
+        Lwt.return
+          (try Topology_doc.hover_at ~path:(path_of_uri uri) ~line ~utf16_char
+           with _ -> None)
+      else
       let result =
         match get_analysis uri with
         | None -> None
@@ -484,6 +538,10 @@ class march_server =
         ~workDoneToken:_ ~partialResultToken:_ _doc =
       let (line, utf16_char) = Pos.lsp_pos_to_pair pos in
       let loc =
+        if is_topology_uri uri then
+          (try Topology_doc.definition_at ~path:(path_of_uri uri) ~line ~utf16_char
+           with _ -> None)
+        else
         match get_analysis uri with
         | None -> None
         | Some a -> Analysis.query_definition_at a ~line ~utf16_char
@@ -497,6 +555,11 @@ class march_server =
     method on_req_completion ~notify_back:_ ~id:_ ~uri ~pos ~ctx:_
         ~workDoneToken:_ ~partialResultToken:_ _doc =
       let (line, utf16_char) = Pos.lsp_pos_to_pair pos in
+      if is_topology_uri uri then
+        Lwt.return
+          (Some (`List (try Topology_doc.completions_at ~path:(path_of_uri uri) ~line ~utf16_char
+                        with _ -> [])))
+      else
       let uri_str = Lsp.Types.DocumentUri.to_string uri in
       let items =
         match get_analysis uri with
