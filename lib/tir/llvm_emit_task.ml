@@ -124,6 +124,18 @@ let emit_task_await ~emit_atom ctx (a : Tir.atom) : string * string =
     let (_, tp) = emit_atom ctx a in
     let r = fresh ctx "tawait" in
     emit ctx (Printf.sprintf "%s = call ptr @march_task_await(ptr %s)" r tp);
+    (* A cancelled task (a hard drain deadline, or task_cancel) comes back as
+       Err("task cancelled"), whose field is a string, not a tagged result:
+       normalise the payload only under the Ok tag (i32 at +8). *)
+    let tagp = fresh ctx "tawtagp" in
+    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tagp r);
+    let tag = fresh ctx "tawtag" in
+    emit ctx (Printf.sprintf "%s = load i32, ptr %s, align 4" tag tagp);
+    let isok = fresh ctx "tawok" in
+    emit ctx (Printf.sprintf "%s = icmp eq i32 %s, 0" isok tag);
+    let lbl_ok = fresh_block ctx "tawait_ok" and lbl_done = fresh_block ctx "tawait_done" in
+    emit ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" isok lbl_ok lbl_done);
+    emit_label ctx lbl_ok;
     let fp = fresh ctx "tawf" in
     emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp r);
     let v  = fresh ctx "tawv" in
@@ -159,6 +171,8 @@ let emit_task_await ~emit_atom ctx (a : Tir.atom) : string * string =
        emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" bp v2);
        emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" bp)
      | _ -> ());
+    emit ctx (Printf.sprintf "br label %%%s" lbl_done);
+    emit_label ctx lbl_done;
     (* Release the caller's Task handle — same ownership argument as
        task_await_unwrap above (consuming builtin, Perceus dups for every
        earlier use, nothing else ever dropped the handle).  Emitted after the

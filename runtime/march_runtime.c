@@ -4490,6 +4490,9 @@ void *march_actor_recv(void) {
     if (msg != MARCH_RECV_NO_MSG) return msg;
     march_proc *p = march_sched_current();
     if (p && p->stop_jmp) longjmp(*p->stop_jmp, 1);
+    /* A task stopped by a hard drain deadline completes its Task handle as
+     * cancelled rather than just ending its green thread (follow-up 4). */
+    march_sched_cancel_point();
     march_sched_exit();
     return MARCH_RECV_NO_MSG;   /* not reached */
 }
@@ -6420,6 +6423,13 @@ static void task_wait_done(int64_t *task) {
     pthread_mutex_unlock(&g_task_done_mu);
 }
 
+/* Tasks unwound by a hard drain deadline (march_sched_cancel_point). */
+static _Atomic int64_t g_tasks_cancelled = 0;
+#define MARCH_TASK_CANCELLED ((int64_t)0)
+int64_t march_tasks_cancelled(void) {
+    return atomic_load_explicit(&g_tasks_cancelled, memory_order_relaxed);
+}
+
 static void march_thunk_trampoline(void *arg) {
     march_thunk_arg *wa = (march_thunk_arg *)arg;
     void *clo = wa->clo;
@@ -6434,7 +6444,29 @@ static void march_thunk_trampoline(void *arg) {
     }
     typedef void *(*apply_fn_t)(void *, int64_t);
     apply_fn_t apply = *(apply_fn_t *)((char *)clo + 16);
-    void *result = apply(clo, (int64_t)0);
+    /* The cancellation landing (march_proc.task_jmp; DD step-6 follow-up 4):
+     * a hard drain deadline unwinds a task here from its next cancellation
+     * point, and its Task completes with the same "task cancelled" error
+     * march_task_cancel_by_id stores.  What the unwound frames held is not
+     * released (as for a panic). */
+    march_proc *self = march_sched_current();
+    jmp_buf cancel_jmp;
+    volatile int cancelled = 0;
+    void *volatile result = NULL;
+    if (self) self->task_jmp = &cancel_jmp;
+    if (setjmp(cancel_jmp) == 0) {
+        result = apply(clo, (int64_t)0);
+    } else {
+        cancelled = 1;
+    }
+    if (self) self->task_jmp = NULL;
+    if (task && cancelled) {
+        /* MARCH_TASK_CANCELLED: the one even value task[3] can hold (every
+         * real result is tagged odd below), which march_task_await turns
+         * into Err("task cancelled") and task_await_unwrap into a panic. */
+        task[3] = MARCH_TASK_CANCELLED;
+        atomic_fetch_add_explicit(&g_tasks_cancelled, 1, memory_order_relaxed);
+    }
     if (task) {
         /* Tag the result for the uniform March value convention: scalars (Int,
          * Bool, Unit) are returned as raw i64 by the apply function, but the
@@ -6443,8 +6475,10 @@ static void march_thunk_trampoline(void *arg) {
          * the original value.  Heap pointers fit in 63 bits on all supported
          * targets (ARM64/x86-64 use ≤48-bit user-space addresses), so the shift
          * is lossless. */
-        int64_t raw = (int64_t)(uintptr_t)result;
-        task[3] = (raw << 1) | (int64_t)1;     /* tagged result at offset 24 */
+        if (!cancelled) {
+            int64_t raw = (int64_t)(uintptr_t)result;
+            task[3] = (raw << 1) | (int64_t)1; /* tagged result at offset 24 */
+        }
         /* SEQ_CST store + SEQ_CST load: this store(task[4])-then-load(task[5])
          * is one half of a Dekker / store-buffering pair with task_wait_done's
          * store(task[5])-then-load(task[4]) — see the long comment there.
@@ -6572,6 +6606,7 @@ void *march_task_await(void *task_obj) {
     if (!task_obj) return mk_err_cstr("task_await: null task");
     int64_t *task = (int64_t *)task_obj;
     task_wait_done(task);
+    if (task[3] == MARCH_TASK_CANCELLED) return mk_err_cstr("task cancelled");
     void *result = (void *)(uintptr_t)task[3];
     return mk_ok(result);
 }
@@ -6584,6 +6619,9 @@ void *march_task_await_value(void *task_obj) {
     if (!task_obj) return (void *)1; /* tagged Unit/null */
     int64_t *task = (int64_t *)task_obj;
     task_wait_done(task);
+    /* unwrap of a cancelled task: as unwrapping any Err. */
+    if (task[3] == MARCH_TASK_CANCELLED)
+        march_panic(march_string_lit("task cancelled", 14));
     return (void *)(uintptr_t)task[3]; /* tagged result */
 }
 
@@ -6628,9 +6666,12 @@ void march_task_cancel_by_id(void *task_obj) {
     int64_t handle = task[2];
     if (!(handle & 1)) return;           /* proc not recorded yet */
     /* Store the cancelled sentinel before the status flip so the await side
-     * always sees a valid error result when it observes PROC_DEAD.  (Written
-     * whether or not the proc is still around, as it always was.) */
-    task[3] = (int64_t)(uintptr_t)mk_err_cstr("task cancelled");
+     * always sees it when it observes PROC_DEAD.  (Written whether or not
+     * the proc is still around, as it always was.)  The sentinel is 0, not
+     * an Err cell: march_task_await wraps task[3] in Ok and the compiled
+     * await normalises the payload as a tagged result, so a cell here was
+     * never an Err to March code. */
+    task[3] = MARCH_TASK_CANCELLED;
     march_reclaim_enter();
     march_proc *p = march_sched_find(handle >> 1);   /* NULL: already reaped */
     if (p) {

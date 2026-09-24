@@ -1426,7 +1426,22 @@ mod SessionNode do
         tcp_shutdown(l.control_fd)
         0
       end)
+      -- The shutdown wakes each data reader with an end of file; wait for
+      -- it to have RUN before `finish` closes the socket, or the close drops
+      -- its parked wait and the task never ends (the process would not
+      -- exit). Bounded: a reader that never started (`serve_outcome` not
+      -- reached) has no flag to set.
+      let _ = List.map(p.links, fn l -> await_reader(p, l.role, 500))
       ()
+    end
+  end
+
+  pfn await_reader(p : Party, role : Int, tries : Int) : () do
+    if tries <= 0 || Vault.get(p.meta, "reading" ++ rkey(role)) == None
+       || Vault.get(p.meta, "reader_done" ++ rkey(role)) != None do ()
+    else
+      sleep_ms(10)
+      await_reader(p, role, tries - 1)
     end
   end
 
@@ -1449,6 +1464,10 @@ mod SessionNode do
     let _ = List.map(p.links, fn l -> task_spawn(fn _ -> do
       let why = read_link(p, l)
       Vault.set(p.meta, "link_done" ++ rkey(l.role), 1)
+      -- For `endpoint_died`, which must not let `finish` close this socket
+      -- under a reader still parked in it (a close drops the parked wait;
+      -- only the shutdown wakes it, and the reader has to run first).
+      Vault.set(p.meta, "reader_done" ++ rkey(l.role), 1)
       send(p.ep, LinkEnded(l.role, why))
       0
     end))

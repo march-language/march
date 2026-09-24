@@ -803,6 +803,8 @@ void   *march_task_await(void *task_obj);
 void   *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr);
 /* Mark a task's green thread as DEAD (cooperative cancel). */
 void    march_task_cancel_by_id(void *task_obj);
+/* Tasks a hard drain deadline cancelled through their handle (follow-up 4). */
+int64_t march_tasks_cancelled(void);
 
 /* Float builtins. */
 double  march_float_abs(double f);

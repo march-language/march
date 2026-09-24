@@ -139,7 +139,7 @@ static void wait_pins_zero(uint32_t epoch, long timeout_ms) {
 
 enum { SLOT_ORDER = 1, SLOT_MANY, SLOT_DRAIN, SLOT_DRAIN_FMT, SLOT_BUSY,
        SLOT_HOLD, SLOT_EARLY, SLOT_CONVERT, SLOT_FULL, SLOT_HARD, SLOT_DEATH,
-       N_SLOTS };
+       SLOT_TASKS, N_SLOTS };
 #define N_MANY 2100   /* > the old 2048-entry snapshot cap */
 
 static void reset(void) {
@@ -447,6 +447,64 @@ static void test_hard_deadline_kills(void) {
     CHECK(c1.killed - c0.killed == 1, "and counted the kill");
 }
 
+/* ── Follow-up 4: a task pinned to the old epoch is CANCELLED at the hard
+ * deadline, through its handle ── */
+
+/* A capture-free March thunk, as march_task_spawn_thunk expects one: a
+ * 16-byte header (rc, tag) and the apply function at +16.  Immortal, so the
+ * trampoline's bookkeeping never frees it. */
+typedef struct { int64_t rc; int32_t tag, pad; void *(*apply)(void *, int64_t); } c_thunk;
+
+static _Atomic int g_task_stop;
+static _Atomic long g_task_ticks, g_task_finished;
+
+/* "Computing": never receives, only sleeps (a cancellation point). */
+static void *busy_task(void *clo, int64_t arg) {
+    (void)clo; (void)arg;
+    while (!atomic_load(&g_task_stop)) {
+        atomic_fetch_add(&g_task_ticks, 1);
+        march_sleep_ms(1);
+    }
+    atomic_fetch_add(&g_task_finished, 1);
+    return (void *)7;
+}
+static c_thunk g_busy_thunk = { MARCH_RC_IMMORTAL, 0, 0, busy_task };
+
+static void test_hard_deadline_cancels_tasks(void) {
+    printf("-- the hard deadline cancels a task pinned to the old epoch through its handle --\n");
+    reset();
+    atomic_store(&g_gate_open, 1);
+    atomic_store(&g_task_stop, 0);
+    atomic_store(&g_task_ticks, 0); atomic_store(&g_task_finished, 0);
+    int64_t cancelled0 = march_tasks_cancelled();
+    /* An actor to activate on, held so the old epoch stays pinned. */
+    void *a = new_actor(SLOT_TASKS);
+    send(a, MSG_HOLD);
+    /* The old task: pinned to the epoch current NOW. */
+    void *old_task = march_task_spawn_thunk(&g_busy_thunk);
+    sleep_ms(20);
+    long ticks0 = atomic_load(&g_task_ticks);
+    CHECK(ticks0 > 0, "the old task is running");
+    CHECK(activate_ex(SLOT_TASKS, (void *)v2_dispatch, migrate_v1_v2, 0, NULL,
+                      20, 80) > 0, "activation with soft 20 ms, hard 80 ms");
+    /* A task spawned after the activation runs at the new epoch: untouched. */
+    void *new_task = march_task_spawn_thunk(&g_busy_thunk);
+    void *r = march_task_await(old_task);           /* returns once cancelled */
+    CHECK(((march_hdr *)r)->tag == 1 /* Err */, "task_await of the old task is Err (cancelled)");
+    march_hcr_counters c1; march_hcr_counters_get(&c1);
+    CHECK(march_tasks_cancelled() - cancelled0 == 1, "exactly one task was cancelled");
+    CHECK(atomic_load(&g_task_finished) == 0, "the old task did not run to completion");
+    long ticks1 = atomic_load(&g_task_ticks);
+    sleep_ms(30);
+    CHECK(atomic_load(&g_task_ticks) > ticks1, "the new-epoch task keeps running");
+    atomic_store(&g_task_stop, 1);
+    void *r2 = march_task_await(new_task);
+    CHECK(((march_hdr *)r2)->tag == 0 /* Ok */, "the new-epoch task finishes normally");
+    CHECK(atomic_load(&g_task_finished) == 1, "and only it finished");
+    CHECK(!march_is_alive(a), "the held actor was killed at the hard deadline");
+    (void)c1;
+}
+
 static void test_dead_actor_releases_pins(void) {
     printf("-- actor killed before reaching its marker --\n");
     reset();
@@ -477,6 +535,7 @@ static void test_main(void) {
     test_migrate_msg_converts();
     test_full_drop_new_mailbox();
     test_hard_deadline_kills();
+    test_hard_deadline_cancels_tasks();
     test_dead_actor_releases_pins();
     march_hcr_counters c; march_hcr_counters_get(&c);
     printf("-- counters: deferred=%lld converted=%lld dropped=%lld killed=%lld "
@@ -498,7 +557,7 @@ int main(void) {
         NULL, "Ord_dispatch", "Many_dispatch", "Drain_dispatch",
         "DrainFmt_dispatch", "Busy_dispatch", "Hold_dispatch",
         "Early_dispatch", "Convert_dispatch", "Full_dispatch",
-        "Hard_dispatch", "Death_dispatch" };
+        "Hard_dispatch", "Death_dispatch", "Tasks_dispatch" };
     march_dispatch_init(N_SLOTS);
     for (uint32_t i = 1; i < N_SLOTS; i++) {
         march_dispatch_register_name(i, names[i]);

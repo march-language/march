@@ -412,6 +412,16 @@ typedef struct march_proc {
      * underflow, abort).  The landing site is the loop's normal death path.
      * Same migration argument as crash_jmp: lives on the proc, not in TLS. */
     jmp_buf                   *stop_jmp;
+    /* A TASK's cancellation landing (DD step-6 follow-up 4): set by the task
+     * trampoline (march_thunk_trampoline) around the task's closure, on this
+     * proc's own stack.  When cancel_requested is set -- the hard drain
+     * deadline, march_sched_stop_epoch -- the task is unwound to it at its
+     * next cancellation point (march_sched_cancel_point: a compiled yield
+     * point, a sleep, a stopped receive), and its Task handle completes as
+     * cancelled, so a task computing without receiving no longer runs on.
+     * Lives on the proc for the same migration reason as crash_jmp. */
+    jmp_buf                   *task_jmp;
+    _Atomic int                cancel_requested;
     /* The unified epoch model (D12/D33; specs/plans/2026-09-21-distributed-
      * authority-and-deploys-plan.md, II.4.1).  The code epoch this unit of
      * work runs at: every boundary call it makes resolves to the newest
@@ -812,6 +822,9 @@ uint32_t march_sched_send_epoch(void);
  * without receiving runs on (the scheduler is cooperative).  Returns the
  * number of procs told. */
 int64_t march_sched_stop_epoch(uint32_t upto);
+/* Unwind the running task to its trampoline if its cancellation was
+ * requested (march_proc.task_jmp); a no-op otherwise.  See march_scheduler.c. */
+void    march_sched_cancel_point(void);
 /* Spawn with the CURRENT epoch rather than the spawner's: a supervisor
  * restart, which D11 says runs the new code. */
 march_proc *march_sched_spawn_current(void (*fn)(void *), void *arg);

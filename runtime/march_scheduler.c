@@ -2590,6 +2590,7 @@ volatile _Thread_local int64_t march_tls_reductions = MARCH_REDUCTION_BUDGET;
 volatile int64_t march_preempt_request = 0;
 
 void march_yield_from_compiled(void) {
+    march_sched_cancel_point();
     /* Clear the request FIRST.  If we cleared it after yielding, this thread
      * would re-enter compiled code, immediately observe the still-set flag,
      * and yield again in a tight loop until the daemon happened to clear it. */
@@ -2600,6 +2601,7 @@ void march_yield_from_compiled(void) {
      * still be valid for future use (task_reductions() reads it). */
     march_tls_reductions = MARCH_REDUCTION_BUDGET;
     march_sched_yield();
+    march_sched_cancel_point();
 }
 
 /* Message disposer for dropped mailbox messages. The runtime registers a
@@ -3084,6 +3086,19 @@ int march_sched_take_markers(uint32_t upto, void **msgs, uint32_t *epochs,
     return n;
 }
 
+/* A task whose cancellation was requested (march_sched_stop_epoch) unwinds
+ * here to its trampoline's landing (march_proc.task_jmp), which completes
+ * its Task as cancelled.  Called only where no runtime state is held on the
+ * task's behalf: a compiled yield point, a sleep, a stopped receive.  A
+ * task parked in an fd wait, a task_await or an Actor.call is cancelled at
+ * its first cancellation point after that wait ends. */
+void march_sched_cancel_point(void) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    if (p && p->task_jmp
+            && atomic_load_explicit(&p->cancel_requested, memory_order_acquire))
+        longjmp(*p->task_jmp, 1);
+}
+
 int64_t march_sched_stop_epoch(uint32_t upto) {
     int64_t n = 0;
     pthread_mutex_lock(&g_registry_mu);
@@ -3095,10 +3110,16 @@ int64_t march_sched_stop_epoch(uint32_t upto) {
         if (!ce || ce > upto) continue;
         if (atomic_load_explicit(&p->status, memory_order_acquire) == PROC_DEAD)
             continue;
+        /* A real cancel (follow-up 4): the stop ends a blocking receive, and
+         * cancel_requested unwinds a task at its next cancellation point. */
+        atomic_store_explicit(&p->cancel_requested, 1, memory_order_release);
         march_sched_request_stop(p);
         n++;
     }
     pthread_mutex_unlock(&g_registry_mu);
+    /* Make every running green thread reach a compiled yield point now, so a
+     * task computing without yielding meets its cancellation promptly. */
+    if (n > 0) march_preempt_request = 1;
     return n;
 }
 
@@ -3595,7 +3616,11 @@ static void timer_service(int64_t now_ms) {
  * delivery to this proc), so loop on the clock. */
 void march_sleep_ms(int64_t ms) {
     int64_t until = march_now_ms() + (ms > 0 ? ms : 0);
-    while (march_now_ms() < until) march_sched_park_self_until(until);
+    while (march_now_ms() < until) {
+        march_sched_cancel_point();
+        march_sched_park_self_until(until);
+    }
+    march_sched_cancel_point();
 }
 
 /* ── Phase 5A: signal-based preemption ───────────────────────────────── */
