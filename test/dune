@@ -7654,22 +7654,45 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; mutates a SHARED array in place. Verified non-vacuous on 2026-09-16 by
 ; forcing the in-place path unconditionally -- that line, and only that
 ; line, flipped to false.
+;
+; The same file covers NativeArray.sort_float (f64, IEEE 754 totalOrder:
+; NaN / -0.0 / +-Inf placement). The binary runs TWICE against the same
+; golden: the second run sets MARCH_TEST_NSORT_DEPTH_LIMIT=0, which forces
+; every segment above the small-sort cutoff into the heapsort fallback
+; (nsort_heap) -- the only way to reach it, since the pattern-breaking step
+; makes it practically unreachable from input. The INTERPRETER runs it too,
+; against the same golden: OCaml's `compare` puts every NaN first and ties
+; -0.0 with 0.0, so an interpreter arm built on it (rather than on the
+; totalOrder key the C sort uses) diverges on the f64 specials lines.
 (rule
- (targets native_arr_sort native_arr_sort.out)
+ (targets native_arr_sort native_arr_sort.out native_arr_sort_heap.out
+          native_arr_sort_interp.out)
  (deps (file %{exe:../bin/main.exe})
        (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/native_arr_sort.march)
        (source_tree ../stdlib))
  (action
   (progn
+   (with-stdout-to native_arr_sort_interp.out
+     (run %{exe:../bin/main.exe} native/native_arr_sort.march))
    (run %{exe:../bin/main.exe} --compile -o native_arr_sort
         native/native_arr_sort.march)
    (with-stdout-to native_arr_sort.out
-        (system "./native_arr_sort")))))
+        (system "./native_arr_sort"))
+   (with-stdout-to native_arr_sort_heap.out
+        (system "MARCH_TEST_NSORT_DEPTH_LIMIT=0 ./native_arr_sort")))))
 
 (rule
  (alias runtest)
  (action (diff native/native_arr_sort.expected native_arr_sort.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort.expected native_arr_sort_heap.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort.expected native_arr_sort_interp.out)))
 
 ; ── fold per-element float box: live-object guard ──────────────────────
 ; The rule above diffs OUTPUT ONLY, and a leak is invisible to an output

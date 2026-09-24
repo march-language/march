@@ -1,5 +1,5 @@
 -- types (0) --
--- fns (62) --
+-- fns (63) --
 ## NativeArray.f32_to_float_arr
 fn NativeArray.f32_to_float_arr(arr : '_) : '_ =
   native_f32_to_float_arr(arr)
@@ -183,6 +183,10 @@ fn NativeArray.set_int(arr : '_, i : Int, v : Int) : '_ =
 ## NativeArray.set_u8
 fn NativeArray.set_u8(arr : '_, i : Int, v : Int) : '_ =
   native_u8_arr_set(arr, i, v)
+
+## NativeArray.sort_float
+fn NativeArray.sort_float(arr : '_) : '_ =
+  native_float_arr_sort(arr)
 
 ## NativeArray.sort_int
 fn NativeArray.sort_int(arr : '_) : '_ =

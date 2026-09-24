@@ -169,6 +169,28 @@ mod NativeArray do
     native_float_arr_sum(arr)
   end
 
+  doc """
+  Sort ascending by IEEE 754 `totalOrder`. Same algorithm and ownership as
+  `sort_int`: unstable, in place when the array is uniquely owned, so a
+  threaded `let a = NativeArray.sort_float(a)` allocates nothing.
+
+  `totalOrder` is a total order on every bit pattern, NaN included:
+  `-NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN`. Two consequences
+  that differ from the rest of the language:
+
+  - `-0.0` sorts strictly before `+0.0`, although `-0.0 == 0.0` is true
+    and `compare(-0.0, 0.0)` is `0`.
+  - A NaN goes to the end, or to the front if its sign bit is set. `<`
+    is false for every NaN comparison and `compare` does not order NaN
+    consistently, so a sort built on either has no defined NaN placement.
+
+      march> NativeArray.get_float(NativeArray.sort_float(NativeArray.from_list_float([2.5, -1.5, 0.5])), 0)
+      -1.5
+  """
+  fn sort_float(arr) do
+    native_float_arr_sort(arr)
+  end
+
   doc "Apply [f] to every element, returning a new NativeFloatArr. O(n)."
   fn map_float(arr, f) do
     native_float_arr_map(arr, f)

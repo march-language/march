@@ -9,3 +9,16 @@ nearly: 13
 alias original intact: true
 alias result sorted: true
 idempotent: true
+f64 sorted: 13
+f64 reversed: 13
+f64 equal: 13
+f64 dist10: 13
+f64 sawtooth: 13
+f64 organ: 13
+f64 random: 13
+f64 nearly: 13
+f64 specials: nan -inf -1. -0. 0. 1. inf nan
+f64 nan last: -1. 1. nan
+f64 mixed specials: 5
+f64 alias original intact: true
+f64 alias result sorted: true

@@ -1386,6 +1386,8 @@ let builtin_bindings : (string * scheme) list =
              TArrow (t_int, TArrow (t_float, TCon ("NativeFloatArr", []))))));
     ("native_float_arr_sum",
        Mono (TArrow (TCon ("NativeFloatArr", []), t_float)));
+    ("native_float_arr_sort",
+       Mono (TArrow (TCon ("NativeFloatArr", []), TCon ("NativeFloatArr", []))));
     ("native_float_arr_min",
        Mono (TArrow (TCon ("NativeFloatArr", []), t_float)));
     ("native_float_arr_max",
