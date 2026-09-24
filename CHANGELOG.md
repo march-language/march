@@ -322,6 +322,18 @@ git log is authoritative for exact commits.
   failed to link with `Undefined symbols: "_Inner.Box_spawn"`. It now links and runs.
   A `mailbox N policy` declared on such an actor is also applied at a qualified spawn;
   before, it was silently skipped there.
+
+- **Fourteen stdlib wrappers over builtins the typechecker did not know now
+  typecheck**, and the interpreter and compiled backends agree on each.
+  `System.os()`/`System.arch()` return a lowercase `String` (`"macos"`,
+  `"aarch64"`), and misusing one is a type error instead of a runtime crash;
+  compiled programs calling them previously failed to link. Compiled
+  `Crypto.sha512` returned the SHA-256 digest, compiled `UUID.v5` crashed with
+  SIGBUS, compiled `IO.warn`/`Logger.appender_stderr` printed a blank line after
+  every message, and `System.version()` said `march/dev` compiled and `0.1.0`
+  interpreted; it now reports the compiler's real version in both. Compiled
+  `IO.read_line` no longer splits lines longer than 4096 bytes. `print_stderr`
+  now requires `IO.Console`, like `print`.
 - **`csv_next_row`'s result now matches against `CsvEof` / `Row`.** The builtin
   is typed with the qualified `Csv.CsvRow`, and builtin signatures skipped the
   qualified-to-bare canonicalization that written type annotations get, so

@@ -35,6 +35,7 @@ let cap_table : (string * string) list = [
   (* IO.Console *)
   ("println",               "IO.Console");
   ("print",                 "IO.Console");
+  ("print_stderr",          "IO.Console");
   (* IO.FileRead *)
   ("file_exists",           "IO.FileRead");
   ("file_read",             "IO.FileRead");

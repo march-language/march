@@ -573,6 +573,13 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
      | Some e' -> lower_expr env e'
      | None -> assert false)
 
+  (* `march_version()` is a compile-time constant: fold it to the compiler's
+     own version string (dune-project), the same value the interpreter
+     returns, instead of a C literal that drifts from both. *)
+  | Ast.EApp (Ast.EVar { txt = "march_version"; _ }, ([] | [ _ ]), sp)
+    when not (Hashtbl.mem !_current_module_fns "march_version") ->
+    lower_expr env (Ast.ELit (Ast.LitString March_ast.March_version.version, sp))
+
   (* --- Function application (CPS: all args must be atoms) --- *)
   | Ast.EApp (f_expr, args, call_sp) ->
     (* Check for default-arg dispatch: if f is a plain EVar that names a
