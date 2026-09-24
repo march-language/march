@@ -254,9 +254,6 @@ let base_env : env =
            | Some inst -> VBool inst.ai_alive
            | None      -> VBool false)
         | _ -> eval_error "is_alive: expected Pid"))
-  ; ("respond", VBuiltin ("respond", function
-        | [_] -> VUnit   (* stub: full async impl in future *)
-        | _ -> eval_error "respond: expected one argument"))
   ; ("monitor", VBuiltin ("monitor", function
         | [VPid watcher_pid; VPid target_pid] ->
           VInt (monitor_actor ~watcher_pid ~target_pid)
@@ -4490,6 +4487,23 @@ let base_env : env =
           for i = 0 to Array.length a - 1 do s := !s +. a.(i) done;
           VFloat !s
         | _ -> eval_error "native_float_arr_sum: expected NativeFloatArr"))
+  ; ("native_float_arr_sort", VBuiltin ("native_float_arr_sort", function
+        | [VNativeFloatArr a] ->
+          (* IEEE 754 totalOrder, the same key the C sort (nsort_f64 in
+             runtime/march_runtime.c) sorts on:
+               key(bits) = bits lxor ((bits asr 63) lsr 1)
+             compared as a signed int64, giving
+             -NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN.
+             NOT OCaml's [compare]: it puts every NaN first whatever its
+             sign and ties -0.0 with 0.0, so the backends would disagree
+             (test/native/native_arr_sort.march's f64 specials lines go red).
+             key is an involution, so mapping it back restores the bits. *)
+          let key b =
+            Int64.logxor b (Int64.shift_right_logical (Int64.shift_right b 63) 1) in
+          let ks = Array.map (fun f -> key (Int64.bits_of_float f)) a in
+          Array.sort Int64.compare ks;
+          VNativeFloatArr (Array.map (fun k -> Int64.float_of_bits (key k)) ks)
+        | _ -> eval_error "native_float_arr_sort: expected NativeFloatArr"))
   ; ("native_float_arr_min", VBuiltin ("native_float_arr_min", function
         | [VNativeFloatArr a] ->
           let m = ref a.(0) in

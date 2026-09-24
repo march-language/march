@@ -58,8 +58,10 @@ let total = NativeArray.sum_float(doubled)
 `NativeArray.sort_int` sorts an `Int` array in place when nothing else holds
 it, and copies when something does. It is unstable, which no program can
 observe for plain numbers, and it recognises already-sorted, reversed and
-low-cardinality input instead of always paying `n log n`. Floats and the
-narrow widths are not sorted yet.
+low-cardinality input instead of always paying `n log n`.
+`NativeArray.sort_float` does the same for `Float` arrays, ordering by IEEE 754
+`totalOrder`: NaNs get a fixed place at the ends, and `-0.0` sorts before
+`0.0`. The narrow widths (f32, i32, u8) are not sorted yet.
 
 When you need guaranteed vector codegen rather than an optimizer decision
 (cross-lane structure with masks and `select`, a fused multiply-add, or byte-level

@@ -232,7 +232,9 @@ let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) -> m a
   | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> false
   | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a) | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> m a
-  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.And (a, b)
+  | Smt.Ite (c, a, b) -> m c || m a || m b
+  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.Div (a, b) | Smt.Mod (a, b)
+  | Smt.And (a, b)
   | Smt.Or (a, b)
   | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b)
   | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
@@ -281,7 +283,11 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.Not a -> w a
   | Smt.Neg a | Smt.MulLit (_, a) | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> int_side a
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) -> w a && w b
-  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.Lt (a, b)
+  (* The condition is a formula; the branches are Int terms (the only [Ite]
+     the reflector builds is truncating division's sign split). *)
+  | Smt.Ite (c, a, b) -> w c && int_side a && int_side b
+  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.Div (a, b) | Smt.Mod (a, b)
+  | Smt.Lt (a, b)
   | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b) -> int_side a && int_side b
   (* Floats and `$Str` are disjoint sorts; an `fp.*` term is well-sorted here
      exactly when neither operand drags a string in.  Whether its operands are
@@ -341,7 +347,8 @@ let rec mentions_float (is_float : string -> bool) (t : Smt.term) : bool =
   | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.exists m args
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a)
   | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> m a
-  | Smt.Mul (a, b)
+  | Smt.Ite (c, a, b) -> m c || m a || m b
+  | Smt.Mul (a, b) | Smt.Div (a, b) | Smt.Mod (a, b)
   | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.And (a, b) | Smt.Or (a, b)
   | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b)
   | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
@@ -396,11 +403,15 @@ let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) 
   | Smt.FpEq _ | Smt.FpLt _ | Smt.FpLe _ | Smt.FpGt _ | Smt.FpGe _ -> true
   (* Membership and subset are the two Bool-valued set operators. *)
   | Smt.SetMem _ | Smt.SetSub _ -> true
+  (* An `ite` is Bool-valued exactly when its branches are.  The reflector's
+     only [Ite] is truncating division's Int-valued sign split, so in Boolean
+     position it is (correctly) refused like any other Int term. *)
+  | Smt.Ite (_, a, b) -> w a && w b
   (* Nothing in this checker declares an uninterpreted function at `Bool`
      (measures and selectors return Int or a datatype), so an application in
      Boolean position is a sort error just as arithmetic and literals are. *)
   | Smt.App _ | Smt.Ctor _ | Smt.IntLit _ | Smt.FloatLit _ | Smt.Add _ | Smt.Sub _
-  | Smt.MulLit _ | Smt.Mul _ | Smt.DivLit _ | Smt.ModLit _ | Smt.Neg _
+  | Smt.MulLit _ | Smt.Mul _ | Smt.DivLit _ | Smt.ModLit _ | Smt.Div _ | Smt.Mod _ | Smt.Neg _
   | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetUnion _ | Smt.SetInter _ | Smt.SetDiff _
   | Smt.SetCard _ -> false
 
@@ -1137,6 +1148,9 @@ let rec pin_set_sorts (elem : Smt.sort) (t : Smt.term) : Smt.term =
   | Smt.MulLit (k, a) -> Smt.MulLit (k, p a)
   | Smt.DivLit (a, k) -> Smt.DivLit (p a, k)
   | Smt.ModLit (a, k) -> Smt.ModLit (p a, k)
+  | Smt.Div (a, b) -> Smt.Div (p a, p b)
+  | Smt.Mod (a, b) -> Smt.Mod (p a, p b)
+  | Smt.Ite (c, a, b) -> Smt.Ite (p c, p a, p b)
   | Smt.Eq (a, b) -> Smt.Eq (p a, p b)
   | Smt.Ne (a, b) -> Smt.Ne (p a, p b)
   | Smt.And (a, b) -> Smt.And (p a, p b)
@@ -1165,7 +1179,9 @@ let vc_set_elem_sorts (vc : Smt.vc) : Smt.sort list =
     | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.iter go args
     | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a)
     | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> go a
-    | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.And (a, b) | Smt.Or (a, b)
+    | Smt.Ite (c, a, b) -> go c; go a; go b
+    | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.Div (a, b) | Smt.Mod (a, b)
+    | Smt.And (a, b) | Smt.Or (a, b)
     | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b) | Smt.Le (a, b)
     | Smt.Gt (a, b) | Smt.Ge (a, b) | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b)
     | Smt.FpGt (a, b) | Smt.FpGe (a, b) -> go a; go b
@@ -3010,10 +3026,16 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
     | Smt.IntLit _ -> IInt
     | Smt.BoolLit _ -> IBool
     | Smt.FloatLit _ -> IFloat
-    | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) ->
+    | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.Div (a, b) | Smt.Mod (a, b) ->
       let ta = infer a in
       let tb = infer b in
       unify ta IInt; unify tb IInt; IInt
+    (* Traversal order c, a, b — [rewrite] below pops slots in the same order. *)
+    | Smt.Ite (c, a, b) ->
+      unify (infer c) IBool;
+      let ta = infer a in
+      let tb = infer b in
+      unify ta tb; ta
     | Smt.MulLit (_, a) | Smt.DivLit (a, _) | Smt.ModLit (a, _) | Smt.Neg a ->
       unify (infer a) IInt; IInt
     | Smt.Not a -> ignore (infer a); IBool
@@ -3141,6 +3163,12 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       | Smt.MulLit (k, a) -> Smt.MulLit (k, rewrite a)
       | Smt.DivLit (a, k) -> Smt.DivLit (rewrite a, k)
       | Smt.ModLit (a, k) -> Smt.ModLit (rewrite a, k)
+      | Smt.Div (a, b) -> let a' = rewrite a in Smt.Div (a', rewrite b)
+      | Smt.Mod (a, b) -> let a' = rewrite a in Smt.Mod (a', rewrite b)
+      | Smt.Ite (c, a, b) ->
+        let c' = rewrite c in
+        let a' = rewrite a in
+        Smt.Ite (c', a', rewrite b)
       | Smt.Neg a -> Smt.Neg (rewrite a)
       | Smt.Not a -> Smt.Not (rewrite a)
       | Smt.And (a, b) -> let a' = rewrite a in Smt.And (a', rewrite b)
@@ -3249,7 +3277,9 @@ let rec term_sorts (acc : Smt.sort list) (t : Smt.term) : Smt.sort list =
   | Smt.SetSng (e, a) -> term_sorts (e :: acc) a
   | Smt.MulLit (_, a) | Smt.DivLit (a, _) | Smt.ModLit (a, _) | Smt.Neg a | Smt.Not a ->
     term_sorts acc a
-  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.And (a, b) | Smt.Or (a, b)
+  | Smt.Ite (c, a, b) -> term_sorts (term_sorts (term_sorts acc c) a) b
+  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.Div (a, b) | Smt.Mod (a, b)
+  | Smt.And (a, b) | Smt.Or (a, b)
   | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b) | Smt.Le (a, b)
   | Smt.Gt (a, b) | Smt.Ge (a, b) | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b)
   | Smt.FpGt (a, b) | Smt.FpGe (a, b) | Smt.SetMem (a, b) | Smt.SetUnion (a, b)

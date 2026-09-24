@@ -54,6 +54,27 @@ git log is authoritative for exact commits.
   `forge cluster revoke`; `MARCH_CLUSTER_REVOCATIONS` seeds the list at
   startup; nodes pass revocations on to each other, and only the operator's
   signature makes one count. `ClusterNode.revocations(c)` lists them.
+- **Refinement predicates: `/` and `%` in general.** A predicate may now divide
+  a possibly-negative value, or divide by a variable: `{Int | _ / 2 == -3}` and
+  `{Int | d != 0 && _ / d > 0}` are checked instead of skipped. The checker uses
+  March's truncating division (`-7 / 2` is `-3`, `-7 % 2` is `-1`), not the
+  solver's Euclidean one, so `f(-7)` proves and `f(-5)` is reported. Dividing by
+  zero panics, so a predicate is false wherever it would divide by zero,
+  following `&&`/`||` short-circuiting: with `_ / d > 0`, a call with `d == 0` is
+  a violation and one that cannot rule out `d == 0` is not proved.
+- **`forge audit --inferred --allow-unanalyzable`** gates on the dependencies
+  that typecheck, so a project can adopt the capability gate before its whole
+  dependency graph checks cleanly. Every unanalyzable dependency is still listed
+  with its reason on every run, and none is treated as asking for nothing.
+  `--record` leaves unanalyzable dependencies out of `forge.caps.lock` and keeps
+  any set recorded for them earlier.
+- **`NativeArray.sort_float` — a `Float` array can now be sorted.** Same
+  algorithm and ownership as `sort_int` (unstable, in place when uniquely owned,
+  copy-on-write when shared), 1.9–18x faster than libc `qsort` at 5 million
+  elements. Floats sort by IEEE 754 `totalOrder`, so NaN has a defined place:
+  `-NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN`. Note that `-0.0` sorts
+  before `+0.0` even though `-0.0 == 0.0` and `compare(-0.0, 0.0)` is `0`. The
+  interpreter and compiled builds produce the same order, NaN included.
 - **Editor support for `topology.toml`** (build step 7 of the distributed-deploys
   plan). `march-lsp` recognises `topology.toml` and `topology.<env>.toml` and shows
   `forge topology check`'s diagnostics on forge's lines, computed by forge's own
@@ -187,6 +208,9 @@ git log is authoritative for exact commits.
   including when the accumulator is itself a tuple.
 
 ### Removed
+- **The `respond` builtin is gone.** It was an interpreter no-op stub
+  (`respond(x)` returned `()`), had no callers, and never had a compiled
+  lowering.
 - **`MARCH_NO_TRMC` is gone.** The environment variable turned off
   tail-recursion-modulo-cons for every compile in the process, including the
   stdlib, which increasingly depends on the transform to avoid overflowing the
@@ -203,6 +227,26 @@ git log is authoritative for exact commits.
   `needs IO.Mut` / `needs IO.Clock` and the matching `Cap(IO.Mut)` /
   `Cap(IO.Clock)` parameters (nine `test/native` loopback fixtures and the
   `restart` two-node scenario did).
+- **`forge audit --inferred` caches each dependency's result** under
+  `.forge/audit-cache/`, keyed on the dependency's files, the files on its lib
+  path and the compiler. A repeat audit re-analyzes only the dependencies whose
+  inputs changed, instead of rerunning `march caps` (minutes each) for all of
+  them. A cached result prints the same output as a fresh one.
+- **An unanalyzable dependency now fails `forge audit --inferred`.** A dependency
+  that does not typecheck is listed as `NOT ANALYZABLE` with the compiler's
+  reason, the check exits 1, and `--record` refuses to write a baseline.
+  Previously the audit printed the error to stderr, used the dependency's
+  declared `needs` set in its place and passed.
+- **forge checks cached dependencies on online builds too.** `forge build`,
+  `check`, `run`, `test` and `bench` re-hash each cached git or registry
+  dependency against `forge.lock`, once per command. Before, only `--offline`
+  did this. A tree that was edited or corrupted is fetched again, checked, and
+  swapped in, with a one-line note. If the fresh copy does not match
+  `forge.lock` either, the command fails, naming the dependency and both hashes,
+  because `forge.lock` or the upstream source has changed. A clean cache prints
+  nothing and fetches nothing. `forge deps` also no longer keeps an edited
+  cached git tree and writes that tree's hash into `forge.lock`: it replaces the
+  tree with the fresh clone. `--offline` is unchanged: a mismatch is an error.
 - **Hot reload: a second deploy while actors are still migrating is accepted**
   (it used to be refused with `ERR publish_failed`); each actor applies both
   migrations in order. Past the soft drain deadline, messages in an unchanged
@@ -441,6 +485,71 @@ git log is authoritative for exact commits.
 - **Cluster handshake reflection.** A shared-secret node accepted a peer that
   sent the node's own hello back to it and then its own proof back; a nonce
   equal to ours is now refused.
+- **Compiled `to_string` no longer quotes strings inside a List or Result of
+  unknown static type.** When the type was erased, for example when the value
+  reached `to_string` through a closure stored in a container, a compiled
+  program printed `["a", "b"]` and `Ok("x")` where the interpreter prints
+  `[a, b]` and `Ok(x)`. Compiled output now matches the interpreter. Strings
+  inside a user constructor or record are still quoted (`B("x")`), as the
+  interpreter quotes them. `~H` interpolation still quotes every nested string.
+- **Floats at the JIT REPL print correctly and no longer crash the session.** Any
+  Float inside a list, `Option`, `Result` or tuple printed as garbage like
+  `[2.15e-313, 2.15e-313]` at the (default, JIT-backed) REPL prompt, including
+  `NativeArray.to_list_float` and `to_list_f32` results and a plain `[3.5, 1.25]`
+  literal; they now print their values. Separately, an expression that returned a
+  Float, followed by any expression returning a list, string or other heap value
+  (`3.5` then `[1, 2]`, or `NativeArray.get_float(a, 0)` then
+  `NativeArray.to_list_float(a)`), killed the REPL with a segmentation fault; it now
+  runs. The interpreter, `--compile` and `march --jit file.march` were not affected.
+- **`forge audit --inferred` names a toolchain too old for `march caps`.** When
+  the toolchain's `march` predated the `caps` subcommand (before 0.3.0), it read
+  `caps` as a file name and failed, so every dependency showed as unanalyzable
+  and nothing pointed at the compiler. The audit now checks the compiler before
+  analyzing anything and stops with one error that gives the toolchain's path,
+  its version and the version it needs. A `.march-version` pin whose toolchain
+  is not installed is also an error now; the audit used to fall back to
+  whatever `march` was on `PATH`.
+- **Sixteen builtins that ran interpreted but failed to link when compiled now
+  compile or give a clear error.** A `--compile`d call used to fail at link time
+  with `Undefined symbols: _<name>` and no March location. `char_is_alpha`,
+  `char_is_uppercase`, `char_is_lowercase`, `char_to_uppercase`,
+  `char_to_lowercase`, `float_from_string`, `print_int`, `print_float` and `tap`
+  now compile, and the compiled output matches the interpreter. The
+  dynamic-supervisor queries (`Supervisor.stop_child`, `which_children`,
+  `count_children`), `App.stop` and `task_spawn_link` only work in the
+  interpreter, so a compiled call is now an error at the call site that says so
+  and names the compiled alternative. `to_json` on a type with no `derive Json`
+  now reports the missing codec even when no type in the program derives
+  `Json`. `task_spawn_link(f, pid)` is now typed with the two arguments the
+  interpreter takes. Before, no typechecked program could call it.
+- **A zero-argument lambda is a `() -> T` everywhere.** `fn () -> 3` (or `fn -> 3`)
+  in a record literal, or bound with `let` and passed on, was typed as its result,
+  so it could not fill a `() -> Int` record field ("expected `() -> Int` but got
+  `Int`"). It is now `() -> T` wherever it appears and `f()` calls it, on both
+  backends. Passing a zero-argument named fn by bare name where a generic
+  function calls it with `()` (`apply(answer)` with `fn apply(f) do f() end`) is
+  now a type error; it used to crash compiled code. Also fixed: a fn with a
+  required parameter after a defaulted one (`fn f(a, b \\ "x", c)`) forwarded
+  the short call `f(1, 2)` with its arguments out of order.
+- **Compiled `Base64.encode` and `sha256` on a `Bytes` no longer crash.** Since
+  boxed constructor cells began carrying a runtime type id (0.4.0), a compiled
+  `Base64.encode(Bytes.from_string("x"))`, `Base64.url_encode`/`mime_encode`, or
+  `sha256(bytes)` died with `fatal SIGBUS` (exit 138): the runtime mistook the
+  `Bytes` value for a `String`. The interpreter was unaffected.
+- **`pid_to_int` and supervise blocks no longer leak the actor record.**
+  Compiled, every `pid_to_int(p)` and `Actor.set_queue_limit(p, …)` call kept
+  one reference to `p`'s actor record, and every supervise-block child was
+  held two extra times by its supervisor's spawn code (the supervisor itself
+  twice more), so an actor that had been through any of them was never freed
+  after it stopped. They now leave the count alone.
+- **`--cap-sandbox` write scopes behind a symlink no longer deny every write.** On
+  macOS, `needs IO.FileWrite("/tmp/myapp")` refused even in-scope writes, because
+  the kernel matches the resolved path (`/private/tmp/myapp`) and the scope was
+  baked into the profile as written. The binary now resolves each scope with
+  `realpath()` at startup, on the machine it runs on, before installing the
+  sandbox. A scope that does not exist yet resolves through its longest existing
+  parent, and a scope that is itself a symlink resolves to its target. Writes
+  outside the scope are still refused.
 - **`Compress` decoders and encoders return the `Compress.Error` their signatures
   promise.** They used to pass the codec's message string straight through as the
   error, so matching `Err(Compress.InvalidInput(_))` never matched. Now corrupt or
