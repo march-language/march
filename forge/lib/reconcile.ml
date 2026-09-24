@@ -395,3 +395,206 @@ let render_status (ss : node_status list) : string =
       end)
     ss;
   Buffer.contents b
+
+(* ── One reconciliation pass: diff, push, wait, report ─────────────────── *)
+
+(** The digest the running nodes were last given: copied from
+    [.forge/topology.json] when [forge run --processes] starts them and
+    after every push. [.forge/topology.json] itself is not the observed
+    state: [forge build] and [forge topology check] rewrite it without
+    telling any node. *)
+let applied_file ~root = Filename.concat (run_dir ~root) "applied.json"
+
+let record_applied ~root =
+  match In_channel.with_open_bin (Topology.digest_file ~root) In_channel.input_all with
+  | text ->
+    mkdir_p (run_dir ~root);
+    Out_channel.with_open_bin (applied_file ~root) (fun oc -> output_string oc text)
+  | exception Sys_error _ -> ()
+
+(** What a difference between two topologies takes to apply. *)
+type change_kind =
+  | Placement              (** the nodes re-read it: no code change, no restart *)
+  | Needs_restart          (** code or process layout: rebuild and restart *)
+
+type change = { subject : string; detail : string; kind : change_kind }
+
+let place_text (p : Topology.place option) =
+  match p with
+  | None -> "everywhere"
+  | Some { Topology.on = None; count = None } -> "everywhere"
+  | Some { on = Some l; count = None } -> "on " ^ l
+  | Some { on = None; count = Some n } -> Printf.sprintf "count %d" n
+  | Some { on = Some l; count = Some n } -> Printf.sprintf "count %d on %s" n l
+
+let opt_text f = function None -> "(none)" | Some v -> f v
+
+let hosts_text (hs : Topology.host list) =
+  String.concat ", " (List.map (fun (h : Topology.host) ->
+      if h.labels = [] then h.host else Printf.sprintf "%s [%s]" h.host (String.concat "," h.labels)) hs)
+
+(** Every difference between [old_t] (what the nodes run) and [new_t],
+    classified. Placement, capacity, a role a pool stops serving, a removed
+    role, and drain deadlines are [Placement]: the nodes re-read them (D16).
+    Anything the build or the process layout fixes is [Needs_restart]: a
+    role's binding, a new role or a role newly served by a pool (its code is
+    not in that pool's generated [main]), a pool's hook, caps, initiates,
+    isolation, hosts and labels, pools added or removed. *)
+let diff_topologies (old_t : Topology.t) (new_t : Topology.t) : change list =
+  let out = ref [] in
+  let add subject kind fmt = Printf.ksprintf (fun detail -> out := { subject; detail; kind } :: !out) fmt in
+  let find_role (t : Topology.t) n = List.find_opt (fun (r : Topology.role) -> r.role_name = n) t.roles in
+  let find_pool (t : Topology.t) n = List.find_opt (fun (p : Topology.pool) -> p.pool_name = n) t.pools in
+  List.iter (fun (r : Topology.role) ->
+      match find_role old_t r.role_name with
+      | None -> add r.role_name Needs_restart "a new role: its code has to be built and started"
+      | Some o ->
+        if o.body <> r.body || o.actor <> r.actor then
+          add r.role_name Needs_restart "bound to %s, was %s"
+            (opt_text Fun.id (if r.body <> None then r.body else r.actor))
+            (opt_text Fun.id (if o.body <> None then o.body else o.actor));
+        if place_text o.place <> place_text r.place then
+          add r.role_name Placement "placement %s -> %s" (place_text o.place) (place_text r.place);
+        let cap (x : Topology.role) = Option.value ~default:64 x.capacity in
+        if cap o <> cap r then add r.role_name Placement "capacity %d -> %d" (cap o) (cap r))
+    new_t.roles;
+  List.iter (fun (o : Topology.role) ->
+      if find_role new_t o.role_name = None then
+        add o.role_name Placement "removed: its offers close and drain")
+    old_t.roles;
+  List.iter (fun (p : Topology.pool) ->
+      let subject = "pool " ^ p.pool_name in
+      match find_pool old_t p.pool_name with
+      | None -> add subject Needs_restart "a new pool: its processes have to be started"
+      | Some o ->
+        if o.start <> p.start then add subject Needs_restart "hook %s, was %s" (opt_text Fun.id p.start) (opt_text Fun.id o.start);
+        if o.caps <> p.caps then add subject Needs_restart "caps changed (checked when the pool is built)";
+        if o.initiates <> p.initiates then add subject Needs_restart "initiates changed (checked when the pool is built)";
+        if o.isolate <> p.isolate then add subject Needs_restart "isolate %b -> %b (a different build)" o.isolate p.isolate;
+        if o.hosts <> p.hosts then
+          add subject Needs_restart "hosts [%s] -> [%s] (a node's labels are read when it starts)"
+            (hosts_text o.hosts) (hosts_text p.hosts);
+        List.iter (fun r ->
+            if not (List.mem r o.serves) then
+              add subject Needs_restart "now serves %s, which its build has no code for" r)
+          p.serves;
+        List.iter (fun r ->
+            if not (List.mem r p.serves) && find_role new_t r <> None then
+              add subject Placement "stops serving %s: its offers there close and drain" r)
+          o.serves)
+    new_t.pools;
+  List.iter (fun (o : Topology.pool) ->
+      if find_pool new_t o.pool_name = None then
+        add ("pool " ^ o.pool_name) Needs_restart "removed: its processes are still running; stop and restart the cluster")
+    old_t.pools;
+  let drain_text (d : Topology.drain option) =
+    match d with
+    | None -> "default"
+    | Some d -> Printf.sprintf "soft %s, hard %s" (opt_text string_of_int d.soft_ms) (opt_text string_of_int d.hard_ms)
+  in
+  if drain_text old_t.drain <> drain_text new_t.drain then
+    add "drain" Placement "%s -> %s (offers closed from now on; a SIGTERM drain keeps the built deadlines until a restart)"
+      (drain_text old_t.drain) (drain_text new_t.drain);
+  List.rev !out
+
+let render_change c =
+  Printf.sprintf "  %s: %s%s" c.subject c.detail (match c.kind with Placement -> "" | Needs_restart -> "  [needs a rebuild and restart]")
+
+(** Poll [status] until every node in [names] reports [sha], then until the
+    reports stop changing (placement settles within a tick or two); gives
+    up after [timeout] seconds and returns the last statuses. *)
+let wait_applied ?(timeout = 30.) (b : backend) ~sha (names : string list) : node_status list * string list =
+  let t0 = Unix.gettimeofday () in
+  let pending ss =
+    List.filter_map (fun s ->
+        if List.mem s.node.name names && s.up
+           && (match s.report with Some r -> r.r_topology <> sha | None -> true)
+        then Some s.node.name else None)
+      ss
+  in
+  let rec applied () =
+    let ss = b.status () in
+    let p = pending ss in
+    if p = [] || Unix.gettimeofday () -. t0 > timeout then (ss, p) else (Unix.sleepf 0.2; applied ())
+  in
+  let (ss, p) = applied () in
+  if p <> [] then (ss, p)
+  else begin
+    let offers ss = List.map (fun s -> Option.map (fun r -> r.r_offers) s.report) ss in
+    let rec settle prev n =
+      Unix.sleepf 0.5;
+      let ss = b.status () in
+      if offers ss = offers prev || n = 0 || Unix.gettimeofday () -. t0 > timeout then ss else settle ss (n - 1)
+    in
+    (settle ss 10, [])
+  end
+
+(** One reconciliation pass over the local backend ([forge topology apply]):
+    load and check the topology (with [env], else the overlay the cluster
+    was started with), diff it against what the nodes were given, refuse a
+    change that needs a rebuild and restart, push the rest, wait until every
+    node has applied it, and report each node's offers. Holds the reconcile
+    lock throughout. *)
+let apply ?env ~root () : (string, string) result =
+  with_lock ~root (fun () ->
+      let* (b, st) = local_backend ~root in
+      let env = match env with Some e -> Some e | None -> st.env in
+      let env = match env with
+        | Some e when Sys.file_exists (Topology.overlay_file ~root e) -> Some e
+        | _ -> None in
+      let* desired =
+        match Topology.load ~root ?env () with
+        | Error ds -> Error (String.concat "\n" (List.map Topology.render_diag ds))
+        | Ok t ->
+          let ds = Topology.check ~index:(Topology.index_project ~root) t in
+          List.iter (fun d -> prerr_endline (Topology.render_diag d)) ds;
+          if Topology.has_errors ds then Error "topology check failed" else Ok t
+      in
+      let* observed =
+        let path = applied_file ~root in
+        if Sys.file_exists path then Topology.read_digest path
+        else Error (Printf.sprintf "%s is missing: the cluster predates `forge topology apply`; restart it" path)
+      in
+      let changes = diff_topologies observed desired in
+      let restart = List.filter (fun c -> c.kind = Needs_restart) changes in
+      let buf = Buffer.create 512 in
+      let say fmt = Printf.bprintf buf fmt in
+      if restart <> [] then begin
+        say "%d change(s):\n%s\n" (List.length changes) (String.concat "\n" (List.map render_change changes));
+        Error (Buffer.contents buf
+               ^ Printf.sprintf "%d of them need a rebuild and restart, so nothing was applied: stop the cluster and \
+                                 run `forge run --processes%s` again"
+                 (List.length restart) (match env with Some e -> " --env " ^ e | None -> ""))
+      end else begin
+        let ss = b.status () in
+        let digest_sha = Digestif.SHA256.(to_hex (digest_string (Topology.digest_text desired))) in
+        let behind =
+          List.filter (fun s ->
+              s.up && (match s.report with
+                  | Some r -> r.r_topology <> digest_sha && not (r.r_topology = "compiled" && changes = [])
+                  | None -> false))
+            ss
+        in
+        if changes = [] && behind = [] then begin
+          say "the running cluster already has this topology (no change)\n%s" (render_status ss);
+          Ok (Buffer.contents buf)
+        end else begin
+          if changes = [] then say "no change to the topology; re-sending it to %d node(s) that have not applied it\n" (List.length behind)
+          else say "%d change(s), none needs a restart:\n%s\n" (List.length changes) (String.concat "\n" (List.map render_change changes));
+          let* r = b.push_topology desired in
+          record_applied ~root;
+          let signalled = List.filter_map (fun (n, o) -> if o = Signalled then Some n else None) r.outcome in
+          say "pushed %s to %d node(s)\n" (String.sub r.sha 0 12) (List.length signalled);
+          List.iter (fun (n, o) ->
+              match o with
+              | Signalled -> ()
+              | Not_running -> say "  %s: not running\n" n
+              | Not_reporting -> say "  %s: has not reported yet, so it was not signalled; apply again once it has\n" n)
+            r.outcome;
+          let (ss, pending) = wait_applied b ~sha:r.sha signalled in
+          say "%s" (render_status ss);
+          if pending <> [] then
+            Error (Buffer.contents buf ^ Printf.sprintf "%s did not apply the topology within 30 s" (String.concat ", " pending))
+          else Ok (Buffer.contents buf)
+        end
+      end)

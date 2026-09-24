@@ -150,7 +150,7 @@
 (test
  (name test_reconcile)
  (modules test_reconcile)
- (libraries march_forge alcotest unix yojson))
+ (libraries march_forge alcotest unix yojson str))
 
 ; test_topology_run.ml: `forge run` / `forge run --processes` / `forge topology
 ; export` on examples/topology_app, a two-pool topology app with a generated

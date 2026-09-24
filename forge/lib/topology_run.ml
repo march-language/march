@@ -224,6 +224,8 @@ let start_processes ?env ?(hot_reload = false) ?pubkey ?(extra_env = []) ?log
   in
   let digest = Topology.digest_file ~root in
   Reconcile.mkdir_p (Reconcile.run_dir ~root);
+  (* What the nodes are given: the reconciler's observed state. *)
+  Reconcile.record_applied ~root;
   let started =
     List.map (fun (s, env) ->
         let binary = List.assoc s.s_build outputs in

@@ -225,8 +225,74 @@ let test_socket_path_short () =
   let q = Reconcile.socket_path ~root:"/tmp/p" "back-1" in
   Alcotest.(check string) "a short root keeps .forge/run" "/tmp/p/.forge/run/back-1.sock" q
 
+(* ── the diff: what a change takes to apply ─────────────────────────────── *)
+
+let topo text =
+  match Topology.of_strings [ ("topology.toml", text) ] with
+  | Ok t -> t
+  | Error ds -> Alcotest.failf "fixture: %s" (String.concat "; " (List.map Topology.render_diag ds))
+
+let base_text = {|
+[roles]
+"Echo.Server" = { body = "App.serve", capacity = 4, place = { count = 1 } }
+"Log.Sink" = { body = "App.sink" }
+
+[pool.a]
+start = "App.start"
+serves = ["Echo.Server", "Log.Sink"]
+hosts = [{ host = "h1", labels = ["x"] }]
+
+[pool.b]
+serves = ["Echo.Server"]
+|}
+
+let kinds changes =
+  List.map (fun (c : Reconcile.change) ->
+      (c.subject, (match c.kind with Reconcile.Placement -> "placement" | Reconcile.Needs_restart -> "restart"))) changes
+
+let replace ~sub ~by s = Str.global_replace (Str.regexp_string sub) by s
+
+let test_diff_placement_only () =
+  let old_t = topo base_text in
+  Alcotest.(check (list (pair string string))) "no change" [] (kinds (Reconcile.diff_topologies old_t old_t));
+  let new_t = topo (base_text
+                    |> replace ~sub:{|place = { count = 1 }|} ~by:{|place = { on = "x", count = 1 }|}
+                    |> replace ~sub:"capacity = 4" ~by:"capacity = 8"
+                    |> replace ~sub:{|[pool.b]
+serves = ["Echo.Server"]|} ~by:{|[pool.b]
+serves = []|}) in
+  let cs = Reconcile.diff_topologies old_t new_t in
+  Alcotest.(check (list (pair string string))) "all placement"
+    [ ("Echo.Server", "placement"); ("Echo.Server", "placement"); ("pool b", "placement") ] (kinds cs);
+  Alcotest.(check (list string)) "details"
+    [ "placement count 1 -> count 1 on x"; "capacity 4 -> 8"; "stops serving Echo.Server: its offers there close and drain" ]
+    (List.map (fun (c : Reconcile.change) -> c.detail) cs)
+
+let test_diff_needs_restart () =
+  let old_t = topo base_text in
+  let check_restart what text subject =
+    let cs = Reconcile.diff_topologies old_t (topo text) in
+    if not (List.exists (fun (c : Reconcile.change) -> c.subject = subject && c.kind = Reconcile.Needs_restart) cs) then
+      Alcotest.failf "%s: expected a restart for %s, got [%s]" what subject
+        (String.concat "; " (List.map Reconcile.render_change cs))
+  in
+  check_restart "rebinding" (replace ~sub:"App.serve" ~by:"App.serve2" base_text) "Echo.Server";
+  check_restart "a new served role" (replace ~sub:{|serves = ["Echo.Server"]
+|} ~by:{|serves = ["Echo.Server", "Log.Sink"]
+|} base_text) "pool b";
+  check_restart "a hook" (replace ~sub:"App.start" ~by:"App.boot" base_text) "pool a";
+  check_restart "labels" (replace ~sub:{|labels = ["x"]|} ~by:{|labels = ["x", "y"]|} base_text) "pool a";
+  check_restart "a new pool" (base_text ^ "\n[pool.c]\nserves = []\n") "pool c";
+  check_restart "a new role"
+    (replace ~sub:{|"Log.Sink" = { body = "App.sink" }|} ~by:{|"Log.Sink" = { body = "App.sink" }
+"Log.Tail" = { body = "App.tail" }|} base_text) "Log.Tail"
+
 let () =
   Alcotest.run "reconcile" [
+    ("diff", [
+        Alcotest.test_case "placement, capacity and a dropped role apply without a restart" `Quick test_diff_placement_only;
+        Alcotest.test_case "bindings, served roles, hooks, labels, pools and roles need a restart" `Quick test_diff_needs_restart;
+      ]);
     ("state", [
         Alcotest.test_case "state.json round trip; a dead run is no run" `Quick test_state_round_trip;
         Alcotest.test_case "the local backend needs a running cluster" `Quick test_local_backend_needs_a_run;

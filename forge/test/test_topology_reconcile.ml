@@ -77,6 +77,13 @@ let spawn_forge ~dir ~out args =
      with _ -> Unix._exit 127)
   | pid -> pid
 
+(** Run forge [args] in [dir] to completion; its exit code and output. *)
+let run_forge ~dir args =
+  let out = Filename.concat dir (Printf.sprintf "forge-%d.out" (Random.bits ())) in
+  let pid = spawn_forge ~dir ~out args in
+  let (_, st) = Unix.waitpid [] pid in
+  ((match st with Unix.WEXITED n -> n | _ -> 255), read_file out)
+
 let wait_exit pid timeout =
   let t0 = Unix.gettimeofday () in
   let rec go () =
@@ -208,11 +215,51 @@ let test_kill_then_push () =
   List.iter (fun s -> if not (contains out s) then Alcotest.failf "expected %S in forge's output:\n%s" s out)
     [ "topology: Echo.Server: placement count 1 -> count 1 on "; "; draining its offer" ]
 
+let test_apply () =
+  ignore (with_cluster (fun dir _out ->
+      let st = running_state dir in
+      let x = exactly_one_holder st in
+      let pids = List.map (fun n -> n.Reconcile.pid) st.nodes in
+      let y = List.find (fun n -> n.Reconcile.name <> x.name) st.nodes in
+      let expect out s = if not (contains out s) then Alcotest.failf "expected %S in:\n%s" s out in
+      (* A placement change: one pass pushes it, waits, and reports. *)
+      set_place dir (Printf.sprintf "{ on = %S, count = 1 }" (label_of y));
+      let (rc, out) = run_forge ~dir [ "topology"; "apply" ] in
+      if rc <> 0 then Alcotest.failf "apply failed (%d):\n%s" rc out;
+      expect out "1 change(s), none needs a restart:";
+      expect out (Printf.sprintf "Echo.Server: placement count 1 -> count 1 on %s" (label_of y));
+      expect out "pushed ";
+      expect out "to 3 node(s)";
+      expect out (Printf.sprintf "%s (pool %s" y.name y.pool);
+      let h = exactly_one_holder st in
+      Alcotest.(check string) "the role moved to the labelled node" y.name h.name;
+      Alcotest.(check (list int)) "no node was restarted" pids
+        (List.filter_map (fun n -> if Reconcile.alive n.Reconcile.pid then Some n.Reconcile.pid else None) st.nodes);
+      (* The same topology again: nothing to do. *)
+      let (rc, out) = run_forge ~dir [ "topology"; "apply" ] in
+      if rc <> 0 then Alcotest.failf "second apply failed (%d):\n%s" rc out;
+      expect out "already has this topology (no change)";
+      (* A change that needs a restart is refused and nothing is pushed. *)
+      let before = applied y in
+      let overlay = Filename.concat dir "topology.dev.toml" in
+      write_file overlay (Str.global_replace (Str.regexp_string {|labels = ["a"]|}) {|labels = ["a", "gpu"]|} (read_file overlay));
+      let (rc, out) = run_forge ~dir [ "topology"; "apply" ] in
+      Alcotest.(check int) "refused" 1 rc;
+      expect out "pool a: hosts";
+      expect out "[needs a rebuild and restart]";
+      expect out "so nothing was applied";
+      Unix.sleepf 1.0;
+      Alcotest.(check string) "nothing was pushed" before (applied y)))
+
 let () =
   Random.self_init ();
   Alcotest.run "topology-reconcile" [
     ("placement", [
         Alcotest.test_case "three nodes: a killed holder's role moves; a pushed topology moves it again, no restart" `Slow
           test_kill_then_push;
+      ]);
+    ("apply", [
+        Alcotest.test_case "forge topology apply: one pass moves the role; no change; a restart-only change is refused" `Slow
+          test_apply;
       ]);
   ]

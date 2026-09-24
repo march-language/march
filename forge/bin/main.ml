@@ -1467,11 +1467,31 @@ let topology_status_cmd =
                  build, its code versions and epoch pins")
     Term.(const run $ const ())
 
+let topology_apply_cmd =
+  let run env =
+    match Project.load () with
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+    | Ok proj ->
+      match Reconcile.apply ?env ~root:proj.Project.root () with
+      | Ok report -> print_string report
+      | Error m -> Printf.eprintf "%s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "apply"
+           ~doc:"One reconciliation pass over the running local cluster ($(b,forge run \
+                 --processes)): diff topology.toml (and the $(b,--env) overlay, by default \
+                 the one the cluster started with) against what the nodes were given, \
+                 push it (the nodes re-read it on SIGHUP and move their own offers: no \
+                 code change, no restart), wait until every node has applied it, and \
+                 report each node's offers. A change that needs a rebuild and restart \
+                 (a new role or pool, a binding, a hook, caps, hosts or labels) is \
+                 refused and listed.")
+    Term.(const run $ topology_env)
+
 let topology_cmd =
   Cmd.group (Cmd.info "topology"
                ~doc:"The topology file: check, export as JSON, generate deployment files, \
                      status of the running cluster")
-    [topology_check_cmd; topology_export_cmd; topology_gen_cmd; topology_status_cmd]
+    [topology_check_cmd; topology_export_cmd; topology_gen_cmd; topology_status_cmd; topology_apply_cmd]
 
 let completions_cmd =
   let shell =
