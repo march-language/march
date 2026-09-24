@@ -366,6 +366,29 @@ let attribute_widening (functions : fn_manifest list) (widening : string list) :
 let filter_granted_widening ~(widening : string list) ~(grant_caps : string list) : string list =
   List.filter (fun c -> not (List.exists (fun g -> March_caps.Cap_lattice.cap_subsumes g c) grant_caps)) widening
 
+(** [compute_role_widening ~prior ~current] — the per-role gate
+    (distributed-deploys build step 10, plan II.2 "Hot deploys").  For every
+    role of [current], the caps of its closure no cap of the SAME role's
+    closure in [prior] subsumes; a role absent from [prior] widens by its
+    whole closure (its code is new authority).  [None] when [prior] carries no
+    ROLE line at all: a baseline written before step 10 says nothing about
+    roles, so the gate is permissive for that deploy, as the per-function
+    gate is with no baseline.  Roles that did not widen are left out. *)
+let compute_role_widening ~(prior : manifest) ~(current : manifest)
+  : (role_manifest * string list) list option =
+  if prior.roles = [] then None
+  else
+    Some (List.filter_map (fun (r : role_manifest) ->
+        let before =
+          match List.find_opt (fun (p : role_manifest) -> p.role_name = r.role_name) prior.roles with
+          | Some p -> March_caps.Cap_lattice.normalize p.role_caps
+          | None -> []
+        in
+        match compute_cap_widening ~prior:before
+                ~new_caps:(March_caps.Cap_lattice.normalize r.role_caps) with
+        | [] -> None
+        | w -> Some (r, w)) current.roles)
+
 (** Print the "hot deploy would add authority" diagnostic to stderr in the
     fixed shape depended on by tooling/tests:
 
@@ -378,10 +401,19 @@ let filter_granted_widening ~(widening : string list) ~(grant_caps : string list
 
     Only caps still ungranted (after `filter_granted_widening` has removed
     any covered by `--grant-cap`) are ever passed in via [attributed]. *)
-let print_widening_diagnostic ~(prior_caps : string list) ~(attributed : (string * string) list) =
-  Printf.eprintf "error: hot deploy would add authority not held by the running version\n";
-  Printf.eprintf "  running version caps:  %s\n"
-    (if prior_caps = [] then "(none)" else String.concat ", " prior_caps);
+let print_widening_diagnostic ?role ~(prior_caps : string list) ~(attributed : (string * string) list) () =
+  (match role with
+   | None ->
+     Printf.eprintf "error: hot deploy would add authority not held by the running version\n";
+     Printf.eprintf "  running version caps:  %s\n"
+       (if prior_caps = [] then "(none)" else String.concat ", " prior_caps)
+   | Some (r : role_manifest) ->
+     (* The per-role gate: [attributed] pairs each cap with its reach chain
+        (from the manifest's via= field), or "?" when the compiler recorded
+        none. *)
+     Printf.eprintf "error: hot deploy would widen role %s's capability closure\n" r.role_name;
+     Printf.eprintf "  running version caps:  %s\n"
+       (if prior_caps = [] then "(none)" else String.concat ", " prior_caps));
   (* M3 fix: the padding width used to be a hardcoded 12, which misaligned
      for caps longer than 12 chars (e.g. "IO.NetConnect.TLS",
      "IO.Foreign.Blocking"). Compute it dynamically from the longest cap name
@@ -389,12 +421,68 @@ let print_widening_diagnostic ~(prior_caps : string list) ~(attributed : (string
   let pad_width =
     List.fold_left (fun acc (cap, _) -> max acc (String.length cap)) 12 attributed in
   List.iter (fun (cap, fn_name) ->
-    Printf.eprintf "  new version adds:      %-*s (from %s)\n" pad_width cap fn_name
+    match role with
+    | None ->
+      Printf.eprintf "  new version adds:      %-*s (from %s)\n" pad_width cap fn_name
+    | Some _ ->
+      Printf.eprintf "  new version adds:      %-*s (reached: %s)\n" pad_width cap fn_name
   ) attributed;
   Printf.eprintf "  A hot deploy may only narrow authority. To authorize this widening, re-run with:\n";
   List.iter (fun (cap, _) ->
     Printf.eprintf "      forge deploy hot --grant-cap %s\n" cap
   ) attributed
+
+(** Pair each widened cap of [r] with its reach chain, rendered as the
+    compiler renders it ("body \u{2192} cons \u{2192} save"), or "?" when the
+    manifest carries no chain for it. *)
+let attribute_role_widening (r : role_manifest) (widening : string list) : (string * string) list =
+  List.map (fun cap ->
+      let chain =
+        match List.assoc_opt cap r.role_chains with
+        | Some (_ :: _ as ch) -> String.concat " \xe2\x86\x92 " ch
+        | _ ->
+          (* the closure may hold a broader cap that normalize kept; find a
+             chain recorded for a cap it subsumes *)
+          (match List.find_opt (fun (c, _) -> March_caps.Cap_lattice.cap_subsumes cap c) r.role_chains with
+           | Some (_, (_ :: _ as ch)) -> String.concat " \xe2\x86\x92 " ch
+           | _ -> "?")
+      in
+      (cap, chain)) widening
+
+(** The per-role gate as [run] applies it: for each widened role, print the
+    grants that cover it and the diagnostic for what is left.  Returns true
+    iff some role still has an ungranted widening (the deploy must stop). *)
+let role_gate ~(prior : manifest option) ~(current : manifest) ~(grant_caps : string list) : bool =
+  match prior with
+  | None -> false
+  | Some prior ->
+    match compute_role_widening ~prior ~current with
+    | None ->
+      if current.roles <> [] then
+        Printf.printf
+          "NOTE: the capability baseline has no ROLE lines (written before per-role closures) — the per-role gate is permissive for this deploy.\n%!";
+      false
+    | Some widened ->
+      List.fold_left (fun blocked ((r : role_manifest), widening) ->
+          let ungranted = filter_granted_widening ~widening ~grant_caps in
+          List.iter (fun cap ->
+              if not (List.mem cap ungranted) then
+                let g =
+                  Option.value ~default:cap
+                    (List.find_opt (fun g -> March_caps.Cap_lattice.cap_subsumes g cap) grant_caps) in
+                Printf.printf "  granted widening: role %s gains %s (via --grant-cap %s)\n%!"
+                  r.role_name cap g) widening;
+          if ungranted = [] then blocked
+          else begin
+            let prior_caps =
+              match List.find_opt (fun (p : role_manifest) -> p.role_name = r.role_name) prior.roles with
+              | Some p -> p.role_caps
+              | None -> []
+            in
+            print_widening_diagnostic ~role:r ~prior_caps
+              ~attributed:(attribute_role_widening r ungranted) ();
+            true
+          end) false widened
 
 (** After a successful deploy, copy the just-deployed .hcr_manifest over the
     baseline file, so next time's "prior" is this time's "new" — mirrors
@@ -828,11 +916,20 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
               ) granted_caps;
               if ungranted <> [] then begin
                 let attributed = attribute_widening to_activate ungranted in
-                print_widening_diagnostic ~prior_caps ~attributed;
+                print_widening_diagnostic ~prior_caps ~attributed ();
                 Unix.close fd;
                 raise (Failure "capability widening — deploy aborted")
               end
             end);
+          (* DD build step 10: the per-role gate.  A role's closure is
+             everything its code reaches, so a patch that only calls an
+             existing, more powerful helper widens it even when no changed
+             function's own caps did.  The baseline file is the whole prior
+             manifest (save_manifest_baseline), ROLE lines included. *)
+          if role_gate ~prior:prior_manifest_opt ~current:manifest ~grant_caps then begin
+            Unix.close fd;
+            raise (Failure "role capability widening — deploy aborted")
+          end;
 
           (* 6. CAS_PUT the .so if not already present *)
           (* NOTE (2026-07-04): the former skew check SHA-256-hashed the .so

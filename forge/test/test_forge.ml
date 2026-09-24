@@ -1332,6 +1332,74 @@ let test_parse_manifest_legacy_has_no_roles () =
       | Error m -> Alcotest.fail m
       | Ok m -> Alcotest.(check int) "no roles" 0 (List.length m.Cmd_deploy_hot.roles))
 
+(* ── DD build step 10: the per-role widening gate ───────────────────────── *)
+let role_m ?(chains = []) name caps =
+  { Cmd_deploy_hot.role_name = name; role_caps = caps; role_chains = chains }
+let manifest_roles roles =
+  { Cmd_deploy_hot.cas_hash = "cas"; functions = []; roles }
+
+let test_role_gate_legacy_baseline_permissive () =
+  let prior = manifest_roles [] in
+  let current = manifest_roles [ role_m "Stream.Cons" ["IO.FileWrite"] ] in
+  Alcotest.(check bool) "no ROLE lines in the baseline -> None" true
+    (Cmd_deploy_hot.compute_role_widening ~prior ~current = None);
+  Alcotest.(check bool) "and the gate does not block" false
+    (Cmd_deploy_hot.role_gate ~prior:(Some prior) ~current ~grant_caps:[])
+
+let test_role_gate_widened_closure_blocks () =
+  let prior = manifest_roles [ role_m "Stream.Cons" ["IO.Console"] ] in
+  let current =
+    manifest_roles [ role_m "Stream.Cons" ["IO.Console"; "IO.FileWrite"]
+                       ~chains:[ ("IO.FileWrite", ["body"; "cons"; "save"]) ] ] in
+  (match Cmd_deploy_hot.compute_role_widening ~prior ~current with
+   | Some [ (r, w) ] ->
+     Alcotest.(check string) "the role" "Stream.Cons" r.Cmd_deploy_hot.role_name;
+     Alcotest.(check (list string)) "the widened cap" ["IO.FileWrite"] w;
+     Alcotest.(check (list (pair string string))) "attributed to its chain"
+       [ ("IO.FileWrite", "body \xe2\x86\x92 cons \xe2\x86\x92 save") ]
+       (Cmd_deploy_hot.attribute_role_widening r w)
+   | _ -> Alcotest.fail "expected one widened role");
+  Alcotest.(check bool) "blocked without --grant-cap" true
+    (Cmd_deploy_hot.role_gate ~prior:(Some prior) ~current ~grant_caps:[]);
+  Alcotest.(check bool) "an exact grant covers it" false
+    (Cmd_deploy_hot.role_gate ~prior:(Some prior) ~current ~grant_caps:["IO.FileWrite"]);
+  Alcotest.(check bool) "a broader grant covers it (subsumption)" false
+    (Cmd_deploy_hot.role_gate ~prior:(Some prior) ~current ~grant_caps:["IO"]);
+  Alcotest.(check bool) "an unrelated grant does not" true
+    (Cmd_deploy_hot.role_gate ~prior:(Some prior) ~current ~grant_caps:["IO.Process"])
+
+let test_role_gate_narrowing_and_subsumed_pass () =
+  let prior = manifest_roles [ role_m "P.A" ["IO"]; role_m "P.B" ["IO.Console"; "IO.FileWrite"] ] in
+  let current = manifest_roles [ role_m "P.A" ["IO.Console"]; role_m "P.B" ["IO.Console"] ] in
+  Alcotest.(check bool) "narrowed or subsumed closures do not widen" true
+    (Cmd_deploy_hot.compute_role_widening ~prior ~current = Some [])
+
+let test_role_gate_new_role_widens_by_its_closure () =
+  let prior = manifest_roles [ role_m "P.A" ["IO.Console"] ] in
+  let current = manifest_roles [ role_m "P.A" ["IO.Console"]; role_m "P.B" ["IO.NetConnect"] ] in
+  (match Cmd_deploy_hot.compute_role_widening ~prior ~current with
+   | Some [ (r, w) ] ->
+     Alcotest.(check string) "the new role" "P.B" r.Cmd_deploy_hot.role_name;
+     Alcotest.(check (list string)) "its whole closure" ["IO.NetConnect"] w
+   | _ -> Alcotest.fail "expected the new role to widen")
+
+let test_role_baseline_round_trip () =
+  (* The baseline is the whole prior manifest, ROLE lines included. *)
+  with_manifest_file
+    [cas_hash_line; "MyApp.f implhash sighash caps=";
+     "ROLE Stream.Cons caps=IO.Console via=IO.Console:body>cons"]
+    (fun path ->
+      let base = Filename.temp_file "march_role_baseline" ".hcr_manifest" in
+      Sys.remove base;
+      Cmd_deploy_hot.save_manifest_baseline ~new_manifest_path:path ~prev_manifest_path:base;
+      match Cmd_deploy_hot.parse_manifest base with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        Sys.remove base;
+        Alcotest.(check (list string)) "baseline keeps the role closure"
+          ["IO.Console"]
+          (List.concat_map (fun r -> r.Cmd_deploy_hot.role_caps) m.Cmd_deploy_hot.roles))
+
 let test_gate_no_prior_is_permissive () =
   (* No baseline file at all -> caller treats prior_caps as empty / gate skipped.
      At the pure-function level, computing widening against an empty prior
@@ -2609,6 +2677,11 @@ let () =
       Alcotest.test_case "parse_manifest: caps= empty"          `Quick test_parse_manifest_caps_empty;
       Alcotest.test_case "parse_manifest: ROLE lines"            `Quick test_parse_manifest_role_lines;
       Alcotest.test_case "parse_manifest: legacy has no roles"   `Quick test_parse_manifest_legacy_has_no_roles;
+      Alcotest.test_case "role gate: legacy baseline is permissive" `Quick test_role_gate_legacy_baseline_permissive;
+      Alcotest.test_case "role gate: widened closure blocks unless granted" `Quick test_role_gate_widened_closure_blocks;
+      Alcotest.test_case "role gate: narrowing/subsumed closures pass" `Quick test_role_gate_narrowing_and_subsumed_pass;
+      Alcotest.test_case "role gate: a new role widens by its closure" `Quick test_role_gate_new_role_widens_by_its_closure;
+      Alcotest.test_case "role gate: baseline keeps ROLE lines" `Quick test_role_baseline_round_trip;
       Alcotest.test_case "gate: empty prior -> all new caps 'widen'" `Quick test_gate_no_prior_is_permissive;
       Alcotest.test_case "gate: pure narrowing allowed"         `Quick test_gate_pure_narrowing_allowed;
       Alcotest.test_case "gate: narrowing uses subsumption, root cap covers prior specific" `Quick test_gate_narrowing_root_cap_covers_prior_specific_not_misreported;
