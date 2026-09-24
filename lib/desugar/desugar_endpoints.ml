@@ -1702,7 +1702,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
 
 (** `<P>_Run`: the role runner's typed front.  Per role,
 
-      run_<Role>(io, node_id, secret, addrs, body) : Result((), SessionNode.RunError)
+      run_<Role>(io, node_id, secret, addrs, body) : Result(Session.Outcome, SessionNode.RunError)
       host_<Role>(io, node_id, secret, addrs, host, start, deliver) : the same, hosted in actor [host]
 
     where [body] takes the session capability and the role's ENTRY state (so
@@ -1761,7 +1761,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
          fn ("run_" ^ role)
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node_id", t_string); ("secret", t_string);
              ("addrs", t_addrs); ("body", t_body role entry) ]
-           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
                 var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
@@ -1779,7 +1779,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
          fn ("cluster_" ^ role)
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster);
              ("session", t_string); ("body", t_body role entry) ]
-           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_cluster"
               [ var "io"; var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) [];
                 var "session"; lam [ "_ep" ] unit; call_body role ]))
@@ -1810,7 +1810,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
       (fun (role, entry) ->
          fn ("initiate_" ^ role)
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("body", t_body role entry) ]
-           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.initiate"
               [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; app (msg ^ ".others_" ^ role) []; lam [ "_ep" ] unit; call_body role ]))
@@ -1840,7 +1840,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
          fn ("host_" ^ role)
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node_id", t_string); ("secret", t_string);
              ("addrs", t_addrs); ("host", tycon "Pid" [ TyVar (n "a") ]); ("start", t_start_of role); ("deliver", t_deliver) ]
-           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_hosted"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
                 var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
@@ -1858,7 +1858,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node_id", t_string); ("secret", t_string);
              ("addrs", t_addrs); ("host", tycon "Pid" [ TyVar (n "a") ]); ("start", t_start_of role); ("deliver", t_deliver);
              ("cancel", t_cancel) ]
-           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_hosted_or"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
                 var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
@@ -1909,7 +1909,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
          fn ("cluster_hosted_" ^ role)
            ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("session", t_string) ]
             @ hosted_callbacks role)
-           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_cluster_hosted"
               [ var "io"; var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "session";
                 lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ];

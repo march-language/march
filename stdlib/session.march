@@ -290,6 +290,20 @@ mod Session do
   -- `crash(role, cause)` makes a role gone without running any of its code:
   -- the test's stand-in for a node dying.
   --
+  -- Drains (D27) follow `SessionNode` too, with the test standing in for the
+  -- epochs: `drain_role(role)` says [role]'s code epoch is draining. From
+  -- then on a delivery to [role] at a loop boundary (`suspend_at_boundary`),
+  -- or at any role's boundary from a sender whose epoch is draining, is not
+  -- consumed: it goes back to its sender (UNDELIVERED), and the receiving
+  -- endpoint DRAINS: everything queued for it goes back too, it is gone
+  -- ("drained"), and its drain handler (`on_drain`) runs, or it just ends.
+  -- A message to a drained role is returned to its sender at `emit`; an
+  -- endpoint waiting on a drained role, with nothing from it queued, drains
+  -- in turn. `sent`, `consumed` and `returned` count every message, so a
+  -- test can check that none was lost: sent = consumed + returned + queued
+  -- when no role failed. `step(())` delivers one message (or handles one
+  -- stuck endpoint), for turning draining on part-way through.
+  --
   -- Endpoint ids are role numbers (`register` returns the role, as
   -- `SessionNode`'s does), so one transport carries ONE session, and each
   -- role registers once.
@@ -299,7 +313,14 @@ mod Session do
     drain  : () -> (),
     take   : () -> Option((Int, Int, Bytes)),
     crash  : Int -> String -> (),
-    queued : () -> Int
+    queued : () -> Int,
+    step   : () -> Bool,
+    drain_role  : Int -> (),
+    undelivered : Int -> Int,
+    drained     : Int -> Bool,
+    sent        : () -> Int,
+    consumed    : () -> Int,
+    returned    : () -> Int
   }
 
   type InProcessState = {
@@ -308,6 +329,9 @@ mod Session do
     cancel_hs : Vault(Int -> String -> Int -> Int),
     crash_hs  : Vault(Int -> String -> Int -> Int),
     drain_hs  : Vault(Int -> List(Bytes) -> Int -> Int),
+    boundary  : Vault(Int),
+    draining  : Vault(Int),
+    undeliv   : Vault(List(Bytes)),
     gone      : Vault(String),
     meta      : Vault(Int),
     roles     : Vault(List(Int)),
@@ -333,6 +357,8 @@ mod Session do
   pfn ip_forget(st : InProcessState, ep : Int) : () do
     let _ = Vault.delete(st.handlers, ip_key(ep))
     let _ = Vault.delete(st.cancel_hs, ip_key(ep))
+    let _ = Vault.delete(st.drain_hs, ip_key(ep))
+    let _ = Vault.delete(st.boundary, ip_key(ep))
     let _ = List.map(ip_roles(st), fn r -> Vault.delete(st.crash_hs, ip_crash_key(ep, r)))
     ()
   end
@@ -357,6 +383,59 @@ mod Session do
         None -> ()
       end
     end
+  end
+
+  -- ── drains (D27) ──
+
+  pfn ip_count(st : InProcessState, key : String) : () do
+    let _ = Vault.incr(st.meta, key, 1)
+    ()
+  end
+
+  pfn ip_is_drained(st : InProcessState, role : Int) : Bool do
+    match Vault.get(st.gone, ip_key(role)) do
+      Some(w) -> w == "drained"
+      None -> false
+    end
+  end
+
+  -- [msg], sent by [sender] to [role], comes back to [sender] undelivered.
+  pfn ip_return(st : InProcessState, sender : Int, role : Int, msg : Bytes) : () do
+    Vault.set(st.undeliv, ip_key(sender), List.append(Vault.get_or(st.undeliv, ip_key(sender), Nil), Cons(msg, Nil)))
+    ip_count(st, "returned")
+    st.trace("undelivered " ++ ip_key(sender) ++ " -> " ++ ip_key(role))
+  end
+
+  -- End [ep] by a drain: [role] is the drained role it waited on, 0 for its
+  -- own boundary. Everything queued for it goes back to its senders, in
+  -- queue order, then its drain handler runs with what came back to it.
+  pfn ip_drain_ep(st : InProcessState, ep : Int, role : Int) : () do
+    if ip_is_gone(st, ep) do ()
+    else
+      Vault.set(st.gone, ip_key(ep), "drained")
+      let h = Vault.get(st.drain_hs, ip_key(ep))
+      ip_forget(st, ep)
+      let _ = Vault.delete(st.cancel_hs, "cur" ++ ip_key(ep))
+      st.trace("drained " ++ ip_key(ep) ++ (if role == 0 do " at its boundary" else " waiting on role " ++ ip_key(role) end))
+      let q = ip_queue(st)
+      let mine = List.filter(q, fn d -> match d do (to, _f, _m) -> to == ep end)
+      Vault.set(st.queue, "q", List.filter(q, fn d -> match d do (to, _f, _m) -> to != ep end))
+      let _ = List.map(mine, fn d -> match d do (_to, from, msg) -> ip_return(st, from, ep, msg) end)
+      match h do
+        Some(f) ->
+          let _ = f(role, Vault.get_or(st.undeliv, ip_key(ep), Nil), ep)
+          ()
+        None -> ()
+      end
+    end
+  end
+
+  -- Does this delivery end [to] at its boundary? [to]'s continuation was
+  -- installed by `suspend_at_boundary`, and [to]'s epoch or [from]'s is
+  -- draining (a sender on a draining node drains the session too).
+  pfn ip_drains_here(st : InProcessState, to : Int, from : Int) : Bool do
+    Vault.get_or(st.boundary, ip_key(to), 0) == 1
+      && (Vault.has(st.draining, ip_key(to)) || Vault.has(st.draining, ip_key(from)))
   end
 
   -- The first queued delivery a continuation can take -- to an endpoint with
@@ -429,6 +508,7 @@ mod Session do
     match Vault.get(st.handlers, ip_key(to)) do
       None -> ()
       Some(h) ->
+        ip_count(st, "consumed")
         ip_enter(st, to, from)
         let _ = h(from, msg, to)
         let _ = Vault.delete(st.cancel_hs, "cur" ++ ip_key(to))
@@ -454,39 +534,58 @@ mod Session do
     end
   end
 
-  pfn ip_drain(st : InProcessState) : () do
+  -- One step: deliver one message, or end one endpoint that waits on a role
+  -- that can send nothing more. `false` when neither is possible.
+  pfn ip_step(st : InProcessState) : Bool do
     -- Messages to an endpoint that is gone are dropped, as `emit` drops them.
+    -- (A drained endpoint's were returned when it drained, and `emit`
+    -- returns later ones, so none is dropped here.)
     let q = List.filter(ip_queue(st), fn d -> match d do (to, _f, _m) -> !ip_is_gone(st, to) end)
     match ip_take(st, q, Nil) do
       Some((d, rest)) ->
         Vault.set(st.queue, "q", rest)
         match d do
-          (to, from, msg) -> ip_resume(st, to, from, msg)
+          (to, from, msg) ->
+            if ip_drains_here(st, to, from) do
+              -- Not consumed: back to its sender, and [to] drains.
+              ip_return(st, from, to, msg)
+              ip_drain_ep(st, to, 0)
+            else ip_resume(st, to, from, msg) end
         end
-        ip_drain(st)
+        true
       None ->
         Vault.set(st.queue, "q", q)
         match ip_stuck(st, ip_roles(st)) do
-          None ->
-            -- Stopped with deliveries nobody is waiting for: say so, since a
-            -- silently stalled queue is how a lost message hides.
-            match q do
-              Nil -> ()
-              _ -> st.trace("stalled: " ++ ip_key(List.length(q)) ++ " queued")
-            end
+          None -> false
           Some((ep, role, why)) ->
-            let cause = if why == "closed" do "role " ++ ip_key(role) ++ " closed without sending" else why end
-            match Vault.get(st.crash_hs, ip_crash_key(ep, role)) do
-              Some(h) ->
-                ip_forget(st, ep)
-                st.trace("crash branch " ++ ip_key(ep) ++ ": role " ++ ip_key(role) ++ ": " ++ cause)
-                let _ = h(role, cause, ep)
-                ip_drain(st)
-              None ->
-                ip_cancel(st, ep, role, cause, "role " ++ ip_key(role) ++ ": " ++ cause)
-                ip_drain(st)
+            if why == "drained" do
+              ip_drain_ep(st, ep, role)
+            else
+              let cause = if why == "closed" do "role " ++ ip_key(role) ++ " closed without sending" else why end
+              match Vault.get(st.crash_hs, ip_crash_key(ep, role)) do
+                Some(h) ->
+                  ip_forget(st, ep)
+                  st.trace("crash branch " ++ ip_key(ep) ++ ": role " ++ ip_key(role) ++ ": " ++ cause)
+                  let _ = h(role, cause, ep)
+                  ()
+                None ->
+                  ip_cancel(st, ep, role, cause, "role " ++ ip_key(role) ++ ": " ++ cause)
+              end
             end
+            true
         end
+    end
+  end
+
+  pfn ip_drain(st : InProcessState) : () do
+    if ip_step(st) do ip_drain(st)
+    else
+      -- Stopped with deliveries nobody is waiting for: say so, since a
+      -- silently stalled queue is how a lost message hides.
+      match ip_queue(st) do
+        Nil -> ()
+        q -> st.trace("stalled: " ++ ip_key(List.length(q)) ++ " queued")
+      end
     end
   end
 
@@ -502,17 +601,24 @@ mod Session do
         end
       end,
       emit: fn (ep, to, msg) -> do
-        if ip_is_gone(st, ep) || ip_is_gone(st, to) do
+        ip_count(st, "sent")
+        if !ip_is_gone(st, ep) && ip_is_drained(st, to) do
+          -- D27: a message to a drained role comes straight back.
+          ip_return(st, ep, to, msg)
+          ep
+        else if ip_is_gone(st, ep) || ip_is_gone(st, to) do
+          ip_count(st, "dropped")
           st.trace("dropped " ++ ip_key(ep) ++ " -> " ++ ip_key(to))
           ep
         else
           Vault.set(st.queue, "q", List.append(ip_queue(st), Cons((to, ep, msg), Nil)))
           ep
-        end
+        end end
       end,
       suspend: fn (ep, from, handler) -> do
         Vault.set(st.waiting, ip_key(ep), from)
         Vault.set(st.handlers, ip_key(ep), handler)
+        Vault.set(st.boundary, ip_key(ep), 0)
         ep
       end,
       close: fn ep -> do
@@ -536,6 +642,7 @@ mod Session do
       suspend_at_boundary: fn (ep, from, handler) -> do
         Vault.set(st.waiting, ip_key(ep), from)
         Vault.set(st.handlers, ip_key(ep), handler)
+        Vault.set(st.boundary, ip_key(ep), 1)
         ep
       end,
       on_drain: fn (ep, h) -> do
@@ -600,6 +707,9 @@ mod Session do
       cancel_hs: Vault.new("session_in_process_cancel_" ++ tag),
       crash_hs: Vault.new("session_in_process_crash_" ++ tag),
       drain_hs: Vault.new("session_in_process_drain_" ++ tag),
+      boundary: Vault.new("session_in_process_boundary_" ++ tag),
+      draining: Vault.new("session_in_process_draining_" ++ tag),
+      undeliv: Vault.new("session_in_process_undeliv_" ++ tag),
       gone: Vault.new("session_in_process_gone_" ++ tag),
       meta: Vault.new("session_in_process_meta_" ++ tag),
       roles: Vault.new("session_in_process_roles_" ++ tag),
@@ -613,7 +723,17 @@ mod Session do
       drain: fn _ -> ip_drain(st),
       take: fn _ -> ip_take_next(st),
       crash: fn (role, cause) -> ip_crash(st, role, cause),
-      queued: fn _ -> List.length(ip_queue(st))
+      queued: fn _ -> List.length(ip_queue(st)),
+      step: fn _ -> ip_step(st),
+      drain_role: fn role -> do
+        Vault.set(st.draining, ip_key(role), 1)
+        st.trace("draining " ++ ip_key(role))
+      end,
+      undelivered: fn role -> List.length(Vault.get_or(st.undeliv, ip_key(role), Nil)),
+      drained: fn role -> ip_is_drained(st, role),
+      sent: fn _ -> Vault.get_or(st.meta, "sent", 0),
+      consumed: fn _ -> Vault.get_or(st.meta, "consumed", 0),
+      returned: fn _ -> Vault.get_or(st.meta, "returned", 0)
     }
   end
 end
