@@ -1,4 +1,10 @@
-# `[P2]` Distributed deploys, step 6 follow-ups: what the epoch model left open
+# Distributed deploys, step 6 follow-ups: what the epoch model left open
+
+**DONE 2026-09-24**, all five items, in
+[2026-09-24-dd-d27-session-drains.md](2026-09-24-dd-d27-session-drains.md) (which
+also states the three-or-more-role drain rule and lists the tests). Filed 2026-09-23 as
+`specs/todos/2026-09-23-dd-step06-followups.md`; the text below is the item list as
+filed.
 
 **Parent:** [../progress/2026-09-23-dd-step06-epoch-model-and-drains.md](../progress/2026-09-23-dd-step06-epoch-model-and-drains.md)
 ("Deviations"), plan II.4.6-II.4.7, D27.

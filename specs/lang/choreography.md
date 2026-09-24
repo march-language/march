@@ -251,13 +251,13 @@ says why it did not.
 
 | Function | Transport | Body | Returns |
 |---|---|---|---|
-| `run_<Role>(io, node_id, secret, addrs, body)` | its own connections, from an address table | callbacks | `Result((), RunError)` |
-| `host_<Role>(io, node_id, secret, addrs, actor, start, deliver)` and `host_<Role>_or(…, cancel)` | its own connections | an actor (see [Hosting a role in an actor](#hosting-a-role-in-an-actor)) | `Result((), RunError)` |
-| `cluster_<Role>(io, node, session, body)` | a running `ClusterNode`, one session under a given id | callbacks | `Result((), RunError)` |
+| `run_<Role>(io, node_id, secret, addrs, body)` | its own connections, from an address table | callbacks | `Result(Session.Outcome, RunError)` |
+| `host_<Role>(io, node_id, secret, addrs, actor, start, deliver)` and `host_<Role>_or(…, cancel)` | its own connections | an actor (see [Hosting a role in an actor](#hosting-a-role-in-an-actor)) | `Result(Session.Outcome, RunError)` |
+| `cluster_<Role>(io, node, session, body)` | a running `ClusterNode`, one session under a given id | callbacks | `Result(Session.Outcome, RunError)` |
 | `offer_<Role>(io, node, capacity, body)` | a running `ClusterNode`, any number of sessions | callbacks | `Result(Offer, RunError)` |
-| `initiate_<Role>(io, node, body)` | a running `ClusterNode`, one session it starts | callbacks | `Result((), RunError)` |
+| `initiate_<Role>(io, node, body)` | a running `ClusterNode`, one session it starts | callbacks | `Result(Session.Outcome, RunError)` |
 | `offer_hosted_<Role>(io, node, capacity, actor, start, deliver, cancel)` | a running `ClusterNode`, any number of sessions | one actor for all of them (see [Many sessions in one actor](#many-sessions-in-one-actor)) | `Result(Offer, RunError)` |
-| `cluster_hosted_<Role>(io, node, session, actor, start, deliver, cancel)` | a running `ClusterNode`, one session under a given id | an actor, with the same callbacks | `Result((), RunError)` |
+| `cluster_hosted_<Role>(io, node, session, actor, start, deliver, cancel)` | a running `ClusterNode`, one session under a given id | an actor, with the same callbacks | `Result(Session.Outcome, RunError)` |
 
 `<P>_Run.error_message(e)` turns any `RunError` into a line that names the roles.
 
@@ -511,14 +511,76 @@ for it is thrown away.
 
 | Result | Meaning |
 |---|---|
-| `Ok(_)` | This role reached the end of the protocol. |
+| `Ok(Session.Finished)` | This role reached the end of the protocol. |
+| `Ok(Session.Drained(n))` | The session was ended at a loop boundary because a node it runs on is draining (see [Draining a session](#draining-a-session)). `n` is how many of this role's own messages came back undelivered. A clean end, like `Finished`. |
 | `Err(Cancelled(role, cause))` | This role was waiting on `role`, that role failed, and nothing it had sent was still waiting to be read. `cause` says what went wrong: `"connection lost"`, `"no heartbeat"`, or a chain such as `"role 3: connection lost"` when the failure reached this role through another one. |
 | `Err(Protocol(role, why))` | That role sent something this role cannot accept: a message that does not decode, or one the protocol does not allow at this point. |
 | `Err(HostGone(ep))` | Only for a role hosted in an actor (below): the actor died. |
 | `Err(Left(why))` | This role left the session on purpose (below). |
 | `Err(Listen(port, why))`, `Err(Accept(why))`, `Err(Connect(role, why))` | Startup failed: the port was taken, a handshake was refused, a peer never came up. |
 
-`SessionNode.run_error_message(e)` turns any of these into a readable line.
+`SessionNode.run_error_message(e)` turns any of these into a readable line. The `Ok` value
+is a `Session.Outcome` (`Finished | Drained(Int)`); code that matches `Ok(_)` needs no change.
+
+## Draining a session
+
+A node that is being upgraded or shut down *drains*: its old code has to stop running, but a
+session in the middle of an exchange cannot just be cut. A session drains at a **loop
+boundary**: the point where one iteration of a `loop` in the protocol has finished and the
+next has not begun. Every `loop` is a drain point unless it is written `loop atomic`.
+
+What happens, for any number of roles:
+
+1. **The role that would receive the first message of the next iteration does not take it.**
+   When that message arrives and the receiving role's node is draining, or the sender's node
+   was draining when it sent it, the message goes back to its sender, marked undelivered.
+   The receiving role *drains*: it ends there.
+2. **A drained role returns everything sent to it that it has not taken**, whenever it
+   arrives, so no message is silently lost.
+3. **The other roles are told.** A message sent to a drained role comes straight back to its
+   sender.
+4. **A role waiting for a message from a drained role drains too**, at that receive. So a
+   role in the middle of an iteration finishes the iteration's work up to its next receive
+   from a drained role, and ends there.
+
+`run_<Role>` then returns `Ok(Session.Drained(n))` on every role, where `n` counts the
+role's own messages that came back. Between them, the roles' `n`s add up to exactly the
+messages that were in flight. A role whose messages came back but that finished the
+protocol anyway (it never had to receive from the drained role again) also returns
+`Drained(n)`.
+
+A drained role does not run any more of its session code. Every receive has a third form,
+ending in `_or_drain`, that takes a **drain handler**:
+
+```march
+Stream_Prod.offer_more_done_or_drain(s, st1,
+  fn (_b, st2) -> prod(s, st2, next + 1),
+  fn (_b, st2) -> Stream_Prod.close(s, st2),
+  fn (role, undelivered, d) ->
+    requeue(undelivered)          -- the messages that came back, decoded
+    Stream_Prod.drained(s, d))
+```
+
+Like a cancel handler it gets no session state: the drained role it was waiting on (0 when
+this role drained at its own loop boundary), the messages this role sent that came back,
+and a token whose only use is `<Role>.drained(s, token)`. A receive without `_or_drain`
+simply ends. A role hosted in an actor hears of a drain through its cancel callback, with
+the cause `"drained"`.
+
+**Why a loop boundary, and not a `choose`.** The runner only has control when it delivers a
+message, so a receive is the one place it can end a session without handing your code a
+state it did not expect. A `choose_*` returns the next state and your code carries on with
+it; ending the session there would mean returning a state the types cannot express.
+
+**`loop atomic do ... end`** is a loop whose iterations must not be split from each other:
+its head is not a drain point, so its sessions run until they end on their own, or until the
+drain's hard deadline stops them (`Err(Left("draining"))`). It changes no message, so it
+does not change the protocol's fingerprint.
+
+`SessionNode.drain_epochs(io, soft_ms, hard_ms)` drains every session on the node (and every
+actor still on old code; see [hot reload]({{ site.baseurl }}/docs/hot-code-reload/)).
+`Topology.drain_on_signal` calls it on SIGTERM, and a hot deploy's `DRAIN` does the same for
+the epochs it retires.
 
 ## When a role fails
 
@@ -580,6 +642,9 @@ The names, in one place:
 | `on_cancel : (Int, String, Cancelled_<Role>) -> Yield` | the failed role's number, the cause, and the token |
 | `<Role>.cancelled(s, token)` | the only way a cancel handler can finish |
 | `leave_<state>(s, st, why)` | leave on purpose from that state (`leave_recv_Number` from `S_recv_Number`) |
+| `recv_<Msg>_or_drain(s, st, on_msg, on_drain)` | a receive with a drain handler; `offer_<labels>_or_drain` likewise ([Draining a session](#draining-a-session)) |
+| `on_drain : (Int, List(<P>_Msg.<P>_Message), Drained_<Role>) -> Yield` | the drained role (0: this one), the messages that came back, and the token |
+| `<Role>.drained(s, token)` | the only way a drain handler can finish |
 
 ### Starting again
 
