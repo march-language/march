@@ -52,9 +52,46 @@ let _current_module_fns = Lower_state._current_module_fns
     the call here turns that into a positioned compile-time error. A user
     function of the same name shadows the builtin (the typechecker already
     resolved it that way), so [_current_module_fns] is consulted first.
-    specs/2026-09-11-correctness-fixes-design.md §3. *)
-let interpreter_only_builtins =
-  ["worker"; "dynamic_supervisor"; "Supervisor.spec"; "Supervisor.start_child"]
+    specs/2026-09-11-correctness-fixes-design.md §3.
+
+    Each entry carries the sentence the diagnostic uses after "`<name>` ...",
+    so the reason is specific to the builtin. The dynamic-supervisor queries,
+    [App.stop] and [task_spawn_link] joined on 2026-09-24
+    (specs/progress/2026-09-24-interpreter-only-builtins.md): each acts on
+    interpreter-only state (the dynamic-supervisor registry, the `app`
+    declaration's shutdown flag, the eager task/actor link) that has no
+    compiled counterpart to lower onto. *)
+let supervisor_spec_reason =
+  "builds a value-level supervisor spec, which only the interpreter runs; a \
+   compiled program declares its children in a `supervise do ... end` block \
+   inside the supervising actor (see docs/supervision.md). The `app` / \
+   `Supervisor.spec` DSL is interpreter-only."
+
+let dynamic_supervisor_reason =
+  "queries a dynamic supervisor created by `dynamic_supervisor(...)`, which \
+   only the interpreter runs, so a compiled program has no such supervisor to \
+   ask. A compiled program supervises its children in a `supervise do ... end` \
+   block inside the supervising actor (see docs/supervision.md)."
+
+let interpreter_only_builtin_reasons : (string * string) list = [
+  ("worker", supervisor_spec_reason);
+  ("dynamic_supervisor", supervisor_spec_reason);
+  ("Supervisor.spec", supervisor_spec_reason);
+  ("Supervisor.start_child", supervisor_spec_reason);
+  ("Supervisor.stop_child", dynamic_supervisor_reason);
+  ("Supervisor.which_children", dynamic_supervisor_reason);
+  ("Supervisor.count_children", dynamic_supervisor_reason);
+  ("App.stop",
+   "stops the supervision tree of an `app` declaration, which only the \
+    interpreter runs (a compiled program ignores `app`). A compiled program \
+    ends when `main` returns, or exits early with `process_exit(code)`.");
+  ("task_spawn_link",
+   "links a task to an actor so the task fails if the actor dies, which only \
+    the interpreter implements; the compiled task runtime has no task/actor \
+    link. Use `task_spawn` and watch the actor with `monitor` or `is_alive`.");
+]
+
+let interpreter_only_builtins = List.map fst interpreter_only_builtin_reasons
 let resolve_use_alias = Lower_state.resolve_use_alias
 let _ensure_module_lowered = Lower_state._ensure_module_lowered
 let _default_dispatch = Lower_state._default_dispatch
@@ -73,6 +110,16 @@ let lower_fn_def = Lower_decls.lower_fn_def
 let rec lower_to_atom_k (env : env) (e : Ast.expr) (k : Tir.atom -> Tir.expr) : Tir.expr =
   match e with
   | Ast.ELit (lit, _) -> k (Tir.ALit lit)
+  (* A first-class `tap` (passed, not applied): every applied `tap(x)` is
+     rewritten to `x` in [lower_expr] before its head is lowered here, so this
+     can only be a value reference, which has no compiled symbol to point at. *)
+  | Ast.EVar { txt = "tap"; span; _ }
+    when not (Hashtbl.mem !_current_module_fns "tap")
+         && not (Hashtbl.mem _fn_param_types "tap") ->
+    failwith (Printf.sprintf
+      "%s:%d:%d: error: `tap` can only be called directly in a compiled \
+       program, not passed as a value; write `fn x -> tap(x)` instead."
+      span.Ast.file span.Ast.start_line span.Ast.start_col)
   | Ast.EVar { txt = name; span; _ } ->
     let name = resolve_use_alias env name in
     (match String.index_opt name '.' with
@@ -435,13 +482,9 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
   | Ast.EApp (Ast.EVar { txt = name; span }, _, _)
     when List.mem name interpreter_only_builtins
          && not (Hashtbl.mem !_current_module_fns name) ->
-    failwith (Printf.sprintf
-      "%s:%d:%d: error: `%s` builds a value-level supervisor spec, which only \
-       the interpreter runs; a compiled program declares its children in a \
-       `supervise do ... end` block inside the supervising actor (see \
-       docs/supervision.md). The `app` / `Supervisor.spec` DSL is \
-       interpreter-only."
-      span.Ast.file span.Ast.start_line span.Ast.start_col name)
+    failwith (Printf.sprintf "%s:%d:%d: error: `%s` %s"
+      span.Ast.file span.Ast.start_line span.Ast.start_col name
+      (List.assoc name interpreter_only_builtin_reasons))
   | Ast.EApp (Ast.EVar { txt = "Chan.new"; _ }, [proto_arg], _) ->
     lower_to_atom_k env proto_arg (fun proto' ->
       let fn_var : Tir.var = {
@@ -579,6 +622,20 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
   | Ast.EApp (Ast.EVar { txt = "march_version"; _ }, ([] | [ _ ]), sp)
     when not (Hashtbl.mem !_current_module_fns "march_version") ->
     lower_expr env (Ast.ELit (Ast.LitString March_ast.March_version.version, sp))
+
+  (* `tap(x)` returns `x`.  The interpreter also pushes `x` onto its tap bus,
+     which only the REPL drains (Repl, via Eval.tap_drain); a compiled program
+     has no REPL and so no reader of that bus, which makes the identity the
+     compiled program's whole observable behaviour.  Lowering to the argument
+     itself (evaluated exactly once, in place) also avoids a polymorphic C
+     identity whose erased-slot ABI would have to be re-derived per type.
+     A first-class `tap` (not applied) is rejected with a positioned error in
+     [lower_to_atom_k]'s EVar arm. *)
+  | Ast.EApp (Ast.EVar { txt = "tap"; _ }, [ arg ], _)
+    when not (Hashtbl.mem !_current_module_fns "tap")
+         (* a parameter or let-bound local named `tap` shadows the builtin *)
+         && not (Hashtbl.mem _fn_param_types "tap") ->
+    lower_expr env arg
 
   (* --- Function application (CPS: all args must be atoms) --- *)
   | Ast.EApp (f_expr, args, call_sp) ->

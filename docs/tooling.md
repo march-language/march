@@ -973,6 +973,24 @@ forge licenses --strict    # exit non-zero if any dependency has no license
 
 ---
 
+## Dependency Capability Audit
+
+```sh
+forge audit --record                             # record each dependency's capability set (forge.caps.lock)
+forge audit                                      # exit 1 if a dependency gained authority
+forge audit --inferred                           # infer each set from the code (`march caps`), not `needs`
+forge audit --inferred --allow-unanalyzable      # gate on the deps that typecheck; list the rest
+```
+
+`--inferred` needs a toolchain whose `march` supports `caps` (0.3.0 or later)
+and stops with the toolchain's path and version if it does not. It caches
+each dependency's result under `.forge/audit-cache/`, so only changed
+dependencies are re-analyzed. A dependency that does not typecheck fails the
+audit unless `--allow-unanalyzable` is given, and it is listed with the
+compiler's reason either way. See [Capability Audit](capability-audit.md).
+
+---
+
 ## Shell Completions
 
 Generate a completion script for your shell and source it:

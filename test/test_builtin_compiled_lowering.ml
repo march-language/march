@@ -14,14 +14,16 @@
      2. a [Builtin_name.t] constructor (an [emit_expr] arm in llvm_emit.ml),
      3. the SIMD grid ([Llvm_emit_simd.decode_simd_call]),
      4. [special_lowerings] below (lowered by some other named route),
-     5. [interpreter_only] below (no compiled lowering exists yet),
+     5. [interpreter_only] below (no compiled lowering; a compiled call is
+        REJECTED at lowering with a positioned diagnostic),
    and anything unaccounted FAILS.  So adding a typechecked builtin without a
    lowering is a test failure until it is either lowered or consciously listed.
 
    The lists are kept HERE, not in production code, so the compiler cannot
    vacuously satisfy its own test. [interpreter_only] is also checked in the
-   other direction: an entry that has gained a lowering fails too, so the list
-   only shrinks. *)
+   other direction: an entry that has gained a lowering fails too. And it must
+   equal [Lower_expr.interpreter_only_builtins] exactly, so every name on it is
+   a compile-time error, never a link-time one. *)
 
 (* Builtins lowered outside the codegen table and [Builtin_name], each by a
    route named in its comment. *)
@@ -38,14 +40,20 @@ let special_lowerings : string list =
     (* lower_expr.ml json_dispatch_rewrite: resolved to the derived
        JsonFrom$T / JsonFromEvents$T impl at the call site. *)
     "from_json"; "from_json_events";
+    (* Interface dispatch (Lower_state.resolve_iface_method at lowering, Mono
+       for a generic caller): resolved to the derived JsonTo$T.to_json impl by
+       its argument's type. A call no impl resolves is reported by
+       Llvm_calls.fail_if_unresolved_iface_method as a missing codec
+       (including when NO type derives Json), not a link error. *)
+    "to_json";
+    (* lower_expr.ml: `tap(x)` is rewritten to `x` (the tap bus it also feeds
+       interpreted has no reader outside the REPL); a first-class `tap` is a
+       positioned lowering error. *)
+    "tap";
     (* cap_passing.ml: rewritten to an empty capability ops record. *)
     "cap_ops_empty";
     (* stdlib/prelude.march defines a March fn of the same name. *)
     "head"; "tail"; "is_nil";
-    (* Rejected at lowering with a positioned diagnostic
-       (Lower_expr.interpreter_only_builtins), so a compiled call is a compile
-       error, not a link error. *)
-    "worker"; "dynamic_supervisor"; "Supervisor.spec"; "Supervisor.start_child";
     (* The generic extern-call path emits `call @<name>`, and the runtime
        defines a C function of exactly that name (runtime/march_runtime.c,
        runtime/march_http.c), so the call links. *)
@@ -57,29 +65,29 @@ let special_lowerings : string list =
     "logger_register_appender"; "logger_remove_appender";
     "logger_set_module_level" ]
 
-(* INTERPRETER-ONLY: typechecked builtins with no compiled lowering. A call to
-   any of these in a `--compile`d program fails at link time.
+(* INTERPRETER-ONLY: typechecked builtins with no compiled lowering. A
+   compiled call to any of these is rejected at lowering with a positioned
+   diagnostic (Lower_expr.interpreter_only_builtin_reasons carries each one's
+   reason), so it is a compile error naming the March call site, never a
+   link-time `Undefined symbols: _<name>`.
 
-   This is the static-scan remainder recorded on 2026-09-22, NOT a triaged
-   list: some may be target-gated, reached only through a stdlib wrapper that
-   is itself interpreter-only, or simply dead. Triage is
-   specs/todos/2026-09-22-triage-interpreter-only-builtins.md. Removing a name
-   from here requires giving it a lowering (the reverse check below enforces
-   that the list only shrinks); ADDING one is a decision to ship a builtin
-   that cannot compile, and should come with a reason.
-
-   Confirmed on 2026-09-22 by compiling a one-line call: char_is_alpha,
-   char_to_uppercase, print_int, print_float, tap, respond and to_json each
-   fail with `Undefined symbols: _<name>`. *)
+   Every name here acts on state only the interpreter has:
+   - the value-level supervisor DSL (`worker`, `dynamic_supervisor`,
+     `Supervisor.spec`, `Supervisor.start_child`) and the dynamic-supervisor
+     registry it creates (`Supervisor.stop_child` / `which_children` /
+     `count_children`) -- a compiled program supervises with
+     `supervise do ... end`;
+   - `App.stop`, the shutdown flag of an `app` declaration, which the compiled
+     backend ignores;
+   - `task_spawn_link`, the interpreter's eager task/actor link, which the
+     compiled task runtime has no counterpart for.
+   Triaged 2026-09-24 (specs/progress/2026-09-24-interpreter-only-builtins.md);
+   ADDING a name is a decision to ship a builtin that cannot compile, and needs
+   a reason in Lower_expr as well as here. *)
 let interpreter_only : string list =
-  [ "App.stop";
-    "Supervisor.count_children"; "Supervisor.stop_child";
-    "Supervisor.which_children";
-    "char_is_alpha"; "char_is_lowercase"; "char_is_uppercase";
-    "char_to_lowercase"; "char_to_uppercase";
-    "float_from_string";
-    "print_float"; "print_int";
-    "respond"; "tap"; "task_spawn_link"; "to_json" ]
+  [ "worker"; "dynamic_supervisor"; "Supervisor.spec"; "Supervisor.start_child";
+    "Supervisor.stop_child"; "Supervisor.which_children";
+    "Supervisor.count_children"; "App.stop"; "task_spawn_link" ]
 
 let in_codegen_table name =
   List.exists
@@ -115,8 +123,9 @@ let test_every_builtin_lowered_or_listed () =
       "%d typechecked builtin(s) have no compiled lowering: %s\n\
        A compiled call to one fails at LINK time. Lower it (a row in \
        lib/tir/llvm_builtins.ml backed by a runtime C function, or a \
-       Builtin_name arm in llvm_emit.ml), or list it in [interpreter_only] in \
-       test/test_builtin_compiled_lowering.ml with a reason."
+       Builtin_name arm in llvm_emit.ml), or reject it at lowering \
+       (Lower_expr.interpreter_only_builtin_reasons) and list it in \
+       [interpreter_only] in test/test_builtin_compiled_lowering.ml."
       (List.length unaccounted) (String.concat ", " unaccounted)
 
 let test_interpreter_only_is_not_stale () =
@@ -127,6 +136,15 @@ let test_interpreter_only_is_not_stale () =
   Alcotest.(check (list string))
     "every interpreter_only entry is a typechecked builtin with no lowering \
      (remove lowered or deleted names from the list)" [] stale
+
+(* The allowlist is exactly the set the compiler rejects: a name listed here
+   but not rejected would link-fail again, and a name rejected but not listed
+   would be an unaccounted-for builtin hiding behind a diagnostic. *)
+let test_interpreter_only_is_rejected_at_lowering () =
+  Alcotest.(check (list string))
+    "interpreter_only = Lower_expr.interpreter_only_builtins"
+    (List.sort compare interpreter_only)
+    (List.sort compare March_tir.Lower_expr.interpreter_only_builtins)
 
 let test_special_lowerings_not_redundant () =
   let redundant =
@@ -143,5 +161,7 @@ let tests =
       test_every_builtin_lowered_or_listed;
     Alcotest.test_case "interpreter_only list is not stale" `Quick
       test_interpreter_only_is_not_stale;
+    Alcotest.test_case "interpreter_only is exactly the rejected set" `Quick
+      test_interpreter_only_is_rejected_at_lowering;
     Alcotest.test_case "special_lowerings are not redundant" `Quick
       test_special_lowerings_not_redundant ]

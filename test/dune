@@ -2334,6 +2334,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/float_consts_typed_array_slice.expected native_float_consts_typed_array_slice.out)))
 
+; ── Regression: char_is_alpha / char_is_uppercase / char_is_lowercase /
+; char_to_uppercase / char_to_lowercase / float_from_string / print_int /
+; print_float / tap typechecked and ran interpreted, but `--compile` failed at
+; LINK time with `Undefined symbols: _char_is_alpha` (etc.). The golden is the
+; INTERPRETER's output for the same file, so each line is a compiled-vs-
+; interpreted parity check (ASCII range boundaries, float formatting incl.
+; inf, tap through a generic fn and shadowed by a local, and a flat leak leg
+; for the borrowed char argument).
+; See specs/progress/2026-09-24-interpreter-only-builtins.md.
+(rule
+ (targets native_interpreter_only_builtins_lowered native_interpreter_only_builtins_lowered.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/interpreter_only_builtins_lowered.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_interpreter_only_builtins_lowered
+        native/interpreter_only_builtins_lowered.march)
+   (with-stdout-to native_interpreter_only_builtins_lowered.out
+        (system "./native_interpreter_only_builtins_lowered")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/interpreter_only_builtins_lowered.expected native_interpreter_only_builtins_lowered.out)))
+
 ; ── Regression: send(self, m) inside a handler delivers, and binding `self`
 ; does not move the actor record's refcount. `self` was never BOUND by either
 ; backend, so it fell through to the global builtin: compiled, march_send got
