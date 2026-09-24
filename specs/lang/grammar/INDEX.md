@@ -1,4 +1,4 @@
-# Grammar corpus index (p01–p39 parse, 14 reject: r02/r07/r08 retired 2026-07-24; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13, §7.3 curried-call resolution added p23–p24/r14, slice-8 companion added p25; item-110 ECond `>=`/`<=` regression added p26; item-700 dedicated `let?`-annotation error added r15; leading-`|` arm-separator and single-line cond-form parser fixes added p27–p28; as-patterns became reachable and retired r08 (2026-07-24), added p29; record patterns became reachable and retired r02/r07 (2026-07-24), added p30–p31; or-patterns added p32; the `(`-led-statement fix added p33; its literal-operand follow-up added p34; `let*` generalized bind added p35/r16; a `doc` string alongside function attributes added p36; protocol message labels added p38/r17; protocol role grants added p39)
+# Grammar corpus index (p01–p41 parse, 14 reject: r02/r07/r08 retired 2026-07-24; Task 1 seeded p01–p02/r01–r02, Task 2 added p03–p08/r03–r04, Task 3 added p09–p11/r05–r06, Task 4 added p12–p14/r07–r08, Task 5 added p15–p17/r09–r10, DSL-resolution pass added p18–p22/r11–r13, §7.3 curried-call resolution added p23–p24/r14, slice-8 companion added p25; item-110 ECond `>=`/`<=` regression added p26; item-700 dedicated `let?`-annotation error added r15; leading-`|` arm-separator and single-line cond-form parser fixes added p27–p28; as-patterns became reachable and retired r08 (2026-07-24), added p29; record patterns became reachable and retired r02/r07 (2026-07-24), added p30–p31; or-patterns added p32; the `(`-led-statement fix added p33; its literal-operand follow-up added p34; `let*` generalized bind added p35/r16; a `doc` string alongside function attributes added p36; protocol message labels added p38/r17; protocol role grants added p39; multi-step `choose` branches added p40–p41)
 
 Navigable map of the resolved-grammar conformance corpus: each program in
 this directory (`specs/lang/grammar/parse/*.march`,
@@ -33,7 +33,7 @@ Run the whole corpus:
 MARCH_BIN=$PWD/_build/default/bin/main.exe bash specs/lang/grammar/check_grammar.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 53/53, 39 parse, 14
+Exit 0 iff every program behaves as declared (currently 55/55, 41 parse, 14
 reject).
 
 **Naming note:** this corpus uses `parse/` + `reject/` (not `accept/` +
@@ -96,6 +96,8 @@ shape is otherwise identical to `types/check_types.sh`.
 | [`parse/p37_fn_named_send_in_module.march`](parse/p37_fn_named_send_in_module.march) | §2 declarations: `fn send(...)` / `pfn send(...)` inside a module — `fn_decl_name` admits the `send` keyword at the DECLARATION (2026-09-15) | `send` is the actor primitive's keyword (`expr_atom`'s `SEND LPAREN … RPAREN`), and until 2026-09-15 no module could declare a function by that name, so `Node.send` (`stdlib/node.march`, the typed remote send) could not exist. The call form was already admitted qualified (`expr_field DOT SEND`, for `Chan.send`); the bare call stays the primitive. Value-witnessed: prints `a: hi` and `b: yo b: yo` through a public, a private and a self-qualified call. `--check` exit 0, menhir conflict count unchanged (11). |
 | [`parse/p38_protocol_labelled_message_step.march`](parse/p38_protocol_labelled_message_step.march) | §9.4 `protocol_step`: a labelled message step, `lower_name COLON upper ARROW upper COLON ty` (2026-09-20) | `item: Prod -> Cons : Int` names the message for `@[endpoints]` (`send_Item` for `send_Msg_Prod_Cons_1`); the label is a `lower_name` like a branch label, and `stop` (the bare `lower_name` step) is told apart by the COLON that follows a label. One labelled step inside a `loop`, two among plain steps. `--check` exit 0, menhir conflict count unchanged (11). |
 | [`parse/p39_protocol_role_needs.march`](parse/p39_protocol_role_needs.march) | §9.4 `protocol_step`: a role's capability grant, `ROLE upper_name NEEDS cap_path (COMMA cap_path)*` (2026-09-22) | `role Cons needs IO.Console, IO.FileWrite` before the first message step; `role` is a SOFT keyword kept only before an uppercase name (`Token_filter`, as `may`/`or`), so `fn pick(role : Int)` in the same file still parses. `--check` exit 0, the program prints `1`, menhir conflict count unchanged (11). |
+| [`parse/p40_protocol_choose_two_step_branch.march`](parse/p40_protocol_choose_two_step_branch.march) | §9.4 `choose_branch`: a branch body of several `protocol_step`s, each on its own line; §3.3 the arm-boundary lookahead inside a `choose` | Branch `go` holds its head message then `A -> B : Int` and `B -> A : String` on the following lines. Inside a `choose` an arm is always `label ->`, so the token filter reads an upper-case-led line as the branch's next step, not a new arm (`ms_is_choose`). `--check` exit 0; the program runs and prints `1`. |
+| [`parse/p41_protocol_choose_labelled_second_step.march`](parse/p41_protocol_choose_labelled_second_step.march) | §9.4 `choose_branch` + labelled `protocol_step`; §3.3 the arm-boundary lookahead inside a `choose` (2026-09-23) | The labelled twin of p40: the branch's later steps are `tick: A -> B : Int` and `stop_ack: B -> A : String`. A lower-case-led line is a new arm only when its name is followed by `->`; a depth-0 `:` before any `->` marks a labelled step, so the lookahead returns "continuation". Before the fix this failed with "I got stuck here" at the label's `:`. `--check` exit 0; prints `1`. |
 | [`reject/r17_protocol_label_after_arrow.march`](reject/r17_protocol_label_after_arrow.march) | §9.4 `protocol_step`: the label goes before the step, not after the arrow | `Prod -> item: Cons : Int`: after `Prod ->` the message alternative needs an `upper_name` receiver and finds the `lower_name` `item`. Captured live: `I got stuck here`. |
 
 Task 2 (§4 Expressions, the precedence ladder) added p03–p08/r03–r04 above.
@@ -132,7 +134,7 @@ p29 and retired r08; the same pass, closing the record-pattern
 reachability gap, added p30/p31 and retired r02/r07; the same pass, adding
 or-patterns, added p32 (the binding-rejection witness is a type error, not a
 parse error, so it lives in `specs/lang/types/reject/t82` instead):
-53 programs total (39 `parse/`, 14 `reject/`). See
+55 programs total (41 `parse/`, 14 `reject/`). See
 `specs/plans/archive/2026-07-06-resolved-grammar-plan.md` for the task-by-task
 breakdown that built the first 27; the DSL-resolution pass and the
 `f(1)(2)` fix are tracked in their own commits rather than numbered plan
