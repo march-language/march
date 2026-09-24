@@ -1884,7 +1884,7 @@ void *__try_call_val(void *thunk) {
 
 /* ── march_try_finally ───────────────────────────────────────────────────── */
 /*
- * try_finally : (Bool -> a) -> (Bool -> b) -> a
+ * try_finally : (() -> a) -> (() -> b) -> a   (typecheck_builtins.ml)
  *
  * Runs action(), then cleanup(), and returns action's result.  If action
  * panics, cleanup STILL runs, and the panic is then re-raised (so it
