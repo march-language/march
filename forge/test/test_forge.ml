@@ -929,7 +929,8 @@ let test_hosts_from_config () =
   Alcotest.(check (list string)) "from [[hot-reload.env]]" [ "prod"; "root@h"; "/s"; "k" ]
     [ h.Hosts.name; h.Hosts.ssh; h.Hosts.socket; h.Hosts.pubkey ];
   let flat = { Project.hr_socket = "/f"; hr_ssh_host = ""; hr_public_key = None;
-               hr_envs = []; hr_health_check_url = None; hr_strategy = "rolling" } in
+               hr_envs = []; hr_health_check_url = None; hr_strategy = "rolling";
+               hr_target = None; hr_module_prefix = None } in
   Alcotest.(check bool) "no ssh_host -> no host" true (Hosts.of_flat_config flat = None);
   match Hosts.of_flat_config { flat with Project.hr_ssh_host = "root@x" } with
   | Some h -> Alcotest.(check (list string)) "flat host is 'default'"
@@ -1394,7 +1395,9 @@ let test_scoped_caps_new_function_compares_against_empty () =
      entirely (e.g. newly added this deploy) -> its caps compare against
      [], so ALL its caps show up as widening. *)
   let to_activate = [ fm ~name:"MyApp.brand_new" ~caps:["IO.Console"; "IO.FileWrite"] ] in
-  let prior_manifest = { Cmd_deploy_hot.cas_hash = "cas"; functions = [] } in
+  let prior_manifest = { Cmd_deploy_hot.version = 2; cas_hash = "cas";
+                         target = None; hcr_abi = None; module_prefix = None;
+                         functions = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
   Alcotest.(check (list string)) "new fn has no prior caps" [] prior_caps;
@@ -1405,7 +1408,8 @@ let test_scoped_caps_new_function_compares_against_empty () =
 let test_scoped_caps_existing_function_adds_cap_widens () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] in
   let prior_manifest =
-    { Cmd_deploy_hot.cas_hash = "cas";
+    { Cmd_deploy_hot.version = 2; cas_hash = "cas";
+      target = None; hcr_abi = None; module_prefix = None;
       functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
@@ -1417,7 +1421,8 @@ let test_scoped_caps_existing_function_adds_cap_widens () =
 let test_scoped_caps_existing_function_drops_cap_narrows () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] in
   let prior_manifest =
-    { Cmd_deploy_hot.cas_hash = "cas";
+    { Cmd_deploy_hot.version = 2; cas_hash = "cas";
+      target = None; hcr_abi = None; module_prefix = None;
       functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
@@ -1431,7 +1436,8 @@ let test_scoped_caps_existing_function_adds_subsumed_cap_no_widen () =
      subsumes -> normalize drops it, so no widening is reported. *)
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Network"; "IO.NetConnect"] ] in
   let prior_manifest =
-    { Cmd_deploy_hot.cas_hash = "cas";
+    { Cmd_deploy_hot.version = 2; cas_hash = "cas";
+      target = None; hcr_abi = None; module_prefix = None;
       functions = [ fm ~name:"MyApp.f" ~caps:["IO.Network"] ] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
@@ -1706,13 +1712,15 @@ let activate4_selected ~manifest ~no_cap_gate =
   (not (Cmd_deploy_hot.is_legacy_manifest manifest)) && not no_cap_gate
 
 let manifest_with_caps =
-  { Cmd_deploy_hot.cas_hash = String.make 64 'a';
+  { Cmd_deploy_hot.version = 2; cas_hash = String.make 64 'a';
+    target = None; hcr_abi = None; module_prefix = None;
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
         fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true } ] }
 
 let legacy_manifest =
-  { Cmd_deploy_hot.cas_hash = String.make 64 'a';
+  { Cmd_deploy_hot.version = 2; cas_hash = String.make 64 'a';
+    target = None; hcr_abi = None; module_prefix = None;
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
         fn_callers = []; fn_caps = []; fn_has_caps = false } ] }

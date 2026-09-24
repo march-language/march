@@ -184,6 +184,12 @@ native_h_trusted_context: coverage audit (user + stdlib): 120 enforced, 0 inert 
 native_h_trusted_context: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_hash_cross_backend: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_hash_cross_backend: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_hcr_e2e_patch: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_hcr_e2e_patch: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_hcr_e2e_server: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_hcr_e2e_server: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_hcr_smoke: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_hcr_smoke: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_html_safe_raw: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_html_safe_raw: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_if_branch_dead_value_probe: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
