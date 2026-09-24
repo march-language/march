@@ -613,6 +613,186 @@ let test_e2e_tarball_restore_and_corruption () =
   Alcotest.(check bool) "corrupt entry discarded" false (Sys.file_exists cached);
   check_no_network env
 
+(* ============================================ online integrity (re-fetch) *)
+
+(** Every occurrence of [k] in [t] replaced by [r]. *)
+let replace_all t k r =
+  let n = String.length t and m = String.length k in
+  let b = Buffer.create n in
+  let rec go i =
+    if i >= n then ()
+    else if i + m <= n && String.sub t i m = k then (Buffer.add_string b r; go (i + m))
+    else (Buffer.add_char b t.[i]; go (i + 1))
+  in
+  go 0; Buffer.contents b
+
+(** The widget app, populated the real way, and its one cached tree. *)
+let widget_app env =
+  let up = make_upstream "widget" ~mod_name:"Widget" in
+  let app = make_app ~body:(app_using "Widget")
+      ~deps:[ Printf.sprintf "widget = { git = %S, tag = \"v1.0.0\" }" ("file://" ^ up) ] () in
+  populate env app;
+  (app, only_coord env "widget")
+
+(** Break the cached tree so that building against it FAILS: the module no
+    longer defines [answer]. A build that quietly used the tampered copy
+    cannot pass. *)
+let tamper_widget dir =
+  let src = Filename.concat dir "lib/widget.march" in
+  write_file src (replace_all (read_file src) "answer" "answr")
+
+let lock_hash app name =
+  match Resolver_lockfile.read (Filename.concat app "forge.lock") with
+  | Ok (entries, _) ->
+    (match List.find_opt (fun (e : Resolver_lockfile.entry) ->
+         e.Resolver_lockfile.name = name) entries with
+     | Some e -> e.Resolver_lockfile.hash
+     | None -> Alcotest.failf "%s not in forge.lock" name)
+  | Error e -> Alcotest.failf "forge.lock unreadable: %s" e
+
+(** A clean cached tree builds online with no extra output and, with the
+    sentinel `git` first on PATH, starts no network process: verifying is a
+    local re-hash, not a fetch. *)
+let test_e2e_online_clean_silent () =
+  let env = make_env () in
+  let (app, _) = widget_app env in
+  let (code, o, e) = run_forge env ~dir:app [ "build" ] in
+  if code <> 0 then Alcotest.failf "online build failed:\n%s\n%s" o e;
+  Alcotest.(check bool) "no integrity notice" false (contains e "note: dependency");
+  Alcotest.(check bool) "no integrity error" false (contains e "integrity");
+  check_no_network env
+
+(** A tampered git tree is detected by an ONLINE build, re-fetched at the
+    locked commit, verified, swapped in, and the build succeeds with one
+    notice. Before this, the build used the tampered copy and failed with
+    whatever the tampering broke (here: the missing function). *)
+let test_e2e_online_tampered_git_refetched () =
+  let env = make_env () in
+  let (app, dir) = widget_app env in
+  let locked = lock_hash app "widget" in
+  tamper_widget dir;
+  Alcotest.(check bool) "tamper changed the tree" true
+    (Resolver_cas_package.hash_directory dir <> locked);
+  let (code, o, e) = run_forge ~sentinel:false env ~dir:app [ "build" ] in
+  if code <> 0 then Alcotest.failf "online build did not recover:\n%s\n%s" o e;
+  Alcotest.(check int) "one replacement notice" 1
+    (count_occurrences e "note: dependency `widget`");
+  Alcotest.(check bool) "says the copy was replaced" true
+    (contains e "replaced it with a freshly fetched copy");
+  Alcotest.(check string) "cached tree matches forge.lock again" locked
+    (Resolver_cas_package.hash_directory dir);
+  let leftovers =
+    Sys.readdir (deps_dir env "widget") |> Array.to_list
+    |> List.filter (fun n -> n.[0] = '.') in
+  Alcotest.(check (list string)) "no staging or aside dirs left" [] leftovers;
+  (* Recovered for good: the next build is silent and fetches nothing. *)
+  let (code, _, e) = run_forge env ~dir:app [ "build" ] in
+  Alcotest.(check int) "second build succeeds" 0 code;
+  Alcotest.(check bool) "second build silent" false (contains e "note: dependency");
+  check_no_network env
+
+(** The check runs on the other compile-shaped commands too, once per
+    invocation (one notice, not one per file). *)
+let test_e2e_online_check_and_test_verify () =
+  let env = make_env () in
+  let (app, dir) = widget_app env in
+  let locked = lock_hash app "widget" in
+  (* `forge test` / `forge bench` return before the preflight when there is
+     nothing to run, so give each something. Whether it passes is not the
+     point here; that the preflight ran once is. *)
+  write_file (Filename.concat app "test/app_test.march")
+    "mod AppTest do\n  fn main() do\n    println(int_to_string(Widget.answer()))\n  end\nend\n";
+  write_file (Filename.concat app "bench/b.march")
+    "mod B do\n  fn main() do\n    println(int_to_string(Widget.answer()))\n  end\nend\n";
+  List.iter (fun cmd ->
+      tamper_widget dir;
+      let (_, _, e) = run_forge ~sentinel:false env ~dir:app [ cmd ] in
+      Alcotest.(check int) (Printf.sprintf "forge %s: exactly one notice" cmd) 1
+        (count_occurrences e "note: dependency `widget`");
+      Alcotest.(check string) (Printf.sprintf "forge %s: tree restored" cmd) locked
+        (Resolver_cas_package.hash_directory dir))
+    [ "check"; "test"; "bench" ]
+
+(** If the fresh copy ALSO fails to match forge.lock, the cache was not the
+    problem (the lock or the upstream changed): an error naming the dep and
+    the hashes, and the build does not proceed. Simulated by pointing the
+    lockfile's hash at a value no tree has. *)
+let test_e2e_online_fresh_copy_mismatch_errors () =
+  let env = make_env () in
+  let (app, dir) = widget_app env in
+  let locked = lock_hash app "widget" in
+  let bogus = "sha256:" ^ String.make 64 '0' in
+  let lock = Filename.concat app "forge.lock" in
+  write_file lock (replace_all (read_file lock) locked bogus);
+  Alcotest.(check string) "lock now records the bogus hash" bogus (lock_hash app "widget");
+  let (code, o, e) = run_forge ~sentinel:false env ~dir:app [ "build" ] in
+  Alcotest.(check bool) "build fails" true (code <> 0);
+  Alcotest.(check bool) "names the dep" true (contains e "dependency `widget`");
+  Alcotest.(check bool) "says the fresh copy mismatches too" true
+    (contains e "neither does a freshly fetched copy");
+  Alcotest.(check bool) "reports the lockfile hash" true (contains e bogus);
+  Alcotest.(check bool) "reports the fresh copy's hash" true (contains e locked);
+  Alcotest.(check bool) "did not build" false (contains o "checked");
+  Alcotest.(check string) "cached tree left as it was" locked
+    (Resolver_cas_package.hash_directory dir)
+
+(** Offline is unchanged: the same tampering is an error, not a re-fetch. *)
+let test_e2e_offline_tamper_still_errors () =
+  let env = make_env () in
+  let (app, dir) = widget_app env in
+  tamper_widget dir;
+  let (code, _, e) = run_forge env ~dir:app [ "build"; "--offline" ] in
+  Alcotest.(check bool) "offline build fails" true (code <> 0);
+  Alcotest.(check bool) "integrity error" true (contains e "failed its integrity check");
+  Alcotest.(check bool) "no re-fetch notice" false (contains e "note: dependency");
+  check_no_network env
+
+(** A tampered REGISTRY tree whose published tarball is in the tarball cache
+    is restored online from that tarball, with no network process at all. *)
+let test_e2e_online_registry_refetch_from_tarball () =
+  let env = make_env () in
+  let app = make_app ~body:(app_using "Gadget") ~deps:[ "gadget = \"~> 1.0\"" ] () in
+  let staging = fresh_dir "pkg" in
+  let pkg = Filename.concat staging "gadget-1.2.0" in
+  write_file (Filename.concat pkg "forge.toml")
+    "[package]\nname = \"gadget\"\nversion = \"1.2.0\"\ntype = \"lib\"\n";
+  write_file (Filename.concat pkg "lib/gadget.march")
+    "mod Gadget do\n  fn answer() : Int do\n    7\n  end\nend\n";
+  let hash = Resolver_cas_package.hash_directory pkg in
+  let tgz = Filename.concat staging "gadget.tar.gz" in
+  shell_ok "tar czf %s -C %s gadget-1.2.0" (Filename.quote tgz) (Filename.quote staging);
+  let cs = Tarball_cache.sha256_file tgz in
+  write_file (Filename.concat env.home
+                (Printf.sprintf ".march/cas/tarballs/%s.tar.gz" cs)) (read_file tgz);
+  let tree = Filename.concat (deps_dir env "gadget") "1.2.0" in
+  shell_ok "mkdir -p %s" (Filename.quote tree);
+  shell_ok "cp -R %s/. %s" (Filename.quote pkg) (Filename.quote tree);
+  write_file (Filename.concat tree "lib/gadget.march") "mod Gadget do\nend\n";
+  write_lock app [ registry_entry ~name:"gadget" ~version:"1.2.0" ~hash
+                     ~checksum:("sha256:" ^ cs) () ];
+  let (code, o, e) = run_forge env ~dir:app [ "build" ] in
+  if code <> 0 then Alcotest.failf "online build did not recover:\n%s\n%s" o e;
+  Alcotest.(check int) "one replacement notice" 1
+    (count_occurrences e "note: dependency `gadget`");
+  Alcotest.(check string) "tree matches forge.lock again" hash
+    (Resolver_cas_package.hash_directory tree);
+  check_no_network env
+
+(** `forge deps` online must not launder a tampered tree. It used to find the
+    commit already cached, keep the tampered tree, and write ITS hash into
+    forge.lock, so every later check passed against the tampered copy. *)
+let test_e2e_deps_does_not_relock_tampered_tree () =
+  let env = make_env () in
+  let (app, dir) = widget_app env in
+  let locked = lock_hash app "widget" in
+  tamper_widget dir;
+  let (code, o, e) = run_forge ~sentinel:false env ~dir:app [ "deps" ] in
+  if code <> 0 then Alcotest.failf "forge deps failed:\n%s\n%s" o e;
+  Alcotest.(check string) "forge.lock keeps the true hash" locked (lock_hash app "widget");
+  Alcotest.(check string) "cached tree replaced by the clone" locked
+    (Resolver_cas_package.hash_directory dir);
+  Alcotest.(check bool) "says so" true (contains o "did not match the commit")
+
 let () =
   Random.self_init ();
   let e2e name f = Alcotest.test_case name `Quick f in
@@ -650,4 +830,18 @@ let () =
         e2e "add / outdated refuse, no march spawned" test_e2e_add_outdated_refuse;
         e2e "tampered cached tree fails integrity check" test_e2e_integrity_mismatch;
         e2e "tarball cache: offline restore; corruption detected"
-          test_e2e_tarball_restore_and_corruption ] ]
+          test_e2e_tarball_restore_and_corruption ];
+      "online integrity",
+      [ e2e "clean tree: silent, no network process" test_e2e_online_clean_silent;
+        e2e "tampered git tree re-fetched, verified, build succeeds"
+          test_e2e_online_tampered_git_refetched;
+        e2e "check, test and bench verify too, once per invocation"
+          test_e2e_online_check_and_test_verify;
+        e2e "fresh copy also mismatches: error with both hashes"
+          test_e2e_online_fresh_copy_mismatch_errors;
+        e2e "offline tamper still an error, no re-fetch"
+          test_e2e_offline_tamper_still_errors;
+        e2e "tampered registry tree restored from the tarball cache"
+          test_e2e_online_registry_refetch_from_tarball;
+        e2e "forge deps does not re-lock a tampered tree"
+          test_e2e_deps_does_not_relock_tampered_tree ] ]
