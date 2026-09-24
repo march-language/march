@@ -1,0 +1,49 @@
+-- pid_of_int on the pid of an actor that has died and whose record has been
+-- freed (specs/progress/2026-09-23-proc-struct-reclamation-metas.md, "Survey
+-- additions"). Metas used to be kept forever, so a dead pid still resolved to
+-- its meta, and march_pid_of_int incrc'd and returned that meta's actor
+-- pointer: a record the actor's own green thread had already freed when it
+-- dropped its reference. Under ASAN in the Linux container that was a
+-- heap-use-after-free WRITE in march_incrc from march_pid_of_int, 3 of 3 runs
+-- on the base runtime. A dead pid now resolves through its tombstone, which
+-- holds no record pointer, to the dead-actor sentinel.
+--
+-- Nothing may hold the record once the actor has exited, or it is never freed
+-- and there is nothing to see: the only Pid is `w`, dropped after the kill.
+-- The index comes from spawn order rather than pid_to_int, which leaks a
+-- reference to its argument (filed separately). Natively the freed record
+-- usually still reads dead, so the golden line alone does not discriminate;
+-- the ASAN run does.
+mod PidOfIntDeadPid do
+  needs IO
+  needs IO.Console
+  needs Actor.Introspect
+
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+    on Tick() do
+      state
+    end
+  end
+
+  fn spawn_and_kill() do
+    let w = spawn(Worker)
+    kill(w)
+    -- The first actor a program spawns gets pid index 0.
+    0
+  end
+
+  fn probe(intro : Cap(Actor.Introspect), n) do
+    is_alive(Actor.pid_from_int(intro, n))
+  end
+
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
+    let n = spawn_and_kill()
+    run_until_idle()
+    -- Let the killed actor's green thread exit and drop its reference.
+    sleep_ms(100)
+    println("dead pid alive: " ++ bool_to_string(probe(intro, n)))
+  end
+end

@@ -76,6 +76,20 @@ Cons picks. Each branch starts with a label (`more`, `done`) and must begin with
 from the chooser. That first message is how the other side learns which branch was
 picked. The compiler rejects a branch that starts any other way.
 
+After its first message a branch can go on for as many steps as it needs, one per line,
+labelled or not. A new line starting `name ->` begins the next branch; anything else
+(`A -> B : T`, `tick: A -> B : T`, `stop`, a nested `loop` or `choose`) continues the
+current one:
+
+```march
+choose by A:
+  go -> A -> B : Int
+        tick: A -> B : Int
+        B -> A : String
+  no -> A -> B : Bool
+end
+```
+
 A protocol may also say what each role's code is allowed to do:
 
 ```march
