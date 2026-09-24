@@ -375,6 +375,12 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **`pid_to_int` and supervise blocks no longer leak the actor record.**
+  Compiled, every `pid_to_int(p)` and `Actor.set_queue_limit(p, …)` call kept
+  one reference to `p`'s actor record, and every supervise-block child was
+  held two extra times by its supervisor's spawn code (the supervisor itself
+  twice more), so an actor that had been through any of them was never freed
+  after it stopped. They now leave the count alone.
 - **Spawning a nested actor from its parent module compiles.** `spawn(Inner.Box)`
   written outside `mod Inner` passed `--check` and ran interpreted, but `--compile`
   failed to link with `Undefined symbols: "_Inner.Box_spawn"`. It now links and runs.
