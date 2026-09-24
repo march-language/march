@@ -402,10 +402,12 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#type-NameEvent"><span class="sb-kind" style="color:var(--ty)">T</span>NameEvent</a>
 <a class="sl" href="ClusterNode.html#type-RegisterError"><span class="sb-kind" style="color:var(--ty)">T</span>RegisterError</a>
 <a class="sl" href="ClusterNode.html#type-CnEffect"><span class="sb-kind" style="color:var(--ty)">T</span>CnEffect</a>
-<a class="sl" href="ClusterNode.html#type-ClusterHandle"><span class="sb-kind" style="color:var(--ty)">T</span>ClusterHandle</a>
+<a class="sl" href="ClusterNode.html#type-CnHandle"><span class="sb-kind" style="color:var(--ty)">T</span>CnHandle</a>
 <a class="sl" href="ClusterNode.html#type-NodeActorState"><span class="sb-kind" style="color:var(--ty)">T</span>NodeActorState</a>
+<a class="sl" href="ClusterNode.html#type-ClusterOps"><span class="sb-kind" style="color:var(--ty)">T</span>ClusterOps</a>
 <a class="sl" href="ClusterNode.html#fn-addr_of"><span class="sb-kind" style="color:var(--fn)">F</span>addr_of</a>
 <a class="sl" href="ClusterNode.html#fn-all_members"><span class="sb-kind" style="color:var(--fn)">F</span>all_members</a>
+<a class="sl" href="ClusterNode.html#fn-attach"><span class="sb-kind" style="color:var(--fn)">F</span>attach</a>
 <a class="sl" href="ClusterNode.html#fn-await_members"><span class="sb-kind" style="color:var(--fn)">F</span>await_members</a>
 <a class="sl" href="ClusterNode.html#fn-config"><span class="sb-kind" style="color:var(--fn)">F</span>config</a>
 <a class="sl" href="ClusterNode.html#fn-config_from_env"><span class="sb-kind" style="color:var(--fn)">F</span>config_from_env</a>
@@ -435,10 +437,13 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#fn-name_event_text"><span class="sb-kind" style="color:var(--fn)">F</span>name_event_text</a>
 <a class="sl" href="ClusterNode.html#fn-name_of"><span class="sb-kind" style="color:var(--fn)">F</span>name_of</a>
 <a class="sl" href="ClusterNode.html#fn-names"><span class="sb-kind" style="color:var(--fn)">F</span>names</a>
+<a class="sl" href="ClusterNode.html#fn-next_id"><span class="sb-kind" style="color:var(--fn)">F</span>next_id</a>
+<a class="sl" href="ClusterNode.html#fn-node_id"><span class="sb-kind" style="color:var(--fn)">F</span>node_id</a>
 <a class="sl" href="ClusterNode.html#fn-node_id_of"><span class="sb-kind" style="color:var(--fn)">F</span>node_id_of</a>
 <a class="sl" href="ClusterNode.html#fn-off_peer_closed"><span class="sb-kind" style="color:var(--fn)">F</span>off_peer_closed</a>
 <a class="sl" href="ClusterNode.html#fn-on_delivery_failed"><span class="sb-kind" style="color:var(--fn)">F</span>on_delivery_failed</a>
 <a class="sl" href="ClusterNode.html#fn-on_peer_closed"><span class="sb-kind" style="color:var(--fn)">F</span>on_peer_closed</a>
+<a class="sl" href="ClusterNode.html#fn-ops_stub"><span class="sb-kind" style="color:var(--fn)">F</span>ops_stub</a>
 <a class="sl" href="ClusterNode.html#fn-queue_for"><span class="sb-kind" style="color:var(--fn)">F</span>queue_for</a>
 <a class="sl" href="ClusterNode.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
 <a class="sl" href="ClusterNode.html#fn-route"><span class="sb-kind" style="color:var(--fn)">F</span>route</a>
@@ -459,7 +464,9 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Compress.html#type-Mode"><span class="sb-kind" style="color:var(--ty)">T</span>Mode</a>
 <a class="sl" href="Compress.html#type-Level"><span class="sb-kind" style="color:var(--ty)">T</span>Level</a>
 <a class="sl" href="Compress.html#fn-accept_encoding"><span class="sb-kind" style="color:var(--fn)">F</span>accept_encoding</a>
-<a class="sl" href="Compress.html#fn-best_encoding"><span class="sb-kind" style="color:var(--fn)">F</span>best_encoding</a></div></div>
+<a class="sl" href="Compress.html#fn-best_encoding"><span class="sb-kind" style="color:var(--fn)">F</span>best_encoding</a>
+<a class="sl" href="Compress.html#fn-lift_decode_error"><span class="sb-kind" style="color:var(--fn)">F</span>lift_decode_error</a>
+<a class="sl" href="Compress.html#fn-lift_encode_error"><span class="sb-kind" style="color:var(--fn)">F</span>lift_encode_error</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Config.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Config.html">Config</a></div><div class="sb-sub"><a class="sl" href="Config.html#type-Value"><span class="sb-kind" style="color:var(--ty)">T</span>Value</a>
 <a class="sl" href="Config.html#type-Codec"><span class="sb-kind" style="color:var(--ty)">T</span>Codec</a>
 <a class="sl" href="Config.html#type-Key"><span class="sb-kind" style="color:var(--ty)">T</span>Key</a>
@@ -1592,6 +1599,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NativeArray.html#fn-set_i32"><span class="sb-kind" style="color:var(--fn)">F</span>set_i32</a>
 <a class="sl" href="NativeArray.html#fn-set_int"><span class="sb-kind" style="color:var(--fn)">F</span>set_int</a>
 <a class="sl" href="NativeArray.html#fn-set_u8"><span class="sb-kind" style="color:var(--fn)">F</span>set_u8</a>
+<a class="sl" href="NativeArray.html#fn-sort_float"><span class="sb-kind" style="color:var(--fn)">F</span>sort_float</a>
 <a class="sl" href="NativeArray.html#fn-sort_int"><span class="sb-kind" style="color:var(--fn)">F</span>sort_int</a>
 <a class="sl" href="NativeArray.html#fn-sum_f32"><span class="sb-kind" style="color:var(--fn)">F</span>sum_f32</a>
 <a class="sl" href="NativeArray.html#fn-sum_float"><span class="sb-kind" style="color:var(--fn)">F</span>sum_float</a>
@@ -1658,6 +1666,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NodeQueue.html#fn-encode_credit"><span class="sb-kind" style="color:var(--fn)">F</span>encode_credit</a>
 <a class="sl" href="NodeQueue.html#fn-enqueue"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue</a>
 <a class="sl" href="NodeQueue.html#fn-start"><span class="sb-kind" style="color:var(--fn)">F</span>start</a>
+<a class="sl" href="NodeQueue.html#fn-start_local"><span class="sb-kind" style="color:var(--fn)">F</span>start_local</a>
 <a class="sl" href="NodeQueue.html#fn-tag_credit"><span class="sb-kind" style="color:var(--fn)">F</span>tag_credit</a>
 <a class="sl" href="NodeQueue.html#fn-take_evicted"><span class="sb-kind" style="color:var(--fn)">F</span>take_evicted</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NodeRpc.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NodeRpc.html">NodeRpc</a></div><div class="sb-sub"><a class="sl" href="NodeRpc.html#type-Target"><span class="sb-kind" style="color:var(--ty)">T</span>Target</a>
@@ -2051,12 +2060,14 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Session.html#fn-crash_payload"><span class="sb-kind" style="color:var(--fn)">F</span>crash_payload</a>
 <a class="sl" href="Session.html#fn-emit"><span class="sb-kind" style="color:var(--fn)">F</span>emit</a>
 <a class="sl" href="Session.html#fn-fail"><span class="sb-kind" style="color:var(--fn)">F</span>fail</a>
+<a class="sl" href="Session.html#fn-hold_epoch"><span class="sb-kind" style="color:var(--fn)">F</span>hold_epoch</a>
 <a class="sl" href="Session.html#fn-in_process"><span class="sb-kind" style="color:var(--fn)">F</span>in_process</a>
 <a class="sl" href="Session.html#fn-in_process_with"><span class="sb-kind" style="color:var(--fn)">F</span>in_process_with</a>
 <a class="sl" href="Session.html#fn-leave"><span class="sb-kind" style="color:var(--fn)">F</span>leave</a>
 <a class="sl" href="Session.html#fn-on_cancel"><span class="sb-kind" style="color:var(--fn)">F</span>on_cancel</a>
 <a class="sl" href="Session.html#fn-on_crash"><span class="sb-kind" style="color:var(--fn)">F</span>on_crash</a>
 <a class="sl" href="Session.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
+<a class="sl" href="Session.html#fn-release_epoch"><span class="sb-kind" style="color:var(--fn)">F</span>release_epoch</a>
 <a class="sl" href="Session.html#fn-suspend"><span class="sb-kind" style="color:var(--fn)">F</span>suspend</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="SessionNode.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="SessionNode.html">SessionNode</a></div><div class="sb-sub"><a class="sl" href="SessionNode.html#type-Link"><span class="sb-kind" style="color:var(--ty)">T</span>Link</a>
 <a class="sl" href="SessionNode.html#type-EndpointState"><span class="sb-kind" style="color:var(--ty)">T</span>EndpointState</a>
@@ -2466,6 +2477,41 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Toml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Toml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
 <a class="sl" href="Toml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Topology.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Topology.html">Topology</a></div><div class="sb-sub"><a class="sl" href="Topology.html#type-TopoPlacement"><span class="sb-kind" style="color:var(--ty)">T</span>TopoPlacement</a>
+<a class="sl" href="Topology.html#type-TopoOpened"><span class="sb-kind" style="color:var(--ty)">T</span>TopoOpened</a>
+<a class="sl" href="Topology.html#type-TopoRole"><span class="sb-kind" style="color:var(--ty)">T</span>TopoRole</a>
+<a class="sl" href="Topology.html#type-TopoAnchorState"><span class="sb-kind" style="color:var(--ty)">T</span>TopoAnchorState</a>
+<a class="sl" href="Topology.html#type-TopoState"><span class="sb-kind" style="color:var(--ty)">T</span>TopoState</a>
+<a class="sl" href="Topology.html#fn-actor_role"><span class="sb-kind" style="color:var(--fn)">F</span>actor_role</a>
+<a class="sl" href="Topology.html#fn-close_all"><span class="sb-kind" style="color:var(--fn)">F</span>close_all</a>
+<a class="sl" href="Topology.html#fn-config_from_env"><span class="sb-kind" style="color:var(--fn)">F</span>config_from_env</a>
+<a class="sl" href="Topology.html#fn-count"><span class="sb-kind" style="color:var(--fn)">F</span>count</a>
+<a class="sl" href="Topology.html#fn-count_on"><span class="sb-kind" style="color:var(--fn)">F</span>count_on</a>
+<a class="sl" href="Topology.html#fn-drain"><span class="sb-kind" style="color:var(--fn)">F</span>drain</a>
+<a class="sl" href="Topology.html#fn-drain_on_signal"><span class="sb-kind" style="color:var(--fn)">F</span>drain_on_signal</a>
+<a class="sl" href="Topology.html#fn-eligible_here"><span class="sb-kind" style="color:var(--fn)">F</span>eligible_here</a>
+<a class="sl" href="Topology.html#fn-everywhere"><span class="sb-kind" style="color:var(--fn)">F</span>everywhere</a>
+<a class="sl" href="Topology.html#fn-hook"><span class="sb-kind" style="color:var(--fn)">F</span>hook</a>
+<a class="sl" href="Topology.html#fn-labels_of"><span class="sb-kind" style="color:var(--fn)">F</span>labels_of</a>
+<a class="sl" href="Topology.html#fn-marked"><span class="sb-kind" style="color:var(--fn)">F</span>marked</a>
+<a class="sl" href="Topology.html#fn-marker"><span class="sb-kind" style="color:var(--fn)">F</span>marker</a>
+<a class="sl" href="Topology.html#fn-node_labels"><span class="sb-kind" style="color:var(--fn)">F</span>node_labels</a>
+<a class="sl" href="Topology.html#fn-offer_worker"><span class="sb-kind" style="color:var(--fn)">F</span>offer_worker</a>
+<a class="sl" href="Topology.html#fn-offered"><span class="sb-kind" style="color:var(--fn)">F</span>offered</a>
+<a class="sl" href="Topology.html#fn-on_label"><span class="sb-kind" style="color:var(--fn)">F</span>on_label</a>
+<a class="sl" href="Topology.html#fn-place"><span class="sb-kind" style="color:var(--fn)">F</span>place</a>
+<a class="sl" href="Topology.html#fn-rank"><span class="sb-kind" style="color:var(--fn)">F</span>rank</a>
+<a class="sl" href="Topology.html#fn-ranked"><span class="sb-kind" style="color:var(--fn)">F</span>ranked</a>
+<a class="sl" href="Topology.html#fn-reconcile_now"><span class="sb-kind" style="color:var(--fn)">F</span>reconcile_now</a>
+<a class="sl" href="Topology.html#fn-role"><span class="sb-kind" style="color:var(--fn)">F</span>role</a>
+<a class="sl" href="Topology.html#fn-running"><span class="sb-kind" style="color:var(--fn)">F</span>running</a>
+<a class="sl" href="Topology.html#fn-runs_pool"><span class="sb-kind" style="color:var(--fn)">F</span>runs_pool</a>
+<a class="sl" href="Topology.html#fn-score"><span class="sb-kind" style="color:var(--fn)">F</span>score</a>
+<a class="sl" href="Topology.html#fn-settled"><span class="sb-kind" style="color:var(--fn)">F</span>settled</a>
+<a class="sl" href="Topology.html#fn-start_failed"><span class="sb-kind" style="color:var(--fn)">F</span>start_failed</a>
+<a class="sl" href="Topology.html#fn-stop"><span class="sb-kind" style="color:var(--fn)">F</span>stop</a>
+<a class="sl" href="Topology.html#fn-supervise_offers"><span class="sb-kind" style="color:var(--fn)">F</span>supervise_offers</a>
+<a class="sl" href="Topology.html#fn-wants"><span class="sb-kind" style="color:var(--fn)">F</span>wants</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Tuple.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Tuple.html">Tuple</a></div><div class="sb-sub"><a class="sl" href="Tuple.html#fn-apply"><span class="sb-kind" style="color:var(--fn)">F</span>apply</a>
 <a class="sl" href="Tuple.html#fn-both"><span class="sb-kind" style="color:var(--fn)">F</span>both</a>
 <a class="sl" href="Tuple.html#fn-first"><span class="sb-kind" style="color:var(--fn)">F</span>first</a>
@@ -2579,7 +2625,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Stats</span></nav><h1>Stats</h1><div class="mdoc"><p>Stats module: descriptive statistics on List(Float).</p><p>All functions are pure — no side effects. Primary input type: List(Float).</p><p>Functions that require non-empty input panic on empty list. sum and count always succeed (return 0.0 / 0 for empty).</p><p>Design: all sorting uses List.sort_by with Float comparison. Variance uses Welford's online algorithm for numerical stability.</p></div><h2>Types</h2><div class="item" id="type-QuantileMethod"><div class="ih"><span class="badge bty">type</span><span class="name">QuantileMethod</span><span class="sig"><a href="#type-QuantileMethod">QuantileMethod</a> =</span><a class="anchor-link" href="#type-QuantileMethod" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-correlation"><div class="ih"><span class="badge bfn">fn</span><span class="name">correlation</span><span class="sig">correlation(xs : {List(Float) | len(_) &gt;= 2},</span><a class="anchor-link" href="#fn-correlation" title="Link">#</a></div><div class="ib"><p>Pearson correlation coefficient. Returns value in [-1, 1]. Panics if lists have different lengths, fewer than 2 elements, or if either list has zero standard deviation.</p><pre><code>The two *structural* preconditions are declared in the signature (`xs` has at
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Stats</span></nav><h1>Stats</h1><div class="mdoc"><p>Stats module: descriptive statistics on List(Float).</p><p>All functions are pure — no side effects. Primary input type: List(Float).</p><p>Functions that require non-empty input declare it in their signature as <code>{List(Float) | len(_) &gt; 0}</code> (a refinement the compiler checks at every call site) and still panic on an empty list as the runtime backstop. sum, count, variance_pop, std_dev_pop and the *_safe variants accept any list. To migrate a caller the checker flags, run <code>march --check --refine-suggest &lt;caller&gt; file.march</code>: it proposes the parameter refinement to restate upward, or guard the call with <code>match xs do Nil -&gt; ... _ -&gt; ... end</code>.</p><p>Design: all sorting uses List.sort_by with Float comparison. Variance uses Welford's online algorithm for numerical stability.</p></div><h2>Types</h2><div class="item" id="type-QuantileMethod"><div class="ih"><span class="badge bty">type</span><span class="name">QuantileMethod</span><span class="sig"><a href="#type-QuantileMethod">QuantileMethod</a> =</span><a class="anchor-link" href="#type-QuantileMethod" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-correlation"><div class="ih"><span class="badge bfn">fn</span><span class="name">correlation</span><span class="sig">correlation(xs : {List(Float) | len(_) &gt;= 2},</span><a class="anchor-link" href="#fn-correlation" title="Link">#</a></div><div class="ib"><p>Pearson correlation coefficient. Returns value in [-1, 1]. Panics if lists have different lengths, fewer than 2 elements, or if either list has zero standard deviation.</p><pre><code>The two *structural* preconditions are declared in the signature (`xs` has at
 least 2 elements; `ys` has exactly as many as `xs`), so a provable violation
 of either is a compile error. The zero-standard-deviation panic is
 data-dependent — it turns on the `Float` *values* in the lists, not on their
@@ -2591,9 +2637,10 @@ compiler can prove violates either is a compile error rather than a runtime
 panic. Lengths it cannot relate are accepted in silence (March reports only
 definite failures) and the `panic`s below remain the runtime backstop.</code></pre></div></div>
 <div class="item" id="fn-five_number_summary"><div class="ih"><span class="badge bfn">fn</span><span class="name">five_number_summary</span><span class="sig">five_number_summary(xs : {List(Float) | len(_) &gt; 0}, method : <a href="#type-QuantileMethod">QuantileMethod</a>) : (Float, Float, Float, Float, Float)</span><a class="anchor-link" href="#fn-five_number_summary" title="Link">#</a></div><div class="ib"><p>Five-number summary with selectable method: (min, Q1, median, Q3, max). Panics on empty list.</p></div></div>
-<div class="item" id="fn-iqr"><div class="ih"><span class="badge bfn">fn</span><span class="name">iqr</span><span class="sig">iqr(xs : List(Float), method : <a href="#type-QuantileMethod">QuantileMethod</a>) : Float</span><a class="anchor-link" href="#fn-iqr" title="Link">#</a></div><div class="ib"><p>Interquartile range: Q3 − Q1 using the given method.</p><pre><code>Uses the same sorted list for both quartiles (one sort, not two).
-Panics on empty input.</code></pre></div></div>
-<div class="item" id="fn-iqr_default"><div class="ih"><span class="badge bfn">fn</span><span class="name">iqr_default</span><span class="sig">iqr_default(xs : List(Float)) : Float</span><a class="anchor-link" href="#fn-iqr_default" title="Link">#</a></div><div class="ib"><p>Interquartile range using <code>Linear</code> (Type 7) interpolation.</p></div></div>
+<div class="item" id="fn-iqr"><div class="ih"><span class="badge bfn">fn</span><span class="name">iqr</span><span class="sig">iqr(xs : {List(Float) | len(_) &gt; 0}, method : <a href="#type-QuantileMethod">QuantileMethod</a>) : Float</span><a class="anchor-link" href="#fn-iqr" title="Link">#</a></div><div class="ib"><p>Interquartile range: Q3 − Q1 using the given method.</p><pre><code>Uses the same sorted list for both quartiles (one sort, not two).
+Precondition: `xs` is non-empty (`{List(Float) | len(_) &gt; 0}`); panics on
+empty input.</code></pre></div></div>
+<div class="item" id="fn-iqr_default"><div class="ih"><span class="badge bfn">fn</span><span class="name">iqr_default</span><span class="sig">iqr_default(xs : {List(Float) | len(_) &gt; 0}) : Float</span><a class="anchor-link" href="#fn-iqr_default" title="Link">#</a></div><div class="ib"><p>Interquartile range using <code>Linear</code> (Type 7) interpolation. Precondition: <code>xs</code> is non-empty (<code>{List(Float) | len(_) &gt; 0}</code>).</p></div></div>
 <div class="item" id="fn-linear_regression"><div class="ih"><span class="badge bfn">fn</span><span class="name">linear_regression</span><span class="sig">linear_regression(xs : {List(Float) | len(_) &gt;= 2},</span><a class="anchor-link" href="#fn-linear_regression" title="Link">#</a></div><div class="ib"><p>Simple linear regression: y = slope * x + intercept. Returns (slope, intercept). Panics if lists have different lengths or fewer than 2 elements, or if xs has zero variance (vertical line).</p><pre><code>The two *structural* preconditions are declared in the signature (`xs` has at
 least 2 points; `ys` has exactly as many as `xs`), so a provable violation of
 either is a compile error. The zero-variance panic is data-dependent — it
@@ -2603,7 +2650,7 @@ express it and it stays a runtime check.</code></pre></div></div>
 <div class="item" id="fn-max_val"><div class="ih"><span class="badge bfn">fn</span><span class="name">max_val</span><span class="sig">max_val(xs : {List(Float) | len(_) &gt; 0}) : Float</span><a class="anchor-link" href="#fn-max_val" title="Link">#</a></div><div class="ib"><p>Maximum value. Panics on empty list.</p></div></div>
 <div class="item" id="fn-mean"><div class="ih"><span class="badge bfn">fn</span><span class="name">mean</span><span class="sig">mean(xs : {List(Float) | len(_) &gt; 0}) : Float</span><a class="anchor-link" href="#fn-mean" title="Link">#</a></div><div class="ib"><p>Arithmetic mean. Panics on empty list.</p></div></div>
 <div class="item" id="fn-mean_safe"><div class="ih"><span class="badge bfn">fn</span><span class="name">mean_safe</span><span class="sig">mean_safe(xs : List(Float)) : Result(Float, String)</span><a class="anchor-link" href="#fn-mean_safe" title="Link">#</a></div><div class="ib"><p>Mean, returning Err on empty list instead of panicking.</p></div></div>
-<div class="item" id="fn-median"><div class="ih"><span class="badge bfn">fn</span><span class="name">median</span><span class="sig">median(xs : List(Float)) : Float</span><a class="anchor-link" href="#fn-median" title="Link">#</a></div><div class="ib"><p>Median (50th percentile). Panics on empty list.</p></div></div>
+<div class="item" id="fn-median"><div class="ih"><span class="badge bfn">fn</span><span class="name">median</span><span class="sig">median(xs : {List(Float) | len(_) &gt; 0}) : Float</span><a class="anchor-link" href="#fn-median" title="Link">#</a></div><div class="ib"><p>Median (50th percentile). Precondition: <code>xs</code> is non-empty (<code>{List(Float) | len(_) &gt; 0}</code>, checked at compile time); panics on an empty list if the checker could not decide it.</p></div></div>
 <div class="item" id="fn-min_safe"><div class="ih"><span class="badge bfn">fn</span><span class="name">min_safe</span><span class="sig">min_safe(xs : List(Float)) : Result(Float, String)</span><a class="anchor-link" href="#fn-min_safe" title="Link">#</a></div><div class="ib"><p>Minimum value, returning Err on empty list.</p></div></div>
 <div class="item" id="fn-min_val"><div class="ih"><span class="badge bfn">fn</span><span class="name">min_val</span><span class="sig">min_val(xs : {List(Float) | len(_) &gt; 0}) : Float</span><a class="anchor-link" href="#fn-min_val" title="Link">#</a></div><div class="ib"><p>Minimum value. Panics on empty list.</p></div></div>
 <div class="item" id="fn-mode"><div class="ih"><span class="badge bfn">fn</span><span class="name">mode</span><span class="sig">mode(xs : {List(Float) | len(_) &gt; 0}) : Float</span><a class="anchor-link" href="#fn-mode" title="Link">#</a></div><div class="ib"><p>Mode: the most frequently occurring value. When there are ties, returns the first value encountered (in sorted order). Panics on empty list.</p></div></div>
@@ -2611,13 +2658,13 @@ express it and it stays a runtime check.</code></pre></div></div>
 <div class="item" id="fn-quantile"><div class="ih"><span class="badge bfn">fn</span><span class="name">quantile</span><span class="sig">quantile(xs : {List(Float) | len(_) &gt; 0}, q : {Float | _ &gt;= 0.0 &amp;&amp; _ &lt;= 1.0}, method : <a href="#type-QuantileMethod">QuantileMethod</a>) : Float</span><a class="anchor-link" href="#fn-quantile" title="Link">#</a></div><div class="ib"><p>Quantile at probability q ∈ [0.0, 1.0] using the given interpolation method.  Panics on empty list or out-of-range q.</p><pre><code>For a percentile-style API (q in 0..100), see `percentile`.  The
 existing `percentile(xs, p)` is equivalent to
 `quantile(xs, p / 100.0, Linear)`.</code></pre></div></div>
-<div class="item" id="fn-quantile_default"><div class="ih"><span class="badge bfn">fn</span><span class="name">quantile_default</span><span class="sig">quantile_default(xs : List(Float), q : Float) : Float</span><a class="anchor-link" href="#fn-quantile_default" title="Link">#</a></div><div class="ib"><p>Quantile with <code>Linear</code> interpolation (Type 7, R/numpy default). Convenience alias for <code>quantile(xs, q, Linear)</code>.</p></div></div>
+<div class="item" id="fn-quantile_default"><div class="ih"><span class="badge bfn">fn</span><span class="name">quantile_default</span><span class="sig">quantile_default(xs : {List(Float) | len(_) &gt; 0}, q : {Float | _ &gt;= 0.0 &amp;&amp; _ &lt;= 1.0}) : Float</span><a class="anchor-link" href="#fn-quantile_default" title="Link">#</a></div><div class="ib"><p>Quantile with <code>Linear</code> interpolation (Type 7, R/numpy default). Convenience alias for <code>quantile(xs, q, Linear)</code>, and carries the same preconditions: <code>xs</code> is non-empty and <code>q</code> is in [0.0, 1.0].</p></div></div>
 <div class="item" id="fn-quantiles"><div class="ih"><span class="badge bfn">fn</span><span class="name">quantiles</span><span class="sig">quantiles(xs : {List(Float) | len(_) &gt; 0}, qs : List(Float), method : <a href="#type-QuantileMethod">QuantileMethod</a>) : List(Float)</span><a class="anchor-link" href="#fn-quantiles" title="Link">#</a></div><div class="ib"><p>Batched quantiles: returns <code>[quantile(xs, q, method) for q in qs]</code>. Sorts the input once and reuses it for each q.</p></div></div>
-<div class="item" id="fn-std_dev"><div class="ih"><span class="badge bfn">fn</span><span class="name">std_dev</span><span class="sig">std_dev(xs : List(Float)) : Float</span><a class="anchor-link" href="#fn-std_dev" title="Link">#</a></div><div class="ib"><p>Sample standard deviation. Returns 0.0 for single element. Panics on empty.</p></div></div>
+<div class="item" id="fn-std_dev"><div class="ih"><span class="badge bfn">fn</span><span class="name">std_dev</span><span class="sig">std_dev(xs : {List(Float) | len(_) &gt; 0}) : Float</span><a class="anchor-link" href="#fn-std_dev" title="Link">#</a></div><div class="ib"><p>Sample standard deviation. Returns 0.0 for a single element. Precondition: <code>xs</code> is non-empty (<code>{List(Float) | len(_) &gt; 0}</code>); panics on an empty list.</p></div></div>
 <div class="item" id="fn-std_dev_pop"><div class="ih"><span class="badge bfn">fn</span><span class="name">std_dev_pop</span><span class="sig">std_dev_pop(xs : List(Float)) : Float</span><a class="anchor-link" href="#fn-std_dev_pop" title="Link">#</a></div><div class="ib"><p>Population standard deviation.</p></div></div>
 <div class="item" id="fn-std_dev_safe"><div class="ih"><span class="badge bfn">fn</span><span class="name">std_dev_safe</span><span class="sig">std_dev_safe(xs : List(Float)) : Result(Float, String)</span><a class="anchor-link" href="#fn-std_dev_safe" title="Link">#</a></div><div class="ib"><p>Sample standard deviation, returning Err on empty or single-element list.</p></div></div>
 <div class="item" id="fn-sum"><div class="ih"><span class="badge bfn">fn</span><span class="name">sum</span><span class="sig">sum(xs : List(Float)) : Float</span><a class="anchor-link" href="#fn-sum" title="Link">#</a></div><div class="ib"><p>Sum of all elements. Returns 0.0 for empty list.</p></div></div>
-<div class="item" id="fn-variance"><div class="ih"><span class="badge bfn">fn</span><span class="name">variance</span><span class="sig">variance(xs : {List(Float) | len(_) &gt; 0}) : Float</span><a class="anchor-link" href="#fn-variance" title="Link">#</a></div><div class="ib"><p>Sample variance (denominator n-1). Returns 0.0 for a single element. Panics on empty list.</p><pre><code>Uses Welford's online algorithm for numerical stability on inputs
+<div class="item" id="fn-variance"><div class="ih"><span class="badge bfn">fn</span><span class="name">variance</span><span class="sig">variance(xs : {List(Float) | len(_) &gt; 0}) : Float</span><a class="anchor-link" href="#fn-variance" title="Link">#</a></div><div class="ib"><p>Sample variance (denominator n-1). Returns 0.0 for a single element. Precondition: <code>xs</code> is non-empty (<code>{List(Float) | len(_) &gt; 0}</code>); panics on an empty list.</p><pre><code>Uses Welford's online algorithm for numerical stability on inputs
 where the naive two-pass sum-of-squares would suffer catastrophic
 cancellation (near-constant data, shifted distributions).</code></pre></div></div>
 <div class="item" id="fn-variance_pop"><div class="ih"><span class="badge bfn">fn</span><span class="name">variance_pop</span><span class="sig">variance_pop(xs : List(Float)) : Float</span><a class="anchor-link" href="#fn-variance_pop" title="Link">#</a></div><div class="ib"><p>Population variance (denominator n). Returns 0.0 for a single element or empty list.</p><pre><code>Uses Welford's online algorithm (same stability benefit as `variance`).</code></pre></div></div>
