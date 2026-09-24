@@ -617,10 +617,10 @@ Path.is_absolute("/usr/bin")       -- true
 `system.march`: OS and runtime information.
 
 ```march
-System.os()                -- "macos" | "linux" | "windows"
-System.arch()              -- "x86_64" | "arm64"
+System.os()                -- "macos" | "linux" | "windows" | "unknown"
+System.arch()              -- "x86_64" | "aarch64" | "x86" | ...
 System.cpu_count()         -- number of logical CPUs
-System.monotonic_time()    -- Int (nanoseconds, for timing)
+System.monotonic_time()    -- Int (milliseconds since process start)
 System.env("HOME")         -- Option(String)
 System.put_env("KEY", "val")
 System.argv()              -- List(String)

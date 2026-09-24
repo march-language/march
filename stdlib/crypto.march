@@ -127,11 +127,13 @@ mod Crypto do
   end
 
   doc """
-  Compute the SHA-512 hash of data, returning a lowercase hex string.
+  Compute the SHA-512 hash of a String, returning a 128-char lowercase hex
+  string.
 
-  The argument may be a String or Bytes value.
+      Crypto.sha512("hello")
+      -- "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca7..."
   """
-  fn sha512(data) do
+  fn sha512(data : String) : String do
     stdlib_sha512(data)
   end
 
