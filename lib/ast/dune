@@ -1,2 +1,13 @@
 (library
  (name march_ast))
+
+; The compiler's own version, from dune-project's (version ...) field, for the
+; `march_version` builtin: the interpreter returns it and TIR lowering folds a
+; direct call to it into a string literal, so both backends report the same
+; string without a hand-maintained literal (bin/dune does the same for
+; `march --version`).
+(rule
+ (target march_version.ml)
+ (action
+  (with-stdout-to march_version.ml
+   (echo "let version = \"%{version:march}\"\n"))))

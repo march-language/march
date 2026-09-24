@@ -1289,21 +1289,31 @@ void march_println(void *s) {
     (void)rc;
 }
 
+/* Writes the String verbatim, NO newline, like the interpreter's print_stderr.
+ * Every caller (IO.warn, Logger.appender_stderr) appends its own "\n"; the
+ * newline this used to add doubled each of them in compiled programs. */
 void march_print_stderr(void *s) {
     march_string *ms = (march_string *)s;
     fwrite(ms->data, 1, (size_t)ms->len, stderr);
-    fputc('\n', stderr);
 }
 
+/* One whole line (no 4096-byte cap: a longer line used to come back in
+ * pieces, one per call, where the interpreter returns it whole), minus its
+ * trailing "\n" and "\r". */
 void *march_io_read_line(void) {
-    char buf[4096];
-    if (!fgets(buf, sizeof(buf), stdin)) {
+    char *buf = NULL;
+    size_t cap = 0;
+    ssize_t n = getline(&buf, &cap, stdin);
+    if (n <= 0) {
+        free(buf);
         return march_string_lit("", 0);
     }
-    size_t len = strlen(buf);
+    size_t len = (size_t)n;
     if (len > 0 && buf[len-1] == '\n') { buf[--len] = '\0'; }
     if (len > 0 && buf[len-1] == '\r') { buf[--len] = '\0'; }
-    return march_string_lit(buf, (int64_t)len);
+    void *r = march_string_lit(buf, (int64_t)len);
+    free(buf);
+    return r;
 }
 
 /* Reads directly off fd 0 via read(2), bypassing stdio's buffer -- unlike

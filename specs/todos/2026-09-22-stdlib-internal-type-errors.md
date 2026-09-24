@@ -28,7 +28,7 @@ counts so no NEW one can land. This item is the backlog it pins, by class:
 | `Array(a)` annotations vs the `PVec(a)` the Array module returns | rrb_vec (19), aho_corasick (11) | `2026-09-22-stdlib-array-pvec-annotations.md` |
 | gzip/zstd builtins return `Result(_, String)`, signatures say `Compress.Error` | compress (19) | `2026-09-22-stdlib-compress-error-type.md` |
 | ~~qualified `Csv.CsvRow` does not unify with bare `CsvRow`~~ | ~~csv (12)~~ | ~~`2026-09-22-stdlib-csv-qualified-type-name.md`~~ fixed 2026-09-23, `specs/progress/2026-09-23-csv-qualified-type-name.md` |
-| builtins the interpreter and codegen know but the typechecker does not | system (8), io (3), uuid (2), crypto (1), logger (1) | `2026-09-22-builtins-missing-from-the-typechecker.md` |
+| ~~builtins the interpreter and codegen know but the typechecker does not~~ | ~~system (8), io (3), uuid (2), crypto (1), logger (1)~~ | fixed 2026-09-23: `specs/progress/2026-09-23-builtins-missing-from-the-typechecker.md` |
 | undeclared `needs`, unknown constructors, ambiguous ctors, `Pid` arity | node_call (5), session_node (3), actor (2), cluster_node (1) | `2026-09-22-stdlib-distributed-module-errors.md` |
 | one-off: `plot.march:714` expects `String`, gets `FileError`; `logger.march:208` expects `Int`, gets `()` | plot (1), logger (1) | this file |
 
