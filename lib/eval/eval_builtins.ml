@@ -254,9 +254,6 @@ let base_env : env =
            | Some inst -> VBool inst.ai_alive
            | None      -> VBool false)
         | _ -> eval_error "is_alive: expected Pid"))
-  ; ("respond", VBuiltin ("respond", function
-        | [_] -> VUnit   (* stub: full async impl in future *)
-        | _ -> eval_error "respond: expected one argument"))
   ; ("monitor", VBuiltin ("monitor", function
         | [VPid watcher_pid; VPid target_pid] ->
           VInt (monitor_actor ~watcher_pid ~target_pid)

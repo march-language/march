@@ -152,6 +152,9 @@ git log is authoritative for exact commits.
   including when the accumulator is itself a tuple.
 
 ### Removed
+- **The `respond` builtin is gone.** It was an interpreter no-op stub
+  (`respond(x)` returned `()`), had no callers, and never had a compiled
+  lowering.
 - **`MARCH_NO_TRMC` is gone.** The environment variable turned off
   tail-recursion-modulo-cons for every compile in the process, including the
   stdlib, which increasingly depends on the transform to avoid overflowing the
@@ -404,6 +407,19 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Sixteen builtins that ran interpreted but failed to link when compiled now
+  compile or give a clear error.** A `--compile`d call used to fail at link time
+  with `Undefined symbols: _<name>` and no March location. `char_is_alpha`,
+  `char_is_uppercase`, `char_is_lowercase`, `char_to_uppercase`,
+  `char_to_lowercase`, `float_from_string`, `print_int`, `print_float` and `tap`
+  now compile, and the compiled output matches the interpreter. The
+  dynamic-supervisor queries (`Supervisor.stop_child`, `which_children`,
+  `count_children`), `App.stop` and `task_spawn_link` only work in the
+  interpreter, so a compiled call is now an error at the call site that says so
+  and names the compiled alternative. `to_json` on a type with no `derive Json`
+  now reports the missing codec even when no type in the program derives
+  `Json`. `task_spawn_link(f, pid)` is now typed with the two arguments the
+  interpreter takes. Before, no typechecked program could call it.
 - **A zero-argument lambda is a `() -> T` everywhere.** `fn () -> 3` (or `fn -> 3`)
   in a record literal, or bound with `let` and passed on, was typed as its result,
   so it could not fill a `() -> Int` record field ("expected `() -> Int` but got

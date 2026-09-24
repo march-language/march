@@ -81,7 +81,7 @@ let impure_named = [
   "uuid_v7"; "uuid_v7_at";
   (* actors, monitors, supervision, capabilities *)
   "monitor"; "demonitor"; "send_checked"; "dynamic_supervisor"; "register_resource";
-  "respond"; "mint_cap"; "revoke_cap"; "run_until_idle"; "worker"; "get_work_pool";
+  "mint_cap"; "revoke_cap"; "run_until_idle"; "worker"; "get_work_pool";
   (* the supervise-block spawn glue's registrations: their Unit result is
      discarded, so as pure EApps (Defun.builtin_names) DCE deleted them and
      no supervisor ever restarted a child *)
