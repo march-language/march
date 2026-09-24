@@ -375,6 +375,15 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A zero-argument lambda is a `() -> T` everywhere.** `fn () -> 3` (or `fn -> 3`)
+  in a record literal, or bound with `let` and passed on, was typed as its result,
+  so it could not fill a `() -> Int` record field ("expected `() -> Int` but got
+  `Int`"). It is now `() -> T` wherever it appears and `f()` calls it, on both
+  backends. Passing a zero-argument named fn by bare name where a generic
+  function calls it with `()` (`apply(answer)` with `fn apply(f) do f() end`) is
+  now a type error; it used to crash compiled code. Also fixed: a fn with a
+  required parameter after a defaulted one (`fn f(a, b \\ "x", c)`) forwarded
+  the short call `f(1, 2)` with its arguments out of order.
 - **Spawning a nested actor from its parent module compiles.** `spawn(Inner.Box)`
   written outside `mod Inner` passed `--check` and ran interpreted, but `--compile`
   failed to link with `Undefined symbols: "_Inner.Box_spawn"`. It now links and runs.

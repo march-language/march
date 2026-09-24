@@ -73,11 +73,9 @@ mod Topology do
 
   -- One served role: its "Protocol.Role" name, its placement, and how to
   -- open one offer of it on this node. The generated `main` builds these
-  -- with `role` and `actor_role`; `open` is called (with a dummy argument:
-  -- a zero-parameter closure cannot be stored in a record field today) once
-  -- per offer.
+  -- with `role` and `actor_role`; `open` is called once per offer.
   type TopoRole = { name : String, place : TopoPlacement,
-                open : Int -> Result(TopoOpened, SessionNode.RunError) }
+                open : () -> Result(TopoOpened, SessionNode.RunError) }
 
   doc """
   A role bound to a function (`body = "M.f"` in `[roles]`). [open] is the
@@ -86,7 +84,7 @@ mod Topology do
   """
   fn role(name : String, place : TopoPlacement, open : () -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
     { name: name, place: place,
-      open: fn _ ->
+      open: fn () ->
         match open() do
           Ok(o) -> Ok({ ap: o, alive: fn _ -> true })
           Err(e) -> Err(e)
@@ -105,7 +103,7 @@ mod Topology do
                 open : Pid(a) -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
     let spare = Vault.new("topology_spare_" ++ name ++ "_" ++ int_to_string(next_id()))
     { name: name, place: place,
-      open: fn _ ->
+      open: fn () ->
         let host = match Vault.get(spare, "h") do
           Some(h) -> h
           None -> mk()
@@ -353,7 +351,7 @@ mod Topology do
   end
 
   pfn open_role(st : TopoState, r : TopoRole) : () do
-    match (r.open)(0) do
+    match (r.open)() do
       Ok(o) ->
         Vault.drop(st.meta, "e:" ++ r.name)
         Vault.set(st.offers, r.name, o)
