@@ -738,27 +738,36 @@ void *march_int_to_string(int64_t n) {
     return march_string_lit(buf, len);
 }
 
-void *march_float_to_string(double f) {
-    /* Byte-for-byte reproduce the interpreter's OCaml `string_of_float`
-     * (eval.ml), which is `valid_float_lexem (format_float "%.12g" f)`:
-     *   - `%.12g` gives the same 12-significant-digit form as OCaml's
-     *     format_float (both defer to the platform libc);
-     *   - valid_float_lexem appends a bare '.' when every character is a
-     *     digit or leading '-', so a whole number prints "1." not "1"/"1.0".
-     * The old `%g` (6 sig-figs, and no trailing dot) diverged from the
-     * interpreter on both precision and whole numbers — the golden oracle
-     * (specs/lang/golden/g09_float_show.march) now pins the agreement. */
-    char buf[64];
-    int len = snprintf(buf, sizeof(buf), "%.12g", f);
+/* Byte-for-byte reproduce the interpreter's OCaml `string_of_float`
+ * (eval.ml), which is `valid_float_lexem (format_float "%.12g" f)`:
+ *   - `%.12g` gives the same 12-significant-digit form as OCaml's
+ *     format_float (both defer to the platform libc);
+ *   - valid_float_lexem appends a bare '.' when every character is a
+ *     digit or leading '-', so a whole number prints "1." not "1"/"1.0".
+ * The old `%g` (6 sig-figs, and no trailing dot) diverged from the
+ * interpreter on both precision and whole numbers — the golden oracle
+ * (specs/lang/golden/g09_float_show.march) now pins the agreement.
+ * Shared by march_float_to_string and march_print_float so the two cannot
+ * drift. Writes into [buf] (64 bytes) and returns the length. */
+static int march_format_float_ocaml(char *buf, double f) {
+    int len = snprintf(buf, 64, "%.12g", f);
+    if (len < 0) len = 0;
+    if (len > 63) len = 63;
     int bare_int = 1;
     for (int i = 0; i < len; i++) {
         char c = buf[i];
         if (!((c >= '0' && c <= '9') || c == '-')) { bare_int = 0; break; }
     }
-    if (bare_int && len > 0 && len < (int)sizeof(buf) - 1) {
+    if (bare_int && len > 0 && len < 63) {
         buf[len++] = '.';
         buf[len] = '\0';
     }
+    return len;
+}
+
+void *march_float_to_string(double f) {
+    char buf[64];
+    int len = march_format_float_ocaml(buf, f);
     return march_string_lit(buf, len);
 }
 
@@ -1243,6 +1252,22 @@ void *march_string_join(void *list, void *sep) {
 void march_print(void *s) {
     march_string *ms = (march_string *)s;
     write(1, ms->data, (size_t)ms->len);
+}
+
+/* `print_int(n)` / `print_float(f)`: the interpreter writes `string_of_int n`
+ * / `string_of_float f` with no newline (eval_builtins.ml).  Format on the
+ * stack and issue the same single write(2) march_print does, so there is no
+ * intermediate heap string to allocate and release. */
+void march_print_int(int64_t n) {
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "%lld", (long long)n);
+    if (len > 0) write(1, buf, (size_t)len);
+}
+
+void march_print_float(double f) {
+    char buf[64];
+    int len = march_format_float_ocaml(buf, f);
+    if (len > 0) write(1, buf, (size_t)len);
 }
 
 /* Serialises march_println against itself across OS threads.  See the comment
@@ -7594,6 +7619,48 @@ int64_t march_char_is_alphanumeric(void *c) {
     return ((ch >= '0' && ch <= '9') ||
             (ch >= 'a' && ch <= 'z') ||
             (ch >= 'A' && ch <= 'Z')) ? 1 : 0;
+}
+
+/* ASCII-only, first byte, like the siblings above.  The interpreter's
+ * versions (eval_builtins.ml) test the same ASCII ranges and use
+ * Char.uppercase_ascii / lowercase_ascii, so any other byte (a UTF-8 lead
+ * byte included) answers false / is returned unchanged on both backends. */
+int64_t march_char_is_alpha(void *c) {
+    march_string *sc = (march_string *)c;
+    if (sc->len == 0) return 0;
+    unsigned char ch = (unsigned char)sc->data[0];
+    return ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) ? 1 : 0;
+}
+
+int64_t march_char_is_uppercase(void *c) {
+    march_string *sc = (march_string *)c;
+    if (sc->len == 0) return 0;
+    unsigned char ch = (unsigned char)sc->data[0];
+    return (ch >= 'A' && ch <= 'Z') ? 1 : 0;
+}
+
+int64_t march_char_is_lowercase(void *c) {
+    march_string *sc = (march_string *)c;
+    if (sc->len == 0) return 0;
+    unsigned char ch = (unsigned char)sc->data[0];
+    return (ch >= 'a' && ch <= 'z') ? 1 : 0;
+}
+
+/* Return a FRESH one-byte string; the argument is only read (borrowed). */
+void *march_char_to_uppercase(void *c) {
+    march_string *sc = (march_string *)c;
+    if (sc->len == 0) return march_string_lit("", 0);
+    char ch = sc->data[0];
+    if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
+    return march_string_lit(&ch, 1);
+}
+
+void *march_char_to_lowercase(void *c) {
+    march_string *sc = (march_string *)c;
+    if (sc->len == 0) return march_string_lit("", 0);
+    char ch = sc->data[0];
+    if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+    return march_string_lit(&ch, 1);
 }
 
 int64_t march_char_is_whitespace(void *c) {

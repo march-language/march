@@ -81,7 +81,7 @@ let impure_named = [
   "uuid_v7"; "uuid_v7_at";
   (* actors, monitors, supervision, capabilities *)
   "monitor"; "demonitor"; "send_checked"; "dynamic_supervisor"; "register_resource";
-  "respond"; "mint_cap"; "revoke_cap"; "run_until_idle"; "worker"; "get_work_pool";
+  "mint_cap"; "revoke_cap"; "run_until_idle"; "worker"; "get_work_pool";
   (* reads of mutable runtime state: not to be CSE'd or reordered *)
   "self"; "is_alive"; "mailbox_size"; "get_actor_field"; "live_allocs"; "peak_rss_bytes";
   "sched_stat";

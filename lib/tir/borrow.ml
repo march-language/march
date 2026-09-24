@@ -160,6 +160,16 @@ let extern_borrow_table : (string * bool list) list = [
   ("string_is_empty",      [true]);
   ("string_to_int",        [true]);
   ("string_to_float",      [true]);
+  ("float_from_string",    [true]);   (* same C function as string_to_float *)
+  (* Char predicates / case maps (the march_char_ family): read the first byte of the
+     argument, never store or free it; the case maps return a FRESH string.
+     Every Char producer (string_chars, char_from_int, literals) hands back an
+     owned or immortal reference, so borrowing is balanced. *)
+  ("char_is_alpha",        [true]);
+  ("char_is_uppercase",    [true]);
+  ("char_is_lowercase",    [true]);
+  ("char_to_uppercase",    [true]);
+  ("char_to_lowercase",    [true]);
   ("string_to_lowercase",  [true]);
   ("string_to_uppercase",  [true]);
   ("string_trim",          [true]);
