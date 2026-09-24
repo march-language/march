@@ -1,5 +1,7 @@
 `[P2]` # Observability: no slow-mailbox alarm, no state inspection, no tracing
 
+> Design: [specs/2026-09-23-per-actor-introspection-design.md](../2026-09-23-per-actor-introspection-design.md)
+
 > **Process enumeration landed 2026-09-08** — `Actor.list()` (builtin
 > `actor_pid_indices`) walks every live actor lock-free, and
 > `docs/overload-resilience.md` now shows it closing the shedding loop. See

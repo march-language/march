@@ -330,6 +330,10 @@ git log is authoritative for exact commits.
   and `stat(11)` that waiting to be freed. `Actor.pid_from_int` on the pid of an
   actor that has died now returns a dead Pid; it used to return a pointer to
   the dead actor's record, which could already have been freed.
+- **A protocol `choose` branch can now continue with a labelled message step.** A branch
+  body line such as `tick: A -> B : Int` after the branch's first message was read as the
+  start of the next branch and failed with "I got stuck here"; it now continues the branch,
+  as an unlabelled `A -> B : Int` line already did.
 
 - **Fourteen stdlib wrappers over builtins the typechecker did not know now
   typecheck**, and the interpreter and compiled backends agree on each.
