@@ -55,4 +55,89 @@ mod NetFrame do
     end
   end
 
+  -- ── the per-frame MAC (distributed-deploys step 11a) ───────────────────────
+  -- After a handshake that agreed a key (NetKernel.handshake_auth), every
+  -- frame on the connection is SEALED: the body is
+  --   seq (8 bytes, big-endian) ++ payload ++ tag (32 bytes)
+  -- where tag = HMAC-SHA256(key, seq ++ payload), key the sender's direction
+  -- key, and the 4-byte length prefix covers all of it. The sequence number
+  -- travels in the frame (rather than being implied by a counter each side
+  -- keeps) because a socket can have two local writers (SessionNode's control
+  -- connection: CREDIT from the data reader, Bye from `finish`), and a
+  -- preemption between taking a number and writing would reorder them; the
+  -- receiver instead accepts each number once, within a window
+  -- (`window_accept`). Integrity, not confidentiality (plan D4): the payload
+  -- stays readable. A modified, injected or replayed frame fails; a DELETED
+  -- frame is not detected (an attacker able to drop frames can drop the
+  -- connection too).
+
+  fn tag_size() : Int do 32 end
+  fn seq_size() : Int do 8 end
+  -- Bytes a sealed frame adds to its payload.
+  fn mac_overhead() : Int do 40 end
+
+  pfn be64(n : Int) : List(Int) do
+    List.map([56, 48, 40, 32, 24, 16, 8, 0], fn s -> lo8(int_shr(n, s)))
+  end
+
+  pfn read_be64(bs : List(Int)) : Int do
+    List.fold_left(bs, 0, fn (acc, b) -> acc * 256 + b)
+  end
+
+  doc "The MAC tag over [seq] and [payload] under [key]."
+  fn mac_tag(key : Bytes, seq : Bytes, payload : Bytes) : Bytes do
+    hmac_sha256_bytes(key, Bytes.concat(seq, payload))
+  end
+
+  doc "A sealed frame (4-byte length ++ seq ++ payload ++ tag) for [payload] as frame number [seq]."
+  fn seal(key : Bytes, seq : Int, payload : Bytes) : Bytes do
+    let sb = Bytes.from_list(be64(seq))
+    let tag = mac_tag(key, sb, payload)
+    Bytes.concat(Bytes.from_list(len4(Bytes.length(payload) + mac_overhead())),
+                 Bytes.concat(sb, Bytes.concat(payload, tag)))
+  end
+
+  doc "Seal an already-framed (length-prefixed, unsealed) frame: NodeQueue frames at enqueue time."
+  fn reseal(key : Bytes, seq : Int, framed : Bytes) : Bytes do
+    seal(key, seq, Bytes.slice(framed, 4, Bytes.length(framed) - 4))
+  end
+
+  doc """
+  Open a sealed frame BODY (what follows the length prefix) under [key]:
+  Ok((seq, payload)) when the tag verifies, Err otherwise. The caller decides
+  whether [seq] is acceptable (`window_accept`).
+  """
+  fn open(key : Bytes, body : Bytes) : Result((Int, Bytes), String) do
+    let n = Bytes.length(body)
+    if n < mac_overhead() do Err("frame too short for its MAC")
+    else
+      let sb = Bytes.slice(body, 0, 8)
+      let payload = Bytes.slice(body, 8, n - mac_overhead())
+      let tag = Bytes.slice(body, n - 32, 32)
+      if mac_tag(key, sb, payload) == tag do Ok((read_be64(Bytes.to_list(sb)), payload))
+      else Err("frame MAC mismatch") end
+    end
+  end
+
+  -- ── the receive window ─────────────────────────────────────────────────
+  -- (hi, mask): the highest sequence number accepted so far, and a bitmask
+  -- of which of the 32 numbers at and below it have been seen (bit i: hi - i).
+  -- A number above hi slides the window; one inside it is accepted once; one
+  -- below it, or seen already, is a replay. hi starts at -1 (nothing seen).
+
+  fn window_size() : Int do 32 end
+
+  doc "Accept [seq] against the window (hi, mask): Some(new window), or None for a replay / too old."
+  fn window_accept(hi : Int, mask : Int, seq : Int) : Option((Int, Int)) do
+    if seq > hi do
+      let shift = seq - hi
+      let kept = if shift >= window_size() do 0 else int_and(int_shl(mask, shift), 4294967295) end
+      Some((seq, int_or(kept, 1)))
+    else if hi - seq >= window_size() do None
+    else
+      let bit = int_shl(1, hi - seq)
+      if int_and(mask, bit) != 0 do None else Some((hi, int_or(mask, bit))) end
+    end end
+  end
+
 end

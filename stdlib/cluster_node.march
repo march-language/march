@@ -204,14 +204,19 @@ mod ClusterNode do
 
   type NodeEvent = NodeUp(NodeInfo) | NodeSuspect(NodeInfo) | NodeDead(NodeInfo, String) | NodeRejoined(NodeInfo)
 
-  -- What `on_security_event` subscribers see: a peer's handshake refused
-  -- (by address when we dialled, "inbound" for an accepted connection, and
-  -- the handshake's reason).
-  type SecurityEvent = HandshakeRejected(String, String)
+  -- What `on_security_event` subscribers see:
+  --   HandshakeRejected(who, why)  a peer's handshake refused: `who` is the
+  --                                address we dialled, or "inbound"
+  --   FrameRejected(node_id, n)    a frame from that peer failed its MAC and
+  --                                was dropped; n is the count on that
+  --                                connection (NetKernel.mac_failure_limit()
+  --                                of them close it)
+  type SecurityEvent = HandshakeRejected(String, String) | FrameRejected(String, Int)
 
   fn security_text(ev : SecurityEvent) : String do
     match ev do
       HandshakeRejected(who, why) -> "handshake with " ++ who ++ " rejected: " ++ why
+      FrameRejected(id, n) -> "frame from " ++ id ++ " failed its MAC (" ++ int_to_string(n) ++ " on that connection)"
     end
   end
 
@@ -1161,6 +1166,10 @@ mod ClusterNode do
     let n = Vault.incr(h.meta, key, 1)
     if n == need do
       Vault.drop(h.meta, key)
+      -- Every reader is done: the connection's MAC state goes with it (the
+      -- fd numbers are about to be reused).
+      NetKernel.forget(l.cfd)
+      if l.dfd >= 0 do NetKernel.forget(l.dfd) else () end
       discard(send(pid_of_int(l.cw), CtlClose()))
       let qk = "q" ++ int_to_string(l.cfd)
       match Vault.get(h.qs, qk) do
@@ -1173,8 +1182,14 @@ mod ClusterNode do
   end
 
   pfn close_half(hf : CnHalf) : () do
-    if hf.cfd >= 0 do tcp_close(hf.cfd) else () end
-    if hf.dfd >= 0 do tcp_close(hf.dfd) else () end
+    if hf.cfd >= 0 do
+      NetKernel.forget(hf.cfd)
+      tcp_close(hf.cfd)
+    else () end
+    if hf.dfd >= 0 do
+      NetKernel.forget(hf.dfd)
+      tcp_close(hf.dfd)
+    else () end
   end
 
   -- Pair up an accepted connection with its other half; a complete pair is
@@ -1633,6 +1648,7 @@ mod ClusterNode do
     monitor_remote     : GlobalPid.Pid -> (DistLink.DownReason -> Unit) -> Result(Int, String),
     demonitor_remote   : GlobalPid.Pid -> Int -> (),
     peer_cert          : String -> Option(NodeCert.Cert),
+    frames_rejected    : () -> Int,
     on_security_event  : (SecurityEvent -> Unit) -> Int,
     off_security_event : Int -> ()
   }
@@ -1687,6 +1703,7 @@ mod ClusterNode do
       monitor_remote: fn (_, _) -> unsupported("monitor_remote"),
       demonitor_remote: fn (_, _) -> unsupported("demonitor_remote"),
       peer_cert: fn _ -> unsupported("peer_cert"),
+      frames_rejected: fn _ -> unsupported("frames_rejected"),
       on_security_event: fn _ -> unsupported("on_security_event"),
       off_security_event: fn _ -> unsupported("off_security_event") }
   end
@@ -1722,6 +1739,7 @@ mod ClusterNode do
       monitor_remote: fn (target, on_down) -> h_monitor_remote(h, target, on_down),
       demonitor_remote: fn (target, r) -> Vault.drop(h.downs, mkey(target.node_id, target.local_pid) ++ int_to_string(r)),
       peer_cert: fn id -> Vault.get(h.certs, id),
+      frames_rejected: fn _ -> Vault.get_or(h.meta, "frames_rejected", 0),
       on_security_event: fn f -> h_on_security_event(h, f),
       off_security_event: fn id -> Vault.drop(h.sec, int_to_string(id)) }
   end
@@ -1906,6 +1924,15 @@ mod ClusterNode do
     id
   end
 
+  pfn on_bad_frame(h : CnHandle, fd : Int, n : Int) : () do
+    match List.find(Vault.all(h.links), fn kv -> match kv do (_k, l) -> l.cfd == fd || l.dfd == fd end) do
+      Some((id, _l)) ->
+        let _ = Vault.incr(h.meta, "frames_rejected", 1)
+        security(h, FrameRejected(id, n))
+      None -> ()
+    end
+  end
+
   pfn h_on_security_event(h : CnHandle, f : SecurityEvent -> Unit) : Int do
     let id = Vault.incr(h.meta, "next_sec", 1)
     Vault.set(h.sec, int_to_string(id), f)
@@ -1969,6 +1996,10 @@ mod ClusterNode do
         let meta = h.meta
         let _ = task_spawn(fn _ -> accept_loop(node, h, cfg, me, listen_fd, meta))
         let _ = task_spawn(fn _ -> tick_loop(node, cfg.tick_ms, meta))
+        -- Frames that fail their MAC on one of this node's links: counted
+        -- and reported by peer (the hook is process-wide; other nodes'
+        -- fds are not in our links).
+        let _ = NetKernel.on_frame_rejected(fn (fd, n) -> on_bad_frame(h, fd, n))
         Ok(attach(io, ops_of(h)))
     end
   end
@@ -2246,6 +2277,15 @@ mod ClusterNode do
   fn off_security_event(c : Cap(ClusterNode.Live), id : Int) : () do
     let d = ops(c)
     d.off_security_event(id)
+  end
+
+  doc """
+  Frames from this node's peers dropped because they failed their MAC
+  (sealed connections: see specs/lang/clustering.md, "Per-frame MAC").
+  """
+  fn frames_rejected(c : Cap(ClusterNode.Live)) : Int do
+    let d = ops(c)
+    d.frames_rejected(())
   end
 
 end

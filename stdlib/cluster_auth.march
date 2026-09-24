@@ -12,6 +12,11 @@
 --                  verifies the other's certificate and then signs the peer's
 --                  nonce together with the handshake transcript.
 --
+-- Either way the handshake ends with a per-connection MAC key pair
+-- (`frame_keys`): HKDF-SHA256 over the handshake transcript, keyed in
+-- certificate mode by an X25519 agreement between ephemeral keys each side
+-- sent in its (signed) hello, and in shared-secret mode by the secret.
+--
 mod ClusterAuth do
 
   type Auth = Secret(String) | Certified(NodeCert.Credentials)
@@ -37,7 +42,28 @@ mod ClusterAuth do
     prove(secret, nonce) == proof
   end
 
-  -- ── the transcript ─────────────────────────────────────────────────────
+  -- ── the per-frame MAC offer (shared-secret mode) ─────────────────────────
+  -- A shared-secret node appends this suffix to its nonce to say it seals
+  -- frames after the handshake; the MAC is on when BOTH nonces carry it. The
+  -- nonce is the one hello field a pre-11a node treats as opaque (it only
+  -- HMACs it), so the offer interoperates with older nodes, which never make
+  -- it and so get no MAC. It cannot be stripped in transit: each side's proof
+  -- is an HMAC of the nonce exactly as the other side sent it.
+
+  fn mac_suffix() : String do "~mac1" end
+
+  fn offers_mac(nonce : String) : Bool do String.ends_with(nonce, mac_suffix()) end
+
+  -- ── key derivation ─────────────────────────────────────────────────────
+
+  doc "HKDF-SHA256 extract (RFC 5869): the pseudorandom key for [ikm] under [salt]."
+  fn hkdf_extract(salt : Bytes, ikm : Bytes) : Bytes do hmac_sha256_bytes(salt, ikm) end
+
+  doc "HKDF-SHA256 expand to one 32-byte block for [info]."
+  fn hkdf_expand(prk : Bytes, info : String) : Bytes do
+    hmac_sha256_bytes(prk, Bytes.concat(Bytes.from_string(info), Bytes.from_list([1])))
+  end
+
 
   doc """
   The handshake transcript hash: HMAC-SHA256 under a fixed label of both
@@ -50,6 +76,21 @@ mod ClusterAuth do
     let joined = if my_nonce < peer_nonce do List.append(my_hello, peer_hello)
                  else List.append(peer_hello, my_hello) end
     hmac_sha256_bytes(Bytes.from_string("march-cluster-transcript-v1"), Bytes.from_list(joined))
+  end
+
+  -- One direction's MAC key: the sender's.
+  type FrameKeys = { tx_key : Bytes, rx_key : Bytes }
+
+  doc """
+  The per-connection MAC keys from input key material [ikm] (the X25519
+  shared secret, or the cluster secret) and the transcript [th]: one key per
+  direction, told apart by the SENDER's nonce, so a frame reflected back to
+  its sender does not verify.
+  """
+  fn frame_keys(ikm : Bytes, th : Bytes, my_nonce : String, peer_nonce : String) : FrameKeys do
+    let prk = hkdf_extract(th, ikm)
+    { tx_key: hkdf_expand(prk, "march frame mac v1 " ++ my_nonce),
+      rx_key: hkdf_expand(prk, "march frame mac v1 " ++ peer_nonce) }
   end
 
   -- ── certificate-mode proof ─────────────────────────────────────────────

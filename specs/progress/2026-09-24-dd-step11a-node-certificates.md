@@ -92,3 +92,48 @@ section 3 (Identity, Threat model), 7.4, II.9, D3, D4. The authorization half
   builtin is typed `Bytes -> Bytes` but returns a hex String on both backends,
   and a compiled program that uses its result as Bytes dies with SIGBUS. The
   transcript uses `hmac_sha256_bytes` under a fixed label instead.
+
+## 3. Per-frame MAC
+
+- **Sealed frames** (`NetFrame.seal`/`open`): after the handshake every frame
+  body is `seq (8 bytes BE) ++ payload ++ HMAC-SHA256(key, seq ++ payload)`,
+  the length prefix covering all of it (40 bytes of overhead). Integrity, not
+  confidentiality (D4): the payload stays readable.
+- **Explicit sequence number and a receive window** (`window_accept`, 32
+  frames), not an implied counter. A socket can have two local writers
+  (SessionNode writes CREDIT from its data reader and Bye from `finish` on one
+  control connection); with an implied counter, a preemption between taking a
+  number and writing would reorder two frames and fail both. The window
+  accepts each number once, so replays and injected frames fail and local
+  reordering does not. A DELETED frame is not detected (documented).
+- **Keys** (`ClusterAuth.frame_keys`): HKDF-SHA256 (RFC 5869 test case 1 in
+  the unit tests), salt the transcript hash, one key per direction named by
+  the sender's nonce. Certificate mode: the input key material is an X25519
+  agreement between the ephemeral keys in the two hellos. The runtime did not
+  have X25519, so TweetNaCl's `crypto_scalarmult` was added (step 1) rather
+  than deriving from the nonces: nonces cross the wire in the clear, so a key
+  derived from them alone is known to any eavesdropper. The signed transcript
+  binds the ephemeral keys to the certificates. Shared-secret mode: the input
+  key material is the secret.
+- **Negotiation in shared-secret mode**: a node appends `~mac1` to its nonce;
+  frames are sealed when both nonces carry it. A pre-11a node treats the nonce
+  as opaque (it only HMACs it), so old and new nodes still interoperate,
+  unsealed. The flag cannot be stripped in transit, because each side's proof
+  is an HMAC of the nonce exactly as the other side sent it. Certificate mode
+  always seals.
+- **Where it applies**: per fd, in NetKernel (`install` at the end of the
+  handshake, `forget`), so everything above the net-kernel (PeerReader,
+  NodeSend, NodeCall, SessionNode, ClusterNode) seals and checks without
+  changes; NodeQueue, which frames at enqueue time, writes through the new
+  `NetKernel.write_framed`. The handshake forgets any earlier state on its fd,
+  and ClusterNode forgets a link's fds when it releases them.
+- **Failures**: a frame that fails its MAC (or a replayed number) is dropped
+  and counted (`NetKernel.frames_rejected`, `ClusterNode.frames_rejected`), the
+  `NetKernel.on_frame_rejected` hooks run, and ClusterNode reports
+  `FrameRejected(node_id, n)` to `on_security_event` subscribers. After
+  `NetKernel.mac_failure_limit()` (3) failures on one connection its reader
+  gets Err and the connection closes through the existing path.
+- **Cost**: see `specs/benchmarks.md`, `bench/cluster_frames.march` (new, gated
+  with value anchors): +25 µs/frame at 64 B, +1.1 ms at 16 KiB, mostly
+  `List(Int)`/`Bytes` conversion rather than the HMAC; no difference on the
+  two-node `stream` scenario.

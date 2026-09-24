@@ -37,6 +37,15 @@ git log is authoritative for exact commits.
   certificate a peer presented, `ClusterConn.connect_split_auth` /
   `accept_split_auth` do the same for direct connections, and
   `ClusterNode.on_security_event` reports refused handshakes.
+- **Per-frame MAC on cluster connections** (step 11a, part 3). After the
+  handshake every frame carries a sequence number and an HMAC-SHA256 tag under a
+  per-connection, per-direction key (HKDF over the handshake transcript; from an
+  X25519 agreement in certificate mode, from the secret in shared-secret mode). A
+  modified, injected or replayed frame is dropped and counted
+  (`ClusterNode.frames_rejected`, a `FrameRejected` security event), and three
+  on one connection close it. This is integrity, not encryption: frames stay
+  readable on the wire. Shared-secret nodes negotiate it, so they still talk to
+  older nodes (unsealed). New `bench/cluster_frames.march`.
 - **Hot reload: the unified epoch model and drains** (build step 6 of the
   distributed-deploys plan). Every unit of work (actor, task, session) runs at the
   epoch of the deploy it started under, and every call it makes, from the base
