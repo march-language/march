@@ -11421,6 +11421,93 @@ let test_migrate_state_pure_with_module_needs_clean () =
   end|} in
   Alcotest.(check bool) "pure migrate_state in module with needs IO.Console: no error" false (has_errors ctx)
 
+(* ── migrate_msg (DD step 6, plan II.4.8) ─────────────────────────────── *)
+
+let migrate_msg_actor = {|
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Add(k : Int) do { n: state.n + k } end
+    on Reset() do { n: 0 } end
+  end
+  mod V1 do
+    type Msg = Inc(Int) | Show
+  end
+|}
+
+let diag_texts ctx =
+  List.concat_map (fun d ->
+      d.March_errors.Errors.message :: d.March_errors.Errors.notes)
+    (March_errors.Errors.sorted ctx)
+
+(* A well-formed migrate_msg: the old type in a nested module, the new one
+   named `Counter.Msg` (the typecheck-side alias of `Counter_Msg`). *)
+let test_migrate_msg_clean () =
+  let ctx = typecheck ("mod App do" ^ migrate_msg_actor ^ {|
+  fn counter_migrate_msg(m : V1.Msg) : Option(Counter.Msg) do
+    match m do
+      V1.Inc(k) -> Some(Add(k))
+      V1.Show -> None
+    end
+  end
+end|}) in
+  if has_errors ctx then List.iter prerr_endline (diag_texts ctx);
+  Alcotest.(check bool) "well-formed migrate_msg with Counter.Msg: no error" false (has_errors ctx)
+
+(* `Counter.Msg` IS the actor's message type: returning something else is a
+   type error, so the alias is not a fresh unconstrained type. *)
+let test_actor_msg_alias_is_the_message_type () =
+  let ctx = typecheck ("mod App do" ^ migrate_msg_actor ^ {|
+  fn wrong(m : V1.Msg) : Option(Counter.Msg) do
+    match m do
+      V1.Inc(k) -> Some(V1.Inc(k))
+      V1.Show -> None
+    end
+  end
+end|}) in
+  Alcotest.(check bool) "Counter.Msg does not unify with another type" true (has_errors ctx)
+
+let test_migrate_msg_io_error () =
+  let ctx = typecheck ("mod App do\n  needs IO.Console" ^ migrate_msg_actor ^ {|
+  fn counter_migrate_msg(m : V1.Msg) : Option(Counter.Msg) do
+    println("converting")
+    match m do
+      V1.Inc(k) -> Some(Add(k))
+      V1.Show -> None
+    end
+  end
+end|}) in
+  Alcotest.(check bool) "migrate_msg calling println: compile error" true (has_errors ctx);
+  Alcotest.(check bool) "error says migrate_msg must be IO-free" true
+    (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m)
+                     "migrate_msg must be io-free") (diag_texts ctx))
+
+let test_migrate_msg_shape_error () =
+  let ctx = typecheck ("mod App do" ^ migrate_msg_actor ^ {|
+  fn counter_migrate_msg(m : V1.Msg) : Counter.Msg do
+    match m do
+      V1.Inc(k) -> Add(k)
+      V1.Show -> Reset()
+    end
+  end
+end|}) in
+  Alcotest.(check bool) "migrate_msg without an Option return: compile error" true (has_errors ctx);
+  Alcotest.(check bool) "error names the required shape" true
+    (List.exists (fun m -> migrate_test_contains_substr m "hot-reload message migration")
+       (diag_texts ctx))
+
+let test_migrate_msg_not_exhaustive () =
+  let ctx = typecheck ("mod App do" ^ migrate_msg_actor ^ {|
+  fn counter_migrate_msg(m : V1.Msg) : Option(Counter.Msg) do
+    match m do
+      V1.Inc(k) -> Some(Add(k))
+    end
+  end
+end|}) in
+  Alcotest.(check bool) "a migrate_msg that misses an old constructor is reported" true
+    (List.exists (fun m -> migrate_test_contains_substr (String.lowercase_ascii m) "show")
+       (diag_texts ctx))
+
 (* A pure migrate_state in a module with no needs at all -> clean. *)
 let test_migrate_state_pure_no_needs_clean () =
   let ctx = typecheck {|mod Counter do
@@ -17342,6 +17429,11 @@ let compiler_suites =
           Alcotest.test_case "migrate_state as extern fn: error"          `Quick test_migrate_state_extern_error;
           Alcotest.test_case "pure migrate_state + module needs: clean"   `Quick test_migrate_state_pure_with_module_needs_clean;
           Alcotest.test_case "pure migrate_state, no needs: clean"        `Quick test_migrate_state_pure_no_needs_clean;
+          Alcotest.test_case "migrate_msg well-formed with Actor.Msg: clean" `Quick test_migrate_msg_clean;
+          Alcotest.test_case "Actor.Msg is the actor's message type"      `Quick test_actor_msg_alias_is_the_message_type;
+          Alcotest.test_case "migrate_msg calling println: error"         `Quick test_migrate_msg_io_error;
+          Alcotest.test_case "migrate_msg without Option return: error"   `Quick test_migrate_msg_shape_error;
+          Alcotest.test_case "migrate_msg not exhaustive: reported"       `Quick test_migrate_msg_not_exhaustive;
         ] );
       ( "cap-closure", [
           Alcotest.test_case "a cap reached only via a private helper propagates up" `Quick test_transitive_cap_via_private_helper;

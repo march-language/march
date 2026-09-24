@@ -294,6 +294,14 @@ let base_env : env =
               | _ -> VCon ("None", []))
            | None -> VCon ("None", []))
         | _ -> eval_error "actor_whereis: expected String"))
+  (* Epoch holds (DD step 6): the interpreter has no hot reload, so no
+     epochs to hold. *)
+  ; ("epoch_hold", VBuiltin ("epoch_hold", function
+        | [] | [VUnit] -> VUnit
+        | _ -> eval_error "epoch_hold: expected unit"))
+  ; ("epoch_release", VBuiltin ("epoch_release", function
+        | [] | [VUnit] -> VUnit
+        | _ -> eval_error "epoch_release: expected unit"))
   ; ("actor_registered", VBuiltin ("actor_registered", function
         | [] ->
           Hashtbl.fold (fun name _pid acc -> VString name :: acc) named_registry []

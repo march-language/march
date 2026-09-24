@@ -119,7 +119,11 @@ let stdlib_only : (string * string) list ref =
        "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)");
       ("actor_pid_indices", "use `Actor.list(cap)` (see `Actor.introspect`)");
       ("actor_whereis", "use `Actor.whereis(cap, name)` (see `Actor.introspect`)");
-      ("actor_registered", "use `Actor.registered(cap)` (see `Actor.introspect`)") ]
+      ("actor_registered", "use `Actor.registered(cap)` (see `Actor.introspect`)");
+      (* DD step 6 (plan II.4.4): an epoch hold keeps its proc on an old code
+         version; only the session runtime takes one. *)
+      ("epoch_hold", "epoch holds are taken by `SessionNode` and generated session endpoints");
+      ("epoch_release", "epoch holds are taken by `SessionNode` and generated session endpoints") ]
 
 (** The source files a list of loaded stdlib declarations came from: every
     file named by a [DFn] span or a [DMod] span, recursively. A file is what
@@ -968,6 +972,8 @@ let builtin_bindings : (string * scheme) list =
     ("actor_unregister", Mono (TArrow (t_string, t_bool)));
     ("actor_whereis",    poly1 (fun a -> TArrow (t_string, TCon ("Option", [TCon ("Pid", [a])]))));
     ("actor_registered", Mono (TArrow (t_unit, TCon ("List", [t_string]))));
+    ("epoch_hold", Mono (TArrow (t_unit, t_unit)));
+    ("epoch_release", Mono (TArrow (t_unit, t_unit)));
     (* Phase 3: Epoch-based capability builtins *)
     (* [ActorCap], NOT [Cap] (2026-08-06).  These are process capabilities —
        a revocable, epoch-checked reference to a live actor, represented at run

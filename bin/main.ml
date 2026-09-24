@@ -2415,6 +2415,52 @@ let compile filename =
           ) tir.March_tir.Tir.tm_types
       else []
     in
+    (* DD step 6 (plan II.4.8): each actor's handler signatures (its lowered
+       `<Actor>_Msg` variant), and, for an actor with an `<actor>_migrate_msg`,
+       the constructors of that function's OLD message type.  forge diffs the
+       first against the running version's (a removed handler or a changed
+       parameter type is a message-type change) and pins the second to it. *)
+    let variant_ctors (tname : string) =
+      let all = List.filter_map (function
+          | March_tir.Tir.TDVariant (n, ctors) -> Some (n, ctors)
+          | _ -> None) tir.March_tir.Tir.tm_types in
+      match List.assoc_opt tname all with
+      | Some c -> Some c
+      | None ->
+        (* Types are canonicalized to their bare name (`V1.Msg` -> `Msg`)
+           while the declaration keeps its module path: match the suffix,
+           and only when it is unambiguous. *)
+        let sfx = "." ^ tname in
+        let sl = String.length sfx in
+        (match List.filter (fun (n, _) ->
+             let nl = String.length n in
+             nl > sl && String.sub n (nl - sl) sl = sfx) all with
+         | [ (_, c) ] -> Some c
+         | _ -> None) in
+    let actor_handlers : (string * (string * March_tir.Tir.ty list) list) list =
+      List.filter_map (fun (actor, _) ->
+          Option.map (fun c -> (actor, c)) (variant_ctors (actor ^ "_Msg")))
+        actor_schemas in
+    let actor_migrate_msg_from : (string * (string * March_tir.Tir.ty list) list) list =
+      List.filter_map (fun (fn : March_tir.Tir.fn_def) ->
+          let name = fn.March_tir.Tir.fn_name in
+          let sfx = March_tir.Tir_names.migrate_msg_suffix in
+          let nl = String.length name and sl = String.length sfx in
+          if nl <= sl || String.sub name (nl - sl) sl <> sfx then None
+          else
+            let before = String.sub name 0 (nl - sl) in
+            let last = match String.rindex_opt before '.' with
+              | None -> before
+              | Some i -> String.sub before (i + 1) (String.length before - i - 1) in
+            let actor = String.capitalize_ascii last in
+            match fn.March_tir.Tir.fn_params with
+            | [ p ] ->
+              (match p.March_tir.Tir.v_ty with
+               | March_tir.Tir.TCon (tn, _) ->
+                 Option.map (fun c -> (actor, c)) (variant_ctors tn)
+               | _ -> None)
+            | _ -> None)
+        tir.March_tir.Tir.tm_fns in
     (* Capture the interface-dispatch table before it is cleared by lower_module.
        Passed to monomorphize so it can resolve interface calls in functions
        that were polymorphic during lowering but now have concrete types. *)
@@ -3684,9 +3730,20 @@ let compile filename =
                          actor_name;
                        "")
                 in
+                let ctor_list ctors =
+                  "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
+                      Printf.sprintf {|{"name":%S,"params":[%s]}|} cn
+                        (String.concat "," (List.map (fun t ->
+                             Printf.sprintf "%S" (ty_to_schema_str t)) tys))) ctors) ^ "]" in
+                let handlers_line = match List.assoc_opt actor_name actor_handlers with
+                  | None -> ""
+                  | Some c -> Printf.sprintf "    \"handlers\": %s,\n" (ctor_list c) in
+                let mm_line = match List.assoc_opt actor_name actor_migrate_msg_from with
+                  | None -> ""
+                  | Some c -> Printf.sprintf "    \"migrate_msg_from\": %s,\n" (ctor_list c) in
                 Printf.fprintf oc
-                  "  %S: {\n    \"compat\": %S,\n%s    \"state_fields\": %s\n  }%s\n"
-                  actor_name compat invariant_line field_lines
+                  "  %S: {\n    \"compat\": %S,\n%s%s%s    \"state_fields\": %s\n  }%s\n"
+                  actor_name compat invariant_line handlers_line mm_line field_lines
                   (if i < List.length actor_schemas - 1 then "," else "")
               ) actor_schemas;
             Printf.fprintf oc "}\n";

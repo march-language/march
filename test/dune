@@ -845,6 +845,7 @@
  (targets test_reload_activate4_runner)
  (deps    test_reload_activate4.c
           reload_keys.txt
+          hcr_stub.so
           ../runtime/march_reload.c ../runtime/march_reload.h
           ../runtime/march_dispatch.c ../runtime/march_dispatch.h
           ../runtime/march_cap_lattice.c ../runtime/march_cap_lattice.h
@@ -881,12 +882,18 @@
 
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so))
  (action (run ./test_reload_activate4_runner reload_keys.txt)))
+
+; The stub patch the reload test's epoch-model case uploads and activates.
+(rule
+ (targets hcr_stub.so)
+ (deps    hcr_stub_so.c)
+ (action  (run %{cc} -shared -fPIC -o %{targets} hcr_stub_so.c)))
 
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy.txt))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy.txt) (file hcr_stub.so))
  (action (setenv MARCH_DEPLOY_POLICY test_reload_policy.txt
           (run ./test_reload_activate4_runner reload_keys.txt policy))))
 

@@ -7,11 +7,58 @@
 
 type field = { name: string; ty: string }
 
+(** One message constructor: a handler of the actor, or a constructor of a
+    migrate_msg's old type.  [params] are the schema type strings. *)
+type ctor = { cname: string; params: string list }
+
 type actor_schema = {
   compat: string;            (* "full" | "forward" | "any" *)
   invariant: string option;  (* @invariant predicate text, if any *)
   state_fields: field list;
+  handlers: ctor list option;          (* DD step 6: None = an older compiler *)
+  migrate_msg_from: ctor list option;  (* the old type <actor>_migrate_msg takes *)
 }
+
+let find_sub (hay : string) (needle : string) : int option =
+  let hl = String.length hay and nl = String.length needle in
+  let rec go i = if i + nl > hl then None
+    else if String.sub hay i nl = needle then Some i else go (i + 1) in
+  go 0
+
+(** Parse a one-line constructor list as the compiler writes it:
+    [[{"name":"Add","params":["Int"]}, {"name":"Show","params":[]}]]. *)
+let parse_ctor_list (line : string) : ctor list =
+  let len = String.length line in
+  let rec go pos acc =
+    match String.index_from_opt line pos '{' with
+    | None -> List.rev acc
+    | Some b ->
+      let e = match String.index_from_opt line b '}' with Some e -> e | None -> len - 1 in
+      let chunk = String.sub line b (e - b + 1) in
+      let cname = match String.split_on_char '"' chunk with
+        | _ :: "name" :: _ :: n :: _ -> n | _ -> "" in
+      let params =
+        match find_sub chunk "\"params\":[" with
+        | None -> []
+        | Some i ->
+          let start = i + String.length "\"params\":[" in
+          let stop = match String.index_from_opt chunk start ']' with
+            | Some j -> j | None -> String.length chunk in
+          let inner = String.sub chunk start (stop - start) in
+          List.filteri (fun k _ -> k mod 2 = 1) (String.split_on_char '"' inner)
+      in
+      go (e + 1) (if cname = "" then acc else { cname; params } :: acc)
+  in
+  go 0 []
+
+(** The deploy changed the actor's message type (D30, plan 6.3): a handler
+    of the running version was removed, or takes different parameters.
+    Adding a handler is not a change: old messages stay readable. *)
+let messages_changed ~(old_h : ctor list) ~(new_h : ctor list) : bool =
+  List.exists (fun o ->
+      match List.find_opt (fun n -> n.cname = o.cname) new_h with
+      | None -> true
+      | Some n -> n.params <> o.params) old_h
 
 type field_change =
   | FieldAdded   of field
@@ -37,7 +84,11 @@ let parse_schemas_file (path : string) : (string * actor_schema) list =
     let current_compat = ref "full" in
     let current_invariant : string option ref = ref None in
     let current_fields : field list ref = ref [] in
+    let current_handlers : ctor list option ref = ref None in
+    let current_mm_from : ctor list option ref = ref None in
     let in_fields = ref false in
+    let starts_with p l = String.length l >= String.length p
+                          && String.sub l 0 (String.length p) = p in
     List.iter (fun line ->
         let line = String.trim line in
         let llen = String.length line in
@@ -48,16 +99,21 @@ let parse_schemas_file (path : string) : (string * actor_schema) list =
             (match String.split_on_char '"' line with
             | "" :: name :: _ when name <> "compat" && name <> "invariant"
                                  && name <> "state_fields"
+                                 && name <> "handlers" && name <> "migrate_msg_from"
                                  && name <> "name" && name <> "ty" ->
               if !current_actor <> "" then
                 schemas := (!current_actor,
                   { compat = !current_compat;
                     invariant = !current_invariant;
-                    state_fields = List.rev !current_fields }) :: !schemas;
+                    state_fields = List.rev !current_fields;
+                    handlers = !current_handlers;
+                    migrate_msg_from = !current_mm_from }) :: !schemas;
               current_actor := name;
               current_compat := "full";
               current_invariant := None;
-              current_fields := []
+              current_fields := [];
+              current_handlers := None;
+              current_mm_from := None
             | _ -> ())
           end;
           (* Detect "compat": "value" *)
@@ -78,6 +134,10 @@ let parse_schemas_file (path : string) : (string * actor_schema) list =
                 current_invariant := Some (String.sub line first_q (last_q - first_q))
             with Not_found -> ())
           end;
+          if starts_with "\"handlers\":" line then
+            current_handlers := Some (parse_ctor_list line);
+          if starts_with "\"migrate_msg_from\":" line then
+            current_mm_from := Some (parse_ctor_list line);
           (* Detect state_fields array start; also scan for inline field entries
              on the same line (e.g. "state_fields": [{"name":"x","ty":"Y"}]) *)
           if llen >= 15 && String.sub line 0 15 = "\"state_fields\":" then begin
@@ -111,7 +171,9 @@ let parse_schemas_file (path : string) : (string * actor_schema) list =
       schemas := (!current_actor,
         { compat = !current_compat;
           invariant = !current_invariant;
-          state_fields = List.rev !current_fields }) :: !schemas;
+          state_fields = List.rev !current_fields;
+          handlers = !current_handlers;
+          migrate_msg_from = !current_mm_from }) :: !schemas;
     List.rev !schemas
   end
 

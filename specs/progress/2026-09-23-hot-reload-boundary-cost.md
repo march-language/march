@@ -2,7 +2,7 @@
 
 **Parent:** [../plans/2026-09-21-distributed-deploys-groundwork-plan.md](../plans/2026-09-21-distributed-deploys-groundwork-plan.md), G1;
 [../plans/2026-09-21-distributed-authority-and-deploys-plan.md](../plans/2026-09-21-distributed-authority-and-deploys-plan.md), II.7 and II.4.1.
-Consumed by `specs/todos/2026-09-22-dd-step05-model-b-spike.md`. Closes
+Consumed by `specs/progress/2026-09-23-dd-step05-model-b-deferred.md`. Closes
 `specs/todos/2026-09-22-dd-g1-boundary-cost-measurement.md` (this file replaces it).
 
 Measured 2026-09-23 on the 14-core Apple-silicon Mac, compiler and runtime built at

@@ -511,6 +511,21 @@ void march_kill(void *actor);
 int64_t march_actor_get_int(void *actor, int64_t index);
 ```
 
+### Hot-reload epochs (DD step 6)
+
+Every proc carries `march_proc.code_epoch` (0 = unpinned, only the compiled
+`main`); `march_dispatch_enter_unit` resolves a boundary call to the newest live
+version at or before it. Epochs are pinned in a small table in
+`runtime/march_dispatch.c` (`march_epoch_pin`/`unpin`/`reserve`/`advance`), and a
+ring version (three per slot) is reclaimed only when `refs == 0` and no pinned
+epoch lies in `[e, e_next)`. Mailbox nodes carry the sender's epoch and a
+`marker` flag; `march_hcr_activate` (`runtime/march_runtime.c`) stages, commits,
+advances and marks every live actor; the actor loop advances at markers, early
+on a newer-format message (D30), defers while held (`epoch_holds`), converts or
+drops old-format messages, and obeys soft/hard drains. Design:
+`specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md` II.4; record:
+`specs/progress/2026-09-23-dd-step06-epoch-model-and-drains.md`.
+
 ## Float Operations
 
 ### Float Conversions

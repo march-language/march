@@ -624,14 +624,9 @@ let emit_mutual_tco_group ~emit_expr ctx (group : Tir.fn_def list) =
     in
     let wrap_vis =
       let fname = fn.Tir.fn_name in
-      let flen  = String.length fname in
-      let ends_with sfx =
-        let sl = String.length sfx in
-        flen > sl && String.sub fname (flen - sl) sl = sfx
-      in
       if ctx.Llvm_ctx.compile_so
          && not (Tir_names.is_actor_dispatch_fn fname)
-         && not (ends_with "_migrate_state")
+         && not (Tir_names.is_migrate_fn_name fname)
       then "hidden " else ""
     in
     Buffer.add_string ctx.Llvm_ctx.buf

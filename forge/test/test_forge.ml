@@ -1592,6 +1592,90 @@ let test_activate4_wire_line_orders_cap_root_and_caps_before_callers () =
   Alcotest.(check bool) "wire starts with ACTIVATE4" true
     (String.length wire >= 9 && String.sub wire 0 9 = "ACTIVATE4")
 
+(* ─── The epoch model: ACTIVATE5 and WAIT (plan II.4.2, II.4.6) ─────────── *)
+
+let test_activate5_signed_shape () =
+  let (signed, wire_head) =
+    Cmd_deploy_hot.build_activate5_lines
+      ~name:"Counter_dispatch" ~impl:"implhash" ~cas:"cashash"
+      ~migrate:3 ~epoch:9 ~cap_root:cap_root_hex ~callers_csv:""
+  in
+  Alcotest.(check string) "wire_head" "ACTIVATE5 Counter_dispatch implhash cashash" wire_head;
+  Alcotest.(check string) "signed message carries the bitmask"
+    (Printf.sprintf "ACTIVATE5 Counter_dispatch implhash cashash 3 epoch:9 cap_root:%s callers:"
+       cap_root_hex)
+    signed
+
+let test_parse_wait () =
+  Alcotest.(check (option (pair int (pair int (pair int bool)))))
+    "a WAIT line"
+    (Some (5, (3, (40000, false))))
+    (Option.map (fun (e, p, d, f) -> (e, (p, (d, f))))
+       (Cmd_deploy_hot.parse_wait "WAIT epoch:5 pins:3 deadline_ms:40000"));
+  Alcotest.(check (option (pair int (pair int (pair int bool)))))
+    "a full pin table, no deadline"
+    (Some (2, (1, (-1, true))))
+    (Option.map (fun (e, p, d, f) -> (e, (p, (d, f))))
+       (Cmd_deploy_hot.parse_wait "WAIT epoch:2 pins:1 deadline_ms:-1 table_full"));
+  Alcotest.(check bool) "OK is not a WAIT" true
+    (Cmd_deploy_hot.parse_wait "OK 1" = None);
+  Alcotest.(check string) "described as the plan words it"
+    "waiting on 3 unit(s) pinned to epoch 5, hard deadline in 40s"
+    (Cmd_deploy_hot.describe_wait (5, 3, 40000, false))
+
+let test_schema_handlers_and_message_diff () =
+  let path = Filename.temp_file "schemas" ".json" in
+  let oc = open_out path in
+  output_string oc {|{
+  "Counter": {
+    "compat": "full",
+    "handlers": [{"name":"Add","params":["Int"]}, {"name":"Show","params":[]}],
+    "migrate_msg_from": [{"name":"Inc","params":["Int","String"]}],
+    "state_fields": [
+      {"name":"n","ty":"Int"}
+    ]
+  }
+}
+|};
+  close_out oc;
+  let schemas = Schema_diff.parse_schemas_file path in
+  Sys.remove path;
+  Alcotest.(check (list string)) "one actor, not a stray \"handlers\" actor"
+    ["Counter"] (List.map fst schemas);
+  let s = List.assoc "Counter" schemas in
+  let show (c : Schema_diff.ctor) = c.cname ^ "(" ^ String.concat "," c.params ^ ")" in
+  Alcotest.(check (list string)) "handlers parsed" ["Add(Int)"; "Show()"]
+    (List.map show (Option.get s.Schema_diff.handlers));
+  Alcotest.(check (list string)) "migrate_msg_from parsed" ["Inc(Int,String)"]
+    (List.map show (Option.get s.Schema_diff.migrate_msg_from));
+  Alcotest.(check (list string)) "state fields still parsed" ["n"]
+    (List.map (fun (f : Schema_diff.field) -> f.name) s.Schema_diff.state_fields);
+  let c n ps = { Schema_diff.cname = n; params = ps } in
+  let old_h = [ c "Add" ["Int"]; c "Show" [] ] in
+  Alcotest.(check bool) "adding a handler is not a message change" false
+    (Schema_diff.messages_changed ~old_h ~new_h:(old_h @ [ c "Reset" [] ]));
+  Alcotest.(check bool) "removing one is" true
+    (Schema_diff.messages_changed ~old_h ~new_h:[ c "Add" ["Int"] ]);
+  Alcotest.(check bool) "changing a parameter type is" true
+    (Schema_diff.messages_changed ~old_h ~new_h:[ c "Add" ["String"]; c "Show" [] ])
+
+let test_migrate_msg_stub () =
+  let c n ps = { Schema_diff.cname = n; params = ps } in
+  let stub = Cmd_deploy_hot.migrate_msg_stub ~actor:"Counter"
+      ~old_h:[ c "Add" ["Int"]; c "Show" [] ]
+      ~new_h:[ c "Add" ["Int"]; c "Reset" [] ] () in
+  let has sub =
+    let hl = String.length stub and nl = String.length sub in
+    let rec go i = i + nl <= hl && (String.sub stub i nl = sub || go (i + 1)) in go 0 in
+  Alcotest.(check bool) "old type spelled out in its own module" true
+    (has "mod CounterMsgV do\n  type Msg = Add(Int) | Show\nend");
+  Alcotest.(check bool) "signature names Counter.Msg" true
+    (has "fn counter_migrate_msg(m : CounterMsgV.Msg) : Option(Counter.Msg) do");
+  Alcotest.(check bool) "a kept handler maps to itself" true
+    (has "CounterMsgV.Add(a1) -> Some(Add(a1))");
+  Alcotest.(check bool) "a removed handler maps to None" true
+    (has "CounterMsgV.Show -> None")
+
 let test_activate3_signed_shape_unchanged () =
   let (signed, wire_head) =
     Cmd_deploy_hot.build_activate3_lines
@@ -2518,6 +2602,10 @@ let () =
       Alcotest.test_case "ACTIVATE4: signed excludes caps, includes cap_root" `Quick test_activate4_signed_excludes_caps_includes_cap_root;
       Alcotest.test_case "ACTIVATE4: wire orders cap_root+caps before callers" `Quick test_activate4_wire_line_orders_cap_root_and_caps_before_callers;
       Alcotest.test_case "ACTIVATE3: signed/wire shape unchanged" `Quick test_activate3_signed_shape_unchanged;
+      Alcotest.test_case "ACTIVATE5: signed shape carries the migrate bitmask" `Quick test_activate5_signed_shape;
+      Alcotest.test_case "WAIT: parsed and described" `Quick test_parse_wait;
+      Alcotest.test_case "schemas: handlers, migrate_msg_from, message diff" `Quick test_schema_handlers_and_message_diff;
+      Alcotest.test_case "migrate_msg stub from handler signatures" `Quick test_migrate_msg_stub;
       Alcotest.test_case "ACTIVATE4: caps csv is sorted own caps per function" `Quick test_activate4_caps_csv_is_sorted_own_caps_per_function;
       Alcotest.test_case "branch: caps present, no flag -> ACTIVATE4" `Quick test_branch_caps_present_no_flag_selects_activate4;
       Alcotest.test_case "branch: --no-cap-gate forces ACTIVATE3" `Quick test_branch_no_cap_gate_flag_forces_activate3;

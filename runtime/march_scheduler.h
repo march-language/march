@@ -177,6 +177,18 @@ typedef struct march_mbox_node {
     uint64_t                enqueue_seq; /* Per-mailbox global order across
                                             user and control planes. */
     struct march_mbox_node *next;
+    /* D29 (plan II.4.5): the sender's code epoch at enqueue (its
+     * march_proc.code_epoch, or the current epoch for an unpinned or
+     * proc-less sender).  Runtime-owned, so it costs four bytes per queued
+     * message, in every build, and nothing on the wire or in the heap ABI. */
+    uint32_t                epoch;
+    /* 1: an epoch marker (II.4.6) -- a runtime-owned node in the USER
+     * mailbox, placed by an activation behind whatever the actor already had
+     * queued.  Exempt from overflow policies (never dropped, evicted or
+     * counted against mbox_limit), invisible to every receive except the
+     * actor loop's (march_sched_recv_actor), and disposed through the marker
+     * dtor (march_sched_set_marker_dtor), never the message dtor. */
+    uint8_t                 marker;
 } march_mbox_node;
 
 /* ── Mailbox capacity + overflow policy ─────────────────────────────────
@@ -237,6 +249,21 @@ typedef struct march_proc {
                                                  the lock. */
     _Atomic int64_t             user_mbox_count; /* User messages only; mailbox limits and
                                                     BLOCK low-water checks use this count. */
+    int64_t                    mbox_markers; /* Epoch markers currently in the user mailbox
+                                                 (counted in user_mbox_count so the actor
+                                                 loop wakes for them, subtracted wherever the
+                                                 count means "messages": the limit and the
+                                                 BLOCK low-water check).  Under mbox_lock. */
+    uint32_t                   last_recv_epoch; /* Stamp of the last message a receive
+                                                 popped for THIS proc (written under
+                                                 mbox_lock, read by the proc itself right
+                                                 after): lets Actor.call put held messages
+                                                 back with their stamps. */
+    /* Epoch holds (D28, plan II.4.4): while non-zero this proc does not
+     * advance at a marker (the actor loop remembers it as pending).  Taken by
+     * code that keeps work of an older epoch alive (a session party, a parked
+     * hosted endpoint); only the proc itself changes it, drains read it. */
+    _Atomic(uint32_t)           epoch_holds;
     int64_t                    mbox_limit;   /* 0 = unbounded (default). Plain field: only
                                                  read/written under mbox_lock (set by
                                                  march_sched_set_mbox_limit, read by
@@ -385,6 +412,17 @@ typedef struct march_proc {
      * underflow, abort).  The landing site is the loop's normal death path.
      * Same migration argument as crash_jmp: lives on the proc, not in TLS. */
     jmp_buf                   *stop_jmp;
+    /* The unified epoch model (D12/D33; specs/plans/2026-09-21-distributed-
+     * authority-and-deploys-plan.md, II.4.1).  The code epoch this unit of
+     * work runs at: every boundary call it makes resolves to the newest
+     * version at or before it (march_dispatch_enter_unit).  0 = unpinned,
+     * follow the current version (only the compiled `main` green thread).
+     * Set at spawn, inherited from the spawning proc (else the current
+     * epoch), with one pin on that epoch (march_epoch_pin), dropped at the
+     * reap.  Only the proc itself changes it afterwards (an actor advancing
+     * at its marker); other threads read it (drains) -- hence atomic, and
+     * per proc, never TLS: procs migrate across OS threads. */
+    _Atomic(uint32_t)           code_epoch;
 #ifdef MARCH_ASAN_BUILD
     /* ASan fiber-switch bookkeeping: this proc's own "fake stack" handle,
      * threaded through __sanitizer_start_switch_fiber/finish_switch_fiber
@@ -556,6 +594,14 @@ void         march_sched_exit(void);
 
 /* Return the currently running process (NULL if in scheduler context). */
 march_proc  *march_sched_current(void);
+/* The running proc's code epoch (0 when there is no proc, or it is unpinned).
+ * What march_dispatch_enter_unit resolves against. */
+uint32_t     march_sched_current_epoch(void);
+/* Spawn the compiled `main` green thread: like march_sched_spawn[_pinned]
+ * (sched_pinned selects scheduler 0), but UNPINNED in the epoch sense
+ * (code_epoch 0, follows current), see march_proc.code_epoch. */
+march_proc  *march_sched_spawn_main(void (*fn)(void *), void *arg,
+                                    int sched_pinned);
 
 /* Return 1 if the calling OS thread is running inside the scheduler loop, 0 otherwise.
  * Used to avoid launching a redundant background scheduler thread. */
@@ -738,8 +784,48 @@ void *march_sched_recv_user_until(int64_t deadline_ms);
  * caller does not want goes back with march_sched_requeue_user_front, which
  * puts msgs[0..n) at the head of the CURRENT proc's user mailbox, in order,
  * with their original sequence numbers. */
+/* Epoch markers (plan II.4.6).  send_marker enqueues [msg] as a marker node
+ * stamped [epoch] in [target]'s USER mailbox, bypassing the overflow policy
+ * and never blocking: MARCH_SEND_OK, or MARCH_SEND_DEAD (the caller keeps
+ * [msg]).  recv_actor is the actor loop's receive: the head of the user
+ * mailbox INCLUDING markers, with its stamp and marker flag.  take_markers
+ * unlinks, in order, the current proc's queued markers stamped <= [upto]
+ * (a forced marker: the soft drain deadline, or an early advance).  Every
+ * other receive skips markers and leaves them where they are. */
+int   march_sched_send_marker(march_proc *target, void *msg, uint32_t epoch);
+void *march_sched_recv_actor(uint32_t *epoch_out, int *marker_out);
+int   march_sched_take_markers(uint32_t upto, void **msgs, uint32_t *epochs,
+                               int max);
+/* Dispose of a marker the scheduler must drop (a dead proc's mailbox). */
+void  march_sched_set_marker_dtor(void (*fn)(void *msg, uint32_t epoch));
+/* The stamp of the last message the current proc received (see
+ * march_proc.last_recv_epoch). */
+uint32_t march_sched_last_recv_epoch(void);
+/* Test seam: when non-zero, every node is stamped with this epoch instead
+ * of the sender's.  0 in production. */
+extern _Atomic(uint32_t) march_sched_test_stamp;
+/* The epoch a message sent now by the current thread is stamped with. */
+uint32_t march_sched_send_epoch(void);
+/* The hard drain deadline for non-actor procs (II.4.7): request a stop on
+ * every live proc that is not an actor green thread and whose code epoch is
+ * in (0, upto].  A blocking receive then returns "stop"; a proc computing
+ * without receiving runs on (the scheduler is cooperative).  Returns the
+ * number of procs told. */
+int64_t march_sched_stop_epoch(uint32_t upto);
+/* Spawn with the CURRENT epoch rather than the spawner's: a supervisor
+ * restart, which D11 says runs the new code. */
+march_proc *march_sched_spawn_current(void (*fn)(void *), void *arg);
+/* A runtime-internal timer proc: a daemon (does not keep the scheduler alive)
+ * that is unpinned (code_epoch 0: holds no epoch, and a drain never stops
+ * it).  The hot-reload hard drain deadline runs on one. */
+march_proc *march_sched_spawn_daemon_unpinned(void (*fn)(void *), void *arg);
 void *march_sched_recv_user_seq(uint64_t *seq_out);
 void *march_sched_recv_user_until_seq(int64_t deadline_ms, uint64_t *seq_out);
+/* As march_sched_requeue_user_front, restoring each message's stamp. */
+void  march_sched_requeue_user_front_epochs(void *const *msgs,
+                                            const uint64_t *seqs,
+                                            const uint32_t *epochs,
+                                            int64_t n);
 void  march_sched_requeue_user_front(void *const *msgs, const uint64_t *seqs,
                                      int64_t n);
 

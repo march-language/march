@@ -104,9 +104,10 @@ let rec cap_annots_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
   | Ast.EResultRef _ -> acc
   | Ast.ELit _ | Ast.EVar _ -> acc   (* carry no type annotation *)
 
-(** True if [fn_name] ends in the bare "_migrate_state" suffix, regardless of
-    which actor it belongs to — the hot-reload state-migration naming
-    convention (Phase5C-C.5). This is a local copy of
+(** True if [fn_name] is a hot-reload migration function: the
+    "_migrate_state" suffix (Phase5C-C.5), or "_migrate_msg" and its
+    generated "_migrate_msg__hcr" wrapper (DD step 6), regardless of which
+    actor it belongs to. This is a local copy of
     [March_tir.Tir_names.is_migrate_fn_name]: [march_typecheck] cannot depend
     on [march_tir] ([march_tir]'s dune already depends on
     [march_typecheck]), so the bare-suffix predicate this module's
@@ -114,9 +115,12 @@ let rec cap_annots_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
     than shared. Keep byte-identical to [Tir_names.is_migrate_fn_name] if
     either changes. *)
 let is_migrate_fn_name (fn_name : string) : bool =
-  let sfx = "_migrate_state" in
-  let nl = String.length fn_name and sl = String.length sfx in
-  nl >= sl && String.sub fn_name (nl - sl) sl = sfx
+  let has sfx =
+    let nl = String.length fn_name and sl = String.length sfx in
+    nl >= sl && String.sub fn_name (nl - sl) sl = sfx in
+  (* "_migrate_state", and the message-migration pair (DD step 6):
+     "_migrate_msg" and its generated "_migrate_msg__hcr" wrapper. *)
+  has "_migrate_state" || has "_migrate_msg" || has "_migrate_msg__hcr"
 
 (** [fn_transitive_capability_closures_tbl env] is each function's capability set
     including everything it reaches through the reference graph:
@@ -1643,17 +1647,48 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     let own_caps =
       Option.value ~default:[] (Hashtbl.find_opt env.own_cap_closures qname)
     in
+    let is_msg =
+      let has sfx =
+        let nl = String.length qname and sl = String.length sfx in
+        nl >= sl && String.sub qname (nl - sl) sl = sfx in
+      has "_migrate_msg" || has "_migrate_msg__hcr" in
+    let what = if is_msg then "migrate_msg" else "migrate_state" in
     if own_caps <> [] then
       Err.error env.errors ~span:sp
         (render_parts [
-          MPText "migrate_state must be IO-free"; MPBreak;
+          MPText (what ^ " must be IO-free"); MPBreak;
           MPCode qname; MPText " calls capabilities that need ";
           MPCode (String.concat ", " own_caps); MPText ".";
-          MPBreak; MPText "migrate_state runs during the hot-migration window, before user messages.";
+          MPBreak; MPText (if is_msg
+                           then "migrate_msg runs inside the actor's receive loop, converting a message that is already queued."
+                           else "migrate_state runs during the hot-migration window, before user messages.");
           MPBreak; MPText "hint: move side effects into a normal handler that runs after migration completes." ])
+  in
+  (* The shape the runtime relies on (DD step 6, plan II.4.8): exactly one
+     parameter, annotated with the OLD message type, and an annotated
+     `Option(<Actor>.Msg)` return -- None drops the message on purpose. *)
+  let check_migrate_msg_shape (def : Ast.fn_def) (sp : Ast.span) =
+    let name = def.Ast.fn_name.txt in
+    let nl = String.length name and sl = String.length "_migrate_msg" in
+    if nl > sl && String.sub name (nl - sl) sl = "_migrate_msg" then begin
+      let ok_params = match def.Ast.fn_clauses with
+        | [ { Ast.fc_params = [ Ast.FPNamed { Ast.param_ty = Some _; _ } ]; _ } ] -> true
+        | _ -> false in
+      let ok_ret = match def.Ast.fn_ret_ty with
+        | Some (Ast.TyCon ({ Ast.txt = "Option"; _ }, [ _ ])) -> true
+        | _ -> false in
+      if not (ok_params && ok_ret) then
+        Err.error env.errors ~span:sp
+          (render_parts [
+            MPCode name; MPText " is a hot-reload message migration, and must be written as";
+            MPBreak; MPCode (name ^ "(m : <old message type>) : Option(<Actor>.Msg)");
+            MPText ", with one clause.";
+            MPBreak; MPText "hint: `forge hot-reload migrate-msg-stub <Actor>` writes one from the running version's handlers." ])
+    end
   in
   List.iter (function
     | Ast.DFn (def, sp) when is_migrate_fn_name def.fn_name.txt ->
+      check_migrate_msg_shape def sp;
       check_migrate_fn_io_free (cap_qname def.fn_name.txt) sp
     (* An extern-declared fn following the migrate_state naming convention is
        equally recognized: its own caps were recorded under [ef_name.txt] by

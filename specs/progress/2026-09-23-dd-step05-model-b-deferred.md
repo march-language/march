@@ -1,4 +1,11 @@
-# `[P3]` Distributed deploys, build step 5: the Model B spike (no longer blocks step 6)
+# Distributed deploys, build step 5: Model B deferred, not required
+
+**CLOSED 2026-09-23.** The decision below is the outcome of step 5: Model B does
+not precede step 6 and is not required by any later step of the plan. Step 6
+landed on today's dispatch (`specs/progress/2026-09-23-dd-step06-epoch-model-and-drains.md`),
+with `march_dispatch_enter_unit` on the call path as II.4.1 designs it. The larger
+ORC-JIT Phase 0 spike stays where it was filed, as its own optional item in
+`specs/todos/2026-07-31-p2-runtime-hot-code-reloading.md`; it is not tracked here.
 
 **Parent:** [../plans/2026-09-21-distributed-authority-and-deploys-plan.md](../plans/2026-09-21-distributed-authority-and-deploys-plan.md), section 6.7, II.7.
 
@@ -22,4 +29,6 @@ unit of work, re-check the first threshold there.
 `specs/todos/2026-07-31-p2-runtime-hot-code-reloading.md`, for the ORC question on its own
 merits. It is no longer a prerequisite for anything in this plan.
 
-**Acceptance.** Close this file when the ORC spike is either run or dropped.
+**Acceptance (as filed).** "Close this file when the ORC spike is either run or dropped."
+Closed instead on the decision itself, as the step-6 task directed: the ORC spike
+is no longer part of this plan.
