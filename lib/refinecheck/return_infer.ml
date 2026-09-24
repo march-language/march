@@ -163,6 +163,8 @@ let rec collect_consts (acc : (string, unit) Hashtbl.t) (t : Smt.term) : unit =
     collect_consts acc a; collect_consts acc b
   | Smt.MulLit (_, t) | Smt.DivLit (t, _) | Smt.ModLit (t, _) | Smt.Neg t | Smt.Not t ->
     collect_consts acc t
+  | Smt.Mul (a, b) | Smt.Div (a, b) | Smt.Mod (a, b) -> collect_consts acc a; collect_consts acc b
+  | Smt.Ite (c, a, b) -> collect_consts acc c; collect_consts acc a; collect_consts acc b
   | Smt.App (_, ts) | Smt.Ctor (_, _, ts) -> List.iter (collect_consts acc) ts
   | _ -> ()
 

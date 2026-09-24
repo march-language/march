@@ -12,6 +12,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Refinement predicates: `/` and `%` in general.** A predicate may now divide
+  a possibly-negative value, or divide by a variable: `{Int | _ / 2 == -3}` and
+  `{Int | d != 0 && _ / d > 0}` are checked instead of skipped. The checker uses
+  March's truncating division (`-7 / 2` is `-3`, `-7 % 2` is `-1`), not the
+  solver's Euclidean one, so `f(-7)` proves and `f(-5)` is reported. Dividing by
+  zero panics, so a predicate is false wherever it would divide by zero,
+  following `&&`/`||` short-circuiting: with `_ / d > 0`, a call with `d == 0` is
+  a violation and one that cannot rule out `d == 0` is not proved.
 - **Hot reload: the unified epoch model and drains** (build step 6 of the
   distributed-deploys plan). Every unit of work (actor, task, session) runs at the
   epoch of the deploy it started under, and every call it makes, from the base
