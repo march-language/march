@@ -1146,6 +1146,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_value_to_string_typed", "declare ptr  @march_value_to_string_typed(ptr %v, i32 %type_id)");
   ("march_html_auto_escape_dyn", "declare ptr  @march_html_auto_escape_dyn(ptr %v)");
   ("march_html_escape_ctx_dyn", "declare ptr  @march_html_escape_ctx_dyn(i64 %id, ptr %v)");
+  ("march_value_to_string_repr", "declare ptr  @march_value_to_string_repr(ptr %v)");
   ("march_record_shape_intern", "declare i32  @march_record_shape_intern(ptr %desc)");
   ("march_record_set_shape", "declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)");
   ("march_record_put", "declare ptr  @march_record_put(ptr %rec, ptr %key, ptr %val, i64 %kind)");
@@ -1273,6 +1274,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_value_to_string_typed";
   PDeclare "march_html_auto_escape_dyn";
   PDeclare "march_html_escape_ctx_dyn";
+  PDeclare "march_value_to_string_repr";
   PDeclare "march_record_shape_intern";
   PDeclare "march_record_set_shape";
   PDeclare "march_record_keys";

@@ -30,6 +30,14 @@ git log is authoritative for exact commits.
   `RESTORED` line. New signed `TOPOLOGY` verb (`Cmd_deploy_hot.push_topology`)
   persists the pushed topology and hands it to a runtime hook; new `COMPACT` verb
   reports the patch stack's size, which `forge hot-reload status` prints.
+- **Refinement predicates: `/` and `%` in general.** A predicate may now divide
+  a possibly-negative value, or divide by a variable: `{Int | _ / 2 == -3}` and
+  `{Int | d != 0 && _ / d > 0}` are checked instead of skipped. The checker uses
+  March's truncating division (`-7 / 2` is `-3`, `-7 % 2` is `-1`), not the
+  solver's Euclidean one, so `f(-7)` proves and `f(-5)` is reported. Dividing by
+  zero panics, so a predicate is false wherever it would divide by zero,
+  following `&&`/`||` short-circuiting: with `_ / d > 0`, a call with `d == 0` is
+  a violation and one that cannot rule out `d == 0` is not proved.
 - **`forge audit --inferred --allow-unanalyzable`** gates on the dependencies
   that typecheck, so a project can adopt the capability gate before its whole
   dependency graph checks cleanly. Every unanalyzable dependency is still listed
@@ -441,6 +449,22 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Compiled `to_string` no longer quotes strings inside a List or Result of
+  unknown static type.** When the type was erased, for example when the value
+  reached `to_string` through a closure stored in a container, a compiled
+  program printed `["a", "b"]` and `Ok("x")` where the interpreter prints
+  `[a, b]` and `Ok(x)`. Compiled output now matches the interpreter. Strings
+  inside a user constructor or record are still quoted (`B("x")`), as the
+  interpreter quotes them. `~H` interpolation still quotes every nested string.
+- **Floats at the JIT REPL print correctly and no longer crash the session.** Any
+  Float inside a list, `Option`, `Result` or tuple printed as garbage like
+  `[2.15e-313, 2.15e-313]` at the (default, JIT-backed) REPL prompt, including
+  `NativeArray.to_list_float` and `to_list_f32` results and a plain `[3.5, 1.25]`
+  literal; they now print their values. Separately, an expression that returned a
+  Float, followed by any expression returning a list, string or other heap value
+  (`3.5` then `[1, 2]`, or `NativeArray.get_float(a, 0)` then
+  `NativeArray.to_list_float(a)`), killed the REPL with a segmentation fault; it now
+  runs. The interpreter, `--compile` and `march --jit file.march` were not affected.
 - **`forge audit --inferred` names a toolchain too old for `march caps`.** When
   the toolchain's `march` predated the `caps` subcommand (before 0.3.0), it read
   `caps` as a file name and failed, so every dependency showed as unanalyzable
