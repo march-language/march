@@ -12,6 +12,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`forge audit --inferred --allow-unanalyzable`** gates on the dependencies
+  that typecheck, so a project can adopt the capability gate before its whole
+  dependency graph checks cleanly. Every unanalyzable dependency is still listed
+  with its reason on every run, and none is treated as asking for nothing.
+  `--record` leaves unanalyzable dependencies out of `forge.caps.lock` and keeps
+  any set recorded for them earlier.
 - **Editor support for `topology.toml`** (build step 7 of the distributed-deploys
   plan). `march-lsp` recognises `topology.toml` and `topology.<env>.toml` and shows
   `forge topology check`'s diagnostics on forge's lines, computed by forge's own
@@ -152,6 +158,16 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **`forge audit --inferred` caches each dependency's result** under
+  `.forge/audit-cache/`, keyed on the dependency's files, the files on its lib
+  path and the compiler. A repeat audit re-analyzes only the dependencies whose
+  inputs changed, instead of rerunning `march caps` (minutes each) for all of
+  them. A cached result prints the same output as a fresh one.
+- **An unanalyzable dependency now fails `forge audit --inferred`.** A dependency
+  that does not typecheck is listed as `NOT ANALYZABLE` with the compiler's
+  reason, the check exits 1, and `--record` refuses to write a baseline.
+  Previously the audit printed the error to stderr, used the dependency's
+  declared `needs` set in its place and passed.
 - **Hot reload: a second deploy while actors are still migrating is accepted**
   (it used to be refused with `ERR publish_failed`); each actor applies both
   migrations in order. Past the soft drain deadline, messages in an unchanged
@@ -387,6 +403,14 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **`forge audit --inferred` names a toolchain too old for `march caps`.** When
+  the toolchain's `march` predated the `caps` subcommand (before 0.3.0), it read
+  `caps` as a file name and failed, so every dependency showed as unanalyzable
+  and nothing pointed at the compiler. The audit now checks the compiler before
+  analyzing anything and stops with one error that gives the toolchain's path,
+  its version and the version it needs. A `.march-version` pin whose toolchain
+  is not installed is also an error now; the audit used to fall back to
+  whatever `march` was on `PATH`.
 - **Spawning a nested actor from its parent module compiles.** `spawn(Inner.Box)`
   written outside `mod Inner` passed `--check` and ran interpreted, but `--compile`
   failed to link with `Undefined symbols: "_Inner.Box_spawn"`. It now links and runs.
