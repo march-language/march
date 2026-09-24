@@ -6,8 +6,10 @@
 activation, so the spawn marker finds it held. `party()` calls it before
 `spawn(Endpoint)`; the `HoldEpoch` message is gone. `test/test_hcr_migrate_order.c`
 `test_spawn_hold_precedes_marker` is the harness described below: the message-held
-child advances (the control), the spawn-held child stays at the parent's epoch. Filed
-2026-09-24; the text below is the finding as filed.
+child advances (the control), the spawn-held child stays at the parent's epoch. The flag
+is the interim shape: a spawn argument is
+[../todos/2026-09-24-spawn-held-as-a-spawn-argument.md](../todos/2026-09-24-spawn-held-as-a-spawn-argument.md).
+Filed 2026-09-24; the text below is the finding as filed.
 
 Filed 2026-09-24 by the distributed-deploys review (step 6, PR #612, commits
 1157997f5 and 753336d36). Plan: II.4.4, D28; progress deviation 2.
