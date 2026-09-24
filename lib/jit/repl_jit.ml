@@ -521,7 +521,10 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
      offset 12: int32_t pad
    Fields start at offset 16, 8 bytes each.
    TInt/TBool/TUnit fields are stored as int64.
-   TFloat fields are stored as double (same 8-byte slot, read bits).
+   TFloat fields are stored as double (same 8-byte slot, read bits) ONLY
+   when the field's declared type is concrete; in an erased slot (List/
+   Option/Result payloads, tuples, generic ctor args) a Float is a
+   march_alloc_float box pointer — see [pp_float_word].
    All other fields (TString, TCon, TTuple, …) are stored as pointers.
 
    Built-in variant tag assignments (determined by constructor order in lower.ml):
@@ -541,6 +544,35 @@ let field_i64 (ptr : nativeint) (i : int) : int64 =
 (** Read field i (0-based) as a pointer (for TString/TCon/TTuple/etc.). *)
 let field_ptr (ptr : nativeint) (i : int) : nativeint =
   Jit.read_ptr_at ptr (16 + i * 8)
+
+(** [MARCH_FLOAT_TAG] in runtime/march_runtime.h: the tag of a
+    [march_float_box] {rc, tag, pad, double val}. *)
+let march_float_tag = -3
+
+(** Is [w] a [march_float_box] pointer?  Never dereferences an odd (tagged
+    scalar) or null word. *)
+let is_float_box (w : nativeint) : bool =
+  w <> Nativeint.zero && Nativeint.logand w 1n = 0n
+  && heap_tag w = march_float_tag
+
+(** Render a Float held in one machine word.
+
+    Where it lives decides how it is stored (float-boxing stage 2,
+    [Llvm_ctx.coerce]'s ("double","ptr") arm): a slot whose DECLARED type is
+    erased — a List's Cons head, Option/Result payloads, tuple slots, a
+    generic user ctor's field ([~erased:true], the printer's [~tagged]) —
+    holds a [march_alloc_float] BOX pointer.  A concrete Float field (a
+    record's, or a ctor declared at Float) holds the raw double bits.
+    Reading a box pointer as raw bits prints denormal garbage like
+    2.15e-313 for every element — which is what every List(Float) at the
+    JIT prompt printed until 2026-09-24.  The box tag is checked before
+    reading, so a raw-bits word that reached an erased-slot read still
+    falls back to the bits instead of being dereferenced as a box. *)
+let pp_float_word ~erased (w : nativeint) : string =
+  let bits =
+    if erased && is_float_box w then Jit.read_i64_at w 16
+    else Int64.of_nativeint w in
+  Printf.sprintf "%g" (Int64.float_of_bits bits)
 
 (** Collect free TVars from a type_def's constructor payload signatures,
     preserving first-seen order.  Used to align TCon type-args with TVars
@@ -849,9 +881,9 @@ and pp_field ?(depth=0) ~type_defs ~ctor_tags ~tagged (ty : March_tir.Tir.ty) (p
   let open March_tir.Tir in
   match ty with
   | TFloat ->
-    (* Floats are stored as raw double bits via bitcast — no tag bit, and the
-       bit pattern is not a meaningful nativeint, so read the slot directly. *)
-    Printf.sprintf "%g" (Int64.float_of_bits (field_i64 ptr i))
+    (* An erased slot ([tagged]) holds a float BOX pointer; a concrete one
+       the raw double bits — see [pp_float_word]. *)
+    pp_float_word ~erased:tagged (Int64.to_nativeint (field_i64 ptr i))
   | TInt | TBool | TUnit ->
     pp_word ~depth ~type_defs ~ctor_tags ~tagged ty (Int64.to_nativeint (field_i64 ptr i))
   | _ -> pp_word ~depth ~type_defs ~ctor_tags ~tagged ty (field_ptr ptr i)
@@ -869,7 +901,7 @@ and pp_word ?(depth=0) ~type_defs ~ctor_tags ~tagged (ty : March_tir.Tir.ty) (w 
   | TInt  -> Int64.to_string (scalar ())
   | TBool -> if scalar () = 0L then "false" else "true"
   | TUnit -> "()"
-  | TFloat -> Printf.sprintf "%g" (Int64.float_of_bits (Int64.of_nativeint w))
+  | TFloat -> pp_float_word ~erased:tagged w
   | TVar _ ->
     (* Erased slot: a scalar is low-bit tagged, a heap value is an aligned
        pointer.  Decide from the word itself — dereferencing a tagged scalar
@@ -877,6 +909,7 @@ and pp_word ?(depth=0) ~type_defs ~ctor_tags ~tagged (ty : March_tir.Tir.ty) (w 
     if Nativeint.logand w 1n = 1n then
       Int64.to_string (Int64.shift_right_logical (Int64.of_nativeint w) 1)
     else if w = Nativeint.zero then "null"
+    else if is_float_box w then pp_float_word ~erased:true w
     else Printf.sprintf "#<tag:%d>" (heap_tag w)
   | _ ->
     if w = Nativeint.zero then "null"

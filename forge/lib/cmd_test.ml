@@ -156,7 +156,7 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
     let lib_dir_pp = Filename.concat proj.Project.root "lib" in
     let _pp = Cmd_build.run_preprocessors ~proj ~src_dir ~gen_dir in
     let _pp2 = Cmd_build.run_preprocessors ~proj ~src_dir:lib_dir_pp ~gen_dir in
-    match Cmd_build.offline_preflight
+    match Cmd_build.deps_preflight
             ~scope:(proj.Project.deps @ proj.Project.dev_deps @ proj.Project.test_deps)
             proj with
     | Error e -> Error e

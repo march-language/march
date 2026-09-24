@@ -862,6 +862,59 @@ let test_repl_stdlib_ctor_tags_interp () =
   check_stdlib_ctor_tags ~label:"interpreter mode"
     (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" stdlib_ctor_tags_session)
 
+(* ── Floats at the JIT prompt (2026-09-24) ──────────────────────────────
+   Two bugs, one session.  specs/progress/2026-09-24-jit-to-list-float.md.
+
+   1. Printer: a Float in an ERASED slot (a List's Cons head, Option/Result
+      payload, tuple slot) is a march_alloc_float box pointer, but the REPL
+      printer read the slot as raw double bits, so every List(Float) printed
+      denormal garbage (`[2.15e-313, 2.15e-313, ...]`) while `List.head` of
+      the same list printed the right value.
+
+   2. Slot release: a Float result is stored in the "v" slot as raw bits; the
+      NEXT heap-returning expression decrc'd the old slot word as a pointer
+      (IS_HEAP_PTR passes 3.5's bits), so `get_float` then `to_list_float`
+      — or just `3.5` then `[1, 2]` — SIGSEGV'd the REPL (exit 139).
+
+   Non-integral values on purpose: the JIT prints `%g` (2.0 -> "2") while
+   the interpreter prints "2.", and neither spelling should be pinned here. *)
+
+let float_session =
+  [ "let a = NativeArray.from_list_float([3.5, 1.25, 0.5])";
+    "NativeArray.get_float(a, 0)";
+    "NativeArray.to_list_float(a)";
+    "NativeArray.to_list_f32(NativeArray.from_list_f32([3.5, 0.25]))";
+    "Some(2.5)";
+    "(1.5, 7)";
+    "[Some(0.75)]" ]
+
+let check_float_session ~label (out, code) =
+  Alcotest.(check int)
+    (Printf.sprintf "%s: REPL exit code (139 = SIGSEGV from the slot release; output: %s)"
+       label out) 0 code;
+  List.iter (fun (needle, what) ->
+    if not (contains ~needle out) then
+      Alcotest.failf "%s: expected %s (%s) in session output, got:\n%s"
+        label needle what out)
+    [ "= 3.5", "get_float reads the element";
+      "= [3.5, 1.25, 0.5]", "to_list_float after a Float result";
+      "= [3.5, 0.25]", "to_list_f32";
+      "= Some(2.5)", "Option(Float) payload";
+      "= (1.5, 7)", "tuple Float slot";
+      "= [Some(0.75)]", "nested erased Float" ]
+
+let test_repl_floats_jit () =
+  if not (clang_available ()) then ()  (* skip: stdlib precompile needs clang *)
+  else
+    check_float_session ~label:"JIT"
+      (run_repl_session ~env_prefix:"" float_session)
+
+(* Parity control: the interpreter was always right, so a failure here means
+   the witness broke, not the JIT. *)
+let test_repl_floats_interp () =
+  check_float_session ~label:"interpreter mode"
+    (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" float_session)
+
 let () =
   Alcotest.run "march_jit" [
     "jit", [
@@ -903,6 +956,10 @@ let () =
         test_repl_stdlib_ctor_tags_jit;
       Alcotest.test_case "stdlib ADT ctor tags (interpreter)" `Quick
         test_repl_stdlib_ctor_tags_interp;
+      Alcotest.test_case "Floats print and survive the v slot (JIT)" `Slow
+        test_repl_floats_jit;
+      Alcotest.test_case "Floats print and survive the v slot (interpreter)"
+        `Quick test_repl_floats_interp;
     ];
     "jit_file", [
       Alcotest.test_case "march --jit runs a whole program (ORC JIT)" `Slow
