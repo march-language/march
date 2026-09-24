@@ -929,7 +929,8 @@ let test_hosts_from_config () =
   Alcotest.(check (list string)) "from [[hot-reload.env]]" [ "prod"; "root@h"; "/s"; "k" ]
     [ h.Hosts.name; h.Hosts.ssh; h.Hosts.socket; h.Hosts.pubkey ];
   let flat = { Project.hr_socket = "/f"; hr_ssh_host = ""; hr_public_key = None;
-               hr_envs = []; hr_health_check_url = None; hr_strategy = "rolling" } in
+               hr_envs = []; hr_health_check_url = None; hr_strategy = "rolling";
+               hr_target = None; hr_module_prefix = None } in
   Alcotest.(check bool) "no ssh_host -> no host" true (Hosts.of_flat_config flat = None);
   match Hosts.of_flat_config { flat with Project.hr_ssh_host = "root@x" } with
   | Some h -> Alcotest.(check (list string)) "flat host is 'default'"
@@ -1394,7 +1395,9 @@ let test_scoped_caps_new_function_compares_against_empty () =
      entirely (e.g. newly added this deploy) -> its caps compare against
      [], so ALL its caps show up as widening. *)
   let to_activate = [ fm ~name:"MyApp.brand_new" ~caps:["IO.Console"; "IO.FileWrite"] ] in
-  let prior_manifest = { Cmd_deploy_hot.cas_hash = "cas"; functions = [] } in
+  let prior_manifest = { Cmd_deploy_hot.version = 2; cas_hash = "cas";
+                         target = None; hcr_abi = None; module_prefix = None;
+                         functions = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
   Alcotest.(check (list string)) "new fn has no prior caps" [] prior_caps;
@@ -1405,7 +1408,8 @@ let test_scoped_caps_new_function_compares_against_empty () =
 let test_scoped_caps_existing_function_adds_cap_widens () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] in
   let prior_manifest =
-    { Cmd_deploy_hot.cas_hash = "cas";
+    { Cmd_deploy_hot.version = 2; cas_hash = "cas";
+      target = None; hcr_abi = None; module_prefix = None;
       functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
@@ -1417,7 +1421,8 @@ let test_scoped_caps_existing_function_adds_cap_widens () =
 let test_scoped_caps_existing_function_drops_cap_narrows () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] in
   let prior_manifest =
-    { Cmd_deploy_hot.cas_hash = "cas";
+    { Cmd_deploy_hot.version = 2; cas_hash = "cas";
+      target = None; hcr_abi = None; module_prefix = None;
       functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
@@ -1431,7 +1436,8 @@ let test_scoped_caps_existing_function_adds_subsumed_cap_no_widen () =
      subsumes -> normalize drops it, so no widening is reported. *)
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Network"; "IO.NetConnect"] ] in
   let prior_manifest =
-    { Cmd_deploy_hot.cas_hash = "cas";
+    { Cmd_deploy_hot.version = 2; cas_hash = "cas";
+      target = None; hcr_abi = None; module_prefix = None;
       functions = [ fm ~name:"MyApp.f" ~caps:["IO.Network"] ] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
@@ -1706,13 +1712,15 @@ let activate4_selected ~manifest ~no_cap_gate =
   (not (Cmd_deploy_hot.is_legacy_manifest manifest)) && not no_cap_gate
 
 let manifest_with_caps =
-  { Cmd_deploy_hot.cas_hash = String.make 64 'a';
+  { Cmd_deploy_hot.version = 2; cas_hash = String.make 64 'a';
+    target = None; hcr_abi = None; module_prefix = None;
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
         fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true } ] }
 
 let legacy_manifest =
-  { Cmd_deploy_hot.cas_hash = String.make 64 'a';
+  { Cmd_deploy_hot.version = 2; cas_hash = String.make 64 'a';
+    target = None; hcr_abi = None; module_prefix = None;
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
         fn_callers = []; fn_caps = []; fn_has_caps = false } ] }
@@ -2404,6 +2412,58 @@ entrypoint = ".forge/generated/lib/genentry.march"
             once preprocessors run, got: %s" msg
        | Ok () -> ()))
 
+(** Regression: [Cmd_bench.run] compiled every [bench/*.march] with a
+    hardcoded [~ffi_flags:""], so a benchmark calling an extern from the
+    project's [[ffi] sources] failed to link while `forge build`/`run`/`test`
+    of the same code worked (they all pass [Cmd_build.ffi_flags_full]).  A real
+    project with a one-function C shim and a benchmark that calls it: the
+    bench must compile, link and run.  Real compile + link, so [`Slow]. *)
+let test_bench_links_ffi_sources () =
+ with_dev_march_on_path (fun () ->
+  let tmpdir = Filename.temp_dir "forge_bench_ffi_" "" in
+  Project.mkdir_p (Filename.concat tmpdir "native");
+  Project.mkdir_p (Filename.concat tmpdir "bench");
+  write_file (Filename.concat tmpdir "native/shim.c")
+    "#include <stdint.h>\nint64_t forge_bench_ffi_answer(void) { return 42; }\n";
+  write_file (Filename.concat tmpdir "bench/ffi_answer.march")
+    (String.concat "\n"
+       [ "mod FfiAnswerBench do";
+         "  needs IO.Console";
+         "  needs IO.Foreign";
+         "";
+         "  extern \"shim\" : Cap(IO.Foreign) do";
+         "    fn answer() : Int = \"forge_bench_ffi_answer\"";
+         "  end";
+         "";
+         "  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do";
+         "    println(\"answer=\" ++ int_to_string(answer()))";
+         "  end";
+         "end";
+         "" ]);
+  write_file (Filename.concat tmpdir "forge.toml")
+    {|[package]
+name = "benchffi"
+version = "0.1.0"
+type = "app"
+
+[ffi]
+sources = ["native/shim.c"]
+|};
+  let old_cwd = Sys.getcwd () in
+  Fun.protect
+    ~finally:(fun () ->
+        Unix.chdir old_cwd;
+        let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir)) in
+        ())
+    (fun () ->
+       Unix.chdir tmpdir;
+       match Cmd_bench.run () with
+       | Error msg ->
+         Alcotest.failf "a bench calling an [ffi] C extern should link and run, got: %s" msg
+       | Ok () ->
+         Alcotest.(check bool) "bench binary was built" true
+           (Sys.file_exists (Filename.concat tmpdir ".march/bench/ffi_answer"))))
+
 let test_repl_command_includes_ffi_flags_after_entry () =
   let cmd =
     Cmd_interactive.repl_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib"
@@ -2651,6 +2711,8 @@ let () =
         test_compiled_run_end_to_end;
       Alcotest.test_case "compiled project build with a generated entrypoint" `Slow
         test_compiled_project_build_generated_entrypoint;
+      Alcotest.test_case "forge bench links the project's [ffi] C sources" `Slow
+        test_bench_links_ffi_sources;
     ];
     "search_index_cache", [
       Alcotest.test_case "stale version cache is rebuilt" `Quick

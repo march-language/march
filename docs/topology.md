@@ -159,6 +159,34 @@ modules, that:
 A hand-written `main` is kept, with a warning: it gives up running every pool in one
 process and the node-owned offers.
 
+## Editor support
+
+`march-lsp` serves `topology.toml` and `topology.<env>.toml` (it recognises them by
+name; see `lsp/docs/editors.md` to attach it). It reads them with forge's own parser
+and runs forge's own checks, so what the editor shows is what `forge topology check`
+prints:
+
+- **Diagnostics**, with forge's message on the line forge names. An overlay shows
+  what `forge topology check --env <env>` reports in the overlay. The base file shows
+  what `forge topology check` reports, plus what each overlay next to it adds in the
+  base file (a `place.count` above the host count only exists once an overlay
+  supplies hosts); those carry the source `forge topology --env <env>`. The names
+  resolve against the open editor buffers, so editing a `.march` file (renaming the
+  function a `body` names, say) updates the topology file's diagnostics without a
+  save.
+- **Go to definition** on a `body`, `actor` or `start` string jumps to the declaration
+  it resolves to. On a `"Protocol.Role"` string (a `[roles]` key, a `serves` or
+  `initiates` entry), the protocol part jumps to the `protocol` declaration and the
+  role part to the role inside it: its `role R needs` line, else its first message.
+- **Completion** inside those strings: functions for `body` and `start`, actors for
+  `actor`, `Protocol.Role` for `serves`, `initiates` and new `[roles]` keys, host
+  labels for `place.on`. Outside strings, the known keys of the section (or inline
+  table) the cursor is in, and section names in a header, including the base file's
+  pool names when an overlay starts a `[pool.`.
+- **Hover** on a role string shows its `role R needs ...` grant and its body type,
+  `(Cap(Session.Live), Cap(P)..., <P>_<R>.Entry) -> <P>_<R>.Yield`, with the pool
+  environment a topology-bound `body` takes first.
+
 ## `forge topology export --json`
 
 Prints the digest plus the derived facts:

@@ -434,8 +434,11 @@ mod ClusterNode do
   A pair to [id] is up ([cfd]/[dfd], opened by [dialer], its control writer
   [cw]). Applies the duplicate rule, gives it a generation, records what the
   handshake said about the peer (name, advertised address, creation) as an
-  Alive observation at incarnation 0 -- which outranks nothing it already
-  knows about that creation -- and sends it our whole member view.
+  Alive observation. A completed authenticated link directly proves a peer
+  previously declared Dead or Suspect is alive, so its observation advances
+  that peer's incarnation; otherwise a split brain can leave both sides
+  retaining Dead records that neither can independently refute. It then sends
+  our whole member view.
   """
   fn core_linked(st : CnState, id : String, name : String, addr : String, creation : Int,
                  cfd : Int, dfd : Int, dialer : String, cw : Int) : (CnState, List(CnEffect)) do
@@ -456,7 +459,17 @@ mod ClusterNode do
       _ -> true
     end
     if kept_new do
-      let obs = Membership.member(id, name, addr, creation, Alive, 0)
+      let known_incarnation = match core_member(st2, id) do
+        Some(m) ->
+          if m.creation == creation do
+            match m.status do
+              Alive -> m.incarnation
+              _ -> m.incarnation + 1
+            end
+          else 0 end
+        None -> 0
+      end
+      let obs = Membership.member(id, name, addr, creation, Alive, known_incarnation)
       let st3 = queue({ st2 with links: Map.insert(st2.links, id, l, Map.str_cmp),
                                  backoff: Map.remove(st2.backoff, addr, Map.str_cmp),
                                  dialing: Map.remove(st2.dialing, addr, Map.str_cmp) },

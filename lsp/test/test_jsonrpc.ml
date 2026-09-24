@@ -1165,6 +1165,167 @@ let test_on_type_formatting_does_not_close_a_void_element () =
   Alcotest.(check int) "`<br>` is void: there is nothing to close"
     0 (List.length (items (cov "ontype-void")))
 
+(* ── topology.toml over the wire (distributed deploys, build step 7) ─────────
+   The in-process group in test_lsp_topology.ml pins the answers; this one pins
+   the WIRING: a topology document is recognised by its name, never analysed
+   as March, answers definition/completion/hover/pull-diagnostics, and — the
+   part only a live session shows — an edit to a `.march` BUFFER republishes
+   the topology document's diagnostics under the topology document's own URI. *)
+
+(* No `@[endpoints]`: the topology side only PARSES the sources (as forge
+   does), and generating the endpoint modules makes the server's own March
+   analysis of this buffer ~10x slower (measured: ~28s against ~3s here). *)
+let topo_shop = "mod Shop do\n\
+  \  protocol Checkout do\n\
+  \    role Ledger needs IO.FileWrite\n\
+  \    order: Client -> Ledger : Int\n\
+  \    receipt: Ledger -> Client : Int\n\
+  \  end\n\
+  \  mod Ledger do\n\
+  \    fn serve_one(env, s, st) do 0 end\n\
+  \  end\n\
+   end\n"
+
+let topo_toml = "[roles]\n\
+   \"Checkout.Ledger\" = { body = \"Shop.Ledger.serve_one\" }\n\
+   \n\
+   [pool.ledger]\n\
+   serves = [\"Checkout.Ledger\"]\n"
+
+let run_topology_session () =
+  Sys.set_signal Sys.sigalrm
+    (Sys.Signal_handle (fun _ -> failwith "march-lsp did not respond (timeout)"));
+  ignore (Unix.alarm 60);
+  let root = Filename.temp_dir "lsp_topology_rpc_" "" in
+  write_file (Filename.concat root "forge.toml")
+    "[package]\nname = \"shop\"\nversion = \"0.1.0\"\ntype = \"app\"\n";
+  write_file (Filename.concat root "shop.march") topo_shop;
+  write_file (Filename.concat root "topology.toml") topo_toml;
+  let topo_uri = "file://" ^ Filename.concat root "topology.toml" in
+  let shop_uri = "file://" ^ Filename.concat root "shop.march" in
+  let (ic, oc, ec) = Unix.open_process_args_full exe [| exe |] (Unix.environment ()) in
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "id", `Int 1; "method", `String "initialize";
+    "params", `Assoc [ "processId", `Null; "rootUri", `String ("file://" ^ root);
+                       "capabilities", `Assoc [] ] ]);
+  ignore (read_until ic ~max:30 (is_id 1));
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "initialized";
+                    "params", `Assoc [] ]);
+  let messages j =
+    match member "diagnostics" (member "params" j) with
+    | `List ds -> List.filter_map (fun d -> match member "message" d with `String m -> Some m | _ -> None) ds
+    | _ -> []
+  in
+  let contains ~sub s =
+    let n = String.length sub and m = String.length s in
+    let rec go i = i + n <= m && (String.sub s i n = sub || go (i + 1)) in
+    go 0
+  in
+  let topo_publish ?(pred = fun _ -> true) () =
+    read_until ic ~max:60 (fun j ->
+        is_method "textDocument/publishDiagnostics" j
+        && member "uri" (member "params" j) = `String topo_uri
+        && pred (messages j))
+  in
+  let unbound = "body 'Shop.Ledger.serve_one' is not a function declared in the project" in
+  let has_unbound ms = List.exists (contains ~sub:unbound) ms in
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "method", `String "textDocument/didOpen";
+    "params", `Assoc [ "textDocument", `Assoc [
+      "uri", `String topo_uri; "languageId", `String "toml";
+      "version", `Int 1; "text", `String topo_toml ] ] ]);
+  let first = topo_publish () in
+  let next_id = ref 10 in
+  let ask meth params =
+    let id = !next_id in
+    incr next_id;
+    send oc (`Assoc [ "jsonrpc", `String "2.0"; "id", `Int id;
+                      "method", `String meth; "params", params ]);
+    match read_until ic ~max:60 (is_id id) with
+    | None -> `Null
+    | Some j -> (match member "error" j with `Null -> member "result" j | e -> `Assoc [ "error", e ])
+  in
+  let at line character =
+    `Assoc [ "textDocument", `Assoc [ "uri", `String topo_uri ];
+             "position", `Assoc [ "line", `Int line; "character", `Int character ] ]
+  in
+  (* Line 1: "Checkout.Ledger" = { body = "Shop.Ledger.serve_one" } ;
+     the body string's content starts at column 30. *)
+  let def = ask "textDocument/definition" (at 1 35) in
+  let completion = ask "textDocument/completion" (at 1 35) in
+  let hover = ask "textDocument/hover" (at 1 3) in
+  (* Now the .march buffer: open it, then rename the function in the buffer. *)
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "method", `String "textDocument/didOpen";
+    "params", `Assoc [ "textDocument", `Assoc [
+      "uri", `String shop_uri; "languageId", `String "march";
+      "version", `Int 1; "text", `String topo_shop ] ] ]);
+  let renamed =
+    let b = Buffer.create 256 in
+    let n = String.length topo_shop and k = "serve_one(" in
+    let i = ref 0 in
+    while !i < n do
+      if !i + String.length k <= n && String.sub topo_shop !i (String.length k) = k then
+        (Buffer.add_string b "serve_two("; i := !i + String.length k)
+      else (Buffer.add_char b topo_shop.[!i]; incr i)
+    done;
+    Buffer.contents b
+  in
+  send oc (`Assoc [
+    "jsonrpc", `String "2.0"; "method", `String "textDocument/didChange";
+    "params", `Assoc [
+      "textDocument", `Assoc [ "uri", `String shop_uri; "version", `Int 2 ];
+      "contentChanges", `List [ `Assoc [ "text", `String renamed ] ] ] ]);
+  let after_edit = topo_publish ~pred:has_unbound () in
+  let pulled =
+    ask "textDocument/diagnostic" (`Assoc [ "textDocument", `Assoc [ "uri", `String topo_uri ] ]) in
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "id", `Int 3;
+                    "method", `String "shutdown"; "params", `Null ]);
+  send oc (`Assoc [ "jsonrpc", `String "2.0"; "method", `String "exit";
+                    "params", `Null ]);
+  (try ignore (Unix.close_process_full (ic, oc, ec)) with _ -> ());
+  ignore (Unix.alarm 0);
+  ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote root)));
+  (first, has_unbound, def, completion, hover, after_edit, pulled)
+
+let test_topology_document_over_the_wire () =
+  let (first, has_unbound, def, completion, hover, after_edit, pulled) = run_topology_session () in
+  (match first with
+   | None -> Alcotest.fail "no publishDiagnostics for topology.toml after didOpen"
+   | Some j ->
+     let ms = match member "diagnostics" (member "params" j) with `List l -> l | _ -> [] in
+     Alcotest.(check bool) "the clean topology publishes no unbound-body error" false
+       (has_unbound (List.filter_map (fun d -> match member "message" d with `String m -> Some m | _ -> None) ms));
+     (* Were it analysed as March, the TOML would be a parse error. *)
+     Alcotest.(check bool) "and no March parse error either" true
+       (List.for_all (fun d -> member "source" d = `String "forge topology") ms));
+  (match def with
+   | `List [ loc ] ->
+     (match member "uri" loc with
+      | `String u -> Alcotest.(check string) "definition lands in shop.march" "shop.march" (Filename.basename u)
+      | _ -> Alcotest.fail "definition without a uri");
+     Alcotest.(check int) "on the fn's line" 7 (match member "line" (member "start" (member "range" loc)) with `Int n -> n | _ -> -1)
+   | j -> Alcotest.failf "definition: expected one location, got %s" (Yojson.Safe.to_string j));
+  (match completion with
+   | `List items ->
+     Alcotest.(check bool) "completion offers the fn" true
+       (List.exists (fun i -> member "label" i = `String "Shop.Ledger.serve_one") items)
+   | j -> Alcotest.failf "completion: %s" (Yojson.Safe.to_string j));
+  (match member "value" (member "contents" hover) with
+   | `String v ->
+     Alcotest.(check bool) "hover shows the body type" true
+       (let sub = "(Cap(Session.Live), Cap(IO.FileWrite), Checkout_Ledger.Entry) -> Checkout_Ledger.Yield" in
+        let n = String.length sub and m = String.length v in
+        let rec go i = i + n <= m && (String.sub v i n = sub || go (i + 1)) in go 0)
+   | _ -> Alcotest.failf "hover: %s" (Yojson.Safe.to_string hover));
+  Alcotest.(check bool) "editing the .march buffer republishes topology.toml with the error" true
+    (after_edit <> None);
+  (match member "items" pulled with
+   | `List ds ->
+     Alcotest.(check bool) "pull diagnostics agree" true
+       (has_unbound (List.filter_map (fun d -> match member "message" d with `String m -> Some m | _ -> None) ds))
+   | _ -> Alcotest.failf "pull: %s" (Yojson.Safe.to_string pulled))
+
 let () =
   Alcotest.run "jsonrpc"
     [ "stdio",
@@ -1180,7 +1341,9 @@ let () =
         Alcotest.test_case "every advertised capability answers" `Quick
           test_every_advertised_capability_answers;
         Alcotest.test_case "a document with no project root does not hang" `Quick
-          test_no_project_root_does_not_hang ];
+          test_no_project_root_does_not_hang;
+        Alcotest.test_case "topology.toml: diagnostics follow a .march edit" `Quick
+          test_topology_document_over_the_wire ];
       "dispatch branches",
       [ Alcotest.test_case "semanticTokens/full returns a token stream" `Quick
           test_semantic_tokens_full_returns_a_token_stream;
