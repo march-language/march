@@ -24,7 +24,7 @@ let context_of_project ~interpreted proj =
   match Toolchain.ensure_installed () with
   | Error e -> Error e
   | Ok () ->
-    match Cmd_build.offline_preflight
+    match Cmd_build.deps_preflight
             ~scope:(Cmd_build.build_scope ~release:false proj) proj with
     | Error e -> Error e
     | Ok () ->

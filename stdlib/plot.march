@@ -708,7 +708,11 @@ mod Plot do
     svg_wrap(w, h, parts)
   end
 
-  fn save(p : Plot, path : String) : Result(Unit, String) do
+  doc """
+  Render `p` to SVG and write it to `path`. Fails with the `File.FileError`
+  the write reported (`NotFound`, `Permission`, `IsDirectory`, `IoError`, ...).
+  """
+  fn save(p : Plot, path : String) : Result(Unit, File.FileError) do
     match File.write(path, to_svg(p)) do
     Ok(_) -> Ok(())
     Err(e) -> Err(e)

@@ -129,6 +129,15 @@ The body is: zero or more `let`/`linear let` bindings, then a final expression.
 Single-expression lambdas are unchanged: no `let` bindings means no `EBlock` wrapper.
 
 Both `fn -> expr` and `fn () -> expr` are valid zero-arg lambdas; they are identical.
+A zero-arg lambda has type `() -> T` (the same as `Unit -> T`) wherever it appears, so it
+can fill a `() -> T` record field or be bound with `let` and passed on, and `f()` calls it:
+
+```march
+type Job = { name : String, run : () -> Int }
+let g = fn () -> 4
+let job = { name: "j", run: g }
+job.run()                     -- 4
+```
 
 ### `fn (a, b) -> …` takes TWO arguments, it does not destructure a pair
 

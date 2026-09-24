@@ -287,11 +287,75 @@ let lib_path_env ?(release=false) proj =
   let quoted = String.concat ":" (List.map Filename.quote all_lib_paths) in
   Printf.sprintf "%sMARCH_LIB_PATH=%s " toolchain_pfx quoted
 
-(** Offline-mode dependency preflight, run by every compile-shaped command
-    (build, check, run, test, bench) before it assembles MARCH_LIB_PATH. A
-    no-op returning [Ok ()] when not offline.
+(** Online half of [deps_preflight]: re-hash every cached git/registry tree
+    this command will use against forge.lock and, on a mismatch, re-fetch the
+    locked version ([Dep_refetch.refetch]) rather than fail, since the network
+    is available. Only a fresh copy that ALSO mismatches is an error (forge.lock
+    or the upstream changed; the user must act). A replaced tree gets a
+    one-line notice. Nothing else is printed: the offline warnings (missing,
+    not locked, unusable lockfile, drift, unverifiable hashes) stay offline,
+    because online resolution has its own fallbacks and those cases were never
+    errors here. A dep without a lockfile coordinate is not checked: there is
+    no recorded hash to check it against.
 
-    Offline, the lockfile is the only source of dependency identity, so this
+    After a re-fetch the closure is walked again, since the replaced tree's
+    forge.toml may name deps the tampered one did not; each tree is re-fetched
+    at most once, which bounds the loop. *)
+let online_verify ~scope proj =
+  let root = proj.Project.root in
+  let toml_content =
+    try Project.read_file (Filename.concat root "forge.toml") with Sys_error _ -> "" in
+  match Offline_deps.read_state ~project_root:root ~toml_content with
+  | Offline_deps.No_lockfile | Offline_deps.Not_a_lockfile -> Ok ()
+  | Offline_deps.Lockfile { entries; format; _ } as state ->
+    let coords = Project.dep_coords ~project_root:root in
+    let refetched = Hashtbl.create 4 in
+    let rec pass errors =
+      let closure = collect_transitive_deps ~coords (Hashtbl.create 16) (root, scope) in
+      let report = Offline_deps.assess ~verify:true ~state closure in
+      let replaced = ref false in
+      let errors =
+        List.fold_left (fun errors (name, _dep, status) ->
+            match status with
+            | Offline_deps.Present
+                { dir; label; verdict = Offline_deps.Mismatch { expected; actual } }
+              when not (Hashtbl.mem refetched dir) ->
+              Hashtbl.add refetched dir ();
+              (match List.find_opt (fun (e : Resolver_lockfile.entry) ->
+                   e.Resolver_lockfile.name = name) entries with
+               | None ->
+                 Offline_deps.mismatch_error ~name ~label ~dir ~expected ~actual
+                 :: errors
+               | Some e ->
+                 match Dep_refetch.refetch ~format e ~dest:dir ~cached_actual:actual with
+                 | Ok () ->
+                   replaced := true;
+                   Printf.eprintf
+                     "note: dependency `%s` (%s): the cached copy did not match \
+                      forge.lock (modified or corrupted); replaced it with a \
+                      freshly fetched copy that does\n%!"
+                     name label;
+                   errors
+                 | Error msg -> msg :: errors)
+            | _ -> errors)
+          errors report
+      in
+      if !replaced then pass errors else errors
+    in
+    match List.rev (pass []) with
+    | [] -> Ok ()
+    | errs -> Error (String.concat "\n" errs)
+
+(** Dependency preflight, run ONCE per invocation by every compile-shaped
+    command (build, check, run, test, bench) before it assembles
+    MARCH_LIB_PATH. Every cached git/registry tree the command will use is
+    re-hashed against forge.lock's [hash] in both modes; what a mismatch does
+    differs:
+    - online, the tree is re-fetched and re-verified ([online_verify]);
+    - offline, it is an error (there is nothing to re-fetch from).
+
+    Offline, the lockfile is also the only source of dependency identity, so
+    the offline path additionally
     - reports an unusable lockfile ONCE (absent, or not a lockfile at all)
       rather than one warning per dependency that buries the cause;
     - warns once if forge.toml has drifted from forge.lock;
@@ -306,8 +370,9 @@ let lib_path_env ?(release=false) proj =
     [scope] is the command's declared dependency set (e.g. deps + dev-deps);
     the check walks it transitively, exactly as [lib_path_env] does.
     `specs/2026-09-11-forge-offline-and-versioned-dep-cache-design.md` §3, §4. *)
-let offline_preflight ~scope proj =
-  if not (Net_gate.is_offline ()) || scope = [] then Ok ()
+let deps_preflight ~scope proj =
+  if scope = [] then Ok ()
+  else if not (Net_gate.is_offline ()) then online_verify ~scope proj
   else begin
     let root = proj.Project.root in
     let toml_content =
@@ -610,16 +675,21 @@ let output_ext = function
   | Some t when String.length t >= 4 && String.sub t 0 4 = "wasm" -> ".wasm"
   | _ -> ""
 
+type hcr_build = { prefix : string; public_key : string }
+
 (** The shell command that compiles the entry file to [output]. [target] is
     passed as --target <t>; omitting it compiles to a native binary.
     [pin_main] (from forge.toml's [package] pin_main) adds --pin-main; when it
     is false the command is byte-identical to what forge ran before the key
     existed (pinned by forge/test/test_forge.ml's "pin_main" group). *)
-let compile_command ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target
+let compile_command ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target ?hcr
     ~pin_main entry =
   let opt_flag    = if release then " --opt 2" else " --opt 0" in
   let dump_flag   = if dump_phases then " --dump-phases" else "" in
   let target_flag = match target with Some t -> " --target " ^ t | None -> "" in
+  let hcr_flags = match hcr with
+    | Some h -> " --hot-reload " ^ h.prefix ^ " --signing-pubkey " ^ h.public_key
+    | None -> "" in
   let pin_flag    = if pin_main then " --pin-main" else "" in
   (* Optional List.pmap sequential-fallback cutoff, passed through to the
      compiler.  Sourced from MARCH_PMAP_THRESHOLD so the value can flow
@@ -629,17 +699,17 @@ let compile_command ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?targ
     | Some v when v <> "" -> " --pmap-threshold=" ^ v
     | _ -> ""
   in
-  Printf.sprintf "%smarch --compile -o %s%s%s%s%s%s%s %s"
+  Printf.sprintf "%smarch --compile -o %s%s%s%s%s%s%s%s %s"
     lib_path_env (Filename.quote output) opt_flag pmap_flag target_flag
-    pin_flag dump_flag ffi_flags (Filename.quote entry)
+    pin_flag dump_flag hcr_flags ffi_flags (Filename.quote entry)
 
 (** Compile the entry file to [output] (see [compile_command]).
     Returns [(exit_code, n_errors, n_warnings)]. *)
-let compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target
+let compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target ?hcr
     ~pin_main entry =
   let cmd =
     compile_command ~lib_path_env ~ffi_flags ~output ~release ~dump_phases
-      ?target ~pin_main entry
+      ?target ?hcr ~pin_main entry
   in
   let (rc, content) = run_capturing_stderr cmd in
   let (e, w) = count_diagnostics content in
@@ -881,7 +951,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
     if files = [] && not has_entry then
       Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
-      match offline_preflight ~scope:(build_scope ~release proj) proj with
+      match deps_preflight ~scope:(build_scope ~release proj) proj with
       | Error e -> Error e
       | Ok () ->
       let lib_path_env = lib_path_env ~release proj in
@@ -939,8 +1009,16 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
           match npm_result with
           | Error e -> Error e
           | Ok () ->
-          let (rc, ce, cw) = compile_entry ~lib_path_env ~ffi_flags:(ffi_flags ^ topology_flags) ~output ~release
-              ~dump_phases ?target ~pin_main:proj.Project.pin_main entry_path in
+          let hcr =
+            match proj.Project.project_type, proj.Project.hot_reload with
+            | (Project.App | Project.Tool), Some hr ->
+              (match hr.hr_module_prefix, hr.hr_public_key with
+               | Some prefix, Some public_key -> Some { prefix; public_key }
+               | _ -> None)
+            | _ -> None
+          in
+          let (rc, ce, cw) = compile_entry ~lib_path_env ~ffi_flags:(ffi_flags ^ topology_flags) ~output ~release ~dump_phases ?target
+              ?hcr ~pin_main:proj.Project.pin_main entry_path in
           print_build_summary ~t0 ~errors:(te + ce) ~warnings:(tw + cw);
           if rc = 0 then begin
             do_islands ();

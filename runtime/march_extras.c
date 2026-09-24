@@ -459,18 +459,29 @@ void *march_sha1_bytes(void *b) {
 
 /* ── march_sha256 ────────────────────────────────────────────────────── */
 
+/* Is [v] (a String or a Bytes, statically unknown here) the Bytes cell?
+ *
+ * Both are boxed: a String is { rc; int64 len; data... }, a Bytes is the
+ * one-field ctor { rc; int32 tag = 0; int32 pad; march_string* }.  So the
+ * word at offset 8 is the String's length or the Bytes' tag+pad.  The pad
+ * word is 0 for a Bytes the C runtime built (bytes_wrap) but carries the
+ * boxed-ADT type id for one the compiler built (llvm_data.ml emit_store_tag,
+ * since 2026-09-11), so accept either.  The type_defs name is "Bytes.Bytes"
+ * normally and bare "Bytes" when bytes.march is itself the entry module.
+ * A String can only match with a length whose low 32 bits are 0 and whose
+ * high 32 bits are 0 (the empty string, which has no payload either way) or
+ * one of those negative ids (impossible: len >= 0). */
+static int is_bytes_value(void *v) {
+    static int32_t id_q = 0, id_bare = 0;
+    if (id_q == 0) id_q = march_type_id_of_name("Bytes.Bytes");
+    if (id_bare == 0) id_bare = march_type_id_of_name("Bytes");
+    const march_hdr *h = (const march_hdr *)v;
+    return h->tag == 0 && (h->pad == 0 || h->pad == id_q || h->pad == id_bare);
+}
+
 /* Raw bytes of a String or a Bytes value (malloc'd; caller frees). */
 static uint8_t *string_or_bytes_to_raw(void *data, size_t *out_len) {
-    /* Distinguish String vs Bytes by looking at the int64 at offset 8.
-     * String: offset 8 = int64_t len (string length, typically > 0 or 0 for empty).
-     * Bytes ctor: offset 8 = int32_t tag (0) + int32_t pad (0) = 0 as int64.
-     * Heuristic: if the value at offset 8 is likely a tag (0 or small int),
-     * treat as Bytes; otherwise treat as String. */
-    int64_t field8 = *(int64_t *)((char *)data + 8);
-    if ((uint32_t)field8 == 0 && (uint32_t)(field8 >> 32) == 0) {
-        /* Looks like Bytes(List(Int)): field8 = (tag=0, pad=0) = 0 */
-        return bytes_to_raw(data, out_len);
-    }
+    if (is_bytes_value(data)) return bytes_to_raw(data, out_len);
     return string_to_raw(data, out_len);
 }
 
@@ -692,12 +703,7 @@ void *march_pbkdf2_sha256(void *pass, void *salt, int64_t iters, int64_t dklen) 
 /* Takes Bytes or String, returns String (base64 encoded). */
 void *march_base64_encode(void *input) {
     size_t len;
-    uint8_t *raw;
-    int64_t field8 = *(int64_t *)((char *)input + 8);
-    if ((uint32_t)field8 == 0 && (uint32_t)(field8 >> 32) == 0)
-        raw = bytes_to_raw(input, &len);
-    else
-        raw = string_to_raw(input, &len);
+    uint8_t *raw = string_or_bytes_to_raw(input, &len);
 
     size_t out_sz = ((len + 2) / 3) * 4 + 2;
     char *out_buf = malloc(out_sz);
@@ -1104,7 +1110,9 @@ static char *vault_key_cstr(void *key) {
 
 /* Create a new vault_data wrapped in a March heap handle. */
 static void *vault_new_handle(void) {
-    vault_data *vd = calloc(1, sizeof(vault_data));
+    vault_data *vd = aligned_alloc(_Alignof(vault_data), sizeof(vault_data));
+    if (!vd) abort();
+    memset(vd, 0, sizeof(vault_data));
     /* calloc already zeroed rd[*].readers and writer; wmutex still needs a
      * real pthread_mutex_init (a zeroed pthread_mutex_t is not portably
      * equivalent to PTHREAD_MUTEX_INITIALIZER). */

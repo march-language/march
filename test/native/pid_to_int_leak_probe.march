@@ -1,0 +1,77 @@
+-- Regression: the builtins that only READ a Pid must leave its record's
+-- refcount where they found it (specs/progress/2026-09-24-pid-to-int-leak.md).
+--
+-- `pid_to_int`, the supervise glue's `pid_index_of`, `actor_set_mailbox_limit`
+-- (Actor.set_queue_limit), `register_supervisor` and
+-- `register_supervisor_child` were classified OWNED while their C side never
+-- releases the pid, so every call leaked one reference and a record ever
+-- passed to one could never be freed. The two registration calls also went
+-- through Defun's indirect-call rewrite, and an ECallPtr never consults the
+-- borrow table at all. Before the fix this printed 3/5 for the first line's
+-- counts, a supervised child held 3 times (its own reference, pid_index_of's
+-- and register_supervisor_child's) and set_queue_limit moved the count too.
+--
+-- `ffi_test_actor_rc` (runtime/march_ffi.c) reads the record's count word; the
+-- same probe actor_send_to_self.march uses. A live actor holds exactly one
+-- reference to its own record (march_spawn_common), so a count of 1 means the
+-- record is freed the moment its green thread exits.
+mod Main do
+  needs IO
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+
+  extern "rt" : Cap(Ffi) do
+    fn actor_rc(pid : Int) : Int = "ffi_test_actor_rc"
+  end
+
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+    on Tick() do
+      state
+    end
+  end
+
+  actor Boss do
+    state { child : Int }
+    init  { child: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 10 within 60
+      Worker child
+    end
+  end
+
+  fn child_index(boss) do
+    match get_actor_field(boss, "child") do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let w = spawn(Worker)
+    let idx = pid_to_int(w)
+    -- Held by `w` and by the running actor itself.
+    let before = actor_rc(idx)
+    println("worker held by w and itself: " ++ bool_to_string(before == 2))
+    let _ = pid_to_int(w)
+    let _ = pid_to_int(w)
+    let _ = pid_to_int(w)
+    println("pid_to_int leaves the count alone: "
+            ++ bool_to_string(actor_rc(idx) == before))
+    Actor.set_queue_limit(w, 8, 1)
+    Actor.set_queue_limit(w, 0, 0)
+    println("set_queue_limit leaves the count alone: "
+            ++ bool_to_string(actor_rc(idx) == before))
+    kill(w)
+
+    -- The supervisor's state holds the child as an Int, so nothing but the
+    -- child itself should own the child's record once the glue returns.
+    let boss = spawn(Boss)
+    let c = child_index(boss)
+    println("supervised child held only by itself: "
+            ++ bool_to_string(actor_rc(c) == 1))
+  end
+end

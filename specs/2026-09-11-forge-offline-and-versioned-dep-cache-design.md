@@ -5,8 +5,9 @@
 2026-09-12** — see `specs/progress/2026-09-12-version-aware-dep-cache.md` and
 `specs/progress/2026-09-12-lockfile-hash-domains-aligned.md`. §3 (`--offline`),
 §4's verification (offline path) and §2.4's tarball cache **LANDED 2026-09-22**
-— see `specs/progress/2026-09-22-forge-offline-mode.md`; verifying trees on
-online builds too is `specs/todos/2026-09-22-forge-verify-dep-trees-online.md`.
+— see `specs/progress/2026-09-22-forge-offline-mode.md`. Verifying trees on
+online builds too (with re-fetch on a mismatch) **LANDED 2026-09-24** — see
+`specs/progress/2026-09-24-forge-verify-dep-trees-online.md`.
 **Closes part of:** what was `specs/todos/2026-07-31-p1-tooling-forge-build-tool.md`'s
 first bullet (split on 2026-09-18 into three todos; that one became
 `specs/todos/2026-07-31-forge-offline-mode.md`, since moved to

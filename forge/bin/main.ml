@@ -1117,8 +1117,20 @@ let audit_cmd =
                  $(b,forge cap inspect <binary>) is the sound check for a \
                  built artifact.")
   in
-  let run r inferred =
-    match Cmd_audit.run ~record_mode:r ~inferred () with
+  let allow_unanalyzable =
+    Arg.(value & flag &
+         info ["allow-unanalyzable"]
+           ~doc:"With $(b,--inferred): gate on the dependencies that CAN be \
+                 analyzed instead of failing on the ones that cannot. Every \
+                 unanalyzable dependency is still listed, with the reason, \
+                 and is never treated as asking for nothing: $(b,--record) \
+                 leaves it out of forge.caps.lock (keeping any set recorded \
+                 for it earlier), and the check sets its baseline entry \
+                 aside. Lets a project adopt the gate before its whole \
+                 dependency graph typechecks.")
+  in
+  let run r inferred allow_unanalyzable =
+    match Cmd_audit.run ~record_mode:r ~inferred ~allow_unanalyzable () with
     | Ok code -> exit code
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
@@ -1137,11 +1149,24 @@ let audit_cmd =
                  dependency update on it.";
              `P "A dependency that stops asking for a capability is reported but \
                  does not fail the audit.";
+             `S "INFERRED MODE";
+             `P "$(b,--inferred) runs $(b,march caps) over each dependency. It \
+                 first checks that the toolchain's $(b,march) supports \
+                 $(b,caps) (march 0.3.0 or later) and fails with the \
+                 toolchain's path and version if it does not, rather than \
+                 reporting every dependency as not analyzable.";
+             `P "Each dependency's inferred set is cached under \
+                 $(b,.forge/audit-cache/), keyed on the dependency's files, \
+                 the files on its lib path, and the compiler, so a repeat \
+                 audit re-analyzes only what changed. Only successful \
+                 analyses are cached.";
+             `P "A dependency that does not typecheck cannot be analyzed and \
+                 fails the audit unless $(b,--allow-unanalyzable) is given.";
              `S "TYPICAL USE";
              `P "forge audit --record   # accept the current set, commit forge.caps.lock";
              `P "forge audit            # in CI: fail if a dependency gained authority";
            ])
-    Term.(const run $ record $ inferred)
+    Term.(const run $ record $ inferred $ allow_unanalyzable)
 
 (* --------------------------------------------------------- forge ffi -------- *)
 
@@ -1204,6 +1229,14 @@ let deploy_hot_cmd =
            ~doc:"Use a pre-built .so instead of rebuilding (manifest is <FILE.so>.hcr_manifest). \
                  Useful when the target host differs from the build host (e.g. cross-compiled via Docker).")
   in
+  let target =
+    Arg.(value & opt (some string) None & info ["target"] ~docv:"TARGET"
+           ~doc:"Cross-compilation target (for example linux/amd64).")
+  in
+  let module_prefix =
+    Arg.(value & opt (some string) None & info ["module-prefix"] ~docv:"PREFIX"
+           ~doc:"Hot-reload module prefix; must match the running baseline.")
+  in
   let env_name =
     Arg.(value & opt string "" &
          info ["env"] ~docv:"NAME"
@@ -1234,7 +1267,8 @@ let deploy_hot_cmd =
                  against a server that predates capability admission, or to \
                  deliberately bypass the gate.")
   in
-  let run o s e c t grant_caps no_cap_gate =
+  let run o s target prefix e c t grant_caps no_cap_gate =
+    ignore target; ignore prefix;
     let result =
       if e = "" && c = 0 then
         (* Single-server fast path (backward compat) *)
@@ -1249,7 +1283,7 @@ let deploy_hot_cmd =
   in
   Cmd.v (Cmd.info "hot"
            ~doc:"Build and hot-deploy changed functions to a running server (or fleet)")
-    Term.(const run $ output $ so $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate)
+  Term.(const run $ output $ so $ target $ module_prefix $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate)
 
 let deploy_cmd =
   Cmd.group (Cmd.info "deploy" ~doc:"Deploy project to a target environment")
@@ -1515,7 +1549,8 @@ let offline_man_blocks = [
       toolchain download, no npm install. Git and registry dependencies are \
       resolved only through $(b,forge.lock) to \
       $(b,~/.march/cas/deps/<name>/<commit-or-version>) and re-hashed against \
-      the lockfile; a missing one is warned about and skipped. \
+      the lockfile (a mismatch is an error offline; online builds re-fetch \
+      the dependency instead); a missing one is warned about and skipped. \
       $(b,forge deps --offline) reports cached/missing per dependency and \
       exits non-zero if any is missing. $(b,forge add) (registry or remote) \
       and $(b,forge outdated) refuse.";

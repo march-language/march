@@ -114,6 +114,52 @@ Only **new** authority fails the audit:
 Narrowing does not fail. A gate that fires when a dependency becomes *safer* is
 a gate people learn to skip, and skipped gates are a step down from absent ones.
 
+### `--inferred`: what the code uses, not what it declares
+
+`forge audit --inferred` runs `march caps` over each dependency to infer the
+capabilities its own code uses, instead of reading its `needs` declarations.
+It catches a capability builtin called directly with no matching `needs`,
+which the compiler only warns about. It does not see a capability reached
+through a stdlib or dependency *function*. It also needs every dependency to
+typecheck.
+
+- **Toolchain check.** `march caps` first shipped in march 0.3.0 (nightly
+  2026-08-05). Before analyzing anything, the audit checks that the toolchain's
+  `march` supports it. If it does not, the audit stops with one error that
+  names the toolchain's path and version. Without this check, every
+  dependency would be reported as not analyzable and nothing would point at
+  the compiler.
+- **Cache.** Each analysis loads the whole stdlib plus the dependency's tree.
+  Results are cached under `.forge/audit-cache/`, keyed on the dependency's
+  files, every file on its lib path, and the compiler. A repeat audit therefore
+  re-analyzes only a dependency whose inputs changed, or every dependency after
+  a toolchain change. A cached result prints exactly what a fresh one would.
+  Only successful analyses are cached, and deleting the directory is always
+  safe.
+- **Dependencies that do not typecheck** are listed as `NOT ANALYZABLE`, with
+  the compiler's reason. They fail the audit, and `--record` refuses to write a
+  baseline while any exist, because an unknown set must never be recorded as
+  "asks for nothing".
+
+To adopt the gate before your whole dependency graph typechecks, pass
+`--allow-unanalyzable`:
+
+```
+$ forge audit --inferred --allow-unanalyzable
+capabilities unchanged across 3 analyzable dependencies
+
+1 dependency NOT ANALYZABLE — capability set unknown (excluded from the gate by --allow-unanalyzable):
+  ? conduit — NOT ANALYZABLE
+      conduit: capability set could not be computed (march caps exited 1)
+      …
+```
+
+The gate then covers only the analyzable dependencies. Every unanalyzable one
+is still listed with its reason on every run. `--record` leaves unanalyzable
+dependencies out of `forge.caps.lock` and keeps any set recorded for them
+earlier. The check sets their baseline entries aside, so they are reported
+neither as removed nor as unchanged. The flag only applies with `--inferred`.
+
 ---
 
 ## What this does and does not prove

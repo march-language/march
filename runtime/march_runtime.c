@@ -738,27 +738,36 @@ void *march_int_to_string(int64_t n) {
     return march_string_lit(buf, len);
 }
 
-void *march_float_to_string(double f) {
-    /* Byte-for-byte reproduce the interpreter's OCaml `string_of_float`
-     * (eval.ml), which is `valid_float_lexem (format_float "%.12g" f)`:
-     *   - `%.12g` gives the same 12-significant-digit form as OCaml's
-     *     format_float (both defer to the platform libc);
-     *   - valid_float_lexem appends a bare '.' when every character is a
-     *     digit or leading '-', so a whole number prints "1." not "1"/"1.0".
-     * The old `%g` (6 sig-figs, and no trailing dot) diverged from the
-     * interpreter on both precision and whole numbers — the golden oracle
-     * (specs/lang/golden/g09_float_show.march) now pins the agreement. */
-    char buf[64];
-    int len = snprintf(buf, sizeof(buf), "%.12g", f);
+/* Byte-for-byte reproduce the interpreter's OCaml `string_of_float`
+ * (eval.ml), which is `valid_float_lexem (format_float "%.12g" f)`:
+ *   - `%.12g` gives the same 12-significant-digit form as OCaml's
+ *     format_float (both defer to the platform libc);
+ *   - valid_float_lexem appends a bare '.' when every character is a
+ *     digit or leading '-', so a whole number prints "1." not "1"/"1.0".
+ * The old `%g` (6 sig-figs, and no trailing dot) diverged from the
+ * interpreter on both precision and whole numbers — the golden oracle
+ * (specs/lang/golden/g09_float_show.march) now pins the agreement.
+ * Shared by march_float_to_string and march_print_float so the two cannot
+ * drift. Writes into [buf] (64 bytes) and returns the length. */
+static int march_format_float_ocaml(char *buf, double f) {
+    int len = snprintf(buf, 64, "%.12g", f);
+    if (len < 0) len = 0;
+    if (len > 63) len = 63;
     int bare_int = 1;
     for (int i = 0; i < len; i++) {
         char c = buf[i];
         if (!((c >= '0' && c <= '9') || c == '-')) { bare_int = 0; break; }
     }
-    if (bare_int && len > 0 && len < (int)sizeof(buf) - 1) {
+    if (bare_int && len > 0 && len < 63) {
         buf[len++] = '.';
         buf[len] = '\0';
     }
+    return len;
+}
+
+void *march_float_to_string(double f) {
+    char buf[64];
+    int len = march_format_float_ocaml(buf, f);
     return march_string_lit(buf, len);
 }
 
@@ -1243,6 +1252,22 @@ void *march_string_join(void *list, void *sep) {
 void march_print(void *s) {
     march_string *ms = (march_string *)s;
     write(1, ms->data, (size_t)ms->len);
+}
+
+/* `print_int(n)` / `print_float(f)`: the interpreter writes `string_of_int n`
+ * / `string_of_float f` with no newline (eval_builtins.ml).  Format on the
+ * stack and issue the same single write(2) march_print does, so there is no
+ * intermediate heap string to allocate and release. */
+void march_print_int(int64_t n) {
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "%lld", (long long)n);
+    if (len > 0) write(1, buf, (size_t)len);
+}
+
+void march_print_float(double f) {
+    char buf[64];
+    int len = march_format_float_ocaml(buf, f);
+    if (len > 0) write(1, buf, (size_t)len);
 }
 
 /* Serialises march_println against itself across OS threads.  See the comment
@@ -1884,7 +1909,7 @@ void *__try_call_val(void *thunk) {
 
 /* ── march_try_finally ───────────────────────────────────────────────────── */
 /*
- * try_finally : (Bool -> a) -> (Bool -> b) -> a
+ * try_finally : (() -> a) -> (() -> b) -> a   (typecheck_builtins.ml)
  *
  * Runs action(), then cleanup(), and returns action's result.  If action
  * panics, cleanup STILL runs, and the panic is then re-raised (so it
@@ -2535,9 +2560,105 @@ static void main_fn_green_thread(void *arg) {
 #if defined(__APPLE__)
 extern int sandbox_init(const char *profile, uint64_t flags, char **errorbuf);
 extern void sandbox_free_error(char *errorbuf);
+
+#ifdef MARCH_CAP_WRITE_SCOPES
+#include <limits.h>
+/* Scoped IO.FileWrite grants as the compiler normalized them: LEXICALLY,
+ * because the build machine's filesystem is not the deployment machine's.
+ * Seatbelt matches a subpath against the path AFTER symlink resolution, so a
+ * lexical "/tmp/x" would match nothing on macOS (/tmp -> /private/tmp) and
+ * deny every in-scope write.  The scopes are therefore resolved HERE, on the
+ * machine that runs the program, and their subpath clauses appended to the
+ * compile-time profile before sandbox_init. */
+static const char *const march_cap_write_scopes[] = { MARCH_CAP_WRITE_SCOPES, NULL };
+
+/* Append one path component to the absolute path in out (capacity outsz),
+ * resolving "." and ".." lexically.  Returns 0 on overflow. */
+static int march_scope_push(char *out, size_t outsz, const char *comp, size_t n) {
+    if (n == 0 || (n == 1 && comp[0] == '.')) return 1;
+    if (n == 2 && comp[0] == '.' && comp[1] == '.') {
+        char *slash = strrchr(out, '/');
+        if (slash == out) out[1] = '\0';        /* never above "/" */
+        else if (slash) *slash = '\0';
+        return 1;
+    }
+    size_t len = strlen(out);
+    int need_sep = !(len > 0 && out[len - 1] == '/');
+    if (len + (size_t)need_sep + n + 1 > outsz) return 0;
+    if (need_sep) out[len++] = '/';
+    memcpy(out + len, comp, n);
+    out[len + n] = '\0';
+    return 1;
+}
+
+/* Resolve a scope against THIS filesystem.  The scope itself may not exist
+ * yet -- writing a new file or directory under a scope is the common case --
+ * so realpath() the LONGEST EXISTING PREFIX and re-append the remaining
+ * components lexically.  A scope that is itself a symlink resolves to its
+ * target.  Falls back to the lexical text if nothing resolves (cannot happen
+ * for an absolute path: "/" always exists) or the result would not fit. */
+static void march_scope_resolve(const char *scope, char *out, size_t outsz) {
+    char prefix[PATH_MAX];
+    char resolved[PATH_MAX];
+    size_t len = strlen(scope);
+    size_t cut;
+    const char *p;
+    if (len == 0 || scope[0] != '/' || len >= sizeof prefix) goto lexical;
+    memcpy(prefix, scope, len + 1);
+    cut = len;                                  /* prefix = scope[0, cut) */
+    for (;;) {
+        prefix[cut] = '\0';
+        if (realpath(cut == 0 ? "/" : prefix, resolved)) break;
+        if (cut == 0) goto lexical;
+        while (cut > 0 && prefix[cut - 1] != '/') cut--;
+        if (cut > 0) cut--;                     /* drop the separator too */
+    }
+    if (strlen(resolved) + 1 > outsz) goto lexical;
+    strcpy(out, resolved);
+    p = scope + cut;
+    while (*p) {
+        const char *e;
+        while (*p == '/') p++;
+        e = p;
+        while (*e && *e != '/') e++;
+        if (!march_scope_push(out, outsz, p, (size_t)(e - p))) goto lexical;
+        p = e;
+    }
+    return;
+lexical:
+    snprintf(out, outsz, "%s", scope);
+}
+#endif
+
 void march_sandbox_install(void) {
     char *err = NULL;
-    if (sandbox_init(MARCH_CAP_PROFILE, 0, &err) != 0) {
+    const char *profile = MARCH_CAP_PROFILE;
+#ifdef MARCH_CAP_WRITE_SCOPES
+    /* Worst case per scope: the clause text plus every path byte escaped. */
+    size_t nscopes = 0, cap, n;
+    char *built;
+    for (const char *const *sp = march_cap_write_scopes; *sp; sp++) nscopes++;
+    cap = strlen(MARCH_CAP_PROFILE) + 1 + nscopes * (64 + 2 * PATH_MAX);
+    built = malloc(cap);
+    if (!built) {
+        fprintf(stderr, "march: capability sandbox: out of memory; refusing to "
+                        "run uncontained\n");
+        exit(70);
+    }
+    n = (size_t)snprintf(built, cap, "%s", MARCH_CAP_PROFILE);
+    for (const char *const *sp = march_cap_write_scopes; *sp; sp++) {
+        char res[PATH_MAX];
+        march_scope_resolve(*sp, res, sizeof res);
+        n += (size_t)snprintf(built + n, cap - n, "(allow file-write* (subpath \"");
+        for (const char *c = res; *c; c++) {    /* SBPL string escapes */
+            if (*c == '"' || *c == '\\') built[n++] = '\\';
+            built[n++] = *c;
+        }
+        n += (size_t)snprintf(built + n, cap - n, "\"))");
+    }
+    profile = built;   /* installed for the life of the process; never freed */
+#endif
+    if (sandbox_init(profile, 0, &err) != 0) {
         /* Fail CLOSED: a sandbox that silently fails to install is worse than
          * none, because the operator believes the process is contained. */
         fprintf(stderr,
@@ -7596,6 +7717,48 @@ int64_t march_char_is_alphanumeric(void *c) {
             (ch >= 'A' && ch <= 'Z')) ? 1 : 0;
 }
 
+/* ASCII-only, first byte, like the siblings above.  The interpreter's
+ * versions (eval_builtins.ml) test the same ASCII ranges and use
+ * Char.uppercase_ascii / lowercase_ascii, so any other byte (a UTF-8 lead
+ * byte included) answers false / is returned unchanged on both backends. */
+int64_t march_char_is_alpha(void *c) {
+    march_string *sc = (march_string *)c;
+    if (sc->len == 0) return 0;
+    unsigned char ch = (unsigned char)sc->data[0];
+    return ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) ? 1 : 0;
+}
+
+int64_t march_char_is_uppercase(void *c) {
+    march_string *sc = (march_string *)c;
+    if (sc->len == 0) return 0;
+    unsigned char ch = (unsigned char)sc->data[0];
+    return (ch >= 'A' && ch <= 'Z') ? 1 : 0;
+}
+
+int64_t march_char_is_lowercase(void *c) {
+    march_string *sc = (march_string *)c;
+    if (sc->len == 0) return 0;
+    unsigned char ch = (unsigned char)sc->data[0];
+    return (ch >= 'a' && ch <= 'z') ? 1 : 0;
+}
+
+/* Return a FRESH one-byte string; the argument is only read (borrowed). */
+void *march_char_to_uppercase(void *c) {
+    march_string *sc = (march_string *)c;
+    if (sc->len == 0) return march_string_lit("", 0);
+    char ch = sc->data[0];
+    if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
+    return march_string_lit(&ch, 1);
+}
+
+void *march_char_to_lowercase(void *c) {
+    march_string *sc = (march_string *)c;
+    if (sc->len == 0) return march_string_lit("", 0);
+    char ch = sc->data[0];
+    if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+    return march_string_lit(&ch, 1);
+}
+
 int64_t march_char_is_whitespace(void *c) {
     march_string *sc = (march_string *)c;
     if (sc->len == 0) return 0;
@@ -10642,6 +10805,25 @@ static void nsort_rec(int64_t *v, int64_t n, const int64_t *ancestor,
     }
 }
 
+/* Test hook: MARCH_TEST_NSORT_DEPTH_LIMIT=<k> replaces the 2·log2(n) depth
+ * limit with k, so k = 0 sends every segment above the small-sort cutoff
+ * straight to nsort_heap. That is the only way to exercise the heapsort
+ * fallback directly: the pattern-breaking step makes it practically
+ * unreachable from any input. test/dune runs native_arr_sort a second time
+ * with this set to 0 and diffs against the same golden. Read once; the
+ * benign race on first use stores the same value from every thread. */
+static int nsort_forced_limit(void) {
+    static int cached = -2;             /* -2 unread, -1 unset, else the limit */
+    int c = __atomic_load_n(&cached, __ATOMIC_RELAXED);
+    if (c == -2) {
+        const char *e = getenv("MARCH_TEST_NSORT_DEPTH_LIMIT");
+        c = (e && e[0]) ? atoi(e) : -1;
+        if (c < -1) c = -1;
+        __atomic_store_n(&cached, c, __ATOMIC_RELAXED);
+    }
+    return c;
+}
+
 static void nsort_i64(int64_t *v, int64_t n) {
     if (n < 2) return;
     if (n <= 32) { nsort_small(v, n); return; }
@@ -10663,6 +10845,8 @@ static void nsort_i64(int64_t *v, int64_t n) {
 
     int limit = 0;
     for (int64_t m = n; m > 1; m >>= 1) limit += 2;
+    int forced = nsort_forced_limit();
+    if (forced >= 0) limit = forced;
     uint64_t seed = (uint64_t)n * 0x9E3779B97F4A7C15ULL;
     nsort_rec(v, n, NULL, limit, &seed);
 }
@@ -10684,6 +10868,46 @@ void *native_int_arr_sort(void *arr) {
     march_decrc(arr);
     return new_arr;
 }
+
+/* ── NativeArray.sort_float: the same sort, on IEEE 754 totalOrder keys ────
+ *
+ * `<` on doubles is not a total order (every comparison with NaN is false),
+ * and a quicksort fed an inconsistent comparator can break its own
+ * partition invariants. So doubles sort by their totalOrder key:
+ *
+ *   key(bits) = bits ^ (((int64_t)bits >> 63) & 0x7FFFFFFFFFFFFFFF)
+ *
+ * compared as a signed i64. Negative doubles get their magnitude bits
+ * flipped and keep the sign bit, which yields
+ *   -NaN < -Inf < ... < -1 < -0 < +0 < 1 < ... < +Inf < +NaN.
+ * Note -0.0 sorts strictly before +0.0, although `compare(-0.0, 0.0)` and
+ * `==` treat them as equal.
+ *
+ * key() leaves the sign bit alone, so it is an involution: applying it twice
+ * restores the original bits. That allows "transform in, sort, transform out"
+ * with nsort_i64 reused verbatim, which is what this does. The alternative,
+ * comparing through key() on every comparison, was measured in
+ * bench/c/native_sort_bench.c (`nsb f64`): 10-14% slower on the
+ * comparison-bound patterns (random, organ, nearly), 5-14% faster only on
+ * the already-O(n) ones (sorted, reversed, equal) where the two extra
+ * vectorized passes are the whole cost. Both are bit-identical to qsort
+ * with a totalOrder comparator.
+ *
+ * The interpreter arm (lib/eval/eval_builtins.ml) sorts on the same key; it
+ * must not use OCaml's `compare`, which puts every NaN first regardless of
+ * sign. */
+static inline int64_t nsort_f64_key(int64_t bits) {
+    return bits ^ (int64_t)((uint64_t)(bits >> 63) >> 1);
+}
+
+static void nsort_f64(double *d, int64_t n) {
+    int64_t *v = (int64_t *)d;          /* -fno-strict-aliasing: bit view */
+    for (int64_t i = 0; i < n; i++) v[i] = nsort_f64_key(v[i]);
+    nsort_i64(v, n);
+    for (int64_t i = 0; i < n; i++) v[i] = nsort_f64_key(v[i]);
+}
+/* native_float_arr_sort itself sits after native_float_arr_set, below, next
+ * to the rest of the f64 array entry points. */
 
 /* Sum of squared deviations from a precomputed mean — the stable second pass
  * of the standard two-pass variance algorithm. int elements promote to
@@ -10851,6 +11075,23 @@ void *native_float_arr_set(void *arr, int64_t i, double val) {
     void *new_arr = native_arr_alloc(len, 8, NATIVE_ELEM_F64);
     memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR, (size_t)(len * 8));
     memcpy((char *)new_arr + NATIVE_ARR_HDR + i * 8, &val, 8);
+    march_decrc(arr);
+    return new_arr;
+}
+
+/* NativeArray.sort_float — totalOrder ipnsort; see nsort_f64 above. FBIP/COW
+ * contract identical to native_int_arr_sort: [arr] is owned and consumed, in
+ * place at rc == 1, a sorted fresh copy (our reference released) at rc > 1. */
+void *native_float_arr_sort(void *arr) {
+    int64_t len = native_float_arr_length(arr);
+    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+        nsort_f64((double *)((char *)arr + NATIVE_ARR_HDR), len);
+        return arr;
+    }
+    void *new_arr = native_arr_alloc(len, 8, NATIVE_ELEM_F64);
+    memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR,
+           (size_t)(len * 8));
+    nsort_f64((double *)((char *)new_arr + NATIVE_ARR_HDR), len);
     march_decrc(arr);
     return new_arr;
 }

@@ -595,6 +595,124 @@ let test_macos_deny_write () =
     check_field "write" 1 out
   end
 
+(* ── macOS: scoped IO.FileWrite resolves symlinks on the deployment machine ──
+   Scope normalization is lexical (the build machine's filesystem is not the
+   deployment machine's), but Seatbelt matches a subpath AFTER resolving
+   symlinks. /tmp is a symlink to /private/tmp on macOS, so a scope baked
+   into the profile as "/tmp/<x>" matched nothing and denied every write,
+   including the in-scope ones. The runtime now realpath()s each scope in
+   march_sandbox_install (longest existing prefix, remainder re-appended).
+   Each fixture checks the in-scope write SUCCEEDS (the bug) and a write
+   outside the scope, through the raw-C probe, is still refused (EPERM = 1)
+   -- the latter is what keeps "resolve the scope" from quietly becoming
+   "allow everything". *)
+
+let fresh_tmp_dir (tag : string) : string =
+  (* Deliberately spelled through /tmp, the symlinked path, not /private/tmp. *)
+  let d =
+    Printf.sprintf "/tmp/march_sbx_%s_%d_%d" tag (Unix.getpid ())
+      (Random.State.bits (Random.State.make_self_init ()))
+  in
+  Unix.mkdir d 0o755;
+  d
+
+let rm_rf (d : string) : unit =
+  ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote d)))
+
+let result_line name expr =
+  Printf.sprintf
+    {|    match %s do
+      Ok(_) -> println("%s=0")
+      Err(_) -> println("%s=1")
+    end|}
+    expr name name
+
+let scoped_fixture ~modname ~scope ~(body : string list) =
+  Printf.sprintf
+    {|
+mod %s do
+  needs IO.Console
+  needs IO.Foreign
+  needs IO.FileWrite("%s")
+
+  extern "raw" : Cap(IO.Foreign) do
+    fn probe_write_open() : Int = "sbx_probe_write_open"
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _w : Cap(IO.FileWrite)) : Unit do
+%s
+    println("outscope=" ++ int_to_string(probe_write_open()))
+  end
+end
+|}
+    modname scope (String.concat "\n" body)
+
+let test_macos_scope_under_symlinked_tmp () =
+  if not is_macos then Alcotest.skip ()
+  else begin
+    let d = fresh_tmp_dir "scope" in
+    Fun.protect ~finally:(fun () -> rm_rf d) (fun () ->
+        let src =
+          scoped_fixture ~modname:"SbxScopeTmpMac" ~scope:d
+            ~body:
+              [ result_line "inscope"
+                  (Printf.sprintf "file_write(\"%s/in.txt\", \"x\")" d);
+                (* A subdirectory that does not exist at startup. *)
+                result_line "mkdir" (Printf.sprintf "dir_mkdir(\"%s/newdir\")" d);
+                result_line "newsub"
+                  (Printf.sprintf "file_write(\"%s/newdir/f.txt\", \"y\")" d) ]
+        in
+        let out = compile_and_run src in
+        check_field "inscope" 0 out;
+        check_field "mkdir" 0 out;
+        check_field "newsub" 0 out;
+        check_field "outscope" 1 out;
+        Alcotest.(check bool) "in-scope file really written" true
+          (Sys.file_exists (d ^ "/newdir/f.txt")))
+  end
+
+let test_macos_scope_not_yet_existing () =
+  if not is_macos then Alcotest.skip ()
+  else begin
+    let d = fresh_tmp_dir "scope_new" in
+    Fun.protect ~finally:(fun () -> rm_rf d) (fun () ->
+        (* The scope itself does not exist when the sandbox is installed, so
+           realpath fails on it: resolution must fall back to the longest
+           existing prefix (d, itself behind /tmp) and re-append the rest. *)
+        let scope = d ^ "/notyet" in
+        let src =
+          scoped_fixture ~modname:"SbxScopeNewMac" ~scope
+            ~body:
+              [ result_line "mkdir" (Printf.sprintf "dir_mkdir(\"%s\")" scope);
+                result_line "inscope"
+                  (Printf.sprintf "file_write(\"%s/f.txt\", \"x\")" scope) ]
+        in
+        let out = compile_and_run src in
+        check_field "mkdir" 0 out;
+        check_field "inscope" 0 out;
+        check_field "outscope" 1 out)
+  end
+
+let test_macos_scope_is_symlink () =
+  if not is_macos then Alcotest.skip ()
+  else begin
+    let d = fresh_tmp_dir "scope_link" in
+    Fun.protect ~finally:(fun () -> rm_rf d) (fun () ->
+        Unix.mkdir (d ^ "/real") 0o755;
+        Unix.symlink "real" (d ^ "/link");
+        let src =
+          scoped_fixture ~modname:"SbxScopeLinkMac" ~scope:(d ^ "/link")
+            ~body:
+              [ result_line "inscope"
+                  (Printf.sprintf "file_write(\"%s/link/f.txt\", \"x\")" d) ]
+        in
+        let out = compile_and_run src in
+        check_field "inscope" 0 out;
+        check_field "outscope" 1 out;
+        Alcotest.(check bool) "write landed in the link's target" true
+          (Sys.file_exists (d ^ "/real/f.txt")))
+  end
+
 let tests : unit Alcotest.test_case list =
   [ Alcotest.test_case "linux: NET withheld denies socket, EXEC/WRITE still allowed" `Slow test_linux_deny_net;
     Alcotest.test_case "linux: PROCESS withheld denies execve, NET/WRITE still allowed" `Slow test_linux_deny_exec;
@@ -605,4 +723,7 @@ let tests : unit Alcotest.test_case list =
     Alcotest.test_case "macos: PROCESS withheld denies fork AND exec, NET/WRITE still allowed" `Slow test_macos_deny_process;
     Alcotest.test_case "macos: PROCESS held allows fork and exec" `Slow test_macos_hold_process;
     Alcotest.test_case "macos: FILEWRITE withheld denies write-open, NET/FORK still allowed" `Slow test_macos_deny_write;
+    Alcotest.test_case "macos: FILEWRITE scope under symlinked /tmp allows in-scope writes, denies out-of-scope" `Slow test_macos_scope_under_symlinked_tmp;
+    Alcotest.test_case "macos: FILEWRITE scope that does not exist yet resolves via its existing prefix" `Slow test_macos_scope_not_yet_existing;
+    Alcotest.test_case "macos: FILEWRITE scope that is itself a symlink resolves to its target" `Slow test_macos_scope_is_symlink;
   ]
