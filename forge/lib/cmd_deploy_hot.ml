@@ -33,6 +33,17 @@ type fn_manifest = {
                            capless function legitimately has fn_caps = []. *)
 }
 
+(** One [ROLE <Proto.Role> caps=<csv> [via=<cap>:<frame>>...;...]] line
+    (distributed-deploys build step 10): a role's FULL capability closure,
+    everything its code reaches, from the same solve the compiler's
+    [check_role_grants] runs.  [role_chains] maps a cap of the closure to its
+    reach chain (callback position first), when the compiler recorded one. *)
+type role_manifest = {
+  role_name   : string;
+  role_caps   : string list;
+  role_chains : (string * string list) list;
+}
+
 type manifest = {
   version  : int;
   cas_hash  : string;
@@ -40,7 +51,32 @@ type manifest = {
   hcr_abi : string option;
   module_prefix : string option;
   functions : fn_manifest list;
+  roles     : role_manifest list;  (** [] for a manifest written before step 10 *)
 }
+
+(** Parse the fields after [ROLE <name>]: [caps=<csv>] and [via=...]. *)
+let parse_role_line (rest : string list) (name : string) : role_manifest =
+  let field prefix =
+    let pl = String.length prefix in
+    List.find_map (fun f ->
+        if String.length f >= pl && String.sub f 0 pl = prefix
+        then Some (String.sub f pl (String.length f - pl)) else None) rest
+  in
+  let csv = function None | Some "" -> [] | Some s -> String.split_on_char ',' s in
+  let chains =
+    match field "via=" with
+    | None | Some "" -> []
+    | Some s ->
+      List.filter_map (fun entry ->
+          match String.index_opt entry ':' with
+          | Some i ->
+            let cap = String.sub entry 0 i in
+            let chain = String.sub entry (i + 1) (String.length entry - i - 1) in
+            Some (cap, if chain = "" then [] else String.split_on_char '>' chain)
+          | None -> None)
+        (String.split_on_char ';' s)
+  in
+  { role_name = name; role_caps = csv (field "caps="); role_chains = chains }
 
 let parse_manifest path : (manifest, string) result =
   try
@@ -49,6 +85,7 @@ let parse_manifest path : (manifest, string) result =
     let version = ref 1 in
     let target = ref None and hcr_abi = ref None and module_prefix = ref None in
     let fns = ref [] in
+    let roles = ref [] in
     (try while true do
        let line = String.trim (input_line ic) in
        if String.length line = 0 || line.[0] = '#' then begin
@@ -69,6 +106,10 @@ let parse_manifest path : (manifest, string) result =
             otherwise fall into the FN-line branches below and fabricate a
             phantom function named "ROOT". *)
          ()
+       end else if String.length line >= 5 && String.sub line 0 5 = "ROLE " then begin
+         (match String.split_on_char ' ' line with
+          | _ :: name :: rest when name <> "" -> roles := parse_role_line rest name :: !roles
+          | _ -> ())
        end else begin
          let has_prefix field prefix =
            let plen = String.length prefix in
@@ -122,7 +163,7 @@ let parse_manifest path : (manifest, string) result =
     if !cas_hash = "" then Error (path ^ ": missing # cas_hash line")
     else Ok { version = !version; cas_hash = !cas_hash; target = !target;
               hcr_abi = !hcr_abi; module_prefix = !module_prefix;
-              functions = List.rev !fns }
+              functions = List.rev !fns; roles = List.rev !roles }
   with Sys_error m -> Error m
 
 (** True iff [manifest] is a genuine pre-Phase-5C legacy manifest — i.e. NO
@@ -262,6 +303,31 @@ let build_activate5_lines ~name ~impl ~cas ~migrate ~epoch ~cap_root ~callers_cs
   let wire_head = Printf.sprintf "ACTIVATE5 %s %s %s" name impl cas in
   (signed, wire_head)
 
+(** ACTIVATE6 (distributed-deploys build step 10): ACTIVATE5 plus the
+    per-role closures.  [role_caps] is the SIGNED block,
+    ["<Proto.Role>=<root>;..."] sorted by role; [roles] the unsigned
+    ["<Proto.Role>=<csv>;..."] the server recomputes each root from (see
+    {!role_blocks}).  Returns [(signed, wire_head)]; the caller appends
+    [" <sig_b64> <migrate> epoch:<N> cap_root:<hex> role_caps:<..> caps:<csv> roles:<..> callers:<csv>"].
+    A new verb because an older server rebuilds the signed line without
+    [role_caps] and parses [callers:] to end of line. *)
+let build_activate6_lines ~name ~impl ~cas ~migrate ~epoch ~cap_root ~role_caps ~callers_csv
+  : string * string =
+  let signed = Printf.sprintf "ACTIVATE6 %s %s %s %d epoch:%d cap_root:%s role_caps:%s callers:%s"
+    name impl cas migrate epoch cap_root role_caps callers_csv in
+  let wire_head = Printf.sprintf "ACTIVATE6 %s %s %s" name impl cas in
+  (signed, wire_head)
+
+(** The two role blocks of an ACTIVATE6 from a manifest's ROLE lines:
+    [(role_caps, roles)], both sorted by role name.  Each root is
+    {!fn_cap_root} over the role's closure, the recipe the server's
+    [compute_cap_root] reproduces; each closure is sent sorted. *)
+let role_blocks (roles : role_manifest list) : string * string =
+  let sorted = List.sort (fun a b -> String.compare a.role_name b.role_name) roles in
+  let root r = r.role_name ^ "=" ^ fn_cap_root r.role_caps in
+  let csv r = r.role_name ^ "=" ^ String.concat "," (List.sort String.compare r.role_caps) in
+  (String.concat ";" (List.map root sorted), String.concat ";" (List.map csv sorted))
+
 (** A reload-server WAIT answer (plan II.4.2):
     ["WAIT epoch:<E> pins:<n> deadline_ms:<t>"], optionally followed by
     [" table_full"].  [Some (epoch, pins, deadline_ms, table_full)], or
@@ -340,6 +406,29 @@ let attribute_widening (functions : fn_manifest list) (widening : string list) :
 let filter_granted_widening ~(widening : string list) ~(grant_caps : string list) : string list =
   List.filter (fun c -> not (List.exists (fun g -> March_caps.Cap_lattice.cap_subsumes g c) grant_caps)) widening
 
+(** [compute_role_widening ~prior ~current] — the per-role gate
+    (distributed-deploys build step 10, plan II.2 "Hot deploys").  For every
+    role of [current], the caps of its closure no cap of the SAME role's
+    closure in [prior] subsumes; a role absent from [prior] widens by its
+    whole closure (its code is new authority).  [None] when [prior] carries no
+    ROLE line at all: a baseline written before step 10 says nothing about
+    roles, so the gate is permissive for that deploy, as the per-function
+    gate is with no baseline.  Roles that did not widen are left out. *)
+let compute_role_widening ~(prior : manifest) ~(current : manifest)
+  : (role_manifest * string list) list option =
+  if prior.roles = [] then None
+  else
+    Some (List.filter_map (fun (r : role_manifest) ->
+        let before =
+          match List.find_opt (fun (p : role_manifest) -> p.role_name = r.role_name) prior.roles with
+          | Some p -> March_caps.Cap_lattice.normalize p.role_caps
+          | None -> []
+        in
+        match compute_cap_widening ~prior:before
+                ~new_caps:(March_caps.Cap_lattice.normalize r.role_caps) with
+        | [] -> None
+        | w -> Some (r, w)) current.roles)
+
 (** Print the "hot deploy would add authority" diagnostic to stderr in the
     fixed shape depended on by tooling/tests:
 
@@ -352,10 +441,19 @@ let filter_granted_widening ~(widening : string list) ~(grant_caps : string list
 
     Only caps still ungranted (after `filter_granted_widening` has removed
     any covered by `--grant-cap`) are ever passed in via [attributed]. *)
-let print_widening_diagnostic ~(prior_caps : string list) ~(attributed : (string * string) list) =
-  Printf.eprintf "error: hot deploy would add authority not held by the running version\n";
-  Printf.eprintf "  running version caps:  %s\n"
-    (if prior_caps = [] then "(none)" else String.concat ", " prior_caps);
+let print_widening_diagnostic ?role ~(prior_caps : string list) ~(attributed : (string * string) list) () =
+  (match role with
+   | None ->
+     Printf.eprintf "error: hot deploy would add authority not held by the running version\n";
+     Printf.eprintf "  running version caps:  %s\n"
+       (if prior_caps = [] then "(none)" else String.concat ", " prior_caps)
+   | Some (r : role_manifest) ->
+     (* The per-role gate: [attributed] pairs each cap with its reach chain
+        (from the manifest's via= field), or "?" when the compiler recorded
+        none. *)
+     Printf.eprintf "error: hot deploy would widen role %s's capability closure\n" r.role_name;
+     Printf.eprintf "  running version caps:  %s\n"
+       (if prior_caps = [] then "(none)" else String.concat ", " prior_caps));
   (* M3 fix: the padding width used to be a hardcoded 12, which misaligned
      for caps longer than 12 chars (e.g. "IO.NetConnect.TLS",
      "IO.Foreign.Blocking"). Compute it dynamically from the longest cap name
@@ -363,12 +461,68 @@ let print_widening_diagnostic ~(prior_caps : string list) ~(attributed : (string
   let pad_width =
     List.fold_left (fun acc (cap, _) -> max acc (String.length cap)) 12 attributed in
   List.iter (fun (cap, fn_name) ->
-    Printf.eprintf "  new version adds:      %-*s (from %s)\n" pad_width cap fn_name
+    match role with
+    | None ->
+      Printf.eprintf "  new version adds:      %-*s (from %s)\n" pad_width cap fn_name
+    | Some _ ->
+      Printf.eprintf "  new version adds:      %-*s (reached: %s)\n" pad_width cap fn_name
   ) attributed;
   Printf.eprintf "  A hot deploy may only narrow authority. To authorize this widening, re-run with:\n";
   List.iter (fun (cap, _) ->
     Printf.eprintf "      forge deploy hot --grant-cap %s\n" cap
   ) attributed
+
+(** Pair each widened cap of [r] with its reach chain, rendered as the
+    compiler renders it ("body \u{2192} cons \u{2192} save"), or "?" when the
+    manifest carries no chain for it. *)
+let attribute_role_widening (r : role_manifest) (widening : string list) : (string * string) list =
+  List.map (fun cap ->
+      let chain =
+        match List.assoc_opt cap r.role_chains with
+        | Some (_ :: _ as ch) -> String.concat " \xe2\x86\x92 " ch
+        | _ ->
+          (* the closure may hold a broader cap that normalize kept; find a
+             chain recorded for a cap it subsumes *)
+          (match List.find_opt (fun (c, _) -> March_caps.Cap_lattice.cap_subsumes cap c) r.role_chains with
+           | Some (_, (_ :: _ as ch)) -> String.concat " \xe2\x86\x92 " ch
+           | _ -> "?")
+      in
+      (cap, chain)) widening
+
+(** The per-role gate as [run] applies it: for each widened role, print the
+    grants that cover it and the diagnostic for what is left.  Returns true
+    iff some role still has an ungranted widening (the deploy must stop). *)
+let role_gate ~(prior : manifest option) ~(current : manifest) ~(grant_caps : string list) : bool =
+  match prior with
+  | None -> false
+  | Some prior ->
+    match compute_role_widening ~prior ~current with
+    | None ->
+      if current.roles <> [] then
+        Printf.printf
+          "NOTE: the capability baseline has no ROLE lines (written before per-role closures) — the per-role gate is permissive for this deploy.\n%!";
+      false
+    | Some widened ->
+      List.fold_left (fun blocked ((r : role_manifest), widening) ->
+          let ungranted = filter_granted_widening ~widening ~grant_caps in
+          List.iter (fun cap ->
+              if not (List.mem cap ungranted) then
+                let g =
+                  Option.value ~default:cap
+                    (List.find_opt (fun g -> March_caps.Cap_lattice.cap_subsumes g cap) grant_caps) in
+                Printf.printf "  granted widening: role %s gains %s (via --grant-cap %s)\n%!"
+                  r.role_name cap g) widening;
+          if ungranted = [] then blocked
+          else begin
+            let prior_caps =
+              match List.find_opt (fun (p : role_manifest) -> p.role_name = r.role_name) prior.roles with
+              | Some p -> p.role_caps
+              | None -> []
+            in
+            print_widening_diagnostic ~role:r ~prior_caps
+              ~attributed:(attribute_role_widening r ungranted) ();
+            true
+          end) false widened
 
 (** After a successful deploy, copy the just-deployed .hcr_manifest over the
     baseline file, so next time's "prior" is this time's "new" — mirrors
@@ -577,6 +731,58 @@ let cas_put conn hash path =
   let final = recv_line conn in
   if not (String.length final >= 2 && String.sub final 0 2 = "OK") then
     failwith (Printf.sprintf "CAS_PUT failed: %s" final)
+
+(* ─── Signed TOPOLOGY push (distributed-deploys build step 10) ────────────
+
+   A reconciler action like ACTIVATE (plan section 5, "Every reconciler
+   action is signed"): pushing a topology changes what a node offers, so an
+   unsigned push would be a way around every other check.  The server
+   verifies the signature over ["TOPOLOGY <blake3>"] before it accepts the
+   body, checks the body's digest, persists it with the patch stack (so a
+   restart restores it) and calls its topology hook. *)
+
+(** [topology_command ~sk ~body] — [(line, digest)]: the line is
+    ["TOPOLOGY <blake3> <sig64> <size>"], the signature over
+    ["TOPOLOGY <blake3>"] with the deploy key [sk]. *)
+let topology_command ~sk ~(body : string) : string * string =
+  let digest = March_cas.Blake3.hash_string body in
+  let sig_b64 =
+    March_ed25519.Ed25519.sig_to_base64
+      (March_ed25519.Ed25519.sign_str ("TOPOLOGY " ^ digest) sk) in
+  (Printf.sprintf "TOPOLOGY %s %s %d" digest sig_b64 (String.length body), digest)
+
+(** Push [body] over an open reload-server connection.  [Ok digest], or
+    [Error] with the server's answer. *)
+let push_topology_conn conn ~sk ~(body : string) : (string, string) result =
+  let (cmd, digest) = topology_command ~sk ~body in
+  send_line conn cmd;
+  match recv_line conn with
+  | "READY" ->
+    send_binary conn (Bytes.of_string body) 0 (String.length body);
+    let resp = recv_line conn in
+    if resp = "OK " ^ digest then Ok digest else Error resp
+  | "ERR unknown_command" -> Error "server predates the TOPOLOGY verb; upgrade the server"
+  | resp -> Error resp
+
+(** [push_topology ~ssh_host ~remote_socket ~sk ~path] — push the topology
+    file at [path] to one node's reload server over an SSH tunnel.  For the
+    reconciler (build steps 8 and 10b); [Ok digest] on success. *)
+let push_topology ~ssh_host ~remote_socket ~sk ~(path : string) : (string, string) result =
+  match In_channel.with_open_bin path In_channel.input_all with
+  | exception Sys_error m -> Error m
+  | body ->
+    let local_socket =
+      Printf.sprintf "/tmp/march_topology_%d.sock" (Unix.getpid ()) in
+    let (pid, _) = open_tunnel ~ssh_host ~remote_socket ~local_socket in
+    Fun.protect ~finally:(fun () -> close_tunnel pid local_socket) (fun () ->
+        try
+          let fd = connect_socket local_socket in
+          let r = push_topology_conn (conn_of_fd fd) ~sk ~body in
+          Unix.close fd;
+          r
+        with
+        | Failure m -> Error m
+        | Unix_error (e, fn, _) -> Error (Printf.sprintf "%s: %s" fn (Unix.error_message e)))
 
 (* ─── Transient socket naming (shared by Phase 7 fan-out and Phase 10 helpers) *)
 
@@ -840,11 +1046,20 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
               ) granted_caps;
               if ungranted <> [] then begin
                 let attributed = attribute_widening to_activate ungranted in
-                print_widening_diagnostic ~prior_caps ~attributed;
+                print_widening_diagnostic ~prior_caps ~attributed ();
                 Unix.close fd;
                 raise (Failure "capability widening — deploy aborted")
               end
             end);
+          (* DD build step 10: the per-role gate.  A role's closure is
+             everything its code reaches, so a patch that only calls an
+             existing, more powerful helper widens it even when no changed
+             function's own caps did.  The baseline file is the whole prior
+             manifest (save_manifest_baseline), ROLE lines included. *)
+          if role_gate ~prior:prior_manifest_opt ~current:manifest ~grant_caps then begin
+            Unix.close fd;
+            raise (Failure "role capability widening — deploy aborted")
+          end;
 
           (* 6. CAS_PUT the .so if not already present *)
           (* NOTE (2026-07-04): the former skew check SHA-256-hashed the .so
@@ -1030,23 +1245,61 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
               let fn_caps_sorted = List.sort String.compare fm.fn_caps in
               let caps_csv = String.concat "," fn_caps_sorted in
               let this_cap_root = fn_cap_root fm.fn_caps in
-              (* A message-type change (bit 2) needs ACTIVATE5; otherwise
-                 ACTIVATE4, so an older server keeps working. *)
-              let build = if migrate_required land 2 <> 0
-                then build_activate5_lines else build_activate4_lines in
-              let (signed, wire_head) =
-                build ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
-                  ~migrate:migrate_required ~epoch:epoch_n ~cap_root:this_cap_root
-                  ~callers_csv
+              (* A manifest with ROLE lines needs ACTIVATE6 (the server's
+                 per-role admission); else a message-type change (bit 2)
+                 needs ACTIVATE5; otherwise ACTIVATE4, so an older server
+                 keeps working. *)
+              let (signed, wire_head, role_fields) =
+                if manifest.roles <> [] then begin
+                  let (role_caps, roles) = role_blocks manifest.roles in
+                  let (signed, wire_head) =
+                    build_activate6_lines ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
+                      ~migrate:migrate_required ~epoch:epoch_n ~cap_root:this_cap_root
+                      ~role_caps ~callers_csv in
+                  (signed, wire_head, Some (role_caps, roles))
+                end else begin
+                  let build = if migrate_required land 2 <> 0
+                    then build_activate5_lines else build_activate4_lines in
+                  let (signed, wire_head) =
+                    build ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
+                      ~migrate:migrate_required ~epoch:epoch_n ~cap_root:this_cap_root
+                      ~callers_csv
+                  in
+                  (signed, wire_head, None)
+                end
               in
               let sig_bytes = March_ed25519.Ed25519.sign_str signed sk in
               let sig_b64 = March_ed25519.Ed25519.sig_to_base64 sig_bytes in
-              let cmd = Printf.sprintf "%s %s %d epoch:%d cap_root:%s caps:%s callers:%s"
-                wire_head sig_b64 migrate_required epoch_n this_cap_root caps_csv callers_csv in
+              let cmd = match role_fields with
+                | None ->
+                  Printf.sprintf "%s %s %d epoch:%d cap_root:%s caps:%s callers:%s"
+                    wire_head sig_b64 migrate_required epoch_n this_cap_root caps_csv callers_csv
+                | Some (role_caps, roles) ->
+                  Printf.sprintf "%s %s %d epoch:%d cap_root:%s role_caps:%s caps:%s roles:%s callers:%s"
+                    wire_head sig_b64 migrate_required epoch_n this_cap_root role_caps
+                    caps_csv roles callers_csv in
               let resp = send_waiting ~send_line ~recv_line conn cmd in
               if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin
                 Printf.printf "  activated: %s\n%!" fm.fn_name;
                 incr activated
+              end else if resp = "ERR unknown_command" && role_fields <> None then begin
+                Printf.eprintf
+                  "  FAILED %s: server predates per-role admission (ACTIVATE6); upgrade the server or re-run with --no-cap-gate\n%!"
+                  fm.fn_name;
+                incr failed
+              end else if resp = "ERR role_cap_tamper" then begin
+                Printf.eprintf
+                  "  FAILED %s: role_cap_tamper — a server-recomputed role closure root did not match the signed value; deploy rejected\n%!"
+                  fm.fn_name;
+                incr failed
+              end else if String.length resp >= 20 && String.sub resp 0 20 = "ERR role_cap_policy " then begin
+                (match String.split_on_char ' ' resp with
+                 | [_; _; role; cap] ->
+                   Printf.eprintf
+                     "  FAILED %s: role %s's capability closure reaches %s, which this node's capability policy does not allow; deploy rejected\n%!"
+                     fm.fn_name role cap
+                 | _ -> Printf.eprintf "  FAILED %s: %s\n%!" fm.fn_name resp);
+                incr failed
               end else if resp = "ERR unknown_command" then begin
                 Printf.eprintf
                   "  FAILED %s: server predates capability admission (Phase 5C); upgrade the server or re-run with --no-cap-gate\n%!"
@@ -1194,6 +1447,39 @@ let read_pins conn : string list =
   in
   loop []
 
+(** The COMPACT answer (distributed-deploys build step 10, plan 6.5):
+    ["STACK entries:<n> functions:<m> deploys:<d> artifacts:<k> cas_bytes:<b>"].
+    [None] for anything else (an older server answers [ERR unknown_command]). *)
+type stack_size = {
+  st_entries : int; st_functions : int; st_deploys : int;
+  st_artifacts : int; st_cas_bytes : int;
+}
+
+let parse_compact (resp : string) : stack_size option =
+  try
+    Scanf.sscanf resp "STACK entries:%d functions:%d deploys:%d artifacts:%d cas_bytes:%d%!"
+      (fun e f d a b ->
+         Some { st_entries = e; st_functions = f; st_deploys = d;
+                st_artifacts = a; st_cas_bytes = b })
+  with _ -> None
+
+let human_bytes (b : int) : string =
+  if b < 1024 then Printf.sprintf "%d B" b
+  else if b < 1024 * 1024 then Printf.sprintf "%.1f KiB" (float_of_int b /. 1024.)
+  else Printf.sprintf "%.1f MiB" (float_of_int b /. 1048576.)
+
+(** The status line for a node's patch stack: what the reconciler weighs
+    when it decides to rebuild the build's base image (no rebuild here). *)
+let describe_stack (st : stack_size) : string =
+  if st.st_entries = 0 then "no hot patches persisted (the node runs its base build)"
+  else
+    Printf.sprintf "%d persisted patch%s over %d deploy%s (%d function%s), %d artifact%s, %s in the CAS"
+      st.st_entries (if st.st_entries = 1 then "" else "es")
+      st.st_deploys (if st.st_deploys = 1 then "" else "s")
+      st.st_functions (if st.st_functions = 1 then "" else "s")
+      st.st_artifacts (if st.st_artifacts = 1 then "" else "s")
+      (human_bytes st.st_cas_bytes)
+
 let run_status ?(env="") () : (unit, string) result =
   match Project.load () with
   | Error m -> Error m
@@ -1218,6 +1504,7 @@ let run_status ?(env="") () : (unit, string) result =
       else begin
         let multi_node = List.length servers > 1 in
         let pins_by_node : (string, string list) Hashtbl.t = Hashtbl.create 4 in
+        let stack_by_node : (string, stack_size) Hashtbl.t = Hashtbl.create 4 in
         let query_server (srv : Project.hot_reload_env) =
           let local = fresh_sock "march_status" in
           Printf.printf "Connecting to %s...\n%!" srv.Project.hre_ssh_host;
@@ -1232,6 +1519,10 @@ let run_status ?(env="") () : (unit, string) result =
               let slots = parse_versions_detail conn in
               send_line conn "PINS";
               let pins = read_pins conn in
+              send_line conn "COMPACT";
+              (match parse_compact (recv_line conn) with
+               | Some st -> Hashtbl.replace stack_by_node srv.Project.hre_name st
+               | None -> ());
               Unix.close fd;
               Hashtbl.replace pins_by_node srv.Project.hre_name pins;
               Ok (srv.Project.hre_name, slots)
@@ -1326,6 +1617,14 @@ let run_status ?(env="") () : (unit, string) result =
             | Some lines ->
               Printf.printf "\nEpochs%s:\n" (if multi_node then " (" ^ node_name ^ ")" else "");
               List.iter (fun l -> Printf.printf "  %s\n" l) lines
+          ) nodes;
+          (* The persisted patch stack (COMPACT). *)
+          List.iter (fun (node_name, _) ->
+            match Hashtbl.find_opt stack_by_node node_name with
+            | None -> ()
+            | Some st ->
+              Printf.printf "\nPatch stack%s: %s\n"
+                (if multi_node then " (" ^ node_name ^ ")" else "") (describe_stack st)
           ) nodes;
           Ok ()
         end
