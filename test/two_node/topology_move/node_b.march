@@ -1,0 +1,82 @@
+-- Two-node scenario "topology_move": a `Count(1)` role (Topology.place,
+-- build step 3) is offered by exactly one of two nodes, the one ranked first
+-- by rendezvous hashing; when that node is SIGKILLed, SWIM declares it dead
+-- and the survivor starts offering. node_a.march is this file with the
+-- names swapped. A state is printed only once it has held for 1.5 s, so the
+-- brief duplicate offer while the markers replicate does not reach the
+-- golden. See scenario.sh.
+mod TopologyMoveB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    ask: Client -> Server : Int
+    answer: Server -> Client : Int
+  end
+
+  pfn serve_one(s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
+    Echo_Server.recv_Ask(s, st, fn (n, st1) -> Echo_Server.close(s, Echo_Server.send_Answer(s, st1, n)))
+  end
+
+  -- Print [me]'s offering state each time it changes and then holds for
+  -- 1.5 s, until the stop file exists.
+  pfn watch(h : Cap(ClusterNode.Live), me : String, shown : Bool, seen : Bool, since : Int, stop : String) : () do
+    if File.exists(stop) do () else
+      let now = Topology.offered(h) == ["Echo.Server"]
+      let t = unix_time_ms()
+      let since2 = if now == seen do since else t end
+      let shown2 = if now != shown && t - since2 >= 1500 do
+        println(me ++ ": " ++ (if now do "offering Echo.Server" else "not offering Echo.Server" end))
+        now
+      else shown end
+      sleep_ms(50)
+      watch(h, me, shown2, now, since2, stop)
+    end
+  end
+
+  pfn wait_marker(h : Cap(ClusterNode.Live), name : String, left : Int) : () do
+    if ClusterNode.lookup(h, name) != None || left <= 0 do () else
+      sleep_ms(50)
+      wait_marker(h, name, left - 50)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let me = "node-b"
+    let other = "node-a"
+    let seeds = Cons("127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A")), Nil)
+    let port = Env.require_int("MARCH_PORT_B")
+    match ClusterNode.start(c, ClusterNode.config(me, port, "", seeds, "topo-move-secret", 1)) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println(me ++ ": up")
+        if ClusterNode.await_members(h, 1, 120000) do () else panic(me ++ ": never joined") end
+        let ranked = Topology.rank("Echo.Server", [ClusterNode.node_id_of(me), ClusterNode.node_id_of(other)])
+        let first = if List.take(ranked, 1) == [ClusterNode.node_id_of(me)] do "first" else "second" end
+        println(me ++ ": ranked " ++ first)
+        -- The node ranked second waits for the first one's placement marker
+        -- before placing, so it decides with that marker visible and never
+        -- offers the role even briefly (a bounded wait on both sides raced
+        -- under load: both placed before seeing each other). The first
+        -- places at once. Without such a wait a brief duplicate offer is
+        -- correct behaviour (count = 1 is not a lock), just not a golden.
+        if first == "second" do
+          wait_marker(h, Topology.marker("Echo.Server", ClusterNode.node_id_of(other)), 60000)
+        else () end
+        Topology.place(h, [ Topology.role("Echo.Server", Topology.count(1),
+                              fn () -> Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st))) ])
+        watch(h, me, false, false, unix_time_ms(), Env.require("TOPOLOGY_STOP_FILE"))
+        println(me ++ ": stopping")
+        Topology.stop(h)
+    end
+  end
+end

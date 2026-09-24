@@ -257,7 +257,21 @@ let run_cmd =
                  the project's entry point. A file named here still sees the \
                  surrounding project's modules and FFI shims when there is one.")
   in
-  let run d c tgt fs =
+  let processes =
+    Arg.(value & flag & info ["processes"]
+           ~doc:"For a topology app: one process per pool (per host listed for it in \
+                 the $(b,--env) overlay), each a node of one local cluster, instead of \
+                 every pool in one process. Ctrl-C drains and stops them all.")
+  in
+  let fail_fast =
+    Arg.(value & flag & info ["fail-fast"]
+           ~doc:"With $(b,--processes): stop every process as soon as one exits.")
+  in
+  let run_env =
+    Arg.(value & opt (some string) None & info ["env"] ~docv:"ENV"
+           ~doc:"For a topology app: apply the topology.$(docv).toml overlay (host labels).")
+  in
+  let run d c tgt fs p ff e =
     (* The first positional is always the FILE; everything after it belongs to
        the program.  There is deliberately no spelling that passes arguments to
        the PROJECT entry: cmdliner records the positionals but not where `--`
@@ -268,10 +282,10 @@ let run_cmd =
       | []          -> (None, [])
       | f :: rest   -> (Some f, rest)
     in
-    handle (Cmd_run.run ~dump_phases:d ~compiled:c ?target:tgt ?file ~args ())
+    handle (Cmd_run.run ~dump_phases:d ~compiled:c ?target:tgt ?file ~args ~processes:p ~fail_fast:ff ?env:e ())
   in
   Cmd.v (Cmd.info "run" ~doc:"Build and run the current project, or a single file")
-    Term.(const run $ dump_phases $ compiled $ target $ files)
+    Term.(const run $ dump_phases $ compiled $ target $ files $ processes $ fail_fast $ run_env)
 
 (* ------------------------------------------------------------------ forge test *)
 
@@ -1353,6 +1367,15 @@ let topology_load_checked env =
           Ok (proj, t, index, path)
         end
 
+(** The compiler's derived pool caps and initiated roles, or [None] with a
+    warning saying why (the export then keeps `"caps": null`). *)
+let topology_compiler_derived proj =
+  match Topology_run.compiler_derived proj with
+  | Ok d -> Some d
+  | Error m ->
+    Printf.eprintf "warning: derived caps unavailable: %s\n%!" m;
+    None
+
 let topology_check_cmd =
   let run env =
     match topology_load_checked env with
@@ -1372,8 +1395,9 @@ let topology_export_cmd =
   let json = Arg.(value & flag & info ["json"] ~doc:"Print the export as JSON (the only format today).") in
   let run env _json =
     match topology_load_checked env with
-    | Ok (_, t, index, _) ->
-      print_endline (Yojson.Safe.pretty_to_string (Topology.export_json ~index t))
+    | Ok (proj, t, index, _) ->
+      print_endline (Yojson.Safe.pretty_to_string
+                       (Topology.export_json ?compiler:(topology_compiler_derived proj) ~index t))
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
   Cmd.v (Cmd.info "export"
@@ -1399,7 +1423,7 @@ let topology_gen_cmd =
     match topology_load_checked env with
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
     | Ok (proj, t, index, _) ->
-      let json = Topology.export_json ~index t in
+      let json = Topology.export_json ?compiler:(topology_compiler_derived proj) ~index t in
       match Topology.export_of_json json with
       | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
       | Ok ex ->

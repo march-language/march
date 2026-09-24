@@ -1847,25 +1847,23 @@ let compile filename =
         span.March_ast.Ast.start_col msg
     ) resolve_errors;
   let has_resolve_errors = resolve_errors <> [] in
-  (* --topology: validate the digest against what is loaded (see Flags). The
+  (* --topology: check the digest against what is loaded and, when the entry
+     module has no `main`, generate one (Topology_gen, Desugar_topology). The
      entry module's declarations are flat under its own name; imports arrive
      wrapped in DMod, so an empty prefix qualifies them by their module. *)
-  (match !topology_file with
-   | None -> ()
-   | Some path ->
-     (match March_forge.Topology.read_digest path with
-      | Error m -> Printf.eprintf "error: --topology: %s\n" m; exit 1
-      | Ok topo ->
-        let entry_name = desugared.March_ast.Ast.mod_name.March_ast.Ast.txt in
-        let index =
-          March_forge.Topology.index_of_decls
-            [ (entry_name, desugared.March_ast.Ast.mod_decls); ("", extra_decls) ]
-        in
-        (match March_forge.Topology.unresolved_names ~index topo with
-         | [] -> ()
-         | errs ->
-           List.iter (fun e -> Printf.eprintf "%s: error: topology: %s\n" path e) errs;
-           exit 1)));
+  let (desugared, extra_decls, topology_session) =
+    match !topology_file with
+    | None -> (desugared, extra_decls, None)
+    | Some path ->
+      (match March_forge.Topology.read_digest path with
+       | Error m -> Printf.eprintf "error: --topology: %s\n" m; exit 1
+       | Ok topo ->
+         let (entry_decls, imports, sess) =
+           Topology_gen.prepare ~path ~entry:desugared ~imports:extra_decls
+             ~pools:!topology_pools ~foreign_isolated:!topology_isolate_foreign topo
+         in
+         ({ desugared with March_ast.Ast.mod_decls = entry_decls }, imports, Some (path, sess)))
+  in
   let desugared =
     { desugared with
       March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
@@ -2142,9 +2140,25 @@ let compile filename =
     List.exists (fun (d : March_errors.Errors.diagnostic) ->
         d.severity = March_errors.Errors.Error) (Lazy.force contract_diags)
   in
+  (* --topology, after typechecking: each pool's derived caps and initiated
+     roles (D22), and a written `caps` enforced against what the pool's hook
+     and roles reach. Skipped when the program did not typecheck: the rows
+     would describe a partial program. *)
+  let topology_json =
+    match topology_session with
+    | Some (path, sess) when not frontend_rejected ->
+      let derived = Topology_gen.derive sess typecheck_env in
+      (match Topology_gen.reach_errors sess derived with
+       | [] -> ()
+       | errs ->
+         List.iter (fun e -> Printf.eprintf "%s: error: topology: %s\n" path e) errs;
+         exit 1);
+      Some (Topology_gen.json sess derived)
+    | _ -> None
+  in
   if !emit_core_ast_file <> None then begin
     let contract = if frontend_rejected then [] else Lazy.force contract_diags in
-    Emit_core_ast.run ~filename ~user_files ~user_ast ~type_map
+    Emit_core_ast.run ~topology:topology_json ~filename ~user_files ~user_ast ~type_map
       ~diags:(diags @ contract) ~is_user_file ~typecheck_env
       ~rejected:(frontend_rejected || contract_rejected ())
   end;
@@ -4581,7 +4595,12 @@ let () =
                      " Pass every remaining argument to the program as its argv; must come last");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
     ("--topology",   Arg.String (fun p -> topology_file := Some p),
-     "<json>  Read a forge topology digest (.forge/topology.json, schema version 1) and check that every name it binds is declared in the loaded modules");
+     "<json>  Read a forge topology digest (.forge/topology.json, schema version 1): check its bindings and caps, and generate `main` when the entry module has none");
+    ("--topology-pools", Arg.String (fun s ->
+         topology_pools := Some (List.filter (fun x -> x <> "") (List.map String.trim (String.split_on_char ',' s)))),
+     "<a,b>  With --topology: the pools this build contains (default: every pool)");
+    ("--topology-isolate-foreign", Arg.Set topology_isolate_foreign,
+     " With --topology: reject an IO.Foreign role or hook in a pool that is not isolated");
     ("--cap-strict", Arg.Set cap_strict, " Treat `needs` as a hard ceiling (the DEFAULT since 2026-08-08; accepted for compatibility and to state the intent explicitly)");
     ("--no-cap-strict", Arg.Clear cap_strict, " Do not enforce `needs` as a ceiling: allow a module's emitted code to use capabilities it does not declare");
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");

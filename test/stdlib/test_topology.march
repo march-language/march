@@ -1,0 +1,103 @@
+mod TestTopology do
+
+  -- Topology's pure half (stdlib/topology.march): the placement decision
+  -- every node makes for itself, fed fake membership. The effectful half
+  -- (offers opened, moved, drained over a real ClusterNode; the hook
+  -- watchdog) runs compiled in test/native/topology_place and
+  -- test/native/topology_hook_timeout.
+
+  pfn nodes(n : Int) : List(String) do
+    List.map(List.range(0, n), fn i -> "node-" ++ int_to_string(i))
+  end
+
+  pfn nth(xs : List(String), i : Int) : String do
+    match List.drop(xs, i) do
+      Cons(h, _) -> h
+      Nil -> ""
+    end
+  end
+
+  -- How many of [ids] offer [role] under [p], each deciding with the others
+  -- as its eligible set.
+  pfn offering(p : Topology.TopoPlacement, role : String, ids : List(String), labels : List(String)) : List(String) do
+    List.filter(ids, fn me -> Topology.wants(p, role, me, labels, List.filter(ids, fn o -> o != me)))
+  end
+
+  describe "Topology placement: labels" do
+
+    test "MARCH_NODE_LABELS-style lists parse, blanks dropped" do
+      assert (Topology.labels_of("db, public") == ["db", "public"])
+      assert (Topology.labels_of("") == Nil)
+      assert (Topology.labels_of(" , gpu,") == ["gpu"])
+    end
+
+    test "Everywhere is offered by every node; On only where the label is" do
+      assert (Topology.wants(Topology.everywhere(), "P.R", "a", Nil, Nil))
+      assert (Topology.wants(Topology.on_label("db"), "P.R", "a", ["db"], Nil))
+      assert (Topology.wants(Topology.on_label("db"), "P.R", "a", ["public"], Nil) == false)
+      assert (Topology.ranked(Topology.everywhere()) == false)
+      assert (Topology.ranked(Topology.count(1)))
+    end
+
+  end
+
+  describe "Topology placement: rendezvous counts" do
+
+    test "every node computes the same ranking, whatever order it saw members in" do
+      let ids = nodes(6)
+      let r1 = Topology.rank("Checkout.Ledger", ids)
+      let r2 = Topology.rank("Checkout.Ledger", List.reverse(ids))
+      assert (r1 == r2)
+      assert (List.length(r1) == 6)
+    end
+
+    test "Count(n) is offered by exactly n nodes when all agree on membership" do
+      let ids = nodes(5)
+      assert (List.length(offering(Topology.count(1), "A.X", ids, Nil)) == 1)
+      assert (List.length(offering(Topology.count(2), "A.X", ids, Nil)) == 2)
+      assert (List.length(offering(Topology.count(9), "A.X", ids, Nil)) == 5)
+    end
+
+    test "different roles spread over different nodes" do
+      let ids = nodes(8)
+      let owners = List.map(["A.X", "A.Y", "B.X", "B.Y", "C.X", "C.Y"], fn r -> offering(Topology.count(1), r, ids, Nil))
+      let distinct = List.dedup(List.concat(owners))
+      assert (List.length(distinct) > 1)
+    end
+
+    test "a dead node's role moves to the next node in the ranking, and only it" do
+      let ids = nodes(4)
+      let before = offering(Topology.count(1), "Checkout.Ledger", ids, Nil)
+      let ranked = Topology.rank("Checkout.Ledger", ids)
+      let first = nth(ranked, 0)
+      let second = nth(ranked, 1)
+      assert (before == [first])
+      let survivors = List.filter(ids, fn i -> i != first)
+      assert (offering(Topology.count(1), "Checkout.Ledger", survivors, Nil) == [second])
+    end
+
+    test "CountOn needs the label as well as the rank" do
+      assert (Topology.wants(Topology.count_on("db", 1), "P.R", "a", Nil, Nil) == false)
+      assert (Topology.wants(Topology.count_on("db", 1), "P.R", "a", ["db"], Nil))
+    end
+
+  end
+
+  describe "Topology placement: markers and settling" do
+
+    test "marker names round-trip to node ids" do
+      let names = [Topology.marker("P.R", "n1"), Topology.marker("P.R", "n2"),
+                   Topology.marker("P.S", "n3"), "ap:P/1/n1"]
+      assert (Topology.marked("P.R", names) == ["n1", "n2"])
+      assert (Topology.marked("P.S", names) == ["n3"])
+    end
+
+    test "a rejoined node counts only after the settling period" do
+      assert (Topology.settled(1000, None, 15000))
+      assert (Topology.settled(10000, Some(0), 15000) == false)
+      assert (Topology.settled(15000, Some(0), 15000))
+    end
+
+  end
+
+end

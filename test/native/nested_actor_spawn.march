@@ -1,0 +1,55 @@
+-- spawn(Inner.Box) from the PARENT module of a nested actor. The actor's glue
+-- is minted under its bare declared name (Box_spawn); the call site used the
+-- qualified spelling (Inner.Box_spawn), so `--check` passed and `--compile`
+-- died at link time with an undefined `_Inner.Box_spawn`. Slow also checks the
+-- declared `mailbox` limit still binds when the spawn is qualified (that table
+-- is keyed by the bare name too).
+mod Outer do
+  needs IO.Console
+  needs IO.Spawn
+
+  mod Inner do
+    actor Box do
+      state { n : Int }
+      init  { n: 0 }
+      on Set(k : Int) do
+        { n: k }
+      end
+    end
+
+    actor Slow do
+      state { n : Int }
+      init  { n: 0 }
+      mailbox 8 drop_new
+      on Bump() do
+        let _ = List.fold_left(Range.to_list(Range.new(0, 1000)), 0, fn (a, b) -> a + b)
+        { n: state.n + 1 }
+      end
+    end
+
+    fn put(pid, k) do send(pid, Set(k)) end
+    fn bump(pid) do send(pid, Bump()) end
+  end
+
+  fn flood(pid, k) do
+    if k == 0 do () else
+      Inner.bump(pid)
+      flood(pid, k - 1)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let p = spawn(Inner.Box)
+    println("spawned")
+    Inner.put(p, 42)
+    run_until_idle()
+    match get_actor_field(p, "n") do
+      Some(n) -> println("n = " ++ int_to_string(n))
+      None    -> println("n = <none>")
+    end
+    let s = spawn(Inner.Slow)
+    flood(s, 5000)
+    run_until_idle()
+    println("some dropped: " ++ bool_to_string(Scheduler.dropped_messages() > 0))
+  end
+end

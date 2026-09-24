@@ -2,10 +2,15 @@
 
 **Status:** static half landed 2026-09-22 (build step 7 of
 `specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md`, section 4 and
-II.6). Implementation: `forge/lib/topology.ml`; CLI in `forge/bin/main.ml`
-(`forge topology check|export|gen`); compiler flag `--topology` in `bin/main.ml`
-(`bin/flags.ml`); generator templates under `forge/templates/topology/`.
-User documentation: `docs/topology.md`.
+II.6); level 0 landed 2026-09-23 (build step 3: the generated `main`, runtime
+placement, `forge run` and `forge run --processes`). Implementation:
+`forge/lib/topology.ml`; CLI in `forge/bin/main.ml` (`forge topology
+check|export|gen`); `forge/lib/topology_run.ml` (`forge run` on a topology app and
+the compiler-derived export values); compiler flag `--topology` in `bin/main.ml`
+(`bin/flags.ml`, `bin/topology_gen.ml`) with the generated `main` in
+`lib/desugar/desugar_topology.ml`; the runtime side in `stdlib/topology.march`;
+generator templates under `forge/templates/topology/`. User documentation:
+`docs/topology.md`.
 
 ## Files
 
@@ -70,9 +75,11 @@ The digest's fields plus:
 {
   "derived": {
     "edge": {
-      "initiates": ["Checkout.Client"],   // <P>_Run.initiate_<R> references reachable
-                                          // from the hook and the served roles' bodies
-      "caps": null                        // compiler-side derivation: not yet
+      "initiates": ["Checkout.Client"],   // <P>_Run.initiate_<R> reachable from the hook
+                                          // and the served roles (typed, by the compiler)
+      "caps": ["IO.NetListen"],           // what the hook and roles reach (D22); null when
+                                          // the compiler could not run
+      "source": "compiler"                // or "names": the by-name fallback
     }
   },
   "connectivity": [
@@ -125,3 +132,24 @@ a no-op without a `topology.toml`.
   --topology` accepts a valid digest, resolves a body/actor/hook in the entry and in
   an imported sibling module, rejects an unbound name with its message, refuses
   schema version 2 and a missing file.
+
+## The compiler's `topology` object
+
+`march --topology <digest> --emit-core-ast <entry>` adds, after typechecking:
+
+```jsonc
+"topology": {
+  "version": 1,
+  "generated_main": true,                 // false: the entry has its own main
+  "pools": {
+    "edge": {
+      "caps": ["IO"],                     // IO caps reached by the hook and the roles
+      "reached_from": { "IO": "hook Shop.Edge.start" },
+      "initiates": ["Checkout.Client"]
+    }
+  }
+}
+```
+
+`forge topology export` (and `gen`) read `caps` and `initiates` from it
+(`Topology_run.compiler_derived`). Without `--topology` the document has no such key.

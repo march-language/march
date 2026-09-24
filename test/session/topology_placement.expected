@@ -1,0 +1,6 @@
+ranking: n1 > n0 > n2
+n0's marker registered: yes
+placed: n0 offers []
+n1 dead: n0 offers [Echo.Server]
+n1 rejoined, settling: n0 offers [Echo.Server]
+closed: n0 offers []

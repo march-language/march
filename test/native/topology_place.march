@@ -1,0 +1,94 @@
+-- Topology.place over one real ClusterNode (build step 3, item 1): which
+-- roles a node opens under each placement rule, the markers a ranked role
+-- registers, re-offering after an offer dies (supervision), and a SIGTERM
+-- drain that closes every offer and exits. The pure placement decision is unit-tested in
+-- test/stdlib/test_topology.march; a role moving between nodes runs in
+-- test/two_node/topology_move.
+mod TopologyPlace do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs IO.Process
+  needs IO.Signal
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    ask: Client -> Server : Int
+    answer: Server -> Client : Int
+  end
+
+  pfn serve_one(s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
+    Echo_Server.recv_Ask(s, st, fn (n, st1) ->
+      Echo_Server.close(s, Echo_Server.send_Answer(s, st1, n * 10)))
+  end
+
+  pfn show(xs : List(String)) : String do "[" ++ String.join(xs, ", ") ++ "]" end
+
+  pfn wait_offered(h : Cap(ClusterNode.Live), want : List(String), left : Int) : Bool do
+    if Topology.offered(h) == want do true
+    else if left <= 0 do false else
+      sleep_ms(20)
+      wait_offered(h, want, left - 20)
+    end end
+  end
+
+  fn main(c : Cap(IO)) do
+    let h = match ClusterNode.start(c, ClusterNode.config("topo-1", 0, "", Nil, "topo-secret", 1)) do
+      Ok(h) -> h
+      Err(e) -> panic(e)
+    end
+    let mk = fn (name, p) -> Topology.role(name, p, fn () -> Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)))
+    -- No labels on this node: the On("gpu") role is not offered here.
+    Topology.place(h, [ mk("Echo.Server", Topology.everywhere()),
+                        mk("Echo.Gpu", Topology.on_label("gpu")),
+                        mk("Echo.Counted", Topology.count(1)) ])
+    println("offered: " ++ show(Topology.offered(h)))
+    -- A ranked role registers this node's marker (asynchronously).
+    let marker = Topology.marker("Echo.Counted", ClusterNode.node_id(h))
+    if wait_marker(h, marker, 5000) do println("marker registered") else println("marker missing") end
+    -- Supervision: kill one offer's actor; the role is offered again.
+    let _ = task_spawn(fn _ -> do
+      Topology.supervise_offers(h)
+      0
+    end)
+    match Topology.offer_worker(h, "Echo.Server") do
+      None -> println("Echo.Server has no offer")
+      Some(before) ->
+        kill(before)
+        if wait_reoffered(h, "Echo.Server", pid_to_int(before), 5000) do println("re-offered after its offer died")
+        else println("never re-offered") end
+    end
+    -- SIGTERM drains: every offer closes and, with nothing running, the
+    -- process exits 0 on its own.
+    Topology.drain_on_signal(h, 1000, 5000)
+    Signal.raise(Signal.Term)
+    sleep_ms(10000)
+    println("the drain never exited")
+  end
+
+  pfn wait_marker(h : Cap(ClusterNode.Live), name : String, left : Int) : Bool do
+    if ClusterNode.lookup(h, name) != None do true
+    else if left <= 0 do false else
+      sleep_ms(20)
+      wait_marker(h, name, left - 20)
+    end end
+  end
+
+  pfn wait_reoffered(h : Cap(ClusterNode.Live), role : String, old : Int, left : Int) : Bool do
+    let now = match Topology.offer_worker(h, role) do
+      Some(p) -> pid_to_int(p)
+      None -> old
+    end
+    if now != old do true
+    else if left <= 0 do false else
+      sleep_ms(20)
+      wait_reoffered(h, role, old, left - 20)
+    end end
+  end
+end

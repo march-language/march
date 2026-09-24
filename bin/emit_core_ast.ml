@@ -14,7 +14,7 @@
     The body keeps [compile]'s original indentation: OCaml is insensitive to
     it, and re-indenting would forfeit the byte-for-byte motion proof. *)
 
-let run ~(filename : string) ~(user_files : string list) ~user_ast ~type_map
+let run ~(topology : string option) ~(filename : string) ~(user_files : string list) ~user_ast ~type_map
         ~(diags : March_errors.Errors.diagnostic list) ~is_user_file
         ~(typecheck_env : March_typecheck.Typecheck.env)
         ~(rejected : bool) : unit =
@@ -143,7 +143,7 @@ let run ~(filename : string) ~(user_files : string list) ~user_ast ~type_map
                   (List.map March_dump.Dump.json_string needs)) ])
     in
     let doc =
-      March_dump.Dump.json_obj [
+      March_dump.Dump.json_obj ([
         ("format_version", "3");
         ("verdict", March_dump.Dump.json_string verdict);
         ("diagnostics", diagnostics_json);
@@ -152,6 +152,10 @@ let run ~(filename : string) ~(user_files : string list) ~user_ast ~type_map
         ("instantiations", March_dump.Dump.json_list insts_json);
         ("module_caps", March_dump.Dump.json_list module_caps_json);
       ]
+      (* --topology: the derived pool caps and initiated roles
+         (Topology_gen.json), present only with the flag, so every other
+         document is byte-identical to before. *)
+      @ (match topology with Some j -> [ ("topology", j) ] | None -> []))
     in
     print_string doc;
     exit (if verdict = "accept" then 0 else 1)
