@@ -249,7 +249,7 @@ let scalar_builtins = [
   "march_decrc_freed"; "march_decrc_local_freed";
   "march_incrc"; "march_decrc"; "march_free";
   "native_int_arr_get"; "native_int_arr_length"; "native_int_arr_set"; "native_int_arr_sum";
-  "native_int_arr_sort";
+  "native_int_arr_sort"; "native_float_arr_sort";
   "native_float_arr_get"; "native_float_arr_length"; "native_float_arr_set"; "native_float_arr_sum";
   "native_f32_arr_get"; "native_f32_arr_length"; "native_f32_arr_set"; "native_f32_arr_sum";
   "native_i32_arr_get"; "native_i32_arr_length"; "native_i32_arr_set"; "native_i32_arr_sum";
