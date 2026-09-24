@@ -1054,10 +1054,16 @@ let builtin_bindings : (string * scheme) list =
     (* file_close returns :ok on both backends (it was declared Unit while
        the interpreter returned :ok and compiled C a heap Ok(()) cell). *)
     ("file_close",      Mono (TArrow (t_int, t_atom)));
-    (* Structured cleanup: try_finally(action: () -> a, cleanup: () -> b) : a *)
+    (* Structured cleanup: try_finally(action: () -> a, cleanup: () -> b) : a.
+       Both callbacks take one DUMMY argument, which they must ignore (every
+       caller writes `fn _ -> ...`): the interpreter passes `()`, the compiled
+       runtime (march_try_finally) passes a placeholder word. The argument
+       used to be declared `Int`, which matched neither backend and made
+       a thunk annotated `() -> a` (Logger.with_scope's) a type error that
+       the stdlib diagnostic filter hid. *)
     ("try_finally",
-      poly2 (fun a b -> TArrow (TArrow (t_int, a),
-                                TArrow (TArrow (t_int, b), a))));
+      poly2 (fun a b -> TArrow (TArrow (t_unit, a),
+                                TArrow (TArrow (t_unit, b), a))));
     (* CSV builtins — csv_next_row returns CsvRow (declared in csv.march).
        The TIR registers user ptypes under their module-qualified name
        ("Csv.CsvRow"), so this MUST match that qualification: a bare
@@ -1339,8 +1345,8 @@ let builtin_bindings : (string * scheme) list =
         TCon ("Result", [TCon ("Bytes", []); t_string])))));
     ("stdlib_zstd_decode",    Mono (TArrow (TCon ("Bytes", []),
         TCon ("Result", [TCon ("Bytes", []); t_string]))));
-    ("stdlib_brotli_encode",  Mono (TArrow (TCon ("Bytes", []), TArrow (t_int,
-        TCon ("Result", [TCon ("Bytes", []); t_string])))));
+    ("stdlib_brotli_encode",  Mono (TArrow (TCon ("Bytes", []), TArrow (t_int, TArrow (t_int,
+        TCon ("Result", [TCon ("Bytes", []); t_string]))))));
     ("stdlib_brotli_decode",  Mono (TArrow (TCon ("Bytes", []),
         TCon ("Result", [TCon ("Bytes", []); t_string]))));
     (* NativeArray builtins — flat OCaml arrays for fast numeric loops (P10).

@@ -37,11 +37,11 @@ mod RRB do
 
   -- Persistent sequence. Wraps the Array module's 32-way trie PVec.
   -- Constructors are private; use the public API below.
-  ptype Vec(a) = Vec(Array(a))
+  ptype Vec(a) = Vec(Array.PVec(a))
 
   -- Zero-copy contiguous window into a Vec: [lo, hi).
   -- Created by slice/chunk; iterated by fold.
-  ptype Slice(a) = Slice(Array(a), Int, Int)
+  ptype Slice(a) = Slice(Array.PVec(a), Int, Int)
 
   -- ── Construction ──────────────────────────────────────────────────────────
 
@@ -54,8 +54,8 @@ mod RRB do
   doc "Build a `Vec` from a list. O(n)."
   fn from_list(xs: List(a)): Vec(a) do Vec(Array.from_list(xs)) end
 
-  doc "Wrap an `Array` as a `Vec`. O(1)."
-  fn from_array(xs: Array(a)): Vec(a) do Vec(xs) end
+  doc "Wrap an `Array` (an `Array.PVec(a)`, the type every `Array.*` function returns) as a `Vec`. O(1)."
+  fn from_array(xs: Array.PVec(a)): Vec(a) do Vec(xs) end
 
   doc """
   Build a `Vec` of length `n` by calling `f(i)` for each index i ∈ [0, n).
@@ -233,8 +233,8 @@ mod RRB do
     match v do Vec(arr) -> Array.to_list(arr) end
   end
 
-  doc "Return the underlying `Array`. O(1)."
-  fn to_array(v: Vec(a)): Array(a) do
+  doc "Return the underlying `Array` (an `Array.PVec(a)`). O(1)."
+  fn to_array(v: Vec(a)): Array.PVec(a) do
     match v do Vec(arr) -> arr end
   end
 

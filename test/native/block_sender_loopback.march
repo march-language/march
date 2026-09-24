@@ -65,6 +65,17 @@ mod BlockSenderLoopback do
     end
   end
 
+  -- Poll (10 ms steps, [attempts] tries) until the queue's admitted-but-
+  -- unwritten depth reads [want]; same helper as credit_backpressure_loopback.
+  pfn wait_depth(q, want : Int, attempts : Int) : Bool do
+    if NodeQueue.depth(q) == want do true
+    else if attempts <= 0 do false
+    else
+      let _ = Process.run("sleep", Cons("0.01", Nil))
+      wait_depth(q, want, attempts - 1)
+    end end
+  end
+
   fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_random : Cap(IO.Random), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
     let listen_fd = match tcp_listen(0) do
       Ok(fd) -> fd
@@ -83,10 +94,15 @@ mod BlockSenderLoopback do
     let r1 = NodeQueue.enqueue(q, 1, frame(), NodeQueue.DropNew)
     let r2 = NodeQueue.enqueue(q, 2, frame(), NodeQueue.DropNew)
     println("node-a: two frames admitted: " ++ bool_to_string(r1 == Ok(()) && r2 == Ok(())))
-    -- Let the writer put those two on the wire (initial credit covers 100).
-    -- Not run_until_idle: the receiver task is parked in accept, and that
-    -- call never returns while any task is parked in a socket read.
-    let _ = Process.run("sleep", Cons("0.05", Nil))
+    -- Wait for the writer to put those two on the wire (initial credit
+    -- covers 100), so depth is 0 and frames 3-4 both fit the budget. Poll the
+    -- observable state rather than sleeping a fixed time: under load the
+    -- writer can take longer than any fixed pause. Not run_until_idle: the
+    -- receiver task is parked in accept, and that call never returns while
+    -- any task is parked in a socket read.
+    if wait_depth(q, 0, 500) do ()
+    else panic("node-a: writer never wrote frames 1-2 under the initial credit (depth " ++ int_to_string(NodeQueue.depth(q)) ++ " after 5 s)")
+    end
     let r3 = NodeQueue.enqueue(q, 3, frame(), NodeQueue.DropNew)
     let r4 = NodeQueue.enqueue(q, 4, frame(), NodeQueue.DropNew)
     println("node-a: two more queued behind the credit line: " ++ bool_to_string(r3 == Ok(()) && r4 == Ok(())))
