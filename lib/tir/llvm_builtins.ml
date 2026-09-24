@@ -394,6 +394,15 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_hmac_sha256(ptr %key, ptr %msg)" };
   { march_name = "hmac_sha256_bytes"; c_name = Some "march_hmac_sha256_bytes"; ret_ty = Some (Tir.TCon ("Bytes", []));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_hmac_sha256_bytes(ptr %key, ptr %msg)" };
+  (* ed25519 / X25519 over the vendored TweetNaCl (runtime/march_nacl.c). *)
+  { march_name = "ed25519_seed_keypair"; c_name = Some "march_ed25519_seed_keypair"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_ed25519_seed_keypair(ptr %seed)" };
+  { march_name = "ed25519_sign"; c_name = Some "march_ed25519_sign"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_ed25519_sign(ptr %sk, ptr %msg)" };
+  { march_name = "ed25519_verify"; c_name = Some "march_ed25519_verify"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_ed25519_verify(ptr %pk, ptr %msg, ptr %sig)" };
+  { march_name = "x25519"; c_name = Some "march_x25519"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_x25519(ptr %k, ptr %u)" };
   { march_name = "pbkdf2_sha256"; c_name = Some "march_pbkdf2_sha256"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_pbkdf2_sha256(ptr %pass, ptr %salt, i64 %iters, i64 %len)" };
   { march_name = "base64_encode"; c_name = Some "march_base64_encode"; ret_ty = Some Tir.TString;
@@ -1383,6 +1392,10 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_sha1_bytes";
   PDeclare "march_hmac_sha256";
   PDeclare "march_hmac_sha256_bytes";
+  PDeclare "march_ed25519_seed_keypair";
+  PDeclare "march_ed25519_sign";
+  PDeclare "march_ed25519_verify";
+  PDeclare "march_x25519";
   PDeclare "march_pbkdf2_sha256";
   PDeclare "march_base64_encode";
   PDeclare "march_base64_decode";

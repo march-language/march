@@ -1,0 +1,271 @@
+-- NodeCert: a cluster node's certificate (distributed-deploys build step 11a).
+--
+-- A certificate names one node, the protocol roles it may play and the raw
+-- primitives it may use, and is signed (ed25519) by the cluster's OPERATOR
+-- key. Nodes present certificates in the cert-mode handshake
+-- (NetKernel.handshake_auth); each side verifies the other's against the
+-- operator public key and the clock, then proves it holds the key the
+-- certificate names. See specs/lang/clustering.md, "Node certificates".
+--
+-- Names are SPIFFE-style URIs, so a service mesh can carry the same
+-- identities later (SPIFFE itself is not implemented):
+--   node    spiffe://<trust-domain>/pool/<pool>/node/<name>
+--   issuer  spiffe://<trust-domain>/operator/<first 16 hex digits of the operator key>
+--
+-- Roles are "Proto.Role:offer" / "Proto.Role:initiate"; the one flag so far
+-- is "raw_send". Nothing checks roles or flags yet: that is step 11b
+-- (`offer_verdict`/`fill_roles`, `ClusterNode.send_msg`/`route`), which reads
+-- them from `ClusterNode.peer_cert`.
+--
+-- Wire form. The body is the canonical MessagePack array
+--   ["march-node-cert-v1", node, [role...], [flag...], not_after, issuer,
+--    pubkey_hex, serial]
+-- (Msgpack.encode's smallest-form encoding; forge's `cluster cert` writes the
+-- same bytes), and a signed certificate is [Bin(body), Bin(signature)]; its
+-- text form (MARCH_NODE_CERT, `forge cluster cert`'s .cert file) is that,
+-- base64. The signature covers the body bytes exactly as sent, so
+-- verification never re-encodes. `not_after` is unix SECONDS, inclusive.
+--
+-- A revocation is signed by the same operator key: body
+--   ["march-revocation-v1", node, serial, issued_at]
+-- revoking one certificate (serial != "") or every certificate of a node
+-- (serial == ""). Revocations are gossiped between nodes (ClusterNode).
+mod NodeCert do
+
+  type Cert = { node : String, roles : List(String), flags : List(String), not_after : Int,
+                issuer : String, pubkey : String, serial : String }
+
+  -- A certificate as received: the decoded fields, the exact body bytes the
+  -- signature covers, and the signature.
+  type Signed = { cert : Cert, body : List(Int), signature : Bytes }
+
+  type Revocation = { node : String, serial : String, issued_at : Int }
+
+  type SignedRevocation = { rev : Revocation, body : List(Int), signature : Bytes }
+
+  -- What a node needs to take part in a cert-mode handshake: its own signed
+  -- certificate, the ed25519 secret key the certificate names (64 bytes:
+  -- seed || public key), the operator public key every peer's certificate
+  -- must verify under, and a predicate for revoked certificates (the node's
+  -- live revocation list).
+  type Credentials = { signed : Signed, secret_key : Bytes, operator_pubkey : Bytes,
+                       revoked : Cert -> Bool }
+
+  fn cert_version() : String do "march-node-cert-v1" end
+  fn revocation_version() : String do "march-revocation-v1" end
+
+  -- ── keys ────────────────────────────────────────────────────────────────
+
+  doc "A fresh ed25519 secret key (64 bytes: seed || public key)."
+  fn keypair() : Bytes do ed25519_seed_keypair(Crypto.random_bytes(32)) end
+
+  doc "The secret key a 32-byte [seed] determines (RFC 8032); empty Bytes for a wrong length."
+  fn keypair_from_seed(seed : Bytes) : Bytes do ed25519_seed_keypair(seed) end
+
+  doc "The 32-byte public key inside a 64-byte secret key."
+  fn public_key(sk : Bytes) : Bytes do Bytes.slice(sk, 32, 32) end
+
+  doc "A key (or signature) from its hex text, checking its length in bytes."
+  fn key_from_hex(s : String, len : Int) : Result(Bytes, String) do
+    match Bytes.from_hex(String.trim(s)) do
+      Err(e) -> Err("not hex: " ++ e)
+      Ok(b) ->
+        if Bytes.length(b) != len do
+          Err("expected " ++ int_to_string(len) ++ " bytes, got " ++ int_to_string(Bytes.length(b)))
+        else Ok(b) end
+    end
+  end
+
+  -- ── names ───────────────────────────────────────────────────────────────
+
+  doc "The SPIFFE-style URI of node [name] in [pool] under [trust_domain]."
+  fn node_uri(trust_domain : String, pool : String, name : String) : String do
+    "spiffe://" ++ trust_domain ++ "/pool/" ++ pool ++ "/node/" ++ name
+  end
+
+  doc "The issuer URI for an operator public key (hex): its first 16 hex digits."
+  fn issuer_uri(trust_domain : String, operator_pub_hex : String) : String do
+    "spiffe://" ++ trust_domain ++ "/operator/" ++ String.slice(operator_pub_hex, 0, 16)
+  end
+
+  doc """
+  The node name a certificate's URI ends in (the segment after the last
+  "/node/"), or "" when the URI has no node segment. The handshake requires it
+  to equal the name the peer announces.
+  """
+  fn node_name(uri : String) : String do
+    match List.reverse(String.split(uri, "/node/")) do
+      Cons(last, Cons(_, _)) -> if String.contains(last, "/") do "" else last end
+      _ -> ""
+    end
+  end
+
+  doc "Does [c] let its node play role [role] (\"Proto.Role:offer\" or \":initiate\")?"
+  fn has_role(c : Cert, role : String) : Bool do List.member(c.roles, role) end
+
+  doc "Does [c] carry [flag] (e.g. \"raw_send\")?"
+  fn has_flag(c : Cert, flag : String) : Bool do List.member(c.flags, flag) end
+
+  -- ── the canonical body ──────────────────────────────────────────────────
+
+  pfn strs(xs : List(String)) : Msgpack.Value do Msgpack.array(List.map(xs, fn x -> Msgpack.str(x))) end
+
+  doc "The canonical MessagePack body of [c] (what the operator signs)."
+  fn encode(c : Cert) : List(Int) do
+    Msgpack.encode(Msgpack.array([
+      Msgpack.str(cert_version()), Msgpack.str(c.node), strs(c.roles), strs(c.flags),
+      Msgpack.int(c.not_after), Msgpack.str(c.issuer), Msgpack.str(c.pubkey), Msgpack.str(c.serial)]))
+  end
+
+  pfn str_list(vs : List(Msgpack.Value)) : Option(List(String)) do
+    List.fold_right(vs, Some(Nil), fn (v, acc) ->
+      match (v, acc) do
+        (Msgpack.Str(s), Some(rest)) -> Some(Cons(s, rest))
+        _ -> None
+      end)
+  end
+
+  doc "Decode a canonical body."
+  fn decode(bytes : List(Int)) : Result(Cert, String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err("NodeCert: " ++ e)
+      Ok(Msgpack.Array([Msgpack.Str(v), Msgpack.Str(node), Msgpack.Array(rs), Msgpack.Array(fs),
+                        Msgpack.Int(na), Msgpack.Str(issuer), Msgpack.Str(pk), Msgpack.Str(serial)])) ->
+        if v != cert_version() do Err("NodeCert: unknown certificate version " ++ v)
+        else
+          match (str_list(rs), str_list(fs)) do
+            (Some(roles), Some(flags)) ->
+              Ok({ node: node, roles: roles, flags: flags, not_after: na, issuer: issuer,
+                   pubkey: pk, serial: serial })
+            _ -> Err("NodeCert: roles and flags must be strings")
+          end
+        end
+      Ok(_) -> Err("NodeCert: malformed certificate body")
+    end
+  end
+
+  -- ── signing and verification ────────────────────────────────────────────
+
+  doc "Sign [c] with the operator secret key [operator_sk]."
+  fn sign(c : Cert, operator_sk : Bytes) : Signed do
+    let body = encode(c)
+    { cert: c, body: body, signature: ed25519_sign(operator_sk, Bytes.from_list(body)) }
+  end
+
+  doc "The signed certificate's wire bytes: [Bin(body), Bin(signature)]."
+  fn to_bytes(s : Signed) : List(Int) do
+    Msgpack.encode(Msgpack.array([Msgpack.bin(s.body), Msgpack.bin(Bytes.to_list(s.signature))]))
+  end
+
+  doc "Parse wire bytes (does NOT verify: see `verify`)."
+  fn from_bytes(bytes : List(Int)) : Result(Signed, String) do
+    match Msgpack.decode(bytes) do
+      Err(e) -> Err("NodeCert: " ++ e)
+      Ok(Msgpack.Array([Msgpack.Bin(body), Msgpack.Bin(sg)])) ->
+        match decode(body) do
+          Err(e) -> Err(e)
+          Ok(c) -> Ok({ cert: c, body: body, signature: Bytes.from_list(sg) })
+        end
+      Ok(_) -> Err("NodeCert: malformed signed certificate")
+    end
+  end
+
+  doc "The text form (base64 of `to_bytes`): MARCH_NODE_CERT and forge's .cert files."
+  fn to_text(s : Signed) : String do Bytes.encode_base64(Bytes.from_list(to_bytes(s))) end
+
+  doc "Parse the text form (does NOT verify)."
+  fn from_text(t : String) : Result(Signed, String) do
+    match Bytes.decode_base64(String.trim(t)) do
+      Err(e) -> Err("NodeCert: " ++ e)
+      Ok(b) -> from_bytes(Bytes.to_list(b))
+    end
+  end
+
+  doc """
+  Verify a signed certificate against [operator_pubkey] (32 bytes) at [now]
+  (unix seconds): the signature must cover the body, and [now] must not be
+  past `not_after`. Returns the certificate, or why it is refused.
+  """
+  fn verify(s : Signed, operator_pubkey : Bytes, now : Int) : Result(Cert, String) do
+    if not(ed25519_verify(operator_pubkey, Bytes.from_list(s.body), s.signature)) do
+      Err("certificate not signed by the cluster operator")
+    else if now > s.cert.not_after do
+      Err("certificate expired")
+    else if Bytes.length(Result.unwrap_or(Bytes.from_hex(s.cert.pubkey), Bytes.empty())) != 32 do
+      Err("certificate names no valid node key")
+    else
+      Ok(s.cert)
+    end end end
+  end
+
+  doc "Has [c] expired at [now] (unix seconds)?"
+  fn expired(c : Cert, now : Int) : Bool do now > c.not_after end
+
+  -- ── revocations ─────────────────────────────────────────────────────────
+
+  fn encode_revocation(r : Revocation) : List(Int) do
+    Msgpack.encode(Msgpack.array([Msgpack.str(revocation_version()), Msgpack.str(r.node),
+                                  Msgpack.str(r.serial), Msgpack.int(r.issued_at)]))
+  end
+
+  fn decode_revocation(bytes : List(Int)) : Result(Revocation, String) do
+    match Msgpack.decode(bytes) do
+      Ok(Msgpack.Array([Msgpack.Str(v), Msgpack.Str(node), Msgpack.Str(serial), Msgpack.Int(at)])) ->
+        if v != revocation_version() do Err("NodeCert: unknown revocation version " ++ v)
+        else Ok({ node: node, serial: serial, issued_at: at }) end
+      Ok(_) -> Err("NodeCert: malformed revocation")
+      Err(e) -> Err("NodeCert: " ++ e)
+    end
+  end
+
+  doc "Sign a revocation with the operator secret key."
+  fn sign_revocation(r : Revocation, operator_sk : Bytes) : SignedRevocation do
+    let body = encode_revocation(r)
+    { rev: r, body: body, signature: ed25519_sign(operator_sk, Bytes.from_list(body)) }
+  end
+
+  fn revocation_to_bytes(s : SignedRevocation) : List(Int) do
+    Msgpack.encode(Msgpack.array([Msgpack.bin(s.body), Msgpack.bin(Bytes.to_list(s.signature))]))
+  end
+
+  fn revocation_from_bytes(bytes : List(Int)) : Result(SignedRevocation, String) do
+    match Msgpack.decode(bytes) do
+      Ok(Msgpack.Array([Msgpack.Bin(body), Msgpack.Bin(sg)])) ->
+        match decode_revocation(body) do
+          Err(e) -> Err(e)
+          Ok(r) -> Ok({ rev: r, body: body, signature: Bytes.from_list(sg) })
+        end
+      Ok(_) -> Err("NodeCert: malformed signed revocation")
+      Err(e) -> Err("NodeCert: " ++ e)
+    end
+  end
+
+  doc "The text form of a signed revocation (base64): what `forge cluster revoke` prints."
+  fn revocation_to_text(s : SignedRevocation) : String do
+    Bytes.encode_base64(Bytes.from_list(revocation_to_bytes(s)))
+  end
+
+  fn revocation_from_text(t : String) : Result(SignedRevocation, String) do
+    match Bytes.decode_base64(String.trim(t)) do
+      Err(e) -> Err("NodeCert: " ++ e)
+      Ok(b) -> revocation_from_bytes(Bytes.to_list(b))
+    end
+  end
+
+  doc "Verify a signed revocation against the operator key (a member cannot revoke another)."
+  fn verify_revocation(s : SignedRevocation, operator_pubkey : Bytes) : Result(Revocation, String) do
+    if ed25519_verify(operator_pubkey, Bytes.from_list(s.body), s.signature) do Ok(s.rev)
+    else Err("revocation not signed by the cluster operator") end
+  end
+
+  doc "Does [r] revoke [c]: the same serial, or (serial \"\") every certificate of [c]'s node?"
+  fn revokes(r : Revocation, c : Cert) : Bool do
+    if String.is_empty(r.serial) do r.node == c.node else r.serial == c.serial end
+  end
+
+  doc "Is [c] revoked by any of [rs]?"
+  fn is_revoked(c : Cert, rs : List(Revocation)) : Bool do
+    List.any(rs, fn r -> revokes(r, c))
+  end
+
+end

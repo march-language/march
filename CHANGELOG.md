@@ -12,6 +12,19 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Node certificates for clusters** (build step 11a of the distributed-deploys
+  plan, part 1). New `NodeCert` module: a certificate names a node
+  (`spiffe://<trust-domain>/pool/<pool>/node/<name>`), its role permissions
+  (`Proto.Role:offer` / `Proto.Role:initiate`), flags (`raw_send`), an expiry and
+  a serial, and is signed ed25519 by an operator key; `NodeCert.verify(cert,
+  operator_pubkey, now)` checks it, and operator-signed revocations name a
+  serial or a whole node. `forge cluster keygen` makes the operator keypair (a
+  separate key from the hot-reload deploy key), `forge cluster cert <node>
+  --roles ... --flags ... --days N` issues a node key and certificate, and
+  `forge cluster revoke --serial S | --node N` prints a revocation token. New
+  builtins `ed25519_seed_keypair`, `ed25519_sign`, `ed25519_verify` and
+  `x25519` (RFC 8032 / RFC 7748, over the runtime's TweetNaCl, which gained
+  X25519).
 - **Hot reload: the unified epoch model and drains** (build step 6 of the
   distributed-deploys plan). Every unit of work (actor, task, session) runs at the
   epoch of the deploy it started under, and every call it makes, from the base
