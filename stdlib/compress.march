@@ -1,7 +1,8 @@
 -- Compress module: gzip, deflate, zstd, and brotli compression.
 --
 -- All one-shot encode/decode functions operate on Bytes values and return
--- Result(Bytes, Compress.Error).  Streaming variants return Seq(Bytes).
+-- Result(Bytes, Compress.Error).  Streaming variants take a Seq of Bytes
+-- chunks and return a lazy Seq of per-chunk Result(Bytes, Compress.Error).
 --
 -- Sub-modules are scoped by algorithm so callers can import selectively:
 --
@@ -20,17 +21,77 @@
 mod Compress do
 
   -- Shared error type across all sub-modules.
+  --   InvalidInput(msg)   the input was not valid compressed data (decode),
+  --                       or was too large to hand to the codec (encode)
+  --   InsufficientOutput  decoding hit the decompressed-output size cap
+  --   Io(msg)             an environment failure: out of memory, a codec
+  --                       that failed to initialise, or a library not built in
+  -- `msg` is the codec's own message, e.g. "gzip_decode: inflate failed".
   type Error =
       InvalidInput(String)
     | InsufficientOutput
     | Io(String)
 
-  -- ── Private helpers ───────────────────────────────────────────────────────
+  -- ── Error mapping ─────────────────────────────────────────────────────────
 
-  pfn unwrap_result(r) do
+  -- The gzip/deflate/zstd/brotli builtins report failure as a plain message
+  -- string (runtime/march_compress.c compiled, lib/eval/compress_stubs.c
+  -- interpreted; both spell the same messages). The classifiers below turn
+  -- that string into the structured `Error` every public signature promises,
+  -- keeping the original message as the payload where there is one.
+  --
+  -- Encoding: an oversized input is the caller's input; anything else (out
+  -- of memory, a failed encoder init, a missing library) is an environment
+  -- failure.
+  pfn encode_error(msg : String) : Error do
+    if string_contains(msg, "input too large") do InvalidInput(msg)
+    else Io(msg) end
+  end
+
+  -- Decoding: hitting the output size cap is `InsufficientOutput`; out of
+  -- memory, a failed decoder init or a missing library is `Io`; every other
+  -- failure (corrupt stream, truncated data, a zstd frame error) means the
+  -- input was not valid compressed data.
+  pfn decode_error(msg : String) : Error do
+    if string_contains(msg, "size limit exceeded")
+       || string_contains(msg, "exceeds limit") do InsufficientOutput
+    else if string_contains(msg, "out of memory")
+            || string_contains(msg, "Init")
+            || string_contains(msg, "not available") do Io(msg)
+    else InvalidInput(msg)
+    end end
+  end
+
+  -- The two lifts are public only because the sub-modules must reach them:
+  -- a nested module's BARE call to a parent function (`lift_decode_error(r)`
+  -- inside `mod Gzip`) typechecks and interprets, but in a module that is not
+  -- the compile's entry (every stdlib module) the compiled call is left
+  -- unqualified and fails to link, and a QUALIFIED call to a `pfn` is
+  -- rejected as private. See
+  -- specs/todos/2026-09-24-nested-module-bare-parent-call-link-failure.md.
+
+  doc """
+  Convert a raw encoder result, whose error is the codec's message string,
+  into `Result(Bytes, Compress.Error)`. Used by every `encode*` wrapper; an
+  oversized input becomes `InvalidInput(msg)`, anything else `Io(msg)`.
+  """
+  fn lift_encode_error(r : Result(Bytes, String)) : Result(Bytes, Error) do
     match r do
-    Ok(v) -> v
-    Err(msg) -> panic("Compress: " ++ msg)
+    Ok(b) -> Ok(b)
+    Err(msg) -> Err(encode_error(msg))
+    end
+  end
+
+  doc """
+  Convert a raw decoder result, whose error is the codec's message string,
+  into `Result(Bytes, Compress.Error)`. Used by every `decode*` wrapper:
+  corrupt or truncated data becomes `InvalidInput(msg)`, hitting the output
+  size cap `InsufficientOutput`, and an environment failure `Io(msg)`.
+  """
+  fn lift_decode_error(r : Result(Bytes, String)) : Result(Bytes, Error) do
+    match r do
+    Ok(b) -> Ok(b)
+    Err(msg) -> Err(decode_error(msg))
     end
   end
 
@@ -67,7 +128,7 @@ mod Compress do
         end
     """
     fn encode(data : Bytes) : Result(Bytes, Compress.Error) do
-      stdlib_gzip_encode(data, -1)
+      Compress.lift_encode_error(stdlib_gzip_encode(data, -1))
     end
 
     doc """
@@ -77,7 +138,7 @@ mod Compress do
         Compress.Gzip.encode_level(data, Gzip.Custom(6))
     """
     fn encode_level(data : Bytes, level : Level) : Result(Bytes, Compress.Error) do
-      stdlib_gzip_encode(data, level_int(level))
+      Compress.lift_encode_error(stdlib_gzip_encode(data, level_int(level)))
     end
 
     doc """
@@ -89,7 +150,7 @@ mod Compress do
         end
     """
     fn decode(data : Bytes) : Result(Bytes, Compress.Error) do
-      stdlib_gzip_decode(data)
+      Compress.lift_decode_error(stdlib_gzip_decode(data))
     end
 
     doc """
@@ -97,23 +158,27 @@ mod Compress do
     Result values.  Each chunk is compressed independently; errors are
     surfaced per-chunk rather than silently dropped.
 
-        let chunks : Seq(Bytes) = ...
-        let compressed : Seq(Result(Bytes, Compress.Error)) =
+        let chunks = Seq.from_list([chunk1, chunk2])   -- a Seq of Bytes
+        let compressed =                              -- a Seq of Result(Bytes, Compress.Error)
           Compress.Gzip.encode_stream(chunks)
     """
-    fn encode_stream(input : Seq(Bytes)) : Seq(Result(Bytes, Compress.Error)) do
-      Seq.map(input, fn chunk -> stdlib_gzip_encode(chunk, -1))
+    -- The streaming functions are deliberately unannotated. `Seq(a)`'s
+    -- parameter is the church-encoded fold closure, not the element type
+    -- (see stdlib/seq.march), so `Seq(Bytes)` names no real sequence and an
+    -- annotation spelled that way cannot typecheck.
+    fn encode_stream(input) do
+      Seq.map(input, fn chunk -> Compress.lift_encode_error(stdlib_gzip_encode(chunk, -1)))
     end
 
     doc """
     Decompress a sequence of gzip-compressed byte chunks.  Errors are
     surfaced per-chunk rather than silently dropped.
 
-        let decompressed : Seq(Result(Bytes, Compress.Error)) =
+        let decompressed =                            -- a Seq of Result(Bytes, Compress.Error)
           Compress.Gzip.decode_stream(compressed_chunks)
     """
-    fn decode_stream(input : Seq(Bytes)) : Seq(Result(Bytes, Compress.Error)) do
-      Seq.map(input, fn chunk -> stdlib_gzip_decode(chunk))
+    fn decode_stream(input) do
+      Seq.map(input, fn chunk -> Compress.lift_decode_error(stdlib_gzip_decode(chunk)))
     end
 
   end
@@ -131,7 +196,7 @@ mod Compress do
         end
     """
     fn encode(data : Bytes) : Result(Bytes, Compress.Error) do
-      stdlib_deflate_encode(data)
+      Compress.lift_encode_error(stdlib_deflate_encode(data))
     end
 
     doc """
@@ -143,7 +208,7 @@ mod Compress do
         end
     """
     fn decode(data : Bytes) : Result(Bytes, Compress.Error) do
-      stdlib_deflate_decode(data)
+      Compress.lift_decode_error(stdlib_deflate_decode(data))
     end
 
   end
@@ -172,11 +237,12 @@ mod Compress do
 
         match Compress.Zstd.encode(data) do
         Ok(compressed) -> compressed
-        Err(e) -> panic("zstd encode failed: " ++ e)
+        Err(InvalidInput(msg)) -> panic("zstd encode failed: " ++ msg)
+        Err(_) -> panic("zstd encode failed")
         end
     """
     fn encode(data : Bytes) : Result(Bytes, Compress.Error) do
-      stdlib_zstd_encode(data, 3)
+      Compress.lift_encode_error(stdlib_zstd_encode(data, 3))
     end
 
     doc """
@@ -186,7 +252,7 @@ mod Compress do
         Compress.Zstd.encode_level(data, Zstd.Fast(1))
     """
     fn encode_level(data : Bytes, level : Level) : Result(Bytes, Compress.Error) do
-      stdlib_zstd_encode(data, level_int(level))
+      Compress.lift_encode_error(stdlib_zstd_encode(data, level_int(level)))
     end
 
     doc """
@@ -194,27 +260,28 @@ mod Compress do
 
         match Compress.Zstd.decode(compressed) do
         Ok(original) -> original
-        Err(e) -> panic("zstd decode failed: " ++ e)
+        Err(InvalidInput(msg)) -> panic("zstd decode failed: " ++ msg)
+        Err(_) -> panic("zstd decode failed")
         end
     """
     fn decode(data : Bytes) : Result(Bytes, Compress.Error) do
-      stdlib_zstd_decode(data)
+      Compress.lift_decode_error(stdlib_zstd_decode(data))
     end
 
     doc """
     Compress a sequence of byte chunks with zstd at the default level.
     Errors are surfaced per-chunk rather than silently dropped.
     """
-    fn encode_stream(input : Seq(Bytes)) : Seq(Result(Bytes, Compress.Error)) do
-      Seq.map(input, fn chunk -> stdlib_zstd_encode(chunk, 3))
+    fn encode_stream(input) do
+      Seq.map(input, fn chunk -> Compress.lift_encode_error(stdlib_zstd_encode(chunk, 3)))
     end
 
     doc """
     Decompress a sequence of zstd-compressed byte chunks.
     Errors are surfaced per-chunk rather than silently dropped.
     """
-    fn decode_stream(input : Seq(Bytes)) : Seq(Result(Bytes, Compress.Error)) do
-      Seq.map(input, fn chunk -> stdlib_zstd_decode(chunk))
+    fn decode_stream(input) do
+      Seq.map(input, fn chunk -> Compress.lift_decode_error(stdlib_zstd_decode(chunk)))
     end
 
   end
@@ -254,11 +321,12 @@ mod Compress do
 
         match Compress.Brotli.encode(data) do
         Ok(compressed) -> compressed
-        Err(e) -> panic("brotli encode failed: " ++ e)
+        Err(InvalidInput(msg)) -> panic("brotli encode failed: " ++ msg)
+        Err(_) -> panic("brotli encode failed")
         end
     """
     fn encode(data : Bytes) : Result(Bytes, Compress.Error) do
-      stdlib_brotli_encode(data, 0, 6)
+      Compress.lift_encode_error(stdlib_brotli_encode(data, 0, 6))
     end
 
     doc """
@@ -267,7 +335,7 @@ mod Compress do
         Compress.Brotli.encode_mode(data, Brotli.Text, Brotli.Level(9))
     """
     fn encode_mode(data : Bytes, mode : Mode, level : Level) : Result(Bytes, Compress.Error) do
-      stdlib_brotli_encode(data, mode_int(mode), level_int(level))
+      Compress.lift_encode_error(stdlib_brotli_encode(data, mode_int(mode), level_int(level)))
     end
 
     doc """
@@ -275,11 +343,12 @@ mod Compress do
 
         match Compress.Brotli.decode(compressed) do
         Ok(original) -> original
-        Err(e) -> panic("brotli decode failed: " ++ e)
+        Err(InvalidInput(msg)) -> panic("brotli decode failed: " ++ msg)
+        Err(_) -> panic("brotli decode failed")
         end
     """
     fn decode(data : Bytes) : Result(Bytes, Compress.Error) do
-      stdlib_brotli_decode(data)
+      Compress.lift_decode_error(stdlib_brotli_decode(data))
     end
 
   end
