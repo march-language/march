@@ -110,25 +110,43 @@ there, so a non-linear goal it cannot settle is reported as the skip reason
 ARGUMENT: `need_pos(y * y + 1)` against `{Int | _ > 0}` reflects the product
 as a subject and proves.
 
-Integer division (`/`, `%`) is in the fragment only where March's
-truncating division agrees with the solver's Euclidean one: the divisor is a
-non-zero integer literal (`2`, `-2`) and the dividend is **known to be
-non-negative**. A dividend counts as non-negative when it is a non-negative
-literal, a `len(...)` (or another measure the checker knows is non-negative),
-a sum, product, or in-fragment `/`/`%` of such terms, or a variable, field, or
-measure that a conjunct of the same `&&` chain bounds below by 0:
+Integer division (`/`, `%`) is in the fragment with March's own semantics:
+both **truncate toward zero**, and the remainder takes the dividend's sign
+(`-7 / 2` is `-3`, `-7 % 2` is `-1`, `7 / -2` is `-3`). The solver's `div`/`mod`
+are Euclidean (`-7 / 2` would be `-4` there), so the checker does not use them
+directly: `a / d` is encoded as "`a >= 0` ? `div(a, d)` : `-div(-a, d)`" and
+`a % d` likewise, which is exact for either sign of either operand. When the
+dividend is known to be non-negative (a non-negative literal, a `len(...)` or
+another non-negative measure, a sum or product of such terms, or a variable,
+field, or measure that a conjunct of the same `&&` chain bounds below by 0) the
+two agree and the plain `div`/`mod` is used, which keeps the query simpler.
 
 ```march
-fn half(n : {Int | _ >= 0 && _ / 2 < 10}) : Int do n end        -- checked
+fn half(n : {Int | _ >= 0 && _ / 2 < 10}) : Int do n end
 fn mid(xs : List(Int), i : {Int | _ >= 0 && _ < len(xs) / 2}) : Int do i end
-fn f(n : {Int | _ / 2 > 0}) : Int do n end                      -- not checked
+fn f(n : {Int | _ / 2 == -3}) : Int do n end     -- f(-7) proves; f(-5) is a violation
+fn g(d : Int, n : {Int | d != 0 && _ / d > 0}) : Int do n end
 ```
 
-Outside that (a variable divisor, or a dividend that may be negative, where
-`-7 / 2` is `-3` in March but `-4` in the solver's logic) the predicate is not
-translated: it gets a warning at the definition, and a use is filed as the
-skip reason `unreflectable-predicate`, with the detail naming which condition
-failed.
+A literal divisor keeps the query linear. A **variable divisor** (or any other
+non-literal one) is non-linear, so an undecided goal is the skip reason
+`nonlinear-goal` as for `*`. It also has a side condition: dividing by zero
+panics at run time, so a predicate is never *true* at a zero divisor. The
+checker conjoins "every divisor it reaches is non-zero" to the predicate,
+following `&&`/`||` short-circuiting exactly as March evaluates it:
+`d != 0 && _ / d > 0` is defined everywhere, `_ / d > 0 && d != 0` is not (the
+division runs first). So `g(0, 5)` above is a violation, and a call that
+cannot rule out a zero divisor is not proved. A counterexample whose only
+failure is a zero divisor is not confirmed by running the code (the predicate
+panics rather than returning `false`), so it is reported as not verified
+rather than as a violation.
+
+That side condition needs a Boolean predicate to attach to, so it applies
+where the predicate (or path guard) is a comparison or a `&&`/`||`/`not` of
+comparisons, which is every ordinary refinement. A division in a bare
+`Int`-valued position, such as a call's argument `f(n / d)`, is translated only
+when its divisor is a non-zero literal or is syntactically positive
+(`len(xs) + 1`).
 
 ---
 

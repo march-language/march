@@ -99,12 +99,26 @@ type term =
   (* Integer `div`/`mod` by a NON-ZERO integer literal (the int is the
      divisor).  SMT-LIB's `div`/`mod` are Euclidean; March's `/`/`%`
      truncate toward zero.  The two agree exactly when the dividend is
-     non-negative (for either sign of divisor), so these are constructed
-     ONLY where the reflector has established that — see [smt_of_r_marked]'s
-     division arm in lib/refinecheck/refine_scope.ml.  Anywhere else,
-     rendering one as the other would certify code that can fail. *)
+     non-negative (for either sign of divisor), so these are applied ONLY
+     to a dividend the reflector has established is non-negative — either
+     syntactically ([Refine_scope.known_nonneg]) or under the `(>= a 0)`
+     branch of [Refine_scope.truncating_division]'s sign split.  Anywhere
+     else, rendering one as the other would certify code that can fail. *)
   | DivLit of term * int
   | ModLit of term * int
+  (* Euclidean `div`/`mod` by a NON-LITERAL divisor (non-linear).  Like
+     [DivLit]/[ModLit] these are SMT-LIB's operators, not March's: the
+     reflector builds March's truncating `/`/`%` out of them with [Ite]
+     (see [Refine_scope.truncating_division]), and only inside a Boolean
+     predicate whose definedness condition (every such divisor non-zero)
+     it conjoins at the top.  A zero divisor is an uninterpreted value in
+     SMT-LIB and a panic in March. *)
+  | Div of term * term
+  | Mod of term * term
+  (* `(ite c a b)`: [c] is a formula, [a]/[b] share a sort.  Used for the
+     sign split of truncating division (an Int-valued [Ite]); it is a formula
+     exactly when both branches are. *)
+  | Ite of term * term * term
   | Neg of term
   | Not of term
   | And of term * term
@@ -159,7 +173,8 @@ let children (t : term) : term list =
   | App (_, args) | Ctor (_, _, args) -> args
   | IsCtor (_, a) | IsCtorAt (_, _, _, a) | MulLit (_, a) | DivLit (a, _) | ModLit (a, _)
   | Neg a | Not a | SetSng (_, a) | SetCard (_, a) -> [ a ]
-  | Add (a, b) | Sub (a, b) | Mul (a, b) | And (a, b) | Or (a, b) | Implies (a, b) | Eq (a, b)
+  | Ite (c, a, b) -> [ c; a; b ]
+  | Add (a, b) | Sub (a, b) | Mul (a, b) | Div (a, b) | Mod (a, b) | And (a, b) | Or (a, b) | Implies (a, b) | Eq (a, b)
   | Ne (a, b) | Lt (a, b) | Le (a, b) | Gt (a, b) | Ge (a, b) | FpEq (a, b) | FpLt (a, b)
   | FpLe (a, b) | FpGt (a, b) | FpGe (a, b) | SetMem (a, b) | SetUnion (a, b) | SetInter (a, b)
   | SetDiff (a, b) | SetSub (a, b) -> [ a; b ]
@@ -286,6 +301,9 @@ let rec render = function
   | Mul (a, b) -> Printf.sprintf "(* %s %s)" (render a) (render b)
   | DivLit (a, k) -> Printf.sprintf "(div %s %s)" (render a) (render (IntLit k))
   | ModLit (a, k) -> Printf.sprintf "(mod %s %s)" (render a) (render (IntLit k))
+  | Div (a, b) -> Printf.sprintf "(div %s %s)" (render a) (render b)
+  | Mod (a, b) -> Printf.sprintf "(mod %s %s)" (render a) (render b)
+  | Ite (c, a, b) -> Printf.sprintf "(ite %s %s %s)" (render c) (render a) (render b)
   | Neg a -> Printf.sprintf "(- %s)" (render a)
   | Not a -> Printf.sprintf "(not %s)" (render a)
   | And (a, b) -> Printf.sprintf "(and %s %s)" (render a) (render b)
