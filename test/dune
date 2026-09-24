@@ -8016,6 +8016,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/bytes_u8_bridge.expected bytes_u8_bridge.out)))
 
+; Regression: compiled Base64.encode / sha256 on a Bytes SIGBUSed once boxed
+; ADT cells began carrying a type id in the header pad word (the runtime's
+; Bytes-vs-String check required pad == 0). .expected is interpreter-produced;
+; both backends must match it.
+(rule
+ (targets bytes_typeid_base64_sha bytes_typeid_base64_sha.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/bytes_typeid_base64_sha.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o bytes_typeid_base64_sha
+        native/bytes_typeid_base64_sha.march)
+   (with-stdout-to bytes_typeid_base64_sha.out
+        (system "./bytes_typeid_base64_sha")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/bytes_typeid_base64_sha.expected bytes_typeid_base64_sha.out)))
+
+(rule
+ (targets interp_bytes_typeid_base64_sha.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/bytes_typeid_base64_sha.march))
+ (action
+  (with-stdout-to interp_bytes_typeid_base64_sha.out
+    (run %{exe:../bin/main.exe} native/bytes_typeid_base64_sha.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/bytes_typeid_base64_sha.expected interp_bytes_typeid_base64_sha.out)))
+
 ; Rounding-parity fuzz for Simd.fma_f32x4: 100k deterministic LCG iterations x
 ; 4 lanes, folded into an integer checksum, half of them drawn from a family
 ; whose product lands exactly on a binary32 midpoint. The interpreter now
