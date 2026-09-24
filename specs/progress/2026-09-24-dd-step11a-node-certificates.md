@@ -38,6 +38,13 @@ section 3 (Identity, Threat model), 7.4, II.9, D3, D4. The authorization half
   (plan section 3: separate keys). `cert` writes `<node>.key` and
   `<node>.cert`; `--seconds` exists for short-lived certificates in tests;
   `--node-key` renews with an existing key.
+- **Found by the full suite, fixed:** `NodeCert.str_list` first passed a lambda
+  returning `Option(List(String))` to `List.fold_right`, whose parameter is
+  named `f`; with `node_cert` eagerly loaded, an unrelated user program that
+  defines a top-level `fn f` (test_codegen's `unit_tail_discard` fixture)
+  failed to compile with mono's repr-disagreement refusal (the defun
+  capture-shadowing bug, `specs/progress/` 2026-09 entries). Rewritten as plain
+  recursion. The refinement-audit corpus baseline gained the module's two lines.
 - **Byte compatibility** between forge's OCaml MessagePack encoder and
   `Msgpack.encode` is pinned by one vector asserted in both
   `test/stdlib/test_node_cert.march` and `forge/test/test_cluster.ml`

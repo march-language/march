@@ -117,12 +117,20 @@ mod NodeCert do
       Msgpack.int(c.not_after), Msgpack.str(c.issuer), Msgpack.str(c.pubkey), Msgpack.str(c.serial)]))
   end
 
+  -- Plain recursion, not a fold with a lambda: a lambda returning
+  -- Option(List(String)) passed to a stdlib HOF made a USER program with a
+  -- top-level `fn f` fail to compile (the defun capture-shadowing bug: `f` is
+  -- the HOF's parameter name; test_codegen's unit_tail_discard fixture).
   pfn str_list(vs : List(Msgpack.Value)) : Option(List(String)) do
-    List.fold_right(vs, Some(Nil), fn (v, acc) ->
-      match (v, acc) do
-        (Msgpack.Str(s), Some(rest)) -> Some(Cons(s, rest))
-        _ -> None
-      end)
+    match vs do
+      Nil -> Some(Nil)
+      Cons(Msgpack.Str(s), rest) ->
+        match str_list(rest) do
+          Some(tail) -> Some(Cons(s, tail))
+          None -> None
+        end
+      Cons(_, _) -> None
+    end
   end
 
   doc "Decode a canonical body."
