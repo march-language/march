@@ -2351,6 +2351,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_send_to_self.expected native_actor_send_to_self.out)))
 
+; ── Regression: the Pid-reading builtins (pid_to_int, the supervise glue's
+; pid_index_of / register_supervisor / register_supervisor_child,
+; actor_set_mailbox_limit) leave the record's refcount alone. They were
+; classified owned while their C side never releases the pid, so each call
+; leaked a reference and the record was never freed. Verified red on the base
+; compiler (all four lines false) and red with only the borrow-table half of
+; the fix (the supervised-child line: the registration calls were ECallPtrs,
+; which never consult the table). See
+; specs/progress/2026-09-24-pid-to-int-leak.md.
+(rule
+ (targets native_pid_to_int_leak_probe native_pid_to_int_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/pid_to_int_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_pid_to_int_leak_probe
+        native/pid_to_int_leak_probe.march)
+   (with-stdout-to native_pid_to_int_leak_probe.out
+        (system "./native_pid_to_int_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/pid_to_int_leak_probe.expected native_pid_to_int_leak_probe.out)))
+
 ; ── Capability mocking reaching an actor handler ──────────────────────────
 ; The handler is entered from the scheduler, so the capability cannot be
 ; threaded in as a parameter -- the dispatch function's arity is frozen because

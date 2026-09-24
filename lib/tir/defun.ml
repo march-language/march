@@ -101,6 +101,14 @@ let builtin_names : StringSet.t =
       "epoch_hold"; "epoch_release";
       "send_checked"; "revoke_cap"; "is_cap_valid";
       "pid_of_int"; "pid_to_int"; "get_actor_field";
+      (* The supervise-block spawn glue's registration calls (lower_actor.ml).
+         Their TFn-typed vars used to fall into the indirect-call rewrite, and
+         an ECallPtr never consults Borrow's extern table, so Perceus dup'd
+         the supervisor pid into register_supervisor and handed the child pid
+         to register_supervisor_child as owned: two leaked references per
+         supervisor and one per child
+         (specs/progress/2026-09-24-pid-to-int-leak.md). *)
+      "register_supervisor"; "register_supervisor_child";
       (* Comparison builtins used by derived Ord instances *)
       "march_compare_int"; "march_compare_float"; "march_compare_string";
       (* Hash builtins used by derived Hash instances *)

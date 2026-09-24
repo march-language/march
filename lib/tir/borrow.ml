@@ -80,6 +80,27 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_mailbox_size", [true]);
   ("get_cap",           [true]);
   ("march_get_cap",     [true]);
+  (* The rest of the read-only pid family, missed by the 2026-09-14 audit and
+     left owned, so each call leaked one reference to its pid and a record
+     ever passed to one was never freed
+     (specs/progress/2026-09-24-pid-to-int-leak.md). Audited 2026-09-24:
+     march_pid_index_of resolves the record's tombstone and returns its index;
+     march_actor_get_int loads one word; march_actor_set_mbox_limit looks the
+     meta up; march_register_supervisor writes meta fields;
+     march_actor_register_child links the two METAS and activates the child
+     (whose own reference march_spawn_common already took), storing only
+     [spawn_clo], which stays OWNED. None stores or releases a pid. *)
+  ("pid_to_int",        [true]);
+  ("pid_index_of",      [true]);
+  ("march_pid_index_of", [true]);
+  ("actor_get_int",     [true; false]);
+  ("march_actor_get_int", [true; false]);
+  ("actor_set_mailbox_limit", [true; false; false]);
+  ("march_actor_set_mbox_limit", [true; false; false]);
+  ("register_supervisor", [true; false; false; false; false; false; false]);
+  ("march_register_supervisor", [true; false; false; false; false; false; false]);
+  ("register_supervisor_child", [true; true; false; false; false; false]);
+  ("march_actor_register_child", [true; true; false; false; false; false]);
   (* ── Core string operations ─────────────────────────────────────────────── *)
   ("march_string_eq",          [true; true]);
   ("march_string_concat",      [true; true]);
@@ -330,7 +351,7 @@ let extern_owned_builtins : string list = [
     "stdlib_base64_decode"; "bytes_to_u8_arr"; "u8_arr_to_bytes";
     "remote_register_stub"; "remote_check"; "remote_invoke";
     "logger_add_context"; "logger_write"; "spawn";
-    "spawn_supervised"; "actor_get_int"; "actor_call"; "actor_reply";
+    "spawn_supervised"; "actor_call"; "actor_reply";
     "actor_send_after"; "actor_cancel_timer"; "http_server_spawn_n";
     "file_exists"; "dir_exists"; "file_open"; "file_close"; "file_read";
     "file_read_line"; "file_read_chunk"; "file_write"; "file_append";
@@ -363,11 +384,10 @@ let extern_owned_builtins : string list = [
     "tcp_connect"; "tcp_connect_timeout"; "http_serialize_request"; "http_parse_response";
     "csv_open"; "csv_next_row"; "csv_close"; "own"; "cap_narrow"; "mint_cap";
     "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps"; "monitor";
-    "actor_set_mailbox_limit"; "register_resource";
+    "register_resource";
     "actor_register"; "actor_unregister"; "actor_whereis";
     "send_checked"; "revoke_cap"; "is_cap_valid"; "get_actor_field";
-    "register_supervisor"; "register_supervisor_child"; "register_actor_on_stop"; "pid_index_of";
-    "pid_to_int";
+    "register_actor_on_stop";
 ]
 
 (** True iff parameter [idx] of C extern / TIR builtin [fn_name] is borrowed
