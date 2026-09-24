@@ -24,7 +24,7 @@ let check ?(_quiet = false) () =
     if files = [] && not (match entry with Some (Ok _) -> true | _ -> false) then
       Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
-      match Cmd_build.offline_preflight
+      match Cmd_build.deps_preflight
               ~scope:(Cmd_build.build_scope ~release:false proj) proj with
       | Error e -> Error e
       | Ok () ->
