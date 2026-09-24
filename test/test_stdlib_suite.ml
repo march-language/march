@@ -8657,6 +8657,26 @@ let test_gzip_decode_invalid () =
   end|} in
   Alcotest.(check int) "gzip decode invalid data returns Err" 1 (vint (call_fn env "f" []))
 
+(* The signatures promise Result(Bytes, Compress.Error), but the builtins return
+   Result(Bytes, String), and until 2026-09-24 the wrappers handed that String
+   straight through. The mismatch was a hidden stdlib type error, so
+   `Err(Compress.InvalidInput(_))` never matched: the payload was a String. The
+   test above only checks `Err(_)`, which the bug passed. *)
+let test_gzip_decode_invalid_is_structured () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let garbage = Bytes.from_list([1, 2, 3, 4, 5, 6, 7, 8])
+      match Compress.Gzip.decode(garbage) do
+      Ok(_) -> 0
+      Err(Compress.InvalidInput(msg)) ->
+        if string_contains(msg, "gzip_decode") do 1 else 2 end
+      Err(_) -> 3
+      end
+    end
+  end|} in
+  Alcotest.(check int) "gzip decode of invalid data is Err(InvalidInput(<codec msg>))" 1
+    (vint (call_fn env "f" []))
+
 let test_gzip_compressed_smaller () =
   (* Compressible data: 100 identical bytes → should compress well *)
   let env = eval_with_compress {|mod Test do
@@ -12431,6 +12451,60 @@ let test_concat_chain_values () =
   | None -> ()
   | Some out -> Alcotest.(check string) "compiled matches interpreted" expected out
 
+(* Compress's decoders turn the builtin's String error into Compress.Error, on
+   BOTH backends (the classifier is March code, but the messages it reads come
+   from two different C shims: runtime/march_compress.c compiled,
+   lib/eval/compress_stubs.c interpreted). Also covers the streaming path,
+   whose Seq annotations could never typecheck, and a round-trip so the Ok arm
+   of the mapping is exercised compiled. zstd/brotli may be built without their
+   library, in which case the decoder reports Io("... not available ..."),
+   which is folded into the expected line rather than failing the test. *)
+let test_compress_decode_error_structured_both_backends () =
+  let src =
+    "mod CompressErr do\n\
+    \  needs IO.Console\n\
+    \  pfn kind(r) do\n\
+    \    match r do\n\
+    \    Ok(_) -> \"ok\"\n\
+    \    Err(Compress.InvalidInput(_)) -> \"invalid_input\"\n\
+    \    Err(Compress.InsufficientOutput) -> \"insufficient_output\"\n\
+    \    Err(Compress.Io(msg)) ->\n\
+    \      if string_contains(msg, \"not available\") do \"unavailable\" else \"io\" end\n\
+    \    end\n\
+    \  end\n\
+    \  pfn or_missing(k) do if k == \"unavailable\" do \"invalid_input\" else k end end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let garbage = Bytes.from_list([1, 2, 3, 4, 5, 6, 7, 8])\n\
+    \    println(\"gzip \" ++ kind(Compress.Gzip.decode(garbage)))\n\
+    \    println(\"deflate \" ++ kind(Compress.Deflate.decode(garbage)))\n\
+    \    println(\"zstd \" ++ or_missing(kind(Compress.Zstd.decode(garbage))))\n\
+    \    println(\"brotli \" ++ or_missing(kind(Compress.Brotli.decode(garbage))))\n\
+    \    match Compress.Gzip.encode(Bytes.from_string(\"hello hello hello\")) do\n\
+    \    Ok(c) ->\n\
+    \      match Compress.Gzip.decode(c) do\n\
+    \      Ok(d) -> println(\"roundtrip \" ++ Bytes.to_string(d))\n\
+    \      Err(_) -> println(\"roundtrip decode-failed\")\n\
+    \      end\n\
+    \    Err(_) -> println(\"roundtrip encode-failed\")\n\
+    \    end\n\
+    \    match Seq.to_list(Compress.Gzip.decode_stream(Seq.from_list([garbage]))) do\n\
+    \    Cons(r, Nil) -> println(\"stream \" ++ kind(r))\n\
+    \    _ -> println(\"stream wrong-length\")\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let expected =
+    "gzip invalid_input\ndeflate invalid_input\nzstd invalid_input\n\
+     brotli invalid_input\nroundtrip hello hello hello\nstream invalid_input" in
+  let (interpreted, compiled) =
+    compiled_and_interpreted_stdout ~tag:"march_compress_err" ~src_text:src
+  in
+  Alcotest.(check string) "interpreted: decode errors are Compress.Error" expected interpreted;
+  match compiled with
+  | None -> ()
+  | Some out -> Alcotest.(check string) "compiled matches interpreted" expected out
+
 (* Is this machine's ASAN runtime able to run ANY sanitized binary?  Compiles
    and runs a C hello-world with no March code in it; [true] means even that
    hangs, so a March binary hanging under ASAN says nothing about March.  Used
@@ -14904,6 +14978,9 @@ let stdlib_suites =
         Alcotest.test_case "gzip round-trip"                    `Quick test_gzip_roundtrip;
         Alcotest.test_case "gzip empty bytes"                   `Quick test_gzip_empty;
         Alcotest.test_case "gzip decode invalid → Err"         `Quick test_gzip_decode_invalid;
+        Alcotest.test_case "gzip decode invalid → Err(InvalidInput)" `Quick test_gzip_decode_invalid_is_structured;
+        Alcotest.test_case "decode errors are Compress.Error, compiled + interpreted" `Slow
+          test_compress_decode_error_structured_both_backends;
         Alcotest.test_case "gzip compresses repetitive"        `Quick test_gzip_compressed_smaller;
         Alcotest.test_case "gzip encode_level BestSpeed"       `Quick test_gzip_level_explicit;
         Alcotest.test_case "deflate round-trip"                 `Quick test_deflate_roundtrip;

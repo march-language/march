@@ -155,50 +155,14 @@ module RQ = Registry_query
    parsing); two copies of a network path is one more place for an offline
    check to be missing. *)
 
-let download_url ~base name version =
-  Printf.sprintf "%s/api/v1/packages/%s/releases/%s/download"
-    (RQ.no_trailing_slash base) name version
+let download_url = Dep_refetch.download_url
 
 (** Extract a .tar.gz into [dest], stripping the single top-level directory so
     the package's own `lib/` lands directly at [dest]/lib. *)
 let extract_tarball ~tarball ~dest = Offline_deps.extract ~tarball ~dest
 
-(** A verified copy of [name] [vstr]'s tarball in [Tarball_cache], downloading
-    it only when the cache has no intact copy. The download goes to a temp
-    file, is checked against the registry's published [expected_cs], and only
-    then enters the cache (atomically), so the cache never holds bytes that
-    failed verification. *)
-let cached_or_download ~binary ~base ~name ~vstr ~expected_cs =
-  let label = name ^ " " ^ vstr in
-  let cached =
-    match Tarball_cache.lookup expected_cs with
-    | Tarball_cache.Hit p -> Some p
-    | Tarball_cache.Miss -> None
-    | Tarball_cache.Corrupt { path; actual } ->
-      prerr_endline (Tarball_cache.corrupt_warning ~label ~path
-                       ~expected:expected_cs ~actual);
-      None
-  in
-  match cached with
-  | Some p ->
-    Printf.printf "  %s: using cached tarball\n%!" label;
-    Ok p
-  | None ->
-    let tmp = Filename.temp_file ("forge_" ^ name ^ "_") ".tar.gz" in
-    Fun.protect ~finally:(fun () -> try Sys.remove tmp with Sys_error _ -> ())
-      (fun () ->
-         Printf.printf "  %s: downloading...\n%!" label;
-         match RQ.fetch ~binary ~url:(download_url ~base name vstr) ~out:tmp with
-         | Error e -> Error (Printf.sprintf "%s: %s" label e)
-         | Ok () ->
-           let actual_cs = Tarball_cache.sha256_file tmp in
-           if actual_cs <> expected_cs then
-             Error (Printf.sprintf
-                      "%s: checksum mismatch\n  expected: %s\n  got:      %s"
-                      label expected_cs actual_cs)
-           else
-             Result.map_error (fun e -> label ^ ": " ^ e)
-               (Tarball_cache.store ~checksum:expected_cs ~src:tmp))
+(** Shared with the online integrity re-fetch; see [Dep_refetch]. *)
+let cached_or_download = Dep_refetch.cached_or_download
 
 (** Fetch metadata for each registry dep, version-solve with PubGrub (pinning
     path/git deps as overrides), then download+verify+extract each solved
@@ -402,11 +366,29 @@ let clone_git_dep ~name ~url ~ref_name ~depth1 ~version =
       Error (Printf.sprintf "%s: cloned %s but could not resolve its commit" name url)
     | Some commit ->
       let dest = dep_coord_dir ~name ~coord:commit in
-      if Sys.file_exists dest then begin
-        (* Already cached at this exact commit — keep the cached tree and throw
-           the fresh clone away, so a concurrent reader is never disturbed. *)
+      let cached_ok =
+        Sys.file_exists dest
+        && Resolver_cas_package.hash_directory dest
+           = Resolver_cas_package.hash_directory staging in
+      if cached_ok then begin
+        (* Already cached at this exact commit, and the cached tree matches the
+           fresh clone: keep it and throw the clone away, so a concurrent
+           reader is never disturbed. *)
         ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote staging)));
         Printf.printf "  %s: already cached at %s\n%!" name commit
+      end else if Sys.file_exists dest then begin
+        (* Cached at this commit but the tree differs from what the commit
+           holds: modified or corrupted. Reusing it here is what used to write
+           the TAMPERED tree's hash into forge.lock, laundering the change
+           past every later integrity check. Replace it with the clone. *)
+        (match Dep_refetch.swap_in ~staging ~dest with
+         | Ok () ->
+           Printf.printf
+             "  %s: cached copy at %s did not match the commit; replaced it \
+              with the fresh clone\n%!" name commit
+         | Error msg ->
+           Printf.eprintf "warning: %s: could not replace the cached copy at %s: %s\n%!"
+             name dest msg)
       end else begin
         Project.mkdir_p (Filename.dirname dest);
         (try Sys.rename staging dest

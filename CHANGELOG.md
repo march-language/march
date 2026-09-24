@@ -30,6 +30,13 @@ git log is authoritative for exact commits.
   `RESTORED` line. New signed `TOPOLOGY` verb (`Cmd_deploy_hot.push_topology`)
   persists the pushed topology and hands it to a runtime hook; new `COMPACT` verb
   reports the patch stack's size, which `forge hot-reload status` prints.
+- **`NativeArray.sort_float` — a `Float` array can now be sorted.** Same
+  algorithm and ownership as `sort_int` (unstable, in place when uniquely owned,
+  copy-on-write when shared), 1.9–18x faster than libc `qsort` at 5 million
+  elements. Floats sort by IEEE 754 `totalOrder`, so NaN has a defined place:
+  `-NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN`. Note that `-0.0` sorts
+  before `+0.0` even though `-0.0 == 0.0` and `compare(-0.0, 0.0)` is `0`. The
+  interpreter and compiled builds produce the same order, NaN included.
 - **Editor support for `topology.toml`** (build step 7 of the distributed-deploys
   plan). `march-lsp` recognises `topology.toml` and `topology.<env>.toml` and shows
   `forge topology check`'s diagnostics on forge's lines, computed by forge's own
@@ -170,6 +177,16 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **forge checks cached dependencies on online builds too.** `forge build`,
+  `check`, `run`, `test` and `bench` re-hash each cached git or registry
+  dependency against `forge.lock`, once per command. Before, only `--offline`
+  did this. A tree that was edited or corrupted is fetched again, checked, and
+  swapped in, with a one-line note. If the fresh copy does not match
+  `forge.lock` either, the command fails, naming the dependency and both hashes,
+  because `forge.lock` or the upstream source has changed. A clean cache prints
+  nothing and fetches nothing. `forge deps` also no longer keeps an edited
+  cached git tree and writes that tree's hash into `forge.lock`: it replaces the
+  tree with the fresh clone. `--offline` is unchanged: a mismatch is an error.
 - **Hot reload: a second deploy while actors are still migrating is accepted**
   (it used to be refused with `ERR publish_failed`); each actor applies both
   migrations in order. Past the soft drain deadline, messages in an unchanged
@@ -405,6 +422,52 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Compiled `Base64.encode` and `sha256` on a `Bytes` no longer crash.** Since
+  boxed constructor cells began carrying a runtime type id (0.4.0), a compiled
+  `Base64.encode(Bytes.from_string("x"))`, `Base64.url_encode`/`mime_encode`, or
+  `sha256(bytes)` died with `fatal SIGBUS` (exit 138): the runtime mistook the
+  `Bytes` value for a `String`. The interpreter was unaffected.
+- **`pid_to_int` and supervise blocks no longer leak the actor record.**
+  Compiled, every `pid_to_int(p)` and `Actor.set_queue_limit(p, …)` call kept
+  one reference to `p`'s actor record, and every supervise-block child was
+  held two extra times by its supervisor's spawn code (the supervisor itself
+  twice more), so an actor that had been through any of them was never freed
+  after it stopped. They now leave the count alone.
+- **`--cap-sandbox` write scopes behind a symlink no longer deny every write.** On
+  macOS, `needs IO.FileWrite("/tmp/myapp")` refused even in-scope writes, because
+  the kernel matches the resolved path (`/private/tmp/myapp`) and the scope was
+  baked into the profile as written. The binary now resolves each scope with
+  `realpath()` at startup, on the machine it runs on, before installing the
+  sandbox. A scope that does not exist yet resolves through its longest existing
+  parent, and a scope that is itself a symlink resolves to its target. Writes
+  outside the scope are still refused.
+- **`Compress` decoders and encoders return the `Compress.Error` their signatures
+  promise.** They used to pass the codec's message string straight through as the
+  error, so matching `Err(Compress.InvalidInput(_))` never matched. Now corrupt or
+  truncated input is `InvalidInput(msg)`, hitting the decompressed-size cap is
+  `InsufficientOutput`, and out of memory, a failed codec init or a library that
+  was not built in is `Io(msg)`; `msg` is still the codec's message. The streaming
+  functions (`Gzip.encode_stream`/`decode_stream`, `Zstd.encode_stream`/
+  `decode_stream`) typecheck when you call them now: their `Seq(Bytes)`
+  annotation could never match a real `Seq` and has been removed. `Brotli.encode`
+  and `Brotli.encode_mode` also typecheck: the typechecker gave the builtin under
+  them one parameter too few. New `Compress.lift_encode_error`/`lift_decode_error`
+  expose the mapping.
+- **`RRB.from_array`/`RRB.to_array` and `AhoCorasick` use the Array module's real
+  type, `Array.PVec(a)`.** They were annotated `Array(a)`, a type that does not
+  exist, so an `Array.from_list(...)` value could not be passed to
+  `RRB.from_array`, and `RRB.to_array`'s result could not be annotated
+  `Array.PVec(a)`. Write `Array.PVec(a)` where you need the type: March has no
+  type-alias syntax, so `Array(a)` could not be made to mean it.
+- **`Plot.save` returns `Result(Unit, File.FileError)`.** It was declared
+  `Result(Unit, String)` but returned the `File.FileError` from the write, so the
+  declared type was wrong. Code that matched the error as a `String` needs to match
+  `File.FileError` instead.
+- **`Logger.with_scope`'s body typechecks.** The builtin `try_finally` under it was
+  typed as passing its callbacks an `Int`, which matched neither backend and
+  rejected the `() -> a` thunk `with_scope` takes. It is now typed `() -> a`.
+  Callbacks written `fn _ -> ...`, which is every existing caller, are unaffected.
+
 - **`forge bench` now links a project's FFI code.** Benchmarks were compiled
   without the `[ffi]` C sources/link flags and `[ffi.rust]` archive that
   `forge build`, `forge run` and `forge test` pass, so a benchmark calling any
