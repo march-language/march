@@ -574,4 +574,133 @@ mod TestClusterNode do
 
   end
 
+  -- ── certificates: revocation and expiry (distributed-deploys step 11a) ──
+
+  pfn seed32(v : Int) : Bytes do Bytes.from_list(List.map(List.range(0, 32), fn _ -> v)) end
+  pfn op_sk() : Bytes do NodeCert.keypair_from_seed(seed32(1)) end
+  pfn node_sk(v : Int) : Bytes do NodeCert.keypair_from_seed(seed32(v)) end
+
+  pfn cert_of(name : String, v : Int, not_after : Int) : NodeCert.Cert do
+    { node: NodeCert.node_uri("t", "p", name), roles: Nil, flags: Nil, not_after: not_after,
+      issuer: "spiffe://t/operator/x", pubkey: Bytes.to_hex(NodeCert.public_key(node_sk(v))), serial: "serial-" ++ name }
+  end
+
+  -- node "a" in certificate mode, linked to "b" whose certificate is [bcert].
+  pfn cert_cfg() : ClusterNode.CnConfig do
+    let creds = { signed: NodeCert.sign(cert_of("a", 2, 2000000000), op_sk()), secret_key: node_sk(2),
+                  operator_pubkey: NodeCert.public_key(op_sk()), revoked: fn _ -> false }
+    { cfg("a", Nil) with auth: ClusterAuth.Certified(creds) }
+  end
+
+  pfn cert_linked(bcert : NodeCert.Cert) : (String, ClusterNode.CnState) do
+    let b = ClusterNode.node_id_of("b")
+    let st = ClusterNode.core_peer_cert(ClusterNode.core_new(cert_cfg(), 1), b, Some(bcert))
+    match ClusterNode.core_linked(st, b, "b", "127.0.0.1:7001", 1, 10, 11, b, 99) do
+      (st2, _) ->
+        match ClusterNode.core_tick(st2, 1000) do
+          (st3, _) ->
+            let out = (b, st3)
+            out
+        end
+    end
+  end
+
+  pfn revocation(serial : String, signer : Bytes) : NodeCert.SignedRevocation do
+    NodeCert.sign_revocation({ node: "", serial: serial, issued_at: 1 }, signer)
+  end
+
+  describe "certificates" do
+
+    test "a peer's certificate is kept for peer_cert" do
+      match cert_linked(cert_of("b", 3, 2000000000)) do
+        (b, st) -> assert (Map.get(st.certs, b, Map.str_cmp) == Some(cert_of("b", 3, 2000000000)))
+      end
+    end
+
+    test "an expired certificate drops the link and reports the peer dead: certificate expired" do
+      -- not_after 1500 (unix seconds): still valid at tick 1000 ms, expired at 1600 s.
+      match cert_linked(cert_of("b", 3, 1500)) do
+        (b, st) ->
+          match ClusterNode.core_tick(st, 1600000) do
+            (st2, effs) ->
+              assert (drops(effs) != Nil)
+              match ClusterNode.core_tick(st2, 1700000) do
+                (st3, effs2) ->
+                  assert (status_of(st3, b) == "dead")
+                  assert (List.member(List.append(event_texts(effs), event_texts(effs2)), "b dead: certificate expired"))
+              end
+          end
+      end
+    end
+
+    test "an operator-signed revocation drops the link, is passed on, and reports certificate revoked" do
+      match cert_linked(cert_of("b", 3, 2000000000)) do
+        (b, st) ->
+          match ClusterNode.core_revoke(st, revocation("serial-b", op_sk())) do
+            (st2, effs) ->
+              assert (List.length(ClusterNode.core_revocations(st2)) == 1)
+              -- passed on to the linked peer as a REVOCATIONS frame (tag 15)
+              assert (List.any(sends_to(effs, b), fn f -> PeerReader.tag_of(f) == 15))
+              match ClusterNode.core_tick(st2, 2000) do
+                (st3, effs2) ->
+                  match ClusterNode.core_tick(st3, 3000) do
+                    (st4, effs3) ->
+                      assert (drops(effs2) != Nil)
+                      assert (status_of(st4, b) == "dead")
+                      assert (List.member(List.append(event_texts(effs2), event_texts(effs3)), "b dead: certificate revoked"))
+                  end
+              end
+          end
+      end
+    end
+
+    test "a revocation not signed by the operator, or one already known, changes nothing" do
+      match cert_linked(cert_of("b", 3, 2000000000)) do
+        (_b, st) ->
+          match ClusterNode.core_revoke(st, revocation("serial-b", node_sk(3))) do
+            (st2, effs) ->
+              assert (ClusterNode.core_revocations(st2) == Nil)
+              assert (effs == Nil)
+          end
+          match ClusterNode.core_revoke(st, revocation("serial-x", op_sk())) do
+            (st2, _) ->
+              match ClusterNode.core_revoke(st2, revocation("serial-x", op_sk())) do
+                (st3, effs) ->
+                  assert (List.length(ClusterNode.core_revocations(st3)) == 1)
+                  assert (effs == Nil)
+              end
+          end
+      end
+    end
+
+    test "a REVOCATIONS frame from a peer is decoded and applied" do
+      match cert_linked(cert_of("b", 3, 2000000000)) do
+        (b, st) ->
+          let frame = ClusterNode.encode_revocations([revocation("serial-b", op_sk())])
+          match ClusterNode.core_frame(st, b, 15, frame) do
+            (st2, _) -> assert (List.length(ClusterNode.core_revocations(st2)) == 1)
+          end
+      end
+    end
+
+    test "a shared-secret node accepts no revocations" do
+      let st = ClusterNode.core_new(cfg("a", Nil), 1)
+      match ClusterNode.core_revoke(st, revocation("serial-b", op_sk())) do
+        (st2, _) -> assert (ClusterNode.core_revocations(st2) == Nil)
+      end
+    end
+
+    test "MARCH_CLUSTER_REVOCATIONS text: tokens split on commas, spaces or lines, each verified" do
+      let t1 = NodeCert.revocation_to_text(revocation("s1", op_sk()))
+      let t2 = NodeCert.revocation_to_text(revocation("s2", op_sk()))
+      match ClusterNode.revocations_from_text(t1 ++ "\n " ++ t2 ++ ",", NodeCert.public_key(op_sk())) do
+        Ok(rs) -> assert (List.length(rs) == 2)
+        Err(e) -> assert (e == "no error")
+      end
+      assert (Result.is_err(ClusterNode.revocations_from_text(t1, NodeCert.public_key(node_sk(3)))))
+      assert (ClusterNode.revocations_from_text("", NodeCert.public_key(op_sk())) == Ok(Nil))
+    end
+
+  end
+
 end

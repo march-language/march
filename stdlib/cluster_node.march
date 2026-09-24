@@ -80,7 +80,8 @@ mod ClusterNode do
   type CnConfig = { name : String, listen_port : Int, advertise : String, seeds : List(String),
                     secret : String, creation : Int, swim : Swim.Config, period_ms : Int,
                     tick_ms : Int, redial_min_ms : Int, redial_max_ms : Int,
-                    dial_timeout_ms : Int, handshake_timeout_ms : Int, auth : ClusterAuth.Auth }
+                    dial_timeout_ms : Int, handshake_timeout_ms : Int, auth : ClusterAuth.Auth,
+                    revocations : List(NodeCert.SignedRevocation) }
 
   doc """
   A configuration with the defaults: SWIM period 1 s, ack timeout 500 ms,
@@ -97,7 +98,7 @@ mod ClusterNode do
     { name: name, listen_port: listen_port, advertise: adv, seeds: seeds, secret: secret,
       creation: creation, swim: Swim.config(500, 3000, 2), period_ms: 1000, tick_ms: 100,
       redial_min_ms: 200, redial_max_ms: 5000, dial_timeout_ms: 2000, handshake_timeout_ms: 2000,
-      auth: ClusterAuth.Secret(secret) }
+      auth: ClusterAuth.Secret(secret), revocations: Nil }
   end
 
   pfn env_or(name : String, dflt : String) : String do
@@ -151,6 +152,28 @@ mod ClusterNode do
   end
 
   doc """
+  Revocation tokens (`forge cluster revoke`'s output) separated by
+  whitespace or commas, each verified against the operator key.
+  """
+  fn revocations_from_text(text : String, operator_pubkey : Bytes) : Result(List(NodeCert.SignedRevocation), String) do
+    let toks = List.filter(String.split(String.replace_all(String.replace_all(text, "\n", ","), " ", ","), ","),
+                           fn t -> not(String.is_empty(String.trim(t))))
+    List.fold_right(toks, Ok(Nil), fn (t, acc) ->
+      match acc do
+        Err(e) -> Err(e)
+        Ok(rest) ->
+          match NodeCert.revocation_from_text(t) do
+            Err(e) -> Err(e)
+            Ok(r) ->
+              match NodeCert.verify_revocation(r, operator_pubkey) do
+                Err(e) -> Err(e)
+                Ok(_) -> Ok(Cons(r, rest))
+              end
+          end
+      end)
+  end
+
+  doc """
   Configuration from the environment: MARCH_NODE_NAME, MARCH_NODE_PORT,
   MARCH_NODE_ADVERTISE (default 127.0.0.1:<port>), MARCH_CLUSTER_NODES
   (seeds, host:port,...), MARCH_CLUSTER_SECRET, MARCH_NODE_CREATION (default:
@@ -162,6 +185,8 @@ mod ClusterNode do
   holding the value). MARCH_CLUSTER_SECRET is then ignored: both set means
   certificate mode. Without MARCH_NODE_CERT the node runs in shared-secret
   mode, as before (MARCH_NODE_KEY alone is an error, not a silent fallback).
+  MARCH_CLUSTER_REVOCATIONS (certificate mode; tokens or a file of them)
+  seeds the node's revocation list.
   """
   fn config_from_env() : Result(CnConfig, String) do
     match System.env("MARCH_NODE_NAME") do
@@ -186,7 +211,11 @@ mod ClusterNode do
             else
               match credentials(name, key, cert, env_file("MARCH_CLUSTER_OPERATOR_PUBKEY")) do
                 Err(e) -> Err(e)
-                Ok(creds) -> Ok({ cfg with auth: ClusterAuth.Certified(creds) })
+                Ok(creds) ->
+                  match revocations_from_text(env_file("MARCH_CLUSTER_REVOCATIONS"), creds.operator_pubkey) do
+                    Err(e) -> Err("cluster_node: MARCH_CLUSTER_REVOCATIONS: " ++ e)
+                    Ok(revs) -> Ok({ cfg with auth: ClusterAuth.Certified(creds), revocations: revs })
+                  end
               end
             end
         end
@@ -263,7 +292,9 @@ mod ClusterNode do
     reg : GlobalRegistry.Names,          -- the registry replica
     regs : Map(String, (Int, Int)),      -- names registered HERE: name -> (pid, watcher pid)
     vis : Map(String, GlobalPid.Pid),    -- the visible binding of every name, as last reported
-    certs : Map(String, NodeCert.Cert)   -- each certificate-mode peer's verified certificate
+    certs : Map(String, NodeCert.Cert),  -- each certificate-mode peer's verified certificate
+    revs : List(NodeCert.SignedRevocation), -- every operator-signed revocation known here
+    cert_dead : Map(String, String)      -- peers dropped for their certificate -> why
   }
 
   -- What a watcher of a name sees. `Lost` goes to watchers on the node that
@@ -291,7 +322,105 @@ mod ClusterNode do
     { cfg: cfg, me: me, driver: SwimDriver.make(me, 1, ms, cfg.swim, cfg.period_ms, seed),
       links: Map.empty(), halves: Map.empty(), gen: 0, dialing: Map.empty(), backoff: Map.empty(),
       pending: Nil, relays: Map.empty(), refused: Nil, seed_ids: Map.empty(), rejoining: Nil, stopped: false,
-      reg: GlobalRegistry.empty(), regs: Map.empty(), vis: Map.empty(), certs: Map.empty() }
+      reg: GlobalRegistry.empty(), regs: Map.empty(), vis: Map.empty(), certs: Map.empty(),
+      revs: List.filter(cfg.revocations, fn r -> Result.is_ok(check_revocation(cfg, r))), cert_dead: Map.empty() }
+  end
+
+  -- ── revocation and expiry ──────────────────────────────────────────────
+  -- A peer's certificate is rechecked every tick: one that has expired, or
+  -- that a known revocation names, has its link dropped and the member
+  -- declared Dead with the reason ("certificate expired" / "certificate
+  -- revoked"), so subscribers see NodeDead(info, why) and sessions with it
+  -- are cancelled through the existing NodeDead path. Its handshakes are
+  -- refused from then on (NodeCert.Credentials.revoked reads this node's
+  -- list; expiry is checked in every handshake). Revocations travel as
+  -- REVOCATIONS control frames (tag 15): the whole list to every new link,
+  -- each new one to every linked peer. Only the operator's signature makes
+  -- one count, so a member cannot revoke another.
+
+  fn tag_revocations() : Int do 15 end
+
+  fn encode_revocations(rs : List(NodeCert.SignedRevocation)) : List(Int) do
+    Msgpack.encode(Msgpack.array([Msgpack.int(tag_revocations()),
+      Msgpack.array(List.map(rs, fn r -> Msgpack.bin(NodeCert.revocation_to_bytes(r))))]))
+  end
+
+  fn decode_revocations(frame : List(Int)) : List(NodeCert.SignedRevocation) do
+    match Msgpack.decode(frame) do
+      Ok(Msgpack.Array([Msgpack.Int(15), Msgpack.Array(bins)])) ->
+        List.filter_map(bins, fn b ->
+          match b do
+            Msgpack.Bin(bs) -> Result.to_option(NodeCert.revocation_from_bytes(bs))
+            _ -> None
+          end)
+      _ -> Nil
+    end
+  end
+
+  pfn operator_key(cfg : CnConfig) : Option(Bytes) do
+    match cfg.auth do
+      ClusterAuth.Certified(c) -> Some(c.operator_pubkey)
+      ClusterAuth.Secret(_) -> None
+    end
+  end
+
+  -- Is [r] signed by this cluster's operator? (Shared-secret nodes have no
+  -- operator and accept no revocations.)
+  fn check_revocation(cfg : CnConfig, r : NodeCert.SignedRevocation) : Result(NodeCert.Revocation, String) do
+    match operator_key(cfg) do
+      None -> Err("this node runs in shared-secret mode; revocations need certificate mode")
+      Some(op) -> NodeCert.verify_revocation(r, op)
+    end
+  end
+
+  fn core_revocations(st : CnState) : List(NodeCert.Revocation) do List.map(st.revs, fn r -> r.rev) end
+
+  doc """
+  Add a revocation (from the API or a peer): kept and passed on to every
+  linked peer if it is the operator's and new here, ignored otherwise. The
+  certificates it names are dropped at the next tick.
+  """
+  fn core_revoke(st : CnState, r : NodeCert.SignedRevocation) : (CnState, List(CnEffect)) do
+    let known = List.any(st.revs, fn k -> k.body == r.body)
+    if known || Result.is_err(check_revocation(st.cfg, r)) do (st, Nil)
+    else
+      let st1 = { st with revs: Cons(r, st.revs) }
+      let frame = encode_revocations(Cons(r, Nil))
+      let out = (st1, List.map(linked_ids(st1), fn id -> Send(id, frame)))
+      out
+    end
+  end
+
+  -- Why [c] no longer admits its node at [now_s], if it does not.
+  pfn cert_problem(st : CnState, c : NodeCert.Cert, now_s : Int) : Option(String) do
+    if NodeCert.is_revoked(c, core_revocations(st)) do Some("certificate revoked")
+    else if NodeCert.expired(c, now_s) do Some("certificate expired")
+    else None end end
+  end
+
+  doc """
+  Recheck every linked peer's certificate at [now_s] (unix seconds): drop the
+  link of one that has expired or been revoked, and queue the member Dead
+  with that reason (the tick that follows reports it).
+  """
+  fn core_check_certs(st : CnState, now_s : Int) : (CnState, List(CnEffect)) do
+    List.fold_left(Map.entries(st.links), (st, Nil), fn (acc, kv) ->
+      match (acc, kv) do
+        ((s, effs), (id, l)) ->
+          match Map.get(s.certs, id, Map.str_cmp) do
+            None -> (s, effs)
+            Some(c) ->
+              match cert_problem(s, c, now_s) do
+                None -> (s, effs)
+                Some(why) ->
+                  let s1 = queue({ s with links: Map.remove(s.links, id, Map.str_cmp),
+                                          certs: Map.remove(s.certs, id, Map.str_cmp),
+                                          cert_dead: Map.insert(s.cert_dead, id, why, Map.str_cmp) },
+                                 SwimDriver.PeerDown(id))
+                  (s1, Cons(Drop(l, why), effs))
+              end
+          end
+      end)
   end
 
   doc """
@@ -475,7 +604,8 @@ mod ClusterNode do
   actions become control frames to linked peers), derive the member events,
   and plan the dials this tick allows.
   """
-  fn core_tick(st : CnState, now : Int) : (CnState, List(CnEffect)) do
+  fn core_tick(st0 : CnState, now : Int) : (CnState, List(CnEffect)) do
+    let (st, cert_effs) = core_check_certs(st0, now / 1000)
     let before = st.driver.swim.members
     let timed_out = List.filter_map(Map.entries(st.driver.swim.suspect_deadlines), fn kv ->
       match kv do (id, dl) -> if dl <= now do Some(id) else None end end)
@@ -485,10 +615,15 @@ mod ClusterNode do
       (d2, acts) ->
         let st2 = { st with driver: d2, pending: Nil, refused: Nil }
         let frames = swim_frames(st2, acts)
+        let cert_dead = st.cert_dead
         let cause = fn id ->
+          match Map.get(cert_dead, id, Map.str_cmp) do
+            Some(why) -> why
+            None ->
           if List.member(refused, id) do "connection refused"
           else if List.member(timed_out, id) do "suspect timeout"
           else "gossip" end end
+          end
         let evs = member_events(before, d2.swim.members, st.me, cause, st.rejoining)
         let rejoining = next_rejoining(before, d2.swim.members, st.rejoining)
         match event_effects({ st2 with rejoining: rejoining }, evs) do
@@ -501,7 +636,7 @@ mod ClusterNode do
                 let ae = List.map(ae_peers, fn id -> Send(id, req))
                 match refresh_names(st5) do
                   (st6, name_effs) ->
-                    let out = (st6, List.append(frames, List.append(ev_effs, List.append(dials, List.append(ae, name_effs)))))
+                    let out = (st6, List.append(cert_effs, List.append(frames, List.append(ev_effs, List.append(dials, List.append(ae, name_effs))))))
                     out
                 end
             end
@@ -554,12 +689,14 @@ mod ClusterNode do
     if kept_new do
       let obs = Membership.member(id, name, addr, creation, Alive, 0)
       let st3 = queue({ st2 with links: Map.insert(st2.links, id, l, Map.str_cmp),
+                                 cert_dead: Map.remove(st2.cert_dead, id, Map.str_cmp),
                                  backoff: Map.remove(st2.backoff, addr, Map.str_cmp),
                                  dialing: Map.remove(st2.dialing, addr, Map.str_cmp) },
                       SwimDriver.GossipFrame(obs))
       let sync = SwimDriver.encode_members_sync(List.append(core_members(st3), Cons(obs, Nil)))
       let regsync = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(st3.reg), GlobalRegistry.all_entries(st3.reg))
-      let out = (st3, List.append(drops, Cons(Install(l), Cons(Send(id, sync), Cons(Send(id, regsync), Nil)))))
+      let revsync = if List.is_empty(st3.revs) do Nil else Cons(Send(id, encode_revocations(st3.revs)), Nil) end
+      let out = (st3, List.append(drops, Cons(Install(l), Cons(Send(id, sync), Cons(Send(id, regsync), revsync)))))
       out
     else
       (st2, drops)
@@ -670,6 +807,14 @@ mod ClusterNode do
       end
     else if tag == 5 || tag == 6 do
       registry_frame(st, from, tag, frame)
+    else if tag == tag_revocations() do
+      List.fold_left(decode_revocations(frame), (st, Nil), fn (acc, r) ->
+        match acc do
+          (s, effs) ->
+            match core_revoke(s, r) do
+              (s2, e2) -> (s2, List.append(effs, e2))
+            end
+        end)
     else if tag >= 0 && tag <= 3 do
       match SwimDriver.decode_msg(frame) do
         Err(_) -> (st, Nil)
@@ -699,7 +844,7 @@ mod ClusterNode do
       end
     else
       (st, Nil)
-    end end end end
+    end end end end end
   end
 
   -- ── names ──────────────────────────────────────────────────────────────
@@ -1000,7 +1145,8 @@ mod ClusterNode do
                   closes : Vault(String -> String -> Unit),
                   downs : Vault(DistLink.DownReason -> Unit), fired : Vault(List(Int)),
                   failed : Vault(Int -> String -> Unit),
-                  certs : Vault(NodeCert.Cert), sec : Vault(SecurityEvent -> Unit) }
+                  certs : Vault(NodeCert.Cert), sec : Vault(SecurityEvent -> Unit),
+                  revs : Vault(NodeCert.Revocation), op_pub : Bytes }
 
   -- Watches one registered process: its `Down` unregisters its names. `Down`
   -- is a raw mailbox message, so the watcher reads it with `receive` (the
@@ -1034,7 +1180,8 @@ mod ClusterNode do
                  fired: Vault.new("cluster_node_unset_fired"),
                  failed: Vault.new("cluster_node_unset_failed"),
                  certs: Vault.new("cluster_node_unset_certs"),
-                 sec: Vault.new("cluster_node_unset_sec") },
+                 sec: Vault.new("cluster_node_unset_sec"),
+                 revs: Vault.new("cluster_node_unset_revs"), op_pub: Bytes.empty() },
             started: false }
     on Boot(st0 : CnState, h0 : CnHandle) do
       { st: st0, h: h0, started: true }
@@ -1094,6 +1241,9 @@ mod ClusterNode do
       else
         step_io(state.st, state.h, (state.st, Cons(Unwatch(watcher), Nil)), state.started)
       end
+    end
+    on Revoke(r : NodeCert.SignedRevocation) do
+      step_io(state.st, state.h, core_revoke(state.st, r), state.started)
     end
     on Unregister(name : String) do
       step_io(state.st, state.h, core_unregister(state.st, name), state.started)
@@ -1280,6 +1430,9 @@ mod ClusterNode do
     let _ = List.map(core_members(st), fn m -> Vault.set(h.members, m.node_id, m))
     let _ = Vault.set(h.meta, "links", Map.size(st.links))
     let _ = List.map(Map.entries(st.certs), fn kv -> match kv do (k, c) -> Vault.set(h.certs, k, c) end)
+    let _ = List.map(Vault.keys(h.certs), fn k ->
+      if Map.contains_key(st.certs, k, Map.str_cmp) do () else Vault.drop(h.certs, k) end)
+    let _ = List.map(st.revs, fn r -> Vault.set(h.revs, Bytes.to_hex(r.signature), r.rev))
     let _ = List.map(Vault.keys(h.links), fn k ->
       if Map.contains_key(st.links, k, Map.str_cmp) do () else Vault.drop(h.links, k) end)
     let _ = List.map(Map.entries(st.links), fn kv -> match kv do (k, l) -> Vault.set(h.links, k, l) end)
@@ -1649,6 +1802,8 @@ mod ClusterNode do
     demonitor_remote   : GlobalPid.Pid -> Int -> (),
     peer_cert          : String -> Option(NodeCert.Cert),
     frames_rejected    : () -> Int,
+    revoke             : String -> Result((), String),
+    revocations        : () -> List(NodeCert.Revocation),
     on_security_event  : (SecurityEvent -> Unit) -> Int,
     off_security_event : Int -> ()
   }
@@ -1704,6 +1859,8 @@ mod ClusterNode do
       demonitor_remote: fn (_, _) -> unsupported("demonitor_remote"),
       peer_cert: fn _ -> unsupported("peer_cert"),
       frames_rejected: fn _ -> unsupported("frames_rejected"),
+      revoke: fn _ -> unsupported("revoke"),
+      revocations: fn _ -> unsupported("revocations"),
       on_security_event: fn _ -> unsupported("on_security_event"),
       off_security_event: fn _ -> unsupported("off_security_event") }
   end
@@ -1740,6 +1897,8 @@ mod ClusterNode do
       demonitor_remote: fn (target, r) -> Vault.drop(h.downs, mkey(target.node_id, target.local_pid) ++ int_to_string(r)),
       peer_cert: fn id -> Vault.get(h.certs, id),
       frames_rejected: fn _ -> Vault.get_or(h.meta, "frames_rejected", 0),
+      revoke: fn token -> h_revoke(h, token),
+      revocations: fn _ -> List.map(Vault.all(h.revs), fn kv -> match kv do (_k, r) -> r end),
       on_security_event: fn f -> h_on_security_event(h, f),
       off_security_event: fn id -> Vault.drop(h.sec, int_to_string(id)) }
   end
@@ -1924,6 +2083,36 @@ mod ClusterNode do
     id
   end
 
+  pfn live_revoked(revs : Vault(NodeCert.Revocation), c : NodeCert.Cert) : Bool do
+    NodeCert.is_revoked(c, List.map(Vault.all(revs), fn kv -> match kv do (_k, r) -> r end))
+  end
+
+  pfn with_live_revocations(cfg : CnConfig, revs : Vault(NodeCert.Revocation)) : CnConfig do
+    match cfg.auth do
+      ClusterAuth.Certified(cr) ->
+        let inner = cr.revoked
+        let checked = { cr with revoked: fn c -> inner(c) || live_revoked(revs, c) }
+        { cfg with auth: ClusterAuth.Certified(checked) }
+      ClusterAuth.Secret(_) -> cfg
+    end
+  end
+
+  pfn h_revoke(h : CnHandle, token : String) : Result((), String) do
+    if Bytes.is_empty(h.op_pub) do Err("cluster_node: this node runs in shared-secret mode; revocations need certificate mode")
+    else
+      match NodeCert.revocation_from_text(token) do
+        Err(e) -> Err("cluster_node: " ++ e)
+        Ok(r) ->
+          match NodeCert.verify_revocation(r, h.op_pub) do
+            Err(e) -> Err("cluster_node: " ++ e)
+            Ok(_) ->
+              send(node_pid(h), Revoke(r))
+              Ok(())
+          end
+      end
+    end
+  end
+
   pfn on_bad_frame(h : CnHandle, fd : Int, n : Int) : () do
     match List.find(Vault.all(h.links), fn kv -> match kv do (_k, l) -> l.cfd == fd || l.dfd == fd end) do
       Some((id, _l)) ->
@@ -1980,6 +2169,11 @@ mod ClusterNode do
                   failed: Vault.new("cluster_node_failed_" ++ tag),
                   certs: Vault.new("cluster_node_certs_" ++ tag),
                   sec: Vault.new("cluster_node_sec_" ++ tag),
+                  revs: Vault.new("cluster_node_revs_" ++ tag),
+                  op_pub: match operator_key(cfg) do
+                    Some(k) -> k
+                    None -> Bytes.empty()
+                  end,
                   subs: Vault.new("cluster_node_subs_" ++ tag),
                   meta: Vault.new("cluster_node_meta_" ++ tag) }
         Vault.set(h.meta, "listen_fd", listen_fd)
@@ -1989,6 +2183,8 @@ mod ClusterNode do
             Vault.set(h.qs, "loop", pid_to_int(w))
             Vault.set(h.meta, "loop_fd", fd)
         end
+        -- The handshake's revocation check reads this node's live list.
+        let cfg = with_live_revocations(cfg, h.revs)
         let st0 = core_new(cfg, cfg.creation)
         mirror(st0, h)
         send(node, Boot(st0, h))
@@ -2286,6 +2482,25 @@ mod ClusterNode do
   fn frames_rejected(c : Cap(ClusterNode.Live)) : Int do
     let d = ops(c)
     d.frames_rejected(())
+  end
+
+  doc """
+  Revoke a certificate cluster-wide: [token] is `forge cluster revoke`'s
+  output, signed by the operator key. The node drops any link whose
+  certificate it names (the peer is reported NodeDead(_, "certificate
+  revoked")), refuses that certificate's handshakes, and passes the
+  revocation on to every peer. Err for a token that does not parse or is not
+  the operator's, or on a shared-secret node.
+  """
+  fn revoke(c : Cap(ClusterNode.Live), token : String) : Result((), String) do
+    let d = ops(c)
+    d.revoke(token)
+  end
+
+  doc "Every revocation this node knows (from MARCH_CLUSTER_REVOCATIONS, `revoke`, or its peers)."
+  fn revocations(c : Cap(ClusterNode.Live)) : List(NodeCert.Revocation) do
+    let d = ops(c)
+    d.revocations(())
   end
 
 end

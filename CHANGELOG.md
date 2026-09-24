@@ -46,6 +46,14 @@ git log is authoritative for exact commits.
   on one connection close it. This is integrity, not encryption: frames stay
   readable on the wire. Shared-secret nodes negotiate it, so they still talk to
   older nodes (unsealed). New `bench/cluster_frames.march`.
+- **Certificate expiry and revocation** (step 11a, part 4). A peer whose
+  certificate expires, or is revoked, is disconnected and reported as
+  `NodeDead(_, "certificate expired")` / `NodeDead(_, "certificate revoked")`,
+  so its sessions are cancelled as for any dead node, and its handshakes are
+  refused from then on. `ClusterNode.revoke(c, token)` takes a token from
+  `forge cluster revoke`; `MARCH_CLUSTER_REVOCATIONS` seeds the list at
+  startup; nodes pass revocations on to each other, and only the operator's
+  signature makes one count. `ClusterNode.revocations(c)` lists them.
 - **Hot reload: the unified epoch model and drains** (build step 6 of the
   distributed-deploys plan). Every unit of work (actor, task, session) runs at the
   epoch of the deploy it started under, and every call it makes, from the base

@@ -137,3 +137,33 @@ section 3 (Identity, Threat model), 7.4, II.9, D3, D4. The authorization half
   with value anchors): +25 µs/frame at 64 B, +1.1 ms at 16 KiB, mostly
   `List(Int)`/`Bytes` conversion rather than the HMAC; no difference on the
   two-node `stream` scenario.
+
+## 4. Revocation and expiry
+
+- **Expiry**: `not_after` is checked in every handshake (`NodeCert.verify`)
+  and again for every linked peer on every tick (`core_check_certs`, run at
+  the start of `core_tick`). An expired certificate's link is dropped, the
+  member is queued `PeerDown`, and the tick reports
+  `NodeDead(info, "certificate expired")`; sessions with the node are then
+  cancelled through the existing NodeDead path.
+- **Revocations** (`NodeCert.SignedRevocation`, operator-signed, by serial or
+  by node): `ClusterNode.revoke(c, token)` (the token is `forge cluster
+  revoke`'s output), `MARCH_CLUSTER_REVOCATIONS` at startup (tokens, or a file
+  of them), and REVOCATIONS control frames (tag 15) from peers:
+  the whole list goes to every new link and each new revocation to every
+  linked peer (`core_revoke`). Only the operator's signature makes one count;
+  a shared-secret node accepts none. A revoked peer is dropped like an expired
+  one, with `"certificate revoked"`, and its handshakes are refused: `start`
+  wraps `Credentials.revoked` to read the node's live list.
+- **Deviation:** the revocation list rides on its own control frame (tag 15),
+  sent on the same occasions as the member view (every new link) and pushed
+  on change, rather than inside SWIM's MEMBER_GOSSIP frames: it is not
+  per-member state, and a list signed item by item does not fit gossip's
+  one-member records.
+- **A dropped peer stays out**: it is Dead in the member view, redials of it
+  and from it fail at the handshake, and `cert_dead` names the cause so the
+  NodeDead reason is the certificate's, not "gossip". A later link with a
+  valid (renewed) certificate clears it.
+- **API**: `ClusterNode.revoke`, `ClusterNode.revocations`, both through the
+  `ClusterOps` dictionary; `ClusterNode.revocations_from_text`,
+  `encode_revocations`/`decode_revocations`, `core_revoke`, `core_check_certs`.
