@@ -2052,6 +2052,7 @@ static void sched_loop(march_scheduler *sched) {
              * thread resuming a process whose context isn't saved yet. */
             atomic_store_explicit(&p->status, PROC_WAITING, memory_order_release);
         } else if (st == PROC_DEAD) {
+            atomic_store_explicit(&p->hold_next_spawn, 0, memory_order_relaxed);
             registry_remove(p);
             /* The epoch pin taken at spawn (or moved there by an advance):
              * dropped exactly once, here.  The PROC_DEAD release store

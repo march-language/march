@@ -607,10 +607,38 @@ static void test_spawn_hold_precedes_marker(void) {
           "held from the spawn, the child stays at the parent's epoch");
     void *held = atomic_load((_Atomic(void *) *)&g_child);
     CHECK(march_epoch_pins(old_e) >= 2, "parent and child both pin the old epoch");
+    /* The flag is bound to ONE spawn: a second spawn right after a held one
+     * (no flag set again) is a plain spawn and advances. */
+    atomic_store(&g_probe_epoch, 0);
+    send(parent, MSG_SPAWN_PLAIN);
+    end = now_ms() + 3000;
+    while (atomic_load(&g_probe_epoch) == 0 && now_ms() < end) march_sched_yield();
+    CHECK(atomic_load(&g_probe_epoch) == new_e, "the spawn after a held one is not held");
+    void *plain2 = atomic_load((_Atomic(void *) *)&g_child);
+    send(plain2, MSG_RELEASE);
     /* Release everything so the old epoch retires. */
     send(held, MSG_RELEASE); send(plain, MSG_RELEASE); send(parent, MSG_RELEASE);
     wait_pins_zero(old_e, 5000);
     CHECK(march_epoch_pins(old_e) == 0, "released, the old epoch retires");
+}
+
+/* A HELD actor that dies (a hosting actor killed or restarted with parked
+ * endpoints, HostGone) gives its pin back at the reap: holds live on the
+ * proc, and a dead proc's holds hold nothing. */
+static void test_dead_held_actor_releases_pin(void) {
+    printf("-- a held actor killed with its holds gives its epoch pin back --\n");
+    reset();
+    atomic_store(&g_gate_open, 1);
+    void *a = new_actor(SLOT_DEATH);
+    send(a, MSG_HOLD); send(a, MSG_HOLD);           /* two parked endpoints' worth */
+    sleep_ms(20);
+    uint32_t old_e = march_epoch_current();
+    CHECK(activate(SLOT_DEATH, (void *)v2_dispatch, 0) > 0, "activation published");
+    sleep_ms(50);
+    CHECK(march_epoch_pins(old_e) >= 1, "the held actor keeps the old epoch pinned");
+    march_kill(a);
+    wait_pins_zero(old_e, 5000);
+    CHECK(march_epoch_pins(old_e) == 0, "killed while holding, its pin is released at the reap");
 }
 
 static void test_dead_actor_releases_pins(void) {
@@ -646,6 +674,7 @@ static void test_main(void) {
     test_hard_deadline_cancels_tasks();
     test_dropped_remote_delivery_reports_origin();
     test_spawn_hold_precedes_marker();
+    test_dead_held_actor_releases_pin();
     test_dead_actor_releases_pins();
     march_hcr_counters c; march_hcr_counters_get(&c);
     printf("-- counters: deferred=%lld converted=%lld dropped=%lld killed=%lld "

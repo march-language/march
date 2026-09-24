@@ -4295,7 +4295,14 @@ static void actor_green_thread(void *arg) {
         /* The epoch model's per-boundary work: a pending marker whose holds
          * are gone, a lost marker, a soft drain deadline (see hcr_boundary).
          * Only for procs that pin an epoch (actor procs always do). */
-        if (self) hcr_boundary(meta, a, self, (int)actor_alive_load(actor));
+        if (self) {
+            hcr_boundary(meta, a, self, (int)actor_alive_load(actor));
+            /* A hold-next-spawn flag (march_sched_hold_next_spawn) is bound
+             * to the spawn that follows it in the same handler; one that
+             * outlived its handler (a panic between the two) is dropped
+             * here rather than seeding a later, unrelated spawn. */
+            atomic_store_explicit(&self->hold_next_spawn, 0, memory_order_relaxed);
+        }
 
         /* Deferred newer-format messages replay first, in order, once the
          * actor has advanced and holds nothing (hcr_route). */

@@ -63,6 +63,9 @@ mod ClusterApHostedCancelA do
         (Some(parked), m) ->
           println("Server: session cancelled, " ++ Echo_Msg.role_name(role) ++ " gone")
           Echo_Server.take_closed(Echo_Server.cancel(s, parked))
+          -- `cancel` released the hold `register` took; `take_closed` of the
+          -- Closed value releases nothing more.
+          println("Server holds after cancel: " ++ int_to_string(Session.epoch_holds_here()))
           { state with cancelled: state.cancelled + 1,
                        counts: Map.remove(state.counts, sid, Map.str_cmp), sessions: m }
       end
