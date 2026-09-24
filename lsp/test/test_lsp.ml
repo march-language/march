@@ -13,7 +13,8 @@
       [Test_lsp_features]  TIR pipeline, inlay hints, lenses, semantic tokens
       [Test_lsp_refactor]  DAP inline values, deltas, call hierarchy, refactors
       [Test_lsp_html]      the ~H sigil, islands, and their lints
-      [Test_lsp_depot]     depot-aware analysis and capability tooling *)
+      [Test_lsp_depot]     depot-aware analysis and capability tooling
+      [Test_lsp_topology]  topology.toml: diagnostics, definition, completion, hover *)
 
 open Test_lsp_analysis
 open Test_lsp_actions
@@ -568,4 +569,5 @@ let () =
       "proof cap find-refs finds type annotations", `Quick, test_proof_cap_find_refs;
       "cap inlay hint emitted for builtin in needs module", `Quick, test_cap_inlay_hints;
     ];
+    "topology file", Test_lsp_topology.tests;
   ]
