@@ -153,19 +153,32 @@ mod Session do
   end
 
   doc """
-  For generated `@[endpoints]` code only: take an epoch hold on the running
-  actor while it hosts a started endpoint, so it stays on the code version the
-  session formed under until the endpoint closes (hot reload's nesting rule).
-  Paired with `release_epoch`; calling it anywhere else only delays a deploy
-  (up to its hard drain deadline).
+  Take an epoch hold on the running actor while it hosts a started endpoint
+  of the session [c] belongs to, so it stays on the code version the session
+  formed under until the endpoint closes (hot reload's nesting rule, D28).
+  The transport takes it for a hosted endpoint at `register`; generated code
+  and transports are its callers. Paired with `release_epoch`. It takes the
+  session capability so that only code holding a session can pin an actor's
+  epoch: calling it anywhere else only delays a deploy (up to its hard drain
+  deadline).
   """
-  fn hold_epoch() : () do
+  fn hold_epoch(c : Cap(Session.Live)) : () do
+    let _ = c
     epoch_hold()
   end
 
-  doc "For generated `@[endpoints]` code only: release the hold `hold_epoch` took."
-  fn release_epoch() : () do
+  doc "Release the hold `hold_epoch` took for a session [c] belongs to."
+  fn release_epoch(c : Cap(Session.Live)) : () do
+    let _ = c
     epoch_release()
+  end
+
+  doc """
+  How many epoch holds the running actor has (0 outside a hosted session).
+  A read-only count, for tests of the hosting patterns.
+  """
+  fn epoch_holds_here() : Int do
+    epoch_holds()
   end
 
   doc "Close endpoint `ep`."

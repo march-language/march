@@ -165,6 +165,18 @@ remote route, the hook installed by `ClusterNode.start`) runs in every `cluster_
 two-node scenario, which all pass; see deviation 1 for why no scenario performs the
 drop itself.
 
+## Follow-on review findings absorbed the same day
+
+The step-6 review found the epoch-hold mechanism this rule sits on broken in three ways,
+all fixed on this branch after the five commits above: the party's hold arrived behind
+its Endpoint's spawn marker (so a session formed by an old-epoch unit was not held at
+all, and the `Undelivered` rule could not be trusted for it), cluster parties never
+released their hold, and only one hosting pattern held. See
+`2026-09-24-dd-review-party-hold-queued-behind-spawn-marker.md`,
+`…-cluster-party-never-releases-epoch-hold.md`, `…-hosted-register-path-takes-no-hold.md`,
+`…-session-hold-epoch-public.md` and `…-drain-current-epoch-kills-every-actor.md` in
+this directory.
+
 ## Deviations
 
 1. **Follow-up 1 has no two-node scenario that performs the drop.** A remote delivery is

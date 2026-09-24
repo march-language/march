@@ -129,6 +129,7 @@ let stdlib_only : (string * string) list ref =
       ("epoch_draining", "session drains are decided by `SessionNode` (D27)");
       ("epoch_drain", "use `SessionNode.drain_epochs(io, soft_ms, hard_ms)`");
       ("epoch_hold_next_spawn", "epoch holds are taken by `SessionNode` and generated session endpoints");
+      ("epoch_holds", "use `Session.epoch_holds_here()`");
       (* DD step-6 follow-up 1: a remote delivery's origin rides the mailbox
          node; only the cluster node's data reader stamps it and installs
          the DELIVERY_FAILED hook. *)
@@ -988,6 +989,7 @@ let builtin_bindings : (string * scheme) list =
     ("epoch_draining", Mono (TArrow (t_unit, t_bool)));
     ("epoch_drain", Mono (TArrow (t_int, TArrow (t_int, t_unit))));
     ("epoch_hold_next_spawn", Mono (TArrow (t_unit, t_unit)));
+    ("epoch_holds", Mono (TArrow (t_unit, t_int)));
     ("delivery_origin_set", Mono (TArrow (t_int, TArrow (t_int, t_unit))));
     ("delivery_origin_clear", Mono (TArrow (t_unit, t_unit)));
     ("delivery_failed_watch",

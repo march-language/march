@@ -106,14 +106,14 @@ let test_shipped_table () =
   let gated = List.map fst !TB.stdlib_only in
   Alcotest.(check (list string)) "the four forging builtins, the epoch holds and the drain flag are gated"
     [ "pid_of_int"; "actor_pid_indices"; "actor_whereis"; "actor_registered";
-      "epoch_hold"; "epoch_release"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn";
+      "epoch_hold"; "epoch_release"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn"; "epoch_holds";
       "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch" ]
     gated;
   List.iter (fun (name, hint) ->
       Alcotest.(check bool) (name ^ " suggestion names Actor.introspect") true
         (let n = String.length "`Actor.introspect`" in
          let rec go i = i + n <= String.length hint && (String.sub hint i n = "`Actor.introspect`" || go (i + 1)) in go 0))
-    (List.filter (fun (name, _) -> name <> "epoch_hold" && name <> "epoch_release" && name <> "epoch_draining" && name <> "epoch_drain" && name <> "epoch_hold_next_spawn"
+    (List.filter (fun (name, _) -> name <> "epoch_hold" && name <> "epoch_release" && name <> "epoch_draining" && name <> "epoch_drain" && name <> "epoch_hold_next_spawn" && name <> "epoch_holds"
                              && name <> "delivery_origin_set" && name <> "delivery_origin_clear"
                              && name <> "delivery_failed_watch")
        !TB.stdlib_only);

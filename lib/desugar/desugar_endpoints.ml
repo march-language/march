@@ -1153,16 +1153,16 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
   let idle = fn "idle" [] t_parked (con idle_c [ secret_v ]) in
   (* Epoch holds (DD step 6, plan II.4.4, D28): a started endpoint keeps the
      HOSTING actor on the epoch the session formed in, so its parked state --
-     typed by that version's protocol -- is never resumed by newer code.  One
-     hold per started endpoint: taken here, when the actor starts it, and
-     released when it closes (`finish`, or `cancel` of a started one).  All
-     three run in the host actor's own turn, so the hold is on its proc.
-     Through `Session`: the builtins are stdlib-only. *)
+     typed by that version's protocol -- is never resumed by newer code.  The
+     TRANSPORT takes the hold at `register` and releases it at `close`, both
+     in the host actor's turn, whichever hosting pattern the actor uses
+     (`take_idle` then `register`, or `await_X(s, register(s, 0))` for many
+     sessions); a cancelled endpoint has no `close`, so `cancel` below
+     releases through `Session.release_epoch(s)`. *)
   let take_idle =
     fn "take_idle" [ ("p", t_parked) ] (TyTuple [])
       (match_ (var "p")
-         [ (pcon idle_c [ PatWild sp ],
-            block [ let_wild (app "Session.hold_epoch" []); ETuple ([], sp) ]);
+         [ (pcon idle_c [ PatWild sp ], ETuple ([], sp));
            (PatWild sp, panic (where ^ ": take_idle on an endpoint that was already started")) ])
   in
   (* `take_closed(p)`: retire a finished or cancelled endpoint.  Without it the
@@ -1216,7 +1216,6 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                (match_ (var "st")
                   [ (pcon this [ pvar "ep" ],
                      block [ let_wild (app "Session.close" [ var "s"; var "ep" ]);
-                             let_wild (app "Session.release_epoch" []);
                              con closed_c [ secret_v ] ]) ]) ]
          | _ -> [])
       names
@@ -1265,22 +1264,24 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                   @ [ (pcon idle_c [ PatWild sp ], panic (where ^ ": delivery before the endpoint was started"));
                       (pcon closed_c [ PatWild sp ], panic (where ^ ": delivery to a closed endpoint")) ]) ]) ]
   in
-  (* `cancel(p)`: the hosted endpoint was cancelled (its runner said so,
+  (* `cancel(s, p)`: the hosted endpoint was cancelled (its runner said so,
      through `host_<Role>_or`'s cancel function).  Consumes the parked value
      and returns [Closed]: the actor must store it, as for any other step,
-     and nothing can resume a closed endpoint. *)
+     and nothing can resume a closed endpoint.  A started endpoint's hold
+     (taken by the transport at `register`) is released here, since a
+     cancelled endpoint never reaches `finish`. *)
   let cancel_parked =
     (* One arm per constructor, never a top-level `_`: a wildcard over the
        whole value would DISCARD a linear [Parked], which the checker
        rejects; matching the constructor consumes it. *)
-    fn "cancel" [ ("p", t_parked) ] t_parked
+    fn "cancel" [ ("s", t_cap_session); ("p", t_parked) ] t_parked
       (match_ (var "p")
-         ((pcon idle_c [ PatWild sp ], con closed_c [ secret_v ])
+         ((pcon idle_c [ PatWild sp ], block [ let_wild (var "s"); con closed_c [ secret_v ] ])
           :: List.map (fun (this, _, _) ->
               (pcon ("Awaiting_" ^ this) [ PatWild sp; PatWild sp ],
-               block [ let_wild (app "Session.release_epoch" []); con closed_c [ secret_v ] ]))
+               block [ let_wild (app "Session.release_epoch" [ var "s" ]); con closed_c [ secret_v ] ]))
             receiving
-          @ [ (pcon closed_c [ PatWild sp ], con closed_c [ secret_v ]) ]))
+          @ [ (pcon closed_c [ PatWild sp ], block [ let_wild (var "s"); con closed_c [ secret_v ] ]) ]))
   in
   let event_api = (parked_ty :: event_ty) @ (idle :: take_idle :: take_closed :: cancel_parked :: awaits) @ resume in
   (* ── scripted and chaos peers (D36, distributed-deploys plan 7.2) ──────

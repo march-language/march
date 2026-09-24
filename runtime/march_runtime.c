@@ -3763,6 +3763,12 @@ uint32_t march_epoch_holds(void) {
     return p ? atomic_load_explicit(&p->epoch_holds, memory_order_relaxed) : 0;
 }
 
+/* The stdlib-only builtin epoch_holds(): the running proc's hold count, as an
+ * i64 (the uint32 accessor above would leave x0's upper half unspecified). */
+int64_t march_epoch_holds_i64(void) {
+    return (int64_t)march_epoch_holds();
+}
+
 /* D27: is the running proc's code epoch draining?  The stdlib-only builtin
  * epoch_draining(): SessionNode asks it in its Endpoint actor's turn, and the
  * Endpoint holds the epoch its session formed in (march_epoch_hold), so this

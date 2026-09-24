@@ -822,7 +822,7 @@ actor starts idle and cannot pick up the old conversation; start a new session i
 For the actor to hear that its role was cancelled, use `host_<Role>_or`, which takes a
 fourth function after `deliver`. It is called with the session, the failed role, the cause
 and the endpoint. Send those to the actor; its handler stores
-`Stream_Cons.cancel(state.parked)`, which gives back a closed value, and can update the rest
+`Stream_Cons.cancel(s, state.parked)`, which gives back a closed value, and can update the rest
 of its state. Like a cancel handler, it cannot send in the failed session. This is the cost of keeping the session in the actor's state. The
 callback style does not have it, because there the session state lives in the runner.
 
@@ -848,7 +848,7 @@ actor ServerActor do
     match LinearMap.put(state.sessions, sid, parked) do
       (None, m) -> { state with sessions: m }
       (Some(old), m) ->
-        Echo_Server.take_closed(Echo_Server.cancel(old))
+        Echo_Server.take_closed(Echo_Server.cancel(s, old))
         panic("session " ++ sid ++ " is already hosted")
     end
   end
@@ -866,11 +866,11 @@ actor ServerActor do
         end
     end
   end
-  on Cancel(sid : String, _s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
+  on Cancel(sid : String, s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
     match LinearMap.take(state.sessions, sid) do
       (None, m) -> { state with sessions: m }
       (Some(parked), m) ->
-        Echo_Server.take_closed(Echo_Server.cancel(parked))
+        Echo_Server.take_closed(Echo_Server.cancel(s, parked))
         { state with sessions: m }
     end
   end

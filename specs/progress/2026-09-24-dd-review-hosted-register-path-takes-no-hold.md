@@ -1,4 +1,15 @@
-# `[P1]` Multi-session hosted actors take no epoch hold, and `finish`/`cancel` release one they never took
+# Multi-session hosted actors take no epoch hold, and `finish`/`cancel` release one they never took
+
+**DONE 2026-09-24.** The hold is the transport's: `SessionNode`'s hosted `register`
+takes it and its hosted `close` releases it, both in the host actor's turn, so both
+hosting patterns (`take_idle` then `register`, and `await_X(s, register(s, 0))` for many
+sessions) hold exactly once; `take_idle` no longer holds and `finish` no longer releases
+(its `close` does), and the generated `cancel` -- a started endpoint that never reaches
+`finish` -- is now `cancel(s, p)` and releases through `Session.release_epoch(s)`. Tests:
+`test/two_node/hosted` (single-session pattern) and `test/two_node/cluster_ap_local`
+(many-session pattern) print `Session.epoch_holds_here()` after the start (1) and after
+`finish` (0); `test/test_endpoints.ml` pins that no generated function holds and only
+`cancel` releases. Filed 2026-09-24; the text below is the finding as filed.
 
 Filed 2026-09-24 by the distributed-deploys review (step 6, PR #612, commit
 753336d36). Plan: 6.1 (nesting rule), II.4.4, D28; progress deviation 10.

@@ -1183,6 +1183,15 @@ mod SessionNode do
     {
       register: fn (_ap, role) -> do
         Vault.set(meta, "ep", role)
+        -- Hosted (this runs in the HOST actor's turn, from its start
+        -- handler): the host holds the session's epoch from here until
+        -- `close`, whichever hosting pattern it uses (review finding
+        -- 2026-09-24-dd-review-hosted-register-path-takes-no-hold: the
+        -- generated take_idle held only on the single-session path).
+        match Vault.get(forward, "f") do
+          None -> ()
+          Some(_) -> epoch_hold()
+        end
         role
       end,
       emit: fn (ep, to, msg) -> do
@@ -1219,6 +1228,12 @@ mod SessionNode do
         on_close(ep)
         Vault.set(meta, "closed", 1)
         Vault.set(meta, "done", 1)
+        -- Hosted: `finish` runs this in the host's turn; release its hold.
+        -- (A cancelled hosted endpoint releases in the generated `cancel`.)
+        match Vault.get(forward, "f") do
+          None -> ()
+          Some(_) -> epoch_release()
+        end
         -- Every peer's reader has to learn this endpoint is done.
         let _ = List.map(links, fn l -> send_frame(party, l, "SessionNode.Bye", bye_payload(party)))
         ()

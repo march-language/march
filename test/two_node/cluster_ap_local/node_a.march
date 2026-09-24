@@ -50,10 +50,13 @@ mod ClusterApLocal do
     init  { sessions: LinearMap.empty_string() }
     on Start(sid : String, s : Cap(Session.Live)) do
       let parked = Hosted_Server.await_Ping(s, Hosted_Server.register(s, 0))
+      -- The many-session pattern holds too: the transport takes the hold at
+      -- `register`, whichever pattern the actor uses.
+      println("PingServer holds after start: " ++ int_to_string(Session.epoch_holds_here()))
       match LinearMap.put(state.sessions, sid, parked) do
         (None, m) -> { sessions: m }
         (Some(old), m) ->
-          Hosted_Server.take_closed(Hosted_Server.cancel(old))
+          Hosted_Server.take_closed(Hosted_Server.cancel(s, old))
           { sessions: m }
       end
     end
@@ -65,15 +68,16 @@ mod ClusterApLocal do
             Got_Ping(n, st) ->
               println("PingServer: got " ++ int_to_string(n))
               Hosted_Server.take_closed(Hosted_Server.finish(s, Hosted_Server.send_Pong(s, st, n + 1)))
+              println("PingServer holds after finish: " ++ int_to_string(Session.epoch_holds_here()))
               { sessions: LinearMap.vacate(slot) }
           end
       end
     end
-    on Cancel(sid : String, _s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
+    on Cancel(sid : String, s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
       match LinearMap.take(state.sessions, sid) do
         (None, m) -> { sessions: m }
         (Some(parked), m) ->
-          Hosted_Server.take_closed(Hosted_Server.cancel(parked))
+          Hosted_Server.take_closed(Hosted_Server.cancel(s, parked))
           { sessions: m }
       end
     end

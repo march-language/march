@@ -256,11 +256,14 @@ let unlabelled_names_pinned =
        Alcotest.(check (list string)) "Stream_Prod" stream_prod_fns (List.assoc "Stream_Prod" mods);
        Alcotest.(check (list string)) "Stream_Cons" stream_cons_fns (List.assoc "Stream_Cons" mods))
 
-(* Hot reload (DD step 6, plan II.4.4, D28): a started hosted endpoint holds
-   the hosting actor's epoch -- taken when the actor starts it (take_idle),
-   released when it closes (finish, and cancel of a started one). *)
+(* Hot reload (DD step 6, plan II.4.4, D28): the TRANSPORT holds the hosting
+   actor's epoch from `register` to `close`, whichever hosting pattern the
+   actor uses; the generated API neither holds in take_idle nor releases in
+   finish (review finding 2026-09-24-dd-review-hosted-register-path-takes-no-
+   hold), and only `cancel` -- a started endpoint that never reaches `finish`
+   -- releases, through the cap. *)
 let hosted_endpoint_epoch_holds =
-  Alcotest.test_case "hosted endpoint: take_idle holds the epoch, finish/cancel release it" `Quick
+  Alcotest.test_case "hosted endpoint: holds are the transport's; only cancel releases, through the cap" `Quick
     (fun () ->
        let m = parse_and_desugar (wrap stream) in
        let body_calls modname fname =
@@ -274,15 +277,16 @@ let hosted_endpoint_epoch_holds =
                    | _ -> []) decls
              | _ -> []) m.mod_decls in
        let calls m f n = List.length (List.filter (( = ) n) (body_calls m f)) in
-       Alcotest.(check int) "take_idle holds once" 1
+       Alcotest.(check int) "take_idle takes no hold" 0
          (calls "Stream_Cons" "take_idle" "Session.hold_epoch");
-       Alcotest.(check int) "finish releases once" 1
+       Alcotest.(check int) "finish releases nothing itself (close does, in the transport)" 0
          (calls "Stream_Cons" "finish" "Session.release_epoch");
-       Alcotest.(check int) "cancel releases once per awaiting state, not for idle or closed" 1
+       Alcotest.(check int) "cancel releases once, for the awaiting state" 1
          (calls "Stream_Cons" "cancel" "Session.release_epoch");
-       Alcotest.(check int) "an await neither holds nor releases" 0
-         (calls "Stream_Cons" "await_Msg_Prod_Cons_1" "Session.hold_epoch"
-          + calls "Stream_Cons" "await_Msg_Prod_Cons_1" "Session.release_epoch"))
+       Alcotest.(check int) "no generated function holds" 0
+         (List.length (List.filter (( = ) "Session.hold_epoch")
+            (List.concat_map (fun f -> body_calls "Stream_Cons" f)
+               [ "register"; "take_idle"; "await_Msg_Prod_Cons_1"; "finish"; "cancel"; "resume" ]))))
 
 (* ── D27: drain points ────────────────────────────────────────────────── *)
 
@@ -1050,15 +1054,15 @@ let cancelled_forge = bad "a Cancelled token cannot be forged: its constructor t
 |}))
 
 let hosted_cancel_ok = ok "a hosted actor stores the Closed value `cancel` returns" (cons_actor {|
-    on CancelC() do
-      { state with parked: Stream_Cons.cancel(state.parked) }
+    on CancelC(s : Cap(Session.Live)) do
+      { state with parked: Stream_Cons.cancel(s, state.parked) }
     end
 |})
 
 let hosted_cancel_retained = bad "a hosted actor cannot cancel its Parked value and keep it too"
     "`state.parked` is used more than once" (cons_actor {|
-    on CancelC() do
-      let _closed = Stream_Cons.cancel(state.parked)
+    on CancelC(s : Cap(Session.Live)) do
+      let _closed = Stream_Cons.cancel(s, state.parked)
       state
     end
 |})

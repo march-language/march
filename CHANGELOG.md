@@ -46,6 +46,16 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **The generated hosted event API's `cancel` takes the session: `cancel(s, parked)`.**
+  The epoch hold a hosting actor takes for a session is now the transport's, taken at
+  `register` and released at `close` for both hosting patterns (before, only the
+  `take_idle` pattern held, and `finish`/`cancel` released a hold the many-session
+  pattern never took); `cancel` releases through `Session.release_epoch(s)`, which,
+  like `Session.hold_epoch`, now takes a `Cap(Session.Live)`. `Session.epoch_holds_here()`
+  reads the running actor's hold count. A session party's hold is taken at its
+  Endpoint's spawn and released on every runner's exit (cluster sessions used to pin
+  their epoch for the life of the process). The reload server's `DRAIN` is signed and
+  refuses the current epoch.
 - **`run_<Role>` (and `cluster_`, `initiate_`, `host_` fronts) return
   `Result(Session.Outcome, RunError)`** instead of `Result((), RunError)`:
   `Ok(Session.Finished)` for a session every role completed, `Ok(Session.Drained(n))`
