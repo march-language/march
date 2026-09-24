@@ -2404,6 +2404,58 @@ entrypoint = ".forge/generated/lib/genentry.march"
             once preprocessors run, got: %s" msg
        | Ok () -> ()))
 
+(** Regression: [Cmd_bench.run] compiled every [bench/*.march] with a
+    hardcoded [~ffi_flags:""], so a benchmark calling an extern from the
+    project's [[ffi] sources] failed to link while `forge build`/`run`/`test`
+    of the same code worked (they all pass [Cmd_build.ffi_flags_full]).  A real
+    project with a one-function C shim and a benchmark that calls it: the
+    bench must compile, link and run.  Real compile + link, so [`Slow]. *)
+let test_bench_links_ffi_sources () =
+ with_dev_march_on_path (fun () ->
+  let tmpdir = Filename.temp_dir "forge_bench_ffi_" "" in
+  Project.mkdir_p (Filename.concat tmpdir "native");
+  Project.mkdir_p (Filename.concat tmpdir "bench");
+  write_file (Filename.concat tmpdir "native/shim.c")
+    "#include <stdint.h>\nint64_t forge_bench_ffi_answer(void) { return 42; }\n";
+  write_file (Filename.concat tmpdir "bench/ffi_answer.march")
+    (String.concat "\n"
+       [ "mod FfiAnswerBench do";
+         "  needs IO.Console";
+         "  needs IO.Foreign";
+         "";
+         "  extern \"shim\" : Cap(IO.Foreign) do";
+         "    fn answer() : Int = \"forge_bench_ffi_answer\"";
+         "  end";
+         "";
+         "  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do";
+         "    println(\"answer=\" ++ int_to_string(answer()))";
+         "  end";
+         "end";
+         "" ]);
+  write_file (Filename.concat tmpdir "forge.toml")
+    {|[package]
+name = "benchffi"
+version = "0.1.0"
+type = "app"
+
+[ffi]
+sources = ["native/shim.c"]
+|};
+  let old_cwd = Sys.getcwd () in
+  Fun.protect
+    ~finally:(fun () ->
+        Unix.chdir old_cwd;
+        let _ = Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote tmpdir)) in
+        ())
+    (fun () ->
+       Unix.chdir tmpdir;
+       match Cmd_bench.run () with
+       | Error msg ->
+         Alcotest.failf "a bench calling an [ffi] C extern should link and run, got: %s" msg
+       | Ok () ->
+         Alcotest.(check bool) "bench binary was built" true
+           (Sys.file_exists (Filename.concat tmpdir ".march/bench/ffi_answer"))))
+
 let test_repl_command_includes_ffi_flags_after_entry () =
   let cmd =
     Cmd_interactive.repl_command ~lib_path_env:"MARCH_LIB_PATH=/p/lib"
@@ -2651,6 +2703,8 @@ let () =
         test_compiled_run_end_to_end;
       Alcotest.test_case "compiled project build with a generated entrypoint" `Slow
         test_compiled_project_build_generated_entrypoint;
+      Alcotest.test_case "forge bench links the project's [ffi] C sources" `Slow
+        test_bench_links_ffi_sources;
     ];
     "search_index_cache", [
       Alcotest.test_case "stale version cache is rebuilt" `Quick
