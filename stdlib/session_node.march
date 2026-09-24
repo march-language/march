@@ -1505,9 +1505,20 @@ mod SessionNode do
     epoch_drain(soft_ms, hard_ms)
   end
 
-  doc "Tear every connection down: close data, Bye on control, await the control reader, close control. (A cluster-mode party owns no connection: nothing to do.)"
-  fn finish(p : Party) : Unit do
+  -- The party's session is over: release the Endpoint's epoch hold and end
+  -- the actor, whose reap drops its pin (review finding 2026-09-24-dd-review-
+  -- cluster-party-never-releases-epoch-hold: a party that outlived its
+  -- session pinned its epoch for the life of the process). Every exit of
+  -- every runner passes here: `finish`, the cluster runner's success and
+  -- error arms, and the standalone runner's join failure.
+  pfn end_party(p : Party) : () do
     let _ = send(p.ep, ReleaseEpoch())
+    kill(p.ep)
+  end
+
+  doc "Tear every connection down: close data, Bye on control, await the control reader, close control, and end the party's Endpoint actor. (A cluster-mode party owns no connection: only the actor ends.)"
+  fn finish(p : Party) : Unit do
+    end_party(p)
     let _ = if is_cluster(p) do Nil else List.map(p.links, fn l -> do
       -- Its reader has ended, which stopped its heartbeat; a party that
       -- never served stops it here.
@@ -1890,6 +1901,7 @@ mod SessionNode do
     match joined do
       Err(e) ->
         if listen_fd >= 0 do tcp_close(listen_fd) else () end
+        end_party(p0)
         Err(e)
       Ok(p2) -> serve_party(p2, io, my_role, peers, listen_fd, drive)
     end
@@ -2253,20 +2265,23 @@ mod SessionNode do
     match ClusterNode.register(node, me, p0.ep) do
       Err(_) ->
         ClusterNode.unroute(node, route_key)
+        end_party(p0)
         Err(Listen(my_role, "session " ++ session ++ ": role " ++ int_to_string(my_role) ++ " is already registered"))
       Ok(_) ->
         match find_peers(node, session, peers, 30000, abandoned) do
           Err(missing) ->
             ClusterNode.unroute(node, route_key)
             ClusterNode.unregister(node, me)
-                if missing == 0 do Err(RunError.Connect(0, "session " ++ session ++ ": withdrawn by its initiator"))
+            end_party(p0)
+            if missing == 0 do Err(RunError.Connect(0, "session " ++ session ++ ": withdrawn by its initiator"))
             else Err(RunError.Connect(missing, "session " ++ session ++ ": no endpoint registered for role " ++ int_to_string(missing))) end
           Ok(found) ->
             match cluster_links(node, found, 30000) do
               Err(missing) ->
                 ClusterNode.unroute(node, route_key)
                 ClusterNode.unregister(node, me)
-                        Err(RunError.Connect(missing, "session " ++ session ++ ": no link to role " ++ int_to_string(missing) ++ "'s node"))
+                end_party(p0)
+                Err(RunError.Connect(missing, "session " ++ session ++ ": no link to role " ++ int_to_string(missing) ++ "'s node"))
               Ok(links) ->
                 let p = List.fold_left(links, p0, fn (acc, l) -> with_link(acc, l))
                 Vault.set(slot, "p", p)
@@ -2294,6 +2309,7 @@ mod SessionNode do
                 ClusterNode.off_peer_closed(node, closer)
                 ClusterNode.unroute(node, route_key)
                 ClusterNode.unregister(node, me)
+                end_party(p)
                 run_result(p, my_role)
             end
         end
@@ -2640,6 +2656,9 @@ mod SessionNode do
     let reply = ClusterNode.global_pid(node, pid_to_int(inbox))
     let filled = fill_roles(node, proto, sid, fingerprint, reply, answers, budget, others, n, Nil, Nil)
     ClusterNode.unroute(node, key)
+    -- The inbox has answered its one purpose; left alive it was one actor
+    -- leaked per initiated session.
+    kill(inbox)
     match filled do
       Err((role, why, accepted)) ->
         withdraw_all(node, sid, accepted)

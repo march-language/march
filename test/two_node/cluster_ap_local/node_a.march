@@ -96,6 +96,12 @@ mod ClusterApLocal do
     end
   end
 
+  pfn retired(what : String, before : Int) : () do
+    let now = Scheduler.live_procs()
+    println("procs retired after the " ++ what ++ ": " ++ bool_to_string(now <= before)
+      ++ (if now <= before do "" else " (" ++ int_to_string(now - before) ++ " over)" end))
+  end
+
   fn main(c : Cap(IO)) do
     let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "local-secret", 1)
     match ClusterNode.start(c, cfg) do
@@ -105,8 +111,16 @@ mod ClusterApLocal do
           Err(e) -> panic(Echo_Run.error_message(e))
           Ok(o) ->
             visible(h, o, 10000)
+            -- Every party's Endpoint actor must end with its session (it
+            -- holds the session's epoch), and an initiator's inbox with the
+            -- initiation: the live proc count after the sessions must be
+            -- back to what it was before them (measured once the killed
+            -- actors have been reaped).
+            let before = Scheduler.live_procs()
             session(c, h, 1)
             session(c, h, 2)
+            sleep_ms(300)
+            retired("offered sessions", before)
             SessionNode.close_offer(o)
         end
         let srv = spawn(PingServer)
@@ -126,6 +140,8 @@ mod ClusterApLocal do
           Err(e) -> panic(Hosted_Run.error_message(e))
           Ok(o) ->
             visible(h, o, 10000)
+            let before = Scheduler.live_procs()
+            Vault.set(Vault.new("ap_local_before"), "n", before)
             match Hosted_Run.initiate_Client(c, h, fn (s, st) ->
                 Hosted_Client.recv_Pong(s, Hosted_Client.send_Ping(s, st, 41), fn (m, st2) ->
                   println("Client: pong " ++ int_to_string(m))
@@ -149,6 +165,8 @@ mod ClusterApLocal do
           Err(e) -> println("Client: " ++ Echo_Run.error_message(e))
         end
         let _ = task_await_unwrap(server)
+        sleep_ms(300)
+        retired("hosted and pair sessions", Vault.get_or(Vault.open("ap_local_before"), "n", -1))
         ClusterNode.stop(h)
     end
   end

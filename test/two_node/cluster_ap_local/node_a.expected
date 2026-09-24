@@ -4,9 +4,11 @@ Client: session 1 done
 Server: got 2
 Client: got 20
 Client: session 2 done
+procs retired after the offered sessions: true
 PingServer: got 41
 Client: pong 42
 Client: hosted session done
 Server: got 3
 Client: got 30
 Client: pair session done
+procs retired after the hosted and pair sessions: true
