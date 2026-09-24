@@ -387,6 +387,12 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **`march --check` no longer reuses a `--no-cap-strict` verdict.** The `--check`
+  fast path caches a clean verdict per source digest, but that key ignored
+  `--no-cap-strict`, so `march --check --no-cap-strict f.march` exiting 0 made the
+  next plain `march --check f.march` of the same source exit 0 silently instead
+  of reporting the capability-ceiling error. The key now carries the cap-strict
+  setting, as the `--compile` key already did.
 - **`forge bench` now links a project's FFI code.** Benchmarks were compiled
   without the `[ffi]` C sources/link flags and `[ffi.rust]` archive that
   `forge build`, `forge run` and `forge test` pass, so a benchmark calling any

@@ -1723,7 +1723,14 @@ let compile filename =
          itself decides whether anything is reported. *)
       if contains_substring cache_input "no_alloc" then raise Exit;
       if !do_check then begin
-        let ch = March_cas.Cas.compilation_hash src_hash ~target:"check" ~flags:[] in
+        (* The verdict depends on --no-cap-strict too: the typecheck-side
+           ceiling ([Typecheck.cap_strict_ceiling], set below from
+           [cap_strict]) only runs when it is on, so a program that fails
+           plain `--check` passes `--check --no-cap-strict`.  Key the clean
+           verdict on it, same spelling as build_cas_key, or the relaxed run
+           seeds an artifact the next strict run accepts as clean. *)
+        let flags = if !cap_strict then ["capstrict"] else [] in
+        let ch = March_cas.Cas.compilation_hash src_hash ~target:"check" ~flags in
         (match March_cas.Cas.lookup_artifact store ch with
          | Some _ -> exit 0
          | None -> ());
