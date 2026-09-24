@@ -50,7 +50,7 @@ let run ?(filter = "") ?(json = false) () =
       (Printf.printf "no benchmarks found in bench/%s\n%!"
          (if filter = "" then "" else Printf.sprintf " matching %S" filter); Ok ())
     else begin
-      match Cmd_build.offline_preflight
+      match Cmd_build.deps_preflight
               ~scope:(Cmd_build.build_scope ~release:false proj) proj with
       | Error e -> Error e
       | Ok () ->

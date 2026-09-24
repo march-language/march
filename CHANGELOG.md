@@ -168,6 +168,16 @@ git log is authoritative for exact commits.
   reason, the check exits 1, and `--record` refuses to write a baseline.
   Previously the audit printed the error to stderr, used the dependency's
   declared `needs` set in its place and passed.
+- **forge checks cached dependencies on online builds too.** `forge build`,
+  `check`, `run`, `test` and `bench` re-hash each cached git or registry
+  dependency against `forge.lock`, once per command. Before, only `--offline`
+  did this. A tree that was edited or corrupted is fetched again, checked, and
+  swapped in, with a one-line note. If the fresh copy does not match
+  `forge.lock` either, the command fails, naming the dependency and both hashes,
+  because `forge.lock` or the upstream source has changed. A clean cache prints
+  nothing and fetches nothing. `forge deps` also no longer keeps an edited
+  cached git tree and writes that tree's hash into `forge.lock`: it replaces the
+  tree with the fresh clone. `--offline` is unchanged: a mismatch is an error.
 - **Hot reload: a second deploy while actors are still migrating is accepted**
   (it used to be refused with `ERR publish_failed`); each actor applies both
   migrations in order. Past the soft drain deadline, messages in an unchanged
