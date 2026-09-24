@@ -1,3 +1,5 @@
+> Design: [specs/2026-09-23-tree-sitter-grammar-sync-design.md](../2026-09-23-tree-sitter-grammar-sync-design.md)
+
 # The tree-sitter grammar still fails on 150 of 199 real March files
 
 `[P2]` - [ ] **`tree-sitter-march/grammar.js` lags the compiler's parser by more than the
