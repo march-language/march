@@ -18,6 +18,13 @@ git log is authoritative for exact commits.
   with its reason on every run, and none is treated as asking for nothing.
   `--record` leaves unanalyzable dependencies out of `forge.caps.lock` and keeps
   any set recorded for them earlier.
+- **`NativeArray.sort_float` — a `Float` array can now be sorted.** Same
+  algorithm and ownership as `sort_int` (unstable, in place when uniquely owned,
+  copy-on-write when shared), 1.9–18x faster than libc `qsort` at 5 million
+  elements. Floats sort by IEEE 754 `totalOrder`, so NaN has a defined place:
+  `-NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN`. Note that `-0.0` sorts
+  before `+0.0` even though `-0.0 == 0.0` and `compare(-0.0, 0.0)` is `0`. The
+  interpreter and compiled builds produce the same order, NaN included.
 - **Editor support for `topology.toml`** (build step 7 of the distributed-deploys
   plan). `march-lsp` recognises `topology.toml` and `topology.<env>.toml` and shows
   `forge topology check`'s diagnostics on forge's lines, computed by forge's own
@@ -151,6 +158,9 @@ git log is authoritative for exact commits.
   including when the accumulator is itself a tuple.
 
 ### Removed
+- **The `respond` builtin is gone.** It was an interpreter no-op stub
+  (`respond(x)` returned `()`), had no callers, and never had a compiled
+  lowering.
 - **`MARCH_NO_TRMC` is gone.** The environment variable turned off
   tail-recursion-modulo-cons for every compile in the process, including the
   stdlib, which increasingly depends on the transform to avoid overflowing the
@@ -421,6 +431,33 @@ git log is authoritative for exact commits.
   its version and the version it needs. A `.march-version` pin whose toolchain
   is not installed is also an error now; the audit used to fall back to
   whatever `march` was on `PATH`.
+- **Sixteen builtins that ran interpreted but failed to link when compiled now
+  compile or give a clear error.** A `--compile`d call used to fail at link time
+  with `Undefined symbols: _<name>` and no March location. `char_is_alpha`,
+  `char_is_uppercase`, `char_is_lowercase`, `char_to_uppercase`,
+  `char_to_lowercase`, `float_from_string`, `print_int`, `print_float` and `tap`
+  now compile, and the compiled output matches the interpreter. The
+  dynamic-supervisor queries (`Supervisor.stop_child`, `which_children`,
+  `count_children`), `App.stop` and `task_spawn_link` only work in the
+  interpreter, so a compiled call is now an error at the call site that says so
+  and names the compiled alternative. `to_json` on a type with no `derive Json`
+  now reports the missing codec even when no type in the program derives
+  `Json`. `task_spawn_link(f, pid)` is now typed with the two arguments the
+  interpreter takes. Before, no typechecked program could call it.
+- **A zero-argument lambda is a `() -> T` everywhere.** `fn () -> 3` (or `fn -> 3`)
+  in a record literal, or bound with `let` and passed on, was typed as its result,
+  so it could not fill a `() -> Int` record field ("expected `() -> Int` but got
+  `Int`"). It is now `() -> T` wherever it appears and `f()` calls it, on both
+  backends. Passing a zero-argument named fn by bare name where a generic
+  function calls it with `()` (`apply(answer)` with `fn apply(f) do f() end`) is
+  now a type error; it used to crash compiled code. Also fixed: a fn with a
+  required parameter after a defaulted one (`fn f(a, b \\ "x", c)`) forwarded
+  the short call `f(1, 2)` with its arguments out of order.
+- **Compiled `Base64.encode` and `sha256` on a `Bytes` no longer crash.** Since
+  boxed constructor cells began carrying a runtime type id (0.4.0), a compiled
+  `Base64.encode(Bytes.from_string("x"))`, `Base64.url_encode`/`mime_encode`, or
+  `sha256(bytes)` died with `fatal SIGBUS` (exit 138): the runtime mistook the
+  `Bytes` value for a `String`. The interpreter was unaffected.
 - **`pid_to_int` and supervise blocks no longer leak the actor record.**
   Compiled, every `pid_to_int(p)` and `Actor.set_queue_limit(p, …)` call kept
   one reference to `p`'s actor record, and every supervise-block child was

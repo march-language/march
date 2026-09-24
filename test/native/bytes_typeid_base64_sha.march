@@ -1,0 +1,26 @@
+-- Regression: compiled Base64.encode / sha256 on a Bytes value
+-- SIGBUSed (exit 138).  The runtime told Bytes from String by requiring the
+-- whole tag+pad word at +8 to be 0, but since boxed ADT cells carry a type
+-- id in the pad word (2026-09-11), a compiler-built Bytes has pad != 0, so it
+-- was read as a String and its field pointer taken as a length.  Covers a
+-- compiler-built Bytes (from_string), a runtime-built one (Base64.decode's
+-- result, pad 0), the empty case, and String callers (the Crypto wrappers)
+-- of the same runtime entries.
+mod BytesTypeidBase64Sha do
+  needs IO.Console
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let s = "Basic " ++ Base64.encode(Bytes.from_string("api:SECRET"))
+    println(s)
+    println(Base64.encode(Bytes.from_string("")))
+    println(Base64.url_encode(Bytes.from_string("hi?>")))
+    println(Base64.mime_encode(Bytes.from_string("Hello, world")))
+    println(sha256(Bytes.from_string("abc")))
+    println(Crypto.sha256("abc"))
+    println(Crypto.base64_encode("api:SECRET"))
+    match Base64.decode("SGVsbG8=") do
+    Ok(b) -> println(Base64.encode(b))
+    Err(_) -> println("decode failed")
+    end
+  end
+end

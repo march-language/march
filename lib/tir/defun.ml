@@ -25,7 +25,7 @@ let builtin_names : StringSet.t =
       "read_line"; "io_read_line"; "read_byte"; "io_read_byte"; "not";
       "panic";
       "head"; "tail"; "is_nil";
-      "to_string"; "respond"; "kill"; "is_alive";
+      "to_string"; "kill"; "is_alive";
       "actor_stop"; "actor_is_draining"; "actor_pid_indices";
       "send"; "spawn"; "actor_get_int";
       "task_spawn"; "task_await"; "task_await_unwrap";
@@ -175,6 +175,7 @@ let builtin_names : StringSet.t =
       "native_float_arr_make"; "native_float_arr_get"; "native_float_arr_set";
       "native_float_arr_length"; "native_float_arr_from_list"; "native_float_arr_to_list";
       "native_float_arr_map"; "native_float_arr_map2"; "native_float_arr_fold"; "native_float_arr_sum";
+      "native_float_arr_sort";
       "native_float_arr_min"; "native_float_arr_max"; "native_float_arr_sumsq_dev";
       (* Narrow-width native array builtins — f32/i32/u8 (P10 narrow types) *)
       "native_f32_arr_make"; "native_f32_arr_get"; "native_f32_arr_set";
