@@ -133,6 +133,16 @@ The receiving node, for each activated function:
 2. **Tamper-checks**: compares its computed digest to the signed value; a mismatch (`ERR cap_tamper`) aborts before dlopen. The tamper check is **unconditional** even when the function declares no capabilities: a truly cap-free function has the fixed digest `blake3("")`, so a stripped capability field on a signed message is detected rather than silently admitted.
 3. **Applies the deployment policy**: if `MARCH_DEPLOY_POLICY` is set (a file path), the node verifies that every capability the activated function declares is subsumed by a capability listed in the policy; a capability outside policy (`ERR cap_policy <cap>`) aborts.
 
+### Per-role closures
+
+A changed function's own capabilities miss one case: a patch that only *calls* an existing, more powerful helper. Its own caps stay narrow while what it can reach widens. For code that runs as a protocol role with a grant (`role Cons needs IO.Console`, see [Per-role grants]({{ site.baseurl }}/docs/choreography/#per-role-grants)), the node checks the role's **full capability closure** as well: everything the role's code reaches, from the same solve the compiler's role-grant check runs.
+
+- **The manifest.** `--compile-so` writes one `ROLE <Proto.Role> caps=<closure>` line per granted role, IO capabilities only, normalized and sorted, with each capability's reach chain (`via=IO.FileWrite:body>cons>save`).
+- **The client gate.** `forge deploy hot` compares each role's closure with the saved baseline. A role whose closure widened stops the deploy unless `--grant-cap` covers the new capabilities, and the error names the role and the chain.
+- **The node gate.** A manifest with `ROLE` lines is deployed with the `ACTIVATE6` message, which signs one digest per role. The node recomputes each digest from the closure it received (`ERR role_cap_tamper` on a mismatch, on a signed role the message leaves out, or on a role it adds unsigned) and requires every role closure to fit `MARCH_DEPLOY_POLICY` (`ERR role_cap_policy <role> <cap>`), after the function's own caps.
+
+So a node whose policy is generated from a pool's `caps` refuses a patch whose role code would reach beyond them, even when the patch passed a `--grant-cap` on the client. A build with no role grants deploys as before, and an older server that does not know `ACTIVATE6` refuses a manifest with roles rather than skipping the check.
+
 ### Configuring the policy
 
 Set the `MARCH_DEPLOY_POLICY` environment variable to a file path:
@@ -159,7 +169,7 @@ The policy is **authorization on a self-reported manifest**: a defense-in-depth 
 
 - The artifact was signed by the expected entity (Phase 4 ed25519 signature).
 - The declared capability set has not been tampered with in transit (BLAKE3 tamper-check).
-- The declared capabilities are within a static policy envelope (subsumption check).
+- The declared capabilities, and every role's declared closure, are within a static policy envelope (subsumption check).
 
 It does **not** prove that the code actually *uses* only those capabilities, only that the manifest claims it does, and the claim is signed and untampered. Runtime enforcement via `cap no_panic`, `cap no_alloc`, FFI sandboxing, or OS-level confinement can provide stronger guarantees. For most deployments, the combination of compile-time capability verification, signed manifests, and policy gates is sufficient.
 
