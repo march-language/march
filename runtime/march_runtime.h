@@ -865,7 +865,8 @@ int64_t march_sys_word_size(void);
 int64_t march_sys_minor_gcs(void);
 int64_t march_sys_major_gcs(void);
 int64_t march_sys_actor_count(void);
-void   *march_get_version(void);
+void   *march_sys_os(void);
+void   *march_sys_arch(void);
 
 /* Session-typed channel builtins (binary). */
 void   *march_chan_new(void *proto_name);

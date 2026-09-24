@@ -180,6 +180,7 @@ let builtin_cap_table : (string * string) list = [
   ("println",               "IO.Console");
   ("print",                 "IO.Console");
   ("print_line",            "IO.Console");
+  ("print_stderr",          "IO.Console");
   (* IO.FileRead *)
   ("file_exists",           "IO.FileRead");
   ("file_read",             "IO.FileRead");
@@ -621,6 +622,14 @@ let builtin_bindings : (string * scheme) list =
     ("string_concat",  Mono (TArrow (t_string, TArrow (t_string, t_string))));
     ("read_line",      Mono (TArrow (t_unit,   t_string)));
     ("read_byte",      Mono (TArrow (t_unit,   t_int)));
+    (* io_* aliases of the two above: same C function, same interpreter
+       body; the IO module calls these because its own `read_line`/`read_byte`
+       fns would shadow the bare names. *)
+    ("io_read_line",   Mono (TArrow (t_unit,   t_string)));
+    ("io_read_byte",   Mono (TArrow (t_unit,   t_int)));
+    (* print_stderr: the String verbatim to stderr, NO newline appended
+       (march_print_stderr and the interpreter agree; IO.warn adds its own). *)
+    ("print_stderr",   Mono (TArrow (t_string, t_unit)));
     (* Signal.watch(code, handler): register a deferred handler for an OS
        signal; signal_unwatch(code) removes it. See stdlib/signal.march. *)
     ("signal_watch",   Mono (TArrow (t_int, TArrow (TArrow (t_unit, t_unit), t_unit))));
@@ -763,6 +772,25 @@ let builtin_bindings : (string * scheme) list =
        probes now assert on it instead. *)
     ("live_allocs",     Mono (TArrow (t_unit,  t_int)));
     ("uuid_v7",         Mono (TArrow (t_unit,  t_string)));
+    (* uuid_v4 is NOT a stale spelling of uuid_v7: both are live, distinct
+       generators (march_uuid_v4 / the interpreter's /dev/urandom body), and
+       UUID.v4 / UUID.v7 wrap one each.  Capability: IO.Random (table above). *)
+    ("uuid_v4",         Mono (TArrow (t_unit,  t_string)));
+    (* System introspection (stdlib/system.march).  All ambient, like
+       peak_rss_bytes.  sys_uptime_ms (System.monotonic_time) stays ambient
+       too: it is process-relative elapsed time, not the wall clock
+       unix_time_ms reads, and gating it would break every existing timing
+       caller granted only IO.Console.  sys_os / sys_arch return a lowercase
+       String ("macos", "aarch64", ...): the codegen row always said TString,
+       and a String is what march_sys_os/march_sys_arch can build. *)
+    ("sys_os",                  Mono (TArrow (t_unit, t_string)));
+    ("sys_arch",                Mono (TArrow (t_unit, t_string)));
+    ("sys_cpu_count",           Mono (TArrow (t_unit, t_int)));
+    ("sys_cpu_load_milli",      Mono (TArrow (t_unit, t_int)));
+    ("sys_mem_total_bytes",     Mono (TArrow (t_unit, t_int)));
+    ("sys_mem_available_bytes", Mono (TArrow (t_unit, t_int)));
+    ("sys_uptime_ms",           Mono (TArrow (t_unit, t_int)));
+    ("march_version",           Mono (TArrow (t_unit, t_string)));
     ("uuid_v7_at",      Mono (TArrow (t_int,   t_string)));
     ("float_from_string",Mono (TArrow (t_string, t_option t_float)));
     ("float_to_string", Mono (TArrow (t_float,  t_string)));
@@ -1270,6 +1298,10 @@ let builtin_bindings : (string * scheme) list =
        stdlib_base64_encode accepts String only at the type-checker level;
        callers should convert Bytes to String with bytes_to_string first. *)
     ("stdlib_sha256",         Mono (TArrow (t_string, t_string)));
+    ("stdlib_sha512",         Mono (TArrow (t_string, t_string)));
+    (* sha1_bytes takes Bytes: its one caller (UUID.v5) hashes a raw 16-byte
+       namespace, and march_sha1_bytes reads the Bytes payload. *)
+    ("sha1_bytes",            Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
     ("stdlib_random_bytes",   Mono (TArrow (t_int, TCon ("Bytes", []))));
     ("stdlib_base64_encode",  Mono (TArrow (t_string, t_string)));
     ("stdlib_base64_decode",  Mono (TArrow (t_string,
