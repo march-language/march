@@ -10,32 +10,28 @@
 
 ## Deferred from step 7
 
-- **Derived `caps` (D22) and the widening gate (D26).** A pool's capability closure
-  comes from the typechecker, so it waits for `march --topology` to do more than
-  validate names (the generated `main` of step 3 and role grants of step 4 give it a
-  root to compute from). Until then `export` prints `"caps": null` under `derived`,
-  a written `caps` is stored but not enforced, and `forge deploy hot --grant-cap`
-  does not see pool capabilities. Do not fake either: the compiler-side value is
-  the only honest one.
-- **Compiler-side checks of section 4** that need types: a body's first parameter
-  type matches its pool's hook return type; an actor's `init` parameter type matches
-  the hook's return type; a role's grant against its pool's written `caps`; a hook
-  that reaches beyond them; an `IO.Foreign` role in a non-isolated pool. These are
-  `march --check --topology`'s, once it typechecks against the digest. The
-  `--emit-core-ast` `topology` object that II.6 describes for handing derived values
-  back to forge does not exist yet either.
-- **Derived `initiates` is by name, not by type.** `Topology.reachable` follows call
-  references resolved over the parse (a callee as written, else under each enclosing
-  module of the caller). A call through a closure value or an interface method is
-  not followed, so a pool that initiates only through such a call derives an empty
-  list. The typed version belongs with the compiler-side derivation above.
+- **Delivered by step 3 (2026-09-23,
+  [../progress/2026-09-22-dd-step03-level0-generated-main.md](../progress/2026-09-22-dd-step03-level0-generated-main.md)):**
+  the compiler derives each pool's `caps` and typed `initiates` (`march --topology
+  --emit-core-ast`'s `topology` object) and `forge topology export`/`gen` print them;
+  a written `caps` is enforced against role grants, hook signatures and the pool's
+  reach; body and actor `init` shapes against the hook's `Env`; `IO.Foreign` outside an
+  isolated pool behind `--topology-isolate-foreign`.
+- **The widening gate (D26).** `forge deploy hot --grant-cap` still does not see pool
+  capabilities, and `forge build` does not warn when a pool's derived caps widen. The
+  derived values now exist; what is missing is recording the previous deploy's and
+  comparing.
+- **Derived `initiates` through a closure value or an interface method.** The typed
+  derivation follows the typechecker's reference graph (`fn_refs`), which records
+  names referenced as values too, but a call through a closure received as a parameter
+  is still not followed. forge's by-name fallback (`"source": "names"`) has the same
+  limit.
 - **LSP support for the TOML** (go-to-definition and completion on the `body`,
   `actor`, `start`, `serves` and `initiates` strings; unknown-key diagnostics in
   the editor). Not started.
 - **`k8s` generator** comes with its backend (step 10 onwards), per II.6.
 - **`replicas`** is parsed and exported but no backend consumes it.
 
-**Acceptance for the rest:** `forge topology export` shows a non-null derived `caps`
-computed by the compiler; a code change that widens a pool's derived caps stops
+**Acceptance for the rest:** a code change that widens a pool's derived caps stops
 `forge deploy hot` at the monotonicity gate unless `--grant-cap` names it; the LSP
 resolves a `body` string to its declaration.

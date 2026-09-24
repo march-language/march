@@ -12,7 +12,7 @@
  (name march_test_compiler)
  (wrapped false)
  (modules test_compiler test_stdlib_only test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag)
- (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint yojson alcotest str unix threads.posix))
 
 (library
  (name march_test_eval)
@@ -9979,3 +9979,56 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias stdlib-march-properties)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_properties.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_properties.march)))
+
+; ── Topology.place over one real ClusterNode (distributed deploys, build ──
+; ── step 3): placement rules, a ranked role's marker, re-offering after ────
+; ── an offer dies, and a SIGTERM drain that exits 0 ─────────────────────────
+(rule
+ (targets native_topology_place native_topology_place.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib) (source_tree ../runtime)
+       (file native/topology_place.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_topology_place
+        native/topology_place.march)
+   (with-stdout-to native_topology_place.out
+        (system "./native_topology_place")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/topology_place.expected native_topology_place.out)))
+
+; ── Topology.hook's watchdog: a hook still running after ───────────────────
+; ── MARCH_HOOK_TIMEOUT_MS is named and the process exits 1 ─────────────────
+(rule
+ (targets native_topology_hook_timeout native_topology_hook_timeout.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib) (source_tree ../runtime)
+       (file native/topology_hook_timeout.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_topology_hook_timeout
+        native/topology_hook_timeout.march)
+   (with-stdout-to native_topology_hook_timeout.out
+        (system "MARCH_HOOK_TIMEOUT_MS=300 ./native_topology_hook_timeout; echo exit=$?")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/topology_hook_timeout.expected native_topology_hook_timeout.out)))
+
+; ── Topology.place over a FAKE cluster dictionary (D35's seam): a count(1)
+; ── role moves to this node when the peers ranked above it are declared
+; ── dead, and stays while a rejoined peer settles. No sockets; compiled only
+; ── (place runs a background task).
+(rule
+ (targets topology_placement_bin topology_placement.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib) (source_tree ../runtime)
+       (file session/topology_placement.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o topology_placement_bin session/topology_placement.march)
+   (with-stdout-to topology_placement.out
+    (system "MARCH_PLACEMENT_TICK_MS=600000 MARCH_PLACEMENT_SETTLE_MS=600000 ./topology_placement_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/topology_placement.expected topology_placement.out)))

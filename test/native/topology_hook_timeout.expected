@@ -1,0 +1,3 @@
+Quick.start returned 42
+topology: hook Stuck.start did not return within 300 ms (MARCH_HOOK_TIMEOUT_MS); a hook must return promptly -- start long-lived work in a task or actor
+exit=1

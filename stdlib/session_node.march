@@ -2138,10 +2138,12 @@ mod SessionNode do
   end
 
   -- The offers of [role], other than on the nodes in [used], rotated by [n]
-  -- so successive sessions of one initiator spread over them. Only offers on
-  -- nodes this node is connected to: the registry can show a name (learnt
-  -- through a third node) before the two nodes have a connection, and a
-  -- session between them needs one.
+  -- so successive sessions of one initiator spread over them, with an offer
+  -- on THIS node first (prefer-local, plan 4.2: it saves a hop, and it goes
+  -- over the node's loopback link). Only offers on nodes this node is
+  -- connected to: the registry can show a name (learnt through a third node)
+  -- before the two nodes have a connection, and a session between them
+  -- needs one.
   pfn candidates(node : Cap(ClusterNode.Live), proto : String, role : Int, used : List(String), n : Int)
       : List(GlobalPid.Pid) do
     let prefix = ap_prefix(proto, role)
@@ -2149,10 +2151,13 @@ mod SessionNode do
       if String.starts_with(name, prefix) do ClusterNode.lookup(node, name) else None end)
     let fresh = List.filter(found, fn g ->
       List.member(used, g.node_id) == false && ClusterNode.queue_for(node, g.node_id) != None)
-    let k = List.length(fresh)
-    if k == 0 do fresh else
+    let me = ClusterNode.node_id(node)
+    let local = List.filter(fresh, fn g -> g.node_id == me)
+    let remote = List.filter(fresh, fn g -> g.node_id != me)
+    let k = List.length(remote)
+    if k == 0 do local else
       let r = n % k
-      List.append(List.drop(fresh, r), List.take(fresh, r))
+      List.append(local, List.append(List.drop(remote, r), List.take(remote, r)))
     end
   end
 
@@ -2226,9 +2231,11 @@ mod SessionNode do
     ()
   end
 
-  -- Fill every role in [roles] from its offers, each on a node not yet in
-  -- the session: Ok(the accepted offers), or Err((role, why, accepted so
-  -- far)).
+  -- Fill every role in [roles] from its offers: Ok(the accepted offers), or
+  -- Err((role, why, accepted so far)). Any node may play several roles of
+  -- one session, the initiator's own included -- each party is its own
+  -- endpoint, and frames between two on one node take the loopback link --
+  -- so [used] (nodes to skip) is empty unless a caller wants otherwise.
   pfn fill_roles(node : Cap(ClusterNode.Live), proto : String, sid : String, fp : String, reply : GlobalPid.Pid,
                  answers : Vault(String), budget : Vault(Int), roles : List(Int), n : Int,
                  used : List(String), accepted : List(GlobalPid.Pid))
@@ -2239,7 +2246,7 @@ mod SessionNode do
         match invite_role(node, sid, fp, reply, answers, budget, candidates(node, proto, r, used, n), "") do
           Err(why) -> Err((r, why, accepted))
           Ok(g) -> fill_roles(node, proto, sid, fp, reply, answers, budget, rest, n,
-                              Cons(g.node_id, used), Cons(g, accepted))
+                              used, Cons(g, accepted))
         end
     end
   end
@@ -2250,7 +2257,7 @@ mod SessionNode do
   access points that offer it (`offer_role`). Mints a fresh session id (this
   node, its creation, a counter: never reused, so a restarted or partitioned
   node cannot be addressed by an old session), invites one offer per role --
-  each on a different node, as cluster sessions need -- moving to the next
+  an offer on this node first, then the others -- moving to the next
   offer on a refusal or no answer, all within the setup time
   (MARCH_SESSION_CONNECT_MS, 20 s). Then runs [body] as `run_cluster` does.
   `Err(NoOffer(role, why))` if a role could not be filled; the offers that
@@ -2269,7 +2276,7 @@ mod SessionNode do
     Vault.set(budget, "left", if t > 0 do t else 3600000 end)
     let key = ClusterNode.route(node, pid_to_int(inbox), fn d -> inbox_frame(answers, sid, d))
     let reply = ClusterNode.global_pid(node, pid_to_int(inbox))
-    let filled = fill_roles(node, proto, sid, fingerprint, reply, answers, budget, others, n, Cons(ClusterNode.node_id(node), Nil), Nil)
+    let filled = fill_roles(node, proto, sid, fingerprint, reply, answers, budget, others, n, Nil, Nil)
     ClusterNode.unroute(node, key)
     match filled do
       Err((role, why, accepted)) ->

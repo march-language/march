@@ -488,6 +488,10 @@ native_to_string_show: coverage audit (user + stdlib): 120 enforced, 0 inert (wa
 native_to_string_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_toml_get_int: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_toml_get_int: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_topology_hook_timeout: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_topology_hook_timeout: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_topology_place: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_topology_place: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_trmc_shared_tail_reuse: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_trmc_shared_tail_reuse: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tuple_destructure_dce: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
@@ -748,6 +752,8 @@ stdlib_tls: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 un
 stdlib_tls: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_toml: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 stdlib_toml: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_topology: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+stdlib_topology: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_tuple: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 stdlib_tuple: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_uri: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
