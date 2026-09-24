@@ -29,9 +29,13 @@
 -- NativeArray.sort_float (f64) runs the same patterns on signed, fractional
 -- doubles, and then the part only floats have: IEEE 754 totalOrder placement
 -- of -NaN, -Inf, -0.0, +0.0, +Inf, +NaN. Floats are compared through
--- float_to_string renderings, because NaN != NaN under `==` and -0.0 == 0.0.
--- NaN renders as "nan" whatever its sign, so a NaN's sign shows up only as
--- its POSITION, which is exactly what is being tested. The interpreter must
+-- renderings, because NaN != NaN under `==` and -0.0 == 0.0. A NaN does NOT
+-- go through float_to_string: libc prints a sign-bit-set NaN as "-nan" on
+-- glibc and "nan" on macOS, so the golden would be platform-dependent (and
+-- on macOS the two NaNs would be indistinguishable). render_f instead names
+-- each NaN by its bit pattern, via hash(), which hashes a Float's raw bits on
+-- both backends: "-nan" for -float_nan(), "+nan" for float_nan(), and
+-- "nan?" for any other payload. The interpreter must
 -- print the same lines: OCaml's `compare` puts every NaN first and treats
 -- -0.0 as equal to 0.0, so an interpreter arm built on it fails `specials`
 -- and `nan last` here.
@@ -95,8 +99,17 @@ mod NativeArrSort do
     List.map(xs, fn x -> int_to_float(x - 500) *. 0.25)
   end
 
+  -- Platform-independent, sign-explicit rendering (see the header comment).
+  pfn render_f(x : Float) : String do
+    if float_is_nan(x) do
+      if hash(x) == hash(-float_nan()) do "-nan"
+      else if hash(x) == hash(float_nan()) do "+nan"
+      else "nan?" end end
+    else float_to_string(x) end
+  end
+
   pfn render(xs : List(Float)) : List(String) do
-    List.map(xs, fn x -> float_to_string(x))
+    List.map(xs, fn x -> render_f(x))
   end
 
   pfn agrees_f(xs : List(Float)) : Bool do

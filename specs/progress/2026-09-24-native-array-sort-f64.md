@@ -93,12 +93,16 @@ not go through `compare`, so it is unaffected.
 `test/native/native_arr_sort.march` gained f64 cases: all eight patterns at the
 13 sizes, on signed fractional doubles, checked against `List.sort_by`. It
 also gained an explicit specials line
-(`nan -inf -1. -0. 0. 1. inf nan`), a `+NaN sorts last` line, specials mixed
+(`-nan -inf -1. -0. 0. 1. inf +nan`), a `+NaN sorts last` line, specials mixed
 into arrays of 9 to 5000 elements (expected order built from each element's
 KIND, not by comparing values), and the f64 aliasing case. Floats are compared
-through `float_to_string`, because `==` cannot see NaN or the sign of zero.
-NaN renders as `nan` whatever its sign, so a NaN's sign shows only through its
-position, which is exactly what the test checks.
+through string renderings, because `==` cannot see NaN or the sign of zero.
+A NaN is not rendered with `float_to_string`: libc prints a sign-bit-set NaN
+as `-nan` on glibc but `nan` on macOS, which made the golden platform-dependent
+(first CI run: ubuntu failed, macOS passed). The fixture instead names each NaN
+by its bit pattern through `hash()` (raw-bits hash on both backends), as
+`-nan` / `+nan`, so both platforms print the same line and the sign of each
+NaN is checked explicitly rather than only through its position.
 
 `test/dune` now runs the file three ways against the one golden:
 
