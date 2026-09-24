@@ -40,3 +40,17 @@ Exempt a file only when its real path is under the resolved stdlib directory.
 Better, give the CI `--check stdlib/<mod>.march` ratchet an explicit flag and
 stop inferring stdlib-ness from the name. Add a driver-level test: a user
 `json.march` calling `pid_of_int` is rejected.
+
+## Fixed 2026-09-24
+
+Provenance replaced the basename match. See
+[2026-09-24-stdlib-only-gate-at-resolution.md](2026-09-24-stdlib-only-gate-at-resolution.md).
+The driver no longer adds any entry file to `stdlib_source_files` by name; a
+file is the stdlib's when its real path is under the root the loader read
+the stdlib from (`Typecheck_builtins.stdlib_roots`, registered by
+`Toolchain.load_stdlib` and the LSP's `Analysis.load_stdlib`), or when
+`--stdlib-source` says so explicitly (the CI ratchet's `march --check
+--stdlib-source stdlib/list.march`). Test: `test/test_stdlib_only.ml`,
+"stdlib root provenance, not basename" (in-process) and "driver rejects a
+user json.march" (the repro above, end to end: `--check` exits 1, the
+interpreted run never prints `forged`, `--stdlib-source` accepts it).

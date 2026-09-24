@@ -14834,7 +14834,9 @@ let test_stdlib_internal_errors_ratchet () =
        hides these (bin/main.ml drops any diagnostic spanned in stdlib), but a \n\
        function whose body failed to check is still callable, and its call \n\
        sites bind it as an unconstrained type variable.\n\
-       Run `march --check stdlib/<file>` to see them.\n\n\
+       Run `march --check --stdlib-source stdlib/<file>` to see them (the \n\
+       flag marks the entry as the stdlib's; without it the stdlib-only \n\
+       builtin gate adds its own errors for actor.march and friends).\n\n\
        Fewer than expected: a file was FIXED -- lower its count in \n\
        [stdlib_known_internal_errors] (or drop the row) in the same commit.\n\n\
        The full list of errors:\n%s"

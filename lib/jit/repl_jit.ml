@@ -976,6 +976,36 @@ let register_user_type_decl ctx (d : March_ast.Ast.decl) =
      | None -> ())
   | _ -> ()
 
+(** The typecheck this module runs before lowering a fragment found errors.
+    Raised (never [Failure], which some REPL call sites treat as "the JIT
+    could not compile this, evaluate it in the interpreter instead": a
+    fragment that does not typecheck must not run anywhere). *)
+exception Typecheck_failed of string
+
+(** The type map of a fragment's typecheck, or [Typecheck_failed] with the
+    rendered diagnostics. Every lowering entry point below goes through this:
+    they used to bind `(_, type_map)` and lower regardless, so a fragment the
+    typechecker rejected (a stdlib-only builtin such as `pid_of_int`, gated
+    at name resolution) still compiled and ran when a caller had not checked
+    it first (2026-09-24-dd-review-repl-not-stdlib-only-gated.md). *)
+let checked_type_map ((errors, type_map) : March_errors.Errors.ctx * _) =
+  (* Only the fragment's OWN errors count. A REPL fragment is parsed from a
+     string with no file name, so its spans carry [""]; declarations the
+     caller prepended from disk (the codegen harness hands the JIT modules
+     with the whole stdlib inside, and never registers those files as the
+     stdlib's) carry their path, and their Check 1b diagnostics are the
+     stdlib's, which the driver discards too. *)
+  let own =
+    List.filter (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Error && d.span.March_ast.Ast.file = "")
+      (March_errors.Errors.sorted errors)
+  in
+  if own <> [] then
+    raise (Typecheck_failed
+             (String.concat "\n"
+                (List.map (fun (d : March_errors.Errors.diagnostic) -> d.message) own)));
+  type_map
+
 (** Compile a :load-ed DMod's functions into the JIT dylib so ORC can resolve
     module-qualified names (e.g. Counter.create) in subsequent fragments.
     [tc_env] must be the type environment *before* the DMod was added (i.e.
@@ -1001,7 +1031,7 @@ let register_module_decl ctx ~tc_env (d : March_ast.Ast.decl) =
          analogous reused env. *)
       refs = ref []; current_decl = ref "" } in
     (try
-      let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
+      let type_map = checked_type_map (March_typecheck.Typecheck.check_module_with_env env m) in
       let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls m in
       register_type_defs ctx tir.March_tir.Tir.tm_types;
       ctx.loaded_tir_types <- ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types;
@@ -1075,7 +1105,7 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
     (* Same per-call reset as [register_module_decl]/[run_expr]: [tc_env] is a
        long-lived, reused environment. *)
     refs = ref []; current_decl = ref "" } in
-  let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
+  let type_map = checked_type_map (March_typecheck.Typecheck.check_module_with_env env m) in
   let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls m in
   (* Prune functions unreachable from `main`, exactly as the ahead-of-time
      pipeline does immediately before LLVM emit (see [Dce.prune_unreachable]'s
@@ -1185,8 +1215,8 @@ let run_expr ctx ~tc_env m =
          see [Typecheck_cache.derive]'s identical reset for the LSP's
          analogous reused env. *)
       refs = ref []; current_decl = ref "" } in
-  let (_, type_map) = time_phase "typecheck"
-    (fun () -> March_typecheck.Typecheck.check_module_with_env env m) in
+  let type_map = checked_type_map (time_phase "typecheck"
+    (fun () -> March_typecheck.Typecheck.check_module_with_env env m)) in
   let tir = time_phase "lower+mono+opt"
     (fun () -> lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m) in
   register_type_defs ctx tir.March_tir.Tir.tm_types;
@@ -1316,7 +1346,7 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
          see [Typecheck_cache.derive]'s identical reset for the LSP's
          analogous reused env. *)
       refs = ref []; current_decl = ref "" } in
-  let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
+  let type_map = checked_type_map (March_typecheck.Typecheck.check_module_with_env env m) in
   let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m in
   register_type_defs ctx tir.March_tir.Tir.tm_types;
   let all_support_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->

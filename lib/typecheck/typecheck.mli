@@ -264,6 +264,10 @@ type env = {
   proof_caps : (string * string) list;
   always_linear_types : string list;
   current_module : string;
+  gated_shadowed : StringSet.t;
+  (** [Typecheck_builtins.stdlib_only] names rebound by a non-builtin binding
+      in this scope; a reference to one resolves to that binding, so the
+      stdlib-only gate lets it through. See the implementation's comment. *)
   root_cap_allowed : bool;
   cur_fn_public : bool;
   cap_qual_prefix : string;
