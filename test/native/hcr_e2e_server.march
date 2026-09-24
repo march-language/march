@@ -1,0 +1,3 @@
+mod HcrE2e do
+  fn main() : Int do 0 end
+end

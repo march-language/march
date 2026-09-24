@@ -174,7 +174,13 @@ let entry_module (proj : Project.project) : (string, string) result =
     prefix and, when one is known, the public key activations must be
     signed with. *)
 let hot_reload_flags ?pubkey (proj : Project.project) : (string, string) result =
-  let* prefix = entry_module proj in
+  (* A configured [hot-reload] module_prefix wins over the entry module: it
+     is what `forge build` and `forge deploy hot` use. *)
+  let* prefix =
+    match proj.Project.hot_reload with
+    | Some { Project.hr_module_prefix = Some p; _ } -> Ok p
+    | _ -> entry_module proj
+  in
   let pubkey = match pubkey with
     | Some k -> k
     | None -> (match proj.Project.hot_reload with

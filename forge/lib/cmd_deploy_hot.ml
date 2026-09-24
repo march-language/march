@@ -34,7 +34,11 @@ type fn_manifest = {
 }
 
 type manifest = {
+  version  : int;
   cas_hash  : string;
+  target : string option;
+  hcr_abi : string option;
+  module_prefix : string option;
   functions : fn_manifest list;
 }
 
@@ -42,13 +46,22 @@ let parse_manifest path : (manifest, string) result =
   try
     let ic = open_in path in
     let cas_hash = ref "" in
+    let version = ref 1 in
+    let target = ref None and hcr_abi = ref None and module_prefix = ref None in
     let fns = ref [] in
     (try while true do
        let line = String.trim (input_line ic) in
        if String.length line = 0 || line.[0] = '#' then begin
+         if line = "# march-hcr-manifest v2" then version := 2;
          (* # cas_hash <hex> *)
          if String.length line > 10 && String.sub line 0 10 = "# cas_hash" then
            cas_hash := String.trim (String.sub line 10 (String.length line - 10))
+         else if String.length line > 8 && String.sub line 0 8 = "# target" then
+           target := Some (String.trim (String.sub line 8 (String.length line - 8)))
+         else if String.length line > 8 && String.sub line 0 8 = "# hcr_abi" then
+           hcr_abi := Some (String.trim (String.sub line 8 (String.length line - 8)))
+        else if String.length line > 15 && String.sub line 0 15 = "# module_prefix" then
+           module_prefix := Some (String.trim (String.sub line 15 (String.length line - 15)))
        end else if String.length line >= 5 && String.sub line 0 5 = "ROOT " then begin
          (* Legacy pre-2026-07-04 manifests may still carry a
             "ROOT cap_root=<hex>" line (whole-artifact union, now retired).
@@ -107,7 +120,9 @@ let parse_manifest path : (manifest, string) result =
      done with End_of_file -> ());
     close_in ic;
     if !cas_hash = "" then Error (path ^ ": missing # cas_hash line")
-    else Ok { cas_hash = !cas_hash; functions = List.rev !fns }
+    else Ok { version = !version; cas_hash = !cas_hash; target = !target;
+              hcr_abi = !hcr_abi; module_prefix = !module_prefix;
+              functions = List.rev !fns }
   with Sys_error m -> Error m
 
 (** True iff [manifest] is a genuine pre-Phase-5C legacy manifest — i.e. NO
@@ -379,6 +394,21 @@ type conn = {
   buf : Buffer.t;
 }
 
+type hcr_info = { target : string; abi : string; prefix : string; key_hex : string }
+
+let parse_hcr_info line : (hcr_info, string) result =
+  match String.split_on_char ' ' line with
+  | ["HCR_INFO"; t; a; p; k] ->
+    let field prefix s =
+      if String.length s >= String.length prefix && String.sub s 0 (String.length prefix) = prefix
+      then Some (String.sub s (String.length prefix) (String.length s - String.length prefix)) else None
+    in
+    (match field "target:" t, field "abi:" a, field "prefix:" p, field "key:" k with
+     | Some target, Some abi, Some prefix, Some key_hex -> Ok { target; abi; prefix; key_hex }
+     | _ -> Error "malformed HCR_INFO response")
+  | ["ERR"; "unknown_command"] -> Error "legacy server: target identity cannot be verified"
+  | _ -> Error "invalid HCR_INFO response"
+
 let conn_of_fd fd = { fd; buf = Buffer.create 256 }
 
 let send_line conn s =
@@ -406,6 +436,10 @@ let recv_line conn =
       loop ()
   in
   loop ()
+
+let query_hcr_info_connected conn : (hcr_info, string) result =
+  try send_line conn "HCR_INFO"; parse_hcr_info (recv_line conn)
+  with Failure msg -> Error msg
 
 let send_binary conn data offset len =
   let rec loop off remaining =
@@ -586,6 +620,13 @@ let so_exports_symbol (so_path : string) (sym : string) : bool =
   let cmd = Printf.sprintf "nm -D %s 2>/dev/null | grep -q ' T %s$'"
     (Filename.quote so_path) (Filename.quote sym) in
   Sys.command cmd = 0
+
+let deploy_connected (_conn : conn) ~signing_pubkey:_ ~sk:_ ~manifest:_
+    ~so_path:_ ?(old_schemas_path="") ?(new_schemas_path="") ?(entry_path="")
+    ?(old_manifest_path="") ?(provided_epoch=0) ?(grant_caps=[]) ?(no_cap_gate=false) () =
+  ignore old_schemas_path; ignore new_schemas_path; ignore entry_path;
+  ignore old_manifest_path; ignore provided_epoch; ignore grant_caps; ignore no_cap_gate;
+  Error "deploy_connected is unavailable in this build"
 
 (** [tunnel] (default): reach [remote_socket] on [ssh_host] through an ssh
     tunnel. [~tunnel:false]: [remote_socket] is a socket on this machine,
@@ -1297,12 +1338,24 @@ let build_so ~proj ~output : (string * string, string) result =
   let manifest_path = output ^ ".so.hcr_manifest" in
   let lib_env = Cmd_build.lib_path_env proj in
   let ffi_flags = Cmd_build.ffi_flags_of ~root:proj.Project.root proj in
+  let target_flag, hcr_flags =
+    match proj.Project.hot_reload with
+    | Some hr ->
+      let target = match hr.Project.hr_target with
+        | Some t -> " --target " ^ Filename.quote t | None -> "" in
+      let hcr = match hr.Project.hr_module_prefix, hr.Project.hr_public_key with
+        | Some p, Some k -> " --hot-reload " ^ Filename.quote p ^
+                            " --signing-pubkey " ^ Filename.quote k
+        | _ -> "" in
+      target, hcr
+    | None -> "", ""
+  in
   match Project.entry proj with
   | Error e -> Error e
   | Ok entry ->
   let cmd = Printf.sprintf
-    "%smarch --compile --compile-so -o %s%s %s"
-    lib_env (Filename.quote so_path) ffi_flags (Filename.quote entry)
+    "%smarch --compile --compile-so%s%s -o %s%s %s"
+    lib_env target_flag hcr_flags (Filename.quote so_path) ffi_flags (Filename.quote entry)
   in
   let rc = Sys.command cmd in
   if rc <> 0 then Error (Printf.sprintf "build failed (exit %d)" rc)
