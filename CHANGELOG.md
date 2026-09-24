@@ -12,6 +12,24 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Hot reload: per-role capability closures, restart durability and signed
+  topology pushes** (build step 10, first half, of the distributed-deploys plan).
+  The `--compile-so` manifest gains a `ROLE <Proto.Role> caps=...` line per role
+  with a grant: the role's full capability closure (everything its code reaches)
+  with each capability's reach chain. `forge deploy hot` stops a deploy that
+  widens a role's closure unless `--grant-cap` covers it, naming the role and the
+  chain, and sends such builds with the new `ACTIVATE6` message, which signs one
+  digest per role; the server recomputes each from the closures it receives
+  (`ERR role_cap_tamper`) and checks every closure against `MARCH_DEPLOY_POLICY`
+  (`ERR role_cap_policy <role> <cap>`), so a patch that only calls an existing,
+  more powerful helper no longer slips past the node's policy. The reload server
+  now persists its applied patch stack on the host (under the CAS root) and
+  replays it at start, before `main` runs, re-verifying every signature; a bad
+  entry is skipped with an audit line, a different base build or
+  `MARCH_HCR_NO_REPLAY=1` starts clean, and `VERSIONS_DETAIL` reports a
+  `RESTORED` line. New signed `TOPOLOGY` verb (`Cmd_deploy_hot.push_topology`)
+  persists the pushed topology and hands it to a runtime hook; new `COMPACT` verb
+  reports the patch stack's size, which `forge hot-reload status` prints.
 - **Hot reload: the unified epoch model and drains** (build step 6 of the
   distributed-deploys plan). Every unit of work (actor, task, session) runs at the
   epoch of the deploy it started under, and every call it makes, from the base

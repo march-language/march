@@ -71,6 +71,10 @@
  *     march_hcr_on_topology(path) (a no-op until build step 8 fills it).
  *     At start, a persisted topology whose signature and digest verify is
  *     handed to the hook again.
+ *   COMPACT                                           → STACK entries:<n> functions:<m>
+ *                                                       deploys:<d> artifacts:<k> cas_bytes:<b>
+ *     The persisted patch stack's size, for the reconciler to decide when
+ *     to rebuild a base image (plan 6.5, "Compaction").  Reports only.
  *   BEGIN_BATCH                                       → OK
  *   COMMIT_BATCH                                      → OK <n> | WAIT … | ERR <reason>
  *   ROLLBACK_BATCH                                    → OK
@@ -258,9 +262,27 @@ static uint32_t load_next_epoch(void) {
 static int  is_hex64(const char *s);
 static void mkdir_p(const char *path);
 
+/* march_blake3_hex, but only in a build with a deploy key.  A build without
+ * one activates nothing (every ACTIVATE and TOPOLOGY is refused), so it has
+ * no state to hash, and the REPL/JIT runtime links this file without
+ * march_blake3.c (runtime/sources.list: blake3 is `hcr`, not `jit`).  The
+ * older blake3 uses (compute_cap_root) are only reachable after a signature
+ * check and so drop out of such a build; this keeps the new ones out of it
+ * without relying on the optimizer. */
+static void state_hex(const unsigned char *p, size_t n, char out[65]) {
+#if HAVE_SIGNING_KEY
+    march_blake3_hex(p, n, out);
+#else
+    (void)p; (void)n;
+    memset(out, '0', 64);
+    out[64] = '\0';
+#endif
+}
+
 static char g_last_signed[RELOAD_LINE_MAX];   /* the last verified signed line */
 static char g_last_sig[256];                  /* and its signature */
 
+__attribute__((unused))
 static void remember_signed(const char *msg, size_t n, const char *sig) {
     if (n >= sizeof(g_last_signed)) n = sizeof(g_last_signed) - 1;
     memcpy(g_last_signed, msg, n);
@@ -359,7 +381,7 @@ static void slots_digest(int current, char out[65]) {
         }
         len += (size_t)snprintf(buf + len, cap - len, "%s %s\n", name, h ? h : "");
     }
-    march_blake3_hex((const unsigned char *)buf, len, out);
+    state_hex((const unsigned char *)buf, len, out);
     free(buf);
 }
 
@@ -846,7 +868,7 @@ static void restore_topology(void) {
         size_t got = buf && sz > 0 ? fread(buf, 1, (size_t)sz, f) : 0;
         fclose(f);
         char hex[65];
-        march_blake3_hex(buf, got, hex);
+        state_hex(buf, got, hex);
         free(buf);
         if (strcmp(hex, g_topology_digest) != 0) why = "err_topology_digest";
         else if (!topology_signature_ok(g_topology_digest, g_topology_sig)) why = "err_topology_sig";
@@ -888,7 +910,7 @@ static void handle_topology(int fd, const char *args) {
         free(buf); g_audit_type = NULL; return;   /* the client went away */
     }
     char hex[65];
-    march_blake3_hex(buf, (size_t)size, hex);
+    state_hex(buf, (size_t)size, hex);
     if (strcmp(hex, digest) != 0) {
         write_audit_log("(topology)", digest, "", NULL, "err_digest");
         free(buf); g_audit_type = NULL;
@@ -921,10 +943,43 @@ static void handle_topology(int fd, const char *args) {
     write_safe(fd, resp, n, sizeof(resp));
 }
 
+/* COMPACT: the persisted patch stack's size (plan 6.5, "Compaction").  The
+ * reconciler decides from it when to rebuild the build's base image from the
+ * current version; nothing is rebuilt or dropped here. */
+static void handle_compact(int fd) {
+    size_t funcs = 0, deploys = 0, arts = 0;
+    unsigned long long bytes = 0;
+    for (size_t i = 0; i < g_stack_n; i++) {
+        const hcr_stack_entry *e = &g_stack[i];
+        int seen_name = 0, seen_seq = 0, seen_cas = 0;
+        for (size_t j = 0; j < i; j++) {
+            const hcr_stack_entry *o = &g_stack[j];
+            if (e->name && o->name && strcmp(e->name, o->name) == 0) seen_name = 1;
+            if (o->seq == e->seq) seen_seq = 1;
+            if (e->cas_hash && o->cas_hash && strcmp(e->cas_hash, o->cas_hash) == 0) seen_cas = 1;
+        }
+        if (!seen_name && e->name) funcs++;
+        if (!seen_seq) deploys++;
+        if (!seen_cas && e->cas_hash) {
+            arts++;
+            char path[640];
+            struct stat st;
+            cas_artifact_path(path, sizeof(path), e->cas_hash);
+            if (stat(path, &st) == 0) bytes += (unsigned long long)st.st_size;
+        }
+    }
+    char resp[256];
+    int n = snprintf(resp, sizeof(resp),
+                     "STACK entries:%zu functions:%zu deploys:%zu artifacts:%zu cas_bytes:%llu\n",
+                     g_stack_n, funcs, deploys, arts, bytes);
+    write_safe(fd, resp, n, sizeof(resp));
+}
+
+__attribute__((unused))
 static void replay_state(const char *socket_path) {
     /* The state directory: one per service (socket path). */
     char key[65];
-    march_blake3_hex((const unsigned char *)socket_path, strlen(socket_path), key);
+    state_hex((const unsigned char *)socket_path, strlen(socket_path), key);
     snprintf(g_state_dir, sizeof(g_state_dir), "%s/hcr_state/%.16s", g_cas_root, key);
     slots_digest(0, g_base_digest);
     slots_digest(1, g_manifest_digest);
@@ -2158,6 +2213,10 @@ static void handle_client(int fd) {
                             activate_epoch, callers_sorted, &ac4);
             }
 
+        /* ── COMPACT (patch-stack size, DD step 10) ───────────────────── */
+        } else if (strcmp(line, "COMPACT") == 0) {
+            handle_compact(fd);
+
         /* ── TOPOLOGY (signed reconciler action, DD step 10) ──────────── */
         } else if (strncmp(line, "TOPOLOGY ", 9) == 0) {
             handle_topology(fd, line + 9);
@@ -2341,8 +2400,11 @@ void march_reload_server_start(const char *socket_path) {
     load_pubkey_from_hex();
 #endif
     /* Plan 6.5: come back on the code this host was running, before `main`
-     * gets control back (and so before it opens any offer). */
+     * gets control back (and so before it opens any offer).  A build with no
+     * deploy key never activated anything: nothing to replay. */
+#if HAVE_SIGNING_KEY
     replay_state(g_socket_path);
+#endif
 
     pthread_t tid;
     pthread_attr_t attr;

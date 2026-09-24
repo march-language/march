@@ -1753,6 +1753,23 @@ let test_topology_command_signed () =
           (March_ed25519.Ed25519.sign_str ("TOPOLOGY " ^ digest) sk) pk)
    | _ -> Alcotest.failf "unexpected TOPOLOGY line: %s" line)
 
+(* DD build step 10: COMPACT, the patch-stack size forge status shows. *)
+let test_parse_compact () =
+  (match Cmd_deploy_hot.parse_compact
+           "STACK entries:3 functions:2 deploys:2 artifacts:1 cas_bytes:1258291" with
+   | Some st ->
+     Alcotest.(check string) "described"
+       "3 persisted patches over 2 deploys (2 functions), 1 artifact, 1.2 MiB in the CAS"
+       (Cmd_deploy_hot.describe_stack st)
+   | None -> Alcotest.fail "STACK line not parsed");
+  (match Cmd_deploy_hot.parse_compact "STACK entries:0 functions:0 deploys:0 artifacts:0 cas_bytes:0" with
+   | Some st ->
+     Alcotest.(check string) "empty"
+       "no hot patches persisted (the node runs its base build)" (Cmd_deploy_hot.describe_stack st)
+   | None -> Alcotest.fail "empty STACK line not parsed");
+  Alcotest.(check bool) "an older server's answer" true
+    (Cmd_deploy_hot.parse_compact "ERR unknown_command" = None)
+
 let test_parse_wait () =
   Alcotest.(check (option (pair int (pair int (pair int bool)))))
     "a WAIT line"
@@ -2761,6 +2778,7 @@ let () =
       Alcotest.test_case "ACTIVATE5: signed shape carries the migrate bitmask" `Quick test_activate5_signed_shape;
       Alcotest.test_case "ACTIVATE6: role roots signed, closures unsigned" `Quick test_activate6_signed_shape_and_role_blocks;
       Alcotest.test_case "TOPOLOGY: signed line shape" `Quick test_topology_command_signed;
+      Alcotest.test_case "COMPACT: parsed and described" `Quick test_parse_compact;
       Alcotest.test_case "WAIT: parsed and described" `Quick test_parse_wait;
       Alcotest.test_case "schemas: handlers, migrate_msg_from, message diff" `Quick test_schema_handlers_and_message_diff;
       Alcotest.test_case "migrate_msg stub from handler signatures" `Quick test_migrate_msg_stub;

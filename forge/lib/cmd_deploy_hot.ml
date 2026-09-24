@@ -1394,6 +1394,39 @@ let read_pins conn : string list =
   in
   loop []
 
+(** The COMPACT answer (distributed-deploys build step 10, plan 6.5):
+    ["STACK entries:<n> functions:<m> deploys:<d> artifacts:<k> cas_bytes:<b>"].
+    [None] for anything else (an older server answers [ERR unknown_command]). *)
+type stack_size = {
+  st_entries : int; st_functions : int; st_deploys : int;
+  st_artifacts : int; st_cas_bytes : int;
+}
+
+let parse_compact (resp : string) : stack_size option =
+  try
+    Scanf.sscanf resp "STACK entries:%d functions:%d deploys:%d artifacts:%d cas_bytes:%d%!"
+      (fun e f d a b ->
+         Some { st_entries = e; st_functions = f; st_deploys = d;
+                st_artifacts = a; st_cas_bytes = b })
+  with _ -> None
+
+let human_bytes (b : int) : string =
+  if b < 1024 then Printf.sprintf "%d B" b
+  else if b < 1024 * 1024 then Printf.sprintf "%.1f KiB" (float_of_int b /. 1024.)
+  else Printf.sprintf "%.1f MiB" (float_of_int b /. 1048576.)
+
+(** The status line for a node's patch stack: what the reconciler weighs
+    when it decides to rebuild the build's base image (no rebuild here). *)
+let describe_stack (st : stack_size) : string =
+  if st.st_entries = 0 then "no hot patches persisted (the node runs its base build)"
+  else
+    Printf.sprintf "%d persisted patch%s over %d deploy%s (%d function%s), %d artifact%s, %s in the CAS"
+      st.st_entries (if st.st_entries = 1 then "" else "es")
+      st.st_deploys (if st.st_deploys = 1 then "" else "s")
+      st.st_functions (if st.st_functions = 1 then "" else "s")
+      st.st_artifacts (if st.st_artifacts = 1 then "" else "s")
+      (human_bytes st.st_cas_bytes)
+
 let run_status ?(env="") () : (unit, string) result =
   match Project.load () with
   | Error m -> Error m
@@ -1418,6 +1451,7 @@ let run_status ?(env="") () : (unit, string) result =
       else begin
         let multi_node = List.length servers > 1 in
         let pins_by_node : (string, string list) Hashtbl.t = Hashtbl.create 4 in
+        let stack_by_node : (string, stack_size) Hashtbl.t = Hashtbl.create 4 in
         let query_server (srv : Project.hot_reload_env) =
           let local = fresh_sock "march_status" in
           Printf.printf "Connecting to %s...\n%!" srv.Project.hre_ssh_host;
@@ -1432,6 +1466,10 @@ let run_status ?(env="") () : (unit, string) result =
               let slots = parse_versions_detail conn in
               send_line conn "PINS";
               let pins = read_pins conn in
+              send_line conn "COMPACT";
+              (match parse_compact (recv_line conn) with
+               | Some st -> Hashtbl.replace stack_by_node srv.Project.hre_name st
+               | None -> ());
               Unix.close fd;
               Hashtbl.replace pins_by_node srv.Project.hre_name pins;
               Ok (srv.Project.hre_name, slots)
@@ -1526,6 +1564,14 @@ let run_status ?(env="") () : (unit, string) result =
             | Some lines ->
               Printf.printf "\nEpochs%s:\n" (if multi_node then " (" ^ node_name ^ ")" else "");
               List.iter (fun l -> Printf.printf "  %s\n" l) lines
+          ) nodes;
+          (* The persisted patch stack (COMPACT). *)
+          List.iter (fun (node_name, _) ->
+            match Hashtbl.find_opt stack_by_node node_name with
+            | None -> ()
+            | Some st ->
+              Printf.printf "\nPatch stack%s: %s\n"
+                (if multi_node then " (" ^ node_name ^ ")" else "") (describe_stack st)
           ) nodes;
           Ok ()
         end

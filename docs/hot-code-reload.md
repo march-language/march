@@ -359,11 +359,35 @@ The policy is loaded once at startup; change it by restarting the server.
 
 A useful pattern is to size the policy from the app's own manifest: build the app, inspect the `caps=` fields in the `.hcr_manifest`, and grant exactly the capabilities the running boundary functions declare; then any future patch that reaches for more is caught.
 
+### Per-role closures (`ACTIVATE6`)
+
+A changed function's own capabilities have one blind spot: a patch that only *calls* an existing helper which already holds a capability. The patched function's own caps do not change, yet what it can reach does. For code that runs as a protocol role with a grant (`role Cons needs IO.Console`, see [Per-role grants]({{ site.baseurl }}/docs/choreography/#per-role-grants)), both gates also check the role's **full capability closure**: everything the role's code reaches, from the same solve the compiler's role-grant check runs.
+
+The manifest `--compile-so` writes carries one line per granted role, with each capability's reach chain:
+
+```
+ROLE Stream.Cons caps=IO.Console,IO.FileWrite via=IO.Console:body>cons;IO.FileWrite:body>cons>save
+```
+
+`forge deploy hot` compares each role's closure with the saved baseline, exactly as it compares functions. A widened role stops the deploy unless `--grant-cap` covers it:
+
+```
+error: hot deploy would widen role Stream.Cons's capability closure
+  running version caps:  IO.Console
+  new version adds:      IO.FileWrite (reached: body → cons → save)
+  A hot deploy may only narrow authority. To authorize this widening, re-run with:
+      forge deploy hot --grant-cap IO.FileWrite
+```
+
+A role new to the baseline widens by its whole closure. A baseline written before per-role closures (no `ROLE` lines) makes this gate permissive for one deploy, with a note.
+
+On the wire, a manifest with `ROLE` lines is deployed with the `ACTIVATE6` message: `ACTIVATE5`'s fields plus `role_caps:<Proto.Role>=<digest>;...` inside the signed line (one digest per role, sorted by role, the `cap_root` recipe over its closure) and an unsigned `roles:<Proto.Role>=<caps>;...` block. The server recomputes every digest from the block and refuses a mismatch, a signed role the block leaves out, or a role it adds unsigned (`ERR role_cap_tamper`), then checks every closure against `MARCH_DEPLOY_POLICY` (`ERR role_cap_policy Stream.Cons IO.FileWrite`). A granted widening therefore still stops at a node whose policy forbids it. It is a new message rather than an extra field because an older server rebuilds the signed line without the role digests, so a signature check there would fail for a confusing reason. A build with no role grants keeps sending `ACTIVATE4`/`ACTIVATE5`; a server that predates `ACTIVATE6` refuses a manifest with roles (upgrade it, or use `--no-cap-gate`).
+
 ### `--grant-cap`
 
 `--grant-cap <CAP>` is repeatable and subsumption-matched: `--grant-cap IO.FileSystem` authorizes a widening to the narrower `IO.FileWrite`. The granted capability becomes part of the deployed function's own signed capability set, so it can't be stripped or altered without breaking the signature; the server's audit log records who deployed which function, when, and with which capability set, so a widening is always traceable back to the person who authorized it.
 
-Each `ACTIVATE` appends one JSON line to `$MARCH_AUDIT_LOG` (default `${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl`) with `ts`, `fn`, `impl_hash`, `signer`, `cas_hash`, `caps`, `cap_root` and `result`. `caps` is the deploy's capability list (`[]` for a capless artifact) and `cap_root` its signed root; both are `null` for deploys over pre-v4 protocols, which carry no capability data. They are recorded as received, so on a rejected request (`err_sig`, `err_cap_tamper`) they show what the request claimed, not a verified set. To find when a node last gained a capability: `jq -c 'select(.result == "ok" and (.caps // [] | index("IO.Network")))' audit.jsonl | tail -1`.
+Each `ACTIVATE` appends one JSON line to `$MARCH_AUDIT_LOG` (default `${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl`) with `ts`, `type` (`activate`, `restore` for a replay at start, `topology` for a topology push), `fn`, `impl_hash`, `signer`, `cas_hash`, `caps`, `cap_root` and `result`, plus `roles` (the role closures as received) for `ACTIVATE6`. `caps` is the deploy's capability list (`[]` for a capless artifact) and `cap_root` its signed root; both are `null` for deploys over pre-v4 protocols, which carry no capability data. They are recorded as received, so on a rejected request (`err_sig`, `err_cap_tamper`) they show what the request claimed, not a verified set. To find when a node last gained a capability: `jq -c 'select(.result == "ok" and (.caps // [] | index("IO.Network")))' audit.jsonl | tail -1`.
 
 ```sh
 forge deploy hot --grant-cap IO.FileWrite --grant-cap IO.Process --so v2.so
@@ -401,7 +425,57 @@ A policy constrains what *hot-patched* functions may do; it does not retroactive
 
 ### Backward compatibility
 
-Every gate is opt-in and additive. A pre-capability artifact (no capability fields in its manifest) deploys with permissive admission and a one-line note. A node with no `MARCH_DEPLOY_POLICY` allows everything, exactly as before. Deploying capability-aware code to a server that predates node admission fails fast with an actionable message rather than silently downgrading; re-run with `--no-cap-gate` if you intentionally want the legacy path.
+Every gate is opt-in and additive. A pre-capability artifact (no capability fields in its manifest) deploys with permissive admission and a one-line note. A manifest without `ROLE` lines deploys over `ACTIVATE4`/`ACTIVATE5` exactly as before. A node with no `MARCH_DEPLOY_POLICY` allows everything, exactly as before. Deploying capability-aware code to a server that predates node admission fails fast with an actionable message rather than silently downgrading; re-run with `--no-cap-gate` if you intentionally want the legacy path.
+
+---
+
+## Restart durability
+
+A restarted server comes back on the code it was running, without a redeploy and before `main` runs (so before a node opens any offer). The reload server keeps a **patch stack** on the host, under its CAS root next to `next_epoch`:
+
+```
+~/.march/cas/hcr_state/<16 hex of blake3(socket path)>/state
+```
+
+It holds every activated function's signed message and signature in activation order (a deploy's functions share one sequence number), a digest of the base build it patches, a digest of the code actually running (`manifest`), and the digest of the last topology pushed. It is rewritten with a temporary file and a rename after every deploy.
+
+At start, before `march_reload_server_start` returns, the server replays it:
+
+- Each entry's **signature is verified again** from the stored signed line with the key baked into the binary.
+- An entry that fails (bad signature, artifact gone from the CAS, a function this binary does not have, a malformed line) is **skipped with an audit line** (`"type":"restore"`, `"result":"err_restore_sig"` and so on), never a crash.
+- Each function's newest valid entry is republished, deploy by deploy in the original order, so epochs keep their order. Superseded and broken entries are dropped from the rewritten file.
+- A **different build** on the same socket (its baseline digest differs) does not replay the stack: patches of one build are not patches of another. The file is set aside as `state.base-changed`.
+- `MARCH_HCR_NO_REPLAY=1` starts from the base binary and sets the stack aside as `state.no-replay`: the escape hatch for a patch that breaks the boot.
+
+`VERSIONS` then shows the hot versions as before, and `VERSIONS_DETAIL` gains a line saying what the start restored:
+
+```
+RESTORED entries:1 skipped:0 mode:replayed stack:1 manifest:<hex> topology:<hex>
+```
+
+(`mode` is `none` on a first start, `replayed`, `off` under `MARCH_HCR_NO_REPLAY`, or `base_changed`.) The state is keyed by the socket path because the CAS root is shared by every March program of a user; the socket names the service.
+
+**Compaction.** A host that boots its base binary and then republishes a long stack boots slowly and runs code no single build produced. `COMPACT` reports the stack's size, and `forge hot-reload status` prints it per node:
+
+```
+Patch stack: 3 persisted patches over 2 deploys (2 functions), 1 artifact, 1.2 MiB in the CAS
+```
+
+When it grows long, rebuild the base image from the current version and roll the hosts onto it (the reconciler does this in a later build step; nothing is rebuilt automatically yet).
+
+---
+
+## Pushing a topology: the `TOPOLOGY` verb
+
+Pushing a topology changes what a node offers, so, like every reconciler action, it is signed. `Cmd_deploy_hot.push_topology` sends
+
+```
+TOPOLOGY <blake3 of the file> <signature> <size>
+```
+
+with the signature over `TOPOLOGY <blake3>` made with the deploy key. The server checks the signature **before** it accepts the body (`READY`), checks that the body hashes to the signed digest (`ERR digest_mismatch`), writes it to the service's state directory (`topology.toml`), records the digest and signature in the persisted state, and calls the runtime's topology hook, `march_hcr_on_topology(path)`, then answers `OK <blake3>`. At start, a persisted topology whose signature and digest still verify goes through the hook again, so the node comes back on the topology it had.
+
+The hook does nothing yet: the node-side re-read (a node opening its own offers from a pushed topology) arrives with the reconciler's build step.
 
 ---
 

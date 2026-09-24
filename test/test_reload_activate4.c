@@ -833,6 +833,20 @@ static void ph_restored_hot(void) {
     int fd = connect_sock(SOCK_PATH);
     if (fd < 0) return;
     char v[4096], d[65], want[128];
+    {
+        /* COMPACT: one persisted patch, one deploy, one artifact (the stub). */
+        struct stat st;
+        char path[512], resp[256];
+        snprintf(path, sizeof(path), "%s/.march/cas/artifacts/%.2s/%.62s",
+                 g_restore_home, STUB_CAS, STUB_CAS + 2);
+        send_line(fd, "COMPACT");
+        read_resp(fd, resp, sizeof(resp));
+        snprintf(want, sizeof(want),
+                 "STACK entries:1 functions:1 deploys:1 artifacts:1 cas_bytes:%lld",
+                 stat(path, &st) == 0 ? (long long)st.st_size : -1LL);
+        CHECK(strcmp(resp, want) == 0, "restart: COMPACT reports the persisted stack");
+        if (strcmp(resp, want) != 0) fprintf(stderr, "    want: %s\n    got:  %s\n", want, resp);
+    }
     restore_versions(fd, v, sizeof(v), "VERSIONS_DETAIL");
     topo_digest(TOPO_BODY, d);
     snprintf(want, sizeof(want), "topology:%s", d);
@@ -959,6 +973,20 @@ int main(int argc, char **argv) {
         test_epoch_model_wait_pins_drain();
         test_activate6_role_closures();
         test_topology_push();
+        {
+            int fd = connect_sock(SOCK_PATH);
+            char resp[256];
+            send_line(fd, "COMPACT");
+            read_resp(fd, resp, sizeof(resp));
+            /* The epoch-model case activated test_fn_epoch three times (two
+             * single deploys and one batch) and ACTIVATE6 once more. */
+            static const char want[] =
+                "STACK entries:4 functions:1 deploys:4 artifacts:1 cas_bytes:";
+            CHECK(strncmp(resp, want, sizeof(want) - 1) == 0,
+                  "COMPACT counts every persisted activation");
+            if (strncmp(resp, want, sizeof(want) - 1) != 0) fprintf(stderr, "    got: %s\n", resp);
+            close(fd);
+        }
     } else {
         /* $MARCH_DEPLOY_POLICY must already be set by the caller (dune rule)
          * before this process started, since the server loads it lazily on
