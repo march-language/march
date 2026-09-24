@@ -375,6 +375,32 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **`Compress` decoders and encoders return the `Compress.Error` their signatures
+  promise.** They used to pass the codec's message string straight through as the
+  error, so matching `Err(Compress.InvalidInput(_))` never matched. Now corrupt or
+  truncated input is `InvalidInput(msg)`, hitting the decompressed-size cap is
+  `InsufficientOutput`, and out of memory, a failed codec init or a library that
+  was not built in is `Io(msg)`; `msg` is still the codec's message. The streaming
+  functions (`Gzip.encode_stream`/`decode_stream`, `Zstd.encode_stream`/
+  `decode_stream`) typecheck when you call them now: their `Seq(Bytes)`
+  annotation could never match a real `Seq` and has been removed. `Brotli.encode`
+  and `Brotli.encode_mode` also typecheck: the typechecker gave the builtin under
+  them one parameter too few. New `Compress.lift_encode_error`/`lift_decode_error`
+  expose the mapping.
+- **`RRB.from_array`/`RRB.to_array` and `AhoCorasick` use the Array module's real
+  type, `Array.PVec(a)`.** They were annotated `Array(a)`, a type that does not
+  exist, so an `Array.from_list(...)` value could not be passed to
+  `RRB.from_array`, and `RRB.to_array`'s result could not be annotated
+  `Array.PVec(a)`. Write `Array.PVec(a)` where you need the type: March has no
+  type-alias syntax, so `Array(a)` could not be made to mean it.
+- **`Plot.save` returns `Result(Unit, File.FileError)`.** It was declared
+  `Result(Unit, String)` but returned the `File.FileError` from the write, so the
+  declared type was wrong. Code that matched the error as a `String` needs to match
+  `File.FileError` instead.
+- **`Logger.with_scope`'s body typechecks.** The builtin `try_finally` under it was
+  typed as passing its callbacks an `Int`, which matched neither backend and
+  rejected the `() -> a` thunk `with_scope` takes. It is now typed `() -> a`.
+  Callbacks written `fn _ -> ...`, which is every existing caller, are unaffected.
 - **Spawning a nested actor from its parent module compiles.** `spawn(Inner.Box)`
   written outside `mod Inner` passed `--check` and ran interpreted, but `--compile`
   failed to link with `Undefined symbols: "_Inner.Box_spawn"`. It now links and runs.
