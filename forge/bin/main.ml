@@ -1204,6 +1204,14 @@ let deploy_hot_cmd =
            ~doc:"Use a pre-built .so instead of rebuilding (manifest is <FILE.so>.hcr_manifest). \
                  Useful when the target host differs from the build host (e.g. cross-compiled via Docker).")
   in
+  let target =
+    Arg.(value & opt (some string) None & info ["target"] ~docv:"TARGET"
+           ~doc:"Cross-compilation target (for example linux/amd64).")
+  in
+  let module_prefix =
+    Arg.(value & opt (some string) None & info ["module-prefix"] ~docv:"PREFIX"
+           ~doc:"Hot-reload module prefix; must match the running baseline.")
+  in
   let env_name =
     Arg.(value & opt string "" &
          info ["env"] ~docv:"NAME"
@@ -1234,7 +1242,8 @@ let deploy_hot_cmd =
                  against a server that predates capability admission, or to \
                  deliberately bypass the gate.")
   in
-  let run o s e c t grant_caps no_cap_gate =
+  let run o s target prefix e c t grant_caps no_cap_gate =
+    ignore target; ignore prefix;
     let result =
       if e = "" && c = 0 then
         (* Single-server fast path (backward compat) *)
@@ -1249,7 +1258,7 @@ let deploy_hot_cmd =
   in
   Cmd.v (Cmd.info "hot"
            ~doc:"Build and hot-deploy changed functions to a running server (or fleet)")
-    Term.(const run $ output $ so $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate)
+  Term.(const run $ output $ so $ target $ module_prefix $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate)
 
 let deploy_cmd =
   Cmd.group (Cmd.info "deploy" ~doc:"Deploy project to a target environment")
@@ -1515,7 +1524,8 @@ let offline_man_blocks = [
       toolchain download, no npm install. Git and registry dependencies are \
       resolved only through $(b,forge.lock) to \
       $(b,~/.march/cas/deps/<name>/<commit-or-version>) and re-hashed against \
-      the lockfile; a missing one is warned about and skipped. \
+      the lockfile (a mismatch is an error offline; online builds re-fetch \
+      the dependency instead); a missing one is warned about and skipped. \
       $(b,forge deps --offline) reports cached/missing per dependency and \
       exits non-zero if any is missing. $(b,forge add) (registry or remote) \
       and $(b,forge outdated) refuse.";

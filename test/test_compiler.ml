@@ -1226,9 +1226,9 @@ end
     false (has_errors ctx)
 
 (* A local zero-arg LAMBDA LITERAL (`let g = fn -> body`) called with `g()`
-   must still typecheck.  Under plain inference (no expected-type context) a
-   zero-param lambda collapses to its body's result type just like a
-   top-level zero-arg `fn` — the SAME shape the generalized noncallable
+   must still typecheck.  Under plain inference a zero-param lambda used to
+   collapse to its body's result type just like a top-level zero-arg `fn`
+   (it now infers to `Unit -> T`) — the SAME shape the generalized noncallable
    check targets — so `let g = fn -> println("b"); g()` is real, existing,
    tested behavior (test/native/unit_callback_zero_arg.march) that a naive
    "any plain let-bound non-arrow value is uncallable" rule would wrongly
@@ -4619,8 +4619,8 @@ let test_let_annot_poly_instance_accepts () =
   Alcotest.(check bool) "let : (Int)->Int = fn n -> n accepted" false (has_errors ctx)
 
 (* ── Zero-arg lambda satisfies a `Unit -> Unit` callback param ───────────
-   A 0-arg lambda `fn -> body` types to its body's result (a thunk), so it
-   used to be un-passable to a declared `Unit -> Unit` parameter ("expected
+   A 0-arg lambda `fn -> body` used to type to its body's result, so it
+   was un-passable to a declared `Unit -> Unit` parameter ("expected
    () but got () -> ()"); and calling such a callback with `cb()` yielded the
    arrow type rather than the result.  Both boundaries are now reconciled: a
    `Unit -> T` arrow behaves like a 0-arg callable at both construction
@@ -4660,6 +4660,73 @@ let test_discard_arg_thunk_still_accepts () =
     end
   end|} in
   Alcotest.(check bool) "task_spawn(fn _ -> 42) still accepted"
+    false (has_errors ctx)
+
+(* A zero-parameter lambda typed WITHOUT a `Unit -> T` expected type in hand
+   — a record-literal field, an unannotated `let` — used to infer to its
+   body's result `T`, so it could not fill a `() -> T` record field:
+   "expected `() -> Int` but got `Int`" (specs/progress/
+   2026-09-24-zero-arg-lambda-thunk.md).  It now infers to `Unit -> T`. *)
+let test_zero_arg_lambda_record_field_accepts () =
+  let ctx = typecheck {|mod Z do
+    type R = { name : String, go : () -> Int }
+    fn mk(name : String) : R do
+      { name: name, go: fn () -> 3 }
+    end
+    fn mk_short(name : String) : R do
+      { name: name, go: fn -> 3 }
+    end
+    fn call_go(r : R) : Int do r.go() + (r.go)() end
+  end|} in
+  Alcotest.(check bool) "{ go: fn () -> 3 } fills a `() -> Int` field"
+    false (has_errors ctx)
+
+let test_zero_arg_lambda_let_bound_record_field_accepts () =
+  let ctx = typecheck {|mod Z do
+    type R = { name : String, go : () -> Int }
+    fn mk2(name : String) : R do
+      let g = fn () -> 4
+      { name: name, go: g }
+    end
+    fn run(cb : Unit -> Int) : Int do cb() end
+    fn f() : Int do
+      let h = fn -> 7
+      run(h) + h()
+    end
+  end|} in
+  Alcotest.(check bool) "let g = fn () -> 4 fills a `() -> Int` field / param"
+    false (has_errors ctx)
+
+(* An empty-parens call of an unannotated parameter makes it a thunk, so a
+   generic HOF over a zero-arg lambda returns the thunk's RESULT; and a
+   zero-arg lambda passed where a type variable is expected is `Unit -> T`,
+   not `T`. *)
+let test_zero_arg_lambda_through_generic_fns () =
+  let ctx = typecheck {|mod Z do
+    fn apply(f) do f() end
+    fn id(x) do x end
+    fn total() : Int do
+      let h = fn -> 7
+      let k = id(fn -> 1)
+      apply(h) + apply(fn () -> 8) + k()
+    end
+  end|} in
+  Alcotest.(check bool) "apply(fn -> 7) : Int, id(fn -> 1)() : Int"
+    false (has_errors ctx)
+
+(* A required parameter declared AFTER a defaulted one: the short-arity
+   variant must forward to the full-arity fn in the ORIGINAL parameter order.
+   It used to forward `f$3(a, c, "x")`, which only typechecked while the
+   misplaced values happened to share a type (a zero-arg-lambda param did,
+   when such a lambda was typed as its result). *)
+let test_default_arg_before_required_forwards_in_order () =
+  let ctx = typecheck {|mod Z do
+    fn f(a : Int, b : String \\ "x", c : Int) : String do
+      b ++ int_to_string(a + c)
+    end
+    fn g() : String do f(1, 2) end
+  end|} in
+  Alcotest.(check bool) "fn f(a, b \\\\ d, c): f(1, 2) forwards f$3(1, d, 2)"
     false (has_errors ctx)
 
 (* ── Finding 13: ELetFn return-annotation mismatch reported ONCE ────────── *)
@@ -14795,13 +14862,8 @@ let assert_stdlib_file_typechecks_cleanly name =
 let stdlib_known_internal_errors = [
   (* file, errors -- see specs/todos/2026-09-22-stdlib-internal-type-errors.md *)
   "actor.march", 2;
-  "aho_corasick.march", 11;
   "cluster_node.march", 1;
-  "compress.march", 19;
-  "logger.march", 1;
   "node_call.march", 5;
-  "plot.march", 1;
-  "rrb_vec.march", 19;
   "session_node.march", 3;
 ]
 
@@ -14842,6 +14904,39 @@ let test_stdlib_internal_errors_ratchet () =
       (show_stdlib_errors
          (List.filter (fun (d : March_errors.Errors.diagnostic) ->
               d.severity = March_errors.Errors.Error) (check_stdlib_like_cli ())))
+
+(* What fixing a hidden stdlib error buys a USER, seen from outside the module.
+   rrb_vec.march annotated its Array-backed values as `Array(a)`, a type that
+   does not exist (the Array module's type is `Array.PVec(a)`; March has no
+   type-alias syntax, so `Array(a)` could not be made to mean it). Its bodies
+   failed to check, and its exported signatures carried the phantom type, so
+   a user could neither hand the value of `Array.from_list` to
+   `RRB.from_array` nor receive `RRB.to_array`'s result as an `Array.PVec`:
+   pre-fix the accepting program below fails with "expected `PVec(Int)` but
+   got `Array(Int)`" (measured 2026-09-24). The rejection half pins that the
+   fix did not swap the phantom for an unconstrained type variable. *)
+let test_rrb_to_array_has_a_real_type_for_users () =
+  let run name body =
+    let (project_root, main_exe, src, tmp) =
+      session_write_src ~name
+        ("mod " ^ String.capitalize_ascii name ^ " do\n" ^ body ^ "\nend\n") in
+    let out = Filename.concat tmp "out.txt" in
+    let rc = Sys.command (Printf.sprintf "cd %s && %s --check %s > %s 2>&1"
+                            (Filename.quote project_root) (Filename.quote main_exe)
+                            (Filename.quote src) (Filename.quote out)) in
+    (rc, read_file_contents out)
+  in
+  let (ok_rc, ok_out) = run "march_rrb_pvec_ok"
+      "  fn f() : Array.PVec(Int) do RRB.to_array(RRB.from_list([1, 2, 3])) end\n\
+      \  fn g(xs : Array.PVec(Int)) : Int do RRB.length(RRB.from_array(xs)) end" in
+  Alcotest.(check int)
+    (Printf.sprintf "Array.PVec(Int) annotations around RRB typecheck:\n%s" ok_out)
+    0 ok_rc;
+  let (bad_rc, bad_out) = run "march_rrb_pvec_bad"
+      "  fn f() : String do RRB.to_array(RRB.from_list([1, 2, 3])) end" in
+  Alcotest.(check bool)
+    (Printf.sprintf "RRB.to_array is no longer an unconstrained type variable:\n%s" bad_out)
+    true (bad_rc <> 0 && contains_substring bad_out "PVec")
 
 (* ── Stdlib wrappers over builtins the typechecker did not know ──────────────
 
@@ -17606,6 +17701,10 @@ let compiler_suites =
           Alcotest.test_case "fn -> body satisfies Unit -> Unit param"       `Quick test_zero_arg_lambda_unit_callback_accepts;
           Alcotest.test_case "Unit -> T value called with f() yields T"      `Quick test_zero_arg_unit_call_returns_result;
           Alcotest.test_case "fn _ -> body (discard thunk) still accepted"   `Quick test_discard_arg_thunk_still_accepts;
+          Alcotest.test_case "fn () -> e fills a () -> T record field"       `Quick test_zero_arg_lambda_record_field_accepts;
+          Alcotest.test_case "let-bound fn () -> e fills () -> T"            `Quick test_zero_arg_lambda_let_bound_record_field_accepts;
+          Alcotest.test_case "zero-arg lambda through generic fns"           `Quick test_zero_arg_lambda_through_generic_fns;
+          Alcotest.test_case "default before required forwards in order"     `Quick test_default_arg_before_required_forwards_in_order;
         ] );
       ( "letfn_ret_annot", [
           Alcotest.test_case "finding 13: mismatch reported exactly once"    `Quick test_letfn_ret_annot_mismatch_single_diagnostic;
@@ -17692,6 +17791,7 @@ let compiler_suites =
           Alcotest.test_case "Main.launder (a->b) launders Int -> String: error"  `Quick test_entry_qual_distinct_tvar_launders;
           Alcotest.test_case "T.id from nested App launders Int -> String: error" `Quick test_entry_qual_from_nested_sibling;
           Alcotest.test_case "stdlib internal-type-error ratchet"                  `Quick test_stdlib_internal_errors_ratchet;
+          Alcotest.test_case "RRB.to_array has a real type for users"             `Quick test_rrb_to_array_has_a_real_type_for_users;
           Alcotest.test_case "stdlib builtin wrappers have their real types"       `Quick test_stdlib_builtin_wrappers_have_real_types;
           Alcotest.test_case "prelude.march fold_left: curried, no internal error"    `Quick test_stdlib_prelude_fold_left_curried;
           Alcotest.test_case "iterable.march fold: curried, no internal error"        `Quick test_stdlib_iterable_fold_curried;

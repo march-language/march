@@ -1,6 +1,7 @@
 /* native_sort_bench.c — standalone measurement for the NativeArray.sort_int spec
  * (specs/todos/2026-09-16-native-array-sort-ipnsort.md). Not part of the runtime;
  * build with: cc -O2 -fno-strict-aliasing -fwrapv -o /tmp/nsb bench/c/native_sort_bench.c && /tmp/nsb [quick]
+ * f64 width (NativeArray.sort_float): /tmp/nsb f64 [quick] — see the f64 section below.
  *
  * Four i64 sorts over eight input patterns at three sizes, compiled with the
  * same flags the March runtime uses (cc -O2 -fno-strict-aliasing -fwrapv).
@@ -362,7 +363,316 @@ static int verify(void) {
     return bad;
 }
 
+/* ======================================================================
+ * f64 width (NativeArray.sort_float). Run with `nsb f64 [quick]`.
+ *
+ * Doubles sort by IEEE 754 totalOrder:
+ *   key(bits) = bits ^ (((int64_t)bits >> 63) & 0x7FFFFFFFFFFFFFFF)
+ * compared as a signed i64, which gives -NaN < -Inf < ... < -0 < +0 < ...
+ * < +Inf < +NaN. key() is an involution (the sign bit is untouched, so
+ * applying it twice restores the bits), which allows two shapes:
+ *
+ *   xform   transform every element to its key in place, run the i64 ipn
+ *           sort above unchanged, transform back. Two extra O(n) passes
+ *           (both vectorize), zero extra work per comparison.
+ *   keyed   the same ipn algorithm with every `a < b` replaced by
+ *           key(a) < key(b) on the fly: no extra passes, two xor/shift/and
+ *           per comparison.
+ *
+ * The runtime ships whichever measures faster; the numbers are recorded in
+ * specs/progress/2026-09-24-native-array-sort-f64.md.
+ *
+ * Baselines: qsort with a totalOrder comparator (the reference output every
+ * other variant is memcmp'd against), and qsort with the "naive" double
+ * comparator (x > y) - (x < y), which is only a valid sort on NaN-free data
+ * and is therefore neither verified nor timed on the `specials` pattern.
+ * ====================================================================== */
+
+static inline i64 fkey(i64 bits) {
+    return bits ^ (i64)((uint64_t)(bits >> 63) >> 1);
+}
+
+static int cmp_f64_total(const void *a, const void *b) {
+    i64 x = fkey(*(const i64 *)a), y = fkey(*(const i64 *)b);
+    return (x > y) - (x < y);
+}
+static int cmp_f64_naive(const void *a, const void *b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+static void fsort_qsort_total(double *v, size_t n) { qsort(v, n, sizeof(double), cmp_f64_total); }
+static void fsort_qsort_naive(double *v, size_t n) { qsort(v, n, sizeof(double), cmp_f64_naive); }
+
+static void fsort_xform(double *d, size_t n) {
+    i64 *v = (i64 *)d;
+    for (size_t i = 0; i < n; i++) v[i] = fkey(v[i]);
+    sort_ipn(v, n);
+    for (size_t i = 0; i < n; i++) v[i] = fkey(v[i]);
+}
+
+/* keyed: the ipn algorithm above, verbatim, with `<` routed through fkey. */
+#define KLT(x, y) (fkey(x) < fkey(y))
+#define KCSWAP(a, b) do { i64 _x = v[a], _y = v[b]; bool _lt = KLT(_y, _x); v[a] = _lt ? _y : _x; v[b] = _lt ? _x : _y; } while (0)
+
+static inline void knet8(i64 *v) {
+    KCSWAP(0,2); KCSWAP(1,3); KCSWAP(4,6); KCSWAP(5,7);
+    KCSWAP(0,4); KCSWAP(1,5); KCSWAP(2,6); KCSWAP(3,7);
+    KCSWAP(0,1); KCSWAP(2,3); KCSWAP(4,5); KCSWAP(6,7);
+    KCSWAP(2,4); KCSWAP(3,5);
+    KCSWAP(1,4); KCSWAP(3,6);
+    KCSWAP(1,2); KCSWAP(3,4); KCSWAP(5,6);
+}
+static void kinsertion(i64 *v, size_t n) {
+    for (size_t i = 1; i < n; i++) {
+        i64 x = v[i];
+        size_t j = i;
+        while (j > 0 && KLT(x, v[j - 1])) { v[j] = v[j - 1]; j--; }
+        v[j] = x;
+    }
+}
+static void ksmall(i64 *v, size_t n) {
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) knet8(v + i);
+    kinsertion(v, n);
+}
+static void kheap(i64 *v, size_t n) {
+    for (size_t start = n / 2; start-- > 0;) {
+        size_t root = start;
+        for (;;) {
+            size_t child = 2 * root + 1;
+            if (child >= n) break;
+            if (child + 1 < n && KLT(v[child], v[child + 1])) child++;
+            if (!KLT(v[root], v[child])) break;
+            swap64(&v[root], &v[child]);
+            root = child;
+        }
+    }
+    for (size_t end = n; end-- > 1;) {
+        swap64(&v[0], &v[end]);
+        size_t root = 0;
+        for (;;) {
+            size_t child = 2 * root + 1;
+            if (child >= end) break;
+            if (child + 1 < end && KLT(v[child], v[child + 1])) child++;
+            if (!KLT(v[root], v[child])) break;
+            swap64(&v[root], &v[child]);
+            root = child;
+        }
+    }
+}
+static inline size_t kmedian3(const i64 *v, size_t a, size_t b, size_t c) {
+    bool ab = KLT(v[a], v[b]), ac = KLT(v[a], v[c]), bc = KLT(v[b], v[c]);
+    if (ab == bc) return b;
+    if (ab == ac) return c;
+    return a;
+}
+static size_t kpivot(const i64 *v, size_t n) {
+    size_t s = n / 8;
+    if (n >= 64) {
+        size_t a = kmedian3(v, 0 * s, 1 * s, 2 * s);
+        size_t b = kmedian3(v, 3 * s, 4 * s, 5 * s);
+        size_t c = kmedian3(v, 6 * s, 7 * s, n - 1);
+        return kmedian3(v, a, b, c);
+    }
+    return kmedian3(v, 0, n / 2, n - 1);
+}
+static size_t kpart_lt(i64 *v, size_t n, i64 pivot) {
+    size_t j = 0;
+    for (size_t i = 0; i < n; i++) {
+        i64 x = v[i], y = v[j];
+        v[i] = y; v[j] = x;
+        j += KLT(x, pivot);
+    }
+    return j;
+}
+static size_t kpart_le(i64 *v, size_t n, i64 pivot) {
+    size_t j = 0;
+    for (size_t i = 0; i < n; i++) {
+        i64 x = v[i], y = v[j];
+        v[i] = y; v[j] = x;
+        j += !KLT(pivot, x);
+    }
+    return j;
+}
+static void kbreak(i64 *l, size_t ln) {
+    if (ln < 8) return;
+    size_t q = ln / 4;
+    swap64(&l[0], &l[rng() % ln]); swap64(&l[q], &l[rng() % ln]);
+    swap64(&l[2 * q], &l[rng() % ln]); swap64(&l[ln - 1], &l[rng() % ln]);
+}
+static void krec(i64 *v, size_t n, const i64 *ancestor, int limit) {
+    for (;;) {
+        if (n <= IPN_SMALL) { ksmall(v, n); return; }
+        if (limit == 0) { kheap(v, n); return; }
+        limit--;
+        size_t pi = kpivot(v, n);
+        i64 pivot = v[pi];
+        if (ancestor && !KLT(*ancestor, pivot)) {
+            size_t eq = kpart_le(v, n, pivot);
+            v += eq; n -= eq; ancestor = NULL;
+            continue;
+        }
+        swap64(&v[0], &v[pi]);
+        size_t lt = kpart_lt(v + 1, n - 1, pivot);
+        swap64(&v[0], &v[lt]);
+        size_t rn = n - 1 - lt;
+        if (lt < n / 8 || rn < n / 8) { kbreak(v, lt); kbreak(v + lt + 1, rn); }
+        krec(v, lt, ancestor, limit);
+        ancestor = &v[lt];
+        v += lt + 1; n -= lt + 1;
+    }
+}
+static void fsort_keyed(double *d, size_t n) {
+    i64 *v = (i64 *)d;
+    if (n < 2) return;
+    if (n <= IPN_SMALL) { ksmall(v, n); return; }
+    size_t i = 1;
+    if (KLT(v[1], v[0])) {
+        while (i < n && KLT(v[i], v[i - 1])) i++;
+        if (i == n) {
+            for (size_t a = 0, b = n - 1; a < b; a++, b--) swap64(&v[a], &v[b]);
+            return;
+        }
+    } else {
+        while (i < n && !KLT(v[i], v[i - 1])) i++;
+        if (i == n) return;
+    }
+    krec(v, n, NULL, (int)(2 * log2_floor(n)));
+}
+
+/* f64 patterns: the eight i64 shapes, as doubles, plus `specials`. `random`
+ * spans both signs with fractional parts so the key transform's negative
+ * branch is exercised on every run, not only on `specials`. */
+typedef void (*fgen_fn)(double *, size_t);
+static void fgen_from_i64(double *d, size_t n, gen_fn g) {
+    i64 *tmp = malloc((n + 1) * sizeof(i64));
+    g(tmp, n);
+    for (size_t i = 0; i < n; i++) d[i] = (double)tmp[i];
+    free(tmp);
+}
+static void fgen_random(double *d, size_t n) {
+    for (size_t i = 0; i < n; i++) d[i] = (double)(i64)rng() / 4294967296.0;
+}
+static void fgen_sorted(double *d, size_t n)   { fgen_from_i64(d, n, gen_sorted); }
+static void fgen_reversed(double *d, size_t n) { fgen_from_i64(d, n, gen_reversed); }
+static void fgen_nearly(double *d, size_t n)   { fgen_from_i64(d, n, gen_nearly); }
+static void fgen_dist10(double *d, size_t n)   { fgen_from_i64(d, n, gen_dist10); }
+static void fgen_sawtooth(double *d, size_t n) { fgen_from_i64(d, n, gen_sawtooth); }
+static void fgen_organ(double *d, size_t n)    { fgen_from_i64(d, n, gen_organ); }
+static void fgen_equal(double *d, size_t n)    { fgen_from_i64(d, n, gen_equal); }
+/* ~6% special values: both NaN signs, both infinities, both zeros. */
+static void fgen_specials(double *d, size_t n) {
+    fgen_random(d, n);
+    for (size_t i = 0; i < n; i++) {
+        switch (rng() % 100) {
+            case 0: d[i] = NAN; break;
+            case 1: d[i] = -NAN; break;
+            case 2: d[i] = INFINITY; break;
+            case 3: d[i] = -INFINITY; break;
+            case 4: d[i] = 0.0; break;
+            case 5: d[i] = -0.0; break;
+            default: break;
+        }
+    }
+}
+
+typedef void (*fsort_fn)(double *, size_t);
+static const struct { const char *name; fsort_fn f; } FSORTS[] = {
+    {"qs_total", fsort_qsort_total}, {"qs_naive", fsort_qsort_naive},
+    {"xform", fsort_xform}, {"keyed", fsort_keyed},
+};
+static const struct { const char *name; fgen_fn g; bool special; } FPATTERNS[] = {
+    {"random", fgen_random, false}, {"sorted", fgen_sorted, false},
+    {"reversed", fgen_reversed, false}, {"nearly", fgen_nearly, false},
+    {"dist10", fgen_dist10, false}, {"sawtooth", fgen_sawtooth, false},
+    {"organ", fgen_organ, false}, {"equal", fgen_equal, false},
+    {"specials", fgen_specials, true},
+};
+#define NFS (sizeof FSORTS / sizeof FSORTS[0])
+#define NFP (sizeof FPATTERNS / sizeof FPATTERNS[0])
+
+static int fverify(void) {
+    int bad = 0;
+    size_t sizes[] = {0, 1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 255, 256, 1000, 100000};
+    for (size_t si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
+        size_t n = sizes[si];
+        double *src = malloc((n + 1) * sizeof(double)), *ref = malloc((n + 1) * sizeof(double)),
+               *w = malloc((n + 1) * sizeof(double));
+        for (size_t p = 0; p < NFP; p++) {
+            for (int rep = 0; rep < 3; rep++) {
+                FPATTERNS[p].g(src, n);
+                memcpy(ref, src, n * sizeof(double)); fsort_qsort_total(ref, n);
+                for (size_t s = 1; s < NFS; s++) {
+                    if (FPATTERNS[p].special && FSORTS[s].f == fsort_qsort_naive) continue;
+                    memcpy(w, src, n * sizeof(double));
+                    FSORTS[s].f(w, n);
+                    if (memcmp(w, ref, n * sizeof(double)) != 0) {
+                        printf("MISMATCH sort=%s pattern=%s n=%zu\n", FSORTS[s].name, FPATTERNS[p].name, n);
+                        bad++;
+                    }
+                }
+            }
+        }
+        free(src); free(ref); free(w);
+    }
+    /* totalOrder placement, spelled out: the reference comparator itself must
+     * put the specials where the spec says, or every memcmp above is vacuous. */
+    double sp[] = {1.0, NAN, -0.0, -INFINITY, 0.0, -NAN, INFINITY, -1.0};
+    fsort_xform(sp, 8);
+    if (!(isnan(sp[0]) && signbit(sp[0]) && sp[1] == -INFINITY && sp[2] == -1.0 &&
+          sp[3] == 0.0 && signbit(sp[3]) && sp[4] == 0.0 && !signbit(sp[4]) &&
+          sp[5] == 1.0 && sp[6] == INFINITY && isnan(sp[7]) && !signbit(sp[7]))) {
+        printf("MISMATCH totalOrder placement of specials\n");
+        bad++;
+    }
+    return bad;
+}
+
+static int main_f64(bool quick) {
+    int bad = fverify();
+    printf("f64 verify: %s (%d mismatches)\n\n", bad ? "FAIL" : "ok", bad);
+    if (bad) return 1;
+    size_t sizes[] = {1000, 100000, 5000000};
+    int reps[]     = {2000, 30, 3};
+    if (quick) { reps[0] = 200; reps[1] = 5; reps[2] = 1; }
+    for (size_t si = 0; si < 3; si++) {
+        size_t n = sizes[si];
+        double *src = malloc(n * sizeof(double)), *w = malloc(n * sizeof(double));
+        printf("f64 n=%zu  (min of %d reps, ms)\n", n, reps[si]);
+        printf("%-10s", "pattern");
+        for (size_t s = 0; s < NFS; s++) printf("%10s", FSORTS[s].name);
+        printf("   xform/qs_total  keyed/xform\n");
+        for (size_t p = 0; p < NFP; p++) {
+            FPATTERNS[p].g(src, n);
+            double best[NFS];
+            for (size_t s = 0; s < NFS; s++) {
+                best[s] = -1;
+                if (FPATTERNS[p].special && FSORTS[s].f == fsort_qsort_naive) continue;
+                best[s] = 1e18;
+                for (int r = 0; r < reps[si]; r++) {
+                    memcpy(w, src, n * sizeof(double));
+                    double t0 = now_ms();
+                    FSORTS[s].f(w, n);
+                    double t = now_ms() - t0;
+                    if (t < best[s]) best[s] = t;
+                }
+            }
+            printf("%-10s", FPATTERNS[p].name);
+            for (size_t s = 0; s < NFS; s++) {
+                if (best[s] < 0) printf("%10s", "-");
+                else printf("%10.3f", best[s]);
+            }
+            printf("   %12.2fx  %10.2fx\n", best[0] / best[2], best[3] / best[2]);
+        }
+        printf("\n");
+        free(src); free(w);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "f64") == 0)
+        return main_f64(argc > 2 && strcmp(argv[2], "quick") == 0);
     int bad = verify();
     printf("verify: %s (%d mismatches, incl. net8 0-1 principle over all 256 inputs)\n\n",
            bad ? "FAIL" : "ok", bad);

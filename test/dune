@@ -795,23 +795,28 @@
 ; string whose expected hex digest is also asserted OCaml-side in
 ; test_cas.ml's test_blake3_cross_impl_agreement_fixture — a single literal
 ; can only satisfy both assertions if the implementations match bit-for-bit.
-; Reuses the same discovered blake3_cflags.sexp/blake3_libs.sexp that
-; lib/cas/dune uses (via lib/cas/discover.exe), so the include/lib paths
-; never drift from the OCaml side's probe.
+; The C runtime uses the vendored portable implementation below.  The OCaml
+; CAS side continues to use lib/cas/discover.exe and its host library.
 (rule
  (targets test_blake3_agreement_runner)
  (deps    test_blake3_agreement.c
           ../runtime/march_blake3.c
           ../runtime/march_blake3.h
-          ../lib/cas/blake3_cflags.sexp
-          ../lib/cas/blake3_libs.sexp)
+          ../runtime/third_party/blake3/blake3.c
+          ../runtime/third_party/blake3/blake3.h
+          ../runtime/third_party/blake3/blake3_dispatch.c
+          ../runtime/third_party/blake3/blake3_impl.h
+          ../runtime/third_party/blake3/blake3_portable.c)
  (action
   (run bash -c
-   "set -e; strip_sexp() { tr -d '()' < \"$1\" | xargs; }; \
-    %{cc} -std=gnu11 -Wall -Wextra -I../runtime \
-      $(strip_sexp ../lib/cas/blake3_cflags.sexp) \
+   "set -e; \
+    %{cc} -std=gnu11 -Wall -Wextra -I../runtime -I../runtime/third_party/blake3 \
+      -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 \
+      -DBLAKE3_NO_AVX512 -DBLAKE3_USE_NEON=0 \
       -o %{targets} test_blake3_agreement.c ../runtime/march_blake3.c \
-      $(strip_sexp ../lib/cas/blake3_libs.sexp)")))
+      ../runtime/third_party/blake3/blake3.c \
+      ../runtime/third_party/blake3/blake3_dispatch.c \
+      ../runtime/third_party/blake3/blake3_portable.c")))
 
 (rule
  (alias   runtest)
@@ -850,6 +855,12 @@
           ../runtime/march_dispatch.c ../runtime/march_dispatch.h
           ../runtime/march_cap_lattice.c ../runtime/march_cap_lattice.h
           ../runtime/march_blake3.c ../runtime/march_blake3.h
+          ../runtime/march_hcr_identity.c ../runtime/march_hcr_identity.h
+          ../runtime/third_party/blake3/blake3.c
+          ../runtime/third_party/blake3/blake3.h
+          ../runtime/third_party/blake3/blake3_dispatch.c
+          ../runtime/third_party/blake3/blake3_impl.h
+          ../runtime/third_party/blake3/blake3_portable.c
           ../runtime/tweetnacl.c ../runtime/tweetnacl.h
           ../runtime/march_runtime.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
@@ -860,25 +871,31 @@
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
           ../runtime/march_remote_registry.c
-          ../lib/cas/blake3_cflags.sexp ../lib/cas/blake3_libs.sexp
           (glob_files ../runtime/*.h))
  (action
   (run bash -c
-   "set -e; strip_sexp() { tr -d '()' < \"$1\" | xargs; }; \
+   "set -e; \
     PK=$(head -n1 reload_keys.txt); \
-    %{cc} -std=gnu11 -Wall -I../runtime -O2 -DMARCH_SIGNING_PUBKEY_HEX=\\\"$PK\\\" \
-      $(strip_sexp ../lib/cas/blake3_cflags.sexp) \
+    %{cc} -std=gnu11 -Wall -I../runtime -I../runtime/third_party/blake3 -O2 \
+      -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 \
+      -DBLAKE3_NO_AVX512 -DBLAKE3_USE_NEON=0 \
+      -DMARCH_HCR_TRIPLE=arm64-apple-macosx26.0.0 \
+      -DMARCH_HCR_TARGET=\\\"native\\\" -DMARCH_HCR_PREFIX=\\\"Test\\\" \
+      -DMARCH_SIGNING_PUBKEY_HEX=\\\"$PK\\\" \
       -o %{targets} test_reload_activate4.c \
       ../runtime/march_reload.c ../runtime/march_dispatch.c \
       ../runtime/march_cap_lattice.c ../runtime/march_blake3.c \
+      ../runtime/march_hcr_identity.c \
+      ../runtime/third_party/blake3/blake3.c \
+      ../runtime/third_party/blake3/blake3_dispatch.c \
+      ../runtime/third_party/blake3/blake3_portable.c \
       ../runtime/tweetnacl.c ../runtime/march_runtime.c \
       ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_message.c \
       ../runtime/march_heap.c ../runtime/march_gc.c \
       ../runtime/march_monitor_registry.c \
       ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c \
       ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c \
-      ../runtime/march_remote_registry.c \
-      $(strip_sexp ../lib/cas/blake3_libs.sexp) -lpthread -lm -lz")))
+      ../runtime/march_remote_registry.c -lpthread -lm -lz")))
 
 (rule
  (alias runtest)
@@ -888,8 +905,12 @@
 ; The stub patch the reload test's epoch-model case uploads and activates.
 (rule
  (targets hcr_stub.so)
- (deps    hcr_stub_so.c)
- (action  (run %{cc} -shared -fPIC -o %{targets} hcr_stub_so.c)))
+ (deps    hcr_stub_so.c ../runtime/march_hcr_identity.c ../runtime/march_hcr_identity.h)
+ (action  (run bash -c
+            "%{cc} -shared -fPIC \
+             -DMARCH_HCR_TRIPLE=arm64-apple-macosx26.0.0 \
+             -DMARCH_HCR_TARGET=\\\"native\\\" -DMARCH_HCR_PREFIX=\\\"Test\\\" \
+             -o hcr_stub.so hcr_stub_so.c ../runtime/march_hcr_identity.c")))
 
 (rule
  (alias runtest)
@@ -2329,6 +2350,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_send_to_self.expected native_actor_send_to_self.out)))
+
+; ── Regression: the Pid-reading builtins (pid_to_int, the supervise glue's
+; pid_index_of / register_supervisor / register_supervisor_child,
+; actor_set_mailbox_limit) leave the record's refcount alone. They were
+; classified owned while their C side never releases the pid, so each call
+; leaked a reference and the record was never freed. Verified red on the base
+; compiler (all four lines false) and red with only the borrow-table half of
+; the fix (the supervised-child line: the registration calls were ECallPtrs,
+; which never consult the table). See
+; specs/progress/2026-09-24-pid-to-int-leak.md.
+(rule
+ (targets native_pid_to_int_leak_probe native_pid_to_int_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/pid_to_int_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_pid_to_int_leak_probe
+        native/pid_to_int_leak_probe.march)
+   (with-stdout-to native_pid_to_int_leak_probe.out
+        (system "./native_pid_to_int_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/pid_to_int_leak_probe.expected native_pid_to_int_leak_probe.out)))
 
 ; ── Capability mocking reaching an actor handler ──────────────────────────
 ; The handler is entered from the scheduler, so the capability cannot be
@@ -7654,22 +7700,45 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; mutates a SHARED array in place. Verified non-vacuous on 2026-09-16 by
 ; forcing the in-place path unconditionally -- that line, and only that
 ; line, flipped to false.
+;
+; The same file covers NativeArray.sort_float (f64, IEEE 754 totalOrder:
+; NaN / -0.0 / +-Inf placement). The binary runs TWICE against the same
+; golden: the second run sets MARCH_TEST_NSORT_DEPTH_LIMIT=0, which forces
+; every segment above the small-sort cutoff into the heapsort fallback
+; (nsort_heap) -- the only way to reach it, since the pattern-breaking step
+; makes it practically unreachable from input. The INTERPRETER runs it too,
+; against the same golden: OCaml's `compare` puts every NaN first and ties
+; -0.0 with 0.0, so an interpreter arm built on it (rather than on the
+; totalOrder key the C sort uses) diverges on the f64 specials lines.
 (rule
- (targets native_arr_sort native_arr_sort.out)
+ (targets native_arr_sort native_arr_sort.out native_arr_sort_heap.out
+          native_arr_sort_interp.out)
  (deps (file %{exe:../bin/main.exe})
        (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/native_arr_sort.march)
        (source_tree ../stdlib))
  (action
   (progn
+   (with-stdout-to native_arr_sort_interp.out
+     (run %{exe:../bin/main.exe} native/native_arr_sort.march))
    (run %{exe:../bin/main.exe} --compile -o native_arr_sort
         native/native_arr_sort.march)
    (with-stdout-to native_arr_sort.out
-        (system "./native_arr_sort")))))
+        (system "./native_arr_sort"))
+   (with-stdout-to native_arr_sort_heap.out
+        (system "MARCH_TEST_NSORT_DEPTH_LIMIT=0 ./native_arr_sort")))))
 
 (rule
  (alias runtest)
  (action (diff native/native_arr_sort.expected native_arr_sort.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort.expected native_arr_sort_heap.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort.expected native_arr_sort_interp.out)))
 
 ; ── fold per-element float box: live-object guard ──────────────────────
 ; The rule above diffs OUTPUT ONLY, and a leak is invisible to an output
@@ -7969,6 +8038,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/bytes_u8_bridge.expected bytes_u8_bridge.out)))
+
+; Regression: compiled Base64.encode / sha256 on a Bytes SIGBUSed once boxed
+; ADT cells began carrying a type id in the header pad word (the runtime's
+; Bytes-vs-String check required pad == 0). .expected is interpreter-produced;
+; both backends must match it.
+(rule
+ (targets bytes_typeid_base64_sha bytes_typeid_base64_sha.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/bytes_typeid_base64_sha.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o bytes_typeid_base64_sha
+        native/bytes_typeid_base64_sha.march)
+   (with-stdout-to bytes_typeid_base64_sha.out
+        (system "./bytes_typeid_base64_sha")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/bytes_typeid_base64_sha.expected bytes_typeid_base64_sha.out)))
+
+(rule
+ (targets interp_bytes_typeid_base64_sha.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/bytes_typeid_base64_sha.march))
+ (action
+  (with-stdout-to interp_bytes_typeid_base64_sha.out
+    (run %{exe:../bin/main.exe} native/bytes_typeid_base64_sha.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/bytes_typeid_base64_sha.expected interp_bytes_typeid_base64_sha.out)))
 
 ; Rounding-parity fuzz for Simd.fma_f32x4: 100k deterministic LCG iterations x
 ; 4 lanes, folded into an integer checksum, half of them drawn from a family
@@ -10009,6 +10112,47 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_properties.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_properties.march)))
 
+(test
+ (name test_hcr_abi)
+ (modules test_hcr_abi)
+ (libraries march_tir alcotest))
+
+(rule
+ (targets hcr_identity_amd64.so hcr_identity_arm64.so)
+ (deps ../runtime/march_hcr_identity.c ../runtime/march_hcr_identity.h)
+ (action
+  (progn
+   (run bash -c
+    "%{cc} -shared -fPIC -I../runtime \
+     -DMARCH_HCR_TRIPLE=x86_64-unknown-linux-gnu \
+     '-DMARCH_HCR_ABI_ID=\"march-hcr-v2;triple=x86_64-unknown-linux-gnu;ptr=8\"' \
+     -DMARCH_HCR_TARGET=\\\"linux/amd64\\\" -DMARCH_HCR_PREFIX=\\\"HcrSmoke\\\" \
+     -o hcr_identity_amd64.so ../runtime/march_hcr_identity.c")
+   (run bash -c
+    "%{cc} -shared -fPIC -I../runtime \
+     -DMARCH_HCR_TRIPLE=aarch64-unknown-linux-gnu \
+     '-DMARCH_HCR_ABI_ID=\"march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8\"' \
+     -DMARCH_HCR_TARGET=\\\"linux/arm64\\\" -DMARCH_HCR_PREFIX=\\\"HcrSmoke\\\" \
+     -o hcr_identity_arm64.so ../runtime/march_hcr_identity.c"))))
+
+(rule
+ (targets test_hcr_identity_runner)
+ (alias runtest)
+ (deps test_hcr_identity.c hcr_identity_amd64.so hcr_identity_arm64.so)
+ (action (run %{cc} -std=c11 -Wall -Wextra -o test_hcr_identity_runner test_hcr_identity.c -ldl)))
+
+(rule
+ (alias runtest)
+ (deps test_hcr_identity_runner hcr_identity_amd64.so hcr_identity_arm64.so)
+ (action (run %{dep:test_hcr_identity_runner} %{dep:hcr_identity_amd64.so} %{dep:hcr_identity_arm64.so})))
+
+; Cross-target HCR smoke (requires the configured Linux sysroots for baseline
+; artifacts; the patch half is sysroot-independent).  Keep this off the
+; default runtest alias because it intentionally exercises external toolchains.
+(rule
+ (alias cross-hcr)
+ (deps ../bin/main.exe cross_hcr_compile.sh native/hcr_smoke.march)
+ (action (run sh %{dep:cross_hcr_compile.sh})))
 ; ── Topology.place over one real ClusterNode (distributed deploys, build ──
 ; ── step 3): placement rules, a ranked role's marker, re-offering after ────
 ; ── an offer dies, and a SIGTERM drain that exits 0 ─────────────────────────
