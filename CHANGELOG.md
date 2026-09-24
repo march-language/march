@@ -397,6 +397,11 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Compiled `Base64.encode` and `sha256` on a `Bytes` no longer crash.** Since
+  boxed constructor cells began carrying a runtime type id (0.4.0), a compiled
+  `Base64.encode(Bytes.from_string("x"))`, `Base64.url_encode`/`mime_encode`, or
+  `sha256(bytes)` died with `fatal SIGBUS` (exit 138): the runtime mistook the
+  `Bytes` value for a `String`. The interpreter was unaffected.
 - **`pid_to_int` and supervise blocks no longer leak the actor record.**
   Compiled, every `pid_to_int(p)` and `Actor.set_queue_limit(p, …)` call kept
   one reference to `p`'s actor record, and every supervise-block child was
