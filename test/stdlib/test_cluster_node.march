@@ -294,6 +294,27 @@ mod TestClusterNode do
       end
     end
 
+    test "a reconnect directly revives a peer declared Dead" do
+      match linked_ab() do
+        (b, st, _) ->
+          let dead_b = Membership.member(b, "b", "127.0.0.1:7001", 1, Dead, 5)
+          match ClusterNode.core_frame(st, b, 13, SwimDriver.encode_member_gossip(dead_b)) do
+            (st1, _) ->
+              match ClusterNode.core_tick(st1, 1100) do
+                (st2, _) ->
+                  match ClusterNode.core_linked(st2, b, "b", "127.0.0.1:7001", 1, 20, 21, b, 98) do
+                    (st3, _) ->
+                      match ClusterNode.core_tick(st3, 1200) do
+                        (st4, effs) ->
+                          assert (status_of(st4, b) == "alive")
+                          assert (List.member(event_texts(effs), "b rejoined"))
+                      end
+                  end
+              end
+          end
+      end
+    end
+
     test "a refused redial is definite: Dead, with that cause" do
       match linked_ab() do
         (b, st, _) ->

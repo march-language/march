@@ -825,6 +825,7 @@ let ensure_runtime_so () =
         Printf.sprintf "%s%s%s%s%s" (opt_file sched_c) (opt_file extras_c)
           (opt_file compress_c) (opt_file base64_c) (opt_file sha1_c))
       ^ (opt_file ffi_c)
+      ^ (opt_file (Filename.concat runtime_dir "march_hcr_identity.c")) (* HCR target identity *)
       ^ (opt_file (Filename.concat runtime_dir "march_dispatch.c"))  (* HCR dispatch table *)
       ^ (opt_file (Filename.concat runtime_dir "march_reload.c"))    (* HCR reload server *)
       ^ (opt_file (Filename.concat runtime_dir "march_blake3.c"))    (* BLAKE3 for server-side cap_root recompute *)

@@ -33,6 +33,7 @@ march_tls.c                  http            -
 march_dispatch.c             hcr             jit
 march_reload.c               hcr             jit
 march_blake3.c               hcr             -
+march_hcr_identity.c         hcr             -
 march_cap_lattice.c          hcr             -
 tweetnacl.c                  core            jit
 march_nacl.c                 core            jit
