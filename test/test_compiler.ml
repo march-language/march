@@ -14795,13 +14795,8 @@ let assert_stdlib_file_typechecks_cleanly name =
 let stdlib_known_internal_errors = [
   (* file, errors -- see specs/todos/2026-09-22-stdlib-internal-type-errors.md *)
   "actor.march", 2;
-  "aho_corasick.march", 11;
   "cluster_node.march", 1;
-  "compress.march", 19;
-  "logger.march", 1;
   "node_call.march", 5;
-  "plot.march", 1;
-  "rrb_vec.march", 19;
   "session_node.march", 3;
 ]
 
@@ -14844,6 +14839,39 @@ let test_stdlib_internal_errors_ratchet () =
       (show_stdlib_errors
          (List.filter (fun (d : March_errors.Errors.diagnostic) ->
               d.severity = March_errors.Errors.Error) (check_stdlib_like_cli ())))
+
+(* What fixing a hidden stdlib error buys a USER, seen from outside the module.
+   rrb_vec.march annotated its Array-backed values as `Array(a)`, a type that
+   does not exist (the Array module's type is `Array.PVec(a)`; March has no
+   type-alias syntax, so `Array(a)` could not be made to mean it). Its bodies
+   failed to check, and its exported signatures carried the phantom type, so
+   a user could neither hand the value of `Array.from_list` to
+   `RRB.from_array` nor receive `RRB.to_array`'s result as an `Array.PVec`:
+   pre-fix the accepting program below fails with "expected `PVec(Int)` but
+   got `Array(Int)`" (measured 2026-09-24). The rejection half pins that the
+   fix did not swap the phantom for an unconstrained type variable. *)
+let test_rrb_to_array_has_a_real_type_for_users () =
+  let run name body =
+    let (project_root, main_exe, src, tmp) =
+      session_write_src ~name
+        ("mod " ^ String.capitalize_ascii name ^ " do\n" ^ body ^ "\nend\n") in
+    let out = Filename.concat tmp "out.txt" in
+    let rc = Sys.command (Printf.sprintf "cd %s && %s --check %s > %s 2>&1"
+                            (Filename.quote project_root) (Filename.quote main_exe)
+                            (Filename.quote src) (Filename.quote out)) in
+    (rc, read_file_contents out)
+  in
+  let (ok_rc, ok_out) = run "march_rrb_pvec_ok"
+      "  fn f() : Array.PVec(Int) do RRB.to_array(RRB.from_list([1, 2, 3])) end\n\
+      \  fn g(xs : Array.PVec(Int)) : Int do RRB.length(RRB.from_array(xs)) end" in
+  Alcotest.(check int)
+    (Printf.sprintf "Array.PVec(Int) annotations around RRB typecheck:\n%s" ok_out)
+    0 ok_rc;
+  let (bad_rc, bad_out) = run "march_rrb_pvec_bad"
+      "  fn f() : String do RRB.to_array(RRB.from_list([1, 2, 3])) end" in
+  Alcotest.(check bool)
+    (Printf.sprintf "RRB.to_array is no longer an unconstrained type variable:\n%s" bad_out)
+    true (bad_rc <> 0 && contains_substring bad_out "PVec")
 
 (* ── Stdlib wrappers over builtins the typechecker did not know ──────────────
 
@@ -17694,6 +17722,7 @@ let compiler_suites =
           Alcotest.test_case "Main.launder (a->b) launders Int -> String: error"  `Quick test_entry_qual_distinct_tvar_launders;
           Alcotest.test_case "T.id from nested App launders Int -> String: error" `Quick test_entry_qual_from_nested_sibling;
           Alcotest.test_case "stdlib internal-type-error ratchet"                  `Quick test_stdlib_internal_errors_ratchet;
+          Alcotest.test_case "RRB.to_array has a real type for users"             `Quick test_rrb_to_array_has_a_real_type_for_users;
           Alcotest.test_case "stdlib builtin wrappers have their real types"       `Quick test_stdlib_builtin_wrappers_have_real_types;
           Alcotest.test_case "prelude.march fold_left: curried, no internal error"    `Quick test_stdlib_prelude_fold_left_curried;
           Alcotest.test_case "iterable.march fold: curried, no internal error"        `Quick test_stdlib_iterable_fold_curried;
