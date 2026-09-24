@@ -119,6 +119,50 @@ let get_analysis uri =
   Hashtbl.find_opt doc_cache (Lsp.Types.DocumentUri.to_string uri)
 
 (* ------------------------------------------------------------------ *)
+(* Topology documents (topology.toml, topology.<env>.toml)             *)
+(* ------------------------------------------------------------------ *)
+
+(* These are TOML, not March: they bypass [analyse_and_cache] entirely and
+   are served by [Topology_doc], which reads them through forge's own
+   parser and checks. Their diagnostics depend on the project's `.march`
+   sources, so a `.march` edit republishes them too. *)
+
+let path_of_uri uri =
+  try Lsp.Types.DocumentUri.to_path uri
+  with _ -> Lsp.Types.DocumentUri.to_string uri
+
+let is_topology_uri uri = Topology_doc.is_topology_path (path_of_uri uri)
+
+(* The URI each open topology document arrived under, so a republish
+   triggered by ANOTHER document addresses it exactly as the client does. *)
+let topology_uris : (string, Lsp.Types.DocumentUri.t) Hashtbl.t = Hashtbl.create 4
+
+let topology_diagnostics_safe path =
+  try Topology_doc.diagnostics_for path
+  with exn ->
+    Printf.eprintf "march-lsp: topology diagnostics for %s failed: %s\n%!"
+      path (Printexc.to_string exn);
+    []
+
+let publish_topology ~notify_back paths =
+  Lwt_list.iter_s (fun p ->
+      let uri =
+        match Hashtbl.find_opt topology_uris p with
+        | Some u -> u
+        | None -> Lsp.Types.DocumentUri.of_path p
+      in
+      notify_back#send_notification
+        (Lsp.Server_notification.PublishDiagnostics
+           (Lsp.Types.PublishDiagnosticsParams.create ~uri
+              ~diagnostics:(topology_diagnostics_safe p) ())))
+    paths
+
+(* Republish every open topology document whose diagnostics depend on the
+   document at [path] (itself included, when it is one). *)
+let publish_topology_dependents ~notify_back path =
+  publish_topology ~notify_back (Topology_doc.dependents_of path)
+
+(* ------------------------------------------------------------------ *)
 (* Workspace symbol index (cross-file)                                 *)
 (* ------------------------------------------------------------------ *)
 

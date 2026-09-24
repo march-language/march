@@ -28,6 +28,8 @@ Live, built from `lsp/` (Zed and other editors point at `_build/default/lsp/bin/
 - **Logging**: `window/logMessage` on document open (first editor-visible observability).
 - **Completion depth**: scope-precise local bindings (`collect_scoped` records a scope span per binder) offered first via `sortText` ranking.
 
+- **Topology files** (distributed-deploys build step 7, 2026-09-24): `topology.toml` and `topology.<env>.toml` are recognised by name and never analysed as March. `lib/topology_doc.ml` links forge's `march_forge` library and uses `Topology.of_strings`/`check`/`index_project_with` directly, so diagnostics are `forge topology check`'s messages on forge's lines; open `.march` buffers replace their files in the index, and an edit to one republishes every open topology document under the project. Definition, completion and hover work on the `body`/`actor`/`start` and `Protocol.Role` strings. Detail: `specs/progress/2026-09-24-dd-step07-topology-lsp.md`.
+
 **Remaining (Phase 5):** a per-def in-file typecheck firewall (AST-level `sig_hash`/`impl_hash` for the user file's own defs; deferred; requires canonical serialization of the full surface AST, and the dominant cost is already removed by caching the stdlib+deps prefix; see the deferred "Increment G" in `specs/plans/archive/2026-06-13-lsp-incremental-engine.md`); module-qualified precision for cross-file references (currently name-based); richer completion (auto-import, qualified `Module.`, postfix). A separate **compiler-side** issue: user `type` declarations are shadowed by same-named stdlib types in the typecheck environment (the type-level analogue of the def_map collision the LSP already fixes), fixable only in the typechecker.
 
 ## Features
@@ -55,6 +57,7 @@ Live, built from `lsp/` (Zed and other editors point at `_build/default/lsp/bin/
 | Performance insights (TCO, closure capture, actor copy; TIR pipeline lenses) | ✅ |
 | Position encoding | ✅ UTF-16 (advertised) |
 | Logging (`window/logMessage`) | ✅ on document open |
+| Topology files (`topology.toml`, `topology.<env>.toml`): forge's diagnostics, definition, completion, hover on the binding and role strings | ✅ `lib/topology_doc.ml`, links `march_forge` |
 | Standalone CLI query mode | ✅ `march-lsp query hover\|definition\|references\|completions\|diagnostics\|format …`, `--stdin` |
 
 ## Architecture
@@ -76,6 +79,7 @@ lsp/
 ├── lib/stdlib_cache.ml  # content-hashed stdlib parse/desugar memo
 ├── lib/typecheck_cache.ml # memoized typed stdlib + deps envs (incremental check)
 ├── lib/forge_config.ml  # project root + import path discovery
+├── lib/topology_doc.ml  # topology.toml / overlays: forge's parse + checks, cursor context, def/completion/hover
 ├── docs/editors.md      # editor setup guides + CLI reference
 └── test/                # alcotest suites (test_lsp, test_utf16, test_query_cli, test_incremental, test_jsonrpc)
 ```
