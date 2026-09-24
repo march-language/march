@@ -54,6 +54,24 @@ git log is authoritative for exact commits.
   `forge cluster revoke`; `MARCH_CLUSTER_REVOCATIONS` seeds the list at
   startup; nodes pass revocations on to each other, and only the operator's
   signature makes one count. `ClusterNode.revocations(c)` lists them.
+- **Hot reload: per-role capability closures, restart durability and signed
+  topology pushes** (build step 10, first half, of the distributed-deploys plan).
+  The `--compile-so` manifest gains a `ROLE <Proto.Role> caps=...` line per role
+  with a grant: the role's full capability closure (everything its code reaches)
+  with each capability's reach chain. `forge deploy hot` stops a deploy that
+  widens a role's closure unless `--grant-cap` covers it, naming the role and the
+  chain, and sends such builds with the new `ACTIVATE6` message, which signs one
+  digest per role; the server recomputes each from the closures it receives
+  (`ERR role_cap_tamper`) and checks every closure against `MARCH_DEPLOY_POLICY`
+  (`ERR role_cap_policy <role> <cap>`), so a patch that only calls an existing,
+  more powerful helper no longer slips past the node's policy. The reload server
+  now persists its applied patch stack on the host (under the CAS root) and
+  replays it at start, before `main` runs, re-verifying every signature; a bad
+  entry is skipped with an audit line, a different base build or
+  `MARCH_HCR_NO_REPLAY=1` starts clean, and `VERSIONS_DETAIL` reports a
+  `RESTORED` line. New signed `TOPOLOGY` verb (`Cmd_deploy_hot.push_topology`)
+  persists the pushed topology and hands it to a runtime hook; new `COMPACT` verb
+  reports the patch stack's size, which `forge hot-reload status` prints.
 - **Refinement predicates: `/` and `%` in general.** A predicate may now divide
   a possibly-negative value, or divide by a variable: `{Int | _ / 2 == -3}` and
   `{Int | d != 0 && _ / d > 0}` are checked instead of skipped. The checker uses

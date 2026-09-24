@@ -317,6 +317,14 @@ val cap_strict_ceiling : bool ref
     actors behind them, each with its capabilities).  A report, not a check;
     set by the driver. *)
 val dump_role_authority : bool ref
+
+(** Per-role FULL capability closures for the hot-deploy manifest's
+    [ROLE <Proto.Role> caps=...] lines (distributed-deploys build step 10):
+    [(proto.role, normalized sorted IO caps, per-cap reach chain)], one entry
+    per role with a grant, from the same [Cap_rows.solve] over the role roots
+    that [check_role_grants] runs.  Sorted by role. *)
+val role_capability_closures :
+  env -> (string * string list * (string * string list) list) list
 val builtin_cap_table : (string * string) list
 val locally_declared_names_of : Ast.decl list -> (string, unit) Hashtbl.t
 val builtin_interface_bindings : (string * scheme) list
