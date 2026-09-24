@@ -771,14 +771,10 @@ mod SessionNode do
     end
     -- Hot reload (DD step 6, plan II.4.4, D28): this actor runs the party's
     -- session callbacks, so it holds the session's epoch -- the code version
-    -- the session formed under -- until `finish`.  Sent by `party` and
-    -- `finish`; handled in this actor's own turn, where the hold belongs.
+    -- the session formed under -- from its spawn (`party`) until `finish`
+    -- sends this.  Handled in this actor's own turn, where the hold is.
     -- Appended after every other handler: `Actor.call` addresses the first
     -- two by position (see the note above the actor).
-    on HoldEpoch() do
-      epoch_hold()
-      state
-    end
     on ReleaseEpoch() do
       epoch_release()
       state
@@ -968,10 +964,13 @@ mod SessionNode do
   [on_close] runs when a local endpoint closes, with its endpoint id.
   """
   fn party(my_role : Int, node_id : String, on_close : Int -> Unit) : Party do
+    -- The Endpoint inherits this proc's code epoch at spawn and holds it
+    -- from the spawn itself until `finish` (hot reload's nesting rule, D28).
+    -- The hold is part of the spawn, not a first message: a message would
+    -- queue behind the epoch marker a spawn from an old-epoch unit gets, and
+    -- the Endpoint would advance before holding.
+    epoch_hold_next_spawn()
     let ep = spawn(Endpoint)
-    -- The Endpoint inherits this proc's code epoch at spawn, and holds it
-    -- until `finish` (hot reload's nesting rule, D28).
-    let _ = send(ep, HoldEpoch())
     let tag = node_id ++ "." ++ int_to_string(my_role) ++ "." ++ int_to_string(pid_to_int(ep))
     { my_role: my_role, node_id: node_id,
       handlers: Vault.new("session_node_handlers_" ++ tag),
@@ -2260,14 +2259,14 @@ mod SessionNode do
           Err(missing) ->
             ClusterNode.unroute(node, route_key)
             ClusterNode.unregister(node, me)
-            if missing == 0 do Err(RunError.Connect(0, "session " ++ session ++ ": withdrawn by its initiator"))
+                if missing == 0 do Err(RunError.Connect(0, "session " ++ session ++ ": withdrawn by its initiator"))
             else Err(RunError.Connect(missing, "session " ++ session ++ ": no endpoint registered for role " ++ int_to_string(missing))) end
           Ok(found) ->
             match cluster_links(node, found, 30000) do
               Err(missing) ->
                 ClusterNode.unroute(node, route_key)
                 ClusterNode.unregister(node, me)
-                Err(RunError.Connect(missing, "session " ++ session ++ ": no link to role " ++ int_to_string(missing) ++ "'s node"))
+                        Err(RunError.Connect(missing, "session " ++ session ++ ": no link to role " ++ int_to_string(missing) ++ "'s node"))
               Ok(links) ->
                 let p = List.fold_left(links, p0, fn (acc, l) -> with_link(acc, l))
                 Vault.set(slot, "p", p)

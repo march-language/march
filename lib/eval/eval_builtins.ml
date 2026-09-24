@@ -306,6 +306,9 @@ let base_env : env =
   ; ("epoch_draining", VBuiltin ("epoch_draining", function
         | [] | [VUnit] -> VBool false
         | _ -> eval_error "epoch_draining: expected unit"))
+  ; ("epoch_hold_next_spawn", VBuiltin ("epoch_hold_next_spawn", function
+        | [] | [VUnit] -> VUnit
+        | _ -> eval_error "epoch_hold_next_spawn: expected unit"))
   ; ("epoch_drain", VBuiltin ("epoch_drain", function
         | [ VInt _; VInt _ ] -> VUnit
         | _ -> eval_error "epoch_drain: expected (Int, Int)"))

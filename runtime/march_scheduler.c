@@ -1557,6 +1557,11 @@ __attribute__((weak)) uint32_t march_epoch_current(void) { return 1; }
 __attribute__((weak)) int      march_epoch_pin(uint32_t e) { (void)e; return 0; }
 __attribute__((weak)) void     march_epoch_unpin(uint32_t e) { (void)e; }
 
+void march_sched_hold_next_spawn(void) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    if (p) atomic_store_explicit(&p->hold_next_spawn, 1, memory_order_relaxed);
+}
+
 uint32_t march_sched_current_epoch(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     return p ? atomic_load_explicit(&p->code_epoch, memory_order_relaxed) : 0;
@@ -1666,6 +1671,15 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
      * supervisor restart), 0 = inherit (everything else). */
     atomic_init(&p->code_epoch,
                 follow_current == 1 ? 0u : spawn_code_epoch(follow_current == 0));
+    /* A spawn the spawner asked to start held (march_sched_hold_next_spawn):
+     * the hold is on the child before it can run, so its spawn marker, if
+     * any, is deferred like any other. */
+    {
+        march_proc *parent = tl_sched ? tl_sched->current : NULL;
+        if (parent && atomic_exchange_explicit(&parent->hold_next_spawn, 0,
+                                               memory_order_relaxed))
+            atomic_store_explicit(&p->epoch_holds, 1, memory_order_relaxed);
+    }
 
     registry_add(p);
     atomic_fetch_add_explicit(&g_live_procs, 1, memory_order_relaxed);

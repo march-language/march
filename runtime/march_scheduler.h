@@ -272,6 +272,12 @@ typedef struct march_proc {
      * code that keeps work of an older epoch alive (a session party, a parked
      * hosted endpoint); only the proc itself changes it, drains read it. */
     _Atomic(uint32_t)           epoch_holds;
+    /* Set by march_sched_hold_next_spawn: the next proc THIS proc spawns
+     * starts with epoch_holds = 1, before its activation, so an epoch
+     * marker queued at its spawn (hcr_spawn_marker) finds it held.  A hold
+     * sent as a message arrived behind that marker (review finding
+     * 2026-09-24-dd-review-party-hold-queued-behind-spawn-marker). */
+    _Atomic int                 hold_next_spawn;
     int64_t                    mbox_limit;   /* 0 = unbounded (default). Plain field: only
                                                  read/written under mbox_lock (set by
                                                  march_sched_set_mbox_limit, read by
@@ -615,6 +621,9 @@ march_proc  *march_sched_current(void);
 /* The running proc's code epoch (0 when there is no proc, or it is unpinned).
  * What march_dispatch_enter_unit resolves against. */
 uint32_t     march_sched_current_epoch(void);
+/* The next proc the running proc spawns starts held (epoch_holds = 1); see
+ * march_proc.hold_next_spawn.  The stdlib-only builtin epoch_hold_next_spawn. */
+void         march_sched_hold_next_spawn(void);
 /* Spawn the compiled `main` green thread: like march_sched_spawn[_pinned]
  * (sched_pinned selects scheduler 0), but UNPINNED in the epoch sense
  * (code_epoch 0, follows current), see march_proc.code_epoch. */
