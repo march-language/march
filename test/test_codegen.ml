@@ -13302,6 +13302,8 @@ declare void @march_test_setup_all(ptr %fn)
 declare i32  @march_test_report()
 declare void @march_println(ptr %s)
 declare void @march_print_stderr(ptr %s)
+declare void @march_print_int(i64 %n)
+declare void @march_print_float(double %f)
 declare ptr  @march_io_read_line()
 declare i64  @march_io_read_byte()
 declare ptr  @march_string_lit(ptr %s, i64 %len)
@@ -13370,6 +13372,11 @@ declare i64    @march_char_to_int(ptr %c)
 declare i64    @march_char_is_digit(ptr %c)
 declare i64    @march_char_is_alphanumeric(ptr %c)
 declare i64    @march_char_is_whitespace(ptr %c)
+declare i64    @march_char_is_alpha(ptr %c)
+declare i64    @march_char_is_uppercase(ptr %c)
+declare i64    @march_char_is_lowercase(ptr %c)
+declare ptr    @march_char_to_uppercase(ptr %c)
+declare ptr    @march_char_to_lowercase(ptr %c)
 ; Float/Int conversion builtins
 declare i64    @march_float_to_int(double %f)
 ; Math builtins
@@ -14987,6 +14994,90 @@ let test_compiled_worker_local_fn_still_compiles () =
     ~expected:"42"
     ()
 
+(** Compile [body] (the inside of `main`) and return the compiler's output,
+    failing the test if it compiled and linked (None when the toolchain is
+    unavailable).  The module declares a `Worker` actor and grants main all
+    of IO, so a body may spawn. *)
+let compile_expect_rejected ~(tag : string) ~(body : string) : string option =
+  let main_exe = find_main_exe () in
+  let project_root = march_project_root () in
+  let tmp = Filename.temp_file ("march_" ^ tag) "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp (tag ^ ".march") in
+  let oc = open_out src in
+  output_string oc
+    ("mod Rejected do\n\
+     \  needs IO\n\
+     \  actor Worker do\n\
+     \    state { x : Int }\n\
+     \    init { x: 0 }\n\
+     \    on Compute() do { x: 42 } end\n\
+     \  end\n\
+     \  fn main(_c : Cap(IO)) do\n" ^ body ^ "\n\
+     \    println(\"unreachable compiled\")\n\
+     \  end\n\
+      end\n");
+  close_out oc;
+  let bin = Filename.concat tmp (tag ^ "_bin") in
+  match compile_march_raw ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | `Ok _ -> Alcotest.failf "%s: the compiled call must be rejected, not linked" tag
+  | `Skipped -> None
+  | `Failed (rc, output, _) ->
+    Alcotest.(check bool) (tag ^ ": non-zero exit") true (rc <> 0);
+    Alcotest.(check bool) (tag ^ ": no link-time symbol error") false
+      (ir_contains output "Undefined symbols");
+    Some output
+
+(** The dynamic-supervisor queries, App.stop and task_spawn_link act on state
+    only the interpreter has.  Each used to reach the linker as
+    `Undefined symbols: _<name>`; each is now a positioned lowering error
+    carrying its own reason. specs/progress/2026-09-24-interpreter-only-builtins.md *)
+let test_compiled_interpreter_only_builtins_rejected () =
+  List.iter (fun (name, call, reason_fragment) ->
+      let tag = "iob_" ^ String.map (fun c -> if c = '.' then '_' else c) name in
+      match compile_expect_rejected ~tag ~body:("    let _r = " ^ call) with
+      | None -> ()
+      | Some output ->
+        Alcotest.(check bool) (name ^ ": diagnostic names the builtin") true
+          (ir_contains output ("`" ^ name ^ "`"));
+        Alcotest.(check bool) (name ^ ": diagnostic gives its reason") true
+          (ir_contains output reason_fragment);
+        Alcotest.(check bool) (name ^ ": diagnostic carries the March span") true
+          (ir_contains output (tag ^ ".march:")))
+    [ ("Supervisor.stop_child", "Supervisor.stop_child(:pool, 3)",
+       "dynamic supervisor");
+      ("Supervisor.which_children", "Supervisor.which_children(:pool)",
+       "dynamic supervisor");
+      ("Supervisor.count_children", "Supervisor.count_children(:pool)",
+       "dynamic supervisor");
+      ("App.stop", "App.stop()", "`app` declaration");
+      ("task_spawn_link", "task_spawn_link(fn _ -> 1, spawn(Worker))",
+       "no task/actor link") ]
+
+(** `tap(x)` compiles to `x`; only a first-class `tap` has no compiled
+    symbol, and it is a positioned error rather than `_tap` at link time. *)
+let test_compiled_first_class_tap_rejected () =
+  match compile_expect_rejected ~tag:"tap_value"
+          ~body:"    let _r = List.map([1, 2], tap)" with
+  | None -> ()
+  | Some output ->
+    Alcotest.(check bool) "names tap and the fix" true
+      (ir_contains output "`tap` can only be called directly");
+    Alcotest.(check bool) "carries the March span" true
+      (ir_contains output "tap_value.march:")
+
+(** `to_json` on a type with no JsonTo impl, in a program where NOTHING
+    derives Json: the missing-impl check only ran when some impl existed, so
+    this reached the linker as `Undefined symbols: _to_json`. *)
+let test_compiled_to_json_without_codec_rejected () =
+  match compile_expect_rejected ~tag:"to_json_nocodec"
+          ~body:"    let _r = to_json(3)" with
+  | None -> ()
+  | Some output ->
+    Alcotest.(check bool) "names the missing JsonTo impl and the type" true
+      (ir_contains output "no `JsonTo` implementation for type `Int`")
+
 (* A bare user fn named after a C symbol the runtime links against must not
    be emitted under that symbol: `fn connect` as `@connect` IS the connect()
    the runtime's tcp_connect calls (llvm_builtins.ml, c_reserved_symbols). *)
@@ -15975,6 +16066,12 @@ let codegen_suites =
             test_compiled_interpreter_only_supervisor_dsl_rejected;
           Alcotest.test_case "a user fn named worker still compiles" `Quick
             test_compiled_worker_local_fn_still_compiles;
+          Alcotest.test_case "supervisor queries / App.stop / task_spawn_link rejected with a span" `Quick
+            test_compiled_interpreter_only_builtins_rejected;
+          Alcotest.test_case "first-class tap rejected with a span" `Quick
+            test_compiled_first_class_tap_rejected;
+          Alcotest.test_case "to_json with no codec anywhere is a diagnostic, not a link error" `Quick
+            test_compiled_to_json_without_codec_rejected;
         ] );
       ( "js_pipeline", [
           Alcotest.test_case "simple program compiles"      `Quick test_js_pipeline_simple_program_compiles;
