@@ -905,8 +905,12 @@
 ; The stub patch the reload test's epoch-model case uploads and activates.
 (rule
  (targets hcr_stub.so)
- (deps    hcr_stub_so.c)
- (action  (run %{cc} -shared -fPIC -o %{targets} hcr_stub_so.c)))
+ (deps    hcr_stub_so.c ../runtime/march_hcr_identity.c ../runtime/march_hcr_identity.h)
+ (action  (run bash -c
+            "%{cc} -shared -fPIC \
+             -DMARCH_HCR_TRIPLE=arm64-apple-macosx26.0.0 \
+             -DMARCH_HCR_TARGET=\\\"native\\\" -DMARCH_HCR_PREFIX=\\\"Test\\\" \
+             -o hcr_stub.so hcr_stub_so.c ../runtime/march_hcr_identity.c")))
 
 (rule
  (alias runtest)
