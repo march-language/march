@@ -1064,7 +1064,19 @@ protocol_step:
   | label = lower_name; COLON; sender = upper_name; ARROW; receiver = upper_name; COLON; t = ty
     { ProtoMsg (sender, receiver, t, Some label) }
   | LOOP; DO; steps = list(protocol_step); END
-    { ProtoLoop steps }
+    { ProtoLoop (steps, false) }
+  (* `loop atomic do ... end` (D27): a loop whose iterations must not be cut
+     between them, so its head is not a drain point.  `atomic` is a
+     contextual identifier here, like `stop` below: not a keyword. *)
+  | LOOP; kw = lower_name; DO; steps = list(protocol_step); END
+    { if kw.txt = "atomic" then ProtoLoop (steps, true)
+      else
+        error_raise
+          (Printf.sprintf
+             "I don't recognize `loop %s` here — the only loop modifier is `atomic` \
+              (`loop atomic do ... end`, a loop whose head is not a drain point)."
+             kw.txt)
+          None $startpos(kw) }
   | CHOOSE; BY; chooser = upper_name; COLON; option(arm_sep); branches = separated_nonempty_list(arm_sep, choose_branch); END
     { ProtoChoice (chooser, branches) }
   | id = lower_name

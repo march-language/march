@@ -302,6 +302,13 @@ let base_env : env =
   ; ("epoch_release", VBuiltin ("epoch_release", function
         | [] | [VUnit] -> VUnit
         | _ -> eval_error "epoch_release: expected unit"))
+  (* D27: no epochs, so nothing is ever draining. *)
+  ; ("epoch_draining", VBuiltin ("epoch_draining", function
+        | [] | [VUnit] -> VBool false
+        | _ -> eval_error "epoch_draining: expected unit"))
+  ; ("epoch_drain", VBuiltin ("epoch_drain", function
+        | [ VInt _; VInt _ ] -> VUnit
+        | _ -> eval_error "epoch_drain: expected (Int, Int)"))
   ; ("actor_registered", VBuiltin ("actor_registered", function
         | [] ->
           Hashtbl.fold (fun name _pid acc -> VString name :: acc) named_registry []

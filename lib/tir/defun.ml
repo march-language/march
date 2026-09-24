@@ -98,7 +98,7 @@ let builtin_names : StringSet.t =
       "run_until_idle"; "register_resource"; "get_cap";
       (* Named registry (Task 4) *)
       "actor_register"; "actor_unregister"; "actor_whereis"; "actor_registered";
-      "epoch_hold"; "epoch_release";
+      "epoch_hold"; "epoch_release"; "epoch_draining"; "epoch_drain";
       "send_checked"; "revoke_cap"; "is_cap_valid";
       "pid_of_int"; "pid_to_int"; "get_actor_field";
       (* Comparison builtins used by derived Ord instances *)

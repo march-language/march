@@ -1062,7 +1062,19 @@ mod SessionNode do
       on_crash: fn (ep, role, h) -> do
         Vault.set(party.crash_hs, crash_key(ep, role), h)
         ep
-      end
+      end,
+      suspend_at_boundary: fn (ep, from, handler) -> do
+        Vault.set(waiting, ekey(ep), from)
+        Vault.set(handlers, ekey(ep), handler)
+        match Vault.get(forward, "f") do
+          None -> ()
+          Some(_) ->
+            let _ = send(ep_actor, Drain(party, ep))
+            ()
+        end
+        ep
+      end,
+      on_drain: fn (ep, _h) -> ep
     }
   end
 

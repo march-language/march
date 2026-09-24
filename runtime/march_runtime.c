@@ -3695,6 +3695,15 @@ void march_hcr_drain(uint32_t upto, int64_t soft_ms, int64_t hard_ms) {
     }
 }
 
+/* The stdlib-only builtin epoch_drain(soft_ms, hard_ms): drain every code
+ * epoch this process runs (DRAIN epoch:<current>), for SIGTERM on a node
+ * (Topology.drain) and SessionNode.drain_epochs.  Sessions then end at their
+ * next loop boundary (D27) and actors take the epoch drain's deadlines.
+ * hard_ms <= 0 arms no hard deadline. */
+void march_epoch_drain(int64_t soft_ms, int64_t hard_ms) {
+    march_hcr_drain(march_epoch_current(), soft_ms, hard_ms);
+}
+
 /* ── Holds (D28, II.4.4) ─────────────────────────────────────────────────── */
 
 void march_epoch_hold(void) {
@@ -3716,6 +3725,17 @@ void march_epoch_release(void) {
 uint32_t march_epoch_holds(void) {
     march_proc *p = march_sched_current();
     return p ? atomic_load_explicit(&p->epoch_holds, memory_order_relaxed) : 0;
+}
+
+/* D27: is the running proc's code epoch draining?  The stdlib-only builtin
+ * epoch_draining(): SessionNode asks it in its Endpoint actor's turn, and the
+ * Endpoint holds the epoch its session formed in (march_epoch_hold), so this
+ * is the PARTY's epoch.  An unpinned proc (the compiled main, epoch 0) is
+ * never draining. */
+int64_t march_epoch_draining(void) {
+    march_proc *p = march_sched_current();
+    uint32_t e = p ? atomic_load_explicit(&p->code_epoch, memory_order_relaxed) : 0;
+    return march_hcr_epoch_draining(e) ? 1 : 0;
 }
 
 /* ── Advancing ───────────────────────────────────────────────────────────── */

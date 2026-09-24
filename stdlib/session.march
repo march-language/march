@@ -48,6 +48,18 @@ mod Session do
   -- cancelled (a generated `recv_<Msg>` with a crash branch installs it;
   -- specs/2026-09-19-choreography-access-points-and-crash-branches-design.md
   -- Part B). A transport where nothing fails may ignore it.
+  -- `suspend_at_boundary(ep, from, handler)`: `suspend`, at a DRAIN POINT --
+  -- the head of a loop that is not `loop atomic` (D27, plan 6.2). A
+  -- transport whose code epoch is draining may end the session there instead
+  -- of resuming: the delivery goes back to its sender undelivered and the
+  -- endpoint's drain handler runs. A transport that never drains treats it
+  -- as `suspend`. `on_drain(ep, h)`: install `h` as the drain handler for the
+  -- continuation `suspend`/`suspend_at_boundary` installs next on `ep`;
+  -- returns `ep`. The transport calls `h(role, undelivered, ep)` if the
+  -- session drains while that continuation waits: `role` is the drained role
+  -- it was waiting on (0: this endpoint's own boundary), `undelivered` the
+  -- messages this endpoint sent that came back. No handler: the endpoint just
+  -- finishes. Both: specs/progress/2026-09-24-dd-d27-session-drains.md.
   type Ops = {
     register  : Int -> Int -> Int,
     emit      : Int -> Int -> Bytes -> Int,
@@ -56,8 +68,16 @@ mod Session do
     fail      : Int -> String -> (),
     on_cancel : Int -> (Int -> String -> Int -> Int) -> Int,
     leave     : Int -> String -> (),
-    on_crash  : Int -> Int -> (Int -> String -> Int -> Int) -> Int
+    on_crash  : Int -> Int -> (Int -> String -> Int -> Int) -> Int,
+    suspend_at_boundary : Int -> Int -> (Int -> Bytes -> Int -> Int) -> Int,
+    on_drain  : Int -> (Int -> List(Bytes) -> Int -> Int) -> Int
   }
+
+  -- How a session that did not fail ended: every role reached the protocol's
+  -- end (`Finished`), or it was ended at a loop boundary by a drain
+  -- (`Drained(n)`, D27), [n] being how many of this role's own messages came
+  -- back undelivered. A clean end either way: what `run_<Role>` returns in `Ok`.
+  type Outcome = Finished | Drained(Int)
 
   proof cap Live with Ops
 
@@ -97,6 +117,37 @@ mod Session do
   fn suspend(c : Cap(Session.Live), ep : Int, from : Int, handler : Int -> Bytes -> Int -> Int) : Int do
     match cap_dict(c) do
       Some(d) -> d.suspend(ep, from, handler)
+      None    -> no_transport()
+    end
+  end
+
+  doc """
+  `suspend` at a drain point: the receive at the head of a loop that is not
+  `loop atomic` (D27). The generated receive of a loop-head state calls this
+  instead of `suspend`; a transport whose code epoch is draining may then end
+  the session here (the delivery returns to its sender undelivered and the
+  endpoint's drain handler runs). A transport that never drains treats it as
+  `suspend`.
+  """
+  fn suspend_at_boundary(c : Cap(Session.Live), ep : Int, from : Int, handler : Int -> Bytes -> Int -> Int) : Int do
+    match cap_dict(c) do
+      Some(d) -> d.suspend_at_boundary(ep, from, handler)
+      None    -> no_transport()
+    end
+  end
+
+  doc """
+  Install `handler` as the drain handler for the continuation that the next
+  `suspend` (or `suspend_at_boundary`) on `ep` installs, and return `ep`. It
+  runs as `handler(role, undelivered, ep)` if the session drains while that
+  continuation waits: `role` is the drained role it waited on, or 0 when this
+  endpoint's own loop boundary drained, and `undelivered` the messages this
+  endpoint sent that came back. The generated `recv_…_or_drain` and
+  `offer_…_or_drain` call this.
+  """
+  fn on_drain(c : Cap(Session.Live), ep : Int, handler : Int -> List(Bytes) -> Int -> Int) : Int do
+    match cap_dict(c) do
+      Some(d) -> d.on_drain(ep, handler)
       None    -> no_transport()
     end
   end
@@ -256,6 +307,7 @@ mod Session do
     waiting   : Vault(Int),
     cancel_hs : Vault(Int -> String -> Int -> Int),
     crash_hs  : Vault(Int -> String -> Int -> Int),
+    drain_hs  : Vault(Int -> List(Bytes) -> Int -> Int),
     gone      : Vault(String),
     meta      : Vault(Int),
     roles     : Vault(List(Int)),
@@ -480,6 +532,15 @@ mod Session do
       on_crash: fn (ep, role, h) -> do
         Vault.set(st.crash_hs, ip_crash_key(ep, role), h)
         ep
+      end,
+      suspend_at_boundary: fn (ep, from, handler) -> do
+        Vault.set(st.waiting, ip_key(ep), from)
+        Vault.set(st.handlers, ip_key(ep), handler)
+        ep
+      end,
+      on_drain: fn (ep, h) -> do
+        Vault.set(st.drain_hs, ip_key(ep), h)
+        ep
       end
     }
   end
@@ -538,6 +599,7 @@ mod Session do
       waiting: Vault.new("session_in_process_waiting_" ++ tag),
       cancel_hs: Vault.new("session_in_process_cancel_" ++ tag),
       crash_hs: Vault.new("session_in_process_crash_" ++ tag),
+      drain_hs: Vault.new("session_in_process_drain_" ++ tag),
       gone: Vault.new("session_in_process_gone_" ++ tag),
       meta: Vault.new("session_in_process_meta_" ++ tag),
       roles: Vault.new("session_in_process_roles_" ++ tag),

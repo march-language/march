@@ -5183,7 +5183,7 @@ let check_role_needs env ~proto (pdef : Ast.protocol_def) : unit =
     List.concat_map
       (function
         | Ast.ProtoMsg (s, r, _, _) -> [ s.Ast.txt; r.Ast.txt ]
-        | Ast.ProtoLoop inner -> roles_in inner
+        | Ast.ProtoLoop (inner, _) -> roles_in inner
         | Ast.ProtoChoice (c, brs) -> c.Ast.txt :: List.concat_map (fun (_, arm) -> roles_in arm) brs
         | Ast.ProtoStop _ | Ast.ProtoMayCrash _ | Ast.ProtoRoleNeeds _ -> []
         | Ast.ProtoCrashOr (inner, crash, _) -> roles_in (inner :: crash))
@@ -5195,7 +5195,7 @@ let check_role_needs env ~proto (pdef : Ast.protocol_def) : unit =
     | Ast.ProtoRoleNeeds (_, _, sp) :: rest ->
       err ~span:sp "`role ... needs` must be a top-level step of the protocol, before its first message.";
       nested rest
-    | Ast.ProtoLoop inner :: rest -> nested inner; nested rest
+    | Ast.ProtoLoop (inner, _) :: rest -> nested inner; nested rest
     | Ast.ProtoChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> nested arm) brs; nested rest
     | Ast.ProtoCrashOr (_, crash, _) :: rest -> nested crash; nested rest
     | _ :: rest -> nested rest
@@ -5239,7 +5239,7 @@ let check_role_needs env ~proto (pdef : Ast.protocol_def) : unit =
           (List.map (fun (c : Ast.name) -> c.txt) caps, sp);
       top ~after_message rest
     | Ast.ProtoMayCrash _ :: rest -> top ~after_message rest
-    | Ast.ProtoLoop inner :: rest -> nested inner; top ~after_message:true rest
+    | Ast.ProtoLoop (inner, _) :: rest -> nested inner; top ~after_message:true rest
     | Ast.ProtoChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> nested arm) brs; top ~after_message:true rest
     | Ast.ProtoCrashOr (_, crash, _) :: rest -> nested crash; top ~after_message:true rest
     | (Ast.ProtoMsg _ | Ast.ProtoStop _) :: rest -> top ~after_message:true rest
@@ -5252,7 +5252,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
     List.concat_map
       (function
         | Ast.ProtoMsg (s, r, _, _) -> [ s.Ast.txt; r.Ast.txt ]
-        | Ast.ProtoLoop inner -> roles_in inner
+        | Ast.ProtoLoop (inner, _) -> roles_in inner
         | Ast.ProtoChoice (c, brs) -> c.Ast.txt :: List.concat_map (fun (_, arm) -> roles_in arm) brs
         | Ast.ProtoStop _ | Ast.ProtoMayCrash _ | Ast.ProtoRoleNeeds _ -> []
         | Ast.ProtoCrashOr (inner, crash, _) -> roles_in (inner :: crash))
@@ -5281,14 +5281,14 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
     | Ast.ProtoMayCrash (_, msp) :: rest ->
       err ~span:msp "`may crash` must be a top-level step of the protocol, before the steps it applies to.";
       nested_may_crash rest
-    | Ast.ProtoLoop inner :: rest -> nested_may_crash inner; nested_may_crash rest
+    | Ast.ProtoLoop (inner, _) :: rest -> nested_may_crash inner; nested_may_crash rest
     | Ast.ProtoChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> nested_may_crash arm) brs; nested_may_crash rest
     | Ast.ProtoCrashOr (_, crash, _) :: rest -> nested_may_crash crash; nested_may_crash rest
     | _ :: rest -> nested_may_crash rest
   in
   let rec top_only = function
     | [] -> ()
-    | Ast.ProtoLoop inner :: rest -> nested_may_crash inner; top_only rest
+    | Ast.ProtoLoop (inner, _) :: rest -> nested_may_crash inner; top_only rest
     | Ast.ProtoChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> nested_may_crash arm) brs; top_only rest
     | Ast.ProtoCrashOr (_, crash, _) :: rest -> nested_may_crash crash; top_only rest
     | _ :: rest -> top_only rest
@@ -5306,7 +5306,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
       else if r.Ast.txt = p then Some (`Recv s.Ast.txt, None)
       else first_interaction p rest
     | Ast.ProtoCrashOr (inner, _, _) :: rest -> first_interaction p (inner :: rest)
-    | Ast.ProtoLoop inner :: rest ->
+    | Ast.ProtoLoop (inner, _) :: rest ->
       (match first_interaction p inner with Some x -> Some x | None -> first_interaction p rest)
     | Ast.ProtoStop _ :: _ -> None
     | Ast.ProtoMayCrash _ :: rest | Ast.ProtoRoleNeeds _ :: rest -> first_interaction p rest
@@ -5368,7 +5368,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
     | [] -> ()
     | Ast.ProtoMayCrash _ :: rest | Ast.ProtoRoleNeeds _ :: rest -> walk ~tail ~dead rest
     | Ast.ProtoStop _ :: rest -> walk ~tail ~dead rest
-    | Ast.ProtoLoop inner :: rest -> walk ~tail:inner ~dead inner; walk ~tail ~dead rest
+    | Ast.ProtoLoop (inner, _) :: rest -> walk ~tail:inner ~dead inner; walk ~tail ~dead rest
     | Ast.ProtoMsg (s, r, _, _) :: rest ->
       List.iter
         (fun (x : Ast.name) ->
@@ -6113,7 +6113,7 @@ let rec check_decl env (d : Ast.decl) : env =
                name.txt sender.txt);
         let tvars = ref [] in
         ignore (surface_ty env ~tvars msg_ty)
-      | Ast.ProtoLoop steps ->
+      | Ast.ProtoLoop (steps, _) ->
         if steps = [] then
           Err.error env.errors ~span:sp
             (Printf.sprintf "Protocol `%s`: a `loop` block must contain at least one step."
@@ -6151,7 +6151,7 @@ let rec check_decl env (d : Ast.decl) : env =
        branch with `rest = []` and no tail missed exactly that case. *)
     let rec check_unreachable_after_loop ~tail steps =
       match steps with
-      | Ast.ProtoLoop inner :: rest ->
+      | Ast.ProtoLoop (inner, _) :: rest ->
         check_unreachable_after_loop ~tail:[] inner;
         if rest <> [] then
           Err.error env.errors ~span:sp

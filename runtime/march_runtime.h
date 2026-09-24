@@ -664,6 +664,11 @@ int  march_hcr_epoch_draining(uint32_t epoch);
 void     march_epoch_hold(void);
 void     march_epoch_release(void);
 uint32_t march_epoch_holds(void);
+/* D27: 1 iff the running proc's code epoch is draining (stdlib-only builtin
+ * epoch_draining(), read by SessionNode at a loop-boundary delivery). */
+int64_t  march_epoch_draining(void);
+/* Drain every epoch up to the current one (stdlib-only epoch_drain). */
+void     march_epoch_drain(int64_t soft_ms, int64_t hard_ms);
 
 /* Process-wide counters, reported by the reload server's PINS verb. */
 typedef struct {
