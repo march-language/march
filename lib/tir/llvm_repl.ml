@@ -95,9 +95,59 @@ let emit_prev_slot_bridges ctx (prev_slots : repl_slot_info list) =
     Hashtbl.replace ctx.Llvm_ctx.var_slot si.rs_bare si.rs_bare
   ) prev_slots
 
+(** Is a value of [ty] held in a slot as a heap reference (vs. raw scalar
+    bits)?  Slots store Int/Bool/Unit untagged and Float as its raw IEEE-754
+    bits (see [emit_prev_slot_bridges]); everything else is a pointer. *)
+let slot_holds_heap_ref (ty : Tir.ty) =
+  match ty with
+  | Tir.TInt | Tir.TBool | Tir.TUnit | Tir.TFloat -> false
+  | _ -> true
+
 (** Emit a store of [result] (LLVM value of type [llty]) into slot [slot_idx]
-    via @march_repl_set.  Converts non-i64 values to i64 bits first. *)
-let emit_store_to_slot ctx (slot_idx : int) (result : string) (tir_ty : Tir.ty) =
+    via @march_repl_set.  Converts non-i64 values to i64 bits first.
+
+    Releasing the slot's OLD value.  A slot is genuinely OVERWRITTEN, not
+    merely first-written, for the "v" magic slot (the last-expression-value
+    binding, reused across every subsequent REPL expression per repl_jit.ml's
+    alloc_slot logic) — each new expression's result replaces whatever "v"
+    held before, and an old heap value needs releasing or it is retained
+    forever with no name left pointing at it.  march_repl_get/@march_repl_set
+    themselves stay untyped and RC-blind (see emit_prev_slot_bridges' doc
+    comment on why the incrc/decrc calls live at these call sites instead of
+    inside the C functions).
+
+    The release must be decided on the OLD value's type, which [prev_slots]
+    records, not the new one's — "v" changes type from one expression to the
+    next.  Until 2026-09-24 this decrc'd the old word whenever the NEW result
+    was heap-typed, trusting march_decrc's IS_HEAP_PTR guard to skip scalars.
+    That guard only rejects odd and small words: a Float's raw bits (3.5 =
+    0x400C000000000000) are even, large and positive, so `get_float(a, 0)`
+    followed by any heap-returning expression dereferenced the double as a
+    header and SIGSEGV'd the REPL.  It also leaked the old heap value
+    whenever the new result was a scalar.  A slot with no [prev_slots] entry
+    has never been written this session (static zero-init), so the
+    IS_HEAP_PTR-guarded decrc is still a no-op there.
+
+    A plain `let x = ...` binding gets a FRESH slot per repl_jit.ml's
+    alloc_slot (never reused across distinct declarations), so the release
+    is a harmless no-op there — but see the note filed in specs/todos.md:
+    REBINDING a name (`let x = 5` then later `let x = "hi"`) abandons the OLD
+    slot's heap value with nothing ever releasing it, a separate,
+    pre-existing leak this does not address. *)
+let emit_store_to_slot ?(prev_slots : repl_slot_info list = []) ctx
+    (slot_idx : int) (result : string) (tir_ty : Tir.ty) =
+  let old_is_heap =
+    match List.find_opt (fun si -> si.rs_slot = slot_idx) prev_slots with
+    | Some si -> slot_holds_heap_ref si.rs_ty
+    | None -> true
+  in
+  if old_is_heap then begin
+    let old_raw = Llvm_ctx.fresh ctx "slot_old" in
+    Printf.bprintf ctx.Llvm_ctx.buf "  %s = call i64 @march_repl_get(i64 %d)\n" old_raw slot_idx;
+    let old_pt = Llvm_ctx.fresh ctx "slot_oldp" in
+    Printf.bprintf ctx.Llvm_ctx.buf "  %s = inttoptr i64 %s to ptr\n" old_pt old_raw;
+    Printf.bprintf ctx.Llvm_ctx.buf "  call void @march_decrc(ptr %s)\n" old_pt
+  end;
   let bits = match tir_ty with
     | Tir.TInt | Tir.TBool | Tir.TUnit -> result
     | Tir.TFloat ->
@@ -105,30 +155,6 @@ let emit_store_to_slot ctx (slot_idx : int) (result : string) (tir_ty : Tir.ty) 
       Printf.bprintf ctx.Llvm_ctx.buf "  %s = bitcast double %s to i64\n" bt result;
       bt
     | _ ->
-      (* This slot is genuinely OVERWRITTEN, not merely first-written, for the
-         "v" magic slot (the last-expression-value binding, reused across
-         every subsequent REPL expression per repl_jit.ml's alloc_slot logic)
-         — each new expression's result replaces whatever "v" held before,
-         and that old value needs releasing or it is retained forever with
-         no name left pointing at it. march_repl_get/@march_repl_set
-         themselves stay untyped and RC-blind (see emit_prev_slot_bridges'
-         doc comment on why the incrc/decrc calls live at these call sites
-         instead of inside the C functions); march_decrc is IS_HEAP_PTR-
-         guarded, so this is a safe no-op for a slot that starts at 0 (the
-         C array's static zero-init) or otherwise never held a heap value.
-
-         A plain `let x = ...` binding gets a FRESH slot per repl_jit.ml's
-         alloc_slot (never reused across distinct declarations), so this
-         decrc is a harmless no-op there — but see the note filed in
-         specs/todos.md: REBINDING a name (`let x = 5` then later
-         `let x = "hi"`) abandons the OLD slot's heap value with nothing
-         ever releasing it, a separate, pre-existing leak this fix does not
-         address. *)
-      let old_raw = Llvm_ctx.fresh ctx "slot_old" in
-      Printf.bprintf ctx.Llvm_ctx.buf "  %s = call i64 @march_repl_get(i64 %d)\n" old_raw slot_idx;
-      let old_pt = Llvm_ctx.fresh ctx "slot_oldp" in
-      Printf.bprintf ctx.Llvm_ctx.buf "  %s = inttoptr i64 %s to ptr\n" old_pt old_raw;
-      Printf.bprintf ctx.Llvm_ctx.buf "  call void @march_decrc(ptr %s)\n" old_pt;
       let pt = Llvm_ctx.fresh ctx "pb" in
       Printf.bprintf ctx.Llvm_ctx.buf "  %s = ptrtoint ptr %s to i64\n" pt result;
       pt
@@ -254,7 +280,7 @@ let emit_repl_expr ~emit_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   (* Store result to the persistent "v" slot so later fragments can read it. *)
   (match store_as_slot with
    | None -> ()
-   | Some k -> emit_store_to_slot ctx k result' ret_ty);
+   | Some k -> emit_store_to_slot ~prev_slots ctx k result' ret_ty);
   Printf.bprintf ctx.Llvm_ctx.buf "  ret %s %s\n}\n" ret_llty result';
   let out = Buffer.create 4096 in
   Llvm_toplevel.emit_preamble ~repl:true out;
@@ -304,7 +330,7 @@ let emit_repl_decl ~emit_expr ?(fast_math=false) ~(n : int) ~(name : string)
   emit_prev_slot_bridges ctx prev_slots;
   let (actual_ty, result) = emit_expr ctx body in
   let result' = Llvm_ctx.coerce ctx actual_ty result llty in
-  emit_store_to_slot ctx dest_slot result' val_ty;
+  emit_store_to_slot ~prev_slots ctx dest_slot result' val_ty;
   Printf.bprintf ctx.Llvm_ctx.buf "  ret void\n}\n";
   let out = Buffer.create 4096 in
   Llvm_toplevel.emit_preamble ~repl:true out;

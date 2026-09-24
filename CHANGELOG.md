@@ -387,6 +387,15 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Floats at the JIT REPL print correctly and no longer crash the session.** Any
+  Float inside a list, `Option`, `Result` or tuple printed as garbage like
+  `[2.15e-313, 2.15e-313]` at the (default, JIT-backed) REPL prompt, including
+  `NativeArray.to_list_float` and `to_list_f32` results and a plain `[3.5, 1.25]`
+  literal; they now print their values. Separately, an expression that returned a
+  Float, followed by any expression returning a list, string or other heap value
+  (`3.5` then `[1, 2]`, or `NativeArray.get_float(a, 0)` then
+  `NativeArray.to_list_float(a)`), killed the REPL with a segmentation fault; it now
+  runs. The interpreter, `--compile` and `march --jit file.march` were not affected.
 - **Spawning a nested actor from its parent module compiles.** `spawn(Inner.Box)`
   written outside `mod Inner` passed `--check` and ran interpreted, but `--compile`
   failed to link with `Undefined symbols: "_Inner.Box_spawn"`. It now links and runs.
