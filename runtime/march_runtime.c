@@ -3422,8 +3422,44 @@ static void march_actor_msg_dispose(void *msg);
 typedef struct hcr_deferred {
     void                *msg;
     uint32_t             epoch;
+    int64_t              conn, seq;   /* delivery origin (follow-up 1) */
     struct hcr_deferred *next;
 } hcr_deferred;
+
+/* ── DELIVERY_FAILED for a remote delivery the actor loop drops ──────────
+ * (DD step-6 follow-up 1).  A remote delivery reaches an actor as a plain
+ * local send from the cluster node's route closure, so the loop had no
+ * handle on the connection.  Now the node stamps the delivery's origin on
+ * the mailbox node (march_sched_delivery_origin_set, around the route), and
+ * a drop with a non-zero origin calls the hook the node installed:
+ * hook(conn, seq, reason), a March closure taking two Ints and a String,
+ * which sends DELIVERY_FAILED on that connection's control writer (a
+ * negative conn: the node's own loopback, answered to its local handler).
+ * RC contract as for a Signal.watch watcher: one long-lived reference held
+ * here, balanced per call against the apply function's own $clo drop. */
+static _Atomic(void *) g_delivery_failed_hook = NULL;
+static _Atomic int64_t g_delivery_failed_reported = 0;
+
+void march_delivery_failed_watch(void *clo) {
+    void *old = atomic_exchange_explicit(&g_delivery_failed_hook, clo, memory_order_acq_rel);
+    if (old) march_decrc(old);
+}
+
+int64_t march_delivery_failed_reported(void) {
+    return atomic_load_explicit(&g_delivery_failed_reported, memory_order_relaxed);
+}
+
+__attribute__((noinline))
+static void hcr_report_drop(int64_t conn, int64_t seq, const char *reason) {
+    if (!conn) return;
+    void *clo = atomic_load_explicit(&g_delivery_failed_hook, memory_order_acquire);
+    if (!clo) return;
+    atomic_fetch_add_explicit(&g_delivery_failed_reported, 1, memory_order_relaxed);
+    typedef void *(*hook_fn_t)(void *, int64_t, int64_t, void *);
+    hook_fn_t apply = *(hook_fn_t *)((char *)clo + 16);
+    march_incrc(clo);
+    apply(clo, conn, seq, march_string_lit(reason, (int64_t)strlen(reason)));
+}
 
 static _Atomic int64_t g_hcr_drain_dropped = 0;
 static _Atomic int64_t g_hcr_deferred_n    = 0;
@@ -3873,10 +3909,11 @@ static void hcr_boundary_slow(march_actor_meta *meta, int64_t *a,
 }
 
 __attribute__((noinline))
-static void hcr_defer(march_actor_meta *meta, void *msg, uint32_t epoch) {
+static void hcr_defer(march_actor_meta *meta, void *msg, uint32_t epoch,
+                      int64_t conn, int64_t seq) {
     hcr_deferred *d = (hcr_deferred *)malloc(sizeof(*d));
     if (!d) { fputs("march: out of memory (hot-reload defer)\n", stderr); exit(1); }
-    d->msg = msg; d->epoch = epoch; d->next = NULL;
+    d->msg = msg; d->epoch = epoch; d->conn = conn; d->seq = seq; d->next = NULL;
     if (meta->hcr_def_tail) meta->hcr_def_tail->next = d; else meta->hcr_def_head = d;
     meta->hcr_def_tail = d;
     meta->hcr_def_n++;
@@ -3885,14 +3922,15 @@ static void hcr_defer(march_actor_meta *meta, void *msg, uint32_t epoch) {
 
 /* The next deferred message, once the actor may run it (no holds). */
 static int hcr_take_deferred(march_actor_meta *meta, march_proc *self,
-                             void **msg, uint32_t *epoch) {
+                             void **msg, uint32_t *epoch,
+                             int64_t *conn, int64_t *seq) {
     hcr_deferred *d = meta->hcr_def_head;
     if (!d || atomic_load_explicit(&self->epoch_holds, memory_order_relaxed) > 0)
         return 0;
     meta->hcr_def_head = d->next;
     if (!meta->hcr_def_head) meta->hcr_def_tail = NULL;
     meta->hcr_def_n--;
-    *msg = d->msg; *epoch = d->epoch;
+    *msg = d->msg; *epoch = d->epoch; *conn = d->conn; *seq = d->seq;
     free(d);
     return 1;
 }
@@ -3909,7 +3947,7 @@ static int64_t g_hcr_none_cell[3] __attribute__((aligned(16))) = {
  * actor's epoch; HCR_CONSUMED: deferred, or dropped. */
 static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
                           void **msgp, uint32_t mepoch, int alive,
-                          uint32_t slot, uint32_t cur);
+                          uint32_t slot, uint32_t cur, int64_t conn, int64_t seq);
 
 /* The cold helpers above and hcr_route_slow are noinline on purpose: inlined
  * into actor_green_thread (an ASAN -O1 build does it) their locals -- the
@@ -3917,17 +3955,18 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
  * frame past a green thread's initial stack, so every actor paid a stack
  * growth for a path that runs once per deploy. */
 static inline int hcr_route(march_actor_meta *meta, int64_t *a, march_proc *self,
-                            void **msgp, uint32_t mepoch, int alive) {
+                            void **msgp, uint32_t mepoch, int alive,
+                            int64_t conn, int64_t seq) {
     uint32_t slot = meta->dispatch_name_id;
     uint32_t cur = atomic_load_explicit(&self->code_epoch, memory_order_relaxed);
     if (!slot || !cur || mepoch == cur) return HCR_DISPATCH;
-    return hcr_route_slow(meta, a, self, msgp, mepoch, alive, slot, cur);
+    return hcr_route_slow(meta, a, self, msgp, mepoch, alive, slot, cur, conn, seq);
 }
 
 __attribute__((noinline))
 static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
                           void **msgp, uint32_t mepoch, int alive,
-                          uint32_t slot, uint32_t cur) {
+                          uint32_t slot, uint32_t cur, int64_t conn, int64_t seq) {
     uint32_t mse = march_dispatch_msg_schema_epoch(slot);
     if (mepoch > cur) {
         /* D30: a sender that has already advanced, and a message type that
@@ -3936,7 +3975,7 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
         if (mse <= cur || !hcr_log_msg_changes(slot, cur, mepoch, NULL))
             return HCR_DISPATCH;
         if (atomic_load_explicit(&self->epoch_holds, memory_order_relaxed) > 0) {
-            hcr_defer(meta, *msgp, mepoch);
+            hcr_defer(meta, *msgp, mepoch, conn, seq);
             return HCR_CONSUMED;
         }
         hcr_advance(meta, a, self, mepoch, 0, alive);
@@ -3964,6 +4003,7 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
                 /* None: dropped on purpose; migrate_msg consumed it. */
                 meta->hcr_dropped++;
                 atomic_fetch_add_explicit(&g_hcr_drain_dropped, 1, memory_order_relaxed);
+                hcr_report_drop(conn, seq, "old message format: migrate_msg returned None");
                 return HCR_CONSUMED;
             }
             march_dispatch_leave(slot, v);
@@ -3974,6 +4014,7 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
     march_actor_msg_dispose(*msgp);
     meta->hcr_dropped++;
     atomic_fetch_add_explicit(&g_hcr_drain_dropped, 1, memory_order_relaxed);
+    hcr_report_drop(conn, seq, "old message format: no migrate_msg for it");
     return HCR_CONSUMED;
 }
 
@@ -4255,8 +4296,9 @@ static void actor_green_thread(void *arg) {
         void *msg;
         uint32_t msg_epoch = 0;
         int is_marker = 0;
-        if (!(self && hcr_take_deferred(meta, self, &msg, &msg_epoch))) {
-            msg = march_sched_recv_actor(&msg_epoch, &is_marker);
+        int64_t msg_conn = 0, msg_seq = 0;   /* delivery origin (follow-up 1) */
+        if (!(self && hcr_take_deferred(meta, self, &msg, &msg_epoch, &msg_conn, &msg_seq))) {
+            msg = march_sched_recv_actor_ex(&msg_epoch, &is_marker, &msg_conn, &msg_seq);
             if (msg == MARCH_RECV_NO_MSG) break;  /* woken without message (killed) */
         }
 
@@ -4298,7 +4340,7 @@ static void actor_green_thread(void *arg) {
 
         /* The epoch model's message rules (early advance, deferral,
          * migrate_msg, drop). */
-        if (self && hcr_route(meta, a, self, &msg, msg_epoch, 1) == HCR_CONSUMED) {
+        if (self && hcr_route(meta, a, self, &msg, msg_epoch, 1, msg_conn, msg_seq) == HCR_CONSUMED) {
             march_sched_tick();
             continue;
         }

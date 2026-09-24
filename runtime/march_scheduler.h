@@ -189,6 +189,14 @@ typedef struct march_mbox_node {
      * actor loop's (march_sched_recv_actor), and disposed through the marker
      * dtor (march_sched_set_marker_dtor), never the message dtor. */
     uint8_t                 marker;
+    /* DD step-6 follow-up 1: where a REMOTE delivery came from -- the
+     * connection (the peer's control-writer pid, an opaque Int for the
+     * runtime) and the sender's sequence number -- copied from the sending
+     * task's delivery origin (march_sched_delivery_origin_set) at enqueue.
+     * 0/0 for a local message.  Runtime-owned, like the epoch stamp, so the
+     * actor loop can answer DELIVERY_FAILED for a message it drops. */
+    int64_t                 origin_conn;
+    int64_t                 origin_seq;
 } march_mbox_node;
 
 /* ── Mailbox capacity + overflow policy ─────────────────────────────────
@@ -804,6 +812,16 @@ void *march_sched_recv_user_until(int64_t deadline_ms);
  * other receive skips markers and leaves them where they are. */
 int   march_sched_send_marker(march_proc *target, void *msg, uint32_t epoch);
 void *march_sched_recv_actor(uint32_t *epoch_out, int *marker_out);
+/* march_sched_recv_actor, also returning the dequeued node's delivery
+ * origin (follow-up 1; 0/0 for a local message). */
+void *march_sched_recv_actor_ex(uint32_t *epoch_out, int *marker_out,
+                                int64_t *conn_out, int64_t *seq_out);
+/* The delivery origin every message THIS thread enqueues from now on
+ * carries: set by the cluster node's data reader around one remote
+ * delivery's route, cleared after (0/0).  Thread-local: a route runs to
+ * completion in the reader task's turn without a yield. */
+void  march_sched_delivery_origin_set(int64_t conn, int64_t seq);
+void  march_sched_delivery_origin_clear(void);
 int   march_sched_take_markers(uint32_t upto, void **msgs, uint32_t *epochs,
                                int max);
 /* Dispose of a marker the scheduler must drop (a dead proc's mailbox). */

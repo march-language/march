@@ -85,6 +85,7 @@ let impure_named = [
   (* reads of mutable runtime state: not to be CSE'd or reordered *)
   "self"; "is_alive"; "mailbox_size"; "get_actor_field"; "live_allocs"; "peak_rss_bytes";
   "sched_stat"; "epoch_draining"; "epoch_drain";
+  "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch";
   (* control constructs over effectful thunks *)
   "try_finally"; "__try_call"; "__try_call_val"; "tap";
 ]

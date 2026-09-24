@@ -667,6 +667,12 @@ uint32_t march_epoch_holds(void);
 /* D27: 1 iff the running proc's code epoch is draining (stdlib-only builtin
  * epoch_draining(), read by SessionNode at a loop-boundary delivery). */
 int64_t  march_epoch_draining(void);
+/* Follow-up 1: the hook the actor loop calls when it drops a REMOTE delivery
+ * (stdlib-only delivery_failed_watch(f): f(conn, seq, reason)), and how many
+ * drops it has reported.  The origin builtins are march_sched_delivery_origin_*
+ * (march_scheduler.h). */
+void     march_delivery_failed_watch(void *clo);
+int64_t  march_delivery_failed_reported(void);
 /* Drain every epoch up to the current one (stdlib-only epoch_drain). */
 void     march_epoch_drain(int64_t soft_ms, int64_t hard_ms);
 

@@ -317,6 +317,9 @@ let is_simd_builtin (fn_name : string) : bool =
     [extern_borrow_table] — see
     specs/progress/2026-09-14-pid-ownership-settled-send-borrows-self-owned.md. *)
 let extern_owned_builtins : string list = [
+    (* delivery_failed_watch stores its closure in the runtime's hook slot
+       (march_delivery_failed_watch), releasing the one it replaces. *)
+    "delivery_failed_watch";
     "panic_"; "unreachable_"; "todo_"; "print_stderr"; "char_to_int";
     "char_is_digit"; "char_is_alphanumeric"; "char_is_whitespace";
     "string_chars"; "string_from_chars"; "list_append"; "list_concat";

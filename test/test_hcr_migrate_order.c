@@ -139,7 +139,7 @@ static void wait_pins_zero(uint32_t epoch, long timeout_ms) {
 
 enum { SLOT_ORDER = 1, SLOT_MANY, SLOT_DRAIN, SLOT_DRAIN_FMT, SLOT_BUSY,
        SLOT_HOLD, SLOT_EARLY, SLOT_CONVERT, SLOT_FULL, SLOT_HARD, SLOT_DEATH,
-       SLOT_TASKS, N_SLOTS };
+       SLOT_TASKS, SLOT_ORIGIN, N_SLOTS };
 #define N_MANY 2100   /* > the old 2048-entry snapshot cap */
 
 static void reset(void) {
@@ -505,6 +505,55 @@ static void test_hard_deadline_cancels_tasks(void) {
     (void)c1;
 }
 
+/* ── Follow-up 1: a dropped REMOTE delivery answers DELIVERY_FAILED ──
+ * The cluster node stamps (connection, seq) on every remote delivery it
+ * routes (march_sched_delivery_origin_set around the route); the actor
+ * loop's drop of an old-format message calls the hook the node installed
+ * with them.  Here the hook is a C closure counting what it is told. */
+typedef struct { int64_t rc; int32_t tag, pad;
+                 void *(*apply)(void *, int64_t, int64_t, void *); } c_hook;
+static _Atomic long g_hook_calls, g_hook_bad;
+static void *origin_hook(void *clo, int64_t conn, int64_t seq, void *reason) {
+    (void)clo;
+    march_string *r = (march_string *)reason;
+    int ok = conn == 7 && seq >= 42 && seq < 47
+             && r && r->len > 0 && strstr(r->data, "no migrate_msg") != NULL;
+    atomic_fetch_add(ok ? &g_hook_calls : &g_hook_bad, 1);
+    return NULL;
+}
+static c_hook g_origin_hook = { MARCH_RC_IMMORTAL, 0, 0, origin_hook };
+
+static void test_dropped_remote_delivery_reports_origin(void) {
+    printf("-- a dropped remote delivery reports its (connection, seq) through the hook --\n");
+    reset();
+    atomic_store(&g_hook_calls, 0); atomic_store(&g_hook_bad, 0);
+    int64_t reported0 = march_delivery_failed_reported();
+    march_delivery_failed_watch(&g_origin_hook);
+    void *a = new_actor(SLOT_ORIGIN);
+    send(a, MSG_GATE);
+    /* Five old-format messages "from connection 7", seqs 42..46, and one
+     * local one with no origin, all too late for the old code. */
+    for (int i = 0; i < 5; i++) {
+        march_sched_delivery_origin_set(7, 42 + i);
+        send(a, MSG_INC);
+        march_sched_delivery_origin_clear();
+    }
+    send(a, MSG_INC);
+    CHECK(activate_ex(SLOT_ORIGIN, (void *)v2_dispatch, migrate_v1_v2, 1,
+                      NULL, 50, 0) > 0, "activation published (message type changed)");
+    atomic_store(&g_v2_new_format, 1);
+    sleep_ms(200);
+    atomic_store(&g_gate_open, 1);
+    sleep_ms(200);
+    long end = now_ms() + 3000;
+    while (atomic_load(&g_hook_calls) < 5 && now_ms() < end) march_sched_yield();
+    CHECK(atomic_load(&g_hook_calls) == 5, "the hook heard each remote drop with its connection, seq and reason");
+    CHECK(atomic_load(&g_hook_bad) == 0, "and nothing else");
+    CHECK(march_delivery_failed_reported() - reported0 == 5,
+          "the local drop (no origin) was not reported");
+    march_delivery_failed_watch(NULL);
+}
+
 static void test_dead_actor_releases_pins(void) {
     printf("-- actor killed before reaching its marker --\n");
     reset();
@@ -536,6 +585,7 @@ static void test_main(void) {
     test_full_drop_new_mailbox();
     test_hard_deadline_kills();
     test_hard_deadline_cancels_tasks();
+    test_dropped_remote_delivery_reports_origin();
     test_dead_actor_releases_pins();
     march_hcr_counters c; march_hcr_counters_get(&c);
     printf("-- counters: deferred=%lld converted=%lld dropped=%lld killed=%lld "
@@ -557,7 +607,7 @@ int main(void) {
         NULL, "Ord_dispatch", "Many_dispatch", "Drain_dispatch",
         "DrainFmt_dispatch", "Busy_dispatch", "Hold_dispatch",
         "Early_dispatch", "Convert_dispatch", "Full_dispatch",
-        "Hard_dispatch", "Death_dispatch", "Tasks_dispatch" };
+        "Hard_dispatch", "Death_dispatch", "Tasks_dispatch", "Origin_dispatch" };
     march_dispatch_init(N_SLOTS);
     for (uint32_t i = 1; i < N_SLOTS; i++) {
         march_dispatch_register_name(i, names[i]);

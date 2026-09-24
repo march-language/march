@@ -1031,6 +1031,18 @@ uint32_t march_sched_send_epoch(void) {
     return e ? e : march_epoch_current();
 }
 
+/* Follow-up 1: the origin of the remote delivery being routed on this
+ * thread, 0/0 when none is (see march_sched_delivery_origin_set). */
+static _Thread_local int64_t tl_origin_conn = 0, tl_origin_seq = 0;
+
+void march_sched_delivery_origin_set(int64_t conn, int64_t seq) {
+    tl_origin_conn = conn; tl_origin_seq = seq;
+}
+
+void march_sched_delivery_origin_clear(void) {
+    tl_origin_conn = 0; tl_origin_seq = 0;
+}
+
 static march_mbox_node *mbox_node_new(void *msg) {
     march_mbox_node *node = malloc(sizeof(march_mbox_node));
     if (!node) { fputs("march_sched: OOM (mbox node)\n", stderr); abort(); }
@@ -1038,6 +1050,8 @@ static march_mbox_node *mbox_node_new(void *msg) {
     node->next = NULL;
     node->epoch = march_sched_send_epoch();
     node->marker = 0;
+    node->origin_conn = tl_origin_conn;
+    node->origin_seq = tl_origin_seq;
     return node;
 }
 
@@ -3032,6 +3046,11 @@ int march_sched_send_marker(march_proc *target, void *msg, uint32_t epoch) {
  * the head node is taken even when it is a marker. */
 __attribute__((noinline))
 void *march_sched_recv_actor(uint32_t *epoch_out, int *marker_out) {
+    return march_sched_recv_actor_ex(epoch_out, marker_out, NULL, NULL);
+}
+
+void *march_sched_recv_actor_ex(uint32_t *epoch_out, int *marker_out,
+                                int64_t *conn_out, int64_t *seq_out) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return MARCH_RECV_NO_MSG;
     for (;;) {
@@ -3044,6 +3063,8 @@ void *march_sched_recv_actor(uint32_t *epoch_out, int *marker_out) {
             mbox_lock_release(p);
             if (epoch_out) *epoch_out = node->epoch;
             if (marker_out) *marker_out = node->marker;
+            if (conn_out) *conn_out = node->origin_conn;
+            if (seq_out) *seq_out = node->origin_seq;
             void *msg = node->msg;
             free(node);
             return msg;

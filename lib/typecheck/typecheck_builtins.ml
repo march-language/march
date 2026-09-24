@@ -127,7 +127,13 @@ let stdlib_only : (string * string) list ref =
       (* D27: whether the running proc's epoch is draining; SessionNode reads
          it to end sessions at loop boundaries. *)
       ("epoch_draining", "session drains are decided by `SessionNode` (D27)");
-      ("epoch_drain", "use `SessionNode.drain_epochs(io, soft_ms, hard_ms)`") ]
+      ("epoch_drain", "use `SessionNode.drain_epochs(io, soft_ms, hard_ms)`");
+      (* DD step-6 follow-up 1: a remote delivery's origin rides the mailbox
+         node; only the cluster node's data reader stamps it and installs
+         the DELIVERY_FAILED hook. *)
+      ("delivery_origin_set", "remote delivery origins are stamped by `ClusterNode`");
+      ("delivery_origin_clear", "remote delivery origins are stamped by `ClusterNode`");
+      ("delivery_failed_watch", "the DELIVERY_FAILED hook is installed by `ClusterNode`") ]
 
 (** The source files a list of loaded stdlib declarations came from: every
     file named by a [DFn] span or a [DMod] span, recursively. A file is what
@@ -980,6 +986,10 @@ let builtin_bindings : (string * scheme) list =
     ("epoch_release", Mono (TArrow (t_unit, t_unit)));
     ("epoch_draining", Mono (TArrow (t_unit, t_bool)));
     ("epoch_drain", Mono (TArrow (t_int, TArrow (t_int, t_unit))));
+    ("delivery_origin_set", Mono (TArrow (t_int, TArrow (t_int, t_unit))));
+    ("delivery_origin_clear", Mono (TArrow (t_unit, t_unit)));
+    ("delivery_failed_watch",
+     Mono (TArrow (TArrow (t_int, TArrow (t_int, TArrow (t_string, t_unit))), t_unit)));
     (* Phase 3: Epoch-based capability builtins *)
     (* [ActorCap], NOT [Cap] (2026-08-06).  These are process capabilities —
        a revocable, epoch-checked reference to a live actor, represented at run
