@@ -189,7 +189,7 @@ Old epochs are retired by **drains**. After every deploy the older epochs drain 
 - **Soft deadline**: 5 seconds by default, or `MARCH_HCR_DRAIN_MS` milliseconds (`0` turns it off). An actor that has not reached its marker by then moves at once, as if the marker were at the front of its mailbox. The messages still queued ahead of it then run on the new code, except old-format messages (see above), which take `migrate_msg` or are dropped and counted. A handler that is already running is never interrupted.
 - **Hard deadline**: off by default; `MARCH_HCR_HARD_DRAIN_MS` milliseconds arms it. Every actor still pinned to a drained epoch is killed, and its supervisor restarts it on the new code with its `init` state (an unsupervised actor just dies, and its state is lost). Other units still on a drained epoch are told to stop.
 
-A drain can also be started by hand with the reload server's `DRAIN epoch:<E> soft_ms:<n> hard_ms:<n>` request, which drains every epoch up to `E`.
+A drain can also be started by hand with the reload server's `DRAIN <signature> epoch:<E> soft_ms:<n> hard_ms:<n>` request, which drains every epoch up to `E`. It is signed like `ACTIVATE` (over `DRAIN epoch:<E> soft_ms:<n> hard_ms:<n>`), and `E` must be below the current epoch: every live unit is pinned at or below the current one, so draining it with a hard deadline would kill every actor in the process.
 
 An actor that hosts work from an older epoch, such as a session party, takes an **epoch hold**: while it holds one, it stays on its epoch at its marker and at the soft deadline, and moves when the last hold is released. Messages in a newer format that reach it meanwhile are set aside and replayed, in order, once it moves. The hard deadline still applies.
 

@@ -47,7 +47,9 @@
  *                                                       dropped:<n> killed:<n> stopped:<n>
  *                                                       advances:<n> early:<n> forced:<n>
  *                                                       markers_live:<n> markers_lost:<n>, END
- *   DRAIN epoch:<E> [soft_ms:<n>] [hard_ms:<n>]      → OK  (drain every epoch <= E)
+ *   DRAIN <sig64> epoch:<E> [soft_ms:<n>] [hard_ms:<n>]  → OK | ERR bad_epoch | ERR bad_signature
+ *     Drain every epoch <= E; E must be below the current epoch.  Signed over
+ *     "DRAIN epoch:<E> soft_ms:<n> hard_ms:<n>" (omitted deadlines are 0).
  *
  * The epoch model (specs/plans/2026-09-21-distributed-authority-and-deploys-
  * plan.md, II.4): every activation (single, or a whole batch) is ONE deploy
@@ -1510,6 +1512,18 @@ static void handle_client(int fd) {
 
         /* ── DRAIN ────────────────────────────────────────────────────── */
         } else if (strncmp(line, "DRAIN ", 6) == 0) {
+            /* DRAIN <sig64> epoch:<E> [soft_ms:<n>] [hard_ms:<n>]
+             * Signed like ACTIVATE (the canonical message is
+             * "DRAIN epoch:<E> soft_ms:<n> hard_ms:<n>"): its hard deadline
+             * kills actors, and the socket is reachable by any process with
+             * the node's uid.  E must be BELOW the current epoch: every live
+             * unit is pinned at or below current, so a drain of current with
+             * a hard deadline would kill every actor in the process (review
+             * finding 2026-09-24-dd-review-drain-current-epoch-kills-every-actor). */
+            char sig_b64[128] = {0};
+            if (sscanf(line + 6, "%127s", sig_b64) != 1 || strncmp(sig_b64, "epoch:", 6) == 0) {
+                wresp(fd, "ERR bad_signature\n"); continue;
+            }
             const char *ep = strstr(line, "epoch:");
             if (!ep) { wresp(fd, "ERR bad_format missing_epoch\n"); continue; }
             long long e = atoll(ep + 6), soft = 0, hard = 0;
@@ -1520,6 +1534,37 @@ static void handle_client(int fd) {
             if (e <= 0 || soft < 0 || hard < 0) {
                 wresp(fd, "ERR bad_format\n"); continue;
             }
+            if ((uint64_t)e >= march_epoch_current()) {
+                wresp(fd, "ERR bad_epoch\n"); continue;
+            }
+#if HAVE_SIGNING_KEY
+            if (!g_pubkey_loaded) {
+                wresp(fd, "ERR signing_not_configured\n"); continue;
+            }
+            {
+                int all_zero = 1;
+                for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
+                if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); continue; }
+                char signed_msg[256];
+                int smlen = snprintf(signed_msg, sizeof(signed_msg),
+                                     "DRAIN epoch:%lld soft_ms:%lld hard_ms:%lld", e, soft, hard);
+                unsigned char sigbytes[64];
+                int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
+                if (siglen != 64) { wresp(fd, "ERR bad_signature\n"); continue; }
+                unsigned char *sm = (unsigned char *)malloc((size_t)(smlen + 64));
+                unsigned char *m_out = (unsigned char *)malloc((size_t)(smlen + 64));
+                if (!sm || !m_out) { free(sm); free(m_out); wresp(fd, "ERR oom\n"); continue; }
+                memcpy(sm, sigbytes, 64);
+                memcpy(sm + 64, signed_msg, (size_t)smlen);
+                unsigned long long m_out_len = 0;
+                int vrc = crypto_sign_open(m_out, &m_out_len, sm,
+                                           (unsigned long long)(smlen + 64), g_pubkey);
+                free(sm); free(m_out);
+                if (vrc != 0) { wresp(fd, "ERR bad_signature\n"); continue; }
+            }
+#else
+            wresp(fd, "ERR signing_not_configured\n"); continue;
+#endif
             march_hcr_drain((uint32_t)e, (int64_t)soft, (int64_t)hard);
             wresp(fd, "OK\n");
 
