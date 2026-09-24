@@ -396,6 +396,12 @@ git log is authoritative for exact commits.
   (`3.5` then `[1, 2]`, or `NativeArray.get_float(a, 0)` then
   `NativeArray.to_list_float(a)`), killed the REPL with a segmentation fault; it now
   runs. The interpreter, `--compile` and `march --jit file.march` were not affected.
+- **`forge bench` now links a project's FFI code.** Benchmarks were compiled
+  without the `[ffi]` C sources/link flags and `[ffi.rust]` archive that
+  `forge build`, `forge run` and `forge test` pass, so a benchmark calling any
+  extern failed to link (`Undefined symbols`) while the same code built and
+  tested fine. A `[ffi.rust]` cargo build failure is now reported once, before
+  any benchmark compiles.
 - **Spawning a nested actor from its parent module compiles.** `spawn(Inner.Box)`
   written outside `mod Inner` passed `--check` and ran interpreted, but `--compile`
   failed to link with `Undefined symbols: "_Inner.Box_spawn"`. It now links and runs.
