@@ -423,6 +423,13 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Compiled `to_string` no longer quotes strings inside a List or Result of
+  unknown static type.** When the type was erased, for example when the value
+  reached `to_string` through a closure stored in a container, a compiled
+  program printed `["a", "b"]` and `Ok("x")` where the interpreter prints
+  `[a, b]` and `Ok(x)`. Compiled output now matches the interpreter. Strings
+  inside a user constructor or record are still quoted (`B("x")`), as the
+  interpreter quotes them. `~H` interpolation still quotes every nested string.
 - **Floats at the JIT REPL print correctly and no longer crash the session.** Any
   Float inside a list, `Option`, `Result` or tuple printed as garbage like
   `[2.15e-313, 2.15e-313]` at the (default, JIT-backed) REPL prompt, including

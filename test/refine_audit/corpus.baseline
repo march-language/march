@@ -118,6 +118,8 @@ native_dist_monitor_loopback: coverage audit (user + stdlib): 120 enforced, 0 in
 native_dist_monitor_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_erased_render_show: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_erased_render_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_type_id: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_erased_type_id: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_blocking: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced

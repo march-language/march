@@ -9295,6 +9295,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/erased_type_id.expected native_erased_type_id.out)))
 
+; ── Erased render: to_string's Show convention vs ~H's repr convention ────
+; An erased (TVar) `to_string` quoted strings nested in a List/Result
+; (`["a", "b"]`) where the interpreter, going through Show, prints them bare;
+; a `~H` hole must keep quoting them.  .expected is the interpreter's own
+; output.  See specs/progress/2026-09-24-erased-render-nested-strings.md.
+(rule
+ (targets native_erased_render_show native_erased_render_show.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/erased_render_show.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_erased_render_show
+        native/erased_render_show.march)
+   (with-stdout-to native_erased_render_show.out
+        (system "./native_erased_render_show")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/erased_render_show.expected native_erased_render_show.out)))
+
 ; ── Bare short name for a module-qualified type renders by constructor ────
 ; A `ptype` declared in `mod File` lowers to `File.FileError` but is denoted
 ; bare everywhere, so the descriptor lookup missed and compiled `to_string`
