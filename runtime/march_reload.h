@@ -6,6 +6,8 @@
 #ifndef MARCH_RELOAD_H
 #define MARCH_RELOAD_H
 
+#include <stddef.h>
+
 /* Start the reload server on [socket_path].  No-op if path is NULL or empty.
  * Must be called after march_dispatch_init() has been called. */
 void march_reload_server_start(const char *socket_path);
@@ -21,5 +23,8 @@ void march_reload_server_start(const char *socket_path);
  * runs on the reload server thread (or, at start, on the thread calling
  * march_reload_server_start); it must not block. */
 void march_hcr_on_topology(const char *path);
+
+/* Validate a dlopen'd patch's embedded target/ABI/prefix markers. */
+int march_hcr_patch_identity_ok(void *handle, char *reason, size_t reason_len);
 
 #endif /* MARCH_RELOAD_H */

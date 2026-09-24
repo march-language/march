@@ -58,6 +58,8 @@ type hot_reload_config = {
   hr_envs             : hot_reload_env list; (** multi-server environments ([[hot-reload.env]]) *)
   hr_health_check_url : string option;      (** Phase 10: HTTP URL polled after each rolling step *)
   hr_strategy         : string;             (** "rolling" (default) | "simultaneous" *)
+  hr_target           : string option;
+  hr_module_prefix    : string option;
 }
 
 type project = {
@@ -248,7 +250,8 @@ let known_keys_of_section (name : string) : string list option =
   | "ffi" -> Some [ "sources"; "link" ]
   | "ffi.rust" -> Some [ "crate"; "lib" ]
   | "hot-reload" ->
-    Some [ "socket"; "ssh_host"; "public_key"; "health_check_url"; "strategy" ]
+    Some [ "socket"; "ssh_host"; "public_key"; "health_check_url"; "strategy";
+           "target"; "module_prefix" ]
   | "hot-reload.env" -> Some [ "name"; "ssh_host"; "socket"; "public_key" ]
   | "contracts" -> Some [ "no_alloc" ]
   | _ when has_prefix "archive.task." -> Some [ "command"; "module"; "doc" ]
@@ -405,9 +408,11 @@ let load_from root =
       let public_key       = Toml.get_string hr "public_key" in
       let hr_health_check_url = Toml.get_string hr "health_check_url" in
       let hr_strategy      = Option.value ~default:"rolling"             (Toml.get_string hr "strategy") in
+      let hr_target        = Toml.get_string hr "target" in
+      let hr_module_prefix = Toml.get_string hr "module_prefix" in
       Some { hr_socket = socket; hr_ssh_host = ssh_host;
              hr_public_key = public_key; hr_envs;
-             hr_health_check_url; hr_strategy }
+             hr_health_check_url; hr_strategy; hr_target; hr_module_prefix }
     end
   in
   let contracts_no_alloc =
