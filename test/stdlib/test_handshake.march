@@ -98,4 +98,86 @@ mod TestHandshake do
 
   end
 
+  -- ── certificate mode (distributed-deploys step 11a) ────────────────────
+
+  pfn seed(b : Int) : Bytes do Bytes.from_list(List.map(List.range(0, 32), fn _ -> b)) end
+  pfn op_sk() : Bytes do NodeCert.keypair_from_seed(seed(1)) end
+  pfn bob_sk() : Bytes do NodeCert.keypair_from_seed(seed(2)) end
+
+  pfn bob_cert(not_after : Int) : NodeCert.Cert do
+    { node: NodeCert.node_uri("t", "p", "bob"), roles: ["P.B:offer"], flags: Nil, not_after: not_after,
+      issuer: "spiffe://t/operator/x", pubkey: Bytes.to_hex(NodeCert.public_key(bob_sk())), serial: "s-bob" }
+  end
+
+  pfn creds(revoked : NodeCert.Cert -> Bool) : NodeCert.Credentials do
+    { signed: NodeCert.sign(bob_cert(2000000000), op_sk()), secret_key: bob_sk(),
+      operator_pubkey: NodeCert.public_key(op_sk()), revoked: revoked }
+  end
+
+  pfn bob_id() : NodeIdentity.Identity do
+    { name: "bob", node_id: NodeIdentity.name_id("bob"), incarnation: 1 }
+  end
+
+  pfn bob_hello(signed : NodeCert.Signed, id : NodeIdentity.Identity) : Handshake.Hello do
+    Handshake.make_hello_cert(id, "nb", Handshake.role_data(), "127.0.0.1:1", NodeCert.to_bytes(signed), [9, 9])
+  end
+
+  describe "Handshake certificate mode" do
+
+    test "a certificate hello round-trips; a shared-secret hello has no certificate" do
+      let h = bob_hello(NodeCert.sign(bob_cert(2000000000), op_sk()), bob_id())
+      assert (Handshake.decode_hello(Handshake.encode_hello(h)) == Ok(h))
+      let plain = Handshake.make_hello_addr(alice(), "n", Handshake.role_control(), "h:1")
+      assert (plain.cert == None)
+      assert (Handshake.decode_hello(Handshake.encode_hello(plain)) == Ok(plain))
+    end
+
+    test "the modes refuse each other, naming what to configure" do
+      let certified = bob_hello(NodeCert.sign(bob_cert(2000000000), op_sk()), bob_id())
+      let plain = Handshake.make_hello(alice(), "n")
+      assert (Result.is_err(Handshake.check_mode(ClusterAuth.Certified(creds(fn _ -> false)), plain)))
+      assert (Result.is_err(Handshake.check_mode(ClusterAuth.Secret("s"), certified)))
+      assert (Handshake.check_mode(ClusterAuth.Secret("s"), plain) == Ok(()))
+      assert (Handshake.check_mode(ClusterAuth.Certified(creds(fn _ -> false)), certified) == Ok(()))
+    end
+
+    test "a peer certificate from the operator, unexpired, naming the peer, verifies" do
+      let h = bob_hello(NodeCert.sign(bob_cert(2000000000), op_sk()), bob_id())
+      match Handshake.verify_peer_cert(creds(fn _ -> false), h, 1900000000) do
+        Ok((c, pk)) ->
+          assert (c == bob_cert(2000000000))
+          assert (pk == NodeCert.public_key(bob_sk()))
+        Err(e) -> assert (e == "no error")
+      end
+    end
+
+    test "refuses another operator, an expired or revoked certificate, and a name or id mismatch" do
+      let other_op = NodeCert.sign(bob_cert(2000000000), bob_sk())
+      assert (Handshake.verify_peer_cert(creds(fn _ -> false), bob_hello(other_op, bob_id()), 1900000000)
+              == Err("Handshake: peer bob: certificate not signed by the cluster operator"))
+      let expired = NodeCert.sign(bob_cert(1000), op_sk())
+      assert (Handshake.verify_peer_cert(creds(fn _ -> false), bob_hello(expired, bob_id()), 1900000000)
+              == Err("Handshake: peer bob: certificate expired"))
+      let good = NodeCert.sign(bob_cert(2000000000), op_sk())
+      assert (Handshake.verify_peer_cert(creds(fn _ -> true), bob_hello(good, bob_id()), 1900000000)
+              == Err("Handshake: peer bob: certificate revoked"))
+      let mallory = { name: "mallory", node_id: NodeIdentity.name_id("mallory"), incarnation: 1 }
+      assert (Result.is_err(Handshake.verify_peer_cert(creds(fn _ -> false), bob_hello(good, mallory), 1900000000)))
+      let wrong_id = { name: "bob", node_id: NodeIdentity.name_id("alice"), incarnation: 1 }
+      assert (Result.is_err(Handshake.verify_peer_cert(creds(fn _ -> false), bob_hello(good, wrong_id), 1900000000)))
+    end
+
+    test "the possession proof binds the challenge and the transcript" do
+      let th = ClusterAuth.transcript([1, 2], "a", [3, 4], "b")
+      assert (th == ClusterAuth.transcript([3, 4], "b", [1, 2], "a"))
+      let pr = ClusterAuth.cert_prove(bob_sk(), "a", th)
+      let pk = NodeCert.public_key(bob_sk())
+      assert (ClusterAuth.cert_verify(pk, "a", th, pr))
+      assert (not(ClusterAuth.cert_verify(pk, "b", th, pr)))
+      assert (not(ClusterAuth.cert_verify(pk, "a", ClusterAuth.transcript([1, 2], "a", [3, 5], "b"), pr)))
+      assert (not(ClusterAuth.cert_verify(NodeCert.public_key(op_sk()), "a", th, pr)))
+    end
+
+  end
+
 end

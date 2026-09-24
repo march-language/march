@@ -25,6 +25,18 @@ git log is authoritative for exact commits.
   builtins `ed25519_seed_keypair`, `ed25519_sign`, `ed25519_verify` and
   `x25519` (RFC 8032 / RFC 7748, over the runtime's TweetNaCl, which gained
   X25519).
+- **Certificate mode for the cluster handshake** (step 11a, part 2). With
+  `MARCH_NODE_CERT`, `MARCH_NODE_KEY` and `MARCH_CLUSTER_OPERATOR_PUBKEY` set
+  (values or files), `ClusterNode.config_from_env` authenticates peers by
+  certificate instead of `MARCH_CLUSTER_SECRET`: each node verifies the other's
+  certificate against the operator key, its expiry and the node's name, then
+  proves it holds its certificate's key by signing the peer's nonce and the
+  handshake transcript. Shared-secret mode is unchanged and stays the default; a
+  certificate node and a shared-secret node refuse each other with a message
+  naming what to set. `ClusterNode.peer_cert(c, node_id)` returns the
+  certificate a peer presented, `ClusterConn.connect_split_auth` /
+  `accept_split_auth` do the same for direct connections, and
+  `ClusterNode.on_security_event` reports refused handshakes.
 - **Hot reload: the unified epoch model and drains** (build step 6 of the
   distributed-deploys plan). Every unit of work (actor, task, session) runs at the
   epoch of the deploy it started under, and every call it makes, from the base
@@ -388,6 +400,9 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Cluster handshake reflection.** A shared-secret node accepted a peer that
+  sent the node's own hello back to it and then its own proof back; a nonce
+  equal to ours is now refused.
 - **Spawning a nested actor from its parent module compiles.** `spawn(Inner.Box)`
   written outside `mod Inner` passed `--check` and ran interpreted, but `--compile`
   failed to link with `Undefined symbols: "_Inner.Box_spawn"`. It now links and runs.

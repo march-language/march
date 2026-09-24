@@ -37,6 +37,11 @@ mod NetKernel do
   -- ── framed socket I/O ──────────────────────────────────────────────────────
 
   fn send_frame(fd : Int, payload : List(Int)) : Result((), String) do
+    send_raw(fd, payload)
+  end
+
+  -- One frame, never sealed: the handshake's own frames.
+  pfn send_raw(fd : Int, payload : List(Int)) : Result((), String) do
     match Socket.write(fd, to_wire(payload)) do
       Ok(_) -> Ok(())
       Err(e) -> Err(Socket.error_message(e))
@@ -87,6 +92,10 @@ mod NetKernel do
   -- landed in the same recv() as the proof -- 2 runs in 20 under load,
   -- never unloaded (control_channel_loopback, 2026-09-14).
   fn recv_frame_exact(fd : Int) : Result(List(Int), String) do
+    recv_frame_exact_raw(fd)
+  end
+
+  pfn recv_frame_exact_raw(fd : Int) : Result(List(Int), String) do
     match tcp_recv_exact(fd, 4) do
       Err(e) -> Err("net-kernel: " ++ e)
       Ok(hdr) ->
@@ -102,6 +111,7 @@ mod NetKernel do
   -- Both peers run the same sequence: send hello, recv hello, send proof bound
   -- to the peer's nonce, recv proof, authenticate (peer's proof must bind to
   -- the nonce WE issued). Returns the authenticated peer identity or a reason.
+  -- Shared-secret mode; `handshake_auth` is the general form.
   fn handshake(fd : Int, my_id : NodeIdentity.Identity, secret : String,
                my_nonce : String) : Result(NodeIdentity.Identity, String) do
     match handshake_role(fd, my_id, secret, my_nonce, Handshake.role_control()) do
@@ -114,36 +124,14 @@ mod NetKernel do
   -- Handshake.role_*); returns the peer's identity AND the role the peer
   -- announced, so an acceptor knows which of a peer's two connections it
   -- just took. A pre-split peer announces no role and reads as control.
+  -- Reads are exact (recv_frame_exact): nothing past the handshake's own two
+  -- frames is consumed, so the connection is handed over with the peer's
+  -- first real frame still unread in the socket.
   fn handshake_role(fd : Int, my_id : NodeIdentity.Identity, secret : String,
                     my_nonce : String, role : String) : Result((NodeIdentity.Identity, String), String) do
-    let hello = Handshake.encode_hello(Handshake.make_hello_role(my_id, my_nonce, role))
-    match send_frame(fd, hello) do
+    match handshake_auth(fd, my_id, ClusterAuth.Secret(secret), my_nonce, role, "", 0) do
       Err(e) -> Err(e)
-      Ok(_) ->
-        -- Exact reads: nothing past the handshake's own two frames is
-        -- consumed, so the connection is handed over with the peer's first
-        -- real frame still unread in the socket (see recv_frame_exact).
-        match recv_frame_exact(fd) do
-          Err(e) -> Err(e)
-          Ok(hbytes) ->
-            match Handshake.decode_hello(hbytes) do
-              Err(e) -> Err(e)
-              Ok(peer) ->
-                match send_frame(fd, str_to_bytes(ClusterAuth.prove(secret, peer.nonce))) do
-                  Err(e) -> Err(e)
-                  Ok(_) ->
-                    match recv_frame_exact(fd) do
-                      Err(e) -> Err(e)
-                      Ok(pbytes) ->
-                        match Handshake.authenticate(secret, my_nonce, peer,
-                                                     bytes_to_str(pbytes)) do
-                          Err(e) -> Err(e)
-                          Ok(id) -> Ok((id, peer.role))
-                        end
-                    end
-                end
-            end
-        end
+      Ok(a) -> Ok((a.identity, a.role))
     end
   end
 
@@ -193,27 +181,131 @@ mod NetKernel do
   fn handshake_addr(fd : Int, my_id : NodeIdentity.Identity, secret : String, my_nonce : String,
                     role : String, addr : String, timeout_ms : Int)
       : Result((NodeIdentity.Identity, String, String), String) do
-    let deadline = unix_time_ms() + timeout_ms
-    let hello = Handshake.encode_hello(Handshake.make_hello_addr(my_id, my_nonce, role, addr))
-    match send_frame(fd, hello) do
+    match handshake_auth(fd, my_id, ClusterAuth.Secret(secret), my_nonce, role, addr, timeout_ms) do
+      Err(e) -> Err(e)
+      Ok(a) -> Ok((a.identity, a.role, a.addr))
+    end
+  end
+
+  -- ── the authenticated handshake (both modes) ──────────────────────────────
+  -- What a finished handshake knows about the peer: its identity, the role it
+  -- announced for this connection, its advertised address ("" when it sent
+  -- none), its VERIFIED certificate (certificate mode) and whether the
+  -- connection's frames are sealed from here on.
+  type Authed = { identity : NodeIdentity.Identity, role : String, addr : String,
+                  cert : Option(NodeCert.Cert), mac : Bool }
+
+  -- The X25519 base point (u = 9).
+  pfn x25519_base() : Bytes do Bytes.from_list(Cons(9, List.map(List.range(0, 31), fn _ -> 0))) end
+
+  pfn now_s() : Int do unix_time_ms() / 1000 end
+
+  -- One handshake frame: bounded by [deadline] (unix ms) when it is > 0, else
+  -- an exact blocking read. Never over-reads and never MAC-checks: the
+  -- handshake's own frames are plain.
+  pfn hs_recv(fd : Int, deadline : Int) : Result(List(Int), String) do
+    if deadline > 0 do recv_frame_until(fd, deadline) else recv_frame_exact_raw(fd) end
+  end
+
+  doc """
+  The handshake, in either mode ([auth]): send a hello, read the peer's,
+  check the modes agree, prove ourselves bound to the peer's nonce, check the
+  peer's proof bound to ours. Shared-secret mode: an HMAC of the nonce under
+  the secret (wire-compatible with pre-11a nodes). Certificate mode: the hello
+  carries our certificate and an ephemeral X25519 key; we verify the peer's
+  certificate (operator signature, expiry, revocation, name) and its
+  ed25519 signature over our nonce and the transcript. When both sides
+  support it, the connection's frames are sealed from then on (NetFrame.seal;
+  `mac` in the result). [role] names the connection ("control"/"data"),
+  [addr] is our advertised address ("" for none), [timeout_ms] bounds the
+  whole exchange (<= 0: no bound).
+  """
+  fn handshake_auth(fd : Int, my_id : NodeIdentity.Identity, auth : ClusterAuth.Auth, my_nonce : String,
+                    role : String, addr : String, timeout_ms : Int) : Result(Authed, String) do
+    let deadline = if timeout_ms > 0 do unix_time_ms() + timeout_ms else 0 end
+    match auth do
+      ClusterAuth.Secret(secret) -> handshake_secret(fd, my_id, secret, my_nonce, role, addr, deadline)
+      ClusterAuth.Certified(creds) -> handshake_cert(fd, my_id, creds, my_nonce, role, addr, deadline)
+    end
+  end
+
+  pfn handshake_secret(fd : Int, my_id : NodeIdentity.Identity, secret : String, nonce : String,
+                       role : String, addr : String, deadline : Int) : Result(Authed, String) do
+    let hello = Handshake.encode_hello(Handshake.make_hello_addr(my_id, nonce, role, addr))
+    match send_raw(fd, hello) do
       Err(e) -> Err(e)
       Ok(_) ->
-        match recv_frame_until(fd, deadline) do
+        match hs_recv(fd, deadline) do
           Err(e) -> Err(e)
           Ok(hbytes) ->
             match Handshake.decode_hello(hbytes) do
               Err(e) -> Err(e)
               Ok(peer) ->
-                match send_frame(fd, str_to_bytes(ClusterAuth.prove(secret, peer.nonce))) do
+                -- A peer that echoes our own nonce is reflecting our hello
+                -- (and would then reflect our proof, which verifies): refused.
+                match (Handshake.check_mode(ClusterAuth.Secret(secret), peer),
+                       peer.nonce == nonce) do
+                  (Err(e), _) -> Err(e)
+                  (_, true) -> Err("Handshake: the peer echoed our nonce")
+                  (Ok(_), false) ->
+                    match send_raw(fd, str_to_bytes(ClusterAuth.prove(secret, peer.nonce))) do
+                      Err(e) -> Err(e)
+                      Ok(_) ->
+                        match hs_recv(fd, deadline) do
+                          Err(e) -> Err(e)
+                          Ok(pbytes) ->
+                            match Handshake.authenticate(secret, nonce, peer, bytes_to_str(pbytes)) do
+                              Err(e) -> Err(e)
+                              Ok(id) ->
+                                Ok({ identity: id, role: peer.role, addr: peer.addr, cert: None, mac: false })
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+  end
+
+  pfn handshake_cert(fd : Int, my_id : NodeIdentity.Identity, creds : NodeCert.Credentials, nonce : String,
+                     role : String, addr : String, deadline : Int) : Result(Authed, String) do
+    let eph_sk = Crypto.random_bytes(32)
+    let eph_pub = x25519(eph_sk, x25519_base())
+    let hello = Handshake.encode_hello(Handshake.make_hello_cert(my_id, nonce, role, addr,
+                                         NodeCert.to_bytes(creds.signed), Bytes.to_list(eph_pub)))
+    match send_raw(fd, hello) do
+      Err(e) -> Err(e)
+      Ok(_) ->
+        match hs_recv(fd, deadline) do
+          Err(e) -> Err(e)
+          Ok(hbytes) ->
+            match Handshake.decode_hello(hbytes) do
+              Err(e) -> Err(e)
+              Ok(peer) ->
+                match Handshake.check_mode(ClusterAuth.Certified(creds), peer) do
                   Err(e) -> Err(e)
                   Ok(_) ->
-                    match recv_frame_until(fd, deadline) do
-                      Err(e) -> Err(e)
-                      Ok(pbytes) ->
-                        match Handshake.authenticate(secret, my_nonce, peer, bytes_to_str(pbytes)) do
-                          Err(e) -> Err(e)
-                          Ok(id) -> Ok((id, peer.role, peer.addr))
-                        end
+                    if peer.nonce == nonce do Err("Handshake: the peer echoed our nonce")
+                    else
+                      match Handshake.verify_peer_cert(creds, peer, now_s()) do
+                        Err(e) -> Err(e)
+                        Ok((cert, peer_pk)) ->
+                          let th = ClusterAuth.transcript(hello, nonce, hbytes, peer.nonce)
+                          match send_raw(fd, Bytes.to_list(ClusterAuth.cert_prove(creds.secret_key, peer.nonce, th))) do
+                            Err(e) -> Err(e)
+                            Ok(_) ->
+                              match hs_recv(fd, deadline) do
+                                Err(e) -> Err(e)
+                                Ok(pbytes) ->
+                                  if not(ClusterAuth.cert_verify(peer_pk, nonce, th, Bytes.from_list(pbytes))) do
+                                    Err("Handshake: peer " ++ peer.identity.name ++ " failed to prove it holds its certificate's key")
+                                  else
+                                    Ok({ identity: peer.identity, role: peer.role, addr: peer.addr,
+                                         cert: Some(cert), mac: false })
+                                  end
+                              end
+                          end
+                      end
                     end
                 end
             end

@@ -42,3 +42,53 @@ section 3 (Identity, Threat model), 7.4, II.9, D3, D4. The authorization half
   `Msgpack.encode` is pinned by one vector asserted in both
   `test/stdlib/test_node_cert.march` and `forge/test/test_cluster.ml`
   (perturbing one digit of the March copy fails the test).
+
+## 2. The certificate handshake
+
+- **`ClusterAuth.Auth = Secret(String) | Certified(NodeCert.Credentials)`**, and
+  `NetKernel.handshake_auth(fd, me, auth, nonce, role, addr, timeout_ms)`
+  returning `NetKernel.Authed { identity, role, addr, cert, mac }`. The old
+  entry points (`handshake`, `handshake_role`, `handshake_addr`) are
+  `handshake_auth` with `Secret`.
+- **Certificate mode.** The hello gains a seventh element
+  `["cert1", Bin(signed cert), Bin(ephemeral X25519 key)]`; a shared-secret
+  hello is byte-identical to before. Each side checks the peer's certificate
+  (`Handshake.verify_peer_cert`: operator signature, `not_after`, the node's
+  revocation predicate, the URI's node name equals the hello's name, and the
+  hello's node id is `NodeIdentity.name_id(name)`), then sends an ed25519
+  signature over the PEER's nonce and the transcript
+  (`ClusterAuth.transcript`: both hellos' bytes, ordered by nonce) in place
+  of the HMAC proof, and verifies the peer's under the certificate's key.
+- **Modes do not mix.** `Handshake.check_mode`: a certificate node refuses a
+  shared-secret hello, and a shared-secret node refuses a certificate hello,
+  each naming the variables to set. A pre-11a node cannot decode a
+  certificate hello ("malformed hello").
+- **Reflection closed.** A peer whose nonce equals ours is refused in both
+  modes. Before this, a shared-secret node accepted an attacker that sent its
+  own hello back and then its own proof back (the proof is an HMAC of the
+  nonce the node itself issued).
+- **Where certificates are kept.** `ClusterConn.connect_split_auth` /
+  `accept_split_auth` return the peer's certificate and remember it
+  (`ClusterConn.peer_cert(node_id)`). `ClusterNode` carries it from the dial
+  and accept tasks to the node (`Accepted`/`Dialed`), keeps it in the core
+  (`CnState.certs`, `core_peer_cert`) and mirrors it for
+  `ClusterNode.peer_cert(c, node_id)` through the `ClusterOps` dictionary
+  (D35; `ops_stub` panics for it like every other field).
+- **Config.** `CnConfig.auth` (default `Secret(secret)`); `config_from_env`
+  switches to certificate mode when `MARCH_NODE_CERT` is set, requiring
+  `MARCH_NODE_KEY` and `MARCH_CLUSTER_OPERATOR_PUBKEY`; each value may name a
+  file. `ClusterNode.credentials` checks the node's own certificate at
+  startup (operator signature, expiry, its name, its key).
+- **Security events.** `ClusterNode.on_security_event(c, f)` reports refused
+  handshakes (`HandshakeRejected(who, why)`); before, a dial or accept that
+  failed its handshake was silent.
+- **A dial now checks both connections reach the same node** (ClusterNode's
+  `dial` and `connect_split_auth`); before, the data connection's peer was
+  never compared with the control connection's.
+- **Deviation:** node ids are still `derive_id("pk-" ++ name)`, not the hash
+  of the node's real key. Changing that would move every node id (topology
+  ranking, tests). The certificate binds the id through the name instead.
+- **Found on the way (pre-existing, not fixed here):** the bare `sha256`
+  builtin is typed `Bytes -> Bytes` but returns a hex String on both backends,
+  and a compiled program that uses its result as Bytes dies with SIGBUS. The
+  transcript uses `hmac_sha256_bytes` under a fixed label instead.
