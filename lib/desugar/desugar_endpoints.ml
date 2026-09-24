@@ -259,9 +259,20 @@ let crash_ctors_of (steps : astep list) (role : string) : string list =
     paths in declaration order; a role with no line is absent.  Read from the
     raw steps, not the annotated ones, which drop the line. *)
 let grants_of (steps : protocol_step list) : (string * string list) list =
+  (* Only paths under `IO` become parameters: the fronts narrow each one from
+     `io` with `cap_narrow`, which cannot produce a proof or foreign
+     capability.  A non-IO path is refused by the typechecker at the grant
+     line ([Typecheck.check_role_needs]); leaving it out here is what keeps
+     that the ONLY diagnostic, instead of one per generated narrowing site
+     with no excerpt to show (review finding
+     2026-09-24-dd-review-non-io-role-grant-diagnostics). *)
   List.concat_map
     (function
-      | ProtoRoleNeeds (r, caps, _) -> [ (r.txt, List.map (fun (c : name) -> c.txt) caps) ]
+      | ProtoRoleNeeds (r, caps, _) ->
+        [ (r.txt,
+           List.filter_map
+             (fun (c : name) -> if March_caps.Cap_lattice.cap_subsumes "IO" c.txt then Some c.txt else None)
+             caps) ]
       | _ -> [])
     steps
 
