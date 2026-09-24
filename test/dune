@@ -897,6 +897,15 @@
  (action (setenv MARCH_DEPLOY_POLICY test_reload_policy.txt
           (run ./test_reload_activate4_runner reload_keys.txt policy))))
 
+; Restart durability (plan 6.5, DD build step 10): activate, exit, restart,
+; and the persisted patch stack is replayed (signatures re-verified); a
+; corrupt entry is skipped with an audit line; MARCH_HCR_NO_REPLAY and a
+; different base build do not replay.  Each server lifetime is a forked child.
+(rule
+ (alias runtest)
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so))
+ (action (run ./test_reload_activate4_runner reload_keys.txt restore)))
+
 ; ── HCR capability-lattice anti-drift check ───────────────────────────────
 ; Regenerates runtime/march_cap_lattice.{h,c} from lib/caps/cap_lattice.ml
 ; via the emitter and diffs the result against the checked-in copy, so the

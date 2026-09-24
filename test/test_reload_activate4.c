@@ -694,6 +694,127 @@ static void test_activate6_role_policy(void) {
     close(fd);
 }
 
+/* ── Restart durability (plan 6.5, DD build step 10) ─────────────────────
+ * Each phase is its own process (fork), i.e. its own server lifetime, over
+ * one HOME (the CAS root and the persisted state) and one socket path. */
+#include <sys/wait.h>
+
+static const char *g_restore_home;
+
+/* The dispatch table a restarted binary has: the same names, the same
+ * baseline (or a different one, for base_changed). */
+static void restore_boot(const char *baseline) {
+    march_dispatch_init(64);
+    march_dispatch_register_name(1, "test_fn_epoch");
+    march_dispatch_publish(1, (void *)0x1010, baseline, NULL, MARCH_NATIVE);
+    march_reload_server_start(SOCK_PATH);
+}
+
+static void restore_versions(int fd, char *out, size_t max, const char *verb) {
+    send_line(fd, verb);
+    out[0] = '\0';
+    char line[1024];
+    for (int i = 0; i < 64; i++) {
+        read_resp(fd, line, sizeof(line));
+        if (strcmp(line, "END") == 0 || !line[0]) break;
+        strncat(out, line, max - strlen(out) - 2);
+        strncat(out, "\n", max - strlen(out) - 1);
+    }
+}
+
+static const char HOT_IMPL[] =
+    "6666666666666666666666666666666666666666666666666666666666666666";
+
+static void phase_activate(void) {
+    restore_boot("baseline");
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "phase 1: connected");
+    if (fd < 0) return;
+    char resp[512], v[4096];
+    CHECK(put_stub(fd), "phase 1: stub patch uploaded");
+    activate5(fd, "test_fn_epoch", 0, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "phase 1: activated");
+    restore_versions(fd, v, sizeof(v), "VERSIONS");
+    char want[200];
+    snprintf(want, sizeof(want), "VERSION test_fn_epoch hot %s", HOT_IMPL);
+    CHECK(strstr(v, want) != NULL, "phase 1: VERSIONS shows the hot version");
+    close(fd);
+}
+
+static void phase_restored(int expect_hot, const char *expect_mode, int expect_skipped) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "restart: connected");
+    if (fd < 0) return;
+    char v[4096], want[200];
+    restore_versions(fd, v, sizeof(v), "VERSIONS");
+    snprintf(want, sizeof(want), "VERSION test_fn_epoch hot %s", HOT_IMPL);
+    if (expect_hot)
+        CHECK(strstr(v, want) != NULL, "restart: VERSIONS shows the hot version without a redeploy");
+    else
+        CHECK(strstr(v, " hot ") == NULL, "restart: VERSIONS shows only the baseline");
+    restore_versions(fd, v, sizeof(v), "VERSIONS_DETAIL");
+    snprintf(want, sizeof(want), "RESTORED entries:%d skipped:%d mode:%s ",
+             expect_hot, expect_skipped, expect_mode);
+    CHECK(strstr(v, want) != NULL, "restart: VERSIONS_DETAIL has the RESTORED line");
+    if (!strstr(v, want)) fprintf(stderr, "    want: %s\n    got:\n%s", want, v);
+    close(fd);
+}
+
+static int run_phase(void (*body)(void)) {
+    fflush(stdout); fflush(stderr);
+    pid_t pid = fork();
+    if (pid == 0) {
+        g_failed = 0;
+        body();
+        _exit(g_failed > 100 ? 100 : g_failed);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 101;
+}
+
+static void ph_restored_hot(void)   { restore_boot("baseline"); phase_restored(1, "replayed", 0); }
+static void ph_no_replay(void)      { setenv("MARCH_HCR_NO_REPLAY", "1", 1);
+                                      restore_boot("baseline"); phase_restored(0, "off", 1); }
+static void ph_after_no_replay(void){ restore_boot("baseline"); phase_restored(0, "none", 0); }
+static void ph_corrupt_skipped(void){ restore_boot("baseline"); phase_restored(0, "replayed", 1); }
+static void ph_base_changed(void)   { restore_boot("another-build"); phase_restored(0, "base_changed", 1); }
+
+/* Flip one character of the first entry's signature in the state file. */
+static int corrupt_state_signature(void) {
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+             "f=$(ls %s/.march/cas/hcr_state/*/state) && "
+             "awk '/^entry /{ s=$5; c=substr(s,1,1); $5=(c==\"A\"?\"B\":\"A\") substr(s,2) } {print}' "
+             "\"$f\" > \"$f.x\" && mv \"$f.x\" \"$f\"", g_restore_home);
+    return system(cmd) == 0;
+}
+
+static int state_has_entries(void) {
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "grep -q '^entry ' %s/.march/cas/hcr_state/*/state 2>/dev/null",
+             g_restore_home);
+    return system(cmd) == 0;
+}
+
+static void test_restart_durability(void) {
+    CHECK(run_phase(phase_activate) == 0, "phase 1: activate a patch, then exit");
+    CHECK(state_has_entries(), "the patch stack is persisted under the CAS root");
+    CHECK(run_phase(ph_restored_hot) == 0, "phase 2: a restart replays it");
+    CHECK(run_phase(ph_no_replay) == 0, "phase 3: MARCH_HCR_NO_REPLAY starts from the base");
+    CHECK(run_phase(ph_after_no_replay) == 0, "phase 4: and the stack stays set aside");
+    CHECK(run_phase(phase_activate) == 0, "phase 5: activate again");
+    CHECK(corrupt_state_signature(), "phase 6: corrupt the stored signature");
+    CHECK(run_phase(ph_corrupt_skipped) == 0, "phase 6: the corrupt entry is skipped, no crash");
+    {
+        char line[4096]; last_audit_line(line, sizeof(line));
+        CHECK(strstr(line, "\"type\":\"restore\"") && strstr(line, "\"result\":\"err_restore_sig\""),
+              "phase 6: the skipped entry has an audit line");
+    }
+    CHECK(run_phase(phase_activate) == 0, "phase 7: activate again");
+    CHECK(run_phase(ph_base_changed) == 0, "phase 8: another build on the socket does not replay it");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <keys_file> [policy]\n", argv[0]);
@@ -719,6 +840,19 @@ int main(int argc, char **argv) {
     snprintf(home, sizeof(home), "/tmp/march_reload_home_%d", (int)getpid());
     mkdir(home, 0700);
     setenv("HOME", home, 1);
+    if (argc >= 3 && strcmp(argv[2], "restore") == 0) {
+        /* Nothing is started in this process: every server lifetime is a
+         * forked child (see test_restart_durability). */
+        g_restore_home = home;
+        test_restart_durability();
+        unlink(g_audit_path);
+        if (g_failed == 0) {
+            printf("test_reload_activate4_restore: all checks passed\n");
+            return 0;
+        }
+        fprintf(stderr, "test_reload_activate4_restore: %d check(s) failed\n", g_failed);
+        return 1;
+    }
 
     march_dispatch_init(64);
     /* Register every test fn name so do_activate gets past the ABI lookup

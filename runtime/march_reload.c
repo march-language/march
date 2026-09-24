@@ -209,6 +209,169 @@ static uint32_t load_next_epoch(void) {
     return v > 0 ? v : 1;
 }
 
+/* ── Host-local persisted state (plan 6.5, DD build step 10) ─────────────
+ *
+ * A restarted host must come back on the code it was running, before
+ * `main` opens any offers, even when nothing is left to redeploy it (the
+ * reconciler may be `forge` on a laptop).  So the server keeps, under its
+ * CAS root next to `next_epoch` and with the same temp+rename discipline,
+ *
+ *   <cas_root>/hcr_state/<16 hex of blake3(socket path)>/state
+ *
+ * a text file holding
+ *
+ *   # march-hcr-state v1
+ *   base <hex>        blake3 over "name baseline_impl_hash\n" of every slot
+ *                     of the binary that wrote it (the build it patches)
+ *   topology <hex|->  the digest of the last topology pushed (TOPOLOGY)
+ *   manifest <hex>    blake3 over "name current_impl_hash\n" of every slot:
+ *                     the code actually running, for the reconciler to
+ *                     compare against its desired state
+ *   seq <n>           the last deploy's sequence number
+ *   entry <seq> <epoch> <signer_hex|-> <sig64> <signed message>
+ *                     one per activated function, in activation order; a
+ *                     batch's functions share one seq (one deploy)
+ *
+ * Keyed by the socket path because the CAS root is shared by every March
+ * program of a user: the socket names the service.  A different build on
+ * the same socket is caught by `base`, and its stack is set aside, not
+ * replayed.  Replay (replay_state, run by march_reload_server_start before
+ * it returns to `main`) re-verifies every entry's signature from the stored
+ * signed line, skips (with an audit line) any entry that fails, whose
+ * artifact is gone from the CAS or whose function the binary does not
+ * have, and republishes each function's newest entry, deploy by deploy in
+ * sequence (hence epoch) order.  The rewritten file then holds only those:
+ * superseded and broken entries do not outlive a restart.
+ * $MARCH_HCR_NO_REPLAY=1 starts from the base binary and sets the stack
+ * aside (state.no-replay), for a patch that breaks the boot. */
+
+static int  is_hex64(const char *s);
+static void mkdir_p(const char *path);
+
+static char g_last_signed[RELOAD_LINE_MAX];   /* the last verified signed line */
+static char g_last_sig[256];                  /* and its signature */
+
+static void remember_signed(const char *msg, size_t n, const char *sig) {
+    if (n >= sizeof(g_last_signed)) n = sizeof(g_last_signed) - 1;
+    memcpy(g_last_signed, msg, n);
+    g_last_signed[n] = '\0';
+    snprintf(g_last_sig, sizeof(g_last_sig), "%s", sig ? sig : "");
+}
+
+typedef struct {
+    unsigned long long seq;
+    uint32_t           epoch;
+    char              *signer;   /* hex pubkey at activation, or "-" */
+    char              *sig_b64;
+    char              *msg;      /* the signed message, verbatim */
+    char              *name;     /* parsed from msg (NULL if malformed) */
+    char              *impl_hash;
+    char              *cas_hash;
+} hcr_stack_entry;
+
+static hcr_stack_entry *g_stack;
+static size_t           g_stack_n, g_stack_cap;
+static unsigned long long g_stack_seq;
+static char g_state_dir[768];
+static char g_base_digest[65];
+static char g_manifest_digest[65];
+static char g_topology_digest[65] = "-";
+static int  g_restoring;                     /* 1 while replay_state runs */
+static int  g_restored_entries, g_restored_skipped;
+static const char *g_restored_mode = "none"; /* none|replayed|off|base_changed */
+
+/* name/impl/cas of a signed message: "<ACTIVATEn> name impl cas ..." or
+ * the v1 form "name impl cas".  1 on success. */
+static int parse_signed_fields(const char *msg, char name[256], char impl[128], char cas[128]) {
+    char a[256], b[256], c[256], d[256];
+    int k = sscanf(msg, "%255s %255s %255s %255s", a, b, c, d);
+    if (k >= 4 && strncmp(a, "ACTIVATE", 8) == 0) {
+        snprintf(name, 256, "%s", b);
+        snprintf(impl, 128, "%s", c);
+        snprintf(cas, 128, "%s", d);
+    } else if (k >= 3 && strncmp(a, "ACTIVATE", 8) != 0) {
+        snprintf(name, 256, "%s", a);
+        snprintf(impl, 128, "%s", b);
+        snprintf(cas, 128, "%s", c);
+    } else {
+        return 0;
+    }
+    return is_hex64(cas);
+}
+
+static void stack_entry_free(hcr_stack_entry *e) {
+    free(e->signer); free(e->sig_b64); free(e->msg);
+    free(e->name); free(e->impl_hash); free(e->cas_hash);
+    memset(e, 0, sizeof(*e));
+}
+
+/* Append a copy; parses name/impl/cas out of [msg]. */
+static void stack_push(unsigned long long seq, uint32_t epoch, const char *signer,
+                       const char *sig, const char *msg) {
+    if (g_stack_n == g_stack_cap) {
+        size_t nc = g_stack_cap ? g_stack_cap * 2 : 16;
+        hcr_stack_entry *ns = (hcr_stack_entry *)realloc(g_stack, nc * sizeof(*ns));
+        if (!ns) return;
+        g_stack = ns; g_stack_cap = nc;
+    }
+    hcr_stack_entry *e = &g_stack[g_stack_n];
+    memset(e, 0, sizeof(*e));
+    e->seq = seq; e->epoch = epoch;
+    e->signer = strdup(signer && signer[0] ? signer : "-");
+    e->sig_b64 = strdup(sig ? sig : "");
+    e->msg = strdup(msg ? msg : "");
+    char name[256], impl[128], cas[128];
+    if (e->msg && parse_signed_fields(e->msg, name, impl, cas)) {
+        e->name = strdup(name); e->impl_hash = strdup(impl); e->cas_hash = strdup(cas);
+    }
+    g_stack_n++;
+}
+
+/* blake3 over "name <hash>\n" for every registered slot, where <hash> is
+ * the baseline impl hash ([current] = 0) or the running one (1). */
+static void slots_digest(int current, char out[65]) {
+    size_t cap = 4096, len = 0;
+    char *buf = (char *)malloc(cap);
+    if (!buf) { snprintf(out, 65, "%064d", 0); return; }
+    for (uint32_t i = 1; i < 65536; i++) {
+        const char *name = march_dispatch_id_to_name(i);
+        if (!name) break;
+        const char *h = current ? march_dispatch_impl_hash(i, march_dispatch_current(i))
+                                : march_dispatch_baseline_hash(i);
+        size_t need = strlen(name) + (h ? strlen(h) : 0) + 3;
+        if (len + need >= cap) {
+            while (len + need >= cap) cap *= 2;
+            char *nb = (char *)realloc(buf, cap);
+            if (!nb) break;
+            buf = nb;
+        }
+        len += (size_t)snprintf(buf + len, cap - len, "%s %s\n", name, h ? h : "");
+    }
+    march_blake3_hex((const unsigned char *)buf, len, out);
+    free(buf);
+}
+
+/* Rewrite the state file (temp + rename, as persist_next_epoch). */
+static void persist_state(void) {
+    if (!g_state_dir[0]) return;
+    mkdir_p(g_state_dir);
+    char path[800], tmp[820];
+    snprintf(path, sizeof(path), "%s/state", g_state_dir);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    fprintf(f, "# march-hcr-state v1\nbase %s\ntopology %s\nmanifest %s\nseq %llu\n",
+            g_base_digest, g_topology_digest, g_manifest_digest, g_stack_seq);
+    for (size_t i = 0; i < g_stack_n; i++) {
+        const hcr_stack_entry *e = &g_stack[i];
+        fprintf(f, "entry %llu %u %s %s %s\n", e->seq, e->epoch, e->signer,
+                e->sig_b64[0] ? e->sig_b64 : "-", e->msg);
+    }
+    int ok = fflush(f) == 0;
+    ok = (fclose(f) == 0) && ok;
+    if (ok) rename(tmp, path); else unlink(tmp);
+}
+
 /* ── CAS path helpers ────────────────────────────────────────────────── */
 
 /* Validate that s is exactly 64 lowercase-hex characters (CAS hash format). */
@@ -356,10 +519,10 @@ static void write_audit_log(const char *fn, const char *impl_hash,
     FILE *f = fopen(log_path, "a");
     if (!f) return;
     fprintf(f,
-        "{\"ts\":%lld,\"type\":\"activate\",\"fn\":\"%s\","
+        "{\"ts\":%lld,\"type\":\"%s\",\"fn\":\"%s\","
         "\"impl_hash\":\"%s\",\"signer\":\"%s\","
         "\"cas_hash\":\"%s\",",
-        ts_ms, fn ? fn : "", impl_hash ? impl_hash : "",
+        ts_ms, g_restoring ? "restore" : "activate", fn ? fn : "", impl_hash ? impl_hash : "",
         signer, cas_hash ? cas_hash : "");
     if (ac && ac->caps) {
         fputs("\"caps\":[", f);
@@ -472,6 +635,10 @@ typedef struct {
     uint32_t            epoch;
     int                 migrate;   /* MIGRATE_STATE | MIGRATE_MSGS */
     const audit_caps_t *ac;
+    /* The verified signed message and its signature, persisted into the
+     * host-local patch stack so a restart can re-verify and replay it.
+     * NULL on replay itself (the entry is already on the stack). */
+    const char         *signed_msg, *sig_b64;
 } act_item;
 
 /* Activate [n] functions as one deploy.  Returns 0 (OK), 1 (WAIT: nothing
@@ -535,7 +702,8 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
         }
     }
     march_hcr_wait w;
-    int e = march_hcr_activate(u, n, req, -1, -1, &w);
+    /* At replay nothing older runs yet: no drain to arm. */
+    int e = march_hcr_activate(u, n, req, g_restoring ? 0 : -1, g_restoring ? 0 : -1, &w);
     if (e == MARCH_HCR_WAIT) {
         snprintf(resp, rsz, "WAIT epoch:%u pins:%lld deadline_ms:%lld%s\n",
                  w.epoch, (long long)w.pins, (long long)w.deadline_ms,
@@ -561,6 +729,16 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
                 it[i].callers && it[i].callers[0] ? it[i].callers : NULL);
             write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac, "ok");
         }
+        /* The host-local patch stack (6.5): one deploy, one seq.  Replay
+         * records its own entries (replay_state). */
+        if (!g_restoring) {
+            unsigned long long seq = ++g_stack_seq;
+            for (int i = 0; i < n; i++)
+                if (it[i].signed_msg && it[i].signed_msg[0])
+                    stack_push(seq, (uint32_t)e, asigner, it[i].sig_b64, it[i].signed_msg);
+            slots_digest(1, g_manifest_digest);
+            persist_state();
+        }
     }
     free(u);
     return 0;
@@ -576,7 +754,7 @@ static void do_activate(int fd, const char *name, const char *impl_hash,
                         uint32_t activate_epoch, const char *callers_csv,
                         const audit_caps_t *ac) {
     act_item it = { name, impl_hash, cas_hash, callers_csv, activate_epoch,
-                    migrate, ac };
+                    migrate, ac, g_last_signed, g_last_sig };
     char resp[512];
     int r = activate_items(&it, 1, resp, sizeof(resp));
     if (r == 0) {
@@ -585,6 +763,205 @@ static void do_activate(int fd, const char *name, const char *impl_hash,
     } else {
         wresp(fd, resp);
     }
+}
+
+/* ── Replay of the persisted patch stack (plan 6.5) ─────────────────────── */
+
+/* 1 iff [sig_b64] is a valid signature over [msg] by the deploy key. */
+static int verify_signed_line(const char *msg, const char *sig_b64) {
+#if HAVE_SIGNING_KEY
+    if (!g_pubkey_loaded) return 0;
+    int all_zero = 1;
+    for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
+    if (all_zero) return 0;
+    unsigned char sigbytes[64];
+    size_t sl = strlen(sig_b64);
+    if (sl > 128) return 0;
+    if (b64_decode(sig_b64, sl, sigbytes) != 64) return 0;
+    size_t mlen = strlen(msg);
+    unsigned char *sm = (unsigned char *)malloc(mlen + 64);
+    unsigned char *mo = (unsigned char *)malloc(mlen + 64);
+    if (!sm || !mo) { free(sm); free(mo); return 0; }
+    memcpy(sm, sigbytes, 64);
+    memcpy(sm + 64, msg, mlen);
+    unsigned long long olen = 0;
+    int rc = crypto_sign_open(mo, &olen, sm, (unsigned long long)(mlen + 64), g_pubkey);
+    free(sm); free(mo);
+    return rc == 0;
+#else
+    (void)msg; (void)sig_b64;
+    return 0;
+#endif
+}
+
+/* Set the current state file aside as <state>.<suffix>. */
+static void set_state_aside(const char *suffix) {
+    char path[800], dst[840];
+    snprintf(path, sizeof(path), "%s/state", g_state_dir);
+    snprintf(dst, sizeof(dst), "%s.%s", path, suffix);
+    rename(path, dst);
+}
+
+static void replay_state(const char *socket_path) {
+    /* The state directory: one per service (socket path). */
+    char key[65];
+    march_blake3_hex((const unsigned char *)socket_path, strlen(socket_path), key);
+    snprintf(g_state_dir, sizeof(g_state_dir), "%s/hcr_state/%.16s", g_cas_root, key);
+    slots_digest(0, g_base_digest);
+    slots_digest(1, g_manifest_digest);
+
+    char path[800];
+    snprintf(path, sizeof(path), "%s/state", g_state_dir);
+    FILE *f = fopen(path, "r");
+    if (!f) return;                       /* first start of this service */
+
+    /* Parse.  Entries are kept in file order (ascending seq). */
+    char base[80] = "", topo[80] = "-";
+    unsigned long long file_seq = 0;
+    hcr_stack_entry *ents = NULL;
+    size_t n = 0, cap = 0;
+    int malformed = 0;
+    char *line = (char *)malloc(RELOAD_LINE_MAX + 1024);
+    if (!line) { fclose(f); return; }
+    while (fgets(line, RELOAD_LINE_MAX + 1024, f)) {
+        size_t len = strlen(line);
+        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
+        if (!len || line[0] == '#') continue;
+        if (strncmp(line, "base ", 5) == 0) { snprintf(base, sizeof(base), "%s", line + 5); continue; }
+        if (strncmp(line, "topology ", 9) == 0) { snprintf(topo, sizeof(topo), "%s", line + 9); continue; }
+        if (strncmp(line, "manifest ", 9) == 0) continue;
+        if (strncmp(line, "seq ", 4) == 0) { file_seq = strtoull(line + 4, NULL, 10); continue; }
+        unsigned long long seq; unsigned ep; char signer[80], sig[160]; int off = 0;
+        if (strncmp(line, "entry ", 6) != 0
+            || sscanf(line + 6, "%llu %u %79s %159s %n", &seq, &ep, signer, sig, &off) < 4
+            || off <= 0 || !line[6 + off]) {
+            malformed++;
+            continue;
+        }
+        if (n == cap) {
+            size_t nc = cap ? cap * 2 : 16;
+            hcr_stack_entry *ne = (hcr_stack_entry *)realloc(ents, nc * sizeof(*ne));
+            if (!ne) break;
+            ents = ne; cap = nc;
+        }
+        hcr_stack_entry *e = &ents[n++];
+        memset(e, 0, sizeof(*e));
+        e->seq = seq; e->epoch = ep;
+        e->signer = strdup(signer); e->sig_b64 = strdup(sig); e->msg = strdup(line + 6 + off);
+        char nm[256], im[128], cs[128];
+        if (e->msg && parse_signed_fields(e->msg, nm, im, cs)) {
+            e->name = strdup(nm); e->impl_hash = strdup(im); e->cas_hash = strdup(cs);
+        }
+    }
+    free(line);
+    fclose(f);
+    if (strcmp(topo, "-") != 0 && is_hex64(topo)) snprintf(g_topology_digest, sizeof(g_topology_digest), "%s", topo);
+
+    g_restoring = 1;
+    const char *nr = getenv("MARCH_HCR_NO_REPLAY");
+    if (strcmp(base, g_base_digest) != 0) {
+        /* A different build now serves this socket: its patches are not
+         * patches of this binary. */
+        g_restored_mode = "base_changed";
+        g_restored_skipped = (int)n + malformed;
+        write_audit_log("(stack)", "", "", NULL, "base_changed");
+        set_state_aside("base-changed");
+    } else if (nr && nr[0] && strcmp(nr, "0") != 0) {
+        g_restored_mode = "off";
+        g_restored_skipped = (int)n + malformed;
+        write_audit_log("(stack)", "", "", NULL, "no_replay");
+        set_state_aside("no-replay");
+    } else {
+        g_restored_mode = "replayed";
+        g_stack_seq = file_seq;
+        for (int m = 0; m < malformed; m++) {
+            write_audit_log("(malformed)", "", "", NULL, "err_restore_malformed");
+            fprintf(stderr, "[hcr] restore: skipped a malformed patch-stack entry\n");
+        }
+        g_restored_skipped += malformed;
+        /* Validate every entry; a bad one is skipped with an audit line. */
+        char *ok = (char *)calloc(n ? n : 1, 1);
+        for (size_t i = 0; ok && i < n; i++) {
+            hcr_stack_entry *e = &ents[i];
+            const char *why = NULL;
+            uint32_t slot;
+            char cpath[640];
+            if (!e->name) why = "err_restore_malformed";
+            else if (!verify_signed_line(e->msg, e->sig_b64)) why = "err_restore_sig";
+            else if (!march_dispatch_name_to_id(e->name, &slot)) why = "err_restore_unknown_name";
+            else {
+                cas_artifact_path(cpath, sizeof(cpath), e->cas_hash);
+                if (access(cpath, F_OK) != 0) why = "err_restore_cas_miss";
+            }
+            if (why) {
+                write_audit_log(e->name ? e->name : "(malformed)", e->impl_hash, e->cas_hash, NULL, why);
+                fprintf(stderr, "[hcr] restore: skipped patch-stack entry %s (%s)\n",
+                        e->name ? e->name : "(malformed)", why);
+                g_restored_skipped++;
+            } else {
+                ok[i] = 1;
+            }
+        }
+        /* Only each function's newest valid entry is republished. */
+        for (size_t i = 0; ok && i < n; i++) {
+            if (!ok[i]) continue;
+            for (size_t j = i + 1; j < n; j++)
+                if (ok[j] && strcmp(ents[j].name, ents[i].name) == 0) { ok[i] = 0; break; }
+        }
+        /* One activation per deploy (seq), in order. */
+        size_t i = 0;
+        while (ok && i < n) {
+            size_t j = i;
+            while (j < n && ents[j].seq == ents[i].seq) j++;
+            act_item *items = (act_item *)calloc(j - i, sizeof(*items));
+            size_t *idx = (size_t *)calloc(j - i, sizeof(*idx));
+            if (!items || !idx) { free(items); free(idx); break; }
+            int k = 0;
+            uint32_t ep = 0;
+            for (size_t x = i; x < j; x++) {
+                if (!ok[x]) continue;
+                const char *cp = strstr(ents[x].msg, " callers:");
+                items[k] = (act_item){ ents[x].name, ents[x].impl_hash, ents[x].cas_hash,
+                                       cp && cp[9] ? cp + 9 : NULL, ents[x].epoch, 0,
+                                       NULL, NULL, NULL };
+                if (ents[x].epoch > ep) ep = ents[x].epoch;
+                idx[k++] = x;
+            }
+            if (k > 0) {
+                char resp[512];
+                int r = activate_items(items, k, resp, sizeof(resp));
+                if (r == 0) {
+                    uint32_t cur = march_epoch_current();
+                    for (int y = 0; y < k; y++) {
+                        hcr_stack_entry *e = &ents[idx[y]];
+                        stack_push(e->seq, cur, e->signer, e->sig_b64, e->msg);
+                    }
+                    g_restored_entries += k;
+                } else {
+                    size_t rl = strlen(resp);
+                    if (rl && resp[rl - 1] == '\n') resp[rl - 1] = '\0';
+                    fprintf(stderr, "[hcr] restore: deploy %llu not republished (%s)\n",
+                            ents[i].seq, resp);
+                    for (int y = 0; y < k; y++)
+                        write_audit_log(items[y].name, items[y].impl_hash, items[y].cas_hash,
+                                        NULL, r == 1 ? "err_restore_wait" : "err_restore_publish");
+                    g_restored_skipped += k;
+                }
+            }
+            (void)ep;
+            free(items); free(idx);
+            i = j;
+        }
+        free(ok);
+        if (g_restored_entries || g_restored_skipped)
+            fprintf(stderr, "[hcr] restore: republished %d patch(es), skipped %d\n",
+                    g_restored_entries, g_restored_skipped);
+    }
+    g_restoring = 0;
+    for (size_t i = 0; i < n; i++) stack_entry_free(&ents[i]);
+    free(ents);
+    slots_digest(1, g_manifest_digest);
+    if (strcmp(g_restored_mode, "replayed") == 0) persist_state();
 }
 
 /* ── ACTIVATE4: cap_root admission (Phase5C-C.3) ───────────────────────── */
@@ -896,6 +1273,8 @@ static void handle_client(int fd) {
         char    *caps;       /* ACTIVATE4 only (heap, may be ""); NULL otherwise */
         char    *cap_root;   /* ACTIVATE4 only (heap); NULL otherwise */
         char    *roles;      /* ACTIVATE6 only (heap); NULL otherwise */
+        char    *signed_msg; /* the verified signed line (heap), persisted */
+        char    *sig_b64;    /* its signature (heap) */
     } staged[MARCH_MAX_BATCH];
     int n_staged  = 0;
     int in_batch  = 0;
@@ -987,6 +1366,16 @@ static void handle_client(int fd) {
                                  "COUNTERS deferred:%lld converted:%lld dropped:%lld killed:%lld\n",
                                  (long long)c.deferred, (long long)c.converted,
                                  (long long)c.dropped, (long long)c.killed);
+                write_safe(fd, resp, n, sizeof(resp));
+            }
+            {
+                /* Plan 6.5: what the last start restored from the host's
+                 * persisted patch stack (parsers skip non-SLOT lines). */
+                char resp[320];
+                int n = snprintf(resp, sizeof(resp),
+                                 "RESTORED entries:%d skipped:%d mode:%s stack:%zu manifest:%s topology:%s\n",
+                                 g_restored_entries, g_restored_skipped, g_restored_mode,
+                                 g_stack_n, g_manifest_digest, g_topology_digest);
                 write_safe(fd, resp, n, sizeof(resp));
             }
             wresp(fd, "END\n");
@@ -1082,6 +1471,7 @@ static void handle_client(int fd) {
                 write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
                 wresp(fd, "ERR bad_signature\n"); continue;
             }
+            remember_signed(signed_msg, (size_t)smlen, sig_b64);
 #else
             (void)sig_b64;
             write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
@@ -1189,6 +1579,7 @@ static void handle_client(int fd) {
                 write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
                 wresp(fd, "ERR bad_signature\n"); continue;
             }
+            remember_signed(signed_msg, (size_t)smlen, sig_b64);
 #else
             (void)sig_b64;
             write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
@@ -1294,6 +1685,7 @@ static void handle_client(int fd) {
                 write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
                 wresp(fd, "ERR bad_signature\n"); continue;
             }
+            remember_signed(signed_msg, (size_t)smlen, sig_b64);
 #else
             (void)sig_b64;
             write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
@@ -1317,6 +1709,8 @@ static void handle_client(int fd) {
                 staged[n_staged].caps     = NULL;   /* no cap data pre-ACTIVATE4 */
                 staged[n_staged].cap_root = NULL;
                 staged[n_staged].roles    = NULL;
+                staged[n_staged].signed_msg = strdup(g_last_signed);
+                staged[n_staged].sig_b64    = strdup(g_last_sig);
                 n_staged++;
                 char resp[256];
                 int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
@@ -1518,6 +1912,7 @@ static void handle_client(int fd) {
                 write_audit_log(name, impl_hash, cas_hash, &ac4, "err_sig");
                 wresp(fd, "ERR bad_signature\n"); continue;
             }
+            remember_signed(signed_msg, (size_t)smlen, sig_b64);
 #else
             (void)sig_b64;
             write_audit_log(name, impl_hash, cas_hash, &ac4, "err_sig");
@@ -1618,6 +2013,8 @@ static void handle_client(int fd) {
                 staged[n_staged].caps     = strdup(caps_buf);
                 staged[n_staged].cap_root = strdup(cap_root);
                 staged[n_staged].roles    = roles_buf ? strdup(roles_buf) : NULL;
+                staged[n_staged].signed_msg = strdup(g_last_signed);
+                staged[n_staged].sig_b64    = strdup(g_last_sig);
                 n_staged++;
                 char resp[256];
                 int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
@@ -1663,6 +2060,8 @@ static void handle_client(int fd) {
                 items[i].epoch     = staged[i].epoch;
                 items[i].migrate   = staged[i].migrate_required;
                 items[i].ac        = staged[i].caps ? &acs[i] : NULL;
+                items[i].signed_msg = staged[i].signed_msg;
+                items[i].sig_b64    = staged[i].sig_b64;
             }
             char resp[512];
             int r = n_staged ? activate_items(items, n_staged, resp, sizeof(resp)) : 0;
@@ -1674,6 +2073,7 @@ static void handle_client(int fd) {
             int committed = r == 0 ? n_staged : 0;
             for (int k = 0; k < n_staged; k++) {
                 free(staged[k].caps); free(staged[k].cap_root); free(staged[k].roles);
+        free(staged[k].signed_msg); free(staged[k].sig_b64);
             }
             in_batch = 0; n_staged = 0;
             if (r == 0) {
@@ -1732,6 +2132,7 @@ static void handle_client(int fd) {
         } else if (strcmp(line, "ROLLBACK_BATCH") == 0) {
             for (int k = 0; k < n_staged; k++) {
                 free(staged[k].caps); free(staged[k].cap_root); free(staged[k].roles);
+        free(staged[k].signed_msg); free(staged[k].sig_b64);
             }
             in_batch = 0; n_staged = 0;
             wresp(fd, "OK\n");
@@ -1743,6 +2144,7 @@ static void handle_client(int fd) {
     /* Discard any uncommitted staged activations (connection dropped mid-batch) */
     for (int k = 0; k < n_staged; k++) {
         free(staged[k].caps); free(staged[k].cap_root); free(staged[k].roles);
+        free(staged[k].signed_msg); free(staged[k].sig_b64);
     }
     close(fd);
 }
@@ -1797,10 +2199,20 @@ void march_reload_server_start(const char *socket_path) {
     else
         snprintf(g_cas_root, sizeof(g_cas_root), "/tmp/.march_cas");
 
+#if HAVE_SIGNING_KEY
+    load_pubkey_from_hex();
+#endif
+    /* Plan 6.5: come back on the code this host was running, before `main`
+     * gets control back (and so before it opens any offer). */
+    replay_state(g_socket_path);
+
     pthread_t tid;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    /* The handler frame holds a 256-entry batch array and 16 KiB lines;
+     * macOS gives secondary threads 512 KiB by default. */
+    pthread_attr_setstacksize(&attr, 4u << 20);
     pthread_create(&tid, &attr, reload_server_thread, NULL);
     pthread_attr_destroy(&attr);
 }

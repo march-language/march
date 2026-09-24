@@ -11706,7 +11706,7 @@ let e2e_activate6 conn ~sk ~(manifest : March_forge.Cmd_deploy_hot.manifest) ~fn
        (String.concat "," (List.sort String.compare fm.H.fn_caps)) roles callers);
   H.recv_line conn
 
-let with_reload_server ~dir ~bin ~sock ~extra_env f =
+let with_reload_server ?(stop = Sys.sigterm) ~dir ~bin ~sock ~extra_env f =
   let env = Array.append [|
       "MARCH_HOT_RELOAD_SOCKET=" ^ sock;
       "HOME=" ^ dir;
@@ -11718,7 +11718,7 @@ let with_reload_server ~dir ~bin ~sock ~extra_env f =
   Unix.close log;
   Fun.protect
     ~finally:(fun () ->
-        (try Unix.kill pid Sys.sigterm with Unix.Unix_error _ -> ());
+        (try Unix.kill pid stop with Unix.Unix_error _ -> ());
         (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ());
         (try Sys.remove sock with Sys_error _ -> ()))
     (fun () -> f pid)
@@ -11757,7 +11757,8 @@ let test_hcr_role_widening_refused_end_to_end () =
     output_string oc "IO.Console\nIO.NetConnect\nIO.NetListen\nSession.Live\n";
     close_out oc;
     let sock = Printf.sprintf "/tmp/march_role_e2e_%d.sock" (Unix.getpid ()) in
-    with_reload_server ~dir ~bin ~sock ~extra_env:[| "MARCH_DEPLOY_POLICY=" ^ policy |]
+    let admitted = ref "" in
+    with_reload_server ~stop:Sys.sigkill ~dir ~bin ~sock ~extra_env:[| "MARCH_DEPLOY_POLICY=" ^ policy |]
       (fun _pid ->
          match e2e_connect sock with
          | None -> Alcotest.failf "reload server never listened on %s (see %s/server.log)" sock dir
@@ -11781,7 +11782,38 @@ let test_hcr_role_widening_refused_end_to_end () =
            let resp = e2e_activate6 conn ~sk ~manifest:prior ~fn_name:target in
            Alcotest.(check bool) ("a closure inside the policy is admitted: " ^ resp) true
              (String.length resp >= 3 && String.sub resp 0 3 = "OK ");
-           Unix.close fd)
+           admitted := target;
+           Unix.close fd);
+    (* 3. Restart durability (plan 6.5): the server was SIGKILLed; the same
+       binary on the same socket comes back with the admitted patch
+       republished from its persisted stack (the refused one was never
+       persisted), with no redeploy. *)
+    with_reload_server ~dir ~bin ~sock ~extra_env:[||] (fun _pid ->
+        match e2e_connect sock with
+        | None -> Alcotest.failf "restarted server never listened on %s" sock
+        | Some fd ->
+          let conn = H.conn_of_fd fd in
+          H.send_line conn "VERSIONS_DETAIL";
+          let rec read acc = match H.recv_line conn with
+            | "END" -> List.rev acc | l -> read (l :: acc) in
+          let lines = read [] in
+          Unix.close fd;
+          Alcotest.(check bool)
+            ("the restart restored one patch: " ^ String.concat " | " (List.filter (fun l ->
+                 String.length l > 8 && String.sub l 0 8 = "RESTORED") lines))
+            true
+            (List.exists (fun l ->
+                 let p = "RESTORED entries:1 skipped:0 mode:replayed" in
+                 String.length l >= String.length p && String.sub l 0 (String.length p) = p) lines);
+          let slot = List.find_opt (fun l ->
+              match String.split_on_char ' ' l with
+              | "SLOT" :: _ :: name :: _ -> name = !admitted | _ -> false) lines in
+          (match Option.map (String.split_on_char ' ') slot with
+           | Some ("SLOT" :: _ :: _ :: _ :: ts :: signer :: _) ->
+             Alcotest.(check bool) "the restored slot carries its activation time" true (ts <> "0");
+             Alcotest.(check string) "and the deploy key as signer"
+               (March_ed25519.Ed25519.pk_to_hex pk) signer
+           | _ -> Alcotest.failf "no SLOT line for %s" !admitted))
   | _ -> ()  (* toolchain missing: counted skip inside compile_march_or_skip *)
 
 (* C1 fix (final whole-branch review, HCR Phase 5C): actor handler caps were
