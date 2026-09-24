@@ -33,16 +33,53 @@ type fn_manifest = {
                            capless function legitimately has fn_caps = []. *)
 }
 
+(** One [ROLE <Proto.Role> caps=<csv> [via=<cap>:<frame>>...;...]] line
+    (distributed-deploys build step 10): a role's FULL capability closure,
+    everything its code reaches, from the same solve the compiler's
+    [check_role_grants] runs.  [role_chains] maps a cap of the closure to its
+    reach chain (callback position first), when the compiler recorded one. *)
+type role_manifest = {
+  role_name   : string;
+  role_caps   : string list;
+  role_chains : (string * string list) list;
+}
+
 type manifest = {
   cas_hash  : string;
   functions : fn_manifest list;
+  roles     : role_manifest list;  (** [] for a manifest written before step 10 *)
 }
+
+(** Parse the fields after [ROLE <name>]: [caps=<csv>] and [via=...]. *)
+let parse_role_line (rest : string list) (name : string) : role_manifest =
+  let field prefix =
+    let pl = String.length prefix in
+    List.find_map (fun f ->
+        if String.length f >= pl && String.sub f 0 pl = prefix
+        then Some (String.sub f pl (String.length f - pl)) else None) rest
+  in
+  let csv = function None | Some "" -> [] | Some s -> String.split_on_char ',' s in
+  let chains =
+    match field "via=" with
+    | None | Some "" -> []
+    | Some s ->
+      List.filter_map (fun entry ->
+          match String.index_opt entry ':' with
+          | Some i ->
+            let cap = String.sub entry 0 i in
+            let chain = String.sub entry (i + 1) (String.length entry - i - 1) in
+            Some (cap, if chain = "" then [] else String.split_on_char '>' chain)
+          | None -> None)
+        (String.split_on_char ';' s)
+  in
+  { role_name = name; role_caps = csv (field "caps="); role_chains = chains }
 
 let parse_manifest path : (manifest, string) result =
   try
     let ic = open_in path in
     let cas_hash = ref "" in
     let fns = ref [] in
+    let roles = ref [] in
     (try while true do
        let line = String.trim (input_line ic) in
        if String.length line = 0 || line.[0] = '#' then begin
@@ -56,6 +93,10 @@ let parse_manifest path : (manifest, string) result =
             otherwise fall into the FN-line branches below and fabricate a
             phantom function named "ROOT". *)
          ()
+       end else if String.length line >= 5 && String.sub line 0 5 = "ROLE " then begin
+         (match String.split_on_char ' ' line with
+          | _ :: name :: rest when name <> "" -> roles := parse_role_line rest name :: !roles
+          | _ -> ())
        end else begin
          let has_prefix field prefix =
            let plen = String.length prefix in
@@ -107,7 +148,7 @@ let parse_manifest path : (manifest, string) result =
      done with End_of_file -> ());
     close_in ic;
     if !cas_hash = "" then Error (path ^ ": missing # cas_hash line")
-    else Ok { cas_hash = !cas_hash; functions = List.rev !fns }
+    else Ok { cas_hash = !cas_hash; functions = List.rev !fns; roles = List.rev !roles }
   with Sys_error m -> Error m
 
 (** True iff [manifest] is a genuine pre-Phase-5C legacy manifest — i.e. NO

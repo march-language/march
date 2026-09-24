@@ -7494,46 +7494,19 @@ let find_role_roots (env : env) : role_root list =
     env.fn_row_bodies;
   List.rev !roots
 
-let check_role_grants (env : env) (decls : Ast.decl list) : unit =
-  if Hashtbl.length env.role_grants = 0 then ()
+(* The solve [check_role_grants] runs, shared with [role_capability_closures]
+   (the hot-deploy manifest's `ROLE` lines, build step 10): one synthetic row
+   key per root (see the comment above [dump_role_authority] for why the key
+   looks the way it does), solved by [Cap_rows.solve] over COPIES of the
+   tables.  [None] when there is no root. *)
+let solve_role_roots (env : env)
+  : ((string * role_root) list
+     * (string, string list) Hashtbl.t
+     * (string, string list) Hashtbl.t
+     * (string, March_caps.Cap_rows.row) Hashtbl.t) option =
+  let roots = find_role_roots env in
+  if roots = [] then None
   else begin
-    (* 4. Every role's grant fits within `main`'s (section 2, "Relation to
-       `main`").  Only IO-lattice caps are compared, as [check_main_grant]
-       compares; a module without a `main` (a library) is bounded by whoever
-       links it. *)
-    (match main_grant_of_decls decls with
-     | None -> ()
-     | Some (main_grants, _) ->
-       Hashtbl.iter
-         (fun (proto, role) (caps, sp) ->
-            List.iter
-              (fun c ->
-                 if not (cap_subsumes "IO" c) then ()
-                 else if List.exists (fun g -> cap_subsumes g c) main_grants then ()
-                 else
-                   let show_main =
-                     match main_grants with
-                     | [] -> "nothing (`main` has no capability parameter)"
-                     | gs -> String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) gs)
-                   in
-                   let leaf =
-                     match String.rindex_opt c '.' with
-                     | Some i -> String.sub c (i + 1) (String.length c - i - 1)
-                     | None -> c
-                   in
-                   Err.error env.errors ~span:sp
-                     (Printf.sprintf
-                        "Protocol `%s`: `role %s needs %s` is wider than `main`'s grant, which is %s. \
-                         A role's grant must fit within the program's: the runner narrows the role's \
-                         capabilities from what `main` holds.\n\
-                         help: add a `Cap(%s)` parameter to `main` (e.g. `_cap_%s : Cap(%s)`), or take \
-                         `%s` out of the role's grant."
-                        proto role c show_main c (String.lowercase_ascii leaf) c c))
-              caps)
-         env.role_grants);
-    let roots = find_role_roots env in
-    if roots = [] then ()
-    else begin
       let own = Hashtbl.copy env.own_cap_closures in
       let refs = Hashtbl.copy env.fn_refs in
       (* A builtin called directly in the callback body, unless a user
@@ -7573,6 +7546,50 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
       let rows =
         March_caps.Cap_rows.solve ~with_rows:false ~own_caps:own ~refs ~seeds:(Hashtbl.create 1) ()
       in
+      Some (keyed, own, refs, rows)
+  end
+
+let check_role_grants (env : env) (decls : Ast.decl list) : unit =
+  if Hashtbl.length env.role_grants = 0 then ()
+  else begin
+    (* 4. Every role's grant fits within `main`'s (section 2, "Relation to
+       `main`").  Only IO-lattice caps are compared, as [check_main_grant]
+       compares; a module without a `main` (a library) is bounded by whoever
+       links it. *)
+    (match main_grant_of_decls decls with
+     | None -> ()
+     | Some (main_grants, _) ->
+       Hashtbl.iter
+         (fun (proto, role) (caps, sp) ->
+            List.iter
+              (fun c ->
+                 if not (cap_subsumes "IO" c) then ()
+                 else if List.exists (fun g -> cap_subsumes g c) main_grants then ()
+                 else
+                   let show_main =
+                     match main_grants with
+                     | [] -> "nothing (`main` has no capability parameter)"
+                     | gs -> String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) gs)
+                   in
+                   let leaf =
+                     match String.rindex_opt c '.' with
+                     | Some i -> String.sub c (i + 1) (String.length c - i - 1)
+                     | None -> c
+                   in
+                   Err.error env.errors ~span:sp
+                     (Printf.sprintf
+                        "Protocol `%s`: `role %s needs %s` is wider than `main`'s grant, which is %s. \
+                         A role's grant must fit within the program's: the runner narrows the role's \
+                         capabilities from what `main` holds.\n\
+                         help: add a `Cap(%s)` parameter to `main` (e.g. `_cap_%s : Cap(%s)`), or take \
+                         `%s` out of the role's grant."
+                        proto role c show_main c (String.lowercase_ascii leaf) c c))
+              caps)
+         env.role_grants);
+    match solve_role_roots env with
+    | None -> ()
+    | Some (keyed, own, refs, rows) ->
+    begin
       let caps_of k = match Hashtbl.find_opt rows k with Some (row : March_caps.Cap_rows.row) -> row.caps | None -> [] in
       let label (r : role_root) = Printf.sprintf "the %s passed to `%s`" r.rr_what r.rr_front in
       List.iter
@@ -7695,6 +7712,79 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
           keyed
       end
     end
+  end
+
+(* ── Per-role capability closures for the hot-deploy manifest ─────────────
+   (build step 10, plan II.2 "Hot deploys" and section 5 "Admission").  For
+   every role with a grant (`role R needs ...`), its FULL capability closure:
+   the union, over every root of that role, of the IO caps [solve_role_roots]
+   solves, i.e. everything the role's code reaches, not a changed function's
+   own caps.  Normalized with [Cap_lattice.normalize] and sorted, so the
+   writer and the reload server's root recompute agree byte for byte.  Only
+   the IO lattice, as [check_role_grants] judges: proof caps such as
+   `Session.Live` are not authority a node policy grants.
+
+   Each entry is [(proto ^ "." ^ role, closure, chains)], where [chains]
+   gives, per cap of the closure, the first root's reach chain as
+   [check_role_grants] prints it (the callback position first, then the
+   frames down to the holder), so a deploy that widens the closure can name
+   the path.  A role granted but never run (no root) has an empty closure.
+   Sorted by role. *)
+let role_capability_closures (env : env)
+  : (string * string list * (string * string list) list) list =
+  if Hashtbl.length env.role_grants = 0 then []
+  else begin
+    let solved = solve_role_roots env in
+    let per_role : (string, (string * role_root) list) Hashtbl.t = Hashtbl.create 8 in
+    (match solved with
+     | None -> ()
+     | Some (keyed, _, _, _) ->
+       List.iter
+         (fun ((_, r) as kr) ->
+            let k = r.rr_proto ^ "." ^ r.rr_role in
+            Hashtbl.replace per_role k
+              (Option.value ~default:[] (Hashtbl.find_opt per_role k) @ [ kr ]))
+         keyed);
+    let names =
+      Hashtbl.fold (fun (proto, role) _ acc -> (proto ^ "." ^ role) :: acc) env.role_grants []
+      |> List.sort_uniq String.compare
+    in
+    List.map
+      (fun name ->
+         match solved with
+         | None -> (name, [], [])
+         | Some (_, own, refs, rows) ->
+           let roots = Option.value ~default:[] (Hashtbl.find_opt per_role name) in
+           let caps_of k =
+             match Hashtbl.find_opt rows k with
+             | Some (row : March_caps.Cap_rows.row) -> row.caps
+             | None -> []
+           in
+           let io = List.concat_map (fun (k, _) -> List.filter (cap_subsumes "IO") (caps_of k)) roots in
+           let closure =
+             List.sort String.compare (March_caps.Cap_lattice.normalize (List.sort_uniq String.compare io))
+           in
+           let chains =
+             List.filter_map
+               (fun c ->
+                  List.find_map
+                    (fun (k, r) ->
+                       (* the root's row may hold [c] itself or a narrower cap
+                          that [normalize] folded into it *)
+                       let held =
+                         List.find_opt (fun x -> cap_subsumes c x) (caps_of k)
+                       in
+                       match held with
+                       | None -> None
+                       | Some x -> (
+                         match cap_reach_chain ~own_caps:own ~fn_refs:refs env ~from:k ~cap:x with
+                         | Some (_ :: _ as chain) -> Some (c, r.rr_what :: chain)
+                         | _ -> None))
+                    roots)
+               closure
+           in
+           (name, closure, chains))
+      names
   end
 
 (* ── R1 stage C: per-function grants — REMOVED 2026-08-13 ──────────────────

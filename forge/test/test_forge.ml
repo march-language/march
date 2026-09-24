@@ -1301,6 +1301,37 @@ let test_parse_manifest_caps_empty () =
          | [fm] -> Alcotest.(check (list string)) "no caps" [] fm.Cmd_deploy_hot.fn_caps
          | _ -> Alcotest.fail "expected exactly one function"))
 
+(* DD build step 10: ROLE lines carry each role's full closure. *)
+let test_parse_manifest_role_lines () =
+  with_manifest_file
+    [cas_hash_line; "MyApp.f implhash sighash caps=IO.Console";
+     "ROLE Stream.Cons caps=IO.Console,IO.FileWrite via=IO.Console:body>cons;IO.FileWrite:body>cons>save";
+     "ROLE Stream.Prod caps="]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        Alcotest.(check int) "ROLE lines are not functions" 1
+          (List.length m.Cmd_deploy_hot.functions);
+        (match m.Cmd_deploy_hot.roles with
+         | [c; p] ->
+           Alcotest.(check string) "role name" "Stream.Cons" c.Cmd_deploy_hot.role_name;
+           Alcotest.(check (list string)) "closure"
+             ["IO.Console"; "IO.FileWrite"] c.Cmd_deploy_hot.role_caps;
+           Alcotest.(check (list string)) "chain"
+             ["body"; "cons"; "save"]
+             (List.assoc "IO.FileWrite" c.Cmd_deploy_hot.role_chains);
+           Alcotest.(check string) "second role" "Stream.Prod" p.Cmd_deploy_hot.role_name;
+           Alcotest.(check (list string)) "empty closure" [] p.Cmd_deploy_hot.role_caps
+         | rs -> Alcotest.failf "expected two roles, got %d" (List.length rs)))
+
+let test_parse_manifest_legacy_has_no_roles () =
+  with_manifest_file [cas_hash_line; "MyApp.f implhash sighash caps="]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m -> Alcotest.(check int) "no roles" 0 (List.length m.Cmd_deploy_hot.roles))
+
 let test_gate_no_prior_is_permissive () =
   (* No baseline file at all -> caller treats prior_caps as empty / gate skipped.
      At the pure-function level, computing widening against an empty prior
@@ -1394,7 +1425,7 @@ let test_scoped_caps_new_function_compares_against_empty () =
      entirely (e.g. newly added this deploy) -> its caps compare against
      [], so ALL its caps show up as widening. *)
   let to_activate = [ fm ~name:"MyApp.brand_new" ~caps:["IO.Console"; "IO.FileWrite"] ] in
-  let prior_manifest = { Cmd_deploy_hot.cas_hash = "cas"; functions = [] } in
+  let prior_manifest = { Cmd_deploy_hot.cas_hash = "cas"; functions = []; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
   Alcotest.(check (list string)) "new fn has no prior caps" [] prior_caps;
@@ -1406,7 +1437,7 @@ let test_scoped_caps_existing_function_adds_cap_widens () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] in
   let prior_manifest =
     { Cmd_deploy_hot.cas_hash = "cas";
-      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] } in
+      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ]; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
   let widening = Cmd_deploy_hot.compute_cap_widening ~prior:prior_caps ~new_caps in
@@ -1418,7 +1449,7 @@ let test_scoped_caps_existing_function_drops_cap_narrows () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] in
   let prior_manifest =
     { Cmd_deploy_hot.cas_hash = "cas";
-      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] } in
+      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ]; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
   let widening = Cmd_deploy_hot.compute_cap_widening ~prior:prior_caps ~new_caps in
@@ -1432,7 +1463,7 @@ let test_scoped_caps_existing_function_adds_subsumed_cap_no_widen () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Network"; "IO.NetConnect"] ] in
   let prior_manifest =
     { Cmd_deploy_hot.cas_hash = "cas";
-      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Network"] ] } in
+      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Network"] ]; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
   Alcotest.(check (list string)) "subsumed cap dropped from new_caps" ["IO.Network"] new_caps;
@@ -1709,13 +1740,15 @@ let manifest_with_caps =
   { Cmd_deploy_hot.cas_hash = String.make 64 'a';
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
-        fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true } ] }
+        fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true } ];
+    roles = [] }
 
 let legacy_manifest =
   { Cmd_deploy_hot.cas_hash = String.make 64 'a';
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
-        fn_callers = []; fn_caps = []; fn_has_caps = false } ] }
+        fn_callers = []; fn_caps = []; fn_has_caps = false } ];
+    roles = [] }
 
 let test_branch_caps_present_no_flag_selects_activate4 () =
   Alcotest.(check bool) "ACTIVATE4 selected" true
@@ -2574,6 +2607,8 @@ let () =
       Alcotest.test_case "parse_manifest: caps= (no callers)"  `Quick test_parse_manifest_caps_no_callers;
       Alcotest.test_case "parse_manifest: caps= (with callers)" `Quick test_parse_manifest_caps_with_callers;
       Alcotest.test_case "parse_manifest: caps= empty"          `Quick test_parse_manifest_caps_empty;
+      Alcotest.test_case "parse_manifest: ROLE lines"            `Quick test_parse_manifest_role_lines;
+      Alcotest.test_case "parse_manifest: legacy has no roles"   `Quick test_parse_manifest_legacy_has_no_roles;
       Alcotest.test_case "gate: empty prior -> all new caps 'widen'" `Quick test_gate_no_prior_is_permissive;
       Alcotest.test_case "gate: pure narrowing allowed"         `Quick test_gate_pure_narrowing_allowed;
       Alcotest.test_case "gate: narrowing uses subsumption, root cap covers prior specific" `Quick test_gate_narrowing_root_cap_covers_prior_specific_not_misreported;

@@ -3562,7 +3562,14 @@ let compile filename =
            unable to discriminate between artifacts.  There is no
            artifact-wide ROOT cap_root line any more; cap_root is computed
            per-function downstream by the deploy tool from that function's
-           own caps= field. *)
+           own caps= field.
+           ROLE <Proto.Role> caps=<sorted-csv> [via=<cap>:<frame>>...;...]
+           (distributed-deploys build step 10) follows the function lines:
+           one per role with a `role R needs ...` grant, its FULL capability
+           closure (everything the role's code reaches), normalized and
+           sorted, from March_typecheck.Typecheck.role_capability_closures.
+           forge's per-role widening gate compares it with the baseline, and
+           ACTIVATE6 signs a root over it for the server's admission gate. *)
         (if !compile_so && Hashtbl.length hr_impl_hashes > 0 then begin
           (* Per-fn OWN cap closures, keyed by qualified name ("Mod.fn").
              fn_own_capability_closures returns each function's own caps
@@ -3673,6 +3680,20 @@ let compile filename =
                let caps_field = "caps=" ^ String.concat "," (caps_for name) in
                Printf.fprintf oc "%s %s %s%s %s\n" name impl_h sig_h callers_field caps_field
              ) hr_impl_hashes;
+             (* DD build step 10: one ROLE line per role with a grant, its
+                FULL closure from the solve check_role_grants runs (section
+                5, "Admission": a changed function's own caps miss a patch
+                that calls an existing, more powerful helper).  `via=` carries
+                each cap's reach chain for the deploy diagnostic. *)
+             List.iter (fun (role, caps, chains) ->
+               let via =
+                 if chains = [] then ""
+                 else
+                   " via=" ^ String.concat ";"
+                     (List.map (fun (c, chain) -> c ^ ":" ^ String.concat ">" chain) chains)
+               in
+               Printf.fprintf oc "ROLE %s caps=%s%s\n" role (String.concat "," caps) via
+             ) (March_typecheck.Typecheck.role_capability_closures typecheck_env);
              close_out oc
            with Sys_error _ -> ()) (* non-fatal if manifest write fails *)
         end);

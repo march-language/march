@@ -11555,6 +11555,93 @@ let test_hcr_manifest_emits_caps_and_cap_root () =
          [find_caps "Core.logger"]
          [Option.value ~default:"<missing>" (List.assoc_opt "Core.logger" fn_lines2)])
 
+(* Distributed-deploys build step 10: a `ROLE <Proto.Role> caps=...` line per
+   granted role carries the role's FULL closure, i.e. what check_role_grants
+   solves from the role's roots, not a changed function's own caps.  The
+   fixture's body reaches `file_write` only through `save`, a helper whose
+   own caps the per-function lines attribute to `save` alone; the ROLE line
+   still names IO.FileWrite and the chain body -> cons -> save.  A second
+   version of the program whose body never calls `save` has the narrower
+   closure, which is the pair forge's per-role gate compares. *)
+let role_manifest_src ~uses_save =
+  Printf.sprintf {|mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.FileWrite
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    role Cons needs IO.Console, IO.FileWrite
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  pfn save(n : Int) : () do
+    let _ = file_write("/tmp/n", int_to_string(n))
+    ()
+  end
+
+  pfn cons(s : Cap(Session.Live), con : Cap(IO.Console), st : Stream_Cons.Entry) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+      %s
+      Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
+  end
+
+  fn main(c : Cap(IO)) do
+    let _ = Stream_Run.run_Cons(c, "cons", "secret", Stream_Run.addrs_from_env(),
+      fn (s, con, fw, st) -> cons(s, con, st))
+    ()
+  end
+end
+|} (if uses_save then "save(n)" else "let _ = n")
+
+let role_lines_of_build ~tag src_text =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file (Printf.sprintf "march_hcrrole_%s" tag) "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "main.march" in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  let bin = Filename.concat tmp "rolebin" in
+  (* Own cwd and HOME: see test_hcr_manifest_emits_caps_and_cap_root for why
+     a shared CAS would skip the manifest write on a cache hit. *)
+  let cmd_prefix = Printf.sprintf "cd %s && env HOME=%s "
+      (Filename.quote tmp) (Filename.quote tmp) in
+  match compile_march_or_skip ~cmd_prefix ~main_exe ~bin ~src
+          ~extra_args:"--hot-reload Main --compile-so" () with
+  | None -> None
+  | Some bin ->
+    let ic = open_in (bin ^ ".hcr_manifest") in
+    let lines = ref [] in
+    (try while true do
+       let l = input_line ic in
+       if String.length l > 5 && String.sub l 0 5 = "ROLE " then lines := l :: !lines
+     done with End_of_file -> ());
+    close_in ic;
+    Some (List.rev !lines)
+
+let test_hcr_manifest_role_closure_lines () =
+  match role_lines_of_build ~tag:"wide" (role_manifest_src ~uses_save:true) with
+  | None -> ()
+  | Some lines ->
+    Alcotest.(check (list string)) "one ROLE line, the full closure with its chains"
+      [ "ROLE Stream.Cons caps=IO.Console,IO.FileWrite \
+         via=IO.Console:body>cons;IO.FileWrite:body>cons>save" ]
+      lines;
+    (match role_lines_of_build ~tag:"narrow" (role_manifest_src ~uses_save:false) with
+     | None -> ()
+     | Some lines ->
+       Alcotest.(check (list string)) "without the save call the closure is narrower"
+         [ "ROLE Stream.Cons caps=IO.Console via=IO.Console:body>cons" ] lines)
+
 (* C1 fix (final whole-branch review, HCR Phase 5C): actor handler caps were
    silently dropped from the manifest — [record_fn_caps] was called for
    [DFn]/[DExtern] but never for actor handlers, even though TIR hashes every
@@ -14832,6 +14919,8 @@ let stdlib_suites =
           test_hcr_manifest_emits_caps_and_cap_root;
         Alcotest.test_case "HCR manifest: actor handler caps populated (C1 fix)" `Slow
           test_hcr_manifest_actor_handler_caps_populated;
+        Alcotest.test_case "HCR manifest: ROLE lines carry each role's full capability closure (DD step 10)" `Slow
+          test_hcr_manifest_role_closure_lines;
         Alcotest.test_case "HCR manifest: disjoint fn caps stay separate, not the whole-artifact union (granularity revision)" `Slow
           test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union;
         Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow
