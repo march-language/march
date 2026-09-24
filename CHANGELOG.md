@@ -423,6 +423,15 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Floats at the JIT REPL print correctly and no longer crash the session.** Any
+  Float inside a list, `Option`, `Result` or tuple printed as garbage like
+  `[2.15e-313, 2.15e-313]` at the (default, JIT-backed) REPL prompt, including
+  `NativeArray.to_list_float` and `to_list_f32` results and a plain `[3.5, 1.25]`
+  literal; they now print their values. Separately, an expression that returned a
+  Float, followed by any expression returning a list, string or other heap value
+  (`3.5` then `[1, 2]`, or `NativeArray.get_float(a, 0)` then
+  `NativeArray.to_list_float(a)`), killed the REPL with a segmentation fault; it now
+  runs. The interpreter, `--compile` and `march --jit file.march` were not affected.
 - **`forge audit --inferred` names a toolchain too old for `march caps`.** When
   the toolchain's `march` predated the `caps` subcommand (before 0.3.0), it read
   `caps` as a file name and failed, so every dependency showed as unanalyzable
