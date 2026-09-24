@@ -130,6 +130,10 @@
  (name bench_solver)
  (libraries march_forge unix))
 
+(executable
+ (name test_cross_hcr_e2e)
+ (modules test_cross_hcr_e2e)
+ (libraries march_forge alcotest unix))
 ; test_topology.ml: the topology file (forge/lib/topology.ml). In-process
 ; only (the fixture project is parsed, never compiled), so no toolchain env;
 ; the generator goldens under topology_golden/ are its only inputs.
