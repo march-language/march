@@ -13473,7 +13473,6 @@ declare i64  @march_sys_mem_total_bytes()
 declare i64  @march_sys_mem_available_bytes()
 declare ptr  @march_sys_os()
 declare ptr  @march_sys_arch()
-declare ptr  @march_get_version()
 ; UUID / identity builtins
 declare ptr  @march_uuid_v4()
 ; Distributed OTP L4 — function-by-identity remote registry (march_remote_registry.c)

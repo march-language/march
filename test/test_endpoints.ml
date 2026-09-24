@@ -1957,8 +1957,60 @@ end
       Alcotest.(check bool) ("long (output: " ^ out ^ ")") true
         (contains_text out "the protocol has ended, but the script goes on with Send_Msg_A_B_1"))
 
+(* ── a `choose` branch with several steps ───────────────────────────────── *)
+
+(* A branch body holding more than its head message: a LABELLED step and a
+   plain one, each on its own line.  Both used to be read by the token filter
+   as the next arm (`tick: A -> ...` until 2026-09-23), so the protocol did not
+   parse; these pin that every step of the branch is projected, in order. *)
+let two_step_branch = {|
+  @[endpoints]
+  protocol Tick do
+    choose by A:
+      go -> A -> B : Int
+            tick: A -> B : Int
+            B -> A : String
+      no -> A -> B : Bool
+    end
+  end
+|}
+
+let two_step_branch_shape =
+  Alcotest.test_case "a choose branch's later steps are all projected" `Quick
+    (fun () ->
+       let mods = generated (wrap two_step_branch) in
+       List.iter
+         (fun (m, f) -> Alcotest.(check bool) (m ^ "." ^ f) true (has_fn mods m f))
+         [ ("Tick_A", "choose_go"); ("Tick_A", "choose_no"); ("Tick_A", "send_Tick");
+           ("Tick_A", "recv_Msg_B_A_1");
+           ("Tick_B", "offer_go_no"); ("Tick_B", "recv_Tick"); ("Tick_B", "send_Msg_B_A_1") ])
+
+let two_step_branch_ok = ok "both roles driven through a multi-step choose branch typecheck"
+  (wrap (two_step_branch ^ {|
+  pfn a(s : Cap(Session.Live), st : Tick_A.S_choose_go_no) : Tick_A.Yield do
+    let st1 = Tick_A.choose_go(s, st, 1)
+    let st2 = Tick_A.send_Tick(s, st1, 2)
+    Tick_A.recv_Msg_B_A_1(s, st2, fn (_reply, st3) -> Tick_A.close(s, st3))
+  end
+  pfn b(s : Cap(Session.Live), st : Tick_B.S_offer_go_no) : Tick_B.Yield do
+    Tick_B.offer_go_no(s, st,
+      fn (_n, st1) -> Tick_B.recv_Tick(s, st1, fn (_t, st2) ->
+        Tick_B.close(s, Tick_B.send_Msg_B_A_1(s, st2, "ok"))),
+      fn (_b, st1) -> Tick_B.close(s, st1))
+  end
+|}))
+
+let two_step_branch_skip = bad "skipping a choose branch's second step is a type error"
+  "expected `S_recv_Msg_B_A_1` but got `S_send_Tick`" (wrap (two_step_branch ^ {|
+  pfn a(s : Cap(Session.Live), st : Tick_A.S_choose_go_no) : Tick_A.Yield do
+    let st1 = Tick_A.choose_go(s, st, 1)
+    Tick_A.recv_Msg_B_A_1(s, st1, fn (_reply, st3) -> Tick_A.close(s, st3))
+  end
+|}))
+
 let tests =
   [ stream_shape;
+    two_step_branch_shape; two_step_branch_ok; two_step_branch_skip;
     peers_shape; granted_peers_take_the_caps; chaos_user_payload_generator; peers_typecheck;
     cli_script_mismatch_panics; cli_script_runs_out_panics;
     cli_role_grant_violation; cli_role_grant_named_body; cli_role_grant_widened_ok; cli_role_grant_wider_than_main;

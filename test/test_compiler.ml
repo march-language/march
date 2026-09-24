@@ -6143,6 +6143,36 @@ let test_qualified_opaque_type_evals () =
   let v = call_fn env "main" [] in
   Alcotest.(check string) "qualified opaque round-trip evaluates to \"hi\"" "hi" (vstr v)
 
+(* Regression: a BUILTIN typed with a qualified type name must unify with the
+   bare constructors, exactly as a written `Token.Token` annotation does above.
+   `csv_next_row` is typed `Int -> Csv.CsvRow` in the builtin table (the TIR
+   needs the qualified spelling to find the niche-shaped typedef), but builtin
+   signatures are hand-built types that never pass through [surface_ty]'s
+   qualified->bare canonicalization, so matching the call against `CsvEof` /
+   `Row` failed in both directions ("expected `CsvRow` but got `Csv.CsvRow`"
+   and its mirror).  stdlib/csv.march carried 12 such hidden errors.  The
+   module here declares its own bare `CsvRow`; canonicalization keys on the
+   bare suffix, the same rule [surface_ty] applies. *)
+let test_qualified_builtin_type_unifies_bare () =
+  let ctx = typecheck {|mod CsvDemo do
+    needs IO.FileRead
+    type CsvRow = CsvEof | Row(List(String))
+
+    fn count(handle : Int, n : Int) : Int do
+      match csv_next_row(handle) do
+      CsvEof -> n
+      Row(_) -> count(handle, n + 1)
+      end
+    end
+
+    fn first(handle : Int) : CsvRow do
+      csv_next_row(handle)
+    end
+  end|} in
+  Alcotest.(check bool)
+    "builtin returning `Csv.CsvRow` unifies with bare `CsvRow`: no errors"
+    false (has_errors ctx)
+
 (* F5: linear let binding — used exactly once is ok *)
 let test_linear_let_ok () =
   let ctx = typecheck {|mod Test do
@@ -14768,16 +14798,11 @@ let stdlib_known_internal_errors = [
   "aho_corasick.march", 11;
   "cluster_node.march", 1;
   "compress.march", 19;
-  "crypto.march", 1;
-  "csv.march", 12;
-  "io.march", 3;
-  "logger.march", 2;
+  "logger.march", 1;
   "node_call.march", 5;
   "plot.march", 1;
   "rrb_vec.march", 19;
   "session_node.march", 3;
-  "system.march", 8;
-  "uuid.march", 2;
 ]
 
 let test_stdlib_internal_errors_ratchet () =
@@ -14817,6 +14842,68 @@ let test_stdlib_internal_errors_ratchet () =
       (show_stdlib_errors
          (List.filter (fun (d : March_errors.Errors.diagnostic) ->
               d.severity = March_errors.Errors.Error) (check_stdlib_like_cli ())))
+
+(* ── Stdlib wrappers over builtins the typechecker did not know ──────────────
+
+   `sys_os`, `print_stderr`, `stdlib_sha512`, ... had interpreter and codegen
+   implementations but no [Typecheck_builtins.builtin_bindings] entry, so each
+   wrapper's body failed to check and a caller saw an unconstrained type:
+   `System.os() + 1` was accepted and died at runtime.  Typecheck a user module
+   against the WHOLE stdlib (the bin/main.ml shape) and require an error on
+   exactly the lines that misuse a wrapper's real type, and none on the lines
+   that use it correctly.  See
+   specs/progress/2026-09-23-builtins-missing-from-the-typechecker.md. *)
+let user_error_lines_against_stdlib src =
+  let dir = stdlib_dir_for_test () in
+  let files = March_modules.Stdlib_manifest.stdlib_file_list in
+  let user = Test_helpers.parse_and_desugar src in
+  let m = March_ast.Ast.{
+    user with mod_decls = stdlib_decls_like_toolchain dir files @ user.mod_decls } in
+  let saved = !March_typecheck.Typecheck.stdlib_source_files in
+  March_typecheck.Typecheck.stdlib_source_files :=
+    List.map (Filename.concat dir) files @ saved;
+  let (errors, _type_map, _env) =
+    Fun.protect
+      ~finally:(fun () -> March_typecheck.Typecheck.stdlib_source_files := saved)
+      (fun () -> March_typecheck.Typecheck.check_module_core m) in
+  errors.March_errors.Errors.diagnostics
+  |> List.filter (fun (d : March_errors.Errors.diagnostic) ->
+      d.severity = March_errors.Errors.Error
+      && Filename.dirname d.span.March_ast.Ast.file <> dir)
+  |> List.map (fun (d : March_errors.Errors.diagnostic) ->
+      d.span.March_ast.Ast.start_line)
+  |> List.sort_uniq compare
+
+let test_stdlib_builtin_wrappers_have_real_types () =
+  (* Line numbers matter: every `bad_*` body is on the line named in
+     [expected], every `ok_*` body must produce nothing. *)
+  let src = {|mod Main do
+  needs IO
+  fn ok_os() : Int do string_length(System.os()) + string_length(System.arch()) end
+  fn bad_os() : Int do System.os() + 1 end
+  fn bad_arch() : Bool do System.arch() end
+  fn ok_ints() : Int do System.cpu_count() + System.cpu_load_milli() + System.mem_total_bytes() + System.mem_available_bytes() + System.monotonic_time() end
+  fn bad_cpu() : String do System.cpu_count() end
+  fn bad_version() : Int do System.version() end
+  fn ok_io() : String do IO.read_line() ++ int_to_string(IO.read_byte()) end
+  fn bad_read_line() : Int do IO.read_line() end
+  fn bad_read_byte() : String do IO.read_byte() end
+  fn bad_warn() : Int do IO.warn("x") end
+  fn ok_hash() : String do Crypto.sha512("x") ++ UUID.to_string(UUID.v4()) end
+  fn bad_sha512() : Int do Crypto.sha512("x") end
+  fn bad_sha512_arg() : String do Crypto.sha512(1) end
+  fn bad_v4() : String do UUID.v4() end
+end|} in
+  let expected = [4; 5; 7; 8; 10; 11; 12; 14; 15; 16] in
+  let got = user_error_lines_against_stdlib src in
+  let show ls = String.concat ", " (List.map string_of_int ls) in
+  if got <> expected then
+    Alcotest.failf
+      "error lines: expected [%s], got [%s]\n\
+       A missing line is a stdlib wrapper whose type is still unconstrained \
+       (its builtin is unknown to the typechecker); an extra one is a wrapper \
+       typed wrongly."
+      (show expected) (show got)
 
 (* ── postcond_infer: propose a RETURN refinement that helps the CALLERS ──────
 
@@ -16839,6 +16926,7 @@ let compiler_suites =
           Alcotest.test_case "cross-module public fn accepted"   `Quick test_cross_module_public_fn_accepted;
           (* Regression: qualified type path `Mod.Type` ≡ bare `Type` *)
           Alcotest.test_case "qualified opaque type unifies with bare" `Quick test_qualified_opaque_type_unifies_bare;
+          Alcotest.test_case "qualified builtin type unifies bare" `Quick test_qualified_builtin_type_unifies_bare;
           Alcotest.test_case "qualified opaque type evaluates"         `Quick test_qualified_opaque_type_evals;
           (* F5: linear let bindings *)
           Alcotest.test_case "linear let ok"                 `Quick test_linear_let_ok;
@@ -17604,6 +17692,7 @@ let compiler_suites =
           Alcotest.test_case "Main.launder (a->b) launders Int -> String: error"  `Quick test_entry_qual_distinct_tvar_launders;
           Alcotest.test_case "T.id from nested App launders Int -> String: error" `Quick test_entry_qual_from_nested_sibling;
           Alcotest.test_case "stdlib internal-type-error ratchet"                  `Quick test_stdlib_internal_errors_ratchet;
+          Alcotest.test_case "stdlib builtin wrappers have their real types"       `Quick test_stdlib_builtin_wrappers_have_real_types;
           Alcotest.test_case "prelude.march fold_left: curried, no internal error"    `Quick test_stdlib_prelude_fold_left_curried;
           Alcotest.test_case "iterable.march fold: curried, no internal error"        `Quick test_stdlib_iterable_fold_curried;
           Alcotest.test_case "ordered_map.march cmp/fold: curried, no internal error" `Quick test_stdlib_ordered_map_cmp_curried;

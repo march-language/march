@@ -184,6 +184,7 @@ let builtin_cap_table : (string * string) list = [
   ("println",               "IO.Console");
   ("print",                 "IO.Console");
   ("print_line",            "IO.Console");
+  ("print_stderr",          "IO.Console");
   (* IO.FileRead *)
   ("file_exists",           "IO.FileRead");
   ("file_read",             "IO.FileRead");
@@ -625,6 +626,14 @@ let builtin_bindings : (string * scheme) list =
     ("string_concat",  Mono (TArrow (t_string, TArrow (t_string, t_string))));
     ("read_line",      Mono (TArrow (t_unit,   t_string)));
     ("read_byte",      Mono (TArrow (t_unit,   t_int)));
+    (* io_* aliases of the two above: same C function, same interpreter
+       body; the IO module calls these because its own `read_line`/`read_byte`
+       fns would shadow the bare names. *)
+    ("io_read_line",   Mono (TArrow (t_unit,   t_string)));
+    ("io_read_byte",   Mono (TArrow (t_unit,   t_int)));
+    (* print_stderr: the String verbatim to stderr, NO newline appended
+       (march_print_stderr and the interpreter agree; IO.warn adds its own). *)
+    ("print_stderr",   Mono (TArrow (t_string, t_unit)));
     (* Signal.watch(code, handler): register a deferred handler for an OS
        signal; signal_unwatch(code) removes it. See stdlib/signal.march. *)
     ("signal_watch",   Mono (TArrow (t_int, TArrow (TArrow (t_unit, t_unit), t_unit))));
@@ -767,6 +776,25 @@ let builtin_bindings : (string * scheme) list =
        probes now assert on it instead. *)
     ("live_allocs",     Mono (TArrow (t_unit,  t_int)));
     ("uuid_v7",         Mono (TArrow (t_unit,  t_string)));
+    (* uuid_v4 is NOT a stale spelling of uuid_v7: both are live, distinct
+       generators (march_uuid_v4 / the interpreter's /dev/urandom body), and
+       UUID.v4 / UUID.v7 wrap one each.  Capability: IO.Random (table above). *)
+    ("uuid_v4",         Mono (TArrow (t_unit,  t_string)));
+    (* System introspection (stdlib/system.march).  All ambient, like
+       peak_rss_bytes.  sys_uptime_ms (System.monotonic_time) stays ambient
+       too: it is process-relative elapsed time, not the wall clock
+       unix_time_ms reads, and gating it would break every existing timing
+       caller granted only IO.Console.  sys_os / sys_arch return a lowercase
+       String ("macos", "aarch64", ...): the codegen row always said TString,
+       and a String is what march_sys_os/march_sys_arch can build. *)
+    ("sys_os",                  Mono (TArrow (t_unit, t_string)));
+    ("sys_arch",                Mono (TArrow (t_unit, t_string)));
+    ("sys_cpu_count",           Mono (TArrow (t_unit, t_int)));
+    ("sys_cpu_load_milli",      Mono (TArrow (t_unit, t_int)));
+    ("sys_mem_total_bytes",     Mono (TArrow (t_unit, t_int)));
+    ("sys_mem_available_bytes", Mono (TArrow (t_unit, t_int)));
+    ("sys_uptime_ms",           Mono (TArrow (t_unit, t_int)));
+    ("march_version",           Mono (TArrow (t_unit, t_string)));
     ("uuid_v7_at",      Mono (TArrow (t_int,   t_string)));
     ("float_from_string",Mono (TArrow (t_string, t_option t_float)));
     ("float_to_string", Mono (TArrow (t_float,  t_string)));
@@ -1038,7 +1066,11 @@ let builtin_bindings : (string * scheme) list =
        CsvRow is niche-shaped (CsvEof nullary + Row single-payload). Under
        Boxed the compiled match reads a heap object's tag byte, but the C
        runtime returns raw NULL for EOF (a Niche-only convention) — so every
-       row is misread against an uninitialized tag. *)
+       row is misread against an uninitialized tag.
+       The typechecker itself sees the BARE `CsvRow` (so the result unifies
+       with csv.march's own `CsvEof`/`Row`): the EVar arm canonicalizes every
+       [qualified_type_builtins] entry, and [Lower_state.ty_of_expr] restores
+       this qualified spelling for the TIR. *)
     (* csv_open's error is always a concrete Csv.CsvError value at runtime
        (see eval.ml's csv_open_impl) — Mono, not a polymorphic `e`. CsvError
        isn't niche-shaped (both variants carry a payload) so, unlike CsvRow
@@ -1272,6 +1304,10 @@ let builtin_bindings : (string * scheme) list =
        stdlib_base64_encode accepts String only at the type-checker level;
        callers should convert Bytes to String with bytes_to_string first. *)
     ("stdlib_sha256",         Mono (TArrow (t_string, t_string)));
+    ("stdlib_sha512",         Mono (TArrow (t_string, t_string)));
+    (* sha1_bytes takes Bytes: its one caller (UUID.v5) hashes a raw 16-byte
+       namespace, and march_sha1_bytes reads the Bytes payload. *)
+    ("sha1_bytes",            Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
     ("stdlib_random_bytes",   Mono (TArrow (t_int, TCon ("Bytes", []))));
     ("stdlib_base64_encode",  Mono (TArrow (t_string, t_string)));
     ("stdlib_base64_decode",  Mono (TArrow (t_string,
@@ -1738,6 +1774,27 @@ let builtin_bindings : (string * scheme) list =
 let prelude_collision_builtin_names : string list =
   List.filter_map (fun (name, _) -> if String.contains name '.' then None else Some name)
     builtin_bindings
+
+(** Builtins whose signature names a type by its QUALIFIED spelling (today
+    only [csv_next_row] : Int -> Csv.CsvRow, which the TIR needs qualified to
+    find the niche-shaped typedef).  [infer_expr]'s EVar arm canonicalizes
+    these at each use via [canon_qualified_tcons], exactly as [surface_ty]
+    canonicalizes a written `Csv.CsvRow`; computed from [builtin_bindings]
+    itself so a future builtin typed with a qualified name is covered with no
+    list to maintain. *)
+let qualified_type_builtins : StringSet.t =
+  let rec mentions_qualified = function
+    | TCon (n, args) -> String.contains n '.' || List.exists mentions_qualified args
+    | TArrow (a, b) -> mentions_qualified a || mentions_qualified b
+    | TTuple ts -> List.exists mentions_qualified ts
+    | TRecord flds -> List.exists (fun (_, t) -> mentions_qualified t) flds
+    | TLin (_, t) | TRefine (t, _, _) -> mentions_qualified t
+    | _ -> false
+  in
+  List.fold_left (fun acc (name, sch) ->
+      let ty = match sch with Mono t -> t | Poly (_, _, t) -> t in
+      if mentions_qualified ty then StringSet.add name acc else acc)
+    StringSet.empty builtin_bindings
 
 (* [show]/[eq]/[compare]/[hash] are NOT in the list above — they are
    structural interface methods with their OWN type-directed dispatch

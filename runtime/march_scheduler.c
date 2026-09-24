@@ -380,13 +380,18 @@ int64_t march_sched_stat(int64_t which) {
     case 0: return atomic_load_explicit(&g_live_procs, memory_order_relaxed);
     case 1: return atomic_load_explicit(&g_next_pid,   memory_order_relaxed);
     case 2: return atomic_load_explicit(&g_runq_len,   memory_order_relaxed);
-    case 3: case 4: case 5: case 7: case 8:
+    case 3: case 4: case 5: case 7: case 8: case 10:
         return atomic_load_explicit(&march_stat_counters[which],
                                     memory_order_relaxed);
     case 9:
         return atomic_load_explicit(&march_stat_counters[MARCH_STAT_PROCS_RETIRED],
                                     memory_order_relaxed)
              - atomic_load_explicit(&march_stat_counters[MARCH_STAT_PROCS_FREED],
+                                    memory_order_relaxed);
+    case 11:
+        return atomic_load_explicit(&march_stat_counters[MARCH_STAT_METAS_RETIRED],
+                                    memory_order_relaxed)
+             - atomic_load_explicit(&march_stat_counters[MARCH_STAT_METAS_FREED],
                                     memory_order_relaxed);
     case 6: {
         pthread_mutex_lock(&g_timer_mu);
@@ -2156,8 +2161,9 @@ static void sched_loop(march_scheduler *sched) {
                     memory_order_relaxed);
             }
             /* Retire the struct itself.  It is unreachable to NEW readers:
-             * registry_remove ran above, the actor's own thread NULLed its
-             * meta's green_thread before its fn returned, and every holder
+             * registry_remove ran above, the actor's own thread unpublished
+             * its meta's green_thread (MARCH_GT_EXITED) before its fn
+             * returned, and every holder
              * that can outlive a proc (Task word 2, reply-ref field 0, timer
              * entries) stores a pid and resolves it through the registry.
              * A reader that resolved it earlier is inside a critical section,
@@ -2200,8 +2206,8 @@ static void sched_loop(march_scheduler *sched) {
              * lifetime) for eliminating the crash; proper reclamation
              * (e.g. reference counting or an epoch/hazard-pointer scheme)
              * was the separate, larger undertaking that is now
-             * march_reclaim (specs/todos/2026-09-17-proc-struct-
-             * reclamation.md). */
+             * march_reclaim (specs/progress/2026-09-23-proc-struct-
+             * reclamation-metas.md). */
         }
         /* PROC_WAITING: process parked itself; a wakeup call re-enqueues it. */
     }

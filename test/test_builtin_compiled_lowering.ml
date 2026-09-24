@@ -33,6 +33,8 @@ let special_lowerings : string list =
     (* lower_expr.ml: session-typed channel calls rewritten at lowering. *)
     "Chan.new"; "Chan.send"; "Chan.recv"; "Chan.close"; "Chan.choose";
     "Chan.offer";
+    (* lower_expr.ml: folded into a string literal (the compiler version). *)
+    "march_version";
     (* lower_expr.ml json_dispatch_rewrite: resolved to the derived
        JsonFrom$T / JsonFromEvents$T impl at the call site. *)
     "from_json"; "from_json_events";

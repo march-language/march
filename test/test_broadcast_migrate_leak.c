@@ -14,7 +14,7 @@
  * What this test drives: the REAL code, twice over.
  *   1. march_actor_inject_migrate_msg (Phase 2's per-target body, split out
  *      of the loop) against a PROC_DEAD target.  Since procs are reclaimed
- *      (specs/todos/2026-09-17-proc-struct-reclamation.md), a proc driven to
+ *      (specs/progress/2026-09-23-proc-struct-reclamation-metas.md), a proc driven to
  *      PROC_DEAD by the real scheduler is FREED once march_sched_run returns,
  *      so it can no longer be the target: holding its pointer past its death
  *      is exactly what reclamation forbids.  The target is a stand-in struct

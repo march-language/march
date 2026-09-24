@@ -1,5 +1,5 @@
 /* march_reclaim.c — epoch-based reclamation.  Contract and design: the header,
- * and specs/todos/2026-09-17-proc-struct-reclamation.md ("Chosen mechanism").
+ * and specs/progress/2026-09-23-proc-struct-reclamation-metas.md ("Chosen mechanism").
  *
  * Correctness argument, in one place (every ordering below is load-bearing):
  *

@@ -1,0 +1,19 @@
+-- A `choose` branch whose body is more than its head message: a second plain
+-- step (`A -> B : Int`) on its own line. The token filter's arm-boundary
+-- scan must read that line as the branch's next STEP, not as the next arm:
+-- in a `choose`, an arm is always `label ->`, never an upper-case role.
+mod P40ProtocolChooseTwoStepBranch do
+  needs IO.Console
+  protocol Tally do
+    choose by A:
+      go -> A -> B : Int
+            A -> B : Int
+            B -> A : String
+      no -> A -> B : Bool
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    println(1)
+  end
+end

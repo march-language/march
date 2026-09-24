@@ -18,6 +18,12 @@ open Eval_simd
 open Eval_session
 open Eval_net
 
+(* read_line / io_read_line drop a trailing '\r' as well as the '\n', the same
+   as march_io_read_line, so a CRLF line reads the same in both backends. *)
+let strip_trailing_cr s =
+  let n = String.length s in
+  if n > 0 && s.[n - 1] = '\r' then String.sub s 0 (n - 1) else s
+
 let base_env : env =
   (* δ-rules — core-march.md §4.4. These bindings ARE the primitive operators;
      surface `a + b` etc. is ordinary application (EApp) of the VBuiltin bound
@@ -174,13 +180,13 @@ let base_env : env =
         | _ -> eval_error "string_concat: expected two strings"))
   ; ("read_line", VBuiltin ("read_line", function
         | [VUnit] | [] ->
-          (try VString (input_line stdin)
+          (try VString (strip_trailing_cr (input_line stdin))
            with End_of_file -> VString "")
         | _ -> eval_error "read_line: expected unit"))
     (* io_read_line: alias for read_line, avoids name conflict inside IO module *)
   ; ("io_read_line", VBuiltin ("io_read_line", function
         | [VUnit] | [] ->
-          (try VString (input_line stdin)
+          (try VString (strip_trailing_cr (input_line stdin))
            with End_of_file -> VString "")
         | _ -> eval_error "io_read_line: expected unit"))
   ; ("read_byte", VBuiltin ("read_byte", function
@@ -3456,7 +3462,11 @@ let base_env : env =
         | _ -> eval_error "sys_mem_available_bytes: no arguments expected"))
   ; ("sys_os", VBuiltin ("sys_os", function
         | [] | [VUnit] ->
-          let atom = match Sys.os_type with
+          (* A String, matching march_sys_os (runtime/march_extras.c).  This
+             used to return a nullary VCon, which was neither the String the
+             codegen row declared nor a VAtom, so `System.os() == :macos` was
+             false in the interpreter too. *)
+          let os = match Sys.os_type with
             | "Win32" | "Cygwin" -> "windows"
             | _ ->
               (match Lazy.force uname_info with
@@ -3465,21 +3475,21 @@ let base_env : env =
                | Some (os, _)       -> os
                | None               -> "unknown")
           in
-          VCon (atom, [])
+          VString os
         | _ -> eval_error "sys_os: no arguments expected"))
   ; ("sys_arch", VBuiltin ("sys_arch", function
         | [] | [VUnit] ->
-          let atom = match Lazy.force uname_info with
+          let arch = match Lazy.force uname_info with
             | Some (_, "x86_64")                     -> "x86_64"
             | Some (_, "aarch64") | Some (_, "arm64") -> "aarch64"
             | Some (_, "i386")   | Some (_, "i686")   -> "x86"
             | Some (_, arch) when arch <> ""          -> arch
             | _                                       -> "unknown"
           in
-          VCon (atom, [])
+          VString arch
         | _ -> eval_error "sys_arch: no arguments expected"))
   ; ("march_version", VBuiltin ("march_version", function
-        | [] | [VUnit] -> VString "0.1.0"
+        | [] | [VUnit] -> VString March_ast.March_version.version
         | _ -> eval_error "march_version: no arguments expected"))
   (* Run a command synchronously; returns Ok(ProcessResult(code, stdout, stderr))
      or Err(msg) on OS error.  Stderr is captured separately. *)

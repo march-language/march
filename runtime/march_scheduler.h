@@ -226,7 +226,7 @@ struct march_scheduler;
  * reply-ref (field 0), a timer entry.  The original corruption this guards
  * against was a pointer that outlived the fact it named; read every new
  * holder against the sentence above.
- * specs/todos/2026-09-17-proc-struct-reclamation.md has the per-site survey. */
+ * specs/progress/2026-09-23-proc-struct-reclamation-metas.md has the per-site survey. */
 typedef struct march_proc {
     int64_t                    pid;          /* Unique process ID (monotonic counter) */
     _Atomic march_proc_status  status;       /* Process lifecycle state (atomic)      */
@@ -679,6 +679,10 @@ extern _Atomic int64_t march_stat_counters[16];
 /* Index 9 of march_sched_stat is proc structs retired and still waiting for
  * their grace period: retired (reap count) minus freed. */
 #define MARCH_STAT_PROCS_RETIRED    9
+#define MARCH_STAT_METAS_FREED     10   /* dead actors' metas freed after their grace period */
+/* Index 11 of march_sched_stat is actor metas retired and still waiting for
+ * their grace period: retired minus freed (both bumped by march_runtime.c). */
+#define MARCH_STAT_METAS_RETIRED   11
 
 /* Observability: a single raw stat read by index. See the index contract in
  * march_stat_counters' comment above and stdlib/scheduler.march's `stat`

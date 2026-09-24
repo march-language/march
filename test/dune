@@ -4551,7 +4551,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (diff native/timer_send_after.expected native_timer_send_after.out)))
 
 ; ── Proc reclamation under kill-then-immediately-respawn
-; (specs/todos/2026-09-17-proc-struct-reclamation.md, mechanism PR 1).  Every
+; (specs/progress/2026-09-23-proc-struct-reclamation-metas.md, mechanism PR 1).  Every
 ; holder that can outlive a proc (a BLOCK sender parked on it, a reply-ref, a
 ; send_after, a Task handle/waiter) is driven against a proc that dies and is
 ; freed while the next round's spawn reuses memory.  The golden only proves it
@@ -4572,6 +4572,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/proc_reclaim_kill_respawn.expected native_proc_reclaim_kill_respawn.out)))
+
+; ── pid_of_int on a dead pid whose record is freed (metas PR,
+; specs/progress/2026-09-23-proc-struct-reclamation-metas.md "Survey additions").  The
+; golden only pins the answer; the evidence is the ASAN run, where the base
+; runtime's march_pid_of_int incrc'd the freed record.
+(rule
+ (targets native_pid_of_int_dead_pid native_pid_of_int_dead_pid.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (source_tree ../stdlib)
+       (file native/pid_of_int_dead_pid.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_pid_of_int_dead_pid
+        native/pid_of_int_dead_pid.march)
+   (with-stdout-to native_pid_of_int_dead_pid.out
+        (system "./native_pid_of_int_dead_pid")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/pid_of_int_dead_pid.expected native_pid_of_int_dead_pid.out)))
 
 ; ── Leak guard for send_after/cancel_timer message + TimerRef-token disposal
 ; (specs/progress/2026-08-12-language-level-timers.md) — the cancelled-before-

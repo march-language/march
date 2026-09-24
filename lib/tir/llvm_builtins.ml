@@ -452,8 +452,6 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_sys_os()" };
   { march_name = "sys_arch"; c_name = Some "march_sys_arch"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_sys_arch()" };
-  { march_name = "march_version"; c_name = Some "march_get_version"; ret_ty = Some Tir.TString;
-    in_is_builtin = true; declare_sig = Some "declare ptr  @march_get_version()" };
   { march_name = "uuid_v4"; c_name = Some "march_uuid_v4"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_uuid_v4()" };
   { march_name = "remote_register_stub"; c_name = Some "march_remote_register"; ret_ty = Some Tir.TInt;
@@ -1413,7 +1411,6 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_sys_mem_available_bytes";
   PDeclare "march_sys_os";
   PDeclare "march_sys_arch";
-  PDeclare "march_get_version";
   PComment "; UUID / identity builtins";
   PDeclare "march_uuid_v4";
   PComment "; Distributed OTP L4 — function-by-identity remote registry (march_remote_registry.c)";

@@ -348,6 +348,44 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **A dead actor's metadata is now returned, and sends no longer slow down
+  after actor churn.** Each actor's runtime bookkeeping (about 300 bytes) used
+  to be kept for the life of the program, and it stayed on the lookup path of
+  every `send` and `Actor.call`, so a node that had churned 200,000 short-lived
+  actors took 3 seconds instead of 45 ms to send 200,000 messages to one
+  long-lived actor. It is now freed once no other thread can still be reading
+  it, leaving a 56-byte record per pid for what a dead pid can still be asked
+  (its terminal reason, `Pid(n)` display, capability epoch): 200,000 churned
+  actors retain 18.5 MB instead of 65.6 MB, and send speed no longer depends on
+  how many actors have died. `Scheduler.stat(10)` counts freed actor metadata
+  and `stat(11)` that waiting to be freed. `Actor.pid_from_int` on the pid of an
+  actor that has died now returns a dead Pid; it used to return a pointer to
+  the dead actor's record, which could already have been freed.
+- **A protocol `choose` branch can now continue with a labelled message step.** A branch
+  body line such as `tick: A -> B : Int` after the branch's first message was read as the
+  start of the next branch and failed with "I got stuck here"; it now continues the branch,
+  as an unlabelled `A -> B : Int` line already did.
+
+- **Fourteen stdlib wrappers over builtins the typechecker did not know now
+  typecheck**, and the interpreter and compiled backends agree on each.
+  `System.os()`/`System.arch()` return a lowercase `String` (`"macos"`,
+  `"aarch64"`), and misusing one is a type error instead of a runtime crash;
+  compiled programs calling them previously failed to link. Compiled
+  `Crypto.sha512` returned the SHA-256 digest, compiled `UUID.v5` crashed with
+  SIGBUS, compiled `IO.warn`/`Logger.appender_stderr` printed a blank line after
+  every message, and `System.version()` said `march/dev` compiled and `0.1.0`
+  interpreted; it now reports the compiler's real version in both. Compiled
+  `IO.read_line` no longer splits lines longer than 4096 bytes. `print_stderr`
+  now requires `IO.Console`, like `print`.
+- **`csv_next_row`'s result now matches against `CsvEof` / `Row`.** The builtin
+  is typed with the qualified `Csv.CsvRow`, and builtin signatures skipped the
+  qualified-to-bare canonicalization that written type annotations get, so
+  matching its result against the bare constructors was a type error both ways.
+  `stdlib/csv.march` carried 12 such errors, hidden because stdlib diagnostics
+  are filtered, which left `Csv.each_row`, `Csv.read_all` and
+  `Csv.each_row_with_header` unchecked. Builtin signatures now go through the
+  same canonicalization, so any future builtin typed with a qualified name is
+  covered too.
 - **Two modules can each name their capability dictionary `Ops`.** A
   `proof cap X with T` resolved `T` by its bare name first, so when two modules
   each declared a same-named dictionary record, one module's `cap_impl` /
