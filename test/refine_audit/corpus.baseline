@@ -330,6 +330,8 @@ native_perceus_borrowed_child_release: coverage audit (user + stdlib): 120 enfor
 native_perceus_borrowed_child_release: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_perceus_three_deep_field_borrow: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_perceus_three_deep_field_borrow: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_pid_of_int_dead_pid: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_pid_of_int_dead_pid: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_pid_of_int_roundtrip: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_pid_of_int_roundtrip: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced

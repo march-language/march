@@ -611,17 +611,13 @@ int64_t ffi_count_matching(march_value pred, int64_t n) {
  *
  * Takes the Int a compiled Pid field holds (march_pid_index_of's encoding),
  * NOT an actor pointer — March has no way to hand one over.  Returns -1 for
- * a pid that never named an actor; march_pid_of_int answers for a DEAD
- * actor too (metas outlive their actors), which is the whole point: the
- * probe runs after the crash. */
-extern void *march_pid_of_int(int64_t n);
-
+ * a pid that never named an actor.  The probe runs after the crash, on a DEAD
+ * actor, so it reads the record address from the pid's tombstone
+ * (march_pid_of_int answers a dead pid with the dead-actor sentinel, since a
+ * dead actor's meta is freed).  That address is safe to read here only
+ * because the test holds its own Pid to the victim across the probe. */
 int64_t ffi_test_actor_rc(int64_t pid_index) {
-    void *actor = march_pid_of_int(pid_index);
+    void *actor = march_test_actor_addr_of_pid(pid_index);
     if (!IS_HEAP_PTR(actor)) return -1;
-    /* march_pid_of_int takes a reference for its caller; report the count
-     * without it, and give it back. */
-    int64_t rc = ((int64_t *)actor)[0] - 1;
-    march_decrc(actor);
-    return rc;
+    return __atomic_load_n(&((int64_t *)actor)[0], __ATOMIC_ACQUIRE);
 }

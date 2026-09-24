@@ -644,6 +644,11 @@ int64_t march_migrate_msgs_live(void);
 /* Test-only seam: bind [actor]'s meta green_thread to [proc] (a march_proc*)
  * without spawning an actor green thread. Not used by generated code. */
 void march_test_actor_bind_green_thread(void *actor, void *proc);
+/* Test seam: the record address pid index [n] named, live or dead, from its
+ * tombstone, WITHOUT taking a reference (NULL if no actor was given [n]).
+ * Dereferenceable only by a caller that holds its own reference to that
+ * record (march_ffi.c's ffi_test_actor_rc). */
+void *march_test_actor_addr_of_pid(int64_t n);
 
 /* Actor builtins.
  * Actor object layout (on top of the standard 16-byte header):

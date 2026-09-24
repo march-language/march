@@ -1,9 +1,11 @@
-# `[P2]` Reclaiming the `march_proc` struct — and what the survey says it is really part of
+# Dead actors' metadata is reclaimed (proc-struct reclamation, closed)
 
-Filed 2026-09-17 as the design for item 5 of
-[[2026-08-11-actor-hardening-distributed-plane]] ("full epoch-based proc reclamation,
-replacing leak-don't-free"), the last open item in that file. Written survey-first, as the
-parent asked.
+**Closed 2026-09-23 with mechanism PR 2 (metas and tombstones).** Filed 2026-09-17 as a
+`[P2]` todo, the design for item 5 of [[2026-08-11-actor-hardening-distributed-plane]]
+("full epoch-based proc reclamation, replacing leak-don't-free"), the last open item in
+that file. Written survey-first, as the parent asked. The design history below is kept as
+it was written; what landed, and where it differs, is in "Mechanism PR 2 as landed" just
+before "Survey: every holder of a `march_proc *`".
 
 **Phase 1 shipped 2026-09-17** ([[2026-09-17-proc-ctx-released-at-death]]): the
 execution context is freed at proc death.
@@ -11,9 +13,14 @@ execution context is freed at proc death.
 **Mechanism PR 1 (the reclaim module + procs) shipped 2026-09-22**
 ([[2026-09-22-proc-struct-reclaimed]]): `runtime/march_reclaim.{c,h}` exists, a dead
 proc's struct is freed after its grace period, and every holder in the survey below was
-converted or argued bounded. **Still open: mechanism PR 2 (metas and tombstones)**, step 3
-of "Chosen mechanism", with the notes for it in "Notes for the metas PR" at the end of
-that section.
+converted or argued bounded.
+
+**Mechanism PR 2 (metas and tombstones) shipped 2026-09-23**: a dead actor's meta is
+freed after its grace period, `g_actor_tbl` holds live metas only (the send-path cliff is
+gone), and what a dead pid still needs is a 56 B tombstone. The one question PR 1 left
+open (the fan-in cost of the reclaim calls) moved to
+[[2026-09-23-reclaim-call-cost-on-fanin]]. A reference leak found on the way is
+[[2026-09-23-pid-to-int-leaks-its-pid]].
 
 **The survey changed the item.** Three findings, each of which moves the design:
 
@@ -304,7 +311,7 @@ something the survey did not:
   On a scheduler thread it is already inside the implicit one. On any other thread it is
   a best-effort diagnostic on the way to `_exit`. There is a comment at the walk.
 
-**Open: a fan-in throughput cost the design did not predict.** On
+**Open (moved to [[2026-09-23-reclaim-call-cost-on-fanin]] when this item closed): a fan-in throughput cost the design did not predict.** On
 `bench/actors/fanin_flood.march`, A/B against base on the same box (shuffled, load
 average 11–50):
 
@@ -322,7 +329,7 @@ acceptable, or whether scheduler-thread sites should drop the depth bookkeeping 
 it only on foreign threads. The latter loses the "critical section held across a switch"
 assertion for those sites. Details: [[2026-09-22-proc-struct-reclaimed]].
 
-**Notes for the metas PR (still open).**
+**Notes for the metas PR** (all addressed by PR 2; see "Mechanism PR 2 as landed").
 
 - The procs PR relies on "`green_thread` is NULLed by the actor's own thread before its
   proc can die". The metas PR must keep an equivalent unpublish-before-retire order for
@@ -337,6 +344,244 @@ assertion for those sites. Details: [[2026-09-22-proc-struct-reclaimed]].
   additions" have no critical section at all yet.
 - The kill-then-respawn fixture (`test/native/proc_reclaim_kill_respawn.march`) and its
   TSAN/ASAN recipe and red control are reusable as-is. Add meta traffic to it.
+
+### Mechanism PR 2 as landed (2026-09-23): metas and tombstones
+
+Built on PR 1's `march_reclaim`, as step 3 of "Chosen mechanism" specifies, with the
+deviations listed below. Everything is in `runtime/march_runtime.c`.
+
+**What changed**
+
+- **`g_actor_tbl` holds live metas only.** The death claim (`death_claim_locked`, under
+  `g_tbl_mu`) unlinks the meta. The unlink swings the predecessor's `tbl_next` (now
+  `_Atomic`) with a release store and leaves the node's own link intact, so a reader
+  standing on it walks on. Chains are O(live actors), so the send-path cliff is gone.
+- **The tombstone** (`march_pid_entry`, 56 B) holds what a dead pid still needs:
+  - the pid index and the capability epoch;
+  - the terminal reason and message;
+  - the record address, as a key only;
+  - `live`, the meta while it is linked.
+
+  It is reachable two ways, and is never freed:
+  - by pid index, through a dense two-level array (`g_pid_chunks`: a fixed top array of
+    4096-entry chunks, so it never moves);
+  - for a dead actor, by record address, through `g_tomb`. This is a cold hash with one
+    link per *distinct* address, repointed when a later incarnation there dies, so it is
+    bounded by peak heap, not by churn. It grows by rebuilding and retiring the old table
+    to `march_reclaim`.
+- **`g_pididx_tbl` is gone.** `pididx_next`, `pididx_linked` and
+  `replace_stale_meta_locked` went with it.
+- **Metas are retired by reference count, not at the unlink.** A meta has three kinds of
+  owner:
+  - the table (one reference while linked, inherited by the claimant at the unlink);
+  - the actor's green thread (one, from activation to its last access);
+  - cold holders that must keep it across a switch or a wait (a pin, `meta_tryget` inside
+    a critical section).
+
+  The last `meta_put` retires it. The hot readers never touch the count. They resolve
+  inside a critical section, which is enough because the count reaches zero only after the
+  unlink, so a meta is unpublished before it is retired (the order "Notes for the metas
+  PR" asked for).
+- **Transient post-death fields moved to the restart that consumes them.**
+  `reg_names_pending` and the spawn-site capability are stashed on the supervisor's slot
+  (`march_sup_child.pending_names` / `pending_spawn_cap`, under `g_supervise_mu`) by
+  `stash_child_for_restart`, and taken by `march_respawn_child`. A stash that is never
+  taken is freed with the supervisor's meta. It used to leak by design.
+- **A child finds its supervisor by the supervisor's tombstone** (`sup_pe`), not its
+  record address. That makes it incarnation-precise and closes the "known gap" the
+  synchronous absorb loop documented.
+- **New stats.** `Scheduler.stat(10)` counts dead actors' metas freed; `stat(11)` counts
+  those retired and waiting for their grace period.
+
+**The rule, and every meta holder read against it**
+
+> A meta found by lookup (`find_meta`, `march_pid_entry.live`) is valid only inside the
+> reader's critical section, never across a context switch, unless the reader pinned it.
+> Its `actor` may be dereferenced only by a caller holding its own counted reference to
+> that record, or under `g_tbl_mu` while the meta is linked (the live actor's own
+> reference is dropped only after the death claim).
+
+The rule is in the header comment on `march_actor_meta`.
+
+| Holder | How it satisfies the rule |
+|---|---|
+| `march_send` | `find_meta`, the `draining` read, the `green_thread` load and `march_sched_send` in one critical section, which now starts before `find_meta`. No lock, no count. |
+| `march_actor_call` | The reply-ref and call message are built first (no switch). Then `find_meta`, the `green_thread` load, the `call_tag_base` rebase and the send run in one critical section, and the waits come after it. |
+| `march_send_after`, `march_mailbox_size`, `march_actor_set_mbox_limit`, `march_actor_is_draining`, `march_set_actor_caps` / `march_actor_caps` | Resolve and use inside one critical section. |
+| `deliver_monitor_down` | An early-out lookup in its own critical section. Then the decisive resolve, the watcher-liveness test and `march_sched_send_control`, all inside one critical section under `g_tbl_mu`: a linked meta means not dead. |
+| `do_actor_death` | Claim and unlink under `g_tbl_mu` inside a critical section. It then owns the table's reference across the cleanups, the monitor walk and the notify (March code, switches), and puts it at the end. |
+| `actor_green_thread` | Its own reference, taken by `activate_actor_green_thread`, put at both exits. It sets `green_thread` to `MARCH_GT_EXITED`, not NULL (see deviations). |
+| `activate_actor_green_thread` | Caller in a critical section. `meta_tryget` for the thread's reference fails once the meta is retired (a supervised child killed by pid before its activation). The proc is published with a compare-exchange from NULL. |
+| `march_actor_register` / `unregister`, `registry_retire_actor` | Resolve and use inside one critical section, under `g_registry_mu`. `register` resolves the meta before writing the forward entry, and gives a record that died meanwhile no name. |
+| `find_or_create_meta` callers (`set_dispatch_id`, `set_call_base`, `register_supervisor`, `register_child`, `spawn_common`, the bind test seam) | Inside one critical section. `find_or_create_meta` refuses a dead record, so no meta is linked that nothing will unlink. |
+| `march_monitor` | `find_or_create_meta`, then the linked test and either the monitor-list link or the tombstone read, all under `g_tbl_mu` inside one critical section. A dead target's reason comes from its tombstone, found through the meta or by address. |
+| `march_register_resource` | The meta is resolved under `g_tbl_mu` inside a critical section, so a node is only linked onto a live meta. A dead actor gets no node: its closure reference is released instead of leaked. |
+| `march_get_cap`, `march_pid_index_of`, `march_value_to_string` (Pid display) | Resolve inside a critical section and read the tombstone, which is never freed. A dead record the caller holds resolves through `g_tomb`. |
+| `cap_live_meta_locked` (`is_cap_valid`, `send_checked`) | `pe->live` under `g_tbl_mu`. `send_checked` `incrc`s the record there (linked means the live actor's reference is held). The epoch is read from the tombstone. |
+| `march_pid_of_int` | `pe->live` and the `incrc` under `g_tbl_mu`. A dead pid gets the dead-actor sentinel (see findings). |
+| `march_actor_terminal_reason` | The tombstone. |
+| `march_actor_pid_indices` | The lock-free walk runs inside one critical section. |
+| `march_demonitor`, `hcr_snapshot` | Walk under `g_tbl_mu`. The snapshot pins each meta (and `incrc`s its record) across the publish. |
+| Migrate markers (`mm->meta`) | Each marker holds its own reference, dropped by `migrate_msg_free`. The marker can be disposed at the target's reap, after the actor died. |
+| `march_supervisor_notify` | Gets the supervisor pinned by `do_actor_death` (`meta_pin`: the meta plus a counted reference to its record), because the synchronous strategies run March code. |
+| `delayed_restart_thread` | Pins the supervisor by pid index after the backoff park. A dead supervisor pins as nothing. `sup_still_live` reads `pe->live`, never the record. |
+| One_for_all / rest_for_one sweeps, `march_actor_stop`'s child walk | Children are pinned by pid (`meta_pin_pe`) under `g_tbl_mu` while linked. `do_actor_death`, `march_actor_stop` and `stop_await_death` then use a counted record. |
+| `march_actor_stop` (its own meta) | Pinned across the child teardown and the wait. `stop_await_death` dereferences only the record its caller holds. |
+| `march_respawn_child` | The epoch comes from the dead incarnation's tombstone. The new child's meta is resolved and used, through activation, in one critical section with no switch in it. |
+
+The "Survey additions" `m->actor` use-after-free sites are closed:
+
+- `march_pid_of_int` and the strategies' and stop's child walks take a counted reference
+  under `g_tbl_mu`, or none.
+- `delayed_restart_thread` no longer touches the record.
+- `march_is_cap_valid` never did.
+
+**Deviations from the design, and findings**
+
+- **Reference counts for ownership, on cold paths only.** The design said "unlinked at
+  death and retired". Three parties can still hold the meta after the unlink:
+  - the dying actor's own green thread, which keeps running after a kill from another
+    thread;
+  - the death processing, which runs cleanups;
+  - supervision, stop and hot-reload, which run March code or wait.
+
+  So "retire at the unlink" would have been a use-after-free, and "retire when the last of
+  them is done" needs a count. The send path never touches it, which is the reader-refcount
+  cost "Chosen mechanism" rejected.
+- **The tombstone is allocated with the meta, not at spawn or death.** The supervise
+  lowering (`lower_actor.ml`) calls `register_supervisor` and `register_child` on the
+  supervisor's record *before* `spawn` runs on it. With the tombstone created at spawn, a
+  child was linked to a supervisor that had none yet, and so was unsupervised: its first
+  panic killed the process. The pid index is still assigned at spawn (`-1` until then;
+  `pe_pid_or_0` keeps the old "0 before spawn" display).
+- **`green_thread` is never republished after exit.** `activate_actor_green_thread` used
+  to store the new proc after `march_sched_spawn_daemon` returned. A thread that ran to
+  completion first (killed before activation, or woken by shutdown) had already cleared
+  the field, and the late store republished a dead, soon-freed proc. It is now a
+  compare-exchange from NULL, and the exiting thread stores `MARCH_GT_EXITED` (read as
+  NULL through `meta_gt`). This was a latent PR 1 hole: it needed an actor to finish
+  before its own `spawn` returned.
+- **`march_pid_of_int` on a dead pid returns the dead-actor sentinel.** It used to return
+  the dead meta's `actor`, whose record the actor's thread had already freed. Reproduced
+  under ASAN in the container before the fix, as the survey asked:
+  `test/native/pid_of_int_dead_pid.march` (spawn, kill, drop the Pid, then `pid_of_int`
+  the index) is a heap-use-after-free WRITE in `march_incrc` from `march_pid_of_int` on
+  **5/5** base runs, and **0/5** on this change. `ffi_test_actor_rc`
+  (`actor_crash_rc_restore`) relied on the old answer to read a dead record's count. It
+  now reads the address from the tombstone through a test seam
+  (`march_test_actor_addr_of_pid`), which is safe there because the test holds its own
+  Pid to the victim.
+- **`pid_to_int` leaks a reference to its Pid.** This is not fixed here. It is why a
+  record ever passed to it is never freed, and why the reproduction above avoids it:
+  [[2026-09-23-pid-to-int-leaks-its-pid]].
+- **A supervisor's `spawn_clo` cell is released when its meta is freed.**
+  `march_actor_register_child` owns one reference; before, it was held forever.
+- **Pre-existing, not changed:** a non-actor heap object at an address a dead actor once
+  occupied prints as `Pid(n)` and reads as a dead monitor target. That was already true
+  when dead metas stayed linked, and the address table keeps the same answer.
+
+**Evidence**
+
+The fixture `test/native/proc_reclaim_kill_respawn.march` now also drives meta traffic
+every round:
+
+- a monitor on the worker before the kill, and one after it (the tombstone);
+- a registered name;
+- a capability taken while the worker is live and used as it dies;
+- after the kill: Pid display, `pid_from_int(pid_to_int(prev))`, `mailbox_size` and
+  `is_draining`;
+- a graceful `stop` instead of a kill every 16th round;
+- a supervisor whose child is poisoned every round (one_for_one, backoff base 1 ms),
+  replaced every 64th round while restarts are in flight.
+
+Its golden asserts `metas freed true`. All sanitizer runs were in `march-sbx-test-ubuntu`
+(Linux/aarch64, clang 18) with `MARCH_NUM_SCHEDULERS=4`, each build checked with `nm` for
+`__asan_init` / `__tsan_init`.
+
+| build | runs | result |
+|---|---|---|
+| ASAN (`MARCH_SANITIZE=1 MARCH_DEBUG_RUNTIME=1`) | 10 | **10/10 clean**, rc 0, `metas freed true` |
+| TSAN (`MARCH_SANITIZE=thread`) | 40 | **0 heap-use-after-free**; no race signature absent from base (below) |
+| **Red control**: `meta_put` frees at once (no grace period), TSAN | 10 | **heap-use-after-free in 6/10** |
+| Red control, ASAN | 13 | **heap-use-after-free in 3/13** |
+
+- **Red-control sites** (the top frame of each report): `march_send` (the `draining`
+  read), `meta_gt`, `find_meta`'s chain walk, `march_actor_call`, and `march_monitor`.
+  These are the hot readers the grace period exists for. ASAN's own words: a 264-byte
+  region (the meta) freed by `actor_green_thread` and read by `march_monitor`.
+- **TSAN against base.** Ten base-runtime runs of the same fixture give the identical
+  signature set:
+  - the preemption-flag reports;
+  - `march_sched_send | sched_loop`;
+  - `rec_field_raw | march_respawn_child` (a respawn writing the supervisor's state word
+    while the supervisor reads it; 9/10 base runs, 38/40 here);
+  - three rare record-shape pairs.
+
+  Nothing is new.
+- **ASAN sweep.** Every actor-related native fixture (73; network and two-node ones
+  excluded) was compiled with this runtime under ASAN and run at 4 schedulers.
+  **Zero AddressSanitizer reports**, and every golden matched, with four exceptions,
+  none of them this change:
+  - `sched_stress` hits ASAN's `Failed to mmap` (250k tasks, and ASAN builds never
+    recycle stacks). Base fails identically.
+  - `node_discovery` and `println_line_atomic` have known nondeterministic raw output.
+  - `actor_init_params_schema` is a `--compile-so` rule the plain sweep does not model.
+
+  `supervisor_deflected_crash_absorbed` matches once run under its rule's environment,
+  with ASAN's startup warning filtered from the merged stderr.
+  `actor_crash_rc_restore` needed its probe changed (see the findings above).
+- **Suites.** `scripts/run-tests.sh` (every alcotest suite, including the z3-backed
+  refinement suite) and `dune build --root . @runtest` (the dune-rule tests the script
+  skips) are green.
+  - `test/refine_audit/corpus.baseline` gained the new fixture's two audit lines.
+  - `native_proc_reclaim_kill_respawn` and `native_actor_crash_rc_restore` first failed
+    with `Permission denied` on a stray `test/native/*.ll`, left by compiling those
+    fixtures by hand. That is the known `--compile`-on-a-fixture trap; removing the
+    files cleared it.
+  - macOS native: the fixture ran **100/100** at `MARCH_NUM_SCHEDULERS=4`.
+
+**Retained memory.** Compiled `--opt 2`, macOS. This is heap in use after `spawn` / `send`
+/ `kill` churn has drained, read with `heap(1)` from the live process and summed from its
+size histogram. Peak RSS was too noisy at load 20–60 to separate the two builds.
+
+| churned actors | base | this change |
+|---|---|---|
+| 0 | 1.41 MB | 1.41 MB |
+| 50,000 | 16.8 MB | 5.25 MB |
+| 200,000 | 65.6 MB | 18.5 MB |
+| **per dead actor (slope)** | **341 B** | **93 B** |
+
+- `heap`'s histogram names the terms. Base holds one 320-byte block per dead actor (the
+  meta, 304 B rounded up by malloc). This change holds one 64-byte block per dead actor
+  (the 56 B tombstone), plus the 32 KB pid chunks.
+- The rest of the 93 B is terms the todo already accepted as out of scope: the
+  scheduler's 8 B registry slot per pid, and its leaked growth arrays.
+
+**The send-path cliff.** 200k sends to one long-lived actor, before and after churning N
+short-lived actors, in the same run:
+
+| churned first | base | this change |
+|---|---|---|
+| 0 | 46–54 ms | 42–53 ms |
+| 50,000 | 482–514 ms | 38–49 ms |
+| 200,000 | **3035–3267 ms** | **38–44 ms** |
+
+**`bench/actors/fanin_flood.march`.** Compiled `--opt 2` against a compiler built at the
+base commit (PR 1 merged), on the same box, run order shuffled per pair. Load average
+20–60 throughout.
+
+| | base | this change |
+|---|---|---|
+| fanin_flood, n=30 | 158.7 ms | 159.6 ms |
+| fanin_flood, n=60 | 164.6 ms (p10–p90 137.8–196.2) | 163.7 ms (145.1–194.9) |
+| 10× variant, n=20 | 1400.8 ms (1270.9–2038.2) | 1496.4 ms (1311.2–2051.1) |
+| 10× variant, n=30 | 1437.9 ms (1193.0–1803.7) | 1473.3 ms (1294.2–1787.1) |
+
+No measurable change on the base benchmark. The 10× variant reads +2.5% and +6.8% in two
+sets, well inside the spread. The hot path gained no reclaim calls (each `enter` only
+moved ahead of `find_meta`) and lost the chain walk over dead metas, which a fresh
+process does not have. A base run was SIGKILLed twice across these sets, a
+load artifact; runs with a non-zero exit are excluded from the n above.
 
 ## Survey: every holder of a `march_proc *`
 
@@ -471,8 +716,8 @@ the need:
    reach it by. Question 1 is also answered no. See "Analysis, 2026-09-22".
 5. The epoch scheme, for the holders question 4 leaves hot. Design recorded in "Chosen
    mechanism": ~~procs first (one PR)~~ **landed 2026-09-22**
-   ([[2026-09-22-proc-struct-reclaimed]]), then metas and tombstones (one PR), **still
-   open**.
+   ([[2026-09-22-proc-struct-reclaimed]]), then ~~metas and tombstones (one PR)~~
+   **landed 2026-09-23** (this file, "Mechanism PR 2 as landed").
 
 ## Evidence any reclamation phase must produce
 

@@ -1,7 +1,7 @@
 #pragma once
 /* march_reclaim — epoch-based reclamation for actor-lifetime structures.
  *
- * Design: specs/todos/2026-09-17-proc-struct-reclamation.md, "Chosen
+ * Design: specs/progress/2026-09-23-proc-struct-reclamation-metas.md, "Chosen
  * mechanism".  Procs are the first user (march_scheduler.c's PROC_DEAD reap);
  * actor metas are the second (a later PR).
  *
