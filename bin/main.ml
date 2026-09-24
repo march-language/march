@@ -3313,12 +3313,17 @@ let compile filename =
                      enforcement and is not.  Linux scopes reads properly via
                      the mount-namespace allow-list in forge/lib/cap_sandbox.ml.
 
-                   CAVEAT for scope authors: the kernel matches subpaths AFTER
-                   resolving symlinks, and normalization here is lexical (the
-                   build machine's filesystem is not the deployment machine's).
-                   A scope of "/tmp/x" on macOS therefore matches nothing,
-                   because /tmp is a symlink to /private/tmp.  Give the
-                   resolved path. *)
+                   Symlinks: the kernel matches subpaths AFTER resolving
+                   symlinks, while normalization here is lexical (the build
+                   machine's filesystem is not the deployment machine's).  A
+                   "/tmp/x" subpath baked in here would match nothing on macOS
+                   (/tmp -> /private/tmp) and deny every in-scope write.  So
+                   the scoped clauses are NOT part of the compile-time profile
+                   text: the lexical scopes travel separately as
+                   MARCH_CAP_WRITE_SCOPES, and march_sandbox_install()
+                   realpath()s each one on the deployment machine (longest
+                   existing prefix, rest re-appended) and appends the subpath
+                   clauses before sandbox_init. *)
                 let write_scopes =
                   List.filter_map (fun (cap, sc) ->
                       if March_caps.Cap_lattice.cap_subsumes "IO.FileWrite" cap
@@ -3326,20 +3331,37 @@ let compile filename =
                       then Some sc else None)
                     declared_scopes
                 in
-                if holds "IO.FileWrite" then begin
+                (* C string literals for the scopes, comma-separated, used as
+                   an array initializer by the runtime.  Escapes only what C
+                   needs (quote, backslash, controls as octal); UTF-8 bytes
+                   pass through untouched. *)
+                let c_string_lit (str : string) : string =
+                  let buf = Buffer.create (String.length str + 2) in
+                  Buffer.add_char buf '"';
+                  String.iter (fun c ->
+                      match c with
+                      | '"' -> Buffer.add_string buf "\\\""
+                      | '\\' -> Buffer.add_string buf "\\\\"
+                      | c when Char.code c < 0x20 || Char.code c = 0x7f ->
+                        Buffer.add_string buf (Printf.sprintf "\\%03o" (Char.code c))
+                      | c -> Buffer.add_char buf c) str;
+                  Buffer.add_char buf '"';
+                  Buffer.contents buf
+                in
+                let scoped_write_lits =
+                  if not (holds "IO.FileWrite") then []
                   (* An unscoped grant among them means any path: narrowing
                      would be a lie if one declaration is unrestricted. *)
-                  if write_scopes = [] || List.exists (fun sc -> sc = None) write_scopes
-                  then Buffer.add_string b "(allow file-write*)"
-                  else
-                    List.iter (function
-                        | None -> ()
-                        | Some path ->
-                          Buffer.add_string b
-                            (Printf.sprintf "(allow file-write* (subpath \\\"%s\\\"))"
-                               (March_caps.Cap_scope.normalize path)))
-                      write_scopes
-                end;
+                  else if write_scopes = []
+                       || List.exists (fun sc -> sc = None) write_scopes then begin
+                    Buffer.add_string b "(allow file-write*)";
+                    []
+                  end else
+                    List.sort_uniq compare
+                      (List.filter_map (Option.map March_caps.Cap_scope.normalize)
+                         write_scopes)
+                    |> List.map c_string_lit
+                in
                 if holds "IO.Network"   then Buffer.add_string b "(allow network*)";
                 (* process-exec is gated with process-fork, NOT baseline.
                    forge's profile_for keeps it unconditional because
@@ -3373,8 +3395,15 @@ let compile filename =
                    hands clang a real string; without the inner quotes the
                    macro expands as bare SBPL tokens and the runtime will not
                    compile. *)
+                let scopes_define =
+                  if scoped_write_lits = [] then ""
+                  else
+                    " -DMARCH_CAP_WRITE_SCOPES="
+                    ^ Filename.quote (String.concat "," scoped_write_lits)
+                in
                 " -DMARCH_CAP_PROFILE="
                 ^ Filename.quote ("\"" ^ Buffer.contents b ^ "\"")
+                ^ scopes_define
                 ^ deny_flags
               end in
             let strip_flag =
