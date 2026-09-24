@@ -393,6 +393,40 @@ git log is authoritative for exact commits.
   held two extra times by its supervisor's spawn code (the supervisor itself
   twice more), so an actor that had been through any of them was never freed
   after it stopped. They now leave the count alone.
+- **`--cap-sandbox` write scopes behind a symlink no longer deny every write.** On
+  macOS, `needs IO.FileWrite("/tmp/myapp")` refused even in-scope writes, because
+  the kernel matches the resolved path (`/private/tmp/myapp`) and the scope was
+  baked into the profile as written. The binary now resolves each scope with
+  `realpath()` at startup, on the machine it runs on, before installing the
+  sandbox. A scope that does not exist yet resolves through its longest existing
+  parent, and a scope that is itself a symlink resolves to its target. Writes
+  outside the scope are still refused.
+- **`Compress` decoders and encoders return the `Compress.Error` their signatures
+  promise.** They used to pass the codec's message string straight through as the
+  error, so matching `Err(Compress.InvalidInput(_))` never matched. Now corrupt or
+  truncated input is `InvalidInput(msg)`, hitting the decompressed-size cap is
+  `InsufficientOutput`, and out of memory, a failed codec init or a library that
+  was not built in is `Io(msg)`; `msg` is still the codec's message. The streaming
+  functions (`Gzip.encode_stream`/`decode_stream`, `Zstd.encode_stream`/
+  `decode_stream`) typecheck when you call them now: their `Seq(Bytes)`
+  annotation could never match a real `Seq` and has been removed. `Brotli.encode`
+  and `Brotli.encode_mode` also typecheck: the typechecker gave the builtin under
+  them one parameter too few. New `Compress.lift_encode_error`/`lift_decode_error`
+  expose the mapping.
+- **`RRB.from_array`/`RRB.to_array` and `AhoCorasick` use the Array module's real
+  type, `Array.PVec(a)`.** They were annotated `Array(a)`, a type that does not
+  exist, so an `Array.from_list(...)` value could not be passed to
+  `RRB.from_array`, and `RRB.to_array`'s result could not be annotated
+  `Array.PVec(a)`. Write `Array.PVec(a)` where you need the type: March has no
+  type-alias syntax, so `Array(a)` could not be made to mean it.
+- **`Plot.save` returns `Result(Unit, File.FileError)`.** It was declared
+  `Result(Unit, String)` but returned the `File.FileError` from the write, so the
+  declared type was wrong. Code that matched the error as a `String` needs to match
+  `File.FileError` instead.
+- **`Logger.with_scope`'s body typechecks.** The builtin `try_finally` under it was
+  typed as passing its callbacks an `Int`, which matched neither backend and
+  rejected the `() -> a` thunk `with_scope` takes. It is now typed `() -> a`.
+  Callbacks written `fn _ -> ...`, which is every existing caller, are unaffected.
 
 - **`forge bench` now links a project's FFI code.** Benchmarks were compiled
   without the `[ffi]` C sources/link flags and `[ffi.rust]` archive that

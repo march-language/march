@@ -1884,7 +1884,7 @@ void *__try_call_val(void *thunk) {
 
 /* ── march_try_finally ───────────────────────────────────────────────────── */
 /*
- * try_finally : (Bool -> a) -> (Bool -> b) -> a
+ * try_finally : (() -> a) -> (() -> b) -> a   (typecheck_builtins.ml)
  *
  * Runs action(), then cleanup(), and returns action's result.  If action
  * panics, cleanup STILL runs, and the panic is then re-raised (so it
@@ -2535,9 +2535,105 @@ static void main_fn_green_thread(void *arg) {
 #if defined(__APPLE__)
 extern int sandbox_init(const char *profile, uint64_t flags, char **errorbuf);
 extern void sandbox_free_error(char *errorbuf);
+
+#ifdef MARCH_CAP_WRITE_SCOPES
+#include <limits.h>
+/* Scoped IO.FileWrite grants as the compiler normalized them: LEXICALLY,
+ * because the build machine's filesystem is not the deployment machine's.
+ * Seatbelt matches a subpath against the path AFTER symlink resolution, so a
+ * lexical "/tmp/x" would match nothing on macOS (/tmp -> /private/tmp) and
+ * deny every in-scope write.  The scopes are therefore resolved HERE, on the
+ * machine that runs the program, and their subpath clauses appended to the
+ * compile-time profile before sandbox_init. */
+static const char *const march_cap_write_scopes[] = { MARCH_CAP_WRITE_SCOPES, NULL };
+
+/* Append one path component to the absolute path in out (capacity outsz),
+ * resolving "." and ".." lexically.  Returns 0 on overflow. */
+static int march_scope_push(char *out, size_t outsz, const char *comp, size_t n) {
+    if (n == 0 || (n == 1 && comp[0] == '.')) return 1;
+    if (n == 2 && comp[0] == '.' && comp[1] == '.') {
+        char *slash = strrchr(out, '/');
+        if (slash == out) out[1] = '\0';        /* never above "/" */
+        else if (slash) *slash = '\0';
+        return 1;
+    }
+    size_t len = strlen(out);
+    int need_sep = !(len > 0 && out[len - 1] == '/');
+    if (len + (size_t)need_sep + n + 1 > outsz) return 0;
+    if (need_sep) out[len++] = '/';
+    memcpy(out + len, comp, n);
+    out[len + n] = '\0';
+    return 1;
+}
+
+/* Resolve a scope against THIS filesystem.  The scope itself may not exist
+ * yet -- writing a new file or directory under a scope is the common case --
+ * so realpath() the LONGEST EXISTING PREFIX and re-append the remaining
+ * components lexically.  A scope that is itself a symlink resolves to its
+ * target.  Falls back to the lexical text if nothing resolves (cannot happen
+ * for an absolute path: "/" always exists) or the result would not fit. */
+static void march_scope_resolve(const char *scope, char *out, size_t outsz) {
+    char prefix[PATH_MAX];
+    char resolved[PATH_MAX];
+    size_t len = strlen(scope);
+    size_t cut;
+    const char *p;
+    if (len == 0 || scope[0] != '/' || len >= sizeof prefix) goto lexical;
+    memcpy(prefix, scope, len + 1);
+    cut = len;                                  /* prefix = scope[0, cut) */
+    for (;;) {
+        prefix[cut] = '\0';
+        if (realpath(cut == 0 ? "/" : prefix, resolved)) break;
+        if (cut == 0) goto lexical;
+        while (cut > 0 && prefix[cut - 1] != '/') cut--;
+        if (cut > 0) cut--;                     /* drop the separator too */
+    }
+    if (strlen(resolved) + 1 > outsz) goto lexical;
+    strcpy(out, resolved);
+    p = scope + cut;
+    while (*p) {
+        const char *e;
+        while (*p == '/') p++;
+        e = p;
+        while (*e && *e != '/') e++;
+        if (!march_scope_push(out, outsz, p, (size_t)(e - p))) goto lexical;
+        p = e;
+    }
+    return;
+lexical:
+    snprintf(out, outsz, "%s", scope);
+}
+#endif
+
 void march_sandbox_install(void) {
     char *err = NULL;
-    if (sandbox_init(MARCH_CAP_PROFILE, 0, &err) != 0) {
+    const char *profile = MARCH_CAP_PROFILE;
+#ifdef MARCH_CAP_WRITE_SCOPES
+    /* Worst case per scope: the clause text plus every path byte escaped. */
+    size_t nscopes = 0, cap, n;
+    char *built;
+    for (const char *const *sp = march_cap_write_scopes; *sp; sp++) nscopes++;
+    cap = strlen(MARCH_CAP_PROFILE) + 1 + nscopes * (64 + 2 * PATH_MAX);
+    built = malloc(cap);
+    if (!built) {
+        fprintf(stderr, "march: capability sandbox: out of memory; refusing to "
+                        "run uncontained\n");
+        exit(70);
+    }
+    n = (size_t)snprintf(built, cap, "%s", MARCH_CAP_PROFILE);
+    for (const char *const *sp = march_cap_write_scopes; *sp; sp++) {
+        char res[PATH_MAX];
+        march_scope_resolve(*sp, res, sizeof res);
+        n += (size_t)snprintf(built + n, cap - n, "(allow file-write* (subpath \"");
+        for (const char *c = res; *c; c++) {    /* SBPL string escapes */
+            if (*c == '"' || *c == '\\') built[n++] = '\\';
+            built[n++] = *c;
+        }
+        n += (size_t)snprintf(built + n, cap - n, "\"))");
+    }
+    profile = built;   /* installed for the life of the process; never freed */
+#endif
+    if (sandbox_init(profile, 0, &err) != 0) {
         /* Fail CLOSED: a sandbox that silently fails to install is worse than
          * none, because the operator believes the process is contained. */
         fprintf(stderr,
