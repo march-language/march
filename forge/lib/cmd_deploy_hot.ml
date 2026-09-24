@@ -587,18 +587,30 @@ let so_exports_symbol (so_path : string) (sym : string) : bool =
     (Filename.quote so_path) (Filename.quote sym) in
   Sys.command cmd = 0
 
-let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
+(** [tunnel] (default): reach [remote_socket] on [ssh_host] through an ssh
+    tunnel. [~tunnel:false]: [remote_socket] is a socket on this machine,
+    connected to directly ([forge test --upgrade-from]'s local processes);
+    [ssh_host] is then only a label. *)
+let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
     ?(old_schemas_path="") ?(new_schemas_path="") ?(entry_path="")
     ?(old_manifest_path="") ?(provided_epoch=0) ?(grant_caps=([] : string list))
     ?(no_cap_gate=false) () =
-  let local_socket = Printf.sprintf "/tmp/march_deploy_%d.sock" (Unix.getpid ()) in
+  let local_socket =
+    if tunnel then Printf.sprintf "/tmp/march_deploy_%d.sock" (Unix.getpid ()) else remote_socket in
 
-  (* 1. SSH tunnel *)
-  Printf.printf "Connecting to %s via SSH...\n%!" ssh_host;
-  let (tunnel_pid, _) = open_tunnel ~ssh_host ~remote_socket ~local_socket in
+  (* 1. SSH tunnel (none for a local socket) *)
+  let tunnel_pid =
+    if tunnel then begin
+      Printf.printf "Connecting to %s via SSH...\n%!" ssh_host;
+      fst (open_tunnel ~ssh_host ~remote_socket ~local_socket)
+    end else begin
+      Printf.printf "Connecting to %s (%s)...\n%!" ssh_host remote_socket;
+      -1
+    end
+  in
 
   let result =
-    Fun.protect ~finally:(fun () -> close_tunnel tunnel_pid local_socket) (fun () ->
+    Fun.protect ~finally:(fun () -> if tunnel then close_tunnel tunnel_pid local_socket) (fun () ->
     (try
       let fd = connect_socket local_socket in
       let conn = conn_of_fd fd in

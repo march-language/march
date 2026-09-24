@@ -196,3 +196,28 @@
      (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
       (setenv RECONCILE_APP_DIR fixtures/reconcile_app
        (run %{exe:test_topology_reconcile.exe}))))))))
+
+; test_upgrade_from.ml: `forge test --upgrade-from <ref>` (distributed-deploys
+; build step 8, II.8) on fixtures/upgrade: v1 becomes a git commit (the ref);
+; `good` (a handler's body changes; same message type) must PASS, `drops`
+; (a handler removed with no migrate_msg, so the old feeder's messages are
+; dropped and counted) must FAIL. Each case builds the old version and the
+; patch, runs the old version's process with a reload socket, drives real
+; sessions across a real hot deploy. test_topology_run's hermetic shape; it
+; also needs `git` on PATH (the fixture repositories and the ref's worktree).
+(executable
+ (name test_upgrade_from)
+ (modules test_upgrade_from)
+ (libraries alcotest unix))
+
+(rule
+ (alias runtest)
+ (deps (source_tree %{workspace_root}/runtime) (source_tree %{workspace_root}/stdlib)
+       (source_tree fixtures/upgrade))
+ (action
+  (setenv MARCH_TEST_BIN %{bin:march}
+   (setenv FORGE_TEST_BIN %{bin:forge}
+    (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
+     (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
+      (setenv UPGRADE_FIXTURES_DIR fixtures/upgrade
+       (run %{exe:test_upgrade_from.exe}))))))))

@@ -289,3 +289,115 @@ exits.
 
 [examples/topology_app](https://github.com/march-language/march/tree/main/examples/topology_app)
 is a complete two-pool app.
+
+## Changing placement on a running system
+
+A node opens its own offers from the topology it was given, and it re-reads that
+topology on **SIGHUP**. The reconciler (at small scale, `forge` on your machine) never
+opens or closes an offer itself: it writes the new topology and signals the nodes, and
+each node decides what it now serves. A placement change therefore needs no code change
+and no restart.
+
+```bash
+forge run --processes --env dev   # in one terminal: the cluster, one process per pool
+# edit topology.toml or topology.dev.toml: place = { on = "b", count = 1 }
+forge topology apply --env dev    # in another: one reconciliation pass
+forge topology status             # what each node holds
+```
+
+`forge topology apply` is one pass: it loads and checks the topology (with the overlay
+the cluster was started with, unless `--env` says otherwise), diffs it against what the
+nodes were given, pushes it (`.forge/topology.json` rewritten, SIGHUP to every node),
+waits until every node reports the new digest and its offers have settled, and prints
+each node's offers:
+
+```
+1 change(s), none needs a restart:
+  Echo.Server: placement count 1 -> count 1 on a
+pushed c5d272a26c83 to 3 node(s)
+a-1 (pool a, pid 83370, port 57968)
+  topology: c5d272a26c83
+  offers: Echo.Server
+b-1 (pool b, pid 83371, port 57969)
+  topology: c5d272a26c83
+  offers: (none)
+```
+
+What a node applies from a re-read topology, for the roles its build contains:
+
+- a role's **placement** (`place`): a role this node now ranks for is offered; one it
+  no longer ranks for is closed and **drains** (new invitations are refused, running
+  sessions finish; the closed offer is reported at the topology's soft and hard
+  deadlines if sessions are still running);
+- a role's **capacity**: the offer is closed and reopened at the new size;
+- a role a pool **stops serving**, or a role **removed** from `[roles]`: its offers
+  close and drain;
+- the `[drain]` deadlines for offers closed from then on.
+
+What needs a rebuild and restart, and is refused by `apply` with the list: a role's
+binding (`body`/`actor`), a new role, a role newly served by a pool (its build has no
+code for it), a pool's hook, `caps`, `initiates`, `isolate`, hosts and labels (a node
+reads its labels when it starts), pools added or removed. Stop the cluster and run
+`forge run --processes` again.
+
+Two `forge` invocations cannot reconcile the same project at once: a pass holds
+`.forge/run/reconcile.lock`, and a second one reports who holds it. The running
+cluster is recorded in `.forge/run/state.json` (pids, ports, reload sockets, each
+node's status file) while `forge run --processes` lasts. Each node reports the digest it
+applied, its offers and its running sessions to `.forge/run/<node>.status`
+(`MARCH_TOPOLOGY_STATUS`); a node that has not reported yet is never signalled, since a
+process with no watcher would die of the SIGHUP.
+
+Outside forge, the same works by hand: write the digest to the file the node was started
+with (`MARCH_TOPOLOGY_FILE`) and send it SIGHUP.
+
+## Testing an upgrade
+
+```bash
+forge test --upgrade-from v1.4.0     # any git ref
+```
+
+An upgrade test runs the **old** version of the app as local processes, drives traffic
+through it, hot-deploys the working tree into those processes, and checks what the
+deploy did:
+
+1. `git worktree add` at the ref under `.forge/upgrade/<ref>` (the directory ignores
+   itself), built with hot reload and started like `forge run --processes`, each process
+   with a reload socket;
+2. every `test/upgrade_*.march` of the working tree is compiled and started as one more
+   node of that cluster. It is the traffic: it opens sessions, sends actors messages, and
+   makes its own checks. It is given `MARCH_UPGRADE_SOCKETS` (the reload sockets),
+   `MARCH_UPGRADE_READY` (a file it creates once its pre-upgrade traffic is running) and
+   `MARCH_UPGRADE_DEPLOYED` (a file forge creates once the new code is live), and it
+   exits 0 when its checks pass;
+3. the working tree is deployed into every process through the same path as
+   `forge deploy hot`, on the local socket;
+4. forge waits for the tests to finish and for the drain, then reads each process's
+   `PINS`.
+
+The test passes when every test file exited 0, every old process is still running, and
+the counters show **nothing dropped**, nothing killed by a hard drain deadline and no
+epoch marker lost. A dropped message is the typical broken upgrade: an actor whose
+message type changed while old code (a task started before the deploy, another node)
+still sends it the old format, with no `<actor>_migrate_msg` to convert it. The report
+names it:
+
+```
+upgrade from HEAD FAILED:
+  app-1 dropped 255 message(s): an actor's message type changed and old code still
+  sent it the old format, with no migrate_msg for it (write one: forge hot-reload
+  migrate-msg-stub <Actor>)
+```
+
+Actors that hold their epoch for an unfinished session, or sit in a nested `receive`,
+and units that are not actors (tasks) stay on the old epoch until a hard drain deadline,
+which is off by default; the report lists them, and `MARCH_UPGRADE_STRICT_DRAIN=1` makes
+them a failure. `MARCH_UPGRADE_DRAIN_S` (60) bounds the wait for the drain,
+`MARCH_UPGRADE_TEST_S` (180) the wait for the test files.
+
+A test file declares the protocols it drives itself (a protocol's wire identity is its
+name, roles and steps, so a copy interoperates with the app's), starts its node with
+`Topology.config_from_env()`, and initiates sessions as the app's own initiators would.
+[forge/test/fixtures/upgrade](https://github.com/march-language/march/tree/main/forge/test/fixtures/upgrade)
+holds a complete one: `v1` (the old version and its `test/upgrade_traffic.march`),
+`good` (an upgrade that passes) and `drops` (one that drops messages and fails).

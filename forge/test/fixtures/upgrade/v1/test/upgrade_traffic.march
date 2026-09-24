@@ -1,0 +1,117 @@
+-- The upgrade test's traffic (`forge test --upgrade-from`, distributed-
+-- deploys build step 8, II.8). forge compiles this file from the working
+-- tree, starts it next to the OLD version's processes, and gives it:
+--   MARCH_UPGRADE_SOCKETS   the processes' reload sockets (comma-separated)
+--   MARCH_UPGRADE_READY     a file to create once the pre-upgrade traffic runs
+--   MARCH_UPGRADE_DEPLOYED  a file forge creates once the new code is deployed
+--   MARCH_NODE_NAME / PORT / ADVERTISE, MARCH_CLUSTER_NODES, MARCH_CLUSTER_SECRET
+--     to join the cluster as one more node.
+-- It exits 0 when its own checks pass.
+--
+-- Here: a session started on the old code that finishes on the new one (it
+-- waits for the deploy between its two exchanges), plus fresh sessions
+-- before and after.
+--
+-- The protocol is declared again here rather than imported: the app's entry
+-- module is not loadable as a library, and @[endpoints] code generated in
+-- an imported module does not typecheck today. A copy interoperates: a
+-- protocol's wire fingerprint is its name, roles and steps.
+mod UpgradeTraffic do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+  needs IO.Spawn
+  needs IO.Mut
+  needs IO.FileRead
+  needs IO.FileWrite
+  needs IO.Process
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs Session.Live
+  needs ClusterNode.Live
+
+  -- Must match UpgradeApp's protocol exactly (src/upgrade_app.march).
+  @[endpoints]
+  protocol Echo do
+    ask: Client -> Server : Int
+    answer: Server -> Client : Int
+    ask2: Client -> Server : Int
+    answer2: Server -> Client : Int
+  end
+
+  pfn wait_file(path : String, left : Int) : Bool do
+    if File.exists(path) do true
+    else if left <= 0 do false
+    else
+      sleep_ms(50)
+      wait_file(path, left - 1)
+    end end
+  end
+
+  -- One Echo session; [between] runs between its two exchanges. Some(sum
+  -- of both answers) when it completed.
+  pfn session(io : Cap(IO), node : Cap(ClusterNode.Live), n : Int, between : Int -> Bool) : Option(Int) do
+    let got = Vault.new("upgrade_traffic_" ++ int_to_string(n))
+    match Echo_Run.initiate_Client(io, node, fn (s, st) ->
+        Echo_Client.recv_Answer(s, Echo_Client.send_Ask(s, st, n), fn (a, st2) ->
+          let _ = between(0)
+          Echo_Client.recv_Answer2(s, Echo_Client.send_Ask2(s, st2, a), fn (b, st3) ->
+            Vault.set(got, "v", b)
+            Echo_Client.close(s, st3)))) do
+      Ok(_) -> Vault.get(got, "v")
+      Err(_) -> None
+    end
+  end
+
+  -- Offers take a moment to reach a new node: retry.
+  pfn retry(io : Cap(IO), node : Cap(ClusterNode.Live), n : Int, left : Int) : Option(Int) do
+    match session(io, node, n, fn _ -> true) do
+      Some(v) -> Some(v)
+      None ->
+        if left <= 0 do None else
+          sleep_ms(100)
+          retry(io, node, n, left - 1)
+        end
+    end
+  end
+
+  pfn check(what : String, got : Option(Int), want : Int) : Bool do
+    match got do
+      Some(v) ->
+        if v == want do
+          println("upgrade traffic: " ++ what ++ " ok")
+          true
+        else
+          println("upgrade traffic: " ++ what ++ ": got " ++ int_to_string(v) ++ ", want " ++ int_to_string(want))
+          false
+        end
+      None ->
+        println("upgrade traffic: " ++ what ++ ": the session failed")
+        false
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let node = match ClusterNode.start(io, Topology.config_from_env()) do
+      Ok(h) -> h
+      Err(e) -> Topology.start_failed(e)
+    end
+    let ready = Env.get("MARCH_UPGRADE_READY", "")
+    let deployed = Env.get("MARCH_UPGRADE_DEPLOYED", "")
+    let before = check("a session on the old code", retry(io, node, 1, 300), 3)
+    -- A session that spans the deploy: it waits for it between exchanges.
+    let spanning = task_spawn(fn _ -> session(io, node, 10, fn _ -> wait_file(deployed, 1200)))
+    sleep_ms(300)
+    let _ = File.write(ready, "ready\n")
+    let deployed_ok = wait_file(deployed, 1200)
+    let across = check("a session across the upgrade", task_await_unwrap(spanning), 12)
+    let after = check("a session on the new code", retry(io, node, 20, 100), 22)
+    ClusterNode.stop(node)
+    if before && deployed_ok && across && after do
+      println("upgrade traffic: all checks passed")
+    else
+      println("upgrade traffic: FAILED")
+      process_exit(1)
+    end
+  end
+end
