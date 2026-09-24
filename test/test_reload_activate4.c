@@ -694,6 +694,56 @@ static void test_activate6_role_policy(void) {
     close(fd);
 }
 
+/* ── TOPOLOGY (DD build step 10): a signed reconciler action ──────────── */
+static const char TOPO_BODY[] = "[pools.edge]\nserves = [\"Stream.Cons\"]\n";
+
+/* Push [body] signed over "TOPOLOGY <digest_claim>"; [send_digest] is what
+ * the line claims (normally the body's own digest). */
+static void push_topology(int fd, const char *body, const char *sign_digest,
+                          const char *send_digest, char *resp, int max) {
+    char sig[128], msg[128], line[512];
+    snprintf(msg, sizeof(msg), "TOPOLOGY %s", sign_digest);
+    sign_b64(msg, sig);
+    snprintf(line, sizeof(line), "TOPOLOGY %s %s %zu", send_digest, sig, strlen(body));
+    send_line(fd, line);
+    read_resp(fd, resp, max);
+    if (strcmp(resp, "READY") != 0) return;
+    write(fd, body, strlen(body));
+    read_resp(fd, resp, max);
+}
+
+static void topo_digest(const char *body, char out[65]) {
+    march_blake3_hex((const unsigned char *)body, strlen(body), out);
+}
+
+static void test_topology_push(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "connected to reload server (TOPOLOGY)");
+    if (fd < 0) return;
+    char resp[512], d[65], other[65], want[128];
+    topo_digest(TOPO_BODY, d);
+    topo_digest("something else", other);
+
+    push_topology(fd, TOPO_BODY, other, d, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR bad_signature") == 0,
+          "TOPOLOGY: a signature over another digest is refused before the body");
+    push_topology(fd, TOPO_BODY, other, other, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR digest_mismatch") == 0,
+          "TOPOLOGY: a body that does not hash to the signed digest is refused");
+    push_topology(fd, TOPO_BODY, d, d, resp, sizeof(resp));
+    snprintf(want, sizeof(want), "OK %s", d);
+    CHECK(strcmp(resp, want) == 0, "TOPOLOGY: a signed push is accepted");
+    {
+        char line[4096]; last_audit_line(line, sizeof(line));
+        CHECK(strstr(line, "\"type\":\"topology\"") && strstr(line, "\"result\":\"ok\""),
+              "TOPOLOGY: the push is audited");
+    }
+    send_line(fd, "PING");   /* the connection is still in sync */
+    read_resp(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "PONG") == 0, "TOPOLOGY: the stream stays in sync after the body");
+    close(fd);
+}
+
 /* ── Restart durability (plan 6.5, DD build step 10) ─────────────────────
  * Each phase is its own process (fork), i.e. its own server lifetime, over
  * one HOME (the CAS root and the persisted state) and one socket path. */
@@ -738,6 +788,10 @@ static void phase_activate(void) {
     char want[200];
     snprintf(want, sizeof(want), "VERSION test_fn_epoch hot %s", HOT_IMPL);
     CHECK(strstr(v, want) != NULL, "phase 1: VERSIONS shows the hot version");
+    char d[65];
+    topo_digest(TOPO_BODY, d);
+    push_topology(fd, TOPO_BODY, d, d, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "phase 1: a topology pushed");
     close(fd);
 }
 
@@ -773,7 +827,21 @@ static int run_phase(void (*body)(void)) {
     return WIFEXITED(st) ? WEXITSTATUS(st) : 101;
 }
 
-static void ph_restored_hot(void)   { restore_boot("baseline"); phase_restored(1, "replayed", 0); }
+static void ph_restored_hot(void) {
+    restore_boot("baseline");
+    phase_restored(1, "replayed", 0);
+    int fd = connect_sock(SOCK_PATH);
+    if (fd < 0) return;
+    char v[4096], d[65], want[128];
+    restore_versions(fd, v, sizeof(v), "VERSIONS_DETAIL");
+    topo_digest(TOPO_BODY, d);
+    snprintf(want, sizeof(want), "topology:%s", d);
+    CHECK(strstr(v, want) != NULL, "restart: the last pushed topology is restored");
+    char line[4096]; last_audit_line(line, sizeof(line));
+    CHECK(strstr(line, "\"type\":\"topology\"") && strstr(line, "\"result\":\"restored\""),
+          "restart: the topology went back through the hook (audited)");
+    close(fd);
+}
 static void ph_no_replay(void)      { setenv("MARCH_HCR_NO_REPLAY", "1", 1);
                                       restore_boot("baseline"); phase_restored(0, "off", 1); }
 static void ph_after_no_replay(void){ restore_boot("baseline"); phase_restored(0, "none", 0); }
@@ -807,9 +875,14 @@ static void test_restart_durability(void) {
     CHECK(corrupt_state_signature(), "phase 6: corrupt the stored signature");
     CHECK(run_phase(ph_corrupt_skipped) == 0, "phase 6: the corrupt entry is skipped, no crash");
     {
-        char line[4096]; last_audit_line(line, sizeof(line));
-        CHECK(strstr(line, "\"type\":\"restore\"") && strstr(line, "\"result\":\"err_restore_sig\""),
-              "phase 6: the skipped entry has an audit line");
+        int found = 0;
+        FILE *f = fopen(g_audit_path, "r");
+        char line[4096];
+        while (f && fgets(line, sizeof(line), f))
+            if (strstr(line, "\"type\":\"restore\"") && strstr(line, "\"result\":\"err_restore_sig\""))
+                found = 1;
+        if (f) fclose(f);
+        CHECK(found, "phase 6: the skipped entry has an audit line");
     }
     CHECK(run_phase(phase_activate) == 0, "phase 7: activate again");
     CHECK(run_phase(ph_base_changed) == 0, "phase 8: another build on the socket does not replay it");
@@ -885,6 +958,7 @@ int main(int argc, char **argv) {
         test_batch_audit_carries_caps();
         test_epoch_model_wait_pins_drain();
         test_activate6_role_closures();
+        test_topology_push();
     } else {
         /* $MARCH_DEPLOY_POLICY must already be set by the caller (dune rule)
          * before this process started, since the server loads it lazily on

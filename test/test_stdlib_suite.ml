@@ -11757,7 +11757,7 @@ let test_hcr_role_widening_refused_end_to_end () =
     output_string oc "IO.Console\nIO.NetConnect\nIO.NetListen\nSession.Live\n";
     close_out oc;
     let sock = Printf.sprintf "/tmp/march_role_e2e_%d.sock" (Unix.getpid ()) in
-    let admitted = ref "" in
+    let admitted = ref "" and topology = ref "" in
     with_reload_server ~stop:Sys.sigkill ~dir ~bin ~sock ~extra_env:[| "MARCH_DEPLOY_POLICY=" ^ policy |]
       (fun _pid ->
          match e2e_connect sock with
@@ -11783,6 +11783,10 @@ let test_hcr_role_widening_refused_end_to_end () =
            Alcotest.(check bool) ("a closure inside the policy is admitted: " ^ resp) true
              (String.length resp >= 3 && String.sub resp 0 3 = "OK ");
            admitted := target;
+           (* A signed topology push, which must survive the restart too. *)
+           (match H.push_topology_conn conn ~sk ~body:"[pools.edge]\nserves = [\"Stream.Cons\"]\n" with
+            | Ok d -> topology := d
+            | Error e -> Alcotest.failf "TOPOLOGY push refused: %s" e);
            Unix.close fd);
     (* 3. Restart durability (plan 6.5): the server was SIGKILLed; the same
        binary on the same socket comes back with the admitted patch
@@ -11805,6 +11809,11 @@ let test_hcr_role_widening_refused_end_to_end () =
             (List.exists (fun l ->
                  let p = "RESTORED entries:1 skipped:0 mode:replayed" in
                  String.length l >= String.length p && String.sub l 0 (String.length p) = p) lines);
+          Alcotest.(check bool) "the pushed topology's digest is restored" true
+            (List.exists (fun l ->
+                 let n = String.length l and t = "topology:" ^ !topology in
+                 n >= String.length t && String.sub l (n - String.length t) (String.length t) = t)
+                lines);
           let slot = List.find_opt (fun l ->
               match String.split_on_char ' ' l with
               | "SLOT" :: _ :: name :: _ -> name = !admitted | _ -> false) lines in

@@ -61,6 +61,16 @@
  *     signature would fail with a misleading ERR bad_signature) and its
  *     `callers:` parse runs to end of line.  A client whose manifest has
  *     no ROLE lines keeps sending ACTIVATE4/ACTIVATE5 unchanged.
+ *   TOPOLOGY <blake3> <sig64> <size>\n                → READY | ERR <reason>
+ *     <topology file, exactly size bytes>            → OK <blake3> | ERR <reason>
+ *     A signed reconciler action (plan section 5): the signature is over
+ *     "TOPOLOGY <blake3>" with the deploy key, checked BEFORE the body is
+ *     accepted; the body must hash to <blake3>.  The server writes it to
+ *     the service's persisted state (topology.toml, temp+rename), records
+ *     the digest and signature in the state file, and calls
+ *     march_hcr_on_topology(path) (a no-op until build step 8 fills it).
+ *     At start, a persisted topology whose signature and digest verify is
+ *     handed to the hook again.
  *   BEGIN_BATCH                                       → OK
  *   COMMIT_BATCH                                      → OK <n> | WAIT … | ERR <reason>
  *   ROLLBACK_BATCH                                    → OK
@@ -276,6 +286,8 @@ static char g_state_dir[768];
 static char g_base_digest[65];
 static char g_manifest_digest[65];
 static char g_topology_digest[65] = "-";
+static char g_topology_sig[160] = "-";       /* its signature, re-verified at start */
+static const char *g_audit_type;             /* overrides "activate"/"restore" */
 static int  g_restoring;                     /* 1 while replay_state runs */
 static int  g_restored_entries, g_restored_skipped;
 static const char *g_restored_mode = "none"; /* none|replayed|off|base_changed */
@@ -360,8 +372,8 @@ static void persist_state(void) {
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     FILE *f = fopen(tmp, "w");
     if (!f) return;
-    fprintf(f, "# march-hcr-state v1\nbase %s\ntopology %s\nmanifest %s\nseq %llu\n",
-            g_base_digest, g_topology_digest, g_manifest_digest, g_stack_seq);
+    fprintf(f, "# march-hcr-state v1\nbase %s\ntopology %s %s\nmanifest %s\nseq %llu\n",
+            g_base_digest, g_topology_digest, g_topology_sig, g_manifest_digest, g_stack_seq);
     for (size_t i = 0; i < g_stack_n; i++) {
         const hcr_stack_entry *e = &g_stack[i];
         fprintf(f, "entry %llu %u %s %s %s\n", e->seq, e->epoch, e->signer,
@@ -522,7 +534,8 @@ static void write_audit_log(const char *fn, const char *impl_hash,
         "{\"ts\":%lld,\"type\":\"%s\",\"fn\":\"%s\","
         "\"impl_hash\":\"%s\",\"signer\":\"%s\","
         "\"cas_hash\":\"%s\",",
-        ts_ms, g_restoring ? "restore" : "activate", fn ? fn : "", impl_hash ? impl_hash : "",
+        ts_ms, g_audit_type ? g_audit_type : g_restoring ? "restore" : "activate",
+        fn ? fn : "", impl_hash ? impl_hash : "",
         signer, cas_hash ? cas_hash : "");
     if (ac && ac->caps) {
         fputs("\"caps\":[", f);
@@ -802,6 +815,112 @@ static void set_state_aside(const char *suffix) {
     rename(path, dst);
 }
 
+/* ── The signed TOPOLOGY verb (plan section 5, DD build step 10) ───────── */
+
+/* Filled in by build step 8 (see march_reload.h). */
+void march_hcr_on_topology(const char *path) {
+    (void)path;
+}
+
+static void topology_path(char *out, size_t n) {
+    snprintf(out, n, "%s/topology.toml", g_state_dir);
+}
+
+static int topology_signature_ok(const char *digest, const char *sig) {
+    char msg[128];
+    snprintf(msg, sizeof(msg), "TOPOLOGY %s", digest);
+    return verify_signed_line(msg, sig);
+}
+
+static void restore_topology(void) {
+    char path[800];
+    topology_path(path, sizeof(path));
+    const char *why = NULL;
+    FILE *f = fopen(path, "rb");
+    if (!f) why = "err_topology_missing";
+    else {
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        unsigned char *buf = (unsigned char *)malloc(sz > 0 ? (size_t)sz : 1);
+        size_t got = buf && sz > 0 ? fread(buf, 1, (size_t)sz, f) : 0;
+        fclose(f);
+        char hex[65];
+        march_blake3_hex(buf, got, hex);
+        free(buf);
+        if (strcmp(hex, g_topology_digest) != 0) why = "err_topology_digest";
+        else if (!topology_signature_ok(g_topology_digest, g_topology_sig)) why = "err_topology_sig";
+    }
+    g_audit_type = "topology";
+    if (why) {
+        write_audit_log("(topology)", g_topology_digest, "", NULL, why);
+        fprintf(stderr, "[hcr] restore: persisted topology not restored (%s)\n", why);
+    } else {
+        write_audit_log("(topology)", g_topology_digest, "", NULL, "restored");
+        march_hcr_on_topology(path);
+    }
+    g_audit_type = NULL;
+}
+
+#define MARCH_TOPOLOGY_MAX (4 * 1024 * 1024)
+
+/* TOPOLOGY <blake3> <sig64> <size>: see the file header. */
+static void handle_topology(int fd, const char *args) {
+    char digest[80], sig[160];
+    long long size = -1;
+    if (sscanf(args, "%79s %159s %lld", digest, sig, &size) != 3
+        || !is_hex64(digest) || size < 0 || size > MARCH_TOPOLOGY_MAX) {
+        wresp(fd, "ERR bad_format\n");
+        return;
+    }
+    for (char *p = digest; *p; p++) if (*p >= 'A' && *p <= 'F') *p = (char)(*p - 'A' + 'a');
+    g_audit_type = "topology";
+    if (!topology_signature_ok(digest, sig)) {
+        write_audit_log("(topology)", digest, "", NULL, "err_sig");
+        g_audit_type = NULL;
+        wresp(fd, HAVE_SIGNING_KEY ? "ERR bad_signature\n" : "ERR signing_not_configured\n");
+        return;
+    }
+    unsigned char *buf = (unsigned char *)malloc(size > 0 ? (size_t)size : 1);
+    if (!buf) { g_audit_type = NULL; wresp(fd, "ERR oom\n"); return; }
+    wresp(fd, "READY\n");
+    if (size > 0 && read_exact(fd, buf, (size_t)size) != 0) {
+        free(buf); g_audit_type = NULL; return;   /* the client went away */
+    }
+    char hex[65];
+    march_blake3_hex(buf, (size_t)size, hex);
+    if (strcmp(hex, digest) != 0) {
+        write_audit_log("(topology)", digest, "", NULL, "err_digest");
+        free(buf); g_audit_type = NULL;
+        wresp(fd, "ERR digest_mismatch\n");
+        return;
+    }
+    char path[800], tmp[820];
+    mkdir_p(g_state_dir);
+    topology_path(path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "wb");
+    int ok = f && fwrite(buf, 1, (size_t)size, f) == (size_t)size;
+    if (f) ok = (fclose(f) == 0) && ok;
+    free(buf);
+    if (!ok || rename(tmp, path) != 0) {
+        unlink(tmp);
+        write_audit_log("(topology)", digest, "", NULL, "err_write");
+        g_audit_type = NULL;
+        wresp(fd, "ERR write_failed\n");
+        return;
+    }
+    snprintf(g_topology_digest, sizeof(g_topology_digest), "%s", digest);
+    snprintf(g_topology_sig, sizeof(g_topology_sig), "%s", sig);
+    persist_state();
+    write_audit_log("(topology)", digest, "", NULL, "ok");
+    g_audit_type = NULL;
+    march_hcr_on_topology(path);
+    char resp[96];
+    int n = snprintf(resp, sizeof(resp), "OK %s\n", digest);
+    write_safe(fd, resp, n, sizeof(resp));
+}
+
 static void replay_state(const char *socket_path) {
     /* The state directory: one per service (socket path). */
     char key[65];
@@ -816,7 +935,7 @@ static void replay_state(const char *socket_path) {
     if (!f) return;                       /* first start of this service */
 
     /* Parse.  Entries are kept in file order (ascending seq). */
-    char base[80] = "", topo[80] = "-";
+    char base[80] = "", topo[80] = "-", topo_sig[160] = "-";
     unsigned long long file_seq = 0;
     hcr_stack_entry *ents = NULL;
     size_t n = 0, cap = 0;
@@ -828,7 +947,10 @@ static void replay_state(const char *socket_path) {
         while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
         if (!len || line[0] == '#') continue;
         if (strncmp(line, "base ", 5) == 0) { snprintf(base, sizeof(base), "%s", line + 5); continue; }
-        if (strncmp(line, "topology ", 9) == 0) { snprintf(topo, sizeof(topo), "%s", line + 9); continue; }
+        if (strncmp(line, "topology ", 9) == 0) {
+            if (sscanf(line + 9, "%79s %159s", topo, topo_sig) < 1) snprintf(topo, sizeof(topo), "-");
+            continue;
+        }
         if (strncmp(line, "manifest ", 9) == 0) continue;
         if (strncmp(line, "seq ", 4) == 0) { file_seq = strtoull(line + 4, NULL, 10); continue; }
         unsigned long long seq; unsigned ep; char signer[80], sig[160]; int off = 0;
@@ -855,7 +977,10 @@ static void replay_state(const char *socket_path) {
     }
     free(line);
     fclose(f);
-    if (strcmp(topo, "-") != 0 && is_hex64(topo)) snprintf(g_topology_digest, sizeof(g_topology_digest), "%s", topo);
+    if (strcmp(topo, "-") != 0 && is_hex64(topo)) {
+        snprintf(g_topology_digest, sizeof(g_topology_digest), "%s", topo);
+        snprintf(g_topology_sig, sizeof(g_topology_sig), "%s", topo_sig);
+    }
 
     g_restoring = 1;
     const char *nr = getenv("MARCH_HCR_NO_REPLAY");
@@ -866,11 +991,15 @@ static void replay_state(const char *socket_path) {
         g_restored_skipped = (int)n + malformed;
         write_audit_log("(stack)", "", "", NULL, "base_changed");
         set_state_aside("base-changed");
+        snprintf(g_topology_digest, sizeof(g_topology_digest), "-");
+        snprintf(g_topology_sig, sizeof(g_topology_sig), "-");
     } else if (nr && nr[0] && strcmp(nr, "0") != 0) {
         g_restored_mode = "off";
         g_restored_skipped = (int)n + malformed;
         write_audit_log("(stack)", "", "", NULL, "no_replay");
         set_state_aside("no-replay");
+        snprintf(g_topology_digest, sizeof(g_topology_digest), "-");
+        snprintf(g_topology_sig, sizeof(g_topology_sig), "-");
     } else {
         g_restored_mode = "replayed";
         g_stack_seq = file_seq;
@@ -957,6 +1086,11 @@ static void replay_state(const char *socket_path) {
             fprintf(stderr, "[hcr] restore: republished %d patch(es), skipped %d\n",
                     g_restored_entries, g_restored_skipped);
     }
+    /* The last pushed topology: handed to the hook again when its
+     * signature and digest still verify (a replaced file, or one signed by
+     * another key, is not). */
+    if (strcmp(g_restored_mode, "replayed") == 0 && strcmp(g_topology_digest, "-") != 0)
+        restore_topology();
     g_restoring = 0;
     for (size_t i = 0; i < n; i++) stack_entry_free(&ents[i]);
     free(ents);
@@ -2024,6 +2158,10 @@ static void handle_client(int fd) {
                             activate_epoch, callers_sorted, &ac4);
             }
 
+        /* ── TOPOLOGY (signed reconciler action, DD step 10) ──────────── */
+        } else if (strncmp(line, "TOPOLOGY ", 9) == 0) {
+            handle_topology(fd, line + 9);
+
         /* ── GET_EPOCH ────────────────────────────────────────────────── */
         } else if (strcmp(line, "GET_EPOCH") == 0) {
             uint32_t e = atomic_fetch_add_explicit(&g_next_epoch, 1,
@@ -2223,6 +2361,10 @@ void march_reload_server_start(const char *socket_path) {
 
 void march_reload_server_start(const char *socket_path) {
     (void)socket_path;
+}
+
+void march_hcr_on_topology(const char *path) {
+    (void)path;
 }
 
 #endif /* __linux__ || __APPLE__ */

@@ -1732,6 +1732,27 @@ let test_activate6_signed_shape_and_role_blocks () =
        cap_root_hex role_caps)
     signed
 
+(* DD build step 10: the signed TOPOLOGY line. *)
+let test_topology_command_signed () =
+  let (pk, sk) = March_ed25519.Ed25519.keygen () in
+  let body = "[pools.edge]\nserves = [\"Stream.Cons\"]\n" in
+  let (line, digest) = Cmd_deploy_hot.topology_command ~sk ~body in
+  Alcotest.(check string) "digest is the body's blake3"
+    (March_cas.Blake3.hash_string body) digest;
+  (match String.split_on_char ' ' line with
+   | [ "TOPOLOGY"; d; sig_b64; size ] ->
+     Alcotest.(check string) "digest on the line" digest d;
+     Alcotest.(check string) "size on the line" (string_of_int (String.length body)) size;
+     let expected =
+       March_ed25519.Ed25519.sig_to_base64
+         (March_ed25519.Ed25519.sign_str ("TOPOLOGY " ^ digest) sk) in
+     Alcotest.(check string) "signed over \"TOPOLOGY <digest>\" (ed25519 is deterministic)"
+       expected sig_b64;
+     Alcotest.(check bool) "and it verifies under the deploy key" true
+       (March_ed25519.Ed25519.verify (Bytes.of_string ("TOPOLOGY " ^ digest))
+          (March_ed25519.Ed25519.sign_str ("TOPOLOGY " ^ digest) sk) pk)
+   | _ -> Alcotest.failf "unexpected TOPOLOGY line: %s" line)
+
 let test_parse_wait () =
   Alcotest.(check (option (pair int (pair int (pair int bool)))))
     "a WAIT line"
@@ -2739,6 +2760,7 @@ let () =
       Alcotest.test_case "ACTIVATE3: signed/wire shape unchanged" `Quick test_activate3_signed_shape_unchanged;
       Alcotest.test_case "ACTIVATE5: signed shape carries the migrate bitmask" `Quick test_activate5_signed_shape;
       Alcotest.test_case "ACTIVATE6: role roots signed, closures unsigned" `Quick test_activate6_signed_shape_and_role_blocks;
+      Alcotest.test_case "TOPOLOGY: signed line shape" `Quick test_topology_command_signed;
       Alcotest.test_case "WAIT: parsed and described" `Quick test_parse_wait;
       Alcotest.test_case "schemas: handlers, migrate_msg_from, message diff" `Quick test_schema_handlers_and_message_diff;
       Alcotest.test_case "migrate_msg stub from handler signatures" `Quick test_migrate_msg_stub;

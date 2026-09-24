@@ -698,6 +698,58 @@ let cas_put conn hash path =
   if not (String.length final >= 2 && String.sub final 0 2 = "OK") then
     failwith (Printf.sprintf "CAS_PUT failed: %s" final)
 
+(* ─── Signed TOPOLOGY push (distributed-deploys build step 10) ────────────
+
+   A reconciler action like ACTIVATE (plan section 5, "Every reconciler
+   action is signed"): pushing a topology changes what a node offers, so an
+   unsigned push would be a way around every other check.  The server
+   verifies the signature over ["TOPOLOGY <blake3>"] before it accepts the
+   body, checks the body's digest, persists it with the patch stack (so a
+   restart restores it) and calls its topology hook. *)
+
+(** [topology_command ~sk ~body] — [(line, digest)]: the line is
+    ["TOPOLOGY <blake3> <sig64> <size>"], the signature over
+    ["TOPOLOGY <blake3>"] with the deploy key [sk]. *)
+let topology_command ~sk ~(body : string) : string * string =
+  let digest = March_cas.Blake3.hash_string body in
+  let sig_b64 =
+    March_ed25519.Ed25519.sig_to_base64
+      (March_ed25519.Ed25519.sign_str ("TOPOLOGY " ^ digest) sk) in
+  (Printf.sprintf "TOPOLOGY %s %s %d" digest sig_b64 (String.length body), digest)
+
+(** Push [body] over an open reload-server connection.  [Ok digest], or
+    [Error] with the server's answer. *)
+let push_topology_conn conn ~sk ~(body : string) : (string, string) result =
+  let (cmd, digest) = topology_command ~sk ~body in
+  send_line conn cmd;
+  match recv_line conn with
+  | "READY" ->
+    send_binary conn (Bytes.of_string body) 0 (String.length body);
+    let resp = recv_line conn in
+    if resp = "OK " ^ digest then Ok digest else Error resp
+  | "ERR unknown_command" -> Error "server predates the TOPOLOGY verb; upgrade the server"
+  | resp -> Error resp
+
+(** [push_topology ~ssh_host ~remote_socket ~sk ~path] — push the topology
+    file at [path] to one node's reload server over an SSH tunnel.  For the
+    reconciler (build steps 8 and 10b); [Ok digest] on success. *)
+let push_topology ~ssh_host ~remote_socket ~sk ~(path : string) : (string, string) result =
+  match In_channel.with_open_bin path In_channel.input_all with
+  | exception Sys_error m -> Error m
+  | body ->
+    let local_socket =
+      Printf.sprintf "/tmp/march_topology_%d.sock" (Unix.getpid ()) in
+    let (pid, _) = open_tunnel ~ssh_host ~remote_socket ~local_socket in
+    Fun.protect ~finally:(fun () -> close_tunnel pid local_socket) (fun () ->
+        try
+          let fd = connect_socket local_socket in
+          let r = push_topology_conn (conn_of_fd fd) ~sk ~body in
+          Unix.close fd;
+          r
+        with
+        | Failure m -> Error m
+        | Unix_error (e, fn, _) -> Error (Printf.sprintf "%s: %s" fn (Unix.error_message e)))
+
 (* ─── Transient socket naming (shared by Phase 7 fan-out and Phase 10 helpers) *)
 
 let _tunnel_counter = ref 0
