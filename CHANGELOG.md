@@ -20,6 +20,18 @@ git log is authoritative for exact commits.
   zero panics, so a predicate is false wherever it would divide by zero,
   following `&&`/`||` short-circuiting: with `_ / d > 0`, a call with `d == 0` is
   a violation and one that cannot rule out `d == 0` is not proved.
+- **Editor support for `topology.toml`** (build step 7 of the distributed-deploys
+  plan). `march-lsp` recognises `topology.toml` and `topology.<env>.toml` and shows
+  `forge topology check`'s diagnostics on forge's lines, computed by forge's own
+  code; the base file also shows what each overlay adds (a `place.count` above the
+  host count, a missing host label). Names resolve against open editor buffers, so
+  renaming a function in a `.march` file updates the topology file's diagnostics at
+  once. Go to definition on `body`, `actor` and `start` strings and on
+  `"Protocol.Role"` strings (protocol part to the `protocol`, role part to the role);
+  completion of functions, actors, roles, host labels, keys per section and pool
+  names in an overlay's `[pool.` header; hover on a role showing its `role R needs`
+  grant and its body type. Attach the server to those file names in your editor
+  (`lsp/docs/editors.md`).
 - **Hot reload: the unified epoch model and drains** (build step 6 of the
   distributed-deploys plan). Every unit of work (actor, task, session) runs at the
   epoch of the deploy it started under, and every call it makes, from the base
@@ -383,6 +395,12 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **`forge bench` now links a project's FFI code.** Benchmarks were compiled
+  without the `[ffi]` C sources/link flags and `[ffi.rust]` archive that
+  `forge build`, `forge run` and `forge test` pass, so a benchmark calling any
+  extern failed to link (`Undefined symbols`) while the same code built and
+  tested fine. A `[ffi.rust]` cargo build failure is now reported once, before
+  any benchmark compiles.
 - **Spawning a nested actor from its parent module compiles.** `spawn(Inner.Box)`
   written outside `mod Inner` passed `--check` and ran interpreted, but `--compile`
   failed to link with `Undefined symbols: "_Inner.Box_spawn"`. It now links and runs.
