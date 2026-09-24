@@ -6879,6 +6879,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/mailbox_decl.expected native_mailbox_decl.out)))
 
+; ── spawn(Inner.Box): a nested actor spawned from its PARENT module ──
+; The actor's glue is minted under its bare declared name (Box_spawn); the
+; qualified call site used to name Inner.Box_spawn, so --check passed and
+; --compile failed to link. The interpreted run is diffed against the same
+; .expected so both backends must agree.
+(rule
+ (targets native_nested_actor_spawn native_nested_actor_spawn.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nested_actor_spawn.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_nested_actor_spawn
+        native/nested_actor_spawn.march)
+   (with-stdout-to native_nested_actor_spawn.out
+        (system "./native_nested_actor_spawn")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_actor_spawn.expected native_nested_actor_spawn.out)))
+
+(rule
+ (targets interp_nested_actor_spawn.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/nested_actor_spawn.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_nested_actor_spawn.out
+   (run %{exe:../bin/main.exe} native/nested_actor_spawn.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_actor_spawn.expected interp_nested_actor_spawn.out)))
+
 ; ── Credit-based flow control: budget refuses, CREDIT re-admits ──
 (rule
  (targets native_credit_backpressure_loopback native_credit_backpressure_loopback.out)

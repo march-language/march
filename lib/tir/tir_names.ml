@@ -394,6 +394,25 @@ let actor_dispatch_suffix = "_dispatch"
 (** Suffix for an actor's spawn fn name ("Name" -> "Name_spawn"). *)
 let actor_spawn_suffix = "_spawn"
 
+(** The declared (bare) name an actor REFERENCE denotes.  Every actor's glue
+    ([Name_spawn], [Name_dispatch], [Name_Msg], ...) is minted from its bare
+    declared name, including an actor nested in a module (lower.ml's DMod
+    DActor arm: the spawn symbol and the HCR manifest assert the short
+    spelling), and [Lower_state._actor_mailboxes] is keyed the same way.  A
+    reference from outside the declaring module is module-qualified
+    ([spawn(Inner.Box)], a supervise field [c : Inner.Box]), so the qualifier
+    must be dropped before a glue name is built from it, or the call names
+    an [Inner.Box_spawn] that no definition provides (undefined symbol at
+    link time).  "Inner.Box" -> "Box"; "Box" -> "Box". *)
+let actor_decl_name (ref_name : string) : string =
+  match String.rindex_opt ref_name '.' with
+  | Some i -> String.sub ref_name (i + 1) (String.length ref_name - i - 1)
+  | None -> ref_name
+
+(** The spawn fn an actor reference calls: "Inner.Box" -> "Box_spawn". *)
+let actor_spawn_fn_name (ref_name : string) : string =
+  actor_decl_name ref_name ^ actor_spawn_suffix
+
 (** Actor struct field name for the dispatch-fn pointer slot (field 0).
     C-runtime word index: a[2]. MUST alphabetically sort before
     [actor_alive_field] and [actor_state_field] — see module doc above. *)

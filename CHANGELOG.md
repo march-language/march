@@ -317,6 +317,11 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Spawning a nested actor from its parent module compiles.** `spawn(Inner.Box)`
+  written outside `mod Inner` passed `--check` and ran interpreted, but `--compile`
+  failed to link with `Undefined symbols: "_Inner.Box_spawn"`. It now links and runs.
+  A `mailbox N policy` declared on such an actor is also applied at a qualified spawn;
+  before, it was silently skipped there.
 - **A dead actor's metadata is now returned, and sends no longer slow down
   after actor churn.** Each actor's runtime bookkeeping (about 300 bytes) used
   to be kept for the life of the program, and it stayed on the lookup path of
