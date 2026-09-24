@@ -12,6 +12,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`NativeArray.sort_float` — a `Float` array can now be sorted.** Same
+  algorithm and ownership as `sort_int` (unstable, in place when uniquely owned,
+  copy-on-write when shared), 1.9–18x faster than libc `qsort` at 5 million
+  elements. Floats sort by IEEE 754 `totalOrder`, so NaN has a defined place:
+  `-NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN`. Note that `-0.0` sorts
+  before `+0.0` even though `-0.0 == 0.0` and `compare(-0.0, 0.0)` is `0`. The
+  interpreter and compiled builds produce the same order, NaN included.
 - **Editor support for `topology.toml`** (build step 7 of the distributed-deploys
   plan). `march-lsp` recognises `topology.toml` and `topology.<env>.toml` and shows
   `forge topology check`'s diagnostics on forge's lines, computed by forge's own
@@ -155,6 +162,16 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **forge checks cached dependencies on online builds too.** `forge build`,
+  `check`, `run`, `test` and `bench` re-hash each cached git or registry
+  dependency against `forge.lock`, once per command. Before, only `--offline`
+  did this. A tree that was edited or corrupted is fetched again, checked, and
+  swapped in, with a one-line note. If the fresh copy does not match
+  `forge.lock` either, the command fails, naming the dependency and both hashes,
+  because `forge.lock` or the upstream source has changed. A clean cache prints
+  nothing and fetches nothing. `forge deps` also no longer keeps an edited
+  cached git tree and writes that tree's hash into `forge.lock`: it replaces the
+  tree with the fresh clone. `--offline` is unchanged: a mismatch is an error.
 - **Hot reload: a second deploy while actors are still migrating is accepted**
   (it used to be refused with `ERR publish_failed`); each actor applies both
   migrations in order. Past the soft drain deadline, messages in an unchanged
@@ -403,6 +420,11 @@ git log is authoritative for exact commits.
   now reports the missing codec even when no type in the program derives
   `Json`. `task_spawn_link(f, pid)` is now typed with the two arguments the
   interpreter takes. Before, no typechecked program could call it.
+- **Compiled `Base64.encode` and `sha256` on a `Bytes` no longer crash.** Since
+  boxed constructor cells began carrying a runtime type id (0.4.0), a compiled
+  `Base64.encode(Bytes.from_string("x"))`, `Base64.url_encode`/`mime_encode`, or
+  `sha256(bytes)` died with `fatal SIGBUS` (exit 138): the runtime mistook the
+  `Bytes` value for a `String`. The interpreter was unaffected.
 - **`pid_to_int` and supervise blocks no longer leak the actor record.**
   Compiled, every `pid_to_int(p)` and `Actor.set_queue_limit(p, …)` call kept
   one reference to `p`'s actor record, and every supervise-block child was

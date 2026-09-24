@@ -735,6 +735,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_set(ptr %arr, i64 %i, double %val)" };
   { march_name = "native_float_arr_sum"; c_name = None; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @native_float_arr_sum(ptr %arr)" };
+  { march_name = "native_float_arr_sort"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_sort(ptr %arr)" };
   { march_name = "native_float_arr_min"; c_name = None; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @native_float_arr_min(ptr %arr)" };
   { march_name = "native_float_arr_max"; c_name = None; ret_ty = Some Tir.TFloat;
@@ -1617,6 +1619,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_float_arr_get";
   PDeclare "native_float_arr_set";
   PDeclare "native_float_arr_sum";
+  PDeclare "native_float_arr_sort";
   PDeclare "native_float_arr_min";
   PDeclare "native_float_arr_max";
   PDeclare "native_float_arr_sumsq_dev";

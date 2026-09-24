@@ -379,7 +379,8 @@ let extern_owned_builtins : string list = [
     "native_int_arr_sumsq_dev"; "native_int_arr_map"; "native_int_arr_map2";
     "native_int_arr_to_float_arr"; "native_int_arr_fold";
     "native_int_arr_from_list"; "native_int_arr_filter_mask";
-    "native_float_arr_set"; "native_float_arr_min"; "native_float_arr_max";
+    "native_float_arr_set"; "native_float_arr_sort";
+    "native_float_arr_min"; "native_float_arr_max";
     "native_float_arr_sumsq_dev"; "native_float_arr_map";
     "native_float_arr_map2"; "native_float_arr_fold";
     "native_float_arr_from_list"; "native_float_arr_filter_mask";
