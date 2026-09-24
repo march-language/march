@@ -54,6 +54,11 @@ let run ?(filter = "") ?(json = false) () =
               ~scope:(Cmd_build.build_scope ~release:false proj) proj with
       | Error e -> Error e
       | Ok () ->
+      (* The same [[ffi]] / [[ffi.rust]] flags `forge build`/`run`/`test` pass,
+         computed once (it may run `cargo build`); an error aborts the run. *)
+      match Cmd_build.ffi_flags_full proj with
+      | Error e -> Error e
+      | Ok ffi_flags ->
       let lib_path_env = Cmd_build.lib_path_env proj in
       let out_dir = Filename.concat proj.Project.root ".march/bench" in
       Project.mkdir_p out_dir;
@@ -62,7 +67,7 @@ let run ?(filter = "") ?(json = false) () =
           let bin = Filename.concat out_dir name in
           Printf.eprintf "  compiling %s ...\n%!" name;
           let (crc, _, _) =
-            Cmd_build.compile_entry ~lib_path_env ~ffi_flags:"" ~output:bin ~release:true ~dump_phases:false
+            Cmd_build.compile_entry ~lib_path_env ~ffi_flags ~output:bin ~release:true ~dump_phases:false
               ~pin_main:proj.Project.pin_main path
           in
           if crc <> 0 then (name, 0.0, false)
