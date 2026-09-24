@@ -627,6 +627,25 @@ let expanding_records : StringSet.t ref = ref StringSet.empty
    syntax rather than anything reachable now. *)
 let expanding_aliases : string list ref = ref []
 
+(** [Some "<Actor>_Msg"] when [name] is `<Actor>.Msg` (or `M.<Actor>.Msg`)
+    for an actor whose message constructors are in scope, and no real type of
+    that name exists. *)
+let actor_msg_alias env (name : string) : string option =
+  let sfx = ".Msg" in
+  let n = String.length name and k = String.length sfx in
+  if n <= k || String.sub name (n - k) k <> sfx || lookup_type name env <> None
+  then None
+  else
+    let prefix = String.sub name 0 (n - k) in
+    let actor = match String.rindex_opt prefix '.' with
+      | None -> prefix
+      | Some i -> String.sub prefix (i + 1) (String.length prefix - i - 1) in
+    let target = actor ^ "_Msg" in
+    if StrMap.exists (fun _ cis ->
+        List.exists (fun ci -> ci.ci_is_actor_msg && ci.ci_type = target) cis)
+        env.ctors
+    then Some target else None
+
 (** Convert a surface [Ast.ty] to an internal [ty].
     [tvars] accumulates a mapping from type-variable *names* to fresh
     unification-variable ids (so that two mentions of [a] in the same
@@ -715,6 +734,13 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
          tvars := saved;
          t
        end
+     | _ when args = [] && actor_msg_alias env name.Ast.txt <> None ->
+       (* `<Actor>.Msg` (DD step 6, plan II.4.8): the source name of an
+          actor's message type, a typecheck-side alias of the lowered
+          `<Actor>_Msg` its message constructors already have. *)
+       (match actor_msg_alias env name.Ast.txt with
+        | Some t -> TCon (t, [])
+        | None -> TError)
      | "Chan", _ when name.txt = "Chan" ->
        Err.error env.errors ~span:name.span
          "Chan expects exactly two type arguments: Chan(RoleName, ProtocolName)";
@@ -743,12 +769,9 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
        constructor name to its bare suffix whenever that suffix denotes a type
        of the same arity in scope. *)
     let canon_name =
-      (* The bare suffix is the component after the LAST '.' (the type's own
-         name); everything before is the module path.  Uses its own rindex
-         here rather than calling [split_qualified] (same rindex convention
-         as of this writing, but this call's purpose — extracting the bare
-         type-name suffix — is independent of module-load resolution, so it
-         stays deliberately decoupled from that function's behavior.
+      (* [canon_type_name] takes the component after the LAST '.' (the
+         type's own name) as the bare suffix; it is shared with the builtin
+         signatures' [canon_qualified_tcons] so both routes agree.
          Look up the bare suffix in [env_loaded] (not the pre-resolution
          [env]): when [name.txt] needed [resolve_qualified_type] to lazily
          load its module, [load_module_into_env]'s [ExType]/[ExRecord] arms
@@ -760,11 +783,7 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
          skipping canonicalization and leaving a real value (whose actual
          type uses the bare `TCon`) unable to unify against the qualified
          annotation. *)
-      match String.rindex_opt name.txt '.' with
-      | Some i ->
-        let bare = String.sub name.txt (i + 1) (String.length name.txt - i - 1) in
-        (match lookup_type bare env_loaded with Some a when a = arity -> bare | _ -> name.txt)
-      | None -> name.txt
+      canon_type_name env_loaded name.txt arity
     in
     let args' = List.map (surface_ty env ~tvars) args in
     (* `Pid(a)` is the actor pid, a builtin whose one parameter is the actor's

@@ -785,7 +785,14 @@ let ensure_js_deps ~root (proj : Project.project) =
       else Error (Printf.sprintf "npm install failed (exit %d)" rc)
   end
 
-let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
+(** [topology_pools]: a topology app's build restricted to these pools
+    ([march --topology-pools]); [output_suffix] names the artifact
+    [<name><suffix>] so the builds of one topology do not overwrite each
+    other; [topology_env] picks the overlay the gate digests. A project with a
+    topology.toml is always compiled with [--topology .forge/topology.json]:
+    its [main] is generated from it (build step 3). *)
+let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
+    ?(output_suffix = "") ?topology_env () =
   let t0 = Unix.gettimeofday () in
   (* Normalize cross-target aliases to the compiler's canonical form and derive
      a per-target output subdir so a Linux build never clobbers the host binary. *)
@@ -808,9 +815,17 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
   | Ok proj ->
     (* A project with a topology.toml: check it first (section 4 of the
        distributed-deploys plan). Its errors point into the TOML. *)
-    match Topology.gate ~proj () with
+    match Topology.gate ?env:topology_env ~proj () with
     | Error m -> Error m
     | Ok () ->
+    let topology_flags =
+      if not (Topology.exists ~root:proj.Project.root) then ""
+      else
+        " --topology " ^ Filename.quote (Topology.digest_file ~root:proj.Project.root)
+        ^ (match topology_pools with
+           | Some ps -> " --topology-pools " ^ Filename.quote (String.concat "," ps)
+           | None -> "")
+    in
     (* --frozen: a lockfile out of date with forge.toml is an error, not a
        silent re-resolve (CI reproducibility). *)
     let lock = Filename.concat proj.Project.root "forge.lock" in
@@ -914,7 +929,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
           Error "typecheck failed"
         end else begin
           let output =
-            Filename.concat build_dir (proj.Project.name ^ output_ext target) in
+            Filename.concat build_dir (proj.Project.name ^ output_suffix ^ output_ext target) in
           (* FFI shim flags: [[ffi]] C sources/links plus, if declared, a built
              [[ffi.rust]] staticlib archive (shared with [forge test]). *)
           match ffi_flags_full ~target_is_cross:(target_subdir <> "") proj with
@@ -937,7 +952,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target () =
                | _ -> None)
             | _ -> None
           in
-          let (rc, ce, cw) = compile_entry ~lib_path_env ~ffi_flags ~output ~release ~dump_phases ?target
+          let (rc, ce, cw) = compile_entry ~lib_path_env ~ffi_flags:(ffi_flags ^ topology_flags) ~output ~release ~dump_phases ?target
               ?hcr ~pin_main:proj.Project.pin_main entry_path in
           print_build_summary ~t0 ~errors:(te + ce) ~warnings:(tw + cw);
           if rc = 0 then begin

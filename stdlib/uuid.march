@@ -264,7 +264,7 @@ mod UUID do
         -- Per RFC 4122 §4.3: SHA-1(namespace_bytes || name_bytes).  The
         -- namespace is 16 raw bytes, so they are kept as bytes end to end:
         -- build a single `Bytes(...)` value and pass it directly to
-        -- `sha1_bytes`, which accepts both String and Bytes.  (This shape
+        -- `sha1_bytes : Bytes -> Bytes`.  (This shape
         -- was originally forced by `char_from_int` silently dropping bytes
         -- > 0x7F in the interpreter, corrupting the hash input; that is
         -- fixed, but routing raw bytes through a String is still the

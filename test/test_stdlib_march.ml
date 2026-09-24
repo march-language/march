@@ -179,6 +179,7 @@ let all_stdlib_decls =
     "node_queue.march";
     "cluster_node.march";
     "session_node.march";
+    "topology.march";
     "node.march";
     "cluster_load.march";
     "work_dispatch.march";
@@ -618,6 +619,8 @@ let () =
         `Quick (run_stdlib_test "test_node_queue.march" "TestNodeQueue");
       Alcotest.test_case "session_node: the role runner's topology and address table"
         `Quick (run_stdlib_test "test_session_node.march" "TestSessionNode");
+      Alcotest.test_case "topology: placement decisions over fake membership"
+        `Quick (run_stdlib_test "test_topology.march" "TestTopology");
       Alcotest.test_case "node: the typed remote send, interpreter half"
         `Quick (run_stdlib_test "test_node.march" "TestNode");
     ]);

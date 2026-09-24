@@ -146,3 +146,25 @@
  (modules test_topology)
  (deps (glob_files topology_golden/*.expected))
  (libraries march_forge march_parser march_lexer alcotest unix yojson))
+
+; test_topology_run.ml: `forge run` / `forge run --processes` / `forge topology
+; export` on examples/topology_app, a two-pool topology app with a generated
+; `main` (distributed-deploys build step 3). Real native compiles and real
+; processes, so it takes test_procs' hermetic shape, plus FORGE_TEST_BIN (it
+; runs forge itself) and the example project, copied to a scratch dir.
+(executable
+ (name test_topology_run)
+ (modules test_topology_run)
+ (libraries march_forge alcotest unix yojson))
+
+(rule
+ (alias runtest)
+ (deps (source_tree %{workspace_root}/runtime) (source_tree %{workspace_root}/stdlib)
+       (source_tree %{workspace_root}/examples/topology_app))
+ (action
+  (setenv MARCH_TEST_BIN %{bin:march}
+   (setenv FORGE_TEST_BIN %{bin:forge}
+    (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
+     (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
+      (setenv TOPOLOGY_APP_DIR %{workspace_root}/examples/topology_app
+       (run %{exe:test_topology_run.exe}))))))))

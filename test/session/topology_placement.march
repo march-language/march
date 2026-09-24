@@ -1,0 +1,122 @@
+-- Topology.place over a FAKE cluster (D35's seam): the dictionary attached
+-- with `ClusterNode.attach(io, ops)` holds the member table and the name
+-- registry, and the test injects NodeDead / NodeRejoined through the
+-- subscribers it collected. The offers are real `SessionNode` offers opened
+-- over the fake (their routes and names land in it). No sockets.
+--
+-- Node n0 places Echo.Server with count(1) against peers n1 and n2, which
+-- are eligible (their `topo:` markers are in the registry). The rendezvous
+-- ranking decides who offers; each node that ranks above n0 is then
+-- declared dead until the role moves to n0. A rejoined peer that ranks
+-- above n0 does not take it back while it is settling
+-- (MARCH_PLACEMENT_SETTLE_MS, set long by the dune rule, as is
+-- MARCH_PLACEMENT_TICK_MS: the test re-evaluates with `reconcile_now`).
+-- Compiled only: `place` runs a background task, which the interpreter's
+-- scheduler runs to completion at spawn (this one never completes).
+mod TopologyPlacement do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.Spawn
+  needs IO.Clock
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    ask: Client -> Server : Int
+    answer: Server -> Client : Int
+  end
+
+  pfn serve_one(s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
+    Echo_Server.recv_Ask(s, st, fn (n, st1) -> Echo_Server.close(s, Echo_Server.send_Answer(s, st1, n)))
+  end
+
+  -- ── the fake cluster ──────────────────────────────────────────────────
+
+  type Fake = { members : Vault(Membership.Member), subs : Vault(ClusterNode.NodeEvent -> Unit),
+                names : Vault(GlobalPid.Pid), meta : Vault(Int) }
+
+  pfn member(id : String, status : Membership.MemberStatus) : Membership.Member do
+    { node_id: id, status: status, incarnation: 0, creation: 1, name: "node-" ++ id, addr: "" }
+  end
+
+  pfn info(id : String) : ClusterNode.NodeInfo do
+    { node_id: id, name: "node-" ++ id, addr: "", creation: 1, incarnation: 0 }
+  end
+
+  pfn tell(fk : Fake, ev : ClusterNode.NodeEvent) : () do
+    List.each(Vault.all(fk.subs), fn kv -> match kv do (_k, f) -> f(ev) end)
+  end
+
+  pfn fake_ops(fk : Fake) : ClusterNode.ClusterOps do
+    { ClusterNode.ops_stub("n0") with
+      all_members: fn _ -> List.map(Vault.all(fk.members), fn kv -> match kv do (_k, m) -> m end),
+      members: fn _ -> Nil,
+      subscribe: fn f -> do
+        let id = Vault.incr(fk.meta, "sub", 1)
+        Vault.set(fk.subs, int_to_string(id), f)
+        id
+      end,
+      names: fn _ -> Vault.keys(fk.names),
+      lookup: fn nm -> Vault.get(fk.names, nm),
+      register: fn (nm, pid) -> do
+        Vault.set(fk.names, nm, GlobalPid.make("n0", pid, 1))
+        Ok(())
+      end,
+      unregister: fn nm -> Vault.drop(fk.names, nm),
+      route: fn (pid, _) -> "p" ++ int_to_string(pid),
+      unroute: fn _ -> (),
+      creation: fn _ -> 1 }
+  end
+
+  pfn report(c : Cap(ClusterNode.Live), what : String) : () do
+    Topology.reconcile_now(c)
+    println(what ++ ": n0 offers [" ++ String.join(Topology.offered(c), ", ") ++ "]")
+  end
+
+  -- The peers ranked above n0, best first.
+  pfn above(ranked : List(String)) : List(String) do
+    match ranked do
+      Nil -> Nil
+      Cons(id, rest) -> if id == "n0" do Nil else Cons(id, above(rest)) end
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let fk = { members: Vault.new("tp_members"), subs: Vault.new("tp_subs"),
+               names: Vault.new("tp_names"), meta: Vault.new("tp_meta") }
+    List.each(["n0", "n1", "n2"], fn id -> Vault.set(fk.members, id, member(id, Membership.Alive)))
+    List.each(["n1", "n2"], fn id ->
+      Vault.set(fk.names, Topology.marker("Echo.Server", id), GlobalPid.make(id, 1, 1)))
+    let c = ClusterNode.attach(io, fake_ops(fk))
+    let ranked = Topology.rank("Echo.Server", ["n0", "n1", "n2"])
+    println("ranking: " ++ String.join(ranked, " > "))
+    Topology.place(c, [ Topology.role("Echo.Server", Topology.count(1),
+                          fn () -> Echo_Run.offer_Server(io, c, 4, fn (s, st) -> serve_one(s, st))) ])
+    println("n0's marker registered: " ++ (if Vault.get(fk.names, Topology.marker("Echo.Server", "n0")) != None do "yes" else "no" end))
+    report(c, "placed")
+    let ahead = above(ranked)
+    List.each(ahead, fn id -> do
+      Vault.set(fk.members, id, member(id, Membership.Dead))
+      tell(fk, ClusterNode.NodeDead(info(id), "suspect timeout"))
+      report(c, id ++ " dead")
+    end)
+    -- The best-ranked peer comes back: while it settles, n0 keeps the role.
+    match ahead do
+      Nil -> println("n0 ranked first: nothing to move")
+      Cons(first, _) ->
+        Vault.set(fk.members, first, member(first, Membership.Alive))
+        tell(fk, ClusterNode.NodeRejoined(info(first)))
+        report(c, first ++ " rejoined, settling")
+    end
+    Topology.close_all(c)
+    println("closed: n0 offers [" ++ String.join(Topology.offered(c), ", ") ++ "]")
+    -- Placement's own task is still asleep (a long tick); a fake node has
+    -- no `stop`, so end the program here.
+    process_exit(0)
+  end
+end

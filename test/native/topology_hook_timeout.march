@@ -1,0 +1,23 @@
+-- Topology.hook's watchdog (build step 3, item 1): a pool hook must return
+-- promptly, because offers open only after every hook has returned. One
+-- that is still running after MARCH_HOOK_TIMEOUT_MS is reported by name and
+-- the process exits 1. The dune rule runs this with MARCH_HOOK_TIMEOUT_MS=300
+-- and prints the exit status.
+mod TopologyHookTimeout do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+  needs IO.Mut
+  needs IO.Spawn
+  needs IO.Process
+
+  fn main(c : Cap(IO)) do
+    let n = Topology.hook("Quick.start", fn () -> 41 + 1)
+    println("Quick.start returned " ++ int_to_string(n))
+    let _ = Topology.hook("Stuck.start", fn () -> do
+      sleep_ms(30000)
+      0
+    end)
+    println("Stuck.start returned (the watchdog did not fire)")
+  end
+end

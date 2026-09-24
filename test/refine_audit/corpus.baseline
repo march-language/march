@@ -292,6 +292,8 @@ native_native_arr_sort: coverage audit (user + stdlib): 120 enforced, 0 inert (w
 native_native_arr_sort: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_native_float_box_abi_leak_probe: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_native_float_box_abi_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_nested_actor_spawn: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_nested_actor_spawn: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_cons_ctor_heap: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_nested_cons_ctor_heap: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_derive_json: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
@@ -336,6 +338,8 @@ native_perceus_borrowed_child_release: coverage audit (user + stdlib): 120 enfor
 native_perceus_borrowed_child_release: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_perceus_three_deep_field_borrow: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_perceus_three_deep_field_borrow: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_pid_of_int_dead_pid: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_pid_of_int_dead_pid: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_pid_of_int_roundtrip: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_pid_of_int_roundtrip: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
@@ -490,6 +494,10 @@ native_to_string_show: coverage audit (user + stdlib): 120 enforced, 0 inert (wa
 native_to_string_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_toml_get_int: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_toml_get_int: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_topology_hook_timeout: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_topology_hook_timeout: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_topology_place: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_topology_place: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_trmc_shared_tail_reuse: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_trmc_shared_tail_reuse: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tuple_destructure_dce: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
@@ -750,6 +758,8 @@ stdlib_tls: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 un
 stdlib_tls: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_toml: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 stdlib_toml: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_topology: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+stdlib_topology: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_tuple: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 stdlib_tuple: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_uri: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced

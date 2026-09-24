@@ -98,6 +98,7 @@ let builtin_names : StringSet.t =
       "run_until_idle"; "register_resource"; "get_cap";
       (* Named registry (Task 4) *)
       "actor_register"; "actor_unregister"; "actor_whereis"; "actor_registered";
+      "epoch_hold"; "epoch_release";
       "send_checked"; "revoke_cap"; "is_cap_valid";
       "pid_of_int"; "pid_to_int"; "get_actor_field";
       (* Comparison builtins used by derived Ord instances *)
@@ -261,7 +262,8 @@ let builtin_names : StringSet.t =
       "sys_actor_count"; "sys_cpu_count";
       "sys_cpu_load_milli"; "sys_mem_total_bytes"; "sys_mem_available_bytes";
       "sys_os"; "sys_arch";
-      "march_version";
+      (* march_version is not here: lower_expr folds every call to it into a
+         string literal, so no compiled code references it. *)
       (* UUID / identity builtins *)
       "uuid_v4";
       (* Session-typed channel builtins *)

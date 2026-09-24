@@ -1,0 +1,578 @@
+-- Topology: the runtime side of a topology app (build step 3 of the
+-- distributed-deploys plan, specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md,
+-- sections 4.1, 4.2 and II.3 / II.6 "Placement at runtime").
+--
+-- In a topology app `main` is generated (`march --topology`,
+-- lib/desugar/desugar_topology.ml). It starts the ClusterNode, runs each
+-- pool's hook under `hook` (a watchdog: a hook must return promptly), and
+-- hands this module one `Role` per served role. From then on the NODE owns
+-- its offers (D16): `place` opens the offers the topology places on it and
+-- re-evaluates on every membership change; `drain_on_signal` closes them on
+-- SIGTERM/SIGINT and lets running sessions finish; `supervise_offers` re-offers a
+-- role whose offer (or hosting actor) died, and keeps `main` alive.
+--
+-- Placement rules (4.2), evaluated by every node for itself, with no control
+-- plane:
+--   everywhere()        offered on every node that serves the role (D18);
+--   on_label(label)     offered when this node's labels (MARCH_NODE_LABELS, a
+--                   comma-separated list set by the launcher) include it;
+--   count(n)            offered on n of the eligible live nodes, chosen by
+--                   rendezvous hashing: every node ranks the candidates by
+--                   hash(role, node_id) and offers when it is in the top n (D19);
+--   count_on(l, n)      count(n) among the nodes carrying label l.
+-- "Eligible" for a Count role means: a live member (or this node) that serves
+-- the role and carries its label. Other nodes' pools and labels are not in
+-- the membership table, so each eligible node registers a cluster name,
+-- `topo:<role>/<node_id>`, and the ranking reads those names back; a dead
+-- node's names become invisible with its membership. A node that REJOINS
+-- counts only after MARCH_PLACEMENT_SETTLE_MS (default 15000), so a flapping
+-- node does not pull a role back and forth (hysteresis). `count(1)` is not a
+-- lock: during a partition each side may offer, as with any global name.
+--
+-- The hash is SHA-256 (Crypto.sha256), not the plan's BLAKE3: the runtime's
+-- BLAKE3 is not exposed to March code, and the placement only needs a hash
+-- that every node computes identically.
+--
+-- Losing a role is a drain, not a cut: `SessionNode.close_offer` refuses new
+-- invitations and lets the sessions already running finish.
+mod Topology do
+  needs IO
+  needs IO.Mut
+  needs IO.Spawn
+  needs IO.Clock
+  needs IO.Signal
+  needs IO.Process
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs Session.Live
+  needs ClusterNode.Live
+
+  -- ── placement rules and roles ─────────────────────────────────────────
+
+  -- Constructor names are prefixed: a bare `Count` collided with DataFrame's
+  -- nullary `Count` aggregate in user code that writes it unqualified. Type
+  -- names are prefixed too (`TopoPlacement`, `TopoRole`, ...): March has one
+  -- global type namespace, and a bare `Placement` broke a user program that
+  -- declares its own (test/session/cluster_placement).
+  type TopoPlacement = PlaceEverywhere | PlaceOn(String) | PlaceCount(Int) | PlaceCountOn(String, Int)
+
+  doc "Offer the role on every node that serves it (no `place` in the topology)."
+  fn everywhere() : TopoPlacement do PlaceEverywhere end
+  doc "Offer the role on the nodes whose MARCH_NODE_LABELS include [label] (`place = { on = label }`)."
+  fn on_label(label : String) : TopoPlacement do PlaceOn(label) end
+  doc "Offer the role on [n] of the eligible live nodes, by rendezvous hashing (`place = { count = n }`)."
+  fn count(n : Int) : TopoPlacement do PlaceCount(n) end
+  doc "`count(n)` among the nodes carrying [label] (`place = { on = label, count = n }`)."
+  fn count_on(label : String, n : Int) : TopoPlacement do PlaceCountOn(label, n) end
+
+  -- What an open offer needs to be supervised: the offer, and whether
+  -- whatever serves its sessions is still alive (a hosted role's actor; a
+  -- function role has nothing beyond the offer itself).
+  type TopoOpened = { ap : SessionNode.Offer, alive : Int -> Bool }
+
+  -- One served role: its "Protocol.Role" name, its placement, and how to
+  -- open one offer of it on this node. The generated `main` builds these
+  -- with `role` and `actor_role`; `open` is called (with a dummy argument:
+  -- a zero-parameter closure cannot be stored in a record field today) once
+  -- per offer.
+  type TopoRole = { name : String, place : TopoPlacement,
+                open : Int -> Result(TopoOpened, SessionNode.RunError) }
+
+  doc """
+  A role bound to a function (`body = "M.f"` in `[roles]`). [open] is the
+  generated `<P>_Run.offer_<R>(io, node, capacity, fn (s, caps..., st) ->
+  M.f(env, s, caps..., st))`.
+  """
+  fn role(name : String, place : TopoPlacement, open : () -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
+    { name: name, place: place,
+      open: fn _ ->
+        match open() do
+          Ok(o) -> Ok({ ap: o, alive: fn _ -> true })
+          Err(e) -> Err(e)
+        end }
+  end
+
+  doc """
+  A role bound to an actor (`actor = "M.A"` in `[roles]`, D23): one actor per
+  offer, spawned by [mk] (the generated `fn () -> spawn(M.A, env)`) and handed
+  to [open] (the generated `<P>_Run.offer_hosted_<R>` call whose start,
+  deliver and cancel callbacks forward to it). An actor spawned for an offer
+  that could not be opened is kept for the next attempt rather than spawned
+  again. Supervision re-offers the role when its actor dies.
+  """
+  fn actor_role(name : String, place : TopoPlacement, mk : () -> Pid(a),
+                open : Pid(a) -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
+    let spare = Vault.new("topology_spare_" ++ name ++ "_" ++ int_to_string(next_id()))
+    { name: name, place: place,
+      open: fn _ ->
+        let host = match Vault.get(spare, "h") do
+          Some(h) -> h
+          None -> mk()
+        end
+        match open(host) do
+          Ok(o) ->
+            Vault.drop(spare, "h")
+            Ok({ ap: o, alive: fn _ -> is_alive(host) })
+          Err(e) ->
+            Vault.set(spare, "h", host)
+            Err(e)
+        end }
+  end
+
+  pfn next_id() : Int do
+    let ids : Vault(Int) = Vault.open("topology_ids")
+    Vault.incr(ids, "n", 1)
+  end
+
+  -- ── the pure core: who offers what ────────────────────────────────────
+
+  doc "Labels from a comma-separated list: `\"db, public\"` is `[\"db\", \"public\"]`."
+  fn labels_of(s : String) : List(String) do
+    List.filter(List.map(String.split(s, ","), String.trim), fn l -> not(String.is_empty(l)))
+  end
+
+  doc "This node's labels: MARCH_NODE_LABELS, comma-separated (set by the launcher from the overlay)."
+  fn node_labels() : List(String) do labels_of(Env.get("MARCH_NODE_LABELS", "")) end
+
+  doc "A node's rendezvous score for [role]: every node computes the same one."
+  fn score(role_name : String, node_id : String) : String do
+    Crypto.sha256(role_name ++ "\n" ++ node_id)
+  end
+
+  doc "[ids] ranked for [role_name], best first (highest score; ties by id)."
+  fn rank(role_name : String, ids : List(String)) : List(String) do
+    let scored = List.map(List.dedup(ids), fn id -> (score(role_name, id), id))
+    let sorted = List.sort_by(scored, fn (a, b) ->
+      match (a, b) do
+        ((sa, ia), (sb, ib)) -> if sa == sb do ia < ib else sa > sb end
+      end)
+    List.map(sorted, fn p -> match p do (_, id) -> id end)
+  end
+
+  doc "Whether this node may take part in [p] at all: it carries the label, if any."
+  fn eligible_here(p : TopoPlacement, labels : List(String)) : Bool do
+    match p do
+      PlaceEverywhere -> true
+      PlaceOn(l) -> List.member(labels, l)
+      PlaceCount(_) -> true
+      PlaceCountOn(l, _) -> List.member(labels, l)
+    end
+  end
+
+  doc "Whether [p] ranks nodes (and so needs the eligible set)."
+  fn ranked(p : TopoPlacement) : Bool do
+    match p do
+      PlaceCount(_) -> true
+      PlaceCountOn(_, _) -> true
+      _ -> false
+    end
+  end
+
+  doc """
+  Whether node [me], with [labels], offers [role_name] under [p], given the
+  settled eligible nodes [eligible] (other nodes; [me] is added when it is
+  eligible itself).
+  """
+  fn wants(p : TopoPlacement, role_name : String, me : String, labels : List(String), eligible : List(String)) : Bool do
+    if not(eligible_here(p, labels)) do false
+    else
+      match p do
+        PlaceCount(n) -> List.member(List.take(rank(role_name, Cons(me, eligible)), n), me)
+        PlaceCountOn(_, n) -> List.member(List.take(rank(role_name, Cons(me, eligible)), n), me)
+        _ -> true
+      end
+    end
+  end
+
+  doc "A member that rejoined at [rejoined_at] counts again once [settle_ms] have passed."
+  fn settled(now : Int, rejoined_at : Option(Int), settle_ms : Int) : Bool do
+    match rejoined_at do
+      None -> true
+      Some(t) -> now - t >= settle_ms
+    end
+  end
+
+  doc "The name an eligible node registers for a ranked role."
+  fn marker(role_name : String, node_id : String) : String do
+    "topo:" ++ role_name ++ "/" ++ node_id
+  end
+
+  -- The node ids behind every marker of [role_name] in [names].
+  fn marked(role_name : String, names : List(String)) : List(String) do
+    let prefix = "topo:" ++ role_name ++ "/"
+    let k = String.byte_size(prefix)
+    List.filter_map(names, fn nm ->
+      if String.starts_with(nm, prefix) do Some(String.slice(nm, k, String.byte_size(nm) - k)) else None end)
+  end
+
+  pfn settle_ms() : Int do Env.get_int("MARCH_PLACEMENT_SETTLE_MS", 15000) end
+  pfn tick_ms() : Int do Env.get_int("MARCH_PLACEMENT_TICK_MS", 200) end
+  pfn hook_timeout_ms() : Int do Env.get_int("MARCH_HOOK_TIMEOUT_MS", 10000) end
+
+  -- ── per-node state ────────────────────────────────────────────────────
+
+  -- The process a node's placement markers are bound to.
+  -- A field name no other stdlib or user record is likely to share: a
+  -- declared record type is found by its SHAPE in places (the `@[remote]`
+  -- codec choice), and `{ n : Int }` made a user's `type Hit = { n : Int }`
+  -- ambiguous.
+  type TopoAnchorState = { topology_anchor_marks : Int }
+
+  actor Anchor do
+    state { topology_anchor_marks : Int }
+    init  { topology_anchor_marks: 0 }
+    on Nop() do state end
+  end
+
+  -- Everything `place`, `drain_on_signal` and `supervise_offers` share,
+  -- found by the node's id so the three need only the node.
+  type TopoState = { meta : Vault(Int), offers : Vault(TopoOpened), draining : Vault(TopoOpened),
+                 roles : Vault(List(TopoRole)), anchor : Vault(Pid(TopoAnchorState)) }
+
+  pfn state_of(node : Cap(ClusterNode.Live)) : TopoState do
+    let k = ClusterNode.node_id(node)
+    { meta: Vault.open("topology_meta_" ++ k), offers: Vault.open("topology_offers_" ++ k),
+      draining: Vault.open("topology_draining_" ++ k), roles: Vault.open("topology_roles_" ++ k),
+      anchor: Vault.open("topology_anchor_" ++ k) }
+  end
+
+  pfn anchor(st : TopoState) : Pid(TopoAnchorState) do
+    match Vault.get(st.anchor, "a") do
+      Some(a) -> a
+      None ->
+        let a = spawn(Anchor)
+        Vault.set(st.anchor, "a", a)
+        a
+    end
+  end
+
+  -- Reports go to stdout, prefixed: `print_stderr` exists in both backends
+  -- but not in the typechecker's builtin table.
+  -- The node's name for messages: its own membership entry, else its id.
+  pfn label(node : Cap(ClusterNode.Live)) : String do
+    let me = ClusterNode.node_id(node)
+    match List.find(ClusterNode.all_members(node), fn m -> m.node_id == me) do
+      Some(m) -> m.name
+      None -> me
+    end
+  end
+
+  pfn report(msg : String) : () do println("topology: " ++ msg) end
+
+  -- ── placement ─────────────────────────────────────────────────────────
+
+  doc """
+  Open the offers the topology places on [node], one per entry of [roles],
+  and keep them placed: a task re-evaluates every MARCH_PLACEMENT_TICK_MS
+  (default 200 ms) against the current membership, opening a role this node
+  now ranks for and closing (draining) one it no longer does. Membership
+  events are recorded as they arrive; a node that rejoins counts after the
+  settling period. Returns once the first evaluation has opened its offers.
+  """
+  fn place(node : Cap(ClusterNode.Live), roles : List(TopoRole)) : () do
+    let st = state_of(node)
+    Vault.set(st.roles, "roles", roles)
+    let meta = st.meta
+    let _ = ClusterNode.subscribe(node, fn ev ->
+      match ev do
+        ClusterNode.NodeRejoined(i) -> Vault.set(meta, "r:" ++ i.node_id, unix_time_ms())
+        _ -> ()
+      end)
+    reconcile(node, st)
+    let _ = task_spawn(fn _ -> place_loop(node, st))
+    ()
+  end
+
+  pfn place_loop(node : Cap(ClusterNode.Live), st : TopoState) : Int do
+    sleep_ms(tick_ms())
+    if Vault.get(st.meta, "closing") != None do 0
+    else if Vault.get(st.meta, "stopped") != None do 0
+    else
+      reconcile(node, st)
+      place_loop(node, st)
+    end end
+  end
+
+  -- The other nodes eligible for [r], settled, as this node sees them.
+  pfn eligible_others(node : Cap(ClusterNode.Live), st : TopoState, r : TopoRole, now : Int) : List(String) do
+    -- A suspect member still counts: a role moves only once SWIM declares
+    -- its node Dead (4.2), not on every missed probe.
+    let alive = List.filter_map(ClusterNode.all_members(node), fn m ->
+      match m.status do
+        Membership.Dead -> None
+        _ -> Some(m.node_id)
+      end)
+    let settle = settle_ms()
+    List.filter(marked(r.name, ClusterNode.names(node)), fn id ->
+      id != ClusterNode.node_id(node) && List.member(alive, id) && settled(now, Vault.get(st.meta, "r:" ++ id), settle))
+  end
+
+  doc """
+  Re-evaluate [node]'s placement now, as the next tick would. For tests that
+  drive membership through a fake dictionary and should not wait for a tick
+  (run them with a long MARCH_PLACEMENT_TICK_MS).
+  """
+  fn reconcile_now(node : Cap(ClusterNode.Live)) : () do reconcile(node, state_of(node)) end
+
+  pfn reconcile(node : Cap(ClusterNode.Live), st : TopoState) : () do
+    let labels = node_labels()
+    let now = unix_time_ms()
+    let roles = Vault.get_or(st.roles, "roles", Nil)
+    List.each(roles, fn r -> reconcile_role(node, st, labels, now, r))
+  end
+
+  pfn reconcile_role(node : Cap(ClusterNode.Live), st : TopoState, labels : List(String), now : Int, r : TopoRole) : () do
+    let here = eligible_here(r.place, labels)
+    if ranked(r.place) do mark(node, st, r.name, here) else () end
+    let others = if ranked(r.place) do eligible_others(node, st, r, now) else Nil end
+    let want = wants(r.place, r.name, ClusterNode.node_id(node), labels, others)
+    match Vault.get(st.offers, r.name) do
+      None ->
+        if want do open_role(st, r) else () end
+      Some(o) ->
+        if not(want) do
+          report(r.name ++ ": no longer placed on " ++ label(node) ++ "; draining its offer")
+          retire(st, r.name, o)
+        else if Vault.get(st.meta, "supervise") != None && not(healthy(o)) do
+          report(r.name ++ ": its offer or hosting actor died; offering it again")
+          retire(st, r.name, o)
+        else () end end
+    end
+  end
+
+  -- Register (or release) this node's marker for a ranked role.
+  pfn mark(node : Cap(ClusterNode.Live), st : TopoState, role_name : String, here : Bool) : () do
+    let name = marker(role_name, ClusterNode.node_id(node))
+    let held = ClusterNode.lookup(node, name) != None
+    if here && not(held) do
+      let _ = ClusterNode.register(node, name, anchor(st))
+      ()
+    else if not(here) && held do ClusterNode.unregister(node, name)
+    else () end end
+  end
+
+  pfn open_role(st : TopoState, r : TopoRole) : () do
+    match (r.open)(0) do
+      Ok(o) ->
+        Vault.drop(st.meta, "e:" ++ r.name)
+        Vault.set(st.offers, r.name, o)
+      -- The previous offer's name is released asynchronously: try again on
+      -- the next tick without reporting it.
+      Err(SessionNode.AlreadyOffered(_)) -> ()
+      Err(e) ->
+        -- Report a failure once, not every tick.
+        if Vault.get(st.meta, "e:" ++ r.name) == None do
+          Vault.set(st.meta, "e:" ++ r.name, 1)
+          report(r.name ++ ": could not offer: " ++ SessionNode.run_error_message(e))
+        else () end
+    end
+  end
+
+  -- Close [o] (sessions already running finish) and keep it for the drain.
+  pfn retire(st : TopoState, role_name : String, o : TopoOpened) : () do
+    SessionNode.close_offer(o.ap)
+    Vault.drop(st.offers, role_name)
+    Vault.set(st.draining, role_name ++ "#" ++ int_to_string(next_id()), o)
+  end
+
+  pfn healthy(o : TopoOpened) : Bool do
+    is_alive(o.ap.worker) && (o.alive)(0)
+  end
+
+  doc "The roles [node] offers right now, by name, sorted."
+  fn offered(node : Cap(ClusterNode.Live)) : List(String) do
+    let st = state_of(node)
+    List.sort_by(Vault.keys(st.offers), fn (a, b) -> a < b)
+  end
+
+  doc "The actor answering invitations for [role_name]'s open offer on [node], if one is open."
+  fn offer_worker(node : Cap(ClusterNode.Live), role_name : String) : Option(Pid(SessionNode.OfferCount)) do
+    let st = state_of(node)
+    match Vault.get(st.offers, role_name) do
+      Some(o) -> Some(o.ap.worker)
+      None -> None
+    end
+  end
+
+  -- Sessions still running under [o].
+  pfn active(o : TopoOpened) : Int do
+    match get_actor_field(o.ap.worker, "active") do
+      Some(n) -> n
+      None -> 0
+    end
+  end
+
+  doc "Sessions still running on [node]'s offers, open or draining."
+  fn running(node : Cap(ClusterNode.Live)) : Int do
+    let st = state_of(node)
+    let sum = fn (acc, kv) -> match kv do (_, o) -> acc + active(o) end
+    List.fold_left(Vault.all(st.draining), List.fold_left(Vault.all(st.offers), 0, sum), sum)
+  end
+
+  -- ── draining ──────────────────────────────────────────────────────────
+
+  doc """
+  Stop placing and close every offer of [node] (running sessions finish):
+  what SIGTERM does under `drain_on_signal`. Returns at once.
+  """
+  fn close_all(node : Cap(ClusterNode.Live)) : () do
+    let st = state_of(node)
+    Vault.set(st.meta, "closing", 1)
+    List.each(Vault.all(st.offers), fn kv -> match kv do (name, o) -> retire(st, name, o) end)
+  end
+
+  doc """
+  On SIGTERM or SIGINT: close every offer of [node] (new invitations are
+  refused, running sessions finish), then exit 0 once no session is running.
+  At [soft_ms] a drain still waiting is reported; at [hard_ms] the process
+  exits 1, naming how many sessions it cut. (Epoch drains are build step 6.)
+  A second signal escapes the watcher and stops the process at once.
+  """
+  fn drain_on_signal(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int) : () do
+    Signal.watch(Signal.Term, fn -> drain(node, soft_ms, hard_ms))
+    Signal.watch(Signal.Int, fn -> drain(node, soft_ms, hard_ms))
+  end
+
+  doc "Drain [node] now, as SIGTERM does under `drain_on_signal`."
+  fn drain(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int) : () do
+    let st = state_of(node)
+    if Vault.get(st.meta, "closing") != None do () else
+      report("draining " ++ label(node) ++ " (soft " ++ int_to_string(soft_ms) ++ " ms, hard "
+             ++ int_to_string(hard_ms) ++ " ms)")
+      close_all(node)
+      let t0 = unix_time_ms()
+      let _ = task_spawn(fn _ -> drain_wait(node, soft_ms, hard_ms, t0, false))
+      ()
+    end
+  end
+
+  pfn drain_wait(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int, t0 : Int, warned : Bool) : Int do
+    let n = running(node)
+    let spent = unix_time_ms() - t0
+    if n == 0 do
+      report("drained " ++ label(node))
+      process_exit(0)
+      0
+    else if spent >= hard_ms do
+      report("hard deadline: stopping " ++ label(node) ++ " with " ++ int_to_string(n) ++ " session(s) still running")
+      process_exit(1)
+      1
+    else
+      let w = if not(warned) && spent >= soft_ms do
+        report("soft deadline passed with " ++ int_to_string(n) ++ " session(s) still running")
+        true
+      else warned end
+      sleep_ms(50)
+      drain_wait(node, soft_ms, hard_ms, t0, w)
+    end end
+  end
+
+  -- ── supervision ───────────────────────────────────────────────────────
+
+  doc """
+  Re-offer any role whose offer actor, or hosting actor, has died, and keep
+  the calling task (the generated `main`) alive until the node stops or
+  drains. A process whose `main` returned would exit, taking its offers
+  with it.
+  """
+  fn supervise_offers(node : Cap(ClusterNode.Live)) : () do
+    let st = state_of(node)
+    Vault.set(st.meta, "supervise", 1)
+    supervise_wait(st)
+  end
+
+  pfn supervise_wait(st : TopoState) : () do
+    if Vault.get(st.meta, "stopped") != None do ()
+    else
+      sleep_ms(250)
+      supervise_wait(st)
+    end
+  end
+
+  doc """
+  Stop [node] and everything placed on it: close every offer (running
+  sessions are cut when the node goes), end placement and `supervise_offers`,
+  then `ClusterNode.stop`. For a program (a test, say) that ends on its own
+  rather than on a signal.
+  """
+  fn stop(node : Cap(ClusterNode.Live)) : () do
+    let st = state_of(node)
+    close_all(node)
+    Vault.set(st.meta, "stopped", 1)
+    ClusterNode.stop(node)
+  end
+
+  -- ── hooks ─────────────────────────────────────────────────────────────
+
+  doc """
+  Run the pool hook [name] ([f]), which must return promptly: offers open
+  only after every hook has returned. A watchdog reports a hook still
+  running after MARCH_HOOK_TIMEOUT_MS (default 10000) and exits the process
+  with status 1: offering nothing would be worse than failing loudly.
+  Long-lived work belongs in a task or actor the hook spawns.
+  """
+  fn hook(name : String, f : () -> a) : a do
+    let flag : Vault(Int) = Vault.new("topology_hook_" ++ int_to_string(next_id()))
+    let limit = hook_timeout_ms()
+    let _ = task_spawn(fn _ -> watchdog(flag, name, limit, unix_time_ms()))
+    let v = f()
+    Vault.set(flag, "done", 1)
+    v
+  end
+
+  pfn watchdog(flag : Vault(Int), name : String, limit : Int, t0 : Int) : Int do
+    if Vault.get(flag, "done") != None do 0
+    else if unix_time_ms() - t0 >= limit do
+      report("hook " ++ name ++ " did not return within " ++ int_to_string(limit)
+             ++ " ms (MARCH_HOOK_TIMEOUT_MS); a hook must return promptly -- start long-lived work in a task or actor")
+      process_exit(1)
+      1
+    else
+      sleep_ms(50)
+      watchdog(flag, name, limit, t0)
+    end end
+  end
+
+  -- ── starting the node ─────────────────────────────────────────────────
+
+  doc """
+  The node's configuration from the environment (`ClusterNode.config_from_env`),
+  with defaults for a lone local run: MARCH_NODE_NAME defaults to `local-1`
+  and MARCH_NODE_PORT to 7946.
+  """
+  fn config_from_env() : ClusterNode.CnConfig do
+    let name = Env.get("MARCH_NODE_NAME", "local-1")
+    let port = Env.get_int("MARCH_NODE_PORT", 7946)
+    let seeds = labels_of(Env.get("MARCH_CLUSTER_NODES", ""))
+    let creation = Env.get_int("MARCH_NODE_CREATION", unix_time_ms())
+    ClusterNode.config(name, port, Env.get("MARCH_NODE_ADVERTISE", ""), seeds,
+                       Env.get("MARCH_CLUSTER_SECRET", "march-cluster"), creation)
+  end
+
+  doc """
+  Report that the node could not start ([why]) and stop the program with
+  status 1. The generated `main` starts the node itself --
+  `ClusterNode.start(io, Topology.config_from_env())` -- because only
+  `ClusterNode` may hand out a `Cap(ClusterNode.Live)`.
+  """
+  fn start_failed(why : String) : a do
+    report(why)
+    process_exit(1)
+    panic(why)
+  end
+
+  doc """
+  Whether this process runs pool [pool]: MARCH_POOLS (comma-separated) names
+  the pools a process of a shared build runs; unset, it runs every pool the
+  build contains (`forge run`'s one process, D9).
+  """
+  fn runs_pool(pool : String) : Bool do
+    match process_env("MARCH_POOLS") do
+      None -> true
+      Some(s) ->
+        let ps = labels_of(s)
+        List.is_empty(ps) || List.member(ps, pool)
+    end
+  end
+end

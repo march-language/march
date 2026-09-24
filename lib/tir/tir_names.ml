@@ -394,6 +394,25 @@ let actor_dispatch_suffix = "_dispatch"
 (** Suffix for an actor's spawn fn name ("Name" -> "Name_spawn"). *)
 let actor_spawn_suffix = "_spawn"
 
+(** The declared (bare) name an actor REFERENCE denotes.  Every actor's glue
+    ([Name_spawn], [Name_dispatch], [Name_Msg], ...) is minted from its bare
+    declared name, including an actor nested in a module (lower.ml's DMod
+    DActor arm: the spawn symbol and the HCR manifest assert the short
+    spelling), and [Lower_state._actor_mailboxes] is keyed the same way.  A
+    reference from outside the declaring module is module-qualified
+    ([spawn(Inner.Box)], a supervise field [c : Inner.Box]), so the qualifier
+    must be dropped before a glue name is built from it, or the call names
+    an [Inner.Box_spawn] that no definition provides (undefined symbol at
+    link time).  "Inner.Box" -> "Box"; "Box" -> "Box". *)
+let actor_decl_name (ref_name : string) : string =
+  match String.rindex_opt ref_name '.' with
+  | Some i -> String.sub ref_name (i + 1) (String.length ref_name - i - 1)
+  | None -> ref_name
+
+(** The spawn fn an actor reference calls: "Inner.Box" -> "Box_spawn". *)
+let actor_spawn_fn_name (ref_name : string) : string =
+  actor_decl_name ref_name ^ actor_spawn_suffix
+
 (** Actor struct field name for the dispatch-fn pointer slot (field 0).
     C-runtime word index: a[2]. MUST alphabetically sort before
     [actor_alive_field] and [actor_state_field] — see module doc above. *)
@@ -497,14 +516,27 @@ let is_actor_on_stop_fn (fn_name : string) : bool =
 
 let migrate_state_suffix = "_migrate_state"
 
-(** True if [fn_name] ends in the bare "_migrate_state" suffix, regardless
-    of which actor it belongs to. Mirrors the byte-identical inline checks
-    in lib/tir/dce.ml, lib/tir/mono.ml, and lib/tir/llvm_emit.ml (multiple
-    sites). *)
-let is_migrate_fn_name (fn_name : string) : bool =
-  let sfx = migrate_state_suffix in
+(** The message-migration pair (DD step 6, plan II.4.8): the user's
+    `<actor>_migrate_msg` and the C-ABI wrapper desugar generates after it,
+    `<actor>_migrate_msg__hcr`, which is exported as [@__migrate_msg_<Actor>]. *)
+let migrate_msg_suffix = "_migrate_msg"
+let migrate_msg_wrapper_suffix = "_migrate_msg__hcr"
+
+let has_suffix sfx (fn_name : string) =
   let nl = String.length fn_name and sl = String.length sfx in
   nl >= sl && String.sub fn_name (nl - sl) sl = sfx
+
+(** True if [fn_name] is a hot-reload migration entry point: the
+    "_migrate_state" suffix, or either half of the message-migration pair.
+    All of them are DCE and mono roots and stay default-visible in a .so.
+    Keep in step with [Typecheck_caps.is_migrate_fn_name]. *)
+let is_migrate_fn_name (fn_name : string) : bool =
+  has_suffix migrate_state_suffix fn_name
+  || has_suffix migrate_msg_suffix fn_name
+  || has_suffix migrate_msg_wrapper_suffix fn_name
+
+let is_migrate_msg_wrapper_name (fn_name : string) : bool =
+  has_suffix migrate_msg_wrapper_suffix fn_name
 
 (** True if [fn_name] is the migrate_state function for [actor]: it ends in
     "_migrate_state" AND the dotted-path component immediately before that
@@ -514,7 +546,7 @@ let is_migrate_fn_name (fn_name : string) : bool =
     `--check-migration` SMT mode to pick out one actor's migration fn among
     possibly several in the same program. *)
 let is_migrate_fn_for ~(actor : string) (fn_name : string) : bool =
-  if not (is_migrate_fn_name fn_name) then false
+  if not (has_suffix migrate_state_suffix fn_name) then false
   else begin
     let sfx = migrate_state_suffix in
     let n = String.length fn_name and suf_len = String.length sfx in

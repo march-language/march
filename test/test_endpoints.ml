@@ -256,6 +256,34 @@ let unlabelled_names_pinned =
        Alcotest.(check (list string)) "Stream_Prod" stream_prod_fns (List.assoc "Stream_Prod" mods);
        Alcotest.(check (list string)) "Stream_Cons" stream_cons_fns (List.assoc "Stream_Cons" mods))
 
+(* Hot reload (DD step 6, plan II.4.4, D28): a started hosted endpoint holds
+   the hosting actor's epoch -- taken when the actor starts it (take_idle),
+   released when it closes (finish, and cancel of a started one). *)
+let hosted_endpoint_epoch_holds =
+  Alcotest.test_case "hosted endpoint: take_idle holds the epoch, finish/cancel release it" `Quick
+    (fun () ->
+       let m = parse_and_desugar (wrap stream) in
+       let body_calls modname fname =
+         List.concat_map (function
+             | DMod (n, _, decls, _) when n.txt = modname ->
+               List.concat_map (function
+                   | DFn (fd, _) when fd.fn_name.txt = fname ->
+                     List.concat_map (fun (c : fn_clause) ->
+                         List.map fst (March_ast.Calls.names_and_name_spans c.fc_body))
+                       fd.fn_clauses
+                   | _ -> []) decls
+             | _ -> []) m.mod_decls in
+       let calls m f n = List.length (List.filter (( = ) n) (body_calls m f)) in
+       Alcotest.(check int) "take_idle holds once" 1
+         (calls "Stream_Cons" "take_idle" "Session.hold_epoch");
+       Alcotest.(check int) "finish releases once" 1
+         (calls "Stream_Cons" "finish" "Session.release_epoch");
+       Alcotest.(check int) "cancel releases once per awaiting state, not for idle or closed" 1
+         (calls "Stream_Cons" "cancel" "Session.release_epoch");
+       Alcotest.(check int) "an await neither holds nor releases" 0
+         (calls "Stream_Cons" "await_Msg_Prod_Cons_1" "Session.hold_epoch"
+          + calls "Stream_Cons" "await_Msg_Prod_Cons_1" "Session.release_epoch"))
+
 (** Replace every occurrence of [needle] in [s] by [by]. *)
 let replace_all ~needle ~by s =
   let n = String.length needle in
@@ -1929,8 +1957,60 @@ end
       Alcotest.(check bool) ("long (output: " ^ out ^ ")") true
         (contains_text out "the protocol has ended, but the script goes on with Send_Msg_A_B_1"))
 
+(* ── a `choose` branch with several steps ───────────────────────────────── *)
+
+(* A branch body holding more than its head message: a LABELLED step and a
+   plain one, each on its own line.  Both used to be read by the token filter
+   as the next arm (`tick: A -> ...` until 2026-09-23), so the protocol did not
+   parse; these pin that every step of the branch is projected, in order. *)
+let two_step_branch = {|
+  @[endpoints]
+  protocol Tick do
+    choose by A:
+      go -> A -> B : Int
+            tick: A -> B : Int
+            B -> A : String
+      no -> A -> B : Bool
+    end
+  end
+|}
+
+let two_step_branch_shape =
+  Alcotest.test_case "a choose branch's later steps are all projected" `Quick
+    (fun () ->
+       let mods = generated (wrap two_step_branch) in
+       List.iter
+         (fun (m, f) -> Alcotest.(check bool) (m ^ "." ^ f) true (has_fn mods m f))
+         [ ("Tick_A", "choose_go"); ("Tick_A", "choose_no"); ("Tick_A", "send_Tick");
+           ("Tick_A", "recv_Msg_B_A_1");
+           ("Tick_B", "offer_go_no"); ("Tick_B", "recv_Tick"); ("Tick_B", "send_Msg_B_A_1") ])
+
+let two_step_branch_ok = ok "both roles driven through a multi-step choose branch typecheck"
+  (wrap (two_step_branch ^ {|
+  pfn a(s : Cap(Session.Live), st : Tick_A.S_choose_go_no) : Tick_A.Yield do
+    let st1 = Tick_A.choose_go(s, st, 1)
+    let st2 = Tick_A.send_Tick(s, st1, 2)
+    Tick_A.recv_Msg_B_A_1(s, st2, fn (_reply, st3) -> Tick_A.close(s, st3))
+  end
+  pfn b(s : Cap(Session.Live), st : Tick_B.S_offer_go_no) : Tick_B.Yield do
+    Tick_B.offer_go_no(s, st,
+      fn (_n, st1) -> Tick_B.recv_Tick(s, st1, fn (_t, st2) ->
+        Tick_B.close(s, Tick_B.send_Msg_B_A_1(s, st2, "ok"))),
+      fn (_b, st1) -> Tick_B.close(s, st1))
+  end
+|}))
+
+let two_step_branch_skip = bad "skipping a choose branch's second step is a type error"
+  "expected `S_recv_Msg_B_A_1` but got `S_send_Tick`" (wrap (two_step_branch ^ {|
+  pfn a(s : Cap(Session.Live), st : Tick_A.S_choose_go_no) : Tick_A.Yield do
+    let st1 = Tick_A.choose_go(s, st, 1)
+    Tick_A.recv_Msg_B_A_1(s, st1, fn (_reply, st3) -> Tick_A.close(s, st3))
+  end
+|}))
+
 let tests =
   [ stream_shape;
+    two_step_branch_shape; two_step_branch_ok; two_step_branch_skip;
     peers_shape; granted_peers_take_the_caps; chaos_user_payload_generator; peers_typecheck;
     cli_script_mismatch_panics; cli_script_runs_out_panics;
     cli_role_grant_violation; cli_role_grant_named_body; cli_role_grant_widened_ok; cli_role_grant_wider_than_main;
@@ -1939,7 +2019,7 @@ let tests =
     grants_not_in_fingerprint; role_needs_ok; role_identifier_ok; role_needs_unknown_cap;
     role_needs_unknown_role; role_needs_twice; role_needs_after_message; role_needs_nested; msg_type_named_after_protocol; two_protocols_distinct_msg_types; two_protocols_ok;
     cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
-    unlabelled_names_pinned; labelled_shape; label_changes_fingerprint; labelled_roles_ok;
+    unlabelled_names_pinned; hosted_endpoint_epoch_holds; labelled_shape; label_changes_fingerprint; labelled_roles_ok;
     payload_definition_in_fingerprint; payload_field_order_in_fingerprint;
     recursive_payload_terminates; payload_type_arguments_substituted; imported_payload_falls_back;
     entry_alias_shape; alias_cycles; entry_roles_ok; entry_wrong_role; entry_keeps_linearity;

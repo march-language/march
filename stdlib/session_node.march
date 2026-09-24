@@ -441,8 +441,17 @@ mod SessionNode do
       -- rather than messaging it (a message would be read here as a
       -- `Down`, `receive()` being typed by this pattern).
       match receive() do
-        Down.Down(_, _, _) ->
-          let _ = send(p.ep, HostDown(p, ep))
+        Down.Down(_, _, reason) ->
+          -- A hot-reload hard drain kills the host with Crash("draining"):
+          -- pass that on, and the Endpoint ends the session as drained.
+          -- (One constructor reference on purpose: this actor is declared
+          -- before Endpoint, so each reference to Endpoint's constructors
+          -- counts in the stdlib internal-error ratchet.)
+          let why = match reason do
+            DownReason.Crash(w) -> w
+            _ -> ""
+          end
+          let _ = send(p.ep, HostDown(p, ep, why))
           ()
       end
       { n: state.n + 1 }
@@ -594,10 +603,31 @@ mod SessionNode do
       state
     end
     -- The hosting actor died: our endpoint's session state died with it.
-    on HostDown(p : Party, ep : Int) do
-      cancel_endpoint(p, ep, p.my_role, "host gone", "host gone", kind_host_gone())
+    on HostDown(p : Party, ep : Int, why : String) do
+      -- A hot-reload hard drain deadline killed the host (II.4.7): the
+      -- session ends as `Left("draining")`, not as a crash.
+      if why == "draining" do
+        cancel_endpoint(p, ep, p.my_role, "draining", "draining", kind_left())
+      else
+        cancel_endpoint(p, ep, p.my_role, "host gone", "host gone", kind_host_gone())
+      end
       state
     end
+    -- Hot reload (DD step 6, plan II.4.4, D28): this actor runs the party's
+    -- session callbacks, so it holds the session's epoch -- the code version
+    -- the session formed under -- until `finish`.  Sent by `party` and
+    -- `finish`; handled in this actor's own turn, where the hold belongs.
+    -- Appended after every other handler: `Actor.call` addresses the first
+    -- two by position (see the note above the actor).
+    on HoldEpoch() do
+      epoch_hold()
+      state
+    end
+    on ReleaseEpoch() do
+      epoch_release()
+      state
+    end
+
     -- `Session.leave`: this role exits the session on purpose.
     on Leave(p : Party, ep : Int, why : String) do
       cancel_endpoint(p, ep, p.my_role, "left: " ++ why, "left: " ++ why, kind_left())
@@ -771,6 +801,9 @@ mod SessionNode do
   """
   fn party(my_role : Int, node_id : String, on_close : Int -> Unit) : Party do
     let ep = spawn(Endpoint)
+    -- The Endpoint inherits this proc's code epoch at spawn, and holds it
+    -- until `finish` (hot reload's nesting rule, D28).
+    let _ = send(ep, HoldEpoch())
     let tag = node_id ++ "." ++ int_to_string(my_role) ++ "." ++ int_to_string(pid_to_int(ep))
     { my_role: my_role, node_id: node_id,
       handlers: Vault.new("session_node_handlers_" ++ tag),
@@ -1189,6 +1222,7 @@ mod SessionNode do
 
   doc "Tear every connection down: close data, Bye on control, await the control reader, close control. (A cluster-mode party owns no connection: nothing to do.)"
   fn finish(p : Party) : Unit do
+    let _ = send(p.ep, ReleaseEpoch())
     let _ = if is_cluster(p) do Nil else List.map(p.links, fn l -> do
       -- Its reader has ended, which stopped its heartbeat; a party that
       -- never served stops it here.
@@ -2138,10 +2172,12 @@ mod SessionNode do
   end
 
   -- The offers of [role], other than on the nodes in [used], rotated by [n]
-  -- so successive sessions of one initiator spread over them. Only offers on
-  -- nodes this node is connected to: the registry can show a name (learnt
-  -- through a third node) before the two nodes have a connection, and a
-  -- session between them needs one.
+  -- so successive sessions of one initiator spread over them, with an offer
+  -- on THIS node first (prefer-local, plan 4.2: it saves a hop, and it goes
+  -- over the node's loopback link). Only offers on nodes this node is
+  -- connected to: the registry can show a name (learnt through a third node)
+  -- before the two nodes have a connection, and a session between them
+  -- needs one.
   pfn candidates(node : Cap(ClusterNode.Live), proto : String, role : Int, used : List(String), n : Int)
       : List(GlobalPid.Pid) do
     let prefix = ap_prefix(proto, role)
@@ -2149,10 +2185,13 @@ mod SessionNode do
       if String.starts_with(name, prefix) do ClusterNode.lookup(node, name) else None end)
     let fresh = List.filter(found, fn g ->
       List.member(used, g.node_id) == false && ClusterNode.queue_for(node, g.node_id) != None)
-    let k = List.length(fresh)
-    if k == 0 do fresh else
+    let me = ClusterNode.node_id(node)
+    let local = List.filter(fresh, fn g -> g.node_id == me)
+    let remote = List.filter(fresh, fn g -> g.node_id != me)
+    let k = List.length(remote)
+    if k == 0 do local else
       let r = n % k
-      List.append(List.drop(fresh, r), List.take(fresh, r))
+      List.append(local, List.append(List.drop(remote, r), List.take(remote, r)))
     end
   end
 
@@ -2226,9 +2265,11 @@ mod SessionNode do
     ()
   end
 
-  -- Fill every role in [roles] from its offers, each on a node not yet in
-  -- the session: Ok(the accepted offers), or Err((role, why, accepted so
-  -- far)).
+  -- Fill every role in [roles] from its offers: Ok(the accepted offers), or
+  -- Err((role, why, accepted so far)). Any node may play several roles of
+  -- one session, the initiator's own included -- each party is its own
+  -- endpoint, and frames between two on one node take the loopback link --
+  -- so [used] (nodes to skip) is empty unless a caller wants otherwise.
   pfn fill_roles(node : Cap(ClusterNode.Live), proto : String, sid : String, fp : String, reply : GlobalPid.Pid,
                  answers : Vault(String), budget : Vault(Int), roles : List(Int), n : Int,
                  used : List(String), accepted : List(GlobalPid.Pid))
@@ -2239,7 +2280,7 @@ mod SessionNode do
         match invite_role(node, sid, fp, reply, answers, budget, candidates(node, proto, r, used, n), "") do
           Err(why) -> Err((r, why, accepted))
           Ok(g) -> fill_roles(node, proto, sid, fp, reply, answers, budget, rest, n,
-                              Cons(g.node_id, used), Cons(g, accepted))
+                              used, Cons(g, accepted))
         end
     end
   end
@@ -2250,7 +2291,7 @@ mod SessionNode do
   access points that offer it (`offer_role`). Mints a fresh session id (this
   node, its creation, a counter: never reused, so a restarted or partitioned
   node cannot be addressed by an old session), invites one offer per role --
-  each on a different node, as cluster sessions need -- moving to the next
+  an offer on this node first, then the others -- moving to the next
   offer on a refusal or no answer, all within the setup time
   (MARCH_SESSION_CONNECT_MS, 20 s). Then runs [body] as `run_cluster` does.
   `Err(NoOffer(role, why))` if a role could not be filled; the offers that
@@ -2269,7 +2310,7 @@ mod SessionNode do
     Vault.set(budget, "left", if t > 0 do t else 3600000 end)
     let key = ClusterNode.route(node, pid_to_int(inbox), fn d -> inbox_frame(answers, sid, d))
     let reply = ClusterNode.global_pid(node, pid_to_int(inbox))
-    let filled = fill_roles(node, proto, sid, fingerprint, reply, answers, budget, others, n, Cons(ClusterNode.node_id(node), Nil), Nil)
+    let filled = fill_roles(node, proto, sid, fingerprint, reply, answers, budget, others, n, Nil, Nil)
     ClusterNode.unroute(node, key)
     match filled do
       Err((role, why, accepted)) ->

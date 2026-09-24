@@ -7,7 +7,7 @@ permalink: /docs/hot-code-reload/
 
 # Hot Code Reload
 
-March supports deploying new code to a running server **without restarting the process**. Actors keep running, their state is preserved, and new messages are handled by the new code, all while in-flight requests from the previous version complete normally.
+March supports deploying new code to a running server **without restarting the process**. Actors keep running and their state is preserved. Work that started on the old code finishes on the old code: each actor handles the messages it already has queued with the version they were sent to, then moves to the new version and migrates its state. New work runs on the new code.
 
 This is useful in practice: no cold-start latency, no dropped connections, no TCP state reset, and no need to drain traffic before a routine code push.
 
@@ -27,8 +27,10 @@ When you run `forge deploy hot`, the build tool:
 4. Signs each changed function with your **ed25519 key** (a public/private key pair;
    the server uses your public key to confirm the patch really came from you, the same
    idea as an SSH key) and sends it to the server
-5. The server activates the new functions atomically: new calls immediately use the
-   new code, and no function is left partially updated at any point
+5. The server activates the whole deploy as one step, tagged with a new **epoch**
+   number. Work that starts after that (a new task, session or actor, and `main`)
+   runs the new code at once; running actors move over at their own pace, as the
+   next section explains
 
 Actors that have a state schema change are migrated in mailbox order: messages already queued when the deploy lands finish on the old code against the old state, then the actor runs `migrate_state` and handles everything after that on the new code. New code never sees an old-shaped state. See [Messages queued during a deploy](#messages-queued-during-a-deploy).
 
@@ -148,17 +150,58 @@ The naming convention is `<actor_name_lowercase>_migrate_state`. The parameter t
 
 ### Messages queued during a deploy
 
-A deploy can land while an actor still has messages waiting in its mailbox. Those messages were sent to the old code, and the actor's state still has the old shape, so they are handled by the **old** code:
+A deploy can land while an actor still has messages waiting in its mailbox. Those messages were sent to the old code, and the actor's state still has the old shape, so they are handled by the **old** code.
 
-1. When the deploy activates, each live actor is held on the code version it was running, and a migration marker is appended to its mailbox.
-2. The actor works through the messages ahead of the marker using the old handlers, against the old state.
-3. When it reaches the marker, it runs `migrate_state` on its state and switches to the new code. Every later message is handled by the new handlers, against the new state.
+Every unit of work (an actor, a task, a session) runs at an **epoch**: the deploy it started under. Every call it makes resolves to the newest version of the function at or before its own epoch. A task inherits the epoch of the code that spawned it. The compiled `main` is the one exception: it always follows the newest code.
 
-Each actor switches independently, at its own marker, so for a short while some actors of a type run the old code and others the new.
+1. When a deploy activates, it gets a new epoch, and the server puts a **marker** in every live actor's mailbox, behind whatever the actor already has queued.
+2. The actor works through the messages ahead of the marker at its old epoch: old handlers, old state.
+3. When it reaches the marker, it moves to the new epoch. If its state schema changed, it runs `migrate_state` first. An actor several deploys behind runs each deploy's `migrate_state` in order. Every later message is handled by the new handlers, against the new state.
 
-**Drain deadline.** Old messages are honoured for a bounded time: 5 seconds by default, or `MARCH_HCR_DRAIN_MS` milliseconds if that is set in the server's environment (`0` turns the deadline off). If an actor has not reached its marker by then, it drops each remaining pre-deploy message instead of handling it, and reports how many it dropped on stderr (`[hcr] migrate: actor on dispatch slot N missed the drain deadline; K pre-migration message(s) dropped`). A handler that is already running is never interrupted.
+Each actor moves independently, at its own marker, so for a short while some actors of a type run the old code and others the new. The marker is never subject to a mailbox's overflow policy: an actor whose bounded mailbox is full at deploy time still gets it, behind its queued messages.
 
-**One migration at a time.** The old code stays loaded until every actor has passed its marker. A second deploy that changes the same actor's state before then is refused (the server answers `ERR publish_failed`, or `ERR commit_partial_failure` for a multi-function commit); deploy it again once the first migration has finished.
+A sender that has already moved can send an actor a message in the new format before that actor reaches its marker. If the actor's message type changed in that deploy, the actor moves at that message instead of at the marker, so the new-format message runs on the new code and nothing is reordered.
+
+### Message type changes and `migrate_msg`
+
+Removing a handler, or changing a handler's parameter types, changes the actor's message type. `forge deploy hot` detects it from the handler signatures it keeps from the running version, and tells the server. A message in the old format that reaches the actor after it has moved (from a sender still on old code) is converted by `<actor>_migrate_msg` if you wrote one, and dropped and counted otherwise:
+
+```march
+mod CounterMsgV do
+  type Msg = Inc(Int) | Reset | SetLabel(String)   -- the running version's handlers
+end
+
+fn counter_migrate_msg(m : CounterMsgV.Msg) : Option(Counter.Msg) do
+  match m do
+    CounterMsgV.Inc(n)      -> Some(Inc(n))
+    CounterMsgV.Reset       -> Some(Reset())
+    CounterMsgV.SetLabel(_) -> None     -- dropped on purpose, counted
+  end
+end
+```
+
+`Counter.Msg` names the actor's message type (the type its `on` handlers define). `forge hot-reload migrate-msg-stub Counter` writes this stub from the running version's handlers (add `--new <build>.so.schemas.json` to map kept handlers to themselves and removed or changed ones to `None`). The function is checked like `migrate_state`: it must be IO-free, take exactly one annotated parameter, return `Option(<Actor>.Msg)`, and match exhaustively. `forge deploy hot` refuses the deploy if its old type does not match the running version's handlers.
+
+### Drains
+
+Old epochs are retired by **drains**. After every deploy the older epochs drain automatically:
+
+- **Soft deadline**: 5 seconds by default, or `MARCH_HCR_DRAIN_MS` milliseconds (`0` turns it off). An actor that has not reached its marker by then moves at once, as if the marker were at the front of its mailbox. The messages still queued ahead of it then run on the new code, except old-format messages (see above), which take `migrate_msg` or are dropped and counted. A handler that is already running is never interrupted.
+- **Hard deadline**: off by default; `MARCH_HCR_HARD_DRAIN_MS` milliseconds arms it. Every actor still pinned to a drained epoch is killed, and its supervisor restarts it on the new code with its `init` state (an unsupervised actor just dies, and its state is lost). Other units still on a drained epoch are told to stop.
+
+A drain can also be started by hand with the reload server's `DRAIN epoch:<E> soft_ms:<n> hard_ms:<n>` request, which drains every epoch up to `E`.
+
+An actor that hosts work from an older epoch, such as a session party, takes an **epoch hold**: while it holds one, it stays on its epoch at its marker and at the soft deadline, and moves when the last hold is released. Messages in a newer format that reach it meanwhile are set aside and replayed, in order, once it moves. The hard deadline still applies.
+
+### When a deploy has to wait
+
+Each function keeps up to **three** live versions. A version stays loaded while any unit could still call it: while some unit's epoch lies between that version's epoch and the next newer version's. When a deploy needs a fourth version of a function that every older version is still serving, the server does not fail it. It answers
+
+```
+WAIT epoch:5 pins:3 deadline_ms:40000
+```
+
+and keeps the deploy queued. `forge deploy hot` prints it (`waiting on 3 unit(s) pinned to epoch 5, hard deadline in 40s`) and retries every second, for up to `MARCH_DEPLOY_WAIT_S` seconds (600 by default). A hard drain deadline guarantees the wait ends. `forge hot-reload status` shows the pinned epochs and the counters (messages deferred, converted and dropped, actors killed).
 
 ---
 
@@ -559,22 +602,22 @@ deploy batch is tagged with a **monotonically increasing epoch number**; think o
 like a global "build number" that only goes up. Each function keeps not just its
 newest version but a short rolling history of recent versions too (its **ring slots**,
 a small, fixed-size buffer of "this version, introduced at this epoch"). And critically,
-every *caller* remembers which epoch it itself was deployed at.
+every *unit of work* (an actor, a task, a session) remembers the epoch it runs at.
 
 When a caller invokes a function under epoch-tagged dispatch, the runtime doesn't just
 jump to the newest version: it walks the callee's ring slots and picks **the newest
 version that existed at or before the caller's own epoch**. So:
 
-- An old `A.so`, still running at epoch 5, calls `B.foo` → it gets the `B.foo` that was
-  current *at epoch 5*, the version it was actually built and tested against.
-- A freshly-redeployed `A.so`, now at epoch 7, calls `B.foo` → it gets the newest
+- An actor still at epoch 5 (it has not reached its marker yet) calls `B.foo` → it gets
+  the `B.foo` that was current *at epoch 5*, the version its code was built against.
+- The same actor after its marker, now at epoch 7, calls `B.foo` → it gets the newest
   `B.foo`, because its own epoch has caught up.
 
-In other words, a caller only sees a version of a function that's compatible with
-the epoch it was itself deployed at, never anything newer. Old callers automatically
-keep working against the old signature until *they* get redeployed, at which point they
-pick up the new one for free. No coordination, no batching, no window where a live call
-could receive the wrong shape of arguments.
+In other words, a unit of work only sees versions compatible with its own epoch, never
+anything newer, whether the call is made from the base binary or from a hot patch. It
+picks up the new versions when it moves epochs (an actor at its marker; a task or session
+never, so it finishes on the code it started with). No coordination, no batching, no
+window where a live call could receive the wrong shape of arguments.
 
 This changes what the coordinated upgrade gate does: once a server supports epoch-tagged
 dispatch, a missing caller is no longer a hard error: the gate downgrades to an

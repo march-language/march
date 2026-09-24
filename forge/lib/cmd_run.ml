@@ -138,7 +138,27 @@ let exec_output ~target ~args output =
     first and re-matching on [file] inside — means there is no leftover
     "[compiled] and [file] is somehow [None] after all" arm to fill with a
     placeholder; the impossible case simply isn't expressible. *)
-let run ?(dump_phases = false) ?(compiled = false) ?target ?file ?(args = []) () =
+let run ?(dump_phases = false) ?(compiled = false) ?target ?file ?(args = [])
+    ?(processes = false) ?(fail_fast = false) ?env () =
+  (* A project with a topology.toml (and no single FILE named) is a topology
+     app: its `main` is generated, so it always runs compiled, and
+     --processes runs one process per pool (Topology_run, build step 3). *)
+  let topology_app =
+    match file with
+    | Some _ -> None
+    | None ->
+      (match Project.load () with
+       | Ok proj when Topology.exists ~root:proj.Project.root -> Some proj
+       | _ -> None)
+  in
+  match topology_app with
+  | Some proj when target = None || target = Some "native" ->
+    if processes then
+      Topology_run.run_processes ?env ~proj ~compiled ~dump_phases ~fail_fast ~args ()
+    else Topology_run.run_level0 ?env ~proj ~compiled ~dump_phases ~args ()
+  | Some _ -> Error "a topology app runs natively; --target is not supported with topology.toml"
+  | None ->
+  if processes then Error "--processes needs a topology.toml in the project root" else
   (* The topology check runs before an interpreted or single-file run; the
      compiled project run goes through Cmd_build.build, which gates itself.
      A run outside any project (no forge.toml) has no topology to check. *)

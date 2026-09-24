@@ -12,6 +12,57 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Hot reload: the unified epoch model and drains** (build step 6 of the
+  distributed-deploys plan). Every unit of work (actor, task, session) runs at the
+  epoch of the deploy it started under, and every call it makes, from the base
+  binary or a hot patch, resolves to the newest version at or before that epoch.
+  A deploy puts a marker in every live actor's mailbox; the actor finishes its
+  queued messages on the old code, then applies each passed deploy's
+  `migrate_state` in order and moves. The marker ignores mailbox overflow
+  policies, so a full `DROP_NEW` mailbox no longer loses it. A sender that already
+  moved can make a receiver move early when the message type changed, keeping
+  FIFO order. New `<actor>_migrate_msg(m : Old) : Option(<Actor>.Msg)` converts
+  old-format messages that arrive after an actor moved (else they are dropped and
+  counted); `<Actor>.Msg` names an actor's message type; `forge hot-reload
+  migrate-msg-stub <Actor>` writes one from the running version's handlers, and
+  `forge deploy hot` refuses a `migrate_msg` whose old type does not match them.
+  Drains retire old epochs: a soft deadline (`MARCH_HCR_DRAIN_MS`, 5 s) moves
+  stragglers at once, an optional hard deadline (`MARCH_HCR_HARD_DRAIN_MS`, or the
+  reload server's `DRAIN epoch:<E> soft_ms:<n> hard_ms:<n>`) kills actors still on
+  the old epoch for their supervisor to restart on the new code. Session parties
+  and generated hosted endpoints take epoch holds, so an actor with a live old
+  session stays old until it ends. Up to three live versions per function; a
+  deploy that needs a fourth while all are in use gets `WAIT epoch:<E> pins:<n>
+  deadline_ms:<t>` and stays queued, which `forge deploy hot` prints and polls.
+  New reload-server verbs `PINS`, `DRAIN`, `ACTIVATE5`; `forge hot-reload status`
+  shows the pinned epochs and the deferred/converted/dropped/killed counters.
+- **Topology apps run: a generated `main`, placement, `forge run` and
+  `forge run --processes`** (build step 3 of the distributed-deploys plan). A
+  project with a `topology.toml` needs no `main`: `march --topology` generates one
+  that starts the cluster node from the environment, runs each pool's `start` hook
+  (with one narrowed `Cap(P)` per capability it declares, then the node handle;
+  a hook still running after `MARCH_HOOK_TIMEOUT_MS` stops the process), opens the
+  offers the topology places on the node, drains on SIGTERM/SIGINT and re-offers a
+  role whose offer or actor died. A `body` binding receives the hook's environment,
+  the session, the role's granted caps and its entry state; an `actor` binding is
+  spawned per offer with the environment as its `init` argument and receives
+  `Start`/`Deliver`/`Cancel`. The new `Topology` stdlib module does the placement:
+  `on` labels from `MARCH_NODE_LABELS`, `count = n` by rendezvous hashing over the
+  live members that serve the role (a dead node's role moves; a rejoined node
+  counts after `MARCH_PLACEMENT_SETTLE_MS`), a lost role drained rather than cut.
+  `march --topology` now also checks each binding's shape, role grants and hooks
+  against a pool's written `caps`, and a pool's actual reach after typechecking
+  (`--topology-isolate-foreign` adds the `IO.Foreign` isolation check);
+  `--emit-core-ast` reports each pool's derived `caps` and `initiates`, which
+  `forge topology export` now prints instead of `"caps": null`. `forge run` on a
+  topology app always compiles and runs every pool in one process; `--processes`
+  runs one process per pool as a local cluster (`--fail-fast`, `--env` for host
+  labels), and Ctrl-C drains and stops them all. See `docs/topology.md` and
+  `examples/topology_app`.
+- **A cluster node can talk to itself.** `ClusterNode.queue_for(node, own_id)` is
+  now a loopback link (ordered, no credit flow control), so two roles of one
+  session can run on the same node: `initiate_<Role>` may pick its own node's
+  offer, and prefers it.
 - **The topology file, static half** (build step 7 of the distributed-deploys plan).
   `topology.toml` next to `forge.toml` binds each offered `Protocol.Role` to a
   `body` function or an `actor`, groups roles into `[pool.*]` sections
@@ -89,6 +140,13 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **Hot reload: a second deploy while actors are still migrating is accepted**
+  (it used to be refused with `ERR publish_failed`); each actor applies both
+  migrations in order. Past the soft drain deadline, messages in an unchanged
+  format now run on the new code against the migrated state instead of being
+  dropped; only old-format messages are dropped (or converted by `migrate_msg`).
+  The compiled `main` follows the newest code; every other unit keeps the code it
+  started with.
 - **Breaking: a running cluster node is a capability, `Cap(ClusterNode.Live)`.**
   `ClusterNode.start` takes the root capability first, `start(io, cfg)`, and returns
   `Result(Cap(ClusterNode.Live), String)`; the `ClusterNode.ClusterHandle` type is gone.
@@ -317,6 +375,49 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Spawning a nested actor from its parent module compiles.** `spawn(Inner.Box)`
+  written outside `mod Inner` passed `--check` and ran interpreted, but `--compile`
+  failed to link with `Undefined symbols: "_Inner.Box_spawn"`. It now links and runs.
+  A `mailbox N policy` declared on such an actor is also applied at a qualified spawn;
+  before, it was silently skipped there.
+- **A dead actor's metadata is now returned, and sends no longer slow down
+  after actor churn.** Each actor's runtime bookkeeping (about 300 bytes) used
+  to be kept for the life of the program, and it stayed on the lookup path of
+  every `send` and `Actor.call`, so a node that had churned 200,000 short-lived
+  actors took 3 seconds instead of 45 ms to send 200,000 messages to one
+  long-lived actor. It is now freed once no other thread can still be reading
+  it, leaving a 56-byte record per pid for what a dead pid can still be asked
+  (its terminal reason, `Pid(n)` display, capability epoch): 200,000 churned
+  actors retain 18.5 MB instead of 65.6 MB, and send speed no longer depends on
+  how many actors have died. `Scheduler.stat(10)` counts freed actor metadata
+  and `stat(11)` that waiting to be freed. `Actor.pid_from_int` on the pid of an
+  actor that has died now returns a dead Pid; it used to return a pointer to
+  the dead actor's record, which could already have been freed.
+- **A protocol `choose` branch can now continue with a labelled message step.** A branch
+  body line such as `tick: A -> B : Int` after the branch's first message was read as the
+  start of the next branch and failed with "I got stuck here"; it now continues the branch,
+  as an unlabelled `A -> B : Int` line already did.
+
+- **Fourteen stdlib wrappers over builtins the typechecker did not know now
+  typecheck**, and the interpreter and compiled backends agree on each.
+  `System.os()`/`System.arch()` return a lowercase `String` (`"macos"`,
+  `"aarch64"`), and misusing one is a type error instead of a runtime crash;
+  compiled programs calling them previously failed to link. Compiled
+  `Crypto.sha512` returned the SHA-256 digest, compiled `UUID.v5` crashed with
+  SIGBUS, compiled `IO.warn`/`Logger.appender_stderr` printed a blank line after
+  every message, and `System.version()` said `march/dev` compiled and `0.1.0`
+  interpreted; it now reports the compiler's real version in both. Compiled
+  `IO.read_line` no longer splits lines longer than 4096 bytes. `print_stderr`
+  now requires `IO.Console`, like `print`.
+- **`csv_next_row`'s result now matches against `CsvEof` / `Row`.** The builtin
+  is typed with the qualified `Csv.CsvRow`, and builtin signatures skipped the
+  qualified-to-bare canonicalization that written type annotations get, so
+  matching its result against the bare constructors was a type error both ways.
+  `stdlib/csv.march` carried 12 such errors, hidden because stdlib diagnostics
+  are filtered, which left `Csv.each_row`, `Csv.read_all` and
+  `Csv.each_row_with_header` unchecked. Builtin signatures now go through the
+  same canonicalization, so any future builtin typed with a qualified name is
+  covered too.
 - **Two modules can each name their capability dictionary `Ops`.** A
   `proof cap X with T` resolved `T` by its bare name first, so when two modules
   each declared a same-named dictionary record, one module's `cap_impl` /

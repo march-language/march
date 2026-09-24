@@ -12,7 +12,7 @@
  (name march_test_compiler)
  (wrapped false)
  (modules test_compiler test_stdlib_only test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag)
- (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint yojson alcotest str unix threads.posix))
 
 (library
  (name march_test_eval)
@@ -850,6 +850,7 @@
  (targets test_reload_activate4_runner)
  (deps    test_reload_activate4.c
           reload_keys.txt
+          hcr_stub.so
           ../runtime/march_reload.c ../runtime/march_reload.h
           ../runtime/march_dispatch.c ../runtime/march_dispatch.h
           ../runtime/march_cap_lattice.c ../runtime/march_cap_lattice.h
@@ -898,12 +899,18 @@
 
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so))
  (action (run ./test_reload_activate4_runner reload_keys.txt)))
+
+; The stub patch the reload test's epoch-model case uploads and activates.
+(rule
+ (targets hcr_stub.so)
+ (deps    hcr_stub_so.c)
+ (action  (run %{cc} -shared -fPIC -o %{targets} hcr_stub_so.c)))
 
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy.txt))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy.txt) (file hcr_stub.so))
  (action (setenv MARCH_DEPLOY_POLICY test_reload_policy.txt
           (run ./test_reload_activate4_runner reload_keys.txt policy))))
 
@@ -4561,7 +4568,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (diff native/timer_send_after.expected native_timer_send_after.out)))
 
 ; ── Proc reclamation under kill-then-immediately-respawn
-; (specs/todos/2026-09-17-proc-struct-reclamation.md, mechanism PR 1).  Every
+; (specs/progress/2026-09-23-proc-struct-reclamation-metas.md, mechanism PR 1).  Every
 ; holder that can outlive a proc (a BLOCK sender parked on it, a reply-ref, a
 ; send_after, a Task handle/waiter) is driven against a proc that dies and is
 ; freed while the next round's spawn reuses memory.  The golden only proves it
@@ -4582,6 +4589,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/proc_reclaim_kill_respawn.expected native_proc_reclaim_kill_respawn.out)))
+
+; ── pid_of_int on a dead pid whose record is freed (metas PR,
+; specs/progress/2026-09-23-proc-struct-reclamation-metas.md "Survey additions").  The
+; golden only pins the answer; the evidence is the ASAN run, where the base
+; runtime's march_pid_of_int incrc'd the freed record.
+(rule
+ (targets native_pid_of_int_dead_pid native_pid_of_int_dead_pid.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (source_tree ../stdlib)
+       (file native/pid_of_int_dead_pid.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_pid_of_int_dead_pid
+        native/pid_of_int_dead_pid.march)
+   (with-stdout-to native_pid_of_int_dead_pid.out
+        (system "./native_pid_of_int_dead_pid")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/pid_of_int_dead_pid.expected native_pid_of_int_dead_pid.out)))
 
 ; ── Leak guard for send_after/cancel_timer message + TimerRef-token disposal
 ; (specs/progress/2026-08-12-language-level-timers.md) — the cancelled-before-
@@ -6874,6 +6902,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/mailbox_decl.expected native_mailbox_decl.out)))
+
+; ── spawn(Inner.Box): a nested actor spawned from its PARENT module ──
+; The actor's glue is minted under its bare declared name (Box_spawn); the
+; qualified call site used to name Inner.Box_spawn, so --check passed and
+; --compile failed to link. The interpreted run is diffed against the same
+; .expected so both backends must agree.
+(rule
+ (targets native_nested_actor_spawn native_nested_actor_spawn.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nested_actor_spawn.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_nested_actor_spawn
+        native/nested_actor_spawn.march)
+   (with-stdout-to native_nested_actor_spawn.out
+        (system "./native_nested_actor_spawn")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_actor_spawn.expected native_nested_actor_spawn.out)))
+
+(rule
+ (targets interp_nested_actor_spawn.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/nested_actor_spawn.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_nested_actor_spawn.out
+   (run %{exe:../bin/main.exe} native/nested_actor_spawn.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_actor_spawn.expected interp_nested_actor_spawn.out)))
 
 ; ── Credit-based flow control: budget refuses, CREDIT re-admits ──
 (rule
@@ -9980,3 +10043,55 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias cross-hcr)
  (deps ../bin/main.exe cross_hcr_compile.sh native/hcr_smoke.march)
  (action (run sh %{dep:cross_hcr_compile.sh})))
+; ── Topology.place over one real ClusterNode (distributed deploys, build ──
+; ── step 3): placement rules, a ranked role's marker, re-offering after ────
+; ── an offer dies, and a SIGTERM drain that exits 0 ─────────────────────────
+(rule
+ (targets native_topology_place native_topology_place.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib) (source_tree ../runtime)
+       (file native/topology_place.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_topology_place
+        native/topology_place.march)
+   (with-stdout-to native_topology_place.out
+        (system "./native_topology_place")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/topology_place.expected native_topology_place.out)))
+
+; ── Topology.hook's watchdog: a hook still running after ───────────────────
+; ── MARCH_HOOK_TIMEOUT_MS is named and the process exits 1 ─────────────────
+(rule
+ (targets native_topology_hook_timeout native_topology_hook_timeout.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib) (source_tree ../runtime)
+       (file native/topology_hook_timeout.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_topology_hook_timeout
+        native/topology_hook_timeout.march)
+   (with-stdout-to native_topology_hook_timeout.out
+        (system "MARCH_HOOK_TIMEOUT_MS=300 ./native_topology_hook_timeout; echo exit=$?")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/topology_hook_timeout.expected native_topology_hook_timeout.out)))
+
+; ── Topology.place over a FAKE cluster dictionary (D35's seam): a count(1)
+; ── role moves to this node when the peers ranked above it are declared
+; ── dead, and stays while a rejoined peer settles. No sockets; compiled only
+; ── (place runs a background task).
+(rule
+ (targets topology_placement_bin topology_placement.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib) (source_tree ../runtime)
+       (file session/topology_placement.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o topology_placement_bin session/topology_placement.march)
+   (with-stdout-to topology_placement.out
+    (system "MARCH_PLACEMENT_TICK_MS=600000 MARCH_PLACEMENT_SETTLE_MS=600000 ./topology_placement_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/topology_placement.expected topology_placement.out)))

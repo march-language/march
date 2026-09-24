@@ -76,6 +76,20 @@ Cons picks. Each branch starts with a label (`more`, `done`) and must begin with
 from the chooser. That first message is how the other side learns which branch was
 picked. The compiler rejects a branch that starts any other way.
 
+After its first message a branch can go on for as many steps as it needs, one per line,
+labelled or not. A new line starting `name ->` begins the next branch; anything else
+(`A -> B : T`, `tick: A -> B : T`, `stop`, a nested `loop` or `choose`) continues the
+current one:
+
+```march
+choose by A:
+  go -> A -> B : Int
+        tick: A -> B : Int
+        B -> A : String
+  no -> A -> B : Bool
+end
+```
+
 A protocol may also say what each role's code is allowed to do:
 
 ```march
@@ -402,7 +416,9 @@ end
   (`node node-b dead: suspect timeout`, `... connection refused`), or the connection was
   lost. The drain rule still holds: the node reports the death only after the last message
   that arrived from that peer.
-- Every role must run on a different node.
+- Roles may share a node, even two roles of one session: frames between parties on the
+  same node go over the node's loopback link (`ClusterNode.queue_for(node, own_id)`),
+  in order and without flow control.
 
 ## Access points: many sessions, and starting again
 
@@ -435,8 +451,8 @@ initiate just as well.
 
 **How a session forms.** The initiator mints a fresh session id (its node, that node's
 incarnation, a counter: never reused, so a restarted or partitioned node can never be
-addressed by an old session), then invites one offer of each other role, each on a
-different node. An offer refuses when it is full, when it is closing, or when it was
+addressed by an old session), then invites one offer of each other role, trying an offer on
+its own node first. An offer refuses when it is full, when it is closing, or when it was
 built from a different version of the protocol: each protocol has a fingerprint, so two
 nodes built from different versions refuse each other instead of exchanging messages the
 other cannot read. On a refusal, or no answer, the initiator tries the next offer, all
@@ -925,7 +941,7 @@ node's (SWIM) and the heartbeat settings do not apply.
 - A session cannot be resumed after a failure, and nothing restarts it for you.
 - Every role that exchanges messages with another needs a direct connection to it. There is
   no relaying.
-- Over a cluster node (`cluster_<Role>`), every role must be on a different node, and a
+- Over a cluster node (`cluster_<Role>`), a
   connection lost for any reason cancels the sessions using it, even if the peer node
   reconnects at once. Frames in flight on the old connection may be gone, so the session
   cannot safely continue.

@@ -251,6 +251,64 @@ let build_activate4_lines ~name ~impl ~cas ~migrate ~epoch ~cap_root ~callers_cs
   let wire_head = Printf.sprintf "ACTIVATE4 %s %s %s" name impl cas in
   (signed, wire_head)
 
+(** ACTIVATE5 (the epoch model, plan II.4.6): ACTIVATE4 with [migrate] a
+    bitmask — 1 = the actor's state schema changed, 2 = its message type
+    changed.  Same shapes as {!build_activate4_lines}; a separate verb because
+    the signed integer changes meaning (an older server answers
+    [ERR unknown_command] instead of misreading 3 as "no migration"). *)
+let build_activate5_lines ~name ~impl ~cas ~migrate ~epoch ~cap_root ~callers_csv : string * string =
+  let signed = Printf.sprintf "ACTIVATE5 %s %s %s %d epoch:%d cap_root:%s callers:%s"
+    name impl cas migrate epoch cap_root callers_csv in
+  let wire_head = Printf.sprintf "ACTIVATE5 %s %s %s" name impl cas in
+  (signed, wire_head)
+
+(** A reload-server WAIT answer (plan II.4.2):
+    ["WAIT epoch:<E> pins:<n> deadline_ms:<t>"], optionally followed by
+    [" table_full"].  [Some (epoch, pins, deadline_ms, table_full)], or
+    [None] if [resp] is not a WAIT. *)
+let parse_wait (resp : string) : (int * int * int * bool) option =
+  if String.length resp < 5 || String.sub resp 0 5 <> "WAIT " then None
+  else
+    try
+      Scanf.sscanf resp "WAIT epoch:%d pins:%d deadline_ms:%d%s@\n"
+        (fun e p d rest -> Some (e, p, d, String.trim rest = "table_full"))
+    with _ -> None
+
+(** The line forge prints for a WAIT, in the plan's words ("waiting on 3
+    units pinned to epoch 5, deadline 40s"). *)
+let describe_wait (e, p, d, full) =
+  let deadline =
+    if d < 0 then "no hard drain deadline armed (send DRAIN to arm one)"
+    else Printf.sprintf "hard deadline in %ds" ((d + 999) / 1000) in
+  if full then
+    Printf.sprintf "waiting: the epoch pin table is full; oldest pinned epoch %d has %d unit(s), %s" e p deadline
+  else
+    Printf.sprintf "waiting on %d unit(s) pinned to epoch %d, %s" p e deadline
+
+(** Send [cmd] and return the server's answer, re-sending while it answers
+    WAIT: the activation is queued server side (a batch stays staged; a
+    single ACTIVATE is simply re-sent), so polling is re-asking.  Gives up
+    after [$MARCH_DEPLOY_WAIT_S] seconds (default 600) and returns the last
+    WAIT line. *)
+let send_waiting ~send_line ~recv_line conn cmd : string =
+  let limit =
+    match Sys.getenv_opt "MARCH_DEPLOY_WAIT_S" with
+    | Some v -> (match float_of_string_opt v with Some f -> f | None -> 600.)
+    | None -> 600. in
+  let t0 = Unix.gettimeofday () in
+  let rec go last_msg =
+    send_line conn cmd;
+    let resp = recv_line conn in
+    match parse_wait resp with
+    | None -> resp
+    | Some w ->
+      let msg = describe_wait w in
+      if msg <> last_msg then Printf.printf "  %s\n%!" msg;
+      if Unix.gettimeofday () -. t0 >= limit then resp
+      else (Unix.sleepf 1.0; go msg)
+  in
+  go ""
+
 (** For each widened cap, find a function in [functions] whose [fn_caps]
     contains (or subsumes-would-need) that cap — used to attribute the
     widening to a specific manifest line in the diagnostic.  Picks the first
@@ -832,6 +890,44 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
             raise (Failure "compat violation — deploy aborted")
           end;
 
+          (* DD step 6 (plan 6.3, II.4.8): which actors' message types changed
+             (a running handler removed, or its parameters changed).  Such an
+             actor's deploy sends migrate bit 2 (ACTIVATE5): old-format
+             messages it dequeues after advancing go through its
+             <actor>_migrate_msg, whose old type must be the running
+             version's handlers, else they are dropped and counted. *)
+          let msgs_changed_actors =
+            List.filter_map (fun (actor, (ns : Schema_diff.actor_schema)) ->
+                match List.assoc_opt actor old_schemas with
+                | Some { Schema_diff.handlers = Some oh; _ } ->
+                  (match ns.Schema_diff.handlers with
+                   | Some nh when Schema_diff.messages_changed ~old_h:oh ~new_h:nh ->
+                     Some (actor, oh, ns.Schema_diff.migrate_msg_from)
+                   | _ -> None)
+                | _ -> None) new_schemas in
+          let mm_errors = List.filter_map (fun (actor, oh, from) ->
+              match from with
+              | None ->
+                Printf.printf
+                  "  NOTE: %s's message type changed and it has no %s_migrate_msg: \
+                   old-format messages will be dropped and counted (write one with \
+                   `forge hot-reload migrate-msg-stub %s`)\n%!"
+                  actor (String.uncapitalize_ascii actor) actor;
+                None
+              | Some f when f = oh -> None
+              | Some _ -> Some actor) msgs_changed_actors in
+          if mm_errors <> [] then begin
+            List.iter (fun actor ->
+              Printf.eprintf
+                "forge deploy hot: actor %s — %s_migrate_msg's old type does not match \
+                 the running version's handlers\n" actor (String.uncapitalize_ascii actor)
+            ) mm_errors;
+            Unix.close fd;
+            raise (Failure "migrate_msg old-type mismatch — deploy aborted")
+          end;
+          let msgs_changed actor =
+            List.exists (fun (a, _, _) -> a = actor) msgs_changed_actors in
+
           (* Gap #3: migration VC — shell out to march --check-migration. *)
           let march_bin =
             Option.value (Sys.getenv_opt "MARCH_BIN")
@@ -891,6 +987,10 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
                   | Error _ -> 1)
               else 0
             in
+            let migrate_required =
+              if flen > dlen && String.sub fm.fn_name (flen - dlen) dlen = dispatch_suffix
+                 && msgs_changed (String.sub fm.fn_name 0 (flen - dlen))
+              then migrate_required lor 2 else migrate_required in
             (* Protocol v3/v4: migrate_required is also signed so it can't be
                forged between the signature and the server.
 
@@ -918,8 +1018,12 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
               let fn_caps_sorted = List.sort String.compare fm.fn_caps in
               let caps_csv = String.concat "," fn_caps_sorted in
               let this_cap_root = fn_cap_root fm.fn_caps in
+              (* A message-type change (bit 2) needs ACTIVATE5; otherwise
+                 ACTIVATE4, so an older server keeps working. *)
+              let build = if migrate_required land 2 <> 0
+                then build_activate5_lines else build_activate4_lines in
               let (signed, wire_head) =
-                build_activate4_lines ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
+                build ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
                   ~migrate:migrate_required ~epoch:epoch_n ~cap_root:this_cap_root
                   ~callers_csv
               in
@@ -927,8 +1031,7 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
               let sig_b64 = March_ed25519.Ed25519.sig_to_base64 sig_bytes in
               let cmd = Printf.sprintf "%s %s %d epoch:%d cap_root:%s caps:%s callers:%s"
                 wire_head sig_b64 migrate_required epoch_n this_cap_root caps_csv callers_csv in
-              send_line conn cmd;
-              let resp = recv_line conn in
+              let resp = send_waiting ~send_line ~recv_line conn cmd in
               if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin
                 Printf.printf "  activated: %s\n%!" fm.fn_name;
                 incr activated
@@ -952,6 +1055,11 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
                 incr failed
               end
             end else begin
+              if migrate_required land 2 <> 0 then
+                Printf.printf
+                  "  NOTE: %s — ACTIVATE3 cannot say the message type changed: \
+                   old-format messages will run on the new handlers\n%!" fm.fn_name;
+              let migrate_required = migrate_required land 1 in
               let (signed, wire_head) =
                 build_activate3_lines ~name:fm.fn_name ~impl:fm.fn_impl_hash ~cas:cas_hash
                   ~migrate:migrate_required ~epoch:epoch_n ~callers_csv
@@ -960,8 +1068,7 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
               let sig_b64 = March_ed25519.Ed25519.sig_to_base64 sig_bytes in
               let cmd = Printf.sprintf "%s %s %d epoch:%d callers:%s"
                 wire_head sig_b64 migrate_required epoch_n callers_csv in
-              send_line conn cmd;
-              let resp = recv_line conn in
+              let resp = send_waiting ~send_line ~recv_line conn cmd in
               if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin
                 Printf.printf "  activated: %s\n%!" fm.fn_name;
                 incr activated
@@ -980,8 +1087,8 @@ let run ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
           (* Commit or rollback the batch *)
           if batch_mode then begin
             if !failed = 0 then begin
-              send_line conn "COMMIT_BATCH";
-              let commit_resp = recv_line conn in
+              let commit_resp =
+                send_waiting ~send_line ~recv_line conn "COMMIT_BATCH" in
               let n_expected = List.length to_activate in
               let commit_ok =
                 try
@@ -1036,8 +1143,8 @@ let parse_versions_detail conn =
       (match String.split_on_char ' ' line with
        | "SLOT" :: id_s :: name :: impl_h :: ts_s :: signer :: rest ->
          let epoch = match rest with
-           | [ep_s] -> (match int_of_string_opt ep_s with Some v -> v | None -> 0)
-           | _ -> 0
+           | ep_s :: _ -> (match int_of_string_opt ep_s with Some v -> v | None -> 0)
+           | [] -> 0
          in
          (match int_of_string_opt id_s, Int64.of_string_opt ts_s with
           | Some id, Some ts ->
@@ -1064,6 +1171,17 @@ let format_elapsed_ms (ts_ms : int64) : string =
     else Printf.sprintf "%dd ago" (diff_s / 86400)
   end
 
+(** The PINS answer (plan II.4.7): [EPOCH …] and [COUNTERS …] lines up to
+    [END].  An older server answers [ERR unknown_command]: no lines. *)
+let read_pins conn : string list =
+  let rec loop acc =
+    let line = recv_line conn in
+    if line = "END" then List.rev acc
+    else if String.length line >= 4 && String.sub line 0 4 = "ERR " then List.rev acc
+    else loop (line :: acc)
+  in
+  loop []
+
 let run_status ?(env="") () : (unit, string) result =
   match Project.load () with
   | Error m -> Error m
@@ -1087,6 +1205,7 @@ let run_status ?(env="") () : (unit, string) result =
         Error "[hot-reload] ssh_host is required"
       else begin
         let multi_node = List.length servers > 1 in
+        let pins_by_node : (string, string list) Hashtbl.t = Hashtbl.create 4 in
         let query_server (srv : Project.hot_reload_env) =
           let local = fresh_sock "march_status" in
           Printf.printf "Connecting to %s...\n%!" srv.Project.hre_ssh_host;
@@ -1099,7 +1218,10 @@ let run_status ?(env="") () : (unit, string) result =
               let conn = conn_of_fd fd in
               send_line conn "VERSIONS_DETAIL";
               let slots = parse_versions_detail conn in
+              send_line conn "PINS";
+              let pins = read_pins conn in
               Unix.close fd;
+              Hashtbl.replace pins_by_node srv.Project.hre_name pins;
               Ok (srv.Project.hre_name, slots)
             with
             | Failure m -> Error m
@@ -1185,6 +1307,14 @@ let run_status ?(env="") () : (unit, string) result =
               Printf.printf "Run `forge deploy hot --env <name>` to bring nodes into sync.\n%!"
             end
           end;
+          (* The epoch pin table and the drain counters (PINS). *)
+          List.iter (fun (node_name, _) ->
+            match Hashtbl.find_opt pins_by_node node_name with
+            | None | Some [] -> ()
+            | Some lines ->
+              Printf.printf "\nEpochs%s:\n" (if multi_node then " (" ^ node_name ^ ")" else "");
+              List.iter (fun l -> Printf.printf "  %s\n" l) lines
+          ) nodes;
           Ok ()
         end
       end
@@ -1588,3 +1718,76 @@ let deploy_env ?(output="") ?(so="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
                 end
               end
       end
+
+(* ─── migrate_msg stubs (DD step 6, plan 6.3 / II.4.8) ─────────────────── *)
+
+(** The source of an `<actor>_migrate_msg` for [actor], from the RUNNING
+    version's handlers [old_h] (its `.schemas.json.prev`).  The old message
+    type is spelled out in a nested module (its constructors would otherwise
+    collide with the actor's own), and the match is exhaustive.  With the new
+    build's handlers [new_h], a handler kept with the same parameters maps to
+    itself and a removed or changed one to [None] (dropped on purpose,
+    counted as dropped); without them every arm maps to itself. *)
+let migrate_msg_stub ~(actor : string) ~(old_h : Schema_diff.ctor list)
+    ?(new_h : Schema_diff.ctor list option) () : string =
+  let b = Buffer.create 512 in
+  let add fmt = Printf.bprintf b fmt in
+  let modname = actor ^ "MsgV" in
+  let lower = String.uncapitalize_ascii actor in
+  add "-- generated by `forge hot-reload migrate-msg-stub %s` from the running\n" actor;
+  add "-- version's handler signatures. Put it in the module that declares %s.\n" actor;
+  add "mod %s do\n  type Msg = %s\nend\n\n" modname
+    (String.concat " | " (List.map (fun (c : Schema_diff.ctor) ->
+         if c.params = [] then c.cname
+         else Printf.sprintf "%s(%s)" c.cname (String.concat ", " c.params)) old_h));
+  add "fn %s_migrate_msg(m : %s.Msg) : Option(%s.Msg) do\n  match m do\n"
+    lower modname actor;
+  List.iter (fun (c : Schema_diff.ctor) ->
+      let args = List.mapi (fun i _ -> Printf.sprintf "a%d" (i + 1)) c.params in
+      let pat = if args = [] then Printf.sprintf "%s.%s" modname c.cname
+        else Printf.sprintf "%s.%s(%s)" modname c.cname (String.concat ", " args) in
+      let same = match new_h with
+        | None -> true
+        | Some nh -> List.exists (fun (n : Schema_diff.ctor) ->
+            n.cname = c.cname && n.params = c.params) nh in
+      if same then
+        add "    %s -> Some(%s(%s))\n" pat c.cname (String.concat ", " args)
+      else
+        add "    %s -> None   -- removed or changed: dropped on purpose (counted)\n"
+          (if args = [] then pat
+           else Printf.sprintf "%s.%s(%s)" modname c.cname
+               (String.concat ", " (List.map (fun _ -> "_") args))))
+    old_h;
+  add "  end\nend\n";
+  Buffer.contents b
+
+(** `forge hot-reload migrate-msg-stub <Actor>`: write the stub to
+    `.forge/migrate_msg_stubs/<Actor>.march`.  [old_path] defaults to the
+    last deploy's `.march/<name>_hot.so.schemas.json.prev`; [new_path], when
+    given, is the new build's `.schemas.json`. *)
+let run_migrate_msg_stub ~actor ?old_path ?new_path () : (string, string) result =
+  match Project.load () with
+  | Error m -> Error m
+  | Ok proj ->
+    let old_path = match old_path with
+      | Some p -> p
+      | None -> Filename.concat (Filename.concat proj.Project.root ".march")
+                  (proj.Project.name ^ "_hot.so.schemas.json.prev") in
+    let old_s = Schema_diff.parse_schemas_file old_path in
+    match List.assoc_opt actor old_s with
+    | None -> Error (Printf.sprintf "no actor %s in %s" actor old_path)
+    | Some { Schema_diff.handlers = None; _ } ->
+      Error (Printf.sprintf "%s has no handler signatures (deployed by an older compiler)" old_path)
+    | Some { Schema_diff.handlers = Some old_h; _ } ->
+      let new_h = match new_path with
+        | None -> None
+        | Some p -> (match List.assoc_opt actor (Schema_diff.parse_schemas_file p) with
+            | Some s -> s.Schema_diff.handlers | None -> None) in
+      let dir = Filename.concat (Filename.concat proj.Project.root ".forge") "migrate_msg_stubs" in
+      let mk d = if not (Sys.file_exists d) then Sys.mkdir d 0o755 in
+      mk (Filename.concat proj.Project.root ".forge"); mk dir;
+      let out = Filename.concat dir (actor ^ ".march") in
+      let oc = open_out out in
+      output_string oc (migrate_msg_stub ~actor ~old_h ?new_h ());
+      close_out oc;
+      Ok out

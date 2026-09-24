@@ -37,6 +37,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <errno.h>
 #include <time.h>
@@ -436,6 +437,121 @@ static void test_batch_audit_carries_caps(void) {
  *    that starts its own server with MARCH_DEPLOY_POLICY set before any
  *    ACTIVATE4 — see test/dune and main() below (argv[2] selects mode). */
 
+/* 7. The epoch model end to end (II.4.2): a real patch (hcr_stub.so) goes in
+ *    through CAS_PUT and ACTIVATE5.  With the slot's three live versions all
+ *    in use (a unit pinned at the base epoch keeps the baseline, one pinned at
+ *    the first deploy's epoch keeps that version), a third deploy WAITs
+ *    instead of failing, the batch stays staged, PINS and DRAIN report and
+ *    arm, and the retry succeeds once the blocking unit exits. */
+static const char STUB_CAS[] =
+    "5555555555555555555555555555555555555555555555555555555555555555";
+
+static int put_stub(int fd) {
+    FILE *f = fopen("hcr_stub.so", "rb");
+    if (!f) return 0;
+    static unsigned char buf[1 << 20];
+    size_t n = fread(buf, 1, sizeof(buf), f);
+    fclose(f);
+    char line[256], resp[256];
+    snprintf(line, sizeof(line), "CAS_PUT %s %zu", STUB_CAS, n);
+    send_line(fd, line);
+    read_resp(fd, resp, sizeof(resp));
+    if (strcmp(resp, "READY") != 0) return 0;
+    if (write(fd, buf, n) != (ssize_t)n) return 0;
+    read_resp(fd, resp, sizeof(resp));
+    return strncmp(resp, "OK ", 3) == 0;
+}
+
+static void activate5(int fd, const char *name, int migrate, char *resp, int max) {
+    char impl_hash[65];
+    memset(impl_hash, '6', 64); impl_hash[64] = '\0';
+    char root[65];
+    expected_cap_root(NULL, 0, root);
+    uint32_t epoch = 0;   /* the server's runtime epoch is max(this, current + 1) */
+    char signed_msg[2048];
+    snprintf(signed_msg, sizeof(signed_msg),
+             "ACTIVATE5 %s %s %s %d epoch:%u cap_root:%s callers:%s",
+             name, impl_hash, STUB_CAS, migrate, epoch, root, "");
+    char sig_b64[128];
+    sign_b64(signed_msg, sig_b64);
+    char line[2560];
+    snprintf(line, sizeof(line),
+             "ACTIVATE5 %s %s %s %s %d epoch:%u cap_root:%s caps: callers:",
+             name, impl_hash, STUB_CAS, sig_b64, migrate, epoch, root);
+    send_line(fd, line);
+    read_resp(fd, resp, max);
+}
+
+/* Read PINS up to END into one buffer. */
+static void read_pins(int fd, char *out, size_t max) {
+    send_line(fd, "PINS");
+    out[0] = '\0';
+    char line[512];
+    for (int i = 0; i < 32; i++) {
+        read_resp(fd, line, sizeof(line));
+        if (strcmp(line, "END") == 0) break;
+        strncat(out, line, max - strlen(out) - 2);
+        strncat(out, "\n", max - strlen(out) - 1);
+    }
+}
+
+static void test_epoch_model_wait_pins_drain(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "connected to reload server (epoch model)");
+    if (fd < 0) return;
+    char resp[512], pins[4096];
+    CHECK(put_stub(fd), "stub patch uploaded to the CAS");
+
+    activate5(fd, "test_fn_epoch", 7, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR bad_format bad_migrate") == 0,
+          "ACTIVATE5 rejects a migrate value outside the bitmask");
+
+    uint32_t base = march_epoch_current();
+    CHECK(march_epoch_pin(base) == 0, "a unit pinned at the base epoch");
+    activate5(fd, "test_fn_epoch", 0, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "first deploy activates");
+    uint32_t e1 = march_epoch_current();
+    CHECK(e1 > base, "and advances the epoch");
+    CHECK(march_epoch_pin(e1) == 0, "a unit pinned at the first deploy's epoch");
+    activate5(fd, "test_fn_epoch", 0, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "second deploy takes the third live version");
+
+    activate5(fd, "test_fn_epoch", 0, resp, sizeof(resp));
+    char want[128];
+    snprintf(want, sizeof(want), "WAIT epoch:%u pins:1 deadline_ms:-1", base);
+    CHECK(strcmp(resp, want) == 0,
+          "third deploy WAITs on the oldest pinned epoch (nothing reclaimable)");
+    if (strcmp(resp, want) != 0) fprintf(stderr, "    got: %s\n", resp);
+
+    read_pins(fd, pins, sizeof(pins));
+    snprintf(want, sizeof(want), "EPOCH %u pins:1", base);
+    CHECK(strstr(pins, want) != NULL, "PINS lists the base epoch's unit");
+    CHECK(strstr(pins, " current") != NULL, "PINS marks the current epoch");
+    CHECK(strstr(pins, "COUNTERS deferred:") != NULL, "PINS reports the counters");
+
+    snprintf(want, sizeof(want), "DRAIN epoch:%u soft_ms:60000 hard_ms:600000", base);
+    send_line(fd, want);
+    read_resp(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "OK") == 0, "DRAIN accepted");
+    read_pins(fd, pins, sizeof(pins));
+    snprintf(want, sizeof(want), "EPOCH %u pins:1 draining\n", base);
+    CHECK(strstr(pins, want) != NULL, "PINS shows the epoch draining");
+
+    /* A batch waits too, and stays staged. */
+    send_line(fd, "BEGIN_BATCH"); read_resp(fd, resp, sizeof(resp));
+    activate5(fd, "test_fn_epoch", 0, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "ACTIVATE5 staged in a batch");
+    send_line(fd, "COMMIT_BATCH"); read_resp(fd, resp, sizeof(resp));
+    CHECK(strncmp(resp, "WAIT epoch:", 11) == 0 && strstr(resp, "deadline_ms:-1") == NULL,
+          "COMMIT_BATCH waits, and reports the armed hard deadline");
+
+    march_epoch_unpin(base);   /* the blocking unit exits */
+    send_line(fd, "COMMIT_BATCH"); read_resp(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "OK 1") == 0, "the retried COMMIT_BATCH activates the staged deploy");
+    march_epoch_unpin(e1);
+    close(fd);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <keys_file> [policy]\n", argv[0]);
@@ -455,6 +571,13 @@ int main(int argc, char **argv) {
     snprintf(sock_path, sizeof(sock_path), "/tmp/march_reload_test_%d.sock", (int)getpid());
     SOCK_PATH = sock_path;
 
+    /* A private CAS (march_reload_server_start roots it at $HOME/.march/cas):
+     * the epoch-model case uploads a real artifact. */
+    char home[96];
+    snprintf(home, sizeof(home), "/tmp/march_reload_home_%d", (int)getpid());
+    mkdir(home, 0700);
+    setenv("HOME", home, 1);
+
     march_dispatch_init(64);
     /* Register every test fn name so do_activate gets past the ABI lookup
      * and reaches the CAS-miss check (proving the cap gate ran and passed) —
@@ -469,6 +592,8 @@ int main(int argc, char **argv) {
     march_dispatch_register_name(7, "test_fn_exceeds_policy");
     march_dispatch_register_name(8, "test_fn_legacy_ok");
     march_dispatch_register_name(9, "test_fn_batch");
+    march_dispatch_register_name(10, "test_fn_epoch");
+    march_dispatch_publish(10, (void *)0x1010, "baseline", NULL, MARCH_NATIVE);
     march_reload_server_start(sock_path);
     test_hcr_info();
 
@@ -482,6 +607,7 @@ int main(int argc, char **argv) {
         test_empty_caps_real_empty_root_admitted();
         test_activate3_regression();
         test_batch_audit_carries_caps();
+        test_epoch_model_wait_pins_drain();
     } else {
         /* $MARCH_DEPLOY_POLICY must already be set by the caller (dune rule)
          * before this process started, since the server loads it lazily on

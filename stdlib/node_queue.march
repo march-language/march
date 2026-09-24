@@ -341,6 +341,27 @@ mod NodeQueue do
     st.sent + len <= st.granted || st.sent - (st.granted - st.budget) < st.budget / 4
   end
 
+  -- A LOCAL queue (`start_local`) has an fd of -2 or below, naming its sink:
+  -- the frame is handed to it in this writer's turn instead of written.
+  -- (-1 is a closed connection, `close_fd_state`.)
+  pfn sinks() : Vault(Bytes -> Unit) do Vault.open("node_queue_sinks") end
+
+  pfn write_frame(fd : Int, frame : Bytes) : Result((), ()) do
+    if fd <= -2 do
+      match Vault.get(sinks(), int_to_string(fd)) do
+        Some(f) ->
+          f(frame)
+          Ok(())
+        None -> Err(())
+      end
+    else
+      match Socket.write(fd, Bytes.to_string(frame)) do
+        Ok(_) -> Ok(())
+        Err(_) -> Err(())
+      end
+    end
+  end
+
   -- Write while credit covers the head of the queue.
   pfn drain(st : WriterState) : WriterState do
     if st.dead do st
@@ -350,7 +371,7 @@ mod NodeQueue do
         Some((_seq, frame)) ->
           let len = Bytes.length(frame)
           if may_write(st, len) do
-            match Socket.write(st.fd, Bytes.to_string(frame)) do
+            match write_frame(st.fd, frame) do
               Err(_) -> with_dead(st)
               Ok(_) ->
                 let _ = Vault.incr(table(), "q" ++ int_to_string(st.fd), 0 - len)
@@ -374,6 +395,19 @@ mod NodeQueue do
     Vault.set(table(), "b" ++ int_to_string(fd), budget)
     Vault.set(table(), "q" ++ int_to_string(fd), 0)
     (w, fd)
+  end
+
+  doc """
+  A LOCAL queue: the same writer and admission as `start`, but each frame is
+  handed to [sink] (in the writer's turn, in queue order) instead of written
+  to a socket. There is no receiver to grant credit, so it is bypassed: the
+  budget is effectively unbounded. The cluster node's loopback link (a node
+  sending to itself, `ClusterNode.queue_for(h, own_id)`) is one.
+  """
+  fn start_local(sink : Bytes -> Unit) do
+    let id = -1 - Vault.incr(table(), "local", 1)
+    Vault.set(sinks(), int_to_string(id), sink)
+    start(id, 1152921504606846976)
   end
 
   -- Queue one frame under [policy]. Synchronous: returns as soon as the

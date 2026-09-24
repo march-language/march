@@ -452,8 +452,6 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_sys_os()" };
   { march_name = "sys_arch"; c_name = Some "march_sys_arch"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_sys_arch()" };
-  { march_name = "march_version"; c_name = Some "march_get_version"; ret_ty = Some Tir.TString;
-    in_is_builtin = true; declare_sig = Some "declare ptr  @march_get_version()" };
   { march_name = "uuid_v4"; c_name = Some "march_uuid_v4"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_uuid_v4()" };
   { march_name = "remote_register_stub"; c_name = Some "march_remote_register"; ret_ty = Some Tir.TInt;
@@ -946,6 +944,12 @@ let builtins : builtin list = [
     ret_ty = Some (Tir.TCon ("Option", [Tir.TPtr Tir.TUnit]));
     in_is_builtin = true;
     declare_sig = Some "declare ptr  @march_actor_whereis(ptr %name)" };
+  (* Epoch holds (DD step 6, plan II.4.4): on the running proc; stdlib-only
+     (Typecheck_builtins.stdlib_only). *)
+  { march_name = "epoch_hold"; c_name = Some "march_epoch_hold"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_epoch_hold()" };
+  { march_name = "epoch_release"; c_name = Some "march_epoch_release"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_epoch_release()" };
   { march_name = "actor_registered"; c_name = Some "march_actor_registered";
     ret_ty = Some (Tir.TCon ("List", [Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_registered()" };
@@ -1093,6 +1097,7 @@ type preamble_item =
 let runtime_only_declares : (string * string) list = [
   ("march_dispatch_enter", "declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)");
   ("march_dispatch_enter_gen", "declare ptr  @march_dispatch_enter_gen(i32 %name_id, i32 %caller_epoch, ptr %out_version)");
+  ("march_dispatch_enter_unit", "declare ptr  @march_dispatch_enter_unit(i32 %name_id, ptr %out_version)");
   ("march_dispatch_leave", "declare void @march_dispatch_leave(i32 %name_id, i32 %version)");
   ("march_dispatch_publish", "declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind)");
   ("march_dispatch_publish_epoch", "declare i32  @march_dispatch_publish_epoch(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind, i32 %epoch)");
@@ -1206,6 +1211,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PComment "; Hot Code Reload versioned dispatch (runtime/march_dispatch.c)";
   PDeclare "march_dispatch_enter";
   PDeclare "march_dispatch_enter_gen";
+  PDeclare "march_dispatch_enter_unit";
   PDeclare "march_dispatch_leave";
   PDeclare "march_dispatch_publish";
   PDeclare "march_dispatch_publish_epoch";
@@ -1405,7 +1411,6 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_sys_mem_available_bytes";
   PDeclare "march_sys_os";
   PDeclare "march_sys_arch";
-  PDeclare "march_get_version";
   PComment "; UUID / identity builtins";
   PDeclare "march_uuid_v4";
   PComment "; Distributed OTP L4 — function-by-identity remote registry (march_remote_registry.c)";
@@ -1692,6 +1697,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_actor_unregister";
   PDeclare "march_actor_whereis";
   PDeclare "march_actor_registered";
+  PDeclare "march_epoch_hold";
+  PDeclare "march_epoch_release";
   PDeclare "march_get_cap";
   PDeclare "march_send_checked";
   PDeclare "march_revoke_cap";

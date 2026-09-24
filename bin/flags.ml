@@ -31,10 +31,17 @@ let ffi_link_flags : string list ref = ref []      (* extra linker flags, e.g. "
 let do_check       = ref false   (* --check: typecheck only, no codegen or eval *)
 let topology_file  : string option ref = ref None
 (* --topology <json>: a forge topology digest (.forge/topology.json, schema
-   version 1). Step 7 of the distributed-deploys plan: the compiler only
-   validates the digest's version and that every name it binds is declared in
-   the loaded modules. The generated `main`, role grants and the derived caps
-   (steps 3 and 4) do not exist yet, so nothing else happens. *)
+   version 1). The compiler validates the digest's version and names (step 7),
+   checks each binding against its expected shape and each pool's written caps
+   (step 3), generates `main` when the entry module has none
+   (lib/desugar/desugar_topology.ml), and derives each pool's caps and
+   initiated roles, which --emit-core-ast reports as a `topology` object. *)
+let topology_pools : string list option ref = ref None
+(* --topology-pools a,b: the pools this build contains (an isolated pool's own
+   build, or the shared build without the isolated ones). Default: every pool. *)
+let topology_isolate_foreign = ref false
+(* --topology-isolate-foreign: reject an IO.Foreign role or hook in a pool
+   that is not `isolate = true` (the opt-in check of plan section 4). *)
 
 let cap_sandbox    = ref false   (* --cap-sandbox: embed a self-imposed capability sandbox profile *)
 (* `needs` is a hard ceiling, checked against attributed use.  ON by default

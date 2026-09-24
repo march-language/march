@@ -53,8 +53,9 @@
     [export_json] adds, on top of the digest:
 
     {v
-      "derived": { "<pool>": { "initiates": [...],   -- from <P>_Run.initiate_R call sites
-                               "caps": null } },     -- compiler-side, deferred
+      "derived": { "<pool>": { "initiates": [...],   -- the compiler's, typed; else from call sites by name
+                               "caps": [...] | null, -- the compiler's (D22); null when it could not run
+                               "source": "compiler" | "names" } },
       "connectivity": [ { "from": "edge", "to": "ledger", "protocols": ["Checkout"] } ],
       "cluster_port": 7946
     v}
@@ -1084,15 +1085,30 @@ let connectivity (idx : index) (t : t) : edge list =
     pools;
   List.rev !edges
 
-let export_json ~(index : index) (t : t) : Yojson.Safe.t =
+(** [compiler]: each pool's derived caps and initiated roles as the compiler
+    computed them (`march --topology ... --emit-core-ast`'s [topology]
+    object, [Topology_run.compiler_derived]). Given, they replace the
+    name-based [initiates] and the [null] [caps]; without them (no toolchain,
+    or a program that does not typecheck) [caps] stays [null], never a guess. *)
+let export_json ?(compiler : (string * (string list * string list)) list option) ~(index : index) (t : t)
+  : Yojson.Safe.t =
   `Assoc (
     digest_fields t
     @ [
       ("derived", `Assoc (List.map (fun p ->
-           (p.pool_name, `Assoc [
-               ("initiates", json_strs (List.sort_uniq String.compare (List.map fst (derived_initiates index t p))));
-               ("caps", `Null);
-             ])) t.pools));
+           match Option.bind compiler (List.assoc_opt p.pool_name) with
+           | Some (caps, initiates) ->
+             (p.pool_name, `Assoc [
+                 ("initiates", json_strs initiates);
+                 ("caps", json_strs caps);
+                 ("source", `String "compiler");
+               ])
+           | None ->
+             (p.pool_name, `Assoc [
+                 ("initiates", json_strs (List.sort_uniq String.compare (List.map fst (derived_initiates index t p))));
+                 ("caps", `Null);
+                 ("source", `String "names");
+               ])) t.pools));
       ("connectivity", `List (List.map (fun e ->
            `Assoc [ ("from", `String e.e_from); ("to", `String e.e_to); ("protocols", json_strs e.e_protocols) ])
            (connectivity index t)));

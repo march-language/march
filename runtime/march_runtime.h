@@ -566,12 +566,9 @@ void    march_register_supervisor(void *supervisor, int64_t strategy,
  * march_actor_broadcast_migrate; freed with free() (NOT march_decrc) by
  * actor_green_thread after handling.
  *
- * The message is also a MARKER: its position in the mailbox separates the
- * messages queued before the switch (handled by the old code against the old
- * state) from those queued after it.  [pin] is the code-version pin the
- * activator took on the target actor (ring version + 1; 0 = none, the legacy
- * march_actor_broadcast_migrate shape) and [meta] the actor's meta (metas are
- * never freed), so whichever path disposes the marker can release the pin. */
+ * Legacy (march_actor_broadcast_migrate / march_actor_inject_migrate_msg):
+ * deploys use epoch markers, which are mailbox-node flags (march_mbox_node.
+ * marker), not messages.  [meta] and [pin] are unused, always NULL/0. */
 typedef struct {
     int64_t  _rc;              /* always 1 (not reference-counted) */
     int64_t  _tag;             /* MARCH_MIGRATE_TAG */
@@ -591,40 +588,120 @@ void march_actor_set_dispatch_id(void *actor, uint32_t name_id);
  * address the handler positionally under F19's globally-unique msg tags. */
 void march_actor_set_call_base(void *actor, int64_t base);
 
-/* Publish a new version of a hot-reload actor's dispatch fn whose state
- * layout changed, and migrate every live actor of that type.
+/* ── The unified epoch model: activation, markers, holds, drains ─────────
+ * specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md, II.4.
  *
- * Each live actor keeps running the version it was on, against its old
- * state, for every message already in its mailbox.  A migrate marker is
- * appended to each mailbox; when an actor reaches its marker it runs
- * [migrate_fn] on its state (skipped if NULL) and switches to the new
- * version.  The old version stays pinned in the dispatch ring until every
- * actor has passed its marker, so a second migrating publish before that
- * fails (-1) rather than reclaiming code that is still running.
- *
- * [drain_ms] bounds how long old messages are honoured: once it has elapsed,
- * an actor that has still not reached its marker drops (and reports on
- * stderr) each remaining pre-marker message instead of running it.  < 0 uses
- * $MARCH_HCR_DRAIN_MS, else MARCH_HCR_DRAIN_MS_DEFAULT; 0 = no deadline.
- *
- * [epoch] > 0 publishes with march_dispatch_publish_epoch.  Returns the ring
- * index published, or -1 if the publish failed (nothing is changed then). */
+ * One activated function of a deploy.  [migrate_fn]: the actor's
+ * __migrate_<Actor> (state, old -> new), or NULL.  [migrate_msg_fn]: its
+ * __migrate_msg_<Actor> wrapper, called as fn(old_msg, sentinel) and
+ * returning the converted message, or [sentinel] for None.  [state_changed] /
+ * [msgs_changed]: what the deploy's schema diff says changed for this
+ * actor.  [handle]: the dlopen handle the version will own (NULL in tests).
+ * [ring_idx] is filled in. */
+typedef struct {
+    uint32_t    slot;
+    void       *fn;
+    const char *impl_hash;
+    const char *sig_hash;
+    uint8_t     kind;
+    void     *(*migrate_fn)(void *);
+    void     *(*migrate_msg_fn)(void *, void *);
+    int         state_changed;
+    int         msgs_changed;
+    void       *handle;
+    int         ring_idx;
+} march_hcr_unit;
+
+/* Why an activation could not proceed yet (MARCH_HCR_WAIT): the oldest
+ * pinned epoch, its pinned units, and the hard drain deadline covering it in
+ * ms from now (-1 = none armed). */
+typedef struct {
+    uint32_t epoch;
+    int64_t  pins;
+    int64_t  deadline_ms;
+    int      table_full;   /* 1: the epoch pin table has no free entry */
+} march_hcr_wait;
+
+#define MARCH_HCR_WAIT  (-1)
+#define MARCH_HCR_ERROR (-2)
+
+/* Activate [n] functions as ONE deploy (II.4.6): stage each into its slot
+ * (live = 0), commit them all (live, current), advance the current epoch to
+ * the deploy's epoch (march_epoch_next(requested_epoch)), then put an epoch
+ * marker in EVERY live actor's user mailbox.  Each actor runs whatever it
+ * already had queued at its own (old) epoch and moves at its marker,
+ * applying the state migrations of every deploy it passes, in order.
+ * Afterwards a soft drain of the older epochs is armed ([soft_ms]/[hard_ms];
+ * < 0 = $MARCH_HCR_DRAIN_MS / $MARCH_HCR_HARD_DRAIN_MS, else the defaults;
+ * 0 = none).  Returns the deploy's epoch (> 0), MARCH_HCR_WAIT with [wait]
+ * filled when some slot has no reclaimable version or the pin table is
+ * full (nothing changed), or MARCH_HCR_ERROR (nothing changed). */
+int march_hcr_activate(march_hcr_unit *units, int n, uint32_t requested_epoch,
+                       int64_t soft_ms, int64_t hard_ms, march_hcr_wait *wait);
+
+/* A one-function migrating activation (the #564 entry point, kept for
+ * tests): march_hcr_activate with state_changed = 1.  Returns the ring index,
+ * or -1 (waiting or failed; nothing changed). */
 #define MARCH_HCR_DRAIN_MS_DEFAULT 5000
 int march_actor_publish_migrating(uint32_t dispatch_name_id, void *fn_ptr,
                                   const char *impl_hash, const char *sig_hash,
                                   uint8_t kind, uint32_t epoch,
                                   void *(*migrate_fn)(void *), int64_t drain_ms);
 
-/* Pre-marker messages dropped by an expired drain deadline, process-wide. */
+/* Drain every epoch <= [upto] (II.4.7, the DRAIN verb): at the soft deadline
+ * each actor still pinned there with no epoch holds advances at once (a
+ * forced marker; its remaining old-format messages take the migrate_msg path
+ * or are dropped and counted); at the hard deadline every actor pinned there
+ * is killed (its supervisor restarts it at the current epoch) and every other
+ * proc pinned there is told to stop.  0 ms = that deadline is not armed. */
+void march_hcr_drain(uint32_t upto, int64_t soft_ms, int64_t hard_ms);
+/* 1 iff [epoch] is covered by an armed drain (SessionNode reads this to start
+ * its D27 loop-boundary drains). */
+int  march_hcr_epoch_draining(uint32_t epoch);
+
+/* Epoch holds (D28, II.4.4) on the current proc; see march_proc.epoch_holds.
+ * Called through the stdlib-only builtins epoch_hold()/epoch_release(). */
+void     march_epoch_hold(void);
+void     march_epoch_release(void);
+uint32_t march_epoch_holds(void);
+
+/* Process-wide counters, reported by the reload server's PINS verb. */
+typedef struct {
+    int64_t deferred;     /* newer-format messages a held actor set aside */
+    int64_t converted;    /* old-format messages migrate_msg converted */
+    int64_t dropped;      /* old messages dropped (no migrate_msg, or None) */
+    int64_t killed;       /* actors killed at a hard drain deadline */
+    int64_t stopped;      /* other procs told to stop at a hard deadline */
+    int64_t advances;     /* actor epoch advances (markers, early, forced) */
+    int64_t early;        /* of which D30 early advances */
+    int64_t forced;       /* of which soft-deadline forced markers */
+    int64_t markers_lost; /* markers that could not be enqueued (OOM) */
+} march_hcr_counters;
+void march_hcr_counters_get(march_hcr_counters *out);
+
+/* Old messages dropped (a drain, or an old-format message with no
+ * migrate_msg), process-wide.  Kept under its #564 name. */
 int64_t march_hcr_drain_dropped(void);
+
+/* Test seam: when set, march_hcr_activate calls it after advancing the
+ * current epoch and BEFORE it marks the actors -- the window in which a
+ * sender that already runs at the new epoch can put a message ahead of a
+ * receiver's marker (D30).  NULL in production. */
+extern void (*march_hcr_test_before_mark)(uint32_t epoch);
+
+/* Test seam: march_send with the message stamped [epoch], as a sender
+ * pinned to that epoch would send it. */
+void *march_hcr_test_send_stamped(void *actor, void *msg, uint32_t epoch);
+
+/* Epoch markers enqueued and not yet consumed or disposed.  0 at rest. */
+int64_t march_hcr_markers_live(void);
 
 /* Walk all live actors whose dispatch_name_id equals [dispatch_name_id] and
  * inject a MARCH_MIGRATE_TAG message so each actor migrates its state on
  * the next turn.  migrate_fn may be NULL (skip state transform).
  *
- * No ordering guarantee: it takes no code-version pin, so if the new version
- * is already published, messages queued ahead of the marker run the NEW code
- * against the OLD state.  A deploy must use march_actor_publish_migrating. */
+ * Legacy, no ordering guarantee: an ordinary user message, not an epoch
+ * marker, and it moves no epoch.  A deploy must use march_hcr_activate. */
 void march_actor_broadcast_migrate(uint32_t dispatch_name_id,
                                    void *(*migrate_fn)(void *));
 
@@ -644,6 +721,11 @@ int64_t march_migrate_msgs_live(void);
 /* Test-only seam: bind [actor]'s meta green_thread to [proc] (a march_proc*)
  * without spawning an actor green thread. Not used by generated code. */
 void march_test_actor_bind_green_thread(void *actor, void *proc);
+/* Test seam: the record address pid index [n] named, live or dead, from its
+ * tombstone, WITHOUT taking a reference (NULL if no actor was given [n]).
+ * Dereferenceable only by a caller that holds its own reference to that
+ * record (march_ffi.c's ffi_test_actor_rc). */
+void *march_test_actor_addr_of_pid(int64_t n);
 
 /* Actor builtins.
  * Actor object layout (on top of the standard 16-byte header):
@@ -860,7 +942,8 @@ int64_t march_sys_word_size(void);
 int64_t march_sys_minor_gcs(void);
 int64_t march_sys_major_gcs(void);
 int64_t march_sys_actor_count(void);
-void   *march_get_version(void);
+void   *march_sys_os(void);
+void   *march_sys_arch(void);
 
 /* Session-typed channel builtins (binary). */
 void   *march_chan_new(void *proto_name);

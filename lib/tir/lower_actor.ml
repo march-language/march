@@ -388,7 +388,7 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
       binds
   in
   let child_spawn_fn_var (child_actor_name : string) (arg_vars : Tir.var list) : Tir.var =
-    { v_name = child_actor_name ^ Tir_names.actor_spawn_suffix;
+    { v_name = Tir_names.actor_spawn_fn_name child_actor_name;
       v_ty   = Tir.TFn (List.map (fun (v : Tir.var) -> v.Tir.v_ty) arg_vars, Tir.TPtr Tir.TUnit);
       v_lin  = Tir.Unr }
   in

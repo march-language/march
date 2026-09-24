@@ -1,12 +1,13 @@
--- Kill-then-immediately-respawn under proc reclamation
--- (specs/todos/2026-09-17-proc-struct-reclamation.md, mechanism PR 1).
+-- Kill-then-immediately-respawn under proc AND meta reclamation
+-- (specs/progress/2026-09-23-proc-struct-reclamation-metas.md, mechanism PRs 1 and 2).
 --
 -- The corruption the leak-don't-free discipline was added for appeared ONLY
 -- under this pattern: a proc dies while other threads still hold its
--- pointer, and the very next spawn reuses the freed address. Procs are now
--- freed after a grace period, so this drives every holder the survey found
--- against a proc that is dying while it is being used, round after round,
--- with each round's traffic still in flight when the next round spawns:
+-- pointer, and the very next spawn reuses the freed address. Procs, and
+-- since the metas PR the actor metas too, are now freed after a grace
+-- period, so this drives every holder the surveys found against an actor
+-- that is dying while it is being used, round after round, with each
+-- round's traffic still in flight when the next round spawns:
 --
 --   - senders loaded from green_thread (send; the BLOCK policy, so some are
 --     PARKED on the dying worker's full mailbox when it dies and must
@@ -15,14 +16,30 @@
 --     a dead caller (reply-ref field 0),
 --   - send_after to a worker that dies before the timer fires (timer SEND),
 --   - tasks awaited from another task (Task word 5) and cancelled after they
---     finished (Task word 2 naming a reaped proc).
+--     finished (Task word 2 naming a reaped proc),
+--
+-- and, for the metas (every one of these resolves the dying worker's meta,
+-- or its tombstone once it is dead):
+--
+--   - a monitor set before the kill (Down delivery) and one set after it
+--     (the tombstone's stored reason, found by address),
+--   - a registered name (retired at death), capabilities checked and used
+--     while the kill lands (send_checked, is_cap_valid),
+--   - the dead worker printed (Pid(n) from its tombstone), converted to and
+--     from its Int (pid_of_int on a dead pid), mailbox_size / is_draining,
+--   - a graceful stop instead of a kill every 16th round,
+--   - a supervisor whose child crashes every round, so restarts (immediate,
+--     then delayed by the backoff) pin the supervisor and stash the child's
+--     names while the supervisor itself is replaced every 64 rounds.
 --
 -- The golden output is deliberately boring. The evidence is the run under
 -- ThreadSanitizer and ASAN (see the todo), and that a green run here also
--- frees procs: `freed` would read false with reclamation disabled.
+-- frees procs and metas: `freed` / `metas freed` would read false with
+-- reclamation disabled.
 mod ProcReclaimKillRespawn do
+  needs IO
   needs IO.Console
-  needs IO.Spawn
+  needs Actor.Introspect
 
   -- Call sentinels route by constructor index: GetReq -> Get, SlowReq -> Slow.
   type Req = GetReq | SlowReq
@@ -45,6 +62,32 @@ mod ProcReclaimKillRespawn do
 
     on Tick(k : Int) do
       { n: state.n + k }
+    end
+
+    on Poison() do
+      panic("poisoned")
+    end
+  end
+
+  -- Receives the Down notifications of every monitor below; their payloads
+  -- are not otherwise used.
+  actor Watcher do
+    state { seen : Int }
+    init  { seen: 0 }
+    on Nop() do
+      state
+    end
+  end
+
+  actor Boss do
+    state { c : Int }
+    init  { c: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 1000000 within 60
+      backoff base 1 cap 2 jitter 0%
+      Worker c
     end
   end
 
@@ -72,6 +115,16 @@ mod ProcReclaimKillRespawn do
     end
   end
 
+  -- Capabilities taken while the worker is live and used while it dies.
+  fn use_cap(pid) do
+    match get_cap(pid) do
+    None -> 0
+    Some(cap) ->
+      let _ = send_checked(cap, Tick(1))
+      if is_cap_valid(cap) do 1 else 0 end
+    end
+  end
+
   fn settle(tasks) do
     match tasks do
     Nil -> 0
@@ -84,34 +137,85 @@ mod ProcReclaimKillRespawn do
     end
   end
 
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) do
+      None    -> -1
+      Some(n) -> n
+    end
+  end
+
+  -- Everything that asks about the PREVIOUS worker after it was killed: its
+  -- meta is unlinked (or already freed) by now, so each of these reads its
+  -- tombstone, or finds nothing.
+  fn after_death(intro : Cap(Actor.Introspect), watcher, prev) do
+    let _ = monitor(watcher, prev)
+    let shown = to_string(prev)
+    let again = Actor.pid_from_int(intro, pid_to_int(prev))
+    let _ = send(again, Tick(1))
+    let _ = mailbox_size(prev)
+    let _ = Actor.is_draining(prev)
+    string_byte_length(shown)
+  end
+
+  -- Crash the supervisor's current child: a restart, immediate the first
+  -- time and then delayed by the (short) backoff, while this round goes on.
+  fn poison_child(intro : Cap(Actor.Introspect), boss) do
+    let c = Actor.pid_from_int(intro, child_int(boss, "c"))
+    let _ = send(c, Poison())
+    0
+  end
+
   -- Each round spawns a worker, starts traffic at it, and then kills the
   -- PREVIOUS round's worker, whose traffic is still in flight, before the
   -- next spawn: kill-then-immediately-respawn with live readers.
-  fn round(i, total, prev, pending) do
+  fn round(intro : Cap(Actor.Introspect), watcher, i, total, prev, boss, pending) do
     if i == total do
       kill(prev)
+      kill(boss)
       settle(pending)
     else
       let w = spawn(Worker)
       Actor.set_queue_limit(w, 4, 3)
+      let _ = Actor.register(w, "w" ++ int_to_string(i))
+      let _ = monitor(watcher, w)
       let t_send = Task.async(fn -> hammer(w, 256))
       let req = if i % 10 == 0 do SlowReq else GetReq end
       let t_call = Task.async(fn -> caller(w, req, 3, 0))
       let t_wait = Task.async(fn ->
         let _ = Task.await(t_send)
         1)
+      let t_cap = Task.async(fn -> use_cap(w))
       let _ = Actor.send_after(w, Tick(1), 1)
-      kill(prev)
+      let _ = poison_child(intro, boss)
+      if i % 16 == 0 do
+        let _ = Actor.stop(prev, 0)
+        0
+      else
+        kill(prev)
+        0
+      end
+      let _ = after_death(intro, watcher, prev)
+      let next_boss = if i % 64 == 63 do
+        kill(boss)
+        spawn(Boss)
+      else
+        boss
+      end
       let _ = settle(pending)
-      round(i + 1, total, w, Cons(t_call, Cons(t_wait, Nil)))
+      round(intro, watcher, i + 1, total, w, next_boss,
+            Cons(t_call, Cons(t_wait, Cons(t_cap, Nil))))
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
+    let watcher = spawn(Watcher)
     let first = spawn(Worker)
-    let _ = round(0, 1500, first, Nil)
+    let boss = spawn(Boss)
+    let _ = round(intro, watcher, 0, 1500, first, boss, Nil)
     run_until_idle()
     println("rounds done")
     println("freed " ++ bool_to_string(Scheduler.stat(8) > 0))
+    println("metas freed " ++ bool_to_string(Scheduler.stat(10) > 0))
   end
 end

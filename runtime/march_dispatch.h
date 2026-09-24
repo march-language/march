@@ -30,10 +30,13 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* Erlang-style old+current cap by default; a reload that would exceed it needs
- * a purge of callers still pinned to the oldest version (deferred phase). */
+/* Live code versions per slot (D13/D32): three, so one drain can overlap the
+ * next deploy.  A publish that finds no free or reclaimable ring version does
+ * not fail silently: the reload server queues the activation and answers WAIT
+ * (see march_dispatch_can_stage and specs/plans/2026-09-21-distributed-
+ * authority-and-deploys-plan.md, II.4.2). */
 #ifndef MARCH_MAX_LIVE_VERSIONS
-#define MARCH_MAX_LIVE_VERSIONS 2
+#define MARCH_MAX_LIVE_VERSIONS 3
 #endif
 
 /* Version kind: native code vs interpreter trampoline (Model A, later phase). */
@@ -48,8 +51,9 @@ void march_dispatch_shutdown(void);
  * [sig_hash] is the ABI signature hash (64 hex chars); stored per-version for
  * the sig_hash compatibility gate in forge deploy hot.
  * Returns the ring index used, or -1 if [name_id] is out of range or no
- * reclaimable ring slot exists (every other version is still pinned — a purge
- * would be required; deferred to a later phase). */
+ * free or reclaimable ring slot exists (see the reclaim condition under
+ * "The unified epoch model" below).  The version gets ring epoch 0, the
+ * baseline's; the reload server stages epoch-tagged versions instead. */
 int march_dispatch_publish(uint32_t name_id, void *fn_ptr,
                            const char *impl_hash, const char *sig_hash,
                            uint8_t kind);
@@ -134,5 +138,96 @@ int      march_dispatch_publish_epoch(uint32_t name_id, void *fn_ptr,
 void    *march_dispatch_enter_gen(uint32_t name_id, uint32_t caller_epoch,
                                   uint32_t *out_version);
 uint32_t march_dispatch_epoch(uint32_t name_id, uint32_t version);
+
+/* ── The unified epoch model (D12, D32, D33; plan II.4.1-II.4.2) ─────────
+ *
+ * Every unit of work (a proc: actor, task, session party) carries a code
+ * epoch, march_proc.code_epoch.  A boundary call resolves against it:
+ * march_dispatch_enter_unit picks the newest live version whose epoch is at or
+ * before the running proc's epoch.  A proc whose epoch is 0 is UNPINNED and
+ * follows the slot's current version; the compiled `main` green thread is the
+ * one such unit (it runs for the process lifetime and has no marker, so a
+ * pinned main would keep its epoch alive for ever and block retirement).
+ *
+ * Epoch numbering.  g_current_epoch starts at MARCH_EPOCH_BASE (1): every proc
+ * spawned before the first deploy is pinned to it, and baseline versions carry
+ * ring epoch 0, which is <= 1.  A deploy gets a runtime epoch strictly above
+ * the current one (march_epoch_next), so two activations never share an epoch
+ * even when a client reuses the server's GET_EPOCH value.
+ *
+ * Pins (D32).  A small table of MARCH_EPOCH_PIN_SLOTS entries counts the units
+ * pinned to each epoch, separately from a version's per-call `refs`.  Every
+ * pin has a live holder: a proc (taken at spawn, moved when an actor advances,
+ * dropped at the reap), a queued marker (moved to the actor that consumes it),
+ * or the "current" role itself (the current epoch always holds one pin, so a
+ * spawn that reads g_current_epoch can always pin it).  An entry whose count is
+ * 0 has no holder, so nothing but march_epoch_reserve can revive it.
+ *
+ * Reclaim condition (II.4.2, per slot): ring version V with epoch e is
+ * reclaimable iff refs == 0 and no pinned epoch E satisfies e <= E < e_next,
+ * where e_next is the epoch of the next newer live version in the same slot
+ * (infinity for the newest).  A unit pinned to epoch 5 calling a function last
+ * changed at epoch 2 resolves to the epoch-2 version, so that version is in use
+ * although epoch 2 itself may have no pins. */
+
+#define MARCH_EPOCH_BASE      1u
+#define MARCH_EPOCH_PIN_SLOTS 8
+
+/* Pin the ring version the running proc's epoch selects (see above).  The
+ * base binary and every .so call this at a boundary call. */
+void    *march_dispatch_enter_unit(uint32_t name_id, uint32_t *out_version);
+
+uint32_t march_epoch_current(void);
+/* The runtime epoch for an activation the client tagged [requested]:
+ * max(requested, current + 1). */
+uint32_t march_epoch_next(uint32_t requested);
+/* Take one pin on [epoch] if it has a live entry (count > 0).  0 on success,
+ * -1 if the epoch has no holder (the caller picks another epoch). */
+int      march_epoch_pin(uint32_t epoch);
+void     march_epoch_unpin(uint32_t epoch);
+/* Pinned units of [epoch] (0 if it has no entry). */
+int64_t  march_epoch_pins(uint32_t epoch);
+/* Allocate an entry for a NEW epoch with count 1 (the activation's "current"
+ * role pin, taken before any marker is sent).  -1 if all entries are in use:
+ * the activation waits. */
+int      march_epoch_reserve(uint32_t epoch);
+/* Make [epoch] current and drop the previous current's role pin.  [epoch]
+ * must already be reserved. */
+void     march_epoch_advance(uint32_t epoch);
+/* Snapshot of the pin table (entries with count > 0), for PINS.  Returns the
+ * number written (<= max). */
+int      march_epoch_pin_table(uint32_t *epochs, int64_t *counts, int max);
+/* 1 iff some pinned epoch E satisfies lo <= E < hi (hi == UINT32_MAX: no upper
+ * bound).  The reclaim condition's pin scan. */
+int      march_epoch_pinned_in(uint32_t lo, uint32_t hi);
+/* Tests only: reset to a fresh process's state (current = MARCH_EPOCH_BASE,
+ * one role pin). */
+void     march_epoch_reset_for_test(void);
+
+/* Staged activation (II.4.6 step 1 and 3).  stage writes a version into a free
+ * or reclaimable ring slot with live = 0 and returns its index (-1: nothing
+ * reclaimable, the activation must wait); readers cannot select it.  commit
+ * makes it live and current; unstage discards a staged version. */
+int  march_dispatch_stage(uint32_t name_id, void *fn_ptr,
+                          const char *impl_hash, const char *sig_hash,
+                          uint8_t kind, uint32_t epoch);
+void march_dispatch_commit(uint32_t name_id, uint32_t version);
+void march_dispatch_unstage(uint32_t name_id, uint32_t version);
+/* 1 iff a stage into [name_id] would find a ring slot now (no side effects).
+ * The reload server checks every slot of a batch before staging any. */
+int  march_dispatch_can_stage(uint32_t name_id);
+/* Mark a ring version as carrying a migration (its .so holds a
+ * migrate_state or migrate_msg an older actor has yet to run): it is then
+ * also kept while ANY epoch older than its own is pinned, on top of the
+ * reclaim condition.  Cleared when the version is reused. */
+void march_dispatch_set_keep_for_older(uint32_t name_id, uint32_t version);
+/* 1 iff ring version [version] of [name_id] is live. */
+int  march_dispatch_live(uint32_t name_id, uint32_t version);
+
+/* Per-slot message-schema epoch (D30, II.4.6): the epoch at which the actor
+ * whose dispatch function is [name_id] last changed its message type.  Set by
+ * an activation whose deploy changed the handler signatures; 0 = never. */
+void     march_dispatch_set_msg_schema_epoch(uint32_t name_id, uint32_t epoch);
+uint32_t march_dispatch_msg_schema_epoch(uint32_t name_id);
 
 #endif /* MARCH_DISPATCH_H */

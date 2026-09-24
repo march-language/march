@@ -11,7 +11,7 @@ permalink: /docs/stdlib-guide/
 > signatures and docstrings generated from source, lives at **[/docs/stdlib/](/docs/stdlib/)**.
 > This page is a hand-written tour of the most commonly used modules.
 
-March ships with 124 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
+March ships with 125 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
 
 All stdlib modules are available without any import statement: use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
 
@@ -617,10 +617,10 @@ Path.is_absolute("/usr/bin")       -- true
 `system.march`: OS and runtime information.
 
 ```march
-System.os()                -- "macos" | "linux" | "windows"
-System.arch()              -- "x86_64" | "arm64"
+System.os()                -- "macos" | "linux" | "windows" | "unknown"
+System.arch()              -- "x86_64" | "aarch64" | "x86" | ...
 System.cpu_count()         -- number of logical CPUs
-System.monotonic_time()    -- Int (nanoseconds, for timing)
+System.monotonic_time()    -- Int (milliseconds since process start)
 System.env("HOME")         -- Option(String)
 System.put_env("KEY", "val")
 System.argv()              -- List(String)

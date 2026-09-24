@@ -1847,25 +1847,23 @@ let compile filename =
         span.March_ast.Ast.start_col msg
     ) resolve_errors;
   let has_resolve_errors = resolve_errors <> [] in
-  (* --topology: validate the digest against what is loaded (see Flags). The
+  (* --topology: check the digest against what is loaded and, when the entry
+     module has no `main`, generate one (Topology_gen, Desugar_topology). The
      entry module's declarations are flat under its own name; imports arrive
      wrapped in DMod, so an empty prefix qualifies them by their module. *)
-  (match !topology_file with
-   | None -> ()
-   | Some path ->
-     (match March_forge.Topology.read_digest path with
-      | Error m -> Printf.eprintf "error: --topology: %s\n" m; exit 1
-      | Ok topo ->
-        let entry_name = desugared.March_ast.Ast.mod_name.March_ast.Ast.txt in
-        let index =
-          March_forge.Topology.index_of_decls
-            [ (entry_name, desugared.March_ast.Ast.mod_decls); ("", extra_decls) ]
-        in
-        (match March_forge.Topology.unresolved_names ~index topo with
-         | [] -> ()
-         | errs ->
-           List.iter (fun e -> Printf.eprintf "%s: error: topology: %s\n" path e) errs;
-           exit 1)));
+  let (desugared, extra_decls, topology_session) =
+    match !topology_file with
+    | None -> (desugared, extra_decls, None)
+    | Some path ->
+      (match March_forge.Topology.read_digest path with
+       | Error m -> Printf.eprintf "error: --topology: %s\n" m; exit 1
+       | Ok topo ->
+         let (entry_decls, imports, sess) =
+           Topology_gen.prepare ~path ~entry:desugared ~imports:extra_decls
+             ~pools:!topology_pools ~foreign_isolated:!topology_isolate_foreign topo
+         in
+         ({ desugared with March_ast.Ast.mod_decls = entry_decls }, imports, Some (path, sess)))
+  in
   let desugared =
     { desugared with
       March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
@@ -2142,9 +2140,25 @@ let compile filename =
     List.exists (fun (d : March_errors.Errors.diagnostic) ->
         d.severity = March_errors.Errors.Error) (Lazy.force contract_diags)
   in
+  (* --topology, after typechecking: each pool's derived caps and initiated
+     roles (D22), and a written `caps` enforced against what the pool's hook
+     and roles reach. Skipped when the program did not typecheck: the rows
+     would describe a partial program. *)
+  let topology_json =
+    match topology_session with
+    | Some (path, sess) when not frontend_rejected ->
+      let derived = Topology_gen.derive sess typecheck_env in
+      (match Topology_gen.reach_errors sess derived with
+       | [] -> ()
+       | errs ->
+         List.iter (fun e -> Printf.eprintf "%s: error: topology: %s\n" path e) errs;
+         exit 1);
+      Some (Topology_gen.json sess derived)
+    | _ -> None
+  in
   if !emit_core_ast_file <> None then begin
     let contract = if frontend_rejected then [] else Lazy.force contract_diags in
-    Emit_core_ast.run ~filename ~user_files ~user_ast ~type_map
+    Emit_core_ast.run ~topology:topology_json ~filename ~user_files ~user_ast ~type_map
       ~diags:(diags @ contract) ~is_user_file ~typecheck_env
       ~rejected:(frontend_rejected || contract_rejected ())
   end;
@@ -2401,6 +2415,52 @@ let compile filename =
           ) tir.March_tir.Tir.tm_types
       else []
     in
+    (* DD step 6 (plan II.4.8): each actor's handler signatures (its lowered
+       `<Actor>_Msg` variant), and, for an actor with an `<actor>_migrate_msg`,
+       the constructors of that function's OLD message type.  forge diffs the
+       first against the running version's (a removed handler or a changed
+       parameter type is a message-type change) and pins the second to it. *)
+    let variant_ctors (tname : string) =
+      let all = List.filter_map (function
+          | March_tir.Tir.TDVariant (n, ctors) -> Some (n, ctors)
+          | _ -> None) tir.March_tir.Tir.tm_types in
+      match List.assoc_opt tname all with
+      | Some c -> Some c
+      | None ->
+        (* Types are canonicalized to their bare name (`V1.Msg` -> `Msg`)
+           while the declaration keeps its module path: match the suffix,
+           and only when it is unambiguous. *)
+        let sfx = "." ^ tname in
+        let sl = String.length sfx in
+        (match List.filter (fun (n, _) ->
+             let nl = String.length n in
+             nl > sl && String.sub n (nl - sl) sl = sfx) all with
+         | [ (_, c) ] -> Some c
+         | _ -> None) in
+    let actor_handlers : (string * (string * March_tir.Tir.ty list) list) list =
+      List.filter_map (fun (actor, _) ->
+          Option.map (fun c -> (actor, c)) (variant_ctors (actor ^ "_Msg")))
+        actor_schemas in
+    let actor_migrate_msg_from : (string * (string * March_tir.Tir.ty list) list) list =
+      List.filter_map (fun (fn : March_tir.Tir.fn_def) ->
+          let name = fn.March_tir.Tir.fn_name in
+          let sfx = March_tir.Tir_names.migrate_msg_suffix in
+          let nl = String.length name and sl = String.length sfx in
+          if nl <= sl || String.sub name (nl - sl) sl <> sfx then None
+          else
+            let before = String.sub name 0 (nl - sl) in
+            let last = match String.rindex_opt before '.' with
+              | None -> before
+              | Some i -> String.sub before (i + 1) (String.length before - i - 1) in
+            let actor = String.capitalize_ascii last in
+            match fn.March_tir.Tir.fn_params with
+            | [ p ] ->
+              (match p.March_tir.Tir.v_ty with
+               | March_tir.Tir.TCon (tn, _) ->
+                 Option.map (fun c -> (actor, c)) (variant_ctors tn)
+               | _ -> None)
+            | _ -> None)
+        tir.March_tir.Tir.tm_fns in
     (* Capture the interface-dispatch table before it is cleared by lower_module.
        Passed to monomorphize so it can resolve interface calls in functions
        that were polymorphic during lowering but now have concrete types. *)
@@ -3719,9 +3779,20 @@ let compile filename =
                          actor_name;
                        "")
                 in
+                let ctor_list ctors =
+                  "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
+                      Printf.sprintf {|{"name":%S,"params":[%s]}|} cn
+                        (String.concat "," (List.map (fun t ->
+                             Printf.sprintf "%S" (ty_to_schema_str t)) tys))) ctors) ^ "]" in
+                let handlers_line = match List.assoc_opt actor_name actor_handlers with
+                  | None -> ""
+                  | Some c -> Printf.sprintf "    \"handlers\": %s,\n" (ctor_list c) in
+                let mm_line = match List.assoc_opt actor_name actor_migrate_msg_from with
+                  | None -> ""
+                  | Some c -> Printf.sprintf "    \"migrate_msg_from\": %s,\n" (ctor_list c) in
                 Printf.fprintf oc
-                  "  %S: {\n    \"compat\": %S,\n%s    \"state_fields\": %s\n  }%s\n"
-                  actor_name compat invariant_line field_lines
+                  "  %S: {\n    \"compat\": %S,\n%s%s%s    \"state_fields\": %s\n  }%s\n"
+                  actor_name compat invariant_line handlers_line mm_line field_lines
                   (if i < List.length actor_schemas - 1 then "," else "")
               ) actor_schemas;
             Printf.fprintf oc "}\n";
@@ -4573,7 +4644,12 @@ let () =
                      " Pass every remaining argument to the program as its argv; must come last");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
     ("--topology",   Arg.String (fun p -> topology_file := Some p),
-     "<json>  Read a forge topology digest (.forge/topology.json, schema version 1) and check that every name it binds is declared in the loaded modules");
+     "<json>  Read a forge topology digest (.forge/topology.json, schema version 1): check its bindings and caps, and generate `main` when the entry module has none");
+    ("--topology-pools", Arg.String (fun s ->
+         topology_pools := Some (List.filter (fun x -> x <> "") (List.map String.trim (String.split_on_char ',' s)))),
+     "<a,b>  With --topology: the pools this build contains (default: every pool)");
+    ("--topology-isolate-foreign", Arg.Set topology_isolate_foreign,
+     " With --topology: reject an IO.Foreign role or hook in a pool that is not isolated");
     ("--cap-strict", Arg.Set cap_strict, " Treat `needs` as a hard ceiling (the DEFAULT since 2026-08-08; accepted for compatibility and to state the intent explicitly)");
     ("--no-cap-strict", Arg.Clear cap_strict, " Do not enforce `needs` as a ceiling: allow a module's emitted code to use capabilities it does not declare");
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");

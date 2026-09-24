@@ -30,9 +30,34 @@
  *     cap must be subsumed by some policy entry (ERR cap_policy <cap>); the
  *     policy gate is a no-op when the received cap set is empty (trivially
  *     satisfied — there is nothing to violate).
+ *   ACTIVATE5 <name> <impl_hash> <cas_hash> <sig64> <migrate> epoch:<N> cap_root:<hex>
+ *             caps:<sorted-csv> callers:<sorted-csv>
+ *                                                   → OK | WAIT … | ERR <reason>  (v5)
+ *     As ACTIVATE4, but <migrate> is a bitmask: 1 = the actor's state schema
+ *     changed (run __migrate_<Actor>), 2 = its message type changed
+ *     (D30/II.4.6: old-format messages take __migrate_msg_<Actor>, or are
+ *     dropped).  A new verb because the signed message changes meaning
+ *     (the ACTIVATE3/4 precedent): an older server rejects it outright
+ *     instead of misreading "3" as "no migration".
  *   BEGIN_BATCH                                       → OK
- *   COMMIT_BATCH                                      → OK <n>  (n committed)
+ *   COMMIT_BATCH                                      → OK <n> | WAIT … | ERR <reason>
  *   ROLLBACK_BATCH                                    → OK
+ *   PINS                                              → EPOCH <e> pins:<n> [current] [draining] …,
+ *                                                       COUNTERS deferred:<n> converted:<n>
+ *                                                       dropped:<n> killed:<n> stopped:<n>
+ *                                                       advances:<n> early:<n> forced:<n>
+ *                                                       markers_live:<n> markers_lost:<n>, END
+ *   DRAIN epoch:<E> [soft_ms:<n>] [hard_ms:<n>]      → OK  (drain every epoch <= E)
+ *
+ * The epoch model (specs/plans/2026-09-21-distributed-authority-and-deploys-
+ * plan.md, II.4): every activation (single, or a whole batch) is ONE deploy
+ * with its own runtime epoch (march_hcr_activate).  When some slot has no
+ * reclaimable version, or the epoch pin table is full, nothing changes and
+ * the answer is
+ *     WAIT epoch:<E> pins:<n> deadline_ms:<t>
+ * (E: the oldest pinned epoch, n: its units, t: ms to its hard drain
+ * deadline, -1 if none).  A batch stays staged on the connection; the client
+ * sends COMMIT_BATCH (or the single ACTIVATE) again to retry.
  *
  * Artifact CAS layout (server side):
  *   ~/.march/cas/artifacts/<2>/<62>
@@ -421,174 +446,158 @@ static migrate_fn_t resolve_migrate_fn(void *handle, const char *name,
     return migrate_fn;
 }
 
-/* Publish [fn_ptr] as slot_id's new version. A migrating activation goes
- * through march_actor_publish_migrating, which pins every live actor of
- * the type to the old code BEFORE publishing and switches each one at its
- * migrate marker, so messages already queued never run the new code against
- * the old state. Returns the ring index, or -1 (nothing changed). */
-static int publish_activation(void *handle, const char *name, uint32_t slot_id,
-                              void *fn_ptr, const char *impl_hash,
-                              int migrate_required, uint32_t activate_epoch) {
-    if (migrate_required)
-        return march_actor_publish_migrating(
-            slot_id, fn_ptr, impl_hash, NULL, (uint8_t)MARCH_NATIVE,
-            activate_epoch, resolve_migrate_fn(handle, name, slot_id), -1);
-    return (activate_epoch > 0)
-        ? march_dispatch_publish_epoch(slot_id, fn_ptr, impl_hash, NULL,
-                                       (uint8_t)MARCH_NATIVE, activate_epoch)
-        : march_dispatch_publish(slot_id, fn_ptr, impl_hash, NULL,
-                                (uint8_t)MARCH_NATIVE);
+/* __migrate_msg_<Actor>: the compiler-generated wrapper around
+ * <actor>_migrate_msg, called as fn(old_msg, none) -> new_msg or none. */
+typedef void *(*migrate_msg_fn_t)(void *, void *);
+static migrate_msg_fn_t resolve_migrate_msg_fn(void *handle, const char *name,
+                                               uint32_t slot_id) {
+    char sym[320];
+    size_t name_len = strlen(name), dlen = strlen("_dispatch");
+    size_t alen = (name_len > dlen && strcmp(name + name_len - dlen, "_dispatch") == 0)
+                  ? name_len - dlen : name_len;
+    if (alen > 255) alen = 255;
+    snprintf(sym, sizeof(sym), "__migrate_msg_%.*s", (int)alen, name);
+    for (char *p = sym + 14; *p; p++) if (*p == '.') *p = '_';
+    void *raw = dlsym(handle, sym);
+    migrate_msg_fn_t fn = NULL;
+    if (raw) {
+        memcpy(&fn, &raw, sizeof(fn));
+        fprintf(stderr, "[hcr] migrate_msg: found %s for slot %u\n", sym, slot_id);
+    } else {
+        fprintf(stderr, "[hcr] migrate_msg: symbol not found: %s (old-format "
+                "messages to slot %u will be dropped and counted)\n", sym, slot_id);
+    }
+    return fn;
 }
 
-/* Shared activation body: dlopen, dlsym, publish, set metadata, run migration.
- * Returns 0 on success, -1 on error (does NOT write to fd).
- * On error, handle (if non-NULL) has already been dlclosed. */
-static int do_activate_inner(const char *name, const char *impl_hash,
-                             const char *cas_hash, int migrate_required,
-                             uint32_t activate_epoch, const char *callers_csv,
-                             const audit_caps_t *ac, void **out_handle) {
-    if (out_handle) *out_handle = NULL;
+#define MIGRATE_STATE 1
+#define MIGRATE_MSGS  2
 
-    uint32_t slot_id;
-    if (!march_dispatch_name_to_id(name, &slot_id)) {
-        write_audit_log(name, impl_hash, cas_hash, ac, "err_abi");
-        return -1;
+typedef struct {
+    const char         *name, *impl_hash, *cas_hash, *callers;
+    uint32_t            epoch;
+    int                 migrate;   /* MIGRATE_STATE | MIGRATE_MSGS */
+    const audit_caps_t *ac;
+} act_item;
+
+/* Activate [n] functions as one deploy.  Returns 0 (OK), 1 (WAIT: nothing
+ * changed, [resp] holds the WAIT line) or -1 (error: nothing changed, [resp]
+ * holds the ERR line). */
+static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
+    march_hcr_unit *u = (march_hcr_unit *)calloc((size_t)n, sizeof(*u));
+    if (!u) { snprintf(resp, rsz, "ERR oom\n"); return -1; }
+    int opened = 0, rc = -1;
+    uint32_t req = 0;
+    for (int i = 0; i < n; i++, opened++) {
+        uint32_t slot_id;
+        if (!march_dispatch_name_to_id(it[i].name, &slot_id)) {
+            write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac, "err_abi");
+            snprintf(resp, rsz, "ERR unknown_name %.200s\n", it[i].name);
+            goto fail;
+        }
+        char path[640]; cas_artifact_path(path, sizeof(path), it[i].cas_hash);
+        if (access(path, F_OK) != 0) {
+            write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac, "err_cas_miss");
+            snprintf(resp, rsz, "ERR missing_artifact\n");
+            goto fail;
+        }
+        void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL | RTLD_DEEPBIND);
+        if (!handle) {
+            write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac, "err_dlopen");
+            snprintf(resp, rsz, "ERR dlopen_failed %.300s\n", dlerror());
+            goto fail;
+        }
+        char identity_reason[128];
+        if (!march_hcr_patch_identity_ok(handle, identity_reason, sizeof(identity_reason))) {
+            write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac, "err_identity");
+            snprintf(resp, rsz, "ERR identity %.200s\n", identity_reason);
+            dlclose(handle);
+            goto fail;
+        }
+        void *fn_ptr = dlsym(handle, it[i].name);
+        if (!fn_ptr) {
+            write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac, "err_dlsym");
+            snprintf(resp, rsz, "ERR dlsym_failed %.200s\n", it[i].name);
+            dlclose(handle);
+            goto fail;
+        }
+        u[i].slot           = slot_id;
+        u[i].fn             = fn_ptr;
+        u[i].impl_hash      = it[i].impl_hash;
+        u[i].sig_hash       = NULL;
+        u[i].kind           = (uint8_t)MARCH_NATIVE;
+        u[i].state_changed  = (it[i].migrate & MIGRATE_STATE) != 0;
+        u[i].msgs_changed   = (it[i].migrate & MIGRATE_MSGS) != 0;
+        u[i].migrate_fn     = u[i].state_changed
+                              ? resolve_migrate_fn(handle, it[i].name, slot_id) : NULL;
+        u[i].migrate_msg_fn = u[i].msgs_changed
+                              ? resolve_migrate_msg_fn(handle, it[i].name, slot_id) : NULL;
+        u[i].handle         = handle;
+        u[i].ring_idx       = -1;
+        if (it[i].epoch > req) req = it[i].epoch;
     }
-
-    char path[640]; cas_artifact_path(path, sizeof(path), cas_hash);
-    if (access(path, F_OK) != 0) {
-        write_audit_log(name, impl_hash, cas_hash, ac, "err_cas_miss");
-        return -1;
+    {
+        /* __march_init still stamps the per-.so epoch cell (retired: nothing
+         * reads it, D33), with the epoch this deploy will get. */
+        uint32_t predicted = march_epoch_next(req);
+        for (int i = 0; i < n; i++) {
+            void (*init_fn)(uint32_t) = NULL;
+            void *raw_init = dlsym(u[i].handle, "__march_init");
+            if (raw_init) memcpy(&init_fn, &raw_init, sizeof(init_fn));
+            if (init_fn) init_fn(predicted);
+        }
     }
-
-    void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL | RTLD_DEEPBIND);
-    if (!handle) {
-        write_audit_log(name, impl_hash, cas_hash, ac, "err_dlopen");
-        return -1;
+    march_hcr_wait w;
+    int e = march_hcr_activate(u, n, req, -1, -1, &w);
+    if (e == MARCH_HCR_WAIT) {
+        snprintf(resp, rsz, "WAIT epoch:%u pins:%lld deadline_ms:%lld%s\n",
+                 w.epoch, (long long)w.pins, (long long)w.deadline_ms,
+                 w.table_full ? " table_full" : "");
+        rc = 1;
+        goto fail;
     }
-
-    char identity_reason[128];
-    if (!march_hcr_patch_identity_ok(handle, identity_reason, sizeof(identity_reason))) {
-        write_audit_log(name, impl_hash, cas_hash, ac, "err_identity");
-        dlclose(handle);
-        return -1;
+    if (e <= 0) {
+        for (int i = 0; i < n; i++)
+            write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac, "err_publish");
+        snprintf(resp, rsz, "ERR publish_failed\n");
+        goto fail;
     }
-
-    void *fn_ptr = dlsym(handle, name);
-    if (!fn_ptr) {
-        write_audit_log(name, impl_hash, cas_hash, ac, "err_dlsym");
-        dlclose(handle);
-        return -1;
-    }
-
-    if (activate_epoch > 0) {
-        void (*init_fn)(uint32_t) = NULL;
-        void *raw_init = dlsym(handle, "__march_init");
-        if (raw_init) memcpy(&init_fn, &raw_init, sizeof(init_fn));
-        if (init_fn) init_fn(activate_epoch);
-    }
-
-    int idx = publish_activation(handle, name, slot_id, fn_ptr, impl_hash,
-                                 migrate_required, activate_epoch);
-    if (idx < 0) {
-        dlclose(handle);
-        return -1;
-    }
-    march_dispatch_set_handle(slot_id, (uint32_t)idx, handle);
-    if (out_handle) *out_handle = handle;  /* table owns it now */
-
+    /* The dispatch table owns every handle now (dlclosed when its ring slot
+     * is reclaimed). */
     {
         struct timeval atv; gettimeofday(&atv, NULL);
         long long ats = (long long)atv.tv_sec * 1000LL + (long long)atv.tv_usec / 1000;
         char asigner[65]; pubkey_to_hex(asigner);
-        march_dispatch_set_activation(slot_id, ats, asigner);
+        for (int i = 0; i < n; i++) {
+            march_dispatch_set_activation(u[i].slot, ats, asigner);
+            march_dispatch_set_callers(u[i].slot,
+                it[i].callers && it[i].callers[0] ? it[i].callers : NULL);
+            write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac, "ok");
+        }
     }
-
-    march_dispatch_set_callers(slot_id, callers_csv && callers_csv[0] ? callers_csv : NULL);
-    write_audit_log(name, impl_hash, cas_hash, ac, "ok");
+    free(u);
     return 0;
+fail:
+    for (int i = 0; i < opened; i++) if (u[i].handle) dlclose(u[i].handle);
+    free(u);
+    return rc;
 }
 
-/* Common activation body shared by ACTIVATE (v1) and ACTIVATE2 (v2).
- * callers_csv: comma-separated caller list (already sorted for v2; raw for v1),
- *              or NULL if absent. */
+/* A single (unbatched) activation: answers OK <impl_hash>, WAIT …, or ERR. */
 static void do_activate(int fd, const char *name, const char *impl_hash,
-                        const char *cas_hash, int migrate_required,
+                        const char *cas_hash, int migrate,
                         uint32_t activate_epoch, const char *callers_csv,
                         const audit_caps_t *ac) {
-    uint32_t slot_id;
-    if (!march_dispatch_name_to_id(name, &slot_id)) {
-        write_audit_log(name, impl_hash, cas_hash, ac, "err_abi");
-        char resp[512];
-        int n = snprintf(resp, sizeof(resp), "ERR unknown_name %s\n", name);
+    act_item it = { name, impl_hash, cas_hash, callers_csv, activate_epoch,
+                    migrate, ac };
+    char resp[512];
+    int r = activate_items(&it, 1, resp, sizeof(resp));
+    if (r == 0) {
+        int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
         write_safe(fd, resp, n, sizeof(resp));
-        return;
+    } else {
+        wresp(fd, resp);
     }
-
-    char path[640]; cas_artifact_path(path, sizeof(path), cas_hash);
-    if (access(path, F_OK) != 0) {
-        write_audit_log(name, impl_hash, cas_hash, ac, "err_cas_miss");
-        wresp(fd, "ERR missing_artifact\n"); return;
-    }
-
-    void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL | RTLD_DEEPBIND);
-    if (!handle) {
-        write_audit_log(name, impl_hash, cas_hash, ac, "err_dlopen");
-        char resp[512];
-        int n = snprintf(resp, sizeof(resp), "ERR dlopen_failed %s\n", dlerror());
-        write_safe(fd, resp, n, sizeof(resp));
-        return;
-    }
-
-    char identity_reason[128];
-    if (!march_hcr_patch_identity_ok(handle, identity_reason, sizeof(identity_reason))) {
-        write_audit_log(name, impl_hash, cas_hash, ac, "err_identity");
-        dlclose(handle);
-        char resp[256];
-        int n = snprintf(resp, sizeof(resp), "ERR identity %s\n", identity_reason);
-        write_safe(fd, resp, n, sizeof(resp));
-        return;
-    }
-
-    void *fn_ptr = dlsym(handle, name);
-    if (!fn_ptr) {
-        char resp[512];
-        int n = snprintf(resp, sizeof(resp), "ERR dlsym_failed %s\n", name);
-        dlclose(handle);
-        write_safe(fd, resp, n, sizeof(resp));
-        return;
-    }
-
-    if (activate_epoch > 0) {
-        void (*init_fn)(uint32_t) = NULL;
-        void *raw_init = dlsym(handle, "__march_init");
-        if (raw_init) memcpy(&init_fn, &raw_init, sizeof(init_fn));
-        if (init_fn) init_fn(activate_epoch);
-    }
-
-    int idx = publish_activation(handle, name, slot_id, fn_ptr, impl_hash,
-                                 migrate_required, activate_epoch);
-    if (idx < 0) {
-        wresp(fd, "ERR publish_failed all_slots_pinned\n");
-        dlclose(handle);
-        return;
-    }
-    /* Dispatch table owns the handle from this point; it will dlclose when the
-     * ring slot is reclaimed by the next hot deploy. */
-    march_dispatch_set_handle(slot_id, (uint32_t)idx, handle);
-
-    {
-        struct timeval atv; gettimeofday(&atv, NULL);
-        long long ats = (long long)atv.tv_sec * 1000LL + (long long)atv.tv_usec / 1000;
-        char asigner[65]; pubkey_to_hex(asigner);
-        march_dispatch_set_activation(slot_id, ats, asigner);
-    }
-
-    march_dispatch_set_callers(slot_id, callers_csv && callers_csv[0] ? callers_csv : NULL);
-    write_audit_log(name, impl_hash, cas_hash, ac, "ok");
-    char resp[256];
-    int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
-    write_safe(fd, resp, n, sizeof(resp));
 }
 
 /* ── ACTIVATE4: cap_root admission (Phase5C-C.3) ───────────────────────── */
@@ -823,6 +832,17 @@ static void handle_client(int fd) {
                                  ts,
                                  sig && sig[0] ? sig : "(none)",
                                  ep);
+                write_safe(fd, resp, n, sizeof(resp));
+            }
+            {
+                /* Delivery-failure counters (II.4.7); parsers skip non-SLOT
+                 * lines. */
+                march_hcr_counters c; march_hcr_counters_get(&c);
+                char resp[256];
+                int n = snprintf(resp, sizeof(resp),
+                                 "COUNTERS deferred:%lld converted:%lld dropped:%lld killed:%lld\n",
+                                 (long long)c.deferred, (long long)c.converted,
+                                 (long long)c.dropped, (long long)c.killed);
                 write_safe(fd, resp, n, sizeof(resp));
             }
             wresp(fd, "END\n");
@@ -1168,7 +1188,12 @@ static void handle_client(int fd) {
          * signed value (see compute_cap_root / THE CRUX in the task brief).
          * Signed message: "ACTIVATE4 <name> <impl_hash> <cas_hash> <migrate>
          *                  epoch:<N> cap_root:<hex> callers:<sorted-csv>" */
-        } else if (strncmp(line, "ACTIVATE4 ", 10) == 0) {
+        } else if (strncmp(line, "ACTIVATE4 ", 10) == 0
+                   || strncmp(line, "ACTIVATE5 ", 10) == 0) {
+            /* ACTIVATE5 differs only in <migrate> being a bitmask (see the
+             * file header) and in the verb inside the signed message. */
+            const int v5 = line[8] == '5';
+            const char *verb = v5 ? "ACTIVATE5" : "ACTIVATE4";
             char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
             char migrate_str[8] = {0};
             if (sscanf(line + 10, "%255s %127s %127s %255s %7s",
@@ -1178,7 +1203,15 @@ static void handle_client(int fd) {
             if (!is_hex64(cas_hash)) {
                 wresp(fd, "ERR bad_cas_hash\n"); continue;
             }
-            int migrate_required = (migrate_str[0] == '1') ? 1 : 0;
+            int migrate_required;
+            if (v5) {
+                if (migrate_str[0] < '0' || migrate_str[0] > '3' || migrate_str[1]) {
+                    wresp(fd, "ERR bad_format bad_migrate\n"); continue;
+                }
+                migrate_required = migrate_str[0] - '0';
+            } else {
+                migrate_required = (migrate_str[0] == '1') ? MIGRATE_STATE : 0;
+            }
 
             /* Parse mandatory epoch:<N>. */
             uint32_t activate_epoch = 0;
@@ -1282,8 +1315,8 @@ static void handle_client(int fd) {
              * caps is NOT (see file-header note above). */
             char signed_msg[2048];
             int smlen = snprintf(signed_msg, sizeof(signed_msg),
-                                 "ACTIVATE4 %s %s %s %d epoch:%u cap_root:%s callers:%s",
-                                 name, impl_hash, cas_hash, migrate_required,
+                                 "%s %s %s %s %d epoch:%u cap_root:%s callers:%s",
+                                 verb, name, impl_hash, cas_hash, migrate_required,
                                  activate_epoch, cap_root, callers_sorted);
             if (smlen < 0 || smlen >= (int)sizeof(signed_msg)) {
                 wresp(fd, "ERR signed_msg_truncated\n"); continue;
@@ -1408,34 +1441,87 @@ static void handle_client(int fd) {
         /* ── COMMIT_BATCH ─────────────────────────────────────────────── */
         } else if (strcmp(line, "COMMIT_BATCH") == 0) {
             if (!in_batch) { wresp(fd, "ERR not_in_batch\n"); continue; }
-            int committed = 0;
-            int commit_ok = 1;
+            /* The whole batch is ONE deploy (one epoch, one marker per
+             * actor).  WAIT keeps it staged: send COMMIT_BATCH again. */
+            act_item *items = (act_item *)calloc((size_t)(n_staged ? n_staged : 1),
+                                                 sizeof(*items));
+            audit_caps_t *acs = (audit_caps_t *)calloc((size_t)(n_staged ? n_staged : 1),
+                                                       sizeof(*acs));
+            if (!items || !acs) { free(items); free(acs); wresp(fd, "ERR oom\n"); continue; }
             for (int i = 0; i < n_staged; i++) {
-                audit_caps_t ac = { staged[i].caps, staged[i].cap_root };
-                if (do_activate_inner(staged[i].name, staged[i].impl_hash,
-                                      staged[i].cas_hash,
-                                      staged[i].migrate_required,
-                                      staged[i].epoch,
-                                      staged[i].callers[0] ? staged[i].callers : NULL,
-                                      staged[i].caps ? &ac : NULL,
-                                      NULL) == 0) {
-                    committed++;
-                } else {
-                    commit_ok = 0;
-                    break;
-                }
+                acs[i].caps = staged[i].caps;
+                acs[i].cap_root = staged[i].cap_root;
+                items[i].name      = staged[i].name;
+                items[i].impl_hash = staged[i].impl_hash;
+                items[i].cas_hash  = staged[i].cas_hash;
+                items[i].callers   = staged[i].callers[0] ? staged[i].callers : NULL;
+                items[i].epoch     = staged[i].epoch;
+                items[i].migrate   = staged[i].migrate_required;
+                items[i].ac        = staged[i].caps ? &acs[i] : NULL;
             }
+            char resp[512];
+            int r = n_staged ? activate_items(items, n_staged, resp, sizeof(resp)) : 0;
+            free(items); free(acs);
+            if (r == 1) {           /* WAIT: the batch stays staged */
+                wresp(fd, resp);
+                continue;
+            }
+            int committed = r == 0 ? n_staged : 0;
             for (int k = 0; k < n_staged; k++) {
                 free(staged[k].caps); free(staged[k].cap_root);
             }
             in_batch = 0; n_staged = 0;
-            if (commit_ok) {
-                char resp[64];
+            if (r == 0) {
                 int n = snprintf(resp, sizeof(resp), "OK %d\n", committed);
                 write_safe(fd, resp, n, sizeof(resp));
             } else {
                 wresp(fd, "ERR commit_partial_failure\n");
             }
+
+        /* ── PINS ─────────────────────────────────────────────────────── */
+        } else if (strcmp(line, "PINS") == 0) {
+            uint32_t eps[MARCH_EPOCH_PIN_SLOTS]; int64_t cnt[MARCH_EPOCH_PIN_SLOTS];
+            int k = march_epoch_pin_table(eps, cnt, MARCH_EPOCH_PIN_SLOTS);
+            uint32_t cur = march_epoch_current();
+            for (int i = 0; i < k; i++) {
+                char resp[160];
+                /* The current epoch's count includes its one role pin. */
+                int n = snprintf(resp, sizeof(resp), "EPOCH %u pins:%lld%s%s\n",
+                                 eps[i],
+                                 (long long)(eps[i] == cur ? cnt[i] - 1 : cnt[i]),
+                                 eps[i] == cur ? " current" : "",
+                                 march_hcr_epoch_draining(eps[i]) ? " draining" : "");
+                write_safe(fd, resp, n, sizeof(resp));
+            }
+            march_hcr_counters c; march_hcr_counters_get(&c);
+            char resp[512];
+            int n = snprintf(resp, sizeof(resp),
+                             "COUNTERS deferred:%lld converted:%lld dropped:%lld "
+                             "killed:%lld stopped:%lld advances:%lld early:%lld "
+                             "forced:%lld markers_live:%lld markers_lost:%lld\n",
+                             (long long)c.deferred, (long long)c.converted,
+                             (long long)c.dropped, (long long)c.killed,
+                             (long long)c.stopped, (long long)c.advances,
+                             (long long)c.early, (long long)c.forced,
+                             (long long)march_hcr_markers_live(),
+                             (long long)c.markers_lost);
+            write_safe(fd, resp, n, sizeof(resp));
+            wresp(fd, "END\n");
+
+        /* ── DRAIN ────────────────────────────────────────────────────── */
+        } else if (strncmp(line, "DRAIN ", 6) == 0) {
+            const char *ep = strstr(line, "epoch:");
+            if (!ep) { wresp(fd, "ERR bad_format missing_epoch\n"); continue; }
+            long long e = atoll(ep + 6), soft = 0, hard = 0;
+            const char *sp = strstr(line, "soft_ms:");
+            const char *hp = strstr(line, "hard_ms:");
+            if (sp) soft = atoll(sp + 8);
+            if (hp) hard = atoll(hp + 8);
+            if (e <= 0 || soft < 0 || hard < 0) {
+                wresp(fd, "ERR bad_format\n"); continue;
+            }
+            march_hcr_drain((uint32_t)e, (int64_t)soft, (int64_t)hard);
+            wresp(fd, "OK\n");
 
         /* ── ROLLBACK_BATCH ───────────────────────────────────────────── */
         } else if (strcmp(line, "ROLLBACK_BATCH") == 0) {
