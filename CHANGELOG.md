@@ -12,6 +12,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`NativeArray.sort_float` — a `Float` array can now be sorted.** Same
+  algorithm and ownership as `sort_int` (unstable, in place when uniquely owned,
+  copy-on-write when shared), 1.9–18x faster than libc `qsort` at 5 million
+  elements. Floats sort by IEEE 754 `totalOrder`, so NaN has a defined place:
+  `-NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN`. Note that `-0.0` sorts
+  before `+0.0` even though `-0.0 == 0.0` and `compare(-0.0, 0.0)` is `0`. The
+  interpreter and compiled builds produce the same order, NaN included.
 - **Editor support for `topology.toml`** (build step 7 of the distributed-deploys
   plan). `march-lsp` recognises `topology.toml` and `topology.<env>.toml` and shows
   `forge topology check`'s diagnostics on forge's lines, computed by forge's own

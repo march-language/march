@@ -10738,6 +10738,25 @@ static void nsort_rec(int64_t *v, int64_t n, const int64_t *ancestor,
     }
 }
 
+/* Test hook: MARCH_TEST_NSORT_DEPTH_LIMIT=<k> replaces the 2·log2(n) depth
+ * limit with k, so k = 0 sends every segment above the small-sort cutoff
+ * straight to nsort_heap. That is the only way to exercise the heapsort
+ * fallback directly: the pattern-breaking step makes it practically
+ * unreachable from any input. test/dune runs native_arr_sort a second time
+ * with this set to 0 and diffs against the same golden. Read once; the
+ * benign race on first use stores the same value from every thread. */
+static int nsort_forced_limit(void) {
+    static int cached = -2;             /* -2 unread, -1 unset, else the limit */
+    int c = __atomic_load_n(&cached, __ATOMIC_RELAXED);
+    if (c == -2) {
+        const char *e = getenv("MARCH_TEST_NSORT_DEPTH_LIMIT");
+        c = (e && e[0]) ? atoi(e) : -1;
+        if (c < -1) c = -1;
+        __atomic_store_n(&cached, c, __ATOMIC_RELAXED);
+    }
+    return c;
+}
+
 static void nsort_i64(int64_t *v, int64_t n) {
     if (n < 2) return;
     if (n <= 32) { nsort_small(v, n); return; }
@@ -10759,6 +10778,8 @@ static void nsort_i64(int64_t *v, int64_t n) {
 
     int limit = 0;
     for (int64_t m = n; m > 1; m >>= 1) limit += 2;
+    int forced = nsort_forced_limit();
+    if (forced >= 0) limit = forced;
     uint64_t seed = (uint64_t)n * 0x9E3779B97F4A7C15ULL;
     nsort_rec(v, n, NULL, limit, &seed);
 }
@@ -10780,6 +10801,46 @@ void *native_int_arr_sort(void *arr) {
     march_decrc(arr);
     return new_arr;
 }
+
+/* ── NativeArray.sort_float: the same sort, on IEEE 754 totalOrder keys ────
+ *
+ * `<` on doubles is not a total order (every comparison with NaN is false),
+ * and a quicksort fed an inconsistent comparator can break its own
+ * partition invariants. So doubles sort by their totalOrder key:
+ *
+ *   key(bits) = bits ^ (((int64_t)bits >> 63) & 0x7FFFFFFFFFFFFFFF)
+ *
+ * compared as a signed i64. Negative doubles get their magnitude bits
+ * flipped and keep the sign bit, which yields
+ *   -NaN < -Inf < ... < -1 < -0 < +0 < 1 < ... < +Inf < +NaN.
+ * Note -0.0 sorts strictly before +0.0, although `compare(-0.0, 0.0)` and
+ * `==` treat them as equal.
+ *
+ * key() leaves the sign bit alone, so it is an involution: applying it twice
+ * restores the original bits. That allows "transform in, sort, transform out"
+ * with nsort_i64 reused verbatim, which is what this does. The alternative,
+ * comparing through key() on every comparison, was measured in
+ * bench/c/native_sort_bench.c (`nsb f64`): 10-14% slower on the
+ * comparison-bound patterns (random, organ, nearly), 5-14% faster only on
+ * the already-O(n) ones (sorted, reversed, equal) where the two extra
+ * vectorized passes are the whole cost. Both are bit-identical to qsort
+ * with a totalOrder comparator.
+ *
+ * The interpreter arm (lib/eval/eval_builtins.ml) sorts on the same key; it
+ * must not use OCaml's `compare`, which puts every NaN first regardless of
+ * sign. */
+static inline int64_t nsort_f64_key(int64_t bits) {
+    return bits ^ (int64_t)((uint64_t)(bits >> 63) >> 1);
+}
+
+static void nsort_f64(double *d, int64_t n) {
+    int64_t *v = (int64_t *)d;          /* -fno-strict-aliasing: bit view */
+    for (int64_t i = 0; i < n; i++) v[i] = nsort_f64_key(v[i]);
+    nsort_i64(v, n);
+    for (int64_t i = 0; i < n; i++) v[i] = nsort_f64_key(v[i]);
+}
+/* native_float_arr_sort itself sits after native_float_arr_set, below, next
+ * to the rest of the f64 array entry points. */
 
 /* Sum of squared deviations from a precomputed mean — the stable second pass
  * of the standard two-pass variance algorithm. int elements promote to
@@ -10947,6 +11008,23 @@ void *native_float_arr_set(void *arr, int64_t i, double val) {
     void *new_arr = native_arr_alloc(len, 8, NATIVE_ELEM_F64);
     memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR, (size_t)(len * 8));
     memcpy((char *)new_arr + NATIVE_ARR_HDR + i * 8, &val, 8);
+    march_decrc(arr);
+    return new_arr;
+}
+
+/* NativeArray.sort_float — totalOrder ipnsort; see nsort_f64 above. FBIP/COW
+ * contract identical to native_int_arr_sort: [arr] is owned and consumed, in
+ * place at rc == 1, a sorted fresh copy (our reference released) at rc > 1. */
+void *native_float_arr_sort(void *arr) {
+    int64_t len = native_float_arr_length(arr);
+    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+        nsort_f64((double *)((char *)arr + NATIVE_ARR_HDR), len);
+        return arr;
+    }
+    void *new_arr = native_arr_alloc(len, 8, NATIVE_ELEM_F64);
+    memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR,
+           (size_t)(len * 8));
+    nsort_f64((double *)((char *)new_arr + NATIVE_ARR_HDR), len);
     march_decrc(arr);
     return new_arr;
 }
