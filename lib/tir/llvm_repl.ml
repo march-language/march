@@ -124,9 +124,18 @@ let slot_holds_heap_ref (ty : Tir.ty) =
     0x400C000000000000) are even, large and positive, so `get_float(a, 0)`
     followed by any heap-returning expression dereferenced the double as a
     header and SIGSEGV'd the REPL.  It also leaked the old heap value
-    whenever the new result was a scalar.  A slot with no [prev_slots] entry
-    has never been written this session (static zero-init), so the
-    IS_HEAP_PTR-guarded decrc is still a no-op there.
+    whenever the new result was a scalar.
+
+    A slot with no [prev_slots] entry has never been written by THIS
+    session, so there is nothing of ours to release and no decrc is emitted.
+    Do not assume such a slot reads as zero: [march_repl_slots] is a static
+    array in the runtime .so, which stays mapped for the life of the process,
+    and a new session's [alloc_slot] restarts at 0.  A slot therefore still
+    holds whatever an EARLIER session in the same process last stored there
+    (a dangling pointer to freed memory, or a Float's raw bits) — the
+    run_codegen suite runs many sessions in one process, and decrc'ing that
+    stale word SIGSEGV'd `stdlib List.length via precompile` right after the
+    closure-leak case filled slot 0.
 
     A plain `let x = ...` binding gets a FRESH slot per repl_jit.ml's
     alloc_slot (never reused across distinct declarations), so the release
@@ -139,7 +148,7 @@ let emit_store_to_slot ?(prev_slots : repl_slot_info list = []) ctx
   let old_is_heap =
     match List.find_opt (fun si -> si.rs_slot = slot_idx) prev_slots with
     | Some si -> slot_holds_heap_ref si.rs_ty
-    | None -> true
+    | None -> false
   in
   if old_is_heap then begin
     let old_raw = Llvm_ctx.fresh ctx "slot_old" in

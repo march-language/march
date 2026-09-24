@@ -81,8 +81,18 @@ bitcast double.
 emits the release only when that type is heap-shaped (`slot_holds_heap_ref`). The
 release now also runs when the new result is a scalar, so a heap `v` that is
 replaced by a Float or Int is released rather than leaked. A slot with no previous
-entry has never been written (zero-init), and the guarded decrc is a no-op there as
-before.
+entry has never been written by this session, so no release is emitted for it.
+
+That last rule is load-bearing. The first version of this fix released an
+unrecorded slot too, on the theory that it still read as zero. It does not:
+`march_repl_slots` is a static array in the runtime .so, which stays mapped for the
+life of the process, and every new session's `alloc_slot` restarts at 0. So a fresh
+session's slot 0 holds whatever an earlier session in the same process last stored
+there. CI's `run_codegen` runs many JIT sessions in one process, and it died with
+SIGSEGV (exit 139, no alcotest summary) in `repl_jit_cross_line` 11 ("stdlib
+List.length via precompile"): that session's first `v` store decrc'd a dangling
+pointer that case 10 ("capture-free closure materialization does not leak") had left
+in slot 0. Running only cases 10 and 11 reproduced it; either case alone passed.
 
 ## Siblings checked
 
