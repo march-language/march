@@ -63,6 +63,26 @@ There is no bespoke extension; use a generic LSP client (e.g. a small
 - `serverOptions`: `{ command: "march-lsp", transport: stdio }`
 - `documentSelector`: `[{ language: "march" }]`
 
+## Topology files (`topology.toml`, `topology.<env>.toml`)
+
+The server also serves a project's topology file and its overlays: forge's
+diagnostics, go-to-definition, completion and hover (see `docs/topology.md`,
+"Editor support"). It recognises them by FILE NAME, whatever language id the
+client sends, so attach `march-lsp` to those two name patterns as well. Neovim:
+
+```lua
+vim.api.nvim_create_autocmd({ "BufRead", "BufNewFile" }, {
+  pattern = { "topology.toml", "topology.*.toml" },
+  callback = function()
+    vim.lsp.start({ name = "march", cmd = { "march-lsp" },
+      root_dir = vim.fs.root(0, { "forge.toml" }) })
+  end,
+})
+```
+
+In a generic VS Code client, add
+`{ pattern: "**/topology{,.*}.toml" }` to the `documentSelector`.
+
 ## Standalone / LLM / scripting (no editor)
 
 The same analysis engine is reachable as one-shot queries that print a single
