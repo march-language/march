@@ -522,11 +522,24 @@ type index = {
   (** every fn or actor (qualified) to the ["Proto.Role"] it references
       through [<Proto>_Run.initiate_<Role>] *)
   mutable parse_errors : (string * string) list;
+  sites     : (string, Ast.span) Hashtbl.t;
+  (** Where each indexed name is declared, keyed [site_key kind qname]
+      ([`Fn], [`Actor], [`Protocol]): the span of the declaration's NAME.
+      Nothing here reads it; it is for navigation (the LSP's go-to-definition
+      on a `body`/`actor`/`start` string), so an editor jumps to exactly the
+      declaration the check resolved the string to. *)
 }
 
 let empty_index () =
   { fns = Hashtbl.create 64; actors = Hashtbl.create 8; protocols = [];
-    calls = Hashtbl.create 64; initiate_refs = Hashtbl.create 8; parse_errors = [] }
+    calls = Hashtbl.create 64; initiate_refs = Hashtbl.create 8; parse_errors = [];
+    sites = Hashtbl.create 64 }
+
+let site_key kind qname =
+  (match kind with `Fn -> "fn:" | `Actor -> "actor:" | `Protocol -> "protocol:") ^ qname
+
+(** The declaration site of an indexed name, if the index has one. *)
+let site idx kind qname = Hashtbl.find_opt idx.sites (site_key kind qname)
 
 (** Every dotted reference and call target in an expression, as written. *)
 let rec refs_in_expr acc (e : Ast.expr) : string list =
@@ -597,18 +610,22 @@ let rec index_decls idx ~prefix (decls : Ast.decl list) =
       | Ast.DFn (fn, _) ->
         let name = q fn.Ast.fn_name.Ast.txt in
         Hashtbl.replace idx.fns name ();
+        if not (Hashtbl.mem idx.sites (site_key `Fn name)) then
+          Hashtbl.replace idx.sites (site_key `Fn name) fn.Ast.fn_name.Ast.span;
         add_body idx name
           (List.concat_map (fun (cl : Ast.fn_clause) ->
                let g = match cl.Ast.fc_guard with Some g -> refs_in_expr [] g | None -> [] in
                g @ refs_in_expr [] cl.Ast.fc_body) fn.Ast.fn_clauses)
-      | Ast.DActor (_, name, def, _) ->
-        let name = q name.Ast.txt in
+      | Ast.DActor (_, aname, def, _) ->
+        let name = q aname.Ast.txt in
         Hashtbl.replace idx.actors name ();
+        Hashtbl.replace idx.sites (site_key `Actor name) aname.Ast.span;
         add_body idx name
           (refs_in_expr [] def.Ast.actor_init
            @ List.concat_map (fun (h : Ast.actor_handler) -> refs_in_expr [] h.Ast.ah_body)
              def.Ast.actor_handlers)
       | Ast.DProtocol (name, def, _) ->
+        Hashtbl.replace idx.sites (site_key `Protocol (q name.Ast.txt)) name.Ast.span;
         idx.protocols <- idx.protocols @ [ (q name.Ast.txt, name.Ast.txt, def) ]
       | Ast.DMod (name, _, inner, _) -> index_decls idx ~prefix:(q name.Ast.txt) inner
       | _ -> ())
@@ -640,27 +657,38 @@ let find_march_files dir =
   in
   List.rev (walk [] dir)
 
-let parse_module path : (Ast.module_, string) result =
+(** Parse [src] as the module in file [path] (the path goes into every span). *)
+let parse_source ~path (src : string) : (Ast.module_, string) result =
   try
-    let src = read_text path in
     let lexbuf = Lexing.from_string src in
     lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
     Ok (March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
-  with
-  | Sys_error msg -> Error msg
-  | exn -> Error (Printexc.to_string exn)
+  with exn -> Error (Printexc.to_string exn)
+
+let parse_module path : (Ast.module_, string) result =
+  match read_text path with
+  | exception Sys_error msg -> Error msg
+  | src -> parse_source ~path src
 
 (** Parse every `.march` under [root] (test files skipped) into an index. A
     file that does not parse is recorded, not fatal: the compiler reports it
-    properly; here it only means its names cannot be resolved. *)
-let index_project ~root : index =
+    properly; here it only means its names cannot be resolved.
+
+    [index_project_with ~parse] takes how one file's module is obtained
+    ([index_project] uses [parse_module], reading the disk). The LSP passes
+    one that reads an editor buffer in place of the file when the file is
+    open, so the walk, the naming and the parse-error handling stay this
+    function's. *)
+let index_project_with ~(parse : string -> (Ast.module_, string) result) ~root : index =
   let idx = empty_index () in
   List.iter (fun path ->
-      match parse_module path with
+      match parse path with
       | Ok m -> index_module idx m
       | Error msg -> idx.parse_errors <- idx.parse_errors @ [ (path, msg) ])
     (find_march_files root);
   idx
+
+let index_project ~root : index = index_project_with ~parse:parse_module ~root
 
 (** The index of a set of already-parsed declaration lists, as the compiler
     holds them after import resolution: the entry module's flat decls under

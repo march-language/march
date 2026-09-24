@@ -8,6 +8,11 @@
 `forge build`/`run`/`deploy hot`; `march --topology` as a version-and-names stub;
 `docs/topology.md`, `specs/features/topology.md`).
 
+**The LSP half landed 2026-09-24:**
+[../progress/2026-09-24-dd-step07-topology-lsp.md](../progress/2026-09-24-dd-step07-topology-lsp.md)
+(`march-lsp` serves `topology.toml` and its overlays: forge's diagnostics, definition,
+completion, hover).
+
 ## Deferred from step 7
 
 - **Delivered by step 3 (2026-09-23,
@@ -26,12 +31,8 @@
   names referenced as values too, but a call through a closure received as a parameter
   is still not followed. forge's by-name fallback (`"source": "names"`) has the same
   limit.
-- **LSP support for the TOML** (go-to-definition and completion on the `body`,
-  `actor`, `start`, `serves` and `initiates` strings; unknown-key diagnostics in
-  the editor). Not started.
 - **`k8s` generator** comes with its backend (step 10 onwards), per II.6.
 - **`replicas`** is parsed and exported but no backend consumes it.
 
 **Acceptance for the rest:** a code change that widens a pool's derived caps stops
-`forge deploy hot` at the monotonicity gate unless `--grant-cap` names it; the LSP
-resolves a `body` string to its declaration.
+`forge deploy hot` at the monotonicity gate unless `--grant-cap` names it.
