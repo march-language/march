@@ -344,6 +344,8 @@ native_pid_of_int_dead_pid: coverage audit (user + stdlib): 120 enforced, 0 iner
 native_pid_of_int_dead_pid: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_pid_of_int_roundtrip: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_pid_of_int_roundtrip: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_pid_to_int_leak_probe: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_pid_to_int_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_prelude_scope_user_shadow: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced

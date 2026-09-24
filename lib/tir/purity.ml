@@ -82,6 +82,10 @@ let impure_named = [
   (* actors, monitors, supervision, capabilities *)
   "monitor"; "demonitor"; "send_checked"; "dynamic_supervisor"; "register_resource";
   "mint_cap"; "revoke_cap"; "run_until_idle"; "worker"; "get_work_pool";
+  (* the supervise-block spawn glue's registrations: their Unit result is
+     discarded, so as pure EApps (Defun.builtin_names) DCE deleted them and
+     no supervisor ever restarted a child *)
+  "register_supervisor"; "register_supervisor_child";
   (* reads of mutable runtime state: not to be CSE'd or reordered *)
   "self"; "is_alive"; "mailbox_size"; "get_actor_field"; "live_allocs"; "peak_rss_bytes";
   "sched_stat";
