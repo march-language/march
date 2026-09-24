@@ -3062,7 +3062,7 @@ void *march_html_auto_escape(void *v) {
     {
         int32_t tid = march_hdr_type_id(v);
         if (tid != 0 && !is_iolist_type_id(tid)) {
-            void *s = march_value_to_string(v);
+            void *s = march_value_to_string_repr(v);
             char scratch[24];
             const char *d = march_str_data(s, scratch);
             void *r = html_escape_bytes(d ? d : "", d ? march_str_len(s) : 0);
@@ -3233,7 +3233,7 @@ static int is_iolist_type_id(int32_t tid) {
  * header id resolved but whose tag/kind did not match its rows: without it
  * the generic renderer's hook would hand the same cell straight back. */
 static __thread int ctor_dyn_suppress = 0;
-static void *ctor_render_dyn(void *v);
+static void *ctor_render_dyn(void *v, int repr);
 
 /* Copy [n] bytes of [p] into a fresh NUL-terminated buffer. */
 static char *ctor_strndup(const char *p, size_t n) {
@@ -3381,7 +3381,8 @@ static void cb_put_march_string(ctor_buf *b, void *s, int owned) {
 }
 
 /* OCaml [String.escaped], which is what the interpreter's repr-form
- * value_to_string applies to a nested string.  Non-printables become a
+ * value_to_string applies to a nested string -- used only when the render
+ * is in repr convention (see [ctor_render]'s [repr] argument).  Non-printables become a
  * THREE-digit DECIMAL escape (\ddd), not hex — matching that exactly is the
  * whole point of quoting nested strings here at all. */
 static void cb_put_escaped(ctor_buf *b, const char *d, int64_t n) {
@@ -3411,12 +3412,22 @@ static void cb_put_escaped(ctor_buf *b, const char *d, int64_t n) {
  * overflow. */
 #define CTOR_MAX_DEPTH 24
 
-static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth);
+static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth, int repr);
+
+/* A nested String under the current convention: QUOTED and escaped in repr
+ * form (the interpreter's value_to_string), verbatim in show form (the
+ * element's own `show`, which for a String is the identity). */
+static void cb_put_nested_str(ctor_buf *b, const char *d, int64_t n, int repr) {
+    if (repr) cb_put_escaped(b, d, n);
+    else if (n > 0) cb_puts(b, d, (size_t)n);
+}
 
 /* Render one field slot.  [raw] is the 8 bytes at the slot; which of its
  * interpretations is correct is decided ENTIRELY by [f.kind], because that is
- * the only thing that knows what the compiler stored there. */
-static void ctor_render_field(ctor_buf *b, int64_t raw, march_ctor_field f, int depth) {
+ * the only thing that knows what the compiler stored there.  [repr] is the
+ * nested-string convention in force for this slot (see [ctor_render]). */
+static void ctor_render_field(ctor_buf *b, int64_t raw, march_ctor_field f, int depth,
+                              int repr) {
     switch (f.kind) {
         case 'i': {
             char tmp[24];
@@ -3434,38 +3445,38 @@ static void ctor_render_field(ctor_buf *b, int64_t raw, march_ctor_field f, int 
         }
         case 's': {
             void *s = (void *)(uintptr_t)raw;
-            if (!s) { cb_putz(b, "\"\""); break; }
             char scratch[24];
-            const char *d = march_str_data(s, scratch);
-            if (!d) { cb_putz(b, "\"\""); break; }
-            cb_put_escaped(b, d, march_str_len(s));
+            const char *d = s ? march_str_data(s, scratch) : NULL;
+            if (!d) { if (repr) cb_putz(b, "\"\""); break; }
+            cb_put_nested_str(b, d, march_str_len(s), repr);
             break;
         }
-        case 'A': ctor_render(b, (void *)(uintptr_t)raw, f.type_id, depth + 1); break;
+        case 'A': ctor_render(b, (void *)(uintptr_t)raw, f.type_id, depth + 1, repr); break;
         default: {
             /* Generic slot: the field's declared type was a type VARIABLE
              * (`Ok(a)`, `Cons(a, List(a))`), so the descriptor cannot say what
-             * is in it and the value must classify itself.  A String must
-             * still be QUOTED here — the interpreter's repr-form
-             * value_to_string quotes a nested string wherever it appears, and
-             * march_value_to_string returns one verbatim (it is the identity
-             * on a real String), so delegating blindly would print
-             * `Ok(<script>)` where the interpreter prints `Ok("<script>")`. */
+             * is in it and the value must classify itself.  A String is
+             * classified HERE, under [repr]: march_value_to_string returns a
+             * top-level string verbatim in both conventions, so delegating
+             * blindly would print `Ok(<script>)` where the interpreter's repr
+             * form (a `~H` hole) prints `Ok("<script>")`. */
             void *fv = (void *)(uintptr_t)raw;
             /* A boxed ADT in a generic slot names itself through its header
                id (a `List(Shape)` element, an `Ok(a)` payload): render it by
                name rather than as "#<tag:N>". */
             int32_t dyn = ctor_type_index_for_hdr(fv);
-            if (dyn > 0) { ctor_render(b, fv, dyn, depth + 1); break; }
+            if (dyn > 0) { ctor_render(b, fv, dyn, depth + 1, repr); break; }
             int is_str = fv
                 && (march_str_is_inline(fv)
                     || (IS_HEAP_PTR(fv) && ((march_hdr *)fv)->tag == MARCH_STRING_TAG));
             if (is_str) {
                 char scratch[24];
                 const char *d = march_str_data(fv, scratch);
-                if (d) { cb_put_escaped(b, d, march_str_len(fv)); break; }
+                if (d) { cb_put_nested_str(b, d, march_str_len(fv), repr); break; }
             }
-            cb_put_march_string(b, march_value_to_string(fv), 1);
+            /* Carry the convention across the generic renderer: its hook
+             * renders a stamped cell back through ctor_render. */
+            cb_put_march_string(b, march_value_to_string_mode(fv, repr), 1);
             break;
         }
     }
@@ -3489,20 +3500,37 @@ static int ctor_type_is_list(march_ctor_type *t) {
     return t->kind == 'V' && strcmp(t->name, "List") == 0;
 }
 
+/* The interpreter's `to_string` goes through Show, and of the types this
+ * table can describe only these carry a Show impl that SHOWS its elements
+ * (stdlib/prelude.march): everything else -- a user variant, a record --
+ * falls back to the repr-form value_to_string, which quotes every string
+ * beneath it.  Keyed on the declared name, like [ctor_type_is_list]. */
+static int ctor_type_shows_elements(march_ctor_type *t) {
+    return t->kind == 'V'
+        && (strcmp(t->name, "List") == 0 || strcmp(t->name, "Option") == 0
+            || strcmp(t->name, "Result") == 0);
+}
+
 /* Generic-renderer fallback for a cell the table could not walk.  [nohook]
  * is set when the cell's own header id resolved to [type_id] and still did
  * not match: the generic renderer would consult the hook, which would hand
- * the same cell back here. */
-static void ctor_put_generic(ctor_buf *b, void *v, int nohook) {
+ * the same cell back here.  [repr] is passed through so the generic
+ * renderer's hook keeps this render's convention. */
+static void ctor_put_generic(ctor_buf *b, void *v, int nohook, int repr) {
     if (nohook) ctor_dyn_suppress++;
-    cb_put_march_string(b, march_value_to_string(v), 1);
+    cb_put_march_string(b, march_value_to_string_mode(v, repr), 1);
     if (nohook) ctor_dyn_suppress--;
 }
 
-static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth) {
+/* [repr] selects the nested-string convention (march_runtime.h,
+ * march_value_to_string_mode): 1 quotes every nested string (the
+ * interpreter's value_to_string, which `~H` uses); 0 is `to_string`/Show,
+ * which renders a string bare where its container has a Show impl and
+ * switches to repr beneath any container that does not. */
+static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth, int repr) {
     if (depth >= CTOR_MAX_DEPTH) { cb_putz(b, "..."); return; }
     if (type_id <= 0 || type_id > ctor_type_count || !IS_HEAP_PTR(v)) {
-        ctor_put_generic(b, v, 0);
+        ctor_put_generic(b, v, 0, repr);
         return;
     }
     /* The header id is ground truth for what was ALLOCATED; the static id is
@@ -3513,12 +3541,15 @@ static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth) {
         if (hdr > 0 && hdr != type_id) type_id = hdr;
     }
     march_ctor_type *t = &ctor_types[type_id - 1];
-    if (!t->name) { ctor_put_generic(b, v, 1); return; }
+    if (!t->name) { ctor_put_generic(b, v, 1, repr); return; }
     int32_t tag = ((march_hdr *)v)->tag;
     /* A reserved sentinel tag means the slot does not actually hold a value of
      * the static type (an erased flow, a string in a TVar slot).  The generic
      * renderer classifies those correctly; the table would misread them. */
-    if (tag < 0) { ctor_put_generic(b, v, 0); return; }
+    if (tag < 0) { ctor_put_generic(b, v, 0, repr); return; }
+    /* Show form switches to repr beneath a type with no element-showing
+       Show impl, exactly where the interpreter falls back to value_to_string. */
+    if (!ctor_type_shows_elements(t)) repr = 1;
     if (t->kind == 'R') {
         cb_putz(b, "{ ");
         for (int32_t i = 0; i < t->nrows; i++) {
@@ -3528,13 +3559,13 @@ static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth) {
             ctor_render_field(b, ctor_slot(v, i),
                               t->rows[i].nfields > 0 ? t->rows[i].fields[0]
                                                      : (march_ctor_field){ 'p', 0 },
-                              depth);
+                              depth, repr);
         }
         cb_putz(b, " }");
         return;
     }
     march_ctor_row *row = ctor_row_for_tag(t, tag);
-    if (!row) { ctor_put_generic(b, v, 1); return; }
+    if (!row) { ctor_put_generic(b, v, 1, repr); return; }
     if (ctor_type_is_list(t)) {
         if (strcmp(row->name, "Nil") == 0) { cb_putz(b, "[]"); return; }
         if (strcmp(row->name, "Cons") == 0 && row->nfields == 2) {
@@ -3546,7 +3577,7 @@ static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth) {
                    && guard++ < 1000000) {
                 if (!first) cb_putz(b, ", ");
                 first = 0;
-                ctor_render_field(b, ctor_slot(cur, 0), r->fields[0], depth + 1);
+                ctor_render_field(b, ctor_slot(cur, 0), r->fields[0], depth + 1, repr);
                 void *next = (void *)(uintptr_t)ctor_slot(cur, 1);
                 if (!IS_HEAP_PTR(next)) { cur = NULL; break; }
                 cur = next;
@@ -3561,18 +3592,25 @@ static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth) {
     cb_putc(b, '(');
     for (int32_t i = 0; i < row->nfields; i++) {
         if (i) cb_putz(b, ", ");
-        ctor_render_field(b, ctor_slot(v, i), row->fields[i], depth + 1);
+        ctor_render_field(b, ctor_slot(v, i), row->fields[i], depth + 1, repr);
     }
     cb_putc(b, ')');
 }
 
-/* to_string on a value whose STATIC type named a registered variant/record.
- * Falls back to [march_value_to_string] for every shape the table cannot
- * describe, so this is never worse than the untyped path. */
+/* to_string / a `~H` hole on a value whose STATIC type named a registered
+ * variant/record.  Falls back to [march_value_to_string] for every shape the
+ * table cannot describe, so this is never worse than the untyped path.
+ *
+ * Repr convention, because a `~H` hole needs it (test/native/
+ * h_sigil_adt_interp pins `list=<p>[&quot;...&quot;]</p>`).  For the
+ * to_string site it is also exactly Show's answer: the lowering routes a
+ * static List/Option/Result through its prelude Show impl before this
+ * builtin is reached, so the static type here is always one with NO Show
+ * impl, and Show falls back to repr for it. */
 void *march_value_to_string_typed(void *v, int32_t type_id) {
     if (!v || !IS_HEAP_PTR(v)) return march_value_to_string(v);
     ctor_buf b = { NULL, 0, 0 };
-    ctor_render(&b, v, type_id, 0);
+    ctor_render(&b, v, type_id, 0, 1);
     void *s = march_string_lit(b.p ? b.p : "", (int64_t)b.len);
     free(b.p);
     return s;
@@ -3580,13 +3618,15 @@ void *march_value_to_string_typed(void *v, int32_t type_id) {
 
 /* march_render_dyn_hook: to_string on a value with NO static type.  Renders
  * by the header id when it resolves, else NULL so the generic renderer
- * prints what it always did. */
-static void *ctor_render_dyn(void *v) {
+ * prints what it always did.  [repr] is the caller's convention: 0 from the
+ * erased `to_string` (march_value_to_string), 1 from a `~H` hole
+ * (march_value_to_string_repr) or a repr render's own generic fallback. */
+static void *ctor_render_dyn(void *v, int repr) {
     if (ctor_dyn_suppress) return NULL;
     int32_t idx = ctor_type_index_for_hdr(v);
     if (idx <= 0) return NULL;
     ctor_buf b = { NULL, 0, 0 };
-    ctor_render(&b, v, idx, 0);
+    ctor_render(&b, v, idx, 0, repr);
     void *s = march_string_lit(b.p ? b.p : "", (int64_t)b.len);
     free(b.p);
     return s;
@@ -3618,7 +3658,11 @@ void *march_html_escape_ctx_dyn(int64_t escaper_id, void *v) {
         }
         if (tag == MARCH_STRING_TAG) return march_html_escape_ctx(escaper_id, v);
     }
-    void *s = march_value_to_string(v);
+    /* REPR, not the show form: a `~H` hole renders like the interpreter's
+       value_to_string (nested strings quoted).  This is the route a TVar
+       `~H"...${x}..."` hole actually takes -- html_escape_ctx with escaper 0,
+       not html_auto_escape_dyn -- pinned by h_sigil_adt_interp's poly_* legs. */
+    void *s = march_value_to_string_repr(v);
     if (march_str_is_inline(s)) {
         /* march_html_escape_ctx reads a heap march_string; materialise. */
         char scratch[24];
@@ -3638,7 +3682,8 @@ void *march_html_auto_escape_dyn(void *v) {
         if (tag >= 0 && is_iolist_type_id(march_hdr_type_id(v)))
             return march_html_auto_escape(v);
     }
-    void *s = march_value_to_string(v);
+    /* REPR: a `~H` hole quotes nested strings (see march_html_escape_ctx_dyn). */
+    void *s = march_value_to_string_repr(v);
     char scratch[24];
     const char *d = march_str_data(s, scratch);
     void *r = html_escape_bytes(d ? d : "", d ? march_str_len(s) : 0);

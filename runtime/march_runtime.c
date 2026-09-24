@@ -9635,9 +9635,12 @@ static void *march_simd_to_string(void *v) {
 
 /* Format a March value as a human-readable string.
    Handles tagged immediates (low bit == 1), actor Pids, and heap objects. */
-void *(*march_render_dyn_hook)(void *v) = NULL;
+void *(*march_render_dyn_hook)(void *v, int repr) = NULL;
 
-void *march_value_to_string(void *v) {
+void *march_value_to_string(void *v) { return march_value_to_string_mode(v, 0); }
+void *march_value_to_string_repr(void *v) { return march_value_to_string_mode(v, 1); }
+
+void *march_value_to_string_mode(void *v, int repr) {
     if (!v) return march_string_lit("nil", 3);
     /* Tagged immediate: low bit == 1 → extract integer value via arithmetic
      * right-shift of the raw pointer bits (sign-preserving). */
@@ -9703,7 +9706,7 @@ void *march_value_to_string(void *v) {
      * type reached this call.  Only consulted for an ordinary ctor tag, and
      * only once some compilation unit has registered its descriptor. */
     if (tag >= 0 && march_render_dyn_hook) {
-        void *r = march_render_dyn_hook(v);
+        void *r = march_render_dyn_hook(v, repr);
         if (r) return r;
     }
     char buf[128];
