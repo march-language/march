@@ -712,8 +712,6 @@ let builtin_bindings : (string * scheme) list =
        multiple types deriving Json in one module can each define it
        without colliding with the polymorphic scheme registered here. *)
     ("from_json_events", poly2 (fun a b -> TArrow (a, b)));
-    (* Actor/respond: ∀a. a -> Unit *)
-    ("respond", poly1 (fun a -> TArrow (a, t_unit)));
     (* Actor builtins *)
     ("kill",     poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_unit)));
     (* Graceful stop: drains the mailbox, then dies normally. Returns whether
@@ -1009,8 +1007,15 @@ let builtin_bindings : (string * scheme) list =
     (* The inverse: the spawn index a Pid displays as ("Pid(N)"), so a
        GlobalPid for a local actor can be built without parsing to_string. *)
     ("pid_to_int",   poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_int)));
-    (* Phase 5: task_spawn_link — like task_spawn but links to spawner *)
-    ("task_spawn_link", poly1 (fun a -> TArrow (TArrow (t_int, a), TCon ("Task", [a]))));
+    (* Phase 5: task_spawn_link(f, pid) — like task_spawn, but the task fails
+       if the linked actor [pid] is (or becomes) dead.  Two arguments, as the
+       interpreter (its only implementation) takes them; this was a one-argument
+       type until 2026-09-24, so no typechecked program could call it at all.
+       Interpreter-only: a compiled call is rejected at lowering
+       (Lower_expr.interpreter_only_builtin_reasons). *)
+    ("task_spawn_link",
+     poly2 (fun a b -> TArrow (TArrow (t_int, a),
+                               TArrow (TCon ("Pid", [b]), TCon ("Task", [a])))));
     (* Phase 5B: cancellation token builtins.
        task_cancel_token_new() is zero-arg: EApp(f,[]) → infer_app returns type
        directly (see infer_app: | [], t -> t), so declare as Mono CancelToken,
@@ -1392,6 +1397,8 @@ let builtin_bindings : (string * scheme) list =
              TArrow (t_int, TArrow (t_float, TCon ("NativeFloatArr", []))))));
     ("native_float_arr_sum",
        Mono (TArrow (TCon ("NativeFloatArr", []), t_float)));
+    ("native_float_arr_sort",
+       Mono (TArrow (TCon ("NativeFloatArr", []), TCon ("NativeFloatArr", []))));
     ("native_float_arr_min",
        Mono (TArrow (TCon ("NativeFloatArr", []), t_float)));
     ("native_float_arr_max",

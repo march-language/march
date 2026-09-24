@@ -181,6 +181,16 @@ let extern_borrow_table : (string * bool list) list = [
   ("string_is_empty",      [true]);
   ("string_to_int",        [true]);
   ("string_to_float",      [true]);
+  ("float_from_string",    [true]);   (* same C function as string_to_float *)
+  (* Char predicates / case maps (the march_char_ family): read the first byte of the
+     argument, never store or free it; the case maps return a FRESH string.
+     Every Char producer (string_chars, char_from_int, literals) hands back an
+     owned or immortal reference, so borrowing is balanced. *)
+  ("char_is_alpha",        [true]);
+  ("char_is_uppercase",    [true]);
+  ("char_is_lowercase",    [true]);
+  ("char_to_uppercase",    [true]);
+  ("char_to_lowercase",    [true]);
   ("string_to_lowercase",  [true]);
   ("string_to_uppercase",  [true]);
   ("string_trim",          [true]);
@@ -369,7 +379,8 @@ let extern_owned_builtins : string list = [
     "native_int_arr_sumsq_dev"; "native_int_arr_map"; "native_int_arr_map2";
     "native_int_arr_to_float_arr"; "native_int_arr_fold";
     "native_int_arr_from_list"; "native_int_arr_filter_mask";
-    "native_float_arr_set"; "native_float_arr_min"; "native_float_arr_max";
+    "native_float_arr_set"; "native_float_arr_sort";
+    "native_float_arr_min"; "native_float_arr_max";
     "native_float_arr_sumsq_dev"; "native_float_arr_map";
     "native_float_arr_map2"; "native_float_arr_fold";
     "native_float_arr_from_list"; "native_float_arr_filter_mask";

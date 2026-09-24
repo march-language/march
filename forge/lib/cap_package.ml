@@ -65,6 +65,110 @@ let of_package ~root ~env_prefix =
       Ok { name = Filename.basename root; caps = parse_caps_json stdout_s }
   end
 
+(* ── the toolchain behind `march caps` ─────────────────────────────── *)
+
+(* Run [cmd] through the shell, returning (exit code, stdout, stderr). *)
+let run_capture cmd_body =
+  let out = Filename.temp_file "cap_probe" ".out" in
+  let err = Filename.temp_file "cap_probe" ".err" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "%s > %s 2> %s" cmd_body (Filename.quote out) (Filename.quote err))
+  in
+  let o = try read_all out with Sys_error _ -> "" in
+  let e = try read_all err with Sys_error _ -> "" in
+  (try Sys.remove out with Sys_error _ -> ());
+  (try Sys.remove err with Sys_error _ -> ());
+  (rc, o, e)
+
+let resolve_march ~toolchain_prefix =
+  match run_capture (Printf.sprintf "%ssh -c 'command -v march'" toolchain_prefix) with
+  | 0, o, _ when String.trim o <> "" -> Some (String.trim o)
+  | _ -> None
+
+let march_version ~toolchain_prefix =
+  match run_capture (Printf.sprintf "%smarch --version" toolchain_prefix) with
+  | 0, o, _ when String.trim o <> "" -> Some (String.trim o)
+  | _ -> None
+
+let realpath p = try Unix.realpath p with Unix.Unix_error _ -> p
+
+let compiler_identity ~toolchain_prefix =
+  let parts =
+    match resolve_march ~toolchain_prefix with
+    | None -> [ "march-unresolved" ]
+    | Some p ->
+      let real = realpath p in
+      let digest = try Digest.to_hex (Digest.file real) with Sys_error _ -> "unreadable" in
+      [ p; real; digest ]
+  in
+  (* The executable's digest alone misses two ways the SAME binary can run a
+     different compiler: a wrapper script that execs through
+     ~/.march/current (its bytes never change when the active toolchain
+     does), and a stdlib picked up from MARCH_STDLIB. *)
+  let global = Option.value ~default:"" (try Toolchain.global_version () with _ -> None) in
+  let stdlib = Option.value ~default:"" (Sys.getenv_opt "MARCH_STDLIB") in
+  Digest.to_hex (Digest.string (String.concat "\x00" (parts @ [ global; stdlib ])))
+
+(* `march caps` first shipped in 0.3.0 (nightly-20260805 for nightlies). *)
+let caps_min_version = "0.3.0 (or nightly-20260805)"
+
+let probe_caps_support ~toolchain_prefix =
+  let dir = Filename.temp_dir "forge_caps_probe" "" in
+  let file = Filename.concat dir "forge_caps_probe.march" in
+  let oc = open_out file in
+  output_string oc "mod ForgeCapsProbe do\n  fn probe() : Int do 1 end\nend\n";
+  close_out oc;
+  (* No MARCH_LIB_PATH: the probe must not depend on any package's tree, so
+     a failure here is about the compiler, never about a dependency. *)
+  let rc, o, e =
+    run_capture
+      (Printf.sprintf "%sMARCH_LIB_PATH= march caps %s" toolchain_prefix
+         (Filename.quote file))
+  in
+  (try Sys.remove file with Sys_error _ -> ());
+  (try Unix.rmdir dir with Unix.Unix_error _ -> ());
+  (* Keyed on the contract [of_package] relies on — exit 0 and a JSON object
+     with a "caps" field on stdout — not on the wording of an error message.
+     A compiler that predates the subcommand takes `caps` as a file name and
+     fails; one that supports it answers {"caps":[]} for this module. *)
+  let has_caps_json =
+    let needle = "\"caps\"" in
+    let n = String.length o and m = String.length needle in
+    let rec at i = i + m <= n && (String.sub o i m = needle || at (i + 1)) in
+    String.contains o '{' && at 0
+  in
+  if rc = 0 && has_caps_json then Ok ()
+  else begin
+    let where =
+      match resolve_march ~toolchain_prefix with
+      | Some p -> p
+      | None -> "(no `march` found on PATH)"
+    in
+    let version =
+      match march_version ~toolchain_prefix with
+      | Some v -> v
+      | None -> "version unknown"
+    in
+    let detail =
+      let s = String.trim (if String.trim e <> "" then e else o) in
+      let lines = String.split_on_char '\n' s in
+      let first = List.filteri (fun i _ -> i < 3) lines in
+      if s = "" then "" else "\n  " ^ String.concat "\n  " first
+    in
+    Error
+      (Printf.sprintf
+         "the March toolchain this audit runs does not support `march caps`, \
+          which `forge audit --inferred` needs.\n\
+          toolchain: %s (%s)\n\
+          `march caps` first shipped in march %s. Install a newer toolchain \
+          (`forge toolchain install`, then `forge toolchain use`) or update \
+          the project's .march-version pin.\n\
+          A trivial module run through `march caps` exited %d%s"
+         where version caps_min_version rc
+         (if detail = "" then " with no output." else ":" ^ detail))
+  end
+
 (* ── diffing two versions ──────────────────────────────────────────── *)
 
 (* [covered_by set c] — is [c] already implied by something in [set]?

@@ -2237,6 +2237,23 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | _ -> f
       in
       let f_ty = infer_expr env f in
+      (* An empty-parens call `f()` of a LOCAL value whose type is not yet
+         known — typically an unannotated parameter, `fn apply(f) do f() end`
+         — makes it a thunk `Unit -> r`.  A zero-parameter lambda infers to
+         `Unit -> T` (see the [Ast.ELam] arm), so leaving the variable free
+         would type `apply` as `a -> a` and `apply(fn -> 7)` as the thunk
+         rather than `7`.  Named fns are excluded ([fn_arities], qualified
+         names): a zero-arg `fn` is typed as its bare return type, and its
+         own forward/self-reference placeholder is an unbound var that must
+         stay free to meet that type. *)
+      (match f, args, repr f_ty with
+       | Ast.EVar name, [], TVar _
+         when not (String.contains name.txt '.')
+           && not (StrMap.mem name.txt env.fn_arities)
+           && (match lookup_var name.txt env with
+               | Some (Mono _) -> true | _ -> false) ->
+         unify env ~span:sp f_ty (TArrow (t_unit, fresh_var env.level))
+       | _ -> ());
       (* Reject wrong-arity calls of known (module-defined) functions.  March
          has no partial application: under-application panics at runtime (and
          the compiler miscompiles it into a body call with a garbage arg), and
@@ -2484,7 +2501,18 @@ let rec infer_expr env (e : Ast.expr) : ty =
          ends, as it must for a named function's parameters. *)
       check_scope_consumed ~before:env ~after:env' ~scope_span:lsp;
       check_captures env ~span:lsp captures;
-      List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty
+      (* A zero-parameter lambda (`fn -> e` / `fn () -> e`) is a thunk of
+         type `Unit -> T` — the same type the surface `() -> T` denotes and
+         the one the [check_expr] ELam arm already gives it when checked
+         against a declared `Unit -> T`.  Folding an empty param list used to
+         collapse it to plain `T` here, so a lambda typed WITHOUT an expected
+         arrow in hand (a record-literal field, an unannotated `let g = fn ->
+         e`) could never satisfy a `() -> T` field or parameter: "expected
+         `() -> Int` but got `Int`".  Calling it is unaffected — [infer_app]
+         applies the implicit unit for an empty-parens call `g()`. *)
+      (match param_tys with
+       | [] -> TArrow (t_unit, body_ty)
+       | _ -> List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty)
 
     (* ── do/end block ─────────────────────────────────────────────── *)
     | Ast.EBlock (exprs, _) ->
@@ -3188,6 +3216,14 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
            env params comps in
        check_expr env' body ret_ty ~reason;
        close env'
+     | TVar _ when params = [] ->
+       (* A zero-parameter lambda checked against a not-yet-known type (a
+          polymorphic parameter, `id(fn -> 3)`) is a `Unit -> T` thunk, the
+          same type [infer_expr]'s ELam arm gives it.  Without this the plain
+          peel below checked the BODY against the variable and typed the
+          lambda as its result. *)
+       unify env ~span:lsp ~reason expected (TArrow (t_unit, fresh_var env.level));
+       peel params expected env
      | _ -> peel params expected env)
 
   (* Match in check mode: check each arm against expected *)
@@ -3673,19 +3709,14 @@ and infer_block env exprs =
        alone (narrower scope, no false positives there either way).
 
        Critically, ALSO exclude an RHS that is itself a lambda literal
-       (`Ast.ELam`, i.e. `let g = fn ... -> body`).  A ZERO-param lambda
-       checked under plain inference (no expected-type context — see the
-       [Ast.ELam] arm of [infer_expr]) collapses to its body's result type
-       exactly like a top-level zero-arg `fn`, via the identical
-       [List.fold_right ... [] body_ty = body_ty] convention — it only
-       gets a real `Unit -> T` [TArrow] when CHECKED against one (the
-       [Ast.ELam] arm of [check_expr]).  So `let g = fn -> println("b")`
-       then `g()` (test/native/unit_callback_zero_arg.march) is completely
-       legitimate, ordinary code whose RHS produces the very same
-       "collapsed non-arrow type" shape as the bug this check targets —
-       type alone truly cannot tell them apart here, but the AST shape of
-       the RHS can: a fresh lambda LITERAL is never a "disguised alias of
-       something else", it always means exactly what it says. *)
+       (`Ast.ELam`, i.e. `let g = fn ... -> body`).  A lambda literal is
+       never a "disguised alias of something else": it always means exactly
+       what it says.  (A ZERO-param lambda used to infer to its body's
+       result type, the very "collapsed non-arrow type" shape this check
+       targets; it now infers to `Unit -> T` — see the [Ast.ELam] arm of
+       [infer_expr] — so the exclusion is belt-and-braces for
+       `let g = fn -> println("b"); g()`,
+       test/native/unit_callback_zero_arg.march.) *)
     let env' =
       match b.bind_pat, auto_lin, b.bind_expr with
       | Ast.PatVar _, Ast.Unrestricted, Ast.ELam _ ->

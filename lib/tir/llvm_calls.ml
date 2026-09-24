@@ -211,6 +211,45 @@ let fail_if_unresolved_iface_method ?(args : Tir.atom list = [])
       in
       find bare_name
   in
+  (* `to_json` with NO JsonTo impl anywhere in the program: no candidate list,
+     so the branch below never ran and the bare builtin reached the linker as
+     `Undefined symbols: _to_json`.  The builtin has no generic compiled
+     implementation (the interpreter's is a runtime impl-table lookup that
+     fails the same way, "to_json: no Json derive for type Int"), so a call
+     that got here names a type without a codec.  Say so. *)
+  if candidates = [] && bare_name = "to_json" then begin
+    let tname =
+      match args with
+      | Tir.AVar v :: _ ->
+        (match v.Tir.v_ty with
+         | Tir.TCon (n, _) -> Some n
+         | Tir.TInt -> Some "Int" | Tir.TFloat -> Some "Float"
+         | Tir.TString -> Some "String" | Tir.TBool -> Some "Bool"
+         | Tir.TUnit -> Some "Unit"
+         | _ -> None)
+      | Tir.ALit (March_ast.Ast.LitInt _) :: _ -> Some "Int"
+      | Tir.ALit (March_ast.Ast.LitFloat _) :: _ -> Some "Float"
+      | Tir.ALit (March_ast.Ast.LitString _) :: _ -> Some "String"
+      | Tir.ALit (March_ast.Ast.LitBool _) :: _ -> Some "Bool"
+      | _ -> None
+    in
+    let what = match tname with
+      | Some t -> Printf.sprintf "type `%s`" t
+      | None -> "this argument's type"
+    in
+    let fix = match tname with
+      | Some ("Int" | "Float" | "String" | "Bool" | "Unit") ->
+        "A primitive has no codec to derive; build the `JsonValue` directly \
+         (Json.Number, Json.Str, Json.Bool, Json.Null)."
+      | Some t ->
+        Printf.sprintf "Add one next to the type's declaration:\n  derive Json for %s" t
+      | None -> "Add `derive Json for <Type>` next to the type's declaration."
+    in
+    raise (Ambiguous_iface_call (Printf.sprintf
+      "no `JsonTo` implementation for %s, which the call to `to_json` needs \
+       (no type in this program derives `Json`).\n%s"
+      what fix))
+  end;
   if candidates <> [] then begin
     (* Two failures wear the same shape here and must not wear the same
        message.  If the dispatch ARGUMENT's type is concrete, nothing is
