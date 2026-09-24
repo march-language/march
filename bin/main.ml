@@ -2835,6 +2835,13 @@ let compile filename =
         ) tir.tm_fns
     end else begin
       let target = parse_target !target_str in
+      if !hot_reload_prefix <> None || !compile_so then begin
+        match March_tir.Hcr_abi.of_target target with
+        | Ok _ -> ()
+        | Error msg ->
+          Printf.eprintf "march: %s\n" msg;
+          exit 1
+      end;
       let basename = Filename.remove_extension filename in
       let ll_file  = basename ^ ".ll" in
       if !do_compile then begin
@@ -2997,6 +3004,11 @@ let compile filename =
           let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
           stamp "llvm-emit";
+          (* A previous invocation can leave the generated IR read-only (in
+             particular under Dune's source-tree sandbox).  It is always a
+             compiler output, so replace it rather than requiring callers to
+             clean their source directory before compiling again. *)
+          if Sys.file_exists ll_file then Sys.remove ll_file;
           let oc = open_out ll_file in
           output_string oc ir;
           close_out oc;
@@ -3073,6 +3085,21 @@ let compile filename =
             let http_c      = Filename.concat runtime_dir "march_http.c" in
             let extras_c2   = Filename.concat runtime_dir "march_extras.c" in
             let compress_c2 = Filename.concat runtime_dir "march_compress.c" in
+            let blake3_c2 = Filename.concat runtime_dir "march_blake3.c" in
+            let blake3_impl_c2 = Filename.concat runtime_dir "third_party/blake3/blake3.c" in
+            let blake3_dispatch_c2 = Filename.concat runtime_dir "third_party/blake3/blake3_dispatch.c" in
+            let blake3_portable_c2 = Filename.concat runtime_dir "third_party/blake3/blake3_portable.c" in
+            let hcr_identity_c2 = Filename.concat runtime_dir "march_hcr_identity.c" in
+            let target_hcr_abi = March_tir.Hcr_abi.of_target target in
+            let hcr_identity_flags =
+              match target_hcr_abi, !hot_reload_prefix with
+              | Ok abi, Some prefix ->
+                let macro name value =
+                  " -D" ^ name ^ "=" ^ Filename.quote ("\"" ^ value ^ "\"") in
+                macro "MARCH_HCR_TRIPLE" abi.llvm_triple
+                ^ macro "MARCH_HCR_TARGET" abi.canonical_target
+                ^ macro "MARCH_HCR_PREFIX" prefix
+              | _ -> "" in
             let opt_file2 f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
             let sched_c2  = Filename.concat runtime_dir "march_scheduler.c" in
             let ffi_c2    = Filename.concat runtime_dir "march_ffi.c" in
@@ -3103,12 +3130,16 @@ let compile filename =
               ^ (opt_file2 ffi_c2)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_dispatch.c") else "")  (* HCR dispatch table *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_reload.c")    else "")  (* HCR reload server *)
-              ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_blake3.c")    else "")  (* BLAKE3 for server-side cap_root recompute *)
+              ^ (if not !compile_so then
+                   opt_file2 blake3_c2 ^ opt_file2 blake3_impl_c2
+                   ^ opt_file2 blake3_dispatch_c2 ^ opt_file2 blake3_portable_c2
+                 else "")  (* BLAKE3 for server-side cap_root recompute *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_cap_lattice.c") else "")  (* cap subsumption/normalize for ACTIVATE4 admission *)
               ^ opt_file2 (Filename.concat runtime_dir "march_ctx_escape.c")  (* ~H contextual escapers; referenced by march_extras.c *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "tweetnacl.c")       else "")  (* ed25519 for ACTIVATE verification *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
+              ^ (if hcr_identity_flags <> "" then opt_file2 hcr_identity_c2 else "")
               ^ (opt_file2 (Filename.concat runtime_dir "march_reclaim.c"))  (* epoch reclamation of dead procs; referenced by march_scheduler.c *)
             in
             (* User FFI shim sources from forge.toml [[ffi]] (--ffi-c). *)
@@ -3177,10 +3208,6 @@ let compile filename =
             let ucontext_flag = ucontext_link_flags () in
             let dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
             let san_flag = sanitize_clang_flag () in
-            (* BLAKE3 flags: needed when march_blake3.c is included (server-only,
-               guarded by not !compile_so above, same as march_reload.c). *)
-            let blake3_c2 = Filename.concat runtime_dir "march_blake3.c" in
-            let blake3_flags2 = if not !compile_so && Sys.file_exists blake3_c2 then blake3_link_flags () else "" in
             (* User FFI linker flags from forge.toml [[ffi]] (--ffi-link), e.g. -lz. *)
             let ffi_link = String.concat "" (List.rev_map (fun f -> " " ^ f) !ffi_link_flags) in
             (* When compiling user FFI shims, put the runtime dir on the include
@@ -3192,11 +3219,19 @@ let compile filename =
                build host: a cross Linux .so/binary needs Linux linker flags even
                when built on macOS, and vice versa. *)
             let xtarget = parse_target !target_str in
+            let hcr_abi =
+              match March_tir.Hcr_abi.of_target xtarget with
+              | Ok abi -> Some abi
+              | Error _ -> None
+            in
             let link_is_linux =
-              March_tir.Llvm_emit.target_is_linux xtarget
-              || (match xtarget with
-                  | March_tir.Llvm_emit.Native -> Sys.file_exists "/proc/version"
-                  | _ -> false) in
+              match hcr_abi with
+              | Some abi -> abi.platform = March_tir.Hcr_abi.Elf
+              | None ->
+                March_tir.Llvm_emit.target_is_linux xtarget
+                || (match xtarget with
+                    | March_tir.Llvm_emit.Native -> Sys.file_exists "/proc/version"
+                    | _ -> false) in
             let rdynamic_flag =
               (* Export all symbols so dlopen'd patch .so can resolve back to server.
                  Pass via -Wl, so the flag goes straight to the linker, not the clang driver.
@@ -3400,7 +3435,7 @@ let compile filename =
                §5 (P3). *)
             let is_cross = March_tir.Llvm_emit.target_is_linux xtarget in
             let cross_sysroot =
-              if not is_cross then None
+              if not is_cross || !compile_so then None
               else match linux_arch_str xtarget with
                 | None -> None
                 | Some arch ->
@@ -3425,25 +3460,32 @@ let compile filename =
                correct DT_NEEDED soname.  zstd/brotli stay off for cross (zlib is
                the only mandatory codec; gzip/deflate is pure zlib). *)
             let openssl_flags2 = match cross_sysroot with
-              | None -> openssl_flags2
+              | None -> if is_cross && !compile_so then "" else openssl_flags2
               | Some sr ->
                 Printf.sprintf " -I%s/include %s/lib/libssl.so.3 %s/lib/libcrypto.so.3"
                   sr sr sr
             in
             let compress_flags2 = match cross_sysroot with
-              | None -> compress_flags2
+              | None -> if is_cross && !compile_so then "" else compress_flags2
               | Some sr ->
                 Printf.sprintf " -I%s/include %s/lib/libz.so.1" sr sr
             in
-            (* blake3 stays host-discovered for native; zeroed for cross (its .c
-               is dropped below — no target libblake3). *)
-            let blake3_flags2 = if is_cross then "" else blake3_flags2 in
+            (* The vendored portable implementation is used for every target;
+               never probe or link a host libblake3 during a cross build. *)
+            let blake3_flags2 =
+              if Sys.file_exists blake3_c2 then
+                " -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2"
+                ^ " -DBLAKE3_NO_AVX512 -DBLAKE3_USE_NEON=0"
+              else "" in
             let extra_c_files =
-              if not is_cross then extra_c_files
+              if not is_cross || not !compile_so then extra_c_files
               else
-                (* Keep march_tls.c + march_compress.c (they link against the
-                   target sysroot); drop the blake3/reload HCR pair. *)
-                let dropped = ["march_blake3.c"; "march_reload.c"] in
+                (* A patch keeps the undefined-symbol model: optional host
+                   libraries and the HCR server are supplied by the baseline,
+                   so do not compile their target-specific implementations. *)
+                let dropped = ["march_blake3.c"; "blake3.c"; "blake3_dispatch.c";
+                               "blake3_portable.c"; "march_reload.c";
+                               "march_tls.c"; "march_compress.c"] in
                 extra_c_files
                 |> String.split_on_char ' '
                 |> List.filter (fun p ->
@@ -3526,8 +3568,8 @@ let compile filename =
               | None      -> runtime ^ extra_c_files
             in
             let cmd = Printf.sprintf
-              "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s %s%s%s%s%s %s -o %s%s%s%s%s"
-              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag ucontext_flag reload_ldl strip_flag in
+              "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s%s %s%s%s%s%s %s -o %s%s%s%s%s"
+              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define hcr_identity_flags runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag ucontext_flag reload_ldl strip_flag in
             (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
             let rc = Sys.command cmd in
@@ -3661,7 +3703,14 @@ let compile filename =
           let mf = out_bin ^ ".hcr_manifest" in
           (try
              let oc = open_out mf in
-             Printf.fprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch;
+             (match March_tir.Hcr_abi.of_target target with
+              | Ok abi ->
+                Printf.fprintf oc
+                  "# march-hcr-manifest v2\n# cas_hash %s\n# target %s\n# hcr_abi %s\n# module_prefix %s\n"
+                  ch abi.canonical_target (March_tir.Hcr_abi.abi_id abi)
+                  (Option.value ~default:"" !hot_reload_prefix)
+              | Error _ ->
+                Printf.fprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch);
              Hashtbl.iter (fun name impl_h ->
                let sig_h = Option.value ~default:""
                    (Hashtbl.find_opt remote_sig_hashes name) in
