@@ -61,14 +61,20 @@ let sh ~dir cmd =
 let project version =
   let fx = getenv_abs "UPGRADE_FIXTURES_DIR" in
   let dir = Filename.temp_dir "upgrade_app_" "" in
-  sh ~dir (Printf.sprintf "cp -R %s/. . && rm -rf .forge .march" (Filename.quote (Filename.concat fx "v1")));
+  (* dune stages the fixtures read-only and cp keeps the mode: the copy
+     must be writable for the new version to be copied over it. *)
+  sh ~dir (Printf.sprintf "cp -R %s/. . && chmod -R u+w . && rm -rf .forge .march" (Filename.quote (Filename.concat fx "v1")));
   sh ~dir "git init -q && git add -A && git -c user.email=forge-test@example.invalid -c user.name=forge-test commit -q -m v1";
-  sh ~dir (Printf.sprintf "cp -R %s/. ." (Filename.quote (Filename.concat fx version)));
+  sh ~dir (Printf.sprintf "cp -R %s/. . && chmod -R u+w ." (Filename.quote (Filename.concat fx version)));
   dir
 
 (** Run `forge test --upgrade-from HEAD` in [dir]: its exit code and output. *)
 let run_upgrade dir =
   let out = Filename.concat dir "forge.out" in
+  (* Resolved before the fork: dune passes the binaries as paths relative
+     to its cwd, which the child's chdir would break. *)
+  let env = environment () in
+  let forge = Filename.concat (List.hd (String.split_on_char ':' (List.assoc "PATH" (Lazy.force hermetic_env)))) "forge" in
   let pid =
     match Unix.fork () with
     | 0 ->
@@ -77,8 +83,7 @@ let run_upgrade dir =
          let fd = Unix.openfile out [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o644 in
          Unix.dup2 fd Unix.stdout;
          Unix.dup2 fd Unix.stderr;
-         let forge = Filename.concat (List.hd (String.split_on_char ':' (List.assoc "PATH" (Lazy.force hermetic_env)))) "forge" in
-         Unix.execve forge [| "forge"; "test"; "--upgrade-from"; "HEAD" |] (environment ())
+         Unix.execve forge [| "forge"; "test"; "--upgrade-from"; "HEAD" |] env
        with _ -> Unix._exit 127)
     | pid -> pid
   in

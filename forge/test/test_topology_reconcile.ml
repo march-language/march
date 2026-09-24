@@ -57,8 +57,10 @@ let forge_path () = Filename.concat (List.hd (String.split_on_char ':' (List.ass
 let fresh_project () =
   let src = getenv_abs "RECONCILE_APP_DIR" in
   let dir = Filename.temp_dir "reconcile_app_" "" in
-  let rc = Sys.command (Printf.sprintf "cp -R %s/. %s && rm -rf %s/.forge %s/.march"
-                          (Filename.quote src) (Filename.quote dir) (Filename.quote dir) (Filename.quote dir)) in
+  (* dune stages the fixture read-only and cp keeps the mode; the test
+     rewrites topology.toml and the overlay, so make its copy writable. *)
+  let rc = Sys.command (Printf.sprintf "cp -R %s/. %s && chmod -R u+w %s && rm -rf %s/.forge %s/.march"
+                          (Filename.quote src) (Filename.quote dir) (Filename.quote dir) (Filename.quote dir) (Filename.quote dir)) in
   if rc <> 0 then Alcotest.failf "could not copy %s" src;
   dir
 
