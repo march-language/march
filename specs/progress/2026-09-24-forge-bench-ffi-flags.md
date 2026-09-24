@@ -1,4 +1,23 @@
-`[P3]` # `forge bench` never passes the project's FFI flags to the compiler
+# DONE 2026-09-24: `forge bench` now passes the project's FFI flags to the compiler
+
+**Fixed.** `Cmd_bench.run` (`forge/lib/cmd_bench.ml`) now calls
+`Cmd_build.ffi_flags_full proj` once, after the offline preflight and before any
+benchmark compiles, returns its `Error` unchanged (e.g. a failed `[ffi.rust]`
+`cargo build`), and passes the flags to every `Cmd_build.compile_entry`, the same
+source `forge build`/`run`/`test` use. No flag logic is duplicated.
+
+**Regression test:** `test_bench_links_ffi_sources` in `forge/test/test_forge.ml`
+(`interp_command` group, `Slow`): a scratch project with
+`[ffi] sources = ["native/shim.c"]` and a `bench/ffi_answer.march` that calls the
+shim's extern, run through `Cmd_bench.run` against the dev compiler
+(`with_dev_march_on_path`). With `origin/main`'s `cmd_bench.ml` swapped back it
+fails at link time (`Undefined symbols: "_forge_bench_ffi_answer"`, "some
+benchmarks failed"); with the fix it passes. Runs under
+`dune build --root . @forge/test/runtest`, which `scripts/run-tests.sh` does not
+cover.
+
+## Original report
+
 
 `Cmd_bench.run` (`forge/lib/cmd_bench.ml`) compiles every `bench/*.march` with
 
