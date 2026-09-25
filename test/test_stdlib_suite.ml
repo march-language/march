@@ -1300,8 +1300,9 @@ let test_eval_monitor_down_target_is_pid () =
       send(watcher, Check())
       kill(target)
       run_until_idle()
+      -- get_actor_field reads Int-like fields; a Bool reads as 0/1.
       match get_actor_field(watcher, "target_dead") do
-        Some(dead) -> dead
+        Some(dead) -> dead == 1
         None -> false
       end
     end
@@ -11890,6 +11891,145 @@ let hcr_manifest_actor_handler_caps_fixture_src =
   \  end\n\
    end\n"
 
+
+(* The migrate_msg P1 (specs/progress/2026-09-25-migrate-msg-actor-message-tags.md),
+   end to end on a real compiled hot deploy: v1's Tally handles Add and
+   Legacy; a feeder TASK keeps sending Legacy(1) (a task never advances, so
+   after the deploy it still runs v1 code and sends the v1 format); v2
+   removes Legacy and converts it with tally_migrate_msg. Every Legacy the
+   runtime hands to the migrate function is a heap cell v1 allocated with
+   v1's actor-message tag for Tally_Msg.Legacy. Before the fix the user's
+   TallyMsgV1.Msg compiled to tags 0/1, the compiled match fell to
+   "non-exhaustive pattern match" and the process died on the first one.
+
+   Also the "pins never reach zero" question from the same todo: once the
+   feeder has finished and Tally has moved, nothing may pin the old epoch. *)
+let migrate_msg_tally_src ~v2 =
+  "mod Main do\n\
+  \  needs IO\n\
+  \  actor Tally do\n\
+  \    state { total : Int }\n\
+  \    init  { total: 0 }\n\
+  \    on Add(n : Int) do { total: state.total + n } end\n"
+  ^ (if v2 then "" else "    on Legacy(n : Int) do { total: state.total + n } end\n")
+  ^ "  end\n\
+  \  type TallyState = { total : Int }\n\
+  \  fn feed(t : Pid(TallyState), i : Int) : Int do\n\
+  \    if i >= 150 do i else\n"
+  ^ (if v2 then "      let _ = send(t, Add(1))\n" else "      let _ = send(t, Legacy(1))\n")
+  ^ "      sleep_ms(20)\n\
+  \      feed(t, i + 1)\n\
+  \    end\n\
+  \  end\n"
+  ^ (if v2 then
+       "  mod TallyMsgV1 do\n\
+       \    type Msg = Add(Int) | Legacy(Int)\n\
+       \  end\n\
+       \  fn tally_migrate_msg(m : TallyMsgV1.Msg) : Option(Tally.Msg) do\n\
+       \    match m do\n\
+       \      TallyMsgV1.Add(n) -> Some(Add(n))\n\
+       \      TallyMsgV1.Legacy(n) -> Some(Add(n))\n\
+       \    end\n\
+       \  end\n"
+     else "")
+  ^ "  fn main(_io : Cap(IO)) do\n\
+  \    let t = spawn(Tally)\n\
+  \    let _ = task_spawn(fn _ -> feed(t, 0))\n\
+  \    println(\"tally started\")\n\
+  \    sleep_ms(30000)\n\
+  \  end\n\
+   end\n"
+
+(* A CAS hit for a --compile-so build restores the build's sidecars
+   (specs/progress/2026-09-25-cas-hit-restores-so-sidecars.md). The second
+   compile of the same source, from the same working directory (the store is
+   <cwd>/.march/cas), into a different -o is a source-level cache hit, which
+   exits before the code that writes .hcr_manifest/.schemas.json; before the
+   fix only the .so came back, and `forge deploy hot` found no manifest. *)
+let test_cas_hit_restores_so_sidecars () =
+  let main_exe = find_main_exe () in
+  let dir = Filename.temp_file "march_cas_sidecars" "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  let src = Filename.concat dir "app.march" in
+  Out_channel.with_open_bin src (fun oc -> output_string oc (migrate_msg_tally_src ~v2:false));
+  let build out =
+    let cmd = Printf.sprintf "cd %s && env HOME=%s %s --compile --compile-so --hot-reload Main -o %s %s > %s.log 2>&1"
+        (Filename.quote dir) (Filename.quote dir) (Filename.quote main_exe)
+        (Filename.quote out) (Filename.quote src) (Filename.quote out) in
+    if Sys.command cmd <> 0 then
+      Alcotest.failf "compile failed: %s" (read_file_contents (out ^ ".log"));
+    read_file_contents (out ^ ".log")
+  in
+  let a = Filename.concat dir "a.so" and b = Filename.concat dir "b.so" in
+  ignore (build a);
+  let second = build b in
+  Alcotest.(check bool) ("the second build is a cache hit: " ^ second) true
+    (contains "(cached)" second);
+  List.iter (fun sfx ->
+      Alcotest.(check bool) ("the first build wrote " ^ sfx) true (Sys.file_exists (a ^ sfx));
+      Alcotest.(check bool) ("the cache hit restored " ^ sfx) true (Sys.file_exists (b ^ sfx));
+      Alcotest.(check string) (sfx ^ " is the same file") (read_file_contents (a ^ sfx))
+        (read_file_contents (b ^ sfx)))
+    [ ".hcr_manifest"; ".schemas.json" ]
+
+let test_hcr_migrate_msg_converts_real_old_message () =
+  let module H = March_forge.Cmd_deploy_hot in
+  let module R = March_forge.Reconcile in
+  let (pk, sk) = March_ed25519.Ed25519.keygen () in
+  let pk_b64 = March_ed25519.Ed25519.pk_to_base64 pk in
+  let base = build_role_fixture ~tag:"mmbase"
+      ~extra_args:("--hot-reload Main --signing-pubkey " ^ Filename.quote pk_b64)
+      (migrate_msg_tally_src ~v2:false) in
+  (* v1 again as a .so: its .schemas.json is the running version's schema
+     forge diffs the patch against (and pins migrate_msg's old type to). *)
+  let v1so = build_role_fixture ~tag:"mmv1so" ~extra_args:"--hot-reload Main --compile-so"
+      (migrate_msg_tally_src ~v2:false) in
+  let v2so = build_role_fixture ~tag:"mmv2so" ~extra_args:"--hot-reload Main --compile-so"
+      (migrate_msg_tally_src ~v2:true) in
+  match base, v1so, v2so with
+  | Some (dir, bin), Some (_, v1), Some (_, v2) ->
+    let manifest = match H.parse_manifest (v2 ^ ".hcr_manifest") with
+      | Ok m -> m | Error e -> Alcotest.fail e in
+    let sock = Printf.sprintf "/tmp/march_mm_e2e_%d.sock" (Unix.getpid ()) in
+    let log = Filename.concat dir "server.log" in
+    with_reload_server ~dir ~bin ~sock ~extra_env:[||] (fun pid ->
+        (match e2e_connect sock with
+         | None -> Alcotest.failf "reload server never listened on %s (see %s)" sock log
+         | Some fd -> Unix.close fd);
+        Unix.sleepf 0.5;   (* the feeder has sent some Legacy on v1 *)
+        (match H.run ~tunnel:false ~ssh_host:"local" ~remote_socket:sock
+                 ~signing_pubkey:pk_b64 ~sk ~manifest ~so_path:v2
+                 ~old_schemas_path:(v1 ^ ".schemas.json")
+                 ~new_schemas_path:(v2 ^ ".schemas.json") () with
+         | Ok _ -> ()
+         | Error e -> Alcotest.failf "the deploy failed: %s\n%s" e (read_file_contents log));
+        (* The feeder runs ~3 s from start; wait for it to finish and for
+           Tally to drain what it sent. *)
+        Unix.sleepf 4.0;
+        let alive = match Unix.waitpid [ Unix.WNOHANG ] pid with (0, _) -> true | _ -> false in
+        let server_log = read_file_contents log in
+        if not alive || contains "non-exhaustive" server_log then
+          Alcotest.failf "the process died converting an old message:\n%s" server_log;
+        let pins = match R.query_reload sock with
+          | Ok ri -> ri.R.pins
+          | Error e -> Alcotest.failf "PINS: %s\n%s" e server_log in
+        let c k = Option.value ~default:(-1) (R.pins_counter pins k) in
+        print_endline (String.concat "\n" pins);
+        Alcotest.(check bool) "migrate_msg found for Tally" true
+          (contains "migrate_msg: found __migrate_msg_Tally" server_log);
+        Alcotest.(check bool) (Printf.sprintf "old Legacy messages converted (%d)" (c "converted"))
+          true (c "converted" > 0);
+        Alcotest.(check int) "nothing dropped" 0 (c "dropped");
+        Alcotest.(check int) "no marker live: Tally moved" 0 (c "markers_live");
+        (* The fully drained deploy: no epoch other than the current one may
+           still pin a unit. *)
+        let old = List.filter (fun (_, n, current) -> not current && n > 0) (R.pins_epochs pins) in
+        Alcotest.(check (list (pair int int))) "no old epoch still pinned" []
+          (List.map (fun (e, n, _) -> (e, n)) old))
+  | _ -> ()
+
+
 let test_hcr_manifest_actor_handler_caps_populated () =
   let main_exe = find_main_exe () in
   let tmp = Filename.temp_file "march_hcractorcaps" "" in
@@ -15183,6 +15323,10 @@ let stdlib_suites =
           test_hcr_manifest_role_closure_lines;
         Alcotest.test_case "HCR ACTIVATE6: a widened role closure is refused by the client gate and the server (DD step 10)" `Slow
           test_hcr_role_widening_refused_end_to_end;
+        Alcotest.test_case "HCR: a CAS hit for a --compile-so build restores .hcr_manifest and .schemas.json" `Slow
+          test_cas_hit_restores_so_sidecars;
+        Alcotest.test_case "HCR migrate_msg: a compiled deploy converts a real old-format message (Tally Add|Legacy -> Add)" `Slow
+          test_hcr_migrate_msg_converts_real_old_message;
         Alcotest.test_case "HCR manifest: disjoint fn caps stay separate, not the whole-artifact union (granularity revision)" `Slow
           test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union;
         Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow
