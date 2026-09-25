@@ -67,7 +67,11 @@ val attribute :
     closure ([Tir.ECallPtr]) has no statically known callee, so it yields no
     row — the flat marker still reports the capability, it just carries no
     owner. Consumers must therefore treat "flat caps minus attributed caps"
-    as unattributed rather than as absent. *)
+    as unattributed rather than as absent.
+
+    A call to a name DEFINED in [m] is a call to that function, never to a
+    builtin of the same bare name: the entry module's own [fn dns_resolve] is
+    not a DNS lookup. Its body is attributed on its own. *)
 
 val cap_of_call : string -> string option
 (** [cap_of_call march_name] is the capability a call to [march_name] implies,
