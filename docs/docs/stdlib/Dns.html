@@ -1634,8 +1634,11 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NativeArray.html#fn-set_i32"><span class="sb-kind" style="color:var(--fn)">F</span>set_i32</a>
 <a class="sl" href="NativeArray.html#fn-set_int"><span class="sb-kind" style="color:var(--fn)">F</span>set_int</a>
 <a class="sl" href="NativeArray.html#fn-set_u8"><span class="sb-kind" style="color:var(--fn)">F</span>set_u8</a>
+<a class="sl" href="NativeArray.html#fn-sort_f32"><span class="sb-kind" style="color:var(--fn)">F</span>sort_f32</a>
 <a class="sl" href="NativeArray.html#fn-sort_float"><span class="sb-kind" style="color:var(--fn)">F</span>sort_float</a>
+<a class="sl" href="NativeArray.html#fn-sort_i32"><span class="sb-kind" style="color:var(--fn)">F</span>sort_i32</a>
 <a class="sl" href="NativeArray.html#fn-sort_int"><span class="sb-kind" style="color:var(--fn)">F</span>sort_int</a>
+<a class="sl" href="NativeArray.html#fn-sort_u8"><span class="sb-kind" style="color:var(--fn)">F</span>sort_u8</a>
 <a class="sl" href="NativeArray.html#fn-sum_f32"><span class="sb-kind" style="color:var(--fn)">F</span>sum_f32</a>
 <a class="sl" href="NativeArray.html#fn-sum_float"><span class="sb-kind" style="color:var(--fn)">F</span>sum_float</a>
 <a class="sl" href="NativeArray.html#fn-sum_i32"><span class="sb-kind" style="color:var(--fn)">F</span>sum_i32</a>
@@ -2142,6 +2145,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Seq.html#fn-unfold_until"><span class="sb-kind" style="color:var(--fn)">F</span>unfold_until</a>
 <a class="sl" href="Seq.html#fn-zip"><span class="sb-kind" style="color:var(--fn)">F</span>zip</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Session.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Session.html">Session</a></div><div class="sb-sub"><a class="sl" href="Session.html#type-Ops"><span class="sb-kind" style="color:var(--ty)">T</span>Ops</a>
+<a class="sl" href="Session.html#type-Outcome"><span class="sb-kind" style="color:var(--ty)">T</span>Outcome</a>
 <a class="sl" href="Session.html#type-InProcess"><span class="sb-kind" style="color:var(--ty)">T</span>InProcess</a>
 <a class="sl" href="Session.html#type-InProcessState"><span class="sb-kind" style="color:var(--ty)">T</span>InProcessState</a>
 <a class="sl" href="Session.html#fn-attach"><span class="sb-kind" style="color:var(--fn)">F</span>attach</a>
@@ -2149,6 +2153,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Session.html#fn-crash_cause"><span class="sb-kind" style="color:var(--fn)">F</span>crash_cause</a>
 <a class="sl" href="Session.html#fn-crash_payload"><span class="sb-kind" style="color:var(--fn)">F</span>crash_payload</a>
 <a class="sl" href="Session.html#fn-emit"><span class="sb-kind" style="color:var(--fn)">F</span>emit</a>
+<a class="sl" href="Session.html#fn-epoch_holds_here"><span class="sb-kind" style="color:var(--fn)">F</span>epoch_holds_here</a>
 <a class="sl" href="Session.html#fn-fail"><span class="sb-kind" style="color:var(--fn)">F</span>fail</a>
 <a class="sl" href="Session.html#fn-hold_epoch"><span class="sb-kind" style="color:var(--fn)">F</span>hold_epoch</a>
 <a class="sl" href="Session.html#fn-in_process"><span class="sb-kind" style="color:var(--fn)">F</span>in_process</a>
@@ -2156,9 +2161,11 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Session.html#fn-leave"><span class="sb-kind" style="color:var(--fn)">F</span>leave</a>
 <a class="sl" href="Session.html#fn-on_cancel"><span class="sb-kind" style="color:var(--fn)">F</span>on_cancel</a>
 <a class="sl" href="Session.html#fn-on_crash"><span class="sb-kind" style="color:var(--fn)">F</span>on_crash</a>
+<a class="sl" href="Session.html#fn-on_drain"><span class="sb-kind" style="color:var(--fn)">F</span>on_drain</a>
 <a class="sl" href="Session.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
 <a class="sl" href="Session.html#fn-release_epoch"><span class="sb-kind" style="color:var(--fn)">F</span>release_epoch</a>
-<a class="sl" href="Session.html#fn-suspend"><span class="sb-kind" style="color:var(--fn)">F</span>suspend</a></div></div>
+<a class="sl" href="Session.html#fn-suspend"><span class="sb-kind" style="color:var(--fn)">F</span>suspend</a>
+<a class="sl" href="Session.html#fn-suspend_at_boundary"><span class="sb-kind" style="color:var(--fn)">F</span>suspend_at_boundary</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="SessionNode.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="SessionNode.html">SessionNode</a></div><div class="sb-sub"><a class="sl" href="SessionNode.html#type-Link"><span class="sb-kind" style="color:var(--ty)">T</span>Link</a>
 <a class="sl" href="SessionNode.html#type-EndpointState"><span class="sb-kind" style="color:var(--ty)">T</span>EndpointState</a>
 <a class="sl" href="SessionNode.html#type-Party"><span class="sb-kind" style="color:var(--ty)">T</span>Party</a>
@@ -2176,6 +2183,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#fn-connect_to"><span class="sb-kind" style="color:var(--fn)">F</span>connect_to</a>
 <a class="sl" href="SessionNode.html#fn-deliver"><span class="sb-kind" style="color:var(--fn)">F</span>deliver</a>
 <a class="sl" href="SessionNode.html#fn-dials"><span class="sb-kind" style="color:var(--fn)">F</span>dials</a>
+<a class="sl" href="SessionNode.html#fn-drain_epochs"><span class="sb-kind" style="color:var(--fn)">F</span>drain_epochs</a>
 <a class="sl" href="SessionNode.html#fn-finish"><span class="sb-kind" style="color:var(--fn)">F</span>finish</a>
 <a class="sl" href="SessionNode.html#fn-initiate"><span class="sb-kind" style="color:var(--fn)">F</span>initiate</a>
 <a class="sl" href="SessionNode.html#fn-missing_addrs"><span class="sb-kind" style="color:var(--fn)">F</span>missing_addrs</a>
@@ -2724,10 +2732,10 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-get_str"><span class="sb-kind" style="color:var(--fn)">F</span>get_str</a>
 <a class="sl" href="Yaml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
-<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Dns</span></nav><h1>Dns</h1><div class="mdoc"><p>DNS resolution module.</p><p>Resolves hostnames to IPv4 addresses via the platform's getaddrinfo(3). Results reflect the system's resolver configuration (e.g. /etc/hosts, /etc/resolv.conf, mDNS, and any configured search domains).</p><p>Public API: Dns.resolve(host)      : Result(List(String), DnsError) Dns.resolve_one(host)  : Result(String, DnsError) Dns.is_ip(s)           : Bool Dns.error_message(e)   : String</p></div><h2>Types</h2><div class="item" id="type-DnsError"><div class="ih"><span class="badge bty">type</span><span class="name">DnsError</span><span class="sig"><a href="#type-DnsError">DnsError</a></span><a class="anchor-link" href="#type-DnsError" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-error_message"><div class="ih"><span class="badge bfn">fn</span><span class="name">error_message</span><span class="sig">error_message(e : <a href="#type-DnsError">DnsError</a>) : String</span><a class="anchor-link" href="#fn-error_message" title="Link">#</a></div><div class="ib"><p>Return a human-readable description of a DnsError.</p></div></div>
+<a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Dns</span></nav><h1>Dns</h1><div class="mdoc"><p>DNS resolution module.</p><p>Resolves hostnames to IPv4 addresses via the platform's getaddrinfo(3). Results reflect the system's resolver configuration (e.g. /etc/hosts, /etc/resolv.conf, mDNS, and any configured search domains).</p><p>IPv4 only: every tcp_connect path opens an AF_INET socket, so an IPv6 answer would be an address nothing can dial.  A host with only IPv6 addresses (or an IPv6 literal such as &quot;::1&quot;) is NotFound.  The list has one entry per address, in the resolver's order, with no duplicates; the interpreter and compiled code return the same list.</p><p>Public API: Dns.resolve(host)      : Result(List(String), DnsError) Dns.resolve_one(host)  : Result(String, DnsError) Dns.is_ip(s)           : Bool Dns.error_message(e)   : String</p></div><h2>Types</h2><div class="item" id="type-DnsError"><div class="ih"><span class="badge bty">type</span><span class="name">DnsError</span><span class="sig"><a href="#type-DnsError">DnsError</a></span><a class="anchor-link" href="#type-DnsError" title="Link">#</a></div><div class="ib"></div></div><h2>Functions</h2><div class="item" id="fn-error_message"><div class="ih"><span class="badge bfn">fn</span><span class="name">error_message</span><span class="sig">error_message(e : <a href="#type-DnsError">DnsError</a>) : String</span><a class="anchor-link" href="#fn-error_message" title="Link">#</a></div><div class="ib"><p>Return a human-readable description of a DnsError.</p></div></div>
 <div class="item" id="fn-is_ip"><div class="ih"><span class="badge bfn">fn</span><span class="name">is_ip</span><span class="sig">is_ip(s : String) : Bool</span><a class="anchor-link" href="#fn-is_ip" title="Link">#</a></div><div class="ib"><p>Return true if s looks like an IPv4 address (four dot-separated octets). Does not validate octet ranges.</p><pre><code>    Dns.is_ip(&quot;127.0.0.1&quot;)    -- true
     Dns.is_ip(&quot;example.com&quot;)  -- false</code></pre></div></div>
-<div class="item" id="fn-resolve"><div class="ih"><span class="badge bfn">fn</span><span class="name">resolve</span><span class="sig">resolve(host : String) : Result(List(String), <a href="#type-DnsError">DnsError</a>)</span><a class="anchor-link" href="#fn-resolve" title="Link">#</a></div><div class="ib"><p>Resolve hostname to a list of IPv4 address strings. Returns Ok(addrs) where addrs is non-empty, or Err on failure.</p><pre><code>    match Dns.resolve(&quot;example.com&quot;) do
+<div class="item" id="fn-resolve"><div class="ih"><span class="badge bfn">fn</span><span class="name">resolve</span><span class="sig">resolve(host : String) : Result(List(String), <a href="#type-DnsError">DnsError</a>)</span><a class="anchor-link" href="#fn-resolve" title="Link">#</a></div><div class="ib"><p>Resolve hostname to a list of IPv4 address strings. Returns Ok(addrs) where addrs is non-empty, holds each address once, and keeps the resolver's order; or Err on failure (NotFound when the host has no IPv4 address).</p><pre><code>    match Dns.resolve(&quot;example.com&quot;) do
     Ok(ips)  -&gt; List.head_opt(ips)
     Err(e)   -&gt; panic(Dns.error_message(e))
     end</code></pre></div></div>

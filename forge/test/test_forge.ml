@@ -2655,8 +2655,96 @@ let test_repl_command_bare_includes_ffi_flags () =
 
 (* -------------------------------------------------------------------- suite *)
 
+(* Build step 9: forge keeps `.forge/protocols/<P>.json` current by passing
+   every stored baseline and `--emit-protocols` -- but only for a project that
+   declares an `@[endpoints]` protocol, since the flag turns off the
+   compiler's source-level cache exit. *)
+let test_protocol_flags () =
+  let root = Filename.temp_dir "forge_protocols_" "" in
+  let write path body = let oc = open_out path in output_string oc body; close_out oc in
+  let plain = Filename.concat root "plain.march" in
+  write plain "mod Plain do\n  fn f() : Int do 1 end\nend\n";
+  Alcotest.(check string) "no protocol, no flags" "" (Cmd_build.protocol_flags ~root [ plain ]);
+  let proto = Filename.concat root "app.march" in
+  write proto "mod App do\n  @[endpoints]\n  protocol P do\n    A -> B : Int\n  end\nend\n";
+  let dir = Cmd_build.protocols_dir ~root in
+  Alcotest.(check string) "first build: emit only"
+    (" --emit-protocols " ^ Filename.quote dir) (Cmd_build.protocol_flags ~root [ plain; proto ]);
+  Project.mkdir_p dir;
+  write (Filename.concat dir "P.json") "{}";
+  write (Filename.concat dir "notes.txt") "";
+  Alcotest.(check string) "later builds: every stored baseline, then emit"
+    (" --protocol-baseline " ^ Filename.quote (Filename.concat dir "P.json")
+     ^ " --emit-protocols " ^ Filename.quote dir)
+    (Cmd_build.protocol_flags ~root [ proto ])
+
+(* Build step 9, item 6: expand/contract (D21).  `Order` v1 has `choose by
+   Shop` with `more`/`done`; v2 adds `later`.  Buyer receives the choice. *)
+module PE = March_desugar.Desugar_endpoints
+
+let order_version ~fp ~extra : PE.version =
+  let branch l t = (l, [ PE.WMsg ("Shop", "Buyer", String.capitalize_ascii l, t) ]) in
+  { PE.v_proto = "Order"; v_fingerprint = fp; v_roles = [ "Buyer"; "Shop" ];
+    v_steps =
+      [ PE.WLoop
+          [ PE.WMsg ("Buyer", "Shop", "Item", "Int");
+            PE.WChoice ("Shop", [ branch "more" "Int" ] @ extra @ [ ("done", [ PE.WMsg ("Shop", "Buyer", "Done", "String"); PE.WStop ]) ]) ] ] }
+
+let order_change =
+  { Protocol_split.old_ = order_version ~fp:"f1" ~extra:[];
+    new_ = order_version ~fp:"f2" ~extra:[ ("later", [ PE.WMsg ("Shop", "Buyer", "Later", "Int") ]) ] }
+
+let test_split_monolith () =
+  let builds = [ { Protocol_split.b_name = "app"; b_roles = [ "Order.Buyer"; "Order.Shop" ] } ] in
+  match Protocol_split.plan [ order_change ] builds with
+  | Protocol_split.Split (a, b) ->
+    Alcotest.(check string) "first" "expand" a.d_label;
+    Alcotest.(check (list string)) "expand flags" [ "--protocol-expand Order:later" ] a.d_flags;
+    Alcotest.(check string) "second" "contract" b.d_label;
+    Alcotest.(check (list string)) "contract flags" [] b.d_flags
+  | v -> Alcotest.failf "expected a split, got:\n%s" (Protocol_split.render v)
+
+let test_split_separate_pools () =
+  let builds =
+    [ { Protocol_split.b_name = "shop"; b_roles = [ "Order.Shop" ] };
+      { Protocol_split.b_name = "buyer"; b_roles = [ "Order.Buyer" ] } ]
+  in
+  match Protocol_split.plan [ order_change ] builds with
+  | Protocol_split.One d -> Alcotest.(check (list string)) "receivers' build first" [ "buyer"; "shop" ] d.d_builds
+  | v -> Alcotest.failf "expected one deploy, got:\n%s" (Protocol_split.render v)
+
+let test_split_breaking_and_unchanged () =
+  let builds = [ { Protocol_split.b_name = "app"; b_roles = [ "Order.Buyer"; "Order.Shop" ] } ] in
+  (match Protocol_split.plan [ { order_change with new_ = { order_change.new_ with v_steps = [] } } ] builds with
+   | Protocol_split.Breaking [ w ] -> Alcotest.(check bool) "names the protocol" true (String.length w > 6 && String.sub w 0 6 = "Order:")
+   | v -> Alcotest.failf "expected breaking, got:\n%s" (Protocol_split.render v));
+  match Protocol_split.plan [ { order_change with new_ = order_change.old_ } ] builds with
+  | Protocol_split.Unchanged -> ()
+  | v -> Alcotest.failf "expected unchanged, got:\n%s" (Protocol_split.render v)
+
+let test_split_plan_project_monolith () =
+  let root = Filename.temp_dir "forge_split_" "" in
+  let dir = Filename.concat root ".forge/protocols" in
+  Project.mkdir_p dir;
+  let b = { PE.current = order_change.new_; previous = Some order_change.old_ } in
+  let oc = open_out (Filename.concat dir "Order.json") in
+  output_string oc (PE.baseline_to_string b);
+  close_out oc;
+  match Protocol_split.plan_project ~root ~name:"app" with
+  | Protocol_split.Split (a, _) -> Alcotest.(check (list string)) "one build, both halves" [ "app" ] a.d_builds
+  | v -> Alcotest.failf "a project with no topology is a monolith:\n%s" (Protocol_split.render v)
+
 let () =
   Alcotest.run "forge" [
+    "protocol split", [
+      Alcotest.test_case "a project with no topology splits from .forge/protocols" `Quick test_split_plan_project_monolith;
+      Alcotest.test_case "a monolith that chooses and receives splits into expand/contract" `Quick test_split_monolith;
+      Alcotest.test_case "separate pools deploy once, receivers first" `Quick test_split_separate_pools;
+      Alcotest.test_case "breaking and unchanged protocols" `Quick test_split_breaking_and_unchanged;
+    ];
+    "protocols", [
+      Alcotest.test_case "build passes protocol baselines only when a protocol exists" `Quick test_protocol_flags;
+    ];
     "scaffold", [
       Alcotest.test_case "app project creates expected files" `Quick test_scaffold_app;
       Alcotest.test_case "lib project sets type=lib"          `Quick test_scaffold_lib;

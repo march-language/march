@@ -2,10 +2,10 @@ node-a: sent seq=1
 node-a: sent seq=2
 node-a: sent seq=3
 node-a: queued seq=4
-node-b: seq=1 to=42 tag=Msgs.Ping -> Ping n=7 who=node-a
-node-b: seq=2 to=42 tag=Msgs.Report -> Report Hot(99)
-node-b: seq=3 to=42 tag=Msgs.Report -> Report Cold
-node-b: seq=4 to=42 tag=Msgs.Report -> Report Hot(7)
+node-b: seq=1 to=42 tag=Msgs.Ping schema=sent -> Ping n=7 who=node-a
+node-b: seq=2 to=42 tag=Msgs.Report schema=sent -> Report Hot(99)
+node-b: seq=3 to=42 tag=Msgs.Report schema=sent -> Report Cold
+node-b: seq=4 to=42 tag=Msgs.Report schema=sent -> Report Hot(7)
 inbox: GotPing n=7
 inbox: GotReport Hot(99)
 inbox: GotReport Cold

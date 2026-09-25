@@ -120,6 +120,8 @@ native_default_method_args: coverage audit (user + stdlib): 120 enforced, 0 iner
 native_default_method_args: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_dist_monitor_loopback: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_dist_monitor_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_dns_resolve_parity: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_dns_resolve_parity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_render_show: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
@@ -386,6 +388,8 @@ native_remote_actor_dispatch: coverage audit (user + stdlib): 120 enforced, 0 in
 native_remote_actor_dispatch: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_remote_ref_hashes: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_remote_ref_hashes: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_remote_schema: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_remote_schema: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_result_int_match: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_result_int_match: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ring_buf_ops: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced

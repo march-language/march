@@ -78,6 +78,18 @@ mod Node do
     end
   end
 
+  -- The form a typed send lowers to (build step 9): [schema] is the message
+  -- type's schema hash, which the compiler computes; it rides the frame so a
+  -- receiver can tell a same-named type of another shape.
+  fn send_tagged_schema(peer : Peer, to : Pid, type_tag : String, schema : String, json) : Result(Int, SendError) do
+    let seq = next_seq()
+    let payload = Bytes.to_list(Bytes.from_string(Json.to_string(json)))
+    match NodeSend.cast_schema(wire_fd(peer), seq, to, type_tag, schema, payload) do
+      Ok(_) -> Ok(seq)
+      Err(e) -> Err(e)
+    end
+  end
+
   -- The typed send. `msg`'s type must `derive Json`; see the module comment
   -- for what the compiler does with this call. Returns the message's seq.
   fn send(peer : Peer, to : Pid, msg) : Result(Int, SendError) do
@@ -97,6 +109,16 @@ mod Node do
     let seq = next_seq()
     let payload = Bytes.to_list(Bytes.from_string(Json.to_string(json)))
     match NodeQueue.cast(q, seq, to, type_tag, payload, policy) do
+      Ok(_) -> Ok(seq)
+      Err(e) -> Err(e)
+    end
+  end
+
+  -- `enqueue_tagged` with the schema hash (what `enqueue` lowers to).
+  fn enqueue_tagged_schema(q, to : Pid, type_tag : String, schema : String, json, policy : NodeQueue.Policy) : Result(Int, NodeQueue.EnqueueError) do
+    let seq = next_seq()
+    let payload = Bytes.to_list(Bytes.from_string(Json.to_string(json)))
+    match NodeQueue.cast_schema(q, seq, to, type_tag, schema, payload, policy) do
       Ok(_) -> Ok(seq)
       Err(e) -> Err(e)
     end
@@ -122,9 +144,45 @@ mod Node do
     panic("Node.accepts: this call was not resolved by the compiler -- the typechecker records it and both backends rewrite it to tag_is")
   end
 
-  -- The resolved form of `accepts`.
+  -- The tag alone: what `accepts_tag` resolves to.
   fn tag_is(d : Delivery, tag : String) : Bool do
     d.type_tag == tag
+  end
+
+  -- The resolved form of `accepts` (build step 9): the tag, and the schema
+  -- hash when the sender sent one. A sender built before schema hashes sends
+  -- none and is taken at its tag.
+  fn tag_is_schema(d : Delivery, tag : String, schema : String) : Bool do
+    d.type_tag == tag && (schema == "" || d.schema == "" || d.schema == schema)
+  end
+
+  -- The resolved form of `schema_matches`: the delivery carries exactly this
+  -- schema hash.
+  fn schema_is(d : Delivery, schema : String) : Bool do
+    d.schema == schema
+  end
+
+  -- `@[remote]`'s other tests (build step 9), resolved like `accepts`:
+  -- `accepts_tag(d, fn (_ : T) -> ())` is T's tag alone (to tell a
+  -- same-named type of ANOTHER shape), `schema_matches(d, fn (_ : T) -> ())`
+  -- is T's schema hash alone (to pick the `migrate_msg` input type an old
+  -- shape decodes as), and `schema_of(fn (_ : T) -> ())` is T's schema hash
+  -- as a String.
+  fn accepts_tag(d : Delivery, witness) : Bool do
+    let _ = d
+    let _ = witness
+    panic("Node.accepts_tag: this call was not resolved by the compiler")
+  end
+
+  fn schema_matches(d : Delivery, witness) : Bool do
+    let _ = d
+    let _ = witness
+    panic("Node.schema_matches: this call was not resolved by the compiler")
+  end
+
+  fn schema_of(witness) : String do
+    let _ = witness
+    panic("Node.schema_of: this call was not resolved by the compiler")
   end
 
   -- The receiver's half of the codec: the delivery's payload as JSON, ready

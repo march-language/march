@@ -1,0 +1,7 @@
+Ok([127.0.0.1])
+Ok([10.1.2.3])
+Ok(127.0.0.1)
+::1 has no IPv4 answer: true
+localhost no duplicates: true
+localhost all IPv4: true
+localhost has 127.0.0.1: true

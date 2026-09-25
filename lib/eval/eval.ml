@@ -1833,7 +1833,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
      ([type_name_of_value]: a record's registered shape, a constructor's
      parent type).  On that path the tag is the runtime (short) name.  Only a
      value no table and no shape can name reaches the panicking body. *)
-  | EApp (EVar { txt = "Node.accepts"; _ }, [ _; _ ], sp)
+  | EApp (EVar { txt = ("Node.accepts" | "Node.accepts_tag" | "Node.schema_matches" | "Node.schema_of"); _ }, _, sp)
     when March_ast.Json_dispatch.find sp <> None ->
     (* `@[remote]`'s tag test (Desugar_remote): the typechecker minted the tag
        from the witness's parameter type; compare the delivery's tag with it.
@@ -1871,7 +1871,9 @@ and eval_expr_inner (env : env) (e : expr) : value =
           in
           let json = apply codec [msg] in
           let send = eval_expr env (EVar { txt = tagged; span = fsp }) in
-          apply send ([dst; to_; VString tag; json] @ rest))
+          (* The schema hash (build step 9): the typechecker's, or none on an
+             unchecked run -- a receiver then compares the tag alone. *)
+          apply send ([dst; to_; VString tag; VString (March_ast.Json_dispatch.find_schema sp); json] @ rest))
      | _ -> assert false)
 
   | EApp (f, args, sp) ->

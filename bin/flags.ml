@@ -39,6 +39,17 @@ let topology_file  : string option ref = ref None
 let topology_pools : string list option ref = ref None
 (* --topology-pools a,b: the pools this build contains (an isolated pool's own
    build, or the shared build without the isolated ones). Default: every pool. *)
+let protocol_baselines : string list ref = ref []
+(* --protocol-baseline <file> (repeatable): a protocol's previous version, as
+   `--emit-protocols` wrote it (.forge/protocols/<P>.json). `<P>_Msg.compat()`
+   is computed against it (plan II.5, build step 9). *)
+let emit_protocols_dir : string option ref = ref None
+(* --emit-protocols <dir>: after a clean typecheck, write <dir>/<P>.json for
+   every `@[endpoints]` protocol: this build's version, and the previous one
+   when the protocol changed. forge passes .forge/protocols on every build. *)
+let protocol_baseline_tag : string option ref = ref None
+(* A digest of the --protocol-baseline files, for the CAS key: the baseline
+   changes the generated `compat()`, so it changes the binary. *)
 let topology_isolate_foreign = ref false
 (* --topology-isolate-foreign: reject an IO.Foreign role or hook in a pool
    that is not `isolate = true` (the opt-in check of plan section 4). *)

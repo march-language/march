@@ -457,7 +457,12 @@ mod NodeQueue do
   -- as Bytes. The remote-send path a program should use once it has a
   -- queue for the peer; NodeSend.cast writes straight to a socket.
   fn cast(q, seq : Int, to : Pid, type_tag : String, payload : List(Int), policy : Policy) : Result((), EnqueueError) do
-    enqueue(q, seq, Bytes.from_list(NetFrame.encode(NodeSend.encode_msg(seq, to, type_tag, payload))), policy)
+    cast_schema(q, seq, to, type_tag, "", payload, policy)
+  end
+
+  -- `cast` with the message type's schema hash in the frame (build step 9).
+  fn cast_schema(q, seq : Int, to : Pid, type_tag : String, schema : String, payload : List(Int), policy : Policy) : Result((), EnqueueError) do
+    enqueue(q, seq, Bytes.from_list(NetFrame.encode(NodeSend.encode_msg_schema(seq, to, type_tag, schema, payload))), policy)
   end
 
   -- `close`, and close the connection's fd through its writer (after every

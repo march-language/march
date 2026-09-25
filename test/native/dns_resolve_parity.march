@@ -1,0 +1,55 @@
+-- dns_resolve answers the same list interpreted and compiled.
+-- (specs/progress/2026-09-25-dns-resolve-parity.md)
+--
+-- Until 2026-09-25 the two backends disagreed on what the list holds:
+--   interpreted  getaddrinfo(AF_INET, no socktype hint), no dedup:
+--                "127.0.0.1" -> [127.0.0.1, 127.0.0.1] (one per socket type;
+--                three on Linux), "::1" -> Err
+--   compiled     getaddrinfo(AF_UNSPEC, SOCK_STREAM), dedup:
+--                "127.0.0.1" -> [127.0.0.1], "::1" -> Ok([::1]),
+--                "localhost" -> [127.0.0.1, ::1] on macOS
+-- The contract now (stdlib/dns.march): IPv4 addresses only, one entry per
+-- address, in resolver order.  Every tcp_connect path in both backends opens
+-- an AF_INET socket, so an IPv6 answer is an address nothing can dial.
+--
+-- The numeric hosts involve no resolver and no /etc/hosts, so their exact
+-- lists are safe to pin.  `localhost` depends on the host's /etc/hosts, so
+-- only properties that hold on every CI host are printed for it.  The dune
+-- rule runs this BOTH ways against the one golden.
+mod Main do
+  needs IO.Console, IO.Network
+
+  pfn has_dup(xs : List(String)) : Bool do
+    match xs do
+      Nil -> false
+      Cons(x, rest) -> if List.member(rest, x) do true else has_dup(rest) end
+    end
+  end
+
+  pfn all_ipv4(xs : List(String)) : Bool do
+    List.all(xs, fn s -> Dns.is_ip(s) && !string_contains(s, ":"))
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_net : Cap(IO.Network)) do
+    -- Numeric IPv4: exactly one entry, whatever the socket-type fan-out.
+    println(to_string(dns_resolve("127.0.0.1")))
+    println(to_string(dns_resolve("10.1.2.3")))
+    println(to_string(Dns.resolve_one("127.0.0.1")))
+
+    -- Numeric IPv6: no IPv4 address, so no answer (compiled said Ok([::1])).
+    let v6 = match dns_resolve("::1") do
+      Ok(_) -> false
+      Err(_) -> true
+    end
+    println("::1 has no IPv4 answer: " ++ to_string(v6))
+
+    -- localhost: properties only, the exact list is /etc/hosts' business.
+    match dns_resolve("localhost") do
+      Ok(ips) ->
+        println("localhost no duplicates: " ++ to_string(!has_dup(ips)))
+        println("localhost all IPv4: " ++ to_string(all_ipv4(ips)))
+        println("localhost has 127.0.0.1: " ++ to_string(List.member(ips, "127.0.0.1")))
+      Err(msg) -> println("localhost failed: " ++ msg)
+    end
+  end
+end

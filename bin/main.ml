@@ -1029,7 +1029,12 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
            gate's own driver test went silent on a warm CAS). *)
         @ (if !stdlib_source then ["stdlib-source"] else [])
         @ cross_sysroot_tag
-        @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
+        @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])
+        (* --protocol-baseline: the previous protocol versions decide the
+           generated `<P>_Msg.compat()` table, so they are part of the binary. *)
+        @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])
+        @ List.map (fun (p, l) -> "pexpand:" ^ p ^ ":" ^ l)
+            (List.sort compare !March_desugar.Desugar_endpoints.expand_labels)) in
   let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
   (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" <> None then
      Printf.eprintf "MARCH_CASFLAGS: target=%s flags=[%s] ch=%s\n%!"
@@ -1654,6 +1659,69 @@ let contract_attr_fix ~src ~filename ~read_file
         text = attr ^ " " }
   | _ -> above (String.make (max 0 col) ' ')
 
+(** Protocol evolution inputs (build step 9), read before anything is
+    desugared: every `--protocol-baseline` file, registered under its
+    protocol's name for [Desugar_endpoints.expand] (and digested for the CAS
+    key), and, from the `--topology` digest, the protocols the app's topology
+    uses, whose unlabelled steps are warnings (D25).  A digest that does not
+    read is left for the `--topology` handling below to report. *)
+let load_protocol_inputs () =
+  let module E = March_desugar.Desugar_endpoints in
+  let contents =
+    List.map (fun path ->
+        let text =
+          try read_file path
+          with Sys_error m -> Printf.eprintf "error: --protocol-baseline: %s\n" m; exit 1
+        in
+        (match E.baseline_of_string text with
+         | Ok b -> Hashtbl.replace E.baselines b.E.current.E.v_proto b
+         | Error m -> Printf.eprintf "error: --protocol-baseline %s: %s\n" path m; exit 1);
+        text)
+      (List.rev !protocol_baselines)
+  in
+  if contents <> [] then
+    protocol_baseline_tag :=
+      Some (Digest.to_hex (Digest.string (String.concat "\000" (List.sort String.compare contents))));
+  match !topology_file with
+  | None -> ()
+  | Some path ->
+    (match March_forge.Topology.read_digest path with
+     | Error _ -> ()
+     | Ok t -> E.topology_protocols := March_forge.Topology.protocols_used t)
+
+(** --emit-protocols: write each expanded protocol's next baseline. *)
+let emit_protocols () =
+  match !emit_protocols_dir with
+  | None -> ()
+  | Some dir ->
+    let module E = March_desugar.Desugar_endpoints in
+    let rec mkdir_p d =
+      if d <> "" && d <> "." && d <> "/" && not (Sys.file_exists d) then begin
+        mkdir_p (Filename.dirname d);
+        (try Sys.mkdir d 0o755 with Sys_error _ -> ())
+      end
+    in
+    mkdir_p dir;
+    let in_stdlib file =
+      let n = String.length file in
+      let rec has i = i + 7 <= n && (String.sub file i 7 = "stdlib/" || has (i + 1)) in
+      has 0
+    in
+    Hashtbl.iter (fun name (v, file) ->
+        if not (in_stdlib file) then begin
+        let path = Filename.concat dir (name ^ ".json") in
+        let body = E.emit_file v in
+        let unchanged = try read_file path = body with Sys_error _ -> false in
+        if not unchanged then begin
+          let tmp = path ^ ".tmp" in
+          let oc = open_out_bin tmp in
+          output_string oc body;
+          close_out oc;
+          Sys.rename tmp path
+        end
+        end)
+      E.emitted
+
 let compile filename =
   (* Enable backtraces so an internal-error report (below) is actionable
      even without OCAMLRUNPARAM=b. *)
@@ -1665,6 +1733,7 @@ let compile filename =
       Printf.eprintf "march: %s\n" msg;
       exit 1
   in
+  load_protocol_inputs ();
   (* --fmt: format the source file before compiling *)
   if !do_fmt then begin
     let changed, formatted = fmt_file filename in
@@ -1690,6 +1759,10 @@ let compile filename =
          `check` artifact skips entirely: CI saw an empty report after an
          earlier plain --check of the same source (PR #596). *)
       || !dump_role_authority
+      (* --emit-protocols writes a file from the desugared protocols; a warm
+         artifact would exit before any protocol is expanded and the baseline
+         would silently stop following the source. *)
+      || !emit_protocols_dir <> None
     then None
     else if not !do_compile && not !do_check then None
     else try
@@ -2269,6 +2342,7 @@ let compile filename =
   in
   (* In compile mode, abort on user-file errors only.  Stdlib errors
      (e.g. http_client) are tolerated since those modules are WIP. *)
+  if not frontend_rejected then emit_protocols ();
   if frontend_rejected then exit 1
   (* --check: stop after typecheck.  Diagnostics above already printed; we just
      exit 0 so tooling (forge build / forge check) can treat a clean typecheck
@@ -4861,6 +4935,17 @@ let () =
     ("--args",       Arg.Rest_all (fun l -> prog_args := Some l),
                      " Pass every remaining argument to the program as its argv; must come last");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
+    ("--protocol-baseline", Arg.String (fun p -> protocol_baselines := p :: !protocol_baselines),
+     "<file>  A protocol's previous version (.forge/protocols/<P>.json, from --emit-protocols); `<P>_Msg.compat()` is computed against it. Repeatable");
+    ("--protocol-expand", Arg.String (fun spec ->
+         match String.index_opt spec ':' with
+         | Some i ->
+           let p = String.sub spec 0 i and l = String.sub spec (i + 1) (String.length spec - i - 1) in
+           March_desugar.Desugar_endpoints.expand_labels := (p, l) :: !March_desugar.Desugar_endpoints.expand_labels
+         | None -> Printf.eprintf "error: --protocol-expand wants <Protocol>:<label>, got %s\n" spec; exit 2),
+     "<P>:<label>  Build the EXPAND half of a two-deploy protocol change (D21): P's chooser stays on the previous fingerprint and cannot choose <label>. Needs --protocol-baseline. Repeatable");
+    ("--emit-protocols", Arg.String (fun d -> emit_protocols_dir := Some d),
+     "<dir>  After a clean typecheck, write <dir>/<P>.json for every @[endpoints] protocol: the baseline the next build's --protocol-baseline reads");
     ("--topology",   Arg.String (fun p -> topology_file := Some p),
      "<json>  Read a forge topology digest (.forge/topology.json, schema version 1): check its bindings and caps, and generate `main` when the entry module has none");
     ("--topology-pools", Arg.String (fun s ->
