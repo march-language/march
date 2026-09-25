@@ -1220,17 +1220,40 @@ module Gen = struct
   let binary_name ~project (p : pool) =
     if p.isolate then project ^ "-" ^ p.pool_name else project
 
+  (** The pool-level environment every node of [p] shares (the runtime's
+      names: [MARCH_POOLS], [MARCH_TOPOLOGY_FILE]). *)
+  let pool_environment ~project (p : pool) =
+    [ ("MARCH_POOLS", p.pool_name);
+      ("MARCH_TOPOLOGY_FILE", Printf.sprintf "/etc/march/%s/topology.json" project) ]
+
+  let environment_lines (env : (string * string) list) =
+    String.concat "\n" (List.map (fun (k, v) -> Printf.sprintf "Environment=%s=%s" k v) env)
+
+  (** One pool's unit. [environment] is written as [Environment=] lines;
+      [forge topology gen systemd] gives the pool-level ones, [forge host
+      init] each host's own (node name, labels, ports, seeds, sockets). *)
+  let systemd_unit ?(generator = "forge topology gen systemd") ~project ~(topo : t) ~environment (p : pool) =
+    render Topology_tmpl_systemd.content [
+      ("pool", p.pool_name);
+      ("project", project);
+      ("generator", generator);
+      ("user", "march");
+      ("exec", Printf.sprintf "/opt/march/%s/%s" project (binary_name ~project p));
+      ("environment", environment_lines environment);
+      ("stop_sec", string_of_int (stop_sec topo));
+      ("roles", if p.serves = [] then "(no roles; hook only)" else String.concat " " p.serves);
+    ]
+
   (** One output file per pool: `march-<pool>.service`. *)
   let systemd ~project (ex : export) : (string * string) list =
     List.map (fun p ->
         ( Printf.sprintf "march-%s.service" p.pool_name,
-          render Topology_tmpl_systemd.content [
-            ("pool", p.pool_name);
-            ("project", project);
-            ("exec", Printf.sprintf "/opt/march/%s/%s" project (binary_name ~project p));
-            ("stop_sec", string_of_int (stop_sec ex.topo));
-            ("roles", if p.serves = [] then "(no roles; hook only)" else String.concat " " p.serves);
-          ] ))
+          systemd_unit ~project ~topo:ex.topo
+            ~environment:(pool_environment ~project p
+                          @ [ ("MARCH_TOPOLOGY_STATUS", Printf.sprintf "/var/lib/march/%s/run/%s.status" project p.pool_name);
+                              ("MARCH_HOT_RELOAD_SOCKET", Printf.sprintf "/var/lib/march/%s/run/%s.sock" project p.pool_name);
+                              ("HOME", Printf.sprintf "/var/lib/march/%s" project) ])
+            p ))
       ex.topo.pools
 
   (** One shell script per host: its pool's public ports from anywhere, the

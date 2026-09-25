@@ -8,10 +8,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=march
+Group=march
 ExecStart=/opt/march/shop/shop
-Environment=MARCH_POOL=edge
-Environment=MARCH_TOPOLOGY=/etc/march/shop/topology.json
-# Per-host settings (MARCH_NODE_LABELS, ports, secrets) live in the env file the launcher writes.
+Environment=MARCH_POOLS=edge
+Environment=MARCH_TOPOLOGY_FILE=/etc/march/shop/topology.json
+Environment=MARCH_TOPOLOGY_STATUS=/var/lib/march/shop/run/edge.status
+Environment=MARCH_HOT_RELOAD_SOCKET=/var/lib/march/shop/run/edge.sock
+Environment=HOME=/var/lib/march/shop
+# Secrets (the cluster secret) live in the env file `forge host init` writes (mode 0640).
 EnvironmentFile=-/etc/march/shop/edge.env
 Restart=on-failure
 RestartSec=2
@@ -32,10 +37,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=march
+Group=march
 ExecStart=/opt/march/shop/shop
-Environment=MARCH_POOL=ledger
-Environment=MARCH_TOPOLOGY=/etc/march/shop/topology.json
-# Per-host settings (MARCH_NODE_LABELS, ports, secrets) live in the env file the launcher writes.
+Environment=MARCH_POOLS=ledger
+Environment=MARCH_TOPOLOGY_FILE=/etc/march/shop/topology.json
+Environment=MARCH_TOPOLOGY_STATUS=/var/lib/march/shop/run/ledger.status
+Environment=MARCH_HOT_RELOAD_SOCKET=/var/lib/march/shop/run/ledger.sock
+Environment=HOME=/var/lib/march/shop
+# Secrets (the cluster secret) live in the env file `forge host init` writes (mode 0640).
 EnvironmentFile=-/etc/march/shop/ledger.env
 Restart=on-failure
 RestartSec=2
@@ -56,10 +66,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=march
+Group=march
 ExecStart=/opt/march/shop/shop-imaging
-Environment=MARCH_POOL=imaging
-Environment=MARCH_TOPOLOGY=/etc/march/shop/topology.json
-# Per-host settings (MARCH_NODE_LABELS, ports, secrets) live in the env file the launcher writes.
+Environment=MARCH_POOLS=imaging
+Environment=MARCH_TOPOLOGY_FILE=/etc/march/shop/topology.json
+Environment=MARCH_TOPOLOGY_STATUS=/var/lib/march/shop/run/imaging.status
+Environment=MARCH_HOT_RELOAD_SOCKET=/var/lib/march/shop/run/imaging.sock
+Environment=HOME=/var/lib/march/shop
+# Secrets (the cluster secret) live in the env file `forge host init` writes (mode 0640).
 EnvironmentFile=-/etc/march/shop/imaging.env
 Restart=on-failure
 RestartSec=2

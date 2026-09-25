@@ -226,3 +226,13 @@
      (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
       (setenv UPGRADE_FIXTURES_DIR fixtures/upgrade
        (run %{exe:test_upgrade_from.exe}))))))))
+
+; test_host_init.ml: `forge host init` (distributed-deploys build step 10b).
+; `local`: the host script against a scratch directory (in-process, no
+; toolchain). `container` (Slow): the acceptance, over real ssh against an
+; sshd container (alpine); it SKIPs loudly when Docker is absent or the image
+; cannot be built, never passes vacuously.
+(test
+ (name test_host_init)
+ (modules test_host_init)
+ (libraries march_forge alcotest unix march_ed25519))

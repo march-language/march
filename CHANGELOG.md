@@ -12,6 +12,11 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **`forge topology gen systemd` names the variables the runtime reads**:
+  `MARCH_POOLS` and `MARCH_TOPOLOGY_FILE` (it wrote `MARCH_POOL` and
+  `MARCH_TOPOLOGY`, which nothing reads), and adds `User=march`, the reload
+  socket, the status file and `HOME`. `forge topology gen ufw` now allows ssh
+  before `ufw --force enable`, which otherwise locked the operator out.
 - **`forge deploy hot` checks a patch's target identity before uploading it.**
   #606 taught the reload server to answer `HCR_INFO` (target, HCR ABI, module
   prefix) but forge never asked, and it never read the manifest's `# hcr_abi`
@@ -39,6 +44,16 @@ git log is authoritative for exact commits.
   stack, the stack's size and target, and flags code that drifted from what forge
   last deployed. `FORGE_SSH_CONFIG=<file>` passes `-F <file>` to every ssh forge
   starts.
+- **`forge host init --env <env>`** prepares every host of an ssh topology once,
+  over ssh: the `march` user and directories (code, the service's HOME whose CAS
+  root holds the persisted patch stack, run state), the pool's systemd unit with
+  the host's own `Environment=` (node name, labels, cluster port and address,
+  seeds, reload socket, status and topology files, `MARCH_DEPLOY_POLICY`), the
+  deploy public key, a shared cluster secret or, with an operator key from
+  `forge cluster keygen`, a node certificate per node, the node's capability
+  policy from its pool's written or derived `caps`, and the pool's ufw rules
+  (applied when ufw is installed). A second run changes nothing. Each host's
+  target (`linux/amd64`, `linux/arm64`) is recorded in `.forge/hosts/<env>.json`.
 - **`NativeArray.sort_i32`, `sort_f32` and `sort_u8`: every NativeArray width
   can now be sorted.** Same ownership as `sort_int`: in place when the array is
   uniquely owned, copy-on-write when it is shared. `sort_i32` is the same

@@ -18,7 +18,7 @@ let known_builtin_names =
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
     "licenses"; "tree"; "outdated"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "audit"; "ffi"; "fix"; "help";
-    "completions"; "deploy"; "hot-reload"; "topology"; "cluster" ]
+    "completions"; "deploy"; "hot-reload"; "topology"; "cluster"; "host" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
    Archive tasks look like "bastion.new" — dotted namespaces not used by any
@@ -1600,6 +1600,46 @@ let topology_cmd =
                      status of the running cluster")
     [topology_check_cmd; topology_export_cmd; topology_gen_cmd; topology_status_cmd; topology_apply_cmd]
 
+(* -------------------------------------------------------------- forge host *)
+
+let host_init_cmd =
+  let operator_key =
+    Arg.(value & opt (some string) None & info ["operator-key"] ~docv:"PATH"
+           ~doc:"The operator key (`forge cluster keygen`) that signs each node's certificate. \
+                 Default: .forge/cluster/operator.key when it exists; without one the hosts get \
+                 a shared cluster secret instead.")
+  in
+  let trust_domain =
+    Arg.(value & opt string "cluster.local" & info ["trust-domain"] ~docv:"DOMAIN"
+           ~doc:"Trust domain of the node certificates (certificate mode).")
+  in
+  let no_firewall =
+    Arg.(value & flag & info ["no-firewall"]
+           ~doc:"Write each host's ufw rules but do not apply them.")
+  in
+  let run env operator_key trust_domain no_firewall =
+    match Project.load () with
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+    | Ok proj ->
+      let opts = { (Host_init.default_opts env) with
+                   Host_init.operator_key; trust_domain; firewall = not no_firewall } in
+      match Host_init.run ~proj ~opts () with
+      | Ok report -> print_string report
+      | Error m -> Printf.eprintf "%s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "init"
+           ~doc:"Prepare every host of an ssh topology ($(b,[backend] kind = \"ssh\") in the \
+                 $(b,--env) overlay) once, over ssh: the march user and directories, the pool's \
+                 systemd unit with this host's environment, the deploy public key, the cluster \
+                 secret or node certificate, the node's capability policy, firewall rules and \
+                 the topology. Idempotent: a second run changes nothing. Records each host's \
+                 target in .forge/hosts/<env>.json for $(b,forge deploy).")
+    Term.(const run $ topology_env $ operator_key $ trust_domain $ no_firewall)
+
+let host_cmd =
+  Cmd.group (Cmd.info "host" ~doc:"Hosts of an ssh topology: one-time setup")
+    [host_init_cmd]
+
 let completions_cmd =
   let shell =
     Arg.(required & pos 0 (some string) None &
@@ -1686,7 +1726,7 @@ let () =
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
       licenses_cmd; tree_cmd; outdated_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
-      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; topology_cmd; cluster_cmd; completions_cmd; help_cmd ]
+      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; topology_cmd; cluster_cmd; host_cmd; completions_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term

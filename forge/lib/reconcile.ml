@@ -512,7 +512,7 @@ let ssh_nodes ~(layout : Host_layout.t) ~pubkey ~(records : host_record list) (t
 (** Write [content] to [path] on a host (atomically: temp file + mv, as
     the invoking user; [$SUDO] is empty for root, else [sudo -n]). The
     script prints [changed <path>] or [ok <path>] (unchanged). *)
-let put_file_script ~path ~mode ?(owner = "") (content : string) : string =
+let put_file_script ~path ~mode ?(owner = "") ?(on_change = "") (content : string) : string =
   let b64 = March_ed25519.Ed25519.pk_to_base64 (Bytes.of_string content) in
   let q = Remote.sh_quote path in
   let b = Buffer.create (String.length b64 + 1024) in
@@ -533,6 +533,7 @@ let put_file_script ~path ~mode ?(owner = "") (content : string) : string =
   line "else";
   line ("  " ^ fix_attrs "\"$tmp\"" ^ " && $SUDO mv -f \"$tmp\" " ^ q ^ " && echo "
         ^ Remote.sh_quote ("changed " ^ path));
+  if on_change <> "" then line ("  " ^ on_change);
   line "fi";
   Buffer.contents b
 
