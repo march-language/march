@@ -98,20 +98,22 @@ kills ends as `Err(Left("draining"))`.
    count as message-compatible.
 8. **`migrate_msg` converts across ONE message-type change**: an old message two
    changes behind is dropped and counted (the older conversion's `.so` may be gone).
-9. **No `DELIVERY_FAILED` for remote deliveries dropped in the receive loop.** A
-   remote delivery is a plain local send from a route closure in `cluster_node`, so
-   the loop has no handle on the connection; such drops are counted with the rest.
-   Follow-up todo.
+9. ~~No `DELIVERY_FAILED` for remote deliveries dropped in the receive loop.~~ Closed
+   2026-09-24: the delivery's `(connection, seq)` rides the mailbox node and the loop
+   reports a drop through `ClusterNode`'s hook
+   ([2026-09-24-dd-d27-session-drains.md](2026-09-24-dd-d27-session-drains.md), item 5).
 10. **Hosted holds are per started endpoint** (`take_idle` to `finish`/`cancel`), not
     per `await_*`: same count of holds, one hold/release pair per session instead of
     per step.
-11. **Only hosted sessions end as `Left("draining")`.** A party whose held Endpoint is
-    killed at a hard deadline ends through the existing dead-endpoint paths. D27
-    loop-boundary session drains (SessionNode reading the draining flag) are not
-    built: `march_hcr_epoch_draining` exists in C with no builtin yet. Follow-up todo.
-12. **Hard deadline, non-actor procs: `stop_requested`**, which ends a blocking receive;
-    a task computing without receiving runs on (the scheduler is cooperative). Tasks
-    are not cancelled through their handles.
+11. ~~Only hosted sessions end as `Left("draining")`; D27 drains not built.~~ Closed
+    2026-09-24: a party whose Endpoint is killed at the hard deadline ends as
+    `Left("draining")`, and sessions drain at loop boundaries (D27) through
+    `epoch_draining()` ([2026-09-24-dd-d27-session-drains.md](2026-09-24-dd-d27-session-drains.md),
+    items 1-3).
+12. ~~Hard deadline, non-actor procs: `stop_requested` only.~~ Closed 2026-09-24: tasks
+    are cancelled through their handles at their next cancellation point (same entry,
+    item 3). What remains: a task parked in an fd wait, a `task_await` or an
+    `Actor.call` is cancelled only when that wait ends.
 13. **Nested `receive()` inside a handler skips markers and applies no epoch rules.**
 14. **The activation log is never freed** (a few dozen bytes per deploy): an old-stamped
     message can outlive every unit of its epoch and must still see the type change.
@@ -122,8 +124,8 @@ kills ends as `Err(Left("draining"))`.
 17. **Commits**: items 1-4 share `march_runtime.c`/`march_scheduler.c`, so they landed
     as three commits by layer (dispatch+codegen, runtime+server, forge) rather than one
     per item.
-18. **Step 3 had not landed** when item 6 merged origin/main, so its loopback and
-    `Topology.drain_on_signal` hard deadline are not wired to the drain API.
+18. ~~Step 3's loopback and `Topology.drain_on_signal` not wired to the drain API.~~
+    Closed 2026-09-24: `Topology.drain` calls `epoch_drain` (same entry, item 4).
 
 ## Tests
 

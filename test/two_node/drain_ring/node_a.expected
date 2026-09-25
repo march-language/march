@@ -1,0 +1,6 @@
+node-a: up
+A sends 1
+A sends 2
+A sends 3
+A drained, waiting on role 3, 0 came back
+A: Ok(Drained(0))

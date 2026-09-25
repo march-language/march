@@ -33,7 +33,12 @@
 -- On the wire, per peer connection (the control/data split):
 --   data     ACTOR_MSG "SessionNode.Deliver" [to, from, msg], through a
 --            NodeQueue (credit-based flow control); "SessionNode.Bye" when an
---            endpoint closes.
+--            endpoint closes. D27 drains add a fourth Deliver element (1: the
+--            sender's epoch is draining, sent only while it is),
+--            "SessionNode.Undelivered" [to, from, msg] (a message of [to]'s
+--            that [from] drained without consuming, going back) and
+--            "SessionNode.Drained" [role] (that role's endpoint drained; its
+--            Bye follows once the peer's own end has arrived).
 --   control  "SessionNode.Hello" [role, pid] (the ACCEPTING side announces
 --            first), CREDIT, and a final Bye.
 --
@@ -122,6 +127,7 @@ mod SessionNode do
                  crash_hs : Vault(Int -> String -> Int -> Int),
                  forward_cancel : Vault(Int -> String -> Int -> Unit),
                  forward_crash : Vault(Int -> String -> Int -> Unit), heard : Vault(Int),
+                 drain_hs : Vault(Int -> List(Bytes) -> Int -> Int),
                  ep : Pid(EndpointState), links : List(Link), on_close : Int -> Unit }
 
   pfn ekey(ep : Int) : String do "e" ++ int_to_string(ep) end
@@ -133,10 +139,38 @@ mod SessionNode do
   end
 
   pfn decode_deliver(payload : List(Int)) : Result((Int, Int, Bytes), String) do
+    match decode_deliver_flag(payload) do
+      Ok((to, from, msg, _draining)) -> Ok((to, from, msg))
+      Err(e) -> Err(e)
+    end
+  end
+
+  -- D27: a Deliver sent while the sender's epoch is draining carries a
+  -- fourth element, 1. Only then: a frame from a node that is not draining
+  -- is byte-for-byte the three-element one every older node reads.
+  pfn encode_deliver_flag(to : Int, from : Int, msg : Bytes, draining : Bool) : List(Int) do
+    let head = Cons(Msgpack.int(to), Cons(Msgpack.int(from), Cons(Msgpack.bin(Bytes.to_list(msg)), Nil)))
+    Msgpack.encode(Msgpack.array(if draining do List.append(head, Cons(Msgpack.int(1), Nil)) else head end))
+  end
+
+  pfn decode_deliver_flag(payload : List(Int)) : Result((Int, Int, Bytes, Bool), String) do
     match Msgpack.decode(payload) do
-      Ok(Msgpack.Array(Cons(Msgpack.Int(to), Cons(Msgpack.Int(from), Cons(Msgpack.Bin(m), Nil))))) ->
-        Ok((to, from, Bytes.from_list(m)))
+      Ok(Msgpack.Array(Cons(Msgpack.Int(to), Cons(Msgpack.Int(from), Cons(Msgpack.Bin(m), rest))))) ->
+        match rest do
+          Nil -> Ok((to, from, Bytes.from_list(m), false))
+          Cons(Msgpack.Int(f), Nil) -> Ok((to, from, Bytes.from_list(m), f == 1))
+          _ -> Err("session_node: bad Deliver payload")
+        end
       _ -> Err("session_node: bad Deliver payload")
+    end
+  end
+
+  pfn encode_role(role : Int) : List(Int) do Msgpack.encode(Msgpack.int(role)) end
+
+  pfn decode_role(payload : List(Int)) : Result(Int, String) do
+    match Msgpack.decode(payload) do
+      Ok(Msgpack.Int(role)) -> Ok(role)
+      _ -> Err("session_node: bad Drained payload")
     end
   end
 
@@ -370,6 +404,7 @@ mod SessionNode do
             Some(found) ->
               match found do
                 (role, why) ->
+                  if why == "drained" do drain_endpoint(p, ep, role) else
                   let cause = if why == "closed" do "role " ++ int_to_string(role) ++ " closed without sending" else why end
                   match Vault.get(p.crash_hs, crash_key(ep, role)) do
                     Some(h) ->
@@ -390,6 +425,7 @@ mod SessionNode do
                     None ->
                       cancel_endpoint(p, ep, role, cause, "role " ++ int_to_string(role) ++ ": " ++ cause, kind_cancelled())
                   end
+                  end
               end
           end
       end
@@ -404,11 +440,125 @@ mod SessionNode do
       Some(_) -> ()
       None ->
         Vault.set(p.gone, rkey(role), why)
+        -- Drained here, and this is the peer's end: nothing more it sends
+        -- needs returning (an Undelivered coming back needs no answer), so
+        -- this side's Bye can go now (see `drain_endpoint`).
+        if Vault.get(p.meta, "drained") != None do bye_to(p, role) else () end
         match Vault.get(p.meta, "ep") do
           Some(ep) -> check_waiting(p, ep)
           None -> ()
         end
     end
+  end
+
+  -- ── drains (D27, plan 6.2 and II.5.4) ───────────────────────────────────
+  -- The rule, for any number of roles (specs/progress/2026-09-24-dd-d27-
+  -- session-drains.md states it and its proof):
+  --   1. A delivery to our endpoint's continuation installed at a loop
+  --      boundary (`suspend_at_boundary`), when our epoch is draining or the
+  --      sender's was when it sent it, is NOT consumed: it goes back to the
+  --      sender as Undelivered, and our endpoint DRAINS.
+  --   2. A drained endpoint returns every message addressed to it that it has
+  --      not consumed: those parked here, and every one that arrives later.
+  --   3. It announces Drained to every peer, behind everything it sent. A
+  --      peer marks the role drained; its messages to that role from then on
+  --      come back at `emit`, without a round trip.
+  --   4. An endpoint whose continuation waits on a drained role, with nothing
+  --      from it queued, drains in turn (rules 2-3 again): a role mid-
+  --      iteration ends at its next receive from a drained role.
+  --   5. A drained endpoint's Bye to a peer waits for that peer's own end
+  --      (Bye, Cancel or Drained), after which nothing it sends needs
+  --      returning; each reader keeps reading to the peer's Bye.
+  -- Our own messages that came back are kept (pending, key "u") for the
+  -- drain handler and counted ("undelivered") for `run`'s result.
+
+  pfn drained_here(p : Party) : Bool do Vault.get(p.meta, "drained") != None end
+
+  pfn is_drained_role(p : Party, role : Int) : Bool do
+    match Vault.get(p.gone, rkey(role)) do
+      Some(w) -> w == "drained"
+      None -> false
+    end
+  end
+
+  -- [role] sent a message to our endpoint while its epoch was draining.
+  pfn sender_draining(p : Party, role : Int) : Bool do
+    Vault.get(p.meta, "sdrain" ++ rkey(role)) != None
+  end
+
+  -- One of our messages came back undelivered from [role].
+  pfn record_undelivered(p : Party, role : Int, msg : Bytes) : () do
+    park(p.pending, -2, role, msg)
+    let _ = Vault.incr(p.meta, "undelivered", 1)
+    ()
+  end
+
+  pfn undelivered_msgs(p : Party) : List(Bytes) do
+    List.map(Vault.get_or(p.pending, ekey(-2), Nil), fn e -> match e do (_r, m) -> m end)
+  end
+
+  -- [msg], from [from], goes back to [from] undelivered.
+  pfn return_to(p : Party, from : Int, msg : Bytes) : () do
+    let _ = Vault.incr(p.meta, "returned", 1)
+    send_frame(p, link_for(p.links, from), "SessionNode.Undelivered", encode_deliver(from, p.my_role, msg))
+  end
+
+  -- This side's Bye to [role], once.
+  pfn bye_to(p : Party, role : Int) : () do
+    if Vault.incr(p.meta, "bye" ++ rkey(role), 1) == 1 do
+      match List.find(p.links, fn l -> l.role == role) do
+        Some(l) -> send_frame(p, l, "SessionNode.Bye", bye_payload(p))
+        None -> ()
+      end
+    else () end
+  end
+
+  -- Drain our endpoint [ep]: [role] is the drained role its continuation
+  -- waited on, 0 when it drained at its own boundary. Runs in the endpoint
+  -- actor's turn; idempotent, and a no-op for an endpoint already done.
+  pfn drain_endpoint(p : Party, ep : Int, role : Int) : () do
+    if ep_done(p) do ()
+    else
+      Vault.set(p.meta, "done", 1)
+      Vault.set(p.meta, "drained", 1)
+      Vault.set(p.meta, "drained_on", role)
+      let handler = Vault.get(p.drain_hs, ekey(ep))
+      let _ = Vault.delete(p.handlers, ekey(ep))
+      let _ = Vault.delete(p.drain_hs, ekey(ep))
+      let _ = Vault.delete(p.cancel_hs, ekey(ep))
+      let _ = Vault.delete(p.cancel_hs, "cur" ++ ekey(ep))
+      let _ = List.map(p.links, fn l -> Vault.delete(p.crash_hs, crash_key(ep, l.role)))
+      -- Rule 2: what was parked for us goes back, in the order it came.
+      let parked = Vault.get_or(p.pending, ekey(ep), Nil)
+      let _ = Vault.delete(p.pending, ekey(ep))
+      let _ = List.map(parked, fn e -> match e do (from, msg) -> return_to(p, from, msg) end)
+      -- Rule 3, then rule 5 for peers that have already ended.
+      let _ = List.map(p.links, fn l -> send_frame(p, l, "SessionNode.Drained", encode_role(p.my_role)))
+      let _ = List.map(p.links, fn l -> if Vault.get(p.gone, rkey(l.role)) != None do bye_to(p, l.role) else () end)
+      match handler do
+        Some(h) ->
+          let _ = h(role, undelivered_msgs(p), ep)
+          ()
+        None -> ()
+      end
+      -- Hosted: the actor holds the parked state; it hears of the drain on
+      -- the cancel route, with the cause "drained", and closes its endpoint.
+      match Vault.get(p.forward_cancel, "c") do
+        Some(f) -> f(role, "drained", ep)
+        None -> ()
+      end
+    end
+  end
+
+  -- Hand a delivery the continuation [k] on [ep] is waiting for to it --
+  -- unless it drains our endpoint (rule 1).
+  pfn consume(p : Party, k : Int -> Bytes -> Int -> Int, ep : Int, from : Int, msg : Bytes) : Int do
+    if Vault.get_or(p.meta, "boundary" ++ ekey(ep), 0) == 1
+         && (sender_draining(p, from) || epoch_draining()) do
+      return_to(p, from, msg)
+      drain_endpoint(p, ep, 0)
+      ep
+    else resume_with(p, k, ep, from, msg) end
   end
 
   -- The generated code could not deliver a message to [ep]'s continuation
@@ -498,7 +648,11 @@ mod SessionNode do
   -- expects yet is parked, not dropped.
   fn deliver(p : Party, ep : Int, from : Int, msg : Bytes) : Int do
     let want = Vault.get_or(p.waiting, ekey(ep), 0)
-    if ep_done(p) do ep   -- our endpoint closed or was cancelled: discard
+    if ep_done(p) do
+      -- Our endpoint closed or was cancelled: discard. Drained: the message
+      -- goes back to its sender (D27 rule 2), so none is silently lost.
+      if drained_here(p) do return_to(p, from, msg) else () end
+      ep
     else
     match Vault.get(p.handlers, ekey(ep)) do
       None ->
@@ -508,7 +662,7 @@ mod SessionNode do
         if want == 0 || want == from do
           -- This continuation is consumed by the call; anything parked is for
           -- whatever it installs next.
-          resume_with(p, k, ep, from, msg)
+          consume(p, k, ep, from, msg)
         else
           park(p.pending, ep, from, msg)
           ep
@@ -533,7 +687,7 @@ mod SessionNode do
             ep
           Some(entry) ->
             match entry do
-              (from, msg) -> resume_with(p, k, ep, from, msg)
+              (from, msg) -> consume(p, k, ep, from, msg)
             end
         end
     end
@@ -571,10 +725,12 @@ mod SessionNode do
         state
       else
         -- Held across turns: retained, and as the closure that answers it
-        -- (an Int-typed slot would tag the ref; see NodeQueue.Wait).
+        -- (an Int-typed slot would tag the ref; see NodeQueue.Wait). Only
+        -- the newest: the one asker (`await_outcome`) asks again every
+        -- second, and an older ask has already timed out.
         let r = actor_reply_retain(reply_to)
         ep_state(state.n, state.links, state.ended, state.failed,
-                 Cons(fn out -> Actor.reply(r, out), state.waiters))
+                 Cons(fn out -> Actor.reply(r, out), Nil))
       end
     end
     on Expect(links : Int) do
@@ -615,14 +771,10 @@ mod SessionNode do
     end
     -- Hot reload (DD step 6, plan II.4.4, D28): this actor runs the party's
     -- session callbacks, so it holds the session's epoch -- the code version
-    -- the session formed under -- until `finish`.  Sent by `party` and
-    -- `finish`; handled in this actor's own turn, where the hold belongs.
+    -- the session formed under -- from its spawn (`party`) until `finish`
+    -- sends this.  Handled in this actor's own turn, where the hold is.
     -- Appended after every other handler: `Actor.call` addresses the first
     -- two by position (see the note above the actor).
-    on HoldEpoch() do
-      epoch_hold()
-      state
-    end
     on ReleaseEpoch() do
       epoch_release()
       state
@@ -656,6 +808,18 @@ mod SessionNode do
       let _ = List.map(held, fn e -> match e do
         (kind, payload) -> cluster_kind_here(p, early_kind_name(kind), Bytes.to_list(payload))
       end)
+      state
+    end
+    -- D27: a delivery its sender sent while its epoch was draining.
+    on DeliverDraining(p : Party, ep : Int, from : Int, msg : Bytes) do
+      Vault.set(p.meta, "sdrain" ++ rkey(from), 1)
+      let _ = deliver(p, ep, from, msg)
+      ep_state(state.n + 1, state.links, state.ended, state.failed, state.waiters)
+    end
+    -- D27: one of our messages came back from [role], which drained.
+    on Returned(p : Party, role : Int, msg : Bytes) do
+      record_undelivered(p, role, msg)
+      peer_gone(p, role, "drained")
       state
     end
   end
@@ -800,10 +964,13 @@ mod SessionNode do
   [on_close] runs when a local endpoint closes, with its endpoint id.
   """
   fn party(my_role : Int, node_id : String, on_close : Int -> Unit) : Party do
+    -- The Endpoint inherits this proc's code epoch at spawn and holds it
+    -- from the spawn itself until `finish` (hot reload's nesting rule, D28).
+    -- The hold is part of the spawn, not a first message: a message would
+    -- queue behind the epoch marker a spawn from an old-epoch unit gets, and
+    -- the Endpoint would advance before holding.
+    epoch_hold_next_spawn()
     let ep = spawn(Endpoint)
-    -- The Endpoint inherits this proc's code epoch at spawn, and holds it
-    -- until `finish` (hot reload's nesting rule, D28).
-    let _ = send(ep, HoldEpoch())
     let tag = node_id ++ "." ++ int_to_string(my_role) ++ "." ++ int_to_string(pid_to_int(ep))
     { my_role: my_role, node_id: node_id,
       handlers: Vault.new("session_node_handlers_" ++ tag),
@@ -818,6 +985,7 @@ mod SessionNode do
       forward_cancel: Vault.new("session_node_fwdcancel_" ++ tag),
       forward_crash: Vault.new("session_node_fwdcrash_" ++ tag),
       heard: Vault.new("session_node_heard_" ++ tag),
+      drain_hs: Vault.new("session_node_drain_" ++ tag),
       ep: ep, links: Nil, on_close: on_close }
   end
 
@@ -825,7 +993,7 @@ mod SessionNode do
     { my_role: p.my_role, node_id: p.node_id, handlers: p.handlers, waiting: p.waiting,
       pending: p.pending, meta: p.meta, forward: p.forward, why: p.why, gone: p.gone,
       cancel_hs: p.cancel_hs, crash_hs: p.crash_hs, forward_cancel: p.forward_cancel,
-      forward_crash: p.forward_crash, heard: p.heard, ep: p.ep,
+      forward_crash: p.forward_crash, heard: p.heard, drain_hs: p.drain_hs, ep: p.ep,
       links: List.append(p.links, Cons(l, Nil)), on_close: p.on_close }
   end
 
@@ -1015,22 +1183,36 @@ mod SessionNode do
     {
       register: fn (_ap, role) -> do
         Vault.set(meta, "ep", role)
+        -- Hosted (this runs in the HOST actor's turn, from its start
+        -- handler): the host holds the session's epoch from here until
+        -- `close`, whichever hosting pattern it uses (review finding
+        -- 2026-09-24-dd-review-hosted-register-path-takes-no-hold: the
+        -- generated take_idle held only on the single-session path).
+        match Vault.get(forward, "f") do
+          None -> ()
+          Some(_) -> epoch_hold()
+        end
         role
       end,
       emit: fn (ep, to, msg) -> do
+        -- D27: a message to a drained role comes straight back undelivered.
+        if Vault.get(meta, "done") == None && is_drained_role(party, to) do
+          record_undelivered(party, to, msg)
+          ep
         -- Maty's E-CancelMsg: a message to a role that can take no more, or
         -- from an endpoint that is itself done, is discarded.
-        if Vault.get(meta, "done") != None || Vault.get(party.gone, rkey(to)) != None do
+        else if Vault.get(meta, "done") != None || Vault.get(party.gone, rkey(to)) != None do
           let _ = Vault.incr(meta, "discarded", 1)
           ep
         else
-          send_frame(party, link_for(links, to), "SessionNode.Deliver", encode_deliver(to, ep, msg))
+          send_frame(party, link_for(links, to), "SessionNode.Deliver", encode_deliver_flag(to, ep, msg, epoch_draining()))
           ep
-        end
+        end end
       end,
       suspend: fn (ep, from, handler) -> do
         Vault.set(waiting, ekey(ep), from)
         Vault.set(handlers, ekey(ep), handler)
+        Vault.set(meta, "boundary" ++ ekey(ep), 0)
         -- Hosted: this runs in the host actor's turn. A delivery parked
         -- while the host was resuming is drained in the endpoint actor's
         -- turn, never here (see `Drain`).
@@ -1046,6 +1228,12 @@ mod SessionNode do
         on_close(ep)
         Vault.set(meta, "closed", 1)
         Vault.set(meta, "done", 1)
+        -- Hosted: `finish` runs this in the host's turn; release its hold.
+        -- (A cancelled hosted endpoint releases in the generated `cancel`.)
+        match Vault.get(forward, "f") do
+          None -> ()
+          Some(_) -> epoch_release()
+        end
         -- Every peer's reader has to learn this endpoint is done.
         let _ = List.map(links, fn l -> send_frame(party, l, "SessionNode.Bye", bye_payload(party)))
         ()
@@ -1061,6 +1249,22 @@ mod SessionNode do
       end,
       on_crash: fn (ep, role, h) -> do
         Vault.set(party.crash_hs, crash_key(ep, role), h)
+        ep
+      end,
+      suspend_at_boundary: fn (ep, from, handler) -> do
+        Vault.set(waiting, ekey(ep), from)
+        Vault.set(handlers, ekey(ep), handler)
+        Vault.set(meta, "boundary" ++ ekey(ep), 1)
+        match Vault.get(forward, "f") do
+          None -> ()
+          Some(_) ->
+            let _ = send(ep_actor, Drain(party, ep))
+            ()
+        end
+        ep
+      end,
+      on_drain: fn (ep, h) -> do
+        Vault.set(party.drain_hs, ekey(ep), h)
         ep
       end
     }
@@ -1094,15 +1298,31 @@ mod SessionNode do
                 Ok(true)
               else
                 if d.type_tag == "SessionNode.Deliver" do
+                  match decode_deliver_flag(d.payload) do
+                    Err(e) -> Err(e)
+                    Ok((to, from, msg, draining)) ->
+                      if draining do send(p.ep, DeliverDraining(p, to, from, msg))
+                      else send(p.ep, Deliver(p, to, from, msg)) end
+                      Ok(true)
+                  end
+                else if d.type_tag == "SessionNode.Undelivered" do
                   match decode_deliver(d.payload) do
                     Err(e) -> Err(e)
-                    Ok((to, from, msg)) ->
-                      send(p.ep, Deliver(p, to, from, msg))
+                    Ok((_to, from, msg)) ->
+                      send(p.ep, Returned(p, from, msg))
+                      Ok(true)
+                  end
+                else if d.type_tag == "SessionNode.Drained" do
+                  -- The peer drained; its Bye ends this reader (rule 5).
+                  match decode_role(d.payload) do
+                    Err(e) -> Err(e)
+                    Ok(role) ->
+                      send(p.ep, PeerGone(p, role, "drained"))
                       Ok(true)
                   end
                 else
                   Err("session_node: unexpected type " ++ d.type_tag)
-                end
+                end end end
               end
             end
           end
@@ -1153,7 +1373,9 @@ mod SessionNode do
     sleep_ms(interval)
     if Vault.get(p.meta, "link_done" ++ rkey(l.role)) != None do 0
     else
-      if Vault.get(p.meta, "done") == None do
+      -- A drained party is done but still serving: its peers read its
+      -- connection until its Bye, which waits for their own end (D27).
+      if Vault.get(p.meta, "done") == None || drained_here(p) do
         let _ = NodeQueue.cast(l.q, next_seq(p.meta), l.peer, "SessionNode.Ping", Nil, NodeQueue.DropNew)
         ()
       else () end
@@ -1168,10 +1390,72 @@ mod SessionNode do
     end
   end
 
+  -- The readers' outcome, from the endpoint actor. Asked again every
+  -- second (the actor keeps only the newest asker, see `AwaitOutcome`), so a
+  -- dead endpoint actor is noticed: `Actor.call` does not return early when
+  -- its target dies.
   pfn await_outcome(p : Party) : List((Int, String)) do
-    match Actor.call(p.ep, OutcomeReq, 3600000) do
+    match Actor.call(p.ep, OutcomeReq, 1000) do
       Ok(failed) -> failed
-      Err(_) -> await_outcome(p)
+      Err(_) ->
+        if is_alive(p.ep) do await_outcome(p)
+        else
+          endpoint_died(p)
+          Nil
+        end
+    end
+  end
+
+  -- The party's endpoint actor is dead. It holds the session's epoch
+  -- (`party`), so a hot-reload hard drain deadline kills it with
+  -- Crash("draining") (plan 6.2, follow-up 3): the session ends as
+  -- `Left("draining")`, as a hosted one whose host was killed does. Any
+  -- other death is a cancellation naming it. Runs in the runner's own task,
+  -- after the actor's turns are over, so the Vaults are no longer shared.
+  -- The peers are told by the connection ending (standalone: both sockets
+  -- are shut down, which their readers see at once); a cluster party's
+  -- connections are the node's and stay up, and the peers learn from their
+  -- own endpoint's failure detection.
+  pfn endpoint_died(p : Party) : () do
+    let why = match actor_terminal_reason(pid_to_int(p.ep)) do
+      Some((_tag, m)) -> m
+      None -> ""
+    end
+    if ep_done(p) do () else
+      Vault.set(p.meta, "done", 1)
+      if why == "draining" do
+        Vault.set(p.meta, "kind", kind_left())
+        Vault.set(p.meta, "cancel_role", p.my_role)
+        Vault.set(p.why, "cancel_cause", "draining")
+      else
+        Vault.set(p.meta, "kind", kind_cancelled())
+        Vault.set(p.meta, "cancel_role", p.my_role)
+        Vault.set(p.why, "cancel_cause", "session endpoint gone" ++ (if why == "" do "" else ": " ++ why end))
+      end
+    end
+    if is_cluster(p) do () else
+      let _ = List.map(p.links, fn l -> do
+        Vault.set(p.meta, "link_done" ++ rkey(l.role), 1)
+        tcp_shutdown(l.data_fd)
+        tcp_shutdown(l.control_fd)
+        0
+      end)
+      -- The shutdown wakes each data reader with an end of file; wait for
+      -- it to have RUN before `finish` closes the socket, or the close drops
+      -- its parked wait and the task never ends (the process would not
+      -- exit). Bounded: a reader that never started (`serve_outcome` not
+      -- reached) has no flag to set.
+      let _ = List.map(p.links, fn l -> await_reader(p, l.role, 500))
+      ()
+    end
+  end
+
+  pfn await_reader(p : Party, role : Int, tries : Int) : () do
+    if tries <= 0 || Vault.get(p.meta, "reading" ++ rkey(role)) == None
+       || Vault.get(p.meta, "reader_done" ++ rkey(role)) != None do ()
+    else
+      sleep_ms(10)
+      await_reader(p, role, tries - 1)
     end
   end
 
@@ -1194,6 +1478,10 @@ mod SessionNode do
     let _ = List.map(p.links, fn l -> task_spawn(fn _ -> do
       let why = read_link(p, l)
       Vault.set(p.meta, "link_done" ++ rkey(l.role), 1)
+      -- For `endpoint_died`, which must not let `finish` close this socket
+      -- under a reader still parked in it (a close drops the parked wait;
+      -- only the shutdown wakes it, and the reader has to run first).
+      Vault.set(p.meta, "reader_done" ++ rkey(l.role), 1)
       send(p.ep, LinkEnded(l.role, why))
       0
     end))
@@ -1220,9 +1508,32 @@ mod SessionNode do
     end
   end
 
-  doc "Tear every connection down: close data, Bye on control, await the control reader, close control. (A cluster-mode party owns no connection: nothing to do.)"
-  fn finish(p : Party) : Unit do
+  doc """
+  Drain every code epoch this process runs, as the reload server's
+  `DRAIN epoch:<current>` does: every session on this node ends at its next
+  loop boundary (D27; `run_<Role>` returns `Ok(Session.Drained(n))`), actors
+  still on an old epoch get a marker at [soft_ms], and at [hard_ms] (> 0)
+  whatever is still pinned is stopped. `Topology.drain` calls it on SIGTERM.
+  Takes `Cap(IO)`: it ends sessions it does not own.
+  """
+  fn drain_epochs(_io : Cap(IO), soft_ms : Int, hard_ms : Int) : () do
+    epoch_drain(soft_ms, hard_ms)
+  end
+
+  -- The party's session is over: release the Endpoint's epoch hold and end
+  -- the actor, whose reap drops its pin (review finding 2026-09-24-dd-review-
+  -- cluster-party-never-releases-epoch-hold: a party that outlived its
+  -- session pinned its epoch for the life of the process). Every exit of
+  -- every runner passes here: `finish`, the cluster runner's success and
+  -- error arms, and the standalone runner's join failure.
+  pfn end_party(p : Party) : () do
     let _ = send(p.ep, ReleaseEpoch())
+    kill(p.ep)
+  end
+
+  doc "Tear every connection down: close data, Bye on control, await the control reader, close control, and end the party's Endpoint actor. (A cluster-mode party owns no connection: only the actor ends.)"
+  fn finish(p : Party) : Unit do
+    end_party(p)
     let _ = if is_cluster(p) do Nil else List.map(p.links, fn l -> do
       -- Its reader has ended, which stopped its heartbeat; a party that
       -- never served stops it here.
@@ -1504,12 +1815,14 @@ mod SessionNode do
   `<P>_Run.run_<Role>` supplies the role, its peers, the fingerprint and the
   typed entry state.
 
-  `Ok(())` when every peer's endpoint closed; else the `RunError` that ended
+  `Ok(Session.Finished)` when every peer's endpoint closed, `Ok(Session.Drained(n))`
+  when the session was ended at a loop boundary by a drain (D27; [n] of this
+  role's messages came back undelivered); else the `RunError` that ended
   the session, after the party has been torn down.
   """
   fn run(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
          addrs : List(Addr), fingerprint : String, on_close : Int -> Unit,
-         body : Cap(Session.Live) -> Unit) : Result((), RunError) do
+         body : Cap(Session.Live) -> Unit) : Result(Session.Outcome, RunError) do
     run_party(io, my_role, peers, node_id, secret, addrs, fingerprint, on_close, fn (_p, s) -> body(s))
   end
 
@@ -1533,7 +1846,7 @@ mod SessionNode do
   fn run_hosted(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
                 addrs : List(Addr), fingerprint : String, on_close : Int -> Unit, host : Int,
                 start : Cap(Session.Live) -> Unit,
-                deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit) : Result((), RunError) do
+                deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit) : Result(Session.Outcome, RunError) do
     run_hosted_or(io, my_role, peers, node_id, secret, addrs, fingerprint, on_close, host, start, deliver,
                   fn (_s, _role, _cause, _ep) -> ())
   end
@@ -1549,7 +1862,7 @@ mod SessionNode do
                    addrs : List(Addr), fingerprint : String, on_close : Int -> Unit, host : Int,
                    start : Cap(Session.Live) -> Unit,
                    deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
-                   cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result((), RunError) do
+                   cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result(Session.Outcome, RunError) do
     run_party(io, my_role, peers, node_id, secret, addrs, fingerprint, on_close,
               fn (p, s) -> host_party(p, s, host, start, deliver, cancel))
   end
@@ -1587,7 +1900,7 @@ mod SessionNode do
 
   pfn run_party(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
                 addrs : List(Addr), fingerprint : String, on_close : Int -> Unit,
-                drive : Party -> Cap(Session.Live) -> Unit) : Result((), RunError) do
+                drive : Party -> Cap(Session.Live) -> Unit) : Result(Session.Outcome, RunError) do
     match missing_addrs(my_role, peers, addrs) do
       Nil -> ()
       missing -> panic("session_node: role " ++ int_to_string(my_role) ++ " needs an address for role(s) " ++ show_roles(missing))
@@ -1603,13 +1916,14 @@ mod SessionNode do
     match joined do
       Err(e) ->
         if listen_fd >= 0 do tcp_close(listen_fd) else () end
+        end_party(p0)
         Err(e)
       Ok(p2) -> serve_party(p2, io, my_role, peers, listen_fd, drive)
     end
   end
 
   pfn serve_party(p2 : Party, io : Cap(IO), my_role : Int, peers : List(Int), listen_fd : Int,
-                  drive : Party -> Cap(Session.Live) -> Unit) : Result((), RunError) do
+                  drive : Party -> Cap(Session.Live) -> Unit) : Result(Session.Outcome, RunError) do
     let p = require(p2, peers)
     let s = Session.attach(io, ops(p))
     drive(p, s)
@@ -1620,7 +1934,7 @@ mod SessionNode do
     let role = Vault.get_or(p.meta, "cancel_role", 0)
     let cause = Vault.get_or(p.why, "cancel_cause", "")
     match Vault.get(p.meta, "kind") do
-      None -> Ok(())
+      None -> Ok(outcome_of(p))
       Some(kind) ->
         if kind == kind_protocol() do Err(Protocol(role, cause))
         else if kind == kind_host_gone() do Err(HostGone(Vault.get_or(p.meta, "ep", my_role)))
@@ -1656,10 +1970,24 @@ mod SessionNode do
 
   pfn cluster_kind(p : Party, kind : String, payload : List(Int)) : Result((), String) do
     if kind == "SessionNode.Deliver" do
+      match decode_deliver_flag(payload) do
+        Err(e) -> Err(e)
+        Ok((to, from, msg, draining)) ->
+          let _ = if draining do send(p.ep, DeliverDraining(p, to, from, msg)) else send(p.ep, Deliver(p, to, from, msg)) end
+          Ok(())
+      end
+    else if kind == "SessionNode.Undelivered" do
       match decode_deliver(payload) do
         Err(e) -> Err(e)
-        Ok((to, from, msg)) ->
-          let _ = send(p.ep, Deliver(p, to, from, msg))
+        Ok((_to, from, msg)) ->
+          let _ = send(p.ep, Returned(p, from, msg))
+          Ok(())
+      end
+    else if kind == "SessionNode.Drained" do
+      match decode_role(payload) do
+        Err(e) -> Err(e)
+        Ok(role) ->
+          let _ = send(p.ep, PeerGone(p, role, "drained"))
           Ok(())
       end
     else if kind == "SessionNode.Bye" do
@@ -1682,7 +2010,7 @@ mod SessionNode do
       Ok(())
     else
       Err("session_node: unexpected type " ++ kind)
-    end end end end
+    end end end end end end
   end
 
   -- `cluster_kind`, run in the endpoint actor's own turn (`Early`, `Ready`):
@@ -1690,10 +2018,26 @@ mod SessionNode do
   -- it would land behind frames the reader forwarded after it.
   pfn cluster_kind_here(p : Party, kind : String, payload : List(Int)) : Result((), String) do
     if kind == "SessionNode.Deliver" do
+      match decode_deliver_flag(payload) do
+        Err(e) -> Err(e)
+        Ok((to, from, msg, draining)) ->
+          if draining do Vault.set(p.meta, "sdrain" ++ rkey(from), 1) else () end
+          let _ = deliver(p, to, from, msg)
+          Ok(())
+      end
+    else if kind == "SessionNode.Undelivered" do
       match decode_deliver(payload) do
         Err(e) -> Err(e)
-        Ok((to, from, msg)) ->
-          let _ = deliver(p, to, from, msg)
+        Ok((_to, from, msg)) ->
+          record_undelivered(p, from, msg)
+          peer_gone(p, from, "drained")
+          Ok(())
+      end
+    else if kind == "SessionNode.Drained" do
+      match decode_role(payload) do
+        Err(e) -> Err(e)
+        Ok(role) ->
+          peer_gone(p, role, "drained")
           Ok(())
       end
     else if kind == "SessionNode.Bye" do
@@ -1712,7 +2056,7 @@ mod SessionNode do
           link_ended(p, role, "")
           Ok(())
       end
-    else Ok(()) end end end
+    else Ok(()) end end end end end
   end
 
   -- The frame kinds a session receives, as a small number to hold an early
@@ -1722,14 +2066,18 @@ mod SessionNode do
     else if kind == "SessionNode.Bye" do 2
     else if kind == "SessionNode.Cancel" do 3
     else if kind == "SessionNode.Ping" do 4
-    else 0 end end end end
+    else if kind == "SessionNode.Undelivered" do 5
+    else if kind == "SessionNode.Drained" do 6
+    else 0 end end end end end end
   end
 
   pfn early_kind_name(k : Int) : String do
     if k == 1 do "SessionNode.Deliver"
     else if k == 2 do "SessionNode.Bye"
     else if k == 3 do "SessionNode.Cancel"
-    else "SessionNode.Ping" end end end
+    else if k == 5 do "SessionNode.Undelivered"
+    else if k == 6 do "SessionNode.Drained"
+    else "SessionNode.Ping" end end end end end
   end
 
   -- A frame for this session, from the node's data reader -- a task every
@@ -1847,11 +2195,18 @@ mod SessionNode do
     end
   end
 
-  pfn run_result(p : Party, my_role : Int) : Result((), RunError) do
+  -- A session that did not fail: `Drained(n)` if our endpoint drained or
+  -- [n] > 0 of our messages came back undelivered (D27), else `Finished`.
+  pfn outcome_of(p : Party) : Session.Outcome do
+    let n = Vault.get_or(p.meta, "undelivered", 0)
+    if drained_here(p) || n > 0 do Session.Drained(n) else Session.Finished end
+  end
+
+  pfn run_result(p : Party, my_role : Int) : Result(Session.Outcome, RunError) do
     let role = Vault.get_or(p.meta, "cancel_role", 0)
     let cause = Vault.get_or(p.why, "cancel_cause", "")
     match Vault.get(p.meta, "kind") do
-      None -> Ok(())
+      None -> Ok(outcome_of(p))
       Some(kind) ->
         if kind == kind_protocol() do Err(Protocol(role, cause))
         else if kind == kind_host_gone() do Err(HostGone(Vault.get_or(p.meta, "ep", my_role)))
@@ -1872,14 +2227,14 @@ mod SessionNode do
   `<P>_Run.cluster_<Role>` supplies the role and its peers.
   """
   fn run_cluster(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
-                 on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result((), RunError) do
+                 on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result(Session.Outcome, RunError) do
     run_cluster_with(io, node, my_role, peers, session, on_close, body, fn _ -> false)
   end
 
   -- `run_cluster`, abandoned while still finding its peers once [abandoned]
   -- says so (an access point's session the initiator withdrew).
   pfn run_cluster_with(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
-                       on_close : Int -> Unit, body : Cap(Session.Live) -> Unit, abandoned : Int -> Bool) : Result((), RunError) do
+                       on_close : Int -> Unit, body : Cap(Session.Live) -> Unit, abandoned : Int -> Bool) : Result(Session.Outcome, RunError) do
     run_cluster_party(io, node, my_role, peers, session, on_close, fn (_p, s) -> body(s), abandoned)
   end
 
@@ -1896,7 +2251,7 @@ mod SessionNode do
   fn run_cluster_hosted(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
                         on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
                         deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
-                        cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result((), RunError) do
+                        cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result(Session.Outcome, RunError) do
     run_cluster_hosted_with(io, node, my_role, peers, session, on_close, host, start, deliver, cancel, fn _ -> false)
   end
 
@@ -1907,7 +2262,7 @@ mod SessionNode do
                               on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
                               deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
                               cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit,
-                              abandoned : Int -> Bool) : Result((), RunError) do
+                              abandoned : Int -> Bool) : Result(Session.Outcome, RunError) do
     run_cluster_party(io, node, my_role, peers, session, on_close,
                       fn (p, s) -> host_party(p, s, host, start, deliver, cancel), abandoned)
   end
@@ -1916,7 +2271,7 @@ mod SessionNode do
   -- it (a callback body, or a hosted party's setup) and serve it to its end.
   pfn run_cluster_party(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
                         on_close : Int -> Unit, drive : Party -> Cap(Session.Live) -> Unit,
-                        abandoned : Int -> Bool) : Result((), RunError) do
+                        abandoned : Int -> Bool) : Result(Session.Outcome, RunError) do
     let p0 = party(my_role, ClusterNode.node_id(node), on_close)
     Vault.set(p0.why, "sid", session)
     let slot = Vault.new("session_node_slot_" ++ session ++ "." ++ int_to_string(pid_to_int(p0.ep)))
@@ -1925,12 +2280,14 @@ mod SessionNode do
     match ClusterNode.register(node, me, p0.ep) do
       Err(_) ->
         ClusterNode.unroute(node, route_key)
+        end_party(p0)
         Err(Listen(my_role, "session " ++ session ++ ": role " ++ int_to_string(my_role) ++ " is already registered"))
       Ok(_) ->
         match find_peers(node, session, peers, 30000, abandoned) do
           Err(missing) ->
             ClusterNode.unroute(node, route_key)
             ClusterNode.unregister(node, me)
+            end_party(p0)
             if missing == 0 do Err(RunError.Connect(0, "session " ++ session ++ ": withdrawn by its initiator"))
             else Err(RunError.Connect(missing, "session " ++ session ++ ": no endpoint registered for role " ++ int_to_string(missing))) end
           Ok(found) ->
@@ -1938,6 +2295,7 @@ mod SessionNode do
               Err(missing) ->
                 ClusterNode.unroute(node, route_key)
                 ClusterNode.unregister(node, me)
+                end_party(p0)
                 Err(RunError.Connect(missing, "session " ++ session ++ ": no link to role " ++ int_to_string(missing) ++ "'s node"))
               Ok(links) ->
                 let p = List.fold_left(links, p0, fn (acc, l) -> with_link(acc, l))
@@ -1966,6 +2324,7 @@ mod SessionNode do
                 ClusterNode.off_peer_closed(node, closer)
                 ClusterNode.unroute(node, route_key)
                 ClusterNode.unregister(node, me)
+                end_party(p)
                 run_result(p, my_role)
             end
         end
@@ -1997,7 +2356,7 @@ mod SessionNode do
   -- session its initiator withdrew.
   type Offer = { node : Cap(ClusterNode.Live), proto : String, fingerprint : String, my_role : Int,
                  capacity : Int, name : String, flags : Vault(Int), strs : Vault(String),
-                 start : String -> (Int -> Bool) -> Result((), RunError), worker : Pid(OfferCount) }
+                 start : String -> (Int -> Bool) -> Result(Session.Outcome, RunError), worker : Pid(OfferCount) }
 
   pfn offer_verdict(o : Offer, active : Int, fp : String) : String do
     if Vault.get(o.flags, "closing") != None do "closing"
@@ -2122,7 +2481,7 @@ mod SessionNode do
   -- accepted session through [start] (under its sid, abandoned once the
   -- second argument says so), routed and registered under the offer's name.
   pfn offer_with(node : Cap(ClusterNode.Live), proto : String, fingerprint : String, my_role : Int, capacity : Int,
-                 start : String -> (Int -> Bool) -> Result((), RunError)) : Result(Offer, RunError) do
+                 start : String -> (Int -> Bool) -> Result(Session.Outcome, RunError)) : Result(Offer, RunError) do
     let a = spawn(OfferActor)
     let tag = proto ++ "." ++ int_to_string(my_role) ++ "." ++ int_to_string(pid_to_int(a))
     let o = { node: node, proto: proto, fingerprint: fingerprint, my_role: my_role, capacity: capacity,
@@ -2300,7 +2659,7 @@ mod SessionNode do
   """
   fn initiate(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String, my_role : Int,
               peers : List(Int), others : List(Int), on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
-      : Result((), RunError) do
+      : Result(Session.Outcome, RunError) do
     let n = ClusterNode.next_id(node, "ap_sessions")
     let sid = ClusterNode.node_id(node) ++ "." ++ int_to_string(ClusterNode.creation(node)) ++ "." ++ int_to_string(n)
     let inbox = spawn(ApInbox)
@@ -2312,6 +2671,9 @@ mod SessionNode do
     let reply = ClusterNode.global_pid(node, pid_to_int(inbox))
     let filled = fill_roles(node, proto, sid, fingerprint, reply, answers, budget, others, n, Nil, Nil)
     ClusterNode.unroute(node, key)
+    -- The inbox has answered its one purpose; left alive it was one actor
+    -- leaked per initiated session.
+    kill(inbox)
     match filled do
       Err((role, why, accepted)) ->
         withdraw_all(node, sid, accepted)

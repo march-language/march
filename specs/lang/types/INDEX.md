@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t293 accept, t01–t294 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (175 accept, 240 reject; see the Result line below) -->
+# Typing corpus index (t01–t293 accept, t01–t295 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (175 accept, 241 reject; see the Result line below) -->
 
 **Two-repo rule.** This corpus is also checked by
 [march-language/march-lean](https://github.com/march-language/march-lean), an
@@ -248,7 +248,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 415/415: 175 accept, 240
+Exit 0 iff every program behaves as declared (currently 416/416: 175 accept, 241
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -616,7 +616,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t178_letstar_no_flat_map` | **`let*` (generalized monadic bind, 2026-08-14, `specs/lang/let-star-generalized-bind.md`): no matching `flat_map`.** `let*` resolves `<Type>.flat_map` from the RHS's inferred type; a type with no `flat_map` in a same-named module (here a bare `Widget`) is a clear, actionable error naming exactly what to define, not a crash or a generic "unbound variable" | ``let*` needs `Widget.flat_map`, but it doesn't exist.` |
 | `t179_letstar_last_expr` | **`let*`: trailing binder rejected, mirrors `let?`'s `t67`/`r05`.** A `let*` with an empty continuation can never unify against `M(b)`, so it is caught with the same "cannot be the last expression in a block" shape `let?` already has, generalized to name the RHS's own type instead of hardcoding `Result` | ``let*` cannot be the last expression in a block.` |
 
-**Result: 415 / 415 (175 accept, 240 reject).** `reject/t169`–`t170`
+**Result: 416 / 416 (175 accept, 241 reject).** `reject/t169`–`t170`
 (`NativeF32Arr`/`NativeU8Arr` non-sendable in actor messages, added
 2026-08-09 alongside the narrow-element-width work) are not yet written up
 as their own table entries; they mirror the existing `t164`/`t165` pattern
@@ -720,6 +720,7 @@ their own table entries.
 | `t286_endpoints_message_type_name_reserved` | **`@[endpoints] protocol P` reserves the type name `P_Message` (2026-09-22).** The generated message type is named after its protocol so two protocols in one module cannot collide on the short name `Msg` (accept `t285`); the price is that a user type called `Stream_Message` deriving the same interface the generated codec derives is an overlapping implementation. That is a loud typecheck error on both backends, which is the trade being made — the collision it replaces was silent interpreted and a codegen refusal compiled | ``Overlapping implementation`` |
 | `t287_pid_of_int_without_introspect` | **The raw reference-forging builtins are stdlib-internal (2026-09-22):** `pid_of_int`, `actor_pid_indices`, `actor_whereis` and `actor_registered` are in `Typecheck_builtins.stdlib_only`, so a reference from user code is a type error that names the wrapper to use and the minting function, `Actor.introspect`. The gate is by the referencing declaration's file (`Typecheck_caps.check_stdlib_only_refs`), so the stdlib's own calls are unaffected. Accept twin: `accept/t291` | ``Actor.introspect`` |
 | `t294_endpoints_role_grant_violation` | **Per-role grants, outside the grant (2026-09-22).** `Cons` is granted the console only and its body reaches `file_write` through `save`, which takes no capability value, so the type cannot see it and the walk from the runner callback does, naming the chain the way `main`'s grant does. Accept twin: `t293` | ``reaches `IO.FileWrite` (reached from the body: body → cons → save)`` |
+| `t295_endpoints_role_grant_let_bound_body` | **Per-role grants, the root is the VALUE (2026-09-24, review finding `dd-review-role-grants-miss-let-bound-body`).** `Cons` is granted the network only and its body reaches `file_delete` through `wipe`; the body reaches `run_Cons` through a local `let`. `check_role_grants` used to charge such a root nothing (the name `body` is no function key, so the solver dropped it, and a parameter, a `let`-alias and a local closure were dropped the same way). The root is now whatever value flows into the body parameter, resolved through the owner's bindings; a value with no static origin is reported as unverifiable rather than passed. Sibling `t294` is the literal-lambda shape | ``reaches `IO.FileWrite` (reached from the body: body → wipe)`` |
 | `t285_linear_param_rebound_then_dropped` | **A plain `let` rename can't launder a binding-linear value (2026-09-22).** `h` is linear only because of its binding (`linear h : Res`, a plain ADT), so `ELet`'s type-driven auto-promotion bound `let h2 = h` Unrestricted: the read of `h` was its one use and `h2` was then dropped silently — the named twin of `t283`. `h2` now inherits the tracked binding's linearity. Accepted before the fix | `` The linear value `h2` was never used. `` |
 | `t291_config_typed_key_read_as_pid` | **Config typed keys (2026-09-22): the `specs/progress/2026-09-22-config-typed-keys.md` witness, spelled with the typed API.** The untyped `Config.put(:ns, :name, 42)` / `Config.get(:ns, :name)` pair typechecked and handed the stored `Int` to `is_alive` as a `Pid`; `Config.get(key : Key(v)) : Option(v)` on a `Key(Int)` now yields `Option(Int)`. Accept twin `t292` | ``expected `Pid(`` |
 

@@ -3685,7 +3685,7 @@ let rec eval_decl (env : env) (d : decl) : env =
       | [] -> acc
       | ProtoMsg (s, r, _, _) :: rest ->
         collect_roles (s.txt :: r.txt :: acc) rest
-      | ProtoLoop steps :: rest ->
+      | ProtoLoop (steps, _) :: rest ->
         collect_roles (collect_roles acc steps) rest
       | ProtoChoice (ch, branches) :: rest ->
         let branch_roles = List.concat_map (fun (_, steps) ->
