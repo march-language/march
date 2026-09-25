@@ -1308,8 +1308,44 @@ let deploy_hot_cmd =
            ~doc:"Build and hot-deploy changed functions to a running server (or fleet)")
   Term.(const run $ output $ so $ target $ module_prefix $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate)
 
+let deploy_term =
+  let env_arg =
+    Arg.(value & opt (some string) None & info ["env"] ~docv:"NAME"
+           ~doc:"The environment: the $(b,topology.NAME.toml) overlay, whose $(b,[backend] kind = \"ssh\") \
+                 hosts are deployed to.")
+  in
+  let plan =
+    Arg.(value & flag & info ["plan"]
+           ~doc:"Print what the deploy would do, per pool and build (what changed, the mechanism and why, \
+                 order and splits, drains, what may be lost, authority and derived values), and change nothing.")
+  in
+  let grant_cap =
+    Arg.(value & opt_all string [] & info ["grant-cap"] ~docv:"CAP"
+           ~doc:"Authorize a capability widening (repeatable), as for $(b,forge deploy hot).")
+  in
+  let run env plan grant_caps =
+    match Project.load () with
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+    | Ok proj ->
+      if plan then
+        match Cmd_deploy.plan_only ~proj ~env ~grant_caps ~compact:false () with
+        | Ok text -> print_string text
+        | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+      else begin
+        Printf.eprintf "error: executing a plan is not implemented yet; run `forge deploy --plan%s`\n%!"
+          (match env with Some e -> " --env " ^ e | None -> "");
+        exit 1
+      end
+  in
+  Term.(const run $ env_arg $ plan $ grant_cap)
+
 let deploy_cmd =
-  Cmd.group (Cmd.info "deploy" ~doc:"Deploy project to a target environment")
+  Cmd.group ~default:deploy_term
+    (Cmd.info "deploy"
+       ~doc:"Deploy a topology app to an environment's ssh hosts, choosing per pool between a hot \
+             patch, a hot patch with migration or a protocol drain, a restart, and a topology push \
+             ($(b,--plan) shows the choice); or, with $(b,hot), hot-deploy changed functions to a \
+             [hot-reload] server or fleet")
     [deploy_hot_cmd]
 
 (* -------------------------------------------------------- forge hot-reload *)

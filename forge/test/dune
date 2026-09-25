@@ -236,3 +236,11 @@
  (name test_host_init)
  (modules test_host_init)
  (libraries march_forge alcotest unix march_ed25519))
+
+; test_deploy_plan.ml: `forge deploy --plan`'s classification
+; (Deploy_plan.classify) on fixture pairs, one per branch, and the six-block
+; rendering (distributed-deploys build step 10b). In-process, no toolchain.
+(test
+ (name test_deploy_plan)
+ (modules test_deploy_plan)
+ (libraries march_forge march_ast alcotest str))

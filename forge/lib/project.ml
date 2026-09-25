@@ -60,6 +60,9 @@ type hot_reload_config = {
   hr_strategy         : string;             (** "rolling" (default) | "simultaneous" *)
   hr_target           : string option;
   hr_module_prefix    : string option;
+  hr_compact_after    : int option;
+  (** DD step 10b: [forge deploy] rebuilds a build's base image when a
+      node's persisted patch stack (COMPACT) is longer than this. *)
 }
 
 type project = {
@@ -251,7 +254,7 @@ let known_keys_of_section (name : string) : string list option =
   | "ffi.rust" -> Some [ "crate"; "lib" ]
   | "hot-reload" ->
     Some [ "socket"; "ssh_host"; "public_key"; "health_check_url"; "strategy";
-           "target"; "module_prefix" ]
+           "target"; "module_prefix"; "compact_after" ]
   | "hot-reload.env" -> Some [ "name"; "ssh_host"; "socket"; "public_key" ]
   | "contracts" -> Some [ "no_alloc" ]
   | _ when has_prefix "archive.task." -> Some [ "command"; "module"; "doc" ]
@@ -410,9 +413,10 @@ let load_from root =
       let hr_strategy      = Option.value ~default:"rolling"             (Toml.get_string hr "strategy") in
       let hr_target        = Toml.get_string hr "target" in
       let hr_module_prefix = Toml.get_string hr "module_prefix" in
+      let hr_compact_after = Option.bind (Toml.get_string hr "compact_after") int_of_string_opt in
       Some { hr_socket = socket; hr_ssh_host = ssh_host;
              hr_public_key = public_key; hr_envs;
-             hr_health_check_url; hr_strategy; hr_target; hr_module_prefix }
+             hr_health_check_url; hr_strategy; hr_target; hr_module_prefix; hr_compact_after }
     end
   in
   let contracts_no_alloc =

@@ -54,6 +54,17 @@ git log is authoritative for exact commits.
   policy from its pool's written or derived `caps`, and the pool's ufw rules
   (applied when ufw is installed). A second run changes nothing. Each host's
   target (`linux/amd64`, `linux/arm64`) is recorded in `.forge/hosts/<env>.json`.
+- **`forge deploy --plan --env <env>`** shows, per pool and build, what a deploy
+  of the working tree would do, in six blocks: what changed (functions, actor
+  state and message types, protocols with fingerprints, placement, hooks, the
+  base image), the mechanism and why (hot patch, hot patch + migration, hot patch
+  + protocol drain, restart, topology push), order and splits (the pools that
+  receive a new choice branch before the pool that makes it; in a monolith, the
+  expand/contract split into two deploys, D21), drains with the live sessions
+  each node reports, what may be lost (queued messages with no `migrate_msg`,
+  sessions cut at the hard deadline, renumbered unlabelled messages), and
+  authority (a widening role closure or derived pool capability, and the
+  `--grant-cap` it needs) with each pool's derived values.
 - **`NativeArray.sort_i32`, `sort_f32` and `sort_u8`: every NativeArray width
   can now be sorted.** Same ownership as `sort_int`: in place when the array is
   uniquely owned, copy-on-write when it is shared. `sort_i32` is the same
