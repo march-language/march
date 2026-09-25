@@ -94,7 +94,8 @@ jobs:
           - { os: ubuntu-24.04, shard: rest }
           - { os: macos-15,     shard: all }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 85
+    # Must stay above the Test step's 75 plus setup (12) and build (10).
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
 
@@ -128,10 +129,13 @@ jobs:
           dune build bin/main.exe
 
       - name: Test (${{ matrix.shard }})
-        # Sized for the unsharded macOS run: 43-49 min on main in late
-        # September 2026 (the shards are well under it), so 45 was hit on main
-        # itself on a slow runner day.
-        timeout-minutes: 60
+        # Sized for the unsharded macOS run: 37-49 min on main in late
+        # September 2026 (run_codegen alone took 28-29 min on a slow macOS
+        # runner; the ubuntu shards are well under it). 45 was hit on main
+        # itself; 75 leaves ~50% over the worst run seen. Don't split the
+        # macOS shard to get under a timeout: that doubled its runner-minutes
+        # (see README.md, "Runner budget").
+        timeout-minutes: 75
         run: |
           eval $(opam env)
           case "${{ matrix.shard }}" in
@@ -148,7 +152,9 @@ jobs:
   # compiler and the staged runtime/stdlib, so they get their own runner.
   two-node:
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    # Must stay above the scenarios step's 45 plus setup (12), build (10) and
+    # the soak (5).
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -198,8 +204,13 @@ jobs:
       # is test/two_node/<name>/; see specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
       - name: Two-node scenarios
         # 52 scenarios at 30-70 s each on a loaded runner (~20-24 min on a
-        # quiet one); 25 was hit on main itself on a slow runner day.
-        timeout-minutes: 35
+        # quiet one). 25 was hit on main itself on a slow runner day, and one
+        # such run got through only 36 of the 52 scenarios in 25 min, which
+        # extrapolates to ~36 min for the lot; 45 covers that with margin.
+        # The cert_* scenarios (distributed-deploys step 11a) are what pushed
+        # it up. Splitting the scenario list across two jobs would also pay a
+        # second toolchain setup + build each run; a longer step is cheaper.
+        timeout-minutes: 45
         run: |
           eval $(opam env)
           for s in $(scripts/two-node.sh --list); do scripts/two-node.sh "$s" || exit 1; done
