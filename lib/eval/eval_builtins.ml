@@ -1510,8 +1510,10 @@ let base_env : env =
         | [VInt a; VInt b] -> VInt (compare a b)
         | _ -> eval_error "compare_int: expected two ints"))
   ; ("compare_float", VBuiltin ("compare_float", function
-        | [VFloat a; VFloat b] ->
-          VInt (if a < b then -1 else if a > b then 1 else 0)
+        (* Same order as `compare` on Float (Float.compare: NaN equals NaN
+           and is below every other value) and as the compiled
+           march_compare_float. The IEEE `a < b` form returned 0 for a NaN. *)
+        | [VFloat a; VFloat b] -> VInt (Float.compare a b)
         | _ -> eval_error "compare_float: expected two floats"))
   ; ("compare_string", VBuiltin ("compare_string", function
         | [VString a; VString b] ->

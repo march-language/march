@@ -497,6 +497,22 @@ void *march_sha256(void *data) {
     return march_string_lit(hex, 64);
 }
 
+/* Takes a Bytes and returns a 64-char lowercase hex String: the C entry for
+ * the bare `sha256 : Bytes -> String` builtin (llvm_builtins.ml), whose
+ * argument is Bytes by its static type, so no is_bytes_value guess is needed
+ * here. Same output domain as march_sha256 / the interpreter's
+ * Digestif.to_hex arm; for a raw 32-byte digest see march_hmac_sha256_bytes. */
+void *march_sha256_of_bytes(void *b) {
+    size_t len;
+    uint8_t *bytes = bytes_to_raw(b, &len);
+    uint8_t hash[32];
+    do_sha256(bytes, len, hash);
+    free(bytes);
+    char hex[65];
+    bytes_to_hex(hash, 32, hex);
+    return march_string_lit(hex, 64);
+}
+
 /* ── march_sha512 ────────────────────────────────────────────────────── */
 
 /* FIPS 180-4 SHA-512.  A copy of the one in tweetnacl.c, which is static and
