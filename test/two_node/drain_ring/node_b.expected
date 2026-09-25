@@ -1,0 +1,6 @@
+node-b: up
+B got 1, sends 10
+B got 2, sends 20
+B got 3, sends 30
+B drained, waiting on role 3; came back: 30
+B: Ok(Drained(1))

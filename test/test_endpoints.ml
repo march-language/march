@@ -235,16 +235,16 @@ let stream_labelled = {|
     change nothing for a protocol that has none, and this list is the oracle
     the labelled twin is compared against (below). *)
 let stream_prod_fns =
-  [ "register"; "cancelled"; "leave_send_Msg_Prod_Cons_1"; "send_Msg_Prod_Cons_1";
-    "leave_offer_more_done"; "offer_more_done"; "offer_more_done_or"; "close";
+  [ "register"; "cancelled"; "drained"; "leave_send_Msg_Prod_Cons_1"; "send_Msg_Prod_Cons_1";
+    "leave_offer_more_done"; "offer_more_done"; "offer_more_done_or"; "offer_more_done_or_drain"; "close";
     "idle"; "take_idle"; "take_closed"; "cancel"; "await_more_done"; "finish"; "resume";
     (* the scripted and chaos peers (D36), one private walker per state *)
     "step_name"; "script_S_send_Msg_Prod_Cons_1"; "script_S_offer_more_done"; "script_S_end"; "script";
     "chaos_S_send_Msg_Prod_Cons_1"; "chaos_S_offer_more_done"; "chaos_S_end"; "chaos" ]
 
 let stream_cons_fns =
-  [ "register"; "cancelled"; "leave_recv_Msg_Prod_Cons_1"; "recv_Msg_Prod_Cons_1";
-    "recv_Msg_Prod_Cons_1_or"; "leave_choose_more_done"; "choose_more"; "choose_done"; "close";
+  [ "register"; "cancelled"; "drained"; "leave_recv_Msg_Prod_Cons_1"; "recv_Msg_Prod_Cons_1";
+    "recv_Msg_Prod_Cons_1_or"; "recv_Msg_Prod_Cons_1_or_drain"; "leave_choose_more_done"; "choose_more"; "choose_done"; "close";
     "idle"; "take_idle"; "take_closed"; "cancel"; "await_Msg_Prod_Cons_1"; "finish"; "resume";
     "step_name"; "script_S_recv_Msg_Prod_Cons_1"; "script_S_choose_more_done"; "script_S_end"; "script";
     "chaos_S_recv_Msg_Prod_Cons_1"; "chaos_S_choose_more_done"; "chaos_S_end"; "chaos" ]
@@ -256,11 +256,14 @@ let unlabelled_names_pinned =
        Alcotest.(check (list string)) "Stream_Prod" stream_prod_fns (List.assoc "Stream_Prod" mods);
        Alcotest.(check (list string)) "Stream_Cons" stream_cons_fns (List.assoc "Stream_Cons" mods))
 
-(* Hot reload (DD step 6, plan II.4.4, D28): a started hosted endpoint holds
-   the hosting actor's epoch -- taken when the actor starts it (take_idle),
-   released when it closes (finish, and cancel of a started one). *)
+(* Hot reload (DD step 6, plan II.4.4, D28): the TRANSPORT holds the hosting
+   actor's epoch from `register` to `close`, whichever hosting pattern the
+   actor uses; the generated API neither holds in take_idle nor releases in
+   finish (review finding 2026-09-24-dd-review-hosted-register-path-takes-no-
+   hold), and only `cancel` -- a started endpoint that never reaches `finish`
+   -- releases, through the cap. *)
 let hosted_endpoint_epoch_holds =
-  Alcotest.test_case "hosted endpoint: take_idle holds the epoch, finish/cancel release it" `Quick
+  Alcotest.test_case "hosted endpoint: holds are the transport's; only cancel releases, through the cap" `Quick
     (fun () ->
        let m = parse_and_desugar (wrap stream) in
        let body_calls modname fname =
@@ -274,15 +277,141 @@ let hosted_endpoint_epoch_holds =
                    | _ -> []) decls
              | _ -> []) m.mod_decls in
        let calls m f n = List.length (List.filter (( = ) n) (body_calls m f)) in
-       Alcotest.(check int) "take_idle holds once" 1
+       Alcotest.(check int) "take_idle takes no hold" 0
          (calls "Stream_Cons" "take_idle" "Session.hold_epoch");
-       Alcotest.(check int) "finish releases once" 1
+       Alcotest.(check int) "finish releases nothing itself (close does, in the transport)" 0
          (calls "Stream_Cons" "finish" "Session.release_epoch");
-       Alcotest.(check int) "cancel releases once per awaiting state, not for idle or closed" 1
+       Alcotest.(check int) "cancel releases once, for the awaiting state" 1
          (calls "Stream_Cons" "cancel" "Session.release_epoch");
-       Alcotest.(check int) "an await neither holds nor releases" 0
-         (calls "Stream_Cons" "await_Msg_Prod_Cons_1" "Session.hold_epoch"
-          + calls "Stream_Cons" "await_Msg_Prod_Cons_1" "Session.release_epoch"))
+       Alcotest.(check int) "no generated function holds" 0
+         (List.length (List.filter (( = ) "Session.hold_epoch")
+            (List.concat_map (fun f -> body_calls "Stream_Cons" f)
+               [ "register"; "take_idle"; "await_Msg_Prod_Cons_1"; "finish"; "cancel"; "resume" ]))))
+
+(* ── D27: drain points ────────────────────────────────────────────────── *)
+
+let replace_all_ ~needle ~by s =
+  let n = String.length needle in
+  let b = Buffer.create (String.length s) in
+  let rec go i =
+    if i + n <= String.length s && String.sub s i n = needle then (Buffer.add_string b by; go (i + n))
+    else if i < String.length s then (Buffer.add_char b s.[i]; go (i + 1))
+  in
+  go 0;
+  Buffer.contents b
+
+(** The names a generated function's body calls, for [modname].[fname]. *)
+let body_calls_of src modname fname =
+  let m = parse_and_desugar src in
+  List.concat_map (function
+      | DMod (n, _, decls, _) when n.txt = modname ->
+        List.concat_map (function
+            | DFn (fd, _) when fd.fn_name.txt = fname ->
+              List.concat_map (fun (c : fn_clause) ->
+                  List.map fst (March_ast.Calls.names_and_name_spans c.fc_body))
+                fd.fn_clauses
+            | _ -> []) decls
+      | _ -> []) m.mod_decls
+
+let count_calls src m f n = List.length (List.filter (( = ) n) (body_calls_of src m f))
+
+(* A receive at a loop head suspends through `Session.suspend_at_boundary`
+   (a drain point); every other receive through `Session.suspend`.  Stream's
+   Cons receives the item at the loop head; Prod's offer is mid-iteration. *)
+let d27_boundary_receives =
+  Alcotest.test_case "D27: a loop-head receive suspends at a boundary, a mid-iteration one does not" `Quick
+    (fun () ->
+       let src = wrap stream in
+       List.iter (fun f ->
+           Alcotest.(check int) ("Cons " ^ f ^ " is a drain point") 1
+             (count_calls src "Stream_Cons" f "Session.suspend_at_boundary");
+           Alcotest.(check int) ("Cons " ^ f ^ " never plain-suspends") 0
+             (count_calls src "Stream_Cons" f "Session.suspend"))
+         [ "recv_Msg_Prod_Cons_1"; "recv_Msg_Prod_Cons_1_or"; "recv_Msg_Prod_Cons_1_or_drain";
+           "await_Msg_Prod_Cons_1" ];
+       List.iter (fun f ->
+           Alcotest.(check int) ("Prod " ^ f ^ " is not a drain point") 0
+             (count_calls src "Stream_Prod" f "Session.suspend_at_boundary");
+           Alcotest.(check int) ("Prod " ^ f ^ " suspends") 1
+             (count_calls src "Stream_Prod" f "Session.suspend"))
+         [ "offer_more_done"; "offer_more_done_or"; "offer_more_done_or_drain"; "await_more_done" ];
+       Alcotest.(check int) "only the _or_drain form installs a drain handler" 1
+         (count_calls src "Stream_Cons" "recv_Msg_Prod_Cons_1_or_drain" "Session.on_drain");
+       Alcotest.(check int) "the plain form leaves the default" 0
+         (count_calls src "Stream_Cons" "recv_Msg_Prod_Cons_1" "Session.on_drain"))
+
+(* `loop atomic do ... end`: the same protocol, and its head is NOT a drain
+   point.  The fingerprint does not change (atomicity is the receiver's
+   business and changes no message). *)
+let stream_atomic = replace_all_ ~needle:"    loop do" ~by:"    loop atomic do" stream
+
+let d27_loop_atomic =
+  Alcotest.test_case "D27: `loop atomic` parses, and its head is not a drain point" `Quick
+    (fun () ->
+       let src = wrap stream_atomic in
+       Alcotest.(check int) "atomic head suspends plainly" 1
+         (count_calls src "Stream_Cons" "recv_Msg_Prod_Cons_1" "Session.suspend");
+       Alcotest.(check int) "atomic head is no boundary" 0
+         (count_calls src "Stream_Cons" "recv_Msg_Prod_Cons_1" "Session.suspend_at_boundary");
+       let fp s =
+         let m = parse_and_desugar s in
+         List.concat_map (function
+             | DMod (n, _, decls, _) when n.txt = "Stream_Msg" ->
+               List.filter_map (function
+                   | DFn (fd, _) when fd.fn_name.txt = "fingerprint" ->
+                     (match fd.fn_clauses with
+                      | [ { fc_body = ELit (LitString f, _); _ } ] -> Some f
+                      | _ -> None)
+                   | _ -> None) decls
+             | _ -> []) m.mod_decls
+       in
+       Alcotest.(check (list string)) "same fingerprint" (fp (wrap stream)) (fp src);
+       (* the AST records it, and the formatter round-trips it *)
+       let m = parse_and_desugar src in
+       let atomic_loops =
+         List.concat_map (function
+             | DProtocol (_, pd, _) ->
+               List.filter_map (function ProtoLoop (_, a) -> Some a | _ -> None) pd.proto_steps
+             | _ -> []) m.mod_decls
+       in
+       Alcotest.(check (list bool)) "ProtoLoop carries atomic" [ true ] atomic_loops)
+
+let d27_loop_modifier_rejected =
+  Alcotest.test_case "D27: `loop <anything but atomic>` is a parse error naming `atomic`" `Quick
+    (fun () ->
+       let src = wrap (replace_all_ ~needle:"    loop do" ~by:"    loop forever do" stream) in
+       match parse_and_desugar src with
+       | _ -> Alcotest.fail "expected a parse error"
+       | exception e ->
+         let msg = Printexc.to_string e in
+         let has needle =
+           let n = String.length needle in
+           let rec go i = i + n <= String.length msg && (String.sub msg i n = needle || go (i + 1)) in
+           go 0
+         in
+         Alcotest.(check bool) ("the error names `atomic`: " ^ msg) true (has "atomic"))
+
+(* The drain handler gets no state and must finish with `drained`: a handler
+   that returns anything else, or tries to use the state it was never given,
+   is rejected; one that calls `drained` is accepted. *)
+let d27_drain_handler_ok = ok "D27: an _or_drain handler that finishes with drained is accepted" (wrap (stream ^ {|
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.Entry) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1_or_drain(s, st,
+      fn (_n, st1) -> Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)),
+      fn (_role, undelivered, d) ->
+        let _ = List.length(undelivered)
+        Stream_Cons.drained(s, d))
+  end
+|}))
+
+let d27_drain_handler_needs_token = bad "D27: a drain handler cannot produce Yield without its token"
+  "Yield" (wrap (stream ^ {|
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.Entry) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1_or_drain(s, st,
+      fn (_n, st1) -> Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)),
+      fn (_role, _undelivered, _d) -> ())
+  end
+|}))
 
 (** Replace every occurrence of [needle] in [s] by [by]. *)
 let replace_all ~needle ~by s =
@@ -738,7 +867,7 @@ let replayed = bad "sending twice on one state is a linearity error (replay)" "i
 
 let abandoned = bad "registering and never driving the session is a linearity error (abandon)" "was never used" (wrap (stream ^ {|
   fn go(c : Cap(IO)) do
-    let s = Session.attach(c, { register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _f, _h) -> e, close: fn _e -> (), fail: fn (_e, w) -> panic(w), on_cancel: fn (e, _h) -> e, leave: fn (_e, _w) -> (), on_crash: fn (e, _r, _h) -> e })
+    let s = Session.attach(c, { register: fn (_a, r) -> r, emit: fn (e, _t, _m) -> e, suspend: fn (e, _f, _h) -> e, close: fn _e -> (), fail: fn (_e, w) -> panic(w), on_cancel: fn (e, _h) -> e, leave: fn (_e, _w) -> (), on_crash: fn (e, _r, _h) -> e, suspend_at_boundary: fn (e, _f, _h) -> e, on_drain: fn (e, _h) -> e })
     let st = Stream_Prod.register(s, 0)
     ()
   end
@@ -925,15 +1054,15 @@ let cancelled_forge = bad "a Cancelled token cannot be forged: its constructor t
 |}))
 
 let hosted_cancel_ok = ok "a hosted actor stores the Closed value `cancel` returns" (cons_actor {|
-    on CancelC() do
-      { state with parked: Stream_Cons.cancel(state.parked) }
+    on CancelC(s : Cap(Session.Live)) do
+      { state with parked: Stream_Cons.cancel(s, state.parked) }
     end
 |})
 
 let hosted_cancel_retained = bad "a hosted actor cannot cancel its Parked value and keep it too"
     "`state.parked` is used more than once" (cons_actor {|
-    on CancelC() do
-      let _closed = Stream_Cons.cancel(state.parked)
+    on CancelC(s : Cap(Session.Live)) do
+      let _closed = Stream_Cons.cancel(s, state.parked)
       state
     end
 |})
@@ -2019,7 +2148,9 @@ let tests =
     grants_not_in_fingerprint; role_needs_ok; role_identifier_ok; role_needs_unknown_cap;
     role_needs_unknown_role; role_needs_twice; role_needs_after_message; role_needs_nested; msg_type_named_after_protocol; two_protocols_distinct_msg_types; two_protocols_ok;
     cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;
-    unlabelled_names_pinned; hosted_endpoint_epoch_holds; labelled_shape; label_changes_fingerprint; labelled_roles_ok;
+    unlabelled_names_pinned; hosted_endpoint_epoch_holds;
+    d27_boundary_receives; d27_loop_atomic; d27_loop_modifier_rejected; d27_drain_handler_ok;
+    d27_drain_handler_needs_token; labelled_shape; label_changes_fingerprint; labelled_roles_ok;
     payload_definition_in_fingerprint; payload_field_order_in_fingerprint;
     recursive_payload_terminates; payload_type_arguments_substituted; imported_payload_falls_back;
     entry_alias_shape; alias_cycles; entry_roles_ok; entry_wrong_role; entry_keeps_linearity;

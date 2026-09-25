@@ -966,11 +966,11 @@ and protocol_step_to_json (ps : protocol_step) : string =
       ("to", name_to_json to_);
       ("msg_ty", ty_to_json ty);
     ] @ (match label with Some l -> [ ("label", name_to_json l) ] | None -> []))
-  | ProtoLoop steps ->
-    Dump.json_obj [
+  | ProtoLoop (steps, atomic) ->
+    Dump.json_obj ([
       ("kind", Dump.json_string "ProtoLoop");
       ("steps", Dump.json_list (List.map protocol_step_to_json steps));
-    ]
+    ] @ (if atomic then [ ("atomic", json_bool true) ] else []))
   | ProtoStop _ ->
     Dump.json_obj [
       ("kind", Dump.json_string "ProtoStop");

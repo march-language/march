@@ -98,7 +98,14 @@ mod StreamActorRestart do
         fail: fn (_ep, why) -> panic(why),
         on_cancel: fn (ep, _h) -> ep,
         leave: fn (ep, why) -> print_line("leave " ++ int_to_string(ep) ++ ": " ++ why),
-        on_crash: fn (ep, _r, _h) -> ep
+        on_crash: fn (ep, _r, _h) -> ep,
+        -- D27: this transport never drains, so a loop-head receive is a
+        -- plain suspend and a drain handler is never called.
+        suspend_at_boundary: fn (ep, _from, handler) -> do
+          Vault.set(handlers, ekey(ep), handler)
+          ep
+        end,
+        on_drain: fn (ep, _h) -> ep
       }
     }
   end

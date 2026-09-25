@@ -375,12 +375,20 @@ type Ops = {
   fail      : Int -> String -> (),                   -- a delivery the continuation cannot take; the transport decides
   on_cancel : Int -> (Int -> String -> Int -> Int) -> Int,        -- cancel handler for the next continuation
   leave     : Int -> String -> (),                   -- exit the session on purpose
-  on_crash  : Int -> Int -> (Int -> String -> Int -> Int) -> Int  -- crash branch for a role, with the next continuation
+  on_crash  : Int -> Int -> (Int -> String -> Int -> Int) -> Int,  -- crash branch for a role, with the next continuation
+  suspend_at_boundary : Int -> Int -> (Int -> Bytes -> Int -> Int) -> Int,  -- `suspend` at a loop head: a drain point
+  on_drain  : Int -> (Int -> List(Bytes) -> Int -> Int) -> Int    -- drain handler for the next continuation
 }
 ```
 
-The last three carry failure (see [Choreographies]({{ site.baseurl }}/docs/choreography/)); a
-transport where nothing fails may ignore them.
+`fail`, `on_cancel`, `leave` and `on_crash` carry failure (see
+[Choreographies]({{ site.baseurl }}/docs/choreography/)); a transport where nothing fails
+may ignore them. The last two carry drains (D27): the generated receive at the head of a
+`loop` (not `loop atomic`) suspends through `suspend_at_boundary`, where a draining
+transport may end the session instead of resuming, sending the delivery back to its sender;
+`on_drain(ep, h)` installs `h(role, undelivered, ep)` for the next continuation. A transport
+that never drains treats `suspend_at_boundary` as `suspend` and never calls a drain
+handler.
 
 It is protocol-agnostic on purpose: no field is named after a protocol, a role
 or a message. Endpoints, roles and access points are opaque `Int` handles the
@@ -422,7 +430,10 @@ left or crashed is gone, and an endpoint waiting on it takes its crash branch
 or is cancelled. `t.crash(role, cause)` stands in for a node dying, and
 `Session.in_process_with(trace)` reports the transport's own events (closes,
 cancellations, drops) so a test can assert on them. One transport carries one
-session. (A transport that delivers synchronously inside `emit` is wrong for
+session. It drains like the network transport too: `t.drain_role(role)` says that role's
+node is draining, `t.step(())` delivers one message so a test can turn draining on part-way
+through, and `t.sent`, `t.consumed`, `t.returned` and `t.undelivered(role)` let it check that
+no message was lost. (A transport that delivers synchronously inside `emit` is wrong for
 this shape: an endpoint sends *before* it suspends, so a synchronous reply
 arrives before its handler exists.)
 

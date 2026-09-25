@@ -1,0 +1,46 @@
+-- Three-node scenario "drain_ring": node-c runs C and drains its epochs
+-- after its second `more` (see scenario.sh).
+mod DrainRingC do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Ring do
+    loop do
+      a: A -> B : Int
+      b: B -> C : Int
+      choose by C:
+        more -> C -> A : Bool
+                more_b: C -> B : Bool
+        done -> C -> A : Bool
+                done_b: C -> B : Bool
+                stop
+      end
+    end
+  end
+
+  pfn role_c(c : Cap(IO), s : Cap(Session.Live), st : Ring_C.Entry, rounds : Int) : Ring_C.Yield do
+    Ring_C.recv_B(s, st, fn (n, st1) ->
+      println("C got " ++ int_to_string(n))
+      let st2 = Ring_C.choose_more(s, st1, true)
+      let st3 = Ring_C.send_More_b(s, st2, true)
+      if rounds + 1 == 2 do
+        println("node-c: draining")
+        SessionNode.drain_epochs(c, 600000, 0)
+      else () end
+      role_c(c, s, st3, rounds + 1))
+  end
+
+  fn main(c : Cap(IO)) do
+    match Ring_Run.run_C(c, "node-c", "ring-secret", Ring_Run.addrs_from_env(), fn (s, st) -> role_c(c, s, st, 0)) do
+      Ok(Session.Drained(n)) -> println("C: Ok(Drained(" ++ int_to_string(n) ++ "))")
+      Ok(Session.Finished) -> println("C: Ok(Finished)")
+      Err(e) -> panic(Ring_Run.error_message(e))
+    end
+  end
+end

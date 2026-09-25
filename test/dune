@@ -1862,6 +1862,67 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/stream_peers.expected stream_peers_interp.out)))
 
+; D27 session drains (distributed-deploys step 6 follow-ups, 2026-09-24):
+; a session ends at a loop boundary when a role's epoch is draining. The
+; in-process transport stands in for the epochs (`drain_role`), so the
+; drain rule for two AND three-or-more roles is pinned here, in one process
+; with a FIFO queue, before test/two_node/drain_stream and drain_ring pin
+; the network version: a delivery at a loop head goes back to its sender
+; undelivered, the receiver drains, its peers' later messages to it come
+; back, a role waiting on a drained role drains in turn. Scripted runs print
+; the transport's trace; the chaos runs (five protocols, 60 seeds each,
+; draining a seed-chosen role after a seed-chosen number of steps) print
+; aggregates and, on any violation of "sent = consumed + returned, per-role
+; undelivered = returned = traced", a VIOLATION line the golden does not
+; contain. Both backends, one golden.
+(rule
+ (targets drain_peers_bin drain_peers.out drain_peers_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file session/drain_peers.march))
+ (action
+  (progn
+   (with-stdout-to drain_peers_interp.out
+     (run %{exe:../bin/main.exe} session/drain_peers.march))
+   (run %{exe:../bin/main.exe} --compile -o drain_peers_bin
+        session/drain_peers.march)
+   (with-stdout-to drain_peers.out (system "./drain_peers_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/drain_peers.expected drain_peers.out)))
+
+(rule
+ (alias runtest)
+ (action (diff session/drain_peers.expected drain_peers_interp.out)))
+
+; Part two of the above: three more protocols (Pair, Relay3, Fork) under the
+; chaos peers. A second file because the frontend's time grows steeply with
+; the number of `@[endpoints]` protocols in one module (three: seconds; five:
+; ~50 s; six: ~8 min), which a test must not pay.
+(rule
+ (targets drain_peers_multi_bin drain_peers_multi.out drain_peers_multi_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file session/drain_peers_multi.march))
+ (action
+  (progn
+   (with-stdout-to drain_peers_multi_interp.out
+     (run %{exe:../bin/main.exe} session/drain_peers_multi.march))
+   (run %{exe:../bin/main.exe} --compile -o drain_peers_multi_bin
+        session/drain_peers_multi.march)
+   (with-stdout-to drain_peers_multi.out (system "./drain_peers_multi_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/drain_peers_multi.expected drain_peers_multi.out)))
+
+(rule
+ (alias runtest)
+ (action (diff session/drain_peers_multi.expected drain_peers_multi_interp.out)))
+
 ; `Cap(ClusterNode.Live)` as a seam (D35, distributed-deploys step 4,
 ; 2026-09-23): a toy placement written against the cluster capability only,
 ; driven by a fake dictionary attached with `ClusterNode.attach(io, ops)`.

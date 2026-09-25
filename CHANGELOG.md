@@ -32,6 +32,26 @@ git log is authoritative for exact commits.
   For a raw digest use `hmac_sha256_bytes` / `sha1_bytes`.
 
 ### Added
+- **Sessions drain automatically at loop boundaries** (D27, build step 6's
+  follow-ups). When a node is draining (a hot deploy's `DRAIN`, or SIGTERM under
+  `Topology.drain_on_signal`), every session it takes part in ends at the next
+  iteration boundary of a protocol `loop`: the message that would start the next
+  iteration goes back to its sender, marked undelivered, the receiving role ends
+  there, and a role waiting on a drained role ends at that receive. No message is
+  silently lost: each role's `run_<Role>` reports how many of its own messages came
+  back. Every receive and offer gains an `_or_drain` form taking a drain handler,
+  `(role, undelivered, token) -> Yield`, which gets the returned messages decoded
+  and finishes with the generated `<Role>.drained(s, token)`; a receive without one
+  simply ends. `loop atomic do ... end` opts a loop out. `Session.Ops` gains
+  `suspend_at_boundary` and `on_drain`; `Session.in_process` stands in for the
+  epochs with `drain_role`, `step` and the `sent`/`consumed`/`returned` counters;
+  `SessionNode.drain_epochs(io, soft_ms, hard_ms)` drains a node from code.
+- **A remote delivery an actor drops is answered with `DELIVERY_FAILED`.** A message
+  from another node that the receive loop drops after a hot deploy changed the
+  actor's message type (no `migrate_msg`, or one that returned `None`) now reaches
+  the sending node's `ClusterNode.on_delivery_failed` handler with its sequence
+  number and the reason, instead of only being counted.
+
 - **`NativeArray.sort_i32`, `sort_f32` and `sort_u8`: every NativeArray width
   can now be sorted.** Same ownership as `sort_int`: in place when the array is
   uniquely owned, copy-on-write when it is shared. `sort_i32` is the same
@@ -147,6 +167,28 @@ git log is authoritative for exact commits.
   names in an overlay's `[pool.` header; hover on a role showing its `role R needs`
   grant and its body type. Attach the server to those file names in your editor
   (`lsp/docs/editors.md`).
+
+### Changed
+- **The generated hosted event API's `cancel` takes the session: `cancel(s, parked)`.**
+  The epoch hold a hosting actor takes for a session is now the transport's, taken at
+  `register` and released at `close` for both hosting patterns (before, only the
+  `take_idle` pattern held, and `finish`/`cancel` released a hold the many-session
+  pattern never took); `cancel` releases through `Session.release_epoch(s)`, which,
+  like `Session.hold_epoch`, now takes a `Cap(Session.Live)`. `Session.epoch_holds_here()`
+  reads the running actor's hold count. A session party's hold is taken at its
+  Endpoint's spawn and released on every runner's exit (cluster sessions used to pin
+  their epoch for the life of the process). The reload server's `DRAIN` is signed and
+  refuses the current epoch.
+- **`run_<Role>` (and `cluster_`, `initiate_`, `host_` fronts) return
+  `Result(Session.Outcome, RunError)`** instead of `Result((), RunError)`:
+  `Ok(Session.Finished)` for a session every role completed, `Ok(Session.Drained(n))`
+  for one ended by a drain. Code matching `Ok(_)` compiles unchanged.
+- **A session whose party endpoint is killed at a hot deploy's hard drain deadline
+  ends as `Err(Left("draining"))`**, as a hosted one already did, instead of a
+  cancellation naming the endpoint.
+- **Tasks pinned to an epoch are cancelled at the hard drain deadline**: a task
+  computing without receiving is unwound at its next yield point and its `Task`
+  handle completes as `Err("task cancelled")`, instead of running on.
 - **Hot reload: the unified epoch model and drains** (build step 6 of the
   distributed-deploys plan). Every unit of work (actor, task, session) runs at the
   epoch of the deploy it started under, and every call it makes, from the base

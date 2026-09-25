@@ -1,4 +1,15 @@
-# `[P1]` A cluster-mode session party takes an epoch hold it never releases
+# A cluster-mode session party takes an epoch hold it never releases
+
+**DONE 2026-09-24.** Every party exit passes `end_party`, which releases the hold and
+kills the Endpoint actor (its reap drops the pin): `finish`, the cluster runner's
+success and three error arms, and the standalone runner's join failure. `initiate`'s
+`ApInbox` actor, leaked once per initiated session, is killed too. Test:
+`test/two_node/cluster_ap_local` measures `Scheduler.live_procs()` before and after
+the two offered sessions and again around the hosted and pair sessions, and prints
+`procs retired ... true`; with `end_party`'s kill removed it prints `false (4 over)` and
+`false (3 over)`. A `PINS`-through-a-deploy test needs a local reload client, which
+`forge deploy hot` does not offer (SSH only); the live-proc count is what a session
+leaves behind. Filed 2026-09-24; the text below is the finding as filed.
 
 Filed 2026-09-24 by the distributed-deploys review of `12c062761..d3396f743`
 (step 6, PR #612, commit 753336d36). Plan: II.4.4, D28.

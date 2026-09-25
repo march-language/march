@@ -1,4 +1,12 @@
-# `[P2]` `Session.hold_epoch`/`release_epoch` expose the stdlib-only epoch builtins to any code, with no capability
+# `Session.hold_epoch`/`release_epoch` expose the stdlib-only epoch builtins to any code, with no capability
+
+**DONE 2026-09-24.** Both wrappers take a `Cap(Session.Live)`, so only code holding a
+session can pin or unpin an actor's epoch. Generated code no longer calls
+`hold_epoch` at all (the transport holds at `register`; see
+[2026-09-24-dd-review-hosted-register-path-takes-no-hold.md](2026-09-24-dd-review-hosted-register-path-takes-no-hold.md))
+and calls `release_epoch(s)` only from `cancel(s, p)`, which gained the cap; the
+raw builtins stay stdlib-only. `Session.epoch_holds_here()` is a new read-only count
+for tests. Filed 2026-09-24; the text below is the finding as filed.
 
 Filed 2026-09-24 by the distributed-deploys review (step 6, PR #612, commit
 753336d36). Plan: II.4.4 says the builtins are stdlib-only. This is not listed

@@ -704,7 +704,7 @@ let rec proto_msgs (steps : Ast.protocol_step list) : (string * string * bool) l
   (* sender, receiver, labelled *)
   List.concat_map (function
       | Ast.ProtoMsg (s, r, _, label) -> [ (s.Ast.txt, r.Ast.txt, label <> None) ]
-      | Ast.ProtoLoop inner -> proto_msgs inner
+      | Ast.ProtoLoop (inner, _) -> proto_msgs inner
       | Ast.ProtoChoice (_, branches) ->
         List.concat_map (fun (_, steps) ->
             (* A branch's head message is named by the branch label, so it

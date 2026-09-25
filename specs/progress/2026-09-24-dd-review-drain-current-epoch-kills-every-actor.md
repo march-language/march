@@ -1,4 +1,13 @@
-# `[P2]` `DRAIN epoch:<E>` with E at or above the current epoch kills every live actor
+# `DRAIN epoch:<E>` with E at or above the current epoch kills every live actor
+
+**DONE 2026-09-24.** The reload server's verb is now `DRAIN <sig64> epoch:<E> …`, signed
+like `ACTIVATE` over `DRAIN epoch:<E> soft_ms:<n> hard_ms:<n>`, and refuses `E >=
+current` with `ERR bad_epoch` (an unsigned request: `ERR bad_signature`).
+`test/test_reload_activate4.c` pins the three refusals and the accepted form. The C
+API `march_hcr_drain` is NOT clamped: `SessionNode.drain_epochs(io, soft, hard)` (a
+program draining itself, holding `Cap(IO)`) needs a hard deadline on the current
+epoch, which `test/two_node/drain_hard` relies on, and `Topology.drain` passes no hard
+deadline. Filed 2026-09-24; the text below is the finding as filed.
 
 Filed 2026-09-24 by the distributed-deploys review (step 6, PR #612, commit
 1157997f5). Plan: II.4.7; progress deviation 5.
