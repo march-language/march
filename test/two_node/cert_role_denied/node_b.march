@@ -1,0 +1,94 @@
+-- Two-node harness, scenario "cert_role_denied": node-b, whose certificate
+-- names only Thumbs.Render:offer. See scenario.sh.
+mod CertRoleDeniedB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+  needs Session.Live
+
+  @[endpoints]
+  protocol Checkout do
+    Client -> Ledger : Int
+    Ledger -> Client : Int
+  end
+
+  @[endpoints]
+  protocol Thumbs do
+    Client -> Render : Int
+    Render -> Client : Int
+  end
+
+  pfn me() : String do "node-b" end
+
+  -- What the forged offer name is bound to: it counts what reaches it.
+  actor Forged do
+    state { n : Int }
+    init  { n: 0 }
+    on Nop() do state end
+  end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn ledger(s : Cap(Session.Live), st : Checkout_Ledger.S_recv_Msg_Client_Ledger_1) : Checkout_Ledger.Yield do
+    Checkout_Ledger.recv_Msg_Client_Ledger_1(s, st, fn (n, st1) ->
+      Checkout_Ledger.close(s, Checkout_Ledger.send_Msg_Ledger_Client_1(s, st1, n)))
+  end
+
+  pfn render(s : Cap(Session.Live), st : Thumbs_Render.S_recv_Msg_Client_Render_1) : Thumbs_Render.Yield do
+    Thumbs_Render.recv_Msg_Client_Render_1(s, st, fn (n, st1) ->
+      Thumbs_Render.close(s, Thumbs_Render.send_Msg_Render_Client_1(s, st1, n * 10)))
+  end
+
+  fn main(c : Cap(IO)) do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_NAME", me())
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int("MARCH_PORT_B")))
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
+    let cfg = match ClusterNode.config_from_env() do
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    end
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        match Checkout_Run.offer_Ledger(c, h, 4, fn (s, st) -> ledger(s, st)) do
+          Ok(_) -> println(me() ++ ": offering Checkout.Ledger (wrong: the certificate does not allow it)")
+          Err(e) -> println(me() ++ ": offer_Ledger refused: " ++ Checkout_Run.error_message(e))
+        end
+        -- A compromised node skips its own check and binds the offer name.
+        let seen = Vault.new("cert_role_denied_seen")
+        let forged = spawn(Forged)
+        let _ = ClusterNode.route(h, pid_to_int(forged), fn d -> do
+          let _ = Vault.incr(seen, d.type_tag, 1)
+          Ok(())
+        end)
+        match ClusterNode.register(h, "ap:Checkout/" ++ int_to_string(Checkout_Msg.role_Ledger()) ++ "/" ++ Checkout_Msg.fingerprint() ++ "/" ++ ClusterNode.node_id(h), forged) do
+          Ok(_) -> println(me() ++ ": forged the Checkout.Ledger offer")
+          Err(_) -> println(me() ++ ": could not bind the forged offer")
+        end
+        match Thumbs_Run.offer_Render(c, h, 4, fn (s, st) -> render(s, st)) do
+          Ok(_) -> println(me() ++ ": offering Thumbs.Render")
+          Err(e) -> panic(Thumbs_Run.error_message(e))
+        end
+        println(me() ++ ": up")
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        println(me() ++ ": invitations to the forged offer: " ++ int_to_string(Vault.get_or(seen, "SessionAP.Invite", 0)))
+        ClusterNode.stop(h)
+        println(me() ++ ": done")
+    end
+  end
+end

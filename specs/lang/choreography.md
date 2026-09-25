@@ -238,7 +238,12 @@ The arguments are:
 - `c`: the program's IO capability.
 - `"node-c"`: this node's name, used in the handshake.
 - `"fan-secret"`: a secret every node in the session shares. A node with a different secret
-  is refused.
+  is refused. With `MARCH_NODE_CERT` set (and `MARCH_NODE_KEY`,
+  `MARCH_CLUSTER_OPERATOR_PUBKEY`, as for a cluster node) the node runs in
+  [certificate mode]({{ site.baseurl }}/docs/clustering/#authorization) instead and the
+  secret is unused. Each side then checks that the peer's certificate lets it play the
+  role it announces (`Proto.Role:offer` or `:initiate`), and refuses with
+  `Connect`/`Accept`: `role Audit.A is played by node-a: not authorized for Audit.A`.
 - `Fan_Run.addrs_from_env()`: where the roles are, read from the environment (next section).
 - The body: a function from the session and C's first state to `Yield`. Its type comes from
   the protocol, so passing A's body to `run_C` does not compile.
@@ -475,7 +480,8 @@ initiate just as well.
 **How a session forms.** The initiator mints a fresh session id (its node, that node's
 incarnation, a counter: never reused, so a restarted or partitioned node can never be
 addressed by an old session), then invites one offer of each other role, trying an offer on
-its own node first. An offer refuses when it is full, when it is closing, or when it was
+its own node first. An offer refuses when it is full, when it is closing, when the initiator's
+certificate does not allow its role (certificate mode, below), or when it was
 built from a version of the protocol this one cannot form a session with: each protocol has
 a fingerprint, so two nodes built from incompatible versions refuse each other instead of
 exchanging messages the other cannot read (see [Changing a protocol](#changing-a-protocol)
@@ -495,6 +501,33 @@ in its handshake too, not only the access points, and a peer built before that c
 which sends no fingerprint -- is refused with a message saying so rather than joining
 unchecked. Every fingerprint changed when the digest widened: a node built before the
 change and one built after will refuse each other, which is the check working.
+
+**Who may take part (certificate mode).** When the cluster runs in
+[certificate mode]({{ site.baseurl }}/docs/clustering/#authorization), each node's
+certificate names the roles it may play, as `Proto.Role:offer` and
+`Proto.Role:initiate`, and a session forms only between nodes whose certificates allow
+it. Both sides check:
+
+- **The initiator checks every offer before inviting it.** Offer names are registry names
+  that any member can write, so the initiator checks the certificate of the node that
+  holds the offer, not the registry entry. An offer on a node whose certificate does not
+  name `Checkout.Ledger:offer` is skipped, and `NoOffer`'s reasons list it:
+  `node-b not authorized for Checkout.Ledger, not invited`.
+- **The offer checks the initiator.** An invitation says which role its initiator plays,
+  and the offer refuses it unless the certificate of the node it came from names
+  `Proto.Role:initiate` for that role. The initiator's `NoOffer` then reads
+  `node-b refused: initiator node-a not authorized for Checkout.Client`.
+- **Each party checks the others once the session forms.** Parties find each other by
+  session names in the registry, and a member could bind one of those names first. Each
+  party checks that every role's endpoint is on a node whose certificate allows that
+  role, and ends with `Connect(role, "... is held by node-c: not authorized for ...")`
+  otherwise.
+- **A node does not offer what its own certificate does not allow.** `offer_<Role>`
+  returns `Err(Unauthorized(role, why))`, and a topology app reports it as "could not
+  offer". This is a courtesy check. The initiator's check is the one that holds against
+  a node that skips it.
+
+A shared-secret cluster has no certificates and checks none of this, as before.
 
 **Capacity** is the second argument to `offer_<Role>`: how many sessions it will run at
 once. Past that it answers "full" and the initiator looks elsewhere.

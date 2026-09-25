@@ -8,7 +8,9 @@ mkdir -p "$PKI"
 "$forge" cluster keygen --out "$PKI" > "$work/pki.log" || fail "forge cluster keygen failed"
 "$forge" cluster cert node-a --roles CertOk.A:initiate --flags raw_send --days 1 \
   --trust-domain test.local --pool web --operator-key "$PKI/operator.key" --out "$PKI" >> "$work/pki.log" || fail "cert node-a"
-"$forge" cluster cert node-b --roles CertOk.B:offer --days 1 \
+# node-b carries raw_send too: node-a's pings are raw sends, and since step
+# 11b a raw send crosses a link only when both certificates carry the flag.
+"$forge" cluster cert node-b --roles CertOk.B:offer --flags raw_send --days 1 \
   --trust-domain test.local --pool web --operator-key "$PKI/operator.key" --out "$PKI" >> "$work/pki.log" || fail "cert node-b"
 export CLUSTER_STOP_FILE="$work/stop"
 

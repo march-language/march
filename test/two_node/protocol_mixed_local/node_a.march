@@ -121,7 +121,7 @@ mod ProtocolMixedLocal do
         let buyer_role = Order_Msg.role_Buyer()
         -- 1. Two fingerprints of one role, offered side by side on one node.
         let b2 = ok_offer(Order_Run.offer_Buyer(c, h, 4, fn (s, st) -> buyer(s, st, "v2", 1)))
-        let b1 = ok_offer(SessionNode.offer_role(c, h, "Order", v1, Nil, buyer_role, Order_Msg.peers_Buyer(), 4,
+        let b1 = ok_offer(SessionNode.offer_role(c, h, "Order", v1, Order_Msg.role_names(), Nil, buyer_role, Order_Msg.peers_Buyer(), 4,
                                                  fn _ -> (), fn s -> run_buyer(s, "v1")))
         visible(h, b2, 10000)
         visible(h, b1, 10000)
@@ -132,19 +132,19 @@ mod ProtocolMixedLocal do
         --    (receivers first); the new offer decides, by its table.
         close(h, b1)
         outcome("v1 Shop + v2 Buyer",
-          SessionNode.initiate(c, h, "Order", v1, Nil, shop_role, Order_Msg.peers_Shop(), Order_Msg.others_Shop(),
+          SessionNode.initiate(c, h, "Order", v1, Order_Msg.role_names(), Nil, shop_role, Order_Msg.peers_Shop(), Order_Msg.others_Shop(),
                                fn _ -> (), fn s -> run_shop(s, "v1")))
         -- 4. A version-2 chooser with only a version-1 receiver: refused by the
         --    initiator's own table, before any invitation.
         close(h, b2)
-        let b1b = ok_offer(SessionNode.offer_role(c, h, "Order", v1, Nil, buyer_role, Order_Msg.peers_Buyer(), 4,
+        let b1b = ok_offer(SessionNode.offer_role(c, h, "Order", v1, Order_Msg.role_names(), Nil, buyer_role, Order_Msg.peers_Buyer(), 4,
                                                   fn _ -> (), fn s -> run_buyer(s, "v1")))
         visible(h, b1b, 10000)
         outcome("v2 Shop + v1 Buyer", Order_Run.initiate_Shop(c, h, fn (s, st) -> shop(s, st, "v2", true)))
         close(h, b1b)
         -- 5. A version-2 receiver initiating towards a version-1 chooser: the
         --    newer initiator vouches for the older offer.
-        let s1 = ok_offer(SessionNode.offer_role(c, h, "Order", v1, Nil, shop_role, Order_Msg.peers_Shop(), 4,
+        let s1 = ok_offer(SessionNode.offer_role(c, h, "Order", v1, Order_Msg.role_names(), Nil, shop_role, Order_Msg.peers_Shop(), 4,
                                                  fn _ -> (), fn s -> run_shop(s, "v1")))
         visible(h, s1, 10000)
         outcome("v2 Buyer + v1 Shop", Order_Run.initiate_Buyer(c, h, fn (s, st) -> buyer(s, st, "v2", 1)))
@@ -155,7 +155,7 @@ mod ProtocolMixedLocal do
         let s2 = ok_offer(Order_Run.offer_Shop(c, h, 4, fn (s, st) -> shop(s, st, "v2", false)))
         visible(h, s2, 10000)
         outcome("v3 Buyer + v2 Shop",
-          SessionNode.initiate(c, h, "Order", "v3-fingerprint", Nil, buyer_role, Order_Msg.peers_Buyer(),
+          SessionNode.initiate(c, h, "Order", "v3-fingerprint", Order_Msg.role_names(), Nil, buyer_role, Order_Msg.peers_Buyer(),
                                Order_Msg.others_Buyer(), fn _ -> (), fn s -> run_buyer(s, "v3")))
         ignore_v2(v2)
         ClusterNode.stop(h)

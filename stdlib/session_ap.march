@@ -1,0 +1,70 @@
+-- SessionAP: who may form a session at an access point (distributed-deploys
+-- build step 11b, the authorization half of node certificates).
+--
+-- A node certificate (NodeCert) names the protocol roles its node may play,
+-- as "Proto.Role:offer" (it may OFFER the role at an access point) and
+-- "Proto.Role:initiate" (it may INITIATE a session in the role). When a
+-- session forms at access points both sides check (plan section 3, "Two-way
+-- checks when a session forms"):
+--
+--   * the offer checks that the INITIATOR's certificate names
+--     "Proto.Role:initiate" for the role it plays (SessionNode.offer_verdict);
+--   * the initiator checks that each OFFERING node's certificate names
+--     "Proto.Role:offer" for the role it offers, before inviting it
+--     (SessionNode.candidates). Offers are registered under names any member
+--     can write, so the check is on the certificate of the node that holds
+--     the offer, never on the registry entry.
+--
+-- Everything here is pure: the certificate is the one ClusterNode verified
+-- in its handshake (`ClusterNode.peer_cert`). Checks apply in CERTIFICATE
+-- mode only; a shared-secret node has no certificates and checks nothing
+-- (specs/lang/clustering.md, "Authorization").
+mod SessionAP do
+
+  doc "The mode an offering node's certificate must name for a role."
+  fn offer_mode() : String do "offer" end
+
+  doc "The mode an initiating node's certificate must name for a role."
+  fn initiate_mode() : String do "initiate" end
+
+  doc """
+  A role's certificate name: "Proto.Role" for protocol [proto] and role name
+  [role] (the names `forge cluster cert --roles` takes, before `:mode`).
+  """
+  fn role_label(proto : String, role : String) : String do proto ++ "." ++ role end
+
+  doc "The permission a certificate must carry: \"Proto.Role:mode\"."
+  fn permission(proto : String, role : String, mode : String) : String do
+    role_label(proto, role) ++ ":" ++ mode
+  end
+
+  doc """
+  May the node that presented [cert] play role [role] of protocol [proto] in
+  [mode] (`offer_mode()` or `initiate_mode()`)? `Ok(())`, or `Err(why)`: "presented
+  no certificate" when the peer presented none (a certificate-mode node never
+  links to such a peer, so this is a peer this node has not verified), else
+  "not authorized for Proto.Role". A caller in shared-secret mode does not
+  call this at all.
+  """
+  fn authorize(cert : Option(NodeCert.Cert), proto : String, role : String, mode : String) : Result((), String) do
+    match cert do
+      None -> Err("presented no certificate")
+      Some(c) ->
+        if NodeCert.has_role(c, permission(proto, role, mode)) do Ok(())
+        else Err("not authorized for " ++ role_label(proto, role)) end
+    end
+  end
+
+  doc """
+  The name of role number [i] in [roles] (a protocol's `<P>_Msg.role_names()`),
+  or its number as text when the table does not have it (a peer built from a
+  protocol with other role numbers: its fingerprint differs, so the session is
+  refused for that first).
+  """
+  fn role_name(roles : List((String, Int)), i : Int) : String do
+    match List.find(roles, fn r -> match r do (_n, k) -> k == i end) do
+      Some((n, _)) -> n
+      None -> int_to_string(i)
+    end
+  end
+end
