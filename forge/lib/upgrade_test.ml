@@ -237,9 +237,9 @@ let run ~ref_ () : (string, string) result =
              let secret = Option.value ~default:("forge-run-" ^ old_proj.Project.name) (Sys.getenv_opt "MARCH_CLUSTER_SECRET") in
              let seeds = String.concat "," (List.map (fun n -> "127.0.0.1:" ^ string_of_int n.Reconcile.port) nodes) in
              let deployed = Filename.concat work "deployed" in
+             let ports = Procs.free_ports (List.length test_bins) in
              let tp =
-               List.map (fun (name, bin) ->
-                   let port = Procs.free_port () in
+               List.map2 (fun (name, bin) port ->
                    let ready = Filename.concat work (name ^ ".ready") in
                    let env = [ ("MARCH_NODE_NAME", name); ("MARCH_NODE_PORT", string_of_int port);
                                ("MARCH_NODE_ADVERTISE", "127.0.0.1:" ^ string_of_int port);
@@ -247,7 +247,7 @@ let run ~ref_ () : (string, string) result =
                                ("MARCH_UPGRADE_SOCKETS", String.concat "," sockets);
                                ("MARCH_UPGRADE_READY", ready); ("MARCH_UPGRADE_DEPLOYED", deployed) ] in
                    (Procs.spawn ~name ~env ~argv:[| bin |] ~log, ready))
-                 test_bins
+                 test_bins ports
              in
              test_procs := List.map fst tp;
              say "driving %s" (String.concat ", " (List.map fst test_bins));

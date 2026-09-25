@@ -33,7 +33,7 @@ constructor for runtime-internal state.
 `ClusterNode.start` names the node's Vaults `cluster_node_<x>_<name>.<pid>.<nonce>`,
 the nonce `Crypto.random_hex(16)` (128 bits; the module already declared
 `needs IO.Random`). Nothing else looked these Vaults up by name. Only the naming
-changed (D27 edits other parts of cluster_node.march).
+changed.
 
 Test: `test/native/cluster_node_vaults_unnamed.march` starts a real node and scans the
 old names (`meta` and `names`) over pids 0..4095: `node Vaults found by name: 0`.

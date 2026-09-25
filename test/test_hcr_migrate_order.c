@@ -55,14 +55,23 @@ static int g_pass = 0, g_fail = 0;
 #define MSG_INC2    ((void *)(intptr_t)7)    /* the v2 message format */
 #define MSG_HOLD    ((void *)(intptr_t)9)    /* handler takes an epoch hold */
 #define MSG_RELEASE ((void *)(intptr_t)11)   /* handler releases it */
-#define MSG_NESTED  ((void *)(intptr_t)13)   /* handler blocks in a nested receive() */
-#define MSG_SPAWN   ((void *)(intptr_t)15)   /* handler spawns g_child on its own slot */
+#define MSG_SPAWN_PLAIN ((void *)(intptr_t)13) /* handler spawns a child, then sends it MSG_HOLD */
+#define MSG_SPAWN_HELD  ((void *)(intptr_t)15) /* handler spawns a child held from the spawn */
+#define MSG_PROBE       ((void *)(intptr_t)17) /* handler records its proc's epoch */
+#define MSG_NESTED  ((void *)(intptr_t)19)   /* handler blocks in a nested receive() */
+#define MSG_SPAWN   ((void *)(intptr_t)21)   /* handler spawns g_old_child on g_spawn_slot */
 
 static _Atomic int g_gate_open;
+static _Atomic long g_gate_entered;   /* handlers that reached the gate's wait */
+static _Atomic uint32_t g_probe_epoch;
+static void *g_child;
+static void *new_actor_fwd(uint32_t slot);
+static void send_fwd(void *actor, void *msg);
+#define SLOT_CHILD_FWD 14   /* == SLOT_CHILD below */
 static _Atomic long g_v1_handled, g_v2_handled, g_v1_mismatch, g_v2_mismatch;
 static _Atomic long g_migrations, g_v2_fmt_mismatch;
 static _Atomic int  g_v2_new_format;   /* 1: v2 reads MSG_INC2, not MSG_INC */
-static void *_Atomic g_child;          /* MSG_SPAWN's child */
+static void *_Atomic g_old_child;      /* MSG_SPAWN's child */
 static _Atomic uint32_t g_spawn_slot;
 
 static long now_ms(void) {
@@ -74,6 +83,7 @@ static int64_t *state_of(void *actor) { return (int64_t *)(uintptr_t)((int64_t *
 
 static int control_msg(void *msg) {
     if (msg == MSG_GATE) {
+        atomic_fetch_add(&g_gate_entered, 1);
         while (!atomic_load(&g_gate_open)) march_sched_yield();
         return 1;
     }
@@ -82,7 +92,16 @@ static int control_msg(void *msg) {
     if (msg == MSG_NESTED)  { (void)march_actor_recv(); return 1; }
     if (msg == MSG_SPAWN)   {
         void *new_actor(uint32_t slot);
-        atomic_store(&g_child, new_actor(atomic_load(&g_spawn_slot)));
+        atomic_store(&g_old_child, new_actor(atomic_load(&g_spawn_slot)));
+        return 1;
+    }
+    if (msg == MSG_PROBE)   { atomic_store(&g_probe_epoch, march_sched_current_epoch()); return 1; }
+    if (msg == MSG_SPAWN_PLAIN || msg == MSG_SPAWN_HELD) {
+        if (msg == MSG_SPAWN_HELD) march_sched_hold_next_spawn();
+        void *c = new_actor_fwd(SLOT_CHILD_FWD);
+        if (msg == MSG_SPAWN_PLAIN) send_fwd(c, MSG_HOLD);
+        send_fwd(c, MSG_PROBE);
+        atomic_store((_Atomic(void *) *)&g_child, c);
         return 1;
     }
     return 0;
@@ -138,6 +157,19 @@ void *new_actor(uint32_t slot) {
 
 static void send(void *actor, void *msg) { march_decrc(march_send(actor, msg)); }
 
+/* Park [actor] inside a v1 handler, and only return once it is THERE.  A
+ * deadline armed while the gate is still queued treats the gate like any
+ * other old-stamped message (dropped as old-format once the slot's message
+ * type changed), which on a slow runner made a "5 dropped" check see 6. */
+static void gate(void *actor) {
+    long before = atomic_load(&g_gate_entered);
+    send(actor, MSG_GATE);
+    long end = now_ms() + 5000;
+    while (atomic_load(&g_gate_entered) == before && now_ms() < end) march_sched_yield();
+}
+static void *new_actor_fwd(uint32_t slot) { return new_actor(slot); }
+static void send_fwd(void *actor, void *msg) { send(actor, msg); }
+
 static void wait_until(_Atomic long *ctr, long want, long timeout_ms) {
     long end = now_ms() + timeout_ms;
     while (atomic_load(ctr) < want && now_ms() < end) march_sched_yield();
@@ -155,11 +187,13 @@ static void wait_pins_zero(uint32_t epoch, long timeout_ms) {
 
 enum { SLOT_ORDER = 1, SLOT_MANY, SLOT_DRAIN, SLOT_DRAIN_FMT, SLOT_BUSY,
        SLOT_HOLD, SLOT_EARLY, SLOT_CONVERT, SLOT_FULL, SLOT_HARD, SLOT_DEATH,
+       SLOT_TASKS, SLOT_ORIGIN, SLOT_CHILD, SLOT_SPAWNER,
        SLOT_NESTED, SLOT_SPAWNOLD, SLOT_PLAINDEPLOY, N_SLOTS };
 #define N_MANY 2100   /* > the old 2048-entry snapshot cap */
 
 static void reset(void) {
     atomic_store(&g_gate_open, 0);
+    atomic_store(&g_gate_entered, 0);
     atomic_store(&g_v1_handled, 0); atomic_store(&g_v2_handled, 0);
     atomic_store(&g_v1_mismatch, 0); atomic_store(&g_v2_mismatch, 0);
     atomic_store(&g_migrations, 0); atomic_store(&g_v2_fmt_mismatch, 0);
@@ -186,7 +220,7 @@ static void test_queued_messages_run_on_old_code(void) {
     printf("-- messages queued before a migrating activation --\n");
     reset();
     void *a = new_actor(SLOT_ORDER);
-    send(a, MSG_GATE);                       /* holds the actor inside v1 */
+    gate(a);                       /* holds the actor inside v1 */
     for (int i = 0; i < 5; i++) send(a, MSG_INC);   /* queued pre-switch */
     uint32_t old_e = march_epoch_current();
     int e = activate(SLOT_ORDER, (void *)v2_dispatch, 0);
@@ -238,7 +272,7 @@ static void test_old_epoch_spawn_gets_marker(void) {
     printf("-- an actor spawned at an older epoch advances before its first message --\n");
     reset();
     atomic_store(&g_spawn_slot, SLOT_SPAWNOLD);
-    atomic_store(&g_child, NULL);
+    atomic_store(&g_old_child, NULL);
     void *parent = new_actor(SLOT_SPAWNOLD);
     send(parent, MSG_GATE);                    /* holds the parent inside v1 */
     send(parent, MSG_SPAWN);                   /* queued before the deploy: runs on v1 */
@@ -246,8 +280,8 @@ static void test_old_epoch_spawn_gets_marker(void) {
     CHECK(activate(SLOT_SPAWNOLD, (void *)v2_dispatch, 0) > (int)old_e, "activation published");
     atomic_store(&g_gate_open, 1);
     long end = now_ms() + 5000;
-    while (!atomic_load(&g_child) && now_ms() < end) march_sched_yield();
-    void *child = atomic_load(&g_child);
+    while (!atomic_load(&g_old_child) && now_ms() < end) march_sched_yield();
+    void *child = atomic_load(&g_old_child);
     CHECK(child != NULL, "the parent spawned its child on v1");
     if (!child) return;
     send(child, MSG_INC);
@@ -304,7 +338,7 @@ static void test_soft_deadline_forces_marker(void) {
     int64_t dropped0 = march_hcr_drain_dropped();
     march_hcr_counters c0; march_hcr_counters_get(&c0);
     void *a = new_actor(SLOT_DRAIN);
-    send(a, MSG_GATE);
+    gate(a);
     for (int i = 0; i < 5; i++) send(a, MSG_INC);   /* will miss the deadline */
     CHECK(activate(SLOT_DRAIN, (void *)v2_dispatch, 50) > 0, "activation published");
     for (int i = 0; i < 5; i++) send(a, MSG_INC);
@@ -332,7 +366,7 @@ static void test_soft_deadline_drops_old_format(void) {
     reset();
     int64_t dropped0 = march_hcr_drain_dropped();
     void *a = new_actor(SLOT_DRAIN_FMT);
-    send(a, MSG_GATE);
+    gate(a);
     for (int i = 0; i < 5; i++) send(a, MSG_INC);   /* old format, too late */
     CHECK(activate_ex(SLOT_DRAIN_FMT, (void *)v2_dispatch, migrate_v1_v2, 1,
                       NULL, 50, 0) > 0, "activation published");
@@ -356,7 +390,7 @@ static void test_second_deploy_while_draining(void) {
     printf("-- a second migrating deploy while the first is draining --\n");
     reset();
     void *a = new_actor(SLOT_BUSY);
-    send(a, MSG_GATE);
+    gate(a);
     for (int i = 0; i < 2; i++) send(a, MSG_INC);        /* before deploy 1 */
     int e1 = activate(SLOT_BUSY, (void *)v2_dispatch, 0);
     for (int i = 0; i < 2; i++) send(a, MSG_INC);        /* between deploys */
@@ -429,7 +463,7 @@ static void test_early_advance_keeps_fifo(void) {
     reset();
     march_hcr_counters c0; march_hcr_counters_get(&c0);
     void *a = new_actor(SLOT_EARLY);
-    send(a, MSG_GATE);
+    gate(a);
     for (int i = 0; i < 3; i++) send(a, MSG_INC);   /* old format, pre-deploy */
     g_early_target = a;
     march_hcr_test_before_mark = early_hook;
@@ -490,7 +524,7 @@ static void test_full_drop_new_mailbox(void) {
     int64_t dropped0 = march_hcr_drain_dropped();
     void *a = new_actor(SLOT_FULL);
     march_actor_set_mbox_limit(a, 4, MARCH_MBOX_DROP_NEW);
-    send(a, MSG_GATE);
+    gate(a);
     sleep_ms(20);                                   /* gate is being handled */
     for (int i = 0; i < 4; i++) send(a, MSG_INC);   /* fills the mailbox */
     send(a, MSG_INC);                                /* rejected by DROP_NEW */
@@ -533,11 +567,186 @@ static void test_hard_deadline_kills(void) {
     CHECK(c1.killed - c0.killed == 1, "and counted the kill");
 }
 
+/* ── Follow-up 4: a task pinned to the old epoch is CANCELLED at the hard
+ * deadline, through its handle ── */
+
+/* A capture-free March thunk, as march_task_spawn_thunk expects one: a
+ * 16-byte header (rc, tag) and the apply function at +16.  Immortal, so the
+ * trampoline's bookkeeping never frees it. */
+typedef struct { int64_t rc; int32_t tag, pad; void *(*apply)(void *, int64_t); } c_thunk;
+
+static _Atomic int g_task_stop;
+static _Atomic long g_task_ticks, g_task_finished;
+
+/* "Computing": never receives, only sleeps (a cancellation point). */
+static void *busy_task(void *clo, int64_t arg) {
+    (void)clo; (void)arg;
+    while (!atomic_load(&g_task_stop)) {
+        atomic_fetch_add(&g_task_ticks, 1);
+        march_sleep_ms(1);
+    }
+    atomic_fetch_add(&g_task_finished, 1);
+    return (void *)7;
+}
+static c_thunk g_busy_thunk = { MARCH_RC_IMMORTAL, 0, 0, busy_task };
+
+static void test_hard_deadline_cancels_tasks(void) {
+    printf("-- the hard deadline cancels a task pinned to the old epoch through its handle --\n");
+    reset();
+    atomic_store(&g_gate_open, 1);
+    atomic_store(&g_task_stop, 0);
+    atomic_store(&g_task_ticks, 0); atomic_store(&g_task_finished, 0);
+    int64_t cancelled0 = march_tasks_cancelled();
+    /* An actor to activate on, held so the old epoch stays pinned. */
+    void *a = new_actor(SLOT_TASKS);
+    send(a, MSG_HOLD);
+    /* The old task: pinned to the epoch current NOW. */
+    void *old_task = march_task_spawn_thunk(&g_busy_thunk);
+    sleep_ms(20);
+    long ticks0 = atomic_load(&g_task_ticks);
+    CHECK(ticks0 > 0, "the old task is running");
+    CHECK(activate_ex(SLOT_TASKS, (void *)v2_dispatch, migrate_v1_v2, 0, NULL,
+                      20, 80) > 0, "activation with soft 20 ms, hard 80 ms");
+    /* A task spawned after the activation runs at the new epoch: untouched. */
+    void *new_task = march_task_spawn_thunk(&g_busy_thunk);
+    void *r = march_task_await(old_task);           /* returns once cancelled */
+    CHECK(((march_hdr *)r)->tag == 1 /* Err */, "task_await of the old task is Err (cancelled)");
+    march_hcr_counters c1; march_hcr_counters_get(&c1);
+    CHECK(march_tasks_cancelled() - cancelled0 == 1, "exactly one task was cancelled");
+    CHECK(atomic_load(&g_task_finished) == 0, "the old task did not run to completion");
+    long ticks1 = atomic_load(&g_task_ticks);
+    sleep_ms(30);
+    CHECK(atomic_load(&g_task_ticks) > ticks1, "the new-epoch task keeps running");
+    atomic_store(&g_task_stop, 1);
+    void *r2 = march_task_await(new_task);
+    CHECK(((march_hdr *)r2)->tag == 0 /* Ok */, "the new-epoch task finishes normally");
+    CHECK(atomic_load(&g_task_finished) == 1, "and only it finished");
+    CHECK(!march_is_alive(a), "the held actor was killed at the hard deadline");
+    (void)c1;
+}
+
+/* ── Follow-up 1: a dropped REMOTE delivery answers DELIVERY_FAILED ──
+ * The cluster node stamps (connection, seq) on every remote delivery it
+ * routes (march_sched_delivery_origin_set around the route); the actor
+ * loop's drop of an old-format message calls the hook the node installed
+ * with them.  Here the hook is a C closure counting what it is told. */
+typedef struct { int64_t rc; int32_t tag, pad;
+                 void *(*apply)(void *, int64_t, int64_t, void *); } c_hook;
+static _Atomic long g_hook_calls, g_hook_bad;
+static void *origin_hook(void *clo, int64_t conn, int64_t seq, void *reason) {
+    (void)clo;
+    march_string *r = (march_string *)reason;
+    int ok = conn == 7 && seq >= 42 && seq < 47
+             && r && r->len > 0 && strstr(r->data, "no migrate_msg") != NULL;
+    atomic_fetch_add(ok ? &g_hook_calls : &g_hook_bad, 1);
+    return NULL;
+}
+static c_hook g_origin_hook = { MARCH_RC_IMMORTAL, 0, 0, origin_hook };
+
+static void test_dropped_remote_delivery_reports_origin(void) {
+    printf("-- a dropped remote delivery reports its (connection, seq) through the hook --\n");
+    reset();
+    atomic_store(&g_hook_calls, 0); atomic_store(&g_hook_bad, 0);
+    int64_t reported0 = march_delivery_failed_reported();
+    march_delivery_failed_watch(&g_origin_hook);
+    void *a = new_actor(SLOT_ORIGIN);
+    gate(a);
+    /* Five old-format messages "from connection 7", seqs 42..46, and one
+     * local one with no origin, all too late for the old code. */
+    for (int i = 0; i < 5; i++) {
+        march_sched_delivery_origin_set(7, 42 + i);
+        send(a, MSG_INC);
+        march_sched_delivery_origin_clear();
+    }
+    send(a, MSG_INC);
+    CHECK(activate_ex(SLOT_ORIGIN, (void *)v2_dispatch, migrate_v1_v2, 1,
+                      NULL, 50, 0) > 0, "activation published (message type changed)");
+    atomic_store(&g_v2_new_format, 1);
+    sleep_ms(200);
+    atomic_store(&g_gate_open, 1);
+    sleep_ms(200);
+    long end = now_ms() + 3000;
+    while (atomic_load(&g_hook_calls) < 5 && now_ms() < end) march_sched_yield();
+    CHECK(atomic_load(&g_hook_calls) == 5, "the hook heard each remote drop with its connection, seq and reason");
+    CHECK(atomic_load(&g_hook_bad) == 0, "and nothing else");
+    CHECK(march_delivery_failed_reported() - reported0 == 5,
+          "the local drop (no origin) was not reported");
+    march_delivery_failed_watch(NULL);
+}
+
+/* ── A party's hold is part of the Endpoint's spawn, ahead of its marker ──
+ * (review finding 2026-09-24-dd-review-party-hold-queued-behind-spawn-marker).
+ * A held parent stays at the old epoch across a deploy; a child it spawns
+ * inherits that epoch and gets a marker at spawn.  Held by a MESSAGE, the
+ * child consumes the marker first and advances (the control); held from the
+ * spawn (march_sched_hold_next_spawn), it stays at the parent's epoch. */
+static void test_spawn_hold_precedes_marker(void) {
+    printf("-- a hold taken at spawn precedes the child's spawn marker --\n");
+    reset();
+    atomic_store(&g_gate_open, 1);
+    void *parent = new_actor(SLOT_SPAWNER);
+    send(parent, MSG_HOLD);
+    sleep_ms(20);
+    uint32_t old_e = march_epoch_current();
+    CHECK(activate(SLOT_SPAWNER, (void *)v2_dispatch, 0) > 0, "activation published");
+    uint32_t new_e = march_epoch_current();
+    CHECK(new_e > old_e, "the current epoch moved on");
+    /* Control: the old way, a hold sent as the child's first message. */
+    atomic_store(&g_probe_epoch, 0);
+    send(parent, MSG_SPAWN_PLAIN);
+    long end = now_ms() + 3000;
+    while (atomic_load(&g_probe_epoch) == 0 && now_ms() < end) march_sched_yield();
+    CHECK(atomic_load(&g_probe_epoch) == new_e,
+          "held by a message, the child advanced before holding (the defect)");
+    void *plain = atomic_load((_Atomic(void *) *)&g_child);
+    /* The fix: held from the spawn. */
+    atomic_store(&g_probe_epoch, 0);
+    send(parent, MSG_SPAWN_HELD);
+    end = now_ms() + 3000;
+    while (atomic_load(&g_probe_epoch) == 0 && now_ms() < end) march_sched_yield();
+    CHECK(atomic_load(&g_probe_epoch) == old_e,
+          "held from the spawn, the child stays at the parent's epoch");
+    void *held = atomic_load((_Atomic(void *) *)&g_child);
+    CHECK(march_epoch_pins(old_e) >= 2, "parent and child both pin the old epoch");
+    /* The flag is bound to ONE spawn: a second spawn right after a held one
+     * (no flag set again) is a plain spawn and advances. */
+    atomic_store(&g_probe_epoch, 0);
+    send(parent, MSG_SPAWN_PLAIN);
+    end = now_ms() + 3000;
+    while (atomic_load(&g_probe_epoch) == 0 && now_ms() < end) march_sched_yield();
+    CHECK(atomic_load(&g_probe_epoch) == new_e, "the spawn after a held one is not held");
+    void *plain2 = atomic_load((_Atomic(void *) *)&g_child);
+    send(plain2, MSG_RELEASE);
+    /* Release everything so the old epoch retires. */
+    send(held, MSG_RELEASE); send(plain, MSG_RELEASE); send(parent, MSG_RELEASE);
+    wait_pins_zero(old_e, 5000);
+    CHECK(march_epoch_pins(old_e) == 0, "released, the old epoch retires");
+}
+
+/* A HELD actor that dies (a hosting actor killed or restarted with parked
+ * endpoints, HostGone) gives its pin back at the reap: holds live on the
+ * proc, and a dead proc's holds hold nothing. */
+static void test_dead_held_actor_releases_pin(void) {
+    printf("-- a held actor killed with its holds gives its epoch pin back --\n");
+    reset();
+    atomic_store(&g_gate_open, 1);
+    void *a = new_actor(SLOT_DEATH);
+    send(a, MSG_HOLD); send(a, MSG_HOLD);           /* two parked endpoints' worth */
+    sleep_ms(20);
+    uint32_t old_e = march_epoch_current();
+    CHECK(activate(SLOT_DEATH, (void *)v2_dispatch, 0) > 0, "activation published");
+    sleep_ms(50);
+    CHECK(march_epoch_pins(old_e) >= 1, "the held actor keeps the old epoch pinned");
+    march_kill(a);
+    wait_pins_zero(old_e, 5000);
+    CHECK(march_epoch_pins(old_e) == 0, "killed while holding, its pin is released at the reap");
+}
+
 static void test_dead_actor_releases_pins(void) {
     printf("-- actor killed before reaching its marker --\n");
     reset();
     void *a = new_actor(SLOT_DEATH);
-    send(a, MSG_GATE);
+    gate(a);
     for (int i = 0; i < 3; i++) send(a, MSG_INC);
     uint32_t old_e = march_epoch_current();
     int64_t before = march_epoch_pins(old_e);
@@ -565,6 +774,10 @@ static void test_main(void) {
     test_migrate_msg_converts();
     test_full_drop_new_mailbox();
     test_hard_deadline_kills();
+    test_hard_deadline_cancels_tasks();
+    test_dropped_remote_delivery_reports_origin();
+    test_spawn_hold_precedes_marker();
+    test_dead_held_actor_releases_pin();
     test_dead_actor_releases_pins();
     march_hcr_counters c; march_hcr_counters_get(&c);
     printf("-- counters: deferred=%lld converted=%lld dropped=%lld killed=%lld "
@@ -615,8 +828,8 @@ static void register_slots(void) {
         NULL, "Ord_dispatch", "Many_dispatch", "Drain_dispatch",
         "DrainFmt_dispatch", "Busy_dispatch", "Hold_dispatch",
         "Early_dispatch", "Convert_dispatch", "Full_dispatch",
-        "Hard_dispatch", "Death_dispatch", "Nested_dispatch", "SpawnOld_dispatch",
-        "PlainDeploy_dispatch" };
+        "Hard_dispatch", "Death_dispatch", "Tasks_dispatch", "Origin_dispatch", "Child_dispatch", "Spawner_dispatch",
+        "Nested_dispatch", "SpawnOld_dispatch", "PlainDeploy_dispatch" };
     march_dispatch_init(N_SLOTS);
     for (uint32_t i = 1; i < N_SLOTS; i++) {
         march_dispatch_register_name(i, names[i]);

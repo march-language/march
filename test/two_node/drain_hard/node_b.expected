@@ -1,0 +1,2 @@
+node-b: draining, hard deadline 300 ms
+Cons: Err(Left(draining))

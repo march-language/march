@@ -719,10 +719,12 @@ mod Topology do
 
   doc """
   On SIGTERM or SIGINT: close every offer of [node] (new invitations are
-  refused, running sessions finish), then exit 0 once no session is running.
-  At [soft_ms] a drain still waiting is reported; at [hard_ms] the process
-  exits 1, naming how many sessions it cut. (Epoch drains are build step 6.)
-  A second signal escapes the watcher and stops the process at once.
+  refused), drain every code epoch the process runs (running sessions end
+  at their next loop boundary, D27, and actors take the epoch drain's
+  deadlines), then exit 0 once no session is running. At [soft_ms] a drain
+  still waiting is reported; at [hard_ms] the process exits 1, naming how
+  many sessions it cut. A second signal escapes the watcher and stops the
+  process at once.
   """
   fn drain_on_signal(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int) : () do
     Signal.watch(Signal.Term, fn -> drain(node, soft_ms, hard_ms))
@@ -736,6 +738,13 @@ mod Topology do
       report("draining " ++ label(node) ++ " (soft " ++ int_to_string(soft_ms) ++ " ms, hard "
              ++ int_to_string(hard_ms) ++ " ms)")
       close_all(node)
+      -- The epoch drain (DD step 6, follow-up 5): the same as the reload
+      -- server's `DRAIN` for every epoch this process runs. Sessions end at
+      -- their next loop boundary (D27); the hard deadline below exits the
+      -- process before the epoch drain's own would matter, so only the soft
+      -- one is armed here. (The stdlib-only builtin: this function has no
+      -- `Cap(IO)` and its signature is the generated main's.)
+      epoch_drain(soft_ms, 0)
       let t0 = unix_time_ms()
       let _ = task_spawn(fn _ -> drain_wait(node, soft_ms, hard_ms, t0, false))
       ()

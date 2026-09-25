@@ -299,6 +299,30 @@ let base_env : env =
   ; ("epoch_release", VBuiltin ("epoch_release", function
         | [] | [VUnit] -> VUnit
         | _ -> eval_error "epoch_release: expected unit"))
+  (* D27: no epochs, so nothing is ever draining. *)
+  ; ("epoch_draining", VBuiltin ("epoch_draining", function
+        | [] | [VUnit] -> VBool false
+        | _ -> eval_error "epoch_draining: expected unit"))
+  ; ("epoch_holds", VBuiltin ("epoch_holds", function
+        | [] | [VUnit] -> VInt 0
+        | _ -> eval_error "epoch_holds: expected unit"))
+  ; ("epoch_hold_next_spawn", VBuiltin ("epoch_hold_next_spawn", function
+        | [] | [VUnit] -> VUnit
+        | _ -> eval_error "epoch_hold_next_spawn: expected unit"))
+  ; ("epoch_drain", VBuiltin ("epoch_drain", function
+        | [ VInt _; VInt _ ] -> VUnit
+        | _ -> eval_error "epoch_drain: expected (Int, Int)"))
+  (* Follow-up 1: the interpreter's actor loop applies no epoch rules, so it
+     never drops a delivery and the origin has no reader. *)
+  ; ("delivery_origin_set", VBuiltin ("delivery_origin_set", function
+        | [ VInt _; VInt _ ] -> VUnit
+        | _ -> eval_error "delivery_origin_set: expected (Int, Int)"))
+  ; ("delivery_origin_clear", VBuiltin ("delivery_origin_clear", function
+        | [] | [VUnit] -> VUnit
+        | _ -> eval_error "delivery_origin_clear: expected unit"))
+  ; ("delivery_failed_watch", VBuiltin ("delivery_failed_watch", function
+        | [ _ ] -> VUnit
+        | _ -> eval_error "delivery_failed_watch: expected a function"))
   ; ("actor_registered", VBuiltin ("actor_registered", function
         | [] ->
           Hashtbl.fold (fun name _pid acc -> VString name :: acc) named_registry []

@@ -57,5 +57,5 @@ socket for the holds.
    without that argument.
 
 Not done: a behavioural test of `SessionNode`'s `HoldEpoch`/`ReleaseEpoch` through
-the reload socket. That is D27's hold code, which was changing on an unmerged branch.
+the reload socket. That is D27's hold code, which was changing on an unmerged branch at the time.
 Filed as `specs/todos/2026-09-25-session-hold-epoch-behaviour-test.md`.

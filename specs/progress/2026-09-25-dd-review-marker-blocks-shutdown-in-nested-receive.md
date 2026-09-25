@@ -61,8 +61,8 @@ control plane (`mbox_count - user_mbox_count`), never a marker. `mbox_markers` b
 other two counters; its writers still run under the lock, now with explicit relaxed
 atomics.
 
-Scope: only the receive-loop marker path; D27 (session drains, holds) was not merged
-when this landed and its hold/drain code was not touched.
+Scope: only the receive-loop marker path; D27's hold/drain code (PR #648, merged
+while this was in review) was not touched.
 
 Test: `test/test_hcr_migrate_order.c` spawns itself twice (`nested-exit` and
 `nested-exit-deploy`, `alarm(10)`): an actor whose handler blocks in

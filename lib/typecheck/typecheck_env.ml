@@ -1637,7 +1637,19 @@ let stdlib_only : (string * string) list ref =
       (* DD step 6 (plan II.4.4): an epoch hold keeps its proc on an old code
          version; only the session runtime takes one. *)
       ("epoch_hold", "epoch holds are taken by `SessionNode` and generated session endpoints");
-      ("epoch_release", "epoch holds are taken by `SessionNode` and generated session endpoints") ]
+      ("epoch_release", "epoch holds are taken by `SessionNode` and generated session endpoints");
+      (* D27: whether the running proc's epoch is draining; SessionNode reads
+         it to end sessions at loop boundaries. *)
+      ("epoch_draining", "session drains are decided by `SessionNode` (D27)");
+      ("epoch_drain", "use `SessionNode.drain_epochs(io, soft_ms, hard_ms)`");
+      ("epoch_hold_next_spawn", "epoch holds are taken by `SessionNode` and generated session endpoints");
+      ("epoch_holds", "use `Session.epoch_holds_here()`");
+      (* DD step-6 follow-up 1: a remote delivery's origin rides the mailbox
+         node; only the cluster node's data reader stamps it and installs
+         the DELIVERY_FAILED hook. *)
+      ("delivery_origin_set", "remote delivery origins are stamped by `ClusterNode`");
+      ("delivery_origin_clear", "remote delivery origins are stamped by `ClusterNode`");
+      ("delivery_failed_watch", "the DELIVERY_FAILED hook is installed by `ClusterNode`") ]
 
 
 (* [gated_shadowed] bookkeeping shared by every binding funnel: a rebinding

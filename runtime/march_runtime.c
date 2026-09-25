@@ -3563,8 +3563,44 @@ static void march_actor_msg_dispose(void *msg);
 typedef struct hcr_deferred {
     void                *msg;
     uint32_t             epoch;
+    int64_t              conn, seq;   /* delivery origin (follow-up 1) */
     struct hcr_deferred *next;
 } hcr_deferred;
+
+/* ── DELIVERY_FAILED for a remote delivery the actor loop drops ──────────
+ * (DD step-6 follow-up 1).  A remote delivery reaches an actor as a plain
+ * local send from the cluster node's route closure, so the loop had no
+ * handle on the connection.  Now the node stamps the delivery's origin on
+ * the mailbox node (march_sched_delivery_origin_set, around the route), and
+ * a drop with a non-zero origin calls the hook the node installed:
+ * hook(conn, seq, reason), a March closure taking two Ints and a String,
+ * which sends DELIVERY_FAILED on that connection's control writer (a
+ * negative conn: the node's own loopback, answered to its local handler).
+ * RC contract as for a Signal.watch watcher: one long-lived reference held
+ * here, balanced per call against the apply function's own $clo drop. */
+static _Atomic(void *) g_delivery_failed_hook = NULL;
+static _Atomic int64_t g_delivery_failed_reported = 0;
+
+void march_delivery_failed_watch(void *clo) {
+    void *old = atomic_exchange_explicit(&g_delivery_failed_hook, clo, memory_order_acq_rel);
+    if (old) march_decrc(old);
+}
+
+int64_t march_delivery_failed_reported(void) {
+    return atomic_load_explicit(&g_delivery_failed_reported, memory_order_relaxed);
+}
+
+__attribute__((noinline))
+static void hcr_report_drop(int64_t conn, int64_t seq, const char *reason) {
+    if (!conn) return;
+    void *clo = atomic_load_explicit(&g_delivery_failed_hook, memory_order_acquire);
+    if (!clo) return;
+    atomic_fetch_add_explicit(&g_delivery_failed_reported, 1, memory_order_relaxed);
+    typedef void *(*hook_fn_t)(void *, int64_t, int64_t, void *);
+    hook_fn_t apply = *(hook_fn_t *)((char *)clo + 16);
+    march_incrc(clo);
+    apply(clo, conn, seq, march_string_lit(reason, (int64_t)strlen(reason)));
+}
 
 static _Atomic int64_t g_hcr_drain_dropped = 0;
 static _Atomic int64_t g_hcr_deferred_n    = 0;
@@ -3836,6 +3872,15 @@ void march_hcr_drain(uint32_t upto, int64_t soft_ms, int64_t hard_ms) {
     }
 }
 
+/* The stdlib-only builtin epoch_drain(soft_ms, hard_ms): drain every code
+ * epoch this process runs (DRAIN epoch:<current>), for SIGTERM on a node
+ * (Topology.drain) and SessionNode.drain_epochs.  Sessions then end at their
+ * next loop boundary (D27) and actors take the epoch drain's deadlines.
+ * hard_ms <= 0 arms no hard deadline. */
+void march_epoch_drain(int64_t soft_ms, int64_t hard_ms) {
+    march_hcr_drain(march_epoch_current(), soft_ms, hard_ms);
+}
+
 /* ── Holds (D28, II.4.4) ─────────────────────────────────────────────────── */
 
 void march_epoch_hold(void) {
@@ -3857,6 +3902,23 @@ void march_epoch_release(void) {
 uint32_t march_epoch_holds(void) {
     march_proc *p = march_sched_current();
     return p ? atomic_load_explicit(&p->epoch_holds, memory_order_relaxed) : 0;
+}
+
+/* The stdlib-only builtin epoch_holds(): the running proc's hold count, as an
+ * i64 (the uint32 accessor above would leave x0's upper half unspecified). */
+int64_t march_epoch_holds_i64(void) {
+    return (int64_t)march_epoch_holds();
+}
+
+/* D27: is the running proc's code epoch draining?  The stdlib-only builtin
+ * epoch_draining(): SessionNode asks it in its Endpoint actor's turn, and the
+ * Endpoint holds the epoch its session formed in (march_epoch_hold), so this
+ * is the PARTY's epoch.  An unpinned proc (the compiled main, epoch 0) is
+ * never draining. */
+int64_t march_epoch_draining(void) {
+    march_proc *p = march_sched_current();
+    uint32_t e = p ? atomic_load_explicit(&p->code_epoch, memory_order_relaxed) : 0;
+    return march_hcr_epoch_draining(e) ? 1 : 0;
 }
 
 /* ── Advancing ───────────────────────────────────────────────────────────── */
@@ -3994,10 +4056,11 @@ static void hcr_boundary_slow(march_actor_meta *meta, int64_t *a,
 }
 
 __attribute__((noinline))
-static void hcr_defer(march_actor_meta *meta, void *msg, uint32_t epoch) {
+static void hcr_defer(march_actor_meta *meta, void *msg, uint32_t epoch,
+                      int64_t conn, int64_t seq) {
     hcr_deferred *d = (hcr_deferred *)malloc(sizeof(*d));
     if (!d) { fputs("march: out of memory (hot-reload defer)\n", stderr); exit(1); }
-    d->msg = msg; d->epoch = epoch; d->next = NULL;
+    d->msg = msg; d->epoch = epoch; d->conn = conn; d->seq = seq; d->next = NULL;
     if (meta->hcr_def_tail) meta->hcr_def_tail->next = d; else meta->hcr_def_head = d;
     meta->hcr_def_tail = d;
     meta->hcr_def_n++;
@@ -4006,14 +4069,15 @@ static void hcr_defer(march_actor_meta *meta, void *msg, uint32_t epoch) {
 
 /* The next deferred message, once the actor may run it (no holds). */
 static int hcr_take_deferred(march_actor_meta *meta, march_proc *self,
-                             void **msg, uint32_t *epoch) {
+                             void **msg, uint32_t *epoch,
+                             int64_t *conn, int64_t *seq) {
     hcr_deferred *d = meta->hcr_def_head;
     if (!d || atomic_load_explicit(&self->epoch_holds, memory_order_relaxed) > 0)
         return 0;
     meta->hcr_def_head = d->next;
     if (!meta->hcr_def_head) meta->hcr_def_tail = NULL;
     meta->hcr_def_n--;
-    *msg = d->msg; *epoch = d->epoch;
+    *msg = d->msg; *epoch = d->epoch; *conn = d->conn; *seq = d->seq;
     free(d);
     return 1;
 }
@@ -4030,7 +4094,7 @@ static int64_t g_hcr_none_cell[3] __attribute__((aligned(16))) = {
  * actor's epoch; HCR_CONSUMED: deferred, or dropped. */
 static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
                           void **msgp, uint32_t mepoch, int alive,
-                          uint32_t slot, uint32_t cur);
+                          uint32_t slot, uint32_t cur, int64_t conn, int64_t seq);
 
 /* The cold helpers above and hcr_route_slow are noinline on purpose: inlined
  * into actor_green_thread (an ASAN -O1 build does it) their locals -- the
@@ -4038,17 +4102,18 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
  * frame past a green thread's initial stack, so every actor paid a stack
  * growth for a path that runs once per deploy. */
 static inline int hcr_route(march_actor_meta *meta, int64_t *a, march_proc *self,
-                            void **msgp, uint32_t mepoch, int alive) {
+                            void **msgp, uint32_t mepoch, int alive,
+                            int64_t conn, int64_t seq) {
     uint32_t slot = meta->dispatch_name_id;
     uint32_t cur = atomic_load_explicit(&self->code_epoch, memory_order_relaxed);
     if (!slot || !cur || mepoch == cur) return HCR_DISPATCH;
-    return hcr_route_slow(meta, a, self, msgp, mepoch, alive, slot, cur);
+    return hcr_route_slow(meta, a, self, msgp, mepoch, alive, slot, cur, conn, seq);
 }
 
 __attribute__((noinline))
 static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
                           void **msgp, uint32_t mepoch, int alive,
-                          uint32_t slot, uint32_t cur) {
+                          uint32_t slot, uint32_t cur, int64_t conn, int64_t seq) {
     uint32_t mse = march_dispatch_msg_schema_epoch(slot);
     if (mepoch > cur) {
         /* D30: a sender that has already advanced, and a message type that
@@ -4057,7 +4122,7 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
         if (mse <= cur || !hcr_log_msg_changes(slot, cur, mepoch, NULL))
             return HCR_DISPATCH;
         if (atomic_load_explicit(&self->epoch_holds, memory_order_relaxed) > 0) {
-            hcr_defer(meta, *msgp, mepoch);
+            hcr_defer(meta, *msgp, mepoch, conn, seq);
             return HCR_CONSUMED;
         }
         hcr_advance(meta, a, self, mepoch, 0, alive);
@@ -4085,6 +4150,7 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
                 /* None: dropped on purpose; migrate_msg consumed it. */
                 meta->hcr_dropped++;
                 atomic_fetch_add_explicit(&g_hcr_drain_dropped, 1, memory_order_relaxed);
+                hcr_report_drop(conn, seq, "old message format: migrate_msg returned None");
                 return HCR_CONSUMED;
             }
             march_dispatch_leave(slot, v);
@@ -4095,6 +4161,7 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
     march_actor_msg_dispose(*msgp);
     meta->hcr_dropped++;
     atomic_fetch_add_explicit(&g_hcr_drain_dropped, 1, memory_order_relaxed);
+    hcr_report_drop(conn, seq, "old message format: no migrate_msg for it");
     return HCR_CONSUMED;
 }
 
@@ -4369,15 +4436,23 @@ static void actor_green_thread(void *arg) {
         /* The epoch model's per-boundary work: a pending marker whose holds
          * are gone, a lost marker, a soft drain deadline (see hcr_boundary).
          * Only for procs that pin an epoch (actor procs always do). */
-        if (self) hcr_boundary(meta, a, self, (int)actor_alive_load(actor));
+        if (self) {
+            hcr_boundary(meta, a, self, (int)actor_alive_load(actor));
+            /* A hold-next-spawn flag (march_sched_hold_next_spawn) is bound
+             * to the spawn that follows it in the same handler; one that
+             * outlived its handler (a panic between the two) is dropped
+             * here rather than seeding a later, unrelated spawn. */
+            atomic_store_explicit(&self->hold_next_spawn, 0, memory_order_relaxed);
+        }
 
         /* Deferred newer-format messages replay first, in order, once the
          * actor has advanced and holds nothing (hcr_route). */
         void *msg;
         uint32_t msg_epoch = 0;
         int is_marker = 0;
-        if (!(self && hcr_take_deferred(meta, self, &msg, &msg_epoch))) {
-            msg = march_sched_recv_actor(&msg_epoch, &is_marker);
+        int64_t msg_conn = 0, msg_seq = 0;   /* delivery origin (follow-up 1) */
+        if (!(self && hcr_take_deferred(meta, self, &msg, &msg_epoch, &msg_conn, &msg_seq))) {
+            msg = march_sched_recv_actor_ex(&msg_epoch, &is_marker, &msg_conn, &msg_seq);
             if (msg == MARCH_RECV_NO_MSG) break;  /* woken without message (killed) */
         }
 
@@ -4419,7 +4494,7 @@ static void actor_green_thread(void *arg) {
 
         /* The epoch model's message rules (early advance, deferral,
          * migrate_msg, drop). */
-        if (self && hcr_route(meta, a, self, &msg, msg_epoch, 1) == HCR_CONSUMED) {
+        if (self && hcr_route(meta, a, self, &msg, msg_epoch, 1, msg_conn, msg_seq) == HCR_CONSUMED) {
             march_sched_tick();
             continue;
         }
@@ -4611,6 +4686,9 @@ void *march_actor_recv(void) {
     if (msg != MARCH_RECV_NO_MSG) return msg;
     march_proc *p = march_sched_current();
     if (p && p->stop_jmp) longjmp(*p->stop_jmp, 1);
+    /* A task stopped by a hard drain deadline completes its Task handle as
+     * cancelled rather than just ending its green thread (follow-up 4). */
+    march_sched_cancel_point();
     march_sched_exit();
     return MARCH_RECV_NO_MSG;   /* not reached */
 }
@@ -6575,6 +6653,13 @@ static void task_wait_done(int64_t *task) {
     pthread_mutex_unlock(&g_task_done_mu);
 }
 
+/* Tasks unwound by a hard drain deadline (march_sched_cancel_point). */
+static _Atomic int64_t g_tasks_cancelled = 0;
+#define MARCH_TASK_CANCELLED ((int64_t)0)
+int64_t march_tasks_cancelled(void) {
+    return atomic_load_explicit(&g_tasks_cancelled, memory_order_relaxed);
+}
+
 static void march_thunk_trampoline(void *arg) {
     march_thunk_arg *wa = (march_thunk_arg *)arg;
     void *clo = wa->clo;
@@ -6589,7 +6674,29 @@ static void march_thunk_trampoline(void *arg) {
     }
     typedef void *(*apply_fn_t)(void *, int64_t);
     apply_fn_t apply = *(apply_fn_t *)((char *)clo + 16);
-    void *result = apply(clo, (int64_t)0);
+    /* The cancellation landing (march_proc.task_jmp; DD step-6 follow-up 4):
+     * a hard drain deadline unwinds a task here from its next cancellation
+     * point, and its Task completes with the same "task cancelled" error
+     * march_task_cancel_by_id stores.  What the unwound frames held is not
+     * released (as for a panic). */
+    march_proc *self = march_sched_current();
+    jmp_buf cancel_jmp;
+    volatile int cancelled = 0;
+    void *volatile result = NULL;
+    if (self) self->task_jmp = &cancel_jmp;
+    if (setjmp(cancel_jmp) == 0) {
+        result = apply(clo, (int64_t)0);
+    } else {
+        cancelled = 1;
+    }
+    if (self) self->task_jmp = NULL;
+    if (task && cancelled) {
+        /* MARCH_TASK_CANCELLED: the one even value task[3] can hold (every
+         * real result is tagged odd below), which march_task_await turns
+         * into Err("task cancelled") and task_await_unwrap into a panic. */
+        task[3] = MARCH_TASK_CANCELLED;
+        atomic_fetch_add_explicit(&g_tasks_cancelled, 1, memory_order_relaxed);
+    }
     if (task) {
         /* Tag the result for the uniform March value convention: scalars (Int,
          * Bool, Unit) are returned as raw i64 by the apply function, but the
@@ -6598,8 +6705,10 @@ static void march_thunk_trampoline(void *arg) {
          * the original value.  Heap pointers fit in 63 bits on all supported
          * targets (ARM64/x86-64 use ≤48-bit user-space addresses), so the shift
          * is lossless. */
-        int64_t raw = (int64_t)(uintptr_t)result;
-        task[3] = (raw << 1) | (int64_t)1;     /* tagged result at offset 24 */
+        if (!cancelled) {
+            int64_t raw = (int64_t)(uintptr_t)result;
+            task[3] = (raw << 1) | (int64_t)1; /* tagged result at offset 24 */
+        }
         /* SEQ_CST store + SEQ_CST load: this store(task[4])-then-load(task[5])
          * is one half of a Dekker / store-buffering pair with task_wait_done's
          * store(task[5])-then-load(task[4]) — see the long comment there.
@@ -6727,6 +6836,7 @@ void *march_task_await(void *task_obj) {
     if (!task_obj) return mk_err_cstr("task_await: null task");
     int64_t *task = (int64_t *)task_obj;
     task_wait_done(task);
+    if (task[3] == MARCH_TASK_CANCELLED) return mk_err_cstr("task cancelled");
     void *result = (void *)(uintptr_t)task[3];
     return mk_ok(result);
 }
@@ -6739,6 +6849,9 @@ void *march_task_await_value(void *task_obj) {
     if (!task_obj) return (void *)1; /* tagged Unit/null */
     int64_t *task = (int64_t *)task_obj;
     task_wait_done(task);
+    /* unwrap of a cancelled task: as unwrapping any Err. */
+    if (task[3] == MARCH_TASK_CANCELLED)
+        march_panic(march_string_lit("task cancelled", 14));
     return (void *)(uintptr_t)task[3]; /* tagged result */
 }
 
@@ -6783,9 +6896,12 @@ void march_task_cancel_by_id(void *task_obj) {
     int64_t handle = task[2];
     if (!(handle & 1)) return;           /* proc not recorded yet */
     /* Store the cancelled sentinel before the status flip so the await side
-     * always sees a valid error result when it observes PROC_DEAD.  (Written
-     * whether or not the proc is still around, as it always was.) */
-    task[3] = (int64_t)(uintptr_t)mk_err_cstr("task cancelled");
+     * always sees it when it observes PROC_DEAD.  (Written whether or not
+     * the proc is still around, as it always was.)  The sentinel is 0, not
+     * an Err cell: march_task_await wraps task[3] in Ok and the compiled
+     * await normalises the payload as a tagged result, so a cell here was
+     * never an Err to March code. */
+    task[3] = MARCH_TASK_CANCELLED;
     march_reclaim_enter();
     march_proc *p = march_sched_find(handle >> 1);   /* NULL: already reaped */
     if (p) {

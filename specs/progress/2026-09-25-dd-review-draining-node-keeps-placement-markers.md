@@ -43,5 +43,5 @@ hard-deadline path.
 Test: `test/session/topology_placement.march` now prints, after `close_all`,
 `after close_all, n0's marker still registered: no` and
 `a peer sees eligible ids: [n1, n2]`; before the fix those were `yes` and
-`[n0, n1, n2]` (the review's repro). D27's branch edits `drain` a few lines above;
-expect a trivial merge.
+`[n0, n1, n2]` (the review's repro). D27 (PR #648) edited `drain` a few lines above;
+the merge was clean.
