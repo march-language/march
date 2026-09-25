@@ -27,8 +27,12 @@ What is left:
    ([2026-09-25-hcr-patch-so-private-runtime-copy.md](2026-09-25-hcr-patch-so-private-runtime-copy.md)).
    Once that is fixed, move it to `test/two_node/` and make it pass.
 2. **`Topology.reoffer` after a real deploy** reopens a role through the `open` closure
-   the old `main` built, which runs the old code (closures and entry-module functions are
-   outside the reload boundary). It needs calls inside older closures to resolve by the
-   unit's epoch (Model B, deferred in step 5), or roles built by reloadable code.
+   the old `main` built, which runs the old code. The cause is the boundary rule, not the
+   epoch model: `Hot_reload.needs_dispatch` (lib/tir/hot_reload.ml) routes a call through
+   the dispatch table only when BOTH caller and callee are reloadable, and the generated
+   `main` and its closures (entry module) never are, so they call role bodies directly,
+   pinned to the baseline. The "Fix the hot-reload boundary" work changes the rule to
+   "callee reloadable" (and fixes the patch runtime copy of item 1); recheck item 4's
+   post-deploy re-offer once it lands.
 3. **Wire `Protocol_split.plan_project` into `forge deploy --plan`** when step 10b's
    classifier lands.

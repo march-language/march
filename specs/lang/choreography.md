@@ -1123,7 +1123,9 @@ node's (SWIM) and the heartbeat settings do not apply.
 - After a hot deploy, `Topology.reoffer` calls each role's `open` function, which the old
   code built, and that runs the old code: the role is reopened under the old fingerprint
   (a no-op). It reopens under the new one only when new code builds the role, until calls
-  inside older closures resolve by the unit's epoch. A hosting actor whose handler the
+  from entry-module code and its closures go through the reload dispatch table (today a
+  call is dispatched only when both caller and callee are reloadable). A hosting actor
+  whose handler the
   deploy replaces can re-offer from there.
 - A hot patch currently carries its own copy of the runtime, so a session started by
   patched code can crash the process; the two-node test of a hot protocol change is

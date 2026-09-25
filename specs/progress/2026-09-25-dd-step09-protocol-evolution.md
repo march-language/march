@@ -154,8 +154,10 @@ Refused without a baseline, or unless the version is the baseline plus exactly t
    closure the old `main` built; closures and entry-module functions are outside the reload
    boundary (only names under the `--hot-reload` prefix and actor dispatch functions are
    reloadable), so the respawned loop calls the old `offer_<R>`, gets `AlreadyOffered`, and
-   keeps the old offer. The mechanism is right under unit-epoch resolution (Model B,
-   deferred in step 5); today an actor whose handler the deploy replaces can re-offer, as
+   keeps the old offer. The cause is `Hot_reload.needs_dispatch`, which dispatches only when
+   both caller and callee are reloadable, so entry-module code and its closures call role
+   bodies directly; the boundary-rule fix (callee reloadable) addresses it, not the
+   unit-epoch model. Until then an actor whose handler the deploy replaces can re-offer, as
    protocol_evolve's node-a does. Item 4's test drives `reoffer` with new code building the
    role, which is what it proves.
 3. **The schema hash is not "ignored by an old receiver".** A node built before this
