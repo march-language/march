@@ -18,7 +18,7 @@ let known_builtin_names =
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
     "licenses"; "tree"; "outdated"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "audit"; "ffi"; "fix"; "help";
-    "completions"; "deploy"; "hot-reload"; "topology" ]
+    "completions"; "deploy"; "hot-reload"; "topology"; "cluster" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
    Archive tasks look like "bastion.new" — dotted namespaces not used by any
@@ -1386,6 +1386,60 @@ let hot_reload_cmd =
     [ hot_reload_keygen_cmd; hot_reload_show_pubkey_cmd; hot_reload_use_key_cmd;
       hot_reload_init_cmd; hot_reload_status_cmd; hot_reload_migrate_msg_stub_cmd ]
 
+(* ----------------------------------------------------------- forge cluster *)
+
+let cluster_trust_domain =
+  Arg.(value & opt string "cluster.local" & info ["trust-domain"] ~docv:"DOMAIN"
+         ~doc:"SPIFFE-style trust domain for node and issuer URIs (default: cluster.local)")
+
+let cluster_pool =
+  Arg.(value & opt string "default" & info ["pool"] ~docv:"POOL"
+         ~doc:"Pool the node belongs to, the /pool/<POOL>/ segment of its URI (default: default)")
+
+let cluster_operator_key =
+  Arg.(value & opt string "operator.key" & info ["operator-key"] ~docv:"PATH"
+         ~doc:"The operator secret key file written by `forge cluster keygen` (default: ./operator.key)")
+
+let cluster_keygen_cmd =
+  let out = Arg.(value & opt string "." & info ["out"] ~docv:"DIR" ~doc:"Directory to write operator.key/operator.pub into") in
+  let force = Arg.(value & flag & info ["force"] ~doc:"Replace an existing operator.key") in
+  Cmd.v (Cmd.info "keygen"
+           ~doc:"Generate the cluster OPERATOR ed25519 keypair that signs node certificates (separate from the hot-reload deploy key)")
+    Term.(const (fun o f -> handle_msg (Cmd_cluster.run_keygen ~out_dir:o ~force:f ())) $ out $ force)
+
+let cluster_cert_cmd =
+  let name = Arg.(required & pos 0 (some string) None & info [] ~docv:"NODE"
+                    ~doc:"The node's name (MARCH_NODE_NAME), the last segment of its URI") in
+  let roles = Arg.(value & opt string "" & info ["roles"] ~docv:"LIST"
+                     ~doc:"Comma-separated role permissions, each Proto.Role:offer or Proto.Role:initiate") in
+  let flags = Arg.(value & opt string "" & info ["flags"] ~docv:"LIST"
+                     ~doc:"Comma-separated flags (raw_send)") in
+  let days = Arg.(value & opt int 90 & info ["days"] ~docv:"N" ~doc:"Validity in days (default: 90)") in
+  let seconds = Arg.(value & opt (some int) None & info ["seconds"] ~docv:"N"
+                       ~doc:"Validity in seconds, overriding --days (short-lived certificates, tests)") in
+  let node_key = Arg.(value & opt (some string) None & info ["node-key"] ~docv:"PATH"
+                        ~doc:"Reuse this node secret key (renewal) instead of generating NODE.key") in
+  let out = Arg.(value & opt string "." & info ["out"] ~docv:"DIR" ~doc:"Directory to write NODE.cert/NODE.key into") in
+  Cmd.v (Cmd.info "cert" ~doc:"Issue a node certificate signed by the operator key")
+    Term.(const (fun n r f d s td p ok nk o ->
+      handle_msg (Cmd_cluster.run_cert ~name:n ~roles:r ~flags:f ~days:d ~seconds:s ~trust_domain:td
+                    ~pool:p ~operator_key:ok ~node_key:nk ~out_dir:o ()))
+          $ name $ roles $ flags $ days $ seconds $ cluster_trust_domain $ cluster_pool
+          $ cluster_operator_key $ node_key $ out)
+
+let cluster_revoke_cmd =
+  let serial = Arg.(value & opt string "" & info ["serial"] ~docv:"SERIAL" ~doc:"Revoke the certificate with this serial") in
+  let node = Arg.(value & opt string "" & info ["node"] ~docv:"NODE"
+                    ~doc:"Revoke every certificate of this node (a name, or a spiffe:// URI)") in
+  Cmd.v (Cmd.info "revoke" ~doc:"Print a signed revocation token for ClusterNode.revoke / MARCH_CLUSTER_REVOCATIONS")
+    Term.(const (fun s n td p ok ->
+      handle_msg (Cmd_cluster.run_revoke ~serial:s ~node:n ~trust_domain:td ~pool:p ~operator_key:ok ()))
+          $ serial $ node $ cluster_trust_domain $ cluster_pool $ cluster_operator_key)
+
+let cluster_cmd =
+  Cmd.group (Cmd.info "cluster" ~doc:"Cluster certificates: operator keys, node certificates, revocations")
+    [ cluster_keygen_cmd; cluster_cert_cmd; cluster_revoke_cmd ]
+
 (* --------------------------------------------------------- forge completions *)
 
 
@@ -1629,7 +1683,7 @@ let () =
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
       licenses_cmd; tree_cmd; outdated_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
-      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; topology_cmd; completions_cmd; help_cmd ]
+      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; topology_cmd; cluster_cmd; completions_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term

@@ -962,6 +962,11 @@ void   *march_vault_ns_drop(void *ns, void *key);
 void   *march_sha256(void *data);
 void   *march_sha512(void *data);
 void   *march_hmac_sha256(void *key, void *msg);
+/* ed25519 / X25519 over the vendored TweetNaCl (runtime/march_nacl.c). */
+void   *march_ed25519_seed_keypair(void *seed);
+void   *march_ed25519_sign(void *sk, void *msg);
+int64_t march_ed25519_verify(void *pk, void *msg, void *sig);
+void   *march_x25519(void *scalar, void *point);
 void   *march_pbkdf2_sha256(void *pass, void *salt, int64_t iters, int64_t dklen);
 void   *march_base64_encode(void *input);
 void   *march_base64_decode(void *str);

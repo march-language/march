@@ -42,4 +42,40 @@ mod TestClusterAuth do
 
   end
 
+  describe "ClusterAuth frame keys (step 11a)" do
+
+    test "each side's send key is the other's receive key, and the directions differ" do
+      let ikm = Bytes.from_string("shared")
+      let th = ClusterAuth.transcript([1], "na", [2], "nb")
+      let a = ClusterAuth.frame_keys(ikm, th, "na", "nb")
+      let b = ClusterAuth.frame_keys(ikm, ClusterAuth.transcript([2], "nb", [1], "na"), "nb", "na")
+      assert (a.tx_key == b.rx_key)
+      assert (a.rx_key == b.tx_key)
+      assert (a.tx_key != a.rx_key)
+      assert (Bytes.length(a.tx_key) == 32)
+    end
+
+    test "the keys depend on the key material and on the transcript" do
+      let th = ClusterAuth.transcript([1], "na", [2], "nb")
+      let a = ClusterAuth.frame_keys(Bytes.from_string("s1"), th, "na", "nb")
+      let other_ikm = ClusterAuth.frame_keys(Bytes.from_string("s2"), th, "na", "nb")
+      let other_th = ClusterAuth.frame_keys(Bytes.from_string("s1"), ClusterAuth.transcript([1], "na", [3], "nb"), "na", "nb")
+      assert (a.tx_key != other_ikm.tx_key)
+      assert (a.tx_key != other_th.tx_key)
+    end
+
+    test "the MAC offer rides on the nonce" do
+      assert (ClusterAuth.offers_mac("abc" ++ ClusterAuth.mac_suffix()))
+      assert (not(ClusterAuth.offers_mac("abc")))
+    end
+
+    test "HKDF-SHA256 matches RFC 5869 test case 1 (first block)" do
+      let ikm = Bytes.from_list(List.map(List.range(0, 22), fn _ -> 11))
+      let salt = Result.unwrap_or(Bytes.from_hex("000102030405060708090a0b0c"), Bytes.empty())
+      let prk = ClusterAuth.hkdf_extract(salt, ikm)
+      assert (Bytes.to_hex(prk) == "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5")
+    end
+
+  end
+
 end

@@ -175,6 +175,9 @@ let gated : (string * string * compare_mode) list = [
      The anchor keeps the leading digits, which is what a real regression
      would move. *)
   "vector_math",         "", IgnoreTiming;
+  (* frame throughput over a loopback cluster connection (sealed frames since
+     distributed-deploys step 11a); ephemeral port, so safe to run here. *)
+  "cluster_frames",      "", IgnoreTiming;
 ]
 
 (* Benches deliberately NOT gated, each with the reason. These bind fixed TCP
@@ -204,6 +207,9 @@ let excluded : (string * string) list = [
    wrong checksum still fails. *)
 let timing_value_anchors : (string * string list) list = [
   "hash_map_bench", ["check=14999850000"];
+  "cluster_frames", ["payload 64 B: received 5000 frames, 320000 bytes";
+                     "payload 1024 B: received 2000 frames, 2048000 bytes";
+                     "payload 16384 B: received 300 frames, 4915200 bytes"];
   "rrb_bench",      ["seq_sum=500000500000"; "par_sum=500000500000"];
 
   (* Added 2026-09-16, captured from a real run, never written from memory.

@@ -2165,6 +2165,48 @@ let base_env : env =
              march_bytes_of_string (Digestif.SHA256.(to_raw_string (hmac_string ~key msg)))
            | Error e, _ | _, Error e -> eval_error "hmac_sha256_bytes: %s" e)
         | _ -> eval_error "hmac_sha256_bytes(key: Bytes, msg: Bytes): Bytes"))
+    (* ---- ed25519 / X25519 (lib/ed25519, the same TweetNaCl the native
+       runtime links via runtime/march_nacl.c). Parity with the runtime: a
+       wrong-length argument gives EMPTY Bytes (verify: false), never an
+       error, and x25519 of a low-order point (all-zero result) is empty. ---- *)
+  ; ("ed25519_seed_keypair", VBuiltin ("ed25519_seed_keypair", function
+        | [seed_v] ->
+          (match march_val_to_raw seed_v with
+           | Ok seed when String.length seed = 32 ->
+             march_bytes_of_string (Bytes.to_string
+               (March_ed25519.Ed25519.seed_keypair (Bytes.of_string seed)))
+           | Ok _ -> march_bytes_of_string ""
+           | Error e -> eval_error "ed25519_seed_keypair: %s" e)
+        | _ -> eval_error "ed25519_seed_keypair(seed: Bytes): Bytes"))
+  ; ("ed25519_sign", VBuiltin ("ed25519_sign", function
+        | [sk_v; msg_v] ->
+          (match march_val_to_raw sk_v, march_val_to_raw msg_v with
+           | Ok sk, Ok msg when String.length sk = 64 ->
+             march_bytes_of_string (Bytes.to_string
+               (March_ed25519.Ed25519.sign (Bytes.of_string msg) (Bytes.of_string sk)))
+           | Ok _, Ok _ -> march_bytes_of_string ""
+           | Error e, _ | _, Error e -> eval_error "ed25519_sign: %s" e)
+        | _ -> eval_error "ed25519_sign(sk: Bytes, msg: Bytes): Bytes"))
+  ; ("ed25519_verify", VBuiltin ("ed25519_verify", function
+        | [pk_v; msg_v; sig_v] ->
+          (match march_val_to_raw pk_v, march_val_to_raw msg_v, march_val_to_raw sig_v with
+           | Ok pk, Ok msg, Ok sg ->
+             VBool (String.length pk = 32 && String.length sg = 64 &&
+                    March_ed25519.Ed25519.verify (Bytes.of_string msg)
+                      (Bytes.of_string sg) (Bytes.of_string pk))
+           | Error e, _, _ | _, Error e, _ | _, _, Error e -> eval_error "ed25519_verify: %s" e)
+        | _ -> eval_error "ed25519_verify(pk: Bytes, msg: Bytes, sig: Bytes): Bool"))
+  ; ("x25519", VBuiltin ("x25519", function
+        | [k_v; u_v] ->
+          (match march_val_to_raw k_v, march_val_to_raw u_v with
+           | Ok k, Ok u when String.length k = 32 && String.length u = 32 ->
+             let q = Bytes.to_string
+                 (March_ed25519.Ed25519.x25519 (Bytes.of_string k) (Bytes.of_string u)) in
+             if String.for_all (fun c -> c = '\000') q then march_bytes_of_string ""
+             else march_bytes_of_string q
+           | Ok _, Ok _ -> march_bytes_of_string ""
+           | Error e, _ | _, Error e -> eval_error "x25519: %s" e)
+        | _ -> eval_error "x25519(scalar: Bytes, point: Bytes): Bytes"))
     (* ---- PBKDF2-HMAC-SHA256: returns Ok(Bytes) ---- *)
   ; ("pbkdf2_sha256", VBuiltin ("pbkdf2_sha256", function
         | [pwd_v; salt_v; VInt iters; VInt dklen] ->

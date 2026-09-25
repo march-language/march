@@ -360,6 +360,7 @@ let extern_owned_builtins : string list = [
     "vault_ns_set"; "vault_ns_get"; "vault_ns_drop"; "md5"; "sha256";
     "stdlib_sha256"; "sha512"; "stdlib_sha512"; "hmac_sha256";
     "stdlib_hmac_sha256"; "hmac_sha256_bytes"; "pbkdf2_sha256";
+    "ed25519_seed_keypair"; "ed25519_sign"; "ed25519_verify"; "x25519";
     "base64_encode"; "stdlib_base64_encode"; "base64_decode";
     "stdlib_base64_decode"; "bytes_to_u8_arr"; "u8_arr_to_bytes";
     "remote_register_stub"; "remote_check"; "remote_invoke";
