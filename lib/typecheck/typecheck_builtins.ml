@@ -89,8 +89,61 @@ let cap_strict_ceiling : bool ref = ref false
     driver's diagnostic filter (bin/main.ml, [user_diag_file]) all go through
     it, so the gate can never admit code the filter shows as the user's, or
     reject code whose error the filter then hides. *)
+(* The directories the standard library was loaded FROM: the resolved stdlib
+   root each loader (the driver's [Toolchain.load_stdlib], the LSP's
+   [Analysis.load_stdlib]) read its modules out of, as a real path. A file
+   whose real path lies under one of them is the stdlib's even when it was
+   named on the command line under another spelling (`march --check
+   $MARCH_STDLIB/actor.march`). This is provenance, not a name: the driver
+   used to add any entry file whose BASENAME matched the stdlib manifest to
+   [stdlib_source_files], so a user's own `json.march` was exempt from the
+   stdlib-only builtin gate (2026-09-24-dd-review-stdlib-only-gate-entry-
+   named-like-stdlib.md). *)
+let stdlib_roots : string list ref = ref []
+
+(* Canonicalisation is supplied by the loader ([Unix.realpath] in the driver
+   and the LSP) rather than called here: this library is also linked into
+   the browser REPL, which has no filesystem and registers no root. *)
+let stdlib_realpath : (string -> string option) ref = ref (fun _ -> None)
+
+let realpath_opt (f : string) : string option = !stdlib_realpath f
+
+let note_stdlib_root (dir : string) : unit =
+  match realpath_opt dir with
+  | Some r when not (List.mem r !stdlib_roots) -> stdlib_roots := r :: !stdlib_roots
+  | _ -> ()
+
+(* [realpath] per distinct span file, memoised: [span_is_stdlib] is asked on
+   every gated reference and on every diagnostic the driver filters. The
+   memo is keyed on the roots too, so a root registered after a miss is
+   not shadowed by a stale negative answer. *)
+let under_root_memo : (string list * string, bool) Hashtbl.t = Hashtbl.create 64
+
+let file_under_stdlib_root (f : string) : bool =
+  match !stdlib_roots with
+  | [] -> false
+  | roots ->
+    let key = (roots, f) in
+    (match Hashtbl.find_opt under_root_memo key with
+     | Some b -> b
+     | None ->
+       let b =
+         f <> "" && f <> Ast.dummy_span.Ast.file
+         && (match realpath_opt f with
+             | None -> false
+             | Some r ->
+               List.exists (fun root ->
+                   let n = String.length root in
+                   String.length r > n
+                   && String.sub r 0 n = root
+                   && r.[n] = '/')
+                 roots)
+       in
+       Hashtbl.replace under_root_memo key b;
+       b)
+
 let file_is_stdlib (f : string) : bool =
-  List.mem f !stdlib_source_files
+  List.mem f !stdlib_source_files || file_under_stdlib_root f
 
 let span_is_stdlib (sp : Ast.span) : bool =
   file_is_stdlib sp.Ast.file
@@ -113,17 +166,7 @@ let span_is_stdlib (sp : Ast.span) : bool =
     `Actor` wrappers that take a `Cap(Actor.Introspect)` minted by
     `Actor.introspect(io)`. A ref so tests can install an entry around a
     single check. *)
-let stdlib_only : (string * string) list ref =
-  ref
-    [ ("pid_of_int",
-       "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)");
-      ("actor_pid_indices", "use `Actor.list(cap)` (see `Actor.introspect`)");
-      ("actor_whereis", "use `Actor.whereis(cap, name)` (see `Actor.introspect`)");
-      ("actor_registered", "use `Actor.registered(cap)` (see `Actor.introspect`)");
-      (* DD step 6 (plan II.4.4): an epoch hold keeps its proc on an old code
-         version; only the session runtime takes one. *)
-      ("epoch_hold", "epoch holds are taken by `SessionNode` and generated session endpoints");
-      ("epoch_release", "epoch holds are taken by `SessionNode` and generated session endpoints") ]
+let stdlib_only : (string * string) list ref = Typecheck_env.stdlib_only
 
 (** The source files a list of loaded stdlib declarations came from: every
     file named by a [DFn] span or a [DMod] span, recursively. A file is what
@@ -1948,6 +1991,9 @@ let base_env errors type_map =
   let env = bind_vars builtin_bindings env in
   let env = bind_vars builtin_interface_bindings env in
   { env with
+    (* The builtins just bound ARE the gated bindings: only a later rebinding
+       shadows one. *)
+    gated_shadowed = StringSet.empty;
     types      = List.fold_left (fun m (k, v) -> StrMap.add k v m) StrMap.empty builtin_types;
     ctors      = List.fold_left (fun m (k, v) -> add_ctor k v m) StrMap.empty builtin_ctors;
     interfaces = List.fold_left (fun m (k, v) -> StrMap.add k v m) StrMap.empty builtin_interfaces;

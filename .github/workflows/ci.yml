@@ -395,7 +395,7 @@ jobs:
           fi
 
           rm -rf .march/cas/artifacts-v2
-          ./_build/default/bin/main.exe --check --refine-report stdlib/list.march \
+          ./_build/default/bin/main.exe --check --stdlib-source --refine-report stdlib/list.march \
             > /tmp/refine_ceiling.txt 2>&1 || true
           cat /tmp/refine_ceiling.txt
           # Read the whole-program slice specifically, same reasoning as above.
@@ -427,7 +427,7 @@ jobs:
             echo "  1. Run it locally, against a COLD CHECK CACHE:"
             echo "       rm -rf .march/cas/artifacts-v2"
             echo "       ./_build/default/bin/main.exe --check \\"
-            echo "         --refine-report stdlib/list.march"
+            echo "         --stdlib-source --refine-report stdlib/list.march"
             echo "     Without that rm, a cached --check exits before the report runs"
             echo "     and you get empty output, not a smaller number. Add"
             echo "     'rm -rf .march/cas/vc' as well only if you want z3 to re-decide"
@@ -474,7 +474,7 @@ jobs:
           eval $(opam env)
           unenforced_baseline=0
           rm -rf .march/cas/artifacts-v2
-          ./_build/default/bin/main.exe --check --refine-audit stdlib/list.march \
+          ./_build/default/bin/main.exe --check --stdlib-source --refine-audit stdlib/list.march \
             > /tmp/refine_audit_ceiling.txt 2>&1 || true
           cat /tmp/refine_audit_ceiling.txt
           unenforced=$(sed -n \
@@ -505,7 +505,7 @@ jobs:
             echo "What to do:"
             echo "  1. Reproduce locally:"
             echo "       rm -rf .march/cas/artifacts-v2"
-            echo "       ./_build/default/bin/main.exe --check --refine-audit stdlib/list.march"
+            echo "       ./_build/default/bin/main.exe --check --stdlib-source --refine-audit stdlib/list.march"
             echo "  2. Read the per-site lines this prints (file:line:col, the"
             echo "     predicate, and why it is Unenforced) to find what changed."
             echo "  3. Fix the regression, or move the new refinement to a position"

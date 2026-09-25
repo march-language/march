@@ -3082,7 +3082,17 @@ let test_repl_jit_general_interaction () =
          | March_ast.Ast.ReplExpr e ->
            let e' = March_desugar.Desugar.desugar_expr e in
            let m = make_jit_test_module e' in
+           (* As the REPL does around every evaluation (lib/repl/repl.ml
+              infers the expression, then binds "v" to that type): the JIT's
+              typecheck is no longer advisory, so a later fragment naming `v`
+              must find it typed. *)
+           let inferred = March_typecheck.Typecheck.infer_expr
+             { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } e' in
            let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
+           tc_env := { !tc_env with
+             March_typecheck.Typecheck.vars =
+               March_typecheck.Typecheck.StrMap.add "v"
+                 (March_typecheck.Typecheck.Mono inferred) !tc_env.March_typecheck.Typecheck.vars };
            result
          | _ -> failwith ("expected ReplExpr for: " ^ src)
        in

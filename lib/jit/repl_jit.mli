@@ -17,6 +17,11 @@ val current_backend : unit -> backend
     against both backends. *)
 val set_backend_for_tests : backend -> unit
 
+(** A fragment's typecheck (re-run by every lowering entry point) found
+    errors; carries the rendered messages. Distinct from [Failure], which the
+    REPL treats as "fall back to the interpreter". *)
+exception Typecheck_failed of string
+
 (** Create a JIT context.
     [runtime_so] is the path to the pre-compiled march_runtime.so.
     [clang] is the clang binary path (default "clang"). *)

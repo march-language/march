@@ -1009,6 +1009,11 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
            non-sandboxed cached artifact must never satisfy it. *)
         @ (if !cap_sandbox then ["capsandbox"] else [])
         @ (if !cap_strict then ["capstrict"] else [])
+        (* --stdlib-source changes the verdict: a file the stdlib-only
+           builtin gate rejects passes under it, so a clean cached check
+           must never satisfy the plain spelling (measured: it did, and the
+           gate's own driver test went silent on a warm CAS). *)
+        @ (if !stdlib_source then ["stdlib-source"] else [])
         @ cross_sysroot_tag
         @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
   let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
@@ -1723,7 +1728,14 @@ let compile filename =
          itself decides whether anything is reported. *)
       if contains_substring cache_input "no_alloc" then raise Exit;
       if !do_check then begin
-        let ch = March_cas.Cas.compilation_hash src_hash ~target:"check" ~flags:[] in
+        (* --stdlib-source changes the verdict (a file the stdlib-only
+           builtin gate rejects passes under it), so it is part of the key:
+           measured, a clean `--check --stdlib-source` run satisfied the
+           next plain `--check` of the same source, which then exited 0
+           silently. *)
+        let ch =
+          March_cas.Cas.compilation_hash src_hash ~target:"check"
+            ~flags:(if !stdlib_source then ["stdlib-source"] else []) in
         (match March_cas.Cas.lookup_artifact store ch with
          | Some _ -> exit 0
          | None -> ());
@@ -1973,13 +1985,13 @@ let compile filename =
      module (prelude is unwrapped into global scope, so its decls ride in the
      entry module's list).  See Typecheck.stdlib_source_files. *)
   March_typecheck.Typecheck.stdlib_source_files := stdlib_span_files stdlib_decls;
-  (* A shipped stdlib module checked AS THE ENTRY (`march --check
-     stdlib/<mod>.march`) is spelled the way the command line spelled it, not
-     the way [load_stdlib] stamped its own copy, so the set above does not
-     contain it; add it, or the stdlib-only builtin gate rejects the module's
-     own legitimate calls to `pid_of_int` and friends. [user_diag_file] tests
-     the entry file first, so its diagnostics are still shown. *)
-  if is_shipped_stdlib_file filename then
+  (* A stdlib module checked AS THE ENTRY is the stdlib's when its real path
+     is under the root [load_stdlib] read from (registered there through
+     [Typecheck_builtins.note_stdlib_root]), or when `--stdlib-source` says
+     so explicitly. Not by basename: that exempted a user's own `json.march`
+     from the stdlib-only builtin gate. [user_diag_file] tests the entry
+     file first, so its diagnostics are still shown. *)
+  if !stdlib_source then
     March_typecheck.Typecheck.stdlib_source_files :=
       filename :: !March_typecheck.Typecheck.stdlib_source_files;
   (* Run the typecheck-side capability ceiling ONLY in typecheck-only modes
@@ -4228,14 +4240,13 @@ let run_check_cmd ?(emit_caps = false) files =
   let no_shadowing = List.length stdlib_decls = stdlib_decls_unshadowed_count in
   if not (List.for_all is_shipped_stdlib_file files) then
     check_no_prelude_collision_decls ~stdlib_decls all_decls;
-  (* As in [compile]: a shipped stdlib module named on the command line is
-     the stdlib's for the stdlib-only builtin gate, whatever spelling the
-     command line used. *)
-  List.iter (fun f ->
-      if is_shipped_stdlib_file f then
+  (* As in [compile]: a file under the stdlib root is the stdlib's by
+     provenance; `--stdlib-source` says so for any other spelling. *)
+  if !stdlib_source then
+    List.iter (fun f ->
         March_typecheck.Typecheck.stdlib_source_files :=
           f :: !March_typecheck.Typecheck.stdlib_source_files)
-    files;
+      files;
   (* Build a synthetic module of just the user's own decls and type-check it,
      seeded from the cached stdlib typecheck env (see [get_stdlib_tc_env])
      instead of re-typechecking stdlib combined with user code from scratch —
@@ -4702,6 +4713,7 @@ let () =
     ("--topology-isolate-foreign", Arg.Set topology_isolate_foreign,
      " With --topology: reject an IO.Foreign role or hook in a pool that is not isolated");
     ("--cap-strict", Arg.Set cap_strict, " Treat `needs` as a hard ceiling (the DEFAULT since 2026-08-08; accepted for compatibility and to state the intent explicitly)");
+    ("--stdlib-source", Arg.Set stdlib_source, " The entry file(s) are standard-library sources checked under a path outside the resolved stdlib root (e.g. `march --check --stdlib-source stdlib/actor.march` from the repo root): exempt them from the stdlib-only builtin gate. Never inferred from the file name");
     ("--no-cap-strict", Arg.Clear cap_strict, " Do not enforce `needs` as a ceiling: allow a module's emitted code to use capabilities it does not declare");
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");

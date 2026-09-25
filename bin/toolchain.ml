@@ -567,6 +567,14 @@ let load_stdlib ?(for_js=false) () =
   match stdlib_source_hash ~for_js () with
   | None -> []
   | Some (stdlib_dir, source_hash, _) ->
+    (* Provenance for the stdlib-only builtin gate: everything under this
+       directory is the stdlib's, whatever spelling later names it (the AST
+       cache below stamps spans with the directory the populating process
+       used, and [note_stdlib_decls] records those; the root covers an entry
+       file named under this directory by another path). *)
+    March_typecheck.Typecheck_builtins.stdlib_realpath :=
+      (fun f -> try Some (Unix.realpath f) with _ -> None);
+    March_typecheck.Typecheck_builtins.note_stdlib_root stdlib_dir;
     let home = (try Sys.getenv "HOME" with Not_found -> ".") in
     let cache_dir = Filename.concat home ".cache/march" in
     let short_hash = String.sub source_hash 0 16 in
