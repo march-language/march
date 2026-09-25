@@ -618,6 +618,18 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Per-role grants check the value that reaches the runner, not the expression at the
+  call.** `check_role_grants` used to walk only a literal lambda or a directly named
+  function; a body bound with `let`, passed through a parameter, calling a `let`-aliased
+  function or a local closure was charged nothing and `--check` accepted it. The root is
+  now resolved through the calling function's bindings (`let` right-hand sides, aliases,
+  parameters at their call sites, call results), local closures are charged and named in
+  the chain (`body → sv → save`), and a body with no static origin (a record field, a
+  message) is reported as "cannot verify role grant … value not statically known" instead
+  of passing silently. `--dump-role-authority` now lists the captured local closures and
+  the pids the body holds. A `role R needs` naming a non-IO capability (`Session.Live`,
+  `ClusterNode.Live`, `LibC`) is one error at the grant line instead of a spray of errors
+  inside generated code. Corpus `reject/t295`.
 - **`march --check` no longer reuses a `--no-cap-strict` verdict.** The `--check`
   fast path caches a clean verdict per source digest, but that key ignored
   `--no-cap-strict`, so `march --check --no-cap-strict f.march` exiting 0 made the
