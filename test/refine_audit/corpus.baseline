@@ -388,6 +388,8 @@ native_sched_stress: coverage audit (user + stdlib): 120 enforced, 0 inert (warn
 native_sched_stress: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_session_node_fan_loopback: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_session_node_fan_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_sha256_hex_string: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_sha256_hex_string: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_shadow_selfref_let: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_shadow_selfref_let: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_shadowed_builtin_name: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced

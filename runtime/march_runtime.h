@@ -925,7 +925,8 @@ void   *march_vault_ns_get(void *ns, void *key);
 void   *march_vault_ns_drop(void *ns, void *key);
 
 /* Crypto builtins (march_extras.c). */
-void   *march_sha256(void *data);
+void   *march_sha256(void *data);          /* String -> hex String */
+void   *march_sha256_of_bytes(void *b);    /* Bytes  -> hex String */
 void   *march_sha512(void *data);
 void   *march_hmac_sha256(void *key, void *msg);
 void   *march_pbkdf2_sha256(void *pass, void *salt, int64_t iters, int64_t dklen);

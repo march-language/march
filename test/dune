@@ -2802,6 +2802,46 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_call_late_reply.expected native_actor_call_late_reply.out)))
 
+; ; ── Regression: bare `sha256` returns a hex String on BOTH backends ──
+; typecheck_builtins.ml said `sha256 : Bytes -> Bytes` while both backends
+; returned a hex String, so a Bytes-typed use of the digest crashed (match
+; failure interpreted, SIGBUS compiled); and even a String-typed use crashed
+; compiled, because march_sha256 guessed String-vs-Bytes from the box's
+; header word, which now carries a type id. The fixture hashes a Bytes with
+; the bare builtin and uses the result as a String; the .expected was generated
+; interpreted and the compiled run is diffed against the SAME file, so this
+; is a compiled-vs-interpreted parity check as well as a golden. See
+; specs/progress/2026-09-24-sha256-builtin-hex-string.md.
+(rule
+ (targets native_sha256_hex_string native_sha256_hex_string.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/sha256_hex_string.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_sha256_hex_string
+        native/sha256_hex_string.march)
+   (with-stdout-to native_sha256_hex_string.out
+        (system "./native_sha256_hex_string")))))
+
+(rule
+ (targets interp_sha256_hex_string.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/sha256_hex_string.march))
+ (action
+  (with-stdout-to interp_sha256_hex_string.out
+    (run %{exe:../bin/main.exe} native/sha256_hex_string.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/sha256_hex_string.expected interp_sha256_hex_string.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/sha256_hex_string.expected native_sha256_hex_string.out)))
+
 ; ── Regression: Actor.call inside a handler keeps the actor's own messages ──
 ; The compiled call waits on the caller's mailbox; an actor's ordinary
 ; messages sent during the wait were returned as the call's reply and never

@@ -459,25 +459,33 @@ void *march_sha1_bytes(void *b) {
 
 /* ── march_sha256 ────────────────────────────────────────────────────── */
 
-/* Raw bytes of a String or a Bytes value (malloc'd; caller frees). */
-static uint8_t *string_or_bytes_to_raw(void *data, size_t *out_len) {
-    /* Distinguish String vs Bytes by looking at the int64 at offset 8.
-     * String: offset 8 = int64_t len (string length, typically > 0 or 0 for empty).
-     * Bytes ctor: offset 8 = int32_t tag (0) + int32_t pad (0) = 0 as int64.
-     * Heuristic: if the value at offset 8 is likely a tag (0 or small int),
-     * treat as Bytes; otherwise treat as String. */
-    int64_t field8 = *(int64_t *)((char *)data + 8);
-    if ((uint32_t)field8 == 0 && (uint32_t)(field8 >> 32) == 0) {
-        /* Looks like Bytes(List(Int)): field8 = (tag=0, pad=0) = 0 */
-        return bytes_to_raw(data, out_len);
-    }
-    return string_to_raw(data, out_len);
-}
-
-/* Takes a String (or Bytes) and returns a 64-char lowercase hex String */
+/* Takes a String and returns a 64-char lowercase hex String.
+ *
+ * String ONLY: this is the C entry for `stdlib_sha256` (Crypto.sha256, typed
+ * String -> String). Until 2026-09-24 it "auto-detected" String vs Bytes by
+ * testing whether the 64-bit word at offset 8 was zero; that predates the
+ * compiler stamping a type id into the box's pad word (+12), after which every
+ * Bytes box read as a String and its payload POINTER was taken as the length
+ * (SIGBUS in memcpy). The Bytes-typed `sha256` builtin has its own entry,
+ * march_sha256_of_bytes, chosen statically by the compiler. */
 void *march_sha256(void *data) {
     size_t len;
-    uint8_t *bytes = string_or_bytes_to_raw(data, &len);
+    uint8_t *bytes = string_to_raw(data, &len);
+    uint8_t hash[32];
+    do_sha256(bytes, len, hash);
+    free(bytes);
+    char hex[65];
+    bytes_to_hex(hash, 32, hex);
+    return march_string_lit(hex, 64);
+}
+
+/* Takes a Bytes and returns a 64-char lowercase hex String: the C entry for
+ * the bare `sha256 : Bytes -> String` builtin (llvm_builtins.ml). Same
+ * output domain as march_sha256 / the interpreter's Digestif.to_hex arm; for
+ * a raw 32-byte digest see march_hmac_sha256_bytes. */
+void *march_sha256_of_bytes(void *b) {
+    size_t len;
+    uint8_t *bytes = bytes_to_raw(b, &len);
     uint8_t hash[32];
     do_sha256(bytes, len, hash);
     free(bytes);
@@ -562,10 +570,12 @@ static void sha512_raw(const uint8_t *m, size_t len, uint8_t out[64]) {
             out[i * 8 + j] = (uint8_t)(h[i] >> (56 - 8 * j));
 }
 
-/* Takes a String (or Bytes) and returns a 128-char lowercase hex String */
+/* Takes a String and returns a 128-char lowercase hex String (String only,
+ * for the same reason as march_sha256 above: stdlib_sha512 is String -> String
+ * and the old auto-detection misread every Bytes box). */
 void *march_sha512(void *data) {
     size_t len;
-    uint8_t *bytes = string_or_bytes_to_raw(data, &len);
+    uint8_t *bytes = string_to_raw(data, &len);
     uint8_t hash[64];
     sha512_raw(bytes, len, hash);
     free(bytes);

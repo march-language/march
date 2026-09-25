@@ -13441,6 +13441,7 @@ declare ptr  @march_vault_ns_drop(ptr %ns, ptr %key)
 ; Crypto / hash builtins
 declare ptr  @march_md5(ptr %b)
 declare ptr  @march_sha256(ptr %b)
+declare ptr  @march_sha256_of_bytes(ptr %b)
 declare ptr  @march_sha512(ptr %b)
 declare ptr  @march_sha1_bytes(ptr %b)
 declare ptr  @march_hmac_sha256(ptr %key, ptr %msg)

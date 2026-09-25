@@ -1281,7 +1281,14 @@ let builtin_bindings : (string * scheme) list =
     ("self",    Mono t_int);
     ("receive", poly1 (fun a -> a));
     (* Crypto / encoding builtins *)
-    ("sha256",          Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
+    (* sha256(data: Bytes): String -- a 64-char lowercase HEX string, like
+       md5/sha512/Crypto.sha256, and like what BOTH implementations have always
+       returned (eval_builtins' arm via Digestif.to_hex, march_sha256 via
+       march_string_lit). Until 2026-09-24 this said Bytes -> Bytes, so
+       `Bytes.length(sha256(b))` typechecked and then read a march_string as a
+       Bytes ctor: a match failure interpreted, SIGBUS compiled. For a raw
+       digest use hmac_sha256_bytes / sha1_bytes, which really return Bytes. *)
+    ("sha256",          Mono (TArrow (TCon ("Bytes", []), t_string)));
     (* hmac_sha256(key, msg): String-domain HMAC. Canonical signature matches
        the native runtime (march_hmac_sha256 reads march_string args) and the
        eval builtin — both return Result(Bytes, String). *)
