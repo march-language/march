@@ -21,6 +21,23 @@ git log is authoritative for exact commits.
   entry below for the runtime side); the builtin now also has its own runtime
   entry, chosen by the compiler from the static type, so it never guesses.
   For a raw digest use `hmac_sha256_bytes` / `sha1_bytes`.
+- **A top-level function named like a capability builtin no longer fails a
+  compiled build's capability ceiling.** A `fn dns_resolve(x : Int) : Int` (or
+  `fn file_read(...)`, …) in the entry module was charged the builtin's
+  capability, so `--compile` rejected it with "module `M` uses `IO.Network` but
+  does not declare `needs IO.Network`", while the interpreter ran the same
+  program. A call to a function the program defines is now attributed to that
+  function.
+- **Compiled `uuid_v7()` and `unix_time_ms()` now show up in the binary
+  capability audit.** Both compiled, but no IO.Clock marker was emitted for
+  them, so `forge cap inspect` under-reported any binary that used them.
+  `uuid_v7`, `uuid_v7_at` and `dns_resolve` are now the prefixed runtime
+  functions `march_uuid_v7`, `march_uuid_v7_at` and `march_dns_resolve`. Before
+  the rename, any symbol spelled `dns_resolve` in a binary counted as an
+  IO.Network witness.
+- **Compiled `dns_resolve` no longer leaks its host argument** (one String per
+  call). **Compiled `uuid_v7_at` with a negative timestamp now errors** as the
+  interpreter does, instead of returning a UUID with a garbage timestamp.
 
 ### Added
 - **Node certificates for clusters** (build step 11a of the distributed-deploys

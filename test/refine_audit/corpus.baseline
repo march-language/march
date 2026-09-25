@@ -532,6 +532,8 @@ native_unit_callback_zero_arg: coverage audit (user + stdlib): 120 enforced, 0 i
 native_unit_callback_zero_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_user_fn_named_own: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_user_fn_named_own: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_uuid_v7_dns_parity: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_uuid_v7_dns_parity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_vault_new_same_name: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_vault_new_same_name: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_vault_niche_unsafe_element: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced

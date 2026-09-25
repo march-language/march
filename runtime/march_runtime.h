@@ -959,6 +959,10 @@ void   *march_base64_encode(void *input);
 void   *march_base64_decode(void *str);
 void   *march_random_bytes(int64_t n);
 void   *march_uuid_v4(void);
+void   *march_uuid_v7(void);
+void   *march_uuid_v7_at(int64_t ts_ms);
+/* DNS lookup (march_runtime.c): Result(List(String), String); borrows host. */
+void   *march_dns_resolve(void *host);
 
 /* System introspection builtins (march_extras.c). */
 int64_t march_sys_uptime_ms(void);
