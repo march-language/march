@@ -222,6 +222,17 @@ this directory.
    shim was added.
 9. **Three-or-more-role rule: an atomic `loop` inside a draining session still ends at the
    hard deadline only**, by design (6.2); the fixture's `Steady` protocol pins it.
+10. **`march_sched_cancel_point` is `noinline`.** Inlined into `march_yield_from_compiled`
+    and `march_sleep_ms`, its `tl_sched` read was hoisted across the migrating switch, so
+    the post-switch call saw the old OS thread's scheduler and `longjmp`ed into another
+    proc's trampoline frame: `test_hard_deadline_cancels_tasks` faulted in 5-12% of runs
+    at 14 schedulers (never at one; pc inside `g_scheds`, `current == NULL` on a proc
+    stack, the same signature `march_sched_yield`'s note documents). A frame walk in the
+    fatal handler found it; 0 faults in 70 runs after, 2 in 50 before on the same box.
+11. **The C harness's gate messages wait until the actor entered them** (`gate(a)`), not
+    just until sent; on a slow runner a gate sent right before an activation could sit
+    behind the marker and be dropped, failing `test_soft_deadline_drops_old_format`
+    (reported by a teammate's CI run).
 
 ## Results
 

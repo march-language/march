@@ -54,6 +54,7 @@ static int g_pass = 0, g_fail = 0;
 #define MSG_PROBE       ((void *)(intptr_t)17) /* handler records its proc's epoch */
 
 static _Atomic int g_gate_open;
+static _Atomic long g_gate_entered;   /* handlers that reached the gate's wait */
 static _Atomic uint32_t g_probe_epoch;
 static void *g_child;
 static void *new_actor_fwd(uint32_t slot);
@@ -72,6 +73,7 @@ static int64_t *state_of(void *actor) { return (int64_t *)(uintptr_t)((int64_t *
 
 static int control_msg(void *msg) {
     if (msg == MSG_GATE) {
+        atomic_fetch_add(&g_gate_entered, 1);
         while (!atomic_load(&g_gate_open)) march_sched_yield();
         return 1;
     }
@@ -138,6 +140,17 @@ static void *new_actor(uint32_t slot) {
 }
 
 static void send(void *actor, void *msg) { march_decrc(march_send(actor, msg)); }
+
+/* Park [actor] inside a v1 handler, and only return once it is THERE.  A
+ * deadline armed while the gate is still queued treats the gate like any
+ * other old-stamped message (dropped as old-format once the slot's message
+ * type changed), which on a slow runner made a "5 dropped" check see 6. */
+static void gate(void *actor) {
+    long before = atomic_load(&g_gate_entered);
+    send(actor, MSG_GATE);
+    long end = now_ms() + 5000;
+    while (atomic_load(&g_gate_entered) == before && now_ms() < end) march_sched_yield();
+}
 static void *new_actor_fwd(uint32_t slot) { return new_actor(slot); }
 static void send_fwd(void *actor, void *msg) { send(actor, msg); }
 
@@ -163,6 +176,7 @@ enum { SLOT_ORDER = 1, SLOT_MANY, SLOT_DRAIN, SLOT_DRAIN_FMT, SLOT_BUSY,
 
 static void reset(void) {
     atomic_store(&g_gate_open, 0);
+    atomic_store(&g_gate_entered, 0);
     atomic_store(&g_v1_handled, 0); atomic_store(&g_v2_handled, 0);
     atomic_store(&g_v1_mismatch, 0); atomic_store(&g_v2_mismatch, 0);
     atomic_store(&g_migrations, 0); atomic_store(&g_v2_fmt_mismatch, 0);
@@ -189,7 +203,7 @@ static void test_queued_messages_run_on_old_code(void) {
     printf("-- messages queued before a migrating activation --\n");
     reset();
     void *a = new_actor(SLOT_ORDER);
-    send(a, MSG_GATE);                       /* holds the actor inside v1 */
+    gate(a);                       /* holds the actor inside v1 */
     for (int i = 0; i < 5; i++) send(a, MSG_INC);   /* queued pre-switch */
     uint32_t old_e = march_epoch_current();
     int e = activate(SLOT_ORDER, (void *)v2_dispatch, 0);
@@ -237,7 +251,7 @@ static void test_soft_deadline_forces_marker(void) {
     int64_t dropped0 = march_hcr_drain_dropped();
     march_hcr_counters c0; march_hcr_counters_get(&c0);
     void *a = new_actor(SLOT_DRAIN);
-    send(a, MSG_GATE);
+    gate(a);
     for (int i = 0; i < 5; i++) send(a, MSG_INC);   /* will miss the deadline */
     CHECK(activate(SLOT_DRAIN, (void *)v2_dispatch, 50) > 0, "activation published");
     for (int i = 0; i < 5; i++) send(a, MSG_INC);
@@ -265,7 +279,7 @@ static void test_soft_deadline_drops_old_format(void) {
     reset();
     int64_t dropped0 = march_hcr_drain_dropped();
     void *a = new_actor(SLOT_DRAIN_FMT);
-    send(a, MSG_GATE);
+    gate(a);
     for (int i = 0; i < 5; i++) send(a, MSG_INC);   /* old format, too late */
     CHECK(activate_ex(SLOT_DRAIN_FMT, (void *)v2_dispatch, migrate_v1_v2, 1,
                       NULL, 50, 0) > 0, "activation published");
@@ -289,7 +303,7 @@ static void test_second_deploy_while_draining(void) {
     printf("-- a second migrating deploy while the first is draining --\n");
     reset();
     void *a = new_actor(SLOT_BUSY);
-    send(a, MSG_GATE);
+    gate(a);
     for (int i = 0; i < 2; i++) send(a, MSG_INC);        /* before deploy 1 */
     int e1 = activate(SLOT_BUSY, (void *)v2_dispatch, 0);
     for (int i = 0; i < 2; i++) send(a, MSG_INC);        /* between deploys */
@@ -362,7 +376,7 @@ static void test_early_advance_keeps_fifo(void) {
     reset();
     march_hcr_counters c0; march_hcr_counters_get(&c0);
     void *a = new_actor(SLOT_EARLY);
-    send(a, MSG_GATE);
+    gate(a);
     for (int i = 0; i < 3; i++) send(a, MSG_INC);   /* old format, pre-deploy */
     g_early_target = a;
     march_hcr_test_before_mark = early_hook;
@@ -423,7 +437,7 @@ static void test_full_drop_new_mailbox(void) {
     int64_t dropped0 = march_hcr_drain_dropped();
     void *a = new_actor(SLOT_FULL);
     march_actor_set_mbox_limit(a, 4, MARCH_MBOX_DROP_NEW);
-    send(a, MSG_GATE);
+    gate(a);
     sleep_ms(20);                                   /* gate is being handled */
     for (int i = 0; i < 4; i++) send(a, MSG_INC);   /* fills the mailbox */
     send(a, MSG_INC);                                /* rejected by DROP_NEW */
@@ -549,7 +563,7 @@ static void test_dropped_remote_delivery_reports_origin(void) {
     int64_t reported0 = march_delivery_failed_reported();
     march_delivery_failed_watch(&g_origin_hook);
     void *a = new_actor(SLOT_ORIGIN);
-    send(a, MSG_GATE);
+    gate(a);
     /* Five old-format messages "from connection 7", seqs 42..46, and one
      * local one with no origin, all too late for the old code. */
     for (int i = 0; i < 5; i++) {
@@ -645,7 +659,7 @@ static void test_dead_actor_releases_pins(void) {
     printf("-- actor killed before reaching its marker --\n");
     reset();
     void *a = new_actor(SLOT_DEATH);
-    send(a, MSG_GATE);
+    gate(a);
     for (int i = 0; i < 3; i++) send(a, MSG_INC);
     uint32_t old_e = march_epoch_current();
     int64_t before = march_epoch_pins(old_e);

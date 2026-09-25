@@ -3127,7 +3127,16 @@ int march_sched_take_markers(uint32_t upto, void **msgs, uint32_t *epochs,
  * its Task as cancelled.  Called only where no runtime state is held on the
  * task's behalf: a compiled yield point, a sleep, a stopped receive.  A
  * task parked in an fd wait, a task_await or an Actor.call is cancelled at
- * its first cancellation point after that wait ends. */
+ * its first cancellation point after that wait ends.
+ *
+ * noinline: this reads tl_sched and is called on BOTH sides of a migrating
+ * switch (march_yield_from_compiled, march_sleep_ms's loop).  Inlined, the
+ * optimizer hoists the TLS read across the switch, so the post-switch call
+ * sees the OLD OS thread's scheduler and longjmps into another proc's
+ * trampoline frame (same bug and same signature as the march_sched_yield
+ * note above: pc inside g_scheds, current == NULL on a proc stack; ~5-12%
+ * of test_hard_deadline_cancels_tasks runs at 14 schedulers, 0 at one). */
+__attribute__((noinline))
 void march_sched_cancel_point(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (p && p->task_jmp
