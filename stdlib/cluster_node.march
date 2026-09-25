@@ -174,6 +174,34 @@ mod ClusterNode do
   end
 
   doc """
+  How a node named [name] authenticates, from the environment, for code that
+  opens connections of its own (SessionNode's direct runner, `run_<Role>`):
+  certificate mode when MARCH_NODE_CERT is set (with MARCH_NODE_KEY and
+  MARCH_CLUSTER_OPERATOR_PUBKEY, each a value or a file, and
+  MARCH_CLUSTER_REVOCATIONS for the revoked list), exactly as
+  `config_from_env` reads them; otherwise `ClusterAuth.Secret([secret])`.
+  """
+  fn auth_from_env(name : String, secret : String) : Result(ClusterAuth.Auth, String) do
+    let cert = env_file("MARCH_NODE_CERT")
+    let key = env_file("MARCH_NODE_KEY")
+    if String.is_empty(cert) do
+      if String.is_empty(key) do Ok(ClusterAuth.Secret(secret))
+      else Err("cluster_node: MARCH_NODE_KEY is set but MARCH_NODE_CERT is not") end
+    else
+      match credentials(name, key, cert, env_file("MARCH_CLUSTER_OPERATOR_PUBKEY")) do
+        Err(e) -> Err(e)
+        Ok(creds) ->
+          match revocations_from_text(env_file("MARCH_CLUSTER_REVOCATIONS"), creds.operator_pubkey) do
+            Err(e) -> Err("cluster_node: MARCH_CLUSTER_REVOCATIONS: " ++ e)
+            Ok(revs) ->
+              let rs = List.map(revs, fn r -> r.rev)
+              Ok(ClusterAuth.Certified({ creds with revoked: fn c -> NodeCert.is_revoked(c, rs) }))
+          end
+      end
+    end
+  end
+
+  doc """
   Configuration from the environment: MARCH_NODE_NAME, MARCH_NODE_PORT,
   MARCH_NODE_ADVERTISE (default 127.0.0.1:<port>), MARCH_CLUSTER_NODES
   (seeds, host:port,...), MARCH_CLUSTER_SECRET, MARCH_NODE_CREATION (default:
@@ -227,6 +255,61 @@ mod ClusterNode do
   -- are an open question of the design.
   fn node_id_of(name : String) : String do NodeIdentity.name_id(name) end
 
+  -- ── raw sends (distributed-deploys step 11b) ─────────────────────────────
+  -- Raw primitives (`send_msg`, `queue_for` for `Node.enqueue`, and the
+  -- `route`/`route_type` receivers `@[remote]` and user code install) are
+  -- outside the protocol boundary: in CERTIFICATE mode a raw ACTOR_MSG
+  -- crosses a link only when the certificates at BOTH ends carry `raw_send`
+  -- (plan section 3, "Raw primitives"). A node's frames to itself (the
+  -- loopback) are never raw sends. Exempt, and enumerated here:
+  --   * session traffic: an ACTOR_MSG whose type tag is one of
+  --     `session_tags()` (before any "#<sid>" suffix), delivered to a route a
+  --     session opened with `route_session`. A session tag sent to a raw
+  --     route, or a raw tag sent to a session route, is refused.
+  --   * every frame on the CONTROL connection, which only ClusterNode writes
+  --     (`control_tags()`): SWIM, member gossip and sync, registry sync,
+  --     remote monitors, DELIVERY_FAILED, CREDIT, revocations. None of them
+  --     reaches a route.
+  -- A shared-secret node has no certificates and refuses nothing.
+
+  doc """
+  The ACTOR_MSG type tags that are session traffic, exempt from raw-send
+  denial when they reach a session route: SessionAP's invitation, withdrawal
+  and answer, and SessionNode's frames (cluster sessions append "#<sid>").
+  The list is `NodeSend.session_tags()`, shared with the direct connections.
+  """
+  fn session_tags() : List(String) do NodeSend.session_tags() end
+
+  doc "Is [type_tag] session traffic (`session_tags()`, ignoring a \"#<sid>\" suffix)?"
+  fn is_session_tag(type_tag : String) : Bool do NodeSend.is_session_tag(type_tag) end
+
+  doc """
+  The control-connection frame tags, all ClusterNode's own and exempt from
+  raw-send denial: SWIM 0-3, REGISTRY_SYNC_REQ/RESP 5-6, MONITOR_REQ 7,
+  MONITOR_FIRE 8, DELIVERY_FAILED 10, CREDIT 11, MONITOR_ACK 12,
+  MEMBER_GOSSIP 13, MEMBERS_SYNC 14, REVOCATIONS 15. (9 is ACTOR_MSG, the only
+  frame on a data connection, and the only one checked.)
+  """
+  fn control_tags() : List(Int) do [0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15] end
+
+  doc """
+  May a raw ACTOR_MSG cross a link between a node holding [own] and a peer
+  that presented [peer]? Always in shared-secret mode ([own] None); in
+  certificate mode only when both certificates carry `raw_send`.
+  """
+  fn raw_allowed(own : Option(NodeCert.Cert), peer : Option(NodeCert.Cert)) : Bool do
+    match own do
+      None -> true
+      Some(o) ->
+        if NodeCert.has_flag(o, "raw_send") do
+          match peer do
+            Some(p) -> NodeCert.has_flag(p, "raw_send")
+            None -> false
+          end
+        else false end
+    end
+  end
+
   -- ── what subscribers see ────────────────────────────────────────────────
 
   type NodeInfo = { node_id : String, name : String, addr : String, creation : Int, incarnation : Int }
@@ -240,12 +323,18 @@ mod ClusterNode do
   --                                was dropped; n is the count on that
   --                                connection (NetKernel.mac_failure_limit()
   --                                of them close it)
-  type SecurityEvent = HandshakeRejected(String, String) | FrameRejected(String, Int)
+  --   RawSendRefused(node_id, what) a raw send to or from that peer refused
+  --                                (certificate mode, step 11b: this node's or
+  --                                the peer's certificate lacks `raw_send`);
+  --                                `what` is "outbound <type tag>", "outbound
+  --                                queue" or "inbound <type tag>"
+  type SecurityEvent = HandshakeRejected(String, String) | FrameRejected(String, Int) | RawSendRefused(String, String)
 
   fn security_text(ev : SecurityEvent) : String do
     match ev do
       HandshakeRejected(who, why) -> "handshake with " ++ who ++ " rejected: " ++ why
       FrameRejected(id, n) -> "frame from " ++ id ++ " failed its MAC (" ++ int_to_string(n) ++ " on that connection)"
+      RawSendRefused(id, what) -> "raw send refused (" ++ what ++ "): no raw_send between this node and " ++ id
     end
   end
 
@@ -885,11 +974,97 @@ mod ClusterNode do
     end end
   end
 
+  -- ── cross-node references (distributed-deploys step 11b) ─────────────────
+  -- Cross-node references are handed out, not computed (plan section 1). In
+  -- CERTIFICATE mode `lookup` (and `names`) hides a binding unless a raw
+  -- send to its holder would be allowed (`raw_allowed`: both this node's
+  -- certificate and the holder's verified one carry raw_send; this node's
+  -- own bindings always show): a name you cannot raw-send to is not a
+  -- reference you should hold. A holder this node has not verified (no link
+  -- yet) is hidden until it is. The stdlib's coordination namespaces are
+  -- exempt (`reference_exempt`): access-point offers ("ap:"), session
+  -- endpoints ("session:") and topology markers ("topo:") are found by name
+  -- whatever the holder's flags, and are checked by role where they are
+  -- used (SessionNode). A send to any binding still goes through raw-send
+  -- denial. `GlobalPid.make` stays pure: a pid built by hand is only a
+  -- value, and sending to it is what is checked.
+
+  doc "The registry name prefixes exempt from certificate-mode hiding: SessionNode's and Topology's coordination names."
+  fn reference_namespaces() : List(String) do ["ap:", "session:", "topo:"] end
+
+  doc "Is [name] in a namespace `lookup` never hides (`reference_namespaces()`)?"
+  fn reference_exempt(name : String) : Bool do
+    List.any(reference_namespaces(), fn p -> String.starts_with(name, p))
+  end
+
+  -- This node's certificate, or None in shared-secret mode.
+  pfn core_own_cert(st : CnState) : Option(NodeCert.Cert) do
+    match st.cfg.auth do
+      ClusterAuth.Certified(cr) -> Some(cr.signed.cert)
+      ClusterAuth.Secret(_) -> None
+    end
+  end
+
+  -- May this node hold binding [name] -> [e] as a reference?
+  pfn reference_visible(st : CnState, name : String, e : GlobalRegistry.Entry) : Bool do
+    e.node_id == st.me || reference_exempt(name)
+      || raw_allowed(core_own_cert(st), Map.get(st.certs, e.node_id, Map.str_cmp))
+  end
+
+  -- The certificate identity (URI) of node [id] as this node verified it:
+  -- its own for itself, a linked peer's, else "".
+  pfn identity_of(st : CnState, id : String) : String do
+    if id == st.me do
+      match core_own_cert(st) do
+        Some(c) -> c.node
+        None -> ""
+      end
+    else
+      match Map.get(st.certs, id, Map.str_cmp) do
+        Some(c) -> c.node
+        None -> ""
+      end
+    end
+  end
+
+  -- Record who registered each leaf a peer [from] sent: the link's verified
+  -- peer for its own bindings; for a relayed binding, what we recorded for
+  -- that same binding before, else its holder's certificate if we have it.
+  pfn stamp_leaves(st : CnState, from : String, leaves : List((String, GlobalRegistry.Entry)))
+      : List((String, GlobalRegistry.Entry)) do
+    List.map(leaves, fn kv ->
+      match kv do
+        (name, e) ->
+          let who = if e.node_id == from || e.node_id == st.me do identity_of(st, e.node_id)
+            else
+              match GlobalRegistry.entry(st.reg, name) do
+                Some(old) ->
+                  if old.node_id == e.node_id && old.pid == e.pid && old.creation == e.creation && old.registrant != "" do old.registrant
+                  else identity_of(st, e.node_id) end
+                None -> identity_of(st, e.node_id)
+              end
+            end
+          (name, { e with registrant: who })
+      end)
+  end
+
+  doc """
+  The recorded registrant of binding [name] (the certificate identity of the
+  node that registered it, as this replica recorded it; "" when unknown), if
+  the registry holds a present binding for it. Unlike `lookup`, not hidden.
+  """
+  fn core_registrant(st : CnState, name : String) : Option(String) do
+    match GlobalRegistry.entry(st.reg, name) do
+      Some(e) -> if e.present do Some(e.registrant) else None end
+      None -> None
+    end
+  end
+
   pfn visible_map(st : CnState) : Map(String, GlobalPid.Pid) do
     List.fold_left(GlobalRegistry.all_entries(st.reg), Map.empty(), fn (acc, kv) ->
       match kv do
         (name, e) ->
-          if visible(st, e) do
+          if visible(st, e) && reference_visible(st, name, e) do
             Map.insert(acc, name, GlobalPid.make(e.node_id, e.pid, e.creation), Map.str_cmp)
           else acc end
       end)
@@ -1033,7 +1208,8 @@ mod ClusterNode do
       Some((_, w)) -> if w != watcher do Cons(Unwatch(w), Nil) else Nil end
       None -> Nil
     end
-    let st2 = { st with reg: GlobalRegistry.register_at(st.reg, name, st.me, st.cfg.creation, pid, clock),
+    let st2 = { st with reg: GlobalRegistry.register_as(st.reg, name, st.me, st.cfg.creation, pid, clock,
+                                                        identity_of(st, st.me)),
                         regs: Map.insert(st.regs, name, (pid, watcher), Map.str_cmp) }
     match refresh_names(st2) do
       (st3, effs) ->
@@ -1093,7 +1269,7 @@ mod ClusterNode do
       match NetKernel.decode_registry_sync_resp(frame) do
         Err(_) -> (st, Nil)
         Ok((rh, leaves)) ->
-          let merged = GlobalRegistry.diff_entries(st.reg, rh, leaves)
+          let merged = GlobalRegistry.diff_entries(st.reg, rh, stamp_leaves(st, from, leaves))
           match retire_stale({ st with reg: merged }) do
             (st2, retired) ->
               let mine = GlobalRegistry.root_hash(st2.reg)
@@ -1159,7 +1335,8 @@ mod ClusterNode do
                   downs : Vault(DistLink.DownReason -> Unit), fired : Vault(List(Int)),
                   failed : Vault(Int -> String -> Unit),
                   certs : Vault(NodeCert.Cert), sec : Vault(SecurityEvent -> Unit),
-                  revs : Vault(NodeCert.Revocation), op_pub : Bytes }
+                  revs : Vault(NodeCert.Revocation), op_pub : Bytes,
+                  own : Option(NodeCert.Cert), registrants : Vault(String) }
 
   -- Watches one registered process: its `Down` unregisters its names. `Down`
   -- is a raw mailbox message, so the watcher reads it with `receive` (the
@@ -1194,7 +1371,8 @@ mod ClusterNode do
                  failed: Vault.new("cluster_node_unset_failed"),
                  certs: Vault.new("cluster_node_unset_certs"),
                  sec: Vault.new("cluster_node_unset_sec"),
-                 revs: Vault.new("cluster_node_unset_revs"), op_pub: Bytes.empty() },
+                 revs: Vault.new("cluster_node_unset_revs"), op_pub: Bytes.empty(), own: None,
+                 registrants: Vault.new("cluster_node_unset_registrants") },
             started: false }
     on Boot(st0 : CnState, h0 : CnHandle) do
       { st: st0, h: h0, started: true }
@@ -1396,6 +1574,13 @@ mod ClusterNode do
         let cfg = st.cfg
         discard(task_spawn(fn _ -> dial(node, h, cfg, me, addr)))
       Install(l) ->
+        -- The peer's certificate, before its readers start: the data reader
+        -- checks raw sends against it, and `mirror` runs only after the
+        -- effects.
+        let _ = match Map.get(st.certs, l.node_id, Map.str_cmp) do
+          Some(pc) -> Vault.set(h.certs, l.node_id, pc)
+          None -> ()
+        end
         let node = pid_of_int(h.pid)
         let _ = task_spawn(fn _ -> read_control(node, h, l))
         discard(task_spawn(fn _ -> read_data(node, h, st.cfg.creation, l)))
@@ -1457,6 +1642,10 @@ mod ClusterNode do
     let _ = List.map(Vault.keys(h.names), fn k ->
       if Map.contains_key(st.vis, k, Map.str_cmp) do () else Vault.drop(h.names, k) end)
     discard(List.map(Map.entries(st.vis), fn kv -> match kv do (k, p) -> Vault.set(h.names, k, p) end))
+    let _ = List.map(Vault.keys(h.registrants), fn k ->
+      if core_registrant(st, k) == None do Vault.drop(h.registrants, k) else () end)
+    discard(List.map(GlobalRegistry.all_entries(st.reg), fn kv ->
+      match kv do (k, e) -> if e.present do Vault.set(h.registrants, k, e.registrant) else () end end))
   end
 
   -- ── tasks ──────────────────────────────────────────────────────────────
@@ -1496,6 +1685,18 @@ mod ClusterNode do
 
   pfn security(h : CnHandle, ev : SecurityEvent) : () do
     discard(List.map(Vault.all(h.sec), fn kv -> match kv do (_k, f) -> f(ev) end))
+  end
+
+  -- A raw frame between this node and [peer_id]: allowed? (Its own node,
+  -- the loopback, always.)
+  pfn h_raw_ok(h : CnHandle, peer_id : String) : Bool do
+    peer_id == h.node_id || raw_allowed(h.own, Vault.get(h.certs, peer_id))
+  end
+
+  -- Count and report a refused raw send.
+  pfn note_raw_refused(h : CnHandle, peer_id : String, what : String) : () do
+    let _ = Vault.incr(h.meta, "raw_refused", 1)
+    security(h, RawSendRefused(peer_id, what))
   end
 
   -- Open a pair to [addr]: control, then data (the order the acceptor's
@@ -1611,7 +1812,9 @@ mod ClusterNode do
       if tag == NodeSend.tag_actor_msg() do
         match NodeSend.decode_msg(frame) do
           Err(_) -> ()
-          Ok(d) ->
+          Ok(d0) ->
+            -- The sender is the link's verified peer, never a claim in the frame.
+            let d = { d0 with from_node: l.node_id }
             announce_consumed(h, l, List.length(frame) + 4)
             -- The delivery's origin rides the mailbox node of whatever the
             -- route sends (DD step-6 follow-up 1): an actor that later drops
@@ -1660,7 +1863,20 @@ mod ClusterNode do
     end
   end
 
+  -- A delivery from [d.from_node] (the link's peer, or this node for the
+  -- loopback). A session route ("s<pid>") takes session traffic from any
+  -- certified peer; everything else is a raw send, refused (counted,
+  -- reported, and answered DELIVERY_FAILED by the caller) unless both
+  -- certificates carry raw_send (step 11b; see "raw sends" above).
   pfn deliver_local(h : CnHandle, d : NodeSend.Delivery) : Result((), String) do
+    let raw_ok = h_raw_ok(h, d.from_node)
+    match Vault.get(h.routes, "s" ++ int_to_string(d.to_local_pid)) do
+      Some(f) -> if raw_ok || is_session_tag(d.type_tag) do f(d) else refuse_inbound(h, d) end
+      None -> if raw_ok do deliver_raw(h, d) else refuse_inbound(h, d) end
+    end
+  end
+
+  pfn deliver_raw(h : CnHandle, d : NodeSend.Delivery) : Result((), String) do
     match Vault.get(h.routes, "p" ++ int_to_string(d.to_local_pid)) do
       Some(f) -> f(d)
       None ->
@@ -1669,6 +1885,11 @@ mod ClusterNode do
           None -> Err("no route to pid " ++ int_to_string(d.to_local_pid) ++ " for " ++ d.type_tag)
         end
     end
+  end
+
+  pfn refuse_inbound(h : CnHandle, d : NodeSend.Delivery) : Result((), String) do
+    note_raw_refused(h, d.from_node, "inbound " ++ d.type_tag)
+    Err("not authorized: raw send of " ++ d.type_tag ++ " refused (certificate mode: both nodes' certificates need raw_send)")
   end
 
   -- CREDIT every quarter budget consumed (NodeQueue.consumed's rule), sent
@@ -1824,6 +2045,7 @@ mod ClusterNode do
     register           : String -> Int -> Result((), RegisterError),
     unregister         : String -> (),
     lookup             : String -> Option(GlobalPid.Pid),
+    registrant         : String -> Option(String),
     names              : () -> List(String),
     watch              : String -> (NameEvent -> Unit) -> Int,
     unwatch            : Int -> (),
@@ -1831,9 +2053,11 @@ mod ClusterNode do
     creation           : () -> Int,
     next_id            : String -> Int,
     queue_for          : String -> Option((Pid(NodeQueue.WriterState), Int)),
+    session_queue_for  : String -> Option((Pid(NodeQueue.WriterState), Int)),
     send_msg           : GlobalPid.Pid -> String -> List(Int) -> NodeQueue.Policy -> Result(Int, NodeQueue.EnqueueError),
     route              : Int -> (NodeSend.Delivery -> Result((), String)) -> String,
     route_type         : String -> (NodeSend.Delivery -> Result((), String)) -> String,
+    route_session      : Int -> (NodeSend.Delivery -> Result((), String)) -> String,
     unroute            : String -> (),
     on_peer_closed     : (String -> String -> Unit) -> Int,
     off_peer_closed    : Int -> (),
@@ -1841,7 +2065,9 @@ mod ClusterNode do
     monitor_remote     : GlobalPid.Pid -> (DistLink.DownReason -> Unit) -> Result(Int, String),
     demonitor_remote   : GlobalPid.Pid -> Int -> (),
     peer_cert          : String -> Option(NodeCert.Cert),
+    own_cert           : () -> Option(NodeCert.Cert),
     frames_rejected    : () -> Int,
+    raw_refused        : () -> Int,
     revoke             : String -> Result((), String),
     revocations        : () -> List(NodeCert.Revocation),
     on_security_event  : (SecurityEvent -> Unit) -> Int,
@@ -1881,6 +2107,7 @@ mod ClusterNode do
       register: fn (_, _) -> unsupported("register"),
       unregister: fn _ -> unsupported("unregister"),
       lookup: fn _ -> unsupported("lookup"),
+      registrant: fn _ -> unsupported("registrant"),
       names: fn _ -> unsupported("names"),
       watch: fn (_, _) -> unsupported("watch"),
       unwatch: fn _ -> unsupported("unwatch"),
@@ -1888,9 +2115,11 @@ mod ClusterNode do
       creation: fn _ -> unsupported("creation"),
       next_id: fn _ -> unsupported("next_id"),
       queue_for: fn _ -> unsupported("queue_for"),
+      session_queue_for: fn _ -> unsupported("session_queue_for"),
       send_msg: fn (_, _, _, _) -> unsupported("send_msg"),
       route: fn (_, _) -> unsupported("route"),
       route_type: fn (_, _) -> unsupported("route_type"),
+      route_session: fn (_, _) -> unsupported("route_session"),
       unroute: fn _ -> unsupported("unroute"),
       on_peer_closed: fn _ -> unsupported("on_peer_closed"),
       off_peer_closed: fn _ -> unsupported("off_peer_closed"),
@@ -1898,7 +2127,9 @@ mod ClusterNode do
       monitor_remote: fn (_, _) -> unsupported("monitor_remote"),
       demonitor_remote: fn (_, _) -> unsupported("demonitor_remote"),
       peer_cert: fn _ -> unsupported("peer_cert"),
+      own_cert: fn _ -> None,
       frames_rejected: fn _ -> unsupported("frames_rejected"),
+      raw_refused: fn _ -> unsupported("raw_refused"),
       revoke: fn _ -> unsupported("revoke"),
       revocations: fn _ -> unsupported("revocations"),
       on_security_event: fn _ -> unsupported("on_security_event"),
@@ -1919,16 +2150,19 @@ mod ClusterNode do
       register: fn (name, p) -> h_register(h, name, p),
       unregister: fn name -> discard(send(node_pid(h), Unregister(name))),
       lookup: fn name -> Vault.get(h.names, name),
+      registrant: fn name -> Vault.get(h.registrants, name),
       names: fn _ -> Vault.keys(h.names),
       watch: fn (name, f) -> h_watch(h, name, f),
       unwatch: fn id -> h_unwatch(h, id),
       stale_bindings: fn _ -> Vault.get_or(h.meta, "stale_bindings", 0),
       creation: fn _ -> Vault.get_or(h.meta, "creation", 0),
       next_id: fn key -> Vault.incr(h.meta, "next_id#" ++ key, 1),
-      queue_for: fn id -> h_queue_for(h, id),
+      queue_for: fn id -> h_raw_queue_for(h, id),
+      session_queue_for: fn id -> h_queue_for(h, id),
       send_msg: fn (to, tag, payload, policy) -> h_send_msg(h, to, tag, payload, policy),
       route: fn (pid, deliver) -> h_route(h, "p" ++ int_to_string(pid), deliver),
       route_type: fn (tag, deliver) -> h_route(h, "t" ++ tag, deliver),
+      route_session: fn (pid, deliver) -> h_route(h, "s" ++ int_to_string(pid), deliver),
       unroute: fn key -> Vault.drop(h.routes, key),
       on_peer_closed: fn f -> h_on_peer_closed(h, f),
       off_peer_closed: fn id -> Vault.drop(h.closes, int_to_string(id)),
@@ -1936,7 +2170,9 @@ mod ClusterNode do
       monitor_remote: fn (target, on_down) -> h_monitor_remote(h, target, on_down),
       demonitor_remote: fn (target, r) -> Vault.drop(h.downs, mkey(target.node_id, target.local_pid) ++ int_to_string(r)),
       peer_cert: fn id -> Vault.get(h.certs, id),
+      own_cert: fn _ -> h.own,
       frames_rejected: fn _ -> Vault.get_or(h.meta, "frames_rejected", 0),
+      raw_refused: fn _ -> Vault.get_or(h.meta, "raw_refused", 0),
       revoke: fn token -> h_revoke(h, token),
       revocations: fn _ -> List.map(Vault.all(h.revs), fn kv -> match kv do (_k, r) -> r end),
       on_security_event: fn f -> h_on_security_event(h, f),
@@ -2050,6 +2286,16 @@ mod ClusterNode do
       if String.ends_with(k, suffix) do Vault.drop(h.watches, k) else () end))
   end
 
+  -- The raw queue (`queue_for`, what `Node.enqueue` sends through): None,
+  -- counted and reported, when raw sends to [node_id] are refused.
+  pfn h_raw_queue_for(h : CnHandle, node_id : String) : Option((Pid(NodeQueue.WriterState), Int)) do
+    if h_raw_ok(h, node_id) do h_queue_for(h, node_id)
+    else
+      note_raw_refused(h, node_id, "outbound queue")
+      None
+    end
+  end
+
   pfn h_queue_for(h : CnHandle, node_id : String) : Option((Pid(NodeQueue.WriterState), Int)) do
     if node_id == h.node_id do loopback(h) else
     match Vault.get(h.links, node_id) do
@@ -2083,7 +2329,8 @@ mod ClusterNode do
       Some((body, _)) ->
         match NodeSend.decode_msg(body) do
           Err(_) -> ()
-          Ok(d) ->
+          Ok(d0) ->
+            let d = { d0 with from_node: h.node_id }
             -- A negative origin: the loopback, whose failures go to this
             -- node's own handler (see `delivery_failed_hook`).
             delivery_origin_set(0 - 1, d.seq)
@@ -2103,8 +2350,14 @@ mod ClusterNode do
     end
   end
 
+  -- A raw send (not session traffic) to a peer where raw sends are refused
+  -- is Err(NotAuthorized), counted and reported, and never queued.
   pfn h_send_msg(h : CnHandle, to : GlobalPid.Pid, type_tag : String, payload : List(Int),
                  policy : NodeQueue.Policy) : Result(Int, NodeQueue.EnqueueError) do
+    if is_session_tag(type_tag) == false && h_raw_ok(h, to.node_id) == false do
+      note_raw_refused(h, to.node_id, "outbound " ++ type_tag)
+      Err(NodeQueue.NotAuthorized)
+    else
     match h_queue_for(h, to.node_id) do
       None -> Err(NodeQueue.NoConnection)
       Some(q) ->
@@ -2113,7 +2366,7 @@ mod ClusterNode do
           Ok(_) -> Ok(seq)
           Err(e) -> Err(e)
         end
-    end
+    end end
   end
 
   pfn h_route(h : CnHandle, k : String, deliver : NodeSend.Delivery -> Result((), String)) : String do
@@ -2219,9 +2472,14 @@ mod ClusterNode do
                   certs: Vault.new("cluster_node_certs_" ++ tag),
                   sec: Vault.new("cluster_node_sec_" ++ tag),
                   revs: Vault.new("cluster_node_revs_" ++ tag),
+                  registrants: Vault.new("cluster_node_registrants_" ++ tag),
                   op_pub: match operator_key(cfg) do
                     Some(k) -> k
                     None -> Bytes.empty()
+                  end,
+                  own: match cfg.auth do
+                    ClusterAuth.Certified(cr) -> Some(cr.signed.cert)
+                    ClusterAuth.Secret(_) -> None
                   end,
                   subs: Vault.new("cluster_node_subs_" ++ tag),
                   meta: Vault.new("cluster_node_meta_" ++ tag) }
@@ -2352,10 +2610,27 @@ mod ClusterNode do
     d.unregister(name)
   end
 
-  doc "The process bound to [name] cluster-wide, as this node sees it (a Vault read)."
+  doc """
+  The process bound to [name] cluster-wide, as this node sees it (a Vault
+  read). In certificate mode a binding is hidden unless a raw send to its
+  holder would be allowed (both certificates carry raw_send; this node's own
+  bindings and the coordination namespaces `reference_namespaces()` always
+  show): a name you cannot raw-send to is not a reference you should hold.
+  """
   fn lookup(c : Cap(ClusterNode.Live), name : String) : Option(GlobalPid.Pid) do
     let d = ops(c)
     d.lookup(name)
+  end
+
+  doc """
+  Who registered [name]: the certificate identity (URI) of the registering
+  node as this node recorded it, "" when unknown (shared-secret mode, or a
+  relayed binding whose holder this node has not verified). None when no
+  present binding exists. Not hidden the way `lookup` is.
+  """
+  fn registrant(c : Cap(ClusterNode.Live), name : String) : Option(String) do
+    let d = ops(c)
+    d.registrant(name)
   end
 
   doc "Every name with a visible binding here."
@@ -2403,10 +2678,26 @@ mod ClusterNode do
   Every write to a data socket goes through this one writer, so this is the
   only way to send on it: `Node.send(peer, ...)` writes the socket directly
   and would interleave with the queue.
+
+  This is a RAW send path: in certificate mode it is None (counted in
+  `raw_refused`, reported as `RawSendRefused`) unless this node's and the
+  peer's certificates both carry `raw_send`. The peer refuses a raw frame
+  it receives from a node without raw_send in any case.
   """
   fn queue_for(c : Cap(ClusterNode.Live), node_id : String) : Option((Pid(NodeQueue.WriterState), Int)) do
     let d = ops(c)
     d.queue_for(node_id)
+  end
+
+  doc """
+  `queue_for` for SESSION traffic (SessionNode's cluster links): never refused
+  for want of `raw_send`, since what it carries is checked at the receiver
+  (session frames reach only session routes). Not for raw sends: a raw frame
+  sent through it is refused by a receiver that would refuse it anyway.
+  """
+  fn session_queue_for(c : Cap(ClusterNode.Live), node_id : String) : Option((Pid(NodeQueue.WriterState), Int)) do
+    let d = ops(c)
+    d.session_queue_for(node_id)
   end
 
   doc """
@@ -2415,6 +2706,12 @@ mod ClusterNode do
   delivered: a delivery failure comes back as DELIVERY_FAILED (see
   `on_delivery_failed`). `Err(NoConnection)` when this node has no link to
   [to]'s node.
+
+  In certificate mode a send whose [type_tag] is not session traffic
+  (`session_tags()`) is a raw send: `Err(NotAuthorized)` (counted in
+  `raw_refused`, reported as `RawSendRefused`) unless this node's and the
+  peer's certificates both carry `raw_send`. Sends to this node itself are
+  never refused.
   """
   fn send_msg(c : Cap(ClusterNode.Live), to : GlobalPid.Pid, type_tag : String, payload : List(Int),
               policy : NodeQueue.Policy) : Result(Int, NodeQueue.EnqueueError) do
@@ -2426,6 +2723,11 @@ mod ClusterNode do
   Deliver every ACTOR_MSG addressed to local pid [pid] to [deliver], called
   in the data reader's task (it should only `send`). Its `Err(reason)` goes
   back to the sender as DELIVERY_FAILED. Returns the key for `unroute`.
+
+  A route is a raw receiver: in certificate mode a delivery from a peer is
+  refused before it reaches [deliver] (DELIVERY_FAILED to the sender, counted
+  in `raw_refused`, reported as `RawSendRefused`) unless this node's and the
+  sender's certificates both carry `raw_send`.
   """
   fn route(c : Cap(ClusterNode.Live), pid : Int, deliver : NodeSend.Delivery -> Result((), String)) : String do
     let d = ops(c)
@@ -2436,6 +2738,18 @@ mod ClusterNode do
   fn route_type(c : Cap(ClusterNode.Live), type_tag : String, deliver : NodeSend.Delivery -> Result((), String)) : String do
     let d = ops(c)
     d.route_type(type_tag, deliver)
+  end
+
+  doc """
+  As `route`, for a SESSION endpoint (SessionNode's parties, access points
+  and initiator inboxes): it takes session traffic (`session_tags()`) from
+  any certified peer, raw_send or not, and refuses anything else from a peer
+  where raw sends are refused. The session layer checks the rest: frames
+  carry the session id, and access points check certificates' roles.
+  """
+  fn route_session(c : Cap(ClusterNode.Live), pid : Int, deliver : NodeSend.Delivery -> Result((), String)) : String do
+    let d = ops(c)
+    d.route_session(pid, deliver)
   end
 
   fn unroute(c : Cap(ClusterNode.Live), key : String) : () do
@@ -2502,12 +2816,48 @@ mod ClusterNode do
 
   doc """
   The certificate peer [node_id] presented in its latest verified handshake
-  (certificate mode), or None (shared-secret mode, or no such peer). Step
-  11b checks role permissions and the raw-send flag against it.
+  (certificate mode), or None (shared-secret mode, or no such peer). The
+  step-11b checks (session roles, raw sends, registry visibility) read it.
   """
   fn peer_cert(c : Cap(ClusterNode.Live), node_id : String) : Option(NodeCert.Cert) do
     let d = ops(c)
     d.peer_cert(node_id)
+  end
+
+  doc """
+  This node's own certificate (certificate mode), or None (shared-secret
+  mode). `ops_stub`'s answer is None, a shared-secret node: every step-11b
+  check is off unless a test overrides it.
+  """
+  fn own_cert(c : Cap(ClusterNode.Live)) : Option(NodeCert.Cert) do
+    let d = ops(c)
+    d.own_cert(())
+  end
+
+  doc """
+  Is this node in certificate mode? Every authorization check (the two-way
+  role check at session formation, raw-send denial, registry visibility)
+  applies only then; a shared-secret node checks nothing, as before step 11b.
+  """
+  fn certified(c : Cap(ClusterNode.Live)) : Bool do own_cert(c) != None end
+
+  doc """
+  May a node that presented [cert] play role [role] of protocol [proto] in
+  [mode] ("offer" or "initiate")? Always Ok on a shared-secret node; on a
+  certificate node, `SessionAP.authorize` against the peer's certificate
+  (None: the peer presented none). What SessionNode's access points check
+  when a session forms.
+  """
+  fn authorize_peer(c : Cap(ClusterNode.Live), id : String, proto : String, role : String,
+                    mode : String) : Result((), String) do
+    if certified(c) do SessionAP.authorize(peer_or_own_cert(c, id), proto, role, mode)
+    else Ok(()) end
+  end
+
+  -- The certificate of [node_id]: this node's own for its own id (the
+  -- loopback: an initiator inviting an offer on its own node), else the peer's.
+  pfn peer_or_own_cert(c : Cap(ClusterNode.Live), id : String) : Option(NodeCert.Cert) do
+    if id == node_id(c) do own_cert(c) else peer_cert(c, id) end
   end
 
   doc """
@@ -2532,6 +2882,16 @@ mod ClusterNode do
   fn frames_rejected(c : Cap(ClusterNode.Live)) : Int do
     let d = ops(c)
     d.frames_rejected(())
+  end
+
+  doc """
+  Raw sends this node refused (certificate mode, step 11b): outbound ones
+  (`send_msg`'s `Err(NotAuthorized)`, `queue_for`'s None) and inbound raw
+  frames dropped from a peer. Each is also a `RawSendRefused` security event.
+  """
+  fn raw_refused(c : Cap(ClusterNode.Live)) : Int do
+    let d = ops(c)
+    d.raw_refused(())
   end
 
   doc """

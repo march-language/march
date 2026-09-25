@@ -11,7 +11,7 @@ permalink: /docs/stdlib-guide/
 > signatures and docstrings generated from source, lives at **[/docs/stdlib/](/docs/stdlib/)**.
 > This page is a hand-written tour of the most commonly used modules.
 
-March ships with 126 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
+March ships with 127 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
 
 All stdlib modules are available without any import statement: use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
 
@@ -911,6 +911,19 @@ NodeCert.to_text(signed) / from_text(text)   -- base64 wire form (MARCH_NODE_CER
 NodeCert.has_role(cert, "Proto.Role:offer")  -- Bool
 NodeCert.sign_revocation(rev, operator_sk)   -- SignedRevocation
 NodeCert.is_revoked(cert, revocations)       -- Bool
+```
+
+### SessionAP
+
+`session_ap.march`: the access-point authorization check of a
+certificate-mode cluster (who may offer and who may initiate a role).
+SessionNode's access points call it; it is pure.
+
+```march
+SessionAP.authorize(Some(cert), "Checkout", "Ledger", SessionAP.offer_mode())
+                                              -- Result((), String)
+SessionAP.permission("Checkout", "Ledger", SessionAP.initiate_mode())
+                                              -- "Checkout.Ledger:initiate"
 ```
 
 ### ClusterAuth

@@ -197,6 +197,58 @@ git log is authoritative for exact commits.
   `forge cluster revoke`; `MARCH_CLUSTER_REVOCATIONS` seeds the list at
   startup; nodes pass revocations on to each other, and only the operator's
   signature makes one count. `ClusterNode.revocations(c)` lists them.
+- **Access points check certificates both ways** (build step 11b of the
+  distributed-deploys plan, part 1; certificate mode only). An initiator skips,
+  before inviting it, any offer whose node's certificate does not name
+  `Proto.Role:offer` for the role, and lists it in `NoOffer`'s reasons ("node-b
+  not authorized for Checkout.Ledger, not invited"): offer names are registry
+  names any member can write, so the check is on the certificate of the node
+  holding the offer. An offer refuses an initiator whose certificate does not
+  name `Proto.Role:initiate` for the role it plays ("initiator node-a not
+  authorized for Checkout.Client"). A node whose own certificate does not allow
+  a role gets `Err(Unauthorized(role, why))` from `offer_<Role>`, and once a
+  session forms each party checks that every role's endpoint is on a node
+  certified for that role. Shared-secret mode checks nothing, as before. New
+  `SessionAP` module (`SessionAP.authorize(cert, proto, role, mode)`),
+  `ClusterNode.own_cert`, `ClusterNode.certified` and
+  `ClusterNode.authorize_peer`; `NodeSend.Delivery` gains `from_node`, the
+  verified peer a frame arrived from. The generated `offer_<Role>`,
+  `offer_hosted_<Role>` and `initiate_<Role>` pass the protocol's role names
+  (`SessionNode.offer_role`, `offer_hosted` and `initiate` take a `roles`
+  argument after the fingerprint).
+- **Raw sends need `raw_send` at both ends** (step 11b, part 2; certificate mode
+  only). `ClusterNode.send_msg` refuses a raw send to or from a peer unless both
+  nodes' certificates carry `raw_send` (`Err(NodeQueue.NotAuthorized)`, a new
+  `EnqueueError` variant); `ClusterNode.queue_for` (what `Node.enqueue` uses)
+  returns `None`; an inbound raw frame from such a peer is dropped before any
+  route and answered `DELIVERY_FAILED`. On direct certificate-mode connections
+  `NodeSend.cast` (`Node.send`) is refused and `NodeCall.call` (`RemoteCall`)
+  returns the new `CallError.Forbidden`, which the serving side also answers.
+  Session traffic (`ClusterNode.session_tags()`, to a route opened with the new
+  `ClusterNode.route_session`) and ClusterNode's own control frames are exempt;
+  SessionNode uses `route_session` and the new `session_queue_for`. Refusals are
+  counted (`ClusterNode.raw_refused`, `NetKernel.raw_refused`) and reported as the
+  new `RawSendRefused(node_id, what)` security event. A node's sends to itself are
+  never refused.
+- **Registry lookups follow the raw-send rule** (step 11b, part 3; certificate
+  mode only). `ClusterNode.lookup` and `names` hide a binding unless this node's
+  and the holder's certificates both carry `raw_send` (a name you cannot
+  raw-send to is not a reference you should hold); a node's own bindings, and
+  the coordination namespaces `ap:`, `session:` and `topo:`
+  (`ClusterNode.reference_namespaces()`), always show. Each replica records who
+  registered a binding (`ClusterNode.registrant(c, name)`, the certificate
+  identity; `GlobalRegistry.Entry` gains `registrant`, `register_as`); it is not
+  on the wire or in the Merkle hash. `GlobalPid.make` stays pure: sending to a
+  pid is what is checked.
+- **The direct session runner speaks certificate mode** (step 11b, part 4).
+  `run_<Role>` / `host_<Role>` / `host_<Role>_or` authenticate by certificate
+  when `MARCH_NODE_CERT` is set (new `ClusterNode.auth_from_env(name, secret)`,
+  the variables a cluster node reads), over `ClusterConn.connect_split_auth` /
+  `accept_split_auth`, and each side refuses a peer whose certificate does not
+  let it play the role it announces ("role Audit.A is played by node-a: not
+  authorized for Audit.A"). Without it, the shared secret as before.
+  `SessionNode.run`, `run_hosted` and `run_hosted_or` take the protocol name and
+  role names after the fingerprint (the generated runners pass them).
 - **Placement changes on a running system and upgrade tests** (build step 8 of the
   distributed-deploys plan). A topology app's nodes re-read their topology on
   SIGHUP and move their own offers: a role's placement, capacity, or a pool that

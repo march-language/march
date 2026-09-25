@@ -1,0 +1,126 @@
+-- Two-node harness, scenario "cert_raw_send_denied": node-a, whose
+-- certificate carries raw_send. It listens, installs one route of each kind
+-- (a pid route, a type route, a session route) and writes their pids for
+-- node-b, tries to raw-send to node-b, and reports every raw send it
+-- refuses. See scenario.sh.
+mod CertRawSendDeniedA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.FileWrite
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+
+  pfn me() : String do "node-a" end
+
+  actor Sink do
+    state { n : Int }
+    init  { n: 0 }
+    on Nop() do state end
+  end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn wait_cert(h : Cap(ClusterNode.Live), id : String, left : Int) : Bool do
+    if ClusterNode.peer_cert(h, id) != None do true
+    else if left <= 0 do false else
+      sleep_ms(50)
+      wait_cert(h, id, left - 50)
+    end end
+  end
+
+  pfn wait_registrant(h : Cap(ClusterNode.Live), name : String, left : Int) : Option(String) do
+    match ClusterNode.registrant(h, name) do
+      Some(r) -> Some(r)
+      None ->
+        if left <= 0 do None else
+          sleep_ms(50)
+          wait_registrant(h, name, left - 50)
+        end
+    end
+  end
+
+  pfn shown(h : Cap(ClusterNode.Live), name : String) : String do
+    if ClusterNode.lookup(h, name) == None do "hidden" else "visible" end
+  end
+
+  pfn said(r : Result(Int, NodeQueue.EnqueueError)) : String do
+    match r do
+      Ok(_) -> "sent (wrong)"
+      Err(NodeQueue.NotAuthorized) -> "not authorized"
+      Err(NodeQueue.NoConnection) -> "no connection"
+      Err(NodeQueue.Backpressure) -> "backpressure"
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_NAME", me())
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int("MARCH_PORT_A")))
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
+    let cfg = match ClusterNode.config_from_env() do
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    end
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let got = Vault.new("raw_denied_got")
+        let _ = ClusterNode.on_security_event(h, fn ev ->
+          match ev do
+            ClusterNode.RawSendRefused(_, what) -> println(me() ++ ": refused " ++ what)
+            _ -> ()
+          end)
+        let raw = spawn(Sink)
+        let sess = spawn(Sink)
+        let _ = ClusterNode.route(h, pid_to_int(raw), fn d -> do
+          let _ = Vault.incr(got, "raw " ++ d.type_tag, 1)
+          Ok(())
+        end)
+        let _ = ClusterNode.route_type(h, "Raw.Ping", fn d -> do
+          let _ = Vault.incr(got, "type " ++ d.type_tag, 1)
+          Ok(())
+        end)
+        let _ = ClusterNode.route_session(h, pid_to_int(sess), fn d -> do
+          println(me() ++ ": session route got " ++ d.type_tag)
+          Ok(())
+        end)
+        let _ = File.write(Env.require("PIDS_FILE"),
+                           int_to_string(pid_to_int(raw)) ++ " " ++ int_to_string(pid_to_int(sess)) ++ " "
+                           ++ int_to_string(ClusterNode.creation(h)))
+        let _ = ClusterNode.register(h, "raw.a", raw)
+        println(me() ++ ": up")
+        let b = ClusterNode.node_id_of("node-b")
+        if wait_cert(h, b, 60000) do () else panic("node-a: node-b never linked") end
+        let to_b = GlobalPid.make(b, 1, 0)
+        println(me() ++ ": raw send_msg to node-b: " ++ said(ClusterNode.send_msg(h, to_b, "Raw.Ping", [1], NodeQueue.Unbounded)))
+        println(me() ++ ": queue_for node-b: " ++ (if ClusterNode.queue_for(h, b) == None do "refused" else "given (wrong)" end))
+        -- Cross-node references: node-b's binding reaches this replica,
+        -- recorded with its registrant, but lookup hides it (node-b has no
+        -- raw_send); this node's own shows.
+        match wait_registrant(h, "raw.b", 60000) do
+          Some(who) -> println(me() ++ ": raw.b registered by " ++ who ++ ", lookup " ++ shown(h, "raw.b"))
+          None -> println(me() ++ ": raw.b never arrived")
+        end
+        let _ = wait_registrant(h, "raw.a", 60000)
+        println(me() ++ ": raw.a (its own) lookup " ++ shown(h, "raw.a"))
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        println(me() ++ ": raw deliveries: " ++ int_to_string(List.length(Vault.keys(got))))
+        println(me() ++ ": raw sends refused: " ++ int_to_string(ClusterNode.raw_refused(h)))
+        ClusterNode.stop(h)
+        println(me() ++ ": done")
+    end
+  end
+end

@@ -92,7 +92,7 @@ mod HostedProtocolChange do
 
   -- A session of client [n] at fingerprint [fp].
   pfn session(c : Cap(IO), h : Cap(ClusterNode.Live), fp : String, n : Int, gate : Vault(Int)) : () do
-    match SessionNode.initiate(c, h, "Hold", fp, Nil, Hold_Msg.role_Client(), Hold_Msg.peers_Client(),
+    match SessionNode.initiate(c, h, "Hold", fp, Hold_Msg.role_names(), Nil, Hold_Msg.role_Client(), Hold_Msg.peers_Client(),
                                Hold_Msg.others_Client(), fn _ -> (),
                                fn s ->
                                  let _ = client(s, Hold_Client.register(s, 0), n, gate)
@@ -148,7 +148,7 @@ mod HostedProtocolChange do
         let gens : Vault(Int) = Vault.new("hpc_gens")
         let mk = fn () -> new_host(gens, hosts)
         let open = fn (a, cap) ->
-          SessionNode.offer_hosted(c, h, "Hold", Option.unwrap_or(Vault.get(version, "fp"), "?"), Nil,
+          SessionNode.offer_hosted(c, h, "Hold", Option.unwrap_or(Vault.get(version, "fp"), "?"), Hold_Msg.role_names(), Nil,
             Hold_Msg.role_Server(), Hold_Msg.peers_Server(), cap, fn _ -> (), pid_to_int(a),
             fn (sid, s) ->
               let _ = send(a, Start(sid, s))

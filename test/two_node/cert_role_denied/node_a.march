@@ -1,0 +1,92 @@
+-- Two-node harness, scenario "cert_role_denied": node-a, whose certificate
+-- names Checkout.Client:initiate and Thumbs.Client:initiate. It waits for
+-- node-b's two offer names, then initiates one session of each protocol.
+-- See scenario.sh.
+mod CertRoleDeniedA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+  needs Session.Live
+
+  @[endpoints]
+  protocol Checkout do
+    Client -> Ledger : Int
+    Ledger -> Client : Int
+  end
+
+  @[endpoints]
+  protocol Thumbs do
+    Client -> Render : Int
+    Render -> Client : Int
+  end
+
+  pfn me() : String do "node-a" end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn wait_name(h : Cap(ClusterNode.Live), name : String, left : Int) : Bool do
+    if ClusterNode.lookup(h, name) != None do true
+    else if left <= 0 do false else
+      sleep_ms(50)
+      wait_name(h, name, left - 50)
+    end end
+  end
+
+  pfn checkout(s : Cap(Session.Live), st : Checkout_Client.S_send_Msg_Client_Ledger_1) : Checkout_Client.Yield do
+    Checkout_Client.recv_Msg_Ledger_Client_1(s, Checkout_Client.send_Msg_Client_Ledger_1(s, st, 1), fn (_n, st1) ->
+      Checkout_Client.close(s, st1))
+  end
+
+  pfn thumbs(s : Cap(Session.Live), st : Thumbs_Client.S_send_Msg_Client_Render_1, got : Vault(Int)) : Thumbs_Client.Yield do
+    Thumbs_Client.recv_Msg_Render_Client_1(s, Thumbs_Client.send_Msg_Client_Render_1(s, st, 5), fn (n, st1) ->
+      Vault.set(got, "n", n)
+      Thumbs_Client.close(s, st1))
+  end
+
+  fn main(c : Cap(IO)) do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_NAME", me())
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int("MARCH_PORT_A")))
+    Process.set_env("MARCH_CLUSTER_NODES", "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_B")))
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
+    let cfg = match ClusterNode.config_from_env() do
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    end
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let b = ClusterNode.node_id_of("node-b")
+        let ledger_name = "ap:Checkout/" ++ int_to_string(Checkout_Msg.role_Ledger()) ++ "/" ++ Checkout_Msg.fingerprint() ++ "/" ++ b
+        let render_name = "ap:Thumbs/" ++ int_to_string(Thumbs_Msg.role_Render()) ++ "/" ++ Thumbs_Msg.fingerprint() ++ "/" ++ b
+        if wait_name(h, ledger_name, 60000) && wait_name(h, render_name, 60000) do () else panic("node-a: node-b's offers never appeared") end
+        println(me() ++ ": sees node-b's Checkout.Ledger and Thumbs.Render offers")
+        match Checkout_Run.initiate_Client(c, h, fn (s, st) -> checkout(s, st)) do
+          Ok(_) -> println(me() ++ ": Checkout session formed (wrong)")
+          Err(e) -> println(me() ++ ": Checkout: " ++ Checkout_Run.error_message(e))
+        end
+        let got = Vault.new("cert_role_denied_got")
+        match Thumbs_Run.initiate_Client(c, h, fn (s, st) -> thumbs(s, st, got)) do
+          Ok(_) -> println(me() ++ ": Thumbs session got " ++ int_to_string(Vault.get_or(got, "n", 0)))
+          Err(e) -> println(me() ++ ": Thumbs: " ++ Thumbs_Run.error_message(e))
+        end
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        ClusterNode.stop(h)
+        println(me() ++ ": done")
+    end
+  end
+end

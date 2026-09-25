@@ -1985,6 +1985,35 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/cluster_placement.expected cluster_placement_interp.out)))
 
+;
+; Step 11b's two-way role check at session formation, in one process, over
+; fake cluster dictionaries (D35): each fake node has its own certificate
+; and they share a fake registry and network. An initiator skips an offer
+; whose node is not certified to offer the role (and never invites it), an
+; offer refuses an initiator not certified to initiate, an honest node
+; refuses to open an offer its certificate lacks, shared-secret mode checks
+; nothing, and a squatter on a session's role name is refused. Compiled
+; only: the interpreter does not run the offer actor while the initiator
+; polls for its answer. `--no-cap-strict` because a user-level
+; `NodeQueue.start_local` call (the fake's data queue) trips the
+; capability ceiling in stdlib `Socket`, which declares no `needs`
+; (pre-existing: specs/todos/2026-09-25-nodequeue-start-local-socket-ceiling.md).
+(rule
+ (targets cert_authz_bin cert_authz.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file session/cert_authz.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --no-cap-strict -o cert_authz_bin
+        session/cert_authz.march)
+   (with-stdout-to cert_authz.out (system "./cert_authz_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/cert_authz.expected cert_authz.out)))
+
 ; Crash branches in one process (design Part B, 2026-09-20): the logging
 ; protocol with `may crash C`, run twice on a transport that can mark a role
 ; gone -- once with C alive, once with C "crashed", where I takes its crash
