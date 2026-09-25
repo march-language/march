@@ -76,7 +76,7 @@ mod CertRoleDeniedB do
           let _ = Vault.incr(seen, d.type_tag, 1)
           Ok(())
         end)
-        match ClusterNode.register(h, "ap:Checkout/" ++ int_to_string(Checkout_Msg.role_Ledger()) ++ "/" ++ ClusterNode.node_id(h), forged) do
+        match ClusterNode.register(h, "ap:Checkout/" ++ int_to_string(Checkout_Msg.role_Ledger()) ++ "/" ++ Checkout_Msg.fingerprint() ++ "/" ++ ClusterNode.node_id(h), forged) do
           Ok(_) -> println(me() ++ ": forged the Checkout.Ledger offer")
           Err(_) -> println(me() ++ ": could not bind the forged offer")
         end

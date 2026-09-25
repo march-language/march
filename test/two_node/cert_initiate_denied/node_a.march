@@ -58,7 +58,7 @@ mod CertInitiateDeniedA do
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
-        let name = "ap:Checkout/" ++ int_to_string(Checkout_Msg.role_Ledger()) ++ "/" ++ ClusterNode.node_id_of("node-b")
+        let name = "ap:Checkout/" ++ int_to_string(Checkout_Msg.role_Ledger()) ++ "/" ++ Checkout_Msg.fingerprint() ++ "/" ++ ClusterNode.node_id_of("node-b")
         if wait_name(h, name, 60000) do () else panic("node-a: node-b's offer never appeared") end
         println(me() ++ ": sees node-b's Checkout.Ledger offer")
         match Checkout_Run.initiate_Client(c, h, fn (s, st) -> checkout(s, st)) do

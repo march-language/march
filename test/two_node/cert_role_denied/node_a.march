@@ -71,8 +71,8 @@ mod CertRoleDeniedA do
       Err(e) -> panic(e)
       Ok(h) ->
         let b = ClusterNode.node_id_of("node-b")
-        let ledger_name = "ap:Checkout/" ++ int_to_string(Checkout_Msg.role_Ledger()) ++ "/" ++ b
-        let render_name = "ap:Thumbs/" ++ int_to_string(Thumbs_Msg.role_Render()) ++ "/" ++ b
+        let ledger_name = "ap:Checkout/" ++ int_to_string(Checkout_Msg.role_Ledger()) ++ "/" ++ Checkout_Msg.fingerprint() ++ "/" ++ b
+        let render_name = "ap:Thumbs/" ++ int_to_string(Thumbs_Msg.role_Render()) ++ "/" ++ Thumbs_Msg.fingerprint() ++ "/" ++ b
         if wait_name(h, ledger_name, 60000) && wait_name(h, render_name, 60000) do () else panic("node-a: node-b's offers never appeared") end
         println(me() ++ ": sees node-b's Checkout.Ledger and Thumbs.Render offers")
         match Checkout_Run.initiate_Client(c, h, fn (s, st) -> checkout(s, st)) do

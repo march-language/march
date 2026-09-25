@@ -143,7 +143,7 @@ mod CertAuthz do
   end
 
   pfn ledger_offer_name(id : String) : String do
-    "ap:Checkout/" ++ int_to_string(Checkout_Msg.role_Ledger()) ++ "/" ++ id
+    "ap:Checkout/" ++ int_to_string(Checkout_Msg.role_Ledger()) ++ "/" ++ Checkout_Msg.fingerprint() ++ "/" ++ id
   end
 
   pfn invites(net : Net, id : String) : Int do Vault.get_or(net.meta, "sent SessionAP.Invite to " ++ id, 0) end
