@@ -531,6 +531,18 @@ git log is authoritative for exact commits.
   next plain `march --check f.march` of the same source exit 0 silently instead
   of reporting the capability-ceiling error. The key now carries the cap-strict
   setting, as the `--compile` key already did.
+- A function in a nested module that calls a function of an enclosing module
+  (`mod Outer do pfn helper ... mod Inner do fn f(x) do helper(x) end end end`)
+  now compiles. Before, the compiled program failed to link with `helper`
+  undefined, while the interpreter ran it. This applied at any nesting depth,
+  whether the enclosing function was declared before or after the nested
+  module, and in `MARCH_LIB_PATH` modules, stdlib modules and the entry file
+  alike. The qualified spelling `Outer.helper(x)` also now works from inside
+  `Outer` for a `pfn`: it was rejected as private in a stdlib module, and in
+  the same file it could bind a same-named function of the nested module
+  instead. `Compress`'s internal `lift_encode_error` / `lift_decode_error`
+  are private again.
+
 - `compare` on a NaN `Float` now gives the same answer compiled as interpreted:
   NaN compares equal to NaN and less than every other value (OCaml's
   `Float.compare`). Compiled `compare` returned 0 whenever either operand was
