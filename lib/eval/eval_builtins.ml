@@ -2067,11 +2067,18 @@ let base_env : env =
         | [VString host] ->
           (try
              let open Unix in
-             let addrs = getaddrinfo host "" [AI_FAMILY PF_INET] in
-             let ip_strings = List.filter_map (fun ai ->
+             (* Same contract as march_dns_resolve (runtime/march_runtime.c):
+                IPv4 only, one entry per address in resolver order.  Without
+                the SOCK_STREAM hint getaddrinfo answers once per socket type,
+                so "127.0.0.1" came back two or three times. *)
+             let addrs =
+               getaddrinfo host "" [AI_FAMILY PF_INET; AI_SOCKTYPE SOCK_STREAM] in
+             let ip_strings = List.fold_left (fun acc ai ->
                match ai.ai_addr with
-               | ADDR_INET (addr, _) -> Some (string_of_inet_addr addr)
-               | _ -> None) addrs in
+               | ADDR_INET (addr, _) ->
+                 let s = string_of_inet_addr addr in
+                 if List.mem s acc then acc else s :: acc
+               | _ -> acc) [] addrs |> List.rev in
              if ip_strings = [] then
                VCon ("Err", [VString ("cannot resolve " ^ host)])
              else

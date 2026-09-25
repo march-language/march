@@ -4,6 +4,12 @@
 -- Results reflect the system's resolver configuration (e.g. /etc/hosts,
 -- /etc/resolv.conf, mDNS, and any configured search domains).
 --
+-- IPv4 only: every tcp_connect path opens an AF_INET socket, so an IPv6
+-- answer would be an address nothing can dial.  A host with only IPv6
+-- addresses (or an IPv6 literal such as "::1") is NotFound.  The list has
+-- one entry per address, in the resolver's order, with no duplicates; the
+-- interpreter and compiled code return the same list.
+--
 -- Public API:
 --   Dns.resolve(host)      : Result(List(String), DnsError)
 --   Dns.resolve_one(host)  : Result(String, DnsError)
@@ -26,7 +32,9 @@ mod Dns do
 
   doc """
   Resolve hostname to a list of IPv4 address strings.
-  Returns Ok(addrs) where addrs is non-empty, or Err on failure.
+  Returns Ok(addrs) where addrs is non-empty, holds each address once, and
+  keeps the resolver's order; or Err on failure (NotFound when the host has
+  no IPv4 address).
 
       match Dns.resolve("example.com") do
       Ok(ips)  -> List.head_opt(ips)
