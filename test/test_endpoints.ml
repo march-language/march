@@ -1963,6 +1963,306 @@ let cli_dump_role_authority =
           "root: the body passed to `Stream_Run.run_Cons`, in `main`"; "reaches: IO.Console, IO.FileWrite";
           "values: none"; "actors: none" ])
 
+(* ── the root is whatever VALUE flows into the body parameter ──────────
+   Review finding 2026-09-24-dd-review-role-grants-miss-let-bound-body: a
+   body bound by `let`, passed through a parameter, calling an aliased
+   function or a local closure was charged nothing, because only the NAME
+   at the call reached the walk.  Each shape is a reject case now, and the
+   chain names how the body reaches the capability. *)
+
+(* `Cons` is granted the network only; the body deletes a file (`file_delete`
+   is `IO.FileWrite` in the capability table) and reaches the runner through
+   a local `let`. *)
+let let_bound_src = {|
+mod GLet do
+  needs IO
+  needs IO.NetConnect
+  needs IO.FileWrite
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    role Cons needs IO.NetConnect
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  pfn wipe(n : Int) : () do
+    let _ = file_delete("/tmp/n" ++ int_to_string(n))
+    ()
+  end
+  fn main(c : Cap(IO)) do
+    let body = fn (s, nc, st) ->
+      Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+        wipe(n)
+        Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
+    let _ = Stream_Run.run_Cons(c, "n", "s", Stream_Run.addrs_from_env(), body)
+    ()
+  end
+end
+|}
+
+let cli_role_grant_let_bound_body =
+  Alcotest.test_case "CLI: a `let`-bound body reaching file_delete under a NetConnect grant is refused, with the chain" `Quick
+    (fun () ->
+       let rc, out = check_cli let_bound_src in
+       Alcotest.(check int) "exit code" 1 rc;
+       Alcotest.(check bool) ("names the grant, the cap and the chain (output: " ^ out ^ ")") true
+         (contains_text out "Role `Stream.Cons` is granted `Cap(IO.NetConnect)`"
+          && contains_text out "the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite`"
+          && contains_text out "body → wipe"))
+
+(* The body is a PARAMETER of the function that calls the runner; the value
+   is the lambda `main` passes at the call site. *)
+let cli_role_grant_parameter_body =
+  Alcotest.test_case "CLI: a body passed through a parameter is resolved at the call site" `Quick (fun () ->
+      let src = replace_all ~needle:{|  fn main(c : Cap(IO)) do
+    let body = fn (s, nc, st) ->
+      Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+        wipe(n)
+        Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
+    let _ = Stream_Run.run_Cons(c, "n", "s", Stream_Run.addrs_from_env(), body)
+    ()
+  end|} ~by:{|  pfn go(c : Cap(IO), b) do
+    let _ = Stream_Run.run_Cons(c, "n", "s", Stream_Run.addrs_from_env(), b)
+    ()
+  end
+  fn main(c : Cap(IO)) do
+    go(c, fn (s, nc, st) ->
+      Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+        wipe(n)
+        Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))))
+  end|} let_bound_src in
+      let rc, out = check_cli src in
+      Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 1 rc;
+      Alcotest.(check bool) ("chain through wipe (output: " ^ out ^ ")") true
+        (contains_text out "reaches `IO.FileWrite`" && contains_text out "body → wipe"))
+
+(* [violation_src] with the receive written INLINE in `main`'s lambda, so a
+   local of `main` is in scope where `save` is called. *)
+let violation_inline_src = replace_all ~needle:"fn (s, con, st) -> cons(s, con, st)" ~by:{|fn (s, con, st) ->
+      Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+        save(n)
+        Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))|} violation_src
+
+(* `let sv = save` in `main`: the alias resolves to the named function. *)
+let cli_role_grant_aliased_fn =
+  Alcotest.test_case "CLI: a body calling a `let`-aliased function is charged the function" `Quick (fun () ->
+      let src = replace_all ~needle:"fn main(c : Cap(IO)) do
+" ~by:"fn main(c : Cap(IO)) do
+    let sv = save
+" violation_inline_src in
+      let src = replace_all ~needle:"        save(n)
+" ~by:"        sv(n)
+" src in
+      let rc, out = check_cli src in
+      Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 1 rc;
+      Alcotest.(check bool) ("chain through save (output: " ^ out ^ ")") true
+        (contains_text out "reaches `IO.FileWrite`" && contains_text out "body → save"))
+
+(* A local closure `main` made and the body captures: a captured function is
+   part of the body's code (plan section 2), so it is charged, and the chain
+   names it by its local name. *)
+let local_closure_src =
+  let src = replace_all ~needle:"fn main(c : Cap(IO)) do
+" ~by:"fn main(c : Cap(IO)) do
+    let sv = fn n -> save(n)
+" violation_inline_src in
+  replace_all ~needle:"        save(n)
+" ~by:"        sv(n)
+" src
+
+let cli_role_grant_local_closure =
+  Alcotest.test_case "CLI: a local closure the body captures is charged, and named in the chain" `Quick (fun () ->
+      let rc, out = check_cli local_closure_src in
+      Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 1 rc;
+      Alcotest.(check bool) ("chain through sv (output: " ^ out ^ ")") true
+        (contains_text out "reaches `IO.FileWrite`" && contains_text out "body → sv → save"))
+
+(* A body BUILT by a call is bounded by what the callee reaches. *)
+let cli_role_grant_call_built_body =
+  Alcotest.test_case "CLI: a body returned by a function is charged that function's reach" `Quick (fun () ->
+      let src = replace_all ~needle:"fn main(c : Cap(IO)) do
+    let _ = Stream_Run.run_Cons(c, \"n\", \"s\", Stream_Run.addrs_from_env(), fn (s, con, st) -> cons(s, con, st))
+" ~by:"pfn pick() do
+    fn (s, con, st) -> cons(s, con, st)
+  end
+  fn main(c : Cap(IO)) do
+    let b = pick()
+    let _ = Stream_Run.run_Cons(c, \"n\", \"s\", Stream_Run.addrs_from_env(), b)
+" violation_src in
+      let rc, out = check_cli src in
+      Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 1 rc;
+      Alcotest.(check bool) ("chain through pick (output: " ^ out ^ ")") true
+        (contains_text out "body → pick → cons → save"))
+
+(* Test gap 1 (2026-09-24-dd-review-step4-test-gaps): the root's OWN
+   builtin calls, with no helper in between.  Replacing that arm with `[]`
+   left every other case green. *)
+let cli_role_grant_direct_builtin =
+  Alcotest.test_case "CLI: a body lambda calling a capability builtin directly is refused" `Quick (fun () ->
+      let src = replace_all ~needle:"fn (s, con, st) -> cons(s, con, st)" ~by:{|fn (s, con, st) ->
+      Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+        let _ = file_write("/tmp/n", int_to_string(n))
+        Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))|} violation_src in
+      let rc, out = check_cli src in
+      Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 1 rc;
+      Alcotest.(check bool) ("the body itself reaches FileWrite (output: " ^ out ^ ")") true
+        (contains_text out "the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite`"))
+
+(* A body with no statically known value (read from a record field) is not
+   silently accepted: under D14 it is its creator's authority, so the grant
+   is reported as unverifiable (a warning, exit 0), not refused. *)
+let cli_role_grant_unresolvable_body_warns =
+  Alcotest.test_case "CLI: a body read from a data structure is reported as not statically known, not passed silently" `Quick
+    (fun () ->
+       let src = replace_all ~needle:"fn main(c : Cap(IO)) do
+    let _ = Stream_Run.run_Cons(c, \"n\", \"s\", Stream_Run.addrs_from_env(), fn (s, con, st) -> cons(s, con, st))
+" ~by:"type Cfg = { body : (Cap(Session.Live)) -> (Cap(IO.Console)) -> (Stream_Cons.Entry) -> Stream_Cons.Yield }
+  fn main(c : Cap(IO)) do
+    let cfg = { body: fn (s, con, st) -> cons(s, con, st) }
+    let _ = Stream_Run.run_Cons(c, \"n\", \"s\", Stream_Run.addrs_from_env(), cfg.body)
+" violation_src in
+       let rc, out = check_cli src in
+       Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc;
+       Alcotest.(check bool) ("warns (output: " ^ out ^ ")") true
+         (contains_text out "cannot verify role grant for the body passed to `Stream_Run.run_Cons`"
+          && contains_text out "value not statically known"
+          && not (contains_text out "reaches `IO.FileWrite`")))
+
+(* D34: the grant is the body's own type.  A named body whose Cap parameter
+   is a DIFFERENT capability than the role's line cannot reach the runner:
+   the type refuses it before the walk runs. *)
+let cli_role_grant_wrong_cap_type =
+  Alcotest.test_case "CLI: a body typed with a cap other than the role's grant does not typecheck at the runner" `Quick
+    (fun () ->
+       let src = replace_all ~needle:"con : Cap(IO.Console), st" ~by:"fw : Cap(IO.FileWrite), st" violation_src in
+       let src = replace_all ~needle:"fn (s, con, st) -> cons(s, con, st)" ~by:"cons" src in
+       let src = replace_all ~needle:"      save(n)
+" ~by:"" src in
+       let rc, out = check_cli src in
+       Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 1 rc;
+       Alcotest.(check bool) ("the type names both caps, and the walk adds nothing (output: " ^ out ^ ")") true
+         (contains_text out "expected `IO.Console` but got `IO.FileWrite`"
+          && not (contains_text out "Role `Stream.Cons` is granted")))
+
+(* Review finding 2026-09-24-dd-review-role-authority-report-omits-local-closures:
+   the report lists the local closures the body captures and the pids it
+   holds without spawning them. *)
+let cli_dump_role_authority_local_closures =
+  Alcotest.test_case "CLI: --dump-role-authority lists captured local closures and held pids" `Quick (fun () ->
+      let src = replace_all ~needle:"role Cons needs IO.Console
+" ~by:"role Cons needs IO.Console, IO.FileWrite
+" local_closure_src in
+      let src = replace_all ~needle:"con : Cap(IO.Console), st" ~by:"con : Cap(IO.Console), fw : Cap(IO.FileWrite), st" src in
+      let src = replace_all ~needle:"fn (s, con, st) ->" ~by:"fn (s, con, fw, st) ->" src in
+      let src = replace_all ~needle:"        sv(n)
+" ~by:"        let _ = send(h, Tick())
+        sv(n)
+" src in
+      let src = replace_all ~needle:"    let sv = fn n -> save(n)
+" ~by:"    let sv = fn n -> save(n)
+    let h = spawn(Keeper)
+" src in
+      let src = replace_all ~needle:"  fn main(c : Cap(IO)) do
+" ~by:"  actor Keeper do
+    state { n : Int }
+    init { n: 0 }
+    on Tick() do
+      let _ = file_write(\"/tmp/k\", \"1\")
+      state
+    end
+  end
+  fn main(c : Cap(IO)) do
+" src in
+      let rc, out = check_cli ~flags:"--dump-role-authority" src in
+      Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc;
+      List.iter
+        (fun needle -> Alcotest.(check bool) (needle ^ " (output: " ^ out ^ ")") true (contains_text out needle))
+        [ "closures: sv (closure in `main`, line"; ") -> IO.FileWrite"; "holds: h -> Keeper -> IO.FileWrite" ])
+
+(* Review finding 2026-09-24-dd-review-non-io-role-grant-diagnostics: a grant
+   naming a proof or foreign capability is refused ONCE, at the grant line,
+   with nothing from generated code. *)
+let cli_role_needs_non_io =
+  Alcotest.test_case "CLI: a grant naming a non-IO capability is one error at the grant line" `Quick (fun () ->
+      List.iter
+        (fun cap ->
+           let src = {|
+mod GNonIO do
+  needs IO
+  needs IO.Console
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    role Cons needs CAP
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  fn main(c : Cap(IO)) do () end
+end
+|} in
+           let rc, out = check_cli (replace_all ~needle:"CAP" ~by:cap src) in
+           Alcotest.(check int) (cap ^ ": exit code (output: " ^ out ^ ")") 1 rc;
+           Alcotest.(check bool) (cap ^ ": names the grant (output: " ^ out ^ ")") true
+             (contains_text out ("`role Cons needs " ^ cap ^ "` names a capability that is not under `IO`")
+              && contains_text out ("role Cons needs " ^ cap));
+           let errors = List.length (List.filter (fun l -> contains_text l "-- ERROR") (String.split_on_char '\n' out)) in
+           Alcotest.(check int) (cap ^ ": exactly one error (output: " ^ out ^ ")") 1 errors;
+           Alcotest.(check bool) (cap ^ ": nothing from generated code (output: " ^ out ^ ")") false
+             (contains_text out "in code generated for this file"))
+        [ "ClusterNode.Live"; "Session.Live"; "LibC" ])
+
+(* Test gap 2: the fingerprint the GENERATED CODE embeds, read through the
+   program (`Stream_Msg.fingerprint()`), is the same across grant variants.
+   [grants_not_in_fingerprint] calls the helper directly and stays green when
+   the generator mixes the grants into the digest it emits; this does not. *)
+let cli_grants_not_in_program_fingerprint =
+  Alcotest.test_case "CLI: `<P>_Msg.fingerprint()` printed by the program is the same with no grant, one grant, another" `Quick
+    (fun () ->
+       let program grant = Printf.sprintf {|
+mod FP do
+  needs IO
+  needs IO.Console
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+%s    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+  fn main(c : Cap(IO)) do
+    print_line(Stream_Msg.fingerprint())
+  end
+end
+|} grant in
+       let run grant =
+         let rc, out = check_cli ~flags:"" (program grant) in
+         Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 0 rc;
+         String.trim out
+       in
+       let none = run "" in
+       let one = run "    role Cons needs IO.Console\n" in
+       let other = run "    role Cons needs IO.Console, IO.FileWrite\n    role Prod needs IO.NetConnect\n" in
+       Alcotest.(check bool) "a digest was printed" true (String.length none > 8);
+       Alcotest.(check string) "no grant vs one grant" none one;
+       Alcotest.(check string) "one grant vs another" one other)
+
 (* ── scripted and chaos peers (D36) ──────────────────────────────────── *)
 
 let peers_shape =
@@ -2144,6 +2444,10 @@ let tests =
     cli_script_mismatch_panics; cli_script_runs_out_panics;
     cli_role_grant_violation; cli_role_grant_named_body; cli_role_grant_widened_ok; cli_role_grant_wider_than_main;
     cli_role_grant_hosted_actor; cli_dump_role_authority;
+    cli_role_grant_let_bound_body; cli_role_grant_parameter_body; cli_role_grant_aliased_fn;
+    cli_role_grant_local_closure; cli_role_grant_call_built_body; cli_role_grant_direct_builtin;
+    cli_role_grant_unresolvable_body_warns; cli_role_grant_wrong_cap_type;
+    cli_dump_role_authority_local_closures; cli_role_needs_non_io; cli_grants_not_in_program_fingerprint;
     granted_body_type; ungranted_body_type_unchanged; cli_granted_body_ok; cli_granted_body_missing_caps;
     grants_not_in_fingerprint; role_needs_ok; role_identifier_ok; role_needs_unknown_cap;
     role_needs_unknown_role; role_needs_twice; role_needs_after_message; role_needs_nested; msg_type_named_after_protocol; two_protocols_distinct_msg_types; two_protocols_ok;

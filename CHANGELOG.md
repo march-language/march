@@ -12,6 +12,8 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- `forge run --processes` no longer occasionally assigns two pools the same cluster port (seen on Linux CI as `tcp_listen: bind failed`); the ports for all processes are now reserved together.
+
 - **Multi-threaded programs no longer occasionally abort with SIGTRAP (or a bare
   `Killed: 9`) at shutdown under load.** When a scheduler worker thread exited, a
   preemption tick already on its way could land inside the thread's teardown, and
@@ -20,7 +22,6 @@ git log is authoritative for exact commits.
   parallel load, with no output, and never reproduced on a rerun. Ticks that
   arrive after a thread has left its scheduler loop are now dropped, and worker
   threads block the tick signal before they exit.
-
 - **The bare `sha256` builtin now typechecks as `Bytes -> String`, matching what it
   has always returned** (a 64-char lowercase hex string, like `Crypto.sha256`,
   `md5` and `sha512`). It was declared `Bytes -> Bytes`, so `Bytes.length(sha256(b))`
@@ -30,6 +31,23 @@ git log is authoritative for exact commits.
   entry below for the runtime side); the builtin now also has its own runtime
   entry, chosen by the compiler from the static type, so it never guesses.
   For a raw digest use `hmac_sha256_bytes` / `sha1_bytes`.
+- **A top-level function named like a capability builtin no longer fails a
+  compiled build's capability ceiling.** A `fn dns_resolve(x : Int) : Int` (or
+  `fn file_read(...)`, …) in the entry module was charged the builtin's
+  capability, so `--compile` rejected it with "module `M` uses `IO.Network` but
+  does not declare `needs IO.Network`", while the interpreter ran the same
+  program. A call to a function the program defines is now attributed to that
+  function.
+- **Compiled `uuid_v7()` and `unix_time_ms()` now show up in the binary
+  capability audit.** Both compiled, but no IO.Clock marker was emitted for
+  them, so `forge cap inspect` under-reported any binary that used them.
+  `uuid_v7`, `uuid_v7_at` and `dns_resolve` are now the prefixed runtime
+  functions `march_uuid_v7`, `march_uuid_v7_at` and `march_dns_resolve`. Before
+  the rename, any symbol spelled `dns_resolve` in a binary counted as an
+  IO.Network witness.
+- **Compiled `dns_resolve` no longer leaks its host argument** (one String per
+  call). **Compiled `uuid_v7_at` with a negative timestamp now errors** as the
+  interpreter does, instead of returning a UUID with a garbage timestamp.
 
 ### Added
 - **Sessions drain automatically at loop boundaries** (D27, build step 6's
@@ -597,6 +615,19 @@ git log is authoritative for exact commits.
   (`fn lt(a) do fn b -> a < b end`, including `Map.int_cmp` / `Map.str_cmp`)
   passed as a value and called curried no longer crashes compiled programs
   with SIGSEGV.
+
+- **Per-role grants check the value that reaches the runner, not the expression at the
+  call.** `check_role_grants` used to walk only a literal lambda or a directly named
+  function; a body bound with `let`, passed through a parameter, calling a `let`-aliased
+  function or a local closure was charged nothing and `--check` accepted it. The root is
+  now resolved through the calling function's bindings (`let` right-hand sides, aliases,
+  parameters at their call sites, call results), local closures are charged and named in
+  the chain (`body → sv → save`), and a body with no static origin (a record field, a
+  message) is reported as "cannot verify role grant … value not statically known" instead
+  of passing silently. `--dump-role-authority` now lists the captured local closures and
+  the pids the body holds. A `role R needs` naming a non-IO capability (`Session.Live`,
+  `ClusterNode.Live`, `LibC`) is one error at the grant line instead of a spray of errors
+  inside generated code. Corpus `reject/t295`.
 - **`march --check` no longer reuses a `--no-cap-strict` verdict.** The `--check`
   fast path caches a clean verdict per source digest, but that key ignored
   `--no-cap-strict`, so `march --check --no-cap-strict f.march` exiting 0 made the

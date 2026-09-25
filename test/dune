@@ -3450,6 +3450,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (diff native/builtin_link_backing.expected
                native_builtin_link_backing.out)))
 
+; uuid_v7 / uuid_v7_at / dns_resolve compiled only because the runtime defined
+; UNPREFIXED C functions of exactly those names, reached through mangle_extern's
+; identity fallthrough.  Renamed to march_* with explicit codegen rows
+; (specs/progress/2026-09-25-runtime-symbol-naming-and-uncompiled-caps.md).
+; Run on BOTH backends against the one golden: the contract is parity.
+(rule
+ (targets native_uuid_v7_dns_parity native_uuid_v7_dns_parity.out
+          native_uuid_v7_dns_parity_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/uuid_v7_dns_parity.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (with-stdout-to native_uuid_v7_dns_parity_interp.out
+     (run %{exe:../bin/main.exe} native/uuid_v7_dns_parity.march))
+    (run %{exe:../bin/main.exe} --compile -o native_uuid_v7_dns_parity
+         native/uuid_v7_dns_parity.march)
+    (with-stdout-to native_uuid_v7_dns_parity.out
+         (system "./native_uuid_v7_dns_parity"))))))
+
+(rule
+ (alias runtest)
+ (deps native_uuid_v7_dns_parity.out native/uuid_v7_dns_parity.expected)
+ (action (diff native/uuid_v7_dns_parity.expected
+               native_uuid_v7_dns_parity.out)))
+
+(rule
+ (alias runtest)
+ (deps native_uuid_v7_dns_parity_interp.out
+       native/uuid_v7_dns_parity.expected)
+ (action (diff native/uuid_v7_dns_parity.expected
+               native_uuid_v7_dns_parity_interp.out)))
+
 ; ── Erased/uniform boundary between the C runtime and compiled code ──────
 ; One family, three fixtures.  march_vault_get / march_record_get / the vault
 ; key builtins all hand a value across a boundary where the runtime has ONE

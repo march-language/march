@@ -233,14 +233,23 @@ let supervise ?(fail_fast = false) ~grace_ms procs =
        loop ();
        List.map (fun p -> (p.p_name, Option.get p.p_status)) procs)
 
-let free_port () =
-  let s = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-  Fun.protect ~finally:(fun () -> Unix.close s) (fun () ->
-      Unix.setsockopt s Unix.SO_REUSEADDR true;
-      Unix.bind s (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
-      match Unix.getsockname s with
-      | Unix.ADDR_INET (_, port) -> port
-      | Unix.ADDR_UNIX _ -> failwith "Procs.free_port: not an inet socket")
+(* Every socket stays bound until all [n] ports are read, so one call never
+   hands out the same port twice: bind-read-close one at a time lets the kernel
+   give the just-closed port straight back (seen on Linux CI, where two pools
+   of one [forge run --processes] both got the same port and one failed to bind). *)
+let free_ports n =
+  let socks = ref [] in
+  Fun.protect ~finally:(fun () -> List.iter Unix.close !socks) (fun () ->
+      List.init n (fun _ ->
+          let s = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+          socks := s :: !socks;
+          Unix.setsockopt s Unix.SO_REUSEADDR true;
+          Unix.bind s (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+          match Unix.getsockname s with
+          | Unix.ADDR_INET (_, port) -> port
+          | Unix.ADDR_UNIX _ -> failwith "Procs.free_ports: not an inet socket"))
+
+let free_port () = List.hd (free_ports 1)
 
 let string_of_status = function
   | Unix.WEXITED n -> Printf.sprintf "exited %d" n
