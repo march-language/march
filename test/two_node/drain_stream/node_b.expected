@@ -1,0 +1,5 @@
+Cons got 1
+Cons got 2
+Cons got 3
+node-b: draining
+Cons: Ok(Drained(0))

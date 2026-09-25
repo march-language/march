@@ -48,6 +48,18 @@ mod Session do
   -- cancelled (a generated `recv_<Msg>` with a crash branch installs it;
   -- specs/2026-09-19-choreography-access-points-and-crash-branches-design.md
   -- Part B). A transport where nothing fails may ignore it.
+  -- `suspend_at_boundary(ep, from, handler)`: `suspend`, at a DRAIN POINT --
+  -- the head of a loop that is not `loop atomic` (D27, plan 6.2). A
+  -- transport whose code epoch is draining may end the session there instead
+  -- of resuming: the delivery goes back to its sender undelivered and the
+  -- endpoint's drain handler runs. A transport that never drains treats it
+  -- as `suspend`. `on_drain(ep, h)`: install `h` as the drain handler for the
+  -- continuation `suspend`/`suspend_at_boundary` installs next on `ep`;
+  -- returns `ep`. The transport calls `h(role, undelivered, ep)` if the
+  -- session drains while that continuation waits: `role` is the drained role
+  -- it was waiting on (0: this endpoint's own boundary), `undelivered` the
+  -- messages this endpoint sent that came back. No handler: the endpoint just
+  -- finishes. Both: specs/progress/2026-09-24-dd-d27-session-drains.md.
   type Ops = {
     register  : Int -> Int -> Int,
     emit      : Int -> Int -> Bytes -> Int,
@@ -56,8 +68,16 @@ mod Session do
     fail      : Int -> String -> (),
     on_cancel : Int -> (Int -> String -> Int -> Int) -> Int,
     leave     : Int -> String -> (),
-    on_crash  : Int -> Int -> (Int -> String -> Int -> Int) -> Int
+    on_crash  : Int -> Int -> (Int -> String -> Int -> Int) -> Int,
+    suspend_at_boundary : Int -> Int -> (Int -> Bytes -> Int -> Int) -> Int,
+    on_drain  : Int -> (Int -> List(Bytes) -> Int -> Int) -> Int
   }
+
+  -- How a session that did not fail ended: every role reached the protocol's
+  -- end (`Finished`), or it was ended at a loop boundary by a drain
+  -- (`Drained(n)`, D27), [n] being how many of this role's own messages came
+  -- back undelivered. A clean end either way: what `run_<Role>` returns in `Ok`.
+  type Outcome = Finished | Drained(Int)
 
   proof cap Live with Ops
 
@@ -102,19 +122,63 @@ mod Session do
   end
 
   doc """
-  For generated `@[endpoints]` code only: take an epoch hold on the running
-  actor while it hosts a started endpoint, so it stays on the code version the
-  session formed under until the endpoint closes (hot reload's nesting rule).
-  Paired with `release_epoch`; calling it anywhere else only delays a deploy
-  (up to its hard drain deadline).
+  `suspend` at a drain point: the receive at the head of a loop that is not
+  `loop atomic` (D27). The generated receive of a loop-head state calls this
+  instead of `suspend`; a transport whose code epoch is draining may then end
+  the session here (the delivery returns to its sender undelivered and the
+  endpoint's drain handler runs). A transport that never drains treats it as
+  `suspend`.
   """
-  fn hold_epoch() : () do
+  fn suspend_at_boundary(c : Cap(Session.Live), ep : Int, from : Int, handler : Int -> Bytes -> Int -> Int) : Int do
+    match cap_dict(c) do
+      Some(d) -> d.suspend_at_boundary(ep, from, handler)
+      None    -> no_transport()
+    end
+  end
+
+  doc """
+  Install `handler` as the drain handler for the continuation that the next
+  `suspend` (or `suspend_at_boundary`) on `ep` installs, and return `ep`. It
+  runs as `handler(role, undelivered, ep)` if the session drains while that
+  continuation waits: `role` is the drained role it waited on, or 0 when this
+  endpoint's own loop boundary drained, and `undelivered` the messages this
+  endpoint sent that came back. The generated `recv_…_or_drain` and
+  `offer_…_or_drain` call this.
+  """
+  fn on_drain(c : Cap(Session.Live), ep : Int, handler : Int -> List(Bytes) -> Int -> Int) : Int do
+    match cap_dict(c) do
+      Some(d) -> d.on_drain(ep, handler)
+      None    -> no_transport()
+    end
+  end
+
+  doc """
+  Take an epoch hold on the running actor while it hosts a started endpoint
+  of the session [c] belongs to, so it stays on the code version the session
+  formed under until the endpoint closes (hot reload's nesting rule, D28).
+  The transport takes it for a hosted endpoint at `register`; generated code
+  and transports are its callers. Paired with `release_epoch`. It takes the
+  session capability so that only code holding a session can pin an actor's
+  epoch: calling it anywhere else only delays a deploy (up to its hard drain
+  deadline).
+  """
+  fn hold_epoch(c : Cap(Session.Live)) : () do
+    let _ = c
     epoch_hold()
   end
 
-  doc "For generated `@[endpoints]` code only: release the hold `hold_epoch` took."
-  fn release_epoch() : () do
+  doc "Release the hold `hold_epoch` took for a session [c] belongs to."
+  fn release_epoch(c : Cap(Session.Live)) : () do
+    let _ = c
     epoch_release()
+  end
+
+  doc """
+  How many epoch holds the running actor has (0 outside a hosted session).
+  A read-only count, for tests of the hosting patterns.
+  """
+  fn epoch_holds_here() : Int do
+    epoch_holds()
   end
 
   doc "Close endpoint `ep`."
@@ -239,6 +303,20 @@ mod Session do
   -- `crash(role, cause)` makes a role gone without running any of its code:
   -- the test's stand-in for a node dying.
   --
+  -- Drains (D27) follow `SessionNode` too, with the test standing in for the
+  -- epochs: `drain_role(role)` says [role]'s code epoch is draining. From
+  -- then on a delivery to [role] at a loop boundary (`suspend_at_boundary`),
+  -- or at any role's boundary from a sender whose epoch is draining, is not
+  -- consumed: it goes back to its sender (UNDELIVERED), and the receiving
+  -- endpoint DRAINS: everything queued for it goes back too, it is gone
+  -- ("drained"), and its drain handler (`on_drain`) runs, or it just ends.
+  -- A message to a drained role is returned to its sender at `emit`; an
+  -- endpoint waiting on a drained role, with nothing from it queued, drains
+  -- in turn. `sent`, `consumed` and `returned` count every message, so a
+  -- test can check that none was lost: sent = consumed + returned + queued
+  -- when no role failed. `step(())` delivers one message (or handles one
+  -- stuck endpoint), for turning draining on part-way through.
+  --
   -- Endpoint ids are role numbers (`register` returns the role, as
   -- `SessionNode`'s does), so one transport carries ONE session, and each
   -- role registers once.
@@ -248,7 +326,14 @@ mod Session do
     drain  : () -> (),
     take   : () -> Option((Int, Int, Bytes)),
     crash  : Int -> String -> (),
-    queued : () -> Int
+    queued : () -> Int,
+    step   : () -> Bool,
+    drain_role  : Int -> (),
+    undelivered : Int -> Int,
+    drained     : Int -> Bool,
+    sent        : () -> Int,
+    consumed    : () -> Int,
+    returned    : () -> Int
   }
 
   type InProcessState = {
@@ -256,6 +341,10 @@ mod Session do
     waiting   : Vault(Int),
     cancel_hs : Vault(Int -> String -> Int -> Int),
     crash_hs  : Vault(Int -> String -> Int -> Int),
+    drain_hs  : Vault(Int -> List(Bytes) -> Int -> Int),
+    boundary  : Vault(Int),
+    draining  : Vault(Int),
+    undeliv   : Vault(List(Bytes)),
     gone      : Vault(String),
     meta      : Vault(Int),
     roles     : Vault(List(Int)),
@@ -281,6 +370,8 @@ mod Session do
   pfn ip_forget(st : InProcessState, ep : Int) : () do
     let _ = Vault.delete(st.handlers, ip_key(ep))
     let _ = Vault.delete(st.cancel_hs, ip_key(ep))
+    let _ = Vault.delete(st.drain_hs, ip_key(ep))
+    let _ = Vault.delete(st.boundary, ip_key(ep))
     let _ = List.map(ip_roles(st), fn r -> Vault.delete(st.crash_hs, ip_crash_key(ep, r)))
     ()
   end
@@ -305,6 +396,59 @@ mod Session do
         None -> ()
       end
     end
+  end
+
+  -- ── drains (D27) ──
+
+  pfn ip_count(st : InProcessState, key : String) : () do
+    let _ = Vault.incr(st.meta, key, 1)
+    ()
+  end
+
+  pfn ip_is_drained(st : InProcessState, role : Int) : Bool do
+    match Vault.get(st.gone, ip_key(role)) do
+      Some(w) -> w == "drained"
+      None -> false
+    end
+  end
+
+  -- [msg], sent by [sender] to [role], comes back to [sender] undelivered.
+  pfn ip_return(st : InProcessState, sender : Int, role : Int, msg : Bytes) : () do
+    Vault.set(st.undeliv, ip_key(sender), List.append(Vault.get_or(st.undeliv, ip_key(sender), Nil), Cons(msg, Nil)))
+    ip_count(st, "returned")
+    st.trace("undelivered " ++ ip_key(sender) ++ " -> " ++ ip_key(role))
+  end
+
+  -- End [ep] by a drain: [role] is the drained role it waited on, 0 for its
+  -- own boundary. Everything queued for it goes back to its senders, in
+  -- queue order, then its drain handler runs with what came back to it.
+  pfn ip_drain_ep(st : InProcessState, ep : Int, role : Int) : () do
+    if ip_is_gone(st, ep) do ()
+    else
+      Vault.set(st.gone, ip_key(ep), "drained")
+      let h = Vault.get(st.drain_hs, ip_key(ep))
+      ip_forget(st, ep)
+      let _ = Vault.delete(st.cancel_hs, "cur" ++ ip_key(ep))
+      st.trace("drained " ++ ip_key(ep) ++ (if role == 0 do " at its boundary" else " waiting on role " ++ ip_key(role) end))
+      let q = ip_queue(st)
+      let mine = List.filter(q, fn d -> match d do (to, _f, _m) -> to == ep end)
+      Vault.set(st.queue, "q", List.filter(q, fn d -> match d do (to, _f, _m) -> to != ep end))
+      let _ = List.map(mine, fn d -> match d do (_to, from, msg) -> ip_return(st, from, ep, msg) end)
+      match h do
+        Some(f) ->
+          let _ = f(role, Vault.get_or(st.undeliv, ip_key(ep), Nil), ep)
+          ()
+        None -> ()
+      end
+    end
+  end
+
+  -- Does this delivery end [to] at its boundary? [to]'s continuation was
+  -- installed by `suspend_at_boundary`, and [to]'s epoch or [from]'s is
+  -- draining (a sender on a draining node drains the session too).
+  pfn ip_drains_here(st : InProcessState, to : Int, from : Int) : Bool do
+    Vault.get_or(st.boundary, ip_key(to), 0) == 1
+      && (Vault.has(st.draining, ip_key(to)) || Vault.has(st.draining, ip_key(from)))
   end
 
   -- The first queued delivery a continuation can take -- to an endpoint with
@@ -377,6 +521,7 @@ mod Session do
     match Vault.get(st.handlers, ip_key(to)) do
       None -> ()
       Some(h) ->
+        ip_count(st, "consumed")
         ip_enter(st, to, from)
         let _ = h(from, msg, to)
         let _ = Vault.delete(st.cancel_hs, "cur" ++ ip_key(to))
@@ -402,39 +547,58 @@ mod Session do
     end
   end
 
-  pfn ip_drain(st : InProcessState) : () do
+  -- One step: deliver one message, or end one endpoint that waits on a role
+  -- that can send nothing more. `false` when neither is possible.
+  pfn ip_step(st : InProcessState) : Bool do
     -- Messages to an endpoint that is gone are dropped, as `emit` drops them.
+    -- (A drained endpoint's were returned when it drained, and `emit`
+    -- returns later ones, so none is dropped here.)
     let q = List.filter(ip_queue(st), fn d -> match d do (to, _f, _m) -> !ip_is_gone(st, to) end)
     match ip_take(st, q, Nil) do
       Some((d, rest)) ->
         Vault.set(st.queue, "q", rest)
         match d do
-          (to, from, msg) -> ip_resume(st, to, from, msg)
+          (to, from, msg) ->
+            if ip_drains_here(st, to, from) do
+              -- Not consumed: back to its sender, and [to] drains.
+              ip_return(st, from, to, msg)
+              ip_drain_ep(st, to, 0)
+            else ip_resume(st, to, from, msg) end
         end
-        ip_drain(st)
+        true
       None ->
         Vault.set(st.queue, "q", q)
         match ip_stuck(st, ip_roles(st)) do
-          None ->
-            -- Stopped with deliveries nobody is waiting for: say so, since a
-            -- silently stalled queue is how a lost message hides.
-            match q do
-              Nil -> ()
-              _ -> st.trace("stalled: " ++ ip_key(List.length(q)) ++ " queued")
-            end
+          None -> false
           Some((ep, role, why)) ->
-            let cause = if why == "closed" do "role " ++ ip_key(role) ++ " closed without sending" else why end
-            match Vault.get(st.crash_hs, ip_crash_key(ep, role)) do
-              Some(h) ->
-                ip_forget(st, ep)
-                st.trace("crash branch " ++ ip_key(ep) ++ ": role " ++ ip_key(role) ++ ": " ++ cause)
-                let _ = h(role, cause, ep)
-                ip_drain(st)
-              None ->
-                ip_cancel(st, ep, role, cause, "role " ++ ip_key(role) ++ ": " ++ cause)
-                ip_drain(st)
+            if why == "drained" do
+              ip_drain_ep(st, ep, role)
+            else
+              let cause = if why == "closed" do "role " ++ ip_key(role) ++ " closed without sending" else why end
+              match Vault.get(st.crash_hs, ip_crash_key(ep, role)) do
+                Some(h) ->
+                  ip_forget(st, ep)
+                  st.trace("crash branch " ++ ip_key(ep) ++ ": role " ++ ip_key(role) ++ ": " ++ cause)
+                  let _ = h(role, cause, ep)
+                  ()
+                None ->
+                  ip_cancel(st, ep, role, cause, "role " ++ ip_key(role) ++ ": " ++ cause)
+              end
             end
+            true
         end
+    end
+  end
+
+  pfn ip_drain(st : InProcessState) : () do
+    if ip_step(st) do ip_drain(st)
+    else
+      -- Stopped with deliveries nobody is waiting for: say so, since a
+      -- silently stalled queue is how a lost message hides.
+      match ip_queue(st) do
+        Nil -> ()
+        q -> st.trace("stalled: " ++ ip_key(List.length(q)) ++ " queued")
+      end
     end
   end
 
@@ -450,17 +614,24 @@ mod Session do
         end
       end,
       emit: fn (ep, to, msg) -> do
-        if ip_is_gone(st, ep) || ip_is_gone(st, to) do
+        ip_count(st, "sent")
+        if !ip_is_gone(st, ep) && ip_is_drained(st, to) do
+          -- D27: a message to a drained role comes straight back.
+          ip_return(st, ep, to, msg)
+          ep
+        else if ip_is_gone(st, ep) || ip_is_gone(st, to) do
+          ip_count(st, "dropped")
           st.trace("dropped " ++ ip_key(ep) ++ " -> " ++ ip_key(to))
           ep
         else
           Vault.set(st.queue, "q", List.append(ip_queue(st), Cons((to, ep, msg), Nil)))
           ep
-        end
+        end end
       end,
       suspend: fn (ep, from, handler) -> do
         Vault.set(st.waiting, ip_key(ep), from)
         Vault.set(st.handlers, ip_key(ep), handler)
+        Vault.set(st.boundary, ip_key(ep), 0)
         ep
       end,
       close: fn ep -> do
@@ -479,6 +650,16 @@ mod Session do
       leave: fn (ep, why) -> ip_cancel(st, ep, ep, "left: " ++ why, "left: " ++ why),
       on_crash: fn (ep, role, h) -> do
         Vault.set(st.crash_hs, ip_crash_key(ep, role), h)
+        ep
+      end,
+      suspend_at_boundary: fn (ep, from, handler) -> do
+        Vault.set(st.waiting, ip_key(ep), from)
+        Vault.set(st.handlers, ip_key(ep), handler)
+        Vault.set(st.boundary, ip_key(ep), 1)
+        ep
+      end,
+      on_drain: fn (ep, h) -> do
+        Vault.set(st.drain_hs, ip_key(ep), h)
         ep
       end
     }
@@ -538,6 +719,10 @@ mod Session do
       waiting: Vault.new("session_in_process_waiting_" ++ tag),
       cancel_hs: Vault.new("session_in_process_cancel_" ++ tag),
       crash_hs: Vault.new("session_in_process_crash_" ++ tag),
+      drain_hs: Vault.new("session_in_process_drain_" ++ tag),
+      boundary: Vault.new("session_in_process_boundary_" ++ tag),
+      draining: Vault.new("session_in_process_draining_" ++ tag),
+      undeliv: Vault.new("session_in_process_undeliv_" ++ tag),
       gone: Vault.new("session_in_process_gone_" ++ tag),
       meta: Vault.new("session_in_process_meta_" ++ tag),
       roles: Vault.new("session_in_process_roles_" ++ tag),
@@ -551,7 +736,17 @@ mod Session do
       drain: fn _ -> ip_drain(st),
       take: fn _ -> ip_take_next(st),
       crash: fn (role, cause) -> ip_crash(st, role, cause),
-      queued: fn _ -> List.length(ip_queue(st))
+      queued: fn _ -> List.length(ip_queue(st)),
+      step: fn _ -> ip_step(st),
+      drain_role: fn role -> do
+        Vault.set(st.draining, ip_key(role), 1)
+        st.trace("draining " ++ ip_key(role))
+      end,
+      undelivered: fn role -> List.length(Vault.get_or(st.undeliv, ip_key(role), Nil)),
+      drained: fn role -> ip_is_drained(st, role),
+      sent: fn _ -> Vault.get_or(st.meta, "sent", 0),
+      consumed: fn _ -> Vault.get_or(st.meta, "consumed", 0),
+      returned: fn _ -> Vault.get_or(st.meta, "returned", 0)
     }
   end
 end

@@ -189,6 +189,14 @@ typedef struct march_mbox_node {
      * actor loop's (march_sched_recv_actor), and disposed through the marker
      * dtor (march_sched_set_marker_dtor), never the message dtor. */
     uint8_t                 marker;
+    /* DD step-6 follow-up 1: where a REMOTE delivery came from -- the
+     * connection (the peer's control-writer pid, an opaque Int for the
+     * runtime) and the sender's sequence number -- copied from the sending
+     * task's delivery origin (march_sched_delivery_origin_set) at enqueue.
+     * 0/0 for a local message.  Runtime-owned, like the epoch stamp, so the
+     * actor loop can answer DELIVERY_FAILED for a message it drops. */
+    int64_t                 origin_conn;
+    int64_t                 origin_seq;
 } march_mbox_node;
 
 /* ── Mailbox capacity + overflow policy ─────────────────────────────────
@@ -264,6 +272,12 @@ typedef struct march_proc {
      * code that keeps work of an older epoch alive (a session party, a parked
      * hosted endpoint); only the proc itself changes it, drains read it. */
     _Atomic(uint32_t)           epoch_holds;
+    /* Set by march_sched_hold_next_spawn: the next proc THIS proc spawns
+     * starts with epoch_holds = 1, before its activation, so an epoch
+     * marker queued at its spawn (hcr_spawn_marker) finds it held.  A hold
+     * sent as a message arrived behind that marker (review finding
+     * 2026-09-24-dd-review-party-hold-queued-behind-spawn-marker). */
+    _Atomic int                 hold_next_spawn;
     int64_t                    mbox_limit;   /* 0 = unbounded (default). Plain field: only
                                                  read/written under mbox_lock (set by
                                                  march_sched_set_mbox_limit, read by
@@ -412,6 +426,16 @@ typedef struct march_proc {
      * underflow, abort).  The landing site is the loop's normal death path.
      * Same migration argument as crash_jmp: lives on the proc, not in TLS. */
     jmp_buf                   *stop_jmp;
+    /* A TASK's cancellation landing (DD step-6 follow-up 4): set by the task
+     * trampoline (march_thunk_trampoline) around the task's closure, on this
+     * proc's own stack.  When cancel_requested is set -- the hard drain
+     * deadline, march_sched_stop_epoch -- the task is unwound to it at its
+     * next cancellation point (march_sched_cancel_point: a compiled yield
+     * point, a sleep, a stopped receive), and its Task handle completes as
+     * cancelled, so a task computing without receiving no longer runs on.
+     * Lives on the proc for the same migration reason as crash_jmp. */
+    jmp_buf                   *task_jmp;
+    _Atomic int                cancel_requested;
     /* The unified epoch model (D12/D33; specs/plans/2026-09-21-distributed-
      * authority-and-deploys-plan.md, II.4.1).  The code epoch this unit of
      * work runs at: every boundary call it makes resolves to the newest
@@ -482,6 +506,13 @@ typedef struct march_scheduler {
                                    * handler.  How the handler tells OUR tick
                                    * from a host's delivery of the same signal
                                    * (which it chains to the host's handler). */
+    _Atomic int     tls_live;     /* 1 only while this thread is inside
+                                   * sched_loop, with its TLS materialised.
+                                   * The preempt handler writes TLS only when
+                                   * it reads 1; a tick delivered later (e.g.
+                                   * during pthread_exit's TSD cleanup, when
+                                   * a TLS access mallocs) is consumed and
+                                   * dropped. */
 #ifdef MARCH_ASAN_BUILD
     /* ASan fiber-switch bookkeeping for THIS scheduler's own native-thread
      * "fiber" (see march_proc.asan_fake_stack for the full rationale). */
@@ -597,6 +628,9 @@ march_proc  *march_sched_current(void);
 /* The running proc's code epoch (0 when there is no proc, or it is unpinned).
  * What march_dispatch_enter_unit resolves against. */
 uint32_t     march_sched_current_epoch(void);
+/* The next proc the running proc spawns starts held (epoch_holds = 1); see
+ * march_proc.hold_next_spawn.  The stdlib-only builtin epoch_hold_next_spawn. */
+void         march_sched_hold_next_spawn(void);
 /* Spawn the compiled `main` green thread: like march_sched_spawn[_pinned]
  * (sched_pinned selects scheduler 0), but UNPINNED in the epoch sense
  * (code_epoch 0, follows current), see march_proc.code_epoch. */
@@ -794,6 +828,16 @@ void *march_sched_recv_user_until(int64_t deadline_ms);
  * other receive skips markers and leaves them where they are. */
 int   march_sched_send_marker(march_proc *target, void *msg, uint32_t epoch);
 void *march_sched_recv_actor(uint32_t *epoch_out, int *marker_out);
+/* march_sched_recv_actor, also returning the dequeued node's delivery
+ * origin (follow-up 1; 0/0 for a local message). */
+void *march_sched_recv_actor_ex(uint32_t *epoch_out, int *marker_out,
+                                int64_t *conn_out, int64_t *seq_out);
+/* The delivery origin every message THIS thread enqueues from now on
+ * carries: set by the cluster node's data reader around one remote
+ * delivery's route, cleared after (0/0).  Thread-local: a route runs to
+ * completion in the reader task's turn without a yield. */
+void  march_sched_delivery_origin_set(int64_t conn, int64_t seq);
+void  march_sched_delivery_origin_clear(void);
 int   march_sched_take_markers(uint32_t upto, void **msgs, uint32_t *epochs,
                                int max);
 /* Dispose of a marker the scheduler must drop (a dead proc's mailbox). */
@@ -812,6 +856,9 @@ uint32_t march_sched_send_epoch(void);
  * without receiving runs on (the scheduler is cooperative).  Returns the
  * number of procs told. */
 int64_t march_sched_stop_epoch(uint32_t upto);
+/* Unwind the running task to its trampoline if its cancellation was
+ * requested (march_proc.task_jmp); a no-op otherwise.  See march_scheduler.c. */
+void    march_sched_cancel_point(void);
 /* Spawn with the CURRENT epoch rather than the spawner's: a supervisor
  * restart, which D11 says runs the new code. */
 march_proc *march_sched_spawn_current(void (*fn)(void *), void *arg);

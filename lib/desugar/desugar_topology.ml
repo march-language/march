@@ -125,7 +125,7 @@ let rec proto_roles_of acc (steps : protocol_step list) =
   List.fold_left (fun acc st ->
       match st with
       | ProtoMsg (a, b, _, _) -> b.txt :: a.txt :: acc
-      | ProtoLoop ss -> proto_roles_of acc ss
+      | ProtoLoop (ss, _) -> proto_roles_of acc ss
       | ProtoChoice (r, brs) ->
         List.fold_left (fun acc (_, ss) -> proto_roles_of acc ss) (r.txt :: acc) brs
       | ProtoCrashOr (s, ss, _) -> proto_roles_of (proto_roles_of acc [ s ]) ss

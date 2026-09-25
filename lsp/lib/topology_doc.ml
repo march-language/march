@@ -461,7 +461,7 @@ let role_site (def : Ast.protocol_def) (role : string) : Ast.span option =
           if s.Ast.txt = role then Some s.Ast.span
           else if r.Ast.txt = role then Some r.Ast.span
           else None
-        | Ast.ProtoLoop inner -> in_steps inner
+        | Ast.ProtoLoop (inner, _) -> in_steps inner
         | Ast.ProtoChoice (by, branches) ->
           if by.Ast.txt = role then Some by.Ast.span
           else List.find_map (fun (_, steps) -> in_steps steps) branches

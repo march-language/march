@@ -578,7 +578,7 @@ let rec has_crash_branches (steps : Ast.protocol_step list) : bool =
   List.exists
     (function
       | Ast.ProtoMayCrash _ | Ast.ProtoCrashOr _ -> true
-      | Ast.ProtoLoop inner -> has_crash_branches inner
+      | Ast.ProtoLoop (inner, _) -> has_crash_branches inner
       | Ast.ProtoChoice (_, brs) ->
         List.exists (fun (l, arm) -> l.Ast.txt = "crash" || has_crash_branches arm) brs
       | Ast.ProtoMsg _ | Ast.ProtoStop _ | Ast.ProtoRoleNeeds _ -> false)

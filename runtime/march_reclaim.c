@@ -59,11 +59,17 @@ static pthread_key_t  g_key;
 
 static _Thread_local march_reclaim_tls tl_reclaim;
 
+/* The key destructor, run by pthread_exit's TSD cleanup.  It must NOT touch
+ * tl_reclaim or any other _Thread_local: on Darwin dyld may already have torn
+ * this thread's TLV block down, so a TLS access here instantiates it again,
+ * which mallocs, and a preemption tick landing inside that malloc re-entered
+ * the allocator from the signal handler and trapped
+ * (specs/progress/2026-09-25-preempt-tick-at-thread-exit-sigtrap.md).
+ * Everything comes from the argument.  A later key destructor on this thread
+ * that enters again cannot reuse the stale tl_reclaim.slot: my_slot checks it
+ * against the key's value, which pthreads cleared before calling us. */
 static void slot_release(void *v) {
     march_reclaim_slot *s = (march_reclaim_slot *)v;
-    /* A later key destructor on this exiting thread that enters again must
-     * claim a fresh slot, not reuse this one after another thread has. */
-    if (tl_reclaim.slot == s) { tl_reclaim.slot = NULL; tl_reclaim.depth = 0; }
     atomic_store_explicit(&s->epoch, 0, memory_order_release);
     atomic_store_explicit(&s->owned, 0, memory_order_release);
 }
@@ -104,8 +110,13 @@ static march_reclaim_slot *slot_claim(void) {
     return s;
 }
 
+/* t->slot goes stale once slot_release has run for this thread (the slot may
+ * belong to another thread by then), so it is ours only while it is still the
+ * key's value.  `!t->slot` first: a non-NULL slot means slot_claim ran, so
+ * g_key exists. */
 static inline march_reclaim_slot *my_slot(march_reclaim_tls *t) {
-    if (!t->slot) t->slot = slot_claim();
+    if (!t->slot || pthread_getspecific(g_key) != (void *)t->slot)
+        t->slot = slot_claim();
     return t->slot;
 }
 

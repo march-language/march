@@ -2,10 +2,12 @@
 
 **Parent:** [../plans/2026-09-21-distributed-authority-and-deploys-plan.md](../plans/2026-09-21-distributed-authority-and-deploys-plan.md), section 6.4, II.5, D5, D21, D25.
 
-**What.** Multi-fingerprint offers; drain points; the per-protocol
+**What.** Multi-fingerprint offers; the per-protocol
 version-compatibility table and its first rule; a new hosting actor per fingerprint
 for hosted access points (6.1); automatic expand/contract splitting of a compatible
-change into two deploys for monoliths (D21), done by `forge deploy --plan`.
+change into two deploys for monoliths (D21), done by `forge deploy --plan`. (The drain
+points of II.5.4, D27, landed separately:
+[../progress/2026-09-24-dd-d27-session-drains.md](../progress/2026-09-24-dd-d27-session-drains.md).)
 
 **Acceptance.** A protocol that adds a choice branch deploys hot across a two-node
 cluster with sessions in flight on both fingerprints; `--plan` splits the same change

@@ -98,7 +98,8 @@ let builtin_names : StringSet.t =
       "run_until_idle"; "register_resource"; "get_cap";
       (* Named registry (Task 4) *)
       "actor_register"; "actor_unregister"; "actor_whereis"; "actor_registered";
-      "epoch_hold"; "epoch_release";
+      "epoch_hold"; "epoch_release"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn"; "epoch_holds";
+      "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch";
       "send_checked"; "revoke_cap"; "is_cap_valid";
       "pid_of_int"; "pid_to_int"; "get_actor_field";
       (* The supervise-block spawn glue's registration calls (lower_actor.ml).

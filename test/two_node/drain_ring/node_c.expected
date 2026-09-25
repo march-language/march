@@ -1,0 +1,4 @@
+C got 10
+C got 20
+node-c: draining
+C: Ok(Drained(0))
