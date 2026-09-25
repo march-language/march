@@ -91,7 +91,9 @@ forge deploy hot --so /path/to/my_app.so
 > **Cross-host note.** Cross-target reload units are supported for
 > `linux/amd64` and `linux/arm64`. Set `[hot-reload].target` and
 > `module_prefix` in `forge.toml`; the running baseline advertises its target,
-> ABI, prefix, and signing key, and rejects mismatched patches before loading.
+> ABI, prefix, and signing key (`HCR_INFO`). forge compares them with the
+> patch's manifest before it uploads anything and names both on a mismatch;
+> the server checks again after loading the patch.
 
 On a successful deploy you see:
 
@@ -110,6 +112,53 @@ If there are no changes since the last deploy, forge detects this from the conte
 ```
 No changes detected — server is already up to date.
 ```
+
+---
+
+## Multi-host deploys
+
+For more than one server, describe the app as a topology (see
+[Topology]({{ site.baseurl }}/docs/topology/)) and let `forge deploy` decide, per pool,
+how to get the hosts from what they run to what your working tree says: a hot patch, a
+hot patch with a state migration or a protocol drain, a restart, a topology push, or
+nothing. You never choose between "hot" and "restart".
+
+```toml
+# topology.prod.toml
+[pool.back]
+hosts = [{ host = "root@back-1", labels = ["db"] }, "root@back-2"]
+
+[backend]
+kind = "ssh"
+```
+
+```sh
+forge host init --env prod      # once per host: user, dirs, systemd unit, keys, policy, firewall
+forge deploy --plan --env prod  # what would happen, and why
+forge deploy --env prod         # do it (asks first; --yes to skip)
+forge topology status --env prod
+```
+
+`forge host init` prepares every host over ssh and records each one's target
+(`linux/amd64`, `linux/arm64`): `forge deploy` builds for it, and refuses a patch built
+for another target before it leaves your machine. The deploy then runs pool by pool: a
+hot patch goes through an ssh tunnel to each node's reload socket, exactly as
+`forge deploy hot` does (rolling with the health gate, `strategy = "simultaneous"`, or
+`--canary N`); a restart uploads a base image built for the host and restarts the pool's
+unit, and waits for the node's reload server before the next host; the signed topology
+goes last. What was deployed is kept in `.forge/deploy/<env>/` and is what the next
+plan compares against.
+
+A hot patch can only replace **dispatch slots**: code under the module prefix, and
+actor handlers' dispatch functions. A change the running base cannot swap (a closure's
+body, whose enclosing function did not change, or a function with no slot and no changed
+caller that has one) is planned as a restart, and the plan says which functions. In a
+topology app today the entry module's own functions have no slot under the entry
+module's prefix (the compiler names them without it), so set `[hot-reload]
+module_prefix` to the pool module that holds the code you want to patch.
+
+The `[[hot-reload.env]]` fleet table below and `forge deploy hot --env <name>` keep
+working for a project without a topology.
 
 ---
 
@@ -459,7 +508,7 @@ RESTORED entries:1 skipped:0 mode:replayed stack:1 manifest:<hex> topology:<hex>
 Patch stack: 3 persisted patches over 2 deploys (2 functions), 1 artifact, 1.2 MiB in the CAS
 ```
 
-When it grows long, rebuild the base image from the current version and roll the hosts onto it (the reconciler does this in a later build step; nothing is rebuilt automatically yet).
+When it grows long, `forge deploy --compact --env <env>` rebuilds each build's base image from the current version, restarts its hosts onto it (the new base build makes the server set the old stack aside) and removes what was set aside; each node then reports an empty stack. With `[hot-reload] compact_after = N` in `forge.toml`, `forge deploy` does this by itself for a build whose nodes report a stack longer than `N`.
 
 ---
 
@@ -473,7 +522,7 @@ TOPOLOGY <blake3 of the file> <signature> <size>
 
 with the signature over `TOPOLOGY <blake3>` made with the deploy key. The server checks the signature **before** it accepts the body (`READY`), checks that the body hashes to the signed digest (`ERR digest_mismatch`), writes it to the service's state directory (`topology.toml`), records the digest and signature in the persisted state, and calls the runtime's topology hook, `march_hcr_on_topology(path)`, then answers `OK <blake3>`. At start, a persisted topology whose signature and digest still verify goes through the hook again, so the node comes back on the topology it had.
 
-The hook does nothing yet: the node-side re-read (a node opening its own offers from a pushed topology) arrives with the reconciler's build step.
+The hook does nothing yet. The ssh reconciler backend (`forge topology apply --env`, `forge deploy --env`) therefore also writes the digest to the node's `MARCH_TOPOLOGY_FILE` and sends its unit SIGHUP, which makes the node re-read it and open its own offers; a node whose server refused the signed push is not signalled.
 
 ---
 
@@ -622,12 +671,13 @@ public_key = "base64key="       # ed25519 public key (base64), embedded for sign
 
 Only `ssh_host` is strictly required; `socket` falls back to `/tmp/march_hcr.sock` if omitted. The deploy uses `ssh` from the system PATH; your `~/.ssh/config` aliases and identity files are respected.
 
-This is the single-server setup this page focuses on. Two more `[hot-reload]` options
-exist for larger deployments, beyond the scope of this page: a `strategy` key
-(`"rolling"`, the default, vs. `"simultaneous"`) and a `health_check_url` that's polled
-between rolling-deploy steps, plus a repeatable `[[hot-reload.env]]` table for naming
-multiple server environments (each with its own `ssh_host`/`socket`/`public_key`) so one
-project can deploy the same batch to a whole fleet.
+This is the single-server setup this page focuses on. More `[hot-reload]` options serve
+larger deployments: a `strategy` key (`"rolling"`, the default, vs. `"simultaneous"`), a
+`health_check_url` polled between rolling-deploy steps, and `compact_after = N`
+(see [Restart durability](#restart-durability)). For a fleet, see
+[Multi-host deploys](#multi-host-deploys); the older repeatable `[[hot-reload.env]]`
+table (each entry with its own `ssh_host`/`socket`/`public_key`, deployed with
+`forge deploy hot --env <name>`) is still supported.
 
 ---
 

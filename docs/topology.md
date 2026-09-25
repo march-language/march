@@ -213,8 +213,8 @@ directory with `--out DIR`:
 
 | Target | Output |
 |---|---|
-| `systemd` | One `march-<pool>.service` per pool: `MARCH_POOL`, `MARCH_TOPOLOGY`, an `EnvironmentFile` for per-host settings, `TimeoutStopSec` from `[drain] hard_ms`. |
-| `ufw` | One `ufw-<host>.sh` per host: its pool's public ports from anywhere, the cluster port only from the hosts of the pools it talks to. |
+| `systemd` | One `march-<pool>.service` per pool, run as `User=march`: `MARCH_POOLS`, `MARCH_TOPOLOGY_FILE`, the status file, the reload socket and `HOME`, an `EnvironmentFile` for secrets, `TimeoutStopSec` from `[drain] hard_ms`. `forge host init` writes one per host with that host's own settings too. |
+| `ufw` | One `ufw-<host>.sh` per host: ssh, its pool's public ports from anywhere, the cluster port only from the hosts of the pools it talks to. |
 | `do-firewall` | `do-firewalls.json`: one DigitalOcean firewall per pool, keyed by droplet tag `march-<pool>`, with the same rules. |
 | `compose` | `docker-compose.yml`: one service per pool, `replicas` from the host count, `ports` from `public`. |
 
@@ -378,6 +378,115 @@ process with no watcher would die of the SIGHUP.
 
 Outside forge, the same works by hand: write the digest to the file the node was started
 with (`MARCH_TOPOLOGY_FILE`) and send it SIGHUP.
+
+## Deploying
+
+A topology whose overlay says `[backend] kind = "ssh"` is deployed to the overlay's
+hosts by `forge deploy`, one reconciliation pass per run, with `forge` on your machine as
+the reconciler (there is no daemon).
+
+```toml
+# topology.prod.toml
+[pool.back]
+hosts = [{ host = "root@back-1", labels = ["db"] }, "root@back-2"]
+
+[pool.front]
+hosts = ["root@front-1"]
+
+[backend]
+kind = "ssh"
+```
+
+**Once per host: `forge host init --env prod`.** Over ssh, idempotently (a second run
+changes nothing):
+
+- the `march` system user and `/opt/march/<project>` (code), `/var/lib/march/<project>`
+  (the service's HOME: its CAS root keeps the persisted patch stack, and `run/` holds the
+  reload socket and the status file), `/etc/march/<project>` (configuration);
+- `/etc/systemd/system/march-<pool>.service` from the `systemd` generator, with this
+  host's `Environment=`: node name (`<pool>-<host>`), labels, cluster port and advertised
+  address, the other nodes as seeds, the reload socket, the status and topology files,
+  `MARCH_DEPLOY_POLICY`; enabled where systemd runs;
+- the deploy public key; the cluster secret (generated once per environment, in the
+  pool's env file, mode 0640), or, when an operator key exists (`forge cluster keygen`;
+  `.forge/cluster/operator.key` or `--operator-key`), a node certificate per node, issued
+  for the roles the pool offers and initiates and reused until 30 days before it
+  expires;
+- the node's capability policy (`<pool>.policy`, the admission gate's
+  `MARCH_DEPLOY_POLICY`) from the pool's written `caps`, else the compiler's derived ones;
+  the gate also applies it to each patched function's own capabilities;
+- the pool's ufw rules (applied when ufw is installed; `--no-firewall` only writes them),
+  and the DigitalOcean firewall JSON locally in `.forge/hosts/prod/`;
+- each host's target (`uname -sm`), recorded in `.forge/hosts/prod.json`.
+
+One pool per host: a host listed in two pools is refused.
+
+**Every deploy: `forge deploy --env prod`.** It builds each build (the shared one, each
+isolated pool's) for each target its hosts recorded, compares it with what was last
+deployed there (`.forge/deploy/prod/`), prints the plan, asks, and carries it out.
+`--plan` prints the plan and stops:
+
+```
+forge deploy --plan (env prod)
+
+1. What changed
+  build shared (pools back, front): 1 function(s) changed, 0 added, 0 removed
+    changed: Back.scale
+
+2. Mechanism and why
+  pool back (build shared, 1 host): hot patch
+    1 function(s) changed, 0 added, 0 removed
+  ...
+
+3. Order and splits
+  1. pool back (hot patch)
+  ...
+
+4. Drains
+  none
+
+5. What may be lost
+  nothing
+
+6. Authority and derived values
+  no capability widens
+  pool back: caps IO.Console; initiates (none)
+  ...
+```
+
+Per pool, the mechanism is the strongest that applies:
+
+| Mechanism | When |
+|---|---|
+| blocked | a state change with no `migrate_state` under its `@compat`, a `migrate_msg` for the wrong old type, a widening capability without `--grant-cap` |
+| restart | nothing deployed yet; a pool hook changed (hooks run once, at start); the C runtime, HCR ABI or target changed; a binding, a new role or pool, hosts or labels changed; code the running base cannot swap; compaction |
+| hot patch + protocol drain | a protocol's wire fingerprint changed: its offers close and drain |
+| hot patch + migration | an actor's state changed and `migrate_state` exists |
+| hot patch | functions changed |
+| topology push | only placement or capacity changed |
+
+A choice that gains a branch is safe when every receiver of the choice runs the new
+version before its chooser does, so pools that receive it go first. When one build both
+chooses and receives it (a replicated monolith), no order works within one deploy: the
+plan splits it in two (D21). Deploy one activates everything except the chooser role's
+functions; `forge deploy` stops there, and running it again does deploy two. The finer
+rule, which (role, version) pairs may share a session over wire tags, comes with the
+protocol compatibility table. The plan also names the unlabelled messages a new branch
+would renumber.
+
+`forge topology status --env prod` and `forge topology apply --env prod` work over ssh
+too: status reads each node's report, its reload server (code versions, pins, what its
+last start restored, the patch stack's size, its target) and says whether the node runs
+what forge last deployed; apply pushes a placement-only change, the signed `TOPOLOGY`
+verb on each node's reload socket, then the digest file and a SIGHUP to its unit, and
+refuses a change that needs `forge deploy`.
+
+`forge deploy --compact` rebuilds each build's base image from the current version and
+restarts its hosts onto it, clearing their persisted patch stacks; `[hot-reload]
+compact_after = N` in `forge.toml` does it when a node's stack grows past `N`.
+
+ssh is plain `ssh` from `PATH` (your `~/.ssh/config` applies); `FORGE_SSH_CONFIG=<file>`
+adds `-F <file>`. Scripts run as root, or through `sudo -n`.
 
 ## Testing an upgrade
 

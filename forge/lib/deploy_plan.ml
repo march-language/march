@@ -361,7 +361,7 @@ type plan = {
   splits     : split list;
   widenings  : widening list;
   derived    : (string * (string list * string list) * (string list * string list) option) list;
-  compact    : string list;                        (** builds whose base image is rebuilt, and why *)
+  compact    : (string * string) list;             (** builds whose base image is rebuilt, and why *)
   live       : live list;
   topology   : Topology.t;
   first      : bool;                               (** nothing deployed yet *)
@@ -793,7 +793,7 @@ let classify (i : input) : plan =
       List.map (fun (pool, now) -> (pool, now, Option.bind i.i_old_derived (List.assoc_opt pool))) nd
   in
   { env = i.i_env; builds; protocols; placement; hooks; runtime; pools; order_why = !order_why; splits; widenings;
-    derived; compact = List.map (fun (b, why) -> b ^ ": " ^ why) compact; live = i.i_live; topology = t; first }
+    derived; compact; live = i.i_live; topology = t; first }
 
 (* ── render: the six blocks of 6.8 ────────────────────────────────────── *)
 
@@ -969,7 +969,9 @@ let render (p : plan) : string =
         (if inits = [] then "(none)" else String.concat ", " inits) (mark inits (Option.map snd old)))
     p.derived;
   if p.derived = [] then say "  derived values: not available (the compiler's analysis did not run)\n";
-  List.iter (fun c -> say "  compaction: %s\n" c) p.compact;
+  List.iter (fun (b, why) ->
+      say "  compaction: build %s: %s; its hosts restart on a base image rebuilt from the current version and \
+           their persisted patch stack is cleared\n" b why) p.compact;
   Buffer.contents b
 
 let blocked (p : plan) = List.exists (fun pp -> match pp.pp_mechanism with Blocked _ -> true | _ -> false) p.pools

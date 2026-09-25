@@ -46,6 +46,10 @@ let cert_file l node = cert_dir l ^ "/" ^ node ^ ".cert"
 let key_file l node = cert_dir l ^ "/" ^ node ^ ".key"
 let operator_pub l = cert_dir l ^ "/operator.pub"
 
+(** The runtime's persisted patch stacks (plan 6.5): one directory per
+    reload socket under the service's CAS root. *)
+let hcr_state_dir l = state_dir l ^ "/.march/cas/hcr_state"
+
 let unit_name pool = "march-" ^ pool ^ ".service"
 let unit_file l pool = p l ("/etc/systemd/system/" ^ unit_name pool)
 

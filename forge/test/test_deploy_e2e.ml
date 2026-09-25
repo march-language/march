@@ -211,11 +211,25 @@ let test_deploy_over_ssh () =
   expect "hot deploy" out [ "==> pool back: hot patch"; "activated: Back.scale"; "Deploy complete"; "deploy complete" ];
   let status = ok "topology status --env prod" in
   expect "status after the hot patch" status [ "1 hot-patched"; "back-web-1: running code matches what forge last deployed";
-                                               "patch stack: 1 persisted patch" ]
+                                               "patch stack: 1 persisted patch" ];
+  (* 5: compaction: the base image is rebuilt from the current version, the
+     node restarted onto it, and its persisted patch stack cleared. *)
+  expect "compaction plan" (ok "deploy --env prod --compact --plan")
+    [ "pool back (build shared, 1 host): restart"; "compaction: --compact";
+      "compaction: build shared: --compact; its hosts restart on a base image rebuilt from the current version" ];
+  let out = ok "deploy --env prod --compact --yes" in
+  expect "compaction" out [ "==> pool back: restart"; "back-web-1: restarted";
+                            "back-web-1: persisted patch stack cleared (was 1 entry)"; "deploy complete" ];
+  let status = ok "topology status --env prod" in
+  expect "status after compaction" status
+    [ "0 hot-patched"; "patch stack: no hot patches persisted (the node runs its base build)";
+      "back-web-1: running code matches what forge last deployed" ];
+  if contains (capture (Printf.sprintf "docker exec %s sh -c 'ls /var/lib/march/topology_app/.march/cas/hcr_state/*/ 2>&1'" name))
+      "base-changed" then Alcotest.fail "state.base-changed was left on the host"
 
 let () =
   if not (sh "command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1") then
     banner "Docker is absent or its daemon is not reachable";
   Alcotest.run "deploy-e2e" [
-    ("ssh", [ Alcotest.test_case "host init, first deploy, restart, hot patch over ssh" `Slow test_deploy_over_ssh ]);
+    ("ssh", [ Alcotest.test_case "host init, first deploy, restart, hot patch, compaction over ssh" `Slow test_deploy_over_ssh ]);
   ]

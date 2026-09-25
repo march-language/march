@@ -76,6 +76,11 @@ git log is authoritative for exact commits.
   cannot swap (a function with no dispatch slot and no changed caller that has
   one, such as a closure body) is planned as a restart instead of a hot patch
   that would activate nothing.
+- **Patch-stack compaction: `forge deploy --compact --env <env>`**, and
+  automatically when a node reports a persisted patch stack longer than
+  `[hot-reload] compact_after = N`: each build's base image is rebuilt from the
+  current version, its hosts restart onto it, and their persisted stacks are
+  cleared (forge checks each node reports an empty stack afterwards).
 - **`NativeArray.sort_i32`, `sort_f32` and `sort_u8`: every NativeArray width
   can now be sorted.** Same ownership as `sort_int`: in place when the array is
   uniquely owned, copy-on-write when it is shared. `sort_i32` is the same

@@ -5,7 +5,7 @@
 sections 5 ("Admission", "Every reconciler action is signed"), 6.5, II.2 ("Hot
 deploys"). What remains (10b: the ssh backend, `forge host init`, `forge deploy
 --plan`) is the todo
-[../todos/2026-09-22-dd-step10-ssh-backend-and-plan.md](../todos/2026-09-22-dd-step10-ssh-backend-and-plan.md).
+[2026-09-22-dd-step10-ssh-backend-and-plan.md](2026-09-22-dd-step10-ssh-backend-and-plan.md) (10b, done 2026-09-25).
 Six commits, one per item.
 
 ## 1. `ROLE` manifest lines

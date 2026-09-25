@@ -392,6 +392,54 @@ let restart_node c ~binary (n : Reconcile.ssh_node) : (unit, string) result =
   if r.Remote.rc <> 0 then Error (Printf.sprintf "restart failed (exit %d): %s" r.rc (String.trim (r.err ^ r.out)))
   else (Printf.printf "  %s: restarted\n%!" n.sn.Hosts.name; Ok ())
 
+(** A node's persisted patch stack (COMPACT), or None when it does not
+    answer. *)
+let stack_of c (h : Hosts.host) : Cmd_deploy_hot.stack_size option =
+  match c.transport.Remote.with_socket h (fun conn ->
+      Cmd_deploy_hot.send_line conn "COMPACT";
+      Ok (Cmd_deploy_hot.parse_compact (Cmd_deploy_hot.recv_line conn))) with
+  | Ok s -> s
+  | Error _ -> None
+
+(** Compaction's last step on a node restarted onto the rebuilt base image
+    (plan 6.5): its persisted patch stack must be empty. A new base build
+    makes the runtime set the old stack aside ([state.base-changed]); forge
+    removes what was set aside. A stack still there (the rebuilt base has
+    the same baseline hashes, so the runtime replayed it) is removed and the
+    node restarted once more. *)
+let clear_stack c ~(before : int option) (n : Reconcile.ssh_node) : (string, string) result =
+  let dir = Host_layout.hcr_state_dir c.layout in
+  let remove what =
+    let script =
+      Reconcile.sudo_prelude c.layout
+      ^ Printf.sprintf "for f in %s/*/%s; do [ -e \"$f\" ] && $SUDO rm -f \"$f\" && echo \"removed $f\"; done; true\n"
+        (Remote.sh_quote dir) what
+    in
+    let r = c.transport.Remote.exec n.sn script in
+    if r.Remote.rc <> 0 then Error (Printf.sprintf "clearing the patch stack failed: %s" (String.trim r.err)) else Ok ()
+  in
+  let* () =
+    match stack_of c n.sn with
+    | Some st when st.Cmd_deploy_hot.st_entries > 0 ->
+      Printf.printf "  %s: the stack survived the restart (%d entries); removing it and restarting again\n%!"
+        n.sn.Hosts.name st.st_entries;
+      let* () = remove "state" in
+      let r = c.transport.Remote.exec n.sn
+          (Reconcile.sudo_prelude c.layout
+           ^ Printf.sprintf "$SUDO %s restart %s\n" c.service_ctl (Remote.sh_quote (Host_layout.unit_name n.sn_pool))) in
+      if r.Remote.rc <> 0 then Error "the second restart failed"
+      else if not (wait_up c n.sn ~timeout:60.) then Error "the node did not come back after the second restart"
+      else Ok ()
+    | _ -> Ok ()
+  in
+  let* () = remove "state.base-changed" in
+  match stack_of c n.sn with
+  | Some st when st.Cmd_deploy_hot.st_entries = 0 ->
+    Ok (Printf.sprintf "%s: persisted patch stack cleared%s" n.sn.Hosts.name
+          (match before with Some b when b > 0 -> Printf.sprintf " (was %d entr%s)" b (if b = 1 then "y" else "ies") | _ -> ""))
+  | Some st -> Error (Printf.sprintf "%s still reports %d persisted entries" n.sn.Hosts.name st.st_entries)
+  | None -> Error (Printf.sprintf "%s did not answer COMPACT after the restart" n.sn.Hosts.name)
+
 let hr_strategy c = match c.proj.Project.hot_reload with Some hr -> hr.Project.hr_strategy | None -> "rolling"
 
 (** Run [step] on a pool's nodes with forge.toml's strategy (rolling with
@@ -516,9 +564,22 @@ let run ?transport ?service_ctl ?layout_prefix ~proj ~env ~(opts : opts) () : (s
             let pools = (List.assoc pp.pp_build (List.map (fun (b, ps) -> (b, ps)) (Topology_run.builds_of c.t))) in
             if nodes = [] then Printf.printf "  (pool %s has no hosts in this environment)\n%!" pp.pp_pool
             else restarted := pp.pp_build :: !restarted;
-            on_nodes c ~opts ~canary:0 nodes (fun n ->
-                let* binary = build_base c ~build:pp.pp_build ~pools ~target:(Option.get n.sn_target) in
-                restart_node c ~binary n)
+            let compacting = List.mem_assoc pp.pp_build plan.compact in
+            let* () =
+              on_nodes c ~opts ~canary:0 nodes (fun n ->
+                  let* binary = build_base c ~build:pp.pp_build ~pools ~target:(Option.get n.sn_target) in
+                  restart_node c ~binary n)
+            in
+            if not compacting then Ok ()
+            else
+              List.fold_left (fun acc (n : Reconcile.ssh_node) ->
+                  let* () = acc in
+                  let before = Option.bind (List.find_opt (fun (l : Deploy_plan.live) -> l.l_node = n.sn.Hosts.name) plan.live)
+                      (fun l -> l.l_stack) in
+                  let* msg = clear_stack c ~before n in
+                  Printf.printf "  %s\n%!" msg;
+                  Ok ())
+                (Ok ()) nodes
           | Hot | Hot_migrate _ | Hot_drain _ ->
             Printf.printf "\n==> pool %s: %s\n%!" pp.pp_pool (Deploy_plan.mechanism_text pp.pp_mechanism);
             let held = held pp.pp_build in

@@ -1331,21 +1331,27 @@ let deploy_term =
   let timeout =
     Arg.(value & opt int 30000 & info ["timeout"] ~docv:"MS" ~doc:"The canary window in milliseconds (default: 30000).")
   in
-  let run env plan grant_caps yes canary timeout =
+  let compact =
+    Arg.(value & flag & info ["compact"]
+           ~doc:"Rebuild each build's base image from the current version and restart its hosts onto it, \
+                 clearing their persisted patch stacks (also automatic when a node's stack is longer than \
+                 forge.toml's [hot-reload] compact_after).")
+  in
+  let run env plan grant_caps yes canary timeout compact =
     match Project.load () with
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
     | Ok proj ->
       if plan then
-        match Cmd_deploy.plan_only ~proj ~env ~grant_caps ~compact:false () with
+        match Cmd_deploy.plan_only ~proj ~env ~grant_caps ~compact () with
         | Ok text -> print_string text
         | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
       else
-        let opts = { Cmd_deploy.default_opts with yes; grant_caps; canary; timeout_ms = timeout } in
+        let opts = { Cmd_deploy.default_opts with yes; grant_caps; canary; timeout_ms = timeout; compact } in
         match Cmd_deploy.run ~proj ~env ~opts () with
         | Ok msg -> print_endline msg
         | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
-  Term.(const run $ env_arg $ plan $ grant_cap $ yes $ canary $ timeout)
+  Term.(const run $ env_arg $ plan $ grant_cap $ yes $ canary $ timeout $ compact)
 
 let deploy_cmd =
   Cmd.group ~default:deploy_term
