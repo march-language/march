@@ -946,11 +946,97 @@ mod ClusterNode do
     end end
   end
 
+  -- ── cross-node references (distributed-deploys step 11b) ─────────────────
+  -- Cross-node references are handed out, not computed (plan section 1). In
+  -- CERTIFICATE mode `lookup` (and `names`) hides a binding unless a raw
+  -- send to its holder would be allowed (`raw_allowed`: both this node's
+  -- certificate and the holder's verified one carry raw_send; this node's
+  -- own bindings always show): a name you cannot raw-send to is not a
+  -- reference you should hold. A holder this node has not verified (no link
+  -- yet) is hidden until it is. The stdlib's coordination namespaces are
+  -- exempt (`reference_exempt`): access-point offers ("ap:"), session
+  -- endpoints ("session:") and topology markers ("topo:") are found by name
+  -- whatever the holder's flags, and are checked by role where they are
+  -- used (SessionNode). A send to any binding still goes through raw-send
+  -- denial. `GlobalPid.make` stays pure: a pid built by hand is only a
+  -- value, and sending to it is what is checked.
+
+  doc "The registry name prefixes exempt from certificate-mode hiding: SessionNode's and Topology's coordination names."
+  fn reference_namespaces() : List(String) do ["ap:", "session:", "topo:"] end
+
+  doc "Is [name] in a namespace `lookup` never hides (`reference_namespaces()`)?"
+  fn reference_exempt(name : String) : Bool do
+    List.any(reference_namespaces(), fn p -> String.starts_with(name, p))
+  end
+
+  -- This node's certificate, or None in shared-secret mode.
+  pfn core_own_cert(st : CnState) : Option(NodeCert.Cert) do
+    match st.cfg.auth do
+      ClusterAuth.Certified(cr) -> Some(cr.signed.cert)
+      ClusterAuth.Secret(_) -> None
+    end
+  end
+
+  -- May this node hold binding [name] -> [e] as a reference?
+  pfn reference_visible(st : CnState, name : String, e : GlobalRegistry.Entry) : Bool do
+    e.node_id == st.me || reference_exempt(name)
+      || raw_allowed(core_own_cert(st), Map.get(st.certs, e.node_id, Map.str_cmp))
+  end
+
+  -- The certificate identity (URI) of node [id] as this node verified it:
+  -- its own for itself, a linked peer's, else "".
+  pfn identity_of(st : CnState, id : String) : String do
+    if id == st.me do
+      match core_own_cert(st) do
+        Some(c) -> c.node
+        None -> ""
+      end
+    else
+      match Map.get(st.certs, id, Map.str_cmp) do
+        Some(c) -> c.node
+        None -> ""
+      end
+    end
+  end
+
+  -- Record who registered each leaf a peer [from] sent: the link's verified
+  -- peer for its own bindings; for a relayed binding, what we recorded for
+  -- that same binding before, else its holder's certificate if we have it.
+  pfn stamp_leaves(st : CnState, from : String, leaves : List((String, GlobalRegistry.Entry)))
+      : List((String, GlobalRegistry.Entry)) do
+    List.map(leaves, fn kv ->
+      match kv do
+        (name, e) ->
+          let who = if e.node_id == from || e.node_id == st.me do identity_of(st, e.node_id)
+            else
+              match GlobalRegistry.entry(st.reg, name) do
+                Some(old) ->
+                  if old.node_id == e.node_id && old.pid == e.pid && old.creation == e.creation && old.registrant != "" do old.registrant
+                  else identity_of(st, e.node_id) end
+                None -> identity_of(st, e.node_id)
+              end
+            end
+          (name, { e with registrant: who })
+      end)
+  end
+
+  doc """
+  The recorded registrant of binding [name] (the certificate identity of the
+  node that registered it, as this replica recorded it; "" when unknown), if
+  the registry holds a present binding for it. Unlike `lookup`, not hidden.
+  """
+  fn core_registrant(st : CnState, name : String) : Option(String) do
+    match GlobalRegistry.entry(st.reg, name) do
+      Some(e) -> if e.present do Some(e.registrant) else None end
+      None -> None
+    end
+  end
+
   pfn visible_map(st : CnState) : Map(String, GlobalPid.Pid) do
     List.fold_left(GlobalRegistry.all_entries(st.reg), Map.empty(), fn (acc, kv) ->
       match kv do
         (name, e) ->
-          if visible(st, e) do
+          if visible(st, e) && reference_visible(st, name, e) do
             Map.insert(acc, name, GlobalPid.make(e.node_id, e.pid, e.creation), Map.str_cmp)
           else acc end
       end)
@@ -1094,7 +1180,8 @@ mod ClusterNode do
       Some((_, w)) -> if w != watcher do Cons(Unwatch(w), Nil) else Nil end
       None -> Nil
     end
-    let st2 = { st with reg: GlobalRegistry.register_at(st.reg, name, st.me, st.cfg.creation, pid, clock),
+    let st2 = { st with reg: GlobalRegistry.register_as(st.reg, name, st.me, st.cfg.creation, pid, clock,
+                                                        identity_of(st, st.me)),
                         regs: Map.insert(st.regs, name, (pid, watcher), Map.str_cmp) }
     match refresh_names(st2) do
       (st3, effs) ->
@@ -1154,7 +1241,7 @@ mod ClusterNode do
       match NetKernel.decode_registry_sync_resp(frame) do
         Err(_) -> (st, Nil)
         Ok((rh, leaves)) ->
-          let merged = GlobalRegistry.diff_entries(st.reg, rh, leaves)
+          let merged = GlobalRegistry.diff_entries(st.reg, rh, stamp_leaves(st, from, leaves))
           match retire_stale({ st with reg: merged }) do
             (st2, retired) ->
               let mine = GlobalRegistry.root_hash(st2.reg)
@@ -1221,7 +1308,7 @@ mod ClusterNode do
                   failed : Vault(Int -> String -> Unit),
                   certs : Vault(NodeCert.Cert), sec : Vault(SecurityEvent -> Unit),
                   revs : Vault(NodeCert.Revocation), op_pub : Bytes,
-                  own : Option(NodeCert.Cert) }
+                  own : Option(NodeCert.Cert), registrants : Vault(String) }
 
   -- Watches one registered process: its `Down` unregisters its names. `Down`
   -- is a raw mailbox message, so the watcher reads it with `receive` (the
@@ -1256,7 +1343,8 @@ mod ClusterNode do
                  failed: Vault.new("cluster_node_unset_failed"),
                  certs: Vault.new("cluster_node_unset_certs"),
                  sec: Vault.new("cluster_node_unset_sec"),
-                 revs: Vault.new("cluster_node_unset_revs"), op_pub: Bytes.empty(), own: None },
+                 revs: Vault.new("cluster_node_unset_revs"), op_pub: Bytes.empty(), own: None,
+                 registrants: Vault.new("cluster_node_unset_registrants") },
             started: false }
     on Boot(st0 : CnState, h0 : CnHandle) do
       { st: st0, h: h0, started: true }
@@ -1526,6 +1614,10 @@ mod ClusterNode do
     let _ = List.map(Vault.keys(h.names), fn k ->
       if Map.contains_key(st.vis, k, Map.str_cmp) do () else Vault.drop(h.names, k) end)
     discard(List.map(Map.entries(st.vis), fn kv -> match kv do (k, p) -> Vault.set(h.names, k, p) end))
+    let _ = List.map(Vault.keys(h.registrants), fn k ->
+      if core_registrant(st, k) == None do Vault.drop(h.registrants, k) else () end)
+    discard(List.map(GlobalRegistry.all_entries(st.reg), fn kv ->
+      match kv do (k, e) -> if e.present do Vault.set(h.registrants, k, e.registrant) else () end end))
   end
 
   -- ── tasks ──────────────────────────────────────────────────────────────
@@ -1925,6 +2017,7 @@ mod ClusterNode do
     register           : String -> Int -> Result((), RegisterError),
     unregister         : String -> (),
     lookup             : String -> Option(GlobalPid.Pid),
+    registrant         : String -> Option(String),
     names              : () -> List(String),
     watch              : String -> (NameEvent -> Unit) -> Int,
     unwatch            : Int -> (),
@@ -1986,6 +2079,7 @@ mod ClusterNode do
       register: fn (_, _) -> unsupported("register"),
       unregister: fn _ -> unsupported("unregister"),
       lookup: fn _ -> unsupported("lookup"),
+      registrant: fn _ -> unsupported("registrant"),
       names: fn _ -> unsupported("names"),
       watch: fn (_, _) -> unsupported("watch"),
       unwatch: fn _ -> unsupported("unwatch"),
@@ -2028,6 +2122,7 @@ mod ClusterNode do
       register: fn (name, p) -> h_register(h, name, p),
       unregister: fn name -> discard(send(node_pid(h), Unregister(name))),
       lookup: fn name -> Vault.get(h.names, name),
+      registrant: fn name -> Vault.get(h.registrants, name),
       names: fn _ -> Vault.keys(h.names),
       watch: fn (name, f) -> h_watch(h, name, f),
       unwatch: fn id -> h_unwatch(h, id),
@@ -2344,6 +2439,7 @@ mod ClusterNode do
                   certs: Vault.new("cluster_node_certs_" ++ tag),
                   sec: Vault.new("cluster_node_sec_" ++ tag),
                   revs: Vault.new("cluster_node_revs_" ++ tag),
+                  registrants: Vault.new("cluster_node_registrants_" ++ tag),
                   op_pub: match operator_key(cfg) do
                     Some(k) -> k
                     None -> Bytes.empty()
@@ -2481,10 +2577,27 @@ mod ClusterNode do
     d.unregister(name)
   end
 
-  doc "The process bound to [name] cluster-wide, as this node sees it (a Vault read)."
+  doc """
+  The process bound to [name] cluster-wide, as this node sees it (a Vault
+  read). In certificate mode a binding is hidden unless a raw send to its
+  holder would be allowed (both certificates carry raw_send; this node's own
+  bindings and the coordination namespaces `reference_namespaces()` always
+  show): a name you cannot raw-send to is not a reference you should hold.
+  """
   fn lookup(c : Cap(ClusterNode.Live), name : String) : Option(GlobalPid.Pid) do
     let d = ops(c)
     d.lookup(name)
+  end
+
+  doc """
+  Who registered [name]: the certificate identity (URI) of the registering
+  node as this node recorded it, "" when unknown (shared-secret mode, or a
+  relayed binding whose holder this node has not verified). None when no
+  present binding exists. Not hidden the way `lookup` is.
+  """
+  fn registrant(c : Cap(ClusterNode.Live), name : String) : Option(String) do
+    let d = ops(c)
+    d.registrant(name)
   end
 
   doc "Every name with a visible binding here."

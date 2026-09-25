@@ -136,6 +136,16 @@ git log is authoritative for exact commits.
   counted (`ClusterNode.raw_refused`, `NetKernel.raw_refused`) and reported as the
   new `RawSendRefused(node_id, what)` security event. A node's sends to itself are
   never refused.
+- **Registry lookups follow the raw-send rule** (step 11b, part 3; certificate
+  mode only). `ClusterNode.lookup` and `names` hide a binding unless this node's
+  and the holder's certificates both carry `raw_send` (a name you cannot
+  raw-send to is not a reference you should hold); a node's own bindings, and
+  the coordination namespaces `ap:`, `session:` and `topo:`
+  (`ClusterNode.reference_namespaces()`), always show. Each replica records who
+  registered a binding (`ClusterNode.registrant(c, name)`, the certificate
+  identity; `GlobalRegistry.Entry` gains `registrant`, `register_as`); it is not
+  on the wire or in the Merkle hash. `GlobalPid.make` stays pure: sending to a
+  pid is what is checked.
 - **Placement changes on a running system and upgrade tests** (build step 8 of the
   distributed-deploys plan). A topology app's nodes re-read their topology on
   SIGHUP and move their own offers: a role's placement, capacity, or a pool that

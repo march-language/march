@@ -6,7 +6,10 @@
 # queue) node-a drops every non-exempt frame kind, counts it and answers
 # DELIVERY_FAILED; session traffic to a session route still arrives. node-b
 # also checks Node.send's and RemoteCall's paths on a direct certificate-mode
-# connection it opens to itself. See node_a.march and node_b.march.
+# connection it opens to itself. Each node's registered name reaches the
+# other, recorded with its registrant, but lookup hides it (a name you cannot
+# raw-send to is not a reference you should hold). See node_a.march and
+# node_b.march.
 forge="${FORGE_BIN:-$root/_build/default/forge/bin/main.exe}"
 [ -x "$forge" ] || fail "forge not built: $forge (dune build forge/bin/main.exe)"
 export PKI="$work/pki"
@@ -25,6 +28,7 @@ start_node b
 wait_line b "node-b: probes sent"
 wait_line a "node-a: session route got SessionNode.Ping#probe"
 wait_line b "node-b: direct connection checked"
+wait_line a "node-a: raw.a (its own) lookup"
 touch "$CLUSTER_STOP_FILE"
 wait_exit a
 wait_exit b

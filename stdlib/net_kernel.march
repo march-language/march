@@ -595,7 +595,8 @@ mod NetKernel do
                       let entry = { node_id: nid, pid: pid,
                                     clock: clock,
                                     present: present_int != 0,
-                                    creation: creation }
+                                    creation: creation,
+                                    registrant: "" }
                       Some((name, entry))
                   _ -> None
                 end)

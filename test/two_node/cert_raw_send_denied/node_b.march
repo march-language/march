@@ -51,6 +51,27 @@ mod CertRawSendDeniedB do
     end
   end
 
+  actor Holder do
+    state { n : Int }
+    init  { n: 0 }
+    on Nop() do state end
+  end
+
+  pfn wait_registrant(h : Cap(ClusterNode.Live), name : String, left : Int) : Option(String) do
+    match ClusterNode.registrant(h, name) do
+      Some(r) -> Some(r)
+      None ->
+        if left <= 0 do None else
+          sleep_ms(50)
+          wait_registrant(h, name, left - 50)
+        end
+    end
+  end
+
+  pfn shown(h : Cap(ClusterNode.Live), name : String) : String do
+    if ClusterNode.lookup(h, name) == None do "hidden" else "visible" end
+  end
+
   pfn said(r : Result(Int, NodeQueue.EnqueueError)) : String do
     match r do
       Ok(_) -> "sent"
@@ -182,9 +203,24 @@ mod CertRawSendDeniedB do
               end)
             println(me() ++ ": probes sent")
         end
+        -- Cross-node references: node-a's binding reaches this replica but
+        -- lookup hides it (this node has no raw_send); its own shows.
+        -- Held in a variable and sent to at the end: an actor nothing
+        -- references can be reclaimed, and its name unregistered with it.
+        let holder = spawn(Holder)
+        let _ = ClusterNode.register(h, "raw.b", holder)
+        match wait_registrant(h, "raw.a", 60000) do
+          Some(who) -> println(me() ++ ": raw.a registered by " ++ who ++ ", lookup " ++ shown(h, "raw.a"))
+          None -> println(me() ++ ": raw.a never arrived")
+        end
+        -- register is asynchronous: wait until this node has recorded its
+        -- own binding (the registrant mirror is updated with the names).
+        let _ = wait_registrant(h, "raw.b", 60000)
+        println(me() ++ ": raw.b (its own) lookup " ++ shown(h, "raw.b"))
         direct(pki)
         wait_file(Env.require("CLUSTER_STOP_FILE"))
         println(me() ++ ": raw sends refused: " ++ int_to_string(ClusterNode.raw_refused(h)))
+        send(holder, Nop())
         ClusterNode.stop(h)
         println(me() ++ ": done")
     end

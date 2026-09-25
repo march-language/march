@@ -449,6 +449,40 @@ A node without `raw_send` is the right certificate for code isolated on its own
 node because it needs `IO.Foreign`. Its reach is the sessions its roles let it
 form, and nothing it sends outside them is delivered.
 
+### Cross-node references
+
+A reference to a process on another node is handed out, not computed. The
+global registry is where they are handed out, so in certificate mode it
+follows the raw-send rule:
+
+- **`ClusterNode.lookup` (and `names`) hides a binding unless a raw send to its
+  holder would be allowed**: this node's certificate and the holder's verified
+  certificate must both carry `raw_send`. A name you cannot raw-send to is not
+  a reference you should hold. This node's own bindings always show. A binding
+  whose holder this node has not verified yet (no link to it) stays hidden
+  until the link forms.
+- **The coordination namespaces are exempt**
+  (`ClusterNode.reference_namespaces()`): access-point offers (`ap:`), session
+  endpoints (`session:`) and topology markers (`topo:`) show whatever the
+  holder's flags. Access points check the holder's certificate by role when
+  they use one ([Roles](#roles-who-may-form-a-session)).
+- **Registrations record who made them.** Each replica records the certificate
+  identity of the registering node: its own for its own bindings, the link's
+  verified peer for bindings that peer holds, and the holder's certificate if
+  it has one for bindings relayed through a third node.
+  `ClusterNode.registrant(c, name)` returns it, and it is not hidden.
+  The identity is local bookkeeping. It is not sent on the wire and not
+  covered by the registry's Merkle hash, so replicas that recorded it
+  differently still converge.
+- **`GlobalPid.make` stays pure.** A pid built by hand is only a value. Sending
+  to it is a raw send, and that is what is checked.
+
+Registry writes themselves are not refused: a node without `raw_send` can
+still register a name, which no certificate-mode reader will then see outside
+the exempt namespaces. Registrations are not signed, so a member could claim
+another node's pid in a relayed binding. That binding would be attributed to
+the claimed holder, and any send to it would still be checked.
+
 ### What authorization does not cover
 
 Authorization is about **authority**: which conversations a misbehaving member

@@ -39,6 +39,21 @@ mod CertRawSendDeniedA do
     end end
   end
 
+  pfn wait_registrant(h : Cap(ClusterNode.Live), name : String, left : Int) : Option(String) do
+    match ClusterNode.registrant(h, name) do
+      Some(r) -> Some(r)
+      None ->
+        if left <= 0 do None else
+          sleep_ms(50)
+          wait_registrant(h, name, left - 50)
+        end
+    end
+  end
+
+  pfn shown(h : Cap(ClusterNode.Live), name : String) : String do
+    if ClusterNode.lookup(h, name) == None do "hidden" else "visible" end
+  end
+
   pfn said(r : Result(Int, NodeQueue.EnqueueError)) : String do
     match r do
       Ok(_) -> "sent (wrong)"
@@ -85,12 +100,22 @@ mod CertRawSendDeniedA do
         let _ = File.write(Env.require("PIDS_FILE"),
                            int_to_string(pid_to_int(raw)) ++ " " ++ int_to_string(pid_to_int(sess)) ++ " "
                            ++ int_to_string(ClusterNode.creation(h)))
+        let _ = ClusterNode.register(h, "raw.a", raw)
         println(me() ++ ": up")
         let b = ClusterNode.node_id_of("node-b")
         if wait_cert(h, b, 60000) do () else panic("node-a: node-b never linked") end
         let to_b = GlobalPid.make(b, 1, 0)
         println(me() ++ ": raw send_msg to node-b: " ++ said(ClusterNode.send_msg(h, to_b, "Raw.Ping", [1], NodeQueue.Unbounded)))
         println(me() ++ ": queue_for node-b: " ++ (if ClusterNode.queue_for(h, b) == None do "refused" else "given (wrong)" end))
+        -- Cross-node references: node-b's binding reaches this replica,
+        -- recorded with its registrant, but lookup hides it (node-b has no
+        -- raw_send); this node's own shows.
+        match wait_registrant(h, "raw.b", 60000) do
+          Some(who) -> println(me() ++ ": raw.b registered by " ++ who ++ ", lookup " ++ shown(h, "raw.b"))
+          None -> println(me() ++ ": raw.b never arrived")
+        end
+        let _ = wait_registrant(h, "raw.a", 60000)
+        println(me() ++ ": raw.a (its own) lookup " ++ shown(h, "raw.a"))
         wait_file(Env.require("CLUSTER_STOP_FILE"))
         println(me() ++ ": raw deliveries: " ++ int_to_string(List.length(Vault.keys(got))))
         println(me() ++ ": raw sends refused: " ++ int_to_string(ClusterNode.raw_refused(h)))

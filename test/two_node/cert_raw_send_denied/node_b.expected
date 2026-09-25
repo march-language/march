@@ -13,4 +13,6 @@ node-b: raw sends refused: 2
 node-b: raw tag to a pid route refused by node-a: not authorized
 node-b: raw tag to a session route refused by node-a: not authorized
 node-b: raw tag to a type route refused by node-a: not authorized
+node-b: raw.a registered by spiffe://test.local/pool/web/node/node-a, lookup hidden
+node-b: raw.b (its own) lookup visible
 node-b: session tag to a raw route refused by node-a: not authorized

@@ -24,8 +24,12 @@ Every certificate-mode peer's verified certificate is available as
   (`NetKernel.raw_allowed`). Session routes (`route_session`) and control
   frames exempt. Tests: `test/stdlib/test_session_ap.march`, two-node
   `cert_raw_send_denied`; `cert_ok`'s node-b gained `raw_send`.
-- Cross-node references (`GlobalPid.make`, `GlobalRegistry.lookup`) checked
-  against the certificate.
+- ~~Cross-node references~~ **done** (2026-09-25): `lookup`/`names` hide a
+  binding unless raw sends to its holder are allowed (own bindings and the
+  `ap:`/`session:`/`topo:` namespaces exempt); each replica records the
+  registrant's certificate identity (`ClusterNode.registrant`);
+  `GlobalPid.make` stays pure. Tests: `test/stdlib/test_cluster_node.march`
+  ("cross-node references"), `cert_raw_send_denied` (raw.a / raw.b).
 - SessionNode's direct-connection path (`dial_all` / `accept_all`) still calls
   the shared-secret `ClusterConn.connect_split_within` / `accept_split_within`;
   moving it to `connect_split_auth` / `accept_split_auth` gives it
