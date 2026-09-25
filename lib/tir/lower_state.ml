@@ -633,6 +633,65 @@ let with_enclosing_module_fns (names : string list) (f : unit -> 'a) : 'a =
   _enclosing_module_fns := tbl;
   Fun.protect ~finally:(fun () -> _enclosing_module_fns := saved) f
 
+(** Entry-module top-level fns whose name is also a builtin with its own C
+    symbol, mapped to the distinct TIR name the fn is lowered under
+    ([Tir_names.builtin_shadow_name]: `file_read` -> `file_read$u`).
+
+    The entry module's fns keep BARE TIR names, and so do the builtins, so
+    `file_read` in TIR could mean either.  Codegen turns a bare name into a
+    symbol with [Llvm_builtins.mangle_extern], which consults the builtin
+    table first, so a user `fn file_read` that survived to emission was
+    defined as `@march_file_read` and clang rejected the redefinition of the
+    runtime's function.  The name cannot be disambiguated after lowering: the
+    stdlib (lowered in the same module) calls the builtin by the same bare
+    name.  Lowering knows the scope, so it renames the definition and every
+    reference that resolves to it here, and the builtin keeps its name.
+
+    [_entry_builtin_shadows] is the full table for the program being lowered
+    (set once per [Lower.lower_module]).  [_builtin_shadows] is the table in
+    effect for the code being lowered right now: the full table inside the
+    entry file's own declarations, minus the names a nested module defines
+    itself (its own fn shadows the entry's), and EMPTY in the stdlib, the
+    prelude and modules from other files, where the bare name is the
+    builtin.  That is exactly the interpreter's scoping: an entry-file fn
+    named like a builtin wins everywhere in the entry file, including nested
+    modules and impl bodies, and nowhere else.
+    specs/progress/2026-09-25-user-fn-named-like-builtin-symbol.md *)
+let _entry_builtin_shadows : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
+let _builtin_shadows : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
+
+(** The source file of the entry module ([Lower.lower_module]'s [m]), which
+    decides whether a top-level declaration sees [_entry_builtin_shadows]. *)
+let _entry_file : string ref = ref ""
+
+(** Run [f] with [_builtin_shadows] set to [tbl], restoring it afterwards. *)
+let with_builtin_shadows (tbl : (string, string) Hashtbl.t) (f : unit -> 'a) : 'a =
+  let saved = !_builtin_shadows in
+  _builtin_shadows := tbl;
+  Fun.protect ~finally:(fun () -> _builtin_shadows := saved) f
+
+(** Run [f], which lowers the top-level declaration whose span is [sp], with
+    the builtin-shadow table that declaration's scope sees: the entry's when
+    it is written in the entry file, none otherwise (stdlib, prelude, a
+    module loaded from another file). *)
+let with_decl_builtin_shadows (sp : Ast.span) (f : unit -> 'a) : 'a =
+  if !_entry_file <> "" && sp.Ast.file = !_entry_file
+  then with_builtin_shadows !_entry_builtin_shadows f
+  else with_builtin_shadows (Hashtbl.create 0) f
+
+(** Run [f], which lowers the body of a nested module defining [names], with
+    those names removed from the builtin-shadow table: the module's own fn
+    shadows the entry's for bare references inside it. *)
+let hiding_builtin_shadows (names : string list) (f : unit -> 'a) : 'a =
+  if Hashtbl.length !_builtin_shadows = 0
+     || not (List.exists (Hashtbl.mem !_builtin_shadows) names)
+  then f ()
+  else begin
+    let tbl = Hashtbl.copy !_builtin_shadows in
+    List.iter (Hashtbl.remove tbl) names;
+    with_builtin_shadows tbl f
+  end
+
 (** Names bound by an enclosing LAMBDA or local named fn ([Ast.ELam] /
     [Ast.ELetFn]) while its body is being lowered.  A binder shadows any
     import alias, exactly as it shadows one in the interpreter.
@@ -670,7 +729,12 @@ let with_scope_locals (names : string list) (f : unit -> 'a) : 'a =
 let resolve_use_alias (env : env) (name : string) : string =
   if Hashtbl.mem _fn_param_types name then name
   else if Hashtbl.mem _scope_locals name then name
-  else if Hashtbl.mem !_current_module_fns name then name
+  (* An entry-file fn named like a C-symbol builtin: the reference means the
+     user's fn, lowered under its own name (see [_builtin_shadows]). *)
+  else match Hashtbl.find_opt !_builtin_shadows name with
+  | Some renamed -> renamed
+  | None ->
+  if Hashtbl.mem !_current_module_fns name then name
   (* A bulk `import Mod` registers every public fn of Mod as an unqualified
      alias (see [register_aliases] / the DUse cases).  When one of those short
      names is a compiler builtin — e.g. [to_string], which has a generic

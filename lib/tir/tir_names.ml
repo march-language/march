@@ -315,6 +315,22 @@ let strip_specialization_suffix (name : string) : string =
   | Some j -> String.sub name 0 j
   | None -> name
 
+(* ── Builtin-shadowing user fns: "name$u" ───────────────────────────────
+   Producer: lib/tir/lower.ml's [lower_module] (the definition) and
+   [Lower_state.resolve_use_alias] (every reference that resolves to it).
+   An entry-module top-level fn keeps its bare name in TIR, so one named like
+   a builtin with its own C symbol (`fn file_read`) was indistinguishable from
+   the builtin and codegen emitted it AS that symbol (`@march_file_read`,
+   a clang redefinition).  It is lowered as "name$u" instead.  The same
+   suffix [Llvm_builtins.user_symbol_of] gives a user fn named like a libc
+   symbol at emission; both mean "the user's fn, not the C one".  A `$` is
+   unlexable in March source, so no user name can collide with it, and
+   [strip_specialization_suffix] maps it back to the bare name, which
+   consumers that match by base name (exports, contracts) rely on. *)
+
+(** [builtin_shadow_name "file_read" = "file_read$u"]. *)
+let builtin_shadow_name (name : string) : string = name ^ "$u"
+
 (* ── Default-argument mangling: "base$N" ────────────────────────────────
    Producer: lib/desugar/desugar.ml's [expand_defaults_decl] mints, for a
    fn with default params, a full-arity mangled decl ["%s$%d" name
