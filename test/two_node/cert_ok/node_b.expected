@@ -1,0 +1,5 @@
+node-b: done
+node-b: got 10 pings
+node-b: mode certificate
+node-b: node-a presents spiffe://test.local/pool/web/node/node-a roles=CertOk.A:initiate flags=raw_send
+node-b: up

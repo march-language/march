@@ -21,6 +21,7 @@ mod CreditBackpressureLoopback do
   needs IO.Random
   needs IO.Spawn
   needs IO.Process
+  needs IO.Clock
 
   pfn secret() do "test-cluster-secret" end
   pfn node_a_id() do NodeIdentity.make("node-a", "pk-a", 1) end
@@ -86,7 +87,7 @@ mod CreditBackpressureLoopback do
     end end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_random : Cap(IO.Random), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_random : Cap(IO.Random), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
     let listen_fd = match tcp_listen(0) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)

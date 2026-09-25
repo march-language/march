@@ -1,0 +1,88 @@
+-- Two-node harness, scenario "cert_ok": node-a. Both nodes run in
+-- certificate mode (ClusterNode.config_from_env with MARCH_NODE_CERT,
+-- MARCH_NODE_KEY and MARCH_CLUSTER_OPERATOR_PUBKEY naming the files
+-- scenario.sh made with `forge cluster`). node-b listens; node-a dials it,
+-- each verifies the other's certificate, and node-a sends ten actor
+-- messages over the (sealed) data connection. Each node prints the
+-- certificate its peer presented, as ClusterNode.peer_cert returns it.
+mod CertOkA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+
+  pfn me() : String do "node-a" end
+  pfn other() : String do "node-b" end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn wait_cert(h : Cap(ClusterNode.Live), left : Int) : Option(NodeCert.Cert) do
+    match ClusterNode.peer_cert(h, ClusterNode.node_id_of(other())) do
+      Some(c) -> Some(c)
+      None ->
+        if left <= 0 do None else
+          sleep_ms(50)
+          wait_cert(h, left - 50)
+        end
+    end
+  end
+
+  pfn wait_member(h : Cap(ClusterNode.Live), left : Int) : Option(ClusterNode.NodeInfo) do
+    match List.find(ClusterNode.members(h), fn i -> i.name == other()) do
+      Some(i) -> Some(i)
+      None ->
+        if left <= 0 do None else
+          sleep_ms(50)
+          wait_member(h, left - 50)
+        end
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_NAME", me())
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int("MARCH_PORT_A")))
+    Process.set_env("MARCH_CLUSTER_NODES", "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_B")))
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
+    let cfg = match ClusterNode.config_from_env() do
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    end
+    println(me() ++ ": mode " ++ ClusterAuth.mode_name(cfg.auth))
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println(me() ++ ": up")
+        match wait_cert(h, 60000) do
+          Some(pc) ->
+            println(me() ++ ": " ++ other() ++ " presents " ++ pc.node ++ " roles=" ++ String.join(pc.roles, ",")
+                    ++ " flags=" ++ String.join(pc.flags, ","))
+          None -> println(me() ++ ": no certificate from " ++ other())
+        end
+        match wait_member(h, 60000) do
+          None -> println(me() ++ ": " ++ other() ++ " is not a member")
+          Some(i) ->
+            let to = GlobalPid.make(i.node_id, 0, i.creation)
+            let _ = List.map(List.range(0, 10), fn k ->
+              ClusterNode.send_msg(h, to, "CertOk.Ping", [k], NodeQueue.BlockSender(10000)))
+            println(me() ++ ": sent 10 pings")
+        end
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        ClusterNode.stop(h)
+        println(me() ++ ": done")
+    end
+  end
+end

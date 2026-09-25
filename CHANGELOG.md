@@ -12,6 +12,48 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Node certificates for clusters** (build step 11a of the distributed-deploys
+  plan, part 1). New `NodeCert` module: a certificate names a node
+  (`spiffe://<trust-domain>/pool/<pool>/node/<name>`), its role permissions
+  (`Proto.Role:offer` / `Proto.Role:initiate`), flags (`raw_send`), an expiry and
+  a serial, and is signed ed25519 by an operator key; `NodeCert.verify(cert,
+  operator_pubkey, now)` checks it, and operator-signed revocations name a
+  serial or a whole node. `forge cluster keygen` makes the operator keypair (a
+  separate key from the hot-reload deploy key), `forge cluster cert <node>
+  --roles ... --flags ... --days N` issues a node key and certificate, and
+  `forge cluster revoke --serial S | --node N` prints a revocation token. New
+  builtins `ed25519_seed_keypair`, `ed25519_sign`, `ed25519_verify` and
+  `x25519` (RFC 8032 / RFC 7748, over the runtime's TweetNaCl, which gained
+  X25519).
+- **Certificate mode for the cluster handshake** (step 11a, part 2). With
+  `MARCH_NODE_CERT`, `MARCH_NODE_KEY` and `MARCH_CLUSTER_OPERATOR_PUBKEY` set
+  (values or files), `ClusterNode.config_from_env` authenticates peers by
+  certificate instead of `MARCH_CLUSTER_SECRET`: each node verifies the other's
+  certificate against the operator key, its expiry and the node's name, then
+  proves it holds its certificate's key by signing the peer's nonce and the
+  handshake transcript. Shared-secret mode is unchanged and stays the default; a
+  certificate node and a shared-secret node refuse each other with a message
+  naming what to set. `ClusterNode.peer_cert(c, node_id)` returns the
+  certificate a peer presented, `ClusterConn.connect_split_auth` /
+  `accept_split_auth` do the same for direct connections, and
+  `ClusterNode.on_security_event` reports refused handshakes.
+- **Per-frame MAC on cluster connections** (step 11a, part 3). After the
+  handshake every frame carries a sequence number and an HMAC-SHA256 tag under a
+  per-connection, per-direction key (HKDF over the handshake transcript; from an
+  X25519 agreement in certificate mode, from the secret in shared-secret mode). A
+  modified, injected or replayed frame is dropped and counted
+  (`ClusterNode.frames_rejected`, a `FrameRejected` security event), and three
+  on one connection close it. This is integrity, not encryption: frames stay
+  readable on the wire. Shared-secret nodes negotiate it, so they still talk to
+  older nodes (unsealed). New `bench/cluster_frames.march`.
+- **Certificate expiry and revocation** (step 11a, part 4). A peer whose
+  certificate expires, or is revoked, is disconnected and reported as
+  `NodeDead(_, "certificate expired")` / `NodeDead(_, "certificate revoked")`,
+  so its sessions are cancelled as for any dead node, and its handshakes are
+  refused from then on. `ClusterNode.revoke(c, token)` takes a token from
+  `forge cluster revoke`; `MARCH_CLUSTER_REVOCATIONS` seeds the list at
+  startup; nodes pass revocations on to each other, and only the operator's
+  signature makes one count. `ClusterNode.revocations(c)` lists them.
 - **Placement changes on a running system and upgrade tests** (build step 8 of the
   distributed-deploys plan). A topology app's nodes re-read their topology on
   SIGHUP and move their own offers: a role's placement, capacity, or a pool that
@@ -208,6 +250,15 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **Programs that use the cluster transport directly need `IO.Mut` and
+  `IO.Clock` in their grant.** `NetKernel`, `ClusterConn`, `PeerReader`,
+  `NodeSend`, `NodeCall` and `NodeQueue` now reach a process-wide table (the
+  per-connection MAC state) and the clock (handshake deadline, certificate
+  expiry), and the capability check is a ceiling on the whole program. A
+  `main(io : Cap(IO))` program sees no change; one with a narrow grant must add
+  `needs IO.Mut` / `needs IO.Clock` and the matching `Cap(IO.Mut)` /
+  `Cap(IO.Clock)` parameters (nine `test/native` loopback fixtures and the
+  `restart` two-node scenario did).
 - **`forge audit --inferred` caches each dependency's result** under
   `.forge/audit-cache/`, keyed on the dependency's files, the files on its lib
   path and the compiler. A repeat audit re-analyzes only the dependencies whose
@@ -463,6 +514,15 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Compiling a module with no `main` no longer takes minutes.** A TIR pass
+  rewrote the rest of a function twice for every non-capturing closure it
+  found ineligible, so a function that builds a record of many small lambdas
+  (`ClusterNode.ops_stub`) cost 2^k traversals; a compile with a `main` never
+  reached it, a main-less one (`forge build` on a library, `--cap-strict`
+  checks) did. Same generated code, one traversal.
+- **Cluster handshake reflection.** A shared-secret node accepted a peer that
+  sent the node's own hello back to it and then its own proof back; a nonce
+  equal to ours is now refused.
 - The stdlib-only builtin gate (`pid_of_int`, `actor_whereis`, `actor_registered`,
   `actor_pid_indices`, `epoch_hold`, `epoch_release`) now fires at name
   resolution, closing four bypasses found in review: it applies inside `impl`
@@ -924,6 +984,10 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Cluster certificates** operator guide (`docs/cluster-certificates.md`):
+  keys, issuing, configuring nodes, renewal, revocation, what the MAC does and
+  does not protect. The clustering reference's "Authentication & Handshake"
+  section covers both modes, the per-frame MAC and the threat model.
 - **The actors chapter now documents `Actor.stop`** (graceful, synchronous,
   reverse-order supervisor teardown), which shipped 2026-09-08 without a
   section of its own.

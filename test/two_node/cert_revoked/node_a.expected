@@ -1,0 +1,7 @@
+node-a: a garbage token was refused
+node-a: done
+node-a: linked to node-b
+node-a: node-b dead: certificate revoked
+node-a: refused a handshake: certificate revoked
+node-a: revoked node-b's certificate
+node-a: up
