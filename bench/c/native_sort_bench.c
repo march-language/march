@@ -1,5 +1,5 @@
 /* native_sort_bench.c — standalone measurement for the NativeArray.sort_int spec
- * (specs/todos/2026-09-16-native-array-sort-ipnsort.md). Not part of the runtime;
+ * (specs/progress/2026-09-25-native-array-sort-narrow-widths.md). Not part of the runtime;
  * build with: cc -O2 -fno-strict-aliasing -fwrapv -o /tmp/nsb bench/c/native_sort_bench.c && /tmp/nsb [quick]
  * f64 width (NativeArray.sort_float): /tmp/nsb f64 [quick] — see the f64 section below.
  *

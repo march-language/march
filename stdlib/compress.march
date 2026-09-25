@@ -62,20 +62,17 @@ mod Compress do
     end end
   end
 
-  -- The two lifts are public only because the sub-modules must reach them:
-  -- a nested module's BARE call to a parent function (`lift_decode_error(r)`
-  -- inside `mod Gzip`) typechecks and interprets, but in a module that is not
-  -- the compile's entry (every stdlib module) the compiled call is left
-  -- unqualified and fails to link, and a QUALIFIED call to a `pfn` is
-  -- rejected as private. See
-  -- specs/todos/2026-09-24-nested-module-bare-parent-call-link-failure.md.
+  -- The sub-modules below call the two lifts by their bare names: a nested
+  -- module sees its enclosing module's `pfn`s. (Until 2026-09-25 the compiled
+  -- call was left unqualified and failed to link, so these were public; see
+  -- specs/progress/2026-09-25-nested-module-parent-call.md.)
 
   doc """
   Convert a raw encoder result, whose error is the codec's message string,
   into `Result(Bytes, Compress.Error)`. Used by every `encode*` wrapper; an
   oversized input becomes `InvalidInput(msg)`, anything else `Io(msg)`.
   """
-  fn lift_encode_error(r : Result(Bytes, String)) : Result(Bytes, Error) do
+  pfn lift_encode_error(r : Result(Bytes, String)) : Result(Bytes, Error) do
     match r do
     Ok(b) -> Ok(b)
     Err(msg) -> Err(encode_error(msg))
@@ -88,7 +85,7 @@ mod Compress do
   corrupt or truncated data becomes `InvalidInput(msg)`, hitting the output
   size cap `InsufficientOutput`, and an environment failure `Io(msg)`.
   """
-  fn lift_decode_error(r : Result(Bytes, String)) : Result(Bytes, Error) do
+  pfn lift_decode_error(r : Result(Bytes, String)) : Result(Bytes, Error) do
     match r do
     Ok(b) -> Ok(b)
     Err(msg) -> Err(decode_error(msg))
@@ -128,7 +125,7 @@ mod Compress do
         end
     """
     fn encode(data : Bytes) : Result(Bytes, Compress.Error) do
-      Compress.lift_encode_error(stdlib_gzip_encode(data, -1))
+      lift_encode_error(stdlib_gzip_encode(data, -1))
     end
 
     doc """
@@ -138,7 +135,7 @@ mod Compress do
         Compress.Gzip.encode_level(data, Gzip.Custom(6))
     """
     fn encode_level(data : Bytes, level : Level) : Result(Bytes, Compress.Error) do
-      Compress.lift_encode_error(stdlib_gzip_encode(data, level_int(level)))
+      lift_encode_error(stdlib_gzip_encode(data, level_int(level)))
     end
 
     doc """
@@ -150,7 +147,7 @@ mod Compress do
         end
     """
     fn decode(data : Bytes) : Result(Bytes, Compress.Error) do
-      Compress.lift_decode_error(stdlib_gzip_decode(data))
+      lift_decode_error(stdlib_gzip_decode(data))
     end
 
     doc """
@@ -167,7 +164,7 @@ mod Compress do
     -- (see stdlib/seq.march), so `Seq(Bytes)` names no real sequence and an
     -- annotation spelled that way cannot typecheck.
     fn encode_stream(input) do
-      Seq.map(input, fn chunk -> Compress.lift_encode_error(stdlib_gzip_encode(chunk, -1)))
+      Seq.map(input, fn chunk -> lift_encode_error(stdlib_gzip_encode(chunk, -1)))
     end
 
     doc """
@@ -178,7 +175,7 @@ mod Compress do
           Compress.Gzip.decode_stream(compressed_chunks)
     """
     fn decode_stream(input) do
-      Seq.map(input, fn chunk -> Compress.lift_decode_error(stdlib_gzip_decode(chunk)))
+      Seq.map(input, fn chunk -> lift_decode_error(stdlib_gzip_decode(chunk)))
     end
 
   end
@@ -196,7 +193,7 @@ mod Compress do
         end
     """
     fn encode(data : Bytes) : Result(Bytes, Compress.Error) do
-      Compress.lift_encode_error(stdlib_deflate_encode(data))
+      lift_encode_error(stdlib_deflate_encode(data))
     end
 
     doc """
@@ -208,7 +205,7 @@ mod Compress do
         end
     """
     fn decode(data : Bytes) : Result(Bytes, Compress.Error) do
-      Compress.lift_decode_error(stdlib_deflate_decode(data))
+      lift_decode_error(stdlib_deflate_decode(data))
     end
 
   end
@@ -242,7 +239,7 @@ mod Compress do
         end
     """
     fn encode(data : Bytes) : Result(Bytes, Compress.Error) do
-      Compress.lift_encode_error(stdlib_zstd_encode(data, 3))
+      lift_encode_error(stdlib_zstd_encode(data, 3))
     end
 
     doc """
@@ -252,7 +249,7 @@ mod Compress do
         Compress.Zstd.encode_level(data, Zstd.Fast(1))
     """
     fn encode_level(data : Bytes, level : Level) : Result(Bytes, Compress.Error) do
-      Compress.lift_encode_error(stdlib_zstd_encode(data, level_int(level)))
+      lift_encode_error(stdlib_zstd_encode(data, level_int(level)))
     end
 
     doc """
@@ -265,7 +262,7 @@ mod Compress do
         end
     """
     fn decode(data : Bytes) : Result(Bytes, Compress.Error) do
-      Compress.lift_decode_error(stdlib_zstd_decode(data))
+      lift_decode_error(stdlib_zstd_decode(data))
     end
 
     doc """
@@ -273,7 +270,7 @@ mod Compress do
     Errors are surfaced per-chunk rather than silently dropped.
     """
     fn encode_stream(input) do
-      Seq.map(input, fn chunk -> Compress.lift_encode_error(stdlib_zstd_encode(chunk, 3)))
+      Seq.map(input, fn chunk -> lift_encode_error(stdlib_zstd_encode(chunk, 3)))
     end
 
     doc """
@@ -281,7 +278,7 @@ mod Compress do
     Errors are surfaced per-chunk rather than silently dropped.
     """
     fn decode_stream(input) do
-      Seq.map(input, fn chunk -> Compress.lift_decode_error(stdlib_zstd_decode(chunk)))
+      Seq.map(input, fn chunk -> lift_decode_error(stdlib_zstd_decode(chunk)))
     end
 
   end
@@ -326,7 +323,7 @@ mod Compress do
         end
     """
     fn encode(data : Bytes) : Result(Bytes, Compress.Error) do
-      Compress.lift_encode_error(stdlib_brotli_encode(data, 0, 6))
+      lift_encode_error(stdlib_brotli_encode(data, 0, 6))
     end
 
     doc """
@@ -335,7 +332,7 @@ mod Compress do
         Compress.Brotli.encode_mode(data, Brotli.Text, Brotli.Level(9))
     """
     fn encode_mode(data : Bytes, mode : Mode, level : Level) : Result(Bytes, Compress.Error) do
-      Compress.lift_encode_error(stdlib_brotli_encode(data, mode_int(mode), level_int(level)))
+      lift_encode_error(stdlib_brotli_encode(data, mode_int(mode), level_int(level)))
     end
 
     doc """
@@ -348,7 +345,7 @@ mod Compress do
         end
     """
     fn decode(data : Bytes) : Result(Bytes, Compress.Error) do
-      Compress.lift_decode_error(stdlib_brotli_decode(data))
+      lift_decode_error(stdlib_brotli_decode(data))
     end
 
   end

@@ -93,7 +93,7 @@ mod NativeArray do
   O(n), an equal-partition makes low-cardinality input near-linear, and a
   heapsort fallback bounds the worst case at O(n log n). Measured 5-30x
   faster than libc qsort at 5M elements; see
-  `specs/todos/2026-09-16-native-array-sort-ipnsort.md`.
+  `specs/progress/2026-09-25-native-array-sort-narrow-widths.md`.
 
   Unstable is unobservable here: i64 elements carry no payload to reorder.
 
@@ -259,6 +259,23 @@ mod NativeArray do
     native_f32_arr_sum(arr)
   end
 
+  doc """
+  Sort ascending by IEEE 754 `totalOrder` on binary32. Same algorithm,
+  ownership and NaN / `-0.0` placement as `sort_float`, on 32-bit keys: the
+  elements are not widened to f64 to sort. Unstable, in place when the
+  array is uniquely owned, so a threaded `let a = NativeArray.sort_f32(a)`
+  allocates nothing.
+
+  `-NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN`, so `-0.0` sorts
+  strictly before `+0.0` although `-0.0 == 0.0` is true.
+
+      march> NativeArray.get_f32(NativeArray.sort_f32(NativeArray.from_list_f32([2.5, -1.5, 0.5])), 0)
+      -1.5
+  """
+  fn sort_f32(arr) do
+    native_f32_arr_sort(arr)
+  end
+
   doc "Apply [f] to every element (widened Float in, rounded to binary32 out), returning a new NativeF32Arr. O(n)."
   fn map_f32(arr, f) do
     native_f32_arr_map(arr, f)
@@ -319,6 +336,19 @@ mod NativeArray do
     native_i32_arr_sum(arr)
   end
 
+  doc """
+  Sort ascending (signed 32-bit order). The same ipnsort-style algorithm and
+  ownership as `sort_int`, on 4-byte elements: unstable, in place when the
+  array is uniquely owned, O(n) on sorted or reversed input, O(n log n)
+  worst case.
+
+      march> NativeArray.to_list_i32(NativeArray.sort_i32(NativeArray.from_list_i32([3, -1, 2])))
+      [-1, 2, 3]
+  """
+  fn sort_i32(arr) do
+    native_i32_arr_sort(arr)
+  end
+
   doc "Apply [f] to every element (sign-extended Int in, wrapped to i32 out), returning a new NativeI32Arr. O(n)."
   fn map_i32(arr, f) do
     native_i32_arr_map(arr, f)
@@ -377,6 +407,19 @@ mod NativeArray do
   doc "Sum all elements, accumulated in Int (i64). O(n) tight loop."
   fn sum_u8(arr) : Int do
     native_u8_arr_sum(arr)
+  end
+
+  doc """
+  Sort ascending. A counting sort over the 256 possible values: O(n + 256),
+  no comparisons. Same ownership as `sort_int`: in place when the array is
+  uniquely owned, so a threaded `let a = NativeArray.sort_u8(a)` allocates
+  nothing.
+
+      march> NativeArray.to_list_u8(NativeArray.sort_u8(NativeArray.from_list_u8([200, 7, 255, 0])))
+      [0, 7, 200, 255]
+  """
+  fn sort_u8(arr) do
+    native_u8_arr_sort(arr)
   end
 
   doc "Apply [f] to every element (zero-extended Int in, wrapped to u8 out), returning a new NativeU8Arr. O(n)."

@@ -13,6 +13,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 - `forge run --processes` no longer occasionally assigns two pools the same cluster port (seen on Linux CI as `tcp_listen: bind failed`); the ports for all processes are now reserved together.
+
+- **Multi-threaded programs no longer occasionally abort with SIGTRAP (or a bare
+  `Killed: 9`) at shutdown under load.** When a scheduler worker thread exited, a
+  preemption tick already on its way could land inside the thread's teardown, and
+  the tick handler touched thread-local storage that the teardown was rebuilding,
+  which crashed the memory allocator. It hit about 0.3% of runs under heavy
+  parallel load, with no output, and never reproduced on a rerun. Ticks that
+  arrive after a thread has left its scheduler loop are now dropped, and worker
+  threads block the tick signal before they exit.
 - **The bare `sha256` builtin now typechecks as `Bytes -> String`, matching what it
   has always returned** (a 64-char lowercase hex string, like `Crypto.sha256`,
   `md5` and `sha512`). It was declared `Bytes -> Bytes`, so `Bytes.length(sha256(b))`
@@ -24,6 +33,14 @@ git log is authoritative for exact commits.
   For a raw digest use `hmac_sha256_bytes` / `sha1_bytes`.
 
 ### Added
+- **`NativeArray.sort_i32`, `sort_f32` and `sort_u8`: every NativeArray width
+  can now be sorted.** Same ownership as `sort_int`: in place when the array is
+  uniquely owned, copy-on-write when it is shared. `sort_i32` is the same
+  algorithm as `sort_int` on 4-byte elements. `sort_f32` orders by IEEE 754
+  `totalOrder` exactly like `sort_float` (NaN at a fixed end, `-0.0` before
+  `+0.0`), without widening to f64. `sort_u8` is a counting sort, about 0.3 ms
+  for a million bytes whatever their order. The interpreter and compiled builds
+  produce the same order, NaN included.
 - **Node certificates for clusters** (build step 11a of the distributed-deploys
   plan, part 1). New `NodeCert` module: a certificate names a node
   (`spiffe://<trust-domain>/pool/<pool>/node/<name>`), its role permissions
@@ -526,6 +543,29 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **`march --check` no longer reuses a `--no-cap-strict` verdict.** The `--check`
+  fast path caches a clean verdict per source digest, but that key ignored
+  `--no-cap-strict`, so `march --check --no-cap-strict f.march` exiting 0 made the
+  next plain `march --check f.march` of the same source exit 0 silently instead
+  of reporting the capability-ceiling error. The key now carries the cap-strict
+  setting, as the `--compile` key already did.
+- `to_string`/`println` of a List, Option, Result or tuple no longer aborts
+  `march --jit` or the JIT REPL with an internal compiler error ("ambiguous
+  interface-method call to `Show$List.show`"). The prelude's generic `Show`
+  impls are now specialised at the call site, as they are under `--compile`.
+
+- A function in a nested module that calls a function of an enclosing module
+  (`mod Outer do pfn helper ... mod Inner do fn f(x) do helper(x) end end end`)
+  now compiles. Before, the compiled program failed to link with `helper`
+  undefined, while the interpreter ran it. This applied at any nesting depth,
+  whether the enclosing function was declared before or after the nested
+  module, and in `MARCH_LIB_PATH` modules, stdlib modules and the entry file
+  alike. The qualified spelling `Outer.helper(x)` also now works from inside
+  `Outer` for a `pfn`: it was rejected as private in a stdlib module, and in
+  the same file it could bind a same-named function of the nested module
+  instead. `Compress`'s internal `lift_encode_error` / `lift_decode_error`
+  are private again.
+
 - `compare` on a NaN `Float` now gives the same answer compiled as interpreted:
   NaN compares equal to NaN and less than every other value (OCaml's
   `Float.compare`). Compiled `compare` returned 0 whenever either operand was

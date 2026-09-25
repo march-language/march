@@ -134,9 +134,12 @@ for `List.sort_by` on the same data. See [Benchmarks](https://github.com/march-l
 for the full table and the caveat that some of that gap is the data structure
 rather than the algorithm.
 
-Only `Int` arrays for now. The float and narrow-width sorts are not
-implemented — sorting floats needs a decision about where `NaN` goes, since it
-compares false against everything including itself.
+Every width has one: `sort_int`, `sort_float`, `sort_i32`, `sort_f32` and
+`sort_u8`, all with the same ownership rule. The two float sorts order by IEEE
+754 `totalOrder`, so `NaN` has a fixed place (last, or first if its sign bit
+is set) and `-0.0` sorts before `0.0`. `sort_u8` is a counting sort over the
+256 possible byte values, about 0.3 ms for a million elements whatever their
+order.
 
 ---
 

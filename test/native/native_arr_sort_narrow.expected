@@ -1,0 +1,34 @@
+i32 sorted: 13
+i32 reversed: 13
+i32 equal: 13
+i32 dist10: 13
+i32 sawtooth: 13
+i32 organ: 13
+i32 random: 13
+i32 nearly: 13
+i32 full range: 13
+i32 extremes: true
+i32 alias original intact: true
+i32 alias result sorted: true
+f32 sorted: 13
+f32 reversed: 13
+f32 equal: 13
+f32 dist10: 13
+f32 sawtooth: 13
+f32 organ: 13
+f32 random: 13
+f32 nearly: 13
+f32 specials: -nan -inf -1. -0. 0. 1. inf +nan
+f32 nan last: -1. 1. +nan
+f32 mixed specials: 5
+f32 alias original intact: true
+f32 alias result sorted: true
+u8 sorted: 13
+u8 reversed: 13
+u8 equal: 13
+u8 dist10: 13
+u8 random: 13
+u8 nearly: 13
+u8 extremes: true
+u8 alias original intact: true
+u8 alias result sorted: true
