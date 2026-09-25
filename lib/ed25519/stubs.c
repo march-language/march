@@ -95,3 +95,31 @@ CAMLprim value caml_ed25519_verify(value msg_val, value sig_val, value pk_val)
 
     CAMLreturn(Val_bool(ok));
 }
+
+/* Ed25519.seed_keypair seed : bytes  — 64-byte sk (seed || pk) for a 32-byte seed */
+CAMLprim value caml_ed25519_seed_keypair(value seed_val)
+{
+    CAMLparam1(seed_val);
+    CAMLlocal1(sk_val);
+    if (caml_string_length(seed_val) != 32)
+        caml_failwith("ed25519: seed must be 32 bytes");
+    unsigned char pk[CRYPTO_SIGN_PUBLICKEYBYTES];
+    sk_val = caml_alloc_string(CRYPTO_SIGN_SECRETKEYBYTES);
+    crypto_sign_seed_keypair(pk, (unsigned char *)Bytes_val(sk_val),
+                             (const unsigned char *)Bytes_val(seed_val));
+    CAMLreturn(sk_val);
+}
+
+/* Ed25519.x25519 scalar point : bytes  — X25519 (RFC 7748), 32 bytes */
+CAMLprim value caml_x25519(value k_val, value u_val)
+{
+    CAMLparam2(k_val, u_val);
+    CAMLlocal1(q_val);
+    if (caml_string_length(k_val) != 32 || caml_string_length(u_val) != 32)
+        caml_failwith("x25519: scalar and point must be 32 bytes");
+    q_val = caml_alloc_string(32);
+    crypto_scalarmult((unsigned char *)Bytes_val(q_val),
+                      (const unsigned char *)Bytes_val(k_val),
+                      (const unsigned char *)Bytes_val(u_val));
+    CAMLreturn(q_val);
+}
