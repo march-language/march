@@ -482,6 +482,13 @@ typedef struct march_scheduler {
                                    * handler.  How the handler tells OUR tick
                                    * from a host's delivery of the same signal
                                    * (which it chains to the host's handler). */
+    _Atomic int     tls_live;     /* 1 only while this thread is inside
+                                   * sched_loop, with its TLS materialised.
+                                   * The preempt handler writes TLS only when
+                                   * it reads 1; a tick delivered later (e.g.
+                                   * during pthread_exit's TSD cleanup, when
+                                   * a TLS access mallocs) is consumed and
+                                   * dropped. */
 #ifdef MARCH_ASAN_BUILD
     /* ASan fiber-switch bookkeeping for THIS scheduler's own native-thread
      * "fiber" (see march_proc.asan_fake_stack for the full rationale). */
