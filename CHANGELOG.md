@@ -924,6 +924,11 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Cross-language benchmark results refreshed** (2026-09-25, Linux x86_64). `bench/RESULTS.md`
+  leads with the new run, and its raw output, JSONL rows and chart are committed under
+  `bench/results/`. `bench/run_benchmarks.sh` now honours `MARCH=/path/to/march` for the March
+  rows, which it previously resolved and then ignored, and links the OCaml SIMD programs without
+  `ocamlfind` when that is absent.
 - **The actors chapter now documents `Actor.stop`** (graceful, synchronous,
   reverse-order supervisor teardown), which shipped 2026-09-08 without a
   section of its own.

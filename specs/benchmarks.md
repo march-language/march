@@ -176,6 +176,22 @@ algorithm does.
 
 ---
 
+## Cross-language run, 2026-09-25 (Linux x86_64 cloud VM)
+
+The seven cross-language benchmarks were re-run with `bench/run_benchmarks.sh`
+and committed as `bench/results/2026-09-25-x86_64-xeon-cloud.{txt,jsonl,svg}`;
+the tables and caveats are in `bench/RESULTS.md` under "Latest run". Two
+findings came out of it:
+
+- **binary-trees closed a third of its gap.** March-to-Rust went from 4.39x to
+  2.92x and March-to-OCaml from 20.1x to 13.3x against the 2026-08-04 x86 run.
+- **March simd-map2 is bimodal on this box.** Runs alternate between about
+  22 ms and about 160 ms while Rust stays flat. Filed as
+  `specs/todos/2026-09-25-simd-map2-bimodal-timing.md`.
+
+The run used the `nightly-20260924` compiler through the runner's new `MARCH=`
+override, because the box had no opam switch.
+
 ## Compute-benchmark sweep, 2026-07-31 — and why absolute-ms baselines cannot detect regressions
 
 All 31 non-network benchmarks compiled at `--opt 2` and ran clean: 31/31 exit 0,

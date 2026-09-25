@@ -49,6 +49,11 @@ find_tool() {                      # find_tool VAR_VALUE name…
 DUNE="$(find_tool "${DUNE:-}" dune)"
 OCAMLOPT="$(find_tool "${OCAMLOPT:-}" ocamlopt)"
 OCAMLFIND="$(find_tool "${OCAMLFIND:-}" ocamlfind)"
+# An explicit MARCH=... builds the March rows with THAT compiler (e.g. a release
+# or nightly binary on a box without an opam switch). Unset, the March rows are
+# built by `dune exec` against this working tree, as before; a `march` merely
+# found on PATH is never used for them.
+MARCH_EXPLICIT="${MARCH:-}"
 MARCH="$(find_tool "${MARCH:-}" march)"
 ELIXIR="$(find_tool "${ELIXIR:-}" elixir)"
 RUSTC="$(find_tool "${RUSTC:-}" rustc)"
@@ -122,7 +127,10 @@ print_provenance() {
   # be on PATH. Those differ routinely (an installed release vs. the tree you
   # are testing), and reporting the wrong one is the same class of error as
   # omitting a language silently.
-  if [ -n "$DUNE" ]; then
+  if [ -n "$MARCH_EXPLICIT" ]; then
+    printf '  %-8s %s\n' "March" \
+      "$("$MARCH_EXPLICIT" --version 2>/dev/null | head -1 || echo 'version unknown') ($MARCH_EXPLICIT, NOT this working tree)"
+  elif [ -n "$DUNE" ]; then
     printf '  %-8s %s\n' "March" \
       "$( (cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --version 2>/dev/null | head -1) || echo 'build failed' ) (dune exec, this working tree)"
   else
@@ -269,14 +277,21 @@ print_provenance
 bold "Compiling..."
 
 # March (native via LLVM backend)
+march_compile() {                  # march_compile SRC OUT
+  if [ -n "$MARCH_EXPLICIT" ]; then
+    (cd "$REPO_ROOT" && "$MARCH_EXPLICIT" --compile --opt 2 "$1" -o "$2" 2>/dev/null)
+  else
+    (cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 "$1" -o "$2" 2>/dev/null)
+  fi
+}
 printf '  March... '
-(cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/fib.march            -o "$TMP/march_fib"  2>/dev/null) && printf 'fib ' || printf '(fib FAILED) '
-(cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/binary_trees.march   -o "$TMP/march_bt"   2>/dev/null) && printf 'bt '  || printf '(bt FAILED) '
-(cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/tree_transform.march -o "$TMP/march_tt"   2>/dev/null) && printf 'tt '  || printf '(tt FAILED) '
-(cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/list_ops.march       -o "$TMP/march_lo"   2>/dev/null) && printf 'lo '  || printf '(lo FAILED) '
-(cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/simd_sum.march       -o "$TMP/march_ss"   2>/dev/null) && printf 'ss '  || printf '(ss FAILED) '
-(cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/simd_map.march       -o "$TMP/march_sm"   2>/dev/null) && printf 'sm '  || printf '(sm FAILED) '
-(cd "$REPO_ROOT" && "$DUNE" exec --root . march -- --compile --opt 2 bench/simd_map2.march      -o "$TMP/march_sm2"  2>/dev/null) && printf 'sm2 ' || printf '(sm2 FAILED) '
+march_compile bench/fib.march "$TMP/march_fib" && printf 'fib ' || printf '(fib FAILED) '
+march_compile bench/binary_trees.march "$TMP/march_bt" && printf 'bt '  || printf '(bt FAILED) '
+march_compile bench/tree_transform.march "$TMP/march_tt" && printf 'tt '  || printf '(tt FAILED) '
+march_compile bench/list_ops.march "$TMP/march_lo" && printf 'lo '  || printf '(lo FAILED) '
+march_compile bench/simd_sum.march "$TMP/march_ss" && printf 'ss '  || printf '(ss FAILED) '
+march_compile bench/simd_map.march "$TMP/march_sm" && printf 'sm '  || printf '(sm FAILED) '
+march_compile bench/simd_map2.march "$TMP/march_sm2" && printf 'sm2 ' || printf '(sm2 FAILED) '
 printf '\n'
 
 # OCaml (ocamlopt native compiler)
@@ -291,14 +306,20 @@ else
   printf '(ocamlopt not found)\n'
 fi
 # simd-* OCaml benchmarks self-time via Unix.gettimeofday, so link the unix package.
+# Without ocamlfind, link OCaml 5's bundled unix library directly (+unix).
 if [ -x "$OCAMLFIND" ]; then
+  ocaml_unix() { "$OCAMLFIND" ocamlopt -package unix -linkpkg "$@"; }
+elif [ -x "$OCAMLOPT" ]; then
+  ocaml_unix() { "$OCAMLOPT" -I +unix unix.cmxa "$@"; }
+fi
+if [ -x "$OCAMLFIND" ] || [ -x "$OCAMLOPT" ]; then
   printf '  OCaml (simd)... '
-  "$OCAMLFIND" ocamlopt -package unix -linkpkg "$BENCH_DIR/ocaml/simd_sum.ml"  -o "$TMP/ocaml_ss"  2>/dev/null && printf 'ss '  || printf '(ss FAILED) '
-  "$OCAMLFIND" ocamlopt -package unix -linkpkg "$BENCH_DIR/ocaml/simd_map.ml"  -o "$TMP/ocaml_sm"  2>/dev/null && printf 'sm '  || printf '(sm FAILED) '
-  "$OCAMLFIND" ocamlopt -package unix -linkpkg "$BENCH_DIR/ocaml/simd_map2.ml" -o "$TMP/ocaml_sm2" 2>/dev/null && printf 'sm2 ' || printf '(sm2 FAILED) '
+  ocaml_unix "$BENCH_DIR/ocaml/simd_sum.ml"  -o "$TMP/ocaml_ss"  2>/dev/null && printf 'ss '  || printf '(ss FAILED) '
+  ocaml_unix "$BENCH_DIR/ocaml/simd_map.ml"  -o "$TMP/ocaml_sm"  2>/dev/null && printf 'sm '  || printf '(sm FAILED) '
+  ocaml_unix "$BENCH_DIR/ocaml/simd_map2.ml" -o "$TMP/ocaml_sm2" 2>/dev/null && printf 'sm2 ' || printf '(sm2 FAILED) '
   printf '\n'
 else
-  printf '  OCaml (simd)... (ocamlfind not found)\n'
+  printf '  OCaml (simd)... (neither ocamlfind nor ocamlopt found)\n'
 fi
 
 # Rust (rustc with optimisations)
