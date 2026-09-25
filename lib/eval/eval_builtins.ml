@@ -4633,6 +4633,23 @@ let base_env : env =
   ; ("native_f32_arr_sum", VBuiltin ("native_f32_arr_sum", function
         | [VNativeF32Arr a] -> VFloat (Array.fold_left (+.) 0.0 a)
         | _ -> eval_error "native_f32_arr_sum: expected NativeF32Arr"))
+  ; ("native_f32_arr_sort", VBuiltin ("native_f32_arr_sort", function
+        | [VNativeF32Arr a] ->
+          (* binary32 totalOrder, the same key the C sort (nsort_f32 in
+             runtime/march_runtime.c) sorts on:
+               key(bits) = bits lxor ((bits asr 31) lsr 1)   (on 32 bits)
+             compared as a signed int32, giving
+             -NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN.
+             NOT OCaml's [compare] (every NaN first, -0.0 tied with 0.0).
+             Elements are already binary32 values held as doubles, so
+             Int32.bits_of_float is exact, NaN sign included, and key is an
+             involution, so mapping it back restores the bits. *)
+          let key b =
+            Int32.logxor b (Int32.shift_right_logical (Int32.shift_right b 31) 1) in
+          let ks = Array.map (fun f -> key (Int32.bits_of_float f)) a in
+          Array.sort Int32.compare ks;
+          VNativeF32Arr (Array.map (fun k -> Int32.float_of_bits (key k)) ks)
+        | _ -> eval_error "native_f32_arr_sort: expected NativeF32Arr"))
   ; ("native_f32_arr_map", VBuiltin ("native_f32_arr_map", function
         | [VNativeF32Arr a; f] ->
           let n = Array.length a in
@@ -4710,6 +4727,15 @@ let base_env : env =
   ; ("native_i32_arr_sum", VBuiltin ("native_i32_arr_sum", function
         | [VNativeI32Arr a] -> VInt (Array.fold_left (+) 0 a)
         | _ -> eval_error "native_i32_arr_sum: expected NativeI32Arr"))
+  ; ("native_i32_arr_sort", VBuiltin ("native_i32_arr_sort", function
+        | [VNativeI32Arr a] ->
+          (* Value semantics, like native_int_arr_sort's arm. Elements are
+             already wrapped to the i32 range, so Int.compare is the same
+             order as the C sort's signed int32_t compare. *)
+          let a' = Array.copy a in
+          Array.sort Int.compare a';
+          VNativeI32Arr a'
+        | _ -> eval_error "native_i32_arr_sort: expected NativeI32Arr"))
   ; ("native_i32_arr_map", VBuiltin ("native_i32_arr_map", function
         | [VNativeI32Arr a; f] ->
           let n = Array.length a in
@@ -4787,6 +4813,14 @@ let base_env : env =
   ; ("native_u8_arr_sum", VBuiltin ("native_u8_arr_sum", function
         | [VNativeU8Arr a] -> VInt (Array.fold_left (+) 0 a)
         | _ -> eval_error "native_u8_arr_sum: expected NativeU8Arr"))
+  ; ("native_u8_arr_sort", VBuiltin ("native_u8_arr_sort", function
+        | [VNativeU8Arr a] ->
+          (* The C side is a counting sort; any correct sort agrees with it
+             on integers in 0..255. *)
+          let a' = Array.copy a in
+          Array.sort Int.compare a';
+          VNativeU8Arr a'
+        | _ -> eval_error "native_u8_arr_sort: expected NativeU8Arr"))
   ; ("native_u8_arr_map", VBuiltin ("native_u8_arr_map", function
         | [VNativeU8Arr a; f] ->
           let n = Array.length a in

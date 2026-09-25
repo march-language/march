@@ -915,6 +915,75 @@ let test_repl_floats_interp () =
   check_float_session ~label:"interpreter mode"
     (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" float_session)
 
+(* ── `to_string` on a generic container (2026-09-25) ───────────────────
+   specs/progress/2026-09-25-jit-file-to-string-list.md.
+
+   Every `to_string`/`show` of a List, Option, Result or tuple was an
+   internal compiler error under --jit AND at the JIT prompt (exit 3,
+   `Ambiguous_iface_call ... Show$List.show`), while the interpreter and
+   --compile printed the value.  The prelude's generic Show impls
+   (`impl Show(List(a)) when Show(a)` &c.) are never in the precompiled
+   prelude .so -- Mono only emits specialisations -- and Lower registered
+   stdlib-context impls WITHOUT lowering their bodies, so no fragment ever
+   had a body to specialise and the bare `Show$List.show` reached LLVM emit.
+
+   Every shape is asserted: all of them failed, not only Float lists.  The
+   `2.` spelling is Show$Float's (to_string goes through the impl, not the
+   REPL printer), and matches the interpreter and --compile. *)
+let jit_file_to_string_src = {|mod JitFileToString do
+  needs IO.Console
+  fn main(_cap_console : Cap(IO.Console)) do
+    let xs = NativeArray.to_list_float(NativeArray.from_list_float([3.5, 1.25, 2.0]))
+    println(to_string(xs))
+    println(to_string([1, 2, 3]))
+    println(to_string(["a", "b"]))
+    println(to_string(Some(7)))
+    let r : Result(Int, String) = Err("no")
+    println(to_string(r))
+    println(to_string((1, 2.5)))
+    println(to_string([[1, 2], [3]]))
+    println(to_string([Some(1), None]))
+  end
+end
+|}
+
+let test_jit_file_to_string_generic () =
+  if not (clang_available ()) then ()  (* skip: stdlib precompile needs clang *)
+  else begin
+    let (out, code) = run_jit_file ~env_prefix:"" jit_file_to_string_src in
+    if contains ~needle:"libLLVM not found" out then ()
+    else
+      check_jit_file ~label:"--jit to_string of generic containers" (out, code)
+        [ "[3.5, 1.25, 2.]"; "[1, 2, 3]"; "[a, b]"; "Some(7)"; "Err(no)";
+          "(1, 2.5)"; "[[1, 2], [3]]"; "[Some(1), None]" ]
+  end
+
+let to_string_session =
+  [ "to_string([1, 2])";
+    "to_string(Some(2))";
+    "to_string((1, 2.5))" ]
+
+let check_to_string_session ~label (out, code) =
+  Alcotest.(check int) (label ^ ": REPL exit code") 0 code;
+  if contains ~needle:"Ambiguous_iface_call" out then
+    Alcotest.failf "%s: unresolved Show dispatch:\n%s" label out;
+  List.iter (fun needle ->
+    if not (contains ~needle out) then
+      Alcotest.failf "%s: expected %s in session output, got:\n%s"
+        label needle out)
+    [ "= \"[1, 2]\""; "= \"Some(2)\""; "= \"(1, 2.5)\"" ]
+
+let test_repl_to_string_generic_jit () =
+  if not (clang_available ()) then ()
+  else
+    check_to_string_session ~label:"JIT"
+      (run_repl_session ~env_prefix:"" to_string_session)
+
+(* Parity control: the interpreter was always right. *)
+let test_repl_to_string_generic_interp () =
+  check_to_string_session ~label:"interpreter mode"
+    (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" to_string_session)
+
 let () =
   Alcotest.run "march_jit" [
     "jit", [
@@ -960,6 +1029,10 @@ let () =
         test_repl_floats_jit;
       Alcotest.test_case "Floats print and survive the v slot (interpreter)"
         `Quick test_repl_floats_interp;
+      Alcotest.test_case "to_string of List/Option/tuple (JIT)" `Slow
+        test_repl_to_string_generic_jit;
+      Alcotest.test_case "to_string of List/Option/tuple (interpreter)"
+        `Quick test_repl_to_string_generic_interp;
     ];
     "jit_file", [
       Alcotest.test_case "march --jit runs a whole program (ORC JIT)" `Slow
@@ -982,5 +1055,8 @@ let () =
       Alcotest.test_case
         "march --jit loops mutual tail calls instead of overflowing the stack"
         `Slow test_jit_file_mutual_tco_no_stack_overflow;
+      Alcotest.test_case
+        "march --jit to_string of List/Option/Result/tuple values"
+        `Slow test_jit_file_to_string_generic;
     ];
   ]
