@@ -476,9 +476,10 @@ initiate just as well.
 incarnation, a counter: never reused, so a restarted or partitioned node can never be
 addressed by an old session), then invites one offer of each other role, trying an offer on
 its own node first. An offer refuses when it is full, when it is closing, or when it was
-built from a different version of the protocol: each protocol has a fingerprint, so two
-nodes built from different versions refuse each other instead of exchanging messages the
-other cannot read. On a refusal, or no answer, the initiator tries the next offer, all
+built from a version of the protocol this one cannot form a session with: each protocol has
+a fingerprint, so two nodes built from incompatible versions refuse each other instead of
+exchanging messages the other cannot read (see [Changing a protocol](#changing-a-protocol)
+for the versions that can mix). On a refusal, or no answer, the initiator tries the next offer, all
 within the setup time (`MARCH_SESSION_CONNECT_MS`, 20 seconds). If a role cannot be
 filled, `Err(NoOffer(role, why))` says what each offer said, and the offers that had
 already accepted are released.
@@ -508,7 +509,7 @@ any other.
 is released, while sessions already running finish.
 
 The [cluster limits](#running-over-a-cluster-node) still apply: every role on a different
-node, and one offer per role per node.
+node, and one offer per role and protocol version per node.
 
 ## Messages from different peers
 
@@ -1010,6 +1011,90 @@ while the in-process transport treats a role that has left as gone, so a peer wa
 it takes its crash branch. `test/session/stream_peers.march` in the compiler repository
 runs the real Stream, Fan and Logging roles against both kinds of peer.
 
+## Changing a protocol
+
+A protocol is a contract between binaries that are deployed separately, so changing one
+is a deploy question, not only a source edit. There are three kinds of change.
+
+1. **Same fingerprint.** Nothing any peer can see changed: a handler body, a role's
+   `needs` line (grants are about the role's code, not the wire, and are left out of the
+   fingerprint on purpose). Deploy in any order.
+2. **Compatible.** A session may mix the two versions. One change qualifies so far:
+   **a `choose` gains a branch**, and nothing else changes.
+3. **Breaking.** Anything else: a new message, a changed payload type, a removed branch,
+   a renamed label, a new role. Old and new binaries refuse each other when a session
+   forms, so both versions have to be offered while the deploy rolls through.
+
+**Compatibility is about the wire.** Every message crosses the network as JSON tagged
+with its constructor name. A labelled step (`item: Buyer -> Shop : Int`) is named after
+its label, and a `choose` branch's first message after the branch label. An unlabelled
+step is named by its position among the messages between the same two roles,
+`Msg_<From>_<To>_<k>`. A new branch that contains an unlabelled `A -> C` message
+therefore renumbers every later `A -> C` message, and an old peer can no longer decode
+them. The compiler compares the two versions' tags, not only their shapes: that change
+is breaking, and the explanation names the tags that moved (`Msg_A_C_1 is now
+Msg_A_C_2`). Label the steps and it becomes compatible.
+
+**Label the steps of any protocol a topology app uses.** When `topology.toml` names a
+protocol (in `[roles]`, or in a pool's `initiates`), each unlabelled step is a warning at
+the step, in the compiler's output and in the editor, with a suggested label. A branch's
+first message needs no label of its own: the branch label names it.
+
+**Rollout order: receivers of a choice before its chooser.** An old chooser never picks
+the new branch, so a new receiver is safe beside it. A new chooser may pick the new
+branch towards a receiver that cannot handle it. So the compatible change is safe only in
+one direction: upgrade every role that receives the choice first, then the role that
+makes it. This has nothing to do with which role initiates the session. In a replicated
+monolith, where one binary holds both the chooser and the receivers, that order cannot
+happen inside one deploy, and the change has to go out as two.
+
+**The compatibility table.** Every `@[endpoints]` protocol's `<P>_Msg` module has
+`compat() : List((String, String, List(String)))`: one row `(fingerprint, role,
+accepts)` for each role that may form a session with peers on another fingerprint. It is
+computed at compile time against the previous version of the protocol, which the compiler
+reads from `--protocol-baseline <file>`. `forge build` keeps that file for you, in
+`.forge/protocols/<P>.json`, rewriting it on every build (`--emit-protocols`). Only the
+receivers of a compatible change get a row, naming the previous fingerprint. The chooser,
+and every role after a breaking change or a change with no wire effect, has no row:
+same fingerprint only.
+
+```march
+-- v2 added `later` to `choose by Shop`; Buyer receives the choice
+Order_Msg.compat()
+-- [("8e44…", "Buyer", ["d248…"])]
+```
+
+**One version back.** The baseline file keeps the version last built and the one before
+it, and the table reaches exactly one version back. A peer two versions behind is
+"protocol differs". That is enough for a rollout, which moves one version at a time, and
+for the monolith's two-deploy split.
+
+**How a session forms across versions.** An access point's registry name carries its
+fingerprint (`ap:<P>/<role>/<fp>/<node>`), so a node can offer two versions of one role side
+by side, and an initiator can tell an offer's version before inviting it. The initiator
+invites, in this order, offers at its own fingerprint, then older ones its table accepts,
+then ones it does not know (a newer version decides for itself). It never invites an offer
+its own table rules out, and it lets a session hold at most two fingerprints. An offer
+accepts an initiator at its own fingerprint, at an older one its table accepts, or at a
+newer one that has checked the pair against its own table and says so in the invitation.
+A new chooser and an old receiver never meet: the chooser's table has no row for the
+receiver's older version.
+
+**Hosted access points across a change.** An actor hosting sessions holds each session's
+epoch, so it cannot move to a new protocol version while it hosts old sessions (plan 6.1).
+`Topology.reoffer(node)` opens each open offer again with the code now running: a role whose
+fingerprint changed gets a new offer and, for an actor role, a fresh hosting actor. The old
+offer closes, its sessions finish on the old version, and its actor is stopped once they
+have. The placement loop runs this after a deploy, but see the limits below: today it
+reopens with the code the role's `open` function was built from.
+
+**A monolith needs two deploys (D21).** When one binary both makes and receives a changed
+choice, no rollout order exists inside one deploy. Build the first deploy with
+`--protocol-expand <P>:<label>`: the receivers take the new version, while the chooser
+keeps offering and initiating under the previous fingerprint, and its `choose_<label>`
+panics. Then deploy the plain build. `forge`'s `Protocol_split.plan` works out which
+case applies from `.forge/protocols/` and the topology's pools.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -1035,6 +1120,16 @@ node's (SWIM) and the heartbeat settings do not apply.
   cannot safely continue.
 - Messages are encoded as JSON, so every payload type needs a JSON codec. Built-in types
   have one; for your own types, add `derive Json for YourType`.
+- After a hot deploy, `Topology.reoffer` calls each role's `open` function, which the old
+  code built, and that runs the old code: the role is reopened under the old fingerprint
+  (a no-op). It reopens under the new one only when new code builds the role, until calls
+  from entry-module code and its closures go through the reload dispatch table (today a
+  call is dispatched only when both caller and callee are reloadable). A hosting actor
+  whose handler the
+  deploy replaces can re-offer from there.
+- A hot patch currently carries its own copy of the runtime, so a session started by
+  patched code can crash the process; the two-node test of a hot protocol change is
+  pending on that fix (`specs/todos/2026-09-25-hcr-patch-so-private-runtime-copy.md`).
 
 ## See also
 

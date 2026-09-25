@@ -252,6 +252,44 @@ WAIT epoch:5 pins:3 deadline_ms:40000
 
 and keeps the deploy queued. `forge deploy hot` prints it (`waiting on 3 unit(s) pinned to epoch 5, hard deadline in 40s`) and retries every second, for up to `MARCH_DEPLOY_WAIT_S` seconds (600 by default). A hard drain deadline guarantees the wait ends. `forge hot-reload status` shows the pinned epochs and the counters (messages deferred, converted and dropped, actors killed).
 
+### Protocol changes
+
+A session pins the epoch it formed in, so a deploy never changes the protocol under a
+session that is already running. What a deploy can change is which protocol *new*
+sessions form under, and that depends on the kind of change (see
+[Changing a protocol]({{ site.baseurl }}/docs/choreography/#changing-a-protocol)):
+
+- **Same fingerprint** (handler bodies, a role's `needs` line): deploy in any order.
+- **A `choose` gaining a branch**: compatible, provided every role that *receives* the
+  choice is upgraded before the role that *makes* it. Each protocol's `<P>_Msg.compat()`
+  table, computed at build time against `.forge/protocols/<P>.json` (the previous
+  version, which `forge build` keeps), says which roles may run the new version beside
+  old peers, and access points form mixed-version sessions by it. Offers carry their
+  fingerprint in their names, so a node can offer both versions of a role at once.
+- **Anything else**: breaking. Old and new binaries refuse each other when a session
+  forms; offer both versions while the deploy rolls through.
+
+When one binary both makes and receives the changed choice (a replicated monolith), the
+change takes two deploys: first a build with `--protocol-expand <P>:<label>` (receivers
+take the new version, the chooser stays on the previous one and cannot pick the new
+branch), then the plain build. `Protocol_split.plan` in forge computes this from
+`.forge/protocols/` and the topology's pools, ready for `forge deploy --plan`.
+
+Unlabelled protocol steps get positional wire tags that an inserted step renumbers, so
+the compiler warns at each one in a protocol your topology uses; label them before you
+need to change the protocol.
+
+Typed remote messages (`Node.send`, `@[remote]`) carry their type's schema hash beside the
+tag, so an actor built from a newer or older version of a message type converts it with
+its `migrate_msg` or refuses it with `DELIVERY_FAILED` instead of misdecoding it
+([Clustering]({{ site.baseurl }}/docs/clustering/)).
+
+Two limits for now. After a deploy, `Topology.reoffer` reopens a role through the `open`
+function the old code built, which still runs the old code; re-offer from an actor whose
+handler the deploy replaces instead. And a hot patch carries its own copy of the runtime,
+so a session started by patched code can crash the process
+(`specs/todos/2026-09-25-hcr-patch-so-private-runtime-copy.md`).
+
 ---
 
 ## Capability-safe deploys

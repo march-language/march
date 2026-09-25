@@ -33,7 +33,21 @@
 
 let tbl : (Ast.span, string) Hashtbl.t = Hashtbl.create 32
 
-let reset () = Hashtbl.reset tbl
+(** The typed remote send's SCHEMA HASH per site (distributed-deploys build
+    step 9, `@[remote]` schema hashes): a digest of the message type's
+    STRUCTURE (record fields or variant constructors, with nested declared
+    types expanded; not its name), recorded beside the tag by
+    [Typecheck_caps.check_node_send_sites]. The sender puts it in the
+    envelope; a receiver compares it with its own, so a message whose type
+    kept its name but changed its shape is caught instead of misdecoded. *)
+let schemas : (Ast.span, string) Hashtbl.t = Hashtbl.create 32
+
+let reset () = Hashtbl.reset tbl; Hashtbl.reset schemas
+
+let record_schema (sp : Ast.span) (hash : string) : unit = Hashtbl.replace schemas sp hash
+
+let find_schema (sp : Ast.span) : string =
+  match Hashtbl.find_opt schemas sp with Some h -> h | None -> ""
 
 (** Record that the `from_json` call at [sp] decodes to type [type_name].
     Called only from the capability sweep, which derives [type_name] from the
@@ -72,37 +86,68 @@ let encoder_symbol (type_name : string) : string =
     The message is the third argument of both. *)
 let tagged_callee (callee : string) (arity : int) : string option =
   match callee, arity with
-  | "Node.send", 3 -> Some "Node.send_tagged"
-  | "Node.enqueue", 4 -> Some "Node.enqueue_tagged"
-  | "Node.accepts", 2 -> Some "Node.tag_is"
+  | "Node.send", 3 -> Some "Node.send_tagged_schema"
+  | "Node.enqueue", 4 -> Some "Node.enqueue_tagged_schema"
+  | "Node.accepts", 2 -> Some "Node.tag_is_schema"
+  (* The schema forms `@[remote]` generates (build step 9): the tag alone, the
+     schema alone, and the schema as a value. *)
+  | "Node.accepts_tag", 2 -> Some "Node.tag_is"
+  | "Node.schema_matches", 2 -> Some "Node.schema_is"
+  | "Node.schema_of", 1 -> Some "Node.schema_of"
+  | _ -> None
+
+(** The callees whose message type is a WITNESS function's parameter
+    (`fn (_ : T) -> ()`), and where the witness sits. *)
+let witness_arg (callee : string) : int option =
+  match callee with
+  | "Node.accepts" | "Node.accepts_tag" | "Node.schema_matches" -> Some 1
+  | "Node.schema_of" -> Some 0
   | _ -> None
 
 (** Both backends' rewrite of a resolved typed-send site, in one place so
-    they cannot drift:
+    they cannot drift (<schema> is T's schema hash, build step 9):
       Node.send(peer, to, msg)
-        ==> Node.send_tagged(peer, to, "<tag>", JsonTo$T.to_json(msg))
+        ==> Node.send_tagged_schema(peer, to, "<tag>", "<schema>", JsonTo$T.to_json(msg))
       Node.enqueue(q, to, msg, policy)
-        ==> Node.enqueue_tagged(q, to, "<tag>", JsonTo$T.to_json(msg), policy)
+        ==> Node.enqueue_tagged_schema(q, to, "<tag>", "<schema>", JsonTo$T.to_json(msg), policy)
       Node.accepts(d, fn (_ : T) -> ())
-        ==> Node.tag_is(d, "<tag>")
+        ==> Node.tag_is_schema(d, "<tag>", "<schema>")
+      Node.accepts_tag(d, fn (_ : T) -> ())      ==> Node.tag_is(d, "<tag>")
+      Node.schema_matches(d, fn (_ : T) -> ())   ==> Node.schema_is(d, "<schema>")
+      Node.schema_of(fn (_ : T) -> ())           ==> "<schema>"
     [None] when the site was not recorded (the typechecker then already
     reported it) or the call is not one of the two shapes above. *)
 let node_send_rewrite (e : Ast.expr) : Ast.expr option =
+  let str sp x = Ast.ELit (Ast.LitString x, sp) in
   match e with
   | Ast.EApp (Ast.EVar { txt = "Node.accepts"; span = fsp }, [ d; _witness ], sp) ->
     (* The receiver's half: `Node.accepts(d, fn (_ : T) -> ())` ==>
-       `Node.tag_is(d, "<tag of T>")`.  The witness is only a type carrier. *)
+       `Node.tag_is_schema(d, "<tag of T>", "<schema of T>")`.  The witness
+       is only a type carrier. *)
     (match find sp with
      | None -> None
      | Some tag ->
-       Some (Ast.EApp (Ast.EVar { txt = "Node.tag_is"; span = fsp },
-                       [ d; Ast.ELit (Ast.LitString tag, sp) ], sp)))
+       Some (Ast.EApp (Ast.EVar { txt = "Node.tag_is_schema"; span = fsp },
+                       [ d; str sp tag; str sp (find_schema sp) ], sp)))
+  | Ast.EApp (Ast.EVar { txt = "Node.accepts_tag"; span = fsp }, [ d; _witness ], sp) ->
+    (match find sp with
+     | None -> None
+     | Some tag -> Some (Ast.EApp (Ast.EVar { txt = "Node.tag_is"; span = fsp }, [ d; str sp tag ], sp)))
+  | Ast.EApp (Ast.EVar { txt = "Node.schema_matches"; span = fsp }, [ d; _witness ], sp) ->
+    (match find sp with
+     | None -> None
+     | Some _ -> Some (Ast.EApp (Ast.EVar { txt = "Node.schema_is"; span = fsp }, [ d; str sp (find_schema sp) ], sp)))
+  | Ast.EApp (Ast.EVar { txt = "Node.schema_of"; _ }, [ _witness ], sp) ->
+    (match find sp with
+     | None -> None
+     | Some _ -> Some (str sp (find_schema sp)))
   | Ast.EApp (Ast.EVar { txt; span = fsp }, (dst :: to_ :: msg :: rest as args), sp) ->
     (match tagged_callee txt (List.length args), find sp with
      | Some tagged, Some tag ->
        Some (Ast.EApp (Ast.EVar { txt = tagged; span = fsp },
                        [ dst; to_;
-                         Ast.ELit (Ast.LitString tag, sp);
+                         str sp tag;
+                         str sp (find_schema sp);
                          Ast.EApp (Ast.EVar { txt = encoder_symbol tag; span = fsp },
                                    [msg], sp) ] @ rest,
                        sp))

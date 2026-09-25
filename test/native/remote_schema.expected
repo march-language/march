@@ -1,0 +1,12 @@
+schemas: new and old differ true, 32 hex true
+Counter: Bump n=1 who=now
+Counter, this schema: delivered
+Counter: Bump n=1 who=now
+Counter, no schema: delivered
+Counter: Bump n=2 who=migrated
+Counter, the old schema: delivered
+Counter, the old schema, dropped: refused: Counter: migrate_msg dropped a Bump message of an older schema
+Counter, an unknown schema: refused: Counter: a Bump message arrived with a schema this build's type does not have, and no migrate_msg converts it
+Tally: Tick n=1 who=now
+Tally, this schema: delivered
+Tally, the old schema: refused: Tally: a Tick message arrived with a schema this build's type does not have, and no migrate_msg converts it

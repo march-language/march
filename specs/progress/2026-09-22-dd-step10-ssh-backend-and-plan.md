@@ -60,7 +60,7 @@ of 6.8. Inputs, by source:
 |---|---|
 | functions | manifest set-diff; signature changes shown |
 | actor state / messages | `.schemas.json`; `migrate_state` presence = a `<actor>_migrate_state` in the manifest (not `nm`, which fails on a cross-built `.so` on macOS) |
-| protocol fingerprints | the generated `<P>_Msg.fingerprint`'s impl hash (its body is the fingerprint literal); the KIND of change from forge's own structure of the declaration, kept in `.forge/protocols/<P>.json` |
+| protocol fingerprints | the generated `<P>_Msg.fingerprint`'s impl hash (its body is the fingerprint literal); the KIND of change from forge's own structure of the declaration, kept in `.forge/deploy/<env>/protocols/<P>.json` |
 | hooks | the hook's impl hash (prefix-stripped name) |
 | placement | `Reconcile.diff_topologies` over the deployed and the new digest |
 | derived caps | `--emit-core-ast`'s `topology` object, deployed (`derived.json`) vs now |
@@ -125,9 +125,9 @@ the rebuilt base had the same baseline hashes, removes it and restarts once more
    [../todos/2026-09-25-topology-firewall-cluster-port-vs-swim.md](../todos/2026-09-25-topology-firewall-cluster-port-vs-swim.md).
 6. **One pool per host** for the ssh backend (one unit, socket and cluster port per
    pool; a second pool would collide). Refused with a message.
-7. **Protocol baselines** are kept per environment (`.forge/deploy/<env>/protocols/`)
-   and also written to `.forge/protocols/` (the path step 9's `--protocol-baseline`
-   will read), which the plan falls back to.
+7. **Protocol baselines** are kept per environment (`.forge/deploy/<env>/protocols/`).
+   `.forge/protocols/` belongs to step 9's compiler baselines (`--emit-protocols`), in
+   its own format; forge does not write it.
 8. **`loop atomic` and unsupervised actors** ("what may be lost") are not detected: the
    first is D27's syntax (another session), the second is not in any artifact. Drains
    report live sessions per pool (the status file counts sessions per node, not per

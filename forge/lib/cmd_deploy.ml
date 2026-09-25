@@ -16,9 +16,9 @@
     [<build>.schemas.json] and [<build>.base.json] (the base image's
     C-runtime digest, target, ABI); [derived.json] (each pool's derived
     caps and initiated roles); [protocols/<P>.json]; [pending_split.json]
-    while a D21 split waits for its second deploy. Every successful deploy
-    also writes [.forge/protocols/<P>.json] (the current build's
-    protocols, the baseline build step 9's compiler will read). *)
+    while a D21 split waits for its second deploy. [.forge/protocols/]
+    belongs to the compiler (build step 9's baselines, [--emit-protocols]);
+    forge never writes it. *)
 
 let ( let* ) = Result.bind
 
@@ -217,14 +217,9 @@ let derived_json (d : Deploy_plan.derived) : Yojson.Safe.t =
       (pool, `Assoc [ ("caps", `List (List.map (fun s -> `String s) caps));
                       ("initiates", `List (List.map (fun s -> `String s) inits)) ])) d)
 
-(** The deployed protocol structures: the environment's, else the last
-    build's [.forge/protocols/]. *)
+(** The deployed protocol structures ([.forge/deploy/<env>/protocols/]). *)
 let old_protocol c name : Deploy_plan.proto option =
-  let file d = Filename.concat d (name ^ ".json") in
-  let global = Filename.concat (Filename.concat c.root ".forge") "protocols" in
-  match read_json (file (protocols_dir c)) with
-  | Some j -> Deploy_plan.proto_of_json j
-  | None -> Option.bind (read_json (file global)) Deploy_plan.proto_of_json
+  Option.bind (read_json (Filename.concat (protocols_dir c) (name ^ ".json"))) Deploy_plan.proto_of_json
 
 let live_of_status (ss : Reconcile.node_status list) : Deploy_plan.live list =
   List.map (fun (s : Reconcile.node_status) ->
@@ -505,12 +500,9 @@ let record c ~(artifacts : artifact list) ~(restarted : string list) ~(derived :
   Option.iter (fun d -> Yojson.Safe.to_file (derived_file c) (derived_json d)) derived;
   Reconcile.record_deployed_topology ~root:c.root c.env c.t;
   let index = Topology.index_project ~root:c.root in
-  let global = Filename.concat (Filename.concat c.root ".forge") "protocols" in
+  Reconcile.mkdir_p (protocols_dir c);
   List.iter (fun (p : Deploy_plan.proto) ->
-      List.iter (fun d ->
-          Reconcile.mkdir_p d;
-          Yojson.Safe.to_file (Filename.concat d (p.p_name ^ ".json")) (Deploy_plan.proto_json p))
-        [ protocols_dir c; global ])
+      Yojson.Safe.to_file (Filename.concat (protocols_dir c) (p.p_name ^ ".json")) (Deploy_plan.proto_json p))
     (Deploy_plan.protos_of_index index)
 
 (** The manifest to activate for [build]: the whole new manifest, less the

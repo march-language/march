@@ -2437,6 +2437,223 @@ let two_step_branch_skip = bad "skipping a choose branch's second step is a type
   end
 |}))
 
+(* ── protocol evolution: the compatibility table (build step 9) ────────── *)
+
+(* Plan 6.4 / II.5.  Rule one: the old and new annotated step lists are
+   identical except that one `choose` gains a branch, every message both
+   versions exchange keeps its constructor (its JSON wire tag) and payload
+   key, and the role is a receiver of that choice, not its chooser. *)
+
+module E = March_desugar.Desugar_endpoints
+
+(** The wire view of the first protocol in [src], the way [expand] records it. *)
+let version_of_src ?(proto = "Stream") src : E.version =
+  let m = parse_module (wrap src) in
+  let steps =
+    List.find_map (function DProtocol (_, pd, _) -> Some pd.proto_steps | _ -> None) m.mod_decls
+    |> Option.get
+  in
+  let errors = March_errors.Errors.create () in
+  let annotated = Option.get (E.annotate errors ~proto ~span:dummy_span steps) in
+  let types = E.ty_defs_of m.mod_decls in
+  { E.v_proto = proto;
+    v_fingerprint = E.fingerprint_of ~proto ~types (E.roles_of annotated) annotated;
+    v_roles = E.roles_of annotated;
+    v_steps = E.wire_of ~types annotated }
+
+(* [stream] with a third branch: `Cons` chooses, `Prod` receives the choice. *)
+let stream_v2 = replace_all ~needle:"        done -> Cons -> Prod : Bool"
+    ~by:"        pause -> Cons -> Prod : Int\n        done -> Cons -> Prod : Bool" stream
+
+let verdict_str = function
+  | E.Same -> "same"
+  | E.Compatible { chooser; label; receivers } ->
+    Printf.sprintf "compatible: choose by %s gained %s; receivers %s" chooser label (String.concat "," receivers)
+  | E.Incompatible why -> "incompatible: " ^ why
+
+let compat_branch_added =
+  Alcotest.test_case "rule one: a choose gaining a branch is compatible for its receivers, not its chooser" `Quick
+    (fun () ->
+       let old_ = version_of_src stream and new_ = version_of_src stream_v2 in
+       Alcotest.(check bool) "fingerprints differ" true (old_.v_fingerprint <> new_.v_fingerprint);
+       Alcotest.(check string) "verdict" "compatible: choose by Cons gained pause; receivers Prod"
+         (verdict_str (E.compare_versions ~old_ ~new_));
+       Alcotest.(check (list (triple string string (list string)))) "rows: only the receiver accepts the old one"
+         [ (new_.v_fingerprint, "Prod", [ old_.v_fingerprint ]) ]
+         (E.compat_rows ~old_:(Some old_) ~new_);
+       (* the reverse direction (dropping a branch) is not rule one *)
+       Alcotest.(check bool) "removing the branch is not compatible" true
+         (match E.compare_versions ~old_:new_ ~new_:old_ with E.Incompatible _ -> true | _ -> false))
+
+(* Three roles, an unlabelled A -> C message AFTER the choice.  The new branch
+   carries an unlabelled A -> C message of its own, which takes the name
+   `Msg_A_C_1` and pushes the later step to `Msg_A_C_2`: structurally one
+   added branch, on the wire a renamed message old peers cannot decode. *)
+let tri_v1 = {|
+  @[endpoints]
+  protocol Tri do
+    choose by A:
+      go -> A -> B : Int
+      no -> A -> B : Bool
+    end
+    A -> C : String
+  end
+|}
+
+let tri_v2 = replace_all ~needle:"      no -> A -> B : Bool"
+    ~by:"      no -> A -> B : Bool\n      skip -> A -> B : String\n              A -> C : Int" tri_v1
+
+let compat_renumbered =
+  Alcotest.test_case "an unlabelled message renumbered by an inserted branch is incompatible" `Quick
+    (fun () ->
+       let old_ = version_of_src ~proto:"Tri" tri_v1 and new_ = version_of_src ~proto:"Tri" tri_v2 in
+       let v = verdict_str (E.compare_versions ~old_ ~new_) in
+       Alcotest.(check bool) ("names the renumbered tag (got: " ^ v ^ ")") true
+         (contains_text v "Msg_A_C_1 is now Msg_A_C_2");
+       Alcotest.(check bool) ("suggests a label (got: " ^ v ^ ")") true (contains_text v "Label them");
+       Alcotest.(check (list (triple string string (list string)))) "no rows: same fingerprint only" []
+         (E.compat_rows ~old_:(Some old_) ~new_))
+
+(* The same change with the trailing step labelled: its tag is its label, the
+   inserted branch renames nothing, and B and C (both reached by the choice)
+   may run the new version against old peers. *)
+let tri_labelled_v1 = replace_all ~needle:"    A -> C : String" ~by:"    note: A -> C : String" tri_v1
+let tri_labelled_v2 = replace_all ~needle:"    A -> C : String" ~by:"    note: A -> C : String" tri_v2
+
+let compat_labelled =
+  Alcotest.test_case "a labelled protocol gaining a branch is compatible" `Quick
+    (fun () ->
+       let old_ = version_of_src ~proto:"Tri" tri_labelled_v1
+       and new_ = version_of_src ~proto:"Tri" tri_labelled_v2 in
+       Alcotest.(check string) "verdict" "compatible: choose by A gained skip; receivers B,C"
+         (verdict_str (E.compare_versions ~old_ ~new_));
+       Alcotest.(check (list string)) "rows name B and C, not the chooser A" [ "B"; "C" ]
+         (List.map (fun (_, r, _) -> r) (E.compat_rows ~old_:(Some old_) ~new_)))
+
+let compat_grant_change =
+  Alcotest.test_case "a role grant change keeps the fingerprint and needs no table entry" `Quick
+    (fun () ->
+       let old_ = version_of_src stream_granted and new_ = version_of_src stream_granted_other in
+       Alcotest.(check string) "same fingerprint" old_.v_fingerprint new_.v_fingerprint;
+       Alcotest.(check string) "verdict" "same" (verdict_str (E.compare_versions ~old_ ~new_));
+       Alcotest.(check (list (triple string string (list string)))) "no rows" []
+         (E.compat_rows ~old_:(Some old_) ~new_))
+
+let compat_payload_change =
+  Alcotest.test_case "a changed payload type on a shared message is incompatible" `Quick
+    (fun () ->
+       let old_ = version_of_src stream
+       and new_ = version_of_src (replace_all ~needle:"        more -> Cons -> Prod : Bool"
+                                    ~by:"        more -> Cons -> Prod : Int" stream_v2) in
+       Alcotest.(check bool) "incompatible" true
+         (match E.compare_versions ~old_ ~new_ with E.Incompatible _ -> true | _ -> false))
+
+let compat_baseline_roundtrip =
+  Alcotest.test_case "the baseline file round-trips, and a rebuild keeps the version before it" `Quick
+    (fun () ->
+       let v1 = version_of_src stream and v2 = version_of_src stream_v2 in
+       let b1 = E.next_baseline None v1 in
+       let b2 = E.next_baseline (Some b1) v2 in
+       let b2' = E.next_baseline (Some b2) v2 in
+       (match E.baseline_of_string (E.baseline_to_string b2') with
+        | Error m -> Alcotest.fail m
+        | Ok b ->
+          Alcotest.(check string) "current" v2.v_fingerprint b.current.v_fingerprint;
+          Alcotest.(check (option string)) "previous survives the rebuild" (Some v1.v_fingerprint)
+            (Option.map (fun (v : E.version) -> v.v_fingerprint) b.previous);
+          Alcotest.(check bool) "steps survive" true (b.current.v_steps = v2.v_steps);
+          Alcotest.(check (option string)) "judged against v1" (Some v1.v_fingerprint)
+            (Option.map (fun (v : E.version) -> v.v_fingerprint) (E.prior_version b ~fp:v2.v_fingerprint)));
+       Alcotest.(check bool) "another format is refused" true
+         (Result.is_error (E.baseline_of_string {|{"format": 99, "current": null, "previous": null}|})))
+
+(** With [baseline] registered, [src]'s generated `compat()` typechecks and
+    user code can read it as a list of rows. *)
+let with_baseline (b : E.baseline) f =
+  Hashtbl.replace E.baselines b.current.v_proto b;
+  Fun.protect ~finally:(fun () -> Hashtbl.remove E.baselines b.current.v_proto) f
+
+let compat_generated_ok =
+  Alcotest.test_case "`<P>_Msg.compat()` is generated from the baseline and typechecks" `Quick
+    (fun () ->
+       let b = E.next_baseline None (version_of_src stream) in
+       with_baseline b (fun () ->
+           let src = wrap (stream_v2 ^ {|
+  pfn rows() : Int do List.length(Stream_Msg.compat()) end
+|}) in
+           let mods = generated src in
+           Alcotest.(check bool) "Stream_Msg.compat" true (has_fn mods "Stream_Msg" "compat");
+           Alcotest.(check bool) "Stream_Msg.compat_by_role" true (has_fn mods "Stream_Msg" "compat_by_role");
+           Alcotest.(check (list string)) "no error" [] (error_messages (typecheck_with_stdlib src))))
+
+(* ── expand/contract (D21): `--protocol-expand P:label` ─────────────────── *)
+
+let with_expand spec f =
+  let saved = !E.expand_labels in
+  E.expand_labels := spec;
+  Fun.protect ~finally:(fun () -> E.expand_labels := saved) f
+
+let desugar_errors src =
+  let errors = March_errors.Errors.create () in
+  ignore (without_runner (fun () -> March_desugar.Desugar.desugar_module ~errors (parse_module src)));
+  error_messages errors
+
+let expand_build_ok =
+  Alcotest.test_case "an expand build keeps the chooser on the previous fingerprint and typechecks" `Quick
+    (fun () ->
+       with_baseline (E.next_baseline None (version_of_src stream)) (fun () ->
+           with_expand [ ("Stream", "pause") ] (fun () ->
+               let src = wrap (stream_v2 ^ {|
+  pfn fp_of_chooser() : String do Stream_Msg.role_fingerprint(Stream_Msg.role_Cons()) end
+|}) in
+               let mods = generated src in
+               Alcotest.(check bool) "Stream_Msg.role_fingerprint" true (has_fn mods "Stream_Msg" "role_fingerprint");
+               Alcotest.(check (list string)) "no error" [] (error_messages (typecheck_with_stdlib src)))))
+
+let expand_build_refused =
+  Alcotest.test_case "--protocol-expand is refused without a baseline, or for the wrong branch" `Quick
+    (fun () ->
+       let has sub msgs = List.exists (fun m -> contains_text m sub) msgs in
+       with_expand [ ("Stream", "pause") ] (fun () ->
+           Alcotest.(check bool) "no baseline" true
+             (has "needs the protocol's previous version" (desugar_errors (wrap stream_v2))));
+       with_baseline (E.next_baseline None (version_of_src stream)) (fun () ->
+           with_expand [ ("Stream", "more") ] (fun () ->
+               Alcotest.(check bool) "wrong branch" true
+                 (has "the branch this version adds is `pause`" (desugar_errors (wrap stream_v2))))))
+
+(* ── D25: unlabelled steps in a protocol the topology uses ──────────────── *)
+
+let d25_warnings ~topology src =
+  let saved = !E.topology_protocols in
+  E.topology_protocols := topology;
+  Fun.protect ~finally:(fun () -> E.topology_protocols := saved) (fun () ->
+      let errors = March_errors.Errors.create () in
+      ignore (without_runner (fun () -> March_desugar.Desugar.desugar_module ~errors (parse_module (wrap src))));
+      List.filter_map
+        (fun (d : March_errors.Errors.diagnostic) ->
+           if d.severity = March_errors.Errors.Warning && contains_text d.message "(D25)"
+           then Some (d.span.start_line, d.message) else None)
+        errors.diagnostics)
+
+let d25_unlabelled_warns =
+  Alcotest.test_case "D25: each unlabelled step of a topology protocol is a warning at the step" `Quick
+    (fun () ->
+       let ws = d25_warnings ~topology:[ "Tri" ] tri_v1 in
+       (* branch heads are named by their branch labels: only `A -> C` warns *)
+       Alcotest.(check int) "one warning" 1 (List.length ws);
+       let (line, msg) = List.hd ws in
+       Alcotest.(check int) "at the step's line" 11 line;
+       Alcotest.(check bool) ("names the positional tag (got: " ^ msg ^ ")") true (contains_text msg "`Msg_A_C_1`");
+       Alcotest.(check bool) "suggests a label" true (contains_text msg "a_to_c: A -> C"))
+
+let d25_quiet =
+  Alcotest.test_case "D25: no warning outside a topology, or once the step is labelled" `Quick
+    (fun () ->
+       Alcotest.(check int) "not a topology protocol" 0 (List.length (d25_warnings ~topology:[ "Other" ] tri_v1));
+       Alcotest.(check int) "labelled" 0 (List.length (d25_warnings ~topology:[ "Tri" ] tri_labelled_v1));
+       Alcotest.(check int) "qualified name matches" 1 (List.length (d25_warnings ~topology:[ "Main.Tri" ] tri_v1)))
+
 let tests =
   [ stream_shape;
     two_step_branch_shape; two_step_branch_ok; two_step_branch_skip;
@@ -2468,4 +2685,6 @@ let tests =
     crash_shape; crash_roles_ok; crash_state_is_the_branch;
     crash_rule_1; crash_rule_2; crash_rule_3; crash_rule_4; crash_rule_5; crash_rule_6; crash_rule_6_twice;
     crash_choose_shape; crash_choose_ok; crash_chan_refused;
-    crash_hosted_shape; crash_choose_hosted_shape; crash_hosted_ok; crash_hosted_state_is_the_branch ]
+    crash_hosted_shape; crash_choose_hosted_shape; crash_hosted_ok; crash_hosted_state_is_the_branch;
+    compat_branch_added; compat_renumbered; compat_labelled; compat_grant_change; compat_payload_change;
+    compat_baseline_roundtrip; compat_generated_ok; expand_build_ok; expand_build_refused; d25_unlabelled_warns; d25_quiet ]

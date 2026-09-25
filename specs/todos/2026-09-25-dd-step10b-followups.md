@@ -23,3 +23,10 @@ left open, each small:
   calls is hot-patched although the hook already ran.
 - **Per-target manifests**: the plan reads the first target's manifest of a build.
 - **Uploads**: a restart uploads the whole base image; the host's CAS could dedupe.
+- **Step 9's split in the deploy.** `Protocol_split.plan_project` (step 9) decides
+  expand/contract from the compiler's baselines and builds the expand deploy with
+  `--protocol-expand P:label`, which keeps the chooser on the previous fingerprint.
+  `Deploy_plan` detects the same case from forge's own view of the declarations and
+  splits by holding the chooser role's functions back. Replace forge's split with
+  `plan_project`'s (the expand flags in `Cmd_deploy.build_patch` and the base build),
+  then tick item 3 of the step-9 todo.

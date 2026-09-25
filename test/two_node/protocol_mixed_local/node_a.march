@@ -1,0 +1,166 @@
+-- One-node scenario "protocol_mixed_local" (distributed-deploys build step 9):
+-- sessions that mix two versions of `Order`, formed by access points on one
+-- ClusterNode over its loopback link. This build is version 2 (`choose by
+-- Shop` gained `later`), compiled against version 1's baseline, so
+-- `Order_Msg.compat()` says Buyer (a receiver of the choice) accepts
+-- version 1 and Shop (its chooser) does not. A version-1 party is played by
+-- this build's code under version 1's FINGERPRINT (`SessionNode.offer_role`
+-- / `initiate` called directly with it, and no table): the wire is the
+-- same, since every version-1 message is a version-2 message, and a
+-- version-1 chooser never picks `later`.
+mod ProtocolMixedLocal do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Order do
+    loop do
+      item: Buyer -> Shop : Int
+      choose by Shop:
+        more -> Shop -> Buyer : Int
+        later -> Shop -> Buyer : Int
+        done -> Shop -> Buyer : String
+                stop
+      end
+    end
+  end
+
+  -- Shop: answers items 1 and 2 with `more` (or `later`, when [late] and a
+  -- version-2 chooser), and the third with `done`.
+  pfn shop(s : Cap(Session.Live), st : Order_Shop.Entry, who : String, late : Bool) : Order_Shop.Yield do
+    Order_Shop.recv_Item(s, st, fn (n, st1) ->
+      if n >= 3 do
+        println(who ++ " Shop: done after " ++ int_to_string(n))
+        Order_Shop.close(s, Order_Shop.choose_done(s, st1, "bye"))
+      else if late do shop(s, Order_Shop.choose_later(s, st1, n), who, late)
+      else shop(s, Order_Shop.choose_more(s, st1, n), who, late) end end)
+  end
+
+  pfn buyer(s : Cap(Session.Live), st : Order_Buyer.Entry, who : String, n : Int) : Order_Buyer.Yield do
+    let st1 = Order_Buyer.send_Item(s, st, n)
+    Order_Buyer.offer_more_later_done(s, st1,
+      fn (_m, st2) -> buyer(s, st2, who, n + 1),
+      fn (_m, st2) ->
+        println(who ++ " Buyer: got later")
+        buyer(s, st2, who, n + 1),
+      fn (bye, st2) ->
+        println(who ++ " Buyer: " ++ bye)
+        Order_Buyer.close(s, st2))
+  end
+
+  -- The generated body wrapper, as `<P>_Run.offer_<R>` builds it, for the
+  -- direct `SessionNode` calls a version-1 party makes.
+  pfn run_shop(s : Cap(Session.Live), who : String) : () do
+    let _ = shop(s, Order_Shop.register(s, 0), who, false)
+    ()
+  end
+
+  pfn run_buyer(s : Cap(Session.Live), who : String) : () do
+    let _ = buyer(s, Order_Buyer.register(s, 0), who, 1)
+    ()
+  end
+
+  pfn visible(h : Cap(ClusterNode.Live), o : SessionNode.Offer, left : Int) : () do
+    if ClusterNode.lookup(h, o.name) != None do ()
+    else if left <= 0 do panic("the offer never became visible") else
+      sleep_ms(20)
+      visible(h, o, left - 20)
+    end end
+  end
+
+  pfn gone(h : Cap(ClusterNode.Live), o : SessionNode.Offer, left : Int) : () do
+    if ClusterNode.lookup(h, o.name) == None do ()
+    else if left <= 0 do panic("the offer never went") else
+      sleep_ms(20)
+      gone(h, o, left - 20)
+    end end
+  end
+
+  pfn close(h : Cap(ClusterNode.Live), o : SessionNode.Offer) : () do
+    SessionNode.close_offer(o)
+    gone(h, o, 10000)
+  end
+
+  pfn outcome(what : String, r : Result(Session.Outcome, SessionNode.RunError)) : () do
+    match r do
+      Ok(_) -> println(what ++ ": formed and finished")
+      Err(SessionNode.NoOffer(role, why)) ->
+        println(what ++ ": no offer for role " ++ Order_Msg.role_name(role) ++ " (" ++ why ++ ")")
+      Err(e) -> println(what ++ ": " ++ SessionNode.run_error_message(e))
+    end
+  end
+
+  pfn ok_offer(r : Result(SessionNode.Offer, SessionNode.RunError)) : SessionNode.Offer do
+    match r do
+      Ok(o) -> o
+      Err(e) -> panic(SessionNode.run_error_message(e))
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let v2 = Order_Msg.fingerprint()
+    -- Version 1's fingerprint, from the table itself: the one Buyer accepts.
+    let v1 = match List.find(Order_Msg.compat(), fn row -> match row do (_, r, _) -> r == "Buyer" end) do
+      Some((_, _, Cons(fp, _))) -> fp
+      _ -> panic("no compatibility row for Buyer: was this built against version 1's baseline?")
+    end
+    println("table: Buyer accepts version 1; Shop rows: "
+      ++ int_to_string(List.length(List.filter(Order_Msg.compat(), fn row -> match row do (_, r, _) -> r == "Shop" end))))
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "mixed-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let shop_role = Order_Msg.role_Shop()
+        let buyer_role = Order_Msg.role_Buyer()
+        -- 1. Two fingerprints of one role, offered side by side on one node.
+        let b2 = ok_offer(Order_Run.offer_Buyer(c, h, 4, fn (s, st) -> buyer(s, st, "v2", 1)))
+        let b1 = ok_offer(SessionNode.offer_role(c, h, "Order", v1, Nil, buyer_role, Order_Msg.peers_Buyer(), 4,
+                                                 fn _ -> (), fn s -> run_buyer(s, "v1")))
+        visible(h, b2, 10000)
+        visible(h, b1, 10000)
+        println("Buyer offered at both fingerprints: " ++ bool_to_string(b1.name != b2.name))
+        -- 2. Same fingerprint first: a version-2 Shop picks the version-2 Buyer.
+        outcome("v2 Shop", Order_Run.initiate_Shop(c, h, fn (s, st) -> shop(s, st, "v2", true)))
+        -- 3. A version-1 chooser with only a version-2 receiver: compatible
+        --    (receivers first); the new offer decides, by its table.
+        close(h, b1)
+        outcome("v1 Shop + v2 Buyer",
+          SessionNode.initiate(c, h, "Order", v1, Nil, shop_role, Order_Msg.peers_Shop(), Order_Msg.others_Shop(),
+                               fn _ -> (), fn s -> run_shop(s, "v1")))
+        -- 4. A version-2 chooser with only a version-1 receiver: refused by the
+        --    initiator's own table, before any invitation.
+        close(h, b2)
+        let b1b = ok_offer(SessionNode.offer_role(c, h, "Order", v1, Nil, buyer_role, Order_Msg.peers_Buyer(), 4,
+                                                  fn _ -> (), fn s -> run_buyer(s, "v1")))
+        visible(h, b1b, 10000)
+        outcome("v2 Shop + v1 Buyer", Order_Run.initiate_Shop(c, h, fn (s, st) -> shop(s, st, "v2", true)))
+        close(h, b1b)
+        -- 5. A version-2 receiver initiating towards a version-1 chooser: the
+        --    newer initiator vouches for the older offer.
+        let s1 = ok_offer(SessionNode.offer_role(c, h, "Order", v1, Nil, shop_role, Order_Msg.peers_Shop(), 4,
+                                                 fn _ -> (), fn s -> run_shop(s, "v1")))
+        visible(h, s1, 10000)
+        outcome("v2 Buyer + v1 Shop", Order_Run.initiate_Buyer(c, h, fn (s, st) -> buyer(s, st, "v2", 1)))
+        close(h, s1)
+        -- 6. Without the vouch the older offer refuses: a version-3 party
+        --    this build has no table for (its fingerprint unknown here) is
+        --    invited, and answers "protocol differs".
+        let s2 = ok_offer(Order_Run.offer_Shop(c, h, 4, fn (s, st) -> shop(s, st, "v2", false)))
+        visible(h, s2, 10000)
+        outcome("v3 Buyer + v2 Shop",
+          SessionNode.initiate(c, h, "Order", "v3-fingerprint", Nil, buyer_role, Order_Msg.peers_Buyer(),
+                               Order_Msg.others_Buyer(), fn _ -> (), fn s -> run_buyer(s, "v3")))
+        ignore_v2(v2)
+        ClusterNode.stop(h)
+    end
+  end
+
+  pfn ignore_v2(_v : String) : () do () end
+end

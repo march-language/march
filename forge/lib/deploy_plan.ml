@@ -17,7 +17,7 @@
       message types, [migrate_msg]), and the identity of the base image
       (runtime ABI, target, C-runtime digest).
     - Per protocol: its structure as the parse declares it, now and as of
-      the last deploy ([.forge/protocols/<P>.json]), and whether its wire
+      the last deploy ([.forge/deploy/<env>/protocols/<P>.json]), and whether its wire
       fingerprint changed: the generated [<P>_Msg.fingerprint] function's
       impl hash, whose body is the fingerprint literal, so it changes
       exactly when the fingerprint does. forge's structure is not the wire

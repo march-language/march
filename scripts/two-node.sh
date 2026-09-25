@@ -33,6 +33,8 @@
 #                                 reads as a skip. Rules are removed on exit.
 #   wait_line <a|b|c> <text>      block until the node's stdout contains <text>
 #   wait_exit <a|b|c>             block until the node's process exits
+#   COMPILE_FLAGS_<a|b|c>         (set by the scenario) extra `march --compile`
+#                                 flags for that node
 #   ORDERED=1                     (set by the scenario) diff each node's stdout
 #                                 unsorted: only for a node that prints from one
 #                                 actor, whose order is then the protocol's
@@ -114,7 +116,11 @@ compile() {
   # Compile a COPY: `march --compile` writes <source>.ll beside the source,
   # and a stray .ll under test/ breaks dune's sandbox copy (Permission denied).
   cp "$dir/node_$n.march" "$work/node_$n.march"
-  "$MARCH" --compile -o "$work/node_$n" "$work/node_$n.march" > "$work/compile_$n.log" 2>&1 \
+  # COMPILE_FLAGS_<n> (set by the scenario): extra compiler flags for that
+  # node, e.g. `--protocol-baseline $work/base/P.json` (build step 9).
+  local flags_var="COMPILE_FLAGS_$n"
+  # shellcheck disable=SC2086 # the flags are words, split on purpose
+  "$MARCH" --compile ${!flags_var:-} -o "$work/node_$n" "$work/node_$n.march" > "$work/compile_$n.log" 2>&1 \
     || { cat "$work/compile_$n.log" >&2; fail "node_$n.march did not compile"; }
 }
 
