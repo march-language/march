@@ -41,7 +41,7 @@ mod ProtocolNodeB do
       Ok(a) -> Cons(a, Nil)
       Err(e) -> panic(e)
     end
-    match SessionNode.run(c, 2, Cons(1, Nil), "node-b", "bad-secret", addrs, Bad_Msg.fingerprint(), fn _ep -> (), fn s -> body(s)) do
+    match SessionNode.run(c, 2, Cons(1, Nil), "node-b", "bad-secret", addrs, Bad_Msg.fingerprint(), "Bad", Bad_Msg.role_names(), fn _ep -> (), fn s -> body(s)) do
       Ok(_) -> println("B: done")
       Err(e) -> panic(SessionNode.run_error_message(e))
     end

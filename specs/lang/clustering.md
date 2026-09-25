@@ -395,6 +395,11 @@ forms at access points, both sides check
 | the offer, on each invitation | the certificate of the node the invitation came from names `Proto.Role:initiate` for the role it plays | the offer refuses: `initiator node-a not authorized for Checkout.Client` |
 | each party, once the session forms | every role's endpoint is on a node whose certificate allows that role | `Connect(role, "... is held by node-c: not authorized for ...")` |
 | a node, opening an offer | its own certificate names `Proto.Role:offer` | `Err(Unauthorized(role, why))` |
+| each side of a direct session (`run_<Role>`), when it connects | the peer's certificate names the role it announces, as `:offer` or `:initiate` | `Connect(role, "role P.R is played by node-a: not authorized for P.R")` or `Accept(...)` |
+
+The direct runner (`run_<Role>`, `host_<Role>`) uses certificate mode when
+`MARCH_NODE_CERT` is set, read by `ClusterNode.auth_from_env(name, secret)` from
+the same variables a cluster node reads.
 
 The checks read the certificate the node verified in its handshake with that
 peer. They never trust the registry: offer names and session names are

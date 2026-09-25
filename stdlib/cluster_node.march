@@ -174,6 +174,34 @@ mod ClusterNode do
   end
 
   doc """
+  How a node named [name] authenticates, from the environment, for code that
+  opens connections of its own (SessionNode's direct runner, `run_<Role>`):
+  certificate mode when MARCH_NODE_CERT is set (with MARCH_NODE_KEY and
+  MARCH_CLUSTER_OPERATOR_PUBKEY, each a value or a file, and
+  MARCH_CLUSTER_REVOCATIONS for the revoked list), exactly as
+  `config_from_env` reads them; otherwise `ClusterAuth.Secret([secret])`.
+  """
+  fn auth_from_env(name : String, secret : String) : Result(ClusterAuth.Auth, String) do
+    let cert = env_file("MARCH_NODE_CERT")
+    let key = env_file("MARCH_NODE_KEY")
+    if String.is_empty(cert) do
+      if String.is_empty(key) do Ok(ClusterAuth.Secret(secret))
+      else Err("cluster_node: MARCH_NODE_KEY is set but MARCH_NODE_CERT is not") end
+    else
+      match credentials(name, key, cert, env_file("MARCH_CLUSTER_OPERATOR_PUBKEY")) do
+        Err(e) -> Err(e)
+        Ok(creds) ->
+          match revocations_from_text(env_file("MARCH_CLUSTER_REVOCATIONS"), creds.operator_pubkey) do
+            Err(e) -> Err("cluster_node: MARCH_CLUSTER_REVOCATIONS: " ++ e)
+            Ok(revs) ->
+              let rs = List.map(revs, fn r -> r.rev)
+              Ok(ClusterAuth.Certified({ creds with revoked: fn c -> NodeCert.is_revoked(c, rs) }))
+          end
+      end
+    end
+  end
+
+  doc """
   Configuration from the environment: MARCH_NODE_NAME, MARCH_NODE_PORT,
   MARCH_NODE_ADVERTISE (default 127.0.0.1:<port>), MARCH_CLUSTER_NODES
   (seeds, host:port,...), MARCH_CLUSTER_SECRET, MARCH_NODE_CREATION (default:
@@ -2783,8 +2811,8 @@ mod ClusterNode do
 
   doc """
   The certificate peer [node_id] presented in its latest verified handshake
-  (certificate mode), or None (shared-secret mode, or no such peer). Step
-  11b checks role permissions and the raw-send flag against it.
+  (certificate mode), or None (shared-secret mode, or no such peer). The
+  step-11b checks (session roles, raw sends, registry visibility) read it.
   """
   fn peer_cert(c : Cap(ClusterNode.Live), node_id : String) : Option(NodeCert.Cert) do
     let d = ops(c)

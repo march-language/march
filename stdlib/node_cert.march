@@ -13,9 +13,10 @@
 --   issuer  spiffe://<trust-domain>/operator/<first 16 hex digits of the operator key>
 --
 -- Roles are "Proto.Role:offer" / "Proto.Role:initiate"; the one flag so far
--- is "raw_send". Nothing checks roles or flags yet: that is step 11b
--- (`offer_verdict`/`fill_roles`, `ClusterNode.send_msg`/`route`), which reads
--- them from `ClusterNode.peer_cert`.
+-- is "raw_send". Step 11b checks them: roles at session formation
+-- (SessionAP.authorize, from SessionNode's access points and direct runner),
+-- raw_send on every raw send and registry lookup (ClusterNode, NodeSend,
+-- NodeCall). See specs/lang/clustering.md, "Authorization".
 --
 -- Wire form. The body is the canonical MessagePack array
 --   ["march-node-cert-v1", node, [role...], [flag...], not_after, issuer,

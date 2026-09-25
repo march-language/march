@@ -238,7 +238,12 @@ The arguments are:
 - `c`: the program's IO capability.
 - `"node-c"`: this node's name, used in the handshake.
 - `"fan-secret"`: a secret every node in the session shares. A node with a different secret
-  is refused.
+  is refused. With `MARCH_NODE_CERT` set (and `MARCH_NODE_KEY`,
+  `MARCH_CLUSTER_OPERATOR_PUBKEY`, as for a cluster node) the node runs in
+  [certificate mode]({{ site.baseurl }}/docs/clustering/#authorization) instead and the
+  secret is unused. Each side then checks that the peer's certificate lets it play the
+  role it announces (`Proto.Role:offer` or `:initiate`), and refuses with
+  `Connect`/`Accept`: `role Audit.A is played by node-a: not authorized for Audit.A`.
 - `Fan_Run.addrs_from_env()`: where the roles are, read from the environment (next section).
 - The body: a function from the session and C's first state to `Yield`. Its type comes from
   the protocol, so passing A's body to `run_C` does not compile.

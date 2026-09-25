@@ -1698,27 +1698,56 @@ mod SessionNode do
 
   -- Dial [a] every 100 ms until it answers or [attempts] run out (connect_ms
   -- worth), each handshake bounded by [timeout_ms].
-  pfn dial_retry(a : Addr, me, secret : String, attempts : Int, timeout_ms : Int) : Result(Peer, String) do
-    match ClusterConn.connect_split_within(PeerRegistry.empty(), a.host, a.port, me, secret, timeout_ms) do
-      Ok((_reg, conn)) -> Ok(conn)
+  -- [auth] is the node's (`ClusterNode.auth_from_env`): a shared secret, or
+  -- its certificate (step 11b), in which case the peer's verified
+  -- certificate comes back with the connection.
+  pfn dial_retry(a : Addr, me, auth : ClusterAuth.Auth, attempts : Int, timeout_ms : Int)
+      : Result((Peer, Option(NodeCert.Cert)), String) do
+    match ClusterConn.connect_split_auth(PeerRegistry.empty(), a.host, a.port, me, auth, timeout_ms) do
+      Ok((_reg, conn, cert)) -> Ok((conn, cert))
       Err(e) ->
         -- The peer answered and rejected the handshake: retrying cannot
         -- help, and the peer has given up on this node, so a retry would
         -- only be refused and hide the real reason.
         if String.starts_with(e, "Handshake:") do
-          Err(e ++ " (do both nodes run with the same secret?)")
+          match auth do
+            ClusterAuth.Secret(_) -> Err(e ++ " (do both nodes run with the same secret?)")
+            ClusterAuth.Certified(_) -> Err(e)
+          end
         else if attempts <= 1 do
           Err(e)
         else
           sleep_ms(100)
-          dial_retry(a, me, secret, attempts - 1, timeout_ms)
+          dial_retry(a, me, auth, attempts - 1, timeout_ms)
         end end
+    end
+  end
+
+  -- The direct runner's two-way role check (step 11b): in certificate mode
+  -- the peer's verified certificate must let it play role [r] of [proto]
+  -- (either mode: a direct session has no offer or initiator). Always Ok
+  -- with a shared secret.
+  pfn direct_role_ok(auth : ClusterAuth.Auth, cert : Option(NodeCert.Cert), proto : String,
+                     roles : List((String, Int)), r : Int, who : String) : Result((), String) do
+    match auth do
+      ClusterAuth.Secret(_) -> Ok(())
+      ClusterAuth.Certified(_) ->
+        let name = SessionAP.role_name(roles, r)
+        match SessionAP.authorize(cert, proto, name, SessionAP.offer_mode()) do
+          Ok(_) -> Ok(())
+          Err(_) ->
+            match SessionAP.authorize(cert, proto, name, SessionAP.initiate_mode()) do
+              Ok(_) -> Ok(())
+              Err(why) -> Err("role " ++ SessionAP.role_label(proto, name) ++ " is played by " ++ who ++ ": " ++ why)
+            end
+        end
     end
   end
 
   -- Every setup failure below tears down the connections made so far
   -- (`abort_links`), so the peers already reached learn of it at once.
-  pfn dial_all(p : Party, roles : List(Int), addrs : List(Addr), me, secret : String, fingerprint : String) : Result(Party, RunError) do
+  pfn dial_all(p : Party, roles : List(Int), addrs : List(Addr), me, auth : ClusterAuth.Auth, fingerprint : String,
+               proto : String, names : List((String, Int))) : Result(Party, RunError) do
     match roles do
       Nil -> Ok(p)
       Cons(r, rest) ->
@@ -1729,16 +1758,23 @@ mod SessionNode do
           Some(a) ->
             let t = connect_ms()
             let attempts = if t > 0 do if t / 100 > 1 do t / 100 else 1 end else 1000000000 end
-            match dial_retry(a, me, secret, attempts, t) do
+            match dial_retry(a, me, auth, attempts, t) do
               Err(e) ->
                 abort_links(p)
                 Err(RunError.Connect(r, e))
-              Ok(conn) ->
-                match join_dialed(p, r, conn, t, fingerprint) do
+              Ok((conn, cert)) ->
+                match direct_role_ok(auth, cert, proto, names, r, conn.identity.name) do
                   Err(e) ->
+                    close_peer(conn)
                     abort_links(p)
                     Err(RunError.Connect(r, e))
-                  Ok(p2) -> dial_all(p2, rest, addrs, me, secret, fingerprint)
+                  Ok(_) ->
+                    match join_dialed(p, r, conn, t, fingerprint) do
+                      Err(e) ->
+                        abort_links(p)
+                        Err(RunError.Connect(r, e))
+                      Ok(p2) -> dial_all(p2, rest, addrs, me, auth, fingerprint, proto, names)
+                    end
                 end
             end
         end
@@ -1759,18 +1795,19 @@ mod SessionNode do
   -- role connects within connect_ms (each accept waits that long, so a
   -- cluster whose roles keep arriving is never cut off): a role that never
   -- starts, or failed its own setup, no longer holds this one for ever.
-  pfn accept_all(p : Party, expected : List(Int), listen_fd : Int, me, secret : String, fingerprint : String) : Result(Party, RunError) do
+  pfn accept_all(p : Party, expected : List(Int), listen_fd : Int, me, auth : ClusterAuth.Auth, fingerprint : String,
+                 proto : String, names : List((String, Int))) : Result(Party, RunError) do
     match expected do
       Nil -> Ok(p)
       _ ->
         let t = connect_ms()
-        match ClusterConn.accept_split_within(PeerRegistry.empty(), listen_fd, me, secret, t) do
+        match ClusterConn.accept_split_auth(PeerRegistry.empty(), listen_fd, me, auth, t) do
           Err(e) ->
             abort_links(p)
             if e == "tcp_accept: timed out" do
               Err(RunError.Accept("no connection from role(s) " ++ show_roles(expected) ++ " within " ++ int_to_string(t) ++ " ms"))
             else Err(RunError.Accept(e)) end
-          Ok((_reg, conn)) ->
+          Ok((_reg, conn, cert)) ->
             match join_accepted(p, conn, t, fingerprint) do
               Err(e) ->
                 abort_links(p)
@@ -1781,7 +1818,14 @@ mod SessionNode do
                   panic("session_node: role " ++ int_to_string(p.my_role) ++ " accepted a connection from role "
                         ++ int_to_string(got) ++ " but expects role(s) " ++ show_roles(expected))
                 else () end
-                accept_all(p2, List.filter(expected, fn r -> r != got), listen_fd, me, secret, fingerprint)
+                -- The role comes from the peer's hello: its certificate must
+                -- allow it (step 11b).
+                match direct_role_ok(auth, cert, proto, names, got, conn.identity.name) do
+                  Err(e) ->
+                    abort_links(p2)
+                    Err(RunError.Accept(e))
+                  Ok(_) -> accept_all(p2, List.filter(expected, fn r -> r != got), listen_fd, me, auth, fingerprint, proto, names)
+                end
             end
         end
     end
@@ -1810,7 +1854,12 @@ mod SessionNode do
   must hold this role's own entry iff it accepts anyone and an entry for
   every peer it dials; a missing one panics by role before any socket opens.
   [node_id] names this node in the handshake and [secret] is the cluster
-  secret every node shares. [fingerprint] is the protocol's own
+  secret every node shares; with MARCH_NODE_CERT set the node runs in
+  certificate mode instead (`ClusterNode.auth_from_env`, the variables a
+  cluster node reads), and each peer's certificate must let it play the
+  role it announces in [proto] (named by [roles], `<P>_Msg.role_names()`),
+  else setup fails with `Connect`/`Accept` "role P.R is played by <node>:
+  not authorized for P.R". [fingerprint] is the protocol's own
   (`<P>_Msg.fingerprint()`): it rides the hello, and a peer whose own differs
   -- or that is too old to send one at all -- is refused at setup with a
   `Connect`/`Accept` error rather than discovered mid-session as an
@@ -1824,9 +1873,9 @@ mod SessionNode do
   the session, after the party has been torn down.
   """
   fn run(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
-         addrs : List(Addr), fingerprint : String, on_close : Int -> Unit,
-         body : Cap(Session.Live) -> Unit) : Result(Session.Outcome, RunError) do
-    run_party(io, my_role, peers, node_id, secret, addrs, fingerprint, on_close, fn (_p, s) -> body(s))
+         addrs : List(Addr), fingerprint : String, proto : String, roles : List((String, Int)),
+         on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result(Session.Outcome, RunError) do
+    run_party(io, my_role, peers, node_id, secret, addrs, fingerprint, proto, roles, on_close, fn (_p, s) -> body(s))
   end
 
   doc """
@@ -1847,10 +1896,11 @@ mod SessionNode do
   generated `<P>_Run.host_<Role>` supplies the role and its peers.
   """
   fn run_hosted(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
-                addrs : List(Addr), fingerprint : String, on_close : Int -> Unit, host : Int,
+                addrs : List(Addr), fingerprint : String, proto : String, roles : List((String, Int)),
+                on_close : Int -> Unit, host : Int,
                 start : Cap(Session.Live) -> Unit,
                 deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit) : Result(Session.Outcome, RunError) do
-    run_hosted_or(io, my_role, peers, node_id, secret, addrs, fingerprint, on_close, host, start, deliver,
+    run_hosted_or(io, my_role, peers, node_id, secret, addrs, fingerprint, proto, roles, on_close, host, start, deliver,
                   fn (_s, _role, _cause, _ep) -> ())
   end
 
@@ -1862,11 +1912,12 @@ mod SessionNode do
   the rest of its state; it cannot communicate in the cancelled session.
   """
   fn run_hosted_or(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
-                   addrs : List(Addr), fingerprint : String, on_close : Int -> Unit, host : Int,
+                   addrs : List(Addr), fingerprint : String, proto : String, roles : List((String, Int)),
+                   on_close : Int -> Unit, host : Int,
                    start : Cap(Session.Live) -> Unit,
                    deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
                    cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result(Session.Outcome, RunError) do
-    run_party(io, my_role, peers, node_id, secret, addrs, fingerprint, on_close,
+    run_party(io, my_role, peers, node_id, secret, addrs, fingerprint, proto, roles, on_close,
               fn (p, s) -> host_party(p, s, host, start, deliver, cancel))
   end
 
@@ -1902,19 +1953,26 @@ mod SessionNode do
   end
 
   pfn run_party(io : Cap(IO), my_role : Int, peers : List(Int), node_id : String, secret : String,
-                addrs : List(Addr), fingerprint : String, on_close : Int -> Unit,
+                addrs : List(Addr), fingerprint : String, proto : String, roles : List((String, Int)),
+                on_close : Int -> Unit,
                 drive : Party -> Cap(Session.Live) -> Unit) : Result(Session.Outcome, RunError) do
     match missing_addrs(my_role, peers, addrs) do
       Nil -> ()
       missing -> panic("session_node: role " ++ int_to_string(my_role) ++ " needs an address for role(s) " ++ show_roles(missing))
     end
     let me = NodeIdentity.make(node_id, "pk-" ++ node_id, 1)
+    -- Certificate mode when MARCH_NODE_CERT is set, as for a cluster node
+    -- (step 11b); else the shared [secret].
+    let? auth = match ClusterNode.auth_from_env(node_id, secret) do
+      Ok(a) -> Ok(a)
+      Err(e) -> Err(RunError.Connect(my_role, e))
+    end
     let higher = accepts(my_role, peers)
     let? listen_fd = open_listener(my_role, higher, addrs)
     let p0 = party(my_role, node_id, on_close)
-    let joined = match dial_all(p0, dials(my_role, peers), addrs, me, secret, fingerprint) do
+    let joined = match dial_all(p0, dials(my_role, peers), addrs, me, auth, fingerprint, proto, roles) do
       Err(e) -> Err(e)
-      Ok(p1) -> accept_all(p1, higher, listen_fd, me, secret, fingerprint)
+      Ok(p1) -> accept_all(p1, higher, listen_fd, me, auth, fingerprint, proto, roles)
     end
     match joined do
       Err(e) ->

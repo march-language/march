@@ -146,6 +146,15 @@ git log is authoritative for exact commits.
   identity; `GlobalRegistry.Entry` gains `registrant`, `register_as`); it is not
   on the wire or in the Merkle hash. `GlobalPid.make` stays pure: sending to a
   pid is what is checked.
+- **The direct session runner speaks certificate mode** (step 11b, part 4).
+  `run_<Role>` / `host_<Role>` / `host_<Role>_or` authenticate by certificate
+  when `MARCH_NODE_CERT` is set (new `ClusterNode.auth_from_env(name, secret)`,
+  the variables a cluster node reads), over `ClusterConn.connect_split_auth` /
+  `accept_split_auth`, and each side refuses a peer whose certificate does not
+  let it play the role it announces ("role Audit.A is played by node-a: not
+  authorized for Audit.A"). Without it, the shared secret as before.
+  `SessionNode.run`, `run_hosted` and `run_hosted_or` take the protocol name and
+  role names after the fingerprint (the generated runners pass them).
 - **Placement changes on a running system and upgrade tests** (build step 8 of the
   distributed-deploys plan). A topology app's nodes re-read their topology on
   SIGHUP and move their own offers: a role's placement, capacity, or a pool that

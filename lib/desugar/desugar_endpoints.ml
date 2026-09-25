@@ -1776,7 +1776,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
-                var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
+                var "secret"; var "addrs"; app (msg ^ ".fingerprint") [];
+                lit_str proto; app (msg ^ ".role_names") []; lam [ "_ep" ] unit;
                 call_body role ]))
       roles
   in
@@ -1858,7 +1859,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_hosted"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
-                var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
+                var "secret"; var "addrs"; app (msg ^ ".fingerprint") [];
+                lit_str proto; app (msg ^ ".role_names") []; lam [ "_ep" ] unit;
                 app "pid_to_int" [ var "host" ]; start_of role; var "deliver" ]))
       roles
   in
@@ -1876,7 +1878,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_hosted_or"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
-                var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
+                var "secret"; var "addrs"; app (msg ^ ".fingerprint") [];
+                lit_str proto; app (msg ^ ".role_names") []; lam [ "_ep" ] unit;
                 app "pid_to_int" [ var "host" ]; start_of role; var "deliver"; var "cancel" ]))
       roles
   in
