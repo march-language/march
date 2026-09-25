@@ -525,6 +525,12 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- `compare` on a NaN `Float` now gives the same answer compiled as interpreted:
+  NaN compares equal to NaN and less than every other value (OCaml's
+  `Float.compare`). Compiled `compare` returned 0 whenever either operand was
+  NaN, so NaN "equalled" everything and a sort by `compare` scattered the NaNs.
+  `compare_float` now has the same order on both backends (the interpreter's
+  also returned 0 for NaN). `==`, `<` and the other operators stay IEEE 754.
 - **Compiling a module with no `main` no longer takes minutes.** A TIR pass
   rewrote the rest of a function twice for every non-capturing closure it
   found ineligible, so a function that builds a record of many small lambdas
