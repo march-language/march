@@ -1,0 +1,128 @@
+-- Scenario "hcr_new_code_session", node-a, VERSION 2, the hot patch
+-- deployed over node_a.march (see it for the design): offers role Shop of `Order` from the hosting actor
+-- ShopHost and keeps the offer in a Vault. The code that changes between
+-- the versions lives in the nested module `Host`, so it is on the
+-- hot-reload boundary (`--hot-reload HcrSessionA`; entry-module functions
+-- get bare names and are not); the actor's handler and `main` are the same
+-- in both versions and are NOT activated by the deploy. Their calls into
+-- `Host` reach version 2 only because a call dispatches whenever its callee
+-- is reloadable, whoever the caller is. See scenario.sh.
+mod HcrSessionA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Order do
+    loop do
+      item: Buyer -> Shop : Int
+      choose by Shop:
+        more -> Shop -> Buyer : Int
+        done -> Shop -> Buyer : Int
+                stop
+      end
+    end
+  end
+
+  mod Host do
+    needs IO
+    needs IO.Console
+    needs IO.Mut
+    needs IO.NetConnect
+    needs IO.NetListen
+    needs IO.Spawn
+    needs IO.Clock
+    needs Session.Live
+    needs ClusterNode.Live
+
+    fn version() : Int do 2 end
+
+    -- The Shop: answers `done` with its version after four items, so the
+    -- Buyer can tell which version served it.
+    fn shop(s : Cap(Session.Live), st : Order_Shop.Entry) : Order_Shop.Yield do
+      Order_Shop.recv_Item(s, st, fn (n, st1) ->
+        sleep_ms(100)
+        if n >= 4 do Order_Shop.close(s, Order_Shop.choose_done(s, st1, version()))
+        else shop(s, Order_Shop.choose_more(s, st1, version())) end)
+    end
+
+    fn offers() : Vault(SessionNode.Offer) do
+      match Vault.whereis("hcr_offers") do
+        Some(v) -> v
+        None -> Vault.new("hcr_offers")
+      end
+    end
+
+    -- The hosting actor's tick: open the offer once and keep it. The offer's
+    -- body closure is built here, by version 1; its call to `shop` is a
+    -- boundary call too, so sessions formed after the deploy get version 2.
+    fn host_tick(c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
+      let v = offers()
+      -- Version 2 reports, once, whether it finds the offer version 1
+      -- stored: with a second vault registry in the patch it would not, and
+      -- would open a second offer.
+      let flags = Vault.open("hcr_flags")
+      match Vault.get(v, "cur") do
+        Some(_) ->
+          if Vault.get(flags, "noted") == None do
+            Vault.set(flags, "noted", 1)
+            println("node-a: version 2 host sees the version-1 offer")
+          else () end
+        None ->
+          if Vault.get(flags, "noted") == None do
+            Vault.set(flags, "noted", 1)
+            println("node-a: version 2 host finds NO offer: it opens another")
+          else () end
+          match Order_Run.offer_Shop(c, h, 64, fn (s, st) -> shop(s, st)) do
+            Ok(o) -> Vault.set(v, "cur", o)
+            Err(e) -> panic(SessionNode.run_error_message(e))
+          end
+      end
+    end
+  end
+
+  type ShopHostState = { ticks : Int }
+
+  actor ShopHost do
+    state { ticks : Int }
+    init  { ticks: 0 }
+    -- Identical in both versions: never activated by the deploy.
+    on Tick(c : Cap(IO), h : Cap(ClusterNode.Live)) do
+      Host.host_tick(c, h)
+      { ticks: state.ticks + 1 }
+    end
+  end
+
+  pfn ticking(a : Pid(ShopHostState), c : Cap(IO), h : Cap(ClusterNode.Live), left : Int) : () do
+    if left <= 0 do () else
+      let _ = send(a, Tick(c, h))
+      sleep_ms(500)
+      ticking(a, c, h, left - 1)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    -- A 15 s suspect timeout: a deploy under AddressSanitizer (the sanitize
+    -- gate runs every scenario with it) stalls the node for seconds while
+    -- the patch is verified and activated, and the default 3 s had node-b
+    -- declare node-a dead in the middle of it.
+    let cfg = { ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "hcr-secret", 1) with swim: Swim.config(500, 15000, 2) }
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let a = spawn(ShopHost)
+        let _ = send(a, Tick(c, h))
+        sleep_ms(200)
+        println("node-a: offering")
+        -- Ticks until the scenario kills the node.
+        ticking(a, c, h, 400)
+        ClusterNode.stop(h)
+    end
+  end
+end

@@ -206,7 +206,9 @@
 ; build step 8, II.8) on fixtures/upgrade: v1 becomes a git commit (the ref);
 ; `good` (a handler's body changes; same message type) must PASS, `drops`
 ; (a handler removed with no migrate_msg, so the old feeder's messages are
-; dropped and counted) must FAIL. Each case builds the old version and the
+; dropped and counted) must FAIL, `live` (the role body changes; the new
+; body spawns a task, reads the old version's Vault and starts a session of
+; its own) must PASS with the new body's answer. Each case builds the old version and the
 ; patch, runs the old version's process with a reload socket, drives real
 ; sessions across a real hot deploy. test_topology_run's hermetic shape; it
 ; also needs `git` on PATH (the fixture repositories and the ref's worktree).

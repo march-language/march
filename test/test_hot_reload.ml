@@ -69,11 +69,20 @@ let test_boundary_to_stdlib_is_direct () =
   check "app→stdlib stays direct" false
     (HR.needs_dispatch cfg ~caller_module:"MyApp.Router" ~callee_module:"List")
 
-let test_stdlib_to_boundary_is_direct () =
-  (* Non-boundary callers are fully optimised and never dispatch-indirect. *)
+let test_non_boundary_caller_to_boundary_dispatches () =
+  (* The callee decides: a non-reloadable caller (stdlib, the entry module,
+     a lifted closure with a bare name) still goes through the table, or its
+     call would be pinned to the baseline for ever (2026-09-25). *)
   let cfg = HR.default_config "MyApp" in
-  check "stdlib→app stays direct" false
-    (HR.needs_dispatch cfg ~caller_module:"List" ~callee_module:"MyApp.Service")
+  check "stdlib→app dispatches" true
+    (HR.needs_dispatch cfg ~caller_module:"List" ~callee_module:"MyApp.Service");
+  check "entry module (bare name)→app dispatches" true
+    (HR.needs_dispatch cfg ~caller_module:"" ~callee_module:"MyApp.Service");
+  check "excluded caller→app dispatches" true
+    (HR.needs_dispatch { cfg with HR.excludes = ["MyApp.Cold"] }
+       ~caller_module:"MyApp.Cold" ~callee_module:"MyApp.Service");
+  check "stdlib→stdlib stays direct" false
+    (HR.needs_dispatch cfg ~caller_module:"List" ~callee_module:"Map")
 
 let test_excluded_callee_is_direct () =
   let cfg = { (HR.default_config "MyApp") with HR.excludes = ["MyApp.Hot.Inner"] } in
@@ -398,7 +407,7 @@ let () =
     ("dispatch_edge", [
       Alcotest.test_case "boundary→boundary needs dispatch"  `Quick test_boundary_to_boundary_needs_dispatch;
       Alcotest.test_case "boundary→stdlib is direct"         `Quick test_boundary_to_stdlib_is_direct;
-      Alcotest.test_case "stdlib→boundary is direct"         `Quick test_stdlib_to_boundary_is_direct;
+      Alcotest.test_case "non-boundary caller→boundary dispatches" `Quick test_non_boundary_caller_to_boundary_dispatches;
       Alcotest.test_case "excluded callee is direct"         `Quick test_excluded_callee_is_direct;
     ]);
     ("llvm_emit", [

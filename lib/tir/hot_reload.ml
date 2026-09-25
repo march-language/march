@@ -48,16 +48,27 @@ let is_reloadable (cfg : config) (m : string) : bool =
 (** Must a direct call from [caller_module] to [callee_module] route through
     the versioned dispatch table (vs. a plain, inlinable direct call)?
 
-    Per specs/hot-code-reload.md Part 2 only boundary→boundary edges cross the
-    table: the callee must be reloadable so a new version can be swapped in, and
-    the caller must be on the boundary (non-boundary code — stdlib/deps — is
-    fully optimised and direct-calls everything). Calls to stdlib/excluded
-    modules, and into the runtime, stay direct. (Intra-SCC calls also stay
-    direct; that is an SCC-level decision made by the caller of this predicate,
-    not a module-level one.) *)
+    A call dispatches whenever the CALLEE is reloadable, whoever the caller
+    is.  Until 2026-09-25 the caller had to be reloadable too (only
+    boundary→boundary edges crossed the table, per the first reading of
+    specs/hot-code-reload.md Part 2), which pinned every call from
+    non-reloadable code into the boundary to the baseline for ever: the
+    generated topology `main` and the entry module (never reloadable, see
+    [is_entry_fn] in llvm_toplevel.ml), the closures they build, and any
+    stdlib code that calls back into the app (Topology.reoffer reopening a
+    role with its OLD body after a deploy) all direct-called old code and
+    never saw a patch.  Nothing stops a non-reloadable caller from
+    dispatching: the table is process-global and a boundary call resolves
+    against the running proc's code epoch (march_dispatch_enter_unit), so the
+    call gets the code its task was spawned under.  Calls to stdlib/excluded
+    modules, and into the runtime, stay direct.  (Intra-SCC calls also stay
+    direct; that is an SCC-level decision made by the caller of this
+    predicate, not a module-level one.)  [caller_module] is kept in the
+    signature so a call site still names both ends of the edge. *)
 let needs_dispatch (cfg : config) ~(caller_module : string)
     ~(callee_module : string) : bool =
-  is_reloadable cfg caller_module && is_reloadable cfg callee_module
+  ignore caller_module;
+  is_reloadable cfg callee_module
 
 (* ── NAME_ID interning ─────────────────────────────────────────────────────
 

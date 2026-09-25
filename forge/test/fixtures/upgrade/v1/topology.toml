@@ -3,7 +3,7 @@
 # step 8: `forge test --upgrade-from`).
 
 [roles]
-"Echo.Server" = { body = "UpgradeApp.serve_one", capacity = 8 }
+"Echo.Server" = { body = "UpgradeApp.Serve.serve_one", capacity = 8 }
 
 [pool.app]
 start = "UpgradeApp.start"

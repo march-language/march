@@ -242,7 +242,8 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
                          [do_activate] resolves the patch by name. Leaving them
                          default-visible does NOT reopen the "v1 wins" hazard
                          above: every boundary→boundary call in the emitted IR
-                         (see [needs_dispatch] in llvm_emit.ml) is rewritten to
+                         (see [needs_dispatch] in llvm_emit_call.ml: every
+                         call whose CALLEE is a boundary fn) is rewritten to
                          an indirect call through march_dispatch_enter/_gen,
                          which looks the callee up in the versioned dispatch
                          table by NAME_ID rather than emitting a direct

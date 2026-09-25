@@ -1,0 +1,168 @@
+-- Scenario "hcr_new_code_session", node-b, version 1 (node_b_v2.march is
+-- the hot patch): initiates role Buyer of `Order` over and over for a fixed
+-- time, each session from a task the Driver actor spawns. The Buyer code
+-- lives in the nested module `Buy`, on the hot-reload boundary; the Driver's
+-- handler and `main` are identical in both versions, so the deploy activates
+-- only `Buy.*`, and a task spawned after it runs version 2 only because its
+-- call into `Buy` dispatches (a call dispatches whenever its callee is
+-- reloadable). Each of those tasks runs a cluster session, a party endpoint
+-- actor and more green threads on the NEW code: what crashed when a patch
+-- carried its own copy of the C runtime. Every outcome is counted, then
+-- summarised. See scenario.sh.
+mod HcrSessionB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Order do
+    loop do
+      item: Buyer -> Shop : Int
+      choose by Shop:
+        more -> Shop -> Buyer : Int
+        done -> Shop -> Buyer : Int
+                stop
+      end
+    end
+  end
+
+  mod Buy do
+    needs IO
+    needs IO.Console
+    needs IO.Mut
+    needs IO.NetConnect
+    needs IO.NetListen
+    needs IO.Spawn
+    needs IO.Clock
+    needs Session.Live
+    needs ClusterNode.Live
+
+    fn version() : Int do 1 end
+
+    fn tally() : Vault(Int) do
+      match Vault.whereis("hcr_tally") do
+        Some(t) -> t
+        None -> Vault.new("hcr_tally")
+      end
+    end
+
+    fn count(key : String, k : Int) : () do
+      let _ = Vault.incr(tally(), key, k)
+      ()
+    end
+
+    fn buyer(s : Cap(Session.Live), st : Order_Buyer.Entry, n : Int) : Order_Buyer.Yield do
+      let st1 = Order_Buyer.send_Item(s, st, n)
+      Order_Buyer.offer_more_done(s, st1,
+        fn (_v, st2) -> buyer(s, st2, n + 1),
+        fn (v, st2) ->
+          count("pair:" ++ int_to_string(version()) ++ "/" ++ int_to_string(v), 1)
+          Order_Buyer.close(s, st2))
+    end
+
+    -- One session, its outcome counted: Finished, Drained (D27: ended at a
+    -- loop boundary while an epoch drained), refused at formation, or
+    -- failed -- the last is a LOST session.
+    fn session(c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
+      count("started", 1)
+      match Order_Run.initiate_Buyer(c, h, fn (s, st) -> buyer(s, st, 1)) do
+        Ok(Session.Finished) -> count("finished", 1)
+        Ok(Session.Drained(_)) -> count("drained", 1)
+        Err(SessionNode.NoOffer(_, why)) ->
+          count("refused", 1)
+          println("node-b: refused at formation: " ++ why)
+        Err(e) ->
+          count("failed", 1)
+          println("node-b: session failed: " ++ Order_Run.error_message(e))
+      end
+      count("ended", 1)
+    end
+  end
+
+  type DriverState = { started : Int }
+
+  actor Driver do
+    state { started : Int }
+    init  { started: 0 }
+    -- Identical in both versions: never activated by the deploy.
+    on Go(c : Cap(IO), h : Cap(ClusterNode.Live)) do
+      let _ = task_spawn(fn _ -> do
+        Buy.session(c, h)
+        0
+      end)
+      { started: state.started + 1 }
+    end
+  end
+
+  pfn settled() : Bool do
+    let t = Buy.tally()
+    Vault.get_or(t, "ended", 0) >= Vault.get_or(t, "started", 0)
+  end
+
+  pfn seen(key : String) : String do
+    if Vault.get_or(Buy.tally(), key, 0) > 0 do "seen" else "NOT seen" end
+  end
+
+  pfn summary() : () do
+    let t = Buy.tally()
+    println("node-b: sessions lost: " ++ int_to_string(Vault.get_or(t, "failed", 0)))
+    println("node-b: sessions refused at formation: " ++ int_to_string(Vault.get_or(t, "refused", 0)))
+    println("node-b: every session Finished or Drained: "
+      ++ bool_to_string(Vault.get_or(t, "finished", 0) + Vault.get_or(t, "drained", 0) == Vault.get_or(t, "started", 0)))
+    println("node-b: v1 Buyer with a v1 Shop: " ++ seen("pair:1/1"))
+    println("node-b: v2 Buyer with a v1 Shop: " ++ seen("pair:2/1"))
+    println("node-b: v2 Buyer with a v2 Shop: " ++ seen("pair:2/2"))
+    println("node-b: v1 Buyer with a v2 Shop: " ++ seen("pair:1/2"))
+  end
+
+  pfn drive(d : Pid(DriverState), c : Cap(IO), h : Cap(ClusterNode.Live), until : Int) : () do
+    if unix_time_ms() >= until do ()
+    else
+      let _ = send(d, Go(c, h))
+      sleep_ms(150)
+      drive(d, c, h, until)
+    end
+  end
+
+  pfn settle(left : Int) : () do
+    if settled() do ()
+    else if left <= 0 do println("node-b: sessions still running at the end") else
+      sleep_ms(50)
+      settle(left - 50)
+    end end
+  end
+
+  pfn offered(h : Cap(ClusterNode.Live), left : Int) : Bool do
+    if List.any(ClusterNode.names(h), fn nm -> String.starts_with(nm, "ap:Order/2/")) && ClusterNode.link_count(h) >= 1 do true
+    else if left <= 0 do false else
+      sleep_ms(50)
+      offered(h, left - 50)
+    end end
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    -- 15 s suspect timeout: see node_a.march.
+    let cfg = { ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "hcr-secret", 1) with swim: Swim.config(500, 15000, 2) }
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 1, 60000) do () else panic("node-b: never joined") end
+        if offered(h, 60000) do () else panic("node-b: never saw the Shop offer") end
+        let d = spawn(Driver)
+        println("node-b: driving")
+        drive(d, c, h, unix_time_ms() + Env.get_int("HCR_DRIVE_MS", 12000))
+        settle(30000)
+        summary()
+        -- Linger so the scenario can read this node's reload counters.
+        sleep_ms(5000)
+        ClusterNode.stop(h)
+    end
+  end
+end

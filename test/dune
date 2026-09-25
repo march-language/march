@@ -1104,6 +1104,14 @@
  (modules test_fmt)
  (libraries march_lexer march_parser march_ast march_format alcotest))
 
+; hcr_deploy: a local hot deploy for scripts/two-node.sh scenarios
+; (test/two_node/hcr_new_code_session; step 9's protocol_evolve, whose
+; branch this tool comes from verbatim).
+(executable
+ (name hcr_deploy)
+ (modules hcr_deploy)
+ (libraries unix march_forge march_ed25519))
+
 (executable
  (name test_oracle)
  (modules test_oracle)
