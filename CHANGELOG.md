@@ -12,6 +12,8 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- The interpreter no longer dies with `stub NAME called before initialisation` when a nested module calls an enclosing module's fn that is declared after the nested module. This covers calls from the nested module's own fns, its impl methods and actor handlers, and modules nested further down. Compiled programs already worked (#645). A module-level `let` that calls a fn declared after it still fails, as before.
+
 - `forge run --processes` no longer occasionally assigns two pools the same cluster port (seen on Linux CI as `tcp_listen: bind failed`); the ports for all processes are now reserved together.
 
 - **Multi-threaded programs no longer occasionally abort with SIGTRAP (or a bare

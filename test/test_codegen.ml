@@ -10272,9 +10272,10 @@ let write_march_source ~name src_text =
    parent `fn` declared AFTER it, two levels of nesting (Deep reaching both
    Inner's and Outer's fns), an inner fn shadowing an outer one of the same
    name (the nearer one wins), and the QUALIFIED spelling `Outer.helper` of a
-   parent `pfn`.  Compiled only: the interpreter has a separate, pre-existing
-   bug with a parent fn declared after the nested module (see
-   specs/todos/2026-09-25-interp-nested-module-forward-parent-fn-stub.md). *)
+   parent `pfn`.  Each shape also runs INTERPRETED against the same expected
+   output: the interpreter used to die with "stub later called before
+   initialisation" on the parent fn declared after the nested module (see
+   specs/progress/2026-09-25-interp-nested-forward-parent-fn.md). *)
 let nested_parent_call_outer_src = {|mod Outer do
   pfn helper(x : Int) : Int do x + 1 end
 
@@ -10311,8 +10312,10 @@ let nested_parent_call_main_body = {|    println(int_to_string(Outer.Inner.f(41)
    Inner's shadowed(1) + 2 = 102; q: Outer.helper(8) = 9. *)
 let nested_parent_call_expected = "42\n40\n300\n51\n102\n9"
 
-let test_nested_module_parent_call_lib_path_compiled () =
-  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_parent"
+(* The entry file (main only) plus [Outer] as a MARCH_LIB_PATH module;
+   returns [(project_root, main_exe, src, tmp, lib_dir)]. *)
+let write_nested_parent_lib_path_project ~name =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name
     ("mod Main do\n\
      \  needs IO.Console\n\
      \  fn main(_c : Cap(IO.Console)) do\n"
@@ -10325,6 +10328,25 @@ let test_nested_module_parent_call_lib_path_compiled () =
   let oc = open_out (Filename.concat lib_dir "outer.march") in
   output_string oc nested_parent_call_outer_src;
   close_out oc;
+  (project_root, main_exe, src, tmp, lib_dir)
+
+(* [Outer] nested inside the entry file's own module. *)
+let nested_parent_call_entry_src () =
+  let indent s =
+    String.concat "\n"
+      (List.map (fun l -> if l = "" then l else "  " ^ l)
+         (String.split_on_char '\n' s)) in
+  "mod Main do\n\
+  \  needs IO.Console\n"
+  ^ indent nested_parent_call_outer_src ^
+  "\n  fn main(_c : Cap(IO.Console)) do\n"
+  ^ nested_parent_call_main_body ^
+  "  end\n\
+   end\n"
+
+let test_nested_module_parent_call_lib_path_compiled () =
+  let (project_root, main_exe, src, tmp, lib_dir) =
+    write_nested_parent_lib_path_project ~name:"march_nested_parent" in
   let bin = Filename.concat tmp "nested_parent_bin" in
   match compile_march_or_skip
           ~cmd_prefix:(Printf.sprintf "cd %s && MARCH_LIB_PATH=%s "
@@ -10340,19 +10362,9 @@ let test_nested_module_parent_call_lib_path_compiled () =
 (* The same modules nested inside the entry file's own module, which failed
    to link the same way. *)
 let test_nested_module_parent_call_entry_compiled () =
-  let indent s =
-    String.concat "\n"
-      (List.map (fun l -> if l = "" then l else "  " ^ l)
-         (String.split_on_char '\n' s)) in
-  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_parent_entry"
-    ("mod Main do\n\
-     \  needs IO.Console\n"
-     ^ indent nested_parent_call_outer_src ^
-     "\n  fn main(_c : Cap(IO.Console)) do\n"
-     ^ nested_parent_call_main_body ^
-     "  end\n\
-      end\n")
-  in
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_nested_parent_entry"
+      (nested_parent_call_entry_src ()) in
   let bin = Filename.concat tmp "nested_parent_entry_bin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
           ~main_exe ~bin ~src () with
@@ -10361,6 +10373,34 @@ let test_nested_module_parent_call_entry_compiled () =
     Alcotest.(check string)
       "an entry-file nested module links and calls its enclosing modules' fns"
       nested_parent_call_expected (read_cmd_output (Filename.quote bin))
+
+(* The same two programs, INTERPRETED.  stderr is folded into the compared
+   output so the pre-fix "stub later called before initialisation" death
+   shows up in the diff instead of as a bare truncated stdout. *)
+let test_nested_module_parent_call_lib_path_interpreted () =
+  let (project_root, main_exe, src, _tmp, lib_dir) =
+    write_nested_parent_lib_path_project ~name:"march_nested_parent_interp" in
+  Alcotest.(check string)
+    "interpreted: a MARCH_LIB_PATH module's nested module calls its enclosing \
+     modules' fns, including one declared after it"
+    nested_parent_call_expected
+    (read_cmd_output
+       (Printf.sprintf "cd %s && MARCH_LIB_PATH=%s %s %s 2>&1"
+          (Filename.quote project_root) (Filename.quote lib_dir)
+          (Filename.quote main_exe) (Filename.quote src)))
+
+let test_nested_module_parent_call_entry_interpreted () =
+  let (project_root, main_exe, src, _tmp) =
+    write_march_source ~name:"march_nested_parent_entry_interp"
+      (nested_parent_call_entry_src ()) in
+  Alcotest.(check string)
+    "interpreted: an entry-file nested module calls its enclosing modules' \
+     fns, including one declared after it"
+    nested_parent_call_expected
+    (read_cmd_output
+       (Printf.sprintf "cd %s && %s %s 2>&1"
+          (Filename.quote project_root)
+          (Filename.quote main_exe) (Filename.quote src)))
 
 (* A qualified call to an enclosing module's `pfn` names THAT module's fn even
    when the calling module has its own fn of the same name.  Pre-fix, in-file,
@@ -15997,6 +16037,10 @@ let codegen_suites =
             test_nested_module_parent_call_lib_path_compiled;
           Alcotest.test_case "entry-file nested module calls enclosing fns (compiled)" `Quick
             test_nested_module_parent_call_entry_compiled;
+          Alcotest.test_case "MARCH_LIB_PATH nested module calls enclosing fns (interpreted)" `Quick
+            test_nested_module_parent_call_lib_path_interpreted;
+          Alcotest.test_case "entry-file nested module calls enclosing fns (interpreted)" `Quick
+            test_nested_module_parent_call_entry_interpreted;
           Alcotest.test_case "qualified parent pfn is not shadowed by an inner fn" `Quick
             test_nested_module_qualified_parent_pfn_not_shadowed;
         ] );

@@ -3299,6 +3299,31 @@ let spawn_from_spec (spec : value) : unit =
     later fill it with the real closure. *)
 type stub = { mutable sv : value }
 
+(** Pass-1 forward-reference placeholder for fn [name] of the scope whose
+    evolving environment is [scope_ref].
+
+    A closure built while the scope is still being walked can capture this
+    placeholder rather than the real fn: a nested module declared BEFORE
+    [name] (its [inner_ref] starts from the parent env as it stood then), a
+    nested module's actor or impl, two levels down, and so on. Those
+    environments are never re-pointed at the parent's final env, so a
+    placeholder that only raised made `mod Inner do fn g() do later() end end`
+    followed by `fn later` die with "stub later called before initialisation"
+    although it typechecks and runs compiled.
+
+    So at call time the placeholder resolves [name] in the scope's CURRENT
+    env and forwards to it. A genuine too-early call (a top-level `let` that
+    runs [name] before its declaration) still finds this same placeholder
+    there and raises exactly as before. *)
+let forward_stub (scope_ref : (string * value) list ref) (name : string) : value =
+  let stub_name = "<stub:" ^ name ^ ">" in
+  VBuiltin (stub_name, fun args ->
+      match List.assoc_opt name !scope_ref with
+      | Some (VBuiltin (n, _)) when n = stub_name ->
+        eval_error "stub %s called before initialisation" name
+      | Some v -> apply v args
+      | None -> eval_error "stub %s called before initialisation" name)
+
 (** Evaluate a single declaration, extending [env].
     Returns the updated environment. *)
 let rec eval_decl (env : env) (d : decl) : env =
@@ -3380,9 +3405,7 @@ let rec eval_decl (env : env) (d : decl) : env =
     let inner_ref = ref env in
     List.iter (function
       | DFn (def, _) ->
-        let stub = VBuiltin ("<stub:" ^ def.fn_name.txt ^ ">",
-                             fun _ -> eval_error "stub %s called before initialisation"
-                                 def.fn_name.txt) in
+        let stub = forward_stub inner_ref def.fn_name.txt in
         inner_ref := (def.fn_name.txt, stub) :: !inner_ref
       | _ -> ()
     ) decls;
@@ -3876,14 +3899,12 @@ let eval_module_env (m : module_) : env =
      [top_level_file_runs]) right before that run's pass 2, onto a ref cell
      shared by the run's closures, so that closures created in pass 2 see
      the run's final environment at call time. *)
-  let install_stubs (decls : decl list) (env : env) : env =
+  let install_stubs scope_ref (decls : decl list) (env : env) : env =
     List.fold_left (fun env -> function
       | DFn (def, _) ->
-        (* Placeholder that will be overwritten in pass 2 *)
-        let stub = VBuiltin ("<stub:" ^ def.fn_name.txt ^ ">",
-                             fun _ -> eval_error "stub %s called before initialisation"
-                                 def.fn_name.txt) in
-        (def.fn_name.txt, stub) :: env
+        (* Placeholder that will be overwritten in pass 2; forwards to the
+           real binding in [scope_ref] once it exists (see [forward_stub]). *)
+        (def.fn_name.txt, forward_stub scope_ref def.fn_name.txt) :: env
       | _ -> env) env decls
   in
 
@@ -4043,7 +4064,8 @@ let eval_module_env (m : module_) : env =
   scope_tails := [];
   let run_envs, final_env =
     List.fold_left (fun (acc, env) run ->
-        let scope_ref = ref (install_stubs run env) in
+        let scope_ref = ref env in
+        scope_ref := install_stubs scope_ref run env;
         let run_env = make_recursive_env scope_ref run !scope_ref in
         scope_ref := run_env;
         (run_env :: acc, run_env))
@@ -4074,9 +4096,7 @@ let eval_stdlib_decls (decls : decl list) : unit =
       let inner_ref = ref env in
       List.iter (function
         | DFn (def, _) ->
-          let stub = VBuiltin ("<stub:" ^ def.fn_name.txt ^ ">",
-                               fun _ -> eval_error "stub %s called before initialisation"
-                                   def.fn_name.txt) in
+          let stub = forward_stub inner_ref def.fn_name.txt in
           inner_ref := (def.fn_name.txt, stub) :: !inner_ref
         | _ -> ()
       ) inner_decls;
