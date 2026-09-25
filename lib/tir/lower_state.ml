@@ -610,6 +610,29 @@ let with_current_module_fns (names : string list) (f : unit -> 'a) : 'a =
   _current_module_fns := tbl;
   Fun.protect ~finally:(fun () -> _current_module_fns := saved) f
 
+(** Bare function names defined by the modules LEXICALLY ENCLOSING the one
+    currently being lowered (every level out to, but not including, the
+    entry module's unprefixed top level).  A nested module may call an
+    enclosing module's fn (or pfn) by its bare name — the typechecker and the
+    interpreter resolve it lexically — and the lowering must too: without this
+    table the bare name fell through to the program-global [_use_aliases]
+    (hijackable by any other module's import of the same short name), and
+    without the matching [Lower_decls.rename_scoped_vars] it was emitted
+    unqualified, so a compiled program failed to LINK (`_helper` undefined).
+    Consulted by [resolve_use_alias] AFTER the current module's own import
+    aliases (an import in the inner module is the innermost binding) and
+    before the global table.  specs/progress/2026-09-25-nested-module-parent-call.md *)
+let _enclosing_module_fns : (string, unit) Hashtbl.t ref = ref (Hashtbl.create 0)
+
+(** Run [f] with [_enclosing_module_fns] set to [names], restoring the
+    previous table afterwards. *)
+let with_enclosing_module_fns (names : string list) (f : unit -> 'a) : 'a =
+  let saved = !_enclosing_module_fns in
+  let tbl = Hashtbl.create (List.length names) in
+  List.iter (fun n -> Hashtbl.replace tbl n ()) names;
+  _enclosing_module_fns := tbl;
+  Fun.protect ~finally:(fun () -> _enclosing_module_fns := saved) f
+
 (** Names bound by an enclosing LAMBDA or local named fn ([Ast.ELam] /
     [Ast.ELetFn]) while its body is being lowered.  A binder shadows any
     import alias, exactly as it shadows one in the interpreter.
@@ -676,6 +699,9 @@ let resolve_use_alias (env : env) (name : string) : string =
   else match Hashtbl.find_opt env.current_module_aliases name with
   | Some qualified -> qualified
   | None ->
+  (* A bare call to a fn of a lexically enclosing module: keep it bare here;
+     [Lower_decls.rename_scoped_vars] qualifies it with that module's prefix. *)
+  if Hashtbl.mem !_enclosing_module_fns name then name else
   (* The GLOBAL [_use_aliases] table is populated program-wide by EVERY module's
      bulk imports (e.g. a `import Bastion` in one module registers the dotted
      short name `Logger.debug` -> `Bastion.Logger.debug`).  Consulting it for a
