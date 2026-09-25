@@ -1,0 +1,35 @@
+-- Regression: the bare `sha256` builtin returns a 64-char lowercase HEX
+-- STRING on both backends, and its typecheck signature says so.
+--
+-- Until 2026-09-24 typecheck_builtins.ml declared `sha256 : Bytes -> Bytes`
+-- while eval_builtins.ml (Digestif.to_hex) and runtime march_sha256
+-- (march_string_lit) both returned a hex String, so `Bytes.length(sha256(b))`
+-- typechecked and then read a march_string as a Bytes ctor: a match failure
+-- interpreted, SIGBUS (exit 138) compiled. The .expected below was generated
+-- by the interpreter and the compiled run is diffed against the SAME file,
+-- so this is a compiled-vs-interpreted parity check as well as a golden.
+-- The typecheck side (a Bytes-typed use of the result is now rejected) is
+-- pinned by the `sha256_builtin_type` group in test/test_compiler.ml.
+mod Sha256HexString do
+  needs IO.Console
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let d = sha256(Bytes.from_string("abc"))
+    -- FIPS 180-2 test vector for "abc"
+    println(d)
+    -- A String: string operations apply directly, no Bytes.to_string needed.
+    println(int_to_string(string_length(d)))
+    println(String.slice(d, 0, 8))
+    -- Agrees with the stdlib wrapper (which also documents a hex String).
+    if d == Crypto.sha256("abc") do
+      println("matches Crypto.sha256")
+    else
+      println("DIFFERS from Crypto.sha256")
+    end
+    -- And with the raw-digest builtins' domain: hex of the raw HMAC-family
+    -- digests is what Crypto users compare against, so an empty-key HMAC is
+    -- NOT the plain hash (sanity that the two builtin families stay distinct).
+    let mac = hmac_sha256_bytes(Bytes.from_string(""), Bytes.from_string("abc"))
+    println(int_to_string(Bytes.length(mac)))
+  end
+end

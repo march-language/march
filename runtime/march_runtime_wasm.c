@@ -454,7 +454,11 @@ const char *march_string_data_ptr(void *str) {
 int64_t march_compare_int(int64_t x, int64_t y) {
     return x < y ? -1 : x > y ? 1 : 0;
 }
+/* NaN-total, like the native runtime's march_compare_float and the
+ * interpreter (OCaml Float.compare): NaN == NaN, NaN < every other value. */
 int64_t march_compare_float(double x, double y) {
+    int xn = x != x, yn = y != y;
+    if (xn || yn) return yn - xn;
     return x < y ? -1 : x > y ? 1 : 0;
 }
 int64_t march_compare_string(void *a, void *b) {

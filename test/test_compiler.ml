@@ -16603,6 +16603,31 @@ let test_curried_lambda_over_pair_occurs_case_errors () =
     (has_error_with ctx "infinitely recursive")
 
 (* Three params against a 3-tuple callback: same mistake, same diagnostic. *)
+(* The bare `sha256` builtin returns a hex STRING on both backends (and so
+   does Crypto.sha256); until 2026-09-24 its typecheck signature said
+   Bytes -> Bytes, so treating the digest as Bytes typechecked and then
+   crashed (match failure interpreted, SIGBUS compiled). Pin the signature
+   from both sides: a String-typed use is accepted, a Bytes-typed use is
+   rejected. Backend behaviour is pinned by test/native/sha256_hex_string. *)
+let test_sha256_builtin_returns_string () =
+  (* No stdlib here, so `Bytes` cannot be named and the capability-gated
+     Bytes constructors are off limits: take the Bytes as an unannotated
+     parameter and let sha256's own signature fix its type. *)
+  let ok = typecheck {|mod Test do
+    fn hex(b) : String do sha256(b) end
+    fn n(b) : Int do string_length(sha256(b)) end
+  end|} in
+  if has_errors ok then
+    Alcotest.failf "sha256(b) : String rejected: %s"
+      (String.concat " | " (List.map (fun d -> d.March_errors.Errors.message)
+                              ok.March_errors.Errors.diagnostics));
+  (* hmac_sha256_bytes wants Bytes for both args; sha256's String result
+     must not satisfy it. *)
+  let bad = typecheck {|mod Test do
+    fn raw(b) do hmac_sha256_bytes(sha256(b), b) end
+  end|} in
+  Alcotest.(check bool) "sha256(b) used as Bytes rejected" true (has_errors bad)
+
 let test_curried_lambda_over_triple_errors () =
   let ctx = typecheck ("mod Test do" ^ curried_pair_prelude ^ {|
     fn sums(xs : List((Int, Int, Int))) : List(Int) do
@@ -17838,6 +17863,9 @@ let compiler_suites =
           Alcotest.test_case "dependency mod, structural recursion: no error"       `Quick test_tce_non_entry_structural_recursion_no_error;
           Alcotest.test_case "supervise child restart types"                       `Quick test_parse_supervise_child_restart_types;
           Alcotest.test_case "restart usable as identifier"                       `Quick test_restart_still_usable_as_identifier;
+        ] );
+      ( "sha256_builtin_type", [
+          Alcotest.test_case "sha256(Bytes) : String, not Bytes"               `Quick test_sha256_builtin_returns_string;
         ] );
       ( "curried_lambda_over_tuple", [
           Alcotest.test_case "fn (_, w) over a pair (silent case): error"       `Quick test_curried_lambda_over_pair_silent_case_errors;

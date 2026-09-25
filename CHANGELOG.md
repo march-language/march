@@ -11,6 +11,17 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+- **The bare `sha256` builtin now typechecks as `Bytes -> String`, matching what it
+  has always returned** (a 64-char lowercase hex string, like `Crypto.sha256`,
+  `md5` and `sha512`). It was declared `Bytes -> Bytes`, so `Bytes.length(sha256(b))`
+  typechecked and then crashed on both backends (a match failure interpreted,
+  `fatal SIGBUS` / exit 138 compiled). Compiled `sha256` of a `Bytes` also crashed
+  regardless of how the result was used (see the `Base64.encode` / `sha256`
+  entry below for the runtime side); the builtin now also has its own runtime
+  entry, chosen by the compiler from the static type, so it never guesses.
+  For a raw digest use `hmac_sha256_bytes` / `sha1_bytes`.
+
 ### Added
 - **Node certificates for clusters** (build step 11a of the distributed-deploys
   plan, part 1). New `NodeCert` module: a certificate names a node
@@ -520,6 +531,12 @@ git log is authoritative for exact commits.
   next plain `march --check f.march` of the same source exit 0 silently instead
   of reporting the capability-ceiling error. The key now carries the cap-strict
   setting, as the `--compile` key already did.
+- `compare` on a NaN `Float` now gives the same answer compiled as interpreted:
+  NaN compares equal to NaN and less than every other value (OCaml's
+  `Float.compare`). Compiled `compare` returned 0 whenever either operand was
+  NaN, so NaN "equalled" everything and a sort by `compare` scattered the NaNs.
+  `compare_float` now has the same order on both backends (the interpreter's
+  also returned 0 for NaN). `==`, `<` and the other operators stay IEEE 754.
 - **Compiling a module with no `main` no longer takes minutes.** A TIR pass
   rewrote the rest of a function twice for every non-capturing closure it
   found ineligible, so a function that builds a record of many small lambdas

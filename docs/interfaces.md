@@ -243,6 +243,35 @@ cmp(3, 2)    -- 1
 lt(1, 2)     -- true
 ```
 
+#### Built-in `compare` on `Float`, and NaN
+
+The built-in `compare` (and `compare_float`) on `Float` is a total preorder:
+**NaN compares equal to NaN and less than every other value**, including
+`-inf`. Otherwise it is the IEEE order, so `-0.0` and `0.0` compare equal. This
+is OCaml's `Float.compare`, and both backends agree on it. It means a sort or a
+`Map`/`Set` comparator built on `compare` puts every NaN first and keeps them
+together.
+
+The comparison *operators* are different: `==`, `!=`, `<`, `<=`, `>`, `>=` on
+`Float` stay IEEE 754, so every one of them except `!=` is `false` when either
+operand is NaN (`nan == nan` is `false`). Use `compare` when you need an
+ordering, and the operators when you want IEEE semantics.
+
+```march
+let nan = float_nan()      -- `0.0 / 0.0` is a division-by-zero error in March
+compare(nan, 1.0)          -- -1
+compare(1.0, nan)          -- 1
+compare(nan, nan)          -- 0
+compare(-0.0, 0.0)         -- 0
+nan == nan                 -- false
+nan < 1.0                  -- false
+```
+
+Before 2026-09-25 the compiled backend returned `0` from `compare` whenever
+either operand was NaN, so NaN compared equal to everything and a sort by
+`compare` could put the NaNs anywhere. The interpreter already used the order
+described here.
+
 ### `Show(a)`: String Representation
 
 ```march
