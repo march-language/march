@@ -1,0 +1,27 @@
+compare(nan, 1.0) = -1
+compare(1.0, nan) = 1
+compare(nan, nan) = 0
+compare(nan, -inf) = -1
+compare(inf, nan) = 1
+compare(1.0, 2.0) = -1
+compare(-0.0, 0.0) = 0
+compare_float(nan, 1.0) = -1
+compare_float(1.0, nan) = 1
+compare_float(nan, nan) = 0
+nan == nan: false
+nan < 1.0: false
+nan <= 1.0: false
+nan > 1.0: false
+gcmp(nan, 1.0) = -1
+gcmp(1.0, nan) = 1
+gcmp(nan, nan) = 0
+glt(nan, 1.0): false
+glt(1.0, nan): false
+gle(nan, 1.0): false
+gle(nan, nan): false
+list_cmp([nan], [1.0]) = -1
+list_cmp([1.0], [nan]) = 1
+list_cmp([nan, 2.0], [nan, 1.0]) = 1
+sort_by compare: nan, nan, 0.5, 1., 2., 3.
+sort_by compare (2): nan, nan, -inf, -0., 2., 7.5
+sorted again, unchanged: nan, nan, 0.5, 1., 2., 3.

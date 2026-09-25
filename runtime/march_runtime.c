@@ -814,7 +814,24 @@ int64_t march_compare_int(int64_t x, int64_t y) {
     return (x > y) - (x < y);
 }
 
+/* `compare` on Float (and the `compare_float` builtin): a total preorder that
+ * matches the interpreter (OCaml's Float.compare). NaN equals NaN and is LESS
+ * than every non-NaN value; otherwise the IEEE order, so -0.0 and +0.0 compare
+ * equal. A plain `(x > y) - (x < y)` returned 0 for any NaN operand, making NaN
+ * "equal" to everything and breaking sorts / Map keys built on compare.
+ * `==` / `<` stay IEEE (they are lowered inline with fcmp, not through here). */
 int64_t march_compare_float(double x, double y) {
+    int xn = x != x, yn = y != y;
+    if (xn || yn) return yn - xn;
+    return (x > y) - (x < y);
+}
+
+/* IEEE three-way compare (0 when either operand is NaN): the ordering the
+ * erased relational operators (`<`/`<=`/`>`/`>=` via [march_poly_compare])
+ * and SIMD lane ordering have always used. Kept separate from
+ * [march_compare_float] so the NaN-total `compare` fix does not turn an
+ * erased `nan < 1.0` true. */
+static int64_t march_ieee_compare_double(double x, double y) {
     return (x > y) - (x < y);
 }
 
@@ -915,11 +932,10 @@ static int64_t march_simd_eq(void *a, void *b) {
 /* Ordered lane-wise compare by kind, for [march_poly_compare]'s total-order
  * contract: different kinds order by kind index (arbitrary but total and
  * stable); same kind orders lexicographically lane 0..N-1, each lane via
- * [march_compare_int]/[march_compare_float] (both already used elsewhere in
- * this file for the same "0 for unordered/equal, else sign of difference"
- * convention — a NaN lane compares as 0/unordered against everything,
- * including itself, same degenerate behavior [march_compare_float] already
- * has for plain boxed floats). */
+ * [march_compare_int]/[march_ieee_compare_double] ("0 for unordered/equal,
+ * else sign of difference" — a NaN lane compares as 0/unordered against
+ * everything, including itself, same as [march_poly_compare]'s boxed-float
+ * arm; NOT the NaN-total [march_compare_float] that `compare` uses). */
 static int64_t march_simd_compare(void *a, void *b) {
     int32_t ka = ((march_hdr *)a)->pad, kb = ((march_hdr *)b)->pad;
     if (ka != kb) return march_compare_int(ka, kb);
@@ -929,7 +945,7 @@ static int64_t march_simd_compare(void *a, void *b) {
             float fa[4], fb[4];
             memcpy(fa, pa, sizeof(fa)); memcpy(fb, pb, sizeof(fb));
             for (int i = 0; i < 4; i++) {
-                int64_t c = march_compare_float((double)fa[i], (double)fb[i]);
+                int64_t c = march_ieee_compare_double((double)fa[i], (double)fb[i]);
                 if (c != 0) return c;
             }
             return 0;
@@ -938,7 +954,7 @@ static int64_t march_simd_compare(void *a, void *b) {
             double da[2], db[2];
             memcpy(da, pa, sizeof(da)); memcpy(db, pb, sizeof(db));
             for (int i = 0; i < 2; i++) {
-                int64_t c = march_compare_float(da[i], db[i]);
+                int64_t c = march_ieee_compare_double(da[i], db[i]);
                 if (c != 0) return c;
             }
             return 0;
@@ -1082,7 +1098,7 @@ int64_t march_poly_compare(void *a, void *b) {
     if (!IS_HEAP_PTR(a) || !IS_HEAP_PTR(b)) return 0;
     int32_t ta = ((march_hdr *)a)->tag, tb = ((march_hdr *)b)->tag;
     if (ta == MARCH_FLOAT_TAG && tb == MARCH_FLOAT_TAG)
-        return march_compare_float(march_unbox_float(a), march_unbox_float(b));
+        return march_ieee_compare_double(march_unbox_float(a), march_unbox_float(b));
     if (ta == MARCH_STRING_TAG && tb == MARCH_STRING_TAG)
         return march_compare_string(a, b);
     /* Boxed SIMD vectors: same rationale as march_poly_eq's arm above — a
