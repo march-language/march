@@ -382,6 +382,8 @@ native_remote_actor_dispatch: coverage audit (user + stdlib): 120 enforced, 0 in
 native_remote_actor_dispatch: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_remote_ref_hashes: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_remote_ref_hashes: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_remote_schema: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_remote_schema: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_result_int_match: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_result_int_match: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ring_buf_ops: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
