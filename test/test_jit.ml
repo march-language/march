@@ -266,6 +266,64 @@ let test_repl_session_fn_redefinition_interp () =
   check_redefinition ~label:"interpreter mode"
     (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" redefinition_session)
 
+(* ── Stdlib-only builtins at the REPL ────────────────────────────────────
+   The gate (Typecheck_builtins.stdlib_only) fires at name resolution, so the
+   REPL's per-input typecheck reports it in both modes and never evaluates
+   the fragment. The old test called check_module_with_env directly and
+   proved nothing about either REPL: the interpreter REPL answered
+   `pid_of_int(0)` with `= Pid(0)` and the JIT REPL with a record
+   (2026-09-24-dd-review-repl-not-stdlib-only-gated.md). Every spelling the
+   finding lists is one line here. *)
+
+let stdlib_only_session =
+  [ "pid_of_int(0)";
+    "actor_registered()";
+    "let pid_of_int = pid_of_int";
+    "fn f() do actor_whereis(\"x\") end";
+    "f()";
+    "let n = 1 + 2";
+    "n" ]
+
+let check_stdlib_only_session ~label (out, code) =
+  Alcotest.(check int) (label ^ ": REPL exit code") 0 code;
+  List.iter (fun (name, hint) ->
+      let needle = Printf.sprintf "`%s` is internal to the standard library; %s" name hint in
+      if not (contains ~needle out) then
+        Alcotest.failf "%s: expected the gate's error for %s in session output, got:\n%s"
+          label name out)
+    [ ("pid_of_int", "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)");
+      ("actor_registered", "use `Actor.registered(cap)` (see `Actor.introspect`)");
+      ("actor_whereis", "use `Actor.whereis(cap, name)` (see `Actor.introspect`)") ];
+  (* Nothing gated was evaluated: no forged pid, no registry listing, and
+     the `fn f` that failed to check was never bound. *)
+  List.iter (fun needle ->
+      if contains ~needle out then
+        Alcotest.failf "%s: a gated builtin was evaluated (%S in output):\n%s" label needle out)
+    [ "= Pid("; "node_id"; "= []"; "val f = <fn>" ];
+  (* The session itself kept working after the rejections. *)
+  if not (contains ~needle:"= 3" out) then
+    Alcotest.failf "%s: expected the ungated `n` to print `= 3` after the rejections, got:\n%s"
+      label out
+
+let test_repl_session_stdlib_only_interp () =
+  check_stdlib_only_session ~label:"interpreter mode"
+    (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" stdlib_only_session)
+
+let test_repl_session_stdlib_only_clang () =
+  if not (clang_available ()) then ()  (* skip: no clang on PATH *)
+  else
+    check_stdlib_only_session ~label:"clang backend"
+      (run_repl_session ~env_prefix:"" stdlib_only_session)
+
+let test_repl_session_stdlib_only_orc () =
+  if not (clang_available ()) then ()  (* skip: stdlib precompile needs clang *)
+  else begin
+    let (out, code) =
+      run_repl_session ~env_prefix:"MARCH_JIT_BACKEND=orc" stdlib_only_session in
+    if contains ~needle:"libLLVM not found" out then ()
+    else check_stdlib_only_session ~label:"orc backend" (out, code)
+  end
+
 (* Redefine-then-call across the two fixes that landed together: the
    slot-loader call routing (this branch) and fn-redefinition rebinding
    (#339).  Pins INTERPRETER PARITY, which is lexical: `g` keeps calling the
@@ -884,6 +942,12 @@ let () =
         test_repl_session_fn_redefinition_orc;
       Alcotest.test_case "fn redefinition (interpreter)" `Quick
         test_repl_session_fn_redefinition_interp;
+      Alcotest.test_case "stdlib-only builtins rejected (interpreter)" `Quick
+        test_repl_session_stdlib_only_interp;
+      Alcotest.test_case "stdlib-only builtins rejected (clang JIT)" `Slow
+        test_repl_session_stdlib_only_clang;
+      Alcotest.test_case "stdlib-only builtins rejected (ORC JIT)" `Slow
+        test_repl_session_stdlib_only_orc;
       Alcotest.test_case "redefine then call through prior fn (clang JIT)" `Slow
         test_repl_session_redefine_then_call_clang;
       Alcotest.test_case "redefine then call through prior fn (ORC JIT)" `Slow

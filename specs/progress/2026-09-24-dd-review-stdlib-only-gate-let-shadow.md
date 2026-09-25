@@ -31,3 +31,13 @@ The resolution-based check in
 `2026-09-24-dd-review-stdlib-only-gate-skips-impl-interface-test.md`. At
 minimum, a `DLet` must not count as shadowing its own right-hand side, and
 that right-hand side must still be scanned.
+
+## Fixed 2026-09-24
+
+The gate moved to name resolution (`Typecheck.infer_expr`'s `EVar` arm), see
+[2026-09-24-stdlib-only-gate-at-resolution.md](2026-09-24-stdlib-only-gate-at-resolution.md).
+The right-hand side of `let pid_of_int = pid_of_int` is typed before the new
+binding exists, so it is a reference to the builtin and an error; the
+binding itself then never forms. Tests: "module-level let self-alias
+rejected", "fn-local let self-alias rejected", and the same two shapes for
+every gated name in the adversarial sweep.

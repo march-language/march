@@ -463,6 +463,17 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- The stdlib-only builtin gate (`pid_of_int`, `actor_whereis`, `actor_registered`,
+  `actor_pid_indices`, `epoch_hold`, `epoch_release`) now fires at name
+  resolution, closing four bypasses found in review: it applies inside `impl`
+  bodies, interface default methods, `test`/`describe`/`setup`/`setup_all`
+  blocks and actor `init`, a `let pid_of_int = pid_of_int` alias no longer
+  switches it off for its module, both REPLs (interpreter and JIT) reject the
+  gated builtins, and a user file that happens to be named like a stdlib file
+  (`json.march`) is no longer exempt. Stdlib-ness is now the loader's
+  provenance (the file lives under the stdlib directory the compiler loaded),
+  plus an explicit `--stdlib-source` flag for checking a stdlib file by another
+  path, which is also part of the `--check` cache key.
 - **Compiled `to_string` no longer quotes strings inside a List or Result of
   unknown static type.** When the type was erased, for example when the value
   reached `to_string` through a closure stored in a container, a compiled

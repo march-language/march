@@ -33,6 +33,18 @@ val t_result : ty -> ty -> ty
 
 val stdlib_source_files : string list ref
 
+(** The real paths of the directories the stdlib was loaded from. A file whose
+    real path is under one of them is the stdlib's ([file_is_stdlib]), whatever
+    spelling names it. Registered by every stdlib loader with
+    [note_stdlib_root]; never inferred from a file's basename. *)
+val stdlib_roots : string list ref
+val note_stdlib_root : string -> unit
+
+(** How [note_stdlib_root] and [file_is_stdlib] canonicalise a path. The
+    loader installs [Unix.realpath] (wrapped in an option); the default
+    answers [None], under which no root is ever registered. *)
+val stdlib_realpath : (string -> string option) ref
+
 (** The files a list of loaded stdlib declarations came from (every [DFn] and
     [DMod] span's file, recursively; the two no-file spellings excluded). *)
 val stdlib_span_files : Ast.decl list -> string list
@@ -49,8 +61,11 @@ val span_is_stdlib : Ast.span -> bool
 
 (** Builtins only the standard library may reference, with the suggestion
     shown to user code instead: the reference-forging actor builtins, reached
-    through the `Actor` wrappers that take a `Cap(Actor.Introspect)`. See
-    [Typecheck_caps.check_stdlib_only_refs]. *)
+    through the `Actor` wrappers that take a `Cap(Actor.Introspect)`. Enforced
+    at name resolution ([Typecheck.infer_expr]'s [EVar] arm): a reference
+    from a span outside the stdlib to a gated name that still resolves to
+    the builtin (not to a user binding, see [env.gated_shadowed]) is an
+    error. *)
 val stdlib_only : (string * string) list ref
 
 (** {1 Capabilities} *)

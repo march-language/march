@@ -28,3 +28,17 @@ Piped into the compiler binary's REPL:
 Run `check_stdlib_only_refs`, or the resolution-based check, on each REPL
 input in `repl.ml`. Make `repl_jit` report the errors it now drops. Replace the
 unit test with one that drives the REPL entry itself.
+
+## Fixed 2026-09-24
+
+Because the gate now fires inside `infer_expr`, the REPL's own per-input
+`check_decl`/`infer_expr` reports it in both modes and skips evaluation, with
+no REPL-specific call to remember. `Repl_jit` no longer discards the errors
+of its re-check: every lowering entry point goes through
+`checked_type_map`, which raises `Repl_jit.Typecheck_failed` (not `Failure`,
+which some call sites treat as "fall back to the interpreter"). Test:
+`test/test_jit.ml`, "stdlib-only builtins rejected" for the interpreter,
+clang and ORC backends, driving the real REPL binary over stdin with every
+spelling this file lists, asserting the gate's text for each and that no
+forged pid, registry listing or `val f = <fn>` ever printed. See
+[2026-09-24-stdlib-only-gate-at-resolution.md](2026-09-24-stdlib-only-gate-at-resolution.md).
