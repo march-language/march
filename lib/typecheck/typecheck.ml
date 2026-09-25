@@ -5276,7 +5276,26 @@ let check_role_needs env ~proto (pdef : Ast.protocol_def) : unit =
       List.iter
         (fun (c : Ast.name) ->
            match March_caps.Cap_lattice.suggest_cap c.txt with
-           | None -> ()
+           | None ->
+             (* A grant names IO capabilities only: the runner narrows each
+                path from the `Cap(IO)` it holds with `cap_narrow`, and a
+                proof capability (`Session.Live`, `ClusterNode.Live`) or a
+                foreign one (`LibC`) is not under `IO`, so the generated
+                narrowing cannot produce it.  Refused HERE, at the grant line,
+                and the generator leaves the path out ([Desugar_endpoints.
+                grants_of]), so the only diagnostic is this one, not a
+                handful inside generated code with no excerpt. *)
+             if not (March_caps.Cap_lattice.cap_subsumes "IO" c.txt) then begin
+               ok := false;
+               err ~span:c.span
+                 (Printf.sprintf
+                    "`role %s needs %s` names a capability that is not under `IO`. A role's grant is \
+                     narrowed by the runner from `main`'s `Cap(IO)`, so it can name IO capabilities \
+                     only; `%s` is a proof or foreign capability that no narrowing produces.\n\
+                     help: take `%s` out of the grant. The session capability is passed to every body \
+                     already; a body that needs another proof capability takes it from whoever minted it."
+                    r.Ast.txt c.txt c.txt c.txt)
+             end
            | Some known ->
              ok := false;
              Err.error_with_fix env.errors ~span:c.span
@@ -7385,11 +7404,21 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
    (the `body` argument), `host_R`, `host_R_or`, `offer_hosted_R`,
    `cluster_hosted_R` (the `start`, `deliver` and `cancel` callbacks, and the
    actor behind `host` when it is `spawn(A)` or a variable bound to one in
-   the same function).  Each callback gets a SYNTHETIC row key whose own
-   caps are the builtins its body calls and whose refs are its free
-   variables (what [record_fn_refs] records for a lambda), solved by the
-   same [Cap_rows.solve] over a copy of the tables; a named function passed
-   as the body is one free variable, so its whole row flows in.  The key
+   the same function).  The root is the VALUE that flows into the callback
+   parameter, resolved through the calling function's bindings
+   ([resolve_root_value]): a lambda literal; a `let`-bound name's right-hand
+   side, repeatedly; a parameter, through every call of the function in its
+   module; an alias of a named function; a value built by a call, charged
+   the callee and its arguments.  Each root gets a SYNTHETIC row key whose
+   own caps are the builtins its body calls and whose refs are its free
+   variables, with the locals among them expanded against the scope at the
+   lambda's definition (a captured local closure gets its own synthetic row
+   and is charged: a captured function is part of the body's code), solved
+   by the same [Cap_rows.solve] over a copy of the tables; a named function
+   passed as the body is one free variable, so its whole row flows in.  A
+   value with no static origin (a record field, a match binder, a message)
+   is REPORTED as unverifiable (a warning at the call), not passed: under
+   D14 a received closure is its creator's authority.  The key
    carries the calling function's module prefix so the solver's
    owner-prefix-first resolution reads bare references the way the
    calling code did, and it uses characters no identifier can
@@ -7457,6 +7486,89 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) : unit =
   | Ast.ELetFn (_, _, _, body, _) -> go body
   | Ast.ELetQ (_, r, k, _) | Ast.ELetStar (_, r, k, _) -> go r; go k
 
+(* ── How a local name was bound, and the scope in effect where it was ────
+   The runner's body argument is whatever VALUE flows into it, not the
+   expression at the call: `let body = fn ...` then `run_R(..., body)`, a
+   parameter of the calling function whose call sites pass a lambda, or an
+   alias of a named function.  [free_vars_expr] alone sees only a NAME there,
+   and a name that is not a function key is dropped by the solver, which
+   is the fail-open direction (review finding
+   2026-09-24-dd-review-role-grants-miss-let-bound-body).  So the owner's
+   body is walked with the lexical scope that the typechecker itself bound
+   it under, and each local is classified by its right-hand side. *)
+type local_binding =
+  | LLam of string list * Ast.expr * Ast.span * local_scope
+      (** `let x = fn ps -> body` or a local `fn x(ps) do body end`; the scope
+          is the one at the definition (a local `fn` sees itself) *)
+  | LAlias of Ast.expr * local_scope  (** `let x = <any other expression>` *)
+  | LParam of int  (** the i-th parameter of the owning function *)
+  | LOpaque  (** a pattern binder, a lambda parameter, a `let?` binder *)
+
+and local_scope = (string * local_binding) list
+
+(* Visit every sub-expression with the scope in effect there.  Block-level
+   `let`/`let fn` extend the scope for the rest of the block; binders of a
+   lambda, match arm or `let?` shadow as opaque. *)
+let rec iter_expr_scoped (f : local_scope -> Ast.expr -> unit) (scope : local_scope) (e : Ast.expr) : unit =
+  f scope e;
+  let go = iter_expr_scoped f scope in
+  let opaque names = List.map (fun n -> (n, LOpaque)) names @ scope in
+  match e with
+  | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> ()
+  | Ast.EDbg (Some inner, _) -> go inner
+  | Ast.EApp (h, args, _) -> go h; List.iter go args
+  | Ast.EPipe (l, r, _) -> go l; go r
+  | Ast.ECon (_, args, _) | Ast.EAtom (_, args, _) | Ast.ETuple (args, _) -> List.iter go args
+  | Ast.ELam (ps, body, _) ->
+    iter_expr_scoped f (opaque (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps)) body
+  | Ast.EBlock (es, _) ->
+    let rec block scope = function
+      | [] -> ()
+      | (Ast.ELet ({ bind_pat; bind_expr; _ }, _) as le) :: rest ->
+        iter_expr_scoped f scope le;
+        let bound =
+          match bind_pat with
+          | Ast.PatVar v -> (
+            match bind_expr with
+            | Ast.ELam (ps, b, sp) -> [ (v.Ast.txt, LLam (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps, b, sp, scope)) ]
+            | rhs -> [ (v.Ast.txt, LAlias (rhs, scope)) ])
+          | p -> List.map (fun n -> (n, LOpaque)) (free_vars_pattern p)
+        in
+        block (bound @ scope) rest
+      | (Ast.ELetFn (name, ps, _, body, sp) as lf) :: rest ->
+        let rec self = (name.Ast.txt, LLam (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps, body, sp, inner))
+        and inner = self :: scope in
+        iter_expr_scoped f inner lf;
+        block inner rest
+      | e :: rest -> iter_expr_scoped f scope e; block scope rest
+    in
+    block scope es
+  | Ast.ELet (b, _) -> go b.Ast.bind_expr
+  | Ast.EMatch (scrut, branches, _) ->
+    go scrut;
+    List.iter
+      (fun (br : Ast.branch) ->
+         let inner = opaque (free_vars_pattern br.Ast.branch_pat) in
+         Option.iter (iter_expr_scoped f inner) br.Ast.branch_guard;
+         iter_expr_scoped f inner br.Ast.branch_body)
+      branches
+  | Ast.ERecord (fields, _) -> List.iter (fun (_, ex) -> go ex) fields
+  | Ast.ERecordUpdate (base, fields, _) -> go base; List.iter (fun (_, ex) -> go ex) fields
+  | Ast.EField (ex, _, _) -> go ex
+  | Ast.EIf (c, t, e, _) -> go c; go t; go e
+  | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
+  | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) -> go ex
+  | Ast.ESend (a, b, _) -> go a; go b
+  | Ast.ELetFn (name, ps, _, body, _) ->
+    (* outside a block: only its own body sees it *)
+    iter_expr_scoped f (opaque (name.Ast.txt :: List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps)) body
+  | Ast.ELetQ (p, r, k, _) | Ast.ELetStar (p, r, k, _) ->
+    go r;
+    iter_expr_scoped f (opaque (free_vars_pattern p)) k
+
+(* The scope a function's clause binds: its parameters, by position. *)
+let param_scope (params : string list) : local_scope = List.mapi (fun i p -> (p, LParam i)) params
+
 type role_root = {
   rr_proto : string;
   rr_role : string;
@@ -7464,7 +7576,8 @@ type role_root = {
   rr_front : string;  (** the runner front as the call spells it, `Stream_Run.run_Cons` *)
   rr_what : string;  (** `body`, `start`, `deliver`, `cancel` *)
   rr_owner : string;  (** the function whose body makes the call *)
-  rr_expr : Ast.expr;  (** the callback expression *)
+  rr_expr : Ast.expr;  (** the callback expression, as written at the call *)
+  rr_scope : local_scope;  (** the locals in scope at the call *)
   rr_span : Ast.span;
   rr_host : string option;  (** the actor behind a hosted front's `host`, when resolvable *)
 }
@@ -7514,7 +7627,7 @@ let find_role_roots (env : env) : role_root list =
   Hashtbl.iter
     (fun owner bodies ->
        List.iter
-         (fun (_params, body) ->
+         (fun (params, body) ->
             (* `let h = spawn(A)` in this body, for a hosted front's `host`. *)
             let spawned_by_var : (string, string) Hashtbl.t = Hashtbl.create 4 in
             iter_expr
@@ -7530,8 +7643,8 @@ let find_role_roots (env : env) : role_root list =
               | a :: _ -> Some a
               | [] -> (match e with Ast.EVar v -> Hashtbl.find_opt spawned_by_var v.Ast.txt | _ -> None)
             in
-            iter_expr
-              (function
+            iter_expr_scoped
+              (fun scope -> function
                 | Ast.EApp (Ast.EVar f, args, _) -> (
                   match role_front_of f.Ast.txt with
                   | None -> ()
@@ -7542,8 +7655,8 @@ let find_role_roots (env : env) : role_root list =
                       let root what host e =
                         roots :=
                           { rr_proto = proto; rr_role = role; rr_grant = grant; rr_front = f.Ast.txt;
-                            rr_what = what; rr_owner = owner; rr_expr = e; rr_span = span_of_expr e;
-                            rr_host = host }
+                            rr_what = what; rr_owner = owner; rr_expr = e; rr_scope = scope;
+                            rr_span = span_of_expr e; rr_host = host }
                           :: !roots
                       in
                       let nth i = List.nth_opt args i in
@@ -7558,27 +7671,147 @@ let find_role_roots (env : env) : role_root list =
                            (fun j what -> Option.iter (root what host) (nth (start + j)))
                            [ "start"; "deliver"; "cancel" ])))
                 | _ -> ())
-              body)
+              (param_scope params) body)
          bodies)
     env.fn_row_bodies;
   List.rev !roots
 
-(* The solve [check_role_grants] runs, shared with [role_capability_closures]
-   (the hot-deploy manifest's `ROLE` lines, build step 10): one synthetic row
-   key per root (see the comment above [dump_role_authority] for why the key
-   looks the way it does), solved by [Cap_rows.solve] over COPIES of the
-   tables.  [None] when there is no root. *)
-let solve_role_roots (env : env)
-  : ((string * role_root) list
-     * (string, string list) Hashtbl.t
-     * (string, string list) Hashtbl.t
-     * (string, March_caps.Cap_rows.row) Hashtbl.t) option =
+(* What a callback expression resolves to, following the bindings above. *)
+type root_value =
+  | RVLam of string * local_scope * string list * Ast.expr * Ast.span
+      (** a lambda: its owning function, the scope at its definition, its
+          parameters, its body, its span *)
+  | RVName of string  (** a top-level (or imported) function, referenced by name *)
+  | RVUnknown of string  (** why the value is not statically known *)
+
+let short_name (q : string) : string =
+  match String.rindex_opt q '.' with Some i -> String.sub q (i + 1) (String.length q - i - 1) | None -> q
+
+(* Every argument in position [i] of a call to [callee] anywhere in the
+   program, with the caller and the scope at the call. *)
+let call_site_args (env : env) ~(callee : string) (i : int) : (string * local_scope * Ast.expr) list =
+  let found = ref [] in
+  let bare = short_name callee in
+  Hashtbl.iter
+    (fun caller bodies ->
+       (* A bare call resolves to [callee] only from the same module (the
+          entry module's functions are bare keys, a nested module's are
+          `M.f`); the stdlib is not searched, so its many local `go`s never
+          match a user function of that name. *)
+       let same_module =
+         match String.rindex_opt callee '.' with
+         | None -> not (String.contains caller '.')
+         | Some j -> String.length caller > j && String.sub caller 0 (j + 1) = String.sub callee 0 (j + 1)
+       in
+       if not (Hashtbl.mem env.stdlib_fns caller) then
+         List.iter
+           (fun (params, body) ->
+              iter_expr_scoped
+                (fun scope -> function
+                  | Ast.EApp (Ast.EVar f, args, _)
+                    when f.Ast.txt = callee || (f.Ast.txt = bare && same_module && not (List.mem_assoc bare scope)) -> (
+                    match List.nth_opt args i with
+                    | Some a -> found := (caller, scope, a) :: !found
+                    | None -> ())
+                  | _ -> ())
+                (param_scope params) body)
+           bodies)
+    env.fn_row_bodies;
+  List.rev !found
+
+(* Resolve [e], as written in [owner] under [scope], to the values that can
+   flow through it.  [depth] bounds the chase through parameters (a
+   recursive function passing its own parameter along would otherwise loop). *)
+let rec resolve_root_value (env : env) ~(depth : int) ~(owner : string) (scope : local_scope) (e : Ast.expr)
+  : root_value list =
+  let known_fn n =
+    let prefix = match String.rindex_opt owner '.' with Some i -> String.sub owner 0 (i + 1) | None -> "" in
+    Hashtbl.mem env.own_cap_closures (prefix ^ n) || Hashtbl.mem env.own_cap_closures n
+  in
+  match e with
+  | Ast.ELam (ps, b, sp) -> [ RVLam (owner, scope, List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps, b, sp) ]
+  | Ast.EAnnot (inner, _, _) | Ast.EDbg (Some inner, _) -> resolve_root_value env ~depth ~owner scope inner
+  | Ast.EVar v -> (
+    match List.assoc_opt v.Ast.txt scope with
+    | Some (LLam (ps, b, sp, sc)) -> [ RVLam (owner, sc, ps, b, sp) ]
+    | Some (LAlias (rhs, sc)) -> resolve_root_value env ~depth ~owner sc rhs
+    | Some LOpaque ->
+      [ RVUnknown (Printf.sprintf "`%s` is bound by a pattern or received as a lambda argument" v.Ast.txt) ]
+    | Some (LParam i) ->
+      if depth = 0 then [ RVUnknown (Printf.sprintf "`%s` is passed through too many parameters to follow" v.Ast.txt) ]
+      else (
+        match call_site_args env ~callee:owner i with
+        | [] ->
+          [ RVUnknown
+              (Printf.sprintf "`%s` is a parameter of `%s`, and no call of `%s` this check can see supplies it"
+                 v.Ast.txt (short_name owner) (short_name owner)) ]
+        | sites ->
+          List.concat_map
+            (fun (caller, sc, a) -> resolve_root_value env ~depth:(depth - 1) ~owner:caller sc a)
+            sites)
+    | None ->
+      if known_fn v.Ast.txt then [ RVName v.Ast.txt ]
+      else [ RVUnknown (Printf.sprintf "`%s` is a builtin or not a function this check knows" v.Ast.txt) ])
+  | Ast.EApp (h, args, _) ->
+    (* A value BUILT by a call: whatever the callee returns can reach only
+       what the callee and its arguments reach, so charging both bounds it
+       (the row solver's [CCharged]).  A literal argument carries nothing;
+       any other unresolvable argument makes the result unknown, since the
+       callee may invoke or return it. *)
+    let head =
+      match h with
+      | Ast.EVar f when not (List.mem_assoc f.Ast.txt scope) ->
+        if known_fn f.Ast.txt then [ RVName f.Ast.txt ]
+        else [ RVUnknown (Printf.sprintf "it is built by `%s`, a builtin or a function this check does not know" f.Ast.txt) ]
+      | _ -> resolve_root_value env ~depth ~owner scope h
+    in
+    head
+    @ List.concat_map
+        (function Ast.ELit _ -> [] | a -> resolve_root_value env ~depth ~owner scope a)
+        args
+  | _ -> [ RVUnknown "it is read from a data structure, a record field or a message, not bound in this function" ]
+
+(* ── the shared solve ────────────────────────────────────────────────────
+   Run by [check_role_grants] and, for the hot-deploy manifest's `ROLE` lines
+   (build step 10), by [role_capability_closures]: one synthetic row key per
+   root (see the comment above [dump_role_authority] for why the key looks
+   the way it does), the root's value resolved and charged as described
+   there, solved by [Cap_rows.solve] over COPIES of the tables.  [None] when
+   there is no root.  [decls] feeds the D34 check of a named body's own
+   `Cap` parameters; the manifest passes none. *)
+type role_solve = {
+  rs_keyed : (string * role_root) list;
+  rs_own : (string, string list) Hashtbl.t;
+  rs_refs : (string, string list) Hashtbl.t;
+  rs_rows : (string, March_caps.Cap_rows.row) Hashtbl.t;
+  rs_synthetic : (string, string * string list * Ast.expr) Hashtbl.t;
+      (** every lambda charged under a synthetic key: owner, params, body *)
+  rs_local_closures : (string, (string * string * Ast.span) list) Hashtbl.t;
+      (** per root: the captured local closures (key, local name, span) *)
+  rs_held_pids : (string, (string * string) list) Hashtbl.t;
+      (** per root: pids captured but not spawned by the body (var, actor) *)
+  rs_unresolved : (string, string list) Hashtbl.t;  (** per root: why a value could not be resolved *)
+  rs_type_mismatch : (string, unit) Hashtbl.t;
+      (** roots whose named body declares caps other than the role's grant *)
+}
+
+let solve_role_roots_full ?(decls = []) (env : env) : role_solve option =
   let roots = find_role_roots env in
   if roots = [] then None
   else begin
       let own = Hashtbl.copy env.own_cap_closures in
       let refs = Hashtbl.copy env.fn_refs in
-      (* A builtin called directly in the callback body, unless a user
+      (* Seeds for the row solver's `unknown`: every user function's bodies
+         (the stdlib is transparent here, as it is for the ceiling -- its
+         dictionary dispatch through `cap_dict` invokes record fields by
+         design) plus each synthetic key below. *)
+      let seeds : (string, March_caps.Cap_rows.seed) Hashtbl.t = Hashtbl.create 64 in
+      Hashtbl.iter
+        (fun k bodies ->
+           if not (Hashtbl.mem env.stdlib_fns k) then
+             Hashtbl.replace seeds k (March_caps.Cap_rows.seed_of_bodies bodies))
+        env.fn_row_bodies;
+      (* A builtin called directly in a callback body, unless a user
          function of that name shadows it (recorded under its bare key). *)
       let cap_of_call name =
         if Hashtbl.mem env.own_cap_closures name then None
@@ -7595,28 +7828,147 @@ let solve_role_roots (env : env)
           r.rr_what r.rr_span.Ast.start_line r.rr_span.Ast.start_col
       in
       let keyed = List.map (fun r -> (key_of r, r)) roots in
+      (* D34: a named body's own `Cap(P)` parameters ARE its grant.  When the
+         generator's type and the role line agree (every program that
+         typechecks), they are the role's grant; when a named body declares
+         a different capability, the runner call is already a type error,
+         and the walk stays silent for that root rather than reporting a
+         second, differently-worded violation against a grant the body never
+         claimed. *)
+      let declared_io_caps : (string, string list) Hashtbl.t = Hashtbl.create 32 in
+      let rec collect prefix = function
+        | Ast.DFn (def, _) -> (
+          match def.Ast.fn_clauses with
+          | clause :: _ ->
+            let caps =
+              List.concat_map
+                (function
+                  | Ast.FPNamed p | Ast.FPDefault (p, _) -> (
+                    match p.Ast.param_ty with
+                    | Some ty -> List.filter (cap_subsumes "IO") (March_caps.Cap_surface_ty.caps_in_ty ty)
+                    | None -> [])
+                  | Ast.FPPat _ -> [])
+                clause.Ast.fc_params
+            in
+            Hashtbl.replace declared_io_caps (prefix ^ def.Ast.fn_name.Ast.txt) (List.sort_uniq String.compare caps)
+          | [] -> ())
+        | Ast.DMod (nm, _, ds, _) -> List.iter (collect (prefix ^ nm.Ast.txt ^ ".")) ds
+        | _ -> ()
+      in
+      List.iter (collect "") decls;
+      let declared_caps_of ~owner n =
+        let prefix = match String.rindex_opt owner '.' with Some i -> String.sub owner 0 (i + 1) | None -> "" in
+        match Hashtbl.find_opt declared_io_caps (prefix ^ n) with
+        | Some cs -> Some cs
+        | None -> Hashtbl.find_opt declared_io_caps n
+      in
+      let type_mismatch : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+      (* Per root: the lambdas charged to it (the root's own and every local
+         closure it captures, transitively), keyed by synthetic name; the
+         pids it holds without spawning them; and what could not be
+         resolved. *)
+      let synthetic : (string, string * string list * Ast.expr) Hashtbl.t = Hashtbl.create 16 in
+      let local_closures : (string, (string * string * Ast.span) list) Hashtbl.t = Hashtbl.create 8 in
+      let held_pids : (string, (string * string) list) Hashtbl.t = Hashtbl.create 8 in
+      let unresolved : (string, string list) Hashtbl.t = Hashtbl.create 8 in
+      let push tbl k v =
+        let prior = Option.value ~default:[] (Hashtbl.find_opt tbl k) in
+        if not (List.mem v prior) then Hashtbl.replace tbl k (prior @ [ v ])
+      in
+      let add_own k caps =
+        let prior = Option.value ~default:[] (Hashtbl.find_opt own k) in
+        Hashtbl.replace own k (March_caps.Cap_lattice.normalize (List.sort_uniq compare (caps @ prior)))
+      in
+      let add_refs k rs =
+        let prior = Option.value ~default:[] (Hashtbl.find_opt refs k) in
+        Hashtbl.replace refs k (List.sort_uniq compare (rs @ prior))
+      in
+      (* Charge a lambda's reach to key [k]: its direct builtins, its free
+         variables (locals expanded against [scope]), the actors it spawns. *)
+      let rec charge_lambda ~root_key k ~owner scope bound body =
+        Hashtbl.replace synthetic k (owner, bound, body);
+        let called = March_ast.Calls.names_and_name_spans body in
+        add_own k (List.filter_map (fun (call_name, _) -> cap_of_call call_name) called);
+        add_refs k (March_ast.Calls.spawned_actor_names [] body);
+        if not (Hashtbl.mem seeds k) then Hashtbl.replace seeds k (March_caps.Cap_rows.seed_of_bodies [ (bound, body) ]);
+        let invoked v = List.exists (fun (n, _) -> n = v) called in
+        List.iter
+          (fun v ->
+             match List.assoc_opt v scope with
+             | None -> add_refs k [ v ]
+             | Some binding -> charge_local ~root_key k ~owner scope v binding ~invoked:(invoked v) 8)
+          (List.sort_uniq compare (free_vars_expr bound body))
+      (* A captured local: a closure is charged (a captured function is part
+         of the body's code, plan section 2); a pid the enclosing function
+         spawned is HELD, not charged (D1: delegation), and reported; a value
+         with no traceable origin is reported when the body invokes it. *)
+      and charge_local ~root_key k ~owner scope v binding ~invoked depth =
+        match binding with
+        | LLam (ps, b, sp, sc) ->
+          let lk = Printf.sprintf "%s/%s:%d" root_key v sp.Ast.start_line in
+          add_refs k [ lk ];
+          if not (Hashtbl.mem synthetic lk) then begin
+            push local_closures root_key (lk, v, sp);
+            charge_lambda ~root_key lk ~owner sc ps b
+          end
+        | LAlias (rhs, sc) -> (
+          match March_ast.Calls.spawned_actor_names [] rhs with
+          | a :: _ -> push held_pids root_key (v, a)
+          | [] -> (
+            match rhs with
+            | Ast.ELit _ -> ()
+            | Ast.EVar _ | Ast.EAnnot _ | Ast.EDbg _ | Ast.ELam _ | Ast.EApp _ ->
+              List.iter
+                (function
+                  | RVName n -> add_refs k [ n ]
+                  | RVLam (o, sc2, ps, b, sp) ->
+                    charge_local ~root_key k ~owner:o sc2 v (LLam (ps, b, sp, sc2)) ~invoked depth
+                  | RVUnknown why -> if invoked then push unresolved root_key (Printf.sprintf "`%s` is invoked, and %s" v why))
+                (resolve_root_value env ~depth ~owner sc rhs)
+            | _ -> if invoked then push unresolved root_key (Printf.sprintf "`%s` is invoked, and its value is not statically known" v)))
+        | LParam _ ->
+          List.iter
+            (function
+              | RVName n -> add_refs k [ n ]
+              | RVLam (o, sc2, ps, b, sp) -> charge_local ~root_key k ~owner:o sc2 v (LLam (ps, b, sp, sc2)) ~invoked depth
+              | RVUnknown why -> if invoked then push unresolved root_key (Printf.sprintf "`%s` is invoked, and %s" v why))
+            (resolve_root_value env ~depth ~owner scope (Ast.EVar { Ast.txt = v; span = Ast.dummy_span }))
+        | LOpaque ->
+          if invoked then
+            push unresolved root_key
+              (Printf.sprintf "`%s` is invoked, and it is bound by a pattern or received as a lambda argument" v)
+      in
       List.iter
         (fun (k, r) ->
-           let bound, body =
-             match r.rr_expr with
-             | Ast.ELam (ps, b, _) -> (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps, b)
-             | e -> ([], e)
-           in
-           let own_caps =
-             List.filter_map (fun (call_name, _) -> cap_of_call call_name) (March_ast.Calls.names_and_name_spans body)
-           in
-           let rs =
-             free_vars_expr bound body @ March_ast.Calls.spawned_actor_names [] body
-             @ Option.to_list r.rr_host
-           in
-           Hashtbl.replace own k (March_caps.Cap_lattice.normalize own_caps);
-           Hashtbl.replace refs k (List.sort_uniq compare rs))
+           Hashtbl.replace own k [];
+           add_refs k (Option.to_list r.rr_host);
+           List.iter
+             (function
+               | RVLam (owner, scope, bound, body, _) -> charge_lambda ~root_key:k k ~owner scope bound body
+               | RVName n ->
+                 (match declared_caps_of ~owner:r.rr_owner n with
+                  | Some (_ :: _ as own_grant)
+                    when own_grant <> List.sort_uniq String.compare (List.filter (cap_subsumes "IO") r.rr_grant) ->
+                    Hashtbl.replace type_mismatch k ()
+                  | _ -> ());
+                 add_refs k [ n ]
+               | RVUnknown why -> push unresolved k why)
+             (resolve_root_value env ~depth:8 ~owner:r.rr_owner r.rr_scope r.rr_expr))
         keyed;
-      let rows =
-        March_caps.Cap_rows.solve ~with_rows:false ~own_caps:own ~refs ~seeds:(Hashtbl.create 1) ()
-      in
-      Some (keyed, own, refs, rows)
+      let rows = March_caps.Cap_rows.solve ~with_rows:true ~own_caps:own ~refs ~seeds () in
+      Some
+        { rs_keyed = keyed; rs_own = own; rs_refs = refs; rs_rows = rows; rs_synthetic = synthetic;
+          rs_local_closures = local_closures; rs_held_pids = held_pids; rs_unresolved = unresolved;
+          rs_type_mismatch = type_mismatch }
   end
+
+(* The tuple view [role_capability_closures] reads. *)
+let solve_role_roots (env : env)
+  : ((string * role_root) list
+     * (string, string list) Hashtbl.t
+     * (string, string list) Hashtbl.t
+     * (string, March_caps.Cap_rows.row) Hashtbl.t) option =
+  Option.map (fun s -> (s.rs_keyed, s.rs_own, s.rs_refs, s.rs_rows)) (solve_role_roots_full env)
 
 let check_role_grants (env : env) (decls : Ast.decl list) : unit =
   if Hashtbl.length env.role_grants = 0 then ()
@@ -7655,12 +8007,28 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                         proto role c show_main c (String.lowercase_ascii leaf) c c))
               caps)
          env.role_grants);
-    match solve_role_roots env with
+    match solve_role_roots_full ~decls env with
     | None -> ()
-    | Some (keyed, own, refs, rows) ->
+    | Some { rs_keyed = keyed; rs_own = own; rs_refs = refs; rs_rows = rows; rs_synthetic = synthetic;
+             rs_local_closures = local_closures; rs_held_pids = held_pids; rs_unresolved = unresolved;
+             rs_type_mismatch = type_mismatch } ->
     begin
-      let caps_of k = match Hashtbl.find_opt rows k with Some (row : March_caps.Cap_rows.row) -> row.caps | None -> [] in
+      let row_of k = Option.value ~default:March_caps.Cap_rows.empty_row (Hashtbl.find_opt rows k) in
+      let caps_of k = (row_of k).caps in
       let label (r : role_root) = Printf.sprintf "the %s passed to `%s`" r.rr_what r.rr_front in
+      (* A chain element: a synthetic local-closure key reads as the local's
+         name, a root key as the callback's role. *)
+      let show_key k =
+        match Hashtbl.find_opt synthetic k with
+        | Some _ when List.mem_assoc k keyed -> (List.assoc k keyed).rr_what
+        | Some _ -> (
+          match String.rindex_opt k '/' with
+          | Some i -> (
+            let tail = String.sub k (i + 1) (String.length k - i - 1) in
+            match String.index_opt tail ':' with Some j -> String.sub tail 0 j | None -> tail)
+          | None -> k)
+        | None -> k
+      in
       List.iter
         (fun (k, r) ->
            let covered c = List.exists (fun g -> cap_subsumes g c) r.rr_grant in
@@ -7669,13 +8037,13 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
            in
            List.iter
              (fun c ->
-                if not (cap_subsumes "IO" c) || covered c then ()
+                if not (cap_subsumes "IO" c) || covered c || Hashtbl.mem type_mismatch k then ()
                 else
                   let chain =
                     match cap_reach_chain ~own_caps:own ~fn_refs:refs env ~from:k ~cap:c with
                     | Some (_ :: _ as chain) ->
                       Printf.sprintf " (reached from the %s: %s)" r.rr_what
-                        (render_cap_chain (r.rr_what :: chain))
+                        (render_cap_chain (r.rr_what :: List.map show_key chain))
                     | _ -> ""
                   in
                   Err.error env.errors ~span:r.rr_span
@@ -7686,13 +8054,35 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                         help: add `%s` to `role %s needs ...` in protocol `%s`, or remove the use."
                        r.rr_proto r.rr_role show_grant r.rr_role (String.concat ", " r.rr_grant)
                        (label r) c chain c r.rr_role r.rr_proto))
-             (List.sort_uniq String.compare (caps_of k)))
+             (List.sort_uniq String.compare (caps_of k));
+           (* Not statically known: the callback itself, a local it invokes,
+              or (the solver's `unknown`) a value of untraceable origin that
+              something in its reach invokes.  Under D14 such a value is its
+              creator's authority, so this is a diagnostic, not an error:
+              the grant is not refused, it is reported as unverifiable. *)
+           let whys =
+             Option.value ~default:[] (Hashtbl.find_opt unresolved k)
+             @ (if (row_of k).unknown then
+                  [ "its code invokes a value of untraceable origin (a closure received in a message, or read from a data structure)" ]
+                else [])
+           in
+           if whys <> [] then
+             Err.warning env.errors ~span:r.rr_span
+               (Printf.sprintf
+                  "cannot verify role grant for %s at %s:%d: value not statically known (%s). \
+                   A closure received as a value is its creator's authority, so `role %s needs %s` \
+                   is not checked against what it reaches.\n\
+                   help: pass a lambda or a named function here, or bind the body with `let` in \
+                   this function, to have it checked."
+                  (label r) r.rr_span.Ast.file r.rr_span.Ast.start_line (String.concat "; " whys)
+                  r.rr_role (String.concat ", " r.rr_grant)))
         keyed;
       (* ── the effective-authority report ─────────────────────────────────
          What the grant does NOT bound, made visible: for each root, the
          functions its reachable code references as VALUES (closures it may
-         hand on or receive back) and the actors it spawns or hosts, each
-         with the capabilities behind it.  Under D1/D14 those are delegated
+         hand on or receive back), the local closures it captures, the pids
+         it holds, and the actors it spawns or hosts, each with the
+         capabilities behind it.  Under D1/D14 those are delegated
          authority, charged to their creator; a reader of `role Cons needs
          IO.Console` would otherwise take the narrow grant for narrow
          authority. *)
@@ -7730,7 +8120,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                  (fun v ->
                     if not (List.mem v called) then
                       match resolve owner v with
-                      | Some key when key <> k && not (List.mem_assoc key !values) ->
+                      | Some key when key <> k && not (Hashtbl.mem synthetic key) && not (List.mem_assoc key !values) ->
                         values := (key, caps_of key) :: !values
                       | _ -> ())
                  (free_vars_expr bound body);
@@ -7743,14 +8133,9 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
              in
              Hashtbl.iter
                (fun x () ->
-                  if x = k then
-                    let bound, body =
-                      match r.rr_expr with
-                      | Ast.ELam (ps, b, _) -> (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps, b)
-                      | e -> ([], e)
-                    in
-                    note_body r.rr_owner bound body
-                  else
+                  match Hashtbl.find_opt synthetic x with
+                  | Some (owner, bound, body) -> note_body owner bound body
+                  | None ->
                     List.iter
                       (fun (bound, body) -> note_body x bound body)
                       (Option.value ~default:[] (Hashtbl.find_opt env.fn_row_bodies x)))
@@ -7762,6 +8147,7 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                   | _ -> ())
                r.rr_host;
              let sorted xs = List.sort (fun (a, _) (b, _) -> String.compare a b) xs in
+             let row = row_of k in
              Printf.printf "role authority: %s.%s\n" r.rr_proto r.rr_role;
              Printf.printf "  grant: %s\n" (show_caps r.rr_grant);
              Printf.printf "  root: %s, in `%s` (%s:%d)\n" (label r) r.rr_owner r.rr_span.Ast.file
@@ -7774,10 +8160,40 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                (match sorted !values with
                 | [] -> "none"
                 | vs -> String.concat ", " (List.map (fun (v, cs) -> Printf.sprintf "%s -> %s" v (show_caps cs)) vs));
+             (* the local closures the body captures (charged), with the
+                function that made them and the line *)
+             Printf.printf "  closures: %s\n"
+               (match Option.value ~default:[] (Hashtbl.find_opt local_closures k) with
+                | [] -> "none"
+                | cs ->
+                  String.concat ", "
+                    (List.map
+                       (fun (lk, v, (sp : Ast.span)) ->
+                          let owner = match Hashtbl.find_opt synthetic lk with Some (o, _, _) -> o | None -> "?" in
+                          Printf.sprintf "%s (closure in `%s`, line %d) -> %s" v owner sp.Ast.start_line
+                            (show_caps (List.filter (cap_subsumes "IO") (caps_of lk))))
+                       cs));
+             (* the pids it holds without having spawned them (delegated) *)
+             Printf.printf "  holds: %s\n"
+               (match Option.value ~default:[] (Hashtbl.find_opt held_pids k) with
+                | [] -> "none"
+                | ps ->
+                  String.concat ", "
+                    (List.map
+                       (fun (v, a) ->
+                          let cs = match resolve r.rr_owner a with Some key -> caps_of key | None -> [] in
+                          Printf.sprintf "%s -> %s -> %s" v a (show_caps cs))
+                       ps));
              Printf.printf "  actors: %s\n"
                (match sorted !actors with
                 | [] -> "none"
-                | xs -> String.concat ", " (List.map (fun (a, cs) -> Printf.sprintf "%s -> %s" a (show_caps cs)) xs)))
+                | xs -> String.concat ", " (List.map (fun (a, cs) -> Printf.sprintf "%s -> %s" a (show_caps cs)) xs));
+             if row.deps <> [] then Printf.printf "  invokes parameters: %s\n" (String.concat ", " row.deps);
+             if row.unknown || Hashtbl.mem unresolved k then
+               Printf.printf "  unverified: %s\n"
+                 (String.concat "; "
+                    (Option.value ~default:[] (Hashtbl.find_opt unresolved k)
+                     @ if row.unknown then [ "invokes a value of untraceable origin" ] else [])))
           keyed
       end
     end

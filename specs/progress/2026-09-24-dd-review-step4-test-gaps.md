@@ -18,3 +18,16 @@ found by perturbation in a scratch worktree at d3396f743.
 Add a CLI reject case for a body lambda that calls a builtin directly. Compare
 `<P>_Msg.fingerprint()` across grant variants through the compiled or
 interpreted program, not the helper.
+
+## Fixed 2026-09-24
+
+1. `cli_role_grant_direct_builtin`: a body lambda calling `file_write` directly, with no
+   helper between, is refused with "the body passed to `Stream_Run.run_Cons` reaches
+   `IO.FileWrite`". Perturbation: the root's own-caps arm in `charge_lambda` replaced with
+   `[]` in a scratch worktree → this case red, the rest of the suite green (recorded in
+   the PR description / session report).
+2. `cli_grants_not_in_program_fingerprint`: three programs (no grant, one grant, two
+   grants on two roles) run interpreted and print `Stream_Msg.fingerprint()`; the three
+   digests must be equal. Perturbation: the grants mixed into the `fingerprint_of` call at
+   the generation site → red; `grants_not_in_fingerprint` (the helper-level test) stays
+   green under the same perturbation, which is the gap the finding describes.
