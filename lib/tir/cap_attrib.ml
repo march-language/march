@@ -43,24 +43,43 @@ let cap_of_call (name : string) : string option =
    IO.FileRead marker with NO owner row, so the module that handed out the
    capability escaped attribution entirely.  Charging it to the module that
    passes the value is right: that module is the one granting the authority. *)
-let atom_cap (a : Tir.atom) : string option =
+let atom_cap ~is_defined (a : Tir.atom) : string option =
   match a with
+  | Tir.AVar v when is_defined v.Tir.v_name -> None
   | Tir.AVar v -> cap_of_call v.Tir.v_name
   | Tir.ADefRef _ | Tir.ALit _ -> None
 
-let add_atoms caps atoms =
-  List.fold_left
-    (fun acc a -> match atom_cap a with Some c -> SSet.add c acc | None -> acc)
-    caps atoms
-
 (* One walk collecting both halves: the capabilities this body reaches
-   directly, and the functions it calls (for the reverse call graph). *)
-let rec walk (caps, callees) (e : Tir.expr) =
+   directly, and the functions it calls (for the reverse call graph).
+
+   [is_defined n] is true when [n] names a function DEFINED in the module
+   being attributed.  A call to such a name is a call to that function, never
+   to the builtin of the same bare name: the typechecker resolved the
+   shadowing (a module-level `fn dns_resolve` wins over the builtin), and the
+   function's own body is walked separately, so any capability it really uses
+   still reaches its callers through the call graph.  The entry module's
+   functions are unprefixed in TIR, so without this a user `fn dns_resolve(x
+   : Int) : Int` was charged IO.Network by name and a compiled build failed
+   the ceiling ("module `M` uses `IO.Network` but does not declare `needs
+   IO.Network`") for a program that ran fine interpreted.  The typecheck-level
+   scans got the same fix on 2026-08-09 (specs/2026-08-09-cap-loose-ends-plan.md,
+   Tier 0); this TIR walk had kept the name-only lookup. *)
+let rec walk ~is_defined (caps, callees) (e : Tir.expr) =
+  let walk = walk ~is_defined in
+  let add_atoms caps atoms =
+    List.fold_left
+      (fun acc a ->
+         match atom_cap ~is_defined a with
+         | Some c -> SSet.add c acc
+         | None -> acc)
+      caps atoms
+  in
   match e with
   | Tir.EApp (v, args) ->
     let n = v.Tir.v_name in
     let caps =
-      match cap_of_call n with Some c -> SSet.add c caps | None -> caps
+      if is_defined n then caps
+      else match cap_of_call n with Some c -> SSet.add c caps | None -> caps
     in
     (add_atoms caps args, SSet.add n callees)
   | Tir.ELet (_, rhs, body) -> walk (walk (caps, callees) rhs) body
@@ -167,7 +186,10 @@ let attribute ?(transparent = fun _ -> false)
     m.Tir.tm_fns;
   List.iter
     (fun (fn : Tir.fn_def) ->
-       let caps, callees = walk (SSet.empty, SSet.empty) fn.Tir.fn_body in
+       let caps, callees =
+         walk ~is_defined:(Hashtbl.mem defined) (SSet.empty, SSet.empty)
+           fn.Tir.fn_body
+       in
        if not (SSet.is_empty caps) then
          Hashtbl.replace direct fn.Tir.fn_name caps;
        SSet.iter

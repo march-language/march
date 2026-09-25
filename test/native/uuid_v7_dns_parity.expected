@@ -1,0 +1,10 @@
+uuid_v7 shape: true
+uuid_v7 timestamp within a minute of unix_time_ms: true
+two uuid_v7 differ: true
+lengths via closure: [36, 36, 36]
+00000000-0000-7
+018bcfe5-6800-7
+ffffffff-ffff-7
+uuid_v7_at shape: true
+dns_resolve numeric host, 200 calls: 200
+dns_resolve leaked nothing: true

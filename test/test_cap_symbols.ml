@@ -29,8 +29,6 @@ let test_known_mappings () =
    cannot vacuously satisfy its own test. *)
 let special_lowerings =
   [
-    ("dns_resolve", "dns_resolve");
-    (* unprefixed C fn, runtime/march_runtime.c *)
     ("signal_watch", "march_signal_watch");
     ("signal_unwatch", "march_signal_unwatch");
     ("signal_raise_self", "march_signal_raise_self");
@@ -79,9 +77,70 @@ let test_no_drift_from_builtin_cap_table () =
   Alcotest.(check (list string))
     "every cap-bearing builtin accounted for and correctly mapped" [] problems
 
+(* The other direction: an [uncompiled_builtins] entry that HAS a lowering is
+   stale, and staleness here is not cosmetic.  The drift test above skips
+   listed names entirely, so a lowered builtin left on the list is a builtin
+   whose symbol the audit never learns: unix_time_ms and uuid_v7 sat here
+   (until 2026-09-25) while both compiled, and no binary using them carried an
+   IO.Clock marker. *)
+let test_uncompiled_builtins_not_stale () =
+  let stale =
+    List.filter
+      (fun march_name ->
+        List.mem_assoc march_name special_lowerings
+        || List.exists
+             (fun (b : March_tir.Llvm_builtins.builtin) ->
+               b.March_tir.Llvm_builtins.march_name = march_name
+               && b.March_tir.Llvm_builtins.c_name <> None)
+             March_tir.Llvm_builtins.builtins
+        || not
+             (List.mem_assoc march_name
+                March_typecheck.Typecheck.builtin_cap_table))
+      March_caps.Cap_symbols.uncompiled_builtins
+  in
+  Alcotest.(check (list string))
+    "every uncompiled_builtins entry is a cap builtin with no lowering" []
+    stale
+
+(* Every key is a march_-prefixed runtime symbol.  The binary audit matches
+   RAW symbol names ([forge/lib/cap_binary.ml] reads the whole symbol table),
+   so an unprefixed key also matches any user or foreign symbol of that
+   spelling.  `dns_resolve` was such a key until 2026-09-25: a binary linking
+   any C object that defines `dns_resolve` showed an IO.Network witness. *)
+let test_table_keys_are_prefixed () =
+  let unprefixed =
+    List.filter
+      (fun (sym, _) ->
+        not (String.length sym > 6 && String.sub sym 0 6 = "march_"))
+      March_caps.Cap_symbols.table
+  in
+  Alcotest.(check (list string))
+    "every Cap_symbols key starts with march_" [] (List.map fst unprefixed);
+  Alcotest.(check (option string))
+    "the bare spelling dns_resolve is no capability witness" None
+    (March_caps.Cap_symbols.cap_of_symbol "dns_resolve");
+  Alcotest.(check (option string))
+    "nor its Mach-O spelling" None
+    (March_caps.Cap_symbols.cap_of_symbol "_dns_resolve");
+  (* Positive control: without it the two absences above pass if IO.Network
+     simply vanished from the table. *)
+  Alcotest.(check (option string))
+    "march_dns_resolve witnesses IO.Network" (Some "IO.Network")
+    (March_caps.Cap_symbols.cap_of_symbol "march_dns_resolve");
+  Alcotest.(check (option string))
+    "march_uuid_v7 witnesses IO.Clock" (Some "IO.Clock")
+    (March_caps.Cap_symbols.cap_of_symbol "march_uuid_v7");
+  Alcotest.(check (option string))
+    "march_unix_time_ms witnesses IO.Clock" (Some "IO.Clock")
+    (March_caps.Cap_symbols.cap_of_symbol "march_unix_time_ms")
+
 let tests =
   [
     Alcotest.test_case "known cap symbol mappings" `Quick test_known_mappings;
     Alcotest.test_case "no drift from builtin_cap_table" `Quick
       test_no_drift_from_builtin_cap_table;
+    Alcotest.test_case "uncompiled_builtins is not stale" `Quick
+      test_uncompiled_builtins_not_stale;
+    Alcotest.test_case "table keys are march_-prefixed" `Quick
+      test_table_keys_are_prefixed;
   ]

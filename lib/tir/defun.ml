@@ -279,7 +279,9 @@ let builtin_names : StringSet.t =
       (* march_version is not here: lower_expr folds every call to it into a
          string literal, so no compiled code references it. *)
       (* UUID / identity builtins *)
-      "uuid_v4";
+      "uuid_v4"; "uuid_v7"; "uuid_v7_at";
+      (* DNS *)
+      "dns_resolve";
       (* Session-typed channel builtins *)
       "chan_new"; "chan_send"; "chan_recv"; "chan_close";
       "chan_choose"; "chan_offer";

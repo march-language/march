@@ -269,6 +269,12 @@ let extern_borrow_table : (string * bool list) list = [
      owned array, so nothing hands it an unowned reference. The rest of the
      family is still in [extern_owned_builtins], unaudited. ── *)
   ("typed_array_slice",    [true; false; false]);
+  (* ── dns_resolve: march_dns_resolve copies the host's bytes into a stack
+     buffer for getaddrinfo and never stores or frees the String.  Before it
+     had a codegen-table row (2026-09-25) it was on no list and defaulted to
+     OWNED, so every call leaked its host argument. ── *)
+  ("dns_resolve",          [true]);
+  ("march_dns_resolve",    [true]);
   (* ── Synthetic C names used directly in lower.ml wrappers ──────────────── *)
   ("march_compare_string", [true; true]);
   ("march_hash_string",    [true]);
