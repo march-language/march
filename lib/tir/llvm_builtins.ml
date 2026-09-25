@@ -792,6 +792,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_f32_arr_set(ptr %arr, i64 %i, double %v)" };
   { march_name = "native_f32_arr_sum"; c_name = None; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @native_f32_arr_sum(ptr %arr)" };
+  { march_name = "native_f32_arr_sort"; c_name = None; ret_ty = Some (Tir.TCon ("NativeF32Arr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_f32_arr_sort(ptr %arr)" };
   { march_name = "native_f32_arr_map"; c_name = None; ret_ty = Some (Tir.TCon ("NativeF32Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_f32_arr_map(ptr %arr, ptr %f)" };
   { march_name = "native_f32_arr_map2"; c_name = None; ret_ty = Some (Tir.TCon ("NativeF32Arr", []));
@@ -812,6 +814,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_i32_arr_set(ptr %arr, i64 %i, i64 %v)" };
   { march_name = "native_i32_arr_sum"; c_name = None; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @native_i32_arr_sum(ptr %arr)" };
+  { march_name = "native_i32_arr_sort"; c_name = None; ret_ty = Some (Tir.TCon ("NativeI32Arr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_i32_arr_sort(ptr %arr)" };
   { march_name = "native_i32_arr_map"; c_name = None; ret_ty = Some (Tir.TCon ("NativeI32Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_i32_arr_map(ptr %arr, ptr %f)" };
   { march_name = "native_i32_arr_map2"; c_name = None; ret_ty = Some (Tir.TCon ("NativeI32Arr", []));
@@ -832,6 +836,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_u8_arr_set(ptr %arr, i64 %i, i64 %v)" };
   { march_name = "native_u8_arr_sum"; c_name = None; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @native_u8_arr_sum(ptr %arr)" };
+  { march_name = "native_u8_arr_sort"; c_name = None; ret_ty = Some (Tir.TCon ("NativeU8Arr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_u8_arr_sort(ptr %arr)" };
   { march_name = "native_u8_arr_map"; c_name = None; ret_ty = Some (Tir.TCon ("NativeU8Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_u8_arr_map(ptr %arr, ptr %f)" };
   { march_name = "native_u8_arr_map2"; c_name = None; ret_ty = Some (Tir.TCon ("NativeU8Arr", []));
@@ -1674,6 +1680,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_f32_arr_get";
   PDeclare "native_f32_arr_set";
   PDeclare "native_f32_arr_sum";
+  PDeclare "native_f32_arr_sort";
   PDeclare "native_f32_arr_map";
   PDeclare "native_f32_arr_map2";
   PDeclare "native_f32_arr_fold";
@@ -1684,6 +1691,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_i32_arr_get";
   PDeclare "native_i32_arr_set";
   PDeclare "native_i32_arr_sum";
+  PDeclare "native_i32_arr_sort";
   PDeclare "native_i32_arr_map";
   PDeclare "native_i32_arr_map2";
   PDeclare "native_i32_arr_fold";
@@ -1694,6 +1702,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_u8_arr_get";
   PDeclare "native_u8_arr_set";
   PDeclare "native_u8_arr_sum";
+  PDeclare "native_u8_arr_sort";
   PDeclare "native_u8_arr_map";
   PDeclare "native_u8_arr_map2";
   PDeclare "native_u8_arr_fold";

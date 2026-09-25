@@ -1,5 +1,5 @@
 -- Compiled witness for NativeArray.sort_int (ipnsort-style, implemented in the
--- C runtime; see specs/todos/2026-09-16-native-array-sort-ipnsort.md).
+-- C runtime; see specs/progress/2026-09-25-native-array-sort-narrow-widths.md).
 --
 -- Every case cross-checks the C sort against List.sort_by, an INDEPENDENT
 -- implementation (stdlib/list.march's mergesort over cons cells). Asserting

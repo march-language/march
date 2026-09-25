@@ -7824,7 +7824,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; ── NativeArray.sort_int: ipnsort-style in-place sort ──────────────────
 ; Correctness witness for the C sort added in runtime/march_runtime.c; the
 ; algorithm, its measurements and the rejected alternatives are in
-; specs/todos/2026-09-16-native-array-sort-ipnsort.md.
+; specs/progress/2026-09-25-native-array-sort-narrow-widths.md.
 ;
 ; Every case cross-checks against List.sort_by (stdlib's independent
 ; mergesort), because "the output is sorted" alone would pass a sort that
@@ -7877,6 +7877,43 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/native_arr_sort.expected native_arr_sort_interp.out)))
+
+; ── NativeArray.sort_i32 / sort_f32 / sort_u8: the narrow widths ───────
+; Same shape and same three runs as native_arr_sort above (compiled,
+; compiled with MARCH_TEST_NSORT_DEPTH_LIMIT=0, interpreted), one golden.
+; sort_i32 is the ipnsort core instantiated at int32_t (nsort_i32), sort_f32
+; is that core on binary32 totalOrder keys, and sort_u8 is a counting sort,
+; which has no depth limit, so its lines are unchanged by the heap run.
+; Record: specs/progress/2026-09-25-native-array-sort-narrow-widths.md.
+(rule
+ (targets native_arr_sort_narrow native_arr_sort_narrow.out
+          native_arr_sort_narrow_heap.out native_arr_sort_narrow_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_sort_narrow.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (with-stdout-to native_arr_sort_narrow_interp.out
+     (run %{exe:../bin/main.exe} native/native_arr_sort_narrow.march))
+   (run %{exe:../bin/main.exe} --compile -o native_arr_sort_narrow
+        native/native_arr_sort_narrow.march)
+   (with-stdout-to native_arr_sort_narrow.out
+        (system "./native_arr_sort_narrow"))
+   (with-stdout-to native_arr_sort_narrow_heap.out
+        (system "MARCH_TEST_NSORT_DEPTH_LIMIT=0 ./native_arr_sort_narrow")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort_narrow.expected native_arr_sort_narrow.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort_narrow.expected native_arr_sort_narrow_heap.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort_narrow.expected native_arr_sort_narrow_interp.out)))
 
 ; ── fold per-element float box: live-object guard ──────────────────────
 ; The rule above diffs OUTPUT ONLY, and a leak is invisible to an output

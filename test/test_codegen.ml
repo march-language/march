@@ -10259,6 +10259,143 @@ let write_march_source ~name src_text =
   close_out oc;
   (project_root, main_exe, src, tmp)
 
+(* ── A nested module's call to an ENCLOSING module's fn ────────────────────
+   specs/progress/2026-09-25-nested-module-parent-call.md.  `mod Outer do pfn
+   helper ... mod Inner do fn f(x) do helper(x) end end end` typechecked and
+   interpreted, but the lowering qualified only the nested module's OWN fns
+   ([rename_tir_vars prefix direct_fn_names]), so the call to `helper` was
+   emitted bare and the compiled program failed to LINK (`_helper`
+   undefined) -- in a MARCH_LIB_PATH module, in a stdlib module (which is why
+   Compress's lifts had to be public), and in the entry file alike.
+
+   The program covers: a parent `pfn` declared BEFORE the nested module, a
+   parent `fn` declared AFTER it, two levels of nesting (Deep reaching both
+   Inner's and Outer's fns), an inner fn shadowing an outer one of the same
+   name (the nearer one wins), and the QUALIFIED spelling `Outer.helper` of a
+   parent `pfn`.  Compiled only: the interpreter has a separate, pre-existing
+   bug with a parent fn declared after the nested module (see
+   specs/todos/2026-09-25-interp-nested-module-forward-parent-fn-stub.md). *)
+let nested_parent_call_outer_src = {|mod Outer do
+  pfn helper(x : Int) : Int do x + 1 end
+
+  mod Inner do
+    fn f(x : Int) : Int do helper(x) end
+    fn g(x : Int) : Int do later(x) end
+    fn s(x : Int) : Int do shadowed(x) end
+    pfn shadowed(x : Int) : Int do x * 100 end
+
+    mod Deep do
+      fn h(x : Int) : Int do helper(later(x)) end
+      fn k(x : Int) : Int do mid(x) end
+      fn q(x : Int) : Int do Outer.helper(x) end
+    end
+
+    pfn mid(x : Int) : Int do shadowed(x) + 2 end
+  end
+
+  fn later(x : Int) : Int do x * 10 end
+  pfn shadowed(x : Int) : Int do x - 1000 end
+end
+|}
+
+let nested_parent_call_main_body = {|    println(int_to_string(Outer.Inner.f(41)))
+    println(int_to_string(Outer.Inner.g(4)))
+    println(int_to_string(Outer.Inner.s(3)))
+    println(int_to_string(Outer.Inner.Deep.h(5)))
+    println(int_to_string(Outer.Inner.Deep.k(1)))
+    println(int_to_string(Outer.Inner.Deep.q(8)))
+|}
+
+(* f: helper(41) = 42; g: later(4) = 40; s: Inner's shadowed(3) = 300 (not
+   Outer's, which would give -997); h: helper(later(5)) = 51; k: mid(1) =
+   Inner's shadowed(1) + 2 = 102; q: Outer.helper(8) = 9. *)
+let nested_parent_call_expected = "42\n40\n300\n51\n102\n9"
+
+let test_nested_module_parent_call_lib_path_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_parent"
+    ("mod Main do\n\
+     \  needs IO.Console\n\
+     \  fn main(_c : Cap(IO.Console)) do\n"
+     ^ nested_parent_call_main_body ^
+     "  end\n\
+      end\n")
+  in
+  let lib_dir = Filename.concat tmp "lib" in
+  Unix.mkdir lib_dir 0o755;
+  let oc = open_out (Filename.concat lib_dir "outer.march") in
+  output_string oc nested_parent_call_outer_src;
+  close_out oc;
+  let bin = Filename.concat tmp "nested_parent_bin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && MARCH_LIB_PATH=%s "
+                         (Filename.quote project_root) (Filename.quote lib_dir))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    Alcotest.(check string)
+      "a MARCH_LIB_PATH module's nested module links and calls its enclosing \
+       modules' fns (bare and qualified)"
+      nested_parent_call_expected (read_cmd_output (Filename.quote bin))
+
+(* The same modules nested inside the entry file's own module, which failed
+   to link the same way. *)
+let test_nested_module_parent_call_entry_compiled () =
+  let indent s =
+    String.concat "\n"
+      (List.map (fun l -> if l = "" then l else "  " ^ l)
+         (String.split_on_char '\n' s)) in
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_parent_entry"
+    ("mod Main do\n\
+     \  needs IO.Console\n"
+     ^ indent nested_parent_call_outer_src ^
+     "\n  fn main(_c : Cap(IO.Console)) do\n"
+     ^ nested_parent_call_main_body ^
+     "  end\n\
+      end\n")
+  in
+  let bin = Filename.concat tmp "nested_parent_entry_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    Alcotest.(check string)
+      "an entry-file nested module links and calls its enclosing modules' fns"
+      nested_parent_call_expected (read_cmd_output (Filename.quote bin))
+
+(* A qualified call to an enclosing module's `pfn` names THAT module's fn even
+   when the calling module has its own fn of the same name.  Pre-fix, in-file,
+   `Outer.helper` resolved only through the typechecker's dot-suffix fallback
+   -- i.e. to whatever bare `helper` meant at the call site, here Inner's
+   `helper : String -> String` -- and the program was rejected.  (For a
+   registry module, e.g. any stdlib module, the same spelling was rejected
+   outright as "private to module"; the stdlib ratchet in run_compiler covers
+   that shape.) *)
+let test_nested_module_qualified_parent_pfn_not_shadowed () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_parent_qual"
+    "mod Main do\n\
+    \  needs IO.Console\n\
+    \  mod Outer do\n\
+    \    pfn helper(x : Int) : Int do x + 1 end\n\
+    \    mod Inner do\n\
+    \      pfn helper(s : String) : String do s ++ \"!\" end\n\
+    \      fn f(x : Int) : String do helper(int_to_string(Outer.helper(x))) end\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_c : Cap(IO.Console)) do\n\
+    \    println(Outer.Inner.f(41))\n\
+    \  end\n\
+     end\n"
+  in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreted" "42!" interp_out;
+  let bin = Filename.concat tmp "nested_parent_qual_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    Alcotest.(check string) "compiled" "42!" (read_cmd_output (Filename.quote bin))
+
 let test_float_lit_match_arm_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_floatpat"
     "mod FloatPat do\n\
@@ -13696,6 +13833,7 @@ declare i64    @native_f32_arr_length(ptr %arr)
 declare double @native_f32_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_f32_arr_set(ptr %arr, i64 %i, double %v)
 declare double @native_f32_arr_sum(ptr %arr)
+declare ptr    @native_f32_arr_sort(ptr %arr)
 declare ptr    @native_f32_arr_map(ptr %arr, ptr %f)
 declare ptr    @native_f32_arr_map2(ptr %a, ptr %b, ptr %f)
 declare ptr    @native_f32_arr_fold(ptr %acc, ptr %arr, ptr %f)
@@ -13706,6 +13844,7 @@ declare i64    @native_i32_arr_length(ptr %arr)
 declare i64    @native_i32_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_i32_arr_set(ptr %arr, i64 %i, i64 %v)
 declare i64    @native_i32_arr_sum(ptr %arr)
+declare ptr    @native_i32_arr_sort(ptr %arr)
 declare ptr    @native_i32_arr_map(ptr %arr, ptr %f)
 declare ptr    @native_i32_arr_map2(ptr %a, ptr %b, ptr %f)
 declare ptr    @native_i32_arr_fold(ptr %acc, ptr %arr, ptr %f)
@@ -13716,6 +13855,7 @@ declare i64    @native_u8_arr_length(ptr %arr)
 declare i64    @native_u8_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_u8_arr_set(ptr %arr, i64 %i, i64 %v)
 declare i64    @native_u8_arr_sum(ptr %arr)
+declare ptr    @native_u8_arr_sort(ptr %arr)
 declare ptr    @native_u8_arr_map(ptr %arr, ptr %f)
 declare ptr    @native_u8_arr_map2(ptr %a, ptr %b, ptr %f)
 declare ptr    @native_u8_arr_fold(ptr %acc, ptr %arr, ptr %f)
@@ -15844,6 +15984,14 @@ let codegen_suites =
             test_derive_json_single_from_json_compiled;
           Alcotest.test_case "ambiguous multi-derive from_json: clean diagnostic, not ICE" `Quick
             test_derive_json_ambiguous_from_json_diagnostic;
+        ] );
+      ( "nested_module_parent_call", [
+          Alcotest.test_case "MARCH_LIB_PATH nested module calls enclosing fns (compiled)" `Quick
+            test_nested_module_parent_call_lib_path_compiled;
+          Alcotest.test_case "entry-file nested module calls enclosing fns (compiled)" `Quick
+            test_nested_module_parent_call_entry_compiled;
+          Alcotest.test_case "qualified parent pfn is not shadowed by an inner fn" `Quick
+            test_nested_module_qualified_parent_pfn_not_shadowed;
         ] );
       ( "float_lit_match_codegen", [
           Alcotest.test_case "compiled float-literal match arm (B4)" `Quick

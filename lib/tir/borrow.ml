@@ -391,10 +391,13 @@ let extern_owned_builtins : string list = [
     "native_float_arr_sumsq_dev"; "native_float_arr_map";
     "native_float_arr_map2"; "native_float_arr_fold";
     "native_float_arr_from_list"; "native_float_arr_filter_mask";
-    "native_f32_arr_set"; "native_f32_arr_map"; "native_f32_arr_map2";
+    "native_f32_arr_set"; "native_f32_arr_sort"; "native_f32_arr_map";
+    "native_f32_arr_map2";
     "native_f32_arr_fold"; "native_f32_arr_from_list"; "native_i32_arr_set";
+    "native_i32_arr_sort";
     "native_i32_arr_map"; "native_i32_arr_map2"; "native_i32_arr_fold";
-    "native_i32_arr_from_list"; "native_u8_arr_set"; "native_u8_arr_map";
+    "native_i32_arr_from_list"; "native_u8_arr_set"; "native_u8_arr_sort";
+    "native_u8_arr_map";
     "native_u8_arr_map2"; "native_u8_arr_fold"; "native_u8_arr_from_list";
     "native_float_to_f32_arr"; "native_f32_to_float_arr";
     "native_int_to_i32_arr"; "native_i32_to_int_arr"; "native_int_to_u8_arr";
