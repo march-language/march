@@ -4,3 +4,5 @@ placed: n0 offers []
 n1 dead: n0 offers [Echo.Server]
 n1 rejoined, settling: n0 offers [Echo.Server]
 closed: n0 offers []
+after close_all, n0's marker still registered: no
+a peer sees eligible ids: [n1, n2]

@@ -1071,7 +1071,8 @@ static march_mbox_node *mbox_unlink(march_proc *p, march_mbox_node **head,
     if (!is_control) {
         atomic_fetch_sub_explicit(&p->user_mbox_count, 1,
                                   memory_order_relaxed);
-        if (node->marker) p->mbox_markers--;
+        if (node->marker)
+            atomic_fetch_sub_explicit(&p->mbox_markers, 1, memory_order_relaxed);
     }
     return node;
 }
@@ -1083,7 +1084,7 @@ static march_mbox_node *mbox_unlink(march_proc *p, march_mbox_node **head,
 static march_mbox_node *mbox_user_visible(march_proc *p,
                                           march_mbox_node **prev_out) {
     march_mbox_node *prev = NULL, *n = p->mailbox;
-    if (p->mbox_markers)
+    if (atomic_load_explicit(&p->mbox_markers, memory_order_relaxed))
         while (n && n->marker) { prev = n; n = n->next; }
     if (prev_out) *prev_out = prev;
     return n;
@@ -1147,14 +1148,29 @@ static int64_t mbox_user_count(march_proc *p) {
 /* User MESSAGES (markers excluded): what mbox_limit and the BLOCK low-water
  * mark are about.  Under mbox_lock. */
 static int64_t mbox_user_msgs(march_proc *p) {
-    return mbox_user_count(p) - p->mbox_markers;
+    return mbox_user_count(p)
+         - atomic_load_explicit(&p->mbox_markers, memory_order_relaxed);
 }
 
+/* A WAITING proc has something its receive can take.  The actor loop (wait
+ * mode 2) takes epoch markers as well as user messages.  Any other wait (a
+ * nested receive() inside a handler, or a proc not in a mailbox wait) can
+ * take user MESSAGES and control-plane values, never a marker: markers stay
+ * queued until the actor loop reaches them (DD step 6, deviation 13).
+ * Counting marker nodes here made shutdown's wake_idle_daemons skip, and
+ * march_sched_wait_idle count as busy, an actor parked in a nested receive()
+ * after any deploy, so the process never exited
+ * (specs/progress/2026-09-25-dd-review-marker-blocks-shutdown-in-nested-receive.md).
+ * Lock-free relaxed reads, like the counters they replace: a racing send is
+ * resolved by the send's own wake. */
 static int mbox_waiting_has_deliverable(march_proc *p) {
     int mode = atomic_load_explicit(&p->mbox_wait_mode, memory_order_relaxed);
-    return mode == 2 ? mbox_user_count(p) > 0
-                     : atomic_load_explicit(&p->mbox_count,
-                                            memory_order_relaxed) > 0;
+    int64_t user_nodes = mbox_user_count(p);
+    if (mode == 2) return user_nodes > 0;
+    int64_t markers = atomic_load_explicit(&p->mbox_markers, memory_order_relaxed);
+    int64_t control = atomic_load_explicit(&p->mbox_count, memory_order_relaxed)
+                    - user_nodes;
+    return user_nodes - markers > 0 || control > 0;
 }
 
 /* Forward declaration: the registered message disposer (defined further
@@ -1589,6 +1605,7 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
     p->control_mbox_tail = NULL;
     atomic_init(&p->mbox_count, 0);
     atomic_init(&p->user_mbox_count, 0);
+    atomic_init(&p->mbox_markers, 0);
     atomic_init(&p->mbox_lock, 0);
     atomic_init(&p->mbox_wait_mode, 0);
     p->owner_sched = NULL;
@@ -3013,7 +3030,7 @@ int march_sched_send_marker(march_proc *target, void *msg, uint32_t epoch) {
      * wait (the activation that sends it must not block on a full
      * mailbox), and it does not count against mbox_limit. */
     mbox_push_node(target, node, 0);
-    target->mbox_markers++;
+    atomic_fetch_add_explicit(&target->mbox_markers, 1, memory_order_relaxed);
     march_proc_status st = atomic_load_explicit(&target->status,
                                                 memory_order_acquire);
     int wait_mode = atomic_load_explicit(&target->mbox_wait_mode,
@@ -3067,7 +3084,8 @@ int march_sched_take_markers(uint32_t upto, void **msgs, uint32_t *epochs,
     int n = 0;
     mbox_lock_acquire(p);
     march_mbox_node *prev = NULL, *node = p->mailbox;
-    while (node && p->mbox_markers && n < max) {
+    while (node && atomic_load_explicit(&p->mbox_markers, memory_order_relaxed)
+                && n < max) {
         march_mbox_node *next = node->next;
         if (node->marker && node->epoch <= upto) {
             mbox_unlink(p, &p->mailbox, &p->mbox_tail, prev, node, 0);

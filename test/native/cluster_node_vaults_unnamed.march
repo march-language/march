@@ -1,0 +1,37 @@
+-- A running ClusterNode's internal Vaults (meta, names, routes, failed, ...)
+-- must not be reachable by name
+-- (specs/progress/2026-09-25-dd-review-cluster-node-vaults-bypass-live-cap.md).
+-- They were named "cluster_node_<x>_<name>.<pid>", so any code holding IO.Mut
+-- could find the node's meta Vault with Vault.whereis over a small pid range
+-- and set `stopped`, or rewrite its routes, without ever holding
+-- Cap(ClusterNode.Live). This scans the old naming scheme over the whole
+-- pid range a fresh process uses; it must find nothing.
+mod ClusterNodeVaultsUnnamed do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.Process
+
+  -- Tail-recursive: the count of Vaults found under the old names.
+  pfn scan(name : String, i : Int, stop : Int, acc : Int) : Int do
+    if i >= stop do acc else
+      let meta : Option(Vault(Int)) = Vault.whereis("cluster_node_meta_" ++ name ++ "." ++ int_to_string(i))
+      let names : Option(Vault(Int)) = Vault.whereis("cluster_node_names_" ++ name ++ "." ++ int_to_string(i))
+      let hit = (if meta != None do 1 else 0 end) + (if names != None do 1 else 0 end)
+      scan(name, i + 1, stop, acc + hit)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let h = match ClusterNode.start(c, ClusterNode.config("vbnode", 0, "", Nil, "vb-secret", 1)) do
+      Ok(h) -> h
+      Err(e) -> panic(e)
+    end
+    println("node started: " ++ (if ClusterNode.node_id(h) != "" do "yes" else "no" end))
+    println("node Vaults found by name: " ++ int_to_string(scan("vbnode", 0, 4096, 0)))
+    ClusterNode.stop(h)
+    println("done")
+    -- The node's tasks outlive main; end the process here.
+    process_exit(0)
+  end
+end

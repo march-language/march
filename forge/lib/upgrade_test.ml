@@ -109,10 +109,11 @@ let worktree_add ~root ~ref_ : (string * (unit -> unit), string) result =
 
 (** Compile [proj]'s hot-reload patch to [out].so (with its manifest and
     actor schemas), with the same boundary and topology as its base build.
-    Run from a fresh working directory: the compiler's artifact cache lives
-    under the working directory's .march/cas, and a cache hit copies the
-    .so alone, without its .hcr_manifest and .schemas.json sidecars, which
-    this needs (todo: 2026-09-24-cas-hit-skips-so-sidecars). *)
+    Run from a fresh working directory, so the ref's build and the working
+    tree's never share an artifact cache (it lives under the working
+    directory's .march/cas). This was once also the workaround for a cache
+    hit that restored the .so without its .hcr_manifest and .schemas.json;
+    a hit restores them now (specs/progress/2026-09-25-cas-hit-restores-so-sidecars.md). *)
 let build_patch ~(proj : Project.project) ~out ~log : (string * string * string, string) result =
   let* entry = Project.entry proj in
   let entry = if Filename.is_relative entry then Filename.concat proj.Project.root entry else entry in

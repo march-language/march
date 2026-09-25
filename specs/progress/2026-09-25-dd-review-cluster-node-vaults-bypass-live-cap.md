@@ -25,3 +25,19 @@ A private function that never sees `Cap(ClusterNode.Live)` scans
 Create the node's Vaults anonymously, or under an unguessable per-node
 nonce, so `whereis` cannot find them. Or give Vault an unregistered
 constructor for runtime-internal state.
+
+---
+
+## Fixed 2026-09-25
+
+`ClusterNode.start` names the node's Vaults `cluster_node_<x>_<name>.<pid>.<nonce>`,
+the nonce `Crypto.random_hex(16)` (128 bits; the module already declared
+`needs IO.Random`). Nothing else looked these Vaults up by name. Only the naming
+changed (D27 edits other parts of cluster_node.march).
+
+Test: `test/native/cluster_node_vaults_unnamed.march` starts a real node and scans the
+old names (`meta` and `names`) over pids 0..4095: `node Vaults found by name: 0`.
+Before the fix the review's scan found the meta Vault at pid 0.
+
+Not done: the placeholder `cluster_node_unset_*` Vaults of an unset handle keep fixed
+names; they hold no live node's state.

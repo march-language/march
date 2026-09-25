@@ -380,9 +380,13 @@ let base_env : env =
            | Some inst ->
              (match inst.ai_state with
               | VRecord fields ->
+                (* Int-only, like march_get_actor_field: an immediate
+                   field reads as its integer; any other field is None. *)
                 (match List.assoc_opt field fields with
-                 | Some v -> VCon ("Some", [v])
-                 | None   -> VCon ("None", []))
+                 | Some (VInt _ as v) -> VCon ("Some", [v])
+                 | Some (VBool b) -> VCon ("Some", [VInt (if b then 1 else 0)])
+                 | Some VUnit -> VCon ("Some", [VInt 0])
+                 | Some _ | None -> VCon ("None", []))
               | _ -> VCon ("None", []))
            | None -> VCon ("None", []))
         | _ -> eval_error "get_actor_field: expected (Pid, String)"))

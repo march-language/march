@@ -56,18 +56,28 @@ val emit_fn :
 val fn_declare_str : Tir.fn_def -> string
 val emit_atom_show_table : Llvm_ctx.ctx -> unit
 
+(** Stable actor-message constructor tags, ["<Actor>_Msg.<Ctor>" -> tag]
+    (see the implementation's comment); [pins] as for {!variant_ctor_tags}. *)
+val actor_msg_tag_table :
+  pins:(string * string) list -> Tir.type_def list -> (string, int) Hashtbl.t
+
 (** Per-constructor heap tags for a [type_def list], in declaration order,
     exactly as {!build_ctor_info} installs them: [type_name -> tag list].
 
     Exported for the REPL's heap pretty-printer, which reads a tag out of a
     live value and must map it back to a constructor name.  "tag = index in
-    the ctor list" holds only for ordinary variants; actor-message types and
-    same-short-name colliding types are numbered from global counters that
-    walk the list front to back, so the caller must pass the SAME list in the
-    SAME order the code being interpreted was compiled with.
+    the ctor list" holds only for ordinary variants. Actor-message types are
+    numbered by a stable hash of the qualified constructor name, and a
+    `*_migrate_msg`'s old message type ([pins]: old type declaration ->
+    `<Actor>_Msg`; default: this compilation's [Migrate_msg_pins]) takes its
+    actor's tags by constructor name. Same-short-name colliding types are
+    numbered from a global counter that walks the list front to back, so the
+    caller must pass the SAME list in the SAME order the code being
+    interpreted was compiled with.
 
     {!build_ctor_info} consumes this function, so the two cannot drift. *)
 val variant_ctor_tags :
+  ?pins:(string * string) list ->
   collision_set:(string, string list) Hashtbl.t ->
   Tir.type_def list ->
   (string, int list) Hashtbl.t

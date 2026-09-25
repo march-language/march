@@ -25,3 +25,23 @@ already held.
 Tie `b` to the field's declared type when the name is a literal, which the
 typechecker knows. Otherwise restrict the public version to a fixed result
 type and make the polymorphic one stdlib-only.
+
+---
+
+## Fixed 2026-09-25
+
+`get_actor_field` is now `Pid(a) -> String -> Option(Int)` (typecheck_builtins; the
+LLVM builtin table's return type matches). Both backends return `Some` only for an
+immediate field (`'i'` kind: Int/Bool/Unit/Atom; the interpreter maps Bool to 0/1 and
+Unit to 0) and `None` for any pointer or float field, so the result can never be a
+disguised pointer. The review's repro (a pid stored as `pid_to_int` read back as a
+`Pid` and sent to) no longer typechecks. Every caller in the repo (stdlib topology,
+supervisor/actor native tests, examples, bench) reads an Int field; the suites stay
+green.
+
+This also removes half of `2026-09-24-get-actor-field-pid-and-result-ownership.md`:
+a boxed field is no longer returned at all, so there is no unowned reference to hand
+back. The leaked pid reference is still open there.
+
+Known difference: an Atom field reads as its hash compiled and as `None`
+interpreted (the interpreter's atom is not an integer).

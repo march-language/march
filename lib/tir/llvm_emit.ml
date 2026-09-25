@@ -117,6 +117,7 @@ type session_wraps = Llvm_ctx.session_wraps = {
 type ctx = Llvm_ctx.ctx = {
   buf       : Buffer.t;
   preamble  : Buffer.t;
+  call_tag_globals : (string, unit) Hashtbl.t;
   mutable ctr     : int;
   mutable blk     : int;
   mutable str_ctr : int;

@@ -2167,7 +2167,12 @@ mod ClusterNode do
       Err(e) -> Err("cluster_node: listen on " ++ int_to_string(cfg.listen_port) ++ ": " ++ e)
       Ok(listen_fd) ->
         let node = spawn(ClusterNodeActor)
-        let tag = cfg.name ++ "." ++ int_to_string(pid_to_int(node))
+        -- The node's Vaults hold its routes, names, membership and its
+        -- `stopped` flag: Cap(ClusterNode.Live) is meant to be the only way
+        -- in (D35). A Vault name is a global handle anyone with IO.Mut can
+        -- `Vault.whereis`, so the name carries 128 random bits; name + pid
+        -- alone was found by a scan over the pid range.
+        let tag = cfg.name ++ "." ++ int_to_string(pid_to_int(node)) ++ "." ++ Crypto.random_hex(16)
         let h = { pid: pid_to_int(node), name: cfg.name, node_id: node_id_of(cfg.name), advertise: cfg.advertise,
                   members: Vault.new("cluster_node_members_" ++ tag),
                   names: Vault.new("cluster_node_names_" ++ tag),

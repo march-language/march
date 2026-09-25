@@ -594,7 +594,7 @@ void march_actor_set_dispatch_id(void *actor, uint32_t name_id);
  * "call tag base").  Emitted by codegen right after the actor record's
  * alloc; march_actor_call adds the sentinel's ctor index to this base to
  * address the handler positionally under F19's globally-unique msg tags. */
-void march_actor_set_call_base(void *actor, int64_t base);
+void march_actor_set_call_tags(void *actor, const int32_t *tags, int64_t n);
 
 /* ── The unified epoch model: activation, markers, holds, drains ─────────
  * specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md, II.4.

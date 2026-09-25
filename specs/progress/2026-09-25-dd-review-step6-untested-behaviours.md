@@ -32,3 +32,30 @@ epoch-1 parent after a deploy advances before its first message. For 2: a
 non-HCR actor's pin moves to the new epoch. For 3: a two-thread stage/commit
 versus `enter_gen` loop. Then add a compiled session test through the reload
 socket for the holds.
+
+---
+
+## Tested 2026-09-25
+
+1. `test_old_epoch_spawn_gets_marker` (test_hcr_migrate_order.c): a parent held in
+   v1 across a deploy spawns a child; the child's first message runs on v2 with its
+   state migrated, and the old epoch's pins reach 0.
+2. `test_non_hcr_actor_advances`: a closure-dispatched actor with no dispatch slot
+   pins its epoch, takes its marker on a deploy of another function, and the old
+   epoch's pins reach 0.
+3. `test_epoch_written_before_live_threads` (test_dispatch.c): one thread stages and
+   commits 200k versions (the two non-baseline ring slots are reused every time),
+   three readers call `enter_gen` at recent epochs and assert the version returned
+   is never newer than the caller's epoch; a held baseline ref keeps `enter_gen` off
+   its fall-back-to-current path. Its first run on unmodified code found **629
+   violations**: an ABA in `enter_gen`. A slot selected by its epoch could be retired,
+   restaged with a newer epoch and committed between the scan and the pin, and the
+   post-pin `live` re-check accepted the new occupant. `enter_gen` now also checks
+   that the pinned slot still carries the epoch it was selected by, and backs out
+   otherwise (0 violations over ~785k checks). Compiled units pin their epoch, so the
+   reclaim condition kept this unreachable from them; the check makes it hold
+   without that argument.
+
+Not done: a behavioural test of `SessionNode`'s `HoldEpoch`/`ReleaseEpoch` through
+the reload socket. That is D27's hold code, which was changing on an unmerged branch.
+Filed as `specs/todos/2026-09-25-session-hold-epoch-behaviour-test.md`.

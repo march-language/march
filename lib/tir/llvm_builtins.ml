@@ -1010,7 +1010,7 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_self()" };
   { march_name = "pid_of_int"; c_name = Some "march_pid_of_int"; ret_ty = Some (Tir.TCon ("Pid", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_pid_of_int(i64 %n)" };
-  { march_name = "get_actor_field"; c_name = Some "march_get_actor_field"; ret_ty = Some (Tir.TCon ("Option", [Tir.TVar "a"]));
+  { march_name = "get_actor_field"; c_name = Some "march_get_actor_field"; ret_ty = Some (Tir.TCon ("Option", [Tir.TInt]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_get_actor_field(ptr %pid, ptr %name)" };
   { march_name = "register_supervisor"; c_name = Some "march_register_supervisor"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs, i64 %backoff_base_ms, i64 %backoff_cap_ms, i64 %backoff_jitter_pct)" };
@@ -1145,7 +1145,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_dispatch_register_name", "declare void @march_dispatch_register_name(i32, ptr)");
   ("march_reload_server_start", "declare void @march_reload_server_start(ptr)");
   ("march_actor_set_dispatch_id", "declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)");
-  ("march_actor_set_call_base", "declare void @march_actor_set_call_base(ptr %actor, i64 %base)");
+  ("march_actor_set_call_tags", "declare void @march_actor_set_call_tags(ptr %actor, ptr %tags, i64 %n)");
   ("getenv", "declare ptr  @getenv(ptr)");
   ("march_alloc", "declare noalias nonnull ptr @march_alloc(i64 %sz) allocsize(0)");
   ("march_incrc", "declare void @march_incrc(ptr %p)");
@@ -1260,7 +1260,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_dispatch_register_name";
   PDeclare "march_reload_server_start";
   PDeclare "march_actor_set_dispatch_id";
-  PDeclare "march_actor_set_call_base";
+  PDeclare "march_actor_set_call_tags";
   PDeclare "getenv";
   PDeclare "march_alloc";
   PDeclare "march_incrc";
