@@ -525,6 +525,11 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- `to_string`/`println` of a List, Option, Result or tuple no longer aborts
+  `march --jit` or the JIT REPL with an internal compiler error ("ambiguous
+  interface-method call to `Show$List.show`"). The prelude's generic `Show`
+  impls are now specialised at the call site, as they are under `--compile`.
+
 - A function in a nested module that calls a function of an enclosing module
   (`mod Outer do pfn helper ... mod Inner do fn f(x) do helper(x) end end end`)
   now compiles. Before, the compiled program failed to link with `helper`
