@@ -14,6 +14,14 @@ git log is authoritative for exact commits.
 ### Fixed
 - The interpreter no longer dies with `stub NAME called before initialisation` when a nested module calls an enclosing module's fn that is declared after the nested module. This covers calls from the nested module's own fns, its impl methods and actor handlers, and modules nested further down. Compiled programs already worked (#645). A module-level `let` that calls a fn declared after it still fails, as before.
 
+- **`dns_resolve` / `Dns.resolve` now return the same list interpreted and compiled.**
+  The interpreter listed each address once per socket type (`"127.0.0.1"` came back
+  as `[127.0.0.1, 127.0.0.1]`), and compiled code also returned IPv6 addresses
+  (`"localhost"` gave `[127.0.0.1, ::1]`) that no March socket can connect to. Both
+  now return IPv4 addresses only, each once, in the resolver's order, as the `Dns`
+  module documents. A host with no IPv4 address (including an IPv6 literal) is
+  `NotFound` on both, where compiled code used to report a resolver error message.
+
 - `forge run --processes` no longer occasionally assigns two pools the same cluster port (seen on Linux CI as `tcp_listen: bind failed`); the ports for all processes are now reserved together.
 
 - **A process now exits after a hot deploy even when an actor is blocked in a nested
