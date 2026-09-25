@@ -18,8 +18,12 @@ Every certificate-mode peer's verified certificate is available as
   checks each offer's holder, and an access point's session checks every
   role's registry holder. Tests: `test/session/cert_authz.march` (fake
   `ClusterOps`), two-node `cert_role_denied` and `cert_initiate_denied`.
-- Raw-send denial in `ClusterNode.send_msg` and `route` against the peer's
-  certificate `raw_send` flag.
+- ~~Raw-send denial in `ClusterNode.send_msg` and `route`~~ **done**
+  (2026-09-25): both ends need `raw_send`; `send_msg`, `queue_for`, inbound
+  routes, `NodeSend.cast`/`handle_frame` and `NodeCall` on direct connections
+  (`NetKernel.raw_allowed`). Session routes (`route_session`) and control
+  frames exempt. Tests: `test/stdlib/test_session_ap.march`, two-node
+  `cert_raw_send_denied`; `cert_ok`'s node-b gained `raw_send`.
 - Cross-node references (`GlobalPid.make`, `GlobalRegistry.lookup`) checked
   against the certificate.
 - SessionNode's direct-connection path (`dial_all` / `accept_all`) still calls

@@ -1,0 +1,13 @@
+node-a: done
+node-a: queue_for node-b: refused
+node-a: raw deliveries: 0
+node-a: raw send_msg to node-b: not authorized
+node-a: raw sends refused: 6
+node-a: refused inbound Raw.Ping
+node-a: refused inbound Raw.Ping
+node-a: refused inbound Raw.Ping
+node-a: refused inbound SessionAP.Invite
+node-a: refused outbound Raw.Ping
+node-a: refused outbound queue
+node-a: session route got SessionNode.Ping#probe
+node-a: up

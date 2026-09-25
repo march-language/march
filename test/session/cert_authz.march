@@ -84,8 +84,9 @@ mod CertAuthz do
       next_id: fn key -> Vault.incr(net.meta, me ++ "#" ++ key, 1),
       creation: fn _ -> 1,
       queue_for: fn _ -> Some(q),
+      session_queue_for: fn _ -> Some(q),
       send_msg: fn (to, tag, payload, _policy) -> fake_send(net, me, to, tag, payload),
-      route: fn (pid, f) -> do
+      route_session: fn (pid, f) -> do
         let k = me ++ "/" ++ int_to_string(pid)
         Vault.set(net.routes, k, f)
         k

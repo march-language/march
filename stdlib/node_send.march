@@ -54,6 +54,28 @@ mod NodeSend do
     from_node : String
   }
 
+  -- ── session traffic (distributed-deploys step 11b) ─────────────────────
+  -- In certificate mode a raw ACTOR_MSG (Node.send, @[remote], any user
+  -- type) crosses a connection only when both nodes' certificates carry
+  -- `raw_send` (NetKernel.raw_allowed; ClusterNode for its own links).
+  -- Session traffic is exempt: these type tags, before any "#<sid>" suffix.
+
+  doc "The ACTOR_MSG type tags that are session traffic (SessionAP's and SessionNode's frames)."
+  fn session_tags() : List(String) do
+    ["SessionAP.Invite", "SessionAP.Withdraw", "SessionAP.Answer",
+     "SessionNode.Hello", "SessionNode.Deliver", "SessionNode.Bye", "SessionNode.Cancel",
+     "SessionNode.Ping", "SessionNode.Undelivered", "SessionNode.Drained"]
+  end
+
+  doc "Is [type_tag] session traffic (`session_tags()`, ignoring a \"#<sid>\" suffix)?"
+  fn is_session_tag(type_tag : String) : Bool do
+    let kind = match String.split_first(type_tag, "#") do
+      Some((k, _)) -> k
+      None -> type_tag
+    end
+    List.member(session_tags(), kind)
+  end
+
   -- ── frames ──────────────────────────────────────────────────────────────
 
   fn encode_msg(seq : Int, to : Pid, type_tag : String, payload : List(Int)) : List(Int) do
@@ -110,11 +132,19 @@ mod NodeSend do
   -- delivery failure arrives later as a DELIVERY_FAILED frame (see
   -- `recv_failure`), not here -- the acknowledgement question the design
   -- record leaves to the flow-control item.
+  --
+  -- On a certificate-mode connection where raw sends are refused
+  -- (`NetKernel.raw_allowed`), anything but session traffic is
+  -- `Err(Refused(seq, "not authorized: ..."))`, counted, never written.
   fn cast(fd : Int, seq : Int, to : Pid, type_tag : String, payload : List(Int)) : Result((), SendError) do
+    if is_session_tag(type_tag) == false && NetKernel.raw_allowed(fd) == false do
+      NetKernel.note_raw_refused(fd)
+      Err(Refused(seq, "not authorized: raw send of " ++ type_tag ++ " (certificate mode: both nodes' certificates need raw_send)"))
+    else
     match NetKernel.send_frame(fd, encode_msg(seq, to, type_tag, payload)) do
       Err(_) -> Err(NoConnection)
       Ok(_) -> Ok(())
-    end
+    end end
   end
 
   -- Read frames off [fd] until one is a DELIVERY_FAILED; other frames are
@@ -202,11 +232,16 @@ mod NodeSend do
       Err(_) -> Ok(())
       Ok(d) ->
         let outcome =
-          if d.to_creation != my_creation do
+          -- Raw frames from a peer whose connection refuses them (step
+          -- 11b): dropped, counted, and answered DELIVERY_FAILED.
+          if is_session_tag(d.type_tag) == false && NetKernel.raw_allowed(reply_fd) == false do
+            NetKernel.note_raw_refused(reply_fd)
+            Err("not authorized: raw send of " ++ d.type_tag ++ " refused (certificate mode: both nodes' certificates need raw_send)")
+          else if d.to_creation != my_creation do
             Err("stale creation " ++ int_to_string(d.to_creation) ++ ", node is at " ++ int_to_string(my_creation))
           else
             dispatch(d)
-          end
+          end end
         match outcome do
           Ok(_) -> Ok(())
           Err(reason) ->

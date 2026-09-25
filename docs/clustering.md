@@ -404,6 +404,51 @@ frame. The pure check is `SessionAP.authorize(cert, proto, role, mode)`, and
 `ClusterNode.authorize_peer(c, node_id, proto, role, mode)` applies it to a
 peer (always `Ok` in shared-secret mode).
 
+### Raw sends
+
+Raw primitives are the ways to reach a process outside any session:
+`ClusterNode.send_msg`, `ClusterNode.queue_for` (what `Node.enqueue` sends
+through), the receivers installed with `ClusterNode.route` / `route_type`
+(`@[remote]` and user code), `Node.send`, and `RemoteCall`. They sit outside
+the protocol boundary, so a certificate grants them with a flag,
+`raw_send`. In certificate mode **a raw frame crosses a link only when the
+certificates at both ends carry `raw_send`**. A node's frames to itself (the
+loopback) are never raw sends.
+
+| where | refused how |
+|---|---|
+| `ClusterNode.send_msg` to a peer | `Err(NodeQueue.NotAuthorized)`, never queued |
+| `ClusterNode.queue_for(c, peer)` | `None` |
+| an inbound raw frame from a peer | dropped before any route, and answered `DELIVERY_FAILED` ("not authorized: ..."), so the sender's `on_delivery_failed` hears it |
+| `NodeSend.cast` / `Node.send` on a connection a program opened with `ClusterConn.connect_split_auth` | `Err(Refused(seq, "not authorized: ..."))`; an inbound raw frame is answered `DELIVERY_FAILED` |
+| `NodeCall.call` (`RemoteCall`) on such a connection | `Err(Forbidden)`; the serving side answers `Forbidden` without dispatching |
+
+Every refusal is counted. `ClusterNode.raw_refused(c)` counts a node's own
+links, and `NetKernel.raw_refused()` counts direct connections. On-security-event
+subscribers get `RawSendRefused(node_id, what)`, where `what` is
+`"outbound <type>"`, `"outbound queue"` or `"inbound <type>"`.
+
+Two kinds of traffic are exempt, and nothing else is:
+
+- **Session traffic.** An ACTOR_MSG whose type tag is one of
+  `ClusterNode.session_tags()` (`SessionAP.Invite`, `.Withdraw` and `.Answer`,
+  and `SessionNode.Hello`, `.Deliver`, `.Bye`, `.Cancel`, `.Ping`,
+  `.Undelivered` and `.Drained`, before any `#<session id>` suffix) is exempt
+  when it reaches a **session route**, one a session opened with
+  `ClusterNode.route_session`. A session tag sent to an ordinary route, or any
+  other tag sent to a session route, is refused. What a session may say is
+  bounded by its protocol and checked by the receiver, and who may join one is
+  checked against the certificates' roles (above).
+- **ClusterNode's own control frames.** Everything on a peer's control
+  connection is written by ClusterNode itself and never reaches a route:
+  SWIM (tags 0-3), registry sync (5-6), remote monitors (7, 8, 12),
+  `DELIVERY_FAILED` (10), `CREDIT` (11), member gossip and sync (13-14), and
+  revocations (15). `ClusterNode.control_tags()` lists them.
+
+A node without `raw_send` is the right certificate for code isolated on its own
+node because it needs `IO.Foreign`. Its reach is the sessions its roles let it
+form, and nothing it sends outside them is delivered.
+
 ### What authorization does not cover
 
 Authorization is about **authority**: which conversations a misbehaving member

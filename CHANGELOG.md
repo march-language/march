@@ -122,6 +122,20 @@ git log is authoritative for exact commits.
   `offer_hosted_<Role>` and `initiate_<Role>` pass the protocol's role names
   (`SessionNode.offer_role`, `offer_hosted` and `initiate` take a `roles`
   argument after the fingerprint).
+- **Raw sends need `raw_send` at both ends** (step 11b, part 2; certificate mode
+  only). `ClusterNode.send_msg` refuses a raw send to or from a peer unless both
+  nodes' certificates carry `raw_send` (`Err(NodeQueue.NotAuthorized)`, a new
+  `EnqueueError` variant); `ClusterNode.queue_for` (what `Node.enqueue` uses)
+  returns `None`; an inbound raw frame from such a peer is dropped before any
+  route and answered `DELIVERY_FAILED`. On direct certificate-mode connections
+  `NodeSend.cast` (`Node.send`) is refused and `NodeCall.call` (`RemoteCall`)
+  returns the new `CallError.Forbidden`, which the serving side also answers.
+  Session traffic (`ClusterNode.session_tags()`, to a route opened with the new
+  `ClusterNode.route_session`) and ClusterNode's own control frames are exempt;
+  SessionNode uses `route_session` and the new `session_queue_for`. Refusals are
+  counted (`ClusterNode.raw_refused`, `NetKernel.raw_refused`) and reported as the
+  new `RawSendRefused(node_id, what)` security event. A node's sends to itself are
+  never refused.
 - **Placement changes on a running system and upgrade tests** (build step 8 of the
   distributed-deploys plan). A topology app's nodes re-read their topology on
   SIGHUP and move their own offers: a role's placement, capacity, or a pool that

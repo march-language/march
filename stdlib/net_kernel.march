@@ -286,8 +286,33 @@ mod NetKernel do
     Vault.set(mac_table(), fk(fd), { tx_key: keys.tx_key, rx_key: keys.rx_key })
   end
 
+  -- ── raw-send permission per connection (distributed-deploys step 11b) ──
+  -- A certificate-mode handshake records whether raw frames (Node.send,
+  -- RemoteCall: anything outside a session) may cross the connection: only
+  -- when BOTH certificates carry `raw_send`. A connection with no entry
+  -- (shared-secret mode, or never handshaked here) allows them.
+  pfn raw_table() : Vault(Int) do Vault.open("net_kernel_raw") end
+
+  doc """
+  May raw frames (anything but session traffic) cross [fd]? False only on a
+  certificate-mode connection where this node's or the peer's certificate
+  lacks `raw_send`. Checked by `NodeSend` (Node.send) and `NodeCall`
+  (RemoteCall); ClusterNode checks its own connections by certificate.
+  """
+  fn raw_allowed(fd : Int) : Bool do Vault.get_or(raw_table(), fk(fd), 1) == 1 end
+
+  doc "Record a raw frame refused on a connection (`raw_allowed` false): counted in `raw_refused()`."
+  fn note_raw_refused(_fd : Int) : () do
+    let _ = Vault.incr(mac_counts(), "raw_refused_total", 1)
+    ()
+  end
+
+  doc "Raw frames refused on connections this process handshaked, in either direction."
+  fn raw_refused() : Int do Vault.get_or(mac_counts(), "raw_refused_total", 0) end
+
   doc "Drop [fd]'s MAC state: its frames are plain again (see the rule above)."
   fn forget(fd : Int) : () do
+    Vault.drop(raw_table(), fk(fd))
     Vault.drop(mac_table(), fk(fd))
     let c = mac_counts()
     Vault.drop(c, "s" ++ fk(fd))
@@ -475,6 +500,8 @@ mod NetKernel do
                                     if Bytes.is_empty(shared) do Err("Handshake: the peer's ephemeral key is not usable")
                                     else
                                       install(fd, ClusterAuth.frame_keys(shared, th, nonce, peer.nonce))
+                                      let raw = NodeCert.has_flag(creds.signed.cert, "raw_send") && NodeCert.has_flag(cert, "raw_send")
+                                      Vault.set(raw_table(), fk(fd), if raw do 1 else 0 end)
                                       Ok({ identity: peer.identity, role: peer.role, addr: peer.addr,
                                            cert: Some(cert), mac: true })
                                     end

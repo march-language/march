@@ -1,0 +1,16 @@
+node-b: direct Node.send path: not authorized: raw send of Raw.Ping (certificate mode: both nodes' certificates need raw_send)
+node-b: direct RemoteCall server answered: not authorized: a remote call needs raw_send in both nodes' certificates
+node-b: direct RemoteCall: not authorized: a remote call needs raw_send in both nodes' certificates
+node-b: direct connection checked
+node-b: direct raw frames refused: 3
+node-b: done
+node-b: loopback raw send delivered
+node-b: probes sent
+node-b: queue_for node-a: refused
+node-b: raw send_msg to itself: sent
+node-b: raw send_msg to node-a: not authorized
+node-b: raw sends refused: 2
+node-b: raw tag to a pid route refused by node-a: not authorized
+node-b: raw tag to a session route refused by node-a: not authorized
+node-b: raw tag to a type route refused by node-a: not authorized
+node-b: session tag to a raw route refused by node-a: not authorized

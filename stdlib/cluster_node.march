@@ -227,6 +227,61 @@ mod ClusterNode do
   -- are an open question of the design.
   fn node_id_of(name : String) : String do NodeIdentity.name_id(name) end
 
+  -- ── raw sends (distributed-deploys step 11b) ─────────────────────────────
+  -- Raw primitives (`send_msg`, `queue_for` for `Node.enqueue`, and the
+  -- `route`/`route_type` receivers `@[remote]` and user code install) are
+  -- outside the protocol boundary: in CERTIFICATE mode a raw ACTOR_MSG
+  -- crosses a link only when the certificates at BOTH ends carry `raw_send`
+  -- (plan section 3, "Raw primitives"). A node's frames to itself (the
+  -- loopback) are never raw sends. Exempt, and enumerated here:
+  --   * session traffic: an ACTOR_MSG whose type tag is one of
+  --     `session_tags()` (before any "#<sid>" suffix), delivered to a route a
+  --     session opened with `route_session`. A session tag sent to a raw
+  --     route, or a raw tag sent to a session route, is refused.
+  --   * every frame on the CONTROL connection, which only ClusterNode writes
+  --     (`control_tags()`): SWIM, member gossip and sync, registry sync,
+  --     remote monitors, DELIVERY_FAILED, CREDIT, revocations. None of them
+  --     reaches a route.
+  -- A shared-secret node has no certificates and refuses nothing.
+
+  doc """
+  The ACTOR_MSG type tags that are session traffic, exempt from raw-send
+  denial when they reach a session route: SessionAP's invitation, withdrawal
+  and answer, and SessionNode's frames (cluster sessions append "#<sid>").
+  The list is `NodeSend.session_tags()`, shared with the direct connections.
+  """
+  fn session_tags() : List(String) do NodeSend.session_tags() end
+
+  doc "Is [type_tag] session traffic (`session_tags()`, ignoring a \"#<sid>\" suffix)?"
+  fn is_session_tag(type_tag : String) : Bool do NodeSend.is_session_tag(type_tag) end
+
+  doc """
+  The control-connection frame tags, all ClusterNode's own and exempt from
+  raw-send denial: SWIM 0-3, REGISTRY_SYNC_REQ/RESP 5-6, MONITOR_REQ 7,
+  MONITOR_FIRE 8, DELIVERY_FAILED 10, CREDIT 11, MONITOR_ACK 12,
+  MEMBER_GOSSIP 13, MEMBERS_SYNC 14, REVOCATIONS 15. (9 is ACTOR_MSG, the only
+  frame on a data connection, and the only one checked.)
+  """
+  fn control_tags() : List(Int) do [0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15] end
+
+  doc """
+  May a raw ACTOR_MSG cross a link between a node holding [own] and a peer
+  that presented [peer]? Always in shared-secret mode ([own] None); in
+  certificate mode only when both certificates carry `raw_send`.
+  """
+  fn raw_allowed(own : Option(NodeCert.Cert), peer : Option(NodeCert.Cert)) : Bool do
+    match own do
+      None -> true
+      Some(o) ->
+        if NodeCert.has_flag(o, "raw_send") do
+          match peer do
+            Some(p) -> NodeCert.has_flag(p, "raw_send")
+            None -> false
+          end
+        else false end
+    end
+  end
+
   -- ── what subscribers see ────────────────────────────────────────────────
 
   type NodeInfo = { node_id : String, name : String, addr : String, creation : Int, incarnation : Int }
@@ -240,12 +295,18 @@ mod ClusterNode do
   --                                was dropped; n is the count on that
   --                                connection (NetKernel.mac_failure_limit()
   --                                of them close it)
-  type SecurityEvent = HandshakeRejected(String, String) | FrameRejected(String, Int)
+  --   RawSendRefused(node_id, what) a raw send to or from that peer refused
+  --                                (certificate mode, step 11b: this node's or
+  --                                the peer's certificate lacks `raw_send`);
+  --                                `what` is "outbound <type tag>", "outbound
+  --                                queue" or "inbound <type tag>"
+  type SecurityEvent = HandshakeRejected(String, String) | FrameRejected(String, Int) | RawSendRefused(String, String)
 
   fn security_text(ev : SecurityEvent) : String do
     match ev do
       HandshakeRejected(who, why) -> "handshake with " ++ who ++ " rejected: " ++ why
       FrameRejected(id, n) -> "frame from " ++ id ++ " failed its MAC (" ++ int_to_string(n) ++ " on that connection)"
+      RawSendRefused(id, what) -> "raw send refused (" ++ what ++ "): no raw_send between this node and " ++ id
     end
   end
 
@@ -1397,6 +1458,13 @@ mod ClusterNode do
         let cfg = st.cfg
         discard(task_spawn(fn _ -> dial(node, h, cfg, me, addr)))
       Install(l) ->
+        -- The peer's certificate, before its readers start: the data reader
+        -- checks raw sends against it, and `mirror` runs only after the
+        -- effects.
+        let _ = match Map.get(st.certs, l.node_id, Map.str_cmp) do
+          Some(pc) -> Vault.set(h.certs, l.node_id, pc)
+          None -> ()
+        end
         let node = pid_of_int(h.pid)
         let _ = task_spawn(fn _ -> read_control(node, h, l))
         discard(task_spawn(fn _ -> read_data(node, h, st.cfg.creation, l)))
@@ -1497,6 +1565,18 @@ mod ClusterNode do
 
   pfn security(h : CnHandle, ev : SecurityEvent) : () do
     discard(List.map(Vault.all(h.sec), fn kv -> match kv do (_k, f) -> f(ev) end))
+  end
+
+  -- A raw frame between this node and [peer_id]: allowed? (Its own node,
+  -- the loopback, always.)
+  pfn h_raw_ok(h : CnHandle, peer_id : String) : Bool do
+    peer_id == h.node_id || raw_allowed(h.own, Vault.get(h.certs, peer_id))
+  end
+
+  -- Count and report a refused raw send.
+  pfn note_raw_refused(h : CnHandle, peer_id : String, what : String) : () do
+    let _ = Vault.incr(h.meta, "raw_refused", 1)
+    security(h, RawSendRefused(peer_id, what))
   end
 
   -- Open a pair to [addr]: control, then data (the order the acceptor's
@@ -1663,7 +1743,20 @@ mod ClusterNode do
     end
   end
 
+  -- A delivery from [d.from_node] (the link's peer, or this node for the
+  -- loopback). A session route ("s<pid>") takes session traffic from any
+  -- certified peer; everything else is a raw send, refused (counted,
+  -- reported, and answered DELIVERY_FAILED by the caller) unless both
+  -- certificates carry raw_send (step 11b; see "raw sends" above).
   pfn deliver_local(h : CnHandle, d : NodeSend.Delivery) : Result((), String) do
+    let raw_ok = h_raw_ok(h, d.from_node)
+    match Vault.get(h.routes, "s" ++ int_to_string(d.to_local_pid)) do
+      Some(f) -> if raw_ok || is_session_tag(d.type_tag) do f(d) else refuse_inbound(h, d) end
+      None -> if raw_ok do deliver_raw(h, d) else refuse_inbound(h, d) end
+    end
+  end
+
+  pfn deliver_raw(h : CnHandle, d : NodeSend.Delivery) : Result((), String) do
     match Vault.get(h.routes, "p" ++ int_to_string(d.to_local_pid)) do
       Some(f) -> f(d)
       None ->
@@ -1672,6 +1765,11 @@ mod ClusterNode do
           None -> Err("no route to pid " ++ int_to_string(d.to_local_pid) ++ " for " ++ d.type_tag)
         end
     end
+  end
+
+  pfn refuse_inbound(h : CnHandle, d : NodeSend.Delivery) : Result((), String) do
+    note_raw_refused(h, d.from_node, "inbound " ++ d.type_tag)
+    Err("not authorized: raw send of " ++ d.type_tag ++ " refused (certificate mode: both nodes' certificates need raw_send)")
   end
 
   -- CREDIT every quarter budget consumed (NodeQueue.consumed's rule), sent
@@ -1834,9 +1932,11 @@ mod ClusterNode do
     creation           : () -> Int,
     next_id            : String -> Int,
     queue_for          : String -> Option((Pid(NodeQueue.WriterState), Int)),
+    session_queue_for  : String -> Option((Pid(NodeQueue.WriterState), Int)),
     send_msg           : GlobalPid.Pid -> String -> List(Int) -> NodeQueue.Policy -> Result(Int, NodeQueue.EnqueueError),
     route              : Int -> (NodeSend.Delivery -> Result((), String)) -> String,
     route_type         : String -> (NodeSend.Delivery -> Result((), String)) -> String,
+    route_session      : Int -> (NodeSend.Delivery -> Result((), String)) -> String,
     unroute            : String -> (),
     on_peer_closed     : (String -> String -> Unit) -> Int,
     off_peer_closed    : Int -> (),
@@ -1846,6 +1946,7 @@ mod ClusterNode do
     peer_cert          : String -> Option(NodeCert.Cert),
     own_cert           : () -> Option(NodeCert.Cert),
     frames_rejected    : () -> Int,
+    raw_refused        : () -> Int,
     revoke             : String -> Result((), String),
     revocations        : () -> List(NodeCert.Revocation),
     on_security_event  : (SecurityEvent -> Unit) -> Int,
@@ -1892,9 +1993,11 @@ mod ClusterNode do
       creation: fn _ -> unsupported("creation"),
       next_id: fn _ -> unsupported("next_id"),
       queue_for: fn _ -> unsupported("queue_for"),
+      session_queue_for: fn _ -> unsupported("session_queue_for"),
       send_msg: fn (_, _, _, _) -> unsupported("send_msg"),
       route: fn (_, _) -> unsupported("route"),
       route_type: fn (_, _) -> unsupported("route_type"),
+      route_session: fn (_, _) -> unsupported("route_session"),
       unroute: fn _ -> unsupported("unroute"),
       on_peer_closed: fn _ -> unsupported("on_peer_closed"),
       off_peer_closed: fn _ -> unsupported("off_peer_closed"),
@@ -1904,6 +2007,7 @@ mod ClusterNode do
       peer_cert: fn _ -> unsupported("peer_cert"),
       own_cert: fn _ -> None,
       frames_rejected: fn _ -> unsupported("frames_rejected"),
+      raw_refused: fn _ -> unsupported("raw_refused"),
       revoke: fn _ -> unsupported("revoke"),
       revocations: fn _ -> unsupported("revocations"),
       on_security_event: fn _ -> unsupported("on_security_event"),
@@ -1930,10 +2034,12 @@ mod ClusterNode do
       stale_bindings: fn _ -> Vault.get_or(h.meta, "stale_bindings", 0),
       creation: fn _ -> Vault.get_or(h.meta, "creation", 0),
       next_id: fn key -> Vault.incr(h.meta, "next_id#" ++ key, 1),
-      queue_for: fn id -> h_queue_for(h, id),
+      queue_for: fn id -> h_raw_queue_for(h, id),
+      session_queue_for: fn id -> h_queue_for(h, id),
       send_msg: fn (to, tag, payload, policy) -> h_send_msg(h, to, tag, payload, policy),
       route: fn (pid, deliver) -> h_route(h, "p" ++ int_to_string(pid), deliver),
       route_type: fn (tag, deliver) -> h_route(h, "t" ++ tag, deliver),
+      route_session: fn (pid, deliver) -> h_route(h, "s" ++ int_to_string(pid), deliver),
       unroute: fn key -> Vault.drop(h.routes, key),
       on_peer_closed: fn f -> h_on_peer_closed(h, f),
       off_peer_closed: fn id -> Vault.drop(h.closes, int_to_string(id)),
@@ -1943,6 +2049,7 @@ mod ClusterNode do
       peer_cert: fn id -> Vault.get(h.certs, id),
       own_cert: fn _ -> h.own,
       frames_rejected: fn _ -> Vault.get_or(h.meta, "frames_rejected", 0),
+      raw_refused: fn _ -> Vault.get_or(h.meta, "raw_refused", 0),
       revoke: fn token -> h_revoke(h, token),
       revocations: fn _ -> List.map(Vault.all(h.revs), fn kv -> match kv do (_k, r) -> r end),
       on_security_event: fn f -> h_on_security_event(h, f),
@@ -2056,6 +2163,16 @@ mod ClusterNode do
       if String.ends_with(k, suffix) do Vault.drop(h.watches, k) else () end))
   end
 
+  -- The raw queue (`queue_for`, what `Node.enqueue` sends through): None,
+  -- counted and reported, when raw sends to [node_id] are refused.
+  pfn h_raw_queue_for(h : CnHandle, node_id : String) : Option((Pid(NodeQueue.WriterState), Int)) do
+    if h_raw_ok(h, node_id) do h_queue_for(h, node_id)
+    else
+      note_raw_refused(h, node_id, "outbound queue")
+      None
+    end
+  end
+
   pfn h_queue_for(h : CnHandle, node_id : String) : Option((Pid(NodeQueue.WriterState), Int)) do
     if node_id == h.node_id do loopback(h) else
     match Vault.get(h.links, node_id) do
@@ -2110,8 +2227,14 @@ mod ClusterNode do
     end
   end
 
+  -- A raw send (not session traffic) to a peer where raw sends are refused
+  -- is Err(NotAuthorized), counted and reported, and never queued.
   pfn h_send_msg(h : CnHandle, to : GlobalPid.Pid, type_tag : String, payload : List(Int),
                  policy : NodeQueue.Policy) : Result(Int, NodeQueue.EnqueueError) do
+    if is_session_tag(type_tag) == false && h_raw_ok(h, to.node_id) == false do
+      note_raw_refused(h, to.node_id, "outbound " ++ type_tag)
+      Err(NodeQueue.NotAuthorized)
+    else
     match h_queue_for(h, to.node_id) do
       None -> Err(NodeQueue.NoConnection)
       Some(q) ->
@@ -2120,7 +2243,7 @@ mod ClusterNode do
           Ok(_) -> Ok(seq)
           Err(e) -> Err(e)
         end
-    end
+    end end
   end
 
   pfn h_route(h : CnHandle, k : String, deliver : NodeSend.Delivery -> Result((), String)) : String do
@@ -2409,10 +2532,26 @@ mod ClusterNode do
   Every write to a data socket goes through this one writer, so this is the
   only way to send on it: `Node.send(peer, ...)` writes the socket directly
   and would interleave with the queue.
+
+  This is a RAW send path: in certificate mode it is None (counted in
+  `raw_refused`, reported as `RawSendRefused`) unless this node's and the
+  peer's certificates both carry `raw_send`. The peer refuses a raw frame
+  it receives from a node without raw_send in any case.
   """
   fn queue_for(c : Cap(ClusterNode.Live), node_id : String) : Option((Pid(NodeQueue.WriterState), Int)) do
     let d = ops(c)
     d.queue_for(node_id)
+  end
+
+  doc """
+  `queue_for` for SESSION traffic (SessionNode's cluster links): never refused
+  for want of `raw_send`, since what it carries is checked at the receiver
+  (session frames reach only session routes). Not for raw sends: a raw frame
+  sent through it is refused by a receiver that would refuse it anyway.
+  """
+  fn session_queue_for(c : Cap(ClusterNode.Live), node_id : String) : Option((Pid(NodeQueue.WriterState), Int)) do
+    let d = ops(c)
+    d.session_queue_for(node_id)
   end
 
   doc """
@@ -2421,6 +2560,12 @@ mod ClusterNode do
   delivered: a delivery failure comes back as DELIVERY_FAILED (see
   `on_delivery_failed`). `Err(NoConnection)` when this node has no link to
   [to]'s node.
+
+  In certificate mode a send whose [type_tag] is not session traffic
+  (`session_tags()`) is a raw send: `Err(NotAuthorized)` (counted in
+  `raw_refused`, reported as `RawSendRefused`) unless this node's and the
+  peer's certificates both carry `raw_send`. Sends to this node itself are
+  never refused.
   """
   fn send_msg(c : Cap(ClusterNode.Live), to : GlobalPid.Pid, type_tag : String, payload : List(Int),
               policy : NodeQueue.Policy) : Result(Int, NodeQueue.EnqueueError) do
@@ -2432,6 +2577,11 @@ mod ClusterNode do
   Deliver every ACTOR_MSG addressed to local pid [pid] to [deliver], called
   in the data reader's task (it should only `send`). Its `Err(reason)` goes
   back to the sender as DELIVERY_FAILED. Returns the key for `unroute`.
+
+  A route is a raw receiver: in certificate mode a delivery from a peer is
+  refused before it reaches [deliver] (DELIVERY_FAILED to the sender, counted
+  in `raw_refused`, reported as `RawSendRefused`) unless this node's and the
+  sender's certificates both carry `raw_send`.
   """
   fn route(c : Cap(ClusterNode.Live), pid : Int, deliver : NodeSend.Delivery -> Result((), String)) : String do
     let d = ops(c)
@@ -2442,6 +2592,18 @@ mod ClusterNode do
   fn route_type(c : Cap(ClusterNode.Live), type_tag : String, deliver : NodeSend.Delivery -> Result((), String)) : String do
     let d = ops(c)
     d.route_type(type_tag, deliver)
+  end
+
+  doc """
+  As `route`, for a SESSION endpoint (SessionNode's parties, access points
+  and initiator inboxes): it takes session traffic (`session_tags()`) from
+  any certified peer, raw_send or not, and refuses anything else from a peer
+  where raw sends are refused. The session layer checks the rest: frames
+  carry the session id, and access points check certificates' roles.
+  """
+  fn route_session(c : Cap(ClusterNode.Live), pid : Int, deliver : NodeSend.Delivery -> Result((), String)) : String do
+    let d = ops(c)
+    d.route_session(pid, deliver)
   end
 
   fn unroute(c : Cap(ClusterNode.Live), key : String) : () do
@@ -2574,6 +2736,16 @@ mod ClusterNode do
   fn frames_rejected(c : Cap(ClusterNode.Live)) : Int do
     let d = ops(c)
     d.frames_rejected(())
+  end
+
+  doc """
+  Raw sends this node refused (certificate mode, step 11b): outbound ones
+  (`send_msg`'s `Err(NotAuthorized)`, `queue_for`'s None) and inbound raw
+  frames dropped from a peer. Each is also a `RawSendRefused` security event.
+  """
+  fn raw_refused(c : Cap(ClusterNode.Live)) : Int do
+    let d = ops(c)
+    d.raw_refused(())
   end
 
   doc """

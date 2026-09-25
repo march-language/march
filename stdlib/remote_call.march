@@ -25,7 +25,9 @@ mod RemoteCall do
 
   -- Why a remote call could not return its target's result. `NoTarget` = the
   -- peer has no function enrolled under this reference (wrong node / not enrolled).
-  type CallError = DeadlineExceeded | NoConnection | RemoteExit(String) | TypeMismatch | VersionSkew | NoTarget
+  -- `Forbidden` = certificate mode (step 11b), and this node's or the peer's
+  -- certificate lacks `raw_send`: RemoteCall is a raw primitive.
+  type CallError = DeadlineExceeded | NoConnection | RemoteExit(String) | TypeMismatch | VersionSkew | NoTarget | Forbidden
 
   -- The CAS admission decision for an inbound call against the local target.
   type Verdict = Accept | Reject(CallError)
@@ -88,6 +90,7 @@ mod RemoteCall do
       TypeMismatch     -> "signature mismatch (incompatible types)"
       VersionSkew      -> "implementation mismatch (version skew)"
       NoTarget         -> "no such enrolled target"
+      Forbidden        -> "not authorized: a remote call needs raw_send in both nodes' certificates"
     end
   end
 
@@ -120,6 +123,7 @@ mod RemoteCall do
       TypeMismatch     -> Msgpack.array(Cons(Msgpack.int(3), Nil))
       VersionSkew      -> Msgpack.array(Cons(Msgpack.int(4), Nil))
       NoTarget         -> Msgpack.array(Cons(Msgpack.int(5), Nil))
+      Forbidden        -> Msgpack.array(Cons(Msgpack.int(6), Nil))
     end
   end
 
@@ -131,6 +135,7 @@ mod RemoteCall do
       Msgpack.Array(Cons(Msgpack.Int(3), Nil)) -> Ok(TypeMismatch)
       Msgpack.Array(Cons(Msgpack.Int(4), Nil)) -> Ok(VersionSkew)
       Msgpack.Array(Cons(Msgpack.Int(5), Nil)) -> Ok(NoTarget)
+      Msgpack.Array(Cons(Msgpack.Int(6), Nil)) -> Ok(Forbidden)
       _ -> Err("RemoteCall: malformed CallError")
     end
   end

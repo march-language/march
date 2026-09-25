@@ -2134,7 +2134,7 @@ mod SessionNode do
 
   pfn recheck_links(node : Cap(ClusterNode.Live), p : Party) : () do
     let _ = List.map(p.links, fn l -> do
-      let current = match ClusterNode.queue_for(node, l.peer.node_id) do
+      let current = match ClusterNode.session_queue_for(node, l.peer.node_id) do
         Some((w, _)) -> match l.q do (lw, _) -> pid_to_int(w) == pid_to_int(lw) end
         None -> false
       end
@@ -2170,7 +2170,7 @@ mod SessionNode do
   pfn cluster_links(node : Cap(ClusterNode.Live), found : List((Int, GlobalPid.Pid)), left : Int)
       : Result(List(Link), Int) do
     let qs = List.map(found, fn rg ->
-      match rg do (r, g) -> (r, g, ClusterNode.queue_for(node, g.node_id)) end)
+      match rg do (r, g) -> (r, g, ClusterNode.session_queue_for(node, g.node_id)) end)
     match List.find(qs, fn t -> match t do (_r, _g, q) -> q == None end) do
       None ->
         Ok(List.filter_map(qs, fn t ->
@@ -2299,7 +2299,7 @@ mod SessionNode do
     let p0 = party(my_role, ClusterNode.node_id(node), on_close)
     Vault.set(p0.why, "sid", session)
     let slot = Vault.new("session_node_slot_" ++ session ++ "." ++ int_to_string(pid_to_int(p0.ep)))
-    let route_key = ClusterNode.route(node, pid_to_int(p0.ep), fn d -> cluster_frame(slot, p0, session, d))
+    let route_key = ClusterNode.route_session(node, pid_to_int(p0.ep), fn d -> cluster_frame(slot, p0, session, d))
     let me = role_name(session, my_role)
     match ClusterNode.register(node, me, p0.ep) do
       Err(_) ->
@@ -2601,7 +2601,7 @@ mod SessionNode do
               name: ap_prefix(proto, my_role) ++ ClusterNode.node_id(node),
               flags: Vault.new("session_ap_flags_" ++ tag), strs: Vault.new("session_ap_strs_" ++ tag),
               start: start, worker: a }
-    let key = ClusterNode.route(node, pid_to_int(a), fn d -> offer_frame(o, d))
+    let key = ClusterNode.route_session(node, pid_to_int(a), fn d -> offer_frame(o, d))
     Vault.set(o.strs, "route", key)
     match ClusterNode.register(node, o.name, a) do
       Ok(_) -> Ok(o)
@@ -2663,7 +2663,7 @@ mod SessionNode do
     let found = List.filter_map(ClusterNode.names(node), fn name ->
       if String.starts_with(name, prefix) do ClusterNode.lookup(node, name) else None end)
     let fresh = List.filter(found, fn g ->
-      List.member(used, g.node_id) == false && ClusterNode.queue_for(node, g.node_id) != None)
+      List.member(used, g.node_id) == false && ClusterNode.session_queue_for(node, g.node_id) != None)
     let rname = SessionAP.role_name(names, role)
     let denied = List.filter_map(fresh, fn g ->
       match ClusterNode.authorize_peer(node, g.node_id, proto, rname, SessionAP.offer_mode()) do
@@ -2820,7 +2820,7 @@ mod SessionNode do
     let budget = Vault.new("session_ap_budget_" ++ sid)
     let t = connect_ms()
     Vault.set(budget, "left", if t > 0 do t else 3600000 end)
-    let key = ClusterNode.route(node, pid_to_int(inbox), fn d -> inbox_frame(answers, sid, d))
+    let key = ClusterNode.route_session(node, pid_to_int(inbox), fn d -> inbox_frame(answers, sid, d))
     let reply = ClusterNode.global_pid(node, pid_to_int(inbox))
     let filled = fill_roles(node, proto, roles, my_role, sid, fingerprint, reply, answers, budget, others, n, Nil, Nil)
     ClusterNode.unroute(node, key)
