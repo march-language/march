@@ -25,6 +25,18 @@ git log is authoritative for exact commits.
   answer is still accepted for a native patch (with a note) and refused for a
   cross-target one. The runtime's own check after `dlopen` is unchanged.
 - `forge run --processes` no longer occasionally assigns two pools the same cluster port (seen on Linux CI as `tcp_listen: bind failed`); the ports for all processes are now reserved together.
+- **A top-level function named like a builtin now compiles.** Defining, for
+  example, `fn file_read(n : Int) : Int` or `fn dns_resolve(...)` in your
+  program (about 330 builtin names are affected) ran fine interpreted, but
+  `--compile` failed with clang's `invalid redefinition of function
+  'march_file_read'` once the function was large enough not to be inlined or
+  was passed as a value. The function now gets its own symbol, and calls to
+  it reach it, including from a nested module or an `impl` in the same file,
+  matching the interpreter. Stdlib code that calls the builtin of the same
+  name (such as `String.reverse`) still calls the builtin. In compiled builds,
+  a call through a parameter or local named like a builtin is also no longer
+  charged that builtin's capability.
+
 - The interpreter no longer dies with `stub NAME called before initialisation` when a nested module calls an enclosing module's fn that is declared after the nested module. This covers calls from the nested module's own fns, its impl methods and actor handlers, and modules nested further down. Compiled programs already worked (#645). A module-level `let` that calls a fn declared after it still fails, as before.
 
 - **`dns_resolve` / `Dns.resolve` now return the same list interpreted and compiled.**
