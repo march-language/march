@@ -24,7 +24,7 @@
 # version pairings the order implies (never a v1 Buyer with a v2 Shop). Both
 # reload servers must count nothing dropped, killed or lost.
 deploy=$root/_build/default/test/hcr_deploy.exe
-[ -x "$deploy" ] || fail "test/hcr_deploy.exe is not built (dune build --root . test/hcr_deploy.exe)"
+need_built test/hcr_deploy.exe
 mkdir -p "$work/keys" "$work/patch_a" "$work/patch_b"
 "$deploy" keygen "$work/keys" || fail "keygen failed"
 pk=$(cat "$work/keys/pk")
