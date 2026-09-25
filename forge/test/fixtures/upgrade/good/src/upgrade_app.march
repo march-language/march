@@ -4,9 +4,8 @@
 -- new handler and nothing is dropped. forge/test/test_upgrade_from.ml
 -- copies this over v1 and expects `forge test --upgrade-from HEAD` to pass.
 --
--- (A version that REMOVES Legacy and converts it with tally_migrate_msg
--- would be the other clean upgrade, but compiled migrate_msg cannot match a
--- real old message today: specs/todos/2026-09-24-migrate-msg-actor-message-tags.md.)
+-- (The version that REMOVES Legacy and converts it with tally_migrate_msg,
+-- the other clean upgrade, is ../migrates.)
 --
 -- Echo.Server answers twice; a session can span a hot deploy. The hook
 -- spawns Tally, whose message type has two handlers, Add and Legacy, and

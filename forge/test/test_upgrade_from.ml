@@ -7,6 +7,8 @@
       code, one spanning the deploy, one on the new code).
     - good: Tally's Legacy handler changes; its message type does not. The
       upgrade must PASS: every session completes, nothing dropped.
+    - migrates: Tally loses Legacy and converts it with tally_migrate_msg;
+      the old feeder's Legacy messages must be converted, none dropped.
     - drops: Tally loses its Legacy handler with no migrate_msg, so every
       Legacy message the old feeder sends after Tally moves is dropped and
       counted. The upgrade must FAIL, naming the dropped messages.
@@ -156,6 +158,30 @@ let test_dropping_upgrade_fails () =
   if contains out "dropped 0," then Alcotest.failf "nothing was dropped:\n%s" out;
   after_run dir
 
+(* The fixture the step-8 progress entry said the passing case avoided: Tally
+   REMOVES Legacy and converts it with tally_migrate_msg. The old feeder keeps
+   sending Legacy after Tally moves; each one is an old-format message carrying
+   the OLD build's actor-message tag, and must reach the user's match as
+   TallyMsgV1.Legacy (specs/progress/2026-09-25-migrate-msg-actor-message-tags.md).
+   Before the fix the compiled match panicked "non-exhaustive pattern match"
+   and killed the process. *)
+let test_migrating_upgrade_passes () =
+  let dir = project "migrates" in
+  let (rc, out) = run_upgrade dir in
+  if rc <> 0 then Alcotest.failf "expected the migrating upgrade to pass, forge exited %d:\n%s" rc out;
+  List.iter (expect out)
+    [ "upgrade traffic: a session across the upgrade ok";
+      "activated: Tally_dispatch";
+      "upgrade from HEAD passed: 1 test(s), 1 process(es), nothing dropped" ];
+  if contains out "non-exhaustive" then Alcotest.failf "migrate_msg panicked:\n%s" out;
+  if contains out "app-1: converted 0," then
+    Alcotest.failf "no old-format message was converted:\n%s" out;
+  (* The counters, for the test log. *)
+  List.iter (fun l -> if contains l "converted" || contains l "migrate_msg" || contains l "pinned"
+                        || contains l "old epoch" then print_endline l)
+    (String.split_on_char '\n' out);
+  after_run dir
+
 let test_refuses_without_a_topology () =
   let dir = Filename.temp_dir "upgrade_plain_" "" in
   sh ~dir "printf '[package]\\nname = \"plain\"\\nversion = \"0.1.0\"\\n' > forge.toml && mkdir src && printf 'mod Plain do\\n  fn main() do 0 end\\nend\\n' > src/plain.march";
@@ -170,6 +196,7 @@ let () =
         Alcotest.test_case "a clean upgrade passes (sessions complete, nothing dropped)" `Slow test_clean_upgrade_passes;
         Alcotest.test_case "a patch that spawns a task, reads the old Vault and starts a session passes" `Slow test_live_upgrade_passes;
         Alcotest.test_case "an upgrade that drops messages fails on the counters" `Slow test_dropping_upgrade_fails;
+        Alcotest.test_case "an upgrade that removes a handler and converts it with migrate_msg passes" `Slow test_migrating_upgrade_passes;
         Alcotest.test_case "not a topology app: refused" `Quick test_refuses_without_a_topology;
       ]);
   ]

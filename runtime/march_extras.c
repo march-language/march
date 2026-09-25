@@ -2832,9 +2832,13 @@ void *march_get_actor_field(void *pid, void *name) {
     if (!s) return NULL;
     int32_t i = rec_find_field(s, ns->data, ns->len);
     if (i < 0) return NULL;
+    /* Typed `Pid(a) -> String -> Option(Int)`: only an immediate ('i':
+     * Int/Bool/Unit/Atom) field is returned.  A pointer or float field is
+     * None: handing its raw bits back as a value was an unchecked cast (and
+     * an unowned reference). */
+    if (s->kinds[i] != 'i') return NULL;
     int64_t raw = rec_field_raw(pid, i);
-    if (s->kinds[i] == 'i') return (void *)(intptr_t)((raw << 1) | 1);
-    return (void *)(intptr_t)raw;
+    return (void *)(intptr_t)((raw << 1) | 1);
 }
 
 /* Record update (`{ r with f: v, ... }`) for statically-unknown record types

@@ -1777,7 +1777,12 @@ let compile filename =
         in
         (match March_cas.Cas.lookup_artifact store ch with
          | Some cached_bin
-           when March_cas.Cas.copy_artifact ~src:cached_bin ~dest:out_bin ->
+           when (not !compile_so || March_cas.Cas.restore_sidecars store ch out_bin)
+                && March_cas.Cas.copy_artifact ~src:cached_bin ~dest:out_bin ->
+           (* A --compile-so build's output includes its sidecars
+              (.hcr_manifest, .schemas.json): restored with the .so, or the
+              hit is a miss. This early exit skips the code that writes
+              them. *)
            Printf.eprintf "compiled %s (cached)\n" out_bin;
            exit 0
          (* Stale/missing artifact or failed copy → recompile *)
@@ -2495,6 +2500,12 @@ let compile filename =
               | None -> before
               | Some i -> String.sub before (i + 1) (String.length before - i - 1) in
             let actor = String.capitalize_ascii last in
+            (* Lowering bound the old type to its declaration
+               (Migrate_msg_pins); the parameter's own type is the bare
+               canonical name, ambiguous once two actors migrate. *)
+            match March_tir.Migrate_msg_pins.old_type_of_fn name with
+            | Some decl -> Option.map (fun c -> (actor, c)) (variant_ctors decl)
+            | None ->
             match fn.March_tir.Tir.fn_params with
             | [ p ] ->
               (match p.March_tir.Tir.v_ty with
@@ -4001,7 +4012,12 @@ let compile filename =
             close_out oc
           with Sys_error e ->
             Printf.eprintf "warning: could not write %s: %s\n" schema_path e)
-        end)
+        end);
+        (* Cache the sidecars just written with the artifact, under both
+           keys, so the source-level early hit can restore them. *)
+        if !compile_so then
+          List.iter (fun (st, key) -> March_cas.Cas.store_sidecars st key out_bin)
+            ((store, ch) :: (match source_cas_state with Some p -> [ p ] | None -> []))
       end (* else begin: non-JS LLVM/clang path *)
       end else begin
         (* --emit-llvm only: write IR and exit *)

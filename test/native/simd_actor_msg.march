@@ -9,7 +9,7 @@
 --
 -- Mirrors test/native/actor_counter.march's Actor.call shape exactly: the
 -- actor_call target (GetLast) is declared FIRST (tag 0, matching the
--- runtime's call_tag_base convention — see march_actor_call's doc comment
+-- runtime's call_tags convention — see march_actor_call's doc comment
 -- in runtime/march_runtime.c); Extract(v) is a plain fire-and-forget `send`
 -- carrying the I32x4 payload (tag 1). The printed result is the lane the
 -- actor extracted AFTER receiving its own cross-heap COPY of the vector, so
