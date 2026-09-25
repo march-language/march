@@ -271,7 +271,13 @@ let run_cmd =
     Arg.(value & opt (some string) None & info ["env"] ~docv:"ENV"
            ~doc:"For a topology app: apply the topology.$(docv).toml overlay (host labels).")
   in
-  let run d c tgt fs p ff e =
+  let run_hot_reload =
+    Arg.(value & flag & info ["hot-reload"]
+           ~doc:"With $(b,--processes): build with hot reload and give every process a \
+                 reload socket under .forge/run/, so $(b,forge topology status) reports \
+                 its code versions and epoch pins.")
+  in
+  let run d c tgt fs p ff e hr =
     (* The first positional is always the FILE; everything after it belongs to
        the program.  There is deliberately no spelling that passes arguments to
        the PROJECT entry: cmdliner records the positionals but not where `--`
@@ -282,10 +288,11 @@ let run_cmd =
       | []          -> (None, [])
       | f :: rest   -> (Some f, rest)
     in
-    handle (Cmd_run.run ~dump_phases:d ~compiled:c ?target:tgt ?file ~args ~processes:p ~fail_fast:ff ?env:e ())
+    handle (Cmd_run.run ~dump_phases:d ~compiled:c ?target:tgt ?file ~args ~processes:p ~fail_fast:ff
+              ~hot_reload:hr ?env:e ())
   in
   Cmd.v (Cmd.info "run" ~doc:"Build and run the current project, or a single file")
-    Term.(const run $ dump_phases $ compiled $ target $ files $ processes $ fail_fast $ run_env)
+    Term.(const run $ dump_phases $ compiled $ target $ files $ processes $ fail_fast $ run_env $ run_hot_reload)
 
 (* ------------------------------------------------------------------ forge test *)
 
@@ -315,7 +322,23 @@ let test_cmd =
     Arg.(value & pos_all string [] &
          info [] ~docv:"FILE" ~doc:"Test files to run (default: all test files under test/)")
   in
-  let run v c f s sp r fs pkg =
+  let upgrade_from =
+    Arg.(value & opt (some string) None &
+         info ["upgrade-from"] ~docv:"REF"
+           ~doc:"Upgrade test for a topology app: check out $(docv) (a git ref) under \
+                 .forge/upgrade/, build and start it as local processes with reload \
+                 sockets, run each test/upgrade_*.march against it, hot-deploy the working \
+                 tree into the running processes, wait for the drains, and fail if the \
+                 test's own checks fail or the reload servers report dropped messages, \
+                 hard-deadline kills or lost markers. Runs instead of the unit tests.")
+  in
+  let run v c f s sp r fs pkg up =
+    match up with
+    | Some ref_ ->
+      (match Upgrade_test.run ~ref_ () with
+       | Ok summary -> print_endline summary
+       | Error m -> Printf.eprintf "%s\n%!" m; exit 1)
+    | None ->
     let cwd = Sys.getcwd () in
     match Workspace.find_root cwd with
     | Some root when root = cwd ->
@@ -329,7 +352,7 @@ let test_cmd =
       handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~files:fs ())
   in
   Cmd.v (Cmd.info "test" ~doc:"Run the test suite")
-    Term.(const run $ verbose $ coverage $ filter $ seed $ skip_props $ release $ files $ workspace_package_flag)
+    Term.(const run $ verbose $ coverage $ filter $ seed $ skip_props $ release $ files $ workspace_package_flag $ upgrade_from)
 
 (* ------------------------------------------------------------------ forge lint *)
 
@@ -1479,10 +1502,46 @@ let topology_gen_cmd =
                  a forge-topology-<target> plugin")
     Term.(const run $ topology_env $ target $ out)
 
+let topology_status_cmd =
+  let run () =
+    match Project.load () with
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+    | Ok proj ->
+      match Reconcile.local_backend ~root:proj.Project.root with
+      | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+      | Ok (b, _) -> print_string (Reconcile.render_status (b.Reconcile.status ()))
+  in
+  Cmd.v (Cmd.info "status"
+           ~doc:"Report each node of the running local cluster ($(b,forge run --processes)): \
+                 alive, the topology it applied, the offers it holds, and, for a hot-reload \
+                 build, its code versions and epoch pins")
+    Term.(const run $ const ())
+
+let topology_apply_cmd =
+  let run env =
+    match Project.load () with
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+    | Ok proj ->
+      match Reconcile.apply ?env ~root:proj.Project.root () with
+      | Ok report -> print_string report
+      | Error m -> Printf.eprintf "%s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "apply"
+           ~doc:"One reconciliation pass over the running local cluster ($(b,forge run \
+                 --processes)): diff topology.toml (and the $(b,--env) overlay, by default \
+                 the one the cluster started with) against what the nodes were given, \
+                 push it (the nodes re-read it on SIGHUP and move their own offers: no \
+                 code change, no restart), wait until every node has applied it, and \
+                 report each node's offers. A change that needs a rebuild and restart \
+                 (a new role or pool, a binding, a hook, caps, hosts or labels) is \
+                 refused and listed.")
+    Term.(const run $ topology_env)
+
 let topology_cmd =
   Cmd.group (Cmd.info "topology"
-               ~doc:"The topology file: check, export as JSON, generate deployment files")
-    [topology_check_cmd; topology_export_cmd; topology_gen_cmd]
+               ~doc:"The topology file: check, export as JSON, generate deployment files, \
+                     status of the running cluster")
+    [topology_check_cmd; topology_export_cmd; topology_gen_cmd; topology_status_cmd; topology_apply_cmd]
 
 let completions_cmd =
   let shell =
