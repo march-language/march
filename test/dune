@@ -918,6 +918,15 @@
  (action (setenv MARCH_DEPLOY_POLICY test_reload_policy.txt
           (run ./test_reload_activate4_runner reload_keys.txt policy))))
 
+; Restart durability (plan 6.5, DD build step 10): activate, exit, restart,
+; and the persisted patch stack is replayed (signatures re-verified); a
+; corrupt entry is skipped with an audit line; MARCH_HCR_NO_REPLAY and a
+; different base build do not replay.  Each server lifetime is a forked child.
+(rule
+ (alias runtest)
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so))
+ (action (run ./test_reload_activate4_runner reload_keys.txt restore)))
+
 ; ── HCR capability-lattice anti-drift check ───────────────────────────────
 ; Regenerates runtime/march_cap_lattice.{h,c} from lib/caps/cap_lattice.ml
 ; via the emitter and diffs the result against the checked-in copy, so the
@@ -2325,6 +2334,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/float_consts_typed_array_slice.expected native_float_consts_typed_array_slice.out)))
 
+; ── Regression: char_is_alpha / char_is_uppercase / char_is_lowercase /
+; char_to_uppercase / char_to_lowercase / float_from_string / print_int /
+; print_float / tap typechecked and ran interpreted, but `--compile` failed at
+; LINK time with `Undefined symbols: _char_is_alpha` (etc.). The golden is the
+; INTERPRETER's output for the same file, so each line is a compiled-vs-
+; interpreted parity check (ASCII range boundaries, float formatting incl.
+; inf, tap through a generic fn and shadowed by a local, and a flat leak leg
+; for the borrowed char argument).
+; See specs/progress/2026-09-24-interpreter-only-builtins.md.
+(rule
+ (targets native_interpreter_only_builtins_lowered native_interpreter_only_builtins_lowered.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/interpreter_only_builtins_lowered.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_interpreter_only_builtins_lowered
+        native/interpreter_only_builtins_lowered.march)
+   (with-stdout-to native_interpreter_only_builtins_lowered.out
+        (system "./native_interpreter_only_builtins_lowered")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/interpreter_only_builtins_lowered.expected native_interpreter_only_builtins_lowered.out)))
+
 ; ── Regression: send(self, m) inside a handler delivers, and binding `self`
 ; does not move the actor record's refcount. `self` was never BOUND by either
 ; backend, so it fell through to the global builtin: compiled, march_send got
@@ -2350,6 +2385,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_send_to_self.expected native_actor_send_to_self.out)))
+
+; ── Regression: the Pid-reading builtins (pid_to_int, the supervise glue's
+; pid_index_of / register_supervisor / register_supervisor_child,
+; actor_set_mailbox_limit) leave the record's refcount alone. They were
+; classified owned while their C side never releases the pid, so each call
+; leaked a reference and the record was never freed. Verified red on the base
+; compiler (all four lines false) and red with only the borrow-table half of
+; the fix (the supervised-child line: the registration calls were ECallPtrs,
+; which never consult the table). See
+; specs/progress/2026-09-24-pid-to-int-leak.md.
+(rule
+ (targets native_pid_to_int_leak_probe native_pid_to_int_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/pid_to_int_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_pid_to_int_leak_probe
+        native/pid_to_int_leak_probe.march)
+   (with-stdout-to native_pid_to_int_leak_probe.out
+        (system "./native_pid_to_int_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/pid_to_int_leak_probe.expected native_pid_to_int_leak_probe.out)))
 
 ; ── Capability mocking reaching an actor handler ──────────────────────────
 ; The handler is entered from the scheduler, so the capability cannot be
@@ -7715,22 +7775,45 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; mutates a SHARED array in place. Verified non-vacuous on 2026-09-16 by
 ; forcing the in-place path unconditionally -- that line, and only that
 ; line, flipped to false.
+;
+; The same file covers NativeArray.sort_float (f64, IEEE 754 totalOrder:
+; NaN / -0.0 / +-Inf placement). The binary runs TWICE against the same
+; golden: the second run sets MARCH_TEST_NSORT_DEPTH_LIMIT=0, which forces
+; every segment above the small-sort cutoff into the heapsort fallback
+; (nsort_heap) -- the only way to reach it, since the pattern-breaking step
+; makes it practically unreachable from input. The INTERPRETER runs it too,
+; against the same golden: OCaml's `compare` puts every NaN first and ties
+; -0.0 with 0.0, so an interpreter arm built on it (rather than on the
+; totalOrder key the C sort uses) diverges on the f64 specials lines.
 (rule
- (targets native_arr_sort native_arr_sort.out)
+ (targets native_arr_sort native_arr_sort.out native_arr_sort_heap.out
+          native_arr_sort_interp.out)
  (deps (file %{exe:../bin/main.exe})
        (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (file native/native_arr_sort.march)
        (source_tree ../stdlib))
  (action
   (progn
+   (with-stdout-to native_arr_sort_interp.out
+     (run %{exe:../bin/main.exe} native/native_arr_sort.march))
    (run %{exe:../bin/main.exe} --compile -o native_arr_sort
         native/native_arr_sort.march)
    (with-stdout-to native_arr_sort.out
-        (system "./native_arr_sort")))))
+        (system "./native_arr_sort"))
+   (with-stdout-to native_arr_sort_heap.out
+        (system "MARCH_TEST_NSORT_DEPTH_LIMIT=0 ./native_arr_sort")))))
 
 (rule
  (alias runtest)
  (action (diff native/native_arr_sort.expected native_arr_sort.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort.expected native_arr_sort_heap.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort.expected native_arr_sort_interp.out)))
 
 ; ── fold per-element float box: live-object guard ──────────────────────
 ; The rule above diffs OUTPUT ONLY, and a leak is invisible to an output
@@ -8030,6 +8113,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/bytes_u8_bridge.expected bytes_u8_bridge.out)))
+
+; Regression: compiled Base64.encode / sha256 on a Bytes SIGBUSed once boxed
+; ADT cells began carrying a type id in the header pad word (the runtime's
+; Bytes-vs-String check required pad == 0). .expected is interpreter-produced;
+; both backends must match it.
+(rule
+ (targets bytes_typeid_base64_sha bytes_typeid_base64_sha.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/bytes_typeid_base64_sha.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o bytes_typeid_base64_sha
+        native/bytes_typeid_base64_sha.march)
+   (with-stdout-to bytes_typeid_base64_sha.out
+        (system "./bytes_typeid_base64_sha")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/bytes_typeid_base64_sha.expected bytes_typeid_base64_sha.out)))
+
+(rule
+ (targets interp_bytes_typeid_base64_sha.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/bytes_typeid_base64_sha.march))
+ (action
+  (with-stdout-to interp_bytes_typeid_base64_sha.out
+    (run %{exe:../bin/main.exe} native/bytes_typeid_base64_sha.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/bytes_typeid_base64_sha.expected interp_bytes_typeid_base64_sha.out)))
 
 ; Rounding-parity fuzz for Simd.fma_f32x4: 100k deterministic LCG iterations x
 ; 4 lanes, folded into an integer checksum, half of them drawn from a family
@@ -9226,6 +9343,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/erased_type_id.expected native_erased_type_id.out)))
+
+; ── Erased render: to_string's Show convention vs ~H's repr convention ────
+; An erased (TVar) `to_string` quoted strings nested in a List/Result
+; (`["a", "b"]`) where the interpreter, going through Show, prints them bare;
+; a `~H` hole must keep quoting them.  .expected is the interpreter's own
+; output.  See specs/progress/2026-09-24-erased-render-nested-strings.md.
+(rule
+ (targets native_erased_render_show native_erased_render_show.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/erased_render_show.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_erased_render_show
+        native/erased_render_show.march)
+   (with-stdout-to native_erased_render_show.out
+        (system "./native_erased_render_show")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/erased_render_show.expected native_erased_render_show.out)))
 
 ; ── Bare short name for a module-qualified type renders by constructor ────
 ; A `ptype` declared in `mod File` lowers to `File.FileError` but is denoted

@@ -1,6 +1,11 @@
 # Stdlib-only builtins: the mechanism, landing with an empty set
 
-**DONE 2026-09-22.** G3 of
+**DONE 2026-09-22.** Mechanism SUPERSEDED 2026-09-24: the declaration walk
+described below (`check_stdlib_only_refs`) was bypassed four ways in review
+and is deleted; the gate now fires at name resolution and exempts by loader
+provenance, see
+[2026-09-24-stdlib-only-gate-at-resolution.md](2026-09-24-stdlib-only-gate-at-resolution.md).
+The table and the error text are as described here. G3 of
 [specs/plans/2026-09-21-distributed-deploys-groundwork-plan.md](../plans/2026-09-21-distributed-deploys-groundwork-plan.md).
 
 Two parts of the distributed-authority plan need builtins that user code cannot

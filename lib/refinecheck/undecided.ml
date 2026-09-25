@@ -22,7 +22,8 @@ let rec consts (t : Smt.term) : string list =
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> consts a
   | Smt.MulLit (_, a) -> consts a
   | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> consts a
-  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b)
+  | Smt.Ite (c, a, b) -> consts c @ consts a @ consts b
+  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.Div (a, b) | Smt.Mod (a, b)
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b)
   | Smt.Eq (a, b) | Smt.Ne (a, b)
   | Smt.Lt (a, b) | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
@@ -41,7 +42,8 @@ let rec app_heads (t : Smt.term) : string list =
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> app_heads a
   | Smt.MulLit (_, a) -> app_heads a
   | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> app_heads a
-  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b)
+  | Smt.Ite (c, a, b) -> app_heads c @ app_heads a @ app_heads b
+  | Smt.Add (a, b) | Smt.Sub (a, b) | Smt.Mul (a, b) | Smt.Div (a, b) | Smt.Mod (a, b)
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b)
   | Smt.Eq (a, b) | Smt.Ne (a, b)
   | Smt.Lt (a, b) | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
@@ -109,12 +111,15 @@ let known_head (f : string) : bool =
 let rec nonlinear (t : Smt.term) : bool =
   match t with
   | Smt.Mul (_, _) -> true
+  (* Division by a NON-literal divisor is non-linear in the same way. *)
+  | Smt.Div (_, _) | Smt.Mod (_, _) -> true
   | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> false
   | Smt.App (_, ts) | Smt.Ctor (_, _, ts) -> List.exists nonlinear ts
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> nonlinear a
   | Smt.MulLit (_, a) -> nonlinear a
   (* Division by a literal keeps the query linear, like [MulLit]. *)
   | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> nonlinear a
+  | Smt.Ite (c, a, b) -> nonlinear c || nonlinear a || nonlinear b
   | Smt.Add (a, b) | Smt.Sub (a, b)
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b)
   | Smt.Eq (a, b) | Smt.Ne (a, b)

@@ -68,34 +68,63 @@ let rec float_const_of (e : A.expr) : float option =
 let float_lit_term (f : float) : Smt.term option =
   Option.map (fun (neg, d) -> Smt.FloatLit (neg, d)) (Smt.float_decimal f)
 
-(* ── Integer division: the fragment where truncation and Euclid agree ─────
+(* ── Integer division: March's truncation, encoded over SMT's Euclid ──────
    March's `/` and `%` truncate toward zero (`-7 / 2` is `-3`, `-7 % 2` is
-   `-1`); SMT-LIB's `div`/`mod` are Euclidean (`(div (- 7) 2)` is `-4`,
-   `(mod (- 7) 2)` is `1`).  Rendering one as the other on a negative dividend
-   would certify code that can fail.  For a NON-NEGATIVE dividend `a` and a
-   non-zero divisor `k` of EITHER sign the two coincide: truncation gives
-   `q = sign(k) * (a div |k|)`, `r = a - k*q = a mod |k|`, which satisfies
-   `a = k*q + r` with `0 <= r < |k|` — the Euclidean definition, whose
-   quotient and remainder are unique.  So `a / k` reflects to
-   [Smt.DivLit (a, k)] (and `%` to [Smt.ModLit]) exactly when [k] is a
-   non-zero integer literal ([nonzero_int_literal]) and [a] is KNOWN
-   non-negative, by one of the syntactic rules in [known_nonneg].
+   `-1`: the remainder takes the DIVIDEND's sign; specs/lang/core-march.md,
+   δ-Div-I/δ-Mod-I).  SMT-LIB's `div`/`mod` are Euclidean (`(div (- 7) 2)` is
+   `-4`, `(mod (- 7) 2)` is `1`: the remainder is always in [0, |d|)).
 
-   The subtle rule is the contextual one: `{Int | _ >= 0 && _ / 2 < 10}`.
+   Where they agree.  For a NON-NEGATIVE dividend `a` and a non-zero divisor
+   `d` of EITHER sign, truncation gives `q = sign(d) * (a div |d|)` and
+   `r = a - d*q = a mod |d|`, which satisfies `a = d*q + r` with
+   `0 <= r < |d|` — the Euclidean definition, whose quotient and remainder
+   are unique.  So there `a / d` is exactly `(div a d)` and `a % d` exactly
+   `(mod a d)`.
+
+   The general encoding ([truncating_division]).  Truncation is odd in the
+   dividend — `(-a) / d == -(a / d)` and `(-a) % d == -(a % d)`, since
+   truncation toward zero commutes with negation — so a negative dividend
+   is reduced to the non-negative case:
+
+     a / d  ~>  (ite (>= a 0) (div a d) (- (div (- a) d)))
+     a % d  ~>  (ite (>= a 0) (mod a d) (- (mod (- a) d)))
+
+   for any non-zero `d`, positive or negative.  (`(-7) / 2`: `-(div 7 2)` =
+   -3; `7 / -2`: `(div 7 (- 2))` = -3; `(-7) % -2`: `-(mod 7 (- 2))` = -1 —
+   OCaml's, hence March's, answers.)
+
+   The fast path.  When the dividend is KNOWN non-negative by one of the
+   syntactic rules in [known_nonneg], the `ite` is dropped and the plain
+   `div`/`mod` emitted — the increment-1 fragment, kept so the common
+   `_ >= 0 && _ / 2 < 10` shape stays a plain, `ite`-free LIA query.
+
+   The contextual non-negativity rule: `{Int | _ >= 0 && _ / 2 < 10}`.
    Inside a conjunction chain, a conjunct `t >= c` (with `c >= 0`, [t] a
    variable, a field of one, or a measure over one) makes `t` usable as a
-   non-negative dividend ANYWHERE in the chain, including under `||`/`not`
-   further down.  Soundness: the fact conjunct contains no division, so it
-   reflects exactly.  Where it holds, every division it guards reflects
-   exactly.  Where it fails, the exact reflection of the fact is `false`, so
-   the whole chain reflects to `false` — which is also the chain's true
-   value.  Either way the chain's reflection equals its meaning, and a
-   subterm with an exact reflection may sit under any context.  (A predicate
-   has no binders, so the same [t] denotes the same value everywhere in it.)
+   non-negative dividend ANYWHERE in the chain.  Soundness: the fact
+   conjunct contains no division, so it reflects exactly.  Where it holds,
+   the fast-path division equals the general one.  Where it fails, the
+   chain reflects to `false`, which is also its true value.  (A predicate
+   has no binders, so the same [t] denotes the same value everywhere.)
 
-   Everything outside the fragment keeps today's behaviour — an [Error] naming
-   the division, i.e. an `unreflectable-predicate` skip — with
-   [division_outside_fragment_hint] explaining why. *)
+   The divisor.  A non-zero integer literal (either sign) is a
+   [Smt.DivLit]/[Smt.ModLit] and keeps the query linear.  Any other divisor
+   is a [Smt.Div]/[Smt.Mod] (non-linear), and brings a side condition: at a
+   zero divisor March's `/` PANICS, so the predicate has no value there.
+   A refinement's value set is the values on which its predicate evaluates
+   to `true`, and a panic is not `true`; so a Boolean predicate [p] is
+   reflected as `defined(p) && p'`, where [defined] ([definedness]) is the
+   condition under which evaluating [p] reaches no zero divisor — following
+   `&&`/`||` short-circuiting, exactly as March evaluates.  That conjunct is
+   what makes the reflection exact in every polarity: as a goal it demands
+   the divisor be non-zero, as an assumption it supplies that fact, and
+   under `not` a zero divisor is still "not true".
+
+   Only a Boolean-SHAPED predicate top ([bool_shaped]) gets that treatment.
+   An Int-valued reflection (a call's actual argument, a return expression)
+   has nowhere to put the conjunct, so there a non-literal divisor must be
+   syntactically positive ([known_pos]); otherwise the division itself is
+   the failing leaf, with [division_outside_fragment_hint] explaining why. *)
 let int_lit_of (e : A.expr) : int option =
   match e with
   | A.ELit (A.LitInt n, _) -> Some n
@@ -149,26 +178,76 @@ let rec known_nonneg ~vocab (ctx : string list) (e : A.expr) : bool =
   | A.EApp (A.EVar { A.txt = "card"; _ }, [ _ ], _) when vocab -> true
   | _ -> (match nonneg_atom_key e with Some k -> List.mem k ctx | None -> false)
 
-(* Would the reflector translate `a / d` (or `a % d`) under the facts [ctx]? *)
-let division_in_fragment ~vocab (ctx : string list) (a : A.expr) (d : A.expr) : bool =
-  nonzero_int_literal d <> None && known_nonneg ~vocab ctx a
-
-(* Why a `/`/`%` leaf did not reflect, for the `unreflectable-predicate`
-   detail; [None] for any other leaf. *)
-let division_outside_fragment_hint (e : A.expr) : string option =
+(* Is [e] strictly positive in every environment where the facts [ctx]
+   hold?  Syntactic, like [known_nonneg]: a positive literal, a sum of a
+   positive and a non-negative term (`len(xs) + 1`), a product of positives.
+   Used only to admit a non-literal divisor OUTSIDE a Boolean predicate. *)
+let rec known_pos ~vocab (ctx : string list) (e : A.expr) : bool =
+  let pos = known_pos ~vocab ctx and nn = known_nonneg ~vocab ctx in
   match e with
-  | A.EApp (A.EVar { A.txt = ("/" | "%") as op; _ }, [ _; d ], _) ->
-    let why =
-      if nonzero_int_literal d = None then "the divisor is not a non-zero integer literal"
-      else "the dividend is not known to be non-negative"
-    in
-    Some
-      (Printf.sprintf
-         "`%s` is translated only when its divisor is a non-zero integer literal and its \
-          dividend is known to be non-negative (e.g. `_ >= 0 && _ %s 2 < 10`), where \
-          March's truncating division agrees with SMT's; here %s"
-         op op why)
-  | _ -> None
+  | A.ELit (A.LitInt n, _) -> n > 0
+  | A.EApp (A.EVar { A.txt = "+"; _ }, [ a; b ], _) -> (pos a && nn b) || (nn a && pos b)
+  | A.EApp (A.EVar { A.txt = "*"; _ }, [ a; b ], _) -> pos a && pos b
+  | _ -> false
+
+(* A predicate top the reflector treats as Boolean, and therefore wraps in
+   its division-definedness condition (see the header above).  Anything
+   else — an arithmetic subject, a bare variable, a call — is reflected
+   without the wrap, so a non-literal divisor there must be [known_pos]. *)
+let bool_shaped (e : A.expr) : bool =
+  match e with
+  | A.EApp
+      (A.EVar { A.txt = "&&" | "||" | "not" | "==" | "!=" | "<" | "<=" | ">" | ">="; _ }, _, _) ->
+    true
+  | _ -> false
+
+(* Would the reflector translate a division by [d] somewhere inside the
+   predicate [top]?  Its dividend never matters: a possibly-negative one
+   takes the `ite` encoding rather than a skip. *)
+let division_reflects ~vocab ~(top : A.expr) (d : A.expr) : bool =
+  bool_shaped top || nonzero_int_literal d <> None || known_pos ~vocab [] d
+
+(* March's truncating `a / d` (or `a % d`, by [op]) over SMT-LIB's Euclidean
+   operators: the encoding derived in the header above.  [divisor] is
+   [`Lit k] for a non-zero literal (linear) or [`Term t] for anything else
+   (non-linear; the caller owns its non-zero side condition).
+   [nonneg_dividend] is the [known_nonneg] fast path: no `ite`. *)
+let truncating_division ~(op : string) ~(nonneg_dividend : bool) (a : Smt.term)
+    (divisor : [ `Lit of int | `Term of Smt.term ]) : Smt.term =
+  let euclid x =
+    match op = "/", divisor with
+    | true, `Lit k -> Smt.DivLit (x, k)
+    | false, `Lit k -> Smt.ModLit (x, k)
+    | true, `Term t -> Smt.Div (x, t)
+    | false, `Term t -> Smt.Mod (x, t)
+  in
+  if nonneg_dividend then euclid a
+  else Smt.Ite (Smt.Ge (a, Smt.IntLit 0), euclid a, Smt.Neg (euclid (Smt.Neg a)))
+
+(* The condition under which evaluating the reflected Boolean term [t]
+   divides by no zero: [None] when it is trivially true (no [Smt.Div]/
+   [Smt.Mod] anywhere — a literal divisor needs nothing).  Computed on the
+   REFLECTED term rather than the source so no sub-expression is reflected
+   twice (a resolver may stand a call up as a fresh constant each time it
+   is asked).  The reflector maps `&&`/`||`/`not` to [And]/[Or]/[Not]
+   one-for-one, so short-circuiting is followed exactly as March evaluates:
+   `d != 0 && x / d > 0` is defined everywhere, `x / d > 0 && d != 0` is
+   not.  Every other node needs all of its children defined — including
+   [Ite], whose only producer, [truncating_division], puts the same divisor
+   in both branches. *)
+let rec definedness (t : Smt.term) : Smt.term option =
+  let conj a b =
+    match a, b with
+    | None, x | x, None -> x
+    | Some a, Some b -> Some (Smt.And (a, b))
+  in
+  let all ts = List.fold_left (fun acc c -> conj acc (definedness c)) None ts in
+  match t with
+  | Smt.And (a, b) | Smt.Implies (a, b) ->
+    conj (definedness a) (Option.map (fun db -> Smt.Implies (a, db)) (definedness b))
+  | Smt.Or (a, b) -> conj (definedness a) (Option.map (fun db -> Smt.Or (a, db)) (definedness b))
+  | Smt.Div (x, d) | Smt.Mod (x, d) -> conj (all [ x; d ]) (Some (Smt.Ne (d, Smt.IntLit 0)))
+  | t -> all (Smt.children t)
 
 (* [smt_of_r] is [smt_of]'s body, made to name its failure: [Error e] carries
    the innermost sub-expression that returned [None] in the [option] version —
@@ -178,16 +257,19 @@ let division_outside_fragment_hint (e : A.expr) : string option =
    down still names the leaf, not each ancestor on the way up. [smt_of] is now
    this function with [Result.to_option] on the outside; the 18 existing
    callers, which want only the [option], are unchanged. *)
-let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ~resolve_var ~resolve_measure
+let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~resolve_var
+    ~resolve_measure
     ?(resolve_field = fun _ _ -> None)
     ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
     ?(resolve_str_lit = fun _ -> None)
     ?(resolve_measure_call = fun _ _ _ -> None)
     (e : A.expr) : (Smt.term, A.expr) result =
   (* [nonneg]: atoms ([nonneg_atom_key]) an enclosing `&&` chain proves
-     non-negative — the context the division arm consults. *)
+     non-negative — the context the division arm's fast path consults.
+     [total_div]: set by [smt_of_r] for a [bool_shaped] predicate, which it
+     wraps in [definedness]; only then may a divisor be an arbitrary term. *)
   let r_in nonneg =
-    smt_of_r_marked ~vocab ~nonneg ~resolve_var ~resolve_measure ~resolve_field
+    smt_of_r_marked ~vocab ~nonneg ~total_div ~resolve_var ~resolve_measure ~resolve_field
       ~resolve_measure_app ~resolve_tester ~resolve_str_lit ~resolve_measure_call
   in
   let r = r_in nonneg in
@@ -334,14 +416,27 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ~resolve_var ~resolve_mea
      | A.ELit (A.LitInt k, _), _ -> Result.map (fun y -> Smt.MulLit (k, y)) (r b)
      | _, A.ELit (A.LitInt k, _) -> Result.map (fun x -> Smt.MulLit (k, x)) (r a)
      | _ -> b2 (fun x y -> Smt.Mul (x, y)) a b)
-  (* Integer `/` and `%`, in the fragment where truncating and Euclidean
-     division agree (see [known_nonneg]'s header).  Outside it, the division
-     node itself is the failing leaf. *)
+  (* Integer `/` and `%` with March's truncating semantics
+     ([truncating_division]; the derivation is in the header above).  A
+     non-literal divisor is admitted inside a Boolean predicate ([total_div],
+     whose [definedness] conjunct [smt_of_r] adds) or when it is
+     syntactically positive; otherwise the division node itself is the
+     failing leaf. *)
   | A.EApp (A.EVar { A.txt = ("/" | "%") as op; _ }, [ a; d ], _) ->
-    (match nonzero_int_literal d with
-     | Some k when known_nonneg ~vocab nonneg a ->
-       Result.map (fun x -> if op = "/" then Smt.DivLit (x, k) else Smt.ModLit (x, k)) (r a)
-     | _ -> Error e)
+    let lit = nonzero_int_literal d in
+    if lit = None && (not total_div) && not (known_pos ~vocab nonneg d) then Error e
+    else
+      (match r a with
+       | Error e -> Error e
+       | Ok x ->
+         let divisor =
+           match lit with
+           | Some k -> Ok (`Lit k)
+           | None -> Result.map (fun t -> `Term t) (r d)
+         in
+         Result.map
+           (truncating_division ~op ~nonneg_dividend:(known_nonneg ~vocab nonneg a) x)
+           divisor)
   | _ -> Error e
 
 (* Every predicate and guard is marked once, here at the entry, so the
@@ -363,9 +458,21 @@ let smt_of_r ?(vocab = true) ~resolve_var ~resolve_measure ?(resolve_field = fun
     ?(resolve_str_lit = fun _ -> None)
     ?(resolve_measure_call = fun _ _ _ -> None)
     (e : A.expr) : (Smt.term, A.expr) result =
-  smt_of_r_marked ~vocab ~resolve_var ~resolve_measure ~resolve_field ~resolve_measure_app
-    ~resolve_tester ~resolve_str_lit ~resolve_measure_call
-    (if vocab then mark_set_empty e else e)
+  let total_div = bool_shaped e in
+  let reflected =
+    smt_of_r_marked ~vocab ~total_div ~resolve_var ~resolve_measure ~resolve_field
+      ~resolve_measure_app ~resolve_tester ~resolve_str_lit ~resolve_measure_call
+      (if vocab then mark_set_empty e else e)
+  in
+  (* A Boolean predicate that divides by a non-literal is true exactly where
+     it is defined AND its reflection holds (see [definedness]).  Without a
+     non-literal division the term is returned untouched, so every query
+     that reflected before this existed keeps its exact text (and cache key). *)
+  if not total_div then reflected
+  else
+    Result.map
+      (fun t -> match definedness t with None -> t | Some def -> Smt.And (def, t))
+      reflected
 
 let smt_of ?(vocab = true) ~resolve_var ~resolve_measure ?(resolve_field = fun _ _ -> None)
     ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
@@ -424,6 +531,22 @@ let rec pred_str (e : A.expr) : string =
          && (match f.[0] with 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false) ->
     f ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
   | _ -> "<predicate>"
+
+(* Why a `/`/`%` leaf did not reflect, for the `unreflectable-predicate`
+   detail and the definition-site warning; [None] for any other leaf.  Since
+   general truncation landed only one reason is left: a non-literal divisor
+   outside a Boolean predicate that is not syntactically positive. *)
+let division_outside_fragment_hint (e : A.expr) : string option =
+  match e with
+  | A.EApp (A.EVar { A.txt = ("/" | "%") as op; _ }, [ _; d ], _) ->
+    Some
+      (Printf.sprintf
+         "`%s` by a divisor that is not a non-zero integer literal is translated only \
+          inside a comparison, or a `&&`/`||`/`not` of comparisons, where a zero divisor \
+          makes the predicate false (March's `%s` panics there); elsewhere the divisor \
+          must be syntactically positive, and `%s` is not"
+         op op (pred_str d))
+  | _ -> None
 
 (* Split a rendered S-expression string into its top-level tokens,
    respecting nested parentheses.  "1 (as nil (List Int))" → ["1";"(as nil (List Int))"] *)

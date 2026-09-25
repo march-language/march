@@ -56,6 +56,14 @@ let cap_sandbox    = ref false   (* --cap-sandbox: embed a self-imposed capabili
    is the only one that sees a stdlib-MEDIATED capability use; leaving it
    opt-in meant the default build enforced nothing on that route. *)
 let cap_strict     = ref true
+(* `--stdlib-source`: the entry file(s) ARE standard-library sources, checked
+   under a spelling that is not under the resolved stdlib root (the CI
+   ratchet's `march --check --stdlib-source stdlib/list.march` from the repo
+   root, while the compiler loads its staged `_build/default/stdlib` copy).
+   Exempts them from the stdlib-only builtin gate and puts their diagnostics
+   at stdlib severity. Never inferred from a file's name: a user's own
+   `json.march` used to get this for free. *)
+let stdlib_source  = ref false
 let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to stdout *)
 let emit_core_ast_file : string option ref = ref None  (* --emit-core-ast <file>: dump desugared core AST + verdict + diagnostics as JSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)

@@ -255,7 +255,68 @@ let refine_suite =
         | Refine.Refuted model ->
             Alcotest.(check (option string)) "d=0" (Some "0")
               (List.assoc_opt "d" model)
-        | _ -> Alcotest.fail "expected Refuted") ]
+        | _ -> Alcotest.fail "expected Refuted");
+
+    (* Ground fast path.  Each case pre-seeds the cache with the OPPOSITE of
+       the fast path's answer, so the outcome shows which one ran — no z3 and
+       no dependence on machine load (the timeout that made `random_hex(8)`
+       report "solver-undecided" is exactly what the fast path removes). *)
+    Alcotest.test_case "closed true goal is Verified before the cache/solver"
+      `Quick (fun () ->
+        let vc : Smt.vc =
+          { decls = []; assumptions = []; goal = Smt.Ge (Smt.IntLit 8, Smt.IntLit 0) }
+        in
+        Vc_cache.store ~root (Vc_cache.key_of_vc vc) (Solver.Sat []);
+        match Refine.discharge ~root vc with
+        | Refine.Verified -> ()
+        | _ -> Alcotest.fail "`8 >= 0` must be Verified without asking the solver");
+
+    Alcotest.test_case "closed negated-false goal is Verified (violation direction)"
+      `Quick (fun () ->
+        (* The caller's ¬G discharge for `random_hex(-1)`. *)
+        let vc : Smt.vc =
+          { decls = []; assumptions = [];
+            goal = Smt.Not (Smt.Ge (Smt.IntLit (-1), Smt.IntLit 0)) }
+        in
+        Vc_cache.store ~root (Vc_cache.key_of_vc vc) (Solver.Sat []);
+        match Refine.discharge ~root vc with
+        | Refine.Verified -> ()
+        | _ -> Alcotest.fail "`not (-1 >= 0)` must be Verified");
+
+    Alcotest.test_case "closed false goal still goes to the solver" `Quick (fun () ->
+        (* Contradictory assumptions make even a false goal Verified, which
+           only the solver can see — so false must not be short-circuited. *)
+        let vc : Smt.vc =
+          { decls = []; assumptions = []; goal = Smt.Ge (Smt.IntLit (-1), Smt.IntLit 0) }
+        in
+        Vc_cache.store ~root (Vc_cache.key_of_vc vc) Solver.Unsat;
+        match Refine.discharge ~root vc with
+        | Refine.Verified -> ()
+        | _ -> Alcotest.fail "expected the seeded (solver) verdict");
+
+    Alcotest.test_case "integer overflow falls back to the solver" `Quick (fun () ->
+        (* SMT ints are unbounded: max_int + 1 < 0 is FALSE.  Wrapping OCaml
+           arithmetic would make it true and wrongly short-circuit. *)
+        let vc : Smt.vc =
+          { decls = []; assumptions = [];
+            goal = Smt.Lt (Smt.Add (Smt.IntLit max_int, Smt.IntLit 1), Smt.IntLit 0) }
+        in
+        Vc_cache.store ~root (Vc_cache.key_of_vc vc) (Solver.Sat []);
+        match Refine.discharge ~root vc with
+        | Refine.Refuted _ -> ()
+        | _ -> Alcotest.fail "overflowing ground goal must not be evaluated");
+
+    Alcotest.test_case "division is left to the solver (Euclidean semantics)" `Quick
+      (fun () ->
+        (* SMT `div` is Euclidean: (div -7 2) = -4, OCaml's -7 / 2 = -3. *)
+        let vc : Smt.vc =
+          { decls = []; assumptions = [];
+            goal = Smt.Eq (Smt.DivLit (Smt.IntLit (-7), 2), Smt.IntLit (-3)) }
+        in
+        Vc_cache.store ~root (Vc_cache.key_of_vc vc) (Solver.Sat []);
+        match Refine.discharge ~root vc with
+        | Refine.Refuted _ -> ()
+        | _ -> Alcotest.fail "division must not be ground-evaluated") ]
 
 (* ── Solver-process lifecycle (regression: 2026-07 z3 orphan leak) ────────
    Every compile/check run used to leave one immortal z3: the shared solver

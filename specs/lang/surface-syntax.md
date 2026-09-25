@@ -129,6 +129,15 @@ The body is: zero or more `let`/`linear let` bindings, then a final expression.
 Single-expression lambdas are unchanged: no `let` bindings means no `EBlock` wrapper.
 
 Both `fn -> expr` and `fn () -> expr` are valid zero-arg lambdas; they are identical.
+A zero-arg lambda has type `() -> T` (the same as `Unit -> T`) wherever it appears, so it
+can fill a `() -> T` record field or be bound with `let` and passed on, and `f()` calls it:
+
+```march
+type Job = { name : String, run : () -> Int }
+let g = fn () -> 4
+let job = { name: "j", run: g }
+job.run()                     -- 4
+```
 
 ### `fn (a, b) -> …` takes TWO arguments, it does not destructure a pair
 
@@ -363,8 +372,8 @@ fields or pass the value to a measure.
 {v : Tree | size(v) < 100}         -- a @[measure] over a structure
 ```
 
-The predicate fragment is `+ - *`, `/ %` (a non-zero literal divisor over a
-dividend known to be non-negative), the comparisons
+The predicate fragment is `+ - *`, `/ %` (with March's truncating semantics;
+a zero divisor makes the predicate false), the comparisons
 `== != < <= > >=`, the connectives `&& || not`, literals, field projection,
 `len`, `is_<Ctor>` testers, and `@[measure]` functions. A predicate may also
 mention **another parameter**, which makes it *relational*:

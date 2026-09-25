@@ -169,6 +169,10 @@ type env = {
   proof_caps : (string * string) list;
   always_linear_types : string list;
   current_module : string;
+  gated_shadowed : Typecheck_types.StringSet.t;
+  (** [Typecheck_builtins.stdlib_only] names rebound by a non-builtin binding
+      in this scope; a reference to one resolves to that binding, so the
+      stdlib-only gate lets it through. See the implementation's comment. *)
   root_cap_allowed : bool;
   cur_fn_public : bool;
   cap_qual_prefix : string;
@@ -290,6 +294,12 @@ val qualified_error_msg : string -> env -> string
 val all_ctors_named : string -> env -> string list
 val all_ctor_candidates_named : string -> env -> (string * string) list
 val suggest_ctors : string -> env -> (string * string) list
+(* The stdlib-only builtin table; see [Typecheck_builtins.stdlib_only]. *)
+val stdlib_only : (string * string) list ref
+
+(* Add [name] to a [gated_shadowed] set when it is a stdlib-only builtin's. *)
+val note_gated_rebind : string -> Typecheck_types.StringSet.t -> Typecheck_types.StringSet.t
+
 val bind_var :
   StrMap.key -> Typecheck_types.scheme -> env -> env
 val bind_vars :

@@ -1,0 +1,36 @@
+-- char predicates and case maps
+'a' alpha=true upper=false lower=true up=A down=a
+'Z' alpha=true upper=true lower=false up=Z down=z
+'m' alpha=true upper=false lower=true up=M down=m
+'9' alpha=false upper=false lower=false up=9 down=9
+' ' alpha=false upper=false lower=false up=  down= 
+'_' alpha=false upper=false lower=false up=_ down=_
+'!' alpha=false upper=false lower=false up=! down=!
+'@' alpha=false upper=false lower=false up=@ down=@
+'[' alpha=false upper=false lower=false up=[ down=[
+'`' alpha=false upper=false lower=false up=` down=`
+'{' alpha=false upper=false lower=false up={ down={
+'~' alpha=false upper=false lower=false up=~ down=~
+'Q' alpha=true upper=true lower=false up=Q down=q
+'z' alpha=true upper=false lower=true up=Z down=z
+-- float_from_string
+float_from_string("3.14") = Some(3.14)
+float_from_string("-2.5") = Some(-2.5)
+float_from_string("42") = Some(42.)
+float_from_string("1e3") = Some(1000.)
+float_from_string("0.1") = Some(0.1)
+float_from_string("abc") = None
+float_from_string("") = None
+float_from_string("1.5x") = None
+-- print_int / print_float (no newline)
+0 -7 123456789012
+3. -2.5 0.1 0.333333333333 1e+20 inf -inf
+-- tap
+tap int 42
+tap string abcd abcd
+tap list 3
+tap generic 7 g
+tap float 2.5
+local tap 20
+-- leak leg
+hits 40000, flat: true

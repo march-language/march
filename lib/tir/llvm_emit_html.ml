@@ -25,17 +25,28 @@ let atom_tir_ty = Llvm_data.atom_tir_ty
     escaping.  Uses the constructor-name table when the atom's STATIC type
     names a variant/record the table describes, so an interpolated user ADT
     escapes `Point(1, 2)` rather than `#<tag:0>`; every other shape keeps the
-    generic [march_value_to_string] it had.  Purely a legibility change — the
-    value is escaped identically either way, so the security property this
-    file's dispatch exists to protect is untouched. *)
+    generic renderer.  Purely a legibility change — the value is escaped
+    identically either way, so the security property this file's dispatch
+    exists to protect is untouched.
+
+    Both routes render in the REPR convention (nested strings quoted), which
+    is what the interpreter's `~H` produces: [march_value_to_string_typed] is
+    repr, and the untyped route calls [march_value_to_string_repr] rather
+    than [march_value_to_string], which is `to_string`'s SHOW convention
+    (a nested string bare inside a List/Option/Result).  WASM has no ctor
+    table and no repr entry ([shape_meta] is off, as in [id_for]), so it keeps
+    the plain renderer. *)
 let stringify_for_escape ctx (a : Tir.atom) (v : string) : string =
   match Llvm_ctor_desc.id_for ctx (atom_tir_ty a) with
   | Some local_id -> snd (Llvm_ctor_desc.emit_to_string ctx v local_id)
   | None ->
     Llvm_ctor_desc.emit_ensure_if_erased ctx (atom_tir_ty a);
     let s = Llvm_ctx.fresh ctx "vts_str" in
+    let fn_name =
+      if ctx.shape_meta then "march_value_to_string_repr"
+      else "march_value_to_string" in
     Llvm_ctx.emit ctx
-      (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" s v);
+      (Printf.sprintf "%s = call ptr @%s(ptr %s)" s fn_name v);
     s
 
 (** Body of the `html_auto_escape` arm for an [Html.Safe] argument: the

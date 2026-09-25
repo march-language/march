@@ -35,15 +35,17 @@ compiled, `march: fatal SIGBUS ... fault outside its stack`, exit 138.
    at +16 was taken as the string length: `memcpy` of gigabytes, SIGBUS.
    Fix: `march_sha256_of_bytes` (Bytes only, via `bytes_to_raw`) is the C
    entry for the `sha256` builtin, chosen by the compiler from the static
-   type; `march_sha256` / `march_sha512` are String-only and the guessing
-   helper is deleted. (`march_sha1_bytes` was fixed the same way earlier for
-   `UUID.v5`.)
+   type, so it never guesses. (`march_sha1_bytes` was fixed the same way
+   earlier for `UUID.v5`.) In parallel, main landed
+   `2026-09-24-bytes-typeid-base64-sigbus.md` (commit 3a59cc246), which
+   teaches the shared guess (`is_bytes_value`) about the type-id stamp; that
+   helper stays, since `march_base64_encode` and the String-typed
+   `stdlib_sha256` / `stdlib_sha512` entries still go through it.
 
 ## Files
 
 - `lib/typecheck/typecheck_builtins.ml` — `sha256 : Bytes -> String`.
-- `runtime/march_extras.c`, `runtime/march_runtime.h` — `march_sha256_of_bytes`;
-  `string_or_bytes_to_raw` removed.
+- `runtime/march_extras.c`, `runtime/march_runtime.h` — `march_sha256_of_bytes`.
 - `lib/tir/llvm_builtins.ml` — `sha256` row's `c_name`/`declare_sig`, preamble
   `PDeclare`; `test/test_codegen.ml` preamble golden.
 - `test/refine_audit/corpus.baseline` — regenerated (the audit sweeps every
