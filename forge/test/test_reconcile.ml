@@ -29,7 +29,7 @@ let wait_until ?(timeout = 10.) f =
 
 let node ~root ?socket ?(pid = 0) name : Reconcile.node =
   { Reconcile.name; pool = "p"; pid; port = 7000; socket; labels = [ "l" ];
-    status_path = Reconcile.status_file ~root name; log = Filename.concat root (name ^ ".log") }
+    status_path = Reconcile.status_file ~root name; log = Filename.concat root (name ^ ".log"); host = "" }
 
 let topology_text = {|
 [roles]
@@ -287,6 +287,368 @@ let test_diff_needs_restart () =
     (replace ~sub:{|"Log.Sink" = { body = "App.sink" }|} ~by:{|"Log.Sink" = { body = "App.sink" }
 "Log.Tail" = { body = "App.tail" }|} base_text) "Log.Tail"
 
+(* ── the ssh backend (build step 10b), over the local transport ─────────── *)
+
+let ssh_topology_text = {|
+[roles]
+"Echo.Server" = { body = "App.serve", capacity = 4 }
+
+[pool.a]
+serves = ["Echo.Server"]
+hosts = [{ host = "root@web-1", labels = ["edge", "x"] }]
+
+[pool.b]
+serves = ["Echo.Server"]
+hosts = ["root@web-2"]
+
+[backend]
+kind = "ssh"
+port = 7950
+|}
+
+let ssh_topology ?(text = ssh_topology_text) () =
+  match Topology.of_strings [ ("topology.toml", text) ] with
+  | Ok t -> t
+  | Error ds -> Alcotest.failf "ssh topology: %s" (String.concat "; " (List.map Topology.render_diag ds))
+
+let record ~host ~pool target =
+  { Reconcile.hr_host = host; hr_pool = pool; hr_node = pool ^ "-x"; hr_target = target;
+    hr_triple = "t"; hr_uname = "u"; hr_at = 0. }
+
+let test_ssh_nodes_from_overlay () =
+  let layout = Host_layout.make ~prefix:"/srv" "app" in
+  let records = [ record ~host:"root@web-1" ~pool:"a" "linux/arm64" ] in
+  match Reconcile.ssh_nodes ~layout ~pubkey:"PK" ~records (ssh_topology ()) with
+  | Error m -> Alcotest.fail m
+  | Ok [ a; b ] ->
+    Alcotest.(check string) "node name" "a-web-1" a.sn.Hosts.name;
+    Alcotest.(check string) "ssh target" "root@web-1" a.sn.Hosts.ssh;
+    Alcotest.(check (list string)) "labels from the overlay" [ "edge"; "x" ] a.sn.Hosts.labels;
+    Alcotest.(check string) "socket from the layout" "/srv/var/lib/march/app/run/a.sock" a.sn.Hosts.socket;
+    Alcotest.(check string) "pubkey" "PK" a.sn.Hosts.pubkey;
+    Alcotest.(check int) "cluster port" 7950 a.sn_port;
+    Alcotest.(check (option string)) "recorded target" (Some "linux/arm64") a.sn_target;
+    Alcotest.(check (option string)) "not initialised" None b.sn_target;
+    Alcotest.(check (list string)) "a bare host has no labels" [] b.sn.Hosts.labels
+  | Ok ns -> Alcotest.failf "expected 2 nodes, got %d" (List.length ns)
+
+let test_ssh_nodes_refuses_shared_host () =
+  let text = replace ~sub:{|hosts = ["root@web-2"]|} ~by:{|hosts = ["root@web-1"]|} ssh_topology_text in
+  let layout = Host_layout.make "app" in
+  (match Reconcile.ssh_nodes ~layout ~pubkey:"" ~records:[] (ssh_topology ~text ()) with
+   | Error m -> Alcotest.(check bool) ("names both pools: " ^ m) true (contains m "pools a and b")
+   | Ok _ -> Alcotest.fail "two pools on one host must be refused");
+  let text = {|
+[roles]
+"Echo.Server" = { body = "App.serve" }
+[pool.a]
+serves = ["Echo.Server"]
+|} in
+  match Reconcile.ssh_nodes ~layout ~pubkey:"" ~records:[] (ssh_topology ~text ()) with
+  | Error m -> Alcotest.(check bool) m true (contains m "no hosts")
+  | Ok _ -> Alcotest.fail "a topology without hosts has no ssh nodes"
+
+let test_host_records_round_trip () =
+  let root = tmp_root () in
+  let rs = [ record ~host:"root@web-1" ~pool:"a" "linux/amd64"; record ~host:"root@web-2" ~pool:"b" "linux/arm64" ] in
+  Reconcile.write_host_records ~root (Some "prod") rs;
+  (match Reconcile.read_host_records ~root (Some "prod") with
+   | Ok back -> Alcotest.(check (list string)) "targets" [ "linux/amd64"; "linux/arm64" ]
+                  (List.map (fun r -> r.Reconcile.hr_target) back)
+   | Error m -> Alcotest.fail m);
+  Alcotest.(check bool) "another env has none" true (Reconcile.read_host_records ~root (Some "dev") = Ok [])
+
+(** A fake current reload server (HCR_INFO, VERSIONS_DETAIL with RESTORED,
+    PINS, COMPACT, GET_EPOCH, PING and the signed TOPOLOGY verb, which it
+    checks against [pk] like the real one). Serves [conns] connections;
+    appends every command line, and each accepted topology body, to [log]. *)
+let fake_hcr_server ?(conns = 1) ~pk ~log path =
+  (try Sys.remove path with Sys_error _ -> ());
+  let fd = Unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  Unix.bind fd (Unix.ADDR_UNIX path);
+  Unix.listen fd 4;
+  match Unix.fork () with
+  | 0 ->
+    let note s = Out_channel.with_open_gen [ Open_append; Open_creat; Open_wronly ] 0o644 log
+        (fun oc -> output_string oc (s ^ "\n")) in
+    for _ = 1 to conns do
+      let (c, _) = Unix.accept fd in
+      let ic = Unix.in_channel_of_descr c and oc = Unix.out_channel_of_descr c in
+      let say s = output_string oc s; flush oc in
+      (try
+         while true do
+           let line = input_line ic in
+           note line;
+           match String.split_on_char ' ' line with
+           | [ "HCR_INFO" ] ->
+             say "HCR_INFO target:linux/arm64 abi:march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8 prefix:App key:00\n"
+           | [ "VERSIONS_DETAIL" ] ->
+             say "SLOT 0 App.f abc123 0 (none) 0\nSLOT 1 App.g def456 1700000000000 ab12 2\n\
+                  RESTORED entries:2 skipped:1 mode:replayed stack:2 manifest:aaaa topology:-\nEND\n"
+           | [ "PINS" ] -> say "EPOCH 2 pins:1 current\nCOUNTERS deferred:0 converted:0 dropped:0 killed:0\nEND\n"
+           | [ "COMPACT" ] -> say "STACK entries:2 functions:2 deploys:1 artifacts:1 cas_bytes:2048\n"
+           | [ "GET_EPOCH" ] -> say "EPOCH 7\n"
+           | [ "PING" ] -> say "PONG\n"
+           | [ "VERSIONS" ] | [ "ABI_QUERY" ] -> say "END\n"
+           | [ "TOPOLOGY"; digest; sig64; size ] ->
+             let signed = "TOPOLOGY " ^ digest in
+             let ok_sig =
+               match Cmd_hot_reload.b64_decode_raw sig64 with
+               | Some sg when Bytes.length sg >= 64 ->
+                 March_ed25519.Ed25519.verify (Bytes.of_string signed) (Bytes.sub sg 0 64) pk
+               | _ -> false
+             in
+             if not ok_sig then say "ERR bad_signature\n"
+             else begin
+               say "READY\n";
+               let body = really_input_string ic (int_of_string size) in
+               if March_cas.Blake3.hash_string body <> digest then say "ERR digest_mismatch\n"
+               else (note ("BODY " ^ string_of_int (String.length body)); say ("OK " ^ digest ^ "\n"))
+             end
+           | _ -> say "ERR unknown_command\n"
+         done
+       with End_of_file -> ());
+      Unix.close c
+    done;
+    Unix._exit 0
+  | p -> Unix.close fd; p
+
+(** Kill [pids] (fake servers) when [f] returns or fails: a failed check
+    must not leave a server blocked in accept, holding the test's stdout. *)
+let reaping pids f =
+  Fun.protect f ~finally:(fun () ->
+      List.iter (fun p ->
+          (try Unix.kill p Sys.sigkill with Unix.Unix_error _ -> ());
+          (try ignore (Unix.waitpid [] p) with Unix.Unix_error _ -> ()))
+        pids)
+
+(** A stand-in for systemctl: logs its arguments; [is-active] says active. *)
+let fake_service_ctl dir =
+  let path = Filename.concat dir "fake-systemctl" in
+  write_file path (Printf.sprintf "#!/bin/sh\necho \"$@\" >> %s/systemctl.log\n\
+                                   case \"$1\" in is-active) echo active ;; esac\nexit 0\n" dir);
+  Unix.chmod path 0o755;
+  path
+
+let short_tmp () =
+  let d = Printf.sprintf "/tmp/frs%d_%d" (Unix.getpid ()) (Random.int 100000) in
+  Unix.mkdir d 0o755; d
+
+let test_ssh_push_and_status () =
+  let dir = short_tmp () in
+  let layout = Host_layout.make ~prefix:dir "app" in
+  Reconcile.mkdir_p (Host_layout.run_dir layout);
+  Reconcile.mkdir_p (Host_layout.etc_dir layout);
+  let (pk, sk) = March_ed25519.Ed25519.keygen () in
+  let t = ssh_topology () in
+  let nodes = match Reconcile.ssh_nodes ~layout ~pubkey:"" ~records:[] t with
+    | Ok ns -> ns | Error m -> Alcotest.fail m in
+  let log_a = Filename.concat dir "a.log" and log_b = Filename.concat dir "b.log" in
+  (* a reports; b has not reported yet. *)
+  write_file (Host_layout.status_file layout "a") "node a-web-1\ntopology compiled\noffers Echo.Server\ndraining 0\nrunning 3\n";
+  let sa = fake_hcr_server ~conns:3 ~pk ~log:log_a (Host_layout.socket layout "a") in
+  let sb = fake_hcr_server ~conns:1 ~pk ~log:log_b (Host_layout.socket layout "b") in
+  let sctl = fake_service_ctl dir in
+  reaping [ sa; sb ] @@ fun () ->
+  let b = Reconcile.ssh ~transport:Remote.local ~service_ctl:sctl ~layout ~sk nodes in
+  (match b.push_topology t with
+   | Error m -> Alcotest.fail m
+   | Ok r ->
+     Alcotest.(check bool) "a signalled" true (List.assoc "a-web-1" r.outcome = Reconcile.Signalled);
+     Alcotest.(check bool) "b not reporting: not signalled" true (List.assoc "b-web-2" r.outcome = Reconcile.Not_reporting);
+     Alcotest.(check string) "the digest file is the topology" (Topology.digest_text t)
+       (read_file (Host_layout.topology_file layout));
+     Alcotest.(check string) "sha of what nodes will report"
+       Digestif.SHA256.(to_hex (digest_string (Topology.digest_text t))) r.sha);
+  let calls = read_file (Filename.concat dir "systemctl.log") in
+  Alcotest.(check bool) ("SIGHUP to a's unit: " ^ calls) true (contains calls "kill --signal=HUP march-a.service");
+  Alcotest.(check bool) "no SIGHUP to b" false (contains calls "march-b.service");
+  Alcotest.(check bool) "a's server verified and stored the body" true (contains (read_file log_a) "BODY ");
+  Alcotest.(check bool) "b's server got the signed push too" true (contains (read_file log_b) "BODY ");
+  (* A push signed with another key is refused by the server: the digest file
+     is not rewritten and nothing is signalled. *)
+  let (_, other_sk) = March_ed25519.Ed25519.keygen () in
+  write_file (Host_layout.topology_file layout) "old\n";
+  let bad = Reconcile.ssh ~transport:Remote.local ~service_ctl:sctl ~layout ~sk:other_sk [ List.hd nodes ] in
+  (match bad.push_topology t with
+   | Ok r ->
+     (match List.assoc "a-web-1" r.outcome with
+      | Reconcile.Push_failed m -> Alcotest.(check bool) m true (contains m "bad_signature")
+      | _ -> Alcotest.fail "a push with the wrong key must fail")
+   | Error m -> Alcotest.fail m);
+  Alcotest.(check string) "digest file untouched" "old\n" (read_file (Host_layout.topology_file layout));
+  (* status: liveness from the unit, the report, and the reload server. *)
+  let ss = (Reconcile.ssh ~transport:Remote.local ~service_ctl:sctl ~layout ~sk [ List.hd nodes ]).status () in
+  (match ss with
+   | [ s ] ->
+     Alcotest.(check bool) "up" true s.up;
+     Alcotest.(check (option int)) "running sessions" (Some 3) (Option.map (fun r -> r.Reconcile.r_running) s.report);
+     (match s.reload with
+      | Some (Ok ri) ->
+        Alcotest.(check int) "slots" 2 (List.length ri.versions);
+        Alcotest.(check (option string)) "restored mode" (Some "replayed")
+          (Option.map (fun r -> r.Reconcile.rs_mode) ri.restored);
+        Alcotest.(check (option int)) "stack" (Some 2)
+          (Option.map (fun st -> st.Cmd_deploy_hot.st_entries) ri.compact);
+        Alcotest.(check (option string)) "target" (Some "linux/arm64")
+          (Option.map (fun h -> h.Cmd_deploy_hot.target) ri.hcr);
+        let text = Reconcile.render_status ss in
+        List.iter (fun w -> if not (contains text w) then Alcotest.failf "expected %S in:\n%s" w text)
+          [ "a-web-1 (pool a, host root@web-1, port 7950)"; "restored at start: 2 patch entries (1 skipped), mode replayed";
+            "patch stack: 2 persisted patches"; "(target linux/arm64)" ]
+      | Some (Error m) -> Alcotest.failf "reload: %s" m
+      | None -> Alcotest.fail "no reload info")
+   | _ -> Alcotest.fail "one status expected")
+
+let test_shared_epoch_and_ping () =
+  let dir = short_tmp () in
+  let (pk, _) = March_ed25519.Ed25519.keygen () in
+  let sock = Filename.concat dir "e.sock" in
+  let server = fake_hcr_server ~conns:2 ~pk ~log:(Filename.concat dir "e.log") sock in
+  reaping [ server ] @@ fun () ->
+  let h = { Hosts.name = "n"; ssh = ""; socket = sock; pubkey = ""; labels = [] } in
+  Alcotest.(check int) "one host: no shared epoch" 0 (Reconcile.shared_epoch ~transport:Remote.local [ h ]);
+  Alcotest.(check int) "fetched once from the first host" 7 (Reconcile.shared_epoch ~transport:Remote.local [ h; h ]);
+  Alcotest.(check bool) "PING" true (Reconcile.ping ~transport:Remote.local h);
+  (try ignore (Unix.waitpid [] server) with Unix.Unix_error _ -> ());
+  Alcotest.(check bool) "no server: not alive" false (Reconcile.ping ~transport:Remote.local h)
+
+let test_drift () =
+  let fm name h = { Cmd_deploy_hot.fn_name = name; fn_impl_hash = h; fn_sig_hash = ""; fn_callers = [];
+                    fn_caps = []; fn_has_caps = true } in
+  let desired = { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = None; hcr_abi = None; module_prefix = None;
+                  functions = [ fm "App.f" "abc123"; fm "App.g" "zzz"; fm "App.new" "n" ]; roles = [] } in
+  let slot name h = { Cmd_deploy_hot.ds_id = 0; ds_name = name; ds_impl_hash = h; ds_activated_at = 0L;
+                      ds_signer = ""; ds_epoch = 0 } in
+  Alcotest.(check (list string)) "only App.g differs"
+    [ "App.g" ] (Reconcile.drift ~desired [ slot "App.f" "abc123"; slot "App.g" "def456"; slot "App.other" "q" ])
+
+(** [forge topology apply --env prod] over the ssh backend, on a small
+    project: refused before anything was deployed; a capacity change is
+    pushed (signed) and applied by the nodes (a fake systemctl plays the
+    node: on SIGHUP it reports the sha of the digest file); a label change
+    needs a restart and is refused, naming `forge deploy`. *)
+let test_ssh_apply () =
+  let dir = short_tmp () in
+  let root = Filename.concat dir "proj" in
+  Reconcile.mkdir_p (Filename.concat root "src");
+  write_file (Filename.concat root "forge.toml") "[package]\nname = \"app\"\nversion = \"0.1.0\"\n";
+  write_file (Filename.concat root "src/app.march")
+    "mod App do\n  protocol Echo do\n    ask: Client -> Server : Int\n    answer: Server -> Client : Int\n  end\n\
+    \  fn serve(x) do x end\nend\n";
+  let base cap = Printf.sprintf "[roles]\n\"Echo.Server\" = { body = \"App.serve\", capacity = %d }\n\n[pool.a]\nserves = [\"Echo.Server\"]\n" cap in
+  write_file (Filename.concat root "topology.toml") (base 4);
+  let overlay labels =
+    Printf.sprintf "[pool.a]\nhosts = [{ host = \"root@web-1\", labels = [%s] }]\n\n[backend]\nkind = \"ssh\"\n" labels in
+  write_file (Filename.concat root "topology.prod.toml") (overlay "\"x\"");
+  let home = Filename.concat dir "home" in
+  Reconcile.mkdir_p home;
+  let old_home = Sys.getenv_opt "HOME" in
+  Unix.putenv "HOME" home;
+  Fun.protect ~finally:(fun () -> Option.iter (Unix.putenv "HOME") old_home) @@ fun () ->
+  let (pk, sk) = March_ed25519.Ed25519.keygen () in
+  (match Cmd_hot_reload.save_sk sk with Ok () -> () | Error m -> Alcotest.fail m);
+  let layout = Host_layout.make ~prefix:dir "app" in
+  Reconcile.mkdir_p (Host_layout.run_dir layout);
+  Reconcile.mkdir_p (Host_layout.etc_dir layout);
+  let status = Host_layout.status_file layout "a" in
+  write_file status "node a-web-1\ntopology compiled\noffers Echo.Server\ndraining 0\nrunning 0\n";
+  let sctl = Filename.concat dir "fake-systemctl" in
+  write_file sctl (Printf.sprintf
+                     "#!/bin/sh\necho \"$@\" >> %s/systemctl.log\n\
+                      case \"$1\" in\n  is-active) echo active ;;\n\
+                     \  kill) sha=$(sha256sum < %s | cut -d' ' -f1)\n\
+                     \        printf 'node a-web-1\\ntopology %%s\\noffers Echo.Server\\ndraining 0\\nrunning 0\\n' \"$sha\" > %s ;;\n\
+                      esac\nexit 0\n" dir (Host_layout.topology_file layout) status);
+  Unix.chmod sctl 0o755;
+  let server = fake_hcr_server ~conns:1000 ~pk ~log:(Filename.concat dir "a.log") (Host_layout.socket layout "a") in
+  reaping [ server ] @@ fun () ->
+  let apply () = Reconcile.apply ~transport:Remote.local ~service_ctl:sctl ~layout_prefix:dir ~env:"prod" ~root () in
+  (match apply () with
+   | Error m -> Alcotest.(check bool) ("nothing deployed yet: " ^ m) true (contains m "run `forge deploy --env prod` first")
+   | Ok r -> Alcotest.failf "apply before any deploy succeeded:\n%s" r);
+  (* What the last deploy pushed: capacity 4. *)
+  (match Topology.load ~root ~env:"prod" () with
+   | Ok t -> Reconcile.record_deployed_topology ~root (Some "prod") t
+   | Error _ -> Alcotest.fail "fixture topology");
+  write_file (Filename.concat root "topology.toml") (base 2);
+  (match apply () with
+   | Ok r ->
+     List.iter (fun w -> if not (contains r w) then Alcotest.failf "expected %S in:\n%s" w r)
+       [ "capacity 4 -> 2"; "pushed "; "to 1 node(s)"; "a-web-1 (pool a, host root@web-1" ]
+   | Error m -> Alcotest.failf "apply failed:\n%s" m);
+  Alcotest.(check bool) "the server received the signed topology" true
+    (contains (read_file (Filename.concat dir "a.log")) "BODY ");
+  (match Topology.read_digest (Reconcile.deployed_topology_file ~root (Some "prod")) with
+   | Ok t -> Alcotest.(check (option int)) "recorded as deployed" (Some 2)
+               (List.hd t.Topology.roles).Topology.capacity
+   | Error m -> Alcotest.fail m);
+  (match apply () with
+   | Ok r -> Alcotest.(check bool) r true (contains r "already has this topology")
+   | Error m -> Alcotest.failf "second apply: %s" m);
+  write_file (Filename.concat root "topology.prod.toml") (overlay "\"x\", \"y\"");
+  match apply () with
+  | Error m -> Alcotest.(check bool) m true (contains m "run `forge deploy --env prod`, which rebuilds and restarts")
+  | Ok r -> Alcotest.failf "a label change was applied without a restart:\n%s" r
+
+(* ── target identity (#606) ─────────────────────────────────────────────── *)
+
+let v2 ?(target = "linux/arm64") ?(abi = "march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8") ?(prefix = "App") () =
+  { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = Some target; hcr_abi = Some abi;
+    module_prefix = Some prefix; functions = []; roles = [] }
+
+let info = { Cmd_deploy_hot.target = "linux/arm64"; abi = "march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8";
+             prefix = "App"; key_hex = "00" }
+
+let test_identity_checks () =
+  let ok r = Alcotest.(check bool) "accepted" true (Result.is_ok r) in
+  let bad what r = match r with
+    | Error m -> Alcotest.(check bool) (what ^ ": " ^ m) true (contains m what)
+    | Ok () -> Alcotest.failf "%s mismatch accepted" what in
+  ok (Cmd_deploy_hot.check_identity ~manifest:(v2 ()) ~info);
+  bad "target" (Cmd_deploy_hot.check_identity ~manifest:(v2 ~target:"linux/amd64" ()) ~info);
+  bad "HCR ABI" (Cmd_deploy_hot.check_identity ~manifest:(v2 ~abi:"march-hcr-v3;triple=x;ptr=8" ()) ~info);
+  bad "module prefix" (Cmd_deploy_hot.check_identity ~manifest:(v2 ~prefix:"Other" ()) ~info);
+  ok (Cmd_deploy_hot.check_identity ~manifest:{ (v2 ~target:"x" ()) with version = 1 } ~info);
+  ok (Cmd_deploy_hot.check_host_target ~recorded:"linux/arm64" ~manifest:(v2 ()));
+  bad "linux/amd64" (Cmd_deploy_hot.check_host_target ~recorded:"linux/arm64" ~manifest:(v2 ~target:"linux/amd64" ()));
+  ok (Cmd_deploy_hot.check_host_target ~recorded:"linux/arm64"
+        ~manifest:(v2 ~target:"native" ~abi:"march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8" ()));
+  bad "built for this machine" (Cmd_deploy_hot.check_host_target ~recorded:"linux/amd64"
+        ~manifest:(v2 ~target:"native" ~abi:"march-hcr-v2;triple=arm64-apple-macosx15.0.0;ptr=8" ()));
+  Alcotest.(check (option string)) "uname" (Some "linux/amd64") (Cmd_deploy_hot.canonical_of_triple "Linux x86_64");
+  Alcotest.(check (option string)) "triple" (Some "linux/arm64") (Cmd_deploy_hot.canonical_of_triple "aarch64-unknown-linux-gnu");
+  Alcotest.(check (option string)) "unknown" None (Cmd_deploy_hot.canonical_of_triple "riscv64 Linux")
+
+let test_manifest_reads_hcr_abi () =
+  let root = tmp_root () in
+  let path = Filename.concat root "m" in
+  write_file path "# march-hcr-manifest v2\n# cas_hash cc\n# target linux/arm64\n\
+                   # hcr_abi march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8\n# module_prefix App\nApp.f aa bb caps=\n";
+  match Cmd_deploy_hot.parse_manifest path with
+  | Ok m ->
+    Alcotest.(check (option string)) "hcr_abi (was never read)" (Some "march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8") m.hcr_abi;
+    Alcotest.(check (option string)) "target" (Some "linux/arm64") m.target;
+    Alcotest.(check (option string)) "prefix" (Some "App") m.module_prefix
+  | Error e -> Alcotest.fail e
+
+(** [forge deploy hot]'s [run] refuses a patch for another target before it
+    uploads anything: the server sees HCR_INFO and nothing else. *)
+let test_run_preflights_identity () =
+  let dir = short_tmp () in
+  let (pk, sk) = March_ed25519.Ed25519.keygen () in
+  let sock = Filename.concat dir "r.sock" and log = Filename.concat dir "r.log" in
+  let server = fake_hcr_server ~pk ~log sock in
+  reaping [ server ] @@ fun () ->
+  let r = Cmd_deploy_hot.run ~tunnel:false ~ssh_host:"n" ~remote_socket:sock ~signing_pubkey:"" ~sk
+      ~manifest:(v2 ~target:"linux/amd64" ~abi:"march-hcr-v2;triple=x86_64-unknown-linux-gnu;ptr=8" ())
+      ~so_path:"/nonexistent.so" () in
+  (try ignore (Unix.waitpid [] server) with Unix.Unix_error _ -> ());
+  (match r with
+   | Error m -> Alcotest.(check bool) m true (contains m "target (linux/amd64) is not the running server's (linux/arm64)")
+   | Ok _ -> Alcotest.fail "a patch for another target was deployed");
+  Alcotest.(check string) "only HCR_INFO reached the server" "HCR_INFO\n" (read_file log)
+
 let () =
   Alcotest.run "reconcile" [
     ("diff", [
@@ -303,5 +665,19 @@ let () =
         Alcotest.test_case "reports and the reload server's VERSIONS_DETAIL/PINS" `Quick test_status_reads_reports_and_reload_server;
         Alcotest.test_case "report parsing" `Quick test_parse_report;
         Alcotest.test_case "reload socket paths fit sun_path" `Quick test_socket_path_short;
+      ]);
+    ("ssh backend", [
+        Alcotest.test_case "nodes from the overlay: names, labels, sockets, recorded targets" `Quick test_ssh_nodes_from_overlay;
+        Alcotest.test_case "one pool per host; hosts required" `Quick test_ssh_nodes_refuses_shared_host;
+        Alcotest.test_case "host records round trip per env" `Quick test_host_records_round_trip;
+        Alcotest.test_case "push: signed TOPOLOGY, digest file, SIGHUP to reporting units; wrong key refused" `Quick test_ssh_push_and_status;
+        Alcotest.test_case "shared epoch fetched once; PING" `Quick test_shared_epoch_and_ping;
+        Alcotest.test_case "drift against the deployed manifest" `Quick test_drift;
+        Alcotest.test_case "topology apply over ssh: refuses before a deploy, pushes, refuses restarts" `Quick test_ssh_apply;
+      ]);
+    ("identity (#606)", [
+        Alcotest.test_case "manifest vs HCR_INFO, host target vs manifest" `Quick test_identity_checks;
+        Alcotest.test_case "# hcr_abi is parsed" `Quick test_manifest_reads_hcr_abi;
+        Alcotest.test_case "deploy hot refuses another target before uploading" `Quick test_run_preflights_identity;
       ]);
   ]

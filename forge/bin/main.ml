@@ -1557,19 +1557,22 @@ let topology_gen_cmd =
     Term.(const run $ topology_env $ target $ out)
 
 let topology_status_cmd =
-  let run () =
+  let run env =
     match Project.load () with
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
     | Ok proj ->
-      match Reconcile.local_backend ~root:proj.Project.root with
+      match Reconcile.status_text ?env ~root:proj.Project.root () with
       | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
-      | Ok (b, _) -> print_string (Reconcile.render_status (b.Reconcile.status ()))
+      | Ok text -> print_string text
   in
   Cmd.v (Cmd.info "status"
-           ~doc:"Report each node of the running local cluster ($(b,forge run --processes)): \
-                 alive, the topology it applied, the offers it holds, and, for a hot-reload \
-                 build, its code versions and epoch pins")
-    Term.(const run $ const ())
+           ~doc:"Report each node: alive, the topology it applied, the offers it holds, and, \
+                 for a hot-reload build, its code versions, epoch pins, restored patch stack \
+                 and its size. Over the local backend (a running $(b,forge run --processes)), \
+                 or, when the $(b,--env) overlay says $(b,[backend] kind = \"ssh\"), over ssh, \
+                 where each node's running code is also checked against what forge last \
+                 deployed there.")
+    Term.(const run $ topology_env)
 
 let topology_apply_cmd =
   let run env =

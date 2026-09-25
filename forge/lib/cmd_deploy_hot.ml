@@ -95,8 +95,10 @@ let parse_manifest path : (manifest, string) result =
            cas_hash := String.trim (String.sub line 10 (String.length line - 10))
          else if String.length line > 8 && String.sub line 0 8 = "# target" then
            target := Some (String.trim (String.sub line 8 (String.length line - 8)))
-         else if String.length line > 8 && String.sub line 0 8 = "# hcr_abi" then
-           hcr_abi := Some (String.trim (String.sub line 8 (String.length line - 8)))
+         else if String.length line > 9 && String.sub line 0 9 = "# hcr_abi" then
+           (* 9 characters: an 8-character prefix could never equal it, so
+              hcr_abi was never read before 10b. *)
+           hcr_abi := Some (String.trim (String.sub line 9 (String.length line - 9)))
         else if String.length line > 15 && String.sub line 0 15 = "# module_prefix" then
            module_prefix := Some (String.trim (String.sub line 15 (String.length line - 15)))
        end else if String.length line >= 5 && String.sub line 0 5 = "ROOT " then begin
@@ -595,6 +597,93 @@ let query_hcr_info_connected conn : (hcr_info, string) result =
   try send_line conn "HCR_INFO"; parse_hcr_info (recv_line conn)
   with Failure msg -> Error msg
 
+(* ─── Target identity (#606; checked before anything is uploaded) ─────────
+
+   A v2 manifest records the patch's identity (# target, # hcr_abi,
+   # module_prefix); a current server reports its own with HCR_INFO.  The
+   runtime repeats the check after dlopen, so this preflight is about a
+   clear, early refusal (no artifact uploaded, no batch opened), not about
+   safety.  distributed-deploys 10b: `forge deploy hot` itself did not call
+   HCR_INFO before this; `run` now does. *)
+
+(** The LLVM triple inside an ABI id ["march-hcr-v2;triple=<t>;ptr=<n>"]. *)
+let triple_of_abi (abi : string) : string option =
+  List.find_map (fun part ->
+      let p = "triple=" in
+      let n = String.length p in
+      if String.length part > n && String.sub part 0 n = p
+      then Some (String.sub part n (String.length part - n)) else None)
+    (String.split_on_char ';' abi)
+
+(** ["linux/amd64"]-style name for a triple or a [uname -sm] answer, when
+    it is one forge can build for over ssh. *)
+let canonical_of_triple (triple : string) : string option =
+  let t = String.lowercase_ascii triple in
+  let has sub =
+    let n = String.length t and k = String.length sub in
+    let rec go i = i + k <= n && (String.sub t i k = sub || go (i + 1)) in
+    go 0
+  in
+  let arch =
+    if has "x86_64" || has "amd64" then Some "amd64"
+    else if has "aarch64" || has "arm64" then Some "arm64"
+    else None
+  in
+  let os = if has "linux" then Some "linux" else if has "darwin" || has "apple" || has "macos" then Some "darwin" else None in
+  match os, arch with
+  | Some o, Some a -> Some (o ^ "/" ^ a)
+  | _ -> None
+
+(** Compare a patch's manifest identity with a running server's HCR_INFO.
+    A v1 manifest carries no identity (the legacy native path): nothing to
+    compare. *)
+let check_identity ~(manifest : manifest) ~(info : hcr_info) : (unit, string) result =
+  if manifest.version < 2 then Ok ()
+  else begin
+    let mism what patch server =
+      Error (Printf.sprintf
+               "the patch's %s (%s) is not the running server's (%s): rebuild the patch for the server's identity"
+               what patch server)
+    in
+    match manifest.target, manifest.hcr_abi, manifest.module_prefix with
+    | Some t, _, _ when t <> info.target -> mism "target" t info.target
+    | _, Some a, _ when a <> info.abi -> mism "HCR ABI" a info.abi
+    | _, _, Some p when p <> "" && p <> info.prefix -> mism "module prefix" p info.prefix
+    | _ -> Ok ()
+  end
+
+(** The target a host was initialised with ([forge host init] records it)
+    against a patch's: a patch built for another target never leaves this
+    machine. [recorded] is canonical ("linux/arm64"). *)
+let check_host_target ~(recorded : string) ~(manifest : manifest) : (unit, string) result =
+  match manifest.target with
+  | None -> Ok ()
+  | Some t when t = recorded -> Ok ()
+  | Some "native" ->
+    (match Option.bind manifest.hcr_abi triple_of_abi with
+     | Some tr when canonical_of_triple tr = Some recorded -> Ok ()
+     | Some tr ->
+       Error (Printf.sprintf "the patch was built for this machine (%s), but the host is %s" tr recorded)
+     | None -> Error (Printf.sprintf "the patch was built natively, but the host is %s" recorded))
+  | Some t -> Error (Printf.sprintf "the patch was built for %s, but the host is %s" t recorded)
+
+(** HCR_INFO over an open connection, checked against [manifest]. A server
+    that predates HCR_INFO is accepted for a native (or v1) patch, with a
+    note; a cross-target patch needs it. *)
+let preflight_identity conn ~(manifest : manifest) : (unit, string) result =
+  match query_hcr_info_connected conn with
+  | Ok info -> check_identity ~manifest ~info
+  | Error "legacy server: target identity cannot be verified" ->
+    (match manifest.version, manifest.target with
+     | 2, Some t when t <> "native" ->
+       Error (Printf.sprintf
+                "the server does not answer HCR_INFO, so a %s patch's identity cannot be verified; \
+                 restart it on a current base build" t)
+     | _ ->
+       Printf.printf "NOTE: the server predates HCR_INFO; its target identity is not preflighted\n%!";
+       Ok ())
+  | Error m -> Error ("HCR_INFO: " ^ m)
+
 let send_binary conn data offset len =
   let rec loop off remaining =
     if remaining > 0 then begin
@@ -607,11 +696,20 @@ let send_binary conn data offset len =
 
 (* ─── SSH tunnel ─────────────────────────────────────────────────────────── *)
 
+(** [FORGE_SSH_CONFIG=<file>]: extra [-F <file>] for every ssh forge starts
+    (a test points it at a config naming a container's port and key). *)
+let ssh_config_args () =
+  match Sys.getenv_opt "FORGE_SSH_CONFIG" with
+  | Some f when f <> "" -> [ "-F"; f ]
+  | _ -> []
+
 let open_tunnel ~ssh_host ~remote_socket ~local_socket =
   let pid = Unix.create_process "ssh"
-    [| "ssh"; "-N"; "-o"; "StrictHostKeyChecking=no"; "-o"; "ExitOnForwardFailure=yes";
-       "-L"; Printf.sprintf "%s:%s" local_socket remote_socket;
-       ssh_host |]
+    (Array.of_list
+       ([ "ssh" ] @ ssh_config_args ()
+        @ [ "-N"; "-o"; "StrictHostKeyChecking=no"; "-o"; "ExitOnForwardFailure=yes";
+            "-L"; Printf.sprintf "%s:%s" local_socket remote_socket;
+            ssh_host ]))
     Unix.stdin Unix.stdout Unix.stderr
   in
   (* Wait for the tunnel socket to appear (up to 5 seconds). *)
@@ -861,6 +959,12 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
     (try
       let fd = connect_socket local_socket in
       let conn = conn_of_fd fd in
+
+      (* 1b. Target identity (#606): refuse a patch built for another target,
+         ABI or module prefix before anything is uploaded. *)
+      (match preflight_identity conn ~manifest with
+       | Ok () -> ()
+       | Error m -> Unix.close fd; failwith m);
 
       (* 2. VERSIONS — active hot-patch check.
          ve_current <> None means this function's running impl_hash differs from
@@ -1399,12 +1503,18 @@ type detail_slot = {
   ds_epoch        : int;     (* Phase 9: deploy epoch; 0 = pre-Phase-9 or baseline *)
 }
 
-let parse_versions_detail conn =
+(** VERSIONS_DETAIL: the SLOT lines, plus every other line before END
+    (a current server adds [RESTORED ...], plan 6.5). *)
+let rec parse_versions_detail conn = fst (parse_versions_detail_full conn)
+
+and parse_versions_detail_full conn : detail_slot list * string list =
   let slots = ref [] in
+  let others = ref [] in
   let rec loop () =
     let line = recv_line conn in
-    if line = "END" then List.rev !slots
+    if line = "END" then (List.rev !slots, List.rev !others)
     else begin
+      if not (String.length line >= 5 && String.sub line 0 5 = "SLOT ") then others := line :: !others;
       (match String.split_on_char ' ' line with
        | "SLOT" :: id_s :: name :: impl_h :: ts_s :: signer :: rest ->
          let epoch = match rest with

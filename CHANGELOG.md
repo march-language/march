@@ -12,6 +12,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **`forge deploy hot` checks a patch's target identity before uploading it.**
+  #606 taught the reload server to answer `HCR_INFO` (target, HCR ABI, module
+  prefix) but forge never asked, and it never read the manifest's `# hcr_abi`
+  line. A patch built for another target, ABI or module prefix is now refused
+  with both identities named, before any artifact is sent; a server too old to
+  answer is still accepted for a native patch (with a note) and refused for a
+  cross-target one. The runtime's own check after `dlopen` is unchanged.
 - **The bare `sha256` builtin now typechecks as `Bytes -> String`, matching what it
   has always returned** (a 64-char lowercase hex string, like `Crypto.sha256`,
   `md5` and `sha512`). It was declared `Bytes -> Bytes`, so `Bytes.length(sha256(b))`
@@ -23,6 +30,15 @@ git log is authoritative for exact commits.
   For a raw digest use `hmac_sha256_bytes` / `sha1_bytes`.
 
 ### Added
+- **The `ssh` reconciler backend** (build step 10b of the distributed-deploys
+  plan). A topology overlay with `[backend] kind = "ssh"` makes `forge topology
+  apply --env <env>` and `forge topology status --env <env>` work on the
+  overlay's hosts over ssh: a topology push is the signed `TOPOLOGY` verb on each
+  node's reload socket (through an ssh tunnel), then the digest file and a SIGHUP
+  to the pool's systemd unit; status shows each node's report, its restored patch
+  stack, the stack's size and target, and flags code that drifted from what forge
+  last deployed. `FORGE_SSH_CONFIG=<file>` passes `-F <file>` to every ssh forge
+  starts.
 - **`NativeArray.sort_i32`, `sort_f32` and `sort_u8`: every NativeArray width
   can now be sorted.** Same ownership as `sort_int`: in place when the array is
   uniquely owned, copy-on-write when it is shared. `sort_i32` is the same

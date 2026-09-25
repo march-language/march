@@ -12,7 +12,7 @@ type host = {
   ssh : string;          (** ssh target, e.g. "root@1.2.3.4" *)
   socket : string;       (** reload socket path on the host *)
   pubkey : string;       (** base64 ed25519 key the host verifies against; "" if none *)
-  labels : string list;  (** placement labels; none yet from forge.toml *)
+  labels : string list;  (** placement labels: from the topology overlay; none from forge.toml *)
 }
 
 (** A host from one [[hot-reload.env]] entry. *)
@@ -21,6 +21,20 @@ val of_hot_reload_env : Project.hot_reload_env -> host
 (** The single host of a flat [hot-reload] section (named "default"), if it
     names an ssh_host. *)
 val of_flat_config : Project.hot_reload_config -> host option
+
+(** The host part of an ssh target: ["root@web-1"] is ["web-1"]. *)
+val host_name : string -> string
+
+(** The node name of a pool's host in a topology: ["<pool>-<host name>"]
+    (MARCH_NODE_NAME, unique across the cluster as long as a host serves
+    one pool, which the ssh backend requires). *)
+val node_name : pool:string -> string -> string
+
+(** A host of a topology overlay ([[pool.<p>] hosts = [...]]), with its
+    labels, as the ssh backend addresses it: [socket] is the reload socket
+    on that host ([Host_layout.socket]), [pubkey] the deploy public key. *)
+val of_topology_host :
+  pool:string -> socket:string -> pubkey:string -> Topology.host -> host
 
 (** A health gate, asked after a step succeeds on a host; [false] stops a
     rolling run. *)
