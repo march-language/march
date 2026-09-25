@@ -397,8 +397,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_vault_ns_drop(ptr %ns, ptr %key)" };
   { march_name = "md5"; c_name = Some "march_md5"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_md5(ptr %b)" };
-  { march_name = "sha256"; c_name = Some "march_sha256"; ret_ty = Some Tir.TString;
-    in_is_builtin = true; declare_sig = Some "declare ptr  @march_sha256(ptr %b)" };
+  (* sha256 : Bytes -> String (hex). Its own C entry: march_sha256 reads a
+     march_string, and the Bytes box's pad word carries a type id, so the
+     runtime cannot tell the two apart at run time -- the compiler picks the
+     entry by the builtin's static type. See the note in typecheck_builtins. *)
+  { march_name = "sha256"; c_name = Some "march_sha256_of_bytes"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_sha256_of_bytes(ptr %b)" };
   { march_name = "stdlib_sha256"; c_name = Some "march_sha256"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_sha256(ptr %b)" };
   { march_name = "sha512"; c_name = Some "march_sha512"; ret_ty = Some Tir.TString;
@@ -1418,6 +1422,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PComment "; Crypto / hash builtins";
   PDeclare "march_md5";
   PDeclare "march_sha256";
+  PDeclare "march_sha256_of_bytes";
   PDeclare "march_sha512";
   PDeclare "march_sha1_bytes";
   PDeclare "march_hmac_sha256";

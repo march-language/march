@@ -705,4 +705,8 @@ let () =
       Alcotest.test_case "Parse golden error corpus"
         `Quick (run_stdlib_test "test_parse_errors.march" "TestParseErrors");
     ]);
+    ("crypto_builtins", [
+      Alcotest.test_case "bare sha256 builtin returns a hex String"
+        `Quick (run_stdlib_test "test_crypto_builtins.march" "TestCryptoBuiltins");
+    ]);
   ]
