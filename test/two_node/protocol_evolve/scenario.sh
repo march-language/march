@@ -22,6 +22,17 @@
 # Finished or Drained, all three version pairings seen, `later` only from a
 # version-2 Shop, and never a version-1 Buyer with a version-2 Shop. The
 # reload servers' counters must show nothing dropped, killed or lost.
+# Not under AddressSanitizer: this scenario's invariants are timing-bound
+# (sessions start every 150 ms and none may be lost across two deploys), and
+# ASan's slowdown turns the re-offer window into lost or refused sessions, or
+# stalls node-b past any deadline. Memory safety of a hot deploy is covered
+# under ASan by hcr_new_code_session. Exit 3 is the harness's "skipped",
+# which the sanitize gate reports as SKIP, not as a pass.
+# specs/todos/2026-09-25-protocol-evolve-under-asan.md
+if [ -n "${MARCH_SANITIZE:-}" ]; then
+  echo "two-node[protocol_evolve]: skipped under MARCH_SANITIZE (timing-bound; see scenario.sh)"
+  exit 3
+fi
 deploy=$root/_build/default/test/hcr_deploy.exe
 [ -x "$deploy" ] || fail "test/hcr_deploy.exe is not built (dune build --root . test/hcr_deploy.exe)"
 mkdir -p "$work/keys" "$work/base" "$work/patch_a" "$work/patch_b"
