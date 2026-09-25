@@ -163,7 +163,9 @@ jobs:
           # stage-source-trees refreshes _build's copies of runtime/ and
           # stdlib/, which every native compile below links and reads (see the
           # rule in test/dune); on this job nothing else builds them first.
-          dune build bin/main.exe @test/stage-source-trees
+          # forge: the cert_* scenarios issue their certificates with
+          # `forge cluster` (keygen / cert / revoke).
+          dune build bin/main.exe forge/bin/main.exe @test/stage-source-trees
 
       # node_discovery was quarantined 2026-08-08 for a torn-stdout race seen
       # ~1-in-2 on THIS runner and fixed 2026-08-21 (march_stdout_mu). It is
@@ -586,7 +588,7 @@ jobs:
   # syscall interception hangs ASAN's shadow-memory setup.
   sanitize-gate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 55
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@v4
 
@@ -598,11 +600,13 @@ jobs:
         # The two-node sweep runs every scenario under ASan; the cluster node
         # service added eleven (each compiles 2-3 ASan binaries). 15 minutes
         # covered the golden + native corpora and the first 14 scenarios.
-        timeout-minutes: 35
+        # Node certificates (step 11a) added five more, and forge, which the
+        # cert_* scenarios issue their certificates with.
+        timeout-minutes: 45
         run: |
           eval $(opam env)
           dune shutdown 2>/dev/null || true
-          dune build bin/main.exe
+          dune build bin/main.exe forge/bin/main.exe
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             ./specs/lang/golden/sanitize.sh
 

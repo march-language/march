@@ -6,6 +6,16 @@
 external keygen_c    : unit   -> bytes * bytes = "caml_ed25519_keygen"
 external sign_c      : bytes -> bytes -> bytes  = "caml_ed25519_sign"
 external verify_c    : bytes -> bytes -> bytes -> bool = "caml_ed25519_verify"
+external seed_keypair_c : bytes -> bytes = "caml_ed25519_seed_keypair"
+external x25519_c    : bytes -> bytes -> bytes = "caml_x25519"
+
+(** [seed_keypair seed] — the 64-byte secret key (seed || public key) that a
+    32-byte [seed] determines (RFC 8032). Raises Failure on a wrong length. *)
+let seed_keypair (seed : bytes) : bytes = seed_keypair_c seed
+
+(** [x25519 scalar point] — X25519 (RFC 7748); both 32 bytes. Raises Failure
+    on a wrong length. *)
+let x25519 (k : bytes) (u : bytes) : bytes = x25519_c k u
 
 (** Generate a fresh keypair.  Returns [(public_key, secret_key)].
     Reads 32 random bytes from /dev/urandom.  Raises Failure on error. *)

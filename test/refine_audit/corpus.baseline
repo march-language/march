@@ -680,6 +680,8 @@ stdlib_node: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 u
 stdlib_node: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_call: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_call: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_node_cert: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+stdlib_node_cert: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_identity: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_identity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_queue: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced

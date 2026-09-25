@@ -52,4 +52,77 @@ mod TestNetFrame do
 
   end
 
+  -- ── the per-frame MAC (distributed-deploys step 11a) ───────────────────
+
+  pfn key(b : Int) : Bytes do Bytes.from_list(List.map(List.range(0, 32), fn _ -> b)) end
+
+  -- The body of a sealed frame (what follows the length prefix).
+  pfn body_of(framed : Bytes) : Bytes do Bytes.slice(framed, 4, Bytes.length(framed) - 4) end
+
+  describe "NetFrame.seal / open" do
+
+    test "a sealed frame's length prefix covers seq, payload and tag" do
+      let f = NetFrame.seal(key(1), 7, Bytes.from_string("hello"))
+      assert (Bytes.length(f) == 4 + 5 + NetFrame.mac_overhead())
+      assert (NetFrame.body_length(Bytes.to_list(f)) == 5 + 40)
+    end
+
+    test "opens under the same key, giving back the number and payload" do
+      let f = NetFrame.seal(key(1), 7, Bytes.from_string("hello"))
+      assert (NetFrame.open(key(1), body_of(f)) == Ok((7, Bytes.from_string("hello"))))
+    end
+
+    test "fails under another key, with any byte flipped, or when too short" do
+      let f = NetFrame.seal(key(1), 7, Bytes.from_string("hello"))
+      assert (Result.is_err(NetFrame.open(key(2), body_of(f))))
+      let body = body_of(f)
+      let n = Bytes.length(body)
+      let flipped = List.map(List.range(0, n), fn i ->
+        Bytes.from_list(List.map(List.range(0, n), fn j ->
+          if i == j do int_xor(Bytes.get(body, j), 1) else Bytes.get(body, j) end)))
+      assert (List.all(flipped, fn fb -> Result.is_err(NetFrame.open(key(1), fb))))
+      assert (Result.is_err(NetFrame.open(key(1), Bytes.from_string("short"))))
+    end
+
+    test "reseal seals an already-framed frame as seal does" do
+      let framed = Bytes.from_list(NetFrame.encode(Bytes.to_list(Bytes.from_string("abc"))))
+      assert (NetFrame.reseal(key(3), 9, framed) == NetFrame.seal(key(3), 9, Bytes.from_string("abc")))
+    end
+
+  end
+
+  describe "NetFrame.window_accept" do
+
+    test "accepts increasing numbers, and a late one inside the window once" do
+      match NetFrame.window_accept(-1, 0, 0) do
+        Some((hi, m)) ->
+          match NetFrame.window_accept(hi, m, 2) do
+            Some((hi2, m2)) ->
+              assert (hi2 == 2)
+              -- 1 arrives after 2 (two local writers raced): accepted once
+              match NetFrame.window_accept(hi2, m2, 1) do
+                Some((hi3, m3)) ->
+                  assert (hi3 == 2)
+                  assert (NetFrame.window_accept(hi3, m3, 1) == None)
+                  assert (NetFrame.window_accept(hi3, m3, 2) == None)
+                  assert (NetFrame.window_accept(hi3, m3, 0) == None)
+                None -> assert false
+              end
+            None -> assert false
+          end
+        None -> assert false
+      end
+    end
+
+    test "refuses a number older than the window" do
+      match NetFrame.window_accept(-1, 0, 100) do
+        Some((hi, m)) ->
+          assert (NetFrame.window_accept(hi, m, 100 - NetFrame.window_size()) == None)
+          assert (NetFrame.window_accept(hi, m, 99) != None)
+        None -> assert false
+      end
+    end
+
+  end
+
 end

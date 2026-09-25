@@ -1,0 +1,76 @@
+-- Two-node harness, scenario "frame_tampered": node-c, a TCP proxy between
+-- node-a and node-b. It forwards every frame unchanged except ONE: in the
+-- second connection node-a opens (its data connection), in the node-a to
+-- node-b direction, the sixth frame (the fourth after the two handshake
+-- frames) gets one byte of its payload flipped. The length prefix is left
+-- alone, so the stream stays framed and only that frame's MAC fails.
+mod FrameTamperedC do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+
+  pfn tamper_conn() : Int do 1 end
+  pfn tamper_frame() : Int do 5 end
+
+  -- Flip the byte at the middle of a sealed body (inside the payload: the
+  -- 8-byte sequence number is before it and the 32-byte tag after it).
+  pfn flip(body : Bytes) : Bytes do
+    let n = Bytes.length(body)
+    let i = 8 + (n - 40) / 2
+    Bytes.concat(Bytes.slice(body, 0, i),
+      Bytes.concat(Bytes.from_list([int_xor(Bytes.get(body, i), 255)]), Bytes.slice(body, i + 1, n - i - 1)))
+  end
+
+  pfn pump(src : Int, dst : Int, conn : Int, a_to_b : Bool, k : Int) : Int do
+    match tcp_recv_exact(src, 4) do
+      Err(_) ->
+        tcp_shutdown(dst)
+        0
+      Ok(hdr) ->
+        match tcp_recv_exact(src, NetFrame.body_length(Bytes.to_list(hdr))) do
+          Err(_) ->
+            tcp_shutdown(dst)
+            0
+          Ok(body) ->
+            let hit = a_to_b && conn == tamper_conn() && k == tamper_frame()
+            let out = if hit do flip(body) else body end
+            if hit do println("node-c: flipped a byte in one data frame") else () end
+            match Socket.write(dst, Bytes.to_string(Bytes.concat(hdr, out))) do
+              Ok(_) -> pump(src, dst, conn, a_to_b, k + 1)
+              Err(_) -> 0
+            end
+        end
+    end
+  end
+
+  pfn serve(listen_fd : Int, conn : Int, stop : String) : () do
+    if File.exists(stop) do () else
+      match tcp_accept_timeout(listen_fd, 200) do
+        Err(_) -> serve(listen_fd, conn, stop)
+        Ok(fd) ->
+          match Socket.connect("127.0.0.1", Env.require_int("MARCH_PORT_B")) do
+            Err(e) -> panic("node-c: upstream: " ++ Socket.error_message(e))
+            Ok(up) ->
+              let _ = task_spawn(fn _ -> pump(fd, up, conn, true, 0))
+              let _ = task_spawn(fn _ -> pump(up, fd, conn, false, 0))
+              serve(listen_fd, conn + 1, stop)
+          end
+      end
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    match tcp_listen(Env.require_int("MARCH_PORT_C")) do
+      Err(e) -> panic("node-c: listen: " ++ e)
+      Ok(lfd) ->
+        println("node-c: up")
+        serve(lfd, 0, Env.require("CLUSTER_STOP_FILE"))
+        println("node-c: done")
+    end
+  end
+end

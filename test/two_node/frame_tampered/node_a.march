@@ -1,0 +1,57 @@
+-- Two-node harness, scenario "frame_tampered": node-a. Dials node-b through
+-- node-c (the tampering proxy), then sends ten pings and a Done over its
+-- data connection, one at a time. See node_b.march and node_c.march.
+mod FrameTamperedA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn wait_member(h : Cap(ClusterNode.Live), left : Int) : Option(ClusterNode.NodeInfo) do
+    match List.find(ClusterNode.members(h), fn i -> i.name == "node-b") do
+      Some(i) -> Some(i)
+      None ->
+        if left <= 0 do None else
+          sleep_ms(50)
+          wait_member(h, left - 50)
+        end
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let proxy = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_C"))
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", [proxy], "tamper-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-a: up")
+        match wait_member(h, 60000) do
+          None -> println("node-a: node-b never joined")
+          Some(i) ->
+            let to = GlobalPid.make(i.node_id, 0, i.creation)
+            -- One at a time (a short pause each), so each ping is its own frame.
+            let _ = List.map(List.range(0, 10), fn k -> do
+              let _ = ClusterNode.send_msg(h, to, "Tamper.Ping", [k], NodeQueue.BlockSender(10000))
+              sleep_ms(20)
+            end)
+            let _ = ClusterNode.send_msg(h, to, "Tamper.Done", Nil, NodeQueue.BlockSender(10000))
+            println("node-a: sent 10 pings and Done")
+        end
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        ClusterNode.stop(h)
+        println("node-a: done")
+    end
+  end
+end

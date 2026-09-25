@@ -1,0 +1,4 @@
+node-b: 9 of 10 pings arrived, frames rejected: 1, links: 1
+node-b: done
+node-b: dropped a frame from node-a (1 on that connection)
+node-b: up

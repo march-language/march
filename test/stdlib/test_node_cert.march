@@ -1,0 +1,134 @@
+mod TestNodeCert do
+
+  -- Deterministic keys: seed bytes all 0x01 (operator) and all 0x02 (node).
+  fn seed(b) do Bytes.from_list(List.map(List.range(0, 32), fn _ -> b)) end
+  fn op_sk() do NodeCert.keypair_from_seed(seed(1)) end
+  fn node_sk() do NodeCert.keypair_from_seed(seed(2)) end
+  fn hex(b) do Bytes.to_hex(b) end
+  fn unhex(s) do Result.unwrap_or(Bytes.from_hex(s), Bytes.empty()) end
+
+  fn cert() do
+    { node: "spiffe://example.org/pool/web/node/node-a", roles: ["Checkout.Ledger:offer"],
+      flags: ["raw_send"], not_after: 2000000000,
+      issuer: NodeCert.issuer_uri("example.org", hex(NodeCert.public_key(op_sk()))),
+      pubkey: hex(NodeCert.public_key(node_sk())), serial: "00112233445566778899aabbccddeeff" }
+  end
+
+  describe "ed25519 and x25519 builtins" do
+    test "RFC 8032 test 1: public key and signature of the empty message" do
+      let sk = ed25519_seed_keypair(unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"))
+      assert (hex(NodeCert.public_key(sk)) == "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+      assert (hex(ed25519_sign(sk, Bytes.empty())) == "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b")
+    end
+
+    test "verify accepts a signature and rejects another message or key" do
+      let sk = node_sk()
+      let sg = ed25519_sign(sk, Bytes.from_string("hello"))
+      assert (ed25519_verify(NodeCert.public_key(sk), Bytes.from_string("hello"), sg))
+      assert (not(ed25519_verify(NodeCert.public_key(sk), Bytes.from_string("hellp"), sg)))
+      assert (not(ed25519_verify(NodeCert.public_key(op_sk()), Bytes.from_string("hello"), sg)))
+    end
+
+    test "RFC 7748 section 6.1: both sides derive the same shared secret" do
+      let a = unhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+      let b = unhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb")
+      let base = unhex("0900000000000000000000000000000000000000000000000000000000000000")
+      let ap = x25519(a, base)
+      let bp = x25519(b, base)
+      assert (hex(ap) == "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+      assert (hex(x25519(a, bp)) == "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742")
+      assert (hex(x25519(b, ap)) == hex(x25519(a, bp)))
+    end
+
+    test "wrong lengths and a low-order point give empty Bytes, never an abort" do
+      assert (Bytes.length(ed25519_sign(Bytes.from_string("short"), Bytes.empty())) == 0)
+      assert (Bytes.length(ed25519_seed_keypair(Bytes.from_string("short"))) == 0)
+      assert (not(ed25519_verify(Bytes.from_string("x"), Bytes.empty(), Bytes.from_string("y"))))
+      assert (Bytes.length(x25519(seed(3), seed(0))) == 0)
+    end
+  end
+
+  describe "NodeCert encoding" do
+    test "the canonical body and signature are pinned (forge/test/test_cluster.ml pins the same bytes)" do
+      assert (hex(NodeCert.public_key(op_sk())) == "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c")
+      assert (hex(NodeCert.public_key(node_sk())) == "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394")
+      let s = NodeCert.sign(cert(), op_sk())
+      assert (hex(Bytes.from_list(s.body)) == "98b26d617263682d6e6f64652d636572742d7631d9297370696666653a2f2f6578616d706c652e6f72672f706f6f6c2f7765622f6e6f64652f6e6f64652d6191b5436865636b6f75742e4c65646765723a6f6666657291a87261775f73656e64ce77359400d92e7370696666653a2f2f6578616d706c652e6f72672f6f70657261746f722f38613838653364643734303966313935d94038313339373730656138376431373566353661333534363663333463376563636362386438613931623465653337613235646636306635623866633962333934d9203030313132323333343435353636373738383939616162626363646465656666")
+      assert (hex(s.signature) == "e8604e7d6a3c3cfbce93a90d76491d8ff87d49df9c7dd7e5cc0526f41733cb0a79450f0f9ff3caf7e9ddb4c2fa27bd71a3a7bfff8a24ac7a69827b9db3aec507")
+    end
+
+    test "round-trips through the text form" do
+      let s = NodeCert.sign(cert(), op_sk())
+      match NodeCert.from_text(NodeCert.to_text(s)) do
+        Ok(s2) ->
+          assert (s2.cert == cert())
+          assert (s2.body == s.body)
+          assert (NodeCert.encode(s2.cert) == s2.body)
+        Err(e) -> assert (e == "no error")
+      end
+    end
+
+    test "names and permissions" do
+      let c = cert()
+      assert (NodeCert.node_name(c.node) == "node-a")
+      assert (NodeCert.node_name("spiffe://example.org/pool/web") == "")
+      assert (NodeCert.has_role(cert(), "Checkout.Ledger:offer"))
+      assert (not(NodeCert.has_role(cert(), "Checkout.Client:initiate")))
+      assert (NodeCert.has_flag(cert(), "raw_send"))
+    end
+
+    test "rejects a malformed body and an unknown version" do
+      assert (Result.is_err(NodeCert.decode([1, 2, 3])))
+      assert (Result.is_err(NodeCert.from_text("not base64!")))
+    end
+  end
+
+  describe "NodeCert.verify" do
+    test "accepts a certificate the operator signed, up to not_after inclusive" do
+      let s = NodeCert.sign(cert(), op_sk())
+      assert (NodeCert.verify(s, NodeCert.public_key(op_sk()), 1900000000) == Ok(cert()))
+      assert (NodeCert.verify(s, NodeCert.public_key(op_sk()), 2000000000) == Ok(cert()))
+    end
+
+    test "refuses another operator's signature" do
+      let s = NodeCert.sign(cert(), node_sk())
+      assert (NodeCert.verify(s, NodeCert.public_key(op_sk()), 1900000000) == Err("certificate not signed by the cluster operator"))
+    end
+
+    test "refuses an expired certificate" do
+      let s = NodeCert.sign(cert(), op_sk())
+      assert (NodeCert.verify(s, NodeCert.public_key(op_sk()), 2000000001) == Err("certificate expired"))
+    end
+
+    test "refuses a body altered after signing" do
+      let s = NodeCert.sign(cert(), op_sk())
+      let forged = { s with body: NodeCert.encode({ cert() with flags: ["raw_send", "admin"] }) }
+      assert (NodeCert.verify(forged, NodeCert.public_key(op_sk()), 1900000000) == Err("certificate not signed by the cluster operator"))
+    end
+  end
+
+  describe "revocations" do
+    test "a serial revokes that certificate only; an empty serial revokes the node" do
+      let by_serial = { node: "", serial: "00112233445566778899aabbccddeeff", issued_at: 1 }
+      let by_node = { node: "spiffe://example.org/pool/web/node/node-a", serial: "", issued_at: 1 }
+      let other = { node: "", serial: "ffff", issued_at: 1 }
+      assert (NodeCert.revokes(by_serial, cert()))
+      assert (NodeCert.revokes(by_node, cert()))
+      assert (not(NodeCert.revokes(other, cert())))
+      assert (NodeCert.is_revoked(cert(), [other, by_node]))
+      assert (not(NodeCert.is_revoked(cert(), [other])))
+    end
+
+    test "a signed revocation round-trips and verifies only under the operator key" do
+      let r = { node: "", serial: "abc", issued_at: 7 }
+      let s = NodeCert.sign_revocation(r, op_sk())
+      match NodeCert.revocation_from_text(NodeCert.revocation_to_text(s)) do
+        Ok(s2) ->
+          assert (NodeCert.verify_revocation(s2, NodeCert.public_key(op_sk())) == Ok(r))
+          assert (Result.is_err(NodeCert.verify_revocation(s2, NodeCert.public_key(node_sk()))))
+        Err(e) -> assert (e == "no error")
+      end
+    end
+  end
+
+end

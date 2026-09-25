@@ -36,7 +36,44 @@ mod NetKernel do
 
   -- ── framed socket I/O ──────────────────────────────────────────────────────
 
+  -- Frame [payload] and write it; sealed (NetFrame.seal) when the
+  -- connection's handshake agreed a MAC key.
   fn send_frame(fd : Int, payload : List(Int)) : Result((), String) do
+    match Vault.get(mac_table(), fk(fd)) do
+      None -> send_raw(fd, payload)
+      Some(keys) -> write_bytes(fd, seal_next(fd, keys, Bytes.from_list(payload)))
+    end
+  end
+
+  doc """
+  Write an already-framed (length-prefixed, unsealed) frame, sealing it
+  first when [fd] is sealed: NodeQueue frames its messages when they are
+  queued, before it knows when they will be written.
+  """
+  fn write_framed(fd : Int, framed : Bytes) : Result((), String) do
+    match Vault.get(mac_table(), fk(fd)) do
+      None -> write_bytes(fd, framed)
+      Some(keys) -> write_bytes(fd, seal_next(fd, keys, Bytes.slice(framed, 4, Bytes.length(framed) - 4)))
+    end
+  end
+
+  pfn write_bytes(fd : Int, b : Bytes) : Result((), String) do
+    match Socket.write(fd, Bytes.to_string(b)) do
+      Ok(_) -> Ok(())
+      Err(e) -> Err(Socket.error_message(e))
+    end
+  end
+
+  -- Number and seal one outgoing frame. The number is taken atomically
+  -- (Vault.incr); two writers on one socket may still write in the other
+  -- order, which the receiver's window allows.
+  pfn seal_next(fd : Int, keys : MacKeys, payload : Bytes) : Bytes do
+    let seq = Vault.incr(mac_counts(), "s" ++ fk(fd), 1) - 1
+    NetFrame.seal(keys.tx_key, seq, payload)
+  end
+
+  -- One frame, never sealed: the handshake's own frames.
+  pfn send_raw(fd : Int, payload : List(Int)) : Result((), String) do
     match Socket.write(fd, to_wire(payload)) do
       Ok(_) -> Ok(())
       Err(e) -> Err(Socket.error_message(e))
@@ -52,7 +89,26 @@ mod NetKernel do
   -- (specs/progress/2026-09-14-distributed-plane-flow-control-and-control-channel.md).
   -- Bytes read past the frame boundary come back as the leftover for the
   -- next call, as before.
+  -- On a sealed connection each frame's MAC is checked (`unseal`): a frame
+  -- that fails is dropped and the next one read; the connection's reader
+  -- gets Err once `mac_failure_limit()` frames have failed.
   fn recv_frame(fd : Int, buf : List(Int)) : Result((List(Int), List(Int)), String) do
+    match recv_frame_plain(fd, buf) do
+      Err(e) -> Err(e)
+      Ok((wire, rest)) ->
+        match Vault.get(mac_table(), fk(fd)) do
+          None -> Ok((wire, rest))
+          Some(keys) ->
+            match unseal(fd, keys, Bytes.from_list(wire)) do
+              Err(e) -> Err(e)
+              Ok(Some(payload)) -> Ok((payload, rest))
+              Ok(None) -> recv_frame(fd, rest)
+            end
+        end
+    end
+  end
+
+  pfn recv_frame_plain(fd : Int, buf : List(Int)) : Result((List(Int), List(Int)), String) do
     match NetFrame.decode(buf) do
       Some(result) -> Ok(result)
       None ->
@@ -64,14 +120,14 @@ mod NetKernel do
               if String.is_empty(chunk) do
                 Err("net-kernel: connection closed mid-frame")
               else
-                recv_frame(fd, List.append(buf, str_to_bytes(chunk)))
+                recv_frame_plain(fd, List.append(buf, str_to_bytes(chunk)))
               end
           end
         else
           let len = NetFrame.body_length(buf)
           match tcp_recv_exact(fd, len - (have - 4)) do
             Err(e) -> Err("net-kernel: " ++ e)
-            Ok(rest) -> recv_frame(fd, List.append(buf, Bytes.to_list(rest)))
+            Ok(rest) -> recv_frame_plain(fd, List.append(buf, Bytes.to_list(rest)))
           end
         end
     end
@@ -87,6 +143,22 @@ mod NetKernel do
   -- landed in the same recv() as the proof -- 2 runs in 20 under load,
   -- never unloaded (control_channel_loopback, 2026-09-14).
   fn recv_frame_exact(fd : Int) : Result(List(Int), String) do
+    match recv_frame_exact_raw(fd) do
+      Err(e) -> Err(e)
+      Ok(wire) ->
+        match Vault.get(mac_table(), fk(fd)) do
+          None -> Ok(wire)
+          Some(keys) ->
+            match unseal(fd, keys, Bytes.from_list(wire)) do
+              Err(e) -> Err(e)
+              Ok(Some(payload)) -> Ok(payload)
+              Ok(None) -> recv_frame_exact(fd)
+            end
+        end
+    end
+  end
+
+  pfn recv_frame_exact_raw(fd : Int) : Result(List(Int), String) do
     match tcp_recv_exact(fd, 4) do
       Err(e) -> Err("net-kernel: " ++ e)
       Ok(hdr) ->
@@ -102,6 +174,7 @@ mod NetKernel do
   -- Both peers run the same sequence: send hello, recv hello, send proof bound
   -- to the peer's nonce, recv proof, authenticate (peer's proof must bind to
   -- the nonce WE issued). Returns the authenticated peer identity or a reason.
+  -- Shared-secret mode; `handshake_auth` is the general form.
   fn handshake(fd : Int, my_id : NodeIdentity.Identity, secret : String,
                my_nonce : String) : Result(NodeIdentity.Identity, String) do
     match handshake_role(fd, my_id, secret, my_nonce, Handshake.role_control()) do
@@ -114,36 +187,14 @@ mod NetKernel do
   -- Handshake.role_*); returns the peer's identity AND the role the peer
   -- announced, so an acceptor knows which of a peer's two connections it
   -- just took. A pre-split peer announces no role and reads as control.
+  -- Reads are exact (recv_frame_exact): nothing past the handshake's own two
+  -- frames is consumed, so the connection is handed over with the peer's
+  -- first real frame still unread in the socket.
   fn handshake_role(fd : Int, my_id : NodeIdentity.Identity, secret : String,
                     my_nonce : String, role : String) : Result((NodeIdentity.Identity, String), String) do
-    let hello = Handshake.encode_hello(Handshake.make_hello_role(my_id, my_nonce, role))
-    match send_frame(fd, hello) do
+    match handshake_auth(fd, my_id, ClusterAuth.Secret(secret), my_nonce, role, "", 0) do
       Err(e) -> Err(e)
-      Ok(_) ->
-        -- Exact reads: nothing past the handshake's own two frames is
-        -- consumed, so the connection is handed over with the peer's first
-        -- real frame still unread in the socket (see recv_frame_exact).
-        match recv_frame_exact(fd) do
-          Err(e) -> Err(e)
-          Ok(hbytes) ->
-            match Handshake.decode_hello(hbytes) do
-              Err(e) -> Err(e)
-              Ok(peer) ->
-                match send_frame(fd, str_to_bytes(ClusterAuth.prove(secret, peer.nonce))) do
-                  Err(e) -> Err(e)
-                  Ok(_) ->
-                    match recv_frame_exact(fd) do
-                      Err(e) -> Err(e)
-                      Ok(pbytes) ->
-                        match Handshake.authenticate(secret, my_nonce, peer,
-                                                     bytes_to_str(pbytes)) do
-                          Err(e) -> Err(e)
-                          Ok(id) -> Ok((id, peer.role))
-                        end
-                    end
-                end
-            end
-        end
+      Ok(a) -> Ok((a.identity, a.role))
     end
   end
 
@@ -193,27 +244,244 @@ mod NetKernel do
   fn handshake_addr(fd : Int, my_id : NodeIdentity.Identity, secret : String, my_nonce : String,
                     role : String, addr : String, timeout_ms : Int)
       : Result((NodeIdentity.Identity, String, String), String) do
-    let deadline = unix_time_ms() + timeout_ms
-    let hello = Handshake.encode_hello(Handshake.make_hello_addr(my_id, my_nonce, role, addr))
-    match send_frame(fd, hello) do
+    match handshake_auth(fd, my_id, ClusterAuth.Secret(secret), my_nonce, role, addr, timeout_ms) do
+      Err(e) -> Err(e)
+      Ok(a) -> Ok((a.identity, a.role, a.addr))
+    end
+  end
+
+  -- ── per-connection MAC state ─────────────────────────────────────────────
+  -- A connection's keys live here, by fd, from the end of its handshake
+  -- (`handshake_auth` installs them) until the next handshake on the same fd
+  -- number or `forget(fd)`. Every framed read and write below consults it, so
+  -- code above the net-kernel (PeerReader, NodeSend, NodeQueue, SessionNode,
+  -- ClusterNode) seals and checks frames without knowing about keys. One
+  -- WRITER-side counter per fd numbers the sealed frames; the reader keeps a
+  -- receive window (NetFrame.window_accept). A frame that fails is dropped
+  -- and counted; after `mac_failure_limit()` failures on one connection the
+  -- read returns Err and the connection's reader ends, which closes it.
+  --
+  -- Rule for code that reuses framing on a socket WITHOUT a handshake (raw
+  -- NodeSend/NodeCall fixtures): call `forget(fd)` first if that process
+  -- ever ran a sealed connection, or a stale key on a reused fd number seals
+  -- its frames.
+
+  type MacKeys = { tx_key : Bytes, rx_key : Bytes }
+
+  pfn mac_table() : Vault(MacKeys) do Vault.open("net_kernel_mac") end
+  pfn mac_counts() : Vault(Int) do Vault.open("net_kernel_mac_counts") end
+  pfn mac_hooks() : Vault(Int -> Int -> Unit) do Vault.open("net_kernel_mac_hooks") end
+  pfn fk(fd : Int) : String do int_to_string(fd) end
+
+  doc "Frames that may fail their MAC on one connection before it is closed."
+  fn mac_failure_limit() : Int do 3 end
+
+  -- Seal [fd]'s frames from now on with [keys].
+  pfn install(fd : Int, keys : ClusterAuth.FrameKeys) : () do
+    let c = mac_counts()
+    Vault.set(c, "s" ++ fk(fd), 0)
+    Vault.set(c, "hi" ++ fk(fd), -1)
+    Vault.set(c, "mask" ++ fk(fd), 0)
+    Vault.set(c, "bad" ++ fk(fd), 0)
+    Vault.set(mac_table(), fk(fd), { tx_key: keys.tx_key, rx_key: keys.rx_key })
+  end
+
+  doc "Drop [fd]'s MAC state: its frames are plain again (see the rule above)."
+  fn forget(fd : Int) : () do
+    Vault.drop(mac_table(), fk(fd))
+    let c = mac_counts()
+    Vault.drop(c, "s" ++ fk(fd))
+    Vault.drop(c, "hi" ++ fk(fd))
+    Vault.drop(c, "mask" ++ fk(fd))
+    Vault.drop(c, "bad" ++ fk(fd))
+  end
+
+  doc "Are [fd]'s frames sealed?"
+  fn sealed(fd : Int) : Bool do Vault.get(mac_table(), fk(fd)) != None end
+
+  doc "Frames dropped for a failed MAC, in this process, since it started."
+  fn frames_rejected() : Int do Vault.get_or(mac_counts(), "bad_total", 0) end
+
+  doc """
+  Call [f](fd, failures_on_that_connection) whenever a frame fails its MAC
+  (the connection's reader calls it, in its own task). Returns an id for
+  `off_frame_rejected`.
+  """
+  fn on_frame_rejected(f : Int -> Int -> Unit) : Int do
+    let id = Vault.incr(mac_counts(), "next_hook", 1)
+    Vault.set(mac_hooks(), int_to_string(id), f)
+    id
+  end
+
+  fn off_frame_rejected(id : Int) : () do Vault.drop(mac_hooks(), int_to_string(id)) end
+
+  -- A sealed frame's body (after the length prefix) off [fd]: the payload,
+  -- or None when it failed (dropped and counted), or Err once the
+  -- connection has failed too often.
+  pfn unseal(fd : Int, keys : MacKeys, body : Bytes) : Result(Option(List(Int)), String) do
+    let c = mac_counts()
+    let ok = match NetFrame.open(keys.rx_key, body) do
+      Err(_) -> None
+      Ok((seq, payload)) ->
+        match NetFrame.window_accept(Vault.get_or(c, "hi" ++ fk(fd), -1), Vault.get_or(c, "mask" ++ fk(fd), 0), seq) do
+          None -> None
+          Some((hi, mask)) ->
+            Vault.set(c, "hi" ++ fk(fd), hi)
+            Vault.set(c, "mask" ++ fk(fd), mask)
+            Some(Bytes.to_list(payload))
+        end
+    end
+    match ok do
+      Some(p) -> Ok(Some(p))
+      None ->
+        let n = Vault.incr(c, "bad" ++ fk(fd), 1)
+        let _ = Vault.incr(c, "bad_total", 1)
+        let _ = List.map(Vault.all(mac_hooks()), fn kv -> match kv do (_k, f) -> f(fd, n) end)
+        if n >= mac_failure_limit() do
+          Err("net-kernel: " ++ int_to_string(n) ++ " frames failed their MAC; closing the connection")
+        else Ok(None) end
+    end
+  end
+
+  -- ── the authenticated handshake (both modes) ──────────────────────────────
+  -- What a finished handshake knows about the peer: its identity, the role it
+  -- announced for this connection, its advertised address ("" when it sent
+  -- none), its VERIFIED certificate (certificate mode) and whether the
+  -- connection's frames are sealed from here on.
+  type Authed = { identity : NodeIdentity.Identity, role : String, addr : String,
+                  cert : Option(NodeCert.Cert), mac : Bool }
+
+  -- The X25519 base point (u = 9).
+  pfn x25519_base() : Bytes do Bytes.from_list(Cons(9, List.map(List.range(0, 31), fn _ -> 0))) end
+
+  pfn now_s() : Int do unix_time_ms() / 1000 end
+
+  -- One handshake frame: bounded by [deadline] (unix ms) when it is > 0, else
+  -- an exact blocking read. Never over-reads and never MAC-checks: the
+  -- handshake's own frames are plain.
+  pfn hs_recv(fd : Int, deadline : Int) : Result(List(Int), String) do
+    if deadline > 0 do recv_frame_until(fd, deadline) else recv_frame_exact_raw(fd) end
+  end
+
+  doc """
+  The handshake, in either mode ([auth]): send a hello, read the peer's,
+  check the modes agree, prove ourselves bound to the peer's nonce, check the
+  peer's proof bound to ours. Shared-secret mode: an HMAC of the nonce under
+  the secret (wire-compatible with pre-11a nodes). Certificate mode: the hello
+  carries our certificate and an ephemeral X25519 key; we verify the peer's
+  certificate (operator signature, expiry, revocation, name) and its
+  ed25519 signature over our nonce and the transcript. When both sides
+  support it, the connection's frames are sealed from then on (NetFrame.seal;
+  `mac` in the result). [role] names the connection ("control"/"data"),
+  [addr] is our advertised address ("" for none), [timeout_ms] bounds the
+  whole exchange (<= 0: no bound).
+  """
+  fn handshake_auth(fd : Int, my_id : NodeIdentity.Identity, auth : ClusterAuth.Auth, my_nonce : String,
+                    role : String, addr : String, timeout_ms : Int) : Result(Authed, String) do
+    -- A connection on a reused fd number must not inherit the last one's key.
+    forget(fd)
+    let deadline = if timeout_ms > 0 do unix_time_ms() + timeout_ms else 0 end
+    match auth do
+      ClusterAuth.Secret(secret) -> handshake_secret(fd, my_id, secret, my_nonce ++ ClusterAuth.mac_suffix(), role, addr, deadline)
+      ClusterAuth.Certified(creds) -> handshake_cert(fd, my_id, creds, my_nonce, role, addr, deadline)
+    end
+  end
+
+  pfn handshake_secret(fd : Int, my_id : NodeIdentity.Identity, secret : String, nonce : String,
+                       role : String, addr : String, deadline : Int) : Result(Authed, String) do
+    let hello = Handshake.encode_hello(Handshake.make_hello_addr(my_id, nonce, role, addr))
+    match send_raw(fd, hello) do
       Err(e) -> Err(e)
       Ok(_) ->
-        match recv_frame_until(fd, deadline) do
+        match hs_recv(fd, deadline) do
           Err(e) -> Err(e)
           Ok(hbytes) ->
             match Handshake.decode_hello(hbytes) do
               Err(e) -> Err(e)
               Ok(peer) ->
-                match send_frame(fd, str_to_bytes(ClusterAuth.prove(secret, peer.nonce))) do
+                -- A peer that echoes our own nonce is reflecting our hello
+                -- (and would then reflect our proof, which verifies): refused.
+                match (Handshake.check_mode(ClusterAuth.Secret(secret), peer),
+                       peer.nonce == nonce) do
+                  (Err(e), _) -> Err(e)
+                  (_, true) -> Err("Handshake: the peer echoed our nonce")
+                  (Ok(_), false) ->
+                    match send_raw(fd, str_to_bytes(ClusterAuth.prove(secret, peer.nonce))) do
+                      Err(e) -> Err(e)
+                      Ok(_) ->
+                        match hs_recv(fd, deadline) do
+                          Err(e) -> Err(e)
+                          Ok(pbytes) ->
+                            match Handshake.authenticate(secret, nonce, peer, bytes_to_str(pbytes)) do
+                              Err(e) -> Err(e)
+                              Ok(id) ->
+                                -- Sealed when the peer offered it too (a pre-11a peer does not).
+                                let mac = ClusterAuth.offers_mac(peer.nonce)
+                                let _ = if mac do
+                                  install(fd, ClusterAuth.frame_keys(Bytes.from_string(secret),
+                                                ClusterAuth.transcript(hello, nonce, hbytes, peer.nonce), nonce, peer.nonce))
+                                else () end
+                                Ok({ identity: id, role: peer.role, addr: peer.addr, cert: None, mac: mac })
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+  end
+
+  pfn handshake_cert(fd : Int, my_id : NodeIdentity.Identity, creds : NodeCert.Credentials, nonce : String,
+                     role : String, addr : String, deadline : Int) : Result(Authed, String) do
+    let eph_sk = Crypto.random_bytes(32)
+    let eph_pub = x25519(eph_sk, x25519_base())
+    let hello = Handshake.encode_hello(Handshake.make_hello_cert(my_id, nonce, role, addr,
+                                         NodeCert.to_bytes(creds.signed), Bytes.to_list(eph_pub)))
+    match send_raw(fd, hello) do
+      Err(e) -> Err(e)
+      Ok(_) ->
+        match hs_recv(fd, deadline) do
+          Err(e) -> Err(e)
+          Ok(hbytes) ->
+            match Handshake.decode_hello(hbytes) do
+              Err(e) -> Err(e)
+              Ok(peer) ->
+                match Handshake.check_mode(ClusterAuth.Certified(creds), peer) do
                   Err(e) -> Err(e)
                   Ok(_) ->
-                    match recv_frame_until(fd, deadline) do
-                      Err(e) -> Err(e)
-                      Ok(pbytes) ->
-                        match Handshake.authenticate(secret, my_nonce, peer, bytes_to_str(pbytes)) do
-                          Err(e) -> Err(e)
-                          Ok(id) -> Ok((id, peer.role, peer.addr))
-                        end
+                    if peer.nonce == nonce do Err("Handshake: the peer echoed our nonce")
+                    else
+                      match Handshake.verify_peer_cert(creds, peer, now_s()) do
+                        Err(e) -> Err(e)
+                        Ok((cert, peer_pk)) ->
+                          let th = ClusterAuth.transcript(hello, nonce, hbytes, peer.nonce)
+                          match send_raw(fd, Bytes.to_list(ClusterAuth.cert_prove(creds.secret_key, peer.nonce, th))) do
+                            Err(e) -> Err(e)
+                            Ok(_) ->
+                              match hs_recv(fd, deadline) do
+                                Err(e) -> Err(e)
+                                Ok(pbytes) ->
+                                  if not(ClusterAuth.cert_verify(peer_pk, nonce, th, Bytes.from_list(pbytes))) do
+                                    Err("Handshake: peer " ++ peer.identity.name ++ " failed to prove it holds its certificate's key")
+                                  else
+                                    let peer_eph = match peer.cert do
+                                      Some(hc) -> Bytes.from_list(hc.eph)
+                                      None -> Bytes.empty()
+                                    end
+                                    -- The MAC key comes from an X25519 agreement between the
+                                    -- two ephemeral keys, which the signed transcript binds to
+                                    -- the two certificates: secret from an eavesdropper.
+                                    let shared = x25519(eph_sk, peer_eph)
+                                    if Bytes.is_empty(shared) do Err("Handshake: the peer's ephemeral key is not usable")
+                                    else
+                                      install(fd, ClusterAuth.frame_keys(shared, th, nonce, peer.nonce))
+                                      Ok({ identity: peer.identity, role: peer.role, addr: peer.addr,
+                                           cert: Some(cert), mac: true })
+                                    end
+                                  end
+                              end
+                          end
+                      end
                     end
                 end
             end

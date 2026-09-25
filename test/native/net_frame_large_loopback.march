@@ -8,6 +8,7 @@ mod NetFrameLargeLoopback do
   needs IO.NetListen
   needs IO.NetConnect
   needs IO.Spawn
+  needs IO.Mut
 
   pfn big() : Int do 1048576 end
 
@@ -35,7 +36,7 @@ mod NetFrameLargeLoopback do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn)) do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
     let listen_fd = match tcp_listen(0) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)

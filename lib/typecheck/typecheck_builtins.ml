@@ -1344,6 +1344,16 @@ let builtin_bindings : (string * scheme) list =
     (* hmac_sha256_bytes(key, msg): Bytes-domain HMAC, bare Bytes result *)
     ("hmac_sha256_bytes", Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
         TCon ("Bytes", [])))));
+    (* ed25519 / X25519 (runtime/march_nacl.c). A wrong-length argument gives
+       EMPTY Bytes (verify: false), never an abort; stdlib/node_cert.march
+       checks. seed_keypair: 32-byte seed -> 64-byte sk (seed || pk). *)
+    ("ed25519_seed_keypair", Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
+    ("ed25519_sign",    Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TCon ("Bytes", [])))));
+    ("ed25519_verify",  Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TArrow (TCon ("Bytes", []), t_bool)))));
+    ("x25519",          Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TCon ("Bytes", [])))));
     ("pbkdf2_sha256",   Mono (TArrow (t_string, TArrow (TCon ("Bytes", []),
         TArrow (t_int, TArrow (t_int,
         TCon ("Result", [TCon ("Bytes", []); t_string])))))));

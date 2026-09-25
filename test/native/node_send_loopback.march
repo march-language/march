@@ -22,6 +22,7 @@ mod NodeSendLoopback do
   needs IO.NetListen
   needs IO.Spawn
   needs IO.NetConnect
+  needs IO.Mut
 
   pfn encode_ping(n : Int, reply_to) : List(Int) do
     Msgpack.encode(Msgpack.array(Cons(Msgpack.int(n), Cons(GlobalPid.to_value(reply_to), Nil))))
@@ -134,7 +135,7 @@ mod NodeSendLoopback do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn)) do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
     let listen_fd = match tcp_listen(0) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)

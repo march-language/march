@@ -355,7 +355,9 @@ mod NodeQueue do
         None -> Err(())
       end
     else
-      match Socket.write(fd, Bytes.to_string(frame)) do
+      -- Through the net-kernel, which seals it when the connection's
+      -- handshake agreed a MAC key (distributed-deploys step 11a).
+      match NetKernel.write_framed(fd, frame) do
         Ok(_) -> Ok(())
         Err(_) -> Err(())
       end
