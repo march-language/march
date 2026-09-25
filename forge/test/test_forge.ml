@@ -2655,8 +2655,34 @@ let test_repl_command_bare_includes_ffi_flags () =
 
 (* -------------------------------------------------------------------- suite *)
 
+(* Build step 9: forge keeps `.forge/protocols/<P>.json` current by passing
+   every stored baseline and `--emit-protocols` -- but only for a project that
+   declares an `@[endpoints]` protocol, since the flag turns off the
+   compiler's source-level cache exit. *)
+let test_protocol_flags () =
+  let root = Filename.temp_dir "forge_protocols_" "" in
+  let write path body = let oc = open_out path in output_string oc body; close_out oc in
+  let plain = Filename.concat root "plain.march" in
+  write plain "mod Plain do\n  fn f() : Int do 1 end\nend\n";
+  Alcotest.(check string) "no protocol, no flags" "" (Cmd_build.protocol_flags ~root [ plain ]);
+  let proto = Filename.concat root "app.march" in
+  write proto "mod App do\n  @[endpoints]\n  protocol P do\n    A -> B : Int\n  end\nend\n";
+  let dir = Cmd_build.protocols_dir ~root in
+  Alcotest.(check string) "first build: emit only"
+    (" --emit-protocols " ^ Filename.quote dir) (Cmd_build.protocol_flags ~root [ plain; proto ]);
+  Project.mkdir_p dir;
+  write (Filename.concat dir "P.json") "{}";
+  write (Filename.concat dir "notes.txt") "";
+  Alcotest.(check string) "later builds: every stored baseline, then emit"
+    (" --protocol-baseline " ^ Filename.quote (Filename.concat dir "P.json")
+     ^ " --emit-protocols " ^ Filename.quote dir)
+    (Cmd_build.protocol_flags ~root [ proto ])
+
 let () =
   Alcotest.run "forge" [
+    "protocols", [
+      Alcotest.test_case "build passes protocol baselines only when a protocol exists" `Quick test_protocol_flags;
+    ];
     "scaffold", [
       Alcotest.test_case "app project creates expected files" `Quick test_scaffold_app;
       Alcotest.test_case "lib project sets type=lib"          `Quick test_scaffold_lib;
