@@ -80,6 +80,29 @@ let rename_tir_vars (prefix : string) (names : string list) (fn : Tir.fn_def) : 
   in
   rename_fn SSet.empty fn
 
+(** [rename_tir_vars] for a fn lowered inside a NESTED module: qualify bare
+    references to the fns of the module itself AND of every lexically
+    enclosing module.  [scopes] is innermost-first [(prefix, names)] — the
+    declaring module's own level, then its parent, and so on (the entry
+    module's unprefixed top level is never in it: its fns keep bare names).
+
+    Applying the levels innermost-first gives lexical shadowing for free: once
+    the inner pass has rewritten [f] to [Outer.Inner.f], the outer pass (whose
+    [names] are bare) can no longer match it, so an inner fn shadows an outer
+    one of the same name.  Before this only the innermost level was applied,
+    so a nested module's bare call to an enclosing module's fn stayed bare and
+    a compiled program failed to link (`_helper` undefined).
+    specs/progress/2026-09-25-nested-module-parent-call.md *)
+let rename_scoped_vars (scopes : (string * string list) list) (fn : Tir.fn_def) : Tir.fn_def =
+  List.fold_left (fun fn (prefix, names) ->
+      if prefix <> "" && names <> [] then rename_tir_vars prefix names fn else fn)
+    fn scopes
+
+(** Every bare fn name bound by the enclosing levels of [scopes] (see
+    [rename_scoped_vars]), for [Lower_state.with_enclosing_module_fns]. *)
+let scoped_names (scopes : (string * string list) list) : string list =
+  List.concat_map snd scopes
+
 (* ── Shadow uniquification (alpha-rename of shadowed local binders) ── *)
 
 (** Make every local binder name within a function UNIQUE by alpha-renaming
@@ -289,17 +312,21 @@ let lower_extern_fns (edef : Ast.extern_def) (ext_fns : Ast.extern_fn list) : Ti
 
 (** Lower all declarations from a stdlib module's body, adding functions
     and types to the current module-level accumulator refs. *)
-let rec lower_stdlib_mod_decls (env : Lower_state.env) prefix decls =
+let rec lower_stdlib_mod_decls ?(enclosing = []) (env : Lower_state.env) prefix decls =
   let direct_fn_names = List.filter_map (function
       | Ast.DFn (def, _) -> Some def.fn_name.txt
       | Ast.DLet (_, b, _) ->
         (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
       | _ -> None) decls in
+  (* [enclosing]: the lexically enclosing modules' levels, innermost-first —
+     see [rename_scoped_vars]. *)
+  let scopes = (prefix, direct_fn_names) :: enclosing in
+  Lower_state.with_enclosing_module_fns (scoped_names enclosing) (fun () ->
   List.iter (fun d ->
       match d with
       | Ast.DFn (def, _) ->
         let fn = lower_fn_def env def in
-        let fn = rename_tir_vars prefix direct_fn_names fn in
+        let fn = rename_scoped_vars scopes fn in
         !Lower_state._fns_ref := { fn with fn_name = prefix ^ fn.fn_name } :: !(!Lower_state._fns_ref)
       | Ast.DType (_, tname, params, td, _)
       | Ast.DAlwaysLinearType (_, tname, params, td, _) ->
@@ -308,7 +335,7 @@ let rec lower_stdlib_mod_decls (env : Lower_state.env) prefix decls =
          | Some td' -> !Lower_state._types_ref := td' :: !(!Lower_state._types_ref)
          | None -> ())
       | Ast.DMod (sub_name, _, sub_decls, _) ->
-        lower_stdlib_mod_decls env (prefix ^ sub_name.txt ^ ".") sub_decls
+        lower_stdlib_mod_decls ~enclosing:scopes env (prefix ^ sub_name.txt ^ ".") sub_decls
       | Ast.DLet (_, b, _) ->
         (* Module-level let bindings are compiled as zero-arg functions so they
            can be referenced by qualified name (e.g. Crypto.pw_dklen). *)
@@ -326,7 +353,7 @@ let rec lower_stdlib_mod_decls (env : Lower_state.env) prefix decls =
            !Lower_state._fns_ref := fn :: !(!Lower_state._fns_ref)
          | _ -> ())
       | _ -> ()
-    ) decls
+    ) decls)
 
 let () = Lower_state._ensure_module_lowered := (fun env mod_name ->
   if not (Hashtbl.mem !Lower_state._lowered_modules mod_name) then begin

@@ -742,7 +742,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
            iface dispatch (e.g. hash → march_hash_string/int/…), leaving a bare
            @hash extern that the linker cannot resolve. *)
         Hashtbl.replace !_lowered_modules mod_name.txt ();
-        let rec lower_mod_decls (env : env) prefix decls =
+        let rec lower_mod_decls ?(enclosing = []) (env : env) prefix decls =
           let direct_fn_names = List.filter_map (function
               | Ast.DFn (def, _) -> Some def.fn_name.txt
               | Ast.DLet (_, b, _) ->
@@ -767,12 +767,20 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           let mod_env = { env with
             current_module_aliases = Hashtbl.copy env.current_module_aliases;
             mod_prefix = prefix } in
+          (* [enclosing]: the lexically enclosing modules' levels,
+             innermost-first.  A bare call to an enclosing module's fn resolves
+             to it (via [with_enclosing_module_fns]) and is qualified with that
+             module's prefix ([rename_scoped_vars]) — before, only this level
+             was qualified, so the call stayed bare and failed to link.
+             specs/progress/2026-09-25-nested-module-parent-call.md *)
+          let scopes = (prefix, direct_fn_names) :: enclosing in
           with_current_module_fns direct_fn_names (fun () ->
+          Lower_state.with_enclosing_module_fns (Lower_decls.scoped_names enclosing) (fun () ->
           List.iter (fun d ->
               match d with
               | Ast.DFn (def, _) ->
                 let fn = Lower_decls.lower_fn_def mod_env def in
-                let fn = Lower_decls.rename_tir_vars prefix direct_fn_names fn in
+                let fn = Lower_decls.rename_scoped_vars scopes fn in
                 fns := { fn with fn_name = prefix ^ fn.fn_name } :: !fns
               | Ast.DType (_, tname, params, td, _)
               | Ast.DAlwaysLinearType (_, tname, params, td, _) ->
@@ -781,7 +789,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                  | Some td' -> types := td' :: !types
                  | None -> ())
               | Ast.DMod (sub_name, _, sub_decls, _) ->
-                lower_mod_decls mod_env (prefix ^ sub_name.txt ^ ".") sub_decls
+                lower_mod_decls ~enclosing:scopes mod_env (prefix ^ sub_name.txt ^ ".") sub_decls
               | Ast.DLet (_, b, _) ->
                 (* Module-level let bindings are compiled as zero-arg functions
                    so they can be referenced by qualified name after
@@ -876,7 +884,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    name; rename_tir_vars rewrites them to their qualified names so
                    the linker can resolve them (e.g. close_all → Pool.close_all). *)
                 let (new_types, new_fns) = Lower_actor.lower_actor mod_env ~hot_reload name.txt actor_def in
-                let renamed_fns = List.map (Lower_decls.rename_tir_vars prefix direct_fn_names) new_fns in
+                let renamed_fns = List.map (Lower_decls.rename_scoped_vars scopes) new_fns in
                 (* The synthesized fn names above are BARE by contract (the
                    spawn symbol and the HCR manifest both assert the short
                    spelling), so the name cannot say which module declared the
@@ -898,7 +906,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    extern-lowering logic. *)
                 externs := List.rev_append (Lower_decls.lower_extern_fns edef edef.ext_fns) !externs
               | _ -> ()
-            ) decls);
+            ) decls));
           (* Save this module's aliases so the later test/setup lowering pass
              (collect_tests) can re-load them for DTest bodies. *)
           Hashtbl.replace !_module_alias_snapshots prefix
