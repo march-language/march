@@ -3458,6 +3458,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (diff native/uuid_v7_dns_parity.expected
                native_uuid_v7_dns_parity_interp.out)))
 
+; dns_resolve returned different lists interpreted and compiled (IPv4 with a
+; duplicate per socket type vs IPv4+IPv6, deduplicated).  One contract now:
+; IPv4 only, one entry per address (specs/progress/2026-09-25-dns-resolve-parity.md).
+(rule
+ (targets native_dns_resolve_parity native_dns_resolve_parity.out
+          native_dns_resolve_parity_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/dns_resolve_parity.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (with-stdout-to native_dns_resolve_parity_interp.out
+     (run %{exe:../bin/main.exe} native/dns_resolve_parity.march))
+    (run %{exe:../bin/main.exe} --compile -o native_dns_resolve_parity
+         native/dns_resolve_parity.march)
+    (with-stdout-to native_dns_resolve_parity.out
+         (system "./native_dns_resolve_parity"))))))
+
+(rule
+ (alias runtest)
+ (deps native_dns_resolve_parity.out native/dns_resolve_parity.expected)
+ (action (diff native/dns_resolve_parity.expected
+               native_dns_resolve_parity.out)))
+
+(rule
+ (alias runtest)
+ (deps native_dns_resolve_parity_interp.out
+       native/dns_resolve_parity.expected)
+ (action (diff native/dns_resolve_parity.expected
+               native_dns_resolve_parity_interp.out)))
+
 ; ── Erased/uniform boundary between the C runtime and compiled code ──────
 ; One family, three fixtures.  march_vault_get / march_record_get / the vault
 ; key builtins all hand a value across a boundary where the runtime has ONE
