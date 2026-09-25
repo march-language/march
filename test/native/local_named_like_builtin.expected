@@ -1,0 +1,40 @@
+via_eq(always, 1, 2): true
+via_f(always, 1, 2): true
+via_eq String: true
+via_eq_mono: true
+via_compare: 42
+via_compare_mono: 42
+via_hash: 7
+via_hash_mono: 7
+via_show: custom-show
+via_show_mono: custom-show-mono
+via_to_string_mono: custom-ts
+via_int_to_string_mono: custom-its
+via_print: custom hi
+let_eq: true
+let_eq_mono: true
+nested_fn_eq: true
+pat_eq: true
+lam_eq: true
+curried lambda: true
+curried top-level: true
+curried top-level (false): false
+two-arg top-level: true
+float map size: 2
+get nan: Some(nan)
+size after re-insert nan: 2
+get nan after re-insert: Some(nan-again)
+contains nan: true
+size after remove nan: 1
+float set size after inserting nan twice: 1
+float set contains nan: true
+ci size: 2
+ci get Alpha: true
+ci get beta: true
+ci size after re-insert: 2
+ord get 7: Some(seven)
+never_eq get 7: None
+int_cmp get 2: Some(two)
+int_cmp size after re-insert: 2
+str_cmp size: 2
+str_cmp get a: Some(z)

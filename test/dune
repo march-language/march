@@ -1714,6 +1714,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/string_concat_n.expected native_string_concat_n.out)))
 
+; ── a local named like a builtin / interface method shadows it, compiled ───
+; A call through a parameter, let, pattern variable, lambda param or nested fn
+; named `eq`/`compare`/`hash`/`show`/`to_string`/`int_to_string`/`print` must
+; call the closure the local holds.  Lowering (monomorphic locals) and mono
+; (polymorphic params, once specialised) used to resolve it as the builtin or
+; interface method instead, so `eq(a, b)` ran `==` -- which made a compiled
+; Map (its comparator-derived closure is named `eq`) ignore its comparator:
+; a NaN key was never found and re-inserting it grew the map.  The .expected
+; is the interpreter's output, so this is a compiled/interpreted parity check.
+; Needs the stdlib (Map), hence (source_tree ../stdlib).
+(rule
+ (targets native_local_named_like_builtin native_local_named_like_builtin.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/local_named_like_builtin.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_local_named_like_builtin
+        native/local_named_like_builtin.march)
+   (with-stdout-to native_local_named_like_builtin.out
+        (system "./native_local_named_like_builtin")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/local_named_like_builtin.expected native_local_named_like_builtin.out)))
+
 ; ── Capability mocking, end to end, compiled ──────────────────────────────
 ; The one test that exercises what compiler-inserted capability passing exists
 ; for: an operation performed by code that names no capability is intercepted

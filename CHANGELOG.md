@@ -514,6 +514,19 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Compiled `Map` and `Set` now use the comparator you pass.** In compiled
+  code, calling a local (a parameter, `let`, pattern variable or lambda
+  parameter) whose name is also a builtin or interface method (`eq`,
+  `compare`, `hash`, `show`, `to_string`) called the builtin instead of the
+  local. `Map` and `Set` name their comparator-derived closure `eq`, so
+  compiled they compared keys with `==` and never called the comparator: a
+  `Float` NaN key was never found and re-inserting it added a second entry,
+  and a comparator that is not `==` behaved differently from the
+  interpreter. A local of that name now shadows the builtin, as it does
+  interpreted. With that fixed, a top-level function that returns a closure
+  (`fn lt(a) do fn b -> a < b end`, including `Map.int_cmp` / `Map.str_cmp`)
+  passed as a value and called curried no longer crashes compiled programs
+  with SIGSEGV.
 - **Compiling a module with no `main` no longer takes minutes.** A TIR pass
   rewrote the rest of a function twice for every non-capturing closure it
   found ineligible, so a function that builds a record of many small lambdas

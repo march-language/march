@@ -242,6 +242,8 @@ native_let_tuple_nested: coverage audit (user + stdlib): 120 enforced, 0 inert (
 native_let_tuple_nested: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_linear_map: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_linear_map: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_local_named_like_builtin: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_local_named_like_builtin: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_mailbox_bounded: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_mailbox_bounded: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_mailbox_decl: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
