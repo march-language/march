@@ -11,7 +11,68 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+- **The bare `sha256` builtin now typechecks as `Bytes -> String`, matching what it
+  has always returned** (a 64-char lowercase hex string, like `Crypto.sha256`,
+  `md5` and `sha512`). It was declared `Bytes -> Bytes`, so `Bytes.length(sha256(b))`
+  typechecked and then crashed on both backends (a match failure interpreted,
+  `fatal SIGBUS` / exit 138 compiled). Compiled `sha256` of a `Bytes` also crashed
+  regardless of how the result was used (see the `Base64.encode` / `sha256`
+  entry below for the runtime side); the builtin now also has its own runtime
+  entry, chosen by the compiler from the static type, so it never guesses.
+  For a raw digest use `hmac_sha256_bytes` / `sha1_bytes`.
+
 ### Added
+- **`NativeArray.sort_i32`, `sort_f32` and `sort_u8`: every NativeArray width
+  can now be sorted.** Same ownership as `sort_int`: in place when the array is
+  uniquely owned, copy-on-write when it is shared. `sort_i32` is the same
+  algorithm as `sort_int` on 4-byte elements. `sort_f32` orders by IEEE 754
+  `totalOrder` exactly like `sort_float` (NaN at a fixed end, `-0.0` before
+  `+0.0`), without widening to f64. `sort_u8` is a counting sort, about 0.3 ms
+  for a million bytes whatever their order. The interpreter and compiled builds
+  produce the same order, NaN included.
+- **Node certificates for clusters** (build step 11a of the distributed-deploys
+  plan, part 1). New `NodeCert` module: a certificate names a node
+  (`spiffe://<trust-domain>/pool/<pool>/node/<name>`), its role permissions
+  (`Proto.Role:offer` / `Proto.Role:initiate`), flags (`raw_send`), an expiry and
+  a serial, and is signed ed25519 by an operator key; `NodeCert.verify(cert,
+  operator_pubkey, now)` checks it, and operator-signed revocations name a
+  serial or a whole node. `forge cluster keygen` makes the operator keypair (a
+  separate key from the hot-reload deploy key), `forge cluster cert <node>
+  --roles ... --flags ... --days N` issues a node key and certificate, and
+  `forge cluster revoke --serial S | --node N` prints a revocation token. New
+  builtins `ed25519_seed_keypair`, `ed25519_sign`, `ed25519_verify` and
+  `x25519` (RFC 8032 / RFC 7748, over the runtime's TweetNaCl, which gained
+  X25519).
+- **Certificate mode for the cluster handshake** (step 11a, part 2). With
+  `MARCH_NODE_CERT`, `MARCH_NODE_KEY` and `MARCH_CLUSTER_OPERATOR_PUBKEY` set
+  (values or files), `ClusterNode.config_from_env` authenticates peers by
+  certificate instead of `MARCH_CLUSTER_SECRET`: each node verifies the other's
+  certificate against the operator key, its expiry and the node's name, then
+  proves it holds its certificate's key by signing the peer's nonce and the
+  handshake transcript. Shared-secret mode is unchanged and stays the default; a
+  certificate node and a shared-secret node refuse each other with a message
+  naming what to set. `ClusterNode.peer_cert(c, node_id)` returns the
+  certificate a peer presented, `ClusterConn.connect_split_auth` /
+  `accept_split_auth` do the same for direct connections, and
+  `ClusterNode.on_security_event` reports refused handshakes.
+- **Per-frame MAC on cluster connections** (step 11a, part 3). After the
+  handshake every frame carries a sequence number and an HMAC-SHA256 tag under a
+  per-connection, per-direction key (HKDF over the handshake transcript; from an
+  X25519 agreement in certificate mode, from the secret in shared-secret mode). A
+  modified, injected or replayed frame is dropped and counted
+  (`ClusterNode.frames_rejected`, a `FrameRejected` security event), and three
+  on one connection close it. This is integrity, not encryption: frames stay
+  readable on the wire. Shared-secret nodes negotiate it, so they still talk to
+  older nodes (unsealed). New `bench/cluster_frames.march`.
+- **Certificate expiry and revocation** (step 11a, part 4). A peer whose
+  certificate expires, or is revoked, is disconnected and reported as
+  `NodeDead(_, "certificate expired")` / `NodeDead(_, "certificate revoked")`,
+  so its sessions are cancelled as for any dead node, and its handshakes are
+  refused from then on. `ClusterNode.revoke(c, token)` takes a token from
+  `forge cluster revoke`; `MARCH_CLUSTER_REVOCATIONS` seeds the list at
+  startup; nodes pass revocations on to each other, and only the operator's
+  signature makes one count. `ClusterNode.revocations(c)` lists them.
 - **Placement changes on a running system and upgrade tests** (build step 8 of the
   distributed-deploys plan). A topology app's nodes re-read their topology on
   SIGHUP and move their own offers: a role's placement, capacity, or a pool that
@@ -208,6 +269,15 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **Programs that use the cluster transport directly need `IO.Mut` and
+  `IO.Clock` in their grant.** `NetKernel`, `ClusterConn`, `PeerReader`,
+  `NodeSend`, `NodeCall` and `NodeQueue` now reach a process-wide table (the
+  per-connection MAC state) and the clock (handshake deadline, certificate
+  expiry), and the capability check is a ceiling on the whole program. A
+  `main(io : Cap(IO))` program sees no change; one with a narrow grant must add
+  `needs IO.Mut` / `needs IO.Clock` and the matching `Cap(IO.Mut)` /
+  `Cap(IO.Clock)` parameters (nine `test/native` loopback fixtures and the
+  `restart` two-node scenario did).
 - **`forge audit --inferred` caches each dependency's result** under
   `.forge/audit-cache/`, keyed on the dependency's files, the files on its lib
   path and the compiler. A repeat audit re-analyzes only the dependencies whose
@@ -463,7 +533,6 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
-<<<<<<< HEAD
 - **Per-role grants check the value that reaches the runner, not the expression at the
   call.** `check_role_grants` used to walk only a literal lambda or a directly named
   function; a body bound with `let`, passed through a parameter, calling a `let`-aliased
@@ -476,7 +545,38 @@ git log is authoritative for exact commits.
   the pids the body holds. A `role R needs` naming a non-IO capability (`Session.Live`,
   `ClusterNode.Live`, `LibC`) is one error at the grant line instead of a spray of errors
   inside generated code. Corpus `reject/t295`.
-=======
+- `to_string`/`println` of a List, Option, Result or tuple no longer aborts
+  `march --jit` or the JIT REPL with an internal compiler error ("ambiguous
+  interface-method call to `Show$List.show`"). The prelude's generic `Show`
+  impls are now specialised at the call site, as they are under `--compile`.
+
+- A function in a nested module that calls a function of an enclosing module
+  (`mod Outer do pfn helper ... mod Inner do fn f(x) do helper(x) end end end`)
+  now compiles. Before, the compiled program failed to link with `helper`
+  undefined, while the interpreter ran it. This applied at any nesting depth,
+  whether the enclosing function was declared before or after the nested
+  module, and in `MARCH_LIB_PATH` modules, stdlib modules and the entry file
+  alike. The qualified spelling `Outer.helper(x)` also now works from inside
+  `Outer` for a `pfn`: it was rejected as private in a stdlib module, and in
+  the same file it could bind a same-named function of the nested module
+  instead. `Compress`'s internal `lift_encode_error` / `lift_decode_error`
+  are private again.
+
+- `compare` on a NaN `Float` now gives the same answer compiled as interpreted:
+  NaN compares equal to NaN and less than every other value (OCaml's
+  `Float.compare`). Compiled `compare` returned 0 whenever either operand was
+  NaN, so NaN "equalled" everything and a sort by `compare` scattered the NaNs.
+  `compare_float` now has the same order on both backends (the interpreter's
+  also returned 0 for NaN). `==`, `<` and the other operators stay IEEE 754.
+- **Compiling a module with no `main` no longer takes minutes.** A TIR pass
+  rewrote the rest of a function twice for every non-capturing closure it
+  found ineligible, so a function that builds a record of many small lambdas
+  (`ClusterNode.ops_stub`) cost 2^k traversals; a compile with a `main` never
+  reached it, a main-less one (`forge build` on a library, `--cap-strict`
+  checks) did. Same generated code, one traversal.
+- **Cluster handshake reflection.** A shared-secret node accepted a peer that
+  sent the node's own hello back to it and then its own proof back; a nonce
+  equal to ours is now refused.
 - The stdlib-only builtin gate (`pid_of_int`, `actor_whereis`, `actor_registered`,
   `actor_pid_indices`, `epoch_hold`, `epoch_release`) now fires at name
   resolution, closing four bypasses found in review: it applies inside `impl`
@@ -580,7 +680,6 @@ git log is authoritative for exact commits.
   rejected the `() -> a` thunk `with_scope` takes. It is now typed `() -> a`.
   Callbacks written `fn _ -> ...`, which is every existing caller, are unaffected.
 
->>>>>>> origin/main
 - **`forge bench` now links a project's FFI code.** Benchmarks were compiled
   without the `[ffi]` C sources/link flags and `[ffi.rust]` archive that
   `forge build`, `forge run` and `forge test` pass, so a benchmark calling any
@@ -939,6 +1038,10 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Cluster certificates** operator guide (`docs/cluster-certificates.md`):
+  keys, issuing, configuring nodes, renewal, revocation, what the MAC does and
+  does not protect. The clustering reference's "Authentication & Handshake"
+  section covers both modes, the per-frame MAC and the threat model.
 - **The actors chapter now documents `Actor.stop`** (graceful, synchronous,
   reverse-order supervisor teardown), which shipped 2026-09-08 without a
   section of its own.

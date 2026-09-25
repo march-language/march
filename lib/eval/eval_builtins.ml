@@ -1486,8 +1486,10 @@ let base_env : env =
         | [VInt a; VInt b] -> VInt (compare a b)
         | _ -> eval_error "compare_int: expected two ints"))
   ; ("compare_float", VBuiltin ("compare_float", function
-        | [VFloat a; VFloat b] ->
-          VInt (if a < b then -1 else if a > b then 1 else 0)
+        (* Same order as `compare` on Float (Float.compare: NaN equals NaN
+           and is below every other value) and as the compiled
+           march_compare_float. The IEEE `a < b` form returned 0 for a NaN. *)
+        | [VFloat a; VFloat b] -> VInt (Float.compare a b)
         | _ -> eval_error "compare_float: expected two floats"))
   ; ("compare_string", VBuiltin ("compare_string", function
         | [VString a; VString b] ->
@@ -2141,6 +2143,48 @@ let base_env : env =
              march_bytes_of_string (Digestif.SHA256.(to_raw_string (hmac_string ~key msg)))
            | Error e, _ | _, Error e -> eval_error "hmac_sha256_bytes: %s" e)
         | _ -> eval_error "hmac_sha256_bytes(key: Bytes, msg: Bytes): Bytes"))
+    (* ---- ed25519 / X25519 (lib/ed25519, the same TweetNaCl the native
+       runtime links via runtime/march_nacl.c). Parity with the runtime: a
+       wrong-length argument gives EMPTY Bytes (verify: false), never an
+       error, and x25519 of a low-order point (all-zero result) is empty. ---- *)
+  ; ("ed25519_seed_keypair", VBuiltin ("ed25519_seed_keypair", function
+        | [seed_v] ->
+          (match march_val_to_raw seed_v with
+           | Ok seed when String.length seed = 32 ->
+             march_bytes_of_string (Bytes.to_string
+               (March_ed25519.Ed25519.seed_keypair (Bytes.of_string seed)))
+           | Ok _ -> march_bytes_of_string ""
+           | Error e -> eval_error "ed25519_seed_keypair: %s" e)
+        | _ -> eval_error "ed25519_seed_keypair(seed: Bytes): Bytes"))
+  ; ("ed25519_sign", VBuiltin ("ed25519_sign", function
+        | [sk_v; msg_v] ->
+          (match march_val_to_raw sk_v, march_val_to_raw msg_v with
+           | Ok sk, Ok msg when String.length sk = 64 ->
+             march_bytes_of_string (Bytes.to_string
+               (March_ed25519.Ed25519.sign (Bytes.of_string msg) (Bytes.of_string sk)))
+           | Ok _, Ok _ -> march_bytes_of_string ""
+           | Error e, _ | _, Error e -> eval_error "ed25519_sign: %s" e)
+        | _ -> eval_error "ed25519_sign(sk: Bytes, msg: Bytes): Bytes"))
+  ; ("ed25519_verify", VBuiltin ("ed25519_verify", function
+        | [pk_v; msg_v; sig_v] ->
+          (match march_val_to_raw pk_v, march_val_to_raw msg_v, march_val_to_raw sig_v with
+           | Ok pk, Ok msg, Ok sg ->
+             VBool (String.length pk = 32 && String.length sg = 64 &&
+                    March_ed25519.Ed25519.verify (Bytes.of_string msg)
+                      (Bytes.of_string sg) (Bytes.of_string pk))
+           | Error e, _, _ | _, Error e, _ | _, _, Error e -> eval_error "ed25519_verify: %s" e)
+        | _ -> eval_error "ed25519_verify(pk: Bytes, msg: Bytes, sig: Bytes): Bool"))
+  ; ("x25519", VBuiltin ("x25519", function
+        | [k_v; u_v] ->
+          (match march_val_to_raw k_v, march_val_to_raw u_v with
+           | Ok k, Ok u when String.length k = 32 && String.length u = 32 ->
+             let q = Bytes.to_string
+                 (March_ed25519.Ed25519.x25519 (Bytes.of_string k) (Bytes.of_string u)) in
+             if String.for_all (fun c -> c = '\000') q then march_bytes_of_string ""
+             else march_bytes_of_string q
+           | Ok _, Ok _ -> march_bytes_of_string ""
+           | Error e, _ | _, Error e -> eval_error "x25519: %s" e)
+        | _ -> eval_error "x25519(scalar: Bytes, point: Bytes): Bytes"))
     (* ---- PBKDF2-HMAC-SHA256: returns Ok(Bytes) ---- *)
   ; ("pbkdf2_sha256", VBuiltin ("pbkdf2_sha256", function
         | [pwd_v; salt_v; VInt iters; VInt dklen] ->
@@ -4589,6 +4633,23 @@ let base_env : env =
   ; ("native_f32_arr_sum", VBuiltin ("native_f32_arr_sum", function
         | [VNativeF32Arr a] -> VFloat (Array.fold_left (+.) 0.0 a)
         | _ -> eval_error "native_f32_arr_sum: expected NativeF32Arr"))
+  ; ("native_f32_arr_sort", VBuiltin ("native_f32_arr_sort", function
+        | [VNativeF32Arr a] ->
+          (* binary32 totalOrder, the same key the C sort (nsort_f32 in
+             runtime/march_runtime.c) sorts on:
+               key(bits) = bits lxor ((bits asr 31) lsr 1)   (on 32 bits)
+             compared as a signed int32, giving
+             -NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN.
+             NOT OCaml's [compare] (every NaN first, -0.0 tied with 0.0).
+             Elements are already binary32 values held as doubles, so
+             Int32.bits_of_float is exact, NaN sign included, and key is an
+             involution, so mapping it back restores the bits. *)
+          let key b =
+            Int32.logxor b (Int32.shift_right_logical (Int32.shift_right b 31) 1) in
+          let ks = Array.map (fun f -> key (Int32.bits_of_float f)) a in
+          Array.sort Int32.compare ks;
+          VNativeF32Arr (Array.map (fun k -> Int32.float_of_bits (key k)) ks)
+        | _ -> eval_error "native_f32_arr_sort: expected NativeF32Arr"))
   ; ("native_f32_arr_map", VBuiltin ("native_f32_arr_map", function
         | [VNativeF32Arr a; f] ->
           let n = Array.length a in
@@ -4666,6 +4727,15 @@ let base_env : env =
   ; ("native_i32_arr_sum", VBuiltin ("native_i32_arr_sum", function
         | [VNativeI32Arr a] -> VInt (Array.fold_left (+) 0 a)
         | _ -> eval_error "native_i32_arr_sum: expected NativeI32Arr"))
+  ; ("native_i32_arr_sort", VBuiltin ("native_i32_arr_sort", function
+        | [VNativeI32Arr a] ->
+          (* Value semantics, like native_int_arr_sort's arm. Elements are
+             already wrapped to the i32 range, so Int.compare is the same
+             order as the C sort's signed int32_t compare. *)
+          let a' = Array.copy a in
+          Array.sort Int.compare a';
+          VNativeI32Arr a'
+        | _ -> eval_error "native_i32_arr_sort: expected NativeI32Arr"))
   ; ("native_i32_arr_map", VBuiltin ("native_i32_arr_map", function
         | [VNativeI32Arr a; f] ->
           let n = Array.length a in
@@ -4743,6 +4813,14 @@ let base_env : env =
   ; ("native_u8_arr_sum", VBuiltin ("native_u8_arr_sum", function
         | [VNativeU8Arr a] -> VInt (Array.fold_left (+) 0 a)
         | _ -> eval_error "native_u8_arr_sum: expected NativeU8Arr"))
+  ; ("native_u8_arr_sort", VBuiltin ("native_u8_arr_sort", function
+        | [VNativeU8Arr a] ->
+          (* The C side is a counting sort; any correct sort agrees with it
+             on integers in 0..255. *)
+          let a' = Array.copy a in
+          Array.sort Int.compare a';
+          VNativeU8Arr a'
+        | _ -> eval_error "native_u8_arr_sort: expected NativeU8Arr"))
   ; ("native_u8_arr_map", VBuiltin ("native_u8_arr_map", function
         | [VNativeU8Arr a; f] ->
           let n = Array.length a in

@@ -357,6 +357,7 @@ let extern_owned_builtins : string list = [
     "vault_ns_set"; "vault_ns_get"; "vault_ns_drop"; "md5"; "sha256";
     "stdlib_sha256"; "sha512"; "stdlib_sha512"; "hmac_sha256";
     "stdlib_hmac_sha256"; "hmac_sha256_bytes"; "pbkdf2_sha256";
+    "ed25519_seed_keypair"; "ed25519_sign"; "ed25519_verify"; "x25519";
     "base64_encode"; "stdlib_base64_encode"; "base64_decode";
     "stdlib_base64_decode"; "bytes_to_u8_arr"; "u8_arr_to_bytes";
     "remote_register_stub"; "remote_check"; "remote_invoke";
@@ -384,10 +385,13 @@ let extern_owned_builtins : string list = [
     "native_float_arr_sumsq_dev"; "native_float_arr_map";
     "native_float_arr_map2"; "native_float_arr_fold";
     "native_float_arr_from_list"; "native_float_arr_filter_mask";
-    "native_f32_arr_set"; "native_f32_arr_map"; "native_f32_arr_map2";
+    "native_f32_arr_set"; "native_f32_arr_sort"; "native_f32_arr_map";
+    "native_f32_arr_map2";
     "native_f32_arr_fold"; "native_f32_arr_from_list"; "native_i32_arr_set";
+    "native_i32_arr_sort";
     "native_i32_arr_map"; "native_i32_arr_map2"; "native_i32_arr_fold";
-    "native_i32_arr_from_list"; "native_u8_arr_set"; "native_u8_arr_map";
+    "native_i32_arr_from_list"; "native_u8_arr_set"; "native_u8_arr_sort";
+    "native_u8_arr_map";
     "native_u8_arr_map2"; "native_u8_arr_fold"; "native_u8_arr_from_list";
     "native_float_to_f32_arr"; "native_f32_to_float_arr";
     "native_int_to_i32_arr"; "native_i32_to_int_arr"; "native_int_to_u8_arr";

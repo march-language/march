@@ -49,28 +49,48 @@ mod ClusterConn do
   -- as long as they like. A peer that connects and then says nothing fails
   -- here instead of holding the caller for ever. The socket is closed on
   -- failure.
-  pfn handshake_within(fd, my_id, secret, role, timeout_ms) do
+  -- [auth] is a ClusterAuth.Auth: the shared secret or this node's
+  -- certificate credentials. The result is NetKernel.Authed (identity,
+  -- announced role, verified certificate in certificate mode).
+  pfn handshake_within(fd, my_id, auth, role, timeout_ms) do
     let _ = if timeout_ms > 0 do tcp_set_recv_timeout(fd, timeout_ms) else Ok(()) end
-    let result = NetKernel.handshake_role(fd, my_id, secret, NetKernel.fresh_nonce(), role)
+    let result = NetKernel.handshake_auth(fd, my_id, auth, NetKernel.fresh_nonce(), role, "", 0)
     let _ = if timeout_ms > 0 do tcp_set_recv_timeout(fd, 0) else Ok(()) end
     match result do
       Err(e) ->
         tcp_close(fd)
         Err(e)
-      Ok(pair) -> Ok(pair)
+      Ok(a) -> Ok(a)
     end
   end
 
-  pfn dial(host, port, my_id, secret, role, timeout_ms) do
+  pfn dial(host, port, my_id, auth, role, timeout_ms) do
     match Socket.connect(host, port) do
       Err(e) -> Err(Socket.error_message(e))
       Ok(fd) ->
-        match handshake_within(fd, my_id, secret, role, timeout_ms) do
+        match handshake_within(fd, my_id, auth, role, timeout_ms) do
           Err(e) -> Err(e)
-          Ok((peer_id, _)) -> Ok((fd, peer_id))
+          Ok(a) -> Ok((fd, a))
         end
     end
   end
+
+  -- ── peer certificates ────────────────────────────────────────────────────
+  -- The certificate each certificate-mode peer presented, by node id, as of
+  -- its most recent handshake here (process-wide, like PeerRegistry's ids).
+  -- Step 11b's role and raw-send checks read it.
+
+  pfn certs() : Vault(NodeCert.Cert) do Vault.open("cluster_conn_certs") end
+
+  pfn remember(a) do
+    match a.cert do
+      Some(c) -> Vault.set(certs(), a.identity.node_id, c)
+      None -> ()
+    end
+  end
+
+  doc "The verified certificate of peer [node_id] (certificate mode), if it presented one."
+  fn peer_cert(node_id : String) : Option(NodeCert.Cert) do Vault.get(certs(), node_id) end
 
   -- Dial [host]:[port] twice -- control first, then data -- and register the
   -- peer with both.
@@ -80,27 +100,47 @@ mod ClusterConn do
 
   -- `connect_split`, each handshake bounded by [timeout_ms] (<= 0: no bound).
   fn connect_split_within(reg, host, port, my_id, secret, timeout_ms) do
-    match dial(host, port, my_id, secret, Handshake.role_control(), timeout_ms) do
+    match connect_split_auth(reg, host, port, my_id, ClusterAuth.Secret(secret), timeout_ms) do
       Err(e) -> Err(e)
-      Ok((cfd, peer_id)) ->
-        match dial(host, port, my_id, secret, Handshake.role_data(), timeout_ms) do
+      Ok((reg2, peer, _cert)) -> Ok((reg2, peer))
+    end
+  end
+
+  doc """
+  `connect_split_within` in either authentication mode ([auth], a
+  ClusterAuth.Auth): also returns the peer's verified certificate
+  (certificate mode; None with a shared secret) and remembers it for
+  `peer_cert`. Both connections must reach the same node.
+  """
+  fn connect_split_auth(reg, host, port, my_id, auth, timeout_ms) do
+    match dial(host, port, my_id, auth, Handshake.role_control(), timeout_ms) do
+      Err(e) -> Err(e)
+      Ok((cfd, a)) ->
+        match dial(host, port, my_id, auth, Handshake.role_data(), timeout_ms) do
           Err(e) ->
             tcp_close(cfd)
             Err(e)
-          Ok((dfd, _)) ->
-            let peer = { node_id: peer_id.node_id, identity: peer_id, fd: cfd, data_fd: dfd }
-            Ok((PeerRegistry.add(reg, peer), peer))
+          Ok((dfd, a2)) ->
+            if a2.identity.node_id != a.identity.node_id do
+              tcp_close(cfd)
+              tcp_close(dfd)
+              Err("ClusterConn: the data connection reached " ++ a2.identity.node_id ++ ", not " ++ a.identity.node_id)
+            else
+              remember(a)
+              let peer = { node_id: a.identity.node_id, identity: a.identity, fd: cfd, data_fd: dfd }
+              Ok((PeerRegistry.add(reg, peer), peer, a.cert))
+            end
         end
     end
   end
 
-  pfn take(listen_fd, my_id, secret, timeout_ms) do
+  pfn take(listen_fd, my_id, auth, timeout_ms) do
     match tcp_accept_timeout(listen_fd, timeout_ms) do
       Err(e) -> Err(e)
       Ok(fd) ->
-        match handshake_within(fd, my_id, secret, Handshake.role_control(), timeout_ms) do
+        match handshake_within(fd, my_id, auth, Handshake.role_control(), timeout_ms) do
           Err(e) -> Err(e)
-          Ok((peer_id, role)) -> Ok((fd, peer_id, role))
+          Ok(a) -> Ok((fd, a))
         end
     end
   end
@@ -116,22 +156,35 @@ mod ClusterConn do
   -- Err("tcp_accept: timed out") for the first, the handshake's own error
   -- for the second.
   fn accept_split_within(reg, listen_fd, my_id, secret, timeout_ms) do
-    match take(listen_fd, my_id, secret, timeout_ms) do
+    match accept_split_auth(reg, listen_fd, my_id, ClusterAuth.Secret(secret), timeout_ms) do
       Err(e) -> Err(e)
-      Ok((cfd, peer_id, role1)) ->
+      Ok((reg2, peer, _cert)) -> Ok((reg2, peer))
+    end
+  end
+
+  doc "`accept_split_within` in either authentication mode; see `connect_split_auth`."
+  fn accept_split_auth(reg, listen_fd, my_id, auth, timeout_ms) do
+    match take(listen_fd, my_id, auth, timeout_ms) do
+      Err(e) -> Err(e)
+      Ok((cfd, a)) ->
+        let peer_id = a.identity
+        let role1 = a.role
         if role1 != Handshake.role_control() do
           Err("ClusterConn: expected the control connection first, got " ++ role1)
         else
-          match take(listen_fd, my_id, secret, timeout_ms) do
+          match take(listen_fd, my_id, auth, timeout_ms) do
             Err(e) ->
               tcp_close(cfd)
               Err(e)
-            Ok((dfd, peer_id2, role2)) ->
+            Ok((dfd, a2)) ->
+              let peer_id2 = a2.identity
+              let role2 = a2.role
               if role2 != Handshake.role_data() || peer_id2.node_id != peer_id.node_id do
                 Err("ClusterConn: expected " ++ peer_id.node_id ++ "'s data connection, got " ++ role2 ++ " from " ++ peer_id2.node_id)
               else
+                remember(a)
                 let peer = { node_id: peer_id.node_id, identity: peer_id, fd: cfd, data_fd: dfd }
-                Ok((PeerRegistry.add(reg, peer), peer))
+                Ok((PeerRegistry.add(reg, peer), peer, a.cert))
               end
           end
         end

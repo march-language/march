@@ -5920,6 +5920,26 @@ let rec check_decl env (d : Ast.decl) : env =
     bind_var name.txt (Mono (TCon ("Pid", [state_ty]))) env_with_ctors
 
   | Ast.DMod (name, _vis, decls, _sp) ->
+    (* A module nested inside another may name an enclosing module's fn by
+       its QUALIFIED path (`Outer.helper`) as well as bare, and that includes
+       a `pfn`: the caller is lexically inside `Outer`, so the fn is in scope.
+       [env] here is the enclosing module's own scope — [local_fns] its fns,
+       [cap_qual_prefix] its full path — so bind "<path>.<fn>" to the same
+       scheme the bare name has.  Only the nested module's env sees these keys;
+       its export step below re-exports [pub_set] members only.  Before this a
+       qualified call to an enclosing `pfn` of a REGISTRY module (every stdlib
+       module) was "private to module" ([is_confirmed_private_qualified]); an
+       in-file one only got through by the dot-suffix fallback, i.e. by
+       whatever the BARE name meant at the call site, even a nearer shadowing
+       fn.  specs/progress/2026-09-25-nested-module-parent-call.md *)
+    let scope_env =
+      if env.cap_qual_prefix = "" then env
+      else StrMap.fold (fun f () e ->
+          let q = env.cap_qual_prefix ^ "." ^ f in
+          if StrMap.mem q e.vars then e
+          else match lookup_var f env with
+            | Some sch -> { e with vars = StrMap.add q sch e.vars }
+            | None -> e) env.local_fns env in
     (* Reset local_fns for this module's scope: a nested module's locally
        defined fn names shadow bulk imports inside it (see env.local_fns). *)
     let pre_env = List.fold_left (fun e d ->
@@ -5934,7 +5954,7 @@ let rec check_decl env (d : Ast.decl) : env =
           { e with local_fns = StrMap.add def.fn_name.txt () e.local_fns;
                    fn_arities = StrMap.add def.fn_name.txt (arity, def.fn_name.span) e.fn_arities }
         | _ -> e
-      ) { env with local_fns = StrMap.empty; current_module = name.txt;
+      ) { scope_env with local_fns = StrMap.empty; current_module = name.txt;
           cap_qual_prefix =
             (if env.cap_qual_prefix = "" then name.txt
              else env.cap_qual_prefix ^ "." ^ name.txt) } decls in

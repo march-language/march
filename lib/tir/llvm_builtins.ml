@@ -397,8 +397,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_vault_ns_drop(ptr %ns, ptr %key)" };
   { march_name = "md5"; c_name = Some "march_md5"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_md5(ptr %b)" };
-  { march_name = "sha256"; c_name = Some "march_sha256"; ret_ty = Some Tir.TString;
-    in_is_builtin = true; declare_sig = Some "declare ptr  @march_sha256(ptr %b)" };
+  (* sha256 : Bytes -> String (hex). Its own C entry: march_sha256 reads a
+     march_string, and the Bytes box's pad word carries a type id, so the
+     runtime cannot tell the two apart at run time -- the compiler picks the
+     entry by the builtin's static type. See the note in typecheck_builtins. *)
+  { march_name = "sha256"; c_name = Some "march_sha256_of_bytes"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_sha256_of_bytes(ptr %b)" };
   { march_name = "stdlib_sha256"; c_name = Some "march_sha256"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_sha256(ptr %b)" };
   { march_name = "sha512"; c_name = Some "march_sha512"; ret_ty = Some Tir.TString;
@@ -413,6 +417,15 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_hmac_sha256(ptr %key, ptr %msg)" };
   { march_name = "hmac_sha256_bytes"; c_name = Some "march_hmac_sha256_bytes"; ret_ty = Some (Tir.TCon ("Bytes", []));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_hmac_sha256_bytes(ptr %key, ptr %msg)" };
+  (* ed25519 / X25519 over the vendored TweetNaCl (runtime/march_nacl.c). *)
+  { march_name = "ed25519_seed_keypair"; c_name = Some "march_ed25519_seed_keypair"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_ed25519_seed_keypair(ptr %seed)" };
+  { march_name = "ed25519_sign"; c_name = Some "march_ed25519_sign"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_ed25519_sign(ptr %sk, ptr %msg)" };
+  { march_name = "ed25519_verify"; c_name = Some "march_ed25519_verify"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_ed25519_verify(ptr %pk, ptr %msg, ptr %sig)" };
+  { march_name = "x25519"; c_name = Some "march_x25519"; ret_ty = Some (Tir.TCon ("Bytes", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_x25519(ptr %k, ptr %u)" };
   { march_name = "pbkdf2_sha256"; c_name = Some "march_pbkdf2_sha256"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_pbkdf2_sha256(ptr %pass, ptr %salt, i64 %iters, i64 %len)" };
   { march_name = "base64_encode"; c_name = Some "march_base64_encode"; ret_ty = Some Tir.TString;
@@ -766,6 +779,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_f32_arr_set(ptr %arr, i64 %i, double %v)" };
   { march_name = "native_f32_arr_sum"; c_name = None; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @native_f32_arr_sum(ptr %arr)" };
+  { march_name = "native_f32_arr_sort"; c_name = None; ret_ty = Some (Tir.TCon ("NativeF32Arr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_f32_arr_sort(ptr %arr)" };
   { march_name = "native_f32_arr_map"; c_name = None; ret_ty = Some (Tir.TCon ("NativeF32Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_f32_arr_map(ptr %arr, ptr %f)" };
   { march_name = "native_f32_arr_map2"; c_name = None; ret_ty = Some (Tir.TCon ("NativeF32Arr", []));
@@ -786,6 +801,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_i32_arr_set(ptr %arr, i64 %i, i64 %v)" };
   { march_name = "native_i32_arr_sum"; c_name = None; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @native_i32_arr_sum(ptr %arr)" };
+  { march_name = "native_i32_arr_sort"; c_name = None; ret_ty = Some (Tir.TCon ("NativeI32Arr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_i32_arr_sort(ptr %arr)" };
   { march_name = "native_i32_arr_map"; c_name = None; ret_ty = Some (Tir.TCon ("NativeI32Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_i32_arr_map(ptr %arr, ptr %f)" };
   { march_name = "native_i32_arr_map2"; c_name = None; ret_ty = Some (Tir.TCon ("NativeI32Arr", []));
@@ -806,6 +823,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_u8_arr_set(ptr %arr, i64 %i, i64 %v)" };
   { march_name = "native_u8_arr_sum"; c_name = None; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @native_u8_arr_sum(ptr %arr)" };
+  { march_name = "native_u8_arr_sort"; c_name = None; ret_ty = Some (Tir.TCon ("NativeU8Arr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_u8_arr_sort(ptr %arr)" };
   { march_name = "native_u8_arr_map"; c_name = None; ret_ty = Some (Tir.TCon ("NativeU8Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_u8_arr_map(ptr %arr, ptr %f)" };
   { march_name = "native_u8_arr_map2"; c_name = None; ret_ty = Some (Tir.TCon ("NativeU8Arr", []));
@@ -1409,10 +1428,15 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PComment "; Crypto / hash builtins";
   PDeclare "march_md5";
   PDeclare "march_sha256";
+  PDeclare "march_sha256_of_bytes";
   PDeclare "march_sha512";
   PDeclare "march_sha1_bytes";
   PDeclare "march_hmac_sha256";
   PDeclare "march_hmac_sha256_bytes";
+  PDeclare "march_ed25519_seed_keypair";
+  PDeclare "march_ed25519_sign";
+  PDeclare "march_ed25519_verify";
+  PDeclare "march_x25519";
   PDeclare "march_pbkdf2_sha256";
   PDeclare "march_base64_encode";
   PDeclare "march_base64_decode";
@@ -1640,6 +1664,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_f32_arr_get";
   PDeclare "native_f32_arr_set";
   PDeclare "native_f32_arr_sum";
+  PDeclare "native_f32_arr_sort";
   PDeclare "native_f32_arr_map";
   PDeclare "native_f32_arr_map2";
   PDeclare "native_f32_arr_fold";
@@ -1650,6 +1675,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_i32_arr_get";
   PDeclare "native_i32_arr_set";
   PDeclare "native_i32_arr_sum";
+  PDeclare "native_i32_arr_sort";
   PDeclare "native_i32_arr_map";
   PDeclare "native_i32_arr_map2";
   PDeclare "native_i32_arr_fold";
@@ -1660,6 +1686,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_u8_arr_get";
   PDeclare "native_u8_arr_set";
   PDeclare "native_u8_arr_sum";
+  PDeclare "native_u8_arr_sort";
   PDeclare "native_u8_arr_map";
   PDeclare "native_u8_arr_map2";
   PDeclare "native_u8_arr_fold";

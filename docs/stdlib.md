@@ -11,7 +11,7 @@ permalink: /docs/stdlib-guide/
 > signatures and docstrings generated from source, lives at **[/docs/stdlib/](/docs/stdlib/)**.
 > This page is a hand-written tour of the most commonly used modules.
 
-March ships with 125 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
+March ships with 126 stdlib modules covering collections, strings, I/O, HTTP, cryptography, and more. This page provides an overview and quick reference for the most commonly used modules.
 
 All stdlib modules are available without any import statement: use qualified access (`List.map`, `String.length`, etc.) or `import`/`use` to bring names into scope.
 
@@ -61,7 +61,8 @@ observe for plain numbers, and it recognises already-sorted, reversed and
 low-cardinality input instead of always paying `n log n`.
 `NativeArray.sort_float` does the same for `Float` arrays, ordering by IEEE 754
 `totalOrder`: NaNs get a fixed place at the ends, and `-0.0` sorts before
-`0.0`. The narrow widths (f32, i32, u8) are not sorted yet.
+`0.0`. `sort_i32` and `sort_f32` are the same sorts on 4-byte elements (f32 is
+not widened to f64 to sort), and `sort_u8` is a counting sort.
 
 When you need guaranteed vector codegen rather than an optimizer decision
 (cross-lane structure with masks and `select`, a fused multiply-add, or byte-level
@@ -897,13 +898,31 @@ NetFrame.encode(payload)       -- List(Int)  (4-byte header + payload)
 NetFrame.decode(buf)           -- Option((List(Int), List(Int)))
 ```
 
-### ClusterAuth
+### NodeCert
 
-`cluster_auth.march`: Shared-secret HMAC challenge/response.
+`node_cert.march`: node certificates for certificate-mode clusters, signed
+ed25519 by an operator key (`forge cluster keygen`, `forge cluster cert`).
 
 ```march
+NodeCert.keypair()                           -- Bytes (64-byte ed25519 secret key)
+NodeCert.sign(cert, operator_sk)             -- Signed
+NodeCert.verify(signed, operator_pub, now)   -- Result(Cert, String); now in unix seconds
+NodeCert.to_text(signed) / from_text(text)   -- base64 wire form (MARCH_NODE_CERT)
+NodeCert.has_role(cert, "Proto.Role:offer")  -- Bool
+NodeCert.sign_revocation(rev, operator_sk)   -- SignedRevocation
+NodeCert.is_revoked(cert, revocations)       -- Bool
+```
+
+### ClusterAuth
+
+`cluster_auth.march`: how a node authenticates in the cluster handshake, in
+either mode, and the per-connection MAC keys the handshake derives.
+
+```march
+ClusterAuth.Secret(secret) / ClusterAuth.Certified(credentials)  -- Auth
 ClusterAuth.prove(secret, nonce)         -- String (HMAC-SHA256 hex)
 ClusterAuth.verify(secret, nonce, proof) -- Bool
+ClusterAuth.frame_keys(ikm, transcript, my_nonce, peer_nonce)  -- FrameKeys (HKDF-SHA256)
 ```
 
 ### Handshake

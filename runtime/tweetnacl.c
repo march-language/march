@@ -401,8 +401,14 @@ static int randombytes(uint8_t *out, size_t len) {
 /* ── Public API ──────────────────────────────────────────────────────────── */
 
 int crypto_sign_keypair(unsigned char *pk, unsigned char *sk) {
-    uint8_t seed[32], h[64];
+    uint8_t seed[32];
     if (randombytes(seed, 32) != 0) return -1;
+    return crypto_sign_seed_keypair(pk, sk, seed);
+}
+
+int crypto_sign_seed_keypair(unsigned char *pk, unsigned char *sk,
+                             const unsigned char *seed) {
+    uint8_t h[64];
     sha512_hash(seed, 32, h);
     clamp(h);
     gf p[4];
@@ -504,4 +510,70 @@ int crypto_sign_open(unsigned char *m, unsigned long long *mlen,
     if (m) memcpy(m, sm + 64, (size_t)msglen);
     if (mlen) *mlen = msglen;
     return 0;
+}
+
+/* ── X25519 (RFC 7748) ───────────────────────────────────────────────────
+ * TweetNaCl's crypto_scalarmult, over the same radix-2^16 field arithmetic
+ * the ed25519 code above uses (gf_mul reduces twice, as TweetNaCl's M does;
+ * gf_cswap is its sel25519). Added for the cluster handshake's ephemeral key
+ * agreement (specs/progress/2026-09-24-dd-step11a-node-certificates.md).
+ * Checked against RFC 7748 section 5.2 and 6.1 vectors in the stdlib tests. */
+
+static const gf GF_121665 = {0xDB41, 1};
+
+int crypto_scalarmult(unsigned char *q, const unsigned char *n,
+                      const unsigned char *p) {
+    uint8_t z[32];
+    long long x[80], r;
+    int i;
+    gf a, b, c, d, e, f;
+    for (i = 0; i < 31; i++) z[i] = n[i];
+    z[31] = (uint8_t)((n[31] & 127) | 64);
+    z[0] &= 248;
+    gf_unpack(x, p);
+    for (i = 0; i < 16; i++) {
+        b[i] = x[i];
+        d[i] = a[i] = c[i] = 0;
+    }
+    a[0] = d[0] = 1;
+    for (i = 254; i >= 0; --i) {
+        r = (z[i >> 3] >> (i & 7)) & 1;
+        gf_cswap(a, b, (int)r);
+        gf_cswap(c, d, (int)r);
+        gf_add(e, a, c);
+        gf_sub(a, a, c);
+        gf_add(c, b, d);
+        gf_sub(b, b, d);
+        gf_sqr(d, e);
+        gf_sqr(f, a);
+        gf_mul(a, c, a);
+        gf_mul(c, b, e);
+        gf_add(e, a, c);
+        gf_sub(a, a, c);
+        gf_sqr(b, a);
+        gf_sub(c, d, f);
+        gf_mul(a, c, GF_121665);
+        gf_add(a, a, d);
+        gf_mul(c, c, a);
+        gf_mul(a, d, f);
+        gf_mul(d, b, x);
+        gf_sqr(b, e);
+        gf_cswap(a, b, (int)r);
+        gf_cswap(c, d, (int)r);
+    }
+    for (i = 0; i < 16; i++) {
+        x[i + 16] = a[i];
+        x[i + 32] = c[i];
+        x[i + 48] = b[i];
+        x[i + 64] = d[i];
+    }
+    gf_inv(x + 32, x + 32);
+    gf_mul(x + 16, x + 16, x + 32);
+    gf_pack(q, x + 16);
+    return 0;
+}
+
+int crypto_scalarmult_base(unsigned char *q, const unsigned char *n) {
+    static const unsigned char base[32] = {9};
+    return crypto_scalarmult(q, n, base);
 }

@@ -288,6 +288,24 @@ two stop agreeing, one of them is measuring something other than the sort).
 The three sub-millisecond rows are the full-run scan and the equal-partition;
 any of them climbing into the milliseconds means a special case stopped firing.
 
+The other widths have no committed March benchmark. A scratch run of the same
+shape on 2026-09-25 (n = 1,000,000, compiled `--opt 2`, arm64, load average
+~7), in ms (random is min of 3), with f64/f32 on the same values scaled to signed quarter-steps and
+u8 on the values mod 256:
+
+| pattern | `sort_int` | `sort_i32` | `sort_float` | `sort_f32` | `sort_u8` |
+|---|---:|---:|---:|---:|---:|
+| random | 13.2 | 12.8 | 13.5 | 12.8 | 0.29 |
+| sorted | 0.29 | 0.28 | 0.70 | 0.41 | 0.30 |
+| reversed | 0.48 | 0.43 | 0.85 | 0.56 | 0.30 |
+| 10 distinct | 2.0 | 1.8 | 2.6 | 2.1 | 0.49 |
+| sawtooth | 10.1 | 9.3 | 10.5 | 9.5 | 0.30 |
+
+i32 is only 3-10% ahead of i64: at this size the sort is compare-bound, not
+bandwidth-bound. The float rows pay two extra key-transform passes, which is
+visible only on the already-linear patterns. `sort_u8` is a counting sort and
+does not care about the pattern.
+
 ---
 
 ## bench/c/native_sort_bench.c — NativeArray.sort_int (i64 sorting)
@@ -319,8 +337,8 @@ means a special case stopped firing; `sawtooth` alone regressing means pivot
 sampling is being defeated again. Run it after any change to the sort, and
 after a clang upgrade — the partition's speed depends on `csel` being emitted.
 
-Touching the sort? Also run `dune build --root . test/native_arr_sort.out`,
-which is the correctness half. Speed without a multiset check is meaningless.
+Touching the sort? Also run `dune build --root . test/native_arr_sort.out
+test/native_arr_sort_narrow.out`, which is the correctness half. Speed without a multiset check is meaningless.
 
 ---
 
@@ -359,6 +377,34 @@ March pays per-node dec_rc. A large regression vs the previous run suggests
 the Perceus pass is inserting extra dec_rc calls.
 
 ---
+
+## bench/cluster_frames.march — framed messages over a loopback cluster connection
+
+One `ClusterConn` connection pair on loopback (shared-secret handshake),
+`NetKernel.send_frame` in one task and `PeerReader.serve` in another. Since
+distributed-deploys step 11a every frame after the handshake is sealed
+(HMAC-SHA256, 40 bytes of sequence number and tag), so this is the bench for
+the per-frame MAC and for anything else on the framed transport. Uses only APIs
+older than the MAC, so a compiler from before and after can be compared on it.
+
+A/B, 2026-09-24, macOS arm64, compiled `--opt 2`, same box and same minute
+(load average ~13 from other sessions), main at d3396f743 against the step-11a
+branch, larger counts than the gated defaults (20000 / 20000 / 2000 frames),
+two alternating runs each:
+
+| payload | main µs/frame | 11a µs/frame | delta |
+|---:|---:|---:|---:|
+| 64 B | 48 / 45 | 72 / 72 | +25 µs (+55%) |
+| 1 KiB | 655 / 655 | 652 / 658 | none measurable |
+| 16 KiB | 2872 / 2759 | 3982 / 3980 | +1.1 ms (+40%) |
+
+The 1 KiB case is dominated by a ~650 µs per-frame stall that main has too
+(not investigated here). Most of the 16 KiB delta is not the HMAC, which is
+tens of µs natively: it is the `List(Int)` <-> `Bytes` conversions sealing and
+opening add, because frames are still `List(Int)` above the socket. Carrying
+frames as `Bytes` end to end would remove them. The two-node `stream` scenario
+showed no difference (median 1040 ms main vs 1041 ms 11a over five runs of the
+compiled node pair): its handful of messages is noise next to connection setup.
 
 ## bench/tree_transform.march — FBIP tree rewrite (depth=20, ×100)
 

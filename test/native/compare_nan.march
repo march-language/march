@@ -1,0 +1,91 @@
+-- `compare` on a NaN Float, on both backends (one golden for both).
+--
+-- Compiled `compare` on Float lowers to the C runtime's march_compare_float,
+-- which was `(x > y) - (x < y)`: 0 whenever either operand is NaN, so NaN
+-- "equalled" every value and compare stopped being an ordering. Interpreted,
+-- compare follows OCaml's Float.compare: NaN == NaN, NaN < every other value.
+-- Both now agree on the interpreter's order; `==`/`<`/`<=`/`>` stay IEEE (every
+-- one of them is false with a NaN operand). compare_float is the same order.
+--
+-- Also: a NaN reached through a type variable (gcmp/glt/gle), a NaN inside a
+-- list compared lexicographically by compare, and sorts by a compare-based
+-- comparator (compiled, NaN "equal" to everything left the NaNs wherever the
+-- merge happened to put them; now they sort first, as interpreted).
+--
+-- Not here: a Map keyed by Float with a NaN key. Compiled Map lookup ignores
+-- the caller's comparator entirely (a parameter named `eq` lowers as the
+-- builtin `==`, so a NaN key is never found again) -- a separate bug, see
+-- specs/todos/2026-09-24-param-named-eq-lowers-as-builtin.md.
+mod CompareNan do
+  needs IO.Console
+
+  fn gcmp(a, b) do
+    compare(a, b)
+  end
+
+  fn glt(a, b) do
+    a < b
+  end
+
+  fn gle(a, b) do
+    a <= b
+  end
+
+  -- Lexicographic compare of two Float lists, element by element.
+  fn list_cmp(xs : List(Float), ys : List(Float)) : Int do
+    match (xs, ys) do
+    (Nil, Nil) -> 0
+    (Nil, _) -> -1
+    (_, Nil) -> 1
+    (Cons(x, xt), Cons(y, yt)) ->
+      let c = compare(x, y)
+      if c != 0 do c else list_cmp(xt, yt) end
+    end
+  end
+
+  fn show_floats(xs : List(Float), acc : String) : String do
+    match xs do
+    Nil -> acc
+    Cons(h, t) ->
+      let sep = if acc == "" do "" else ", " end
+      show_floats(t, acc ++ sep ++ float_to_string(h))
+    end
+  end
+
+  fn cmp_lt(a : Float, b : Float) : Bool do
+    compare(a, b) < 0
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let nan = float_nan()
+    println("compare(nan, 1.0) = " ++ int_to_string(compare(nan, 1.0)))
+    println("compare(1.0, nan) = " ++ int_to_string(compare(1.0, nan)))
+    println("compare(nan, nan) = " ++ int_to_string(compare(nan, nan)))
+    println("compare(nan, -inf) = " ++ int_to_string(compare(nan, float_neg_infinity())))
+    println("compare(inf, nan) = " ++ int_to_string(compare(float_infinity(), nan)))
+    println("compare(1.0, 2.0) = " ++ int_to_string(compare(1.0, 2.0)))
+    println("compare(-0.0, 0.0) = " ++ int_to_string(compare(-0.0, 0.0)))
+    println("compare_float(nan, 1.0) = " ++ int_to_string(compare_float(nan, 1.0)))
+    println("compare_float(1.0, nan) = " ++ int_to_string(compare_float(1.0, nan)))
+    println("compare_float(nan, nan) = " ++ int_to_string(compare_float(nan, nan)))
+    println("nan == nan: " ++ bool_to_string(nan == nan))
+    println("nan < 1.0: " ++ bool_to_string(nan < 1.0))
+    println("nan <= 1.0: " ++ bool_to_string(nan <= 1.0))
+    println("nan > 1.0: " ++ bool_to_string(nan > 1.0))
+    println("gcmp(nan, 1.0) = " ++ int_to_string(gcmp(nan, 1.0)))
+    println("gcmp(1.0, nan) = " ++ int_to_string(gcmp(1.0, nan)))
+    println("gcmp(nan, nan) = " ++ int_to_string(gcmp(nan, nan)))
+    println("glt(nan, 1.0): " ++ bool_to_string(glt(nan, 1.0)))
+    println("glt(1.0, nan): " ++ bool_to_string(glt(1.0, nan)))
+    println("gle(nan, 1.0): " ++ bool_to_string(gle(nan, 1.0)))
+    println("gle(nan, nan): " ++ bool_to_string(gle(nan, nan)))
+    println("list_cmp([nan], [1.0]) = " ++ int_to_string(list_cmp([nan], [1.0])))
+    println("list_cmp([1.0], [nan]) = " ++ int_to_string(list_cmp([1.0], [nan])))
+    println("list_cmp([nan, 2.0], [nan, 1.0]) = " ++ int_to_string(list_cmp([nan, 2.0], [nan, 1.0])))
+    let xs = [3.0, nan, 1.0, 2.0, nan, 0.5]
+    println("sort_by compare: " ++ show_floats(List.sort_by(xs, cmp_lt), ""))
+    let ys = [nan, 2.0, float_neg_infinity(), nan, -0.0, 7.5]
+    println("sort_by compare (2): " ++ show_floats(List.sort_by(ys, cmp_lt), ""))
+    println("sorted again, unchanged: " ++ show_floats(List.sort_by(List.sort_by(xs, cmp_lt), cmp_lt), ""))
+  end
+end

@@ -96,6 +96,8 @@ native_cluster_accept_silent_peer: coverage audit (user + stdlib): 120 enforced,
 native_cluster_accept_silent_peer: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_compare_builtins: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_compare_builtins: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_compare_nan: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_compare_nan: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_config_typed_keys: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_config_typed_keys: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_control_channel_loopback: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
@@ -296,6 +298,8 @@ native_native_arr_narrow_inline: coverage audit (user + stdlib): 120 enforced, 0
 native_native_arr_narrow_inline: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_native_arr_sort: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_native_arr_sort: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_sort_narrow: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_native_arr_sort_narrow: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_native_float_box_abi_leak_probe: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_native_float_box_abi_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_actor_spawn: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
@@ -396,6 +400,8 @@ native_sched_stress: coverage audit (user + stdlib): 120 enforced, 0 inert (warn
 native_sched_stress: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_session_node_fan_loopback: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_session_node_fan_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_sha256_hex_string: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_sha256_hex_string: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_shadow_selfref_let: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_shadow_selfref_let: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_shadowed_builtin_name: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
@@ -678,6 +684,8 @@ stdlib_node: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 u
 stdlib_node: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_call: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_call: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_node_cert: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+stdlib_node_cert: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_identity: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_identity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_node_queue: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced

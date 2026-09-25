@@ -1,0 +1,194 @@
+# Distributed deploys step 11a: node certificates, cert handshake, per-frame MAC, revocation
+
+**Plan:** [../plans/2026-09-21-distributed-authority-and-deploys-plan.md](../plans/2026-09-21-distributed-authority-and-deploys-plan.md),
+section 3 (Identity, Threat model), 7.4, II.9, D3, D4. The authorization half
+(11b: the two-way role check, raw-send denial) is still open:
+[../todos/2026-09-22-dd-step11-certificates-segregation.md](../todos/2026-09-22-dd-step11-certificates-segregation.md).
+
+## 1. Certificates
+
+- **Crypto builtins.** `ed25519_seed_keypair(seed)`, `ed25519_sign(sk, msg)`,
+  `ed25519_verify(pk, msg, sig)`, `x25519(scalar, point)`, all over `Bytes`.
+  Native: `runtime/march_nacl.c` over the vendored `runtime/tweetnacl.c`, which
+  gained `crypto_sign_seed_keypair` and TweetNaCl's `crypto_scalarmult`
+  (X25519, the same radix-2^16 field code the ed25519 half uses). Interpreter:
+  `lib/eval/eval_builtins.ml` through `lib/ed25519` (the OCaml bindings forge
+  already used, which link the same C). A wrong-length argument returns empty
+  Bytes (verify: `false`), never an abort; `x25519` also returns empty Bytes for
+  an all-zero result (a low-order peer point). Checked against RFC 8032 section
+  7.1 tests 1-2 and RFC 7748 sections 5.2 and 6.1, natively and interpreted.
+- **Runtime manifest.** `tweetnacl.c` moved from role `hcr` to `core`+`jit`
+  (it was skipped under `--compile-so`; the builtins need it everywhere), and
+  `march_nacl.c` is new (`core`, `jit`). The wrappers are a separate file
+  because `tweetnacl.c` is also compiled standalone into `lib/ed25519` and C
+  test harnesses with no March runtime to link.
+- **`NodeCert`** (`stdlib/node_cert.march`): `Cert { node, roles, flags,
+  not_after, issuer, pubkey, serial }`; canonical MessagePack body; signed form
+  `[Bin(body), Bin(signature)]`, base64 as text; `verify(signed, operator_pub,
+  now)`; signed revocations (by serial, or by node with an empty serial).
+  SPIFFE-style URIs: `spiffe://<td>/pool/<pool>/node/<name>` and
+  `spiffe://<td>/operator/<16 hex of the operator key>`.
+- **Deviation from the requested record:** two fields were added to the five
+  asked for. `pubkey` (hex of the node's ed25519 public key) is what the
+  handshake's proof of possession checks against, and `serial` is what a
+  revocation names. `not_after` is unix seconds, inclusive.
+- **`forge cluster keygen | cert | revoke`** (`forge/lib/cmd_cluster.ml`,
+  registered in `forge/bin/main.ml` and `known_builtin_names`). The operator
+  key is its own file (`operator.key`, 0600), not the hot-reload deploy key
+  (plan section 3: separate keys). `cert` writes `<node>.key` and
+  `<node>.cert`; `--seconds` exists for short-lived certificates in tests;
+  `--node-key` renews with an existing key.
+- **Found by the full suite, fixed:** `NodeCert.str_list` first passed a lambda
+  returning `Option(List(String))` to `List.fold_right`, whose parameter is
+  named `f`; with `node_cert` eagerly loaded, an unrelated user program that
+  defines a top-level `fn f` (test_codegen's `unit_tail_discard` fixture)
+  failed to compile with mono's repr-disagreement refusal (the defun
+  capture-shadowing bug, `specs/progress/` 2026-09 entries). Rewritten as plain
+  recursion. The refinement-audit corpus baseline gained the module's two lines.
+- **Byte compatibility** between forge's OCaml MessagePack encoder and
+  `Msgpack.encode` is pinned by one vector asserted in both
+  `test/stdlib/test_node_cert.march` and `forge/test/test_cluster.ml`
+  (perturbing one digit of the March copy fails the test).
+
+## 2. The certificate handshake
+
+- **`ClusterAuth.Auth = Secret(String) | Certified(NodeCert.Credentials)`**, and
+  `NetKernel.handshake_auth(fd, me, auth, nonce, role, addr, timeout_ms)`
+  returning `NetKernel.Authed { identity, role, addr, cert, mac }`. The old
+  entry points (`handshake`, `handshake_role`, `handshake_addr`) are
+  `handshake_auth` with `Secret`.
+- **Certificate mode.** The hello gains a seventh element
+  `["cert1", Bin(signed cert), Bin(ephemeral X25519 key)]`; a shared-secret
+  hello is byte-identical to before. Each side checks the peer's certificate
+  (`Handshake.verify_peer_cert`: operator signature, `not_after`, the node's
+  revocation predicate, the URI's node name equals the hello's name, and the
+  hello's node id is `NodeIdentity.name_id(name)`), then sends an ed25519
+  signature over the PEER's nonce and the transcript
+  (`ClusterAuth.transcript`: both hellos' bytes, ordered by nonce) in place
+  of the HMAC proof, and verifies the peer's under the certificate's key.
+- **Modes do not mix.** `Handshake.check_mode`: a certificate node refuses a
+  shared-secret hello, and a shared-secret node refuses a certificate hello,
+  each naming the variables to set. A pre-11a node cannot decode a
+  certificate hello ("malformed hello").
+- **Reflection closed.** A peer whose nonce equals ours is refused in both
+  modes. Before this, a shared-secret node accepted an attacker that sent its
+  own hello back and then its own proof back (the proof is an HMAC of the
+  nonce the node itself issued).
+- **Where certificates are kept.** `ClusterConn.connect_split_auth` /
+  `accept_split_auth` return the peer's certificate and remember it
+  (`ClusterConn.peer_cert(node_id)`). `ClusterNode` carries it from the dial
+  and accept tasks to the node (`Accepted`/`Dialed`), keeps it in the core
+  (`CnState.certs`, `core_peer_cert`) and mirrors it for
+  `ClusterNode.peer_cert(c, node_id)` through the `ClusterOps` dictionary
+  (D35; `ops_stub` panics for it like every other field).
+- **Config.** `CnConfig.auth` (default `Secret(secret)`); `config_from_env`
+  switches to certificate mode when `MARCH_NODE_CERT` is set, requiring
+  `MARCH_NODE_KEY` and `MARCH_CLUSTER_OPERATOR_PUBKEY`; each value may name a
+  file. `ClusterNode.credentials` checks the node's own certificate at
+  startup (operator signature, expiry, its name, its key).
+- **Security events.** `ClusterNode.on_security_event(c, f)` reports refused
+  handshakes (`HandshakeRejected(who, why)`); before, a dial or accept that
+  failed its handshake was silent.
+- **A dial now checks both connections reach the same node** (ClusterNode's
+  `dial` and `connect_split_auth`); before, the data connection's peer was
+  never compared with the control connection's.
+- **Deviation:** node ids are still `derive_id("pk-" ++ name)`, not the hash
+  of the node's real key. Changing that would move every node id (topology
+  ranking, tests). The certificate binds the id through the name instead.
+- **Found on the way (pre-existing, not fixed here):** the bare `sha256`
+  builtin is typed `Bytes -> Bytes` but returns a hex String on both backends,
+  and a compiled program that uses its result as Bytes dies with SIGBUS. The
+  transcript uses `hmac_sha256_bytes` under a fixed label instead.
+
+## 3. Per-frame MAC
+
+- **Sealed frames** (`NetFrame.seal`/`open`): after the handshake every frame
+  body is `seq (8 bytes BE) ++ payload ++ HMAC-SHA256(key, seq ++ payload)`,
+  the length prefix covering all of it (40 bytes of overhead). Integrity, not
+  confidentiality (D4): the payload stays readable.
+- **Explicit sequence number and a receive window** (`window_accept`, 32
+  frames), not an implied counter. A socket can have two local writers
+  (SessionNode writes CREDIT from its data reader and Bye from `finish` on one
+  control connection); with an implied counter, a preemption between taking a
+  number and writing would reorder two frames and fail both. The window
+  accepts each number once, so replays and injected frames fail and local
+  reordering does not. A DELETED frame is not detected (documented).
+- **Keys** (`ClusterAuth.frame_keys`): HKDF-SHA256 (RFC 5869 test case 1 in
+  the unit tests), salt the transcript hash, one key per direction named by
+  the sender's nonce. Certificate mode: the input key material is an X25519
+  agreement between the ephemeral keys in the two hellos. The runtime did not
+  have X25519, so TweetNaCl's `crypto_scalarmult` was added (step 1) rather
+  than deriving from the nonces: nonces cross the wire in the clear, so a key
+  derived from them alone is known to any eavesdropper. The signed transcript
+  binds the ephemeral keys to the certificates. Shared-secret mode: the input
+  key material is the secret.
+- **Negotiation in shared-secret mode**: a node appends `~mac1` to its nonce;
+  frames are sealed when both nonces carry it. A pre-11a node treats the nonce
+  as opaque (it only HMACs it), so old and new nodes still interoperate,
+  unsealed. The flag cannot be stripped in transit, because each side's proof
+  is an HMAC of the nonce exactly as the other side sent it. Certificate mode
+  always seals.
+- **Where it applies**: per fd, in NetKernel (`install` at the end of the
+  handshake, `forget`), so everything above the net-kernel (PeerReader,
+  NodeSend, NodeCall, SessionNode, ClusterNode) seals and checks without
+  changes; NodeQueue, which frames at enqueue time, writes through the new
+  `NetKernel.write_framed`. The handshake forgets any earlier state on its fd,
+  and ClusterNode forgets a link's fds when it releases them.
+- **Failures**: a frame that fails its MAC (or a replayed number) is dropped
+  and counted (`NetKernel.frames_rejected`, `ClusterNode.frames_rejected`), the
+  `NetKernel.on_frame_rejected` hooks run, and ClusterNode reports
+  `FrameRejected(node_id, n)` to `on_security_event` subscribers. After
+  `NetKernel.mac_failure_limit()` (3) failures on one connection its reader
+  gets Err and the connection closes through the existing path.
+- **Cost**: see `specs/benchmarks.md`, `bench/cluster_frames.march` (new, gated
+  with value anchors): +25 µs/frame at 64 B, +1.1 ms at 16 KiB, mostly
+  `List(Int)`/`Bytes` conversion rather than the HMAC; no difference on the
+  two-node `stream` scenario.
+
+## 4. Revocation and expiry
+
+- **Expiry**: `not_after` is checked in every handshake (`NodeCert.verify`)
+  and again for every linked peer on every tick (`core_check_certs`, run at
+  the start of `core_tick`). An expired certificate's link is dropped, the
+  member is queued `PeerDown`, and the tick reports
+  `NodeDead(info, "certificate expired")`; sessions with the node are then
+  cancelled through the existing NodeDead path.
+- **Revocations** (`NodeCert.SignedRevocation`, operator-signed, by serial or
+  by node): `ClusterNode.revoke(c, token)` (the token is `forge cluster
+  revoke`'s output), `MARCH_CLUSTER_REVOCATIONS` at startup (tokens, or a file
+  of them), and REVOCATIONS control frames (tag 15) from peers:
+  the whole list goes to every new link and each new revocation to every
+  linked peer (`core_revoke`). Only the operator's signature makes one count;
+  a shared-secret node accepts none. A revoked peer is dropped like an expired
+  one, with `"certificate revoked"`, and its handshakes are refused: `start`
+  wraps `Credentials.revoked` to read the node's live list.
+- **Deviation:** the revocation list rides on its own control frame (tag 15),
+  sent on the same occasions as the member view (every new link) and pushed
+  on change, rather than inside SWIM's MEMBER_GOSSIP frames: it is not
+  per-member state, and a list signed item by item does not fit gossip's
+  one-member records.
+- **A dropped peer stays out**: it is Dead in the member view, redials of it
+  and from it fail at the handshake, and `cert_dead` names the cause so the
+  NodeDead reason is the certificate's, not "gossip". A later link with a
+  valid (renewed) certificate clears it.
+- **API**: `ClusterNode.revoke`, `ClusterNode.revocations`, both through the
+  `ClusterOps` dictionary; `ClusterNode.revocations_from_text`,
+  `encode_revocations`/`decode_revocations`, `core_revoke`, `core_check_certs`.
+
+## 5. Found by CI: an exponential in the native-map inliner
+
+The PR's compiler test shard (`dune build @test/runtest-run_compiler`) hit
+CI's 45-minute timeout (main's takes 14-18 min), and locally `run_compiler`
+took 3.6 h. `sample` on the stuck `march --compile` put all the time in
+`Native_map_inline.count_uses`. In `rewrite_expr`'s arm for a NON-capturing
+closure allocation, an ineligible closure rewrote its continuation twice
+(once as `inner'` for the eligibility check, then `rewrite_expr rest` on the
+fallback), so a function binding k such closures in a row cost 2^k
+traversals. `ClusterNode.ops_stub` is a record of `fn _ -> unsupported(..)`
+lambdas; this step grew it from 28 to 34, and a MAIN-LESS compile (nothing
+prunes an unused stdlib function then: `cap_ceiling`'s "main-less module"
+case, forge's build check in the `rest` shard) went from 24 s in the TIR
+`opt` phase to minutes. The arm now rewrites once and peels the alias chain
+off the rewritten tree, as the capturing arm already did: 5.7 s. The IR
+oracle (baseline with the pre-fix compiler, check with the fixed one) and the
+TIR snapshots show no IR change; `--timings` is the flag that finds this.

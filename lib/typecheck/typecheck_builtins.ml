@@ -1335,7 +1335,14 @@ let builtin_bindings : (string * scheme) list =
     ("self",    Mono t_int);
     ("receive", poly1 (fun a -> a));
     (* Crypto / encoding builtins *)
-    ("sha256",          Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
+    (* sha256(data: Bytes): String -- a 64-char lowercase HEX string, like
+       md5/sha512/Crypto.sha256, and like what BOTH implementations have always
+       returned (eval_builtins' arm via Digestif.to_hex, march_sha256 via
+       march_string_lit). Until 2026-09-24 this said Bytes -> Bytes, so
+       `Bytes.length(sha256(b))` typechecked and then read a march_string as a
+       Bytes ctor: a match failure interpreted, SIGBUS compiled. For a raw
+       digest use hmac_sha256_bytes / sha1_bytes, which really return Bytes. *)
+    ("sha256",          Mono (TArrow (TCon ("Bytes", []), t_string)));
     (* hmac_sha256(key, msg): String-domain HMAC. Canonical signature matches
        the native runtime (march_hmac_sha256 reads march_string args) and the
        eval builtin — both return Result(Bytes, String). *)
@@ -1343,6 +1350,16 @@ let builtin_bindings : (string * scheme) list =
         TCon ("Result", [TCon ("Bytes", []); t_string])))));
     (* hmac_sha256_bytes(key, msg): Bytes-domain HMAC, bare Bytes result *)
     ("hmac_sha256_bytes", Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TCon ("Bytes", [])))));
+    (* ed25519 / X25519 (runtime/march_nacl.c). A wrong-length argument gives
+       EMPTY Bytes (verify: false), never an abort; stdlib/node_cert.march
+       checks. seed_keypair: 32-byte seed -> 64-byte sk (seed || pk). *)
+    ("ed25519_seed_keypair", Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
+    ("ed25519_sign",    Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TCon ("Bytes", [])))));
+    ("ed25519_verify",  Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TArrow (TCon ("Bytes", []), t_bool)))));
+    ("x25519",          Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
         TCon ("Bytes", [])))));
     ("pbkdf2_sha256",   Mono (TArrow (t_string, TArrow (TCon ("Bytes", []),
         TArrow (t_int, TArrow (t_int,
@@ -1485,6 +1502,8 @@ let builtin_bindings : (string * scheme) list =
              TArrow (t_int, TArrow (t_float, TCon ("NativeF32Arr", []))))));
     ("native_f32_arr_sum",
        Mono (TArrow (TCon ("NativeF32Arr", []), t_float)));
+    ("native_f32_arr_sort",
+       Mono (TArrow (TCon ("NativeF32Arr", []), TCon ("NativeF32Arr", []))));
     ("native_f32_arr_map",
        Mono (TArrow (TCon ("NativeF32Arr", []),
              TArrow (TArrow (t_float, t_float), TCon ("NativeF32Arr", [])))));
@@ -1512,6 +1531,8 @@ let builtin_bindings : (string * scheme) list =
              TArrow (t_int, TArrow (t_int, TCon ("NativeI32Arr", []))))));
     ("native_i32_arr_sum",
        Mono (TArrow (TCon ("NativeI32Arr", []), t_int)));
+    ("native_i32_arr_sort",
+       Mono (TArrow (TCon ("NativeI32Arr", []), TCon ("NativeI32Arr", []))));
     ("native_i32_arr_map",
        Mono (TArrow (TCon ("NativeI32Arr", []),
              TArrow (TArrow (t_int, t_int), TCon ("NativeI32Arr", [])))));
@@ -1539,6 +1560,8 @@ let builtin_bindings : (string * scheme) list =
              TArrow (t_int, TArrow (t_int, TCon ("NativeU8Arr", []))))));
     ("native_u8_arr_sum",
        Mono (TArrow (TCon ("NativeU8Arr", []), t_int)));
+    ("native_u8_arr_sort",
+       Mono (TArrow (TCon ("NativeU8Arr", []), TCon ("NativeU8Arr", []))));
     ("native_u8_arr_map",
        Mono (TArrow (TCon ("NativeU8Arr", []),
              TArrow (TArrow (t_int, t_int), TCon ("NativeU8Arr", [])))));

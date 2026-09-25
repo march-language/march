@@ -7,12 +7,13 @@
 (tests
  (names test_forge test_resolver test_solver test_cas_package test_patch
         test_api_surface test_properties test_regression test_cap_binary test_cap_inspect
-        test_audit test_audit_inferred test_cap_package test_dep_dir test_dep_cache_versions)
+        test_audit test_audit_inferred test_cap_package test_dep_dir test_dep_cache_versions test_cluster)
  (modules test_forge test_resolver test_solver test_cas_package test_patch
           test_api_surface test_properties test_regression test_cap_binary test_cap_inspect
-          test_audit test_audit_inferred test_cap_package test_dep_dir test_dep_cache_versions)
+          test_audit test_audit_inferred test_cap_package test_dep_dir test_dep_cache_versions test_cluster)
  (deps ../../bin/main.exe)
- (libraries march_forge march_search march_caps str alcotest unix qcheck-core qcheck-alcotest march_cas))
+ (libraries march_forge march_search march_caps str alcotest unix qcheck-core qcheck-alcotest march_cas
+            march_ed25519))
 
 ; test_cap_sandbox.ml's test_scaffolded_app_builds_clean and
 ; test_forge_fix_applies_capability_errors cases shell out to real bare

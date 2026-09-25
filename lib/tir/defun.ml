@@ -181,12 +181,15 @@ let builtin_names : StringSet.t =
       "native_f32_arr_make"; "native_f32_arr_get"; "native_f32_arr_set";
       "native_f32_arr_length"; "native_f32_arr_from_list"; "native_f32_arr_to_list";
       "native_f32_arr_map"; "native_f32_arr_map2"; "native_f32_arr_sum"; "native_f32_arr_fold";
+      "native_f32_arr_sort";
       "native_i32_arr_make"; "native_i32_arr_get"; "native_i32_arr_set";
       "native_i32_arr_length"; "native_i32_arr_from_list"; "native_i32_arr_to_list";
       "native_i32_arr_map"; "native_i32_arr_map2"; "native_i32_arr_sum"; "native_i32_arr_fold";
+      "native_i32_arr_sort";
       "native_u8_arr_make"; "native_u8_arr_get"; "native_u8_arr_set";
       "native_u8_arr_length"; "native_u8_arr_from_list"; "native_u8_arr_to_list";
       "native_u8_arr_map"; "native_u8_arr_map2"; "native_u8_arr_sum"; "native_u8_arr_fold";
+      "native_u8_arr_sort";
       "native_float_to_f32_arr"; "native_f32_to_float_arr";
       "native_int_to_i32_arr"; "native_i32_to_int_arr";
       "native_int_to_u8_arr"; "native_u8_to_int_arr";
@@ -257,6 +260,7 @@ let builtin_names : StringSet.t =
          These appear unqualified in stdlib code (session.march, csrf.march, etc.)
          and must be treated as top-level to avoid ECallPtr generation. *)
       "hmac_sha256"; "pbkdf2_sha256";
+      "ed25519_seed_keypair"; "ed25519_sign"; "ed25519_verify"; "x25519";
       "sha256"; "sha512";
       "base64_encode"; "base64_decode";
       "random_bytes";

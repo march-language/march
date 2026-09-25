@@ -1,0 +1,3 @@
+node-a: done
+node-a: refused a handshake: certificate not signed by the cluster operator
+node-a: up
