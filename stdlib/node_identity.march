@@ -13,6 +13,15 @@ mod NodeIdentity do
     Crypto.sha256(pubkey)
   end
 
+  doc """
+  The node id every stdlib caller gives a node named [name]:
+  derive_id("pk-" ++ name). Real per-node keys are not what ids derive from
+  yet; a certificate-mode handshake binds the id to the certificate through
+  the name (Handshake.verify_peer_cert requires id == name_id(name), and the
+  certificate to name that node).
+  """
+  fn name_id(name : String) : String do derive_id("pk-" ++ name) end
+
   fn make(name : String, pubkey : String, incarnation : Int) : Identity do
     { name: name, node_id: derive_id(pubkey), incarnation: incarnation }
   end

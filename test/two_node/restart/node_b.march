@@ -13,6 +13,7 @@ mod TwoNodeRestartB do
   needs IO.NetConnect
   needs IO.Spawn
   needs IO.Process
+  needs IO.Mut
 
   actor Sink do
     state { got : Int }
@@ -67,7 +68,7 @@ mod TwoNodeRestartB do
     ()
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_spawn : Cap(IO.Spawn), _cap_process : Cap(IO.Process)) do
+  fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_spawn : Cap(IO.Spawn), _cap_process : Cap(IO.Process), _cap_mut : Cap(IO.Mut)) do
     let port = Env.require_int("MARCH_NODE_PORT")
     let creation = Env.require_int("MARCH_NODE_CREATION")
     let sink = spawn(Sink)

@@ -257,6 +257,7 @@ let builtin_names : StringSet.t =
          These appear unqualified in stdlib code (session.march, csrf.march, etc.)
          and must be treated as top-level to avoid ECallPtr generation. *)
       "hmac_sha256"; "pbkdf2_sha256";
+      "ed25519_seed_keypair"; "ed25519_sign"; "ed25519_verify"; "x25519";
       "sha256"; "sha512";
       "base64_encode"; "base64_decode";
       "random_bytes";

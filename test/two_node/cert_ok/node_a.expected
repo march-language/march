@@ -1,0 +1,5 @@
+node-a: done
+node-a: mode certificate
+node-a: node-b presents spiffe://test.local/pool/web/node/node-b roles=CertOk.B:offer flags=
+node-a: sent 10 pings
+node-a: up

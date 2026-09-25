@@ -6,6 +6,14 @@
 # withdrawal, node-b's one slot would still be held by the abandoned session
 # (which would only give up 30 s later, when it stopped waiting for its
 # peers) and node-a would be told "full".
+# Compile every node first: node-a retries its session for 20 s after
+# node-b goes up, and on a CI runner node-c's compile alone can exceed that
+# (its first start_node compiles it), so node-a gave up before node-c ever
+# offered (CI 2026-09-25, "no session after node-c joined", node-c silent).
+compile a
+compile b
+compile c
+
 ORDERED=1
 start_node a
 wait_line a "node-a: up"

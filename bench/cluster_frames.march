@@ -1,0 +1,78 @@
+-- bench/cluster_frames.march: framed-message throughput over one loopback
+-- cluster connection (ClusterConn.connect_split / accept_split, the
+-- shared-secret handshake), NetKernel.send_frame in one task and
+-- PeerReader.serve in another. Since distributed-deploys step 11a both sides
+-- seal every frame after the handshake (HMAC-SHA256 per frame), so running
+-- this compiled with a compiler from before and after that change measures
+-- the per-frame MAC cost. It uses only APIs that exist on both sides of the
+-- change, for exactly that A/B. Compiled only:
+--   march --compile --opt 2 bench/cluster_frames.march -o /tmp/cluster_frames && /tmp/cluster_frames
+mod ClusterFramesBench do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Random
+  needs IO.Spawn
+
+  pfn secret() : String do "bench-secret" end
+
+  pfn send_n(fd : Int, payload : List(Int), n : Int) : () do
+    if n <= 0 do () else
+      let _ = NetKernel.send_frame(fd, payload)
+      send_n(fd, payload, n - 1)
+    end
+  end
+
+  pfn run(size : Int, n : Int) : () do
+    let listen_fd = match tcp_listen(0) do
+      Ok(fd) -> fd
+      Err(e) -> panic("listen: " ++ e)
+    end
+    let port = match tcp_local_port(listen_fd) do
+      Ok(p) -> p
+      Err(e) -> panic("port: " ++ e)
+    end
+    let acc = task_spawn(fn _ ->
+      match ClusterConn.accept_split(PeerRegistry.empty(), listen_fd, NodeIdentity.make("b", "pk-b", 1), secret()) do
+        Ok((_r, p)) -> p
+        Err(e) -> panic("accept: " ++ e)
+      end)
+    let a = match ClusterConn.connect_split(PeerRegistry.empty(), "127.0.0.1", port, NodeIdentity.make("a", "pk-a", 1), secret()) do
+      Ok((_r, p)) -> p
+      Err(e) -> panic("connect: " ++ e)
+    end
+    let b = match task_await(acc) do
+      Ok(p) -> p
+      Err(e) -> panic("accept task: " ++ e)
+    end
+    let got = Vault.new("cluster_frames_" ++ int_to_string(size))
+    let payload = List.map(List.range(0, size), fn i -> int_and(i, 255))
+    let t0 = unix_time_ms()
+    let reader = task_spawn(fn _ ->
+      PeerReader.serve(b.data_fd, Nil, fn (_tag, f) -> do
+        let _ = Vault.incr(got, "bytes", List.length(f))
+        Ok(Vault.incr(got, "n", 1) < n)
+      end))
+    send_n(a.data_fd, payload, n)
+    let _ = task_await(reader)
+    let ms = unix_time_ms() - t0
+    let per = if n > 0 do ms * 1000 / n else 0 end
+    println("payload " ++ int_to_string(size) ++ " B: received " ++ int_to_string(Vault.get_or(got, "n", 0))
+            ++ " frames, " ++ int_to_string(Vault.get_or(got, "bytes", 0)) ++ " bytes")
+    println("payload " ++ int_to_string(size) ++ " B: " ++ int_to_string(ms) ++ " ms, " ++ int_to_string(per) ++ " us/frame")
+    tcp_close(a.fd)
+    tcp_close(a.data_fd)
+    tcp_close(b.fd)
+    tcp_close(b.data_fd)
+    tcp_close(listen_fd)
+  end
+
+  fn main(_c : Cap(IO)) do
+    run(64, 5000)
+    run(1024, 2000)
+    run(16384, 300)
+  end
+end

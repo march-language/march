@@ -75,6 +75,8 @@ assemble by hand. `ClusterNode` is the assembled node, and most programs should 
 ```march
 -- MARCH_NODE_NAME=a MARCH_NODE_PORT=4001 MARCH_CLUSTER_NODES=10.0.0.2:4001 \
 -- MARCH_CLUSTER_SECRET=... MARCH_NODE_ADVERTISE=10.0.0.1:4001
+-- (or, instead of the secret, MARCH_NODE_CERT / MARCH_NODE_KEY /
+--  MARCH_CLUSTER_OPERATOR_PUBKEY: see "Authentication & Handshake")
 -- inside `fn main(io : Cap(IO))`, in a module that declares `needs ClusterNode.Live`
 match ClusterNode.config_from_env() do
   Err(e) -> panic(e)
@@ -223,46 +225,142 @@ end
 
 ## Authentication & Handshake
 
-Before any cluster traffic flows, nodes exchange a challenge-response handshake using a shared secret.
+Before any cluster traffic flows, two nodes run a challenge-response handshake.
+A node authenticates in one of two modes:
 
-### Generating a secret
+| mode | a node holds | set with |
+|---|---|---|
+| shared secret (default) | one secret every node shares | `MARCH_CLUSTER_SECRET` |
+| certificate | its own ed25519 key and a certificate for it, signed by the cluster's operator key | `MARCH_NODE_CERT`, `MARCH_NODE_KEY`, `MARCH_CLUSTER_OPERATOR_PUBKEY` |
+
+`ClusterNode.config_from_env` picks the mode: with `MARCH_NODE_CERT` set it
+uses certificate mode and ignores `MARCH_CLUSTER_SECRET`, otherwise shared-secret
+mode. Each certificate-mode variable holds the value itself or names a file
+holding it. The two modes do not mix: a certificate node refuses a
+shared-secret peer and the other way round, and each says which variables the
+other side needs. Operator setup (keys, issuing, renewal, revocation) is in
+[Cluster Certificates]({{ site.baseurl }}/docs/cluster-certificates/).
+
+### Shared-secret mode
 
 ```march
 let secret = Crypto.random_hex(32)   -- random hex String shared by all nodes
 ```
 
-The secret is just a `String`; `ClusterAuth.prove(secret, nonce)` signs a challenge with `HMAC-SHA256(secret, nonce)` and the secret itself never goes on the wire. All nodes in a cluster must share the same secret (distribute it via environment variable or a secrets manager).
+Each side sends a hello with a fresh nonce and answers the peer's nonce with
+`ClusterAuth.prove(secret, nonce)`, which is `HMAC-SHA256(secret, nonce)`. The
+secret never goes on the wire. Every node must hold the same secret. Any holder
+can join as any node, so this mode cannot limit what a node may do (see the
+threat model below).
 
-### Performing the handshake
+### Certificate mode
 
-`Handshake` is a pure state machine; call it once per new connection:
+A certificate (`NodeCert`) names one node, what it may do, and when it expires:
+
+| field | example |
+|---|---|
+| `node` | `spiffe://prod.example/pool/web/node/web-1` |
+| `roles` | `["Checkout.Ledger:offer", "Checkout.Client:initiate"]` |
+| `flags` | `["raw_send"]` |
+| `not_after` | unix seconds, inclusive |
+| `issuer` | `spiffe://prod.example/operator/<16 hex digits of the operator key>` |
+| `pubkey` | the node's ed25519 public key, hex |
+| `serial` | what a revocation names |
+
+Names are SPIFFE-style URIs so that a service mesh can carry the same
+identities later; March does not implement SPIFFE itself. In the handshake each
+hello carries the sender's certificate and a fresh X25519 key. Each side checks
+the peer's certificate: the operator's signature, `not_after`, the node's
+revocation list, and that it names the node the hello claims to be. Then each
+side signs the peer's nonce together with a hash of both hellos, and checks the
+peer's signature under the key its certificate names. `NodeCert.verify(cert,
+operator_pubkey, now)` is the certificate check on its own.
+
+A verified certificate stays with its peer: `ClusterNode.peer_cert(c, node_id)`
+returns it (`ClusterConn.peer_cert` for direct connections). The roles and the
+`raw_send` flag are not enforced yet. Checking an offer or an initiation against
+the certificate's roles, and refusing raw sends without the flag, is the next
+step of the design.
+
+### Per-frame MAC
+
+After the handshake every frame on the connection is sealed: it carries a
+sequence number and an HMAC-SHA256 tag under a key for that connection and
+direction. The key comes from HKDF over a hash of the two hellos. In
+certificate mode its input is an X25519 agreement between the two ephemeral
+keys, which the signed handshake binds to the two certificates. In shared-secret
+mode its input is the secret. The length prefix covers the 40 bytes this adds.
+
+The receiver accepts each sequence number once, within a window of 32. A
+frame whose tag fails, or whose number was seen already, is dropped and
+counted (`ClusterNode.frames_rejected`), and on-security-event subscribers get
+`FrameRejected(node_id, n)`. After three such frames on one connection it is
+closed, and the peer is handled like any lost connection. A shared-secret node
+offers the MAC in its hello, so a node from before the MAC still connects,
+unsealed.
+
+**This is integrity, not confidentiality.** Frames are not encrypted, and
+anyone on the network path can read them. The MAC stops a party without the
+connection's key from changing, injecting or replaying frames. It does not
+detect a frame that is dropped in transit, since an attacker who can drop
+frames can drop the connection too. Encryption is deferred (decision D4 of the
+distributed-deploys plan); run the cluster on a private network or under a
+mesh that encrypts.
+
+### Expiry and revocation
+
+A node rechecks each peer's certificate every tick. When it has expired, or a
+revocation names it, the node closes the peer's connections and reports
+`NodeDead(info, "certificate expired")` or `NodeDead(info, "certificate
+revoked")`, so sessions with the peer are cancelled as for any dead node. The
+peer's handshakes are refused from then on, until it presents a valid
+certificate.
+
+A revocation is signed by the operator key and names a certificate's serial,
+or a whole node. `ClusterNode.revoke(c, token)` takes the token `forge cluster
+revoke` prints; `MARCH_CLUSTER_REVOCATIONS` gives a node its list at start
+(tokens separated by commas or whitespace, or a file of them). Nodes pass
+revocations on to every peer, and a revocation counts only if the operator
+signed it, so a member cannot revoke another.
+
+`ClusterNode.on_security_event(c, f)` reports refused handshakes
+(`HandshakeRejected(who, why)`) and rejected frames (`FrameRejected(node_id,
+n)`).
+
+### Threat model
+
+Certificates limit what a misbehaving *member* can do on a trusted network:
+who may join, and, once roles are enforced, which conversations each node may
+take part in. They do not provide confidentiality, availability against a
+member that lies in SWIM gossip, or protection inside a node that runs foreign
+code.
+
+### The handshake in code
+
+`ClusterNode` runs all of this itself. At the connection level:
 
 ```march
--- Initiator side
-let nonce  = NetKernel.fresh_nonce()
-let result = NetKernel.handshake(fd, my_id, secret, nonce)
+-- Either mode: ClusterAuth.Secret(secret) or ClusterAuth.Certified(credentials)
+match NetKernel.handshake_auth(fd, my_id, auth, NetKernel.fresh_nonce(), Handshake.role_control(), "", 5000) do
+  Ok(peer) -> -- peer.identity, peer.cert (certificate mode), peer.mac
+  Err(e)   -> -- reject and close fd
+end
 
-match result do
+-- The shared-secret spelling, unchanged
+match NetKernel.handshake(fd, my_id, secret, NetKernel.fresh_nonce()) do
   Ok(peer_id) -> -- connection authenticated; peer_id is their NodeIdentity
   Err(e)      -> -- reject and close fd
 end
 ```
 
-`ClusterConn.accept_one` wraps the accept → handshake → enroll flow for the listening side:
-
-```march
-match ClusterConn.accept_one(registry, listen_fd, my_id, secret) do
-  Ok(peer_id) -> -- new peer enrolled
-  Err(e)      -> -- handshake failed
-end
-```
-
-### Starting the listener
+`ClusterConn.connect_split_auth` and `accept_split_auth` open a peer's control
+and data connections in either mode and return its certificate.
+`ClusterConn.accept_one` wraps accept, handshake and enrolment for the
+listening side in shared-secret mode:
 
 ```march
 match ClusterConn.listen(9000) do
   Ok(listen_fd) ->
-    -- accept loop
     let loop = fn _ ->
       match ClusterConn.accept_one(registry, listen_fd, my_id, secret) do
         Ok(peer_id) -> log("connected: " ++ peer_id.node_id)
@@ -793,7 +891,12 @@ post-heal sync picks the same winner on both sides (a `REGISTRY_SYNC_RESP`
 leaf carries the entry's `VectorClock`; the merge orders by it). `partition`
 needs Linux and root for iptables; `scripts/two-node-docker.sh` runs it from
 any host (`specs/progress/2026-09-14-two-node-failure-semantics-harness.md`).
-All of these run on one host over loopback; failure semantics across real
+Node certificates are covered by `cert_ok` (two certificate-mode nodes link, see
+each other's certificates and carry actor messages over sealed connections),
+`cert_wrong_operator`, `cert_expired` and `cert_revoked` (each refusal or drop
+and its reason), and `frame_tampered` (a proxy flips one byte of one sealed data
+frame; the receiver drops and counts that frame and keeps the link). All of
+these run on one host over loopback; failure semantics across real
 machines and networks aren't covered by an automated test, so treat them as
 less battle-tested than the single-process core.
 

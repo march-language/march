@@ -20,6 +20,7 @@ mod TwoNodeRestartA do
   needs IO.NetConnect
   needs IO.Process
   needs IO.Spawn
+  needs IO.Mut
 
   actor Watcher do
     state { downs : Int, last : String }
@@ -103,7 +104,7 @@ mod TwoNodeRestartA do
     println("node-a: sent " ++ int_to_string(seq))
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_spawn : Cap(IO.Spawn)) do
+  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
     let port = Env.require_int("MARCH_PEER_PORT")
     let watcher = spawn(Watcher)
 

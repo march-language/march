@@ -139,6 +139,9 @@ let stdlib_file_list = [
   "merkle.march";
   (* Distributed OTP — added after all other stdlib deps are loaded *)
   "net_frame.march";
+  (* node certificates (dd step 11a); before cluster_auth, whose cert-mode
+     handshake credentials it defines *)
+  "node_cert.march";
   "cluster_auth.march";
   "node_identity.march";
   "handshake.march";
