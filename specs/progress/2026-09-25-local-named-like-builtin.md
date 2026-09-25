@@ -142,3 +142,23 @@ comparator.
   `builtin_compiled_lowering`, `interface_method_qualifiability`,
   `prelude-collision`, `entry_mod_qual_erasure`, `curried_lambda_over_tuple`,
   `cap_shadow`.
+
+## Follow-up: `topology_place` failing on the ubuntu CI leg (a test race, not this fix)
+
+On `test (ubuntu-24.04, rest)` the PR head printed `offered: [Echo.Server]` and
+`never re-offered` (2 of 2 runs); macOS and a quiet Linux container passed. The
+cause is in the TEST, and it is on main too: the fixture opened `Echo.Server`
+and `Echo.Counted` with the same `Echo_Run.offer_Server`, and an offer
+registers under protocol + role + node, so both roles wanted ONE registry
+name. `ClusterNode.register` checks the name synchronously against the names
+Vault but binds it in the node actor's later turn, so whether the second role
+saw the first's binding was a race: when the actor ran first, `Echo.Counted`
+got `AlreadyOffered` (silently retried every tick), then won the name the tick
+after `Echo.Server`'s offer was killed, and `Echo.Server` was never re-offered.
+
+Evidence (arm64 Linux container, 32 copies at once for load): origin/main's
+compiler failed 10/192 runs, this PR 9/192, with an instrumented stdlib
+showing `Echo.Counted: AlreadyOffered` in exactly the failing runs. The PR only
+shifted timing on the CI runner. Fix: the ranked role now serves its own
+protocol (`Tally`), so no two roles share a name; 320/320 (PR) and 192/192
+(main) under the same load, 48/48 on macOS. No compiler change.
