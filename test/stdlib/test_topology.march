@@ -23,6 +23,17 @@ mod TestTopology do
     List.filter(ids, fn me -> Topology.wants(p, role, me, labels, List.filter(ids, fn o -> o != me)))
   end
 
+  pfn digest() : String do
+    "{\"version\":1,\"roles\":[" ++
+    "{\"name\":\"A.Srv\",\"place\":{\"on\":\"db\",\"count\":2},\"capacity\":3}," ++
+    "{\"name\":\"B.Srv\",\"place\":null,\"capacity\":null}," ++
+    "{\"name\":\"C.Srv\",\"place\":{\"on\":null,\"count\":1}}]," ++
+    "\"pools\":[{\"name\":\"p\",\"serves\":[\"A.Srv\",\"B.Srv\"]},{\"name\":\"q\",\"serves\":[\"C.Srv\"]}]," ++
+    "\"drain\":{\"soft_ms\":5,\"hard_ms\":null}}"
+  end
+
+  pfn names(ds : List(Topology.TopoDesired)) : List(String) do List.map(ds, fn d -> d.d_name) end
+
   describe "Topology placement: labels" do
 
     test "MARCH_NODE_LABELS-style lists parse, blanks dropped" do
@@ -96,6 +107,47 @@ mod TestTopology do
       assert (Topology.settled(1000, None, 15000))
       assert (Topology.settled(10000, Some(0), 15000) == false)
       assert (Topology.settled(15000, Some(0), 15000))
+    end
+
+  end
+
+  describe "Topology reload: the digest a SIGHUP re-reads" do
+
+    test "only the roles this process's pools serve, with placement, capacity and drain" do
+      match Topology.desired_of(digest(), fn p -> p == "p") do
+        Ok((ds, soft, hard)) ->
+          assert (names(ds) == ["A.Srv", "B.Srv"])
+          assert (List.map(ds, fn d -> Topology.placement_text(d.d_place)) == ["count 2 on db", "everywhere"])
+          assert (List.map(ds, fn d -> d.d_capacity) == [3, 64])
+          assert (soft == 5)
+          assert (hard == 120000)
+        Err(e) -> assert (e == "a digest")
+      end
+      match Topology.desired_of(digest(), fn p -> p == "q") do
+        Ok((ds, _, _)) -> assert (List.map(ds, fn d -> Topology.placement_text(d.d_place)) == ["count 1"])
+        Err(e) -> assert (e == "a digest")
+      end
+    end
+
+    test "text that is not a version-1 digest is refused" do
+      assert (Result.is_err(Topology.desired_of("{\"version\":2}", fn _ -> true)))
+      assert (Result.is_err(Topology.desired_of("not json", fn _ -> true)))
+    end
+
+    test "the build's roles take the digest's placement; unserved ones are placed nowhere" do
+      let none = fn _ -> Err(SessionNode.AlreadyOffered(0))
+      let base = [Topology.offer_role("A.Srv", Topology.count(1), 4, none),
+                  Topology.role("B.Srv", Topology.everywhere(), fn () -> Err(SessionNode.AlreadyOffered(0))),
+                  Topology.offer_role("D.Srv", Topology.everywhere(), 4, none)]
+      match Topology.desired_of(digest(), fn p -> p == "p") do
+        Ok((ds, _, _)) ->
+          let after = Topology.apply_desired(base, ds)
+          assert (List.map(after, fn r -> Topology.placement_text(r.place)) == ["count 2 on db", "everywhere", "not served here"])
+          -- A capacity from the digest, except where the build fixed it (0).
+          assert (List.map(after, fn r -> r.capacity) == [3, 0, 4])
+          assert (Topology.wants(Topology.PlaceNowhere, "D.Srv", "a", ["db"], Nil) == false)
+        Err(e) -> assert (e == "a digest")
+      end
     end
 
   end

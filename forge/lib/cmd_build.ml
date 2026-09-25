@@ -857,7 +857,7 @@ let ensure_js_deps ~root (proj : Project.project) =
     topology.toml is always compiled with [--topology .forge/topology.json]:
     its [main] is generated from it (build step 3). *)
 let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
-    ?(output_suffix = "") ?topology_env () =
+    ?(output_suffix = "") ?topology_env ?(extra_flags = "") () =
   let t0 = Unix.gettimeofday () in
   (* Normalize cross-target aliases to the compiler's canonical form and derive
      a per-target output subdir so a Linux build never clobbers the host binary. *)
@@ -1017,7 +1017,7 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
                | _ -> None)
             | _ -> None
           in
-          let (rc, ce, cw) = compile_entry ~lib_path_env ~ffi_flags:(ffi_flags ^ topology_flags) ~output ~release ~dump_phases ?target
+          let (rc, ce, cw) = compile_entry ~lib_path_env ~ffi_flags:(ffi_flags ^ topology_flags ^ extra_flags) ~output ~release ~dump_phases ?target
               ?hcr ~pin_main:proj.Project.pin_main entry_path in
           print_build_summary ~t0 ~errors:(te + ce) ~warnings:(tw + cw);
           if rc = 0 then begin

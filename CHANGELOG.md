@@ -54,6 +54,20 @@ git log is authoritative for exact commits.
   `forge cluster revoke`; `MARCH_CLUSTER_REVOCATIONS` seeds the list at
   startup; nodes pass revocations on to each other, and only the operator's
   signature makes one count. `ClusterNode.revocations(c)` lists them.
+- **Placement changes on a running system and upgrade tests** (build step 8 of the
+  distributed-deploys plan). A topology app's nodes re-read their topology on
+  SIGHUP and move their own offers: a role's placement, capacity, or a pool that
+  stops serving it applies with no code change and no restart. `forge topology
+  apply [--env E]` is one reconciliation pass over the cluster `forge run
+  --processes` started (recorded in `.forge/run/state.json`): it diffs, pushes,
+  waits for every node to apply, and reports each node's offers; a change that needs
+  a rebuild and restart is refused and listed. `forge topology status` shows each
+  node's applied topology, offers and (with `forge run --processes --hot-reload`)
+  its code versions and epoch pins. `forge test --upgrade-from <ref>` checks out
+  the ref, starts it as local processes with reload sockets, drives
+  `test/upgrade_*.march` through it, hot-deploys the working tree into the running
+  processes, and fails on the reload servers' counters (messages dropped, actors
+  killed by a hard deadline, markers lost) or the test file's own checks.
 - **Hot reload: per-role capability closures, restart durability and signed
   topology pushes** (build step 10, first half, of the distributed-deploys plan).
   The `--compile-so` manifest gains a `ROLE <Proto.Role> caps=...` line per role

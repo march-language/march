@@ -35,6 +35,19 @@
 --
 -- Losing a role is a drain, not a cut: `SessionNode.close_offer` refuses new
 -- invitations and lets the sessions already running finish.
+--
+-- Re-reading the topology (D16, build step 8). `place` installs a SIGHUP
+-- watcher: on SIGHUP the node re-reads MARCH_TOPOLOGY_FILE (the digest,
+-- `.forge/topology.json`, which the reconciler rewrites before signalling)
+-- and applies what changed for the roles its build contains: a new
+-- placement, a role this process's pools no longer serve (its offer is
+-- closed: a drain), a new capacity (the offer is closed and reopened at the
+-- new size). The next evaluation opens and closes offers as for a
+-- membership change; nothing restarts. A role newly served that this build
+-- has no code for is reported, not offered: that needs a rebuild. The node
+-- reports what it applied and the offers it holds to MARCH_TOPOLOGY_STATUS
+-- (`forge topology status` reads it). The reconciler never opens or closes
+-- an offer itself.
 mod Topology do
   needs IO
   needs IO.Mut
@@ -45,6 +58,8 @@ mod Topology do
   needs IO.Console
   needs IO.NetConnect
   needs IO.NetListen
+  needs IO.FileRead
+  needs IO.FileWrite
   needs Session.Live
   needs ClusterNode.Live
 
@@ -55,7 +70,9 @@ mod Topology do
   -- names are prefixed too (`TopoPlacement`, `TopoRole`, ...): March has one
   -- global type namespace, and a bare `Placement` broke a user program that
   -- declares its own (test/session/cluster_placement).
-  type TopoPlacement = PlaceEverywhere | PlaceOn(String) | PlaceCount(Int) | PlaceCountOn(String, Int)
+  -- `PlaceNowhere`: not served by this process's pools (after a reload
+  -- moved the role to another pool).
+  type TopoPlacement = PlaceEverywhere | PlaceOn(String) | PlaceCount(Int) | PlaceCountOn(String, Int) | PlaceNowhere
 
   doc "Offer the role on every node that serves it (no `place` in the topology)."
   fn everywhere() : TopoPlacement do PlaceEverywhere end
@@ -69,13 +86,17 @@ mod Topology do
   -- What an open offer needs to be supervised: the offer, and whether
   -- whatever serves its sessions is still alive (a hosted role's actor; a
   -- function role has nothing beyond the offer itself).
-  type TopoOpened = { ap : SessionNode.Offer, alive : Int -> Bool }
+  -- [capacity]: the size it was opened at (0: fixed by the build).
+  type TopoOpened = { ap : SessionNode.Offer, alive : Int -> Bool, capacity : Int }
 
-  -- One served role: its "Protocol.Role" name, its placement, and how to
-  -- open one offer of it on this node. The generated `main` builds these
-  -- with `role` and `actor_role`; `open` is called once per offer.
-  type TopoRole = { name : String, place : TopoPlacement,
-                open : () -> Result(TopoOpened, SessionNode.RunError) }
+  -- One served role: its "Protocol.Role" name, its placement, its capacity,
+  -- and how to open one offer of it on this node at a capacity. The
+  -- generated `main` builds these with `offer_role` and `offer_actor_role`
+  -- (capacity from the topology, changeable by a reload); `role` and
+  -- `actor_role` fix the capacity in the code they are given (capacity 0,
+  -- the argument `open` receives is ignored).
+  type TopoRole = { name : String, place : TopoPlacement, capacity : Int,
+                open : Int -> Result(TopoOpened, SessionNode.RunError) }
 
   doc """
   A role bound to a function (`body = "M.f"` in `[roles]`). [open] is the
@@ -83,10 +104,26 @@ mod Topology do
   M.f(env, s, caps..., st))`.
   """
   fn role(name : String, place : TopoPlacement, open : () -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
-    { name: name, place: place,
-      open: fn () ->
+    { name: name, place: place, capacity: 0,
+      open: fn _ ->
         match open() do
-          Ok(o) -> Ok({ ap: o, alive: fn _ -> true })
+          Ok(o) -> Ok({ ap: o, alive: fn _ -> true, capacity: 0 })
+          Err(e) -> Err(e)
+        end }
+  end
+
+  doc """
+  A role bound to a function, offered at [capacity] sessions: [open] is the
+  generated `fn topology_cap -> <P>_Run.offer_<R>(io, node, topology_cap,
+  ...)`. A reload that changes the role's capacity reopens its offer at the
+  new size.
+  """
+  fn offer_role(name : String, place : TopoPlacement, capacity : Int,
+                open : Int -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
+    { name: name, place: place, capacity: capacity,
+      open: fn cap ->
+        match open(cap) do
+          Ok(o) -> Ok({ ap: o, alive: fn _ -> true, capacity: cap })
           Err(e) -> Err(e)
         end }
   end
@@ -101,17 +138,27 @@ mod Topology do
   """
   fn actor_role(name : String, place : TopoPlacement, mk : () -> Pid(a),
                 open : Pid(a) -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
+    offer_actor_role(name, place, 0, mk, fn (a, _) -> open(a))
+  end
+
+  doc """
+  `actor_role`, offered at [capacity] sessions: [open] takes the actor and
+  the capacity (the generated `fn (topology_a, topology_cap) ->
+  <P>_Run.offer_hosted_<R>(io, node, topology_cap, topology_a, ...)`).
+  """
+  fn offer_actor_role(name : String, place : TopoPlacement, capacity : Int, mk : () -> Pid(a),
+                      open : Pid(a) -> Int -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
     let spare = Vault.new("topology_spare_" ++ name ++ "_" ++ int_to_string(next_id()))
-    { name: name, place: place,
-      open: fn () ->
+    { name: name, place: place, capacity: capacity,
+      open: fn cap ->
         let host = match Vault.get(spare, "h") do
           Some(h) -> h
           None -> mk()
         end
-        match open(host) do
+        match open(host, cap) do
           Ok(o) ->
             Vault.drop(spare, "h")
-            Ok({ ap: o, alive: fn _ -> is_alive(host) })
+            Ok({ ap: o, alive: fn _ -> is_alive(host), capacity: cap })
           Err(e) ->
             Vault.set(spare, "h", host)
             Err(e)
@@ -155,6 +202,7 @@ mod Topology do
       PlaceOn(l) -> List.member(labels, l)
       PlaceCount(_) -> true
       PlaceCountOn(l, _) -> List.member(labels, l)
+      PlaceNowhere -> false
     end
   end
 
@@ -225,12 +273,13 @@ mod Topology do
 
   -- Everything `place`, `drain_on_signal` and `supervise_offers` share,
   -- found by the node's id so the three need only the node.
-  type TopoState = { meta : Vault(Int), offers : Vault(TopoOpened), draining : Vault(TopoOpened),
+  type TopoState = { meta : Vault(Int), strs : Vault(String), offers : Vault(TopoOpened), draining : Vault(TopoOpened),
                  roles : Vault(List(TopoRole)), anchor : Vault(Pid(TopoAnchorState)) }
 
   pfn state_of(node : Cap(ClusterNode.Live)) : TopoState do
     let k = ClusterNode.node_id(node)
-    { meta: Vault.open("topology_meta_" ++ k), offers: Vault.open("topology_offers_" ++ k),
+    { meta: Vault.open("topology_meta_" ++ k), strs: Vault.open("topology_strs_" ++ k),
+      offers: Vault.open("topology_offers_" ++ k),
       draining: Vault.open("topology_draining_" ++ k), roles: Vault.open("topology_roles_" ++ k),
       anchor: Vault.open("topology_anchor_" ++ k) }
   end
@@ -271,6 +320,8 @@ mod Topology do
   fn place(node : Cap(ClusterNode.Live), roles : List(TopoRole)) : () do
     let st = state_of(node)
     Vault.set(st.roles, "roles", roles)
+    Vault.set(st.roles, "base", roles)
+    Signal.watch(Signal.Hup, fn -> reload(node))
     let meta = st.meta
     let _ = ClusterNode.subscribe(node, fn ev ->
       match ev do
@@ -278,6 +329,7 @@ mod Topology do
         _ -> ()
       end)
     reconcile(node, st)
+    write_status(node, st)
     let _ = task_spawn(fn _ -> place_loop(node, st))
     ()
   end
@@ -288,6 +340,7 @@ mod Topology do
     else if Vault.get(st.meta, "stopped") != None do 0
     else
       reconcile(node, st)
+      write_status(node, st)
       place_loop(node, st)
     end end
   end
@@ -318,6 +371,7 @@ mod Topology do
     let now = unix_time_ms()
     let roles = Vault.get_or(st.roles, "roles", Nil)
     List.each(roles, fn r -> reconcile_role(node, st, labels, now, r))
+    watch_draining(st, now)
   end
 
   pfn reconcile_role(node : Cap(ClusterNode.Live), st : TopoState, labels : List(String), now : Int, r : TopoRole) : () do
@@ -332,10 +386,14 @@ mod Topology do
         if not(want) do
           report(r.name ++ ": no longer placed on " ++ label(node) ++ "; draining its offer")
           retire(st, r.name, o)
+        else if r.capacity > 0 && o.capacity != r.capacity do
+          report(r.name ++ ": capacity " ++ int_to_string(o.capacity) ++ " -> " ++ int_to_string(r.capacity)
+                 ++ "; draining its offer and opening one at the new size")
+          retire(st, r.name, o)
         else if Vault.get(st.meta, "supervise") != None && not(healthy(o)) do
           report(r.name ++ ": its offer or hosting actor died; offering it again")
           retire(st, r.name, o)
-        else () end end
+        else () end end end
     end
   end
 
@@ -351,7 +409,7 @@ mod Topology do
   end
 
   pfn open_role(st : TopoState, r : TopoRole) : () do
-    match (r.open)() do
+    match (r.open)(r.capacity) do
       Ok(o) ->
         Vault.drop(st.meta, "e:" ++ r.name)
         Vault.set(st.offers, r.name, o)
@@ -371,7 +429,41 @@ mod Topology do
   pfn retire(st : TopoState, role_name : String, o : TopoOpened) : () do
     SessionNode.close_offer(o.ap)
     Vault.drop(st.offers, role_name)
-    Vault.set(st.draining, role_name ++ "#" ++ int_to_string(next_id()), o)
+    let key = role_name ++ "#" ++ int_to_string(next_id())
+    Vault.set(st.draining, key, o)
+    Vault.set(st.meta, "t:" ++ key, unix_time_ms())
+  end
+
+  -- An offer closed while the node keeps running (placement or a reload
+  -- moved its role) drains under the topology's deadlines: its sessions are
+  -- reported once still running at the soft deadline, and again at the hard
+  -- one. They are not cut: cancelling one offer's sessions needs a
+  -- SessionNode API that does not exist yet (a process-wide drain on
+  -- SIGTERM still ends at `drain_on_signal`'s hard deadline). A drained
+  -- offer is forgotten.
+  pfn watch_draining(st : TopoState, now : Int) : () do
+    let soft = Vault.get_or(st.meta, "drain_soft", 30000)
+    let hard = Vault.get_or(st.meta, "drain_hard", 120000)
+    List.each(Vault.all(st.draining), fn kv ->
+      match kv do
+        (key, o) ->
+          let n = active(o)
+          let since = now - Vault.get_or(st.meta, "t:" ++ key, now)
+          if n == 0 do
+            Vault.drop(st.draining, key)
+            Vault.drop(st.meta, "t:" ++ key)
+            Vault.drop(st.meta, "w:" ++ key)
+          else
+            let warned = Vault.get_or(st.meta, "w:" ++ key, 0)
+            if since >= hard && warned < 2 do
+              Vault.set(st.meta, "w:" ++ key, 2)
+              report(key ++ ": hard drain deadline passed with " ++ int_to_string(n) ++ " session(s) still running on its closed offer")
+            else if since >= soft && warned < 1 do
+              Vault.set(st.meta, "w:" ++ key, 1)
+              report(key ++ ": soft drain deadline passed with " ++ int_to_string(n) ++ " session(s) still running on its closed offer")
+            else () end end
+          end
+      end)
   end
 
   pfn healthy(o : TopoOpened) : Bool do
@@ -406,6 +498,204 @@ mod Topology do
     let st = state_of(node)
     let sum = fn (acc, kv) -> match kv do (_, o) -> acc + active(o) end
     List.fold_left(Vault.all(st.draining), List.fold_left(Vault.all(st.offers), 0, sum), sum)
+  end
+
+  -- ── re-reading the topology (SIGHUP) ──────────────────────────────────
+
+  doc "A placement as the topology writes it, for reports."
+  fn placement_text(p : TopoPlacement) : String do
+    match p do
+      PlaceEverywhere -> "everywhere"
+      PlaceOn(l) -> "on " ++ l
+      PlaceCount(n) -> "count " ++ int_to_string(n)
+      PlaceCountOn(l, n) -> "count " ++ int_to_string(n) ++ " on " ++ l
+      PlaceNowhere -> "not served here"
+    end
+  end
+
+  pfn json_int(j : Option(Json.JsonValue)) : Option(Int) do
+    match j do
+      Some(Json.Number(f)) -> Some(float_to_int(f))
+      _ -> None
+    end
+  end
+
+  pfn json_str(j : Option(Json.JsonValue)) : Option(String) do
+    match j do
+      Some(Json.Str(s)) -> Some(s)
+      _ -> None
+    end
+  end
+
+  pfn json_list(j : Option(Json.JsonValue)) : List(Json.JsonValue) do
+    match j do
+      Some(Json.Array(xs)) -> xs
+      _ -> Nil
+    end
+  end
+
+  doc """
+  A digest's `place` object as a placement: null is everywhere (D18),
+  `{ on }`, `{ count }`, or both.
+  """
+  fn placement_of_json(j : Option(Json.JsonValue)) : TopoPlacement do
+    match j do
+      Some(Json.Object(_)) ->
+        let pj = Option.unwrap_or(j, Json.Null)
+        match (json_str(Json.get(pj, "on")), json_int(Json.get(pj, "count"))) do
+          (Some(l), Some(n)) -> PlaceCountOn(l, n)
+          (Some(l), None) -> PlaceOn(l)
+          (None, Some(n)) -> PlaceCount(n)
+          (None, None) -> PlaceEverywhere
+        end
+      _ -> PlaceEverywhere
+    end
+  end
+
+  -- A role as the digest describes it: (name, placement, capacity).
+  type TopoDesired = { d_name : String, d_place : TopoPlacement, d_capacity : Int }
+
+  doc """
+  What the digest [text] asks of this process: for each role one of
+  [pools] serves, its placement and capacity (a role no such pool serves is
+  absent); the drain deadlines; and an error for text that is not a
+  version-1 digest.
+  """
+  fn desired_of(text : String, pools : String -> Bool) : Result((List(TopoDesired), Int, Int), String) do
+    match Json.parse(text) do
+      Err(e) -> Err("not JSON: " ++ e)
+      Ok(dj) ->
+        if json_int(Json.get(dj, "version")) != Some(1) do Err("not a version-1 topology digest")
+        else
+          let served = List.flat_map(json_list(Json.get(dj, "pools")), fn p ->
+            match json_str(Json.get(p, "name")) do
+              Some(n) ->
+                if pools(n) do
+                  List.filter_map(json_list(Json.get(p, "serves")), fn r -> json_str(Some(r)))
+                else Nil end
+              None -> Nil
+            end)
+          let roles = List.filter_map(json_list(Json.get(dj, "roles")), fn r ->
+            match json_str(Json.get(r, "name")) do
+              Some(n) ->
+                if List.member(served, n) do
+                  Some({ d_name: n, d_place: placement_of_json(Json.get(r, "place")),
+                         d_capacity: Option.unwrap_or(json_int(Json.get(r, "capacity")), 64) })
+                else None end
+              None -> None
+            end)
+          let drain = Option.unwrap_or(Json.get(dj, "drain"), Json.Null)
+          let soft = Option.unwrap_or(json_int(Json.get(drain, "soft_ms")), 30000)
+          let hard = Option.unwrap_or(json_int(Json.get(drain, "hard_ms")), 120000)
+          Ok((roles, soft, hard))
+        end
+    end
+  end
+
+  doc """
+  [base] (the roles this build contains, as the generated `main` placed
+  them) under [desired]: a role the digest no longer serves here is
+  `PlaceNowhere`; otherwise its placement and (unless fixed by the build,
+  capacity 0) its capacity come from the digest.
+  """
+  fn apply_desired(base : List(TopoRole), desired : List(TopoDesired)) : List(TopoRole) do
+    List.map(base, fn r ->
+      match List.find(desired, fn d -> d.d_name == r.name) do
+        None -> { r with place: PlaceNowhere }
+        Some(d) -> { r with place: d.d_place, capacity: if r.capacity == 0 do 0 else d.d_capacity end }
+      end)
+  end
+
+  pfn find_role(roles : List(TopoRole), name : String) : Option(TopoRole) do
+    List.find(roles, fn r -> r.name == name)
+  end
+
+  pfn report_change(before : List(TopoRole), r : TopoRole) : () do
+    match find_role(before, r.name) do
+      Some(b) ->
+        if placement_text(b.place) != placement_text(r.place) do
+          report(r.name ++ ": placement " ++ placement_text(b.place) ++ " -> " ++ placement_text(r.place))
+        else () end
+      None -> ()
+    end
+  end
+
+  pfn report_unbuilt(base : List(TopoRole), d : TopoDesired) : () do
+    match find_role(base, d.d_name) do
+      Some(_) -> ()
+      None -> report(d.d_name ++ ": now served by this node's pool, but this build has no code for it; rebuild and restart to offer it")
+    end
+  end
+
+  doc """
+  Re-read the topology now, as SIGHUP does: MARCH_TOPOLOGY_FILE is parsed
+  and the roles this build contains take their placement and capacity from
+  it; the next evaluation (run at once) opens and drains offers to match.
+  A file that cannot be read or parsed changes nothing and is reported.
+  """
+  fn reload(node : Cap(ClusterNode.Live)) : () do
+    let st = state_of(node)
+    if Vault.get(st.meta, "closing") != None do () else
+      match process_env("MARCH_TOPOLOGY_FILE") do
+        None -> report("SIGHUP: MARCH_TOPOLOGY_FILE is not set; there is no topology to re-read")
+        Some(path) ->
+          match File.read(path) do
+            Err(_) -> report("SIGHUP: could not read " ++ path ++ "; placement unchanged")
+            Ok(text) ->
+              match desired_of(text, fn p -> runs_pool(p)) do
+                Err(e) -> report("SIGHUP: " ++ path ++ ": " ++ e ++ "; placement unchanged")
+                Ok((desired, soft, hard)) ->
+                  let base : List(TopoRole) = Vault.get_or(st.roles, "base", Nil)
+                  let before : List(TopoRole) = Vault.get_or(st.roles, "roles", Nil)
+                  let after = apply_desired(base, desired)
+                  List.each(after, fn r -> report_change(before, r))
+                  List.each(desired, fn d -> report_unbuilt(base, d))
+                  Vault.set(st.meta, "drain_soft", soft)
+                  Vault.set(st.meta, "drain_hard", hard)
+                  Vault.set(st.roles, "roles", after)
+                  Vault.set(st.strs, "applied", Crypto.sha256(text))
+                  report("topology re-read from " ++ path)
+                  reconcile(node, st)
+                  write_status(node, st)
+              end
+          end
+      end
+    end
+  end
+
+  -- ── status (for the reconciler) ───────────────────────────────────────
+
+  doc """
+  What this node reports to the reconciler: its name, the digest it applied
+  (sha256, or `compiled` before any reload), its offers, how many closed
+  offers are still draining, and the sessions running on them all.
+  """
+  fn status_text(node : Cap(ClusterNode.Live)) : String do
+    let st = state_of(node)
+    "node " ++ label(node) ++ "\n"
+    ++ "topology " ++ Vault.get_or(st.strs, "applied", "compiled") ++ "\n"
+    ++ "offers " ++ String.join(offered(node), ",") ++ "\n"
+    ++ "draining " ++ int_to_string(List.length(Vault.keys(st.draining))) ++ "\n"
+    ++ "running " ++ int_to_string(running(node)) ++ "\n"
+  end
+
+  -- Write the status to MARCH_TOPOLOGY_STATUS when it changed (atomically:
+  -- a temporary file renamed over it, so a reader never sees half).
+  pfn write_status(node : Cap(ClusterNode.Live), st : TopoState) : () do
+    match process_env("MARCH_TOPOLOGY_STATUS") do
+      None -> ()
+      Some(path) ->
+        let text = status_text(node)
+        if Vault.get(st.strs, "status") == Some(text) do () else
+          let tmp = path ++ ".tmp"
+          match File.write(tmp, text) do
+            Ok(_) ->
+              let _ = File.rename(tmp, path)
+              Vault.set(st.strs, "status", text)
+            Err(_) -> ()
+          end
+        end
+    end
   end
 
   -- ── draining ──────────────────────────────────────────────────────────
