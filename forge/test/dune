@@ -204,7 +204,8 @@
 
 ; test_upgrade_from.ml: `forge test --upgrade-from <ref>` (distributed-deploys
 ; build step 8, II.8) on fixtures/upgrade: v1 becomes a git commit (the ref);
-; `good` (a handler's body changes; same message type) must PASS, `drops`
+; `good` (a handler's body changes; same message type) and `migrates` (a
+; handler removed, its old messages converted by migrate_msg) must PASS, `drops`
 ; (a handler removed with no migrate_msg, so the old feeder's messages are
 ; dropped and counted) must FAIL. Each case builds the old version and the
 ; patch, runs the old version's process with a reload socket, drives real

@@ -15,7 +15,7 @@
 #ifdef MARCH_HCR_ABI_ID
 const char __march_hcr_abi[] = MARCH_HCR_ABI_ID;
 #else
-const char __march_hcr_abi[] = "march-hcr-v2;triple=" MARCH_HCR_STRINGIFY(MARCH_HCR_TRIPLE) ";ptr=8";
+const char __march_hcr_abi[] = "march-hcr-v3;triple=" MARCH_HCR_STRINGIFY(MARCH_HCR_TRIPLE) ";ptr=8";
 #endif
 const char __march_hcr_target[] = MARCH_HCR_TARGET;
 const char __march_hcr_prefix[] = MARCH_HCR_PREFIX;

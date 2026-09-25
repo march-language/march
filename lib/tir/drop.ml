@@ -250,7 +250,7 @@ let droppable_ctors (env : env) (ty : Tir.ty)
   : (string * Tir.ty list) list option =
   match ty with
   | Tir.TCon (name, ty_args)
-    when not (Tir_names.is_actor_msg_name name) ->
+    when not (Migrate_msg_pins.has_actor_msg_repr name) ->
     (* [repr_of_ty] alone is NOT enough here.  For an Option-shaped type it
        classifies from the TCon's type PARAMS, and a NON-GENERIC one
        (`type Wrap = W(String) | Z`) has none — so it falls back to Boxed:

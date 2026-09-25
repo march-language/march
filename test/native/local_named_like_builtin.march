@@ -1,0 +1,199 @@
+-- A LOCAL binding (parameter, let, pattern variable, lambda parameter,
+-- nested fn) named like a builtin or an interface method (`eq`, `compare`,
+-- `hash`, `show`, `to_string`, `int_to_string`, `print`) shadows it: a call
+-- through it calls the closure the local holds, on both backends.
+--
+-- Compiled, the call used to be resolved as the builtin/interface method:
+-- lowering did it for a monomorphic parameter or let, and mono did it for a
+-- polymorphic parameter once specialisation made the first argument's type
+-- concrete.  `stdlib/map.march` names its comparator-derived closure `eq`, so
+-- a compiled Map compared keys with `==` and ignored its comparator.
+--
+-- Once Map really calls its comparator, a stdlib curried comparator
+-- (`Map.int_cmp`, a top-level fn returning a closure) passed as a value must
+-- also work compiled -- it SIGSEGV'd; see `curried_lt` below.
+mod LocalNamedLikeBuiltin do
+  needs IO.Console
+
+  pfn via_eq(eq, a, b) do
+    eq(a, b)
+  end
+
+  pfn via_f(f, a, b) do
+    f(a, b)
+  end
+
+  pfn via_eq_mono(eq : Int -> Int -> Bool, a : Int, b : Int) : Bool do
+    eq(a, b)
+  end
+
+  pfn via_compare(compare, a, b) do
+    compare(a, b)
+  end
+
+  pfn via_compare_mono(compare : Int -> Int -> Int, a : Int, b : Int) : Int do
+    compare(a, b)
+  end
+
+  pfn via_hash(hash, a) do
+    hash(a)
+  end
+
+  pfn via_hash_mono(hash : Int -> Int, a : Int) : Int do
+    hash(a)
+  end
+
+  pfn via_show(show, a) do
+    show(a)
+  end
+
+  pfn via_show_mono(show : Int -> String, a : Int) : String do
+    show(a)
+  end
+
+  pfn via_to_string_mono(to_string : Int -> String, a : Int) : String do
+    to_string(a)
+  end
+
+  pfn via_int_to_string_mono(int_to_string : Int -> String, a : Int) : String do
+    int_to_string(a)
+  end
+
+  pfn via_print(print, a) do
+    print(a)
+  end
+
+  pfn let_eq(a, b) do
+    let eq = fn (x, y) -> x != y
+    eq(a, b)
+  end
+
+  pfn let_eq_mono(a : Int, b : Int) : Bool do
+    let eq = fn (x, y) -> x != y
+    eq(a, b)
+  end
+
+  pfn nested_fn_eq(a : Int, b : Int) : Bool do
+    fn eq(x, y) do x != y end
+    eq(a, b)
+  end
+
+  pfn pat_eq(p, a, b) do
+    match p do
+      Some(eq) -> eq(a, b)
+      None -> false
+    end
+  end
+
+  pfn lam_eq(a, b) do
+    let g = fn eq -> eq(a, b)
+    g(fn (x, y) -> x != y)
+  end
+
+  -- A top-level fn that RETURNS a closure, passed as a value and called
+  -- curried.  Its first-class trampoline used to take its signature from the
+  -- use-site type (`Int -> Int -> Bool` uncurried to 2 params), so it called
+  -- the 1-param fn with 2 args and read the returned closure as an Int
+  -- (SIGSEGV).  Map's own `int_cmp` / `str_cmp` have exactly this shape, and
+  -- Map now actually calls its comparator, so this is on Map's hot path.
+  fn curried_lt(a : Int) : Int -> Bool do
+    fn b -> a < b
+  end
+
+  pfn two_arg_lt(a : Int, b : Int) : Bool do a < b end
+
+  pfn apply_curried(cmp, a, b) do
+    let f = cmp(a)
+    f(b)
+  end
+
+  pfn apply_two(f, a, b) do
+    f(a, b)
+  end
+
+  pfn show_opt(o) do
+    match o do
+      Some(v) -> "Some(" ++ v ++ ")"
+      None -> "None"
+    end
+  end
+
+  pfn lower_lt(a, b) do
+    string_to_lowercase(a) < string_to_lowercase(b)
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let always = fn (a : Int, b : Int) -> true
+    println("via_eq(always, 1, 2): " ++ bool_to_string(via_eq(always, 1, 2)))
+    println("via_f(always, 1, 2): " ++ bool_to_string(via_f(always, 1, 2)))
+    println("via_eq String: " ++ bool_to_string(via_eq(fn (a : String, b : String) -> true, "x", "y")))
+    println("via_eq_mono: " ++ bool_to_string(via_eq_mono(always, 1, 2)))
+    println("via_compare: " ++ int_to_string(via_compare(fn (a : Int, b : Int) -> 42, 1, 2)))
+    println("via_compare_mono: " ++ int_to_string(via_compare_mono(fn (a : Int, b : Int) -> 42, 1, 2)))
+    println("via_hash: " ++ int_to_string(via_hash(fn (a : Int) -> 7, 1)))
+    println("via_hash_mono: " ++ int_to_string(via_hash_mono(fn (a : Int) -> 7, 1)))
+    println("via_show: " ++ via_show(fn (a : Int) -> "custom-show", 1))
+    println("via_show_mono: " ++ via_show_mono(fn (a : Int) -> "custom-show-mono", 1))
+    println("via_to_string_mono: " ++ via_to_string_mono(fn (a : Int) -> "custom-ts", 1))
+    println("via_int_to_string_mono: " ++ via_int_to_string_mono(fn (a : Int) -> "custom-its", 1))
+    via_print(fn (s : String) -> println("via_print: custom " ++ s), "hi")
+    println("let_eq: " ++ bool_to_string(let_eq(1, 2)))
+    println("let_eq_mono: " ++ bool_to_string(let_eq_mono(1, 2)))
+    println("nested_fn_eq: " ++ bool_to_string(nested_fn_eq(1, 2)))
+    println("pat_eq: " ++ bool_to_string(pat_eq(Some(fn (x : Int, y : Int) -> true), 1, 2)))
+    println("lam_eq: " ++ bool_to_string(lam_eq(1, 2)))
+    println("curried lambda: " ++ bool_to_string(apply_curried(fn (x : Int) -> fn (y : Int) -> x < y, 1, 2)))
+    println("curried top-level: " ++ bool_to_string(apply_curried(curried_lt, 1, 2)))
+    println("curried top-level (false): " ++ bool_to_string(apply_curried(curried_lt, 3, 2)))
+    println("two-arg top-level: " ++ bool_to_string(apply_two(two_arg_lt, 1, 2)))
+
+    -- Float-keyed Map with a NaN key.  The comparator is `<`, under which NaN
+    -- is neither less nor greater than itself, so Map's derived equality says
+    -- the NaN key equals itself (while `nan == nan` is false).
+    let nan = float_nan()
+    let flt = fn (a : Float) -> fn (b : Float) -> a < b
+    let fm = Map.insert(Map.insert(Map.empty(), 1.5, "one-and-a-half", flt), nan, "nan", flt)
+    println("float map size: " ++ int_to_string(Map.size(fm)))
+    println("get nan: " ++ show_opt(Map.get(fm, nan, flt)))
+    let fm2 = Map.insert(fm, nan, "nan-again", flt)
+    println("size after re-insert nan: " ++ int_to_string(Map.size(fm2)))
+    println("get nan after re-insert: " ++ show_opt(Map.get(fm2, nan, flt)))
+    println("contains nan: " ++ bool_to_string(Map.contains_key(fm2, nan, flt)))
+    let fm3 = Map.remove(fm2, nan, flt)
+    println("size after remove nan: " ++ int_to_string(Map.size(fm3)))
+
+    -- Set derives its element equality the same way (a closure named `eq`).
+    let fs = Set.insert(Set.insert(Set.empty(), nan, flt), nan, flt)
+    println("float set size after inserting nan twice: " ++ int_to_string(Set.size(fs)))
+    println("float set contains nan: " ++ bool_to_string(Set.contains(fs, nan, flt)))
+
+    -- Case-insensitive String comparator.  Map hashes keys with the builtin
+    -- hash, so differently-cased keys land in different slots; the comparator
+    -- decides only among same-hash keys.  Both backends must agree.
+    let ci = fn (a : String) -> fn (b : String) -> lower_lt(a, b)
+    let sm = Map.insert(Map.insert(Map.empty(), "Alpha", 1, ci), "beta", 2, ci)
+    println("ci size: " ++ int_to_string(Map.size(sm)))
+    println("ci get Alpha: " ++ bool_to_string(Map.contains_key(sm, "Alpha", ci)))
+    println("ci get beta: " ++ bool_to_string(Map.contains_key(sm, "beta", ci)))
+    let sm2 = Map.insert(sm, "Alpha", 10, ci)
+    println("ci size after re-insert: " ++ int_to_string(Map.size(sm2)))
+
+    -- A comparator under which NO key equals itself (cmp(a)(b) is always
+    -- true).  The same key hashes to the same slot, so only the comparator
+    -- decides the lookup: Map must honour it and miss.  With the old
+    -- miscompile the compiled lookup used `==` and hit.
+    let ord = fn (a : Int) -> fn (b : Int) -> a < b
+    let never_eq = fn (a : Int) -> fn (b : Int) -> true
+    let im = Map.insert(Map.empty(), 7, "seven", ord)
+    println("ord get 7: " ++ show_opt(Map.get(im, 7, ord)))
+    println("never_eq get 7: " ++ show_opt(Map.get(im, 7, never_eq)))
+
+    -- The stdlib's own curried comparators, passed as top-level fn values.
+    let icm = Map.insert(Map.insert(Map.empty(), 1, "one", Map.int_cmp), 2, "two", Map.int_cmp)
+    println("int_cmp get 2: " ++ show_opt(Map.get(icm, 2, Map.int_cmp)))
+    println("int_cmp size after re-insert: " ++ int_to_string(Map.size(Map.insert(icm, 1, "uno", Map.int_cmp))))
+    let scm = Map.from_list_string([("a", "x"), ("b", "y"), ("a", "z")])
+    println("str_cmp size: " ++ int_to_string(Map.size(scm)))
+    println("str_cmp get a: " ++ show_opt(Map.get(scm, "a", Map.str_cmp)))
+  end
+end

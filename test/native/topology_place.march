@@ -23,9 +23,26 @@ mod TopologyPlace do
     answer: Server -> Client : Int
   end
 
+  -- The ranked role serves its own protocol. An offer registers under its
+  -- protocol+role+node, so two roles offering the SAME endpoint on one node
+  -- share one registry name: which of them holds it was a race between
+  -- `register`'s synchronous check and the node actor's asynchronous turn,
+  -- and under load the loser was never offered (nor, after a kill, the
+  -- winner re-offered).
+  @[endpoints]
+  protocol Tally do
+    bump: Caller -> Counter : Int
+    total: Counter -> Caller : Int
+  end
+
   pfn serve_one(s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
     Echo_Server.recv_Ask(s, st, fn (n, st1) ->
       Echo_Server.close(s, Echo_Server.send_Answer(s, st1, n * 10)))
+  end
+
+  pfn serve_tally(s : Cap(Session.Live), st : Tally_Counter.Entry) : Tally_Counter.Yield do
+    Tally_Counter.recv_Bump(s, st, fn (n, st1) ->
+      Tally_Counter.close(s, Tally_Counter.send_Total(s, st1, n + 1)))
   end
 
   pfn show(xs : List(String)) : String do "[" ++ String.join(xs, ", ") ++ "]" end
@@ -44,10 +61,12 @@ mod TopologyPlace do
       Err(e) -> panic(e)
     end
     let mk = fn (name, p) -> Topology.role(name, p, fn () -> Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)))
+    let counted = Topology.role("Echo.Counted", Topology.count(1),
+                                fn () -> Tally_Run.offer_Counter(c, h, 4, fn (s, st) -> serve_tally(s, st)))
     -- No labels on this node: the On("gpu") role is not offered here.
     Topology.place(h, [ mk("Echo.Server", Topology.everywhere()),
                         mk("Echo.Gpu", Topology.on_label("gpu")),
-                        mk("Echo.Counted", Topology.count(1)) ])
+                        counted ])
     println("offered: " ++ show(Topology.offered(h)))
     -- A ranked role registers this node's marker (asynchronously).
     let marker = Topology.marker("Echo.Counted", ClusterNode.node_id(h))
