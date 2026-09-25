@@ -1,0 +1,206 @@
+mod DrainPeersMulti do
+  -- D27 drains, part two of test/session/drain_peers.march (which states
+  -- the rule and the conservation check): three more protocols under the
+  -- chaos peers, 60 seeds each, a seed-chosen role draining after a
+  -- seed-chosen number of steps.  Pair sends twice in a row to a loop head,
+  -- so the second message is already parked when the first is refused and
+  -- must come back too (rule 2).  Relay3 and Fork send to a role AFTER it
+  -- may have drained, so the message comes back at `emit` (rule 3).  Only
+  -- aggregates are printed, and a VIOLATION line on any breach.
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+
+  -- Two sends in a row to B's loop head: when B drains on the first, the
+  -- second is already queued for it and must come back too (rule 2).
+  @[endpoints]
+  protocol Pair do
+    loop do
+      first: A -> B : Int
+      second: A -> B : Int
+      choose by B:
+        more -> B -> A : Bool
+        done -> B -> A : Bool
+                stop
+      end
+    end
+  end
+
+  -- A sends to B AFTER B may have drained (it waits on C in between), so
+  -- its message to a drained role comes back at `emit` (rule 3).  C's loop
+  -- head is a send; B's is a receive.
+  @[endpoints]
+  protocol Relay3 do
+    loop do
+      x: A -> B : Int
+      y: C -> A : Int
+      z: A -> B : Int
+      choose by B:
+        more -> B -> C : Bool
+                more_a: B -> A : Bool
+        done -> B -> C : Bool
+                done_a: B -> A : Bool
+                stop
+      end
+    end
+  end
+
+  -- C starts each iteration by sending to B (B's loop head) and then to A
+  -- (A's loop head).  When B drains on c1, A still takes c2 (C is not
+  -- draining) and THEN sends a1 to the drained B, which comes back at
+  -- `emit` (rule 3).  Roles: C = 1, B = 2, A = 3.
+  @[endpoints]
+  protocol Fork do
+    loop do
+      c1: C -> B : Int
+      c2: C -> A : Int
+      a1: A -> B : Int
+      choose by B:
+        more -> B -> C : Bool
+                more_a: B -> A : Bool
+        done -> B -> C : Bool
+                done_a: B -> A : Bool
+                stop
+      end
+    end
+  end
+
+  -- ── the chaos runs (see drain_peers.march) ────────────────────────────
+  pfn bump(tally : Vault(Int), key : String) : () do
+    let _ = Vault.incr(tally, key, 1)
+    ()
+  end
+
+  pfn count(tally : Vault(Int), key : String) : Int do Vault.get_or(tally, key, 0) end
+
+  -- A transport that counts, per session, the ends and stalls it reports.
+  pfn counting(tally : Vault(Int)) : Session.InProcess do
+    Session.in_process_with(fn line ->
+      if String.starts_with(line, "close ") do bump(tally, "end")
+      else if String.starts_with(line, "drained ") do
+        bump(tally, "end")
+        bump(tally, "drained")
+      else if String.starts_with(line, "stalled") do bump(tally, "stalled")
+      else if String.starts_with(line, "cancel ") do bump(tally, "cancel")
+      else if String.starts_with(line, "dropped") do bump(tally, "dropped")
+      else if String.starts_with(line, "undelivered ") do bump(tally, "undelivered")
+      else () end end end end end end)
+  end
+
+  pfn counting(tally : Vault(Int)) : Session.InProcess do
+    Session.in_process_with(fn line ->
+      if String.starts_with(line, "close ") do bump(tally, "end")
+      else if String.starts_with(line, "drained ") do
+        bump(tally, "end")
+        bump(tally, "drained")
+      else if String.starts_with(line, "stalled") do bump(tally, "stalled")
+      else if String.starts_with(line, "cancel ") do bump(tally, "cancel")
+      else if String.starts_with(line, "dropped") do bump(tally, "dropped")
+      else if String.starts_with(line, "undelivered ") do bump(tally, "undelivered")
+      else () end end end end end end)
+  end
+
+  pfn check(tally : Vault(Int), t : Session.InProcess, roles : Int, in_flight : Int, name : String, seed : Int) : () do
+    let per_role = List.fold_left(List.range(1, roles + 1), 0, fn (acc, r) -> acc + t.undelivered(r))
+    let ok = count(tally, "end") == roles && count(tally, "stalled") == 0 && count(tally, "cancel") == 0
+      && count(tally, "dropped") == 0 && t.queued(()) == 0
+      && t.sent(()) == t.consumed(()) + t.returned(())
+      && per_role == t.returned(()) && per_role == count(tally, "undelivered")
+    if ok do () else
+      print_line("VIOLATION " ++ name ++ " seed " ++ int_to_string(seed) ++ ": ends " ++ int_to_string(count(tally, "end"))
+        ++ ", stalls " ++ int_to_string(count(tally, "stalled")) ++ ", cancels " ++ int_to_string(count(tally, "cancel"))
+        ++ ", dropped " ++ int_to_string(count(tally, "dropped")) ++ ", in flight at the drain " ++ int_to_string(in_flight)
+        ++ ", per-role undelivered " ++ int_to_string(per_role) ++ ", traced " ++ int_to_string(count(tally, "undelivered"))
+        ++ ", " ++ counts(t))
+    end
+  end
+
+  pfn counts(t : Session.InProcess) : String do
+    "sent " ++ int_to_string(t.sent(())) ++ ", consumed " ++ int_to_string(t.consumed(()))
+      ++ ", returned " ++ int_to_string(t.returned(())) ++ ", queued " ++ int_to_string(t.queued(()))
+  end
+
+  pfn steps(t : Session.InProcess, k : Int) : () do
+    if k <= 0 do () else
+      if t.step(()) do steps(t, k - 1) else () end
+    end
+  end
+
+  pfn pair_seeds(c : Cap(IO), totals : Vault(Int), seed : Int) : () do
+    if seed == 60 do () else
+      let tally = Vault.new("drain_peers_pair_" ++ int_to_string(seed))
+      let t = counting(tally)
+      let s = Session.attach(c, t.ops)
+      let _ = Pair_B.chaos(s, Pair_B.register(s, 0), seed)
+      let _ = Pair_A.chaos(s, Pair_A.register(s, 0), seed + 300)
+      steps(t, (seed * 3 + 2) % 9)
+      let in_flight = t.queued(())
+      t.drain_role(1 + seed % 2)
+      t.drain(())
+      check(tally, t, 2, in_flight, "Pair", seed)
+      if count(tally, "drained") > 0 do bump(totals, "drained_sessions") else bump(totals, "finished_sessions") end
+      let _ = Vault.incr(totals, "returned", t.returned(()))
+      pair_seeds(c, totals, seed + 1)
+    end
+  end
+
+  pfn relay_seeds(c : Cap(IO), totals : Vault(Int), seed : Int) : () do
+    if seed == 60 do () else
+      let tally = Vault.new("drain_peers_relay_" ++ int_to_string(seed))
+      let t = counting(tally)
+      let s = Session.attach(c, t.ops)
+      let _ = Relay3_B.chaos(s, Relay3_B.register(s, 0), seed)
+      let _ = Relay3_C.chaos(s, Relay3_C.register(s, 0), seed + 400)
+      let _ = Relay3_A.chaos(s, Relay3_A.register(s, 0), seed + 500)
+      steps(t, (seed * 11 + 5) % 14)
+      let in_flight = t.queued(())
+      t.drain_role(1 + seed % 3)
+      t.drain(())
+      check(tally, t, 3, in_flight, "Relay3", seed)
+      if count(tally, "drained") > 0 do bump(totals, "drained_sessions") else bump(totals, "finished_sessions") end
+      let _ = Vault.incr(totals, "returned", t.returned(()))
+      relay_seeds(c, totals, seed + 1)
+    end
+  end
+
+  pfn fork_seeds(c : Cap(IO), totals : Vault(Int), seed : Int) : () do
+    if seed == 60 do () else
+      let tally = Vault.new("drain_peers_fork_" ++ int_to_string(seed))
+      let t = counting(tally)
+      let s = Session.attach(c, t.ops)
+      let _ = Fork_A.chaos(s, Fork_A.register(s, 0), seed)
+      let _ = Fork_B.chaos(s, Fork_B.register(s, 0), seed + 600)
+      let _ = Fork_C.chaos(s, Fork_C.register(s, 0), seed + 700)
+      steps(t, (seed * 13 + 1) % 12)
+      let in_flight = t.queued(())
+      t.drain_role(1 + seed % 3)
+      t.drain(())
+      check(tally, t, 3, in_flight, "Fork", seed)
+      if count(tally, "drained") > 0 do bump(totals, "drained_sessions") else bump(totals, "finished_sessions") end
+      let _ = Vault.incr(totals, "returned", t.returned(()))
+      fork_seeds(c, totals, seed + 1)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    print_line("-- chaos: Pair, two sends in a row to a loop head, 60 seeds")
+    let tot3 = Vault.new("drain_peers_totals_pair")
+    pair_seeds(c, tot3, 0)
+    print_line("drained " ++ int_to_string(count(tot3, "drained_sessions")) ++ ", finished first "
+      ++ int_to_string(count(tot3, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot3, "returned")))
+
+    print_line("-- chaos: Relay3, a send to a role after it drained, 60 seeds")
+    let tot4 = Vault.new("drain_peers_totals_relay")
+    relay_seeds(c, tot4, 0)
+    print_line("drained " ++ int_to_string(count(tot4, "drained_sessions")) ++ ", finished first "
+      ++ int_to_string(count(tot4, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot4, "returned")))
+
+    print_line("-- chaos: Fork, a send to a drained role, 60 seeds")
+    let tot5 = Vault.new("drain_peers_totals_fork")
+    fork_seeds(c, tot5, 0)
+    print_line("drained " ++ int_to_string(count(tot5, "drained_sessions")) ++ ", finished first "
+      ++ int_to_string(count(tot5, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot5, "returned")))
+    ()
+  end
+end

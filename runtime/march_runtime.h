@@ -672,6 +672,18 @@ int  march_hcr_epoch_draining(uint32_t epoch);
 void     march_epoch_hold(void);
 void     march_epoch_release(void);
 uint32_t march_epoch_holds(void);
+/* D27: 1 iff the running proc's code epoch is draining (stdlib-only builtin
+ * epoch_draining(), read by SessionNode at a loop-boundary delivery). */
+int64_t  march_epoch_draining(void);
+int64_t  march_epoch_holds_i64(void);
+/* Follow-up 1: the hook the actor loop calls when it drops a REMOTE delivery
+ * (stdlib-only delivery_failed_watch(f): f(conn, seq, reason)), and how many
+ * drops it has reported.  The origin builtins are march_sched_delivery_origin_*
+ * (march_scheduler.h). */
+void     march_delivery_failed_watch(void *clo);
+int64_t  march_delivery_failed_reported(void);
+/* Drain every epoch up to the current one (stdlib-only epoch_drain). */
+void     march_epoch_drain(int64_t soft_ms, int64_t hard_ms);
 
 /* Process-wide counters, reported by the reload server's PINS verb. */
 typedef struct {
@@ -806,6 +818,8 @@ void   *march_task_await(void *task_obj);
 void   *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr);
 /* Mark a task's green thread as DEAD (cooperative cancel). */
 void    march_task_cancel_by_id(void *task_obj);
+/* Tasks a hard drain deadline cancelled through their handle (follow-up 4). */
+int64_t march_tasks_cancelled(void);
 
 /* Float builtins. */
 double  march_float_abs(double f);

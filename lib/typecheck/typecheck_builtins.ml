@@ -1015,6 +1015,14 @@ let builtin_bindings : (string * scheme) list =
     ("actor_registered", Mono (TArrow (t_unit, TCon ("List", [t_string]))));
     ("epoch_hold", Mono (TArrow (t_unit, t_unit)));
     ("epoch_release", Mono (TArrow (t_unit, t_unit)));
+    ("epoch_draining", Mono (TArrow (t_unit, t_bool)));
+    ("epoch_drain", Mono (TArrow (t_int, TArrow (t_int, t_unit))));
+    ("epoch_hold_next_spawn", Mono (TArrow (t_unit, t_unit)));
+    ("epoch_holds", Mono (TArrow (t_unit, t_int)));
+    ("delivery_origin_set", Mono (TArrow (t_int, TArrow (t_int, t_unit))));
+    ("delivery_origin_clear", Mono (TArrow (t_unit, t_unit)));
+    ("delivery_failed_watch",
+     Mono (TArrow (TArrow (t_int, TArrow (t_int, TArrow (t_string, t_unit))), t_unit)));
     (* Phase 3: Epoch-based capability builtins *)
     (* [ActorCap], NOT [Cap] (2026-08-06).  These are process capabilities —
        a revocable, epoch-checked reference to a live actor, represented at run

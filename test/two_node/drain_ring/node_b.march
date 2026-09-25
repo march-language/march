@@ -1,0 +1,50 @@
+-- Three-node scenario "drain_ring": node-b runs B (see scenario.sh).
+mod DrainRingB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Ring do
+    loop do
+      a: A -> B : Int
+      b: B -> C : Int
+      choose by C:
+        more -> C -> A : Bool
+                more_b: C -> B : Bool
+        done -> C -> A : Bool
+                done_b: C -> B : Bool
+                stop
+      end
+    end
+  end
+
+  pfn role_b(s : Cap(Session.Live), st : Ring_B.Entry) : Ring_B.Yield do
+    Ring_B.recv_A(s, st, fn (n, st1) ->
+      println("B got " ++ int_to_string(n) ++ ", sends " ++ int_to_string(n * 10))
+      let st2 = Ring_B.send_B(s, st1, n * 10)
+      Ring_B.offer_more_done_or_drain(s, st2,
+        fn (_m, st3) -> role_b(s, st3),
+        fn (_d, st3) -> Ring_B.close(s, st3),
+        fn (role, back, d) ->
+          println("B drained, waiting on role " ++ int_to_string(role) ++ "; came back: "
+            ++ String.join(List.map(back, fn m -> match m do
+                 Ring_Msg.B(v) -> int_to_string(v)
+                 _ -> "?"
+               end), ", "))
+          Ring_B.drained(s, d)))
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-b: up")
+    match Ring_Run.run_B(c, "node-b", "ring-secret", Ring_Run.addrs_from_env(), fn (s, st) -> role_b(s, st)) do
+      Ok(Session.Drained(n)) -> println("B: Ok(Drained(" ++ int_to_string(n) ++ "))")
+      Ok(Session.Finished) -> println("B: Ok(Finished)")
+      Err(e) -> panic(Ring_Run.error_message(e))
+    end
+  end
+end

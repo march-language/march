@@ -69,4 +69,9 @@ val supervise :
     like every such helper. *)
 val free_port : unit -> int
 
+(** [n] distinct ports, each free a moment ago. Use this, not [n] calls to
+    [free_port], when several processes need ports at once: the sockets are all
+    held until every port is read, so the list has no duplicates. *)
+val free_ports : int -> int list
+
 val string_of_status : Unix.process_status -> string

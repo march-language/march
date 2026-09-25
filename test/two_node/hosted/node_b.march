@@ -28,7 +28,11 @@ mod HostedNodeB do
     init  { budget: 2, parked: Stream_Cons.idle() }
     on StartC(s : Cap(Session.Live)) do
       Stream_Cons.take_idle(state.parked)
-      { state with parked: Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0)) }
+      let parked = Stream_Cons.await_Msg_Prod_Cons_1(s, Stream_Cons.register(s, 0))
+      -- The transport holds this actor's epoch from `register` (hot reload's
+      -- nesting rule, D28) until the endpoint closes.
+      println("Cons holds after start: " ++ int_to_string(Session.epoch_holds_here()))
+      { state with parked: parked }
     end
     on DeliverC(s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
       match Stream_Cons.resume(state.parked, from, msg, ep) do
@@ -41,7 +45,9 @@ mod HostedNodeB do
                          parked: Stream_Cons.await_Msg_Prod_Cons_1(s, st2) }
           else
             let st2 = Stream_Cons.choose_done(s, st, true)
-            { state with parked: Stream_Cons.finish(s, st2) }
+            let parked = Stream_Cons.finish(s, st2)
+            println("Cons holds after finish: " ++ int_to_string(Session.epoch_holds_here()))
+            { state with parked: parked }
           end
       end
     end

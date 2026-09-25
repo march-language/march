@@ -401,7 +401,9 @@ and protocol_step =
                                                               the label, when present, names the
                                                               message ([@[endpoints]] uses it
                                                               instead of [Msg_<S>_<R>_<k>]) *)
-  | ProtoLoop of protocol_step list                       (** loop do ... end *)
+  | ProtoLoop of protocol_step list * bool                (** loop do ... end; [true] for
+                                                              `loop atomic do ... end`, whose
+                                                              head is not a drain point (D27) *)
   | ProtoChoice of name * (name * protocol_step list) list  (** choose by Role: label -> steps *)
   | ProtoStop of span                                     (** stop — exits an enclosing loop *)
   | ProtoMayCrash of name list * span                     (** may crash A, B: the roles that may crash *)

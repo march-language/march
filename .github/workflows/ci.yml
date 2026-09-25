@@ -94,7 +94,7 @@ jobs:
           - { os: ubuntu-24.04, shard: rest }
           - { os: macos-15,     shard: all }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 70
+    timeout-minutes: 85
     steps:
       - uses: actions/checkout@v4
 
@@ -128,9 +128,10 @@ jobs:
           dune build bin/main.exe
 
       - name: Test (${{ matrix.shard }})
-        # Sized for the unsharded run (27 min on main in September 2026, then
-        # past 30); each shard is now well under it.
-        timeout-minutes: 45
+        # Sized for the unsharded macOS run: 43-49 min on main in late
+        # September 2026 (the shards are well under it), so 45 was hit on main
+        # itself on a slow runner day.
+        timeout-minutes: 60
         run: |
           eval $(opam env)
           case "${{ matrix.shard }}" in
@@ -147,7 +148,7 @@ jobs:
   # compiler and the staged runtime/stdlib, so they get their own runner.
   two-node:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -196,7 +197,9 @@ jobs:
       # with a new creation), per-node goldens. ~5s per scenario. Each scenario
       # is test/two_node/<name>/; see specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
       - name: Two-node scenarios
-        timeout-minutes: 25
+        # 52 scenarios at 30-70 s each on a loaded runner (~20-24 min on a
+        # quiet one); 25 was hit on main itself on a slow runner day.
+        timeout-minutes: 35
         run: |
           eval $(opam env)
           for s in $(scripts/two-node.sh --list); do scripts/two-node.sh "$s" || exit 1; done

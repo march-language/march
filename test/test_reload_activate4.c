@@ -529,10 +529,32 @@ static void test_epoch_model_wait_pins_drain(void) {
     CHECK(strstr(pins, " current") != NULL, "PINS marks the current epoch");
     CHECK(strstr(pins, "COUNTERS deferred:") != NULL, "PINS reports the counters");
 
+    /* DRAIN is signed (its hard deadline kills actors) and refuses the
+     * current epoch, which every live unit is pinned at or below. */
     snprintf(want, sizeof(want), "DRAIN epoch:%u soft_ms:60000 hard_ms:600000", base);
     send_line(fd, want);
     read_resp(fd, resp, sizeof(resp));
-    CHECK(strcmp(resp, "OK") == 0, "DRAIN accepted");
+    CHECK(strcmp(resp, "ERR bad_signature") == 0, "an unsigned DRAIN is refused");
+    {
+        char msg[128], sig[128], line[256];
+        uint32_t cur = march_epoch_current();
+        snprintf(msg, sizeof(msg), "DRAIN epoch:%u soft_ms:60000 hard_ms:600000", cur);
+        sign_b64(msg, sig);
+        snprintf(line, sizeof(line), "DRAIN %s epoch:%u soft_ms:60000 hard_ms:600000", sig, cur);
+        send_line(fd, line);
+        read_resp(fd, resp, sizeof(resp));
+        CHECK(strcmp(resp, "ERR bad_epoch") == 0, "DRAIN of the current epoch is refused");
+        snprintf(msg, sizeof(msg), "DRAIN epoch:%u soft_ms:60000 hard_ms:600000", base);
+        sign_b64(msg, sig);
+        snprintf(line, sizeof(line), "DRAIN %s epoch:%u soft_ms:60000 hard_ms:1", sig, base);
+        send_line(fd, line);
+        read_resp(fd, resp, sizeof(resp));
+        CHECK(strcmp(resp, "ERR bad_signature") == 0, "a signature over other deadlines is refused");
+        snprintf(line, sizeof(line), "DRAIN %s epoch:%u soft_ms:60000 hard_ms:600000", sig, base);
+        send_line(fd, line);
+        read_resp(fd, resp, sizeof(resp));
+        CHECK(strcmp(resp, "OK") == 0, "a signed DRAIN of an older epoch is accepted");
+    }
     read_pins(fd, pins, sizeof(pins));
     snprintf(want, sizeof(want), "EPOCH %u pins:1 draining\n", base);
     CHECK(strstr(pins, want) != NULL, "PINS shows the epoch draining");

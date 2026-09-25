@@ -125,16 +125,23 @@ let rec proto_roles_of acc (steps : protocol_step list) =
   List.fold_left (fun acc st ->
       match st with
       | ProtoMsg (a, b, _, _) -> b.txt :: a.txt :: acc
-      | ProtoLoop ss -> proto_roles_of acc ss
+      | ProtoLoop (ss, _) -> proto_roles_of acc ss
       | ProtoChoice (r, brs) ->
         List.fold_left (fun acc (_, ss) -> proto_roles_of acc ss) (r.txt :: acc) brs
       | ProtoCrashOr (s, ss, _) -> proto_roles_of (proto_roles_of acc [ s ]) ss
       | ProtoMayCrash _ | ProtoStop _ | ProtoRoleNeeds _ -> acc)
     acc steps
 
+(* IO paths only, as [Desugar_endpoints.grants_of]: a non-IO path is refused
+   by the typechecker at the grant line, and dropping it here keeps that the
+   only diagnostic in a topology app too. *)
 let grants_of (steps : protocol_step list) =
   List.filter_map (function
-      | ProtoRoleNeeds (r, caps, _) -> Some (r.txt, List.map (fun (c : name) -> c.txt) caps)
+      | ProtoRoleNeeds (r, caps, _) ->
+        Some (r.txt,
+              List.filter_map
+                (fun (c : name) -> if March_caps.Cap_lattice.cap_subsumes "IO" c.txt then Some c.txt else None)
+                caps)
       | _ -> None)
     steps
 
