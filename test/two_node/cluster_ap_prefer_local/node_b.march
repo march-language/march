@@ -1,0 +1,82 @@
+-- Two-node scenario "cluster_ap_prefer_local": node-b offers role Server of
+-- Echo too, waits until it sees both offers (its own and node-a's), then
+-- initiates three sessions as Client. With prefer-local every one is served
+-- by node-b's own offer; with remote offers first (the reverted behaviour)
+-- they go to node-a. See scenario.sh.
+mod PreferLocalB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  pfn serve_one(s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
+    Echo_Server.recv_Msg_Client_Server_1(s, st, fn (n, st1) ->
+      println("node-b Server: got " ++ int_to_string(n))
+      Echo_Server.close(s, Echo_Server.send_Msg_Server_Client_1(s, st1, n * 10)))
+  end
+
+  pfn ask(s : Cap(Session.Live), st : Echo_Client.Entry, n : Int) : Echo_Client.Yield do
+    let st1 = Echo_Client.send_Msg_Client_Server_1(s, st, n)
+    Echo_Client.recv_Msg_Server_Client_1(s, st1, fn (m, st2) ->
+      println("Client: got " ++ int_to_string(m))
+      Echo_Client.close(s, st2))
+  end
+
+  fn session(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int) : () do
+    match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, n)) do
+      Ok(_) -> println("Client: session " ++ int_to_string(n) ++ " done")
+      Err(e) -> println("Client: " ++ SessionNode.run_error_message(e))
+    end
+  end
+
+  -- Both access points are registered and visible here.
+  pfn wait_offers(h : Cap(ClusterNode.Live), left : Int) : Bool do
+    let aps = List.filter(ClusterNode.names(h), fn nm -> String.starts_with(nm, "ap:"))
+    if List.length(aps) >= 2 do true
+    else if left <= 0 do false else
+      sleep_ms(50)
+      wait_offers(h, left - 50)
+    end end
+  end
+
+  actor Done do
+    state { n : Int }
+    init  { n: 0 }
+    on Nop() do state end
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "pl-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
+        match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do
+          Err(e) -> panic(Echo_Run.error_message(e))
+          Ok(o) ->
+            if wait_offers(h, 60000) do println("node-b: sees both offers")
+            else panic("node-b: never saw both offers") end
+            session(c, h, 1)
+            session(c, h, 2)
+            session(c, h, 3)
+            let _ = ClusterNode.register(h, "pl-done", spawn(Done))
+            -- Keep the registration up until node-a has seen it.
+            sleep_ms(1500)
+            SessionNode.close_offer(o)
+            ClusterNode.stop(h)
+        end
+    end
+  end
+end

@@ -83,7 +83,7 @@ let build ?(externs : Tir.extern_decl list = []) ?(unboxing = true)
             && List.length fields <= max_unboxed_arity
             && List.for_all is_scalar_field fields
             && not (Hashtbl.mem ffi name)
-            && not (Tir_names.is_actor_msg_name name)
+            && not (Migrate_msg_pins.has_actor_msg_repr name)
             && not (Tir_names.is_clo_struct name)
             && not (Collision_set.is_colliding collision_set name) ->
           Hashtbl.replace k_unboxed name (ctor, fields);
@@ -158,7 +158,7 @@ let is_actor_struct_type (t : table) (name : string) : bool =
     message shape is encoded and decoded as a tagged heap cell (no crash from an
     encode/decode repr split). *)
 let is_niche_shaped (t : table) (name : string) : bool =
-  if Tir_names.is_actor_msg_name name then false
+  if Migrate_msg_pins.has_actor_msg_repr name then false
   else if Collision_set.is_colliding t.k_collision name then false
   else
   match find_variant t name with
@@ -224,7 +224,7 @@ and repr_of (t : table) (ty : Tir.ty) : repr =
      is dropped — parity with the interpreter's silent foreign-message drop.
      Consulted uniformly by EAlloc/ECase/Perceus/borrow, so encode, decode, and
      RC all agree on Boxed for these types. *)
-  | Tir.TCon (name, _) when Tir_names.is_actor_msg_name name -> Boxed
+  | Tir.TCon (name, _) when Migrate_msg_pins.has_actor_msg_repr name -> Boxed
   (* Same-short-name colliding type — force Boxed (see doc comment above)
      BEFORE the ctor-shape match, mirroring the actor-msg exclusion. *)
   | Tir.TCon (name, _) when Collision_set.is_colliding t.k_collision name -> Boxed
@@ -283,7 +283,7 @@ and payload_needs_tag (t : table) (ty : Tir.ty) : bool =
     the branch body (observed as count = 21 + 11 instead of 10 + 5). *)
 let niche_repr_of_concrete (t : table) (name : string) : repr option =
   (* Finding-19: actor message types are Boxed (see [repr_of]) — never niche. *)
-  if Tir_names.is_actor_msg_name name then None
+  if Migrate_msg_pins.has_actor_msg_repr name then None
   (* Same-short-name colliding type — never niche, same rationale as
      [repr_of]/[is_niche_shaped].  This function independently re-derives the
      ctor-shape classification for a NON-GENERIC TCon rather than delegating

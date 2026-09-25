@@ -814,13 +814,52 @@ let test_actor_foreign_msg_drop_boxed_dispatch () =
   Alcotest.(check bool) "dispatch default arm is a drop (decrc), not unreachable"
     true (ir_contains ir "case_default");
   (* Global tags: Counter.Inc and Logger.Log get DISTINCT tags. Both are in the
-     0x01000000+ actor-message tag space; distinctness is what makes a foreign
-     message fall to the default arm. The base tag 16777216 (0x01000000) is
-     assigned to the first message ctor; a second, distinct tag must also appear. *)
-  Alcotest.(check bool) "first actor-message ctor uses the global tag base 16777216"
-    true (ir_contains ir "store i32 16777216");
-  Alcotest.(check bool) "a second, distinct actor-message tag is assigned (16777217)"
-    true (ir_contains ir "store i32 16777217")
+     0x01000000+ actor-message tag space (a stable hash of the qualified
+     constructor name, Llvm_toplevel.actor_msg_tag_table); distinctness is
+     what makes a foreign message fall to the default arm. *)
+  let tbl = March_tir.Llvm_toplevel.actor_msg_tag_table ~pins:[]
+      [ March_tir.Tir.TDVariant ("Counter_Msg", [ ("Inc", [ March_tir.Tir.TInt ]) ]);
+        March_tir.Tir.TDVariant ("Logger_Msg", [ ("Log", [ March_tir.Tir.TString ]) ]) ] in
+  let inc = Hashtbl.find tbl "Counter_Msg.Inc" and log = Hashtbl.find tbl "Logger_Msg.Log" in
+  Alcotest.(check bool) "the two message ctors carry distinct tags" true (inc <> log);
+  Alcotest.(check bool) "both in the actor-message range" true
+    (List.for_all (fun t -> t >= 0x0100_0000 && t < 0x0200_0000) [ inc; log ]);
+  Alcotest.(check bool) (Printf.sprintf "Counter.Inc is stored with its tag %d" inc)
+    true (ir_contains ir (Printf.sprintf "store i32 %d" inc));
+  Alcotest.(check bool) (Printf.sprintf "Logger.Log is stored with its tag %d" log)
+    true (ir_contains ir (Printf.sprintf "store i32 %d" log))
+
+(** Actor-message tags are a function of the qualified constructor name,
+    not of build order (specs/progress/2026-09-25-migrate-msg-actor-message-tags.md).
+    A hot deploy runs messages the OLD build allocated through the NEW
+    build's dispatch; under the old counter, removing one handler shifted
+    every later actor's tags, so their queued messages fell to the dropping
+    default arm. And a `*_migrate_msg`'s old message type takes its actor's
+    tags by constructor name, including a removed handler's. *)
+let test_actor_msg_tags_stable_across_builds () =
+  let module T = March_tir.Tir in
+  let module L = March_tir.Llvm_toplevel in
+  let cs = Hashtbl.create 1 in
+  let tally_v1 = T.TDVariant ("Tally_Msg", [ ("Add", [ T.TInt ]); ("Legacy", [ T.TInt ]) ]) in
+  let tally_v2 = T.TDVariant ("Tally_Msg", [ ("Add", [ T.TInt ]) ]) in
+  let other = T.TDVariant ("Other_Msg", [ ("Poke", [ T.TInt ]); ("Stop", []) ]) in
+  let old_ty = T.TDVariant ("TallyMsgV1.Msg", [ ("Legacy", [ T.TInt ]); ("Add", [ T.TInt ]) ]) in
+  let v1 = L.variant_ctor_tags ~pins:[] ~collision_set:cs [ tally_v1; other ] in
+  let v2 = L.variant_ctor_tags ~pins:[ ("TallyMsgV1.Msg", "Tally_Msg") ] ~collision_set:cs
+      [ tally_v2; other; old_ty ] in
+  let v1_reordered = L.variant_ctor_tags ~pins:[] ~collision_set:cs [ other; tally_v1 ] in
+  let get t n = Hashtbl.find t n in
+  Alcotest.(check (list int)) "Other's tags do not move when Tally loses a handler"
+    (get v1 "Other_Msg") (get v2 "Other_Msg");
+  Alcotest.(check (list int)) "nor when the declaration order changes"
+    (get v1 "Other_Msg") (get v1_reordered "Other_Msg");
+  Alcotest.(check int) "Tally.Add keeps its tag" (List.hd (get v1 "Tally_Msg")) (List.hd (get v2 "Tally_Msg"));
+  (match get v1 "Tally_Msg", get v2 "TallyMsgV1.Msg" with
+   | [ add1; legacy1 ], [ legacy_old; add_old ] ->
+     Alcotest.(check int) "the old type's Legacy carries v1's Tally.Legacy tag" legacy1 legacy_old;
+     Alcotest.(check int) "the old type's Add carries v1's Tally.Add tag" add1 add_old
+   | _ -> Alcotest.fail "unexpected ctor counts")
+
 
 (** Finding 20 (compiled actor-struct state-write race, fixed): a genuine
     actor's handler writes its new state back via an EReuse on the actor
@@ -13468,7 +13507,7 @@ declare void @march_dispatch_init(i32 %n_slots)
 declare void @march_dispatch_register_name(i32, ptr)
 declare void @march_reload_server_start(ptr)
 declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)
-declare void @march_actor_set_call_base(ptr %actor, i64 %base)
+declare void @march_actor_set_call_tags(ptr %actor, ptr %tags, i64 %n)
 declare ptr  @getenv(ptr)
 declare noalias nonnull ptr @march_alloc(i64 %sz) allocsize(0)
 declare void @march_incrc(ptr %p)
@@ -15400,6 +15439,8 @@ let codegen_suites =
       ( "actor_dispatch_codegen", [
           Alcotest.test_case "finding-19: foreign msg dropped (Boxed dispatch + global tags + default arm)"
             `Quick test_actor_foreign_msg_drop_boxed_dispatch;
+          Alcotest.test_case "actor-message tags are stable across builds; migrate_msg's old type takes them" `Quick
+            test_actor_msg_tags_stable_across_builds;
           Alcotest.test_case "finding-20: actor-struct state EReuse is unconditional (no RC race)"
             `Quick test_actor_struct_ereuse_unconditional;
           Alcotest.test_case "finding-20 follow-up: a `_Actor`-suffixed user type is NOT treated as an actor struct"
