@@ -463,6 +463,10 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- `to_string`/`println` of a List, Option, Result or tuple no longer aborts
+  `march --jit` or the JIT REPL with an internal compiler error ("ambiguous
+  interface-method call to `Show$List.show`"). The prelude's generic `Show`
+  impls are now specialised at the call site, as they are under `--compile`.
 - The stdlib-only builtin gate (`pid_of_int`, `actor_whereis`, `actor_registered`,
   `actor_pid_indices`, `epoch_hold`, `epoch_release`) now fires at name
   resolution, closing four bypasses found in review: it applies inside `impl`
