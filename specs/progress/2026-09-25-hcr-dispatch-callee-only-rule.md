@@ -62,7 +62,15 @@ Two things had to change with it:
   activated nothing for it. Bare-named (module `""`) callees are never slots,
   so their hashes are now folded into each boundary root transitively,
   stopping at other slots and at cycles; qualified callees (stdlib) stay
-  unfolded.
+  unfolded. What is folded is a CANONICAL hash: the helper's pretty-printed
+  TIR with every counter suffix after a `$` and every inliner `_i<n>` suffix
+  replaced by `#`. The first version folded the CAS hash, which serialises
+  names, and lifted names come from global counters, so any edit renumbered
+  them and every deploy hot-swapped the stdlib's own actors
+  (`ClusterNodeActor_dispatch`, which answers SWIM, `Endpoint_dispatch`,
+  `Writer_dispatch`). Checked by diffing two versions' manifests: the
+  canonical fold flags exactly what the control compiler flags plus the
+  app's changed lambdas.
 - **The reload server no longer dlopens a patch with `RTLD_DEEPBIND`**, and a
   Linux patch is linked `-Wl,-Bsymbolic` instead (macOS's two-level
   namespace already binds intra-image references). DEEPBIND made the patch

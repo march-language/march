@@ -23,3 +23,12 @@ The scenario exits 3 (skipped) under `MARCH_SANITIZE` until this is understood;
 `hcr_new_code_session` covers a hot deploy under ASan. To reproduce, run it in the
 container with `MARCH_SANITIZE=1 TWO_NODE_TIMEOUT=600` after removing the skip,
 and attach gdb to node-b once `deploy_a.log` says "Deploy complete".
+
+## The gate mislabels the skip
+
+`specs/lang/golden/sanitize.sh`'s two-node sweep prints `SKIP (needs root)` for
+EVERY scenario that exits 3, so the report says `[two-node/protocol_evolve] SKIP
+(needs root)`, which is false and would send a reader to the wrong fix. A skip
+must print its real reason: have the sweep show the scenario's own last line
+(this scenario prints "skipped under MARCH_SANITIZE (timing-bound; see
+scenario.sh)"), or have `two-node.sh` distinguish exit codes per reason.

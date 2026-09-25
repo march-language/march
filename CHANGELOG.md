@@ -78,7 +78,9 @@ git log is authoritative for exact commits.
   deploys.** A boundary function's slot hash did not cover the lambdas
   lowering lifts out of it, so editing a session body (always a lambda)
   left the function's hash unchanged and `forge deploy hot` activated
-  nothing. Lifted, bare-named helpers are now folded into the hash.
+  nothing. Lifted, bare-named helpers are now folded into the hash, by their
+  body rather than their compiler-numbered names, so an unrelated edit does
+  not make stdlib actors look changed and get hot-swapped.
 - **`SessionNode.initiate` survives a re-offer.** When the only access point for a
   role answered "closing" (its replacement's registration not yet propagated), the
   session was reported as having no offer; it now looks again within the setup time.

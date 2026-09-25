@@ -3177,28 +3177,43 @@ let compile filename =
            let is_entry n =
              String.equal n "main"
              || (String.length n > 5 && String.equal (String.sub n (String.length n - 5) 5) ".main") in
-           let base_hash n = Hashtbl.find_opt hr_impl_hashes n in
-           let rec fold visiting n =
-             match Hashtbl.find_opt fn_tbl n, base_hash n with
-             | Some fd, Some base ->
-               let visiting = n :: visiting in
-               let dep_hashes =
-                 March_cas.Scc.deps_of all_names fd
-                 |> List.filter (fun c ->
-                      not (List.mem c visiting)
-                      && String.equal (March_tir.Hot_reload.module_of_name c) ""
-                      && not (is_slot c))
-                 |> List.filter_map (fold visiting)
-                 |> List.sort String.compare in
-               (match dep_hashes with
-                | [] -> Some base
-                | dh -> Some (March_cas.Blake3.hash_string (String.concat "" (base :: dh))))
-             | _ -> None in
+           (* A folded helper's hash must not see its NAME or the names of
+              the other lifted helpers it calls: those come from global
+              counters (`$lam39788$apply$4781`, `$jp17442`), so any edit
+              anywhere renumbers them, and hashing them flagged every stdlib
+              actor (ClusterNodeActor_dispatch, the SWIM driver, among them)
+              as changed on every deploy.  Hash the pretty-printed body with
+              each counter suffix after a `$`, and the inliner's `_i<n>`
+              renaming suffix, replaced by `#`: a renumbering is invisible, a
+              real change (a literal, a call, a type) is not. *)
+           let counter_re = Str.regexp "\\$\\([A-Za-z_]*\\)[0-9]+" in
+           let inline_re = Str.regexp "_i[0-9]+" in   (* the inliner's renaming suffix *)
+           let canon_text fd =
+             Str.global_replace inline_re "_i#"
+               (Str.global_replace counter_re "$\\1#" (March_tir.Pp.string_of_fn_def fd)) in
+           let canon fd = March_cas.Blake3.hash_string (canon_text fd) in
+           let rec fold_deps visiting fd =
+             March_cas.Scc.deps_of all_names fd
+             |> List.filter (fun c ->
+                  not (List.mem c visiting)
+                  && String.equal (March_tir.Hot_reload.module_of_name c) ""
+                  && not (is_slot c))
+             |> List.filter_map (fun c ->
+                  match Hashtbl.find_opt fn_tbl c with
+                  | Some cfd ->
+                    let sub = fold_deps (c :: visiting) cfd in
+                    Some (March_cas.Blake3.hash_string (String.concat "" (canon cfd :: sub)))
+                  | None -> None)
+             |> List.sort String.compare in
            let roots = List.filter (fun n -> is_slot n && not (is_entry n)) all_names in
            List.iter (fun n ->
-               match fold [] n with
-               | Some h -> Hashtbl.replace hr_impl_hashes n h
-               | None -> ())
+               match Hashtbl.find_opt fn_tbl n, Hashtbl.find_opt hr_impl_hashes n with
+               | Some fd, Some base ->
+                 (match fold_deps [ n ] fd with
+                  | [] -> ()
+                  | dh -> Hashtbl.replace hr_impl_hashes n
+                            (March_cas.Blake3.hash_string (String.concat "" (base :: dh))))
+               | _ -> ())
              roots);
         (* Post-TIR cache: same key construction as the source-level early
            check above (build_cas_key), keyed on the module's per-SCC impl
