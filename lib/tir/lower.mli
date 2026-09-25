@@ -32,7 +32,14 @@ val lower_module :
   ?type_map:(Ast.span, Typecheck.ty) Hashtbl.t ->
   ?stdlib_context:Ast.decl list ->
   ?test_mode:bool ->
-  ?hot_reload:bool -> Ast.module_ -> Tir.tir_module
+  ?hot_reload:bool ->
+  ?shadow_builtins:bool -> Ast.module_ -> Tir.tir_module
+(** [shadow_builtins] (default [true]): lower an entry-file top-level fn named
+    like a builtin with its own C symbol under a distinct name
+    ([Tir_names.builtin_shadow_name]) so codegen does not emit it as that
+    symbol.  The REPL JIT passes [false]: it binds each fragment's fns by
+    their bare name through closure slots and has its own handling for names
+    the runtime defines. *)
 
 (** {1 Piecewise lowering}
 

@@ -103,6 +103,29 @@ let rename_scoped_vars (scopes : (string * string list) list) (fn : Tir.fn_def) 
 let scoped_names (scopes : (string * string list) list) : string list =
   List.concat_map snd scopes
 
+(** The span of a top-level declaration. *)
+let decl_span (d : Ast.decl) : Ast.span =
+  match d with
+  | Ast.DFn (_, sp) | Ast.DLet (_, _, sp) | Ast.DType (_, _, _, _, sp)
+  | Ast.DAlwaysLinearType (_, _, _, _, sp)
+  | Ast.DActor (_, _, _, sp) | Ast.DProtocol (_, _, sp) | Ast.DMod (_, _, _, sp)
+  | Ast.DSig (_, _, sp) | Ast.DInterface (_, sp) | Ast.DImpl (_, sp)
+  | Ast.DExtern (_, sp) | Ast.DUse (_, sp) | Ast.DAlias (_, sp)
+  | Ast.DNeeds (_, sp) | Ast.DProofCap (_, _, sp) | Ast.DTransitions (_, _, sp)
+  | Ast.DApp (_, sp) | Ast.DDeriving (_, _, sp) | Ast.DSatisfy (_, _, sp)
+  | Ast.DTest (_, sp) | Ast.DDescribe (_, _, sp) | Ast.DSetup (_, sp)
+  | Ast.DSetupAll (_, sp) | Ast.DOpts (_, sp) -> sp
+
+(** The bare names a module level defines as values: its fns and its
+    variable-bound lets (the same set [lower_mod_decls] calls
+    [direct_fn_names]). *)
+let direct_def_names (decls : Ast.decl list) : string list =
+  List.filter_map (function
+      | Ast.DFn (def, _) -> Some def.fn_name.txt
+      | Ast.DLet (_, b, _) ->
+        (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
+      | _ -> None) decls
+
 (* ── Shadow uniquification (alpha-rename of shadowed local binders) ── *)
 
 (** Make every local binder name within a function UNIQUE by alpha-renaming
@@ -374,6 +397,10 @@ let () = Lower_state._ensure_module_lowered := (fun env mod_name ->
          let ast = March_parser.Parser.module_
                      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
          let ast = March_desugar.Desugar.desugar_module ast in
-         lower_stdlib_mod_decls env (mod_name ^ ".") ast.mod_decls
+         (* Lazily lowered from inside whatever body referenced it, possibly
+            an entry fn's: a stdlib module's bare builtin name is the
+            builtin, never the entry's same-named fn. *)
+         Lower_state.with_builtin_shadows (Hashtbl.create 0) (fun () ->
+             lower_stdlib_mod_decls env (mod_name ^ ".") ast.mod_decls)
        with _ -> ())
   end)

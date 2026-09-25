@@ -480,7 +480,10 @@ let prev_slots_of ctx : March_tir.Llvm_emit.repl_slot_info list =
     [repl_vars] are bare variable names of REPL globals that should be
     treated as borrowed by Perceus so they are never freed mid-session. *)
 let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(repl_vars : string list = []) (m : March_ast.Ast.module_) =
-  let tir = March_tir.Lower.lower_module ~type_map ~stdlib_context m in
+  (* [~shadow_builtins:false]: fragments bind fns by bare name through closure
+     slots, and [is_c_runtime_fn] already keeps a runtime-defined name out of
+     a fragment; renaming here would desynchronise the two. *)
+  let tir = March_tir.Lower.lower_module ~type_map ~stdlib_context ~shadow_builtins:false m in
   (* Match the compiled pipeline: bin/main.ml runs Trmc.transform_module
      immediately post-lower (pre-mono), and without it a function behaves
      differently in the REPL than when compiled.  The position matters as much

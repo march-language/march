@@ -1,0 +1,112 @@
+-- Regression: a top-level user fn named like a builtin that has its OWN C
+-- symbol (a `c_name` row in lib/tir/llvm_builtins.ml) must be emitted under
+-- its own symbol, and calls to it must reach it, while the stdlib's calls to
+-- the builtin of the same name still reach the C function.
+--
+-- Before the fix the entry module's bare TIR name was indistinguishable from
+-- the builtin's, so codegen defined `@march_file_read`, `@march_dns_resolve`,
+-- ... and clang rejected the redefinition of the runtime's function.  A small
+-- fn is inlined and never emitted, so each shadow here calls recursive
+-- helpers several times, is called from two or more sites, and (for some) is
+-- passed as a value.
+--
+-- The interpreter's scoping is the reference (.expected is its output): the
+-- entry fn wins everywhere in this file, including a nested module and an
+-- impl body; a nested module's own fn named like a builtin wins inside that
+-- module; a parameter named like it is a local; and `String.reverse`, a
+-- stdlib wrapper calling the builtin `string_reverse` by bare name, still
+-- reverses the string.
+mod UserFnNamedLikeBuiltin do
+  needs IO.Console
+
+  -- Recursive helpers keep the shadows below too big to inline.  (A shadow
+  -- does not call ITSELF: the typechecker binds a fn's own bare name inside
+  -- its body to the builtin -- a separate, typecheck-side issue.)
+  fn count_up(i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc else count_up(i + 1, n, acc + i * 3 + 1) end
+  end
+
+  fn bang(s : String, times : Int) : String do
+    if times <= 0 do s else bang(s ++ "!", times - 1) end
+  end
+
+  -- builtin: file_read(String) -> Result(String, FileError)
+  fn file_read(n : Int) : Int do
+    count_up(0, n, 0) + count_up(1, n, 7) * 2 + count_up(2, n, 9) * 5
+  end
+
+  -- builtin: dns_resolve(String) -> Result(List(String), String)
+  fn dns_resolve(n : Int, acc : Int) : Int do
+    count_up(0, n, acc) * 10 + count_up(3, n + 3, acc) + count_up(1, n, 1)
+  end
+
+  -- builtin: string_reverse(String) -> String.  Different meaning here.
+  fn string_reverse(s : String, times : Int) : String do
+    bang(s, times) ++ "|" ++ bang("<", times + 1) ++ bang(s, 1)
+  end
+
+  -- builtin: int_to_string(Int) -> String.  Same type, different output.
+  fn int_to_string(x : Int) : String do
+    if x < 0 do "neg" ++ bang("", 0 - x) else "#" ++ float_to_string(int_to_float(count_up(0, 1, x))) end
+  end
+
+  -- builtin: string_repeat(String, Int) -> String.  Inner defines its own.
+  fn string_repeat(s : String, n : Int) : String do
+    bang(s, n) ++ "=" ++ bang(s, n + 1)
+  end
+
+  fn apply_int(f : Int -> Int, x : Int) : Int do f(x) end
+
+  fn twice(f : Int -> Int, x : Int) : Int do f(f(x) - 20) end
+
+  mod Inner do
+    -- No fn of its own named int_to_string: the entry's is in scope.
+    fn via_entry(x : Int) : String do int_to_string(x + 1000) end
+
+    -- Its own string_repeat shadows the entry's inside this module.
+    fn string_repeat(s : String, n : Int) : String do
+      if n <= 0 do s else s ++ "~" ++ int_to_string(n) end
+    end
+
+    fn via_own(x : Int) : String do string_repeat("r", x) end
+  end
+
+  interface Describe(a) do
+    fn describe : a -> String
+  end
+
+  type Box = Box(Int)
+
+  impl Describe(Box) do
+    fn describe(b) do
+      match b do
+        Box(n) -> int_to_string(file_read(n))
+      end
+    end
+  end
+
+  -- A parameter named like the builtin is a local closure, not either fn.
+  fn call_param(file_read : Int -> Int, x : Int) : Int do file_read(x) + 1 end
+
+  fn main(_cap : Cap(IO.Console)) : () do
+    println(int_to_string(file_read(4)))
+    println(int_to_string(file_read(6)))
+    println(int_to_string(apply_int(file_read, 5)))
+    println(int_to_string(twice(file_read, 3)))
+    println(int_to_string(dns_resolve(5, 0)))
+    println(int_to_string(dns_resolve(7, 100)))
+    println(string_reverse("ab", 3))
+    println(string_reverse("xyz", 1))
+    println(int_to_string(-3))
+    println(Inner.via_entry(2))
+    println(Inner.via_own(4))
+    println(string_repeat("e", 2))
+    println(string_repeat("f", 1))
+    println(describe(Box(3)))
+    println(int_to_string(call_param(fn x -> x * 10, 4)))
+    -- The builtins themselves, reached through the stdlib.
+    println(String.reverse("stressed"))
+    println(String.reverse("drawer"))
+    println("${file_read(2)}")
+  end
+end
