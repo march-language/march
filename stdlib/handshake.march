@@ -19,28 +19,45 @@ mod Handshake do
   -- acceptor learns where to dial the peer back before any gossip arrives
   -- (the cluster node service). "" when not sent: a hello without it (every
   -- node before the service) decodes as before.
-  type Hello = { identity : NodeIdentity.Identity, nonce : String, role : String, addr : String }
+  --
+  -- `cert` is present only in CERTIFICATE mode (ClusterAuth.Certified): the
+  -- sender's signed certificate (NodeCert.to_bytes) and a fresh ephemeral
+  -- X25519 public key for the connection's MAC key agreement. It is sent as a
+  -- seventh element, ["cert1", Bin(cert), Bin(eph)]; a shared-secret hello
+  -- never has it and is byte-identical to a pre-11a node's.
+  type HelloCert = { cert : List(Int), eph : List(Int) }
+
+  type Hello = { identity : NodeIdentity.Identity, nonce : String, role : String, addr : String,
+                 cert : Option(HelloCert) }
 
   fn role_control() : String do "control" end
   fn role_data() : String do "data" end
 
   fn make_hello(identity : NodeIdentity.Identity, nonce : String) : Hello do
-    { identity: identity, nonce: nonce, role: role_control(), addr: "" }
+    { identity: identity, nonce: nonce, role: role_control(), addr: "", cert: None }
   end
 
   fn make_hello_role(identity : NodeIdentity.Identity, nonce : String, role : String) : Hello do
-    { identity: identity, nonce: nonce, role: role, addr: "" }
+    { identity: identity, nonce: nonce, role: role, addr: "", cert: None }
   end
 
   fn make_hello_addr(identity : NodeIdentity.Identity, nonce : String, role : String, addr : String) : Hello do
-    { identity: identity, nonce: nonce, role: role, addr: addr }
+    { identity: identity, nonce: nonce, role: role, addr: addr, cert: None }
+  end
+
+  fn make_hello_cert(identity : NodeIdentity.Identity, nonce : String, role : String, addr : String,
+                     cert : List(Int), eph : List(Int)) : Hello do
+    { identity: identity, nonce: nonce, role: role, addr: addr, cert: Some({ cert: cert, eph: eph }) }
   end
 
   -- Serialize a Hello to MessagePack bytes: [name, node_id, incarnation,
   -- nonce, role] plus [addr] when one is set (so a hello without an address
   -- is byte-identical to the pre-service shape).
   fn encode_hello(h : Hello) : List(Int) do
-    let tail = if String.is_empty(h.addr) do Nil else Cons(Msgpack.str(h.addr), Nil) end
+    let tail = match h.cert do
+      Some(hc) -> [Msgpack.str(h.addr), Msgpack.array([Msgpack.str("cert1"), Msgpack.bin(hc.cert), Msgpack.bin(hc.eph)])]
+      None -> if String.is_empty(h.addr) do Nil else Cons(Msgpack.str(h.addr), Nil) end
+    end
     Msgpack.encode(Msgpack.array(
       Cons(Msgpack.str(h.identity.name),
       Cons(Msgpack.str(h.identity.node_id),
@@ -54,6 +71,11 @@ mod Handshake do
       Err(e) -> Err(e)
       Ok(v) ->
         match v do
+          Msgpack.Array([Msgpack.Str(name), Msgpack.Str(nid), Msgpack.Int(inc), Msgpack.Str(nonce),
+                         Msgpack.Str(role), Msgpack.Str(addr),
+                         Msgpack.Array([Msgpack.Str("cert1"), Msgpack.Bin(cert), Msgpack.Bin(eph)])]) ->
+            Ok({ identity: { name: name, node_id: nid, incarnation: inc },
+                 nonce: nonce, role: role, addr: addr, cert: Some({ cert: cert, eph: eph }) })
           Msgpack.Array(Cons(Msgpack.Str(name),
                         Cons(Msgpack.Str(nid),
                         Cons(Msgpack.Int(inc),
@@ -61,20 +83,20 @@ mod Handshake do
                         Cons(Msgpack.Str(role),
                         Cons(Msgpack.Str(addr), Nil))))))) ->
             Ok({ identity: { name: name, node_id: nid, incarnation: inc },
-                 nonce: nonce, role: role, addr: addr })
+                 nonce: nonce, role: role, addr: addr, cert: None })
           Msgpack.Array(Cons(Msgpack.Str(name),
                         Cons(Msgpack.Str(nid),
                         Cons(Msgpack.Int(inc),
                         Cons(Msgpack.Str(nonce),
                         Cons(Msgpack.Str(role), Nil)))))) ->
             Ok({ identity: { name: name, node_id: nid, incarnation: inc },
-                 nonce: nonce, role: role, addr: "" })
+                 nonce: nonce, role: role, addr: "", cert: None })
           Msgpack.Array(Cons(Msgpack.Str(name),
                         Cons(Msgpack.Str(nid),
                         Cons(Msgpack.Int(inc),
                         Cons(Msgpack.Str(nonce), Nil))))) ->
             Ok({ identity: { name: name, node_id: nid, incarnation: inc },
-                 nonce: nonce, role: role_control(), addr: "" })
+                 nonce: nonce, role: role_control(), addr: "", cert: None })
           _ -> Err("Handshake: malformed hello")
         end
     end
@@ -89,6 +111,59 @@ mod Handshake do
       Ok(peer.identity)
     else
       Err("Handshake: peer failed authentication")
+    end
+  end
+
+  -- ── certificate mode ───────────────────────────────────────────────────
+
+  doc """
+  The two modes do not mix: a certificate-mode node refuses a shared-secret
+  peer and a shared-secret node refuses a certificate-mode one, each naming
+  what the other side must be given. (A pre-11a node cannot decode a
+  certificate hello at all and fails with "malformed hello".)
+  """
+  fn check_mode(mine : ClusterAuth.Auth, peer : Hello) : Result((), String) do
+    match (mine, peer.cert) do
+      (ClusterAuth.Certified(_), None) ->
+        Err("Handshake: the peer runs in shared-secret mode, but this node requires a certificate "
+            ++ "(give the peer MARCH_NODE_CERT, MARCH_NODE_KEY and MARCH_CLUSTER_OPERATOR_PUBKEY)")
+      (ClusterAuth.Secret(_), Some(_)) ->
+        Err("Handshake: the peer requires a certificate, but this node runs in shared-secret mode "
+            ++ "(set MARCH_NODE_CERT, MARCH_NODE_KEY and MARCH_CLUSTER_OPERATOR_PUBKEY here too)")
+      _ -> Ok(())
+    end
+  end
+
+  doc """
+  Check the certificate a certificate-mode peer sent at [now] (unix seconds):
+  signed by the operator key, not expired, not revoked, and naming the node
+  the hello claims to be -- its name is the certificate URI's last segment,
+  and its node id is that name's (NodeIdentity.name_id). Returns the
+  certificate and the node's public key, or a reason.
+  """
+  fn verify_peer_cert(creds : NodeCert.Credentials, peer : Hello, now : Int) : Result((NodeCert.Cert, Bytes), String) do
+    match peer.cert do
+      None -> Err("Handshake: the peer sent no certificate")
+      Some(hc) ->
+        match NodeCert.from_bytes(hc.cert) do
+          Err(e) -> Err("Handshake: peer certificate: " ++ e)
+          Ok(signed) ->
+            match NodeCert.verify(signed, creds.operator_pubkey, now) do
+              Err(e) -> Err("Handshake: peer " ++ peer.identity.name ++ ": " ++ e)
+              Ok(c) ->
+                if creds.revoked(c) do Err("Handshake: peer " ++ peer.identity.name ++ ": certificate revoked")
+                else if NodeCert.node_name(c.node) != peer.identity.name do
+                  Err("Handshake: peer calls itself " ++ peer.identity.name ++ " but its certificate names " ++ c.node)
+                else if peer.identity.node_id != NodeIdentity.name_id(peer.identity.name) do
+                  Err("Handshake: peer " ++ peer.identity.name ++ " announced a node id that is not its name's")
+                else
+                  match NodeCert.key_from_hex(c.pubkey, 32) do
+                    Err(e) -> Err("Handshake: peer certificate key: " ++ e)
+                    Ok(pk) -> Ok((c, pk))
+                  end
+                end end end
+            end
+        end
     end
   end
 

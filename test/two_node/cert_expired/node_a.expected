@@ -1,0 +1,5 @@
+node-a: done
+node-a: linked to node-b
+node-a: node-b dead: certificate expired
+node-a: refused a handshake: certificate expired
+node-a: up

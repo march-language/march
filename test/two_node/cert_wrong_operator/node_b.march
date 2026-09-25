@@ -1,0 +1,79 @@
+-- Two-node harness, scenario "cert_wrong_operator": node-b. The two nodes' certificates come from DIFFERENT operator keys, each
+-- node trusting its own operator; each must refuse the other's certificate
+-- and they must never link. See scenario.sh.
+-- Certificate mode from the environment (ClusterNode.config_from_env), the
+-- key, certificate and operator key being files scenario.sh made with
+-- `forge cluster`. Each line below prints at most once.
+mod CertWrongOperatorB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+
+  pfn me() : String do "node-b" end
+  pfn other() : String do "node-a" end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn once(flags : Vault(Int), key : String, line : String) : () do
+    if Vault.incr(flags, key, 1) == 1 do println(me() ++ ": " ++ line) else () end
+  end
+
+  -- A handshake refusal, by the reason's key phrase.
+  pfn on_refused(flags : Vault(Int), why : String) : () do
+    let _ = List.map(["certificate expired", "certificate revoked", "certificate not signed by the cluster operator"], fn p ->
+      if String.contains(why, p) do once(flags, "refused " ++ p, "refused a handshake: " ++ p) else () end)
+    ()
+  end
+
+  pfn wait_linked(h : Cap(ClusterNode.Live), flags : Vault(Int), stop : String) : () do
+    if File.exists(stop) do () else
+      match ClusterNode.peer_cert(h, ClusterNode.node_id_of(other())) do
+        Some(_) -> once(flags, "linked", "linked to " ++ other())
+        None ->
+          sleep_ms(50)
+          wait_linked(h, flags, stop)
+      end
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_NAME", me())
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int("MARCH_PORT_B")))
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/op2/operator.pub")
+    let cfg = match ClusterNode.config_from_env() do
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    end
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let flags = Vault.new("cert_flags")
+        let _ = ClusterNode.on_security_event(h, fn ev ->
+          match ev do
+            ClusterNode.HandshakeRejected(_, why) -> on_refused(flags, why)
+            _ -> ()
+          end)
+        println(me() ++ ": up")
+        let stop = Env.require("CLUSTER_STOP_FILE")
+        wait_linked(h, flags, stop)
+        wait_file(stop)
+        ClusterNode.stop(h)
+        println(me() ++ ": done")
+    end
+  end
+end

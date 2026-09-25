@@ -407,13 +407,22 @@ let rec rewrite_expr (apply_fns : (string, Tir.fn_def) Hashtbl.t)
   let rewrite_expr = rewrite_expr apply_fns extra_fns in
   match e with
   | Tir.ELet (v, (Tir.EAlloc (Tir.TCon (_clo_name, []), [ Tir.AVar apply_var ]) as alloc_e), rest) ->
-    let (effective_name, wrappers, inner) = strip_alias_chain v.Tir.v_name rest in
-    let inner' = rewrite_expr inner in
+    (* Rewrite the continuation ONCE, then peel the alias chain off the
+       rewritten tree (the same order as the capturing arm below). This arm
+       used to rewrite [inner] for the eligibility check and then, when the
+       closure was not eligible, rewrite [rest] AGAIN from scratch -- two
+       full traversals per non-capturing closure let, so a function binding
+       k such closures in a row cost 2^k traversals. ClusterNode.ops_stub
+       (a record of ~34 `fn _ -> unsupported(...)` lambdas) made a main-less
+       compile, where nothing prunes it, take minutes instead of seconds
+       (PR #635's CI compiler shard timed out at 45 min). *)
+    let rest' = rewrite_expr rest in
+    let (effective_name, wrappers, inner') = strip_alias_chain v.Tir.v_name rest' in
     let eligible =
       Hashtbl.mem apply_fns apply_var.Tir.v_name
       && count_uses effective_name inner' = 1
     in
-    if not eligible then Tir.ELet (v, alloc_e, rewrite_expr rest)
+    if not eligible then Tir.ELet (v, alloc_e, rest')
     else
       (* Float-boxing Stage 4, Option B: an all-Float callback (no
          captures here, so nothing to check besides the signature) gets
@@ -431,14 +440,15 @@ let rec rewrite_expr (apply_fns : (string, Tir.fn_def) Hashtbl.t)
        | Some target_name ->
          let (unboxed, call_var) = unboxed_pair target_name in
          let substituted = subst_call ~unboxed target_name effective_name call_var inner' in
-         List.fold_right (fun w acc -> Tir.ESeq (rewrite_expr w, acc)) wrappers substituted
+         (* [wrappers] came off the already-rewritten [rest']: re-wrap as is. *)
+         List.fold_right (fun w acc -> Tir.ESeq (w, acc)) wrappers substituted
        | None ->
          match find_target_call2 effective_name inner' with
          | Some target_name ->
            let (unboxed, call_var) = unboxed_pair target_name in
            let substituted = subst_call2 ~unboxed target_name effective_name call_var inner' in
-           List.fold_right (fun w acc -> Tir.ESeq (rewrite_expr w, acc)) wrappers substituted
-         | None -> Tir.ELet (v, alloc_e, rewrite_expr rest))
+           List.fold_right (fun w acc -> Tir.ESeq (w, acc)) wrappers substituted
+         | None -> Tir.ELet (v, alloc_e, rest'))
   (* P10 Phase 2c — a CAPTURING closure (one or more free vars, so the
      EAlloc's arg list is [apply_fn_ptr; fv0; fv1; ...] rather than the
      singleton list above): the closure struct is a real, live value that

@@ -160,6 +160,7 @@ let all_stdlib_decls =
     "consistent_hash.march";
     "net_frame.march";
     "node_identity.march";
+    "node_cert.march";
     "cluster_auth.march";
     "handshake.march";
     "net_kernel.march";
@@ -583,6 +584,10 @@ let () =
     ("cluster_auth", [
       Alcotest.test_case "ClusterAuth module"
         `Quick (run_stdlib_test "test_cluster_auth.march" "TestClusterAuth");
+    ]);
+    ("node_cert", [
+      Alcotest.test_case "NodeCert module + ed25519/x25519 builtins"
+        `Quick (run_stdlib_test "test_node_cert.march" "TestNodeCert");
     ]);
     ("handshake", [
       Alcotest.test_case "Handshake module"
