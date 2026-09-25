@@ -1,0 +1,3 @@
+node-a: Checkout: session_node: no access point for role Ledger: node-b refused: initiator node-a not authorized for Checkout.Client
+node-a: done
+node-a: sees node-b's Checkout.Ledger offer

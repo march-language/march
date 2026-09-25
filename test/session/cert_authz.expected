@@ -1,0 +1,15 @@
+authorize offer: ok
+authorize initiate as Ledger: not authorized for Checkout.Ledger
+authorize no cert: presented no certificate
+1 node-b1 offers Ledger: session_node: role Ledger: this node not authorized for Checkout.Ledger (its certificate lacks Checkout.Ledger:offer)
+1 initiator: session_node: no access point for role Ledger: node-b1 not authorized for Checkout.Ledger, not invited
+1 invitations sent to node-b1: 0
+3 node-b offers Ledger: offered
+3 initiator: session_node: no access point for role Ledger: node-b3 refused: initiator node-a3 not authorized for Checkout.Client
+4 node-b offers Ledger: offered
+4 initiator: session_node: no access point for role Ledger: node-b4 refused: full
+5 node-b offers Ledger: offered
+5 initiator: session_node: no access point for role Ledger: node-b5 refused: full
+6 node-b offers Ledger: offered
+6 initiator: session_node: connect to role Ledger: session a6.1.1: role Checkout.Ledger is held by node-c6: not authorized for Checkout.Ledger
+done

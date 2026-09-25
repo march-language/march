@@ -1,0 +1,6 @@
+node-b: done
+node-b: forged the Checkout.Ledger offer
+node-b: invitations to the forged offer: 0
+node-b: offer_Ledger refused: session_node: role Ledger: this node not authorized for Checkout.Ledger (its certificate lacks Checkout.Ledger:offer)
+node-b: offering Thumbs.Render
+node-b: up

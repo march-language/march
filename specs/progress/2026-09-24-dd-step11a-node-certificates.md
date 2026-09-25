@@ -2,8 +2,8 @@
 
 **Plan:** [../plans/2026-09-21-distributed-authority-and-deploys-plan.md](../plans/2026-09-21-distributed-authority-and-deploys-plan.md),
 section 3 (Identity, Threat model), 7.4, II.9, D3, D4. The authorization half
-(11b: the two-way role check, raw-send denial) is still open:
-[../todos/2026-09-22-dd-step11-certificates-segregation.md](../todos/2026-09-22-dd-step11-certificates-segregation.md).
+(11b: the two-way role check, raw-send denial) landed later:
+[2026-09-25-dd-step11b-authorization.md](2026-09-25-dd-step11b-authorization.md).
 
 ## 1. Certificates
 

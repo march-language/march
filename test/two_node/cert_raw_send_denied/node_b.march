@@ -1,0 +1,228 @@
+-- Two-node harness, scenario "cert_raw_send_denied": node-b, whose
+-- certificate has no raw_send (an isolated IO.Foreign pool). See
+-- scenario.sh.
+mod CertRawSendDeniedB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+
+  pfn me() : String do "node-b" end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn wait_cert(h : Cap(ClusterNode.Live), id : String, left : Int) : Bool do
+    if ClusterNode.peer_cert(h, id) != None do true
+    else if left <= 0 do false else
+      sleep_ms(50)
+      wait_cert(h, id, left - 50)
+    end end
+  end
+
+  pfn read(path : String) : String do
+    match File.read(path) do
+      Ok(s) -> String.trim(s)
+      Err(_) -> panic("node-b: cannot read " ++ path)
+    end
+  end
+
+  pfn num(x : String) : Int do
+    match String.to_int(x) do
+      Ok(n) -> n
+      Err(e) -> panic("node-b: " ++ e)
+    end
+  end
+
+  pfn nth(xs : List(Int), i : Int) : Int do
+    match List.drop(xs, i) do
+      Cons(x, _) -> x
+      Nil -> panic("node-b: bad pids file")
+    end
+  end
+
+  actor Holder do
+    state { n : Int }
+    init  { n: 0 }
+    on Nop() do state end
+  end
+
+  pfn wait_registrant(h : Cap(ClusterNode.Live), name : String, left : Int) : Option(String) do
+    match ClusterNode.registrant(h, name) do
+      Some(r) -> Some(r)
+      None ->
+        if left <= 0 do None else
+          sleep_ms(50)
+          wait_registrant(h, name, left - 50)
+        end
+    end
+  end
+
+  pfn shown(h : Cap(ClusterNode.Live), name : String) : String do
+    if ClusterNode.lookup(h, name) == None do "hidden" else "visible" end
+  end
+
+  pfn said(r : Result(Int, NodeQueue.EnqueueError)) : String do
+    match r do
+      Ok(_) -> "sent"
+      Err(NodeQueue.NotAuthorized) -> "not authorized"
+      Err(NodeQueue.NoConnection) -> "no connection"
+      Err(NodeQueue.Backpressure) -> "backpressure"
+    end
+  end
+
+  pfn creds(pki : String, name : String) : NodeCert.Credentials do
+    match ClusterNode.credentials(name, read(pki ++ "/" ++ name ++ ".key"), read(pki ++ "/" ++ name ++ ".cert"),
+                                  read(pki ++ "/operator.pub")) do
+      Ok(cr) -> cr
+      Err(e) -> panic(e)
+    end
+  end
+
+  -- Node.send's and RemoteCall's paths on a direct certificate-mode
+  -- connection this process opens to itself: node-a's credentials dial,
+  -- node-b's accept. Both ends refuse raw frames (node-b has no raw_send).
+  pfn direct(pki : String) : () do
+    let port = Env.require_int("MARCH_PORT_C")
+    let lfd = match ClusterConn.listen(port) do
+      Ok(fd) -> fd
+      Err(e) -> panic("node-b: listen: " ++ e)
+    end
+    let idb = NodeIdentity.make("node-b", "pk-node-b", 1)
+    let ida = NodeIdentity.make("node-a", "pk-node-a", 1)
+    let cb = creds(pki, "node-b")
+    let ca = creds(pki, "node-a")
+    let served = Vault.new("raw_denied_served")
+    let _ = task_spawn(fn _ -> do
+      match ClusterConn.accept_split_auth(PeerRegistry.empty(), lfd, idb, ClusterAuth.Certified(cb), 10000) do
+        Ok((_reg, peer, _cert)) ->
+          let _ = NodeCall.serve_one(NodeRpc.empty(), peer.fd)
+          Vault.set(served, "done", 1)
+        Err(e) -> println("node-b: direct accept failed: " ++ e)
+      end
+      0
+    end)
+    match ClusterConn.connect_split_auth(PeerRegistry.empty(), "127.0.0.1", port, ida, ClusterAuth.Certified(ca), 10000) do
+      Err(e) -> println("node-b: direct connect failed: " ++ e)
+      Ok((_reg, peer, _cert)) ->
+        let to = GlobalPid.make(idb.node_id, 1, 1)
+        -- Node.send lowers to NodeSend.cast on the peer's data connection.
+        match NodeSend.cast(peer.data_fd, 1, to, "Raw.Ping", [1]) do
+          Ok(_) -> println("node-b: direct Node.send path: sent (wrong)")
+          Err(NodeSend.Refused(_, why)) -> println("node-b: direct Node.send path: " ++ why)
+          Err(_) -> println("node-b: direct Node.send path: no connection")
+        end
+        let fref = RemoteCall.remote_ref("Probe", "f", "sig", "impl")
+        let now = unix_time_ms()
+        match NodeCall.call(peer.fd, fref, Nil, to, now + 5000, 7, now) do
+          Ok(_) -> println("node-b: direct RemoteCall: returned (wrong)")
+          Err(e) -> println("node-b: direct RemoteCall: " ++ RemoteCall.error_message(e))
+        end
+        -- Skipping the caller's check: the server refuses it too.
+        let req = RemoteCall.request(fref, Nil, to, now + 5000, 8)
+        let _ = NetKernel.send_frame(peer.fd, RemoteCall.encode_request(req))
+        match NetKernel.recv_frame(peer.fd, Nil) do
+          Err(e) -> println("node-b: direct RemoteCall reply: " ++ e)
+          Ok((bytes, _)) ->
+            match RemoteCall.decode_reply(bytes) do
+              Ok(r) ->
+                match r.result do
+                  RemoteCall.Failed(e) -> println("node-b: direct RemoteCall server answered: " ++ RemoteCall.error_message(e))
+                  RemoteCall.Returned(_) -> println("node-b: direct RemoteCall server answered: returned (wrong)")
+                end
+              Err(e) -> println("node-b: direct RemoteCall reply: " ++ e)
+            end
+        end
+        println("node-b: direct raw frames refused: " ++ int_to_string(NetKernel.raw_refused()))
+    end
+    println("node-b: direct connection checked")
+  end
+
+  fn main(c : Cap(IO)) do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_NAME", me())
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int("MARCH_PORT_B")))
+    Process.set_env("MARCH_CLUSTER_NODES", "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A")))
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
+    let cfg = match ClusterNode.config_from_env() do
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    end
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let kinds = Vault.new("raw_denied_kinds")
+        ClusterNode.on_delivery_failed(h, fn (seq, reason) ->
+          let kind = Vault.get_or(kinds, int_to_string(seq), "seq " ++ int_to_string(seq))
+          let short = if String.starts_with(reason, "not authorized") do "not authorized" else reason end
+          println(me() ++ ": " ++ kind ++ " refused by node-a: " ++ short))
+        let a = ClusterNode.node_id_of("node-a")
+        if wait_cert(h, a, 60000) do () else panic("node-b: node-a never linked") end
+        let pids = List.map(String.split(read(Env.require("PIDS_FILE")), " "), fn x -> num(x))
+        let raw = nth(pids, 0)
+        let sess = nth(pids, 1)
+        let cr = nth(pids, 2)
+        let to_raw = GlobalPid.make(a, raw, cr)
+        let to_sess = GlobalPid.make(a, sess, cr)
+        -- This node's own raw primitives are refused.
+        println(me() ++ ": raw send_msg to node-a: " ++ said(ClusterNode.send_msg(h, to_raw, "Raw.Ping", [1], NodeQueue.Unbounded)))
+        println(me() ++ ": queue_for node-a: " ++ (if ClusterNode.queue_for(h, a) == None do "refused" else "given (wrong)" end))
+        -- ... but a node's frames to itself are not raw sends.
+        let _ = ClusterNode.route_type(h, "Raw.Self", fn _d -> do
+          println(me() ++ ": loopback raw send delivered")
+          Ok(())
+        end)
+        println(me() ++ ": raw send_msg to itself: " ++ said(ClusterNode.send_msg(h, ClusterNode.global_pid(h, 1), "Raw.Self", [1], NodeQueue.Unbounded)))
+        -- A compromised node skips its own check and writes through the
+        -- session queue: each non-exempt kind, then one exempt one.
+        match ClusterNode.session_queue_for(h, a) do
+          None -> panic("node-b: no session queue to node-a")
+          Some(q) ->
+            let probes = [(101, "raw tag to a pid route", to_raw, "Raw.Ping"),
+                          (102, "raw tag to a type route", GlobalPid.make(a, 999999, cr), "Raw.Ping"),
+                          (103, "session tag to a raw route", to_raw, "SessionAP.Invite"),
+                          (104, "raw tag to a session route", to_sess, "Raw.Ping"),
+                          (105, "session tag to a session route", to_sess, "SessionNode.Ping#probe")]
+            let _ = List.map(probes, fn p ->
+              match p do
+                (seq, kind, to, tag) ->
+                  Vault.set(kinds, int_to_string(seq), kind)
+                  NodeQueue.cast(q, seq, to, tag, [1], NodeQueue.Unbounded)
+              end)
+            println(me() ++ ": probes sent")
+        end
+        -- Cross-node references: node-a's binding reaches this replica but
+        -- lookup hides it (this node has no raw_send); its own shows.
+        -- Held in a variable and sent to at the end: an actor nothing
+        -- references can be reclaimed, and its name unregistered with it.
+        let holder = spawn(Holder)
+        let _ = ClusterNode.register(h, "raw.b", holder)
+        match wait_registrant(h, "raw.a", 60000) do
+          Some(who) -> println(me() ++ ": raw.a registered by " ++ who ++ ", lookup " ++ shown(h, "raw.a"))
+          None -> println(me() ++ ": raw.a never arrived")
+        end
+        -- register is asynchronous: wait until this node has recorded its
+        -- own binding (the registrant mirror is updated with the names).
+        let _ = wait_registrant(h, "raw.b", 60000)
+        println(me() ++ ": raw.b (its own) lookup " ++ shown(h, "raw.b"))
+        direct(pki)
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        println(me() ++ ": raw sends refused: " ++ int_to_string(ClusterNode.raw_refused(h)))
+        send(holder, Nop())
+        ClusterNode.stop(h)
+        println(me() ++ ": done")
+    end
+  end
+end
