@@ -12,8 +12,15 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
-- `forge run --processes` no longer occasionally assigns two pools the same cluster port (seen on Linux CI as `tcp_listen: bind failed`); the ports for all processes are now reserved together.
+- **Compiling the same source twice at once (different `-o` or `--opt`) no longer
+  fails at random with `Undefined symbols: "_main"`.** Both compiles wrote their LLVM
+  IR to the same `<source>.ll` file and handed it to clang, so one could truncate the
+  file while the other's clang was reading it. Now each compile writes its IR to a
+  private temp file and links from that. When clang finishes, the temp is atomically
+  renamed onto `<source>.ll`, so the IR still ends up where it always has, on failure
+  too.
 
+- `forge run --processes` no longer occasionally assigns two pools the same cluster port (seen on Linux CI as `tcp_listen: bind failed`); the ports for all processes are now reserved together.
 - **Multi-threaded programs no longer occasionally abort with SIGTRAP (or a bare
   `Killed: 9`) at shutdown under load.** When a scheduler worker thread exited, a
   preemption tick already on its way could land inside the thread's teardown, and
