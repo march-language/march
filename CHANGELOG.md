@@ -500,6 +500,12 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Compiling a module with no `main` no longer takes minutes.** A TIR pass
+  rewrote the rest of a function twice for every non-capturing closure it
+  found ineligible, so a function that builds a record of many small lambdas
+  (`ClusterNode.ops_stub`) cost 2^k traversals; a compile with a `main` never
+  reached it, a main-less one (`forge build` on a library, `--cap-strict`
+  checks) did. Same generated code, one traversal.
 - **Cluster handshake reflection.** A shared-secret node accepted a peer that
   sent the node's own hello back to it and then its own proof back; a nonce
   equal to ours is now refused.

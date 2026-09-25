@@ -174,3 +174,21 @@ section 3 (Identity, Threat model), 7.4, II.9, D3, D4. The authorization half
 - **API**: `ClusterNode.revoke`, `ClusterNode.revocations`, both through the
   `ClusterOps` dictionary; `ClusterNode.revocations_from_text`,
   `encode_revocations`/`decode_revocations`, `core_revoke`, `core_check_certs`.
+
+## 5. Found by CI: an exponential in the native-map inliner
+
+The PR's compiler test shard (`dune build @test/runtest-run_compiler`) hit
+CI's 45-minute timeout (main's takes 14-18 min), and locally `run_compiler`
+took 3.6 h. `sample` on the stuck `march --compile` put all the time in
+`Native_map_inline.count_uses`. In `rewrite_expr`'s arm for a NON-capturing
+closure allocation, an ineligible closure rewrote its continuation twice
+(once as `inner'` for the eligibility check, then `rewrite_expr rest` on the
+fallback), so a function binding k such closures in a row cost 2^k
+traversals. `ClusterNode.ops_stub` is a record of `fn _ -> unsupported(..)`
+lambdas; this step grew it from 28 to 34, and a MAIN-LESS compile (nothing
+prunes an unused stdlib function then: `cap_ceiling`'s "main-less module"
+case, forge's build check in the `rest` shard) went from 24 s in the TIR
+`opt` phase to minutes. The arm now rewrites once and peels the alias chain
+off the rewritten tree, as the capturing arm already did: 5.7 s. The IR
+oracle (baseline with the pre-fix compiler, check with the fixed one) and the
+TIR snapshots show no IR change; `--timings` is the flag that finds this.
