@@ -96,3 +96,24 @@ let local : transport =
 
 (** A shell word: single-quoted, with embedded quotes escaped. *)
 let sh_quote s = Filename.quote s
+
+(** Copy the local file [local] to [remote] on the host (mode [mode]),
+    atomically: streamed over the ssh connection's stdin into a temp file
+    beside [remote], then renamed. [$SUDO] as in the reconciler's scripts;
+    [sudo] is never used for a relocated (test) layout. *)
+let upload (t : transport) (h : Hosts.host) ~(sudo : bool) ~local ~remote ~mode : (unit, string) Stdlib.result =
+  match In_channel.with_open_bin local In_channel.input_all with
+  | exception Sys_error m -> Error m
+  | data ->
+    let q = sh_quote remote in
+    let script =
+      (if sudo then "set -e; if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO='sudo -n'; fi; " else "set -e; SUDO=; ")
+      ^ Printf.sprintf "$SUDO mkdir -p %s; tmp=$($SUDO mktemp %s.XXXXXX); $SUDO tee \"$tmp\" >/dev/null; \
+                        $SUDO chmod %o \"$tmp\"; $SUDO mv -f \"$tmp\" %s; echo uploaded"
+        (sh_quote (Filename.dirname remote)) q mode q
+    in
+    let r =
+      if t.kind = "ssh" then run_capture (ssh_argv h.Hosts.ssh @ [ "sh -c " ^ sh_quote script ]) ~input:data
+      else run_capture [ "sh"; "-c"; script ] ~input:data
+    in
+    if r.rc = 0 then Ok () else Error (Printf.sprintf "upload to %s failed (exit %d): %s" remote r.rc (String.trim r.err))

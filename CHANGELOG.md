@@ -65,6 +65,17 @@ git log is authoritative for exact commits.
   sessions cut at the hard deadline, renumbered unlabelled messages), and
   authority (a widening role closure or derived pool capability, and the
   `--grant-cap` it needs) with each pool's derived values.
+- **`forge deploy --env <env>` carries the plan out** (confirmation, or `--yes`):
+  pool by pool in the plan's order, a hot patch through an ssh tunnel to each
+  node's reload socket (rolling with a health gate, `simultaneous`, or
+  `--canary N`), a restart onto a base image cross-built for each host's
+  recorded target (uploaded, the unit restarted, the node's reload socket
+  waited for), then the signed topology push; what was deployed becomes the
+  next plan's baseline in `.forge/deploy/<env>/`. A D21 split stops after
+  deploy one and does deploy two when run again. A change the running base
+  cannot swap (a function with no dispatch slot and no changed caller that has
+  one, such as a closure body) is planned as a restart instead of a hot patch
+  that would activate nothing.
 - **`NativeArray.sort_i32`, `sort_f32` and `sort_u8`: every NativeArray width
   can now be sorted.** Same ownership as `sort_int`: in place when the array is
   uniquely owned, copy-on-write when it is shared. `sort_i32` is the same

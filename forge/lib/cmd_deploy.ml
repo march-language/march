@@ -247,7 +247,15 @@ let gather c ~grant_caps ~compact ~(artifacts : artifact list) ~(derived : Deplo
                  b_new = a.a_manifest;
                  b_old_schemas = Schema_diff.parse_schemas_file (schemas_file c build);
                  b_new_schemas = Schema_diff.parse_schemas_file a.a_schemas;
-                 b_old_runtime = base_runtime c build; b_new_runtime = runtime })
+                 b_old_runtime = base_runtime c build; b_new_runtime = runtime;
+                 b_slots =
+                   (let names = List.concat_map (fun (s : Reconcile.node_status) ->
+                        if List.mem s.node.pool pools then
+                          match s.reload with
+                          | Some (Ok ri) -> List.map (fun (d : Cmd_deploy_hot.detail_slot) -> d.ds_name) ri.versions
+                          | _ -> []
+                        else []) status in
+                    if names = [] then None else Some (List.sort_uniq String.compare names)) })
       (builds c)
   in
   let now = Deploy_plan.protos_of_index index in
@@ -280,3 +288,287 @@ let plan_only ?transport ?service_ctl ?layout_prefix ~proj ~env ~grant_caps ~com
   let* c = setup ?transport ?service_ctl ?layout_prefix ~proj ~env () in
   let* (plan, _, _) = make_plan c ~grant_caps ~compact in
   Ok (Deploy_plan.render plan)
+
+(* ── Carrying a plan out (item 4) ─────────────────────────────────────── *)
+
+type opts = {
+  yes        : bool;                    (** skip the confirmation *)
+  grant_caps : string list;
+  compact    : bool;                    (** [--compact] *)
+  canary     : int;                     (** hot pools: this many hosts first, then a PING window *)
+  timeout_ms : int;                     (** the canary window *)
+  up_timeout : float;                   (** seconds a restarted node has to answer PING *)
+  confirm    : string -> bool;          (** asks the operator; [yes] skips it *)
+}
+
+let ask_stdin prompt =
+  if not (Unix.isatty Unix.stdin) then begin
+    Printf.eprintf "%s(stdin is not a terminal: pass --yes to deploy without asking)\n%!" prompt;
+    false
+  end else begin
+    print_string prompt;
+    flush stdout;
+    match In_channel.input_line stdin with
+    | Some l -> (match String.lowercase_ascii (String.trim l) with "y" | "yes" -> true | _ -> false)
+    | None -> false
+  end
+
+let default_opts = { yes = false; grant_caps = []; compact = false; canary = 0; timeout_ms = 30000; up_timeout = 60.;
+                     confirm = ask_stdin }
+
+(* The pending D21 split: which builds ran deploy one, with the artifact
+   (cas hash) they ran it with. Deploy two runs when the same build is
+   deployed again. *)
+
+let read_split c : (string * string) list =
+  match read_json (split_file c) with
+  | Some (`Assoc kv) -> List.filter_map (fun (b, v) -> match v with `String h -> Some (b, h) | _ -> None) kv
+  | _ -> []
+
+let write_split c (entries : (string * string) list) =
+  Reconcile.mkdir_p (dir c);
+  Yojson.Safe.to_file (split_file c) (`Assoc (List.map (fun (b, h) -> (b, `String h)) entries))
+
+let clear_split c = try Sys.remove (split_file c) with Sys_error _ -> ()
+
+let pool_of c name = List.find (fun (p : Topology.pool) -> p.pool_name = name) c.t.pools
+
+let nodes_of_pool c pool = List.filter (fun (n : Reconcile.ssh_node) -> n.sn_pool = pool) c.nodes
+
+(** A base image for [build] and [target], built once per run. *)
+let base_images : (string * string, string) Hashtbl.t = Hashtbl.create 4
+
+let build_base c ~build ~pools ~target : (string, string) result =
+  match Hashtbl.find_opt base_images (build, target) with
+  | Some path -> Ok path
+  | None ->
+    let* flags = Topology_run.hot_reload_flags ~pubkey:c.pubkey c.proj in
+    let target_opt = if target = local_target () then None else Some target in
+    Printf.printf "building the %s base image for %s...\n%!" build target;
+    let* out =
+      Cmd_build.build ~release:false ?target:target_opt ~topology_pools:pools ~output_suffix:("-" ^ build)
+        ?topology_env:c.env ~extra_flags:flags ()
+    in
+    Hashtbl.replace base_images (build, target) out;
+    Ok out
+
+(** Wait until the node's reload server answers PING. *)
+let wait_up c (h : Hosts.host) ~timeout =
+  let t0 = Unix.gettimeofday () in
+  let rec go () =
+    if Reconcile.ping ~transport:c.transport h then true
+    else if Unix.gettimeofday () -. t0 > timeout then false
+    else (Unix.sleepf 0.5; go ())
+  in
+  go ()
+
+(** The health gate between hosts: the node answers PING (a restarted one
+    gets [up_timeout] to come up), and forge.toml's health_check_url when
+    there is one. *)
+let health c ~(opts : opts) : Hosts.health = fun h ->
+  let up = wait_up c h ~timeout:opts.up_timeout in
+  if not up then Printf.eprintf "  %s did not answer PING within %.0f s\n%!" h.Hosts.name opts.up_timeout;
+  up
+  && (match c.proj.Project.hot_reload with
+      | Some { Project.hr_health_check_url = Some url; _ } ->
+        let ok = Cmd_deploy_hot.http_health_check ~url ~timeout_s:10 in
+        if not ok then Printf.eprintf "  health check %s failed after %s\n%!" url h.Hosts.name;
+        ok
+      | _ -> true)
+
+(** Restart one node on [binary]: upload it, give it the topology, restart
+    its unit. The health gate waits for it to come up. *)
+let restart_node c ~binary (n : Reconcile.ssh_node) : (unit, string) result =
+  let p = pool_of c n.sn_pool in
+  let remote = Host_layout.binary c.layout ~binary_name:(Topology.Gen.binary_name ~project:c.proj.Project.name p) in
+  Printf.printf "  %s: uploading %s\n%!" n.sn.Hosts.name (Filename.basename binary);
+  let* () = Remote.upload c.transport n.sn ~sudo:(c.layout.Host_layout.prefix = "") ~local:binary ~remote ~mode:0o755 in
+  let script =
+    Reconcile.sudo_prelude c.layout
+    ^ Reconcile.put_file_script ~path:(Host_layout.topology_file c.layout) ~mode:0o644 (Topology.digest_text c.t)
+    ^ Printf.sprintf "$SUDO %s restart %s\n" c.service_ctl (Remote.sh_quote (Host_layout.unit_name n.sn_pool))
+  in
+  let r = c.transport.Remote.exec n.sn script in
+  if r.Remote.rc <> 0 then Error (Printf.sprintf "restart failed (exit %d): %s" r.rc (String.trim (r.err ^ r.out)))
+  else (Printf.printf "  %s: restarted\n%!" n.sn.Hosts.name; Ok ())
+
+let hr_strategy c = match c.proj.Project.hot_reload with Some hr -> hr.Project.hr_strategy | None -> "rolling"
+
+(** Run [step] on a pool's nodes with forge.toml's strategy (rolling with
+    the health gate, or simultaneous), or the canary flow. *)
+let on_nodes c ~(opts : opts) ~canary (nodes : Reconcile.ssh_node list) (step : Reconcile.ssh_node -> (unit, string) result)
+  : (unit, string) result =
+  let by_host = List.map (fun (n : Reconcile.ssh_node) -> (n.sn.Hosts.name, n)) nodes in
+  let hstep (h : Hosts.host) = step (List.assoc h.Hosts.name by_host) in
+  let hosts = List.map (fun (n : Reconcile.ssh_node) -> n.sn) nodes in
+  let failed rs = List.filter_map (fun ((h : Hosts.host), r) -> match r with Error m -> Some (h.Hosts.name ^ ": " ^ m) | Ok _ -> None) rs in
+  let finish rs = match failed rs with [] -> Ok () | fs -> Error (String.concat "; " fs) in
+  if canary > 0 && List.length hosts > canary then begin
+    let first = List.filteri (fun i _ -> i < canary) hosts and rest = List.filteri (fun i _ -> i >= canary) hosts in
+    let* () = finish (c.backend.run_on ~strategy:`All first hstep) in
+    Printf.printf "  canary live on %d host(s); watching for %.0f s\n%!" canary (float_of_int opts.timeout_ms /. 1000.);
+    let deadline = Unix.gettimeofday () +. float_of_int opts.timeout_ms /. 1000. in
+    let rec watch () =
+      if Unix.gettimeofday () >= deadline then Ok ()
+      else match List.find_opt (fun h -> not (Reconcile.ping ~transport:c.transport h)) first with
+        | Some h -> Error (Printf.sprintf "canary %s stopped responding; the other hosts are untouched" h.Hosts.name)
+        | None -> Unix.sleepf (min 2.0 (max 0.0 (deadline -. Unix.gettimeofday ()))); watch ()
+    in
+    let* () = watch () in
+    finish (c.backend.run_on ~strategy:`All rest hstep)
+  end
+  else if hr_strategy c = "simultaneous" then finish (c.backend.run_on ~strategy:`All hosts hstep)
+  else finish (c.backend.run_on ~strategy:(`Rolling (health c ~opts)) hosts hstep)
+
+(** Everything deployed is now the baseline of the next plan. *)
+let record c ~(artifacts : artifact list) ~(restarted : string list) ~(derived : Deploy_plan.derived option) =
+  Reconcile.mkdir_p (dir c);
+  let seen = Hashtbl.create 4 in
+  List.iter (fun a ->
+      if not (Hashtbl.mem seen a.a_build) then begin
+        Hashtbl.replace seen a.a_build ();
+        copy_file a.a_manifest_path (manifest_file c a.a_build);
+        if Sys.file_exists a.a_schemas then copy_file a.a_schemas (schemas_file c a.a_build)
+        else (try Sys.remove (schemas_file c a.a_build) with Sys_error _ -> ());
+        if List.mem a.a_build restarted || not (Sys.file_exists (base_file c a.a_build)) then
+          Yojson.Safe.to_file (base_file c a.a_build)
+            (`Assoc [ ("runtime", (match runtime_identity () with Some r -> `String r | None -> `Null));
+                      ("target", `String a.a_target);
+                      ("hcr_abi", (match a.a_manifest.hcr_abi with Some x -> `String x | None -> `Null));
+                      ("cas_hash", `String a.a_manifest.cas_hash);
+                      ("at", `Float (Unix.gettimeofday ())) ])
+      end)
+    artifacts;
+  Option.iter (fun d -> Yojson.Safe.to_file (derived_file c) (derived_json d)) derived;
+  Reconcile.record_deployed_topology ~root:c.root c.env c.t;
+  let index = Topology.index_project ~root:c.root in
+  let global = Filename.concat (Filename.concat c.root ".forge") "protocols" in
+  List.iter (fun (p : Deploy_plan.proto) ->
+      List.iter (fun d ->
+          Reconcile.mkdir_p d;
+          Yojson.Safe.to_file (Filename.concat d (p.p_name ^ ".json")) (Deploy_plan.proto_json p))
+        [ protocols_dir c; global ])
+    (Deploy_plan.protos_of_index index)
+
+(** The manifest to activate for [build]: the whole new manifest, less the
+    functions a pending D21 split holds back to deploy two. *)
+let without (m : Cmd_deploy_hot.manifest) held =
+  { m with functions = List.filter (fun (f : Cmd_deploy_hot.fn_manifest) -> not (List.mem f.fn_name held)) m.functions }
+
+(** [forge deploy --env <env>]: plan, confirm, carry out, record. *)
+let run ?transport ?service_ctl ?layout_prefix ~proj ~env ~(opts : opts) () : (string, string) result =
+  let* c = setup ?transport ?service_ctl ?layout_prefix ~proj ~env () in
+  Reconcile.with_lock ~root:c.root (fun () ->
+      let* (plan, artifacts, derived) = make_plan c ~grant_caps:opts.grant_caps ~compact:opts.compact in
+      (* Deploy two of a pending split: the same artifact, deployed again. *)
+      let pending = read_split c in
+      let two =
+        List.filter (fun (b, h) ->
+            List.exists (fun a -> a.a_build = b && a.a_manifest.Cmd_deploy_hot.cas_hash = h) artifacts)
+          pending
+      in
+      if pending <> [] && two = [] then begin
+        Printf.printf "note: the pending split's deploy two is superseded by a new build; planning afresh\n%!";
+        clear_split c
+      end;
+      let plan =
+        if two = [] then plan
+        else
+          { plan with
+            pools = List.map (fun (pp : Deploy_plan.pool_plan) ->
+                if List.mem_assoc pp.pp_build two && pp.pp_mechanism = Deploy_plan.Nothing then
+                  { pp with pp_mechanism = Deploy_plan.Hot;
+                            pp_why = [ "deploy two of the D21 split: the chooser's side" ] }
+                else pp) plan.pools;
+            splits = List.filter (fun (sp : Deploy_plan.split) -> not (List.mem_assoc sp.sp_build two)) plan.splits }
+      in
+      print_string (Deploy_plan.render plan);
+      if Deploy_plan.blocked plan then
+        Error "the deploy is blocked (see \"2. Mechanism and why\"); nothing was changed"
+      else if List.for_all (fun (pp : Deploy_plan.pool_plan) -> pp.pp_mechanism = Deploy_plan.Nothing && not pp.pp_push) plan.pools
+      then Ok "nothing to deploy"
+      else if not (opts.yes || opts.confirm (Printf.sprintf "\ndeploy to %s? [y/N] " (Reconcile.env_key c.env))) then
+        Error "not deployed"
+      else begin
+        let hot_nodes = List.concat_map (fun (pp : Deploy_plan.pool_plan) ->
+            match pp.pp_mechanism with
+            | Deploy_plan.Hot | Hot_migrate _ | Hot_drain _ -> nodes_of_pool c pp.pp_pool
+            | _ -> []) plan.pools in
+        let epoch = Reconcile.shared_epoch ~transport:c.transport (List.map (fun (n : Reconcile.ssh_node) -> n.sn) hot_nodes) in
+        if epoch > 0 then Printf.printf "\n==> shared epoch %d\n%!" epoch;
+        let entry_path = Result.value (Project.entry c.proj) ~default:"" in
+        let restarted = ref [] in
+        let artifact_for build target =
+          match List.find_opt (fun a -> a.a_build = build && a.a_target = target) artifacts with
+          | Some a -> Ok a
+          | None -> Error (Printf.sprintf "no %s patch was built for %s" build target)
+        in
+        let held build =
+          if List.mem_assoc build two then []
+          else List.concat_map (fun (sp : Deploy_plan.split) -> if sp.sp_build = build then sp.sp_held else []) plan.splits
+        in
+        let step_pool (pp : Deploy_plan.pool_plan) : (unit, string) result =
+          let nodes = nodes_of_pool c pp.pp_pool in
+          match pp.pp_mechanism with
+          | Deploy_plan.Nothing | Placement | Blocked _ -> Ok ()
+          | Restart why ->
+            Printf.printf "\n==> pool %s: restart (%s)\n%!" pp.pp_pool (String.concat "; " why);
+            let pools = (List.assoc pp.pp_build (List.map (fun (b, ps) -> (b, ps)) (Topology_run.builds_of c.t))) in
+            if nodes = [] then Printf.printf "  (pool %s has no hosts in this environment)\n%!" pp.pp_pool
+            else restarted := pp.pp_build :: !restarted;
+            on_nodes c ~opts ~canary:0 nodes (fun n ->
+                let* binary = build_base c ~build:pp.pp_build ~pools ~target:(Option.get n.sn_target) in
+                restart_node c ~binary n)
+          | Hot | Hot_migrate _ | Hot_drain _ ->
+            Printf.printf "\n==> pool %s: %s\n%!" pp.pp_pool (Deploy_plan.mechanism_text pp.pp_mechanism);
+            let held = held pp.pp_build in
+            if held <> [] then Printf.printf "  deploy one of two: holding back %d function(s)\n%!" (List.length held);
+            on_nodes c ~opts ~canary:opts.canary nodes (fun n ->
+                let target = Option.get n.sn_target in
+                let* a = artifact_for pp.pp_build target in
+                let* () = Cmd_deploy_hot.check_host_target ~recorded:target ~manifest:a.a_manifest in
+                let* _ =
+                  Cmd_deploy_hot.deploy_one ~tunnel:c.transport.tunnel ~host:n.sn ~sk:c.sk
+                    ~manifest:(without a.a_manifest held) ~so_path:a.a_so
+                    ~old_schemas_path:(schemas_file c pp.pp_build) ~new_schemas_path:a.a_schemas ~entry_path
+                    ~old_manifest_path:(manifest_file c pp.pp_build) ~provided_epoch:epoch ~grant_caps:opts.grant_caps ()
+                in
+                Ok ())
+        in
+        let rec pools = function
+          | [] -> Ok ()
+          | pp :: rest ->
+            (match step_pool pp with
+             | Ok () -> pools rest
+             | Error m -> Error (Printf.sprintf "pool %s: %s (later pools were not touched)" pp.pp_pool m))
+        in
+        let* () = pools plan.pools in
+        (* The topology last: no node offers a role before its code is there. *)
+        let* () =
+          if List.exists (fun (pp : Deploy_plan.pool_plan) -> pp.pp_push) plan.pools then begin
+            Printf.printf "\n==> pushing the topology\n%!";
+            let* r = c.backend.push_topology c.t in
+            List.iter (fun (n, o) ->
+                Printf.printf "  %s: %s\n%!" n (match o with
+                    | Reconcile.Signalled -> "signalled"
+                    | Not_running -> "not running"
+                    | Not_reporting -> "persisted; not signalled (has not reported yet)"
+                    | Push_failed m -> "FAILED: " ^ m))
+              r.outcome;
+            match List.filter_map (fun (n, o) -> match o with Reconcile.Push_failed m -> Some (n ^ ": " ^ m) | _ -> None) r.outcome with
+            | [] -> Ok ()
+            | fs -> Error ("the topology push failed on " ^ String.concat "; " fs)
+          end else Ok ()
+        in
+        record c ~artifacts ~restarted:!restarted ~derived;
+        if plan.splits <> [] then begin
+          write_split c (List.sort_uniq compare (List.filter_map (fun (sp : Deploy_plan.split) ->
+              Option.map (fun a -> (sp.sp_build, a.a_manifest.Cmd_deploy_hot.cas_hash))
+                (List.find_opt (fun a -> a.a_build = sp.sp_build) artifacts)) plan.splits));
+          Ok (Printf.sprintf "deploy one of two is done (D21). Once every host runs it, run `forge deploy%s` again \
+                              for deploy two." (env_flag c.env))
+        end else begin
+          if two <> [] then clear_split c;
+          Ok "deploy complete"
+        end
+      end)

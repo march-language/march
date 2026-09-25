@@ -606,6 +606,9 @@ let test_identity_checks () =
     | Error m -> Alcotest.(check bool) (what ^ ": " ^ m) true (contains m what)
     | Ok () -> Alcotest.failf "%s mismatch accepted" what in
   ok (Cmd_deploy_hot.check_identity ~manifest:(v2 ()) ~info);
+  (* what a real server answers: the triple quoted (march_reload.c) *)
+  ok (Cmd_deploy_hot.check_identity ~manifest:(v2 ())
+        ~info:{ info with abi = "march-hcr-v2;triple=\"aarch64-unknown-linux-gnu\";ptr=8" });
   bad "target" (Cmd_deploy_hot.check_identity ~manifest:(v2 ~target:"linux/amd64" ()) ~info);
   bad "HCR ABI" (Cmd_deploy_hot.check_identity ~manifest:(v2 ~abi:"march-hcr-v3;triple=x;ptr=8" ()) ~info);
   bad "module prefix" (Cmd_deploy_hot.check_identity ~manifest:(v2 ~prefix:"Other" ()) ~info);

@@ -70,9 +70,9 @@ let topo ?(text = topology_text) () =
 let replace ~sub ~by s = Str.global_replace (Str.regexp_string sub) by s
 
 let build ?(name = "shared") ?(pools = [ "back"; "front" ]) ?old ?(old_schemas = []) ?(new_schemas = [])
-    ?(old_runtime = Some "rt1") ?(new_runtime = Some "rt1") nw =
+    ?(old_runtime = Some "rt1") ?(new_runtime = Some "rt1") ?slots nw =
   { P.b_name = name; b_pools = pools; b_old = old; b_new = nw; b_old_schemas = old_schemas; b_new_schemas = new_schemas;
-    b_old_runtime = old_runtime; b_new_runtime = new_runtime }
+    b_old_runtime = old_runtime; b_new_runtime = new_runtime; b_slots = slots }
 
 (** Protocols from March source, through the same parse forge uses. *)
 let protos_of_source src : P.proto list =
@@ -137,6 +137,27 @@ let test_hot_patch () =
   expect "render" (P.render p)
     [ "1 function(s) changed, 1 added, 1 removed"; "changed: Back.helper"; "added: Back.helper2";
       "removed: Back.gone"; "pool back (build shared, 1 host): hot patch" ]
+
+(** Only dispatch slots can be swapped: a changed function with no slot
+    must be reached through a changed slotted caller (the manifest's
+    [callers:]), else the pool restarts. *)
+let test_unslotted_changes () =
+  let callers name cs fns = List.map (fun (f : Cmd_deploy_hot.fn_manifest) ->
+      if f.fn_name = name then { f with fn_callers = cs } else f) fns in
+  let base = callers "$lam1$apply" [ "Counter_dispatch" ] (base_fns @ [ fm "$lam1$apply" "l1"; fm "$lam2$apply" "k1" ]) in
+  let slots = [ "Counter_dispatch"; "Anchor_dispatch" ] in
+  (* a closure body alone: nothing slotted changes, so it cannot be delivered *)
+  let nw = replace_fn "$lam2$apply" "k2" base in
+  let p = P.classify (input [ build ~slots ~old:(manifest base) (manifest nw) ]) in
+  check_mech "closure only" (mech p "back") is_restart;
+  expect "render" (P.render p) [ "1 changed function(s) have no dispatch slot in the running base build"; "$lam2$apply" ];
+  (* a helper under a changed actor dispatch travels inside the patch *)
+  let nw = replace_fn "Counter_dispatch" "d2" (replace_fn "$lam1$apply" "l2" base) in
+  let p = P.classify (input [ build ~slots ~old:(manifest base) (manifest nw) ]) in
+  check_mech "under a changed slot" (mech p "back") (fun m -> m = P.Hot);
+  (* no node reported its slots: no judgement *)
+  let p = P.classify (input [ build ~old:(manifest base) (manifest (replace_fn "$lam2$apply" "k2" base)) ]) in
+  check_mech "slots unknown" (mech p "back") (fun m -> m = P.Hot)
 
 let test_signature_change_noted () =
   let nw = manifest (List.map (fun (f : Cmd_deploy_hot.fn_manifest) ->
@@ -391,6 +412,7 @@ let () =
         Alcotest.test_case "no change: nothing" `Quick test_nothing_changed;
         Alcotest.test_case "functions changed/added/removed: hot patch" `Quick test_hot_patch;
         Alcotest.test_case "a signature change is shown" `Quick test_signature_change_noted;
+        Alcotest.test_case "changes the running base cannot swap restart" `Quick test_unslotted_changes;
         Alcotest.test_case "state change: migrate_state, @compat, blocked" `Quick test_migration;
         Alcotest.test_case "message types: loss, migrate_msg, wrong old type" `Quick test_message_types;
         Alcotest.test_case "a breaking protocol change: hot patch + drain, live sessions" `Quick test_protocol_drain;

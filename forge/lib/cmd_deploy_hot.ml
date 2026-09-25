@@ -645,9 +645,16 @@ let check_identity ~(manifest : manifest) ~(info : hcr_info) : (unit, string) re
                "the patch's %s (%s) is not the running server's (%s): rebuild the patch for the server's identity"
                what patch server)
     in
+    (* A server built by #606's runtime reports its ABI id with the triple
+       in double quotes (march_reload.c stringifies MARCH_HCR_TRIPLE, which
+       bin/main.ml already passes quoted), while the manifest writes it bare
+       (Hcr_abi.abi_id).  The runtime's own post-dlopen check compares two
+       quoted ids, so both spellings name the same identity: compare them
+       without quotes. *)
+    let unquote s = String.concat "" (String.split_on_char '"' s) in
     match manifest.target, manifest.hcr_abi, manifest.module_prefix with
     | Some t, _, _ when t <> info.target -> mism "target" t info.target
-    | _, Some a, _ when a <> info.abi -> mism "HCR ABI" a info.abi
+    | _, Some a, _ when unquote a <> unquote info.abi -> mism "HCR ABI" a info.abi
     | _, _, Some p when p <> "" && p <> info.prefix -> mism "module prefix" p info.prefix
     | _ -> Ok ()
   end
@@ -1909,13 +1916,13 @@ let ping_server ~ssh_host ~remote_socket : bool =
 (** Deploy the given pre-built artifact to one server entry; print status line.
     Pass [~provided_epoch] to use a pre-fetched cluster-wide epoch (Phase 10)
     instead of calling GET_EPOCH on the server. *)
-let deploy_one ~(host : Hosts.host) ~sk ~manifest ~so_path
+let deploy_one ?(tunnel = true) ~(host : Hosts.host) ~sk ~manifest ~so_path
     ~old_schemas_path ~new_schemas_path ?(entry_path="") ?(old_manifest_path="")
     ?(provided_epoch=0) ?(grant_caps=([] : string list)) ?(no_cap_gate=false) ()
     : (int, string) result =
   let label = Printf.sprintf "%s [%s]" host.Hosts.ssh host.Hosts.name in
   Printf.printf "\n── %s\n%!" label;
-  run
+  run ~tunnel
     ~ssh_host:host.Hosts.ssh
     ~remote_socket:host.Hosts.socket
     ~signing_pubkey:host.Hosts.pubkey

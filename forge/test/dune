@@ -244,3 +244,26 @@
  (name test_deploy_plan)
  (modules test_deploy_plan)
  (libraries march_forge march_ast alcotest str))
+
+; test_deploy_e2e.ml: `forge host init`, `forge deploy` and `forge deploy
+; --plan` end to end over real ssh against a Debian sshd container
+; (distributed-deploys build step 10b): a cross-built base image restarted
+; onto the host, a hot patch through the ssh tunnel, compaction. Real compiles
+; (the just-built march and forge, hermetic like test_topology_run) and a
+; container; SKIPs loudly when Docker, zig or the cross sysroot is missing.
+(executable
+ (name test_deploy_e2e)
+ (modules test_deploy_e2e)
+ (libraries alcotest unix str))
+
+(rule
+ (alias runtest)
+ (deps (source_tree %{workspace_root}/runtime) (source_tree %{workspace_root}/stdlib)
+       (source_tree %{workspace_root}/examples/topology_app))
+ (action
+  (setenv MARCH_TEST_BIN %{bin:march}
+   (setenv FORGE_TEST_BIN %{bin:forge}
+    (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
+     (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
+      (setenv TOPOLOGY_APP_DIR %{workspace_root}/examples/topology_app
+       (run %{exe:test_deploy_e2e.exe}))))))))

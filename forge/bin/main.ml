@@ -1323,7 +1323,15 @@ let deploy_term =
     Arg.(value & opt_all string [] & info ["grant-cap"] ~docv:"CAP"
            ~doc:"Authorize a capability widening (repeatable), as for $(b,forge deploy hot).")
   in
-  let run env plan grant_caps =
+  let yes = Arg.(value & flag & info ["yes"; "y"] ~doc:"Deploy without asking for confirmation.") in
+  let canary =
+    Arg.(value & opt int 0 & info ["canary"] ~docv:"N"
+           ~doc:"Hot-patched pools: patch N hosts first, watch them answer PING for $(b,--timeout), then the rest.")
+  in
+  let timeout =
+    Arg.(value & opt int 30000 & info ["timeout"] ~docv:"MS" ~doc:"The canary window in milliseconds (default: 30000).")
+  in
+  let run env plan grant_caps yes canary timeout =
     match Project.load () with
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
     | Ok proj ->
@@ -1331,13 +1339,13 @@ let deploy_term =
         match Cmd_deploy.plan_only ~proj ~env ~grant_caps ~compact:false () with
         | Ok text -> print_string text
         | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
-      else begin
-        Printf.eprintf "error: executing a plan is not implemented yet; run `forge deploy --plan%s`\n%!"
-          (match env with Some e -> " --env " ^ e | None -> "");
-        exit 1
-      end
+      else
+        let opts = { Cmd_deploy.default_opts with yes; grant_caps; canary; timeout_ms = timeout } in
+        match Cmd_deploy.run ~proj ~env ~opts () with
+        | Ok msg -> print_endline msg
+        | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
-  Term.(const run $ env_arg $ plan $ grant_cap)
+  Term.(const run $ env_arg $ plan $ grant_cap $ yes $ canary $ timeout)
 
 let deploy_cmd =
   Cmd.group ~default:deploy_term

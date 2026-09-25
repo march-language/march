@@ -268,6 +268,8 @@ type build_in = {
   b_new_schemas   : (string * Schema_diff.actor_schema) list;
   b_old_runtime   : string option;              (** C-runtime digest of the deployed base image *)
   b_new_runtime   : string option;              (** this toolchain's *)
+  b_slots         : string list option;         (** the dispatch slots the running nodes report (VERSIONS_DETAIL);
+                                                    None: no node answered *)
 }
 
 type live = {
@@ -388,6 +390,11 @@ let impl_of (m : Cmd_deploy_hot.manifest) name =
 let impl_of_q (m : Cmd_deploy_hot.manifest) q =
   match impl_of m q with Some h -> Some h | None -> impl_of m (manifest_name m q)
 
+let list_some_fwd ?(max = 6) xs =
+  let n = List.length xs in
+  String.concat ", " (List.filteri (fun i _ -> i < max) xs)
+  ^ (if n > max then Printf.sprintf ", ... (%d more)" (n - max) else "")
+
 let fn_diff (o : Cmd_deploy_hot.manifest option) (n : Cmd_deploy_hot.manifest) : fn_diff =
   match o with
   | None -> { changed = []; added = List.map (fun (f : Cmd_deploy_hot.fn_manifest) -> f.fn_name) n.functions;
@@ -409,6 +416,33 @@ let fn_diff (o : Cmd_deploy_hot.manifest option) (n : Cmd_deploy_hot.manifest) :
         if Hashtbl.mem now f.fn_name then None else Some f.fn_name) o.functions in
     { changed = List.sort String.compare !changed; added = List.sort String.compare !added;
       removed = List.sort String.compare removed; sig_changed = List.sort String.compare !sigs }
+
+(** Changed functions a hot patch cannot deliver: no dispatch slot in the
+    running base ([slots]), and no chain of callers (the manifest's
+    [callers:], transitively) up to a slotted function that changes too.
+    Only a slot can be swapped; an unslotted function reaches the running
+    program only through a new version of a slotted caller, which carries
+    it inside the patch. A lifted closure is called through its closure
+    value, not by name, so a change inside a lambda whose enclosing function
+    did not change is not deliverable either. *)
+let undeliverable ~(slots : string list) ~(changed : string list) (m : Cmd_deploy_hot.manifest) : string list =
+  let slot = Hashtbl.create 64 and chg = Hashtbl.create 64 and callers = Hashtbl.create 4096 in
+  List.iter (fun n -> Hashtbl.replace slot n ()) slots;
+  List.iter (fun n -> Hashtbl.replace chg n ()) changed;
+  List.iter (fun (f : Cmd_deploy_hot.fn_manifest) -> Hashtbl.replace callers f.fn_name f.fn_callers) m.functions;
+  let deliverable f =
+    let seen = Hashtbl.create 16 in
+    let rec up = function
+      | [] -> false
+      | n :: rest when Hashtbl.mem seen n -> up rest
+      | n :: rest ->
+        Hashtbl.replace seen n ();
+        if Hashtbl.mem slot n then Hashtbl.mem chg n || up rest
+        else up (Option.value ~default:[] (Hashtbl.find_opt callers n) @ rest)
+    in
+    up (Option.value ~default:[] (Hashtbl.find_opt callers f))
+  in
+  List.filter (fun f -> not (Hashtbl.mem slot f) && not (deliverable f)) changed
 
 (** [<actor lowercased-first>_migrate_state] in the manifest (the name the
     compiler aliases as [__migrate_<Actor>]). *)
@@ -652,7 +686,8 @@ let classify (i : input) : plan =
           | None -> ({ b_name = bname; b_pools = [ p.pool_name ]; b_old = None;
                        b_new = { Cmd_deploy_hot.version = 1; cas_hash = ""; target = None; hcr_abi = None;
                                  module_prefix = None; functions = []; roles = [] };
-                       b_old_schemas = []; b_new_schemas = []; b_old_runtime = None; b_new_runtime = None },
+                       b_old_schemas = []; b_new_schemas = []; b_old_runtime = None; b_new_runtime = None;
+                       b_slots = None },
                      { changed = []; added = []; removed = []; sig_changed = [] }, [])
         in
         let blocked =
@@ -678,6 +713,15 @@ let classify (i : input) : plan =
           @ List.filter_map (fun (c : Reconcile.change) ->
               if c.kind = Reconcile.Needs_restart && List.mem p.pool_name (pools_of_subject c.subject)
               then Some (Printf.sprintf "%s: %s" c.subject c.detail) else None) placement
+          @ (match b.b_slots with
+              | Some slots when b.b_old <> None ->
+                (match undeliverable ~slots ~changed:fd.changed b.b_new with
+                 | [] -> []
+                 | fs ->
+                   [ Printf.sprintf "%d changed function(s) have no dispatch slot in the running base build and no \
+                                     changed caller that has one, so a hot patch cannot reach them: %s"
+                       (List.length fs) (list_some_fwd fs) ])
+              | _ -> [])
           @ (match List.assoc_opt bname compact with
               | Some why -> [ "compaction: " ^ why ^ "; the base image is rebuilt from the current version" ]
               | None -> [])
