@@ -2583,6 +2583,7 @@ let compat_generated_ok =
 |}) in
            let mods = generated src in
            Alcotest.(check bool) "Stream_Msg.compat" true (has_fn mods "Stream_Msg" "compat");
+           Alcotest.(check bool) "Stream_Msg.compat_by_role" true (has_fn mods "Stream_Msg" "compat_by_role");
            Alcotest.(check (list string)) "no error" [] (error_messages (typecheck_with_stdlib src))))
 
 (* ── D25: unlabelled steps in a protocol the topology uses ──────────────── *)

@@ -777,8 +777,17 @@ let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint ?(compat = []) (ctor
             con "Cons" [ ETuple ([ lit_str f; lit_str r; str_list acc_fps ], sp); acc ])
          compat (con "Nil" []))
   in
+  (* `compat_by_role()`: the same rows keyed by role number, as `SessionNode`'s
+     offers and initiators read them (they know roles by number). *)
+  let compat_by_role =
+    fn "compat_by_role" [] (tycon "List" [ TyTuple [ t_int; tycon "List" [ t_string ] ] ])
+      (List.fold_right
+         (fun (_, r, acc_fps) acc ->
+            con "Cons" [ ETuple ([ lit_int (index_of r); str_list acc_fps ], sp); acc ])
+         compat (con "Nil" []))
+  in
   DMod (n mname, Public, (msg_decl :: json_fns) @ [ encode; decode; try_decode ] @ role_fns @ peer_fns @ other_fns
-                         @ [ role_names; fp; role_name; compat_fn ], sp)
+                         @ [ role_names; fp; role_name; compat_fn; compat_by_role ], sp)
 
 (** `<P>_<Role>`: one [always_linear] type per state and one function per
     transition, plus the unforgeable [Yield].  Also returns the name of the
@@ -1825,7 +1834,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
              ("capacity", t_int); ("body", t_body role entry) ]
            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_role"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".compat_by_role") [];
+                app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; call_body role ]))
       roles
   in
@@ -1836,7 +1846,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("body", t_body role entry) ]
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.initiate"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".compat_by_role") [];
+                app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; app (msg ^ ".others_" ^ role) []; lam [ "_ep" ] unit; call_body role ]))
       roles
   in
@@ -1922,7 +1933,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
             @ hosted_callbacks role)
            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_hosted"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".compat_by_role") [];
+                app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ];
                 start_sid_of role; var "deliver"; var "cancel" ]))
       roles
