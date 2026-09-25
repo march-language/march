@@ -61,7 +61,8 @@ observe for plain numbers, and it recognises already-sorted, reversed and
 low-cardinality input instead of always paying `n log n`.
 `NativeArray.sort_float` does the same for `Float` arrays, ordering by IEEE 754
 `totalOrder`: NaNs get a fixed place at the ends, and `-0.0` sorts before
-`0.0`. The narrow widths (f32, i32, u8) are not sorted yet.
+`0.0`. `sort_i32` and `sort_f32` are the same sorts on 4-byte elements (f32 is
+not widened to f64 to sort), and `sort_u8` is a counting sort.
 
 When you need guaranteed vector codegen rather than an optimizer decision
 (cross-lane structure with masks and `select`, a fused multiply-add, or byte-level

@@ -23,6 +23,14 @@ git log is authoritative for exact commits.
   For a raw digest use `hmac_sha256_bytes` / `sha1_bytes`.
 
 ### Added
+- **`NativeArray.sort_i32`, `sort_f32` and `sort_u8`: every NativeArray width
+  can now be sorted.** Same ownership as `sort_int`: in place when the array is
+  uniquely owned, copy-on-write when it is shared. `sort_i32` is the same
+  algorithm as `sort_int` on 4-byte elements. `sort_f32` orders by IEEE 754
+  `totalOrder` exactly like `sort_float` (NaN at a fixed end, `-0.0` before
+  `+0.0`), without widening to f64. `sort_u8` is a counting sort, about 0.3 ms
+  for a million bytes whatever their order. The interpreter and compiled builds
+  produce the same order, NaN included.
 - **Node certificates for clusters** (build step 11a of the distributed-deploys
   plan, part 1). New `NodeCert` module: a certificate names a node
   (`spiffe://<trust-domain>/pool/<pool>/node/<name>`), its role permissions
