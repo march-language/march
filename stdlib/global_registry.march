@@ -20,7 +20,14 @@ mod GlobalRegistry do
   -- whatever process now has that pid -- the node service hides it and its
   -- owner tombstones it (specs/progress/2026-09-18-cluster-node-service.md).
   -- 0 for every caller that predates the service.
-  type Entry = { node_id : String, pid : Int, clock : VectorClock, present : Bool, creation : Int }
+  -- `registrant` is the identity (a node certificate's URI) of the node that
+  -- registered the binding, as the REPLICA holding the entry recorded it
+  -- (distributed-deploys step 11b); "" when unknown (shared-secret mode, or
+  -- a relayed binding whose holder this replica has not verified). It is
+  -- local bookkeeping: never on the wire, not in the Merkle hash, and no part
+  -- of the merge order, so replicas that recorded it differently still agree.
+  type Entry = { node_id : String, pid : Int, clock : VectorClock, present : Bool, creation : Int,
+                 registrant : String }
 
   -- name -> Entry.
   type Names = Names(Map(String, Entry))
@@ -70,7 +77,14 @@ mod GlobalRegistry do
 
   -- `register` for a holder at node creation [creation].
   fn register_at(reg : Names, name : String, node_id : String, creation : Int, pid : Int, clock : VectorClock) : Names do
-    observe(reg, name, { node_id: node_id, pid: pid, clock: clock, present: true, creation: creation })
+    register_as(reg, name, node_id, creation, pid, clock, "")
+  end
+
+  -- `register_at`, recording the registering certificate's identity.
+  fn register_as(reg : Names, name : String, node_id : String, creation : Int, pid : Int, clock : VectorClock,
+                 registrant : String) : Names do
+    observe(reg, name, { node_id: node_id, pid: pid, clock: clock, present: true, creation: creation,
+                         registrant: registrant })
   end
 
   -- The entry for [name], tombstone or not.
@@ -173,7 +187,8 @@ mod GlobalRegistry do
 
   -- Serialize one registry entry to a stable byte string for Merkle hashing.
   -- The clock and creation are part of it: replicas that differ only there
-  -- must still compare unequal, or they never exchange them.
+  -- must still compare unequal, or they never exchange them. The registrant
+  -- is not: each replica records it for itself.
   pfn entry_to_bytes(pair : (String, Entry)) : String do
     match pair do
       (name, e) ->

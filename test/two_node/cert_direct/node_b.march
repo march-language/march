@@ -1,0 +1,65 @@
+-- Two-node harness, scenario "cert_direct": node-b, role B of Pair, Audit
+-- and Ledger through the generated run_B, in certificate mode. See
+-- scenario.sh.
+mod CertDirectB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+
+  @[endpoints]
+  protocol Pair do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  @[endpoints]
+  protocol Audit do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  @[endpoints]
+  protocol Ledger do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  pfn me() : String do "node-b" end
+
+  pfn pair(s : Cap(Session.Live), st : Pair_B.S_recv_Msg_A_B_1) : Pair_B.Yield do
+    Pair_B.recv_Msg_A_B_1(s, st, fn (n, st1) -> Pair_B.close(s, Pair_B.send_Msg_B_A_1(s, st1, n + 1)))
+  end
+
+  pfn audit(s : Cap(Session.Live), st : Audit_B.S_recv_Msg_A_B_1) : Audit_B.Yield do
+    Audit_B.recv_Msg_A_B_1(s, st, fn (n, st1) -> Audit_B.close(s, Audit_B.send_Msg_B_A_1(s, st1, n)))
+  end
+
+  pfn ledger(s : Cap(Session.Live), st : Ledger_B.S_recv_Msg_A_B_1) : Ledger_B.Yield do
+    Ledger_B.recv_Msg_A_B_1(s, st, fn (n, st1) -> Ledger_B.close(s, Ledger_B.send_Msg_B_A_1(s, st1, n)))
+  end
+
+  fn main(c : Cap(IO)) do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
+    match Pair_Run.run_B(c, me(), "unused-secret", Pair_Run.addrs_from_env(), fn (s, st) -> pair(s, st)) do
+      Ok(_) -> println(me() ++ ": Pair closed")
+      Err(e) -> println(me() ++ ": Pair: " ++ Pair_Run.error_message(e))
+    end
+    match Audit_Run.run_B(c, me(), "unused-secret", Audit_Run.addrs_from_env(), fn (s, st) -> audit(s, st)) do
+      Ok(_) -> println(me() ++ ": Audit formed (wrong)")
+      Err(e) -> println(me() ++ ": Audit: " ++ Audit_Run.error_message(e))
+    end
+    match Ledger_Run.run_B(c, me(), "unused-secret", Ledger_Run.addrs_from_env(), fn (s, st) -> ledger(s, st)) do
+      Ok(_) -> println(me() ++ ": Ledger formed (wrong)")
+      Err(_) -> println(me() ++ ": Ledger did not form")
+    end
+  end
+end

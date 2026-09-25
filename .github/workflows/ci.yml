@@ -148,7 +148,7 @@ jobs:
   # compiler and the staged runtime/stdlib, so they get their own runner.
   two-node:
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -199,9 +199,10 @@ jobs:
       # with a new creation), per-node goldens. ~5s per scenario. Each scenario
       # is test/two_node/<name>/; see specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
       - name: Two-node scenarios
-        # 52 scenarios at 30-70 s each on a loaded runner (~20-24 min on a
-        # quiet one); 25 was hit on main itself on a slow runner day.
-        timeout-minutes: 35
+        # 57 scenarios at 20-70 s each (~33 min on a 2026-09-25 runner, when
+        # dd step 11b's four cert_* scenarios crossed the old 35); 25 was hit
+        # on main itself on a slow runner day.
+        timeout-minutes: 45
         run: |
           eval $(opam env)
           for s in $(scripts/two-node.sh --list); do scripts/two-node.sh "$s" || exit 1; done

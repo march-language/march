@@ -26,13 +26,19 @@ mod NodeCall do
           now_ms : Int) : Result(List(Int), CallError) do
     if NodeRpc.timed_out(now_ms, deadline_ms) do
       Err(DeadlineExceeded)
+    else if NetKernel.raw_allowed(fd) == false do
+      -- RemoteCall is a raw primitive (step 11b): on a certificate-mode
+      -- connection without raw_send at both ends it is refused, counted,
+      -- and never sent.
+      NetKernel.note_raw_refused(fd)
+      Err(Forbidden)
     else
       let req = RemoteCall.request(fref, args, my_pid, deadline_ms, correlation)
       match NetKernel.send_frame(fd, RemoteCall.encode_request(req)) do
         Err(_) -> Err(NoConnection)
         Ok(_) -> recv_reply(fd, correlation, Nil)
       end
-    end
+    end end
   end
 
   -- Read frames from [fd] until one decodes as a CallReply matching [correlation].
@@ -68,7 +74,7 @@ mod NodeCall do
       Err(e) -> Err(e)
       Ok(fr) ->
         let frame_bytes = match fr do (f, _) -> f end
-        match NodeRpc.handle_frame(targets, frame_bytes) do
+        match serve_verdict(targets, fd, frame_bytes) do
           None -> Ok(())
           Some(reply) ->
             match NetKernel.send_frame(fd, RemoteCall.encode_reply(reply)) do
@@ -76,6 +82,20 @@ mod NodeCall do
               Ok(_) -> Ok(())
             end
         end
+    end
+  end
+
+  -- A request on a connection that refuses raw frames (step 11b) is not
+  -- dispatched: counted, and answered `Forbidden` (so the caller, blocked
+  -- in `call` until a reply, is not left waiting). Otherwise NodeRpc's.
+  pfn serve_verdict(targets : Targets, fd : Int, frame_bytes : List(Int)) : Option(CallReply) do
+    if NetKernel.raw_allowed(fd) do NodeRpc.handle_frame(targets, frame_bytes)
+    else
+      NetKernel.note_raw_refused(fd)
+      match RemoteCall.decode_request(frame_bytes) do
+        Ok(req) -> Some(RemoteCall.err_reply(req.correlation, Forbidden))
+        Err(_) -> None
+      end
     end
   end
 

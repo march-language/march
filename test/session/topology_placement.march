@@ -69,6 +69,8 @@ mod TopologyPlacement do
       end,
       unregister: fn nm -> Vault.drop(fk.names, nm),
       route: fn (pid, _) -> "p" ++ int_to_string(pid),
+      -- SessionNode's offers route through route_session (dd step 11b).
+      route_session: fn (pid, _) -> "s" ++ int_to_string(pid),
       unroute: fn _ -> (),
       creation: fn _ -> 1 }
   end

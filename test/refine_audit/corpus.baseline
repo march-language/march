@@ -750,6 +750,8 @@ stdlib_seq: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 un
 stdlib_seq: coverage audit (user code): 1 enforced, 0 inert (warned), 0 unenforced
 stdlib_session: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 stdlib_session: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_session_ap: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+stdlib_session_ap: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_session_node: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 stdlib_session_node: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_set: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
