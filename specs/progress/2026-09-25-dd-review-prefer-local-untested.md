@@ -18,3 +18,13 @@ printed `two-node[cluster_ap_local]: ok`.
 
 A two-node scenario where both nodes offer the role and one of them
 initiates, asserting that its own offer served the session.
+
+---
+
+## Tested 2026-09-25
+
+`test/two_node/cluster_ap_prefer_local`: both nodes offer Echo.Server; node-b waits
+until it sees both access points, then initiates three sessions. node-b's golden has
+`node-b Server: got 1..3` and node-a's `node-a: served 0`.
+`scripts/two-node.sh cluster_ap_prefer_local` → `ok`. Red check in a scratch
+worktree: see the step-6 entry's "Red checks" list, which records all of them.

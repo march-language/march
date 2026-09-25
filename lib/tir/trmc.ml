@@ -438,7 +438,7 @@ let crosses_actor_boundary (type_defs : Tir.type_def list) (ty : Tir.ty) : bool 
   let kt = Kind.build ~unboxing:false ~collision_set:(Hashtbl.create 0) type_defs in
   match ty with
   | Tir.TCon (name, _) ->
-    Tir_names.is_actor_msg_name name || Kind.is_actor_struct_type kt name
+    Migrate_msg_pins.has_actor_msg_repr name || Kind.is_actor_struct_type kt name
   | _ -> false
 
 (** [Some (f', f_dps)] when [fn] is transformable.

@@ -117,6 +117,7 @@ type session_wraps = Llvm_ctx.session_wraps = {
 type ctx = Llvm_ctx.ctx = {
   buf       : Buffer.t;
   preamble  : Buffer.t;
+  call_tag_globals : (string, unit) Hashtbl.t;
   mutable ctr     : int;
   mutable blk     : int;
   mutable str_ctr : int;
@@ -415,13 +416,33 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
       (* We'll generate the wrapper function at the end.  For now, declare it.
          When the AVar's type is erased (TVar "_"), fall back to the param-count
          registered in top_fn_nparams at function-definition time. *)
-      let (ps_tirs, nparams) = match v.Tir.v_ty with
-        | Tir.TFn (ps, _) -> (ps, List.length ps)
+      (* The wrapper forwards to the function AS DEFINED, so when the
+         use-site type disagrees with the definition's arity, the definition
+         wins.  The typechecker's arrow is curried, and [convert_ty]
+         uncurries a use-site `Int -> Int -> Bool` into a 2-param
+         `TFn([Int; Int], Bool)` -- but `fn curried_lt(a : Int) : Int -> Bool
+         do fn b -> a < b end` takes ONE param and returns a closure.  Built
+         from the use-site type, the trampoline called @curried_lt with two
+         args and read the returned closure pointer as an Int, so a caller
+         doing `let f = cmp(a)` then `f(b)` jumped through garbage (SIGSEGV,
+         pc=0).  Every such caller calls the value with the definition's
+         arity (a call at the other arity would already be a type error),
+         so the definition's signature is the one the closure must carry. *)
+      let def_sig =
+        match Hashtbl.find_opt ctx.top_fn_param_tys v.Tir.v_name,
+              Hashtbl.find_opt ctx.top_fn_ret_ty v.Tir.v_name with
+        | Some ps, Some r -> Some (ps, r)
+        | _ -> None
+      in
+      let (ps_tirs, nparams, ret_tir) = match v.Tir.v_ty, def_sig with
+        | Tir.TFn (ps, _), Some (dps, dret)
+          when List.length ps <> List.length dps ->
+          (dps, List.length dps, dret)
+        | Tir.TFn (ps, _), _ -> (ps, List.length ps, fn_ret_tir v.Tir.v_ty)
         | _ ->
           let n = Option.value ~default:0 (Hashtbl.find_opt ctx.top_fn_nparams v.Tir.v_name) in
-          (List.init n (fun _ -> Tir.TVar "_"), n)
+          (List.init n (fun _ -> Tir.TVar "_"), n, fn_ret_tir v.Tir.v_ty)
       in
-      let ret_tir = fn_ret_tir v.Tir.v_ty in
       let target_ret = llvm_ret_ty ctx ret_tir in
       let _ = nparams in
       (* clo_wrap_define builds the wrapper's uniform-ptr ABI signature and the

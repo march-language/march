@@ -257,11 +257,15 @@ typedef struct march_proc {
                                                  the lock. */
     _Atomic int64_t             user_mbox_count; /* User messages only; mailbox limits and
                                                     BLOCK low-water checks use this count. */
-    int64_t                    mbox_markers; /* Epoch markers currently in the user mailbox
+    _Atomic int64_t            mbox_markers; /* Epoch markers currently in the user mailbox
                                                  (counted in user_mbox_count so the actor
                                                  loop wakes for them, subtracted wherever the
-                                                 count means "messages": the limit and the
-                                                 BLOCK low-water check).  Under mbox_lock. */
+                                                 count means "messages": the limit, the
+                                                 BLOCK low-water check, and "is there
+                                                 something a non-actor-loop receive can
+                                                 take").  Written under mbox_lock; atomic
+                                                 because mbox_waiting_has_deliverable reads
+                                                 it from other OS threads without the lock. */
     uint32_t                   last_recv_epoch; /* Stamp of the last message a receive
                                                  popped for THIS proc (written under
                                                  mbox_lock, read by the proc itself right
