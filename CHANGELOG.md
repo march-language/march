@@ -463,6 +463,17 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- A function in a nested module that calls a function of an enclosing module
+  (`mod Outer do pfn helper ... mod Inner do fn f(x) do helper(x) end end end`)
+  now compiles. Before, the compiled program failed to link with `helper`
+  undefined, while the interpreter ran it. This applied at any nesting depth,
+  whether the enclosing function was declared before or after the nested
+  module, and in `MARCH_LIB_PATH` modules, stdlib modules and the entry file
+  alike. The qualified spelling `Outer.helper(x)` also now works from inside
+  `Outer` for a `pfn`: it was rejected as private in a stdlib module, and in
+  the same file it could bind a same-named function of the nested module
+  instead. `Compress`'s internal `lift_encode_error` / `lift_decode_error`
+  are private again.
 - The stdlib-only builtin gate (`pid_of_int`, `actor_whereis`, `actor_registered`,
   `actor_pid_indices`, `epoch_hold`, `epoch_release`) now fires at name
   resolution, closing four bypasses found in review: it applies inside `impl`
