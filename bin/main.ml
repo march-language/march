@@ -1728,14 +1728,19 @@ let compile filename =
          itself decides whether anything is reported. *)
       if contains_substring cache_input "no_alloc" then raise Exit;
       if !do_check then begin
-        (* --stdlib-source changes the verdict (a file the stdlib-only
-           builtin gate rejects passes under it), so it is part of the key:
-           measured, a clean `--check --stdlib-source` run satisfied the
-           next plain `--check` of the same source, which then exited 0
-           silently. *)
-        let ch =
-          March_cas.Cas.compilation_hash src_hash ~target:"check"
-            ~flags:(if !stdlib_source then ["stdlib-source"] else []) in
+        (* Every flag that changes the verdict is part of the key, or a
+           clean run under one setting satisfies the next run under another
+           and that run exits 0 silently.  Measured for both:
+           - --stdlib-source: a file the stdlib-only builtin gate rejects
+             passes under it.
+           - --no-cap-strict: the typecheck-side ceiling
+             ([Typecheck.cap_strict_ceiling], set below from [cap_strict])
+             only runs when it is on, so a program plain `--check` rejects
+             passes with the flag.  Same spelling as build_cas_key. *)
+        let flags =
+          (if !stdlib_source then ["stdlib-source"] else [])
+          @ (if !cap_strict then ["capstrict"] else []) in
+        let ch = March_cas.Cas.compilation_hash src_hash ~target:"check" ~flags in
         (match March_cas.Cas.lookup_artifact store ch with
          | Some _ -> exit 0
          | None -> ());
