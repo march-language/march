@@ -978,13 +978,16 @@ let digest_fields t : (string * Yojson.Safe.t) list =
 
 let digest_json t : Yojson.Safe.t = `Assoc (digest_fields t)
 
+(** The digest's bytes, as [write_digest] writes them (a node hashes what it
+    read, so the reconciler compares against the same bytes). *)
+let digest_text t = Yojson.Safe.pretty_to_string (digest_json t) ^ "\n"
+
 let write_digest ~root t =
   let dir = Filename.concat root ".forge" in
   if not (Sys.file_exists dir) then Sys.mkdir dir 0o755;
   let path = digest_file ~root in
   let oc = open_out_bin path in
-  output_string oc (Yojson.Safe.pretty_to_string (digest_json t));
-  output_char oc '\n';
+  output_string oc (digest_text t);
   close_out oc;
   path
 

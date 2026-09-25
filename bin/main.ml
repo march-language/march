@@ -1009,6 +1009,11 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
            non-sandboxed cached artifact must never satisfy it. *)
         @ (if !cap_sandbox then ["capsandbox"] else [])
         @ (if !cap_strict then ["capstrict"] else [])
+        (* --stdlib-source changes the verdict: a file the stdlib-only
+           builtin gate rejects passes under it, so a clean cached check
+           must never satisfy the plain spelling (measured: it did, and the
+           gate's own driver test went silent on a warm CAS). *)
+        @ (if !stdlib_source then ["stdlib-source"] else [])
         @ cross_sysroot_tag
         @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
   let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
@@ -1723,7 +1728,14 @@ let compile filename =
          itself decides whether anything is reported. *)
       if contains_substring cache_input "no_alloc" then raise Exit;
       if !do_check then begin
-        let ch = March_cas.Cas.compilation_hash src_hash ~target:"check" ~flags:[] in
+        (* --stdlib-source changes the verdict (a file the stdlib-only
+           builtin gate rejects passes under it), so it is part of the key:
+           measured, a clean `--check --stdlib-source` run satisfied the
+           next plain `--check` of the same source, which then exited 0
+           silently. *)
+        let ch =
+          March_cas.Cas.compilation_hash src_hash ~target:"check"
+            ~flags:(if !stdlib_source then ["stdlib-source"] else []) in
         (match March_cas.Cas.lookup_artifact store ch with
          | Some _ -> exit 0
          | None -> ());
@@ -1973,13 +1985,13 @@ let compile filename =
      module (prelude is unwrapped into global scope, so its decls ride in the
      entry module's list).  See Typecheck.stdlib_source_files. *)
   March_typecheck.Typecheck.stdlib_source_files := stdlib_span_files stdlib_decls;
-  (* A shipped stdlib module checked AS THE ENTRY (`march --check
-     stdlib/<mod>.march`) is spelled the way the command line spelled it, not
-     the way [load_stdlib] stamped its own copy, so the set above does not
-     contain it; add it, or the stdlib-only builtin gate rejects the module's
-     own legitimate calls to `pid_of_int` and friends. [user_diag_file] tests
-     the entry file first, so its diagnostics are still shown. *)
-  if is_shipped_stdlib_file filename then
+  (* A stdlib module checked AS THE ENTRY is the stdlib's when its real path
+     is under the root [load_stdlib] read from (registered there through
+     [Typecheck_builtins.note_stdlib_root]), or when `--stdlib-source` says
+     so explicitly. Not by basename: that exempted a user's own `json.march`
+     from the stdlib-only builtin gate. [user_diag_file] tests the entry
+     file first, so its diagnostics are still shown. *)
+  if !stdlib_source then
     March_typecheck.Typecheck.stdlib_source_files :=
       filename :: !March_typecheck.Typecheck.stdlib_source_files;
   (* Run the typecheck-side capability ceiling ONLY in typecheck-only modes
@@ -3313,12 +3325,17 @@ let compile filename =
                      enforcement and is not.  Linux scopes reads properly via
                      the mount-namespace allow-list in forge/lib/cap_sandbox.ml.
 
-                   CAVEAT for scope authors: the kernel matches subpaths AFTER
-                   resolving symlinks, and normalization here is lexical (the
-                   build machine's filesystem is not the deployment machine's).
-                   A scope of "/tmp/x" on macOS therefore matches nothing,
-                   because /tmp is a symlink to /private/tmp.  Give the
-                   resolved path. *)
+                   Symlinks: the kernel matches subpaths AFTER resolving
+                   symlinks, while normalization here is lexical (the build
+                   machine's filesystem is not the deployment machine's).  A
+                   "/tmp/x" subpath baked in here would match nothing on macOS
+                   (/tmp -> /private/tmp) and deny every in-scope write.  So
+                   the scoped clauses are NOT part of the compile-time profile
+                   text: the lexical scopes travel separately as
+                   MARCH_CAP_WRITE_SCOPES, and march_sandbox_install()
+                   realpath()s each one on the deployment machine (longest
+                   existing prefix, rest re-appended) and appends the subpath
+                   clauses before sandbox_init. *)
                 let write_scopes =
                   List.filter_map (fun (cap, sc) ->
                       if March_caps.Cap_lattice.cap_subsumes "IO.FileWrite" cap
@@ -3326,20 +3343,37 @@ let compile filename =
                       then Some sc else None)
                     declared_scopes
                 in
-                if holds "IO.FileWrite" then begin
+                (* C string literals for the scopes, comma-separated, used as
+                   an array initializer by the runtime.  Escapes only what C
+                   needs (quote, backslash, controls as octal); UTF-8 bytes
+                   pass through untouched. *)
+                let c_string_lit (str : string) : string =
+                  let buf = Buffer.create (String.length str + 2) in
+                  Buffer.add_char buf '"';
+                  String.iter (fun c ->
+                      match c with
+                      | '"' -> Buffer.add_string buf "\\\""
+                      | '\\' -> Buffer.add_string buf "\\\\"
+                      | c when Char.code c < 0x20 || Char.code c = 0x7f ->
+                        Buffer.add_string buf (Printf.sprintf "\\%03o" (Char.code c))
+                      | c -> Buffer.add_char buf c) str;
+                  Buffer.add_char buf '"';
+                  Buffer.contents buf
+                in
+                let scoped_write_lits =
+                  if not (holds "IO.FileWrite") then []
                   (* An unscoped grant among them means any path: narrowing
                      would be a lie if one declaration is unrestricted. *)
-                  if write_scopes = [] || List.exists (fun sc -> sc = None) write_scopes
-                  then Buffer.add_string b "(allow file-write*)"
-                  else
-                    List.iter (function
-                        | None -> ()
-                        | Some path ->
-                          Buffer.add_string b
-                            (Printf.sprintf "(allow file-write* (subpath \\\"%s\\\"))"
-                               (March_caps.Cap_scope.normalize path)))
-                      write_scopes
-                end;
+                  else if write_scopes = []
+                       || List.exists (fun sc -> sc = None) write_scopes then begin
+                    Buffer.add_string b "(allow file-write*)";
+                    []
+                  end else
+                    List.sort_uniq compare
+                      (List.filter_map (Option.map March_caps.Cap_scope.normalize)
+                         write_scopes)
+                    |> List.map c_string_lit
+                in
                 if holds "IO.Network"   then Buffer.add_string b "(allow network*)";
                 (* process-exec is gated with process-fork, NOT baseline.
                    forge's profile_for keeps it unconditional because
@@ -3373,8 +3407,15 @@ let compile filename =
                    hands clang a real string; without the inner quotes the
                    macro expands as bare SBPL tokens and the runtime will not
                    compile. *)
+                let scopes_define =
+                  if scoped_write_lits = [] then ""
+                  else
+                    " -DMARCH_CAP_WRITE_SCOPES="
+                    ^ Filename.quote (String.concat "," scoped_write_lits)
+                in
                 " -DMARCH_CAP_PROFILE="
                 ^ Filename.quote ("\"" ^ Buffer.contents b ^ "\"")
+                ^ scopes_define
                 ^ deny_flags
               end in
             let strip_flag =
@@ -3604,7 +3645,14 @@ let compile filename =
            unable to discriminate between artifacts.  There is no
            artifact-wide ROOT cap_root line any more; cap_root is computed
            per-function downstream by the deploy tool from that function's
-           own caps= field. *)
+           own caps= field.
+           ROLE <Proto.Role> caps=<sorted-csv> [via=<cap>:<frame>>...;...]
+           (distributed-deploys build step 10) follows the function lines:
+           one per role with a `role R needs ...` grant, its FULL capability
+           closure (everything the role's code reaches), normalized and
+           sorted, from March_typecheck.Typecheck.role_capability_closures.
+           forge's per-role widening gate compares it with the baseline, and
+           ACTIVATE6 signs a root over it for the server's admission gate. *)
         (if !compile_so && Hashtbl.length hr_impl_hashes > 0 then begin
           (* Per-fn OWN cap closures, keyed by qualified name ("Mod.fn").
              fn_own_capability_closures returns each function's own caps
@@ -3722,6 +3770,20 @@ let compile filename =
                let caps_field = "caps=" ^ String.concat "," (caps_for name) in
                Printf.fprintf oc "%s %s %s%s %s\n" name impl_h sig_h callers_field caps_field
              ) hr_impl_hashes;
+             (* DD build step 10: one ROLE line per role with a grant, its
+                FULL closure from the solve check_role_grants runs (section
+                5, "Admission": a changed function's own caps miss a patch
+                that calls an existing, more powerful helper).  `via=` carries
+                each cap's reach chain for the deploy diagnostic. *)
+             List.iter (fun (role, caps, chains) ->
+               let via =
+                 if chains = [] then ""
+                 else
+                   " via=" ^ String.concat ";"
+                     (List.map (fun (c, chain) -> c ^ ":" ^ String.concat ">" chain) chains)
+               in
+               Printf.fprintf oc "ROLE %s caps=%s%s\n" role (String.concat "," caps) via
+             ) (March_typecheck.Typecheck.role_capability_closures typecheck_env);
              close_out oc
            with Sys_error _ -> ()) (* non-fatal if manifest write fails *)
         end);
@@ -4177,14 +4239,13 @@ let run_check_cmd ?(emit_caps = false) files =
   let no_shadowing = List.length stdlib_decls = stdlib_decls_unshadowed_count in
   if not (List.for_all is_shipped_stdlib_file files) then
     check_no_prelude_collision_decls ~stdlib_decls all_decls;
-  (* As in [compile]: a shipped stdlib module named on the command line is
-     the stdlib's for the stdlib-only builtin gate, whatever spelling the
-     command line used. *)
-  List.iter (fun f ->
-      if is_shipped_stdlib_file f then
+  (* As in [compile]: a file under the stdlib root is the stdlib's by
+     provenance; `--stdlib-source` says so for any other spelling. *)
+  if !stdlib_source then
+    List.iter (fun f ->
         March_typecheck.Typecheck.stdlib_source_files :=
           f :: !March_typecheck.Typecheck.stdlib_source_files)
-    files;
+      files;
   (* Build a synthetic module of just the user's own decls and type-check it,
      seeded from the cached stdlib typecheck env (see [get_stdlib_tc_env])
      instead of re-typechecking stdlib combined with user code from scratch —
@@ -4651,6 +4712,7 @@ let () =
     ("--topology-isolate-foreign", Arg.Set topology_isolate_foreign,
      " With --topology: reject an IO.Foreign role or hook in a pool that is not isolated");
     ("--cap-strict", Arg.Set cap_strict, " Treat `needs` as a hard ceiling (the DEFAULT since 2026-08-08; accepted for compatibility and to state the intent explicitly)");
+    ("--stdlib-source", Arg.Set stdlib_source, " The entry file(s) are standard-library sources checked under a path outside the resolved stdlib root (e.g. `march --check --stdlib-source stdlib/actor.march` from the repo root): exempt them from the stdlib-only builtin gate. Never inferred from the file name");
     ("--no-cap-strict", Arg.Clear cap_strict, " Do not enforce `needs` as a ceiling: allow a module's emitted code to use capabilities it does not declare");
     ("--cap-sandbox", Arg.Set cap_sandbox, " Embed a self-imposed capability sandbox applied at startup (opt-in; macOS Seatbelt / Linux seccomp-bpf)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");

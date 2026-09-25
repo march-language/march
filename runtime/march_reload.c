@@ -39,6 +39,42 @@
  *     dropped).  A new verb because the signed message changes meaning
  *     (the ACTIVATE3/4 precedent): an older server rejects it outright
  *     instead of misreading "3" as "no migration".
+ *   ACTIVATE6 <name> <impl_hash> <cas_hash> <sig64> <migrate> epoch:<N> cap_root:<hex>
+ *             role_caps:<Proto.Role>=<hex>;... caps:<sorted-csv>
+ *             roles:<Proto.Role>=<sorted-csv>;... callers:<sorted-csv>
+ *                                                   → OK | WAIT … | ERR <reason>  (v6)
+ *     As ACTIVATE5, plus per-role capability closures (distributed-deploys
+ *     build step 10, plan section 5 "Admission"): `role_caps:` holds one
+ *     root per role, `;`-separated, strictly sorted by role name, and is
+ *     INSIDE the signed message (between cap_root and callers).  The
+ *     unsigned `roles:` block carries each role's closure; the server
+ *     recomputes every root from it exactly as it does cap_root
+ *     (compute_cap_root) and rejects any mismatch, a role missing from
+ *     `roles:` or a role `roles:` names that `role_caps:` does not with
+ *     ERR role_cap_tamper.  $MARCH_DEPLOY_POLICY then applies to every
+ *     role closure (ERR role_cap_policy <role> <cap>), after the
+ *     function's own caps (ERR cap_policy <cap>).  A role closure is
+ *     everything the role's code reaches, so a patch that only calls an
+ *     existing, more powerful helper is caught here where the own-caps
+ *     gate misses it.  A new verb, not a field appended to ACTIVATE5: an
+ *     older server rebuilds the signed line without role_caps (the
+ *     signature would fail with a misleading ERR bad_signature) and its
+ *     `callers:` parse runs to end of line.  A client whose manifest has
+ *     no ROLE lines keeps sending ACTIVATE4/ACTIVATE5 unchanged.
+ *   TOPOLOGY <blake3> <sig64> <size>\n                → READY | ERR <reason>
+ *     <topology file, exactly size bytes>            → OK <blake3> | ERR <reason>
+ *     A signed reconciler action (plan section 5): the signature is over
+ *     "TOPOLOGY <blake3>" with the deploy key, checked BEFORE the body is
+ *     accepted; the body must hash to <blake3>.  The server writes it to
+ *     the service's persisted state (topology.toml, temp+rename), records
+ *     the digest and signature in the state file, and calls
+ *     march_hcr_on_topology(path) (a no-op until build step 8 fills it).
+ *     At start, a persisted topology whose signature and digest verify is
+ *     handed to the hook again.
+ *   COMPACT                                           → STACK entries:<n> functions:<m>
+ *                                                       deploys:<d> artifacts:<k> cas_bytes:<b>
+ *     The persisted patch stack's size, for the reconciler to decide when
+ *     to rebuild a base image (plan 6.5, "Compaction").  Reports only.
  *   BEGIN_BATCH                                       → OK
  *   COMMIT_BATCH                                      → OK <n> | WAIT … | ERR <reason>
  *   ROLLBACK_BATCH                                    → OK
@@ -168,7 +204,7 @@ static int b64_decode(const char *in, size_t inlen, unsigned char *out) {
 }
 
 #define RELOAD_BACKLOG  4
-#define RELOAD_LINE_MAX 4096
+#define RELOAD_LINE_MAX 16384   /* an ACTIVATE6 line carries every role's closure */
 #define CAS_HASH_LEN    64      /* compilation_hash: 64 hex chars */
 #define CAS_MAX_ARTIFACT (64 * 1024 * 1024)  /* 64 MB sanity limit */
 
@@ -221,6 +257,189 @@ static uint32_t load_next_epoch(void) {
     fscanf(f, "%u", &v);
     fclose(f);
     return v > 0 ? v : 1;
+}
+
+/* ── Host-local persisted state (plan 6.5, DD build step 10) ─────────────
+ *
+ * A restarted host must come back on the code it was running, before
+ * `main` opens any offers, even when nothing is left to redeploy it (the
+ * reconciler may be `forge` on a laptop).  So the server keeps, under its
+ * CAS root next to `next_epoch` and with the same temp+rename discipline,
+ *
+ *   <cas_root>/hcr_state/<16 hex of blake3(socket path)>/state
+ *
+ * a text file holding
+ *
+ *   # march-hcr-state v1
+ *   base <hex>        blake3 over "name baseline_impl_hash\n" of every slot
+ *                     of the binary that wrote it (the build it patches)
+ *   topology <hex|->  the digest of the last topology pushed (TOPOLOGY)
+ *   manifest <hex>    blake3 over "name current_impl_hash\n" of every slot:
+ *                     the code actually running, for the reconciler to
+ *                     compare against its desired state
+ *   seq <n>           the last deploy's sequence number
+ *   entry <seq> <epoch> <signer_hex|-> <sig64> <signed message>
+ *                     one per activated function, in activation order; a
+ *                     batch's functions share one seq (one deploy)
+ *
+ * Keyed by the socket path because the CAS root is shared by every March
+ * program of a user: the socket names the service.  A different build on
+ * the same socket is caught by `base`, and its stack is set aside, not
+ * replayed.  Replay (replay_state, run by march_reload_server_start before
+ * it returns to `main`) re-verifies every entry's signature from the stored
+ * signed line, skips (with an audit line) any entry that fails, whose
+ * artifact is gone from the CAS or whose function the binary does not
+ * have, and republishes each function's newest entry, deploy by deploy in
+ * sequence (hence epoch) order.  The rewritten file then holds only those:
+ * superseded and broken entries do not outlive a restart.
+ * $MARCH_HCR_NO_REPLAY=1 starts from the base binary and sets the stack
+ * aside (state.no-replay), for a patch that breaks the boot. */
+
+static int  is_hex64(const char *s);
+static void mkdir_p(const char *path);
+
+/* march_blake3_hex, but only in a build with a deploy key.  A build without
+ * one activates nothing (every ACTIVATE and TOPOLOGY is refused), so it has
+ * no state to hash, and the REPL/JIT runtime links this file without
+ * march_blake3.c (runtime/sources.list: blake3 is `hcr`, not `jit`).  The
+ * older blake3 uses (compute_cap_root) are only reachable after a signature
+ * check and so drop out of such a build; this keeps the new ones out of it
+ * without relying on the optimizer. */
+static void state_hex(const unsigned char *p, size_t n, char out[65]) {
+#if HAVE_SIGNING_KEY
+    march_blake3_hex(p, n, out);
+#else
+    (void)p; (void)n;
+    memset(out, '0', 64);
+    out[64] = '\0';
+#endif
+}
+
+static char g_last_signed[RELOAD_LINE_MAX];   /* the last verified signed line */
+static char g_last_sig[256];                  /* and its signature */
+
+__attribute__((unused))
+static void remember_signed(const char *msg, size_t n, const char *sig) {
+    if (n >= sizeof(g_last_signed)) n = sizeof(g_last_signed) - 1;
+    memcpy(g_last_signed, msg, n);
+    g_last_signed[n] = '\0';
+    snprintf(g_last_sig, sizeof(g_last_sig), "%s", sig ? sig : "");
+}
+
+typedef struct {
+    unsigned long long seq;
+    uint32_t           epoch;
+    char              *signer;   /* hex pubkey at activation, or "-" */
+    char              *sig_b64;
+    char              *msg;      /* the signed message, verbatim */
+    char              *name;     /* parsed from msg (NULL if malformed) */
+    char              *impl_hash;
+    char              *cas_hash;
+} hcr_stack_entry;
+
+static hcr_stack_entry *g_stack;
+static size_t           g_stack_n, g_stack_cap;
+static unsigned long long g_stack_seq;
+static char g_state_dir[768];
+static char g_base_digest[65];
+static char g_manifest_digest[65];
+static char g_topology_digest[65] = "-";
+static char g_topology_sig[160] = "-";       /* its signature, re-verified at start */
+static const char *g_audit_type;             /* overrides "activate"/"restore" */
+static int  g_restoring;                     /* 1 while replay_state runs */
+static int  g_restored_entries, g_restored_skipped;
+static const char *g_restored_mode = "none"; /* none|replayed|off|base_changed */
+
+/* name/impl/cas of a signed message: "<ACTIVATEn> name impl cas ..." or
+ * the v1 form "name impl cas".  1 on success. */
+static int parse_signed_fields(const char *msg, char name[256], char impl[128], char cas[128]) {
+    char a[256], b[256], c[256], d[256];
+    int k = sscanf(msg, "%255s %255s %255s %255s", a, b, c, d);
+    if (k >= 4 && strncmp(a, "ACTIVATE", 8) == 0) {
+        snprintf(name, 256, "%s", b);
+        snprintf(impl, 128, "%s", c);
+        snprintf(cas, 128, "%s", d);
+    } else if (k >= 3 && strncmp(a, "ACTIVATE", 8) != 0) {
+        snprintf(name, 256, "%s", a);
+        snprintf(impl, 128, "%s", b);
+        snprintf(cas, 128, "%s", c);
+    } else {
+        return 0;
+    }
+    return is_hex64(cas);
+}
+
+static void stack_entry_free(hcr_stack_entry *e) {
+    free(e->signer); free(e->sig_b64); free(e->msg);
+    free(e->name); free(e->impl_hash); free(e->cas_hash);
+    memset(e, 0, sizeof(*e));
+}
+
+/* Append a copy; parses name/impl/cas out of [msg]. */
+static void stack_push(unsigned long long seq, uint32_t epoch, const char *signer,
+                       const char *sig, const char *msg) {
+    if (g_stack_n == g_stack_cap) {
+        size_t nc = g_stack_cap ? g_stack_cap * 2 : 16;
+        hcr_stack_entry *ns = (hcr_stack_entry *)realloc(g_stack, nc * sizeof(*ns));
+        if (!ns) return;
+        g_stack = ns; g_stack_cap = nc;
+    }
+    hcr_stack_entry *e = &g_stack[g_stack_n];
+    memset(e, 0, sizeof(*e));
+    e->seq = seq; e->epoch = epoch;
+    e->signer = strdup(signer && signer[0] ? signer : "-");
+    e->sig_b64 = strdup(sig ? sig : "");
+    e->msg = strdup(msg ? msg : "");
+    char name[256], impl[128], cas[128];
+    if (e->msg && parse_signed_fields(e->msg, name, impl, cas)) {
+        e->name = strdup(name); e->impl_hash = strdup(impl); e->cas_hash = strdup(cas);
+    }
+    g_stack_n++;
+}
+
+/* blake3 over "name <hash>\n" for every registered slot, where <hash> is
+ * the baseline impl hash ([current] = 0) or the running one (1). */
+static void slots_digest(int current, char out[65]) {
+    size_t cap = 4096, len = 0;
+    char *buf = (char *)malloc(cap);
+    if (!buf) { snprintf(out, 65, "%064d", 0); return; }
+    for (uint32_t i = 1; i < 65536; i++) {
+        const char *name = march_dispatch_id_to_name(i);
+        if (!name) break;
+        const char *h = current ? march_dispatch_impl_hash(i, march_dispatch_current(i))
+                                : march_dispatch_baseline_hash(i);
+        size_t need = strlen(name) + (h ? strlen(h) : 0) + 3;
+        if (len + need >= cap) {
+            while (len + need >= cap) cap *= 2;
+            char *nb = (char *)realloc(buf, cap);
+            if (!nb) break;
+            buf = nb;
+        }
+        len += (size_t)snprintf(buf + len, cap - len, "%s %s\n", name, h ? h : "");
+    }
+    state_hex((const unsigned char *)buf, len, out);
+    free(buf);
+}
+
+/* Rewrite the state file (temp + rename, as persist_next_epoch). */
+static void persist_state(void) {
+    if (!g_state_dir[0]) return;
+    mkdir_p(g_state_dir);
+    char path[800], tmp[820];
+    snprintf(path, sizeof(path), "%s/state", g_state_dir);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    fprintf(f, "# march-hcr-state v1\nbase %s\ntopology %s %s\nmanifest %s\nseq %llu\n",
+            g_base_digest, g_topology_digest, g_topology_sig, g_manifest_digest, g_stack_seq);
+    for (size_t i = 0; i < g_stack_n; i++) {
+        const hcr_stack_entry *e = &g_stack[i];
+        fprintf(f, "entry %llu %u %s %s %s\n", e->seq, e->epoch, e->signer,
+                e->sig_b64[0] ? e->sig_b64 : "-", e->msg);
+    }
+    int ok = fflush(f) == 0;
+    ok = (fclose(f) == 0) && ok;
+    if (ok) rename(tmp, path); else unlink(tmp);
 }
 
 /* ── CAS path helpers ────────────────────────────────────────────────── */
@@ -311,6 +530,9 @@ static void pubkey_to_hex(char out[65]) {
 typedef struct {
     const char *caps;       /* comma-separated, as received on the wire */
     const char *cap_root;   /* signed 64-hex root */
+    const char *roles;      /* ACTIVATE6 only: the `roles:` block as received
+                               ("R=csv;R2=csv"); NULL otherwise, and then the
+                               line has no "roles" key at all */
 } audit_caps_t;
 
 /* Write s as a JSON string literal (quotes included). */
@@ -367,10 +589,11 @@ static void write_audit_log(const char *fn, const char *impl_hash,
     FILE *f = fopen(log_path, "a");
     if (!f) return;
     fprintf(f,
-        "{\"ts\":%lld,\"type\":\"activate\",\"fn\":\"%s\","
+        "{\"ts\":%lld,\"type\":\"%s\",\"fn\":\"%s\","
         "\"impl_hash\":\"%s\",\"signer\":\"%s\","
         "\"cas_hash\":\"%s\",",
-        ts_ms, fn ? fn : "", impl_hash ? impl_hash : "",
+        ts_ms, g_audit_type ? g_audit_type : g_restoring ? "restore" : "activate",
+        fn ? fn : "", impl_hash ? impl_hash : "",
         signer, cas_hash ? cas_hash : "");
     if (ac && ac->caps) {
         fputs("\"caps\":[", f);
@@ -391,6 +614,11 @@ static void write_audit_log(const char *fn, const char *impl_hash,
         json_write_str(f, ac->cap_root ? ac->cap_root : "",
                        ac->cap_root ? strlen(ac->cap_root) : 0);
         fputc(',', f);
+        if (ac->roles) {
+            fputs("\"roles\":", f);
+            json_write_str(f, ac->roles, strlen(ac->roles));
+            fputc(',', f);
+        }
     } else {
         fputs("\"caps\":null,\"cap_root\":null,", f);
     }
@@ -478,6 +706,10 @@ typedef struct {
     uint32_t            epoch;
     int                 migrate;   /* MIGRATE_STATE | MIGRATE_MSGS */
     const audit_caps_t *ac;
+    /* The verified signed message and its signature, persisted into the
+     * host-local patch stack so a restart can re-verify and replay it.
+     * NULL on replay itself (the entry is already on the stack). */
+    const char         *signed_msg, *sig_b64;
 } act_item;
 
 /* Activate [n] functions as one deploy.  Returns 0 (OK), 1 (WAIT: nothing
@@ -548,7 +780,8 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
         }
     }
     march_hcr_wait w;
-    int e = march_hcr_activate(u, n, req, -1, -1, &w);
+    /* At replay nothing older runs yet: no drain to arm. */
+    int e = march_hcr_activate(u, n, req, g_restoring ? 0 : -1, g_restoring ? 0 : -1, &w);
     if (e == MARCH_HCR_WAIT) {
         snprintf(resp, rsz, "WAIT epoch:%u pins:%lld deadline_ms:%lld%s\n",
                  w.epoch, (long long)w.pins, (long long)w.deadline_ms,
@@ -574,6 +807,16 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
                 it[i].callers && it[i].callers[0] ? it[i].callers : NULL);
             write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac, "ok");
         }
+        /* The host-local patch stack (6.5): one deploy, one seq.  Replay
+         * records its own entries (replay_state). */
+        if (!g_restoring) {
+            unsigned long long seq = ++g_stack_seq;
+            for (int i = 0; i < n; i++)
+                if (it[i].signed_msg && it[i].signed_msg[0])
+                    stack_push(seq, (uint32_t)e, asigner, it[i].sig_b64, it[i].signed_msg);
+            slots_digest(1, g_manifest_digest);
+            persist_state();
+        }
     }
     free(u);
     return 0;
@@ -589,7 +832,7 @@ static void do_activate(int fd, const char *name, const char *impl_hash,
                         uint32_t activate_epoch, const char *callers_csv,
                         const audit_caps_t *ac) {
     act_item it = { name, impl_hash, cas_hash, callers_csv, activate_epoch,
-                    migrate, ac };
+                    migrate, ac, g_last_signed, g_last_sig };
     char resp[512];
     int r = activate_items(&it, 1, resp, sizeof(resp));
     if (r == 0) {
@@ -598,6 +841,359 @@ static void do_activate(int fd, const char *name, const char *impl_hash,
     } else {
         wresp(fd, resp);
     }
+}
+
+/* ── Replay of the persisted patch stack (plan 6.5) ─────────────────────── */
+
+/* 1 iff [sig_b64] is a valid signature over [msg] by the deploy key. */
+static int verify_signed_line(const char *msg, const char *sig_b64) {
+#if HAVE_SIGNING_KEY
+    if (!g_pubkey_loaded) return 0;
+    int all_zero = 1;
+    for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
+    if (all_zero) return 0;
+    unsigned char sigbytes[64];
+    size_t sl = strlen(sig_b64);
+    if (sl > 128) return 0;
+    if (b64_decode(sig_b64, sl, sigbytes) != 64) return 0;
+    size_t mlen = strlen(msg);
+    unsigned char *sm = (unsigned char *)malloc(mlen + 64);
+    unsigned char *mo = (unsigned char *)malloc(mlen + 64);
+    if (!sm || !mo) { free(sm); free(mo); return 0; }
+    memcpy(sm, sigbytes, 64);
+    memcpy(sm + 64, msg, mlen);
+    unsigned long long olen = 0;
+    int rc = crypto_sign_open(mo, &olen, sm, (unsigned long long)(mlen + 64), g_pubkey);
+    free(sm); free(mo);
+    return rc == 0;
+#else
+    (void)msg; (void)sig_b64;
+    return 0;
+#endif
+}
+
+/* Set the current state file aside as <state>.<suffix>. */
+static void set_state_aside(const char *suffix) {
+    char path[800], dst[840];
+    snprintf(path, sizeof(path), "%s/state", g_state_dir);
+    snprintf(dst, sizeof(dst), "%s.%s", path, suffix);
+    rename(path, dst);
+}
+
+/* ── The signed TOPOLOGY verb (plan section 5, DD build step 10) ───────── */
+
+/* Filled in by build step 8 (see march_reload.h). */
+void march_hcr_on_topology(const char *path) {
+    (void)path;
+}
+
+static void topology_path(char *out, size_t n) {
+    snprintf(out, n, "%s/topology.toml", g_state_dir);
+}
+
+static int topology_signature_ok(const char *digest, const char *sig) {
+    char msg[128];
+    snprintf(msg, sizeof(msg), "TOPOLOGY %s", digest);
+    return verify_signed_line(msg, sig);
+}
+
+static void restore_topology(void) {
+    char path[800];
+    topology_path(path, sizeof(path));
+    const char *why = NULL;
+    FILE *f = fopen(path, "rb");
+    if (!f) why = "err_topology_missing";
+    else {
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        unsigned char *buf = (unsigned char *)malloc(sz > 0 ? (size_t)sz : 1);
+        size_t got = buf && sz > 0 ? fread(buf, 1, (size_t)sz, f) : 0;
+        fclose(f);
+        char hex[65];
+        state_hex(buf, got, hex);
+        free(buf);
+        if (strcmp(hex, g_topology_digest) != 0) why = "err_topology_digest";
+        else if (!topology_signature_ok(g_topology_digest, g_topology_sig)) why = "err_topology_sig";
+    }
+    g_audit_type = "topology";
+    if (why) {
+        write_audit_log("(topology)", g_topology_digest, "", NULL, why);
+        fprintf(stderr, "[hcr] restore: persisted topology not restored (%s)\n", why);
+    } else {
+        write_audit_log("(topology)", g_topology_digest, "", NULL, "restored");
+        march_hcr_on_topology(path);
+    }
+    g_audit_type = NULL;
+}
+
+#define MARCH_TOPOLOGY_MAX (4 * 1024 * 1024)
+
+/* TOPOLOGY <blake3> <sig64> <size>: see the file header. */
+static void handle_topology(int fd, const char *args) {
+    char digest[80], sig[160];
+    long long size = -1;
+    if (sscanf(args, "%79s %159s %lld", digest, sig, &size) != 3
+        || !is_hex64(digest) || size < 0 || size > MARCH_TOPOLOGY_MAX) {
+        wresp(fd, "ERR bad_format\n");
+        return;
+    }
+    for (char *p = digest; *p; p++) if (*p >= 'A' && *p <= 'F') *p = (char)(*p - 'A' + 'a');
+    g_audit_type = "topology";
+    if (!topology_signature_ok(digest, sig)) {
+        write_audit_log("(topology)", digest, "", NULL, "err_sig");
+        g_audit_type = NULL;
+        wresp(fd, HAVE_SIGNING_KEY ? "ERR bad_signature\n" : "ERR signing_not_configured\n");
+        return;
+    }
+    unsigned char *buf = (unsigned char *)malloc(size > 0 ? (size_t)size : 1);
+    if (!buf) { g_audit_type = NULL; wresp(fd, "ERR oom\n"); return; }
+    wresp(fd, "READY\n");
+    if (size > 0 && read_exact(fd, buf, (size_t)size) != 0) {
+        free(buf); g_audit_type = NULL; return;   /* the client went away */
+    }
+    char hex[65];
+    state_hex(buf, (size_t)size, hex);
+    if (strcmp(hex, digest) != 0) {
+        write_audit_log("(topology)", digest, "", NULL, "err_digest");
+        free(buf); g_audit_type = NULL;
+        wresp(fd, "ERR digest_mismatch\n");
+        return;
+    }
+    char path[800], tmp[820];
+    mkdir_p(g_state_dir);
+    topology_path(path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "wb");
+    int ok = f && fwrite(buf, 1, (size_t)size, f) == (size_t)size;
+    if (f) ok = (fclose(f) == 0) && ok;
+    free(buf);
+    if (!ok || rename(tmp, path) != 0) {
+        unlink(tmp);
+        write_audit_log("(topology)", digest, "", NULL, "err_write");
+        g_audit_type = NULL;
+        wresp(fd, "ERR write_failed\n");
+        return;
+    }
+    snprintf(g_topology_digest, sizeof(g_topology_digest), "%s", digest);
+    snprintf(g_topology_sig, sizeof(g_topology_sig), "%s", sig);
+    persist_state();
+    write_audit_log("(topology)", digest, "", NULL, "ok");
+    g_audit_type = NULL;
+    march_hcr_on_topology(path);
+    char resp[96];
+    int n = snprintf(resp, sizeof(resp), "OK %s\n", digest);
+    write_safe(fd, resp, n, sizeof(resp));
+}
+
+/* COMPACT: the persisted patch stack's size (plan 6.5, "Compaction").  The
+ * reconciler decides from it when to rebuild the build's base image from the
+ * current version; nothing is rebuilt or dropped here. */
+static void handle_compact(int fd) {
+    size_t funcs = 0, deploys = 0, arts = 0;
+    unsigned long long bytes = 0;
+    for (size_t i = 0; i < g_stack_n; i++) {
+        const hcr_stack_entry *e = &g_stack[i];
+        int seen_name = 0, seen_seq = 0, seen_cas = 0;
+        for (size_t j = 0; j < i; j++) {
+            const hcr_stack_entry *o = &g_stack[j];
+            if (e->name && o->name && strcmp(e->name, o->name) == 0) seen_name = 1;
+            if (o->seq == e->seq) seen_seq = 1;
+            if (e->cas_hash && o->cas_hash && strcmp(e->cas_hash, o->cas_hash) == 0) seen_cas = 1;
+        }
+        if (!seen_name && e->name) funcs++;
+        if (!seen_seq) deploys++;
+        if (!seen_cas && e->cas_hash) {
+            arts++;
+            char path[640];
+            struct stat st;
+            cas_artifact_path(path, sizeof(path), e->cas_hash);
+            if (stat(path, &st) == 0) bytes += (unsigned long long)st.st_size;
+        }
+    }
+    char resp[256];
+    int n = snprintf(resp, sizeof(resp),
+                     "STACK entries:%zu functions:%zu deploys:%zu artifacts:%zu cas_bytes:%llu\n",
+                     g_stack_n, funcs, deploys, arts, bytes);
+    write_safe(fd, resp, n, sizeof(resp));
+}
+
+__attribute__((unused))
+static void replay_state(const char *socket_path) {
+    /* The state directory: one per service (socket path). */
+    char key[65];
+    state_hex((const unsigned char *)socket_path, strlen(socket_path), key);
+    snprintf(g_state_dir, sizeof(g_state_dir), "%s/hcr_state/%.16s", g_cas_root, key);
+    slots_digest(0, g_base_digest);
+    slots_digest(1, g_manifest_digest);
+
+    char path[800];
+    snprintf(path, sizeof(path), "%s/state", g_state_dir);
+    FILE *f = fopen(path, "r");
+    if (!f) return;                       /* first start of this service */
+
+    /* Parse.  Entries are kept in file order (ascending seq). */
+    char base[80] = "", topo[80] = "-", topo_sig[160] = "-";
+    unsigned long long file_seq = 0;
+    hcr_stack_entry *ents = NULL;
+    size_t n = 0, cap = 0;
+    int malformed = 0;
+    char *line = (char *)malloc(RELOAD_LINE_MAX + 1024);
+    if (!line) { fclose(f); return; }
+    while (fgets(line, RELOAD_LINE_MAX + 1024, f)) {
+        size_t len = strlen(line);
+        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
+        if (!len || line[0] == '#') continue;
+        if (strncmp(line, "base ", 5) == 0) { snprintf(base, sizeof(base), "%s", line + 5); continue; }
+        if (strncmp(line, "topology ", 9) == 0) {
+            if (sscanf(line + 9, "%79s %159s", topo, topo_sig) < 1) snprintf(topo, sizeof(topo), "-");
+            continue;
+        }
+        if (strncmp(line, "manifest ", 9) == 0) continue;
+        if (strncmp(line, "seq ", 4) == 0) { file_seq = strtoull(line + 4, NULL, 10); continue; }
+        unsigned long long seq; unsigned ep; char signer[80], sig[160]; int off = 0;
+        if (strncmp(line, "entry ", 6) != 0
+            || sscanf(line + 6, "%llu %u %79s %159s %n", &seq, &ep, signer, sig, &off) < 4
+            || off <= 0 || !line[6 + off]) {
+            malformed++;
+            continue;
+        }
+        if (n == cap) {
+            size_t nc = cap ? cap * 2 : 16;
+            hcr_stack_entry *ne = (hcr_stack_entry *)realloc(ents, nc * sizeof(*ne));
+            if (!ne) break;
+            ents = ne; cap = nc;
+        }
+        hcr_stack_entry *e = &ents[n++];
+        memset(e, 0, sizeof(*e));
+        e->seq = seq; e->epoch = ep;
+        e->signer = strdup(signer); e->sig_b64 = strdup(sig); e->msg = strdup(line + 6 + off);
+        char nm[256], im[128], cs[128];
+        if (e->msg && parse_signed_fields(e->msg, nm, im, cs)) {
+            e->name = strdup(nm); e->impl_hash = strdup(im); e->cas_hash = strdup(cs);
+        }
+    }
+    free(line);
+    fclose(f);
+    if (strcmp(topo, "-") != 0 && is_hex64(topo)) {
+        snprintf(g_topology_digest, sizeof(g_topology_digest), "%s", topo);
+        snprintf(g_topology_sig, sizeof(g_topology_sig), "%s", topo_sig);
+    }
+
+    g_restoring = 1;
+    const char *nr = getenv("MARCH_HCR_NO_REPLAY");
+    if (strcmp(base, g_base_digest) != 0) {
+        /* A different build now serves this socket: its patches are not
+         * patches of this binary. */
+        g_restored_mode = "base_changed";
+        g_restored_skipped = (int)n + malformed;
+        write_audit_log("(stack)", "", "", NULL, "base_changed");
+        set_state_aside("base-changed");
+        snprintf(g_topology_digest, sizeof(g_topology_digest), "-");
+        snprintf(g_topology_sig, sizeof(g_topology_sig), "-");
+    } else if (nr && nr[0] && strcmp(nr, "0") != 0) {
+        g_restored_mode = "off";
+        g_restored_skipped = (int)n + malformed;
+        write_audit_log("(stack)", "", "", NULL, "no_replay");
+        set_state_aside("no-replay");
+        snprintf(g_topology_digest, sizeof(g_topology_digest), "-");
+        snprintf(g_topology_sig, sizeof(g_topology_sig), "-");
+    } else {
+        g_restored_mode = "replayed";
+        g_stack_seq = file_seq;
+        for (int m = 0; m < malformed; m++) {
+            write_audit_log("(malformed)", "", "", NULL, "err_restore_malformed");
+            fprintf(stderr, "[hcr] restore: skipped a malformed patch-stack entry\n");
+        }
+        g_restored_skipped += malformed;
+        /* Validate every entry; a bad one is skipped with an audit line. */
+        char *ok = (char *)calloc(n ? n : 1, 1);
+        for (size_t i = 0; ok && i < n; i++) {
+            hcr_stack_entry *e = &ents[i];
+            const char *why = NULL;
+            uint32_t slot;
+            char cpath[640];
+            if (!e->name) why = "err_restore_malformed";
+            else if (!verify_signed_line(e->msg, e->sig_b64)) why = "err_restore_sig";
+            else if (!march_dispatch_name_to_id(e->name, &slot)) why = "err_restore_unknown_name";
+            else {
+                cas_artifact_path(cpath, sizeof(cpath), e->cas_hash);
+                if (access(cpath, F_OK) != 0) why = "err_restore_cas_miss";
+            }
+            if (why) {
+                write_audit_log(e->name ? e->name : "(malformed)", e->impl_hash, e->cas_hash, NULL, why);
+                fprintf(stderr, "[hcr] restore: skipped patch-stack entry %s (%s)\n",
+                        e->name ? e->name : "(malformed)", why);
+                g_restored_skipped++;
+            } else {
+                ok[i] = 1;
+            }
+        }
+        /* Only each function's newest valid entry is republished. */
+        for (size_t i = 0; ok && i < n; i++) {
+            if (!ok[i]) continue;
+            for (size_t j = i + 1; j < n; j++)
+                if (ok[j] && strcmp(ents[j].name, ents[i].name) == 0) { ok[i] = 0; break; }
+        }
+        /* One activation per deploy (seq), in order. */
+        size_t i = 0;
+        while (ok && i < n) {
+            size_t j = i;
+            while (j < n && ents[j].seq == ents[i].seq) j++;
+            act_item *items = (act_item *)calloc(j - i, sizeof(*items));
+            size_t *idx = (size_t *)calloc(j - i, sizeof(*idx));
+            if (!items || !idx) { free(items); free(idx); break; }
+            int k = 0;
+            uint32_t ep = 0;
+            for (size_t x = i; x < j; x++) {
+                if (!ok[x]) continue;
+                const char *cp = strstr(ents[x].msg, " callers:");
+                items[k] = (act_item){ ents[x].name, ents[x].impl_hash, ents[x].cas_hash,
+                                       cp && cp[9] ? cp + 9 : NULL, ents[x].epoch, 0,
+                                       NULL, NULL, NULL };
+                if (ents[x].epoch > ep) ep = ents[x].epoch;
+                idx[k++] = x;
+            }
+            if (k > 0) {
+                char resp[512];
+                int r = activate_items(items, k, resp, sizeof(resp));
+                if (r == 0) {
+                    uint32_t cur = march_epoch_current();
+                    for (int y = 0; y < k; y++) {
+                        hcr_stack_entry *e = &ents[idx[y]];
+                        stack_push(e->seq, cur, e->signer, e->sig_b64, e->msg);
+                    }
+                    g_restored_entries += k;
+                } else {
+                    size_t rl = strlen(resp);
+                    if (rl && resp[rl - 1] == '\n') resp[rl - 1] = '\0';
+                    fprintf(stderr, "[hcr] restore: deploy %llu not republished (%s)\n",
+                            ents[i].seq, resp);
+                    for (int y = 0; y < k; y++)
+                        write_audit_log(items[y].name, items[y].impl_hash, items[y].cas_hash,
+                                        NULL, r == 1 ? "err_restore_wait" : "err_restore_publish");
+                    g_restored_skipped += k;
+                }
+            }
+            (void)ep;
+            free(items); free(idx);
+            i = j;
+        }
+        free(ok);
+        if (g_restored_entries || g_restored_skipped)
+            fprintf(stderr, "[hcr] restore: republished %d patch(es), skipped %d\n",
+                    g_restored_entries, g_restored_skipped);
+    }
+    /* The last pushed topology: handed to the hook again when its
+     * signature and digest still verify (a replaced file, or one signed by
+     * another key, is not). */
+    if (strcmp(g_restored_mode, "replayed") == 0 && strcmp(g_topology_digest, "-") != 0)
+        restore_topology();
+    g_restoring = 0;
+    for (size_t i = 0; i < n; i++) stack_entry_free(&ents[i]);
+    free(ents);
+    slots_digest(1, g_manifest_digest);
+    if (strcmp(g_restored_mode, "replayed") == 0) persist_state();
 }
 
 /* ── ACTIVATE4: cap_root admission (Phase5C-C.3) ───────────────────────── */
@@ -734,6 +1330,166 @@ static const char *check_cap_policy(char *tokens[], int n) {
     return NULL;
 }
 
+/* ── ACTIVATE6: per-role closures (DD build step 10) ───────────────────── */
+
+#define MARCH_ROLE_MAX       64
+#define MARCH_ROLE_NAME_MAX  128
+
+static int role_name_ok(const char *s, size_t n) {
+    if (n == 0 || n >= MARCH_ROLE_NAME_MAX) return 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+              || c == '_' || c == '.' || c == '\''))
+            return 0;
+    }
+    return 1;
+}
+
+/* Copy the value of " <key>" out of [line] into out[outsz]: from just after
+ * the key up to the earliest of the [stops] (each a " <next-key>:" marker),
+ * else up to the next space when [to_space], else to end of line.  Returns
+ * 1 (found), 0 (absent) or -1 (value longer than outsz-1). */
+static int extract_field(const char *line, const char *key, const char *const *stops,
+                         int to_space, char *out, size_t outsz) {
+    const char *k = strstr(line, key);
+    out[0] = '\0';
+    if (!k) return 0;
+    const char *v = k + strlen(key);
+    size_t n = strlen(v);
+    if (to_space) {
+        const char *sp = strchr(v, ' ');
+        if (sp) n = (size_t)(sp - v);
+    }
+    for (int i = 0; stops && stops[i]; i++) {
+        const char *e = strstr(v, stops[i]);
+        if (e && (size_t)(e - v) < n) n = (size_t)(e - v);
+    }
+    if (n >= outsz) return -1;
+    memcpy(out, v, n);
+    out[n] = '\0';
+    return 1;
+}
+
+/* Split "R=val;R2=val" (mutating [buf]) into names[]/vals[].  Names must be
+ * well formed; when [sorted] they must be strictly increasing (the signed
+ * `role_caps:` block is canonical).  Returns the count, or -1. */
+static int split_role_block(char *buf, char *names[], char *vals[], int sorted) {
+    int n = 0;
+    if (buf[0] == '\0') return 0;
+    char *p = buf;
+    while (p) {
+        if (n >= MARCH_ROLE_MAX) return -1;
+        char *semi = strchr(p, ';');
+        if (semi) *semi = '\0';
+        char *eq = strchr(p, '=');
+        if (!eq || !role_name_ok(p, (size_t)(eq - p))) return -1;
+        *eq = '\0';
+        names[n] = p;
+        vals[n] = eq + 1;
+        if (sorted && n > 0 && strcmp(names[n - 1], names[n]) >= 0) return -1;
+        n++;
+        p = semi ? semi + 1 : NULL;
+    }
+    return n;
+}
+
+/* The role checks of an ACTIVATE6, on copies of the received blocks.
+ * [role_roots] is the SIGNED `role_caps:` value, [roles] the unsigned
+ * `roles:` one.  [policy_phase] 0 runs the format and tamper checks, 1 the
+ * policy check (the handler runs every tamper check before any policy
+ * check).  Returns NULL when the phase passes; otherwise writes the ERR
+ * line into resp and returns the audit result string. */
+static const char *check_role_closures(const char *role_roots, const char *roles,
+                                       int policy_phase, char *resp, size_t rsz) {
+    size_t lr = strlen(role_roots) + 1, lc = strlen(roles) + 1;
+    char *rbuf = (char *)malloc(lr), *cbuf = (char *)malloc(lc);
+    if (!rbuf || !cbuf) {
+        free(rbuf); free(cbuf);
+        snprintf(resp, rsz, "ERR oom\n");
+        return "err_oom";
+    }
+    memcpy(rbuf, role_roots, lr);
+    memcpy(cbuf, roles, lc);
+    char *rn[MARCH_ROLE_MAX], *rv[MARCH_ROLE_MAX], *cn[MARCH_ROLE_MAX], *cv[MARCH_ROLE_MAX];
+    const char *result = NULL;
+    int nr = split_role_block(rbuf, rn, rv, 1);
+    int nc = split_role_block(cbuf, cn, cv, 0);
+    if (nr < 0) {
+        snprintf(resp, rsz, "ERR bad_format bad_role_caps\n");
+        result = "err_bad_format";
+        goto out;
+    }
+    if (nc < 0) {
+        /* the unsigned block is malformed: it cannot be the one signed */
+        snprintf(resp, rsz, "ERR role_cap_tamper\n");
+        result = "err_role_cap_tamper";
+        goto out;
+    }
+    for (int i = 0; i < nr; i++) {
+        if (!is_hex64(rv[i])) {
+            snprintf(resp, rsz, "ERR bad_format bad_role_caps\n");
+            result = "err_bad_format";
+            goto out;
+        }
+    }
+    if (policy_phase) goto policy;
+    /* Every role the unsigned block names must be signed. */
+    for (int j = 0; j < nc; j++) {
+        int signed_role = 0;
+        for (int i = 0; i < nr; i++) if (strcmp(rn[i], cn[j]) == 0) { signed_role = 1; break; }
+        if (!signed_role) {
+            snprintf(resp, rsz, "ERR role_cap_tamper\n");
+            result = "err_role_cap_tamper";
+            goto out;
+        }
+    }
+    /* Recompute every signed root.  A role absent from `roles:` recomputes
+     * over the empty set, so it only matches a signed blake3(""). */
+    for (int i = 0; i < nr; i++) {
+        const char *csv = "";
+        for (int j = 0; j < nc; j++) if (strcmp(rn[i], cn[j]) == 0) { csv = cv[j]; break; }
+        char scratch[MARCH_CAP_MAX_TOKENS * 16];
+        if (strlen(csv) >= sizeof(scratch)) {
+            snprintf(resp, rsz, "ERR bad_format roles_too_long\n");
+            result = "err_bad_format";
+            goto out;
+        }
+        snprintf(scratch, sizeof(scratch), "%s", csv);
+        char root[65];
+        if (!compute_cap_root(scratch, root) || strcmp(root, rv[i]) != 0) {
+            snprintf(resp, rsz, "ERR role_cap_tamper\n");
+            result = "err_role_cap_tamper";
+            goto out;
+        }
+    }
+    goto out;
+policy:
+    /* The node's policy bounds every role closure. */
+    for (int i = 0; i < nr; i++) {
+        const char *csv = "";
+        for (int j = 0; j < nc; j++) if (strcmp(rn[i], cn[j]) == 0) { csv = cv[j]; break; }
+        if (!csv[0]) continue;
+        char scratch[MARCH_CAP_MAX_TOKENS * 16];
+        snprintf(scratch, sizeof(scratch), "%s", csv);
+        char *tok[MARCH_CAP_MAX_TOKENS]; int nt = 0;
+        if (!split_cap_csv(scratch, tok, &nt)) {
+            snprintf(resp, rsz, "ERR bad_format bad_roles\n");
+            result = "err_bad_format";
+            goto out;
+        }
+        const char *violation = check_cap_policy(tok, nt);
+        if (violation) {
+            snprintf(resp, rsz, "ERR role_cap_policy %s %s\n", rn[i], violation);
+            result = "err_role_cap_policy";
+            goto out;
+        }
+    }
+out:
+    free(rbuf); free(cbuf);
+    return result;
+}
+
 static void handle_client(int fd) {
     char line[RELOAD_LINE_MAX];
 
@@ -748,6 +1504,9 @@ static void handle_client(int fd) {
         int      migrate_required;
         char    *caps;       /* ACTIVATE4 only (heap, may be ""); NULL otherwise */
         char    *cap_root;   /* ACTIVATE4 only (heap); NULL otherwise */
+        char    *roles;      /* ACTIVATE6 only (heap); NULL otherwise */
+        char    *signed_msg; /* the verified signed line (heap), persisted */
+        char    *sig_b64;    /* its signature (heap) */
     } staged[MARCH_MAX_BATCH];
     int n_staged  = 0;
     int in_batch  = 0;
@@ -845,6 +1604,16 @@ static void handle_client(int fd) {
                                  (long long)c.dropped, (long long)c.killed);
                 write_safe(fd, resp, n, sizeof(resp));
             }
+            {
+                /* Plan 6.5: what the last start restored from the host's
+                 * persisted patch stack (parsers skip non-SLOT lines). */
+                char resp[320];
+                int n = snprintf(resp, sizeof(resp),
+                                 "RESTORED entries:%d skipped:%d mode:%s stack:%zu manifest:%s topology:%s\n",
+                                 g_restored_entries, g_restored_skipped, g_restored_mode,
+                                 g_stack_n, g_manifest_digest, g_topology_digest);
+                write_safe(fd, resp, n, sizeof(resp));
+            }
             wresp(fd, "END\n");
 
         /* ── CAS_CHECK ────────────────────────────────────────────────── */
@@ -938,6 +1707,7 @@ static void handle_client(int fd) {
                 write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
                 wresp(fd, "ERR bad_signature\n"); continue;
             }
+            remember_signed(signed_msg, (size_t)smlen, sig_b64);
 #else
             (void)sig_b64;
             write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
@@ -1045,6 +1815,7 @@ static void handle_client(int fd) {
                 write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
                 wresp(fd, "ERR bad_signature\n"); continue;
             }
+            remember_signed(signed_msg, (size_t)smlen, sig_b64);
 #else
             (void)sig_b64;
             write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
@@ -1150,6 +1921,7 @@ static void handle_client(int fd) {
                 write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
                 wresp(fd, "ERR bad_signature\n"); continue;
             }
+            remember_signed(signed_msg, (size_t)smlen, sig_b64);
 #else
             (void)sig_b64;
             write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
@@ -1172,6 +1944,9 @@ static void handle_client(int fd) {
                 staged[n_staged].callers[1023]  = '\0';
                 staged[n_staged].caps     = NULL;   /* no cap data pre-ACTIVATE4 */
                 staged[n_staged].cap_root = NULL;
+                staged[n_staged].roles    = NULL;
+                staged[n_staged].signed_msg = strdup(g_last_signed);
+                staged[n_staged].sig_b64    = strdup(g_last_sig);
                 n_staged++;
                 char resp[256];
                 int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
@@ -1189,11 +1964,15 @@ static void handle_client(int fd) {
          * Signed message: "ACTIVATE4 <name> <impl_hash> <cas_hash> <migrate>
          *                  epoch:<N> cap_root:<hex> callers:<sorted-csv>" */
         } else if (strncmp(line, "ACTIVATE4 ", 10) == 0
-                   || strncmp(line, "ACTIVATE5 ", 10) == 0) {
+                   || strncmp(line, "ACTIVATE5 ", 10) == 0
+                   || strncmp(line, "ACTIVATE6 ", 10) == 0) {
             /* ACTIVATE5 differs only in <migrate> being a bitmask (see the
-             * file header) and in the verb inside the signed message. */
-            const int v5 = line[8] == '5';
-            const char *verb = v5 ? "ACTIVATE5" : "ACTIVATE4";
+             * file header) and in the verb inside the signed message;
+             * ACTIVATE6 adds the signed role_caps: and the unsigned roles:
+             * blocks (DD build step 10). */
+            const int v6 = line[8] == '6';
+            const int v5 = line[8] == '5' || v6;
+            const char *verb = v6 ? "ACTIVATE6" : v5 ? "ACTIVATE5" : "ACTIVATE4";
             char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
             char migrate_str[8] = {0};
             if (sscanf(line + 10, "%255s %127s %127s %255s %7s",
@@ -1244,6 +2023,9 @@ static void handle_client(int fd) {
                 if (cp) {
                     const char *csv = cp + 6;
                     const char *end = strstr(csv, " callers:");
+                    /* ACTIVATE6: `roles:` sits between caps and callers. */
+                    const char *rend = v6 ? strstr(csv, " roles:") : NULL;
+                    if (rend && (!end || rend < end)) end = rend;
                     size_t clen = end ? (size_t)(end - csv) : strlen(csv);
                     /* Also stop at CR/LF in case callers: is absent (shouldn't
                      * happen given the protocol, but bound defensively). */
@@ -1261,9 +2043,31 @@ static void handle_client(int fd) {
                 }
             }
 
+            /* ACTIVATE6: the signed role roots and the unsigned closures.
+             * File-static: handle_client runs on the one server thread, one
+             * client at a time, and this frame already holds the batch
+             * array. */
+            char *role_roots = NULL, *roles_buf = NULL;
+            if (v6) {
+                static char s_role_roots[RELOAD_LINE_MAX], s_roles[RELOAD_LINE_MAX];
+                static const char *const rc_stops[] = { NULL };
+                static const char *const roles_stops[] = { " callers:", NULL };
+                role_roots = s_role_roots;
+                roles_buf  = s_roles;
+                int a = extract_field(line, " role_caps:", rc_stops, 1,
+                                      role_roots, RELOAD_LINE_MAX);
+                int b = extract_field(line, " roles:", roles_stops, 0,
+                                      roles_buf, RELOAD_LINE_MAX);
+                if (a != 1 || b != 1) {
+                    wresp(fd, a != 1 ? "ERR bad_format missing_role_caps\n"
+                                     : "ERR bad_format missing_roles\n");
+                    continue;
+                }
+            }
+
             /* Audit context for every log line from here on (see
              * write_audit_log for when these values are verified). */
-            audit_caps_t ac4 = { caps_buf, cap_root };
+            audit_caps_t ac4 = { caps_buf, cap_root, roles_buf };
 
             /* Parse mandatory callers:<csv>, then sort for canonical form. */
             char callers_sorted[1024] = {0};
@@ -1313,11 +2117,16 @@ static void handle_client(int fd) {
 
             /* Reconstruct the canonical signed message — cap_root is signed,
              * caps is NOT (see file-header note above). */
-            char signed_msg[2048];
-            int smlen = snprintf(signed_msg, sizeof(signed_msg),
-                                 "%s %s %s %s %d epoch:%u cap_root:%s callers:%s",
-                                 verb, name, impl_hash, cas_hash, migrate_required,
-                                 activate_epoch, cap_root, callers_sorted);
+            char signed_msg[RELOAD_LINE_MAX];
+            int smlen = v6
+                ? snprintf(signed_msg, sizeof(signed_msg),
+                           "%s %s %s %s %d epoch:%u cap_root:%s role_caps:%s callers:%s",
+                           verb, name, impl_hash, cas_hash, migrate_required,
+                           activate_epoch, cap_root, role_roots, callers_sorted)
+                : snprintf(signed_msg, sizeof(signed_msg),
+                           "%s %s %s %s %d epoch:%u cap_root:%s callers:%s",
+                           verb, name, impl_hash, cas_hash, migrate_required,
+                           activate_epoch, cap_root, callers_sorted);
             if (smlen < 0 || smlen >= (int)sizeof(signed_msg)) {
                 wresp(fd, "ERR signed_msg_truncated\n"); continue;
             }
@@ -1339,6 +2148,7 @@ static void handle_client(int fd) {
                 write_audit_log(name, impl_hash, cas_hash, &ac4, "err_sig");
                 wresp(fd, "ERR bad_signature\n"); continue;
             }
+            remember_signed(signed_msg, (size_t)smlen, sig_b64);
 #else
             (void)sig_b64;
             write_audit_log(name, impl_hash, cas_hash, &ac4, "err_sig");
@@ -1372,6 +2182,18 @@ static void handle_client(int fd) {
                 }
             }
 
+            /* ACTIVATE6: every signed role root recomputes from the unsigned
+             * closures (unconditional, like the cap_root check above). */
+            if (v6) {
+                char rresp[256];
+                const char *bad = check_role_closures(role_roots, roles_buf, 0,
+                                                      rresp, sizeof(rresp));
+                if (bad) {
+                    write_audit_log(name, impl_hash, cas_hash, &ac4, bad);
+                    wresp(fd, rresp); continue;
+                }
+            }
+
             /* Policy check may remain gated on a non-empty received cap set:
              * an empty set trivially satisfies any policy (nothing to
              * violate), and the tamper check above already guarantees an
@@ -1391,6 +2213,18 @@ static void handle_client(int fd) {
                     int n = snprintf(resp, sizeof(resp), "ERR cap_policy %s\n", violation);
                     write_safe(fd, resp, n, sizeof(resp));
                     continue;
+                }
+            }
+
+            /* ACTIVATE6: the node's policy bounds every role's closure
+             * (plan section 5, "Admission"). */
+            if (v6) {
+                char rresp[512];
+                const char *bad = check_role_closures(role_roots, roles_buf, 1,
+                                                      rresp, sizeof(rresp));
+                if (bad) {
+                    write_audit_log(name, impl_hash, cas_hash, &ac4, bad);
+                    wresp(fd, rresp); continue;
                 }
             }
 
@@ -1414,6 +2248,9 @@ static void handle_client(int fd) {
                  * rollback and disconnect. */
                 staged[n_staged].caps     = strdup(caps_buf);
                 staged[n_staged].cap_root = strdup(cap_root);
+                staged[n_staged].roles    = roles_buf ? strdup(roles_buf) : NULL;
+                staged[n_staged].signed_msg = strdup(g_last_signed);
+                staged[n_staged].sig_b64    = strdup(g_last_sig);
                 n_staged++;
                 char resp[256];
                 int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
@@ -1422,6 +2259,14 @@ static void handle_client(int fd) {
                 do_activate(fd, name, impl_hash, cas_hash, migrate_required,
                             activate_epoch, callers_sorted, &ac4);
             }
+
+        /* ── COMPACT (patch-stack size, DD step 10) ───────────────────── */
+        } else if (strcmp(line, "COMPACT") == 0) {
+            handle_compact(fd);
+
+        /* ── TOPOLOGY (signed reconciler action, DD step 10) ──────────── */
+        } else if (strncmp(line, "TOPOLOGY ", 9) == 0) {
+            handle_topology(fd, line + 9);
 
         /* ── GET_EPOCH ────────────────────────────────────────────────── */
         } else if (strcmp(line, "GET_EPOCH") == 0) {
@@ -1451,6 +2296,7 @@ static void handle_client(int fd) {
             for (int i = 0; i < n_staged; i++) {
                 acs[i].caps = staged[i].caps;
                 acs[i].cap_root = staged[i].cap_root;
+                acs[i].roles = staged[i].roles;
                 items[i].name      = staged[i].name;
                 items[i].impl_hash = staged[i].impl_hash;
                 items[i].cas_hash  = staged[i].cas_hash;
@@ -1458,6 +2304,8 @@ static void handle_client(int fd) {
                 items[i].epoch     = staged[i].epoch;
                 items[i].migrate   = staged[i].migrate_required;
                 items[i].ac        = staged[i].caps ? &acs[i] : NULL;
+                items[i].signed_msg = staged[i].signed_msg;
+                items[i].sig_b64    = staged[i].sig_b64;
             }
             char resp[512];
             int r = n_staged ? activate_items(items, n_staged, resp, sizeof(resp)) : 0;
@@ -1468,7 +2316,8 @@ static void handle_client(int fd) {
             }
             int committed = r == 0 ? n_staged : 0;
             for (int k = 0; k < n_staged; k++) {
-                free(staged[k].caps); free(staged[k].cap_root);
+                free(staged[k].caps); free(staged[k].cap_root); free(staged[k].roles);
+        free(staged[k].signed_msg); free(staged[k].sig_b64);
             }
             in_batch = 0; n_staged = 0;
             if (r == 0) {
@@ -1526,7 +2375,8 @@ static void handle_client(int fd) {
         /* ── ROLLBACK_BATCH ───────────────────────────────────────────── */
         } else if (strcmp(line, "ROLLBACK_BATCH") == 0) {
             for (int k = 0; k < n_staged; k++) {
-                free(staged[k].caps); free(staged[k].cap_root);
+                free(staged[k].caps); free(staged[k].cap_root); free(staged[k].roles);
+        free(staged[k].signed_msg); free(staged[k].sig_b64);
             }
             in_batch = 0; n_staged = 0;
             wresp(fd, "OK\n");
@@ -1537,7 +2387,8 @@ static void handle_client(int fd) {
     }
     /* Discard any uncommitted staged activations (connection dropped mid-batch) */
     for (int k = 0; k < n_staged; k++) {
-        free(staged[k].caps); free(staged[k].cap_root);
+        free(staged[k].caps); free(staged[k].cap_root); free(staged[k].roles);
+        free(staged[k].signed_msg); free(staged[k].sig_b64);
     }
     close(fd);
 }
@@ -1592,10 +2443,23 @@ void march_reload_server_start(const char *socket_path) {
     else
         snprintf(g_cas_root, sizeof(g_cas_root), "/tmp/.march_cas");
 
+#if HAVE_SIGNING_KEY
+    load_pubkey_from_hex();
+#endif
+    /* Plan 6.5: come back on the code this host was running, before `main`
+     * gets control back (and so before it opens any offer).  A build with no
+     * deploy key never activated anything: nothing to replay. */
+#if HAVE_SIGNING_KEY
+    replay_state(g_socket_path);
+#endif
+
     pthread_t tid;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    /* The handler frame holds a 256-entry batch array and 16 KiB lines;
+     * macOS gives secondary threads 512 KiB by default. */
+    pthread_attr_setstacksize(&attr, 4u << 20);
     pthread_create(&tid, &attr, reload_server_thread, NULL);
     pthread_attr_destroy(&attr);
 }
@@ -1606,6 +2470,10 @@ void march_reload_server_start(const char *socket_path) {
 
 void march_reload_server_start(const char *socket_path) {
     (void)socket_path;
+}
+
+void march_hcr_on_topology(const char *path) {
+    (void)path;
 }
 
 #endif /* __linux__ || __APPLE__ */

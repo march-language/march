@@ -1,0 +1,17 @@
+erased_list=[a, b]
+erased_c_built_list=[a, b]
+erased_list_list=[[a], []]
+erased_ok=Ok(x)
+erased_results=[Ok(a), Err(b)]
+erased_empty_str=[]
+erased_adt=C("x", "y")
+erased_adt_holding_list=P(1, ["a"])
+erased_list_of_adt=[B("x"), A]
+erased_ok_of_adt=Ok(P(2, ["b"]))
+typed_list=[a, b]
+typed_list_of_adt=[B("x")]
+typed_adt_holding_list=P(3, ["c"])
+html_typed_list=<p>[&quot;a&quot;]</p>
+html_erased_list=<p>[&quot;a&quot;, &quot;b&quot;]</p>
+html_erased_ok=<p>Ok(&quot;a&quot;)</p>
+html_erased_adt=<p>B(&quot;a&quot;)</p>

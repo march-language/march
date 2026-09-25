@@ -1,0 +1,4 @@
+worker held by w and itself: true
+pid_to_int leaves the count alone: true
+set_queue_limit leaves the count alone: true
+supervised child held only by itself: true

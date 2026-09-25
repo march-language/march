@@ -24,7 +24,7 @@ let context_of_project ~interpreted proj =
   match Toolchain.ensure_installed () with
   | Error e -> Error e
   | Ok () ->
-    match Cmd_build.offline_preflight
+    match Cmd_build.deps_preflight
             ~scope:(Cmd_build.build_scope ~release:false proj) proj with
     | Error e -> Error e
     | Ok () ->
@@ -139,7 +139,7 @@ let exec_output ~target ~args output =
     "[compiled] and [file] is somehow [None] after all" arm to fill with a
     placeholder; the impossible case simply isn't expressible. *)
 let run ?(dump_phases = false) ?(compiled = false) ?target ?file ?(args = [])
-    ?(processes = false) ?(fail_fast = false) ?env () =
+    ?(processes = false) ?(fail_fast = false) ?(hot_reload = false) ?env () =
   (* A project with a topology.toml (and no single FILE named) is a topology
      app: its `main` is generated, so it always runs compiled, and
      --processes runs one process per pool (Topology_run, build step 3). *)
@@ -154,11 +154,12 @@ let run ?(dump_phases = false) ?(compiled = false) ?target ?file ?(args = [])
   match topology_app with
   | Some proj when target = None || target = Some "native" ->
     if processes then
-      Topology_run.run_processes ?env ~proj ~compiled ~dump_phases ~fail_fast ~args ()
+      Topology_run.run_processes ?env ~hot_reload ~proj ~compiled ~dump_phases ~fail_fast ~args ()
     else Topology_run.run_level0 ?env ~proj ~compiled ~dump_phases ~args ()
   | Some _ -> Error "a topology app runs natively; --target is not supported with topology.toml"
   | None ->
   if processes then Error "--processes needs a topology.toml in the project root" else
+  if hot_reload then Error "--hot-reload goes with --processes on a topology app" else
   (* The topology check runs before an interpreted or single-file run; the
      compiled project run goes through Cmd_build.build, which gates itself.
      A run outside any project (no forge.toml) has no topology to check. *)

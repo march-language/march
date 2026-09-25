@@ -68,6 +68,8 @@ native_builtin_borrow_leak_probe: coverage audit (user + stdlib): 120 enforced, 
 native_builtin_borrow_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_builtin_link_backing: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_builtin_link_backing: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_bytes_typeid_base64_sha: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_bytes_typeid_base64_sha: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_bytes_u8_bridge: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_bytes_u8_bridge: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_c_symbol_collision: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
@@ -116,6 +118,8 @@ native_dist_monitor_loopback: coverage audit (user + stdlib): 120 enforced, 0 in
 native_dist_monitor_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_erased_float_slot_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_erased_render_show: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_erased_render_show: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_erased_type_id: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_erased_type_id: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_ffi_blocking: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
@@ -198,6 +202,8 @@ native_iface_collision_ambiguous_call: coverage audit (user + stdlib): 120 enfor
 native_iface_collision_ambiguous_call: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_iface_method_collision: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_iface_method_collision: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_interpreter_only_builtins_lowered: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_interpreter_only_builtins_lowered: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_canvas_available: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_js_canvas_available: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_closure_reuse_apply_slot: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
@@ -342,6 +348,8 @@ native_pid_of_int_dead_pid: coverage audit (user + stdlib): 120 enforced, 0 iner
 native_pid_of_int_dead_pid: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_pid_of_int_roundtrip: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_pid_of_int_roundtrip: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_pid_to_int_leak_probe: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_pid_to_int_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_prelude_scope_user_shadow: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced

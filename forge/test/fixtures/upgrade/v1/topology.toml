@@ -1,0 +1,14 @@
+# One pool serving a two-step Echo; its hook starts a Tally actor and a
+# feeder task (forge/test/test_upgrade_from.ml, distributed-deploys build
+# step 8: `forge test --upgrade-from`).
+
+[roles]
+"Echo.Server" = { body = "UpgradeApp.serve_one", capacity = 8 }
+
+[pool.app]
+start = "UpgradeApp.start"
+serves = ["Echo.Server"]
+
+[drain]
+soft_ms = 2000
+hard_ms = 5000

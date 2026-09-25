@@ -151,8 +151,8 @@ was added.
 ## Not covered / follow-ups
 
 - **Online builds still do not verify cached trees.** The measurement above
-  says it would be cheap. Filed as
-  `specs/todos/2026-09-22-forge-verify-dep-trees-online.md`.
+  says it would be cheap. Filed as a todo; landed 2026-09-24, see
+  `specs/progress/2026-09-24-forge-verify-dep-trees-online.md`.
 - The online registry path through the tarball cache (download, verify,
   cache, reuse on reinstall) has no end-to-end test, because there is no local
   registry fixture. It is covered only by the `Tarball_cache` unit tests and

@@ -28,6 +28,24 @@ val of_package : root:string -> env_prefix:string -> (t, string) result
     needing LESS than it does. [Error] if the package cannot be analyzed, which
     callers must surface rather than treating as "no capabilities". *)
 
+val probe_caps_support : toolchain_prefix:string -> (unit, string) result
+(** [probe_caps_support ~toolchain_prefix] runs [march caps] on a trivial
+    module, with [toolchain_prefix] ({!Toolchain.path_prefix}'s output, the
+    same PATH [of_package]'s commands get) and no MARCH_LIB_PATH. [Ok ()] when
+    the compiler answers with a caps JSON object; otherwise an [Error] naming
+    the resolved [march], its [--version], the release that introduced
+    [march caps], and what the probe printed.
+
+    Exists because a toolchain that predates the subcommand takes [caps] as a
+    file name and fails, so without it every dependency reports as not
+    analyzable and nothing points at the compiler. *)
+
+val compiler_identity : toolchain_prefix:string -> string
+(** A digest identifying the compiler [march] resolves to under
+    [toolchain_prefix]: its resolved path, the digest of the executable it
+    resolves to, the global toolchain ([~/.march/current]) and MARCH_STDLIB.
+    A cache keyed on it is invalidated by a new or different compiler. *)
+
 type change =
   | Gained of string list  (** capabilities the new version has and the old did not *)
   | Lost of string list
