@@ -179,7 +179,14 @@ let test_deploy_over_ssh () =
     Printf.printf "$ forge %s  (exit %d)\n%s\n%!" args rc out;
     (rc, out)
   in
-  let ok args = match forge args with (0, out) -> out | (rc, out) -> Alcotest.failf "forge %s exited %d:\n%s" args rc out in
+  let ok args =
+    match forge args with
+    | (0, out) -> out
+    | (rc, out) ->
+      (* what the node said, when it said anything *)
+      let node_log = capture (Printf.sprintf "docker exec %s sh -c 'tail -n 40 /var/log/march-*.service.log 2>&1'" name) in
+      Alcotest.failf "forge %s exited %d:\n%s\n--- node log ---\n%s" args rc out node_log
+  in
   ignore (ok "hot-reload keygen");
   let out = ok "host init --env prod" in
   expect "host init" out [ "back-web-1 (root@web-1, pool back)"; "target " ^ target ];

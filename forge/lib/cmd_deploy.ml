@@ -120,14 +120,24 @@ let local_target () =
   ignore (Unix.close_process_in ic);
   Option.value ~default:"" (Cmd_deploy_hot.canonical_of_triple s)
 
-(** The [--target] flag for a host's recorded target: none for this
-    machine's own target (a native build), [--target linux/<arch>] for a
-    Linux host, else unsupported. *)
+(** The [--target] flag for a host's recorded target. A Linux host always
+    gets the cross target ([--target linux/<arch>]: zig with the bookworm
+    sysroot, glibc 2.36), even from a Linux machine of the same arch: a
+    native build links against this machine's newer glibc, which an older
+    host cannot load (CI: an Ubuntu 24.04 build on a Debian bookworm host
+    never came up). Another target is built natively only when it is this
+    machine's own. *)
 let target_flag (target : string) : (string, string) result =
-  if target = local_target () then Ok ""
-  else match target with
-    | "linux/amd64" | "linux/arm64" -> Ok (" --target " ^ target)
-    | t -> Error (Printf.sprintf "forge cannot build for %s from this machine (%s)" t (local_target ()))
+  match target with
+  | "linux/amd64" | "linux/arm64" -> Ok (" --target " ^ target)
+  | t when t = local_target () -> Ok ""
+  | t -> Error (Printf.sprintf "forge cannot build for %s from this machine (%s)" t (local_target ()))
+
+(** The target [Cmd_build.build] takes: None for a native build. *)
+let build_target (target : string) : string option =
+  match target with
+  | "linux/amd64" | "linux/arm64" -> Some target
+  | _ -> None
 
 (** The builds of the topology and the targets their hosts need. *)
 let builds c : (string * string list * string list) list =
@@ -343,7 +353,7 @@ let build_base c ~build ~pools ~target : (string, string) result =
   | Some path -> Ok path
   | None ->
     let* flags = Topology_run.hot_reload_flags ~pubkey:c.pubkey c.proj in
-    let target_opt = if target = local_target () then None else Some target in
+    let target_opt = build_target target in
     Printf.printf "building the %s base image for %s...\n%!" build target;
     let* out =
       Cmd_build.build ~release:false ?target:target_opt ~topology_pools:pools ~output_suffix:("-" ^ build)
