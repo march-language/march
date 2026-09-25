@@ -10743,7 +10743,7 @@ int64_t native_int_arr_max(void *arr) {
 
 /* ── NativeArray.sort_int: in-place ipnsort-style sort ──────────────────────
  *
- * Design + measurements: specs/todos/2026-09-16-native-array-sort-ipnsort.md
+ * Design + measurements: specs/progress/2026-09-25-native-array-sort-narrow-widths.md
  * (5-30x libc qsort at n=5M on 7 of 8 input patterns; harness is
  * bench/c/native_sort_bench.c, which verifies every variant against qsort).
  *
@@ -10759,121 +10759,67 @@ int64_t native_int_arr_max(void *arr) {
  * Plus a heapsort fallback at depth 2·log2(n) for the O(n log n) bound.
  */
 
-/* Branchless compare-exchange. Written as a select on both slots so clang
- * emits two csel and no branch; an `if (a > b) swap` here measured slower. */
-#define NSORT_CSWAP(i, j)                                                      \
-    do {                                                                       \
-        int64_t _x = v[i], _y = v[j];                                          \
-        int _lt = _y < _x;                                                     \
-        v[i] = _lt ? _y : _x;                                                  \
-        v[j] = _lt ? _x : _y;                                                  \
-    } while (0)
-
-/* Parameters are deliberately not named `a`/`b`: scripts/check-actor-rc-stores.sh
- * is a grep-level guard that treats `*a = ...` as a refcount store, because an
- * actor alias named `a` is declared elsewhere in this file. */
-static inline void nsort_swap(int64_t *lhs, int64_t *rhs) {
-    int64_t t = *lhs; *lhs = *rhs; *rhs = t;
-}
-
-/* Optimal 19-comparator sorting network for 8 elements (Knuth 5.3.4). */
-static inline void nsort_net8(int64_t *v) {
-    NSORT_CSWAP(0, 2); NSORT_CSWAP(1, 3); NSORT_CSWAP(4, 6); NSORT_CSWAP(5, 7);
-    NSORT_CSWAP(0, 4); NSORT_CSWAP(1, 5); NSORT_CSWAP(2, 6); NSORT_CSWAP(3, 7);
-    NSORT_CSWAP(0, 1); NSORT_CSWAP(2, 3); NSORT_CSWAP(4, 5); NSORT_CSWAP(6, 7);
-    NSORT_CSWAP(2, 4); NSORT_CSWAP(3, 5);
-    NSORT_CSWAP(1, 4); NSORT_CSWAP(3, 6);
-    NSORT_CSWAP(1, 2); NSORT_CSWAP(3, 4); NSORT_CSWAP(5, 6);
-}
-
-static void nsort_insertion(int64_t *v, int64_t n) {
-    for (int64_t i = 1; i < n; i++) {
-        int64_t x = v[i], j = i;
-        while (j > 0 && v[j - 1] > x) { v[j] = v[j - 1]; j--; }
-        v[j] = x;
-    }
-}
-
-/* Small-sort: network each aligned block of 8, then one insertion pass. The
- * insertion pass is near-linear afterwards because every element is already
- * within its own block, which is the point of doing the network first. */
-static void nsort_small(int64_t *v, int64_t n) {
-    int64_t i = 0;
-    for (; i + 8 <= n; i += 8) nsort_net8(v + i);
-    nsort_insertion(v, n);
-}
-
-static void nsort_heap(int64_t *v, int64_t n) {
-    for (int64_t start = n / 2; start-- > 0;) {
-        int64_t root = start;
-        for (;;) {
-            int64_t child = 2 * root + 1;
-            if (child >= n) break;
-            if (child + 1 < n && v[child] < v[child + 1]) child++;
-            if (v[root] >= v[child]) break;
-            nsort_swap(&v[root], &v[child]);
-            root = child;
-        }
-    }
-    for (int64_t end = n; end-- > 1;) {
-        nsort_swap(&v[0], &v[end]);
-        int64_t root = 0;
-        for (;;) {
-            int64_t child = 2 * root + 1;
-            if (child >= end) break;
-            if (child + 1 < end && v[child] < v[child + 1]) child++;
-            if (v[root] >= v[child]) break;
-            nsort_swap(&v[root], &v[child]);
-            root = child;
-        }
-    }
-}
-
-static inline int64_t nsort_median3(const int64_t *v, int64_t a, int64_t b, int64_t c) {
-    int ab = v[a] < v[b], ac = v[a] < v[c], bc = v[b] < v[c];
-    if (ab == bc) return b;
-    if (ab == ac) return c;
-    return a;
-}
-
-/* Pseudo-median of 9 at stride n/8 for n >= 64, median of 3 below. */
-static int64_t nsort_pivot(const int64_t *v, int64_t n) {
-    if (n >= 64) {
-        int64_t s = n / 8;
-        int64_t a = nsort_median3(v, 0, s, 2 * s);
-        int64_t b = nsort_median3(v, 3 * s, 4 * s, 5 * s);
-        int64_t c = nsort_median3(v, 6 * s, 7 * s, n - 1);
-        return nsort_median3(v, a, b, c);
-    }
-    return nsort_median3(v, 0, n / 2, n - 1);
-}
-
-/* Branchless Lomuto. Both slots are written unconditionally and only the
- * output cursor advances conditionally, so there is no data-dependent branch
- * in the loop. Elements satisfying the predicate land in v[0..ret).
+/* The core is written once, as NSORT_DEFINE_CORE(W, T) below, and
+ * instantiated for i64 (sort_int, and sort_float on 64-bit totalOrder keys)
+ * and i32 (sort_i32, and sort_f32 on 32-bit totalOrder keys). Every helper is
+ * suffixed with its width: nsort_heap_i64, nsort_net8_i32, ... The width-free
+ * pieces (the xorshift rng and the depth-limit test hook) are shared. u8 does
+ * not use the core at all: it is a counting sort (native_u8_arr_sort).
  *
- * Do not "simplify" these into `if (pred) swap` — that reintroduces exactly
- * the branch misprediction this shape exists to avoid, and measured ~3x
- * slower on random input. */
-static int64_t nsort_part_lt(int64_t *v, int64_t n, int64_t pivot) {
-    int64_t j = 0;
-    for (int64_t i = 0; i < n; i++) {
-        int64_t x = v[i], y = v[j];
-        v[i] = y; v[j] = x;
-        j += (x < pivot);
-    }
-    return j;
-}
-
-static int64_t nsort_part_le(int64_t *v, int64_t n, int64_t pivot) {
-    int64_t j = 0;
-    for (int64_t i = 0; i < n; i++) {
-        int64_t x = v[i], y = v[j];
-        v[i] = y; v[j] = x;
-        j += (x <= pivot);
-    }
-    return j;
-}
+ * Notes on the pieces, since comments inside a multi-line #define are awkward:
+ *
+ * NSORT_CSWAP_T — branchless compare-exchange. Written as a select on both
+ *   slots so clang emits two csel and no branch; an `if (a > b) swap` here
+ *   measured slower.
+ *
+ * nsort_swap_W — parameters are deliberately not named `a`/`b`:
+ *   scripts/check-actor-rc-stores.sh is a grep-level guard that treats
+ *   `*a = ...` as a refcount store, because an actor alias named `a` is
+ *   declared elsewhere in this file.
+ *
+ * nsort_net8_W — optimal 19-comparator sorting network for 8 elements
+ *   (Knuth 5.3.4). Verified by the 0-1 principle (256 cases) in
+ *   bench/c/native_sort_bench.c.
+ *
+ * nsort_small_W — network each aligned block of 8, then one insertion pass.
+ *   The insertion pass is near-linear afterwards because every element is
+ *   already within its own block, which is the point of doing the network
+ *   first.
+ *
+ * nsort_pivot_W — pseudo-median of 9 at stride n/8 for n >= 64, median of 3
+ *   below.
+ *
+ * nsort_part_lt_W / nsort_part_le_W — branchless Lomuto. Both slots are
+ *   written unconditionally and only the output cursor advances
+ *   conditionally, so there is no data-dependent branch in the loop.
+ *   Elements satisfying the predicate land in v[0..ret). Do not "simplify"
+ *   these into `if (pred) swap`: that reintroduces exactly the branch
+ *   misprediction this shape exists to avoid, and measured ~3x slower on
+ *   random input.
+ *
+ * nsort_break_patterns_W — pattern-breaking (pdqsort). Fixed-stride pivot
+ *   sampling is defeated by periodic input: when the period divides the
+ *   stride, all nine samples read the same value, every pivot is the segment
+ *   minimum, and the depth limit dumps the whole array into heapsort.
+ *   Measured on `i % 1000` at n=5M: 337ms without this, 38-97ms with it.
+ *   Only runs on a partition that actually came out lopsided, so balanced
+ *   input never pays for it. The seed is derived from the length rather than
+ *   from a clock, so a given input always takes the same path; a
+ *   non-reproducible sort is miserable to debug.
+ *
+ * nsort_rec_W — [ancestor], when non-NULL, points at a pivot that every
+ *   element of [v] is known to be >= . If the newly chosen pivot is not
+ *   greater than it, the two are equal, and so is every element <= the new
+ *   pivot: partition those out and drop them from consideration entirely.
+ *   This is what turns a low-cardinality array from O(n log n) into roughly
+ *   O(n log k). Recurse left, loop right; depth is bounded by [limit], so the
+ *   recursion cannot outrun the stack even on an adversarial input.
+ *
+ * nsort_W — the entry. Top-level full-run scan first: a wholly sorted or
+ *   wholly descending array is finished in one pass. Only at the top level,
+ *   as ipnsort does; checking every segment costs more than it saves. The
+ *   depth limit is 2*floor(log2 n), unless the MARCH_TEST_NSORT_DEPTH_LIMIT
+ *   hook (nsort_forced_limit) overrides it, which every width honours. */
 
 static inline uint64_t nsort_rng(uint64_t *s) {
     uint64_t x = *s;
@@ -10882,71 +10828,14 @@ static inline uint64_t nsort_rng(uint64_t *s) {
     return x;
 }
 
-/* Pattern-breaking (pdqsort). Fixed-stride pivot sampling is defeated by
- * periodic input: when the period divides the stride, all nine samples read
- * the same value, every pivot is the segment minimum, and the depth limit
- * dumps the whole array into heapsort. Measured on `i % 1000` at n=5M:
- * 337ms without this, 38-97ms with it.
- *
- * Only runs on a partition that actually came out lopsided, so balanced
- * input never pays for it. The seed is derived from the length rather than
- * from a clock, so a given input always takes the same path — a
- * non-reproducible sort is miserable to debug. */
-static void nsort_break_patterns(int64_t *v, int64_t n, uint64_t *seed) {
-    if (n < 8) return;
-    int64_t q = n / 4;
-    nsort_swap(&v[0],     &v[nsort_rng(seed) % (uint64_t)n]);
-    nsort_swap(&v[q],     &v[nsort_rng(seed) % (uint64_t)n]);
-    nsort_swap(&v[2 * q], &v[nsort_rng(seed) % (uint64_t)n]);
-    nsort_swap(&v[n - 1], &v[nsort_rng(seed) % (uint64_t)n]);
-}
-
-/* [ancestor], when non-NULL, points at a pivot that every element of [v] is
- * known to be >= . If the newly chosen pivot is not greater than it, the two
- * are equal, and so is every element <= the new pivot: partition those out
- * and drop them from consideration entirely. This is what turns a
- * low-cardinality array from O(n log n) into roughly O(n log k). */
-static void nsort_rec(int64_t *v, int64_t n, const int64_t *ancestor,
-                      int limit, uint64_t *seed) {
-    for (;;) {
-        if (n <= 32) { nsort_small(v, n); return; }
-        if (limit == 0) { nsort_heap(v, n); return; }
-        limit--;
-
-        int64_t pi = nsort_pivot(v, n);
-        int64_t pivot = v[pi];
-
-        if (ancestor != NULL && !(*ancestor < pivot)) {
-            int64_t eq = nsort_part_le(v, n, pivot);
-            v += eq; n -= eq; ancestor = NULL;
-            continue;
-        }
-
-        nsort_swap(&v[0], &v[pi]);
-        int64_t lt = nsort_part_lt(v + 1, n - 1, pivot);
-        nsort_swap(&v[0], &v[lt]);          /* pivot comes to rest at v[lt] */
-
-        int64_t rn = n - 1 - lt;
-        if (lt < n / 8 || rn < n / 8) {
-            nsort_break_patterns(v, lt, seed);
-            nsort_break_patterns(v + lt + 1, rn, seed);
-        }
-
-        /* Recurse left, loop right. Depth is bounded by [limit], so the
-         * recursion cannot outrun the stack even on an adversarial input. */
-        nsort_rec(v, lt, ancestor, limit, seed);
-        ancestor = &v[lt];
-        v += lt + 1; n -= lt + 1;
-    }
-}
-
 /* Test hook: MARCH_TEST_NSORT_DEPTH_LIMIT=<k> replaces the 2·log2(n) depth
  * limit with k, so k = 0 sends every segment above the small-sort cutoff
- * straight to nsort_heap. That is the only way to exercise the heapsort
+ * straight to nsort_heap_W. That is the only way to exercise the heapsort
  * fallback directly: the pattern-breaking step makes it practically
- * unreachable from any input. test/dune runs native_arr_sort a second time
- * with this set to 0 and diffs against the same golden. Read once; the
- * benign race on first use stores the same value from every thread. */
+ * unreachable from any input. test/dune runs native_arr_sort and
+ * native_arr_sort_narrow a second time with this set to 0 and diffs against
+ * the same golden. Read once; the benign race on first use stores the same
+ * value from every thread. */
 static int nsort_forced_limit(void) {
     static int cached = -2;             /* -2 unread, -1 unset, else the limit */
     int c = __atomic_load_n(&cached, __ATOMIC_RELAXED);
@@ -10959,32 +10848,178 @@ static int nsort_forced_limit(void) {
     return c;
 }
 
-static void nsort_i64(int64_t *v, int64_t n) {
-    if (n < 2) return;
-    if (n <= 32) { nsort_small(v, n); return; }
+#define NSORT_CSWAP_T(T, i, j)                                                 \
+    do {                                                                       \
+        T _x = v[i], _y = v[j];                                                \
+        int _lt = _y < _x;                                                     \
+        v[i] = _lt ? _y : _x;                                                  \
+        v[j] = _lt ? _x : _y;                                                  \
+    } while (0)
 
-    /* Top-level full-run scan: a wholly sorted or wholly descending array is
-     * finished in one pass. Only at the top level, as ipnsort does — checking
-     * every segment costs more than it saves. */
-    int64_t i = 1;
-    if (v[1] < v[0]) {
-        while (i < n && v[i] < v[i - 1]) i++;
-        if (i == n) {
-            for (int64_t a = 0, b = n - 1; a < b; a++, b--) nsort_swap(&v[a], &v[b]);
-            return;
-        }
-    } else {
-        while (i < n && !(v[i] < v[i - 1])) i++;
-        if (i == n) return;
-    }
-
-    int limit = 0;
-    for (int64_t m = n; m > 1; m >>= 1) limit += 2;
-    int forced = nsort_forced_limit();
-    if (forced >= 0) limit = forced;
-    uint64_t seed = (uint64_t)n * 0x9E3779B97F4A7C15ULL;
-    nsort_rec(v, n, NULL, limit, &seed);
+#define NSORT_DEFINE_CORE(W, T)                                                \
+static inline void nsort_swap_##W(T *lhs, T *rhs) {                            \
+    T t = *lhs; *lhs = *rhs; *rhs = t;                                         \
+}                                                                              \
+                                                                               \
+static inline void nsort_net8_##W(T *v) {                                      \
+    NSORT_CSWAP_T(T, 0, 2); NSORT_CSWAP_T(T, 1, 3);                            \
+    NSORT_CSWAP_T(T, 4, 6); NSORT_CSWAP_T(T, 5, 7);                            \
+    NSORT_CSWAP_T(T, 0, 4); NSORT_CSWAP_T(T, 1, 5);                            \
+    NSORT_CSWAP_T(T, 2, 6); NSORT_CSWAP_T(T, 3, 7);                            \
+    NSORT_CSWAP_T(T, 0, 1); NSORT_CSWAP_T(T, 2, 3);                            \
+    NSORT_CSWAP_T(T, 4, 5); NSORT_CSWAP_T(T, 6, 7);                            \
+    NSORT_CSWAP_T(T, 2, 4); NSORT_CSWAP_T(T, 3, 5);                            \
+    NSORT_CSWAP_T(T, 1, 4); NSORT_CSWAP_T(T, 3, 6);                            \
+    NSORT_CSWAP_T(T, 1, 2); NSORT_CSWAP_T(T, 3, 4); NSORT_CSWAP_T(T, 5, 6);    \
+}                                                                              \
+                                                                               \
+static void nsort_insertion_##W(T *v, int64_t n) {                             \
+    for (int64_t i = 1; i < n; i++) {                                          \
+        T x = v[i]; int64_t j = i;                                             \
+        while (j > 0 && v[j - 1] > x) { v[j] = v[j - 1]; j--; }                \
+        v[j] = x;                                                              \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+static void nsort_small_##W(T *v, int64_t n) {                                 \
+    int64_t i = 0;                                                             \
+    for (; i + 8 <= n; i += 8) nsort_net8_##W(v + i);                          \
+    nsort_insertion_##W(v, n);                                                 \
+}                                                                              \
+                                                                               \
+static void nsort_heap_##W(T *v, int64_t n) {                                  \
+    for (int64_t start = n / 2; start-- > 0;) {                                \
+        int64_t root = start;                                                  \
+        for (;;) {                                                             \
+            int64_t child = 2 * root + 1;                                      \
+            if (child >= n) break;                                             \
+            if (child + 1 < n && v[child] < v[child + 1]) child++;             \
+            if (v[root] >= v[child]) break;                                    \
+            nsort_swap_##W(&v[root], &v[child]);                               \
+            root = child;                                                      \
+        }                                                                      \
+    }                                                                          \
+    for (int64_t end = n; end-- > 1;) {                                        \
+        nsort_swap_##W(&v[0], &v[end]);                                        \
+        int64_t root = 0;                                                      \
+        for (;;) {                                                             \
+            int64_t child = 2 * root + 1;                                      \
+            if (child >= end) break;                                           \
+            if (child + 1 < end && v[child] < v[child + 1]) child++;           \
+            if (v[root] >= v[child]) break;                                    \
+            nsort_swap_##W(&v[root], &v[child]);                               \
+            root = child;                                                      \
+        }                                                                      \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+static inline int64_t nsort_median3_##W(const T *v, int64_t i0, int64_t i1,    \
+                                        int64_t i2) {                          \
+    int ab = v[i0] < v[i1], ac = v[i0] < v[i2], bc = v[i1] < v[i2];            \
+    if (ab == bc) return i1;                                                   \
+    if (ab == ac) return i2;                                                   \
+    return i0;                                                                 \
+}                                                                              \
+                                                                               \
+static int64_t nsort_pivot_##W(const T *v, int64_t n) {                        \
+    if (n >= 64) {                                                             \
+        int64_t s = n / 8;                                                     \
+        int64_t p0 = nsort_median3_##W(v, 0, s, 2 * s);                        \
+        int64_t p1 = nsort_median3_##W(v, 3 * s, 4 * s, 5 * s);                \
+        int64_t p2 = nsort_median3_##W(v, 6 * s, 7 * s, n - 1);                \
+        return nsort_median3_##W(v, p0, p1, p2);                               \
+    }                                                                          \
+    return nsort_median3_##W(v, 0, n / 2, n - 1);                              \
+}                                                                              \
+                                                                               \
+static int64_t nsort_part_lt_##W(T *v, int64_t n, T pivot) {                   \
+    int64_t j = 0;                                                             \
+    for (int64_t i = 0; i < n; i++) {                                          \
+        T x = v[i], y = v[j];                                                  \
+        v[i] = y; v[j] = x;                                                    \
+        j += (x < pivot);                                                      \
+    }                                                                          \
+    return j;                                                                  \
+}                                                                              \
+                                                                               \
+static int64_t nsort_part_le_##W(T *v, int64_t n, T pivot) {                   \
+    int64_t j = 0;                                                             \
+    for (int64_t i = 0; i < n; i++) {                                          \
+        T x = v[i], y = v[j];                                                  \
+        v[i] = y; v[j] = x;                                                    \
+        j += (x <= pivot);                                                     \
+    }                                                                          \
+    return j;                                                                  \
+}                                                                              \
+                                                                               \
+static void nsort_break_patterns_##W(T *v, int64_t n, uint64_t *seed) {        \
+    if (n < 8) return;                                                         \
+    int64_t q = n / 4;                                                         \
+    nsort_swap_##W(&v[0],     &v[nsort_rng(seed) % (uint64_t)n]);              \
+    nsort_swap_##W(&v[q],     &v[nsort_rng(seed) % (uint64_t)n]);              \
+    nsort_swap_##W(&v[2 * q], &v[nsort_rng(seed) % (uint64_t)n]);              \
+    nsort_swap_##W(&v[n - 1], &v[nsort_rng(seed) % (uint64_t)n]);              \
+}                                                                              \
+                                                                               \
+static void nsort_rec_##W(T *v, int64_t n, const T *ancestor,                  \
+                          int limit, uint64_t *seed) {                         \
+    for (;;) {                                                                 \
+        if (n <= 32) { nsort_small_##W(v, n); return; }                        \
+        if (limit == 0) { nsort_heap_##W(v, n); return; }                      \
+        limit--;                                                               \
+                                                                               \
+        int64_t pi = nsort_pivot_##W(v, n);                                    \
+        T pivot = v[pi];                                                       \
+                                                                               \
+        if (ancestor != NULL && !(*ancestor < pivot)) {                        \
+            int64_t eq = nsort_part_le_##W(v, n, pivot);                       \
+            v += eq; n -= eq; ancestor = NULL;                                 \
+            continue;                                                          \
+        }                                                                      \
+                                                                               \
+        nsort_swap_##W(&v[0], &v[pi]);                                         \
+        int64_t lt = nsort_part_lt_##W(v + 1, n - 1, pivot);                   \
+        nsort_swap_##W(&v[0], &v[lt]);  /* pivot comes to rest at v[lt] */     \
+                                                                               \
+        int64_t rn = n - 1 - lt;                                               \
+        if (lt < n / 8 || rn < n / 8) {                                        \
+            nsort_break_patterns_##W(v, lt, seed);                             \
+            nsort_break_patterns_##W(v + lt + 1, rn, seed);                    \
+        }                                                                      \
+                                                                               \
+        nsort_rec_##W(v, lt, ancestor, limit, seed);                           \
+        ancestor = &v[lt];                                                     \
+        v += lt + 1; n -= lt + 1;                                              \
+    }                                                                          \
+}                                                                              \
+                                                                               \
+static void nsort_##W(T *v, int64_t n) {                                       \
+    if (n < 2) return;                                                         \
+    if (n <= 32) { nsort_small_##W(v, n); return; }                            \
+                                                                               \
+    int64_t i = 1;                                                             \
+    if (v[1] < v[0]) {                                                         \
+        while (i < n && v[i] < v[i - 1]) i++;                                  \
+        if (i == n) {                                                          \
+            for (int64_t lo = 0, hi = n - 1; lo < hi; lo++, hi--)              \
+                nsort_swap_##W(&v[lo], &v[hi]);                                \
+            return;                                                            \
+        }                                                                      \
+    } else {                                                                   \
+        while (i < n && !(v[i] < v[i - 1])) i++;                               \
+        if (i == n) return;                                                    \
+    }                                                                          \
+                                                                               \
+    int limit = 0;                                                             \
+    for (int64_t m = n; m > 1; m >>= 1) limit += 2;                            \
+    int forced = nsort_forced_limit();                                         \
+    if (forced >= 0) limit = forced;                                           \
+    uint64_t seed = (uint64_t)n * 0x9E3779B97F4A7C15ULL;                       \
+    nsort_rec_##W(v, n, NULL, limit, &seed);                                   \
 }
+
+NSORT_DEFINE_CORE(i64, int64_t)
+NSORT_DEFINE_CORE(i32, int32_t)
 
 /* FBIP/COW contract identical to native_int_arr_set above: [arr] is owned and
  * consumed, so at rc == 1 we sort in place and hand our reference straight
@@ -11043,6 +11078,46 @@ static void nsort_f64(double *d, int64_t n) {
 }
 /* native_float_arr_sort itself sits after native_float_arr_set, below, next
  * to the rest of the f64 array entry points. */
+
+/* ── NativeArray.sort_f32: the same decision on 32-bit keys ────────────────
+ *
+ *   key(bits) = bits ^ (((int32_t)bits >> 31) & 0x7FFFFFFF)
+ *
+ * compared as a signed i32 is binary32 totalOrder, exactly as the 64-bit key
+ * is for binary64, and it is an involution for the same reason. So f32 is
+ * transform in / nsort_i32 / transform out. It is deliberately NOT widened to
+ * f64: that would double the memory traffic of the sort and need a scratch
+ * array, and the i32 core is needed for sort_i32 anyway. (Widening is
+ * order-preserving, NaN sign and payload included, so the interpreter arm is
+ * free to compute either key; it uses this one.) */
+static inline int32_t nsort_f32_key(int32_t bits) {
+    return bits ^ (int32_t)((uint32_t)(bits >> 31) >> 1);
+}
+
+static void nsort_f32(float *d, int64_t n) {
+    int32_t *v = (int32_t *)d;          /* -fno-strict-aliasing: bit view */
+    for (int64_t i = 0; i < n; i++) v[i] = nsort_f32_key(v[i]);
+    nsort_i32(v, n);
+    for (int64_t i = 0; i < n; i++) v[i] = nsort_f32_key(v[i]);
+}
+
+/* ── NativeArray.sort_u8: counting sort ─────────────────────────────────────
+ *
+ * 256 possible values, so a histogram and one fill pass is O(n + 256) with
+ * no comparisons, no data-dependent branches and a 2 KiB stack table; no
+ * comparison sort can match it at any n that matters. It needs no depth limit
+ * and has no heapsort fallback, so MARCH_TEST_NSORT_DEPTH_LIMIT does not
+ * apply. [src] and [dst] may be the same buffer (the rc == 1 path): the
+ * histogram is complete before the first write. */
+static void nsort_u8(const uint8_t *src, uint8_t *dst, int64_t n) {
+    int64_t count[256];
+    memset(count, 0, sizeof count);
+    for (int64_t i = 0; i < n; i++) count[src[i]]++;
+    uint8_t *out = dst;
+    for (int k = 0; k < 256; k++) {
+        if (count[k]) { memset(out, k, (size_t)count[k]); out += count[k]; }
+    }
+}
 
 /* Sum of squared deviations from a precomputed mean — the stable second pass
  * of the standard two-pass variance algorithm. int elements promote to
@@ -11524,6 +11599,41 @@ void *PREFIX##_to_list(void *arr) {                                           \
 DEF_NARROW_INT_ARR(native_i32_arr, int32_t, NATIVE_ELEM_I32)
 DEF_NARROW_INT_ARR(native_u8_arr,  uint8_t, NATIVE_ELEM_U8)
 
+/* NativeArray.sort_i32 — the ipnsort core instantiated at int32_t
+ * (nsort_i32). FBIP/COW contract identical to native_int_arr_sort: [arr] is
+ * owned and consumed, sorted in place at rc == 1, a sorted fresh copy (our
+ * reference released) at rc > 1. */
+void *native_i32_arr_sort(void *arr) {
+    int64_t len = native_i32_arr_length(arr);
+    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+        nsort_i32((int32_t *)((char *)arr + NATIVE_ARR_HDR), len);
+        return arr;
+    }
+    void *new_arr = native_arr_alloc(len, 4, NATIVE_ELEM_I32);
+    memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR,
+           (size_t)(len * 4));
+    nsort_i32((int32_t *)((char *)new_arr + NATIVE_ARR_HDR), len);
+    march_decrc(arr);
+    return new_arr;
+}
+
+/* NativeArray.sort_u8 — counting sort (nsort_u8). Same ownership contract.
+ * The rc > 1 path counts straight from the shared original into the fresh
+ * array, so it needs no memcpy first. */
+void *native_u8_arr_sort(void *arr) {
+    int64_t len = native_u8_arr_length(arr);
+    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+        uint8_t *d = (uint8_t *)((char *)arr + NATIVE_ARR_HDR);
+        nsort_u8(d, d, len);
+        return arr;
+    }
+    void *new_arr = native_arr_alloc(len, 1, NATIVE_ELEM_U8);
+    nsort_u8((const uint8_t *)((char *)arr + NATIVE_ARR_HDR),
+             (uint8_t *)((char *)new_arr + NATIVE_ARR_HDR), len);
+    march_decrc(arr);
+    return new_arr;
+}
+
 void *native_f32_arr_alloc_raw(int64_t len) {
     return native_arr_alloc(len, 4, NATIVE_ELEM_F32);
 }
@@ -11554,6 +11664,22 @@ void *native_f32_arr_set(void *arr, int64_t i, double val) {
     void *new_arr = native_arr_alloc(len, 4, NATIVE_ELEM_F32);
     memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR, (size_t)(len * 4));
     *(float *)((char *)new_arr + NATIVE_ARR_HDR + i * 4) = (float)val;
+    march_decrc(arr);
+    return new_arr;
+}
+
+/* NativeArray.sort_f32 — binary32 totalOrder ipnsort; see nsort_f32 above.
+ * FBIP/COW contract identical to native_float_arr_sort. */
+void *native_f32_arr_sort(void *arr) {
+    int64_t len = native_f32_arr_length(arr);
+    if (IS_HEAP_PTR(arr) && ((march_hdr *)arr)->rc == 1) {
+        nsort_f32((float *)((char *)arr + NATIVE_ARR_HDR), len);
+        return arr;
+    }
+    void *new_arr = native_arr_alloc(len, 4, NATIVE_ELEM_F32);
+    memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR,
+           (size_t)(len * 4));
+    nsort_f32((float *)((char *)new_arr + NATIVE_ARR_HDR), len);
     march_decrc(arr);
     return new_arr;
 }

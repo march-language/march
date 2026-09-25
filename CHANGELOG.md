@@ -43,6 +43,14 @@ git log is authoritative for exact commits.
   the sending node's `ClusterNode.on_delivery_failed` handler with its sequence
   number and the reason, instead of only being counted.
 
+- **`NativeArray.sort_i32`, `sort_f32` and `sort_u8`: every NativeArray width
+  can now be sorted.** Same ownership as `sort_int`: in place when the array is
+  uniquely owned, copy-on-write when it is shared. `sort_i32` is the same
+  algorithm as `sort_int` on 4-byte elements. `sort_f32` orders by IEEE 754
+  `totalOrder` exactly like `sort_float` (NaN at a fixed end, `-0.0` before
+  `+0.0`), without widening to f64. `sort_u8` is a counting sort, about 0.3 ms
+  for a million bytes whatever their order. The interpreter and compiled builds
+  produce the same order, NaN included.
 - **Node certificates for clusters** (build step 11a of the distributed-deploys
   plan, part 1). New `NodeCert` module: a certificate names a node
   (`spiffe://<trust-domain>/pool/<pool>/node/<name>`), its role permissions
@@ -567,6 +575,23 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- `to_string`/`println` of a List, Option, Result or tuple no longer aborts
+  `march --jit` or the JIT REPL with an internal compiler error ("ambiguous
+  interface-method call to `Show$List.show`"). The prelude's generic `Show`
+  impls are now specialised at the call site, as they are under `--compile`.
+
+- A function in a nested module that calls a function of an enclosing module
+  (`mod Outer do pfn helper ... mod Inner do fn f(x) do helper(x) end end end`)
+  now compiles. Before, the compiled program failed to link with `helper`
+  undefined, while the interpreter ran it. This applied at any nesting depth,
+  whether the enclosing function was declared before or after the nested
+  module, and in `MARCH_LIB_PATH` modules, stdlib modules and the entry file
+  alike. The qualified spelling `Outer.helper(x)` also now works from inside
+  `Outer` for a `pfn`: it was rejected as private in a stdlib module, and in
+  the same file it could bind a same-named function of the nested module
+  instead. `Compress`'s internal `lift_encode_error` / `lift_decode_error`
+  are private again.
+
 - `compare` on a NaN `Float` now gives the same answer compiled as interpreted:
   NaN compares equal to NaN and less than every other value (OCaml's
   `Float.compare`). Compiled `compare` returned 0 whenever either operand was

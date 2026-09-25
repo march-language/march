@@ -1,0 +1,267 @@
+-- Witness for the narrow NativeArray sorts: sort_i32, sort_f32 and sort_u8
+-- (C runtime; see specs/progress/2026-09-25-native-array-sort-narrow-widths.md).
+-- The i64/f64 widths are covered by native_arr_sort.march, whose structure
+-- this file mirrors.
+--
+-- Every case cross-checks the C sort against List.sort_by, an INDEPENDENT
+-- implementation (stdlib/list.march's mergesort over cons cells), so a sort
+-- that drops or duplicates elements fails, not only one that misorders them.
+--
+-- The input patterns are the ones in bench/c/native_sort_bench.c, each aimed
+-- at a branch of the ipnsort core (sorted/reversed: full-run scan;
+-- equal/dist10: equal-partition; sawtooth: pattern-breaking; organ: a
+-- median-of-3 killer; random: branchless Lomuto), at 13 sizes straddling the
+-- n <= 32 small-sort cutoff and the 8-element network blocks. Each line
+-- prints how many of the 13 sizes agreed.
+--
+-- sort_i32 is the ipnsort core instantiated at int32_t. Its inputs are
+-- signed, and one pattern spans the whole i32 range, so a core that compared
+-- or stored through a wider or unsigned type would misplace the extremes.
+--
+-- sort_f32 is the same core on binary32 totalOrder keys. The specials lines
+-- check -NaN, -Inf, -0.0, +0.0, +Inf, +NaN placement. Floats are compared
+-- through renderings, because NaN != NaN under `==` and -0.0 == 0.0. A NaN is
+-- named by its bit pattern (hash() hashes raw bits on both backends) against
+-- the two NaNs as they come back out of an f32 array, so the sign of each NaN
+-- is checked explicitly and the golden does not depend on libc's "nan"
+-- spelling. The interpreter must print the same lines: an arm built on
+-- OCaml's `compare` puts every NaN first and ties -0.0 with 0.0.
+--
+-- sort_u8 is a counting sort. Its patterns are the same generators mod 256,
+-- which at n = 1000 repeat every value several times.
+--
+-- The aliasing cases catch an FBIP mistake: sorting a SHARED array must copy
+-- rather than mutate. An unconditional in-place sort fails only those lines.
+--
+-- test/dune runs this three ways against one golden: compiled, compiled with
+-- MARCH_TEST_NSORT_DEPTH_LIMIT=0 (every i32/f32 segment above the small-sort
+-- cutoff goes to the heapsort fallback), and interpreted.
+mod NativeArrSortNarrow do
+  needs IO.Console
+
+  pfn build(n : Int, f : Int -> a) : List(a) do
+    fn go(i : Int, acc : List(a)) : List(a) do
+      if i < 0 do acc else go(i - 1, Cons(f(i), acc)) end
+    end
+    go(n - 1, Nil)
+  end
+
+  pfn scramble(i : Int) : Int do
+    let x = (i * 2654435761) % 1000003
+    if x < 0 do 0 - x else x end
+  end
+
+  pfn sorted_l(n : Int) : List(Int) do build(n, fn i -> i) end
+  pfn reversed_l(n : Int) : List(Int) do build(n, fn i -> n - i) end
+  pfn equal_l(n : Int) : List(Int) do build(n, fn _ -> 42) end
+  pfn dist10_l(n : Int) : List(Int) do build(n, fn i -> scramble(i) % 10) end
+  pfn sawtooth_l(n : Int) : List(Int) do build(n, fn i -> i % 17) end
+  pfn organ_l(n : Int) : List(Int) do
+    build(n, fn i -> if i < n / 2 do i else n - i end)
+  end
+  pfn random_l(n : Int) : List(Int) do build(n, fn i -> scramble(i)) end
+  pfn nearly_l(n : Int) : List(Int) do
+    build(n, fn i -> if i % 50 == 0 do scramble(i) % 100 else i end)
+  end
+  -- Spans [-2^31, ~1.95e9]; index 0 is exactly -2^31 (scramble(0) = 0).
+  pfn wide_l(n : Int) : List(Int) do
+    build(n, fn i -> scramble(i) * 4096 - 2147483648)
+  end
+
+  pfn sizes() : List(Int) do [0, 1, 2, 7, 8, 9, 31, 32, 33, 64, 65, 200, 1000] end
+
+  pfn asc(xs : List(Int)) : List(Int) do
+    List.sort_by(xs, fn (a, b) -> a <= b)
+  end
+
+  -- ── i32 ────────────────────────────────────────────────────────────────
+
+  pfn signed(xs : List(Int)) : List(Int) do List.map(xs, fn x -> x - 500) end
+
+  pfn agrees_i32(xs : List(Int)) : Bool do
+    let got = NativeArray.to_list_i32(
+      NativeArray.sort_i32(NativeArray.from_list_i32(xs)))
+    got == asc(xs)
+  end
+
+  pfn score_i32(gen : Int -> List(Int)) : Int do
+    List.fold_left(sizes(), 0, fn (acc, n) ->
+      if agrees_i32(signed(gen(n))) do acc + 1 else acc end)
+  end
+
+  pfn score_i32_wide() : Int do
+    List.fold_left(sizes(), 0, fn (acc, n) ->
+      if agrees_i32(wide_l(n)) do acc + 1 else acc end)
+  end
+
+  -- ── u8 ─────────────────────────────────────────────────────────────────
+
+  pfn bytes(xs : List(Int)) : List(Int) do List.map(xs, fn x -> x % 256) end
+
+  pfn agrees_u8(xs : List(Int)) : Bool do
+    let got = NativeArray.to_list_u8(
+      NativeArray.sort_u8(NativeArray.from_list_u8(xs)))
+    got == asc(xs)
+  end
+
+  pfn score_u8(gen : Int -> List(Int)) : Int do
+    List.fold_left(sizes(), 0, fn (acc, n) ->
+      if agrees_u8(bytes(gen(n))) do acc + 1 else acc end)
+  end
+
+  -- ── f32 ────────────────────────────────────────────────────────────────
+
+  -- Signed quarter-steps: exact in binary32, so rounding on the way into the
+  -- array cannot change the expected order.
+  pfn to_f(xs : List(Int)) : List(Float) do
+    List.map(xs, fn x -> int_to_float(x - 500) *. 0.25)
+  end
+
+  -- The two NaNs as an f32 array stores and returns them. Their bits can
+  -- differ from float_nan()'s own (a payload can be dropped by the binary32
+  -- round trip), but they differ from each other only in the sign bit.
+  pfn f32_rt(x : Float) : Float do
+    NativeArray.get_f32(NativeArray.from_list_f32([x]), 0)
+  end
+
+  pfn render_f(x : Float) : String do
+    if float_is_nan(x) do
+      if hash(x) == hash(f32_rt(-float_nan())) do "-nan"
+      else if hash(x) == hash(f32_rt(float_nan())) do "+nan"
+      else "nan?" end end
+    else float_to_string(x) end
+  end
+
+  pfn render(xs : List(Float)) : List(String) do
+    List.map(xs, fn x -> render_f(x))
+  end
+
+  pfn agrees_f(xs : List(Float)) : Bool do
+    let got = NativeArray.to_list_f32(
+      NativeArray.sort_f32(NativeArray.from_list_f32(xs)))
+    render(got) == render(List.sort_by(xs, fn (a, b) -> a <= b))
+  end
+
+  pfn score_f(gen : Int -> List(Int)) : Int do
+    List.fold_left(sizes(), 0, fn (acc, n) ->
+      if agrees_f(to_f(gen(n))) do acc + 1 else acc end)
+  end
+
+  -- Mixed specials, as in native_arr_sort.march: every 13th slot is one of
+  -- the six specials (kind 0..5 = -NaN, -Inf, -0.0, +0.0, +Inf, +NaN, also
+  -- their totalOrder rank); the rest are nonzero finite values, kind 6 if
+  -- negative and 7 if positive. The expected order is built from kinds, not
+  -- by comparing values.
+  pfn kind(i : Int) : Int do
+    if i % 13 == 0 do (i / 13) % 6
+    else if finite(i) < 0.0 do 6 else 7 end end
+  end
+
+  pfn finite(i : Int) : Float do
+    int_to_float(scramble(i) % 2000 - 1000) +. 0.5
+  end
+
+  pfn special(k : Int) : Float do
+    match k do
+      0 -> -float_nan()
+      1 -> float_neg_infinity()
+      2 -> 0.0 *. -1.0
+      3 -> 0.0
+      4 -> float_infinity()
+      _ -> float_nan()
+    end
+  end
+
+  pfn mixed_at(i : Int) : Float do
+    let k = kind(i)
+    if k < 6 do special(k) else finite(i) end
+  end
+
+  pfn mixed_expected(n : Int) : List(Float) do
+    let idx = build(n, fn i -> i)
+    let of_kind = fn k -> List.map(List.filter(idx, fn i -> kind(i) == k), fn i -> f32_rt(mixed_at(i)))
+    let fasc = fn xs -> List.sort_by(xs, fn (a, b) -> a <= b)
+    List.concat([of_kind(0), of_kind(1), fasc(of_kind(6)), of_kind(2),
+                 of_kind(3), fasc(of_kind(7)), of_kind(4), of_kind(5)])
+  end
+
+  pfn mixed_agrees(n : Int) : Bool do
+    let got = NativeArray.to_list_f32(
+      NativeArray.sort_f32(NativeArray.from_list_f32(build(n, mixed_at))))
+    render(got) == render(mixed_expected(n))
+  end
+
+  pfn show_sorted_f(xs : List(Float)) : String do
+    let got = NativeArray.to_list_f32(
+      NativeArray.sort_f32(NativeArray.from_list_f32(xs)))
+    List.fold_left(render(got), "", fn (acc, s) ->
+      if acc == "" do s else acc ++ " " ++ s end)
+  end
+
+  fn main(_cap : Cap(IO.Console)) : () do
+    println("i32 sorted: " ++ int_to_string(score_i32(sorted_l)))
+    println("i32 reversed: " ++ int_to_string(score_i32(reversed_l)))
+    println("i32 equal: " ++ int_to_string(score_i32(equal_l)))
+    println("i32 dist10: " ++ int_to_string(score_i32(dist10_l)))
+    println("i32 sawtooth: " ++ int_to_string(score_i32(sawtooth_l)))
+    println("i32 organ: " ++ int_to_string(score_i32(organ_l)))
+    println("i32 random: " ++ int_to_string(score_i32(random_l)))
+    println("i32 nearly: " ++ int_to_string(score_i32(nearly_l)))
+    println("i32 full range: " ++ int_to_string(score_i32_wide()))
+    println("i32 extremes: " ++ bool_to_string(
+      NativeArray.to_list_i32(NativeArray.sort_i32(NativeArray.from_list_i32(
+        [2147483647, 0, -2147483648, -1, 1])))
+      == [-2147483648, -1, 0, 1, 2147483647]))
+
+    let ishared = NativeArray.from_list_i32([5, -3, 1, 4, 2])
+    let isorted = NativeArray.sort_i32(ishared)
+    println("i32 alias original intact: "
+            ++ bool_to_string(NativeArray.to_list_i32(ishared) == [5, -3, 1, 4, 2]))
+    println("i32 alias result sorted: "
+            ++ bool_to_string(NativeArray.to_list_i32(isorted) == [-3, 1, 2, 4, 5]))
+
+    println("f32 sorted: " ++ int_to_string(score_f(sorted_l)))
+    println("f32 reversed: " ++ int_to_string(score_f(reversed_l)))
+    println("f32 equal: " ++ int_to_string(score_f(equal_l)))
+    println("f32 dist10: " ++ int_to_string(score_f(dist10_l)))
+    println("f32 sawtooth: " ++ int_to_string(score_f(sawtooth_l)))
+    println("f32 organ: " ++ int_to_string(score_f(organ_l)))
+    println("f32 random: " ++ int_to_string(score_f(random_l)))
+    println("f32 nearly: " ++ int_to_string(score_f(nearly_l)))
+
+    let nz = 0.0 *. -1.0
+    println("f32 specials: " ++ show_sorted_f(
+      [1.0, float_nan(), nz, float_neg_infinity(), 0.0, -float_nan(),
+       float_infinity(), -1.0]))
+    println("f32 nan last: " ++ show_sorted_f([float_nan(), 1.0, -1.0]))
+    let msizes = [9, 33, 200, 1000, 5000]
+    println("f32 mixed specials: " ++ int_to_string(
+      List.fold_left(msizes, 0, fn (acc, n) ->
+        if mixed_agrees(n) do acc + 1 else acc end)))
+
+    let fshared = NativeArray.from_list_f32([0.5, -2.0, 1.5])
+    let fsorted = NativeArray.sort_f32(fshared)
+    println("f32 alias original intact: "
+            ++ bool_to_string(NativeArray.to_list_f32(fshared) == [0.5, -2.0, 1.5]))
+    println("f32 alias result sorted: "
+            ++ bool_to_string(NativeArray.to_list_f32(fsorted) == [-2.0, 0.5, 1.5]))
+
+    println("u8 sorted: " ++ int_to_string(score_u8(sorted_l)))
+    println("u8 reversed: " ++ int_to_string(score_u8(reversed_l)))
+    println("u8 equal: " ++ int_to_string(score_u8(equal_l)))
+    println("u8 dist10: " ++ int_to_string(score_u8(dist10_l)))
+    println("u8 random: " ++ int_to_string(score_u8(random_l)))
+    println("u8 nearly: " ++ int_to_string(score_u8(nearly_l)))
+    println("u8 extremes: " ++ bool_to_string(
+      NativeArray.to_list_u8(NativeArray.sort_u8(NativeArray.from_list_u8(
+        [255, 0, 128, 255, 1, 0])))
+      == [0, 0, 1, 128, 255, 255]))
+
+    let ushared = NativeArray.from_list_u8([9, 200, 3])
+    let usorted = NativeArray.sort_u8(ushared)
+    println("u8 alias original intact: "
+            ++ bool_to_string(NativeArray.to_list_u8(ushared) == [9, 200, 3]))
+    println("u8 alias result sorted: "
+            ++ bool_to_string(NativeArray.to_list_u8(usorted) == [3, 9, 200]))
+  end
+end

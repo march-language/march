@@ -288,6 +288,24 @@ two stop agreeing, one of them is measuring something other than the sort).
 The three sub-millisecond rows are the full-run scan and the equal-partition;
 any of them climbing into the milliseconds means a special case stopped firing.
 
+The other widths have no committed March benchmark. A scratch run of the same
+shape on 2026-09-25 (n = 1,000,000, compiled `--opt 2`, arm64, load average
+~7), in ms (random is min of 3), with f64/f32 on the same values scaled to signed quarter-steps and
+u8 on the values mod 256:
+
+| pattern | `sort_int` | `sort_i32` | `sort_float` | `sort_f32` | `sort_u8` |
+|---|---:|---:|---:|---:|---:|
+| random | 13.2 | 12.8 | 13.5 | 12.8 | 0.29 |
+| sorted | 0.29 | 0.28 | 0.70 | 0.41 | 0.30 |
+| reversed | 0.48 | 0.43 | 0.85 | 0.56 | 0.30 |
+| 10 distinct | 2.0 | 1.8 | 2.6 | 2.1 | 0.49 |
+| sawtooth | 10.1 | 9.3 | 10.5 | 9.5 | 0.30 |
+
+i32 is only 3-10% ahead of i64: at this size the sort is compare-bound, not
+bandwidth-bound. The float rows pay two extra key-transform passes, which is
+visible only on the already-linear patterns. `sort_u8` is a counting sort and
+does not care about the pattern.
+
 ---
 
 ## bench/c/native_sort_bench.c — NativeArray.sort_int (i64 sorting)
@@ -319,8 +337,8 @@ means a special case stopped firing; `sawtooth` alone regressing means pivot
 sampling is being defeated again. Run it after any change to the sort, and
 after a clang upgrade — the partition's speed depends on `csel` being emitted.
 
-Touching the sort? Also run `dune build --root . test/native_arr_sort.out`,
-which is the correctness half. Speed without a multiset check is meaningless.
+Touching the sort? Also run `dune build --root . test/native_arr_sort.out
+test/native_arr_sort_narrow.out`, which is the correctness half. Speed without a multiset check is meaningless.
 
 ---
 

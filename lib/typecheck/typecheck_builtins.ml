@@ -1510,6 +1510,8 @@ let builtin_bindings : (string * scheme) list =
              TArrow (t_int, TArrow (t_float, TCon ("NativeF32Arr", []))))));
     ("native_f32_arr_sum",
        Mono (TArrow (TCon ("NativeF32Arr", []), t_float)));
+    ("native_f32_arr_sort",
+       Mono (TArrow (TCon ("NativeF32Arr", []), TCon ("NativeF32Arr", []))));
     ("native_f32_arr_map",
        Mono (TArrow (TCon ("NativeF32Arr", []),
              TArrow (TArrow (t_float, t_float), TCon ("NativeF32Arr", [])))));
@@ -1537,6 +1539,8 @@ let builtin_bindings : (string * scheme) list =
              TArrow (t_int, TArrow (t_int, TCon ("NativeI32Arr", []))))));
     ("native_i32_arr_sum",
        Mono (TArrow (TCon ("NativeI32Arr", []), t_int)));
+    ("native_i32_arr_sort",
+       Mono (TArrow (TCon ("NativeI32Arr", []), TCon ("NativeI32Arr", []))));
     ("native_i32_arr_map",
        Mono (TArrow (TCon ("NativeI32Arr", []),
              TArrow (TArrow (t_int, t_int), TCon ("NativeI32Arr", [])))));
@@ -1564,6 +1568,8 @@ let builtin_bindings : (string * scheme) list =
              TArrow (t_int, TArrow (t_int, TCon ("NativeU8Arr", []))))));
     ("native_u8_arr_sum",
        Mono (TArrow (TCon ("NativeU8Arr", []), t_int)));
+    ("native_u8_arr_sort",
+       Mono (TArrow (TCon ("NativeU8Arr", []), TCon ("NativeU8Arr", []))));
     ("native_u8_arr_map",
        Mono (TArrow (TCon ("NativeU8Arr", []),
              TArrow (TArrow (t_int, t_int), TCon ("NativeU8Arr", [])))));
