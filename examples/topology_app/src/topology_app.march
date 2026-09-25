@@ -62,7 +62,7 @@ mod TopologyApp do
         match LinearMap.put(state.sessions, sid, parked) do
           (None, m) -> { state with sessions: m }
           (Some(old), m) ->
-            Count_Counter.take_closed(Count_Counter.cancel(old))
+            Count_Counter.take_closed(Count_Counter.cancel(s, old))
             { state with sessions: m }
         end
       end
@@ -78,11 +78,11 @@ mod TopologyApp do
             end
         end
       end
-      on Cancel(sid : String, _s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
+      on Cancel(sid : String, s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
         match LinearMap.take(state.sessions, sid) do
           (None, m) -> { state with sessions: m }
           (Some(parked), m) ->
-            Count_Counter.take_closed(Count_Counter.cancel(parked))
+            Count_Counter.take_closed(Count_Counter.cancel(s, parked))
             { state with sessions: m }
         end
       end

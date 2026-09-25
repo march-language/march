@@ -39,8 +39,8 @@ mod Main do
           end
       end
     end
-    on CancelC(_s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
-      Stream_Cons.take_closed(Stream_Cons.cancel(state.parked))
+    on CancelC(s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
+      Stream_Cons.take_closed(Stream_Cons.cancel(s, state.parked))
       { state with budget: 0, parked: Stream_Cons.idle() }
     end
   end

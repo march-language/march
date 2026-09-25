@@ -1,0 +1,6 @@
+-- chaos: Pair, two sends in a row to a loop head, 60 seeds
+drained 15, finished first 45 of 60, returned 30
+-- chaos: Relay3, a send to a role after it drained, 60 seeds
+drained 17, finished first 43 of 60, returned 34
+-- chaos: Fork, a send to a drained role, 60 seeds
+drained 31, finished first 29 of 60, returned 43

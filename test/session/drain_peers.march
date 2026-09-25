@@ -1,0 +1,269 @@
+mod DrainPeers do
+  -- D27, single process: sessions end at loop boundaries when a role's
+  -- epoch is draining, over the in-process transport (FIFO run queue, so
+  -- every trace is reproducible).  This pins the drain rule for two and
+  -- three roles before the network version (test/two_node/drain_*):
+  --
+  --   1. A delivery to a continuation installed at a loop boundary, when
+  --      the receiver's epoch or the sender's is draining, is not consumed:
+  --      it goes back to its sender, and the receiver drains.
+  --   2. A drained endpoint returns everything addressed to it that it has
+  --      not consumed, now and later.
+  --   3. Its peers learn it drained; their messages to it come back at once.
+  --   4. An endpoint waiting on a drained role, with nothing from it queued,
+  --      drains in turn.
+  --
+  -- and the conservation the rule exists for: every message sent is
+  -- consumed, returned undelivered, or still queued -- none is dropped.
+  --
+  -- Scripted runs print the transport's own trace; the chaos runs (60 seeds
+  -- per protocol, draining a seed-chosen role after a seed-chosen number of
+  -- steps) print only aggregates and, on any violation, a VIOLATION line the
+  -- golden does not contain.  `loop atomic` is checked last: its head is not
+  -- a drain point.  Three more protocols run the same way in
+  -- drain_peers_multi.march (a second file: the frontend's cost grows
+  -- steeply with the number of `@[endpoints]` protocols in one module).
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  -- Three roles: A's loop head is a SEND, B's and C's are receives.
+  @[endpoints]
+  protocol Ring do
+    loop do
+      a: A -> B : Int
+      b: B -> C : Int
+      choose by C:
+        more -> C -> A : Bool
+                more_b: C -> B : Bool
+        done -> C -> A : Bool
+                done_b: C -> B : Bool
+                stop
+      end
+    end
+  end
+
+  @[endpoints]
+  protocol Steady do
+    loop atomic do
+      Src -> Dst : Int
+      choose by Dst:
+        more -> Dst -> Src : Bool
+        done -> Dst -> Src : Bool
+                stop
+      end
+    end
+  end
+
+  -- ── the real Stream roles, with drain handlers that report ───────────
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.Entry, next : Int) : Stream_Prod.Yield do
+    print_line("Prod sends " ++ int_to_string(next))
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done_or_drain(s, st1,
+      fn (_b, st2) -> prod(s, st2, next + 1),
+      fn (_b, st2) ->
+        print_line("Prod got Done")
+        Stream_Prod.close(s, st2),
+      fn (role, undelivered, d) ->
+        print_line("Prod drained (waiting on role " ++ int_to_string(role) ++ "), undelivered: "
+          ++ String.join(List.map(undelivered, fn m -> match m do
+               Stream_Msg.Msg_Prod_Cons_1(v) -> int_to_string(v)
+               _ -> "?"
+             end), ", "))
+        Stream_Prod.drained(s, d))
+  end
+
+  pfn cons(s : Cap(Session.Live), st : Stream_Cons.Entry, budget : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1_or_drain(s, st,
+      fn (n, st1) ->
+        print_line("Cons got " ++ int_to_string(n))
+        if budget > 1 do cons(s, Stream_Cons.choose_more(s, st1, true), budget - 1)
+        else Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)) end,
+      fn (role, _undelivered, d) ->
+        print_line("Cons drained at its boundary (role " ++ int_to_string(role) ++ ")")
+        Stream_Cons.drained(s, d))
+  end
+
+  pfn tracing() : Session.InProcess do
+    Session.in_process_with(fn line -> print_line("  transport: " ++ line))
+  end
+
+  pfn counts(t : Session.InProcess) : String do
+    "sent " ++ int_to_string(t.sent(())) ++ ", consumed " ++ int_to_string(t.consumed(()))
+      ++ ", returned " ++ int_to_string(t.returned(())) ++ ", queued " ++ int_to_string(t.queued(()))
+  end
+
+  pfn steps(t : Session.InProcess, k : Int) : () do
+    if k <= 0 do () else
+      if t.step(()) do steps(t, k - 1) else () end
+    end
+  end
+
+  -- ── the chaos runs ─────────────────────────────────────────────────────
+  pfn bump(tally : Vault(Int), key : String) : () do
+    let _ = Vault.incr(tally, key, 1)
+    ()
+  end
+
+  pfn count(tally : Vault(Int), key : String) : Int do Vault.get_or(tally, key, 0) end
+
+  -- A transport that counts, per session, the ends and stalls it reports.
+  pfn counting(tally : Vault(Int)) : Session.InProcess do
+    Session.in_process_with(fn line ->
+      if String.starts_with(line, "close ") do bump(tally, "end")
+      else if String.starts_with(line, "drained ") do
+        bump(tally, "end")
+        bump(tally, "drained")
+      else if String.starts_with(line, "stalled") do bump(tally, "stalled")
+      else if String.starts_with(line, "cancel ") do bump(tally, "cancel")
+      else if String.starts_with(line, "dropped") do bump(tally, "dropped")
+      else if String.starts_with(line, "undelivered ") do bump(tally, "undelivered")
+      else () end end end end end end)
+  end
+
+  -- Check one finished session: every role ended (closed or drained), no
+  -- stall, nothing dropped, nothing left queued; every message sent was
+  -- consumed or came back (sent = consumed + returned); and the roles'
+  -- undelivered counts add up to exactly the `undelivered` lines of the
+  -- trace.  (A message in flight when draining begins may still be consumed:
+  -- only a delivery at a loop boundary is refused.)
+  pfn check(tally : Vault(Int), t : Session.InProcess, roles : Int, in_flight : Int, name : String, seed : Int) : () do
+    let per_role = List.fold_left(List.range(1, roles + 1), 0, fn (acc, r) -> acc + t.undelivered(r))
+    let ok = count(tally, "end") == roles && count(tally, "stalled") == 0 && count(tally, "cancel") == 0
+      && count(tally, "dropped") == 0 && t.queued(()) == 0
+      && t.sent(()) == t.consumed(()) + t.returned(())
+      && per_role == t.returned(()) && per_role == count(tally, "undelivered")
+    if ok do () else
+      print_line("VIOLATION " ++ name ++ " seed " ++ int_to_string(seed) ++ ": ends " ++ int_to_string(count(tally, "end"))
+        ++ ", stalls " ++ int_to_string(count(tally, "stalled")) ++ ", cancels " ++ int_to_string(count(tally, "cancel"))
+        ++ ", dropped " ++ int_to_string(count(tally, "dropped")) ++ ", in flight at the drain " ++ int_to_string(in_flight)
+        ++ ", per-role undelivered " ++ int_to_string(per_role) ++ ", traced " ++ int_to_string(count(tally, "undelivered"))
+        ++ ", " ++ counts(t))
+    end
+  end
+
+  pfn stream_seeds(c : Cap(IO), totals : Vault(Int), seed : Int) : () do
+    if seed == 60 do () else
+      let tally = Vault.new("drain_peers_stream_" ++ int_to_string(seed))
+      let t = counting(tally)
+      let s = Session.attach(c, t.ops)
+      let _ = Stream_Cons.chaos(s, Stream_Cons.register(s, 0), seed)
+      let _ = Stream_Prod.chaos(s, Stream_Prod.register(s, 0), seed + 1000)
+      steps(t, (seed * 7 + 3) % 11)
+      let in_flight = t.queued(())
+      t.drain_role(1 + seed % 2)
+      t.drain(())
+      check(tally, t, 2, in_flight, "Stream", seed)
+      if count(tally, "drained") > 0 do bump(totals, "drained_sessions") else bump(totals, "finished_sessions") end
+      let _ = Vault.incr(totals, "returned", t.returned(()))
+      stream_seeds(c, totals, seed + 1)
+    end
+  end
+
+  pfn ring_seeds(c : Cap(IO), totals : Vault(Int), seed : Int) : () do
+    if seed == 60 do () else
+      let tally = Vault.new("drain_peers_ring_" ++ int_to_string(seed))
+      let t = counting(tally)
+      let s = Session.attach(c, t.ops)
+      let _ = Ring_C.chaos(s, Ring_C.register(s, 0), seed)
+      let _ = Ring_B.chaos(s, Ring_B.register(s, 0), seed + 100)
+      let _ = Ring_A.chaos(s, Ring_A.register(s, 0), seed + 200)
+      steps(t, (seed * 5 + 1) % 13)
+      let in_flight = t.queued(())
+      t.drain_role(1 + seed % 3)
+      t.drain(())
+      check(tally, t, 3, in_flight, "Ring", seed)
+      if count(tally, "drained") > 0 do bump(totals, "drained_sessions") else bump(totals, "finished_sessions") end
+      let _ = Vault.incr(totals, "returned", t.returned(()))
+      ring_seeds(c, totals, seed + 1)
+    end
+  end
+
+  -- `loop atomic`: draining either role never ends the session early.
+  pfn steady_src(s : Cap(Session.Live), st : Steady_Src.Entry, n : Int) : Steady_Src.Yield do
+    let st1 = Steady_Src.send_Msg_Src_Dst_1(s, st, n)
+    Steady_Src.offer_more_done(s, st1,
+      fn (_b, st2) -> steady_src(s, st2, n + 1),
+      fn (_b, st2) -> Steady_Src.close(s, st2))
+  end
+
+  pfn steady_dst(s : Cap(Session.Live), st : Steady_Dst.Entry, got : Int) : Steady_Dst.Yield do
+    Steady_Dst.recv_Msg_Src_Dst_1(s, st, fn (_n, st1) ->
+      if got >= 4 do
+        print_line("Steady: Dst got all 5 items")
+        Steady_Dst.close(s, Steady_Dst.choose_done(s, st1, true))
+      else steady_dst(s, Steady_Dst.choose_more(s, st1, true), got + 1) end)
+  end
+
+  fn main(c : Cap(IO)) do
+    print_line("-- Stream: Cons drains at its loop boundary after two items")
+    let t1 = tracing()
+    let s1 = Session.attach(c, t1.ops)
+    let _ = cons(s1, Stream_Cons.register(s1, 0), 10)
+    let _ = prod(s1, Stream_Prod.register(s1, 0), 1)
+    steps(t1, 3)
+    t1.drain_role(2)
+    t1.drain(())
+    print_line("Prod undelivered " ++ int_to_string(t1.undelivered(1)) ++ ", Cons drained " ++ bool_to_string(t1.drained(2)))
+    print_line(counts(t1))
+
+    print_line("-- Stream: Prod's epoch drains; Cons ends at its next boundary")
+    let t2 = tracing()
+    let s2 = Session.attach(c, t2.ops)
+    let _ = cons(s2, Stream_Cons.register(s2, 0), 10)
+    let _ = prod(s2, Stream_Prod.register(s2, 0), 1)
+    steps(t2, 1)
+    t2.drain_role(1)
+    t2.drain(())
+    print_line(counts(t2))
+
+    print_line("-- Ring: C drains; B is mid-iteration, A waits on C")
+    let t3 = tracing()
+    let s3 = Session.attach(c, t3.ops)
+    let _ = Ring_C.chaos(s3, Ring_C.register(s3, 0), 1)
+    let _ = Ring_B.chaos(s3, Ring_B.register(s3, 0), 2)
+    let _ = Ring_A.chaos(s3, Ring_A.register(s3, 0), 3)
+    steps(t3, 2)
+    t3.drain_role(3)
+    t3.drain(())
+    print_line("A undelivered " ++ int_to_string(t3.undelivered(1)) ++ ", B undelivered " ++ int_to_string(t3.undelivered(2))
+      ++ ", C undelivered " ++ int_to_string(t3.undelivered(3)))
+    print_line(counts(t3))
+
+    print_line("-- chaos: Stream, 60 seeds, a random role drains after a random number of steps")
+    let tot1 = Vault.new("drain_peers_totals_stream")
+    stream_seeds(c, tot1, 0)
+    print_line("drained " ++ int_to_string(count(tot1, "drained_sessions")) ++ ", finished first "
+      ++ int_to_string(count(tot1, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot1, "returned")))
+
+    print_line("-- chaos: Ring, three roles, 60 seeds")
+    let tot2 = Vault.new("drain_peers_totals_ring")
+    ring_seeds(c, tot2, 0)
+    print_line("drained " ++ int_to_string(count(tot2, "drained_sessions")) ++ ", finished first "
+      ++ int_to_string(count(tot2, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot2, "returned")))
+
+    print_line("-- loop atomic: both roles draining, the session still runs to its end")
+    let t4 = tracing()
+    let s4 = Session.attach(c, t4.ops)
+    let _ = steady_dst(s4, Steady_Dst.register(s4, 0), 0)
+    let _ = steady_src(s4, Steady_Src.register(s4, 0), 1)
+    t4.drain_role(1)
+    t4.drain_role(2)
+    t4.drain(())
+    print_line(counts(t4))
+    ()
+  end
+end

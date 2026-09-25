@@ -211,6 +211,15 @@ let test_free_port () =
   Fun.protect ~finally:(fun () -> Unix.close s) (fun () ->
       Unix.bind s (Unix.ADDR_INET (Unix.inet_addr_loopback, port)))
 
+(* Many ports in one call are all distinct. Calling [free_port] in a loop can
+   repeat a port (the kernel may hand a just-closed port straight back), which
+   is how two [forge run --processes] pools once got the same one. *)
+let test_free_ports_distinct () =
+  let ports = Procs.free_ports 64 in
+  Alcotest.(check int) "64 ports" 64 (List.length ports);
+  Alcotest.(check int) "all distinct" 64 (List.length (List.sort_uniq compare ports));
+  List.iter (fun p -> Alcotest.(check bool) "a real port" true (p > 0 && p < 65536)) ports
+
 let () =
   Alcotest.run "procs"
     [ ("procs",
@@ -224,4 +233,5 @@ let () =
          Alcotest.test_case "follow prefixes lines and still logs" `Quick
            test_follow_prefixes_and_logs;
          Alcotest.test_case "an unrunnable program exits 127" `Quick test_unrunnable_exits_127;
-         Alcotest.test_case "free_port" `Quick test_free_port ]) ]
+         Alcotest.test_case "free_port" `Quick test_free_port;
+         Alcotest.test_case "free_ports: no duplicates" `Quick test_free_ports_distinct ]) ]

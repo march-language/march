@@ -32,7 +32,7 @@ mod ClusterApHostedCancelA do
       match LinearMap.put(state.sessions, sid, parked) do
         (None, m) -> { state with sessions: m }
         (Some(old), m) ->
-          Echo_Server.take_closed(Echo_Server.cancel(old))
+          Echo_Server.take_closed(Echo_Server.cancel(s, old))
           panic("Start: session " ++ sid ++ " is already hosted")
       end
     end
@@ -57,12 +57,15 @@ mod ClusterApHostedCancelA do
           end
       end
     end
-    on Cancel(sid : String, _s : Cap(Session.Live), role : Int, _cause : String, _ep : Int) do
+    on Cancel(sid : String, s : Cap(Session.Live), role : Int, _cause : String, _ep : Int) do
       match LinearMap.take(state.sessions, sid) do
         (None, m) -> { state with sessions: m }
         (Some(parked), m) ->
           println("Server: session cancelled, " ++ Echo_Msg.role_name(role) ++ " gone")
-          Echo_Server.take_closed(Echo_Server.cancel(parked))
+          Echo_Server.take_closed(Echo_Server.cancel(s, parked))
+          -- `cancel` released the hold `register` took; `take_closed` of the
+          -- Closed value releases nothing more.
+          println("Server holds after cancel: " ++ int_to_string(Session.epoch_holds_here()))
           { state with cancelled: state.cancelled + 1,
                        counts: Map.remove(state.counts, sid, Map.str_cmp), sessions: m }
       end

@@ -1,0 +1,43 @@
+-- Two-node scenario "drain_hard": node-b runs Cons and arms a hard drain
+-- deadline after its first item (see scenario.sh). Cons keeps asking for
+-- more, slowly, so the deadline lands mid-session.
+mod DrainHardB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop atomic do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  pfn cons(c : Cap(IO), s : Cap(Session.Live), st : Stream_Cons.Entry, got : Int) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+      if got == 0 do
+        println("node-b: draining, hard deadline 300 ms")
+        SessionNode.drain_epochs(c, 100, 300)
+      else () end
+      sleep_ms(150)
+      if got + 1 >= 20 do Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true))
+      else cons(c, s, Stream_Cons.choose_more(s, st1, true), got + 1) end)
+  end
+
+  fn main(c : Cap(IO)) do
+    match Stream_Run.run_Cons(c, "node-b", "drain-secret", Stream_Run.addrs_from_env(), fn (s, st) -> cons(c, s, st, 0)) do
+      Ok(_) -> println("Cons: Ok")
+      Err(SessionNode.Left(why)) -> println("Cons: Err(Left(" ++ why ++ "))")
+      Err(e) -> println("Cons: " ++ Stream_Run.error_message(e))
+    end
+  end
+end

@@ -222,7 +222,7 @@ let start_processes ?env ?(hot_reload = false) ?pubkey ?(extra_env = []) ?log
       (Ok []) (builds_of t)
   in
   let slots = slots_of t in
-  let ports = List.map (fun _ -> Procs.free_port ()) slots in
+  let ports = Procs.free_ports (List.length slots) in
   let secret = Sys.getenv_opt "MARCH_CLUSTER_SECRET" |> Option.value ~default:("forge-run-" ^ proj.Project.name) in
   let log = match log with
     | Some l -> l

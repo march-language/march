@@ -1613,9 +1613,17 @@ mod ClusterNode do
           Err(_) -> ()
           Ok(d) ->
             announce_consumed(h, l, List.length(frame) + 4)
+            -- The delivery's origin rides the mailbox node of whatever the
+            -- route sends (DD step-6 follow-up 1): an actor that later drops
+            -- the message (a hot deploy changed its message type) answers
+            -- DELIVERY_FAILED through `delivery_failed_watch`'s hook, on
+            -- this link's control writer. Set around the route only: the
+            -- route runs to completion in this task's turn.
+            delivery_origin_set(l.cw, d.seq)
             let outcome = if d.to_creation != creation do
               Err("stale creation " ++ int_to_string(d.to_creation) ++ ", node is at " ++ int_to_string(creation))
             else deliver_local(h, d) end
+            delivery_origin_clear()
             match outcome do
               Ok(_) -> ()
               Err(reason) -> discard(send(pid_of_int(l.cw), CtlWrite(NodeSend.encode_failed(d.seq, reason))))
@@ -1631,6 +1639,25 @@ mod ClusterNode do
     send(node, LinkClosed(l.node_id, l.gen))
     release_link(h, l, 3)
     0
+  end
+
+  -- The actor loop dropped a remote delivery it had already accepted (a hot
+  -- deploy changed the actor's message type and nothing converted the old
+  -- format): answer DELIVERY_FAILED as the reader would for a route's Err.
+  -- [conn] is the link's control-writer pid the reader stamped
+  -- (`delivery_origin_set`), or negative for the loopback. Runs in the
+  -- dropping actor's turn; it only sends. One hook per process, installed
+  -- by the first `start` (a later node's handle replaces it: the loopback
+  -- handler is per node, the writer pids are not).
+  pfn delivery_failed_hook(h : CnHandle, conn : Int, seq : Int, reason : String) : () do
+    if conn < 0 do
+      match Vault.get(h.failed, "f") do
+        Some(f) -> f(seq, reason)
+        None -> ()
+      end
+    else
+      discard(send(pid_of_int(conn), CtlWrite(NodeSend.encode_failed(seq, reason))))
+    end
   end
 
   pfn deliver_local(h : CnHandle, d : NodeSend.Delivery) : Result((), String) do
@@ -2057,9 +2084,13 @@ mod ClusterNode do
         match NodeSend.decode_msg(body) do
           Err(_) -> ()
           Ok(d) ->
+            -- A negative origin: the loopback, whose failures go to this
+            -- node's own handler (see `delivery_failed_hook`).
+            delivery_origin_set(0 - 1, d.seq)
             let outcome = if d.to_creation != Vault.get_or(h.meta, "creation", 0) do
               Err("stale creation " ++ int_to_string(d.to_creation) ++ ", node is at " ++ int_to_string(Vault.get_or(h.meta, "creation", 0)))
             else deliver_local(h, d) end
+            delivery_origin_clear()
             match outcome do
               Ok(_) -> ()
               Err(reason) ->
@@ -2191,6 +2222,7 @@ mod ClusterNode do
                   meta: Vault.new("cluster_node_meta_" ++ tag) }
         Vault.set(h.meta, "listen_fd", listen_fd)
         Vault.set(h.meta, "creation", cfg.creation)
+        delivery_failed_watch(fn (conn, seq, reason) -> delivery_failed_hook(h, conn, seq, reason))
         match NodeQueue.start_local(fn frame -> deliver_loopback(h, frame)) do
           (w, fd) ->
             Vault.set(h.qs, "loop", pid_to_int(w))

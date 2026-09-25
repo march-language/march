@@ -1,0 +1,38 @@
+-- Two-node scenario "drain_hard": node-a runs Prod (see scenario.sh).
+mod DrainHardA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs Session.Live
+
+  @[endpoints]
+  protocol Stream do
+    loop atomic do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  pfn prod(s : Cap(Session.Live), st : Stream_Prod.Entry, next : Int) : Stream_Prod.Yield do
+    let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
+    Stream_Prod.offer_more_done(s, st1,
+      fn (_b, st2) -> prod(s, st2, next + 1),
+      fn (_b, st2) -> Stream_Prod.close(s, st2))
+  end
+
+  fn main(c : Cap(IO)) do
+    println("node-a: up")
+    match Stream_Run.run_Prod(c, "node-a", "drain-secret", Stream_Run.addrs_from_env(), fn (s, st) -> prod(s, st, 1)) do
+      Ok(_) -> println("Prod: Ok")
+      Err(SessionNode.Cancelled(role, _why)) -> println("Prod: cancelled waiting on role " ++ int_to_string(role))
+      Err(e) -> println("Prod: " ++ Stream_Run.error_message(e))
+    end
+  end
+end

@@ -1,4 +1,6 @@
 node-b: up
+Cons holds after start: 1
 Cons got Item(1)
 Cons got Item(2)
+Cons holds after finish: 0
 Cons: closed

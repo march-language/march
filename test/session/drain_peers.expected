@@ -1,0 +1,44 @@
+-- Stream: Cons drains at its loop boundary after two items
+Prod sends 1
+Cons got 1
+Prod sends 2
+Cons got 2
+  transport: draining 2
+Prod sends 3
+  transport: undelivered 1 -> 2
+  transport: drained 2 at its boundary
+Cons drained at its boundary (role 0)
+  transport: drained 1 waiting on role 2
+Prod drained (waiting on role 2), undelivered: 3
+Prod undelivered 1, Cons drained true
+sent 5, consumed 4, returned 1, queued 0
+-- Stream: Prod's epoch drains; Cons ends at its next boundary
+Prod sends 1
+Cons got 1
+  transport: draining 1
+Prod sends 2
+  transport: undelivered 1 -> 2
+  transport: drained 2 at its boundary
+Cons drained at its boundary (role 0)
+  transport: drained 1 waiting on role 2
+Prod drained (waiting on role 2), undelivered: 2
+sent 3, consumed 2, returned 1, queued 0
+-- Ring: C drains; B is mid-iteration, A waits on C
+  transport: draining 3
+  transport: undelivered 2 -> 3
+  transport: drained 3 at its boundary
+  transport: drained 2 waiting on role 3
+  transport: drained 1 waiting on role 3
+A undelivered 0, B undelivered 1, C undelivered 0
+sent 6, consumed 5, returned 1, queued 0
+-- chaos: Stream, 60 seeds, a random role drains after a random number of steps
+drained 13, finished first 47 of 60, returned 13
+-- chaos: Ring, three roles, 60 seeds
+drained 22, finished first 38 of 60, returned 22
+-- loop atomic: both roles draining, the session still runs to its end
+  transport: draining 1
+  transport: draining 2
+Steady: Dst got all 5 items
+  transport: close 2
+  transport: close 1
+sent 10, consumed 10, returned 0, queued 0

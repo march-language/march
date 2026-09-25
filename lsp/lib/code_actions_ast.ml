@@ -508,7 +508,7 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
                  let named = match label with Some l -> l.Ast.txt ^ " : " | None -> "" in
                  Printf.sprintf "%s-- %s sends %s%s\n%ssend(ch, ?)\n%slet _ = receive(ch)\n"
                    indent from.Ast.txt named (surface_ty ty) indent indent
-               | Ast.ProtoLoop inner ->
+               | Ast.ProtoLoop (inner, _) ->
                  Printf.sprintf "%sloop do\n%s%send\n" indent
                    (steps_text (indent ^ "  ") inner) indent
                | Ast.ProtoChoice (role, branches) ->
