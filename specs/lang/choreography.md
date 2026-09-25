@@ -309,10 +309,10 @@ granted body holds `Cap(IO.FileWrite)`, not `Cap(IO)`, and `Cap(IO.FileWrite)` d
 unify with `Cap(IO)`, so it cannot hand its capability to anything that wants the wider
 one. The second is a walk, because a body that never touches its capability value can
 still call `file_write` through any helper. At every call of a runner front the compiler
-walks everything the callback reaches (helpers, functions passed as values, actors it
-spawns; for a hosted role, `start`, `deliver`, `cancel` and the actor behind `host`) and
-requires every capability in that reach to sit under the role's grant, exactly as
-`main`'s grant bounds the program:
+walks everything the callback reaches (helpers, functions passed as values, local closures
+it captures, actors it spawns; for a hosted role, `start`, `deliver`, `cancel` and the
+actor behind `host`) and requires every capability in that reach to sit under the role's
+grant, exactly as `main`'s grant bounds the program:
 
 ```
 Role `Stream.Cons` is granted `Cap(IO.Console)` (`role Cons needs IO.Console`), but the
@@ -322,9 +322,30 @@ grant bounds the program.
 help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.
 ```
 
+The root of the walk is the *value* that reaches the body parameter, not the expression
+at the call. A body bound with `let` in the calling function, a body passed in through a
+parameter (resolved at each call site), an alias such as `let sv = save`, a local closure
+the body calls, and a body returned by a function (charged that function's reach) are all
+walked; the chain names a local closure by its name (`body → sv → save`). When the value
+has no static origin, because it was read from a record field or a data structure or
+received in a message, the compiler cannot walk it. A closure received as a value is its
+creator's authority, so this is reported, not refused:
+
+```
+warning: cannot verify role grant for the body passed to `Stream_Run.run_Cons` at
+app.march:28: value not statically known (it is read from a data structure, a record
+field or a message, not bound in this function). ...
+help: pass a lambda or a named function here, or bind the body with `let` in this
+function, to have it checked.
+```
+
 A role's grant must also fit within `main`'s: the runner narrows the role's capabilities
 from what `main` holds, so `role Cons needs IO.FileWrite` under `fn main(c :
-Cap(IO.Console))` is an error at the grant line.
+Cap(IO.Console))` is an error at the grant line. And a grant names IO capabilities only:
+`role Cons needs Session.Live` (or `ClusterNode.Live`, or `LibC`) is one error at the
+grant line, because the runner narrows each path from `main`'s `Cap(IO)` and no narrowing
+produces a proof or foreign capability. The session capability is passed to every body
+already.
 
 The grant bounds the role's *code*, not its *authority*. A body handed a pid to an actor
 with wider capabilities can message it, and a closure it receives can do whatever its
@@ -336,9 +357,11 @@ march --dump-role-authority app.march
 ```
 
 prints, per runner call, the role's grant, what its code reaches, the functions it
-references as values and the actors it spawns or hosts, each with the capabilities behind
-it. It is a report, not a check; it exists so that a narrow grant is never mistaken for
-narrow authority.
+references as values, the local closures it captures (with the function that made them
+and the line), the pids it holds without having spawned them (`holds: h -> Keeper ->
+IO.FileWrite`) and the actors it spawns or hosts, each with the capabilities behind it. It
+is a report, not a check; it exists so that a narrow grant is never mistaken for narrow
+authority.
 
 ## Telling the nodes where to find each other
 

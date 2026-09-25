@@ -1,0 +1,100 @@
+-- Compiled-vs-interpreted parity for the builtins whose C functions were
+-- UNPREFIXED until 2026-09-25: `uuid_v7`, `uuid_v7_at` and `dns_resolve`.
+-- (specs/progress/2026-09-25-runtime-symbol-naming-and-uncompiled-caps.md)
+--
+-- They compiled only because mangle_extern's identity fallthrough emitted
+-- `call @uuid_v7` and the runtime happened to define a C function of exactly
+-- that name.  With no row in lib/tir/llvm_builtins.ml, no capability table knew
+-- the symbol: a compiled uuid_v7() carried no IO.Clock marker, and the binary
+-- audit read ANY symbol spelled `dns_resolve` as IO.Network.  They are now
+-- `march_uuid_v7` / `march_uuid_v7_at` / `march_dns_resolve` with explicit
+-- rows, and this fixture holds the renamed lowering to the interpreter.  The
+-- dune rule runs it BOTH ways against the one golden.
+--
+-- A UUID v7 is random apart from its timestamp, so the checks are on its
+-- SHAPE (RFC 9562: 8-4-4-4-12 lowercase hex, version nibble 7, variant 10xx),
+-- on the exact timestamp prefix `uuid_v7_at` pins, and on the timestamp
+-- `uuid_v7` embeds agreeing with `unix_time_ms` to within a minute.
+--
+-- dns_resolve gets a NUMERIC host so no resolver or network is involved.  The
+-- call runs in a loop because its argument moved from "owned" (the default for
+-- a builtin on no borrow list) to "borrowed" when it gained its table row: a
+-- wrong classification shows up as a use-after-free or a leak across calls.
+mod Main do
+  needs IO.Console, IO.Clock, IO.Network
+
+  pfn hex_val(b : Int) : Int do
+    if b >= 48 && b <= 57 do b - 48 else b - 87 end
+  end
+
+  -- The first n characters of s as hex, skipping `-`.
+  pfn hex_prefix(s : String, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+      let b = string_byte_at(s, i)
+      if b == 45 do hex_prefix(s, i + 1, n, acc)
+      else hex_prefix(s, i + 1, n, acc * 16 + hex_val(b)) end
+    end
+  end
+
+  pfn is_lower_hex_or_dash(s : String, i : Int) : Bool do
+    if i >= string_byte_length(s) do true
+    else
+      let b = string_byte_at(s, i)
+      let ok = (b >= 48 && b <= 57) || (b >= 97 && b <= 102) || b == 45
+      if ok do is_lower_hex_or_dash(s, i + 1) else false end
+    end
+  end
+
+  pfn shape_ok(u : String) : Bool do
+    string_byte_length(u) == 36
+      && string_slice(u, 8, 1) == "-" && string_slice(u, 13, 1) == "-"
+      && string_slice(u, 18, 1) == "-" && string_slice(u, 23, 1) == "-"
+      && string_slice(u, 14, 1) == "7"
+      && string_contains("89ab", string_slice(u, 19, 1))
+      && is_lower_hex_or_dash(u, 0)
+  end
+
+  pfn resolve_loop(i : Int, n : Int, ok : Int) : Int do
+    if i >= n do ok
+    else
+      let host = "127.0." ++ "0.1"
+      let hit = match dns_resolve(host) do
+        Ok(ips) -> match ips do
+          Cons(ip, _) -> if ip == host do 1 else 0 end
+          Nil -> 0
+        end
+        Err(_) -> 0
+      end
+      resolve_loop(i + 1, n, ok + hit)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock),
+          _cap_net : Cap(IO.Network)) do
+    let u = uuid_v7()
+    println("uuid_v7 shape: " ++ to_string(shape_ok(u)))
+    let now = unix_time_ms()
+    let ts = hex_prefix(u, 0, 13, 0)
+    let skew = if ts > now do ts - now else now - ts end
+    println("uuid_v7 timestamp within a minute of unix_time_ms: " ++ to_string(skew < 60000))
+    println("two uuid_v7 differ: " ++ to_string(uuid_v7() != uuid_v7()))
+    -- Through a closure: the builtin as a lambda body goes through defun.
+    let lens = List.map([1, 2, 3], fn _ -> string_byte_length(uuid_v7()))
+    println("lengths via closure: " ++ to_string(lens))
+
+    println(string_slice(uuid_v7_at(0), 0, 15))
+    println(string_slice(uuid_v7_at(1700000000000), 0, 15))
+    println(string_slice(uuid_v7_at(281474976710655), 0, 15))
+    println("uuid_v7_at shape: " ++ to_string(shape_ok(uuid_v7_at(1700000000000))))
+
+    let _ = resolve_loop(0, 10, 0)
+    let before = live_allocs()
+    let hits = resolve_loop(0, 200, 0)
+    let growth = live_allocs() - before
+    println("dns_resolve numeric host, 200 calls: " ++ to_string(hits))
+    -- Owned (the old default) leaked exactly one host String per call:
+    -- growth was 200 here, measured 2026-09-25 with the borrow rows removed.
+    println("dns_resolve leaked nothing: " ++ to_string(growth == 0))
+  end
+end

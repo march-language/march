@@ -57,8 +57,8 @@ let special_lowerings : string list =
     (* The generic extern-call path emits `call @<name>`, and the runtime
        defines a C function of exactly that name (runtime/march_runtime.c,
        runtime/march_http.c), so the call links. *)
-    "__try_call"; "__try_call_val"; "dns_resolve"; "http_fetch";
-    "http_fetch_available"; "uuid_v7"; "uuid_v7_at";
+    "__try_call"; "__try_call_val"; "http_fetch";
+    "http_fetch_available";
     "logger_add_field"; "logger_appender_names"; "logger_clear_appenders";
     "logger_clear_module_level"; "logger_dispatch"; "logger_field_count";
     "logger_get_fields"; "logger_module_level"; "logger_pop_to_depth";

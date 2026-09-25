@@ -8911,8 +8911,8 @@ int64_t march_process_pid(void) {
     return (int64_t)getpid();
 }
 
-/* dns_resolve(host) → Result(List(String), String) */
-void *dns_resolve(void *host_ptr) {
+/* march_dns_resolve(host) → Result(List(String), String).  Borrows host. */
+void *march_dns_resolve(void *host_ptr) {
     march_string *hs = (march_string *)host_ptr;
     char hostname[1024];
     size_t copy_len = (size_t)hs->len < sizeof(hostname) - 1 ? (size_t)hs->len : sizeof(hostname) - 1;
@@ -12102,7 +12102,18 @@ static void uuid_v7_bytes(uint8_t bytes[16], int64_t ts_ms) {
     bytes[8] = (uint8_t)((bytes[8] & 0x3f) | 0x80);  /* variant 10xx */
 }
 
-void *uuid_v7_at(int64_t ts_ms) {
+/* uuid_v7_at(unix_ms) / uuid_v7(): March builtins, compiled through explicit
+ * rows in lib/tir/llvm_builtins.ml.  Until 2026-09-25 these were the
+ * unprefixed C functions `uuid_v7_at` / `uuid_v7`, reached only through
+ * mangle_extern's identity fallthrough -- so no capability table knew the
+ * symbol and a compiled uuid_v7() left no IO.Clock marker in the binary.
+ * A negative timestamp is an error, as in the interpreter (eval_builtins.ml). */
+void *march_uuid_v7_at(int64_t ts_ms) {
+    if (ts_ms < 0) {
+        fprintf(stderr, "march: runtime error: uuid_v7_at: negative timestamp %lld\n",
+                (long long)ts_ms);
+        exit(1);
+    }
     uint8_t b[16]; uuid_v7_bytes(b, ts_ms);
     char buf[37];
     snprintf(buf, sizeof(buf),
@@ -12112,10 +12123,10 @@ void *uuid_v7_at(int64_t ts_ms) {
     return march_string_lit(buf, 36);
 }
 
-void *uuid_v7(void) {
+void *march_uuid_v7(void) {
     struct timeval tv; gettimeofday(&tv, NULL);
     int64_t ts_ms = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
-    return uuid_v7_at(ts_ms);
+    return march_uuid_v7_at(ts_ms);
 }
 
 /* ── Logger builtins ─────────────────────────────────────────────────── */
