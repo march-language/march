@@ -16,6 +16,7 @@
 #include <assert.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 static void nop(void *arg) { (void)arg; }
@@ -88,7 +89,6 @@ static void test_block_live_scheduler(void) {
 #define N_MSGS2 400
 static _Atomic int64_t g_received2 = 0, g_send_ok2 = 0;
 static march_proc *g_bounded_rxC = NULL;
-static march_proc *g_txA = NULL;
 
 static void rx_loop2(void *arg) {
     (void)arg;
@@ -115,10 +115,29 @@ static void tx_loop2(void *arg) {
  * fixed number of times instead lets this proc finish on its own,
  * alongside txA/txB/rxC, once its work is done. */
 #define PRODDER_ITERS 3000
+/* txA finishes its sends and DIES while the prodder is still prodding it, and
+ * a dead proc is retired to march_reclaim and FREED after a grace period.  So
+ * the prodder must not hold txA's `march_proc *` across its yields: it keeps
+ * the pid and resolves it afresh each turn (a green thread is inside a
+ * critical section between two dispatches, so the pointer is good until the
+ * yield).  It used to send through the raw g_txA pointer, which after txA's
+ * reclaim was a use-after-free (Guard Malloc faults on it every run, in
+ * march_sched_send reading target->pid) that goes on to WRITE the freed
+ * block: mbox_lock, mailbox links, counters.  On macOS a calloc that reuses
+ * such a block returns it with those writes still in it (it relies on the
+ * zeroing done at free), so the garbage resurfaced as the "fresh" state of a
+ * LATER proc: locally, test_spurious_wake_does_not_end_recv's receiver
+ * getting NO_MSG, and sched_loop's reap walking a mbox_send_waiters list whose
+ * head was 0x2 (this prodder's payload) and faulting at 0xa2; on macOS CI,
+ * most likely, test_drop_new's brand-new daemon failing its first send.  See
+ * specs/progress/2026-09-25-flake-scheduler-mbox-drop-new-daemon-exits.md. */
+static int64_t g_txA_pid = -1;
 static void prodder_loop(void *arg) {
     (void)arg;
     for (int i = 0; i < PRODDER_ITERS; i++) {
-        march_sched_send(g_txA, (void *)0x2);   /* result ignored; txA never drains these */
+        march_proc *txA = march_sched_find(g_txA_pid);  /* NULL once reaped */
+        if (txA)
+            march_sched_send(txA, (void *)0x2);   /* result ignored; txA never drains these */
         march_sched_yield();
     }
 }
@@ -127,7 +146,7 @@ static void test_block_spurious_wake_while_linked(void) {
     march_sched_init();
     g_bounded_rxC = march_sched_spawn(rx_loop2, NULL);
     march_sched_set_mbox_limit(g_bounded_rxC, 4, MARCH_MBOX_BLOCK);  /* tight: heavy contention */
-    g_txA = march_sched_spawn(tx_loop2, NULL);
+    g_txA_pid = march_sched_spawn(tx_loop2, NULL)->pid;   /* txA */
     march_sched_spawn(tx_loop2, NULL);          /* txB */
     march_sched_spawn(prodder_loop, NULL);
     march_sched_request_shutdown();
@@ -169,7 +188,10 @@ static void test_block_spurious_wake_while_linked(void) {
 static _Atomic int g_sw_got_nomsg = 0;
 static _Atomic int g_sw_got_real  = 0;
 static _Atomic int g_sw_reparked  = 0;
-static march_proc *g_sw_rx = NULL;
+/* The receiver by pid, resolved afresh each time (never held across a yield):
+ * if a regression kills it, it is reaped and freed, and a stale pointer would
+ * turn a clean assertion failure into a use-after-free (see prodder_loop). */
+static int64_t g_sw_rx_pid = -1;
 
 static void sw_rx_loop(void *arg) {
     (void)arg;
@@ -182,7 +204,9 @@ static void sw_rx_loop(void *arg) {
  * its scheduler thread) until rx reaches PROC_WAITING. Returns 1 if it did. */
 static int sw_wait_until_parked(void) {
     for (int i = 0; i < 200000; i++) {
-        march_proc_status st = atomic_load_explicit(&g_sw_rx->status,
+        march_proc *rx = march_sched_find(g_sw_rx_pid);
+        if (!rx) return 0;                  /* reaped: it died */
+        march_proc_status st = atomic_load_explicit(&rx->status,
                                                     memory_order_acquire);
         if (st == PROC_WAITING) return 1;
         if (st == PROC_DEAD)    return 0;   /* pre-fix: it died on the wake */
@@ -196,18 +220,21 @@ static void sw_prodder_loop(void *arg) {
     if (!sw_wait_until_parked()) return;
     /* The bare spurious wake: deliberately NO march_sched_send, so the
      * mailbox is empty when the receiver resumes. */
-    march_sched_wake(g_sw_rx);
+    march_proc *rx = march_sched_find(g_sw_rx_pid);
+    if (!rx) return;
+    march_sched_wake(rx);
     /* It must come back to WAITING under its own steam (i.e. it re-parked
      * rather than reporting NO_MSG and exiting). */
     if (sw_wait_until_parked()) atomic_store(&g_sw_reparked, 1);
     /* Now a real delivery, to prove the receiver is still functional and the
      * re-park did not cost us the message. */
-    march_sched_send(g_sw_rx, (void *)0x2);
+    rx = march_sched_find(g_sw_rx_pid);
+    if (rx) march_sched_send(rx, (void *)0x2);
 }
 
 static void test_spurious_wake_does_not_end_recv(void) {
     march_sched_init();
-    g_sw_rx = march_sched_spawn(sw_rx_loop, NULL);
+    g_sw_rx_pid = march_sched_spawn(sw_rx_loop, NULL)->pid;
     march_sched_spawn(sw_prodder_loop, NULL);
     march_sched_request_shutdown();
     march_sched_run();
@@ -312,11 +339,68 @@ static void test_dead_reap_drain(void) {
     march_sched_set_msg_dtor(NULL);  /* don't leak into the segments below */
 }
 
+/* ── Deterministic segments: checks that say WHY ─────────────────────────
+ *
+ * CI once failed test_drop_new's FIRST send (macos-15, run 36041334583):
+ * `Assertion failed: (march_sched_send(dn, (void *)0x1) == MARCH_SEND_OK)`.
+ * The daemon had not run and exited first: these segments run after the last
+ * march_sched_run() has joined every scheduler thread and the preemption
+ * daemon, so the process has ONE OS thread here (task_threads() == 1) and
+ * nothing ever dispatches these daemons.  The brand-new proc was, in all
+ * likelihood, not fresh: its calloc'd struct reused a block that prodder_loop
+ * (above) had written after free.  prodder_loop no longer does that; these
+ * checks make a recurrence of the class say which field of which proc was
+ * dirty and what the send returned (DEAD vs DROPPED), instead of a bare
+ * assert's line number.
+ * See specs/progress/2026-09-25-flake-scheduler-mbox-drop-new-daemon-exits.md. */
+static void dump_proc(const char *what, int line, march_proc *p) {
+    if (!p) {
+        fprintf(stderr, "test_scheduler_mbox:%d: %s: proc is NULL\n", line, what);
+        return;
+    }
+    fprintf(stderr,
+            "test_scheduler_mbox:%d: %s: proc=%p pid=%lld daemon=%d status=%d "
+            "mbox_count=%lld user_mbox_count=%lld mbox_markers=%lld "
+            "mbox_limit=%lld mbox_policy=%d stop_requested=%d\n",
+            line, what, (void *)p, (long long)p->pid, (int)p->is_daemon,
+            (int)atomic_load(&p->status),
+            (long long)atomic_load(&p->mbox_count),
+            (long long)atomic_load(&p->user_mbox_count),
+            (long long)p->mbox_markers, (long long)p->mbox_limit,
+            (int)p->mbox_policy, (int)atomic_load(&p->stop_requested));
+}
+
+/* Spawn a never-run daemon and check it starts out alive with an empty
+ * mailbox and no leftover limit state. */
+static march_proc *spawn_fresh_daemon(int line) {
+    march_proc *p = march_sched_spawn_daemon(nop, NULL);
+    if (!p || atomic_load(&p->status) != PROC_RUNNABLE
+            || atomic_load(&p->mbox_count) != 0
+            || atomic_load(&p->user_mbox_count) != 0
+            || p->mbox_markers != 0 || p->mbox_limit != 0) {
+        dump_proc("freshly spawned daemon is not fresh", line, p);
+        abort();
+    }
+    return p;
+}
+
+static void expect_send(march_proc *p, void *msg, int want, int line) {
+    int got = march_sched_send(p, msg);
+    if (got != want) {
+        fprintf(stderr, "test_scheduler_mbox:%d: march_sched_send returned %d, "
+                        "expected %d (OK=%d DEAD=%d DROPPED=%d)\n",
+                line, got, want, MARCH_SEND_OK, MARCH_SEND_DEAD,
+                MARCH_SEND_DROPPED);
+        dump_proc("send target", line, p);
+        abort();
+    }
+}
+
 /* Default mailbox (mbox_limit == 0, MARCH_MBOX_UNBOUNDED) never rejects. */
 static void test_unbounded_default(void) {
-    march_proc *u = march_sched_spawn_daemon(nop, NULL);
+    march_proc *u = spawn_fresh_daemon(__LINE__);
     for (int i = 0; i < 100; i++)
-        assert(march_sched_send(u, (void *)0x1) == MARCH_SEND_OK);
+        expect_send(u, (void *)0x1, MARCH_SEND_OK, __LINE__);
     assert(march_sched_mbox_count(u) == 100);
 }
 
@@ -324,12 +408,12 @@ static void test_unbounded_default(void) {
  * rejected outright (MARCH_SEND_DROPPED) and the mailbox depth never grows
  * past the limit. */
 static void test_drop_new(void) {
-    march_proc *dn = march_sched_spawn_daemon(nop, NULL);
+    march_proc *dn = spawn_fresh_daemon(__LINE__);
     march_sched_set_mbox_limit(dn, 3, MARCH_MBOX_DROP_NEW);
-    assert(march_sched_send(dn, (void *)0x1) == MARCH_SEND_OK);
-    assert(march_sched_send(dn, (void *)0x1) == MARCH_SEND_OK);
-    assert(march_sched_send(dn, (void *)0x1) == MARCH_SEND_OK);
-    assert(march_sched_send(dn, (void *)0x1) == MARCH_SEND_DROPPED);
+    expect_send(dn, (void *)0x1, MARCH_SEND_OK, __LINE__);
+    expect_send(dn, (void *)0x1, MARCH_SEND_OK, __LINE__);
+    expect_send(dn, (void *)0x1, MARCH_SEND_OK, __LINE__);
+    expect_send(dn, (void *)0x1, MARCH_SEND_DROPPED, __LINE__);
     assert(march_sched_mbox_count(dn) == 3);
 }
 
@@ -349,11 +433,11 @@ static void test_drop_new(void) {
 static void test_drop_old(void) {
     int64_t dropped_before = march_sched_stat(MARCH_STAT_MSGS_DROPPED);
 
-    march_proc *dold = march_sched_spawn_daemon(nop, NULL);
+    march_proc *dold = spawn_fresh_daemon(__LINE__);
     march_sched_set_mbox_limit(dold, 2, MARCH_MBOX_DROP_OLD);
-    assert(march_sched_send(dold, (void *)0x3) == MARCH_SEND_OK);  /* tagged imm 1 */
-    assert(march_sched_send(dold, (void *)0x5) == MARCH_SEND_OK);  /* tagged imm 2 */
-    assert(march_sched_send(dold, (void *)0x7) == MARCH_SEND_OK);  /* evicts 0x3 */
+    expect_send(dold, (void *)0x3, MARCH_SEND_OK, __LINE__);  /* tagged imm 1 */
+    expect_send(dold, (void *)0x5, MARCH_SEND_OK, __LINE__);  /* tagged imm 2 */
+    expect_send(dold, (void *)0x7, MARCH_SEND_OK, __LINE__);  /* evicts 0x3 */
     assert(march_sched_mbox_count(dold) == 2);
 
     int64_t dropped_after = march_sched_stat(MARCH_STAT_MSGS_DROPPED);
