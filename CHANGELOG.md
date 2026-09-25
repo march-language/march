@@ -11,6 +11,17 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Fixed
+- **The bare `sha256` builtin now typechecks as `Bytes -> String`, matching what it
+  has always returned** (a 64-char lowercase hex string, like `Crypto.sha256`,
+  `md5` and `sha512`). It was declared `Bytes -> Bytes`, so `Bytes.length(sha256(b))`
+  typechecked and then crashed on both backends (a match failure interpreted,
+  `fatal SIGBUS` / exit 138 compiled). Compiled `sha256` of a `Bytes` also crashed
+  regardless of how the result was used (see the `Base64.encode` / `sha256`
+  entry below for the runtime side); the builtin now also has its own runtime
+  entry, chosen by the compiler from the static type, so it never guesses.
+  For a raw digest use `hmac_sha256_bytes` / `sha1_bytes`.
+
 ### Added
 - **Node certificates for clusters** (build step 11a of the distributed-deploys
   plan, part 1). New `NodeCert` module: a certificate names a node
