@@ -1634,8 +1634,11 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NativeArray.html#fn-set_i32"><span class="sb-kind" style="color:var(--fn)">F</span>set_i32</a>
 <a class="sl" href="NativeArray.html#fn-set_int"><span class="sb-kind" style="color:var(--fn)">F</span>set_int</a>
 <a class="sl" href="NativeArray.html#fn-set_u8"><span class="sb-kind" style="color:var(--fn)">F</span>set_u8</a>
+<a class="sl" href="NativeArray.html#fn-sort_f32"><span class="sb-kind" style="color:var(--fn)">F</span>sort_f32</a>
 <a class="sl" href="NativeArray.html#fn-sort_float"><span class="sb-kind" style="color:var(--fn)">F</span>sort_float</a>
+<a class="sl" href="NativeArray.html#fn-sort_i32"><span class="sb-kind" style="color:var(--fn)">F</span>sort_i32</a>
 <a class="sl" href="NativeArray.html#fn-sort_int"><span class="sb-kind" style="color:var(--fn)">F</span>sort_int</a>
+<a class="sl" href="NativeArray.html#fn-sort_u8"><span class="sb-kind" style="color:var(--fn)">F</span>sort_u8</a>
 <a class="sl" href="NativeArray.html#fn-sum_f32"><span class="sb-kind" style="color:var(--fn)">F</span>sum_f32</a>
 <a class="sl" href="NativeArray.html#fn-sum_float"><span class="sb-kind" style="color:var(--fn)">F</span>sum_float</a>
 <a class="sl" href="NativeArray.html#fn-sum_i32"><span class="sb-kind" style="color:var(--fn)">F</span>sum_i32</a>
@@ -2142,6 +2145,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Seq.html#fn-unfold_until"><span class="sb-kind" style="color:var(--fn)">F</span>unfold_until</a>
 <a class="sl" href="Seq.html#fn-zip"><span class="sb-kind" style="color:var(--fn)">F</span>zip</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Session.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Session.html">Session</a></div><div class="sb-sub"><a class="sl" href="Session.html#type-Ops"><span class="sb-kind" style="color:var(--ty)">T</span>Ops</a>
+<a class="sl" href="Session.html#type-Outcome"><span class="sb-kind" style="color:var(--ty)">T</span>Outcome</a>
 <a class="sl" href="Session.html#type-InProcess"><span class="sb-kind" style="color:var(--ty)">T</span>InProcess</a>
 <a class="sl" href="Session.html#type-InProcessState"><span class="sb-kind" style="color:var(--ty)">T</span>InProcessState</a>
 <a class="sl" href="Session.html#fn-attach"><span class="sb-kind" style="color:var(--fn)">F</span>attach</a>
@@ -2149,6 +2153,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Session.html#fn-crash_cause"><span class="sb-kind" style="color:var(--fn)">F</span>crash_cause</a>
 <a class="sl" href="Session.html#fn-crash_payload"><span class="sb-kind" style="color:var(--fn)">F</span>crash_payload</a>
 <a class="sl" href="Session.html#fn-emit"><span class="sb-kind" style="color:var(--fn)">F</span>emit</a>
+<a class="sl" href="Session.html#fn-epoch_holds_here"><span class="sb-kind" style="color:var(--fn)">F</span>epoch_holds_here</a>
 <a class="sl" href="Session.html#fn-fail"><span class="sb-kind" style="color:var(--fn)">F</span>fail</a>
 <a class="sl" href="Session.html#fn-hold_epoch"><span class="sb-kind" style="color:var(--fn)">F</span>hold_epoch</a>
 <a class="sl" href="Session.html#fn-in_process"><span class="sb-kind" style="color:var(--fn)">F</span>in_process</a>
@@ -2156,9 +2161,11 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Session.html#fn-leave"><span class="sb-kind" style="color:var(--fn)">F</span>leave</a>
 <a class="sl" href="Session.html#fn-on_cancel"><span class="sb-kind" style="color:var(--fn)">F</span>on_cancel</a>
 <a class="sl" href="Session.html#fn-on_crash"><span class="sb-kind" style="color:var(--fn)">F</span>on_crash</a>
+<a class="sl" href="Session.html#fn-on_drain"><span class="sb-kind" style="color:var(--fn)">F</span>on_drain</a>
 <a class="sl" href="Session.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
 <a class="sl" href="Session.html#fn-release_epoch"><span class="sb-kind" style="color:var(--fn)">F</span>release_epoch</a>
-<a class="sl" href="Session.html#fn-suspend"><span class="sb-kind" style="color:var(--fn)">F</span>suspend</a></div></div>
+<a class="sl" href="Session.html#fn-suspend"><span class="sb-kind" style="color:var(--fn)">F</span>suspend</a>
+<a class="sl" href="Session.html#fn-suspend_at_boundary"><span class="sb-kind" style="color:var(--fn)">F</span>suspend_at_boundary</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="SessionNode.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="SessionNode.html">SessionNode</a></div><div class="sb-sub"><a class="sl" href="SessionNode.html#type-Link"><span class="sb-kind" style="color:var(--ty)">T</span>Link</a>
 <a class="sl" href="SessionNode.html#type-EndpointState"><span class="sb-kind" style="color:var(--ty)">T</span>EndpointState</a>
 <a class="sl" href="SessionNode.html#type-Party"><span class="sb-kind" style="color:var(--ty)">T</span>Party</a>
@@ -2176,6 +2183,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#fn-connect_to"><span class="sb-kind" style="color:var(--fn)">F</span>connect_to</a>
 <a class="sl" href="SessionNode.html#fn-deliver"><span class="sb-kind" style="color:var(--fn)">F</span>deliver</a>
 <a class="sl" href="SessionNode.html#fn-dials"><span class="sb-kind" style="color:var(--fn)">F</span>dials</a>
+<a class="sl" href="SessionNode.html#fn-drain_epochs"><span class="sb-kind" style="color:var(--fn)">F</span>drain_epochs</a>
 <a class="sl" href="SessionNode.html#fn-finish"><span class="sb-kind" style="color:var(--fn)">F</span>finish</a>
 <a class="sl" href="SessionNode.html#fn-initiate"><span class="sb-kind" style="color:var(--fn)">F</span>initiate</a>
 <a class="sl" href="SessionNode.html#fn-missing_addrs"><span class="sb-kind" style="color:var(--fn)">F</span>missing_addrs</a>
@@ -2737,7 +2745,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-count_on"><div class="ih"><span class="badge bfn">fn</span><span class="name">count_on</span><span class="sig">count_on(label : String, n : Int) : <a href="#type-TopoPlacement">TopoPlacement</a> do PlaceCountOn(label, n) end</span><a class="anchor-link" href="#fn-count_on" title="Link">#</a></div><div class="ib"><p><code>count(n)</code> among the nodes carrying [label] (<code>place = { on = label, count = n }</code>).</p></div></div>
 <div class="item" id="fn-desired_of"><div class="ih"><span class="badge bfn">fn</span><span class="name">desired_of</span><span class="sig">desired_of(text : String, pools : String -&gt; Bool) : Result((List(<a href="#type-TopoDesired">TopoDesired</a>), Int, Int), String)</span><a class="anchor-link" href="#fn-desired_of" title="Link">#</a></div><div class="ib"><p>What the digest [text] asks of this process: for each role one of [pools] serves, its placement and capacity (a role no such pool serves is absent); the drain deadlines; and an error for text that is not a version-1 digest.</p></div></div>
 <div class="item" id="fn-drain"><div class="ih"><span class="badge bfn">fn</span><span class="name">drain</span><span class="sig">drain(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int) : ()</span><a class="anchor-link" href="#fn-drain" title="Link">#</a></div><div class="ib"><p>Drain [node] now, as SIGTERM does under <code>drain_on_signal</code>.</p></div></div>
-<div class="item" id="fn-drain_on_signal"><div class="ih"><span class="badge bfn">fn</span><span class="name">drain_on_signal</span><span class="sig">drain_on_signal(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int) : ()</span><a class="anchor-link" href="#fn-drain_on_signal" title="Link">#</a></div><div class="ib"><p>On SIGTERM or SIGINT: close every offer of [node] (new invitations are refused, running sessions finish), then exit 0 once no session is running. At [soft_ms] a drain still waiting is reported; at [hard_ms] the process exits 1, naming how many sessions it cut. (Epoch drains are build step 6.) A second signal escapes the watcher and stops the process at once.</p></div></div>
+<div class="item" id="fn-drain_on_signal"><div class="ih"><span class="badge bfn">fn</span><span class="name">drain_on_signal</span><span class="sig">drain_on_signal(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int) : ()</span><a class="anchor-link" href="#fn-drain_on_signal" title="Link">#</a></div><div class="ib"><p>On SIGTERM or SIGINT: close every offer of [node] (new invitations are refused), drain every code epoch the process runs (running sessions end at their next loop boundary, D27, and actors take the epoch drain's deadlines), then exit 0 once no session is running. At [soft_ms] a drain still waiting is reported; at [hard_ms] the process exits 1, naming how many sessions it cut. A second signal escapes the watcher and stops the process at once.</p></div></div>
 <div class="item" id="fn-eligible_here"><div class="ih"><span class="badge bfn">fn</span><span class="name">eligible_here</span><span class="sig">eligible_here(p : <a href="#type-TopoPlacement">TopoPlacement</a>, labels : List(String)) : Bool</span><a class="anchor-link" href="#fn-eligible_here" title="Link">#</a></div><div class="ib"><p>Whether this node may take part in [p] at all: it carries the label, if any.</p></div></div>
 <div class="item" id="fn-everywhere"><div class="ih"><span class="badge bfn">fn</span><span class="name">everywhere</span><span class="sig">everywhere() : <a href="#type-TopoPlacement">TopoPlacement</a> do PlaceEverywhere end</span><a class="anchor-link" href="#fn-everywhere" title="Link">#</a></div><div class="ib"><p>Offer the role on every node that serves it (no <code>place</code> in the topology).</p></div></div>
 <div class="item" id="fn-hook"><div class="ih"><span class="badge bfn">fn</span><span class="name">hook</span><span class="sig">hook(name : String, f : () -&gt; a) : a</span><a class="anchor-link" href="#fn-hook" title="Link">#</a></div><div class="ib"><p>Run the pool hook [name] ([f]), which must return promptly: offers open only after every hook has returned. A watchdog reports a hook still running after MARCH_HOOK_TIMEOUT_MS (default 10000) and exits the process with status 1: offering nothing would be worse than failing loudly. Long-lived work belongs in a task or actor the hook spawns.</p></div></div>
