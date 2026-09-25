@@ -84,7 +84,7 @@ let rec steps_of_ast (steps : Ast.protocol_step list) : step list =
   List.concat_map (function
       | Ast.ProtoMsg (s, r, t, l) ->
         [ Msg { src = s.Ast.txt; dst = r.Ast.txt; ty = ty_text t; label = Option.map (fun (n : Ast.name) -> n.txt) l } ]
-      | Ast.ProtoLoop inner -> [ Loop (steps_of_ast inner) ]
+      | Ast.ProtoLoop (inner, _atomic) -> [ Loop (steps_of_ast inner) ]
       | Ast.ProtoChoice (by, bs) ->
         [ Choice { by = by.Ast.txt; branches = List.map (fun ((l : Ast.name), ss) -> (l.txt, steps_of_ast ss)) bs } ]
       | Ast.ProtoStop _ -> [ Stop ]
