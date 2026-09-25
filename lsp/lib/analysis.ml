@@ -2483,8 +2483,22 @@ let analyse ~filename ~src : t =
        here would drop the entire publishDiagnostics notification and the
        editor would show no squiggle at all. *)
     let desugar_errors = Err.create () in
+    (* D25: a protocol the project's topology uses warns at each unlabelled
+       step, as `march --topology` does, so the editor shows it where the
+       step is written. *)
+    let topology_protocols =
+      if filename = "" || filename = "<unknown>" then []
+      else
+        match Forge_config.find_forge_root (Filename.dirname filename) with
+        | Some root -> (try Topology_doc.protocols_used ~root with _ -> [])
+        | None -> []
+    in
     let desugared =
-      March_desugar.Desugar.desugar_module ~errors:desugar_errors raw_ast in
+      let tp = March_desugar.Desugar_endpoints.topology_protocols in
+      let saved = !tp in
+      tp := topology_protocols;
+      Fun.protect ~finally:(fun () -> tp := saved) (fun () ->
+          March_desugar.Desugar.desugar_module ~errors:desugar_errors raw_ast) in
     let stdlib_decls = Stdlib_cache.load () in
     (* Resolve cross-file imports (user imports + forge dep imports).
        Build the extra lib-path list from:

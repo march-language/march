@@ -81,6 +81,16 @@ let read_file path =
 let text_of path =
   match Hashtbl.find_opt open_docs path with Some t -> Some t | None -> read_file path
 
+(** The protocols the topology at [root] uses (D25), from its base file (the
+    open buffer, else the disk); [] without one, or when it does not parse
+    (its own diagnostics say why).  [Analysis] sets them before desugaring a
+    `.march` buffer, so each unlabelled step of one warns in the editor. *)
+let protocols_used ~root : string list =
+  let base = Filename.concat root "topology.toml" in
+  match text_of base with
+  | None -> []
+  | Some text -> (match T.of_strings [ (base, text) ] with Ok t -> T.protocols_used t | Error _ -> [])
+
 (* ── The index, from buffers and disk ───────────────────────────────────── *)
 
 (** path -> (digest of the text parsed, result): a keystroke in the topology

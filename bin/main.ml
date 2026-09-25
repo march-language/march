@@ -1646,7 +1646,9 @@ let contract_attr_fix ~src ~filename ~read_file
 (** Protocol evolution inputs (build step 9), read before anything is
     desugared: every `--protocol-baseline` file, registered under its
     protocol's name for [Desugar_endpoints.expand] (and digested for the CAS
-    key). *)
+    key), and, from the `--topology` digest, the protocols the app's topology
+    uses, whose unlabelled steps are warnings (D25).  A digest that does not
+    read is left for the `--topology` handling below to report. *)
 let load_protocol_inputs () =
   let module E = March_desugar.Desugar_endpoints in
   let contents =
@@ -1663,7 +1665,13 @@ let load_protocol_inputs () =
   in
   if contents <> [] then
     protocol_baseline_tag :=
-      Some (Digest.to_hex (Digest.string (String.concat "\000" (List.sort String.compare contents))))
+      Some (Digest.to_hex (Digest.string (String.concat "\000" (List.sort String.compare contents))));
+  match !topology_file with
+  | None -> ()
+  | Some path ->
+    (match March_forge.Topology.read_digest path with
+     | Error _ -> ()
+     | Ok t -> E.topology_protocols := March_forge.Topology.protocols_used t)
 
 (** --emit-protocols: write each expanded protocol's next baseline. *)
 let emit_protocols () =

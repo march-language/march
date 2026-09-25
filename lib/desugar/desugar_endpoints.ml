@@ -2143,6 +2143,58 @@ let emitted : (string, version * string) Hashtbl.t = Hashtbl.create 4
 let emit_file (v : version) : string =
   baseline_to_string (next_baseline (Hashtbl.find_opt baselines v.v_proto) v)
 
+(** The protocols a topology app uses (named in `[roles]` or in a pool's
+    `initiates`), by short or qualified name.  Set by the driver from the
+    `--topology` digest and by the LSP from the project's topology.toml; each
+    unlabelled step of one of them is a warning (D25). *)
+let topology_protocols : string list ref = ref []
+
+let uses_protocol (proto : string) =
+  List.exists
+    (fun n ->
+       n = proto
+       || (match List.rev (String.split_on_char '.' n) with last :: _ -> last = proto | [] -> false))
+    !topology_protocols
+
+(** D25: each unlabelled step (not a branch head, which its branch label names)
+    of a protocol a topology app uses is a warning at the step, naming the
+    positional name it would get renumbered out of and suggesting a label. *)
+let warn_unlabelled (errors : Err.ctx) ~proto (steps : protocol_step list) : unit =
+  let counts : (string * string, int) Hashtbl.t = Hashtbl.create 8 in
+  let name s r =
+    let k = 1 + Option.value ~default:0 (Hashtbl.find_opt counts (s, r)) in
+    Hashtbl.replace counts (s, r) k;
+    Printf.sprintf "Msg_%s_%s_%d" s r k
+  in
+  let warn (s : name) (r : name) =
+    let c = name s.txt r.txt in
+    Err.warning errors ~span:s.span
+      (Printf.sprintf
+         "Protocol `%s` is used by this app's topology, and the step `%s -> %s` has no label, so its \
+          wire tag is the positional `%s`. A step added before it renumbers it and breaks a hot deploy \
+          (D25). Label it: `%s: %s -> %s : ...`."
+         proto s.txt r.txt c
+         (String.lowercase_ascii s.txt ^ "_to_" ^ String.lowercase_ascii r.txt) s.txt r.txt)
+  in
+  let rec go (steps : protocol_step list) =
+    List.iter
+      (function
+        | ProtoMsg (s, r, _, None) -> warn s r
+        | ProtoMsg (_, _, _, Some _) -> ()
+        | ProtoLoop inner -> go inner
+        | ProtoCrashOr (inner, crash, _) -> go [ inner ]; go crash
+        | ProtoChoice (_, branches) ->
+          List.iter
+            (fun (_, arm) ->
+               match arm with
+               | (ProtoMsg _ | ProtoCrashOr (ProtoMsg _, _, _)) :: rest -> go rest
+               | arm -> go arm)
+            branches
+        | ProtoStop _ | ProtoMayCrash _ | ProtoRoleNeeds _ -> ())
+      steps
+  in
+  go steps
+
 (** Whether [expand] emits `<P>_Run`.  On for every real compile.  A test that
     typechecks generated code against a thin stdlib without `SessionNode`
     turns it off (test/test_endpoints.ml); the module's shape is asserted
@@ -2236,6 +2288,7 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
                 | None -> []
                 | Some b -> compat_rows ~old_:(prior_version b ~fp:fingerprint) ~new_:version
               in
+              if uses_protocol proto then warn_unlabelled errors ~proto pdef.proto_steps;
               let msg = msg_module errors ~proto ~span ~fingerprint ~compat ctors roles peers in
               let grants = grants_of pdef.proto_steps in
               let role_mods =

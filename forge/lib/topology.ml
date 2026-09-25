@@ -735,6 +735,20 @@ let are_peers (def : Ast.protocol_def) a b =
 let unlabelled_count (def : Ast.protocol_def) =
   List.length (List.filter (fun (_, _, labelled) -> not labelled) (proto_msgs def.Ast.proto_steps))
 
+(** The protocols a topology app uses (D25): each one named in `[roles]`, and
+    each one a pool's written `initiates` names.  Derived initiates are not
+    here (they need the project index): a protocol an app initiates has its
+    other roles served, so `[roles]` names it anyway.  The compiler
+    (`--topology`) and the LSP read this to warn at each unlabelled step. *)
+let protocols_used (t : t) : string list =
+  List.sort_uniq String.compare
+    (List.map (fun r -> r.protocol) t.roles
+     @ List.concat_map (fun p ->
+         List.filter_map (fun r ->
+             match String.split_on_char '.' r with [ pr; _ ] -> Some pr | _ -> None)
+           (Option.value ~default:[] p.initiates))
+       t.pools)
+
 (** Find a protocol by the short name the topology uses ("Checkout"), or by
     its qualified name. *)
 let find_protocol (idx : index) (name : string) =
@@ -902,15 +916,7 @@ let check ~(index : index) (t : t) : diag list =
         p.hosts)
     t.pools;
   (* D25: unlabelled steps in any protocol the topology names. *)
-  let protocols_named =
-    List.sort_uniq String.compare
-      (List.map (fun r -> r.protocol) t.roles
-       @ List.concat_map (fun p ->
-           List.filter_map (fun r ->
-               match String.split_on_char '.' r with [ pr; _ ] -> Some pr | _ -> None)
-             (Option.value ~default:[] p.initiates))
-         t.pools)
-  in
+  let protocols_named = protocols_used t in
   List.iter (fun pname ->
       match find_protocol index pname with
       | Some (_, _, def) ->

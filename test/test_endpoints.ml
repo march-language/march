@@ -2156,6 +2156,38 @@ let compat_generated_ok =
            Alcotest.(check bool) "Stream_Msg.compat" true (has_fn mods "Stream_Msg" "compat");
            Alcotest.(check (list string)) "no error" [] (error_messages (typecheck_with_stdlib src))))
 
+(* ── D25: unlabelled steps in a protocol the topology uses ──────────────── *)
+
+let d25_warnings ~topology src =
+  let saved = !E.topology_protocols in
+  E.topology_protocols := topology;
+  Fun.protect ~finally:(fun () -> E.topology_protocols := saved) (fun () ->
+      let errors = March_errors.Errors.create () in
+      ignore (without_runner (fun () -> March_desugar.Desugar.desugar_module ~errors (parse_module (wrap src))));
+      List.filter_map
+        (fun (d : March_errors.Errors.diagnostic) ->
+           if d.severity = March_errors.Errors.Warning && contains_text d.message "(D25)"
+           then Some (d.span.start_line, d.message) else None)
+        errors.diagnostics)
+
+let d25_unlabelled_warns =
+  Alcotest.test_case "D25: each unlabelled step of a topology protocol is a warning at the step" `Quick
+    (fun () ->
+       let ws = d25_warnings ~topology:[ "Tri" ] tri_v1 in
+       (* branch heads are named by their branch labels: only `A -> C` warns *)
+       Alcotest.(check int) "one warning" 1 (List.length ws);
+       let (line, msg) = List.hd ws in
+       Alcotest.(check int) "at the step's line" 11 line;
+       Alcotest.(check bool) ("names the positional tag (got: " ^ msg ^ ")") true (contains_text msg "`Msg_A_C_1`");
+       Alcotest.(check bool) "suggests a label" true (contains_text msg "a_to_c: A -> C"))
+
+let d25_quiet =
+  Alcotest.test_case "D25: no warning outside a topology, or once the step is labelled" `Quick
+    (fun () ->
+       Alcotest.(check int) "not a topology protocol" 0 (List.length (d25_warnings ~topology:[ "Other" ] tri_v1));
+       Alcotest.(check int) "labelled" 0 (List.length (d25_warnings ~topology:[ "Tri" ] tri_labelled_v1));
+       Alcotest.(check int) "qualified name matches" 1 (List.length (d25_warnings ~topology:[ "Main.Tri" ] tri_v1)))
+
 let tests =
   [ stream_shape;
     two_step_branch_shape; two_step_branch_ok; two_step_branch_skip;
@@ -2183,4 +2215,4 @@ let tests =
     crash_choose_shape; crash_choose_ok; crash_chan_refused;
     crash_hosted_shape; crash_choose_hosted_shape; crash_hosted_ok; crash_hosted_state_is_the_branch;
     compat_branch_added; compat_renumbered; compat_labelled; compat_grant_change; compat_payload_change;
-    compat_baseline_roundtrip; compat_generated_ok ]
+    compat_baseline_roundtrip; compat_generated_ok; d25_unlabelled_warns; d25_quiet ]
