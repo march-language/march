@@ -3480,7 +3480,14 @@ let rec eval_decl (env : env) (d : decl) : env =
         inner_ref := e';
         eval_mod_decls rest e'
     in
-    let mod_env = eval_mod_decls decls !inner_ref in
+    let mod_env =
+      (* Pop our frame if the body raises (a module-level `let` that fails,
+         say): a caller that recovers in-process -- the REPL, the refinement
+         witness harness, the test drivers -- would otherwise evaluate
+         everything after it under this module's stale prefix. *)
+      try eval_mod_decls decls !inner_ref
+      with e -> module_stack := List.tl !module_stack; raise e
+    in
     (* An actor declared in this module was registered with the env as it
        stood at ITS declaration -- pass-1 stubs for every fn declared after
        it -- and nothing re-pointed it, so a handler calling such a fn died
@@ -3865,6 +3872,7 @@ let top_level_file_runs (decls : decl list) : decl list list =
 let eval_module_env (m : module_) : env =
   (* Reset global actor and task state for this module run *)
   closure_prefix_override := None;
+  module_stack := [];
   Hashtbl.clear module_registry;
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.clear actor_registry;
@@ -4123,7 +4131,12 @@ let eval_stdlib_decls (decls : decl list) : unit =
           inner_ref := e';
           eval_inner r e'
       in
-      let mod_env = eval_inner inner_decls !inner_ref in
+      let mod_env =
+        try eval_inner inner_decls !inner_ref
+        with e ->
+          module_stack := (match !module_stack with _ :: tl -> tl | [] -> []);
+          raise e
+      in
       module_stack := (match !module_stack with _ :: tl -> tl | [] -> []);
       let rec declared_names acc = function
         | [] -> acc

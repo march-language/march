@@ -64,6 +64,22 @@ fn declared after it still fails when it is evaluated, with the same message
 as on origin/main. At top level that is `stub later called before
 initialisation`. Inside a nested module it is `unbound variable: Outer.later`.
 
+## Related leak fixed alongside: `module_stack` after an error in a nested module
+
+The nested-module variant of the too-early-`let` test showed that when a
+nested module's body raised, the `DMod` arm never popped its `module_stack`
+frame, and `eval_module_env` did not reset `module_stack`. Any in-process
+caller that recovers from the error then evaluated later programs under the
+stale `Outer.` prefix. That covers the REPL, the refinement witness harness
+(`lib/refinecheck/witness.ml`) and the alcotest drivers. In `run_eval`, the
+next test to hit it was `declarations` 21/22 (the colliding
+double-collision constructor tests), which failed only when run after the
+new test and passed on their own.
+
+Both module walkers (`eval_decl`'s `DMod`, `eval_stdlib_decls`) now pop their
+frame when the body raises and then re-raise. `eval_module_env` also resets
+`module_stack := []` with the other per-run globals.
+
 ## Tests
 
 - `test/test_eval.ml`, `test_eval_nested_module_forward_parent_fn`: a nested
