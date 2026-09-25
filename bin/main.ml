@@ -2935,6 +2935,36 @@ let compile filename =
       end;
       let basename = Filename.remove_extension filename in
       let ll_file  = basename ^ ".ll" in
+      (* The IR is written to a per-process temp beside [ll_file] and only
+         renamed onto it once clang is done with it.  Writing [ll_file]
+         directly raced: two concurrent compiles of the SAME source (different
+         -o / --opt, e.g. test/dune's native_qctor_collision and its _opt0
+         twin) truncated and rewrote the one shared path while the other's
+         clang was still reading it, which linked a half-written module
+         ("Undefined symbols: _main").  rename(2) within a directory is atomic
+         and replaces the target even when it is read-only (Dune's source-tree
+         sandbox), so each compile links its own complete IR and the last one
+         to finish leaves its IR at [ll_file], where tests and tooling read
+         it. *)
+      let ll_tmp = Printf.sprintf "%s.%d.tmp.ll" basename (Unix.getpid ()) in
+      let publish_ll () =
+        if Sys.file_exists ll_tmp then
+          try Sys.rename ll_tmp ll_file
+          with Sys_error _ -> (try Sys.remove ll_tmp with Sys_error _ -> ())
+      in
+      (* Write [ir] to the temp and arrange for it to reach [ll_file] on every
+         way out — the clang-failure and missing-runtime paths [exit 1], and
+         an uncaught exception runs at_exit too — so a failed build still
+         leaves its IR for debugging and never leaves a [*.tmp.ll] behind. *)
+      let write_ll_tmp ir =
+        (* A crashed run with a recycled pid could have left this exact name,
+           read-only under Dune's sandbox; it is always our own output. *)
+        if Sys.file_exists ll_tmp then Sys.remove ll_tmp;
+        let oc = open_out ll_tmp in
+        output_string oc ir;
+        close_out oc;
+        at_exit publish_ll
+      in
       if !do_compile then begin
         let is_wasm = March_tir.Llvm_emit.is_wasm_target target in
         let out_bin =
@@ -3095,14 +3125,10 @@ let compile filename =
           let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
           stamp "llvm-emit";
-          (* A previous invocation can leave the generated IR read-only (in
-             particular under Dune's source-tree sandbox).  It is always a
-             compiler output, so replace it rather than requiring callers to
-             clean their source directory before compiling again. *)
-          if Sys.file_exists ll_file then Sys.remove ll_file;
-          let oc = open_out ll_file in
-          output_string oc ir;
-          close_out oc;
+          (* clang reads the per-process temp, never the shared [ll_file]
+             another concurrent compile of this source may be rewriting; see
+             [ll_tmp] above. *)
+          write_ll_tmp ir;
           if is_wasm then begin
             (* ── WASM compilation path ──────────────────────────────────── *)
             let wasm_runtime = match find_runtime_file "march_runtime_wasm.c" with
@@ -3152,8 +3178,9 @@ let compile filename =
             let wasm_dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
             let cmd = Printf.sprintf
               "%s --target=%s%s%s%s -DMARCH_WASM -Wno-unused-command-line-argument %s %s -o %s"
-              clang triple sysroot_flag opt_flag wasm_dbg_flag wasm_runtime ll_file out_bin in
+              clang triple sysroot_flag opt_flag wasm_dbg_flag wasm_runtime ll_tmp out_bin in
             let rc = Sys.command cmd in
+            publish_ll ();
             if rc <> 0 then begin
               Printf.eprintf "march: WASM compilation failed (exit %d)\n  cmd: %s\n" rc cmd; exit 1
             end else begin
@@ -3690,10 +3717,11 @@ let compile filename =
             in
             let cmd = Printf.sprintf
               "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s%s %s%s%s%s%s %s -o %s%s%s%s%s"
-              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define hcr_identity_flags runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_file out_bin math_flag ucontext_flag reload_ldl strip_flag in
+              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define hcr_identity_flags runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_tmp out_bin math_flag ucontext_flag reload_ldl strip_flag in
             (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
             let rc = Sys.command cmd in
+            publish_ll ();
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
             end else begin
@@ -3997,9 +4025,10 @@ let compile filename =
         in
         let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
-        let oc = open_out ll_file in
-        output_string oc ir;
-        close_out oc;
+        (* Same temp-then-rename as --compile, so a concurrent reader never
+           sees a half-written file. *)
+        write_ll_tmp ir;
+        publish_ll ();
         Printf.eprintf "wrote %s\n" ll_file
       end
     end

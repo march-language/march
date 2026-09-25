@@ -486,6 +486,17 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_sys_arch()" };
   { march_name = "uuid_v4"; c_name = Some "march_uuid_v4"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_uuid_v4()" };
+  (* uuid_v7 / uuid_v7_at (and dns_resolve, below) reached their C code
+     through [mangle_extern]'s identity fallthrough, as the unprefixed C
+     functions `uuid_v7` / `uuid_v7_at` / `dns_resolve`, until 2026-09-25.
+     With no row here no capability table knew them: a compiled uuid_v7()
+     left no IO.Clock marker in the binary, and the binary audit took any
+     symbol spelled `dns_resolve` for IO.Network.
+     specs/progress/2026-09-25-runtime-symbol-naming-and-uncompiled-caps.md *)
+  { march_name = "uuid_v7"; c_name = Some "march_uuid_v7"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_uuid_v7()" };
+  { march_name = "uuid_v7_at"; c_name = Some "march_uuid_v7_at"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_uuid_v7_at(i64 %unix_ms)" };
   { march_name = "remote_register_stub"; c_name = Some "march_remote_register"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i32  @march_remote_register(ptr %impl_hash, ptr %sg_hash, ptr %stub)" };
   { march_name = "remote_count"; c_name = Some "march_remote_count"; ret_ty = Some Tir.TInt;
@@ -636,6 +647,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_process_exit(i64 %code)" };
   { march_name = "process_pid"; c_name = Some "march_process_pid"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_process_pid()" };
+  { march_name = "dns_resolve"; c_name = Some "march_dns_resolve"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TString]); Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_dns_resolve(ptr %host)" };
   { march_name = "process_spawn_sync"; c_name = Some "march_process_spawn_sync"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_process_spawn_sync(ptr %cmd, ptr %args)" };
   { march_name = "process_spawn_lines"; c_name = Some "march_process_spawn_lines"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
@@ -1481,6 +1494,8 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_sys_arch";
   PComment "; UUID / identity builtins";
   PDeclare "march_uuid_v4";
+  PDeclare "march_uuid_v7";
+  PDeclare "march_uuid_v7_at";
   PComment "; Distributed OTP L4 — function-by-identity remote registry (march_remote_registry.c)";
   PDeclare "march_remote_init";
   PDeclare "march_remote_register";
@@ -1598,6 +1613,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_process_set_env";
   PDeclare "march_process_exit";
   PDeclare "march_process_pid";
+  PDeclare "march_dns_resolve";
   PDeclare "march_process_spawn_sync";
   PDeclare "march_process_spawn_lines";
   PDeclare "march_process_spawn_async";
@@ -2092,7 +2108,7 @@ let called_c_symbols () =
    runtime-internal names) plus the common libc/libm/POSIX/Linux surface a
    future runtime change or the Linux build plausibly imports. NOT the
    runtime's own `march_*` names: those are how a builtin resolved by the
-   identity fallthrough (`march_decrc_freed`, `uuid_v7`, `logger_*`) reaches
+   identity fallthrough (`march_decrc_freed`, `logger_*`) reaches
    its C definition, so they must pass through unchanged. Regenerate the
    first part with:
      for f in runtime/*.c; do clang -c -w -I runtime -o /tmp/o/$f.o $f; done

@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_stdlib_only test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag)
+ (modules test_compiler test_stdlib_only test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_compile_ll_race test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint yojson alcotest str unix threads.posix))
 
 (library
@@ -1721,6 +1721,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/string_concat_n.expected native_string_concat_n.out)))
 
+; ── a local named like a builtin / interface method shadows it, compiled ───
+; A call through a parameter, let, pattern variable, lambda param or nested fn
+; named `eq`/`compare`/`hash`/`show`/`to_string`/`int_to_string`/`print` must
+; call the closure the local holds.  Lowering (monomorphic locals) and mono
+; (polymorphic params, once specialised) used to resolve it as the builtin or
+; interface method instead, so `eq(a, b)` ran `==` -- which made a compiled
+; Map (its comparator-derived closure is named `eq`) ignore its comparator:
+; a NaN key was never found and re-inserting it grew the map.  The .expected
+; is the interpreter's output, so this is a compiled/interpreted parity check.
+; Needs the stdlib (Map), hence (source_tree ../stdlib).
+(rule
+ (targets native_local_named_like_builtin native_local_named_like_builtin.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/local_named_like_builtin.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_local_named_like_builtin
+        native/local_named_like_builtin.march)
+   (with-stdout-to native_local_named_like_builtin.out
+        (system "./native_local_named_like_builtin")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/local_named_like_builtin.expected native_local_named_like_builtin.out)))
+
 ; ── Capability mocking, end to end, compiled ──────────────────────────────
 ; The one test that exercises what compiler-inserted capability passing exists
 ; for: an operation performed by code that names no capability is intercepted
@@ -3429,6 +3456,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        native/builtin_link_backing.expected)
  (action (diff native/builtin_link_backing.expected
                native_builtin_link_backing.out)))
+
+; uuid_v7 / uuid_v7_at / dns_resolve compiled only because the runtime defined
+; UNPREFIXED C functions of exactly those names, reached through mangle_extern's
+; identity fallthrough.  Renamed to march_* with explicit codegen rows
+; (specs/progress/2026-09-25-runtime-symbol-naming-and-uncompiled-caps.md).
+; Run on BOTH backends against the one golden: the contract is parity.
+(rule
+ (targets native_uuid_v7_dns_parity native_uuid_v7_dns_parity.out
+          native_uuid_v7_dns_parity_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/uuid_v7_dns_parity.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (with-stdout-to native_uuid_v7_dns_parity_interp.out
+     (run %{exe:../bin/main.exe} native/uuid_v7_dns_parity.march))
+    (run %{exe:../bin/main.exe} --compile -o native_uuid_v7_dns_parity
+         native/uuid_v7_dns_parity.march)
+    (with-stdout-to native_uuid_v7_dns_parity.out
+         (system "./native_uuid_v7_dns_parity"))))))
+
+(rule
+ (alias runtest)
+ (deps native_uuid_v7_dns_parity.out native/uuid_v7_dns_parity.expected)
+ (action (diff native/uuid_v7_dns_parity.expected
+               native_uuid_v7_dns_parity.out)))
+
+(rule
+ (alias runtest)
+ (deps native_uuid_v7_dns_parity_interp.out
+       native/uuid_v7_dns_parity.expected)
+ (action (diff native/uuid_v7_dns_parity.expected
+               native_uuid_v7_dns_parity_interp.out)))
 
 ; ── Erased/uniform boundary between the C runtime and compiled code ──────
 ; One family, three fixtures.  march_vault_get / march_record_get / the vault

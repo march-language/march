@@ -267,3 +267,108 @@ let tests =
       Alcotest.test_case "builtin passed as a value is attributed" `Slow
         test_builtin_passed_as_a_value_is_attributed;
     ]
+
+(* ── Builtins named like a user function, and builtins the audit never saw ──
+   specs/progress/2026-09-25-runtime-symbol-naming-and-uncompiled-caps.md.
+
+   A module-level `fn dns_resolve` in the ENTRY module is a TIR function named
+   exactly `dns_resolve` (lowering strips the entry module's prefix).  The
+   attribution walk looked calls up by bare name, so the user's call to their
+   own function was charged IO.Network, and a compiled build failed the
+   ceiling for a program that runs fine interpreted.  The program below
+   declares no `needs IO.Network`: before the fix --emit-llvm itself failed
+   (the ceiling runs before emission), and [emit_ir] reported it.
+
+   Both halves are asserted, because an absence alone passes vacuously if
+   dns_resolve simply stopped carrying a capability anywhere:
+   [test_real_dns_resolve_call_still_marks_network] is the positive control. *)
+let user_dns_resolve_src =
+  {|
+mod UserDnsResolveApp do
+  needs IO.Console
+  fn dns_resolve(x : Int) : Int do
+    x + 1
+  end
+  fn main(_cap_console : Cap(IO.Console)) : () do
+    println(int_to_string(dns_resolve(41)))
+  end
+end
+|}
+
+let real_dns_resolve_src =
+  {|
+mod RealDnsResolveApp do
+  needs IO.Console
+  needs IO.Network
+  fn main(_cap_console : Cap(IO.Console), _cap_net : Cap(IO.Network)) : () do
+    match dns_resolve("localhost") do
+      Ok(_) -> println("ok")
+      Err(_) -> println("err")
+    end
+  end
+end
+|}
+
+let test_user_fn_named_dns_resolve_marks_nothing () =
+  let ir = emit_ir user_dns_resolve_src in
+  Alcotest.(check bool) "no IO.Network marker for a user fn named dns_resolve"
+    false
+    (contains ir "@__march_cap_IO_Network");
+  Alcotest.(check bool) "and no IO.Network owner row" false
+    (contains ir "@__march_capfrom_IO_Network");
+  Alcotest.(check bool) "the program's real capability is still marked" true
+    (contains ir "@__march_cap_IO_Console")
+
+let test_real_dns_resolve_call_still_marks_network () =
+  let ir = emit_ir real_dns_resolve_src in
+  Alcotest.(check bool) "IO.Network marker for a real dns_resolve call" true
+    (contains ir "@__march_cap_IO_Network");
+  Alcotest.(check bool) "attributed to the calling module" true
+    (contains ir "@__march_capfrom_IO_Network__RealDnsResolveApp");
+  (* The call reaches the prefixed runtime symbol through its table row, not
+     the old unprefixed `dns_resolve` via mangle_extern's identity fallthrough. *)
+  Alcotest.(check bool) "calls @march_dns_resolve" true
+    (contains ir "call ptr @march_dns_resolve(");
+  Alcotest.(check bool) "never the unprefixed @dns_resolve" false
+    (contains ir "@dns_resolve(")
+
+(* uuid_v7 and unix_time_ms compiled and ran, but Cap_symbols listed them as
+   having no compiled lowering, so no binary using them carried an IO.Clock
+   marker: the audit under-reported them.  Measured before the fix with `nm`
+   on the linked binaries: IO_Console only. *)
+let clock_src call =
+  Printf.sprintf
+    {|
+mod ClockMarkerApp do
+  needs IO.Console
+  needs IO.Clock
+  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) : () do
+    println(%s)
+  end
+end
+|}
+    call
+
+let test_uuid_v7_marks_clock () =
+  let ir = emit_ir (clock_src "uuid_v7()") in
+  Alcotest.(check bool) "IO.Clock marker for uuid_v7" true
+    (contains ir "@__march_cap_IO_Clock");
+  Alcotest.(check bool) "calls @march_uuid_v7" true
+    (contains ir "call ptr @march_uuid_v7()")
+
+let test_unix_time_ms_marks_clock () =
+  let ir = emit_ir (clock_src "int_to_string(unix_time_ms())") in
+  Alcotest.(check bool) "IO.Clock marker for unix_time_ms" true
+    (contains ir "@__march_cap_IO_Clock")
+
+let tests =
+  tests
+  @ [
+      Alcotest.test_case "user fn named dns_resolve marks nothing" `Slow
+        test_user_fn_named_dns_resolve_marks_nothing;
+      Alcotest.test_case "real dns_resolve call still marks IO.Network" `Slow
+        test_real_dns_resolve_call_still_marks_network;
+      Alcotest.test_case "uuid_v7 marks IO.Clock" `Slow test_uuid_v7_marks_clock;
+      Alcotest.test_case "unix_time_ms marks IO.Clock" `Slow
+        test_unix_time_ms_marks_clock;
+    ]

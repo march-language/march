@@ -481,7 +481,8 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
   (* --- Session-typed channel builtins (binary) --- *)
   | Ast.EApp (Ast.EVar { txt = name; span }, _, _)
     when List.mem name interpreter_only_builtins
-         && not (Hashtbl.mem !_current_module_fns name) ->
+         && not (Hashtbl.mem !_current_module_fns name)
+         && not (Lower_state.is_local_binding name) ->
     failwith (Printf.sprintf "%s:%d:%d: error: `%s` %s"
       span.Ast.file span.Ast.start_line span.Ast.start_col name
       (List.assoc name interpreter_only_builtin_reasons))
@@ -621,7 +622,8 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
      own version string (dune-project), the same value the interpreter
      returns, instead of a C literal that drifts from both. *)
   | Ast.EApp (Ast.EVar { txt = "march_version"; _ }, ([] | [ _ ]), sp)
-    when not (Hashtbl.mem !_current_module_fns "march_version") ->
+    when not (Hashtbl.mem !_current_module_fns "march_version")
+         && not (Lower_state.is_local_binding "march_version") ->
     lower_expr env (Ast.ELit (Ast.LitString March_ast.March_version.version, sp))
 
   (* `tap(x)` returns `x`.  The interpreter also pushes `x` onto its tap bus,
@@ -635,7 +637,7 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
   | Ast.EApp (Ast.EVar { txt = "tap"; _ }, [ arg ], _)
     when not (Hashtbl.mem !_current_module_fns "tap")
          (* a parameter or let-bound local named `tap` shadows the builtin *)
-         && not (Hashtbl.mem _fn_param_types "tap") ->
+         && not (Lower_state.is_local_binding "tap") ->
     lower_expr env arg
 
   (* --- Function application (CPS: all args must be atoms) --- *)
@@ -688,10 +690,14 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
               in this module — matching the typechecker's overload resolution.
               Without this, `show(someOption)` would dispatch to Show$Option.show
               (String) while typecheck bound it to the user's `show` (Int),
-              feeding a String where an Int is expected. *)
+              feeding a String where an Int is expected.
+              A LOCAL binding of the name (parameter, let, pattern variable,
+              lambda param) shadows the interface method the same way: the
+              call goes through the closure the local holds. *)
            (match args with
             | first_arg :: _
-              when not (Hashtbl.mem !_current_module_fns name) ->
+              when not (Hashtbl.mem !_current_module_fns name)
+                && not (Lower_state.is_local_binding name) ->
               (* `to_string` is a universal formatter that is SEMANTICALLY
                  identical to `show` on any type with a Show impl (verified: the
                  interpreter's `to_string` and `show` produce byte-identical
@@ -744,7 +750,8 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
            does not exist -- a link error naming nothing the user wrote
            (specs/progress/2026-09-14-user-fn-named-own-miscompiled-as-resource-builtin.md). *)
         if f_var.v_name = "own" && List.length arg_atoms = 2
-           && not (Hashtbl.mem !Lower_state._current_module_fns "own") then
+           && not (Hashtbl.mem !Lower_state._current_module_fns "own")
+           && not (Lower_state.is_local_binding "own") then
           let pid_atom   = List.nth arg_atoms 0 in
           let value_atom = List.nth arg_atoms 1 in
           let value_ty = match value_atom with
