@@ -75,7 +75,7 @@ let test_local_idempotent () =
   let run () = Host_init.run ~transport:Remote.local ~service_ctl:"false" ~layout_prefix:prefix ~proj ~opts () in
   let first = match run () with Ok r -> r | Error m -> Alcotest.failf "first run failed:\n%s" m in
   expect "first run" first [ "2 host(s), shared-secret mode"; "a-web-1 (root@web-1, pool a): "; "changed (";
-                             "note: systemd is not running here: march-a.service was written, not enabled" ];
+                             "note: relocated layout: march-a.service was written, not enabled" ];
   let layout = Host_layout.make ~prefix "app" in
   let unit_a = read_file (Host_layout.unit_file layout "a") in
   expect "unit a" unit_a

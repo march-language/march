@@ -319,13 +319,17 @@ let script ~(layout : Host_layout.t) ~service_ctl ~(opts : opts) (hp : host_plan
       add (Reconcile.put_file_script ~path:f.f_path ~mode:f.f_mode ~owner:f.f_owner ~on_change:f.f_on_change f.f_content))
     hp.hp_files;
   let unit = Host_layout.unit_name hp.hp_node.sn_pool in
-  line (Printf.sprintf "if command -v %s >/dev/null 2>&1 && [ -d /run/systemd/system ]; then" service_ctl);
+  (* A relocated layout (a test's scratch directory) never touches the
+     machine's own service manager, even where systemd runs. *)
+  line (Printf.sprintf "if %s command -v %s >/dev/null 2>&1 && [ -d /run/systemd/system ]; then"
+          (if relocated then "false &&" else "") service_ctl);
   line (Printf.sprintf "  if [ -n \"$UNIT_CHANGED\" ]; then $SUDO %s daemon-reload && echo 'changed systemd daemon-reload'; fi" service_ctl);
   line (Printf.sprintf "  if %s is-enabled --quiet %s 2>/dev/null; then echo 'ok enabled %s'; \
                          else $SUDO %s enable %s >/dev/null 2>&1 && echo 'changed enabled %s'; fi"
           service_ctl unit unit service_ctl unit unit);
   line "else";
-  line (Printf.sprintf "  echo 'note systemd is not running here: %s was written, not enabled'" unit);
+  line (if relocated then Printf.sprintf "  echo 'note relocated layout: %s was written, not enabled'" unit
+        else Printf.sprintf "  echo 'note systemd is not running here: %s was written, not enabled'" unit);
   line "fi";
   line "if [ -n \"$UNIT_CHANGED$RESTART_NEEDED\" ]; then echo 'note the unit or its credentials changed: \
         the next `forge deploy` restarts it'; fi";

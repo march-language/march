@@ -703,6 +703,15 @@ let send_binary conn data offset len =
 
 (* ─── SSH tunnel ─────────────────────────────────────────────────────────── *)
 
+(** Run [f] with SIGPIPE ignored. A reload socket reached through an ssh
+    tunnel is closed by ssh when the remote server is not (yet) listening,
+    and a write to it then raises SIGPIPE, whose default action kills forge
+    (a node restarting under the health gate). Ignored, the write fails with
+    EPIPE instead, which the callers already turn into an error. *)
+let without_sigpipe f =
+  let old = Sys.signal Sys.sigpipe Sys.Signal_ignore in
+  Fun.protect ~finally:(fun () -> Sys.set_signal Sys.sigpipe old) f
+
 (** [FORGE_SSH_CONFIG=<file>]: extra [-F <file>] for every ssh forge starts
     (a test points it at a config naming a container's port and key). *)
 let ssh_config_args () =
@@ -873,6 +882,7 @@ let push_topology_conn conn ~sk ~(body : string) : (string, string) result =
     file at [path] to one node's reload server over an SSH tunnel.  For the
     reconciler (build steps 8 and 10b); [Ok digest] on success. *)
 let push_topology ~ssh_host ~remote_socket ~sk ~(path : string) : (string, string) result =
+  without_sigpipe @@ fun () ->
   match In_channel.with_open_bin path In_channel.input_all with
   | exception Sys_error m -> Error m
   | body ->
@@ -907,6 +917,7 @@ let http_health_check ~url ~timeout_s : bool =
 (** Open a transient tunnel, send GET_EPOCH to one server, return the epoch (0
     on failure or when server predates Phase 9). *)
 let get_epoch_from_server ~ssh_host ~remote_socket : int =
+  without_sigpipe @@ fun () ->
   let local = fresh_sock "march_epoch" in
   let (pid, _) = open_tunnel ~ssh_host ~remote_socket ~local_socket:local in
   let epoch =
@@ -947,6 +958,7 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
     ?(old_schemas_path="") ?(new_schemas_path="") ?(entry_path="")
     ?(old_manifest_path="") ?(provided_epoch=0) ?(grant_caps=([] : string list))
     ?(no_cap_gate=false) () =
+  without_sigpipe @@ fun () ->
   let local_socket =
     if tunnel then Printf.sprintf "/tmp/march_deploy_%d.sock" (Unix.getpid ()) else remote_socket in
 
@@ -1898,6 +1910,7 @@ let deploy ?(output="") ?(so="") ?(grant_caps=([] : string list)) ?(no_cap_gate=
 
 (** Send PING to one server; returns true if PONG received. *)
 let ping_server ~ssh_host ~remote_socket : bool =
+  without_sigpipe @@ fun () ->
   let local = fresh_sock "march_ping" in
   let (pid, _) = open_tunnel ~ssh_host ~remote_socket ~local_socket:local in
   let alive =

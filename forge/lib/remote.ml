@@ -67,6 +67,7 @@ let connect_with_timeout ?(timeout = 10.0) path =
   fd
 
 let use_socket path (f : Cmd_deploy_hot.conn -> ('a, string) Stdlib.result) : ('a, string) Stdlib.result =
+  Cmd_deploy_hot.without_sigpipe @@ fun () ->
   match connect_with_timeout path with
   | exception Unix.Unix_error (e, fn, _) -> Error (Printf.sprintf "%s: %s" fn (Unix.error_message e))
   | fd ->

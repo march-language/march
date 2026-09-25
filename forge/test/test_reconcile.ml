@@ -513,6 +513,32 @@ let test_shared_epoch_and_ping () =
   (try ignore (Unix.waitpid [] server) with Unix.Unix_error _ -> ());
   Alcotest.(check bool) "no server: not alive" false (Reconcile.ping ~transport:Remote.local h)
 
+(** A reload socket whose peer closes at once (what an ssh tunnel does
+    while the remote server is not listening yet): the health gate's PING
+    must see "not up", not die of SIGPIPE (CI, a restarted node). *)
+let test_ping_closed_peer () =
+  let dir = short_tmp () in
+  let sock = Filename.concat dir "c.sock" in
+  let fd = Unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  Unix.bind fd (Unix.ADDR_UNIX sock);
+  Unix.listen fd 4;
+  let server = match Unix.fork () with
+    | 0 -> for _ = 1 to 3 do let (c, _) = Unix.accept fd in Unix.close c done; Unix._exit 0
+    | p -> Unix.close fd; p in
+  reaping [ server ] @@ fun () ->
+  let h = { Hosts.name = "n"; ssh = ""; socket = sock; pubkey = ""; labels = [] } in
+  Alcotest.(check bool) "a closed peer is not up" false (Reconcile.ping ~transport:Remote.local h);
+  (* The write after the peer has gone: EPIPE, an Error, not a dead forge. *)
+  for _ = 1 to 2 do
+    match Remote.local.with_socket h (fun conn ->
+        Unix.sleepf 0.3;
+        Cmd_deploy_hot.send_line conn "PING";
+        Cmd_deploy_hot.send_line conn "PING";
+        Ok (Cmd_deploy_hot.recv_line conn)) with
+    | Error _ -> ()
+    | Ok r -> Alcotest.failf "a closed peer answered %S" r
+  done
+
 let test_drift () =
   let fm name h = { Cmd_deploy_hot.fn_name = name; fn_impl_hash = h; fn_sig_hash = ""; fn_callers = [];
                     fn_caps = []; fn_has_caps = true } in
@@ -676,6 +702,7 @@ let () =
         Alcotest.test_case "push: signed TOPOLOGY, digest file, SIGHUP to reporting units; wrong key refused" `Quick test_ssh_push_and_status;
         Alcotest.test_case "shared epoch fetched once; PING" `Quick test_shared_epoch_and_ping;
         Alcotest.test_case "drift against the deployed manifest" `Quick test_drift;
+        Alcotest.test_case "PING to a peer that closes: not up, no SIGPIPE" `Quick test_ping_closed_peer;
         Alcotest.test_case "topology apply over ssh: refuses before a deploy, pushes, refuses restarts" `Quick test_ssh_apply;
       ]);
     ("identity (#606)", [
