@@ -12,6 +12,8 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- The interpreter no longer dies with `stub NAME called before initialisation` when a nested module calls an enclosing module's fn that is declared after the nested module. This covers calls from the nested module's own fns, its impl methods and actor handlers, and modules nested further down. Compiled programs already worked (#645). A module-level `let` that calls a fn declared after it still fails, as before.
+
 - **`dns_resolve` / `Dns.resolve` now return the same list interpreted and compiled.**
   The interpreter listed each address once per socket type (`"127.0.0.1"` came back
   as `[127.0.0.1, 127.0.0.1]`), and compiled code also returned IPv6 addresses
