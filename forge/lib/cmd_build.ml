@@ -850,6 +850,43 @@ let ensure_js_deps ~root (proj : Project.project) =
       else Error (Printf.sprintf "npm install failed (exit %d)" rc)
   end
 
+(** Protocol evolution (distributed-deploys build step 9): the directory that
+    holds each `@[endpoints]` protocol's baseline, `.forge/protocols/<P>.json`,
+    written by the compiler on every build (`--emit-protocols`), the way the
+    hot-deploy schema baselines are kept. *)
+let protocols_dir ~root = Filename.concat root (Filename.concat ".forge" "protocols")
+
+(** The compiler flags that keep [protocols_dir] current and generate each
+    protocol's `<P>_Msg.compat()` table from it: every stored baseline as a
+    `--protocol-baseline`, and `--emit-protocols` to write the next one.
+    Passed only when a source file declares an `@[endpoints]` protocol:
+    `--emit-protocols` turns off the compiler's source-level cache exit (it
+    must expand the protocols to write them), which every other project keeps. *)
+let protocol_flags ~root (sources : string list) : string =
+  let declares f =
+    try
+      let ic = open_in_bin f in
+      let s = Fun.protect ~finally:(fun () -> close_in ic) (fun () -> really_input_string ic (in_channel_length ic)) in
+      let needle = "@[endpoints]" in
+      let n = String.length needle in
+      let rec go i = i + n <= String.length s && (String.sub s i n = needle || go (i + 1)) in
+      go 0
+    with Sys_error _ -> false
+  in
+  if not (List.exists declares sources) then ""
+  else begin
+    let dir = protocols_dir ~root in
+    let stored =
+      if Sys.file_exists dir && Sys.is_directory dir then
+        List.sort compare
+          (List.filter (fun f -> Filename.check_suffix f ".json") (Array.to_list (Sys.readdir dir)))
+      else []
+    in
+    String.concat ""
+      (List.map (fun f -> " --protocol-baseline " ^ Filename.quote (Filename.concat dir f)) stored)
+    ^ " --emit-protocols " ^ Filename.quote dir
+  end
+
 (** [topology_pools]: a topology app's build restricted to these pools
     ([march --topology-pools]); [output_suffix] names the artifact
     [<name><suffix>] so the builds of one topology do not overwrite each
@@ -1017,7 +1054,8 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
                | _ -> None)
             | _ -> None
           in
-          let (rc, ce, cw) = compile_entry ~lib_path_env ~ffi_flags:(ffi_flags ^ topology_flags ^ extra_flags) ~output ~release ~dump_phases ?target
+          let protocol_flags = protocol_flags ~root:proj.Project.root (entry_path :: files) in
+          let (rc, ce, cw) = compile_entry ~lib_path_env ~ffi_flags:(ffi_flags ^ topology_flags ^ protocol_flags ^ extra_flags) ~output ~release ~dump_phases ?target
               ?hcr ~pin_main:proj.Project.pin_main entry_path in
           print_build_summary ~t0 ~errors:(te + ce) ~warnings:(tw + cw);
           if rc = 0 then begin

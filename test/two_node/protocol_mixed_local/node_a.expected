@@ -1,0 +1,15 @@
+table: Buyer accepts version 1; Shop rows: 0
+Buyer offered at both fingerprints: true
+v2 Buyer: got later
+v2 Buyer: got later
+v2 Shop: done after 3
+v2 Buyer: bye
+v2 Shop: formed and finished
+v1 Shop: done after 3
+v2 Buyer: bye
+v1 Shop + v2 Buyer: formed and finished
+v2 Shop + v1 Buyer: no offer for role Buyer (1 offer(s) at a protocol version this one cannot form a session with were not invited)
+v1 Shop: done after 3
+v2 Buyer: bye
+v2 Buyer + v1 Shop: formed and finished
+v3 Buyer + v2 Shop: no offer for role Shop (node-a refused: protocol differs)

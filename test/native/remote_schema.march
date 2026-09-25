@@ -1,0 +1,100 @@
+-- `@[remote]` schema hashes (distributed-deploys build step 9): a typed
+-- remote send carries its message type's schema hash, a digest of the
+-- type's STRUCTURE, beside the tag; a receiver compares both. A message
+-- whose type kept its name but changed its shape is converted by the
+-- actor's `migrate_msg` when that function's old message type has the
+-- handler's constructor with an argument of the delivered shape, and refused
+-- (DELIVERY_FAILED at the transport) otherwise. A sender that sends no
+-- schema (built before the field) is taken at its tag.
+--
+-- No sockets, so both backends run it: each delivery is built with the
+-- sender's own codec (`NodeSend.encode_msg_schema`), exactly the bytes a
+-- typed send puts on the wire, and decoded as a receiver would.
+mod RemoteSchema do
+  needs IO.Console
+
+  mod Msgs do
+    -- This build's message.
+    type Hit = { n : Int, who : String }
+    derive Json for Hit
+  end
+
+  mod V1 do
+    -- The shape an older build sent under the same tag, `Msgs.Hit`. (Named
+    -- apart here only because one program cannot hold two types of one
+    -- name; an older build's `Msgs.Hit` had this shape.)
+    type OldHit = { n : Int }
+    derive Json for OldHit
+    -- The older build's messages, for `counter_migrate_msg`: an older Hit
+    -- arrives as `OldBump`, the argument its schema hash matches.
+    type Msg = OldBump(V1.OldHit)
+  end
+
+  @[remote]
+  actor Counter do
+    state { total : Int }
+    init  { total: 0 }
+    on Bump(h : Msgs.Hit) do
+      println("Counter: Bump n=" ++ int_to_string(h.n) ++ " who=" ++ h.who)
+      { total: state.total + h.n }
+    end
+  end
+
+  -- Declared after the actor on purpose: the generated dispatch module is
+  -- placed after it, so it can call it.
+  fn counter_migrate_msg(m : V1.Msg) : Option(Counter.Msg) do
+    match m do
+      V1.OldBump(h) -> if h.n < 0 do None else Some(Bump({ n: h.n, who: "migrated" })) end
+    end
+  end
+
+  -- The same handler, no migrate_msg.
+  @[remote]
+  actor Tally do
+    state { total : Int }
+    init  { total: 0 }
+    on Tick(h : Msgs.Hit) do
+      println("Tally: Tick n=" ++ int_to_string(h.n) ++ " who=" ++ h.who)
+      { total: state.total + h.n }
+    end
+  end
+
+  pfn delivery(tag : String, schema : String, json : String) : Delivery do
+    let bytes = Bytes.to_list(Bytes.from_string(json))
+    match NodeSend.decode_msg(NodeSend.encode_msg_schema(1, GlobalPid.make("here", 1, 1), tag, schema, bytes)) do
+      Ok(d) -> d
+      Err(e) -> panic("delivery: " ++ e)
+    end
+  end
+
+  pfn outcome(r : Result(Bool, String)) : String do
+    match r do
+      Ok(true) -> "delivered"
+      Ok(false) -> "not for this actor"
+      Err(e) -> "refused: " ++ e
+    end
+  end
+
+  pfn report(label : String, r : Result(Bool, String)) : () do
+    run_until_idle()
+    println(label ++ ": " ++ outcome(r))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let now = Node.schema_of(fn (_w : Msgs.Hit) -> ())
+    let old = Node.schema_of(fn (_w : V1.OldHit) -> ())
+    println("schemas: new and old differ " ++ bool_to_string(now != old)
+      ++ ", 32 hex " ++ bool_to_string(String.byte_size(now) == 32))
+    let c = spawn(Counter)
+    let t = spawn(Tally)
+    let cur = "{\"n\": 1, \"who\": \"now\"}"
+    let was = "{\"n\": 2}"
+    report("Counter, this schema", Counter_Remote.dispatch(c, delivery("Msgs.Hit", now, cur)))
+    report("Counter, no schema", Counter_Remote.dispatch(c, delivery("Msgs.Hit", "", cur)))
+    report("Counter, the old schema", Counter_Remote.dispatch(c, delivery("Msgs.Hit", old, was)))
+    report("Counter, the old schema, dropped", Counter_Remote.dispatch(c, delivery("Msgs.Hit", old, "{\"n\": -1}")))
+    report("Counter, an unknown schema", Counter_Remote.dispatch(c, delivery("Msgs.Hit", "0123456789abcdef0123456789abcdef", cur)))
+    report("Tally, this schema", Tally_Remote.dispatch(t, delivery("Msgs.Hit", now, cur)))
+    report("Tally, the old schema", Tally_Remote.dispatch(t, delivery("Msgs.Hit", old, was)))
+  end
+end

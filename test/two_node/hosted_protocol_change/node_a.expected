@@ -1,0 +1,18 @@
+client 1: reply 10
+client 2: reply 20
+client 3: reply 30
+client 4: reply 40
+client 5: session_node: no access point for role 2: node-a refused: protocol differs
+host 1: hello 1, holds 1
+host 1: hello 2, holds 2
+host 1: hello 3, holds 3
+host 1: served 1, holds 2
+host 1: served 2, holds 1
+host 1: served 3, holds 0
+host 2: hello 4, holds 1
+host 2: served 4, holds 0
+new host alive: true
+old host alive while its sessions run: true
+old host exited: true
+old offer draining: 3 sessions
+topology: Hold.Server: protocol changed on node-a; offering the new version and draining the old one

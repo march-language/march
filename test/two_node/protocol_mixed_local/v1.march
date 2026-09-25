@@ -1,0 +1,16 @@
+-- Version 1 of `Order` for scenario "protocol_mixed_local": compiled only
+-- with `--emit-protocols`, to write the baseline node_a.march is built
+-- against (its `choose by Shop` has no `later` branch).
+mod OrderV1 do
+  @[endpoints]
+  protocol Order do
+    loop do
+      item: Buyer -> Shop : Int
+      choose by Shop:
+        more -> Shop -> Buyer : Int
+        done -> Shop -> Buyer : String
+                stop
+      end
+    end
+  end
+end
