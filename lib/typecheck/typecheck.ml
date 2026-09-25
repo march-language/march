@@ -1351,6 +1351,23 @@ let rec infer_expr env (e : Ast.expr) : ty =
             MPText "help: declare "; MPCode "fn main(cap : Cap(IO))";
             MPText " and pass the capability down to whatever needs it, narrowing with ";
             MPCode "cap_narrow"; MPText " along the way." ]);
+      (* Stdlib-only builtins (specs/progress/2026-09-22-stdlib-only-builtins.md
+         and the 2026-09-24 bypass fixes): the gate sits at resolution, on the
+         reference itself. A name in [stdlib_only] that still resolves to the
+         builtin (no user binding has rebound it, [env.gated_shadowed]) may be
+         named only from a span the stdlib loader owns ([span_is_stdlib]). A
+         value reference counts as much as a call (`let f = pid_of_int`, and
+         `let pid_of_int = pid_of_int`, whose right-hand side is checked before
+         the new binding exists), and every declaration kind that types an
+         expression -- impl and default methods, tests, actor handlers, the
+         REPL's fragments -- arrives here. *)
+      (match List.assoc_opt name.txt !stdlib_only with
+       | Some hint
+         when not (StringSet.mem name.txt env.gated_shadowed)
+           && not (span_is_stdlib name.span) ->
+         Err.error env.errors ~span:name.span
+           (Printf.sprintf "`%s` is internal to the standard library; %s" name.txt hint)
+       | _ -> ());
       (match lookup_var name.txt env with
        | Some sch ->
          (if StrMap.mem name.txt env.local_fns && !(env.current_decl) <> "" then
@@ -4900,7 +4917,8 @@ let prebind_interface_decl ~prefix (idef : Ast.interface_def) (e : env) : env =
                else { e1 with vars = StrMap.add iface_qualified sch e1.vars;
                               qual_fn_names = StrMap.add iface_qualified () e1.qual_fn_names } in
       if StrMap.mem m.md_name.txt e1.vars then e1
-      else { e1 with vars = StrMap.add m.md_name.txt sch e1.vars }
+      else { e1 with vars = StrMap.add m.md_name.txt sch e1.vars;
+                     gated_shadowed = note_gated_rebind m.md_name.txt e1.gated_shadowed }
     end
   ) e1 idef.iface_methods
 
@@ -8505,10 +8523,6 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
      place to carry the exemption rather than a flag threaded from the CLI. *)
   let env = { env with root_cap_allowed = true } in
   record_names_load env.record_names_snapshot;   (* per-check, see [record_names_dump] *)
-  (* REPL input is user code: the stdlib-only builtin gate applies. Its
-     top-level declarations never pass through [check_module_needs] (nested
-     modules do), so run the gate here. *)
-  check_stdlib_only_refs env m.Ast.mod_decls;
   let errors = env.errors in
   let type_map = env.type_map in
   let rec prebind_mod_members_inc ?(opaque = StringSet.empty) prefix e decls =

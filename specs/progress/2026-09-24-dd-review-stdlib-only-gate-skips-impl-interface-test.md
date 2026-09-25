@@ -38,3 +38,15 @@ current declaration's span is not a stdlib file. That covers every
 declaration kind and the `let` shadow in
 `2026-09-24-dd-review-stdlib-only-gate-let-shadow.md`. As a stopgap, add the
 missing declaration kinds to the walker. Add each shape as a reject test.
+
+## Fixed 2026-09-24
+
+The resolution-based check this file proposed, see
+[2026-09-24-stdlib-only-gate-at-resolution.md](2026-09-24-stdlib-only-gate-at-resolution.md).
+There is no declaration walk any more: every expression the typechecker
+types goes through the `EVar` arm, so impl methods, injected interface
+defaults, `test`/`describe`/`setup`/`setup_all`, actor `init` and handlers,
+nested modules and REPL fragments are all covered by the same line. Tests:
+one case per shape, and the adversarial sweep (every gated name x 15
+shapes, asserting the table's exact message). One caveat: an interface
+default that no impl ever takes is never typed (it never runs either).
