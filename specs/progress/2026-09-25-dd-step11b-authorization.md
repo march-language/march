@@ -191,6 +191,10 @@ this node could use.
     while its own shows.
   - `cert_direct`: `run_<Role>` in certificate mode; Pair runs, Audit is
     refused by the dialer, Ledger by the acceptor.
+- **Found by the full suite:** the refinement coverage audit's corpus baseline
+  (`test/refine_audit/corpus.baseline`) gained `session_ap`'s two lines, as it
+  did for `node_cert` in 11a. The quick suite does not run `test_refinecheck`,
+  so this landed as a follow-up commit after the four.
 - **Changed fixture:** `cert_ok`'s node-b certificate gains `raw_send` (node-a
   raw-sends it pings, which the new rule refuses otherwise); its golden shows
   `flags=raw_send`. `frame_tampered` and `node_send_typed_loopback` gained a
