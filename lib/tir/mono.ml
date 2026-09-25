@@ -503,6 +503,18 @@ let ensure_atom_fns fn_table done_set worklist atoms =
     | _ -> ()
   ) atoms
 
+(** [shadowed] extended with a function's own parameters, for rewriting that
+    function's body.  A parameter is a lexical binding exactly like a [let] or
+    a pattern variable: a call through it is a closure call, never a call to a
+    same-named top-level fn, builtin, or interface method.  Before this, only
+    [let]/pattern/nested-fn names were tracked, so `pfn via(eq, a, b) = eq(a,
+    b)` specialised at Int resolved `eq(a, b)` as the [Eq] method and ran
+    `Eq$Int.eq` (i.e. `==`) instead of the caller's closure -- which silently
+    made a compiled [Map] (it names its comparator-derived closure `eq`) ignore
+    its comparator. *)
+let shadow_params (shadowed : SSet.t) (params : Tir.var list) : SSet.t =
+  List.fold_left (fun s (p : Tir.var) -> SSet.add p.Tir.v_name s) shadowed params
+
 (** Rewrite all [EApp] and [ELetRec] calls in [expr] that target
     polymorphic functions, replacing them with calls to the
     specialized (mangled) version and enqueuing the specialization
@@ -1133,7 +1145,7 @@ let rec rewrite_calls
         in
         { fn' with Tir.fn_body =
             rewrite_calls fn_table done_set worklist iface_methods record_to_typename
-              inner_shadowed fn'.Tir.fn_body }
+              (shadow_params inner_shadowed fn'.Tir.fn_params) fn'.Tir.fn_body }
       ) fns in
     (* Apply the merged subst to binding_body (e.g. EAtom(AVar fn_var)) so
        the closure-variable type inside the ELetRec stays consistent with the
@@ -1147,8 +1159,11 @@ let rec rewrite_calls
       Tir.ELetRec (updated_fns,
         rewrite_calls fn_table done_set worklist iface_methods record_to_typename
           inner_shadowed binding_body'),
+      (* [v] itself is bound in [cont] too: `let eq = fn (x, y) -> ...` then
+         `eq(a, b)` must call the closure, not the [Eq] method -- the plain
+         [ELet] case below adds its binder, and this special case must too. *)
       rewrite_calls fn_table done_set worklist iface_methods record_to_typename
-        inner_shadowed cont)
+        (SSet.add v.Tir.v_name inner_shadowed) cont)
   | Tir.ELet (v, e1, e2) ->
     (* [v] is bound in [e2]; if it names a local fn/closure it shadows a
        same-named top-level fn for callee resolution there.  A block-level
@@ -1169,7 +1184,7 @@ let rec rewrite_calls
     let fns' = List.map (fun fn ->
         { fn with Tir.fn_body =
             rewrite_calls fn_table done_set worklist iface_methods record_to_typename
-              inner_shadowed fn.Tir.fn_body }
+              (shadow_params inner_shadowed fn.Tir.fn_params) fn.Tir.fn_body }
       ) fns in
     Tir.ELetRec (fns',
       rewrite_calls fn_table done_set worklist iface_methods record_to_typename
@@ -1431,7 +1446,8 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
         let refined_body = refine_field_types fn'.Tir.fn_body in
         (* Rewrite calls in the body, enqueuing new specializations *)
         let body' = rewrite_calls fn_table done_set worklist
-                      iface_methods record_to_typename SSet.empty refined_body in
+                      iface_methods record_to_typename
+                      (shadow_params SSet.empty fn'.Tir.fn_params) refined_body in
         result := { fn' with Tir.fn_body = body' } :: !result
       end
     end
