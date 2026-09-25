@@ -1351,6 +1351,23 @@ let rec infer_expr env (e : Ast.expr) : ty =
             MPText "help: declare "; MPCode "fn main(cap : Cap(IO))";
             MPText " and pass the capability down to whatever needs it, narrowing with ";
             MPCode "cap_narrow"; MPText " along the way." ]);
+      (* Stdlib-only builtins (specs/progress/2026-09-22-stdlib-only-builtins.md
+         and the 2026-09-24 bypass fixes): the gate sits at resolution, on the
+         reference itself. A name in [stdlib_only] that still resolves to the
+         builtin (no user binding has rebound it, [env.gated_shadowed]) may be
+         named only from a span the stdlib loader owns ([span_is_stdlib]). A
+         value reference counts as much as a call (`let f = pid_of_int`, and
+         `let pid_of_int = pid_of_int`, whose right-hand side is checked before
+         the new binding exists), and every declaration kind that types an
+         expression -- impl and default methods, tests, actor handlers, the
+         REPL's fragments -- arrives here. *)
+      (match List.assoc_opt name.txt !stdlib_only with
+       | Some hint
+         when not (StringSet.mem name.txt env.gated_shadowed)
+           && not (span_is_stdlib name.span) ->
+         Err.error env.errors ~span:name.span
+           (Printf.sprintf "`%s` is internal to the standard library; %s" name.txt hint)
+       | _ -> ());
       (match lookup_var name.txt env with
        | Some sch ->
          (if StrMap.mem name.txt env.local_fns && !(env.current_decl) <> "" then
@@ -2237,6 +2254,23 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | _ -> f
       in
       let f_ty = infer_expr env f in
+      (* An empty-parens call `f()` of a LOCAL value whose type is not yet
+         known — typically an unannotated parameter, `fn apply(f) do f() end`
+         — makes it a thunk `Unit -> r`.  A zero-parameter lambda infers to
+         `Unit -> T` (see the [Ast.ELam] arm), so leaving the variable free
+         would type `apply` as `a -> a` and `apply(fn -> 7)` as the thunk
+         rather than `7`.  Named fns are excluded ([fn_arities], qualified
+         names): a zero-arg `fn` is typed as its bare return type, and its
+         own forward/self-reference placeholder is an unbound var that must
+         stay free to meet that type. *)
+      (match f, args, repr f_ty with
+       | Ast.EVar name, [], TVar _
+         when not (String.contains name.txt '.')
+           && not (StrMap.mem name.txt env.fn_arities)
+           && (match lookup_var name.txt env with
+               | Some (Mono _) -> true | _ -> false) ->
+         unify env ~span:sp f_ty (TArrow (t_unit, fresh_var env.level))
+       | _ -> ());
       (* Reject wrong-arity calls of known (module-defined) functions.  March
          has no partial application: under-application panics at runtime (and
          the compiler miscompiles it into a body call with a garbage arg), and
@@ -2484,7 +2518,18 @@ let rec infer_expr env (e : Ast.expr) : ty =
          ends, as it must for a named function's parameters. *)
       check_scope_consumed ~before:env ~after:env' ~scope_span:lsp;
       check_captures env ~span:lsp captures;
-      List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty
+      (* A zero-parameter lambda (`fn -> e` / `fn () -> e`) is a thunk of
+         type `Unit -> T` — the same type the surface `() -> T` denotes and
+         the one the [check_expr] ELam arm already gives it when checked
+         against a declared `Unit -> T`.  Folding an empty param list used to
+         collapse it to plain `T` here, so a lambda typed WITHOUT an expected
+         arrow in hand (a record-literal field, an unannotated `let g = fn ->
+         e`) could never satisfy a `() -> T` field or parameter: "expected
+         `() -> Int` but got `Int`".  Calling it is unaffected — [infer_app]
+         applies the implicit unit for an empty-parens call `g()`. *)
+      (match param_tys with
+       | [] -> TArrow (t_unit, body_ty)
+       | _ -> List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty)
 
     (* ── do/end block ─────────────────────────────────────────────── *)
     | Ast.EBlock (exprs, _) ->
@@ -3188,6 +3233,14 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
            env params comps in
        check_expr env' body ret_ty ~reason;
        close env'
+     | TVar _ when params = [] ->
+       (* A zero-parameter lambda checked against a not-yet-known type (a
+          polymorphic parameter, `id(fn -> 3)`) is a `Unit -> T` thunk, the
+          same type [infer_expr]'s ELam arm gives it.  Without this the plain
+          peel below checked the BODY against the variable and typed the
+          lambda as its result. *)
+       unify env ~span:lsp ~reason expected (TArrow (t_unit, fresh_var env.level));
+       peel params expected env
      | _ -> peel params expected env)
 
   (* Match in check mode: check each arm against expected *)
@@ -3673,19 +3726,14 @@ and infer_block env exprs =
        alone (narrower scope, no false positives there either way).
 
        Critically, ALSO exclude an RHS that is itself a lambda literal
-       (`Ast.ELam`, i.e. `let g = fn ... -> body`).  A ZERO-param lambda
-       checked under plain inference (no expected-type context — see the
-       [Ast.ELam] arm of [infer_expr]) collapses to its body's result type
-       exactly like a top-level zero-arg `fn`, via the identical
-       [List.fold_right ... [] body_ty = body_ty] convention — it only
-       gets a real `Unit -> T` [TArrow] when CHECKED against one (the
-       [Ast.ELam] arm of [check_expr]).  So `let g = fn -> println("b")`
-       then `g()` (test/native/unit_callback_zero_arg.march) is completely
-       legitimate, ordinary code whose RHS produces the very same
-       "collapsed non-arrow type" shape as the bug this check targets —
-       type alone truly cannot tell them apart here, but the AST shape of
-       the RHS can: a fresh lambda LITERAL is never a "disguised alias of
-       something else", it always means exactly what it says. *)
+       (`Ast.ELam`, i.e. `let g = fn ... -> body`).  A lambda literal is
+       never a "disguised alias of something else": it always means exactly
+       what it says.  (A ZERO-param lambda used to infer to its body's
+       result type, the very "collapsed non-arrow type" shape this check
+       targets; it now infers to `Unit -> T` — see the [Ast.ELam] arm of
+       [infer_expr] — so the exclusion is belt-and-braces for
+       `let g = fn -> println("b"); g()`,
+       test/native/unit_callback_zero_arg.march.) *)
     let env' =
       match b.bind_pat, auto_lin, b.bind_expr with
       | Ast.PatVar _, Ast.Unrestricted, Ast.ELam _ ->
@@ -4869,7 +4917,8 @@ let prebind_interface_decl ~prefix (idef : Ast.interface_def) (e : env) : env =
                else { e1 with vars = StrMap.add iface_qualified sch e1.vars;
                               qual_fn_names = StrMap.add iface_qualified () e1.qual_fn_names } in
       if StrMap.mem m.md_name.txt e1.vars then e1
-      else { e1 with vars = StrMap.add m.md_name.txt sch e1.vars }
+      else { e1 with vars = StrMap.add m.md_name.txt sch e1.vars;
+                     gated_shadowed = note_gated_rebind m.md_name.txt e1.gated_shadowed }
     end
   ) e1 idef.iface_methods
 
@@ -7494,46 +7543,19 @@ let find_role_roots (env : env) : role_root list =
     env.fn_row_bodies;
   List.rev !roots
 
-let check_role_grants (env : env) (decls : Ast.decl list) : unit =
-  if Hashtbl.length env.role_grants = 0 then ()
+(* The solve [check_role_grants] runs, shared with [role_capability_closures]
+   (the hot-deploy manifest's `ROLE` lines, build step 10): one synthetic row
+   key per root (see the comment above [dump_role_authority] for why the key
+   looks the way it does), solved by [Cap_rows.solve] over COPIES of the
+   tables.  [None] when there is no root. *)
+let solve_role_roots (env : env)
+  : ((string * role_root) list
+     * (string, string list) Hashtbl.t
+     * (string, string list) Hashtbl.t
+     * (string, March_caps.Cap_rows.row) Hashtbl.t) option =
+  let roots = find_role_roots env in
+  if roots = [] then None
   else begin
-    (* 4. Every role's grant fits within `main`'s (section 2, "Relation to
-       `main`").  Only IO-lattice caps are compared, as [check_main_grant]
-       compares; a module without a `main` (a library) is bounded by whoever
-       links it. *)
-    (match main_grant_of_decls decls with
-     | None -> ()
-     | Some (main_grants, _) ->
-       Hashtbl.iter
-         (fun (proto, role) (caps, sp) ->
-            List.iter
-              (fun c ->
-                 if not (cap_subsumes "IO" c) then ()
-                 else if List.exists (fun g -> cap_subsumes g c) main_grants then ()
-                 else
-                   let show_main =
-                     match main_grants with
-                     | [] -> "nothing (`main` has no capability parameter)"
-                     | gs -> String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) gs)
-                   in
-                   let leaf =
-                     match String.rindex_opt c '.' with
-                     | Some i -> String.sub c (i + 1) (String.length c - i - 1)
-                     | None -> c
-                   in
-                   Err.error env.errors ~span:sp
-                     (Printf.sprintf
-                        "Protocol `%s`: `role %s needs %s` is wider than `main`'s grant, which is %s. \
-                         A role's grant must fit within the program's: the runner narrows the role's \
-                         capabilities from what `main` holds.\n\
-                         help: add a `Cap(%s)` parameter to `main` (e.g. `_cap_%s : Cap(%s)`), or take \
-                         `%s` out of the role's grant."
-                        proto role c show_main c (String.lowercase_ascii leaf) c c))
-              caps)
-         env.role_grants);
-    let roots = find_role_roots env in
-    if roots = [] then ()
-    else begin
       let own = Hashtbl.copy env.own_cap_closures in
       let refs = Hashtbl.copy env.fn_refs in
       (* A builtin called directly in the callback body, unless a user
@@ -7573,6 +7595,50 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
       let rows =
         March_caps.Cap_rows.solve ~with_rows:false ~own_caps:own ~refs ~seeds:(Hashtbl.create 1) ()
       in
+      Some (keyed, own, refs, rows)
+  end
+
+let check_role_grants (env : env) (decls : Ast.decl list) : unit =
+  if Hashtbl.length env.role_grants = 0 then ()
+  else begin
+    (* 4. Every role's grant fits within `main`'s (section 2, "Relation to
+       `main`").  Only IO-lattice caps are compared, as [check_main_grant]
+       compares; a module without a `main` (a library) is bounded by whoever
+       links it. *)
+    (match main_grant_of_decls decls with
+     | None -> ()
+     | Some (main_grants, _) ->
+       Hashtbl.iter
+         (fun (proto, role) (caps, sp) ->
+            List.iter
+              (fun c ->
+                 if not (cap_subsumes "IO" c) then ()
+                 else if List.exists (fun g -> cap_subsumes g c) main_grants then ()
+                 else
+                   let show_main =
+                     match main_grants with
+                     | [] -> "nothing (`main` has no capability parameter)"
+                     | gs -> String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) gs)
+                   in
+                   let leaf =
+                     match String.rindex_opt c '.' with
+                     | Some i -> String.sub c (i + 1) (String.length c - i - 1)
+                     | None -> c
+                   in
+                   Err.error env.errors ~span:sp
+                     (Printf.sprintf
+                        "Protocol `%s`: `role %s needs %s` is wider than `main`'s grant, which is %s. \
+                         A role's grant must fit within the program's: the runner narrows the role's \
+                         capabilities from what `main` holds.\n\
+                         help: add a `Cap(%s)` parameter to `main` (e.g. `_cap_%s : Cap(%s)`), or take \
+                         `%s` out of the role's grant."
+                        proto role c show_main c (String.lowercase_ascii leaf) c c))
+              caps)
+         env.role_grants);
+    match solve_role_roots env with
+    | None -> ()
+    | Some (keyed, own, refs, rows) ->
+    begin
       let caps_of k = match Hashtbl.find_opt rows k with Some (row : March_caps.Cap_rows.row) -> row.caps | None -> [] in
       let label (r : role_root) = Printf.sprintf "the %s passed to `%s`" r.rr_what r.rr_front in
       List.iter
@@ -7695,6 +7761,79 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
           keyed
       end
     end
+  end
+
+(* ── Per-role capability closures for the hot-deploy manifest ─────────────
+   (build step 10, plan II.2 "Hot deploys" and section 5 "Admission").  For
+   every role with a grant (`role R needs ...`), its FULL capability closure:
+   the union, over every root of that role, of the IO caps [solve_role_roots]
+   solves, i.e. everything the role's code reaches, not a changed function's
+   own caps.  Normalized with [Cap_lattice.normalize] and sorted, so the
+   writer and the reload server's root recompute agree byte for byte.  Only
+   the IO lattice, as [check_role_grants] judges: proof caps such as
+   `Session.Live` are not authority a node policy grants.
+
+   Each entry is [(proto ^ "." ^ role, closure, chains)], where [chains]
+   gives, per cap of the closure, the first root's reach chain as
+   [check_role_grants] prints it (the callback position first, then the
+   frames down to the holder), so a deploy that widens the closure can name
+   the path.  A role granted but never run (no root) has an empty closure.
+   Sorted by role. *)
+let role_capability_closures (env : env)
+  : (string * string list * (string * string list) list) list =
+  if Hashtbl.length env.role_grants = 0 then []
+  else begin
+    let solved = solve_role_roots env in
+    let per_role : (string, (string * role_root) list) Hashtbl.t = Hashtbl.create 8 in
+    (match solved with
+     | None -> ()
+     | Some (keyed, _, _, _) ->
+       List.iter
+         (fun ((_, r) as kr) ->
+            let k = r.rr_proto ^ "." ^ r.rr_role in
+            Hashtbl.replace per_role k
+              (Option.value ~default:[] (Hashtbl.find_opt per_role k) @ [ kr ]))
+         keyed);
+    let names =
+      Hashtbl.fold (fun (proto, role) _ acc -> (proto ^ "." ^ role) :: acc) env.role_grants []
+      |> List.sort_uniq String.compare
+    in
+    List.map
+      (fun name ->
+         match solved with
+         | None -> (name, [], [])
+         | Some (_, own, refs, rows) ->
+           let roots = Option.value ~default:[] (Hashtbl.find_opt per_role name) in
+           let caps_of k =
+             match Hashtbl.find_opt rows k with
+             | Some (row : March_caps.Cap_rows.row) -> row.caps
+             | None -> []
+           in
+           let io = List.concat_map (fun (k, _) -> List.filter (cap_subsumes "IO") (caps_of k)) roots in
+           let closure =
+             List.sort String.compare (March_caps.Cap_lattice.normalize (List.sort_uniq String.compare io))
+           in
+           let chains =
+             List.filter_map
+               (fun c ->
+                  List.find_map
+                    (fun (k, r) ->
+                       (* the root's row may hold [c] itself or a narrower cap
+                          that [normalize] folded into it *)
+                       let held =
+                         List.find_opt (fun x -> cap_subsumes c x) (caps_of k)
+                       in
+                       match held with
+                       | None -> None
+                       | Some x -> (
+                         match cap_reach_chain ~own_caps:own ~fn_refs:refs env ~from:k ~cap:x with
+                         | Some (_ :: _ as chain) -> Some (c, r.rr_what :: chain)
+                         | _ -> None))
+                    roots)
+               closure
+           in
+           (name, closure, chains))
+      names
   end
 
 (* ── R1 stage C: per-function grants — REMOVED 2026-08-13 ──────────────────
@@ -8384,10 +8523,6 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
      place to carry the exemption rather than a flag threaded from the CLI. *)
   let env = { env with root_cap_allowed = true } in
   record_names_load env.record_names_snapshot;   (* per-check, see [record_names_dump] *)
-  (* REPL input is user code: the stdlib-only builtin gate applies. Its
-     top-level declarations never pass through [check_module_needs] (nested
-     modules do), so run the gate here. *)
-  check_stdlib_only_refs env m.Ast.mod_decls;
   let errors = env.errors in
   let type_map = env.type_map in
   let rec prebind_mod_members_inc ?(opaque = StringSet.empty) prefix e decls =

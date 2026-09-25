@@ -49,8 +49,9 @@ void   *march_html_escape_ctx_dyn(int64_t escaper_id, void *v);
 /* Installed by march_ctor_table_ensure: renders a heap cell by its header
  * type id, or returns NULL when the id is unknown/ambiguous.  NULL until a
  * descriptor is registered, so the WASM runtime and binaries with no erased
- * render site never pay for it. */
-extern void *(*march_render_dyn_hook)(void *v);
+ * render site never pay for it.  [repr] selects the nested-string convention
+ * (see march_value_to_string_mode). */
+extern void *(*march_render_dyn_hook)(void *v, int repr);
 
 /* Heap allocation: allocates sz bytes zeroed, returns a pointer. */
 void *march_alloc(int64_t sz);
@@ -488,6 +489,13 @@ void *native_u8_arr_alloc_raw(int64_t len);
 void *march_string_lit_static(const char *utf8, int64_t len, void **cell);
 void *march_int_to_string(int64_t n);
 void *march_float_to_string(double f);
+void  march_print_int(int64_t n);
+void  march_print_float(double f);
+int64_t march_char_is_alpha(void *c);
+int64_t march_char_is_uppercase(void *c);
+int64_t march_char_is_lowercase(void *c);
+void *march_char_to_uppercase(void *c);
+void *march_char_to_lowercase(void *c);
 void *march_bool_to_string(int64_t b);
 void *march_string_concat(void *a, void *b);
 int64_t march_string_eq(void *a, void *b);
@@ -905,8 +913,20 @@ int64_t march_is_cap_valid(void *cap);
  * enqueuing msg.  Returns the :ok atom on delivery, :error otherwise. */
 int64_t march_send_checked(void *cap, void *msg);
 
-/* Value pretty-printing. */
+/* Value pretty-printing.  Two conventions, differing ONLY in how a string
+ * NESTED inside a rendered constructor is printed (a top-level String is
+ * returned verbatim by both):
+ *   show (repr == 0)  the interpreter's `to_string`/Show: a nested string is
+ *                     bare inside List/Option/Result (their Show impls call
+ *                     show on the element), quoted inside any other
+ *                     constructor or record (no Show impl -> repr fallback).
+ *   repr (repr == 1)  the interpreter's value_to_string, which `~H` holes
+ *                     use: every nested string is quoted.
+ * [march_value_to_string] is the show form -- it is the erased `to_string`
+ * and Show$String.show. */
 void *march_value_to_string(void *v);
+void *march_value_to_string_repr(void *v);
+void *march_value_to_string_mode(void *v, int repr);
 
 /* Constructor-name metadata for compiled `to_string` on a user ADT.
  * [march_ctor_table_ensure] registers one compilation unit's descriptor

@@ -197,79 +197,6 @@ let fn_transitive_capability_closures_tbl (env : env)
     (fn_capability_rows_tbl ~with_rows:false env);
   tbl
 
-(** Stdlib-only builtins: a reference to a name in
-    [Typecheck_builtins.stdlib_only] from a declaration outside the standard
-    library is an error. One diagnostic per (declaration, name), at the first
-    call's span when the name is called, at the declaration's span when it is
-    only used as a value. Walks [decls] only: a nested module is checked by
-    its own [check_module_needs] call. Run for every module by
-    [check_module_needs], and for the REPL's top-level fragment by
-    [Typecheck.check_module_with_env], since REPL input is user code. *)
-let check_stdlib_only_refs (env : env) (decls : Ast.decl list) : unit =
-  match !stdlib_only with
-  | [] -> ()
-  | table ->
-    let local = locally_declared_names_of decls in
-    let gated n = if Hashtbl.mem local n then None else List.assoc_opt n table in
-    (* [free_vars_expr] decides WHETHER a gated name is referenced (it honours
-       let/param shadowing and sees value references); the call walk only
-       locates a span for it. *)
-    let scan ~(owner_span : Ast.span) (bound : string list) (es : Ast.expr list) =
-      if not (span_is_stdlib owner_span) then begin
-        let seen = Hashtbl.create 4 in
-        List.iter (fun e ->
-            let calls = March_ast.Calls.names_and_name_spans e in
-            List.iter (fun n ->
-                match gated n with
-                | Some hint when not (Hashtbl.mem seen n) ->
-                  Hashtbl.replace seen n ();
-                  let span =
-                    match List.assoc_opt n calls with
-                    | Some sp -> sp
-                    | None -> owner_span
-                  in
-                  Err.error env.errors ~span
-                    (Printf.sprintf
-                       "`%s` is internal to the standard library; %s" n hint)
-                | _ -> ())
-              (free_vars_expr bound e))
-          es
-      end
-    in
-    let clause_params (c : Ast.fn_clause) =
-      List.concat_map (function
-          | Ast.FPNamed p | Ast.FPDefault (p, _) -> [ p.Ast.param_name.txt ]
-          | Ast.FPPat pat -> free_vars_pattern pat)
-        c.Ast.fc_params
-    in
-    List.iter (function
-        | Ast.DFn (def, sp) ->
-          List.iter (fun (c : Ast.fn_clause) ->
-              let defaults =
-                List.filter_map (function
-                    | Ast.FPDefault (_, e) -> Some e | _ -> None) c.Ast.fc_params
-              in
-              scan ~owner_span:sp (clause_params c)
-                ((c.Ast.fc_body :: Option.to_list c.Ast.fc_guard) @ defaults))
-            def.Ast.fn_clauses
-        | Ast.DLet (_, b, sp) -> scan ~owner_span:sp [] [ b.Ast.bind_expr ]
-        | Ast.DActor (_, _, actor, sp) ->
-          (* The `init` params (D24) are bound in the init expression and in
-             the supervise block's child `init` arguments, which run in this
-             actor's spawn glue. *)
-          let init_bound =
-            List.map (fun (p : Ast.param) -> p.Ast.param_name.txt) actor.Ast.actor_init_params
-          in
-          scan ~owner_span:sp init_bound (actor.Ast.actor_init :: child_init_args actor);
-          List.iter (fun (h : Ast.actor_handler) ->
-              let bound =
-                List.map (fun (p : Ast.param) -> p.Ast.param_name.txt) h.Ast.ah_params
-              in
-              scan ~owner_span:sp bound [ h.Ast.ah_body ])
-            actor.Ast.actor_handlers
-        | _ -> ())
-      decls
-
 (** [check_module_needs env mod_name decls] validates capability declarations for a module:
     1. Every Cap(X) in any function signature must be covered by a [needs] declaration.
     2. Every [needs X] must be used by at least one function.
@@ -1283,9 +1210,9 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             MPText " to the module body." ])
     end
   ) used_caps;
-  (* Stdlib-only builtins, beside Check 1b: both are "may this module call
-     that builtin?" questions. *)
-  check_stdlib_only_refs env decls;
+  (* Stdlib-only builtins used to be walked here beside Check 1b; the gate
+     now fires at name resolution ([Typecheck.infer_expr]'s [EVar] arm), so
+     it needs no declaration walk and misses no declaration kind. *)
   (* Check 1b: a body-scanned builtin call implying an undeclared capability.
      ERROR since 2026-08-06 (was warning-only).  `needs` was a hard floor for
      capability-PASSING code and merely advisory for a direct builtin call —

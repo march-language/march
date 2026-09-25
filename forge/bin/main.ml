@@ -271,7 +271,13 @@ let run_cmd =
     Arg.(value & opt (some string) None & info ["env"] ~docv:"ENV"
            ~doc:"For a topology app: apply the topology.$(docv).toml overlay (host labels).")
   in
-  let run d c tgt fs p ff e =
+  let run_hot_reload =
+    Arg.(value & flag & info ["hot-reload"]
+           ~doc:"With $(b,--processes): build with hot reload and give every process a \
+                 reload socket under .forge/run/, so $(b,forge topology status) reports \
+                 its code versions and epoch pins.")
+  in
+  let run d c tgt fs p ff e hr =
     (* The first positional is always the FILE; everything after it belongs to
        the program.  There is deliberately no spelling that passes arguments to
        the PROJECT entry: cmdliner records the positionals but not where `--`
@@ -282,10 +288,11 @@ let run_cmd =
       | []          -> (None, [])
       | f :: rest   -> (Some f, rest)
     in
-    handle (Cmd_run.run ~dump_phases:d ~compiled:c ?target:tgt ?file ~args ~processes:p ~fail_fast:ff ?env:e ())
+    handle (Cmd_run.run ~dump_phases:d ~compiled:c ?target:tgt ?file ~args ~processes:p ~fail_fast:ff
+              ~hot_reload:hr ?env:e ())
   in
   Cmd.v (Cmd.info "run" ~doc:"Build and run the current project, or a single file")
-    Term.(const run $ dump_phases $ compiled $ target $ files $ processes $ fail_fast $ run_env)
+    Term.(const run $ dump_phases $ compiled $ target $ files $ processes $ fail_fast $ run_env $ run_hot_reload)
 
 (* ------------------------------------------------------------------ forge test *)
 
@@ -315,7 +322,23 @@ let test_cmd =
     Arg.(value & pos_all string [] &
          info [] ~docv:"FILE" ~doc:"Test files to run (default: all test files under test/)")
   in
-  let run v c f s sp r fs pkg =
+  let upgrade_from =
+    Arg.(value & opt (some string) None &
+         info ["upgrade-from"] ~docv:"REF"
+           ~doc:"Upgrade test for a topology app: check out $(docv) (a git ref) under \
+                 .forge/upgrade/, build and start it as local processes with reload \
+                 sockets, run each test/upgrade_*.march against it, hot-deploy the working \
+                 tree into the running processes, wait for the drains, and fail if the \
+                 test's own checks fail or the reload servers report dropped messages, \
+                 hard-deadline kills or lost markers. Runs instead of the unit tests.")
+  in
+  let run v c f s sp r fs pkg up =
+    match up with
+    | Some ref_ ->
+      (match Upgrade_test.run ~ref_ () with
+       | Ok summary -> print_endline summary
+       | Error m -> Printf.eprintf "%s\n%!" m; exit 1)
+    | None ->
     let cwd = Sys.getcwd () in
     match Workspace.find_root cwd with
     | Some root when root = cwd ->
@@ -329,7 +352,7 @@ let test_cmd =
       handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~release:r ~files:fs ())
   in
   Cmd.v (Cmd.info "test" ~doc:"Run the test suite")
-    Term.(const run $ verbose $ coverage $ filter $ seed $ skip_props $ release $ files $ workspace_package_flag)
+    Term.(const run $ verbose $ coverage $ filter $ seed $ skip_props $ release $ files $ workspace_package_flag $ upgrade_from)
 
 (* ------------------------------------------------------------------ forge lint *)
 
@@ -1117,8 +1140,20 @@ let audit_cmd =
                  $(b,forge cap inspect <binary>) is the sound check for a \
                  built artifact.")
   in
-  let run r inferred =
-    match Cmd_audit.run ~record_mode:r ~inferred () with
+  let allow_unanalyzable =
+    Arg.(value & flag &
+         info ["allow-unanalyzable"]
+           ~doc:"With $(b,--inferred): gate on the dependencies that CAN be \
+                 analyzed instead of failing on the ones that cannot. Every \
+                 unanalyzable dependency is still listed, with the reason, \
+                 and is never treated as asking for nothing: $(b,--record) \
+                 leaves it out of forge.caps.lock (keeping any set recorded \
+                 for it earlier), and the check sets its baseline entry \
+                 aside. Lets a project adopt the gate before its whole \
+                 dependency graph typechecks.")
+  in
+  let run r inferred allow_unanalyzable =
+    match Cmd_audit.run ~record_mode:r ~inferred ~allow_unanalyzable () with
     | Ok code -> exit code
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
@@ -1137,11 +1172,24 @@ let audit_cmd =
                  dependency update on it.";
              `P "A dependency that stops asking for a capability is reported but \
                  does not fail the audit.";
+             `S "INFERRED MODE";
+             `P "$(b,--inferred) runs $(b,march caps) over each dependency. It \
+                 first checks that the toolchain's $(b,march) supports \
+                 $(b,caps) (march 0.3.0 or later) and fails with the \
+                 toolchain's path and version if it does not, rather than \
+                 reporting every dependency as not analyzable.";
+             `P "Each dependency's inferred set is cached under \
+                 $(b,.forge/audit-cache/), keyed on the dependency's files, \
+                 the files on its lib path, and the compiler, so a repeat \
+                 audit re-analyzes only what changed. Only successful \
+                 analyses are cached.";
+             `P "A dependency that does not typecheck cannot be analyzed and \
+                 fails the audit unless $(b,--allow-unanalyzable) is given.";
              `S "TYPICAL USE";
              `P "forge audit --record   # accept the current set, commit forge.caps.lock";
              `P "forge audit            # in CI: fail if a dependency gained authority";
            ])
-    Term.(const run $ record $ inferred)
+    Term.(const run $ record $ inferred $ allow_unanalyzable)
 
 (* --------------------------------------------------------- forge ffi -------- *)
 
@@ -1454,10 +1502,46 @@ let topology_gen_cmd =
                  a forge-topology-<target> plugin")
     Term.(const run $ topology_env $ target $ out)
 
+let topology_status_cmd =
+  let run () =
+    match Project.load () with
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+    | Ok proj ->
+      match Reconcile.local_backend ~root:proj.Project.root with
+      | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+      | Ok (b, _) -> print_string (Reconcile.render_status (b.Reconcile.status ()))
+  in
+  Cmd.v (Cmd.info "status"
+           ~doc:"Report each node of the running local cluster ($(b,forge run --processes)): \
+                 alive, the topology it applied, the offers it holds, and, for a hot-reload \
+                 build, its code versions and epoch pins")
+    Term.(const run $ const ())
+
+let topology_apply_cmd =
+  let run env =
+    match Project.load () with
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+    | Ok proj ->
+      match Reconcile.apply ?env ~root:proj.Project.root () with
+      | Ok report -> print_string report
+      | Error m -> Printf.eprintf "%s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "apply"
+           ~doc:"One reconciliation pass over the running local cluster ($(b,forge run \
+                 --processes)): diff topology.toml (and the $(b,--env) overlay, by default \
+                 the one the cluster started with) against what the nodes were given, \
+                 push it (the nodes re-read it on SIGHUP and move their own offers: no \
+                 code change, no restart), wait until every node has applied it, and \
+                 report each node's offers. A change that needs a rebuild and restart \
+                 (a new role or pool, a binding, a hook, caps, hosts or labels) is \
+                 refused and listed.")
+    Term.(const run $ topology_env)
+
 let topology_cmd =
   Cmd.group (Cmd.info "topology"
-               ~doc:"The topology file: check, export as JSON, generate deployment files")
-    [topology_check_cmd; topology_export_cmd; topology_gen_cmd]
+               ~doc:"The topology file: check, export as JSON, generate deployment files, \
+                     status of the running cluster")
+    [topology_check_cmd; topology_export_cmd; topology_gen_cmd; topology_status_cmd; topology_apply_cmd]
 
 let completions_cmd =
   let shell =
@@ -1524,7 +1608,8 @@ let offline_man_blocks = [
       toolchain download, no npm install. Git and registry dependencies are \
       resolved only through $(b,forge.lock) to \
       $(b,~/.march/cas/deps/<name>/<commit-or-version>) and re-hashed against \
-      the lockfile; a missing one is warned about and skipped. \
+      the lockfile (a mismatch is an error offline; online builds re-fetch \
+      the dependency instead); a missing one is warned about and skipped. \
       $(b,forge deps --offline) reports cached/missing per dependency and \
       exits non-zero if any is missing. $(b,forge add) (registry or remote) \
       and $(b,forge outdated) refuse.";

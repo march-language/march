@@ -7,10 +7,10 @@
 (tests
  (names test_forge test_resolver test_solver test_cas_package test_patch
         test_api_surface test_properties test_regression test_cap_binary test_cap_inspect
-        test_audit test_cap_package test_dep_dir test_dep_cache_versions)
+        test_audit test_audit_inferred test_cap_package test_dep_dir test_dep_cache_versions)
  (modules test_forge test_resolver test_solver test_cas_package test_patch
           test_api_surface test_properties test_regression test_cap_binary test_cap_inspect
-          test_audit test_cap_package test_dep_dir test_dep_cache_versions)
+          test_audit test_audit_inferred test_cap_package test_dep_dir test_dep_cache_versions)
  (deps ../../bin/main.exe)
  (libraries march_forge march_search march_caps str alcotest unix qcheck-core qcheck-alcotest march_cas))
 
@@ -147,6 +147,15 @@
  (deps (glob_files topology_golden/*.expected))
  (libraries march_forge march_parser march_lexer alcotest unix yojson))
 
+; test_reconcile.ml: the reconciler's local backend (forge/lib/reconcile.ml,
+; distributed-deploys build step 8): state.json, the single-writer lock,
+; push_topology's SIGHUP to stand-in shell nodes, status against a forked
+; fake reload server. In-process, no toolchain.
+(test
+ (name test_reconcile)
+ (modules test_reconcile)
+ (libraries march_forge alcotest unix yojson str))
+
 ; test_topology_run.ml: `forge run` / `forge run --processes` / `forge topology
 ; export` on examples/topology_app, a two-pool topology app with a generated
 ; `main` (distributed-deploys build step 3). Real native compiles and real
@@ -168,3 +177,51 @@
      (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
       (setenv TOPOLOGY_APP_DIR %{workspace_root}/examples/topology_app
        (run %{exe:test_topology_run.exe}))))))))
+
+; test_topology_reconcile.ml: the reconciler against a real three-node local
+; cluster (distributed-deploys build step 8): fixtures/reconcile_app, three
+; pools each serving a `count = 1` role, run by `forge run --processes --env
+; dev`. A SIGKILLed holder's role moves once SWIM declares it dead; a pushed
+; topology (SIGHUP) moves it again with no restart; `forge topology apply`.
+; Real native compiles and real processes: test_topology_run's hermetic shape.
+(executable
+ (name test_topology_reconcile)
+ (modules test_topology_reconcile)
+ (libraries march_forge alcotest unix str))
+
+(rule
+ (alias runtest)
+ (deps (source_tree %{workspace_root}/runtime) (source_tree %{workspace_root}/stdlib)
+       (source_tree fixtures/reconcile_app))
+ (action
+  (setenv MARCH_TEST_BIN %{bin:march}
+   (setenv FORGE_TEST_BIN %{bin:forge}
+    (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
+     (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
+      (setenv RECONCILE_APP_DIR fixtures/reconcile_app
+       (run %{exe:test_topology_reconcile.exe}))))))))
+
+; test_upgrade_from.ml: `forge test --upgrade-from <ref>` (distributed-deploys
+; build step 8, II.8) on fixtures/upgrade: v1 becomes a git commit (the ref);
+; `good` (a handler's body changes; same message type) must PASS, `drops`
+; (a handler removed with no migrate_msg, so the old feeder's messages are
+; dropped and counted) must FAIL. Each case builds the old version and the
+; patch, runs the old version's process with a reload socket, drives real
+; sessions across a real hot deploy. test_topology_run's hermetic shape; it
+; also needs `git` on PATH (the fixture repositories and the ref's worktree).
+(executable
+ (name test_upgrade_from)
+ (modules test_upgrade_from)
+ (libraries alcotest unix))
+
+(rule
+ (alias runtest)
+ (deps (source_tree %{workspace_root}/runtime) (source_tree %{workspace_root}/stdlib)
+       (source_tree fixtures/upgrade))
+ (action
+  (setenv MARCH_TEST_BIN %{bin:march}
+   (setenv FORGE_TEST_BIN %{bin:forge}
+    (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
+     (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
+      (setenv UPGRADE_FIXTURES_DIR fixtures/upgrade
+       (run %{exe:test_upgrade_from.exe}))))))))

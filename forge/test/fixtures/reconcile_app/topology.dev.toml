@@ -1,0 +1,9 @@
+# One local process per pool, each carrying its pool's name as a label.
+[pool.a]
+hosts = [{ host = "local-a", labels = ["a"] }]
+
+[pool.b]
+hosts = [{ host = "local-b", labels = ["b"] }]
+
+[pool.c]
+hosts = [{ host = "local-c", labels = ["c"] }]

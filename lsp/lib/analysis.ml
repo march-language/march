@@ -65,6 +65,13 @@ let load_stdlib () =
   match find_stdlib_dir () with
   | None -> []
   | Some stdlib_dir ->
+    (* Provenance for the stdlib-only builtin gate, as the driver's
+       [Toolchain.load_stdlib] does: a file under this directory is the
+       stdlib's, so opening `stdlib/actor.march` in the editor does not draw
+       gate errors on its own calls, and no other file can claim that. *)
+    March_typecheck.Typecheck_builtins.stdlib_realpath :=
+      (fun f -> try Some (Unix.realpath f) with _ -> None);
+    March_typecheck.Typecheck_builtins.note_stdlib_root stdlib_dir;
     (* Load prelude first (special treatment: its top-level mod wrapper is
        stripped so its decls land in the global scope).  Then load every
        other *.march file in the stdlib directory so the full standard

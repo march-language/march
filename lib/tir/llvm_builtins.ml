@@ -129,6 +129,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = None };
   { march_name = "print_stderr"; c_name = Some "march_print_stderr"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_print_stderr(ptr %s)" };
+  { march_name = "print_int"; c_name = Some "march_print_int"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_print_int(i64 %n)" };
+  { march_name = "print_float"; c_name = Some "march_print_float"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_print_float(double %f)" };
   { march_name = "io_read_line"; c_name = Some "march_io_read_line"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_io_read_line()" };
   { march_name = "read_line"; c_name = Some "march_io_read_line"; ret_ty = Some Tir.TString;
@@ -248,6 +252,16 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64    @march_char_is_alphanumeric(ptr %c)" };
   { march_name = "char_is_whitespace"; c_name = Some "march_char_is_whitespace"; ret_ty = Some Tir.TBool;
     in_is_builtin = true; declare_sig = Some "declare i64    @march_char_is_whitespace(ptr %c)" };
+  { march_name = "char_is_alpha"; c_name = Some "march_char_is_alpha"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_char_is_alpha(ptr %c)" };
+  { march_name = "char_is_uppercase"; c_name = Some "march_char_is_uppercase"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_char_is_uppercase(ptr %c)" };
+  { march_name = "char_is_lowercase"; c_name = Some "march_char_is_lowercase"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_char_is_lowercase(ptr %c)" };
+  { march_name = "char_to_uppercase"; c_name = Some "march_char_to_uppercase"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_char_to_uppercase(ptr %c)" };
+  { march_name = "char_to_lowercase"; c_name = Some "march_char_to_lowercase"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_char_to_lowercase(ptr %c)" };
   { march_name = "float_to_int"; c_name = Some "march_float_to_int"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @march_float_to_int(double %f)" };
   { march_name = "math_sin"; c_name = Some "march_math_sin"; ret_ty = Some Tir.TFloat;
@@ -339,6 +353,11 @@ let builtins : builtin list = [
   { march_name = "string_last_index_of"; c_name = Some "march_string_last_index_of"; ret_ty = Some (Tir.TCon ("Option", [Tir.TInt]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_last_index_of(ptr %s, ptr %sub)" };
   { march_name = "string_to_float"; c_name = Some "march_string_to_float"; ret_ty = Some (Tir.TCon ("Option", [Tir.TFloat]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_to_float(ptr %s)" };
+  (* Same C symbol as "string_to_float" above; no second PDeclare.  The
+     interpreter implements the two names identically (float_of_string, None
+     on failure), so they share one runtime function here too. *)
+  { march_name = "float_from_string"; c_name = Some "march_string_to_float"; ret_ty = Some (Tir.TCon ("Option", [Tir.TFloat]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_string_to_float(ptr %s)" };
   { march_name = "list_append"; c_name = Some "march_list_append"; ret_ty = Some (Tir.TCon ("List", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_list_append(ptr %a, ptr %b)" };
@@ -716,6 +735,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_set(ptr %arr, i64 %i, double %val)" };
   { march_name = "native_float_arr_sum"; c_name = None; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @native_float_arr_sum(ptr %arr)" };
+  { march_name = "native_float_arr_sort"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_sort(ptr %arr)" };
   { march_name = "native_float_arr_min"; c_name = None; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @native_float_arr_min(ptr %arr)" };
   { march_name = "native_float_arr_max"; c_name = None; ret_ty = Some Tir.TFloat;
@@ -1139,6 +1160,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_value_to_string_typed", "declare ptr  @march_value_to_string_typed(ptr %v, i32 %type_id)");
   ("march_html_auto_escape_dyn", "declare ptr  @march_html_auto_escape_dyn(ptr %v)");
   ("march_html_escape_ctx_dyn", "declare ptr  @march_html_escape_ctx_dyn(i64 %id, ptr %v)");
+  ("march_value_to_string_repr", "declare ptr  @march_value_to_string_repr(ptr %v)");
   ("march_record_shape_intern", "declare i32  @march_record_shape_intern(ptr %desc)");
   ("march_record_set_shape", "declare void @march_record_set_shape(ptr %rec, ptr %desc, ptr %cache)");
   ("march_record_put", "declare ptr  @march_record_put(ptr %rec, ptr %key, ptr %val, i64 %kind)");
@@ -1254,6 +1276,8 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_test_report";
   PDeclare "march_println";
   PDeclare "march_print_stderr";
+  PDeclare "march_print_int";
+  PDeclare "march_print_float";
   PDeclare "march_io_read_line";
   PDeclare "march_io_read_byte";
   PDeclare "march_string_lit";
@@ -1264,6 +1288,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_value_to_string_typed";
   PDeclare "march_html_auto_escape_dyn";
   PDeclare "march_html_escape_ctx_dyn";
+  PDeclare "march_value_to_string_repr";
   PDeclare "march_record_shape_intern";
   PDeclare "march_record_set_shape";
   PDeclare "march_record_keys";
@@ -1321,6 +1346,11 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_char_is_digit";
   PDeclare "march_char_is_alphanumeric";
   PDeclare "march_char_is_whitespace";
+  PDeclare "march_char_is_alpha";
+  PDeclare "march_char_is_uppercase";
+  PDeclare "march_char_is_lowercase";
+  PDeclare "march_char_to_uppercase";
+  PDeclare "march_char_to_lowercase";
   PComment "; Float/Int conversion builtins";
   PDeclare "march_float_to_int";
   PComment "; Math builtins";
@@ -1605,6 +1635,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "native_float_arr_get";
   PDeclare "native_float_arr_set";
   PDeclare "native_float_arr_sum";
+  PDeclare "native_float_arr_sort";
   PDeclare "native_float_arr_min";
   PDeclare "native_float_arr_max";
   PDeclare "native_float_arr_sumsq_dev";

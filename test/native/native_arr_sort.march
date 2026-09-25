@@ -25,12 +25,31 @@
 -- array must copy rather than mutate, or the original binding silently changes
 -- under its owner. A sort that ignores the rc > 1 branch passes every other
 -- case here and only fails that one.
+--
+-- NativeArray.sort_float (f64) runs the same patterns on signed, fractional
+-- doubles, and then the part only floats have: IEEE 754 totalOrder placement
+-- of -NaN, -Inf, -0.0, +0.0, +Inf, +NaN. Floats are compared through
+-- renderings, because NaN != NaN under `==` and -0.0 == 0.0. A NaN does NOT
+-- go through float_to_string: libc prints a sign-bit-set NaN as "-nan" on
+-- glibc and "nan" on macOS, so the golden would be platform-dependent (and
+-- on macOS the two NaNs would be indistinguishable). render_f instead names
+-- each NaN by its bit pattern, via hash(), which hashes a Float's raw bits on
+-- both backends: "-nan" for -float_nan(), "+nan" for float_nan(), and
+-- "nan?" for any other payload. The interpreter must
+-- print the same lines: OCaml's `compare` puts every NaN first and treats
+-- -0.0 as equal to 0.0, so an interpreter arm built on it fails `specials`
+-- and `nan last` here.
+--
+-- test/dune runs the compiled binary a second time with
+-- MARCH_TEST_NSORT_DEPTH_LIMIT=0 against the same golden: that forces every
+-- segment above the small-sort cutoff into the heapsort fallback, which the
+-- pattern-breaking step otherwise makes unreachable from any input.
 mod NativeArrSort do
   needs IO.Console
 
   -- Build [f(0), f(1), ..., f(n-1)]. Tail-recursive with an accumulator.
-  pfn build(n : Int, f : Int -> Int) : List(Int) do
-    fn go(i : Int, acc : List(Int)) : List(Int) do
+  pfn build(n : Int, f : Int -> a) : List(a) do
+    fn go(i : Int, acc : List(a)) : List(a) do
       if i < 0 do acc else go(i - 1, Cons(f(i), acc)) end
     end
     go(n - 1, Nil)
@@ -72,6 +91,93 @@ mod NativeArrSort do
       if agrees(gen(n)) do acc + 1 else acc end)
   end
 
+  -- ── f64 ────────────────────────────────────────────────────────────────
+
+  -- Signed, fractional doubles from an int pattern, so the totalOrder key's
+  -- negative branch runs on every case, not only on the specials.
+  pfn to_f(xs : List(Int)) : List(Float) do
+    List.map(xs, fn x -> int_to_float(x - 500) *. 0.25)
+  end
+
+  -- Platform-independent, sign-explicit rendering (see the header comment).
+  pfn render_f(x : Float) : String do
+    if float_is_nan(x) do
+      if hash(x) == hash(-float_nan()) do "-nan"
+      else if hash(x) == hash(float_nan()) do "+nan"
+      else "nan?" end end
+    else float_to_string(x) end
+  end
+
+  pfn render(xs : List(Float)) : List(String) do
+    List.map(xs, fn x -> render_f(x))
+  end
+
+  pfn agrees_f(xs : List(Float)) : Bool do
+    let got = NativeArray.to_list_float(
+      NativeArray.sort_float(NativeArray.from_list_float(xs)))
+    render(got) == render(List.sort_by(xs, fn (a, b) -> a <= b))
+  end
+
+  pfn score_f(gen : Int -> List(Int)) : Int do
+    let sizes = [0, 1, 2, 7, 8, 9, 31, 32, 33, 64, 65, 200, 1000]
+    List.fold_left(sizes, 0, fn (acc, n) ->
+      if agrees_f(to_f(gen(n))) do acc + 1 else acc end)
+  end
+
+  -- Element i of the mixed-specials array: every 13th slot is one of six
+  -- special values, cycling in the order below; the rest are nonzero finite
+  -- values of both signs. Kind 0..5 = -NaN, -Inf, -0.0, +0.0, +Inf, +NaN,
+  -- which is also their totalOrder rank; 6 = finite negative, 7 = finite
+  -- positive.
+  pfn kind(i : Int) : Int do
+    if i % 13 == 0 do (i / 13) % 6
+    else if finite(i) < 0.0 do 6 else 7 end end
+  end
+
+  pfn finite(i : Int) : Float do
+    int_to_float(scramble(i) % 2000 - 1000) +. 0.5
+  end
+
+  pfn special(k : Int) : Float do
+    match k do
+      0 -> -float_nan()
+      1 -> float_neg_infinity()
+      2 -> 0.0 *. -1.0
+      3 -> 0.0
+      4 -> float_infinity()
+      _ -> float_nan()
+    end
+  end
+
+  pfn mixed_at(i : Int) : Float do
+    let k = kind(i)
+    if k < 6 do special(k) else finite(i) end
+  end
+
+  -- The expected order, built from KINDS rather than by comparing values:
+  -- specials of each rank in rank order, with the finite negatives between
+  -- -Inf and -0.0 and the finite positives between +0.0 and +Inf.
+  pfn mixed_expected(n : Int) : List(Float) do
+    let idx = build(n, fn i -> i)
+    let of_kind = fn k -> List.map(List.filter(idx, fn i -> kind(i) == k), fn i -> mixed_at(i))
+    let asc = fn xs -> List.sort_by(xs, fn (a, b) -> a <= b)
+    List.concat([of_kind(0), of_kind(1), asc(of_kind(6)), of_kind(2),
+                 of_kind(3), asc(of_kind(7)), of_kind(4), of_kind(5)])
+  end
+
+  pfn mixed_agrees(n : Int) : Bool do
+    let got = NativeArray.to_list_float(
+      NativeArray.sort_float(NativeArray.from_list_float(build(n, mixed_at))))
+    render(got) == render(mixed_expected(n))
+  end
+
+  pfn show_sorted_f(xs : List(Float)) : String do
+    let got = NativeArray.to_list_float(
+      NativeArray.sort_float(NativeArray.from_list_float(xs)))
+    List.fold_left(render(got), "", fn (acc, s) ->
+      if acc == "" do s else acc ++ " " ++ s end)
+  end
+
   fn main(_cap : Cap(IO.Console)) : () do
     println("sorted: " ++ int_to_string(score(sorted_l)))
     println("reversed: " ++ int_to_string(score(reversed_l)))
@@ -96,5 +202,34 @@ mod NativeArrSort do
     let twice = NativeArray.sort_int(once)
     println("idempotent: "
             ++ bool_to_string(NativeArray.to_list_int(twice) == expected(random_l(100))))
+
+    println("f64 sorted: " ++ int_to_string(score_f(sorted_l)))
+    println("f64 reversed: " ++ int_to_string(score_f(reversed_l)))
+    println("f64 equal: " ++ int_to_string(score_f(equal_l)))
+    println("f64 dist10: " ++ int_to_string(score_f(dist10_l)))
+    println("f64 sawtooth: " ++ int_to_string(score_f(sawtooth_l)))
+    println("f64 organ: " ++ int_to_string(score_f(organ_l)))
+    println("f64 random: " ++ int_to_string(score_f(random_l)))
+    println("f64 nearly: " ++ int_to_string(score_f(nearly_l)))
+
+    -- totalOrder, spelled out on one small array (small-sort path) ...
+    let nz = 0.0 *. -1.0
+    println("f64 specials: " ++ show_sorted_f(
+      [1.0, float_nan(), nz, float_neg_infinity(), 0.0, -float_nan(),
+       float_infinity(), -1.0]))
+    -- ... and the parity trap on its own: a +NaN sorts LAST.
+    println("f64 nan last: " ++ show_sorted_f([float_nan(), 1.0, -1.0]))
+    -- ... and mixed into large arrays (quicksort + equal-partition paths).
+    let msizes = [9, 33, 200, 1000, 5000]
+    println("f64 mixed specials: " ++ int_to_string(
+      List.fold_left(msizes, 0, fn (acc, n) ->
+        if mixed_agrees(n) do acc + 1 else acc end)))
+
+    let fshared = NativeArray.from_list_float([0.5, -2.0, 1.5])
+    let fsorted = NativeArray.sort_float(fshared)
+    println("f64 alias original intact: "
+            ++ bool_to_string(NativeArray.to_list_float(fshared) == [0.5, -2.0, 1.5]))
+    println("f64 alias result sorted: "
+            ++ bool_to_string(NativeArray.to_list_float(fsorted) == [-2.0, 0.5, 1.5]))
   end
 end

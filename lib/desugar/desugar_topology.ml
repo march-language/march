@@ -15,12 +15,15 @@
     {1 Shape}
 
     - A role bound to a function ([body = "M.f"]) becomes
-      [Topology.role(name, place, fn () -> <P>_Run.offer_<R>(io, node, capacity,
-      fn (s, caps..., st) -> M.f(env, s, caps..., st)))]: the body's type is the
-      role's granted body type with the pool's [Env] in front (4.1, D34).
+      [Topology.offer_role(name, place, capacity, fn cap -> <P>_Run.offer_<R>(io,
+      node, cap, fn (s, caps..., st) -> M.f(env, s, caps..., st)))]: the body's
+      type is the role's granted body type with the pool's [Env] in front (4.1,
+      D34). The capacity is an argument so that a topology re-read on SIGHUP
+      can change it without a rebuild (build step 8).
     - A role bound to an actor ([actor = "M.A"], D23) becomes
-      [Topology.actor_role(name, place, fn () -> spawn(A, env), fn a ->
-      <P>_Run.offer_hosted_<R>(io, node, capacity, a, start, deliver, cancel))],
+      [Topology.offer_actor_role(name, place, capacity, fn () -> spawn(A, env),
+      fn (a, cap) -> <P>_Run.offer_hosted_<R>(io, node, cap, a, start, deliver,
+      cancel))],
       one actor per offer, whose three callbacks forward to the actor's
       [Start(sid, s, caps...)], [Deliver(sid, s, from, msg, ep)] and
       [Cancel(sid, s, role, cause, ep)] handlers -- the same messages a
@@ -473,8 +476,8 @@ let main_source ?pools (f : facts) (t : t) : string =
                | Some body, _ ->
                  let ps = [ "topology_s" ] @ caps @ [ "topology_st" ] in
                  Some (Printf.sprintf
-                         "      Topology.role(%S, %s, fn () -> %s.offer_%s(topology_io, topology_node, %d,\n        fn (%s) -> %s(%s)))"
-                         r.r_name (place_src r.r_place) run r.r_role cap
+                         "      Topology.offer_role(%S, %s, %d, fn topology_cap -> %s.offer_%s(topology_io, topology_node, topology_cap,\n        fn (%s) -> %s(%s)))"
+                         r.r_name (place_src r.r_place) cap run r.r_role
                          (String.concat ", " ps) (ref_of f body) (String.concat ", " (env :: ps)))
                | None, Some a ->
                  (match Hashtbl.find_opt f.actors a with
@@ -488,8 +491,8 @@ let main_source ?pools (f : facts) (t : t) : string =
                     let call name ps = Printf.sprintf "fn (%s) -> %s(%s)" (String.concat ", " ps) (h name)
                         (String.concat ", " ("topology_a" :: ps)) in
                     Some (Printf.sprintf
-                            "      Topology.actor_role(%S, %s, fn () -> %s(%s),\n        fn topology_a -> %s.offer_hosted_%s(topology_io, topology_node, %d, topology_a,\n          %s,\n          %s,\n          %s))"
-                            r.r_name (place_src r.r_place) (h "spawn") env run r.r_role cap
+                            "      Topology.offer_actor_role(%S, %s, %d, fn () -> %s(%s),\n        fn (topology_a, topology_cap) -> %s.offer_hosted_%s(topology_io, topology_node, topology_cap, topology_a,\n          %s,\n          %s,\n          %s))"
+                            r.r_name (place_src r.r_place) cap (h "spawn") env run r.r_role
                             (call "start" start_ps) (call "deliver" dl) (call "cancel" cl)))
                | None, None -> None))
           p.p_serves

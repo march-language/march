@@ -574,6 +574,371 @@ static void test_epoch_model_wait_pins_drain(void) {
     close(fd);
 }
 
+/* ── ACTIVATE6 (DD build step 10): per-role closures ─────────────────────
+ * Build+send one ACTIVATE6.  [role_caps] is the SIGNED block ("R=hex;...");
+ * [roles] the unsigned one ("R=csv;...").  [cas] may be NULL (a fake hash:
+ * admission then falls through to CAS-miss). */
+static void do_activate6(int fd, const char *name, const char *cas,
+                         const char *role_caps, const char *roles,
+                         char *resp, int resp_max) {
+    char impl_hash[65], cas_hash[65];
+    memset(impl_hash, '7', 64); impl_hash[64] = '\0';
+    if (cas) snprintf(cas_hash, sizeof(cas_hash), "%s", cas);
+    else { memset(cas_hash, '8', 64); cas_hash[64] = '\0'; }
+    char root[65];
+    expected_cap_root(NULL, 0, root);
+    char signed_msg[4096];
+    snprintf(signed_msg, sizeof(signed_msg),
+             "ACTIVATE6 %s %s %s %d epoch:%u cap_root:%s role_caps:%s callers:%s",
+             name, impl_hash, cas_hash, 0, 0u, root, role_caps, "");
+    char sig_b64[128];
+    sign_b64(signed_msg, sig_b64);
+    char line[8192];
+    snprintf(line, sizeof(line),
+             "ACTIVATE6 %s %s %s %s %d epoch:%u cap_root:%s role_caps:%s caps: roles:%s callers:",
+             name, impl_hash, cas_hash, sig_b64, 0, 0u, root, role_caps, roles);
+    send_line(fd, line);
+    read_resp(fd, resp, resp_max);
+}
+
+/* "Stream.Cons=<root(caps)>" for one role. */
+static void role_root_entry(const char *role, const char **caps, int n, char *out, size_t max) {
+    char root[65];
+    expected_cap_root(caps, n, root);
+    snprintf(out, max, "%s=%s", role, root);
+}
+
+static void test_activate6_role_closures(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "connected to reload server (ACTIVATE6)");
+    if (fd < 0) return;
+    char resp[512];
+    const char *cons[] = { "IO.Console", "IO.FileWrite" };
+    const char *prod[] = { "IO.Console" };
+    char rc_cons[256], rc_prod[256], rc_both[600];
+    role_root_entry("Stream.Cons", cons, 2, rc_cons, sizeof(rc_cons));
+    role_root_entry("Stream.Prod", prod, 1, rc_prod, sizeof(rc_prod));
+    snprintf(rc_both, sizeof(rc_both), "%s;%s", rc_cons, rc_prod);
+
+    do_activate6(fd, "test_fn_role", NULL, rc_both,
+                 "Stream.Cons=IO.Console,IO.FileWrite;Stream.Prod=IO.Console",
+                 resp, sizeof(resp));
+    CHECK(strncmp(resp, "ERR missing_artifact", 20) == 0,
+          "ACTIVATE6: matching role roots pass admission (falls through to CAS-miss)");
+    {
+        char line[4096]; last_audit_line(line, sizeof(line));
+        CHECK(strstr(line, "\"roles\":\"Stream.Cons=IO.Console,IO.FileWrite;Stream.Prod=IO.Console\"") != NULL,
+              "ACTIVATE6: the audit line records the role closures");
+    }
+
+    /* The unsigned closure narrowed by a MITM (drop IO.FileWrite): the
+     * signed root no longer recomputes. */
+    do_activate6(fd, "test_fn_role", NULL, rc_both,
+                 "Stream.Cons=IO.Console;Stream.Prod=IO.Console", resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR role_cap_tamper") == 0,
+          "ACTIVATE6: a stripped role closure is ERR role_cap_tamper");
+    check_audit("test_fn_role", "[]",
+                "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+                "err_role_cap_tamper");
+
+    do_activate6(fd, "test_fn_role", NULL, rc_both,
+                 "Stream.Cons=IO.Console,IO.FileWrite", resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR role_cap_tamper") == 0,
+          "ACTIVATE6: a signed role missing from roles: is ERR role_cap_tamper");
+
+    do_activate6(fd, "test_fn_role", NULL, rc_cons,
+                 "Stream.Cons=IO.Console,IO.FileWrite;Stream.Prod=IO.Console", resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR role_cap_tamper") == 0,
+          "ACTIVATE6: an unsigned role in roles: is ERR role_cap_tamper");
+
+    char rc_unsorted[600];
+    snprintf(rc_unsorted, sizeof(rc_unsorted), "%s;%s", rc_prod, rc_cons);
+    do_activate6(fd, "test_fn_role", NULL, rc_unsorted,
+                 "Stream.Cons=IO.Console,IO.FileWrite;Stream.Prod=IO.Console", resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR bad_format bad_role_caps") == 0,
+          "ACTIVATE6: role_caps: must be strictly sorted (canonical)");
+
+    /* The signature covers role_caps: swap in another root, keep the sig. */
+    {
+        char impl_hash[65], cas_hash[65], root[65];
+        memset(impl_hash, '7', 64); impl_hash[64] = '\0';
+        memset(cas_hash, '8', 64); cas_hash[64] = '\0';
+        expected_cap_root(NULL, 0, root);
+        char signed_msg[4096], sig_b64[128], line[8192];
+        snprintf(signed_msg, sizeof(signed_msg),
+                 "ACTIVATE6 %s %s %s %d epoch:%u cap_root:%s role_caps:%s callers:%s",
+                 "test_fn_role", impl_hash, cas_hash, 0, 0u, root, rc_cons, "");
+        sign_b64(signed_msg, sig_b64);
+        char rc_other[256];
+        role_root_entry("Stream.Cons", prod, 1, rc_other, sizeof(rc_other));
+        snprintf(line, sizeof(line),
+                 "ACTIVATE6 %s %s %s %s 0 epoch:0 cap_root:%s role_caps:%s caps: roles:%s callers:",
+                 "test_fn_role", impl_hash, cas_hash, sig_b64, root, rc_other,
+                 "Stream.Cons=IO.Console");
+        send_line(fd, line);
+        read_resp(fd, resp, sizeof(resp));
+        CHECK(strcmp(resp, "ERR bad_signature") == 0,
+              "ACTIVATE6: role_caps: is inside the signed message");
+    }
+
+    /* The old verbs still work beside it (ACTIVATE4 path unchanged). */
+    {
+        const char *caps[] = { "IO.Console" };
+        char root[65];
+        expected_cap_root(caps, 1, root);
+        do_activate4(fd, "test_fn_role", "IO.Console", root, "", resp, sizeof(resp));
+        CHECK(strncmp(resp, "ERR missing_artifact", 20) == 0,
+              "ACTIVATE4 unchanged beside ACTIVATE6");
+    }
+
+    /* A real activation through ACTIVATE6 (the stub patch is in the CAS). */
+    do_activate6(fd, "test_fn_epoch", STUB_CAS, rc_both,
+                 "Stream.Cons=IO.Console,IO.FileWrite;Stream.Prod=IO.Console",
+                 resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "ACTIVATE6 activates a real patch");
+    if (strncmp(resp, "OK ", 3) != 0) fprintf(stderr, "    got: %s\n", resp);
+    close(fd);
+}
+
+/* Policy mode: the node policy (IO.Console, IO.NetConnect) bounds every
+ * role closure.  A closure that widened to IO.FileWrite (a patch whose role
+ * body now reaches file_write through an existing helper) is refused by the
+ * SERVER, whatever the client's gate did. */
+static void test_activate6_role_policy(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "connected to reload server (ACTIVATE6 policy)");
+    if (fd < 0) return;
+    char resp[512];
+    const char *narrow[] = { "IO.Console" };
+    const char *wide[] = { "IO.Console", "IO.FileWrite" };
+    char rc[256];
+    role_root_entry("Stream.Cons", narrow, 1, rc, sizeof(rc));
+    do_activate6(fd, "test_fn_role", NULL, rc, "Stream.Cons=IO.Console", resp, sizeof(resp));
+    CHECK(strncmp(resp, "ERR missing_artifact", 20) == 0,
+          "ACTIVATE6: a role closure within policy is admitted");
+    role_root_entry("Stream.Cons", wide, 2, rc, sizeof(rc));
+    do_activate6(fd, "test_fn_role", NULL, rc, "Stream.Cons=IO.Console,IO.FileWrite",
+                 resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR role_cap_policy Stream.Cons IO.FileWrite") == 0,
+          "ACTIVATE6: a widened role closure outside policy is ERR role_cap_policy");
+    if (strcmp(resp, "ERR role_cap_policy Stream.Cons IO.FileWrite") != 0)
+        fprintf(stderr, "    got: %s\n", resp);
+    {
+        char line[4096]; last_audit_line(line, sizeof(line));
+        CHECK(strstr(line, "\"result\":\"err_role_cap_policy\"") != NULL,
+              "ACTIVATE6: the refusal is audited");
+    }
+    close(fd);
+}
+
+/* ── TOPOLOGY (DD build step 10): a signed reconciler action ──────────── */
+static const char TOPO_BODY[] = "[pools.edge]\nserves = [\"Stream.Cons\"]\n";
+
+/* Push [body] signed over "TOPOLOGY <digest_claim>"; [send_digest] is what
+ * the line claims (normally the body's own digest). */
+static void push_topology(int fd, const char *body, const char *sign_digest,
+                          const char *send_digest, char *resp, int max) {
+    char sig[128], msg[128], line[512];
+    snprintf(msg, sizeof(msg), "TOPOLOGY %s", sign_digest);
+    sign_b64(msg, sig);
+    snprintf(line, sizeof(line), "TOPOLOGY %s %s %zu", send_digest, sig, strlen(body));
+    send_line(fd, line);
+    read_resp(fd, resp, max);
+    if (strcmp(resp, "READY") != 0) return;
+    write(fd, body, strlen(body));
+    read_resp(fd, resp, max);
+}
+
+static void topo_digest(const char *body, char out[65]) {
+    march_blake3_hex((const unsigned char *)body, strlen(body), out);
+}
+
+static void test_topology_push(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "connected to reload server (TOPOLOGY)");
+    if (fd < 0) return;
+    char resp[512], d[65], other[65], want[128];
+    topo_digest(TOPO_BODY, d);
+    topo_digest("something else", other);
+
+    push_topology(fd, TOPO_BODY, other, d, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR bad_signature") == 0,
+          "TOPOLOGY: a signature over another digest is refused before the body");
+    push_topology(fd, TOPO_BODY, other, other, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR digest_mismatch") == 0,
+          "TOPOLOGY: a body that does not hash to the signed digest is refused");
+    push_topology(fd, TOPO_BODY, d, d, resp, sizeof(resp));
+    snprintf(want, sizeof(want), "OK %s", d);
+    CHECK(strcmp(resp, want) == 0, "TOPOLOGY: a signed push is accepted");
+    {
+        char line[4096]; last_audit_line(line, sizeof(line));
+        CHECK(strstr(line, "\"type\":\"topology\"") && strstr(line, "\"result\":\"ok\""),
+              "TOPOLOGY: the push is audited");
+    }
+    send_line(fd, "PING");   /* the connection is still in sync */
+    read_resp(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "PONG") == 0, "TOPOLOGY: the stream stays in sync after the body");
+    close(fd);
+}
+
+/* ── Restart durability (plan 6.5, DD build step 10) ─────────────────────
+ * Each phase is its own process (fork), i.e. its own server lifetime, over
+ * one HOME (the CAS root and the persisted state) and one socket path. */
+#include <sys/wait.h>
+
+static const char *g_restore_home;
+
+/* The dispatch table a restarted binary has: the same names, the same
+ * baseline (or a different one, for base_changed). */
+static void restore_boot(const char *baseline) {
+    march_dispatch_init(64);
+    march_dispatch_register_name(1, "test_fn_epoch");
+    march_dispatch_publish(1, (void *)0x1010, baseline, NULL, MARCH_NATIVE);
+    march_reload_server_start(SOCK_PATH);
+}
+
+static void restore_versions(int fd, char *out, size_t max, const char *verb) {
+    send_line(fd, verb);
+    out[0] = '\0';
+    char line[1024];
+    for (int i = 0; i < 64; i++) {
+        read_resp(fd, line, sizeof(line));
+        if (strcmp(line, "END") == 0 || !line[0]) break;
+        strncat(out, line, max - strlen(out) - 2);
+        strncat(out, "\n", max - strlen(out) - 1);
+    }
+}
+
+static const char HOT_IMPL[] =
+    "6666666666666666666666666666666666666666666666666666666666666666";
+
+static void phase_activate(void) {
+    restore_boot("baseline");
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "phase 1: connected");
+    if (fd < 0) return;
+    char resp[512], v[4096];
+    CHECK(put_stub(fd), "phase 1: stub patch uploaded");
+    activate5(fd, "test_fn_epoch", 0, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "phase 1: activated");
+    restore_versions(fd, v, sizeof(v), "VERSIONS");
+    char want[200];
+    snprintf(want, sizeof(want), "VERSION test_fn_epoch hot %s", HOT_IMPL);
+    CHECK(strstr(v, want) != NULL, "phase 1: VERSIONS shows the hot version");
+    char d[65];
+    topo_digest(TOPO_BODY, d);
+    push_topology(fd, TOPO_BODY, d, d, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "phase 1: a topology pushed");
+    close(fd);
+}
+
+static void phase_restored(int expect_hot, const char *expect_mode, int expect_skipped) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "restart: connected");
+    if (fd < 0) return;
+    char v[4096], want[200];
+    restore_versions(fd, v, sizeof(v), "VERSIONS");
+    snprintf(want, sizeof(want), "VERSION test_fn_epoch hot %s", HOT_IMPL);
+    if (expect_hot)
+        CHECK(strstr(v, want) != NULL, "restart: VERSIONS shows the hot version without a redeploy");
+    else
+        CHECK(strstr(v, " hot ") == NULL, "restart: VERSIONS shows only the baseline");
+    restore_versions(fd, v, sizeof(v), "VERSIONS_DETAIL");
+    snprintf(want, sizeof(want), "RESTORED entries:%d skipped:%d mode:%s ",
+             expect_hot, expect_skipped, expect_mode);
+    CHECK(strstr(v, want) != NULL, "restart: VERSIONS_DETAIL has the RESTORED line");
+    if (!strstr(v, want)) fprintf(stderr, "    want: %s\n    got:\n%s", want, v);
+    close(fd);
+}
+
+static int run_phase(void (*body)(void)) {
+    fflush(stdout); fflush(stderr);
+    pid_t pid = fork();
+    if (pid == 0) {
+        g_failed = 0;
+        body();
+        _exit(g_failed > 100 ? 100 : g_failed);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 101;
+}
+
+static void ph_restored_hot(void) {
+    restore_boot("baseline");
+    phase_restored(1, "replayed", 0);
+    int fd = connect_sock(SOCK_PATH);
+    if (fd < 0) return;
+    char v[4096], d[65], want[128];
+    {
+        /* COMPACT: one persisted patch, one deploy, one artifact (the stub). */
+        struct stat st;
+        char path[512], resp[256];
+        snprintf(path, sizeof(path), "%s/.march/cas/artifacts/%.2s/%.62s",
+                 g_restore_home, STUB_CAS, STUB_CAS + 2);
+        send_line(fd, "COMPACT");
+        read_resp(fd, resp, sizeof(resp));
+        snprintf(want, sizeof(want),
+                 "STACK entries:1 functions:1 deploys:1 artifacts:1 cas_bytes:%lld",
+                 stat(path, &st) == 0 ? (long long)st.st_size : -1LL);
+        CHECK(strcmp(resp, want) == 0, "restart: COMPACT reports the persisted stack");
+        if (strcmp(resp, want) != 0) fprintf(stderr, "    want: %s\n    got:  %s\n", want, resp);
+    }
+    restore_versions(fd, v, sizeof(v), "VERSIONS_DETAIL");
+    topo_digest(TOPO_BODY, d);
+    snprintf(want, sizeof(want), "topology:%s", d);
+    CHECK(strstr(v, want) != NULL, "restart: the last pushed topology is restored");
+    char line[4096]; last_audit_line(line, sizeof(line));
+    CHECK(strstr(line, "\"type\":\"topology\"") && strstr(line, "\"result\":\"restored\""),
+          "restart: the topology went back through the hook (audited)");
+    close(fd);
+}
+static void ph_no_replay(void)      { setenv("MARCH_HCR_NO_REPLAY", "1", 1);
+                                      restore_boot("baseline"); phase_restored(0, "off", 1); }
+static void ph_after_no_replay(void){ restore_boot("baseline"); phase_restored(0, "none", 0); }
+static void ph_corrupt_skipped(void){ restore_boot("baseline"); phase_restored(0, "replayed", 1); }
+static void ph_base_changed(void)   { restore_boot("another-build"); phase_restored(0, "base_changed", 1); }
+
+/* Flip one character of the first entry's signature in the state file. */
+static int corrupt_state_signature(void) {
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+             "f=$(ls %s/.march/cas/hcr_state/*/state) && "
+             "awk '/^entry /{ s=$5; c=substr(s,1,1); $5=(c==\"A\"?\"B\":\"A\") substr(s,2) } {print}' "
+             "\"$f\" > \"$f.x\" && mv \"$f.x\" \"$f\"", g_restore_home);
+    return system(cmd) == 0;
+}
+
+static int state_has_entries(void) {
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "grep -q '^entry ' %s/.march/cas/hcr_state/*/state 2>/dev/null",
+             g_restore_home);
+    return system(cmd) == 0;
+}
+
+static void test_restart_durability(void) {
+    CHECK(run_phase(phase_activate) == 0, "phase 1: activate a patch, then exit");
+    CHECK(state_has_entries(), "the patch stack is persisted under the CAS root");
+    CHECK(run_phase(ph_restored_hot) == 0, "phase 2: a restart replays it");
+    CHECK(run_phase(ph_no_replay) == 0, "phase 3: MARCH_HCR_NO_REPLAY starts from the base");
+    CHECK(run_phase(ph_after_no_replay) == 0, "phase 4: and the stack stays set aside");
+    CHECK(run_phase(phase_activate) == 0, "phase 5: activate again");
+    CHECK(corrupt_state_signature(), "phase 6: corrupt the stored signature");
+    CHECK(run_phase(ph_corrupt_skipped) == 0, "phase 6: the corrupt entry is skipped, no crash");
+    {
+        int found = 0;
+        FILE *f = fopen(g_audit_path, "r");
+        char line[4096];
+        while (f && fgets(line, sizeof(line), f))
+            if (strstr(line, "\"type\":\"restore\"") && strstr(line, "\"result\":\"err_restore_sig\""))
+                found = 1;
+        if (f) fclose(f);
+        CHECK(found, "phase 6: the skipped entry has an audit line");
+    }
+    CHECK(run_phase(phase_activate) == 0, "phase 7: activate again");
+    CHECK(run_phase(ph_base_changed) == 0, "phase 8: another build on the socket does not replay it");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <keys_file> [policy]\n", argv[0]);
@@ -599,6 +964,19 @@ int main(int argc, char **argv) {
     snprintf(home, sizeof(home), "/tmp/march_reload_home_%d", (int)getpid());
     mkdir(home, 0700);
     setenv("HOME", home, 1);
+    if (argc >= 3 && strcmp(argv[2], "restore") == 0) {
+        /* Nothing is started in this process: every server lifetime is a
+         * forked child (see test_restart_durability). */
+        g_restore_home = home;
+        test_restart_durability();
+        unlink(g_audit_path);
+        if (g_failed == 0) {
+            printf("test_reload_activate4_restore: all checks passed\n");
+            return 0;
+        }
+        fprintf(stderr, "test_reload_activate4_restore: %d check(s) failed\n", g_failed);
+        return 1;
+    }
 
     march_dispatch_init(64);
     /* Register every test fn name so do_activate gets past the ABI lookup
@@ -615,6 +993,7 @@ int main(int argc, char **argv) {
     march_dispatch_register_name(8, "test_fn_legacy_ok");
     march_dispatch_register_name(9, "test_fn_batch");
     march_dispatch_register_name(10, "test_fn_epoch");
+    march_dispatch_register_name(11, "test_fn_role");
     march_dispatch_publish(10, (void *)0x1010, "baseline", NULL, MARCH_NATIVE);
     march_reload_server_start(sock_path);
     test_hcr_info();
@@ -630,6 +1009,22 @@ int main(int argc, char **argv) {
         test_activate3_regression();
         test_batch_audit_carries_caps();
         test_epoch_model_wait_pins_drain();
+        test_activate6_role_closures();
+        test_topology_push();
+        {
+            int fd = connect_sock(SOCK_PATH);
+            char resp[256];
+            send_line(fd, "COMPACT");
+            read_resp(fd, resp, sizeof(resp));
+            /* The epoch-model case activated test_fn_epoch three times (two
+             * single deploys and one batch) and ACTIVATE6 once more. */
+            static const char want[] =
+                "STACK entries:4 functions:1 deploys:4 artifacts:1 cas_bytes:";
+            CHECK(strncmp(resp, want, sizeof(want) - 1) == 0,
+                  "COMPACT counts every persisted activation");
+            if (strncmp(resp, want, sizeof(want) - 1) != 0) fprintf(stderr, "    got: %s\n", resp);
+            close(fd);
+        }
     } else {
         /* $MARCH_DEPLOY_POLICY must already be set by the caller (dune rule)
          * before this process started, since the server loads it lazily on
@@ -668,6 +1063,7 @@ int main(int argc, char **argv) {
                 close(fd);
             }
         }
+        test_activate6_role_policy();
     }
 
     unlink(sock_path);

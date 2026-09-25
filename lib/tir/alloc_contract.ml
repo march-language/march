@@ -235,7 +235,9 @@ let scalar_builtins = [
   "math_acos"; "math_atan"; "math_atan2"; "math_sinh"; "math_cosh"; "math_tanh";
   "char_is_alpha"; "char_is_digit"; "char_is_alphanumeric"; "char_is_whitespace";
   "char_is_uppercase"; "char_is_lowercase"; "char_to_int"; "char_from_int";
-  "byte_to_char"; "char_to_uppercase"; "char_to_lowercase";
+  "byte_to_char";
+  (* NOT char_to_uppercase / char_to_lowercase: march_char_to_{upper,lower}case
+     return a fresh one-byte string (march_string_lit), so they allocate. *)
   "string_length"; "string_byte_length"; "string_byte_at"; "string_is_empty";
   "is_nil"; "head"; "tail";
   (* Divergence, not allocation: these never return, so no path through them
@@ -249,7 +251,7 @@ let scalar_builtins = [
   "march_decrc_freed"; "march_decrc_local_freed";
   "march_incrc"; "march_decrc"; "march_free";
   "native_int_arr_get"; "native_int_arr_length"; "native_int_arr_set"; "native_int_arr_sum";
-  "native_int_arr_sort";
+  "native_int_arr_sort"; "native_float_arr_sort";
   "native_float_arr_get"; "native_float_arr_length"; "native_float_arr_set"; "native_float_arr_sum";
   "native_f32_arr_get"; "native_f32_arr_length"; "native_f32_arr_set"; "native_f32_arr_sum";
   "native_i32_arr_get"; "native_i32_arr_length"; "native_i32_arr_set"; "native_i32_arr_sum";

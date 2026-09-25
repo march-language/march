@@ -402,10 +402,12 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#type-NameEvent"><span class="sb-kind" style="color:var(--ty)">T</span>NameEvent</a>
 <a class="sl" href="ClusterNode.html#type-RegisterError"><span class="sb-kind" style="color:var(--ty)">T</span>RegisterError</a>
 <a class="sl" href="ClusterNode.html#type-CnEffect"><span class="sb-kind" style="color:var(--ty)">T</span>CnEffect</a>
-<a class="sl" href="ClusterNode.html#type-ClusterHandle"><span class="sb-kind" style="color:var(--ty)">T</span>ClusterHandle</a>
+<a class="sl" href="ClusterNode.html#type-CnHandle"><span class="sb-kind" style="color:var(--ty)">T</span>CnHandle</a>
 <a class="sl" href="ClusterNode.html#type-NodeActorState"><span class="sb-kind" style="color:var(--ty)">T</span>NodeActorState</a>
+<a class="sl" href="ClusterNode.html#type-ClusterOps"><span class="sb-kind" style="color:var(--ty)">T</span>ClusterOps</a>
 <a class="sl" href="ClusterNode.html#fn-addr_of"><span class="sb-kind" style="color:var(--fn)">F</span>addr_of</a>
 <a class="sl" href="ClusterNode.html#fn-all_members"><span class="sb-kind" style="color:var(--fn)">F</span>all_members</a>
+<a class="sl" href="ClusterNode.html#fn-attach"><span class="sb-kind" style="color:var(--fn)">F</span>attach</a>
 <a class="sl" href="ClusterNode.html#fn-await_members"><span class="sb-kind" style="color:var(--fn)">F</span>await_members</a>
 <a class="sl" href="ClusterNode.html#fn-config"><span class="sb-kind" style="color:var(--fn)">F</span>config</a>
 <a class="sl" href="ClusterNode.html#fn-config_from_env"><span class="sb-kind" style="color:var(--fn)">F</span>config_from_env</a>
@@ -435,10 +437,13 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#fn-name_event_text"><span class="sb-kind" style="color:var(--fn)">F</span>name_event_text</a>
 <a class="sl" href="ClusterNode.html#fn-name_of"><span class="sb-kind" style="color:var(--fn)">F</span>name_of</a>
 <a class="sl" href="ClusterNode.html#fn-names"><span class="sb-kind" style="color:var(--fn)">F</span>names</a>
+<a class="sl" href="ClusterNode.html#fn-next_id"><span class="sb-kind" style="color:var(--fn)">F</span>next_id</a>
+<a class="sl" href="ClusterNode.html#fn-node_id"><span class="sb-kind" style="color:var(--fn)">F</span>node_id</a>
 <a class="sl" href="ClusterNode.html#fn-node_id_of"><span class="sb-kind" style="color:var(--fn)">F</span>node_id_of</a>
 <a class="sl" href="ClusterNode.html#fn-off_peer_closed"><span class="sb-kind" style="color:var(--fn)">F</span>off_peer_closed</a>
 <a class="sl" href="ClusterNode.html#fn-on_delivery_failed"><span class="sb-kind" style="color:var(--fn)">F</span>on_delivery_failed</a>
 <a class="sl" href="ClusterNode.html#fn-on_peer_closed"><span class="sb-kind" style="color:var(--fn)">F</span>on_peer_closed</a>
+<a class="sl" href="ClusterNode.html#fn-ops_stub"><span class="sb-kind" style="color:var(--fn)">F</span>ops_stub</a>
 <a class="sl" href="ClusterNode.html#fn-queue_for"><span class="sb-kind" style="color:var(--fn)">F</span>queue_for</a>
 <a class="sl" href="ClusterNode.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
 <a class="sl" href="ClusterNode.html#fn-route"><span class="sb-kind" style="color:var(--fn)">F</span>route</a>
@@ -459,7 +464,9 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Compress.html#type-Mode"><span class="sb-kind" style="color:var(--ty)">T</span>Mode</a>
 <a class="sl" href="Compress.html#type-Level"><span class="sb-kind" style="color:var(--ty)">T</span>Level</a>
 <a class="sl" href="Compress.html#fn-accept_encoding"><span class="sb-kind" style="color:var(--fn)">F</span>accept_encoding</a>
-<a class="sl" href="Compress.html#fn-best_encoding"><span class="sb-kind" style="color:var(--fn)">F</span>best_encoding</a></div></div>
+<a class="sl" href="Compress.html#fn-best_encoding"><span class="sb-kind" style="color:var(--fn)">F</span>best_encoding</a>
+<a class="sl" href="Compress.html#fn-lift_decode_error"><span class="sb-kind" style="color:var(--fn)">F</span>lift_decode_error</a>
+<a class="sl" href="Compress.html#fn-lift_encode_error"><span class="sb-kind" style="color:var(--fn)">F</span>lift_encode_error</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Config.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Config.html">Config</a></div><div class="sb-sub"><a class="sl" href="Config.html#type-Value"><span class="sb-kind" style="color:var(--ty)">T</span>Value</a>
 <a class="sl" href="Config.html#type-Codec"><span class="sb-kind" style="color:var(--ty)">T</span>Codec</a>
 <a class="sl" href="Config.html#type-Key"><span class="sb-kind" style="color:var(--ty)">T</span>Key</a>
@@ -1592,6 +1599,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NativeArray.html#fn-set_i32"><span class="sb-kind" style="color:var(--fn)">F</span>set_i32</a>
 <a class="sl" href="NativeArray.html#fn-set_int"><span class="sb-kind" style="color:var(--fn)">F</span>set_int</a>
 <a class="sl" href="NativeArray.html#fn-set_u8"><span class="sb-kind" style="color:var(--fn)">F</span>set_u8</a>
+<a class="sl" href="NativeArray.html#fn-sort_float"><span class="sb-kind" style="color:var(--fn)">F</span>sort_float</a>
 <a class="sl" href="NativeArray.html#fn-sort_int"><span class="sb-kind" style="color:var(--fn)">F</span>sort_int</a>
 <a class="sl" href="NativeArray.html#fn-sum_f32"><span class="sb-kind" style="color:var(--fn)">F</span>sum_f32</a>
 <a class="sl" href="NativeArray.html#fn-sum_float"><span class="sb-kind" style="color:var(--fn)">F</span>sum_float</a>
@@ -1658,6 +1666,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NodeQueue.html#fn-encode_credit"><span class="sb-kind" style="color:var(--fn)">F</span>encode_credit</a>
 <a class="sl" href="NodeQueue.html#fn-enqueue"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue</a>
 <a class="sl" href="NodeQueue.html#fn-start"><span class="sb-kind" style="color:var(--fn)">F</span>start</a>
+<a class="sl" href="NodeQueue.html#fn-start_local"><span class="sb-kind" style="color:var(--fn)">F</span>start_local</a>
 <a class="sl" href="NodeQueue.html#fn-tag_credit"><span class="sb-kind" style="color:var(--fn)">F</span>tag_credit</a>
 <a class="sl" href="NodeQueue.html#fn-take_evicted"><span class="sb-kind" style="color:var(--fn)">F</span>take_evicted</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="NodeRpc.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="NodeRpc.html">NodeRpc</a></div><div class="sb-sub"><a class="sl" href="NodeRpc.html#type-Target"><span class="sb-kind" style="color:var(--ty)">T</span>Target</a>
@@ -2051,12 +2060,14 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Session.html#fn-crash_payload"><span class="sb-kind" style="color:var(--fn)">F</span>crash_payload</a>
 <a class="sl" href="Session.html#fn-emit"><span class="sb-kind" style="color:var(--fn)">F</span>emit</a>
 <a class="sl" href="Session.html#fn-fail"><span class="sb-kind" style="color:var(--fn)">F</span>fail</a>
+<a class="sl" href="Session.html#fn-hold_epoch"><span class="sb-kind" style="color:var(--fn)">F</span>hold_epoch</a>
 <a class="sl" href="Session.html#fn-in_process"><span class="sb-kind" style="color:var(--fn)">F</span>in_process</a>
 <a class="sl" href="Session.html#fn-in_process_with"><span class="sb-kind" style="color:var(--fn)">F</span>in_process_with</a>
 <a class="sl" href="Session.html#fn-leave"><span class="sb-kind" style="color:var(--fn)">F</span>leave</a>
 <a class="sl" href="Session.html#fn-on_cancel"><span class="sb-kind" style="color:var(--fn)">F</span>on_cancel</a>
 <a class="sl" href="Session.html#fn-on_crash"><span class="sb-kind" style="color:var(--fn)">F</span>on_crash</a>
 <a class="sl" href="Session.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
+<a class="sl" href="Session.html#fn-release_epoch"><span class="sb-kind" style="color:var(--fn)">F</span>release_epoch</a>
 <a class="sl" href="Session.html#fn-suspend"><span class="sb-kind" style="color:var(--fn)">F</span>suspend</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="SessionNode.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="SessionNode.html">SessionNode</a></div><div class="sb-sub"><a class="sl" href="SessionNode.html#type-Link"><span class="sb-kind" style="color:var(--ty)">T</span>Link</a>
 <a class="sl" href="SessionNode.html#type-EndpointState"><span class="sb-kind" style="color:var(--ty)">T</span>EndpointState</a>
@@ -2466,6 +2477,41 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Toml.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
 <a class="sl" href="Toml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
 <a class="sl" href="Toml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Topology.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Topology.html">Topology</a></div><div class="sb-sub"><a class="sl" href="Topology.html#type-TopoPlacement"><span class="sb-kind" style="color:var(--ty)">T</span>TopoPlacement</a>
+<a class="sl" href="Topology.html#type-TopoOpened"><span class="sb-kind" style="color:var(--ty)">T</span>TopoOpened</a>
+<a class="sl" href="Topology.html#type-TopoRole"><span class="sb-kind" style="color:var(--ty)">T</span>TopoRole</a>
+<a class="sl" href="Topology.html#type-TopoAnchorState"><span class="sb-kind" style="color:var(--ty)">T</span>TopoAnchorState</a>
+<a class="sl" href="Topology.html#type-TopoState"><span class="sb-kind" style="color:var(--ty)">T</span>TopoState</a>
+<a class="sl" href="Topology.html#fn-actor_role"><span class="sb-kind" style="color:var(--fn)">F</span>actor_role</a>
+<a class="sl" href="Topology.html#fn-close_all"><span class="sb-kind" style="color:var(--fn)">F</span>close_all</a>
+<a class="sl" href="Topology.html#fn-config_from_env"><span class="sb-kind" style="color:var(--fn)">F</span>config_from_env</a>
+<a class="sl" href="Topology.html#fn-count"><span class="sb-kind" style="color:var(--fn)">F</span>count</a>
+<a class="sl" href="Topology.html#fn-count_on"><span class="sb-kind" style="color:var(--fn)">F</span>count_on</a>
+<a class="sl" href="Topology.html#fn-drain"><span class="sb-kind" style="color:var(--fn)">F</span>drain</a>
+<a class="sl" href="Topology.html#fn-drain_on_signal"><span class="sb-kind" style="color:var(--fn)">F</span>drain_on_signal</a>
+<a class="sl" href="Topology.html#fn-eligible_here"><span class="sb-kind" style="color:var(--fn)">F</span>eligible_here</a>
+<a class="sl" href="Topology.html#fn-everywhere"><span class="sb-kind" style="color:var(--fn)">F</span>everywhere</a>
+<a class="sl" href="Topology.html#fn-hook"><span class="sb-kind" style="color:var(--fn)">F</span>hook</a>
+<a class="sl" href="Topology.html#fn-labels_of"><span class="sb-kind" style="color:var(--fn)">F</span>labels_of</a>
+<a class="sl" href="Topology.html#fn-marked"><span class="sb-kind" style="color:var(--fn)">F</span>marked</a>
+<a class="sl" href="Topology.html#fn-marker"><span class="sb-kind" style="color:var(--fn)">F</span>marker</a>
+<a class="sl" href="Topology.html#fn-node_labels"><span class="sb-kind" style="color:var(--fn)">F</span>node_labels</a>
+<a class="sl" href="Topology.html#fn-offer_worker"><span class="sb-kind" style="color:var(--fn)">F</span>offer_worker</a>
+<a class="sl" href="Topology.html#fn-offered"><span class="sb-kind" style="color:var(--fn)">F</span>offered</a>
+<a class="sl" href="Topology.html#fn-on_label"><span class="sb-kind" style="color:var(--fn)">F</span>on_label</a>
+<a class="sl" href="Topology.html#fn-place"><span class="sb-kind" style="color:var(--fn)">F</span>place</a>
+<a class="sl" href="Topology.html#fn-rank"><span class="sb-kind" style="color:var(--fn)">F</span>rank</a>
+<a class="sl" href="Topology.html#fn-ranked"><span class="sb-kind" style="color:var(--fn)">F</span>ranked</a>
+<a class="sl" href="Topology.html#fn-reconcile_now"><span class="sb-kind" style="color:var(--fn)">F</span>reconcile_now</a>
+<a class="sl" href="Topology.html#fn-role"><span class="sb-kind" style="color:var(--fn)">F</span>role</a>
+<a class="sl" href="Topology.html#fn-running"><span class="sb-kind" style="color:var(--fn)">F</span>running</a>
+<a class="sl" href="Topology.html#fn-runs_pool"><span class="sb-kind" style="color:var(--fn)">F</span>runs_pool</a>
+<a class="sl" href="Topology.html#fn-score"><span class="sb-kind" style="color:var(--fn)">F</span>score</a>
+<a class="sl" href="Topology.html#fn-settled"><span class="sb-kind" style="color:var(--fn)">F</span>settled</a>
+<a class="sl" href="Topology.html#fn-start_failed"><span class="sb-kind" style="color:var(--fn)">F</span>start_failed</a>
+<a class="sl" href="Topology.html#fn-stop"><span class="sb-kind" style="color:var(--fn)">F</span>stop</a>
+<a class="sl" href="Topology.html#fn-supervise_offers"><span class="sb-kind" style="color:var(--fn)">F</span>supervise_offers</a>
+<a class="sl" href="Topology.html#fn-wants"><span class="sb-kind" style="color:var(--fn)">F</span>wants</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Tuple.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Tuple.html">Tuple</a></div><div class="sb-sub"><a class="sl" href="Tuple.html#fn-apply"><span class="sb-kind" style="color:var(--fn)">F</span>apply</a>
 <a class="sl" href="Tuple.html#fn-both"><span class="sb-kind" style="color:var(--fn)">F</span>both</a>
 <a class="sl" href="Tuple.html#fn-first"><span class="sb-kind" style="color:var(--fn)">F</span>first</a>
@@ -2582,7 +2628,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Scheduler</span></nav><h1>Scheduler</h1><div class="mdoc"><p>Scheduler: runtime observability for the actor/task scheduler.</p><p>These counters are the load-shedding substrate: a supervisor or ingress actor polls them to decide when to shed. Interpreted backend reports the subset that is meaningful without the C scheduler (live actor count); unknown/unsupported indices read 0 on both backends.</p></div><h2>Functions</h2><div class="item" id="fn-dropped_messages"><div class="ih"><span class="badge bfn">fn</span><span class="name">dropped_messages</span><span class="sig">dropped_messages() : Int do sched_stat(4) end</span><a class="anchor-link" href="#fn-dropped_messages" title="Link">#</a></div><div class="ib"><p>Messages dropped by bounded-mailbox overflow policies.</p></div></div>
 <div class="item" id="fn-live_procs"><div class="ih"><span class="badge bfn">fn</span><span class="name">live_procs</span><span class="sig">live_procs() : Int do sched_stat(0) end</span><a class="anchor-link" href="#fn-live_procs" title="Link">#</a></div><div class="ib"><p>Green-thread processes currently alive (actors + tasks + main).</p></div></div>
 <div class="item" id="fn-runq_depth"><div class="ih"><span class="badge bfn">fn</span><span class="name">runq_depth</span><span class="sig">runq_depth() : Int do sched_stat(2) end</span><a class="anchor-link" href="#fn-runq_depth" title="Link">#</a></div><div class="ib"><p>Cross-thread global run-queue depth (instantaneous).</p></div></div>
-<div class="item" id="fn-stat"><div class="ih"><span class="badge bfn">fn</span><span class="name">stat</span><span class="sig">stat(i : Int) : Int</span><a class="anchor-link" href="#fn-stat" title="Link">#</a></div><div class="ib"><p>Raw stat by index. 0=live procs, 1=total spawned, 2=global runq depth, 3=stack-alloc failures, 4=messages dropped by mailbox policy, 5=stacks recycled, 6=pending timers, 7=execution contexts released at proc death, 8=dead proc structs freed, 9=dead proc structs retired and still waiting for their grace period. Unknown index reads 0.</p></div></div>
+<div class="item" id="fn-stat"><div class="ih"><span class="badge bfn">fn</span><span class="name">stat</span><span class="sig">stat(i : Int) : Int</span><a class="anchor-link" href="#fn-stat" title="Link">#</a></div><div class="ib"><p>Raw stat by index. 0=live procs, 1=total spawned, 2=global runq depth, 3=stack-alloc failures, 4=messages dropped by mailbox policy, 5=stacks recycled, 6=pending timers, 7=execution contexts released at proc death, 8=dead proc structs freed, 9=dead proc structs retired and still waiting for their grace period, 10=dead actors' metadata freed, 11=dead actors' metadata retired and still waiting for its grace period. Unknown index reads 0.</p></div></div>
 <div class="item" id="fn-total_spawned"><div class="ih"><span class="badge bfn">fn</span><span class="name">total_spawned</span><span class="sig">total_spawned() : Int do sched_stat(1) end</span><a class="anchor-link" href="#fn-total_spawned" title="Link">#</a></div><div class="ib"><p>Processes ever spawned over the program lifetime.</p></div></div></main></div><script>
 /* Theme toggle */
 function getTheme(){var t=localStorage.getItem('march-doc-theme');

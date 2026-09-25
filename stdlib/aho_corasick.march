@@ -58,7 +58,7 @@ mod AhoCorasick do
 
   ptype AcNode = AcNode(List((Int, Int)), Int, List(Int))
 
-  ptype Automaton = Automaton(Array(AcNode), Array(String))
+  ptype Automaton = Automaton(Array.PVec(AcNode), Array.PVec(String))
 
   -- One match: the pattern at `pattern_index` in the list passed to `build`
   -- occurs in the haystack over the half-open byte range `[start, stop)`.

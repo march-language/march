@@ -32,6 +32,59 @@ git log is authoritative for exact commits.
   the sending node's `ClusterNode.on_delivery_failed` handler with its sequence
   number and the reason, instead of only being counted.
 
+- **Placement changes on a running system and upgrade tests** (build step 8 of the
+  distributed-deploys plan). A topology app's nodes re-read their topology on
+  SIGHUP and move their own offers: a role's placement, capacity, or a pool that
+  stops serving it applies with no code change and no restart. `forge topology
+  apply [--env E]` is one reconciliation pass over the cluster `forge run
+  --processes` started (recorded in `.forge/run/state.json`): it diffs, pushes,
+  waits for every node to apply, and reports each node's offers; a change that needs
+  a rebuild and restart is refused and listed. `forge topology status` shows each
+  node's applied topology, offers and (with `forge run --processes --hot-reload`)
+  its code versions and epoch pins. `forge test --upgrade-from <ref>` checks out
+  the ref, starts it as local processes with reload sockets, drives
+  `test/upgrade_*.march` through it, hot-deploys the working tree into the running
+  processes, and fails on the reload servers' counters (messages dropped, actors
+  killed by a hard deadline, markers lost) or the test file's own checks.
+- **Hot reload: per-role capability closures, restart durability and signed
+  topology pushes** (build step 10, first half, of the distributed-deploys plan).
+  The `--compile-so` manifest gains a `ROLE <Proto.Role> caps=...` line per role
+  with a grant: the role's full capability closure (everything its code reaches)
+  with each capability's reach chain. `forge deploy hot` stops a deploy that
+  widens a role's closure unless `--grant-cap` covers it, naming the role and the
+  chain, and sends such builds with the new `ACTIVATE6` message, which signs one
+  digest per role; the server recomputes each from the closures it receives
+  (`ERR role_cap_tamper`) and checks every closure against `MARCH_DEPLOY_POLICY`
+  (`ERR role_cap_policy <role> <cap>`), so a patch that only calls an existing,
+  more powerful helper no longer slips past the node's policy. The reload server
+  now persists its applied patch stack on the host (under the CAS root) and
+  replays it at start, before `main` runs, re-verifying every signature; a bad
+  entry is skipped with an audit line, a different base build or
+  `MARCH_HCR_NO_REPLAY=1` starts clean, and `VERSIONS_DETAIL` reports a
+  `RESTORED` line. New signed `TOPOLOGY` verb (`Cmd_deploy_hot.push_topology`)
+  persists the pushed topology and hands it to a runtime hook; new `COMPACT` verb
+  reports the patch stack's size, which `forge hot-reload status` prints.
+- **Refinement predicates: `/` and `%` in general.** A predicate may now divide
+  a possibly-negative value, or divide by a variable: `{Int | _ / 2 == -3}` and
+  `{Int | d != 0 && _ / d > 0}` are checked instead of skipped. The checker uses
+  March's truncating division (`-7 / 2` is `-3`, `-7 % 2` is `-1`), not the
+  solver's Euclidean one, so `f(-7)` proves and `f(-5)` is reported. Dividing by
+  zero panics, so a predicate is false wherever it would divide by zero,
+  following `&&`/`||` short-circuiting: with `_ / d > 0`, a call with `d == 0` is
+  a violation and one that cannot rule out `d == 0` is not proved.
+- **`forge audit --inferred --allow-unanalyzable`** gates on the dependencies
+  that typecheck, so a project can adopt the capability gate before its whole
+  dependency graph checks cleanly. Every unanalyzable dependency is still listed
+  with its reason on every run, and none is treated as asking for nothing.
+  `--record` leaves unanalyzable dependencies out of `forge.caps.lock` and keeps
+  any set recorded for them earlier.
+- **`NativeArray.sort_float` — a `Float` array can now be sorted.** Same
+  algorithm and ownership as `sort_int` (unstable, in place when uniquely owned,
+  copy-on-write when shared), 1.9–18x faster than libc `qsort` at 5 million
+  elements. Floats sort by IEEE 754 `totalOrder`, so NaN has a defined place:
+  `-NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN`. Note that `-0.0` sorts
+  before `+0.0` even though `-0.0 == 0.0` and `compare(-0.0, 0.0)` is `0`. The
+  interpreter and compiled builds produce the same order, NaN included.
 - **Editor support for `topology.toml`** (build step 7 of the distributed-deploys
   plan). `march-lsp` recognises `topology.toml` and `topology.<env>.toml` and shows
   `forge topology check`'s diagnostics on forge's lines, computed by forge's own
@@ -187,6 +240,9 @@ git log is authoritative for exact commits.
   including when the accumulator is itself a tuple.
 
 ### Removed
+- **The `respond` builtin is gone.** It was an interpreter no-op stub
+  (`respond(x)` returned `()`), had no callers, and never had a compiled
+  lowering.
 - **`MARCH_NO_TRMC` is gone.** The environment variable turned off
   tail-recursion-modulo-cons for every compile in the process, including the
   stdlib, which increasingly depends on the transform to avoid overflowing the
@@ -194,6 +250,26 @@ git log is authoritative for exact commits.
   too; see Changed.) `MARCH_TRMC` (already a no-op) is ignored.
 
 ### Changed
+- **`forge audit --inferred` caches each dependency's result** under
+  `.forge/audit-cache/`, keyed on the dependency's files, the files on its lib
+  path and the compiler. A repeat audit re-analyzes only the dependencies whose
+  inputs changed, instead of rerunning `march caps` (minutes each) for all of
+  them. A cached result prints the same output as a fresh one.
+- **An unanalyzable dependency now fails `forge audit --inferred`.** A dependency
+  that does not typecheck is listed as `NOT ANALYZABLE` with the compiler's
+  reason, the check exits 1, and `--record` refuses to write a baseline.
+  Previously the audit printed the error to stderr, used the dependency's
+  declared `needs` set in its place and passed.
+- **forge checks cached dependencies on online builds too.** `forge build`,
+  `check`, `run`, `test` and `bench` re-hash each cached git or registry
+  dependency against `forge.lock`, once per command. Before, only `--offline`
+  did this. A tree that was edited or corrupted is fetched again, checked, and
+  swapped in, with a one-line note. If the fresh copy does not match
+  `forge.lock` either, the command fails, naming the dependency and both hashes,
+  because `forge.lock` or the upstream source has changed. A clean cache prints
+  nothing and fetches nothing. `forge deps` also no longer keeps an edited
+  cached git tree and writes that tree's hash into `forge.lock`: it replaces the
+  tree with the fresh clone. `--offline` is unchanged: a mismatch is an error.
 - **Hot reload: a second deploy while actors are still migrating is accepted**
   (it used to be refused with `ERR publish_failed`); each actor applies both
   migrations in order. Past the soft drain deadline, messages in an unchanged
@@ -429,6 +505,109 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- The stdlib-only builtin gate (`pid_of_int`, `actor_whereis`, `actor_registered`,
+  `actor_pid_indices`, `epoch_hold`, `epoch_release`) now fires at name
+  resolution, closing four bypasses found in review: it applies inside `impl`
+  bodies, interface default methods, `test`/`describe`/`setup`/`setup_all`
+  blocks and actor `init`, a `let pid_of_int = pid_of_int` alias no longer
+  switches it off for its module, both REPLs (interpreter and JIT) reject the
+  gated builtins, and a user file that happens to be named like a stdlib file
+  (`json.march`) is no longer exempt. Stdlib-ness is now the loader's
+  provenance (the file lives under the stdlib directory the compiler loaded),
+  plus an explicit `--stdlib-source` flag for checking a stdlib file by another
+  path, which is also part of the `--check` cache key.
+- **Compiled `to_string` no longer quotes strings inside a List or Result of
+  unknown static type.** When the type was erased, for example when the value
+  reached `to_string` through a closure stored in a container, a compiled
+  program printed `["a", "b"]` and `Ok("x")` where the interpreter prints
+  `[a, b]` and `Ok(x)`. Compiled output now matches the interpreter. Strings
+  inside a user constructor or record are still quoted (`B("x")`), as the
+  interpreter quotes them. `~H` interpolation still quotes every nested string.
+- **Floats at the JIT REPL print correctly and no longer crash the session.** Any
+  Float inside a list, `Option`, `Result` or tuple printed as garbage like
+  `[2.15e-313, 2.15e-313]` at the (default, JIT-backed) REPL prompt, including
+  `NativeArray.to_list_float` and `to_list_f32` results and a plain `[3.5, 1.25]`
+  literal; they now print their values. Separately, an expression that returned a
+  Float, followed by any expression returning a list, string or other heap value
+  (`3.5` then `[1, 2]`, or `NativeArray.get_float(a, 0)` then
+  `NativeArray.to_list_float(a)`), killed the REPL with a segmentation fault; it now
+  runs. The interpreter, `--compile` and `march --jit file.march` were not affected.
+- **`forge audit --inferred` names a toolchain too old for `march caps`.** When
+  the toolchain's `march` predated the `caps` subcommand (before 0.3.0), it read
+  `caps` as a file name and failed, so every dependency showed as unanalyzable
+  and nothing pointed at the compiler. The audit now checks the compiler before
+  analyzing anything and stops with one error that gives the toolchain's path,
+  its version and the version it needs. A `.march-version` pin whose toolchain
+  is not installed is also an error now; the audit used to fall back to
+  whatever `march` was on `PATH`.
+- **Sixteen builtins that ran interpreted but failed to link when compiled now
+  compile or give a clear error.** A `--compile`d call used to fail at link time
+  with `Undefined symbols: _<name>` and no March location. `char_is_alpha`,
+  `char_is_uppercase`, `char_is_lowercase`, `char_to_uppercase`,
+  `char_to_lowercase`, `float_from_string`, `print_int`, `print_float` and `tap`
+  now compile, and the compiled output matches the interpreter. The
+  dynamic-supervisor queries (`Supervisor.stop_child`, `which_children`,
+  `count_children`), `App.stop` and `task_spawn_link` only work in the
+  interpreter, so a compiled call is now an error at the call site that says so
+  and names the compiled alternative. `to_json` on a type with no `derive Json`
+  now reports the missing codec even when no type in the program derives
+  `Json`. `task_spawn_link(f, pid)` is now typed with the two arguments the
+  interpreter takes. Before, no typechecked program could call it.
+- **A zero-argument lambda is a `() -> T` everywhere.** `fn () -> 3` (or `fn -> 3`)
+  in a record literal, or bound with `let` and passed on, was typed as its result,
+  so it could not fill a `() -> Int` record field ("expected `() -> Int` but got
+  `Int`"). It is now `() -> T` wherever it appears and `f()` calls it, on both
+  backends. Passing a zero-argument named fn by bare name where a generic
+  function calls it with `()` (`apply(answer)` with `fn apply(f) do f() end`) is
+  now a type error; it used to crash compiled code. Also fixed: a fn with a
+  required parameter after a defaulted one (`fn f(a, b \\ "x", c)`) forwarded
+  the short call `f(1, 2)` with its arguments out of order.
+- **Compiled `Base64.encode` and `sha256` on a `Bytes` no longer crash.** Since
+  boxed constructor cells began carrying a runtime type id (0.4.0), a compiled
+  `Base64.encode(Bytes.from_string("x"))`, `Base64.url_encode`/`mime_encode`, or
+  `sha256(bytes)` died with `fatal SIGBUS` (exit 138): the runtime mistook the
+  `Bytes` value for a `String`. The interpreter was unaffected.
+- **`pid_to_int` and supervise blocks no longer leak the actor record.**
+  Compiled, every `pid_to_int(p)` and `Actor.set_queue_limit(p, …)` call kept
+  one reference to `p`'s actor record, and every supervise-block child was
+  held two extra times by its supervisor's spawn code (the supervisor itself
+  twice more), so an actor that had been through any of them was never freed
+  after it stopped. They now leave the count alone.
+- **`--cap-sandbox` write scopes behind a symlink no longer deny every write.** On
+  macOS, `needs IO.FileWrite("/tmp/myapp")` refused even in-scope writes, because
+  the kernel matches the resolved path (`/private/tmp/myapp`) and the scope was
+  baked into the profile as written. The binary now resolves each scope with
+  `realpath()` at startup, on the machine it runs on, before installing the
+  sandbox. A scope that does not exist yet resolves through its longest existing
+  parent, and a scope that is itself a symlink resolves to its target. Writes
+  outside the scope are still refused.
+- **`Compress` decoders and encoders return the `Compress.Error` their signatures
+  promise.** They used to pass the codec's message string straight through as the
+  error, so matching `Err(Compress.InvalidInput(_))` never matched. Now corrupt or
+  truncated input is `InvalidInput(msg)`, hitting the decompressed-size cap is
+  `InsufficientOutput`, and out of memory, a failed codec init or a library that
+  was not built in is `Io(msg)`; `msg` is still the codec's message. The streaming
+  functions (`Gzip.encode_stream`/`decode_stream`, `Zstd.encode_stream`/
+  `decode_stream`) typecheck when you call them now: their `Seq(Bytes)`
+  annotation could never match a real `Seq` and has been removed. `Brotli.encode`
+  and `Brotli.encode_mode` also typecheck: the typechecker gave the builtin under
+  them one parameter too few. New `Compress.lift_encode_error`/`lift_decode_error`
+  expose the mapping.
+- **`RRB.from_array`/`RRB.to_array` and `AhoCorasick` use the Array module's real
+  type, `Array.PVec(a)`.** They were annotated `Array(a)`, a type that does not
+  exist, so an `Array.from_list(...)` value could not be passed to
+  `RRB.from_array`, and `RRB.to_array`'s result could not be annotated
+  `Array.PVec(a)`. Write `Array.PVec(a)` where you need the type: March has no
+  type-alias syntax, so `Array(a)` could not be made to mean it.
+- **`Plot.save` returns `Result(Unit, File.FileError)`.** It was declared
+  `Result(Unit, String)` but returned the `File.FileError` from the write, so the
+  declared type was wrong. Code that matched the error as a `String` needs to match
+  `File.FileError` instead.
+- **`Logger.with_scope`'s body typechecks.** The builtin `try_finally` under it was
+  typed as passing its callbacks an `Int`, which matched neither backend and
+  rejected the `() -> a` thunk `with_scope` takes. It is now typed `() -> a`.
+  Callbacks written `fn _ -> ...`, which is every existing caller, are unaffected.
+
 - **`forge bench` now links a project's FFI code.** Benchmarks were compiled
   without the `[ffi]` C sources/link flags and `[ffi.rust]` archive that
   `forge build`, `forge run` and `forge test` pass, so a benchmark calling any

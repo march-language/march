@@ -1697,7 +1697,6 @@ let rec expand_defaults_decl (d : decl) : decl list =
            | FPDefault (p, _) -> mk_var p.param_name.txt
            | FPPat _ -> mk_var "__arg"   (* pattern params in required position: unusual *)
          in
-         let req_args = List.map req_arg_of_param required in
          (* For i = 0 to n_defaults-1: generate a uniquely-named short-arity version.
             Each calls the full mangled version directly (no self-referential calls). *)
          let mangled_decls = List.init (List.length defaults) (fun i ->
@@ -1707,13 +1706,22 @@ let rec expand_defaults_decl (d : decl) : decl list =
              required @
              List.filteri (fun j _ -> j < i) (List.map (fun (p, _) -> FPNamed p) defaults)
            in
-           let passed_default_args =
-             List.filteri (fun j _ -> j < i) (List.map (fun (p, _) -> mk_var p.param_name.txt) defaults)
+           (* Forward to the full-arity fn in its ORIGINAL parameter order: a
+              default param is the caller's value for the first [i] defaults
+              and its default expression after that.  (Appending all the
+              required args first misplaced a required param declared AFTER a
+              default one — `fn f(a, b \\ 1, k)` forwarded `f$3(a, k, 1)` — which
+              only typechecked while the misplaced values happened to share a
+              type.) *)
+           let default_pos = ref 0 in
+           let all_call_args = List.map (fun p ->
+               match p with
+               | FPDefault (dp, e) ->
+                 let j = !default_pos in
+                 incr default_pos;
+                 if j < i then mk_var dp.param_name.txt else e
+               | other -> req_arg_of_param other) params
            in
-           let remaining_default_exprs =
-             List.filteri (fun j _ -> j >= i) (List.map (fun (_, e) -> e) defaults)
-           in
-           let all_call_args = req_args @ passed_default_args @ remaining_default_exprs in
            (* Call the full mangled version, not the original name *)
            let body = EApp (mk_var full_mangled, all_call_args, sp) in
            let short_clause = { fc_params = short_params; fc_guard = None; fc_body = body; fc_span = sp; fc_params_span = sp } in

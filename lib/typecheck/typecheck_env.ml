@@ -319,6 +319,18 @@ type env = {
       is automatically tracked as linear — no per-site [linear] annotation needed. *)
   current_module : string;
   (** Name of the module currently being typechecked, empty string at top level. *)
+  gated_shadowed : StringSet.t;
+  (** The [Typecheck_builtins.stdlib_only] names a NON-builtin binding has
+      rebound in this scope: a parameter, a `let`, a module-level `fn`, an
+      import. A reference to such a name resolves to that binding, not to
+      the gated builtin, so the stdlib-only gate ([infer_expr]'s [EVar] arm)
+      lets it through. Maintained by [bind_var]/[bind_linear] (the funnels
+      every binding takes) and cleared once by [Typecheck_builtins.base_env]
+      after it binds the builtins themselves. Tracked explicitly rather than
+      by comparing the scheme in scope against [builtin_bindings]: the driver
+      Marshals a cached stdlib env, which loses physical identity, and a
+      structural compare would mistake a user function of the same name and
+      type for the builtin. *)
   root_cap_allowed : bool;
   (** True where naming [root_cap] is still permitted (R2, 2026-08-05).
 
@@ -681,6 +693,7 @@ let make_env errors type_map = {
   proof_caps = [];
   always_linear_types = [];
   current_module = "";
+  gated_shadowed = StringSet.empty;
   root_cap_allowed = false;
   cur_fn_public = false;
   cap_qual_prefix = "";
@@ -1611,8 +1624,44 @@ let suggest_ctors (name : string) (env : env) : (string * string) list =
    is also a top-level fn) would have its LOCAL variable's use misrecorded as
    a call to the shadowed top-level fn — a textual name match masquerading as
    a resolution-based one. *)
+(** The stdlib-only builtin table. Documented and re-exported as
+    [Typecheck_builtins.stdlib_only]; it lives here because [bind_var] below
+    consults it and [Typecheck_builtins] depends on this module. *)
+let stdlib_only : (string * string) list ref =
+  ref
+    [ ("pid_of_int",
+       "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)");
+      ("actor_pid_indices", "use `Actor.list(cap)` (see `Actor.introspect`)");
+      ("actor_whereis", "use `Actor.whereis(cap, name)` (see `Actor.introspect`)");
+      ("actor_registered", "use `Actor.registered(cap)` (see `Actor.introspect`)");
+      (* DD step 6 (plan II.4.4): an epoch hold keeps its proc on an old code
+         version; only the session runtime takes one. *)
+      ("epoch_hold", "epoch holds are taken by `SessionNode` and generated session endpoints");
+      ("epoch_release", "epoch holds are taken by `SessionNode` and generated session endpoints");
+      (* D27: whether the running proc's epoch is draining; SessionNode reads
+         it to end sessions at loop boundaries. *)
+      ("epoch_draining", "session drains are decided by `SessionNode` (D27)");
+      ("epoch_drain", "use `SessionNode.drain_epochs(io, soft_ms, hard_ms)`");
+      ("epoch_hold_next_spawn", "epoch holds are taken by `SessionNode` and generated session endpoints");
+      ("epoch_holds", "use `Session.epoch_holds_here()`");
+      (* DD step-6 follow-up 1: a remote delivery's origin rides the mailbox
+         node; only the cluster node's data reader stamps it and installs
+         the DELIVERY_FAILED hook. *)
+      ("delivery_origin_set", "remote delivery origins are stamped by `ClusterNode`");
+      ("delivery_origin_clear", "remote delivery origins are stamped by `ClusterNode`");
+      ("delivery_failed_watch", "the DELIVERY_FAILED hook is installed by `ClusterNode`") ]
+
+
+(* [gated_shadowed] bookkeeping shared by every binding funnel: a rebinding
+   of a stdlib-only builtin's name is what makes a later reference resolve
+   to something other than the builtin. *)
+let note_gated_rebind name set =
+  if List.mem_assoc name !stdlib_only then StringSet.add name set
+  else set
+
 let bind_var name sch env =
   { env with vars = StrMap.add name sch env.vars;
+             gated_shadowed = note_gated_rebind name env.gated_shadowed;
              fn_arities = StrMap.remove name env.fn_arities;
              plain_let_names = StringSet.remove name env.plain_let_names;
              local_fns = StrMap.remove name env.local_fns;
@@ -1627,6 +1676,7 @@ let bind_linear name lin ty env =
              le_pending = None; le_dup = ref None; le_mixed = ref None } in
   { env with
     vars = StrMap.add name (Mono ty) env.vars;
+    gated_shadowed = note_gated_rebind name env.gated_shadowed;
     fn_arities = StrMap.remove name env.fn_arities;
     plain_let_names = StringSet.remove name env.plain_let_names;
     lin  = le :: env.lin;

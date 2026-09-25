@@ -89,8 +89,61 @@ let cap_strict_ceiling : bool ref = ref false
     driver's diagnostic filter (bin/main.ml, [user_diag_file]) all go through
     it, so the gate can never admit code the filter shows as the user's, or
     reject code whose error the filter then hides. *)
+(* The directories the standard library was loaded FROM: the resolved stdlib
+   root each loader (the driver's [Toolchain.load_stdlib], the LSP's
+   [Analysis.load_stdlib]) read its modules out of, as a real path. A file
+   whose real path lies under one of them is the stdlib's even when it was
+   named on the command line under another spelling (`march --check
+   $MARCH_STDLIB/actor.march`). This is provenance, not a name: the driver
+   used to add any entry file whose BASENAME matched the stdlib manifest to
+   [stdlib_source_files], so a user's own `json.march` was exempt from the
+   stdlib-only builtin gate (2026-09-24-dd-review-stdlib-only-gate-entry-
+   named-like-stdlib.md). *)
+let stdlib_roots : string list ref = ref []
+
+(* Canonicalisation is supplied by the loader ([Unix.realpath] in the driver
+   and the LSP) rather than called here: this library is also linked into
+   the browser REPL, which has no filesystem and registers no root. *)
+let stdlib_realpath : (string -> string option) ref = ref (fun _ -> None)
+
+let realpath_opt (f : string) : string option = !stdlib_realpath f
+
+let note_stdlib_root (dir : string) : unit =
+  match realpath_opt dir with
+  | Some r when not (List.mem r !stdlib_roots) -> stdlib_roots := r :: !stdlib_roots
+  | _ -> ()
+
+(* [realpath] per distinct span file, memoised: [span_is_stdlib] is asked on
+   every gated reference and on every diagnostic the driver filters. The
+   memo is keyed on the roots too, so a root registered after a miss is
+   not shadowed by a stale negative answer. *)
+let under_root_memo : (string list * string, bool) Hashtbl.t = Hashtbl.create 64
+
+let file_under_stdlib_root (f : string) : bool =
+  match !stdlib_roots with
+  | [] -> false
+  | roots ->
+    let key = (roots, f) in
+    (match Hashtbl.find_opt under_root_memo key with
+     | Some b -> b
+     | None ->
+       let b =
+         f <> "" && f <> Ast.dummy_span.Ast.file
+         && (match realpath_opt f with
+             | None -> false
+             | Some r ->
+               List.exists (fun root ->
+                   let n = String.length root in
+                   String.length r > n
+                   && String.sub r 0 n = root
+                   && r.[n] = '/')
+                 roots)
+       in
+       Hashtbl.replace under_root_memo key b;
+       b)
+
 let file_is_stdlib (f : string) : bool =
-  List.mem f !stdlib_source_files
+  List.mem f !stdlib_source_files || file_under_stdlib_root f
 
 let span_is_stdlib (sp : Ast.span) : bool =
   file_is_stdlib sp.Ast.file
@@ -113,29 +166,7 @@ let span_is_stdlib (sp : Ast.span) : bool =
     `Actor` wrappers that take a `Cap(Actor.Introspect)` minted by
     `Actor.introspect(io)`. A ref so tests can install an entry around a
     single check. *)
-let stdlib_only : (string * string) list ref =
-  ref
-    [ ("pid_of_int",
-       "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)");
-      ("actor_pid_indices", "use `Actor.list(cap)` (see `Actor.introspect`)");
-      ("actor_whereis", "use `Actor.whereis(cap, name)` (see `Actor.introspect`)");
-      ("actor_registered", "use `Actor.registered(cap)` (see `Actor.introspect`)");
-      (* DD step 6 (plan II.4.4): an epoch hold keeps its proc on an old code
-         version; only the session runtime takes one. *)
-      ("epoch_hold", "epoch holds are taken by `SessionNode` and generated session endpoints");
-      ("epoch_release", "epoch holds are taken by `SessionNode` and generated session endpoints");
-      (* D27: whether the running proc's epoch is draining; SessionNode reads
-         it to end sessions at loop boundaries. *)
-      ("epoch_draining", "session drains are decided by `SessionNode` (D27)");
-      ("epoch_drain", "use `SessionNode.drain_epochs(io, soft_ms, hard_ms)`");
-      ("epoch_hold_next_spawn", "epoch holds are taken by `SessionNode` and generated session endpoints");
-      ("epoch_holds", "use `Session.epoch_holds_here()`");
-      (* DD step-6 follow-up 1: a remote delivery's origin rides the mailbox
-         node; only the cluster node's data reader stamps it and installs
-         the DELIVERY_FAILED hook. *)
-      ("delivery_origin_set", "remote delivery origins are stamped by `ClusterNode`");
-      ("delivery_origin_clear", "remote delivery origins are stamped by `ClusterNode`");
-      ("delivery_failed_watch", "the DELIVERY_FAILED hook is installed by `ClusterNode`") ]
+let stdlib_only : (string * string) list ref = Typecheck_env.stdlib_only
 
 (** The source files a list of loaded stdlib declarations came from: every
     file named by a [DFn] span or a [DMod] span, recursively. A file is what
@@ -724,8 +755,6 @@ let builtin_bindings : (string * scheme) list =
        multiple types deriving Json in one module can each define it
        without colliding with the polymorphic scheme registered here. *)
     ("from_json_events", poly2 (fun a b -> TArrow (a, b)));
-    (* Actor/respond: ∀a. a -> Unit *)
-    ("respond", poly1 (fun a -> TArrow (a, t_unit)));
     (* Actor builtins *)
     ("kill",     poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_unit)));
     (* Graceful stop: drains the mailbox, then dies normally. Returns whether
@@ -1029,8 +1058,15 @@ let builtin_bindings : (string * scheme) list =
     (* The inverse: the spawn index a Pid displays as ("Pid(N)"), so a
        GlobalPid for a local actor can be built without parsing to_string. *)
     ("pid_to_int",   poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_int)));
-    (* Phase 5: task_spawn_link — like task_spawn but links to spawner *)
-    ("task_spawn_link", poly1 (fun a -> TArrow (TArrow (t_int, a), TCon ("Task", [a]))));
+    (* Phase 5: task_spawn_link(f, pid) — like task_spawn, but the task fails
+       if the linked actor [pid] is (or becomes) dead.  Two arguments, as the
+       interpreter (its only implementation) takes them; this was a one-argument
+       type until 2026-09-24, so no typechecked program could call it at all.
+       Interpreter-only: a compiled call is rejected at lowering
+       (Lower_expr.interpreter_only_builtin_reasons). *)
+    ("task_spawn_link",
+     poly2 (fun a b -> TArrow (TArrow (t_int, a),
+                               TArrow (TCon ("Pid", [b]), TCon ("Task", [a])))));
     (* Phase 5B: cancellation token builtins.
        task_cancel_token_new() is zero-arg: EApp(f,[]) → infer_app returns type
        directly (see infer_app: | [], t -> t), so declare as Mono CancelToken,
@@ -1074,10 +1110,16 @@ let builtin_bindings : (string * scheme) list =
     (* file_close returns :ok on both backends (it was declared Unit while
        the interpreter returned :ok and compiled C a heap Ok(()) cell). *)
     ("file_close",      Mono (TArrow (t_int, t_atom)));
-    (* Structured cleanup: try_finally(action: () -> a, cleanup: () -> b) : a *)
+    (* Structured cleanup: try_finally(action: () -> a, cleanup: () -> b) : a.
+       Both callbacks take one DUMMY argument, which they must ignore (every
+       caller writes `fn _ -> ...`): the interpreter passes `()`, the compiled
+       runtime (march_try_finally) passes a placeholder word. The argument
+       used to be declared `Int`, which matched neither backend and made
+       a thunk annotated `() -> a` (Logger.with_scope's) a type error that
+       the stdlib diagnostic filter hid. *)
     ("try_finally",
-      poly2 (fun a b -> TArrow (TArrow (t_int, a),
-                                TArrow (TArrow (t_int, b), a))));
+      poly2 (fun a b -> TArrow (TArrow (t_unit, a),
+                                TArrow (TArrow (t_unit, b), a))));
     (* CSV builtins — csv_next_row returns CsvRow (declared in csv.march).
        The TIR registers user ptypes under their module-qualified name
        ("Csv.CsvRow"), so this MUST match that qualification: a bare
@@ -1349,8 +1391,8 @@ let builtin_bindings : (string * scheme) list =
         TCon ("Result", [TCon ("Bytes", []); t_string])))));
     ("stdlib_zstd_decode",    Mono (TArrow (TCon ("Bytes", []),
         TCon ("Result", [TCon ("Bytes", []); t_string]))));
-    ("stdlib_brotli_encode",  Mono (TArrow (TCon ("Bytes", []), TArrow (t_int,
-        TCon ("Result", [TCon ("Bytes", []); t_string])))));
+    ("stdlib_brotli_encode",  Mono (TArrow (TCon ("Bytes", []), TArrow (t_int, TArrow (t_int,
+        TCon ("Result", [TCon ("Bytes", []); t_string]))))));
     ("stdlib_brotli_decode",  Mono (TArrow (TCon ("Bytes", []),
         TCon ("Result", [TCon ("Bytes", []); t_string]))));
     (* NativeArray builtins — flat OCaml arrays for fast numeric loops (P10).
@@ -1406,6 +1448,8 @@ let builtin_bindings : (string * scheme) list =
              TArrow (t_int, TArrow (t_float, TCon ("NativeFloatArr", []))))));
     ("native_float_arr_sum",
        Mono (TArrow (TCon ("NativeFloatArr", []), t_float)));
+    ("native_float_arr_sort",
+       Mono (TArrow (TCon ("NativeFloatArr", []), TCon ("NativeFloatArr", []))));
     ("native_float_arr_min",
        Mono (TArrow (TCon ("NativeFloatArr", []), t_float)));
     ("native_float_arr_max",
@@ -1945,6 +1989,9 @@ let base_env errors type_map =
   let env = bind_vars builtin_bindings env in
   let env = bind_vars builtin_interface_bindings env in
   { env with
+    (* The builtins just bound ARE the gated bindings: only a later rebinding
+       shadows one. *)
+    gated_shadowed = StringSet.empty;
     types      = List.fold_left (fun m (k, v) -> StrMap.add k v m) StrMap.empty builtin_types;
     ctors      = List.fold_left (fun m (k, v) -> add_ctor k v m) StrMap.empty builtin_ctors;
     interfaces = List.fold_left (fun m (k, v) -> StrMap.add k v m) StrMap.empty builtin_interfaces;

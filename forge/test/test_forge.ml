@@ -1302,6 +1302,106 @@ let test_parse_manifest_caps_empty () =
          | [fm] -> Alcotest.(check (list string)) "no caps" [] fm.Cmd_deploy_hot.fn_caps
          | _ -> Alcotest.fail "expected exactly one function"))
 
+(* DD build step 10: ROLE lines carry each role's full closure. *)
+let test_parse_manifest_role_lines () =
+  with_manifest_file
+    [cas_hash_line; "MyApp.f implhash sighash caps=IO.Console";
+     "ROLE Stream.Cons caps=IO.Console,IO.FileWrite via=IO.Console:body>cons;IO.FileWrite:body>cons>save";
+     "ROLE Stream.Prod caps="]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        Alcotest.(check int) "ROLE lines are not functions" 1
+          (List.length m.Cmd_deploy_hot.functions);
+        (match m.Cmd_deploy_hot.roles with
+         | [c; p] ->
+           Alcotest.(check string) "role name" "Stream.Cons" c.Cmd_deploy_hot.role_name;
+           Alcotest.(check (list string)) "closure"
+             ["IO.Console"; "IO.FileWrite"] c.Cmd_deploy_hot.role_caps;
+           Alcotest.(check (list string)) "chain"
+             ["body"; "cons"; "save"]
+             (List.assoc "IO.FileWrite" c.Cmd_deploy_hot.role_chains);
+           Alcotest.(check string) "second role" "Stream.Prod" p.Cmd_deploy_hot.role_name;
+           Alcotest.(check (list string)) "empty closure" [] p.Cmd_deploy_hot.role_caps
+         | rs -> Alcotest.failf "expected two roles, got %d" (List.length rs)))
+
+let test_parse_manifest_legacy_has_no_roles () =
+  with_manifest_file [cas_hash_line; "MyApp.f implhash sighash caps="]
+    (fun path ->
+      match Cmd_deploy_hot.parse_manifest path with
+      | Error m -> Alcotest.fail m
+      | Ok m -> Alcotest.(check int) "no roles" 0 (List.length m.Cmd_deploy_hot.roles))
+
+(* ── DD build step 10: the per-role widening gate ───────────────────────── *)
+let role_m ?(chains = []) name caps =
+  { Cmd_deploy_hot.role_name = name; role_caps = caps; role_chains = chains }
+let manifest_roles roles =
+  { Cmd_deploy_hot.version = 2; cas_hash = "cas"; target = None; hcr_abi = None;
+    module_prefix = None; functions = []; roles }
+
+let test_role_gate_legacy_baseline_permissive () =
+  let prior = manifest_roles [] in
+  let current = manifest_roles [ role_m "Stream.Cons" ["IO.FileWrite"] ] in
+  Alcotest.(check bool) "no ROLE lines in the baseline -> None" true
+    (Cmd_deploy_hot.compute_role_widening ~prior ~current = None);
+  Alcotest.(check bool) "and the gate does not block" false
+    (Cmd_deploy_hot.role_gate ~prior:(Some prior) ~current ~grant_caps:[])
+
+let test_role_gate_widened_closure_blocks () =
+  let prior = manifest_roles [ role_m "Stream.Cons" ["IO.Console"] ] in
+  let current =
+    manifest_roles [ role_m "Stream.Cons" ["IO.Console"; "IO.FileWrite"]
+                       ~chains:[ ("IO.FileWrite", ["body"; "cons"; "save"]) ] ] in
+  (match Cmd_deploy_hot.compute_role_widening ~prior ~current with
+   | Some [ (r, w) ] ->
+     Alcotest.(check string) "the role" "Stream.Cons" r.Cmd_deploy_hot.role_name;
+     Alcotest.(check (list string)) "the widened cap" ["IO.FileWrite"] w;
+     Alcotest.(check (list (pair string string))) "attributed to its chain"
+       [ ("IO.FileWrite", "body \xe2\x86\x92 cons \xe2\x86\x92 save") ]
+       (Cmd_deploy_hot.attribute_role_widening r w)
+   | _ -> Alcotest.fail "expected one widened role");
+  Alcotest.(check bool) "blocked without --grant-cap" true
+    (Cmd_deploy_hot.role_gate ~prior:(Some prior) ~current ~grant_caps:[]);
+  Alcotest.(check bool) "an exact grant covers it" false
+    (Cmd_deploy_hot.role_gate ~prior:(Some prior) ~current ~grant_caps:["IO.FileWrite"]);
+  Alcotest.(check bool) "a broader grant covers it (subsumption)" false
+    (Cmd_deploy_hot.role_gate ~prior:(Some prior) ~current ~grant_caps:["IO"]);
+  Alcotest.(check bool) "an unrelated grant does not" true
+    (Cmd_deploy_hot.role_gate ~prior:(Some prior) ~current ~grant_caps:["IO.Process"])
+
+let test_role_gate_narrowing_and_subsumed_pass () =
+  let prior = manifest_roles [ role_m "P.A" ["IO"]; role_m "P.B" ["IO.Console"; "IO.FileWrite"] ] in
+  let current = manifest_roles [ role_m "P.A" ["IO.Console"]; role_m "P.B" ["IO.Console"] ] in
+  Alcotest.(check bool) "narrowed or subsumed closures do not widen" true
+    (Cmd_deploy_hot.compute_role_widening ~prior ~current = Some [])
+
+let test_role_gate_new_role_widens_by_its_closure () =
+  let prior = manifest_roles [ role_m "P.A" ["IO.Console"] ] in
+  let current = manifest_roles [ role_m "P.A" ["IO.Console"]; role_m "P.B" ["IO.NetConnect"] ] in
+  (match Cmd_deploy_hot.compute_role_widening ~prior ~current with
+   | Some [ (r, w) ] ->
+     Alcotest.(check string) "the new role" "P.B" r.Cmd_deploy_hot.role_name;
+     Alcotest.(check (list string)) "its whole closure" ["IO.NetConnect"] w
+   | _ -> Alcotest.fail "expected the new role to widen")
+
+let test_role_baseline_round_trip () =
+  (* The baseline is the whole prior manifest, ROLE lines included. *)
+  with_manifest_file
+    [cas_hash_line; "MyApp.f implhash sighash caps=";
+     "ROLE Stream.Cons caps=IO.Console via=IO.Console:body>cons"]
+    (fun path ->
+      let base = Filename.temp_file "march_role_baseline" ".hcr_manifest" in
+      Sys.remove base;
+      Cmd_deploy_hot.save_manifest_baseline ~new_manifest_path:path ~prev_manifest_path:base;
+      match Cmd_deploy_hot.parse_manifest base with
+      | Error m -> Alcotest.fail m
+      | Ok m ->
+        Sys.remove base;
+        Alcotest.(check (list string)) "baseline keeps the role closure"
+          ["IO.Console"]
+          (List.concat_map (fun r -> r.Cmd_deploy_hot.role_caps) m.Cmd_deploy_hot.roles))
+
 let test_gate_no_prior_is_permissive () =
   (* No baseline file at all -> caller treats prior_caps as empty / gate skipped.
      At the pure-function level, computing widening against an empty prior
@@ -1397,7 +1497,7 @@ let test_scoped_caps_new_function_compares_against_empty () =
   let to_activate = [ fm ~name:"MyApp.brand_new" ~caps:["IO.Console"; "IO.FileWrite"] ] in
   let prior_manifest = { Cmd_deploy_hot.version = 2; cas_hash = "cas";
                          target = None; hcr_abi = None; module_prefix = None;
-                         functions = [] } in
+                         functions = [] ; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
   Alcotest.(check (list string)) "new fn has no prior caps" [] prior_caps;
@@ -1410,7 +1510,7 @@ let test_scoped_caps_existing_function_adds_cap_widens () =
   let prior_manifest =
     { Cmd_deploy_hot.version = 2; cas_hash = "cas";
       target = None; hcr_abi = None; module_prefix = None;
-      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] } in
+      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] ; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
   let widening = Cmd_deploy_hot.compute_cap_widening ~prior:prior_caps ~new_caps in
@@ -1423,7 +1523,7 @@ let test_scoped_caps_existing_function_drops_cap_narrows () =
   let prior_manifest =
     { Cmd_deploy_hot.version = 2; cas_hash = "cas";
       target = None; hcr_abi = None; module_prefix = None;
-      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] } in
+      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] ; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
   let widening = Cmd_deploy_hot.compute_cap_widening ~prior:prior_caps ~new_caps in
@@ -1438,7 +1538,7 @@ let test_scoped_caps_existing_function_adds_subsumed_cap_no_widen () =
   let prior_manifest =
     { Cmd_deploy_hot.version = 2; cas_hash = "cas";
       target = None; hcr_abi = None; module_prefix = None;
-      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Network"] ] } in
+      functions = [ fm ~name:"MyApp.f" ~caps:["IO.Network"] ] ; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
   Alcotest.(check (list string)) "subsumed cap dropped from new_caps" ["IO.Network"] new_caps;
@@ -1612,6 +1712,71 @@ let test_activate5_signed_shape () =
        cap_root_hex)
     signed
 
+(* DD build step 10: ACTIVATE6 signs the role roots between cap_root and
+   callers; the unsigned roles: block carries the closures in the same
+   (sorted) role order, each root the cap_root recipe over its closure. *)
+let test_activate6_signed_shape_and_role_blocks () =
+  let roles = [
+    { Cmd_deploy_hot.role_name = "Stream.Prod"; role_caps = ["IO.Console"]; role_chains = [] };
+    { Cmd_deploy_hot.role_name = "Stream.Cons"; role_caps = ["IO.FileWrite"; "IO.Console"];
+      role_chains = [] } ] in
+  let (role_caps, roles_csv) = Cmd_deploy_hot.role_blocks roles in
+  Alcotest.(check string) "roots sorted by role, cap_root recipe"
+    (Printf.sprintf "Stream.Cons=%s;Stream.Prod=%s"
+       (Cmd_deploy_hot.fn_cap_root ["IO.Console"; "IO.FileWrite"])
+       (Cmd_deploy_hot.fn_cap_root ["IO.Console"]))
+    role_caps;
+  Alcotest.(check string) "closures in the same order, each sorted"
+    "Stream.Cons=IO.Console,IO.FileWrite;Stream.Prod=IO.Console" roles_csv;
+  let (signed, wire_head) =
+    Cmd_deploy_hot.build_activate6_lines
+      ~name:"Main.cons" ~impl:"implhash" ~cas:"cashash" ~migrate:0 ~epoch:4
+      ~cap_root:cap_root_hex ~role_caps ~callers_csv:"Main.a"
+  in
+  Alcotest.(check string) "wire_head" "ACTIVATE6 Main.cons implhash cashash" wire_head;
+  Alcotest.(check string) "role_caps signed, between cap_root and callers"
+    (Printf.sprintf "ACTIVATE6 Main.cons implhash cashash 0 epoch:4 cap_root:%s role_caps:%s callers:Main.a"
+       cap_root_hex role_caps)
+    signed
+
+(* DD build step 10: the signed TOPOLOGY line. *)
+let test_topology_command_signed () =
+  let (pk, sk) = March_ed25519.Ed25519.keygen () in
+  let body = "[pools.edge]\nserves = [\"Stream.Cons\"]\n" in
+  let (line, digest) = Cmd_deploy_hot.topology_command ~sk ~body in
+  Alcotest.(check string) "digest is the body's blake3"
+    (March_cas.Blake3.hash_string body) digest;
+  (match String.split_on_char ' ' line with
+   | [ "TOPOLOGY"; d; sig_b64; size ] ->
+     Alcotest.(check string) "digest on the line" digest d;
+     Alcotest.(check string) "size on the line" (string_of_int (String.length body)) size;
+     let expected =
+       March_ed25519.Ed25519.sig_to_base64
+         (March_ed25519.Ed25519.sign_str ("TOPOLOGY " ^ digest) sk) in
+     Alcotest.(check string) "signed over \"TOPOLOGY <digest>\" (ed25519 is deterministic)"
+       expected sig_b64;
+     Alcotest.(check bool) "and it verifies under the deploy key" true
+       (March_ed25519.Ed25519.verify (Bytes.of_string ("TOPOLOGY " ^ digest))
+          (March_ed25519.Ed25519.sign_str ("TOPOLOGY " ^ digest) sk) pk)
+   | _ -> Alcotest.failf "unexpected TOPOLOGY line: %s" line)
+
+(* DD build step 10: COMPACT, the patch-stack size forge status shows. *)
+let test_parse_compact () =
+  (match Cmd_deploy_hot.parse_compact
+           "STACK entries:3 functions:2 deploys:2 artifacts:1 cas_bytes:1258291" with
+   | Some st ->
+     Alcotest.(check string) "described"
+       "3 persisted patches over 2 deploys (2 functions), 1 artifact, 1.2 MiB in the CAS"
+       (Cmd_deploy_hot.describe_stack st)
+   | None -> Alcotest.fail "STACK line not parsed");
+  (match Cmd_deploy_hot.parse_compact "STACK entries:0 functions:0 deploys:0 artifacts:0 cas_bytes:0" with
+   | Some st ->
+     Alcotest.(check string) "empty"
+       "no hot patches persisted (the node runs its base build)" (Cmd_deploy_hot.describe_stack st)
+   | None -> Alcotest.fail "empty STACK line not parsed");
+  Alcotest.(check bool) "an older server's answer" true
+    (Cmd_deploy_hot.parse_compact "ERR unknown_command" = None)
+
 let test_parse_wait () =
   Alcotest.(check (option (pair int (pair int (pair int bool)))))
     "a WAIT line"
@@ -1716,14 +1881,16 @@ let manifest_with_caps =
     target = None; hcr_abi = None; module_prefix = None;
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
-        fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true } ] }
+        fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true } ];
+    roles = [] }
 
 let legacy_manifest =
   { Cmd_deploy_hot.version = 2; cas_hash = String.make 64 'a';
     target = None; hcr_abi = None; module_prefix = None;
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
-        fn_callers = []; fn_caps = []; fn_has_caps = false } ] }
+        fn_callers = []; fn_caps = []; fn_has_caps = false } ];
+    roles = [] }
 
 let test_branch_caps_present_no_flag_selects_activate4 () =
   Alcotest.(check bool) "ACTIVATE4 selected" true
@@ -2634,6 +2801,13 @@ let () =
       Alcotest.test_case "parse_manifest: caps= (no callers)"  `Quick test_parse_manifest_caps_no_callers;
       Alcotest.test_case "parse_manifest: caps= (with callers)" `Quick test_parse_manifest_caps_with_callers;
       Alcotest.test_case "parse_manifest: caps= empty"          `Quick test_parse_manifest_caps_empty;
+      Alcotest.test_case "parse_manifest: ROLE lines"            `Quick test_parse_manifest_role_lines;
+      Alcotest.test_case "parse_manifest: legacy has no roles"   `Quick test_parse_manifest_legacy_has_no_roles;
+      Alcotest.test_case "role gate: legacy baseline is permissive" `Quick test_role_gate_legacy_baseline_permissive;
+      Alcotest.test_case "role gate: widened closure blocks unless granted" `Quick test_role_gate_widened_closure_blocks;
+      Alcotest.test_case "role gate: narrowing/subsumed closures pass" `Quick test_role_gate_narrowing_and_subsumed_pass;
+      Alcotest.test_case "role gate: a new role widens by its closure" `Quick test_role_gate_new_role_widens_by_its_closure;
+      Alcotest.test_case "role gate: baseline keeps ROLE lines" `Quick test_role_baseline_round_trip;
       Alcotest.test_case "gate: empty prior -> all new caps 'widen'" `Quick test_gate_no_prior_is_permissive;
       Alcotest.test_case "gate: pure narrowing allowed"         `Quick test_gate_pure_narrowing_allowed;
       Alcotest.test_case "gate: narrowing uses subsumption, root cap covers prior specific" `Quick test_gate_narrowing_root_cap_covers_prior_specific_not_misreported;
@@ -2663,6 +2837,9 @@ let () =
       Alcotest.test_case "ACTIVATE4: wire orders cap_root+caps before callers" `Quick test_activate4_wire_line_orders_cap_root_and_caps_before_callers;
       Alcotest.test_case "ACTIVATE3: signed/wire shape unchanged" `Quick test_activate3_signed_shape_unchanged;
       Alcotest.test_case "ACTIVATE5: signed shape carries the migrate bitmask" `Quick test_activate5_signed_shape;
+      Alcotest.test_case "ACTIVATE6: role roots signed, closures unsigned" `Quick test_activate6_signed_shape_and_role_blocks;
+      Alcotest.test_case "TOPOLOGY: signed line shape" `Quick test_topology_command_signed;
+      Alcotest.test_case "COMPACT: parsed and described" `Quick test_parse_compact;
       Alcotest.test_case "WAIT: parsed and described" `Quick test_parse_wait;
       Alcotest.test_case "schemas: handlers, migrate_msg_from, message diff" `Quick test_schema_handlers_and_message_diff;
       Alcotest.test_case "migrate_msg stub from handler signatures" `Quick test_migrate_msg_stub;
