@@ -1,7 +1,7 @@
 # `NativeArray.sort_float`: the f64 width of the ipnsort-style sort
 
 Landed 2026-09-24. Design, i64 measurements and the widths still open (f32,
-i32, u8): `specs/todos/2026-09-16-native-array-sort-ipnsort.md`. The i64 width
+i32, u8): `specs/progress/2026-09-25-native-array-sort-narrow-widths.md`. The i64 width
 this reuses: `specs/progress/2026-09-16-native-array-sort-int-ipnsort.md`.
 
 ## What landed
