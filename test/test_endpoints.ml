@@ -2586,6 +2586,42 @@ let compat_generated_ok =
            Alcotest.(check bool) "Stream_Msg.compat_by_role" true (has_fn mods "Stream_Msg" "compat_by_role");
            Alcotest.(check (list string)) "no error" [] (error_messages (typecheck_with_stdlib src))))
 
+(* ── expand/contract (D21): `--protocol-expand P:label` ─────────────────── *)
+
+let with_expand spec f =
+  let saved = !E.expand_labels in
+  E.expand_labels := spec;
+  Fun.protect ~finally:(fun () -> E.expand_labels := saved) f
+
+let desugar_errors src =
+  let errors = March_errors.Errors.create () in
+  ignore (without_runner (fun () -> March_desugar.Desugar.desugar_module ~errors (parse_module src)));
+  error_messages errors
+
+let expand_build_ok =
+  Alcotest.test_case "an expand build keeps the chooser on the previous fingerprint and typechecks" `Quick
+    (fun () ->
+       with_baseline (E.next_baseline None (version_of_src stream)) (fun () ->
+           with_expand [ ("Stream", "pause") ] (fun () ->
+               let src = wrap (stream_v2 ^ {|
+  pfn fp_of_chooser() : String do Stream_Msg.role_fingerprint(Stream_Msg.role_Cons()) end
+|}) in
+               let mods = generated src in
+               Alcotest.(check bool) "Stream_Msg.role_fingerprint" true (has_fn mods "Stream_Msg" "role_fingerprint");
+               Alcotest.(check (list string)) "no error" [] (error_messages (typecheck_with_stdlib src)))))
+
+let expand_build_refused =
+  Alcotest.test_case "--protocol-expand is refused without a baseline, or for the wrong branch" `Quick
+    (fun () ->
+       let has sub msgs = List.exists (fun m -> contains_text m sub) msgs in
+       with_expand [ ("Stream", "pause") ] (fun () ->
+           Alcotest.(check bool) "no baseline" true
+             (has "needs the protocol's previous version" (desugar_errors (wrap stream_v2))));
+       with_baseline (E.next_baseline None (version_of_src stream)) (fun () ->
+           with_expand [ ("Stream", "more") ] (fun () ->
+               Alcotest.(check bool) "wrong branch" true
+                 (has "the branch this version adds is `pause`" (desugar_errors (wrap stream_v2))))))
+
 (* ── D25: unlabelled steps in a protocol the topology uses ──────────────── *)
 
 let d25_warnings ~topology src =
@@ -2651,4 +2687,4 @@ let tests =
     crash_choose_shape; crash_choose_ok; crash_chan_refused;
     crash_hosted_shape; crash_choose_hosted_shape; crash_hosted_ok; crash_hosted_state_is_the_branch;
     compat_branch_added; compat_renumbered; compat_labelled; compat_grant_change; compat_payload_change;
-    compat_baseline_roundtrip; compat_generated_ok; d25_unlabelled_warns; d25_quiet ]
+    compat_baseline_roundtrip; compat_generated_ok; expand_build_ok; expand_build_refused; d25_unlabelled_warns; d25_quiet ]

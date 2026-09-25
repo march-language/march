@@ -698,7 +698,7 @@ let fingerprint_of ~proto ~(types : ty_defs) (roles : string list) (steps : aste
     specs/progress/).  The name is not user-visible: nothing outside
     this function spells the type -- role modules reach the message only
     through `<P>_Msg.<Ctor>` and `<P>_Msg.{encode,decode,try_decode}`. *)
-let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint ?(compat = []) (ctors : (string * ty) list) (roles : string list)
+let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint ?(compat = []) ?(held : (string * string) option) (ctors : (string * ty) list) (roles : string list)
     (peers : (string * string list) list) : decl =
   let mname = proto ^ "_Msg" in
   let tname = proto ^ "_Message" in
@@ -786,15 +786,26 @@ let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint ?(compat = []) (ctor
             con "Cons" [ ETuple ([ lit_int (index_of r); str_list acc_fps ], sp); acc ])
          compat (con "Nil" []))
   in
+  (* `role_fingerprint(i)`: the fingerprint role [i] offers and initiates
+     under -- this build's, except the chooser's in an expand build (D21,
+     `--protocol-expand`), which stays on the previous one: [held] is
+     (chooser, previous fingerprint). *)
+  let role_fp =
+    fn "role_fingerprint" [ ((if held = None then "_i" else "i"), t_int) ] t_string
+      (match held with
+       | Some (chooser, old_fp) -> EIf (app "==" [ var "i"; lit_int (index_of chooser) ], lit_str old_fp, lit_str fingerprint, sp)
+       | None -> lit_str fingerprint)
+  in
   DMod (n mname, Public, (msg_decl :: json_fns) @ [ encode; decode; try_decode ] @ role_fns @ peer_fns @ other_fns
-                         @ [ role_names; fp; role_name; compat_fn; compat_by_role ], sp)
+                         @ [ role_names; fp; role_name; compat_fn; compat_by_role; role_fp ], sp)
 
 (** `<P>_<Role>`: one [always_linear] type per state and one function per
     transition, plus the unforgeable [Yield].  Also returns the name of the
     role's ENTRY state (what `register` yields), which `<P>_Run` types the
     role's body by. *)
 let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors : int)
-    ~(grants : string list) ~(crash_points : string list) (role : string) (root : lty)
+    ~(grants : string list) ~(crash_points : string list) ?(held_labels : string list = [])
+    (role : string) (root : lty)
     : decl * string =
   let mname = proto ^ "_" ^ role in
   let msg = proto ^ "_Msg" in
@@ -1004,10 +1015,26 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
              (fun (lbl, to_, ctor, payload, next) ->
                 let nx = state_of next in
                 fn ("choose_" ^ lbl) [ ("s", t_cap_session); ("st", sty this); ("v", payload) ] (sty nx)
-                  (on_ep
-                     (con nx
-                        [ app "Session.emit"
-                            [ var "s"; var "ep"; role_idx to_; app (msg ^ ".encode") [ con (msg ^ "." ^ ctor) [ var "v" ] ] ] ])))
+                  (let send_it =
+                     on_ep
+                       (con nx
+                          [ app "Session.emit"
+                              [ var "s"; var "ep"; role_idx to_; app (msg ^ ".encode") [ con (msg ^ "." ^ ctor) [ var "v" ] ] ] ])
+                   in
+                   if List.mem lbl held_labels then
+                     (* An expand build (D21, `--protocol-expand`): this
+                        chooser still runs under the previous fingerprint, so
+                        an old receiver may be in the session. The send stays
+                        after the panic so the state is still consumed. *)
+                     block
+                       [ let_wild
+                           (panic
+                              (Printf.sprintf
+                                 "%s: `choose_%s` is held back in this build, the expand half of a two-deploy protocol change \
+                                  (--protocol-expand %s:%s); it can be chosen once the contract deploy has gone out"
+                                 proto lbl proto lbl));
+                         send_it ]
+                   else send_it))
              brs
          | LRecv (from, ctor, payload, next) ->
            let nx = state_of next in
@@ -1797,7 +1824,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
-                var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
+                var "secret"; var "addrs"; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ]; lam [ "_ep" ] unit;
                 call_body role ]))
       roles
   in
@@ -1834,7 +1861,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
              ("capacity", t_int); ("body", t_body role entry) ]
            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_role"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".compat_by_role") [];
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ]; app (msg ^ ".compat_by_role") [];
                 app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; call_body role ]))
       roles
@@ -1846,7 +1873,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("body", t_body role entry) ]
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.initiate"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".compat_by_role") [];
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ]; app (msg ^ ".compat_by_role") [];
                 app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; app (msg ^ ".others_" ^ role) []; lam [ "_ep" ] unit; call_body role ]))
       roles
@@ -1878,7 +1905,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_hosted"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
-                var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
+                var "secret"; var "addrs"; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ]; lam [ "_ep" ] unit;
                 app "pid_to_int" [ var "host" ]; start_of role; var "deliver" ]))
       roles
   in
@@ -1896,7 +1923,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_hosted_or"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
-                var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
+                var "secret"; var "addrs"; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ]; lam [ "_ep" ] unit;
                 app "pid_to_int" [ var "host" ]; start_of role; var "deliver"; var "cancel" ]))
       roles
   in
@@ -1933,7 +1960,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
             @ hosted_callbacks role)
            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_hosted"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".compat_by_role") [];
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ]; app (msg ^ ".compat_by_role") [];
                 app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ];
                 start_sid_of role; var "deliver"; var "cancel" ]))
@@ -2256,6 +2283,10 @@ let compat_rows ~(old_ : version option) ~(new_ : version) : (string * string * 
          new_.v_roles
      | Same | Incompatible _ -> [])
 
+(** `--protocol-expand P:label` (D21): the protocols built as the EXPAND half
+    of a two-deploy change, with the branch the chooser holds back. *)
+let expand_labels : (string * string) list ref = ref []
+
 (** Baselines given with `--protocol-baseline`, by protocol name.  Set by the
     driver before desugaring; empty everywhere else (the LSP, the REPL), which
     generates an empty table -- what a first build gets too. *)
@@ -2416,14 +2447,47 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
                 | Some b -> compat_rows ~old_:(prior_version b ~fp:fingerprint) ~new_:version
               in
               if uses_protocol proto then warn_unlabelled errors ~proto pdef.proto_steps;
-              let msg = msg_module errors ~proto ~span ~fingerprint ~compat ctors roles peers in
+              (* An expand build: the change must be rule one against the
+                 baseline, adding exactly the named branch. *)
+              let held =
+                match List.assoc_opt proto !expand_labels with
+                | None -> None
+                | Some label ->
+                  let prior = Option.bind (Hashtbl.find_opt baselines proto) (fun b -> prior_version b ~fp:fingerprint) in
+                  (match prior with
+                   | None ->
+                     Err.error errors ~span
+                       (Printf.sprintf
+                          "--protocol-expand %s:%s needs the protocol's previous version (--protocol-baseline) to split against."
+                          proto label);
+                     None
+                   | Some old_ ->
+                     (match compare_versions ~old_ ~new_:version with
+                      | Compatible { chooser; label = l; _ } when l = label -> Some (chooser, label, old_.v_fingerprint)
+                      | Compatible { label = l; _ } ->
+                        Err.error errors ~span
+                          (Printf.sprintf "--protocol-expand %s:%s: the branch this version adds is `%s`." proto label l);
+                        None
+                      | Same | Incompatible _ ->
+                        Err.error errors ~span
+                          (Printf.sprintf
+                             "--protocol-expand %s:%s: this version is not the previous one plus that branch, so there is nothing to split."
+                             proto label);
+                        None))
+              in
+              let msg =
+                msg_module errors ~proto ~span ~fingerprint ~compat
+                  ?held:(Option.map (fun (c, _, f) -> (c, f)) held) ctors roles peers
+              in
               let grants = grants_of pdef.proto_steps in
               let role_mods =
                 List.map
                   (fun role ->
                      role_module errors ~proto ~span ~roles ~nctors:(List.length ctors)
                        ~grants:(Option.value ~default:[] (List.assoc_opt role grants))
-                       ~crash_points:(crash_ctors_of steps role) role
+                       ~crash_points:(crash_ctors_of steps role)
+                       ~held_labels:(match held with Some (c, l, _) when c = role -> [ l ] | _ -> [])
+                       role
                        (project ~proto ~multiparty steps role LEnd))
                   roles
               in

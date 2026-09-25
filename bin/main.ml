@@ -1018,7 +1018,9 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
         @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])
         (* --protocol-baseline: the previous protocol versions decide the
            generated `<P>_Msg.compat()` table, so they are part of the binary. *)
-        @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])) in
+        @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])
+        @ List.map (fun (p, l) -> "pexpand:" ^ p ^ ":" ^ l)
+            (List.sort compare !March_desugar.Desugar_endpoints.expand_labels)) in
   let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
   (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" <> None then
      Printf.eprintf "MARCH_CASFLAGS: target=%s flags=[%s] ch=%s\n%!"
@@ -4784,6 +4786,13 @@ let () =
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
     ("--protocol-baseline", Arg.String (fun p -> protocol_baselines := p :: !protocol_baselines),
      "<file>  A protocol's previous version (.forge/protocols/<P>.json, from --emit-protocols); `<P>_Msg.compat()` is computed against it. Repeatable");
+    ("--protocol-expand", Arg.String (fun spec ->
+         match String.index_opt spec ':' with
+         | Some i ->
+           let p = String.sub spec 0 i and l = String.sub spec (i + 1) (String.length spec - i - 1) in
+           March_desugar.Desugar_endpoints.expand_labels := (p, l) :: !March_desugar.Desugar_endpoints.expand_labels
+         | None -> Printf.eprintf "error: --protocol-expand wants <Protocol>:<label>, got %s\n" spec; exit 2),
+     "<P>:<label>  Build the EXPAND half of a two-deploy protocol change (D21): P's chooser stays on the previous fingerprint and cannot choose <label>. Needs --protocol-baseline. Repeatable");
     ("--emit-protocols", Arg.String (fun d -> emit_protocols_dir := Some d),
      "<dir>  After a clean typecheck, write <dir>/<P>.json for every @[endpoints] protocol: the baseline the next build's --protocol-baseline reads");
     ("--topology",   Arg.String (fun p -> topology_file := Some p),
