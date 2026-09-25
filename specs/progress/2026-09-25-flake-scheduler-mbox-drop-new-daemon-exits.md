@@ -106,7 +106,7 @@ preemption tick interrupts it there, and `march_preempt_signal_handler`'s write 
 `_Thread_local` `march_tls_reductions` re-enters the allocator through `_tlv_get_addr`.
 That aborts with `_os_unfair_lock_recursive_abort`, reported as SIGKILL, or with an
 xzone malloc trap, reported as SIGTRAP. It is recorded in
-`specs/todos/2026-09-24-flake-supervisor-init-arg-restart-sigtrap.md`, whose
+`specs/progress/2026-09-25-preempt-tick-at-thread-exit-sigtrap.md` (since fixed), whose
 SIGTRAP sightings it very likely explains.
 
 ---

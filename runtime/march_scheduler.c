@@ -1800,6 +1800,10 @@ static void sched_loop(march_scheduler *sched) {
      * structs, mailbox nodes, March heap objects), which surfaced as wild
      * garbage ucontexts and heap-metadata crashes under actor churn. */
     march_tls_reductions = MARCH_REDUCTION_BUDGET;
+    /* From here until the end of this function the handler may write TLS.
+     * Same thread as the handler, so program order is the ordering that
+     * matters; release/acquire documents it. */
+    atomic_store_explicit(&sched->tls_live, 1, memory_order_release);
 
     tl_sched = sched;
     /* This thread is now a quiescent-state reader for march_reclaim: online,
@@ -2215,11 +2219,29 @@ static void sched_loop(march_scheduler *sched) {
     atomic_store_explicit(&sched->running, 0, memory_order_release);
     march_reclaim_sched_detach();
     tl_sched = NULL;
+    /* Past this point the handler must not touch TLS: a tick the daemon sent
+     * just before it saw running == 0 can still be delivered, and on a
+     * worker thread that delivery can land inside pthread_exit's TSD cleanup,
+     * where dyld has torn the TLV block down and a TLS access mallocs --
+     * inside whatever malloc the interrupted cleanup was in, which traps
+     * (specs/progress/2026-09-25-preempt-tick-at-thread-exit-sigtrap.md). */
+    atomic_store_explicit(&sched->tls_live, 0, memory_order_release);
 }
 
 static void *sched_thread_entry(void *arg) {
     march_scheduler *sched = (march_scheduler *)arg;
     sched_loop(sched);
+    /* A worker thread is about to exit: block the preemption signal so no
+     * tick is delivered to it at all during pthread_exit (a pending one is
+     * discarded with the thread).  tls_live already makes a delivery here
+     * harmless; this closes the window outright, including for a host
+     * handler we would chain to.  Worker threads only -- scheduler 0 is the
+     * caller's thread, whose mask must survive march_sched_run.  The
+     * handler's installation is untouched. */
+    sigset_t block;
+    sigemptyset(&block);
+    sigaddset(&block, march_preempt_signal());
+    pthread_sigmask(SIG_BLOCK, &block, NULL);
     return NULL;
 }
 
@@ -3895,8 +3917,9 @@ static void chain_prev_preempt_handler(int sig, siginfo_t *si, void *uctx) {
  * on Darwin the first TLS access on a thread mallocs (see sched_loop) -- not
  * async-signal-safe.  So: find this thread in g_scheds by pthread_self(), and
  * consume that scheduler's preempt_tick flag, which the daemon sets just
- * before it signals.  Only a scheduler thread (TLS already materialised in
- * sched_loop) with a pending tick writes TLS.
+ * before it signals.  Only a scheduler thread still inside sched_loop (its
+ * tls_live set: TLS materialised, not yet torn down) with a pending tick
+ * writes TLS.
  *
  * A delivery from another process (si_pid > 0 and != getpid()) is chained
  * without consulting the flag; that also covers a host signal that coalesced
@@ -3921,12 +3944,23 @@ static void march_preempt_signal_handler(int sig, siginfo_t *si, void *uctx) {
         if (pthread_equal(g_scheds[i].thread, me)) {
             if (atomic_exchange_explicit(&g_scheds[i].preempt_tick, 0,
                                          memory_order_acquire)) {
-                /* Both writes are async-signal-safe (volatile scalar stores).
-                 * march_preempt_request is what compiled code actually polls;
-                 * march_tls_reductions is kept in sync so task_reductions()
-                 * and any interpreter-side budget logic see a spent quantum. */
-                march_preempt_request = 1;
-                march_tls_reductions  = 0;
+                /* Our tick either way.  Only a thread still inside
+                 * sched_loop gets the writes: past it (worker exit, or
+                 * scheduler 0 after its loop) there is no quantum to end,
+                 * and during pthread_exit a TLS access mallocs, inside the
+                 * malloc the tick interrupted.  The skip path touches no
+                 * TLS and calls nothing. */
+                if (atomic_load_explicit(&g_scheds[i].tls_live,
+                                         memory_order_acquire)) {
+                    /* Both writes are async-signal-safe here (volatile scalar
+                     * stores, TLS already materialised).
+                     * march_preempt_request is what compiled code actually
+                     * polls; march_tls_reductions is kept in sync so
+                     * task_reductions() and any interpreter-side budget
+                     * logic see a spent quantum. */
+                    march_preempt_request = 1;
+                    march_tls_reductions  = 0;
+                }
                 ours = 1;
             }
             break;
