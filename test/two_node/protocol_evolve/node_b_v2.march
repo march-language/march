@@ -221,6 +221,8 @@ mod ProtocolEvolveB do
         drive(d, c, h, unix_time_ms() + Env.get_int("EVOLVE_DRIVE_MS", 14000))
         settle(30000)
         summary()
+        -- Linger so the scenario can read this node's reload counters.
+        sleep_ms(5000)
         ClusterNode.stop(h)
     end
   end

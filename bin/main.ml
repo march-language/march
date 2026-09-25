@@ -1948,8 +1948,15 @@ let compile filename =
   stamp "desugar";
   (* Capture user AST before stdlib injection — used by -dump-phases *)
   let user_ast = desugared in
+  (* From the PARSED entry module, not the desugared one: desugaring adds the
+     modules `@[endpoints]` / `@[remote]` generate (`Order_Buyer`, `Order_Run`,
+     `Order_Msg`, ...) as nested modules too, and those must stay OFF the
+     boundary -- a session must finish on the protocol code it formed under
+     (D27), and a protocol change ships as a new offer, never as a swap of
+     the running endpoint code (test/two_node/protocol_evolve panicked with a
+     non-exhaustive match when they were swapped). *)
   (match !hot_reload_prefix with
-   | Some p when String.equal p user_ast.March_ast.Ast.mod_name.txt ->
+   | Some p when String.equal p module_ast.March_ast.Ast.mod_name.txt ->
      let rec nested prefix decls =
        List.concat_map (function
            | March_ast.Ast.DMod (n, _, ds, _) ->
@@ -1957,7 +1964,7 @@ let compile filename =
              full :: nested full ds
            | _ -> [])
          decls in
-     hr_entry_nested := nested "" user_ast.March_ast.Ast.mod_decls
+     hr_entry_nested := nested "" module_ast.March_ast.Ast.mod_decls
    | _ -> ());
   (* Resolve cross-file imports: find imported .march files, parse and inject *)
   let (resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in

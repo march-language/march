@@ -77,6 +77,9 @@ git log is authoritative for exact commits.
   lowering lifts out of it, so editing a session body (always a lambda)
   left the function's hash unchanged and `forge deploy hot` activated
   nothing. Lifted, bare-named helpers are now folded into the hash.
+- **`SessionNode.initiate` survives a re-offer.** When the only access point for a
+  role answered "closing" (its replacement's registration not yet propagated), the
+  session was reported as having no offer; it now looks again within the setup time.
 - **Hot reload works under AddressSanitizer.** The reload server loaded a
   patch with `RTLD_DEEPBIND`, which ASan refuses; a patch is now bound
   locally at link time instead (`-Wl,-Bsymbolic` on Linux) and loaded

@@ -46,6 +46,12 @@ Two things had to change with it:
   `specs/todos/2026-09-25-hcr-entry-module-top-level-fns-outside-boundary.md`.
 - The forge upgrade fixtures keep their role body in a nested module
   (`UpgradeApp.Serve.serve_one`), which is the shape a real app has.
+- The nested modules are taken from the PARSED entry module: desugaring adds
+  the `@[endpoints]`/`@[remote]`-generated modules (`Order_Buyer`, `Order_Run`,
+  ...) as nested modules too, and swapping those mid-session made
+  `protocol_evolve`'s version-1 Buyers hit a non-exhaustive match on a
+  `later` they had never heard of. A session finishes on the protocol code
+  it formed under; a protocol change ships as a new offer.
 - **A boundary function's slot hash folds in the lambdas it builds.** The
   slot identity (`hr_impl_hashes` in bin/main.ml) is deliberately
   non-transitive (a leaf change must not flag the whole caller chain), but
@@ -96,6 +102,11 @@ the new version is what runs (`v2 probe 9 sees created=1` in the repro;
   node-a's version-2 host reports it sees the version-1 offer. Driven by
   `test/hcr_deploy.exe`, step 9's local deploy tool (copied verbatim from its
   branch so the two merge cleanly).
+- `test/two_node/protocol_evolve`, step 9's network acceptance scenario (#658),
+  moved out of `two_node_pending`: a protocol gaining a choice branch deploys
+  hot across both nodes with sessions in flight on both fingerprints. It also
+  needed `SessionNode.initiate` to look again when the only offer answers
+  "closing" (the re-offer window), and node-b to linger for the counters query.
 - Same-box A/B benchmark, below.
 
 ## The boundary cost, re-measured (G1's benchmarks, compiled `--opt 2`)
