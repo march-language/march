@@ -23,6 +23,14 @@ git log is authoritative for exact commits.
   For a raw digest use `hmac_sha256_bytes` / `sha1_bytes`.
 
 ### Added
+- **`NativeArray.sort_i32`, `sort_f32` and `sort_u8`: every NativeArray width
+  can now be sorted.** Same ownership as `sort_int`: in place when the array is
+  uniquely owned, copy-on-write when it is shared. `sort_i32` is the same
+  algorithm as `sort_int` on 4-byte elements. `sort_f32` orders by IEEE 754
+  `totalOrder` exactly like `sort_float` (NaN at a fixed end, `-0.0` before
+  `+0.0`), without widening to f64. `sort_u8` is a counting sort, about 0.3 ms
+  for a million bytes whatever their order. The interpreter and compiled builds
+  produce the same order, NaN included.
 - **Node certificates for clusters** (build step 11a of the distributed-deploys
   plan, part 1). New `NodeCert` module: a certificate names a node
   (`spiffe://<trust-domain>/pool/<pool>/node/<name>`), its role permissions
@@ -538,6 +546,16 @@ git log is authoritative for exact commits.
   (`fn lt(a) do fn b -> a < b end`, including `Map.int_cmp` / `Map.str_cmp`)
   passed as a value and called curried no longer crashes compiled programs
   with SIGSEGV.
+- **`march --check` no longer reuses a `--no-cap-strict` verdict.** The `--check`
+  fast path caches a clean verdict per source digest, but that key ignored
+  `--no-cap-strict`, so `march --check --no-cap-strict f.march` exiting 0 made the
+  next plain `march --check f.march` of the same source exit 0 silently instead
+  of reporting the capability-ceiling error. The key now carries the cap-strict
+  setting, as the `--compile` key already did.
+- `to_string`/`println` of a List, Option, Result or tuple no longer aborts
+  `march --jit` or the JIT REPL with an internal compiler error ("ambiguous
+  interface-method call to `Show$List.show`"). The prelude's generic `Show`
+  impls are now specialised at the call site, as they are under `--compile`.
 
 - A function in a nested module that calls a function of an enclosing module
   (`mod Outer do pfn helper ... mod Inner do fn f(x) do helper(x) end end end`)

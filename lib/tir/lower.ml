@@ -437,7 +437,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
      Recursively processes DMod contents so that impls declared inside
      imported modules (which are wrapped in DMod by resolve_imports) are
      also registered. *)
-  let rec collect_iface_impls ~lower_bodies ?(mod_prefix = "") decls =
+  let rec collect_iface_impls ~lower_bodies ?(lower_generic = false)
+      ?(mod_prefix = "") decls =
     (* Collect direct function/let names at this module level so that
        rename_tir_vars can qualify references inside impl method bodies.
        For example, inside `mod BigInt do impl Eq(BigInt) do fn eq(a,b) do
@@ -519,6 +520,28 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             | "Show" | "Eq" | "Ord" | "Hash" -> true
             | _ -> false
           in
+          (* A stdlib-context impl (the REPL / --jit prelude, [lower_bodies]
+             false) is normally registration-only: its body is already in the
+             precompiled prelude .so.  That holds only for a MONOMORPHIC impl.
+             A generic one — the prelude's `impl Show(List(a)) when Show(a)`,
+             Option/Result, the tuple arities — has no definition in the .so
+             at all: Mono emits only specialisations, and the prelude has no
+             caller to specialise it for.  Lowering its body here lets Mono
+             specialise it at THIS fragment's call site (`Show$List.show$…`),
+             exactly as the whole-program --compile pipeline does; without it
+             the call reached LLVM emit as a bare `Show$List.show` and died
+             as an "ambiguous interface-method call" (todo
+             2026-09-24-jit-file-to-string-list-ambiguous-iface).  Top-level
+             impls only: a module-nested body names module-local helpers that
+             [direct_fn_names]/[rename_tir_vars] qualify, and those helpers are
+             not lowered into a fragment by this path. *)
+          let lower_bodies =
+            lower_bodies
+            || (lower_generic && mod_prefix = ""
+                && (match idef.impl_ty with
+                    | Ast.TyTuple _ | Ast.TyCon (_, _ :: _) -> true
+                    | _ -> false))
+          in
           let iface_self_call_names =
             if is_builtin_dispatched_iface then []
             else List.map (fun ((m : Ast.name), _) -> m.txt) idef.impl_methods
@@ -598,7 +621,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         | Ast.DMod (sub_name, _, inner_decls, _) ->
           (* Recurse, tracking the module prefix so that impl method bodies
              that call module-private functions are renamed correctly. *)
-          collect_iface_impls ~lower_bodies
+          collect_iface_impls ~lower_bodies ~lower_generic
             ~mod_prefix:(mod_prefix ^ sub_name.txt ^ ".")
             inner_decls
         | _ -> ()
@@ -607,7 +630,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   (* Stdlib context: only register dispatch table entries, don't lower bodies
      (they're already in the precompiled .so) *)
   if stdlib_context <> [] then
-    collect_iface_impls ~lower_bodies:false stdlib_context;
+    collect_iface_impls ~lower_bodies:false ~lower_generic:true stdlib_context;
   collect_iface_impls ~lower_bodies:true m.mod_decls;
   let all_context_decls = stdlib_context @ m.mod_decls in
   (* Build default-arg dispatch table from mangled DFn names (foo$N pattern).
