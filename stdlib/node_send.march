@@ -40,12 +40,18 @@ mod NodeSend do
 
   type SendError = NoConnection | Refused(Int, String)
 
+  -- `from_node` is the node id of the connection the frame arrived on,
+  -- filled in by the receiver (ClusterNode's data reader, or its own id for
+  -- the loopback), never read off the wire: "" from `decode_msg`. An access
+  -- point checks the sender's certificate by it (step 11b), so it must be
+  -- the link's verified peer, not anything the sender claims.
   type Delivery = {
     seq : Int,
     to_local_pid : Int,
     to_creation : Int,
     type_tag : String,
-    payload : List(Int)
+    payload : List(Int),
+    from_node : String
   }
 
   -- ── frames ──────────────────────────────────────────────────────────────
@@ -71,7 +77,7 @@ mod NodeSend do
                         Cons(Msgpack.Int(cr),
                         Cons(Msgpack.Str(tt),
                         Cons(Msgpack.Bin(pl), Nil))))))) ->
-            Ok({ seq: seq, to_local_pid: lp, to_creation: cr, type_tag: tt, payload: pl })
+            Ok({ seq: seq, to_local_pid: lp, to_creation: cr, type_tag: tt, payload: pl, from_node: "" })
           _ -> Err("node_send: not an ACTOR_MSG frame")
         end
     end

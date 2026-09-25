@@ -178,6 +178,7 @@ let all_stdlib_decls =
     "peer_reader.march";
     "actor.march";
     "node_queue.march";
+    "session_ap.march";
     "cluster_node.march";
     "session_node.march";
     "topology.march";

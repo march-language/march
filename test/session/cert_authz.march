@@ -1,0 +1,212 @@
+-- Step 11b's two-way role check at session formation, in ONE process, over
+-- FAKE cluster dictionaries (D35, `ClusterNode.attach`): no sockets, no
+-- handshake. Each fake node has an id, a certificate (or none: shared-secret
+-- mode) and a view of the others' certificates, and they share one fake
+-- registry and one fake network; a `send_msg` calls the destination's route
+-- in the caller's task with `from_node` set to the SENDER, as ClusterNode's
+-- data reader sets it from the link.
+--
+-- Cases (each on its own fake network, with its own node ids: a session id
+-- is node.creation.counter, and two cases reusing a node id would share one):
+--   1  the initiator skips an offer whose node's certificate does not name
+--      Checkout.Ledger:offer (the binding is forged: an honest node would not
+--      open it), and never sends it an invitation
+--   2  that node's own `offer_Ledger` refuses to open
+--   3  the offer refuses an initiator whose certificate does not name
+--      Checkout.Client:initiate
+--   4  both certified, capacity 0: the verdict is "full", reached only AFTER
+--      the certificate check passed
+--   5  shared-secret mode (no certificates anywhere): no check, "full" again
+--   6  a squatter binds the session's Ledger role name before the offer's
+--      party can; the initiator refuses to form with the squatter
+mod CertAuthz do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.Spawn
+  needs IO.Clock
+  needs IO.Process
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs ClusterNode.Live
+  needs Session.Live
+
+  @[endpoints]
+  protocol Checkout do
+    Client -> Ledger : Int
+    Ledger -> Client : Int
+  end
+
+  -- ── the fake cluster ──────────────────────────────────────────────────
+
+  type Net = { names : Vault(GlobalPid.Pid), routes : Vault(NodeSend.Delivery -> Result((), String)),
+               meta : Vault(Int), certs : Vault(NodeCert.Cert) }
+
+  pfn new_net(tag : String) : Net do
+    { names: Vault.new("authz_names_" ++ tag), routes: Vault.new("authz_routes_" ++ tag),
+      meta: Vault.new("authz_meta_" ++ tag), certs: Vault.new("authz_certs_" ++ tag) }
+  end
+
+  pfn cert(id : String, roles : List(String)) : NodeCert.Cert do
+    { node: "spiffe://test.local/pool/p/node/node-" ++ id, roles: roles, flags: Nil, not_after: 0,
+      issuer: "spiffe://test.local/operator/0", pubkey: "", serial: id }
+  end
+
+  -- A frame from [me] to [to]: straight into the destination's route.
+  pfn fake_send(net : Net, me : String, to : GlobalPid.Pid, tag : String, payload : List(Int))
+      : Result(Int, NodeQueue.EnqueueError) do
+    let seq = Vault.incr(net.meta, "seq", 1)
+    let _ = Vault.incr(net.meta, "sent " ++ tag ++ " to " ++ to.node_id, 1)
+    match Vault.get(net.routes, to.node_id ++ "/" ++ int_to_string(to.local_pid)) do
+      None -> Ok(seq)
+      Some(f) ->
+        let _ = f({ seq: seq, to_local_pid: to.local_pid, to_creation: to.creation, type_tag: tag,
+                    payload: payload, from_node: me })
+        Ok(seq)
+    end
+  end
+
+  pfn fake_register(net : Net, me : String, name : String, p : Int) : Result((), ClusterNode.RegisterError) do
+    match Vault.get(net.names, name) do
+      Some(g) -> Err(ClusterNode.Taken(g))
+      None ->
+        Vault.set(net.names, name, GlobalPid.make(me, p, 1))
+        Ok(())
+    end
+  end
+
+  -- Node [me] of [net]; certificate mode when [certified] (its own
+  -- certificate is `net.certs[me]`, every peer's is `net.certs[peer]`).
+  pfn fake_ops(net : Net, me : String, certified : Bool) : ClusterNode.ClusterOps do
+    let q = NodeQueue.start_local(fn _ -> ())
+    { ClusterNode.ops_stub(me) with
+      name_of: fn id -> Some("node-" ++ id),
+      next_id: fn key -> Vault.incr(net.meta, me ++ "#" ++ key, 1),
+      creation: fn _ -> 1,
+      queue_for: fn _ -> Some(q),
+      send_msg: fn (to, tag, payload, _policy) -> fake_send(net, me, to, tag, payload),
+      route: fn (pid, f) -> do
+        let k = me ++ "/" ++ int_to_string(pid)
+        Vault.set(net.routes, k, f)
+        k
+      end,
+      unroute: fn k -> Vault.drop(net.routes, k),
+      register: fn (name, p) -> fake_register(net, me, name, p),
+      unregister: fn name -> Vault.drop(net.names, name),
+      lookup: fn name -> Vault.get(net.names, name),
+      names: fn _ -> Vault.keys(net.names),
+      on_peer_closed: fn _ -> 0,
+      off_peer_closed: fn _ -> (),
+      peer_cert: fn id -> if certified do Vault.get(net.certs, id) else None end,
+      own_cert: fn _ -> if certified do Vault.get(net.certs, me) else None end }
+  end
+
+  -- Something to bind a name to.
+  actor Dummy do
+    state { n : Int }
+    init  { n: 0 }
+    on Nop() do state end
+  end
+
+  pfn said(r : Result((), String)) : String do
+    match r do
+      Ok(_) -> "ok"
+      Err(e) -> e
+    end
+  end
+
+  -- ── the roles ─────────────────────────────────────────────────────────
+
+  pfn ledger(s : Cap(Session.Live), st : Checkout_Ledger.S_recv_Msg_Client_Ledger_1) : Checkout_Ledger.Yield do
+    Checkout_Ledger.recv_Msg_Client_Ledger_1(s, st, fn (n, st1) ->
+      Checkout_Ledger.close(s, Checkout_Ledger.send_Msg_Ledger_Client_1(s, st1, n + 1)))
+  end
+
+  pfn client(s : Cap(Session.Live), st : Checkout_Client.S_send_Msg_Client_Ledger_1) : Checkout_Client.Yield do
+    Checkout_Client.recv_Msg_Ledger_Client_1(s, Checkout_Client.send_Msg_Client_Ledger_1(s, st, 41), fn (_n, st1) ->
+      Checkout_Client.close(s, st1))
+  end
+
+  pfn initiate(io : Cap(IO), c : Cap(ClusterNode.Live)) : String do
+    match Checkout_Run.initiate_Client(io, c, fn (s, st) -> client(s, st)) do
+      Ok(_) -> "formed"
+      Err(e) -> Checkout_Run.error_message(e)
+    end
+  end
+
+  pfn open_ledger(io : Cap(IO), c : Cap(ClusterNode.Live), capacity : Int) : String do
+    match Checkout_Run.offer_Ledger(io, c, capacity, fn (s, st) -> ledger(s, st)) do
+      Ok(_) -> "offered"
+      Err(e) -> Checkout_Run.error_message(e)
+    end
+  end
+
+  pfn ledger_offer_name(id : String) : String do
+    "ap:Checkout/" ++ int_to_string(Checkout_Msg.role_Ledger()) ++ "/" ++ id
+  end
+
+  pfn invites(net : Net, id : String) : Int do Vault.get_or(net.meta, "sent SessionAP.Invite to " ++ id, 0) end
+
+  fn main(io : Cap(IO)) do
+    Process.set_env("MARCH_SESSION_CONNECT_MS", "3000")
+
+    -- SessionAP.authorize, pure.
+    let ok = cert("x", ["Checkout.Ledger:offer", "Checkout.Client:initiate"])
+    println("authorize offer: " ++ said(SessionAP.authorize(Some(ok), "Checkout", "Ledger", SessionAP.offer_mode())))
+    println("authorize initiate as Ledger: " ++ said(SessionAP.authorize(Some(ok), "Checkout", "Ledger", SessionAP.initiate_mode())))
+    println("authorize no cert: " ++ said(SessionAP.authorize(None, "Checkout", "Ledger", SessionAP.offer_mode())))
+
+    -- 1 and 2: node-b's certificate names only Thumbs.Render:offer.
+    let n1 = new_net("1")
+    Vault.set(n1.certs, "a1", cert("a1", ["Checkout.Client:initiate"]))
+    Vault.set(n1.certs, "b1", cert("b1", ["Thumbs.Render:offer"]))
+    let a1 = ClusterNode.attach(io, fake_ops(n1, "a1", true))
+    let b1 = ClusterNode.attach(io, fake_ops(n1, "b1", true))
+    println("1 node-b1 offers Ledger: " ++ open_ledger(io, b1, 4))
+    -- A compromised node-b binds the offer name itself.
+    let forged = spawn(Dummy)
+    let _ = ClusterNode.register(b1, ledger_offer_name("b1"), forged)
+    println("1 initiator: " ++ initiate(io, a1))
+    println("1 invitations sent to node-b1: " ++ int_to_string(invites(n1, "b1")))
+
+    -- 3: node-a's certificate cannot initiate as Client.
+    let n3 = new_net("3")
+    Vault.set(n3.certs, "a3", cert("a3", ["Thumbs.Render:initiate"]))
+    Vault.set(n3.certs, "b3", cert("b3", ["Checkout.Ledger:offer"]))
+    let a3 = ClusterNode.attach(io, fake_ops(n3, "a3", true))
+    let b3 = ClusterNode.attach(io, fake_ops(n3, "b3", true))
+    println("3 node-b offers Ledger: " ++ open_ledger(io, b3, 4))
+    println("3 initiator: " ++ initiate(io, a3))
+
+    -- 4: both certified; capacity 0, so an authorized initiator hears "full".
+    let n4 = new_net("4")
+    Vault.set(n4.certs, "a4", cert("a4", ["Checkout.Client:initiate"]))
+    Vault.set(n4.certs, "b4", cert("b4", ["Checkout.Ledger:offer"]))
+    let a4 = ClusterNode.attach(io, fake_ops(n4, "a4", true))
+    let b4 = ClusterNode.attach(io, fake_ops(n4, "b4", true))
+    println("4 node-b offers Ledger: " ++ open_ledger(io, b4, 0))
+    println("4 initiator: " ++ initiate(io, a4))
+
+    -- 5: shared-secret mode: nobody has a certificate and nothing is checked.
+    let n5 = new_net("5")
+    let a5 = ClusterNode.attach(io, fake_ops(n5, "a5", false))
+    let b5 = ClusterNode.attach(io, fake_ops(n5, "b5", false))
+    println("5 node-b offers Ledger: " ++ open_ledger(io, b5, 0))
+    println("5 initiator: " ++ initiate(io, a5))
+
+    -- 6: node-c (certified, no roles) squats the session's Ledger name; the
+    -- session id is predictable (node, creation, counter).
+    let n6 = new_net("6")
+    Vault.set(n6.certs, "a6", cert("a6", ["Checkout.Client:initiate"]))
+    Vault.set(n6.certs, "b6", cert("b6", ["Checkout.Ledger:offer"]))
+    Vault.set(n6.certs, "c6", cert("c6", Nil))
+    let a6 = ClusterNode.attach(io, fake_ops(n6, "a6", true))
+    let b6 = ClusterNode.attach(io, fake_ops(n6, "b6", true))
+    let c6 = ClusterNode.attach(io, fake_ops(n6, "c6", true))
+    println("6 node-b offers Ledger: " ++ open_ledger(io, b6, 4))
+    let squat = spawn(Dummy)
+    let _ = ClusterNode.register(c6, "session:a6.1.1/" ++ int_to_string(Checkout_Msg.role_Ledger()), squat)
+    println("6 initiator: " ++ initiate(io, a6))
+    println("done")
+  end
+end

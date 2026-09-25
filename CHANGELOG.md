@@ -102,6 +102,25 @@ git log is authoritative for exact commits.
   `forge cluster revoke`; `MARCH_CLUSTER_REVOCATIONS` seeds the list at
   startup; nodes pass revocations on to each other, and only the operator's
   signature makes one count. `ClusterNode.revocations(c)` lists them.
+- **Access points check certificates both ways** (build step 11b of the
+  distributed-deploys plan, part 1; certificate mode only). An initiator skips,
+  before inviting it, any offer whose node's certificate does not name
+  `Proto.Role:offer` for the role, and lists it in `NoOffer`'s reasons ("node-b
+  not authorized for Checkout.Ledger, not invited"): offer names are registry
+  names any member can write, so the check is on the certificate of the node
+  holding the offer. An offer refuses an initiator whose certificate does not
+  name `Proto.Role:initiate` for the role it plays ("initiator node-a not
+  authorized for Checkout.Client"). A node whose own certificate does not allow
+  a role gets `Err(Unauthorized(role, why))` from `offer_<Role>`, and once a
+  session forms each party checks that every role's endpoint is on a node
+  certified for that role. Shared-secret mode checks nothing, as before. New
+  `SessionAP` module (`SessionAP.authorize(cert, proto, role, mode)`),
+  `ClusterNode.own_cert`, `ClusterNode.certified` and
+  `ClusterNode.authorize_peer`; `NodeSend.Delivery` gains `from_node`, the
+  verified peer a frame arrived from. The generated `offer_<Role>`,
+  `offer_hosted_<Role>` and `initiate_<Role>` pass the protocol's role names
+  (`SessionNode.offer_role`, `offer_hosted` and `initiate` take a `roles`
+  argument after the fingerprint).
 - **Placement changes on a running system and upgrade tests** (build step 8 of the
   distributed-deploys plan). A topology app's nodes re-read their topology on
   SIGHUP and move their own offers: a role's placement, capacity, or a pool that

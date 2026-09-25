@@ -1595,7 +1595,9 @@ mod SessionNode do
   -- - `NoOffer(role, why)`: `initiate` found no access point that would
   --   take [role] (none registered, all full, all refused, or no answer).
   -- - `AlreadyOffered(role)`: this node already offers [role] of that protocol.
-  type RunError = Cancelled(Int, String) | Protocol(Int, String) | HostGone(Int) | Left(String) | Listen(Int, String) | Accept(String) | Connect(Int, String) | NoOffer(Int, String) | AlreadyOffered(Int)
+  -- - `Unauthorized(role, why)`: certificate mode (step 11b), and this node's
+  --   own certificate does not let it offer [role].
+  type RunError = Cancelled(Int, String) | Protocol(Int, String) | HostGone(Int) | Left(String) | Listen(Int, String) | Accept(String) | Connect(Int, String) | NoOffer(Int, String) | AlreadyOffered(Int) | Unauthorized(Int, String)
 
   fn run_error_message(e : RunError) : String do
     run_error_message_named(e, fn i -> int_to_string(i))
@@ -1616,6 +1618,7 @@ mod SessionNode do
       RunError.Connect(role, why) -> "session_node: connect to role " ++ name(role) ++ ": " ++ why
       NoOffer(role, why) -> "session_node: no access point for role " ++ name(role) ++ ": " ++ why
       AlreadyOffered(role) -> "session_node: role " ++ name(role) ++ " is already offered on this node"
+      Unauthorized(role, why) -> "session_node: role " ++ name(role) ++ ": " ++ why
     end
   end
 
@@ -2184,6 +2187,23 @@ mod SessionNode do
     end
   end
 
+  -- No check on who holds a role's name: `run_cluster` (the caller chose
+  -- the session id and its members) and every shared-secret node.
+  pfn no_holder_check(_r : Int, _node_id : String) : Result((), String) do Ok(()) end
+
+  -- Every found role's holder passes [holder_ok], or Err((role, why)).
+  pfn check_holders(found : List((Int, GlobalPid.Pid)), holder_ok : Int -> String -> Result((), String))
+      : Result((), (Int, String)) do
+    match found do
+      Nil -> Ok(())
+      Cons((r, g), rest) ->
+        match holder_ok(r, g.node_id) do
+          Ok(_) -> check_holders(rest, holder_ok)
+          Err(why) -> Err((r, why))
+        end
+    end
+  end
+
   pfn serve_cluster_outcome(p : Party) : () do
     let _ = send(p.ep, Expect(List.length(p.links)))
     let _ = await_outcome(p)
@@ -2228,14 +2248,15 @@ mod SessionNode do
   """
   fn run_cluster(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
                  on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result(Session.Outcome, RunError) do
-    run_cluster_with(io, node, my_role, peers, session, on_close, body, fn _ -> false)
+    run_cluster_with(io, node, my_role, peers, session, on_close, body, fn _ -> false, no_holder_check)
   end
 
   -- `run_cluster`, abandoned while still finding its peers once [abandoned]
   -- says so (an access point's session the initiator withdrew).
   pfn run_cluster_with(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
-                       on_close : Int -> Unit, body : Cap(Session.Live) -> Unit, abandoned : Int -> Bool) : Result(Session.Outcome, RunError) do
-    run_cluster_party(io, node, my_role, peers, session, on_close, fn (_p, s) -> body(s), abandoned)
+                       on_close : Int -> Unit, body : Cap(Session.Live) -> Unit, abandoned : Int -> Bool,
+                       holder_ok : Int -> String -> Result((), String)) : Result(Session.Outcome, RunError) do
+    run_cluster_party(io, node, my_role, peers, session, on_close, fn (_p, s) -> body(s), abandoned, holder_ok)
   end
 
   doc """
@@ -2252,7 +2273,8 @@ mod SessionNode do
                         on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
                         deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
                         cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result(Session.Outcome, RunError) do
-    run_cluster_hosted_with(io, node, my_role, peers, session, on_close, host, start, deliver, cancel, fn _ -> false)
+    run_cluster_hosted_with(io, node, my_role, peers, session, on_close, host, start, deliver, cancel, fn _ -> false,
+                            no_holder_check)
   end
 
   -- `run_cluster_hosted`, abandoned while still finding its peers once
@@ -2262,16 +2284,18 @@ mod SessionNode do
                               on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
                               deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
                               cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit,
-                              abandoned : Int -> Bool) : Result(Session.Outcome, RunError) do
+                              abandoned : Int -> Bool, holder_ok : Int -> String -> Result((), String))
+      : Result(Session.Outcome, RunError) do
     run_cluster_party(io, node, my_role, peers, session, on_close,
-                      fn (p, s) -> host_party(p, s, host, start, deliver, cancel), abandoned)
+                      fn (p, s) -> host_party(p, s, host, start, deliver, cancel), abandoned, holder_ok)
   end
 
   -- The cluster runner proper: form the party under [session], then [drive]
   -- it (a callback body, or a hosted party's setup) and serve it to its end.
   pfn run_cluster_party(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
                         on_close : Int -> Unit, drive : Party -> Cap(Session.Live) -> Unit,
-                        abandoned : Int -> Bool) : Result(Session.Outcome, RunError) do
+                        abandoned : Int -> Bool, holder_ok : Int -> String -> Result((), String))
+      : Result(Session.Outcome, RunError) do
     let p0 = party(my_role, ClusterNode.node_id(node), on_close)
     Vault.set(p0.why, "sid", session)
     let slot = Vault.new("session_node_slot_" ++ session ++ "." ++ int_to_string(pid_to_int(p0.ep)))
@@ -2290,13 +2314,24 @@ mod SessionNode do
             end_party(p0)
             if missing == 0 do Err(RunError.Connect(0, "session " ++ session ++ ": withdrawn by its initiator"))
             else Err(RunError.Connect(missing, "session " ++ session ++ ": no endpoint registered for role " ++ int_to_string(missing))) end
-          Ok(found) ->
-            match cluster_links(node, found, 30000) do
-              Err(missing) ->
+          Ok(found0) ->
+            -- A role's endpoint is found by a registry name any member can
+            -- write: an access point's session checks the certificate of
+            -- the node holding each one (step 11b; `holder_ok`).
+            let linked = match check_holders(found0, holder_ok) do
+              Err(e) -> Err(e)
+              Ok(_) ->
+                match cluster_links(node, found0, 30000) do
+                  Ok(ls) -> Ok(ls)
+                  Err(missing) -> Err((missing, "no link to role " ++ int_to_string(missing) ++ "'s node"))
+                end
+            end
+            match linked do
+              Err((missing, why)) ->
                 ClusterNode.unroute(node, route_key)
                 ClusterNode.unregister(node, me)
                 end_party(p0)
-                Err(RunError.Connect(missing, "session " ++ session ++ ": no link to role " ++ int_to_string(missing) ++ "'s node"))
+                Err(RunError.Connect(missing, "session " ++ session ++ ": " ++ why))
               Ok(links) ->
                 let p = List.fold_left(links, p0, fn (acc, l) -> with_link(acc, l))
                 Vault.set(slot, "p", p)
@@ -2338,7 +2373,8 @@ mod SessionNode do
   -- specs/2026-09-19-choreography-access-points-and-crash-branches-design.md
   -- (Part A). Wire, over the cluster node (routed by the offer's / the
   -- initiator's inbox pid):
-  --   SessionAP.Invite    [sid, fingerprint, reply pid]   initiator -> offer
+  --   SessionAP.Invite    [sid, fingerprint, reply pid, initiator's role]
+  --                                                       initiator -> offer
   --   SessionAP.Withdraw  [sid]                           initiator -> offer
   --   SessionAP.Answer    [sid, node_id, verdict]         offer -> initiator
   -- where verdict "" accepts and anything else is why it refused.
@@ -2354,15 +2390,56 @@ mod SessionNode do
   -- [start] runs one session under a sid, abandoned while still forming
   -- once its argument says so. [flags]: "closing", and "w<sid>" for a
   -- session its initiator withdrew.
+  -- [roles] is the protocol's role-name table (`<P>_Msg.role_names()`), what
+  -- the certificate checks name roles by.
   type Offer = { node : Cap(ClusterNode.Live), proto : String, fingerprint : String, my_role : Int,
+                 roles : List((String, Int)),
                  capacity : Int, name : String, flags : Vault(Int), strs : Vault(String),
                  start : String -> (Int -> Bool) -> Result(Session.Outcome, RunError), worker : Pid(OfferCount) }
 
-  pfn offer_verdict(o : Offer, active : Int, fp : String) : String do
+  -- "" accepts. [from] is the node the invitation arrived from (the link's
+  -- verified peer, `Delivery.from_node`), [irole] the role its initiator
+  -- plays (-1: an invitation that did not say).
+  pfn offer_verdict(o : Offer, active : Int, fp : String, from : String, irole : Int) : String do
     if Vault.get(o.flags, "closing") != None do "closing"
     else if fp != o.fingerprint do "protocol differs"
-    else if active >= o.capacity do "full"
-    else "" end end end
+    else
+      let auth = initiator_verdict(o, from, irole)
+      if auth != "" do auth
+      else if active >= o.capacity do "full"
+      else "" end end
+    end end
+  end
+
+  -- The offer's half of the two-way check (step 11b): the initiator's
+  -- certificate must name "Proto.Role:initiate" for the role it plays.
+  -- "" in shared-secret mode, and when it does.
+  pfn initiator_verdict(o : Offer, from : String, irole : Int) : String do
+    if ClusterNode.certified(o.node) == false do ""
+    else if irole < 0 do "initiator " ++ node_label(o.node, from) ++ " did not name its role"
+    else
+      match ClusterNode.authorize_peer(o.node, from, o.proto, SessionAP.role_name(o.roles, irole), SessionAP.initiate_mode()) do
+        Ok(_) -> ""
+        Err(why) -> "initiator " ++ node_label(o.node, from) ++ " " ++ why
+      end
+    end end
+  end
+
+  -- An access point's session: the node holding role [r]'s name must be one
+  -- whose certificate lets it play [r] (offer or initiate). Always Ok on a
+  -- shared-secret node.
+  pfn ap_holder_check(node : Cap(ClusterNode.Live), proto : String, roles : List((String, Int)))
+      : Int -> String -> Result((), String) do
+    fn (r, nid) ->
+      let name = SessionAP.role_name(roles, r)
+      match ClusterNode.authorize_peer(node, nid, proto, name, SessionAP.offer_mode()) do
+        Ok(_) -> Ok(())
+        Err(_) ->
+          match ClusterNode.authorize_peer(node, nid, proto, name, SessionAP.initiate_mode()) do
+            Ok(_) -> Ok(())
+            Err(why) -> Err("role " ++ SessionAP.role_label(proto, name) ++ " is held by " ++ node_label(node, nid) ++ ": " ++ why)
+          end
+      end
   end
 
   -- Invitations are answered in the offer actor's turn, so the count of
@@ -2371,8 +2448,8 @@ mod SessionNode do
   actor OfferActor do
     state { active : Int }
     init  { active: 0 }
-    on Invite(o : Offer, sid : String, fp : String, reply : GlobalPid.Pid) do
-      let verdict = offer_verdict(o, state.active, fp)
+    on Invite(o : Offer, sid : String, fp : String, reply : GlobalPid.Pid, from : String, irole : Int) do
+      let verdict = offer_verdict(o, state.active, fp, from, irole)
       let _ = ClusterNode.send_msg(o.node, reply, "SessionAP.Answer",
                 encode_answer(sid, ClusterNode.node_id(o.node), verdict), NodeQueue.Unbounded)
       if verdict == "" do
@@ -2397,9 +2474,21 @@ mod SessionNode do
     end
   end
 
-  pfn encode_invite(sid : String, fp : String, reply : GlobalPid.Pid) : List(Int) do
+  pfn encode_invite(sid : String, fp : String, reply : GlobalPid.Pid, irole : Int) : List(Int) do
     Msgpack.encode(Msgpack.array(Cons(Msgpack.str(sid), Cons(Msgpack.str(fp),
-      Cons(Msgpack.bin(GlobalPid.encode(reply)), Nil)))))
+      Cons(Msgpack.bin(GlobalPid.encode(reply)), Cons(Msgpack.int(irole), Nil))))))
+  end
+
+  -- An Invite's fields: (sid, fingerprint, reply pid bytes, initiator role).
+  -- A three-element Invite (before step 11b) names no role: -1.
+  pfn decode_invite(payload : List(Int)) : Option((String, String, List(Int), Int)) do
+    match Msgpack.decode(payload) do
+      Ok(Msgpack.Array(Cons(Msgpack.Str(sid), Cons(Msgpack.Str(fp), Cons(Msgpack.Bin(rb), Nil))))) ->
+        Some((sid, fp, rb, 0 - 1))
+      Ok(Msgpack.Array(Cons(Msgpack.Str(sid), Cons(Msgpack.Str(fp), Cons(Msgpack.Bin(rb), Cons(Msgpack.Int(r), Nil)))))) ->
+        Some((sid, fp, rb, r))
+      _ -> None
+    end
   end
 
   pfn encode_answer(sid : String, node_id : String, verdict : String) : List(Int) do
@@ -2414,15 +2503,15 @@ mod SessionNode do
   -- turn must only send): handed to the offer actor.
   pfn offer_frame(o : Offer, d : NodeSend.Delivery) : Result((), String) do
     if d.type_tag == "SessionAP.Invite" do
-      match Msgpack.decode(d.payload) do
-        Ok(Msgpack.Array(Cons(Msgpack.Str(sid), Cons(Msgpack.Str(fp), Cons(Msgpack.Bin(rb), Nil))))) ->
+      match decode_invite(d.payload) do
+        Some((sid, fp, rb, irole)) ->
           match GlobalPid.decode(rb) do
             Ok(reply) ->
-              let _ = send(o.worker, Invite(o, sid, fp, reply))
+              let _ = send(o.worker, Invite(o, sid, fp, reply, d.from_node, irole))
               Ok(())
             Err(e) -> Err("session_ap: invite reply pid: " ++ e)
           end
-        _ -> Err("session_ap: bad Invite payload")
+        None -> Err("session_ap: bad Invite payload")
       end
     else if d.type_tag == "SessionAP.Withdraw" do
       match Msgpack.decode(d.payload) do
@@ -2441,17 +2530,24 @@ mod SessionNode do
   (`initiate`) invites this node; it then runs [body] in its own task, as
   `run_cluster` would, under the session id the initiator minted. An
   invitation is refused when the offer is full, closing, or built from a
-  different version of the protocol. One offer per role per node: a second
+  different version of the protocol, and, in certificate mode, when the
+  initiating node's certificate does not name "Proto.Role:initiate" for the
+  role it plays (verdict "initiator <node> not authorized for Proto.Role").
+  In certificate mode this node's own certificate must name
+  "Proto.Role:offer" for [my_role], else `Err(Unauthorized(..))`. [roles] is the
+  protocol's role-name table. One offer per role per node: a second
   is `Err`. The generated `<P>_Run.offer_<Role>` supplies the protocol, role
   and peers. The offer's name is bound to an actor of this node; if the
   node stops, or a supervisor restarts the program that made it, it is
   gone from the registry and an initiator no longer picks it -- offer again
   to be found again.
   """
-  fn offer_role(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String, my_role : Int,
+  fn offer_role(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+           roles : List((String, Int)), my_role : Int,
            peers : List(Int), capacity : Int, on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result(Offer, RunError) do
-    offer_with(node, proto, fingerprint, my_role, capacity,
-               fn (sid, abandoned) -> run_cluster_with(io, node, my_role, peers, sid, on_close, body, abandoned))
+    let holders = ap_holder_check(node, proto, roles)
+    offer_with(node, proto, fingerprint, roles, my_role, capacity,
+               fn (sid, abandoned) -> run_cluster_with(io, node, my_role, peers, sid, on_close, body, abandoned, holders))
   end
 
   doc """
@@ -2464,27 +2560,44 @@ mod SessionNode do
   if it dies, every session it hosts ends with `HostGone`. The generated
   `<P>_Run.offer_hosted_<Role>` supplies the protocol, role and peers.
   """
-  fn offer_hosted(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String, my_role : Int,
+  fn offer_hosted(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+                  roles : List((String, Int)), my_role : Int,
                   peers : List(Int), capacity : Int, on_close : Int -> Unit, host : Int,
                   start : String -> Cap(Session.Live) -> Unit,
                   deliver : String -> Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
                   cancel : String -> Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result(Offer, RunError) do
-    offer_with(node, proto, fingerprint, my_role, capacity, fn (sid, abandoned) ->
+    let holders = ap_holder_check(node, proto, roles)
+    offer_with(node, proto, fingerprint, roles, my_role, capacity, fn (sid, abandoned) ->
       run_cluster_hosted_with(io, node, my_role, peers, sid, on_close, host,
                               fn s -> start(sid, s),
                               fn (s, from, msg, ep) -> deliver(sid, s, from, msg, ep),
                               fn (s, role, cause, ep) -> cancel(sid, s, role, cause, ep),
-                              abandoned))
+                              abandoned, holders))
   end
 
   -- The offer itself: an actor that answers invitations and runs each
   -- accepted session through [start] (under its sid, abandoned once the
   -- second argument says so), routed and registered under the offer's name.
-  pfn offer_with(node : Cap(ClusterNode.Live), proto : String, fingerprint : String, my_role : Int, capacity : Int,
+  --
+  -- In certificate mode a node whose own certificate does not name
+  -- "Proto.Role:offer" does not open the offer (`Unauthorized`): every initiator
+  -- would skip it anyway (`candidates`), and this says why at the source.
+  pfn offer_with(node : Cap(ClusterNode.Live), proto : String, fingerprint : String, roles : List((String, Int)),
+                 my_role : Int, capacity : Int,
+                 start : String -> (Int -> Bool) -> Result(Session.Outcome, RunError)) : Result(Offer, RunError) do
+    match ClusterNode.authorize_peer(node, ClusterNode.node_id(node), proto, SessionAP.role_name(roles, my_role), SessionAP.offer_mode()) do
+      Err(why) -> Err(Unauthorized(my_role, "this node " ++ why ++ " (its certificate lacks "
+                                            ++ SessionAP.permission(proto, SessionAP.role_name(roles, my_role), SessionAP.offer_mode()) ++ ")"))
+      Ok(_) -> open_offer(node, proto, fingerprint, roles, my_role, capacity, start)
+    end
+  end
+
+  pfn open_offer(node : Cap(ClusterNode.Live), proto : String, fingerprint : String, roles : List((String, Int)),
+                 my_role : Int, capacity : Int,
                  start : String -> (Int -> Bool) -> Result(Session.Outcome, RunError)) : Result(Offer, RunError) do
     let a = spawn(OfferActor)
     let tag = proto ++ "." ++ int_to_string(my_role) ++ "." ++ int_to_string(pid_to_int(a))
-    let o = { node: node, proto: proto, fingerprint: fingerprint, my_role: my_role, capacity: capacity,
+    let o = { node: node, proto: proto, fingerprint: fingerprint, my_role: my_role, roles: roles, capacity: capacity,
               name: ap_prefix(proto, my_role) ++ ClusterNode.node_id(node),
               flags: Vault.new("session_ap_flags_" ++ tag), strs: Vault.new("session_ap_strs_" ++ tag),
               start: start, worker: a }
@@ -2537,21 +2650,37 @@ mod SessionNode do
   -- connected to: the registry can show a name (learnt through a third node)
   -- before the two nodes have a connection, and a session between them
   -- needs one.
-  pfn candidates(node : Cap(ClusterNode.Live), proto : String, role : Int, used : List(String), n : Int)
-      : List(GlobalPid.Pid) do
+  --
+  -- In certificate mode an offer is a candidate only if the node HOLDING it
+  -- (the binding's node, which is where the invitation goes) has a
+  -- certificate naming "Proto.Role:offer" (step 11b): offer names are
+  -- registry names any member can write, so the registry entry proves
+  -- nothing. The second result lists the offers skipped for that, "; "-
+  -- separated, for NoOffer's reasons.
+  pfn candidates(node : Cap(ClusterNode.Live), proto : String, names : List((String, Int)), role : Int,
+                 used : List(String), n : Int) : (List(GlobalPid.Pid), String) do
     let prefix = ap_prefix(proto, role)
     let found = List.filter_map(ClusterNode.names(node), fn name ->
       if String.starts_with(name, prefix) do ClusterNode.lookup(node, name) else None end)
     let fresh = List.filter(found, fn g ->
       List.member(used, g.node_id) == false && ClusterNode.queue_for(node, g.node_id) != None)
+    let rname = SessionAP.role_name(names, role)
+    let denied = List.filter_map(fresh, fn g ->
+      match ClusterNode.authorize_peer(node, g.node_id, proto, rname, SessionAP.offer_mode()) do
+        Ok(_) -> None
+        Err(why) -> Some(node_label(node, g.node_id) ++ " " ++ why ++ ", not invited")
+      end)
+    let allowed = List.filter(fresh, fn g ->
+      Result.is_ok(ClusterNode.authorize_peer(node, g.node_id, proto, rname, SessionAP.offer_mode())))
     let me = ClusterNode.node_id(node)
-    let local = List.filter(fresh, fn g -> g.node_id == me)
-    let remote = List.filter(fresh, fn g -> g.node_id != me)
+    let local = List.filter(allowed, fn g -> g.node_id == me)
+    let remote = List.filter(allowed, fn g -> g.node_id != me)
     let k = List.length(remote)
-    if k == 0 do local else
+    let ordered = if k == 0 do local else
       let r = n % k
       List.append(local, List.append(List.drop(remote, r), List.take(remote, r)))
     end
+    (ordered, String.join(denied, "; "))
   end
 
   -- Wait up to [left] ms for [nid]'s answer: Some(verdict), or None.
@@ -2568,10 +2697,20 @@ mod SessionNode do
     end
   end
 
-  -- A node's name for messages, falling back to its id.
+  -- A node's name for messages: its member name, else (certificate mode)
+  -- the name its verified certificate gives, else its id.
   pfn node_label(node : Cap(ClusterNode.Live), node_id : String) : String do
     match ClusterNode.name_of(node, node_id) do
-      Some(nm) -> nm
+      Some(nm) -> if nm == "" || nm == node_id do cert_label(node, node_id) else nm end
+      None -> cert_label(node, node_id)
+    end
+  end
+
+  pfn cert_label(node : Cap(ClusterNode.Live), node_id : String) : String do
+    match ClusterNode.peer_cert(node, node_id) do
+      Some(c) ->
+        let nm = NodeCert.node_name(c.node)
+        if nm == "" do node_id else nm end
       None -> node_id
     end
   end
@@ -2589,7 +2728,7 @@ mod SessionNode do
   -- forward, which ASAN caught here as a use-after-free on `why`
   -- (specs/todos/2026-09-20-mutual-tco-borrowed-forwarded-arg.md). Keep it
   -- self-recursive until that is fixed.
-  pfn invite_role(node : Cap(ClusterNode.Live), sid : String, fp : String, reply : GlobalPid.Pid,
+  pfn invite_role(node : Cap(ClusterNode.Live), sid : String, fp : String, reply : GlobalPid.Pid, irole : Int,
                   answers : Vault(String), budget : Vault(Int), cands : List(GlobalPid.Pid), why : String)
       : Result(GlobalPid.Pid, String) do
     match cands do
@@ -2598,7 +2737,7 @@ mod SessionNode do
         if Vault.get_or(budget, "left", 0) <= 0 do Err(and_why(why, "no answer within the setup time"))
         else
           -- Ok(None) accepts; Ok(Some(reason)) moves on to the next candidate.
-          let outcome = match ClusterNode.send_msg(node, g, "SessionAP.Invite", encode_invite(sid, fp, reply), NodeQueue.Unbounded) do
+          let outcome = match ClusterNode.send_msg(node, g, "SessionAP.Invite", encode_invite(sid, fp, reply, irole), NodeQueue.Unbounded) do
             Err(_) -> Some(node_label(node, g.node_id) ++ " is unreachable")
             Ok(_) ->
               match await_answer(answers, g.node_id, budget) do
@@ -2612,7 +2751,7 @@ mod SessionNode do
           end
           match outcome do
             None -> Ok(g)
-            Some(reason) -> invite_role(node, sid, fp, reply, answers, budget, rest, and_why(why, reason))
+            Some(reason) -> invite_role(node, sid, fp, reply, irole, answers, budget, rest, and_why(why, reason))
           end
         end
     end
@@ -2629,17 +2768,23 @@ mod SessionNode do
   -- one session, the initiator's own included -- each party is its own
   -- endpoint, and frames between two on one node take the loopback link --
   -- so [used] (nodes to skip) is empty unless a caller wants otherwise.
-  pfn fill_roles(node : Cap(ClusterNode.Live), proto : String, sid : String, fp : String, reply : GlobalPid.Pid,
+  -- [names] is the protocol's role-name table, [irole] the initiator's role
+  -- (both for the certificate checks: `candidates`, and the invitation).
+  pfn fill_roles(node : Cap(ClusterNode.Live), proto : String, names : List((String, Int)), irole : Int,
+                 sid : String, fp : String, reply : GlobalPid.Pid,
                  answers : Vault(String), budget : Vault(Int), roles : List(Int), n : Int,
                  used : List(String), accepted : List(GlobalPid.Pid))
       : Result(List(GlobalPid.Pid), (Int, String, List(GlobalPid.Pid))) do
     match roles do
       Nil -> Ok(accepted)
       Cons(r, rest) ->
-        match invite_role(node, sid, fp, reply, answers, budget, candidates(node, proto, r, used, n), "") do
-          Err(why) -> Err((r, why, accepted))
-          Ok(g) -> fill_roles(node, proto, sid, fp, reply, answers, budget, rest, n,
-                              used, Cons(g, accepted))
+        match candidates(node, proto, names, r, used, n) do
+          (cands, skipped) ->
+            match invite_role(node, sid, fp, reply, irole, answers, budget, cands, skipped) do
+              Err(why) -> Err((r, why, accepted))
+              Ok(g) -> fill_roles(node, proto, names, irole, sid, fp, reply, answers, budget, rest, n,
+                                  used, Cons(g, accepted))
+            end
         end
     end
   end
@@ -2655,9 +2800,17 @@ mod SessionNode do
   (MARCH_SESSION_CONNECT_MS, 20 s). Then runs [body] as `run_cluster` does.
   `Err(NoOffer(role, why))` if a role could not be filled; the offers that
   had accepted are withdrawn. The generated `<P>_Run.initiate_<Role>`
-  supplies the protocol, role, peers and other roles.
+  supplies the protocol, its role-name table [roles], the role, peers and
+  other roles.
+
+  In certificate mode (step 11b) an offer whose node's certificate does not
+  name "Proto.Role:offer" is skipped before any invitation and listed in
+  NoOffer's reasons; each offer checks this node's certificate names
+  "Proto.Role:initiate" for [my_role] and refuses otherwise; and once formed,
+  every role's endpoint must be on a node certified for that role.
   """
-  fn initiate(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String, my_role : Int,
+  fn initiate(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+              roles : List((String, Int)), my_role : Int,
               peers : List(Int), others : List(Int), on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
       : Result(Session.Outcome, RunError) do
     let n = ClusterNode.next_id(node, "ap_sessions")
@@ -2669,7 +2822,7 @@ mod SessionNode do
     Vault.set(budget, "left", if t > 0 do t else 3600000 end)
     let key = ClusterNode.route(node, pid_to_int(inbox), fn d -> inbox_frame(answers, sid, d))
     let reply = ClusterNode.global_pid(node, pid_to_int(inbox))
-    let filled = fill_roles(node, proto, sid, fingerprint, reply, answers, budget, others, n, Nil, Nil)
+    let filled = fill_roles(node, proto, roles, my_role, sid, fingerprint, reply, answers, budget, others, n, Nil, Nil)
     ClusterNode.unroute(node, key)
     -- The inbox has answered its one purpose; left alive it was one actor
     -- leaked per initiated session.
@@ -2678,7 +2831,8 @@ mod SessionNode do
       Err((role, why, accepted)) ->
         withdraw_all(node, sid, accepted)
         Err(NoOffer(role, why))
-      Ok(_) -> run_cluster(io, node, my_role, peers, sid, on_close, body)
+      Ok(_) -> run_cluster_with(io, node, my_role, peers, sid, on_close, body, fn _ -> false,
+                                ap_holder_check(node, proto, roles))
     end
   end
 end

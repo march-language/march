@@ -177,6 +177,10 @@ let stdlib_file_list = [
   (* Session transport capability (proof cap + dictionary). References
      Bytes, so it must sit after bytes.march. *)
   "session.march";
+  (* the access-point authorization check (dd step 11b): after node_cert,
+     BEFORE cluster_node (authorize_peer) and session_node, whose offers
+     and initiators call it. *)
+  "session_ap.march";
   (* the cluster node service: one running node over SWIM, the per-peer
      connection pairs and the registry replica; after swim_driver,
      net_kernel, peer_reader, global_registry, node_queue, dist_link and

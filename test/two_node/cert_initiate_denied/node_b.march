@@ -1,0 +1,63 @@
+-- Two-node harness, scenario "cert_initiate_denied": node-b, whose
+-- certificate names Checkout.Ledger:offer. See scenario.sh.
+mod CertInitiateDeniedB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+  needs Session.Live
+
+  @[endpoints]
+  protocol Checkout do
+    Client -> Ledger : Int
+    Ledger -> Client : Int
+  end
+
+  pfn me() : String do "node-b" end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn ledger(s : Cap(Session.Live), st : Checkout_Ledger.S_recv_Msg_Client_Ledger_1, served : Vault(Int)) : Checkout_Ledger.Yield do
+    Checkout_Ledger.recv_Msg_Client_Ledger_1(s, st, fn (n, st1) ->
+      let _ = Vault.incr(served, "n", 1)
+      Checkout_Ledger.close(s, Checkout_Ledger.send_Msg_Ledger_Client_1(s, st1, n)))
+  end
+
+  fn main(c : Cap(IO)) do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_NAME", me())
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int("MARCH_PORT_B")))
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
+    let cfg = match ClusterNode.config_from_env() do
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    end
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let served = Vault.new("cert_initiate_denied_served")
+        match Checkout_Run.offer_Ledger(c, h, 4, fn (s, st) -> ledger(s, st, served)) do
+          Ok(_) -> println(me() ++ ": offering Checkout.Ledger")
+          Err(e) -> panic(Checkout_Run.error_message(e))
+        end
+        println(me() ++ ": up")
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        println(me() ++ ": sessions served: " ++ int_to_string(Vault.get_or(served, "n", 0)))
+        ClusterNode.stop(h)
+        println(me() ++ ": done")
+    end
+  end
+end

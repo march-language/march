@@ -1791,8 +1791,9 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
      initiator invites it, each run by [body] in its own task.  And
      `initiate_<Role>(io, node, body)`: start one session in [Role], filling
      every other role from the access points that offer it.  Both are
-     `SessionNode.offer_role` / `initiate`; the front supplies the protocol's name
-     and fingerprint, the role, its peers and the other roles.  Design:
+     `SessionNode.offer_role` / `initiate`; the front supplies the protocol's name,
+     fingerprint and role-name table (what node certificates name roles by,
+     dd step 11b), the role, its peers and the other roles.  Design:
      specs/2026-09-19-choreography-access-points-and-crash-branches-design.md. *)
   let offers =
     List.map
@@ -1802,7 +1803,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
              ("capacity", t_int); ("body", t_body role entry) ]
            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_role"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_names") [];
+                app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; call_body role ]))
       roles
   in
@@ -1813,7 +1815,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("body", t_body role entry) ]
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.initiate"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_names") [];
+                app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; app (msg ^ ".others_" ^ role) []; lam [ "_ep" ] unit; call_body role ]))
       roles
   in
@@ -1899,7 +1902,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
             @ hosted_callbacks role)
            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_hosted"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_names") [];
+                app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ];
                 start_sid_of role; var "deliver"; var "cancel" ]))
       roles

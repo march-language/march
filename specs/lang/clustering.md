@@ -277,10 +277,9 @@ peer's signature under the key its certificate names. `NodeCert.verify(cert,
 operator_pubkey, now)` is the certificate check on its own.
 
 A verified certificate stays with its peer: `ClusterNode.peer_cert(c, node_id)`
-returns it (`ClusterConn.peer_cert` for direct connections). The roles and the
-`raw_send` flag are not enforced yet. Checking an offer or an initiation against
-the certificate's roles, and refusing raw sends without the flag, is the next
-step of the design.
+returns it (`ClusterConn.peer_cert` for direct connections), and
+`ClusterNode.own_cert(c)` returns the node's own. What a node may do with its
+roles and flags is in [Authorization](#authorization) below.
 
 ### Per-frame MAC
 
@@ -330,8 +329,8 @@ n)`).
 ### Threat model
 
 Certificates limit what a misbehaving *member* can do on a trusted network:
-who may join, and, once roles are enforced, which conversations each node may
-take part in. They do not provide confidentiality, availability against a
+who may join, and which conversations each node may take part in (see
+[Authorization](#authorization)). They do not provide confidentiality, availability against a
 member that lies in SWIM gossip, or protection inside a node that runs foreign
 code.
 
@@ -371,6 +370,57 @@ match ClusterConn.listen(9000) do
   Err(e) -> ...
 end
 ```
+
+---
+
+## Authorization
+
+In certificate mode a node checks what each peer's certificate lets it do, not
+only who the peer is. Every check below applies **in certificate mode only**. A
+shared-secret cluster has no certificates: any node holding the secret may
+offer or initiate any role, so a shared-secret cluster should be one where
+every node is equally trusted.
+
+### Roles: who may form a session
+
+A certificate names the protocol roles its node may play, as
+`Proto.Role:offer` (it may offer the role at an access point) and
+`Proto.Role:initiate` (it may start a session in the role). When a session
+forms at access points, both sides check
+([Choreography: access points]({{ site.baseurl }}/docs/choreography/#access-points-many-sessions-and-starting-again)):
+
+| who checks | what | on failure |
+|---|---|---|
+| the initiator, before inviting | the certificate of the node that **holds** each offer names `Proto.Role:offer` | the offer is skipped; `NoOffer`'s reasons say `node-b not authorized for Checkout.Ledger, not invited` |
+| the offer, on each invitation | the certificate of the node the invitation came from names `Proto.Role:initiate` for the role it plays | the offer refuses: `initiator node-a not authorized for Checkout.Client` |
+| each party, once the session forms | every role's endpoint is on a node whose certificate allows that role | `Connect(role, "... is held by node-c: not authorized for ...")` |
+| a node, opening an offer | its own certificate names `Proto.Role:offer` | `Err(Unauthorized(role, why))` |
+
+The checks read the certificate the node verified in its handshake with that
+peer. They never trust the registry: offer names and session names are
+registry names that any member can write, and the node an invitation came from
+is the link it arrived on (`NodeSend.Delivery.from_node`), not anything in the
+frame. The pure check is `SessionAP.authorize(cert, proto, role, mode)`, and
+`ClusterNode.authorize_peer(c, node_id, proto, role, mode)` applies it to a
+peer (always `Ok` in shared-secret mode).
+
+### What authorization does not cover
+
+Authorization is about **authority**: which conversations a misbehaving member
+can join, and so, since every message in a session is checked against the
+protocol, what it can say. It is not about availability or confidentiality:
+
+- A member can still lie in SWIM gossip, refuse to answer, or drop what it
+  receives.
+- Frames are not encrypted. The per-frame MAC stops a party without the
+  connection's key from changing or injecting frames, but anyone on the path can
+  read them.
+- Nothing constrains what code inside a node does, including foreign code
+  (`IO.Foreign`). Isolate such code on its own node, whose certificate names
+  only the roles it needs.
+- A node's messages are untrusted input. Payload refinements on message types
+  are checked by the receiver, and are a security boundary as well as a
+  correctness one.
 
 ---
 

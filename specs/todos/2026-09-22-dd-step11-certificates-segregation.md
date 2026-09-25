@@ -12,11 +12,12 @@ Every certificate-mode peer's verified certificate is available as
 
 **What remains (11b, the authorization half, after D27 lands):**
 
-- The two-way role check in `offer_verdict` and `fill_roles`
-  (stdlib/session_node.march): an offer checks the initiator's certificate
-  names `Proto.Role:initiate` for the role it plays, and the initiator checks
-  each offering node's certificate names `Proto.Role:offer` for the role it
-  offers.
+- ~~The two-way role check in `offer_verdict` and `fill_roles`~~ **done**
+  (2026-09-25): `SessionAP.authorize` (stdlib/session_ap.march);
+  `offer_verdict` checks the initiator by `Delivery.from_node`, `candidates`
+  checks each offer's holder, and an access point's session checks every
+  role's registry holder. Tests: `test/session/cert_authz.march` (fake
+  `ClusterOps`), two-node `cert_role_denied` and `cert_initiate_denied`.
 - Raw-send denial in `ClusterNode.send_msg` and `route` against the peer's
   certificate `raw_send` flag.
 - Cross-node references (`GlobalPid.make`, `GlobalRegistry.lookup`) checked

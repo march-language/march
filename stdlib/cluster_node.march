@@ -1159,7 +1159,8 @@ mod ClusterNode do
                   downs : Vault(DistLink.DownReason -> Unit), fired : Vault(List(Int)),
                   failed : Vault(Int -> String -> Unit),
                   certs : Vault(NodeCert.Cert), sec : Vault(SecurityEvent -> Unit),
-                  revs : Vault(NodeCert.Revocation), op_pub : Bytes }
+                  revs : Vault(NodeCert.Revocation), op_pub : Bytes,
+                  own : Option(NodeCert.Cert) }
 
   -- Watches one registered process: its `Down` unregisters its names. `Down`
   -- is a raw mailbox message, so the watcher reads it with `receive` (the
@@ -1194,7 +1195,7 @@ mod ClusterNode do
                  failed: Vault.new("cluster_node_unset_failed"),
                  certs: Vault.new("cluster_node_unset_certs"),
                  sec: Vault.new("cluster_node_unset_sec"),
-                 revs: Vault.new("cluster_node_unset_revs"), op_pub: Bytes.empty() },
+                 revs: Vault.new("cluster_node_unset_revs"), op_pub: Bytes.empty(), own: None },
             started: false }
     on Boot(st0 : CnState, h0 : CnHandle) do
       { st: st0, h: h0, started: true }
@@ -1611,7 +1612,9 @@ mod ClusterNode do
       if tag == NodeSend.tag_actor_msg() do
         match NodeSend.decode_msg(frame) do
           Err(_) -> ()
-          Ok(d) ->
+          Ok(d0) ->
+            -- The sender is the link's verified peer, never a claim in the frame.
+            let d = { d0 with from_node: l.node_id }
             announce_consumed(h, l, List.length(frame) + 4)
             -- The delivery's origin rides the mailbox node of whatever the
             -- route sends (DD step-6 follow-up 1): an actor that later drops
@@ -1841,6 +1844,7 @@ mod ClusterNode do
     monitor_remote     : GlobalPid.Pid -> (DistLink.DownReason -> Unit) -> Result(Int, String),
     demonitor_remote   : GlobalPid.Pid -> Int -> (),
     peer_cert          : String -> Option(NodeCert.Cert),
+    own_cert           : () -> Option(NodeCert.Cert),
     frames_rejected    : () -> Int,
     revoke             : String -> Result((), String),
     revocations        : () -> List(NodeCert.Revocation),
@@ -1898,6 +1902,7 @@ mod ClusterNode do
       monitor_remote: fn (_, _) -> unsupported("monitor_remote"),
       demonitor_remote: fn (_, _) -> unsupported("demonitor_remote"),
       peer_cert: fn _ -> unsupported("peer_cert"),
+      own_cert: fn _ -> None,
       frames_rejected: fn _ -> unsupported("frames_rejected"),
       revoke: fn _ -> unsupported("revoke"),
       revocations: fn _ -> unsupported("revocations"),
@@ -1936,6 +1941,7 @@ mod ClusterNode do
       monitor_remote: fn (target, on_down) -> h_monitor_remote(h, target, on_down),
       demonitor_remote: fn (target, r) -> Vault.drop(h.downs, mkey(target.node_id, target.local_pid) ++ int_to_string(r)),
       peer_cert: fn id -> Vault.get(h.certs, id),
+      own_cert: fn _ -> h.own,
       frames_rejected: fn _ -> Vault.get_or(h.meta, "frames_rejected", 0),
       revoke: fn token -> h_revoke(h, token),
       revocations: fn _ -> List.map(Vault.all(h.revs), fn kv -> match kv do (_k, r) -> r end),
@@ -2083,7 +2089,8 @@ mod ClusterNode do
       Some((body, _)) ->
         match NodeSend.decode_msg(body) do
           Err(_) -> ()
-          Ok(d) ->
+          Ok(d0) ->
+            let d = { d0 with from_node: h.node_id }
             -- A negative origin: the loopback, whose failures go to this
             -- node's own handler (see `delivery_failed_hook`).
             delivery_origin_set(0 - 1, d.seq)
@@ -2217,6 +2224,10 @@ mod ClusterNode do
                   op_pub: match operator_key(cfg) do
                     Some(k) -> k
                     None -> Bytes.empty()
+                  end,
+                  own: match cfg.auth do
+                    ClusterAuth.Certified(cr) -> Some(cr.signed.cert)
+                    ClusterAuth.Secret(_) -> None
                   end,
                   subs: Vault.new("cluster_node_subs_" ++ tag),
                   meta: Vault.new("cluster_node_meta_" ++ tag) }
@@ -2503,6 +2514,42 @@ mod ClusterNode do
   fn peer_cert(c : Cap(ClusterNode.Live), node_id : String) : Option(NodeCert.Cert) do
     let d = ops(c)
     d.peer_cert(node_id)
+  end
+
+  doc """
+  This node's own certificate (certificate mode), or None (shared-secret
+  mode). `ops_stub`'s answer is None, a shared-secret node: every step-11b
+  check is off unless a test overrides it.
+  """
+  fn own_cert(c : Cap(ClusterNode.Live)) : Option(NodeCert.Cert) do
+    let d = ops(c)
+    d.own_cert(())
+  end
+
+  doc """
+  Is this node in certificate mode? Every authorization check (the two-way
+  role check at session formation, raw-send denial, registry visibility)
+  applies only then; a shared-secret node checks nothing, as before step 11b.
+  """
+  fn certified(c : Cap(ClusterNode.Live)) : Bool do own_cert(c) != None end
+
+  doc """
+  May a node that presented [cert] play role [role] of protocol [proto] in
+  [mode] ("offer" or "initiate")? Always Ok on a shared-secret node; on a
+  certificate node, `SessionAP.authorize` against the peer's certificate
+  (None: the peer presented none). What SessionNode's access points check
+  when a session forms.
+  """
+  fn authorize_peer(c : Cap(ClusterNode.Live), id : String, proto : String, role : String,
+                    mode : String) : Result((), String) do
+    if certified(c) do SessionAP.authorize(peer_or_own_cert(c, id), proto, role, mode)
+    else Ok(()) end
+  end
+
+  -- The certificate of [node_id]: this node's own for its own id (the
+  -- loopback: an initiator inviting an offer on its own node), else the peer's.
+  pfn peer_or_own_cert(c : Cap(ClusterNode.Live), id : String) : Option(NodeCert.Cert) do
+    if id == node_id(c) do own_cert(c) else peer_cert(c, id) end
   end
 
   doc """
