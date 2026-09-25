@@ -100,4 +100,40 @@ the new version is what runs (`v2 probe 9 sees created=1` in the repro;
 
 ## The boundary cost, re-measured (G1's benchmarks, compiled `--opt 2`)
 
-BENCH_TABLE
+Same box as G1 (the 14-core Apple-silicon Mac), 2026-09-25, five interleaved
+rounds after one untimed execution of every binary; **every sample started at a
+1-minute load average between 4.67 and 4.98** (the gate was 5; G1 had to settle
+for 6.5–7.7). Three compilers-worth of binaries: `plain` (no `--hot-reload`),
+`hr_old` (origin/main `ee0413cf4`, the caller-AND-callee rule) and `hr_new`
+(this branch), each compiler compiling its own runtime and stdlib, from fresh
+directories with a fresh `HOME`. Medians, wall seconds, `[min–max]`; the
+percentage is against `plain`; CPU is median user / system.
+
+| benchmark | variant | median wall | min-max | vs plain | user/sys |
+|---|---|---:|---|---:|---|
+| list_ops_nested | plain | 0.096 | 0.096-0.102 | +0.0% | 0.077/0.031 |
+| list_ops_nested | hr_old | 0.097 | 0.096-0.105 | +1.5% | 0.078/0.031 |
+| list_ops_nested | hr_new | 0.100 | 0.097-0.106 | +4.3% | 0.078/0.032 |
+| actor_ping | plain | 2.864 | 2.657-3.011 | +0.0% | 0.647/1.391 |
+| actor_ping | hr_old | 1.345 | 1.327-1.354 | -53.0% | 0.637/0.880 |
+| actor_ping | hr_new | 1.361 | 1.344-1.379 | -52.5% | 0.643/0.892 |
+
+
+Static `march_dispatch_enter_unit` call sites in the binaries (`otool -tv`):
+`list_ops_nested` 8 (old rule) → 12 (new rule);
+`actor_ping` 3 → 7. The new sites are the
+entry module's and its closures' calls into `Ops.*` / `Game.*`, which the old rule
+compiled direct.
+
+**Delta.** `list_ops_nested`: `hr_new` reads +4.3 % against `plain` where `hr_old`
+reads +1.5 % (G1 measured +1.1 %), i.e. the rule change costs 3 ms on a 100 ms
+run whose round-to-round spread is 10 ms; in two of the five rounds the two
+hot-reload variants tied. A handful of extra dynamic dispatch calls per run
+(the entry's calls into `Ops`, once each) cannot cost 3 ms, so as in G1 this is
+layout or noise, not a per-call cost; it stays far below the 10 % threshold
+that would have forced Model B first. `actor_ping`: `hr_new` 1.361 s against
+`hr_old` 1.345 s (+1.2 %, inside the spread of both); the per-message boundary
+call was already dispatched under the old rule (`Game.relay` → `Game.step`), and
+the extra sites (`main` → `Game.*`, called once) are not on the hot path. The
+plain-versus-hot-reload gap on `actor_ping` (2.86 s vs 1.35 s) is G1's filed
+anomaly, unchanged.
