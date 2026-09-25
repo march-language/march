@@ -1,0 +1,43 @@
+-- Tests for the bare crypto builtins (not the Crypto module wrappers).
+-- Run with: dune exec march -- test test/stdlib/test_crypto_builtins.march
+--
+-- Regression for the `sha256` type/implementation mismatch fixed 2026-09-24:
+-- typecheck_builtins.ml declared `sha256 : Bytes -> Bytes` while the
+-- interpreter arm (Digestif.to_hex) and the native runtime both returned a
+-- lowercase hex String, so a Bytes-typed use of the digest typechecked and
+-- then failed at run time. The signature is now `Bytes -> String`; these
+-- tests use the result AS a String, which only typechecks under the fixed
+-- signature. The compiled path is covered by test/native/sha256_hex_string.
+
+mod TestCryptoBuiltins do
+
+describe "sha256 builtin" do
+
+  test "returns the FIPS 180-2 hex digest of \"abc\"" do
+    let d = sha256(Bytes.from_string("abc"))
+    assert (d == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+  end
+
+  test "result is a 64-char String (hex of 32 bytes), not the raw digest" do
+    let d = sha256(Bytes.from_string("abc"))
+    assert (string_length(d) == 64)
+    assert (String.slice(d, 0, 8) == "ba7816bf")
+  end
+
+  test "empty input hashes to the well-known e3b0c442 digest" do
+    let d = sha256(Bytes.empty())
+    assert (d == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+  end
+
+  test "agrees with Crypto.sha256 on the same input" do
+    assert (sha256(Bytes.from_string("hello world")) == Crypto.sha256("hello world"))
+  end
+
+  test "hmac_sha256_bytes is the raw-digest family: 32 Bytes, not hex" do
+    let mac = hmac_sha256_bytes(Bytes.from_string("k"), Bytes.from_string("abc"))
+    assert (Bytes.length(mac) == 32)
+  end
+
+end
+
+end
