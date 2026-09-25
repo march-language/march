@@ -12,6 +12,8 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- `forge run --processes` no longer occasionally assigns two pools the same cluster port (seen on Linux CI as `tcp_listen: bind failed`); the ports for all processes are now reserved together.
+
 - **Multi-threaded programs no longer occasionally abort with SIGTRAP (or a bare
   `Killed: 9`) at shutdown under load.** When a scheduler worker thread exited, a
   preemption tick already on its way could land inside the thread's teardown, and
@@ -20,7 +22,6 @@ git log is authoritative for exact commits.
   parallel load, with no output, and never reproduced on a rerun. Ticks that
   arrive after a thread has left its scheduler loop are now dropped, and worker
   threads block the tick signal before they exit.
-
 - **The bare `sha256` builtin now typechecks as `Bytes -> String`, matching what it
   has always returned** (a 64-char lowercase hex string, like `Crypto.sha256`,
   `md5` and `sha512`). It was declared `Bytes -> Bytes`, so `Bytes.length(sha256(b))`
