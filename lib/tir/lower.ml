@@ -244,7 +244,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   let rec collect_roles acc = function
     | [] -> acc
     | Ast.ProtoMsg (s, r, _, _) :: rest -> collect_roles (s.txt :: r.txt :: acc) rest
-    | Ast.ProtoLoop steps :: rest -> collect_roles (collect_roles acc steps) rest
+    | Ast.ProtoLoop (steps, _) :: rest -> collect_roles (collect_roles acc steps) rest
     | Ast.ProtoChoice (ch, branches) :: rest ->
       let branch_roles =
         List.concat_map (fun (_, steps) -> collect_roles [] steps) branches in

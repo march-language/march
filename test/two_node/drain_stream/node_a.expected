@@ -1,0 +1,7 @@
+node-a: up
+Prod sends 1
+Prod sends 2
+Prod sends 3
+Prod sends 4
+Prod drained, waiting on role 2; came back: 4
+Prod: Ok(Drained(1))

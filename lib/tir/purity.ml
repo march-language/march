@@ -88,7 +88,8 @@ let impure_named = [
   "register_supervisor"; "register_supervisor_child";
   (* reads of mutable runtime state: not to be CSE'd or reordered *)
   "self"; "is_alive"; "mailbox_size"; "get_actor_field"; "live_allocs"; "peak_rss_bytes";
-  "sched_stat";
+  "sched_stat"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn"; "epoch_holds";
+  "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch";
   (* control constructs over effectful thunks *)
   "try_finally"; "__try_call"; "__try_call_val"; "tap";
 ]

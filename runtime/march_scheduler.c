@@ -1031,6 +1031,18 @@ uint32_t march_sched_send_epoch(void) {
     return e ? e : march_epoch_current();
 }
 
+/* Follow-up 1: the origin of the remote delivery being routed on this
+ * thread, 0/0 when none is (see march_sched_delivery_origin_set). */
+static _Thread_local int64_t tl_origin_conn = 0, tl_origin_seq = 0;
+
+void march_sched_delivery_origin_set(int64_t conn, int64_t seq) {
+    tl_origin_conn = conn; tl_origin_seq = seq;
+}
+
+void march_sched_delivery_origin_clear(void) {
+    tl_origin_conn = 0; tl_origin_seq = 0;
+}
+
 static march_mbox_node *mbox_node_new(void *msg) {
     march_mbox_node *node = malloc(sizeof(march_mbox_node));
     if (!node) { fputs("march_sched: OOM (mbox node)\n", stderr); abort(); }
@@ -1038,6 +1050,8 @@ static march_mbox_node *mbox_node_new(void *msg) {
     node->next = NULL;
     node->epoch = march_sched_send_epoch();
     node->marker = 0;
+    node->origin_conn = tl_origin_conn;
+    node->origin_seq = tl_origin_seq;
     return node;
 }
 
@@ -1543,6 +1557,11 @@ __attribute__((weak)) uint32_t march_epoch_current(void) { return 1; }
 __attribute__((weak)) int      march_epoch_pin(uint32_t e) { (void)e; return 0; }
 __attribute__((weak)) void     march_epoch_unpin(uint32_t e) { (void)e; }
 
+void march_sched_hold_next_spawn(void) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    if (p) atomic_store_explicit(&p->hold_next_spawn, 1, memory_order_relaxed);
+}
+
 uint32_t march_sched_current_epoch(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     return p ? atomic_load_explicit(&p->code_epoch, memory_order_relaxed) : 0;
@@ -1652,6 +1671,15 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
      * supervisor restart), 0 = inherit (everything else). */
     atomic_init(&p->code_epoch,
                 follow_current == 1 ? 0u : spawn_code_epoch(follow_current == 0));
+    /* A spawn the spawner asked to start held (march_sched_hold_next_spawn):
+     * the hold is on the child before it can run, so its spawn marker, if
+     * any, is deferred like any other. */
+    {
+        march_proc *parent = tl_sched ? tl_sched->current : NULL;
+        if (parent && atomic_exchange_explicit(&parent->hold_next_spawn, 0,
+                                               memory_order_relaxed))
+            atomic_store_explicit(&p->epoch_holds, 1, memory_order_relaxed);
+    }
 
     registry_add(p);
     atomic_fetch_add_explicit(&g_live_procs, 1, memory_order_relaxed);
@@ -1800,6 +1828,10 @@ static void sched_loop(march_scheduler *sched) {
      * structs, mailbox nodes, March heap objects), which surfaced as wild
      * garbage ucontexts and heap-metadata crashes under actor churn. */
     march_tls_reductions = MARCH_REDUCTION_BUDGET;
+    /* From here until the end of this function the handler may write TLS.
+     * Same thread as the handler, so program order is the ordering that
+     * matters; release/acquire documents it. */
+    atomic_store_explicit(&sched->tls_live, 1, memory_order_release);
 
     tl_sched = sched;
     /* This thread is now a quiescent-state reader for march_reclaim: online,
@@ -2024,6 +2056,7 @@ static void sched_loop(march_scheduler *sched) {
              * thread resuming a process whose context isn't saved yet. */
             atomic_store_explicit(&p->status, PROC_WAITING, memory_order_release);
         } else if (st == PROC_DEAD) {
+            atomic_store_explicit(&p->hold_next_spawn, 0, memory_order_relaxed);
             registry_remove(p);
             /* The epoch pin taken at spawn (or moved there by an advance):
              * dropped exactly once, here.  The PROC_DEAD release store
@@ -2215,11 +2248,29 @@ static void sched_loop(march_scheduler *sched) {
     atomic_store_explicit(&sched->running, 0, memory_order_release);
     march_reclaim_sched_detach();
     tl_sched = NULL;
+    /* Past this point the handler must not touch TLS: a tick the daemon sent
+     * just before it saw running == 0 can still be delivered, and on a
+     * worker thread that delivery can land inside pthread_exit's TSD cleanup,
+     * where dyld has torn the TLV block down and a TLS access mallocs --
+     * inside whatever malloc the interrupted cleanup was in, which traps
+     * (specs/progress/2026-09-25-preempt-tick-at-thread-exit-sigtrap.md). */
+    atomic_store_explicit(&sched->tls_live, 0, memory_order_release);
 }
 
 static void *sched_thread_entry(void *arg) {
     march_scheduler *sched = (march_scheduler *)arg;
     sched_loop(sched);
+    /* A worker thread is about to exit: block the preemption signal so no
+     * tick is delivered to it at all during pthread_exit (a pending one is
+     * discarded with the thread).  tls_live already makes a delivery here
+     * harmless; this closes the window outright, including for a host
+     * handler we would chain to.  Worker threads only -- scheduler 0 is the
+     * caller's thread, whose mask must survive march_sched_run.  The
+     * handler's installation is untouched. */
+    sigset_t block;
+    sigemptyset(&block);
+    sigaddset(&block, march_preempt_signal());
+    pthread_sigmask(SIG_BLOCK, &block, NULL);
     return NULL;
 }
 
@@ -2590,6 +2641,7 @@ volatile _Thread_local int64_t march_tls_reductions = MARCH_REDUCTION_BUDGET;
 volatile int64_t march_preempt_request = 0;
 
 void march_yield_from_compiled(void) {
+    march_sched_cancel_point();
     /* Clear the request FIRST.  If we cleared it after yielding, this thread
      * would re-enter compiled code, immediately observe the still-set flag,
      * and yield again in a tight loop until the daemon happened to clear it. */
@@ -2600,6 +2652,7 @@ void march_yield_from_compiled(void) {
      * still be valid for future use (task_reductions() reads it). */
     march_tls_reductions = MARCH_REDUCTION_BUDGET;
     march_sched_yield();
+    march_sched_cancel_point();
 }
 
 /* Message disposer for dropped mailbox messages. The runtime registers a
@@ -3030,6 +3083,11 @@ int march_sched_send_marker(march_proc *target, void *msg, uint32_t epoch) {
  * the head node is taken even when it is a marker. */
 __attribute__((noinline))
 void *march_sched_recv_actor(uint32_t *epoch_out, int *marker_out) {
+    return march_sched_recv_actor_ex(epoch_out, marker_out, NULL, NULL);
+}
+
+void *march_sched_recv_actor_ex(uint32_t *epoch_out, int *marker_out,
+                                int64_t *conn_out, int64_t *seq_out) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return MARCH_RECV_NO_MSG;
     for (;;) {
@@ -3042,6 +3100,8 @@ void *march_sched_recv_actor(uint32_t *epoch_out, int *marker_out) {
             mbox_lock_release(p);
             if (epoch_out) *epoch_out = node->epoch;
             if (marker_out) *marker_out = node->marker;
+            if (conn_out) *conn_out = node->origin_conn;
+            if (seq_out) *seq_out = node->origin_seq;
             void *msg = node->msg;
             free(node);
             return msg;
@@ -3084,6 +3144,28 @@ int march_sched_take_markers(uint32_t upto, void **msgs, uint32_t *epochs,
     return n;
 }
 
+/* A task whose cancellation was requested (march_sched_stop_epoch) unwinds
+ * here to its trampoline's landing (march_proc.task_jmp), which completes
+ * its Task as cancelled.  Called only where no runtime state is held on the
+ * task's behalf: a compiled yield point, a sleep, a stopped receive.  A
+ * task parked in an fd wait, a task_await or an Actor.call is cancelled at
+ * its first cancellation point after that wait ends.
+ *
+ * noinline: this reads tl_sched and is called on BOTH sides of a migrating
+ * switch (march_yield_from_compiled, march_sleep_ms's loop).  Inlined, the
+ * optimizer hoists the TLS read across the switch, so the post-switch call
+ * sees the OLD OS thread's scheduler and longjmps into another proc's
+ * trampoline frame (same bug and same signature as the march_sched_yield
+ * note above: pc inside g_scheds, current == NULL on a proc stack; ~5-12%
+ * of test_hard_deadline_cancels_tasks runs at 14 schedulers, 0 at one). */
+__attribute__((noinline))
+void march_sched_cancel_point(void) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    if (p && p->task_jmp
+            && atomic_load_explicit(&p->cancel_requested, memory_order_acquire))
+        longjmp(*p->task_jmp, 1);
+}
+
 int64_t march_sched_stop_epoch(uint32_t upto) {
     int64_t n = 0;
     pthread_mutex_lock(&g_registry_mu);
@@ -3095,10 +3177,16 @@ int64_t march_sched_stop_epoch(uint32_t upto) {
         if (!ce || ce > upto) continue;
         if (atomic_load_explicit(&p->status, memory_order_acquire) == PROC_DEAD)
             continue;
+        /* A real cancel (follow-up 4): the stop ends a blocking receive, and
+         * cancel_requested unwinds a task at its next cancellation point. */
+        atomic_store_explicit(&p->cancel_requested, 1, memory_order_release);
         march_sched_request_stop(p);
         n++;
     }
     pthread_mutex_unlock(&g_registry_mu);
+    /* Make every running green thread reach a compiled yield point now, so a
+     * task computing without yielding meets its cancellation promptly. */
+    if (n > 0) march_preempt_request = 1;
     return n;
 }
 
@@ -3595,7 +3683,11 @@ static void timer_service(int64_t now_ms) {
  * delivery to this proc), so loop on the clock. */
 void march_sleep_ms(int64_t ms) {
     int64_t until = march_now_ms() + (ms > 0 ? ms : 0);
-    while (march_now_ms() < until) march_sched_park_self_until(until);
+    while (march_now_ms() < until) {
+        march_sched_cancel_point();
+        march_sched_park_self_until(until);
+    }
+    march_sched_cancel_point();
 }
 
 /* ── Phase 5A: signal-based preemption ───────────────────────────────── */
@@ -3895,8 +3987,9 @@ static void chain_prev_preempt_handler(int sig, siginfo_t *si, void *uctx) {
  * on Darwin the first TLS access on a thread mallocs (see sched_loop) -- not
  * async-signal-safe.  So: find this thread in g_scheds by pthread_self(), and
  * consume that scheduler's preempt_tick flag, which the daemon sets just
- * before it signals.  Only a scheduler thread (TLS already materialised in
- * sched_loop) with a pending tick writes TLS.
+ * before it signals.  Only a scheduler thread still inside sched_loop (its
+ * tls_live set: TLS materialised, not yet torn down) with a pending tick
+ * writes TLS.
  *
  * A delivery from another process (si_pid > 0 and != getpid()) is chained
  * without consulting the flag; that also covers a host signal that coalesced
@@ -3921,12 +4014,23 @@ static void march_preempt_signal_handler(int sig, siginfo_t *si, void *uctx) {
         if (pthread_equal(g_scheds[i].thread, me)) {
             if (atomic_exchange_explicit(&g_scheds[i].preempt_tick, 0,
                                          memory_order_acquire)) {
-                /* Both writes are async-signal-safe (volatile scalar stores).
-                 * march_preempt_request is what compiled code actually polls;
-                 * march_tls_reductions is kept in sync so task_reductions()
-                 * and any interpreter-side budget logic see a spent quantum. */
-                march_preempt_request = 1;
-                march_tls_reductions  = 0;
+                /* Our tick either way.  Only a thread still inside
+                 * sched_loop gets the writes: past it (worker exit, or
+                 * scheduler 0 after its loop) there is no quantum to end,
+                 * and during pthread_exit a TLS access mallocs, inside the
+                 * malloc the tick interrupted.  The skip path touches no
+                 * TLS and calls nothing. */
+                if (atomic_load_explicit(&g_scheds[i].tls_live,
+                                         memory_order_acquire)) {
+                    /* Both writes are async-signal-safe here (volatile scalar
+                     * stores, TLS already materialised).
+                     * march_preempt_request is what compiled code actually
+                     * polls; march_tls_reductions is kept in sync so
+                     * task_reductions() and any interpreter-side budget
+                     * logic see a spent quantum. */
+                    march_preempt_request = 1;
+                    march_tls_reductions  = 0;
+                }
                 ours = 1;
             }
             break;

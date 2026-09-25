@@ -1664,7 +1664,7 @@ let test_parse_protocol_loop () =
   match m.March_ast.Ast.mod_decls with
   | [March_ast.Ast.DProtocol (_, pdef, _)] ->
     (match pdef.March_ast.Ast.proto_steps with
-     | [March_ast.Ast.ProtoLoop [_]] -> ()
+     | [March_ast.Ast.ProtoLoop ([_], false)] -> ()
      | _ -> Alcotest.fail "expected ProtoLoop with one step")
   | _ -> Alcotest.fail "expected single DProtocol"
 

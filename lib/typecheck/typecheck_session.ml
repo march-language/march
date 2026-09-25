@@ -45,7 +45,7 @@ let rec project_steps env ~proto_name ~multiparty steps role cont =
           else SRecv (t, rest_ty ()))
        else
          rest_ty ()   (* This role doesn't participate in this step *)
-     | Ast.ProtoLoop inner_steps ->
+     | Ast.ProtoLoop (inner_steps, _) ->
        (* `loop do S end` is the µ-type `Rec X. S[X]` — the body's continuation
           IS the binder's back-reference, so the loop repeats indefinitely.
           (Substituting the post-loop continuation into the back-reference, as
@@ -144,7 +144,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
     | [] -> []
     | Ast.ProtoMsg (s, r, _, _) :: rest ->
       s.Ast.txt :: r.Ast.txt :: roles_of_steps rest
-    | Ast.ProtoLoop steps :: rest ->
+    | Ast.ProtoLoop (steps, _) :: rest ->
       roles_of_steps steps @ roles_of_steps rest
     | Ast.ProtoChoice (chooser, branches) :: rest ->
       chooser.Ast.txt ::
@@ -187,7 +187,7 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
          let tvars = ref [] in
          let ty = surface_ty env ~tvars t in
          gather_msgs ((s.Ast.txt, r.Ast.txt, ty) :: acc) rest
-       | Ast.ProtoLoop inner :: rest ->
+       | Ast.ProtoLoop (inner, _) :: rest ->
          gather_msgs (gather_msgs acc inner) rest
        | Ast.ProtoChoice (_, branches) :: rest ->
          let branch_msgs = List.concat_map (fun (_, steps) ->

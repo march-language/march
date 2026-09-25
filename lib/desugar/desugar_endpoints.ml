@@ -72,7 +72,9 @@ type lty =
           `choose by A` with a `crash` branch), and the crash continuation:
           what this role, the DETECTOR, does if [from] crashes before sending
           (2026-09-20 crash branches, design Part B). *)
-  | LRec    of string * lty
+  | LRec    of string * bool * lty
+      (** a loop: its variable, whether it is [atomic] (`loop atomic`: its
+          head is not a drain point, D27), its body *)
   | LVar    of string
   | LEnd
 
@@ -108,7 +110,7 @@ let rec lty_equal (a : lty) (b : lty) : bool =
          b1 b2
   | LOffer (r1, b1), LOffer (r2, b2) -> r1 = r2 && brs b1 b2
   | LRecvCrash (r1, b1, c1), LRecvCrash (r2, b2, c2) -> r1 = r2 && brs b1 b2 && lty_equal c1 c2
-  | LRec (x, s), LRec (y, t) -> x = y && lty_equal s t
+  | LRec (x, a, s), LRec (y, b, t) -> x = y && a = b && lty_equal s t
   | LVar x, LVar y -> x = y
   | LEnd, LEnd -> true
   | _ -> false
@@ -117,7 +119,7 @@ let rec lty_equal (a : lty) (b : lty) : bool =
 
 type astep =
   | AMsg    of string * string * ty * string        (** sender, receiver, payload, ctor *)
-  | ALoop   of astep list
+  | ALoop   of bool * astep list                     (** atomic (`loop atomic`), steps *)
   | AChoice of string * (string * astep list) list  (** chooser, (label, steps); a branch labelled `crash` is the chooser's crash branch *)
   | AStop
   | ACrashOr of astep * astep list                  (** an [AMsg] with its sender's crash branch *)
@@ -165,7 +167,7 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
     List.concat_map
       (function
         | ProtoMsg (s, r, t, label) -> [ AMsg (s.txt, r.txt, t, ctor_of s.txt r.txt label) ]
-        | ProtoLoop inner -> [ ALoop (go inner) ]
+        | ProtoLoop (inner, atomic) -> [ ALoop (atomic, go inner) ]
         | ProtoStop _ -> [ AStop ]
         (* `may crash` is a declaration, checked by the typechecker (rule 6);
            the roles it names reach [project] through [crashers_of]. *)
@@ -234,7 +236,7 @@ let crash_ctors_of (steps : astep list) (role : string) : string list =
   let rec go = function
     | [] -> ()
     | AMsg _ :: rest -> go rest
-    | ALoop inner :: rest -> go inner; go rest
+    | ALoop (_, inner) :: rest -> go inner; go rest
     | AStop :: rest -> go rest
     | ACrashOr (AMsg (s, _, _, ctor), crash) :: rest ->
       if s = role then acc := ctor :: !acc;
@@ -275,7 +277,7 @@ let roles_of (steps : astep list) : string list =
   let rec go = function
     | [] -> ()
     | AMsg (s, r, _, _) :: rest -> add s; add r; go rest
-    | ALoop inner :: rest -> go inner; go rest
+    | ALoop (_, inner) :: rest -> go inner; go rest
     | AChoice (c, brs) :: rest -> add c; List.iter (fun (_, arm) -> go arm) brs; go rest
     | AStop :: rest -> go rest
     | ACrashOr (m, crash) :: rest -> go [ m ]; go crash; go rest
@@ -292,7 +294,7 @@ let peers_of (steps : astep list) (roles : string list) (role : string) : string
   let rec go = function
     | [] -> ()
     | AMsg (s, r, _, _) :: rest -> pairs := (s, r) :: !pairs; go rest
-    | ALoop inner :: rest -> go inner; go rest
+    | ALoop (_, inner) :: rest -> go inner; go rest
     | AChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> go arm) brs; go rest
     | AStop :: rest -> go rest
     | ACrashOr (m, crash) :: rest -> go [ m ]; go crash; go rest
@@ -371,11 +373,11 @@ let rec project ~proto ~multiparty (steps : astep list) (role : string) (cont : 
      | ACrashOr (other, crash) ->
        (* Not a message (cannot be built by [annotate]); project what is there. *)
        project ~proto ~multiparty (other :: crash @ rest) role cont
-     | ALoop inner ->
+     | ALoop (atomic, inner) ->
        let x = proto ^ "_loop" in
        (match project ~proto ~multiparty inner role (LVar x) with
         | LVar _ -> rest_ty ()
-        | body -> LRec (x, body))
+        | body -> LRec (x, atomic, body))
      | AStop -> LEnd
      | AChoice (chooser, branches) ->
        let after = rest_ty () in
@@ -479,7 +481,7 @@ let state_names (root : lty) : (lty * string) list =
   let acc = ref [] in
   let rec go (t : lty) =
     match t with
-    | LRec (_, body) -> go body
+    | LRec (_, _, body) -> go body
     | LVar _ -> ()
     | LEnd -> if not (List.exists (fun (s, _) -> s == t) !acc) then acc := (t, fresh "S_end") :: !acc
     | LSend (_, ctor, _, next) -> acc := (t, fresh ("S_send_" ^ ctor)) :: !acc; go next
@@ -504,13 +506,13 @@ let state_names (root : lty) : (lty * string) list =
     [LEnd]s all share one name. *)
 let rec resolve (binders : (string * lty) list) (t : lty) : lty =
   match t with
-  | LRec (x, body) -> resolve ((x, body) :: binders) body
+  | LRec (x, _, body) -> resolve ((x, body) :: binders) body
   | LVar x -> (match List.assoc_opt x binders with Some b -> resolve binders b | None -> t)
   | _ -> t
 
 let rec binders_of (t : lty) acc =
   match t with
-  | LRec (x, body) -> binders_of body ((x, body) :: acc)
+  | LRec (x, _, body) -> binders_of body ((x, body) :: acc)
   | LSend (_, _, _, nx) | LRecv (_, _, _, nx) -> binders_of nx acc
   | LChoose brs -> List.fold_left (fun a (_, _, _, _, nx) -> binders_of nx a) acc brs
   | LOffer (_, brs) -> List.fold_left (fun a (_, _, _, nx) -> binders_of nx a) acc brs
@@ -539,7 +541,7 @@ let collect_ctors (errors : Err.ctx) ~proto ~span (steps : astep list) : (string
   let rec go = function
     | [] -> ()
     | AMsg (_, _, t, c) :: rest -> add c t; go rest
-    | ALoop inner :: rest -> go inner; go rest
+    | ALoop (_, inner) :: rest -> go inner; go rest
     | AChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> go arm) brs; go rest
     | AStop :: rest -> go rest
     | ACrashOr (m, crash) :: rest -> go [ m ]; go crash; go rest
@@ -654,7 +656,10 @@ let fingerprint_of ~proto ~(types : ty_defs) (roles : string list) (steps : aste
     | [] -> ()
     | AMsg (f, t, ty, c) :: rest ->
       Buffer.add_string b (Printf.sprintf "%s>%s:%s(%s);" f t c (ty_key ty)); go rest
-    | ALoop inner :: rest -> Buffer.add_string b "loop{"; go inner; Buffer.add_string b "}"; go rest
+    (* `loop atomic` is not in the digest: it decides only where the
+       RECEIVING role may end the session on a drain, which changes no
+       message, so two builds that differ only in it still interoperate. *)
+    | ALoop (_, inner) :: rest -> Buffer.add_string b "loop{"; go inner; Buffer.add_string b "}"; go rest
     | AChoice (by, brs) :: rest ->
       Buffer.add_string b ("choose " ^ by ^ "{");
       List.iter (fun (l, arm) -> Buffer.add_string b (l ^ "->"); go arm; Buffer.add_string b "|") brs;
@@ -763,6 +768,29 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
   let msg = proto ^ "_Msg" in
   let names = state_names root in
   let binders = binders_of root [] in
+  (* D27 drain points: the state at the head of every loop that is not
+     `loop atomic`.  A receive there is where an iteration BEGINS for this
+     role, so a transport whose epoch is draining may end the session at it
+     without handing user code a state it did not expect: the delivery is
+     not consumed but returned to its sender (plan 6.2, II.5.4).  Physical
+     equality, as [state_of]: the body node IS the state [state_names] named. *)
+  let boundary_heads =
+    let acc = ref [] in
+    let rec go (t : lty) =
+      match t with
+      | LRec (_, atomic, body) ->
+        if not atomic then acc := resolve binders body :: !acc;
+        go body
+      | LSend (_, _, _, nx) | LRecv (_, _, _, nx) -> go nx
+      | LChoose brs -> List.iter (fun (_, _, _, _, nx) -> go nx) brs
+      | LOffer (_, brs) -> List.iter (fun (_, _, _, nx) -> go nx) brs
+      | LRecvCrash (_, brs, crash) -> List.iter (fun (_, _, _, nx) -> go nx) brs; go crash
+      | LVar _ | LEnd -> ()
+    in
+    go root;
+    !acc
+  in
+  let at_boundary (node : lty) = List.exists (fun h -> h == node) boundary_heads in
   let state_of t =
     let t = resolve binders t in
     match List.find_opt (fun (s, _) -> s == t) names with
@@ -797,8 +825,11 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
      anyone else until the continuation that wants it is installed; a
      same-thread or two-party transport ignores it.  Passing 0 here would be
      the old "whoever speaks next", which reorders under a real network. *)
-  let suspend_with from ep arms =
-    app "Session.suspend"
+  (* [boundary]: this receive is a drain point (a loop head), and suspends
+     through `Session.suspend_at_boundary`, which a same-thread transport
+     treats as `suspend`. *)
+  let suspend_with ?(boundary = false) from ep arms =
+    app (if boundary then "Session.suspend_at_boundary" else "Session.suspend")
       [ var "s"; ep; role_idx from;
         lam [ "_from"; "msg"; "ep1" ]
           (match_ (app (msg ^ ".try_decode") [ var "msg" ])
@@ -845,6 +876,44 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
           [ { fld_name = n "role"; fld_ty = t_int; fld_lin = Unrestricted };
             { fld_name = n "cause"; fld_ty = t_string; fld_lin = Unrestricted } ],
         sp )
+  in
+  (* ── drains (D27, plan 6.2 and II.5.4) ──
+     A drain handler, like a cancel handler, gets NO session state: the role
+     that drained (0 when this role's own epoch is draining at a loop head),
+     the messages this role sent that came back undelivered, decoded, and a
+     [Drained_<Role>] token whose only use is `drained(s, d)`.  So it can
+     requeue the undelivered work elsewhere, but not communicate in the
+     drained session.  Installed per receive by the `_or_drain` forms; a
+     receive without one ends with the default, which is to finish. *)
+  let drained_name = "Drained_" ^ role in
+  let t_drained = tycon drained_name [] in
+  let drained_ty = DType (Public, n drained_name, [], TDVariant [ variant drained_name [ tycon "Secret" [] ] ], sp) in
+  let drained_fn =
+    fn "drained" [ ("s", t_cap_session); ("d", t_drained) ] t_yield
+      (match_ (var "d") [ (pcon drained_name [ PatWild sp ], block [ let_wild (var "s"); yield ]) ])
+  in
+  let t_msgs = tycon "List" [ tycon (msg ^ "." ^ proto ^ "_Message") [] ] in
+  let t_on_drain = TyArrow (t_int, TyArrow (t_msgs, TyArrow (t_drained, t_yield))) in
+  (* `Session.on_drain(s, ep, h)`: install the drain handler with the
+     continuation `suspend` installs next, and return [ep] (threaded, as
+     `on_cancel`).  An undelivered message that does not decode is left out:
+     the transport counts it all the same. *)
+  let with_drain ep =
+    app "Session.on_drain"
+      [ var "s"; ep;
+        lam [ "d_role"; "d_msgs"; "d_ep" ]
+          (block
+             [ let_wild
+                 (app "on_drain"
+                    [ var "d_role";
+                      app "List.filter_map"
+                        [ var "d_msgs";
+                          lam [ "d_b" ]
+                            (match_ (app (msg ^ ".try_decode") [ var "d_b" ])
+                               [ (pcon "Ok" [ pvar "d_m" ], con "Some" [ var "d_m" ]);
+                                 (pcon "Err" [ PatWild sp ], con "None" []) ]) ];
+                      con drained_name [ con "Secret" [] ] ]);
+               var "d_ep" ]) ]
   in
   (* `Session.on_crash(s, ep, role, h)` installs the crash continuation for
      [role] with the continuation that `suspend` installs next, and returns
@@ -910,16 +979,23 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
              brs
          | LRecv (from, ctor, payload, next) ->
            let nx = state_of next in
+           let boundary = at_boundary node in
            [ fn ("recv_" ^ ctor)
                [ ("s", t_cap_session); ("st", sty this); ("k", TyArrow (payload, TyArrow (sty nx, t_yield))) ]
                t_yield
-               (on_ep (block [ let_wild (suspend_with from (var "ep") [ (ctor, "k", nx) ]); yield ]));
+               (on_ep (block [ let_wild (suspend_with ~boundary from (var "ep") [ (ctor, "k", nx) ]); yield ]));
              (* the same receive, with a cancel handler *)
              fn ("recv_" ^ ctor ^ "_or")
                [ ("s", t_cap_session); ("st", sty this); ("k", TyArrow (payload, TyArrow (sty nx, t_yield)));
                  ("on_cancel", t_on_cancel) ]
                t_yield
-               (on_ep (block [ let_wild (suspend_with from (with_cancel (var "ep")) [ (ctor, "k", nx) ]); yield ])) ]
+               (on_ep (block [ let_wild (suspend_with ~boundary from (with_cancel (var "ep")) [ (ctor, "k", nx) ]); yield ]));
+             (* the same receive, with a drain handler (D27) *)
+             fn ("recv_" ^ ctor ^ "_or_drain")
+               [ ("s", t_cap_session); ("st", sty this); ("k", TyArrow (payload, TyArrow (sty nx, t_yield)));
+                 ("on_drain", t_on_drain) ]
+               t_yield
+               (on_ep (block [ let_wild (suspend_with ~boundary from (with_drain (var "ep")) [ (ctor, "k", nx) ]); yield ])) ]
          | LOffer (from, brs) ->
            let cbs = List.map (fun (lbl, ctor, payload, next) -> (lbl, ctor, payload, state_of next)) brs in
            let offer_name = "offer_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs) in
@@ -927,16 +1003,24 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
              List.map (fun (lbl, _, payload, nx) -> ("on_" ^ lbl, TyArrow (payload, TyArrow (sty nx, t_yield)))) cbs
            in
            let arms = List.map (fun (lbl, ctor, _, nx) -> (ctor, "on_" ^ lbl, nx)) cbs in
+           let boundary = at_boundary node in
            [ fn offer_name ([ ("s", t_cap_session); ("st", sty this) ] @ branch_params) t_yield
-               (on_ep (block [ let_wild (suspend_with from (var "ep") arms); yield ]));
+               (on_ep (block [ let_wild (suspend_with ~boundary from (var "ep") arms); yield ]));
              (* the same offer, with a cancel handler *)
              fn (offer_name ^ "_or")
                ([ ("s", t_cap_session); ("st", sty this) ] @ branch_params @ [ ("on_cancel", t_on_cancel) ])
                t_yield
-               (on_ep (block [ let_wild (suspend_with from (with_cancel (var "ep")) arms); yield ])) ]
+               (on_ep (block [ let_wild (suspend_with ~boundary from (with_cancel (var "ep")) arms); yield ]));
+             (* the same offer, with a drain handler (D27) *)
+             fn (offer_name ^ "_or_drain")
+               ([ ("s", t_cap_session); ("st", sty this) ] @ branch_params @ [ ("on_drain", t_on_drain) ])
+               t_yield
+               (on_ep (block [ let_wild (suspend_with ~boundary from (with_drain (var "ep")) arms); yield ])) ]
          | LRecvCrash (from, brs, crash) ->
            let cbs = List.map (fun (lbl, ctor, payload, next) -> (lbl, ctor, payload, state_of next)) brs in
            let crash_nx = state_of crash in
+           let boundary = at_boundary node in
+           let suspend_with = suspend_with ~boundary in
            let t_on_crash = TyArrow (t_crashed, TyArrow (sty crash_nx, t_yield)) in
            let arms = List.map (fun (lbl, ctor, _, nx) -> (ctor, "on_" ^ lbl, nx)) cbs in
            (match cbs with
@@ -1069,16 +1153,16 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
   let idle = fn "idle" [] t_parked (con idle_c [ secret_v ]) in
   (* Epoch holds (DD step 6, plan II.4.4, D28): a started endpoint keeps the
      HOSTING actor on the epoch the session formed in, so its parked state --
-     typed by that version's protocol -- is never resumed by newer code.  One
-     hold per started endpoint: taken here, when the actor starts it, and
-     released when it closes (`finish`, or `cancel` of a started one).  All
-     three run in the host actor's own turn, so the hold is on its proc.
-     Through `Session`: the builtins are stdlib-only. *)
+     typed by that version's protocol -- is never resumed by newer code.  The
+     TRANSPORT takes the hold at `register` and releases it at `close`, both
+     in the host actor's turn, whichever hosting pattern the actor uses
+     (`take_idle` then `register`, or `await_X(s, register(s, 0))` for many
+     sessions); a cancelled endpoint has no `close`, so `cancel` below
+     releases through `Session.release_epoch(s)`. *)
   let take_idle =
     fn "take_idle" [ ("p", t_parked) ] (TyTuple [])
       (match_ (var "p")
-         [ (pcon idle_c [ PatWild sp ],
-            block [ let_wild (app "Session.hold_epoch" []); ETuple ([], sp) ]);
+         [ (pcon idle_c [ PatWild sp ], ETuple ([], sp));
            (PatWild sp, panic (where ^ ": take_idle on an endpoint that was already started")) ])
   in
   (* `take_closed(p)`: retire a finished or cancelled endpoint.  Without it the
@@ -1091,7 +1175,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
          [ (pcon closed_c [ PatWild sp ], ETuple ([], sp));
            (PatWild sp, panic (where ^ ": take_closed on an endpoint that has not finished")) ])
   in
-  let await_fn ?(crash = false) ~from name this =
+  let await_fn ?(crash = false) ?(boundary = false) ~from name this =
     (* Suspend so the transport knows the endpoint awaits; the handler must
        never run -- the actor resumes the endpoint itself.  `ep` is bound from
        a linear scrutinee and inherits its linearity, so it is used ONCE:
@@ -1113,7 +1197,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
       (match_ (var "st")
          [ ( pcon this [ pvar "ep" ],
              con ("Awaiting_" ^ this)
-               [ app "Session.suspend"
+               [ app (if boundary then "Session.suspend_at_boundary" else "Session.suspend")
                    [ var "s"; on_crash (var "ep"); role_idx from;
                      lam [ "_from"; "_msg"; "_ep" ]
                        (panic (where ^ ": this endpoint is actor-hosted; deliver through `resume`, not the transport handler")) ];
@@ -1123,15 +1207,15 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
     List.concat_map
       (fun (node, this) ->
          match node with
-         | LRecv (from, ctor, _, _) -> [ await_fn ~from ("await_" ^ ctor) this ]
-         | LOffer (from, brs) -> [ await_fn ~from ("await_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs)) this ]
-         | LRecvCrash (from, brs, _) -> [ await_fn ~crash:true ~from ("await_" ^ crash_nm brs) this ]
+         | LRecv (from, ctor, _, _) -> [ await_fn ~boundary:(at_boundary node) ~from ("await_" ^ ctor) this ]
+         | LOffer (from, brs) ->
+           [ await_fn ~boundary:(at_boundary node) ~from ("await_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs)) this ]
+         | LRecvCrash (from, brs, _) -> [ await_fn ~crash:true ~boundary:(at_boundary node) ~from ("await_" ^ crash_nm brs) this ]
          | LEnd ->
            [ fn "finish" [ ("s", t_cap_session); ("st", sty this) ] t_parked
                (match_ (var "st")
                   [ (pcon this [ pvar "ep" ],
                      block [ let_wild (app "Session.close" [ var "s"; var "ep" ]);
-                             let_wild (app "Session.release_epoch" []);
                              con closed_c [ secret_v ] ]) ]) ]
          | _ -> [])
       names
@@ -1180,22 +1264,24 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                   @ [ (pcon idle_c [ PatWild sp ], panic (where ^ ": delivery before the endpoint was started"));
                       (pcon closed_c [ PatWild sp ], panic (where ^ ": delivery to a closed endpoint")) ]) ]) ]
   in
-  (* `cancel(p)`: the hosted endpoint was cancelled (its runner said so,
+  (* `cancel(s, p)`: the hosted endpoint was cancelled (its runner said so,
      through `host_<Role>_or`'s cancel function).  Consumes the parked value
      and returns [Closed]: the actor must store it, as for any other step,
-     and nothing can resume a closed endpoint. *)
+     and nothing can resume a closed endpoint.  A started endpoint's hold
+     (taken by the transport at `register`) is released here, since a
+     cancelled endpoint never reaches `finish`. *)
   let cancel_parked =
     (* One arm per constructor, never a top-level `_`: a wildcard over the
        whole value would DISCARD a linear [Parked], which the checker
        rejects; matching the constructor consumes it. *)
-    fn "cancel" [ ("p", t_parked) ] t_parked
+    fn "cancel" [ ("s", t_cap_session); ("p", t_parked) ] t_parked
       (match_ (var "p")
-         ((pcon idle_c [ PatWild sp ], con closed_c [ secret_v ])
+         ((pcon idle_c [ PatWild sp ], block [ let_wild (var "s"); con closed_c [ secret_v ] ])
           :: List.map (fun (this, _, _) ->
               (pcon ("Awaiting_" ^ this) [ PatWild sp; PatWild sp ],
-               block [ let_wild (app "Session.release_epoch" []); con closed_c [ secret_v ] ]))
+               block [ let_wild (app "Session.release_epoch" [ var "s" ]); con closed_c [ secret_v ] ]))
             receiving
-          @ [ (pcon closed_c [ PatWild sp ], con closed_c [ secret_v ]) ]))
+          @ [ (pcon closed_c [ PatWild sp ], block [ let_wild (var "s"); con closed_c [ secret_v ] ]) ]))
   in
   let event_api = (parked_ty :: event_ty) @ (idle :: take_idle :: take_closed :: cancel_parked :: awaits) @ resume in
   (* ── scripted and chaos peers (D36, distributed-deploys plan 7.2) ──────
@@ -1453,6 +1539,18 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
              go "rng0",
              sp ))
   in
+  (* D27: at a loop-head receive the chaos peer decides by the seed, one in
+     two, whether to install a drain handler (`_or_drain`, which finishes
+     with `drained`) or leave the transport's default; any other receive is
+     the plain form, so a protocol with no loop draws exactly the stream it
+     drew before drains existed. *)
+  let drain_cb = lam [ "_d_role"; "_d_msgs"; "d" ] (app "drained" [ var "s"; var "d" ]) in
+  let drain_or node plain with_handler =
+    if not (at_boundary node) then plain "rng"
+    else
+      with_gen ~g:(app "Gen.int" [ lit_int 0; lit_int 1 ]) ~rng:"rng" ~tree:"dt" ~rng':"rng_d"
+        (EIf (app "==" [ root_of "dt"; lit_int 0 ], plain "rng_d", with_handler "rng_d", sp))
+  in
   let chaos_states =
     List.filter_map
       (fun (node, this) ->
@@ -1485,14 +1583,19 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
                       (block [ let_ "i" (root_of "it"); chain 0 arms ])))
            | LRecv (_, ctor, _, next) ->
              let nx = state_of next in
-             Some (app ("recv_" ^ ctor) [ var "s"; var "st"; lam [ "_v"; "st1" ] (app (chaos_fn nx) [ var "s"; var "st1"; var "rng" ]) ])
+             let cont rng = lam [ "_v"; "st1" ] (app (chaos_fn nx) [ var "s"; var "st1"; var rng ]) in
+             Some
+               (drain_or node
+                  (fun rng -> app ("recv_" ^ ctor) [ var "s"; var "st"; cont rng ])
+                  (fun rng -> app ("recv_" ^ ctor ^ "_or_drain") [ var "s"; var "st"; cont rng; drain_cb ]))
            | LOffer (_, brs) ->
              let cbs = List.map (fun (lbl, _, _, next) -> (lbl, state_of next)) brs in
              let offer_name = "offer_" ^ String.concat "_" (List.map fst cbs) in
+             let conts rng = List.map (fun (_, nx) -> lam [ "_v"; "st1" ] (app (chaos_fn nx) [ var "s"; var "st1"; var rng ])) cbs in
              Some
-               (app offer_name
-                  ([ var "s"; var "st" ]
-                   @ List.map (fun (_, nx) -> lam [ "_v"; "st1" ] (app (chaos_fn nx) [ var "s"; var "st1"; var "rng" ])) cbs))
+               (drain_or node
+                  (fun rng -> app offer_name ([ var "s"; var "st" ] @ conts rng))
+                  (fun rng -> app (offer_name ^ "_or_drain") ([ var "s"; var "st" ] @ conts rng @ [ drain_cb ])))
            | LRecvCrash (_, brs, crash) ->
              let cbs = List.map (fun (lbl, ctor, _, next) -> (lbl, ctor, state_of next)) brs in
              let crash_nx = state_of crash in
@@ -1594,12 +1697,13 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
         sp )
   in
   (DMod (n mname, Public,
-         (needs :: secret :: yield_ty :: cancelled_ty :: crashed_ty :: state_types) @ [ entry_alias ] @ (register :: cancelled_fn :: transitions) @ event_api @ peers, sp),
+         (needs :: secret :: yield_ty :: cancelled_ty :: crashed_ty :: drained_ty :: state_types) @ [ entry_alias ]
+         @ (register :: cancelled_fn :: drained_fn :: transitions) @ event_api @ peers, sp),
    entry)
 
 (** `<P>_Run`: the role runner's typed front.  Per role,
 
-      run_<Role>(io, node_id, secret, addrs, body) : Result((), SessionNode.RunError)
+      run_<Role>(io, node_id, secret, addrs, body) : Result(Session.Outcome, SessionNode.RunError)
       host_<Role>(io, node_id, secret, addrs, host, start, deliver) : the same, hosted in actor [host]
 
     where [body] takes the session capability and the role's ENTRY state (so
@@ -1658,7 +1762,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
          fn ("run_" ^ role)
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node_id", t_string); ("secret", t_string);
              ("addrs", t_addrs); ("body", t_body role entry) ]
-           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
                 var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
@@ -1676,7 +1780,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
          fn ("cluster_" ^ role)
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster);
              ("session", t_string); ("body", t_body role entry) ]
-           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_cluster"
               [ var "io"; var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) [];
                 var "session"; lam [ "_ep" ] unit; call_body role ]))
@@ -1707,7 +1811,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
       (fun (role, entry) ->
          fn ("initiate_" ^ role)
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("body", t_body role entry) ]
-           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.initiate"
               [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; app (msg ^ ".others_" ^ role) []; lam [ "_ep" ] unit; call_body role ]))
@@ -1737,7 +1841,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
          fn ("host_" ^ role)
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node_id", t_string); ("secret", t_string);
              ("addrs", t_addrs); ("host", tycon "Pid" [ TyVar (n "a") ]); ("start", t_start_of role); ("deliver", t_deliver) ]
-           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_hosted"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
                 var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
@@ -1755,7 +1859,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node_id", t_string); ("secret", t_string);
              ("addrs", t_addrs); ("host", tycon "Pid" [ TyVar (n "a") ]); ("start", t_start_of role); ("deliver", t_deliver);
              ("cancel", t_cancel) ]
-           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_hosted_or"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
                 var "secret"; var "addrs"; app (msg ^ ".fingerprint") []; lam [ "_ep" ] unit;
@@ -1806,7 +1910,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
          fn ("cluster_hosted_" ^ role)
            ([ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("session", t_string) ]
             @ hosted_callbacks role)
-           (tycon "Result" [ t_unit; tycon "SessionNode.RunError" [] ])
+           (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_cluster_hosted"
               [ var "io"; var "node"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "session";
                 lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ];
@@ -1886,7 +1990,7 @@ let check_payload_codecs (errors : Err.ctx) ~proto ~span (decls : decl list) (st
                  Every payload crosses the network as JSON: add `derive Json for %s`."
                 proto f t (ty_key ty) nm nm)) names);
       go rest
-    | ALoop inner :: rest -> go inner; go rest
+    | ALoop (_, inner) :: rest -> go inner; go rest
     | AChoice (_, brs) :: rest -> List.iter (fun (_, arm) -> go arm) brs; go rest
     | AStop :: rest -> go rest
     | ACrashOr (m, crash) :: rest -> go [ m ]; go crash; go rest

@@ -1272,8 +1272,8 @@ and emit_proto_step ctx = function
   | ProtoMsg (s, r, t, label) ->
     let prefix = match label with Some l -> l.txt ^ ": " | None -> "" in
     line ctx (Printf.sprintf "%s%s -> %s : %s" prefix s.txt r.txt (fmt_ty t))
-  | ProtoLoop steps ->
-    line ctx "loop do";
+  | ProtoLoop (steps, atomic) ->
+    line ctx (if atomic then "loop atomic do" else "loop do");
     indented ctx (fun () -> List.iter (emit_proto_step ctx) steps);
     line ctx "end"
   | ProtoStop _ ->
