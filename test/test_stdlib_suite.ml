@@ -1300,8 +1300,9 @@ let test_eval_monitor_down_target_is_pid () =
       send(watcher, Check())
       kill(target)
       run_until_idle()
+      -- get_actor_field reads Int-like fields; a Bool reads as 0/1.
       match get_actor_field(watcher, "target_dead") do
-        Some(dead) -> dead
+        Some(dead) -> dead == 1
         None -> false
       end
     end
