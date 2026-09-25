@@ -2431,15 +2431,50 @@ mod SessionNode do
   -- specs/2026-09-19-choreography-access-points-and-crash-branches-design.md
   -- (Part A). Wire, over the cluster node (routed by the offer's / the
   -- initiator's inbox pid):
-  --   SessionAP.Invite    [sid, fingerprint, reply pid, initiator's role]
+  --   SessionAP.Invite    [sid, fingerprint, reply pid, initiator role, vouch]
   --                                                       initiator -> offer
+  --     (the last two optional: a 3-element Invite from an older node still
+  --     decodes, its role -1, refused in certificate mode; [vouch] lists the
+  --     offer fingerprints a NEWER initiator has checked against its own
+  --     compatibility table, step 9; the initiator's role is what the offer
+  --     checks its certificate against, step 11b)
   --   SessionAP.Withdraw  [sid]                           initiator -> offer
   --   SessionAP.Answer    [sid, node_id, verdict]         offer -> initiator
   -- where verdict "" accepts and anything else is why it refused.
 
-  -- An offer's name: one per protocol, role and node.
+  -- An offer's name: one per protocol, role, FINGERPRINT and node
+  -- (`ap:<P>/<role>/<fp>/<node>`, build step 9), so two versions of one role
+  -- can be offered side by side on a node and an initiator can tell an
+  -- offer's version from its name, before inviting it.
   pfn ap_prefix(proto : String, role : Int) : String do
     "ap:" ++ proto ++ "/" ++ int_to_string(role) ++ "/"
+  end
+
+  pfn ap_name(proto : String, role : Int, fp : String, node_id : String) : String do
+    ap_prefix(proto, role) ++ fp ++ "/" ++ node_id
+  end
+
+  doc """
+  The fingerprint in an offer's registry name [name] (after [prefix], the
+  protocol and role part), or `""` for a name in the older form
+  `ap:<P>/<role>/<node>`, which carried none.
+  """
+  fn name_fingerprint(prefix : String, name : String) : String do
+    let pl = String.byte_size(prefix)
+    let rest = String.slice(name, pl, String.byte_size(name) - pl)
+    match String.index_of(rest, "/") do
+      Some(i) -> String.slice(rest, 0, i)
+      None -> ""
+    end
+  end
+
+  -- The older fingerprints [role] accepts at this build's fingerprint: its
+  -- row of the generated `<P>_Msg.compat_by_role()` (build step 9), or none.
+  pfn accepts_of(compat : List((Int, List(String))), role : Int) : List(String) do
+    match List.find(compat, fn row -> match row do (r, _) -> r == role end) do
+      Some((_, fps)) -> fps
+      None -> Nil
+    end
   end
 
   type OfferCount = { active : Int }
@@ -2449,24 +2484,43 @@ mod SessionNode do
   -- once its argument says so. [flags]: "closing", and "w<sid>" for a
   -- session its initiator withdrew.
   -- [roles] is the protocol's role-name table (`<P>_Msg.role_names()`), what
-  -- the certificate checks name roles by.
-  type Offer = { node : Cap(ClusterNode.Live), proto : String, fingerprint : String, my_role : Int,
-                 roles : List((String, Int)),
+  -- the certificate checks name roles by (step 11b).
+  type Offer = { node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+                 roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int,
                  capacity : Int, name : String, flags : Vault(Int), strs : Vault(String),
                  start : String -> (Int -> Bool) -> Result(Session.Outcome, RunError), worker : Pid(OfferCount) }
+
+  -- Whether an initiator at fingerprint [fp] may form a session with this
+  -- offer (build step 9): the same fingerprint; an OLDER one this role's row
+  -- of the compatibility table accepts (this offer is the newer side and
+  -- decides); or this offer's own fingerprint named in [vouch], the NEWER
+  -- initiator's statement that its table accepts this offer's version and it
+  -- checked every other party against it (this offer, the older side, has no
+  -- table for the newer version). Anything else is "protocol differs".
+  pfn fp_verdict(o : Offer, fp : String, vouch : List(String)) : String do
+    if fp == o.fingerprint do ""
+    else if List.member(accepts_of(o.compat, o.my_role), fp) do ""
+    else if List.member(vouch, o.fingerprint) do ""
+    else "protocol differs" end end end
+  end
 
   -- "" accepts. [from] is the node the invitation arrived from (the link's
   -- verified peer, `Delivery.from_node`), [irole] the role its initiator
   -- plays (-1: an invitation that did not say).
-  pfn offer_verdict(o : Offer, active : Int, fp : String, from : String, irole : Int) : String do
+  pfn offer_verdict(o : Offer, active : Int, fp : String, vouch : List(String), from : String, irole : Int) : String do
     if Vault.get(o.flags, "closing") != None do "closing"
-    else if fp != o.fingerprint do "protocol differs"
     else
-      let auth = initiator_verdict(o, from, irole)
-      if auth != "" do auth
-      else if active >= o.capacity do "full"
-      else "" end end
-    end end
+      let by_fp = fp_verdict(o, fp, vouch)
+      if by_fp != "" do by_fp
+      else
+        -- The certificate check (step 11b): the initiator's node must be
+        -- certified to initiate the role it plays.
+        let by_cert = initiator_verdict(o, from, irole)
+        if by_cert != "" do by_cert
+        else if active >= o.capacity do "full"
+        else "" end end
+      end
+    end
   end
 
   -- The offer's half of the two-way check (step 11b): the initiator's
@@ -2506,8 +2560,9 @@ mod SessionNode do
   actor OfferActor do
     state { active : Int }
     init  { active: 0 }
-    on Invite(o : Offer, sid : String, fp : String, reply : GlobalPid.Pid, from : String, irole : Int) do
-      let verdict = offer_verdict(o, state.active, fp, from, irole)
+    on Invite(o : Offer, sid : String, fp : String, vouch : List(String), reply : GlobalPid.Pid,
+              from : String, irole : Int) do
+      let verdict = offer_verdict(o, state.active, fp, vouch, from, irole)
       let _ = ClusterNode.send_msg(o.node, reply, "SessionAP.Answer",
                 encode_answer(sid, ClusterNode.node_id(o.node), verdict), NodeQueue.Unbounded)
       if verdict == "" do
@@ -2532,20 +2587,31 @@ mod SessionNode do
     end
   end
 
-  pfn encode_invite(sid : String, fp : String, reply : GlobalPid.Pid, irole : Int) : List(Int) do
+  pfn encode_invite(sid : String, fp : String, reply : GlobalPid.Pid, irole : Int, vouch : List(String)) : List(Int) do
     Msgpack.encode(Msgpack.array(Cons(Msgpack.str(sid), Cons(Msgpack.str(fp),
-      Cons(Msgpack.bin(GlobalPid.encode(reply)), Cons(Msgpack.int(irole), Nil))))))
+      Cons(Msgpack.bin(GlobalPid.encode(reply)), Cons(Msgpack.int(irole),
+        Cons(Msgpack.array(List.map(vouch, fn v -> Msgpack.str(v))), Nil)))))))
   end
 
-  -- An Invite's fields: (sid, fingerprint, reply pid bytes, initiator role).
-  -- A three-element Invite (before step 11b) names no role: -1.
-  pfn decode_invite(payload : List(Int)) : Option((String, String, List(Int), Int)) do
-    match Msgpack.decode(payload) do
-      Ok(Msgpack.Array(Cons(Msgpack.Str(sid), Cons(Msgpack.Str(fp), Cons(Msgpack.Bin(rb), Nil))))) ->
-        Some((sid, fp, rb, 0 - 1))
-      Ok(Msgpack.Array(Cons(Msgpack.Str(sid), Cons(Msgpack.Str(fp), Cons(Msgpack.Bin(rb), Cons(Msgpack.Int(r), Nil)))))) ->
-        Some((sid, fp, rb, r))
-      _ -> None
+  -- An Invite's optional fourth element: the initiator's role (-1 when an
+  -- older node sent none).
+  pfn irole_of(rest : List(Msgpack.Value)) : Int do
+    match rest do
+      Cons(Msgpack.Int(r), _) -> r
+      _ -> 0 - 1
+    end
+  end
+
+  -- An Invite's optional fifth element: the vouched fingerprints.
+  pfn vouch_of(rest : List(Msgpack.Value)) : List(String) do
+    match rest do
+      Cons(_, Cons(Msgpack.Array(vs), _)) ->
+        List.filter_map(vs, fn v ->
+          match v do
+            Msgpack.Str(x) -> Some(x)
+            _ -> None
+          end)
+      _ -> Nil
     end
   end
 
@@ -2561,15 +2627,15 @@ mod SessionNode do
   -- turn must only send): handed to the offer actor.
   pfn offer_frame(o : Offer, d : NodeSend.Delivery) : Result((), String) do
     if d.type_tag == "SessionAP.Invite" do
-      match decode_invite(d.payload) do
-        Some((sid, fp, rb, irole)) ->
+      match Msgpack.decode(d.payload) do
+        Ok(Msgpack.Array(Cons(Msgpack.Str(sid), Cons(Msgpack.Str(fp), Cons(Msgpack.Bin(rb), rest))))) ->
           match GlobalPid.decode(rb) do
             Ok(reply) ->
-              let _ = send(o.worker, Invite(o, sid, fp, reply, d.from_node, irole))
+              let _ = send(o.worker, Invite(o, sid, fp, vouch_of(rest), reply, d.from_node, irole_of(rest)))
               Ok(())
             Err(e) -> Err("session_ap: invite reply pid: " ++ e)
           end
-        None -> Err("session_ap: bad Invite payload")
+        _ -> Err("session_ap: bad Invite payload")
       end
     else if d.type_tag == "SessionAP.Withdraw" do
       match Msgpack.decode(d.payload) do
@@ -2588,23 +2654,27 @@ mod SessionNode do
   (`initiate`) invites this node; it then runs [body] in its own task, as
   `run_cluster` would, under the session id the initiator minted. An
   invitation is refused when the offer is full, closing, or built from a
-  different version of the protocol, and, in certificate mode, when the
-  initiating node's certificate does not name "Proto.Role:initiate" for the
-  role it plays (verdict "initiator <node> not authorized for Proto.Role").
-  In certificate mode this node's own certificate must name
-  "Proto.Role:offer" for [my_role], else `Err(Unauthorized(..))`. [roles] is the
-  protocol's role-name table. One offer per role per node: a second
-  is `Err`. The generated `<P>_Run.offer_<Role>` supplies the protocol, role
+  version of the protocol this one cannot form a session with (build step 9:
+  the same fingerprint, or one the compatibility table [compat], the
+  generated `<P>_Msg.compat_by_role()`, relates to it), and, in certificate
+  mode, when the initiating node's certificate does not name
+  "Proto.Role:initiate" for the role it plays (verdict "initiator <node>
+  not authorized for Proto.Role"). In certificate mode this node's own
+  certificate must name "Proto.Role:offer" for [my_role], else
+  `Err(Unauthorized(..))`. [roles] is the protocol's role-name table
+  (step 11b). One offer per role
+  and fingerprint per node: a second is `Err`; two versions of one role may
+  be offered side by side. The generated `<P>_Run.offer_<Role>` supplies the protocol, role
   and peers. The offer's name is bound to an actor of this node; if the
   node stops, or a supervisor restarts the program that made it, it is
   gone from the registry and an initiator no longer picks it -- offer again
   to be found again.
   """
   fn offer_role(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
-           roles : List((String, Int)), my_role : Int,
+           roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int,
            peers : List(Int), capacity : Int, on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result(Offer, RunError) do
     let holders = ap_holder_check(node, proto, roles)
-    offer_with(node, proto, fingerprint, roles, my_role, capacity,
+    offer_with(node, proto, fingerprint, roles, compat, my_role, capacity,
                fn (sid, abandoned) -> run_cluster_with(io, node, my_role, peers, sid, on_close, body, abandoned, holders))
   end
 
@@ -2619,13 +2689,13 @@ mod SessionNode do
   `<P>_Run.offer_hosted_<Role>` supplies the protocol, role and peers.
   """
   fn offer_hosted(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
-                  roles : List((String, Int)), my_role : Int,
+                  roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int,
                   peers : List(Int), capacity : Int, on_close : Int -> Unit, host : Int,
                   start : String -> Cap(Session.Live) -> Unit,
                   deliver : String -> Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
                   cancel : String -> Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result(Offer, RunError) do
     let holders = ap_holder_check(node, proto, roles)
-    offer_with(node, proto, fingerprint, roles, my_role, capacity, fn (sid, abandoned) ->
+    offer_with(node, proto, fingerprint, roles, compat, my_role, capacity, fn (sid, abandoned) ->
       run_cluster_hosted_with(io, node, my_role, peers, sid, on_close, host,
                               fn s -> start(sid, s),
                               fn (s, from, msg, ep) -> deliver(sid, s, from, msg, ep),
@@ -2638,25 +2708,27 @@ mod SessionNode do
   -- second argument says so), routed and registered under the offer's name.
   --
   -- In certificate mode a node whose own certificate does not name
-  -- "Proto.Role:offer" does not open the offer (`Unauthorized`): every initiator
-  -- would skip it anyway (`candidates`), and this says why at the source.
-  pfn offer_with(node : Cap(ClusterNode.Live), proto : String, fingerprint : String, roles : List((String, Int)),
-                 my_role : Int, capacity : Int,
+  -- "Proto.Role:offer" does not open the offer (`Unauthorized`): every
+  -- initiator would skip it anyway (`candidates`), and this says why at the
+  -- source.
+  pfn offer_with(node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+                 roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int, capacity : Int,
                  start : String -> (Int -> Bool) -> Result(Session.Outcome, RunError)) : Result(Offer, RunError) do
-    match ClusterNode.authorize_peer(node, ClusterNode.node_id(node), proto, SessionAP.role_name(roles, my_role), SessionAP.offer_mode()) do
+    let rname = SessionAP.role_name(roles, my_role)
+    match ClusterNode.authorize_peer(node, ClusterNode.node_id(node), proto, rname, SessionAP.offer_mode()) do
       Err(why) -> Err(Unauthorized(my_role, "this node " ++ why ++ " (its certificate lacks "
-                                            ++ SessionAP.permission(proto, SessionAP.role_name(roles, my_role), SessionAP.offer_mode()) ++ ")"))
-      Ok(_) -> open_offer(node, proto, fingerprint, roles, my_role, capacity, start)
+                                            ++ SessionAP.permission(proto, rname, SessionAP.offer_mode()) ++ ")"))
+      Ok(_) -> open_offer(node, proto, fingerprint, roles, compat, my_role, capacity, start)
     end
   end
 
-  pfn open_offer(node : Cap(ClusterNode.Live), proto : String, fingerprint : String, roles : List((String, Int)),
-                 my_role : Int, capacity : Int,
+  pfn open_offer(node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+                 roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int, capacity : Int,
                  start : String -> (Int -> Bool) -> Result(Session.Outcome, RunError)) : Result(Offer, RunError) do
     let a = spawn(OfferActor)
     let tag = proto ++ "." ++ int_to_string(my_role) ++ "." ++ int_to_string(pid_to_int(a))
-    let o = { node: node, proto: proto, fingerprint: fingerprint, my_role: my_role, roles: roles, capacity: capacity,
-              name: ap_prefix(proto, my_role) ++ ClusterNode.node_id(node),
+    let o = { node: node, proto: proto, fingerprint: fingerprint, roles: roles, compat: compat, my_role: my_role, capacity: capacity,
+              name: ap_name(proto, my_role, fingerprint, ClusterNode.node_id(node)),
               flags: Vault.new("session_ap_flags_" ++ tag), strs: Vault.new("session_ap_strs_" ++ tag),
               start: start, worker: a }
     let key = ClusterNode.route_session(node, pid_to_int(a), fn d -> offer_frame(o, d))
@@ -2701,44 +2773,93 @@ mod SessionNode do
     end
   end
 
-  -- The offers of [role], other than on the nodes in [used], rotated by [n]
-  -- so successive sessions of one initiator spread over them, with an offer
-  -- on THIS node first (prefer-local, plan 4.2: it saves a hop, and it goes
-  -- over the node's loopback link). Only offers on nodes this node is
-  -- connected to: the registry can show a name (learnt through a third node)
-  -- before the two nodes have a connection, and a session between them
-  -- needs one.
+  -- The fingerprints already in a forming session, besides the initiator's
+  -- own: at most ONE other (build step 9). [older]: whether it is one the
+  -- initiator's table accepts (the initiator is the newer side and checks
+  -- every pair), else an unknown one taken to be newer (each such offer
+  -- checks the initiator's fingerprint itself, which covers every pair with
+  -- it, since acceptance is per newer role against the older fingerprint).
+  type ApMix = { fp : String, rows : List((Int, List(String))), me : Int,
+                 other : String, older : Bool, filled : List((Int, String)) }
+
+  -- Whether an offer of [role] at [ofp] may join the session [m] so far,
+  -- and the fingerprints to vouch for in its Invite.
+  pfn admissible(m : ApMix, role : Int, ofp : String) : Option(List(String)) do
+    let known_older = List.any(m.rows, fn row -> match row do (_, fps) -> List.member(fps, ofp) end)
+    if ofp == m.fp do
+      if m.other != "" && m.older && not(List.member(accepts_of(m.rows, role), m.other)) do None
+      else Some(Nil) end
+    else if m.other != "" && m.other != ofp do None
+    else if known_older do
+      -- This build is the newer side: the initiator's role and every role
+      -- already filled at its fingerprint must accept the older one.
+      let at_mine = Cons(m.me, List.filter_map(m.filled, fn f -> match f do (r, x) -> if x == m.fp do Some(r) else None end end))
+      if List.all(at_mine, fn r -> List.member(accepts_of(m.rows, r), ofp)) do Some(Cons(ofp, Nil)) else None end
+    else Some(Nil) end end end
+  end
+
+  -- The offers of [role], other than on the nodes in [used], that [m]
+  -- admits, each with what to vouch for: offers at the initiator's own
+  -- fingerprint first, then older ones the table accepts, then unknown
+  -- (possibly newer) ones -- each group with an offer on THIS node first
+  -- (prefer-local, plan 4.2: it saves a hop, and it goes over the node's
+  -- loopback link) and the rest rotated by [n] so successive sessions of one
+  -- initiator spread over them. Only offers on nodes this node is connected
+  -- to: the registry can show a name (learnt through a third node) before
+  -- the two nodes have a connection, and a session between them needs one.
+  -- Offers the table rules out are not invited at all, so no round trip is
+  -- spent on "protocol differs" (build step 9); the second result says how
+  -- many were skipped so, for `NoOffer`'s reason.
   --
   -- In certificate mode an offer is a candidate only if the node HOLDING it
   -- (the binding's node, which is where the invitation goes) has a
   -- certificate naming "Proto.Role:offer" (step 11b): offer names are
   -- registry names any member can write, so the registry entry proves
-  -- nothing. The second result lists the offers skipped for that, "; "-
-  -- separated, for NoOffer's reasons.
+  -- nothing. Those skipped for it are named in the reason too.
   pfn candidates(node : Cap(ClusterNode.Live), proto : String, names : List((String, Int)), role : Int,
-                 used : List(String), n : Int) : (List(GlobalPid.Pid), String) do
+                 used : List(String), n : Int, m : ApMix)
+      : (List((GlobalPid.Pid, String, List(String))), String) do
     let prefix = ap_prefix(proto, role)
-    let found = List.filter_map(ClusterNode.names(node), fn name ->
-      if String.starts_with(name, prefix) do ClusterNode.lookup(node, name) else None end)
-    let fresh = List.filter(found, fn g ->
-      List.member(used, g.node_id) == false && ClusterNode.session_queue_for(node, g.node_id) != None)
+    let named = List.filter_map(ClusterNode.names(node), fn name ->
+      if String.starts_with(name, prefix) do
+        match ClusterNode.lookup(node, name) do
+          Some(g) -> Some((g, name_fingerprint(prefix, name)))
+          None -> None
+        end
+      else None end)
+    let found = List.filter_map(named, fn c -> match c do (g, ofp) ->
+      match admissible(m, role, ofp) do
+        Some(vouch) -> Some((g, ofp, vouch))
+        None -> None
+      end end)
+    let skipped = List.length(named) - List.length(found)
+    let why =
+      if skipped == 0 do ""
+      else int_to_string(skipped) ++ " offer(s) at a protocol version this one cannot form a session with were not invited" end
+    let linked = List.filter(found, fn c -> match c do (g, _, _) ->
+      List.member(used, g.node_id) == false && ClusterNode.session_queue_for(node, g.node_id) != None end)
     let rname = SessionAP.role_name(names, role)
-    let denied = List.filter_map(fresh, fn g ->
+    let denied = List.filter_map(linked, fn c -> match c do (g, _, _) ->
       match ClusterNode.authorize_peer(node, g.node_id, proto, rname, SessionAP.offer_mode()) do
         Ok(_) -> None
-        Err(why) -> Some(node_label(node, g.node_id) ++ " " ++ why ++ ", not invited")
-      end)
-    let allowed = List.filter(fresh, fn g ->
-      Result.is_ok(ClusterNode.authorize_peer(node, g.node_id, proto, rname, SessionAP.offer_mode())))
+        Err(e) -> Some(node_label(node, g.node_id) ++ " " ++ e ++ ", not invited")
+      end end)
+    let fresh = List.filter(linked, fn c -> match c do (g, _, _) ->
+      Result.is_ok(ClusterNode.authorize_peer(node, g.node_id, proto, rname, SessionAP.offer_mode())) end)
     let me = ClusterNode.node_id(node)
-    let local = List.filter(allowed, fn g -> g.node_id == me)
-    let remote = List.filter(allowed, fn g -> g.node_id != me)
-    let k = List.length(remote)
-    let ordered = if k == 0 do local else
-      let r = n % k
-      List.append(local, List.append(List.drop(remote, r), List.take(remote, r)))
-    end
-    (ordered, String.join(denied, "; "))
+    let group = fn cs ->
+      let local = List.filter(cs, fn c -> match c do (g, _, _) -> g.node_id == me end)
+      let remote = List.filter(cs, fn c -> match c do (g, _, _) -> g.node_id != me end)
+      let k = List.length(remote)
+      if k == 0 do local else
+        let r = n % k
+        List.append(local, List.append(List.drop(remote, r), List.take(remote, r)))
+      end
+    let same = List.filter(fresh, fn c -> match c do (_, f, _) -> f == m.fp end)
+    let vouched = List.filter(fresh, fn c -> match c do (_, f, v) -> f != m.fp && v != Nil end)
+    let unknown = List.filter(fresh, fn c -> match c do (_, f, v) -> f != m.fp && v == Nil end)
+    let reasons = List.filter(Cons(why, denied), fn x -> x != "")
+    (List.append(group(same), List.append(group(vouched), group(unknown))), String.join(reasons, "; "))
   end
 
   -- Wait up to [left] ms for [nid]'s answer: Some(verdict), or None.
@@ -2787,15 +2908,15 @@ mod SessionNode do
   -- (specs/todos/2026-09-20-mutual-tco-borrowed-forwarded-arg.md). Keep it
   -- self-recursive until that is fixed.
   pfn invite_role(node : Cap(ClusterNode.Live), sid : String, fp : String, reply : GlobalPid.Pid, irole : Int,
-                  answers : Vault(String), budget : Vault(Int), cands : List(GlobalPid.Pid), why : String)
-      : Result(GlobalPid.Pid, String) do
+                  answers : Vault(String), budget : Vault(Int), cands : List((GlobalPid.Pid, String, List(String))), why : String)
+      : Result((GlobalPid.Pid, String), String) do
     match cands do
       Nil -> Err(if why == "" do "no access point is registered" else why end)
-      Cons(g, rest) ->
+      Cons((g, ofp, vouch), rest) ->
         if Vault.get_or(budget, "left", 0) <= 0 do Err(and_why(why, "no answer within the setup time"))
         else
           -- Ok(None) accepts; Ok(Some(reason)) moves on to the next candidate.
-          let outcome = match ClusterNode.send_msg(node, g, "SessionAP.Invite", encode_invite(sid, fp, reply, irole), NodeQueue.Unbounded) do
+          let outcome = match ClusterNode.send_msg(node, g, "SessionAP.Invite", encode_invite(sid, fp, reply, irole, vouch), NodeQueue.Unbounded) do
             Err(_) -> Some(node_label(node, g.node_id) ++ " is unreachable")
             Ok(_) ->
               match await_answer(answers, g.node_id, budget) do
@@ -2808,7 +2929,7 @@ mod SessionNode do
               end
           end
           match outcome do
-            None -> Ok(g)
+            None -> Ok((g, ofp))
             Some(reason) -> invite_role(node, sid, fp, reply, irole, answers, budget, rest, and_why(why, reason))
           end
         end
@@ -2826,23 +2947,28 @@ mod SessionNode do
   -- one session, the initiator's own included -- each party is its own
   -- endpoint, and frames between two on one node take the loopback link --
   -- so [used] (nodes to skip) is empty unless a caller wants otherwise.
-  -- [names] is the protocol's role-name table, [irole] the initiator's role
-  -- (both for the certificate checks: `candidates`, and the invitation).
-  pfn fill_roles(node : Cap(ClusterNode.Live), proto : String, names : List((String, Int)), irole : Int,
-                 sid : String, fp : String, reply : GlobalPid.Pid,
+  -- [names] is the protocol's role-name table (step 11b's checks).
+  pfn fill_roles(node : Cap(ClusterNode.Live), proto : String, names : List((String, Int)), sid : String, m : ApMix,
+                 reply : GlobalPid.Pid,
                  answers : Vault(String), budget : Vault(Int), roles : List(Int), n : Int,
                  used : List(String), accepted : List(GlobalPid.Pid))
       : Result(List(GlobalPid.Pid), (Int, String, List(GlobalPid.Pid))) do
     match roles do
       Nil -> Ok(accepted)
       Cons(r, rest) ->
-        match candidates(node, proto, names, r, used, n) do
-          (cands, skipped) ->
-            match invite_role(node, sid, fp, reply, irole, answers, budget, cands, skipped) do
-              Err(why) -> Err((r, why, accepted))
-              Ok(g) -> fill_roles(node, proto, names, irole, sid, fp, reply, answers, budget, rest, n,
-                                  used, Cons(g, accepted))
-            end
+        let (cands, skipped) = candidates(node, proto, names, r, used, n, m)
+        match invite_role(node, sid, m.fp, reply, m.me, answers, budget, cands, skipped) do
+          Err(why) -> Err((r, why, accepted))
+          Ok((g, ofp)) ->
+            -- The session's second fingerprint, once an offer at one joins.
+            let m2 =
+              if ofp == m.fp || m.other != "" do m
+              else
+                let older = List.any(m.rows, fn row -> match row do (_, fps) -> List.member(fps, ofp) end)
+                { m with other: ofp, older: older }
+              end
+            fill_roles(node, proto, names, sid, { m2 with filled: Cons((r, ofp), m2.filled) }, reply, answers, budget, rest, n,
+                       used, Cons(g, accepted))
         end
     end
   end
@@ -2855,7 +2981,12 @@ mod SessionNode do
   node cannot be addressed by an old session), invites one offer per role --
   an offer on this node first, then the others -- moving to the next
   offer on a refusal or no answer, all within the setup time
-  (MARCH_SESSION_CONNECT_MS, 20 s). Then runs [body] as `run_cluster` does.
+  (MARCH_SESSION_CONNECT_MS, 20 s). Only offers whose version may form a
+  session with this one are invited (build step 9): the same fingerprint, an
+  older one [compat] (the generated `<P>_Msg.compat_by_role()`) accepts for
+  every role at this fingerprint, or an unknown one that decides for itself;
+  a session holds at most two fingerprints. Then runs [body] as
+  `run_cluster` does.
   `Err(NoOffer(role, why))` if a role could not be filled; the offers that
   had accepted are withdrawn. The generated `<P>_Run.initiate_<Role>`
   supplies the protocol, its role-name table [roles], the role, peers and
@@ -2868,7 +2999,7 @@ mod SessionNode do
   every role's endpoint must be on a node certified for that role.
   """
   fn initiate(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
-              roles : List((String, Int)), my_role : Int,
+              roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int,
               peers : List(Int), others : List(Int), on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
       : Result(Session.Outcome, RunError) do
     let n = ClusterNode.next_id(node, "ap_sessions")
@@ -2880,7 +3011,8 @@ mod SessionNode do
     Vault.set(budget, "left", if t > 0 do t else 3600000 end)
     let key = ClusterNode.route_session(node, pid_to_int(inbox), fn d -> inbox_frame(answers, sid, d))
     let reply = ClusterNode.global_pid(node, pid_to_int(inbox))
-    let filled = fill_roles(node, proto, roles, my_role, sid, fingerprint, reply, answers, budget, others, n, Nil, Nil)
+    let mix = { fp: fingerprint, rows: compat, me: my_role, other: "", older: false, filled: Nil }
+    let filled = fill_roles(node, proto, roles, sid, mix, reply, answers, budget, others, n, Nil, Nil)
     ClusterNode.unroute(node, key)
     -- The inbox has answered its one purpose; left alive it was one actor
     -- leaked per initiated session.

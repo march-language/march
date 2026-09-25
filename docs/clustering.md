@@ -827,6 +827,39 @@ The dispatch compares the delivery's tag with the tag the sender's compiler mint
 handler's type, so the two sides cannot drift. A handler whose type has no codec is a
 compile error, and so is a `@[remote]` actor with no routable handler.
 
+**Schema hashes: a type that kept its name but changed its shape.** Beside the tag, a typed
+send carries the message type's *schema hash*, a digest of its structure: a record's fields
+(names and types, in order), a variant's constructors with their argument types, and every
+declared type they mention, expanded the same way. The name is not part of it. The
+dispatch accepts a delivery whose tag and schema both match, or whose sender sent no schema
+(a program built before schema hashes). When the tag matches but the schema does not, the
+sender was built from another version of the type:
+
+- If the actor has an `<actor>_migrate_msg` (the hot-reload message migration), and the
+  old message type it takes has a one-argument constructor whose argument has the delivered
+  schema, the payload is decoded as that argument, wrapped in that constructor, converted by
+  `migrate_msg`, and delivered. A `None` from `migrate_msg` is refused.
+- Otherwise the dispatch returns `Err`, and the transport answers the sender with
+  `DELIVERY_FAILED`.
+
+```march
+mod V1 do
+  type OldHit = { n : Int }          -- what an older build sent as `Msgs.Hit`
+  derive Json for OldHit
+  type Msg = OldBump(V1.OldHit)
+end
+
+fn counter_migrate_msg(m : V1.Msg) : Option(Counter.Msg) do
+  match m do
+    V1.OldBump(h) -> Some(Bump({ n: h.n, who: "migrated" }))
+  end
+end
+```
+
+`Node.schema_of(fn (_ : T) -> ())` is `T`'s schema hash as a string. The schema rides the
+`ACTOR_MSG` frame as an optional seventh element; a node built before it refuses a
+seven-element frame, so upgrade receivers before senders.
+
 **Session protocols across nodes.** `SessionNode` is the `Session.Ops` transport for an
 `@[endpoints]` protocol whose roles run on different nodes, over split peer connections
 (`ClusterConn.connect_split` / `accept_split`). Two roles:

@@ -61,7 +61,7 @@ mod CertAuthz do
       None -> Ok(seq)
       Some(f) ->
         let _ = f({ seq: seq, to_local_pid: to.local_pid, to_creation: to.creation, type_tag: tag,
-                    payload: payload, from_node: me })
+                    payload: payload, schema: "", from_node: me })
         Ok(seq)
     end
   end

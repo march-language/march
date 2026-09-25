@@ -698,7 +698,7 @@ let fingerprint_of ~proto ~(types : ty_defs) (roles : string list) (steps : aste
     specs/progress/).  The name is not user-visible: nothing outside
     this function spells the type -- role modules reach the message only
     through `<P>_Msg.<Ctor>` and `<P>_Msg.{encode,decode,try_decode}`. *)
-let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint (ctors : (string * ty) list) (roles : string list)
+let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint ?(compat = []) ?(held : (string * string) option) (ctors : (string * ty) list) (roles : string list)
     (peers : (string * string list) list) : decl =
   let mname = proto ^ "_Msg" in
   let tname = proto ^ "_Message" in
@@ -765,15 +765,47 @@ let msg_module (errors : Err.ctx) ~proto ~span ~fingerprint (ctors : (string * t
          (fun r acc -> EIf (app "==" [ var "i"; lit_int (index_of r) ], lit_str r, acc, sp))
          roles (app "int_to_string" [ var "i" ]))
   in
+  (* `compat()`: the version-compatibility table (plan II.5): per role, the
+     OTHER fingerprints a role at this fingerprint may form a session with,
+     computed from the previous version given with `--protocol-baseline`.
+     Empty means "same fingerprint only" for every role. *)
+  let str_list xs = List.fold_right (fun x acc -> con "Cons" [ lit_str x; acc ]) xs (con "Nil" []) in
+  let compat_fn =
+    fn "compat" [] (tycon "List" [ TyTuple [ t_string; t_string; tycon "List" [ t_string ] ] ])
+      (List.fold_right
+         (fun (f, r, acc_fps) acc ->
+            con "Cons" [ ETuple ([ lit_str f; lit_str r; str_list acc_fps ], sp); acc ])
+         compat (con "Nil" []))
+  in
+  (* `compat_by_role()`: the same rows keyed by role number, as `SessionNode`'s
+     offers and initiators read them (they know roles by number). *)
+  let compat_by_role =
+    fn "compat_by_role" [] (tycon "List" [ TyTuple [ t_int; tycon "List" [ t_string ] ] ])
+      (List.fold_right
+         (fun (_, r, acc_fps) acc ->
+            con "Cons" [ ETuple ([ lit_int (index_of r); str_list acc_fps ], sp); acc ])
+         compat (con "Nil" []))
+  in
+  (* `role_fingerprint(i)`: the fingerprint role [i] offers and initiates
+     under -- this build's, except the chooser's in an expand build (D21,
+     `--protocol-expand`), which stays on the previous one: [held] is
+     (chooser, previous fingerprint). *)
+  let role_fp =
+    fn "role_fingerprint" [ ((if held = None then "_i" else "i"), t_int) ] t_string
+      (match held with
+       | Some (chooser, old_fp) -> EIf (app "==" [ var "i"; lit_int (index_of chooser) ], lit_str old_fp, lit_str fingerprint, sp)
+       | None -> lit_str fingerprint)
+  in
   DMod (n mname, Public, (msg_decl :: json_fns) @ [ encode; decode; try_decode ] @ role_fns @ peer_fns @ other_fns
-                         @ [ role_names; fp; role_name ], sp)
+                         @ [ role_names; fp; role_name; compat_fn; compat_by_role; role_fp ], sp)
 
 (** `<P>_<Role>`: one [always_linear] type per state and one function per
     transition, plus the unforgeable [Yield].  Also returns the name of the
     role's ENTRY state (what `register` yields), which `<P>_Run` types the
     role's body by. *)
 let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors : int)
-    ~(grants : string list) ~(crash_points : string list) (role : string) (root : lty)
+    ~(grants : string list) ~(crash_points : string list) ?(held_labels : string list = [])
+    (role : string) (root : lty)
     : decl * string =
   let mname = proto ^ "_" ^ role in
   let msg = proto ^ "_Msg" in
@@ -983,10 +1015,26 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
              (fun (lbl, to_, ctor, payload, next) ->
                 let nx = state_of next in
                 fn ("choose_" ^ lbl) [ ("s", t_cap_session); ("st", sty this); ("v", payload) ] (sty nx)
-                  (on_ep
-                     (con nx
-                        [ app "Session.emit"
-                            [ var "s"; var "ep"; role_idx to_; app (msg ^ ".encode") [ con (msg ^ "." ^ ctor) [ var "v" ] ] ] ])))
+                  (let send_it =
+                     on_ep
+                       (con nx
+                          [ app "Session.emit"
+                              [ var "s"; var "ep"; role_idx to_; app (msg ^ ".encode") [ con (msg ^ "." ^ ctor) [ var "v" ] ] ] ])
+                   in
+                   if List.mem lbl held_labels then
+                     (* An expand build (D21, `--protocol-expand`): this
+                        chooser still runs under the previous fingerprint, so
+                        an old receiver may be in the session. The send stays
+                        after the panic so the state is still consumed. *)
+                     block
+                       [ let_wild
+                           (panic
+                              (Printf.sprintf
+                                 "%s: `choose_%s` is held back in this build, the expand half of a two-deploy protocol change \
+                                  (--protocol-expand %s:%s); it can be chosen once the contract deploy has gone out"
+                                 proto lbl proto lbl));
+                         send_it ]
+                   else send_it))
              brs
          | LRecv (from, ctor, payload, next) ->
            let nx = state_of next in
@@ -1776,7 +1824,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
-                var "secret"; var "addrs"; app (msg ^ ".fingerprint") [];
+                var "secret"; var "addrs"; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
                 lit_str proto; app (msg ^ ".role_names") []; lam [ "_ep" ] unit;
                 call_body role ]))
       roles
@@ -1815,7 +1863,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
              ("capacity", t_int); ("body", t_body role entry) ]
            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_role"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_names") [];
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
+                app (msg ^ ".role_names") []; app (msg ^ ".compat_by_role") [];
                 app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; call_body role ]))
       roles
@@ -1827,7 +1876,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            [ ("io", tycon "Cap" [ tycon "IO" [] ]); ("node", t_cluster); ("body", t_body role entry) ]
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.initiate"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_names") [];
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
+                app (msg ^ ".role_names") []; app (msg ^ ".compat_by_role") [];
                 app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; app (msg ^ ".others_" ^ role) []; lam [ "_ep" ] unit; call_body role ]))
       roles
@@ -1859,7 +1909,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_hosted"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
-                var "secret"; var "addrs"; app (msg ^ ".fingerprint") [];
+                var "secret"; var "addrs"; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
                 lit_str proto; app (msg ^ ".role_names") []; lam [ "_ep" ] unit;
                 app "pid_to_int" [ var "host" ]; start_of role; var "deliver" ]))
       roles
@@ -1878,7 +1928,7 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
            (tycon "Result" [ tycon "Session.Outcome" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.run_hosted_or"
               [ var "io"; app (msg ^ ".role_" ^ role) []; app (msg ^ ".peers_" ^ role) []; var "node_id";
-                var "secret"; var "addrs"; app (msg ^ ".fingerprint") [];
+                var "secret"; var "addrs"; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
                 lit_str proto; app (msg ^ ".role_names") []; lam [ "_ep" ] unit;
                 app "pid_to_int" [ var "host" ]; start_of role; var "deliver"; var "cancel" ]))
       roles
@@ -1916,7 +1966,8 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
             @ hosted_callbacks role)
            (tycon "Result" [ tycon "SessionNode.Offer" []; tycon "SessionNode.RunError" [] ])
            (app "SessionNode.offer_hosted"
-              [ var "io"; var "node"; lit_str proto; app (msg ^ ".fingerprint") []; app (msg ^ ".role_names") [];
+              [ var "io"; var "node"; lit_str proto; app (msg ^ ".role_fingerprint") [ app (msg ^ ".role_" ^ role) [] ];
+                app (msg ^ ".role_names") []; app (msg ^ ".compat_by_role") [];
                 app (msg ^ ".role_" ^ role) [];
                 app (msg ^ ".peers_" ^ role) []; var "capacity"; lam [ "_ep" ] unit; app "pid_to_int" [ var "host" ];
                 start_sid_of role; var "deliver"; var "cancel" ]))
@@ -1958,6 +2009,356 @@ let run_module ~proto ~(roles : (string * string) list) ~(grants : (string * str
   DMod (n mname, Public,
         (needs :: addrs :: error_message :: runners) @ clusters @ offers @ initiators @ hosters @ hosters_or
         @ offers_hosted @ clusters_hosted, sp)
+
+(* ── protocol evolution: the wire view and the compatibility table ─────── *)
+
+(** What a protocol version looks like ON THE WIRE, which is what two binaries
+    built from different versions have to agree on (plan 6.4, "compatibility is
+    about the wire"): every message as sender, receiver, constructor (the JSON
+    tag `derive Json` writes, lib/desugar/desugar_derive.ml) and the deep
+    payload key [ty_key_deep] computes, plus the loops, choices and stops that
+    decide which messages can follow which.  It is [astep] with the payload
+    type reduced to its key, so it can be written to a file and compared with
+    the next build's (`--protocol-baseline`, `--emit-protocols`).  Grants
+    (`role R needs ...`) never reach it, as they never reach the fingerprint. *)
+type wstep =
+  | WMsg    of string * string * string * string   (** sender, receiver, ctor (wire tag), payload key *)
+  | WLoop   of wstep list
+  | WChoice of string * (string * wstep list) list  (** chooser, (label, steps) *)
+  | WStop
+  | WCrashOr of wstep * wstep list
+
+(** One version of one protocol: what `.forge/protocols/<P>.json` stores. *)
+type version = {
+  v_proto       : string;
+  v_fingerprint : string;
+  v_roles       : string list;
+  v_steps       : wstep list;
+}
+
+(** A baseline file: the version last built and, when the last build changed
+    the protocol, the one before it.  The compatibility table reaches ONE
+    version back (plan II.5), so this is all it ever needs: a rebuild of an
+    unchanged protocol compares against [previous], a changed one against
+    [current]. *)
+type baseline = { current : version; previous : version option }
+
+let rec wire_of ~(types : ty_defs) (steps : astep list) : wstep list =
+  List.map
+    (function
+      | AMsg (f, t, ty, c) -> WMsg (f, t, c, ty_key_deep ~types ty)
+      | ALoop (_, inner) -> WLoop (wire_of ~types inner)  (* `atomic` changes no message *)
+      | AChoice (by, brs) -> WChoice (by, List.map (fun (l, arm) -> (l, wire_of ~types arm)) brs)
+      | AStop -> WStop
+      | ACrashOr (m, crash) ->
+        (match wire_of ~types [ m ] with
+         | [ w ] -> WCrashOr (w, wire_of ~types crash)
+         | _ -> assert false))
+    steps
+
+(* JSON: a step is a tagged object, so a file written by one compiler reads in
+   the next without a positional format to keep in step. *)
+let rec wstep_to_json (w : wstep) : Yojson.Safe.t =
+  match w with
+  | WMsg (f, t, c, k) ->
+    `Assoc [ ("msg", `Assoc [ ("from", `String f); ("to", `String t); ("tag", `String c); ("payload", `String k) ]) ]
+  | WLoop inner -> `Assoc [ ("loop", `List (List.map wstep_to_json inner)) ]
+  | WChoice (by, brs) ->
+    `Assoc
+      [ ( "choose",
+          `Assoc
+            [ ("by", `String by);
+              ( "branches",
+                `List
+                  (List.map
+                     (fun (l, arm) -> `Assoc [ ("label", `String l); ("steps", `List (List.map wstep_to_json arm)) ])
+                     brs) ) ] ) ]
+  | WStop -> `String "stop"
+  | WCrashOr (m, crash) ->
+    `Assoc [ ("crash_or", `Assoc [ ("msg", wstep_to_json m); ("crash", `List (List.map wstep_to_json crash)) ]) ]
+
+exception Bad_baseline of string
+
+let rec wstep_of_json (j : Yojson.Safe.t) : wstep =
+  let str = function `String s -> s | _ -> raise (Bad_baseline "expected a string") in
+  let lst = function `List l -> l | _ -> raise (Bad_baseline "expected a list") in
+  let field k = function
+    | `Assoc kv -> (match List.assoc_opt k kv with Some v -> v | None -> raise (Bad_baseline ("missing `" ^ k ^ "`")))
+    | _ -> raise (Bad_baseline "expected an object")
+  in
+  match j with
+  | `String "stop" -> WStop
+  | `Assoc [ ("msg", m) ] -> WMsg (str (field "from" m), str (field "to" m), str (field "tag" m), str (field "payload" m))
+  | `Assoc [ ("loop", l) ] -> WLoop (List.map wstep_of_json (lst l))
+  | `Assoc [ ("choose", c) ] ->
+    WChoice
+      ( str (field "by" c),
+        List.map (fun b -> (str (field "label" b), List.map wstep_of_json (lst (field "steps" b)))) (lst (field "branches" c)) )
+  | `Assoc [ ("crash_or", c) ] -> WCrashOr (wstep_of_json (field "msg" c), List.map wstep_of_json (lst (field "crash" c)))
+  | _ -> raise (Bad_baseline "unknown step")
+
+let version_to_json (v : version) : Yojson.Safe.t =
+  `Assoc
+    [ ("protocol", `String v.v_proto);
+      ("fingerprint", `String v.v_fingerprint);
+      ("roles", `List (List.map (fun r -> `String r) v.v_roles));
+      ("steps", `List (List.map wstep_to_json v.v_steps)) ]
+
+let version_of_json (j : Yojson.Safe.t) : version =
+  let open Yojson.Safe.Util in
+  try
+    { v_proto = to_string (member "protocol" j);
+      v_fingerprint = to_string (member "fingerprint" j);
+      v_roles = List.map to_string (to_list (member "roles" j));
+      v_steps = List.map wstep_of_json (to_list (member "steps" j)) }
+  with Type_error (m, _) -> raise (Bad_baseline m)
+
+(** The format version of `.forge/protocols/<P>.json`.  A reader refuses any
+    other, rather than guessing at a layout it does not know. *)
+let baseline_format = 1
+
+let baseline_to_string (b : baseline) : string =
+  Yojson.Safe.pretty_to_string
+    (`Assoc
+       [ ("format", `Int baseline_format);
+         ("current", version_to_json b.current);
+         ("previous", match b.previous with Some v -> version_to_json v | None -> `Null) ])
+  ^ "\n"
+
+let baseline_of_string (s : string) : (baseline, string) result =
+  try
+    let j = Yojson.Safe.from_string s in
+    let open Yojson.Safe.Util in
+    (match member "format" j with
+     | `Int f when f = baseline_format -> ()
+     | `Int f -> raise (Bad_baseline (Printf.sprintf "format %d, this compiler reads %d" f baseline_format))
+     | _ -> raise (Bad_baseline "no `format`"));
+    Ok
+      { current = version_of_json (member "current" j);
+        previous = (match member "previous" j with `Null -> None | v -> Some (version_of_json v)) }
+  with
+  | Bad_baseline m -> Error m
+  | Yojson.Json_error m -> Error m
+
+(** The baseline to judge [fp] against: the stored version when the protocol
+    changed since it was written, the one before that when it did not (a
+    rebuild must not lose the table the change produced). *)
+let prior_version (b : baseline) ~(fp : string) : version option =
+  if b.current.v_fingerprint <> fp then Some b.current
+  else match b.previous with
+    | Some v when v.v_fingerprint <> fp -> Some v
+    | _ -> None
+
+(** What this build writes back: unchanged protocol, unchanged file; a changed
+    one moves the stored version to [previous]. *)
+let next_baseline (b : baseline option) (v : version) : baseline =
+  match b with
+  | None -> { current = v; previous = None }
+  | Some b when b.current.v_fingerprint = v.v_fingerprint -> { b with current = v }
+  | Some b -> { current = v; previous = Some b.current }
+
+(** The verdict of rule one on an (old, new) pair of versions. *)
+type compat_verdict =
+  | Same
+  | Compatible of { chooser : string; label : string; receivers : string list }
+      (** new = old plus [label] in one `choose by chooser`; [receivers] are the
+          roles that may run the new version against peers on the old one *)
+  | Incompatible of string  (** why, in words, for `forge deploy --plan` *)
+
+(** Every constructor in [ws], in reading order, with its endpoints. *)
+let rec wire_msgs (ws : wstep list) : (string * string * string) list =
+  List.concat_map
+    (function
+      | WMsg (f, t, c, _) -> [ (f, t, c) ]
+      | WLoop inner -> wire_msgs inner
+      | WChoice (_, brs) -> List.concat_map (fun (_, arm) -> wire_msgs arm) brs
+      | WStop -> []
+      | WCrashOr (m, crash) -> wire_msgs [ m ] @ wire_msgs crash)
+    ws
+
+let is_synth c = String.length c >= 4 && String.sub c 0 4 = "Msg_"
+
+(** Rule one (plan 6.4, II.5).  [old_] and [new_] are identical except that one
+    `choose` has exactly one extra branch; every other step, including every
+    branch both versions have, keeps its constructor (so its wire tag) and its
+    payload key.  Branch ORDER is not compared: the tag is the label, not a
+    position.  An added `crash` branch does not qualify (it changes what the
+    detector does, not only what the chooser may send).
+
+    The roles that may run the new version against old peers are the RECEIVERS
+    of that choice: every role other than the chooser that receives a message
+    in any of its branches.  An old chooser never picks the new branch, so a
+    new receiver is safe with it; a new chooser could pick it towards an old
+    receiver, so the chooser's own entry stays "same fingerprint only" and
+    rollouts upgrade receivers first.  A role the choice does not reach at all
+    also stays "same fingerprint only": conservative, and what the rule says. *)
+let compare_versions ~(old_ : version) ~(new_ : version) : compat_verdict =
+  if old_.v_fingerprint = new_.v_fingerprint then Same
+  else if old_.v_roles <> new_.v_roles then
+    Incompatible
+      (Printf.sprintf "the roles changed (%s, was %s)" (String.concat ", " new_.v_roles)
+         (String.concat ", " old_.v_roles))
+  else begin
+    let found = ref None in
+    let fail = ref None in
+    let rec eq_list (a : wstep list) (b : wstep list) =
+      List.length a = List.length b && List.for_all2 eq_step a b
+    and eq_step a b =
+      match a, b with
+      | WMsg (f1, t1, c1, k1), WMsg (f2, t2, c2, k2) -> f1 = f2 && t1 = t2 && c1 = c2 && k1 = k2
+      | WLoop x, WLoop y -> eq_list x y
+      | WStop, WStop -> true
+      | WCrashOr (m1, c1), WCrashOr (m2, c2) -> eq_step m1 m2 && eq_list c1 c2
+      | WChoice (by1, b1), WChoice (by2, b2) when by1 = by2 ->
+        let shared_ok =
+          List.for_all
+            (fun (l, arm) ->
+               match List.assoc_opt l b2 with Some arm' -> eq_list arm arm' | None -> false)
+            b1
+        in
+        if not shared_ok then false
+        else if List.length b2 = List.length b1 then true
+        else if List.length b2 = List.length b1 + 1 then begin
+          let extra = List.filter (fun (l, _) -> not (List.mem_assoc l b1)) b2 in
+          match extra, !found with
+          | [ ("crash", _) ], _ ->
+            fail := Some (Printf.sprintf "`choose by %s` gained a crash branch" by1); false
+          | [ (l, _) ], None -> found := Some (by1, l, b2); true
+          | [ _ ], Some _ -> fail := Some "more than one `choose` gained a branch"; false
+          | _ -> false
+        end
+        else false
+      | _ -> false
+    in
+    let same_shape = eq_list old_.v_steps new_.v_steps in
+    match same_shape, !found, !fail with
+    | true, Some (chooser, label, brs), None ->
+      let receivers =
+        List.sort_uniq String.compare
+          (List.filter_map (fun (_, t, _) -> if t <> chooser then Some t else None)
+             (wire_msgs [ WChoice (chooser, brs) ]))
+      in
+      Compatible { chooser; label; receivers }
+    | _, _, Some why -> Incompatible why
+    | true, None, None ->
+      (* Only a digest input outside the wire view differs; nothing both
+         versions exchange changed, but rule one does not name this case. *)
+      Incompatible "the fingerprint changed without a change the compatibility rule allows"
+    | false, _, None ->
+      (* Name the messages whose tags moved: the usual cause is an unlabelled
+         step renumbered by an inserted one (plan 6.4), and a label fixes it.
+         Align the two trees position by position (branches by label) and
+         report every positional name whose step now carries another. *)
+      let moved = ref [] in
+      let rec align (a : wstep list) (b : wstep list) =
+        match a, b with
+        | x :: xs, y :: ys -> align_step x y; align xs ys
+        | _ -> ()
+      and align_step a b =
+        match a, b with
+        | WMsg (_, _, c1, _), WMsg (_, _, c2, _) when c1 <> c2 && is_synth c1 ->
+          moved := (c1 ^ " is now " ^ c2) :: !moved
+        | WLoop x, WLoop y -> align x y
+        | WCrashOr (m1, c1), WCrashOr (m2, c2) -> align_step m1 m2; align c1 c2
+        | WChoice (_, b1), WChoice (_, b2) ->
+          List.iter (fun (l, arm) -> match List.assoc_opt l b2 with Some arm' -> align arm arm' | None -> ()) b1
+        | _ -> ()
+      in
+      align old_.v_steps new_.v_steps;
+      let renumbered = List.rev !moved in
+      if renumbered <> [] then
+        Incompatible
+          (Printf.sprintf
+             "unlabelled messages change their wire tags (%s): a step was inserted before them. \
+              Label them (`label: A -> B : T`) to pin their tags"
+             (String.concat ", " renumbered))
+      else Incompatible "the steps differ by more than one added `choose` branch"
+  end
+
+(** `<P>_Msg.compat()`'s rows for version [new_] against [old_]: [(fingerprint,
+    role, accepts)] for every role that accepts peers on another fingerprint.
+    Empty when there is nothing to accept (no baseline, the same fingerprint,
+    or a change rule one does not allow): "same fingerprint only". *)
+let compat_rows ~(old_ : version option) ~(new_ : version) : (string * string * string list) list =
+  match old_ with
+  | None -> []
+  | Some o ->
+    (match compare_versions ~old_:o ~new_ with
+     | Compatible { receivers; _ } ->
+       List.filter_map
+         (fun r -> if List.mem r receivers then Some (new_.v_fingerprint, r, [ o.v_fingerprint ]) else None)
+         new_.v_roles
+     | Same | Incompatible _ -> [])
+
+(** `--protocol-expand P:label` (D21): the protocols built as the EXPAND half
+    of a two-deploy change, with the branch the chooser holds back. *)
+let expand_labels : (string * string) list ref = ref []
+
+(** Baselines given with `--protocol-baseline`, by protocol name.  Set by the
+    driver before desugaring; empty everywhere else (the LSP, the REPL), which
+    generates an empty table -- what a first build gets too. *)
+let baselines : (string, baseline) Hashtbl.t = Hashtbl.create 4
+
+(** Every protocol version [expand] generated in this process, by name, with
+    the file it was declared in (the driver writes back only the user's, not
+    the stdlib's), for `--emit-protocols`. *)
+let emitted : (string, version * string) Hashtbl.t = Hashtbl.create 4
+
+(** The file `--emit-protocols` writes for [v]: the next baseline. *)
+let emit_file (v : version) : string =
+  baseline_to_string (next_baseline (Hashtbl.find_opt baselines v.v_proto) v)
+
+(** The protocols a topology app uses (named in `[roles]` or in a pool's
+    `initiates`), by short or qualified name.  Set by the driver from the
+    `--topology` digest and by the LSP from the project's topology.toml; each
+    unlabelled step of one of them is a warning (D25). *)
+let topology_protocols : string list ref = ref []
+
+let uses_protocol (proto : string) =
+  List.exists
+    (fun n ->
+       n = proto
+       || (match List.rev (String.split_on_char '.' n) with last :: _ -> last = proto | [] -> false))
+    !topology_protocols
+
+(** D25: each unlabelled step (not a branch head, which its branch label names)
+    of a protocol a topology app uses is a warning at the step, naming the
+    positional name it would get renumbered out of and suggesting a label. *)
+let warn_unlabelled (errors : Err.ctx) ~proto (steps : protocol_step list) : unit =
+  let counts : (string * string, int) Hashtbl.t = Hashtbl.create 8 in
+  let name s r =
+    let k = 1 + Option.value ~default:0 (Hashtbl.find_opt counts (s, r)) in
+    Hashtbl.replace counts (s, r) k;
+    Printf.sprintf "Msg_%s_%s_%d" s r k
+  in
+  let warn (s : name) (r : name) =
+    let c = name s.txt r.txt in
+    Err.warning errors ~span:s.span
+      (Printf.sprintf
+         "Protocol `%s` is used by this app's topology, and the step `%s -> %s` has no label, so its \
+          wire tag is the positional `%s`. A step added before it renumbers it and breaks a hot deploy \
+          (D25). Label it: `%s: %s -> %s : ...`."
+         proto s.txt r.txt c
+         (String.lowercase_ascii s.txt ^ "_to_" ^ String.lowercase_ascii r.txt) s.txt r.txt)
+  in
+  let rec go (steps : protocol_step list) =
+    List.iter
+      (function
+        | ProtoMsg (s, r, _, None) -> warn s r
+        | ProtoMsg (_, _, _, Some _) -> ()
+        | ProtoLoop (inner, _) -> go inner
+        | ProtoCrashOr (inner, crash, _) -> go [ inner ]; go crash
+        | ProtoChoice (_, branches) ->
+          List.iter
+            (fun (_, arm) ->
+               match arm with
+               | (ProtoMsg _ | ProtoCrashOr (ProtoMsg _, _, _)) :: rest -> go rest
+               | arm -> go arm)
+            branches
+        | ProtoStop _ | ProtoMayCrash _ | ProtoRoleNeeds _ -> ())
+      steps
+  in
+  go steps
 
 (** Whether [expand] emits `<P>_Run`.  On for every real compile.  A test that
     typechecks generated code against a thin stdlib without `SessionNode`
@@ -2041,15 +2442,59 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
                 | d -> d
               in
               let peers = List.map (fun r -> (r, peers_of steps roles r)) roles in
-              let fingerprint = fingerprint_of ~proto ~types:(ty_defs_of decls) roles steps in
-              let msg = msg_module errors ~proto ~span ~fingerprint ctors roles peers in
+              let types = ty_defs_of decls in
+              let fingerprint = fingerprint_of ~proto ~types roles steps in
+              let version =
+                { v_proto = proto; v_fingerprint = fingerprint; v_roles = roles; v_steps = wire_of ~types steps }
+              in
+              Hashtbl.replace emitted proto (version, span.file);
+              let compat =
+                match Hashtbl.find_opt baselines proto with
+                | None -> []
+                | Some b -> compat_rows ~old_:(prior_version b ~fp:fingerprint) ~new_:version
+              in
+              if uses_protocol proto then warn_unlabelled errors ~proto pdef.proto_steps;
+              (* An expand build: the change must be rule one against the
+                 baseline, adding exactly the named branch. *)
+              let held =
+                match List.assoc_opt proto !expand_labels with
+                | None -> None
+                | Some label ->
+                  let prior = Option.bind (Hashtbl.find_opt baselines proto) (fun b -> prior_version b ~fp:fingerprint) in
+                  (match prior with
+                   | None ->
+                     Err.error errors ~span
+                       (Printf.sprintf
+                          "--protocol-expand %s:%s needs the protocol's previous version (--protocol-baseline) to split against."
+                          proto label);
+                     None
+                   | Some old_ ->
+                     (match compare_versions ~old_ ~new_:version with
+                      | Compatible { chooser; label = l; _ } when l = label -> Some (chooser, label, old_.v_fingerprint)
+                      | Compatible { label = l; _ } ->
+                        Err.error errors ~span
+                          (Printf.sprintf "--protocol-expand %s:%s: the branch this version adds is `%s`." proto label l);
+                        None
+                      | Same | Incompatible _ ->
+                        Err.error errors ~span
+                          (Printf.sprintf
+                             "--protocol-expand %s:%s: this version is not the previous one plus that branch, so there is nothing to split."
+                             proto label);
+                        None))
+              in
+              let msg =
+                msg_module errors ~proto ~span ~fingerprint ~compat
+                  ?held:(Option.map (fun (c, _, f) -> (c, f)) held) ctors roles peers
+              in
               let grants = grants_of pdef.proto_steps in
               let role_mods =
                 List.map
                   (fun role ->
                      role_module errors ~proto ~span ~roles ~nctors:(List.length ctors)
                        ~grants:(Option.value ~default:[] (List.assoc_opt role grants))
-                       ~crash_points:(crash_ctors_of steps role) role
+                       ~crash_points:(crash_ctors_of steps role)
+                       ~held_labels:(match held with Some (c, l, _) when c = role -> [ l ] | _ -> [])
+                       role
                        (project ~proto ~multiparty steps role LEnd))
                   roles
               in
