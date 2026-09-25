@@ -26,6 +26,15 @@ git log is authoritative for exact commits.
 
 - `forge run --processes` no longer occasionally assigns two pools the same cluster port (seen on Linux CI as `tcp_listen: bind failed`); the ports for all processes are now reserved together.
 
+- **Compiling the same source twice at once (different `-o` or `--opt`) no longer
+  fails at random with `Undefined symbols: "_main"`.** Both compiles wrote their LLVM
+  IR to the same `<source>.ll` file and handed it to clang, so one could truncate the
+  file while the other's clang was reading it. Now each compile writes its IR to a
+  private temp file and links from that. When clang finishes, the temp is atomically
+  renamed onto `<source>.ll`, so the IR still ends up where it always has, on failure
+  too.
+
+- `forge run --processes` no longer occasionally assigns two pools the same cluster port (seen on Linux CI as `tcp_listen: bind failed`); the ports for all processes are now reserved together.
 - **Multi-threaded programs no longer occasionally abort with SIGTRAP (or a bare
   `Killed: 9`) at shutdown under load.** When a scheduler worker thread exited, a
   preemption tick already on its way could land inside the thread's teardown, and
@@ -614,6 +623,20 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- **Compiled `Map` and `Set` now use the comparator you pass.** In compiled
+  code, calling a local (a parameter, `let`, pattern variable or lambda
+  parameter) whose name is also a builtin or interface method (`eq`,
+  `compare`, `hash`, `show`, `to_string`) called the builtin instead of the
+  local. `Map` and `Set` name their comparator-derived closure `eq`, so
+  compiled they compared keys with `==` and never called the comparator: a
+  `Float` NaN key was never found and re-inserting it added a second entry,
+  and a comparator that is not `==` behaved differently from the
+  interpreter. A local of that name now shadows the builtin, as it does
+  interpreted. With that fixed, a top-level function that returns a closure
+  (`fn lt(a) do fn b -> a < b end`, including `Map.int_cmp` / `Map.str_cmp`)
+  passed as a value and called curried no longer crashes compiled programs
+  with SIGSEGV.
+
 - **Per-role grants check the value that reaches the runner, not the expression at the
   call.** `check_role_grants` used to walk only a literal lambda or a directly named
   function; a body bound with `let`, passed through a parameter, calling a `let`-aliased

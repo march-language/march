@@ -726,6 +726,16 @@ let with_scope_locals (names : string list) (f : unit -> 'a) : 'a =
     ~finally:(fun () -> List.iter (fun n -> Hashtbl.remove _scope_locals n) names)
     f
 
+(** [name] is currently bound by a LOCAL binder in the code being lowered: a
+    parameter, a [let], a pattern variable, a lambda parameter, or a nested
+    named fn.  Such a binding shadows every same-named global -- an import
+    alias, a builtin, an interface method -- exactly as in the interpreter.
+    Checked before a call is resolved as interface-method dispatch: without
+    it, `pfn via(eq : Int -> Int -> Bool, a : Int, b : Int) = eq(a, b)` was
+    lowered to `Eq$Int.eq(a, b)` and the caller's closure never ran. *)
+let is_local_binding (name : string) : bool =
+  Hashtbl.mem _fn_param_types name || Hashtbl.mem _scope_locals name
+
 let resolve_use_alias (env : env) (name : string) : string =
   if Hashtbl.mem _fn_param_types name then name
   else if Hashtbl.mem _scope_locals name then name
