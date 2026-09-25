@@ -252,6 +252,30 @@ let test_unlabelled_steps_warning () =
       | None -> Alcotest.failf "D25 warning missing:\n%s" (show_lsp lsp)
       | Some (_, is_err, _, _) -> Alcotest.(check bool) "a warning" false is_err)
 
+(* D25 in the protocol's own file (build step 9): analysing a `.march` buffer
+   in a project whose topology names `Thumbs` warns at each of its unlabelled
+   steps, on the step's line; `Checkout` (labelled) and `Quotes` (labelled)
+   stay quiet, and so does the same file with no topology. *)
+let test_unlabelled_steps_warn_in_march_file () =
+  let d25 (a : An.t) =
+    List.filter_map (fun (d : Lsp.Types.Diagnostic.t) ->
+        let m = (match d.message with `String s -> s | _ -> "") in
+        if str_contains ~sub:"(D25)" m then Some (d.range.start.line + 1, m) else None)
+      a.diagnostics
+  in
+  with_project (fun root ->
+      let a = March_lsp_lib.Analysis.analyse ~filename:(shop_path root) ~src:shop_march in
+      let ws = d25 a in
+      Alcotest.(check (list int)) "one warning per unlabelled Thumbs step, at its line"
+        [ fst (pos_of shop_march "Edge -> Render") + 1; fst (pos_of shop_march "Render -> Edge") + 1 ]
+        (List.sort compare (List.map fst ws));
+      List.iter (fun (_, m) ->
+          if not (str_contains ~sub:"Protocol `Thumbs`" m) then Alcotest.failf "wrong protocol: %s" m) ws;
+      Sys.remove (base_path root);
+      Sys.remove (prod_path root);
+      Alcotest.(check int) "no topology, no warning" 0
+        (List.length (d25 (March_lsp_lib.Analysis.analyse ~filename:(shop_path root) ~src:shop_march))))
+
 let test_overlay_shows_its_own_diagnostics () =
   let prod = prod_toml ^ "\n[pool.edge]\nhosts = [{ host = \"root@web-1\", label = [\"x\"] }]\n" in
   with_project ~prod:(Some prod) (fun root ->
@@ -475,6 +499,7 @@ let tests = [
   "unknown label under an overlay",        `Quick, test_unknown_label_under_overlay;
   "count above host count",                `Quick, test_count_above_hosts_under_overlay;
   "unlabelled-step warning",               `Quick, test_unlabelled_steps_warning;
+  "unlabelled-step warning in the .march file", `Quick, test_unlabelled_steps_warn_in_march_file;
   "overlay shows its own diagnostics",     `Quick, test_overlay_shows_its_own_diagnostics;
   "malformed TOML line",                   `Quick, test_malformed_toml_line;
   ".march edit updates topology diags",    `Quick, test_march_edit_updates_topology_diagnostics;

@@ -94,6 +94,37 @@ git log is authoritative for exact commits.
   interpreter does, instead of returning a UUID with a garbage timestamp.
 
 ### Added
+- **Protocol changes across versions** (build step 9 of the distributed-deploys
+  plan). Every `@[endpoints]` protocol's `<P>_Msg` module now has `compat()`: per
+  role, the previous fingerprint that role may form a session with. It is computed at
+  build time against the previous version of the protocol, which the compiler reads
+  with `--protocol-baseline <file>` and writes with `--emit-protocols <dir>`;
+  `forge build` keeps it in `.forge/protocols/<P>.json` for any project that declares a
+  protocol. One change counts as compatible so far: a `choose` gaining a branch, for the
+  roles that receive that choice (not the one that makes it), and only if every message
+  both versions exchange keeps its wire tag and payload type. An unlabelled message
+  renumbered by the new branch makes the change breaking, and the explanation names the
+  tags that moved.
+- **Access points form mixed-version sessions.** Offer names carry the fingerprint, so
+  a node can offer two versions of one role; initiators invite only offers their table
+  allows (no round trip wasted on "protocol differs"), and an offer accepts a version
+  its table, or a newer initiator's check, allows. `Topology.reoffer` reopens a role
+  whose protocol changed with a fresh hosting actor and stops the old actor once its
+  sessions have ended.
+- **`--protocol-expand <P>:<label>`** builds the first half of a two-deploy protocol
+  change for a binary that both makes and receives the changed choice: the chooser
+  stays on the previous fingerprint and cannot pick the new branch. forge's
+  `Protocol_split.plan` says when a change needs it.
+- **Typed remote messages carry a schema hash.** `Node.send` / `Node.enqueue` put the
+  message type's structural hash in the frame; an `@[remote]` actor accepts a matching
+  (or absent) hash, converts an older shape through its `migrate_msg`, and refuses
+  anything else with `DELIVERY_FAILED`. A node built before this refuses the longer
+  frame, so upgrade receivers first.
+- **Unlabelled steps in a protocol your topology uses are now a warning at the step**
+  (D25), in `march --topology` output and in the editor, with a suggested label.
+  Positional names (`Msg_A_B_2`) renumber when a step is added before them, which
+  breaks a hot deploy; a label pins the wire tag. `forge topology check` already
+  warned once per protocol in `topology.toml`.
 - **Sessions drain automatically at loop boundaries** (D27, build step 6's
   follow-ups). When a node is draining (a hot deploy's `DRAIN`, or SIGTERM under
   `Topology.drain_on_signal`), every session it takes part in ends at the next
