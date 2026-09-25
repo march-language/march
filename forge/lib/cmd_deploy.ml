@@ -388,7 +388,7 @@ let health c ~(opts : opts) : Hosts.health = fun h ->
 
 (** Restart one node on [binary]: upload it, give it the topology, restart
     its unit. The health gate waits for it to come up. *)
-let restart_node c ~binary (n : Reconcile.ssh_node) : (unit, string) result =
+let restart_node c ?policy ~binary (n : Reconcile.ssh_node) : (unit, string) result =
   let p = pool_of c n.sn_pool in
   let remote = Host_layout.binary c.layout ~binary_name:(Topology.Gen.binary_name ~project:c.proj.Project.name p) in
   Printf.printf "  %s: uploading %s\n%!" n.sn.Hosts.name (Filename.basename binary);
@@ -396,6 +396,11 @@ let restart_node c ~binary (n : Reconcile.ssh_node) : (unit, string) result =
   let script =
     Reconcile.sudo_prelude c.layout
     ^ Reconcile.put_file_script ~path:(Host_layout.topology_file c.layout) ~mode:0o644 (Topology.digest_text c.t)
+    (* The node policy for the build being installed: the pool's caps plus
+       its runner's (Host_init.runner_caps). Read by the node at start. *)
+    ^ (match policy with
+        | Some text -> Reconcile.put_file_script ~path:(Host_layout.policy_file c.layout n.sn_pool) ~mode:0o644 text
+        | None -> "")
     ^ Printf.sprintf "$SUDO %s restart %s\n" c.service_ctl (Remote.sh_quote (Host_layout.unit_name n.sn_pool))
   in
   let r = c.transport.Remote.exec n.sn script in
@@ -577,8 +582,12 @@ let run ?transport ?service_ctl ?layout_prefix ~proj ~env ~(opts : opts) () : (s
             let compacting = List.mem_assoc pp.pp_build plan.compact in
             let* () =
               on_nodes c ~opts ~canary:0 nodes (fun n ->
-                  let* binary = build_base c ~build:pp.pp_build ~pools ~target:(Option.get n.sn_target) in
-                  restart_node c ~binary n)
+                  let target = Option.get n.sn_target in
+                  let* binary = build_base c ~build:pp.pp_build ~pools ~target in
+                  let manifest = Option.map (fun a -> a.a_manifest)
+                      (List.find_opt (fun a -> a.a_build = pp.pp_build && a.a_target = target) artifacts) in
+                  let policy = Host_init.policy_text ~derived ?manifest (pool_of c n.sn_pool) in
+                  restart_node c ?policy ~binary n)
             in
             if not compacting then Ok ()
             else

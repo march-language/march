@@ -110,11 +110,15 @@ the rebuilt base had the same baseline hashes, removes it and restarts once more
 3. **The runtime's topology hook is still a no-op**, so the ssh backend writes the digest
    file and SIGHUPs the unit after the signed push (the unsigned half rides on ssh's own
    authority).
-4. **The policy file bounds functions too.** `MARCH_DEPLOY_POLICY` is applied to each
-   patched function's own caps as well as to role closures; a policy generated from a
-   pool's caps can refuse a patch that changes a stdlib function using a cap outside
-   them (the cluster runner's networking). Generated as the brief says, from the pool's
-   caps; follow-up in the 10b todo.
+4. **The node policy includes the runner's caps.** Since the hook watchdog landed on
+   main, every role closure reaches `IO.Clock`, `IO.Mut`, `IO.Process` and `IO.Spawn`
+   through the stdlib's `Topology.hook`, so a policy of the pool's written caps alone
+   refused every hot patch (`ERR role_cap_policy`, found when merging main). The policy
+   is now the pool's caps plus the caps its role closures reach only through
+   `Topology.*` frames (`Host_init.runner_caps`, from the manifest's `via=` chains),
+   written by `forge deploy` before each restart and by `host init` from the last
+   deployed manifest. A cap the user's own code reaches still has to be in the pool's
+   caps. The gate also bounds each patched function's own caps; see the follow-up.
 5. **The connectivity-graph firewall may partition SWIM.** The step-7 ufw rules open the
    cluster port only between pools that exchange protocol messages; membership probes
    every member. `host init` applies them when ufw is installed. Filed:

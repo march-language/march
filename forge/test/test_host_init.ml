@@ -129,6 +129,28 @@ let test_local_idempotent () =
   let fourth = match run () with Ok r -> r | Error m -> Alcotest.failf "fourth run failed:\n%s" m in
   refuse "certificates are reused" fourth [ "changed (" ]
 
+(** The node policy is the pool's caps plus what its role closures reach
+    only through the stdlib runner (Topology.hook), never a cap the user's
+    own code reaches. *)
+let test_runner_caps () =
+  let pool = match Topology.of_strings [ ("topology.toml",
+      "[roles]\n\"Echo.Server\" = { body = \"App.serve\" }\n[pool.a]\nserves = [\"Echo.Server\"]\ncaps = [\"IO.Console\"]\n") ] with
+    | Ok t -> List.hd t.Topology.pools
+    | Error _ -> Alcotest.fail "fixture" in
+  let role name chains = { Cmd_deploy_hot.role_name = name; role_caps = List.map fst chains; role_chains = chains } in
+  let m = { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = None; hcr_abi = None; module_prefix = None;
+            functions = [];
+            roles = [ role "Echo.Server" [ ("IO.Clock", [ "body"; "Topology.hook" ]);
+                                           ("IO.Console", [ "body"; "Back.serve_one" ]);
+                                           ("IO.FileWrite", [ "body"; "Back.serve_one"; "Topology.save" ]);
+                                           ("IO.Spawn", [ "body"; "Topology.hook"; "Topology.watchdog" ]) ];
+                      role "Other.Role" [ ("IO.Process", [ "body"; "Topology.hook" ]) ] ] } in
+  Alcotest.(check (list string)) "runner caps" [ "IO.Clock"; "IO.Spawn" ] (Host_init.runner_caps m pool);
+  Alcotest.(check (option string)) "policy text" (Some "IO.Clock\nIO.Console\nIO.Spawn\n")
+    (Host_init.policy_text ~derived:None ~manifest:m pool);
+  Alcotest.(check (option string)) "no manifest: the written caps" (Some "IO.Console\n")
+    (Host_init.policy_text ~derived:None pool)
+
 let test_refuses_non_ssh () =
   with_home @@ fun () ->
   let dir = short_tmp "n" in
@@ -242,6 +264,7 @@ let () =
         Alcotest.test_case "files, environment, secret and certificate modes; a second run changes nothing" `Quick
           test_local_idempotent;
         Alcotest.test_case "refuses a topology that is not ssh" `Quick test_refuses_non_ssh;
+        Alcotest.test_case "the node policy adds the runner's caps, not the user's" `Quick test_runner_caps;
       ]);
     ("container", [
         Alcotest.test_case "over ssh against an sshd container: converges, records the target, idempotent" `Slow

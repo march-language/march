@@ -4,10 +4,10 @@ What [../progress/2026-09-22-dd-step10-ssh-backend-and-plan.md](../progress/2026
 left open, each small:
 
 - **Node policy vs function caps.** `MARCH_DEPLOY_POLICY` bounds each patched
-  function's own caps as well as role closures; a policy from a pool's caps refuses a
-  patch that changes a stdlib function outside them (e.g. the cluster runner's
-  networking). Generate the policy from the pool's caps plus the runtime's own, or have
-  the gate apply the policy to role closures only.
+  function's own caps as well as role closures. The policy now adds the runner's caps
+  (`Host_init.runner_caps`), but a patch that changes a stdlib function outside both
+  (e.g. the cluster's networking) is still refused. Add the runtime's own caps, or
+  have the gate apply the policy to role closures only.
 - **Topology hook.** Fill `march_hcr_on_topology` (runtime) so a signed `TOPOLOGY`
   push is applied by the node; the ssh backend then stops writing the digest file and
   sending SIGHUP itself.

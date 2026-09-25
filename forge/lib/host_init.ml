@@ -198,6 +198,37 @@ let pool_policy ~(derived : (string * (string list * string list)) list option) 
     Option.map (fun (caps, _) -> List.sort_uniq String.compare caps)
       (Option.bind derived (List.assoc_opt p.pool_name))
 
+(** The caps a pool's role closures reach only through the stdlib's
+    topology runner: the generated code wraps each role body in
+    [Topology.hook] (the hook watchdog), whose clock, spawn, process and
+    vault authority is charged to every role closure (the manifest's [ROLE]
+    lines, [via=] chains [body>Topology.hook>...]). The user did not write
+    them in the pool's [caps] and cannot remove them, so a node policy of
+    the written caps alone would refuse every hot patch of the pool
+    ([ERR role_cap_policy]). A cap the user's own code reaches is not a
+    runner cap: it still has to be in the pool's caps. *)
+let runner_caps (m : Cmd_deploy_hot.manifest) (p : Topology.pool) : string list =
+  let is_runner frame = String.length frame >= 9 && String.sub frame 0 9 = "Topology." in
+  List.concat_map (fun (r : Cmd_deploy_hot.role_manifest) ->
+      if not (List.mem r.role_name p.serves) then []
+      else
+        List.filter_map (fun (cap, chain) ->
+            match chain with
+            | _body :: frame :: _ when is_runner frame -> Some cap
+            | _ -> None)
+          r.role_chains)
+    m.roles
+  |> List.sort_uniq String.compare
+
+(** The policy file's text for a pool: its caps ([pool_policy]) plus, when
+    the manifest being installed is known, its runner's ([runner_caps]).
+    None: no policy (the pool's caps are unknown). *)
+let policy_text ~derived ?manifest (p : Topology.pool) : string option =
+  Option.map (fun caps ->
+      let runner = match manifest with Some m -> runner_caps m p | None -> [] in
+      String.concat "" (List.map (fun c -> c ^ "\n") (List.sort_uniq String.compare (caps @ runner))))
+    (pool_policy ~derived p)
+
 (** Everything [forge host init] wants on each host. Pure apart from the
     credentials ([auth], certificates issued into [.forge/hosts/]). *)
 let plan ~root ~(opts : opts) ~(proj : Project.project) ~(layout : Host_layout.t) ~(t : Topology.t)
@@ -215,7 +246,13 @@ let plan ~root ~(opts : opts) ~(proj : Project.project) ~(layout : Host_layout.t
       let* acc = acc in
       let pool = n.sn_pool in
       let p = List.find (fun (p : Topology.pool) -> p.pool_name = pool) t.pools in
-      let policy = pool_policy ~derived p in
+      (* The runner's caps come from the manifest last deployed to this
+         environment, when there is one, so host init and forge deploy
+         write the same policy. *)
+      let deployed =
+        Result.to_option (Cmd_deploy_hot.parse_manifest
+                            (Reconcile.deployed_manifest_file ~root opts.env (Reconcile.build_of_pool t pool))) in
+      let policy = policy_text ~derived ?manifest:deployed p in
       let notes =
         if policy = None then
           [ Printf.sprintf "pool %s has no written caps and the compiler could not derive them: no capability \
@@ -260,9 +297,9 @@ let plan ~root ~(opts : opts) ~(proj : Project.project) ~(layout : Host_layout.t
           { f_path = Host_layout.topology_file layout; f_mode = 0o644; f_owner = ""; f_content = digest;
             f_on_change = "" } ]
         @ (match policy with
-            | Some caps ->
+            | Some text ->
               [ { f_path = Host_layout.policy_file layout pool; f_mode = 0o644; f_owner = "";
-                  f_content = String.concat "" (List.map (fun c -> c ^ "\n") caps); f_on_change = "RESTART_NEEDED=1" } ]
+                  f_content = text; f_on_change = "RESTART_NEEDED=1" } ]
             | None -> [])
         @ cert_files
         @ (match firewall with
