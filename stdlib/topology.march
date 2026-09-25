@@ -769,6 +769,13 @@ mod Topology do
   fn close_all(node : Cap(ClusterNode.Live)) : () do
     let st = state_of(node)
     Vault.set(st.meta, "closing", 1)
+    -- Withdraw from every ranked role's rendezvous ranking first, so the
+    -- other nodes re-offer a `count = n` role now instead of after this
+    -- node's whole drain plus SWIM's suspect timeout (4.2: losing a role is
+    -- a drain, not a cut). A brief duplicate offer is tolerated (D19), and
+    -- the sessions this node is running continue.
+    List.each(Vault.get_or(st.roles, "roles", Nil), fn r ->
+      if ranked(r.place) do mark(node, st, r.name, false) else () end)
     List.each(Vault.all(st.offers), fn kv -> match kv do (name, o) -> retire(st, name, o) end)
   end
 
@@ -811,10 +818,15 @@ mod Topology do
     let spent = unix_time_ms() - t0
     if n == 0 do
       report("drained " ++ label(node))
+      -- Leave the cluster (close the links and the listener) rather than
+      -- vanish: peers see the links close instead of waiting out a suspect
+      -- timeout.
+      ClusterNode.stop(node)
       process_exit(0)
       0
     else if spent >= hard_ms do
       report("hard deadline: stopping " ++ label(node) ++ " with " ++ int_to_string(n) ++ " session(s) still running")
+      ClusterNode.stop(node)
       process_exit(1)
       1
     else

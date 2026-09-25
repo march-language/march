@@ -51,6 +51,12 @@ where both registrations slip in before either is visible. The failing one:
    concurrent local `register`s of one name cannot both succeed, and stop a
    pid's death from unregistering a name another pid holds. Pin both with a
    stdlib test.
-2. Give the fixture's `Echo.Counted` role an offer of its own (a second
-   protocol, or a distinct role) so the golden no longer depends on two roles
-   sharing one name; regenerate `topology_place.expected`.
+2. ~~Give the fixture's `Echo.Counted` role an offer of its own~~ Done in #646
+   (commit 4a450eadc): `Echo.Counted` now offers its own `Tally` protocol, and
+   the golden is unchanged. An independent run with a per-role-protocol fixture
+   in the `march-amdr-repro` container (60 runs, 12-way parallel) went from 4/60
+   failures to 0/60. With a trace in `Topology.open_role`, `AlreadyOffered`
+   never happened after the change, and every passing run before it had
+   BOTH roles' `offer_Server` return `Ok` for the one name, confirming item 1.
+   Item 1 is what remains; no test exercises it any more, so its fix needs its
+   own stdlib test.

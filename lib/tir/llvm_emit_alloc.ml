@@ -277,31 +277,47 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
              "call void @march_actor_set_dispatch_id(ptr %s, i32 %d)" ptr slot_id)
          | None -> ()
        end;
-       (* Actor.call tag-base registration. F19 (build_ctor_info) gives actor
-          _Msg ctors GLOBALLY-unique tags (base 0x0100_0000 + declaration
-          index) so cross-actor sends can't misroute — but march_actor_call
-          stamps the augmented call message with the SENTINEL's per-type
-          0-based tag (= handler index). Register this actor's first-msg-ctor
-          global tag so the runtime can translate index → global tag; without
-          it every compiled Actor.call falls to the dispatch default arm and
-          is dropped (the caller blocks forever / times out). Emitted at the
+       (* Actor.call tag-table registration. F19 (build_ctor_info) gives
+          actor _Msg ctors GLOBALLY-unique tags (a stable hash of the
+          qualified constructor name, Llvm_toplevel.actor_msg_tag_table) so
+          cross-actor sends can't misroute — but march_actor_call stamps the
+          augmented call message with the SENTINEL's per-type 0-based tag
+          (= handler index). Register this actor's tags in handler order so
+          the runtime can translate index → global tag; without it every
+          compiled Actor.call falls to the dispatch default arm and is
+          dropped (the caller blocks forever / times out). Emitted at the
           alloc (like the shape stamp above) so supervisor respawns, which
-          re-run the March-level spawn closure, re-register the fresh record. *)
+          re-run the March-level spawn closure, re-register the fresh record.
+          The runtime interns (copies) the table: this constant may live in a
+          hot patch that is dlclosed while the actor still runs. *)
        if Tir_names.is_actor_struct_name alloc_type_name then begin
          let actor_base = String.sub alloc_type_name 0 (atn_len - sfx_len) in
          let msg_ty_name = actor_base ^ Tir_names.actor_msg_suffix in
-         let first_ctor = List.find_map (function
-           | Tir.TDVariant (n, (c, _) :: _) when n = msg_ty_name -> Some c
+         let ctors = List.find_map (function
+           | Tir.TDVariant (n, (_ :: _ as cs)) when n = msg_ty_name -> Some cs
            | _ -> None) ctx.type_defs
          in
-         match first_ctor with
-         | Some c ->
-           (match Hashtbl.find_opt ctx.ctor_info (msg_ty_name ^ "." ^ c) with
-            | Some e ->
-              emit ctx (Printf.sprintf
-                "call void @march_actor_set_call_base(ptr %s, i64 %d)"
-                ptr e.ce_tag)
-            | None -> ())
+         match ctors with
+         | Some cs ->
+           let tags = List.filter_map (fun (c, _) ->
+               Option.map (fun e -> e.ce_tag)
+                 (Hashtbl.find_opt ctx.ctor_info (msg_ty_name ^ "." ^ c))) cs in
+           if List.length tags = List.length cs then begin
+             let g = "@.calltags." ^ String.map (fun c ->
+                 match c with
+                 | 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' | '.' -> c
+                 | _ -> '_') msg_ty_name in
+             if not (Hashtbl.mem ctx.call_tag_globals g) then begin
+               Hashtbl.replace ctx.call_tag_globals g ();
+               Buffer.add_string ctx.preamble (Printf.sprintf
+                 "%s = private unnamed_addr constant [%d x i32] [%s]\n"
+                 g (List.length tags)
+                 (String.concat ", " (List.map (Printf.sprintf "i32 %d") tags)))
+             end;
+             emit ctx (Printf.sprintf
+               "call void @march_actor_set_call_tags(ptr %s, ptr %s, i64 %d)"
+               ptr g (List.length tags))
+           end
          | None -> ()
        end;
        ("ptr", ptr))

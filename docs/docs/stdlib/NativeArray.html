@@ -1634,8 +1634,11 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NativeArray.html#fn-set_i32"><span class="sb-kind" style="color:var(--fn)">F</span>set_i32</a>
 <a class="sl" href="NativeArray.html#fn-set_int"><span class="sb-kind" style="color:var(--fn)">F</span>set_int</a>
 <a class="sl" href="NativeArray.html#fn-set_u8"><span class="sb-kind" style="color:var(--fn)">F</span>set_u8</a>
+<a class="sl" href="NativeArray.html#fn-sort_f32"><span class="sb-kind" style="color:var(--fn)">F</span>sort_f32</a>
 <a class="sl" href="NativeArray.html#fn-sort_float"><span class="sb-kind" style="color:var(--fn)">F</span>sort_float</a>
+<a class="sl" href="NativeArray.html#fn-sort_i32"><span class="sb-kind" style="color:var(--fn)">F</span>sort_i32</a>
 <a class="sl" href="NativeArray.html#fn-sort_int"><span class="sb-kind" style="color:var(--fn)">F</span>sort_int</a>
+<a class="sl" href="NativeArray.html#fn-sort_u8"><span class="sb-kind" style="color:var(--fn)">F</span>sort_u8</a>
 <a class="sl" href="NativeArray.html#fn-sum_f32"><span class="sb-kind" style="color:var(--fn)">F</span>sum_f32</a>
 <a class="sl" href="NativeArray.html#fn-sum_float"><span class="sb-kind" style="color:var(--fn)">F</span>sum_float</a>
 <a class="sl" href="NativeArray.html#fn-sum_i32"><span class="sb-kind" style="color:var(--fn)">F</span>sum_i32</a>
@@ -2142,6 +2145,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Seq.html#fn-unfold_until"><span class="sb-kind" style="color:var(--fn)">F</span>unfold_until</a>
 <a class="sl" href="Seq.html#fn-zip"><span class="sb-kind" style="color:var(--fn)">F</span>zip</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Session.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Session.html">Session</a></div><div class="sb-sub"><a class="sl" href="Session.html#type-Ops"><span class="sb-kind" style="color:var(--ty)">T</span>Ops</a>
+<a class="sl" href="Session.html#type-Outcome"><span class="sb-kind" style="color:var(--ty)">T</span>Outcome</a>
 <a class="sl" href="Session.html#type-InProcess"><span class="sb-kind" style="color:var(--ty)">T</span>InProcess</a>
 <a class="sl" href="Session.html#type-InProcessState"><span class="sb-kind" style="color:var(--ty)">T</span>InProcessState</a>
 <a class="sl" href="Session.html#fn-attach"><span class="sb-kind" style="color:var(--fn)">F</span>attach</a>
@@ -2149,6 +2153,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Session.html#fn-crash_cause"><span class="sb-kind" style="color:var(--fn)">F</span>crash_cause</a>
 <a class="sl" href="Session.html#fn-crash_payload"><span class="sb-kind" style="color:var(--fn)">F</span>crash_payload</a>
 <a class="sl" href="Session.html#fn-emit"><span class="sb-kind" style="color:var(--fn)">F</span>emit</a>
+<a class="sl" href="Session.html#fn-epoch_holds_here"><span class="sb-kind" style="color:var(--fn)">F</span>epoch_holds_here</a>
 <a class="sl" href="Session.html#fn-fail"><span class="sb-kind" style="color:var(--fn)">F</span>fail</a>
 <a class="sl" href="Session.html#fn-hold_epoch"><span class="sb-kind" style="color:var(--fn)">F</span>hold_epoch</a>
 <a class="sl" href="Session.html#fn-in_process"><span class="sb-kind" style="color:var(--fn)">F</span>in_process</a>
@@ -2156,9 +2161,11 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Session.html#fn-leave"><span class="sb-kind" style="color:var(--fn)">F</span>leave</a>
 <a class="sl" href="Session.html#fn-on_cancel"><span class="sb-kind" style="color:var(--fn)">F</span>on_cancel</a>
 <a class="sl" href="Session.html#fn-on_crash"><span class="sb-kind" style="color:var(--fn)">F</span>on_crash</a>
+<a class="sl" href="Session.html#fn-on_drain"><span class="sb-kind" style="color:var(--fn)">F</span>on_drain</a>
 <a class="sl" href="Session.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
 <a class="sl" href="Session.html#fn-release_epoch"><span class="sb-kind" style="color:var(--fn)">F</span>release_epoch</a>
-<a class="sl" href="Session.html#fn-suspend"><span class="sb-kind" style="color:var(--fn)">F</span>suspend</a></div></div>
+<a class="sl" href="Session.html#fn-suspend"><span class="sb-kind" style="color:var(--fn)">F</span>suspend</a>
+<a class="sl" href="Session.html#fn-suspend_at_boundary"><span class="sb-kind" style="color:var(--fn)">F</span>suspend_at_boundary</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="SessionNode.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="SessionNode.html">SessionNode</a></div><div class="sb-sub"><a class="sl" href="SessionNode.html#type-Link"><span class="sb-kind" style="color:var(--ty)">T</span>Link</a>
 <a class="sl" href="SessionNode.html#type-EndpointState"><span class="sb-kind" style="color:var(--ty)">T</span>EndpointState</a>
 <a class="sl" href="SessionNode.html#type-Party"><span class="sb-kind" style="color:var(--ty)">T</span>Party</a>
@@ -2176,6 +2183,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#fn-connect_to"><span class="sb-kind" style="color:var(--fn)">F</span>connect_to</a>
 <a class="sl" href="SessionNode.html#fn-deliver"><span class="sb-kind" style="color:var(--fn)">F</span>deliver</a>
 <a class="sl" href="SessionNode.html#fn-dials"><span class="sb-kind" style="color:var(--fn)">F</span>dials</a>
+<a class="sl" href="SessionNode.html#fn-drain_epochs"><span class="sb-kind" style="color:var(--fn)">F</span>drain_epochs</a>
 <a class="sl" href="SessionNode.html#fn-finish"><span class="sb-kind" style="color:var(--fn)">F</span>finish</a>
 <a class="sl" href="SessionNode.html#fn-initiate"><span class="sb-kind" style="color:var(--fn)">F</span>initiate</a>
 <a class="sl" href="SessionNode.html#fn-missing_addrs"><span class="sb-kind" style="color:var(--fn)">F</span>missing_addrs</a>
@@ -2802,6 +2810,11 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-set_i32"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_i32</span><span class="sig">set_i32(arr, i : Int, v : Int)</span><a class="anchor-link" href="#fn-set_i32" title="Link">#</a></div><div class="ib"><p>Set element [i] to [v] wrapped mod 2^32 two's-complement. Never traps.</p></div></div>
 <div class="item" id="fn-set_int"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_int</span><span class="sig">set_int(arr, i : Int, v : Int)</span><a class="anchor-link" href="#fn-set_int" title="Link">#</a></div><div class="ib"><p>Return a new array with element [i] replaced by [v]. O(n).</p></div></div>
 <div class="item" id="fn-set_u8"><div class="ih"><span class="badge bfn">fn</span><span class="name">set_u8</span><span class="sig">set_u8(arr, i : Int, v : Int)</span><a class="anchor-link" href="#fn-set_u8" title="Link">#</a></div><div class="ib"><p>Set element [i] to [v] wrapped mod 256. Never traps.</p></div></div>
+<div class="item" id="fn-sort_f32"><div class="ih"><span class="badge bfn">fn</span><span class="name">sort_f32</span><span class="sig">sort_f32(arr)</span><a class="anchor-link" href="#fn-sort_f32" title="Link">#</a></div><div class="ib"><p>Sort ascending by IEEE 754 <code>totalOrder</code> on binary32. Same algorithm, ownership and NaN / <code>-0.0</code> placement as <code>sort_float</code>, on 32-bit keys: the elements are not widened to f64 to sort. Unstable, in place when the array is uniquely owned, so a threaded <code>let a = NativeArray.sort_f32(a)</code> allocates nothing.</p><pre><code>`-NaN &lt; -Inf &lt; ... &lt; -0.0 &lt; +0.0 &lt; ... &lt; +Inf &lt; +NaN`, so `-0.0` sorts
+strictly before `+0.0` although `-0.0 == 0.0` is true.
+
+    march&gt; NativeArray.get_f32(NativeArray.sort_f32(NativeArray.from_list_f32([2.5, -1.5, 0.5])), 0)
+    -1.5</code></pre></div></div>
 <div class="item" id="fn-sort_float"><div class="ih"><span class="badge bfn">fn</span><span class="name">sort_float</span><span class="sig">sort_float(arr)</span><a class="anchor-link" href="#fn-sort_float" title="Link">#</a></div><div class="ib"><p>Sort ascending by IEEE 754 <code>totalOrder</code>. Same algorithm and ownership as <code>sort_int</code>: unstable, in place when the array is uniquely owned, so a threaded <code>let a = NativeArray.sort_float(a)</code> allocates nothing.</p><pre><code>`totalOrder` is a total order on every bit pattern, NaN included:
 `-NaN &lt; -Inf &lt; ... &lt; -0.0 &lt; +0.0 &lt; ... &lt; +Inf &lt; +NaN`. Two consequences
 that differ from the rest of the language:
@@ -2814,16 +2827,20 @@ that differ from the rest of the language:
 
     march&gt; NativeArray.get_float(NativeArray.sort_float(NativeArray.from_list_float([2.5, -1.5, 0.5])), 0)
     -1.5</code></pre></div></div>
+<div class="item" id="fn-sort_i32"><div class="ih"><span class="badge bfn">fn</span><span class="name">sort_i32</span><span class="sig">sort_i32(arr)</span><a class="anchor-link" href="#fn-sort_i32" title="Link">#</a></div><div class="ib"><p>Sort ascending (signed 32-bit order). The same ipnsort-style algorithm and ownership as <code>sort_int</code>, on 4-byte elements: unstable, in place when the array is uniquely owned, O(n) on sorted or reversed input, O(n log n) worst case.</p><pre><code>    march&gt; NativeArray.to_list_i32(NativeArray.sort_i32(NativeArray.from_list_i32([3, -1, 2])))
+    [-1, 2, 3]</code></pre></div></div>
 <div class="item" id="fn-sort_int"><div class="ih"><span class="badge bfn">fn</span><span class="name">sort_int</span><span class="sig">sort_int(arr)</span><a class="anchor-link" href="#fn-sort_int" title="Link">#</a></div><div class="ib"><p>Sort ascending. Unstable and in place when the array is uniquely owned, so a threaded <code>let a = NativeArray.sort_int(a)</code> allocates nothing.</p><pre><code>ipnsort-style: a full-run scan makes already-sorted and reversed input
 O(n), an equal-partition makes low-cardinality input near-linear, and a
 heapsort fallback bounds the worst case at O(n log n). Measured 5-30x
 faster than libc qsort at 5M elements; see
-`specs/todos/2026-09-16-native-array-sort-ipnsort.md`.
+`specs/progress/2026-09-25-native-array-sort-narrow-widths.md`.
 
 Unstable is unobservable here: i64 elements carry no payload to reorder.
 
     march&gt; NativeArray.to_list_int(NativeArray.sort_int(NativeArray.from_list_int([3, 1, 2])))
     [1, 2, 3]</code></pre></div></div>
+<div class="item" id="fn-sort_u8"><div class="ih"><span class="badge bfn">fn</span><span class="name">sort_u8</span><span class="sig">sort_u8(arr)</span><a class="anchor-link" href="#fn-sort_u8" title="Link">#</a></div><div class="ib"><p>Sort ascending. A counting sort over the 256 possible values: O(n + 256), no comparisons. Same ownership as <code>sort_int</code>: in place when the array is uniquely owned, so a threaded <code>let a = NativeArray.sort_u8(a)</code> allocates nothing.</p><pre><code>    march&gt; NativeArray.to_list_u8(NativeArray.sort_u8(NativeArray.from_list_u8([200, 7, 255, 0])))
+    [0, 7, 200, 255]</code></pre></div></div>
 <div class="item" id="fn-sum_f32"><div class="ih"><span class="badge bfn">fn</span><span class="name">sum_f32</span><span class="sig">sum_f32(arr) : Float</span><a class="anchor-link" href="#fn-sum_f32" title="Link">#</a></div><div class="ib"><p>Sum all elements as a double accumulation over pre-rounded binary32 elements. O(n) tight loop.</p></div></div>
 <div class="item" id="fn-sum_float"><div class="ih"><span class="badge bfn">fn</span><span class="name">sum_float</span><span class="sig">sum_float(arr) : Float</span><a class="anchor-link" href="#fn-sum_float" title="Link">#</a></div><div class="ib"><p>Sum all elements. O(n) tight loop.</p></div></div>
 <div class="item" id="fn-sum_i32"><div class="ih"><span class="badge bfn">fn</span><span class="name">sum_i32</span><span class="sig">sum_i32(arr) : Int</span><a class="anchor-link" href="#fn-sum_i32" title="Link">#</a></div><div class="ib"><p>Sum all elements, accumulated in Int (i64). O(n) tight loop.</p></div></div>

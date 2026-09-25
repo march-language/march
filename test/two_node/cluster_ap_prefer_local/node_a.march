@@ -1,0 +1,53 @@
+-- Two-node scenario "cluster_ap_prefer_local": node-a offers role Server of
+-- Echo and counts what it serves; it stops once node-b registers "pl-done".
+-- It must serve nothing: node-b prefers its own offer. See scenario.sh.
+mod PreferLocalA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  pfn serve_one(s : Cap(Session.Live), st : Echo_Server.Entry, served : Vault(Int)) : Echo_Server.Yield do
+    Echo_Server.recv_Msg_Client_Server_1(s, st, fn (n, st1) ->
+      println("node-a Server: got " ++ int_to_string(n))
+      let _ = Vault.incr(served, "n", 1)
+      Echo_Server.close(s, Echo_Server.send_Msg_Server_Client_1(s, st1, n * 10)))
+  end
+
+  pfn wait_done(h : Cap(ClusterNode.Live), left : Int) : Bool do
+    if ClusterNode.lookup(h, "pl-done") != None do true
+    else if left <= 0 do false else
+      sleep_ms(50)
+      wait_done(h, left - 50)
+    end end
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "pl-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let served = Vault.new("served")
+        println("node-a: offering")
+        match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st, served)) do
+          Err(e) -> panic(Echo_Run.error_message(e))
+          Ok(o) ->
+            if wait_done(h, 120000) do () else panic("node-a: node-b never finished") end
+            println("node-a: served " ++ int_to_string(Vault.get_or(served, "n", 0)))
+            SessionNode.close_offer(o)
+            ClusterNode.stop(h)
+        end
+    end
+  end
+end
