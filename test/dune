@@ -2283,6 +2283,34 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/compare_builtins.expected native_compare_builtins.out)))
 
+; `compare` on a NaN Float agrees across backends (NaN == NaN, NaN < every
+; other value, as OCaml's Float.compare); `==`/`<` stay IEEE. Compiled
+; march_compare_float returned 0 for any NaN operand. Diffed on BOTH backends
+; against the one golden, since the bug was the backends disagreeing.
+; See specs/progress/2026-09-25-compare-nan-backends.md.
+(rule
+ (targets native_compare_nan native_compare_nan.out native_compare_nan_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/compare_nan.march))
+ (action
+  (progn
+   (with-stdout-to native_compare_nan_interp.out
+     (run %{exe:../bin/main.exe} native/compare_nan.march))
+   (run %{exe:../bin/main.exe} --compile -o native_compare_nan
+        native/compare_nan.march)
+   (with-stdout-to native_compare_nan.out
+        (system "./native_compare_nan")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/compare_nan.expected native_compare_nan.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/compare_nan.expected native_compare_nan_interp.out)))
+
 ; ── Leak guard: builtins that only READ a heap argument release it. `==`,
 ; `!=`, `<`, `>=` on a fresh String, `==` on a List / boxed ADT / erased value,
 ; and `string_length` each leaked their argument once per call: absent from

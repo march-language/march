@@ -463,6 +463,12 @@ git log is authoritative for exact commits.
   role may crash".
 
 ### Fixed
+- `compare` on a NaN `Float` now gives the same answer compiled as interpreted:
+  NaN compares equal to NaN and less than every other value (OCaml's
+  `Float.compare`). Compiled `compare` returned 0 whenever either operand was
+  NaN, so NaN "equalled" everything and a sort by `compare` scattered the NaNs.
+  `compare_float` now has the same order on both backends (the interpreter's
+  also returned 0 for NaN). `==`, `<` and the other operators stay IEEE 754.
 - The stdlib-only builtin gate (`pid_of_int`, `actor_whereis`, `actor_registered`,
   `actor_pid_indices`, `epoch_hold`, `epoch_release`) now fires at name
   resolution, closing four bypasses found in review: it applies inside `impl`
