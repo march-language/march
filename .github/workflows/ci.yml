@@ -166,7 +166,9 @@ jobs:
           # rule in test/dune); on this job nothing else builds them first.
           # forge: the cert_* scenarios issue their certificates with
           # `forge cluster` (keygen / cert / revoke).
-          dune build bin/main.exe forge/bin/main.exe @test/stage-source-trees
+          # test/hcr_deploy.exe: the hot-deploy scenarios (hcr_new_code_session,
+          # protocol_evolve) drive their reload sockets with it.
+          dune build bin/main.exe forge/bin/main.exe test/hcr_deploy.exe @test/stage-source-trees
 
       # node_discovery was quarantined 2026-08-08 for a torn-stdout race seen
       # ~1-in-2 on THIS runner and fixed 2026-08-21 (march_stdout_mu). It is
@@ -609,7 +611,8 @@ jobs:
         run: |
           eval $(opam env)
           dune shutdown 2>/dev/null || true
-          dune build bin/main.exe forge/bin/main.exe
+          # test/hcr_deploy.exe: the two-node sweep's hot-deploy scenarios.
+          dune build bin/main.exe forge/bin/main.exe test/hcr_deploy.exe
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             ./specs/lang/golden/sanitize.sh
 
