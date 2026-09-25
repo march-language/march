@@ -8911,7 +8911,17 @@ int64_t march_process_pid(void) {
     return (int64_t)getpid();
 }
 
-/* march_dns_resolve(host) → Result(List(String), String).  Borrows host. */
+/* march_dns_resolve(host) → Result(List(String), String).  Borrows host.
+
+   Contract (shared with the interpreter's dns_resolve in
+   lib/eval/eval_builtins.ml, and documented on stdlib/dns.march):
+     - IPv4 only.  Every tcp_connect / http path in both backends opens an
+       AF_INET socket, so an IPv6 answer would be an address nothing can dial.
+     - One entry per ADDRESS, in resolver order: SOCK_STREAM pins one addrinfo
+       per address, and any address the resolver repeats is dropped.
+     - "cannot resolve <host>" when the host has no IPv4 address (Dns.resolve
+       reads that prefix as NotFound); any other resolver failure (EAI_AGAIN,
+       EAI_FAIL, ...) is passed through as gai_strerror's text. */
 void *march_dns_resolve(void *host_ptr) {
     march_string *hs = (march_string *)host_ptr;
     char hostname[1024];
@@ -8919,37 +8929,42 @@ void *march_dns_resolve(void *host_ptr) {
     memcpy(hostname, hs->data, copy_len);
     hostname[copy_len] = '\0';
 
+    char not_found[1100];
+    snprintf(not_found, sizeof(not_found), "cannot resolve %s", hostname);
+
     struct addrinfo hints, *res, *rp;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_UNSPEC;
+    hints.ai_family   = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
     int rc = getaddrinfo(hostname, NULL, &hints, &res);
     if (rc != 0) {
-        const char *msg = gai_strerror(rc);
-        return mk_err_cstr(msg);
+        int no_address = rc == EAI_NONAME || rc == EAI_FAMILY
+#ifdef EAI_NODATA
+            || rc == EAI_NODATA
+#endif
+#ifdef EAI_ADDRFAMILY
+            || rc == EAI_ADDRFAMILY
+#endif
+            ;
+        return mk_err_cstr(no_address ? not_found : gai_strerror(rc));
     }
 
-    /* Collect unique IP strings into a temporary array. */
-    char addrs[64][INET6_ADDRSTRLEN];
+    /* Collect unique IPv4 strings, in resolver order. */
+    char addrs[64][INET_ADDRSTRLEN];
     int n = 0;
     for (rp = res; rp != NULL && n < 64; rp = rp->ai_next) {
-        char buf[INET6_ADDRSTRLEN];
-        void *addr_ptr;
-        if (rp->ai_family == AF_INET)
-            addr_ptr = &((struct sockaddr_in  *)rp->ai_addr)->sin_addr;
-        else if (rp->ai_family == AF_INET6)
-            addr_ptr = &((struct sockaddr_in6 *)rp->ai_addr)->sin6_addr;
-        else continue;
-        if (!inet_ntop(rp->ai_family, addr_ptr, buf, sizeof(buf))) continue;
-        /* Deduplicate */
+        if (rp->ai_family != AF_INET) continue;
+        char buf[INET_ADDRSTRLEN];
+        if (!inet_ntop(AF_INET, &((struct sockaddr_in *)rp->ai_addr)->sin_addr,
+                       buf, sizeof(buf))) continue;
         int dup = 0;
         for (int i = 0; i < n; i++) if (strcmp(addrs[i], buf) == 0) { dup = 1; break; }
-        if (!dup) { strncpy(addrs[n], buf, INET6_ADDRSTRLEN - 1); addrs[n][INET6_ADDRSTRLEN-1]='\0'; n++; }
+        if (!dup) { memcpy(addrs[n], buf, sizeof(buf)); n++; }
     }
     freeaddrinfo(res);
+    if (n == 0) return mk_err_cstr(not_found);
 
-    /* Build List(String) in reverse (build_string_list handles it). */
     char *ptrs[64];
     for (int i = 0; i < n; i++) ptrs[i] = addrs[i];
     void *list = build_string_list(ptrs, n);
