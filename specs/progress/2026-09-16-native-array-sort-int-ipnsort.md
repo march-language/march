@@ -1,7 +1,7 @@
 # `NativeArray.sort_int` — ipnsort-style in-place sort in the C runtime
 
 Landed 2026-09-16. Design, measurements and the remaining four element widths:
-`specs/todos/2026-09-16-native-array-sort-ipnsort.md`.
+`specs/progress/2026-09-25-native-array-sort-narrow-widths.md`.
 
 ## What landed
 
