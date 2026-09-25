@@ -8,7 +8,13 @@ type t = {
   runtime_abi : int;
 }
 
-let runtime_abi = 2
+(* 3: actor-message constructor tags became a stable hash of the qualified
+   constructor name, and Actor.call's positional tag translation moved from
+   march_actor_set_call_base to march_actor_set_call_tags
+   (specs/progress/2026-09-25-migrate-msg-actor-message-tags.md). A patch
+   built by this compiler would drop every actor message a v2 process sends
+   it, and could not even load against a v2 runtime. *)
+let runtime_abi = 3
 
 let contains haystack needle =
   let hay_len = String.length haystack in

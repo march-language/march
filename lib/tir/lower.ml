@@ -160,6 +160,24 @@ let rec collect_type_names ~prefix acc decls =
       | _ -> acc
     ) acc decls
 
+(** Record a hot-reload `<actor>_migrate_msg` for [Migrate_msg_pins]: the old
+    message type as the source spells it (the lowered parameter type is the
+    bare canonical name) and the actor message type its declared
+    `Option(<Actor>.Msg)` return lowered to. Anything else is left to the
+    typechecker's migrate-function shape check. *)
+let note_migrate_msg ~prefix (def : Ast.fn_def) (fn : Tir.fn_def) =
+  let sfx = Tir_names.migrate_msg_suffix in
+  let n = def.Ast.fn_name.txt in
+  let nl = String.length n and sl = String.length sfx in
+  if nl > sl && String.sub n (nl - sl) sl = sfx then
+    match def.Ast.fn_clauses, fn.Tir.fn_ret_ty with
+    | [ { Ast.fc_params = [ Ast.FPNamed { param_ty = Some (Ast.TyCon (written, _)); _ } ]; _ } ],
+      Tir.TCon ("Option", [ Tir.TCon (actor_msg, _) ])
+      when Tir_names.is_actor_msg_name actor_msg ->
+      Migrate_msg_pins.register ~fn_name:fn.Tir.fn_name ~prefix
+        ~written:written.txt ~actor_msg
+    | _ -> ()
+
 (** Lower a module. *)
 let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) ?(shadow_builtins=true) (m : Ast.module_) : Tir.tir_module =
   reset_counter ();
@@ -220,6 +238,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   Hashtbl.reset _alias_candidates;
   Hashtbl.reset _alias_reported;
   Handler_owner.reset ();
+  Migrate_msg_pins.reset ();
   _lowered_modules := Hashtbl.create 8;
   (* Entry-file top-level fns named like a builtin that has its own C symbol
      get a distinct TIR name (see [Lower_state._builtin_shadows]).  Only
@@ -754,6 +773,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             | Some renamed -> { fn with fn_name = renamed }
             | None -> fn
           in
+          note_migrate_msg ~prefix:"" def fn;
           fns := fn :: !fns
         end
       | Ast.DType (_, name, params, td, _)
@@ -828,7 +848,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
               | Ast.DFn (def, _) ->
                 let fn = Lower_decls.lower_fn_def mod_env def in
                 let fn = Lower_decls.rename_scoped_vars scopes fn in
-                fns := { fn with fn_name = prefix ^ fn.fn_name } :: !fns
+                let fn = { fn with fn_name = prefix ^ fn.fn_name } in
+                note_migrate_msg ~prefix def fn;
+                fns := fn :: !fns
               | Ast.DType (_, tname, params, td, _)
               | Ast.DAlwaysLinearType (_, tname, params, td, _) ->
                 let qtname = { tname with txt = prefix ^ tname.txt } in
@@ -1132,6 +1154,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     tm_exports = [];
     tm_tests = List.rev !test_pairs;
     tm_io_fns = [] } in
+  (* Every type declaration is known now: bind each `*_migrate_msg`'s old
+     message type to its declaration (see [Migrate_msg_pins]). *)
+  Migrate_msg_pins.resolve result.Tir.tm_types;
   (* [env]'s [type_map] and [current_module_aliases] fields are local
      bindings, not refs — they are simply dropped when [lower_module]
      returns, with no explicit reset needed (was [_type_map_ref := None];

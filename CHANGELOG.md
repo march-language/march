@@ -26,6 +26,33 @@ git log is authoritative for exact commits.
 
 - `forge run --processes` no longer occasionally assigns two pools the same cluster port (seen on Linux CI as `tcp_listen: bind failed`); the ports for all processes are now reserved together.
 
+- **A process now exits after a hot deploy even when an actor is blocked in a nested
+  `receive()`.** A queued epoch marker was counted as mail the actor could take, so
+  shutdown never stopped it and the process spun for ever.
+- **`get_actor_field` is `Pid(a) -> String -> Option(Int)`.** It was a free
+  `Option(b)`, an unchecked cast: a field could be read back as any type, and a pid
+  stored as an Int read back as a `Pid` crashed compiled code. It now returns `Some`
+  only for an Int-like field and `None` otherwise.
+- **A draining node withdraws from role placement at once.** On SIGTERM it unregisters
+  its placement markers and leaves the cluster before exiting. A `count = n` role is
+  re-offered elsewhere instead of staying unavailable for the whole drain plus SWIM's
+  suspect timeout.
+- **A ClusterNode's internal Vaults can no longer be found by name**, which let any
+  code with `IO.Mut` stop the node or rewrite its routes without the node capability.
+- **Hot-reload dispatch can no longer select a newer version for an older caller**
+  when a ring slot is reclaimed and republished between the lookup and the pin.
+- **A compiled `<actor>_migrate_msg` now matches the real old-format messages a hot
+  deploy hands it.** The runtime passes a message the previous build allocated, but the
+  user's old message type was compiled with ordinary tags, so the match panicked
+  "non-exhaustive pattern match" and killed the process on the first old message. The
+  old type is now compiled with the actor's message representation and tags, by
+  constructor name. Actor-message tags are also stable across builds: removing a
+  handler no longer renumbers every later actor's messages, which silently dropped
+  their queued messages after a deploy. Hot-reload patches built by this compiler carry
+  ABI id `march-hcr-v3` and are refused by older running binaries.
+- **A cached `--compile --compile-so` build restores its `.hcr_manifest` and
+  `.schemas.json`**, not only the `.so`. `forge deploy hot` no longer reports "no
+  manifest" after a second build of the same source.
 - **Compiling the same source twice at once (different `-o` or `--opt`) no longer
   fails at random with `Undefined symbols: "_main"`.** Both compiles wrote their LLVM
   IR to the same `<source>.ll` file and handed it to clang, so one could truncate the

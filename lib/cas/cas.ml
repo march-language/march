@@ -321,6 +321,47 @@ let copy_artifact ~(src : string) ~(dest : string) : bool =
     in
     same_file || copy_file_exec ~src ~dest
 
+(* The files a `--compile-so` build writes NEXT TO its artifact: the
+   hot-reload manifest and the actor schema file (bin/main.ml). They are
+   part of the build's output, so they are cached with it: a hit that
+   restored only the .so left `forge deploy hot` and `forge test
+   --upgrade-from` with "no manifest"
+   (specs/progress/2026-09-25-cas-hit-restores-so-sidecars.md). *)
+let sidecar_suffixes = [ ".hcr_manifest"; ".schemas.json" ]
+
+(* [<blob>.sidecars] lists the suffixes stored for [ch], one per line; its
+   presence is what says "this entry's sidecars were recorded" (an entry
+   cached before sidecars were stored has none, and must not satisfy a
+   build that needs them). *)
+let sidecar_list_path t ch = artifact_path t.local_root ch ^ ".sidecars"
+
+let store_sidecars (t : t) (ch : string) (out : string) : unit =
+  let blob = artifact_path t.local_root ch in
+  let stored = List.filter (fun sfx ->
+      Sys.file_exists (out ^ sfx) && copy_file_exec ~src:(out ^ sfx) ~dest:(blob ^ sfx))
+      sidecar_suffixes in
+  try write_file (sidecar_list_path t ch) (String.concat "\n" stored ^ "\n")
+  with Sys_error _ -> ()
+
+(* Restore [ch]'s sidecars next to [out], removing any [out] sidecar the
+   cached build did not produce (a stale manifest from another build is
+   worse than none). False when [ch] has no sidecar record or a listed file
+   is gone: the caller must rebuild. *)
+let restore_sidecars (t : t) (ch : string) (out : string) : bool =
+  let blob = artifact_path t.local_root ch in
+  match read_file (sidecar_list_path t ch) with
+  | None -> false
+  | Some listed ->
+    let stored = List.filter (fun l -> l <> "") (String.split_on_char '\n' listed) in
+    let ok = List.for_all (fun sfx ->
+        copy_file_exec ~src:(blob ^ sfx) ~dest:(out ^ sfx)) stored in
+    if ok then
+      List.iter (fun sfx ->
+          if not (List.mem sfx stored) then
+            (try Sys.remove (out ^ sfx) with Sys_error _ -> ()))
+        sidecar_suffixes;
+    ok
+
 let lookup_artifact (t : t) (ch : string) : string option =
   let blob = artifact_path t.local_root ch in
   if Sys.file_exists blob then begin

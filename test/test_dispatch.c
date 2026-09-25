@@ -521,6 +521,91 @@ static void test_reclaim_race_threads(void) {
            bad == 0 ? "PASS" : "FAIL", k - 1, pins, blocked, held, bad);
 }
 
+/* ── 9b. a version's epoch is written before it can become live ───────────
+ * (#551's fix, kept by staging; DD review step 6, item 3:
+ * specs/progress/2026-09-25-dd-review-step6-untested-behaviours.md.)
+ * A reused ring slot still carries its previous occupant's epoch until the
+ * stage rewrites it.  If that store came after the `live` release (the
+ * original bug's shape), enter_gen could select the NEW code by the OLD
+ * epoch: a unit at epoch E would run a version published at a later epoch.
+ *
+ * One thread publishes epoch after epoch through stage + commit (so the two
+ * non-baseline slots are reclaimed and reused every time); readers call
+ * enter_gen at recent epochs and check the invariant "the version returned
+ * is never newer than the caller's epoch".  A reader holds a ref on the
+ * epoch-0 baseline for the whole run, so a live version <= every caller
+ * epoch always exists and enter_gen never falls back to `current` (which
+ * could legitimately be newer). */
+#define EBL_READERS 3
+#define EBL_PUBLISHES 200000
+#define EBL_DEADLINE_S 5
+static _Atomic uint32_t g_ebl_k;          /* newest committed epoch */
+static _Atomic int      g_ebl_stop;
+static _Atomic long     g_ebl_bad, g_ebl_checks;
+static void *ebl_fn(uint32_t k) { return (void *)(uintptr_t)(0x200000u + 16u * k); }
+static uint32_t ebl_k_of(void *fn) { return (uint32_t)(((uintptr_t)fn - 0x200000u) / 16u); }
+
+static void *ebl_reader(void *arg) {
+    uint32_t seed = (uint32_t)(uintptr_t)arg * 2654435761u + 1u;
+    while (!atomic_load_explicit(&g_ebl_stop, memory_order_acquire)) {
+        uint32_t k = atomic_load_explicit(&g_ebl_k, memory_order_acquire);
+        if (k < 3) continue;
+        seed = seed * 1103515245u + 12345u;
+        uint32_t ce = k - 1 - (seed >> 16) % 2;      /* k-1 or k-2 */
+        uint32_t v;
+        void *fn = march_dispatch_enter_gen(0, ce, &v);
+        if (!fn) continue;                           /* backed out of a retire */
+        if (ebl_k_of(fn) > ce)
+            atomic_fetch_add_explicit(&g_ebl_bad, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_ebl_checks, 1, memory_order_relaxed);
+        march_dispatch_leave(0, v);
+    }
+    return NULL;
+}
+
+static void test_epoch_written_before_live_threads(void) {
+    march_epoch_reset_for_test();
+    march_dispatch_init(1);
+    atomic_store(&g_ebl_k, 0); atomic_store(&g_ebl_stop, 0);
+    atomic_store(&g_ebl_bad, 0); atomic_store(&g_ebl_checks, 0);
+    CHECK(march_dispatch_publish(0, ebl_fn(0), H1, NULL, MARCH_NATIVE) == 0, "baseline at epoch 0");
+    uint32_t base_v;
+    CHECK(march_dispatch_enter(0, &base_v) == ebl_fn(0), "hold the baseline for the whole run");
+    pthread_t th[EBL_READERS];
+    for (int i = 0; i < EBL_READERS; i++)
+        pthread_create(&th[i], NULL, ebl_reader, (void *)(uintptr_t)(i + 1));
+    struct timespec t0, now;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    uint32_t k = 1;
+    long retries = 0;
+    for (unsigned long attempt = 1; k <= EBL_PUBLISHES; attempt++) {
+        if ((attempt & 255) == 0) {
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (now.tv_sec - t0.tv_sec >= EBL_DEADLINE_S) break;
+        }
+        int idx = march_dispatch_stage(0, ebl_fn(k), H1, NULL, MARCH_NATIVE, k);
+        if (idx < 0) { retries++; sched_yield(); continue; }   /* a reader holds it */
+        march_dispatch_commit(0, (uint32_t)idx);
+        /* Epoch k is now current, as an activation would leave it (the
+           reclaim race test's discipline). */
+        if (k > 1 && march_epoch_reserve(k) == 0) march_epoch_advance(k);
+        atomic_store_explicit(&g_ebl_k, k, memory_order_release);
+        k++;
+    }
+    atomic_store_explicit(&g_ebl_stop, 1, memory_order_release);
+    for (int i = 0; i < EBL_READERS; i++) pthread_join(th[i], NULL);
+    march_dispatch_leave(0, base_v);
+    long bad = atomic_load(&g_ebl_bad), checks = atomic_load(&g_ebl_checks);
+    CHECK(bad == 0, "enter_gen never returned a version newer than the caller's epoch");
+    CHECK(checks > 1000, "readers actually ran (else vacuous)");
+    CHECK(k > 1000, "the slots were reused many times (else vacuous)");
+    march_dispatch_shutdown();
+    march_epoch_reset_for_test();
+    printf("%s: test_epoch_written_before_live_threads (publishes=%u checks=%ld "
+           "retries=%ld newer_than_caller=%ld)\n",
+           bad == 0 ? "PASS" : "FAIL", k - 1, checks, retries, bad);
+}
+
 /* ── 10. the per-slot reclaim condition (II.4.2) ──────────────────────────
  * Slot history: v0 baseline (epoch 0), v1 changed at epoch 2, v2 changed at
  * epoch 6 (current).  A unit pinned to epoch 5 resolves to v1 ("newest at or
@@ -651,6 +736,7 @@ int main(void) {
     test_startup_publish_enter_race();
     test_reclaim_retires_before_dlclose();
     test_reclaim_race_threads();
+    test_epoch_written_before_live_threads();
     test_reclaim_respects_newer_pinned_epoch();
     test_equal_epochs_prefer_current();
     test_staged_version_invisible();

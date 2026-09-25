@@ -1,11 +1,11 @@
--- The NEW version of the upgrade fixture, the one that upgrades cleanly:
--- Tally's Legacy handler changes what it does, but Tally's message type is
--- the same, so the Legacy messages the old feeder keeps sending run on the
--- new handler and nothing is dropped. forge/test/test_upgrade_from.ml
--- copies this over v1 and expects `forge test --upgrade-from HEAD` to pass.
---
--- (The version that REMOVES Legacy and converts it with tally_migrate_msg,
--- the other clean upgrade, is ../migrates.)
+-- The NEW version of the upgrade fixture that REMOVES a handler and converts
+-- what old code still sends: Tally loses Legacy, and tally_migrate_msg turns
+-- each old-format Legacy(n) the old feeder keeps sending into Add(n).
+-- forge/test/test_upgrade_from.ml copies this over v1 and expects
+-- `forge test --upgrade-from HEAD` to pass with converted > 0 and nothing
+-- dropped (specs/progress/2026-09-25-migrate-msg-actor-message-tags.md: the
+-- old message carries the OLD build's actor-message tag, and TallyMsgV1.Msg
+-- is compiled with Tally's tags by constructor name so the match sees it).
 --
 -- Echo.Server answers twice; a session can span a hot deploy. The hook
 -- spawns Tally, whose message type has two handlers, Add and Legacy, and
@@ -34,7 +34,6 @@ mod UpgradeApp do
     state { total : Int }
     init  { total: 0 }
     on Add(n : Int) do { total: state.total + n } end
-    on Legacy(n : Int) do { total: state.total + 2 * n } end
   end
 
   fn start(_io : Cap(IO), _node : Cap(ClusterNode.Live)) : Env do
@@ -45,13 +44,26 @@ mod UpgradeApp do
 
   fn feed(t : Pid(TallyState), i : Int) : Int do
     if i >= 300 do i else
-      let _ = send(t, Legacy(1))
+      let _ = send(t, Add(1))
       sleep_ms(20)
       feed(t, i + 1)
     end
   end
 
   type TallyState = { total : Int }
+
+  -- The message type Tally had in v1 (what `forge hot-reload
+  -- migrate-msg-stub Tally` writes).
+  mod TallyMsgV1 do
+    type Msg = Add(Int) | Legacy(Int)
+  end
+
+  fn tally_migrate_msg(m : TallyMsgV1.Msg) : Option(Tally.Msg) do
+    match m do
+      TallyMsgV1.Add(n) -> Some(Add(n))
+      TallyMsgV1.Legacy(n) -> Some(Add(n))
+    end
+  end
 
   fn serve_one(_env : Env, s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
     Echo_Server.recv_Ask(s, st, fn (n, st1) ->

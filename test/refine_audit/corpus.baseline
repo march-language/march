@@ -94,6 +94,8 @@ native_closure_scalar_abi: coverage audit (user + stdlib): 120 enforced, 0 inert
 native_closure_scalar_abi: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_cluster_accept_silent_peer: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_cluster_accept_silent_peer: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_cluster_node_vaults_unnamed: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_cluster_node_vaults_unnamed: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_compare_builtins: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_compare_builtins: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_compare_nan: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
