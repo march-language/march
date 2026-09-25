@@ -3,10 +3,25 @@
 Logged 2026-09-16. `[P2]`
 
 **Status: the i64 width landed 2026-09-16** (`NativeArray.sort_int`); see
-`specs/progress/2026-09-16-native-array-sort-int-ipnsort.md`. What remains open
-here is the other four widths (f64, f32, i32, u8) and the follow-ups at the
-bottom. The Design and Wiring sections below are the record of how the i64 one
-was built; follow them for the rest.
+`specs/progress/2026-09-16-native-array-sort-int-ipnsort.md`. **The f64 width
+landed 2026-09-24** (`NativeArray.sort_float`, totalOrder keys, transform in /
+sort / transform out); see `specs/progress/2026-09-24-native-array-sort-f64.md`.
+What remains open here is the other three widths (f32, i32, u8) and the
+follow-ups at the bottom. The Design and Wiring sections below are the record of
+how the i64 one was built; follow them for the rest.
+
+Notes from the f64 landing that apply to what is left:
+
+- f32 should reuse the f64 decision on 32-bit keys
+  (`bits ^ (((int32_t)bits >> 31) & 0x7FFFFFFF)`), which means an i32 core —
+  so build i32 first and f32 on top of it, rather than widening f32 to f64.
+- The heapsort fallback now has its direct test: `MARCH_TEST_NSORT_DEPTH_LIMIT=0`
+  (read once in `nsort_forced_limit`) replaces the depth limit, and `test/dune`
+  runs `native_arr_sort` a second time with it against the same golden. A new
+  width that grows its own core must honour the same hook.
+- `native_arr_sort` also runs INTERPRETED against the same golden now. The
+  interpreter arm must sort on the same key as C; OCaml's `compare` puts every
+  NaN first and ties -0.0 with 0.0 (shown red on 2026-09-24).
 
 ## Why
 

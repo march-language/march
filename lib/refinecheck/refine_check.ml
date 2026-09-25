@@ -1980,20 +1980,14 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
      vocabulary: it is checked by [Refine_abstract.check], which reports its
      own errors.  Warning here as well would tell the author to annotate `p`
      `@[measure]`, which is exactly what it must not be. *)
-  (* The non-negativity facts of the enclosing `&&` chains, exactly as
-     [Refine_scope.smt_of_r_marked] accumulates them, so the division warning
-     below fires precisely where the reflector would refuse. *)
-  let nonneg_ctx = ref [] in
+  (* The division warning fires precisely where the reflector would refuse:
+     a non-literal, not-syntactically-positive divisor in a predicate whose
+     TOP is not Boolean-shaped ([Refine_scope.division_reflects]). *)
+  let top = e in
   let rec go (e : A.expr) =
     match e with
-    | A.EApp (A.EVar { A.txt = "&&"; _ }, [ a; b ], _) ->
-      let saved = !nonneg_ctx in
-      nonneg_ctx := List.concat_map nonneg_facts_of_conjunct (conjuncts_of e) @ saved;
-      go a;
-      go b;
-      nonneg_ctx := saved
-    | A.EApp (A.EVar { A.txt = "/" | "%"; _ }, ([ a; d ] as args), span) ->
-      if not (division_in_fragment ~vocab:true !nonneg_ctx a d) then
+    | A.EApp (A.EVar { A.txt = "/" | "%"; _ }, ([ _; d ] as args), span) ->
+      if not (division_reflects ~vocab:true ~top d) then
         Option.iter
           (fun why ->
             Err.warning errctx ~span

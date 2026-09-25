@@ -8657,6 +8657,26 @@ let test_gzip_decode_invalid () =
   end|} in
   Alcotest.(check int) "gzip decode invalid data returns Err" 1 (vint (call_fn env "f" []))
 
+(* The signatures promise Result(Bytes, Compress.Error), but the builtins return
+   Result(Bytes, String), and until 2026-09-24 the wrappers handed that String
+   straight through. The mismatch was a hidden stdlib type error, so
+   `Err(Compress.InvalidInput(_))` never matched: the payload was a String. The
+   test above only checks `Err(_)`, which the bug passed. *)
+let test_gzip_decode_invalid_is_structured () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let garbage = Bytes.from_list([1, 2, 3, 4, 5, 6, 7, 8])
+      match Compress.Gzip.decode(garbage) do
+      Ok(_) -> 0
+      Err(Compress.InvalidInput(msg)) ->
+        if string_contains(msg, "gzip_decode") do 1 else 2 end
+      Err(_) -> 3
+      end
+    end
+  end|} in
+  Alcotest.(check int) "gzip decode of invalid data is Err(InvalidInput(<codec msg>))" 1
+    (vint (call_fn env "f" []))
+
 let test_gzip_compressed_smaller () =
   (* Compressible data: 100 identical bytes → should compress well *)
   let env = eval_with_compress {|mod Test do
@@ -11555,6 +11575,276 @@ let test_hcr_manifest_emits_caps_and_cap_root () =
          [find_caps "Core.logger"]
          [Option.value ~default:"<missing>" (List.assoc_opt "Core.logger" fn_lines2)])
 
+(* Distributed-deploys build step 10: a `ROLE <Proto.Role> caps=...` line per
+   granted role carries the role's FULL closure, i.e. what check_role_grants
+   solves from the role's roots, not a changed function's own caps.  The
+   fixture's body reaches `file_write` only through `save`, a helper whose
+   own caps the per-function lines attribute to `save` alone; the ROLE line
+   still names IO.FileWrite and the chain body -> cons -> save.  A second
+   version of the program whose body never calls `save` has the narrower
+   closure, which is the pair forge's per-role gate compares. *)
+let role_manifest_src ?(serve = false) ~uses_save () =
+  Printf.sprintf {|mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.FileWrite
+  needs Session.Live
+  @[endpoints]
+  protocol Stream do
+    role Cons needs IO.Console, IO.FileWrite
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+
+  pfn save(n : Int) : () do
+    let _ = file_write("/tmp/n", int_to_string(n))
+    ()
+  end
+
+  pfn cons(s : Cap(Session.Live), con : Cap(IO.Console), st : Stream_Cons.Entry) : Stream_Cons.Yield do
+    Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
+      %s
+      Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
+  end
+
+  fn main(c : Cap(IO)) do
+    %s
+  end
+end
+|} (if uses_save then "save(n)" else "let _ = n")
+    (if serve then
+       (* The base binary of the end-to-end test: it only has to stay up
+          with its reload server; the role's root still exists statically. *)
+       "if List.length(Process.argv()) > 99 do\n\
+       \      let _ = Stream_Run.run_Cons(c, \"cons\", \"secret\", Stream_Run.addrs_from_env(),\n\
+       \        fn (s, con, fw, st) -> cons(s, con, st))\n\
+       \      ()\n\
+       \    else\n\
+       \      sleep_ms(60000)\n\
+       \    end"
+     else
+       "let _ = Stream_Run.run_Cons(c, \"cons\", \"secret\", Stream_Run.addrs_from_env(),\n\
+       \      fn (s, con, fw, st) -> cons(s, con, st))\n\
+       \    ()")
+
+(* Compile [src_text] in a fresh directory (own cwd and HOME, so no CAS hit
+   skips the manifest write; see test_hcr_manifest_emits_caps_and_cap_root).
+   [Some (dir, bin)], or [None] when the toolchain is missing (counted skip). *)
+let build_role_fixture ~tag ~extra_args src_text =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file (Printf.sprintf "march_hcrrole_%s" tag) "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "main.march" in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  let bin = Filename.concat tmp "rolebin" in
+  let cmd_prefix = Printf.sprintf "cd %s && env HOME=%s "
+      (Filename.quote tmp) (Filename.quote tmp) in
+  match compile_march_or_skip ~cmd_prefix ~main_exe ~bin ~src ~extra_args () with
+  | None -> None
+  | Some bin -> Some (tmp, bin)
+
+let role_lines_of_build ~tag src_text =
+  let main_exe = find_main_exe () in
+  let tmp = Filename.temp_file (Printf.sprintf "march_hcrrole_%s" tag) "" in
+  Sys.remove tmp;
+  Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "main.march" in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  let bin = Filename.concat tmp "rolebin" in
+  (* Own cwd and HOME: see test_hcr_manifest_emits_caps_and_cap_root for why
+     a shared CAS would skip the manifest write on a cache hit. *)
+  let cmd_prefix = Printf.sprintf "cd %s && env HOME=%s "
+      (Filename.quote tmp) (Filename.quote tmp) in
+  match compile_march_or_skip ~cmd_prefix ~main_exe ~bin ~src
+          ~extra_args:"--hot-reload Main --compile-so" () with
+  | None -> None
+  | Some bin ->
+    let ic = open_in (bin ^ ".hcr_manifest") in
+    let lines = ref [] in
+    (try while true do
+       let l = input_line ic in
+       if String.length l > 5 && String.sub l 0 5 = "ROLE " then lines := l :: !lines
+     done with End_of_file -> ());
+    close_in ic;
+    Some (List.rev !lines)
+
+let test_hcr_manifest_role_closure_lines () =
+  match role_lines_of_build ~tag:"wide" (role_manifest_src ~uses_save:true ()) with
+  | None -> ()
+  | Some lines ->
+    Alcotest.(check (list string)) "one ROLE line, the full closure with its chains"
+      [ "ROLE Stream.Cons caps=IO.Console,IO.FileWrite \
+         via=IO.Console:body>cons;IO.FileWrite:body>cons>save" ]
+      lines;
+    (match role_lines_of_build ~tag:"narrow" (role_manifest_src ~uses_save:false ()) with
+     | None -> ()
+     | Some lines ->
+       Alcotest.(check (list string)) "without the save call the closure is narrower"
+         [ "ROLE Stream.Cons caps=IO.Console via=IO.Console:body>cons" ] lines)
+
+(* The step-10 acceptance end to end: a role whose closure widens in a hot
+   patch is refused.  Without --grant-cap forge's per-role gate stops it
+   (the baseline is the running build's manifest); with --grant-cap it gets
+   past the client, and the SERVER refuses it: a real compiled base binary
+   running its reload server under a node policy (IO.Console, not
+   IO.FileWrite) answers the signed ACTIVATE6 with ERR role_cap_policy.  A
+   control patch whose closure stays inside the policy is admitted. *)
+let e2e_connect sock =
+  let fd = Unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  let rec go n =
+    match Unix.connect fd (Unix.ADDR_UNIX sock) with
+    | () -> Some fd
+    | exception Unix.Unix_error _ when n > 0 -> Unix.sleepf 0.1; go (n - 1)
+    | exception Unix.Unix_error _ -> Unix.close fd; None
+  in
+  go 150
+
+let e2e_activate6 conn ~sk ~(manifest : March_forge.Cmd_deploy_hot.manifest) ~fn_name =
+  let module H = March_forge.Cmd_deploy_hot in
+  let fm = List.find (fun f -> f.H.fn_name = fn_name) manifest.H.functions in
+  let (role_caps, roles) = H.role_blocks manifest.H.roles in
+  let cap_root = H.fn_cap_root fm.H.fn_caps in
+  let callers = String.concat "," (List.sort String.compare fm.H.fn_callers) in
+  let (signed, wire_head) =
+    H.build_activate6_lines ~name:fm.H.fn_name ~impl:fm.H.fn_impl_hash ~cas:manifest.H.cas_hash
+      ~migrate:0 ~epoch:0 ~cap_root ~role_caps ~callers_csv:callers in
+  let sig_b64 = March_ed25519.Ed25519.(sig_to_base64 (sign_str signed sk)) in
+  H.send_line conn
+    (Printf.sprintf "%s %s 0 epoch:0 cap_root:%s role_caps:%s caps:%s roles:%s callers:%s"
+       wire_head sig_b64 cap_root role_caps
+       (String.concat "," (List.sort String.compare fm.H.fn_caps)) roles callers);
+  H.recv_line conn
+
+let with_reload_server ?(stop = Sys.sigterm) ~dir ~bin ~sock ~extra_env f =
+  let env = Array.append [|
+      "MARCH_HOT_RELOAD_SOCKET=" ^ sock;
+      "HOME=" ^ dir;
+      "MARCH_AUDIT_LOG=" ^ Filename.concat dir "audit.jsonl";
+      "PATH=" ^ (try Sys.getenv "PATH" with Not_found -> "/usr/bin:/bin") |] extra_env in
+  let log = Unix.openfile (Filename.concat dir "server.log")
+      [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_APPEND ] 0o644 in
+  let pid = Unix.create_process_env bin [| bin |] env Unix.stdin log log in
+  Unix.close log;
+  Fun.protect
+    ~finally:(fun () ->
+        (try Unix.kill pid stop with Unix.Unix_error _ -> ());
+        (try ignore (Unix.waitpid [] pid) with Unix.Unix_error _ -> ());
+        (try Sys.remove sock with Sys_error _ -> ()))
+    (fun () -> f pid)
+
+let test_hcr_role_widening_refused_end_to_end () =
+  let module H = March_forge.Cmd_deploy_hot in
+  let (pk, sk) = March_ed25519.Ed25519.keygen () in
+  let pk_b64 = March_ed25519.Ed25519.pk_to_base64 pk in
+  let base =
+    build_role_fixture ~tag:"e2ebase"
+      ~extra_args:("--hot-reload Main --signing-pubkey " ^ Filename.quote pk_b64)
+      (role_manifest_src ~serve:true ~uses_save:false ()) in
+  let narrow =
+    build_role_fixture ~tag:"e2enarrow" ~extra_args:"--hot-reload Main --compile-so"
+      (role_manifest_src ~serve:true ~uses_save:false ()) in
+  let wide =
+    build_role_fixture ~tag:"e2ewide" ~extra_args:"--hot-reload Main --compile-so"
+      (role_manifest_src ~serve:true ~uses_save:true ()) in
+  match base, narrow, wide with
+  | Some (dir, bin), Some (_, nbin), Some (_, wbin) ->
+    let parse p = match H.parse_manifest (p ^ ".hcr_manifest") with
+      | Ok m -> m | Error e -> Alcotest.fail e in
+    let prior = parse nbin and current = parse wbin in
+    Alcotest.(check (list string)) "the running build's role closure"
+      ["IO.Console"] (List.concat_map (fun r -> r.H.role_caps) prior.H.roles);
+    Alcotest.(check (list string)) "the patch widens it through `save`"
+      ["IO.Console"; "IO.FileWrite"] (List.concat_map (fun r -> r.H.role_caps) current.H.roles);
+    (* 1. The client gate. *)
+    Alcotest.(check bool) "forge's per-role gate stops it without --grant-cap" true
+      (H.role_gate ~prior:(Some prior) ~current ~grant_caps:[]);
+    Alcotest.(check bool) "--grant-cap IO.FileWrite lets it past the client" false
+      (H.role_gate ~prior:(Some prior) ~current ~grant_caps:["IO.FileWrite"]);
+    (* 2. The server, under a node policy. *)
+    let policy = Filename.concat dir "policy.txt" in
+    let oc = open_out policy in
+    output_string oc "IO.Console\nIO.NetConnect\nIO.NetListen\nSession.Live\n";
+    close_out oc;
+    let sock = Printf.sprintf "/tmp/march_role_e2e_%d.sock" (Unix.getpid ()) in
+    let admitted = ref "" and topology = ref "" in
+    with_reload_server ~stop:Sys.sigkill ~dir ~bin ~sock ~extra_env:[| "MARCH_DEPLOY_POLICY=" ^ policy |]
+      (fun _pid ->
+         match e2e_connect sock with
+         | None -> Alcotest.failf "reload server never listened on %s (see %s/server.log)" sock dir
+         | Some fd ->
+           let conn = H.conn_of_fd fd in
+           H.cas_put conn current.H.cas_hash (wbin);
+           let resp = e2e_activate6 conn ~sk ~manifest:current ~fn_name:"cons" in
+           Alcotest.(check string) "the server refuses the widened role closure"
+             "ERR role_cap_policy Stream.Cons IO.FileWrite" resp;
+           H.cas_put conn prior.H.cas_hash nbin;
+           (* The control activates a function the running server registered
+              (a boundary function of the base binary). *)
+           H.send_line conn "ABI_QUERY";
+           let slots = H.parse_abi_query conn in
+           let known = List.filter_map (fun (f : H.fn_manifest) ->
+               if List.exists (fun sl -> sl.H.slot_name = f.H.fn_name) slots
+               then Some f.H.fn_name else None) prior.H.functions in
+           let target =
+             if List.mem "cons" known then "cons"
+             else match known with n :: _ -> n | [] -> Alcotest.fail "no registered slot in the manifest" in
+           let resp = e2e_activate6 conn ~sk ~manifest:prior ~fn_name:target in
+           Alcotest.(check bool) ("a closure inside the policy is admitted: " ^ resp) true
+             (String.length resp >= 3 && String.sub resp 0 3 = "OK ");
+           admitted := target;
+           (* A signed topology push, which must survive the restart too. *)
+           (match H.push_topology_conn conn ~sk ~body:"[pools.edge]\nserves = [\"Stream.Cons\"]\n" with
+            | Ok d -> topology := d
+            | Error e -> Alcotest.failf "TOPOLOGY push refused: %s" e);
+           Unix.close fd);
+    (* 3. Restart durability (plan 6.5): the server was SIGKILLed; the same
+       binary on the same socket comes back with the admitted patch
+       republished from its persisted stack (the refused one was never
+       persisted), with no redeploy. *)
+    with_reload_server ~dir ~bin ~sock ~extra_env:[||] (fun _pid ->
+        match e2e_connect sock with
+        | None -> Alcotest.failf "restarted server never listened on %s" sock
+        | Some fd ->
+          let conn = H.conn_of_fd fd in
+          H.send_line conn "VERSIONS_DETAIL";
+          let rec read acc = match H.recv_line conn with
+            | "END" -> List.rev acc | l -> read (l :: acc) in
+          let lines = read [] in
+          Unix.close fd;
+          Alcotest.(check bool)
+            ("the restart restored one patch: " ^ String.concat " | " (List.filter (fun l ->
+                 String.length l > 8 && String.sub l 0 8 = "RESTORED") lines))
+            true
+            (List.exists (fun l ->
+                 let p = "RESTORED entries:1 skipped:0 mode:replayed" in
+                 String.length l >= String.length p && String.sub l 0 (String.length p) = p) lines);
+          Alcotest.(check bool) "the pushed topology's digest is restored" true
+            (List.exists (fun l ->
+                 let n = String.length l and t = "topology:" ^ !topology in
+                 n >= String.length t && String.sub l (n - String.length t) (String.length t) = t)
+                lines);
+          let slot = List.find_opt (fun l ->
+              match String.split_on_char ' ' l with
+              | "SLOT" :: _ :: name :: _ -> name = !admitted | _ -> false) lines in
+          (match Option.map (String.split_on_char ' ') slot with
+           | Some ("SLOT" :: _ :: _ :: _ :: ts :: signer :: _) ->
+             Alcotest.(check bool) "the restored slot carries its activation time" true (ts <> "0");
+             Alcotest.(check string) "and the deploy key as signer"
+               (March_ed25519.Ed25519.pk_to_hex pk) signer
+           | _ -> Alcotest.failf "no SLOT line for %s" !admitted))
+  | _ -> ()  (* toolchain missing: counted skip inside compile_march_or_skip *)
+
 (* C1 fix (final whole-branch review, HCR Phase 5C): actor handler caps were
    silently dropped from the manifest — [record_fn_caps] was called for
    [DFn]/[DExtern] but never for actor handlers, even though TIR hashes every
@@ -12157,6 +12447,60 @@ let test_concat_chain_values () =
     compiled_and_interpreted_stdout ~tag:"march_catval" ~src_text:src
   in
   Alcotest.(check string) "interpreted concat chain values" expected interpreted;
+  match compiled with
+  | None -> ()
+  | Some out -> Alcotest.(check string) "compiled matches interpreted" expected out
+
+(* Compress's decoders turn the builtin's String error into Compress.Error, on
+   BOTH backends (the classifier is March code, but the messages it reads come
+   from two different C shims: runtime/march_compress.c compiled,
+   lib/eval/compress_stubs.c interpreted). Also covers the streaming path,
+   whose Seq annotations could never typecheck, and a round-trip so the Ok arm
+   of the mapping is exercised compiled. zstd/brotli may be built without their
+   library, in which case the decoder reports Io("... not available ..."),
+   which is folded into the expected line rather than failing the test. *)
+let test_compress_decode_error_structured_both_backends () =
+  let src =
+    "mod CompressErr do\n\
+    \  needs IO.Console\n\
+    \  pfn kind(r) do\n\
+    \    match r do\n\
+    \    Ok(_) -> \"ok\"\n\
+    \    Err(Compress.InvalidInput(_)) -> \"invalid_input\"\n\
+    \    Err(Compress.InsufficientOutput) -> \"insufficient_output\"\n\
+    \    Err(Compress.Io(msg)) ->\n\
+    \      if string_contains(msg, \"not available\") do \"unavailable\" else \"io\" end\n\
+    \    end\n\
+    \  end\n\
+    \  pfn or_missing(k) do if k == \"unavailable\" do \"invalid_input\" else k end end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let garbage = Bytes.from_list([1, 2, 3, 4, 5, 6, 7, 8])\n\
+    \    println(\"gzip \" ++ kind(Compress.Gzip.decode(garbage)))\n\
+    \    println(\"deflate \" ++ kind(Compress.Deflate.decode(garbage)))\n\
+    \    println(\"zstd \" ++ or_missing(kind(Compress.Zstd.decode(garbage))))\n\
+    \    println(\"brotli \" ++ or_missing(kind(Compress.Brotli.decode(garbage))))\n\
+    \    match Compress.Gzip.encode(Bytes.from_string(\"hello hello hello\")) do\n\
+    \    Ok(c) ->\n\
+    \      match Compress.Gzip.decode(c) do\n\
+    \      Ok(d) -> println(\"roundtrip \" ++ Bytes.to_string(d))\n\
+    \      Err(_) -> println(\"roundtrip decode-failed\")\n\
+    \      end\n\
+    \    Err(_) -> println(\"roundtrip encode-failed\")\n\
+    \    end\n\
+    \    match Seq.to_list(Compress.Gzip.decode_stream(Seq.from_list([garbage]))) do\n\
+    \    Cons(r, Nil) -> println(\"stream \" ++ kind(r))\n\
+    \    _ -> println(\"stream wrong-length\")\n\
+    \    end\n\
+    \  end\n\
+     end\n"
+  in
+  let expected =
+    "gzip invalid_input\ndeflate invalid_input\nzstd invalid_input\n\
+     brotli invalid_input\nroundtrip hello hello hello\nstream invalid_input" in
+  let (interpreted, compiled) =
+    compiled_and_interpreted_stdout ~tag:"march_compress_err" ~src_text:src
+  in
+  Alcotest.(check string) "interpreted: decode errors are Compress.Error" expected interpreted;
   match compiled with
   | None -> ()
   | Some out -> Alcotest.(check string) "compiled matches interpreted" expected out
@@ -14634,6 +14978,9 @@ let stdlib_suites =
         Alcotest.test_case "gzip round-trip"                    `Quick test_gzip_roundtrip;
         Alcotest.test_case "gzip empty bytes"                   `Quick test_gzip_empty;
         Alcotest.test_case "gzip decode invalid → Err"         `Quick test_gzip_decode_invalid;
+        Alcotest.test_case "gzip decode invalid → Err(InvalidInput)" `Quick test_gzip_decode_invalid_is_structured;
+        Alcotest.test_case "decode errors are Compress.Error, compiled + interpreted" `Slow
+          test_compress_decode_error_structured_both_backends;
         Alcotest.test_case "gzip compresses repetitive"        `Quick test_gzip_compressed_smaller;
         Alcotest.test_case "gzip encode_level BestSpeed"       `Quick test_gzip_level_explicit;
         Alcotest.test_case "deflate round-trip"                 `Quick test_deflate_roundtrip;
@@ -14832,6 +15179,10 @@ let stdlib_suites =
           test_hcr_manifest_emits_caps_and_cap_root;
         Alcotest.test_case "HCR manifest: actor handler caps populated (C1 fix)" `Slow
           test_hcr_manifest_actor_handler_caps_populated;
+        Alcotest.test_case "HCR manifest: ROLE lines carry each role's full capability closure (DD step 10)" `Slow
+          test_hcr_manifest_role_closure_lines;
+        Alcotest.test_case "HCR ACTIVATE6: a widened role closure is refused by the client gate and the server (DD step 10)" `Slow
+          test_hcr_role_widening_refused_end_to_end;
         Alcotest.test_case "HCR manifest: disjoint fn caps stay separate, not the whole-artifact union (granularity revision)" `Slow
           test_hcr_manifest_disjoint_fn_caps_not_whole_artifact_union;
         Alcotest.test_case "MARCH_SANITIZE binary exits 0 (ASAN altstack teardown, macOS arm64)" `Slow

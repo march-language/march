@@ -1,0 +1,57 @@
+-- The NEW version of the upgrade fixture, the one whose upgrade DROPS
+-- messages: Tally loses its Legacy handler and there is no
+-- tally_migrate_msg, so every Legacy message the old feeder sends after
+-- Tally moves is dropped and counted. forge/test/test_upgrade_from.ml copies
+-- this over v1 and expects `forge test --upgrade-from HEAD` to FAIL.
+--
+-- Echo.Server answers twice; a session can span a hot deploy. The hook
+-- spawns Tally, whose message type has two handlers, Add and Legacy, and
+-- a feeder task that sends Legacy(1) every 20 ms for about six seconds.
+-- The feeder is a task: it stays on the code (epoch) it started on, so
+-- after a deploy it keeps sending the OLD message format to a Tally that
+-- has moved to the new code.
+mod UpgradeApp do
+  needs IO
+  needs IO.Clock
+  needs IO.Spawn
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    ask: Client -> Server : Int
+    answer: Server -> Client : Int
+    ask2: Client -> Server : Int
+    answer2: Server -> Client : Int
+  end
+
+  type Env = { started : Bool }
+
+  actor Tally do
+    state { total : Int }
+    init  { total: 0 }
+    on Add(n : Int) do { total: state.total + n } end
+  end
+
+  fn start(_io : Cap(IO), _node : Cap(ClusterNode.Live)) : Env do
+    let t = spawn(Tally)
+    let _ = task_spawn(fn _ -> feed(t, 0))
+    { started: true }
+  end
+
+  fn feed(t : Pid(TallyState), i : Int) : Int do
+    if i >= 300 do i else
+      let _ = send(t, Add(1))
+      sleep_ms(20)
+      feed(t, i + 1)
+    end
+  end
+
+  type TallyState = { total : Int }
+
+  fn serve_one(_env : Env, s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
+    Echo_Server.recv_Ask(s, st, fn (n, st1) ->
+      Echo_Server.recv_Ask2(s, Echo_Server.send_Answer(s, st1, n + 1), fn (k, st2) ->
+        Echo_Server.close(s, Echo_Server.send_Answer2(s, st2, k + 1))))
+  end
+end

@@ -686,6 +686,8 @@ forge deps update depot   # update a specific package
 
 `forge.lock` pins exact versions for reproducible builds. Commit it to version control.
 
+Every `build`, `check`, `run`, `test` and `bench` re-hashes each cached git or registry dependency it is about to use against the `hash` in `forge.lock`, once per command. This is a local re-hash with no network access, and it costs about 0.01 s for a 1.8 MB dependency. If a cached tree does not match (it was edited or corrupted), forge fetches the locked commit or version again, checks the fresh copy against the same hash, swaps it in, and prints one note naming the dependency. If the fresh copy does not match either, the cache was not the cause: `forge.lock` or the upstream source has changed. The command then fails, naming the dependency, the hash in `forge.lock` and the hash of the fresh copy. Run `forge deps` to re-lock it if you expect the upstream change. `forge deps` also replaces a cached git tree that does not match its commit; before, it kept the edited tree and wrote that tree's hash into `forge.lock`. Offline, a mismatch is always an error (see below).
+
 ### Offline Builds
 
 `--offline` is a global flag: every command accepts it, in any position before a bare `--` (`forge build --offline`, `forge --offline test`). Setting `FORGE_OFFLINE=1` does the same; either one turns offline mode on, and neither can turn it off once the other has.
@@ -701,7 +703,7 @@ Offline, forge starts no process that talks to the network: no `git clone`, no r
 - **Dependencies come from `forge.lock` only.** Each git or registry dependency is looked up at `~/.march/cas/deps/<name>/<commit-or-version>`, using the commit or exact version the lockfile recorded. Offline mode never chooses a version: a registry dependency that is not in `forge.lock` is skipped even when some version of it is cached.
 - **A missing dependency is a warning, not an error.** The build, check, test or run goes ahead without it; if your code imports it, the compiler's `Unknown module` error follows the warning, which names the dependency and its cache directory.
 - **An unusable lockfile is reported once.** A missing `forge.lock`, or a `forge.lock` that is not a lockfile (for example one holding `forge.toml` syntax), gets one error, and only path dependencies are used. If `forge.toml` has changed since `forge deps`, you get one warning that the locked versions may be stale.
-- **Cached trees are checked.** Each cached dependency is re-hashed against the `hash` in `forge.lock` before an offline build uses it. A mismatch fails the build, and the error names the dependency, the expected hash and the actual hash.
+- **Cached trees are checked.** Each cached dependency is re-hashed against the `hash` in `forge.lock` before an offline build uses it. A mismatch fails the build, and the error names the dependency, the expected hash and the actual hash. Running the command again without `--offline` re-fetches the dependency.
 - **`forge deps --offline`** fetches and rewrites nothing. It prints one line per dependency and exits non-zero if any is missing or fails its hash check.
 - **`forge add`** (registry or git) and **`forge outdated`** refuse offline. `forge add --path` still works.
 
@@ -968,6 +970,24 @@ forge licenses             # list each dependency and its declared license
 forge licenses --json      # JSON output for tooling
 forge licenses --strict    # exit non-zero if any dependency has no license
 ```
+
+---
+
+## Dependency Capability Audit
+
+```sh
+forge audit --record                             # record each dependency's capability set (forge.caps.lock)
+forge audit                                      # exit 1 if a dependency gained authority
+forge audit --inferred                           # infer each set from the code (`march caps`), not `needs`
+forge audit --inferred --allow-unanalyzable      # gate on the deps that typecheck; list the rest
+```
+
+`--inferred` needs a toolchain whose `march` supports `caps` (0.3.0 or later)
+and stops with the toolchain's path and version if it does not. It caches
+each dependency's result under `.forge/audit-cache/`, so only changed
+dependencies are re-analyzed. A dependency that does not typecheck fails the
+audit unless `--allow-unanalyzable` is given, and it is listed with the
+compiler's reason either way. See [Capability Audit](capability-audit.md).
 
 ---
 

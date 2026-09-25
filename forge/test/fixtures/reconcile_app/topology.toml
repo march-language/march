@@ -1,0 +1,19 @@
+# Three pools, one role placed on exactly one node (forge/test/
+# test_topology_reconcile.ml, distributed-deploys build step 8). The test
+# rewrites `place` and pushes it to the running cluster.
+
+[roles]
+"Echo.Server" = { body = "ReconcileApp.serve_one", capacity = 4, place = { count = 1 } }
+
+[pool.a]
+serves = ["Echo.Server"]
+
+[pool.b]
+serves = ["Echo.Server"]
+
+[pool.c]
+serves = ["Echo.Server"]
+
+[drain]
+soft_ms = 1000
+hard_ms = 3000
