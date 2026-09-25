@@ -7054,6 +7054,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/node_call_loopback.expected native_node_call_loopback.out)))
 
+; ── ClusterNode's internal Vaults are not found by name ────────────────────
+; A node's meta/names Vaults are named with a random nonce, so a scan of the
+; old "cluster_node_<x>_<name>.<pid>" names finds nothing (D35: the node cap
+; is the only way in; specs/progress/2026-09-25-dd-review-cluster-node-vaults-
+; bypass-live-cap.md). Ephemeral port.
+(rule
+ (targets native_cluster_node_vaults_unnamed native_cluster_node_vaults_unnamed.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime) (source_tree ../stdlib)
+       (file native/cluster_node_vaults_unnamed.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_cluster_node_vaults_unnamed
+        native/cluster_node_vaults_unnamed.march)
+   (with-stdout-to native_cluster_node_vaults_unnamed.out
+        (system "./native_cluster_node_vaults_unnamed")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/cluster_node_vaults_unnamed.expected native_cluster_node_vaults_unnamed.out)))
+
 ; ── NodeSend loopback: a one-way actor message to a GlobalPid over TCP ──
 ; Distributed actors 1/4 (specs/progress/2026-09-14-remote-send-to-a-global-pid.md):
 ; ACTOR_MSG delivered into a remote actor's mailbox and answered by the same
@@ -10421,13 +10442,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (run bash -c
     "%{cc} -shared -fPIC -I../runtime \
      -DMARCH_HCR_TRIPLE=x86_64-unknown-linux-gnu \
-     '-DMARCH_HCR_ABI_ID=\"march-hcr-v2;triple=x86_64-unknown-linux-gnu;ptr=8\"' \
+     '-DMARCH_HCR_ABI_ID=\"march-hcr-v3;triple=x86_64-unknown-linux-gnu;ptr=8\"' \
      -DMARCH_HCR_TARGET=\\\"linux/amd64\\\" -DMARCH_HCR_PREFIX=\\\"HcrSmoke\\\" \
      -o hcr_identity_amd64.so ../runtime/march_hcr_identity.c")
    (run bash -c
     "%{cc} -shared -fPIC -I../runtime \
      -DMARCH_HCR_TRIPLE=aarch64-unknown-linux-gnu \
-     '-DMARCH_HCR_ABI_ID=\"march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8\"' \
+     '-DMARCH_HCR_ABI_ID=\"march-hcr-v3;triple=aarch64-unknown-linux-gnu;ptr=8\"' \
      -DMARCH_HCR_TARGET=\\\"linux/arm64\\\" -DMARCH_HCR_PREFIX=\\\"HcrSmoke\\\" \
      -o hcr_identity_arm64.so ../runtime/march_hcr_identity.c"))))
 

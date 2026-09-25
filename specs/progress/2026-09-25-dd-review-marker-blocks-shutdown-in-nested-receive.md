@@ -47,3 +47,25 @@ this mode can take something". `mbox_waiting_has_deliverable` should use
 `mbox_user_msgs(p) > 0 || control_mailbox` for modes other than 2 (markers
 are only deliverable to wait mode 2). Add the harness as a case in
 `test_hcr_migrate_order.c`.
+
+---
+
+## Fixed 2026-09-25
+
+`mbox_waiting_has_deliverable` (runtime/march_scheduler.c) now counts what a receive
+in the proc's wait mode can take. The actor loop (mode 2) takes markers, so any
+user-mailbox node counts. Every other wait (a nested `receive()`, or a proc not in a
+mailbox wait) counts user messages (`user_mbox_count - mbox_markers`) plus the
+control plane (`mbox_count - user_mbox_count`), never a marker. `mbox_markers` became
+`_Atomic int64_t` so the check can read it without the mailbox lock, as it reads the
+other two counters; its writers still run under the lock, now with explicit relaxed
+atomics.
+
+Scope: only the receive-loop marker path; D27's hold/drain code (PR #648, merged
+while this was in review) was not touched.
+
+Test: `test/test_hcr_migrate_order.c` spawns itself twice (`nested-exit` and
+`nested-exit-deploy`, `alarm(10)`): an actor whose handler blocks in
+`march_actor_recv()`, and `main` returns with or without one activation. Output:
+`control exit=0 deploy exit=0`, 62/62 at the time. The review's repro measured
+`control=0 deploy=142` before the fix.

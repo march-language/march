@@ -19,8 +19,8 @@ static void check(const char *path, const char *abi, const char *target,
 
 int main(int argc, char **argv) {
   if (argc != 3) return 2;
-  check(argv[1], "march-hcr-v2;triple=x86_64-unknown-linux-gnu;ptr=8", "linux/amd64", "HcrSmoke");
-  check(argv[2], "march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8", "linux/arm64", "HcrSmoke");
+  check(argv[1], "march-hcr-v3;triple=x86_64-unknown-linux-gnu;ptr=8", "linux/amd64", "HcrSmoke");
+  check(argv[2], "march-hcr-v3;triple=aarch64-unknown-linux-gnu;ptr=8", "linux/arm64", "HcrSmoke");
   puts("hcr identity: all checks passed");
   return 0;
 }

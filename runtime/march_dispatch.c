@@ -601,7 +601,16 @@ void *march_dispatch_enter_gen(uint32_t name_id, uint32_t caller_epoch,
        seq_cst Dekker pairing with the reclaimer): a concurrent reclaim that
        retired this slot means we must back out and fall back. */
     atomic_fetch_add_explicit(&s->ring[v].refs, 1, memory_order_seq_cst);
-    if (!atomic_load_explicit(&s->ring[v].live, memory_order_seq_cst)) {
+    /* ...and the slot must still hold the version it was SELECTED by: a
+       reclaim can retire it, restage it with a newer epoch and commit it
+       between the scan and the pin, and `live` alone would then accept the
+       new occupant -- code from after the caller's epoch (the ABA twin of
+       #551).  Epochs only grow, so an unchanged epoch is the same version.
+       Unreachable for a caller that pins its epoch (the reclaim condition
+       keeps the selected version), which every compiled unit does; this
+       keeps enter_gen correct without that argument. */
+    if (!atomic_load_explicit(&s->ring[v].live, memory_order_seq_cst)
+            || atomic_load_explicit(&s->ring[v].epoch, memory_order_relaxed) != best_ep) {
         atomic_fetch_sub_explicit(&s->ring[v].refs, 1, memory_order_acq_rel);
         if (out_version) *out_version = 0;
         return NULL;

@@ -2206,7 +2206,7 @@ typedef struct march_actor_meta {
     int                          linked;
     /* This incarnation's tombstone, allocated with the meta (meta_new_locked;
      * compiled code creates the meta before the spawn, to set
-     * dispatch_name_id and call_tag_base), given its pid index by
+     * dispatch_name_id and call_tags), given its pid index by
      * march_spawn_common.  Never NULL, never freed. */
     march_pid_entry             *pe;
     /* Graceful shutdown (march_actor_stop). [draining] is set by whichever
@@ -2284,15 +2284,19 @@ typedef struct march_actor_meta {
     struct hcr_deferred        *hcr_def_tail;
     int64_t                     hcr_def_n;
     int64_t                     hcr_dropped;
-    /* Global tag of this actor's FIRST message constructor (the F19
-     * memory-safety fix gives actor _Msg ctors globally-unique tags,
-     * base 0x0100_0000 — see lib/tir/llvm_toplevel.ml build_ctor_info).
-     * march_actor_call adds the caller's sentinel ctor INDEX to this base
-     * to address the handler positionally; 0 = unregistered (fall back to
-     * the sentinel's raw tag). Stamped at actor-record alloc via
-     * march_actor_set_call_base, so supervisor respawns (which re-run the
-     * March-level spawn closure) re-stamp it on the fresh record. */
-    int64_t                     call_tag_base;
+    /* This actor type's message-constructor tags in HANDLER ORDER: entry i
+     * is the tag of its i-th handler's constructor (the F19 memory-safety
+     * fix gives actor _Msg ctors globally-unique tags, a stable hash of the
+     * qualified constructor name — see lib/tir/llvm_toplevel.ml
+     * actor_msg_tag_table — so they are NOT contiguous).  march_actor_call
+     * maps the caller's sentinel ctor INDEX through it to address the handler
+     * positionally; NULL = unregistered (fall back to the sentinel's raw
+     * tag).  Stamped at actor-record alloc via march_actor_set_call_tags, so
+     * supervisor respawns (which re-run the March-level spawn closure)
+     * re-stamp it on the fresh record.  Interned by the runtime (never
+     * freed, see call_tags_intern): the codegen's copy may live in a hot
+     * patch that is dlclosed while this actor still runs. */
+    const struct march_call_tags *call_tags;
     /* Set on a CHILD when it is spawned by a supervisor: the SUPERVISOR's
      * tombstone, so the supervisor is found by incarnation (sup_pin), never
      * by a record address that may since have been freed and reused.  NULL
@@ -6047,13 +6051,13 @@ static void *march_spawn_common(void *actor, int defer_activation) {
      * very record (a record is spawned once by the lowering; this is
      * defence, not a path a compiled program takes): the new incarnation
      * gets a fresh meta, and the old one stays linked, as before the metas
-     * PR.  dispatch_name_id and call_tag_base are carried over because
+     * PR.  dispatch_name_id and call_tags are carried over because
      * compiled code sets them on the record before spawning it. */
     pthread_mutex_lock(&g_tbl_mu);
     if (pe_pid(meta->pe) >= 0) {
         march_actor_meta *m = meta_new_locked(actor);
         m->dispatch_name_id = meta->dispatch_name_id;
-        m->call_tag_base    = meta->call_tag_base;
+        m->call_tags        = meta->call_tags;
         meta = m;
     }
     atomic_store_explicit(&meta->pe->pid_index,
@@ -6140,13 +6144,47 @@ void march_actor_set_dispatch_id(void *actor, uint32_t name_id) {
     march_reclaim_exit();
 }
 
-void march_actor_set_call_base(void *actor, int64_t base) {
+/* Interned handler-tag tables (see march_actor_meta.call_tags).  One per
+ * distinct table: a program has one per actor type, and each hot patch that
+ * changes an actor's handlers adds one, so the list stays short and is never
+ * freed.  Immutable once published; readers need no lock. */
+struct march_call_tags {
+    struct march_call_tags *next;
+    int64_t                 n;
+    int32_t                 tags[];
+};
+static struct march_call_tags *g_call_tags = NULL;
+static pthread_mutex_t g_call_tags_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static const struct march_call_tags *call_tags_intern(const int32_t *tags,
+                                                      int64_t n) {
+    if (!tags || n <= 0) return NULL;
+    pthread_mutex_lock(&g_call_tags_mu);
+    struct march_call_tags *t = g_call_tags;
+    for (; t; t = t->next)
+        if (t->n == n && memcmp(t->tags, tags, (size_t)n * sizeof(int32_t)) == 0)
+            break;
+    if (!t) {
+        t = malloc(sizeof *t + (size_t)n * sizeof(int32_t));
+        if (t) {
+            t->n = n;
+            memcpy(t->tags, tags, (size_t)n * sizeof(int32_t));
+            t->next = g_call_tags;
+            g_call_tags = t;
+        }
+    }
+    pthread_mutex_unlock(&g_call_tags_mu);
+    return t;
+}
+
+void march_actor_set_call_tags(void *actor, const int32_t *tags, int64_t n) {
     /* Emitted by codegen right after the actor record's alloc (same timing
      * as march_actor_set_dispatch_id): before march_spawn, so
      * find_or_create_meta creates the entry the spawn will reuse. */
+    const struct march_call_tags *t = call_tags_intern(tags, n);
     march_reclaim_enter();   /* meta: resolved and used inside */
     march_actor_meta *meta = find_or_create_meta(actor);
-    if (meta) meta->call_tag_base = base;
+    if (meta) meta->call_tags = t;
     march_reclaim_exit();
 }
 
@@ -7132,7 +7170,7 @@ void march_timer_cancel(void *tok) {
  * loop discards any envelope whose corr doesn't match the call it belongs to.
  *
  * Tag choice: 0x00CA11ED sits below the F19 global ctor-tag floor
- * (0x01000000 — see the call_tag_base comment above) so it can never collide
+ * (0x01000000 — see the call_tags comment above) so it can never collide
  * with a real user/stdlib constructor tag, and it doesn't collide with the
  * other reserved sentinel tags either: MARCH_STRING_TAG/-1, MARCH_RESOURCE_TAG/-2,
  * and MARCH_FLOAT_TAG/-3 (all negative int32, checked as literal != this one)
@@ -7288,17 +7326,20 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
     if (gt && caller) {
         /* Positional dispatch: the sentinel's per-type tag IS the handler
          * index. The actor's dispatch switch matches GLOBAL msg tags (F19:
-         * base 0x0100_0000 + declaration index, unique across actors), so
-         * translate index → global tag via the base stamped at alloc time.
-         * Without this every call message falls to the dispatch default arm
-         * and is silently dropped — the caller blocks forever (or times out).
+         * a stable hash of the qualified constructor name, unique across
+         * actors and NOT contiguous), so translate index → global tag via
+         * the table stamped at alloc time.  Without this every call message
+         * falls to the dispatch default arm and is silently dropped — the
+         * caller blocks forever (or times out).
          *
-         * Only rebase a tag BELOW the F19 global floor: a caller may also pass
-         * the actor's OWN _Msg constructor (e.g. actor_call(pool, Checkout(0)))
-         * whose tag is ALREADY global — rebasing it again would double-add the
-         * base and misroute (the erased_option_niche_fbip_codegen regression). */
-        if (meta->call_tag_base && msg_tag < 0x01000000)
-            msg_tag = (int32_t)(meta->call_tag_base + msg_tag);
+         * Only translate a tag that is a handler index: a caller may also
+         * pass the actor's OWN _Msg constructor (e.g.
+         * actor_call(pool, Checkout(0))) whose tag is ALREADY global (at or
+         * above 0x01000000, far past any index) — translating it would
+         * misroute (the erased_option_niche_fbip_codegen regression). */
+        const struct march_call_tags *ct = meta->call_tags;
+        if (ct && msg_tag >= 0 && (int64_t)msg_tag < ct->n)
+            msg_tag = ct->tags[msg_tag];
         MARCH_SET_TAG(call_msg, msg_tag);
         march_sched_send(gt, call_msg);
     }
