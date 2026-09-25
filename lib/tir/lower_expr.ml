@@ -610,7 +610,8 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
      form and lower THAT, so downstream sees an ordinary call of a stdlib
      function and a direct call of the derived encoder.  The rewrite itself
      lives beside the table so the interpreter's is the same one. *)
-  | Ast.EApp (Ast.EVar { txt = ("Node.send" | "Node.enqueue" | "Node.accepts"); _ }, _, _)
+  | Ast.EApp (Ast.EVar { txt = ("Node.send" | "Node.enqueue" | "Node.accepts" | "Node.accepts_tag"
+                              | "Node.schema_matches" | "Node.schema_of"); _ }, _, _)
     when March_ast.Json_dispatch.node_send_rewrite e <> None ->
     (match March_ast.Json_dispatch.node_send_rewrite e with
      | Some e' -> lower_expr env e'

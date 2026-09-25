@@ -93,11 +93,91 @@ let routable (adef : actor_def) : (string * ty) list =
        | _ -> None)
     adef.actor_handlers
 
-let dispatch_fn ~actor (routes : (string * ty) list) : decl =
-  let decode_arm (ctor, ty) rest =
-    let witness =
-      ELam ([ { param_name = n "_w"; param_ty = Some ty; param_lin = Unrestricted } ], ETuple ([], sp), sp)
+(** The actor's `<actor>_migrate_msg` among [decls] (build step 9, schema
+    hashes), as (its name, the old message type's name): a function of that
+    name, lower-cased as the hot-reload runtime matches it, with one parameter
+    annotated with a named type. *)
+let migrate_of ~actor (decls : decl list) : (string * string) option =
+  let want = String.lowercase_ascii actor ^ Desugar_migrate.msg_suffix in
+  List.find_map
+    (function
+      | DFn (fd, _) when String.lowercase_ascii fd.fn_name.txt = want ->
+        (match fd.fn_clauses with
+         | [ { fc_params = [ FPNamed { param_ty = Some (TyCon (t, [])); _ } ]; _ } ] -> Some (fd.fn_name.txt, t.txt)
+         | _ -> None)
+      | _ -> None)
+    decls
+
+(** The constructors of the old message variant [old_ty] declared among
+    [decls] that take one argument, each as it must be spelled (qualified by
+    [old_ty]'s module path when that was written qualified) with its argument
+    type: the older payload shapes `migrate_msg` accepts. *)
+let old_ctor_args (decls : decl list) ~(old_ty : string) : (string * ty) list =
+  let path, short =
+    match String.rindex_opt old_ty '.' with
+    | Some i -> (String.sub old_ty 0 (i + 1), String.sub old_ty (i + 1) (String.length old_ty - i - 1))
+    | None -> ("", old_ty)
+  in
+  let rec find (ds : decl list) (segs : string list) =
+    match segs with
+    | [] ->
+      List.find_map
+        (function
+          | DType (_, nm, [], TDVariant vs, _) when nm.txt = short ->
+            Some (List.filter_map (fun v -> match v.var_args with [ t ] -> Some (path ^ v.var_name.txt, t) | _ -> None) vs)
+          | _ -> None)
+        ds
+    | m :: rest ->
+      List.find_map (function DMod (nm, _, inner, _) when nm.txt = m -> find inner rest | _ -> None) ds
+  in
+  let segs = List.filter (fun x -> x <> "") (String.split_on_char '.' path) in
+  Option.value ~default:[] (find decls segs)
+
+let dispatch_fn ~actor ?(decls = []) (routes : (string * ty) list) : decl =
+  let witness_of ty =
+    ELam ([ { param_name = n "_w"; param_ty = Some ty; param_lin = Unrestricted } ], ETuple ([], sp), sp)
+  in
+  let migrate = migrate_of ~actor decls in
+  (* The tag is this handler's type but the schema is not: a same-named type
+     of another shape (an older or newer build). Converted by the actor's
+     `migrate_msg` when its old message type has this constructor and the
+     delivery's schema is that constructor's argument's; refused otherwise
+     (an `Err`, which the transport answers with DELIVERY_FAILED). *)
+  let mismatch ctor =
+    let refuse =
+      con "Err"
+        [ lit_str
+            (Printf.sprintf
+               "%s: a %s message arrived with a schema this build's type does not have, and no migrate_msg converts it"
+               actor ctor) ]
     in
+    match migrate with
+    | None -> refuse
+    | Some (mig, old_ty) ->
+      (* One arm per older shape `migrate_msg` takes: the delivery's schema is
+         that constructor's argument's. *)
+      List.fold_right
+        (fun (old_ctor, old_arg) rest ->
+           EIf
+             ( app "Node.schema_matches" [ var "d"; witness_of old_arg ],
+               EBlock
+                 ( [ let_ ~ty:(tycon "Result" [ old_arg; tycon "Json.DecodeError" [] ]) "old" (app "from_json" [ var "v" ]);
+                     match_ (var "old")
+                       [ ( pcon "Ok" [ PatVar (n "x") ],
+                           match_ (app mig [ con old_ctor [ var "x" ] ])
+                             [ ( pcon "Some" [ PatVar (n "m") ],
+                                 EBlock ([ let_wild (ESend (var "pid", var "m", sp)); con "Ok" [ ELit (LitBool true, sp) ] ], sp) );
+                               ( pcon "None" [],
+                                 con "Err" [ lit_str (Printf.sprintf "%s: migrate_msg dropped a %s message of an older schema" actor ctor) ] ) ] );
+                         ( pcon "Err" [ PatWild sp ],
+                           con "Err" [ lit_str (Printf.sprintf "%s: the payload does not decode as %s's older message" actor ctor) ] ) ] ],
+                   sp ),
+               rest,
+               sp ))
+        (old_ctor_args decls ~old_ty) refuse
+  in
+  let decode_arm (ctor, ty) rest =
+    let witness = witness_of ty in
     EIf
       ( app "Node.accepts" [ var "d"; witness ],
         EBlock
@@ -108,7 +188,7 @@ let dispatch_fn ~actor (routes : (string * ty) list) : decl =
                   ( pcon "Err" [ PatWild sp ],
                     con "Err" [ lit_str (Printf.sprintf "%s: the payload does not decode as %s's message" actor ctor) ] ) ] ],
             sp ),
-        rest,
+        EIf (app "Node.accepts_tag" [ var "d"; witness_of ty ], mismatch ctor, rest, sp),
         sp )
   in
   let chain = List.fold_right decode_arm routes (con "Ok" [ ELit (LitBool false, sp) ]) in
@@ -128,21 +208,46 @@ let dispatch_fn ~actor (routes : (string * ty) list) : decl =
       sp )
 
 (** [decls] with an `<Actor>_Remote` module inserted after every `@[remote]`
-    actor, recursing into nested modules. *)
+    actor, recursing into nested modules.  When the actor has a
+    `<actor>_migrate_msg` declared AFTER it, the module goes after that
+    function instead: a nested module that calls a parent function declared
+    later is a stub at run time. *)
 let rec expand (errors : Err.ctx) (decls : decl list) : decl list =
-  List.concat_map
-    (function
-      | DActor (_, name, adef, span) as d when adef.actor_remote ->
-        (match routable adef with
-         | [] ->
-           Err.error errors ~span
-             (Printf.sprintf
-                "`@[remote]` actor `%s` has no handler a remote message can reach. A routable handler takes exactly one parameter annotated with a declared type that derives Json, e.g. `on Bump(h : Hit)`."
-                name.txt);
-           [ d ]
-         | routes ->
-           let m = DMod (n (name.txt ^ "_Remote"), Public, [ D.respan_derived_decl (dispatch_fn ~actor:name.txt routes) ], sp) in
-           [ d; m ])
-      | DMod (nm, vis, inner, s) -> [ DMod (nm, vis, expand errors inner, s) ]
-      | d -> [ d ])
-    decls
+  let siblings = decls in
+  (* Modules waiting for their actor's migrate function, by its name. *)
+  let pending : (string * decl) list ref = ref [] in
+  let out =
+    List.concat_map
+      (function
+        | DActor (_, name, adef, span) as d when adef.actor_remote ->
+          (match routable adef with
+           | [] ->
+             Err.error errors ~span
+               (Printf.sprintf
+                  "`@[remote]` actor `%s` has no handler a remote message can reach. A routable handler takes exactly one parameter annotated with a declared type that derives Json, e.g. `on Bump(h : Hit)`."
+                  name.txt);
+             [ d ]
+           | routes ->
+             let m = DMod (n (name.txt ^ "_Remote"), Public,
+                           [ D.respan_derived_decl (dispatch_fn ~actor:name.txt ~decls:siblings routes) ], sp) in
+             (* Is the migrate function still ahead? *)
+             let rec ahead = function
+               | [] -> None
+               | DActor (_, nm, _, _) :: rest when nm.txt = name.txt ->
+                 (match migrate_of ~actor:name.txt rest with Some (mig, _) -> Some mig | None -> None)
+               | _ :: rest -> ahead rest
+             in
+             (match ahead siblings with
+              | Some mig ->
+                pending := (mig, m) :: !pending;
+                [ d ]
+              | None -> [ d; m ]))
+        | DFn (fd, _) as d when List.mem_assoc fd.fn_name.txt !pending ->
+          let m = List.assoc fd.fn_name.txt !pending in
+          pending := List.remove_assoc fd.fn_name.txt !pending;
+          [ d; m ]
+        | DMod (nm, vis, inner, s) -> [ DMod (nm, vis, expand errors inner, s) ]
+        | d -> [ d ])
+      decls
+  in
+  out @ List.map snd !pending
