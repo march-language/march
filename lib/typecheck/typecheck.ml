@@ -7889,7 +7889,11 @@ let solve_role_roots_full ?(decls = []) (env : env) : role_solve option =
       let rec charge_lambda ~root_key k ~owner scope bound body =
         Hashtbl.replace synthetic k (owner, bound, body);
         let called = March_ast.Calls.names_and_name_spans body in
-        add_own k (List.filter_map (fun (call_name, _) -> cap_of_call call_name) called);
+        (* Scope-aware for the builtin charge: a call through the lambda's own
+           parameter or a local it binds is not the builtin of that name. *)
+        add_own k
+          (List.filter_map (fun (call_name, _) -> cap_of_call call_name)
+             (March_ast.Calls.builtin_candidate_calls ~bound body));
         add_refs k (March_ast.Calls.spawned_actor_names [] body);
         if not (Hashtbl.mem seeds k) then Hashtbl.replace seeds k (March_caps.Cap_rows.seed_of_bodies [ (bound, body) ]);
         let invoked v = List.exists (fun (n, _) -> n = v) called in

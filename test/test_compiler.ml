@@ -12003,6 +12003,27 @@ let test_pure_module_shadowing_builtin_is_not_impure () =
     "a `cap pure` module's own `random_bytes` fn is not an impurity" false
     (has_errors ctx)
 
+(* Same rule one scope down: a PARAMETER / local named like a banned builtin
+   is not a call to it — but a sibling's real call still is, so the test
+   cannot pass by banning nothing. *)
+let test_pure_module_local_shadow_is_not_impure () =
+  let ctx = typecheck {|mod ShadowPureLocal do
+    cap pure
+    fn by_param(unix_time : Int -> Int) : Int do
+      unix_time(3)
+    end
+    fn by_let() : Int do
+      let unix_time = fn n -> n + 1
+      unix_time(4)
+    end
+    fn real() : Int do
+      unix_time()
+    end
+  end|} in
+  Alcotest.(check int)
+    "only the sibling's real `unix_time()` is an impurity" 1
+    (count_errors_with ctx "which has side effects")
+
 let test_deterministic_module_shadowing_builtin_is_not_flagged () =
   let ctx = typecheck {|mod ShadowDeterministic do
     cap deterministic
@@ -13009,6 +13030,103 @@ let test_cap_infer_shadowed_builtin_no_hint () =
   Alcotest.(check bool)
     "no hint for a module's own file_read fn" true
     (not (List.exists (string_contains ~needle:"file_read") hints))
+
+(* A LOCAL named like a capability builtin (parameter, `let`, lambda param,
+   match-arm pattern variable, local fn) shadows the builtin inside its scope:
+   a call through it is a call to the local, so no capability is involved.
+   The module below has NO top-level `file_read`, so only scope-awareness can
+   keep Check 1b (the "call builtins that require" error) and cap_infer's hint
+   quiet.  Mirrors [Cap_attrib.walk]'s [bound] set on the TIR side. *)
+let local_shadow_fns = {|
+    fn by_param(file_read : String -> String) : String do
+      file_read("x")
+    end
+    fn by_let() : String do
+      let file_read = fn s -> s ++ "!"
+      file_read("y")
+    end
+    fn by_lambda() : String do
+      let f = fn file_read -> file_read("z")
+      f(fn s -> s)
+    end
+    fn by_match(o : Option(String -> String)) : String do
+      match o do
+        Some(file_read) -> file_read("m")
+        None -> "none"
+      end
+    end
+    fn by_local_fn() : String do
+      fn file_read(s : String) : String do s ++ "#" end
+      file_read("n")
+    end
+|}
+
+let file_read_hints ctx =
+  List.filter (fun (d : March_errors.Errors.diagnostic) ->
+      d.March_errors.Errors.severity = March_errors.Errors.Hint
+      && string_contains ~needle:"call to `file_read`" d.March_errors.Errors.message)
+    ctx.March_errors.Errors.diagnostics
+
+let test_cap_scan_local_shadow_accepted () =
+  let ctx = check_cap_infer ("mod LocalShadow do" ^ local_shadow_fns ^ "end") in
+  Alcotest.(check int) "no missing-needs error for calls through locals" 0
+    (count_errors_with ctx "declares no matching `needs`");
+  Alcotest.(check bool) "no errors at all" false (has_errors ctx);
+  Alcotest.(check int) "no cap_infer hint for calls through locals" 0
+    (List.length (file_read_hints ctx))
+
+(* The non-vacuous half: the same module plus a SIBLING function that calls
+   the real builtin.  The shadowing bindings above are out of scope there, so
+   the builtin is still charged — an accept-only test could pass by never
+   charging anything. *)
+let test_cap_scan_local_shadow_sibling_still_charged () =
+  let src = "mod LocalShadowSib do" ^ local_shadow_fns ^ {|
+    fn real() : String do
+      match file_read("/tmp/nope") do
+        Ok(s) -> s
+        Err(_) -> "err"
+      end
+    end
+  end|} in
+  let real_call_line =
+    let rec find i = function
+      | [] -> Alcotest.fail "fixture lost its real file_read call"
+      | l :: rest ->
+        if string_contains ~needle:"file_read(\"/tmp/nope\")" l then i
+        else find (i + 1) rest
+    in
+    find 1 (String.split_on_char '\n' src)
+  in
+  let ctx = check_cap_infer src in
+  Alcotest.(check int) "the real builtin call is still charged" 1
+    (count_errors_with ctx "declares no matching `needs`");
+  Alcotest.(check bool) "and it names IO.FileRead" true
+    (has_error_with ctx "Cap(IO.FileRead)");
+  (match file_read_hints ctx with
+   | [ d ] ->
+     Alcotest.(check int) "the one cap_infer hint points at the real call"
+       real_call_line d.March_errors.Errors.span.March_ast.Ast.start_line
+   | ds -> Alcotest.failf "expected exactly one file_read hint, got %d" (List.length ds))
+
+(* Scope ends inside a function too: after a match arm (or a lambda) that
+   binds `file_read`, a bare `file_read(...)` is the builtin again. *)
+let test_cap_scan_local_shadow_scope_ends () =
+  let ctx = typecheck {|mod LocalShadowEnd do
+    fn after_arm(o : Option(String -> String)) : String do
+      let a = match o do
+        Some(file_read) -> file_read("m")
+        None -> "none"
+      end
+      let f = fn file_read -> file_read("z")
+      let b = f(fn s -> s)
+      match file_read("/tmp/nope") do
+        Ok(s) -> a ++ b ++ s
+        Err(_) -> a ++ b
+      end
+    end
+  end|} in
+  Alcotest.(check int) "the builtin call after the shadowing scopes is charged" 1
+    (count_errors_with ctx "declares no matching `needs`")
 
 let test_cap_chain_from_main () =
   let hints = cap_hint_messages {|mod CapChain do
@@ -17591,8 +17709,12 @@ let compiler_suites =
           Alcotest.test_case "unshadowed builtin call still requires needs"    `Quick test_unshadowed_builtin_call_still_requires_needs;
           Alcotest.test_case "shadowed builtin not in inferred caps"           `Quick test_shadowed_builtin_not_in_inferred_caps;
           Alcotest.test_case "cap pure: shadowing builtin is not impure"       `Quick test_pure_module_shadowing_builtin_is_not_impure;
+          Alcotest.test_case "cap pure: local shadowing builtin is not impure" `Quick test_pure_module_local_shadow_is_not_impure;
           Alcotest.test_case "cap deterministic: shadowing builtin not flagged" `Quick test_deterministic_module_shadowing_builtin_is_not_flagged;
           Alcotest.test_case "cap_infer: shadowed builtin draws no hint"        `Quick test_cap_infer_shadowed_builtin_no_hint;
+          Alcotest.test_case "cap scan: locals named like a builtin shadow it" `Quick test_cap_scan_local_shadow_accepted;
+          Alcotest.test_case "cap scan: sibling's real builtin call still charged" `Quick test_cap_scan_local_shadow_sibling_still_charged;
+          Alcotest.test_case "cap scan: builtin charged after shadow scope ends" `Quick test_cap_scan_local_shadow_scope_ends;
           Alcotest.test_case "prelude println still requires needs"            `Quick test_prelude_println_still_requires_needs;
         ] );
       ( "cap_propagation", [

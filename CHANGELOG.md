@@ -36,6 +36,16 @@ git log is authoritative for exact commits.
   name (such as `String.reverse`) still calls the builtin. In compiled builds,
   a call through a parameter or local named like a builtin is also no longer
   charged that builtin's capability.
+- **A parameter or local named like a builtin no longer demands that
+  builtin's capability.** `fn go(file_read : String -> String) do
+  file_read("x") end` was rejected on both backends with "function bodies in
+  `M` call builtins that require `Cap(IO.FileRead)`", although the call goes
+  to the parameter. The capability check now treats a name bound by a
+  parameter, `let`, lambda parameter, match-arm pattern or local `fn` as that
+  local inside its scope, the same rule compiled builds already used. The
+  `cap pure` / `cap deterministic` checks and the "requires `needs`" hint
+  follow the same rule. A real builtin call outside that scope, such as in
+  another function, still needs the capability.
 
 - The interpreter no longer dies with `stub NAME called before initialisation` when a nested module calls an enclosing module's fn that is declared after the nested module. This covers calls from the nested module's own fns, its impl methods and actor handlers, and modules nested further down. Compiled programs already worked (#645). A module-level `let` that calls a fn declared after it still fails, as before.
 

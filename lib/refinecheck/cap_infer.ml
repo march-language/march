@@ -179,47 +179,21 @@ let need_covers cap needs =
     fix: this pass's HINT kept firing on a module's own `file_read`, the
     typechecker's ERROR having stopped. Defaults to "nothing is shadowed" so
     every existing caller keeps its exact prior behavior. *)
-let rec iter_cap_calls ?(shadowed = fun (_ : string) -> false)
+let iter_cap_calls ?(shadowed = fun (_ : string) -> false) ?(bound = [])
     (f : string -> A.span -> unit) (e : A.expr) : unit =
-  let go = iter_cap_calls ~shadowed f in
-  match e with
-  | A.EApp (A.EVar fn_name, args, _) ->
-    (if not (shadowed fn_name.A.txt) then
-       match cap_of_call fn_name.A.txt with
-       | Some _ -> f fn_name.A.txt fn_name.A.span
-       | None   -> ());
-    List.iter go args
-  | A.EApp (callee, args, _) ->
-    go callee; List.iter go args
-  | A.ECon (_, args, _) | A.ETuple (args, _) | A.EAtom (_, args, _) ->
-    List.iter go args
-  | A.ERecord (fields, _) ->
-    List.iter (fun (_, e) -> go e) fields
-  | A.ERecordUpdate (r, fields, _) ->
-    go r; List.iter (fun (_, e) -> go e) fields
-  | A.EBlock (es, _) -> List.iter go es
-  | A.ELet (b, _) -> go b.A.bind_expr
-  | A.EMatch (scrut, arms, _) ->
-    go scrut;
-    List.iter
-      (fun (arm : A.branch) ->
-        Option.iter go arm.A.branch_guard;
-        go arm.A.branch_body)
-      arms
-  | A.EIf (cond, t, e_else, _) -> go cond; go t; go e_else
-  | A.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
-  | A.EField (inner, _, _) -> go inner
-  | A.EPipe (a, b, _) -> go a; go b
-  | A.EAnnot (inner, _, _) -> go inner
-  | A.ELam (_, body, _) -> go body
-  | A.ELetFn (_, _, _, body, _) -> go body
-  | A.ELetQ (_, rhs, body, _) | A.ELetStar (_, rhs, body, _) -> go rhs; go body
-  | A.EAssert (inner, _) -> go inner
-  | A.ESend (cap, msg, _) -> go cap; go msg
-  | A.ESpawn (inner, _) -> go inner
-  | A.EDbg (e_opt, _) -> Option.iter go e_opt
-  | A.ESigil (_, inner, _) -> go inner
-  | A.EVar _ | A.ELit _ | A.EHole _ | A.EResultRef _ -> ()
+  (* [builtin_candidate_calls] already drops calls through a LOCAL binding
+     (parameter — seeded by [bound] — lambda param, let / pattern / match-arm
+     variable, local fn): the same scope rule as the typechecker's Check 1b
+     and [Cap_attrib.walk], so the three cannot disagree about whether
+     `file_read(x)` names the builtin.  It returns calls in reverse encounter
+     order; reversed here so the first hinted span is the first in the body. *)
+  List.iter
+    (fun (name, sp) ->
+      if not (shadowed name) then
+        match cap_of_call name with
+        | Some _ -> f name sp
+        | None -> ())
+    (List.rev (March_ast.Calls.builtin_candidate_calls ~bound e))
 
 (* ── Call graph, for "how did we get here from `main`" ───────────────────── *)
 
@@ -409,7 +383,14 @@ let rec check_decls ?(graph : (string, string list) Hashtbl.t option)
       | A.DFn (fd, _) ->
         List.iter
           (fun (clause : A.fn_clause) ->
-            iter_cap_calls ~shadowed (emit_if_missing fd.A.fn_name.A.txt) clause.A.fc_body)
+            let bound =
+              List.concat_map (function
+                  | A.FPNamed p | A.FPDefault (p, _) -> [ p.A.param_name.A.txt ]
+                  | A.FPPat pat -> March_ast.Calls.pattern_vars [] pat)
+                clause.A.fc_params
+            in
+            iter_cap_calls ~shadowed ~bound
+              (emit_if_missing fd.A.fn_name.A.txt) clause.A.fc_body)
           fd.A.fn_clauses
       | A.DLet (_vis, b, _) ->
         iter_cap_calls ~shadowed (emit_if_missing "") b.A.bind_expr
