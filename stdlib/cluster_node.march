@@ -1152,7 +1152,7 @@ mod ClusterNode do
   -- bare. `pid` is the Node actor's pid as an Int; the Vaults are its mirrors.
   type CnHandle = { pid : Int, name : String, node_id : String, advertise : String,
                   members : Vault(Member), subs : Vault(NodeEvent -> Unit), meta : Vault(Int),
-                  names : Vault(GlobalPid.Pid), watches : Vault(NameEvent -> Unit),
+                  names : Vault(GlobalPid.Pid), claims : Vault(Int), watches : Vault(NameEvent -> Unit),
                   links : Vault(CnLink), qs : Vault(Int), causes : Vault(String),
                   routes : Vault(NodeSend.Delivery -> Result((), String)),
                   closes : Vault(String -> String -> Unit),
@@ -1183,6 +1183,7 @@ mod ClusterNode do
                  subs: Vault.new("cluster_node_unset_subs"),
                  meta: Vault.new("cluster_node_unset_meta"),
                  names: Vault.new("cluster_node_unset_names"),
+                 claims: Vault.new("cluster_node_unset_claims"),
                  watches: Vault.new("cluster_node_unset_watches"),
                  links: Vault.new("cluster_node_unset_links"),
                  qs: Vault.new("cluster_node_unset_qs"),
@@ -1249,11 +1250,15 @@ mod ClusterNode do
       -- registering it would leave a binding to a dead process forever. One
       -- that dies after this check is unregistered by the LocalDown that is
       -- then queued behind this turn.
-      if is_alive(pid_of_int(pid)) do
+      let next = if is_alive(pid_of_int(pid)) do
         step_io(state.st, state.h, core_register(state.st, name, pid, watcher), state.started)
       else
         step_io(state.st, state.h, (state.st, Cons(Unwatch(watcher), Nil)), state.started)
       end
+      -- step_io has mirrored the outcome into h.names; only now drop the
+      -- claim h_register took, so a racing register always sees one of them.
+      release_claim(state.h.claims, name, pid)
+      next
     end
     on Revoke(r : NodeCert.SignedRevocation) do
       step_io(state.st, state.h, core_revoke(state.st, r), state.started)
@@ -2014,17 +2019,59 @@ mod ClusterNode do
 
   pfn watch_sep() : String do "#watch#" end
 
+  doc """
+  The synchronous half of `register`: decide, in the caller, whether local
+  pid [p] may take [name] on node [node_id] (at [creation]). [names] is the
+  node's mirrored view; [claims] holds the registrations sent to the node
+  actor but not yet processed there (name -> pid). The claim is taken first
+  (`Vault.put_new`, atomic), then the view is checked, and the node actor
+  mirrors a binding before releasing its claim (`release_claim`), so two
+  concurrent registrations of one name by different pids cannot both get
+  `Ok`. The same pid registering again is allowed. On `Ok` the caller owns
+  the claim and must send the `Register` that releases it.
+  """
+  fn reserve(names : Vault(GlobalPid.Pid), claims : Vault(Int), node_id : String, creation : Int,
+             name : String, p : Int) : Result((), RegisterError) do
+    let claimed = if Vault.put_new(claims, name, p) do Ok(true)
+      else
+        match Vault.get(claims, name) do
+          Some(q) -> if q == p do Ok(false) else Err(q) end
+          None -> Err(-1)   -- released between the two reads: retry
+        end
+      end
+    match claimed do
+      Err(q) ->
+        if q < 0 do reserve(names, claims, node_id, creation, name, p)
+        else Err(Taken(GlobalPid.make(node_id, q, creation))) end
+      Ok(fresh) ->
+        let taken = match Vault.get(names, name) do
+          Some(holder) -> if holder.node_id == node_id && holder.local_pid == p do None else Some(holder) end
+          None -> None
+        end
+        match taken do
+          Some(holder) ->
+            if fresh do release_claim(claims, name, p) else () end
+            Err(Taken(holder))
+          None -> Ok(())
+        end
+    end
+  end
+
+  doc "Drop [name]'s pending claim (see `reserve`) if pid [p] holds it."
+  fn release_claim(claims : Vault(Int), name : String, p : Int) : () do
+    match Vault.get(claims, name) do
+      Some(q) -> if q == p do Vault.drop(claims, name) else () end
+      None -> ()
+    end
+  end
+
   pfn h_register(h : CnHandle, name : String, p : Int) : Result((), RegisterError) do
     if Vault.get(h.meta, "stopped") != None do
       Err(Stopped)
     else
-      let taken = match Vault.get(h.names, name) do
-        Some(holder) -> if holder.node_id == h.node_id && holder.local_pid == p do None else Some(holder) end
-        None -> None
-      end
-      match taken do
-        Some(holder) -> Err(Taken(holder))
-        None ->
+      match reserve(h.names, h.claims, h.node_id, Vault.get_or(h.meta, "creation", 0), name, p) do
+        Err(e) -> Err(e)
+        Ok(_) ->
           let w = spawn(RegWatch)
           send(w, WatchPid(h.pid, p))
           let _ = monitor(w, pid_of_int(p))
@@ -2202,6 +2249,7 @@ mod ClusterNode do
         let h = { pid: pid_to_int(node), name: cfg.name, node_id: node_id_of(cfg.name), advertise: cfg.advertise,
                   members: Vault.new("cluster_node_members_" ++ tag),
                   names: Vault.new("cluster_node_names_" ++ tag),
+                  claims: Vault.new("cluster_node_claims_" ++ tag),
                   watches: Vault.new("cluster_node_watches_" ++ tag),
                   links: Vault.new("cluster_node_links_" ++ tag),
                   qs: Vault.new("cluster_node_qs_" ++ tag),
@@ -2315,7 +2363,9 @@ mod ClusterNode do
 
   doc """
   Register [name] -> [pid] (a process on this node) cluster-wide. Refused
-  with `Taken(holder)` if another holder's binding is visible here. `Ok`
+  with `Taken(holder)` if another holder's binding is visible here, or
+  another local pid's registration of [name] is still pending (so two
+  concurrent local registrations of one name cannot both succeed). `Ok`
   means the binding is made here and pushed to every peer; it is not a lock
   -- a node on the far side of a partition can hold the same name, and after
   the heal one binding wins everywhere (watch the name to hear `Lost`). The

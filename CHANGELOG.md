@@ -12,6 +12,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **`ClusterNode.register` no longer lets two local processes register the same name
+  at once.** The check for a taken name read the node's view, which the node updated
+  only on its next turn. So two back-to-back registrations of one name could both
+  return `Ok`, and the second caller believed it held a name it never got. A
+  registration still waiting for the node's turn now counts as taken: the second
+  one returns `Err(Taken(first))`.
+
 - **Compiling the same source twice at once (different `-o` or `--opt`) no longer
   fails at random with `Undefined symbols: "_main"`.** Both compiles wrote their LLVM
   IR to the same `<source>.ll` file and handed it to clang, so one could truncate the

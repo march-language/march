@@ -418,6 +418,13 @@ mod TestClusterNode do
     List.filter_map(effs, fn e -> match e do ClusterNode.Named(_, ev) -> Some(ClusterNode.name_event_text(ev)) | _ -> None end)
   end
 
+  pfn lookup_pid(st : ClusterNode.CnState, name : String) : Int do
+    match ClusterNode.core_lookup(st, name) do
+      Some(p) -> p.local_pid
+      None -> -1
+    end
+  end
+
   pfn lookup_node(st : ClusterNode.CnState, name : String) : String do
     match ClusterNode.core_lookup(st, name) do
       Some(p) -> p.node_id
@@ -720,6 +727,105 @@ mod TestClusterNode do
       end
       assert (Result.is_err(ClusterNode.revocations_from_text(t1, NodeCert.public_key(node_sk(3)))))
       assert (ClusterNode.revocations_from_text("", NodeCert.public_key(op_sk())) == Ok(Nil))
+    end
+
+  end
+
+
+  -- ── local registration races (register's synchronous half) ────────────
+  --
+  -- ClusterNode.register decides in the caller, before the node actor has
+  -- processed anything: `reserve` over the node's mirrored view and its
+  -- pending claims. (A live node cannot run here: the interpreter runs the
+  -- accept loop's task eagerly.)
+
+  pfn race_vaults(tag : String) : (Vault(GlobalPid.Pid), Vault(Int)) do
+    (Vault.new("test_cn_race_names_" ++ tag), Vault.new("test_cn_race_claims_" ++ tag))
+  end
+
+  pfn taken_pid(r : Result((), ClusterNode.RegisterError)) : Int do
+    match r do
+      Err(ClusterNode.Taken(h)) -> h.local_pid
+      _ -> -1
+    end
+  end
+
+  -- What the node actor does for Register(name, pid): mirror the binding
+  -- into the view, then release the claim.
+  pfn node_processes(names : Vault(GlobalPid.Pid), claims : Vault(Int), me : String, name : String, pid : Int) : () do
+    Vault.set(names, name, GlobalPid.make(me, pid, 1))
+    ClusterNode.release_claim(claims, name, pid)
+  end
+
+  describe "local registration races" do
+
+    test "a second register of a name still pending in the node actor is Taken" do
+      let me = ClusterNode.node_id_of("a")
+      match race_vaults("pending") do
+        (names, claims) ->
+          -- Back to back: the node actor has had no turn, the view is empty.
+          assert (ClusterNode.reserve(names, claims, me, 1, "svc", 41) == Ok(()))
+          assert (taken_pid(ClusterNode.reserve(names, claims, me, 1, "svc", 42)) == 41)
+          -- The same pid registering again is not refused.
+          assert (ClusterNode.reserve(names, claims, me, 1, "svc", 41) == Ok(()))
+          -- Once processed, the view refuses 42 (the claim is gone).
+          node_processes(names, claims, me, "svc", 41)
+          assert (Vault.get(claims, "svc") == None)
+          assert (taken_pid(ClusterNode.reserve(names, claims, me, 1, "svc", 42)) == 41)
+          -- A refused register leaves no claim behind.
+          assert (Vault.get(claims, "svc") == None)
+          -- Other names are independent.
+          assert (ClusterNode.reserve(names, claims, me, 1, "other", 42) == Ok(()))
+      end
+    end
+
+    test "a released name can be taken by another pid" do
+      let me = ClusterNode.node_id_of("a")
+      match race_vaults("released") do
+        (names, claims) ->
+          assert (ClusterNode.reserve(names, claims, me, 1, "svc", 41) == Ok(()))
+          node_processes(names, claims, me, "svc", 41)
+          -- 41 dies: the node unregisters and mirrors the name away.
+          Vault.drop(names, "svc")
+          assert (ClusterNode.reserve(names, claims, me, 1, "svc", 42) == Ok(()))
+          assert (taken_pid(ClusterNode.reserve(names, claims, me, 1, "svc", 41)) == 42)
+      end
+    end
+
+    test "release_claim leaves another pid's claim alone" do
+      let me = ClusterNode.node_id_of("a")
+      match race_vaults("release") do
+        (names, claims) ->
+          assert (ClusterNode.reserve(names, claims, me, 1, "svc", 41) == Ok(()))
+          ClusterNode.release_claim(claims, "svc", 42)
+          assert (Vault.get(claims, "svc") == Some(41))
+          assert (taken_pid(ClusterNode.reserve(names, claims, me, 1, "svc", 42)) == 41)
+      end
+    end
+
+    test "a pid's death releases only the names that pid holds" do
+      let st = ClusterNode.core_new(cfg("a", Nil), 1)
+      match ClusterNode.core_register(st, "one", 41, 0) do
+        (st1, _) ->
+          match ClusterNode.core_register(st1, "two", 42, 0) do
+            (st2, _) ->
+              -- A second pid's Register of a held name is refused in the actor
+              -- too, and does not become the binding.
+              match ClusterNode.core_register(st2, "one", 42, 0) do
+                (st3, _) ->
+                  assert (lookup_pid(st3, "one") == 41)
+                  match ClusterNode.core_local_down(st3, 41) do
+                    (st4, _) ->
+                      assert (ClusterNode.core_lookup(st4, "one") == None)
+                      assert (lookup_pid(st4, "two") == 42)
+                      -- 41's death again (a late watcher) touches nothing of 42's.
+                      match ClusterNode.core_local_down(st4, 41) do
+                        (st5, _) -> assert (lookup_pid(st5, "two") == 42)
+                      end
+                  end
+              end
+          end
+      end
     end
 
   end
