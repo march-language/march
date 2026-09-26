@@ -1,0 +1,21 @@
+default level: 1
+depth: 4
+fields: fl=f:1.5 ok=b:true n=i:42 user=s:alice
+fields again: fl=f:1.5 ok=b:true n=i:42 user=s:alice
+depth inside scope: 6
+depth after scope: 4
+depth after with_fields: 5
+Noisy level: 3
+Other level: 1
+Noisy level after clear: 1
+appenders: 0
+ok 10
+err
+try_call: ok true
+try_call_val tuple: t 2.5
+http_fetch_available: false
+with_scope x200 depth sum: 1200
+with_scope leaked nothing: true
+module levels x200: 4200
+module levels leaked nothing: true
+dispatch leaked nothing: true

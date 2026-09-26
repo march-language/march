@@ -71,7 +71,7 @@ let builtin_names : StringSet.t =
       "file_open"; "file_close"; "file_read"; "file_read_line"; "file_read_chunk";
       "file_write"; "file_append"; "file_delete"; "file_copy"; "file_rename"; "file_stat";
       "file_create_dir"; "file_create_dir_all";
-      "dir_mkdir"; "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list"; "dir_list_full";
+      "dir_mkdir"; "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list";
       "process_argv";
       "process_env"; "process_set_env"; "process_cwd"; "process_exit";
       "process_pid"; "process_spawn_sync"; "process_spawn_lines";
@@ -133,6 +133,18 @@ let builtin_names : StringSet.t =
       (* Logger builtins *)
       "logger_set_level"; "logger_get_level"; "logger_add_context";
       "logger_clear_context"; "logger_get_context"; "logger_write";
+      (* Logger v2, http_fetch and the try-call pair: explicit codegen rows
+         since 2026-09-26.  Missing here, a call from a local fn became a
+         `logger_add_field$clo_wrap` closure whose body called the C symbol
+         with no declare ("use of undefined value", so Logger.with_fields and
+         Logger.with_scope did not compile). *)
+      "logger_add_field"; "logger_field_count"; "logger_get_fields";
+      "logger_pop_to_depth"; "logger_dispatch"; "logger_register_appender";
+      "logger_remove_appender"; "logger_clear_appenders";
+      "logger_appender_names"; "logger_set_module_level";
+      "logger_clear_module_level"; "logger_module_level";
+      "http_fetch"; "http_fetch_available";
+      "__try_call"; "__try_call_val";
       (* Integer builtins *)
       "int_abs"; "int_pow"; "int_max_value"; "int_min_value";
       "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";

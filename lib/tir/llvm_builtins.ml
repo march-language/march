@@ -121,6 +121,18 @@ let builtins : builtin list = [
      linked against a nonexistent bare `try_finally` symbol. *)
   { march_name = "try_finally"; c_name = Some "march_try_finally"; ret_ty = Some (Tir.TVar "_");
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_try_finally(ptr %action, ptr %cleanup)" };
+  (* __try_call / __try_call_val (stdlib/check.march, Depot.Transaction.run):
+     run a (Bool -> a) thunk, catching a panic as Err(msg).  Until 2026-09-26
+     they had no row: [mangle_extern]'s identity fallthrough emitted
+     `call @__try_call`, [Llvm_emit_call] synthesized its `declare` from the
+     call site's March types, and it linked only because the runtime defined
+     an unprefixed C `__try_call`.  [in_is_builtin = false] like
+     [try_finally]: both invoke a closure, so the call is not a leaf.
+     specs/progress/2026-09-26-same-named-builtin-abi-audit.md *)
+  { march_name = "__try_call"; c_name = Some "march_try_call"; ret_ty = Some (Tir.TCon ("Result", [Tir.TBool; Tir.TString]));
+    in_is_builtin = false; declare_sig = Some "declare ptr  @march_try_call(ptr %thunk)" };
+  { march_name = "__try_call_val"; c_name = Some "march_try_call_val"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "_"; Tir.TString]));
+    in_is_builtin = false; declare_sig = Some "declare ptr  @march_try_call_val(ptr %thunk)" };
   { march_name = "println"; c_name = Some "march_println"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_println(ptr %s)" };
   (* Same C symbol as "println" above; no second PDeclare.  The two March names
@@ -517,6 +529,38 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_get_context()" };
   { march_name = "logger_write"; c_name = Some "march_logger_write"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_write(ptr %level, ptr %msg, ptr %ctx, ptr %extra)" };
+  (* Logger v2 (field stack, appenders, per-module levels).  Until 2026-09-26
+     these were unprefixed C functions (`logger_add_field`, ...) reached only
+     through [mangle_extern]'s identity fallthrough with a call-site-derived
+     declare -- and with none at all through a `$clo_wrap`, so
+     `Logger.with_fields` / `Logger.with_scope` did not compile ("use of
+     undefined value '@logger_add_field'").  With no row the borrow guard
+     never saw them either: every String argument was OWNED by default and
+     leaked.  specs/progress/2026-09-26-same-named-builtin-abi-audit.md *)
+  { march_name = "logger_add_field"; c_name = Some "march_logger_add_field"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_add_field(ptr %key, ptr %value)" };
+  { march_name = "logger_field_count"; c_name = Some "march_logger_field_count"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_logger_field_count()" };
+  { march_name = "logger_get_fields"; c_name = Some "march_logger_get_fields"; ret_ty = Some (Tir.TCon ("List", [Tir.TVar "_"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_get_fields()" };
+  { march_name = "logger_pop_to_depth"; c_name = Some "march_logger_pop_to_depth"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_pop_to_depth(i64 %depth)" };
+  { march_name = "logger_dispatch"; c_name = Some "march_logger_dispatch"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_dispatch(ptr %level, ptr %msg, ptr %source, ptr %fields)" };
+  { march_name = "logger_register_appender"; c_name = Some "march_logger_register_appender"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_register_appender(ptr %name, ptr %cb)" };
+  { march_name = "logger_remove_appender"; c_name = Some "march_logger_remove_appender"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_remove_appender(ptr %name)" };
+  { march_name = "logger_clear_appenders"; c_name = Some "march_logger_clear_appenders"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_clear_appenders()" };
+  { march_name = "logger_appender_names"; c_name = Some "march_logger_appender_names"; ret_ty = Some (Tir.TCon ("List", [Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_appender_names()" };
+  { march_name = "logger_set_module_level"; c_name = Some "march_logger_set_module_level"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_set_module_level(ptr %module, i64 %level)" };
+  { march_name = "logger_clear_module_level"; c_name = Some "march_logger_clear_module_level"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_logger_clear_module_level(ptr %module)" };
+  { march_name = "logger_module_level"; c_name = Some "march_logger_module_level"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_logger_module_level(ptr %module)" };
   { march_name = "kill"; c_name = Some "march_kill"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_kill(ptr %actor)" };
   { march_name = "actor_stop"; c_name = Some "march_actor_stop"; ret_ty = Some Tir.TBool;
@@ -633,8 +677,6 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_rm_rf(ptr %path)" };
   { march_name = "dir_list"; c_name = Some "march_dir_list"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TString]); Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_list(ptr %path)" };
-  { march_name = "dir_list_full"; c_name = Some "march_dir_list_full"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TString]); Tir.TString]));
-    in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_list_full(ptr %path)" };
   { march_name = "process_argv"; c_name = Some "march_process_argv"; ret_ty = Some (Tir.TCon ("List", [Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_process_argv()" };
   { march_name = "process_cwd"; c_name = Some "march_process_cwd"; ret_ty = Some Tir.TString;
@@ -922,6 +964,15 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_http_serialize_request(ptr %method, ptr %host, ptr %path, ptr %query, ptr %headers, ptr %body)" };
   { march_name = "http_parse_response"; c_name = Some "march_http_parse_response"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_http_parse_response(ptr %raw)" };
+  (* http_fetch / http_fetch_available: the JS-only fetch path, stubbed on
+     native (available = false).  Unprefixed C `http_fetch` /
+     `http_fetch_available` reached through [mangle_extern]'s identity
+     fallthrough until 2026-09-26.
+     specs/progress/2026-09-26-same-named-builtin-abi-audit.md *)
+  { march_name = "http_fetch_available"; c_name = Some "march_http_fetch_available"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_http_fetch_available()" };
+  { march_name = "http_fetch"; c_name = Some "march_http_fetch"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_http_fetch(ptr %method, ptr %url, ptr %headers, ptr %body)" };
   { march_name = "csv_open"; c_name = Some "march_csv_open"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_csv_open(ptr %path, ptr %delim, ptr %mode)" };
   { march_name = "csv_next_row"; c_name = Some "march_csv_next_row"; ret_ty = Some (Tir.TCon ("Option", [Tir.TCon ("List", [Tir.TString])]));
@@ -1302,6 +1353,8 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_panic_ext";
   PDeclare "march_todo_ext";
   PDeclare "march_try_finally";
+  PDeclare "march_try_call";
+  PDeclare "march_try_call_val";
   PDeclare "march_test_init";
   PDeclare "march_test_run";
   PDeclare "march_test_setup_all";
@@ -1516,6 +1569,18 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_logger_clear_context";
   PDeclare "march_logger_get_context";
   PDeclare "march_logger_write";
+  PDeclare "march_logger_add_field";
+  PDeclare "march_logger_field_count";
+  PDeclare "march_logger_get_fields";
+  PDeclare "march_logger_pop_to_depth";
+  PDeclare "march_logger_dispatch";
+  PDeclare "march_logger_register_appender";
+  PDeclare "march_logger_remove_appender";
+  PDeclare "march_logger_clear_appenders";
+  PDeclare "march_logger_appender_names";
+  PDeclare "march_logger_set_module_level";
+  PDeclare "march_logger_clear_module_level";
+  PDeclare "march_logger_module_level";
   PComment "; REPL JIT persistent variable slot table (march_extras.c)";
   PDeclare "march_repl_get";
   PDeclare "march_repl_set";
@@ -1606,7 +1671,6 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_dir_rmdir";
   PDeclare "march_dir_rm_rf";
   PDeclare "march_dir_list";
-  PDeclare "march_dir_list_full";
   PDeclare "march_process_argv";
   PDeclare "march_process_cwd";
   PDeclare "march_process_env";
@@ -1754,6 +1818,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PComment "; HTTP client builtins";
   PDeclare "march_http_serialize_request";
   PDeclare "march_http_parse_response";
+  PDeclare "march_http_fetch_available";
+  PDeclare "march_http_fetch";
   PComment "; CSV builtins";
   PDeclare "march_csv_open";
   PDeclare "march_csv_next_row";
@@ -2108,7 +2174,7 @@ let called_c_symbols () =
    runtime-internal names) plus the common libc/libm/POSIX/Linux surface a
    future runtime change or the Linux build plausibly imports. NOT the
    runtime's own `march_*` names: those are how a builtin resolved by the
-   identity fallthrough (`march_decrc_freed`, `logger_*`) reaches
+   identity fallthrough (`march_decrc_freed`) reaches
    its C definition, so they must pass through unchanged. Regenerate the
    first part with:
      for f in runtime/*.c; do clang -c -w -I runtime -o /tmp/o/$f.o $f; done

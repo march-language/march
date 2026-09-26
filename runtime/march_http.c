@@ -3095,27 +3095,26 @@ void *march_http_parse_response(void *raw_ptr) {
     return ok_obj;
 }
 
-/* http_fetch / http_fetch_available — native link-time stubs.
+/* http_fetch / http_fetch_available — native stubs for the JS-only fetch
+ * path.  stdlib/http_transport.march calls both builtins unqualified;
+ * http_fetch_available() is false on native, so request_via_fetch/http_fetch
+ * are dead code there and native requests go through the tcp_* socket path.
  *
- * These two names are called unqualified from stdlib/http_transport.march
- * but before typecheck.ml registered them (see the "http_fetch_available /
- * http_fetch" builtin_bindings entry), the call sites had no static type and
- * fell through llvm_emit's generic "unresolved global call -> declare + call
- * an extern C symbol of the same name" fallback, which still requires these
- * symbols to resolve at link time for every compiled program that pulls in
- * HttpTransport (i.e. HttpClient) even though http_fetch_available() being
- * false makes request_via_fetch/http_fetch dead code on native — native
- * requests go through the tcp_* socket path below instead.
+ * The C symbols are march_http_fetch / march_http_fetch_available, each with
+ * an explicit row and declare in lib/tir/llvm_builtins.ml.  Until 2026-09-26
+ * they were the UNPREFIXED `http_fetch` / `http_fetch_available`, linked only
+ * through mangle_extern's identity fallthrough with a declare synthesized from
+ * the call site's March types
+ * (specs/progress/2026-09-26-same-named-builtin-abi-audit.md).
  *
- * Now that http_fetch_available is registered with a concrete Bool return
- * type, the call site uses the raw-i64 Bool ABI (0/1 — see
- * lib/tir/llvm_emit.ml's `Tir.TBool -> "i64"`), NOT the tagged-immediate
- * `(v<<1)|1` ptr representation used for erased/boxed values. */
-int64_t http_fetch_available(void) {
+ * The Bool result is the raw-i64 Bool ABI (0/1 — `Tir.TBool -> "i64"`), NOT
+ * the tagged-immediate `(v<<1)|1` used for erased/boxed values.  http_fetch
+ * only reads its four String arguments (borrowed, lib/tir/borrow.ml). */
+int64_t march_http_fetch_available(void) {
     return 0;
 }
 
-void *http_fetch(void *method, void *url, void *header_block, void *body) {
+void *march_http_fetch(void *method, void *url, void *header_block, void *body) {
     (void)method; (void)url; (void)header_block; (void)body;
     static const char msg[] =
         "http_fetch: not available on native builds; guarded by "

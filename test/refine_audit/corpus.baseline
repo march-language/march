@@ -402,6 +402,8 @@ native_rpc_hash_live: coverage audit (user + stdlib): 120 enforced, 0 inert (war
 native_rpc_hash_live: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_rrb_push_float: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_rrb_push_float: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_same_named_builtin_abi_parity: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_same_named_builtin_abi_parity: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_sched_stats: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_sched_stats: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_sched_stress: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
