@@ -12,6 +12,18 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **A node healed after a network partition is now reported as rejoined.** If the
+  heal's redial closed a duplicate connection at the same moment the link came
+  back, the peer passed through Suspect, and its return was reported as `NodeUp`
+  instead of `NodeRejoined`. A subscriber that had already seen the peer up never
+  heard that it came back.
+
+- **`ClusterNode.register` no longer lets two local processes register the same name
+  at once.** The check for a taken name read the node's view, which the node updated
+  only on its next turn. So two back-to-back registrations of one name could both
+  return `Ok`, and the second caller believed it held a name it never got. A
+  registration still waiting for the node's turn now counts as taken: the second
+  one returns `Err(Taken(first))`.
 - **Deep tail recursion that hands a freshly built value to a parameter the
   callee only reads no longer overflows the stack or leaks.** A pair of
   mutually tail-recursive functions in that shape (e.g. `take_next`/`inspect`
