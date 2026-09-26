@@ -604,7 +604,8 @@ jobs:
   # syscall interception hangs ASAN's shadow-memory setup.
   sanitize-gate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 65
+    # Step (65) + toolchain setup (12), rounded up.
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v4
 
@@ -618,7 +619,18 @@ jobs:
         # covered the golden + native corpora and the first 14 scenarios.
         # Node certificates (step 11a) added five more, and forge, which the
         # cert_* scenarios issue their certificates with.
-        timeout-minutes: 45
+        #
+        # 45 -> 65 on 2026-09-26. Nothing hung or regressed. ubuntu runners
+        # come in two speeds: the same sweep took 29-34 min on a fast one and
+        # 38-39 min on a slow one (about 25% slower on every program). #663
+        # then added hcr_new_code_session (four ASan compiles, ~150 s), and
+        # on a slow runner the sweep ran past 45 min (main runs 36218685305,
+        # 36221645823). 65 leaves ~40% headroom over that for the scenario
+        # list to keep growing. It is not sharded: this job ends well before
+        # test (macos-15, all) at ~60 min, so a shard buys no wall time and
+        # adds a second setup + build to every run's Linux job-minutes. A
+        # longer timeout costs nothing while the sweep passes.
+        timeout-minutes: 65
         run: |
           eval $(opam env)
           dune shutdown 2>/dev/null || true
