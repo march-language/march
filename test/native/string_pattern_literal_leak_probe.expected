@@ -1,0 +1,5 @@
+first arm = 0, flat: true
+last arm = 180000, flat: true
+default arm = 0, flat: true
+walk = 180000000, flat: true
+control: Int patterns = 180000, flat: true
