@@ -5,6 +5,21 @@ file's own closing instruction was "a single SIGSEGV in the death path is worth
 a second sighting before it is dismissed." That sighting has now happened, on
 `main`, and it is confirmed intermittent rather than commit-specific.
 
+## Third CI sighting (2026-09-25): no `march: fatal` line in the log
+
+PR #664 (a `ci.yml`-only timeout change) at head 701bd4f8c, run 36189995026,
+job `test (ubuntu-24.04, rest)`: the `MARCH_NUM_SCHEDULERS=4` loop rule reported
+`iteration 79: binary exited 139`. As in the first two sightings, all five
+expected lines had been printed first, so it crashed after correct output.
+**The fatal-fault report line this file relies on (below) is absent**:
+`gh run view 36189995026 --log-failed | grep -c 'march: fatal'` is 0. Either
+the crash bypasses the SIGSEGV handler (a fault inside the handler, or on a
+thread whose signal disposition was reset during teardown), or the rule's
+`$(...)` capture loses stderr before dune prints it. Check that second
+possibility first: run the loop with a deliberate `raise(SIGSEGV)` and confirm
+the line reaches the dune log. The binary was not kept, so `pc` could not be
+resolved.
+
 ## Third investigation (2026-09-13): amd64 and ASAN, 60,000 runs, NOT reproduced; the next sighting will say where
 
 **The two untried axes are now tried.**
