@@ -25,6 +25,10 @@ git log is authoritative for exact commits.
   registration still waiting for the node's turn now counts as taken: the second
   one returns `Err(Taken(first))`.
 
+- **A compiled `match` on string literals no longer leaks memory.** Each arm
+  it tried allocated a copy of that arm's literal and never freed it, so a
+  string `match` in a loop grew memory without bound: one string per arm
+  compared, on every evaluation.
 - **Compiled `Logger` now behaves like the interpreted one, and no longer
   crashes or leaks.** `Logger.current_fields()` handed back the runtime's own
   field stack without a reference, so the next logger call aborted with

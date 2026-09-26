@@ -749,17 +749,23 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     in
     emit_chain branches branch_lbls
   end else if is_string_case then begin
-    (* String pattern matching: emit if-else chain with march_string_eq *)
+    (* String pattern matching: emit if-else chain with march_string_eq.
+       Each arm's literal is an immortal per-site string
+       ([intern_string_site]), not a fresh [march_string_lit]: the pattern
+       literal is not a TIR value, so no Perceus op ever releases it, and a
+       fresh rc=1 cell leaked once per comparison (every arm tried, on every
+       evaluation).  march_string_eq borrows both operands. *)
     let rec emit_chain brs lbls =
       match brs, lbls with
       | [], [] -> Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" default_lbl)
       | br :: rest_brs, lbl :: rest_lbls ->
         let next_lbl = Llvm_ctx.fresh_block ctx "str_next" in
         let s = String.sub br.Tir.br_tag 1 (String.length br.Tir.br_tag - 2) in
-        let gname = Llvm_ctx.intern_string ctx s in
+        let (gname, cell) = Llvm_ctx.intern_string_site ctx s in
         let slit = Llvm_ctx.fresh ctx "sl" in
-        Llvm_ctx.emit ctx (Printf.sprintf "%s = call ptr @march_string_lit(ptr %s, i64 %d)"
-                    slit gname (String.length s));
+        Llvm_ctx.emit ctx (Printf.sprintf
+                    "%s = call ptr @march_string_lit_static(ptr %s, i64 %d, ptr %s)"
+                    slit gname (String.length s) cell);
         let eq = Llvm_ctx.fresh ctx "seq" in
         Llvm_ctx.emit ctx (Printf.sprintf "%s = call i64 @march_string_eq(ptr %s, ptr %s)"
                     eq scrut_val slit);
