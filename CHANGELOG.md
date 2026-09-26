@@ -19,6 +19,18 @@ git log is authoritative for exact commits.
   registration still waiting for the node's turn now counts as taken: the second
   one returns `Err(Taken(first))`.
 
+- **Compiled `Logger` now behaves like the interpreted one, and no longer
+  crashes or leaks.** `Logger.current_fields()` handed back the runtime's own
+  field stack without a reference, so the next logger call aborted with
+  `RC underflow`; `Logger.with_fields` and `Logger.with_scope` did not compile
+  at all (`use of undefined value '@logger_add_field'`); per-module levels
+  (`Logger.set_module_level`, `Logger.log_in`) were ignored; the default level
+  was Debug instead of Info; every log line printed its context fields twice;
+  `Logger.with_context` fields never appeared on a log line and
+  `Logger.clear_context` left structured fields in place; and each log call
+  leaked its strings and field list. `__try_call`, `__try_call_val`,
+  `http_fetch` and the Logger builtins now have checked C prototypes, and a
+  new test fails if any builtin reaches the runtime without one.
 - **`forge topology gen systemd` names the variables the runtime reads**:
   `MARCH_POOLS` and `MARCH_TOPOLOGY_FILE` (it wrote `MARCH_POOL` and
   `MARCH_TOPOLOGY`, which nothing reads), and adds `User=march`, the reload
@@ -43,6 +55,16 @@ git log is authoritative for exact commits.
   name (such as `String.reverse`) still calls the builtin. In compiled builds,
   a call through a parameter or local named like a builtin is also no longer
   charged that builtin's capability.
+- **A parameter or local named like a builtin no longer demands that
+  builtin's capability.** `fn go(file_read : String -> String) do
+  file_read("x") end` was rejected on both backends with "function bodies in
+  `M` call builtins that require `Cap(IO.FileRead)`", although the call goes
+  to the parameter. The capability check now treats a name bound by a
+  parameter, `let`, lambda parameter, match-arm pattern or local `fn` as that
+  local inside its scope, the same rule compiled builds already used. The
+  `cap pure` / `cap deterministic` checks and the "requires `needs`" hint
+  follow the same rule. A real builtin call outside that scope, such as in
+  another function, still needs the capability.
 
 - The interpreter no longer dies with `stub NAME called before initialisation` when a nested module calls an enclosing module's fn that is declared after the nested module. This covers calls from the nested module's own fns, its impl methods and actor handlers, and modules nested further down. Compiled programs already worked (#645). A module-level `let` that calls a fn declared after it still fails, as before.
 

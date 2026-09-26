@@ -140,6 +140,25 @@ void   *march_logger_add_context(void *key, void *value);
 void   *march_logger_clear_context(void);
 void   *march_logger_get_context(void);
 void   *march_logger_write(void *level_str, void *msg, void *ctx, void *extra);
+/* Logger v2: field stack, appenders, per-module levels.  Unprefixed
+ * `logger_*` (identity-fallthrough) C functions until 2026-09-26. */
+void   *march_logger_add_field(void *key, void *value);
+int64_t march_logger_field_count(void);
+void   *march_logger_get_fields(void);
+void   *march_logger_pop_to_depth(int64_t depth);
+void   *march_logger_dispatch(void *level_str, void *msg, void *module_name, void *fields);
+void   *march_logger_register_appender(void *name, void *cb);
+void   *march_logger_remove_appender(void *name);
+void   *march_logger_clear_appenders(void);
+void   *march_logger_appender_names(void);
+void   *march_logger_set_module_level(void *mod, int64_t lv);
+void   *march_logger_clear_module_level(void *mod);
+int64_t march_logger_module_level(void *mod);
+
+/* __try_call / __try_call_val: run a (Bool -> a) thunk, catching a panic as
+ * Err(msg).  Unprefixed `__try_call` / `__try_call_val` until 2026-09-26. */
+void   *march_try_call(void *thunk);
+void   *march_try_call_val(void *thunk);
 
 /* String builtins.
  *

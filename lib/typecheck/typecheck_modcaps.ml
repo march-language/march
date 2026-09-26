@@ -323,6 +323,15 @@ let pure_banned : StringSet.t =
 let pure_suggestion : string =
   "Use pure functions (no IO, spawn, vault, or random ops) in a `cap pure` module."
 
+(* Names a clause's parameters bind: a call through one of them is a call to
+   the argument, not to a banned builtin of the same name (see
+   [March_ast.Calls.builtin_candidate_calls]). *)
+let clause_param_names (c : Ast.fn_clause) : string list =
+  List.concat_map (function
+      | Ast.FPNamed p | Ast.FPDefault (p, _) -> [ p.Ast.param_name.Ast.txt ]
+      | Ast.FPPat pat -> March_ast.Calls.pattern_vars [] pat)
+    c.Ast.fc_params
+
 let check_pure_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : unit =
   let mod_name = env.current_module in
   (* See [locally_declared_names_of]: a `cap pure` module's own function
@@ -333,7 +342,10 @@ let check_pure_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : u
     match d with
     | Ast.DFn (def, _fn_span) ->
       List.iter (fun clause ->
-        let calls = March_ast.Calls.names_and_name_spans clause.Ast.fc_body in
+        let calls =
+          March_ast.Calls.builtin_candidate_calls
+            ~bound:(clause_param_names clause) clause.Ast.fc_body
+        in
         List.iter (fun (name, site_span) ->
           if StringSet.mem name pure_banned
              && not (Hashtbl.mem locally_declared_names name) then
@@ -402,7 +414,10 @@ let check_deterministic_module (errors : Err.ctx) (env : env) (decls : Ast.decl 
     match d with
     | Ast.DFn (def, _fn_span) ->
       List.iter (fun clause ->
-        let calls = March_ast.Calls.names_and_name_spans clause.Ast.fc_body in
+        let calls =
+          March_ast.Calls.builtin_candidate_calls
+            ~bound:(clause_param_names clause) clause.Ast.fc_body
+        in
         List.iter (fun (name, site_span) ->
           if StringSet.mem name deterministic_banned
              && not (Hashtbl.mem locally_declared_names name) then

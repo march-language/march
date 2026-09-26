@@ -574,10 +574,10 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      closure tables.  Keeping the diagnostic surface byte-identical is
      deliberate — this change exists to restore ENFORCEMENT that the closure
      lost, not to start warning about forms that never warned. *)
-  let builtin_caps_of_expr (e : Ast.expr) : string list =
+  let builtin_caps_of_expr ?(bound = []) (e : Ast.expr) : string list =
     List.filter_map
       (fun (call_name, _) -> cap_of_builtin_call call_name)
-      (March_ast.Calls.names_and_name_spans e)
+      (March_ast.Calls.builtin_candidate_calls ~bound e)
   in
   let default_param_exprs (c : Ast.fn_clause) : Ast.expr list =
     List.filter_map (function Ast.FPDefault (_, e) -> Some e | _ -> None)
@@ -588,7 +588,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      [record_fn_refs] does for a clause's parameters. *)
   let record_expr_owner ?(sp = Ast.dummy_span) (qname : string) (bound : string list)
       (es : Ast.expr list) =
-    let body_caps = List.concat_map builtin_caps_of_expr es in
+    let body_caps = List.concat_map (builtin_caps_of_expr ~bound) es in
     record_fn_caps qname body_caps;
     record_body_caps qname sp body_caps;
     record_fn_refs qname (List.map (fun e -> (bound, e)) es)
@@ -843,7 +843,9 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           let fn_qname = actor_qname ^ "_" ^ h.ah_msg.txt in
           let body_caps = List.filter_map (fun (call_name, _) ->
               cap_of_builtin_call call_name
-            ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body) in
+            ) (March_ast.Calls.builtin_candidate_calls
+                 ~bound:(List.map (fun (p : Ast.param) -> p.param_name.txt) h.Ast.ah_params)
+                 h.Ast.ah_body) in
           record_fn_caps fn_qname body_caps;
           record_body_caps fn_qname sp body_caps;
           record_fn_refs fn_qname
@@ -873,7 +875,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       let init_caps =
         List.concat_map (fun e ->
             List.filter_map (fun (call_name, _) -> cap_of_builtin_call call_name)
-              (March_ast.Calls.names_and_name_spans e)) init_exprs
+              (March_ast.Calls.builtin_candidate_calls ~bound:init_bound e)) init_exprs
       in
       record_fn_caps actor_qname init_caps;
       let prior_actor_refs =
@@ -1076,7 +1078,8 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             match cap_of_builtin_call call_name with
             | Some cap_name -> Some (cap_name, call_span)
             | None -> None
-          ) (March_ast.Calls.names_and_name_spans clause.Ast.fc_body)
+          ) (March_ast.Calls.builtin_candidate_calls
+               ~bound:(fn_clause_param_names clause) clause.Ast.fc_body)
         ) def.fn_clauses in
         let qname = cap_qname def.fn_name.txt in
         (* Default-argument expressions count as this function's own: the
@@ -1090,7 +1093,8 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           List.concat_map (List.map fst) per_clause
           @ List.concat_map
               (fun (c : Ast.fn_clause) ->
-                 List.concat_map builtin_caps_of_expr (default_param_exprs c))
+                 List.concat_map (builtin_caps_of_expr ~bound:(fn_clause_param_names c))
+                   (default_param_exprs c))
               def.fn_clauses
         in
         (* Guards are part of the function too: a guard calling an impure
@@ -1119,7 +1123,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
           match cap_of_builtin_call call_name with
           | Some cap_name -> Some (cap_name, call_span)
           | None -> None
-        ) (March_ast.Calls.names_and_name_spans b.Ast.bind_expr)
+        ) (March_ast.Calls.builtin_candidate_calls b.Ast.bind_expr)
       (* C1 fix (part 2): fold actor handler bodies into the SAME body-scan
          this branch already performs for DFn/DLet, rather than a second/
          parallel AST walk — a handler doing undeclared IO must trip the
@@ -1134,7 +1138,9 @@ let check_module_needs (env : env) (mod_name : Ast.name)
               match cap_of_builtin_call call_name with
               | Some cap_name -> Some (cap_name, call_span)
               | None -> None
-            ) (March_ast.Calls.names_and_name_spans h.Ast.ah_body)
+            ) (March_ast.Calls.builtin_candidate_calls
+                 ~bound:(List.map (fun (p : Ast.param) -> p.Ast.param_name.txt) h.Ast.ah_params)
+                 h.Ast.ah_body)
           ) (Ast.actor_body_handlers actor)
       | _ -> []
     ) decls in

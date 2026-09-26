@@ -365,9 +365,10 @@ let builtin_cap_table : (string * string) list = [
     Deliberately NOT extended to nested-module names (already immune — a
     nested module's qualified TIR/AST name, e.g. "Lib.file_read", never
     string-matches a bare table key) or to a parameter/local `let` shadowing
-    a builtin WITHIN a function body (a real, rarer residual gap needing
-    actual scope-aware resolution these AST-level passes don't have — filed
-    as a follow-up, not blocking this fix).
+    a builtin WITHIN a function body: that is scope-dependent, so the
+    capability passes get it from [March_ast.Calls.builtin_candidate_calls],
+    which drops calls through locals while walking
+    (specs/progress/2026-09-26-typecheck-cap-scan-local-shadow.md).
 
     ONE shared implementation rather than one per call site: this codebase
     has repeatedly been bitten by near-duplicate capability walks drifting
