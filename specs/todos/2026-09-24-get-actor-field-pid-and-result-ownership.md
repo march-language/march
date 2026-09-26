@@ -27,3 +27,8 @@ pointer.
    read too).
 3. Extend `pid_to_int_leak_probe` with a boxed-field probe and an rc assertion after
    `get_actor_field`, and run it under ASAN in the Linux container.
+
+**Update 2026-09-25.** `get_actor_field` now returns only immediate (Int-like) fields
+(`specs/progress/2026-09-25-dd-review-get-actor-field-unchecked-cast.md`), so the
+"returns a field without a reference" half is gone: no boxed field is handed back.
+Step 1 of the fix sketch is moot; steps 2 (borrow the pid) and 3 (the rc probe) remain.

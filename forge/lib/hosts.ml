@@ -19,6 +19,17 @@ let of_flat_config (hr : Project.hot_reload_config) =
               socket = hr.Project.hr_socket;
               pubkey = Option.value ~default:"" hr.Project.hr_public_key; labels = [] }
 
+let host_name target =
+  match String.index_opt target '@' with
+  | Some i -> String.sub target (i + 1) (String.length target - i - 1)
+  | None -> target
+
+let node_name ~pool target = pool ^ "-" ^ host_name target
+
+let of_topology_host ~pool ~socket ~pubkey (h : Topology.host) =
+  { name = node_name ~pool h.Topology.host; ssh = h.Topology.host; socket; pubkey;
+    labels = h.Topology.labels }
+
 type health = host -> bool
 
 type strategy = [ `Rolling of health | `All ]

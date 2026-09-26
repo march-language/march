@@ -19,6 +19,107 @@ git log is authoritative for exact commits.
   registration still waiting for the node's turn now counts as taken: the second
   one returns `Err(Taken(first))`.
 
+- **`forge topology gen systemd` names the variables the runtime reads**:
+  `MARCH_POOLS` and `MARCH_TOPOLOGY_FILE` (it wrote `MARCH_POOL` and
+  `MARCH_TOPOLOGY`, which nothing reads), and adds `User=march`, the reload
+  socket, the status file and `HOME`. `forge topology gen ufw` now allows ssh
+  before `ufw --force enable`, which otherwise locked the operator out.
+- **`forge deploy hot` checks a patch's target identity before uploading it.**
+  #606 taught the reload server to answer `HCR_INFO` (target, HCR ABI, module
+  prefix) but forge never asked, and it never read the manifest's `# hcr_abi`
+  line. A patch built for another target, ABI or module prefix is now refused
+  with both identities named, before any artifact is sent; a server too old to
+  answer is still accepted for a native patch (with a note) and refused for a
+  cross-target one. The runtime's own check after `dlopen` is unchanged.
+- `forge run --processes` no longer occasionally assigns two pools the same cluster port (seen on Linux CI as `tcp_listen: bind failed`); the ports for all processes are now reserved together.
+- **A top-level function named like a builtin now compiles.** Defining, for
+  example, `fn file_read(n : Int) : Int` or `fn dns_resolve(...)` in your
+  program (about 330 builtin names are affected) ran fine interpreted, but
+  `--compile` failed with clang's `invalid redefinition of function
+  'march_file_read'` once the function was large enough not to be inlined or
+  was passed as a value. The function now gets its own symbol, and calls to
+  it reach it, including from a nested module or an `impl` in the same file,
+  matching the interpreter. Stdlib code that calls the builtin of the same
+  name (such as `String.reverse`) still calls the builtin. In compiled builds,
+  a call through a parameter or local named like a builtin is also no longer
+  charged that builtin's capability.
+
+- The interpreter no longer dies with `stub NAME called before initialisation` when a nested module calls an enclosing module's fn that is declared after the nested module. This covers calls from the nested module's own fns, its impl methods and actor handlers, and modules nested further down. Compiled programs already worked (#645). A module-level `let` that calls a fn declared after it still fails, as before.
+
+- **`dns_resolve` / `Dns.resolve` now return the same list interpreted and compiled.**
+  The interpreter listed each address once per socket type (`"127.0.0.1"` came back
+  as `[127.0.0.1, 127.0.0.1]`), and compiled code also returned IPv6 addresses
+  (`"localhost"` gave `[127.0.0.1, ::1]`) that no March socket can connect to. Both
+  now return IPv4 addresses only, each once, in the resolver's order, as the `Dns`
+  module documents. A host with no IPv4 address (including an IPv6 literal) is
+  `NotFound` on both, where compiled code used to report a resolver error message.
+
+- `forge run --processes` no longer occasionally assigns two pools the same cluster port (seen on Linux CI as `tcp_listen: bind failed`); the ports for all processes are now reserved together.
+
+- **A process now exits after a hot deploy even when an actor is blocked in a nested
+  `receive()`.** A queued epoch marker was counted as mail the actor could take, so
+  shutdown never stopped it and the process spun for ever.
+- **`get_actor_field` is `Pid(a) -> String -> Option(Int)`.** It was a free
+  `Option(b)`, an unchecked cast: a field could be read back as any type, and a pid
+  stored as an Int read back as a `Pid` crashed compiled code. It now returns `Some`
+  only for an Int-like field and `None` otherwise.
+- **A draining node withdraws from role placement at once.** On SIGTERM it unregisters
+  its placement markers and leaves the cluster before exiting. A `count = n` role is
+  re-offered elsewhere instead of staying unavailable for the whole drain plus SWIM's
+  suspect timeout.
+- **A ClusterNode's internal Vaults can no longer be found by name**, which let any
+  code with `IO.Mut` stop the node or rewrite its routes without the node capability.
+- **Hot-reload dispatch can no longer select a newer version for an older caller**
+  when a ring slot is reclaimed and republished between the lookup and the pin.
+- **A compiled `<actor>_migrate_msg` now matches the real old-format messages a hot
+  deploy hands it.** The runtime passes a message the previous build allocated, but the
+  user's old message type was compiled with ordinary tags, so the match panicked
+  "non-exhaustive pattern match" and killed the process on the first old message. The
+  old type is now compiled with the actor's message representation and tags, by
+  constructor name. Actor-message tags are also stable across builds: removing a
+  handler no longer renumbers every later actor's messages, which silently dropped
+  their queued messages after a deploy. Hot-reload patches built by this compiler carry
+  ABI id `march-hcr-v3` and are refused by older running binaries.
+- **A cached `--compile --compile-so` build restores its `.hcr_manifest` and
+  `.schemas.json`**, not only the `.so`. `forge deploy hot` no longer reports "no
+  manifest" after a second build of the same source.
+- **Hot reload: a patch `.so` no longer carries its own copy of the C runtime.**
+  `march --compile --compile-so` linked every runtime object into the patch,
+  so code the patch ran used a second scheduler table and a second vault
+  registry: the first task a new-code handler spawned killed the process
+  ("no green thread running on this scheduler") and `Vault.whereis` from new
+  code could not see state the old code created. A patch now links only its
+  own IR (plus the HCR identity strings) and binds every runtime symbol to the
+  host process at `dlopen` time, on macOS and Linux. User FFI shim sources are
+  no longer linked into a patch either; a patch needing a new shim fails to
+  load instead of carrying a private copy.
+- **Hot reload: calls from non-reloadable code into reloadable code now reach
+  the patch.** A call dispatched only when both caller and callee were
+  reloadable, so the generated topology `main`, the entry module's closures,
+  actor handlers and stdlib callbacks called the baseline for ever after a
+  deploy (`Topology.reoffer` reopened roles with the old body). A call now
+  dispatches whenever its callee is reloadable; the boundary cost is
+  unchanged (see `specs/progress/2026-09-25-hcr-dispatch-callee-only-rule.md`).
+- **Hot reload: the entry file's nested modules are on the boundary.**
+  `--hot-reload <EntryModule>` (what forge passes) never matched a nested
+  module of the entry file, so a single-file topology app could hot-deploy
+  nothing but actor handlers and `forge deploy hot` reported "No
+  hot-deployable changes" for a changed role body. The entry file's own
+  top-level functions remain off the boundary (filed).
+- **Hot reload: a change inside a lambda a boundary function builds now
+  deploys.** A boundary function's slot hash did not cover the lambdas
+  lowering lifts out of it, so editing a session body (always a lambda)
+  left the function's hash unchanged and `forge deploy hot` activated
+  nothing. Lifted, bare-named helpers are now folded into the hash, by their
+  body rather than their compiler-numbered names, so an unrelated edit does
+  not make stdlib actors look changed and get hot-swapped.
+- **`SessionNode.initiate` survives a re-offer.** When the only access point for a
+  role answered "closing" (its replacement's registration not yet propagated), the
+  session was reported as having no offer; it now looks again within the setup time.
+- **Hot reload works under AddressSanitizer.** The reload server loaded a
+  patch with `RTLD_DEEPBIND`, which ASan refuses; a patch is now bound
+  locally at link time instead (`-Wl,-Bsymbolic` on Linux) and loaded
+  without it.
 - **Compiling the same source twice at once (different `-o` or `--opt`) no longer
   fails at random with `Undefined symbols: "_main"`.** Both compiles wrote their LLVM
   IR to the same `<source>.ll` file and handed it to clang, so one could truncate the
@@ -64,6 +165,83 @@ git log is authoritative for exact commits.
   interpreter does, instead of returning a UUID with a garbage timestamp.
 
 ### Added
+- **The `ssh` reconciler backend** (build step 10b of the distributed-deploys
+  plan). A topology overlay with `[backend] kind = "ssh"` makes `forge topology
+  apply --env <env>` and `forge topology status --env <env>` work on the
+  overlay's hosts over ssh: a topology push is the signed `TOPOLOGY` verb on each
+  node's reload socket (through an ssh tunnel), then the digest file and a SIGHUP
+  to the pool's systemd unit; status shows each node's report, its restored patch
+  stack, the stack's size and target, and flags code that drifted from what forge
+  last deployed. `FORGE_SSH_CONFIG=<file>` passes `-F <file>` to every ssh forge
+  starts.
+- **`forge host init --env <env>`** prepares every host of an ssh topology once,
+  over ssh: the `march` user and directories (code, the service's HOME whose CAS
+  root holds the persisted patch stack, run state), the pool's systemd unit with
+  the host's own `Environment=` (node name, labels, cluster port and address,
+  seeds, reload socket, status and topology files, `MARCH_DEPLOY_POLICY`), the
+  deploy public key, a shared cluster secret or, with an operator key from
+  `forge cluster keygen`, a node certificate per node, the node's capability
+  policy from its pool's written or derived `caps`, and the pool's ufw rules
+  (applied when ufw is installed). A second run changes nothing. Each host's
+  target (`linux/amd64`, `linux/arm64`) is recorded in `.forge/hosts/<env>.json`.
+- **`forge deploy --plan --env <env>`** shows, per pool and build, what a deploy
+  of the working tree would do, in six blocks: what changed (functions, actor
+  state and message types, protocols with fingerprints, placement, hooks, the
+  base image), the mechanism and why (hot patch, hot patch + migration, hot patch
+  + protocol drain, restart, topology push), order and splits (the pools that
+  receive a new choice branch before the pool that makes it; in a monolith, the
+  expand/contract split into two deploys, D21), drains with the live sessions
+  each node reports, what may be lost (queued messages with no `migrate_msg`,
+  sessions cut at the hard deadline, renumbered unlabelled messages), and
+  authority (a widening role closure or derived pool capability, and the
+  `--grant-cap` it needs) with each pool's derived values.
+- **`forge deploy --env <env>` carries the plan out** (confirmation, or `--yes`):
+  pool by pool in the plan's order, a hot patch through an ssh tunnel to each
+  node's reload socket (rolling with a health gate, `simultaneous`, or
+  `--canary N`), a restart onto a base image cross-built for each host's
+  recorded target (uploaded, the unit restarted, the node's reload socket
+  waited for), then the signed topology push; what was deployed becomes the
+  next plan's baseline in `.forge/deploy/<env>/`. A D21 split stops after
+  deploy one and does deploy two when run again. A change the running base
+  cannot swap (a function with no dispatch slot and no changed caller that has
+  one, such as a closure body) is planned as a restart instead of a hot patch
+  that would activate nothing.
+- **Patch-stack compaction: `forge deploy --compact --env <env>`**, and
+  automatically when a node reports a persisted patch stack longer than
+  `[hot-reload] compact_after = N`: each build's base image is rebuilt from the
+  current version, its hosts restart onto it, and their persisted stacks are
+  cleared (forge checks each node reports an empty stack afterwards).
+- **Protocol changes across versions** (build step 9 of the distributed-deploys
+  plan). Every `@[endpoints]` protocol's `<P>_Msg` module now has `compat()`: per
+  role, the previous fingerprint that role may form a session with. It is computed at
+  build time against the previous version of the protocol, which the compiler reads
+  with `--protocol-baseline <file>` and writes with `--emit-protocols <dir>`;
+  `forge build` keeps it in `.forge/protocols/<P>.json` for any project that declares a
+  protocol. One change counts as compatible so far: a `choose` gaining a branch, for the
+  roles that receive that choice (not the one that makes it), and only if every message
+  both versions exchange keeps its wire tag and payload type. An unlabelled message
+  renumbered by the new branch makes the change breaking, and the explanation names the
+  tags that moved.
+- **Access points form mixed-version sessions.** Offer names carry the fingerprint, so
+  a node can offer two versions of one role; initiators invite only offers their table
+  allows (no round trip wasted on "protocol differs"), and an offer accepts a version
+  its table, or a newer initiator's check, allows. `Topology.reoffer` reopens a role
+  whose protocol changed with a fresh hosting actor and stops the old actor once its
+  sessions have ended.
+- **`--protocol-expand <P>:<label>`** builds the first half of a two-deploy protocol
+  change for a binary that both makes and receives the changed choice: the chooser
+  stays on the previous fingerprint and cannot pick the new branch. forge's
+  `Protocol_split.plan` says when a change needs it.
+- **Typed remote messages carry a schema hash.** `Node.send` / `Node.enqueue` put the
+  message type's structural hash in the frame; an `@[remote]` actor accepts a matching
+  (or absent) hash, converts an older shape through its `migrate_msg`, and refuses
+  anything else with `DELIVERY_FAILED`. A node built before this refuses the longer
+  frame, so upgrade receivers first.
+- **Unlabelled steps in a protocol your topology uses are now a warning at the step**
+  (D25), in `march --topology` output and in the editor, with a suggested label.
+  Positional names (`Msg_A_B_2`) renumber when a step is added before them, which
+  breaks a hot deploy; a label pins the wire tag. `forge topology check` already
+  warned once per protocol in `topology.toml`.
 - **Sessions drain automatically at loop boundaries** (D27, build step 6's
   follow-ups). When a node is draining (a hot deploy's `DRAIN`, or SIGTERM under
   `Topology.drain_on_signal`), every session it takes part in ends at the next
@@ -134,6 +312,58 @@ git log is authoritative for exact commits.
   `forge cluster revoke`; `MARCH_CLUSTER_REVOCATIONS` seeds the list at
   startup; nodes pass revocations on to each other, and only the operator's
   signature makes one count. `ClusterNode.revocations(c)` lists them.
+- **Access points check certificates both ways** (build step 11b of the
+  distributed-deploys plan, part 1; certificate mode only). An initiator skips,
+  before inviting it, any offer whose node's certificate does not name
+  `Proto.Role:offer` for the role, and lists it in `NoOffer`'s reasons ("node-b
+  not authorized for Checkout.Ledger, not invited"): offer names are registry
+  names any member can write, so the check is on the certificate of the node
+  holding the offer. An offer refuses an initiator whose certificate does not
+  name `Proto.Role:initiate` for the role it plays ("initiator node-a not
+  authorized for Checkout.Client"). A node whose own certificate does not allow
+  a role gets `Err(Unauthorized(role, why))` from `offer_<Role>`, and once a
+  session forms each party checks that every role's endpoint is on a node
+  certified for that role. Shared-secret mode checks nothing, as before. New
+  `SessionAP` module (`SessionAP.authorize(cert, proto, role, mode)`),
+  `ClusterNode.own_cert`, `ClusterNode.certified` and
+  `ClusterNode.authorize_peer`; `NodeSend.Delivery` gains `from_node`, the
+  verified peer a frame arrived from. The generated `offer_<Role>`,
+  `offer_hosted_<Role>` and `initiate_<Role>` pass the protocol's role names
+  (`SessionNode.offer_role`, `offer_hosted` and `initiate` take a `roles`
+  argument after the fingerprint).
+- **Raw sends need `raw_send` at both ends** (step 11b, part 2; certificate mode
+  only). `ClusterNode.send_msg` refuses a raw send to or from a peer unless both
+  nodes' certificates carry `raw_send` (`Err(NodeQueue.NotAuthorized)`, a new
+  `EnqueueError` variant); `ClusterNode.queue_for` (what `Node.enqueue` uses)
+  returns `None`; an inbound raw frame from such a peer is dropped before any
+  route and answered `DELIVERY_FAILED`. On direct certificate-mode connections
+  `NodeSend.cast` (`Node.send`) is refused and `NodeCall.call` (`RemoteCall`)
+  returns the new `CallError.Forbidden`, which the serving side also answers.
+  Session traffic (`ClusterNode.session_tags()`, to a route opened with the new
+  `ClusterNode.route_session`) and ClusterNode's own control frames are exempt;
+  SessionNode uses `route_session` and the new `session_queue_for`. Refusals are
+  counted (`ClusterNode.raw_refused`, `NetKernel.raw_refused`) and reported as the
+  new `RawSendRefused(node_id, what)` security event. A node's sends to itself are
+  never refused.
+- **Registry lookups follow the raw-send rule** (step 11b, part 3; certificate
+  mode only). `ClusterNode.lookup` and `names` hide a binding unless this node's
+  and the holder's certificates both carry `raw_send` (a name you cannot
+  raw-send to is not a reference you should hold); a node's own bindings, and
+  the coordination namespaces `ap:`, `session:` and `topo:`
+  (`ClusterNode.reference_namespaces()`), always show. Each replica records who
+  registered a binding (`ClusterNode.registrant(c, name)`, the certificate
+  identity; `GlobalRegistry.Entry` gains `registrant`, `register_as`); it is not
+  on the wire or in the Merkle hash. `GlobalPid.make` stays pure: sending to a
+  pid is what is checked.
+- **The direct session runner speaks certificate mode** (step 11b, part 4).
+  `run_<Role>` / `host_<Role>` / `host_<Role>_or` authenticate by certificate
+  when `MARCH_NODE_CERT` is set (new `ClusterNode.auth_from_env(name, secret)`,
+  the variables a cluster node reads), over `ClusterConn.connect_split_auth` /
+  `accept_split_auth`, and each side refuses a peer whose certificate does not
+  let it play the role it announces ("role Audit.A is played by node-a: not
+  authorized for Audit.A"). Without it, the shared secret as before.
+  `SessionNode.run`, `run_hosted` and `run_hosted_or` take the protocol name and
+  role names after the fingerprint (the generated runners pass them).
 - **Placement changes on a running system and upgrade tests** (build step 8 of the
   distributed-deploys plan). A topology app's nodes re-read their topology on
   SIGHUP and move their own offers: a role's placement, capacity, or a pool that

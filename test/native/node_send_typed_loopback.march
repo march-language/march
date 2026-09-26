@@ -93,7 +93,10 @@ mod TypedSendLoopback do
       match NodeSend.decode_msg(frame) do
         Ok(d) ->
           let line = "node-b: seq=" ++ int_to_string(d.seq) ++ " to=" ++ int_to_string(d.to_local_pid)
-                  ++ " tag=" ++ d.type_tag ++ " -> " ++ describe(d)
+                  ++ " tag=" ++ d.type_tag
+                  -- A typed send carries its type's schema hash (build step 9).
+                  ++ (if d.schema == "" do " schema=none" else " schema=sent" end)
+                  ++ " -> " ++ describe(d)
           let prior = match Vault.get(seen, "lines") do
             Some(ls) -> ls
             None -> Nil
@@ -145,6 +148,7 @@ mod TypedSendLoopback do
       Ok(seq) -> "queued seq=" ++ int_to_string(seq)
       Err(NodeQueue.Backpressure) -> "backpressure"
       Err(NodeQueue.NoConnection) -> "no connection"
+      Err(NodeQueue.NotAuthorized) -> "not authorized"
     end
   end
 

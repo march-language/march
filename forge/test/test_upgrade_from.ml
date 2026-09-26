@@ -7,9 +7,17 @@
       code, one spanning the deploy, one on the new code).
     - good: Tally's Legacy handler changes; its message type does not. The
       upgrade must PASS: every session completes, nothing dropped.
+    - migrates: Tally loses Legacy and converts it with tally_migrate_msg;
+      the old feeder's Legacy messages must be converted, none dropped.
     - drops: Tally loses its Legacy handler with no migrate_msg, so every
       Legacy message the old feeder sends after Tally moves is dropped and
       counted. The upgrade must FAIL, naming the dropped messages.
+    - live: the role body changes, and the new body spawns a task that reads
+      the Vault the old version's hook created and starts an Echo session of
+      its own. The upgrade must PASS and the traffic must get the NEW body's
+      answer: the body is called from the generated (non-reloadable) entry,
+      and the patch runs green threads and sessions against the host
+      process's runtime (2026-09-25, the patch-carries-its-own-runtime fix).
 
     Each case makes a git repository from v1 (the ref), copies the new
     version over its working tree, and runs the real forge. Hermetic like
@@ -119,6 +127,25 @@ let test_clean_upgrade_passes () =
       "upgrade from HEAD passed: 1 test(s), 1 process(es), nothing dropped" ];
   after_run dir
 
+let test_live_upgrade_passes () =
+  let dir = project "live" in
+  let (rc, out) = run_upgrade dir in
+  if rc <> 0 then Alcotest.failf "expected the live upgrade to pass, forge exited %d:\n%s" rc out;
+  List.iter (expect out)
+    [ (* Both the role body (called from the generated, non-reloadable
+         entry) and the task function it calls change. *)
+      "activated: Serve.serve_one"; "activated: Serve.nested";
+      "upgrade traffic: a session on the old code ok";
+      "upgrade traffic: a session across the upgrade ok";
+      "upgrade traffic: a session on the new code ok";
+      (* The new body's task ran on the host runtime, saw the old state and
+         completed a session of its own. *)
+      "upgrade live: new code sees base=100, its own session answered 9";
+      "upgrade traffic: a session on new code that spawns a task, reads the old Vault and starts a session ok";
+      "app-1: converted 0, dropped 0, killed 0";
+      "upgrade from HEAD passed: 1 test(s), 1 process(es), nothing dropped" ];
+  after_run dir
+
 let test_dropping_upgrade_fails () =
   let dir = project "drops" in
   let (rc, out) = run_upgrade dir in
@@ -129,6 +156,30 @@ let test_dropping_upgrade_fails () =
       "upgrade from HEAD FAILED:";
       "app-1 dropped "; "message(s): an actor's message type changed and old code still sent it the old format" ];
   if contains out "dropped 0," then Alcotest.failf "nothing was dropped:\n%s" out;
+  after_run dir
+
+(* The fixture the step-8 progress entry said the passing case avoided: Tally
+   REMOVES Legacy and converts it with tally_migrate_msg. The old feeder keeps
+   sending Legacy after Tally moves; each one is an old-format message carrying
+   the OLD build's actor-message tag, and must reach the user's match as
+   TallyMsgV1.Legacy (specs/progress/2026-09-25-migrate-msg-actor-message-tags.md).
+   Before the fix the compiled match panicked "non-exhaustive pattern match"
+   and killed the process. *)
+let test_migrating_upgrade_passes () =
+  let dir = project "migrates" in
+  let (rc, out) = run_upgrade dir in
+  if rc <> 0 then Alcotest.failf "expected the migrating upgrade to pass, forge exited %d:\n%s" rc out;
+  List.iter (expect out)
+    [ "upgrade traffic: a session across the upgrade ok";
+      "activated: Tally_dispatch";
+      "upgrade from HEAD passed: 1 test(s), 1 process(es), nothing dropped" ];
+  if contains out "non-exhaustive" then Alcotest.failf "migrate_msg panicked:\n%s" out;
+  if contains out "app-1: converted 0," then
+    Alcotest.failf "no old-format message was converted:\n%s" out;
+  (* The counters, for the test log. *)
+  List.iter (fun l -> if contains l "converted" || contains l "migrate_msg" || contains l "pinned"
+                        || contains l "old epoch" then print_endline l)
+    (String.split_on_char '\n' out);
   after_run dir
 
 let test_refuses_without_a_topology () =
@@ -143,7 +194,9 @@ let () =
   Alcotest.run "upgrade-from" [
     ("forge test --upgrade-from", [
         Alcotest.test_case "a clean upgrade passes (sessions complete, nothing dropped)" `Slow test_clean_upgrade_passes;
+        Alcotest.test_case "a patch that spawns a task, reads the old Vault and starts a session passes" `Slow test_live_upgrade_passes;
         Alcotest.test_case "an upgrade that drops messages fails on the counters" `Slow test_dropping_upgrade_fails;
+        Alcotest.test_case "an upgrade that removes a handler and converts it with migrate_msg passes" `Slow test_migrating_upgrade_passes;
         Alcotest.test_case "not a topology app: refused" `Quick test_refuses_without_a_topology;
       ]);
   ]

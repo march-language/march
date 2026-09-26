@@ -35,6 +35,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern char **environ;
 
 /* march_runtime.c; no header declaration. */
 void march_actor_set_mbox_limit(void *actor, int64_t limit, int64_t policy);
@@ -52,6 +58,8 @@ static int g_pass = 0, g_fail = 0;
 #define MSG_SPAWN_PLAIN ((void *)(intptr_t)13) /* handler spawns a child, then sends it MSG_HOLD */
 #define MSG_SPAWN_HELD  ((void *)(intptr_t)15) /* handler spawns a child held from the spawn */
 #define MSG_PROBE       ((void *)(intptr_t)17) /* handler records its proc's epoch */
+#define MSG_NESTED  ((void *)(intptr_t)19)   /* handler blocks in a nested receive() */
+#define MSG_SPAWN   ((void *)(intptr_t)21)   /* handler spawns g_old_child on g_spawn_slot */
 
 static _Atomic int g_gate_open;
 static _Atomic long g_gate_entered;   /* handlers that reached the gate's wait */
@@ -63,6 +71,8 @@ static void send_fwd(void *actor, void *msg);
 static _Atomic long g_v1_handled, g_v2_handled, g_v1_mismatch, g_v2_mismatch;
 static _Atomic long g_migrations, g_v2_fmt_mismatch;
 static _Atomic int  g_v2_new_format;   /* 1: v2 reads MSG_INC2, not MSG_INC */
+static void *_Atomic g_old_child;      /* MSG_SPAWN's child */
+static _Atomic uint32_t g_spawn_slot;
 
 static long now_ms(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -79,6 +89,12 @@ static int control_msg(void *msg) {
     }
     if (msg == MSG_HOLD)    { march_epoch_hold();    return 1; }
     if (msg == MSG_RELEASE) { march_epoch_release(); return 1; }
+    if (msg == MSG_NESTED)  { (void)march_actor_recv(); return 1; }
+    if (msg == MSG_SPAWN)   {
+        void *new_actor(uint32_t slot);
+        atomic_store(&g_old_child, new_actor(atomic_load(&g_spawn_slot)));
+        return 1;
+    }
     if (msg == MSG_PROBE)   { atomic_store(&g_probe_epoch, march_sched_current_epoch()); return 1; }
     if (msg == MSG_SPAWN_PLAIN || msg == MSG_SPAWN_HELD) {
         if (msg == MSG_SPAWN_HELD) march_sched_hold_next_spawn();
@@ -128,7 +144,7 @@ static void *migrate_msg_inc(void *msg, void *none) {
     return msg == MSG_INC ? MSG_INC2 : none;
 }
 
-static void *new_actor(uint32_t slot) {
+void *new_actor(uint32_t slot) {
     int64_t *a = (int64_t *)march_alloc(48);
     a[3] = 1;                                   /* $alive */
     int64_t *s = (int64_t *)march_alloc(24);
@@ -171,7 +187,8 @@ static void wait_pins_zero(uint32_t epoch, long timeout_ms) {
 
 enum { SLOT_ORDER = 1, SLOT_MANY, SLOT_DRAIN, SLOT_DRAIN_FMT, SLOT_BUSY,
        SLOT_HOLD, SLOT_EARLY, SLOT_CONVERT, SLOT_FULL, SLOT_HARD, SLOT_DEATH,
-       SLOT_TASKS, SLOT_ORIGIN, SLOT_CHILD, SLOT_SPAWNER, N_SLOTS };
+       SLOT_TASKS, SLOT_ORIGIN, SLOT_CHILD, SLOT_SPAWNER,
+       SLOT_NESTED, SLOT_SPAWNOLD, SLOT_PLAINDEPLOY, N_SLOTS };
 #define N_MANY 2100   /* > the old 2048-entry snapshot cap */
 
 static void reset(void) {
@@ -243,6 +260,76 @@ static void test_every_actor_is_migrated(void) {
     CHECK(atomic_load(&g_v2_mismatch) == 0, "new code never sees an old-layout state");
     wait_pins_zero(old_e, 2000);
     CHECK(march_epoch_pins(old_e) == 0, "the old epoch retired once every actor advanced");
+}
+
+/* DD review, step 6, item 1 (deviation 2): an actor spawned by a parent
+ * still running at an older epoch inherits that epoch; hcr_spawn_marker
+ * gives it a marker at once, so it moves to the current code before its
+ * first message.  Without it the child never sees a marker and pins the
+ * old epoch for ever.  (Checked red with hcr_spawn_marker returning at once:
+ * specs/progress/2026-09-25-dd-review-step6-untested-behaviours.md.) */
+static void test_old_epoch_spawn_gets_marker(void) {
+    printf("-- an actor spawned at an older epoch advances before its first message --\n");
+    reset();
+    atomic_store(&g_spawn_slot, SLOT_SPAWNOLD);
+    atomic_store(&g_old_child, NULL);
+    void *parent = new_actor(SLOT_SPAWNOLD);
+    send(parent, MSG_GATE);                    /* holds the parent inside v1 */
+    send(parent, MSG_SPAWN);                   /* queued before the deploy: runs on v1 */
+    uint32_t old_e = march_epoch_current();
+    CHECK(activate(SLOT_SPAWNOLD, (void *)v2_dispatch, 0) > (int)old_e, "activation published");
+    atomic_store(&g_gate_open, 1);
+    long end = now_ms() + 5000;
+    while (!atomic_load(&g_old_child) && now_ms() < end) march_sched_yield();
+    void *child = atomic_load(&g_old_child);
+    CHECK(child != NULL, "the parent spawned its child on v1");
+    if (!child) return;
+    send(child, MSG_INC);
+    wait_until(&g_v2_handled, 1, 5000);
+    CHECK(atomic_load(&g_v2_handled) == 1, "the child's first message ran on v2");
+    CHECK(atomic_load(&g_v2_mismatch) == 0, "with its init state migrated");
+    wait_pins_zero(old_e, 3000);
+    CHECK(march_epoch_pins(old_e) == 0, "nothing pins the old epoch once parent and child moved");
+}
+
+/* A regular actor's closure dispatch: counts, and gates like control_msg. */
+static _Atomic long g_plain_handled;
+static void plain_apply(void *clo, void *actor, void *msg) {
+    (void)actor;
+    march_decrc(clo);          /* the loop's per-call incrc */
+    if (msg == MSG_GATE) { while (!atomic_load(&g_gate_open)) march_sched_yield(); }
+    atomic_fetch_add(&g_plain_handled, 1);
+}
+
+/* DD review, step 6, item 2 (deviation 2): markers go to EVERY live actor,
+ * not only hot-reload ones.  A regular (closure-dispatched, no dispatch
+ * slot) actor pins its spawn epoch like any unit; without a marker it would
+ * pin it for ever.  (Checked red with hcr_mark_all skipping
+ * dispatch_name_id == 0.) */
+static void test_non_hcr_actor_advances(void) {
+    printf("-- a regular (non-hot-reload) actor's pin moves to the new epoch --\n");
+    reset();
+    atomic_store(&g_plain_handled, 0);
+    int64_t *clo = (int64_t *)march_alloc(24);
+    void (*fnp)(void *, void *, void *) = plain_apply;
+    memcpy(&clo[2], &fnp, sizeof fnp);
+    int64_t *a = (int64_t *)march_alloc(48);
+    a[2] = (int64_t)(uintptr_t)clo;
+    a[3] = 1;
+    int64_t *st = (int64_t *)march_alloc(24);
+    a[4] = (int64_t)(uintptr_t)st;
+    march_spawn(a);
+    send(a, MSG_INC);
+    wait_until(&g_plain_handled, 1, 3000);
+    uint32_t old_e = march_epoch_current();
+    CHECK(march_epoch_pins(old_e) >= 1, "the regular actor pins its epoch");
+    CHECK(activate(SLOT_PLAINDEPLOY, (void *)v2_dispatch, 0) > (int)old_e,
+          "a deploy of some other function");
+    wait_pins_zero(old_e, 3000);
+    CHECK(march_epoch_pins(old_e) == 0, "the regular actor took its marker and moved");
+    send(a, MSG_INC);
+    wait_until(&g_plain_handled, 2, 3000);
+    CHECK(atomic_load(&g_plain_handled) == 2, "and still runs");
 }
 
 static void test_soft_deadline_forces_marker(void) {
@@ -677,6 +764,8 @@ static void test_dead_actor_releases_pins(void) {
 static void test_main(void) {
     test_queued_messages_run_on_old_code();
     test_every_actor_is_migrated();
+    test_old_epoch_spawn_gets_marker();
+    test_non_hcr_actor_advances();
     test_soft_deadline_forces_marker();
     test_soft_deadline_drops_old_format();
     test_second_deploy_while_draining();
@@ -704,20 +793,70 @@ static void test_main(void) {
     CHECK(march_migrate_msgs_live() == 0, "no legacy migrate message leaked");
 }
 
-int main(void) {
-    printf("=== HCR epoch model: markers, drains, holds, early advance ===\n\n");
+/* ── A deploy must not stop the process from exiting ─────────────────────
+ * (specs/progress/2026-09-25-dd-review-marker-blocks-shutdown-in-nested-receive.md)
+ * One actor's handler blocks in a nested receive(); main returns, either
+ * straight away (the control) or after one activation, which queues a
+ * marker behind the blocked handler.  A nested receive cannot take the
+ * marker, so the shutdown endgame must still stop the actor: before the fix
+ * the scheduler counted the marker as deliverable mail, never stopped the
+ * daemon, and spun in its idle loop for ever.  Run in a child process (a
+ * hang cannot be observed from inside), with alarm() turning it into
+ * SIGALRM. */
+static int g_nested_deploy;
+static void nested_exit_main(void) {
+    void *a = new_actor(SLOT_NESTED);
+    send(a, MSG_NESTED);
+    sleep_ms(20);                       /* the handler is parked in receive() */
+    if (g_nested_deploy)
+        activate_ex(SLOT_NESTED, (void *)v2_dispatch, NULL, 0, NULL, 0, 0);
+    sleep_ms(20);
+}
+
+static int run_nested_exit_child(const char *self, const char *mode) {
+    pid_t pid;
+    char *argv[] = { (char *)self, (char *)mode, NULL };
+    if (posix_spawn(&pid, self, NULL, NULL, argv, environ) != 0) return -1;
+    int st = 0;
+    if (waitpid(pid, &st, 0) < 0) return -1;
+    if (WIFEXITED(st)) return WEXITSTATUS(st);
+    return 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+}
+
+static void register_slots(void) {
     static const char *names[N_SLOTS] = {
         NULL, "Ord_dispatch", "Many_dispatch", "Drain_dispatch",
         "DrainFmt_dispatch", "Busy_dispatch", "Hold_dispatch",
         "Early_dispatch", "Convert_dispatch", "Full_dispatch",
-        "Hard_dispatch", "Death_dispatch", "Tasks_dispatch", "Origin_dispatch", "Child_dispatch", "Spawner_dispatch" };
+        "Hard_dispatch", "Death_dispatch", "Tasks_dispatch", "Origin_dispatch", "Child_dispatch", "Spawner_dispatch",
+        "Nested_dispatch", "SpawnOld_dispatch", "PlainDeploy_dispatch" };
     march_dispatch_init(N_SLOTS);
     for (uint32_t i = 1; i < N_SLOTS; i++) {
         march_dispatch_register_name(i, names[i]);
         march_dispatch_publish(i, (void *)v1_dispatch, "v1", NULL, MARCH_NATIVE);
     }
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && (strcmp(argv[1], "nested-exit") == 0
+                     || strcmp(argv[1], "nested-exit-deploy") == 0)) {
+        alarm(10);
+        g_nested_deploy = strcmp(argv[1], "nested-exit-deploy") == 0;
+        register_slots();
+        march_spawn_main(nested_exit_main);
+        march_run_scheduler();
+        return 0;
+    }
+    printf("=== HCR epoch model: markers, drains, holds, early advance ===\n\n");
+    register_slots();
     march_spawn_main(test_main);
     march_run_scheduler();
+    printf("-- a process with an actor in a nested receive() exits after a deploy --\n");
+    int control = run_nested_exit_child(argv[0], "nested-exit");
+    int deploy = run_nested_exit_child(argv[0], "nested-exit-deploy");
+    printf("     control exit=%d deploy exit=%d (142 = SIGALRM: hung)\n", control, deploy);
+    CHECK(control == 0, "without a deploy the process exits");
+    CHECK(deploy == 0, "after a deploy the process still exits");
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -55,7 +55,10 @@ mod NodeQueue do
   -- returns `Err(Backpressure)` there (as `Actor.set_queue_limit` policy 3 is
   -- refused); the compiled backend blocks for real.
   type Policy = DropNew | DropOld | BlockSender(Int) | Unbounded
-  type EnqueueError = Backpressure | NoConnection
+  -- `NotAuthorized` is ClusterNode's (step 11b): a raw send refused because
+  -- this node's or the peer's certificate lacks `raw_send`. A queue itself
+  -- never returns it.
+  type EnqueueError = Backpressure | NoConnection | NotAuthorized
 
   -- ── wire ────────────────────────────────────────────────────────────────
   -- CREDIT carries the receiver's TOTAL consumed byte count, not a delta,
@@ -457,7 +460,12 @@ mod NodeQueue do
   -- as Bytes. The remote-send path a program should use once it has a
   -- queue for the peer; NodeSend.cast writes straight to a socket.
   fn cast(q, seq : Int, to : Pid, type_tag : String, payload : List(Int), policy : Policy) : Result((), EnqueueError) do
-    enqueue(q, seq, Bytes.from_list(NetFrame.encode(NodeSend.encode_msg(seq, to, type_tag, payload))), policy)
+    cast_schema(q, seq, to, type_tag, "", payload, policy)
+  end
+
+  -- `cast` with the message type's schema hash in the frame (build step 9).
+  fn cast_schema(q, seq : Int, to : Pid, type_tag : String, schema : String, payload : List(Int), policy : Policy) : Result((), EnqueueError) do
+    enqueue(q, seq, Bytes.from_list(NetFrame.encode(NodeSend.encode_msg_schema(seq, to, type_tag, schema, payload))), policy)
   end
 
   -- `close`, and close the connection's fd through its writer (after every

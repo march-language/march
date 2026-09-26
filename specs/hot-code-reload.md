@@ -188,7 +188,7 @@ forge bastion server           # implies --hot-reload (dev)
 
 ### Boundary detection (auto, with overrides)
 
-Default: every `.march` under `src/` is reloadable; module prefix derives from `[package] name` (e.g. `my_app` → `MyApp.*`), reusing `module_name_to_filename` in `bin/main.ml`. Stdlib, deps, and runtime are never reloadable. `forge hot-reload modules` prints the computed boundary and the reason each module is in/out. Optional `[hot-reload]` `include`/`exclude` in `forge.toml` overrides; `forge hot-reload init` suggests excluding rarely-changed modules (which keep full optimization) from git history.
+Default: every `.march` under `src/` is reloadable; module prefix derives from `[package] name` (e.g. `my_app` → `MyApp.*`), reusing `module_name_to_filename` in `bin/main.ml`. Stdlib, deps, and runtime are never reloadable. The entry file is the one exception: lowering strips the entry module's own name from every declaration in it, so its top-level functions get bare names and are never on the boundary (`main` must not be, and the rest share its spelling), while its nested modules (`mod Serve` → `Serve.serve_one`) are put on the boundary explicitly when the prefix names the entry module (`hr_entry_nested` in `bin/main.ml`, since 2026-09-25; before that a single-file topology app could hot-deploy nothing but actor handlers). Actor handlers are on the boundary wherever they are declared. `forge hot-reload modules` prints the computed boundary and the reason each module is in/out. Optional `[hot-reload]` `include`/`exclude` in `forge.toml` overrides; `forge hot-reload init` suggests excluding rarely-changed modules (which keep full optimization) from git history.
 
 ### What changes in LLVM emit
 
@@ -202,7 +202,7 @@ A boundary→boundary call resolves the active version through the dispatch slot
 
 `NAME_ID` is a stable, name-interned index (resolved at startup from the CAS index), **not** a source-order integer. The *version* a slot points at is identified by `impl_hash`. `enter`/`leave` (not a bare load) are required for correct reclamation (§ Part 3).
 
-Direct (non-indirect, inlinable) calls: boundary→stdlib, boundary→excluded module, and intra-SCC. Only boundary→boundary crosses the table. **Boundary→boundary must be a no-inline edge** — otherwise inlining would defeat independent swap; this is the runtime counterpart of the Merkle requirement in Part 1.
+Direct (non-indirect, inlinable) calls: boundary→stdlib, boundary→excluded module, and intra-SCC. Every call whose **callee** is on the boundary crosses the table, whoever the caller is: boundary→boundary, and also stdlib→boundary, entry-module→boundary and closure→boundary (since 2026-09-25; before that only boundary→boundary crossed it, which pinned every call from the generated topology `main`, the entry module's closures and stdlib callbacks into the app to the baseline for ever, so `Topology.reoffer` reopened roles with the old body after a deploy). **A call to a boundary function must be a no-inline edge** — otherwise inlining would defeat independent swap; this is the runtime counterpart of the Merkle requirement in Part 1.
 
 ### Polymorphic exports on the boundary
 

@@ -814,13 +814,52 @@ let test_actor_foreign_msg_drop_boxed_dispatch () =
   Alcotest.(check bool) "dispatch default arm is a drop (decrc), not unreachable"
     true (ir_contains ir "case_default");
   (* Global tags: Counter.Inc and Logger.Log get DISTINCT tags. Both are in the
-     0x01000000+ actor-message tag space; distinctness is what makes a foreign
-     message fall to the default arm. The base tag 16777216 (0x01000000) is
-     assigned to the first message ctor; a second, distinct tag must also appear. *)
-  Alcotest.(check bool) "first actor-message ctor uses the global tag base 16777216"
-    true (ir_contains ir "store i32 16777216");
-  Alcotest.(check bool) "a second, distinct actor-message tag is assigned (16777217)"
-    true (ir_contains ir "store i32 16777217")
+     0x01000000+ actor-message tag space (a stable hash of the qualified
+     constructor name, Llvm_toplevel.actor_msg_tag_table); distinctness is
+     what makes a foreign message fall to the default arm. *)
+  let tbl = March_tir.Llvm_toplevel.actor_msg_tag_table ~pins:[]
+      [ March_tir.Tir.TDVariant ("Counter_Msg", [ ("Inc", [ March_tir.Tir.TInt ]) ]);
+        March_tir.Tir.TDVariant ("Logger_Msg", [ ("Log", [ March_tir.Tir.TString ]) ]) ] in
+  let inc = Hashtbl.find tbl "Counter_Msg.Inc" and log = Hashtbl.find tbl "Logger_Msg.Log" in
+  Alcotest.(check bool) "the two message ctors carry distinct tags" true (inc <> log);
+  Alcotest.(check bool) "both in the actor-message range" true
+    (List.for_all (fun t -> t >= 0x0100_0000 && t < 0x0200_0000) [ inc; log ]);
+  Alcotest.(check bool) (Printf.sprintf "Counter.Inc is stored with its tag %d" inc)
+    true (ir_contains ir (Printf.sprintf "store i32 %d" inc));
+  Alcotest.(check bool) (Printf.sprintf "Logger.Log is stored with its tag %d" log)
+    true (ir_contains ir (Printf.sprintf "store i32 %d" log))
+
+(** Actor-message tags are a function of the qualified constructor name,
+    not of build order (specs/progress/2026-09-25-migrate-msg-actor-message-tags.md).
+    A hot deploy runs messages the OLD build allocated through the NEW
+    build's dispatch; under the old counter, removing one handler shifted
+    every later actor's tags, so their queued messages fell to the dropping
+    default arm. And a `*_migrate_msg`'s old message type takes its actor's
+    tags by constructor name, including a removed handler's. *)
+let test_actor_msg_tags_stable_across_builds () =
+  let module T = March_tir.Tir in
+  let module L = March_tir.Llvm_toplevel in
+  let cs = Hashtbl.create 1 in
+  let tally_v1 = T.TDVariant ("Tally_Msg", [ ("Add", [ T.TInt ]); ("Legacy", [ T.TInt ]) ]) in
+  let tally_v2 = T.TDVariant ("Tally_Msg", [ ("Add", [ T.TInt ]) ]) in
+  let other = T.TDVariant ("Other_Msg", [ ("Poke", [ T.TInt ]); ("Stop", []) ]) in
+  let old_ty = T.TDVariant ("TallyMsgV1.Msg", [ ("Legacy", [ T.TInt ]); ("Add", [ T.TInt ]) ]) in
+  let v1 = L.variant_ctor_tags ~pins:[] ~collision_set:cs [ tally_v1; other ] in
+  let v2 = L.variant_ctor_tags ~pins:[ ("TallyMsgV1.Msg", "Tally_Msg") ] ~collision_set:cs
+      [ tally_v2; other; old_ty ] in
+  let v1_reordered = L.variant_ctor_tags ~pins:[] ~collision_set:cs [ other; tally_v1 ] in
+  let get t n = Hashtbl.find t n in
+  Alcotest.(check (list int)) "Other's tags do not move when Tally loses a handler"
+    (get v1 "Other_Msg") (get v2 "Other_Msg");
+  Alcotest.(check (list int)) "nor when the declaration order changes"
+    (get v1 "Other_Msg") (get v1_reordered "Other_Msg");
+  Alcotest.(check int) "Tally.Add keeps its tag" (List.hd (get v1 "Tally_Msg")) (List.hd (get v2 "Tally_Msg"));
+  (match get v1 "Tally_Msg", get v2 "TallyMsgV1.Msg" with
+   | [ add1; legacy1 ], [ legacy_old; add_old ] ->
+     Alcotest.(check int) "the old type's Legacy carries v1's Tally.Legacy tag" legacy1 legacy_old;
+     Alcotest.(check int) "the old type's Add carries v1's Tally.Add tag" add1 add_old
+   | _ -> Alcotest.fail "unexpected ctor counts")
+
 
 (** Finding 20 (compiled actor-struct state-write race, fixed): a genuine
     actor's handler writes its new state back via an EReuse on the actor
@@ -10272,9 +10311,10 @@ let write_march_source ~name src_text =
    parent `fn` declared AFTER it, two levels of nesting (Deep reaching both
    Inner's and Outer's fns), an inner fn shadowing an outer one of the same
    name (the nearer one wins), and the QUALIFIED spelling `Outer.helper` of a
-   parent `pfn`.  Compiled only: the interpreter has a separate, pre-existing
-   bug with a parent fn declared after the nested module (see
-   specs/todos/2026-09-25-interp-nested-module-forward-parent-fn-stub.md). *)
+   parent `pfn`.  Each shape also runs INTERPRETED against the same expected
+   output: the interpreter used to die with "stub later called before
+   initialisation" on the parent fn declared after the nested module (see
+   specs/progress/2026-09-25-interp-nested-forward-parent-fn.md). *)
 let nested_parent_call_outer_src = {|mod Outer do
   pfn helper(x : Int) : Int do x + 1 end
 
@@ -10311,8 +10351,10 @@ let nested_parent_call_main_body = {|    println(int_to_string(Outer.Inner.f(41)
    Inner's shadowed(1) + 2 = 102; q: Outer.helper(8) = 9. *)
 let nested_parent_call_expected = "42\n40\n300\n51\n102\n9"
 
-let test_nested_module_parent_call_lib_path_compiled () =
-  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_parent"
+(* The entry file (main only) plus [Outer] as a MARCH_LIB_PATH module;
+   returns [(project_root, main_exe, src, tmp, lib_dir)]. *)
+let write_nested_parent_lib_path_project ~name =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name
     ("mod Main do\n\
      \  needs IO.Console\n\
      \  fn main(_c : Cap(IO.Console)) do\n"
@@ -10325,6 +10367,25 @@ let test_nested_module_parent_call_lib_path_compiled () =
   let oc = open_out (Filename.concat lib_dir "outer.march") in
   output_string oc nested_parent_call_outer_src;
   close_out oc;
+  (project_root, main_exe, src, tmp, lib_dir)
+
+(* [Outer] nested inside the entry file's own module. *)
+let nested_parent_call_entry_src () =
+  let indent s =
+    String.concat "\n"
+      (List.map (fun l -> if l = "" then l else "  " ^ l)
+         (String.split_on_char '\n' s)) in
+  "mod Main do\n\
+  \  needs IO.Console\n"
+  ^ indent nested_parent_call_outer_src ^
+  "\n  fn main(_c : Cap(IO.Console)) do\n"
+  ^ nested_parent_call_main_body ^
+  "  end\n\
+   end\n"
+
+let test_nested_module_parent_call_lib_path_compiled () =
+  let (project_root, main_exe, src, tmp, lib_dir) =
+    write_nested_parent_lib_path_project ~name:"march_nested_parent" in
   let bin = Filename.concat tmp "nested_parent_bin" in
   match compile_march_or_skip
           ~cmd_prefix:(Printf.sprintf "cd %s && MARCH_LIB_PATH=%s "
@@ -10340,19 +10401,9 @@ let test_nested_module_parent_call_lib_path_compiled () =
 (* The same modules nested inside the entry file's own module, which failed
    to link the same way. *)
 let test_nested_module_parent_call_entry_compiled () =
-  let indent s =
-    String.concat "\n"
-      (List.map (fun l -> if l = "" then l else "  " ^ l)
-         (String.split_on_char '\n' s)) in
-  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_parent_entry"
-    ("mod Main do\n\
-     \  needs IO.Console\n"
-     ^ indent nested_parent_call_outer_src ^
-     "\n  fn main(_c : Cap(IO.Console)) do\n"
-     ^ nested_parent_call_main_body ^
-     "  end\n\
-      end\n")
-  in
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_nested_parent_entry"
+      (nested_parent_call_entry_src ()) in
   let bin = Filename.concat tmp "nested_parent_entry_bin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
           ~main_exe ~bin ~src () with
@@ -10361,6 +10412,34 @@ let test_nested_module_parent_call_entry_compiled () =
     Alcotest.(check string)
       "an entry-file nested module links and calls its enclosing modules' fns"
       nested_parent_call_expected (read_cmd_output (Filename.quote bin))
+
+(* The same two programs, INTERPRETED.  stderr is folded into the compared
+   output so the pre-fix "stub later called before initialisation" death
+   shows up in the diff instead of as a bare truncated stdout. *)
+let test_nested_module_parent_call_lib_path_interpreted () =
+  let (project_root, main_exe, src, _tmp, lib_dir) =
+    write_nested_parent_lib_path_project ~name:"march_nested_parent_interp" in
+  Alcotest.(check string)
+    "interpreted: a MARCH_LIB_PATH module's nested module calls its enclosing \
+     modules' fns, including one declared after it"
+    nested_parent_call_expected
+    (read_cmd_output
+       (Printf.sprintf "cd %s && MARCH_LIB_PATH=%s %s %s 2>&1"
+          (Filename.quote project_root) (Filename.quote lib_dir)
+          (Filename.quote main_exe) (Filename.quote src)))
+
+let test_nested_module_parent_call_entry_interpreted () =
+  let (project_root, main_exe, src, _tmp) =
+    write_march_source ~name:"march_nested_parent_entry_interp"
+      (nested_parent_call_entry_src ()) in
+  Alcotest.(check string)
+    "interpreted: an entry-file nested module calls its enclosing modules' \
+     fns, including one declared after it"
+    nested_parent_call_expected
+    (read_cmd_output
+       (Printf.sprintf "cd %s && %s %s 2>&1"
+          (Filename.quote project_root)
+          (Filename.quote main_exe) (Filename.quote src)))
 
 (* A qualified call to an enclosing module's `pfn` names THAT module's fn even
    when the calling module has its own fn of the same name.  Pre-fix, in-file,
@@ -13428,7 +13507,7 @@ declare void @march_dispatch_init(i32 %n_slots)
 declare void @march_dispatch_register_name(i32, ptr)
 declare void @march_reload_server_start(ptr)
 declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)
-declare void @march_actor_set_call_base(ptr %actor, i64 %base)
+declare void @march_actor_set_call_tags(ptr %actor, ptr %tags, i64 %n)
 declare ptr  @getenv(ptr)
 declare noalias nonnull ptr @march_alloc(i64 %sz) allocsize(0)
 declare void @march_incrc(ptr %p)
@@ -15360,6 +15439,8 @@ let codegen_suites =
       ( "actor_dispatch_codegen", [
           Alcotest.test_case "finding-19: foreign msg dropped (Boxed dispatch + global tags + default arm)"
             `Quick test_actor_foreign_msg_drop_boxed_dispatch;
+          Alcotest.test_case "actor-message tags are stable across builds; migrate_msg's old type takes them" `Quick
+            test_actor_msg_tags_stable_across_builds;
           Alcotest.test_case "finding-20: actor-struct state EReuse is unconditional (no RC race)"
             `Quick test_actor_struct_ereuse_unconditional;
           Alcotest.test_case "finding-20 follow-up: a `_Actor`-suffixed user type is NOT treated as an actor struct"
@@ -15997,6 +16078,10 @@ let codegen_suites =
             test_nested_module_parent_call_lib_path_compiled;
           Alcotest.test_case "entry-file nested module calls enclosing fns (compiled)" `Quick
             test_nested_module_parent_call_entry_compiled;
+          Alcotest.test_case "MARCH_LIB_PATH nested module calls enclosing fns (interpreted)" `Quick
+            test_nested_module_parent_call_lib_path_interpreted;
+          Alcotest.test_case "entry-file nested module calls enclosing fns (interpreted)" `Quick
+            test_nested_module_parent_call_entry_interpreted;
           Alcotest.test_case "qualified parent pfn is not shadowed by an inner fn" `Quick
             test_nested_module_qualified_parent_pfn_not_shadowed;
         ] );

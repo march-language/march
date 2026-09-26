@@ -731,6 +731,106 @@ mod TestClusterNode do
 
   end
 
+  -- ── cross-node references (distributed-deploys step 11b) ────────────────
+
+  pfn flagged(name : String, v : Int, flags : List(String)) : NodeCert.Cert do
+    { cert_of(name, v, 2000000000) with flags: flags }
+  end
+
+  -- node "a" in certificate mode with [own] flags, linked to "b" with [bflags].
+  pfn ref_linked(own : List(String), bflags : List(String)) : (String, ClusterNode.CnState) do
+    let creds = { signed: NodeCert.sign(flagged("a", 2, own), op_sk()), secret_key: node_sk(2),
+                  operator_pubkey: NodeCert.public_key(op_sk()), revoked: fn _ -> false }
+    let b = ClusterNode.node_id_of("b")
+    let st0 = ClusterNode.core_new({ cfg("a", Nil) with auth: ClusterAuth.Certified(creds) }, 1)
+    let st = ClusterNode.core_peer_cert(st0, b, Some(flagged("b", 3, bflags)))
+    match ClusterNode.core_linked(st, b, "b", "127.0.0.1:7001", 1, 10, 11, b, 99) do
+      (st2, _) ->
+        match ClusterNode.core_tick(st2, 1000) do
+          (st3, _) ->
+            let out = (b, st3)
+            out
+        end
+    end
+  end
+
+  -- b pushes four bindings of its own: one raw name, and one in each
+  -- coordination namespace.
+  pfn from_b(b : String, st : ClusterNode.CnState) : ClusterNode.CnState do
+    let clock = VectorClock.increment(VectorClock.new(), b)
+    let reg = List.fold_left(["raw.x", "ap:P/1/" ++ b, "session:s/1", "topo:R/" ++ b], GlobalRegistry.empty(), fn (r, n) ->
+      GlobalRegistry.register_at(r, n, b, 1, 7, clock))
+    let frame = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(reg), GlobalRegistry.all_entries(reg))
+    match ClusterNode.core_frame(st, b, 6, frame) do
+      (st2, _) -> st2
+    end
+  end
+
+  pfn shows(st : ClusterNode.CnState, name : String) : Bool do ClusterNode.core_lookup(st, name) != None end
+
+  describe "cross-node references" do
+
+    test "a binding held by a peer without raw_send is hidden; coordination names are not" do
+      match ref_linked(["raw_send"], Nil) do
+        (b, st) ->
+          let st2 = from_b(b, st)
+          assert (not(shows(st2, "raw.x")))
+          assert (shows(st2, "ap:P/1/" ++ b))
+          assert (shows(st2, "session:s/1"))
+          assert (shows(st2, "topo:R/" ++ b))
+      end
+    end
+
+    test "with raw_send at both ends the binding shows" do
+      match ref_linked(["raw_send"], ["raw_send"]) do
+        (b, st) -> assert (shows(from_b(b, st), "raw.x"))
+      end
+    end
+
+    test "a node without raw_send sees no peer's raw bindings, but sees its own" do
+      match ref_linked(Nil, ["raw_send"]) do
+        (b, st) ->
+          let st2 = from_b(b, st)
+          assert (not(shows(st2, "raw.x")))
+          match ClusterNode.core_register(st2, "mine", 42, 0) do
+            (st3, _) -> assert (shows(st3, "mine"))
+          end
+      end
+    end
+
+    test "shared-secret mode hides nothing" do
+      match linked_ab() do
+        (b, st, _) -> assert (shows(from_b(b, st), "raw.x"))
+      end
+    end
+
+    test "the registrant is recorded: this node's certificate for its own, the link's peer for its" do
+      match ref_linked(["raw_send"], Nil) do
+        (b, st) ->
+          let st2 = from_b(b, st)
+          assert (ClusterNode.core_registrant(st2, "raw.x") == Some(NodeCert.node_uri("t", "p", "b")))
+          match ClusterNode.core_register(st2, "mine", 42, 0) do
+            (st3, _) -> assert (ClusterNode.core_registrant(st3, "mine") == Some(NodeCert.node_uri("t", "p", "a")))
+          end
+          assert (ClusterNode.core_registrant(st2, "nothing") == None)
+      end
+    end
+
+    test "the registrant is not in the Merkle hash: replicas that recorded it differently agree" do
+      let clock = VectorClock.increment(VectorClock.new(), "n")
+      let r1 = GlobalRegistry.register_as(GlobalRegistry.empty(), "x", "n", 1, 7, clock, "spiffe://t/pool/p/node/n")
+      let r2 = GlobalRegistry.register_as(GlobalRegistry.empty(), "x", "n", 1, 7, clock, "")
+      assert (GlobalRegistry.root_hash(r1) == GlobalRegistry.root_hash(r2))
+    end
+
+    test "the exempt namespaces" do
+      assert (ClusterNode.reference_exempt("ap:Checkout/1/n"))
+      assert (ClusterNode.reference_exempt("session:n.1.1/0"))
+      assert (ClusterNode.reference_exempt("topo:Ledger/n"))
+      assert (not(ClusterNode.reference_exempt("orders")))
+    end
+
+  end
 
   -- ── local registration races (register's synchronous half) ────────────
   --

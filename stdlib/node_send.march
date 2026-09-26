@@ -7,7 +7,7 @@
 -- Wire (msgpack payload behind the NetFrame length prefix; tag byte first,
 -- the P5 convention in NetKernel):
 --   0x09 ACTOR_MSG        [tag=9,  seq:Int, to_local_pid:Int, to_creation:Int,
---                          type_tag:Str, payload:Bin]
+--                          type_tag:Str, payload:Bin, schema:Str?]
 --   0x0A DELIVERY_FAILED  [tag=10, seq:Int, reason:Str]
 --
 -- `seq` is the sender's correlation number, echoed by DELIVERY_FAILED so the
@@ -16,7 +16,12 @@
 -- restarted reuses local pids, and a message carrying the old creation must
 -- be refused rather than delivered to whatever now owns that pid.
 -- `type_tag` names the message type (fully qualified), so a receiver can
--- refuse a type it does not host without decoding the payload.
+-- refuse a type it does not host without decoding the payload. `schema`
+-- (optional, distributed-deploys build step 9) is the message type's schema
+-- hash, a digest of its structure that the typed send puts in: a receiver
+-- that knows its own can tell a same-named type of another shape. It is sent
+-- only by a typed send; a frame without it decodes with `schema: ""`. A node
+-- built before the field existed refuses a seven-element frame.
 --
 -- The receiving side is INJECTED, like NodeRpc's Targets: `serve_one` decodes
 -- the frame, checks the creation, and hands a `Delivery` to the caller's
@@ -40,24 +45,60 @@ mod NodeSend do
 
   type SendError = NoConnection | Refused(Int, String)
 
+  -- `from_node` is the node id of the connection the frame arrived on,
+  -- filled in by the receiver (ClusterNode's data reader, or its own id for
+  -- the loopback), never read off the wire: "" from `decode_msg`. An access
+  -- point checks the sender's certificate by it (step 11b), so it must be
+  -- the link's verified peer, not anything the sender claims.
   type Delivery = {
     seq : Int,
     to_local_pid : Int,
     to_creation : Int,
     type_tag : String,
-    payload : List(Int)
+    payload : List(Int),
+    schema : String,
+    from_node : String
   }
+
+  -- ── session traffic (distributed-deploys step 11b) ─────────────────────
+  -- In certificate mode a raw ACTOR_MSG (Node.send, @[remote], any user
+  -- type) crosses a connection only when both nodes' certificates carry
+  -- `raw_send` (NetKernel.raw_allowed; ClusterNode for its own links).
+  -- Session traffic is exempt: these type tags, before any "#<sid>" suffix.
+
+  doc "The ACTOR_MSG type tags that are session traffic (SessionAP's and SessionNode's frames)."
+  fn session_tags() : List(String) do
+    ["SessionAP.Invite", "SessionAP.Withdraw", "SessionAP.Answer",
+     "SessionNode.Hello", "SessionNode.Deliver", "SessionNode.Bye", "SessionNode.Cancel",
+     "SessionNode.Ping", "SessionNode.Undelivered", "SessionNode.Drained"]
+  end
+
+  doc "Is [type_tag] session traffic (`session_tags()`, ignoring a \"#<sid>\" suffix)?"
+  fn is_session_tag(type_tag : String) : Bool do
+    let kind = match String.split_first(type_tag, "#") do
+      Some((k, _)) -> k
+      None -> type_tag
+    end
+    List.member(session_tags(), kind)
+  end
 
   -- ── frames ──────────────────────────────────────────────────────────────
 
   fn encode_msg(seq : Int, to : Pid, type_tag : String, payload : List(Int)) : List(Int) do
+    encode_msg_schema(seq, to, type_tag, "", payload)
+  end
+
+  -- An ACTOR_MSG carrying the message type's schema hash ([schema] `""`:
+  -- none, the six-element frame every node reads).
+  fn encode_msg_schema(seq : Int, to : Pid, type_tag : String, schema : String, payload : List(Int)) : List(Int) do
+    let tail = if schema == "" do Nil else Cons(Msgpack.str(schema), Nil) end
     Msgpack.encode(Msgpack.array(
       Cons(Msgpack.int(tag_actor_msg()),
       Cons(Msgpack.int(seq),
       Cons(Msgpack.int(to.local_pid),
       Cons(Msgpack.int(to.creation),
       Cons(Msgpack.str(type_tag),
-      Cons(Msgpack.bin(payload), Nil))))))))
+      Cons(Msgpack.bin(payload), tail))))))))
   end
 
   fn decode_msg(bytes : List(Int)) : Result(Delivery, String) do
@@ -71,7 +112,14 @@ mod NodeSend do
                         Cons(Msgpack.Int(cr),
                         Cons(Msgpack.Str(tt),
                         Cons(Msgpack.Bin(pl), Nil))))))) ->
-            Ok({ seq: seq, to_local_pid: lp, to_creation: cr, type_tag: tt, payload: pl })
+            Ok({ seq: seq, to_local_pid: lp, to_creation: cr, type_tag: tt, payload: pl, schema: "", from_node: "" })
+          Msgpack.Array(Cons(Msgpack.Int(9),
+                        Cons(Msgpack.Int(seq),
+                        Cons(Msgpack.Int(lp),
+                        Cons(Msgpack.Int(cr),
+                        Cons(Msgpack.Str(tt),
+                        Cons(Msgpack.Bin(pl), Cons(Msgpack.Str(sh), Nil)))))))) ->
+            Ok({ seq: seq, to_local_pid: lp, to_creation: cr, type_tag: tt, payload: pl, schema: sh, from_node: "" })
           _ -> Err("node_send: not an ACTOR_MSG frame")
         end
     end
@@ -104,11 +152,25 @@ mod NodeSend do
   -- delivery failure arrives later as a DELIVERY_FAILED frame (see
   -- `recv_failure`), not here -- the acknowledgement question the design
   -- record leaves to the flow-control item.
+  --
+  -- On a certificate-mode connection where raw sends are refused
+  -- (`NetKernel.raw_allowed`), anything but session traffic is
+  -- `Err(Refused(seq, "not authorized: ..."))`, counted, never written.
   fn cast(fd : Int, seq : Int, to : Pid, type_tag : String, payload : List(Int)) : Result((), SendError) do
-    match NetKernel.send_frame(fd, encode_msg(seq, to, type_tag, payload)) do
+    cast_schema(fd, seq, to, type_tag, "", payload)
+  end
+
+  -- `cast` with the message type's schema hash in the frame. The raw-send
+  -- check (step 11b) is here, so both spellings get it.
+  fn cast_schema(fd : Int, seq : Int, to : Pid, type_tag : String, schema : String, payload : List(Int)) : Result((), SendError) do
+    if is_session_tag(type_tag) == false && NetKernel.raw_allowed(fd) == false do
+      NetKernel.note_raw_refused(fd)
+      Err(Refused(seq, "not authorized: raw send of " ++ type_tag ++ " (certificate mode: both nodes' certificates need raw_send)"))
+    else
+    match NetKernel.send_frame(fd, encode_msg_schema(seq, to, type_tag, schema, payload)) do
       Err(_) -> Err(NoConnection)
       Ok(_) -> Ok(())
-    end
+    end end
   end
 
   -- Read frames off [fd] until one is a DELIVERY_FAILED; other frames are
@@ -196,11 +258,16 @@ mod NodeSend do
       Err(_) -> Ok(())
       Ok(d) ->
         let outcome =
-          if d.to_creation != my_creation do
+          -- Raw frames from a peer whose connection refuses them (step
+          -- 11b): dropped, counted, and answered DELIVERY_FAILED.
+          if is_session_tag(d.type_tag) == false && NetKernel.raw_allowed(reply_fd) == false do
+            NetKernel.note_raw_refused(reply_fd)
+            Err("not authorized: raw send of " ++ d.type_tag ++ " refused (certificate mode: both nodes' certificates need raw_send)")
+          else if d.to_creation != my_creation do
             Err("stale creation " ++ int_to_string(d.to_creation) ++ ", node is at " ++ int_to_string(my_creation))
           else
             dispatch(d)
-          end
+          end end
         match outcome do
           Ok(_) -> Ok(())
           Err(reason) ->

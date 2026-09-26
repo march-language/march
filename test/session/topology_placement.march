@@ -69,6 +69,8 @@ mod TopologyPlacement do
       end,
       unregister: fn nm -> Vault.drop(fk.names, nm),
       route: fn (pid, _) -> "p" ++ int_to_string(pid),
+      -- SessionNode's offers route through route_session (dd step 11b).
+      route_session: fn (pid, _) -> "s" ++ int_to_string(pid),
       unroute: fn _ -> (),
       creation: fn _ -> 1 }
   end
@@ -115,6 +117,11 @@ mod TopologyPlacement do
     end
     Topology.close_all(c)
     println("closed: n0 offers [" ++ String.join(Topology.offered(c), ", ") ++ "]")
+    -- A draining node withdraws from the ranking at once, so its count(1)
+    -- role is offered elsewhere before SWIM declares it dead.
+    println("after close_all, n0's marker still registered: "
+            ++ (if Vault.get(fk.names, Topology.marker("Echo.Server", "n0")) != None do "yes" else "no" end))
+    println("a peer sees eligible ids: [" ++ String.join(List.sort_by(Topology.marked("Echo.Server", Vault.keys(fk.names)), fn (a, b) -> a < b), ", ") ++ "]")
     -- Placement's own task is still asleep (a long tick); a fake node has
     -- no `stop`, so end the program here.
     process_exit(0)

@@ -1,0 +1,5 @@
+node-a: Audit did not form
+node-a: Ledger: session_node: accept: role Ledger.B is played by node-b: not authorized for Ledger.B
+node-a: Pair closed
+node-a: Pair got 21
+node-a: up

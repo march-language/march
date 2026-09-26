@@ -86,8 +86,10 @@ mod Topology do
   -- What an open offer needs to be supervised: the offer, and whether
   -- whatever serves its sessions is still alive (a hosted role's actor; a
   -- function role has nothing beyond the offer itself).
-  -- [capacity]: the size it was opened at (0: fixed by the build).
-  type TopoOpened = { ap : SessionNode.Offer, alive : Int -> Bool, capacity : Int }
+  -- [capacity]: the size it was opened at (0: fixed by the build). [stop]:
+  -- what ends whatever served it once its closed offer has drained (a hosted
+  -- role's actor exits then, 6.1; a function role has nothing to stop).
+  type TopoOpened = { ap : SessionNode.Offer, alive : Int -> Bool, capacity : Int, stop : Int -> () }
 
   -- One served role: its "Protocol.Role" name, its placement, its capacity,
   -- and how to open one offer of it on this node at a capacity. The
@@ -107,7 +109,7 @@ mod Topology do
     { name: name, place: place, capacity: 0,
       open: fn _ ->
         match open() do
-          Ok(o) -> Ok({ ap: o, alive: fn _ -> true, capacity: 0 })
+          Ok(o) -> Ok({ ap: o, alive: fn _ -> true, capacity: 0, stop: fn _ -> () })
           Err(e) -> Err(e)
         end }
   end
@@ -123,7 +125,7 @@ mod Topology do
     { name: name, place: place, capacity: capacity,
       open: fn cap ->
         match open(cap) do
-          Ok(o) -> Ok({ ap: o, alive: fn _ -> true, capacity: cap })
+          Ok(o) -> Ok({ ap: o, alive: fn _ -> true, capacity: cap, stop: fn _ -> () })
           Err(e) -> Err(e)
         end }
   end
@@ -134,7 +136,11 @@ mod Topology do
   to [open] (the generated `<P>_Run.offer_hosted_<R>` call whose start,
   deliver and cancel callbacks forward to it). An actor spawned for an offer
   that could not be opened is kept for the next attempt rather than spawned
-  again. Supervision re-offers the role when its actor dies.
+  again. Supervision re-offers the role when its actor dies. When the offer
+  closes (placement moved the role, its capacity changed, or its protocol
+  did: `reoffer`), the actor keeps serving the sessions it hosts and is
+  stopped once they have all ended (6.1: a protocol change spawns a new
+  hosting actor; the old one drains and exits).
   """
   fn actor_role(name : String, place : TopoPlacement, mk : () -> Pid(a),
                 open : Pid(a) -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
@@ -158,7 +164,7 @@ mod Topology do
         match open(host, cap) do
           Ok(o) ->
             Vault.drop(spare, "h")
-            Ok({ ap: o, alive: fn _ -> is_alive(host), capacity: cap })
+            Ok({ ap: o, alive: fn _ -> is_alive(host), capacity: cap, stop: fn _ -> kill(host) })
           Err(e) ->
             Vault.set(spare, "h", host)
             Err(e)
@@ -269,6 +275,17 @@ mod Topology do
     state { topology_anchor_marks : Int }
     init  { topology_anchor_marks: 0 }
     on Nop() do state end
+    -- The placement loop, restarted from here after a deploy (build step 9):
+    -- a task runs the code of the epoch it was spawned in, and this actor has
+    -- passed its marker, so the loop it spawns runs the new code -- opening
+    -- a changed protocol's offer under its new fingerprint.
+    on Respawn(node : Cap(ClusterNode.Live), st : TopoState) do
+      let _ = task_spawn(fn _ -> do
+        reoffer_with(node, st)
+        place_loop(node, st)
+      end)
+      state
+    end
   end
 
   -- Everything `place`, `drain_on_signal` and `supervise_offers` share,
@@ -338,11 +355,16 @@ mod Topology do
     sleep_ms(tick_ms())
     if Vault.get(st.meta, "closing") != None do 0
     else if Vault.get(st.meta, "stopped") != None do 0
+    -- A deploy made this loop's epoch old: hand over to a loop on the new
+    -- code (the anchor's, which has moved past its marker) and end.
+    else if epoch_draining() do
+      let _ = send(anchor(st), Respawn(node, st))
+      0
     else
       reconcile(node, st)
       write_status(node, st)
       place_loop(node, st)
-    end end
+    end end end
   end
 
   -- The other nodes eligible for [r], settled, as this node sees them.
@@ -425,6 +447,44 @@ mod Topology do
     end
   end
 
+  doc """
+  Re-open each of [node]'s open offers with the code now running
+  (distributed-deploys build step 9): an offer whose protocol fingerprint
+  changed is opened again under the new one (a hosted role with a fresh
+  actor) and the old offer is closed; its sessions finish on the old
+  version and a hosting actor exits once they have (6.1). An offer whose
+  fingerprint did not change stays as it is (the new offer's name is
+  already taken). The placement loop runs this itself after a deploy; call
+  it directly only from a test.
+  """
+  fn reoffer(node : Cap(ClusterNode.Live)) : () do reoffer_with(node, state_of(node)) end
+
+  pfn reoffer_with(node : Cap(ClusterNode.Live), st : TopoState) : () do
+    let roles = Vault.get_or(st.roles, "roles", Nil)
+    List.each(roles, fn r ->
+      match Vault.get(st.offers, r.name) do
+        None -> ()
+        Some(o) ->
+          match (r.open)(if o.capacity > 0 do o.capacity else r.capacity end) do
+            Ok(fresh) ->
+              if fresh.ap.fingerprint == o.ap.fingerprint do
+                -- Opened under another name with the same version (should not
+                -- happen: the name carries the fingerprint); keep one.
+                SessionNode.close_offer(fresh.ap)
+                (fresh.stop)(0)
+              else
+                report(r.name ++ ": protocol changed on " ++ label(node)
+                       ++ "; offering the new version and draining the old one")
+                retire(st, r.name, o)
+                Vault.set(st.offers, r.name, fresh)
+              end
+            -- Same fingerprint: this version is already offered.
+            Err(SessionNode.AlreadyOffered(_)) -> ()
+            Err(e) -> report(r.name ++ ": could not offer its new version: " ++ SessionNode.run_error_message(e))
+          end
+      end)
+  end
+
   -- Close [o] (sessions already running finish) and keep it for the drain.
   pfn retire(st : TopoState, role_name : String, o : TopoOpened) : () do
     SessionNode.close_offer(o.ap)
@@ -450,6 +510,8 @@ mod Topology do
           let n = active(o)
           let since = now - Vault.get_or(st.meta, "t:" ++ key, now)
           if n == 0 do
+            -- Drained: whatever served it (a hosting actor) is done.
+            (o.stop)(0)
             Vault.drop(st.draining, key)
             Vault.drop(st.meta, "t:" ++ key)
             Vault.drop(st.meta, "w:" ++ key)
@@ -707,6 +769,13 @@ mod Topology do
   fn close_all(node : Cap(ClusterNode.Live)) : () do
     let st = state_of(node)
     Vault.set(st.meta, "closing", 1)
+    -- Withdraw from every ranked role's rendezvous ranking first, so the
+    -- other nodes re-offer a `count = n` role now instead of after this
+    -- node's whole drain plus SWIM's suspect timeout (4.2: losing a role is
+    -- a drain, not a cut). A brief duplicate offer is tolerated (D19), and
+    -- the sessions this node is running continue.
+    List.each(Vault.get_or(st.roles, "roles", Nil), fn r ->
+      if ranked(r.place) do mark(node, st, r.name, false) else () end)
     List.each(Vault.all(st.offers), fn kv -> match kv do (name, o) -> retire(st, name, o) end)
   end
 
@@ -749,10 +818,15 @@ mod Topology do
     let spent = unix_time_ms() - t0
     if n == 0 do
       report("drained " ++ label(node))
+      -- Leave the cluster (close the links and the listener) rather than
+      -- vanish: peers see the links close instead of waiting out a suspect
+      -- timeout.
+      ClusterNode.stop(node)
       process_exit(0)
       0
     else if spent >= hard_ms do
       report("hard deadline: stopping " ++ label(node) ++ " with " ++ int_to_string(n) ++ " session(s) still running")
+      ClusterNode.stop(node)
       process_exit(1)
       1
     else

@@ -160,8 +160,26 @@ let rec collect_type_names ~prefix acc decls =
       | _ -> acc
     ) acc decls
 
+(** Record a hot-reload `<actor>_migrate_msg` for [Migrate_msg_pins]: the old
+    message type as the source spells it (the lowered parameter type is the
+    bare canonical name) and the actor message type its declared
+    `Option(<Actor>.Msg)` return lowered to. Anything else is left to the
+    typechecker's migrate-function shape check. *)
+let note_migrate_msg ~prefix (def : Ast.fn_def) (fn : Tir.fn_def) =
+  let sfx = Tir_names.migrate_msg_suffix in
+  let n = def.Ast.fn_name.txt in
+  let nl = String.length n and sl = String.length sfx in
+  if nl > sl && String.sub n (nl - sl) sl = sfx then
+    match def.Ast.fn_clauses, fn.Tir.fn_ret_ty with
+    | [ { Ast.fc_params = [ Ast.FPNamed { param_ty = Some (Ast.TyCon (written, _)); _ } ]; _ } ],
+      Tir.TCon ("Option", [ Tir.TCon (actor_msg, _) ])
+      when Tir_names.is_actor_msg_name actor_msg ->
+      Migrate_msg_pins.register ~fn_name:fn.Tir.fn_name ~prefix
+        ~written:written.txt ~actor_msg
+    | _ -> ()
+
 (** Lower a module. *)
-let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) (m : Ast.module_) : Tir.tir_module =
+let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) ?(shadow_builtins=true) (m : Ast.module_) : Tir.tir_module =
   reset_counter ();
   (* Collision-conditional qualification (Task 3 of specs/plans/2026-07-20-
      fqn-impl-dispatch-identity.md, impl symbols; extended by Task 3 of
@@ -220,7 +238,35 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   Hashtbl.reset _alias_candidates;
   Hashtbl.reset _alias_reported;
   Handler_owner.reset ();
+  Migrate_msg_pins.reset ();
   _lowered_modules := Hashtbl.create 8;
+  (* Entry-file top-level fns named like a builtin that has its own C symbol
+     get a distinct TIR name (see [Lower_state._builtin_shadows]).  Only
+     decls WRITTEN in the entry file count: [m.mod_decls] also carries the
+     prelude (unwrapped, bare names) and every stdlib module, whose bare
+     references to the name mean the builtin.  `main` maps to `march_main`
+     by design and is not a shadow.  A fn with default args is lowered as
+     `name$N` only (its bare dispatcher is never emitted), so it cannot
+     collide and is left alone. *)
+  Lower_state._entry_file := m.mod_name.span.file;
+  Lower_state._builtin_shadows := Hashtbl.create 0;
+  Lower_state._entry_builtin_shadows :=
+    (let tbl = Hashtbl.create 8 in
+     if shadow_builtins then begin
+       let entry_fns = List.filter_map (function
+           | Ast.DFn (def, sp) when sp.Ast.file = !Lower_state._entry_file ->
+             Some def.fn_name.txt
+           | _ -> None) m.mod_decls in
+       let has_defaults n =
+         List.exists (fun other -> match Tir_names.parse_default_arg other with
+             | Some (base, _) -> base = n
+             | None -> false) entry_fns in
+       List.iter (fun n ->
+           if n <> "main" && Llvm_builtins.has_c_mapping n && not (has_defaults n)
+           then Hashtbl.replace tbl n (Tir_names.builtin_shadow_name n))
+         entry_fns
+     end;
+     tbl);
   (* Pre-register every top-level DMod name from the combined module.
      This prevents _ensure_module_lowered from re-parsing a stdlib file with a
      relative path (e.g. "stdlib/yaml.march") when the type_map was built from
@@ -621,9 +667,11 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         | Ast.DMod (sub_name, _, inner_decls, _) ->
           (* Recurse, tracking the module prefix so that impl method bodies
              that call module-private functions are renamed correctly. *)
-          collect_iface_impls ~lower_bodies ~lower_generic
-            ~mod_prefix:(mod_prefix ^ sub_name.txt ^ ".")
-            inner_decls
+          Lower_state.hiding_builtin_shadows (Lower_decls.direct_def_names inner_decls)
+            (fun () ->
+               collect_iface_impls ~lower_bodies ~lower_generic
+                 ~mod_prefix:(mod_prefix ^ sub_name.txt ^ ".")
+                 inner_decls)
         | _ -> ()
       ) decls
   in
@@ -631,7 +679,15 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
      (they're already in the precompiled .so) *)
   if stdlib_context <> [] then
     collect_iface_impls ~lower_bodies:false ~lower_generic:true stdlib_context;
-  collect_iface_impls ~lower_bodies:true m.mod_decls;
+  (* One top-level decl at a time, so each is lowered in its own file's
+     builtin-shadow scope (the entry file's impls see the entry's fns named
+     like builtins; the stdlib's do not).  Equivalent to one call over the
+     whole list: at the top level ([mod_prefix = ""]) collect_iface_impls
+     keeps no state across decls. *)
+  List.iter (fun d ->
+      Lower_state.with_decl_builtin_shadows (Lower_decls.decl_span d) (fun () ->
+          collect_iface_impls ~lower_bodies:true [d]))
+    m.mod_decls;
   let all_context_decls = stdlib_context @ m.mod_decls in
   (* Build default-arg dispatch table from mangled DFn names (foo$N pattern).
      These are generated by desugar's expand_defaults_decl.
@@ -700,8 +756,10 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   (let t = Hashtbl.create (List.length entry_fn_names) in
    List.iter (fun n -> Hashtbl.replace t n ()) entry_fn_names;
    _current_module_fns := t);
-  (* Pass 2: Lower all other declarations. *)
+  (* Pass 2: Lower all other declarations, each in its own file's
+     builtin-shadow scope (see [Lower_state.with_decl_builtin_shadows]). *)
   List.iter (fun d ->
+      Lower_state.with_decl_builtin_shadows (Lower_decls.decl_span d) (fun () ->
       match d with
       | Ast.DFn (def, _) ->
         (* Skip dispatcher DFns (original-named wrappers for default-arg functions).
@@ -709,6 +767,13 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
            Dispatchers are only needed by the interpreter for VMultiarity dispatch. *)
         if not (Hashtbl.mem !_default_dispatch def.fn_name.txt) then begin
           let fn = Lower_decls.lower_fn_def env def in   (* evaluate before reading !fns *)
+          (* An entry fn named like a C-symbol builtin is defined under its
+             distinct name, the one its references were resolved to. *)
+          let fn = match Hashtbl.find_opt !Lower_state._builtin_shadows fn.fn_name with
+            | Some renamed -> { fn with fn_name = renamed }
+            | None -> fn
+          in
+          note_migrate_msg ~prefix:"" def fn;
           fns := fn :: !fns
         end
       | Ast.DType (_, name, params, td, _)
@@ -776,12 +841,16 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           let scopes = (prefix, direct_fn_names) :: enclosing in
           with_current_module_fns direct_fn_names (fun () ->
           Lower_state.with_enclosing_module_fns (Lower_decls.scoped_names enclosing) (fun () ->
+          (* This module's own fns shadow an entry fn of the same name. *)
+          Lower_state.hiding_builtin_shadows direct_fn_names (fun () ->
           List.iter (fun d ->
               match d with
               | Ast.DFn (def, _) ->
                 let fn = Lower_decls.lower_fn_def mod_env def in
                 let fn = Lower_decls.rename_scoped_vars scopes fn in
-                fns := { fn with fn_name = prefix ^ fn.fn_name } :: !fns
+                let fn = { fn with fn_name = prefix ^ fn.fn_name } in
+                note_migrate_msg ~prefix def fn;
+                fns := fn :: !fns
               | Ast.DType (_, tname, params, td, _)
               | Ast.DAlwaysLinearType (_, tname, params, td, _) ->
                 let qtname = { tname with txt = prefix ^ tname.txt } in
@@ -906,7 +975,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    extern-lowering logic. *)
                 externs := List.rev_append (Lower_decls.lower_extern_fns edef edef.ext_fns) !externs
               | _ -> ()
-            ) decls));
+            ) decls)));
           (* Save this module's aliases so the later test/setup lowering pass
              (collect_tests) can re-load them for DTest bodies. *)
           Hashtbl.replace !_module_alias_snapshots prefix
@@ -999,7 +1068,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
            String.concat "." (List.map (fun n -> n.Ast.txt) ad.alias_path) in
          if not (Hashtbl.mem !_module_aliases short_name) then
            Hashtbl.replace !_module_aliases short_name full_path)
-      | Ast.DDescribe _ | Ast.DOpts _ -> ()
+      | Ast.DDescribe _ | Ast.DOpts _ -> ())
     ) m.mod_decls;
   (* --- Test mode: collect DTest/DSetup/DSetupAll/DDescribe blocks and lower
      them to TIR functions so they can be compiled into a test-runner binary.
@@ -1008,7 +1077,10 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
      extraction rationale). *)
   let test_pairs = ref [] in   (* (fn_name, display_name) in declaration order *)
   if test_mode then
-    Lower_tests.run env fns test_pairs m.mod_decls;
+    (* Test bodies are written in the entry file; [Lower_tests] narrows the
+       builtin-shadow scope per module it descends into. *)
+    Lower_state.with_builtin_shadows !Lower_state._entry_builtin_shadows (fun () ->
+        Lower_tests.run env fns test_pairs m.mod_decls);
   (* Inject top-level let bindings into function bodies that reference them.
      We scan each fn_body for direct variable references to decide which
      top_lets to inject.  This avoids duplicate alloca names in mutco
@@ -1082,6 +1154,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     tm_exports = [];
     tm_tests = List.rev !test_pairs;
     tm_io_fns = [] } in
+  (* Every type declaration is known now: bind each `*_migrate_msg`'s old
+     message type to its declaration (see [Migrate_msg_pins]). *)
+  Migrate_msg_pins.resolve result.Tir.tm_types;
   (* [env]'s [type_map] and [current_module_aliases] fields are local
      bindings, not refs — they are simply dropped when [lower_module]
      returns, with no explicit reset needed (was [_type_map_ref := None];

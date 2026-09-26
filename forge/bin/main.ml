@@ -18,7 +18,7 @@ let known_builtin_names =
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
     "licenses"; "tree"; "outdated"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "audit"; "ffi"; "fix"; "help";
-    "completions"; "deploy"; "hot-reload"; "topology"; "cluster" ]
+    "completions"; "deploy"; "hot-reload"; "topology"; "cluster"; "host" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
    Archive tasks look like "bastion.new" — dotted namespaces not used by any
@@ -1308,8 +1308,58 @@ let deploy_hot_cmd =
            ~doc:"Build and hot-deploy changed functions to a running server (or fleet)")
   Term.(const run $ output $ so $ target $ module_prefix $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate)
 
+let deploy_term =
+  let env_arg =
+    Arg.(value & opt (some string) None & info ["env"] ~docv:"NAME"
+           ~doc:"The environment: the $(b,topology.NAME.toml) overlay, whose $(b,[backend] kind = \"ssh\") \
+                 hosts are deployed to.")
+  in
+  let plan =
+    Arg.(value & flag & info ["plan"]
+           ~doc:"Print what the deploy would do, per pool and build (what changed, the mechanism and why, \
+                 order and splits, drains, what may be lost, authority and derived values), and change nothing.")
+  in
+  let grant_cap =
+    Arg.(value & opt_all string [] & info ["grant-cap"] ~docv:"CAP"
+           ~doc:"Authorize a capability widening (repeatable), as for $(b,forge deploy hot).")
+  in
+  let yes = Arg.(value & flag & info ["yes"; "y"] ~doc:"Deploy without asking for confirmation.") in
+  let canary =
+    Arg.(value & opt int 0 & info ["canary"] ~docv:"N"
+           ~doc:"Hot-patched pools: patch N hosts first, watch them answer PING for $(b,--timeout), then the rest.")
+  in
+  let timeout =
+    Arg.(value & opt int 30000 & info ["timeout"] ~docv:"MS" ~doc:"The canary window in milliseconds (default: 30000).")
+  in
+  let compact =
+    Arg.(value & flag & info ["compact"]
+           ~doc:"Rebuild each build's base image from the current version and restart its hosts onto it, \
+                 clearing their persisted patch stacks (also automatic when a node's stack is longer than \
+                 forge.toml's [hot-reload] compact_after).")
+  in
+  let run env plan grant_caps yes canary timeout compact =
+    match Project.load () with
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+    | Ok proj ->
+      if plan then
+        match Cmd_deploy.plan_only ~proj ~env ~grant_caps ~compact () with
+        | Ok text -> print_string text
+        | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+      else
+        let opts = { Cmd_deploy.default_opts with yes; grant_caps; canary; timeout_ms = timeout; compact } in
+        match Cmd_deploy.run ~proj ~env ~opts () with
+        | Ok msg -> print_endline msg
+        | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Term.(const run $ env_arg $ plan $ grant_cap $ yes $ canary $ timeout $ compact)
+
 let deploy_cmd =
-  Cmd.group (Cmd.info "deploy" ~doc:"Deploy project to a target environment")
+  Cmd.group ~default:deploy_term
+    (Cmd.info "deploy"
+       ~doc:"Deploy a topology app to an environment's ssh hosts, choosing per pool between a hot \
+             patch, a hot patch with migration or a protocol drain, a restart, and a topology push \
+             ($(b,--plan) shows the choice); or, with $(b,hot), hot-deploy changed functions to a \
+             [hot-reload] server or fleet")
     [deploy_hot_cmd]
 
 (* -------------------------------------------------------- forge hot-reload *)
@@ -1557,19 +1607,22 @@ let topology_gen_cmd =
     Term.(const run $ topology_env $ target $ out)
 
 let topology_status_cmd =
-  let run () =
+  let run env =
     match Project.load () with
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
     | Ok proj ->
-      match Reconcile.local_backend ~root:proj.Project.root with
+      match Reconcile.status_text ?env ~root:proj.Project.root () with
       | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
-      | Ok (b, _) -> print_string (Reconcile.render_status (b.Reconcile.status ()))
+      | Ok text -> print_string text
   in
   Cmd.v (Cmd.info "status"
-           ~doc:"Report each node of the running local cluster ($(b,forge run --processes)): \
-                 alive, the topology it applied, the offers it holds, and, for a hot-reload \
-                 build, its code versions and epoch pins")
-    Term.(const run $ const ())
+           ~doc:"Report each node: alive, the topology it applied, the offers it holds, and, \
+                 for a hot-reload build, its code versions, epoch pins, restored patch stack \
+                 and its size. Over the local backend (a running $(b,forge run --processes)), \
+                 or, when the $(b,--env) overlay says $(b,[backend] kind = \"ssh\"), over ssh, \
+                 where each node's running code is also checked against what forge last \
+                 deployed there.")
+    Term.(const run $ topology_env)
 
 let topology_apply_cmd =
   let run env =
@@ -1596,6 +1649,46 @@ let topology_cmd =
                ~doc:"The topology file: check, export as JSON, generate deployment files, \
                      status of the running cluster")
     [topology_check_cmd; topology_export_cmd; topology_gen_cmd; topology_status_cmd; topology_apply_cmd]
+
+(* -------------------------------------------------------------- forge host *)
+
+let host_init_cmd =
+  let operator_key =
+    Arg.(value & opt (some string) None & info ["operator-key"] ~docv:"PATH"
+           ~doc:"The operator key (`forge cluster keygen`) that signs each node's certificate. \
+                 Default: .forge/cluster/operator.key when it exists; without one the hosts get \
+                 a shared cluster secret instead.")
+  in
+  let trust_domain =
+    Arg.(value & opt string "cluster.local" & info ["trust-domain"] ~docv:"DOMAIN"
+           ~doc:"Trust domain of the node certificates (certificate mode).")
+  in
+  let no_firewall =
+    Arg.(value & flag & info ["no-firewall"]
+           ~doc:"Write each host's ufw rules but do not apply them.")
+  in
+  let run env operator_key trust_domain no_firewall =
+    match Project.load () with
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+    | Ok proj ->
+      let opts = { (Host_init.default_opts env) with
+                   Host_init.operator_key; trust_domain; firewall = not no_firewall } in
+      match Host_init.run ~proj ~opts () with
+      | Ok report -> print_string report
+      | Error m -> Printf.eprintf "%s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "init"
+           ~doc:"Prepare every host of an ssh topology ($(b,[backend] kind = \"ssh\") in the \
+                 $(b,--env) overlay) once, over ssh: the march user and directories, the pool's \
+                 systemd unit with this host's environment, the deploy public key, the cluster \
+                 secret or node certificate, the node's capability policy, firewall rules and \
+                 the topology. Idempotent: a second run changes nothing. Records each host's \
+                 target in .forge/hosts/<env>.json for $(b,forge deploy).")
+    Term.(const run $ topology_env $ operator_key $ trust_domain $ no_firewall)
+
+let host_cmd =
+  Cmd.group (Cmd.info "host" ~doc:"Hosts of an ssh topology: one-time setup")
+    [host_init_cmd]
 
 let completions_cmd =
   let shell =
@@ -1683,7 +1776,7 @@ let () =
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
       licenses_cmd; tree_cmd; outdated_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
-      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; topology_cmd; cluster_cmd; completions_cmd; help_cmd ]
+      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; topology_cmd; cluster_cmd; host_cmd; completions_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term

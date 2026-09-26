@@ -1,0 +1,207 @@
+-- Scenario "protocol_evolve", node-a, version 1 (node_a_v2.march is the hot
+-- patch): offers role Shop of `Order`, the CHOOSER of `choose by Shop`, from
+-- the hosting actor ShopHost. A deploy reloads the actor's handler (its text
+-- differs between the versions: `note(1)` / `note(2)`), and the handler runs
+-- the new code from then on, re-offering Shop under the new fingerprint.
+-- `main` only ticks it: entry-module functions and closures are not on the
+-- hot-reload boundary, actor handlers are. See scenario.sh.
+mod ProtocolEvolveA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Order do
+    loop do
+      item: Buyer -> Shop : Int
+      choose by Shop:
+        more -> Shop -> Buyer : Int
+        done -> Shop -> Buyer : Int
+                stop
+      end
+    end
+  end
+
+  fn version() : Int do 1 end
+
+  -- ── the Shop (node-a): the chooser ────────────────────────────────────
+
+  fn shop(s : Cap(Session.Live), st : Order_Shop.Entry) : Order_Shop.Yield do
+    Order_Shop.recv_Item(s, st, fn (n, st1) ->
+      sleep_ms(100)
+      if n >= 4 do Order_Shop.close(s, Order_Shop.choose_done(s, st1, version()))
+      else shop(s, Order_Shop.choose_more(s, st1, version())) end)
+  end
+
+  pfn offers() : Vault(SessionNode.Offer) do
+    match Vault.whereis("evolve_offers") do
+      Some(v) -> v
+      None -> Vault.new("evolve_offers")
+    end
+  end
+
+  -- The Shop's access point, kept on the running code's protocol version: a
+  -- tick of the hosting actor after a deploy runs the new code (the actor
+  -- moved to the new epoch at its marker), which opens the new version's
+  -- offer and closes the old one; the old offer's sessions finish on the old
+  -- code (plan 6.1).
+  fn host_tick(c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
+    let v = offers()
+    let fp = Order_Msg.fingerprint()
+    match Vault.get(v, "cur") do
+      Some(o) ->
+        if o.fingerprint == fp do ()
+        else
+          match Order_Run.offer_Shop(c, h, 64, fn (s, st) -> shop(s, st)) do
+            Ok(o2) ->
+              Vault.set(v, "cur", o2)
+              SessionNode.close_offer(o)
+              println("node-a: Shop re-offered under version " ++ int_to_string(version()) ++ "; the old offer drains")
+            Err(e) -> println("node-a: could not re-offer: " ++ SessionNode.run_error_message(e))
+          end
+        end
+      None ->
+        match Order_Run.offer_Shop(c, h, 64, fn (s, st) -> shop(s, st)) do
+          Ok(o) -> Vault.set(v, "cur", o)
+          Err(e) -> panic(SessionNode.run_error_message(e))
+        end
+    end
+  end
+
+  fn note(_v : Int) : () do () end
+
+  type ShopHostState = { ticks : Int }
+
+  actor ShopHost do
+    state { ticks : Int }
+    init  { ticks: 0 }
+    on Tick(c : Cap(IO), h : Cap(ClusterNode.Live)) do
+      -- The version literal makes this handler differ between the two
+      -- builds, so the deploy activates it.
+      note(1)
+      host_tick(c, h)
+      { ticks: state.ticks + 1 }
+    end
+  end
+
+  fn start_host() : Pid(ShopHostState) do spawn(ShopHost) end
+  fn tick(a : Pid(ShopHostState), c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
+    let _ = send(a, Tick(c, h))
+    ()
+  end
+
+  -- ── the Buyer (node-b): a receiver ────────────────────────────────────
+
+  pfn tally() : Vault(Int) do
+    match Vault.whereis("evolve_tally") do
+      Some(t) -> t
+      None -> Vault.new("evolve_tally")
+    end
+  end
+
+  fn count(key : String, k : Int) : () do
+    let _ = Vault.incr(tally(), key, k)
+    ()
+  end
+
+  fn buyer(s : Cap(Session.Live), st : Order_Buyer.Entry, n : Int) : Order_Buyer.Yield do
+    let st1 = Order_Buyer.send_Item(s, st, n)
+    Order_Buyer.offer_more_done(s, st1,
+      fn (_v, st2) -> buyer(s, st2, n + 1),
+      fn (v, st2) ->
+        count("pair:" ++ int_to_string(version()) ++ "/" ++ int_to_string(v), 1)
+        Order_Buyer.close(s, st2))
+  end
+
+  -- One session, its outcome counted: Finished, Drained (D27: ended at a
+  -- loop boundary while an epoch drained; its returned messages counted),
+  -- refused at formation, or failed -- the last is a LOST session.
+  fn session(c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
+    count("started", 1)
+    match Order_Run.initiate_Buyer(c, h, fn (s, st) -> buyer(s, st, 1)) do
+      Ok(Session.Finished) -> count("finished", 1)
+      Ok(Session.Drained(k)) ->
+        count("drained", 1)
+        count("returned", k)
+      Err(SessionNode.NoOffer(_, why)) ->
+        count("refused", 1)
+        println("node-b: refused at formation: " ++ why)
+      Err(e) ->
+        count("failed", 1)
+        println("node-b: session failed: " ++ Order_Run.error_message(e))
+    end
+    count("ended", 1)
+  end
+
+  type DriverState = { started : Int }
+
+  actor Driver do
+    state { started : Int }
+    init  { started: 0 }
+    on Go(c : Cap(IO), h : Cap(ClusterNode.Live)) do
+      note(1)
+      let _ = task_spawn(fn _ -> do
+        session(c, h)
+        0
+      end)
+      { started: state.started + 1 }
+    end
+  end
+
+  fn start_driver() : Pid(DriverState) do spawn(Driver) end
+  fn go(d : Pid(DriverState), c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
+    let _ = send(d, Go(c, h))
+    ()
+  end
+
+  fn settled() : Bool do
+    let t = tally()
+    Vault.get_or(t, "ended", 0) >= Vault.get_or(t, "started", 0)
+  end
+
+  pfn seen(key : String) : String do
+    if Vault.get_or(tally(), key, 0) > 0 do "seen" else "NOT seen" end
+  end
+
+  fn summary() : () do
+    let t = tally()
+    println("node-b: sessions lost: " ++ int_to_string(Vault.get_or(t, "failed", 0)))
+    println("node-b: sessions refused at formation: " ++ int_to_string(Vault.get_or(t, "refused", 0)))
+    println("node-b: every session Finished or Drained: "
+      ++ bool_to_string(Vault.get_or(t, "finished", 0) + Vault.get_or(t, "drained", 0) == Vault.get_or(t, "started", 0)))
+    println("node-b: v1 Buyer with a v1 Shop: " ++ seen("pair:1/1"))
+    println("node-b: v2 Buyer with a v1 Shop: " ++ seen("pair:2/1"))
+    println("node-b: v2 Buyer with a v2 Shop: " ++ seen("pair:2/2"))
+    println("node-b: v1 Buyer with a v2 Shop: " ++ seen("pair:1/2"))
+    println("node-b: later from a v2 Shop: " ++ seen("later:2"))
+    println("node-b: later from a v1 Shop: " ++ seen("later:1"))
+  end
+
+  pfn run(host : Pid(ShopHostState), c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
+    tick(host, c, h)
+    sleep_ms(200)
+    run(host, c, h)
+  end
+
+  fn main(c : Cap(IO)) do
+    -- A 15 s suspect timeout, not the default 3 s: node-a stalls while its
+    -- deploy is verified and activated, and on a slow CI runner node-b
+    -- declared it dead mid-deploy, cancelling the sessions in flight.
+    let cfg = { ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "evolve-secret", 1) with swim: Swim.config(500, 15000, 2) }
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let host = start_host()
+        tick(host, c, h)
+        sleep_ms(300)
+        println("node-a: offering")
+        run(host, c, h)
+    end
+  end
+end

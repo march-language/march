@@ -217,7 +217,7 @@ static void test_hcr_info(void) {
     int n = read_resp(fd, resp, sizeof(resp));
     CHECK(n > 0 && strncmp(resp, "HCR_INFO target:", 16) == 0,
           "HCR_INFO returns identity");
-    CHECK(strstr(resp, " abi:march-hcr-v2;triple:") == NULL,
+    CHECK(strstr(resp, " abi:march-hcr-v3;triple:") == NULL,
           "HCR_INFO uses abi field");
     CHECK(strstr(resp, " prefix:") != NULL && strstr(resp, " key:") != NULL,
           "HCR_INFO includes prefix and key");

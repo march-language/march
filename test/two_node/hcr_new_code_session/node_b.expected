@@ -1,0 +1,8 @@
+node-b: driving
+node-b: every session Finished or Drained: true
+node-b: sessions lost: 0
+node-b: sessions refused at formation: 0
+node-b: v1 Buyer with a v1 Shop: seen
+node-b: v1 Buyer with a v2 Shop: NOT seen
+node-b: v2 Buyer with a v1 Shop: seen
+node-b: v2 Buyer with a v2 Shop: seen

@@ -249,7 +249,7 @@ let start_processes ?env ?(hot_reload = false) ?pubkey ?(extra_env = []) ?log
         Printf.printf "forge run: starting %s (pool %s, port %d)\n%!" s.s_name s.s_pool port;
         let p = Procs.spawn ~name:s.s_name ~env ~argv:(Array.of_list (binary :: args)) ~log in
         (p, { Reconcile.name = s.s_name; pool = s.s_pool; pid = Procs.pid p; port; socket;
-              labels = s.s_labels; status_path; log = Procs.log_path p }))
+              labels = s.s_labels; status_path; log = Procs.log_path p; host = "" }))
       (slot_envs ~secret slots ports)
   in
   let state = { Reconcile.forge_pid = Unix.getpid (); env; started_at = Unix.gettimeofday ();

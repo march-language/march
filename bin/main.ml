@@ -840,8 +840,22 @@ let print_refine_postconditions ~filename ~user_files desugared =
     if results = [] then Printf.printf "no postcondition suggestions\n"
   end
 
+(* The entry file's nested modules, when the boundary prefix names the entry
+   module itself (what forge passes: `--hot-reload <EntryModule>`).  Lowering
+   strips the entry module's name from every declaration in that file, so a
+   nested `mod Serve` is named `Serve.serve_one`, never
+   `<Entry>.Serve.serve_one`, and `is_reloadable` alone would leave every
+   nested module of the entry file OFF the boundary: in a single-file
+   topology app only actor handlers (included unconditionally in
+   llvm_toplevel's hr_names) could be hot-deployed, and a role body could
+   not.  Filled after the entry file is parsed; carried as the config's
+   `includes`. *)
+let hr_entry_nested : string list ref = ref []
 let hr_config () =
-  Option.map March_tir.Hot_reload.default_config !hot_reload_prefix
+  Option.map (fun p ->
+      let cfg = March_tir.Hot_reload.default_config p in
+      { cfg with March_tir.Hot_reload.includes = !hr_entry_nested })
+    !hot_reload_prefix
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
 let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []
 (* The sanitizer MARCH_SANITIZE selects, or [None] when it is unset.
@@ -1015,7 +1029,12 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
            gate's own driver test went silent on a warm CAS). *)
         @ (if !stdlib_source then ["stdlib-source"] else [])
         @ cross_sysroot_tag
-        @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])) in
+        @ (if !signing_pubkey <> "" then ["spk:" ^ !signing_pubkey] else [])
+        (* --protocol-baseline: the previous protocol versions decide the
+           generated `<P>_Msg.compat()` table, so they are part of the binary. *)
+        @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])
+        @ List.map (fun (p, l) -> "pexpand:" ^ p ^ ":" ^ l)
+            (List.sort compare !March_desugar.Desugar_endpoints.expand_labels)) in
   let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
   (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" <> None then
      Printf.eprintf "MARCH_CASFLAGS: target=%s flags=[%s] ch=%s\n%!"
@@ -1640,6 +1659,69 @@ let contract_attr_fix ~src ~filename ~read_file
         text = attr ^ " " }
   | _ -> above (String.make (max 0 col) ' ')
 
+(** Protocol evolution inputs (build step 9), read before anything is
+    desugared: every `--protocol-baseline` file, registered under its
+    protocol's name for [Desugar_endpoints.expand] (and digested for the CAS
+    key), and, from the `--topology` digest, the protocols the app's topology
+    uses, whose unlabelled steps are warnings (D25).  A digest that does not
+    read is left for the `--topology` handling below to report. *)
+let load_protocol_inputs () =
+  let module E = March_desugar.Desugar_endpoints in
+  let contents =
+    List.map (fun path ->
+        let text =
+          try read_file path
+          with Sys_error m -> Printf.eprintf "error: --protocol-baseline: %s\n" m; exit 1
+        in
+        (match E.baseline_of_string text with
+         | Ok b -> Hashtbl.replace E.baselines b.E.current.E.v_proto b
+         | Error m -> Printf.eprintf "error: --protocol-baseline %s: %s\n" path m; exit 1);
+        text)
+      (List.rev !protocol_baselines)
+  in
+  if contents <> [] then
+    protocol_baseline_tag :=
+      Some (Digest.to_hex (Digest.string (String.concat "\000" (List.sort String.compare contents))));
+  match !topology_file with
+  | None -> ()
+  | Some path ->
+    (match March_forge.Topology.read_digest path with
+     | Error _ -> ()
+     | Ok t -> E.topology_protocols := March_forge.Topology.protocols_used t)
+
+(** --emit-protocols: write each expanded protocol's next baseline. *)
+let emit_protocols () =
+  match !emit_protocols_dir with
+  | None -> ()
+  | Some dir ->
+    let module E = March_desugar.Desugar_endpoints in
+    let rec mkdir_p d =
+      if d <> "" && d <> "." && d <> "/" && not (Sys.file_exists d) then begin
+        mkdir_p (Filename.dirname d);
+        (try Sys.mkdir d 0o755 with Sys_error _ -> ())
+      end
+    in
+    mkdir_p dir;
+    let in_stdlib file =
+      let n = String.length file in
+      let rec has i = i + 7 <= n && (String.sub file i 7 = "stdlib/" || has (i + 1)) in
+      has 0
+    in
+    Hashtbl.iter (fun name (v, file) ->
+        if not (in_stdlib file) then begin
+        let path = Filename.concat dir (name ^ ".json") in
+        let body = E.emit_file v in
+        let unchanged = try read_file path = body with Sys_error _ -> false in
+        if not unchanged then begin
+          let tmp = path ^ ".tmp" in
+          let oc = open_out_bin tmp in
+          output_string oc body;
+          close_out oc;
+          Sys.rename tmp path
+        end
+        end)
+      E.emitted
+
 let compile filename =
   (* Enable backtraces so an internal-error report (below) is actionable
      even without OCAMLRUNPARAM=b. *)
@@ -1651,6 +1733,7 @@ let compile filename =
       Printf.eprintf "march: %s\n" msg;
       exit 1
   in
+  load_protocol_inputs ();
   (* --fmt: format the source file before compiling *)
   if !do_fmt then begin
     let changed, formatted = fmt_file filename in
@@ -1676,6 +1759,10 @@ let compile filename =
          `check` artifact skips entirely: CI saw an empty report after an
          earlier plain --check of the same source (PR #596). *)
       || !dump_role_authority
+      (* --emit-protocols writes a file from the desugared protocols; a warm
+         artifact would exit before any protocol is expanded and the baseline
+         would silently stop following the source. *)
+      || !emit_protocols_dir <> None
     then None
     else if not !do_compile && not !do_check then None
     else try
@@ -1763,7 +1850,12 @@ let compile filename =
         in
         (match March_cas.Cas.lookup_artifact store ch with
          | Some cached_bin
-           when March_cas.Cas.copy_artifact ~src:cached_bin ~dest:out_bin ->
+           when (not !compile_so || March_cas.Cas.restore_sidecars store ch out_bin)
+                && March_cas.Cas.copy_artifact ~src:cached_bin ~dest:out_bin ->
+           (* A --compile-so build's output includes its sidecars
+              (.hcr_manifest, .schemas.json): restored with the .so, or the
+              hit is a miss. This early exit skips the code that writes
+              them. *)
            Printf.eprintf "compiled %s (cached)\n" out_bin;
            exit 0
          (* Stale/missing artifact or failed copy → recompile *)
@@ -1856,6 +1948,24 @@ let compile filename =
   stamp "desugar";
   (* Capture user AST before stdlib injection — used by -dump-phases *)
   let user_ast = desugared in
+  (* From the PARSED entry module, not the desugared one: desugaring adds the
+     modules `@[endpoints]` / `@[remote]` generate (`Order_Buyer`, `Order_Run`,
+     `Order_Msg`, ...) as nested modules too, and those must stay OFF the
+     boundary -- a session must finish on the protocol code it formed under
+     (D27), and a protocol change ships as a new offer, never as a swap of
+     the running endpoint code (test/two_node/protocol_evolve panicked with a
+     non-exhaustive match when they were swapped). *)
+  (match !hot_reload_prefix with
+   | Some p when String.equal p module_ast.March_ast.Ast.mod_name.txt ->
+     let rec nested prefix decls =
+       List.concat_map (function
+           | March_ast.Ast.DMod (n, _, ds, _) ->
+             let full = if prefix = "" then n.txt else prefix ^ "." ^ n.txt in
+             full :: nested full ds
+           | _ -> [])
+         decls in
+     hr_entry_nested := nested "" module_ast.March_ast.Ast.mod_decls
+   | _ -> ());
   (* Resolve cross-file imports: find imported .march files, parse and inject *)
   let (resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
   List.iter (fun (_mod_name, span, msg) ->
@@ -2239,6 +2349,7 @@ let compile filename =
   in
   (* In compile mode, abort on user-file errors only.  Stdlib errors
      (e.g. http_client) are tolerated since those modules are WIP. *)
+  if not frontend_rejected then emit_protocols ();
   if frontend_rejected then exit 1
   (* --check: stop after typecheck.  Diagnostics above already printed; we just
      exit 0 so tooling (forge build / forge check) can treat a clean typecheck
@@ -2470,6 +2581,12 @@ let compile filename =
               | None -> before
               | Some i -> String.sub before (i + 1) (String.length before - i - 1) in
             let actor = String.capitalize_ascii last in
+            (* Lowering bound the old type to its declaration
+               (Migrate_msg_pins); the parameter's own type is the bare
+               canonical name, ambiguous once two actors migrate. *)
+            match March_tir.Migrate_msg_pins.old_type_of_fn name with
+            | Some decl -> Option.map (fun c -> (actor, c)) (variant_ctors decl)
+            | None ->
             match fn.March_tir.Tir.fn_params with
             | [ p ] ->
               (match p.March_tir.Tir.v_ty with
@@ -3032,6 +3149,72 @@ let compile filename =
             end
           ) pre_fns
         in
+        (* A boundary function's slot identity folds in the bare-named
+           helpers only it reaches (2026-09-25).  Lowering lifts every lambda
+           a function builds into a separate bare-named function
+           (`$lam<n>$apply$<k>`, `<name>$apply$<k>`, join points), and the
+           per-function hash above is deliberately non-transitive, so a change
+           INSIDE a lambda -- which is where every session body lives -- left
+           the boundary function's hash untouched and `forge deploy hot`
+           answered "no changes" for it.  Bare names (module "") are never
+           slots themselves (only `<Actor>_dispatch` is, and it is excluded
+           below), so the only way a change to one reaches a running program
+           is through the activation of the boundary function that calls it:
+           fold their hashes in, transitively, stopping at other slots and at
+           cycles.  Stdlib and other qualified callees stay unfolded (a leaf
+           change must not flag the whole caller chain, see above).  Each root
+           is folded with its own visited set, so the result does not depend
+           on the order roots are processed. *)
+        (match hr_config () with
+         | None -> ()
+         | Some cfg ->
+           let fn_tbl = Hashtbl.create 1024 in
+           List.iter (fun (fd : March_tir.Tir.fn_def) -> Hashtbl.replace fn_tbl fd.March_tir.Tir.fn_name fd) tir.March_tir.Tir.tm_fns;
+           let all_names = Hashtbl.fold (fun n _ acc -> n :: acc) fn_tbl [] in
+           let is_slot n =
+             March_tir.Tir_names.is_actor_dispatch_fn n
+             || March_tir.Hot_reload.is_reloadable cfg (March_tir.Hot_reload.module_of_name n) in
+           let is_entry n =
+             String.equal n "main"
+             || (String.length n > 5 && String.equal (String.sub n (String.length n - 5) 5) ".main") in
+           (* A folded helper's hash must not see its NAME or the names of
+              the other lifted helpers it calls: those come from global
+              counters (`$lam39788$apply$4781`, `$jp17442`), so any edit
+              anywhere renumbers them, and hashing them flagged every stdlib
+              actor (ClusterNodeActor_dispatch, the SWIM driver, among them)
+              as changed on every deploy.  Hash the pretty-printed body with
+              each counter suffix after a `$`, and the inliner's `_i<n>`
+              renaming suffix, replaced by `#`: a renumbering is invisible, a
+              real change (a literal, a call, a type) is not. *)
+           let counter_re = Str.regexp "\\$\\([A-Za-z_]*\\)[0-9]+" in
+           let inline_re = Str.regexp "_i[0-9]+" in   (* the inliner's renaming suffix *)
+           let canon_text fd =
+             Str.global_replace inline_re "_i#"
+               (Str.global_replace counter_re "$\\1#" (March_tir.Pp.string_of_fn_def fd)) in
+           let canon fd = March_cas.Blake3.hash_string (canon_text fd) in
+           let rec fold_deps visiting fd =
+             March_cas.Scc.deps_of all_names fd
+             |> List.filter (fun c ->
+                  not (List.mem c visiting)
+                  && String.equal (March_tir.Hot_reload.module_of_name c) ""
+                  && not (is_slot c))
+             |> List.filter_map (fun c ->
+                  match Hashtbl.find_opt fn_tbl c with
+                  | Some cfd ->
+                    let sub = fold_deps (c :: visiting) cfd in
+                    Some (March_cas.Blake3.hash_string (String.concat "" (canon cfd :: sub)))
+                  | None -> None)
+             |> List.sort String.compare in
+           let roots = List.filter (fun n -> is_slot n && not (is_entry n)) all_names in
+           List.iter (fun n ->
+               match Hashtbl.find_opt fn_tbl n, Hashtbl.find_opt hr_impl_hashes n with
+               | Some fd, Some base ->
+                 (match fold_deps [ n ] fd with
+                  | [] -> ()
+                  | dh -> Hashtbl.replace hr_impl_hashes n
+                            (March_cas.Blake3.hash_string (String.concat "" (base :: dh))))
+               | _ -> ())
+             roots);
         (* Post-TIR cache: same key construction as the source-level early
            check above (build_cas_key), keyed on the module's per-SCC impl
            hashes instead of the source digest. *)
@@ -3287,10 +3470,25 @@ let compile filename =
               else "" in
             let so_flag =
               if !compile_so then
-                (* Linux: allow undefined symbols resolved from the server binary at dlopen time.
-                   macOS: clang uses -undefined dynamic_lookup for the same effect. *)
+                (* A patch .so carries NO runtime (see patch_inputs below):
+                   every march_* symbol it references stays undefined and
+                   binds at dlopen time to the host process, whose baseline
+                   was linked with -export_dynamic/--export-dynamic above.
+                   Linux (GNU ld/lld): a -shared link leaves undefined symbols
+                   undefined by default; --allow-shlib-undefined only covers
+                   the shared libraries on the link line.  macOS (ld64) needs
+                   -undefined dynamic_lookup or the link fails.
+                   -Bsymbolic (Linux): the patch's references to its OWN
+                   default-visible symbols (the exported boundary functions,
+                   e.g. the direct fallback a dispatched call site keeps for
+                   the table-not-ready window) bind inside the patch at link
+                   time instead of through the global scope, where the
+                   baseline's same-named v1 would win.  This replaces the
+                   RTLD_DEEPBIND the reload server used to dlopen with, which
+                   AddressSanitizer refuses; macOS's two-level namespace
+                   binds intra-image references the same way by default. *)
                 let undef = if link_is_linux
-                            then " -Wl,--allow-shlib-undefined"
+                            then " -Wl,--allow-shlib-undefined -Wl,-Bsymbolic"
                             else " -undefined dynamic_lookup" in
                 " -shared -fPIC" ^ undef
               else "" in
@@ -3534,13 +3732,13 @@ let compile filename =
                correct DT_NEEDED soname.  zstd/brotli stay off for cross (zlib is
                the only mandatory codec; gzip/deflate is pure zlib). *)
             let openssl_flags2 = match cross_sysroot with
-              | None -> if is_cross && !compile_so then "" else openssl_flags2
+              | None -> if !compile_so then "" else openssl_flags2
               | Some sr ->
                 Printf.sprintf " -I%s/include %s/lib/libssl.so.3 %s/lib/libcrypto.so.3"
                   sr sr sr
             in
             let compress_flags2 = match cross_sysroot with
-              | None -> if is_cross && !compile_so then "" else compress_flags2
+              | None -> if !compile_so then "" else compress_flags2
               | Some sr ->
                 Printf.sprintf " -I%s/include %s/lib/libz.so.1" sr sr
             in
@@ -3551,20 +3749,33 @@ let compile filename =
                 " -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2"
                 ^ " -DBLAKE3_NO_AVX512 -DBLAKE3_USE_NEON=0"
               else "" in
-            let extra_c_files =
-              if not is_cross || not !compile_so then extra_c_files
-              else
-                (* A patch keeps the undefined-symbol model: optional host
-                   libraries and the HCR server are supplied by the baseline,
-                   so do not compile their target-specific implementations. *)
-                let dropped = ["march_blake3.c"; "blake3.c"; "blake3_dispatch.c";
-                               "blake3_portable.c"; "march_reload.c";
-                               "march_tls.c"; "march_compress.c"] in
-                extra_c_files
-                |> String.split_on_char ' '
-                |> List.filter (fun p ->
-                     p = "" || not (List.mem (Filename.basename p) dropped))
-                |> String.concat " " in
+            (* A hot-reload patch (--compile-so) links NONE of the runtime and
+               none of the user's FFI shims: only its own generated IR plus
+               march_hcr_identity.c, the three constant strings the reload
+               server reads with dlsym(handle, ...) to preflight the patch's
+               target identity (dlsym on a handle does not search the host
+               executable, so the patch must carry them itself).
+
+               Before this rule a patch carried a full second copy of the C
+               runtime (everything but march_dispatch.c/march_reload.c), so
+               code the patch ran used a second scheduler table, a second
+               vault registry and every other runtime file-static: the first
+               task a new-code handler spawned died with "no green thread
+               running on this scheduler", and Vault.whereis from new code
+               could not see state the old code created
+               (specs/progress/2026-09-25-hcr-patch-so-private-runtime-copy.md).
+               Every march_* reference the patch makes is left undefined
+               (so_flag above) and binds to the host process at dlopen time:
+               the --hot-reload baseline is linked with -export_dynamic /
+               --export-dynamic (rdynamic_flag) for exactly that.  User FFI
+               shims are in the same position: they are linked (and exported)
+               by the baseline, and a second copy in the patch would duplicate
+               their state too; a patch that needs a NEW shim fails to dlopen
+               with an undefined symbol rather than silently carrying one.
+               The cross-compiled patch (--target linux/amd64 or arm64) is the same rule
+               with no exceptions left to make. *)
+            let patch_inputs =
+              if hcr_identity_flags <> "" then String.trim (opt_file2 hcr_identity_c2) else "" in
             (* -fno-strict-aliasing -fwrapv: the C runtime pervasively type-puns
                (tagged pointers, reading a march_value cell's fields as different
                types, int<->ptr casts), which is strict-aliasing UB. Without these
@@ -3637,9 +3848,11 @@ let compile filename =
             in
             (* Objects go exactly where their sources used to sit, in the same
                order, so the link is object-for-object identical either way. *)
-            let runtime_inputs = match runtime_objs with
-              | Some objs -> String.trim objs ^ user_ffi_c
-              | None      -> runtime ^ extra_c_files
+            let runtime_inputs =
+              if !compile_so then patch_inputs
+              else match runtime_objs with
+                | Some objs -> String.trim objs ^ user_ffi_c
+                | None      -> runtime ^ extra_c_files
             in
             let cmd = Printf.sprintf
               "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s%s %s%s%s%s%s %s -o %s%s%s%s%s"
@@ -3895,7 +4108,12 @@ let compile filename =
             close_out oc
           with Sys_error e ->
             Printf.eprintf "warning: could not write %s: %s\n" schema_path e)
-        end)
+        end);
+        (* Cache the sidecars just written with the artifact, under both
+           keys, so the source-level early hit can restore them. *)
+        if !compile_so then
+          List.iter (fun (st, key) -> March_cas.Cas.store_sidecars st key out_bin)
+            ((store, ch) :: (match source_cas_state with Some p -> [ p ] | None -> []))
       end (* else begin: non-JS LLVM/clang path *)
       end else begin
         (* --emit-llvm only: write IR and exit *)
@@ -4739,6 +4957,17 @@ let () =
     ("--args",       Arg.Rest_all (fun l -> prog_args := Some l),
                      " Pass every remaining argument to the program as its argv; must come last");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
+    ("--protocol-baseline", Arg.String (fun p -> protocol_baselines := p :: !protocol_baselines),
+     "<file>  A protocol's previous version (.forge/protocols/<P>.json, from --emit-protocols); `<P>_Msg.compat()` is computed against it. Repeatable");
+    ("--protocol-expand", Arg.String (fun spec ->
+         match String.index_opt spec ':' with
+         | Some i ->
+           let p = String.sub spec 0 i and l = String.sub spec (i + 1) (String.length spec - i - 1) in
+           March_desugar.Desugar_endpoints.expand_labels := (p, l) :: !March_desugar.Desugar_endpoints.expand_labels
+         | None -> Printf.eprintf "error: --protocol-expand wants <Protocol>:<label>, got %s\n" spec; exit 2),
+     "<P>:<label>  Build the EXPAND half of a two-deploy protocol change (D21): P's chooser stays on the previous fingerprint and cannot choose <label>. Needs --protocol-baseline. Repeatable");
+    ("--emit-protocols", Arg.String (fun d -> emit_protocols_dir := Some d),
+     "<dir>  After a clean typecheck, write <dir>/<P>.json for every @[endpoints] protocol: the baseline the next build's --protocol-baseline reads");
     ("--topology",   Arg.String (fun p -> topology_file := Some p),
      "<json>  Read a forge topology digest (.forge/topology.json, schema version 1): check its bindings and caps, and generate `main` when the entry module has none");
     ("--topology-pools", Arg.String (fun s ->

@@ -94,7 +94,8 @@ jobs:
           - { os: ubuntu-24.04, shard: rest }
           - { os: macos-15,     shard: all }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 85
+    # Must stay above the Test step's 75 plus setup (12) and build (10).
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
 
@@ -128,10 +129,13 @@ jobs:
           dune build bin/main.exe
 
       - name: Test (${{ matrix.shard }})
-        # Sized for the unsharded macOS run: 43-49 min on main in late
-        # September 2026 (the shards are well under it), so 45 was hit on main
-        # itself on a slow runner day.
-        timeout-minutes: 60
+        # Sized for the unsharded macOS run: 37-49 min on main in late
+        # September 2026 (run_codegen alone took 28-29 min on a slow macOS
+        # runner; the ubuntu shards are well under it). 45 was hit on main
+        # itself; 75 leaves ~50% over the worst run seen. Don't split the
+        # macOS shard to get under a timeout: that doubled its runner-minutes
+        # (see README.md, "Runner budget").
+        timeout-minutes: 75
         run: |
           eval $(opam env)
           case "${{ matrix.shard }}" in
@@ -148,7 +152,9 @@ jobs:
   # compiler and the staged runtime/stdlib, so they get their own runner.
   two-node:
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    # Must stay above the scenarios step's 55 plus setup (12), build (10) and
+    # the soak (5).
+    timeout-minutes: 85
     steps:
       - uses: actions/checkout@v4
 
@@ -166,7 +172,9 @@ jobs:
           # rule in test/dune); on this job nothing else builds them first.
           # forge: the cert_* scenarios issue their certificates with
           # `forge cluster` (keygen / cert / revoke).
-          dune build bin/main.exe forge/bin/main.exe @test/stage-source-trees
+          # test/hcr_deploy.exe: the hot-deploy scenarios (hcr_new_code_session,
+          # protocol_evolve) drive their reload sockets with it.
+          dune build bin/main.exe forge/bin/main.exe test/hcr_deploy.exe @test/stage-source-trees
 
       # node_discovery was quarantined 2026-08-08 for a torn-stdout race seen
       # ~1-in-2 on THIS runner and fixed 2026-08-21 (march_stdout_mu). It is
@@ -197,9 +205,14 @@ jobs:
       # with a new creation), per-node goldens. ~5s per scenario. Each scenario
       # is test/two_node/<name>/; see specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
       - name: Two-node scenarios
-        # 52 scenarios at 30-70 s each on a loaded runner (~20-24 min on a
-        # quiet one); 25 was hit on main itself on a slow runner day.
-        timeout-minutes: 35
+        # 57 scenarios at 20-70 s each (~33 min on a 2026-09-25 runner, when
+        # dd step 11b's four cert_* scenarios crossed the old 35); 25 was hit
+        # on main itself on a slow runner day. On such a day one run got
+        # through only 36 of 52 scenarios in 25 min, which is ~40 min for 57;
+        # 55 covers that with margin. Splitting the scenario list across two
+        # jobs would pay a second toolchain setup + build every run; a longer
+        # step is cheaper.
+        timeout-minutes: 55
         run: |
           eval $(opam env)
           for s in $(scripts/two-node.sh --list); do scripts/two-node.sh "$s" || exit 1; done
@@ -609,7 +622,8 @@ jobs:
         run: |
           eval $(opam env)
           dune shutdown 2>/dev/null || true
-          dune build bin/main.exe forge/bin/main.exe
+          # test/hcr_deploy.exe: the two-node sweep's hot-deploy scenarios.
+          dune build bin/main.exe forge/bin/main.exe test/hcr_deploy.exe
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             ./specs/lang/golden/sanitize.sh
 

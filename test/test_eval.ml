@@ -111,6 +111,79 @@ let test_eval_spawn_init_args () =
   Alcotest.(check int) "init(41, \"ab\") then Inc(1), Fold() = 4202" 4202
     (vint (call_fn env "main" []))
 
+(* A nested module (and its impl, its actor, and a module nested two levels
+   down) calling a PARENT fn declared AFTER the nested module.  The nested
+   module's env starts from the parent env as it stood at the `mod`, i.e.
+   with the parent's pass-1 placeholder for [later]; that placeholder used to
+   only raise "stub later called before initialisation".  It now forwards to
+   the parent's real binding once the parent has declared it. *)
+let test_eval_nested_module_forward_parent_fn () =
+  let env = eval_module {|mod Main do
+    mod Outer do
+      mod Inner do
+        type Box = Box(Int)
+        impl Show(Box) do
+          fn show(b) do
+            match b do
+              Box(n) -> "Box " ++ int_to_string(later(n))
+            end
+          end
+        end
+        actor Acc do
+          state { total : Int }
+          init { total: 0 }
+          on Bump(n : Int) do { state with total: state.total + later(n) } end
+        end
+        fn g(x : Int) : Int do later(x) end
+        fn shown() : String do show(Box(3)) end
+        fn run_actor() : Int do
+          let a = spawn(Acc)
+          send(a, Bump(2))
+          run_until_idle()
+          match get_actor_field(a, "total") do
+            Some(v) -> v
+            None -> -1
+          end
+        end
+        mod Deep do
+          fn h(x : Int) : Int do later(x) + 1 end
+        end
+      end
+      fn later(x : Int) : Int do x * 10 end
+    end
+    fn main() do () end
+  end|} in
+  Alcotest.(check int) "nested fn -> later parent fn" 40
+    (vint (call_fn env "Outer.Inner.g" [March_eval.Eval.VInt 4]));
+  Alcotest.(check int) "two levels down -> later grandparent fn" 41
+    (vint (call_fn env "Outer.Inner.Deep.h" [March_eval.Eval.VInt 4]));
+  Alcotest.(check string) "nested impl method -> later parent fn" "Box 30"
+    (vstr (call_fn env "Outer.Inner.shown" []));
+  Alcotest.(check int) "nested actor handler -> later parent fn" 20
+    (vint (call_fn env "Outer.Inner.run_actor" []))
+
+(* The forwarding placeholder must not change module-level `let`
+   initialisation order: a `let` that CALLS a fn declared after it still
+   fails at initialisation time, with the same message as before (inside a
+   nested module that is the unbound qualified name, also unchanged). *)
+let test_eval_let_calling_later_fn_still_fails () =
+  Alcotest.check_raises "too-early call still raises"
+    (March_eval.Eval.Eval_error "stub later called before initialisation")
+    (fun () -> ignore (eval_module {|mod Main do
+      let early = later(1)
+      fn later(x : Int) : Int do x * 10 end
+      fn main() do early end
+    end|}));
+  Alcotest.check_raises "too-early call inside a nested module still raises"
+    (March_eval.Eval.Eval_error "unbound variable: Outer.later")
+    (fun () -> ignore (eval_module {|mod Main do
+      mod Outer do
+        let early = later(1)
+        fn later(x : Int) : Int do x * 10 end
+      end
+      fn main() do () end
+    end|}))
+
 let test_eval_closure () =
   let env = eval_module {|mod Test do
     fn make_adder(n) do fn x -> x + n end
@@ -5439,6 +5512,10 @@ let eval_suites =
           Alcotest.test_case "let* repl [] binds nothing" `Quick test_letstar_repl_empty_list_binds_nothing;
           Alcotest.test_case "closure"             `Quick test_eval_closure;
           Alcotest.test_case "spawn with init args (D24)" `Quick test_eval_spawn_init_args;
+          Alcotest.test_case "nested module calls a parent fn declared after it" `Quick
+            test_eval_nested_module_forward_parent_fn;
+          Alcotest.test_case "let calling a later fn still fails at init" `Quick
+            test_eval_let_calling_later_fn_still_fails;
           Alcotest.test_case "unary minus"         `Quick test_eval_unary_minus;
           Alcotest.test_case "list literal"        `Quick test_eval_list_literal;
           Alcotest.test_case "negative pattern"    `Quick test_eval_negative_pattern;

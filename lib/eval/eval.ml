@@ -1833,7 +1833,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
      ([type_name_of_value]: a record's registered shape, a constructor's
      parent type).  On that path the tag is the runtime (short) name.  Only a
      value no table and no shape can name reaches the panicking body. *)
-  | EApp (EVar { txt = "Node.accepts"; _ }, [ _; _ ], sp)
+  | EApp (EVar { txt = ("Node.accepts" | "Node.accepts_tag" | "Node.schema_matches" | "Node.schema_of"); _ }, _, sp)
     when March_ast.Json_dispatch.find sp <> None ->
     (* `@[remote]`'s tag test (Desugar_remote): the typechecker minted the tag
        from the witness's parameter type; compare the delivery's tag with it.
@@ -1871,7 +1871,9 @@ and eval_expr_inner (env : env) (e : expr) : value =
           in
           let json = apply codec [msg] in
           let send = eval_expr env (EVar { txt = tagged; span = fsp }) in
-          apply send ([dst; to_; VString tag; json] @ rest))
+          (* The schema hash (build step 9): the typechecker's, or none on an
+             unchecked run -- a receiver then compares the tag alone. *)
+          apply send ([dst; to_; VString tag; VString (March_ast.Json_dispatch.find_schema sp); json] @ rest))
      | _ -> assert false)
 
   | EApp (f, args, sp) ->
@@ -3299,6 +3301,31 @@ let spawn_from_spec (spec : value) : unit =
     later fill it with the real closure. *)
 type stub = { mutable sv : value }
 
+(** Pass-1 forward-reference placeholder for fn [name] of the scope whose
+    evolving environment is [scope_ref].
+
+    A closure built while the scope is still being walked can capture this
+    placeholder rather than the real fn: a nested module declared BEFORE
+    [name] (its [inner_ref] starts from the parent env as it stood then), a
+    nested module's actor or impl, two levels down, and so on. Those
+    environments are never re-pointed at the parent's final env, so a
+    placeholder that only raised made `mod Inner do fn g() do later() end end`
+    followed by `fn later` die with "stub later called before initialisation"
+    although it typechecks and runs compiled.
+
+    So at call time the placeholder resolves [name] in the scope's CURRENT
+    env and forwards to it. A genuine too-early call (a top-level `let` that
+    runs [name] before its declaration) still finds this same placeholder
+    there and raises exactly as before. *)
+let forward_stub (scope_ref : (string * value) list ref) (name : string) : value =
+  let stub_name = "<stub:" ^ name ^ ">" in
+  VBuiltin (stub_name, fun args ->
+      match List.assoc_opt name !scope_ref with
+      | Some (VBuiltin (n, _)) when n = stub_name ->
+        eval_error "stub %s called before initialisation" name
+      | Some v -> apply v args
+      | None -> eval_error "stub %s called before initialisation" name)
+
 (** Evaluate a single declaration, extending [env].
     Returns the updated environment. *)
 let rec eval_decl (env : env) (d : decl) : env =
@@ -3380,9 +3407,7 @@ let rec eval_decl (env : env) (d : decl) : env =
     let inner_ref = ref env in
     List.iter (function
       | DFn (def, _) ->
-        let stub = VBuiltin ("<stub:" ^ def.fn_name.txt ^ ">",
-                             fun _ -> eval_error "stub %s called before initialisation"
-                                 def.fn_name.txt) in
+        let stub = forward_stub inner_ref def.fn_name.txt in
         inner_ref := (def.fn_name.txt, stub) :: !inner_ref
       | _ -> ()
     ) decls;
@@ -3457,7 +3482,14 @@ let rec eval_decl (env : env) (d : decl) : env =
         inner_ref := e';
         eval_mod_decls rest e'
     in
-    let mod_env = eval_mod_decls decls !inner_ref in
+    let mod_env =
+      (* Pop our frame if the body raises (a module-level `let` that fails,
+         say): a caller that recovers in-process -- the REPL, the refinement
+         witness harness, the test drivers -- would otherwise evaluate
+         everything after it under this module's stale prefix. *)
+      try eval_mod_decls decls !inner_ref
+      with e -> module_stack := List.tl !module_stack; raise e
+    in
     (* An actor declared in this module was registered with the env as it
        stood at ITS declaration -- pass-1 stubs for every fn declared after
        it -- and nothing re-pointed it, so a handler calling such a fn died
@@ -3842,6 +3874,7 @@ let top_level_file_runs (decls : decl list) : decl list list =
 let eval_module_env (m : module_) : env =
   (* Reset global actor and task state for this module run *)
   closure_prefix_override := None;
+  module_stack := [];
   Hashtbl.clear module_registry;
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.clear actor_registry;
@@ -3876,14 +3909,12 @@ let eval_module_env (m : module_) : env =
      [top_level_file_runs]) right before that run's pass 2, onto a ref cell
      shared by the run's closures, so that closures created in pass 2 see
      the run's final environment at call time. *)
-  let install_stubs (decls : decl list) (env : env) : env =
+  let install_stubs scope_ref (decls : decl list) (env : env) : env =
     List.fold_left (fun env -> function
       | DFn (def, _) ->
-        (* Placeholder that will be overwritten in pass 2 *)
-        let stub = VBuiltin ("<stub:" ^ def.fn_name.txt ^ ">",
-                             fun _ -> eval_error "stub %s called before initialisation"
-                                 def.fn_name.txt) in
-        (def.fn_name.txt, stub) :: env
+        (* Placeholder that will be overwritten in pass 2; forwards to the
+           real binding in [scope_ref] once it exists (see [forward_stub]). *)
+        (def.fn_name.txt, forward_stub scope_ref def.fn_name.txt) :: env
       | _ -> env) env decls
   in
 
@@ -4043,7 +4074,8 @@ let eval_module_env (m : module_) : env =
   scope_tails := [];
   let run_envs, final_env =
     List.fold_left (fun (acc, env) run ->
-        let scope_ref = ref (install_stubs run env) in
+        let scope_ref = ref env in
+        scope_ref := install_stubs scope_ref run env;
         let run_env = make_recursive_env scope_ref run !scope_ref in
         scope_ref := run_env;
         (run_env :: acc, run_env))
@@ -4074,9 +4106,7 @@ let eval_stdlib_decls (decls : decl list) : unit =
       let inner_ref = ref env in
       List.iter (function
         | DFn (def, _) ->
-          let stub = VBuiltin ("<stub:" ^ def.fn_name.txt ^ ">",
-                               fun _ -> eval_error "stub %s called before initialisation"
-                                   def.fn_name.txt) in
+          let stub = forward_stub inner_ref def.fn_name.txt in
           inner_ref := (def.fn_name.txt, stub) :: !inner_ref
         | _ -> ()
       ) inner_decls;
@@ -4103,7 +4133,12 @@ let eval_stdlib_decls (decls : decl list) : unit =
           inner_ref := e';
           eval_inner r e'
       in
-      let mod_env = eval_inner inner_decls !inner_ref in
+      let mod_env =
+        try eval_inner inner_decls !inner_ref
+        with e ->
+          module_stack := (match !module_stack with _ :: tl -> tl | [] -> []);
+          raise e
+      in
       module_stack := (match !module_stack with _ :: tl -> tl | [] -> []);
       let rec declared_names acc = function
         | [] -> acc

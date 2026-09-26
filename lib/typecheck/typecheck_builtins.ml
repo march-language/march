@@ -979,8 +979,14 @@ let builtin_bindings : (string * scheme) list =
     ("sched_stat",   Mono (TArrow (t_int, t_int)));
     (* Task 9: bind a mailbox capacity + overflow policy to an actor. *)
     ("actor_set_mailbox_limit", poly1 (fun a -> TArrow (TCon ("Pid", [a]), TArrow (t_int, TArrow (t_int, t_unit)))));
-    (* Phase 4: Actor state introspection — reads a named field from actor state *)
-    ("get_actor_field", poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (t_string, t_option b))));
+    (* Phase 4: Actor state introspection — reads a named field from actor
+       state.  Int-only: the result used to be a free `Option(b)`, an
+       unchecked cast that read any field as any type (a pid stored as an Int
+       read back as a `Pid` and sent to was a SIGBUS compiled).  Both backends
+       now return Some only for an immediate (Int/Bool/Unit/Atom) field and
+       None for any other, so the result can never be a disguised pointer
+       (specs/progress/2026-09-25-dd-review-get-actor-field-unchecked-cast.md). *)
+    ("get_actor_field", poly1 (fun a -> TArrow (TCon ("Pid", [a]), TArrow (t_string, t_option t_int))));
     (* Phase 4: Flush the async message queue — runs all pending handlers *)
     ("run_until_idle", Mono (TArrow (t_unit, t_unit)));
     (* Phase 6a: Register a cleanup resource with an actor — called on kill/crash *)

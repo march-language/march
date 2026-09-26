@@ -62,6 +62,9 @@ type session_wraps = {
 type ctx = {
   buf       : Buffer.t;
   preamble  : Buffer.t;
+  (* Actor.call handler-tag tables already emitted into [preamble]
+     (Llvm_emit_alloc), one private constant per actor message type. *)
+  call_tag_globals : (string, unit) Hashtbl.t;
   mutable ctr     : int;
   mutable blk     : int;
   mutable str_ctr : int;
@@ -340,6 +343,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   {
   buf      = Buffer.create 4096;
   preamble;
+  call_tag_globals = Hashtbl.create 8;
   ctr      = 0; blk = 0; str_ctr = 0;
   ctor_info = Hashtbl.create 64;
   top_fns   = Hashtbl.create 64;

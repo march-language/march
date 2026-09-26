@@ -1,0 +1,207 @@
+-- One-node scenario "hosted_protocol_change" (distributed-deploys build step
+-- 9, plan 6.1: "a protocol change spawns a new hosting actor"). A hosted
+-- access point placed by `Topology.place` (`offer_actor_role`) hosts three
+-- sessions of the OLD version, each parked mid-session. The protocol then
+-- changes: `Topology.reoffer` opens the new fingerprint's offer with a FRESH
+-- actor and closes the old offer. A new session is served by the new actor
+-- while the old one still holds its three; once they finish, the old actor
+-- (its holds back to zero) is stopped by the placement tick.
+--
+-- A hot deploy is what changes the fingerprint in production (the placement
+-- loop, respawned on the new epoch, runs `reoffer` itself; the network
+-- scenario protocol_evolve does that). Here the version is a value the role's
+-- `open` reads, switched by the program, so one process shows the handover.
+mod HostedProtocolChange do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Hold do
+    hello: Client -> Server : Int
+    go: Client -> Server : Int
+    reply: Server -> Client : Int
+  end
+
+  -- The hosting actor's state, named so a `Pid` of it can be spelled.
+  type HoldState = { gen : Int, sessions : LinearMap(String, Hold_Server.Parked_Server) }
+
+  actor HoldServer do
+    state { gen : Int, sessions : LinearMap(String, Hold_Server.Parked_Server) }
+    init  { gen: 0, sessions: LinearMap.empty_string() }
+    on Name(g : Int) do { state with gen: g } end
+    on Start(sid : String, s : Cap(Session.Live)) do
+      let parked = Hold_Server.await_Hello(s, Hold_Server.register(s, 0))
+      match LinearMap.put(state.sessions, sid, parked) do
+        (None, m) -> { state with sessions: m }
+        (Some(old), m) ->
+          Hold_Server.take_closed(Hold_Server.cancel(s, old))
+          panic("Start: session " ++ sid ++ " is already hosted")
+      end
+    end
+    on Deliver(sid : String, s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+      match LinearMap.take_slot(state.sessions, sid) do
+        (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
+        (Some(parked), slot) ->
+          match Hold_Server.resume(parked, from, msg, ep) do
+            Got_Hello(n, st) ->
+              println("host " ++ int_to_string(state.gen) ++ ": hello " ++ int_to_string(n)
+                ++ ", holds " ++ int_to_string(Session.epoch_holds_here()))
+              { state with sessions: LinearMap.fill(slot, Hold_Server.await_Go(s, st)) }
+            Got_Go(n, st) ->
+              Hold_Server.take_closed(Hold_Server.finish(s, Hold_Server.send_Reply(s, st, n * 10)))
+              println("host " ++ int_to_string(state.gen) ++ ": served " ++ int_to_string(n)
+                ++ ", holds " ++ int_to_string(Session.epoch_holds_here()))
+              { state with sessions: LinearMap.vacate(slot) }
+          end
+      end
+    end
+    on Cancel(sid : String, s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
+      match LinearMap.take(state.sessions, sid) do
+        (None, m) -> { state with sessions: m }
+        (Some(parked), m) ->
+          println("host " ++ int_to_string(state.gen) ++ ": a session was cancelled")
+          Hold_Server.take_closed(Hold_Server.cancel(s, parked))
+          { state with sessions: m }
+      end
+    end
+  end
+
+  -- A client: hello, then (once [gate] opens) go, then the reply.
+  pfn client(s : Cap(Session.Live), st : Hold_Client.Entry, n : Int, gate : Vault(Int)) : Hold_Client.Yield do
+    let st1 = Hold_Client.send_Hello(s, st, n)
+    wait_gate(gate, "open" ++ int_to_string(n), 60000)
+    Hold_Client.recv_Reply(s, Hold_Client.send_Go(s, st1, n), fn (r, st2) ->
+      println("client " ++ int_to_string(n) ++ ": reply " ++ int_to_string(r))
+      Hold_Client.close(s, st2))
+  end
+
+  pfn wait_gate(gate : Vault(Int), key : String, left : Int) : () do
+    if Vault.get(gate, key) != None do ()
+    else if left <= 0 do panic("the gate never opened") else
+      sleep_ms(20)
+      wait_gate(gate, key, left - 20)
+    end end
+  end
+
+  -- A session of client [n] at fingerprint [fp].
+  pfn session(c : Cap(IO), h : Cap(ClusterNode.Live), fp : String, n : Int, gate : Vault(Int)) : () do
+    match SessionNode.initiate(c, h, "Hold", fp, Hold_Msg.role_names(), Nil, Hold_Msg.role_Client(), Hold_Msg.peers_Client(),
+                               Hold_Msg.others_Client(), fn _ -> (),
+                               fn s ->
+                                 let _ = client(s, Hold_Client.register(s, 0), n, gate)
+                                 ()) do
+      Ok(_) -> ()
+      Err(e) -> println("client " ++ int_to_string(n) ++ ": " ++ SessionNode.run_error_message(e))
+    end
+  end
+
+  pfn wait_until(what : String, check : Int -> Bool, left : Int) : () do
+    if check(0) do ()
+    else if left <= 0 do panic("timed out waiting for " ++ what) else
+      sleep_ms(20)
+      wait_until(what, check, left - 20)
+    end end
+  end
+
+  -- Let the parked clients [n], [n]+1, ... finish, one at a time.
+  pfn release(gate : Vault(Int), n : Int, tasks : List(Task(Int))) : () do
+    match tasks do
+      Nil -> ()
+      Cons(t, rest) ->
+        Vault.set(gate, "open" ++ int_to_string(n), 1)
+        let _ = task_await_unwrap(t)
+        release(gate, n + 1, rest)
+    end
+  end
+
+  -- Whether an offer of Server at fingerprint [fp] is in the registry
+  -- (an offer registers, and is released, asynchronously).
+  pfn registered(h : Cap(ClusterNode.Live), fp : String) : Bool do
+    let prefix = "ap:Hold/" ++ int_to_string(Hold_Msg.role_Server()) ++ "/" ++ fp ++ "/"
+    List.any(ClusterNode.names(h), fn nm -> String.starts_with(nm, prefix))
+  end
+
+  -- A hosting actor per offer, numbered in the order they are spawned.
+  pfn new_host(gens : Vault(Int), hosts : Vault(Pid(HoldState))) : Pid(HoldState) do
+    let g = Vault.incr(gens, "n", 1)
+    let a = spawn(HoldServer)
+    let _ = send(a, Name(g))
+    Vault.set(hosts, int_to_string(g), a)
+    a
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "hpc-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let version : Vault(String) = Vault.new("hpc_version")
+        Vault.set(version, "fp", "hold-v1")
+        let hosts : Vault(Pid(HoldState)) = Vault.new("hpc_hosts")
+        let gens : Vault(Int) = Vault.new("hpc_gens")
+        let mk = fn () -> new_host(gens, hosts)
+        let open = fn (a, cap) ->
+          SessionNode.offer_hosted(c, h, "Hold", Option.unwrap_or(Vault.get(version, "fp"), "?"), Hold_Msg.role_names(), Nil,
+            Hold_Msg.role_Server(), Hold_Msg.peers_Server(), cap, fn _ -> (), pid_to_int(a),
+            fn (sid, s) ->
+              let _ = send(a, Start(sid, s))
+              (),
+            fn (sid, s, from, msg, ep) ->
+              let _ = send(a, Deliver(sid, s, from, msg, ep))
+              (),
+            fn (sid, s, role, cause, ep) ->
+              let _ = send(a, Cancel(sid, s, role, cause, ep))
+              ())
+        Topology.place(h, Cons(Topology.offer_actor_role("Hold.Server", Topology.everywhere(), 8, mk, open), Nil))
+        wait_until("the first offer", fn _ -> registered(h, "hold-v1"), 10000)
+        -- Three old-version sessions, each parked after its hello.
+        let gate : Vault(Int) = Vault.new("hpc_gate")
+        let olds = List.map(Cons(1, Cons(2, Cons(3, Nil))), fn n ->
+          let t = task_spawn(fn _ -> do
+            session(c, h, "hold-v1", n, gate)
+            0
+          end)
+          wait_until("hello " ++ int_to_string(n), fn _ -> Topology.running(h) >= n, 10000)
+          sleep_ms(200)
+          t)
+        -- The protocol changes: the new version's offer, with a fresh actor.
+        Vault.set(version, "fp", "hold-v2")
+        Topology.reoffer(h)
+        wait_until("the new offer", fn _ -> registered(h, "hold-v2"), 10000)
+        wait_until("the old offer's name to go", fn _ -> not(registered(h, "hold-v1")), 10000)
+        let old_host = match Vault.get(hosts, "1") do
+          Some(a) -> a
+          None -> panic("no first host")
+        end
+        let new_host = match Vault.get(hosts, "2") do
+          Some(a) -> a
+          None -> panic("reoffer spawned no new host")
+        end
+        println("old offer draining: " ++ int_to_string(Topology.running(h)) ++ " sessions")
+        -- A new session is served by the new actor while the old one holds
+        -- its three.
+        let fresh : Vault(Int) = Vault.new("hpc_gate_new")
+        Vault.set(fresh, "open4", 1)
+        Vault.set(fresh, "open5", 1)
+        session(c, h, "hold-v2", 4, fresh)
+        println("old host alive while its sessions run: " ++ bool_to_string(is_alive(old_host)))
+        -- An old-version client finds no old offer any more.
+        session(c, h, "hold-v1", 5, fresh)
+        -- The old sessions finish, one at a time; the old actor is stopped
+        -- once they have.
+        release(gate, 1, olds)
+        wait_until("the old host to exit", fn _ -> not(is_alive(old_host)), 10000)
+        println("old host exited: true")
+        println("new host alive: " ++ bool_to_string(is_alive(new_host)))
+        Topology.stop(h)
+        ClusterNode.stop(h)
+    end
+  end
+end

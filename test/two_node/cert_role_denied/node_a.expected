@@ -1,0 +1,4 @@
+node-a: Checkout: session_node: no access point for role Ledger: node-b not authorized for Checkout.Ledger, not invited
+node-a: Thumbs session got 50
+node-a: done
+node-a: sees node-b's Checkout.Ledger and Thumbs.Render offers

@@ -1,0 +1,79 @@
+mod TestSessionAp do
+
+  -- Step 11b's pure checks: who may form a session (SessionAP), and which
+  -- frames may cross a link (ClusterNode / NodeSend raw-send policy).
+
+  fn cert(roles, flags) do
+    { node: "spiffe://example.org/pool/web/node/node-a", roles: roles, flags: flags,
+      not_after: 2000000000, issuer: "spiffe://example.org/operator/0", pubkey: "", serial: "1" }
+  end
+
+  describe "SessionAP.authorize" do
+    test "a role named for the mode is authorized" do
+      let c = cert(["Checkout.Ledger:offer", "Checkout.Client:initiate"], Nil)
+      assert (SessionAP.authorize(Some(c), "Checkout", "Ledger", SessionAP.offer_mode()) == Ok(()))
+      assert (SessionAP.authorize(Some(c), "Checkout", "Client", SessionAP.initiate_mode()) == Ok(()))
+    end
+
+    test "the other mode, another role or another protocol is not" do
+      let c = cert(["Checkout.Ledger:offer"], Nil)
+      assert (SessionAP.authorize(Some(c), "Checkout", "Ledger", SessionAP.initiate_mode())
+              == Err("not authorized for Checkout.Ledger"))
+      assert (SessionAP.authorize(Some(c), "Checkout", "Client", SessionAP.offer_mode())
+              == Err("not authorized for Checkout.Client"))
+      assert (SessionAP.authorize(Some(c), "Thumbs", "Ledger", SessionAP.offer_mode())
+              == Err("not authorized for Thumbs.Ledger"))
+    end
+
+    test "no certificate is never authorized" do
+      assert (SessionAP.authorize(None, "Checkout", "Ledger", SessionAP.offer_mode()) == Err("presented no certificate"))
+    end
+
+    test "permissions and role names" do
+      assert (SessionAP.permission("Checkout", "Ledger", SessionAP.offer_mode()) == "Checkout.Ledger:offer")
+      assert (SessionAP.role_name([("Client", 0), ("Ledger", 1)], 1) == "Ledger")
+      assert (SessionAP.role_name([("Client", 0), ("Ledger", 1)], 7) == "7")
+    end
+  end
+
+  describe "raw-send policy" do
+    test "shared-secret mode (no own certificate) allows raw sends" do
+      assert (ClusterNode.raw_allowed(None, None))
+    end
+
+    test "certificate mode needs raw_send at both ends" do
+      let raw = cert(Nil, ["raw_send"])
+      let plain = cert(Nil, Nil)
+      assert (ClusterNode.raw_allowed(Some(raw), Some(raw)))
+      assert (not(ClusterNode.raw_allowed(Some(raw), Some(plain))))
+      assert (not(ClusterNode.raw_allowed(Some(plain), Some(raw))))
+      assert (not(ClusterNode.raw_allowed(Some(raw), None)))
+    end
+
+    test "session tags are exempt, with or without a session id" do
+      assert (ClusterNode.is_session_tag("SessionAP.Invite"))
+      assert (ClusterNode.is_session_tag("SessionAP.Answer"))
+      assert (ClusterNode.is_session_tag("SessionNode.Deliver#node.1.7"))
+      assert (ClusterNode.is_session_tag("SessionNode.Drained#s"))
+      assert (List.length(ClusterNode.session_tags()) == 10)
+    end
+
+    test "anything else is a raw tag" do
+      assert (not(ClusterNode.is_session_tag("Raw.Ping")))
+      assert (not(ClusterNode.is_session_tag("SessionNode.Other#s")))
+      assert (not(ClusterNode.is_session_tag("Checkout.Msg")))
+      assert (not(ClusterNode.is_session_tag("")))
+    end
+
+    test "control-connection frames are ClusterNode's own; ACTOR_MSG (9) is not among them" do
+      assert (List.member(ClusterNode.control_tags(), 13))
+      assert (List.member(ClusterNode.control_tags(), 15))
+      assert (not(List.member(ClusterNode.control_tags(), 9)))
+    end
+
+    test "RemoteCall's Forbidden survives the wire" do
+      let r = RemoteCall.err_reply(3, RemoteCall.Forbidden)
+      assert (RemoteCall.decode_reply(RemoteCall.encode_reply(r)) == Ok(r))
+    end
+  end
+end

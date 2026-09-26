@@ -277,10 +277,9 @@ peer's signature under the key its certificate names. `NodeCert.verify(cert,
 operator_pubkey, now)` is the certificate check on its own.
 
 A verified certificate stays with its peer: `ClusterNode.peer_cert(c, node_id)`
-returns it (`ClusterConn.peer_cert` for direct connections). The roles and the
-`raw_send` flag are not enforced yet. Checking an offer or an initiation against
-the certificate's roles, and refusing raw sends without the flag, is the next
-step of the design.
+returns it (`ClusterConn.peer_cert` for direct connections), and
+`ClusterNode.own_cert(c)` returns the node's own. What a node may do with its
+roles and flags is in [Authorization](#authorization) below.
 
 ### Per-frame MAC
 
@@ -330,8 +329,8 @@ n)`).
 ### Threat model
 
 Certificates limit what a misbehaving *member* can do on a trusted network:
-who may join, and, once roles are enforced, which conversations each node may
-take part in. They do not provide confidentiality, availability against a
+who may join, and which conversations each node may take part in (see
+[Authorization](#authorization)). They do not provide confidentiality, availability against a
 member that lies in SWIM gossip, or protection inside a node that runs foreign
 code.
 
@@ -371,6 +370,141 @@ match ClusterConn.listen(9000) do
   Err(e) -> ...
 end
 ```
+
+---
+
+## Authorization
+
+In certificate mode a node checks what each peer's certificate lets it do, not
+only who the peer is. Every check below applies **in certificate mode only**. A
+shared-secret cluster has no certificates: any node holding the secret may
+offer or initiate any role, so a shared-secret cluster should be one where
+every node is equally trusted.
+
+### Roles: who may form a session
+
+A certificate names the protocol roles its node may play, as
+`Proto.Role:offer` (it may offer the role at an access point) and
+`Proto.Role:initiate` (it may start a session in the role). When a session
+forms at access points, both sides check
+([Choreography: access points]({{ site.baseurl }}/docs/choreography/#access-points-many-sessions-and-starting-again)):
+
+| who checks | what | on failure |
+|---|---|---|
+| the initiator, before inviting | the certificate of the node that **holds** each offer names `Proto.Role:offer` | the offer is skipped; `NoOffer`'s reasons say `node-b not authorized for Checkout.Ledger, not invited` |
+| the offer, on each invitation | the certificate of the node the invitation came from names `Proto.Role:initiate` for the role it plays | the offer refuses: `initiator node-a not authorized for Checkout.Client` |
+| each party, once the session forms | every role's endpoint is on a node whose certificate allows that role | `Connect(role, "... is held by node-c: not authorized for ...")` |
+| a node, opening an offer | its own certificate names `Proto.Role:offer` | `Err(Unauthorized(role, why))` |
+| each side of a direct session (`run_<Role>`), when it connects | the peer's certificate names the role it announces, as `:offer` or `:initiate` | `Connect(role, "role P.R is played by node-a: not authorized for P.R")` or `Accept(...)` |
+
+The direct runner (`run_<Role>`, `host_<Role>`) uses certificate mode when
+`MARCH_NODE_CERT` is set, read by `ClusterNode.auth_from_env(name, secret)` from
+the same variables a cluster node reads.
+
+The checks read the certificate the node verified in its handshake with that
+peer. They never trust the registry: offer names and session names are
+registry names that any member can write, and the node an invitation came from
+is the link it arrived on (`NodeSend.Delivery.from_node`), not anything in the
+frame. The pure check is `SessionAP.authorize(cert, proto, role, mode)`, and
+`ClusterNode.authorize_peer(c, node_id, proto, role, mode)` applies it to a
+peer (always `Ok` in shared-secret mode).
+
+### Raw sends
+
+Raw primitives are the ways to reach a process outside any session:
+`ClusterNode.send_msg`, `ClusterNode.queue_for` (what `Node.enqueue` sends
+through), the receivers installed with `ClusterNode.route` / `route_type`
+(`@[remote]` and user code), `Node.send`, and `RemoteCall`. They sit outside
+the protocol boundary, so a certificate grants them with a flag,
+`raw_send`. In certificate mode **a raw frame crosses a link only when the
+certificates at both ends carry `raw_send`**. A node's frames to itself (the
+loopback) are never raw sends.
+
+| where | refused how |
+|---|---|
+| `ClusterNode.send_msg` to a peer | `Err(NodeQueue.NotAuthorized)`, never queued |
+| `ClusterNode.queue_for(c, peer)` | `None` |
+| an inbound raw frame from a peer | dropped before any route, and answered `DELIVERY_FAILED` ("not authorized: ..."), so the sender's `on_delivery_failed` hears it |
+| `NodeSend.cast` / `Node.send` on a connection a program opened with `ClusterConn.connect_split_auth` | `Err(Refused(seq, "not authorized: ..."))`; an inbound raw frame is answered `DELIVERY_FAILED` |
+| `NodeCall.call` (`RemoteCall`) on such a connection | `Err(Forbidden)`; the serving side answers `Forbidden` without dispatching |
+
+Every refusal is counted. `ClusterNode.raw_refused(c)` counts a node's own
+links, and `NetKernel.raw_refused()` counts direct connections. On-security-event
+subscribers get `RawSendRefused(node_id, what)`, where `what` is
+`"outbound <type>"`, `"outbound queue"` or `"inbound <type>"`.
+
+Two kinds of traffic are exempt, and nothing else is:
+
+- **Session traffic.** An ACTOR_MSG whose type tag is one of
+  `ClusterNode.session_tags()` (`SessionAP.Invite`, `.Withdraw` and `.Answer`,
+  and `SessionNode.Hello`, `.Deliver`, `.Bye`, `.Cancel`, `.Ping`,
+  `.Undelivered` and `.Drained`, before any `#<session id>` suffix) is exempt
+  when it reaches a **session route**, one a session opened with
+  `ClusterNode.route_session`. A session tag sent to an ordinary route, or any
+  other tag sent to a session route, is refused. What a session may say is
+  bounded by its protocol and checked by the receiver, and who may join one is
+  checked against the certificates' roles (above).
+- **ClusterNode's own control frames.** Everything on a peer's control
+  connection is written by ClusterNode itself and never reaches a route:
+  SWIM (tags 0-3), registry sync (5-6), remote monitors (7, 8, 12),
+  `DELIVERY_FAILED` (10), `CREDIT` (11), member gossip and sync (13-14), and
+  revocations (15). `ClusterNode.control_tags()` lists them.
+
+A node without `raw_send` is the right certificate for code isolated on its own
+node because it needs `IO.Foreign`. Its reach is the sessions its roles let it
+form, and nothing it sends outside them is delivered.
+
+### Cross-node references
+
+A reference to a process on another node is handed out, not computed. The
+global registry is where they are handed out, so in certificate mode it
+follows the raw-send rule:
+
+- **`ClusterNode.lookup` (and `names`) hides a binding unless a raw send to its
+  holder would be allowed**: this node's certificate and the holder's verified
+  certificate must both carry `raw_send`. A name you cannot raw-send to is not
+  a reference you should hold. This node's own bindings always show. A binding
+  whose holder this node has not verified yet (no link to it) stays hidden
+  until the link forms.
+- **The coordination namespaces are exempt**
+  (`ClusterNode.reference_namespaces()`): access-point offers (`ap:`), session
+  endpoints (`session:`) and topology markers (`topo:`) show whatever the
+  holder's flags. Access points check the holder's certificate by role when
+  they use one ([Roles](#roles-who-may-form-a-session)).
+- **Registrations record who made them.** Each replica records the certificate
+  identity of the registering node: its own for its own bindings, the link's
+  verified peer for bindings that peer holds, and the holder's certificate if
+  it has one for bindings relayed through a third node.
+  `ClusterNode.registrant(c, name)` returns it, and it is not hidden.
+  The identity is local bookkeeping. It is not sent on the wire and not
+  covered by the registry's Merkle hash, so replicas that recorded it
+  differently still converge.
+- **`GlobalPid.make` stays pure.** A pid built by hand is only a value. Sending
+  to it is a raw send, and that is what is checked.
+
+Registry writes themselves are not refused: a node without `raw_send` can
+still register a name, which no certificate-mode reader will then see outside
+the exempt namespaces. Registrations are not signed, so a member could claim
+another node's pid in a relayed binding. That binding would be attributed to
+the claimed holder, and any send to it would still be checked.
+
+### What authorization does not cover
+
+Authorization is about **authority**: which conversations a misbehaving member
+can join, and so, since every message in a session is checked against the
+protocol, what it can say. It is not about availability or confidentiality:
+
+- A member can still lie in SWIM gossip, refuse to answer, or drop what it
+  receives.
+- Frames are not encrypted. The per-frame MAC stops a party without the
+  connection's key from changing or injecting frames, but anyone on the path can
+  read them.
+- Nothing constrains what code inside a node does, including foreign code
+  (`IO.Foreign`). Isolate such code on its own node, whose certificate names
+  only the roles it needs.
+- A node's messages are untrusted input. Payload refinements on message types
+  are checked by the receiver, and are a security boundary as well as a
+  correctness one.
 
 ---
 
@@ -692,6 +826,39 @@ end
 The dispatch compares the delivery's tag with the tag the sender's compiler minted for each
 handler's type, so the two sides cannot drift. A handler whose type has no codec is a
 compile error, and so is a `@[remote]` actor with no routable handler.
+
+**Schema hashes: a type that kept its name but changed its shape.** Beside the tag, a typed
+send carries the message type's *schema hash*, a digest of its structure: a record's fields
+(names and types, in order), a variant's constructors with their argument types, and every
+declared type they mention, expanded the same way. The name is not part of it. The
+dispatch accepts a delivery whose tag and schema both match, or whose sender sent no schema
+(a program built before schema hashes). When the tag matches but the schema does not, the
+sender was built from another version of the type:
+
+- If the actor has an `<actor>_migrate_msg` (the hot-reload message migration), and the
+  old message type it takes has a one-argument constructor whose argument has the delivered
+  schema, the payload is decoded as that argument, wrapped in that constructor, converted by
+  `migrate_msg`, and delivered. A `None` from `migrate_msg` is refused.
+- Otherwise the dispatch returns `Err`, and the transport answers the sender with
+  `DELIVERY_FAILED`.
+
+```march
+mod V1 do
+  type OldHit = { n : Int }          -- what an older build sent as `Msgs.Hit`
+  derive Json for OldHit
+  type Msg = OldBump(V1.OldHit)
+end
+
+fn counter_migrate_msg(m : V1.Msg) : Option(Counter.Msg) do
+  match m do
+    V1.OldBump(h) -> Some(Bump({ n: h.n, who: "migrated" }))
+  end
+end
+```
+
+`Node.schema_of(fn (_ : T) -> ())` is `T`'s schema hash as a string. The schema rides the
+`ACTOR_MSG` frame as an optional seventh element; a node built before it refuses a
+seven-element frame, so upgrade receivers before senders.
 
 **Session protocols across nodes.** `SessionNode` is the `Session.Ops` transport for an
 `@[endpoints]` protocol whose roles run on different nodes, over split peer connections

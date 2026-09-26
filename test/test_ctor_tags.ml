@@ -71,8 +71,11 @@ let test_monitor_down_metadata_is_seeded_without_source_declarations () =
     (tag_of "DownReason.Killed");
   Alcotest.(check int) "Crash tag" 0x7f00_0003
     (tag_of "DownReason.Crash");
-  Alcotest.(check int) "actor-message range stays disjoint" 0x0100_0000
-    (tag_of "Probe_Msg.Probe");
+  (* Actor-message tags are a stable hash of the qualified constructor name
+     (Llvm_toplevel.actor_msg_tag_table), inside the actor-message range. *)
+  let probe = tag_of "Probe_Msg.Probe" in
+  Alcotest.(check bool) "actor-message range stays disjoint" true
+    (probe >= 0x0100_0000 && probe < 0x0200_0000);
   Alcotest.(check int) "ordinary range stays disjoint" 0
     (tag_of "Ordinary.Ordinary");
   Alcotest.(check int) "Down metadata has three fields" 3

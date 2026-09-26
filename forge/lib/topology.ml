@@ -735,6 +735,20 @@ let are_peers (def : Ast.protocol_def) a b =
 let unlabelled_count (def : Ast.protocol_def) =
   List.length (List.filter (fun (_, _, labelled) -> not labelled) (proto_msgs def.Ast.proto_steps))
 
+(** The protocols a topology app uses (D25): each one named in `[roles]`, and
+    each one a pool's written `initiates` names.  Derived initiates are not
+    here (they need the project index): a protocol an app initiates has its
+    other roles served, so `[roles]` names it anyway.  The compiler
+    (`--topology`) and the LSP read this to warn at each unlabelled step. *)
+let protocols_used (t : t) : string list =
+  List.sort_uniq String.compare
+    (List.map (fun r -> r.protocol) t.roles
+     @ List.concat_map (fun p ->
+         List.filter_map (fun r ->
+             match String.split_on_char '.' r with [ pr; _ ] -> Some pr | _ -> None)
+           (Option.value ~default:[] p.initiates))
+       t.pools)
+
 (** Find a protocol by the short name the topology uses ("Checkout"), or by
     its qualified name. *)
 let find_protocol (idx : index) (name : string) =
@@ -902,15 +916,7 @@ let check ~(index : index) (t : t) : diag list =
         p.hosts)
     t.pools;
   (* D25: unlabelled steps in any protocol the topology names. *)
-  let protocols_named =
-    List.sort_uniq String.compare
-      (List.map (fun r -> r.protocol) t.roles
-       @ List.concat_map (fun p ->
-           List.filter_map (fun r ->
-               match String.split_on_char '.' r with [ pr; _ ] -> Some pr | _ -> None)
-             (Option.value ~default:[] p.initiates))
-         t.pools)
-  in
+  let protocols_named = protocols_used t in
   List.iter (fun pname ->
       match find_protocol index pname with
       | Some (_, _, def) ->
@@ -1220,17 +1226,40 @@ module Gen = struct
   let binary_name ~project (p : pool) =
     if p.isolate then project ^ "-" ^ p.pool_name else project
 
+  (** The pool-level environment every node of [p] shares (the runtime's
+      names: [MARCH_POOLS], [MARCH_TOPOLOGY_FILE]). *)
+  let pool_environment ~project (p : pool) =
+    [ ("MARCH_POOLS", p.pool_name);
+      ("MARCH_TOPOLOGY_FILE", Printf.sprintf "/etc/march/%s/topology.json" project) ]
+
+  let environment_lines (env : (string * string) list) =
+    String.concat "\n" (List.map (fun (k, v) -> Printf.sprintf "Environment=%s=%s" k v) env)
+
+  (** One pool's unit. [environment] is written as [Environment=] lines;
+      [forge topology gen systemd] gives the pool-level ones, [forge host
+      init] each host's own (node name, labels, ports, seeds, sockets). *)
+  let systemd_unit ?(generator = "forge topology gen systemd") ~project ~(topo : t) ~environment (p : pool) =
+    render Topology_tmpl_systemd.content [
+      ("pool", p.pool_name);
+      ("project", project);
+      ("generator", generator);
+      ("user", "march");
+      ("exec", Printf.sprintf "/opt/march/%s/%s" project (binary_name ~project p));
+      ("environment", environment_lines environment);
+      ("stop_sec", string_of_int (stop_sec topo));
+      ("roles", if p.serves = [] then "(no roles; hook only)" else String.concat " " p.serves);
+    ]
+
   (** One output file per pool: `march-<pool>.service`. *)
   let systemd ~project (ex : export) : (string * string) list =
     List.map (fun p ->
         ( Printf.sprintf "march-%s.service" p.pool_name,
-          render Topology_tmpl_systemd.content [
-            ("pool", p.pool_name);
-            ("project", project);
-            ("exec", Printf.sprintf "/opt/march/%s/%s" project (binary_name ~project p));
-            ("stop_sec", string_of_int (stop_sec ex.topo));
-            ("roles", if p.serves = [] then "(no roles; hook only)" else String.concat " " p.serves);
-          ] ))
+          systemd_unit ~project ~topo:ex.topo
+            ~environment:(pool_environment ~project p
+                          @ [ ("MARCH_TOPOLOGY_STATUS", Printf.sprintf "/var/lib/march/%s/run/%s.status" project p.pool_name);
+                              ("MARCH_HOT_RELOAD_SOCKET", Printf.sprintf "/var/lib/march/%s/run/%s.sock" project p.pool_name);
+                              ("HOME", Printf.sprintf "/var/lib/march/%s" project) ])
+            p ))
       ex.topo.pools
 
   (** One shell script per host: its pool's public ports from anywhere, the

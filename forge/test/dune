@@ -155,7 +155,7 @@
 (test
  (name test_reconcile)
  (modules test_reconcile)
- (libraries march_forge alcotest unix yojson str))
+ (libraries march_forge alcotest unix yojson str digestif march_ed25519 march_cas))
 
 ; test_topology_run.ml: `forge run` / `forge run --processes` / `forge topology
 ; export` on examples/topology_app, a two-pool topology app with a generated
@@ -204,9 +204,12 @@
 
 ; test_upgrade_from.ml: `forge test --upgrade-from <ref>` (distributed-deploys
 ; build step 8, II.8) on fixtures/upgrade: v1 becomes a git commit (the ref);
-; `good` (a handler's body changes; same message type) must PASS, `drops`
+; `good` (a handler's body changes; same message type) and `migrates` (a
+; handler removed, its old messages converted by migrate_msg) must PASS, `drops`
 ; (a handler removed with no migrate_msg, so the old feeder's messages are
-; dropped and counted) must FAIL. Each case builds the old version and the
+; dropped and counted) must FAIL, `live` (the role body changes; the new
+; body spawns a task, reads the old version's Vault and starts a session of
+; its own) must PASS with the new body's answer. Each case builds the old version and the
 ; patch, runs the old version's process with a reload socket, drives real
 ; sessions across a real hot deploy. test_topology_run's hermetic shape; it
 ; also needs `git` on PATH (the fixture repositories and the ref's worktree).
@@ -226,3 +229,44 @@
      (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
       (setenv UPGRADE_FIXTURES_DIR fixtures/upgrade
        (run %{exe:test_upgrade_from.exe}))))))))
+
+; test_host_init.ml: `forge host init` (distributed-deploys build step 10b).
+; `local`: the host script against a scratch directory (in-process, no
+; toolchain). `container` (Slow): the acceptance, over real ssh against an
+; sshd container (alpine); it SKIPs loudly when Docker is absent or the image
+; cannot be built, never passes vacuously.
+(test
+ (name test_host_init)
+ (modules test_host_init)
+ (libraries march_forge alcotest unix march_ed25519))
+
+; test_deploy_plan.ml: `forge deploy --plan`'s classification
+; (Deploy_plan.classify) on fixture pairs, one per branch, and the six-block
+; rendering (distributed-deploys build step 10b). In-process, no toolchain.
+(test
+ (name test_deploy_plan)
+ (modules test_deploy_plan)
+ (libraries march_forge march_ast alcotest str))
+
+; test_deploy_e2e.ml: `forge host init`, `forge deploy` and `forge deploy
+; --plan` end to end over real ssh against a Debian sshd container
+; (distributed-deploys build step 10b): a cross-built base image restarted
+; onto the host, a hot patch through the ssh tunnel, compaction. Real compiles
+; (the just-built march and forge, hermetic like test_topology_run) and a
+; container; SKIPs loudly when Docker, zig or the cross sysroot is missing.
+(executable
+ (name test_deploy_e2e)
+ (modules test_deploy_e2e)
+ (libraries alcotest unix str))
+
+(rule
+ (alias runtest)
+ (deps (source_tree %{workspace_root}/runtime) (source_tree %{workspace_root}/stdlib)
+       (source_tree %{workspace_root}/examples/topology_app))
+ (action
+  (setenv MARCH_TEST_BIN %{bin:march}
+   (setenv FORGE_TEST_BIN %{bin:forge}
+    (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
+     (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
+      (setenv TOPOLOGY_APP_DIR %{workspace_root}/examples/topology_app
+       (run %{exe:test_deploy_e2e.exe}))))))))

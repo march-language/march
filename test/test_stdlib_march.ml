@@ -178,6 +178,7 @@ let all_stdlib_decls =
     "peer_reader.march";
     "actor.march";
     "node_queue.march";
+    "session_ap.march";
     "cluster_node.march";
     "session_node.march";
     "topology.march";
@@ -588,6 +589,8 @@ let () =
     ("node_cert", [
       Alcotest.test_case "NodeCert module + ed25519/x25519 builtins"
         `Quick (run_stdlib_test "test_node_cert.march" "TestNodeCert");
+      Alcotest.test_case "SessionAP + raw-send policy (dd step 11b)"
+        `Quick (run_stdlib_test "test_session_ap.march" "TestSessionAp");
     ]);
     ("handshake", [
       Alcotest.test_case "Handshake module"

@@ -242,7 +242,8 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
                          [do_activate] resolves the patch by name. Leaving them
                          default-visible does NOT reopen the "v1 wins" hazard
                          above: every boundary→boundary call in the emitted IR
-                         (see [needs_dispatch] in llvm_emit.ml) is rewritten to
+                         (see [needs_dispatch] in llvm_emit_call.ml: every
+                         call whose CALLEE is a boundary fn) is rewritten to
                          an indirect call through march_dispatch_enter/_gen,
                          which looks the callee up in the versioned dispatch
                          table by NAME_ID rather than emitting a direct
@@ -544,6 +545,79 @@ let emit_atom_show_table ctx =
 
 (* ── Module emitter ──────────────────────────────────────────────────── *)
 
+(** Stable actor-message constructor tags: ["<Actor>_Msg.<Ctor>" -> tag].
+
+    A message is a heap cell whose tag the SENDER's build chose, and after a
+    hot deploy the receiver may run a different build: an old task keeps
+    sending the old format to an actor that moved, and the runtime hands such
+    a message to `<actor>_migrate_msg`. A counter over the program's actor
+    message types in build order gave the same constructor a different tag in
+    two builds as soon as any handler was added or removed ahead of it, so
+    every later actor's queued messages fell to its dispatch's dropping
+    default arm, and an old message could not be matched by the migrate
+    function at all. The tag is now a function of the qualified constructor
+    name alone: 24 bits of the MD5 of ["<Actor>_Msg.<Ctor>"] above
+    [actor_message_tag_base], so the range stays exactly the one
+    march_runtime.h reserves.
+
+    Keys are assigned in sorted order and a key whose slot is taken probes
+    upward (wrapping inside the range), which keeps every tag in one build
+    distinct (Finding 19 needs that: a foreign message must never carry a tag
+    the receiving actor handles). Probing depends on which other keys are in
+    the build, so two colliding keys are the one case where a tag can move
+    between builds; at a few hundred constructors in 2^24 slots that is
+    rare, and it is no worse than the counter it replaces, which moved
+    every tag after any change.
+
+    [pins] adds the constructors of each `*_migrate_msg`'s old message type
+    ([Migrate_msg_pins]) under the ACTOR's name, so a removed handler's key
+    ("Tally_Msg.Legacy") is in the universe and probes exactly as it did in
+    the build that still had it. *)
+let actor_msg_tag_table
+    ~(pins : (string * string) list) (types : Tir.type_def list)
+  : (string, int) Hashtbl.t =
+  let keys = ref [] in
+  let seen_ty = Hashtbl.create 32 in
+  List.iter (function
+      | Tir.TDVariant (name, ctors)
+        when Tir_names.is_actor_msg_name name && not (Hashtbl.mem seen_ty name) ->
+        Hashtbl.replace seen_ty name ();
+        List.iter (fun (c, _) -> keys := (name ^ "." ^ c) :: !keys) ctors
+      | Tir.TDVariant (name, ctors) ->
+        (match List.assoc_opt name pins with
+         | Some actor_msg when not (Hashtbl.mem seen_ty name) ->
+           Hashtbl.replace seen_ty name ();
+           List.iter (fun (c, _) -> keys := (actor_msg ^ "." ^ c) :: !keys) ctors
+         | _ -> ())
+      | _ -> ()) types;
+  let keys = List.sort_uniq compare !keys in
+  let range = Llvm_builtins.actor_message_tag_limit - Llvm_builtins.actor_message_tag_base in
+  if List.length keys > range then
+    failwith (Printf.sprintf
+      "actor-message constructor tag range exhausted (%d constructors, %d tags)"
+      (List.length keys) range);
+  let used = Hashtbl.create (2 * List.length keys + 1) in
+  let out = Hashtbl.create (2 * List.length keys + 1) in
+  List.iter (fun key ->
+      let d = Digest.string key in
+      let h = (Char.code d.[0] lsl 16) lor (Char.code d.[1] lsl 8) lor Char.code d.[2] in
+      let rec place slot =
+        if Hashtbl.mem used slot then place ((slot + 1) mod range)
+        else slot in
+      let slot = place (h mod range) in
+      Hashtbl.replace used slot ();
+      Hashtbl.replace out key (Llvm_builtins.actor_message_tag_base + slot))
+    keys;
+  out
+
+(** The pins [variant_ctor_tags] uses by default: this compilation's
+    [Migrate_msg_pins], as (old type declaration, `<Actor>_Msg`). *)
+let current_migrate_pins (types : Tir.type_def list) : (string * string) list =
+  List.filter_map (function
+      | Tir.TDVariant (n, _) ->
+        Option.map (fun a -> (n, a)) (Migrate_msg_pins.actor_of_decl n)
+      | _ -> None) types
+
 (** Per-constructor heap tags for [types], in declaration order, exactly as
     {!build_ctor_info} installs them: [type_name -> tag list], one tag per
     constructor of that [TDVariant].
@@ -551,27 +625,36 @@ let emit_atom_show_table ctx =
     Extracted so that a SECOND consumer — the REPL's heap pretty-printer,
     which must turn a tag read out of a live value back into a constructor
     name — can ask for the numbering instead of assuming "tag = index in the
-    ctor list".  That assumption is false for the two global-tag ranges
+    ctor list".  That assumption is false for the global-tag ranges
     below, and the REPL only started tripping over it once stdlib's
     [type_def]s became visible to expression fragments — which is what puts a
     prompt-declared `Color` in a collision set with stdlib's `Color` and
     `Plot.Color` in the first place.
 
-    Order-sensitive by construction: both global ranges are handed out by
-    counters walking [types] front to back, so a caller must pass the SAME
-    list, in the SAME order, that the code it is interpreting was compiled
-    with.  Duplicated type names consume counter values here exactly as they
-    do in [build_ctor_info] — the counter advances before the first-wins
-    check there, so the two walks stay in lockstep.
+    Actor-message tags are a stable function of the qualified constructor
+    name ({!actor_msg_tag_table}); a `*_migrate_msg`'s old message type
+    ([pins], default: this compilation's [Migrate_msg_pins]) takes the tags
+    its actor's constructors of the same names have. The collision range is
+    still handed out by a counter walking [types] front to back, so a caller
+    must pass the SAME list, in the SAME order, that the code it is
+    interpreting was compiled with. Duplicated type names consume counter
+    values here exactly as they do in [build_ctor_info] — the counter
+    advances before the first-wins check there, so the two walks stay in
+    lockstep.
 
     Reserved monitor-ABI types are reported with their canonical tags rather
     than a counter's; [build_ctor_info] seeds those separately and only
     validates the declaration it later meets. *)
 let variant_ctor_tags
+    ?pins
     ~(collision_set : (string, string list) Hashtbl.t)
     (types : Tir.type_def list) : (string, int list) Hashtbl.t =
+  let pins = match pins with Some p -> p | None -> current_migrate_pins types in
   let out : (string, int list) Hashtbl.t = Hashtbl.create 64 in
-  let actor_msg_tag = ref Llvm_builtins.actor_message_tag_base in
+  let actor_tags = actor_msg_tag_table ~pins types in
+  let actor_tag key = match Hashtbl.find_opt actor_tags key with
+    | Some t -> t
+    | None -> failwith ("actor-message tag table has no row for " ^ key) in
   let collision_tag = ref Llvm_builtins.collision_tag_base in
   let reserve ~kind ~limit next =
     let tag = !next in
@@ -598,9 +681,11 @@ let variant_ctor_tags
           | _ -> (-1)) ctors in
       if not (Hashtbl.mem out name) then Hashtbl.replace out name tags
     | Tir.TDVariant (name, ctors) when Tir_names.is_actor_msg_name name ->
-      let tags = List.map (fun _ ->
-        reserve ~kind:"actor-message"
-          ~limit:Llvm_builtins.actor_message_tag_limit actor_msg_tag) ctors in
+      let tags = List.map (fun (c, _) -> actor_tag (name ^ "." ^ c)) ctors in
+      if not (Hashtbl.mem out name) then Hashtbl.replace out name tags
+    | Tir.TDVariant (name, ctors) when List.mem_assoc name pins ->
+      let actor_msg = List.assoc name pins in
+      let tags = List.map (fun (c, _) -> actor_tag (actor_msg ^ "." ^ c)) ctors in
       if not (Hashtbl.mem out name) then Hashtbl.replace out name tags
     | Tir.TDVariant (name, ctors)
       when Collision_set.is_colliding collision_set name ->
