@@ -1,18 +1,19 @@
--- The NEW version of the upgrade fixture, the one that upgrades cleanly:
--- Tally's Legacy handler changes what it does, but Tally's message type is
--- the same, so the Legacy messages the old feeder keeps sending run on the
--- new handler and nothing is dropped. forge/test/test_upgrade_from.ml
--- copies this over v1 and expects `forge test --upgrade-from HEAD` to pass.
+-- The NEW version of the upgrade fixture whose patch does what real
+-- patches do (forge/test/test_upgrade_from.ml copies this over v1 and
+-- expects `forge test --upgrade-from HEAD` to pass): the role body changes,
+-- and for an Ask of 1000 or more the new body spawns a task, which reads the
+-- Vault the OLD version's hook created and starts an Echo session of its
+-- own against this pool before answering.
 --
--- (The version that REMOVES Legacy and converts it with tally_migrate_msg,
--- the other clean upgrade, is ../migrates.)
+-- Three things this proves that the arithmetic-only `good` version cannot
+-- (specs/progress/2026-09-25-hcr-patch-so-private-runtime-copy.md):
+--   - the role body is called by the generated topology entry, which is not
+--     reloadable, so the call reaches the patch only because a call
+--     dispatches whenever its CALLEE is reloadable (lib/tir/hot_reload.ml);
+--   - new code runs green threads and sessions: a patch that carried its
+--     own copy of the C runtime crashed on the first task it spawned;
+--   - new code sees the old version's named state (one vault registry).
 --
--- Echo.Server answers twice; a session can span a hot deploy. The hook
--- spawns Tally, whose message type has two handlers, Add and Legacy, and
--- a feeder task that sends Legacy(1) every 20 ms for about six seconds.
--- The feeder is a task: it stays on the code (epoch) it started on, so
--- after a deploy it keeps sending the OLD message format to a Tally that
--- has moved to the new code.
 mod UpgradeApp do
   needs IO
   needs IO.Clock
@@ -37,7 +38,7 @@ mod UpgradeApp do
     state { total : Int }
     init  { total: 0 }
     on Add(n : Int) do { total: state.total + n } end
-    on Legacy(n : Int) do { total: state.total + 2 * n } end
+    on Legacy(n : Int) do { total: state.total + n } end
   end
 
   fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Env do
@@ -75,17 +76,14 @@ mod UpgradeApp do
 
     fn serve_one(env : Env, s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
       Echo_Server.recv_Ask(s, st, fn (n, st1) ->
-        -- Version 1 runs the task (so it holds the same authority as later
-        -- versions: a hot deploy may not add any) but answers without it;
-        -- only a NEW body can produce 1111 for an Ask of 1000.
         let extra = if n >= 1000 do task_await_unwrap(task_spawn(fn _ -> nested(env, n))) else 0 end
-        let _ = extra
-        Echo_Server.recv_Ask2(s, Echo_Server.send_Answer(s, st1, n + 1), fn (k, st2) ->
+        Echo_Server.recv_Ask2(s, Echo_Server.send_Answer(s, st1, n + 1 + extra), fn (k, st2) ->
           Echo_Server.close(s, Echo_Server.send_Answer2(s, st2, k + 1))))
     end
 
-    -- A task: reads the Vault the hook created, then starts an Echo session
-    -- of its own (Ask 7: answered 8, then 9).
+    -- New code in a task the new code spawned: reads the Vault the OLD
+    -- version's hook created, then starts an Echo session of its own (Ask 7:
+    -- answered 8, then 9). Returns base + that answer: 109.
     pfn nested(env : Env, n : Int) : Int do
       let base = match Vault.whereis("upgrade_state") do
         Some(v) -> Vault.get_or(v, "base", -1)
@@ -100,7 +98,7 @@ mod UpgradeApp do
         Ok(_) -> Vault.get_or(got, "v", -10000)
         Err(_) -> -100000
       end
-      println("upgrade v1: a nested session answered " ++ int_to_string(own))
+      println("upgrade live: new code sees base=" ++ int_to_string(base) ++ ", its own session answered " ++ int_to_string(own))
       base + own
     end
   end

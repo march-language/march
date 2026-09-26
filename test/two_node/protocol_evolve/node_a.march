@@ -190,7 +190,10 @@ mod ProtocolEvolveA do
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "evolve-secret", 1)
+    -- A 15 s suspect timeout, not the default 3 s: node-a stalls while its
+    -- deploy is verified and activated, and on a slow CI runner node-b
+    -- declared it dead mid-deploy, cancelling the sessions in flight.
+    let cfg = { ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "evolve-secret", 1) with swim: Swim.config(500, 15000, 2) }
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->

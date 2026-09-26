@@ -209,7 +209,10 @@ mod ProtocolEvolveB do
 
   fn main(c : Cap(IO)) do
     let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
-    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "evolve-secret", 1)
+    -- A 15 s suspect timeout, not the default 3 s: node-a stalls while its
+    -- deploy is verified and activated, and on a slow CI runner node-b
+    -- declared it dead mid-deploy, cancelling the sessions in flight.
+    let cfg = { ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "evolve-secret", 1) with swim: Swim.config(500, 15000, 2) }
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
@@ -220,6 +223,8 @@ mod ProtocolEvolveB do
         drive(d, c, h, unix_time_ms() + Env.get_int("EVOLVE_DRIVE_MS", 14000))
         settle(30000)
         summary()
+        -- Linger so the scenario can read this node's reload counters.
+        sleep_ms(5000)
         ClusterNode.stop(h)
     end
   end

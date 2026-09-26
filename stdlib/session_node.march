@@ -2958,7 +2958,17 @@ mod SessionNode do
       Cons(r, rest) ->
         let (cands, skipped) = candidates(node, proto, names, r, used, n, m)
         match invite_role(node, sid, m.fp, reply, m.me, answers, budget, cands, skipped) do
-          Err(why) -> Err((r, why, accepted))
+          Err(why) ->
+            -- "closing" is an offer being replaced (`close_offer` right after
+            -- a re-offer, e.g. a hosting actor moving a role to a new protocol
+            -- version): its replacement's registration may not have reached
+            -- this node yet, so look again after a moment, within the setup
+            -- time, rather than report the role unfilled.
+            if String.contains(why, "refused: closing") && Vault.get_or(budget, "left", 0) > 100 do
+              sleep_ms(100)
+              let _ = Vault.incr(budget, "left", 0 - 100)
+              fill_roles(node, proto, names, sid, m, reply, answers, budget, roles, n, used, accepted)
+            else Err((r, why, accepted)) end
           Ok((g, ofp)) ->
             -- The session's second fingerprint, once an offer at one joins.
             let m2 =

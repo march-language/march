@@ -17,6 +17,7 @@ mod UpgradeApp do
   needs IO
   needs IO.Clock
   needs IO.Spawn
+  needs IO.Mut
   needs Session.Live
   needs ClusterNode.Live
 
@@ -28,7 +29,9 @@ mod UpgradeApp do
     answer2: Server -> Client : Int
   end
 
-  type Env = { started : Bool }
+  -- The hook keeps its capabilities so a later version's role body can
+  -- start sessions of its own (fixtures/upgrade/live).
+  type Env = { io : Cap(IO), node : Cap(ClusterNode.Live) }
 
   actor Tally do
     state { total : Int }
@@ -36,10 +39,14 @@ mod UpgradeApp do
     on Add(n : Int) do { total: state.total + n } end
   end
 
-  fn start(_io : Cap(IO), _node : Cap(ClusterNode.Live)) : Env do
+  fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Env do
     let t = spawn(Tally)
     let _ = task_spawn(fn _ -> feed(t, 0))
-    { started: true }
+    -- Named state the OLD version creates: a later version's code must find
+    -- it (a hot patch used to carry its own vault registry and could not).
+    let st = Vault.new("upgrade_state")
+    Vault.set(st, "base", 100)
+    { io: io, node: node }
   end
 
   fn feed(t : Pid(TallyState), i : Int) : Int do
@@ -65,9 +72,48 @@ mod UpgradeApp do
     end
   end
 
-  fn serve_one(_env : Env, s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
-    Echo_Server.recv_Ask(s, st, fn (n, st1) ->
-      Echo_Server.recv_Ask2(s, Echo_Server.send_Answer(s, st1, n + 1), fn (k, st2) ->
-        Echo_Server.close(s, Echo_Server.send_Answer2(s, st2, k + 1))))
+  -- The role body lives in a nested module: a nested module's functions
+  -- keep their qualified name (`Serve.serve_one`) and are on the hot-reload
+  -- boundary; the entry module's own top-level functions get bare names and
+  -- are not, so a body there could never be hot-deployed.
+  mod Serve do
+    needs IO
+    needs IO.Console
+    needs IO.Clock
+    needs IO.Spawn
+    needs IO.Mut
+    needs Session.Live
+    needs ClusterNode.Live
+
+    fn serve_one(env : Env, s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
+      Echo_Server.recv_Ask(s, st, fn (n, st1) ->
+        -- Version 1 runs the task (so it holds the same authority as later
+        -- versions: a hot deploy may not add any) but answers without it;
+        -- only a NEW body can produce 1111 for an Ask of 1000.
+        let extra = if n >= 1000 do task_await_unwrap(task_spawn(fn _ -> nested(env, n))) else 0 end
+        let _ = extra
+        Echo_Server.recv_Ask2(s, Echo_Server.send_Answer(s, st1, n + 1), fn (k, st2) ->
+          Echo_Server.close(s, Echo_Server.send_Answer2(s, st2, k + 1))))
+    end
+
+    -- A task: reads the Vault the hook created, then starts an Echo session
+    -- of its own (Ask 7: answered 8, then 9).
+    pfn nested(env : Env, n : Int) : Int do
+      let base = match Vault.whereis("upgrade_state") do
+        Some(v) -> Vault.get_or(v, "base", -1)
+        None -> -1000
+      end
+      let got = Vault.new("upgrade_nested_" ++ int_to_string(n))
+      let own = match Echo_Run.initiate_Client(env.io, env.node, fn (s, st) ->
+          Echo_Client.recv_Answer(s, Echo_Client.send_Ask(s, st, 7), fn (a, st2) ->
+            Echo_Client.recv_Answer2(s, Echo_Client.send_Ask2(s, st2, a), fn (b, st3) ->
+              Vault.set(got, "v", b)
+              Echo_Client.close(s, st3)))) do
+        Ok(_) -> Vault.get_or(got, "v", -10000)
+        Err(_) -> -100000
+      end
+      println("upgrade v1: a nested session answered " ++ int_to_string(own))
+      base + own
+    end
   end
 end

@@ -33,6 +33,10 @@
 #                                 reads as a skip. Rules are removed on exit.
 #   wait_line <a|b|c> <text>      block until the node's stdout contains <text>
 #   wait_exit <a|b|c>             block until the node's process exits
+#   need_built <path>             build <path> (relative to the repo, e.g.
+#                                 test/hcr_deploy.exe) with dune unless it is
+#                                 already built, so a scenario's helper exe is
+#                                 never a CI-only failure
 #   COMPILE_FLAGS_<a|b|c>         (set by the scenario) extra `march --compile`
 #                                 flags for that node
 #   ORDERED=1                     (set by the scenario) diff each node's stdout
@@ -108,6 +112,14 @@ fail() {
     [ -s "$work/$n.err" ] && { echo "--- node-$n stderr"; cat "$work/$n.err"; }
   done >&2
   exit 1
+}
+
+need_built() {
+  local rel=$1
+  [ -x "$root/_build/default/$rel" ] && return 0
+  echo "two-node[$scenario]: building $rel" >&2
+  (cd "$root" && dune build --root . "$rel") > "$work/need_built.log" 2>&1 \
+    || { cat "$work/need_built.log" >&2; fail "could not build $rel"; }
 }
 
 compile() {

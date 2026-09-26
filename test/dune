@@ -1105,7 +1105,8 @@
  (libraries march_lexer march_parser march_ast march_format alcotest))
 
 ; hcr_deploy: a local hot deploy for scripts/two-node.sh scenarios
-; (test/two_node/protocol_evolve, distributed-deploys build step 9).
+; (test/two_node/protocol_evolve, distributed-deploys build step 9, and
+; test/two_node/hcr_new_code_session).
 (executable
  (name hcr_deploy)
  (modules hcr_deploy)

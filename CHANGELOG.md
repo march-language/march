@@ -76,6 +76,43 @@ git log is authoritative for exact commits.
 - **A cached `--compile --compile-so` build restores its `.hcr_manifest` and
   `.schemas.json`**, not only the `.so`. `forge deploy hot` no longer reports "no
   manifest" after a second build of the same source.
+- **Hot reload: a patch `.so` no longer carries its own copy of the C runtime.**
+  `march --compile --compile-so` linked every runtime object into the patch,
+  so code the patch ran used a second scheduler table and a second vault
+  registry: the first task a new-code handler spawned killed the process
+  ("no green thread running on this scheduler") and `Vault.whereis` from new
+  code could not see state the old code created. A patch now links only its
+  own IR (plus the HCR identity strings) and binds every runtime symbol to the
+  host process at `dlopen` time, on macOS and Linux. User FFI shim sources are
+  no longer linked into a patch either; a patch needing a new shim fails to
+  load instead of carrying a private copy.
+- **Hot reload: calls from non-reloadable code into reloadable code now reach
+  the patch.** A call dispatched only when both caller and callee were
+  reloadable, so the generated topology `main`, the entry module's closures,
+  actor handlers and stdlib callbacks called the baseline for ever after a
+  deploy (`Topology.reoffer` reopened roles with the old body). A call now
+  dispatches whenever its callee is reloadable; the boundary cost is
+  unchanged (see `specs/progress/2026-09-25-hcr-dispatch-callee-only-rule.md`).
+- **Hot reload: the entry file's nested modules are on the boundary.**
+  `--hot-reload <EntryModule>` (what forge passes) never matched a nested
+  module of the entry file, so a single-file topology app could hot-deploy
+  nothing but actor handlers and `forge deploy hot` reported "No
+  hot-deployable changes" for a changed role body. The entry file's own
+  top-level functions remain off the boundary (filed).
+- **Hot reload: a change inside a lambda a boundary function builds now
+  deploys.** A boundary function's slot hash did not cover the lambdas
+  lowering lifts out of it, so editing a session body (always a lambda)
+  left the function's hash unchanged and `forge deploy hot` activated
+  nothing. Lifted, bare-named helpers are now folded into the hash, by their
+  body rather than their compiler-numbered names, so an unrelated edit does
+  not make stdlib actors look changed and get hot-swapped.
+- **`SessionNode.initiate` survives a re-offer.** When the only access point for a
+  role answered "closing" (its replacement's registration not yet propagated), the
+  session was reported as having no offer; it now looks again within the setup time.
+- **Hot reload works under AddressSanitizer.** The reload server loaded a
+  patch with `RTLD_DEEPBIND`, which ASan refuses; a patch is now bound
+  locally at link time instead (`-Wl,-Bsymbolic` on Linux) and loaded
+  without it.
 - **Compiling the same source twice at once (different `-o` or `--opt`) no longer
   fails at random with `Undefined symbols: "_main"`.** Both compiles wrote their LLVM
   IR to the same `<source>.ll` file and handed it to clang, so one could truncate the
