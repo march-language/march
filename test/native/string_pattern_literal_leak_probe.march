@@ -1,0 +1,98 @@
+-- Leak guard: matching a String against literal patterns allocates nothing
+-- per comparison.
+--
+-- A string-pattern `match` compiles to an if-else chain of march_string_eq
+-- calls, one per arm, each against the arm's literal. Until 2026-09-26 the
+-- chain built that literal with `march_string_lit` -- a FRESH rc=1 string per
+-- comparison that nothing owned and nothing released (the literal is not a
+-- TIR value, so Perceus never sees it). Every arm tried leaked one string: a
+-- scrutinee that falls through to `_` past ten arms leaked ten. LeakSanitizer
+-- reported it as `march_string_alloc <- march_string_lit <- str_to_int` direct
+-- leaks in test/native/tco_fresh_arg_decrc.march.
+--
+-- Legs:
+--   `first`    matches the first arm (one comparison per call);
+--   `last`     matches the last literal arm (every comparison);
+--   `default`  falls through to `_` (every comparison, no arm taken);
+--   `walk`     the tco_fresh_arg_decrc shape, the match inlined into a
+--              tail-recursive walk over a list of digit strings. (Its
+--              String.join-forwarding original also leaks the joined string
+--              per iteration -- a separate TCO leak -- so this leg walks a
+--              list built once, isolating the pattern-literal leak.)
+-- `control` is the first three legs' loop dispatching on an Int, which never
+-- leaked.
+mod Main do
+  needs IO.Console
+
+  pfn digit_val(c : String) : Int do
+    match c do
+    "0" -> 0
+    "1" -> 1
+    "2" -> 2
+    "3" -> 3
+    "4" -> 4
+    "5" -> 5
+    "6" -> 6
+    "7" -> 7
+    "8" -> 8
+    "9" -> 9
+    _ -> 0
+    end
+  end
+
+  pfn int_val(c : Int) : Int do
+    match c do
+    0 -> 0
+    1 -> 1
+    9 -> 9
+    _ -> 0
+    end
+  end
+
+  pfn str_loop(s : String, n : Int, acc : Int) : Int do
+    if n <= 0 do acc else str_loop(s, n - 1, acc + digit_val(s)) end
+  end
+
+  pfn int_loop(k : Int, n : Int, acc : Int) : Int do
+    if n <= 0 do acc else int_loop(k, n - 1, acc + int_val(k)) end
+  end
+
+  pfn parse(ds : List(String), acc : Int) : Int do
+    match ds do
+    Nil -> acc
+    Cons(c, rest) -> parse(rest, acc * 10 + digit_val(c))
+    end
+  end
+
+  pfn parse_loop(ds : List(String), n : Int, acc : Int) : Int do
+    if n <= 0 do acc else parse_loop(ds, n - 1, acc + parse(ds, 0)) end
+  end
+
+  pfn flat(label : String, before : Int) : () do
+    let grew = live_allocs() - before
+    println(label ++ ", flat: " ++ bool_to_string(grew < 200))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 20000
+    let zero = "0"
+    let nine = "9"
+    let other = "x"
+    let digits = String.split("9000", "")
+    let a = live_allocs()
+    let ra = str_loop(zero, n, 0)
+    flat("first arm = " ++ int_to_string(ra), a)
+    let b = live_allocs()
+    let rb = str_loop(nine, n, 0)
+    flat("last arm = " ++ int_to_string(rb), b)
+    let c = live_allocs()
+    let rc = str_loop(other, n, 0)
+    flat("default arm = " ++ int_to_string(rc), c)
+    let d = live_allocs()
+    let rd = parse_loop(digits, n, 0)
+    flat("walk = " ++ int_to_string(rd), d)
+    let e = live_allocs()
+    let re = int_loop(9, n, 0)
+    flat("control: Int patterns = " ++ int_to_string(re), e)
+  end
+end

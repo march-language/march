@@ -2292,6 +2292,30 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/if_branch_dead_value_probe.expected native_if_branch_dead_value_probe.out)))
 
+; ── Leak guard: a string-pattern `match` built each arm's literal with a fresh
+; march_string_lit per comparison that nothing released -- one leaked string
+; per arm tried (LSan: `march_string_alloc <- march_string_lit` in
+; tco_fresh_arg_decrc). It now uses the immortal per-site literal. Red before
+; the fix: every string leg reads `flat: false` over 20,000 calls; the
+; Int-pattern control stays flat.
+(rule
+ (targets native_string_pattern_literal_leak_probe
+          native_string_pattern_literal_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/string_pattern_literal_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_string_pattern_literal_leak_probe
+        native/string_pattern_literal_leak_probe.march)
+   (with-stdout-to native_string_pattern_literal_leak_probe.out
+        (system "./native_string_pattern_literal_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/string_pattern_literal_leak_probe.expected native_string_pattern_literal_leak_probe.out)))
+
 ; ── Regression: Perceus released a parent before the borrowed child it still had
 ; to dup. A sorted insert into a list of pairs marked the tuple's fields borrowed
 ; on a liveness that was only conservative, so the else arm freed the list cell
