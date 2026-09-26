@@ -93,6 +93,12 @@ int64_t march_decrc_freed(void *p) { (void)p; return 0; }
 void  march_incrc_local(void *p) { (void)p; }
 void  march_decrc_local(void *p) { (void)p; }
 void  march_free(void *p) { (void)p; /* no-op bump alloc */ }
+/* A TCO loop's pending-drop list (see march_runtime.h): every release it could
+   record is a no-op here, so nothing is recorded and the drain does nothing. */
+void *march_tco_defer_push(void *buf, void (*release)(void *), void *v) {
+    (void)release; (void)v; return buf;
+}
+void  march_tco_defer_drain(void *buf) { (void)buf; }
 
 /* ── String representation ──────────────────────────────────────────── */
 

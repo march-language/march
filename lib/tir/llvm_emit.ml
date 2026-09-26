@@ -162,6 +162,7 @@ type ctx = Llvm_ctx.ctx = {
   mutable tco_stack_save : string;
   mutable tco_in_tail   : bool;
   mutable tco_dup_bound : string list;
+  mutable tco_defer_slot : string;
   mutable mutual_tco_group      : string list;
   mutable mutual_tco_tag_slot   : string;
   mutable mutual_tco_loop_label : string;

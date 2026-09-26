@@ -132,39 +132,49 @@ let rec dup_bound_vars (expr : Tir.expr) : string list =
   in
   here @ sub
 
-(** Does the Perceus dec chain [chain] of a tail call with arguments [args]
-    release one of those arguments, other than a dup-bound one?
+(** True for a cleanup op that RELEASES its target (a decrement, a free, or
+    the deep-drop call [Drop.run] substitutes for a decrement), as opposed to
+    an increment.  A release of a forwarded argument on a TCO back edge is
+    deferred to the loop's exit rather than run or skipped (see
+    [back_edge_drops_forwarded_arg]); an increment has no deferred form. *)
+let is_release_op (e : Tir.expr) : bool =
+  match e with
+  | Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ -> true
+  | Tir.EApp (f, _) -> Tir_names.is_drop_fn f.Tir.v_name
+  | _ -> false
 
-    This is the shape the mutual-TCO loop cannot express.  The chain is
-    `let t = g(x, rest, why) in dec_rc why; t`: [why] is forwarded to a
-    BORROWED parameter and released after the call, which is right under real
-    recursion (the release fires once the nested call has returned) and has no
-    place in a flattened loop, where "after the call" is the next iteration:
-    emitting the DecRC frees the value the next iteration reads (a
-    use-after-free, [test/native/mutual_tco_forwarded_arg.march]), while
-    skipping it, as the self-TCO arms do, drops nothing ever (a leak, the
-    reason B7 in [test_codegen.ml] exists).  Faithful semantics would hold the
-    value until the loop exits, which is a pending-drop stack -- option 2 of
-    [specs/todos/2026-09-20-mutual-tco-borrowed-forwarded-arg.md], still
-    open.  Until then such a group is simply not flattened
-    ([group_back_edges_safe]).  A dup-bound argument ([dup_bound_vars]) is
-    exempt for the reason given there: its DecRC closes a balanced pair and
-    is safe to run on the back edge.
+(** The variables a back edge forwards into the next iteration's parameter
+    slots whose post-call cleanup is NOT the closing half of a balanced dup:
+    every [AVar] argument except the dup-bound ones ([dup_bound_vars]).  The
+    single definition the analyses below and the arms in [Llvm_emit_tcoarm]
+    share, so they agree on the vocabulary. *)
+let forwarded_args ~(dup_bound : string list) (args : Tir.atom list) : string list =
+  List.filter_map (fun a -> match a with
+    | Tir.AVar v when not (List.mem v.Tir.v_name dup_bound) -> Some v.Tir.v_name
+    | _ -> None) args
 
-    The forwarded-argument set is computed exactly as the self-TCO arms in
-    [Llvm_emit_tcoarm] compute theirs, so the filter and the arms agree on
-    the vocabulary. *)
-let back_edge_drops_forwarded_arg ~(dup_bound : string list)
+(** Does the Perceus cleanup chain [chain] of a tail call with arguments
+    [args] contain an op on one of those arguments, other than a dup-bound
+    one, that satisfies [pred]?
+
+    The shape is `let t = g(x, rest, why) in dec_rc why; t`: [why] is
+    forwarded to a BORROWED parameter and released after the call, which is
+    right under real recursion (the release fires once the nested call has
+    returned) and has no place in a flattened loop, where "after the call" is
+    the next iteration: emitting the DecRC there frees the value the next
+    iteration reads (a use-after-free, [test/native/mutual_tco_forwarded_arg.march]),
+    and skipping it drops nothing ever (a leak).  The loop instead records the
+    release on a pending-drop list and runs it when the loop function returns
+    ([Llvm_emit_tcoarm], [march_tco_defer_push]/[march_tco_defer_drain]) --
+    the moment the recursion's own frames would have run it.  A dup-bound
+    argument ([dup_bound_vars]) is exempt: its DecRC closes a balanced pair
+    and is safe to run on the back edge. *)
+let back_edge_forwarded_op ~(pred : Tir.expr -> bool) ~(dup_bound : string list)
     (args : Tir.atom list) (chain : Tir.expr) : bool =
-  let forwarded =
-    List.filter_map (fun a -> match a with
-      | Tir.AVar v when not (List.mem v.Tir.v_name dup_bound) ->
-        Some v.Tir.v_name
-      | _ -> None) args
-  in
-  let hits op = match cleanup_target op with
+  let forwarded = forwarded_args ~dup_bound args in
+  let hits op = pred op && (match cleanup_target op with
     | Some n -> List.mem n forwarded
-    | None -> false
+    | None -> false)
   in
   let rec walk = function
     | Tir.ESeq (op, rest) when is_cleanup_op op -> hits op || walk rest
@@ -173,24 +183,40 @@ let back_edge_drops_forwarded_arg ~(dup_bound : string list)
   in
   walk chain
 
+(** Does a back edge RELEASE a forwarded, non-dup-bound argument?  Such a
+    release is deferred, so a loop function containing one needs a
+    pending-drop list. *)
+let back_edge_drops_forwarded_arg ~dup_bound args chain =
+  back_edge_forwarded_op ~pred:is_release_op ~dup_bound args chain
+
+(** Does a back edge INCREMENT a forwarded, non-dup-bound argument?  That has
+    no deferred form and no loop equivalent, so a mutual group containing one
+    is still not flattened ([group_back_edges_safe]).  Perceus does not emit
+    this shape today (an increment of an argument after the call that
+    received it); the refusal keeps the transform from guessing if it ever
+    does. *)
+let back_edge_incs_forwarded_arg ~dup_bound args chain =
+  back_edge_forwarded_op ~pred:(fun op -> not (is_release_op op)) ~dup_bound args chain
+
 (** True if [expr] contains a Perceus-wrapped call to a member of [group]
-    whose dec chain drops a forwarded, non-dup-bound argument -- exactly the
-    two shapes the mutual-TCO arms in [Llvm_emit] intercept
-    ([ELet (tmp, EApp (f, args), chain)] with [is_trivial_dec_chain_returning]
-    and [ESeq (EApp (f, args), chain)] with [is_trivial_dec_chain]).  Every
-    position is walked, not only tail positions: the arms fire on the shape
-    wherever it sits once the group context is installed. *)
-let rec has_unsafe_group_back_edge (group : string list)
-    ~(dup_bound : string list) (expr : Tir.expr) : bool =
-  let go = has_unsafe_group_back_edge group ~dup_bound in
+    whose cleanup chain satisfies [bad] -- exactly the two shapes the TCO arms
+    in [Llvm_emit] intercept ([ELet (tmp, EApp (f, args), chain)] with
+    [is_trivial_dec_chain_returning] and [ESeq (EApp (f, args), chain)] with
+    [is_trivial_dec_chain], [f] a member).  Every position is walked, not
+    only tail positions: the mutual arms fire on the shape wherever it sits
+    once the group context is installed, and over-approximating is safe for
+    both callers. *)
+let rec has_group_back_edge (group : string list)
+    ~(bad : Tir.atom list -> Tir.expr -> bool) (expr : Tir.expr) : bool =
+  let go = has_group_back_edge group ~bad in
   let in_group (f : Tir.var) = List.mem f.Tir.v_name group in
   match expr with
   | Tir.ELet (tmp_v, Tir.EApp (f, args), body)
     when in_group f && is_trivial_dec_chain_returning tmp_v.Tir.v_name body ->
-    back_edge_drops_forwarded_arg ~dup_bound args body
+    bad args body
   | Tir.ESeq (Tir.EApp (f, args), chain)
     when in_group f && is_trivial_dec_chain chain ->
-    back_edge_drops_forwarded_arg ~dup_bound args chain
+    bad args chain
   | Tir.ELet (_, rhs, body) -> go rhs || go body
   | Tir.ESeq (e1, e2) -> go e1 || go e2
   | Tir.ECase (_, branches, default_opt) ->
@@ -200,14 +226,51 @@ let rec has_unsafe_group_back_edge (group : string list)
     List.exists (fun fn -> go fn.Tir.fn_body) fns || go body
   | _ -> false
 
-(** A mutual-TCO group may be flattened only if none of its members has an
-    unsafe back edge.  Each member's dup-bound set is computed over its own
-    body, as [emit_fn] does for the self-TCO arms. *)
+(** A mutual-TCO group may be flattened only if no member's back edge
+    increments a forwarded argument.  Each member's dup-bound set is computed
+    over its own body, as the arms use it. *)
 let group_back_edges_safe (group : string list) (fns : Tir.fn_def list) : bool =
   List.for_all (fun fn ->
-    not (has_unsafe_group_back_edge group
-           ~dup_bound:(dup_bound_vars fn.Tir.fn_body) fn.Tir.fn_body)
+    not (has_group_back_edge group
+           ~bad:(back_edge_incs_forwarded_arg ~dup_bound:(dup_bound_vars fn.Tir.fn_body))
+           fn.Tir.fn_body)
   ) fns
+
+(** Does a loop function built from [fns] (one function for self-TCO, the
+    members of a mutual group otherwise) need a pending-drop list?  True iff
+    some back edge to a member of [group] releases a forwarded, non-dup-bound
+    argument.  Computed up front because the list's slot must be allocated,
+    and set to NULL, in the entry block, before the loop header. *)
+let needs_defer_list (group : string list) (fns : Tir.fn_def list) : bool =
+  List.exists (fun fn ->
+    has_group_back_edge group
+      ~bad:(back_edge_drops_forwarded_arg ~dup_bound:(dup_bound_vars fn.Tir.fn_body))
+      fn.Tir.fn_body
+  ) fns
+
+(** Allocate a loop function's pending-drop list slot in the ENTRY block
+    (it must be set before the loop header and must not be a per-iteration
+    alloca, which the back edge's stackrestore would reclaim), initialise it
+    to NULL, and install it as [ctx.tco_defer_slot] for the arms. *)
+let emit_defer_slot_init (ctx : Llvm_ctx.ctx) : unit =
+  let slot = Llvm_ctx.alloca_name ctx "tco_defer" in
+  Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca ptr" slot);
+  Llvm_ctx.emit ctx (Printf.sprintf "store ptr null, ptr %%%s.addr" slot);
+  ctx.Llvm_ctx.tco_defer_slot <- slot
+
+(** Run a loop function's pending-drop list just before a [ret].  Every
+    return of a function whose [ctx.tco_defer_slot] is set gets one.  The
+    result has already been computed and owns its own reference, so running
+    the deferred releases now is what the unwinding frames of the equivalent
+    recursion would have done.  [march_tco_defer_drain] takes NULL (no back
+    edge was taken) and frees the list. *)
+let emit_defer_drain (ctx : Llvm_ctx.ctx) : unit =
+  if ctx.Llvm_ctx.tco_defer_slot <> "" then begin
+    let buf = Llvm_ctx.fresh ctx "tco_defer_buf" in
+    Llvm_ctx.emit ctx (Printf.sprintf "%s = load ptr, ptr %%%s.addr"
+      buf ctx.Llvm_ctx.tco_defer_slot);
+    Llvm_ctx.emit ctx (Printf.sprintf "call void @march_tco_defer_drain(ptr %s)" buf)
+  end
 
 (* ── Mutual TCO: call graph analysis ────────────────────────────────── *)
 
@@ -339,9 +402,10 @@ let tarjan_sccs (fns : Tir.fn_def list) : string list list =
     3. All functions in the group have the same LLVM return type (required for
        the shared loop to produce one result type).
     4. Every back edge is safe ([group_back_edges_safe]): no member's
-       Perceus-wrapped group call drops a forwarded, non-dup-bound argument.
-       A group failing this is emitted as ordinary functions whose tail
-       calls are real calls -- correct, at the cost of the loop. *)
+       Perceus-wrapped group call INCREMENTS a forwarded, non-dup-bound
+       argument.  (A release of one is deferred to loop exit instead, see
+       [needs_defer_list].)  A group failing this is emitted as ordinary
+       functions whose tail calls are real calls. *)
 let find_mutual_tco_groups (ctx : Llvm_ctx.ctx) (fns : Tir.fn_def list) : Tir.fn_def list list =
   let fn_map = List.map (fun fn -> (fn.Tir.fn_name, fn)) fns in
   let sccs = tarjan_sccs fns in
@@ -525,6 +589,10 @@ let emit_mutual_tco_group ~emit_expr ctx (group : Tir.fn_def list) =
     ) group
   in
 
+  (* The pending-drop list, if any back edge defers a release (see
+     [needs_defer_list]); allocated here, in the entry block. *)
+  if needs_defer_list group_names group then emit_defer_slot_init ctx;
+
   (* Jump to loop header. *)
   let loop_lbl = Llvm_ctx.fresh_block ctx "mutual_loop" in
   Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" loop_lbl);
@@ -592,11 +660,17 @@ let emit_mutual_tco_group ~emit_expr ctx (group : Tir.fn_def list) =
       ) slots
     ) fn_param_slots;
     ctx.Llvm_ctx.ret_ty <- fn.Tir.fn_ret_ty;
+    (* The arms tell a dup-bound argument's balancing DecRC from a forwarded
+       release by this member's own dup-bound set, as [needs_defer_list] and
+       [group_back_edges_safe] computed it. *)
+    ctx.Llvm_ctx.tco_dup_bound <- dup_bound_vars fn.Tir.fn_body;
     let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
-    if ret_ty = "void" then
+    if ret_ty = "void" then begin
+      emit_defer_drain ctx;
       Llvm_ctx.emit_term ctx "ret void"
-    else begin
+    end else begin
       let final_val = Llvm_ctx.coerce ctx body_ty body_val ret_ty in
+      emit_defer_drain ctx;
       Llvm_ctx.emit_term ctx (Printf.sprintf "ret %s %s" ret_ty final_val)
     end
   ) case_labels;
@@ -610,6 +684,8 @@ let emit_mutual_tco_group ~emit_expr ctx (group : Tir.fn_def list) =
   (* Clear mutual TCO context. *)
   ctx.Llvm_ctx.mutual_tco_group <- [];
   ctx.Llvm_ctx.mutual_tco_stack_save <- "";
+  ctx.Llvm_ctx.tco_dup_bound <- [];
+  ctx.Llvm_ctx.tco_defer_slot <- "";
 
   (* ── Emit wrapper functions ──────────────────────────────────────── *)
   (* Each original function name becomes a thin wrapper that sets the

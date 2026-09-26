@@ -370,6 +370,10 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
   let is_leaf = not (expr_has_call fn.Tir.fn_body) in
 
   if is_tco then begin
+    (* The pending-drop list, if a back edge defers the release of a forwarded
+       argument ([Llvm_tco.needs_defer_list]); must live in the entry block. *)
+    if Llvm_tco.needs_defer_list [fn.Tir.fn_name] [fn] then
+      Llvm_tco.emit_defer_slot_init ctx;
     (* Emit: entry → loop.  The loop block header is the back-edge target. *)
     let loop_lbl = Llvm_ctx.fresh_block ctx "tco_loop" in
     Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" loop_lbl);
@@ -401,12 +405,15 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
     ctx.Llvm_ctx.tco_fn_name <- None;
     ctx.Llvm_ctx.tco_stack_save <- "";
     ctx.Llvm_ctx.tco_dup_bound <- [];
-    if ret_ty = "void" then
+    if ret_ty = "void" then begin
+      Llvm_tco.emit_defer_drain ctx;
       Llvm_ctx.emit_term ctx "ret void"
-    else begin
+    end else begin
       let final_val = Llvm_ctx.coerce ctx body_ty body_val ret_ty in
+      Llvm_tco.emit_defer_drain ctx;
       Llvm_ctx.emit_term ctx (Printf.sprintf "ret %s %s" ret_ty final_val)
-    end
+    end;
+    ctx.Llvm_ctx.tco_defer_slot <- ""
   end else begin
     (* Phase 4: insert the reduction check at function entry for non-leaf
        non-TCO functions.  This fires once per call, counting every function
