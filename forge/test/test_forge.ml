@@ -930,7 +930,7 @@ let test_hosts_from_config () =
     [ h.Hosts.name; h.Hosts.ssh; h.Hosts.socket; h.Hosts.pubkey ];
   let flat = { Project.hr_socket = "/f"; hr_ssh_host = ""; hr_public_key = None;
                hr_envs = []; hr_health_check_url = None; hr_strategy = "rolling";
-               hr_target = None; hr_module_prefix = None } in
+               hr_target = None; hr_module_prefix = None; hr_compact_after = None } in
   Alcotest.(check bool) "no ssh_host -> no host" true (Hosts.of_flat_config flat = None);
   match Hosts.of_flat_config { flat with Project.hr_ssh_host = "root@x" } with
   | Some h -> Alcotest.(check (list string)) "flat host is 'default'"

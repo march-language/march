@@ -12,6 +12,19 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **`forge topology gen systemd` names the variables the runtime reads**:
+  `MARCH_POOLS` and `MARCH_TOPOLOGY_FILE` (it wrote `MARCH_POOL` and
+  `MARCH_TOPOLOGY`, which nothing reads), and adds `User=march`, the reload
+  socket, the status file and `HOME`. `forge topology gen ufw` now allows ssh
+  before `ufw --force enable`, which otherwise locked the operator out.
+- **`forge deploy hot` checks a patch's target identity before uploading it.**
+  #606 taught the reload server to answer `HCR_INFO` (target, HCR ABI, module
+  prefix) but forge never asked, and it never read the manifest's `# hcr_abi`
+  line. A patch built for another target, ABI or module prefix is now refused
+  with both identities named, before any artifact is sent; a server too old to
+  answer is still accepted for a native patch (with a note) and refused for a
+  cross-target one. The runtime's own check after `dlopen` is unchanged.
+- `forge run --processes` no longer occasionally assigns two pools the same cluster port (seen on Linux CI as `tcp_listen: bind failed`); the ports for all processes are now reserved together.
 - **A top-level function named like a builtin now compiles.** Defining, for
   example, `fn file_read(n : Int) : Int` or `fn dns_resolve(...)` in your
   program (about 330 builtin names are affected) ran fine interpreted, but
@@ -108,6 +121,52 @@ git log is authoritative for exact commits.
   interpreter does, instead of returning a UUID with a garbage timestamp.
 
 ### Added
+- **The `ssh` reconciler backend** (build step 10b of the distributed-deploys
+  plan). A topology overlay with `[backend] kind = "ssh"` makes `forge topology
+  apply --env <env>` and `forge topology status --env <env>` work on the
+  overlay's hosts over ssh: a topology push is the signed `TOPOLOGY` verb on each
+  node's reload socket (through an ssh tunnel), then the digest file and a SIGHUP
+  to the pool's systemd unit; status shows each node's report, its restored patch
+  stack, the stack's size and target, and flags code that drifted from what forge
+  last deployed. `FORGE_SSH_CONFIG=<file>` passes `-F <file>` to every ssh forge
+  starts.
+- **`forge host init --env <env>`** prepares every host of an ssh topology once,
+  over ssh: the `march` user and directories (code, the service's HOME whose CAS
+  root holds the persisted patch stack, run state), the pool's systemd unit with
+  the host's own `Environment=` (node name, labels, cluster port and address,
+  seeds, reload socket, status and topology files, `MARCH_DEPLOY_POLICY`), the
+  deploy public key, a shared cluster secret or, with an operator key from
+  `forge cluster keygen`, a node certificate per node, the node's capability
+  policy from its pool's written or derived `caps`, and the pool's ufw rules
+  (applied when ufw is installed). A second run changes nothing. Each host's
+  target (`linux/amd64`, `linux/arm64`) is recorded in `.forge/hosts/<env>.json`.
+- **`forge deploy --plan --env <env>`** shows, per pool and build, what a deploy
+  of the working tree would do, in six blocks: what changed (functions, actor
+  state and message types, protocols with fingerprints, placement, hooks, the
+  base image), the mechanism and why (hot patch, hot patch + migration, hot patch
+  + protocol drain, restart, topology push), order and splits (the pools that
+  receive a new choice branch before the pool that makes it; in a monolith, the
+  expand/contract split into two deploys, D21), drains with the live sessions
+  each node reports, what may be lost (queued messages with no `migrate_msg`,
+  sessions cut at the hard deadline, renumbered unlabelled messages), and
+  authority (a widening role closure or derived pool capability, and the
+  `--grant-cap` it needs) with each pool's derived values.
+- **`forge deploy --env <env>` carries the plan out** (confirmation, or `--yes`):
+  pool by pool in the plan's order, a hot patch through an ssh tunnel to each
+  node's reload socket (rolling with a health gate, `simultaneous`, or
+  `--canary N`), a restart onto a base image cross-built for each host's
+  recorded target (uploaded, the unit restarted, the node's reload socket
+  waited for), then the signed topology push; what was deployed becomes the
+  next plan's baseline in `.forge/deploy/<env>/`. A D21 split stops after
+  deploy one and does deploy two when run again. A change the running base
+  cannot swap (a function with no dispatch slot and no changed caller that has
+  one, such as a closure body) is planned as a restart instead of a hot patch
+  that would activate nothing.
+- **Patch-stack compaction: `forge deploy --compact --env <env>`**, and
+  automatically when a node reports a persisted patch stack longer than
+  `[hot-reload] compact_after = N`: each build's base image is rebuilt from the
+  current version, its hosts restart onto it, and their persisted stacks are
+  cleared (forge checks each node reports an empty stack afterwards).
 - **Protocol changes across versions** (build step 9 of the distributed-deploys
   plan). Every `@[endpoints]` protocol's `<P>_Msg` module now has `compat()`: per
   role, the previous fingerprint that role may form a session with. It is computed at
