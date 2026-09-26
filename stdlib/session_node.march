@@ -2902,11 +2902,12 @@ mod SessionNode do
   -- Invite the candidates for [role] in turn until one accepts: Ok(its pid),
   -- or Err(every refusal, "; "-separated, or why there was none).
   --
-  -- ONE recursive function, not a mutually recursive pair: a mutual pair is
-  -- flattened into a shared loop that frees an argument it is about to
-  -- forward, which ASAN caught here as a use-after-free on `why`
-  -- (specs/todos/2026-09-20-mutual-tco-borrowed-forwarded-arg.md). Keep it
-  -- self-recursive until that is fixed.
+  -- ONE recursive function, not a mutually recursive pair: the mutual pair
+  -- this was first written as hit a mutual-TCO loop that freed an argument it
+  -- was about to forward (ASAN: a use-after-free on `why`). That is fixed --
+  -- the release is now deferred to the loop's exit
+  -- (specs/progress/2026-09-26-mutual-tco-forwarded-arg.md) -- so the shape
+  -- is only a matter of style now.
   pfn invite_role(node : Cap(ClusterNode.Live), sid : String, fp : String, reply : GlobalPid.Pid, irole : Int,
                   answers : Vault(String), budget : Vault(Int), cands : List((GlobalPid.Pid, String, List(String))), why : String)
       : Result((GlobalPid.Pid, String), String) do

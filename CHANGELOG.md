@@ -12,6 +12,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **Deep tail recursion that hands a freshly built value to a parameter the
+  callee only reads no longer overflows the stack or leaks.** A pair of
+  mutually tail-recursive functions in that shape (e.g. `take_next`/`inspect`
+  passing `"refused " ++ x` along) was compiled as real recursion and died with
+  a stack overflow on a long enough input (1,000,000 steps), and a
+  self-recursive function in the same shape leaked one value per iteration.
+  Both now run as loops, and those values are released when the loop returns,
+  as the recursion would have released them.
 - **`forge topology gen systemd` names the variables the runtime reads**:
   `MARCH_POOLS` and `MARCH_TOPOLOGY_FILE` (it wrote `MARCH_POOL` and
   `MARCH_TOPOLOGY`, which nothing reads), and adds `User=march`, the reload

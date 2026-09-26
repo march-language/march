@@ -85,6 +85,18 @@ void  march_rc_set_thread_concurrent(int on);
 
 void  march_free(void *p);
 
+/* Pending-drop list of a flattened tail-call loop (self- or mutual-TCO).
+   A tail call that forwards an owned value to a BORROWED parameter is followed
+   by a release of that value, which under real recursion runs only once the
+   nested call has returned.  The loop has no such "after": the back edge
+   records (release fn, value) here instead, and every return of the loop
+   function runs the recorded releases, newest first -- the order the
+   recursion's frames would have unwound in.  [buf] is NULL until the first
+   push; push returns the (possibly moved) buffer.  Drain accepts NULL and
+   frees the buffer.  See lib/tir/llvm_emit_tcoarm.ml. */
+void *march_tco_defer_push(void *buf, void (*release)(void *), void *v);
+void  march_tco_defer_drain(void *buf);
+
 /* I/O builtins. */
 void  march_print(void *s);
 void  march_println(void *s);

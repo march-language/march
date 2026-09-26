@@ -1,6 +1,6 @@
 # Mutual TCO: a group that would free a forwarded argument early is not flattened
 
-Closes option 1 of [[../todos/2026-09-20-mutual-tco-borrowed-forwarded-arg]] (P1,
+Closes option 1 of [[2026-09-26-mutual-tco-forwarded-arg]] (P1,
 kept open for option 2). Plan: `specs/2026-09-20-mutual-tco-safety-implementation.md`.
 
 ## The bug

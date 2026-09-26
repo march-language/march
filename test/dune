@@ -3332,12 +3332,14 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/task_await_discarded.expected native_task_await_discarded.out)))
 
-;; A mutual-TCO group whose back edge would drop a forwarded, non-dup-bound
-;; argument (`why` passed to a borrowed parameter and released after the call)
-;; is not flattened: flattening freed the value one iteration early
-;; ("refused: no-y; refused: no-y"). The second half of the fixture pins that
-;; refusing the loop does not leak either (live_allocs delta over a 20000-walk).
-;; specs/progress/2026-09-20-mutual-tco-safety.md
+;; A mutual-TCO group whose back edge releases a forwarded, non-dup-bound
+;; argument (`why` passed to a borrowed parameter and released after the call):
+;; running the release on the back edge freed the value one iteration early
+;; ("refused: no-y; refused: no-y"). It was then refused the loop
+;; (specs/progress/2026-09-20-mutual-tco-safety.md); it is now flattened with
+;; the release deferred to loop exit (mutual_tco_deferred_drop below,
+;; specs/progress/2026-09-26-mutual-tco-forwarded-arg.md). The second half
+;; pins that nothing leaks (live_allocs delta over a 20000-walk).
 (rule
  (targets native_mutual_tco_forwarded_arg native_mutual_tco_forwarded_arg.out)
  (deps (file %{exe:../bin/main.exe})
@@ -3354,6 +3356,60 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/mutual_tco_forwarded_arg.expected native_mutual_tco_forwarded_arg.out)))
+
+;; A tail call that forwards an owned value to a BORROWED parameter releases
+;; it after the call; a flattened TCO loop now defers that release to its own
+;; exit (a pending-drop list, march_tco_defer_push/_drain) instead of running
+;; it on the back edge (use-after-free) or skipping it (leak). The mutual pair
+;; used to be refused its loop and overflowed the stack at 1000000 steps; the
+;; self-recursive last_seen leaked one string per step. Inputs alternate
+;; between each function's two branches. The expected output is the
+;; interpreter's. specs/progress/2026-09-26-mutual-tco-forwarded-arg.md
+(rule
+ (targets native_mutual_tco_deferred_drop native_mutual_tco_deferred_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/mutual_tco_deferred_drop.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_mutual_tco_deferred_drop
+        native/mutual_tco_deferred_drop.march)
+   (with-stdout-to native_mutual_tco_deferred_drop.out
+        (system "./native_mutual_tco_deferred_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/mutual_tco_deferred_drop.expected native_mutual_tco_deferred_drop.out)))
+
+;; IR-shape pin for the fixture above, so it cannot pass vacuously: the pair
+;; must still be a mutual-TCO group (>=1 '@__mutco_', 0 would mean the inliner
+;; folded it into self-recursion or the group was refused) and the deferred
+;; releases must be emitted (>=2 pushes: the mutual back edge and last_seen's
+;; two self back edges; >=2 drains: one per return).
+(rule
+ (targets mutual_tco_deferred_drop_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/mutual_tco_deferred_drop.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/mutual_tco_deferred_drop.march)
+   (with-stdout-to mutual_tco_deferred_drop_llvm_check.out
+    (run bash -c
+     "mutco=$(grep -c '^define .*@__mutco_' native/mutual_tco_deferred_drop.ll); \
+      push=$(grep -c 'call ptr @march_tco_defer_push' native/mutual_tco_deferred_drop.ll); \
+      drain=$(grep -c 'call void @march_tco_defer_drain' native/mutual_tco_deferred_drop.ll); \
+      echo \"$mutco $push $drain\"")))))
+
+(rule
+ (alias runtest)
+ (deps mutual_tco_deferred_drop_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r mutco push drain < mutual_tco_deferred_drop_llvm_check.out; \
+    test \"$mutco\" -ge 1 -a \"$push\" -ge 2 -a \"$drain\" -ge 2 || { echo \"mutual_tco_deferred_drop no longer exercises the deferred-release TCO path: expected >=1 '@__mutco_' definition, >=2 march_tco_defer_push calls and >=2 march_tco_defer_drain calls -- found mutco=$mutco push=$push drain=$drain\" >&2; exit 1; }")))
 
 ;; stdlib/cluster_node.march must typecheck CLEAN when checked as the entry.
 ;; A diagnostic inside a stdlib module is never printed when a program merely

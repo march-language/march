@@ -6,11 +6,13 @@
 -- march_string_eq; without ASAN the previous element's text reappeared in
 -- the accumulator ("refused: no-y; refused: no-y" for "no-x", "no-y").
 -- Skipping that DecRC (the self-TCO arms' rule, commit eafbd71a) would leak
--- it instead, so a group whose back edge drops a forwarded, non-dup-bound
--- argument is now not flattened at all: take_next/inspect run as ordinary
--- calls. walk/step below forwards only borrowed fields, stays a loop, and
--- its live-allocation check pins that neither shape leaks.
--- specs/progress/2026-09-20-mutual-tco-safety.md
+-- it instead. The group was first refused its loop
+-- (specs/progress/2026-09-20-mutual-tco-safety.md); it is now flattened
+-- again with the release deferred to the loop's exit, where the recursion
+-- would have run it (specs/progress/2026-09-26-mutual-tco-forwarded-arg.md,
+-- deep-input coverage in mutual_tco_deferred_drop.march). walk/step below
+-- forwards only borrowed fields, and its live-allocation check pins that
+-- neither shape leaks.
 mod MutualTcoForwardedArg do
   needs IO
   needs IO.Console

@@ -268,6 +268,8 @@ native_monitor_expiry_loopback: coverage audit (user + stdlib): 120 enforced, 0 
 native_monitor_expiry_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_multihead_literal_arg: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_multihead_literal_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_mutual_tco_deferred_drop: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_mutual_tco_deferred_drop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_mutual_tco_forwarded_arg: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_mutual_tco_forwarded_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_native_arr_bounds_panic: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
