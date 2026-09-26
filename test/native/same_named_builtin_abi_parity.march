@@ -1,0 +1,160 @@
+-- Compiled-vs-interpreted parity for the sixteen builtins that compiled only
+-- because the runtime defined a C function of exactly their March name:
+-- `__try_call`, `__try_call_val`, `http_fetch`, `http_fetch_available` and the
+-- twelve Logger v2 `logger_*`.  (specs/progress/2026-09-26-same-named-builtin-abi-audit.md)
+--
+-- With no row in lib/tir/llvm_builtins.ml, mangle_extern's identity
+-- fallthrough emitted `call @logger_add_field` with a declare synthesized from
+-- the call site, the borrow guard never saw them, and nothing compared them
+-- with the C code.  Measured on origin/main before the fix:
+--   * Logger.current_fields() returned the runtime's own stack without a
+--     reference: the caller's drop freed it, and the next call aborted with
+--     "RC underflow".
+--   * Logger.with_fields / Logger.with_scope did not compile at all: a call
+--     from a local fn went through a `logger_add_field$clo_wrap` closure that
+--     called the C symbol with NO declare ("use of undefined value").
+--   * logger_set_module_level / logger_clear_module_level were no-ops and
+--     logger_module_level always answered the global level.
+--   * the global level started at Debug (interpreter: Info).
+--   * every dispatch printed the context fields twice (stderr golden).
+--   * every String argument was owned by default and leaked (dispatch: ~4
+--     objects a call, the module-level trio ~3 an iteration).
+-- The dune rule runs this BOTH ways against one stdout golden and one stderr
+-- golden: the contract is parity.
+mod Main do
+  needs IO.Console
+
+  pfn show_value(v : Logger.LogValue) : String do
+    match v do
+      Logger.LStr(s) -> "s:" ++ s
+      Logger.LInt(n) -> "i:" ++ int_to_string(n)
+      Logger.LFloat(f) -> "f:" ++ float_to_string(f)
+      Logger.LBool(b) -> "b:" ++ bool_to_string(b)
+      Logger.LAtom(_) -> "a"
+      Logger.LNull -> "null"
+    end
+  end
+
+  pfn show_fields(fs : List(Logger.LogField), acc : String) : String do
+    match fs do
+      Nil -> acc
+      Cons(Logger.LogField(k, v), rest) ->
+        show_fields(rest, acc ++ " " ++ k ++ "=" ++ show_value(v))
+    end
+  end
+
+  pfn scope_loop(i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+      let key = "k" ++ int_to_string(i)
+      let d = Logger.with_scope([Logger.LogField(key, Logger.s("v" ++ key))],
+                                fn _ -> Logger.field_count())
+      scope_loop(i + 1, n, acc + d)
+    end
+  end
+
+  pfn module_level_loop(i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+      let m = "Mod" ++ int_to_string(i)
+      Logger.set_module_level(m, Logger.Warn)
+      let lv = Logger.level_to_int(Logger.level_for(m))
+      Logger.clear_module_level(m)
+      let back = Logger.level_to_int(Logger.level_for(m))
+      module_level_loop(i + 1, n, acc + lv * 10 + back)
+    end
+  end
+
+  pfn dispatch_loop(i : Int, n : Int) : Unit do
+    if i >= n do ()
+    else
+      Logger.log_in("Loop", Logger.Info, "tick " ++ int_to_string(i),
+                    [Logger.LogField("i", Logger.i(i))])
+      dispatch_loop(i + 1, n)
+    end
+  end
+
+  -- __try_call_val from a LOCAL fn: goes through Defun as a nested call.
+  pfn guarded(n : Int) : String do
+    fn run(x : Int) do
+      match __try_call_val(fn _ -> if x > 2 do panic("too big") else x * 10 end) do
+        Ok(v) -> "ok " ++ int_to_string(v)
+        Err(_) -> "err"
+      end
+    end
+    run(n)
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    -- Default level: Info on both backends.
+    println("default level: " ++ int_to_string(Logger.level_to_int(Logger.get_level())))
+
+    -- Field stack, read twice: the first read's drop freed the stack.
+    Logger.with_field("user", Logger.s("alice"))
+    Logger.with_field("n", Logger.i(42))
+    Logger.with_field("ok", Logger.b(true))
+    Logger.with_field("fl", Logger.f(1.5))
+    println("depth: " ++ int_to_string(Logger.field_count()))
+    println("fields:" ++ show_fields(Logger.current_fields(), ""))
+    println("fields again:" ++ show_fields(Logger.current_fields(), ""))
+    Logger.info("with context")
+
+    -- with_scope pushes, runs the thunk, and pops back to the old depth.
+    let inside = Logger.with_scope([Logger.LogField("rid", Logger.s("r-1")),
+                                    Logger.LogField("span", Logger.i(7))],
+                                   fn _ -> Logger.field_count())
+    println("depth inside scope: " ++ int_to_string(inside))
+    println("depth after scope: " ++ int_to_string(Logger.field_count()))
+    Logger.with_fields([Logger.LogField("extra", Logger.s("x"))])
+    println("depth after with_fields: " ++ int_to_string(Logger.field_count()))
+    Logger.warn("after scope")
+
+    -- Per-module levels.
+    Logger.set_module_level("Noisy", Logger.Error)
+    println("Noisy level: " ++ int_to_string(Logger.level_to_int(Logger.level_for("Noisy"))))
+    println("Other level: " ++ int_to_string(Logger.level_to_int(Logger.level_for("Other"))))
+    Logger.log_in("Noisy", Logger.Warn, "filtered out", [])
+    Logger.log_in("Noisy", Logger.Error, "kept", [Logger.LogField("code", Logger.i(500))])
+    Logger.clear_module_level("Noisy")
+    println("Noisy level after clear: " ++ int_to_string(Logger.level_to_int(Logger.level_for("Noisy"))))
+    println("appenders: " ++ int_to_string(List.length(Logger.list_appenders())))
+
+    -- Try-call pair.
+    println(guarded(1))
+    println(guarded(5))
+    let flag = match __try_call(fn _ -> Logger.field_count() > 3) do
+      Ok(b) -> "ok " ++ bool_to_string(b)
+      Err(_) -> "err"
+    end
+    println("try_call: " ++ flag)
+    let tupled = match __try_call_val(fn _ -> ("t", 2.5)) do
+      Ok((s, f)) -> s ++ " " ++ float_to_string(f)
+      Err(_) -> "err"
+    end
+    println("try_call_val tuple: " ++ tupled)
+
+    println("http_fetch_available: " ++ bool_to_string(http_fetch_available()))
+
+    -- Ownership: each loop runs once to warm up, then must not grow the heap.
+    let _ = scope_loop(0, 5, 0)
+    let b1 = live_allocs()
+    let depths = scope_loop(0, 200, 0)
+    let g1 = live_allocs() - b1
+    println("with_scope x200 depth sum: " ++ int_to_string(depths))
+    println("with_scope leaked nothing: " ++ bool_to_string(g1 == 0))
+
+    let _ = module_level_loop(0, 5, 0)
+    let b2 = live_allocs()
+    let lv = module_level_loop(0, 200, 0)
+    let g2 = live_allocs() - b2
+    println("module levels x200: " ++ int_to_string(lv))
+    println("module levels leaked nothing: " ++ bool_to_string(g2 == 0))
+
+    Logger.clear_context()
+    dispatch_loop(0, 2)
+    let b3 = live_allocs()
+    dispatch_loop(2, 20)
+    let g3 = live_allocs() - b3
+    println("dispatch leaked nothing: " ++ bool_to_string(g3 == 0))
+  end
+end
