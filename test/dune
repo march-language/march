@@ -3578,6 +3578,62 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (diff native/uuid_v7_dns_parity.expected
                native_uuid_v7_dns_parity_interp.out)))
 
+; __try_call, __try_call_val, http_fetch, http_fetch_available and the twelve
+; Logger v2 logger_* builtins compiled only because the runtime defined C
+; functions of exactly those names, reached through mangle_extern's identity
+; fallthrough with a declare synthesized from the call site.  Renamed to
+; march_* with explicit codegen rows, borrow classifications and runtime fixes
+; (specs/progress/2026-09-26-same-named-builtin-abi-audit.md).  Run on BOTH
+; backends against one stdout golden and one stderr golden (the log lines).
+(rule
+ (targets native_same_named_builtin_abi_parity
+          native_same_named_builtin_abi_parity.out
+          native_same_named_builtin_abi_parity.err
+          native_same_named_builtin_abi_parity_interp.out
+          native_same_named_builtin_abi_parity_interp.err)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/same_named_builtin_abi_parity.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (with-stdout-to native_same_named_builtin_abi_parity_interp.out
+     (with-stderr-to native_same_named_builtin_abi_parity_interp.err
+      (run %{exe:../bin/main.exe} native/same_named_builtin_abi_parity.march)))
+    (run %{exe:../bin/main.exe} --compile -o native_same_named_builtin_abi_parity
+         native/same_named_builtin_abi_parity.march)
+    (with-stdout-to native_same_named_builtin_abi_parity.out
+     (system "./native_same_named_builtin_abi_parity 2> native_same_named_builtin_abi_parity.err"))))))
+
+(rule
+ (alias runtest)
+ (deps native_same_named_builtin_abi_parity.out
+       native/same_named_builtin_abi_parity.expected)
+ (action (diff native/same_named_builtin_abi_parity.expected
+               native_same_named_builtin_abi_parity.out)))
+
+(rule
+ (alias runtest)
+ (deps native_same_named_builtin_abi_parity_interp.out
+       native/same_named_builtin_abi_parity.expected)
+ (action (diff native/same_named_builtin_abi_parity.expected
+               native_same_named_builtin_abi_parity_interp.out)))
+
+(rule
+ (alias runtest)
+ (deps native_same_named_builtin_abi_parity.err
+       native/same_named_builtin_abi_parity.stderr.expected)
+ (action (diff native/same_named_builtin_abi_parity.stderr.expected
+               native_same_named_builtin_abi_parity.err)))
+
+(rule
+ (alias runtest)
+ (deps native_same_named_builtin_abi_parity_interp.err
+       native/same_named_builtin_abi_parity.stderr.expected)
+ (action (diff native/same_named_builtin_abi_parity.stderr.expected
+               native_same_named_builtin_abi_parity_interp.err)))
+
 ; dns_resolve returned different lists interpreted and compiled (IPv4 with a
 ; duplicate per socket type vs IPv4+IPv6, deduplicated).  One contract now:
 ; IPv4 only, one entry per address (specs/progress/2026-09-25-dns-resolve-parity.md).

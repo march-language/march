@@ -1,0 +1,23 @@
+[INFO] with context {fl=1.5, ok=true, n=42, user=alice}
+[WARN] after scope {extra=x, fl=1.5, ok=true, n=42, user=alice}
+[ERROR] kept {code=500, extra=x, fl=1.5, ok=true, n=42, user=alice}
+[INFO] tick 0 {i=0}
+[INFO] tick 1 {i=1}
+[INFO] tick 2 {i=2}
+[INFO] tick 3 {i=3}
+[INFO] tick 4 {i=4}
+[INFO] tick 5 {i=5}
+[INFO] tick 6 {i=6}
+[INFO] tick 7 {i=7}
+[INFO] tick 8 {i=8}
+[INFO] tick 9 {i=9}
+[INFO] tick 10 {i=10}
+[INFO] tick 11 {i=11}
+[INFO] tick 12 {i=12}
+[INFO] tick 13 {i=13}
+[INFO] tick 14 {i=14}
+[INFO] tick 15 {i=15}
+[INFO] tick 16 {i=16}
+[INFO] tick 17 {i=17}
+[INFO] tick 18 {i=18}
+[INFO] tick 19 {i=19}

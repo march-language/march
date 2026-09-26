@@ -275,6 +275,23 @@ let extern_borrow_table : (string * bool list) list = [
      OWNED, so every call leaked its host argument. ── *)
   ("dns_resolve",          [true]);
   ("march_dns_resolve",    [true]);
+  (* ── Logger / http_fetch: explicit codegen rows since 2026-09-26
+     (specs/progress/2026-09-26-same-named-builtin-abi-audit.md).  Each C
+     function below only READS its heap arguments -- dispatch/write print
+     them, the module-level functions copy the name's bytes into their own
+     table, the appender entries and http_fetch are native no-ops -- so the
+     caller keeps ownership.  Before the rows they were on no list and
+     defaulted to OWNED: every call leaked its Strings (and dispatch its
+     whole field list).  logger_add_field and logger_add_context STORE both
+     arguments and stay in [extern_owned_builtins]. ── *)
+  ("logger_write",              [true; true; true; true]);
+  ("logger_dispatch",           [true; true; true; true]);
+  ("logger_register_appender",  [true; true]);
+  ("logger_remove_appender",    [true]);
+  ("logger_set_module_level",   [true; false]);
+  ("logger_clear_module_level", [true]);
+  ("logger_module_level",       [true]);
+  ("http_fetch",                [true; true; true; true]);
   (* ── Synthetic C names used directly in lower.ml wrappers ──────────────── *)
   ("march_compare_string", [true; true]);
   ("march_hash_string",    [true]);
@@ -370,13 +387,13 @@ let extern_owned_builtins : string list = [
     "base64_encode"; "stdlib_base64_encode"; "base64_decode";
     "stdlib_base64_decode"; "bytes_to_u8_arr"; "u8_arr_to_bytes";
     "remote_register_stub"; "remote_check"; "remote_invoke";
-    "logger_add_context"; "logger_write"; "spawn";
+    "logger_add_context"; "logger_add_field"; "spawn";
     "spawn_supervised"; "actor_call"; "actor_reply";
     "actor_send_after"; "actor_cancel_timer"; "http_server_spawn_n";
     "file_exists"; "dir_exists"; "file_open"; "file_close"; "file_read";
     "file_read_line"; "file_read_chunk"; "file_write"; "file_append";
     "file_delete"; "file_copy"; "file_rename"; "file_stat"; "dir_mkdir";
-    "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list"; "dir_list_full";
+    "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list";
     "process_env"; "process_set_env"; "process_spawn_sync";
     "process_spawn_lines"; "process_spawn_async"; "process_read_line";
     "process_write"; "process_kill_proc"; "process_wait_proc";

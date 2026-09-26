@@ -1786,9 +1786,15 @@ int32_t march_test_report(void) {
     return code;
 }
 
-/* ── __try_call ──────────────────────────────────────────────────────────── */
+/* ── __try_call (C: march_try_call) ─────────────────────────────────────── */
 /*
  * __try_call : (Bool -> Bool) -> Result(Bool, String)
+ *
+ * The C symbol is march_try_call, reached through an explicit row in
+ * lib/tir/llvm_builtins.ml.  Until 2026-09-26 it was the unprefixed C
+ * function `__try_call`, which linked only through mangle_extern's identity
+ * fallthrough with a declare synthesized from the call site's types
+ * (specs/progress/2026-09-26-same-named-builtin-abi-audit.md).
  *
  * Invokes the compiled March closure [thunk] with a dummy Bool argument and
  * returns Ok(result) on success or Err(msg) if the call panics (march_panic,
@@ -1823,7 +1829,7 @@ int32_t march_test_report(void) {
  * Matches Perceus's ownership-transfer convention for last-use args.  If
  * the apply panics we still decref the thunk via the cleanup path.
  */
-void *__try_call(void *thunk) {
+void *march_try_call(void *thunk) {
     typedef int64_t (*apply_fn_t)(void *, int64_t);
     apply_fn_t apply = *(apply_fn_t *)((char *)thunk + 16);
 
@@ -1897,9 +1903,10 @@ void *__try_call(void *thunk) {
     return result;
 }
 
-/* ── __try_call_val ──────────────────────────────────────────────────────── */
+/* ── __try_call_val (C: march_try_call_val) ─────────────────────────────── */
 /*
  * __try_call_val : (Bool -> a) -> Result(a, String)
+ * C symbol march_try_call_val; unprefixed `__try_call_val` until 2026-09-26.
  *
  * Value-carrying sibling of __try_call.  The thunk's March return type is the
  * type variable `a`, so the compiled thunk returns its result in the *uniform*
@@ -1917,7 +1924,7 @@ void *__try_call(void *thunk) {
  *
  * RC contract, closure layout, and Result layout are identical to __try_call.
  */
-void *__try_call_val(void *thunk) {
+void *march_try_call_val(void *thunk) {
     typedef int64_t (*apply_fn_t)(void *, int64_t);
     apply_fn_t apply = *(apply_fn_t *)((char *)thunk + 16);
 
@@ -12188,22 +12195,32 @@ void *march_uuid_v7(void) {
 }
 
 /* ── Logger builtins ─────────────────────────────────────────────────── */
+/*
+ * Every logger builtin is a `march_logger_*` C function reached through an
+ * explicit row (with a declare) in lib/tir/llvm_builtins.ml.  Until
+ * 2026-09-26 the v2 half (field stack, appenders, module levels) was a set of
+ * UNPREFIXED C functions (`logger_add_field`, `logger_dispatch`, ...) that
+ * linked only through mangle_extern's identity fallthrough, with a `declare`
+ * synthesized from each call site's March types
+ * (specs/progress/2026-09-26-same-named-builtin-abi-audit.md).
+ *
+ * Unit-returning entries return NULL: the compiled Unit value is 0 (see
+ * mk_ok_unit), and a fresh 16-byte cell here was never released by anyone.
+ *
+ * Ownership (lib/tir/borrow.ml): add_context / add_field STORE their
+ * arguments (owned); every other heap argument is only read (borrowed). */
 
-static int64_t march_logger_level_val = 0;   /* Debug=0, Info=1, Warn=2, Error=3 */
-static void   *march_logger_ctx_list  = NULL; /* March List((String,String)) or NULL (init on first use) */
+static int64_t march_logger_level_val = 1;   /* Debug=0, Info=1, Warn=2, Error=3; Info
+                                                by default, as the interpreter
+                                                (eval_runtime.ml's logger_level) */
 static pthread_mutex_t march_logger_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void *logger_nil(void) {
-    return march_alloc(16);
+    return make_nil();
 }
 
 static void *logger_cons(void *head, void *tail) {
-    void *cons = march_alloc(32);
-    *(int32_t *)((char *)cons + 8) = 1;
-    void **fp = (void **)((char *)cons + 16);
-    fp[0] = head;
-    fp[1] = tail;
-    return cons;
+    return make_cons(head, tail);
 }
 
 static void *logger_tuple2(void *a, void *b) {
@@ -12239,37 +12256,14 @@ void *march_logger_set_level(int64_t level) {
     pthread_mutex_lock(&march_logger_mutex);
     march_logger_level_val = level;
     pthread_mutex_unlock(&march_logger_mutex);
-    return logger_nil();
+    return NULL;
 }
 
 int64_t march_logger_get_level(void) {
     return march_logger_level_val;
 }
 
-void *march_logger_add_context(void *key, void *value) {
-    pthread_mutex_lock(&march_logger_mutex);
-    if (!march_logger_ctx_list) march_logger_ctx_list = logger_nil();
-    void *tup = logger_tuple2(key, value);
-    march_logger_ctx_list = logger_cons(tup, march_logger_ctx_list);
-    pthread_mutex_unlock(&march_logger_mutex);
-    return logger_nil();
-}
-
-void *march_logger_clear_context(void) {
-    pthread_mutex_lock(&march_logger_mutex);
-    march_logger_ctx_list = logger_nil();
-    pthread_mutex_unlock(&march_logger_mutex);
-    return logger_nil();
-}
-
-void *march_logger_get_context(void) {
-    pthread_mutex_lock(&march_logger_mutex);
-    void *ctx = march_logger_ctx_list ? march_logger_ctx_list : logger_nil();
-    pthread_mutex_unlock(&march_logger_mutex);
-    return ctx;
-}
-
-/* logger_write(level_str, msg, ctx, extra) → unit
+/* logger_write(level_str, msg, ctx, extra) → unit.  Borrows all four.
  * Writes:  [LEVEL] message {ctx_key=val, extra_key=val}  to stderr. */
 void *march_logger_write(void *level_str, void *msg, void *ctx, void *extra) {
     march_string *ls = (march_string *)level_str;
@@ -12290,12 +12284,19 @@ void *march_logger_write(void *level_str, void *msg, void *ctx, void *extra) {
         fputc('}', stderr);
     }
     fputc('\n', stderr);
-    return logger_nil();
+    return NULL;
 }
 
 /* ── Logger v2 builtins (structured fields + appenders) ──────────────── */
 
-static void *logger_v2_field_stack = NULL;  /* List(LogField), head = most recent */
+/* List(LogField), head = most recent push.  The runtime owns one reference
+ * to the head cell; each cell owns its field and its tail. */
+static void *logger_v2_field_stack = NULL;
+
+static void *logger_v2_stack(void) {
+    if (!logger_v2_field_stack) logger_v2_field_stack = logger_nil();
+    return logger_v2_field_stack;
+}
 
 static int64_t logger_v2_depth(void *lst) {
     int64_t n = 0;
@@ -12306,17 +12307,78 @@ static int64_t logger_v2_depth(void *lst) {
     return n;
 }
 
-static void logvalue_print(void *lv) {
-    if (!lv) { fputs("null", stderr); return; }
-    int32_t tag = *(int32_t *)((char *)lv + 8);
-    switch (tag) {
-    case 0: { void *s = *(void **)((char *)lv + 16); march_string *ms = (march_string *)s;
-              fwrite(ms->data, 1, (size_t)ms->len, stderr); break; }
-    case 1: { int64_t n = *(int64_t *)((char *)lv + 16); fprintf(stderr, "%" PRId64, n); break; }
-    case 2: { double f; memcpy(&f, (char *)lv + 16, 8); fprintf(stderr, "%g", f); break; }
-    case 3: { int64_t b = *(int64_t *)((char *)lv + 16); fputs(b ? "true" : "false", stderr); break; }
-    default: fputs("null", stderr); break;
+/* Release one reference to a LogValue.  Only LStr (tag 0) has a heap
+ * payload; LInt / LFloat / LBool / LAtom carry scalars.  Children are read
+ * BEFORE the decrement: once another holder may be the last one, the cell is
+ * theirs to free or reuse. */
+static void logger_release_value(void *v) {
+    if (!IS_HEAP_PTR(v)) return;
+    int32_t tag = *(int32_t *)((char *)v + 8);
+    void *payload = *(void **)((char *)v + 16);
+    if (march_decrc_freed(v) && tag == 0) march_decrc(payload);
+}
+
+/* Release one reference to a LogField(key, value). */
+static void logger_release_field(void *f) {
+    if (!IS_HEAP_PTR(f)) return;
+    void *k = *(void **)((char *)f + 16);
+    void *v = *(void **)((char *)f + 24);
+    if (march_decrc_freed(f)) {
+        march_decrc(k);
+        logger_release_value(v);
     }
+}
+
+/* Pop the head cell of the stack: the stack takes its own reference to the
+ * tail, then releases its reference to the popped cell (and, if that was the
+ * last one, the cell's field and its reference to the tail).  A list handed
+ * out by logger_get_fields that still holds the cell keeps it alive. */
+static void logger_v2_pop_one(void) {
+    void *cell = logger_v2_field_stack;
+    void *field = *(void **)((char *)cell + 16);
+    void *tail  = *(void **)((char *)cell + 24);
+    march_incrc(tail);
+    logger_v2_field_stack = tail;
+    if (march_decrc_freed(cell)) {
+        logger_release_field(field);
+        march_decrc(tail);
+    }
+}
+
+/* A LogFloat rendered as the interpreter renders it: OCaml's
+ * string_of_float, i.e. "%.12g" plus a trailing "." when the result would
+ * otherwise read as an integer ("2." not "2", "1.5", "1e+20", "inf"). */
+static void logger_float_str(double f, char *buf, size_t cap) {
+    snprintf(buf, cap, "%.12g", f);
+    for (const char *c = buf; *c; c++)
+        if (!(*c == '-' || (*c >= '0' && *c <= '9'))) return;
+    size_t n = strlen(buf);
+    if (n + 1 < cap) { buf[n] = '.'; buf[n + 1] = '\0'; }
+}
+
+/* The text of a non-String LogValue, as eval_runtime.ml's
+ * log_value_to_string renders it.  An LAtom's name is not known to the
+ * runtime (atoms are interned integers), so it renders as "null" -- a
+ * remaining divergence, filed with the audit. */
+static void logvalue_scalar_str(void *lv, char *buf, size_t cap) {
+    int32_t tag = IS_HEAP_PTR(lv) ? *(int32_t *)((char *)lv + 8) : -1;
+    switch (tag) {
+    case 1: snprintf(buf, cap, "%" PRId64, *(int64_t *)((char *)lv + 16)); break;
+    case 2: { double f; memcpy(&f, (char *)lv + 16, 8); logger_float_str(f, buf, cap); break; }
+    case 3: snprintf(buf, cap, "%s", *(int64_t *)((char *)lv + 16) ? "true" : "false"); break;
+    default: snprintf(buf, cap, "null"); break;
+    }
+}
+
+static void logvalue_print(void *lv) {
+    if (IS_HEAP_PTR(lv) && *(int32_t *)((char *)lv + 8) == 0) {   /* LStr */
+        march_string *ms = *(march_string **)((char *)lv + 16);
+        fwrite(ms->data, 1, (size_t)ms->len, stderr);
+        return;
+    }
+    char buf[64];
+    logvalue_scalar_str(lv, buf, sizeof buf);
+    fputs(buf, stderr);
 }
 
 static void logger_v2_print_fields(void *lst) {
@@ -12335,42 +12397,103 @@ static void logger_v2_print_fields(void *lst) {
     }
 }
 
-void *logger_add_field(void *key, void *value) {
+/* Stores key and value in the new LogField (owned). */
+void *march_logger_add_field(void *key, void *value) {
     pthread_mutex_lock(&march_logger_mutex);
-    if (!logger_v2_field_stack) logger_v2_field_stack = logger_nil();
     void *field = march_alloc(32);  /* LogField(key,value): hdr(16)+key(8)+value(8) */
     *(void **)((char *)field + 16) = key;
     *(void **)((char *)field + 24) = value;
-    logger_v2_field_stack = logger_cons(field, logger_v2_field_stack);
+    logger_v2_field_stack = logger_cons(field, logger_v2_stack());
     pthread_mutex_unlock(&march_logger_mutex);
-    return logger_nil();
+    return NULL;
 }
 
-int64_t logger_field_count(void) {
+int64_t march_logger_field_count(void) {
     pthread_mutex_lock(&march_logger_mutex);
-    void *lst = logger_v2_field_stack ? logger_v2_field_stack : logger_nil();
-    int64_t n = logger_v2_depth(lst);
+    int64_t n = logger_v2_depth(logger_v2_stack());
     pthread_mutex_unlock(&march_logger_mutex);
     return n;
 }
 
-void *logger_get_fields(void) {
+/* A NEW reference to the stack.  Until 2026-09-26 this returned the stored
+ * list without march_incrc, so the caller's drop freed the runtime's own
+ * stack: `Logger.current_fields()` followed by any logger call aborted with
+ * "RC underflow" (or read freed memory). */
+void *march_logger_get_fields(void) {
     pthread_mutex_lock(&march_logger_mutex);
-    void *lst = logger_v2_field_stack ? logger_v2_field_stack : logger_nil();
+    void *lst = logger_v2_stack();
+    march_incrc(lst);
     pthread_mutex_unlock(&march_logger_mutex);
     return lst;
 }
 
-void *logger_pop_to_depth(int64_t depth) {
+void *march_logger_pop_to_depth(int64_t depth) {
     pthread_mutex_lock(&march_logger_mutex);
-    if (!logger_v2_field_stack) logger_v2_field_stack = logger_nil();
+    logger_v2_stack();
     while (logger_v2_depth(logger_v2_field_stack) > depth)
-        logger_v2_field_stack = *(void **)((char *)logger_v2_field_stack + 24);
+        logger_v2_pop_one();
     pthread_mutex_unlock(&march_logger_mutex);
-    return logger_nil();
+    return NULL;
 }
 
-void *logger_dispatch(void *level_str, void *msg, void *module_name, void *fields) {
+/* ── v1 context: the SAME stack as the v2 fields ──────────────────────
+ * The interpreter keeps one field stack: logger_add_context pushes
+ * LogField(key, LStr(value)) onto it, logger_clear_context empties it, and
+ * logger_get_context renders it as List((String, String)).  Until 2026-09-26
+ * the compiled runtime kept a separate v1 list, so Logger.with_context never
+ * reached a v2 log line, and Logger.clear_context ("Remove all log fields
+ * (v1 + v2)") left every v2 field in place. */
+void *march_logger_add_context(void *key, void *value) {
+    void *lstr = march_alloc(24);          /* LStr(value): tag 0 */
+    *(void **)((char *)lstr + 16) = value;
+    return march_logger_add_field(key, lstr);
+}
+
+void *march_logger_clear_context(void) {
+    return march_logger_pop_to_depth(0);
+}
+
+/* A FRESH List((String, String)), most recent first; non-String values are
+ * rendered as text.  The caller owns the result.  (Until 2026-09-26 this
+ * returned the runtime's stored v1 list without a reference, so the caller's
+ * drop freed it.) */
+void *march_logger_get_context(void) {
+    pthread_mutex_lock(&march_logger_mutex);
+    int64_t n = logger_v2_depth(logger_v2_stack());
+    void **pairs = n > 0 ? malloc((size_t)n * sizeof(void *)) : NULL;
+    int64_t i = 0;
+    for (void *lst = logger_v2_field_stack; *(int32_t *)((char *)lst + 8) != 0;
+         lst = *(void **)((char *)lst + 24)) {
+        void *field = *(void **)((char *)lst + 16);
+        void *k = *(void **)((char *)field + 16);
+        void *v = *(void **)((char *)field + 24);
+        void *vs;
+        if (IS_HEAP_PTR(v) && *(int32_t *)((char *)v + 8) == 0) {
+            vs = *(void **)((char *)v + 16);
+            march_incrc(vs);
+        } else {
+            char buf[64];
+            logvalue_scalar_str(v, buf, sizeof buf);
+            vs = march_string_lit(buf, (int64_t)strlen(buf));
+        }
+        march_incrc(k);
+        pairs[i++] = logger_tuple2(k, vs);
+    }
+    pthread_mutex_unlock(&march_logger_mutex);
+    void *out = logger_nil();
+    while (i > 0) out = logger_cons(pairs[--i], out);
+    free(pairs);
+    return out;
+}
+
+/* logger_dispatch(level, msg, source, fields): borrows all four.  `fields`
+ * is the COMPLETE field list: stdlib/logger.march's do_log / do_log_in
+ * already append the context stack (logger_get_fields) to it, so the stack
+ * is not printed again here -- until 2026-09-26 every context field was
+ * printed twice compiled.  Appenders are not implemented by the compiled
+ * runtime (see logger_register_appender below): this is the interpreter's
+ * no-appender fallback format. */
+void *march_logger_dispatch(void *level_str, void *msg, void *module_name, void *fields) {
     (void)module_name;
     pthread_mutex_lock(&march_logger_mutex);
     march_string *ls = (march_string *)level_str;
@@ -12379,24 +12502,83 @@ void *logger_dispatch(void *level_str, void *msg, void *module_name, void *field
     fwrite(ls->data, 1, (size_t)ls->len, stderr);
     fputs("] ", stderr);
     fwrite(ms->data, 1, (size_t)ms->len, stderr);
-    int has_fields = fields && *(int32_t *)((char *)fields + 8) != 0;
-    int has_ctx    = logger_v2_field_stack && *(int32_t *)((char *)logger_v2_field_stack + 8) != 0;
-    if (has_fields || has_ctx) {
+    if (fields && *(int32_t *)((char *)fields + 8) != 0) {
         fputs(" {", stderr);
-        if (has_fields)  logger_v2_print_fields(fields);
-        if (has_fields && has_ctx) fputs(", ", stderr);
-        if (has_ctx)     logger_v2_print_fields(logger_v2_field_stack);
+        logger_v2_print_fields(fields);
         fputc('}', stderr);
     }
     fputc('\n', stderr);
     pthread_mutex_unlock(&march_logger_mutex);
-    return logger_nil();
+    return NULL;
 }
 
-void *logger_register_appender(void *name, void *cb) { (void)name; (void)cb; return logger_nil(); }
-void *logger_remove_appender(void *name)              { (void)name; return logger_nil(); }
-void *logger_clear_appenders(void)                    { return logger_nil(); }
-void *logger_appender_names(void)                     { return logger_nil(); /* Nil list */ }
-void *logger_set_module_level(void *mod, int64_t lv)  { (void)mod; (void)lv; return logger_nil(); }
-void *logger_clear_module_level(void *mod)            { (void)mod; return logger_nil(); }
-int64_t logger_module_level(void *mod)                { (void)mod; return march_logger_level_val; }
+/* Appenders: the compiled runtime keeps no registry (the interpreter does);
+ * these are no-ops that only READ their arguments, so both are borrowed.
+ * Storing the callback would make it owned -- change borrow.ml with it. */
+void *march_logger_register_appender(void *name, void *cb) { (void)name; (void)cb; return NULL; }
+void *march_logger_remove_appender(void *name)              { (void)name; return NULL; }
+void *march_logger_clear_appenders(void)                    { return NULL; }
+void *march_logger_appender_names(void)                     { return logger_nil(); /* Nil list */ }
+
+/* Per-module level overrides.  Until 2026-09-26 set/clear were no-ops and
+ * logger_module_level always answered the global level, so
+ * Logger.set_module_level / Logger.log_in filtered differently compiled.
+ * The module name is copied; the String argument is borrowed. */
+typedef struct logger_mod_level {
+    char *name;
+    size_t len;
+    int64_t level;
+    struct logger_mod_level *next;
+} logger_mod_level;
+static logger_mod_level *logger_mod_levels = NULL;
+
+static logger_mod_level **logger_mod_find(march_string *m) {
+    logger_mod_level **pp = &logger_mod_levels;
+    while (*pp) {
+        if ((*pp)->len == (size_t)m->len && memcmp((*pp)->name, m->data, (size_t)m->len) == 0)
+            return pp;
+        pp = &(*pp)->next;
+    }
+    return pp;
+}
+
+void *march_logger_set_module_level(void *mod, int64_t lv) {
+    march_string *m = (march_string *)mod;
+    pthread_mutex_lock(&march_logger_mutex);
+    logger_mod_level **pp = logger_mod_find(m);
+    if (*pp) {
+        (*pp)->level = lv;
+    } else {
+        logger_mod_level *e = malloc(sizeof *e);
+        e->name = malloc((size_t)m->len + 1);
+        memcpy(e->name, m->data, (size_t)m->len);
+        e->name[m->len] = '\0';
+        e->len = (size_t)m->len;
+        e->level = lv;
+        e->next = NULL;
+        *pp = e;
+    }
+    pthread_mutex_unlock(&march_logger_mutex);
+    return NULL;
+}
+
+void *march_logger_clear_module_level(void *mod) {
+    pthread_mutex_lock(&march_logger_mutex);
+    logger_mod_level **pp = logger_mod_find((march_string *)mod);
+    if (*pp) {
+        logger_mod_level *e = *pp;
+        *pp = e->next;
+        free(e->name);
+        free(e);
+    }
+    pthread_mutex_unlock(&march_logger_mutex);
+    return NULL;
+}
+
+int64_t march_logger_module_level(void *mod) {
+    pthread_mutex_lock(&march_logger_mutex);
+    logger_mod_level **pp = logger_mod_find((march_string *)mod);
+    int64_t lv = *pp ? (*pp)->level : march_logger_level_val;
+    pthread_mutex_unlock(&march_logger_mutex);
+    return lv;
+}
