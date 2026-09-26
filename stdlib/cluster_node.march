@@ -541,7 +541,9 @@ mod ClusterNode do
   -- [rejoining]: nodes whose new creation first appeared NOT Alive (a
   -- duplicate pair shut by the peer just as it was installed reads as a lost
   -- connection, so the restarted node is Suspect at its new creation until it
-  -- refutes); their first Alive is reported as the rejoin it is, not as `up`.
+  -- refutes), or that left Dead for Suspect (the same close during a
+  -- partition heal); their first Alive is reported as the rejoin it is, not
+  -- as `up`.
   pfn member_events(before : Members, after : Members, me : String, dead_cause : String -> String,
                     rejoining : List(String)) : List(NodeEvent) do
     List.flat_map(Membership.members(after), fn m ->
@@ -582,11 +584,19 @@ mod ClusterNode do
   end
 
   -- The rejoin set after a step: add a node whose creation changed to a
-  -- non-Alive status; drop one that is Alive now (its rejoin was reported).
+  -- non-Alive status, or that was Dead and is not Alive yet (a heal whose
+  -- new link's Alive and a closed duplicate pair's Suspect landed in one
+  -- step reads as Dead -> Suspect); drop one that is Alive now (its rejoin
+  -- was reported).
   pfn next_rejoining(before : Members, after : Members, rejoining : List(String)) : List(String) do
     List.filter_map(Membership.members(after), fn m ->
       let was = match Membership.get(before, m.node_id) do
-        Some(o) -> o.creation != m.creation
+        Some(o) ->
+          let was_dead = match o.status do
+            Dead -> true
+            _ -> false
+          end
+          o.creation != m.creation || was_dead
         None -> false
       end
       let alive = match m.status do

@@ -248,6 +248,50 @@ mod TestClusterNode do
       end
     end
 
+
+    test "a Dead peer healed through Suspect (a closed pair in the same tick) is reported rejoined" do
+      -- The partition heal: both sides redial, the duplicate rule closes one
+      -- pair, and that close (ConnLost) can land in the same tick as the new
+      -- link's Alive observation. SWIM then goes Dead -> Alive -> Suspect in
+      -- one step, so the tick sees Dead -> Suspect; the refutation's
+      -- Suspect -> Alive must still be the rejoin (test/two_node/cluster_partition).
+      match linked_ab() do
+        (b, st, _) ->
+          let dead_b = Membership.member(b, "b", "127.0.0.1:7001", 1, Dead, 1)
+          match ClusterNode.core_frame(st, b, 13, SwimDriver.encode_member_gossip(dead_b)) do
+            (st1, _) ->
+              match ClusterNode.core_tick(st1, 1100) do
+                (st2, e2) ->
+                  assert (List.any(event_texts(e2), fn t -> String.starts_with(t, "b dead")))
+                  match ClusterNode.core_linked(st2, b, "b", "127.0.0.1:7001", 1, 20, 21, b, 98) do
+                    (st3, _) ->
+                      let gen = match Map.get(st3.links, b, Map.str_cmp) do
+                        Some(l) -> l.gen
+                        None -> -1
+                      end
+                      match ClusterNode.core_link_closed(st3, b, gen) do
+                        (st4, _) ->
+                          match ClusterNode.core_tick(st4, 1200) do
+                            (st5, e5) ->
+                              assert (status_of(st5, b) == "suspect")
+                              assert (not(List.any(event_texts(e5), fn t -> String.contains(t, "b up"))))
+                              let alive_b = Membership.member(b, "b", "127.0.0.1:7001", 1, Alive, 3)
+                              match ClusterNode.core_frame(st5, b, 13, SwimDriver.encode_member_gossip(alive_b)) do
+                                (st6, _) ->
+                                  match ClusterNode.core_tick(st6, 1300) do
+                                    (_, e7) ->
+                                      assert (List.member(event_texts(e7), "b rejoined"))
+                                      assert (not(List.member(event_texts(e7), "b up")))
+                                  end
+                              end
+                          end
+                      end
+                  end
+              end
+          end
+      end
+    end
+
   end
 
   describe "connection loss and failure" do
