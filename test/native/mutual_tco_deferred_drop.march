@@ -1,0 +1,70 @@
+-- A tail call that forwards an OWNED value to a BORROWED parameter is followed
+-- by a release of that value (`let t = f(.., why) in dec_rc why; t`), which
+-- under real recursion runs only after the nested call has returned. A
+-- flattened TCO loop has no "after", so the release is now recorded on the
+-- loop function's pending-drop list and run when the loop returns.
+--
+-- Before: the mutual pair take_next/inspect was refused the loop (running the
+-- release on the back edge freed the next iteration's value, see
+-- mutual_tco_forwarded_arg.march), so a deep input overflowed the stack; and
+-- the self-recursive last_seen skipped the release, leaking one string per
+-- element. The inputs ALTERNATE between the two branches of each
+-- function, so a back edge that only works for one branch cannot pass.
+-- specs/progress/2026-09-26-mutual-tco-forwarded-arg.md
+mod MutualTcoDeferredDrop do
+  needs IO
+  needs IO.Console
+
+  -- "no-1", "ok-2", "no-3", "ok-4", ... (odd refused, even accepted)
+  pfn build(n : Int, acc : List(String)) : List(String) do
+    if n <= 0 do acc
+    else
+      let tag = if n % 2 == 0 do "ok-" else "no-" end
+      build(n - 1, Cons(tag ++ int_to_string(n), acc))
+    end
+  end
+
+  -- Mutual pair: inspect only READS `why` (borrowed) and hands take_next a
+  -- fresh string on a refusal, so take_next's release of it follows the call.
+  pfn take_next(xs : List(String), why : String) : String do
+    match xs do
+      Nil -> why
+      Cons(x, rest) -> inspect(x, rest, why)
+    end
+  end
+
+  pfn inspect(x : String, rest : List(String), why : String) : String do
+    if String.starts_with(x, "ok") do
+      take_next(rest, "kept " ++ x ++ " after " ++ int_to_string(string_length(why)))
+    else take_next(rest, "refused " ++ x ++ " after " ++ int_to_string(string_length(why))) end
+  end
+
+  -- Self recursion, same shape: every element hands the borrowed `why` a
+  -- fresh string, "kept" on an accepted element and "last" on a refused one,
+  -- and the Nil arm only reads it.
+  pfn last_seen(xs : List(String), why : String) : String do
+    match xs do
+      Nil -> "final " ++ why
+      Cons(x, rest) ->
+        if String.starts_with(x, "ok") do last_seen(rest, "kept " ++ x)
+        else last_seen(rest, "last " ++ x) end
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    println(take_next(build(6, Nil), ""))
+    println(last_seen(build(6, Nil), "none"))
+
+    let before2 = live_allocs()
+    let last = last_seen(build(200000, Nil), "none")
+    println(last)
+    let delta2 = live_allocs() - before2
+    println("self: live allocations held after 200000 steps under 1000: " ++ bool_to_string(delta2 < 1000))
+
+    let before = live_allocs()
+    let deep = take_next(build(1000000, Nil), "")
+    println(deep)
+    let delta = live_allocs() - before
+    println("mutual: live allocations held after 1000000 steps under 1000: " ++ bool_to_string(delta < 1000))
+  end
+end

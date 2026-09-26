@@ -535,6 +535,49 @@ void march_free(void *p) {
     free(p);
 }
 
+/* Pending-drop list of a flattened tail-call loop; see march_runtime.h.
+ * Layout: a header (len, cap) followed by cap (release, value) pairs.  The
+ * buffer is plain malloc memory owned by one invocation of one loop function,
+ * never a March value, so it is invisible to live_allocs and to the RC paths. */
+typedef struct {
+    void (*release)(void *);
+    void *v;
+} march_tco_defer_item;
+
+typedef struct {
+    int64_t len;
+    int64_t cap;
+    march_tco_defer_item items[];
+} march_tco_defer_buf;
+
+void *march_tco_defer_push(void *buf, void (*release)(void *), void *v) {
+    march_tco_defer_buf *b = (march_tco_defer_buf *)buf;
+    if (b == NULL || b->len == b->cap) {
+        int64_t cap = b ? b->cap * 2 : 16;
+        march_tco_defer_buf *nb = (march_tco_defer_buf *)realloc(
+            b, sizeof(march_tco_defer_buf) + (size_t)cap * sizeof(march_tco_defer_item));
+        if (nb == NULL) {
+            fprintf(stderr, "march: out of memory growing a tail-call pending-drop list\n");
+            abort();
+        }
+        if (b == NULL) nb->len = 0;
+        nb->cap = cap;
+        b = nb;
+    }
+    b->items[b->len].release = release;
+    b->items[b->len].v = v;
+    b->len++;
+    return b;
+}
+
+void march_tco_defer_drain(void *buf) {
+    march_tco_defer_buf *b = (march_tco_defer_buf *)buf;
+    if (b == NULL) return;
+    for (int64_t i = b->len - 1; i >= 0; i--)
+        b->items[i].release(b->items[i].v);
+    free(b);
+}
+
 /* Non-atomic reference counting — for values provably local to one thread.
  * These must NOT be called on values that may be concurrently accessed from
  * another actor.  The callers (Perceus-generated code) guarantee this.

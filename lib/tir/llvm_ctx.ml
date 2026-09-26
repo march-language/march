@@ -245,6 +245,7 @@ type ctx = {
      or be skipped (uncompensated: skipping avoids a use-after-free — see
      commit eafbd71a).  Populated by [emit_fn] per function. *)
   mutable tco_dup_bound : string list;
+  mutable tco_defer_slot : string;
   (* Mutual TCO state — set by emit_mutual_tco_group for the combined function.
      mutual_tco_group: names of all functions in the current mutual group (empty = not active).
      mutual_tco_tag_slot: alloca slot name for the dispatch tag.
@@ -386,6 +387,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   tco_in_tail    = true;
   tco_stack_save = "";
   tco_dup_bound  = [];
+  tco_defer_slot = "";
   mutual_tco_group      = [];
   mutual_tco_tag_slot   = "";
   mutual_tco_loop_label = "";

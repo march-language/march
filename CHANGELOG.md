@@ -12,6 +12,15 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **Deep tail recursion that hands a freshly built value to a parameter the
+  callee only reads no longer overflows the stack or leaks.** A pair of
+  mutually tail-recursive functions in that shape (e.g. `take_next`/`inspect`
+  passing `"refused " ++ x` along) was compiled as real recursion and died with
+  a stack overflow on a long enough input (1,000,000 steps), and a
+  self-recursive function in the same shape leaked one value per iteration.
+  Both now run as loops, and those values are released when the loop returns,
+  as the recursion would have released them.
+
 - **A compiled `match` on string literals no longer leaks memory.** Each arm
   it tried allocated a copy of that arm's literal and never freed it, so a
   string `match` in a loop grew memory without bound: one string per arm

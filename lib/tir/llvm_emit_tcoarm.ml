@@ -66,6 +66,105 @@ let emit_fv_load ~emit_atom ~emit_expr ctx (v : Tir.var) (rhs : Tir.expr)
     Hashtbl.replace ctx.var_llvm_ty slot field_ty;
     emit_expr ctx body
 
+(** Record a RELEASE of a forwarded argument on the loop's pending-drop list
+    instead of running it.  Returns [false] when [op] is not a release this
+    function knows how to defer, and the caller decides.
+
+    The release a Perceus chain runs after a tail call that forwarded an owned
+    value to a borrowed parameter belongs AFTER the nested call returns.  A
+    flattened loop has no such point short of its own exit, so the back edge
+    pushes (the release's runtime function, the value) onto the list held in
+    [ctx.tco_defer_slot], and every return of the loop function drains it
+    ([Llvm_tco.emit_defer_drain]), newest first.  That is exactly when, and in exactly
+    the order, the recursion's frames would have run the releases, so the
+    loop keeps recursion's ownership semantics without its stack.
+
+    Each release is a one-pointer-argument void function: [march_decrc_local]
+    for [EDecRC], [march_decrc] for [EAtomicDecRC], [march_free] for [EFree],
+    and the synthesized [__drop$T] for a deep drop -- the same callees the
+    ops' own [emit_expr] arms call, with the same no-op cases (a non-pointer
+    value, a top-level function or builtin name that is not a local). *)
+let emit_defer_release ~emit_atom ctx (op : Tir.expr) : bool =
+  let release_fn = match op with
+    | Tir.EDecRC _ -> Some "@march_decrc_local"
+    | Tir.EAtomicDecRC _ -> Some "@march_decrc"
+    | Tir.EFree _ -> Some "@march_free"
+    | Tir.EApp (f, [_]) when Tir_names.is_drop_fn f.Tir.v_name ->
+      Some ("@" ^ Llvm_builtins.mangle_extern f.Tir.v_name)
+    | _ -> None
+  in
+  let target = match op with
+    | Tir.EDecRC a | Tir.EAtomicDecRC a | Tir.EFree a -> Some a
+    | Tir.EApp (_, [a]) -> Some a
+    | _ -> None
+  in
+  match release_fn, target with
+  | Some fn_sym, Some (Tir.AVar v as a) ->
+    let is_rc_op = match op with Tir.EApp _ -> false | _ -> true in
+    let inert_name =
+      (Llvm_builtins.is_builtin_fn v.Tir.v_name
+       || Hashtbl.mem ctx.top_fns v.Tir.v_name)
+      && not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name))
+    in
+    if is_rc_op && inert_name then true   (* the op's own arm emits nothing *)
+    else begin
+      let (ty, value) = emit_atom ctx a in
+      if is_rc_op && ty <> "ptr" then true  (* likewise: RC arms act on ptr only *)
+      else begin
+        if ctx.tco_defer_slot = "" then
+          failwith (Printf.sprintf
+            "internal: TCO back edge in %s defers a release of %s but the loop \
+             function has no pending-drop list (Llvm_tco.needs_defer_list \
+             disagrees with the arm)" ctx.cur_emit_fn v.Tir.v_name);
+        let pv = coerce ctx ty value "ptr" in
+        let old_buf = fresh ctx "tco_defer_old" in
+        let new_buf = fresh ctx "tco_defer_new" in
+        emit ctx (Printf.sprintf "%s = load ptr, ptr %%%s.addr" old_buf ctx.tco_defer_slot);
+        emit ctx (Printf.sprintf
+          "%s = call ptr @march_tco_defer_push(ptr %s, ptr %s, ptr %s)"
+          new_buf old_buf fn_sym pv);
+        emit ctx (Printf.sprintf "store ptr %s, ptr %%%s.addr" new_buf ctx.tco_defer_slot);
+        true
+      end
+    end
+  | _ -> false
+
+(** Emit a TCO back edge's Perceus cleanup chain, the ops that must run before
+    the parameter slots are overwritten.  An op whose target is not a
+    forwarded argument (an old container being released, a dup-bound
+    argument's balancing DecRC -- see [Llvm_tco.dup_bound_vars]) is emitted
+    as is.  A RELEASE of a forwarded, non-dup-bound argument is deferred to
+    the loop's exit ([emit_defer_release]): emitting it here freed the value
+    the next iteration reads (eafbd71a, and the mutual-TCO use-after-free of
+    specs/progress/2026-09-26-mutual-tco-forwarded-arg.md), and skipping it,
+    which the self arms used to do, leaked it.  An INCREMENT of a forwarded
+    argument is skipped on a self back edge (unchanged) and emitted on a
+    mutual one, where [Llvm_tco.group_back_edges_safe] already refused any
+    group that has one. *)
+let emit_back_edge_chain ~emit_atom ~emit_expr ctx ~(self : bool)
+    (args : Tir.atom list) (chain : Tir.expr) : unit =
+  let forwarded = Llvm_tco.forwarded_args ~dup_bound:ctx.tco_dup_bound args in
+  let on_forwarded op =
+    match Llvm_tco.cleanup_target op with
+    | Some n -> List.mem n forwarded
+    | None -> false
+  in
+  let emit_op op =
+    if not (on_forwarded op) then ignore (emit_expr ctx op)
+    else if Llvm_tco.is_release_op op && emit_defer_release ~emit_atom ctx op then ()
+    else if self then ()
+    else ignore (emit_expr ctx op)
+  in
+  let saved_tail = ctx.tco_in_tail in
+  ctx.tco_in_tail <- false;
+  let rec walk = function
+    | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op -> emit_op op; walk rest
+    | op when Llvm_tco.is_cleanup_op op -> emit_op op
+    | _ -> ()   (* EAtom(AVar tmp_v) -- trailing return value, nothing to emit *)
+  in
+  walk chain;
+  ctx.tco_in_tail <- saved_tail
+
 (** Body of the Perceus-wrapped self-TCO arm, [ELet] shape. *)
 let emit_self_tco_let ~emit_atom ~emit_expr ctx (args : Tir.atom list)
   (body : Tir.expr) : string * string =
@@ -75,45 +174,10 @@ let emit_self_tco_let ~emit_atom ~emit_expr ctx (args : Tir.atom list)
         coerce ctx arg_ty arg_val param_ty
       ) ctx.tco_param_info args in
     (* 2. Emit the DecRC/Free chain before overwriting slots: these ops reference
-          old slot values (the consumed container wrappers) which are still valid.
-          Suppress tco_in_tail so nested EDecRC/EFree calls don't misfire.
-          EXCEPTION: a Dec/IncRC target that is itself one of [args] is not an
-          "old container being released" — it is the SAME value being forwarded
-          into the next iteration's parameter slot. Under real (non-TCO)
-          recursion this DecRC only fires once the whole nested call has fully
-          returned, by which point nothing below still needs that reference; in
-          the flattened loop there is no such delay, so executing it here would
-          drop a freshly-owned, uncompensated value (no matching prior IncRC) to
-          refcount 0 immediately before it is reused as the next iteration's
-          value — a use-after-free. Skip RC ops on these variables; ownership is
-          transferred into the new slot instead.
-          EXCEPTION TO THE EXCEPTION: a forwarded argument that is DUP-BOUND
-          (its binding RHS is `inc_rc x; x` — see Llvm_tco.dup_bound_vars) does
-          have a matching prior IncRC, so its DecRC is the closing half of a
-          balanced pair rather than an early release. Skipping it strands the
-          +1 and leaks one cell per iteration (a `Cons(_, t)` list walk leaks
-          the entire list). Emit those. *)
-    let arg_var_names =
-      List.filter_map (fun a -> match a with
-        | Tir.AVar v when not (List.mem v.Tir.v_name ctx.tco_dup_bound) ->
-          Some v.Tir.v_name
-        | _ -> None) args
-    in
-    let saved_tail = ctx.tco_in_tail in
-    ctx.tco_in_tail <- false;
-    let skip op =
-      match Llvm_tco.cleanup_target op with
-      | Some n -> List.mem n arg_var_names
-      | None -> false
-    in
-    let rec emit_dec_chain = function
-      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
-        if not (skip op) then ignore (emit_expr ctx op);
-        emit_dec_chain rest
-      | _ -> ()   (* EAtom(AVar tmp_v) — trailing return value, nothing to emit *)
-    in
-    emit_dec_chain body;
-    ctx.tco_in_tail <- saved_tail;
+          old slot values (the consumed container wrappers) which are still
+          valid.  A release of a forwarded argument is deferred to the loop's
+          exit, not run here and not skipped; see [emit_back_edge_chain]. *)
+    emit_back_edge_chain ~emit_atom ~emit_expr ctx ~self:true args body;
     (* 3. Store each new argument into the corresponding parameter alloca slot. *)
     List.iter2 (fun (_vname, slot, param_ty) new_v ->
         emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" param_ty new_v slot)
@@ -140,43 +204,8 @@ let emit_self_tco_seq ~emit_atom ~emit_expr ctx (args : Tir.atom list)
         coerce ctx arg_ty arg_val param_ty
       ) ctx.tco_param_info args in
     (* 2. Emit the dec/inc-RC chain before overwriting slots — same
-          ordering rationale as the ELet-wrapped case above.
-          EXCEPTION: a Dec/IncRC target that is itself one of [args] is the
-          SAME value being forwarded into the next iteration's parameter slot,
-          not an old container being released — see the matching guard and
-          explanation in the ELet-wrapped case above. Skip RC ops on these
-          variables so a freshly-owned, uncompensated argument (e.g. the
-          result of a fresh allocation with no prior IncRC, as opposed to a
-          borrowed field promoted via IncRC) isn't dropped to refcount 0 and
-          freed immediately before being reused as the next iteration's value.
-          The "as opposed to" half of that sentence is the DUP-BOUND case, and
-          it must NOT be skipped: there the DecRC balances the IncRC that
-          materialised the local, so dropping it leaks one cell per iteration
-          (see Llvm_tco.dup_bound_vars — this is the `Cons(_, t)` walk that
-          leaked its whole list). *)
-    let arg_var_names =
-      List.filter_map (fun a -> match a with
-        | Tir.AVar v when not (List.mem v.Tir.v_name ctx.tco_dup_bound) ->
-          Some v.Tir.v_name
-        | _ -> None) args
-    in
-    let saved_tail = ctx.tco_in_tail in
-    ctx.tco_in_tail <- false;
-    let skip op =
-      match Llvm_tco.cleanup_target op with
-      | Some n -> List.mem n arg_var_names
-      | None -> false
-    in
-    let rec emit_dec_chain = function
-      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
-        if not (skip op) then ignore (emit_expr ctx op);
-        emit_dec_chain rest
-      | op when Llvm_tco.is_cleanup_op op ->
-        if not (skip op) then ignore (emit_expr ctx op)
-      | _ -> ()
-    in
-    emit_dec_chain dec_chain;
-    ctx.tco_in_tail <- saved_tail;
+          ordering rationale as the ELet-wrapped case above. *)
+    emit_back_edge_chain ~emit_atom ~emit_expr ctx ~self:true args dec_chain;
     (* 3. Store each new argument into the corresponding parameter alloca slot. *)
     List.iter2 (fun (_vname, slot, param_ty) new_v ->
         emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" param_ty new_v slot)
@@ -207,17 +236,9 @@ let emit_mutual_tco_let ~emit_atom ~emit_expr ctx (f : Tir.var)
         coerce ctx arg_ty arg_val param_ty
       ) target_slots args in
     (* 2. Emit the DecRC/Free chain before overwriting slots — same ordering
-          rationale as the self-TCO ELet-wrapped case. *)
-    let saved_tail = ctx.tco_in_tail in
-    ctx.tco_in_tail <- false;
-    let rec emit_dec_chain = function
-      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
-        ignore (emit_expr ctx op);
-        emit_dec_chain rest
-      | _ -> ()   (* EAtom(AVar tmp_v) — trailing return value, nothing to emit *)
-    in
-    emit_dec_chain body;
-    ctx.tco_in_tail <- saved_tail;
+          rationale as the self-TCO ELet-wrapped case, including the deferred
+          release of a forwarded argument. *)
+    emit_back_edge_chain ~emit_atom ~emit_expr ctx ~self:false args body;
     (* 3. Update the dispatch tag. *)
     emit ctx (Printf.sprintf "store i64 %d, ptr %%%s.addr"
       target_tag ctx.mutual_tco_tag_slot);
@@ -253,17 +274,7 @@ let emit_mutual_tco_seq ~emit_atom ~emit_expr ctx (f : Tir.var)
       ) target_slots args in
     (* 2. Emit the dec/inc-RC chain before overwriting slots — same ordering
           rationale as the ELet-wrapped case above. *)
-    let saved_tail = ctx.tco_in_tail in
-    ctx.tco_in_tail <- false;
-    let rec emit_dec_chain = function
-      | Tir.ESeq (op, rest) when Llvm_tco.is_cleanup_op op ->
-        ignore (emit_expr ctx op);
-        emit_dec_chain rest
-      | op when Llvm_tco.is_cleanup_op op -> ignore (emit_expr ctx op)
-      | _ -> ()
-    in
-    emit_dec_chain dec_chain;
-    ctx.tco_in_tail <- saved_tail;
+    emit_back_edge_chain ~emit_atom ~emit_expr ctx ~self:false args dec_chain;
     (* 3. Update the dispatch tag. *)
     emit ctx (Printf.sprintf "store i64 %d, ptr %%%s.addr"
       target_tag ctx.mutual_tco_tag_slot);
