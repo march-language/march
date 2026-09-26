@@ -60,3 +60,41 @@ where both registrations slip in before either is visible. The failing one:
    BOTH roles' `offer_Server` return `Ok` for the one name, confirming item 1.
    Item 1 is what remains; no test exercises it any more, so its fix needs its
    own stdlib test.
+
+## Resolution (2026-09-25)
+
+Item 1 fixed in `stdlib/cluster_node.march`:
+
+- `CnHandle` gains `claims : Vault(Int)`: local registrations sent to the node
+  actor but not yet processed there (name -> pid). `h_register` now calls the
+  public `ClusterNode.reserve(names, claims, node_id, creation, name, pid)`,
+  which takes the claim with `Vault.put_new` (atomic) and only then checks the
+  view. A name claimed by a different local pid is `Err(Taken(claimant))`. A
+  refused register drops the claim it took. The same pid registering again is
+  still allowed.
+- The node actor's `Register` handler releases the claim (`release_claim`, a
+  compare-and-delete on the pid) only after `step_io` has mirrored the outcome
+  into `h.names`, on every path (bound, refused as `Lost`, pid already dead).
+  So a racing register always sees either the claim or the binding.
+- The death half: `core_local_down` already unregistered only the names whose
+  `regs` entry is the dead pid. The "first pid's death unregisters a name the
+  second pid holds" was the second pid's phantom `Ok`: its `Register` had been
+  refused in the actor (`core_register` saw the first binding in `vis`), so it
+  never held the name. With the synchronous `Taken`, the second caller now
+  knows that.
+
+Tests (`test/stdlib/test_cluster_node.march`, "local registration races"): a
+back-to-back second register of a pending name is `Taken` by the first pid,
+the same pid may re-register, a refused register leaves no claim,
+`release_claim` leaves another pid's claim alone, and (core level) a pid's
+death releases only its own names while a second pid's refused `Register`
+never becomes the binding. A live node cannot run in the interpreter (the
+accept loop's `task_spawn` runs eagerly and blocks the runner), so the tests
+drive `reserve` over the two Vaults directly.
+
+RED check: with `reserve` reduced to the old view-only check, the three claim
+tests fail (41 tests, 3 failures). The core death test passes on both trees
+because that rule was already correct. End to end, a scratch compiled program
+on a live node (two back-to-back `register`s of one name, then the first pid
+killed) printed `r1=Ok r2=Ok` on every pre-fix run and `r1=Ok r2=Taken(2)`
+with the fix.
