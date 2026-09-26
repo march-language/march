@@ -77,6 +77,116 @@ let rec calls_in_expr (acc : (string * Ast.span * Ast.span) list) (e : Ast.expr)
 let names_and_name_spans (e : Ast.expr) : (string * Ast.span) list =
   List.map (fun (n, name_span, _) -> (n, name_span)) (calls_in_expr [] e)
 
+(** Every variable a pattern binds. *)
+let rec pattern_vars (acc : string list) (p : Ast.pattern) : string list =
+  match p with
+  | Ast.PatVar n -> n.Ast.txt :: acc
+  | Ast.PatAs (inner, n, _) -> pattern_vars (n.Ast.txt :: acc) inner
+  | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) | Ast.PatTuple (ps, _)
+  | Ast.PatOr (ps, _) -> List.fold_left pattern_vars acc ps
+  | Ast.PatRecord (fields, _) ->
+    List.fold_left (fun a (_, fp) -> pattern_vars a fp) acc fields
+  | Ast.PatWild _ | Ast.PatLit _ -> acc
+
+module SSet = Set.Make (String)
+
+(** [builtin_candidate_calls ?bound e] is [names_and_name_spans e] minus every
+    bare-name call that goes through a LOCAL binding: a function parameter
+    (seed them with [bound]), a lambda parameter, a [let] / [let?] / [let*]
+    pattern variable (in scope for the rest of its block / continuation), a
+    match-arm pattern variable (in its guard and body), or a local [fn]
+    (in its own body and the rest of its block).
+
+    Use it wherever a call's NAME is matched against a builtin table
+    (capability charging, [cap pure] / [cap deterministic] bans): a call
+    through a local named [file_read] reaches whatever the local holds, never
+    the builtin.  It is the AST-level twin of [Cap_attrib.walk]'s [bound] set
+    (lib/tir/cap_attrib.ml), which applies the same rule to TIR; keep the two
+    in step.  Qualified calls ([M.f]) are never filtered.  A shadowing binding
+    only hides the builtin inside its scope — a call after the scope ends (a
+    sibling function, the code after a [match] arm) is still reported. *)
+let builtin_candidate_calls ?(bound = []) (e : Ast.expr)
+    : (string * Ast.span) list =
+  let rec go bound acc (e : Ast.expr) =
+    let go' = go bound in
+    match e with
+    | Ast.EApp (Ast.EVar fn_name, args, _) ->
+      let acc =
+        if SSet.mem fn_name.Ast.txt bound then acc
+        else (fn_name.Ast.txt, fn_name.Ast.span) :: acc
+      in
+      List.fold_left go' acc args
+    | Ast.EApp (Ast.EField (Ast.EVar mod_name, fn_name, _), args, _) ->
+      let acc = (mod_name.Ast.txt ^ "." ^ fn_name.Ast.txt, fn_name.Ast.span) :: acc in
+      List.fold_left go' acc args
+    | Ast.EApp (f, args, _) -> List.fold_left go' (go' acc f) args
+    | Ast.ECon (_, args, _) -> List.fold_left go' acc args
+    | Ast.ELam (params, body, _) ->
+      let bound =
+        List.fold_left (fun s (p : Ast.param) -> SSet.add p.Ast.param_name.Ast.txt s)
+          bound params
+      in
+      go bound acc body
+    | Ast.EBlock (es, _) ->
+      (* A [let] or local [fn] scopes over the REST of its block. *)
+      let _, acc =
+        List.fold_left (fun (bound, acc) (ex : Ast.expr) ->
+            let acc = go bound acc ex in
+            let bound =
+              match ex with
+              | Ast.ELet (b, _) ->
+                List.fold_left (fun s v -> SSet.add v s) bound
+                  (pattern_vars [] b.Ast.bind_pat)
+              | Ast.ELetFn (n, _, _, _, _) -> SSet.add n.Ast.txt bound
+              | _ -> bound
+            in
+            (bound, acc))
+          (bound, acc) es
+      in
+      acc
+    | Ast.ELet (b, _) -> go' acc b.Ast.bind_expr
+    | Ast.EMatch (scrut, arms, _) ->
+      let acc = go' acc scrut in
+      List.fold_left (fun a (arm : Ast.branch) ->
+          let bound =
+            List.fold_left (fun s v -> SSet.add v s) bound
+              (pattern_vars [] arm.Ast.branch_pat)
+          in
+          let a = Option.fold ~none:a ~some:(go bound a) arm.Ast.branch_guard in
+          go bound a arm.Ast.branch_body)
+        acc arms
+    | Ast.ETuple (es, _) -> List.fold_left go' acc es
+    | Ast.ERecord (fields, _) ->
+      List.fold_left (fun a (_, ex) -> go' a ex) acc fields
+    | Ast.ERecordUpdate (base, fields, _) ->
+      List.fold_left (fun a (_, ex) -> go' a ex) (go' acc base) fields
+    | Ast.EField (inner, _, _) -> go' acc inner
+    | Ast.EIf (c, t, f, _) -> go' (go' (go' acc c) t) f
+    | Ast.ECond (arms, _) ->
+      List.fold_left (fun a (ce, be) -> go' (go' a ce) be) acc arms
+    | Ast.EPipe (a, b, _) -> go' (go' acc a) b
+    | Ast.EAnnot (ex, _, _) -> go' acc ex
+    | Ast.EAtom (_, args, _) -> List.fold_left go' acc args
+    | Ast.ESend (a, b, _) -> go' (go' acc a) b
+    | Ast.ESpawn (ex, _) -> go' acc ex
+    | Ast.EDbg (Some inner, _) -> go' acc inner
+    | Ast.ELetFn (n, params, _, body, _) ->
+      let bound =
+        List.fold_left (fun s (p : Ast.param) -> SSet.add p.Ast.param_name.Ast.txt s)
+          (SSet.add n.Ast.txt bound) params
+      in
+      go bound acc body
+    | Ast.ELetQ (pat, rhs, body, _) | Ast.ELetStar (pat, rhs, body, _) ->
+      let acc = go' acc rhs in
+      go (List.fold_left (fun s v -> SSet.add v s) bound (pattern_vars [] pat)) acc body
+    | Ast.EAssert (ex, _) -> go' acc ex
+    | Ast.ESigil (_, content, _) -> go' acc content
+    | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _)
+    | Ast.ELit _ | Ast.EVar _ -> acc
+  in
+  (* Same (reverse-encounter) order as [names_and_name_spans]. *)
+  go (SSet.of_list bound) [] e
+
 (** [spawned_actor_names e] is every actor name appearing in a [spawn(Actor)]
     position inside [e], as a bare string.  The actor name in an [ESpawn] is
     always a plain nullary constructor or variable — [Typecheck]'s spawn arm
