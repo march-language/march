@@ -2967,7 +2967,7 @@ mod SessionNode do
             if String.contains(why, "refused: closing") && Vault.get_or(budget, "left", 0) > 100 do
               sleep_ms(100)
               let _ = Vault.incr(budget, "left", 0 - 100)
-              fill_roles(node, proto, sid, m, reply, answers, budget, roles, n, used, accepted)
+              fill_roles(node, proto, names, sid, m, reply, answers, budget, roles, n, used, accepted)
             else Err((r, why, accepted)) end
           Ok((g, ofp)) ->
             -- The session's second fingerprint, once an offer at one joins.
