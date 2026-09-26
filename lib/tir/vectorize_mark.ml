@@ -59,7 +59,11 @@ let mark (ast : March_ast.Ast.module_) (m : Tir.tir_module) : Tir.tir_module =
   if attrs = [] then m
   else
     let new_fns = List.map (fun (fd : Tir.fn_def) ->
-        match List.find_opt (fun (n, _, _) -> n = fd.Tir.fn_name) attrs with
+        (* An entry fn named like a C-symbol builtin is lowered as
+           [Tir_names.builtin_shadow_name] of its source name. *)
+        match List.find_opt (fun (n, _, _) ->
+            n = fd.Tir.fn_name
+            || Tir_names.builtin_shadow_name n = fd.Tir.fn_name) attrs with
         | None -> fd
         | Some (name, sev, span) ->
           { fd with Tir.fn_body = Tir.ESeq (sentinel_call sev name span, fd.Tir.fn_body) })

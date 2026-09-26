@@ -43,11 +43,14 @@ let cap_of_call (name : string) : string option =
    IO.FileRead marker with NO owner row, so the module that handed out the
    capability escaped attribution entirely.  Charging it to the module that
    passes the value is right: that module is the one granting the authority. *)
-let atom_cap ~is_defined (a : Tir.atom) : string option =
+let atom_cap ~is_defined ~bound (a : Tir.atom) : string option =
   match a with
-  | Tir.AVar v when is_defined v.Tir.v_name -> None
+  | Tir.AVar v when is_defined v.Tir.v_name || SSet.mem v.Tir.v_name bound -> None
   | Tir.AVar v -> cap_of_call v.Tir.v_name
   | Tir.ADefRef _ | Tir.ALit _ -> None
+
+let bind_vars bound (vs : Tir.var list) =
+  List.fold_left (fun s (v : Tir.var) -> SSet.add v.Tir.v_name s) bound vs
 
 (* One walk collecting both halves: the capabilities this body reaches
    directly, and the functions it calls (for the reverse call graph).
@@ -64,17 +67,23 @@ let atom_cap ~is_defined (a : Tir.atom) : string option =
    IO.Network`") for a program that ran fine interpreted.  The typecheck-level
    scans got the same fix on 2026-08-09 (specs/2026-08-09-cap-loose-ends-plan.md,
    Tier 0); this TIR walk had kept the name-only lookup. *)
-let rec walk ~is_defined (caps, callees) (e : Tir.expr) =
-  let walk = walk ~is_defined in
+let rec walk ~is_defined ~bound (caps, callees) (e : Tir.expr) =
+  let walk_in bound acc e = walk ~is_defined ~bound acc e in
+  let walk = walk_in bound in
   let add_atoms caps atoms =
     List.fold_left
       (fun acc a ->
-         match atom_cap ~is_defined a with
+         match atom_cap ~is_defined ~bound a with
          | Some c -> SSet.add c acc
          | None -> acc)
       caps atoms
   in
   match e with
+  (* A call through a LOCAL (parameter, let, pattern variable, local fn) is a
+     closure call, whatever its name: `fn go(file_read : Int -> Int)` calling
+     `file_read(x)` reaches no builtin.  [bound] tracks those names. *)
+  | Tir.EApp (v, args) when SSet.mem v.Tir.v_name bound ->
+    (add_atoms caps args, callees)
   | Tir.EApp (v, args) ->
     let n = v.Tir.v_name in
     let caps =
@@ -82,22 +91,31 @@ let rec walk ~is_defined (caps, callees) (e : Tir.expr) =
       else match cap_of_call n with Some c -> SSet.add c caps | None -> caps
     in
     (add_atoms caps args, SSet.add n callees)
-  | Tir.ELet (_, rhs, body) -> walk (walk (caps, callees) rhs) body
+  | Tir.ELet (v, rhs, body) ->
+    walk_in (SSet.add v.Tir.v_name bound) (walk (caps, callees) rhs) body
   | Tir.ESeq (a, b) -> walk (walk (caps, callees) a) b
   | Tir.ECase (scrut, branches, default) ->
     let acc =
-      List.fold_left (fun a (br : Tir.branch) -> walk a br.Tir.br_body)
+      List.fold_left
+        (fun a (br : Tir.branch) ->
+           walk_in (bind_vars bound br.Tir.br_vars) a br.Tir.br_body)
         (add_atoms caps [ scrut ], callees) branches
     in
     (match default with Some d -> walk acc d | None -> acc)
   (* A lambda lifted into an inner fn_def is still the enclosing module's
      code, so its uses belong to the same owner. *)
   | Tir.ELetRec (fns, body) ->
+    let bound =
+      List.fold_left (fun s (fd : Tir.fn_def) -> SSet.add fd.Tir.fn_name s)
+        bound fns
+    in
     let acc =
-      List.fold_left (fun a (fd : Tir.fn_def) -> walk a fd.Tir.fn_body)
+      List.fold_left
+        (fun a (fd : Tir.fn_def) ->
+           walk_in (bind_vars bound fd.Tir.fn_params) a fd.Tir.fn_body)
         (caps, callees) fns
     in
-    walk acc body
+    walk_in bound acc body
   (* ECallPtr's CALLEE is not statically known — that is the residual gap the
      .mli documents — but its atoms are still scanned, so a builtin handed to
      it as an argument is attributed. *)
@@ -187,8 +205,9 @@ let attribute ?(transparent = fun _ -> false)
   List.iter
     (fun (fn : Tir.fn_def) ->
        let caps, callees =
-         walk ~is_defined:(Hashtbl.mem defined) (SSet.empty, SSet.empty)
-           fn.Tir.fn_body
+         walk ~is_defined:(Hashtbl.mem defined)
+           ~bound:(bind_vars SSet.empty fn.Tir.fn_params)
+           (SSet.empty, SSet.empty) fn.Tir.fn_body
        in
        if not (SSet.is_empty caps) then
          Hashtbl.replace direct fn.Tir.fn_name caps;

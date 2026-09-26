@@ -7652,6 +7652,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/user_fn_named_own.expected native_user_fn_named_own.out)))
 
+; ── Top-level user fns named like C-symbol builtins get their own symbols ──
+; `fn file_read`, `fn dns_resolve`, … used to be emitted AS the builtin's C
+; symbol (`@march_file_read`), a clang redefinition. Lowering now names them
+; `name$u`; the stdlib's bare calls (String.reverse → string_reverse) still
+; reach the C builtin. Both backends, one .expected (the interpreter's).
+(rule
+ (targets native_user_fn_named_like_builtin native_user_fn_named_like_builtin.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/user_fn_named_like_builtin.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_user_fn_named_like_builtin
+        native/user_fn_named_like_builtin.march)
+   (with-stdout-to native_user_fn_named_like_builtin.out
+        (system "./native_user_fn_named_like_builtin")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_fn_named_like_builtin.expected native_user_fn_named_like_builtin.out)))
+
+(rule
+ (targets interp_user_fn_named_like_builtin.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/user_fn_named_like_builtin.march))
+ (action
+  (with-stdout-to interp_user_fn_named_like_builtin.out
+    (run %{exe:../bin/main.exe} native/user_fn_named_like_builtin.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_fn_named_like_builtin.expected interp_user_fn_named_like_builtin.out)))
+
 ; ── Two-node SWIM discovery: authenticated peer-connection + membership ──
 ; node-a accepts, node-b connects; both run the ClusterConn handshake over
 ; real TCP loopback, then exchange a SwimPing/SwimPingAck pair and each
