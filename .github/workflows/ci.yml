@@ -152,9 +152,9 @@ jobs:
   # compiler and the staged runtime/stdlib, so they get their own runner.
   two-node:
     runs-on: ubuntu-24.04
-    # Must stay above the scenarios step's 45 plus setup (12), build (10) and
+    # Must stay above the scenarios step's 55 plus setup (12), build (10) and
     # the soak (5).
-    timeout-minutes: 75
+    timeout-minutes: 85
     steps:
       - uses: actions/checkout@v4
 
@@ -203,14 +203,14 @@ jobs:
       # with a new creation), per-node goldens. ~5s per scenario. Each scenario
       # is test/two_node/<name>/; see specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
       - name: Two-node scenarios
-        # 52 scenarios at 30-70 s each on a loaded runner (~20-24 min on a
-        # quiet one). 25 was hit on main itself on a slow runner day, and one
-        # such run got through only 36 of the 52 scenarios in 25 min, which
-        # extrapolates to ~36 min for the lot; 45 covers that with margin.
-        # The cert_* scenarios (distributed-deploys step 11a) are what pushed
-        # it up. Splitting the scenario list across two jobs would also pay a
-        # second toolchain setup + build each run; a longer step is cheaper.
-        timeout-minutes: 45
+        # 57 scenarios at 20-70 s each (~33 min on a 2026-09-25 runner, when
+        # dd step 11b's four cert_* scenarios crossed the old 35); 25 was hit
+        # on main itself on a slow runner day. On such a day one run got
+        # through only 36 of 52 scenarios in 25 min, which is ~40 min for 57;
+        # 55 covers that with margin. Splitting the scenario list across two
+        # jobs would pay a second toolchain setup + build every run; a longer
+        # step is cheaper.
+        timeout-minutes: 55
         run: |
           eval $(opam env)
           for s in $(scripts/two-node.sh --list); do scripts/two-node.sh "$s" || exit 1; done

@@ -148,10 +148,20 @@ let run
              (Task 3, docs/superpowers/plans/2026-07-21-ctor-module-identity.md). *)
           { base with Lower_state.mod_prefix = new_mod_prefix }
         in
+        (* A top-level module from another file (the stdlib, MARCH_LIB_PATH)
+           sees no entry fn named like a builtin; in any module, its own fns
+           shadow the entry's (see [Lower_state._builtin_shadows]). *)
+        let in_file_scope f =
+          if mod_prefix = "" then
+            Lower_state.with_decl_builtin_shadows (Lower_decls.decl_span d) f
+          else f ()
+        in
+        in_file_scope (fun () ->
+        Lower_state.hiding_builtin_shadows (direct_names_of inner_decls) (fun () ->
         collect_tests inner_env prefix
           ~mod_prefix:new_mod_prefix
           ~direct_fn_names:(direct_names_of inner_decls)
-          inner_decls
+          inner_decls))
       | _ -> ()
     ) decls
   in

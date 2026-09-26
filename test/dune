@@ -1985,6 +1985,35 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/cluster_placement.expected cluster_placement_interp.out)))
 
+;
+; Step 11b's two-way role check at session formation, in one process, over
+; fake cluster dictionaries (D35): each fake node has its own certificate
+; and they share a fake registry and network. An initiator skips an offer
+; whose node is not certified to offer the role (and never invites it), an
+; offer refuses an initiator not certified to initiate, an honest node
+; refuses to open an offer its certificate lacks, shared-secret mode checks
+; nothing, and a squatter on a session's role name is refused. Compiled
+; only: the interpreter does not run the offer actor while the initiator
+; polls for its answer. `--no-cap-strict` because a user-level
+; `NodeQueue.start_local` call (the fake's data queue) trips the
+; capability ceiling in stdlib `Socket`, which declares no `needs`
+; (pre-existing: specs/todos/2026-09-25-nodequeue-start-local-socket-ceiling.md).
+(rule
+ (targets cert_authz_bin cert_authz.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file session/cert_authz.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --no-cap-strict -o cert_authz_bin
+        session/cert_authz.march)
+   (with-stdout-to cert_authz.out (system "./cert_authz_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/cert_authz.expected cert_authz.out)))
+
 ; Crash branches in one process (design Part B, 2026-09-20): the logging
 ; protocol with `may crash C`, run twice on a transport that can mark a role
 ; gone -- once with C alive, once with C "crashed", where I takes its crash
@@ -7621,6 +7650,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/user_fn_named_own.expected native_user_fn_named_own.out)))
+
+; ── Top-level user fns named like C-symbol builtins get their own symbols ──
+; `fn file_read`, `fn dns_resolve`, … used to be emitted AS the builtin's C
+; symbol (`@march_file_read`), a clang redefinition. Lowering now names them
+; `name$u`; the stdlib's bare calls (String.reverse → string_reverse) still
+; reach the C builtin. Both backends, one .expected (the interpreter's).
+(rule
+ (targets native_user_fn_named_like_builtin native_user_fn_named_like_builtin.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/user_fn_named_like_builtin.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_user_fn_named_like_builtin
+        native/user_fn_named_like_builtin.march)
+   (with-stdout-to native_user_fn_named_like_builtin.out
+        (system "./native_user_fn_named_like_builtin")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_fn_named_like_builtin.expected native_user_fn_named_like_builtin.out)))
+
+(rule
+ (targets interp_user_fn_named_like_builtin.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/user_fn_named_like_builtin.march))
+ (action
+  (with-stdout-to interp_user_fn_named_like_builtin.out
+    (run %{exe:../bin/main.exe} native/user_fn_named_like_builtin.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_fn_named_like_builtin.expected interp_user_fn_named_like_builtin.out)))
 
 ; ── Two-node SWIM discovery: authenticated peer-connection + membership ──
 ; node-a accepts, node-b connects; both run the ClusterConn handshake over

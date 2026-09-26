@@ -14,8 +14,10 @@ Two jobs in `.github/workflows/ci.yml` were timing out with no failing test.
   36087619570 timed out at ~26 min; one main run got through only 36 of the 52
   scenarios in 25 min, which extrapolates to ~36 min for the full list. The
   new `cert_*` scenarios from distributed-deploys step 11a (#635) pushed it
-  up. ac66548fd's 35 min step sat right at that extrapolation. Now **step 45,
-  job 75** (step + setup 12 + build 10 + soak 5, rounded up).
+  up. ac66548fd's 35 min step sat right at that extrapolation; dd step 11b
+  (a906872f8/2acf3d3d6) then grew the list to 57 (~33 min on a normal
+  runner, ~40 min at the slow rate) and set 45/60. Now **step 55, job 85**
+  (step + setup 12 + build 10 + soak 5, rounded up).
 
 Not done, deliberately:
 

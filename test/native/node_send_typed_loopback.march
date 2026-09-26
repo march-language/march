@@ -148,6 +148,7 @@ mod TypedSendLoopback do
       Ok(seq) -> "queued seq=" ++ int_to_string(seq)
       Err(NodeQueue.Backpressure) -> "backpressure"
       Err(NodeQueue.NoConnection) -> "no connection"
+      Err(NodeQueue.NotAuthorized) -> "not authorized"
     end
   end
 

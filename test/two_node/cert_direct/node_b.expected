@@ -1,0 +1,3 @@
+node-b: Audit: session_node: connect to role A: role Audit.A is played by node-a: not authorized for Audit.A
+node-b: Ledger did not form
+node-b: Pair closed
