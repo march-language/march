@@ -26,6 +26,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A module that `import`s a sibling declared later in the file is now
+  checked against that sibling's capabilities.** Sibling modules were
+  checked in declaration order unless a qualified reference said otherwise,
+  so `import Sibling` followed by bare calls into a later `Sibling` ran
+  before `Sibling`'s capabilities were known, and the missing-`needs` error
+  for the import was silently skipped. An import now orders the importer
+  after the sibling, unless the two modules import each other.
 - **A remote message sent after a hot deploy now reaches an actor whose message type
   the deploy changed.** Each cluster link's reader task kept the code of the moment
   the link formed. So a message from a peer already on the new format was decoded by
