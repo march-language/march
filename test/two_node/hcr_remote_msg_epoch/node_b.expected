@@ -1,0 +1,3 @@
+node-b: up
+node-b: version 1 sink got 1
+node-b: version 2 sink got 7 from a version-2 sender

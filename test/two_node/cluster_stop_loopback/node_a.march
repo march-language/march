@@ -1,0 +1,83 @@
+-- One-node scenario "cluster_stop_loopback": the loopback link (a node's
+-- queue to itself) is closed by `ClusterNode.stop`. See scenario.sh.
+mod ClusterStopLoopback do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  pfn serve_one(s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
+    Echo_Server.recv_Msg_Client_Server_1(s, st, fn (n, st1) ->
+      println("Server: got " ++ int_to_string(n))
+      Echo_Server.close(s, Echo_Server.send_Msg_Server_Client_1(s, st1, n * 10)))
+  end
+
+  pfn ask(s : Cap(Session.Live), st : Echo_Client.Entry, n : Int) : Echo_Client.Yield do
+    let st1 = Echo_Client.send_Msg_Client_Server_1(s, st, n)
+    Echo_Client.recv_Msg_Server_Client_1(s, st1, fn (m, st2) ->
+      println("Client: got " ++ int_to_string(m))
+      Echo_Client.close(s, st2))
+  end
+
+  pfn visible(h : Cap(ClusterNode.Live), o : SessionNode.Offer, left : Int) : () do
+    if ClusterNode.lookup(h, o.name) != None do ()
+    else if left <= 0 do panic("the offer never became visible") else
+      sleep_ms(20)
+      visible(h, o, left - 20)
+    end end
+  end
+
+  -- NodeQueue's local sinks, process-wide: one per live loopback link.
+  pfn sinks() : Int do List.length(Vault.keys(Vault.open("node_queue_sinks"))) end
+
+  -- The loopback writer drops its sink in its own turn, after stop returns.
+  pfn wait_sinks(n : Int, left : Int) : Int do
+    if sinks() == n || left <= 0 do sinks() else
+      sleep_ms(20)
+      wait_sinks(n, left - 20)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "local-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let own = ClusterNode.node_id(h)
+        match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do
+          Err(e) -> panic(Echo_Run.error_message(e))
+          Ok(_o) ->
+            visible(h, _o, 10000)
+            match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, 1)) do
+              Ok(_) -> println("before stop: session done")
+              Err(e) -> println("before stop: " ++ Echo_Run.error_message(e))
+            end
+            let running = sinks()
+            println("queue to self before stop: " ++ (if ClusterNode.queue_for(h, own) == None do "none" else "some" end))
+            ClusterNode.stop(h)
+            println("queue to self after stop: " ++ (if ClusterNode.queue_for(h, own) == None do "none" else "some" end))
+            println("loopback sink released: " ++ bool_to_string(wait_sinks(running - 1, 3000) == running - 1))
+            let to = ClusterNode.global_pid(h, 1)
+            match ClusterNode.send_msg(h, to, "Probe", Nil, NodeQueue.DropNew) do
+              Ok(_) -> println("send to self after stop: queued")
+              Err(_) -> println("send to self after stop: refused")
+            end
+            match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, 2)) do
+              Ok(_) -> println("initiate after stop: session ran")
+              Err(_) -> println("initiate after stop: refused")
+            end
+        end
+    end
+  end
+end

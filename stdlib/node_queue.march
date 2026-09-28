@@ -197,7 +197,9 @@ mod NodeQueue do
   end
 
   pfn close_fd_state(st : WriterState) : WriterState do
-    if st.fd >= 0 do tcp_close(st.fd) else () end
+    if st.fd >= 0 do tcp_close(st.fd)
+    else if st.fd <= -2 do forget_local(st.fd)
+    else () end end
     with_dead(mk2(-1, st.granted, st.sent, st.pending, st.evicted, st.budget, true, st.waiting, st.waiters))
   end
 
@@ -349,6 +351,15 @@ mod NodeQueue do
   -- (-1 is a closed connection, `close_fd_state`.)
   pfn sinks() : Vault(Bytes -> Unit) do Vault.open("node_queue_sinks") end
 
+  -- A closed local queue's sink and budget entries go with it: a local id is
+  -- never reused, so nothing else would ever drop them (a process that starts
+  -- and stops nodes would otherwise keep every stopped node's sink closure).
+  pfn forget_local(fd : Int) : () do
+    Vault.drop(sinks(), int_to_string(fd))
+    Vault.drop(table(), "b" ++ int_to_string(fd))
+    Vault.drop(table(), "q" ++ int_to_string(fd))
+  end
+
   pfn write_frame(fd : Int, frame : Bytes) : Result((), ()) do
     if fd <= -2 do
       match Vault.get(sinks(), int_to_string(fd)) do
@@ -469,7 +480,8 @@ mod NodeQueue do
   end
 
   -- `close`, and close the connection's fd through its writer (after every
-  -- write queued before this call).
+  -- write queued before this call). For a local queue (`start_local`) the
+  -- sink is dropped instead: nothing is handed to it afterwards.
   fn close_fd(q) : () do
     match q do
       (w, _) ->

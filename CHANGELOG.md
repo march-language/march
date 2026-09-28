@@ -11,6 +11,20 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+- **A cluster node's certificate can be replaced while it runs.** In
+  certificate mode, a renewed certificate used to need a restart. Now the node
+  watches the files `MARCH_NODE_CERT` and `MARCH_NODE_KEY` name
+  (`MARCH_NODE_CERT_POLL_MS`, default 10 s) and takes a new certificate when
+  one appears, or code can call `ClusterNode.replace_cert(node, cert_text,
+  key_hex)`. The new certificate must verify under the operator key, name the
+  node and its key, and not be revoked. Existing links are not reconnected:
+  each peer is sent the new certificate over the link with a proof that the
+  node holds its key, so sessions keep running past the old certificate's
+  expiry. A new key works the same way. `on_security_event` reports each
+  replacement as `CertReplaced` or `CertRefused` (two new `SecurityEvent`
+  constructors: a `match` that named every constructor needs a new arm).
+
 ### Fixed
 - **Compiled code no longer reads freed memory through a record field after
   handing the record to a function.** Reading a field into a local
@@ -22,6 +36,34 @@ git log is authoritative for exact commits.
   ran interpreted but a compiled program failed to link (`A.f` undefined),
   whenever `Outer` was itself nested in the entry module, or was a library
   (`MARCH_LIB_PATH`) or stdlib module.
+- **A remote message sent after a hot deploy now reaches an actor whose message type
+  the deploy changed.** Each cluster link's reader task kept the code of the moment
+  the link formed. So a message from a peer already on the new format was decoded by
+  the old route code, stamped as an old-format message, and then converted with
+  `migrate_msg` or dropped. A link reader now moves to the new code at the next frame
+  it reads, and so do the node's ticker and acceptor, so a cluster node no longer
+  keeps the old code pinned after a deploy.
+- **`ClusterNode.stop` now closes the node's link to itself.** After `stop`,
+  `queue_for` on the node's own id still returned a queue, a send to a local
+  process was still delivered, and every stopped node left its loopback handler
+  registered for the life of the process. A process that starts and stops nodes
+  (tests, embedding) leaked one per node and kept local sessions reachable after
+  stop. Now `queue_for(own id)` is `None`, a send to the node itself is refused,
+  and the handler is released.
+- **A recorded hot-deploy request can no longer be replayed against a node.** Signed
+  `ACTIVATE`, `TOPOLOGY` and `DRAIN` requests carried nothing that made them fresh, so
+  anyone who could reach a node's reload socket could send an old one again, rolling a
+  function back or re-pushing an old placement. forge now sends each signed request
+  inside a numbered release (`SEQ`). The node remembers the newest release it accepted,
+  across restarts. It refuses older releases, two different releases with the same
+  number, and, once it holds one, any unwrapped signed request. `MARCH_HCR_REQUIRE_RELEASE=1`
+  requires releases from the first request. Older servers keep getting unwrapped requests.
+  Every release accepted or refused, and every `DRAIN`, is now audited.
+
+- **The signed topology push is now the one a node applies, including after a restart.**
+  The node used to verify a pushed topology, then apply an unsigned copy forge wrote
+  alongside it. A restarted node came back on its built-in placement rather than the one
+  last pushed. `Topology` now reads the verified copy first, and applies it at start.
 
 - **A closed or refused session offer no longer leaks its actor and two
   Vault tables.** `SessionNode.close_offer` left the offer's `OfferActor`
@@ -32,6 +74,7 @@ git log is authoritative for exact commits.
   ends once no session runs under it (at once when none does), a refused
   offer's at once, and offers keep their state in two shared tables whose
   keys are dropped when the actor ends. Plain and hosted offers alike.
+
 - **A node healed after a network partition is now reported as rejoined.** If the
   heal's redial closed a duplicate connection at the same moment the link came
   back, the peer passed through Suspect, and its return was reported as `NodeUp`
