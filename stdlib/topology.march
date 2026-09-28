@@ -338,6 +338,14 @@ mod Topology do
     let st = state_of(node)
     Vault.set(st.roles, "roles", roles)
     Vault.set(st.roles, "base", roles)
+    -- A restarted node comes back on the topology last pushed to it (plan
+    -- 6.5): the reload server restored and re-verified its signed copy
+    -- before `main` ran.  Only that copy: the unsigned file is what the
+    -- build was started with, and is read on SIGHUP as before.
+    let _ = match process_env("MARCH_TOPOLOGY_VERIFIED_FILE") do
+      Some(p) -> if File.exists(p) do apply_file(st, p, "start") else false end
+      None -> false
+    end
     Signal.watch(Signal.Hup, fn -> reload(node))
     let meta = st.meta
     let _ = ClusterNode.subscribe(node, fn ev ->
@@ -689,38 +697,77 @@ mod Topology do
     end
   end
 
+  -- Where the topology to apply comes from (DD step 12-pre).  The reload
+  -- server writes every signature-checked TOPOLOGY push to
+  -- MARCH_TOPOLOGY_VERIFIED_FILE; when that copy exists it wins over the
+  -- unsigned MARCH_TOPOLOGY_FILE, so the signed push is what takes effect.
+  -- With MARCH_HCR_REQUIRE_RELEASE=1 the unsigned file is never read.
+  pfn topology_source() : Result(String, String) do
+    let verified = match process_env("MARCH_TOPOLOGY_VERIFIED_FILE") do
+      Some(p) -> if File.exists(p) do Some(p) else None end
+      None -> None
+    end
+    match verified do
+      Some(p) -> Ok(p)
+      None ->
+        if process_env("MARCH_HCR_REQUIRE_RELEASE") == Some("1") do
+          Err("no signed topology has been pushed (MARCH_HCR_REQUIRE_RELEASE=1 ignores MARCH_TOPOLOGY_FILE)")
+        else
+          match process_env("MARCH_TOPOLOGY_FILE") do
+            None -> Err("MARCH_TOPOLOGY_FILE is not set; there is no topology to re-read")
+            Some(p) -> Ok(p)
+          end
+        end
+    end
+  end
+
+  -- Parse [path] and take its placement, capacity and drain deadlines for
+  -- the roles this build contains.  True when applied; a file that cannot be
+  -- read or parsed changes nothing and is reported under [why].
+  pfn apply_file(st : TopoState, path : String, why : String) : Bool do
+    match File.read(path) do
+      Err(_) ->
+        report(why ++ ": could not read " ++ path ++ "; placement unchanged")
+        false
+      Ok(text) ->
+        match desired_of(text, fn p -> runs_pool(p)) do
+          Err(e) ->
+            report(why ++ ": " ++ path ++ ": " ++ e ++ "; placement unchanged")
+            false
+          Ok((desired, soft, hard)) ->
+            let base : List(TopoRole) = Vault.get_or(st.roles, "base", Nil)
+            let before : List(TopoRole) = Vault.get_or(st.roles, "roles", Nil)
+            let after = apply_desired(base, desired)
+            List.each(after, fn r -> report_change(before, r))
+            List.each(desired, fn d -> report_unbuilt(base, d))
+            Vault.set(st.meta, "drain_soft", soft)
+            Vault.set(st.meta, "drain_hard", hard)
+            Vault.set(st.roles, "roles", after)
+            Vault.set(st.strs, "applied", Crypto.sha256(text))
+            report("topology re-read from " ++ path)
+            true
+        end
+    end
+  end
+
   doc """
-  Re-read the topology now, as SIGHUP does: MARCH_TOPOLOGY_FILE is parsed
-  and the roles this build contains take their placement and capacity from
-  it; the next evaluation (run at once) opens and drains offers to match.
-  A file that cannot be read or parsed changes nothing and is reported.
+  Re-read the topology now, as SIGHUP does: the signature-checked copy the
+  reload server keeps (MARCH_TOPOLOGY_VERIFIED_FILE) when there is one, else
+  MARCH_TOPOLOGY_FILE, is parsed and the roles this build contains take
+  their placement and capacity from it; the next evaluation (run at once)
+  opens and drains offers to match. A file that cannot be read or parsed
+  changes nothing and is reported.
   """
   fn reload(node : Cap(ClusterNode.Live)) : () do
     let st = state_of(node)
     if Vault.get(st.meta, "closing") != None do () else
-      match process_env("MARCH_TOPOLOGY_FILE") do
-        None -> report("SIGHUP: MARCH_TOPOLOGY_FILE is not set; there is no topology to re-read")
-        Some(path) ->
-          match File.read(path) do
-            Err(_) -> report("SIGHUP: could not read " ++ path ++ "; placement unchanged")
-            Ok(text) ->
-              match desired_of(text, fn p -> runs_pool(p)) do
-                Err(e) -> report("SIGHUP: " ++ path ++ ": " ++ e ++ "; placement unchanged")
-                Ok((desired, soft, hard)) ->
-                  let base : List(TopoRole) = Vault.get_or(st.roles, "base", Nil)
-                  let before : List(TopoRole) = Vault.get_or(st.roles, "roles", Nil)
-                  let after = apply_desired(base, desired)
-                  List.each(after, fn r -> report_change(before, r))
-                  List.each(desired, fn d -> report_unbuilt(base, d))
-                  Vault.set(st.meta, "drain_soft", soft)
-                  Vault.set(st.meta, "drain_hard", hard)
-                  Vault.set(st.roles, "roles", after)
-                  Vault.set(st.strs, "applied", Crypto.sha256(text))
-                  report("topology re-read from " ++ path)
-                  reconcile(node, st)
-                  write_status(node, st)
-              end
-          end
+      match topology_source() do
+        Err(e) -> report("SIGHUP: " ++ e)
+        Ok(path) ->
+          if apply_file(st, path, "SIGHUP") do
+            reconcile(node, st)
+            write_status(node, st)
+          else () end
       end
     end
   end

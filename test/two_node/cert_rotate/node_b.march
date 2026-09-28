@@ -1,0 +1,103 @@
+-- Two-node harness, scenario "cert_rotate": node-b, which initiates role
+-- Buyer of `Order` and runs ONE session, an item every 200 ms, until node-a
+-- ends it. Its certificate expires 20 s after it was issued; scenario.sh
+-- replaces the certificate and key files it was started from, and node-b
+-- picks them up while it runs (MARCH_NODE_CERT_POLL_MS). See scenario.sh.
+mod CertRotateB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Order do
+    loop do
+      item: Buyer -> Shop : Int
+      choose by Shop:
+        more -> Shop -> Buyer : Int
+        done -> Shop -> Buyer : Int
+                stop
+      end
+    end
+  end
+
+  pfn me() : String do "node-b" end
+
+  pfn flags() : Vault(Int) do
+    match Vault.whereis("cert_rotate_flags") do
+      Some(v) -> v
+      None -> Vault.new("cert_rotate_flags")
+    end
+  end
+
+  pfn once(key : String, line : String) : () do
+    if Vault.incr(flags(), key, 1) == 1 do println(me() ++ ": " ++ line) else () end
+  end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn buyer(s : Cap(Session.Live), st : Order_Buyer.Entry, n : Int) : Order_Buyer.Yield do
+    sleep_ms(200)
+    let st1 = Order_Buyer.send_Item(s, st, n)
+    Order_Buyer.offer_more_done(s, st1,
+      fn (_v, st2) -> do
+        once("running", "session running")
+        buyer(s, st2, n + 1)
+      end,
+      fn (_v, st2) -> Order_Buyer.close(s, st2))
+  end
+
+  pfn offered(h : Cap(ClusterNode.Live), left : Int) : () do
+    if List.any(ClusterNode.names(h), fn nm -> String.starts_with(nm, "ap:Order/")) do ()
+    else if left <= 0 do panic("node-b: never saw the Shop offer") else
+      sleep_ms(50)
+      offered(h, left - 50)
+    end end
+  end
+
+  fn main(c : Cap(IO)) do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_NAME", me())
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int("MARCH_PORT_B")))
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
+    let cfg = match ClusterNode.config_from_env() do
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    end
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let own = ClusterNode.node_id(h)
+        -- Its own refusals are not printed: the key file lands before the
+        -- certificate that names it, and that pair is (rightly) refused.
+        let _ = ClusterNode.on_security_event(h, fn ev ->
+          match ev do
+            ClusterNode.CertReplaced(id, _) -> if id == own do once("replaced", "my certificate replaced") else () end
+            _ -> ()
+          end)
+        println(me() ++ ": up")
+        offered(h, 60000)
+        match Order_Run.initiate_Buyer(c, h, fn (s, st) -> buyer(s, st, 1)) do
+          Ok(_) -> println(me() ++ ": session finished")
+          Err(e) -> println(me() ++ ": session failed: " ++ Order_Run.error_message(e))
+        end
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        ClusterNode.stop(h)
+        println(me() ++ ": done")
+    end
+  end
+end

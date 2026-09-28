@@ -238,7 +238,7 @@ Old epochs are retired by **drains**. After every deploy the older epochs drain 
 - **Soft deadline**: 5 seconds by default, or `MARCH_HCR_DRAIN_MS` milliseconds (`0` turns it off). An actor that has not reached its marker by then moves at once, as if the marker were at the front of its mailbox. The messages still queued ahead of it then run on the new code, except old-format messages (see above), which take `migrate_msg` or are dropped and counted. A handler that is already running is never interrupted.
 - **Hard deadline**: off by default; `MARCH_HCR_HARD_DRAIN_MS` milliseconds arms it. Every actor still pinned to a drained epoch is killed, and its supervisor restarts it on the new code with its `init` state (an unsupervised actor just dies, and its state is lost). Other units still on a drained epoch are told to stop.
 
-A drain can also be started by hand with the reload server's `DRAIN <signature> epoch:<E> soft_ms:<n> hard_ms:<n>` request, which drains every epoch up to `E`. It is signed like `ACTIVATE` (over `DRAIN epoch:<E> soft_ms:<n> hard_ms:<n>`), and `E` must be below the current epoch: every live unit is pinned at or below the current one, so draining it with a hard deadline would kill every actor in the process.
+A drain can also be started by hand with the reload server's `DRAIN <signature> epoch:<E> soft_ms:<n> hard_ms:<n>` request, which drains every epoch up to `E`. It is signed like `ACTIVATE` (over `DRAIN epoch:<E> soft_ms:<n> hard_ms:<n>`), and `E` must be below the current epoch: every live unit is pinned at or below the current one, so draining it with a hard deadline would kill every actor in the process. Every drain request is audited (`type` `drain`). Like every signed request, it must be wrapped in a release once the node holds one (see "Sequenced releases").
 
 An actor that hosts work from an older epoch, such as a session party, takes an **epoch hold**: while it holds one, it stays on its epoch at its marker and at the soft deadline, and moves when the last hold is released. Messages in a newer format that reach it meanwhile are set aside and replayed, in order, once it moves. The hard deadline still applies.
 
@@ -285,6 +285,17 @@ Typed remote messages (`Node.send`, `@[remote]`) carry their type's schema hash 
 tag, so an actor built from a newer or older version of a message type converts it with
 its `migrate_msg` or refuses it with `DELIVERY_FAILED` instead of misdecoding it
 ([Clustering]({{ site.baseurl }}/docs/clustering/)).
+
+A cluster node's own long-lived tasks follow a deploy too. Each link has a reader task
+that routes every remote delivery to its local actor, and a task keeps the epoch it
+started at. So a reader started before the deploy would route later deliveries through
+the old code and stamp them with the old epoch, and an actor whose message type changed
+would convert or drop a message the peer had already sent in the new format. Instead, a
+reader that finds its epoch draining hands its connection, at the next frame it reads, to
+a new reader started on the new code, and that reader delivers the frame. The node's
+ticker and acceptor move the same way, so a cluster node does not keep the old epoch
+pinned. A connection with no traffic moves at its next frame; the acceptor at its next
+inbound connection.
 
 Two limits for now. After a deploy, `Topology.reoffer` reopens a role through the `open`
 function the old code built, which still runs the old code; re-offer from an actor whose
@@ -474,7 +485,7 @@ On the wire, a manifest with `ROLE` lines is deployed with the `ACTIVATE6` messa
 
 `--grant-cap <CAP>` is repeatable and subsumption-matched: `--grant-cap IO.FileSystem` authorizes a widening to the narrower `IO.FileWrite`. The granted capability becomes part of the deployed function's own signed capability set, so it can't be stripped or altered without breaking the signature; the server's audit log records who deployed which function, when, and with which capability set, so a widening is always traceable back to the person who authorized it.
 
-Each `ACTIVATE` appends one JSON line to `$MARCH_AUDIT_LOG` (default `${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl`) with `ts`, `type` (`activate`, `restore` for a replay at start, `topology` for a topology push), `fn`, `impl_hash`, `signer`, `cas_hash`, `caps`, `cap_root` and `result`, plus `roles` (the role closures as received) for `ACTIVATE6`. `caps` is the deploy's capability list (`[]` for a capless artifact) and `cap_root` its signed root; both are `null` for deploys over pre-v4 protocols, which carry no capability data. They are recorded as received, so on a rejected request (`err_sig`, `err_cap_tamper`) they show what the request claimed, not a verified set. To find when a node last gained a capability: `jq -c 'select(.result == "ok" and (.caps // [] | index("IO.Network")))' audit.jsonl | tail -1`.
+Each `ACTIVATE` appends one JSON line to `$MARCH_AUDIT_LOG` (default `${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl`) with `ts`, `type` (`activate`, `restore` for a replay at start, `topology` for a topology push, `drain` for a `DRAIN` request, `release` for a release accepted or refused), `fn`, `impl_hash`, `signer`, `cas_hash`, `caps`, `cap_root` and `result`, plus `roles` (the role closures as received) for `ACTIVATE6`. `caps` is the deploy's capability list (`[]` for a capless artifact) and `cap_root` its signed root; both are `null` for deploys over pre-v4 protocols, which carry no capability data. They are recorded as received, so on a rejected request (`err_sig`, `err_cap_tamper`) they show what the request claimed, not a verified set. To find when a node last gained a capability: `jq -c 'select(.result == "ok" and (.caps // [] | index("IO.Network")))' audit.jsonl | tail -1`.
 
 ```sh
 forge deploy hot --grant-cap IO.FileWrite --grant-cap IO.Process --so v2.so
@@ -562,7 +573,28 @@ TOPOLOGY <blake3 of the file> <signature> <size>
 
 with the signature over `TOPOLOGY <blake3>` made with the deploy key. The server checks the signature **before** it accepts the body (`READY`), checks that the body hashes to the signed digest (`ERR digest_mismatch`), writes it to the service's state directory (`topology.toml`), records the digest and signature in the persisted state, and calls the runtime's topology hook, `march_hcr_on_topology(path)`, then answers `OK <blake3>`. At start, a persisted topology whose signature and digest still verify goes through the hook again, so the node comes back on the topology it had.
 
-The hook does nothing yet. The ssh reconciler backend (`forge topology apply --env`, `forge deploy --env`) therefore also writes the digest to the node's `MARCH_TOPOLOGY_FILE` and sends its unit SIGHUP, which makes the node re-read it and open its own offers; a node whose server refused the signed push is not signalled.
+The signed copy is the one that takes effect. The server sets `MARCH_TOPOLOGY_VERIFIED_FILE` to that `topology.toml` when it starts, and `Topology.reload` reads it in preference to the unsigned `MARCH_TOPOLOGY_FILE`. After a push, the hook sends the process SIGHUP so the node re-reads it and opens its own offers, but only when a SIGHUP watcher is installed (`Topology.place` installs one): a program with no watcher would die of the signal. At start the hook does nothing; `Topology.place` applies the verified copy itself, so a restarted node comes back on the topology last pushed to it, not the one it was built with. With `MARCH_HCR_REQUIRE_RELEASE=1` the unsigned file is never read. The ssh reconciler backend (`forge topology apply --env`, `forge deploy --env`) still also writes the digest to `MARCH_TOPOLOGY_FILE` and signals the unit, for nodes built before this; a node whose server refused the signed push is not signalled.
+
+## Sequenced releases: no replayed requests
+
+A signed line on its own proves who wrote it, not when. Without more, a signed `ACTIVATE`, `TOPOLOGY` or `DRAIN` recorded once could be sent again later: to roll a function back to an old version, re-push an old placement, or repeat a drain. So forge wraps every signed line it sends in a **release**:
+
+```
+SEQ <seq> <id> <signature> <signed line>
+```
+
+signed over `SEQ <seq> <id> <signed line>` with the deploy key. The inner line keeps its own signature, checked as before. One `forge` invocation is one release: `<id>` is random (32 hex digits), and `<seq>` is the time in milliseconds, or one more than the node's current release if that is higher. The node keeps the highest release it has accepted, its **head**, in a file of its own next to the persisted state (`<state dir>/release`), so a restart, `MARCH_HCR_NO_REPLAY` or a different build on the socket does not forget it:
+
+| The release | The node |
+|---|---|
+| newer than the head | accepts it, and it becomes the head (gaps are fine: a node a deploy did not touch never saw that release) |
+| the head itself | accepts it: a retry, or the next line of the same deploy |
+| the head's number with another id | refuses it, `ERR release_fork head:<n>:<id>`: two deploys chose the same number |
+| older than the head | refuses it, `ERR stale_release head:<n>` |
+
+Once a node holds a release, or when it was started with `MARCH_HCR_REQUIRE_RELEASE=1`, a signed line that is not wrapped is refused with `ERR release_required`, so a line recorded before the node saw its first release cannot be replayed either. `RELEASE_HEAD` answers `HEAD <seq> <id>` (`HEAD 0 -` before any release, with ` required` appended under `MARCH_HCR_REQUIRE_RELEASE`); forge asks it once per connection and sends unwrapped lines only to a server that does not know the request. Every release a node accepts or refuses is audited (`type` `release`).
+
+forge reports a refusal in words: a stale release means another deploy reached the node first, or this machine's clock is behind; a fork means two deploys ran at once. Re-run the deploy either way.
 
 ---
 

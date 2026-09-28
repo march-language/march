@@ -1760,6 +1760,29 @@ let test_topology_command_signed () =
           (March_ed25519.Ed25519.sign_str ("TOPOLOGY " ^ digest) sk) pk)
    | _ -> Alcotest.failf "unexpected TOPOLOGY line: %s" line)
 
+(* DD step 12-pre: a signed line wrapped in a release. *)
+let test_wrap_release () =
+  let (pk, sk) = March_ed25519.Ed25519.keygen () in
+  let id = "0123456789abcdef0123456789abcdef" in
+  let inner = "DRAIN c2lnbmF0dXJl epoch:3" in
+  let line = Cmd_deploy_hot.wrap_release ~seq:42 ~id ~sk inner in
+  (match String.split_on_char ' ' line with
+   | "SEQ" :: seq :: id' :: sig_b64 :: rest ->
+     Alcotest.(check string) "seq on the line" "42" seq;
+     Alcotest.(check string) "id on the line" id id';
+     Alcotest.(check string) "the inner line follows, untouched" inner (String.concat " " rest);
+     let signed = Printf.sprintf "SEQ 42 %s %s" id inner in
+     Alcotest.(check string) "signed over \"SEQ <seq> <id> <line>\""
+       (March_ed25519.Ed25519.sig_to_base64 (March_ed25519.Ed25519.sign_str signed sk)) sig_b64;
+     Alcotest.(check bool) "and it verifies under the deploy key" true
+       (March_ed25519.Ed25519.verify (Bytes.of_string signed)
+          (March_ed25519.Ed25519.sign_str signed sk) pk)
+   | _ -> Alcotest.failf "unexpected SEQ line: %s" line);
+  Alcotest.(check bool) "a stale release is explained" true
+    (Cmd_deploy_hot.describe_release_refusal "ERR stale_release head:9" <> None);
+  Alcotest.(check bool) "other answers are not" true
+    (Cmd_deploy_hot.describe_release_refusal "ERR cap_tamper" = None)
+
 (* DD build step 10: COMPACT, the patch-stack size forge status shows. *)
 let test_parse_compact () =
   (match Cmd_deploy_hot.parse_compact
@@ -2972,6 +2995,7 @@ let () =
       Alcotest.test_case "ACTIVATE5: signed shape carries the migrate bitmask" `Quick test_activate5_signed_shape;
       Alcotest.test_case "ACTIVATE6: role roots signed, closures unsigned" `Quick test_activate6_signed_shape_and_role_blocks;
       Alcotest.test_case "TOPOLOGY: signed line shape" `Quick test_topology_command_signed;
+      Alcotest.test_case "SEQ: a signed line wrapped in a release" `Quick test_wrap_release;
       Alcotest.test_case "COMPACT: parsed and described" `Quick test_parse_compact;
       Alcotest.test_case "WAIT: parsed and described" `Quick test_parse_wait;
       Alcotest.test_case "schemas: handlers, migrate_msg_from, message diff" `Quick test_schema_handlers_and_message_diff;

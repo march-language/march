@@ -35,6 +35,7 @@ mod FrameTamperedB do
               println("node-b: dropped a frame from " ++ who ++ " (" ++ int_to_string(n) ++ " on that connection)")
             ClusterNode.HandshakeRejected(_, why) -> println("node-b: handshake rejected: " ++ why)
             ClusterNode.RawSendRefused(_, what) -> println("node-b: raw send refused: " ++ what)
+            _ -> ()
           end)
         let _ = ClusterNode.route_type(h, "Tamper.Ping", fn _d -> do
           let _ = Vault.incr(seen, "n", 1)
