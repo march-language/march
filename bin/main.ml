@@ -3605,7 +3605,27 @@ let compile filename =
                          write_scopes)
                     |> List.map c_string_lit
                 in
-                if holds "IO.Network"   then Buffer.add_string b "(allow network*)";
+                (* Network is split by direction, not granted as network*.
+                   holds is bidirectional, so a program holding only
+                   IO.NetConnect makes holds "IO.Network" true; granting
+                   network* on that would hand it network-bind too.  Measured
+                   2026-09-28 (macOS 26, arm64) with sandbox-exec and real
+                   March binaries:
+                   - a NetConnect-only client (tcp_connect by hostname, then
+                     Tls.https_get) runs under network-outbound alone.
+                     Name resolution needs it too: getaddrinfo talks to
+                     mDNSResponder over a unix socket, which is
+                     network-outbound, not mach-lookup ((allow mach* ) alone
+                     gives "getaddrinfo failed").
+                   - a NetListen-only HttpServer runs under network-bind +
+                     network-inbound, and fails to bind (EPERM) under
+                     network-outbound alone.
+                   Holding IO.Network (or IO) makes both true.  forge's
+                   profile_for makes the same split. *)
+                if holds "IO.NetConnect" then
+                  Buffer.add_string b "(allow network-outbound)";
+                if holds "IO.NetListen" then
+                  Buffer.add_string b "(allow network-bind)(allow network-inbound)";
                 (* process-exec is gated with process-fork, NOT baseline.
                    forge's profile_for keeps it unconditional because
                    sandbox-exec must itself exec the target (deny -> exit 71);

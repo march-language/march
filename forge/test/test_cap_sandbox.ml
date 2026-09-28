@@ -103,21 +103,48 @@ let test_withheld_network_is_denied () =
      explicit deny is present. *)
   let p = profile [ "IO.Console" ] in
   Alcotest.(check bool) "profile is deny-default" true (has_deny p "(deny default)");
-  Alcotest.(check bool) "no network cap => no (allow network*)" false
-    (has_deny p "(allow network*)")
+  Alcotest.(check bool) "no network cap => no (allow network" false
+    (has_deny p "(allow network")
 
 let test_granted_child_keeps_parent_class () =
   (* IO.NetListen is a CHILD of IO.Network; holding it must keep network
      access. Regression: the subsumption ran held-over-parent and denied
      network to a program that had been granted IO.NetListen. *)
-  Alcotest.(check bool) "IO.NetListen granted => network allowed" true
-    (has_deny (profile [ "IO.NetListen" ]) "(allow network*)")
+  let p = profile [ "IO.NetListen" ] in
+  Alcotest.(check bool) "IO.NetListen granted => bind allowed" true
+    (has_deny p "(allow network-bind)");
+  Alcotest.(check bool) "IO.NetListen granted => inbound allowed" true
+    (has_deny p "(allow network-inbound)")
+
+let test_netconnect_does_not_grant_listen () =
+  (* The split: holds_under is bidirectional, so IO.NetConnect alone makes
+     IO.Network "held"; a network* grant on that opened network-bind to a
+     connect-only program. *)
+  List.iter
+    (fun cap ->
+       let p = profile [ cap ] in
+       Alcotest.(check bool) (cap ^ " => outbound allowed") true
+         (has_deny p "(allow network-outbound)");
+       Alcotest.(check bool) (cap ^ " => NO bind") false
+         (has_deny p "(allow network-bind)");
+       Alcotest.(check bool) (cap ^ " => NO inbound") false
+         (has_deny p "(allow network-inbound)");
+       Alcotest.(check bool) (cap ^ " => NO network*") false
+         (has_deny p "(allow network*)"))
+    [ "IO.NetConnect"; "IO.NetConnect.TLS"; "IO.WebSocket"; "IO.Database" ];
+  Alcotest.(check bool) "IO.NetListen => NO outbound" false
+    (has_deny (profile [ "IO.NetListen" ]) "(allow network-outbound)")
 
 let test_granted_parent_covers_child () =
-  Alcotest.(check bool) "IO.Network granted => network allowed" true
-    (has_deny (profile [ "IO.Network" ]) "(allow network*)");
-  Alcotest.(check bool) "IO (root) granted => network allowed" true
-    (has_deny (profile [ "IO" ]) "(allow network*)")
+  List.iter
+    (fun cap ->
+       let p = profile [ cap ] in
+       List.iter
+         (fun op ->
+            Alcotest.(check bool) (cap ^ " granted => " ^ op) true
+              (has_deny p ("(allow " ^ op ^ ")")))
+         [ "network-outbound"; "network-bind"; "network-inbound" ])
+    [ "IO.Network"; "IO" ]
 
 let test_file_write_and_process_gating () =
   let pure = profile [ "IO.Console" ] in
@@ -310,6 +337,8 @@ let tests =
       test_withheld_network_is_denied;
     Alcotest.test_case "granted child keeps parent class" `Quick
       test_granted_child_keeps_parent_class;
+    Alcotest.test_case "NetConnect does not grant bind/inbound" `Quick
+      test_netconnect_does_not_grant_listen;
     Alcotest.test_case "granted parent covers child" `Quick
       test_granted_parent_covers_child;
     Alcotest.test_case "file-write and process gating" `Quick

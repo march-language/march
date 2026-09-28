@@ -26,6 +26,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **On macOS, `IO.NetConnect` no longer lets a sandboxed program listen.** Under
+  `--cap-sandbox` and `forge cap run`, any network capability granted the whole
+  `network*` class, so a program holding only `IO.NetConnect` could still bind
+  and accept connections. The grant is now split: `IO.NetConnect` allows
+  outbound connections (DNS, TCP and TLS clients keep working), `IO.NetListen`
+  allows bind and inbound, `IO.Network` allows both. Linux already worked this
+  way.
 - **A remote message sent after a hot deploy now reaches an actor whose message type
   the deploy changed.** Each cluster link's reader task kept the code of the moment
   the link formed. So a message from a peer already on the new format was decoded by
