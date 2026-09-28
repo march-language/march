@@ -2481,13 +2481,19 @@ mod SessionNode do
 
   -- An offer: what an invitation needs to be answered and its session run.
   -- [start] runs one session under a sid, abandoned while still forming
-  -- once its argument says so. [flags]: "closing", and "w<sid>" for a
-  -- session its initiator withdrew.
+  -- once its argument says so. [flags] and [strs] are tables SHARED by every
+  -- offer of the process, keyed under the offer's [id] (its actor's pid):
+  -- flags "c<id>" (closing: 1, retiring: 2) and "w<id>/<sid>" for a session
+  -- its initiator withdrew, strs "r<id>" its route key. A Vault table is
+  -- never freed (the runtime registers it by name for the life of the
+  -- process), so two per offer were two leaked per offer opened; the keys an
+  -- offer leaves in the shared ones are dropped when its actor retires
+  -- (`retire_offer`).
   -- [roles] is the protocol's role-name table (`<P>_Msg.role_names()`), what
   -- the certificate checks name roles by (step 11b).
   type Offer = { node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
                  roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int,
-                 capacity : Int, name : String, flags : Vault(Int), strs : Vault(String),
+                 capacity : Int, name : String, id : String, flags : Vault(Int), strs : Vault(String),
                  start : String -> (Int -> Bool) -> Result(Session.Outcome, RunError), worker : Pid(OfferCount) }
 
   -- Whether an initiator at fingerprint [fp] may form a session with this
@@ -2508,7 +2514,7 @@ mod SessionNode do
   -- verified peer, `Delivery.from_node`), [irole] the role its initiator
   -- plays (-1: an invitation that did not say).
   pfn offer_verdict(o : Offer, active : Int, fp : String, vouch : List(String), from : String, irole : Int) : String do
-    if Vault.get(o.flags, "closing") != None do "closing"
+    if Vault.get(o.flags, "c" ++ o.id) != None do "closing"
     else
       let by_fp = fp_verdict(o, fp, vouch)
       if by_fp != "" do by_fp
@@ -2557,6 +2563,12 @@ mod SessionNode do
   -- Invitations are answered in the offer actor's turn, so the count of
   -- running sessions is exact; each accepted session runs in its own task
   -- and reports back when it ends.
+  --
+  -- A closed offer's actor retires once no session runs under it (`Close`
+  -- with none running, else the last `Ended`): review finding 2026-09-25-dd-
+  -- review-offer-actors-leak, every retired offer left its actor behind. It
+  -- takes no epoch hold (each session's Endpoint takes and releases its own,
+  -- `end_party`), so ending it strands none.
   actor OfferActor do
     state { active : Int }
     init  { active: 0 }
@@ -2569,22 +2581,53 @@ mod SessionNode do
         let flags = o.flags
         let start = o.start
         let me = o.worker
+        let wkey = withdraw_key(o, sid)
         let _ = task_spawn(fn _ -> do
-          let _ = start(sid, fn _ -> Vault.get(flags, "w" ++ sid) != None)
-          let _ = Vault.delete(flags, "w" ++ sid)
-          let _ = send(me, Ended(sid))
+          let _ = start(sid, fn _ -> Vault.get(flags, wkey) != None)
+          let _ = Vault.delete(flags, wkey)
+          let _ = send(me, Ended(o, sid))
           0
         end)
         { active: state.active + 1 }
       else state end
     end
     on Withdraw(o : Offer, sid : String) do
-      Vault.set(o.flags, "w" ++ sid, 1)
+      Vault.set(o.flags, withdraw_key(o, sid), 1)
       state
     end
-    on Ended(sid : String) do
-      { active: state.active - 1 }
+    on Ended(o : Offer, _sid : String) do
+      let n = state.active - 1
+      if n <= 0 do retire_offer(o) else () end
+      { active: n }
     end
+    on Close(o : Offer) do
+      if state.active <= 0 do retire_offer(o) else () end
+      state
+    end
+  end
+
+  pfn withdraw_key(o : Offer, sid : String) : String do "w" ++ o.id ++ "/" ++ sid end
+
+  -- In the offer actor's turn, once no session runs under [o]: if [o] is
+  -- closing (and not already retiring), end its actor and drop the keys it
+  -- left in the shared tables. The kill runs in its own task, not in this
+  -- turn; the closing flag goes only after it, so no invitation the node
+  -- still hands over in between is accepted.
+  pfn retire_offer(o : Offer) : () do
+    let ck = "c" ++ o.id
+    if Vault.get_or(o.flags, ck, 0) == 1 do
+      Vault.set(o.flags, ck, 2)
+      let me = o.worker
+      let flags = o.flags
+      let wprefix = "w" ++ o.id ++ "/"
+      let _ = task_spawn(fn _ -> do
+        kill(me)
+        List.each(Vault.keys(flags), fn k -> if String.starts_with(k, wprefix) do Vault.delete(flags, k) else () end)
+        Vault.delete(flags, ck)
+        0
+      end)
+      ()
+    else () end
   end
 
   pfn encode_invite(sid : String, fp : String, reply : GlobalPid.Pid, irole : Int, vouch : List(String)) : List(Int) do
@@ -2726,29 +2769,46 @@ mod SessionNode do
                  roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int, capacity : Int,
                  start : String -> (Int -> Bool) -> Result(Session.Outcome, RunError)) : Result(Offer, RunError) do
     let a = spawn(OfferActor)
-    let tag = proto ++ "." ++ int_to_string(my_role) ++ "." ++ int_to_string(pid_to_int(a))
     let o = { node: node, proto: proto, fingerprint: fingerprint, roles: roles, compat: compat, my_role: my_role, capacity: capacity,
               name: ap_name(proto, my_role, fingerprint, ClusterNode.node_id(node)),
-              flags: Vault.new("session_ap_flags_" ++ tag), strs: Vault.new("session_ap_strs_" ++ tag),
+              id: int_to_string(pid_to_int(a)),
+              flags: Vault.new("session_ap_flags"), strs: Vault.new("session_ap_strs"),
               start: start, worker: a }
     let key = ClusterNode.route_session(node, pid_to_int(a), fn d -> offer_frame(o, d))
-    Vault.set(o.strs, "route", key)
+    Vault.set(o.strs, "r" ++ o.id, key)
     match ClusterNode.register(node, o.name, a) do
       Ok(_) -> Ok(o)
       Err(_) ->
+        -- Never registered, so nothing was invited: end the actor at once
+        -- (Topology retries a held name every placement tick, and each try
+        -- left one behind).
         ClusterNode.unroute(node, key)
+        let _ = Vault.delete(o.strs, "r" ++ o.id)
+        kill(a)
         Err(AlreadyOffered(my_role))
     end
   end
 
-  doc "Stop offering: new invitations are refused and the name is released. Sessions already running finish."
+  doc """
+  Stop offering: new invitations are refused and the name is released.
+  Sessions already running finish; the offer's actor ends once none is left
+  (at once when none runs). Closing an offer twice is harmless.
+  """
   fn close_offer(o : Offer) : () do
-    Vault.set(o.flags, "closing", 1)
+    let live = is_alive(o.worker)
+    if live do Vault.set(o.flags, "c" ++ o.id, 1) else () end
     ClusterNode.unregister(o.node, o.name)
-    match Vault.get(o.strs, "route") do
-      Some(k) -> ClusterNode.unroute(o.node, k)
+    match Vault.get(o.strs, "r" ++ o.id) do
+      Some(k) ->
+        ClusterNode.unroute(o.node, k)
+        let _ = Vault.delete(o.strs, "r" ++ o.id)
+        ()
       None -> ()
     end
+    if live do
+      let _ = send(o.worker, Close(o))
+      ()
+    else () end
   end
 
   -- The initiator's reply address: an actor that exists only to have a pid
