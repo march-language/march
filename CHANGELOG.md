@@ -26,6 +26,15 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **`[ffi.rust]` crates now work under the interpreter.** `forge run`,
+  `forge interactive` and interpreted `forge test` used to fail at the first
+  Rust extern with "symbol not found for interpreter FFI", and printed a
+  compile-only warning. The compiler now links every static archive given with
+  `--ffi-link` (such as the crate's `lib<name>.a`) whole into the interpreter's
+  FFI shim, so the crate's functions resolve and a project gives the same
+  output interpreted and compiled. Compiled `[ffi.rust]` builds also link on
+  Linux now: the archive used to come before the program on the link line, and
+  GNU ld then skipped it (`undefined reference`).
 - **A remote message sent after a hot deploy now reaches an actor whose message type
   the deploy changed.** Each cluster link's reader task kept the code of the moment
   the link formed. So a message from a peer already on the new format was decoded by

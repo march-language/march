@@ -267,17 +267,46 @@ let ffi_cas_tag () : string list =
     ["ffi:" ^ Digest.to_hex (Digest.string (Buffer.contents buf))]
   end
 
+(* A static archive among the --ffi-link flags: a flag naming an existing
+   `.a` file.  That is how forge hands over an [ffi.rust] crate
+   (`cargo build --release` produces a staticlib), and how a user links any
+   prebuilt static library. *)
+let is_static_archive_flag (flag : string) : bool =
+  Filename.check_suffix flag ".a" && Sys.file_exists flag
+  && not (Sys.is_directory flag)
+
+(* Linker arguments that put EVERY member of [archive] into the interpreter's
+   shim .so.  A plain `archive.a` on a `cc -shared` line pulls in only members
+   that resolve a symbol something else already references, and the shim
+   references none of the archive's symbols (only the interpreter does, by
+   dlsym, after the link), so without this the archive contributes nothing
+   and every extern it provides is "symbol not found".  Measured 2026-09-28 on
+   macOS 26 arm64 and Ubuntu 24.04 arm64 (Docker) with a `forge ffi add-rust`
+   crate: -force_load / --whole-archive over an empty stub links, and the
+   interpreter then runs the crate's externs with the same output as the
+   compiled binary. *)
+let force_load_args (archive : string) : string =
+  let q = Filename.quote archive in
+  if Sys.file_exists "/System/Library/CoreServices"
+  then Printf.sprintf "-Wl,-force_load,%s" q
+  else Printf.sprintf "-Wl,--whole-archive %s -Wl,--no-whole-archive" q
+
 (* Interpreter FFI (Phase 4 / Gap 1): provide the runtime .so so extern calls
    can be resolved dynamically, and — if ffi_c_files are present (from
-   --ffi-c or forge.toml [ffi]) — compile them into a temp .so and tell the
-   interpreter to dlopen it. An explicit --ffi-so path takes precedence.
+   --ffi-c or forge.toml [ffi]) or a static archive is linked (--ffi-link
+   <lib.a>, e.g. forge's [ffi.rust] crate) — build them into a temp .so and
+   tell the interpreter to dlopen it.  A `.a` cannot be dlopen'ed, so each
+   archive is force-loaded whole into the shim ([force_load_args]); with no C
+   sources at all the shim is an empty stub that exists only to carry the
+   archives.  An explicit --ffi-so path takes precedence.
    Shared by every interpreter entry point (plain `march file.march` and
    `march test`) so FFI shims resolve the same way in both. *)
 let setup_interpreter_ffi () =
   March_eval.Eval.ffi_runtime_so := (fun () -> Some (ensure_runtime_so ()));
+  let archives = List.filter is_static_archive_flag (List.rev !ffi_link_flags) in
   match !March_eval.Eval.ffi_shim_so with
   | Some _ -> ()  (* already set explicitly via --ffi-so *)
-  | None when !ffi_c_files = [] -> ()  (* no shim sources *)
+  | None when !ffi_c_files = [] && archives = [] -> ()  (* nothing to load *)
   | None ->
     (* Build a content-addressed temp path for the shim .so *)
     let home = (try Sys.getenv "HOME" with Not_found -> ".") in
@@ -289,6 +318,13 @@ let setup_interpreter_ffi () =
       (try Buffer.add_string key_buf (Digest.to_hex (Digest.file f)) with _ -> ()))
       (List.rev !ffi_c_files);
     List.iter (Buffer.add_string key_buf) (List.rev !ffi_link_flags);
+    (* An archive's CONTENTS, not just its path: a rebuilt Rust crate keeps
+       the same path, and a key on the path alone would keep loading the
+       stale shim. *)
+    List.iter (fun a ->
+      (try Buffer.add_string key_buf (Digest.to_hex (Digest.file a)) with _ -> ()))
+      archives;
+    Buffer.add_string key_buf "force-load-v1";
     let key = String.sub (Digest.to_hex (Digest.string (Buffer.contents key_buf))) 0 16 in
     let so_path = Filename.concat cache_dir ("march_ffi_shim_" ^ key ^ ".so") in
     if not (Sys.file_exists so_path) then begin
@@ -300,14 +336,29 @@ let setup_interpreter_ffi () =
         | Some d -> Printf.sprintf " -I%s" (Filename.quote d)
         | None -> ""
       in
-      let src_files = String.concat " "
-        (List.rev_map Filename.quote !ffi_c_files) in
+      let src_files =
+        if !ffi_c_files <> [] then
+          String.concat " " (List.rev_map Filename.quote !ffi_c_files)
+        else begin
+          (* Archives only: `cc` needs at least one input, so compile an
+             empty stub the archives are force-loaded around. *)
+          let stub = Filename.concat cache_dir ("march_ffi_stub_" ^ key ^ ".c") in
+          if not (Sys.file_exists stub) then begin
+            let oc = open_out stub in
+            output_string oc "/* march: interpreter FFI shim stub for --ffi-link archives */\n";
+            close_out oc
+          end;
+          Filename.quote stub
+        end in
       (* Link flags from forge.toml [ffi] link (e.g. -lsqlite3) — the shim's
          own C code needs these resolved same as a native `forge build`;
          without them, symbols the shim calls into a system library for
          (not march runtime symbols, which resolve at dlopen time via
          RTLD_GLOBAL) are undefined and the whole shim fails to dlopen. *)
-      let link_flags = String.concat " " (List.rev !ffi_link_flags) in
+      let link_flags = String.concat " "
+        (List.map (fun f ->
+             if is_static_archive_flag f then force_load_args f else f)
+            (List.rev !ffi_link_flags)) in
       let tmp = Printf.sprintf "%s.%d.tmp" so_path (Unix.getpid ()) in
       (* On macOS, shim symbols reference runtime functions (e.g. march_str_borrow)
          that are not available at .so link time — they'll be resolved at dlopen
@@ -3854,9 +3905,16 @@ let compile filename =
                 | Some objs -> String.trim objs ^ user_ffi_c
                 | None      -> runtime ^ extra_c_files
             in
+            (* [ffi_link] goes AFTER the program's own object ([ll_tmp]).
+               GNU ld resolves an archive only against symbols already
+               undefined when it reaches it, so an `--ffi-link lib.a` (an
+               [ffi.rust] crate) placed before the object that calls into it
+               contributed nothing: "undefined reference to `rusty_add'" on
+               Linux, while macOS's ld64, which is order-insensitive, linked
+               fine.  Measured 2026-09-28, Ubuntu 24.04 arm64. *)
             let cmd = Printf.sprintf
-              "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s%s %s%s%s%s%s %s -o %s%s%s%s%s"
-              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define hcr_identity_flags runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ffi_link ll_tmp out_bin math_flag ucontext_flag reload_ldl strip_flag in
+              "%s%s%s%s%s%s%s%s -Wno-unused-command-line-argument -fno-strict-aliasing -fwrapv%s%s%s%s%s %s%s%s%s %s%s -o %s%s%s%s%s"
+              cc_driver opt_flag dbg_flag san_flag rdynamic_flag so_flag arch_cflags section_cflags evloop_flag ffi_inc signing_define cap_sandbox_define hcr_identity_flags runtime_inputs openssl_flags2 compress_flags2 blake3_flags2 ll_tmp ffi_link out_bin math_flag ucontext_flag reload_ldl strip_flag in
             (if Sys.getenv_opt "MARCH_ECHO_CC" <> None then
                Printf.eprintf "MARCH_CC_CMD: %s\n%!" cmd);
             let rc = Sys.command cmd in
