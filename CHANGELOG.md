@@ -26,6 +26,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A compiled filter-shaped recursive function no longer overflows the stack
+  when its branches alternate.** A function with one `Cons(x, self(..))` arm and
+  one plain `self(..)` arm (a hand-written `filter`) is turned into a loop by
+  tail-recursion-modulo-cons, but the plain arm re-entered the original
+  function instead of continuing the loop, pushing a frame each time the input
+  switched arms. Keeping every other element of a 1,000,000-element list died
+  with SIGBUS in the stack guard page; all-kept and all-dropped inputs ran fine.
 - **A remote message sent after a hot deploy now reaches an actor whose message type
   the deploy changed.** Each cluster link's reader task kept the code of the moment
   the link formed. So a message from a peer already on the new format was decoded by
@@ -524,6 +531,14 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **`List.map`, `filter`, `filter_map`, `append`, `flat_map` and `range_step` walk
+  the list once instead of twice.** They were accumulator loops followed by a
+  `reverse`; they are now written in natural recursive style, which
+  tail-recursion-modulo-cons compiles to a single loop that fills each new cell
+  in place. Compiled `--opt 2`, 20k-element lists: `map` 0.53 s -> 0.24 s
+  (`bench/list_producers.march`), `append` 2.0x, `filter`/`filter_map` 1.3x,
+  `flat_map` 1.2x, `range_step` 1.4x. Results and signatures are unchanged, and a
+  1,000,000-element list still works compiled and interpreted.
 - **The generated hosted event API's `cancel` takes the session: `cancel(s, parked)`.**
   The epoch hold a hosting actor takes for a session is now the transport's, taken at
   `register` and released at `close` for both hosting patterns (before, only the
