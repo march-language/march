@@ -20,6 +20,16 @@ git log is authoritative for exact commits.
   start. The compiler now uses a runtime directory only when it holds every
   core file listed in its `sources.list`.
 
+- **A closed or refused session offer no longer leaks its actor and two
+  Vault tables.** `SessionNode.close_offer` left the offer's `OfferActor`
+  running for the life of the process, and an `offer_*` refused with
+  `AlreadyOffered` left one behind per try, which Topology's placement loop
+  made once per tick while a released name was still held. Each offer also
+  created two Vault tables, which are never freed. A closed offer's actor now
+  ends once no session runs under it (at once when none does), a refused
+  offer's at once, and offers keep their state in two shared tables whose
+  keys are dropped when the actor ends. Plain and hosted offers alike.
+
 - **A node healed after a network partition is now reported as rejoined.** If the
   heal's redial closed a duplicate connection at the same moment the link came
   back, the peer passed through Suspect, and its return was reported as `NodeUp`
