@@ -12,6 +12,15 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **`Process.spawn_async` no longer hands a running process's slot to a new
+  one.** Compiled code kept live processes in a fixed table of 64 with no
+  lock. The 65th spawn silently closed the first process's pipes, so a
+  `LiveProcess` held that long read from and wrote to nothing or to another
+  child, and two threads spawning at once could take the same slot. The
+  table is now locked and grows as needed. A handle used after `wait_proc` no
+  longer reaches whichever process took its slot next. Interpreted,
+  `wait_proc` on a child that reads its stdin (such as `cat`) no longer
+  hangs.
 - **A closed or refused session offer no longer leaks its actor and two
   Vault tables.** `SessionNode.close_offer` left the offer's `OfferActor`
   running for the life of the process, and an `offer_*` refused with
