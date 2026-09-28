@@ -12,6 +12,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **`ClusterNode.stop` now closes the node's link to itself.** After `stop`,
+  `queue_for` on the node's own id still returned a queue, a send to a local
+  process was still delivered, and every stopped node left its loopback handler
+  registered for the life of the process. A process that starts and stops nodes
+  (tests, embedding) leaked one per node and kept local sessions reachable after
+  stop. Now `queue_for(own id)` is `None`, a send to the node itself is refused,
+  and the handler is released.
 - **A node healed after a network partition is now reported as rejoined.** If the
   heal's redial closed a duplicate connection at the same moment the link came
   back, the peer passed through Suspect, and its return was reported as `NodeUp`
