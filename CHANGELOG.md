@@ -12,6 +12,21 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **A recorded hot-deploy request can no longer be replayed against a node.** Signed
+  `ACTIVATE`, `TOPOLOGY` and `DRAIN` requests carried nothing that made them fresh, so
+  anyone who could reach a node's reload socket could send an old one again, rolling a
+  function back or re-pushing an old placement. forge now sends each signed request
+  inside a numbered release (`SEQ`). The node remembers the newest release it accepted,
+  across restarts. It refuses older releases, two different releases with the same
+  number, and, once it holds one, any unwrapped signed request. `MARCH_HCR_REQUIRE_RELEASE=1`
+  requires releases from the first request. Older servers keep getting unwrapped requests.
+  Every release accepted or refused, and every `DRAIN`, is now audited.
+
+- **The signed topology push is now the one a node applies, including after a restart.**
+  The node used to verify a pushed topology, then apply an unsigned copy forge wrote
+  alongside it. A restarted node came back on its built-in placement rather than the one
+  last pushed. `Topology` now reads the verified copy first, and applies it at start.
+
 - **A closed or refused session offer no longer leaks its actor and two
   Vault tables.** `SessionNode.close_offer` left the offer's `OfferActor`
   running for the life of the process, and an `offer_*` refused with
@@ -21,6 +36,7 @@ git log is authoritative for exact commits.
   ends once no session runs under it (at once when none does), a refused
   offer's at once, and offers keep their state in two shared tables whose
   keys are dropped when the actor ends. Plain and hosted offers alike.
+
 - **A node healed after a network partition is now reported as rejoined.** If the
   heal's redial closed a duplicate connection at the same moment the link came
   back, the peer passed through Suspect, and its return was reported as `NodeUp`
