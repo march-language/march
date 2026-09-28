@@ -26,6 +26,11 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **`march --check` no longer passes a protocol expand it refuses, from its cache.**
+  After a clean `--check` with `--protocol-baseline` and `--protocol-expand`, the same
+  check without the baseline (which the compiler refuses) exited 0 from the cache
+  without checking anything. The baselines and the expand labels are now part of the
+  check's cache key.
 - **A remote message sent after a hot deploy now reaches an actor whose message type
   the deploy changed.** Each cluster link's reader task kept the code of the moment
   the link formed. So a message from a peer already on the new format was decoded by
@@ -258,6 +263,17 @@ git log is authoritative for exact commits.
   interpreter does, instead of returning a UUID with a garbage timestamp.
 
 ### Added
+- **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
+  When one build both makes a choice that gained a branch and receives it, `forge deploy
+  --plan` now shows two deploys and why: the expand, built with `--protocol-expand
+  <P>:<label>` (the receivers run the new version; the chooser keeps offering under the
+  previous fingerprint and cannot choose the new branch), then the contract, the plain
+  build, on the next `forge deploy`. It compares against what the environment runs
+  (`.forge/deploy/<env>/protocols/`, in the compiler's baseline format), so every patch
+  and base image is also built with the compatibility table for the running version,
+  which it previously lacked. A change the compatibility rule does not allow, including
+  unlabelled messages a new branch renumbers, is reported as breaking, naming the
+  messages. This replaces the earlier split that held the chooser's functions back.
 - **The `ssh` reconciler backend** (build step 10b of the distributed-deploys
   plan). A topology overlay with `[backend] kind = "ssh"` makes `forge topology
   apply --env <env>` and `forge topology status --env <env>` work on the

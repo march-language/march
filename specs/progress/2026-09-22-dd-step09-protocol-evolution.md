@@ -1,5 +1,8 @@
 # `[P2]` Distributed deploys, build step 9: protocol evolution
 
+**DONE 2026-09-28**: item 3 below, the last one, closed the step. Its record:
+[2026-09-28-dd-d21-split-in-forge-deploy.md](2026-09-28-dd-d21-split-in-forge-deploy.md).
+
 **Parent:** [../plans/2026-09-21-distributed-authority-and-deploys-plan.md](../plans/2026-09-21-distributed-authority-and-deploys-plan.md), section 6.4, II.5, D5, D21, D25.
 
 **What.** Multi-fingerprint offers; the per-protocol
@@ -33,5 +36,9 @@ What is left:
    are on the boundary under `--hot-reload <EntryModule>`; the forge `live` upgrade
    fixture asserts a role body reached through the generated `main` gets the new
    version. Item 4's post-deploy re-offer is what `protocol_evolve` exercises.
-3. **Wire `Protocol_split.plan_project` into `forge deploy --plan`** when step 10b's
-   classifier lands.
+3. ~~**Wire `Protocol_split.plan_project` into `forge deploy --plan`**~~ Done 2026-09-28:
+   `Deploy_plan.splits_of` calls `Protocol_split.plan` on the deploy baselines
+   (`.forge/deploy/<env>/protocols/`) against a check of this build, and the expand's
+   `--protocol-expand` goes into every patch and base build `Cmd_deploy` makes; see
+   [2026-09-28-dd-d21-split-in-forge-deploy.md](2026-09-28-dd-d21-split-in-forge-deploy.md).
+   `test/two_node/protocol_expand_contract` is the monolith half of the acceptance.
