@@ -12,6 +12,16 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **Two actors with the same name in different modules are now two actors.**
+  An actor `Box` in `mod A` and another `Box` in `mod B` (or at the file's
+  root) shared one definition: the interpreter spawned the same actor for
+  both, and compiled code ran one dispatch function against both state
+  shapes (wrong state, a `no field` panic, or an internal compiler error).
+  The nested ones now get distinct internal names (`A__Box`, `B__Box`), so
+  `spawn(Box)` inside `A`, `spawn(A.Box)` from the parent and `Box.Msg` all
+  reach the right actor. Actors whose names are unique keep their names, so
+  hot-code-reload manifests are unchanged. Two actors of one name in the
+  same module are now an error.
 - **A closed or refused session offer no longer leaks its actor and two
   Vault tables.** `SessionNode.close_offer` left the offer's `OfferActor`
   running for the life of the process, and an `offer_*` refused with

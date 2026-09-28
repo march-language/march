@@ -1,0 +1,73 @@
+-- Three actors all called Box: one at the root of the file and one in each
+-- of two sibling modules, each with its own state shape and the same message
+-- constructor name. Every backend keyed an actor by its BARE name, so before
+-- 2026-09-28 they collapsed into one: the interpreter spawned one definition
+-- for all three (A's and the root Box's state read back as <none>) and the
+-- compiled binary ran one dispatch against three state shapes (panic: no
+-- field "root"). Desugar_actor_names now renames the nested ones (A__Box,
+-- B__Box) and every reference to them; the root Box keeps its name. A.poke
+-- names the actor's message type as `Box.Msg`, resolved in A, and main
+-- spawns B's actor by its qualified name.
+mod Outer do
+  needs IO.Console
+  needs IO.Spawn
+
+  actor Box do
+    state { root : Int }
+    init  { root: 5 }
+    on Poke(r : Int) do
+      { root: state.root + r }
+    end
+  end
+
+  mod A do
+    needs IO.Spawn
+    actor Box do
+      state { n : Int }
+      init  { n: 1 }
+      on Poke(r : Int) do
+        { n: r + 1 }
+      end
+    end
+    fn start(s : Cap(IO.Spawn)) do spawn(Box) end
+    fn poke(pid, k) do
+      let m : Box.Msg = Poke(k)
+      send(pid, m)
+    end
+  end
+
+  mod B do
+    needs IO.Spawn
+    actor Box do
+      state { s : Int }
+      init  { s: 3 }
+      on Poke(r : Int) do
+        { s: state.s * r }
+      end
+    end
+    fn poke(pid, k) do send(pid, Poke(k)) end
+  end
+
+  fn main(_c : Cap(IO.Console), s : Cap(IO.Spawn)) do
+    let a = A.start(s)
+    let b = spawn(B.Box)
+    let r = spawn(Box)
+    A.poke(a, 41)
+    B.poke(b, 7)
+    send(r, Poke(10))
+    run_until_idle()
+    println("spawned all three")
+    match get_actor_field(a, "n") do
+      Some(n) -> println("A.Box n = " ++ int_to_string(n))
+      None    -> println("A.Box n = <none>")
+    end
+    match get_actor_field(b, "s") do
+      Some(v) -> println("B.Box s = " ++ int_to_string(v))
+      None    -> println("B.Box s = <none>")
+    end
+    match get_actor_field(r, "root") do
+      Some(v) -> println("Box root = " ++ int_to_string(v))
+      None    -> println("Box root = <none>")
+    end
+  end
+end
