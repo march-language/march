@@ -285,14 +285,12 @@ mod List do
       ["foo", "bar"]
   """
   fn filter(xs : List(a), pred : a -> Bool) : {List(a) | subset(elts(_), elts(xs))} do
-    fn go(lst : List(a), acc : List(a)) : {List(a) | subset(elts(_), union(elts(lst), elts(acc)))} do
-      match lst do
-      Nil        -> reverse(acc)
-      Cons(h, t) ->
-        if pred(h) do go(t, Cons(h, acc)) else go(t, acc) end
-      end
+    -- Natural style on purpose: TRMC makes it a single-traversal loop.
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      if pred(h) do Cons(h, filter(t, pred)) else filter(t, pred) end
     end
-    go(xs, Nil)
   end
 
   -- ---- Parallel ----
