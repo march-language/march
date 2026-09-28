@@ -26,6 +26,12 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **The parent module can send to a nested actor by qualified message name.**
+  `send(p, Inner.Set(1))` from the module enclosing `Inner` failed with
+  "I don't know a constructor called `Inner.Set`", although `Inner.A(1)` and
+  `spawn(Inner.Box)` worked. A nested actor's message constructors are now
+  reachable qualified, and so is an `Inner.Box.Msg` annotation. The bare
+  name stays local to the actor's module.
 - **A remote message sent after a hot deploy now reaches an actor whose message type
   the deploy changed.** Each cluster link's reader task kept the code of the moment
   the link formed. So a message from a peer already on the new format was decoded by

@@ -148,6 +148,29 @@ collide (e.g. `Increment`, `Poke`), or qualify. Two consequences of this design 
 compiled wrong-actor-`send` misroute and the payload-typing rule) are documented in the
 [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6.4.
 
+**An actor declared in a nested module** is spawned and messaged from the parent by
+qualified name, the way a nested variant's constructors are:
+
+```march
+mod Inner do
+  actor Box do
+    state { n : Int }
+    init  { n: 0 }
+    on Set(k : Int) do { n: k } end
+  end
+end
+
+fn main(...) do
+  let p = spawn(Inner.Box)
+  send(p, Inner.Set(1))               -- qualified: resolves
+  let m : Inner.Box.Msg = Inner.Set(2)
+  send(p, m)
+end
+```
+
+The bare `Set` is visible only inside `Inner`. It is not exported to the parent,
+so the parent's own bare constructors of the same name keep their meaning.
+
 `send` returns `Some(())` if the actor is alive, or `None` if the actor is dead, on
 both backends alike (fixed 2026-07-18; see the compiled-actor status note above):
 
