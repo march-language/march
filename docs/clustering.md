@@ -281,6 +281,17 @@ returns it (`ClusterConn.peer_cert` for direct connections), and
 `ClusterNode.own_cert(c)` returns the node's own. What a node may do with its
 roles and flags is in [Authorization](#authorization) below.
 
+A node can take a new certificate while it runs:
+`ClusterNode.replace_cert(c, cert_text, key_hex)` (`key_hex` "" keeps the key),
+or a changed `MARCH_NODE_CERT` file, which `config_from_env` nodes re-read every
+`MARCH_NODE_CERT_POLL_MS` (10 s by default). New handshakes present the new
+certificate. A link already up is not reconnected, because that would cancel the
+sessions on it. Instead the node sends the peer a `CERT_UPDATE` control frame
+over the link (tag 16). The frame holds the new certificate and a signature by
+that certificate's key over the sender, the receiver and the certificate. The
+peer checks the certificate as a handshake would, with the same node name
+required, and keeps it for that link from then on.
+
 ### Per-frame MAC
 
 After the handshake every frame on the connection is sealed: it carries a
@@ -447,8 +458,9 @@ Two kinds of traffic are exempt, and nothing else is:
 - **ClusterNode's own control frames.** Everything on a peer's control
   connection is written by ClusterNode itself and never reaches a route:
   SWIM (tags 0-3), registry sync (5-6), remote monitors (7, 8, 12),
-  `DELIVERY_FAILED` (10), `CREDIT` (11), member gossip and sync (13-14), and
-  revocations (15). `ClusterNode.control_tags()` lists them.
+  `DELIVERY_FAILED` (10), `CREDIT` (11), member gossip and sync (13-14),
+  revocations (15), and certificate updates (16). `ClusterNode.control_tags()`
+  lists them.
 
 A node without `raw_send` is the right certificate for code isolated on its own
 node because it needs `IO.Foreign`. Its reach is the sessions its roles let it

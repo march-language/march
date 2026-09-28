@@ -1,0 +1,124 @@
+-- Two-node harness, scenario "cert_rotate": node-a, which offers role Shop
+-- of the loop protocol `Order` and holds a long-lived certificate. node-b's
+-- certificate is replaced while their session runs; node-a must take the
+-- new one over the existing link, keep the session past the old one's
+-- expiry, and refuse the old one from anyone after it. See scenario.sh.
+mod CertRotateA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Order do
+    loop do
+      item: Buyer -> Shop : Int
+      choose by Shop:
+        more -> Shop -> Buyer : Int
+        done -> Shop -> Buyer : Int
+                stop
+      end
+    end
+  end
+
+  pfn me() : String do "node-a" end
+  pfn other() : String do "node-b" end
+
+  pfn flags() : Vault(Int) do
+    match Vault.whereis("cert_rotate_flags") do
+      Some(v) -> v
+      None -> Vault.new("cert_rotate_flags")
+    end
+  end
+
+  pfn once(key : String, line : String) : () do
+    if Vault.incr(flags(), key, 1) == 1 do println(me() ++ ": " ++ line) else () end
+  end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  -- Each item node-b sends: after its OLD certificate's expiry (recorded
+  -- when the link formed), the session has outlived that certificate.
+  pfn shop(s : Cap(Session.Live), st : Order_Shop.Entry, stop : String) : Order_Shop.Yield do
+    Order_Shop.recv_Item(s, st, fn (n, st1) ->
+      let old = Vault.get_or(flags(), "old_not_after", 0)
+      if old > 0 && unix_time_ms() / 1000 > old + 1 do
+        once("outlived", "session still running after " ++ other() ++ "'s old certificate expired")
+      else () end
+      if File.exists(stop) do Order_Shop.close(s, Order_Shop.choose_done(s, st1, n))
+      else shop(s, Order_Shop.choose_more(s, st1, n), stop) end)
+  end
+
+  pfn wait_linked(h : Cap(ClusterNode.Live), left : Int) : () do
+    match ClusterNode.peer_cert(h, ClusterNode.node_id_of(other())) do
+      Some(pc) ->
+        Vault.set(flags(), "old_not_after", pc.not_after)
+        once("linked", "linked to " ++ other())
+      None ->
+        if left <= 0 do panic("node-a: never linked") else
+          sleep_ms(50)
+          wait_linked(h, left - 50)
+        end
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_NAME", me())
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int("MARCH_PORT_A")))
+    Process.set_env("MARCH_CLUSTER_NODES", "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_B")))
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
+    let cfg = match ClusterNode.config_from_env() do
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    end
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let b = ClusterNode.node_id_of(other())
+        let _ = ClusterNode.on_security_event(h, fn ev ->
+          match ev do
+            ClusterNode.HandshakeRejected(_, why) ->
+              if String.contains(why, "certificate expired") do once("refused", "refused a handshake: certificate expired") else () end
+            ClusterNode.CertReplaced(id, _) -> if id == b do once("replaced", other() ++ "'s certificate replaced") else () end
+            ClusterNode.CertRefused(id, why) -> println(me() ++ ": update from " ++ id ++ " refused: " ++ why)
+            _ -> ()
+          end)
+        let stop = Env.require("CLUSTER_STOP_FILE")
+        -- A death before the stop file is the failure this scenario looks
+        -- for; after it, node-b stopping first is the teardown.
+        let _ = ClusterNode.subscribe(h, fn ev ->
+          match ev do
+            ClusterNode.NodeDead(i, why) ->
+              if File.exists(stop) do () else println(me() ++ ": " ++ i.name ++ " dead: " ++ why) end
+            _ -> ()
+          end)
+        println(me() ++ ": up")
+        match Order_Run.offer_Shop(c, h, 4, fn (s, st) -> shop(s, st, stop)) do
+          Err(e) -> panic(Order_Run.error_message(e))
+          Ok(o) ->
+            wait_linked(h, 60000)
+            wait_file(stop)
+            -- Let the session's last item be answered `done`.
+            sleep_ms(1000)
+            SessionNode.close_offer(o)
+        end
+        ClusterNode.stop(h)
+        println(me() ++ ": done")
+    end
+  end
+end

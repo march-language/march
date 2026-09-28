@@ -1,0 +1,52 @@
+-- Two-node harness, scenario "cert_rotate": node-c, an impostor presenting
+-- node-b's OLD certificate and key (saved by scenario.sh before the
+-- rotation) after that certificate expired. `config_from_env` would refuse
+-- to start with an expired certificate, so the credentials are built by
+-- hand, unchecked. node-a must refuse its handshakes ("certificate
+-- expired"). See scenario.sh.
+mod CertRotateC do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+
+  pfn read(path : String) : String do
+    match File.read(path) do
+      Ok(t) -> String.trim(t)
+      Err(_) -> panic("node-c: cannot read " ++ path)
+    end
+  end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let old = Env.require("OLD_PKI")
+    let creds = match (NodeCert.key_from_hex(read(old ++ "/node-b.key"), 64), NodeCert.from_text(read(old ++ "/node-b.cert")),
+                       NodeCert.key_from_hex(read(Env.require("PKI") ++ "/operator.pub"), 32)) do
+      (Ok(sk), Ok(signed), Ok(op)) -> { signed: signed, secret_key: sk, operator_pubkey: op, revoked: fn _ -> false }
+      _ -> panic("node-c: could not read node-b's old credentials")
+    end
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = { ClusterNode.config("node-b", Env.require_int("MARCH_PORT_C"), "", Cons(seed, Nil), "", 2)
+                with auth: ClusterAuth.Certified(creds) }
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-c: up")
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        ClusterNode.stop(h)
+        println("node-c: done")
+    end
+  end
+end

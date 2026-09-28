@@ -11,6 +11,20 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+- **A cluster node's certificate can be replaced while it runs.** In
+  certificate mode, a renewed certificate used to need a restart. Now the node
+  watches the files `MARCH_NODE_CERT` and `MARCH_NODE_KEY` name
+  (`MARCH_NODE_CERT_POLL_MS`, default 10 s) and takes a new certificate when
+  one appears, or code can call `ClusterNode.replace_cert(node, cert_text,
+  key_hex)`. The new certificate must verify under the operator key, name the
+  node and its key, and not be revoked. Existing links are not reconnected:
+  each peer is sent the new certificate over the link with a proof that the
+  node holds its key, so sessions keep running past the old certificate's
+  expiry. A new key works the same way. `on_security_event` reports each
+  replacement as `CertReplaced` or `CertRefused` (two new `SecurityEvent`
+  constructors: a `match` that named every constructor needs a new arm).
+
 ### Fixed
 - **A remote message sent after a hot deploy now reaches an actor whose message type
   the deploy changed.** Each cluster link's reader task kept the code of the moment
