@@ -573,12 +573,25 @@ jobs:
       # the GitHub macos-15 runner has a RESIDUAL nondeterminism even with the fix
       # (first runtime .so built in a job can still miscompile) that needs a
       # macOS 15 host to root-cause. Re-enable on macOS once that residual is gone.
-      - name: Check stdlib `march>` doctests
+      #
+      # The build is its own step so the doctest step's time is the script
+      # alone. (bin/main.exe is normally already built by the refinement
+      # ratchet above, so the build step should take seconds.)
+      - name: Build compiler for stdlib doctests
         if: runner.os != 'macOS'
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           eval $(opam env)
           dune build bin/main.exe
+
+      # 5 -> 15 on 2026-09-28. Nothing hung or failed: main's step ran
+      # 195-251 s, and PR #663's run was killed at 309 s with no failing
+      # doctest. 15 leaves about 3x headroom over the slowest pass.
+      - name: Check stdlib `march>` doctests
+        if: runner.os != 'macOS'
+        timeout-minutes: 15
+        run: |
+          eval $(opam env)
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             python3 scripts/check-stdlib-doctests.py --check
 
