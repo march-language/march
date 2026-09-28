@@ -400,7 +400,33 @@ let is_shipped_stdlib_file filename =
     _build/default/bin/, the key digested ./runtime/*.c while clang compiled
     _build/default/runtime/*.c, and editing a runtime source could print
     `compiled <out> (cached)` for a binary containing none of the new code.
-    MARCH_RUNTIME_DIR overrides the search, mirroring MARCH_STDLIB. *)
+    MARCH_RUNTIME_DIR overrides the search, mirroring MARCH_STDLIB.
+
+    A candidate is preferred only when it is COMPLETE: it has a sources.list
+    and every `core` file that manifest names.  Having march_runtime.c is not
+    enough.  A dune rule that lists individual runtime files as deps (the
+    @vault-scale runners in test/dune) stages a partial _build/default/runtime,
+    and every link list here guards optional files with an existence check, so
+    a partial directory silently built a runtime .so without march_nacl.c or
+    tweetnacl.c.  The REPL's cached stdlib prelude then failed to dlopen
+    (undefined march_ed25519_seed_keypair) and was recompiled, ~25 s, in every
+    session.  A directory with no sources.list at all is still accepted as a
+    last resort, so a layout that ships none keeps working. *)
+let runtime_dir_complete d =
+  Sys.file_exists (Filename.concat d "march_runtime.c") &&
+  let manifest = Filename.concat d "sources.list" in
+  Sys.file_exists manifest &&
+  (try
+     In_channel.with_open_text manifest In_channel.input_all
+     |> String.split_on_char '\n'
+     |> List.for_all (fun line ->
+         match String.split_on_char ' ' (String.trim line)
+               |> List.filter (( <> ) "") with
+         | file :: "core" :: _ when file.[0] <> '#' ->
+           Sys.file_exists (Filename.concat d file)
+         | _ -> true)
+   with Sys_error _ -> false)
+
 let runtime_dir : string option Lazy.t = lazy (
   let candidates =
     match Sys.getenv_opt "MARCH_RUNTIME_DIR" with
@@ -413,9 +439,12 @@ let runtime_dir : string option Lazy.t = lazy (
         "runtime" ]
   in
   let dir =
-    List.find_opt
-      (fun d -> Sys.file_exists (Filename.concat d "march_runtime.c"))
-      candidates
+    match List.find_opt runtime_dir_complete candidates with
+    | Some _ as d -> d
+    | None ->
+      List.find_opt
+        (fun d -> Sys.file_exists (Filename.concat d "march_runtime.c"))
+        candidates
   in
   (match dir with
    | Some d -> March_cas.Cas.set_runtime_dir d

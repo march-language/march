@@ -119,7 +119,7 @@ def extract_doctests(path):
 
 
 def run_module(bin_path, path, exprs):
-    """Feed exprs to one `march repl` session; return {input_index: value}.
+    """Feed exprs to one `march repl` session; return ({input_index: value}, jit_errors).
 
     The REPL prints `march(N)> = VALUE` where N is the 1-based input index, so
     the Nth input's value is keyed by N. An input that errors prints a bare
@@ -145,7 +145,12 @@ def run_module(bin_path, path, exprs):
         m = REPL_VALUE_RE.search(line)
         if m:
             values[int(m.group(1))] = m.group(2).rstrip()
-    return values
+    # A `march JIT:` line means the stdlib prelude .so failed to load and the
+    # session fell back to recompiling it (~25 s each on CI, and the fallback
+    # lowers stdlib without its type map). The doctests still pass that way,
+    # so this is the only thing that notices.
+    jit_errors = [l for l in notes if l.startswith("march JIT:")]
+    return values, jit_errors
 
 
 def main():
@@ -177,7 +182,9 @@ def main():
             runnable.append((lineno, expr, expected))
         if not runnable:
             continue
-        values = run_module(bin_path, path, [e for (_, e, _) in runnable])
+        values, jit_errors = run_module(bin_path, path, [e for (_, e, _) in runnable])
+        for err in jit_errors:
+            failures.append(f"  FAIL {path}: stdlib prelude did not load: {err}")
         for idx, (lineno, expr, expected) in enumerate(runnable):
             actual = values.get(idx + 1)  # REPL input index is 1-based
             if actual is None:

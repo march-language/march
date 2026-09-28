@@ -12,6 +12,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **A source-tree `march` no longer builds its runtime from a partial copy of
+  `runtime/`.** If a build had copied only some runtime C files into
+  `_build/default/runtime` (the vault scaling benchmarks do), the compiler used
+  that directory anyway and left the missing files out of the runtime. The REPL
+  then couldn't load its cached stdlib and recompiled it (~25 s) on every
+  start. The compiler now uses a runtime directory only when it holds every
+  core file listed in its `sources.list`.
+
 - **A node healed after a network partition is now reported as rejoined.** If the
   heal's redial closed a duplicate connection at the same moment the link came
   back, the peer passed through Suspect, and its return was reported as `NodeUp`
