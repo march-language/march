@@ -526,6 +526,8 @@ native_topology_hook_timeout: coverage audit (user + stdlib): 120 enforced, 0 in
 native_topology_hook_timeout: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_topology_place: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_topology_place: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_trmc_filter_alternating: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_trmc_filter_alternating: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_trmc_shared_tail_reuse: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_trmc_shared_tail_reuse: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tuple_destructure_dce: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
