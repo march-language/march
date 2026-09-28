@@ -1,0 +1,220 @@
+-- One-node scenario "cluster_ap_offer_retire" (review finding
+-- 2026-09-25-dd-review-offer-actors-leak): what an offer leaves behind.
+--
+-- 1. N offers opened and closed with no session: the live proc count is back
+--    to where it started (each close used to leave its OfferActor).
+-- 2. N re-offers of a held name, each `AlreadyOffered` (what Topology's
+--    placement loop does every tick while a released name is still held):
+--    no proc left behind (each refused try used to leave one).
+-- 3. An offer closed WHILE a session runs under it: its actor stays (the
+--    running session still reports to it, and Topology's drain reads its
+--    `active` count), then ends once the session does.
+-- 4. The same for a hosted offer (`offer_hosted`): open/close and a refused
+--    re-offer.
+-- 5. SessionNode's shared offer tables hold no key once every offer retired.
+mod ClusterApOfferRetire do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    Client -> Server : Int
+    Server -> Client : Int
+  end
+
+  @[endpoints]
+  protocol Hosted do
+    ping: Client -> Server : Int
+    pong: Server -> Client : Int
+  end
+
+  -- The server of phase 3 waits for the test's go before answering, so the
+  -- session is still running when its offer is closed.
+  pfn wait_go(left : Int) : () do
+    if Vault.get(Vault.open("retire_go"), "go") != None do ()
+    else if left <= 0 do panic("never told to go") else
+      sleep_ms(10)
+      wait_go(left - 10)
+    end end
+  end
+
+  pfn serve_one(s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
+    Echo_Server.recv_Msg_Client_Server_1(s, st, fn (n, st1) ->
+      wait_go(10000)
+      Echo_Server.close(s, Echo_Server.send_Msg_Server_Client_1(s, st1, n * 10)))
+  end
+
+  pfn ask(s : Cap(Session.Live), st : Echo_Client.Entry, n : Int) : Echo_Client.Yield do
+    let st1 = Echo_Client.send_Msg_Client_Server_1(s, st, n)
+    Echo_Client.recv_Msg_Server_Client_1(s, st1, fn (_m, st2) -> Echo_Client.close(s, st2))
+  end
+
+  -- Never asked to host a session here: the hosted offers are only opened
+  -- and closed.
+  actor Idle do
+    state { n : Int }
+    init  { n: 0 }
+    on Nop() do state end
+  end
+
+  pfn visible(h : Cap(ClusterNode.Live), o : SessionNode.Offer, left : Int) : () do
+    if ClusterNode.lookup(h, o.name) != None do ()
+    else if left <= 0 do panic("the offer never became visible") else
+      sleep_ms(20)
+      visible(h, o, left - 20)
+    end end
+  end
+
+  -- Until the name is gone from the registry, so the next offer of it is
+  -- not refused for a release still in flight.
+  pfn released(h : Cap(ClusterNode.Live), o : SessionNode.Offer, left : Int) : () do
+    if ClusterNode.lookup(h, o.name) == None do ()
+    else if left <= 0 do panic("the offer's name was never released") else
+      sleep_ms(20)
+      released(h, o, left - 20)
+    end end
+  end
+
+  pfn active(o : SessionNode.Offer) : Int do
+    match get_actor_field(o.worker, "active") do
+      Some(n) -> n
+      None -> 0
+    end
+  end
+
+  pfn await_active(o : SessionNode.Offer, want : Int, left : Int) : () do
+    if active(o) == want do ()
+    else if left <= 0 do panic("the offer never had " ++ int_to_string(want) ++ " session(s)") else
+      sleep_ms(20)
+      await_active(o, want, left - 20)
+    end end
+  end
+
+  pfn retired(what : String, before : Int) : () do
+    sleep_ms(300)
+    let now = Scheduler.live_procs()
+    println("procs retired after " ++ what ++ ": " ++ bool_to_string(now <= before)
+      ++ (if now <= before do "" else " (" ++ int_to_string(now - before) ++ " over)" end))
+  end
+
+  pfn open_close(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int) : () do
+    if n <= 0 do () else
+      match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do
+        Err(e) -> panic(Echo_Run.error_message(e))
+        Ok(o) ->
+          visible(h, o, 10000)
+          SessionNode.close_offer(o)
+          released(h, o, 10000)
+      end
+      open_close(c, h, n - 1)
+    end
+  end
+
+  pfn refused(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int, count : Int) : Int do
+    if n <= 0 do count else
+      match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do
+        Err(SessionNode.AlreadyOffered(_)) -> refused(c, h, n - 1, count + 1)
+        Err(e) -> panic(Echo_Run.error_message(e))
+        Ok(_) -> panic("a second offer of a held name was opened")
+      end
+    end
+  end
+
+  pfn offer_idle(c : Cap(IO), h : Cap(ClusterNode.Live), host : Pid(a)) : Result(SessionNode.Offer, SessionNode.RunError) do
+    Hosted_Run.offer_hosted_Server(c, h, 4, host,
+      fn (_sid, _s) -> (),
+      fn (_sid, _s, _from, _msg, _ep) -> (),
+      fn (_sid, _s, _role, _cause, _ep) -> ())
+  end
+
+  pfn hosted_open_close(c : Cap(IO), h : Cap(ClusterNode.Live), host : Pid(a), n : Int) : () do
+    if n <= 0 do () else
+      match offer_idle(c, h, host) do
+        Err(e) -> panic(Hosted_Run.error_message(e))
+        Ok(o) ->
+          visible(h, o, 10000)
+          SessionNode.close_offer(o)
+          released(h, o, 10000)
+      end
+      hosted_open_close(c, h, host, n - 1)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "local-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        -- 1. Open and close, no session.
+        let before = Scheduler.live_procs()
+        open_close(c, h, 5)
+        retired("5 offers opened and closed", before)
+
+        -- 2. Refused re-offers of a held name.
+        match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do
+          Err(e) -> panic(Echo_Run.error_message(e))
+          Ok(o) ->
+            visible(h, o, 10000)
+            let held = Scheduler.live_procs()
+            let n = refused(c, h, 5, 0)
+            println("re-offers refused: " ++ int_to_string(n))
+            retired("5 refused re-offers", held)
+
+            -- 3. Close while a session runs under it.
+            let client = task_spawn(fn _ ->
+              match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, 7)) do
+                Ok(_) -> 1
+                Err(e) ->
+                  println("Client: " ++ Echo_Run.error_message(e))
+                  0
+              end)
+            await_active(o, 1, 10000)
+            SessionNode.close_offer(o)
+            sleep_ms(200)
+            println("closed with a session running, actor alive: " ++ bool_to_string(is_alive(o.worker)))
+            Vault.set(Vault.open("retire_go"), "go", 1)
+            println("session done: " ++ int_to_string(task_await_unwrap(client)))
+            sleep_ms(300)
+            println("after the session, actor alive: " ++ bool_to_string(is_alive(o.worker)))
+            retired("the session and its closed offer", before)
+        end
+
+        -- 4. Hosted offers.
+        let host = spawn(Idle)
+        let hbefore = Scheduler.live_procs()
+        hosted_open_close(c, h, host, 5)
+        retired("5 hosted offers opened and closed", hbefore)
+        match offer_idle(c, h, host) do
+          Err(e) -> panic(Hosted_Run.error_message(e))
+          Ok(o) ->
+            visible(h, o, 10000)
+            let held = Scheduler.live_procs()
+            let again = match offer_idle(c, h, host) do
+              Err(SessionNode.AlreadyOffered(_)) -> "AlreadyOffered"
+              Err(e) -> Hosted_Run.error_message(e)
+              Ok(_) -> "opened"
+            end
+            println("hosted re-offer: " ++ again)
+            retired("a refused hosted re-offer", held)
+            SessionNode.close_offer(o)
+            SessionNode.close_offer(o)
+            released(h, o, 10000)
+            retired("the hosted offer closed (twice)", hbefore)
+        end
+
+        -- 5. Nothing left in the shared tables.
+        sleep_ms(100)
+        let flags : Vault(Int) = Vault.open("session_ap_flags")
+        let strs : Vault(String) = Vault.open("session_ap_strs")
+        println("offer keys left: " ++ int_to_string(Vault.size(flags) + Vault.size(strs)))
+        ClusterNode.stop(h)
+    end
+  end
+end
