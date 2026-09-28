@@ -272,8 +272,10 @@ sessions form under, and that depends on the kind of change (see
 When one binary both makes and receives the changed choice (a replicated monolith), the
 change takes two deploys: first a build with `--protocol-expand <P>:<label>` (receivers
 take the new version, the chooser stays on the previous one and cannot pick the new
-branch), then the plain build. `Protocol_split.plan` in forge computes this from
-`.forge/protocols/` and the topology's pools, ready for `forge deploy --plan`.
+branch), then the plain build. `forge deploy` does this for you: `--plan` shows the
+split, the first `forge deploy` builds the expand, and the next one the contract. It
+compares against what the environment runs (`.forge/deploy/<env>/protocols/`), not
+against the previous build.
 
 Unlabelled protocol steps get positional wire tags that an inserted step renumbers, so
 the compiler warns at each one in a protocol your topology uses; label them before you

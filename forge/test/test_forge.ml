@@ -2757,9 +2757,54 @@ let test_split_plan_project_monolith () =
   | Protocol_split.Split (a, _) -> Alcotest.(check (list string)) "one build, both halves" [ "app" ] a.d_builds
   | v -> Alcotest.failf "a project with no topology is a monolith:\n%s" (Protocol_split.render v)
 
+(* A breaking change to another protocol does not cancel the split of a
+   compatible one: the split is decided for the compatible change and the
+   breaking one rides along, named. *)
+let test_split_with_breaking_alongside () =
+  let builds = [ { Protocol_split.b_name = "app"; b_roles = [ "Order.Buyer"; "Order.Shop"; "Other.A"; "Other.B" ] } ] in
+  let other fp steps = { PE.v_proto = "Other"; v_fingerprint = fp; v_roles = [ "A"; "B" ]; v_steps = steps } in
+  let broken = { Protocol_split.old_ = other "o1" [ PE.WMsg ("A", "B", "X", "Int") ];
+                 new_ = other "o2" [ PE.WMsg ("A", "B", "X", "String") ] } in
+  match Protocol_split.plan [ order_change; broken ] builds with
+  | Protocol_split.Split (a, _) as v ->
+    Alcotest.(check (list string)) "expand only the compatible one" [ "--protocol-expand Order:later" ] a.d_flags;
+    Alcotest.(check int) "the breaking one named" 1 (List.length a.d_breaking);
+    Alcotest.(check bool) "rendered" true
+      (let r = Protocol_split.render v in
+       let k = String.length "breaking: Other:" in
+       let rec go i = i + k <= String.length r && (String.sub r i k = "breaking: Other:" || go (i + 1)) in go 0)
+  | v -> Alcotest.failf "expected a split, got:\n%s" (Protocol_split.render v)
+
+(* A deploy plans from the deploy baselines (what the environment runs)
+   against this build's emitted ones, never from .forge/protocols. *)
+let test_split_changes_of_dirs () =
+  let root = Filename.temp_dir "forge_split_dirs_" "" in
+  let write dir name b =
+    Project.mkdir_p dir;
+    let oc = open_out (Filename.concat dir name) in
+    output_string oc b; close_out oc
+  in
+  let deployed = Filename.concat root ".forge/deploy/prod/protocols" and now = Filename.concat root "now" in
+  write deployed "Order.json" (PE.baseline_to_string { PE.current = order_change.old_; previous = None });
+  (* an older forge's structure file: skipped, not an error *)
+  write deployed "Legacy.json" {|{"version":1,"protocol":"Legacy","steps":[]}|};
+  write now "Order.json" (PE.baseline_to_string { PE.current = order_change.new_; previous = Some order_change.old_ });
+  (* the compiler's own baselines say something else entirely: not read *)
+  write (Filename.concat root ".forge/protocols") "Order.json"
+    (PE.baseline_to_string { PE.current = order_change.new_; previous = Some order_change.new_ });
+  Alcotest.(check (list string)) "the deploy baselines that read" [ "Order" ]
+    (List.map fst (Protocol_split.versions_of_dir deployed));
+  match Protocol_split.changes_of_dirs ~deployed ~now with
+  | [ c ] ->
+    Alcotest.(check string) "old: what runs" "f1" c.old_.v_fingerprint;
+    Alcotest.(check string) "new: this build" "f2" c.new_.v_fingerprint
+  | l -> Alcotest.failf "expected one change, got %d" (List.length l)
+
 let () =
   Alcotest.run "forge" [
     "protocol split", [
+      Alcotest.test_case "a breaking change alongside does not cancel a split" `Quick test_split_with_breaking_alongside;
+      Alcotest.test_case "a deploy plans from its own baselines" `Quick test_split_changes_of_dirs;
       Alcotest.test_case "a project with no topology splits from .forge/protocols" `Quick test_split_plan_project_monolith;
       Alcotest.test_case "a monolith that chooses and receives splits into expand/contract" `Quick test_split_monolith;
       Alcotest.test_case "separate pools deploy once, receivers first" `Quick test_split_separate_pools;
