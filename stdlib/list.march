@@ -207,13 +207,11 @@ mod List do
       [1, 2]
   """
   fn append(xs : List(a), ys : List(a)) : {List(a) | elts(_) == union(elts(xs), elts(ys))} do
-    fn go(lst : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(lst), elts(acc))} do
-      match lst do
-      Nil        -> acc
-      Cons(h, t) -> go(t, Cons(h, acc))
-      end
+    -- Natural style on purpose: TRMC makes it a single-traversal loop.
+    match xs do
+    Nil        -> ys
+    Cons(h, t) -> Cons(h, append(t, ys))
     end
-    go(reverse(xs), ys)
   end
 
   doc """
