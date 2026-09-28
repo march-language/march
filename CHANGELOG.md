@@ -12,6 +12,12 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **A nested module's call to a sibling module now links when compiled.** Inside
+  `mod Outer do mod A ... end mod B do ... A.f(x) ... end end`, the call `A.f`
+  ran interpreted but a compiled program failed to link (`A.f` undefined),
+  whenever `Outer` was itself nested in the entry module, or was a library
+  (`MARCH_LIB_PATH`) or stdlib module.
+
 - **A node healed after a network partition is now reported as rejoined.** If the
   heal's redial closed a duplicate connection at the same moment the link came
   back, the peer passed through Suspect, and its return was reported as `NodeUp`

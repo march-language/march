@@ -10464,6 +10464,95 @@ let test_nested_module_parent_call_entry_compiled () =
 (* The same two programs, INTERPRETED.  stderr is folded into the compared
    output so the pre-fix "stub later called before initialisation" death
    shows up in the diff instead of as a bare truncated stdout. *)
+(* ── A nested module's QUALIFIED call to a SIBLING submodule ─────────────
+   specs/progress/2026-09-28-nested-module-sibling-call.md.  Inside
+   `mod Outer do mod A ... end mod B do fn g() do A.f() end end end` the call
+   `A.f` typechecked and interpreted, but the lowering left it spelled `A.f`
+   (no module of that name exists) where the fn is `Outer.A.f`, so the
+   compiled program failed to LINK.  An entry-file module escaped it only at
+   its own top level (unprefixed); one more level of nesting, or any
+   MARCH_LIB_PATH / stdlib module, hit it -- as does an `@[endpoints]`
+   protocol declared inside one, whose role modules call their siblings
+   `P_Msg` / `P_Run` (found compiling dd step 12a's Ctl inside the stdlib).
+
+   Covers: a sibling call (B -> A), a call two levels down (Outer.h ->
+   B.C.k), a deeper module reaching an uncle (C -> A), and a module-level
+   `let` of a sibling. *)
+let nested_sibling_outer_src = {|mod Outer do
+  mod A do
+    fn f(x : Int) : Int do x + 1 end
+    let base = 100
+  end
+
+  mod B do
+    fn g(x : Int) : Int do A.f(x) * 2 end
+
+    mod C do
+      fn k(x : Int) : Int do A.f(x) + A.base end
+    end
+  end
+
+  fn h(x : Int) : Int do B.g(x) + B.C.k(0) end
+end
+|}
+
+(* h(3) = g(3) + k(0) = (3+1)*2 + (0+1+100) = 8 + 101 = 109;
+   B.g(10) = 22; B.C.k(5) = 106. *)
+let nested_sibling_main_body = {|    println(int_to_string(Outer.h(3)))
+    println(int_to_string(Outer.B.g(10)))
+    println(int_to_string(Outer.B.C.k(5)))
+|}
+
+let nested_sibling_expected = "109\n22\n106"
+
+let test_nested_module_sibling_call_lib_path_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_sibling"
+    ("mod Main do\n\
+     \  needs IO.Console\n\
+     \  fn main(_c : Cap(IO.Console)) do\n"
+     ^ nested_sibling_main_body ^
+     "  end\n\
+      end\n")
+  in
+  let lib_dir = Filename.concat tmp "lib" in
+  Unix.mkdir lib_dir 0o755;
+  let oc = open_out (Filename.concat lib_dir "outer.march") in
+  output_string oc nested_sibling_outer_src;
+  close_out oc;
+  let bin = Filename.concat tmp "nested_sibling_bin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && MARCH_LIB_PATH=%s "
+                         (Filename.quote project_root) (Filename.quote lib_dir))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    Alcotest.(check string)
+      "a MARCH_LIB_PATH module's nested module links its qualified calls to sibling submodules"
+      nested_sibling_expected (read_cmd_output (Filename.quote bin))
+
+let test_nested_module_sibling_call_entry_compiled () =
+  let indent s =
+    String.concat "\n"
+      (List.map (fun l -> if l = "" then l else "  " ^ l)
+         (String.split_on_char '\n' s)) in
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_nested_sibling_entry"
+      ("mod Main do\n\
+       \  needs IO.Console\n"
+       ^ indent nested_sibling_outer_src ^
+       "\n  fn main(_c : Cap(IO.Console)) do\n"
+       ^ nested_sibling_main_body ^
+       "  end\n\
+        end\n") in
+  let bin = Filename.concat tmp "nested_sibling_entry_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    Alcotest.(check string)
+      "an entry-file module nested two levels links its qualified sibling calls"
+      nested_sibling_expected (read_cmd_output (Filename.quote bin))
+
 let test_nested_module_parent_call_lib_path_interpreted () =
   let (project_root, main_exe, src, _tmp, lib_dir) =
     write_nested_parent_lib_path_project ~name:"march_nested_parent_interp" in
@@ -16151,6 +16240,12 @@ let codegen_suites =
             test_nested_module_parent_call_entry_interpreted;
           Alcotest.test_case "qualified parent pfn is not shadowed by an inner fn" `Quick
             test_nested_module_qualified_parent_pfn_not_shadowed;
+        ] );
+      ( "nested_module_sibling_call", [
+          Alcotest.test_case "MARCH_LIB_PATH nested module calls a sibling submodule (compiled)" `Quick
+            test_nested_module_sibling_call_lib_path_compiled;
+          Alcotest.test_case "entry-file nested module calls a sibling submodule (compiled)" `Quick
+            test_nested_module_sibling_call_entry_compiled;
         ] );
       ( "float_lit_match_codegen", [
           Alcotest.test_case "compiled float-literal match arm (B4)" `Quick
