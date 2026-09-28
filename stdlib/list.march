@@ -228,13 +228,13 @@ mod List do
       ["A", "B"]
   """
   fn map(xs : List(a), f : a -> b) : List(b) do
-    fn go(lst : List(a), acc : List(b)) : List(b) do
-      match lst do
-      Nil        -> reverse(acc)
-      Cons(h, t) -> go(t, Cons(f(h), acc))
-      end
+    -- Natural style on purpose: TRMC turns this into a single-traversal loop
+    -- (destination-passing, constant stack).  The old accumulator + reverse
+    -- form walked the list twice.
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) -> Cons(f(h), map(t, f))
     end
-    go(xs, Nil)
   end
 
   doc "Applies `f` to each element for side effects. Returns ()."
