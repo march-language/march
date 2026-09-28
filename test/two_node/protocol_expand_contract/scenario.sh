@@ -25,7 +25,8 @@
 #
 # node-b prints the invariants: no session lost or refused, every one
 # Finished or Drained, the pairings of each stage seen, `later` only from a
-# contract Shop, never a version-1 Buyer with a contract Shop. Red control
+# contract Shop, never a version-1 Buyer with a contract Shop. Sessions start
+# every 300 ms (see node_a.march's `drive`). Red control
 # (2026-09-28): the contract build deployed where the expand goes (one plain
 # deploy, chooser first) had node-a re-offer under the new fingerprint while
 # node-b still ran version 1, and formation refused 27 sessions ("protocol
@@ -68,7 +69,7 @@ for half in expand contract; do
 done
 
 socks=$(mktemp -d /tmp/pxc.XXXXXX)
-export SPLIT_DRIVE_MS=24000
+export SPLIT_DRIVE_MS=18000
 export SPLIT_NODE=a MARCH_HOT_RELOAD_SOCKET=$socks/a.sock
 start_node a
 wait_line a "node-a: offering"
@@ -90,14 +91,14 @@ step() {  # step <node> <half>
   else running_b="$work/$half/v2.so.schemas.json $work/$half/v2.so.hcr_manifest"; fi
 }
 
-sleep 3
+sleep 2
 step a expand
-sleep 4
+sleep 3
 step b expand
-sleep 4
+sleep 3
 step a contract
 wait_line a "node-a: Shop re-offered in phase 3"
-sleep 2
+sleep 1
 step b contract
 wait_line b "node-b: later from a contract Shop"
 

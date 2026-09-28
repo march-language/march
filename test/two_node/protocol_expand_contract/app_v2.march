@@ -205,7 +205,10 @@ mod ProtocolSplit do
     if unix_time_ms() >= until do ()
     else
       go(d, c, h)
-      sleep_ms(150)
+      -- 300 ms, not protocol_evolve's 150: on Linux each session grows both
+      -- nodes' memory (specs/todos/2026-09-28-linux-per-session-memory-growth.md),
+      -- and this scenario runs longer than that one.
+      sleep_ms(300)
       drive(d, c, h, until)
     end
   end
@@ -251,7 +254,7 @@ mod ProtocolSplit do
         if offered(h, 60000) do () else panic("node-b: never saw the Shop offer") end
         let d = start_driver()
         println("node-b: driving")
-        drive(d, c, h, unix_time_ms() + Env.get_int("SPLIT_DRIVE_MS", 22000))
+        drive(d, c, h, unix_time_ms() + Env.get_int("SPLIT_DRIVE_MS", 18000))
         settle(30000)
         summary()
         -- Linger so the scenario can read this node's reload counters.

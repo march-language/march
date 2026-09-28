@@ -111,3 +111,10 @@ test_topology_run case; reproduced by hand, then fixed, the warm check now exits
    (`forge/test/test_deploy_e2e.ml`) needs Docker, zig and the cross sysroot. The executor's
    steps are covered by the test_topology_run case against the real compiler; the
    scenario builds exactly what `protocol_build_flags` produces.
+5. **The scenario's first version took CI's Linux `two-node` runner down twice** (a
+   runner shutdown, exit 143, during this scenario). In `ci/Dockerfile.two-node` both
+   nodes grew to ~3.8 GB. The growth is main's, not this change's: `protocol_evolve`
+   reaches 1.6 GB per node the same way, ~17 MB per session on Linux (macOS stays near
+   100 MB). Filed: [../todos/2026-09-28-linux-per-session-memory-growth.md](../todos/2026-09-28-linux-per-session-memory-growth.md).
+   The scenario now starts a session every 300 ms for 18 s; its peak in the container is
+   ~680 MB per node, two passes.
