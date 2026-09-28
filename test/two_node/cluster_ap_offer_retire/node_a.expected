@@ -1,0 +1,12 @@
+procs retired after 5 offers opened and closed: true
+re-offers refused: 5
+procs retired after 5 refused re-offers: true
+closed with a session running, actor alive: true
+session done: 1
+after the session, actor alive: false
+procs retired after the session and its closed offer: true
+procs retired after 5 hosted offers opened and closed: true
+hosted re-offer: AlreadyOffered
+procs retired after a refused hosted re-offer: true
+procs retired after the hosted offer closed (twice): true
+offer keys left: 0
