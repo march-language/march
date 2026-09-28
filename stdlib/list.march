@@ -251,22 +251,24 @@ mod List do
 
   doc "Applies `f` to each element and concatenates the results.  O(n) in the total output size."
   fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
-    -- Accumulate each f(h) onto acc in reversed order, then reverse once at
-    -- the end.  Total work is O(total_output), not O(total_output^2) which
-    -- the old append-based implementation would incur.
-    fn prepend_reversed(sub : List(b), acc : List(b)) : List(b) do
-      match sub do
-      Nil           -> acc
-      Cons(x, rest) -> prepend_reversed(rest, Cons(x, acc))
-      end
-    end
-    fn go(lst : List(a), acc : List(b)) : List(b) do
+    flat_map_go(Nil, xs, f)
+  end
+
+  -- flat_map's walk: copy the current f(h) cell by cell, then advance to the
+  -- next input element.  Natural style on purpose: the copy arm is
+  -- modulo-cons and the advance arm a tail call, so TRMC makes this one loop
+  -- over the total output (no per-element append, no final reverse).  It is
+  -- top-level, not nested in flat_map, because TRMC rewrites only top-level
+  -- functions.
+  pfn flat_map_go(sub : List(b), lst : List(a), f : a -> List(b)) : List(b) do
+    match sub do
+    Cons(x, rest) -> Cons(x, flat_map_go(rest, lst, f))
+    Nil ->
       match lst do
-      Nil        -> reverse(acc)
-      Cons(h, t) -> go(t, prepend_reversed(f(h), acc))
+      Nil        -> Nil
+      Cons(h, t) -> flat_map_go(f(h), t, f)
       end
     end
-    go(xs, Nil)
   end
 
   doc """
