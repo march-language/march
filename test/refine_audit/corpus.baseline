@@ -604,6 +604,8 @@ stdlib_config: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0
 stdlib_config: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_consistent_hash: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 stdlib_consistent_hash: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_control: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+stdlib_control: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_crdt: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 stdlib_crdt: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_crypto: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
