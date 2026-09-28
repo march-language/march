@@ -14978,7 +14978,7 @@ let assert_stdlib_file_typechecks_cleanly name =
    ratchet is two-sided on purpose: fixing a file FAILS this test until its
    count comes down here, so the table cannot quietly describe a fixed tree. *)
 let stdlib_known_internal_errors = [
-  (* file, errors -- see specs/todos/2026-09-22-stdlib-internal-type-errors.md *)
+  (* file, errors -- see specs/progress/2026-09-22-stdlib-internal-type-errors.md *)
   "actor.march", 2;
   "cluster_node.march", 1;
   "node_call.march", 5;
