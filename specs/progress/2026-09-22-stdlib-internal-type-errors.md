@@ -1,3 +1,9 @@
+**Closed 2026-09-28 as an umbrella.** Every class in the table below is fixed (see the
+linked progress files) except the distributed/actor-module row. That row is tracked on its
+own in `specs/todos/2026-09-22-stdlib-distributed-module-errors.md`, and
+`test_stdlib_internal_errors_ratchet` (test/test_compiler.ml) still pins its counts, so no
+work is lost by closing this file.
+
 # `[P2]` 98 type errors inside stdlib bodies that the compiler hides
 
 Filed 2026-09-22, surfaced by making `assert_stdlib_file_typechecks_cleanly`

@@ -1,3 +1,9 @@
+**Closed 2026-09-28: shipped, remainder tracked elsewhere.** The capability diff at
+upgrade time shipped as `forge audit` (#167, `--inferred` #169+), as the status note below
+says. What is left is tracked in `specs/todos/2026-08-04-dependency-cap-audit-followups.md`
+(wiring it into `forge add` / `forge outdated`, speed, toolchain check) and
+`specs/todos/2026-08-03-registry-capability-notarization.md` (registry-side records).
+
 **STATUS 2026-08-04: shipped as `forge audit` (#167), with `--inferred` (#169+)** — see
 `specs/todos/2026-08-04-dependency-cap-audit-followups.md` for what remains (toolchain
 version check, speed, wiring into `forge add`/`outdated`). Implemented against
