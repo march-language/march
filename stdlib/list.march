@@ -403,18 +403,15 @@ mod List do
   Equivalent to map followed by filter for non-None values.
   """
   fn filter_map(xs : List(a), f : a -> Option(b)) : List(b) do
-    fn go(lst : List(a), acc : List(b)) : List(b) do
-      match lst do
-      Nil        -> reverse(acc)
-      Cons(h, t) -> do
-        match f(h) do
-        Some(v) -> go(t, Cons(v, acc))
-        None    -> go(t, acc)
-        end
-      end
+    -- Natural style on purpose: TRMC makes it a single-traversal loop.
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      match f(h) do
+      Some(v) -> Cons(v, filter_map(t, f))
+      None    -> filter_map(t, f)
       end
     end
-    go(xs, Nil)
   end
 
   doc """
