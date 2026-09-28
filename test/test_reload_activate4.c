@@ -925,6 +925,15 @@ static const char *g_restore_home;
 /* The dispatch table a restarted binary has: the same names, the same
  * baseline (or a different one, for base_changed). */
 static void restore_boot(const char *baseline) {
+    /* The default SIGHUP action with SA_SIGINFO set: what a process started
+     * by a parent that caught SIGHUP inherits on macOS (the flag survives
+     * exec, the handler does not).  The topology hook must not read that as
+     * a watcher: a SIGHUP here would kill the phase. */
+    struct sigaction dfl;
+    memset(&dfl, 0, sizeof(dfl));
+    dfl.sa_handler = SIG_DFL;
+    dfl.sa_flags = SA_SIGINFO;
+    sigaction(SIGHUP, &dfl, NULL);
     march_dispatch_init(64);
     march_dispatch_register_name(1, "test_fn_epoch");
     march_dispatch_publish(1, (void *)0x1010, baseline, NULL, MARCH_NATIVE);

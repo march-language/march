@@ -80,6 +80,15 @@ it switches the server into sequenced mode):
   unwrapped replay and an older release are refused;
 - a restart with a persisted topology and no watcher doesn't kill the process.
 
+Every restart phase starts with the default SIGHUP action and `SA_SIGINFO` set, which
+is what a process inherits on macOS when its parent caught SIGHUP: macOS keeps the flag
+across exec and resets the handler. The first version of the hook judged "a watcher is
+installed" partly by `SA_SIGINFO`. On the macOS CI runner it therefore raised SIGHUP in
+processes with no watcher and killed them: restart phases 1, 5 and 7, and adversarial
+regression 44, a compiled `--hot-reload` program. Linux clears the flag on exec, so only
+macOS failed. The hook now judges by the handler alone, and the harness phases fail with
+the old check.
+
 **Proven red:** with the stale-release check and the release-required check disabled,
 10 main-mode checks and 5 restore-mode checks fail.
 

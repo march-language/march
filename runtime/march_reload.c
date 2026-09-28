@@ -916,8 +916,12 @@ void march_hcr_on_topology(const char *path) {
     if (g_booting) return;
     struct sigaction cur;
     if (sigaction(SIGHUP, NULL, &cur) != 0) return;
-    if (!(cur.sa_flags & SA_SIGINFO)
-        && (cur.sa_handler == SIG_DFL || cur.sa_handler == SIG_IGN)) return;
+    /* Judge by the handler alone (sa_handler and sa_sigaction share storage),
+     * never by sa_flags: macOS keeps SA_SIGINFO across exec while resetting
+     * the handler to SIG_DFL, so a program started by a parent that caught
+     * SIGHUP (dune, a test driver) reads as SA_SIGINFO with the default
+     * action, and a SIGHUP would kill it. */
+    if (cur.sa_handler == SIG_DFL || cur.sa_handler == SIG_IGN) return;
     kill(getpid(), SIGHUP);
 }
 
