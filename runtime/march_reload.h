@@ -18,9 +18,12 @@ void march_reload_server_start(const char *socket_path);
  * once at start, before march_reload_server_start returns, when a pushed
  * topology was persisted and its signature and digest still verify.
  *
- * A NO-OP for now: build step 8 (nodes that open their own offers from a
- * pushed topology, D16) fills it in with the node's topology re-read.  It
- * runs on the reload server thread (or, at start, on the thread calling
+ * After a push it raises SIGHUP when a watcher is installed (Topology.place
+ * installs one), so the node re-reads its topology; Topology.reload reads
+ * this verified copy (MARCH_TOPOLOGY_VERIFIED_FILE) in preference to the
+ * unsigned MARCH_TOPOLOGY_FILE.  At start it does nothing: Topology.place
+ * applies the verified copy when `main` places.  It runs on the reload
+ * server thread (or, at start, on the thread calling
  * march_reload_server_start); it must not block. */
 void march_hcr_on_topology(const char *path);
 
