@@ -46,6 +46,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 # Modules whose `## Examples` are pure, single-value REPL transcripts. Everything
 # else is extracted but every doctest is skipped-loud: their examples do IO
@@ -117,7 +118,7 @@ def extract_doctests(path):
         yield (i + 1, expr, expected, reason)
 
 
-def run_module(bin_path, exprs):
+def run_module(bin_path, path, exprs):
     """Feed exprs to one `march repl` session; return {input_index: value}.
 
     The REPL prints `march(N)> = VALUE` where N is the 1-based input index, so
@@ -126,10 +127,19 @@ def run_module(bin_path, exprs):
     never by position, so one errored expression can't shift the rest.
     """
     stdin = "".join(e + "\n" for e in exprs)
+    start = time.monotonic()
     proc = subprocess.run(
         [bin_path, "repl"],
         input=stdin, capture_output=True, text=True, timeout=120,
     )
+    # One line per session: wall time plus the REPL's own `[timing]` and
+    # `march JIT:` stderr lines, so a slow CI run shows where the time went
+    # (a cold stdlib prelude compile, or a cache load that fell back to
+    # recompiling) instead of only the step total.
+    notes = [l.strip() for l in proc.stderr.splitlines()
+             if l.startswith("[timing]") or l.startswith("march JIT:")]
+    print(f"  {path}: {len(exprs)} exprs  {time.monotonic() - start:6.1f}s  "
+          + "; ".join(notes), flush=True)
     values = {}
     for line in proc.stdout.splitlines():
         m = REPL_VALUE_RE.search(line)
@@ -167,7 +177,7 @@ def main():
             runnable.append((lineno, expr, expected))
         if not runnable:
             continue
-        values = run_module(bin_path, [e for (_, e, _) in runnable])
+        values = run_module(bin_path, path, [e for (_, e, _) in runnable])
         for idx, (lineno, expr, expected) in enumerate(runnable):
             actual = values.get(idx + 1)  # REPL input index is 1-based
             if actual is None:
