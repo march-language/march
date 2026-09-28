@@ -16,8 +16,8 @@ mod ControlPeers do
   --     golden does not pin `Gen`'s stream.
   --
   -- The Agent's node side (the reload server, the CAS) is simulated behind
-  -- `Control.AgentOps`, the seam the `reload_request` builtin plugs into once
-  -- PR #671's runtime changes land.
+  -- `Control.AgentOps`, the seam the `reload_request` builtin (design
+  -- section 6, not built yet) plugs into.
   needs IO
   needs IO.Console
   needs IO.Mut

@@ -1,7 +1,7 @@
 # Distributed deploys, step 12a: the control plane's pure core
 
-**Design:** `specs/plans/2026-09-28-dd-step12-control-plane-design.md` (on PR #671's
-branch when this landed), sections 3, 4, 7, 8, 10 ("12a") and decisions D37–D41.
+**Design:** `specs/plans/2026-09-28-dd-step12-control-plane-design.md` (from PR
+#671), sections 3, 4, 7, 8, 10 ("12a") and decisions D37–D41.
 **Remaining wiring:** [../todos/2026-09-28-dd-step12a-control-wiring.md](../todos/2026-09-28-dd-step12a-control-wiring.md).
 
 ## What was built

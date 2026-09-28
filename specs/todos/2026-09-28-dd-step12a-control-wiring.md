@@ -1,14 +1,15 @@
 # `[P3]` Distributed deploys, step 12a: wire the control plane's core into the cluster
 
-**Design:** `specs/plans/2026-09-28-dd-step12-control-plane-design.md` (PR #671),
+**Design:** `specs/plans/2026-09-28-dd-step12-control-plane-design.md`,
 sections 6–10. **Built so far:** [../progress/2026-09-28-dd-step12a-control-core.md](../progress/2026-09-28-dd-step12a-control-core.md)
 (`stdlib/control.march`: release format, executor, leader memory, `agent_apply`, the
 protocols' payloads; the `Ctl` and `CtlFetch` protocols and their role bodies in
 `test/session/control_peers.march`; all tested in one process).
 
-Everything below waits for PR #671 (12-pre) to merge, since it touches
+Everything below was held back while PR #671 (12-pre) was open, since it touches
 `runtime/march_reload.c`, `stdlib/topology.march`, `forge/lib/cmd_deploy_hot.ml`
-or `test/test_reload_activate4.c`, or needs a running cluster.
+or `test/test_reload_activate4.c`, or needs a running cluster. #671 has since
+merged, so it is unblocked.
 
 **What remains.**
 

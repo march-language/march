@@ -25,8 +25,8 @@
 --     sticky halt.
 --   * `agent_apply` is the Agent's side of one `StepOrder`, over an `AgentOps`
 --     dictionary: the node's reload server and CAS are reached through it. Until
---     the `reload_request` builtin lands (with PR #671's runtime changes) the
---     dictionary is the seam tests and the real Agent plug into.
+--     the `reload_request` builtin exists (design section 6) the dictionary is
+--     the seam tests and the real Agent plug into.
 --   * The payloads of the control protocols (section 7): `AgentReport`,
 --     `StepOrder`, `StepResult`, `CtlChunk`, and the `ControlOps` dictionary a
 --     leader's `Ctl` session is driven by. The `Ctl` and `CtlFetch`
@@ -889,7 +889,7 @@ mod Control do
   -- answers `CAS_CHECK` for a hash, and `request` runs one signed request
   -- line through the reload server and returns its answer (`OK ...` or
   -- `ERR ...`). The real Agent builds this over the `reload_request` builtin
-  -- (design section 6, pending PR #671); tests build it over a simulated node.
+  -- (design section 6, not built yet); tests build it over a simulated node.
   type AgentOps = { report : () -> AgentReport, has : String -> Bool, request : String -> String }
 
   doc "The artifacts of [o] the node does not hold yet (to fetch over `CtlFetch` before applying)."
