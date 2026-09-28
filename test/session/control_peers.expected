@@ -7,7 +7,7 @@ script: report from r1 at seq 42
 r1: render@mr2 topology t41, 1 lines applied
 queued after: 0
 -- scripted Agent against the real Control
-script: ordered step 1 of release 42
+script: ordered step 1 of release 42: activate(render) want mr2, 1 line(s)
 script: polled, leader holds 42
 script: polled again (gate), leader holds 42
 script: bye, session budget spent

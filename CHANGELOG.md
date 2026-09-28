@@ -12,6 +12,11 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **Compiled code no longer reads freed memory through a record field after
+  handing the record to a function.** Reading a field into a local
+  (`let x = r.a`), then passing `r` to a function that takes ownership of it,
+  then using `x`, read a string the callee had already released: garbage
+  output, or another value's bytes. The interpreter was unaffected.
 - **A nested module's call to a sibling module now links when compiled.** Inside
   `mod Outer do mod A ... end mod B do ... A.f(x) ... end end`, the call `A.f`
   ran interpreted but a compiled program failed to link (`A.f` undefined),

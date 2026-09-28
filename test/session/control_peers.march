@@ -424,9 +424,10 @@ mod ControlPeers do
   end
 
   pfn show_order(o : WireOrder) : String do
-    -- Int fields only: compiled, this callback reads the order's STRING
-    -- fields back corrupted (specs/todos/2026-09-28-compiled-scripted-offer-payload-uaf.md).
-    "script: ordered step " ++ int_to_string(o.step) ++ " of release " ++ int_to_string(o.seq)
+    -- Read after `order_of(o)` consumes `o`: this is the shape that exposed
+    -- specs/progress/2026-09-28-borrowed-field-outlives-owner.md.
+    "script: ordered step " ++ int_to_string(o.step) ++ " of release " ++ int_to_string(o.seq) ++ ": " ++ o.action
+      ++ " want " ++ o.want ++ ", " ++ int_to_string(List.length(Control.order_lines(order_of(o)))) ++ " line(s)"
   end
 
   pfn show_result(r : Control.StepResult) : String do

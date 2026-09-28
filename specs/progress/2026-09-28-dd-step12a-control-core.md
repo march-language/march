@@ -132,8 +132,10 @@ wiring puts them in the generated topology `main`.
 - Compiling the protocols while they were inside the stdlib module found a lowering
   bug (nested-module sibling calls did not link), fixed alongside:
   [2026-09-28-nested-module-sibling-call.md](2026-09-28-nested-module-sibling-call.md).
-- A compiled-only corruption of a scripted peer's offer payload, filed:
-  [../todos/2026-09-28-compiled-scripted-offer-payload-uaf.md](../todos/2026-09-28-compiled-scripted-offer-payload-uaf.md).
+- A compiled-only corruption of a scripted peer's received order turned out to be a
+  Perceus use-after-free (a borrowed field projection outliving its consumed owner),
+  fixed alongside:
+  [2026-09-28-borrowed-field-outlives-owner.md](2026-09-28-borrowed-field-outlives-owner.md).
 - Record impls are structural: a user record with exactly `StepOrder`'s (or
   `AgentReport`'s, `StepResult`'s, `CtlChunk`'s) fields that derives Json is now an
   overlapping-implementation error. Unlikely with these field sets; noted.

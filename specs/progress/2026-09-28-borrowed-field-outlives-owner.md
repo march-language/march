@@ -1,36 +1,48 @@
-# `[P2]` Compiled: a scripted peer's `Expect_` callback reads a String-field payload corrupted
+# `[P1]` DONE A borrowed field projection outlived its record's owner (compiled use-after-free)
 
-Filed 2026-09-28 while writing `test/session/control_peers.march` (dd step 12a).
+Filed and fixed 2026-09-28 (dd step 12a). First seen as a scripted session peer in
+`test/session/control_peers.march` printing another string's bytes for a received
+order's `action` field, compiled only.
 
-**Symptom.** Compiled only. In that fixture's "scripted Agent against the real
-Control" case, the scripted `Ctl.Agent` receives the real Control role's first
-`apply` order through `Ctl_Agent.Expect_Apply(fn o -> ...)`. Its Int fields read
-correctly; its String fields read back bytes of strings allocated LATER in the
-callback:
+## The bug
 
+```march
+type R = { a : String, b : String, n : Int }
+type R2 = { a : String, b : String }
+pfn copy(r : R) : R2 do { a: r.a, b: r.b } end          -- takes r, drops it
+pfn blen(r : R2) : Int do String.byte_size(r.b) end
+pfn show(r : R) : String do
+  int_to_string(r.n) ++ ": " ++ r.a ++ " / " ++ r.b ++ " / " ++ int_to_string(blen(copy(r)))
+end
 ```
-interpreted: script: ordered step 1 of release 42: activate(render) want mr2, 1 line(s)
-compiled:    script: ordered step 1 of release 42: script: ordered step  want 1, 1 line(s)
-```
 
-`o.action` came back as the callback's own first string, `o.want` as
-`int_to_string(o.step)`: the record's String fields were freed before the callback
-ran and their memory reused. Messages cross `Session.in_process()` as encoded
-`Bytes`, so the record is freshly decoded on the receiving side; the premature free
-is there (the generated offer walker of `script`, or the decode), not in the sender.
+Interpreted: `7: alpha1 / beta2 / 5`. Compiled: `7: :  / 5 / 5`. Perceus
+(`lib/tir/perceus_core.ml`, the `ELet` rule) classifies `let x = r.a` as a BORROWED
+field (no refcount of its own; "the record owner manages it") whenever `r` is still in
+scope or used again in the body. Here the later use is `copy(r)`, which CONSUMES `r`:
+`show` owns `r` and hands it over, and `copy`'s drop releases `r.a` and `r.b`. The
+concatenation then read freed strings, and the next allocations reused their memory.
+Any function that reads a field into a local, passes the record to a consuming call,
+then uses the local, was exposed.
 
-**Allocation-dependent.** A different format string in the same callback printed
-correctly, and a minimal protocol (same loop, `choose`, an 8-field String record,
-scripted on both sides with heap-allocated strings) does not reproduce it. It was
-first seen with the protocol declared inside `stdlib/control.march` and persists with
-it in the entry module.
+In the session fixture the shape was `show_order(o)`, which read `o.action` and
+`o.want`, then called `Control.order_lines(order_of(o))`; the inlined `order_of`
+consumed `o`.
 
-**Where it is pinned.** `test/session/control_peers.march` prints only the order's Int
-fields in that callback, so the golden does not depend on freed memory. To reproduce,
-append `++ ": " ++ o.action ++ " want " ++ o.want ++ ", " ++ int_to_string(List.length(Control.order_lines(order_of(o)))) ++ " line(s)"` to `show_order` there (it still reproduces with the protocol's own `WireOrder` payload) and compare
-the two backends. Next step: an ASAN build (on macOS that needs a Linux container).
+## The fix
 
-**Why it matters.** The real Agent (`agent_role` in that fixture, reading the same
-fields through `Control.agent_apply`) produced correct results compiled in every
-test, but if a received record's strings can be freed early, it may be reading freed
-memory and getting lucky.
+In the `ELet` rule, `dup_owned_field`: when the projection's source is owned here (not
+live after the scope, not itself a borrowed field, not a closure capture, `Unr`) and the
+body uses it other than as a projection source (`used_only_as_field_source` is false),
+the binding is NOT borrowed. It takes its own reference (`inc_rc` right after the
+projection) and is released like any owned binding, at its last use. A source that is
+only ever projected keeps the borrowed classification: nothing in the body can release
+it before the binding's scope ends.
+
+## Tests
+
+- `test/test_codegen.ml`, group `borrowed_field_owner_consumed`: the program above,
+  compiled, plus 2000 iterations under `march_live_allocs` (delta 0, so an over-dup
+  would fail as a leak). RED with the rule disabled (`7: :  / 5 / 5`).
+- `test/session/control_peers.march`: the scripted Agent's `Expect_Apply` callback
+  prints the order's String fields again, identical on both backends.

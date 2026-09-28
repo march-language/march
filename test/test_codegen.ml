@@ -10553,6 +10553,58 @@ let test_nested_module_sibling_call_entry_compiled () =
       "an entry-file module nested two levels links its qualified sibling calls"
       nested_sibling_expected (read_cmd_output (Filename.quote bin))
 
+(* ── A borrowed field projection must not outlive its owner ──────────────
+   specs/progress/2026-09-28-borrowed-field-outlives-owner.md.  Perceus
+   classified [let x = r.a] as BORROWED from [r] because [r] was used again
+   later -- but that later use CONSUMED [r] ([copy(r)] takes ownership and
+   drops it) while [x] was still to be read.  Compiled, the concatenation
+   read freed strings: `7: :  / 5 / 5` instead of `7: alpha1 / beta2 / 5`
+   (the interpreter has no RC, so it always printed the right thing).  The
+   same program also runs 2000 times under the live-allocation counter, so a
+   fix that over-dups (a leak) fails too. *)
+let borrowed_field_owner_src = {|mod Main do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "rt" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  type R = { a : String, b : String, n : Int }
+  type R2 = { a : String, b : String }
+  pfn copy(r : R) : R2 do { a: r.a, b: r.b } end
+  pfn blen(r : R2) : Int do String.byte_size(r.b) end
+  pfn show(r : R) : String do
+    int_to_string(r.n) ++ ": " ++ r.a ++ " / " ++ r.b ++ " / " ++ int_to_string(blen(copy(r)))
+  end
+  pfn churn(n : Int, acc : Int) : Int do
+    if n == 0 do acc
+    else
+      let r = { a: "alpha" ++ int_to_string(n), b: "beta" ++ int_to_string(n), n: n }
+      churn(n - 1, acc + String.byte_size(show(r)))
+    end
+  end
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
+    println(show({ a: "alpha" ++ int_to_string(1), b: "beta" ++ int_to_string(2), n: 7 }))
+    let _ = churn(50, 0)
+    let base = live_allocs()
+    let t = churn(2000, 0)
+    println("leaked " ++ int_to_string(live_allocs() - base) ++ ", total " ++ int_to_string(t))
+  end
+end
+|}
+
+let test_borrowed_field_owner_consumed_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_borrowed_field_owner" borrowed_field_owner_src in
+  let bin = Filename.concat tmp "borrowed_field_owner_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    Alcotest.(check string)
+      "a field read after its record was handed to a consuming call is intact, and nothing leaks"
+      "7: alpha1 / beta2 / 5\nleaked 0, total 56679" (read_cmd_output (Filename.quote bin))
+
 let test_nested_module_parent_call_lib_path_interpreted () =
   let (project_root, main_exe, src, _tmp, lib_dir) =
     write_nested_parent_lib_path_project ~name:"march_nested_parent_interp" in
@@ -16240,6 +16292,10 @@ let codegen_suites =
             test_nested_module_parent_call_entry_interpreted;
           Alcotest.test_case "qualified parent pfn is not shadowed by an inner fn" `Quick
             test_nested_module_qualified_parent_pfn_not_shadowed;
+        ] );
+      ( "borrowed_field_owner_consumed", [
+          Alcotest.test_case "borrowed field outlives its consumed owner (compiled, no leak)" `Quick
+            test_borrowed_field_owner_consumed_compiled;
         ] );
       ( "nested_module_sibling_call", [
           Alcotest.test_case "MARCH_LIB_PATH nested module calls a sibling submodule (compiled)" `Quick
