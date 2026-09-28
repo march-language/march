@@ -86,6 +86,16 @@
  *   DRAIN <sig64> epoch:<E> [soft_ms:<n>] [hard_ms:<n>]  → OK | ERR bad_epoch | ERR bad_signature
  *     Drain every epoch <= E; E must be below the current epoch.  Signed over
  *     "DRAIN epoch:<E> soft_ms:<n> hard_ms:<n>" (omitted deadlines are 0).
+ *     Audited (type "drain").
+ *   SEQ <seq> <id> <sig64> <signed line>              → as the signed line, or
+ *                                                       ERR stale_release head:<n> |
+ *                                                       ERR release_fork head:<n>:<id> |
+ *                                                       ERR bad_signature
+ *     Any of ACTIVATE*, TOPOLOGY, DRAIN wrapped in a release (DD step 12-pre):
+ *     signed over "SEQ <seq> <id> <signed line>".  Once a node has accepted a
+ *     release, or with MARCH_HCR_REQUIRE_RELEASE=1, an unwrapped signed verb
+ *     is refused with ERR release_required.  See "Sequenced releases" below.
+ *   RELEASE_HEAD                                      → HEAD <seq> <id|-> [required]
  *
  * The epoch model (specs/plans/2026-09-21-distributed-authority-and-deploys-
  * plan.md, II.4): every activation (single, or a whole batch) is ONE deploy
@@ -126,6 +136,7 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <signal.h>
 #include <sys/time.h>
 
 #ifndef MARCH_HCR_TRIPLE
@@ -889,13 +900,176 @@ static void set_state_aside(const char *suffix) {
 
 /* ── The signed TOPOLOGY verb (plan section 5, DD build step 10) ───────── */
 
-/* Filled in by build step 8 (see march_reload.h). */
+static int g_booting;   /* 1 while march_reload_server_start replays the state */
+
+/* A verified topology was written to [path] (see march_reload.h).  The node
+ * applies it through Topology.reload, which reads this verified copy in
+ * preference to the unsigned MARCH_TOPOLOGY_FILE (MARCH_TOPOLOGY_VERIFIED_FILE,
+ * set by march_reload_server_start).  So the hook only has to wake the
+ * node's SIGHUP watcher, and only when one is installed: a program that
+ * never called Topology.place has the default SIGHUP action, which would
+ * terminate it.  At start nothing is raised: `main` has not placed yet, and
+ * Topology.place applies the verified copy itself when it does (DD step
+ * 12-pre: a restarted node comes back on the topology last pushed to it). */
 void march_hcr_on_topology(const char *path) {
     (void)path;
+    if (g_booting) return;
+    struct sigaction cur;
+    if (sigaction(SIGHUP, NULL, &cur) != 0) return;
+    if (!(cur.sa_flags & SA_SIGINFO)
+        && (cur.sa_handler == SIG_DFL || cur.sa_handler == SIG_IGN)) return;
+    kill(getpid(), SIGHUP);
 }
 
 static void topology_path(char *out, size_t n) {
     snprintf(out, n, "%s/topology.toml", g_state_dir);
+}
+
+/* ── Sequenced releases (DD step 12-pre) ──────────────────────────────────
+ *
+ * specs/plans/2026-09-28-dd-step12-control-plane-design.md, section 5.  A
+ * signed line alone carries no freshness: an ACTIVATE, TOPOLOGY or DRAIN
+ * recorded once could be sent again for ever (rolling a function back,
+ * re-pushing an old placement).  So a signed line can be wrapped as
+ *
+ *   SEQ <seq> <id> <sig64> <signed line>
+ *
+ * signed over "SEQ <seq> <id> <signed line>" (the inner line keeps its own
+ * signature, which is checked as before).  <seq> is the release's number,
+ * <id> its 32-hex identity, both chosen by the operator's forge.  The node
+ * keeps the highest release it has accepted (the "head") in
+ * <state_dir>/release, a file of its own so that a stack set aside
+ * (base_changed, MARCH_HCR_NO_REPLAY) does not forget it:
+ *
+ *   seq  > head          accepted; the head moves to (seq, id)
+ *   seq == head, same id accepted (a retry, or the next line of the release)
+ *   seq == head, other id ERR release_fork: two releases with one number
+ *   seq  < head          ERR stale_release
+ *
+ * Gaps are fine: a node a release did not touch never saw it.  Once a node
+ * holds a release (or with MARCH_HCR_REQUIRE_RELEASE=1), a signed verb that
+ * is not wrapped is refused (ERR release_required), so a line recorded
+ * before sequencing cannot be replayed either.  The head moves as soon as
+ * the wrapper verifies, before the inner line runs: an inner line that then
+ * fails leaves the release retryable (same seq, same id). */
+static unsigned long long g_release_seq;       /* 0: no release accepted yet */
+static char g_release_id[40] = "-";
+static int  g_require_release;
+
+static int is_release_id(const char *s) {
+    size_t n = strlen(s);
+    if (n != 32) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
+    return 1;
+}
+
+static void release_path(char *out, size_t n) {
+    snprintf(out, n, "%s/release", g_state_dir);
+}
+
+static void load_release_head(void) {
+    if (!g_state_dir[0]) return;
+    char path[800];
+    release_path(path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    unsigned long long s = 0;
+    char id[40] = "";
+    if (fscanf(f, "%llu %39s", &s, id) == 2 && s > 0 && is_release_id(id)) {
+        g_release_seq = s;
+        snprintf(g_release_id, sizeof(g_release_id), "%s", id);
+    } else {
+        /* A head that cannot be read must not reopen replays: refuse every
+         * signed line until an operator looks (the file is kept as is). */
+        fprintf(stderr, "[hcr] %s is unreadable; refusing signed requests\n", path);
+        g_release_seq = ~0ULL;
+    }
+    fclose(f);
+}
+
+/* temp + rename; 1 on success. */
+static int persist_release_head(unsigned long long seq, const char *id) {
+    if (!g_state_dir[0]) return 0;
+    mkdir_p(g_state_dir);
+    char path[800], tmp[820];
+    release_path(path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return 0;
+    int ok = fprintf(f, "%llu %s\n", seq, id) > 0;
+    ok = (fflush(f) == 0) && ok;
+    ok = (fclose(f) == 0) && ok;
+    if (!ok || rename(tmp, path) != 0) { unlink(tmp); return 0; }
+    return 1;
+}
+
+static int is_signed_verb(const char *line) {
+    if (strncmp(line, "ACTIVATE ", 9) == 0) return 1;
+    if (strncmp(line, "ACTIVATE", 8) == 0 && line[8] >= '2' && line[8] <= '9' && line[9] == ' ')
+        return 1;
+    return strncmp(line, "TOPOLOGY ", 9) == 0 || strncmp(line, "DRAIN ", 6) == 0;
+}
+
+/* Unwrap "SEQ <seq> <id> <sig64> <line>" in place (line starts with "SEQ ").
+ * 0: [line] now holds the inner signed line, to be handled as usual.
+ * -1: refused, the ERR already written. */
+static int unwrap_release(int fd, char *line) {
+    unsigned long long seq = 0;
+    char id[40] = "", sig[160] = "";
+    int off = 0;
+    if (sscanf(line + 4, "%llu %39s %159s %n", &seq, id, sig, &off) != 3 || off == 0
+        || seq == 0 || seq == ~0ULL || !is_release_id(id)) {
+        wresp(fd, "ERR bad_format\n");
+        return -1;
+    }
+    char *inner = line + 4 + off;
+    if (!is_signed_verb(inner)) { wresp(fd, "ERR bad_format not_a_signed_verb\n"); return -1; }
+    size_t mlen = strlen(inner) + 96;
+    char *msg = (char *)malloc(mlen);
+    if (!msg) { wresp(fd, "ERR oom\n"); return -1; }
+    snprintf(msg, mlen, "SEQ %llu %s %s", seq, id, inner);
+    int ok = verify_signed_line(msg, sig);
+    free(msg);
+    char what[96];
+    snprintf(what, sizeof(what), "%llu:%s", seq, id);
+    g_audit_type = "release";
+    if (!ok) {
+        write_audit_log("(release)", what, "", NULL, "err_sig");
+        g_audit_type = NULL;
+        wresp(fd, HAVE_SIGNING_KEY ? "ERR bad_signature\n" : "ERR signing_not_configured\n");
+        return -1;
+    }
+    char resp[160];
+    if (seq < g_release_seq) {
+        write_audit_log("(release)", what, "", NULL, "err_stale_release");
+        g_audit_type = NULL;
+        int n = snprintf(resp, sizeof(resp), "ERR stale_release head:%llu\n", g_release_seq);
+        write_safe(fd, resp, n, sizeof(resp));
+        return -1;
+    }
+    if (seq == g_release_seq && strcmp(id, g_release_id) != 0) {
+        write_audit_log("(release)", what, "", NULL, "err_release_fork");
+        g_audit_type = NULL;
+        int n = snprintf(resp, sizeof(resp), "ERR release_fork head:%llu:%s\n",
+                         g_release_seq, g_release_id);
+        write_safe(fd, resp, n, sizeof(resp));
+        return -1;
+    }
+    if (seq > g_release_seq) {
+        if (!persist_release_head(seq, id)) {
+            write_audit_log("(release)", what, "", NULL, "err_write");
+            g_audit_type = NULL;
+            wresp(fd, "ERR write_failed\n");
+            return -1;
+        }
+        g_release_seq = seq;
+        snprintf(g_release_id, sizeof(g_release_id), "%s", id);
+        write_audit_log("(release)", what, "", NULL, "ok");
+    }
+    g_audit_type = NULL;
+    memmove(line, inner, strlen(inner) + 1);
+    return 0;
 }
 
 static int topology_signature_ok(const char *digest, const char *sig) {
@@ -1522,9 +1696,24 @@ static void handle_client(int fd) {
         int r = read_line(fd, line, RELOAD_LINE_MAX);
         if (r <= 0) break;
 
+        /* ── SEQ: a signed line wrapped in a release (DD step 12-pre) ───── */
+        if (strncmp(line, "SEQ ", 4) == 0) {
+            if (unwrap_release(fd, line) != 0) continue;
+        } else if (is_signed_verb(line) && (g_require_release || g_release_seq > 0)) {
+            wresp(fd, "ERR release_required\n");
+            continue;
+        }
+
         /* ── PING ─────────────────────────────────────────────────────── */
         if (strcmp(line, "PING") == 0) {
             wresp(fd, "PONG\n");
+
+        /* ── RELEASE_HEAD: the highest release this node accepted ─────── */
+        } else if (strcmp(line, "RELEASE_HEAD") == 0) {
+            char resp[128];
+            int n = snprintf(resp, sizeof(resp), "HEAD %llu %s%s\n", g_release_seq,
+                             g_release_id, g_require_release ? " required" : "");
+            write_safe(fd, resp, n, sizeof(resp));
 
         /* ── HCR_INFO ─────────────────────────────────────────────────── */
         } else if (strcmp(line, "HCR_INFO") == 0) {
@@ -2414,12 +2603,24 @@ static void handle_client(int fd) {
                 int vrc = crypto_sign_open(m_out, &m_out_len, sm,
                                            (unsigned long long)(smlen + 64), g_pubkey);
                 free(sm); free(m_out);
-                if (vrc != 0) { wresp(fd, "ERR bad_signature\n"); continue; }
+                if (vrc != 0) {
+                    g_audit_type = "drain";
+                    write_audit_log("(drain)", signed_msg, "", NULL, "err_sig");
+                    g_audit_type = NULL;
+                    wresp(fd, "ERR bad_signature\n"); continue;
+                }
             }
 #else
             wresp(fd, "ERR signing_not_configured\n"); continue;
 #endif
             march_hcr_drain((uint32_t)e, (int64_t)soft, (int64_t)hard);
+            {
+                char what[128];
+                snprintf(what, sizeof(what), "epoch:%lld soft_ms:%lld hard_ms:%lld", e, soft, hard);
+                g_audit_type = "drain";
+                write_audit_log("(drain)", what, "", NULL, "ok");
+                g_audit_type = NULL;
+            }
             wresp(fd, "OK\n");
 
         /* ── ROLLBACK_BATCH ───────────────────────────────────────────── */
@@ -2496,11 +2697,32 @@ void march_reload_server_start(const char *socket_path) {
 #if HAVE_SIGNING_KEY
     load_pubkey_from_hex();
 #endif
+    /* The release head and the verified topology live in the service's
+     * state directory (replay_state computes the same path). */
+#if HAVE_SIGNING_KEY
+    {
+        char key[65];
+        state_hex((const unsigned char *)g_socket_path, strlen(g_socket_path), key);
+        snprintf(g_state_dir, sizeof(g_state_dir), "%s/hcr_state/%.16s", g_cas_root, key);
+        load_release_head();
+        /* Topology.reload reads the signature-checked copy in preference to
+         * the unsigned MARCH_TOPOLOGY_FILE (see march_hcr_on_topology).  Set
+         * here, before `main` runs any March code that reads the
+         * environment. */
+        char tpath[800];
+        topology_path(tpath, sizeof(tpath));
+        setenv("MARCH_TOPOLOGY_VERIFIED_FILE", tpath, 1);
+    }
+#endif
+    const char *req = getenv("MARCH_HCR_REQUIRE_RELEASE");
+    g_require_release = req && strcmp(req, "1") == 0;
     /* Plan 6.5: come back on the code this host was running, before `main`
      * gets control back (and so before it opens any offer).  A build with no
      * deploy key never activated anything: nothing to replay. */
 #if HAVE_SIGNING_KEY
+    g_booting = 1;
     replay_state(g_socket_path);
+    g_booting = 0;
 #endif
 
     pthread_t tid;

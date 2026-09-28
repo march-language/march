@@ -41,6 +41,7 @@
 #include <sys/un.h>
 #include <errno.h>
 #include <time.h>
+#include <signal.h>
 
 #ifndef MARCH_SIGNING_PUBKEY_HEX
 #error "test_reload_activate4 must be compiled with -DMARCH_SIGNING_PUBKEY_HEX"
@@ -781,6 +782,139 @@ static void test_topology_push(void) {
     close(fd);
 }
 
+/* ── Sequenced releases (DD step 12-pre) ──────────────────────────────────
+ * "SEQ <seq> <id> <sig> <signed line>", signed over "SEQ <seq> <id> <line>".
+ * Run LAST in the shared server: once a release is accepted, unwrapped
+ * signed verbs are refused for the rest of the process. */
+static const char REL_A[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+static const char REL_B[] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+/* Wrap [inner] as release (seq, id); [sign_seq] is the seq the signature
+ * covers (normally seq itself). */
+static void seq_wrap(unsigned long long seq, unsigned long long sign_seq, const char *id,
+                     const char *inner, char *out, size_t max) {
+    char msg[2048], sig[128];
+    snprintf(msg, sizeof(msg), "SEQ %llu %s %s", sign_seq, id, inner);
+    sign_b64(msg, sig);
+    snprintf(out, max, "SEQ %llu %s %s %s", seq, id, sig, inner);
+}
+
+/* A TOPOLOGY push of [body] as release (seq, id); resp gets the final line
+ * (or the refusal). */
+static void push_topology_seq(int fd, unsigned long long seq, const char *id,
+                              const char *body, char *resp, int max) {
+    char d[65], sig[128], msg[128], inner[512], line[2048];
+    topo_digest(body, d);
+    snprintf(msg, sizeof(msg), "TOPOLOGY %s", d);
+    sign_b64(msg, sig);
+    snprintf(inner, sizeof(inner), "TOPOLOGY %s %s %zu", d, sig, strlen(body));
+    seq_wrap(seq, seq, id, inner, line, sizeof(line));
+    send_line(fd, line);
+    read_resp(fd, resp, max);
+    if (strcmp(resp, "READY") != 0) return;
+    write(fd, body, strlen(body));
+    read_resp(fd, resp, max);
+}
+
+static void head_of(int fd, char *resp, int max) {
+    send_line(fd, "RELEASE_HEAD");
+    read_resp(fd, resp, max);
+}
+
+static int audit_has(const char *type, const char *result) {
+    char t[64], r[96], line[4096];
+    snprintf(t, sizeof(t), "\"type\":\"%s\"", type);
+    snprintf(r, sizeof(r), "\"result\":\"%s\"", result);
+    int found = 0;
+    FILE *f = fopen(g_audit_path, "r");
+    while (f && fgets(line, sizeof(line), f))
+        if (strstr(line, t) && strstr(line, r)) found = 1;
+    if (f) fclose(f);
+    return found;
+}
+
+static void test_sequenced_releases(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "connected to reload server (releases)");
+    if (fd < 0) return;
+    char resp[512], line[2048], want[160];
+    const char *body2 = "[pools.edge]\nserves = [\"Stream.Prod\"]\n";
+
+    head_of(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "HEAD 0 -") == 0, "RELEASE_HEAD: no release accepted yet");
+
+    /* DRAIN is audited (epoch 1 is below current after the epoch-model case). */
+    {
+        char sig[128], msg[128];
+        snprintf(msg, sizeof(msg), "DRAIN epoch:1 soft_ms:0 hard_ms:0");
+        sign_b64(msg, sig);
+        snprintf(line, sizeof(line), "DRAIN %s epoch:1", sig);
+        send_line(fd, line);
+        read_resp(fd, resp, sizeof(resp));
+        CHECK(strcmp(resp, "OK") == 0, "DRAIN: an unwrapped drain is accepted before any release");
+        CHECK(audit_has("drain", "ok"), "DRAIN: the drain is audited");
+    }
+
+    push_topology_seq(fd, 5, REL_A, TOPO_BODY, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "SEQ: release 5 is accepted");
+    CHECK(audit_has("release", "ok"), "SEQ: the accepted release is audited");
+    head_of(fd, resp, sizeof(resp));
+    snprintf(want, sizeof(want), "HEAD 5 %s", REL_A);
+    CHECK(strcmp(resp, want) == 0, "RELEASE_HEAD: the head is release 5");
+
+    {
+        char d[65], sig[128], msg[128];
+        topo_digest(TOPO_BODY, d);
+        snprintf(msg, sizeof(msg), "TOPOLOGY %s", d);
+        sign_b64(msg, sig);
+        snprintf(line, sizeof(line), "TOPOLOGY %s %s %zu", d, sig, strlen(TOPO_BODY));
+        send_line(fd, line);
+        read_resp(fd, resp, sizeof(resp));
+        CHECK(strcmp(resp, "ERR release_required") == 0,
+              "SEQ: once a release is held, an unwrapped signed line (a replay) is refused");
+    }
+
+    push_topology_seq(fd, 4, REL_A, TOPO_BODY, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR stale_release head:5") == 0, "SEQ: an older release is refused");
+
+    push_topology_seq(fd, 5, REL_B, body2, resp, sizeof(resp));
+    snprintf(want, sizeof(want), "ERR release_fork head:5:%s", REL_A);
+    CHECK(strcmp(resp, want) == 0, "SEQ: another release with the same number is a fork");
+    CHECK(audit_has("release", "err_release_fork"), "SEQ: the fork is audited");
+
+    push_topology_seq(fd, 5, REL_A, TOPO_BODY, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "SEQ: the same release again (a retry) is accepted");
+
+    {
+        char d[65], sig[128], msg[128], inner[512];
+        topo_digest(TOPO_BODY, d);
+        snprintf(msg, sizeof(msg), "TOPOLOGY %s", d);
+        sign_b64(msg, sig);
+        snprintf(inner, sizeof(inner), "TOPOLOGY %s %s %zu", d, sig, strlen(TOPO_BODY));
+        seq_wrap(9, 8, REL_B, inner, line, sizeof(line));   /* signed as 8, sent as 9 */
+        send_line(fd, line);
+        read_resp(fd, resp, sizeof(resp));
+        CHECK(strcmp(resp, "ERR bad_signature") == 0,
+              "SEQ: a release number the operator did not sign is refused");
+        seq_wrap(9, 9, REL_B, "PING", line, sizeof(line));
+        send_line(fd, line);
+        read_resp(fd, resp, sizeof(resp));
+        CHECK(strcmp(resp, "ERR bad_format not_a_signed_verb") == 0,
+              "SEQ: only signed verbs can be wrapped");
+    }
+
+    push_topology_seq(fd, 7, REL_B, body2, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "SEQ: a later release is accepted (gaps are fine)");
+    head_of(fd, resp, sizeof(resp));
+    snprintf(want, sizeof(want), "HEAD 7 %s", REL_B);
+    CHECK(strcmp(resp, want) == 0, "RELEASE_HEAD: the head moved to release 7");
+
+    send_line(fd, "PING");
+    read_resp(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "PONG") == 0, "SEQ: the stream stays in sync");
+    close(fd);
+}
+
 /* ── Restart durability (plan 6.5, DD build step 10) ─────────────────────
  * Each phase is its own process (fork), i.e. its own server lifetime, over
  * one HOME (the CAS root and the persisted state) and one socket path. */
@@ -899,6 +1033,70 @@ static void ph_after_no_replay(void){ restore_boot("baseline"); phase_restored(0
 static void ph_corrupt_skipped(void){ restore_boot("baseline"); phase_restored(0, "replayed", 1); }
 static void ph_base_changed(void)   { restore_boot("another-build"); phase_restored(0, "base_changed", 1); }
 
+/* Releases across restarts (DD step 12-pre). */
+static void ph_require_release(void) {
+    setenv("MARCH_HCR_REQUIRE_RELEASE", "1", 1);
+    restore_boot("another-build");
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "require: connected");
+    if (fd < 0) return;
+    char resp[256], d[65];
+    head_of(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "HEAD 0 - required") == 0, "require: RELEASE_HEAD says a release is required");
+    topo_digest(TOPO_BODY, d);
+    push_topology(fd, TOPO_BODY, d, d, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR release_required") == 0,
+          "require: an unwrapped signed line is refused before any release");
+    close(fd);
+}
+
+static volatile sig_atomic_t g_hups;
+static void on_hup(int sig) { (void)sig; g_hups++; }
+
+static void ph_release_push(void) {
+    restore_boot("another-build");
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_hup;
+    sa.sa_flags = SA_RESTART;   /* as march_install_async_signal: the client's read survives it */
+    sigaction(SIGHUP, &sa, NULL);
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "release: connected");
+    if (fd < 0) return;
+    char resp[256];
+    push_topology_seq(fd, 3, REL_A, TOPO_BODY, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "release: release 3 accepted");
+    if (strncmp(resp, "OK ", 3) != 0) fprintf(stderr, "    got: %s\n", resp);
+    for (int i = 0; i < 100 && g_hups == 0; i++) {
+        struct timespec ts = { 0, 10 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    CHECK(g_hups == 1, "release: the topology hook woke the SIGHUP watcher once");
+    const char *vf = getenv("MARCH_TOPOLOGY_VERIFIED_FILE");
+    struct stat st;
+    CHECK(vf && stat(vf, &st) == 0, "release: MARCH_TOPOLOGY_VERIFIED_FILE names the verified copy");
+    close(fd);
+}
+
+static void ph_release_after_restart(void) {
+    restore_boot("yet-another-build");   /* the stack is set aside; the head is not */
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "after restart: connected");
+    if (fd < 0) return;
+    char resp[256], want[96], d[65];
+    head_of(fd, resp, sizeof(resp));
+    snprintf(want, sizeof(want), "HEAD 3 %s", REL_A);
+    CHECK(strcmp(resp, want) == 0, "after restart: the release head survived");
+    topo_digest(TOPO_BODY, d);
+    push_topology(fd, TOPO_BODY, d, d, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR release_required") == 0,
+          "after restart: an unwrapped replay is still refused");
+    push_topology_seq(fd, 2, REL_A, TOPO_BODY, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR stale_release head:3") == 0,
+          "after restart: an older release is still refused");
+    close(fd);
+}
+
 /* Flip one character of the first entry's signature in the state file. */
 static int corrupt_state_signature(void) {
     char cmd[512];
@@ -937,6 +1135,10 @@ static void test_restart_durability(void) {
     }
     CHECK(run_phase(phase_activate) == 0, "phase 7: activate again");
     CHECK(run_phase(ph_base_changed) == 0, "phase 8: another build on the socket does not replay it");
+    CHECK(run_phase(ph_require_release) == 0, "phase 9: MARCH_HCR_REQUIRE_RELEASE refuses unwrapped lines");
+    CHECK(run_phase(ph_release_push) == 0, "phase 10: a release, with the topology hook signalling");
+    CHECK(run_phase(ph_release_after_restart) == 0,
+          "phase 11: after a restart onto another build the head still refuses replays");
 }
 
 int main(int argc, char **argv) {
@@ -1025,6 +1227,7 @@ int main(int argc, char **argv) {
             if (strncmp(resp, want, sizeof(want) - 1) != 0) fprintf(stderr, "    got: %s\n", resp);
             close(fd);
         }
+        test_sequenced_releases();   /* last: it makes the server require releases */
     } else {
         /* $MARCH_DEPLOY_POLICY must already be set by the caller (dune rule)
          * before this process started, since the server loads it lazily on

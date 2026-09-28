@@ -135,26 +135,41 @@ sig      <ed25519 over everything above>
 - **Restart-class steps** (runtime change, hook change, compaction) are the one thing an
   agent can't do to its own process. See section 8.
 
-## 5. Replay protection and ordering (prerequisite, lands first)
+## 5. Replay protection and ordering (12-pre, built 2026-09-28)
 
-- **Every signed request names a release:** `seq` and `parent` go into each signed message
-  (a new `ACTIVATE7`, plus `TOPOLOGY2` and `DRAIN2`, or a single `RELEASE` envelope verb
-  whose signature covers the items it contains). The node keeps the highest `seq` it has
-  applied in its hcr state file, alongside the patch stack it already persists.
-- **The node refuses:**
-  - any `seq` lower than its highest;
-  - a new `seq` whose `parent` isn't the release it holds. That is a fork: two operators
-    each signed a release 43. The node reports it and changes nothing.
-  - re-applying the same `seq` is allowed and does nothing, which gives retries for free.
-- **Replay after a restart** checks the same rule against the persisted `seq`.
-- **The old unsequenced verbs stay for the ssh path**, since ssh already implies uid-level
-  access. A node started in control-plane mode (`MARCH_HCR_REQUIRE_RELEASE=1`, set by
-  `forge host init --control-plane`) refuses them.
-- **Two operators racing.** forge sends release 43 with `parent = 42`. The leader accepts it
-  only if 42 is its head (compare-and-set). The loser gets "stale parent; re-plan from
-  release 43", the way `git push` refuses a non-fast-forward.
+What was built differs from this section's first draft in two places, both noted below.
 
-This fixes the replay gap on the ssh path too, whenever that path opts in.
+- **Every signed request is wrapped in a release:**
+  `SEQ <seq> <id> <sig> <signed line>`, signed over `SEQ <seq> <id> <signed line>`. The
+  inner line keeps its own signature. One wrapper verb covers `ACTIVATE*`, `TOPOLOGY` and
+  `DRAIN` without a new version of each.
+- **The node keeps its head,** the highest `(seq, id)` it has accepted, in
+  `<state_dir>/release`. That is a file of its own, not a line in the patch-stack state,
+  because a stack set aside (a different build, `MARCH_HCR_NO_REPLAY`) must not forget it.
+- **The node:**
+  - accepts a higher `seq`, with gaps allowed;
+  - accepts the head again (a retry, or the next line of the same release);
+  - refuses the head's `seq` with another id as a fork;
+  - refuses a lower `seq` as stale.
+
+  *Changed from the draft:* there is no per-node `parent` check. A node a release didn't
+  touch (a pool with no change) would otherwise refuse every later release. Forks are
+  caught as "same number, different id" instead. Enforcing a parent chain belongs to the
+  one writer that sees every release: the control plane's leader, in 12a.
+- **Once a node holds a release it refuses unwrapped signed lines** (`ERR
+  release_required`), so the switch to sequencing needs no flag.
+  `MARCH_HCR_REQUIRE_RELEASE=1` does the same before the first release, and also makes
+  `Topology` ignore the unsigned `MARCH_TOPOLOGY_FILE`.
+- **forge numbers releases from the clock.** *Changed from the draft:* there is no recorded
+  head in `.forge/`. One invocation is one release: a random id, and
+  `seq = max(now in ms, the first node's head + 1)`. That needs no shared state between
+  operators. A deploy from a machine whose clock is behind gets `stale_release` and says
+  so. The leader's compare-and-set replaces this in 12a.
+- **The signed topology takes effect.** The runtime's hook raises SIGHUP when a watcher is
+  installed. `Topology.reload` reads the verified copy (`MARCH_TOPOLOGY_VERIFIED_FILE`)
+  before the unsigned file, and `Topology.place` applies it at start. That also fixes a
+  restarted node coming back on its compiled-in placement.
+- **Replay after a restart** is refused, because the head is read before the socket opens.
 
 ## 6. The Agent
 

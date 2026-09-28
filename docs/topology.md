@@ -377,7 +377,9 @@ applied, its offers and its running sessions to `.forge/run/<node>.status`
 process with no watcher would die of the SIGHUP.
 
 Outside forge, the same works by hand: write the digest to the file the node was started
-with (`MARCH_TOPOLOGY_FILE`) and send it SIGHUP.
+with (`MARCH_TOPOLOGY_FILE`) and send it SIGHUP. A node that has received a signed
+`TOPOLOGY` push reads that verified copy instead, and a restarted node comes back on it
+(see [Hot code reload]({{ site.baseurl }}/docs/hot-code-reload/#pushing-a-topology-the-topology-verb)).
 
 ## Deploying
 
