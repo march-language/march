@@ -76,14 +76,24 @@ mod List do
 
   doc "Returns [start, start+step, ...] up to but not including stop."
   fn range_step(start : Int, stop : Int, step : Int) : List(Int) do
-    fn build(i : Int, acc : List(Int)) : List(Int) do
-      if step > 0 do
-        if i >= stop do reverse(acc) else build(i + step, Cons(i, acc)) end
-      else
-        if i <= stop do reverse(acc) else build(i + step, Cons(i, acc)) end
-      end
+    range_step_go(start, stop, step)
+  end
+
+  -- range_step's walk.  Natural style on purpose: TRMC makes it a single
+  -- forward loop (the accumulator form built the list backwards and then
+  -- reversed it).  Top-level because TRMC rewrites only top-level functions;
+  -- `next` is let-bound because TRMC does not see through a call argument
+  -- that is itself computed (`range_step_go(i + step, ..)` stays non-trmc).
+  -- The recursion is not structural, hence the annotation; TRMC keeps it at
+  -- constant stack.
+  @[no_warn_recursion]
+  pfn range_step_go(i : Int, stop : Int, step : Int) : List(Int) do
+    if (if step > 0 do i >= stop else i <= stop end) do Nil
+    else do
+      let next = i + step
+      Cons(i, range_step_go(next, stop, step))
     end
-    build(start, Nil)
+    end
   end
 
   -- ---- Access ----
