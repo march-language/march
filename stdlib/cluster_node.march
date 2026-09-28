@@ -20,6 +20,8 @@
 --              the actor as `CtlFrame`; end of stream is `LinkClosed(id, gen)`
 --   ticker     `Tick` every tick_ms; the SWIM period, the redial backoff and
 --              the stale-dial expiry all run off it
+--   (the readers, the ticker and the acceptor move to a new code epoch
+--   after a hot deploy: see "moving to a new code epoch" below)
 --   CtlWriter  one per peer: EVERY write to a control socket goes through it
 --              (two writers on one socket interleave frames)
 --
@@ -1457,6 +1459,45 @@ mod ClusterNode do
     on LocalDown(pid : Int) do
       step_io(state.st, state.h, core_local_down(state.st, pid), state.started)
     end
+    -- A link reader, the ticker or the acceptor found its code epoch draining
+    -- and stopped (see "moving to a new code epoch"): it carries on in a task
+    -- spawned HERE, on this actor's epoch, which its marker has already
+    -- advanced. A reader is respawned even after stop: it must still see its
+    -- connection end and release it.
+    on MoveReader(kind : Int, l : CnLink, frame : List(Int), rest : List(Int)) do
+      let node = pid_of_int(state.h.pid)
+      let h = state.h
+      let creation = state.st.cfg.creation
+      let not_before = unix_time_ms() + move_interval_ms()
+      let _t = if kind == 0 do task_spawn(fn _ -> read_control(node, h, l, Some(frame), rest, not_before))
+               else task_spawn(fn _ -> read_data(node, h, creation, l, Some(frame), rest, not_before)) end
+      state
+    end
+    on MoveTicker() do
+      let node = pid_of_int(state.h.pid)
+      let meta = state.h.meta
+      let tick_ms = state.st.cfg.tick_ms
+      let not_before = unix_time_ms() + move_interval_ms()
+      let _t = task_spawn(fn _ -> tick_loop(node, tick_ms, meta, not_before))
+      state
+    end
+    on MoveAcceptor() do
+      let h = state.h
+      let listen_fd = Vault.get_or(h.meta, "listen_fd", -1)
+      if Vault.get(h.meta, "stopped") != None do
+        -- Nobody is parked on the listen socket now: closing it is safe.
+        tcp_close(listen_fd)
+      else
+        let node = pid_of_int(h.pid)
+        let cfg = state.st.cfg
+        let me = NodeIdentity.make(cfg.name, "pk-" ++ cfg.name, cfg.creation)
+        let meta = h.meta
+        let not_before = unix_time_ms() + move_interval_ms()
+        let _t = task_spawn(fn _ -> accept_loop(node, h, cfg, me, listen_fd, meta, not_before))
+        ()
+      end
+      state
+    end
     on Shutdown() do
       let h = state.h
       let _ = List.map(Map.values(state.st.links), fn l -> do
@@ -1597,8 +1638,8 @@ mod ClusterNode do
           None -> ()
         end
         let node = pid_of_int(h.pid)
-        let _ = task_spawn(fn _ -> read_control(node, h, l))
-        discard(task_spawn(fn _ -> read_data(node, h, st.cfg.creation, l)))
+        let _ = task_spawn(fn _ -> read_control(node, h, l, None, Nil, 0))
+        discard(task_spawn(fn _ -> read_data(node, h, st.cfg.creation, l, None, Nil, 0)))
       Drop(l, why) ->
         -- The data reader reads the cause when its connection ends, and
         -- tells the routes; set before the sockets are shut.
@@ -1769,46 +1810,58 @@ mod ClusterNode do
   --   10 DELIVERY_FAILED  to the failure handler
   --   11 CREDIT       to this link's data queue
   --   12 MONITOR_ACK  forget the pending fire
-  pfn read_control(node, h : CnHandle, l : CnLink) : Int do
-    let _ = PeerReader.serve(l.cfd, Nil, fn (tag, frame) -> do
-      if tag == 7 do
-        match DistLink.decode_req(frame) do
-          Ok((_claimed, watcher_ref, target_pid)) -> dist_monitor_register(target_pid, l.node_id, watcher_ref, -1)
-          Err(_) -> ()
-        end
-      else if tag == 8 do
-        on_fire(h, l, frame)
-      else if tag == 10 do
-        match NodeSend.decode_failed(frame) do
-          Ok((seq, reason)) ->
-            match Vault.get(h.failed, "f") do
-              Some(f) -> f(seq, reason)
-              None -> ()
-            end
-          Err(_) -> ()
-        end
-      else if tag == 11 do
-        match NodeQueue.decode_credit(frame) do
-          Ok(total) ->
-            match Vault.get(h.qs, "q" ++ int_to_string(l.cfd)) do
-              Some(w) -> NodeQueue.credit((pid_of_int(w), l.dfd), total)
-              None -> ()
-            end
-          Err(_) -> ()
-        end
-      else if tag == 12 do
-        match DistLink.decode_ack(frame) do
-          Ok((target_pid, watcher_ref)) -> dist_monitor_ack(target_pid, watcher_ref)
-          Err(_) -> ()
-        end
-      else
-        discard(send(node, CtlFrame(l.node_id, l.gen, tag, frame)))
-      end end end end end
-      Ok(true)
-    end)
-    send(node, LinkClosed(l.node_id, l.gen))
-    release_link(h, l, 3)
-    0
+  pfn read_control(node, h : CnHandle, l : CnLink, first : Option(List(Int)), buf : List(Int),
+                   not_before : Int) : Int do
+    let on_frame = fn (tag, frame) -> control_frame(node, h, l, tag, frame)
+    match first do
+      Some(f) -> on_frame(PeerReader.tag_of(f), f)
+      None -> ()
+    end
+    match read_link(l.cfd, buf, not_before, on_frame) do
+      Some((frame, rest)) ->
+        send(node, MoveReader(0, l, frame, rest))
+        0
+      None ->
+        send(node, LinkClosed(l.node_id, l.gen))
+        release_link(h, l, 3)
+        0
+    end
+  end
+
+  pfn control_frame(node, h : CnHandle, l : CnLink, tag : Int, frame : List(Int)) : () do
+    if tag == 7 do
+      match DistLink.decode_req(frame) do
+        Ok((_claimed, watcher_ref, target_pid)) -> dist_monitor_register(target_pid, l.node_id, watcher_ref, -1)
+        Err(_) -> ()
+      end
+    else if tag == 8 do
+      on_fire(h, l, frame)
+    else if tag == 10 do
+      match NodeSend.decode_failed(frame) do
+        Ok((seq, reason)) ->
+          match Vault.get(h.failed, "f") do
+            Some(f) -> f(seq, reason)
+            None -> ()
+          end
+        Err(_) -> ()
+      end
+    else if tag == 11 do
+      match NodeQueue.decode_credit(frame) do
+        Ok(total) ->
+          match Vault.get(h.qs, "q" ++ int_to_string(l.cfd)) do
+            Some(w) -> NodeQueue.credit((pid_of_int(w), l.dfd), total)
+            None -> ()
+          end
+        Err(_) -> ()
+      end
+    else if tag == 12 do
+      match DistLink.decode_ack(frame) do
+        Ok((target_pid, watcher_ref)) -> dist_monitor_ack(target_pid, watcher_ref)
+        Err(_) -> ()
+      end
+    else
+      discard(send(node, CtlFrame(l.node_id, l.gen, tag, frame)))
+    end end end end end
   end
 
   -- The data reader: every ACTOR_MSG goes to its route -- by destination
@@ -1822,41 +1875,104 @@ mod ClusterNode do
   -- delivery it made, so a route that forwards both to one mailbox sees the
   -- close after the last delivery (the ordering SessionNode's drain rule
   -- depends on).
-  pfn read_data(node, h : CnHandle, creation : Int, l : CnLink) : Int do
-    let _ = PeerReader.serve(l.dfd, Nil, fn (tag, frame) -> do
-      if tag == NodeSend.tag_actor_msg() do
-        match NodeSend.decode_msg(frame) do
-          Err(_) -> ()
-          Ok(d0) ->
-            -- The sender is the link's verified peer, never a claim in the frame.
-            let d = { d0 with from_node: l.node_id }
-            announce_consumed(h, l, List.length(frame) + 4)
-            -- The delivery's origin rides the mailbox node of whatever the
-            -- route sends (DD step-6 follow-up 1): an actor that later drops
-            -- the message (a hot deploy changed its message type) answers
-            -- DELIVERY_FAILED through `delivery_failed_watch`'s hook, on
-            -- this link's control writer. Set around the route only: the
-            -- route runs to completion in this task's turn.
-            delivery_origin_set(l.cw, d.seq)
-            let outcome = if d.to_creation != creation do
-              Err("stale creation " ++ int_to_string(d.to_creation) ++ ", node is at " ++ int_to_string(creation))
-            else deliver_local(h, d) end
-            delivery_origin_clear()
-            match outcome do
-              Ok(_) -> ()
-              Err(reason) -> discard(send(pid_of_int(l.cw), CtlWrite(NodeSend.encode_failed(d.seq, reason))))
-            end
-        end
-      else ()
-      end
-      Ok(true)
-    end)
+  pfn read_data(node, h : CnHandle, creation : Int, l : CnLink, first : Option(List(Int)), buf : List(Int),
+                not_before : Int) : Int do
+    let on_frame = fn (tag, frame) -> data_frame(h, creation, l, tag, frame)
+    match first do
+      Some(f) -> on_frame(PeerReader.tag_of(f), f)
+      None -> ()
+    end
+    match read_link(l.dfd, buf, not_before, on_frame) do
+      Some((frame, rest)) ->
+        send(node, MoveReader(1, l, frame, rest))
+        0
+      None ->
+        data_closed(h, l)
+        send(node, LinkClosed(l.node_id, l.gen))
+        release_link(h, l, 3)
+        0
+    end
+  end
+
+  pfn data_closed(h : CnHandle, l : CnLink) : () do
     let why = Vault.get_or(h.causes, "c" ++ int_to_string(l.cfd), "connection lost")
     Vault.drop(h.causes, "c" ++ int_to_string(l.cfd))
     discard(List.map(Vault.all(h.closes), fn kv -> match kv do (_k, f) -> f(l.node_id, why) end))
-    send(node, LinkClosed(l.node_id, l.gen))
-    release_link(h, l, 3)
-    0
+  end
+
+  pfn data_frame(h : CnHandle, creation : Int, l : CnLink, tag : Int, frame : List(Int)) : () do
+    if tag == NodeSend.tag_actor_msg() do
+      match NodeSend.decode_msg(frame) do
+        Err(_) -> ()
+        Ok(d0) ->
+          -- The sender is the link's verified peer, never a claim in the frame.
+          let d = { d0 with from_node: l.node_id }
+          announce_consumed(h, l, List.length(frame) + 4)
+          -- The delivery's origin rides the mailbox node of whatever the
+          -- route sends (DD step-6 follow-up 1): an actor that later drops
+          -- the message (a hot deploy changed its message type) answers
+          -- DELIVERY_FAILED through `delivery_failed_watch`'s hook, on
+          -- this link's control writer. Set around the route only: the
+          -- route runs to completion in this task's turn.
+          delivery_origin_set(l.cw, d.seq)
+          let outcome = if d.to_creation != creation do
+            Err("stale creation " ++ int_to_string(d.to_creation) ++ ", node is at " ++ int_to_string(creation))
+          else deliver_local(h, d) end
+          delivery_origin_clear()
+          match outcome do
+            Ok(_) -> ()
+            Err(reason) -> discard(send(pid_of_int(l.cw), CtlWrite(NodeSend.encode_failed(d.seq, reason))))
+          end
+      end
+    else ()
+    end
+  end
+
+  -- ── moving to a new code epoch ─────────────────────────────────────────
+  -- A task runs the code of the epoch it was spawned in and never advances
+  -- (plan II.4.3). The node's long-lived tasks -- each link's two readers,
+  -- the ticker, the acceptor -- would keep the epoch of the link's forming
+  -- (or of the node's start) for good: a reader would route every later
+  -- delivery through that epoch's code, and its `send`s stamp the message
+  -- with that epoch, so after a deploy that changes an actor's message type
+  -- a delivery from a sender already on the new format went through
+  -- migrate_msg or was dropped; and the old epoch stayed pinned. So each of
+  -- them, once it finds its epoch draining (`epoch_draining()`: true after a
+  -- deploy until nothing pins the old epoch), hands its work to a task the
+  -- node actor spawns (MoveReader/MoveTicker/MoveAcceptor): that actor has
+  -- passed its marker, so the task runs the new code. Topology's placement
+  -- loop moves the same way.
+  --
+  -- A reader checks after it reads a frame and BEFORE routing it, and hands
+  -- over that frame and the bytes it read past it: the new reader routes
+  -- the frame first, so order is kept and nothing is read twice (the MAC
+  -- state is the fd's, not the task's). A reader of a quiet connection moves
+  -- at its next frame (a control connection carries SWIM every period), the
+  -- acceptor at its next connection, the ticker within a tick.
+  --
+  -- A drain can also cover the CURRENT epoch (`SessionNode.drain_epochs`,
+  -- Topology's SIGTERM drain): a moved task is then still draining. It does
+  -- not move again before [not_before] (move_interval_ms() after it was
+  -- spawned), which bounds that to one move per task per interval, and still
+  -- lets a task moved just before a second deploy follow it.
+
+  pfn move_interval_ms() : Int do 1000 end
+
+  -- Read [fd]'s frames, handing each to [on_frame], until the connection
+  -- ends (None) or this task's epoch is draining at or after [not_before]:
+  -- then Some((frame, rest)), the frame just read (not yet handled) and the
+  -- bytes read past it.
+  pfn read_link(fd : Int, buf : List(Int), not_before : Int, on_frame : Int -> List(Int) -> ())
+      : Option((List(Int), List(Int))) do
+    match NetKernel.recv_frame(fd, buf) do
+      Err(_) -> None
+      Ok((frame, rest)) ->
+        if epoch_draining() && unix_time_ms() >= not_before do Some((frame, rest))
+        else
+          on_frame(PeerReader.tag_of(frame), frame)
+          read_link(fd, rest, not_before, on_frame)
+        end
+    end
   end
 
   -- The actor loop dropped a remote delivery it had already accepted (a hot
@@ -2005,7 +2121,8 @@ mod ClusterNode do
     end
   end
 
-  pfn accept_loop(node, h : CnHandle, cfg : CnConfig, me : NodeIdentity.Identity, listen_fd : Int, meta : Vault(Int)) : Int do
+  pfn accept_loop(node, h : CnHandle, cfg : CnConfig, me : NodeIdentity.Identity, listen_fd : Int, meta : Vault(Int),
+                  not_before : Int) : Int do
     match tcp_accept(listen_fd) do
       Err(_) -> 0
       Ok(fd) ->
@@ -2015,18 +2132,26 @@ mod ClusterNode do
           0
         else
           let _ = task_spawn(fn _ -> handshake_in(node, h, cfg, me, fd))
-          accept_loop(node, h, cfg, me, listen_fd, meta)
+          if epoch_draining() && unix_time_ms() >= not_before do
+            -- Move to the new code epoch (see above); the listen socket stays open.
+            send(node, MoveAcceptor())
+            0
+          else accept_loop(node, h, cfg, me, listen_fd, meta, not_before) end
         end
     end
   end
 
-  pfn tick_loop(node, tick_ms : Int, meta : Vault(Int)) : Int do
+  pfn tick_loop(node, tick_ms : Int, meta : Vault(Int), not_before : Int) : Int do
     sleep_ms(tick_ms)
     if Vault.get(meta, "stopped") != None do
       0
     else
       send(node, Tick(unix_time_ms()))
-      tick_loop(node, tick_ms, meta)
+      if epoch_draining() && unix_time_ms() >= not_before do
+        -- Move to the new code epoch (see above).
+        send(node, MoveTicker())
+        0
+      else tick_loop(node, tick_ms, meta, not_before) end
     end
   end
 
@@ -2568,8 +2693,8 @@ mod ClusterNode do
         send(node, Boot(st0, h))
         let me = NodeIdentity.make(cfg.name, "pk-" ++ cfg.name, cfg.creation)
         let meta = h.meta
-        let _ = task_spawn(fn _ -> accept_loop(node, h, cfg, me, listen_fd, meta))
-        let _ = task_spawn(fn _ -> tick_loop(node, cfg.tick_ms, meta))
+        let _ = task_spawn(fn _ -> accept_loop(node, h, cfg, me, listen_fd, meta, 0))
+        let _ = task_spawn(fn _ -> tick_loop(node, cfg.tick_ms, meta, 0))
         -- Frames that fail their MAC on one of this node's links: counted
         -- and reported by peer (the hook is process-wide; other nodes'
         -- fds are not in our links).

@@ -1,0 +1,57 @@
+-- Scenario "hcr_remote_msg_epoch", node-a: the SENDER. It sends node-b's
+-- sink one message in the version-1 format (one byte), which forms the link
+-- and its reader tasks before any deploy; then, once scenario.sh has
+-- deployed version 2 to node-b, one in the version-2 format (the value and
+-- the sender's version), as a sender already on the new format would. Not
+-- hot-reloaded itself: the format is all that matters here. See scenario.sh.
+mod RemoteEpochA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  pfn sink(h : Cap(ClusterNode.Live), left : Int) : GlobalPid.Pid do
+    match ClusterNode.lookup(h, "sink") do
+      Some(p) -> p
+      None ->
+        if left <= 0 do panic("node-a: never saw node-b's sink") else
+          sleep_ms(50)
+          sink(h, left - 50)
+        end
+    end
+  end
+
+  pfn send_note(h : Cap(ClusterNode.Live), to : GlobalPid.Pid, payload : List(Int), what : String) : () do
+    match ClusterNode.send_msg(h, to, "Note", payload, NodeQueue.DropNew) do
+      Ok(_) -> println("node-a: sent " ++ what)
+      Err(_) -> println("node-a: could not send " ++ what)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_B"))
+    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Cons(seed, Nil), "epoch-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let to = sink(h, 30000)
+        send_note(h, to, [1], "1 in the version-1 format")
+        wait_file(Env.require("DEPLOYED_FILE"))
+        send_note(h, to, [7, 2], "7 in the version-2 format")
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        ClusterNode.stop(h)
+    end
+  end
+end

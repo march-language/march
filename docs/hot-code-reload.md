@@ -284,6 +284,17 @@ tag, so an actor built from a newer or older version of a message type converts 
 its `migrate_msg` or refuses it with `DELIVERY_FAILED` instead of misdecoding it
 ([Clustering]({{ site.baseurl }}/docs/clustering/)).
 
+A cluster node's own long-lived tasks follow a deploy too. Each link has a reader task
+that routes every remote delivery to its local actor, and a task keeps the epoch it
+started at. So a reader started before the deploy would route later deliveries through
+the old code and stamp them with the old epoch, and an actor whose message type changed
+would convert or drop a message the peer had already sent in the new format. Instead, a
+reader that finds its epoch draining hands its connection, at the next frame it reads, to
+a new reader started on the new code, and that reader delivers the frame. The node's
+ticker and acceptor move the same way, so a cluster node does not keep the old epoch
+pinned. A connection with no traffic moves at its next frame; the acceptor at its next
+inbound connection.
+
 Two limits for now. After a deploy, `Topology.reoffer` reopens a role through the `open`
 function the old code built, which still runs the old code; re-offer from an actor whose
 handler the deploy replaces instead. And a hot patch carries its own copy of the runtime,

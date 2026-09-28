@@ -12,6 +12,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Fixed
+- **A remote message sent after a hot deploy now reaches an actor whose message type
+  the deploy changed.** Each cluster link's reader task kept the code of the moment
+  the link formed. So a message from a peer already on the new format was decoded by
+  the old route code, stamped as an old-format message, and then converted with
+  `migrate_msg` or dropped. A link reader now moves to the new code at the next frame
+  it reads, and so do the node's ticker and acceptor, so a cluster node no longer
+  keeps the old code pinned after a deploy.
 - **`ClusterNode.stop` now closes the node's link to itself.** After `stop`,
   `queue_for` on the node's own id still returned a queue, a send to a local
   process was still delivered, and every stopped node left its loopback handler
