@@ -11,10 +11,18 @@
  *   ipn       ipnsort-style: full-run scan, pseudo-median-of-9, branchless Lomuto,
  *             equal-partition on repeated pivot, network+insertion small-sort, heapsort fallback
  *   radix     LSD radix, 8 passes of 8 bits, O(n) scratch (the other real contender for bare i64)
+ *   ipnrs     ipn with Rust's small_sort_network as the n <= 32 base case (rs_small) --
+ *             what the runtime's nsort_small_W ships since 2026-09-28; `ipn` keeps
+ *             the previous net8+insertion base case as the comparison point
+ *             (specs/progress/2026-09-28-native-sort-rust-small-sort-network.md)
  *   radix1    LSD radix with all eight histograms built in ONE read pass and
  *             trivial digits skipped; measured as a second algorithm above a
  *             size threshold and not adopted (`nsb sweep`;
  *             specs/progress/2026-09-28-native-sort-int-radix-threshold.md)
+ *
+ * Modes: (none) the full table; `quick` fewer reps; `small` the two small-sort
+ * base cases alone at every n in 2..32; `sweep` the radix threshold; `f64` the
+ * float width.
  *
  * Every timed run is checked against qsort's output (memcmp), so a wrong sort
  * fails loudly instead of winning the benchmark.
@@ -145,6 +153,79 @@ static void ipn_small(i64 *v, size_t n) {
     insertion_i64(v, n);
 }
 
+/* ---------- Rust's small_sort_network (core::slice::sort::shared::smallsort) ----------
+ * The candidate replacement for ipn_small
+ * (specs/todos/2026-09-25-native-sort-rust-small-sort-network.md). For n <= 32:
+ * below 18 the whole slice is one region, else each half is. A region is
+ * presorted by an optimal network on its first 13 (45 comparators) or 9 (25)
+ * elements -- or 8 (net8's 19), which Rust does not do: its 8-element region
+ * is pure insertion and measured 5.9x slower than net8 at n = 8 --, then
+ * extended by insertion; two regions are merged branchlessly
+ * from both ends at once into a 32-slot stack buffer and copied back. */
+static inline void sort9_opt(i64 *v) {
+    CSWAP(0,3); CSWAP(1,7); CSWAP(2,5); CSWAP(4,8);
+    CSWAP(0,7); CSWAP(2,4); CSWAP(3,8); CSWAP(5,6);
+    CSWAP(0,2); CSWAP(1,3); CSWAP(4,5); CSWAP(7,8);
+    CSWAP(1,4); CSWAP(3,6); CSWAP(5,7);
+    CSWAP(0,1); CSWAP(2,4); CSWAP(3,5); CSWAP(6,8);
+    CSWAP(2,3); CSWAP(4,5); CSWAP(6,7);
+    CSWAP(1,2); CSWAP(3,4); CSWAP(5,6);
+}
+static inline void sort13_opt(i64 *v) {
+    CSWAP(0,12); CSWAP(1,10); CSWAP(2,9); CSWAP(3,7); CSWAP(5,11); CSWAP(6,8);
+    CSWAP(1,6); CSWAP(2,3); CSWAP(4,11); CSWAP(7,9); CSWAP(8,10);
+    CSWAP(0,4); CSWAP(1,2); CSWAP(3,6); CSWAP(7,8); CSWAP(9,10); CSWAP(11,12);
+    CSWAP(4,6); CSWAP(5,9); CSWAP(8,11); CSWAP(10,12);
+    CSWAP(0,5); CSWAP(3,8); CSWAP(4,7); CSWAP(6,11); CSWAP(9,10);
+    CSWAP(0,1); CSWAP(2,5); CSWAP(6,9); CSWAP(7,8); CSWAP(10,11);
+    CSWAP(1,3); CSWAP(2,4); CSWAP(5,6); CSWAP(9,10);
+    CSWAP(1,2); CSWAP(3,4); CSWAP(5,7); CSWAP(6,8);
+    CSWAP(2,3); CSWAP(4,5); CSWAP(6,7); CSWAP(8,9);
+    CSWAP(3,4); CSWAP(5,6);
+}
+/* insertion sort of v[0..n) given v[0..presorted) is already sorted */
+static inline void insertion_from(i64 *v, size_t n, size_t presorted) {
+    for (size_t i = presorted; i < n; i++) {
+        i64 x = v[i];
+        size_t j = i;
+        while (j > 0 && v[j - 1] > x) { v[j] = v[j - 1]; j--; }
+        v[j] = x;
+    }
+}
+static void rs_small(i64 *v, size_t n) {
+    if (n < 8) { insertion_i64(v, n); return; }   /* as ipn_small: no setup cost */
+    size_t half = n / 2;
+    bool no_merge = n < 18;
+    size_t rlen[2] = { no_merge ? n : half, n - half };
+    i64 *rbase[2] = { v, v + half };
+    for (int r = 0; r < (no_merge ? 1 : 2); r++) {
+        i64 *reg = rbase[r]; size_t len = rlen[r], pre;
+        if (len >= 13) { sort13_opt(reg); pre = 13; }
+        else if (len >= 9) { sort9_opt(reg); pre = 9; }
+        else if (len >= 8) { net8(reg); pre = 8; }   /* not in Rust: see main_small */
+        else pre = 1;
+        insertion_from(reg, len, pre);
+    }
+    if (no_merge) return;
+    /* bidirectional branchless merge of v[0..half) and v[half..n) */
+    i64 buf[32];
+    const i64 *l = v, *rr = v + half, *lr = v + half - 1, *rrr = v + n - 1;
+    i64 *out = buf, *out_rev = buf + n - 1;
+    for (size_t i = 0; i < half; i++) {
+        bool take_l = !(*rr < *l);
+        *out++ = take_l ? *l : *rr;
+        l += take_l; rr += !take_l;
+        bool take_lr = *rrr < *lr;
+        *out_rev-- = take_lr ? *lr : *rrr;
+        lr -= take_lr; rrr -= !take_lr;
+    }
+    if (n & 1) {
+        bool left_nonempty = l <= lr;
+        *out = left_nonempty ? *l : *rr;
+    }
+    memcpy(v, buf, n * sizeof(i64));
+}
+
 static inline size_t median3_idx(const i64 *v, size_t a, size_t b, size_t c) {
     bool ab = v[a] < v[b], ac = v[a] < v[c], bc = v[b] < v[c];
     /* branchless-ish median selection */
@@ -257,6 +338,77 @@ static void sort_ipn(i64 *v, size_t n) {
     ipn_rec(v, n, NULL, (int)(2 * log2_floor(n)));
 }
 
+/* ipn with rs_small as the small-sort base case; otherwise identical. */
+static void ipnrs_rec(i64 *v, size_t n, const i64 *ancestor, int limit) {
+    for (;;) {
+        if (n <= IPN_SMALL) { rs_small(v, n); return; }
+        if (limit == 0) { heapsort_i64(v, n); return; }
+        limit--;
+
+        size_t pi = choose_pivot(v, n);
+        i64 pivot = v[pi];
+
+        /* everything in v is >= *ancestor; a pivot that is not > ancestor is
+         * therefore == ancestor, and so is everything <= it: skip them all */
+        if (ancestor && !(*ancestor < pivot)) {
+            size_t eq = part_le(v, n, pivot);
+            v += eq; n -= eq; ancestor = NULL;
+            continue;
+        }
+
+        swap64(&v[0], &v[pi]);
+        size_t lt = part_lt(v + 1, n - 1, pivot);
+        swap64(&v[0], &v[lt]);          /* pivot now at v[lt] */
+
+        /* pattern-defeating step (pdqsort): a badly unbalanced partition means
+         * the pivot samples hit a pattern (e.g. a periodic input whose period
+         * divides the sample stride). Swap a few elements near the sample
+         * points with xorshift-chosen positions so the next pivot is not
+         * chosen from the same phase. Costs nothing on balanced partitions. */
+        {
+            size_t rn = n - 1 - lt;
+            if (lt < n / 8 || rn < n / 8) {
+                i64 *l = v; size_t ln = lt;
+                if (ln >= 8) {
+                    size_t q = ln / 4;
+                    swap64(&l[0], &l[rng() % ln]); swap64(&l[q], &l[rng() % ln]);
+                    swap64(&l[2 * q], &l[rng() % ln]); swap64(&l[ln - 1], &l[rng() % ln]);
+                }
+                i64 *r = v + lt + 1;
+                if (rn >= 8) {
+                    size_t q = rn / 4;
+                    swap64(&r[0], &r[rng() % rn]); swap64(&r[q], &r[rng() % rn]);
+                    swap64(&r[2 * q], &r[rng() % rn]); swap64(&r[rn - 1], &r[rng() % rn]);
+                }
+            }
+        }
+
+        ipnrs_rec(v, lt, ancestor, limit);
+        /* loop on the right side, pivot is its ancestor */
+        v[lt] = pivot;                   /* keep pivot storage stable for the pointer */
+        ancestor = &v[lt];
+        v += lt + 1; n -= lt + 1;
+    }
+}
+
+static void sort_ipnrs(i64 *v, size_t n) {
+    if (n < 2) return;
+    if (n <= IPN_SMALL) { rs_small(v, n); return; }
+    /* top-level full-run scan */
+    size_t i = 1;
+    if (v[1] < v[0]) {
+        while (i < n && v[i] < v[i - 1]) i++;
+        if (i == n) {
+            for (size_t a = 0, b = n - 1; a < b; a++, b--) swap64(&v[a], &v[b]);
+            return;
+        }
+    } else {
+        while (i < n && !(v[i] < v[i - 1])) i++;
+        if (i == n) return;
+    }
+    ipnrs_rec(v, n, NULL, (int)(2 * log2_floor(n)));
+}
+
 /* ---------- LSD radix, 8 x 8-bit passes ---------- */
 static void sort_radix(i64 *v, size_t n) {
     if (n < 2) return;
@@ -353,6 +505,7 @@ static void gen_equal(i64 *v, size_t n)    { for (size_t i = 0; i < n; i++) v[i]
 typedef void (*sort_fn)(i64 *, size_t);
 static const struct { const char *name; sort_fn f; } SORTS[] = {
     {"qsort", sort_qsort}, {"intro", sort_intro}, {"ipn", sort_ipn}, {"radix", sort_radix},
+    {"ipnrs", sort_ipnrs},
     {"radix1", sort_radix1},
 };
 static const struct { const char *name; gen_fn g; } PATTERNS[] = {
@@ -384,10 +537,40 @@ static int verify_net8(void) {
     return bad;
 }
 
+/* 0-1 principle for rs_small's networks (512 and 8192 inputs), and -- since
+ * rs_small as a whole is not a network (insertion + merge) -- an exhaustive
+ * 0/1 check of the whole routine for every n up to 22, which covers both
+ * the single-region (n < 18) and the two-region merge path. Random inputs
+ * up to 32 are in verify() below via ipnrs and in main_small. */
+static int verify_rs_small(void) {
+    int bad = 0;
+    for (int mask = 0; mask < (1 << 9); mask++) {
+        i64 v[9]; for (int i = 0; i < 9; i++) v[i] = (mask >> i) & 1;
+        sort9_opt(v);
+        for (int i = 1; i < 9; i++) if (v[i - 1] > v[i]) { printf("sort9 FAIL mask=%d\n", mask); bad++; break; }
+    }
+    for (int mask = 0; mask < (1 << 13); mask++) {
+        i64 v[13]; for (int i = 0; i < 13; i++) v[i] = (mask >> i) & 1;
+        sort13_opt(v);
+        for (int i = 1; i < 13; i++) if (v[i - 1] > v[i]) { printf("sort13 FAIL mask=%d\n", mask); bad++; break; }
+    }
+    for (int n = 0; n <= 22; n++) {
+        for (long mask = 0; mask < (1L << n); mask++) {
+            i64 v[32]; int ones = 0;
+            for (int i = 0; i < n; i++) { v[i] = (mask >> i) & 1; ones += (int)v[i]; }
+            rs_small(v, (size_t)n);
+            for (int i = 0; i < n; i++)
+                if (v[i] != (i >= n - ones)) { printf("rs_small FAIL n=%d mask=%ld\n", n, mask); bad++; goto next_n; }
+        }
+    next_n:;
+    }
+    return bad;
+}
+
 /* correctness sweep: every sort vs qsort, sizes 0..300 exhaustive-ish plus 100k */
 static int verify(void) {
-    int bad = verify_net8();
-    size_t sizes[] = {0, 1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 255, 256, 1000, 100000};
+    int bad = verify_net8() + verify_rs_small();
+    size_t sizes[] = {0, 1, 2, 3, 7, 8, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 25, 26, 27, 31, 32, 33, 63, 64, 65, 100, 255, 256, 1000, 100000};
     for (size_t si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
         size_t n = sizes[si];
         i64 *src = malloc((n + 1) * sizeof(i64)), *ref = malloc((n + 1) * sizeof(i64)), *w = malloc((n + 1) * sizeof(i64));
@@ -719,6 +902,45 @@ static int main_f64(bool quick) {
     return 0;
 }
 
+/* `nsb small`: the two small-sort base cases alone, on random input, at every
+ * n in 2..32 (the only sizes they ever see). Each timed batch sorts ~2M
+ * elements as independent n-element arrays; min of 15 batches. */
+static int main_small(void) {
+    int bad = verify_rs_small();
+    printf("small verify: %s\n", bad ? "FAIL" : "ok");
+    if (bad) return 1;
+    size_t total = 2000000;
+    i64 *src = malloc(total * sizeof(i64)), *w = malloc(total * sizeof(i64)), *ref = malloc(total * sizeof(i64));
+    printf("%4s %12s %12s %8s\n", "n", "net8+ins ns", "rust ns", "rust/net8");
+    double sum_a = 0, sum_b = 0;
+    for (size_t n = 2; n <= 32; n++) {
+        size_t cnt = total / n, m = cnt * n;
+        gen_random(src, m);
+        double best[2] = {1e18, 1e18};
+        for (int r = 0; r < 15; r++) {
+            for (int k = 0; k < 2; k++) {
+                int which = (r & 1) ? 1 - k : k;
+                memcpy(w, src, m * sizeof(i64));
+                double t0 = now_ms();
+                if (which == 0) for (size_t i = 0; i < cnt; i++) ipn_small(w + i * n, n);
+                else            for (size_t i = 0; i < cnt; i++) rs_small(w + i * n, n);
+                double t = now_ms() - t0;
+                if (t < best[which]) best[which] = t;
+                if (r == 0) {
+                    if (which == 0) memcpy(ref, w, m * sizeof(i64));
+                    else if (memcmp(ref, w, m * sizeof(i64)) != 0) { printf("MISMATCH small n=%zu\n", n); return 1; }
+                }
+            }
+        }
+        double a = best[0] * 1e6 / (double)cnt, b = best[1] * 1e6 / (double)cnt;
+        sum_a += a; sum_b += b;
+        printf("%4zu %12.1f %12.1f %8.2fx\n", n, a, b, b / a);
+    }
+    printf("sum  %12.1f %12.1f %8.2fx\n", sum_a, sum_b, sum_b / sum_a);
+    free(src); free(w); free(ref);
+    return 0;
+}
+
 /* `nsb sweep`: the radix threshold. For each size, ipn vs radix1 on every
  * pattern that survives ipn's full-run scan (sorted/reversed/equal never
  * reach a sort), min of an adaptive number of reps so each cell takes
@@ -763,6 +985,7 @@ static int main_sweep(void) {
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "small") == 0) return main_small();
     if (argc > 1 && strcmp(argv[1], "sweep") == 0) return main_sweep();
     if (argc > 1 && strcmp(argv[1], "f64") == 0)
         return main_f64(argc > 2 && strcmp(argv[2], "quick") == 0);
@@ -781,7 +1004,7 @@ int main(int argc, char **argv) {
         printf("n=%zu  (min of %d reps, ms)\n", n, reps[si]);
         printf("%-10s", "pattern");
         for (size_t s = 0; s < NS; s++) printf("%10s", SORTS[s].name);
-        printf("   ipn/qsort  ipn/radix\n");
+        printf("   ipn/qsort  ipn/radix  ipnrs/ipn\n");
         for (size_t p = 0; p < NP; p++) {
             PATTERNS[p].g(src, n);
             double best[NS];
@@ -797,7 +1020,7 @@ int main(int argc, char **argv) {
             }
             printf("%-10s", PATTERNS[p].name);
             for (size_t s = 0; s < NS; s++) printf("%10.3f", best[s]);
-            printf("   %8.2fx  %8.2fx\n", best[0] / best[2], best[3] / best[2]);
+            printf("   %8.2fx  %8.2fx  %8.2fx\n", best[0] / best[2], best[3] / best[2], best[4] / best[2]);
         }
         printf("\n");
         free(src); free(w);

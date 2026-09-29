@@ -12,6 +12,15 @@
 
 ; Keywords — imports and capabilities
 ["import" "alias" "needs" "as" "only" "except"] @keyword
+
+; Keywords — declarations and actor / protocol bodies added with the
+; 2026-09-28 grammar sync
+["derive" "satisfy" "for" "resource" "transitions" "via" "app" "on_start"
+ "on_stop" "opaque" "always_linear" "tag" "requires" "state" "init" "on"
+ "mailbox" "supervise" "strategy" "max_restarts" "within" "backoff" "restart"
+ "shutdown" "choose" "by" "role" "may" "or" "in" "with"] @keyword
+(attribute "@" @attribute)
+(attribute (identifier) @attribute)
 (capability_declaration) @keyword
 
 ; Refinement types — the predicate's `_` stands for the refined value
@@ -77,7 +86,7 @@
 (actor_def name: (type_identifier) @type)
 (interface_def name: (type_identifier) @type)
 (type_def name: (type_identifier) @type)
-(impl_def interface: (type_identifier) @type)
+(impl_def interface: (module_path (type_identifier) @type .))
 (sig_def name: (type_identifier) @type)
 (protocol_def name: (type_identifier) @type)
 

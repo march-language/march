@@ -11039,10 +11039,22 @@ int64_t native_int_arr_max(void *arr) {
  *   (Knuth 5.3.4). Verified by the 0-1 principle (256 cases) in
  *   bench/c/native_sort_bench.c.
  *
- * nsort_small_W — network each aligned block of 8, then one insertion pass.
- *   The insertion pass is near-linear afterwards because every element is
- *   already within its own block, which is the point of doing the network
- *   first.
+ * nsort_small_W — the n <= 32 base case, Rust's small_sort_network layout
+ *   (core::slice::sort::shared::smallsort): below 18 elements one region,
+ *   otherwise each half is a region; nsort_region_W presorts a region's first
+ *   13 / 9 / 8 elements with an optimal network (nsort_net13_W, 45
+ *   comparators; nsort_net9_W, 25; nsort_net8_W, 19 -- the last is not in
+ *   Rust, whose 8-element region is plain insertion and measured 5.9x slower
+ *   than net8 at n = 8) and extends it by insertion; the two halves are then
+ *   merged branchlessly from both ends at once into a 32-slot stack buffer
+ *   and copied back. Below 8 it is plain insertion. Replaced "net8 on every
+ *   aligned block, then one insertion pass" on 2026-09-28: 2.1x faster summed
+ *   over n = 2..32 on random input, and 0.74-0.80x of the old time for a
+ *   whole random sort at n = 1k / 100k / 5M, with no ordered pattern slower
+ *   (bench/c/native_sort_bench.c `small` and default modes; numbers in
+ *   specs/progress/2026-09-28-native-sort-rust-small-sort-network.md).
+ *   net9 and net13 are verified by the 0-1 principle (512 and 8192 inputs),
+ *   and the whole routine by every 0/1 input for n <= 22, in that harness.
  *
  * nsort_pivot_W — pseudo-median of 9 at stride n/8 for n >= 64, median of 3
  *   below.
@@ -11139,10 +11151,73 @@ static void nsort_insertion_##W(T *v, int64_t n) {                             \
     }                                                                          \
 }                                                                              \
                                                                                \
+static inline void nsort_net9_##W(T *v) {                                      \
+    NSORT_CSWAP_T(T, 0, 3); NSORT_CSWAP_T(T, 1, 7);                            \
+    NSORT_CSWAP_T(T, 2, 5); NSORT_CSWAP_T(T, 4, 8);                            \
+    NSORT_CSWAP_T(T, 0, 7); NSORT_CSWAP_T(T, 2, 4);                            \
+    NSORT_CSWAP_T(T, 3, 8); NSORT_CSWAP_T(T, 5, 6);                            \
+    NSORT_CSWAP_T(T, 0, 2); NSORT_CSWAP_T(T, 1, 3);                            \
+    NSORT_CSWAP_T(T, 4, 5); NSORT_CSWAP_T(T, 7, 8);                            \
+    NSORT_CSWAP_T(T, 1, 4); NSORT_CSWAP_T(T, 3, 6); NSORT_CSWAP_T(T, 5, 7);    \
+    NSORT_CSWAP_T(T, 0, 1); NSORT_CSWAP_T(T, 2, 4);                            \
+    NSORT_CSWAP_T(T, 3, 5); NSORT_CSWAP_T(T, 6, 8);                            \
+    NSORT_CSWAP_T(T, 2, 3); NSORT_CSWAP_T(T, 4, 5); NSORT_CSWAP_T(T, 6, 7);    \
+    NSORT_CSWAP_T(T, 1, 2); NSORT_CSWAP_T(T, 3, 4); NSORT_CSWAP_T(T, 5, 6);    \
+}                                                                              \
+                                                                               \
+static inline void nsort_net13_##W(T *v) {                                     \
+    NSORT_CSWAP_T(T, 0, 12); NSORT_CSWAP_T(T, 1, 10); NSORT_CSWAP_T(T, 2, 9);  \
+    NSORT_CSWAP_T(T, 3, 7);  NSORT_CSWAP_T(T, 5, 11); NSORT_CSWAP_T(T, 6, 8);  \
+    NSORT_CSWAP_T(T, 1, 6);  NSORT_CSWAP_T(T, 2, 3);  NSORT_CSWAP_T(T, 4, 11); \
+    NSORT_CSWAP_T(T, 7, 9);  NSORT_CSWAP_T(T, 8, 10);                          \
+    NSORT_CSWAP_T(T, 0, 4);  NSORT_CSWAP_T(T, 1, 2);  NSORT_CSWAP_T(T, 3, 6);  \
+    NSORT_CSWAP_T(T, 7, 8);  NSORT_CSWAP_T(T, 9, 10); NSORT_CSWAP_T(T, 11, 12);\
+    NSORT_CSWAP_T(T, 4, 6);  NSORT_CSWAP_T(T, 5, 9);  NSORT_CSWAP_T(T, 8, 11); \
+    NSORT_CSWAP_T(T, 10, 12);                                                  \
+    NSORT_CSWAP_T(T, 0, 5);  NSORT_CSWAP_T(T, 3, 8);  NSORT_CSWAP_T(T, 4, 7);  \
+    NSORT_CSWAP_T(T, 6, 11); NSORT_CSWAP_T(T, 9, 10);                          \
+    NSORT_CSWAP_T(T, 0, 1);  NSORT_CSWAP_T(T, 2, 5);  NSORT_CSWAP_T(T, 6, 9);  \
+    NSORT_CSWAP_T(T, 7, 8);  NSORT_CSWAP_T(T, 10, 11);                         \
+    NSORT_CSWAP_T(T, 1, 3);  NSORT_CSWAP_T(T, 2, 4);  NSORT_CSWAP_T(T, 5, 6);  \
+    NSORT_CSWAP_T(T, 9, 10);                                                   \
+    NSORT_CSWAP_T(T, 1, 2);  NSORT_CSWAP_T(T, 3, 4);  NSORT_CSWAP_T(T, 5, 7);  \
+    NSORT_CSWAP_T(T, 6, 8);                                                    \
+    NSORT_CSWAP_T(T, 2, 3);  NSORT_CSWAP_T(T, 4, 5);  NSORT_CSWAP_T(T, 6, 7);  \
+    NSORT_CSWAP_T(T, 8, 9);                                                    \
+    NSORT_CSWAP_T(T, 3, 4);  NSORT_CSWAP_T(T, 5, 6);                           \
+}                                                                              \
+                                                                               \
+static inline void nsort_region_##W(T *v, int64_t n) {                         \
+    int64_t pre = 1;                                                           \
+    if (n >= 13)     { nsort_net13_##W(v); pre = 13; }                         \
+    else if (n >= 9) { nsort_net9_##W(v);  pre = 9;  }                         \
+    else if (n >= 8) { nsort_net8_##W(v);  pre = 8;  }                         \
+    for (int64_t i = pre; i < n; i++) {                                        \
+        T x = v[i]; int64_t j = i;                                             \
+        while (j > 0 && v[j - 1] > x) { v[j] = v[j - 1]; j--; }                \
+        v[j] = x;                                                              \
+    }                                                                          \
+}                                                                              \
+                                                                               \
 static void nsort_small_##W(T *v, int64_t n) {                                 \
-    int64_t i = 0;                                                             \
-    for (; i + 8 <= n; i += 8) nsort_net8_##W(v + i);                          \
-    nsort_insertion_##W(v, n);                                                 \
+    if (n < 8) { nsort_insertion_##W(v, n); return; }                          \
+    if (n < 18) { nsort_region_##W(v, n); return; }                            \
+    int64_t half = n / 2;                                                      \
+    nsort_region_##W(v, half);                                                 \
+    nsort_region_##W(v + half, n - half);                                      \
+    T buf[32];                                                                 \
+    const T *l = v, *r = v + half, *lr = v + half - 1, *rr = v + n - 1;        \
+    T *out = buf, *out_rev = buf + n - 1;                                      \
+    for (int64_t i = 0; i < half; i++) {                                       \
+        int take_l = !(*r < *l);                                               \
+        *out++ = take_l ? *l : *r;                                             \
+        l += take_l; r += !take_l;                                             \
+        int take_lr = *rr < *lr;                                               \
+        *out_rev-- = take_lr ? *lr : *rr;                                      \
+        lr -= take_lr; rr -= !take_lr;                                         \
+    }                                                                          \
+    if (n & 1) *out = (l <= lr) ? *l : *r;                                     \
+    memcpy(v, buf, (size_t)n * sizeof(T));                                     \
 }                                                                              \
                                                                                \
 static void nsort_heap_##W(T *v, int64_t n) {                                  \
