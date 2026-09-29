@@ -1,0 +1,45 @@
+-- __try_call / __try_call_val report a panicking thunk as Err(message), and
+-- the message now reads the same on both backends: "panic: <msg>" for
+-- panic(msg) and "todo: <msg>" for todo(msg), as the interpreter reports
+-- them and as an uncaught panic prints.  Before 2026-09-28 the compiled
+-- runtime returned the bare "<msg>" (march_panic's fail buffer holds it
+-- without the prefix), so Check's property-failure report read differently
+-- compiled and interpreted.  unreachable() reports the interpreter's
+-- "unreachable: reached unreachable code".
+mod Main do
+  needs IO.Console
+
+  pfn boom(n : Int) : Bool do
+    if n > 2 do panic("boom " ++ int_to_string(n)) else true end
+  end
+
+  pfn show(r : Result(Bool, String)) : String do
+    match r do
+      Ok(b) -> "Ok(" ++ bool_to_string(b) ++ ")"
+      Err(m) -> "Err(" ++ m ++ ")"
+    end
+  end
+
+  pfn show_val(r : Result(String, String)) : String do
+    match r do
+      Ok(s) -> "Ok(" ++ s ++ ")"
+      Err(m) -> "Err(" ++ m ++ ")"
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    println(show(__try_call(fn _ -> boom(1))))
+    println(show(__try_call(fn _ -> boom(3))))
+    println(show_val(__try_call_val(fn _ -> "fine")))
+    println(show_val(__try_call_val(fn _ -> do
+      let _ = boom(7)
+      "unreached"
+    end)))
+    println(show_val(__try_call_val(fn _ -> todo("later"))))
+    -- unreachable() takes no argument; compiled, it used to share
+    -- march_panic_ext(msg) and dereference a missing string (SIGSEGV).
+    println(show_val(__try_call_val(fn _ -> unreachable())))
+    -- Nested: the inner Err is reported, the outer call succeeds.
+    println(show_val(__try_call_val(fn _ -> show(__try_call(fn _ -> boom(9))))))
+  end
+end
