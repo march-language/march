@@ -281,6 +281,16 @@ val lookup_ctor_in_type_unique :
   StrMap.key -> string -> env -> ctor_info option
 val add_ctor :
   string -> ctor_info -> ctor_info list StrMap.t -> ctor_info list StrMap.t
+
+(** Bare-keyed constructors whose parent type is exactly the given name
+    (first info of that type per key, descending key order).  Indexed per
+    [ctors] map value once that value has been queried a few times. *)
+val bare_ctors_of_type :
+  ctor_info list StrMap.t -> string -> (string * ctor_info) list
+
+(** True when some constructor's parent type is the name or ends in
+    ["." ^ name].  Same index as [bare_ctors_of_type]. *)
+val ctors_name_a_variant : ctor_info list StrMap.t -> string -> bool
 val split_qualified : string -> (string * string) option
 val load_module_into_env :
   string -> March_modules.Module_registry.module_exports -> env -> env

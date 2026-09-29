@@ -1,3 +1,66 @@
+# `signal_term_suppress` is back on `runtest` (2026-09-28)
+
+This closes the last open bullet of `specs/todos/2026-07-23-ci-infra-2026-07-23.md`.
+That file is reproduced below and moved here, since it has no open items left.
+
+**What the quarantine saw, re-examined.** Two failure shapes appeared at about 2-5%:
+- TORN output, e.g. `survived termterm handler`;
+- a clean reordering, with `term handler` before `survived term`.
+
+The tear has since been explained and fixed. On 2026-08-21 it was measured
+falling between `march_println`'s two iovecs, which raced another thread's
+`writev`, and `march_stdout_mu` now serializes them
+(`specs/progress/2026-08-21-println-writev-not-atomic-across-threads.md`). The
+quarantine's "pre-write allocator/GC race" guess was superseded by that
+finding, and the same fix brought `node_discovery` back on 2026-09-14.
+
+The reordering is not a bug. `Signal.raise`'s documented contract says delivery
+is asynchronous and the watcher runs "from the next scheduler drain". Any
+scheduler OS thread may perform that drain, so the handler can print before
+`main`'s next line.
+
+**Soak (2026-09-28, macOS arm64, binary run directly, host load 10-21):**
+
+| Binary | Runs | Parallel | Outputs compared | Result |
+|---|---|---|---|---|
+| compiled once | 1000 | 4 | exact | 994 exact; 6 clean reorderings; 0 torn lines; 0 non-zero exits |
+| same binary | 800 | 8 | sorted | 0 mismatches |
+| built by the dune rule | 200 | 4 | exact | 0 mismatches |
+
+**Change (`test/dune`).**
+- The rule's hand-listed runtime file deps, which no longer covered the
+  runtime (for example `march_blake3.c`), are replaced by
+  `(source_tree ../runtime)`.
+- A new `native_signal_term_suppress.sorted.out` target sorts the output, and
+  the diff moves from the `signal_term_suppress_quarantined` alias back to
+  `runtest`. This mirrors `node_discovery`.
+- The diff tolerates the documented reordering. A torn or missing line, or a
+  process killed by the SIGTERM, still fails it. The `.expected` is already in
+  sorted order.
+
+**No quarantined test at all is a new state, and two scripts could not
+handle it.** Both derive the alias set with a `grep` that finds nothing and
+exits 1:
+- `scripts/check-docs.sh` Check E runs under `set -euo pipefail`, so that
+  exit killed the whole lint with no message.
+- The nightly's quarantine step (`.github/workflows/nightly.yml`, bash
+  `-eo pipefail`) also ended before printing its "(none quarantined)"
+  summary.
+
+Both now tolerate the empty set (`|| true`). A copy of the old nightly loop
+exits 1 on today's tree; the patched copy runs to the end. Check E reports
+`ok — 0 quarantine alias(es)`.
+
+The quarantine inventory
+(`specs/todos/2026-07-24-quarantined-tests-coverage-that-is-currently-dark-inventory-2026.md`)
+strikes its last live row. It stays in `specs/todos/` as the list
+`check-docs.sh` Check E compares the dune aliases against, which is now empty
+on both sides.
+
+---
+
+Original file (the one open bullet it still carried):
+
 # CI infra (2026-07-23)
 
 Trimmed 2026-09-09: this file originally carried three bullets. Two were

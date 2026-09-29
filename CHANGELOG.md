@@ -40,6 +40,42 @@ git log is authoritative for exact commits.
   it returned (the handle could never be freed once `read_line`, `write`,
   `kill` or `wait_proc` had used it), and `Process.run`, `Process.env` and
   `Process.set_env` leaked their arguments on every call.
+- **A source-tree `march` no longer builds its runtime from a partial copy of
+  `runtime/`.** If a build had copied only some runtime C files into
+  `_build/default/runtime` (the vault scaling benchmarks do), the compiler used
+  that directory anyway and left the missing files out of the runtime. The REPL
+  then couldn't load its cached stdlib and recompiled it (~25 s) on every
+  start. The compiler now uses a runtime directory only when it holds every
+  core file listed in its `sources.list`.
+
+- **`run_until_idle()` no longer returns while actors are still exchanging
+  messages.** Its idle check read processes one at a time, so a message
+  sent between two reads went unseen. About 1 run in 100 of a busy
+  two-actor ping-pong returned early (compiled, 14 scheduler threads). The
+  check now retries if any message was sent or process spawned while it ran.
+  `specs/lang/actors.md` states what `run_until_idle()` does and does not
+  wait for.
+- **`march --check` of a module with several `@[endpoints]` protocols is fast
+  again.** Each protocol made every later one roughly twice as slow to typecheck:
+  one module with six protocols took about 9 minutes. It now takes under a
+  second, and time grows roughly linearly with the number of protocols (16
+  protocols: 1.6 s). Diagnostics are unchanged.
+- **A path-scoped `needs IO.FileRead("...")` now covers `csv_open`.** A
+  literal path passed to `csv_open` was never checked against the declared
+  scope, so `csv_open("/etc/passwd", ...)` compiled under
+  `needs IO.FileRead("/srv/data")`. It is now rejected like `file_read`.
+- **`Process.spawn_async` no longer hands a running process's slot to a new
+  one.** Compiled code kept live processes in a fixed table of 64 with no
+  lock. The 65th spawn silently closed the first process's pipes, so a
+  `LiveProcess` held that long read from and wrote to nothing or to another
+  child, and two threads spawning at once could take the same slot. The
+  table is now locked and grows as needed. A handle used after `wait_proc` no
+  longer reaches whichever process took its slot next. Interpreted,
+  `wait_proc` on a child that reads its stdin (such as `cat`) no longer
+  hangs.
+- **`get_actor_field` no longer keeps the actor it reads alive forever.**
+  In compiled code each call leaked one reference to the actor's record, so
+  an actor that was ever probed with `get_actor_field` was never freed.
 - **A caught panic reads the same compiled and interpreted, and compiled
   `unreachable()` no longer crashes.** When a thunk passed to
   `__try_call` / `__try_call_val` panicked (the call behind `Check`'s
@@ -605,6 +641,13 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **Functions that only read a data structure no longer take ownership of it
+  because of a number inside it.** A function reading a `Node(Int, Tree, Tree)`
+  or a `List(Int)` was treated as consuming the whole value as soon as it used one
+  of the numbers, so every call on a shared value paid a reference-count update
+  per node. Summing a shared binary tree of depth 16 300 times now takes 0.11 s
+  instead of 0.30 s; reading a shared 10k-element list with `List.sum_int`,
+  `fold_left` and `nth` is 20% faster.
 - **The generated hosted event API's `cancel` takes the session: `cancel(s, parked)`.**
   The epoch hold a hosting actor takes for a session is now the transport's, taken at
   `register` and released at `close` for both hosting patterns (before, only the

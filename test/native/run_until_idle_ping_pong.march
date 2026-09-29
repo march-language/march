@@ -1,0 +1,38 @@
+-- run_until_idle() must not return while two actors are still bouncing a
+-- message (specs/progress/2026-09-28-run-until-idle-returned-mid-ping-pong.md).
+-- Before the fix about 1% of runs at MARCH_NUM_SCHEDULERS=14 under load
+-- printed a short total: wait_idle's proc-by-proc scan read every proc idle
+-- while the ball was in flight.
+mod PingIdle do
+  needs IO.Console
+  needs IO.Spawn
+
+  actor Player do
+    state { hits : Int }
+    init  { hits: 0 }
+    on Ball(n : Int, me, other) do
+      if n > 1 do
+        send(other, Ball(n - 1, other, me))
+        { hits: state.hits + 1 }
+      else
+        { hits: state.hits + 1 }
+      end
+    end
+  end
+
+  fn hits(p) : Int do
+    match get_actor_field(p, "hits") do
+      Some(n) -> n
+      None -> -1
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let n = 200000
+    let a = spawn(Player)
+    let b = spawn(Player)
+    send(a, Ball(n, a, b))
+    run_until_idle()
+    println("total " ++ int_to_string(hits(a) + hits(b)))
+  end
+end

@@ -281,6 +281,31 @@ mod ScopeTwoPath do
 end
 |}
 
+(* csv_open(path, delimiter, mode) reads a FILE: its first argument is a path
+   String (the mode is the atom), and it is declared IO.FileRead.  It was
+   missing from [path_arg_builtins], so a scoped `needs IO.FileRead(...)`
+   never checked it: this program compiled clean.  The accept case below is
+   the control that the rejection is about the path, not about csv_open. *)
+let csv_open_src path =
+  Printf.sprintf {|
+mod ScopeCsv do
+  needs IO.Console
+  needs IO.FileRead("/srv/data")
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
+    match csv_open("%s", ",", :simple) do
+      Ok(_) -> println("o")
+      Err(_) -> println("e")
+    end
+  end
+end
+|} path
+
+let test_csv_open_outside_scope_is_rejected () =
+  rejects "csv_open outside the declared scope" (csv_open_src "/etc/passwd")
+
+let test_csv_open_inside_scope_is_accepted () =
+  accepts "csv_open inside the declared scope" (csv_open_src "/srv/data/users.csv")
+
 (* ── The scope itself must be meaningful ─────────────────────────────
    A scope that cannot constrain anything used to parse and be silently
    ignored, which reads as enforcement that is not there. Asserted on the
@@ -354,4 +379,8 @@ let tests =
         test_parent_capability_scope_applies;
       Alcotest.test_case "second path argument is checked" `Slow
         test_second_path_argument_is_checked;
+      Alcotest.test_case "csv_open outside scope is rejected" `Slow
+        test_csv_open_outside_scope_is_rejected;
+      Alcotest.test_case "csv_open inside scope is accepted" `Slow
+        test_csv_open_inside_scope_is_accepted;
     ]
