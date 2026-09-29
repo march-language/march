@@ -40,6 +40,24 @@ git log is authoritative for exact commits.
   on SIGTERM, cutting sessions it had started with `initiate_R` (from a hook or a role
   body) or `cluster_R`. The drain now waits for those sessions too, under the same
   soft and hard deadlines.
+- **Logger appenders work in compiled programs.** Compiled,
+  `Logger.add_appender` did nothing, `Logger.list_appenders()` was always
+  empty, and every message went to the stderr fallback line. Appenders now
+  receive each `LogEntry` exactly as they do interpreted, newest
+  registration first. An atom field (`Logger.LAtom(:closed)`) now logs as
+  `:closed` rather than `null`.
+- **Compiled programs no longer leak memory on every subprocess call.** Each
+  `Process.spawn_async` leaked its argument list and the `LiveProcess` handle
+  it returned (the handle could never be freed once `read_line`, `write`,
+  `kill` or `wait_proc` had used it), and `Process.run`, `Process.env` and
+  `Process.set_env` leaked their arguments on every call.
+- **Editor highlighting (tree-sitter) now covers current March syntax.** The
+  tree-sitter grammar that Zed highlights from failed to parse most real files
+  (713 of 919 in the repo), so they rendered as one long error region. It now
+  parses every file the compiler accepts, including record literals, multi-line
+  match arms and lambdas, patterns, actors, protocols and declarations added
+  since March. Zed's highlight and outline queries, broken since August, compile
+  again. A CI job keeps the grammar in step with the compiler.
 - **A source-tree `march` no longer builds its runtime from a partial copy of
   `runtime/`.** If a build had copied only some runtime C files into
   `_build/default/runtime` (the vault scaling benchmarks do), the compiler used
@@ -122,7 +140,6 @@ git log is authoritative for exact commits.
   reach the right actor. Actors whose names are unique keep their names, so
   hot-code-reload manifests are unchanged. Two actors of one name in the
   same module are now an error.
-
 - **Actors that message each other back and forth are up to 2.6x faster.** With
   several scheduler threads, sending to an actor that was just going to sleep could
   make the sender wait a millisecond or more before delivering. A two-actor
@@ -362,6 +379,16 @@ git log is authoritative for exact commits.
 - **Compiled `dns_resolve` no longer leaks its host argument** (one String per
   call). **Compiled `uuid_v7_at` with a negative timestamp now errors** as the
   interpreter does, instead of returning a UUID with a garbage timestamp.
+- **Compiled code no longer reads freed memory through a record field after
+  handing the record to a function.** Reading a field into a local
+  (`let x = r.a`), then passing `r` to a function that takes ownership of it,
+  then using `x`, read a string the callee had already released: garbage
+  output, or another value's bytes. The interpreter was unaffected.
+- **A nested module's call to a sibling module now links when compiled.** Inside
+  `mod Outer do mod A ... end mod B do ... A.f(x) ... end end`, the call `A.f`
+  ran interpreted but a compiled program failed to link (`A.f` undefined),
+  whenever `Outer` was itself nested in the entry module, or was a library
+  (`MARCH_LIB_PATH`) or stdlib module.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
@@ -641,6 +668,12 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **`NativeArray.sort_int`, `sort_float`, `sort_i32` and `sort_f32` sort random
+  data 17-26% faster.** The step that finishes off short runs of up to 32
+  elements now uses larger sorting networks and a merge (the layout Rust's
+  standard library uses) and is twice as fast on its own. Sorting 1,000,000
+  random integers went from 13.0 ms to 10.8 ms; already-ordered and
+  few-distinct-value inputs are unchanged.
 - **Functions that only read a data structure no longer take ownership of it
   because of a number inside it.** A function reading a `Node(Int, Tree, Tree)`
   or a `List(Int)` was treated as consuming the whole value as soon as it used one

@@ -1,0 +1,646 @@
+mod ControlPeers do
+  -- Distributed-deploys step 12a: the control plane's protocols, Ctl and
+  -- CtlFetch (declared below, over stdlib/control.march's types and executor),
+  -- over the in-process transport, one process, no sockets.
+  --
+  --   * a scripted Control against the real Agent, and a scripted Agent
+  --     against the real Control: the generated peers (D36) check every step
+  --     against the protocol's projection;
+  --   * a whole rollout over Ctl sessions against four simulated nodes, with
+  --     agents reconnecting every round (the discovery model of design
+  --     section 7) and the leader replaced by a fresh one mid-rollout; every
+  --     node takes each of its steps once, none twice and none skipped;
+  --   * a refused order halting the rollout over the same sessions;
+  --   * chaos Control and chaos Agent peers against the real roles, and
+  --     CtlFetch real, scripted and chaos, printing only aggregates so the
+  --     golden does not pin `Gen`'s stream.
+  --
+  -- The Agent's node side (the reload server, the CAS) is simulated behind
+  -- `Control.AgentOps`, the seam the `reload_request` builtin (design
+  -- section 6, not built yet) plugs into.
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.FileWrite
+  needs Session.Live
+
+  -- ── the protocols (design section 7) ─────────────────────────────────────
+  --
+  -- The wire records, with their codecs, belong with the protocol, not in the
+  -- stdlib: a `derive Json` in an eagerly loaded module puts its `from_json`
+  -- in scope for every program and makes a user's bare `from_json` call
+  -- ambiguous. The roles convert to and from Control's own records at the
+  -- boundary (`wire_*` / `*_of`). Each carries `wire`, the format's version
+  -- (1), which also keeps its field set distinct from Control's record: the
+  -- interpreter's `from_json` picks a record type by its field names.
+  type WireReport = {
+    wire : Int, node : String, seq : Int, versions : String, topology : String,
+    drained : Int, healthy : Bool, failed_seq : Int, failed_step : Int, failed_why : String
+  }
+  derive Json for WireReport
+  type WireOrder = {
+    wire : Int, seq : Int, release : String, step : Int, node : String, action : String,
+    want : String, artifacts : String, lines : String
+  }
+  derive Json for WireOrder
+  type WireResult = { wire : Int, seq : Int, step : Int, node : String, ok : Bool, detail : String }
+  derive Json for WireResult
+  type WireChunk = { wire : Int, offset : Int, data : String, last : Bool }
+  derive Json for WireChunk
+
+  pfn wire_report(r : Control.AgentReport) : WireReport do
+    { wire: 1, node: r.node, seq: r.seq, versions: r.versions, topology: r.topology, drained: r.drained,
+      healthy: r.healthy, failed_seq: r.failed_seq, failed_step: r.failed_step, failed_why: r.failed_why }
+  end
+
+  pfn report_of(w : WireReport) : Control.AgentReport do
+    { node: w.node, seq: w.seq, versions: w.versions, topology: w.topology, drained: w.drained,
+      healthy: w.healthy, failed_seq: w.failed_seq, failed_step: w.failed_step, failed_why: w.failed_why }
+  end
+
+  pfn wire_order(o : Control.StepOrder) : WireOrder do
+    { wire: 1, seq: o.seq, release: o.release, step: o.step, node: o.node, action: o.action, want: o.want,
+      artifacts: o.artifacts, lines: o.lines }
+  end
+
+  pfn order_of(w : WireOrder) : Control.StepOrder do
+    { seq: w.seq, release: w.release, step: w.step, node: w.node, action: w.action, want: w.want,
+      artifacts: w.artifacts, lines: w.lines }
+  end
+
+  pfn wire_result(r : Control.StepResult) : WireResult do
+    { wire: 1, seq: r.seq, step: r.step, node: r.node, ok: r.ok, detail: r.detail }
+  end
+
+  pfn result_of(w : WireResult) : Control.StepResult do
+    { seq: w.seq, step: w.step, node: w.node, ok: w.ok, detail: w.detail }
+  end
+
+  pfn wire_chunk(c : Control.CtlChunk) : WireChunk do { wire: 1, offset: c.offset, data: c.data, last: c.last } end
+  --
+  -- The canonical declaration of Ctl and CtlFetch, and their role bodies, until
+  -- the wiring puts them in the generated topology `main`: an `@[endpoints]`
+  -- protocol typechecks only at an entry module's top level today, so it
+  -- cannot live in stdlib/control.march
+  -- (specs/todos/2026-09-28-endpoints-protocol-in-nested-module.md). Every
+  -- type and function the roles use is Control's.
+
+  -- The Agent initiates; Control is offered by the leader only, so the offer
+  -- is how an agent finds the leader. Every step is labelled (D25): this is
+  -- the protocol that must evolve across deploys of itself. `observe` carries
+  -- the leader's head seq and `bye` a reason where the design sketch had
+  -- Unit: a value costs nothing, and says why.
+  @[endpoints]
+  protocol Ctl do
+    role Agent needs IO.NetConnect
+    role Control needs IO.NetConnect, IO.FileWrite
+    hello: Agent -> Control : WireReport
+    loop do
+      choose by Control:
+        apply -> Control -> Agent : WireOrder
+                 stepped: Agent -> Control : WireResult
+        observe -> Control -> Agent : Int
+                   report: Agent -> Control : WireReport
+        bye -> Control -> Agent : String
+               stop
+      end
+    end
+  end
+
+  -- A chunked artifact fetch: the Agent names a hash, the leader (or any
+  -- standby) streams it in fixed-size chunks; an unknown hash is one empty
+  -- last chunk.
+  @[endpoints]
+  protocol CtlFetch do
+    role Agent needs IO.NetConnect
+    role Server needs IO.NetConnect
+    want: Agent -> Server : String
+    loop do
+      choose by Server:
+        chunk -> Server -> Agent : WireChunk
+        fin -> Server -> Agent : WireChunk
+               stop
+      end
+    end
+  end
+
+  -- The Agent role of `Ctl`: say hello with a report, then answer every order and poll until the leader says bye.
+  pfn agent_role(s : Cap(Session.Live), _nc : Cap(IO.NetConnect), st : Ctl_Agent.S_send_Hello, ops : Control.AgentOps) : Ctl_Agent.Yield do
+    agent_loop(s, Ctl_Agent.send_Hello(s, st, wire_report(ops.report())), ops)
+  end
+
+  pfn agent_loop(s : Cap(Session.Live), st : Ctl_Agent.S_offer_apply_observe_bye, ops : Control.AgentOps) : Ctl_Agent.Yield do
+    Ctl_Agent.offer_apply_observe_bye(s, st,
+      fn (o, st1) -> agent_loop(s, Ctl_Agent.send_Stepped(s, st1, wire_result(Control.agent_apply(ops, order_of(o)))), ops),
+      fn (_head, st1) -> agent_loop(s, Ctl_Agent.send_Report(s, st1, wire_report(ops.report())), ops),
+      fn (_why, st1) -> Ctl_Agent.close(s, st1))
+  end
+
+  -- The Control role of `Ctl` for one agent's session, driven by [ops] (the leader's executor).
+  pfn control_role(s : Cap(Session.Live), _nc : Cap(IO.NetConnect), _fw : Cap(IO.FileWrite), st : Ctl_Control.S_recv_Hello, ops : Control.ControlOps) : Ctl_Control.Yield do
+    Ctl_Control.recv_Hello(s, st, fn (rep, st1) ->
+      ops.report(report_of(rep))
+      control_loop(s, st1, rep.node, ops))
+  end
+
+  pfn control_loop(s : Cap(Session.Live), st : Ctl_Control.S_choose_apply_observe_bye, node : String, ops : Control.ControlOps) : Ctl_Control.Yield do
+    match ops.next(node) do
+      Control.NextOrder(o) ->
+        Ctl_Control.recv_Stepped(s, Ctl_Control.choose_apply(s, st, wire_order(o)), fn (res, st1) ->
+          ops.stepped(result_of(res))
+          control_loop(s, st1, node, ops))
+      Control.NextPoll ->
+        Ctl_Control.recv_Report(s, Ctl_Control.choose_observe(s, st, ops.head()), fn (rep, st1) ->
+          ops.report(report_of(rep))
+          control_loop(s, st1, node, ops))
+      Control.NextBye(why) -> Ctl_Control.close(s, Ctl_Control.choose_bye(s, st, why))
+    end
+  end
+
+  -- The Server role of `CtlFetch`: [lookup] a hash's bytes as hex (None: unknown, one empty last chunk), sent in chunks of [size].
+  pfn fetch_server(s : Cap(Session.Live), _nc : Cap(IO.NetConnect), st : CtlFetch_Server.S_recv_Want, lookup : String -> Option(String), size : Int) : CtlFetch_Server.Yield do
+    CtlFetch_Server.recv_Want(s, st, fn (h, st1) ->
+      match lookup(h) do
+        Some(hex) -> send_chunks(s, st1, List.map(Control.chunks(hex, size), fn c -> wire_chunk(c)))
+        None -> CtlFetch_Server.close(s, CtlFetch_Server.choose_fin(s, st1, { wire: 1, offset: 0, data: "", last: true }))
+      end)
+  end
+
+  pfn send_chunks(s : Cap(Session.Live), st : CtlFetch_Server.S_choose_chunk_fin, cs : List(WireChunk)) : CtlFetch_Server.Yield do
+    match cs do
+      Cons(c, Nil) -> CtlFetch_Server.close(s, CtlFetch_Server.choose_fin(s, st, c))
+      Cons(c, rest) -> send_chunks(s, CtlFetch_Server.choose_chunk(s, st, c), rest)
+      Nil -> CtlFetch_Server.close(s, CtlFetch_Server.choose_fin(s, st, { wire: 1, offset: 0, data: "", last: true }))
+    end
+  end
+
+  -- The Agent role of `CtlFetch`: ask for [hash] and hand the reassembled hex ("" for an unknown hash) to [done].
+  pfn fetch_agent(s : Cap(Session.Live), _nc : Cap(IO.NetConnect), st : CtlFetch_Agent.S_send_Want, hash : String, done : String -> ()) : CtlFetch_Agent.Yield do
+    fetch_loop(s, CtlFetch_Agent.send_Want(s, st, hash), Nil, done)
+  end
+
+  pfn fetch_loop(s : Cap(Session.Live), st : CtlFetch_Agent.S_offer_chunk_fin, acc : List(String), done : String -> ()) : CtlFetch_Agent.Yield do
+    CtlFetch_Agent.offer_chunk_fin(s, st,
+      fn (c, st1) -> fetch_loop(s, st1, Cons(c.data, acc), done),
+      fn (c, st1) -> fetch_done(s, st1, Cons(c.data, acc), done))
+  end
+
+  pfn fetch_done(s : Cap(Session.Live), st : CtlFetch_Agent.S_end, acc : List(String), done : String -> ()) : CtlFetch_Agent.Yield do
+    done(String.join(List.reverse(acc), ""))
+    CtlFetch_Agent.close(s, st)
+  end
+
+  -- ── the release ──────────────────────────────────────────────────────────
+
+  fn release_text() : String do
+    "release v1\n"
+    ++ "seq      42\n"
+    ++ "parent   none\n"
+    ++ "env      prod\n"
+    ++ "topology t42\n"
+    ++ "build    web     base:bw manifest:mw2\n"
+    ++ "build    render  base:br manifest:mr2\n"
+    ++ "step 1   pools:render  hosts:canary(1)  do:activate(render)  gate:healthy(5s)\n"
+    ++ "step 2   pools:render  hosts:rest       do:activate(render)  gate:healthy(3s)  batch:1\n"
+    ++ "step 3   pools:*       hosts:all        do:topology\n"
+    ++ "line 1   SEQ 42 id1 s1 ACTIVATE render mr2\n"
+    ++ "line 2   SEQ 42 id1 s1 ACTIVATE render mr2\n"
+    ++ "line 3   SEQ 42 id1 s2 TOPOLOGY t42\n"
+    ++ "sig      -\n"
+  end
+
+  fn rel() : Control.CtlRelease do
+    match Control.parse(release_text()) do
+      Ok(r) -> r
+      Err(e) -> panic("fixture: " ++ e)
+    end
+  end
+
+  -- ── simulated nodes ──────────────────────────────────────────────────────
+
+  -- A node: what it runs, how many signed lines its reload server accepted,
+  -- and whether it refuses them all (a bad signature).
+  type SimNode = {
+    name : String, pools : List(String), versions : List(Control.CtlVersion),
+    topology : String, requests : Int, refuse : Bool
+  }
+
+  pfn sim(name : String, pool : String) : SimNode do
+    let m = if pool == "web" do "mw1" else "mr1" end
+    { name: name, pools: [pool], versions: [{ build: pool, manifest: m }], topology: "t41", requests: 0, refuse: false }
+  end
+
+  pfn node_of(nodes : Vault(SimNode), name : String) : SimNode do
+    match Vault.get(nodes, name) do
+      Some(n) -> n
+      None -> panic("no node " ++ name)
+    end
+  end
+
+  pfn put_node(nodes : Vault(SimNode), n : SimNode) : () do
+    let _ = Vault.set(nodes, n.name, n)
+    ()
+  end
+
+  pfn sim_report(n : SimNode) : Control.AgentReport do
+    { node: n.name, seq: if n.requests > 0 do 42 else 41 end, versions: Control.versions_text(n.versions), topology: n.topology,
+      drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "" }
+  end
+
+  -- What the node's reload server does with one signed line.
+  pfn sim_request(nodes : Vault(SimNode), name : String, line : String) : String do
+    let n = node_of(nodes, name)
+    let ws = List.filter(String.split(line, " "), fn w -> w != "")
+    let tail3 = List.drop(ws, List.length(ws) - 3)
+    let tail2 = List.drop(ws, List.length(ws) - 2)
+    if n.refuse do "ERR bad_signature"
+    else match (tail3, tail2) do
+      (Cons("ACTIVATE", Cons(b, Cons(m, Nil))), _) ->
+        put_node(nodes, { n with requests: n.requests + 1,
+          versions: Cons({ build: b, manifest: m }, List.filter(n.versions, fn v -> v.build != b)) })
+        "OK activated"
+      (_, Cons("TOPOLOGY", Cons(t, Nil))) ->
+        put_node(nodes, { n with requests: n.requests + 1, topology: t })
+        "OK topology"
+      _ -> "ERR unknown_request"
+    end end
+  end
+
+  pfn agent_ops(nodes : Vault(SimNode), name : String) : Control.AgentOps do
+    { report: fn -> sim_report(node_of(nodes, name)),
+      has: fn _ -> true,
+      request: fn line -> sim_request(nodes, name, line) }
+  end
+
+  pfn cluster(nodes : Vault(SimNode)) : () do
+    put_node(nodes, sim("r1", "render"))
+    put_node(nodes, sim("r2", "render"))
+    put_node(nodes, sim("r3", "render"))
+    put_node(nodes, sim("w1", "web"))
+  end
+
+  pfn names() : List(String) do ["r1", "r2", "r3", "w1"] end
+
+  pfn members(nodes : Vault(SimNode)) : List(Control.CtlMember) do
+    List.map(names(), fn nm -> member_of(node_of(nodes, nm)))
+  end
+
+  pfn member_of(n : SimNode) : Control.CtlMember do { node: n.name, pools: n.pools } end
+
+  -- ── the leader, behind Control.ControlOps ────────────────────────────────
+
+  pfn leader_of(lv : Vault(Control.CtlLeader)) : Control.CtlLeader do
+    match Vault.get(lv, "leader") do
+      Some(l) -> l
+      None -> panic("no leader")
+    end
+  end
+
+  pfn put_leader(lv : Vault(Control.CtlLeader), l : Control.CtlLeader) : () do
+    let _ = Vault.set(lv, "leader", l)
+    ()
+  end
+
+  pfn fresh_leader(lv : Vault(Control.CtlLeader)) : () do
+    match Control.leader_release(Control.leader_new(), rel()) do
+      Ok(l) -> put_leader(lv, l)
+      Err(e) -> panic(e)
+    end
+  end
+
+  pfn int_of(v : Vault(Int), k : String) : Int do Vault.get_or(v, k, 0) end
+
+  pfn put_int(v : Vault(Int), k : String, n : Int) : () do
+    let _ = Vault.set(v, k, n)
+    ()
+  end
+
+  -- What the leader's session with [node] does next: run a pass at the
+  -- leader's clock (1 s per exchange), order the node if the pass orders it,
+  -- end the session when the release completes or halts or the session's
+  -- budget of exchanges is spent, else poll.
+  pfn next_for(lv : Vault(Control.CtlLeader), ints : Vault(Int), nodes : Vault(SimNode), node : String) : Control.CtlNext do
+    let budget = int_of(ints, "budget")
+    if budget <= 0 do Control.NextBye("session budget spent")
+    else
+      put_int(ints, "budget", budget - 1)
+      put_int(ints, "now", int_of(ints, "now") + 1000)
+      let (l2, d) = Control.leader_pass(leader_of(lv), members(nodes), int_of(ints, "now"))
+      put_leader(lv, l2)
+      match d do
+        Some(Control.RolloutApply(_, os)) ->
+          match List.find(os, fn o -> o.node == node) do
+            Some(o) -> Control.NextOrder(o)
+            None -> Control.NextPoll
+          end
+        Some(Control.RolloutComplete) -> Control.NextBye("release complete")
+        Some(Control.RolloutHalted(_, _, _)) -> Control.NextBye("release halted")
+        _ -> Control.NextPoll
+      end
+    end
+  end
+
+  pfn head_of(lv : Vault(Control.CtlLeader)) : Int do
+    let l = leader_of(lv)
+    match l.release do
+      Some(r) -> r.seq
+      None -> 0
+    end
+  end
+
+  pfn leader_ops(lv : Vault(Control.CtlLeader), ints : Vault(Int), nodes : Vault(SimNode)) : Control.ControlOps do
+    { report: fn rep -> put_leader(lv, Control.leader_report(leader_of(lv), rep, int_of(ints, "now"))),
+      stepped: fn res -> put_leader(lv, Control.leader_result(leader_of(lv), res, int_of(ints, "now"))),
+      next: fn node -> next_for(lv, ints, nodes, node),
+      head: fn -> head_of(lv) }
+  end
+
+  -- ── a transport that counts closes, stalls and cancels ───────────────────
+
+  pfn bump(tally : Vault(Int), key : String) : () do
+    let _ = Vault.incr(tally, key, 1)
+    ()
+  end
+
+  pfn counting(tally : Vault(Int)) : Session.InProcess do
+    Session.in_process_with(fn line ->
+      if String.starts_with(line, "close ") do bump(tally, "close")
+      else if String.starts_with(line, "stalled") do bump(tally, "stalled")
+      else if String.starts_with(line, "cancel ") do bump(tally, "cancel")
+      else () end end end)
+  end
+
+  pfn tallies(tally : Vault(Int), of_n : Int) : String do
+    "closes: " ++ int_to_string(int_of(tally, "close")) ++ " of " ++ int_to_string(of_n)
+      ++ ", cancels: " ++ int_to_string(int_of(tally, "cancel"))
+      ++ ", stalls: " ++ int_to_string(int_of(tally, "stalled"))
+  end
+
+  -- ── one Ctl session: the real Agent against the real Control ─────────────
+
+  pfn session(c : Cap(IO), nc : Cap(IO.NetConnect), fw : Cap(IO.FileWrite), lv : Vault(Control.CtlLeader), ints : Vault(Int), nodes : Vault(SimNode), tally : Vault(Int), name : String) : () do
+    put_int(ints, "budget", 3)
+    let t = counting(tally)
+    let s = Session.attach(c, t.ops)
+    let _ = agent_role(s, nc, Ctl_Agent.register(s, 0), agent_ops(nodes, name))
+    let _ = control_role(s, nc, fw, Ctl_Control.register(s, 0), leader_ops(lv, ints, nodes))
+    t.drain(())
+  end
+
+  pfn decision_of(lv : Vault(Control.CtlLeader), nodes : Vault(SimNode), ints : Vault(Int)) : String do
+    let (_, d) = Control.leader_pass(leader_of(lv), members(nodes), int_of(ints, "now"))
+    match d do
+      Some(x) -> Control.show_decision(x)
+      None -> "no release"
+    end
+  end
+
+  pfn finished(lv : Vault(Control.CtlLeader), nodes : Vault(SimNode), ints : Vault(Int)) : Bool do
+    let dd = decision_of(lv, nodes, ints)
+    dd == "complete" || String.contains(dd, "HALTED")
+  end
+
+  -- Rounds: each node's agent connects once per round. [swap] is the round
+  -- after which the leader is replaced by a fresh one (0: never).
+  pfn rounds(c : Cap(IO), nc : Cap(IO.NetConnect), fw : Cap(IO.FileWrite), lv : Vault(Control.CtlLeader), ints : Vault(Int), nodes : Vault(SimNode), tally : Vault(Int), k : Int, swap : Int) : Int do
+    if k > 40 || finished(lv, nodes, ints) do k - 1
+    else
+      List.fold_left(names(), (), fn (_, nm) -> session(c, nc, fw, lv, ints, nodes, tally, nm))
+      let _ = if k == swap do
+        let progress = String.join(List.map(names(), fn nm -> progress_of(node_of(nodes, nm))), ", ")
+        print_line("leader replaced after round " ++ int_to_string(k) ++ " (" ++ decision_of(lv, nodes, ints) ++ "; lines applied " ++ progress ++ ")")
+        fresh_leader(lv)
+      else () end
+      rounds(c, nc, fw, lv, ints, nodes, tally, k + 1, swap)
+    end
+  end
+
+  pfn progress_of(n : SimNode) : String do n.name ++ " " ++ int_to_string(n.requests) end
+
+  pfn show_node(n : SimNode) : String do
+    let v = String.join(List.map(List.sort_by(n.versions, fn (a, b) -> a.build < b.build), fn x -> x.build ++ "@" ++ x.manifest), ",")
+    n.name ++ ": " ++ v ++ " topology " ++ n.topology ++ ", " ++ int_to_string(n.requests) ++ " lines applied"
+  end
+
+  pfn show_order(o : WireOrder) : String do
+    -- Read after `order_of(o)` consumes `o`: this is the shape that exposed
+    -- specs/progress/2026-09-28-borrowed-field-outlives-owner.md.
+    "script: ordered step " ++ int_to_string(o.step) ++ " of release " ++ int_to_string(o.seq) ++ ": " ++ o.action
+      ++ " want " ++ o.want ++ ", " ++ int_to_string(List.length(Control.order_lines(order_of(o)))) ++ " line(s)"
+  end
+
+  pfn show_result(r : Control.StepResult) : String do
+    r.node ++ " step " ++ int_to_string(r.step) ++ " " ++ (if r.ok do "ok" else "FAILED" end) ++ ": " ++ r.detail
+  end
+
+  -- ── chaos generators ─────────────────────────────────────────────────────
+
+  pfn mk_order(t : (Int, String, List(String))) : WireOrder do
+    let (n, w, ls) = t
+    { wire: 1, seq: n, release: "chaos", step: n, node: "r1", action: if n % 2 == 0 do "topology" else "activate(render)" end,
+      want: w, artifacts: "", lines: String.join(ls, "\n") }
+  end
+
+  pfn gen_order() : Gen.Generator(WireOrder) do
+    Gen.map(Gen.tuple3(Gen.int(0, 50), Gen.string(), Gen.list(Gen.string())), fn t -> mk_order(t))
+  end
+
+  pfn mk_report(t : (String, Int, Bool)) : WireReport do
+    let (nm, n, h) = t
+    { wire: 1, node: nm, seq: n, versions: "render=" ++ nm, topology: nm, drained: n, healthy: h,
+      failed_seq: if h do 0 else n end, failed_step: 1, failed_why: nm }
+  end
+
+  pfn gen_report() : Gen.Generator(WireReport) do
+    Gen.map(Gen.tuple3(Gen.string(), Gen.int(0, 50), Gen.bool()), fn t -> mk_report(t))
+  end
+
+  pfn mk_result(t : (Int, String, Bool)) : WireResult do
+    let (n, why, ok) = t
+    { wire: 1, seq: 42, step: n, node: "r1", ok: ok, detail: why }
+  end
+
+  pfn gen_result() : Gen.Generator(WireResult) do
+    Gen.map(Gen.tuple3(Gen.int(0, 4), Gen.string(), Gen.bool()), fn t -> mk_result(t))
+  end
+
+  pfn mk_chunk(t : (Int, String, Bool)) : WireChunk do
+    let (n, d, l) = t
+    { wire: 1, offset: n, data: d, last: l }
+  end
+
+  pfn gen_chunk() : Gen.Generator(WireChunk) do
+    Gen.map(Gen.tuple3(Gen.int(0, 100), Gen.string(), Gen.bool()), fn t -> mk_chunk(t))
+  end
+
+  pfn chaos_control(c : Cap(IO), nc : Cap(IO.NetConnect), fw : Cap(IO.FileWrite), tally : Vault(Int), seed : Int) : () do
+    if seed == 30 do ()
+    else
+      let nodes = Vault.new("control_peers_chaos_nodes")
+      put_node(nodes, sim("r1", "render"))
+      let t = counting(tally)
+      let s = Session.attach(c, t.ops)
+      let _ = agent_role(s, nc, Ctl_Agent.register(s, 0), agent_ops(nodes, "r1"))
+      let _ = Ctl_Control.chaos(s, nc, fw, Ctl_Control.register(s, 0), seed, gen_order())
+      t.drain(())
+      chaos_control(c, nc, fw, tally, seed + 1)
+    end
+  end
+
+  pfn chaos_agent(c : Cap(IO), nc : Cap(IO.NetConnect), fw : Cap(IO.FileWrite), tally : Vault(Int), seed : Int) : () do
+    if seed == 30 do ()
+    else
+      let nodes = Vault.new("control_peers_chaos_nodes2")
+      cluster(nodes)
+      let lv = Vault.new("control_peers_chaos_leader")
+      fresh_leader(lv)
+      let ints = Vault.new("control_peers_chaos_ints")
+      put_int(ints, "budget", 6)
+      let t = counting(tally)
+      let s = Session.attach(c, t.ops)
+      let _ = control_role(s, nc, fw, Ctl_Control.register(s, 0), leader_ops(lv, ints, nodes))
+      let _ = Ctl_Agent.chaos(s, nc, Ctl_Agent.register(s, 0), seed, gen_report(), gen_result())
+      t.drain(())
+      chaos_agent(c, nc, fw, tally, seed + 1)
+    end
+  end
+
+  pfn artifact(h : String) : Option(String) do
+    if h == "h1" do Some("00112233445566778899aabbccddeeff00") else None end
+  end
+
+  pfn fetch_seeds(c : Cap(IO), nc : Cap(IO.NetConnect), tally : Vault(Int), got : Vault(Int), seed : Int) : () do
+    if seed == 30 do ()
+    else
+      let t = counting(tally)
+      let s = Session.attach(c, t.ops)
+      let _ = fetch_server(s, nc, CtlFetch_Server.register(s, 0), fn h -> artifact(h), 4)
+      let _ = CtlFetch_Agent.chaos(s, nc, CtlFetch_Agent.register(s, 0), seed)
+      t.drain(())
+      let t2 = counting(tally)
+      let s2 = Session.attach(c, t2.ops)
+      let _ = fetch_agent(s2, nc, CtlFetch_Agent.register(s2, 0), "h1", fn _ -> bump(got, "fetched"))
+      let _ = CtlFetch_Server.chaos(s2, nc, CtlFetch_Server.register(s2, 0), seed, gen_chunk())
+      t2.drain(())
+      fetch_seeds(c, nc, tally, got, seed + 1)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let nc : Cap(IO.NetConnect) = cap_narrow(c)
+    let fw : Cap(IO.FileWrite) = cap_narrow(c)
+    let r = rel()
+
+    print_line("-- scripted Control against the real Agent")
+    let nodes1 = Vault.new("control_peers_nodes1")
+    put_node(nodes1, sim("r1", "render"))
+    let o1 = Control.order(r, head(r.steps), "r1")
+    let t1 = Session.in_process()
+    let s1 = Session.attach(c, t1.ops)
+    let _ = agent_role(s1, nc, Ctl_Agent.register(s1, 0), agent_ops(nodes1, "r1"))
+    let _ = Ctl_Control.script(s1, nc, fw, Ctl_Control.register(s1, 0), [
+      Ctl_Control.Expect_Hello(fn rep -> print_line("script: hello from " ++ rep.node ++ " at seq " ++ int_to_string(rep.seq))),
+      Ctl_Control.Choose_apply(wire_order(o1)),
+      Ctl_Control.Expect_Stepped(fn res -> print_line("script: " ++ show_result(result_of(res)))),
+      Ctl_Control.Choose_apply(wire_order(o1)),
+      Ctl_Control.Expect_Stepped(fn res -> print_line("script: again, " ++ show_result(result_of(res)))),
+      Ctl_Control.Choose_apply(wire_order({ o1 with lines: "SEQ 42 id1 s1 PURGE everything", want: "mr3" })),
+      Ctl_Control.Expect_Stepped(fn res -> print_line("script: " ++ show_result(result_of(res)))),
+      Ctl_Control.Choose_observe(42),
+      Ctl_Control.Expect_Report(fn rep -> print_line("script: report from " ++ rep.node ++ " at seq " ++ int_to_string(rep.seq))),
+      Ctl_Control.Choose_bye("done")
+    ])
+    t1.drain(())
+    print_line(show_node(node_of(nodes1, "r1")))
+    print_line("queued after: " ++ int_to_string(t1.queued(())))
+
+    print_line("-- scripted Agent against the real Control")
+    let nodes2 = Vault.new("control_peers_nodes2")
+    cluster(nodes2)
+    let lv2 = Vault.new("control_peers_leader2")
+    fresh_leader(lv2)
+    let ints2 = Vault.new("control_peers_ints2")
+    put_int(ints2, "budget", 3)
+    let r1_old = sim_report(node_of(nodes2, "r1"))
+    let t2 = Session.in_process()
+    let s2 = Session.attach(c, t2.ops)
+    let _ = control_role(s2, nc, fw, Ctl_Control.register(s2, 0), leader_ops(lv2, ints2, nodes2))
+    let _ = Ctl_Agent.script(s2, nc, Ctl_Agent.register(s2, 0), [
+      Ctl_Agent.Send_Hello(wire_report(r1_old)),
+      Ctl_Agent.Expect_Apply(fn o -> print_line(show_order(o))),
+      Ctl_Agent.Send_Stepped(wire_result({ seq: 42, step: 1, node: "r1", ok: true, detail: "applied" })),
+      Ctl_Agent.Expect_Observe(fn head -> print_line("script: polled, leader holds " ++ int_to_string(head))),
+      Ctl_Agent.Send_Report(wire_report({ r1_old with seq: 42, versions: "render=mr2" })),
+      Ctl_Agent.Expect_Observe(fn head -> print_line("script: polled again (gate), leader holds " ++ int_to_string(head))),
+      Ctl_Agent.Send_Report(wire_report({ r1_old with seq: 42, versions: "render=mr2" })),
+      Ctl_Agent.Expect_Bye(fn why -> print_line("script: bye, " ++ why))
+    ])
+    t2.drain(())
+    print_line("leader: " ++ decision_of(lv2, nodes2, ints2))
+
+    print_line("-- a rollout over Ctl sessions, the leader replaced mid-rollout")
+    let nodes3 = Vault.new("control_peers_nodes3")
+    cluster(nodes3)
+    let lv3 = Vault.new("control_peers_leader3")
+    fresh_leader(lv3)
+    let ints3 = Vault.new("control_peers_ints3")
+    let tally3 = Vault.new("control_peers_tally3")
+    let n3 = rounds(c, nc, fw, lv3, ints3, nodes3, tally3, 1, 1)
+    print_line("after " ++ int_to_string(n3) ++ " rounds: " ++ decision_of(lv3, nodes3, ints3))
+    List.fold_left(names(), (), fn (_, nm) -> print_line(show_node(node_of(nodes3, nm))))
+    print_line(tallies(tally3, n3 * 8))
+
+    print_line("-- a refused order halts the rollout")
+    let nodes4 = Vault.new("control_peers_nodes4")
+    cluster(nodes4)
+    let r1_4 = node_of(nodes4, "r1")
+    put_node(nodes4, { r1_4 with refuse: true })
+    let lv4 = Vault.new("control_peers_leader4")
+    fresh_leader(lv4)
+    let ints4 = Vault.new("control_peers_ints4")
+    let tally4 = Vault.new("control_peers_tally4")
+    let n4 = rounds(c, nc, fw, lv4, ints4, nodes4, tally4, 1, 0)
+    print_line("after " ++ int_to_string(n4) ++ " rounds: " ++ decision_of(lv4, nodes4, ints4))
+    List.fold_left(names(), (), fn (_, nm) -> print_line(show_node(node_of(nodes4, nm))))
+
+    print_line("-- CtlFetch: the real roles, a known and an unknown hash")
+    let t5 = Session.in_process()
+    let s5 = Session.attach(c, t5.ops)
+    let _ = fetch_server(s5, nc, CtlFetch_Server.register(s5, 0), fn h -> artifact(h), 4)
+    let _ = fetch_agent(s5, nc, CtlFetch_Agent.register(s5, 0), "h1", fn hex -> print_line("fetched h1: " ++ hex))
+    t5.drain(())
+    let t6 = Session.in_process()
+    let s6 = Session.attach(c, t6.ops)
+    let _ = fetch_server(s6, nc, CtlFetch_Server.register(s6, 0), fn h -> artifact(h), 4)
+    let _ = fetch_agent(s6, nc, CtlFetch_Agent.register(s6, 0), "nope", fn hex -> print_line("fetched nope: \"" ++ hex ++ "\""))
+    t6.drain(())
+    let t7 = Session.in_process()
+    let s7 = Session.attach(c, t7.ops)
+    let _ = fetch_server(s7, nc, CtlFetch_Server.register(s7, 0), fn h -> artifact(h), 16)
+    let _ = CtlFetch_Agent.script(s7, nc, CtlFetch_Agent.register(s7, 0), [
+      CtlFetch_Agent.Send_Want("h1"),
+      CtlFetch_Agent.Expect_Chunk(fn ch -> print_line("script: chunk at " ++ int_to_string(ch.offset) ++ ": " ++ ch.data)),
+      CtlFetch_Agent.Expect_Chunk(fn ch -> print_line("script: chunk at " ++ int_to_string(ch.offset) ++ ": " ++ ch.data)),
+      CtlFetch_Agent.Expect_Fin(fn ch -> print_line("script: last chunk at " ++ int_to_string(ch.offset) ++ ": " ++ ch.data))
+    ])
+    t7.drain(())
+
+    print_line("-- chaos: Control against the real Agent, 30 seeds")
+    let tally8 = Vault.new("control_peers_tally8")
+    chaos_control(c, nc, fw, tally8, 0)
+    print_line(tallies(tally8, 60))
+
+    print_line("-- chaos: Agent against the real Control, 30 seeds")
+    let tally9 = Vault.new("control_peers_tally9")
+    chaos_agent(c, nc, fw, tally9, 0)
+    print_line(tallies(tally9, 60))
+
+    print_line("-- chaos: CtlFetch, each role against the real other, 30 seeds")
+    let tally10 = Vault.new("control_peers_tally10")
+    let got = Vault.new("control_peers_got")
+    fetch_seeds(c, nc, tally10, got, 0)
+    print_line(tallies(tally10, 120) ++ ", real agents finished: " ++ int_to_string(int_of(got, "fetched")) ++ " of 30")
+    ()
+  end
+end

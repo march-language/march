@@ -1,0 +1,788 @@
+================================================================================
+Match arm body with several expressions ends at the next arm
+================================================================================
+
+mod M do
+  fn f(x) do
+    match x do
+      Some(v) ->
+        let y = v + 1
+        log(y)
+        y
+      None -> 0
+    end
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (function_def
+      name: (identifier)
+      (fn_param
+        (variable_pattern
+          (variable_pattern)))
+      body: (block_body
+        (match_expression
+          value: (identifier)
+          (match_arm
+            pattern: (constructor_pattern
+              name: (type_identifier)
+              (variable_pattern
+                (variable_pattern)))
+            body: (block_body
+              (let_declaration
+                pattern: (variable_pattern
+                  (variable_pattern))
+                value: (additive_expression
+                  left: (identifier)
+                  right: (integer)))
+              (call_expression
+                function: (identifier)
+                (identifier))
+              (identifier)))
+          (match_arm
+            pattern: (constructor_pattern
+              name: (type_identifier))
+            body: (block_body
+              (integer))))))))
+
+================================================================================
+Line-initial tuple pattern starts a new arm
+================================================================================
+
+mod M do
+  fn f(p) do
+    match p do
+      (:get, Nil) -> 1
+      (:post, [a, b]) -> 2
+      _ -> 0
+    end
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (function_def
+      name: (identifier)
+      (fn_param
+        (variable_pattern
+          (variable_pattern)))
+      body: (block_body
+        (match_expression
+          value: (identifier)
+          (match_arm
+            pattern: (tuple_pattern
+              (atom_pattern
+                (atom_literal))
+              (constructor_pattern
+                name: (type_identifier)))
+            body: (block_body
+              (integer)))
+          (match_arm
+            pattern: (tuple_pattern
+              (atom_pattern
+                (atom_literal))
+              (list_pattern
+                (variable_pattern
+                  (variable_pattern))
+                (variable_pattern
+                  (variable_pattern))))
+            body: (block_body
+              (integer)))
+          (match_arm
+            pattern: (wildcard_pattern)
+            body: (block_body
+              (integer))))))))
+
+================================================================================
+Line-initial unit is a new statement, not a call
+================================================================================
+
+mod M do
+  fn f() do
+    let _ = a
+    ()
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (function_def
+      name: (identifier)
+      body: (block_body
+        (let_declaration
+          pattern: (wildcard_pattern)
+          value: (identifier))
+        (unit_expression)))))
+
+================================================================================
+Lambda in call-argument position takes a statement sequence
+================================================================================
+
+mod M do
+  fn f(xs) do
+    List.map(xs, fn x ->
+      log(x)
+      x * 2)
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (function_def
+      name: (identifier)
+      (fn_param
+        (variable_pattern
+          (variable_pattern)))
+      body: (block_body
+        (call_expression
+          function: (field_expression
+            object: (bare_constructor
+              name: (type_identifier))
+            field: (identifier))
+          (identifier)
+          (lambda_expression
+            param: (identifier)
+            body: (block_body
+              (call_expression
+                function: (identifier)
+                (identifier))
+              (multiplicative_expression
+                left: (identifier)
+                right: (integer)))))))))
+
+================================================================================
+Lambda body is lets then one expression
+================================================================================
+
+mod M do
+  fn f() do
+    let g = fn x ->
+      let y = x + 1
+      y * 2
+    g(1)
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (function_def
+      name: (identifier)
+      body: (block_body
+        (let_declaration
+          pattern: (variable_pattern
+            (variable_pattern))
+          value: (lambda_expression
+            param: (identifier)
+            body: (block_body
+              (let_declaration
+                pattern: (variable_pattern
+                  (variable_pattern))
+                value: (additive_expression
+                  left: (identifier)
+                  right: (integer)))
+              (multiplicative_expression
+                left: (identifier)
+                right: (integer)))))
+        (call_expression
+          function: (identifier)
+          (integer))))))
+
+================================================================================
+Leading pipe arm separators and or-patterns
+================================================================================
+
+mod M do
+  fn f(n) do
+    match n do
+    | 1 | 2 -> "small"
+    | _ -> "big"
+    end
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (function_def
+      name: (identifier)
+      (fn_param
+        (variable_pattern
+          (variable_pattern)))
+      body: (block_body
+        (match_expression
+          value: (identifier)
+          (match_arm
+            pattern: (or_pattern
+              (literal_pattern
+                (integer))
+              (literal_pattern
+                (integer)))
+            body: (block_body
+              (string)))
+          (match_arm
+            pattern: (wildcard_pattern)
+            body: (block_body
+              (string))))))))
+
+================================================================================
+Cond form match without a scrutinee
+================================================================================
+
+mod M do
+  fn grade(s) do
+    match do
+      s >= 90 -> "A"
+      _ -> "B"
+    end
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (function_def
+      name: (identifier)
+      (fn_param
+        (variable_pattern
+          (variable_pattern)))
+      body: (block_body
+        (cond_expression
+          (cond_arm
+            condition: (comparison_expression
+              left: (identifier)
+              right: (integer))
+            body: (block_body
+              (string)))
+          (cond_arm
+            condition: (refinement_placeholder)
+            body: (block_body
+              (string))))))))
+
+================================================================================
+Protocol choose branches and stop
+================================================================================
+
+mod M do
+  protocol Stream do
+    loop do
+      Prod -> Cons : Int
+      choose by Cons:
+        more -> Cons -> Prod : Bool
+        done -> Cons -> Prod : Bool
+                stop
+      end
+    end
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (protocol_def
+      name: (type_identifier)
+      (protocol_step
+        (protocol_loop
+          (protocol_step
+            (protocol_message
+              sender: (type_identifier)
+              receiver: (type_identifier)
+              type: (type_constructor
+                (type_constructor))))
+          (protocol_step
+            (protocol_choose
+              chooser: (type_identifier)
+              (choose_branch
+                label: (identifier)
+                (protocol_step
+                  (protocol_message
+                    sender: (type_identifier)
+                    receiver: (type_identifier)
+                    type: (type_constructor
+                      (type_constructor)))))
+              (choose_branch
+                label: (identifier)
+                (protocol_step
+                  (protocol_message
+                    sender: (type_identifier)
+                    receiver: (type_identifier)
+                    type: (type_constructor
+                      (type_constructor))))
+                (protocol_step
+                  (protocol_stop
+                    (identifier)))))))))))
+
+================================================================================
+Record literals and updates, float operators, parentheses
+================================================================================
+
+mod M do
+  type P = { x : Float, y : Float }
+  fn f(p : P) : Float do
+    let q = { p with x: (p.x +. 1.0) *. 2.0 }
+    let r = { x: 0.0, y: q.y }
+    r.x -. q.x
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (type_def
+      name: (type_identifier)
+      (record_type
+        (record_type_field
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor)))
+        (record_type_field
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor)))))
+    (function_def
+      name: (identifier)
+      (fn_param
+        (named_param
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor))))
+      return_type: (type_constructor
+        (type_constructor))
+      body: (block_body
+        (let_declaration
+          pattern: (variable_pattern
+            (variable_pattern))
+          value: (record_update
+            base: (identifier)
+            (record_field
+              name: (identifier)
+              value: (multiplicative_expression
+                left: (parenthesized_expression
+                  (additive_expression
+                    left: (field_expression
+                      object: (identifier)
+                      field: (identifier))
+                    right: (float)))
+                right: (float)))))
+        (let_declaration
+          pattern: (variable_pattern
+            (variable_pattern))
+          value: (record_expression
+            (record_field
+              name: (identifier)
+              value: (float))
+            (record_field
+              name: (identifier)
+              value: (field_expression
+                object: (identifier)
+                field: (identifier)))))
+        (additive_expression
+          left: (field_expression
+            object: (identifier)
+            field: (identifier))
+          right: (field_expression
+            object: (identifier)
+            field: (identifier)))))))
+
+================================================================================
+List, record, qualified, as and parenthesised patterns
+================================================================================
+
+mod M do
+  fn f(v) do
+    match v do
+      [a, b] -> a
+      { x: 1, y } -> y
+      Membership.Alive -> 2
+      Some(n) as whole -> 3
+      (Some(a)) -> a
+    end
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (function_def
+      name: (identifier)
+      (fn_param
+        (variable_pattern
+          (variable_pattern)))
+      body: (block_body
+        (match_expression
+          value: (identifier)
+          (match_arm
+            pattern: (list_pattern
+              (variable_pattern
+                (variable_pattern))
+              (variable_pattern
+                (variable_pattern)))
+            body: (block_body
+              (identifier)))
+          (match_arm
+            pattern: (record_pattern
+              (record_field_pattern
+                name: (identifier)
+                pattern: (literal_pattern
+                  (integer)))
+              (record_field_pattern
+                name: (identifier)))
+            body: (block_body
+              (identifier)))
+          (match_arm
+            pattern: (constructor_pattern
+              name: (qualified_constructor
+                (type_identifier)
+                (type_identifier)))
+            body: (block_body
+              (integer)))
+          (match_arm
+            pattern: (as_pattern
+              pattern: (constructor_pattern
+                name: (type_identifier)
+                (variable_pattern
+                  (variable_pattern)))
+              name: (identifier))
+            body: (block_body
+              (integer)))
+          (match_arm
+            pattern: (paren_pattern
+              (constructor_pattern
+                name: (type_identifier)
+                (variable_pattern
+                  (variable_pattern))))
+            body: (block_body
+              (identifier))))))))
+
+================================================================================
+Declarations: nested mod, derive, satisfy, resource, opaque, tag, extern, transitions, attributes
+================================================================================
+
+mod M do
+  mod Inner do
+    fn h() do 1 end
+  end
+  derive Eq, Show for Point
+  satisfy Ord for Point, Line
+  resource Handle
+  opaque type T = A | B
+  always_linear type L = { v : Int }
+  tag Kind
+  proof cap Live with Ops
+  needs IO.FileWrite("/tmp/app")
+  extern "c" : Cap(IO.Foreign) do
+    blocking fn dbl(n: Int): Int = "ffi_dbl"
+    fn take(consume h: Handle): Unit
+  end
+  transitions Handle do
+    File: Open -> Closed via close
+  end
+  doc "Adds."
+  @[no_alloc]
+  fn add(a : Int, b : Int \\ 1) : Int do a + b end
+  fn send(x) do x end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (module_def
+      name: (module_path
+        (type_identifier))
+      (function_def
+        name: (identifier)
+        body: (block_body
+          (integer))))
+    (derive_declaration
+      (type_identifier)
+      (type_identifier)
+      type: (type_identifier))
+    (satisfy_declaration
+      (type_identifier)
+      (type_identifier)
+      (type_identifier))
+    (resource_declaration
+      name: (type_identifier))
+    (type_def
+      name: (type_identifier)
+      (variant
+        name: (type_identifier))
+      (variant
+        name: (type_identifier)))
+    (type_def
+      name: (type_identifier)
+      (record_type
+        (record_type_field
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor)))))
+    (type_def
+      name: (type_identifier))
+    (capability_declaration
+      name: (type_identifier)
+      dictionary: (type_identifier))
+    (needs_declaration
+      (scoped_capability
+        (module_path
+          (type_identifier)
+          (type_identifier))
+        (string)))
+    (extern_def
+      (string)
+      cap_type: (type_application
+        name: (type_identifier)
+        (qualified_type
+          (type_identifier)
+          (type_identifier)))
+      (extern_fn
+        modifier: (identifier)
+        name: (identifier)
+        (ffi_param
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor)))
+        return_type: (type_constructor
+          (type_constructor))
+        symbol: (string))
+      (extern_fn
+        name: (identifier)
+        (ffi_param
+          modifier: (identifier)
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor)))
+        return_type: (type_constructor
+          (type_constructor))))
+    (transitions_def
+      handle: (type_identifier)
+      (transition_arm
+        resource: (type_identifier)
+        from: (type_identifier)
+        to: (type_identifier)
+        function: (identifier)))
+    (doc_annotation
+      content: (string)
+      (attribute
+        (identifier))
+      decl: (function_def
+        name: (identifier)
+        (fn_param
+          (named_param
+            name: (identifier)
+            type: (type_constructor
+              (type_constructor))))
+        (fn_param
+          (named_param
+            name: (identifier)
+            type: (type_constructor
+              (type_constructor))
+            default: (integer)))
+        return_type: (type_constructor
+          (type_constructor))
+        body: (block_body
+          (additive_expression
+            left: (identifier)
+            right: (identifier)))))
+    (function_def
+      name: (identifier)
+      (fn_param
+        (variable_pattern
+          (variable_pattern)))
+      body: (block_body
+        (identifier)))))
+
+================================================================================
+Actor init parameters, mailbox, supervise, on_stop, spawn arguments
+================================================================================
+
+mod M do
+  actor Counter do
+    state { count : Int }
+    init(start : Int) { count: start }
+    mailbox 1000 drop_old
+    supervise do
+      strategy one_for_one
+      max_restarts 3 within 60
+      Worker w restart transient
+    end
+    on Inc() do
+      { state with count: state.count + 1 }
+    end
+    on_stop do
+      flush(state)
+    end
+  end
+  fn main() do
+    let c = spawn(Counter, 41)
+    c
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (actor_def
+      name: (type_identifier)
+      (actor_state
+        (record_type_field
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor))))
+      (actor_init
+        (init_param
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor)))
+        (record_expression
+          (record_field
+            name: (identifier)
+            value: (identifier))))
+      (mailbox_clause
+        (integer)
+        (identifier))
+      (supervise_block
+        strategy: (identifier)
+        (integer)
+        (integer)
+        (supervise_child
+          actor: (type_identifier)
+          name: (identifier)
+          (identifier)))
+      (actor_handler
+        name: (type_identifier)
+        (block_body
+          (record_update
+            base: (identifier)
+            (record_field
+              name: (identifier)
+              value: (additive_expression
+                left: (field_expression
+                  object: (identifier)
+                  field: (identifier))
+                right: (integer))))))
+      (on_stop_block
+        (block_body
+          (call_expression
+            function: (identifier)
+            (identifier)))))
+    (function_def
+      name: (identifier)
+      body: (block_body
+        (let_declaration
+          pattern: (variable_pattern
+            (variable_pattern))
+          value: (spawn_expression
+            (bare_constructor
+              name: (type_identifier))
+            (integer)))
+        (identifier)))))
+
+================================================================================
+Nested fn, let?, string escapes, lower-case sigil, zero-arg lambda, list comprehension
+================================================================================
+
+mod M do
+  fn f(xs) do
+    fn helper(y) do y + 1 end
+    let? v = parse(xs)
+    let s = "tab\ttab \r \x00 \$"
+    let doc_ = ~yaml"a: 1"
+    let k = fn -> 42
+    [x * 2 for x in xs, x > 1]
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (function_def
+      name: (identifier)
+      (fn_param
+        (variable_pattern
+          (variable_pattern)))
+      body: (block_body
+        (local_function
+          name: (identifier)
+          (fn_param
+            (variable_pattern
+              (variable_pattern)))
+          body: (block_body
+            (additive_expression
+              left: (identifier)
+              right: (integer))))
+        (let_declaration
+          pattern: (variable_pattern
+            (variable_pattern))
+          value: (call_expression
+            function: (identifier)
+            (identifier)))
+        (let_declaration
+          pattern: (variable_pattern
+            (variable_pattern))
+          value: (string))
+        (let_declaration
+          pattern: (variable_pattern
+            (variable_pattern))
+          value: (sigil_expression
+            prefix: (sigil_prefix)
+            content: (string)))
+        (let_declaration
+          pattern: (variable_pattern
+            (variable_pattern))
+          value: (lambda_expression
+            body: (block_body
+              (integer))))
+        (list_comprehension
+          body: (multiplicative_expression
+            left: (identifier)
+            right: (integer))
+          pattern: (variable_pattern
+            (variable_pattern))
+          source: (identifier)
+          guard: (comparison_expression
+            left: (identifier)
+            right: (integer)))))))
