@@ -26,6 +26,11 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Actors that message each other back and forth are up to 2.6x faster.** With
+  several scheduler threads, sending to an actor that was just going to sleep could
+  make the sender wait a millisecond or more before delivering. A two-actor
+  ping-pong of 1,000,000 messages took 3.07 s; it now takes 1.18 s. Actor programs
+  built with `--hot-reload` were affected less (1.45 s -> 1.22 s).
 - **`march --check` no longer passes a protocol expand it refuses, from its cache.**
   After a clean `--check` with `--protocol-baseline` and `--protocol-expand`, the same
   check without the baseline (which the compiler refuses) exited 0 from the cache

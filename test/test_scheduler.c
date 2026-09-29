@@ -18,6 +18,10 @@
  *  6. test_send_recv_multiple — Sender sends 100 messages; receiver loops recv.
  *  7. test_waiting_wakeup     — Receiver blocks on recv; sender wakes it up.
  *  8. test_try_recv           — try_recv returns NULL when empty, msg when ready.
+ *  9. test_wake_parked_does_not_wait — waking a PROC_PARKED proc returns at
+ *                            once and leaves the wake permit for the parking
+ *                            scheduler (it used to spin, then sleep 1 ms per
+ *                            poll, until the scheduler stored PROC_WAITING).
  */
 
 #ifndef _XOPEN_SOURCE
@@ -29,6 +33,8 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 /* ── Lightweight test harness ─────────────────────────────────────────── */
 
@@ -434,6 +440,37 @@ static void test_stack_growth_many(void) {
     TEST_PASS();
 }
 
+/* ── Test 9: a wake never waits for a PARKED target ─────────────────────
+ * A proc that parks stores PROC_PARKED and then swaps to its scheduler; only
+ * sched_loop moves it to PROC_WAITING, after the swap.  march_sched_wake used
+ * to WAIT for that store (4096 spins, then 1 ms nanosleeps), which in a
+ * cross-scheduler ping-pong cost ~1000 sleeps per 1,000,000 messages
+ * (bench/actor_ping.march: 3.07 s, now 1.18 s).  Now the waker leaves its
+ * permit and returns, and sched_loop enqueues the proc after its WAITING
+ * store.  Here nothing will ever finish this park, so the old code never
+ * returns: the alarm turns that into a failure instead of a hang. */
+static void test_wake_parked_does_not_wait(void) {
+    march_proc *p = calloc(1, sizeof *p);
+    TEST_ASSERT(p != NULL, "calloc");
+    atomic_store(&p->status, PROC_PARKED);
+    atomic_store(&p->wake_pending, 0);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    alarm(10);
+    march_sched_wake(p);
+    alarm(0);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms = (double)(t1.tv_sec - t0.tv_sec) * 1e3
+              + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+    int permit = atomic_load(&p->wake_pending);
+    march_proc_status st = atomic_load(&p->status);
+    free(p);
+    TEST_ASSERT(permit == 1, "wake must leave its permit for the parking scheduler");
+    TEST_ASSERT(st == PROC_PARKED, "a PARKED proc must not be enqueued by the waker");
+    TEST_ASSERT(ms < 500.0, "march_sched_wake on a PARKED proc must not wait");
+    TEST_PASS();
+}
+
 /* ── Entry point ──────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -446,6 +483,7 @@ int main(void) {
     test_send_recv_multiple();
     test_waiting_wakeup();
     test_try_recv();
+    test_wake_parked_does_not_wait();
     printf("\n--- Phase 4: stack growth ---\n");
     test_stack_growth_deep();
     test_stack_growth_many();
