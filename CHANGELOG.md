@@ -35,6 +35,10 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A path-scoped `needs IO.FileRead("...")` now covers `csv_open`.** A
+  literal path passed to `csv_open` was never checked against the declared
+  scope, so `csv_open("/etc/passwd", ...)` compiled under
+  `needs IO.FileRead("/srv/data")`. It is now rejected like `file_read`.
 - **`Process.spawn_async` no longer hands a running process's slot to a new
   one.** Compiled code kept live processes in a fixed table of 64 with no
   lock. The 65th spawn silently closed the first process's pipes, so a
