@@ -173,11 +173,108 @@ let test_export_caps_from_compiler () =
   Alcotest.(check (list string)) "front initiates both clients" [ "Count.Client"; "Echo.Client" ] (strs "front" "initiates");
   Alcotest.(check string) "source" "compiler" (d |> member "back" |> member "source" |> to_string)
 
+(* ── forge deploy's protocol steps against the real compiler (D21) ─────── *)
+
+let order_src ~later = Printf.sprintf {|mod App do
+  @[endpoints]
+  protocol Order do
+    loop do
+      item: Buyer -> Shop : Int
+      choose by Shop:
+        more -> Shop -> Buyer : Int
+%s        done -> Shop -> Buyer : Int
+                stop
+      end
+    end
+  end
+end
+|} (if later then "        later -> Shop -> Buyer : Int\n" else "")
+
+(* A monolith: one build both serves Shop (the chooser) and initiates Buyer
+   (a receiver). *)
+let order_topology = {|
+[roles]
+"Order.Shop" = { body = "App.shop", capacity = 8 }
+
+[pool.app]
+serves = ["Order.Shop"]
+initiates = ["Order.Buyer"]
+hosts = ["root@h1"]
+
+[backend]
+kind = "ssh"
+|}
+
+(** What `forge deploy` does with protocols, step by step, with the real
+    compiler: the check against the deploy baselines emits this version
+    ([March_forge.Cmd_deploy.check_protocols]); [March_forge.Deploy_plan.splits_of] finds the
+    monolith's split; [March_forge.Cmd_deploy.protocol_flags_of_dir] is what every build
+    gets, and the compiler accepts it (the expand typechecks); the baseline
+    advances after a deploy only for what was not expanded. Red when the
+    flags leave out the deploy baseline (the compiler refuses the expand). *)
+let test_deploy_protocol_steps () =
+  let env = String.concat "" (List.map (fun (k, v) -> k ^ "=" ^ Filename.quote v ^ " ") (Lazy.force hermetic_env)) in
+  let dir = Filename.temp_dir "deploy_protocols_" "" in
+  let deployed = Filename.concat dir ".forge/deploy/prod/protocols" in
+  let out = Filename.concat dir ".forge/deploy/prod/build/protocols" in
+  let log = Filename.concat dir "check.log" in
+  let app = Filename.concat dir "app.march" in
+  let write path body = Out_channel.with_open_bin path (fun oc -> output_string oc body) in
+  let check () =
+    match March_forge.Cmd_deploy.check_protocols ~env ~cwd:dir ~deployed ~out ~log app with
+    | Ok vs -> vs
+    | Error m -> Alcotest.failf "%s:\n%s" m (read_file log)
+  in
+  (* the first deploy: nothing deployed, version 1 emitted and recorded *)
+  write app (order_src ~later:false);
+  let v1 = check () in
+  Alcotest.(check (list string)) "version 1 emitted" [ "Order" ] (List.map fst v1);
+  March_forge.Cmd_deploy.advance_baselines ~deployed ~now:out ~expanding:[];
+  Alcotest.(check bool) "the deploy baseline" true (March_forge.Protocol_split.versions_of_dir deployed = v1);
+  Alcotest.(check bool) "never the compiler's baselines" false (Sys.file_exists (Filename.concat dir ".forge/protocols"));
+  (* version 2 gains `later` *)
+  write app (order_src ~later:true);
+  let v2 = check () in
+  let protocols = March_forge.Cmd_deploy.protocol_pairs ~deployed:(March_forge.Protocol_split.versions_of_dir deployed) ~now:v2 in
+  let t = match March_forge.Topology.of_strings [ ("topology.toml", order_topology) ] with
+    | Ok t -> t
+    | Error ds -> Alcotest.failf "topology: %s" (String.concat "; " (List.map March_forge.Topology.render_diag ds)) in
+  let (_, splits) = March_forge.Deploy_plan.splits_of ~derived:None t ~builds:[ ("shared", [ "app" ]) ] ~protocols ~pending:[] in
+  Alcotest.(check (list string)) "the expand" [ "--protocol-expand Order:later" ] (March_forge.Deploy_plan.expand_flags splits);
+  let flags = March_forge.Cmd_deploy.protocol_flags_of_dir deployed splits in
+  let compiles flags =
+    Sys.command (Printf.sprintf "cd %s && %smarch --check%s app.march > %s 2>&1" (Filename.quote dir) env flags
+                   (Filename.quote log)) = 0 in
+  if not (compiles flags) then Alcotest.failf "the expand build does not typecheck with %s:\n%s" flags (read_file log);
+  Alcotest.(check bool) "without the deploy baseline the expand is refused" false
+    (compiles " --protocol-expand Order:later");
+  Alcotest.(check bool) "... because it needs the previous version" true
+    (contains (read_file log) "needs the protocol's previous version");
+  (* deploy one ran: the baseline stays on version 1 until the contract *)
+  March_forge.Cmd_deploy.advance_baselines ~deployed ~now:out ~expanding:[ "Order" ];
+  Alcotest.(check bool) "kept through the expand" true (March_forge.Protocol_split.versions_of_dir deployed = v1);
+  (* the contract: pending says the expand went out for this version *)
+  let pending = March_forge.Deploy_plan.pending_after splits in
+  let (_, splits2) = March_forge.Deploy_plan.splits_of ~derived:None t ~builds:[ ("shared", [ "app" ]) ] ~protocols ~pending in
+  Alcotest.(check (list string)) "the contract is the plain build" [] (March_forge.Deploy_plan.expand_flags splits2);
+  if not (compiles (March_forge.Cmd_deploy.protocol_flags_of_dir deployed splits2)) then
+    Alcotest.failf "the contract build does not typecheck:\n%s" (read_file log);
+  March_forge.Cmd_deploy.advance_baselines ~deployed ~now:out ~expanding:[];
+  Alcotest.(check bool) "advanced by the contract" true (March_forge.Protocol_split.versions_of_dir deployed = v2);
+  (* a protocol the program drops loses its deploy baseline *)
+  write app "mod App do\n  fn f() : Int do 1 end\nend\n";
+  ignore (check ());
+  March_forge.Cmd_deploy.advance_baselines ~deployed ~now:out ~expanding:[];
+  Alcotest.(check (list string)) "dropped" [] (List.map fst (March_forge.Protocol_split.versions_of_dir deployed))
+
 let () =
   Alcotest.run "topology-run" [
     ("forge run", [
         Alcotest.test_case "--processes: one process per pool; SIGINT drains and stops all" `Slow test_processes;
         Alcotest.test_case "level 0: every pool in one process; Ctrl-C drains it" `Slow test_level0;
         Alcotest.test_case "topology export: derived caps from the compiler" `Slow test_export_caps_from_compiler;
+      ]);
+    ("forge deploy", [
+        Alcotest.test_case "protocols: check, split, expand flags, baselines (D21)" `Quick test_deploy_protocol_steps;
       ]);
   ]
