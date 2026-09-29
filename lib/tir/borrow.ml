@@ -300,6 +300,26 @@ let extern_borrow_table : (string * bool list) list = [
   ("logger_clear_module_level", [true]);
   ("logger_module_level",       [true]);
   ("http_fetch",                [true; true; true; true]);
+  (* ── Process: every march_process_* function only READS its heap arguments
+     (audited 2026-09-29).  env/set_env copy the Strings' bytes into stack
+     buffers; spawn_sync/spawn_lines/spawn_async walk the command and args
+     list into a malloc'd argv they free themselves; read_line, write,
+     kill_proc and wait_proc load the LiveProcess's pid and slot words and
+     never store or release the cell.  Until then the family sat in
+     [extern_owned_builtins]: each spawn leaked its args list, and each
+     handle use consumed a reference nothing released, so the LiveProcess
+     cell every spawn_async returns could never be freed.  The only producer
+     of a LiveProcess is spawn_async, which returns it fresh and owned.
+     specs/progress/2026-09-29-process-spawn-async-leaks-live-process.md ── *)
+  ("process_env",         [true]);
+  ("process_set_env",     [true; true]);
+  ("process_spawn_sync",  [true; true]);
+  ("process_spawn_lines", [true; true]);
+  ("process_spawn_async", [true; true]);
+  ("process_read_line",   [true]);
+  ("process_write",       [true; true]);
+  ("process_kill_proc",   [true]);
+  ("process_wait_proc",   [true]);
   (* ── Synthetic C names used directly in lower.ml wrappers ──────────────── *)
   ("march_compare_string", [true; true]);
   ("march_hash_string",    [true]);
@@ -406,9 +426,6 @@ let extern_owned_builtins : string list = [
     "file_read_line"; "file_read_chunk"; "file_write"; "file_append";
     "file_delete"; "file_copy"; "file_rename"; "file_stat"; "dir_mkdir";
     "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list";
-    "process_env"; "process_set_env"; "process_spawn_sync";
-    "process_spawn_lines"; "process_spawn_async"; "process_read_line";
-    "process_write"; "process_kill_proc"; "process_wait_proc";
     "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_write";
     "typed_array_create"; "typed_array_from_list"; "typed_array_to_list";
     "typed_array_length"; "typed_array_get"; "typed_array_set";
