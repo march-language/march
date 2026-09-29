@@ -64,6 +64,7 @@ let shim_src =
 #include <stdio.h>
 #include <string.h>
 #include <signal.h>
+#include <poll.h>
 
 int64_t sbx_probe_socket(void) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -109,6 +110,10 @@ int64_t sbx_probe_listen_unbound(void) {
     return rc < 0 ? (int64_t)e : 0;
 }
 
+/* A blocking connect() can be interrupted by the runtime's own preemption
+   signal and return EINTR (seen on a macOS CI runner: "connect = 4"). The
+   connection attempt carries on in the kernel, so an EINTR is not the verdict:
+   wait for it to finish and read the real outcome from SO_ERROR. */
 int64_t sbx_probe_connect_refused(void) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return (int64_t)errno;
@@ -118,9 +123,18 @@ int64_t sbx_probe_connect_refused(void) {
     addr.sin_port = htons(1);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     int rc = connect(fd, (struct sockaddr *)&addr, sizeof addr);
-    int e = errno;
+    int e = rc < 0 ? errno : 0;
+    if (rc < 0 && e == EINTR) {
+        struct pollfd p = { fd, POLLOUT, 0 };
+        int n;
+        do { n = poll(&p, 1, 5000); } while (n < 0 && errno == EINTR);
+        int soerr = 0;
+        socklen_t len = sizeof soerr;
+        if (n > 0 && getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) == 0)
+            e = soerr;
+    }
     close(fd);
-    return rc < 0 ? (int64_t)e : 0;
+    return (int64_t)e;
 }
 
 /* Linux process probe: fork (never gated on Linux -- the scheduler needs
