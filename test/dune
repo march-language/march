@@ -7451,6 +7451,37 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/nested_actor_spawn.expected interp_nested_actor_spawn.out)))
 
+; ── __try_call / __try_call_val Err message: "panic: <msg>" on both backends ──
+(rule
+ (targets native_try_call_err_message native_try_call_err_message.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/try_call_err_message.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_try_call_err_message
+        native/try_call_err_message.march)
+   (with-stdout-to native_try_call_err_message.out
+        (system "./native_try_call_err_message")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/try_call_err_message.expected native_try_call_err_message.out)))
+
+(rule
+ (targets interp_try_call_err_message.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/try_call_err_message.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_try_call_err_message.out
+   (run %{exe:../bin/main.exe} native/try_call_err_message.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/try_call_err_message.expected interp_try_call_err_message.out)))
+
 ; ── A nested actor's message constructors sent qualified from the parent ──
 (rule
  (targets native_nested_actor_msg_from_parent native_nested_actor_msg_from_parent.out)

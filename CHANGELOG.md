@@ -35,6 +35,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A caught panic reads the same compiled and interpreted, and compiled
+  `unreachable()` no longer crashes.** When a thunk passed to
+  `__try_call` / `__try_call_val` panicked (the call behind `Check`'s
+  property runner), compiled code returned `Err("boom")` where the
+  interpreter returned `Err("panic: boom")`. Compiled now matches, and
+  `todo(msg)` likewise reads `todo: msg`. Compiled `unreachable()` used to
+  segfault; it now panics with `unreachable: reached unreachable code`.
 - **On macOS, `IO.NetConnect` no longer lets a sandboxed program listen.** Under
   `--cap-sandbox` and `forge cap run`, any network capability granted the whole
   `network*` class, so a program holding only `IO.NetConnect` could still bind
@@ -603,6 +610,13 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **Functions that only read a data structure no longer take ownership of it
+  because of a number inside it.** A function reading a `Node(Int, Tree, Tree)`
+  or a `List(Int)` was treated as consuming the whole value as soon as it used one
+  of the numbers, so every call on a shared value paid a reference-count update
+  per node. Summing a shared binary tree of depth 16 300 times now takes 0.11 s
+  instead of 0.30 s; reading a shared 10k-element list with `List.sum_int`,
+  `fold_left` and `nth` is 20% faster.
 - **The generated hosted event API's `cancel` takes the session: `cancel(s, parked)`.**
   The epoch hold a hosting actor takes for a session is now the transport's, taken at
   `register` and released at `close` for both hosting patterns (before, only the
