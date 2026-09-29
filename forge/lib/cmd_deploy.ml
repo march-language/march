@@ -15,10 +15,25 @@
     next plan: [topology.json]; per build [<build>.hcr_manifest],
     [<build>.schemas.json] and [<build>.base.json] (the base image's
     C-runtime digest, target, ABI); [derived.json] (each pool's derived
-    caps and initiated roles); [protocols/<P>.json]; [pending_split.json]
-    while a D21 split waits for its second deploy. [.forge/protocols/]
-    belongs to the compiler (build step 9's baselines, [--emit-protocols]);
-    forge never writes it. *)
+    caps and initiated roles); [protocols/<P>.json], the deploy baselines:
+    each protocol's version as the environment runs it, in the compiler's
+    baseline format, passed to every deploy build as [--protocol-baseline]
+    (so a patch's [<P>_Msg.compat()] table is computed against what is
+    running) and advanced only by a deploy that completes (and, for a D21
+    split, only by its contract); [pending_split.json] while a D21 split's
+    expand waits for its contract. [.forge/protocols/] belongs to the
+    compiler (build step 9's baselines of the last BUILD,
+    [--emit-protocols]); a deploy neither reads nor writes it.
+
+    {1 Protocol changes (D21)}
+
+    Before building, a [march --check] of the entry against the deploy
+    baselines emits this version of every protocol into the work directory
+    ([protocol_versions]). [Deploy_plan.splits_of] ([Protocol_split.plan])
+    decides from the two versions whether a build both chooses and receives
+    a changed choice; if so this deploy is the expand, and every patch and
+    base build gets [--protocol-expand <P>:<label>]. The next [forge deploy]
+    of the same version is the contract: the plain build. *)
 
 let ( let* ) = Result.bind
 
@@ -81,6 +96,8 @@ let derived_file c = Filename.concat (dir c) "derived.json"
 let protocols_dir c = Filename.concat (dir c) "protocols"
 let split_file c = Filename.concat (dir c) "pending_split.json"
 let work_dir c = Filename.concat (dir c) "build"
+(* where this deploy's check emits the new protocol versions *)
+let new_protocols_dir c = Filename.concat (work_dir c) "protocols"
 
 let copy_file src dst =
   Reconcile.mkdir_p (Filename.dirname dst);
@@ -160,7 +177,7 @@ type artifact = {
 
 (** Build [build]'s hot-reload patch for [target] (in a fresh directory:
     a CAS hit would copy the .so without its sidecars, the step-8 trap). *)
-let build_patch c ~build ~pools ~target : (artifact, string) result =
+let build_patch c ~pflags ~build ~pools ~target : (artifact, string) result =
   let* tflag = target_flag target in
   let* entry = Project.entry c.proj in
   let entry = if Filename.is_relative entry then Filename.concat c.root entry else entry in
@@ -171,10 +188,10 @@ let build_patch c ~build ~pools ~target : (artifact, string) result =
   let log = Filename.concat out "build.log" in
   let pools_flag = if build = "shared" then "" else " --topology-pools " ^ Filename.quote (String.concat "," pools) in
   let cmd =
-    Printf.sprintf "cd %s && %smarch --compile --compile-so --hot-reload %s --signing-pubkey %s%s --topology %s%s%s -o %s %s > %s 2>&1"
+    Printf.sprintf "cd %s && %smarch --compile --compile-so --hot-reload %s --signing-pubkey %s%s --topology %s%s%s%s -o %s %s > %s 2>&1"
       (Filename.quote out) (Cmd_build.lib_path_env c.proj) (Filename.quote c.prefix) (Filename.quote c.pubkey) tflag
       (Filename.quote (Topology.digest_file ~root:c.root)) pools_flag
-      (Cmd_build.ffi_flags_of ~root:c.root c.proj) (Filename.quote so) (Filename.quote entry) (Filename.quote log)
+      (Cmd_build.ffi_flags_of ~root:c.root c.proj) pflags (Filename.quote so) (Filename.quote entry) (Filename.quote log)
   in
   Printf.printf "building the %s patch for %s...\n%!" build target;
   if Sys.command cmd <> 0 then Error (Printf.sprintf "building build %s for %s failed; see %s" build target log)
@@ -184,12 +201,12 @@ let build_patch c ~build ~pools ~target : (artifact, string) result =
     Ok { a_build = build; a_target = target; a_so = so; a_manifest = m; a_manifest_path = mpath; a_schemas = so ^ ".schemas.json" }
 
 (** Build every (build, target) patch the hosts need. *)
-let build_patches c : (artifact list, string) result =
+let build_patches c ~pflags : (artifact list, string) result =
   List.fold_left (fun acc (build, pools, targets) ->
       let* acc = acc in
       List.fold_left (fun acc target ->
           let* acc = acc in
-          let* a = build_patch c ~build ~pools ~target in
+          let* a = build_patch c ~pflags ~build ~pools ~target in
           Ok (acc @ [ a ]))
         (Ok acc) targets)
     (Ok []) (builds c)
@@ -217,9 +234,90 @@ let derived_json (d : Deploy_plan.derived) : Yojson.Safe.t =
       (pool, `Assoc [ ("caps", `List (List.map (fun s -> `String s) caps));
                       ("initiates", `List (List.map (fun s -> `String s) inits)) ])) d)
 
-(** The deployed protocol structures ([.forge/deploy/<env>/protocols/]). *)
-let old_protocol c name : Deploy_plan.proto option =
-  Option.bind (read_json (Filename.concat (protocols_dir c) (name ^ ".json"))) Deploy_plan.proto_of_json
+(* ── Protocol versions (D21) ──────────────────────────────────────────── *)
+
+(** [--protocol-baseline] for every deploy baseline that reads (a file an
+    older forge wrote there, in its own format, is left out: the compiler
+    would refuse it). *)
+let baseline_flags_of_dir (deployed : string) =
+  String.concat ""
+    (List.map (fun (path, _) -> " --protocol-baseline " ^ Filename.quote path)
+       (Protocol_split.baselines_of_dir deployed))
+
+(** The protocol flags of every build of a deploy: the deploy baselines in
+    [deployed], and the expand of each split whose expand has not gone out. *)
+let protocol_flags_of_dir (deployed : string) (splits : Deploy_plan.split list) =
+  baseline_flags_of_dir deployed ^ String.concat "" (List.map (fun f -> " " ^ f) (Deploy_plan.expand_flags splits))
+
+let protocol_build_flags c splits = protocol_flags_of_dir (protocols_dir c) splits
+
+(** This version of every protocol [entry] declares: [march --check] (in
+    [cwd], with [flags]) against the deploy baselines in [deployed],
+    emitting into [out], emptied first. Each file there is the next deploy
+    baseline: [current] this version, [previous] what runs when it changed. *)
+let check_protocols ?(env = "") ?(flags = "") ~cwd ~deployed ~out ~log (entry : string)
+  : ((string * March_desugar.Desugar_endpoints.version) list, string) result =
+  (try ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote out))) with _ -> ());
+  Reconcile.mkdir_p out;
+  Reconcile.mkdir_p (Filename.dirname log);
+  let cmd =
+    Printf.sprintf "cd %s && %smarch --check%s%s --emit-protocols %s %s > %s 2>&1"
+      (Filename.quote cwd) env flags (baseline_flags_of_dir deployed) (Filename.quote out) (Filename.quote entry)
+      (Filename.quote log)
+  in
+  if Sys.command cmd <> 0 then Error (Printf.sprintf "checking the program's protocols failed; see %s" log)
+  else Ok (Protocol_split.versions_of_dir out)
+
+let protocol_versions c : ((string * March_desugar.Desugar_endpoints.version) list, string) result =
+  let* entry = Project.entry c.proj in
+  let entry = if Filename.is_relative entry then Filename.concat c.root entry else entry in
+  check_protocols ~env:(Cmd_build.lib_path_env c.proj)
+    ~flags:(" --topology " ^ Filename.quote (Topology.digest_file ~root:c.root) ^ Cmd_build.ffi_flags_of ~root:c.root c.proj)
+    ~cwd:c.root ~deployed:(protocols_dir c) ~out:(new_protocols_dir c)
+    ~log:(Filename.concat (work_dir c) "protocols.log") entry
+
+(** After a deploy: every protocol's deploy baseline in [deployed] becomes
+    the one this build emitted into [now], except a protocol whose expand
+    this deploy ran ([expanding]: what runs is not yet that version's
+    chooser). A protocol the program no longer declares (or an older
+    forge's file) loses its baseline: nothing running is of it. *)
+let advance_baselines ~(deployed : string) ~(now : string) ~(expanding : string list) =
+  Reconcile.mkdir_p deployed;
+  let emitted = Protocol_split.baselines_of_dir now in
+  let names = List.map (fun (_, (b : March_desugar.Desugar_endpoints.baseline)) -> b.current.v_proto) emitted in
+  List.iter (fun (path, (b : March_desugar.Desugar_endpoints.baseline)) ->
+      if not (List.mem b.current.v_proto expanding) then
+        copy_file path (Filename.concat deployed (b.current.v_proto ^ ".json")))
+    emitted;
+  Array.iter (fun f ->
+      let name = Filename.remove_extension f in
+      if Filename.check_suffix f ".json" && not (List.mem name names) && not (List.mem name expanding) then
+        (try Sys.remove (Filename.concat deployed f) with Sys_error _ -> ()))
+    (try Sys.readdir deployed with Sys_error _ -> [||])
+
+(** Every protocol either side has: (name, deployed, now). *)
+let protocol_pairs ~deployed ~now =
+  let names = List.sort_uniq String.compare (List.map fst deployed @ List.map fst now) in
+  List.map (fun n -> (n, List.assoc_opt n deployed, List.assoc_opt n now)) names
+
+(** The expands waiting for their contract. *)
+let read_pending c : Deploy_plan.pending list =
+  match read_json (split_file c) with
+  | Some j ->
+    (match Deploy_plan.pending_of_json j with
+     | Some ps -> ps
+     | None ->
+       Printf.printf "note: %s is from an older forge (it held back functions, not a protocol expand); ignoring it\n%!"
+         (split_file c);
+       [])
+  | None -> []
+
+let write_pending c (ps : Deploy_plan.pending list) =
+  if ps = [] then (try Sys.remove (split_file c) with Sys_error _ -> ())
+  else begin
+    Reconcile.mkdir_p (dir c);
+    Yojson.Safe.to_file (split_file c) (Deploy_plan.pending_json ps)
+  end
 
 let live_of_status (ss : Reconcile.node_status list) : Deploy_plan.live list =
   List.map (fun (s : Reconcile.node_status) ->
@@ -234,8 +332,7 @@ let live_of_status (ss : Reconcile.node_status list) : Deploy_plan.live list =
 (** Everything [Deploy_plan.classify] needs, with the patches it was
     computed from. [derived]: the compiler's analysis, when it could run. *)
 let gather c ~grant_caps ~compact ~(artifacts : artifact list) ~(derived : Deploy_plan.derived option)
-    ~(status : Reconcile.node_status list) : Deploy_plan.input =
-  let index = Topology.index_project ~root:c.root in
+    ~(status : Reconcile.node_status list) ~protocols ~pending : Deploy_plan.input =
   let old_t =
     let p = Reconcile.deployed_topology_file ~root:c.root c.env in
     if Sys.file_exists p then Result.to_option (Topology.read_digest p) else None
@@ -263,35 +360,41 @@ let gather c ~grant_caps ~compact ~(artifacts : artifact list) ~(derived : Deplo
                     if names = [] then None else Some (List.sort_uniq String.compare names)) })
       (builds c)
   in
-  let now = Deploy_plan.protos_of_index index in
-  let names = List.sort_uniq String.compare (List.map (fun (p : Deploy_plan.proto) -> p.p_name) now) in
-  let protocols = List.map (fun n ->
-      (n, old_protocol c n, List.find_opt (fun (p : Deploy_plan.proto) -> p.p_name = n) now)) names in
   let compact_after =
     match c.proj.Project.hot_reload with
     | Some hr -> hr.Project.hr_compact_after
     | None -> None
   in
   { Deploy_plan.i_env = c.env; i_old_topology = old_t; i_new_topology = c.t; i_builds = builds; i_protocols = protocols;
+    i_pending = pending;
     i_old_derived = Option.bind (read_json (derived_file c)) derived_of_json; i_new_derived = derived;
     i_grant_caps = grant_caps; i_live = live_of_status status; i_compact = compact; i_compact_after = compact_after }
 
-(** Build, gather and classify: the plan and the patches it is for. *)
-let make_plan c ~grant_caps ~compact : (Deploy_plan.plan * artifact list * Deploy_plan.derived option, string) result =
-  let* artifacts = build_patches c in
+(** Check, decide the split, build, gather and classify: the plan, the
+    patches it is for, and the protocol flags every build of it takes. *)
+let make_plan c ~grant_caps ~compact
+  : (Deploy_plan.plan * artifact list * Deploy_plan.derived option * string, string) result =
   let derived =
     match Topology_run.compiler_derived c.proj with
     | Ok d -> Some d
     | Error m -> Printf.eprintf "warning: derived caps unavailable: %s\n%!" m; None
   in
+  let* now = protocol_versions c in
+  let protocols = protocol_pairs ~deployed:(Protocol_split.versions_of_dir (protocols_dir c)) ~now in
+  let pending = read_pending c in
+  let (_, splits) =
+    Deploy_plan.splits_of ~derived c.t ~builds:(List.map (fun (b, ps, _) -> (b, ps)) (builds c)) ~protocols ~pending
+  in
+  let pflags = protocol_build_flags c splits in
+  let* artifacts = build_patches c ~pflags in
   let status = c.backend.status () in
-  let input = gather c ~grant_caps ~compact ~artifacts ~derived ~status in
-  Ok (Deploy_plan.classify input, artifacts, derived)
+  let input = gather c ~grant_caps ~compact ~artifacts ~derived ~status ~protocols ~pending in
+  Ok (Deploy_plan.classify input, artifacts, derived, pflags)
 
 (** [forge deploy --plan]: print the plan; change nothing. *)
 let plan_only ?transport ?service_ctl ?layout_prefix ~proj ~env ~grant_caps ~compact () : (string, string) result =
   let* c = setup ?transport ?service_ctl ?layout_prefix ~proj ~env () in
-  let* (plan, _, _) = make_plan c ~grant_caps ~compact in
+  let* (plan, _, _, _) = make_plan c ~grant_caps ~compact in
   Ok (Deploy_plan.render plan)
 
 (* ── Carrying a plan out (item 4) ─────────────────────────────────────── *)
@@ -321,30 +424,15 @@ let ask_stdin prompt =
 let default_opts = { yes = false; grant_caps = []; compact = false; canary = 0; timeout_ms = 30000; up_timeout = 60.;
                      confirm = ask_stdin }
 
-(* The pending D21 split: which builds ran deploy one, with the artifact
-   (cas hash) they ran it with. Deploy two runs when the same build is
-   deployed again. *)
-
-let read_split c : (string * string) list =
-  match read_json (split_file c) with
-  | Some (`Assoc kv) -> List.filter_map (fun (b, v) -> match v with `String h -> Some (b, h) | _ -> None) kv
-  | _ -> []
-
-let write_split c (entries : (string * string) list) =
-  Reconcile.mkdir_p (dir c);
-  Yojson.Safe.to_file (split_file c) (`Assoc (List.map (fun (b, h) -> (b, `String h)) entries))
-
-let clear_split c = try Sys.remove (split_file c) with Sys_error _ -> ()
-
 let pool_of c name = List.find (fun (p : Topology.pool) -> p.pool_name = name) c.t.pools
 
 let nodes_of_pool c pool = List.filter (fun (n : Reconcile.ssh_node) -> n.sn_pool = pool) c.nodes
 
 (** A base image for [build] and [target], built once per run. *)
-let base_images : (string * string, string) Hashtbl.t = Hashtbl.create 4
+let base_images : (string * string * string, string) Hashtbl.t = Hashtbl.create 4
 
-let build_base c ~build ~pools ~target : (string, string) result =
-  match Hashtbl.find_opt base_images (build, target) with
+let build_base c ~pflags ~build ~pools ~target : (string, string) result =
+  match Hashtbl.find_opt base_images (build, target, pflags) with
   | Some path -> Ok path
   | None ->
     let* flags = Topology_run.hot_reload_flags ~pubkey:c.pubkey c.proj in
@@ -352,9 +440,9 @@ let build_base c ~build ~pools ~target : (string, string) result =
     Printf.printf "building the %s base image for %s...\n%!" build target;
     let* out =
       Cmd_build.build ~release:false ?target:target_opt ~topology_pools:pools ~output_suffix:("-" ^ build)
-        ?topology_env:c.env ~extra_flags:flags ()
+        ?topology_env:c.env ~extra_flags:flags ~protocol_flags:pflags ()
     in
-    Hashtbl.replace base_images (build, target) out;
+    Hashtbl.replace base_images (build, target, pflags) out;
     Ok out
 
 (** Wait until the node's reload server answers PING. *)
@@ -478,8 +566,10 @@ let on_nodes c ~(opts : opts) ~canary (nodes : Reconcile.ssh_node list) (step : 
   else if hr_strategy c = "simultaneous" then finish (c.backend.run_on ~strategy:`All hosts hstep)
   else finish (c.backend.run_on ~strategy:(`Rolling (health c ~opts)) hosts hstep)
 
-(** Everything deployed is now the baseline of the next plan. *)
-let record c ~(artifacts : artifact list) ~(restarted : string list) ~(derived : Deploy_plan.derived option) =
+(** Everything deployed is now the baseline of the next plan; a protocol
+    this deploy expanded keeps its deploy baseline until its contract. *)
+let record c ~(artifacts : artifact list) ~(restarted : string list) ~(derived : Deploy_plan.derived option)
+    ~(expanding : string list) =
   Reconcile.mkdir_p (dir c);
   let seen = Hashtbl.create 4 in
   List.iter (fun a ->
@@ -499,44 +589,13 @@ let record c ~(artifacts : artifact list) ~(restarted : string list) ~(derived :
     artifacts;
   Option.iter (fun d -> Yojson.Safe.to_file (derived_file c) (derived_json d)) derived;
   Reconcile.record_deployed_topology ~root:c.root c.env c.t;
-  let index = Topology.index_project ~root:c.root in
-  Reconcile.mkdir_p (protocols_dir c);
-  List.iter (fun (p : Deploy_plan.proto) ->
-      Yojson.Safe.to_file (Filename.concat (protocols_dir c) (p.p_name ^ ".json")) (Deploy_plan.proto_json p))
-    (Deploy_plan.protos_of_index index)
-
-(** The manifest to activate for [build]: the whole new manifest, less the
-    functions a pending D21 split holds back to deploy two. *)
-let without (m : Cmd_deploy_hot.manifest) held =
-  { m with functions = List.filter (fun (f : Cmd_deploy_hot.fn_manifest) -> not (List.mem f.fn_name held)) m.functions }
+  advance_baselines ~deployed:(protocols_dir c) ~now:(new_protocols_dir c) ~expanding
 
 (** [forge deploy --env <env>]: plan, confirm, carry out, record. *)
 let run ?transport ?service_ctl ?layout_prefix ~proj ~env ~(opts : opts) () : (string, string) result =
   let* c = setup ?transport ?service_ctl ?layout_prefix ~proj ~env () in
   Reconcile.with_lock ~root:c.root (fun () ->
-      let* (plan, artifacts, derived) = make_plan c ~grant_caps:opts.grant_caps ~compact:opts.compact in
-      (* Deploy two of a pending split: the same artifact, deployed again. *)
-      let pending = read_split c in
-      let two =
-        List.filter (fun (b, h) ->
-            List.exists (fun a -> a.a_build = b && a.a_manifest.Cmd_deploy_hot.cas_hash = h) artifacts)
-          pending
-      in
-      if pending <> [] && two = [] then begin
-        Printf.printf "note: the pending split's deploy two is superseded by a new build; planning afresh\n%!";
-        clear_split c
-      end;
-      let plan =
-        if two = [] then plan
-        else
-          { plan with
-            pools = List.map (fun (pp : Deploy_plan.pool_plan) ->
-                if List.mem_assoc pp.pp_build two && pp.pp_mechanism = Deploy_plan.Nothing then
-                  { pp with pp_mechanism = Deploy_plan.Hot;
-                            pp_why = [ "deploy two of the D21 split: the chooser's side" ] }
-                else pp) plan.pools;
-            splits = List.filter (fun (sp : Deploy_plan.split) -> not (List.mem_assoc sp.sp_build two)) plan.splits }
-      in
+      let* (plan, artifacts, derived, pflags) = make_plan c ~grant_caps:opts.grant_caps ~compact:opts.compact in
       print_string (Deploy_plan.render plan);
       if Deploy_plan.blocked plan then
         Error "the deploy is blocked (see \"2. Mechanism and why\"); nothing was changed"
@@ -558,10 +617,6 @@ let run ?transport ?service_ctl ?layout_prefix ~proj ~env ~(opts : opts) () : (s
           | Some a -> Ok a
           | None -> Error (Printf.sprintf "no %s patch was built for %s" build target)
         in
-        let held build =
-          if List.mem_assoc build two then []
-          else List.concat_map (fun (sp : Deploy_plan.split) -> if sp.sp_build = build then sp.sp_held else []) plan.splits
-        in
         let step_pool (pp : Deploy_plan.pool_plan) : (unit, string) result =
           let nodes = nodes_of_pool c pp.pp_pool in
           match pp.pp_mechanism with
@@ -575,7 +630,7 @@ let run ?transport ?service_ctl ?layout_prefix ~proj ~env ~(opts : opts) () : (s
             let* () =
               on_nodes c ~opts ~canary:0 nodes (fun n ->
                   let target = Option.get n.sn_target in
-                  let* binary = build_base c ~build:pp.pp_build ~pools ~target in
+                  let* binary = build_base c ~pflags ~build:pp.pp_build ~pools ~target in
                   let manifest = Option.map (fun a -> a.a_manifest)
                       (List.find_opt (fun a -> a.a_build = pp.pp_build && a.a_target = target) artifacts) in
                   let policy = Host_init.policy_text ~derived ?manifest (pool_of c n.sn_pool) in
@@ -593,15 +648,13 @@ let run ?transport ?service_ctl ?layout_prefix ~proj ~env ~(opts : opts) () : (s
                 (Ok ()) nodes
           | Hot | Hot_migrate _ | Hot_drain _ ->
             Printf.printf "\n==> pool %s: %s\n%!" pp.pp_pool (Deploy_plan.mechanism_text pp.pp_mechanism);
-            let held = held pp.pp_build in
-            if held <> [] then Printf.printf "  deploy one of two: holding back %d function(s)\n%!" (List.length held);
             on_nodes c ~opts ~canary:opts.canary nodes (fun n ->
                 let target = Option.get n.sn_target in
                 let* a = artifact_for pp.pp_build target in
                 let* () = Cmd_deploy_hot.check_host_target ~recorded:target ~manifest:a.a_manifest in
                 let* _ =
                   Cmd_deploy_hot.deploy_one ~tunnel:c.transport.tunnel ~host:n.sn ~sk:c.sk
-                    ~manifest:(without a.a_manifest held) ~so_path:a.a_so
+                    ~manifest:a.a_manifest ~so_path:a.a_so
                     ~old_schemas_path:(schemas_file c pp.pp_build) ~new_schemas_path:a.a_schemas ~entry_path
                     ~old_manifest_path:(manifest_file c pp.pp_build) ~provided_epoch:epoch ~grant_caps:opts.grant_caps ()
                 in
@@ -632,15 +685,13 @@ let run ?transport ?service_ctl ?layout_prefix ~proj ~env ~(opts : opts) () : (s
             | fs -> Error ("the topology push failed on " ^ String.concat "; " fs)
           end else Ok ()
         in
-        record c ~artifacts ~restarted:!restarted ~derived;
-        if plan.splits <> [] then begin
-          write_split c (List.sort_uniq compare (List.filter_map (fun (sp : Deploy_plan.split) ->
-              Option.map (fun a -> (sp.sp_build, a.a_manifest.Cmd_deploy_hot.cas_hash))
-                (List.find_opt (fun a -> a.a_build = sp.sp_build) artifacts)) plan.splits));
-          Ok (Printf.sprintf "deploy one of two is done (D21). Once every host runs it, run `forge deploy%s` again \
-                              for deploy two." (env_flag c.env))
-        end else begin
-          if two <> [] then clear_split c;
-          Ok "deploy complete"
-        end
+        let expanding = List.filter_map (fun (sp : Deploy_plan.split) ->
+            if sp.sp_phase = `Expand then Some sp.sp_protocol else None) plan.splits in
+        record c ~artifacts ~restarted:!restarted ~derived ~expanding;
+        write_pending c (Deploy_plan.pending_after plan.splits);
+        if expanding <> [] then
+          Ok (Printf.sprintf "deploy one of two (the expand of %s) is done (D21). Every host runs it now; run \
+                              `forge deploy%s` again for deploy two (the contract)."
+                (String.concat ", " expanding) (env_flag c.env))
+        else Ok "deploy complete"
       end)
