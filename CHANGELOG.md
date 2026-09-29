@@ -686,6 +686,12 @@ git log is authoritative for exact commits.
 - **`Array.from_list` (and `RRB.from_list`) is about 8x faster.** It now builds
   the vector in one pass instead of appending one element at a time: 100,000
   elements take 6.6 ms instead of 54 ms. The resulting vector is the same.
+- **`NativeArray.sort_*` is up to 7x faster on nearly-sorted input and 4-5x
+  faster on input made of two sorted runs.** An array that is sorted apart from
+  a few misplaced elements, or that rises and then falls, now takes a quick
+  special path: 1,000,000 nearly-sorted integers sort in 1.7 ms instead of
+  11.6 ms. Other inputs are unchanged. The special path may briefly allocate up
+  to half the array's size, and falls back to the normal sort if it cannot.
 - **`List.map`, `filter`, `filter_map`, `append`, `flat_map` and `range_step` walk
   the list once instead of twice.** They were accumulator loops followed by a
   `reverse`; they are now written in natural recursive style, which

@@ -11300,8 +11300,27 @@ int64_t native_int_arr_max(void *arr) {
  *
  * nsort_W — the entry. Top-level full-run scan first: a wholly sorted or
  *   wholly descending array is finished in one pass. Only at the top level,
- *   as ipnsort does; checking every segment costs more than it saves. The
- *   depth limit is 2*floor(log2 n), unless the MARCH_TEST_NSORT_DEPTH_LIMIT
+ *   as ipnsort does; checking every segment costs more than it saves. Then,
+ *   for n >= 1024, two presorted shapes the quicksort handles badly (added
+ *   2026-09-28, specs/progress/2026-09-28-native-sort-natural-run-merging.md):
+ *     - two runs (the rest after the first run is one more run, ascending or
+ *       strictly descending, e.g. organ-pipe input): nsort_merge2_W merges
+ *       them in place after trimming the prefix/suffix already in position,
+ *       with a malloc'd buffer the size of the smaller trimmed run (<= n/2);
+ *     - nearly sorted (at most 4 descents among the first 64 elements):
+ *       nsort_outliers_W streams the array once, keeping a sorted main
+ *       sequence compacted in place and moving the elements that break it --
+ *       evicting up to 8 kept elements when a later one shows they were the
+ *       misfits -- into a buffer of at most n/16; it gives up (returns 0) as
+ *       soon as the outlier rate passes 1/16 after 256 elements, putting the
+ *       moved elements back into the exactly-sized gap they left, so the
+ *       array is still a permutation of the input. On success the outliers
+ *       are sorted (by nsort_W) and merged back from the end in O(n).
+ *   Either step falls through to the quicksort if its allocation fails.
+ *   Measured in bench/c/native_sort_bench.c `pre` against the plain core:
+ *   nearly-sorted 0.14-0.20x, organ 0.19-0.32x from n = 10k to 5M, every
+ *   other pattern 0.97-1.02x at n = 256..5M. The depth limit is
+ *   2*floor(log2 n), unless the MARCH_TEST_NSORT_DEPTH_LIMIT
  *   hook (nsort_forced_limit) overrides it, which every width honours. */
 
 static inline uint64_t nsort_rng(uint64_t *s) {
@@ -11539,12 +11558,110 @@ static void nsort_rec_##W(T *v, int64_t n, const T *ancestor,                  \
     }                                                                          \
 }                                                                              \
                                                                                \
+static void nsort_##W(T *v, int64_t n);                                        \
+                                                                               \
+static int64_t nsort_upper_##W(const T *v, int64_t n, T x) {                   \
+    int64_t lo = 0, hi = n;                                                    \
+    while (lo < hi) {                                                          \
+        int64_t mid = lo + (hi - lo) / 2;                                      \
+        if (!(x < v[mid])) lo = mid + 1; else hi = mid;                        \
+    }                                                                          \
+    return lo;                                                                 \
+}                                                                              \
+                                                                               \
+static int64_t nsort_lower_##W(const T *v, int64_t n, T x) {                   \
+    int64_t lo = 0, hi = n;                                                    \
+    while (lo < hi) {                                                          \
+        int64_t mid = lo + (hi - lo) / 2;                                      \
+        if (v[mid] < x) lo = mid + 1; else hi = mid;                           \
+    }                                                                          \
+    return lo;                                                                 \
+}                                                                              \
+                                                                               \
+static int nsort_merge2_##W(T *v, int64_t m, int64_t n) {                      \
+    int64_t i = nsort_upper_##W(v, m, v[m]);                                   \
+    int64_t j = m + nsort_lower_##W(v + m, n - m, v[m - 1]);                   \
+    int64_t la = m - i, lb = j - m;                                            \
+    if (la == 0 || lb == 0) return 1;                                          \
+    if (la <= lb) {                                                            \
+        T *buf = (T *)malloc((size_t)la * sizeof(T));                          \
+        if (!buf) return 0;                                                    \
+        memcpy(buf, v + i, (size_t)la * sizeof(T));                            \
+        int64_t o = i, x = 0, y = m;                                           \
+        while (x < la && y < j) {                                              \
+            int take_y = v[y] < buf[x];                                        \
+            v[o++] = take_y ? v[y] : buf[x];                                   \
+            y += take_y; x += !take_y;                                         \
+        }                                                                      \
+        memcpy(v + o, buf + x, (size_t)(la - x) * sizeof(T));                  \
+        free(buf);                                                             \
+    } else {                                                                   \
+        T *buf = (T *)malloc((size_t)lb * sizeof(T));                          \
+        if (!buf) return 0;                                                    \
+        memcpy(buf, v + m, (size_t)lb * sizeof(T));                            \
+        int64_t o = j, x = m, y = lb;                                          \
+        while (x > i && y > 0) {                                               \
+            int take_x = buf[y - 1] < v[x - 1];                                \
+            v[--o] = take_x ? v[x - 1] : buf[y - 1];                           \
+            x -= take_x; y -= !take_x;                                         \
+        }                                                                      \
+        memcpy(v + o - y, buf, (size_t)y * sizeof(T));                         \
+        free(buf);                                                             \
+    }                                                                          \
+    return 1;                                                                  \
+}                                                                              \
+                                                                               \
+static int nsort_outliers_##W(T *v, int64_t n) {                               \
+    int64_t cap = n / 16;                                                      \
+    if (cap < 16) return 0;                                                    \
+    T *out = (T *)malloc((size_t)cap * sizeof(T));                             \
+    if (!out) return 0;                                                        \
+    int64_t m = 0, k = 0, i = 0;                                               \
+    for (; i < n; i++) {                                                       \
+        T x = v[i];                                                            \
+        int64_t pop = 0;                                                       \
+        if (m > 0 && x < v[m - 1] && (i + 1 >= n || !(v[i + 1] < x))) {       \
+            int64_t j = m;                                                     \
+            while (j > 0 && m - j < 8 && x < v[j - 1]) j--;                    \
+            if (j == 0 || !(x < v[j - 1])) pop = m - j;                        \
+        }                                                                      \
+        int outlier = pop == 0                                                 \
+            && ((m > 0 && x < v[m - 1])                                        \
+                || (i + 1 < n && v[i + 1] < x                                  \
+                    && (m == 0 || !(v[i + 1] < v[m - 1]))));                   \
+        if (pop > 0 || outlier) {                                              \
+            if (k + pop + 1 > cap || (i >= 256 && (k + pop) * 16 > i)) {       \
+                memcpy(v + m, out, (size_t)k * sizeof(T));                     \
+                free(out);                                                     \
+                return 0;                                                      \
+            }                                                                  \
+            if (pop > 0) {                                                     \
+                memcpy(out + k, v + m - pop, (size_t)pop * sizeof(T));         \
+                k += pop; m -= pop;                                            \
+                v[m++] = x;                                                    \
+            } else {                                                           \
+                out[k++] = x;                                                  \
+            }                                                                  \
+        } else {                                                               \
+            v[m++] = x;                                                        \
+        }                                                                      \
+    }                                                                          \
+    nsort_##W(out, k);                                                         \
+    for (int64_t o = n, am = m, b = k; b > 0;) {                               \
+        if (am > 0 && out[b - 1] < v[am - 1]) v[--o] = v[--am];                \
+        else v[--o] = out[--b];                                                \
+    }                                                                          \
+    free(out);                                                                 \
+    return 1;                                                                  \
+}                                                                              \
+                                                                               \
 static void nsort_##W(T *v, int64_t n) {                                       \
     if (n < 2) return;                                                         \
     if (n <= 32) { nsort_small_##W(v, n); return; }                            \
                                                                                \
     int64_t i = 1;                                                             \
-    if (v[1] < v[0]) {                                                         \
+    int first_desc = v[1] < v[0];                                              \
+    if (first_desc) {                                                          \
         while (i < n && v[i] < v[i - 1]) i++;                                  \
         if (i == n) {                                                          \
             for (int64_t lo = 0, hi = n - 1; lo < hi; lo++, hi--)              \
@@ -11554,6 +11671,26 @@ static void nsort_##W(T *v, int64_t n) {                                       \
     } else {                                                                   \
         while (i < n && !(v[i] < v[i - 1])) i++;                               \
         if (i == n) return;                                                    \
+    }                                                                          \
+                                                                               \
+    if (n >= 1024) {                                                           \
+        int64_t j = i + 1;                                                     \
+        int second_desc = j < n && v[j] < v[i];                                \
+        if (second_desc) { while (j < n && v[j] < v[j - 1]) j++; }             \
+        else { while (j < n && !(v[j] < v[j - 1])) j++; }                      \
+        if (j == n) {                                                          \
+            if (first_desc)                                                    \
+                for (int64_t lo = 0, hi = i - 1; lo < hi; lo++, hi--)          \
+                    nsort_swap_##W(&v[lo], &v[hi]);                            \
+            if (second_desc)                                                   \
+                for (int64_t lo = i, hi = n - 1; lo < hi; lo++, hi--)          \
+                    nsort_swap_##W(&v[lo], &v[hi]);                            \
+            if (nsort_merge2_##W(v, i, n)) return;                             \
+        } else {                                                               \
+            int desc = 0;                                                      \
+            for (int64_t k = 1; k < 64; k++) desc += v[k] < v[k - 1];          \
+            if (desc <= 4 && nsort_outliers_##W(v, n)) return;                 \
+        }                                                                      \
     }                                                                          \
                                                                                \
     int limit = 0;                                                             \
