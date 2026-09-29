@@ -26,6 +26,12 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Sending a linear message can no longer fail to link.** The compiler
+  lowered a `send` whose message was linear to `march_send_linear`, which
+  only the unit-test runtime defines, so a program that reached that path
+  would have failed with an undefined symbol. It now compiles to the ordinary
+  `send`. Compiled programs also no longer declare the unused
+  `march_msg_copy`, `march_msg_move` and `march_process_alloc`.
 - **`march --check` no longer passes a protocol expand it refuses, from its cache.**
   After a clean `--check` with `--protocol-baseline` and `--protocol-expand`, the same
   check without the baseline (which the compiler refuses) exited 0 from the cache
