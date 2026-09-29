@@ -43,6 +43,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A compiled filter-shaped recursive function no longer overflows the stack
+  when its branches alternate.** A function with one `Cons(x, self(..))` arm and
+  one plain `self(..)` arm (a hand-written `filter`) is turned into a loop by
+  tail-recursion-modulo-cons, but the plain arm re-entered the original
+  function instead of continuing the loop, pushing a frame each time the input
+  switched arms. Keeping every other element of a 1,000,000-element list died
+  with SIGBUS in the stack guard page; all-kept and all-dropped inputs ran fine.
 - **SIGTERM no longer cuts the sessions a node initiated.** `Topology`'s drain
   counted only its offers' sessions, so a node that serves no role exited 0 at once
   on SIGTERM, cutting sessions it had started with `initiate_R` (from a hook or a role
@@ -679,6 +686,14 @@ git log is authoritative for exact commits.
 - **`Array.from_list` (and `RRB.from_list`) is about 8x faster.** It now builds
   the vector in one pass instead of appending one element at a time: 100,000
   elements take 6.6 ms instead of 54 ms. The resulting vector is the same.
+- **`List.map`, `filter`, `filter_map`, `append`, `flat_map` and `range_step` walk
+  the list once instead of twice.** They were accumulator loops followed by a
+  `reverse`; they are now written in natural recursive style, which
+  tail-recursion-modulo-cons compiles to a single loop that fills each new cell
+  in place. Compiled `--opt 2`, 20k-element lists: `map` 0.53 s -> 0.24 s
+  (`bench/list_producers.march`), `append` 2.0x, `filter`/`filter_map` 1.3x,
+  `flat_map` 1.2x, `range_step` 1.4x. Results and signatures are unchanged, and a
+  1,000,000-element list still works compiled and interpreted.
 - **`NativeArray.sort_int`, `sort_float`, `sort_i32` and `sort_f32` sort random
   data 17-26% faster.** The step that finishes off short runs of up to 32
   elements now uses larger sorting networks and a merge (the layout Rust's
