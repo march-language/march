@@ -35,6 +35,11 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Compiled programs no longer leak memory on every subprocess call.** Each
+  `Process.spawn_async` leaked its argument list and the `LiveProcess` handle
+  it returned (the handle could never be freed once `read_line`, `write`,
+  `kill` or `wait_proc` had used it), and `Process.run`, `Process.env` and
+  `Process.set_env` leaked their arguments on every call.
 - **A caught panic reads the same compiled and interpreted, and compiled
   `unreachable()` no longer crashes.** When a thunk passed to
   `__try_call` / `__try_call_val` panicked (the call behind `Check`'s
