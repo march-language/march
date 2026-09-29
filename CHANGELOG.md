@@ -35,6 +35,9 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **`get_actor_field` no longer keeps the actor it reads alive forever.**
+  In compiled code each call leaked one reference to the actor's record, so
+  an actor that was ever probed with `get_actor_field` was never freed.
 - **A caught panic reads the same compiled and interpreted, and compiled
   `unreachable()` no longer crashes.** When a thunk passed to
   `__try_call` / `__try_call_val` panicked (the call behind `Check`'s
