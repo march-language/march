@@ -26,6 +26,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A caught panic reads the same compiled and interpreted, and compiled
+  `unreachable()` no longer crashes.** When a thunk passed to
+  `__try_call` / `__try_call_val` panicked (the call behind `Check`'s
+  property runner), compiled code returned `Err("boom")` where the
+  interpreter returned `Err("panic: boom")`. Compiled now matches, and
+  `todo(msg)` likewise reads `todo: msg`. Compiled `unreachable()` used to
+  segfault; it now panics with `unreachable: reached unreachable code`.
 - **`march --check` no longer passes a protocol expand it refuses, from its cache.**
   After a clean `--check` with `--protocol-baseline` and `--protocol-expand`, the same
   check without the baseline (which the compiler refuses) exited 0 from the cache
