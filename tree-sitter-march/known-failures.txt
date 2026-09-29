@@ -1,0 +1,10 @@
+# Files scripts/check-tree-sitter.sh lets fail to parse (ERROR or MISSING node).
+# One path per line.  A file that parses again must be removed (the check goes
+# red on a stale entry), so this list only shrinks.  Add a file here only with
+# a todo in specs/todos/ saying which construct the grammar lacks.
+#
+# The compiler rejects these too, so tree-sitter failing on them is correct:
+bench/http_get.march                                 # menhir-rejects: `if` without `else`
+bench/http_get_close.march                           # menhir-rejects: `if` without `else`
+bench/http_get_keepalive.march                       # menhir-rejects: `if` without `else`
+test/imports/test_sibling_parse_error/test_b.march   # menhir-rejects: intentionally invalid fixture

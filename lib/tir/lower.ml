@@ -838,7 +838,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
              module's prefix ([rename_scoped_vars]) — before, only this level
              was qualified, so the call stayed bare and failed to link.
              specs/progress/2026-09-25-nested-module-parent-call.md *)
-          let scopes = (prefix, direct_fn_names) :: enclosing in
+          let scopes =
+            (prefix, direct_fn_names @ Lower_decls.nested_qualified_fn_names decls) :: enclosing in
           with_current_module_fns direct_fn_names (fun () ->
           Lower_state.with_enclosing_module_fns (Lower_decls.scoped_names enclosing) (fun () ->
           (* This module's own fns shadow an entry fn of the same name. *)

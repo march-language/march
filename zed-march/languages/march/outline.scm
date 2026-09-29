@@ -8,7 +8,7 @@
 
 (module_def
   "mod" @context
-  name: (type_identifier) @name) @item
+  name: (module_path) @name) @item
 
 (actor_def
   "actor" @context
@@ -20,7 +20,7 @@
 
 (impl_def
   "impl" @context
-  interface: (type_identifier) @name) @item
+  interface: (module_path) @name) @item
 
 (protocol_def
   "protocol" @context
