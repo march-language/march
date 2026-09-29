@@ -4301,6 +4301,33 @@ let test_same_named_actors_spawned_one_still_rejected () =
   Alcotest.(check bool) "the chain names the actor that actually holds it"
     true (has_error_with ctx "Safe.Safe__Worker_Go")
 
+(* A nested actor's message constructors are reachable from the parent by
+   their QUALIFIED name, like a nested variant's (`Inner.A(1)`); before
+   2026-09-28 neither spelling resolved.  The bare name stays module-local on
+   purpose: exporting it would add a candidate to the parent's own bare `Set`
+   (see nested_actor_msg_from_parent.march, which pins both backends). *)
+let test_nested_actor_msg_ctor_qualified_from_parent () =
+  let src body = Printf.sprintf {|mod Outer do
+    needs IO.Spawn
+    mod Inner do
+      actor Box do
+        state { n : Int }
+        init { n: 0 }
+        on Set(k : Int) do { n: k } end
+      end
+    end
+    fn main(_s : Cap(IO.Spawn)) do
+      let p = spawn(Inner.Box)
+      %s
+    end
+  end|} body in
+  Alcotest.(check bool) "send(p, Inner.Set(1)) typechecks" false
+    (has_errors (typecheck (src "send(p, Inner.Set(1))")));
+  Alcotest.(check bool) "an Inner.Box.Msg annotation accepts Inner.Set" false
+    (has_errors (typecheck (src "let m : Inner.Box.Msg = Inner.Set(2)\n      send(p, m)")));
+  Alcotest.(check bool) "the bare Set is still not exported to the parent" true
+    (has_errors (typecheck (src "send(p, Set(1))")))
+
 (* A nested actor spawned by its BARE name from OUTSIDE its declaring module:
    the referring key ("main") has no module prefix, so prefix-first resolution
    cannot reach "Sub.Weeble".  A bare ALIAS node forwards it — without that,
@@ -17405,6 +17432,7 @@ let compiler_suites =
           Alcotest.test_case "same-named actors: only spawned one charged" `Quick test_same_named_actors_only_spawned_one_charged;
           Alcotest.test_case "same-named actors: spawned one still rejected" `Quick test_same_named_actors_spawned_one_still_rejected;
           Alcotest.test_case "nested actor bare spawn from entry: charged" `Quick test_nested_actor_bare_spawn_from_entry_is_charged;
+          Alcotest.test_case "nested actor message ctor, qualified, from parent" `Quick test_nested_actor_msg_ctor_qualified_from_parent;
           (* item 1380: Cap(IO.NetListen) body-scan enforcement *)
           Alcotest.test_case "tcp_listen body, no needs: warns NetListen"   `Quick test_netlisten_body_missing_needs_warns;
           Alcotest.test_case "tcp_listen body, needs NetListen: no warning" `Quick test_netlisten_body_with_needs_no_warning;
