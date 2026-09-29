@@ -1,0 +1,7 @@
+sequential mismatches: 0
+p0 reads: still mine
+p0 exit: 0
+stale p0 reads: <none>
+p1 reads: p1 line
+p1 exit: 0
+concurrent mismatches: 0
