@@ -5,6 +5,8 @@
 
      deny file-write*    -> program runs, writes blocked      ENFORCEABLE
      deny network*       -> program runs, bind fails cleanly  ENFORCEABLE
+     outbound only       -> DNS/TCP/TLS client runs, bind EPERM (NetConnect)
+     bind + inbound only -> server runs, outbound EPERM   (NetListen)
      deny process-fork   -> program runs                      ENFORCEABLE
      deny file-read*     -> SIGABRT (dyld cannot map libs)    NOT enforceable
      deny process-exec   -> exit 71 (target cannot launch)    NOT enforceable
@@ -166,7 +168,17 @@ let profile_for ~caps ~binary =
   Buffer.add_string b (Printf.sprintf "(allow file-read* (literal %S))\n" binary);
   if holds_under caps "IO.FileWrite" then
     Buffer.add_string b "(allow file-write*)\n";
-  if holds_under caps "IO.Network" then Buffer.add_string b "(allow network*)\n";
+  (* Split by direction rather than network*: holds_under is bidirectional, so
+     IO.NetConnect alone would otherwise open network-bind too.  Measured on
+     macOS 26: a connect-only client (DNS, TCP, TLS) needs network-outbound
+     only -- getaddrinfo reaches mDNSResponder over a unix socket, which is
+     network-outbound -- and a listen-only server needs network-bind +
+     network-inbound only.  bin/main.ml's embedded profile makes the same
+     split; test/test_cap_sandbox_profile.ml keeps the two in step. *)
+  if holds_under caps "IO.NetConnect" then
+    Buffer.add_string b "(allow network-outbound)\n";
+  if holds_under caps "IO.NetListen" then
+    Buffer.add_string b "(allow network-bind)\n(allow network-inbound)\n";
   if holds_under caps "IO.Process" then
     Buffer.add_string b "(allow process-fork)\n";
   Buffer.contents b

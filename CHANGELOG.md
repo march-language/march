@@ -45,6 +45,45 @@ git log is authoritative for exact commits.
   Linux now: the archive used to come before the program on the link line, and
   GNU ld then skipped it (`undefined reference`).
 
+- **`get_actor_field` no longer keeps the actor it reads alive forever.**
+  In compiled code each call leaked one reference to the actor's record, so
+  an actor that was ever probed with `get_actor_field` was never freed.
+- **A caught panic reads the same compiled and interpreted, and compiled
+  `unreachable()` no longer crashes.** When a thunk passed to
+  `__try_call` / `__try_call_val` panicked (the call behind `Check`'s
+  property runner), compiled code returned `Err("boom")` where the
+  interpreter returned `Err("panic: boom")`. Compiled now matches, and
+  `todo(msg)` likewise reads `todo: msg`. Compiled `unreachable()` used to
+  segfault; it now panics with `unreachable: reached unreachable code`.
+- **On macOS, `IO.NetConnect` no longer lets a sandboxed program listen.** Under
+  `--cap-sandbox` and `forge cap run`, any network capability granted the whole
+  `network*` class, so a program holding only `IO.NetConnect` could still bind
+  and accept connections. The grant is now split: `IO.NetConnect` allows
+  outbound connections (DNS, TCP and TLS clients keep working), `IO.NetListen`
+  allows bind and inbound, `IO.Network` allows both. Linux already worked this
+  way.
+
+- **The parent module can send to a nested actor by qualified message name.**
+  `send(p, Inner.Set(1))` from the module enclosing `Inner` failed with
+  "I don't know a constructor called `Inner.Set`", although `Inner.A(1)` and
+  `spawn(Inner.Box)` worked. A nested actor's message constructors are now
+  reachable qualified, and so is an `Inner.Box.Msg` annotation. The bare
+  name stays local to the actor's module.
+
+- **A module that `import`s a sibling declared later in the file is now
+  checked against that sibling's capabilities.** Sibling modules were
+  checked in declaration order unless a qualified reference said otherwise,
+  so `import Sibling` followed by bare calls into a later `Sibling` ran
+  before `Sibling`'s capabilities were known, and the missing-`needs` error
+  for the import was silently skipped. An import now orders the importer
+  after the sibling, unless the two modules import each other.
+
+- **Sending a linear message can no longer fail to link.** The compiler
+  lowered a `send` whose message was linear to `march_send_linear`, which
+  only the unit-test runtime defines, so a program that reached that path
+  would have failed with an undefined symbol. It now compiles to the ordinary
+  `send`. Compiled programs also no longer declare the unused
+  `march_msg_copy`, `march_msg_move` and `march_process_alloc`.
 - **Two actors with the same name in different modules are now two actors.**
   An actor `Box` in `mod A` and another `Box` in `mod B` (or at the file's
   root) shared one definition: the interpreter spawned the same actor for
@@ -574,6 +613,13 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **Functions that only read a data structure no longer take ownership of it
+  because of a number inside it.** A function reading a `Node(Int, Tree, Tree)`
+  or a `List(Int)` was treated as consuming the whole value as soon as it used one
+  of the numbers, so every call on a shared value paid a reference-count update
+  per node. Summing a shared binary tree of depth 16 300 times now takes 0.11 s
+  instead of 0.30 s; reading a shared 10k-element list with `List.sum_int`,
+  `fold_left` and `nth` is 20% faster.
 - **The generated hosted event API's `cancel` takes the session: `cancel(s, parked)`.**
   The epoch hold a hosting actor takes for a session is now the transport's, taken at
   `register` and released at `close` for both hosting patterns (before, only the

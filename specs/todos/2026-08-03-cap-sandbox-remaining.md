@@ -8,7 +8,8 @@ are what is left, all narrow.
 - [x] **`IO.NetListen` on Linux** — DONE 2026-09-21, see
   `specs/progress/2026-09-21-cap-sandbox-linux-netlisten.md` (original bullet
   kept there). The macOS half is filed separately:
-  `specs/todos/2026-09-21-cap-sandbox-macos-netlisten-not-split.md`.
+  `specs/todos/2026-09-21-cap-sandbox-macos-netlisten-not-split.md`, done
+  2026-09-28: `specs/progress/2026-09-28-cap-sandbox-macos-netlisten-split.md`.
 
 - [ ] **`IO.FileRead` under the Linux self-sandbox needs Landlock — re-scoped
   2026-08-10, see `specs/2026-08-10-cap-tier5-investigation.md`.** Confirmed

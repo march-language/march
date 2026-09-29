@@ -64,6 +64,7 @@ let shim_src =
 #include <stdio.h>
 #include <string.h>
 #include <signal.h>
+#include <poll.h>
 
 int64_t sbx_probe_socket(void) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -109,6 +110,10 @@ int64_t sbx_probe_listen_unbound(void) {
     return rc < 0 ? (int64_t)e : 0;
 }
 
+/* A blocking connect() can be interrupted by the runtime's own preemption
+   signal and return EINTR (seen on a macOS CI runner: "connect = 4"). The
+   connection attempt carries on in the kernel, so an EINTR is not the verdict:
+   wait for it to finish and read the real outcome from SO_ERROR. */
 int64_t sbx_probe_connect_refused(void) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return (int64_t)errno;
@@ -118,9 +123,18 @@ int64_t sbx_probe_connect_refused(void) {
     addr.sin_port = htons(1);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     int rc = connect(fd, (struct sockaddr *)&addr, sizeof addr);
-    int e = errno;
+    int e = rc < 0 ? errno : 0;
+    if (rc < 0 && e == EINTR) {
+        struct pollfd p = { fd, POLLOUT, 0 };
+        int n;
+        do { n = poll(&p, 1, 5000); } while (n < 0 && errno == EINTR);
+        int soerr = 0;
+        socklen_t len = sizeof soerr;
+        if (n > 0 && getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) == 0)
+            e = soerr;
+    }
     close(fd);
-    return rc < 0 ? (int64_t)e : 0;
+    return (int64_t)e;
 }
 
 /* Linux process probe: fork (never gated on Linux -- the scheduler needs
@@ -459,9 +473,16 @@ let test_linux_deny_write () =
    that withheld IO.Network. forge/lib/cap_sandbox.ml's own measurement notes
    the same thing ("deny network* -> program runs, bind fails cleanly"). The
    printed label stays "socket=" for output-format consistency with the Linux
-   fixtures; only the underlying C symbol differs. Same anchor-call pattern,
+   fixtures; only the underlying C symbol differs. That applies to the
+   deny-net fixture only: the deny-process and deny-write fixtures hold
+   IO.NetConnect, which grants network-outbound and NOT network-bind, so they
+   probe a refused loopback connect ("connect=", ECONNREFUSED when allowed)
+   instead of bind. Same anchor-call pattern,
    and same explicit-`main`-grant requirement, as the Linux fixtures above,
    and for the same reasons. ─────────────────────────────────────────────── *)
+
+(* ECONNREFUSED is 61 on macOS (111 on Linux). *)
+let econnrefused_macos = 61
 
 let macos_deny_net_src =
   {|
@@ -496,7 +517,7 @@ mod SbxDenyProcessMac do
   needs IO.FileWrite
 
   extern "raw" : Cap(IO.Foreign) do
-    fn probe_socket() : Int = "sbx_probe_bind"
+    fn probe_connect() : Int = "sbx_probe_connect_refused"
     fn probe_fork() : Int = "sbx_probe_fork"
     fn probe_write_open() : Int = "sbx_probe_write_open"
     fn probe_exec_inplace() : Int = "sbx_probe_exec_inplace"
@@ -505,7 +526,7 @@ mod SbxDenyProcessMac do
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _w : Cap(IO.FileWrite)) : Unit do
     let _anchor_net = tcp_connect("127.0.0.1", 1)
     let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
-    println("socket=" ++ int_to_string(probe_socket()))
+    println("connect=" ++ int_to_string(probe_connect()))
     println("fork=" ++ int_to_string(probe_fork()))
     println("write=" ++ int_to_string(probe_write_open()))
     println("exec=" ++ int_to_string(probe_exec_inplace()))
@@ -544,7 +565,7 @@ mod SbxDenyWriteMac do
   needs IO.Process
 
   extern "raw" : Cap(IO.Foreign) do
-    fn probe_socket() : Int = "sbx_probe_bind"
+    fn probe_connect() : Int = "sbx_probe_connect_refused"
     fn probe_fork() : Int = "sbx_probe_fork"
     fn probe_write_open() : Int = "sbx_probe_write_open"
   end
@@ -552,7 +573,7 @@ mod SbxDenyWriteMac do
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _p : Cap(IO.Process)) : Unit do
     let _anchor_net = tcp_connect("127.0.0.1", 1)
     let _anchor_proc = process_pid()
-    println("socket=" ++ int_to_string(probe_socket()))
+    println("connect=" ++ int_to_string(probe_connect()))
     println("fork=" ++ int_to_string(probe_fork()))
     println("write=" ++ int_to_string(probe_write_open()))
   end
@@ -572,7 +593,7 @@ let test_macos_deny_process () =
   if not is_macos then Alcotest.skip ()
   else begin
     let out = compile_and_run macos_deny_process_src in
-    check_field "socket" 0 out;
+    check_field "connect" econnrefused_macos out;
     check_field "fork" 1 out;
     check_field "write" 0 out;
     check_field "exec" 1 out
@@ -590,9 +611,107 @@ let test_macos_deny_write () =
   if not is_macos then Alcotest.skip ()
   else begin
     let out = compile_and_run macos_deny_write_src in
-    check_field "socket" 0 out;
+    check_field "connect" econnrefused_macos out;
     check_field "fork" 0 out;
     check_field "write" 1 out
+  end
+
+(* ── macOS: IO.NetListen is split from IO.NetConnect ──────────────────────
+   The embedded profile grants network-outbound for IO.NetConnect and
+   network-bind + network-inbound for IO.NetListen, instead of network* for
+   either (which let a connect-only program bind).  The deny-listen fixture
+   also does a REAL client round trip through March's own tcp_connect with a
+   hostname ("localhost", so getaddrinfo runs) to a listener this test opens
+   outside the sandbox: that is the "a connect-only program still works"
+   half, not just a probe returning ECONNREFUSED.  The listener is never
+   accept()ed; connect and the send complete against the backlog. *)
+
+
+let macos_deny_listen_src port =
+  Printf.sprintf
+    {|
+mod SbxDenyListenMac do
+  needs IO.Console
+  needs IO.Foreign
+  needs IO.NetConnect
+
+  extern "raw" : Cap(IO.Foreign) do
+    fn probe_bind() : Int = "sbx_probe_bind"
+    fn probe_listen() : Int = "sbx_probe_listen_unbound"
+    fn probe_connect() : Int = "sbx_probe_connect_refused"
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect)) : Unit do
+    match tcp_connect("localhost", %d) do
+    Ok(fd) ->
+      println("roundtrip_connect=0")
+      match tcp_send_all(fd, "ping") do
+      Ok(_) -> println("roundtrip_send=0")
+      Err(_) -> println("roundtrip_send=1")
+      end
+      tcp_close(fd)
+    Err(m) -> println("roundtrip_connect=1 " ++ m)
+    end
+    println("bind=" ++ int_to_string(probe_bind()))
+    println("listen=" ++ int_to_string(probe_listen()))
+    println("connect=" ++ int_to_string(probe_connect()))
+  end
+end
+|}
+    port
+
+let macos_hold_listen_src =
+  {|
+mod SbxHoldListenMac do
+  needs IO.Console
+  needs IO.Foreign
+  needs IO.NetListen
+
+  extern "raw" : Cap(IO.Foreign) do
+    fn probe_bind() : Int = "sbx_probe_bind"
+    fn probe_listen() : Int = "sbx_probe_listen_unbound"
+    fn probe_connect() : Int = "sbx_probe_connect_refused"
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _l : Cap(IO.NetListen)) : Unit do
+    let _anchor_listen = tcp_listen(0)
+    println("bind=" ++ int_to_string(probe_bind()))
+    println("listen=" ++ int_to_string(probe_listen()))
+    println("connect=" ++ int_to_string(probe_connect()))
+  end
+end
+|}
+
+let with_loopback_listener (f : int -> 'a) : 'a =
+  let sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> try Unix.close sock with _ -> ()) (fun () ->
+      Unix.setsockopt sock Unix.SO_REUSEADDR true;
+      Unix.bind sock (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+      Unix.listen sock 8;
+      match Unix.getsockname sock with
+      | Unix.ADDR_INET (_, port) -> f port
+      | _ -> Alcotest.fail "listener has no inet address")
+
+let test_macos_deny_listen () =
+  if not is_macos then Alcotest.skip ()
+  else begin
+    let out = with_loopback_listener (fun port ->
+        compile_and_run (macos_deny_listen_src port)) in
+    check_field "roundtrip_connect" 0 out;
+    check_field "roundtrip_send" 0 out;
+    check_field "bind" 1 out;
+    check_field "listen" 1 out;
+    check_field "connect" econnrefused_macos out
+  end
+
+let test_macos_hold_listen () =
+  if not is_macos then Alcotest.skip ()
+  else begin
+    let out = compile_and_run macos_hold_listen_src in
+    check_field "bind" 0 out;
+    check_field "listen" 0 out;
+    (* NetListen alone is not NetConnect: outbound is refused. *)
+    check_field "connect" 1 out
   end
 
 (* ── macOS: scoped IO.FileWrite resolves symlinks on the deployment machine ──
@@ -723,6 +842,8 @@ let tests : unit Alcotest.test_case list =
     Alcotest.test_case "macos: PROCESS withheld denies fork AND exec, NET/WRITE still allowed" `Slow test_macos_deny_process;
     Alcotest.test_case "macos: PROCESS held allows fork and exec" `Slow test_macos_hold_process;
     Alcotest.test_case "macos: FILEWRITE withheld denies write-open, NET/FORK still allowed" `Slow test_macos_deny_write;
+    Alcotest.test_case "macos: NETLISTEN withheld (NetConnect held) denies bind/listen, a real connect still works" `Slow test_macos_deny_listen;
+    Alcotest.test_case "macos: NETLISTEN held allows bind/listen, denies outbound" `Slow test_macos_hold_listen;
     Alcotest.test_case "macos: FILEWRITE scope under symlinked /tmp allows in-scope writes, denies out-of-scope" `Slow test_macos_scope_under_symlinked_tmp;
     Alcotest.test_case "macos: FILEWRITE scope that does not exist yet resolves via its existing prefix" `Slow test_macos_scope_not_yet_existing;
     Alcotest.test_case "macos: FILEWRITE scope that is itself a symlink resolves to its target" `Slow test_macos_scope_is_symlink;
