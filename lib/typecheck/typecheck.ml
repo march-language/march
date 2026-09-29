@@ -6053,12 +6053,23 @@ let rec check_decl env (d : Ast.decl) : env =
     validate_island_protocol env name decls;
     (* Expose only public names as "ModName.name" in the outer env.
        Also export sub-module keys: if "B" is in pub_set, export "B.f" as "A.B.f". *)
+    (* [pub_set] can hold hundreds of names (an `@[endpoints]` role module),
+       and the export filters below run over EVERY name in scope -- the whole
+       stdlib included -- once per nested module, so membership is a hash
+       lookup rather than a list walk
+       (specs/progress/2026-09-28-endpoints-frontend-superlinear-in-protocol-count.md). *)
+    let pub_tbl = Hashtbl.create (2 * List.length pub_set + 1) in
+    List.iter (fun n -> Hashtbl.replace pub_tbl n ()) pub_set;
+    let is_pub n = Hashtbl.mem pub_tbl n in
+    (* [k] is [n] itself or [n ^ "." ^ rest] with a non-empty [rest], for some
+       [n] in [pub_set]. *)
     let is_pub_key k =
-      List.exists (fun n ->
-        k = n ||
-        (String.length k > String.length n + 1 &&
-         String.sub k 0 (String.length n + 1) = n ^ ".")
-      ) pub_set
+      is_pub k ||
+      (let len = String.length k in
+       let rec go i =
+         i < len - 1 && ((k.[i] = '.' && is_pub (String.sub k 0 i)) || go (i + 1))
+       in
+       go 1)
     in
     (* Collect exported names from inner_env.vars.
        StrMap guarantees one entry per key so deduplication is not needed. *)
@@ -6087,15 +6098,33 @@ let rec check_decl env (d : Ast.decl) : env =
        type name is exported, not the constructors (encapsulation). *)
     let proof_cap_type_keys = List.map fst inner_env.proof_caps in
     let new_types = StrMap.filter (fun k _ ->
-        List.mem k pub_set || List.mem k proof_cap_type_keys
+        is_pub k || List.mem k proof_cap_type_keys
       ) inner_env.types in
-    let new_ctors = StrMap.filter_map (fun _k cis ->
+    (* A QUALIFIED key this module merely inherited from the enclosing scope
+       (still the very list the outer env holds) is not this module's to
+       export.  Re-exporting it under [name.txt ^ "."] made every sibling
+       module that declares a public type of the same bare name (each
+       `@[endpoints]` role module declares `Entry`, `Yield`, ...) copy all of
+       the previous siblings' qualified keys again under its own prefix
+       (`P1_A.P0_A.X`, `P1_B.P1_A.P0_A.X`, ...): the constructor table
+       DOUBLED per role module, and `--check` of six protocols took minutes
+       (specs/progress/2026-09-28-endpoints-frontend-superlinear-in-protocol-count.md).
+       Bare keys are unaffected; so are qualified keys this module's own
+       nested modules exported, which are not in the outer env. *)
+    let inherited_qualified k cis =
+      String.contains k '.'
+      && (match StrMap.find_opt k env.ctors with
+          | Some outer -> outer == cis
+          | None -> false)
+    in
+    let new_ctors = StrMap.filter_map (fun k cis ->
+        if inherited_qualified k cis then None else
         let filtered = List.filter (fun ci ->
           (* Hide constructors for opaque types declared in the sig *)
           not (List.mem ci.ci_type opaque_types) &&
           (* Export constructor only if its parent type is public AND
              the constructor itself is explicitly marked Public. *)
-          List.mem ci.ci_type pub_set && ci.ci_vis = Ast.Public
+          is_pub ci.ci_type && ci.ci_vis = Ast.Public
         ) cis in
         match filtered with [] -> None | _ -> Some filtered
       ) inner_env.ctors in
@@ -6167,7 +6196,7 @@ let rec check_decl env (d : Ast.decl) : env =
        ("Conduit.JobRow") so that type annotations written with the module
        prefix also resolve to a structural TRecord instead of opaque TCon. *)
     let new_records = StrMap.fold (fun k v acc ->
-        if List.mem k pub_set then
+        if is_pub k then
           StrMap.add (name.txt ^ "." ^ k) v (StrMap.add k v acc)
         else acc
       ) inner_env.records StrMap.empty in

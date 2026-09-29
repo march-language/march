@@ -43,6 +43,11 @@ git log is authoritative for exact commits.
   switched arms. Keeping every other element of a 1,000,000-element list died
   with SIGBUS in the stack guard page; all-kept and all-dropped inputs ran fine.
 
+- **`march --check` of a module with several `@[endpoints]` protocols is fast
+  again.** Each protocol made every later one roughly twice as slow to typecheck:
+  one module with six protocols took about 9 minutes. It now takes under a
+  second, and time grows roughly linearly with the number of protocols (16
+  protocols: 1.6 s). Diagnostics are unchanged.
 - **A path-scoped `needs IO.FileRead("...")` now covers `csv_open`.** A
   literal path passed to `csv_open` was never checked against the declared
   scope, so `csv_open("/etc/passwd", ...)` compiled under

@@ -1932,32 +1932,6 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/drain_peers.expected drain_peers_interp.out)))
 
-; Part two of the above: three more protocols (Pair, Relay3, Fork) under the
-; chaos peers. A second file because the frontend's time grows steeply with
-; the number of `@[endpoints]` protocols in one module (three: seconds; five:
-; ~50 s; six: ~8 min), which a test must not pay.
-(rule
- (targets drain_peers_multi_bin drain_peers_multi.out drain_peers_multi_interp.out)
- (deps (file %{exe:../bin/main.exe})
-       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
-       (source_tree ../stdlib)
-       (file session/drain_peers_multi.march))
- (action
-  (progn
-   (with-stdout-to drain_peers_multi_interp.out
-     (run %{exe:../bin/main.exe} session/drain_peers_multi.march))
-   (run %{exe:../bin/main.exe} --compile -o drain_peers_multi_bin
-        session/drain_peers_multi.march)
-   (with-stdout-to drain_peers_multi.out (system "./drain_peers_multi_bin")))))
-
-(rule
- (alias runtest)
- (action (diff session/drain_peers_multi.expected drain_peers_multi.out)))
-
-(rule
- (alias runtest)
- (action (diff session/drain_peers_multi.expected drain_peers_multi_interp.out)))
-
 ; `Cap(ClusterNode.Live)` as a seam (D35, distributed-deploys step 4,
 ; 2026-09-23): a toy placement written against the cluster capability only,
 ; driven by a fake dictionary attached with `ClusterNode.attach(io, ops)`.
