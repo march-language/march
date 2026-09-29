@@ -272,16 +272,14 @@ let test_no_undeclared_identity_fallthrough () =
    unit-test-only arena files, so the declares below that ONLY they define
    are compared too -- and pinned, because the driver never links them. *)
 
-(* Declared unconditionally in the native preamble but defined only in the
-   unit-test-only per-process arena runtime (march_message.c, march_heap.c),
-   which the driver never links.  march_send_linear is emitted for a `send`
-   whose message var is linear (llvm_emit.ml); that path is latent today (a
-   destructured `let (m, _) = ...; send(pid, m)` still compiles to
-   march_send), and a program that reached it would fail to link.  Recorded
-   in specs/progress/2026-09-26-same-named-builtin-abi-audit.md; do not add
-   names here. *)
-let defined_only_in_unit_test_runtime =
-  [ "march_msg_copy"; "march_msg_move"; "march_process_alloc"; "march_send_linear" ]
+(* Declares defined only by the unit-test-only per-process arena runtime
+   (march_message.c, march_heap.c), which the driver never links.  Must stay
+   EMPTY: such a declare is a link error waiting for the first program that
+   reaches it.  It held march_send_linear (emitted for a `send` whose message
+   var was linear) and three unused preamble declares until 2026-09-28, when
+   the linear send was lowered to march_send and the four declares dropped
+   (specs/progress/2026-09-28-send-linear-declared-but-never-linked.md). *)
+let defined_only_in_unit_test_runtime : string list = []
 
 let runtime_dir () =
   Filename.concat (Filename.dirname Sys.executable_name) "../runtime"

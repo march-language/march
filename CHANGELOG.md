@@ -45,6 +45,12 @@ git log is authoritative for exact commits.
   ran interpreted but a compiled program failed to link (`A.f` undefined),
   whenever `Outer` was itself nested in the entry module, or was a library
   (`MARCH_LIB_PATH`) or stdlib module.
+- **Sending a linear message can no longer fail to link.** The compiler
+  lowered a `send` whose message was linear to `march_send_linear`, which
+  only the unit-test runtime defines, so a program that reached that path
+  would have failed with an undefined symbol. It now compiles to the ordinary
+  `send`. Compiled programs also no longer declare the unused
+  `march_msg_copy`, `march_msg_move` and `march_process_alloc`.
 - **Two actors with the same name in different modules are now two actors.**
   An actor `Box` in `mod A` and another `Box` in `mod B` (or at the file's
   root) shared one definition: the interpreter spawned the same actor for
