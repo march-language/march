@@ -35,6 +35,15 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **`Process.spawn_async` no longer hands a running process's slot to a new
+  one.** Compiled code kept live processes in a fixed table of 64 with no
+  lock. The 65th spawn silently closed the first process's pipes, so a
+  `LiveProcess` held that long read from and wrote to nothing or to another
+  child, and two threads spawning at once could take the same slot. The
+  table is now locked and grows as needed. A handle used after `wait_proc` no
+  longer reaches whichever process took its slot next. Interpreted,
+  `wait_proc` on a child that reads its stdin (such as `cat`) no longer
+  hangs.
 - **`get_actor_field` no longer keeps the actor it reads alive forever.**
   In compiled code each call leaked one reference to the actor's record, so
   an actor that was ever probed with `get_actor_field` was never freed.

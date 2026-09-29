@@ -7409,6 +7409,37 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/nested_actor_spawn.expected interp_nested_actor_spawn.out)))
 
+; ── Process.spawn_async registry: no live-slot reuse, stale handles, threads ──
+(rule
+ (targets native_live_process_registry native_live_process_registry.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/live_process_registry.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_live_process_registry
+        native/live_process_registry.march)
+   (with-stdout-to native_live_process_registry.out
+        (system "./native_live_process_registry")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/live_process_registry.expected native_live_process_registry.out)))
+
+(rule
+ (targets interp_live_process_registry.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/live_process_registry.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_live_process_registry.out
+   (run %{exe:../bin/main.exe} native/live_process_registry.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/live_process_registry.expected interp_live_process_registry.out)))
+
 ; ── __try_call / __try_call_val Err message: "panic: <msg>" on both backends ──
 (rule
  (targets native_try_call_err_message native_try_call_err_message.out)
