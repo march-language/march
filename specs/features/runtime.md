@@ -806,7 +806,7 @@ Two operations for value transfer between process heaps:
 - Only updates heap accounting: `src.live_bytes -= size`, `dst.live_bytes += size`
 - The linear type system guarantees no other references exist in `src` after the move
 
-The LLVM emitter (`lib/tir/llvm_emit.ml`) chooses between these at compile time: when a `send` call's message argument has `v_lin = Lin` in the TIR, it emits `march_send_linear` (which uses the move path) instead of `march_send` (copy path).
+These two, like the rest of the per-process arena runtime (`march_message.c`, `march_heap.c`), are unit-test-only (`runtime/sources.list`): the driver does not link them into compiled programs, and the compiler emits no call to them. Every `send`, linear message or not, compiles to `march_send`.
 
 ### MPSC Mailbox with Selective Receive (`march_mailbox_t` in `march_message.h`)
 
@@ -842,20 +842,6 @@ Properties:
 - **Only runs at safe points**: the owning process must be yielded (PROC_WAITING or similar); Perceus RC ensures all live objects have `rc > 0`
 - **Exact pointer scan**: uses `n_fields` from `march_alloc_meta` to bound the field scan; the forwarding-table lookup guards against scalar field confusion
 
-### Linear Send Optimization in the LLVM Emitter
+### Linear Send (no longer a separate emit path)
 
-`lib/tir/llvm_emit.ml` now has a special `EApp` case:
-
-```ocaml
-(* Send with linear message: emit march_send_linear (zero-copy move) *)
-| Tir.EApp (f, [actor_atom; msg_atom])
-  when f.Tir.v_name = "send"
-    && (match msg_atom with
-        | Tir.AVar v -> v.Tir.v_lin = Tir.Lin
-        | _ -> false) ->
-  (* emit march_send_linear instead of march_send *)
-```
-
-When the TIR typechecker has proved the message is linear, the emitted code calls `march_send_linear` rather than `march_send`.  This is a compile-time hint that propagates to the runtime's message-passing layer without any overhead at the call site.
-
-The LLVM preamble now also declares `march_msg_copy`, `march_msg_move`, and `march_process_alloc` for future use by the compiler backend when direct heap access is needed.
+`lib/tir/llvm_emit.ml` used to emit `march_send_linear` for a `send` whose message var had `v_lin = Lin`, and the native preamble declared `march_send_linear`, `march_msg_copy`, `march_msg_move` and `march_process_alloc`. All four are defined only by the unit-test-only arena runtime, so a program that reached that arm would have failed to link. Since 2026-09-28 a linear send compiles to `march_send` like any other and the four declares are gone (`specs/progress/2026-09-28-send-linear-declared-but-never-linked.md`). A dedicated linear-send path should come back only together with linking the arena runtime.
