@@ -28,6 +28,11 @@ version="$1"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 f="$root/CHANGELOG.md"
+# Released versions are archived one-per-file under changelog/; the version
+# being released is still in CHANGELOG.md (bump-version.sh finalizes it there).
+if ! grep -q "^## \\[$version\\]" "$f" 2>/dev/null && [ -f "$root/changelog/$version.md" ]; then
+  f="$root/changelog/$version.md"
+fi
 [ -f "$f" ] || { echo "changelog-section.sh: no CHANGELOG.md at $f" >&2; exit 1; }
 
 section="$(awk -v want="## [$version]" '
@@ -46,7 +51,7 @@ if [ -z "$section" ]; then
 fi
 
 if [ -n "$max_bytes" ] && [ "$(printf '%s' "$section" | wc -c)" -gt "$max_bytes" ]; then
-  url="https://github.com/march-language/march/blob/v${version}/CHANGELOG.md"
+  url="https://github.com/march-language/march/blob/v${version}/${f#"$root"/}"
   # Reserve room for the trailer, then cut at the last whole line that fits.
   trailer=$'\n\n---\n\n*These notes are truncated. The full '"$version"' changelog is at ['"$url"']('"$url"').*'
   budget=$(( max_bytes - ${#trailer} ))
