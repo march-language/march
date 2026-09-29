@@ -42,6 +42,15 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **`[ffi.rust]` crates now work under the interpreter.** `forge run`,
+  `forge interactive` and interpreted `forge test` used to fail at the first
+  Rust extern with "symbol not found for interpreter FFI", and printed a
+  compile-only warning. The compiler now links every static archive given with
+  `--ffi-link` (such as the crate's `lib<name>.a`) whole into the interpreter's
+  FFI shim, so the crate's functions resolve and a project gives the same
+  output interpreted and compiled. Compiled `[ffi.rust]` builds also link on
+  Linux now: the archive used to come before the program on the link line, and
+  GNU ld then skipped it (`undefined reference`).
 - **A compiled filter-shaped recursive function no longer overflows the stack
   when its branches alternate.** A function with one `Cons(x, self(..))` arm and
   one plain `self(..)` arm (a hand-written `filter`) is turned into a loop by
