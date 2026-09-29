@@ -369,7 +369,19 @@ let rec returnify ~(self : string) ~(dps : Tir.var) ~(dst : Tir.var)
     Tir.ELet (r, tail, Tir.ESetField (Tir.AVar dst, hole, Tir.AVar r))
   in
   let recur = returnify ~self ~dps ~dst ~hole ~ret_ty in
+  (* A plain tail self-call (the `else filter(t, pred)` arm of a filter)
+     must continue in the HELPER with the same destination.  Treating it as
+     "any other tail expression" called the ENTRY and stored its result:
+     entry -> $dps -> entry -> ... is a non-tail mutual cycle that pushes a
+     frame per alternation between the two arms, and overflowed the stack
+     on a 1M-element filter that keeps every other element. *)
+  let tail_self f = String.equal f.Tir.v_name self in
   match e with
+  | Tir.EApp (f, args) when tail_self f ->
+    Tir.EApp (dps, args @ [Tir.AVar dst])
+  | Tir.ELet (bv, Tir.EApp (f, args), Tir.EAtom (Tir.AVar r))
+    when tail_self f && String.equal bv.Tir.v_name r.Tir.v_name ->
+    Tir.EApp (dps, args @ [Tir.AVar dst])
   | Tir.ELet (bv, Tir.EApp (f, args), k)
     when String.equal f.Tir.v_name self && not (calls_name self k) ->
     (match modcons_alloc bv.Tir.v_name k with

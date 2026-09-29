@@ -35,6 +35,36 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A compiled filter-shaped recursive function no longer overflows the stack
+  when its branches alternate.** A function with one `Cons(x, self(..))` arm and
+  one plain `self(..)` arm (a hand-written `filter`) is turned into a loop by
+  tail-recursion-modulo-cons, but the plain arm re-entered the original
+  function instead of continuing the loop, pushing a frame each time the input
+  switched arms. Keeping every other element of a 1,000,000-element list died
+  with SIGBUS in the stack guard page; all-kept and all-dropped inputs ran fine.
+- **SIGTERM no longer cuts the sessions a node initiated.** `Topology`'s drain
+  counted only its offers' sessions, so a node that serves no role exited 0 at once
+  on SIGTERM, cutting sessions it had started with `initiate_R` (from a hook or a role
+  body) or `cluster_R`. The drain now waits for those sessions too, under the same
+  soft and hard deadlines.
+- **Logger appenders work in compiled programs.** Compiled,
+  `Logger.add_appender` did nothing, `Logger.list_appenders()` was always
+  empty, and every message went to the stderr fallback line. Appenders now
+  receive each `LogEntry` exactly as they do interpreted, newest
+  registration first. An atom field (`Logger.LAtom(:closed)`) now logs as
+  `:closed` rather than `null`.
+- **Compiled programs no longer leak memory on every subprocess call.** Each
+  `Process.spawn_async` leaked its argument list and the `LiveProcess` handle
+  it returned (the handle could never be freed once `read_line`, `write`,
+  `kill` or `wait_proc` had used it), and `Process.run`, `Process.env` and
+  `Process.set_env` leaked their arguments on every call.
+- **Editor highlighting (tree-sitter) now covers current March syntax.** The
+  tree-sitter grammar that Zed highlights from failed to parse most real files
+  (713 of 919 in the repo), so they rendered as one long error region. It now
+  parses every file the compiler accepts, including record literals, multi-line
+  match arms and lambdas, patterns, actors, protocols and declarations added
+  since March. Zed's highlight and outline queries, broken since August, compile
+  again. A CI job keeps the grammar in step with the compiler.
 - **A source-tree `march` no longer builds its runtime from a partial copy of
   `runtime/`.** If a build had copied only some runtime C files into
   `_build/default/runtime` (the vault scaling benchmarks do), the compiler used
@@ -117,7 +147,6 @@ git log is authoritative for exact commits.
   reach the right actor. Actors whose names are unique keep their names, so
   hot-code-reload manifests are unchanged. Two actors of one name in the
   same module are now an error.
-
 - **Actors that message each other back and forth are up to 2.6x faster.** With
   several scheduler threads, sending to an actor that was just going to sleep could
   make the sender wait a millisecond or more before delivering. A two-actor
@@ -357,6 +386,16 @@ git log is authoritative for exact commits.
 - **Compiled `dns_resolve` no longer leaks its host argument** (one String per
   call). **Compiled `uuid_v7_at` with a negative timestamp now errors** as the
   interpreter does, instead of returning a UUID with a garbage timestamp.
+- **Compiled code no longer reads freed memory through a record field after
+  handing the record to a function.** Reading a field into a local
+  (`let x = r.a`), then passing `r` to a function that takes ownership of it,
+  then using `x`, read a string the callee had already released: garbage
+  output, or another value's bytes. The interpreter was unaffected.
+- **A nested module's call to a sibling module now links when compiled.** Inside
+  `mod Outer do mod A ... end mod B do ... A.f(x) ... end end`, the call `A.f`
+  ran interpreted but a compiled program failed to link (`A.f` undefined),
+  whenever `Outer` was itself nested in the entry module, or was a library
+  (`MARCH_LIB_PATH`) or stdlib module.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
@@ -642,6 +681,14 @@ git log is authoritative for exact commits.
   special path: 1,000,000 nearly-sorted integers sort in 1.7 ms instead of
   11.6 ms. Other inputs are unchanged. The special path may briefly allocate up
   to half the array's size, and falls back to the normal sort if it cannot.
+- **`List.map`, `filter`, `filter_map`, `append`, `flat_map` and `range_step` walk
+  the list once instead of twice.** They were accumulator loops followed by a
+  `reverse`; they are now written in natural recursive style, which
+  tail-recursion-modulo-cons compiles to a single loop that fills each new cell
+  in place. Compiled `--opt 2`, 20k-element lists: `map` 0.53 s -> 0.24 s
+  (`bench/list_producers.march`), `append` 2.0x, `filter`/`filter_map` 1.3x,
+  `flat_map` 1.2x, `range_step` 1.4x. Results and signatures are unchanged, and a
+  1,000,000-element list still works compiled and interpreted.
 - **`NativeArray.sort_int`, `sort_float`, `sort_i32` and `sort_f32` sort random
   data 17-26% faster.** The step that finishes off short runs of up to 32
   elements now uses larger sorting networks and a merge (the layout Rust's

@@ -1,0 +1,967 @@
+-- Control: the pure core of the in-cluster control plane (distributed-deploys
+-- build step 12a). Design: specs/plans/2026-09-28-dd-step12-control-plane-design.md,
+-- sections 3, 4, 7 and 8, decisions D37-D41.
+--
+-- The control plane holds no root keys (D37). forge writes and signs a
+-- RELEASE: a sequence number, the digest of its parent, the environment, the
+-- topology digest, the builds it ships, and an ordered list of steps with host
+-- selectors and gates. The leader only executes it:
+--
+--   * `parse` / `serialize` read and write the release's text form (section 4);
+--     `check` validates it, `digest` / `verify` / `sign` cover its identity and
+--     its operator signature, and `accept` is the leader's compare-and-set on
+--     `parent`.
+--   * `pass` is the executor, level-triggered and pure: its inputs are the
+--     newest release held, the membership (which node is in which pool), what
+--     each Agent last reported, the nodes with an order outstanding, and the
+--     time. It finds the first step whose selected nodes do not yet report the
+--     step's end state and orders the next nodes the step allows. Nothing else
+--     is carried between passes, so a new leader resumes a half-finished
+--     rollout from observation alone. A failed step or gate HALTS the release;
+--     the executor never rolls back (a rollback is a new release).
+--   * `Leader` wraps `pass` in the few facts a leader keeps in memory: the
+--     reports (`Obs`, with the leader-clock time each node became healthy, so a
+--     gate window restarts on a new leader, section 4), orders in flight, and a
+--     sticky halt.
+--   * `agent_apply` is the Agent's side of one `StepOrder`, over an `AgentOps`
+--     dictionary: the node's reload server and CAS are reached through it. Until
+--     the `reload_request` builtin exists (design section 6) the dictionary is
+--     the seam tests and the real Agent plug into.
+--   * The payloads of the control protocols (section 7): `AgentReport`,
+--     `StepOrder`, `StepResult`, `CtlChunk`, and the `ControlOps` dictionary a
+--     leader's `Ctl` session is driven by. The `Ctl` and `CtlFetch`
+--     declarations themselves live in test/session/control_peers.march for
+--     now: an `@[endpoints]` protocol only typechecks at an entry module's
+--     top level (specs/todos/2026-09-28-endpoints-protocol-in-nested-module.md).
+--
+-- The leader itself is `count = 1` placement over SWIM with no strict lease
+-- (D40): two leaders during a partition each drive their side toward the
+-- newest release they hold, and nodes refuse anything older (12-pre).
+mod Control do
+  -- ── the release document ─────────────────────────────────────────────────
+
+  -- Which of a step's target nodes the step applies to.
+  type CtlHosts = HostsCanary(Int) | HostsRest | HostsAll
+
+  -- What a step does to a node: activate a build's patch, apply the
+  -- release's topology, or drain.
+  type CtlAction = DoActivate(String) | DoTopology | DoDrain
+
+  -- What must hold after a step before the next one starts. `Healthy(ms)`:
+  -- every node the step selected reports healthy for `ms`.
+  type CtlGate = GateNone | GateHealthy(Int)
+
+  -- One rollout step. `pools` is the pools it targets (`["*"]` for every
+  -- pool), `batch` how many of its nodes may have an order outstanding at
+  -- once (0: no limit).
+  type CtlStep = { id : Int, pools : List(String), hosts : CtlHosts, action : CtlAction, gate : CtlGate, batch : Int }
+
+  -- A build the release ships: the base binary's hash and the patch
+  -- manifest's hash.
+  type CtlBuild = { name : String, base : String, manifest : String }
+
+  -- The release's drain: sessions on epochs up to `epoch` drain, with a soft
+  -- then a hard deadline in ms.
+  type CtlDrain = { epoch : Int, soft_ms : Int, hard_ms : Int }
+
+  -- An operator-signed request line the Agent relays to its node's reload
+  -- server for a step (the `SEQ ...` wrapper of 12-pre). The node verifies
+  -- it; the control plane only carries it.
+  type CtlLine = { step : Int, text : String }
+
+  -- A release (design section 4). `signature` is the operator's ed25519
+  -- signature, hex, over `signed_text`; the document writes it as `sig`.
+  type CtlRelease = {
+    seq : Int, parent : String, env : String, topology : String,
+    builds : List(CtlBuild), steps : List(CtlStep), lines : List(CtlLine),
+    drain : Option(CtlDrain), signature : String
+  }
+
+  doc "The `parent` of the first release of an environment."
+  fn no_parent() : String do "none" end
+
+  -- ── parsing ──────────────────────────────────────────────────────────────
+
+  pfn words(line : String) : List(String) do
+    List.filter(String.split(String.replace_all(line, "\t", " "), " "), fn w -> w != "")
+  end
+
+  pfn int_of(s : String, what : String) : Result(Int, String) do
+    match string_to_int(s) do
+      Some(n) -> Ok(n)
+      None -> Err(what ++ ": not a number: " ++ s)
+    end
+  end
+
+  doc "A duration: `250ms`, `60s`, `2m`, or a bare number of milliseconds."
+  fn parse_duration(s : String) : Result(Int, String) do
+    if String.ends_with(s, "ms") do int_of(String.slice(s, 0, String.byte_size(s) - 2), "duration")
+    else if String.ends_with(s, "s") do Result.map(int_of(String.slice(s, 0, String.byte_size(s) - 1), "duration"), fn n -> n * 1000)
+    else if String.ends_with(s, "m") do Result.map(int_of(String.slice(s, 0, String.byte_size(s) - 1), "duration"), fn n -> n * 60000)
+    else int_of(s, "duration") end end end
+  end
+
+  doc "A duration written the way `parse_duration` reads it back: whole seconds as `Ns`, else `Nms`."
+  fn show_duration(ms : Int) : String do
+    if ms > 0 && ms % 1000 == 0 do int_to_string(ms / 1000) ++ "s" else int_to_string(ms) ++ "ms" end
+  end
+
+  -- `key:value`, the value after the first `:`.
+  pfn field(w : String, key : String) : Option(String) do
+    let p = key ++ ":"
+    if String.starts_with(w, p) do Some(String.slice(w, String.byte_size(p), String.byte_size(w) - String.byte_size(p)))
+    else None end
+  end
+
+  -- `name(arg)` -> arg
+  pfn call_arg(w : String, name : String) : Option(String) do
+    let p = name ++ "("
+    if String.starts_with(w, p) && String.ends_with(w, ")") do
+      Some(String.slice(w, String.byte_size(p), String.byte_size(w) - String.byte_size(p) - 1))
+    else None end
+  end
+
+  pfn parse_hosts(v : String) : Result(CtlHosts, String) do
+    if v == "rest" do Ok(HostsRest)
+    else if v == "all" do Ok(HostsAll)
+    else match call_arg(v, "canary") do
+      Some(n) -> Result.map(int_of(n, "canary"), fn k -> HostsCanary(k))
+      None -> Err("hosts: expected canary(n), rest or all, got " ++ v)
+    end end end
+  end
+
+  pfn parse_action(v : String) : Result(CtlAction, String) do
+    if v == "topology" do Ok(DoTopology)
+    else if v == "drain" do Ok(DoDrain)
+    else match call_arg(v, "activate") do
+      Some(b) -> if b == "" do Err("do: activate() names no build") else Ok(DoActivate(b)) end
+      None -> Err("do: expected activate(build), topology or drain, got " ++ v)
+    end end end
+  end
+
+  pfn parse_gate(v : String) : Result(CtlGate, String) do
+    if v == "none" do Ok(GateNone)
+    else match call_arg(v, "healthy") do
+      Some(d) -> Result.map(parse_duration(d), fn ms -> GateHealthy(ms))
+      None -> Err("gate: expected healthy(duration) or none, got " ++ v)
+    end end
+  end
+
+  -- One `key:value` word of a step line into [st]; the three required keys
+  -- are counted in [seen] as a bit set (pools 1, hosts 2, do 4).
+  pfn step_word(st : CtlStep, seen : Int, w : String, id_w : String) : Result((CtlStep, Int), String) do
+    match field(w, "pools") do
+      Some(v) -> Ok(({ st with pools: List.filter(String.split(v, ","), fn p -> p != "") }, int_or(seen, 1)))
+      None -> match field(w, "hosts") do
+        Some(v) -> Result.map(parse_hosts(v), fn h -> ({ st with hosts: h }, int_or(seen, 2)))
+        None -> match field(w, "do") do
+          Some(v) -> Result.map(parse_action(v), fn a -> ({ st with action: a }, int_or(seen, 4)))
+          None -> match field(w, "gate") do
+            Some(v) -> Result.map(parse_gate(v), fn g -> ({ st with gate: g }, seen))
+            None -> match field(w, "batch") do
+              Some(v) -> Result.map(int_of(v, "batch"), fn b -> ({ st with batch: b }, seen))
+              None -> Err("step " ++ id_w ++ ": unknown field " ++ w)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  pfn step_words(st : CtlStep, seen : Int, ws : List(String), id_w : String) : Result((CtlStep, Int), String) do
+    match ws do
+      Nil -> Ok((st, seen))
+      Cons(w, rest) ->
+        match step_word(st, seen, w, id_w) do
+          Ok((st2, seen2)) -> step_words(st2, seen2, rest, id_w)
+          Err(e) -> Err(e)
+        end
+    end
+  end
+
+  pfn parse_step(id_w : String, rest : List(String)) : Result(CtlStep, String) do
+    let? id = int_of(id_w, "step")
+    let blank = { id: id, pools: Nil, hosts: HostsAll, action: DoTopology, gate: GateNone, batch: 0 }
+    let? (st, seen) = step_words(blank, 0, rest, id_w)
+    if int_and(seen, 1) == 0 do Err("step " ++ id_w ++ ": missing pools:")
+    else if int_and(seen, 2) == 0 do Err("step " ++ id_w ++ ": missing hosts:")
+    else if int_and(seen, 4) == 0 do Err("step " ++ id_w ++ ": missing do:")
+    else Ok(st) end end end
+  end
+
+  pfn parse_build(ws : List(String)) : Result(CtlBuild, String) do
+    match ws do
+      Cons(name, Cons(b, Cons(m, Nil))) ->
+        match (field(b, "base"), field(m, "manifest")) do
+          (Some(base), Some(man)) -> Ok({ name: name, base: base, manifest: man })
+          _ -> Err("build " ++ name ++ ": expected base:<hash> manifest:<hash>")
+        end
+      _ -> Err("build: expected <name> base:<hash> manifest:<hash>")
+    end
+  end
+
+  pfn parse_drain(ws : List(String)) : Result(CtlDrain, String) do
+    match ws do
+      Cons(e, Cons(s, Cons(h, Nil))) ->
+        if String.starts_with(e, "epoch<=") do
+          match (int_of(String.slice(e, 7, String.byte_size(e) - 7), "drain epoch"), field(s, "soft"), field(h, "hard")) do
+            (Ok(epoch), Some(sv), Some(hv)) ->
+              match (int_of(sv, "drain soft"), int_of(hv, "drain hard")) do
+                (Ok(soft), Ok(hard)) -> Ok({ epoch: epoch, soft_ms: soft, hard_ms: hard })
+                (Err(x), _) -> Err(x)
+                (_, Err(x)) -> Err(x)
+              end
+            (Err(x), _, _) -> Err(x)
+            _ -> Err("drain: expected soft:<ms> hard:<ms>")
+          end
+        else Err("drain: expected epoch<=<n>") end
+      _ -> Err("drain: expected epoch<=<n> soft:<ms> hard:<ms>")
+    end
+  end
+
+  -- The text of a `line` entry: everything after `line <step> `, single-spaced.
+  pfn parse_signed_line(ws : List(String)) : Result(CtlLine, String) do
+    match ws do
+      Cons(n, Cons(w, rest)) ->
+        let? step = int_of(n, "line")
+        Ok({ step: step, text: String.join(Cons(w, rest), " ") })
+      _ -> Err("line: expected <step> <signed request line>")
+    end
+  end
+
+  pfn empty_release() : CtlRelease do
+    { seq: 0, parent: "", env: "", topology: "", builds: Nil, steps: Nil, lines: Nil, drain: None, signature: "" }
+  end
+
+  pfn parse_entry(r : CtlRelease, ws : List(String)) : Result(CtlRelease, String) do
+    match ws do
+      Cons("seq", Cons(v, Nil)) -> Result.map(int_of(v, "seq"), fn n -> { r with seq: n })
+      Cons("parent", Cons(v, Nil)) -> Ok({ r with parent: v })
+      Cons("env", Cons(v, Nil)) -> Ok({ r with env: v })
+      Cons("topology", Cons(v, Nil)) -> Ok({ r with topology: v })
+      Cons("sig", Cons(v, Nil)) -> Ok({ r with signature: if v == "-" do "" else v end })
+      Cons("build", rest) -> Result.map(parse_build(rest), fn b -> { r with builds: List.append(r.builds, [b]) })
+      Cons("step", Cons(n, rest)) -> Result.map(parse_step(n, rest), fn s -> { r with steps: List.append(r.steps, [s]) })
+      Cons("line", rest) -> Result.map(parse_signed_line(rest), fn l -> { r with lines: List.append(r.lines, [l]) })
+      Cons("drain", rest) ->
+        match r.drain do
+          Some(_) -> Err("drain: given twice")
+          None -> Result.map(parse_drain(rest), fn d -> { r with drain: Some(d) })
+        end
+      Cons(k, _) -> Err("unknown entry `" ++ k ++ "`")
+      Nil -> Ok(r)
+    end
+  end
+
+  pfn parse_lines(r : CtlRelease, lines : List(String), n : Int, after_sig : Bool) : Result(CtlRelease, String) do
+    match lines do
+      Nil -> Ok(r)
+      Cons(l, rest) ->
+        let ws = words(l)
+        match ws do
+          Nil -> parse_lines(r, rest, n + 1, after_sig)
+          Cons(k, _) ->
+            if after_sig do Err("line " ++ int_to_string(n) ++ ": nothing may follow `sig`")
+            else match parse_entry(r, ws) do
+              Err(e) -> Err("line " ++ int_to_string(n) ++ ": " ++ e)
+              Ok(r2) -> parse_lines(r2, rest, n + 1, k == "sig")
+            end end
+        end
+    end
+  end
+
+  doc """
+  Parse a release document (design section 4). The first non-blank line must
+  be `release v1`; words may be separated by any run of spaces, and `sig -`
+  stands for an unsigned release. The result is `check`ed, so an `Ok` release
+  is well formed (not yet verified: see `verify`).
+  """
+  fn parse(text : String) : Result(CtlRelease, String) do
+    let lines = String.split(String.replace_all(text, "\r", ""), "\n")
+    let body = List.drop_while(lines, fn l -> words(l) == Nil)
+    match body do
+      Cons(first, rest) ->
+        if words(first) != ["release", "v1"] do Err("expected `release v1` first, got `" ++ String.trim(first) ++ "`")
+        else
+          let? r = parse_lines(empty_release(), rest, 2 + List.length(lines) - List.length(body), false)
+          let? _ = check(r)
+          Ok(r)
+        end
+      Nil -> Err("empty release")
+    end
+  end
+
+  -- ── checks ───────────────────────────────────────────────────────────────
+
+  pfn find_build(r : CtlRelease, name : String) : Option(CtlBuild) do
+    List.find(r.builds, fn b -> b.name == name)
+  end
+
+  pfn check_hosts(where : String, h : CtlHosts) : Result((), String) do
+    match h do
+      HostsCanary(n) -> if n < 1 do Err(where ++ "canary(n) needs n >= 1") else Ok(()) end
+      _ -> Ok(())
+    end
+  end
+
+  pfn check_gate(where : String, g : CtlGate) : Result((), String) do
+    match g do
+      GateHealthy(ms) -> if ms <= 0 do Err(where ++ "healthy(window) needs a positive window") else Ok(()) end
+      GateNone -> Ok(())
+    end
+  end
+
+  pfn check_action(where : String, r : CtlRelease, a : CtlAction) : Result((), String) do
+    match a do
+      DoActivate(b) -> match find_build(r, b) do
+        Some(_) -> Ok(())
+        None -> Err(where ++ "activates build `" ++ b ++ "`, which the release does not ship")
+      end
+      DoDrain -> match r.drain do
+        Some(_) -> Ok(())
+        None -> Err(where ++ "drains, but the release has no `drain` line")
+      end
+      DoTopology -> Ok(())
+    end
+  end
+
+  pfn check_steps(r : CtlRelease, steps : List(CtlStep), expect : Int) : Result((), String) do
+    match steps do
+      Nil -> Ok(())
+      Cons(s, rest) ->
+        let where = "step " ++ int_to_string(s.id) ++ ": "
+        if s.id != expect do Err(where ++ "steps must be numbered 1, 2, ... in order (expected " ++ int_to_string(expect) ++ ")")
+        else if s.pools == Nil do Err(where ++ "names no pool")
+        else if s.batch < 0 do Err(where ++ "batch must not be negative")
+        else
+          let? _ = check_hosts(where, s.hosts)
+          let? _ = check_gate(where, s.gate)
+          let? _ = check_action(where, r, s.action)
+          check_steps(r, rest, expect + 1)
+        end end end
+    end
+  end
+
+  pfn dup_build(bs : List(CtlBuild)) : Option(String) do
+    match bs do
+      Nil -> None
+      Cons(b, rest) -> if List.any(rest, fn o -> o.name == b.name) do Some(b.name) else dup_build(rest) end
+    end
+  end
+
+  doc """
+  Is the release well formed? A positive `seq`, a `parent`, `env` and
+  `topology`, distinct builds, steps numbered 1..n in order, every
+  `activate(b)` naming a shipped build, a `drain` line for a drain step, and
+  every signed `line` naming a step that exists.
+  """
+  fn check(r : CtlRelease) : Result((), String) do
+    if r.seq <= 0 do Err("seq must be positive")
+    else if r.parent == "" do Err("missing parent (use `parent " ++ no_parent() ++ "` for the first release)")
+    else if r.env == "" do Err("missing env")
+    else if r.topology == "" do Err("missing topology")
+    else if r.steps == Nil do Err("a release needs at least one step")
+    else match dup_build(r.builds) do
+      Some(b) -> Err("build `" ++ b ++ "` is given twice")
+      None ->
+        let n = List.length(r.steps)
+        match check_steps(r, r.steps, 1) do
+          Err(e) -> Err(e)
+          Ok(_) ->
+            match List.find(r.lines, fn l -> l.step < 1 || l.step > n) do
+              Some(l) -> Err("line for step " ++ int_to_string(l.step) ++ ", which does not exist")
+              None -> Ok(())
+            end
+        end
+    end end end end end end
+  end
+
+  -- ── serialising, identity, signature ─────────────────────────────────────
+
+  pfn show_hosts(h : CtlHosts) : String do
+    match h do
+      HostsCanary(n) -> "canary(" ++ int_to_string(n) ++ ")"
+      HostsRest -> "rest"
+      HostsAll -> "all"
+    end
+  end
+
+  doc "The action as the release and the wire write it: `activate(web)`, `topology`, `drain`."
+  fn show_action(a : CtlAction) : String do
+    match a do
+      DoActivate(b) -> "activate(" ++ b ++ ")"
+      DoTopology -> "topology"
+      DoDrain -> "drain"
+    end
+  end
+
+  pfn show_gate(g : CtlGate) : String do
+    match g do
+      GateNone -> "none"
+      GateHealthy(ms) -> "healthy(" ++ show_duration(ms) ++ ")"
+    end
+  end
+
+  pfn show_step(s : CtlStep) : String do
+    let base = "step " ++ int_to_string(s.id) ++ " pools:" ++ String.join(s.pools, ",") ++ " hosts:" ++ show_hosts(s.hosts)
+      ++ " do:" ++ show_action(s.action) ++ " gate:" ++ show_gate(s.gate)
+    if s.batch > 0 do base ++ " batch:" ++ int_to_string(s.batch) else base end
+  end
+
+  doc """
+  The canonical text the signature covers: the release without its `sig`
+  line, one entry per line, single spaces, a newline after every line. forge
+  signs exactly this, so a document may be laid out any way `parse` accepts
+  and still verify.
+  """
+  fn signed_text(r : CtlRelease) : String do
+    let head_lines = [
+      "release v1",
+      "seq " ++ int_to_string(r.seq),
+      "parent " ++ r.parent,
+      "env " ++ r.env,
+      "topology " ++ r.topology
+    ]
+    let builds = List.map(r.builds, fn b -> "build " ++ b.name ++ " base:" ++ b.base ++ " manifest:" ++ b.manifest)
+    let steps = List.map(r.steps, fn s -> show_step(s))
+    let lines = List.map(r.lines, fn l -> "line " ++ int_to_string(l.step) ++ " " ++ l.text)
+    let drain = match r.drain do
+      Some(d) -> ["drain epoch<=" ++ int_to_string(d.epoch) ++ " soft:" ++ int_to_string(d.soft_ms) ++ " hard:" ++ int_to_string(d.hard_ms)]
+      None -> Nil
+    end
+    String.join(List.concat([head_lines, builds, steps, lines, drain]), "\n") ++ "\n"
+  end
+
+  doc "The release document: `signed_text`, then its `sig` line (`sig -` when unsigned). `parse(serialize(r)) == Ok(r)` for a well-formed `r`."
+  fn serialize(r : CtlRelease) : String do
+    signed_text(r) ++ "sig " ++ (if r.signature == "" do "-" else r.signature end) ++ "\n"
+  end
+
+  doc "The release's content address: sha256 (hex) of `signed_text`. A child names it as its `parent`."
+  fn digest(r : CtlRelease) : String do sha256(Bytes.from_string(signed_text(r))) end
+
+  doc "Sign [r] with an ed25519 secret key (`ed25519_seed_keypair` form). What forge does; here for tests and tooling."
+  fn sign(r : CtlRelease, sk : Bytes) : CtlRelease do
+    { r with signature: Bytes.to_hex(ed25519_sign(sk, Bytes.from_string(signed_text(r)))) }
+  end
+
+  doc """
+  Does [r] carry a valid operator signature for [pubkey]? The leader checks
+  this before storing a release so it never relays junk; the nodes check the
+  signed lines themselves either way (the control plane is not trusted, D37).
+  """
+  fn verify(r : CtlRelease, pubkey : Bytes) : Bool do
+    match Bytes.from_hex(r.signature) do
+      Ok(sg) -> ed25519_verify(pubkey, Bytes.from_string(signed_text(r)), sg)
+      Err(_) -> false
+    end
+  end
+
+  doc """
+  The leader's compare-and-set (design section 9): may [r] replace [head], the
+  newest release held? The first release is accepted whatever its parent. The
+  held release itself is accepted again (a retry). Otherwise `r.seq` must be
+  higher and `r.parent` must be `digest(head)`: the parent chain is enforced by
+  the one writer that sees every release (section 5).
+  """
+  fn accept(head : Option(CtlRelease), r : CtlRelease) : Result((), String) do
+    match head do
+      None -> Ok(())
+      Some(h) ->
+        if r.seq == h.seq && digest(r) == digest(h) do Ok(())
+        else if r.seq == h.seq do Err("fork: release " ++ int_to_string(r.seq) ++ " is already held with other content")
+        else if r.seq < h.seq do Err("stale: release " ++ int_to_string(r.seq) ++ " is older than the head " ++ int_to_string(h.seq))
+        else if r.parent != digest(h) do Err("parent mismatch: release " ++ int_to_string(r.seq) ++ " does not follow the head " ++ int_to_string(h.seq))
+        else Ok(()) end end end end
+    end
+  end
+
+  -- ── what agents report, and what the leader orders ───────────────────────
+
+  -- A node in the membership, with the pools it runs.
+  type CtlMember = { node : String, pools : List(String) }
+
+  -- A build a node runs, by the manifest hash it has active.
+  type CtlVersion = { build : String, manifest : String }
+
+  -- The last step a node failed: the release, the step, and why (the reload
+  -- server's answer).
+  type CtlFailure = { seq : Int, step : Int, why : String }
+
+  -- The wire records below are flat: `derive Json` encodes String, Int,
+  -- Float and Bool fields and nothing else reliably (a `List` field fails
+  -- at run time in the interpreter), so lists travel as canonical text and
+  -- the accessors after each type read them back. Their codecs are NOT
+  -- derived here: a `derive Json` in an eagerly loaded module puts its
+  -- `from_json` in scope for every program and makes a user's bare
+  -- `from_json` call ambiguous. The module declaring the protocols derives
+  -- them (see test/session/control_peers.march).
+
+  -- What an Agent reports (design section 6): the newest release `seq` the
+  -- node holds, the builds it runs (`versions_text`), its topology digest,
+  -- the highest epoch it has drained, whether it is healthy, and its last
+  -- failed step (`failed_seq` 0: none).
+  type AgentReport = {
+    node : String, seq : Int, versions : String, topology : String,
+    drained : Int, healthy : Bool, failed_seq : Int, failed_step : Int, failed_why : String
+  }
+
+  pfn version_text(v : CtlVersion) : String do v.build ++ "=" ++ v.manifest end
+
+  doc "The canonical text of what a node runs: `build=manifest` words, sorted by build."
+  fn versions_text(vs : List(CtlVersion)) : String do
+    String.join(List.map(List.sort_by(vs, fn (a, b) -> a.build < b.build), fn v -> version_text(v)), " ")
+  end
+
+  doc "The builds [rep] runs."
+  fn report_versions(rep : AgentReport) : List(CtlVersion) do
+    List.filter_map(words(rep.versions), fn w ->
+      match String.split_first(w, "=") do
+        Some((b, m)) -> Some({ build: b, manifest: m })
+        None -> None
+      end)
+  end
+
+  doc "The last step [rep]'s node failed, if any."
+  fn report_failure(rep : AgentReport) : Option(CtlFailure) do
+    if rep.failed_seq == 0 do None
+    else Some({ seq: rep.failed_seq, step: rep.failed_step, why: rep.failed_why }) end
+  end
+
+  doc "[rep] with its failure set to [f]."
+  fn with_failure(rep : AgentReport, f : CtlFailure) : AgentReport do
+    { rep with failed_seq: f.seq, failed_step: f.step, failed_why: f.why }
+  end
+
+  -- An order for one node to take one step (design section 7): the release
+  -- and step, the action (`show_action`), the end state it must report
+  -- (`want`: a manifest hash, the topology digest, or the drain epoch), the
+  -- artifact hashes it needs (space-separated), and the signed lines to relay
+  -- (newline-separated). Hashes, never bytes.
+  type StepOrder = {
+    seq : Int, release : String, step : Int, node : String, action : String,
+    want : String, artifacts : String, lines : String
+  }
+
+  doc "The artifact hashes [o] needs."
+  fn order_artifacts(o : StepOrder) : List(String) do words(o.artifacts) end
+
+  doc "The signed lines [o] relays, in order."
+  fn order_lines(o : StepOrder) : List(String) do
+    List.filter(String.split(o.lines, "\n"), fn l -> l != "")
+  end
+
+  -- The Agent's answer to a `StepOrder`.
+  type StepResult = { seq : Int, step : Int, node : String, ok : Bool, detail : String }
+
+  -- A leader's observation of a node: its last report, and the leader-clock
+  -- time since which it has been healthy in that state.
+  type CtlObs = { report : AgentReport, healthy_since : Option(Int) }
+
+  pfn same_state(a : AgentReport, b : AgentReport) : Bool do
+    a.versions == b.versions && a.topology == b.topology && a.drained == b.drained
+  end
+
+  pfn obs_of(obs : List(CtlObs), node : String) : Option(CtlObs) do
+    List.find(obs, fn o -> o.report.node == node)
+  end
+
+  doc """
+  Record [rep] at leader time [now]. A node's healthy window starts when the
+  leader first sees it healthy in its current state, and restarts when the
+  state changes or the node reports unhealthy. The window is the leader's own,
+  so a new leader restarts every window: conservative (design section 4).
+  """
+  fn observe(obs : List(CtlObs), rep : AgentReport, now : Int) : List(CtlObs) do
+    let since = if not(rep.healthy) do None
+      else match obs_of(obs, rep.node) do
+        Some(o) -> match o.healthy_since do
+          Some(t) -> if same_state(o.report, rep) do Some(t) else Some(now) end
+          None -> Some(now)
+        end
+        None -> Some(now)
+      end end
+    Cons({ report: rep, healthy_since: since }, List.filter(obs, fn o -> o.report.node != rep.node))
+  end
+
+  -- ── the executor ─────────────────────────────────────────────────────────
+
+  -- One pass's verdict.
+  --
+  --   Apply(step, orders)     step `step` is the first not done; send these
+  --                           orders (possibly none, when every remaining node
+  --                           already has one in flight or the batch is full).
+  --   Wait(step, why)         step `step` is done on its nodes and its gate
+  --                           has not passed yet.
+  --   Halted(step, node, why) the release stops here and is reported. The
+  --                           executor never rolls back.
+  --   Complete                every step is done and every gate passed.
+  --   Behind(seq)             a node holds a newer release than this one; the
+  --                           leader must fetch it before executing anything.
+  type CtlDecision = RolloutApply(Int, List(StepOrder)) | RolloutWait(Int, String) | RolloutHalted(Int, String, String) | RolloutComplete | RolloutBehind(Int)
+
+  pfn in_pools(m : CtlMember, pools : List(String)) : Bool do
+    List.member(pools, "*") || List.any(m.pools, fn p -> List.member(pools, p))
+  end
+
+  doc "A step's target nodes: the members in any of its pools, in node order (the canary is the first)."
+  fn targets(step : CtlStep, members : List(CtlMember)) : List(String) do
+    List.sort_by(List.map(List.filter(members, fn m -> in_pools(m, step.pools)), fn m -> m.node), fn (a, b) -> a < b)
+  end
+
+  pfn same_action(a : CtlAction, b : CtlAction) : Bool do show_action(a) == show_action(b) end
+
+  -- The nodes an earlier step selected, if its action is [a].
+  pfn selected_by(p : (CtlStep, List(String)), a : CtlAction) : List(String) do
+    let (s, ns) = p
+    if same_action(s.action, a) do ns else Nil end
+  end
+
+  doc """
+  The nodes [step] applies to, given the selections of the steps before it
+  (`(step, nodes)` pairs): `canary(n)` the first n targets, `all` every target,
+  `rest` the targets no earlier step with the same action selected. Selection
+  depends only on the release and the membership, never on progress, so every
+  leader selects the same canary.
+  """
+  fn select(step : CtlStep, members : List(CtlMember), prior : List((CtlStep, List(String)))) : List(String) do
+    let ts = targets(step, members)
+    match step.hosts do
+      HostsCanary(n) -> List.take(ts, n)
+      HostsAll -> ts
+      HostsRest ->
+        let taken = List.flat_map(prior, fn p -> selected_by(p, step.action))
+        List.filter(ts, fn n -> not(List.member(taken, n)))
+    end
+  end
+
+  doc "The end state a node reports once [step] of [r] is done on it (`StepOrder.want`)."
+  fn want(r : CtlRelease, step : CtlStep) : String do
+    match step.action do
+      DoActivate(b) -> match find_build(r, b) do
+        Some(bd) -> bd.manifest
+        None -> ""
+      end
+      DoTopology -> r.topology
+      DoDrain -> match r.drain do
+        Some(d) -> int_to_string(d.epoch)
+        None -> ""
+      end
+    end
+  end
+
+  doc "Does [rep] show the end state [w] of an order with action [action] (`show_action` form)?"
+  fn reports_state(rep : AgentReport, action : String, w : String) : Bool do
+    match call_arg(action, "activate") do
+      Some(b) -> List.any(report_versions(rep), fn v -> v.build == b && v.manifest == w)
+      None ->
+        if action == "topology" do rep.topology == w
+        else if action == "drain" do
+          match string_to_int(w) do
+            Some(e) -> rep.drained >= e
+            None -> false
+          end
+        else false end end
+    end
+  end
+
+  pfn done_on(r : CtlRelease, step : CtlStep, obs : List(CtlObs), node : String) : Bool do
+    match obs_of(obs, node) do
+      Some(o) -> reports_state(o.report, show_action(step.action), want(r, step))
+      None -> false
+    end
+  end
+
+  doc "The order that takes [step] of [r] on [node]."
+  fn order(r : CtlRelease, step : CtlStep, node : String) : StepOrder do
+    let artifacts = match step.action do
+      DoActivate(b) -> match find_build(r, b) do
+        Some(bd) -> [bd.base, bd.manifest]
+        None -> Nil
+      end
+      _ -> Nil
+    end
+    let lines = List.map(List.filter(r.lines, fn l -> l.step == step.id), fn l -> l.text)
+    { seq: r.seq, release: digest(r), step: step.id, node: node, action: show_action(step.action),
+      want: want(r, step), artifacts: String.join(artifacts, " "), lines: String.join(lines, "\n") }
+  end
+
+  pfn first_some(xs : List(String), f : String -> Option(String)) : Option(String) do
+    match xs do
+      Nil -> None
+      Cons(x, rest) -> match f(x) do
+        Some(v) -> Some(v)
+        None -> first_some(rest, f)
+      end
+    end
+  end
+
+  pfn failed_step(r : CtlRelease, step : CtlStep, obs : List(CtlObs), node : String) : Option(String) do
+    match obs_of(obs, node) do
+      Some(o) -> match report_failure(o.report) do
+        Some(f) -> if f.seq == r.seq && f.step == step.id do Some(f.why) else None end
+        None -> None
+      end
+      None -> None
+    end
+  end
+
+  pfn unhealthy(obs : List(CtlObs), node : String) : Bool do
+    match obs_of(obs, node) do
+      Some(o) -> not(o.report.healthy)
+      None -> false
+    end
+  end
+
+  -- Why [node] has not yet passed a healthy([w]) gate at [now], or None.
+  pfn gate_short(obs : List(CtlObs), w : Int, now : Int, node : String) : Option(String) do
+    match obs_of(obs, node) do
+      Some(o) -> match o.healthy_since do
+        Some(t) ->
+          if now - t >= w do None
+          else Some(node ++ " healthy for " ++ int_to_string(now - t) ++ "ms of " ++ int_to_string(w) ++ "ms") end
+        None -> Some(node ++ " not yet seen healthy")
+      end
+      None -> Some(node ++ " has not reported")
+    end
+  end
+
+  -- The gate of a step whose nodes are all done: None once it has passed.
+  pfn gate_verdict(step : CtlStep, obs : List(CtlObs), nodes : List(String), now : Int) : Option(CtlDecision) do
+    match step.gate do
+      GateNone -> None
+      GateHealthy(w) ->
+        let gname = "gate " ++ show_gate(step.gate)
+        match List.find(nodes, fn n -> unhealthy(obs, n)) do
+          Some(n) -> Some(RolloutHalted(step.id, n, gname ++ " failed: " ++ n ++ " reports unhealthy"))
+          None ->
+            match first_some(nodes, fn n -> gate_short(obs, w, now, n)) do
+              Some(why) -> Some(RolloutWait(step.id, gname ++ ": " ++ why))
+              None -> None
+            end
+        end
+    end
+  end
+
+  pfn apply_step(r : CtlRelease, step : CtlStep, pending : List(String), inflight : List(String)) : CtlDecision do
+    let busy = List.filter(pending, fn n -> List.member(inflight, n))
+    let free = List.filter(pending, fn n -> not(List.member(inflight, n)))
+    let room = if step.batch == 0 do List.length(free) else step.batch - List.length(busy) end
+    let go = List.take(free, if room < 0 do 0 else room end)
+    RolloutApply(step.id, List.map(go, fn n -> order(r, step, n)))
+  end
+
+  pfn pass_steps(r : CtlRelease, steps : List(CtlStep), members : List(CtlMember), obs : List(CtlObs), inflight : List(String), now : Int, prior : List((CtlStep, List(String)))) : CtlDecision do
+    match steps do
+      Nil -> RolloutComplete
+      Cons(step, rest) ->
+        let sel = select(step, members, prior)
+        match first_some(sel, fn n -> Option.map(failed_step(r, step, obs, n), fn why -> n ++ "\n" ++ why)) do
+          Some(nw) ->
+            match String.split_first(nw, "\n") do
+              Some((n, why)) -> RolloutHalted(step.id, n, why)
+              None -> RolloutHalted(step.id, nw, "")
+            end
+          None ->
+            let pending = List.filter(sel, fn n -> not(done_on(r, step, obs, n)))
+            if pending != Nil do apply_step(r, step, pending, inflight)
+            else
+              match gate_verdict(step, obs, sel, now) do
+                Some(d) -> d
+                None -> pass_steps(r, rest, members, obs, inflight, now, List.append(prior, [(step, sel)]))
+              end
+            end
+        end
+    end
+  end
+
+  pfn max_seq(obs : List(CtlObs), acc : Int) : Int do
+    match obs do
+      Nil -> acc
+      Cons(o, rest) -> max_seq(rest, if o.report.seq > acc do o.report.seq else acc end)
+    end
+  end
+
+  doc """
+  The executor's pass (design section 4), a pure function of the release, the
+  membership, the observations, the nodes with an order in flight, and the
+  leader's clock. Steps run strictly in order: a step's orders go out only
+  once every earlier step is done on its nodes and its gate has passed, and a
+  node is ordered only while it does not report the step's end state and has
+  no order in flight. So no step is skipped and none is applied twice.
+  """
+  fn pass(r : CtlRelease, members : List(CtlMember), obs : List(CtlObs), inflight : List(String), now : Int) : CtlDecision do
+    let newest = max_seq(obs, r.seq)
+    if newest > r.seq do RolloutBehind(newest)
+    else pass_steps(r, r.steps, members, obs, inflight, now, Nil) end
+  end
+
+  -- ── the leader's memory ──────────────────────────────────────────────────
+
+  -- What a leader holds: the newest release, its observations, the nodes with
+  -- an order outstanding, and a halt, which sticks for the release. None of it
+  -- is handed over: a new leader starts from `leader_new()`, the newest
+  -- release it can find, and the agents' next reports.
+  type CtlLeader = { release : Option(CtlRelease), obs : List(CtlObs), inflight : List(String), halted : Option(CtlDecision) }
+
+  doc "A leader holding nothing yet."
+  fn leader_new() : CtlLeader do { release: None, obs: Nil, inflight: Nil, halted: None } end
+
+  doc "Offer a release to the leader (`check`, then `accept`'s compare-and-set). A new release clears the halt."
+  fn leader_release(l : CtlLeader, r : CtlRelease) : Result(CtlLeader, String) do
+    let? _ = check(r)
+    let? _ = accept(l.release, r)
+    match l.release do
+      Some(h) -> if h.seq == r.seq do Ok(l) else Ok({ l with release: Some(r), halted: None, inflight: Nil }) end
+      None -> Ok({ l with release: Some(r), halted: None, inflight: Nil })
+    end
+  end
+
+  doc """
+  An agent reported: record it; the node's order (if any) is no longer in
+  flight. A failure this leader already knows of for the node is kept even if
+  the report omits it, so a halt cannot be lost to a report sent before the
+  failure.
+  """
+  fn leader_report(l : CtlLeader, rep : AgentReport, now : Int) : CtlLeader do
+    let merged = match (report_failure(rep), obs_of(l.obs, rep.node)) do
+      (None, Some(o)) -> match report_failure(o.report) do
+        Some(f) -> with_failure(rep, f)
+        None -> rep
+      end
+      _ -> rep
+    end
+    { l with obs: observe(l.obs, merged, now), inflight: List.filter(l.inflight, fn n -> n != rep.node) }
+  end
+
+  doc """
+  An agent answered an order. A failure is recorded as the node's failed step
+  (so the next pass halts; a new leader re-derives the halt from the agent's
+  own report). The order stays in flight until the node's next report, so it
+  is not sent again on the strength of a stale report.
+  """
+  fn leader_result(l : CtlLeader, res : StepResult, now : Int) : CtlLeader do
+    if res.ok do l
+    else
+      let f = { seq: res.seq, step: res.step, why: res.detail }
+      match obs_of(l.obs, res.node) do
+        Some(o) -> { l with obs: observe(l.obs, with_failure(o.report, f), now) }
+        None -> l
+      end
+    end
+  end
+
+  doc """
+  Run a pass. The orders it returns are now in flight. A `RolloutHalted` verdict
+  sticks until a new release; `RolloutComplete` and `RolloutWait` hold no state.
+  """
+  fn leader_pass(l : CtlLeader, members : List(CtlMember), now : Int) : (CtlLeader, Option(CtlDecision)) do
+    match l.halted do
+      Some(h) -> (l, Some(h))
+      None ->
+        match l.release do
+          None -> (l, None)
+          Some(r) ->
+            let d = pass(r, members, l.obs, l.inflight, now)
+            match d do
+              RolloutApply(_, orders) -> ({ l with inflight: List.append(l.inflight, List.map(orders, fn o -> o.node)) }, Some(d))
+              RolloutHalted(_, _, _) -> ({ l with halted: Some(d) }, Some(d))
+              _ -> (l, Some(d))
+            end
+        end
+    end
+  end
+
+  doc "The decision as one line, for status output and logs."
+  fn show_decision(d : CtlDecision) : String do
+    match d do
+      RolloutApply(s, os) -> "step " ++ int_to_string(s) ++ ": apply to [" ++ String.join(List.map(os, fn o -> o.node), ", ") ++ "]"
+      RolloutWait(s, why) -> "step " ++ int_to_string(s) ++ ": waiting, " ++ why
+      RolloutHalted(s, n, why) -> "step " ++ int_to_string(s) ++ ": HALTED on " ++ n ++ ": " ++ why
+      RolloutComplete -> "complete"
+      RolloutBehind(s) -> "behind: a node holds release " ++ int_to_string(s)
+    end
+  end
+
+  -- ── the Agent's side ─────────────────────────────────────────────────────
+
+  -- How an Agent reaches its node. `report` reads the node's state, `has`
+  -- answers `CAS_CHECK` for a hash, and `request` runs one signed request
+  -- line through the reload server and returns its answer (`OK ...` or
+  -- `ERR ...`). The real Agent builds this over the `reload_request` builtin
+  -- (design section 6, not built yet); tests build it over a simulated node.
+  type AgentOps = { report : () -> AgentReport, has : String -> Bool, request : String -> String }
+
+  doc "The artifacts of [o] the node does not hold yet (to fetch over `CtlFetch` before applying)."
+  fn missing(ops : AgentOps, o : StepOrder) : List(String) do
+    List.filter(order_artifacts(o), fn h -> not(ops.has(h)))
+  end
+
+  pfn relay(ops : AgentOps, lines : List(String)) : Option(String) do
+    match lines do
+      Nil -> None
+      Cons(l, rest) ->
+        let resp = ops.request(l)
+        if String.starts_with(resp, "OK") do relay(ops, rest) else Some(resp) end
+    end
+  end
+
+  pfn result_of(o : StepOrder, ok : Bool, detail : String) : StepResult do
+    { seq: o.seq, step: o.step, node: o.node, ok: ok, detail: detail }
+  end
+
+  doc """
+  RolloutApply one order on this node. Idempotent: a node that already reports the
+  order's end state answers ok without touching the reload server, so an
+  order a new leader sends again is harmless. Missing artifacts or a refused
+  line answer not-ok with the reason, which halts the release.
+  """
+  fn agent_apply(ops : AgentOps, o : StepOrder) : StepResult do
+    if reports_state(ops.report(), o.action, o.want) do result_of(o, true, "already applied")
+    else
+      let ms = missing(ops, o)
+      if ms != Nil do result_of(o, false, "missing artifacts: " ++ String.join(ms, " "))
+      else match relay(ops, order_lines(o)) do
+        Some(err) -> result_of(o, false, err)
+        None ->
+          if reports_state(ops.report(), o.action, o.want) do result_of(o, true, "applied")
+          else result_of(o, false, "the node accepted every line but does not report " ++ o.action ++ " at " ++ o.want) end
+      end end
+    end
+  end
+
+  -- ── what the protocols carry (design section 7) ──────────────────────────
+  --
+  -- The `Ctl` and `CtlFetch` protocols themselves are not declared here: an
+  -- `@[endpoints]` protocol typechecks only at an entry module's top level
+  -- today (specs/todos/2026-09-28-endpoints-protocol-in-nested-module.md), so
+  -- their canonical declaration and role bodies live in
+  -- test/session/control_peers.march until the wiring puts them in the
+  -- generated topology `main`. Everything the roles need is here.
+
+  -- A chunk of an artifact: its offset, the bytes as hex, and whether it is
+  -- the last.
+  type CtlChunk = { offset : Int, data : String, last : Bool }
+
+  doc "Split [hex] (an artifact as hex) into chunks of [size] hex characters; an empty artifact is one empty last chunk."
+  fn chunks(hex : String, size : Int) : List(CtlChunk) do
+    let n = String.byte_size(hex)
+    if n <= size do [{ offset: 0, data: hex, last: true }]
+    else chunks_from(hex, size, 0, n) end
+  end
+
+  pfn chunks_from(hex : String, size : Int, off : Int, n : Int) : List(CtlChunk) do
+    if off + size >= n do [{ offset: off, data: String.slice(hex, off, n - off), last: true }]
+    else Cons({ offset: off, data: String.slice(hex, off, size), last: false }, chunks_from(hex, size, off + size, n)) end
+  end
+
+  -- What to do next in one agent's `Ctl` session: send an order, poll for a
+  -- report, or end the session.
+  type CtlNext = NextOrder(StepOrder) | NextPoll | NextBye(String)
+
+  -- What the leader's side of one agent's session asks of the executor.
+  -- `report` takes a report (the hello, and every poll's answer), `stepped`
+  -- an order's result, `next(node)` says what to do next with that node's
+  -- session, and `head()` is the newest release seq the leader holds.
+  type ControlOps = { report : AgentReport -> (), stepped : StepResult -> (), next : String -> CtlNext, head : () -> Int }
+end
