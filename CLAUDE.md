@@ -47,6 +47,9 @@ behavior change lands, add a bullet under `## [Unreleased]` in the same commit (
 Skip purely internal refactors with no observable effect. When a release is tagged, rename
 `[Unreleased]` to the new version + date and start a fresh empty `[Unreleased]` above it;
 don't backfill history for versions that predate the file.
+Once a version is tagged and a later release supersedes it, move its section verbatim to
+`changelog/X.Y.Z.md` (heading kept, so `scripts/changelog-section.sh` still finds it) and
+add it to the "Past releases" list at the top of `CHANGELOG.md`.
 
 ## Build & test
 
