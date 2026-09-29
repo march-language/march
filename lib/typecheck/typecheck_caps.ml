@@ -224,6 +224,10 @@ let path_arg_builtins : (string * int list) list = [
   ("file_write", [0]); ("file_append", [0]); ("file_delete", [0]);
   ("dir_mkdir", [0]); ("dir_mkdir_p", [0]); ("dir_rmdir", [0]);
   ("dir_rm_rf", [0]);
+  (* csv_open(path, delimiter, mode): the path is argument 0 (the mode is
+     the atom).  Missing until 2026-09-28, so a scoped IO.FileRead never
+     checked it. *)
+  ("csv_open", [0]);
   (* Both arguments are paths. *)
   ("file_rename", [0; 1]); ("file_copy", [0; 1]);
 ]

@@ -13,9 +13,15 @@
 -- (specs/progress/2026-09-16-if-else-drops-the-dead-side.md).  `h` carries
 -- its own inc_rc, so that release frees the Cons cell and not the value
 -- returned.
+--
+-- The element type is String, not Int, on purpose: since 2026-09-28 borrow
+-- inference decides field escapes per FIELD, so over List(Int) `xs` (whose
+-- only escaping fields are the Int heads) is inferred BORROWED and the owned
+-- scrutinee this fixture exists to pin never arises
+-- (specs/progress/2026-09-28-field-escape-owns-per-field.md).
 mod ScrutineeBorrowedConservatism do
   needs IO.Console
-  fn first_or_recheck(xs : List(Int), flag : Bool) : Int do
+  fn first_or_recheck(xs : List(String), flag : Bool) : String do
     match xs do
       Cons(h, t) ->
         if flag do
@@ -23,14 +29,14 @@ mod ScrutineeBorrowedConservatism do
         else
           match xs do
             Cons(h2, _) -> h2
-            Nil -> 0
+            Nil -> "none"
           end
         end
-      Nil -> -1
+      Nil -> "empty"
     end
   end
 
   fn main(_cap_console : Cap(IO.Console)) do
-    println(first_or_recheck(Cons(1, Nil), true))
+    println(first_or_recheck(Cons("a", Nil), true))
   end
 end

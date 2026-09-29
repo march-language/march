@@ -3,5 +3,5 @@ step 1: re-sent to self
 step 2: re-sent to self
 step 3: resumed via self, done
 steps: 4
-victim is multiply owned: true
+victim is multiply owned: false
 refcount unchanged by handlers that name self: true

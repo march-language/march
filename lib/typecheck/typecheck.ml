@@ -6128,6 +6128,24 @@ let rec check_decl env (d : Ast.decl) : env =
         ) cis in
         match filtered with [] -> None | _ -> Some filtered
       ) inner_env.ctors in
+    (* A public actor's message constructors.  Their [ci_type] is
+       "<Actor>_Msg", which is not a declared name, so the filter above never
+       exported them and the parent could not `send(p, Inner.Set(1))` even
+       though it can build `Inner.A(1)` and `spawn(Inner.Box)`.  They are
+       exported QUALIFIED only (below): exporting the bare `Set` too would add
+       a candidate to every bare `Set` the parent already writes for its own
+       types, and an ambiguous bare constructor resolves to the most local
+       one, so existing code could silently change meaning. *)
+    let actor_msg_ctors = StrMap.filter_map (fun _k cis ->
+        let filtered = List.filter (fun ci ->
+          ci.ci_is_actor_msg
+          && (let sfx = "_Msg" in
+              let n = String.length ci.ci_type and k = String.length sfx in
+              n > k && String.sub ci.ci_type (n - k) k = sfx
+              && List.mem (String.sub ci.ci_type 0 (n - k)) pub_set)
+        ) cis in
+        match filtered with [] -> None | _ -> Some filtered
+      ) inner_env.ctors in
     (* Also register qualified ctor keys "ModName.CtorName" so that the
        desugared form ECon("ModName.CtorName") can be resolved directly from
        env.ctors without going through Module_registry.  This is critical for
@@ -6136,6 +6154,12 @@ let rec check_decl env (d : Ast.decl) : env =
     let qual_ctors = StrMap.fold (fun ctor_name cis acc ->
         StrMap.add (name.txt ^ "." ^ ctor_name) cis acc
       ) new_ctors StrMap.empty in
+    let qual_ctors = StrMap.fold (fun ctor_name cis acc ->
+        let key = name.txt ^ "." ^ ctor_name in
+        let prev = Option.value ~default:[] (StrMap.find_opt key acc) in
+        StrMap.add key (prev @ List.filter (fun ci ->
+            not (List.exists (fun c -> c.ci_type = ci.ci_type) prev)) cis) acc
+      ) actor_msg_ctors qual_ctors in
     (* Collect this module's declared capabilities for transitive enforcement *)
     let inner_needs = List.concat_map (function
         | Ast.DNeeds (caps, _) -> List.map (fun (p, _) -> cap_path_of_names p) caps
