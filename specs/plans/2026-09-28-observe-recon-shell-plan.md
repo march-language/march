@@ -72,7 +72,7 @@ re-read of 2026-09-28 found C10–C14.
 | C13 | String/heap live counters become always-on. | `MARCH_STRING_STATS` counters are atomic and gated (`march_runtime.c:135-224`); making them always-on adds an RMW per allocation. | `MEM` uses the unconditional live-object gauge (`march_live_slot`, `march_runtime.c:292-392`) only. |
 | C14 | Signed lines are safe to accept. | No nonce or expiry; any captured signed line can be replayed (`march_dispatch.c:643-646`). `CAS_PUT` never hashes the body (`march_reload.c:1636`). | R5.2: `EVAL` carries `nonce:` and `not_after_ms:`; R5.2 also hashes uploads. |
 | C15 | Design §1.5 reuses `lib/repl/tui.ml`. | 164 lines, REPL-specific, and `march_repl` drags typecheck, eval and JIT into forge. | R7: add `notty` to `march_forge` directly. |
-| C16 | Open question 1 (can the socket thread enter a reclamation critical section?). | Yes. Slots are per OS thread, registered lazily (`runtime/march_reclaim.h:30-35`); the preempt daemon already reads procs this way (`march_scheduler.c:3615-3690`). | Resolved. The rule that binds: never park or sleep inside a section. |
+| C16 | Open question 1 (can the socket thread enter a reclamation critical section?). | Yes. Slots are per OS thread, registered lazily (`runtime/march_reclaim.h:30-35`); the preempt daemon already reads procs this way (`march_scheduler.c:3615-3690`). | Resolved, and **confirmed by QW4** (20 000 actors under 1 M churn: 200/200 walks, p99 4.6 ms; Linux ASAN clean). The rule that binds: never park or sleep inside a section. |
 | C17 | The design cites a private memory note. | Not a repo artifact. | Removed from the design. |
 
 ---
@@ -96,7 +96,12 @@ Acceptance assumes them.
    `MARCH_NUM_SCHEDULERS=1` median moves more than 1%, or the 8-scheduler
    median moves more than the base arm's own p25–p75 half-width. Also run
    `bench/actors/call_storm.march` and `spawn_churn.march` once each as a
-   sanity check.
+   sanity check. **Measured noise (QW2, 2026-09-29):** on the shared dev Mac the
+   base arm's own half-IQR at one scheduler was 1.6–8.5%, and its median drifted
+   ±2.5% between runs, so n=40 cannot resolve 1%. Use n ≥ 200, repeat a failing
+   run once before bisecting, and treat the instruction-level argument (no new
+   atomic RMW or shared cache line on the path) as the primary gate, as the
+   introspection design's Decision 6 already says.
 4. **ASAN runs in Docker** (this Mac hangs ASAN binaries). Any item that adds a
    foreign-thread reader of proc or meta structs runs the ASAN corpus sweep on
    Linux before merge.
@@ -345,7 +350,11 @@ numbers from March code.
      grow without touching nine sites again. Marked impure.
    - Interpreter: `lib/eval/eval_builtins.ml` builds the same JSON from
      `actor_registry` (`eval_runtime.ml:262`).
-2. **`stdlib/recon.march`**, observe tier only, all taking
+2. **Prerequisite:** fix
+   [`todos/2026-09-29-actor-top-by-mailbox-pid-type-confusion.md`](../todos/2026-09-29-actor-top-by-mailbox-pid-type-confusion.md)
+   first: `Actor.top_by_mailbox` returns a type-confused pid, and `Recon`
+   builds on it.
+   **`stdlib/recon.march`**, observe tier only, all taking
    `Cap(Actor.Introspect)`:
    `info(c, pid) : Option(ActorInfo)`, `proc_count(c, attr, n)`,
    `proc_window(c, attr, n, window_ms)`, `tree(c) : List(SupNode)`,
@@ -453,11 +462,11 @@ the wrong authority. They are fixed here, before any `EVAL` exists.
 
 **What.**
 
-1. **Measure first.** Build a hot-reload patch for `bench/actors/call_storm.march`
-   and for a mid-size app (the conduit test app if available, else the
-   largest `test/two_node` program). Record `.so` size and `dlopen` time in
-   `specs/progress/`. This number decides whether R5.5 is a must or a
-   later optimisation.
+1. **Measured** (QW3, 2026-09-29): a whole-program `--compile-so` patch for a
+   small app is 53–89 KB; deploy (upload + activate) takes 0.07–0.34 s and the
+   run under 0.11 s; **compile takes ~2.6 s** and dominates a 2.95 s median round
+   trip. So R5.5 is worth doing for compile time, not size. Re-measure on a
+   mid-size app (the conduit test app) before deciding R5.5's priority.
 2. **Body hashing** (C14): `CAS_PUT` computes BLAKE3 of the received bytes and
    stores the digest beside the artifact. New signed verbs (EVAL) sign
    `so_blake3:<hex>`, and the server compares it with the stored digest before
@@ -515,7 +524,10 @@ the wrong authority. They are fixed here, before any `EVAL` exists.
    `derive Show` (`lib/desugar/desugar_derive.ml:297`) on demand for the
    result type and every type it reaches, **inside the fragment only**, so
    the node's types are not changed. Opaque runtime types (Pid, closures,
-   Vault handles) use the existing `march_value_to_string`. Spike first: if
+   Vault handles) use the existing `march_value_to_string`. The renderer must
+   **quote strings** (plain `to_string` leaves them bare inside containers on both
+   backends) and render `()` (compiled `to_string(())` prints `0`,
+   [`todos/2026-09-29-compiled-unit-to-string-prints-zero.md`](../todos/2026-09-29-compiled-unit-to-string-prints-zero.md)). Spike first: if
    on-demand derive for a type declared in another module is not possible
    without re-typechecking that module, fall back to the REPL's approach and
    return a heap walk description, and record which.
@@ -538,6 +550,10 @@ the wrong authority. They are fixed here, before any `EVAL` exists.
    code, and the reload server already owns `dlopen`, CAS and activation
    bookkeeping). Signed line:
    `EVAL <name> so_blake3:<h> cas_hash:<c> epoch:<E> cap_root:<r> nonce:<n> not_after_ms:<t> timeout_ms:<t> caps:<csv> src_b64:<s>`.
+   **The fragment's `__eval` takes only the narrowed caps allowed by
+   `$MARCH_SHELL_POLICY` as parameters, never `Cap(IO)`.** QW3 showed why: a hook
+   taking root `Cap(IO)` records `caps=IO` in its manifest, which already covers
+   every leaf, so any widening is invisible to the capability check.
    Flow: verify signature, nonce, expiry (R4.4); check body digest (R5.2);
    check policy against `$MARCH_SHELL_POLICY` (a flat cap list like the
    deploy policy; absent means **deny all**); `dlopen`; marker check (R5.6);

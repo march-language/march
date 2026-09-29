@@ -26,3 +26,6 @@ Move this file to `specs/progress/` when R10 lands; the R11 items (transcripts,
 
 Related: [`2026-09-26-compiled-logger-appenders-are-no-ops.md`](2026-09-26-compiled-logger-appenders-are-no-ops.md)
 blocks any events bus, which this work does not include.
+
+Quick-win results (2026-09-29): [`progress/2026-09-29-observe-quick-wins-results.md`](../progress/2026-09-29-observe-quick-wins-results.md).
+All four passed; three pre-existing bugs filed from them (2026-09-29 todos).
