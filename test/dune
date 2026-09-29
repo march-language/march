@@ -1932,32 +1932,6 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/drain_peers.expected drain_peers_interp.out)))
 
-; Part two of the above: three more protocols (Pair, Relay3, Fork) under the
-; chaos peers. A second file because the frontend's time grows steeply with
-; the number of `@[endpoints]` protocols in one module (three: seconds; five:
-; ~50 s; six: ~8 min), which a test must not pay.
-(rule
- (targets drain_peers_multi_bin drain_peers_multi.out drain_peers_multi_interp.out)
- (deps (file %{exe:../bin/main.exe})
-       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
-       (source_tree ../stdlib)
-       (file session/drain_peers_multi.march))
- (action
-  (progn
-   (with-stdout-to drain_peers_multi_interp.out
-     (run %{exe:../bin/main.exe} session/drain_peers_multi.march))
-   (run %{exe:../bin/main.exe} --compile -o drain_peers_multi_bin
-        session/drain_peers_multi.march)
-   (with-stdout-to drain_peers_multi.out (system "./drain_peers_multi_bin")))))
-
-(rule
- (alias runtest)
- (action (diff session/drain_peers_multi.expected drain_peers_multi.out)))
-
-(rule
- (alias runtest)
- (action (diff session/drain_peers_multi.expected drain_peers_multi_interp.out)))
-
 ; `Cap(ClusterNode.Live)` as a seam (D35, distributed-deploys step 4,
 ; 2026-09-23): a toy placement written against the cluster capability only,
 ; driven by a fake dictionary attached with `ClusterNode.attach(io, ops)`.
@@ -3873,14 +3847,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets native_signal_term_suppress native_signal_term_suppress.out)
  (deps (file %{exe:../bin/main.exe})
-       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
-       (file ../runtime/march_scheduler.c) (file ../runtime/march_reclaim.c) (file ../runtime/march_reclaim.h) (file ../runtime/march_scheduler.h)
-       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
-       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
-       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
-       (file ../runtime/march_deque.h)
-       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
-       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../runtime)
        (file native/signal_term_suppress.march)
        (source_tree ../stdlib))
  (action
@@ -3890,35 +3857,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    (with-stdout-to native_signal_term_suppress.out
         (system "./native_signal_term_suppress")))))
 
-; QUARANTINED from `runtest` (2026-07-24): reddened `test (ubuntu-24.04)`
-; on a signal-dispatch ordering/content race. Not a simple line-ordering
-; flake — reproduced locally at ~2-5% of runs (looping the compiled binary
-; hundreds to thousands of times), and the majority shape is TORN output
-; (e.g. `survived termterm handler` — a dropped newline / concatenated
-; lines), not a clean 3-line permutation a sorted diff could tolerate (that
-; was only ~1 in 5 of the failures; the rest genuinely corrupt content, so
-; `node_discovery`'s sort-before-diff approach above does not apply here).
-; Ruled out march_println/march_print's unchecked writev(2)/write(2) return
-; value (the scheduler's SIGUSR1 preemption tick can EINTR a syscall — see
-; march_scheduler.c's "Limitations / known EINTR exposure") as the cause: a
-; retry-on-short-write fix was implemented and tested, but a guaranteed-fresh
-; compile (MARCH_NO_RUNTIME_CACHE=1, caches cleared) with that fix still
-; flaked at the same ~5% rate, so the corruption happens before the write
-; syscall — most likely a race between the deferred Signal.watch dispatch
-; (run by an arbitrary scheduler OS thread's per-iteration drain, per
-; march_scheduler.c's march_signal_drain call sites) and the raising
-; thread's own subsequent code, touching overlapping memory (allocator/GC)
-; rather than just interleaving output. Same general class as the open
-; scheduler-deadlock P0 in the inventory todo below (heisenbug: not yet isolated to
-; an exact missing sync edge) but a distinct symptom — tracked as a
-; separate entry there. Un-quarantine (restore `(alias runtest)` below)
-; once the dispatch race is fixed. Runnable manually via
-; `dune build @test/signal_term_suppress_quarantined`.  Full quarantine
-; inventory (what coverage this leaves dark):
-; specs/todos/2026-07-24-quarantined-tests-coverage-that-is-currently-dark-inventory-2026.md.
+; Back on `runtest` 2026-09-28 (quarantined 2026-07-24).  The quarantine
+; saw two failure shapes at ~2-5%: TORN output (`survived termterm handler`)
+; and a clean reordering.  The tear was march_println's two iovecs racing
+; another thread's writev, fixed 2026-08-21 by march_stdout_mu
+; (specs/progress/2026-08-21-println-writev-not-atomic-across-threads.md) --
+; the same fix that brought node_discovery back.  The reordering is the
+; contract: Signal.raise's doc says delivery is asynchronous and the watcher
+; runs "from the next scheduler drain", which any scheduler OS thread may
+; perform, so `term handler` may print before `survived term`.  Soaked
+; 2026-09-28 by running the binary directly under host load 10-16: 1000 runs
+; (4 in parallel) gave 6 clean reorderings, 0 torn lines, 0 non-zero exits;
+; 800 runs (8 in parallel) sorted gave 0 mismatches.  So the golden is
+; compared SORTED (LC_ALL=C), as node_discovery's is: order-tolerant, but a
+; torn or missing line, or the process dying on the SIGTERM, still fails it.
+; specs/progress/2026-09-28-signal-term-suppress-unquarantined.md.
 (rule
- (alias signal_term_suppress_quarantined)
- (action (diff native/signal_term_suppress.expected native_signal_term_suppress.out)))
+ (target native_signal_term_suppress.sorted.out)
+ (deps native_signal_term_suppress.out)
+ (action
+  (with-stdout-to native_signal_term_suppress.sorted.out
+   (system "LC_ALL=C sort native_signal_term_suppress.out"))))
+
+(rule
+ (alias runtest)
+ (action (diff native/signal_term_suppress.expected native_signal_term_suppress.sorted.out)))
 
 ; ── Phase 2: float-boxing Stage 2 (erased Floats are heap-boxed) ──────
 ; A Float crossing a type-erasure boundary is boxed (march_float_box, tag -3),
@@ -7419,6 +7382,155 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/nested_actor_spawn.expected interp_nested_actor_spawn.out)))
+
+; ── run_until_idle() must not return mid ping-pong ──
+; Two actors bounce one message 200000 times; main calls run_until_idle()
+; and reads both counts.  Before 2026-09-28 wait_idle's proc-by-proc scan
+; could read every proc idle while a message was in flight, and returned
+; early (~1% of runs at 14 schedulers under load; see
+; specs/progress/2026-09-28-run-until-idle-returned-mid-ping-pong.md).  One
+; run here is a weak guard for a ~1% race, so it runs at 14 schedulers, where
+; the race showed.
+(rule
+ (targets native_run_until_idle_ping_pong native_run_until_idle_ping_pong.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/run_until_idle_ping_pong.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_run_until_idle_ping_pong
+        native/run_until_idle_ping_pong.march)
+   (with-stdout-to native_run_until_idle_ping_pong.out
+        (system "MARCH_NUM_SCHEDULERS=14 ./native_run_until_idle_ping_pong")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/run_until_idle_ping_pong.expected native_run_until_idle_ping_pong.out)))
+
+; ── Process.spawn_async registry: no live-slot reuse, stale handles, threads ──
+(rule
+ (targets native_live_process_registry native_live_process_registry.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/live_process_registry.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_live_process_registry
+        native/live_process_registry.march)
+   (with-stdout-to native_live_process_registry.out
+        (system "./native_live_process_registry")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/live_process_registry.expected native_live_process_registry.out)))
+
+(rule
+ (targets interp_live_process_registry.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/live_process_registry.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_live_process_registry.out
+   (run %{exe:../bin/main.exe} native/live_process_registry.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/live_process_registry.expected interp_live_process_registry.out)))
+
+; ── __try_call / __try_call_val Err message: "panic: <msg>" on both backends ──
+(rule
+ (targets native_try_call_err_message native_try_call_err_message.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/try_call_err_message.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_try_call_err_message
+        native/try_call_err_message.march)
+   (with-stdout-to native_try_call_err_message.out
+        (system "./native_try_call_err_message")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/try_call_err_message.expected native_try_call_err_message.out)))
+
+(rule
+ (targets interp_try_call_err_message.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/try_call_err_message.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_try_call_err_message.out
+   (run %{exe:../bin/main.exe} native/try_call_err_message.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/try_call_err_message.expected interp_try_call_err_message.out)))
+
+; ── A nested actor's message constructors sent qualified from the parent ──
+(rule
+ (targets native_nested_actor_msg_from_parent native_nested_actor_msg_from_parent.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nested_actor_msg_from_parent.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_nested_actor_msg_from_parent
+        native/nested_actor_msg_from_parent.march)
+   (with-stdout-to native_nested_actor_msg_from_parent.out
+        (system "./native_nested_actor_msg_from_parent")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_actor_msg_from_parent.expected native_nested_actor_msg_from_parent.out)))
+
+(rule
+ (targets interp_nested_actor_msg_from_parent.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/nested_actor_msg_from_parent.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_nested_actor_msg_from_parent.out
+   (run %{exe:../bin/main.exe} native/nested_actor_msg_from_parent.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_actor_msg_from_parent.expected interp_nested_actor_msg_from_parent.out)))
+
+; ── Same-named actors in sibling modules and at the root stay distinct ──
+(rule
+ (targets native_nested_actor_same_name native_nested_actor_same_name.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nested_actor_same_name.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_nested_actor_same_name
+        native/nested_actor_same_name.march)
+   (with-stdout-to native_nested_actor_same_name.out
+        (system "./native_nested_actor_same_name")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_actor_same_name.expected native_nested_actor_same_name.out)))
+
+(rule
+ (targets interp_nested_actor_same_name.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/nested_actor_same_name.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_nested_actor_same_name.out
+   (run %{exe:../bin/main.exe} native/nested_actor_same_name.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nested_actor_same_name.expected interp_nested_actor_same_name.out)))
 
 ; ── Credit-based flow control: budget refuses, CREDIT re-admits ──
 (rule

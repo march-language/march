@@ -1498,14 +1498,56 @@ static void do_actor_death(void *actor, march_death_reason reason,
  * March prelude's panic/todo/unreachable wrappers.  They call march_panic and
  * return NULL (unreachable, but needed to satisfy the polymorphic return type
  * the compiler assigns to expressions of type `a`). */
+/* Which diverging primitive raised the panic being caught, as the prefix the
+ * interpreter puts on its message ("panic: boom", "todo: later";
+ * eval_builtins.ml's panic_ / todo_).  march_panic's fail buffer holds the
+ * bare message -- the compiled test runner prints it that way -- so
+ * __try_call / __try_call_val prepend this when building their Err.  Set
+ * immediately before the longjmp by the SAME thread that runs the catching
+ * setjmp, like march_test_fail_buf itself; the catchers clear it on entry
+ * and restore the outer value on exit. */
+static const char *march_panic_prefix = NULL;
+
 void *march_panic_ext(void *s) {
+    march_panic_prefix = "panic: ";
     march_panic(s);
     return NULL;
 }
 
 void *march_todo_ext(void *s) {
+    march_panic_prefix = "todo: ";
     march_panic(s);
     return NULL;
+}
+
+/* The `panic` builtin (lib/tir/llvm_builtins.ml): user `panic(msg)` and the
+ * compiler's own assert / non-exhaustive panics. */
+void march_panic_user(void *s) {
+    march_panic_prefix = "panic: ";
+    march_panic(s);
+}
+
+/* unreachable_ takes no argument; the message is the interpreter's
+ * (eval_builtins.ml's unreachable_), with no further prefix. */
+void *march_unreachable_ext(void) {
+    march_panic_prefix = NULL;
+    march_panic(march_string_lit("unreachable: reached unreachable code", 37));
+    return NULL;
+}
+
+/* The Err message of a caught panic: the prefix march_panic_ext /
+ * march_todo_ext recorded, then the fail buffer (or [fallback] when empty). */
+static void *march_caught_panic_message(const char *fallback) {
+    const char *msg = march_test_fail_buf[0] ? march_test_fail_buf : fallback;
+    const char *pre = march_panic_prefix ? march_panic_prefix : "";
+    size_t pl = strlen(pre), ml = strlen(msg);
+    char *buf = (char *)malloc(pl + ml + 1);
+    if (!buf) { fputs("march: out of memory\n", stderr); exit(1); }
+    memcpy(buf, pre, pl);
+    memcpy(buf + pl, msg, ml + 1);
+    void *str = march_string_lit(buf, (int64_t)(pl + ml));
+    free(buf);
+    return str;
 }
 
 void march_panic(void *s) {
@@ -1841,8 +1883,10 @@ void *march_try_call(void *thunk) {
     memcpy(&saved_jmp, &march_test_jmp_buf, sizeof(jmp_buf));
     memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
 
+    const char *saved_prefix = march_panic_prefix;
     march_test_fail_buf[0] = '\0';
     march_test_in_test     = 1;
+    march_panic_prefix     = NULL;
 
     int64_t ok_result = 0;
     int     panicked  = 0;
@@ -1853,18 +1897,17 @@ void *march_try_call(void *thunk) {
         panicked = 1;
     }
 
-    /* Capture the panic message before restoring the outer fail buffer. */
+    /* Capture the panic message before restoring the outer fail buffer:
+     * "panic: <msg>" for panic(msg), as the interpreter reports it (until
+     * 2026-09-28 the compiled Err carried the bare message). */
     void *err_str = NULL;
-    if (panicked) {
-        const char *msg = march_test_fail_buf[0]
-            ? march_test_fail_buf : "property panicked";
-        err_str = march_string_lit(msg, (int64_t)strlen(msg));
-    }
+    if (panicked) err_str = march_caught_panic_message("property panicked");
 
     /* Restore the outer panic handler. */
     memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
     memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
     march_test_in_test = saved_in_test;
+    march_panic_prefix = saved_prefix;
 
     /* No march_decrc(thunk) here. Like the task_spawn trampoline (see its
      * comment), a CAPTURING thunk's own apply function now releases its one
@@ -1934,8 +1977,10 @@ void *march_try_call_val(void *thunk) {
     memcpy(&saved_jmp, &march_test_jmp_buf, sizeof(jmp_buf));
     memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
 
+    const char *saved_prefix = march_panic_prefix;
     march_test_fail_buf[0] = '\0';
     march_test_in_test     = 1;
+    march_panic_prefix     = NULL;
 
     int64_t ok_result = 0;
     int     panicked  = 0;
@@ -1947,15 +1992,12 @@ void *march_try_call_val(void *thunk) {
     }
 
     void *err_str = NULL;
-    if (panicked) {
-        const char *msg = march_test_fail_buf[0]
-            ? march_test_fail_buf : "call panicked";
-        err_str = march_string_lit(msg, (int64_t)strlen(msg));
-    }
+    if (panicked) err_str = march_caught_panic_message("call panicked");
 
     memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
     memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
     march_test_in_test = saved_in_test;
+    march_panic_prefix = saved_prefix;
 
     /* No march_decrc(thunk) — see the identical comment in __try_call above. */
 
@@ -9106,12 +9148,95 @@ void *march_process_spawn_lines(void *cmd_obj, void *args_list) {
 
 /* ── Async process management ───────────────────────────────────────── */
 
-/* Global fd-to-FILE* registry for live processes.
-   Each entry: slot → {pid, stdout FILE*, stdin FILE*}
-   Keyed by the stream_id stored in LiveProcess(pid, stream_id). */
-#define LIVE_PROC_MAX 64
-static struct { int used; pid_t pid; FILE *fp; FILE *write_fp; } live_proc_reg[LIVE_PROC_MAX];
-static int live_proc_next = 0;
+/* Registry of live child processes started by process_spawn_async.
+
+   A LiveProcess(pid, handle) names its slot by [handle] =
+   (generation << LIVE_PROC_SLOT_BITS) | slot.  Every allocation of a slot
+   bumps its generation, so a handle kept after wait_proc (or copied before
+   it) fails the generation check instead of addressing the slot's next
+   owner.
+
+   All slot bookkeeping is under [live_proc_mu]; the blocking I/O itself
+   (fgets, fwrite) runs outside it.  A reader or writer marks its stream
+   busy while it uses the FILE*, and wait_proc only closes a stream nobody
+   is using; a busy stream is closed by its user on the way out.  A slot
+   becomes free (reusable) only once both streams are closed, so no slot is
+   handed out while a previous owner can still touch its FILE*s.
+
+   Slots are heap-allocated and never freed or moved, so a pointer taken
+   under the lock stays valid after it is released; the pointer array
+   grows on demand (previously a fixed ring of 64 whose 65th spawn
+   silently closed slot 0's pipes). */
+#define LIVE_PROC_SLOT_BITS 20
+#define LIVE_PROC_SLOT_MASK ((1 << LIVE_PROC_SLOT_BITS) - 1)
+typedef struct {
+    int      used;       /* allocated to a process, not yet fully released */
+    int      closing;    /* wait_proc ran; close each stream when idle */
+    int      rbusy;      /* threads inside a read on [fp] */
+    int      wbusy;      /* threads inside a write on [write_fp] */
+    uint32_t gen;        /* bumped on every allocation */
+    pid_t    pid;
+    FILE    *fp;         /* child's stdout (we read) */
+    FILE    *write_fp;   /* child's stdin (we write) */
+} live_proc_slot;
+static pthread_mutex_t  live_proc_mu = PTHREAD_MUTEX_INITIALIZER;
+static live_proc_slot **live_proc_slots = NULL;
+static int              live_proc_len = 0;   /* slots allocated so far */
+static int              live_proc_cap = 0;   /* capacity of live_proc_slots */
+
+/* Close whichever streams of a closing slot nobody is using; free the slot
+   once both are closed.  Caller holds live_proc_mu. */
+static void live_proc_settle_locked(live_proc_slot *s) {
+    if (!s->closing) return;
+    if (s->rbusy == 0 && s->fp)       { fclose(s->fp);       s->fp = NULL; }
+    if (s->wbusy == 0 && s->write_fp) { fclose(s->write_fp); s->write_fp = NULL; }
+    if (!s->fp && !s->write_fp) { s->used = 0; s->closing = 0; }
+}
+
+/* The slot a handle names, if the handle is current.  Caller holds the lock. */
+static live_proc_slot *live_proc_lookup_locked(int64_t handle) {
+    if (handle < 0) return NULL;
+    int64_t idx = handle & LIVE_PROC_SLOT_MASK;
+    uint32_t gen = (uint32_t)(handle >> LIVE_PROC_SLOT_BITS);
+    if (idx >= live_proc_len) return NULL;
+    live_proc_slot *s = live_proc_slots[idx];
+    if (!s->used || s->closing || s->gen != gen) return NULL;
+    return s;
+}
+
+/* Take a free slot for [pid] and its streams.  Returns the handle, or -1
+   when the table cannot grow (the caller closes the streams). */
+static int64_t live_proc_register(pid_t pid, FILE *fp, FILE *write_fp) {
+    pthread_mutex_lock(&live_proc_mu);
+    int idx = -1;
+    for (int k = 0; k < live_proc_len; k++)
+        if (!live_proc_slots[k]->used) { idx = k; break; }
+    if (idx < 0) {
+        if (live_proc_len > LIVE_PROC_SLOT_MASK) {
+            pthread_mutex_unlock(&live_proc_mu);
+            return -1;
+        }
+        if (live_proc_len == live_proc_cap) {
+            int ncap = live_proc_cap ? live_proc_cap * 2 : 64;
+            live_proc_slot **ns = (live_proc_slot **)realloc(
+                live_proc_slots, (size_t)ncap * sizeof(*ns));
+            if (!ns) { pthread_mutex_unlock(&live_proc_mu); return -1; }
+            live_proc_slots = ns;
+            live_proc_cap = ncap;
+        }
+        live_proc_slot *s = (live_proc_slot *)calloc(1, sizeof(*s));
+        if (!s) { pthread_mutex_unlock(&live_proc_mu); return -1; }
+        idx = live_proc_len++;
+        live_proc_slots[idx] = s;
+    }
+    live_proc_slot *s = live_proc_slots[idx];
+    s->gen++;
+    s->used = 1; s->closing = 0; s->rbusy = 0; s->wbusy = 0;
+    s->pid = pid; s->fp = fp; s->write_fp = write_fp;
+    int64_t handle = ((int64_t)s->gen << LIVE_PROC_SLOT_BITS) | idx;
+    pthread_mutex_unlock(&live_proc_mu);
+    return handle;
+}
 
 /* process_spawn_async(command, args) → Result(LiveProcess(pid,id), String) */
 void *march_process_spawn_async(void *cmd_obj, void *args_list) {
@@ -9158,27 +9283,42 @@ void *march_process_spawn_async(void *cmd_obj, void *args_list) {
         close(stdin_pfd[1]); close(stdout_pfd[0]);
         return mk_err_cstr("fork failed");
     }
-    /* Register */
-    int id = live_proc_next++ % LIVE_PROC_MAX;
-    if (live_proc_reg[id].fp)       { fclose(live_proc_reg[id].fp);       live_proc_reg[id].fp = NULL; }
-    if (live_proc_reg[id].write_fp) { fclose(live_proc_reg[id].write_fp); live_proc_reg[id].write_fp = NULL; }
-    live_proc_reg[id].used     = 1;
-    live_proc_reg[id].pid      = pid;
-    live_proc_reg[id].fp       = fdopen(stdout_pfd[0], "r");
-    live_proc_reg[id].write_fp = fdopen(stdin_pfd[1],  "w");
-    /* Build LiveProcess(pid, id): tag=0, 2 int64 fields */
+    /* The parent's ends must not leak into later children: a child that
+       inherits another child's stdin write end keeps that child from ever
+       seeing EOF. */
+    fcntl(stdin_pfd[1],  F_SETFD, FD_CLOEXEC);
+    fcntl(stdout_pfd[0], F_SETFD, FD_CLOEXEC);
+    FILE *rfp = fdopen(stdout_pfd[0], "r");
+    FILE *wfp = fdopen(stdin_pfd[1],  "w");
+    int64_t handle = (rfp && wfp) ? live_proc_register(pid, rfp, wfp) : -1;
+    if (handle < 0) {
+        if (rfp) fclose(rfp); else close(stdout_pfd[0]);
+        if (wfp) fclose(wfp); else close(stdin_pfd[1]);
+        kill(pid, SIGTERM);
+        waitpid(pid, NULL, 0);
+        return mk_err_cstr("too many live processes");
+    }
+    /* Build LiveProcess(pid, handle): tag=0, 2 int64 fields */
     void *lp = march_alloc(16 + 16);
     MARCH_FIELD(lp, 0) = (int64_t)pid;
-    MARCH_FIELD(lp, 1) = (int64_t)id;
+    MARCH_FIELD(lp, 1) = handle;
     return mk_ok(lp);
 }
 
 /* process_read_line(lp) → Option(String) */
 void *march_process_read_line(void *lp_obj) {
-    int64_t id = MARCH_FIELD(lp_obj, 1);
-    if (id < 0 || id >= LIVE_PROC_MAX || !live_proc_reg[id].used || !live_proc_reg[id].fp)
-        return make_none();
-    char buf[4096]; char *line = fgets(buf, sizeof(buf), live_proc_reg[id].fp);
+    int64_t handle = MARCH_FIELD(lp_obj, 1);
+    pthread_mutex_lock(&live_proc_mu);
+    live_proc_slot *s = live_proc_lookup_locked(handle);
+    FILE *fp = s ? s->fp : NULL;
+    if (fp) s->rbusy++;
+    pthread_mutex_unlock(&live_proc_mu);
+    if (!fp) return make_none();
+    char buf[4096]; char *line = fgets(buf, sizeof(buf), fp);
+    pthread_mutex_lock(&live_proc_mu);
+    s->rbusy--;
+    live_proc_settle_locked(s);
+    pthread_mutex_unlock(&live_proc_mu);
     if (!line) return make_none();
     size_t len = strlen(line);
     if (len > 0 && line[len-1] == '\n') len--;  /* strip newline */
@@ -9187,12 +9327,20 @@ void *march_process_read_line(void *lp_obj) {
 
 /* process_write(lp, data) → () — write raw bytes to the process's stdin */
 int64_t march_process_write(void *lp_obj, void *data_obj) {
-    int64_t id = MARCH_FIELD(lp_obj, 1);
-    if (id < 0 || id >= LIVE_PROC_MAX || !live_proc_reg[id].used || !live_proc_reg[id].write_fp)
-        return 0;
-    march_string *s = (march_string *)data_obj;
-    fwrite(s->data, 1, (size_t)s->len, live_proc_reg[id].write_fp);
-    fflush(live_proc_reg[id].write_fp);
+    int64_t handle = MARCH_FIELD(lp_obj, 1);
+    pthread_mutex_lock(&live_proc_mu);
+    live_proc_slot *s = live_proc_lookup_locked(handle);
+    FILE *wfp = s ? s->write_fp : NULL;
+    if (wfp) s->wbusy++;
+    pthread_mutex_unlock(&live_proc_mu);
+    if (!wfp) return 0;
+    march_string *str = (march_string *)data_obj;
+    fwrite(str->data, 1, (size_t)str->len, wfp);
+    fflush(wfp);
+    pthread_mutex_lock(&live_proc_mu);
+    s->wbusy--;
+    live_proc_settle_locked(s);
+    pthread_mutex_unlock(&live_proc_mu);
     return 0;
 }
 
@@ -9203,15 +9351,19 @@ int64_t march_process_kill_proc(void *lp_obj) {
     return 0;
 }
 
-/* process_wait_proc(lp) → Int (exit code) */
+/* process_wait_proc(lp) → Int (exit code).  Closes the streams (a stream a
+   reader or writer is still inside is closed when it leaves) and releases
+   the slot; the handle is stale afterwards. */
 int64_t march_process_wait_proc(void *lp_obj) {
-    int64_t pid = MARCH_FIELD(lp_obj, 0);
-    int64_t id  = MARCH_FIELD(lp_obj, 1);
-    if (id >= 0 && id < LIVE_PROC_MAX && live_proc_reg[id].used) {
-        if (live_proc_reg[id].fp)       { fclose(live_proc_reg[id].fp);       live_proc_reg[id].fp = NULL; }
-        if (live_proc_reg[id].write_fp) { fclose(live_proc_reg[id].write_fp); live_proc_reg[id].write_fp = NULL; }
-        live_proc_reg[id].used = 0;
+    int64_t pid    = MARCH_FIELD(lp_obj, 0);
+    int64_t handle = MARCH_FIELD(lp_obj, 1);
+    pthread_mutex_lock(&live_proc_mu);
+    live_proc_slot *s = live_proc_lookup_locked(handle);
+    if (s) {
+        s->closing = 1;
+        live_proc_settle_locked(s);
     }
+    pthread_mutex_unlock(&live_proc_mu);
     int status = 0;
     waitpid((pid_t)pid, &status, 0);
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
