@@ -45,6 +45,14 @@ git log is authoritative for exact commits.
   ran interpreted but a compiled program failed to link (`A.f` undefined),
   whenever `Outer` was itself nested in the entry module, or was a library
   (`MARCH_LIB_PATH`) or stdlib module.
+- **A module that `import`s a sibling declared later in the file is now
+  checked against that sibling's capabilities.** Sibling modules were
+  checked in declaration order unless a qualified reference said otherwise,
+  so `import Sibling` followed by bare calls into a later `Sibling` ran
+  before `Sibling`'s capabilities were known, and the missing-`needs` error
+  for the import was silently skipped. An import now orders the importer
+  after the sibling, unless the two modules import each other.
+
 - **Sending a linear message can no longer fail to link.** The compiler
   lowered a `send` whose message was linear to `march_send_linear`, which
   only the unit-test runtime defines, so a program that reached that path
