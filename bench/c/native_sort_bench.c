@@ -11,6 +11,10 @@
  *   ipn       ipnsort-style: full-run scan, pseudo-median-of-9, branchless Lomuto,
  *             equal-partition on repeated pivot, network+insertion small-sort, heapsort fallback
  *   radix     LSD radix, 8 passes of 8 bits, O(n) scratch (the other real contender for bare i64)
+ *   radix1    LSD radix with all eight histograms built in ONE read pass and
+ *             trivial digits skipped; measured as a second algorithm above a
+ *             size threshold and not adopted (`nsb sweep`;
+ *             specs/progress/2026-09-28-native-sort-int-radix-threshold.md)
  *
  * Every timed run is checked against qsort's output (memcmp), so a wrong sort
  * fails loudly instead of winning the benchmark.
@@ -282,6 +286,50 @@ static void sort_radix(i64 *v, size_t n) {
     free(a == (uint64_t *)v ? b : a);
 }
 
+/* ---------- LSD radix, one histogram pass (radix1) ----------
+ * The candidate for specs/todos/2026-09-25-native-sort-int-radix-threshold.md.
+ * sort_radix above recomputes a histogram per digit (8 read passes before any
+ * scatter); this one builds all eight 256-bucket histograms in ONE read pass,
+ * then scatters only the digits that are not trivial (a digit every key
+ * shares moves nothing). A 10-distinct-value input therefore costs one read
+ * and one scatter, a nearly-sorted 0..n input three scatters at n = 5M.
+ * Returns false (and leaves v untouched) when the scratch allocation fails,
+ * so a caller can fall back to the in-place sort. */
+static bool radix1_i64(i64 *v, size_t n) {
+    if (n < 2) return true;
+    uint64_t *a = (uint64_t *)v;
+    uint64_t *b = malloc(n * sizeof(uint64_t));
+    if (!b) return false;
+    size_t (*cnt)[256] = calloc(8, sizeof *cnt);
+    if (!cnt) { free(b); return false; }
+    for (size_t i = 0; i < n; i++) {
+        uint64_t k = a[i] ^ 0x8000000000000000ULL;   /* signed -> unsigned order */
+        cnt[0][k & 0xFF]++;         cnt[1][(k >> 8) & 0xFF]++;
+        cnt[2][(k >> 16) & 0xFF]++; cnt[3][(k >> 24) & 0xFF]++;
+        cnt[4][(k >> 32) & 0xFF]++; cnt[5][(k >> 40) & 0xFF]++;
+        cnt[6][(k >> 48) & 0xFF]++; cnt[7][k >> 56]++;
+    }
+    for (int pass = 0; pass < 8; pass++) {
+        size_t *c = cnt[pass];
+        bool trivial = false;
+        for (int d = 0; d < 256; d++) if (c[d] == n) { trivial = true; break; }
+        if (trivial) continue;
+        size_t sum = 0;
+        for (int d = 0; d < 256; d++) { size_t t = c[d]; c[d] = sum; sum += t; }
+        int shift = pass * 8;
+        for (size_t i = 0; i < n; i++) {
+            uint64_t k = a[i] ^ 0x8000000000000000ULL;
+            b[c[(k >> shift) & 0xFF]++] = a[i];
+        }
+        uint64_t *t = a; a = b; b = t;
+    }
+    if (a != (uint64_t *)v) { memcpy(v, a, n * sizeof(uint64_t)); free(a); }
+    else free(b);
+    free(cnt);
+    return true;
+}
+static void sort_radix1(i64 *v, size_t n) { if (!radix1_i64(v, n)) sort_ipn(v, n); }
+
 /* ---------- patterns ---------- */
 typedef void (*gen_fn)(i64 *, size_t);
 static void gen_random(i64 *v, size_t n)   { for (size_t i = 0; i < n; i++) v[i] = (i64)rng(); }
@@ -305,6 +353,7 @@ static void gen_equal(i64 *v, size_t n)    { for (size_t i = 0; i < n; i++) v[i]
 typedef void (*sort_fn)(i64 *, size_t);
 static const struct { const char *name; sort_fn f; } SORTS[] = {
     {"qsort", sort_qsort}, {"intro", sort_intro}, {"ipn", sort_ipn}, {"radix", sort_radix},
+    {"radix1", sort_radix1},
 };
 static const struct { const char *name; gen_fn g; } PATTERNS[] = {
     {"random", gen_random}, {"sorted", gen_sorted}, {"reversed", gen_reversed},
@@ -670,7 +719,51 @@ static int main_f64(bool quick) {
     return 0;
 }
 
+/* `nsb sweep`: the radix threshold. For each size, ipn vs radix1 on every
+ * pattern that survives ipn's full-run scan (sorted/reversed/equal never
+ * reach a sort), min of an adaptive number of reps so each cell takes
+ * ~>=200 ms of total timing; alternating order. Prints radix1/ipn. */
+static int main_sweep(void) {
+    size_t sizes[] = {256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
+                      131072, 262144, 524288, 1048576, 5000000};
+    size_t np = sizeof sizes / sizeof sizes[0];
+    printf("radix1/ipn (min of reps; < 1 means radix1 faster)\n%-9s", "n");
+    for (size_t p = 0; p < NP; p++) {
+        if (PATTERNS[p].g == gen_sorted || PATTERNS[p].g == gen_reversed || PATTERNS[p].g == gen_equal) continue;
+        printf("%10s", PATTERNS[p].name);
+    }
+    printf("\n");
+    for (size_t si = 0; si < np; si++) {
+        size_t n = sizes[si];
+        i64 *src = malloc(n * sizeof(i64)), *w = malloc(n * sizeof(i64)), *ref = malloc(n * sizeof(i64));
+        int reps = (int)(20000000 / n); if (reps < 3) reps = 3; if (reps > 3000) reps = 3000;
+        printf("%-9zu", n);
+        for (size_t p = 0; p < NP; p++) {
+            if (PATTERNS[p].g == gen_sorted || PATTERNS[p].g == gen_reversed || PATTERNS[p].g == gen_equal) continue;
+            PATTERNS[p].g(src, n);
+            memcpy(ref, src, n * sizeof(i64)); sort_ipn(ref, n);
+            double best[2] = {1e18, 1e18};
+            for (int r = 0; r < reps; r++) {
+                for (int k = 0; k < 2; k++) {
+                    int which = (r & 1) ? 1 - k : k;
+                    memcpy(w, src, n * sizeof(i64));
+                    double t0 = now_ms();
+                    if (which == 0) sort_ipn(w, n); else sort_radix1(w, n);
+                    double t = now_ms() - t0;
+                    if (t < best[which]) best[which] = t;
+                    if (r == 0 && memcmp(w, ref, n * sizeof(i64)) != 0) { printf("MISMATCH sweep n=%zu\n", n); return 1; }
+                }
+            }
+            printf("%10.2f", best[1] / best[0]);
+        }
+        printf("\n");
+        free(src); free(w); free(ref);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "sweep") == 0) return main_sweep();
     if (argc > 1 && strcmp(argv[1], "f64") == 0)
         return main_f64(argc > 2 && strcmp(argv[2], "quick") == 0);
     int bad = verify();

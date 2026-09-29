@@ -375,6 +375,54 @@ let dependency_order_dmod_run (run : Ast.decl list) : Ast.decl list =
        dependency is satisfied while still respecting the soft-edge
        preference everywhere it doesn't conflict. *)
     let hard_deps_of decls = unqualified_module_deps ~type_owner ~ctor_owner decls in
+    (* `import Sibling` / `use Sibling` edges.  The importer depends on the
+       sibling whether or not it then writes a qualified `Sibling.f`; with no
+       edge, a BARE import of a sibling declared later left the importer
+       checked first, before the sibling's members and capabilities were
+       known, so capability Check 4 had nothing to look up and silently never
+       fired (specs/progress/2026-09-28-check4-importee-declared-later.md).
+
+       An import edge is added only when it lies on no cycle of the graph
+       made of every edge (reference, bare-type/ctor, and ALL import edges).
+       Mutually importing modules therefore keep exactly the order they had
+       before this edge existed, and a module that imports an EARLIER sibling
+       is already visited after it, so the only order that changes is an
+       acyclic import of a later sibling. *)
+    let base_deps : (string, StringSet.t) Hashtbl.t = Hashtbl.create 16 in
+    List.iter (fun (modname, (decls, _)) ->
+        Hashtbl.replace base_deps modname
+          (StringSet.remove modname
+             (StringSet.inter name_set
+                (StringSet.union (module_refs_in_decls decls) (hard_deps_of decls)))))
+      info;
+    let import_deps : (string, StringSet.t) Hashtbl.t = Hashtbl.create 16 in
+    List.iter (fun (modname, (decls, _)) ->
+        let targets = List.fold_left (fun acc d -> match d with
+            | Ast.DUse (ud, _) ->
+              let target =
+                String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) ud.Ast.use_path) in
+              if StringSet.mem target name_set && target <> modname
+              then StringSet.add target acc else acc
+            | _ -> acc) StringSet.empty decls in
+        Hashtbl.replace import_deps modname targets)
+      info;
+    let succ tbl n = Option.value ~default:StringSet.empty (Hashtbl.find_opt tbl n) in
+    let reaches src dst =
+      let seen = Hashtbl.create 16 in
+      let rec go n =
+        n = dst
+        || (not (Hashtbl.mem seen n)
+            && (Hashtbl.replace seen n ();
+                StringSet.exists go
+                  (StringSet.union (succ base_deps n) (succ import_deps n))))
+      in
+      go src
+    in
+    List.iter (fun (modname, _) ->
+        let acyclic =
+          StringSet.filter (fun t -> not (reaches t modname)) (succ import_deps modname) in
+        Hashtbl.replace base_deps modname (StringSet.union (succ base_deps modname) acyclic))
+      info;
     let visited : (string, unit) Hashtbl.t = Hashtbl.create 16 in
     let out = ref [] in
     let dbg = Sys.getenv_opt "MARCH_DEBUG_ORDER" <> None in
@@ -383,12 +431,9 @@ let dependency_order_dmod_run (run : Ast.decl list) : Ast.decl list =
         Hashtbl.replace visited name ();
         match Hashtbl.find_opt by_name name with
         | Some (decls, dm) ->
+          ignore decls;
           let deps =
-            StringSet.remove name
-              (StringSet.inter name_set
-                 (StringSet.union
-                    (module_refs_in_decls decls)
-                    (hard_deps_of decls)))
+            Option.value ~default:StringSet.empty (Hashtbl.find_opt base_deps name)
           in
           if dbg then
             Printf.eprintf "[order] visit %s deps=[%s]\n%!" name
