@@ -1,0 +1,71 @@
+-- Process.spawn_async's registry of live children (runtime/march_runtime.c).
+-- Before 2026-09-28 it was a fixed 64-slot ring with no lock: the 65th spawn
+-- took slot 0 whether or not its process was still running and closed that
+-- process's pipes, so a LiveProcess held across 64 other spawns read from and
+-- wrote to a different child (or nothing); two scheduler threads spawning at
+-- once could take the same slot. Now slots are allocated first-free under a
+-- lock, the table grows, and a handle carries its slot's generation, so a
+-- handle used after wait_proc addresses nothing instead of the slot's next
+-- owner.
+mod LiveProcReg do
+  needs IO.Console
+  needs IO.Process
+  needs IO.Spawn
+
+  fn echo_once(k) do
+    match Process.spawn_async("echo", ["n" ++ int_to_string(k)]) do
+      Ok(p) ->
+        let line = Process.read_line(p)
+        let _ = Process.wait_proc(p)
+        match line do
+          Some(s) -> s == "n" ++ int_to_string(k)
+          None -> false
+        end
+      Err(_) -> false
+    end
+  end
+
+  fn churn(i, n, bad) do
+    if i == n do bad
+    else
+      let ok = echo_once(i)
+      churn(i + 1, n, if ok do bad else bad + 1 end)
+    end
+  end
+
+  fn show(o) do
+    match o do
+      Some(s) -> s
+      None -> "<none>"
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process), _s : Cap(IO.Spawn)) do
+    match Process.spawn_async("cat", []) do
+      Ok(p0) ->
+        -- 70 spawn/read/wait cycles while p0 stays open.
+        let bad = churn(0, 70, 0)
+        println("sequential mismatches: " ++ int_to_string(bad))
+        Process.write(p0, "still mine\n")
+        println("p0 reads: " ++ show(Process.read_line(p0)))
+        println("p0 exit: " ++ int_to_string(Process.wait_proc(p0)))
+        -- p0 is reaped; its slot is free. A new process may take the slot,
+        -- and the stale p0 handle must not reach it.
+        match Process.spawn_async("cat", []) do
+          Ok(p1) ->
+            Process.write(p0, "not yours\n")
+            Process.write(p1, "p1 line\n")
+            println("stale p0 reads: " ++ show(Process.read_line(p0)))
+            println("p1 reads: " ++ show(Process.read_line(p1)))
+            println("p1 exit: " ++ int_to_string(Process.wait_proc(p1)))
+          Err(e) -> println("spawn p1 failed: " ++ e)
+        end
+        -- Eight tasks spawning at once, across scheduler threads.
+        let tasks = List.map(Range.to_list(Range.new(0, 8)), fn t ->
+          task_spawn(fn _ -> churn(t * 100, t * 100 + 25, 0)))
+        let total = List.fold_left(tasks, 0, fn (acc, tk) -> acc + task_await_unwrap(tk))
+        println("concurrent mismatches: " ++ int_to_string(total))
+      Err(e) -> println("spawn p0 failed: " ++ e)
+    end
+  end
+end

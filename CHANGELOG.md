@@ -43,6 +43,22 @@ git log is authoritative for exact commits.
   switched arms. Keeping every other element of a 1,000,000-element list died
   with SIGBUS in the stack guard page; all-kept and all-dropped inputs ran fine.
 
+- **A path-scoped `needs IO.FileRead("...")` now covers `csv_open`.** A
+  literal path passed to `csv_open` was never checked against the declared
+  scope, so `csv_open("/etc/passwd", ...)` compiled under
+  `needs IO.FileRead("/srv/data")`. It is now rejected like `file_read`.
+- **`Process.spawn_async` no longer hands a running process's slot to a new
+  one.** Compiled code kept live processes in a fixed table of 64 with no
+  lock. The 65th spawn silently closed the first process's pipes, so a
+  `LiveProcess` held that long read from and wrote to nothing or to another
+  child, and two threads spawning at once could take the same slot. The
+  table is now locked and grows as needed. A handle used after `wait_proc` no
+  longer reaches whichever process took its slot next. Interpreted,
+  `wait_proc` on a child that reads its stdin (such as `cat`) no longer
+  hangs.
+- **`get_actor_field` no longer keeps the actor it reads alive forever.**
+  In compiled code each call leaked one reference to the actor's record, so
+  an actor that was ever probed with `get_actor_field` was never freed.
 - **A caught panic reads the same compiled and interpreted, and compiled
   `unreachable()` no longer crashes.** When a thunk passed to
   `__try_call` / `__try_call_val` panicked (the call behind `Check`'s

@@ -284,6 +284,13 @@ let extern_borrow_table : (string * bool list) list = [
      defaulted to OWNED: every call leaked its Strings (and dispatch its
      whole field list).  logger_add_field and logger_add_context STORE both
      arguments and stay in [extern_owned_builtins]. ── *)
+  (* ── get_actor_field: march_get_actor_field (march_extras.c) only reads
+     the pid's shape and the name's bytes, and returns an immediate field or
+     None, never a heap value.  It was OWNED until 2026-09-28, so every call
+     leaked one reference to the probed actor record, which could then never
+     be freed (test/native/pid_to_int_leak_probe.march). ── *)
+  ("get_actor_field",           [true; true]);
+  ("march_get_actor_field",     [true; true]);
   ("logger_write",              [true; true; true; true]);
   ("logger_dispatch",           [true; true; true; true]);
   ("logger_register_appender",  [true; true]);
@@ -427,7 +434,7 @@ let extern_owned_builtins : string list = [
     "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps"; "monitor";
     "register_resource";
     "actor_register"; "actor_unregister"; "actor_whereis";
-    "send_checked"; "revoke_cap"; "is_cap_valid"; "get_actor_field";
+    "send_checked"; "revoke_cap"; "is_cap_valid";
     "register_actor_on_stop";
 ]
 

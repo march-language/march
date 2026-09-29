@@ -73,5 +73,19 @@ mod Main do
     let c = child_index(boss)
     println("supervised child held only by itself: "
             ++ bool_to_string(actor_rc(c) == 1))
+
+    -- get_actor_field only reads the pid (and returns an immediate field
+    -- or None).  It was classified OWNED, so each call leaked one reference
+    -- to the probed record (specs/progress/2026-09-28-get-actor-field-pid-and-result-ownership.md).
+    let bidx = pid_to_int(boss)
+    let boss_before = actor_rc(bidx)
+    let _ = child_index(boss)
+    let _ = child_index(boss)
+    let _ = get_actor_field(boss, "no_such_field")
+    let boss_after = actor_rc(bidx)
+    -- `boss` is used below, so its own reference is still held here.
+    println("get_actor_field leaves the count alone: "
+            ++ bool_to_string(boss_after == boss_before))
+    kill(boss)
   end
 end
