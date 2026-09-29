@@ -45,6 +45,13 @@ git log is authoritative for exact commits.
   ran interpreted but a compiled program failed to link (`A.f` undefined),
   whenever `Outer` was itself nested in the entry module, or was a library
   (`MARCH_LIB_PATH`) or stdlib module.
+- **The parent module can send to a nested actor by qualified message name.**
+  `send(p, Inner.Set(1))` from the module enclosing `Inner` failed with
+  "I don't know a constructor called `Inner.Set`", although `Inner.A(1)` and
+  `spawn(Inner.Box)` worked. A nested actor's message constructors are now
+  reachable qualified, and so is an `Inner.Box.Msg` annotation. The bare
+  name stays local to the actor's module.
+
 - **A module that `import`s a sibling declared later in the file is now
   checked against that sibling's capabilities.** Sibling modules were
   checked in declaration order unless a qualified reference said otherwise,
