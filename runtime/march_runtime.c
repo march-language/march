@@ -10915,7 +10915,7 @@ static inline double clo_call_dbl_dbl_dbl(void *clo, double x, double y) {
  * comparison), then sorts element indices by key with the same merge sort
  * and an inline `<=` on the keys, so equal keys keep input order. */
 #define SSORT_DEFINE(NAME, E, LE)                                              \
-static int64_t NAME##_upper(const E *v, int64_t n, E x, void *ctx) {           \
+static int64_t NAME##_upper(E const *v, int64_t n, E x, void *ctx) {           \
     int64_t lo = 0, hi = n;       /* first i with !LE(v[i], x) */              \
     while (lo < hi) {                                                          \
         int64_t mid = lo + (hi - lo) / 2;                                      \
@@ -10923,7 +10923,7 @@ static int64_t NAME##_upper(const E *v, int64_t n, E x, void *ctx) {           \
     }                                                                          \
     return lo;                                                                 \
 }                                                                              \
-static int64_t NAME##_first_ge(const E *v, int64_t n, E x, void *ctx) {        \
+static int64_t NAME##_first_ge(E const *v, int64_t n, E x, void *ctx) {        \
     int64_t lo = 0, hi = n;       /* first i with LE(x, v[i]) */               \
     while (lo < hi) {                                                          \
         int64_t mid = lo + (hi - lo) / 2;                                      \
