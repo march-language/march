@@ -5756,6 +5756,70 @@ let test_session_compile_odd_int_roundtrip () =
       "compiled: odd Int channel payload round-trips as 43 (not 21 — F1 tag fix)"
       "43" run_out
 
+(** `--check` of one module holding many `@[endpoints]` protocols must stay
+    roughly linear in the protocol count.  Each role module declares public
+    types with the same bare names (`Entry`, `Yield`, ...), and the nested-mod
+    export step re-exported every inherited qualified constructor key whose
+    type name matched, under the new module's prefix: the constructor table
+    DOUBLED per role module.  Six protocols took ~9 minutes (533 s measured on
+    origin/main 9f4c543f2); twelve would not finish.  After the fix twelve
+    take ~1.3 s locally.  The bound is deliberately generous (CI runners are
+    slower); a regression is exponential, not a constant factor.  Runs from a
+    fresh temp dir so a warm `--check` CAS entry cannot short-circuit it.
+    See specs/progress/2026-09-28-endpoints-frontend-superlinear-in-protocol-count.md. *)
+let test_endpoints_check_linear_in_protocols () =
+  let n = 12 in
+  let b = Buffer.create 8192 in
+  Buffer.add_string b
+    "mod ManyProtos do\n  needs IO\n  needs IO.Console\n  needs IO.Mut\n  needs Session.Live\n";
+  for i = 0 to n - 1 do
+    Buffer.add_string b (Printf.sprintf
+      "  @[endpoints]\n\
+      \  protocol P%d do\n\
+      \    loop do\n\
+      \      a%d: A -> B : Int\n\
+      \      b%d: B -> C : Int\n\
+      \      choose by C:\n\
+      \        more -> C -> A : Bool\n\
+      \                more_b: C -> B : Bool\n\
+      \        done -> C -> A : Bool\n\
+      \                done_b: C -> B : Bool\n\
+      \                stop\n\
+      \      end\n\
+      \    end\n\
+      \  end\n" i i i)
+  done;
+  for i = 0 to n - 1 do
+    Buffer.add_string b (Printf.sprintf
+      "  pfn run%d(c : Cap(IO)) : Int do\n\
+      \    let t = Session.in_process_with(fn _line -> ())\n\
+      \    let s = Session.attach(c, t.ops)\n\
+      \    let _ = P%d_C.chaos(s, P%d_C.register(s, 0), 1)\n\
+      \    let _ = P%d_B.chaos(s, P%d_B.register(s, 0), 2)\n\
+      \    let _ = P%d_A.chaos(s, P%d_A.register(s, 0), 3)\n\
+      \    t.drain(())\n\
+      \    t.returned(())\n\
+      \  end\n" i i i i i i i)
+  done;
+  Buffer.add_string b "  fn main(c : Cap(IO)) do\n";
+  for i = 0 to n - 1 do
+    Buffer.add_string b (Printf.sprintf "    print_line(int_to_string(run%d(c)))\n" i)
+  done;
+  Buffer.add_string b "    ()\n  end\nend\n";
+  let (_project_root, main_exe, src, tmp) =
+    session_write_src ~name:"march_many_protocols" (Buffer.contents b) in
+  let t0 = Unix.gettimeofday () in
+  (* perl's alarm is the hard stop: a regression must fail this test, not
+     hang the suite for hours. *)
+  let rc = Sys.command (Printf.sprintf
+    "cd %s && perl -e 'alarm 120; exec @ARGV' %s --check %s > %s 2>&1"
+    (Filename.quote tmp) (Filename.quote main_exe) (Filename.quote src)
+    (Filename.quote (Filename.concat tmp "check.out"))) in
+  let dt = Unix.gettimeofday () -. t0 in
+  Alcotest.(check int) "--check of 12 @[endpoints] protocols exits 0" 0 rc;
+  if dt > 60.0 then
+    Alcotest.failf "--check of %d @[endpoints] protocols took %.1f s (bound 60 s)" n dt
+
 (** Bool payload (true) round-trips through Chan.send/recv compiled.  Pre-fix,
     the compiled run flipped true→false (the F2 miscompile). *)
 let test_session_compile_bool_roundtrip () =
@@ -17585,6 +17649,7 @@ let compiler_suites =
           Alcotest.test_case "full pipeline no crash"           `Quick test_session_compile_full_pipeline_no_crash;
           Alcotest.test_case "compiled odd Int payload round-trips (F1)" `Quick test_session_compile_odd_int_roundtrip;
           Alcotest.test_case "compiled Bool payload round-trips (F2)"    `Quick test_session_compile_bool_roundtrip;
+          Alcotest.test_case "--check linear in @[endpoints] protocol count" `Quick test_endpoints_check_linear_in_protocols;
         ] );
       ( "policy_dce", [
           Alcotest.test_case "NoAlloc verdict moved to Alloc_contract"    `Quick test_policy_noalloc_alloc_violation;

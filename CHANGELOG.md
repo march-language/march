@@ -35,6 +35,11 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **`march --check` of a module with several `@[endpoints]` protocols is fast
+  again.** Each protocol made every later one roughly twice as slow to typecheck:
+  one module with six protocols took about 9 minutes. It now takes under a
+  second, and time grows roughly linearly with the number of protocols (16
+  protocols: 1.6 s). Diagnostics are unchanged.
 - **A path-scoped `needs IO.FileRead("...")` now covers `csv_open`.** A
   literal path passed to `csv_open` was never checked against the declared
   scope, so `csv_open("/etc/passwd", ...)` compiled under
