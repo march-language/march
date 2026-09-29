@@ -490,10 +490,17 @@ let buffer_contains (b : Buffer.t) (needle : string) : bool =
     ground truth.  The `not already-defined` guard makes a second call on the
     same ctx a no-op (can't double-define the symbol or its globals). *)
 let emit_atom_show_table ctx =
-  let call_site = "call ptr @march_atom_to_string" in
+  let in_module s =
+    buffer_contains ctx.Llvm_ctx.buf s
+    || buffer_contains ctx.Llvm_ctx.extra_fns s
+  in
+  (* The C runtime renders an LAtom log field through this table too
+     (logvalue_scalar_str, march_runtime.c, against a weak default), so a
+     program that logs gets it even when it never calls atom_to_string. *)
   let referenced =
-    buffer_contains ctx.Llvm_ctx.buf call_site
-    || buffer_contains ctx.Llvm_ctx.extra_fns call_site
+    in_module "call ptr @march_atom_to_string"
+    || in_module "call ptr @march_logger_dispatch("
+    || in_module "call ptr @march_logger_get_context("
   in
   let already_defined =
     buffer_contains ctx.Llvm_ctx.extra_fns "define ptr @march_atom_to_string"

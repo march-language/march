@@ -249,13 +249,39 @@ mod Logger do
 
   -- An appender consumes log entries and writes them somewhere.  The
   -- string is a name used by `remove_appender`.  Multiple appenders
-  -- fire in registration order.
+  -- fire newest registration first (re-registering a name moves it to the front).
   type Appender = Appender(String, LogEntry -> Unit)
+
+  -- What the runtime hands a registered callback: the entry with its level
+  -- still spelled as the dispatched string ("INFO", ...).  Both backends pass
+  -- this, and `deliver` builds the LogEntry in March, because the compiled
+  -- runtime cannot build a `Level` value itself: the compiler picks its
+  -- constructor tags, and they are not 0..3 when another type is also named
+  -- `Level`.  The runtime builds this cell with tag 0, which holds only while
+  -- no other type is named `AppenderCall` (a colliding name gets global
+  -- tags).  It is a constructor rather than a tuple because destructuring a
+  -- tuple and moving its fields on leaks them compiled
+  -- (specs/todos/2026-09-28-compiled-tuple-destructure-leaks-moved-fields.md).
+  type AppenderCall = AppenderCall(String, String, Int, String, List(LogField))
+
+  pfn level_of_dispatched(s : String) : Level do
+    match level_from_string(s) do
+      Some(l) -> l
+      None -> Info
+    end
+  end
+
+  pfn deliver(cb : LogEntry -> Unit, call : AppenderCall) : Unit do
+    match call do
+    AppenderCall(lvl, msg, ts, source, fields) ->
+      cb(LogEntry(level_of_dispatched(lvl), msg, ts, source, fields))
+    end
+  end
 
   doc "Register an appender.  Replaces any prior appender with the same name."
   fn add_appender(a : Appender) : Unit do
     match a do
-    Appender(name, cb) -> logger_register_appender(name, cb)
+    Appender(name, cb) -> logger_register_appender(name, fn call -> deliver(cb, call))
     end
   end
 

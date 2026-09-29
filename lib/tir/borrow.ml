@@ -283,10 +283,11 @@ let extern_borrow_table : (string * bool list) list = [
      caller keeps ownership.  Before the rows they were on no list and
      defaulted to OWNED: every call leaked its Strings (and dispatch its
      whole field list).  logger_add_field and logger_add_context STORE both
-     arguments and stay in [extern_owned_builtins]. ── *)
+     arguments and stay in [extern_owned_builtins]; since 2026-09-28 so does
+     logger_register_appender (the runtime keeps the name and the callback
+     until the appender is replaced, removed or cleared). ── *)
   ("logger_write",              [true; true; true; true]);
   ("logger_dispatch",           [true; true; true; true]);
-  ("logger_register_appender",  [true; true]);
   ("logger_remove_appender",    [true]);
   ("logger_set_module_level",   [true; false]);
   ("logger_clear_module_level", [true]);
@@ -374,6 +375,10 @@ let extern_owned_builtins : string list = [
     (* delivery_failed_watch stores its closure in the runtime's hook slot
        (march_delivery_failed_watch), releasing the one it replaces. *)
     "delivery_failed_watch";
+    (* logger_register_appender stores its name and callback in the runtime's
+       appender registry (march_logger_register_appender), releasing both
+       when the entry is replaced, removed or cleared. *)
+    "logger_register_appender";
     "panic_"; "unreachable_"; "todo_"; "print_stderr"; "char_to_int";
     "char_is_digit"; "char_is_alphanumeric"; "char_is_whitespace";
     "string_chars"; "string_from_chars"; "list_append"; "list_concat";

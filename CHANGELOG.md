@@ -26,6 +26,12 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Logger appenders work in compiled programs.** Compiled,
+  `Logger.add_appender` did nothing, `Logger.list_appenders()` was always
+  empty, and every message went to the stderr fallback line. Appenders now
+  receive each `LogEntry` exactly as they do interpreted, newest
+  registration first. An atom field (`Logger.LAtom(:closed)`) now logs as
+  `:closed` rather than `null`.
 - **A remote message sent after a hot deploy now reaches an actor whose message type
   the deploy changed.** Each cluster link's reader task kept the code of the moment
   the link formed. So a message from a peer already on the new format was decoded by

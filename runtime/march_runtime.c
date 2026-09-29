@@ -12207,8 +12207,9 @@ void *march_uuid_v7(void) {
  * Unit-returning entries return NULL: the compiled Unit value is 0 (see
  * mk_ok_unit), and a fresh 16-byte cell here was never released by anyone.
  *
- * Ownership (lib/tir/borrow.ml): add_context / add_field STORE their
- * arguments (owned); every other heap argument is only read (borrowed). */
+ * Ownership (lib/tir/borrow.ml): add_context / add_field and
+ * register_appender STORE their arguments (owned); every other heap
+ * argument is only read (borrowed). */
 
 static int64_t march_logger_level_val = 1;   /* Debug=0, Info=1, Warn=2, Error=3; Info
                                                 by default, as the interpreter
@@ -12356,16 +12357,33 @@ static void logger_float_str(double f, char *buf, size_t cap) {
     if (n + 1 < cap) { buf[n] = '.'; buf[n + 1] = '\0'; }
 }
 
+/* An atom's name.  Atoms compile to nameless FNV-1a hashes; the program
+ * carries the hash -> ":name" table as a generated @march_atom_to_string
+ * (llvm_toplevel.ml's emit_atom_show_table, which emits it for any program
+ * that logs).  This weak default is what links when no table was emitted:
+ * it answers NULL and the caller falls back to "null". */
+__attribute__((weak)) void *march_atom_to_string(int64_t h) { (void)h; return NULL; }
+
 /* The text of a non-String LogValue, as eval_runtime.ml's
- * log_value_to_string renders it.  An LAtom's name is not known to the
- * runtime (atoms are interned integers), so it renders as "null" -- a
- * remaining divergence, filed with the audit. */
+ * log_value_to_string renders it.  An LAtom renders as ":name" through the
+ * program's atom table (until 2026-09-28 it always rendered as "null"). */
 static void logvalue_scalar_str(void *lv, char *buf, size_t cap) {
     int32_t tag = IS_HEAP_PTR(lv) ? *(int32_t *)((char *)lv + 8) : -1;
     switch (tag) {
     case 1: snprintf(buf, cap, "%" PRId64, *(int64_t *)((char *)lv + 16)); break;
     case 2: { double f; memcpy(&f, (char *)lv + 16, 8); logger_float_str(f, buf, cap); break; }
     case 3: snprintf(buf, cap, "%s", *(int64_t *)((char *)lv + 16) ? "true" : "false"); break;
+    case 4: {
+        void *name = march_atom_to_string(*(int64_t *)((char *)lv + 16));
+        if (!name) { snprintf(buf, cap, "null"); break; }
+        char sso[MARCH_SSO_MAX + 1];
+        int64_t n = march_str_len(name);
+        if ((size_t)n >= cap) n = (int64_t)cap - 1;
+        memcpy(buf, march_str_data(name, sso), (size_t)n);
+        buf[n] = '\0';
+        march_decrc(name);
+        break;
+    }
     default: snprintf(buf, cap, "null"); break;
     }
 }
@@ -12486,39 +12504,180 @@ void *march_logger_get_context(void) {
     return out;
 }
 
+/* Appenders: (name, LogEntry -> Unit) callbacks, newest first, as the
+ * interpreter keeps them (eval_builtins.ml: register prepends and replaces
+ * any entry of the same name; logger_appender_names lists newest first;
+ * dispatch calls every appender in that order).
+ *
+ * Ownership (lib/tir/borrow.ml): logger_register_appender STORES both its
+ * arguments, so they arrive owned and the registry holds that reference
+ * until the entry is replaced, removed or cleared, when it releases both.
+ * remove_appender only reads its name (borrowed).  Releasing a closure can
+ * free what it captured, so every release happens after the mutex is
+ * dropped.
+ *
+ * Until 2026-09-28 the compiled runtime kept no registry at all: register
+ * was a no-op, list_appenders was always [], and dispatch always printed the
+ * no-appender fallback line. */
+typedef struct logger_appender {
+    void *name;                     /* March String, owned */
+    void *cb;                       /* March closure LogEntry -> Unit, owned */
+    struct logger_appender *next;
+} logger_appender;
+static logger_appender *logger_appenders = NULL;
+
+static int logger_str_eq(void *a, void *b) {
+    char sa[MARCH_SSO_MAX + 1], sb[MARCH_SSO_MAX + 1];
+    int64_t la = march_str_len(a), lb = march_str_len(b);
+    return la == lb && memcmp(march_str_data(a, sa), march_str_data(b, sb), (size_t)la) == 0;
+}
+
+/* Unlink every entry named [name]; the caller releases them unlocked. */
+static logger_appender *logger_appender_unlink_locked(void *name) {
+    logger_appender *removed = NULL;
+    logger_appender **pp = &logger_appenders;
+    while (*pp) {
+        logger_appender *e = *pp;
+        if (logger_str_eq(e->name, name)) {
+            *pp = e->next;
+            e->next = removed;
+            removed = e;
+        } else {
+            pp = &e->next;
+        }
+    }
+    return removed;
+}
+
+static void logger_appender_free_list(logger_appender *e) {
+    while (e) {
+        logger_appender *next = e->next;
+        march_decrc(e->name);
+        march_decrc(e->cb);
+        free(e);
+        e = next;
+    }
+}
+
+void *march_logger_register_appender(void *name, void *cb) {
+    logger_appender *e = malloc(sizeof *e);
+    e->name = name;
+    e->cb = cb;
+    pthread_mutex_lock(&march_logger_mutex);
+    logger_appender *old = logger_appender_unlink_locked(name);
+    e->next = logger_appenders;
+    logger_appenders = e;
+    pthread_mutex_unlock(&march_logger_mutex);
+    logger_appender_free_list(old);
+    return NULL;
+}
+
+void *march_logger_remove_appender(void *name) {
+    pthread_mutex_lock(&march_logger_mutex);
+    logger_appender *old = logger_appender_unlink_locked(name);
+    pthread_mutex_unlock(&march_logger_mutex);
+    logger_appender_free_list(old);
+    return NULL;
+}
+
+void *march_logger_clear_appenders(void) {
+    pthread_mutex_lock(&march_logger_mutex);
+    logger_appender *old = logger_appenders;
+    logger_appenders = NULL;
+    pthread_mutex_unlock(&march_logger_mutex);
+    logger_appender_free_list(old);
+    return NULL;
+}
+
+/* A FRESH List(String) of the names, newest first; the caller owns it. */
+void *march_logger_appender_names(void) {
+    pthread_mutex_lock(&march_logger_mutex);
+    int64_t n = 0;
+    for (logger_appender *e = logger_appenders; e; e = e->next) n++;
+    void **names = n > 0 ? malloc((size_t)n * sizeof(void *)) : NULL;
+    int64_t i = 0;
+    for (logger_appender *e = logger_appenders; e; e = e->next) {
+        march_incrc(e->name);
+        names[i++] = e->name;
+    }
+    pthread_mutex_unlock(&march_logger_mutex);
+    void *out = logger_nil();
+    while (i > 0) out = logger_cons(names[--i], out);
+    free(names);
+    return out;
+}
+
+/* What an appender callback receives: Logger.AppenderCall(level_string,
+ * msg, ts_ms, source, fields), a fresh cell holding its own reference to
+ * each heap argument (the caller's are borrowed).  The callback is
+ * stdlib/logger.march's `deliver` wrapper, which builds the LogEntry in
+ * March: the runtime cannot build a Logger.Level itself, because the
+ * compiler picks its constructor tags (they are not 0..3 when another type
+ * is also named Level).  AppenderCall is a single-constructor type with a
+ * name nothing else uses, so its tag is 0; like any constructor field its
+ * Int is stored raw. */
+static void *logger_appender_call(void *level_str, void *msg, int64_t ts_ms,
+                                  void *source, void *fields) {
+    void *cell = march_alloc(16 + 5 * 8);
+    void **fp = (void **)((char *)cell + 16);
+    march_incrc(level_str); fp[0] = level_str;
+    march_incrc(msg);       fp[1] = msg;
+    *(int64_t *)&fp[2] = ts_ms;
+    march_incrc(source);    fp[3] = source;
+    march_incrc(fields);    fp[4] = fields;
+    return cell;
+}
+
 /* logger_dispatch(level, msg, source, fields): borrows all four.  `fields`
  * is the COMPLETE field list: stdlib/logger.march's do_log / do_log_in
  * already append the context stack (logger_get_fields) to it, so the stack
  * is not printed again here -- until 2026-09-26 every context field was
- * printed twice compiled.  Appenders are not implemented by the compiled
- * runtime (see logger_register_appender below): this is the interpreter's
- * no-appender fallback format. */
+ * printed twice compiled.
+ *
+ * With appenders registered, each one is called with a fresh AppenderCall,
+ * newest registration first, and nothing is printed; with none, this is the
+ * interpreter's no-appender fallback line on stderr.  The mutex is NOT held
+ * across an appender call: an appender may log, register or remove. */
 void *march_logger_dispatch(void *level_str, void *msg, void *module_name, void *fields) {
-    (void)module_name;
     pthread_mutex_lock(&march_logger_mutex);
-    march_string *ls = (march_string *)level_str;
-    march_string *ms = (march_string *)msg;
-    fputc('[', stderr);
-    fwrite(ls->data, 1, (size_t)ls->len, stderr);
-    fputs("] ", stderr);
-    fwrite(ms->data, 1, (size_t)ms->len, stderr);
-    if (fields && *(int32_t *)((char *)fields + 8) != 0) {
-        fputs(" {", stderr);
-        logger_v2_print_fields(fields);
-        fputc('}', stderr);
+    int64_t n = 0;
+    for (logger_appender *e = logger_appenders; e; e = e->next) n++;
+    if (n == 0) {
+        march_string *ls = (march_string *)level_str;
+        march_string *ms = (march_string *)msg;
+        fputc('[', stderr);
+        fwrite(ls->data, 1, (size_t)ls->len, stderr);
+        fputs("] ", stderr);
+        fwrite(ms->data, 1, (size_t)ms->len, stderr);
+        if (fields && *(int32_t *)((char *)fields + 8) != 0) {
+            fputs(" {", stderr);
+            logger_v2_print_fields(fields);
+            fputc('}', stderr);
+        }
+        fputc('\n', stderr);
+        pthread_mutex_unlock(&march_logger_mutex);
+        return NULL;
     }
-    fputc('\n', stderr);
+    /* Snapshot: each callback gets its own reference, which its call
+     * consumes (the closure-call convention, march_runtime.h), so a
+     * concurrent remove/clear cannot free one mid-call. */
+    void **cbs = malloc((size_t)n * sizeof(void *));
+    int64_t i = 0;
+    for (logger_appender *e = logger_appenders; e; e = e->next) {
+        march_incrc(e->cb);
+        cbs[i++] = e->cb;
+    }
     pthread_mutex_unlock(&march_logger_mutex);
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    int64_t ts_ms = (int64_t)tv.tv_sec * 1000 + (int64_t)tv.tv_usec / 1000;
+    for (i = 0; i < n; i++) {
+        void *entry = logger_appender_call(level_str, msg, ts_ms, module_name, fields);
+        (void)call_closure_1(cbs[i], entry);   /* consumes cb ref and entry; Unit */
+    }
+    free(cbs);
     return NULL;
 }
-
-/* Appenders: the compiled runtime keeps no registry (the interpreter does);
- * these are no-ops that only READ their arguments, so both are borrowed.
- * Storing the callback would make it owned -- change borrow.ml with it. */
-void *march_logger_register_appender(void *name, void *cb) { (void)name; (void)cb; return NULL; }
-void *march_logger_remove_appender(void *name)              { (void)name; return NULL; }
-void *march_logger_clear_appenders(void)                    { return NULL; }
-void *march_logger_appender_names(void)                     { return logger_nil(); /* Nil list */ }
 
 /* Per-module level overrides.  Until 2026-09-26 set/clear were no-ops and
  * logger_module_level always answered the global level, so
