@@ -549,6 +549,12 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **`NativeArray.sort_int`, `sort_float`, `sort_i32` and `sort_f32` sort random
+  data 17-26% faster.** The step that finishes off short runs of up to 32
+  elements now uses larger sorting networks and a merge (the layout Rust's
+  standard library uses) and is twice as fast on its own. Sorting 1,000,000
+  random integers went from 13.0 ms to 10.8 ms; already-ordered and
+  few-distinct-value inputs are unchanged.
 - **The generated hosted event API's `cancel` takes the session: `cancel(s, parked)`.**
   The epoch hold a hosting actor takes for a session is now the transport's, taken at
   `register` and released at `close` for both hosting patterns (before, only the
