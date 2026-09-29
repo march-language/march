@@ -35,6 +35,14 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **On macOS, `IO.NetConnect` no longer lets a sandboxed program listen.** Under
+  `--cap-sandbox` and `forge cap run`, any network capability granted the whole
+  `network*` class, so a program holding only `IO.NetConnect` could still bind
+  and accept connections. The grant is now split: `IO.NetConnect` allows
+  outbound connections (DNS, TCP and TLS clients keep working), `IO.NetListen`
+  allows bind and inbound, `IO.Network` allows both. Linux already worked this
+  way.
+
 - **The parent module can send to a nested actor by qualified message name.**
   `send(p, Inner.Set(1))` from the module enclosing `Inner` failed with
   "I don't know a constructor called `Inner.Set`", although `Inner.A(1)` and
