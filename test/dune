@@ -2459,6 +2459,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/builtin_borrow_leak_probe.expected native_builtin_borrow_leak_probe.out)))
 
+; ── Leak guard: the Process builtins (spawn_async/read_line/write/kill_proc/
+; wait_proc, run's spawn_sync, env/set_env) only READ their heap arguments but
+; were classified OWNED in borrow.ml, so every spawn leaked its args list and
+; the LiveProcess cell spawn_async returns was never freed. Red before the fix:
+; every leg reads `flat: false` (4/3/3/2 objects per iteration).
+; specs/progress/2026-09-29-process-spawn-async-leaks-live-process.md
+(rule
+ (targets native_process_handle_leak_probe native_process_handle_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/process_handle_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_process_handle_leak_probe
+        native/process_handle_leak_probe.march)
+   (with-stdout-to native_process_handle_leak_probe.out
+        (system "./native_process_handle_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/process_handle_leak_probe.expected native_process_handle_leak_probe.out)))
+
 ; ── Regression: float_nan / float_infinity / float_neg_infinity /
 ; float_epsilon / float_is_nan / float_is_infinite / typed_array_slice
 ; typechecked and ran interpreted, but `--compile` failed at LINK time with

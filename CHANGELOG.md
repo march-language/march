@@ -35,6 +35,11 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Compiled programs no longer leak memory on every subprocess call.** Each
+  `Process.spawn_async` leaked its argument list and the `LiveProcess` handle
+  it returned (the handle could never be freed once `read_line`, `write`,
+  `kill` or `wait_proc` had used it), and `Process.run`, `Process.env` and
+  `Process.set_env` leaked their arguments on every call.
 - **Editor highlighting (tree-sitter) now covers current March syntax.** The
   tree-sitter grammar that Zed highlights from failed to parse most real files
   (713 of 919 in the repo), so they rendered as one long error region. It now
