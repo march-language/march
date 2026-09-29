@@ -12,6 +12,15 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`forge add` checks a new dependency's capabilities before keeping it.** When
+  the project has a `forge.caps.lock` (from `forge audit --record`), a
+  dependency the add brings in or changes that asks for a capability it was not
+  granted is refused: the delta is shown and `forge.toml` and `forge.lock` are
+  left as they were. `--accept-caps` keeps it and records the new set. Only the
+  dependencies the add touched are analyzed. `forge outdated` now shows, under
+  each outdated registry dependency, whether the newer release asks for new
+  capabilities. `forge.caps.lock` records which mode (`declared`/`inferred`)
+  produced it.
 - **A cluster node's certificate can be replaced while it runs.** In
   certificate mode, a renewed certificate used to need a restart. Now the node
   watches the files `MARCH_NODE_CERT` and `MARCH_NODE_KEY` name
