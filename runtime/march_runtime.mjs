@@ -392,6 +392,33 @@ export function march_list_concat(a, b) {
   return result;
 }
 
+/* Stable sorts behind Array.sort_by / sort_by_key and RRB.sort_by /
+ * sort_by_key (the native builtins are list_stable_sort_by /
+ * list_sort_by_int_key in march_runtime.c). Array.prototype.sort is stable
+ * (ES2019). `le(a, b)` true means a may come before b; a pair that is `le`
+ * both ways compares equal, so ties keep input order, as in the native
+ * sort for a `<=`-style comparator. The key closure is called once per
+ * element. */
+export function march_list_stable_sort_by(list, le) {
+  const arr = [];
+  while (list.$ === "Cons") { arr.push(list._0); list = list._1; }
+  arr.sort((a, b) => le._0(le, a, b) ? (le._0(le, b, a) ? 0 : -1) : 1);
+  let result = { $: "Nil" };
+  for (let i = arr.length - 1; i >= 0; i--) result = { $: "Cons", _0: arr[i], _1: result };
+  return result;
+}
+
+export function march_list_sort_by_int_key(list, key) {
+  const arr = [];
+  while (list.$ === "Cons") { arr.push(list._0); list = list._1; }
+  const keys = arr.map((x) => key._0(key, x));
+  const idx = arr.map((_, i) => i);
+  idx.sort((i, j) => (keys[i] < keys[j] ? -1 : keys[i] > keys[j] ? 1 : 0));
+  let result = { $: "Nil" };
+  for (let k = idx.length - 1; k >= 0; k--) result = { $: "Cons", _0: arr[idx[k]], _1: result };
+  return result;
+}
+
 /* ── Structural equality ────────────────────────────────────────────
  * Deep, tag-aware `==`/`!=` for NON-primitive operands. js_emit routes
  * bare `==`/`!=` here whenever either operand's static type is not a

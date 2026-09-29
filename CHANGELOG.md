@@ -12,6 +12,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`Array.sort_by`, `Array.sort_by_key`, `RRB.sort_by` and `RRB.sort_by_key`.**
+  Stable sorts for the persistent vectors: `sort_by` takes the same comparator
+  as `List.sort_by` (`fn (a, b) -> a <= b`), and `sort_by_key` takes a function
+  returning an `Int` key, which it calls once per element. Elements that compare
+  equal keep their order. Sorting 100,000 pairs takes about 50 ms with `sort_by`
+  and 23 ms with `sort_by_key`, against 250 ms for converting to a list, calling
+  `List.sort_by` and converting back. They work compiled, interpreted and on the
+  JavaScript target.
 - **`forge add` checks a new dependency's capabilities before keeping it.** When
   the project has a `forge.caps.lock` (from `forge audit --record`), a
   dependency the add brings in or changes that asks for a capability it was not
@@ -554,6 +562,9 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **`Array.from_list` (and `RRB.from_list`) is about 8x faster.** It now builds
+  the vector in one pass instead of appending one element at a time: 100,000
+  elements take 6.6 ms instead of 54 ms. The resulting vector is the same.
 - **The generated hosted event API's `cancel` takes the session: `cancel(s, parked)`.**
   The epoch hold a hosting actor takes for a session is now the transport's, taken at
   `register` and released at `close` for both hosting patterns (before, only the

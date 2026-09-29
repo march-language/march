@@ -906,6 +906,10 @@ void   *march_string_to_float(void *s);
 /* List builtins. */
 void *march_list_append(void *a, void *b);
 void *march_list_concat(void *lists);
+/* Stable sorts behind Array/RRB sort_by and sort_by_key: the list is borrowed,
+ * the closure consumed (one reference per call), a fresh list returned. */
+void *march_list_stable_sort_by(void *lst, void *le);
+void *march_list_sort_by_int_key(void *lst, void *key);
 
 /* File/Dir builtins. */
 int64_t march_file_exists(void *s);

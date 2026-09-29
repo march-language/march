@@ -256,6 +256,31 @@ mod RRB do
   end
 
   doc """
+  Sort by a comparator, stably; see `Array.sort_by`. O(n log n).
+
+  ## Examples
+
+      march> RRB.to_list(RRB.sort_by(RRB.from_list([3, 1, 2]), fn (a, b) -> a <= b))
+      [1, 2, 3]
+  """
+  fn sort_by(v: Vec(a), le: a -> a -> Bool): Vec(a) do
+    match v do Vec(arr) -> Vec(Array.sort_by(arr, le)) end
+  end
+
+  doc """
+  Sort by an `Int` key computed once per element, stably; see
+  `Array.sort_by_key`. O(n log n).
+
+  ## Examples
+
+      march> RRB.to_list(RRB.sort_by_key(RRB.from_list([30, 4, 200]), fn x -> 0 - x))
+      [200, 30, 4]
+  """
+  fn sort_by_key(v: Vec(a), key: a -> Int): Vec(a) do
+    match v do Vec(arr) -> Vec(Array.sort_by_key(arr, key)) end
+  end
+
+  doc """
   Left fold over all elements. `f(acc, elem) = new_acc`. O(n).
 
   ## Examples

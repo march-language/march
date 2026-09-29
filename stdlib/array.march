@@ -510,11 +510,145 @@ mod Array do
     lst_rev(rev)
   end
 
+  doc """
+  Sorts by a comparator, stably: `le(a, b)` is true when `a` may come before
+  `b`, as for `List.sort_by`. With a `<=`-style comparator, elements that
+  compare equal keep their original order. O(n log n) comparisons, n - 1 on
+  input that is already sorted or reversed.
+
+  ## Examples
+
+      march> Array.to_list(Array.sort_by(Array.from_list([3, 1, 2]), fn (a, b) -> a <= b))
+      [1, 2, 3]
+
+      march> Array.to_list(Array.sort_by(Array.from_list([(2, "a"), (1, "b"), (2, "c")]), fn (x, y) -> Tuple.first(x) <= Tuple.first(y)))
+      [(1, "b"), (2, "a"), (2, "c")]
+  """
+  -- Assumed, not proved (a runtime sort over to_list/from_list).  Witnessed
+  -- in test/native/array_sort_by.march.
+  @[assume]
+  fn sort_by(v : PVec(a), le : a -> a -> Bool) : {PVec(a) | pvec_length(_) == pvec_length(v)} do
+    from_list(list_stable_sort_by(to_list(v), le))
+  end
+
+  doc """
+  Sorts by an `Int` key, stably: `key` is called once per element (not once
+  per comparison), and elements with equal keys keep their original order.
+
+  ## Examples
+
+      march> Array.to_list(Array.sort_by_key(Array.from_list(["ccc", "a", "bb", "d"]), fn s -> String.byte_size(s)))
+      ["a", "d", "bb", "ccc"]
+  """
+  -- Assumed, not proved (a runtime sort over to_list/from_list).  Witnessed
+  -- in test/native/array_sort_by.march.
+  @[assume]
+  fn sort_by_key(v : PVec(a), key : a -> Int) : {PVec(a) | pvec_length(_) == pvec_length(v)} do
+    from_list(list_sort_by_int_key(to_list(v), key))
+  end
+
+  -- Split a list into its first k elements and the rest.
+  pfn lst_split(xs, k) do
+    fn go(ys, i, acc) do
+      if i == 0 do (lst_rev(acc), ys)
+      else
+        match ys do
+        Nil -> (lst_rev(acc), Nil)
+        Cons(h, t) -> go(t, i - 1, Cons(h, acc))
+        end
+      end
+    end
+    go(xs, k, Nil)
+  end
+
+  -- Group a list into consecutive chunks of 32, each wrapped by `wrap`
+  -- (the last chunk may be shorter), in order.
+  pfn group32(xs, wrap) do
+    fn chunk(ys, i, cur, out) do
+      match ys do
+      Nil ->
+        match cur do
+        Nil -> lst_rev(out)
+        _ -> lst_rev(Cons(wrap(lst_rev(cur)), out))
+        end
+      Cons(h, t) ->
+        if i == 31 do chunk(t, 0, Nil, Cons(wrap(lst_rev(Cons(h, cur))), out))
+        else chunk(t, i + 1, Cons(h, cur), out) end
+      end
+    end
+    chunk(xs, 0, Nil, Nil)
+  end
+
+  doc """
+  Test hook: true when two vectors have the same trie shape -- size, shift,
+  tail length, and the same branch fan-out and leaf lengths all the way
+  down. Elements are not compared.
+  """
+  fn debug_same_shape(a : PVec(a), b : PVec(a)) : Bool do
+    match (a, b) do
+    (PVec(n1, s1, r1, t1), PVec(n2, s2, r2, t2)) ->
+      n1 == n2 && s1 == s2 && lst_len(t1) == lst_len(t2) && shape_node_eq(r1, r2)
+    end
+  end
+
+  pfn shape_node_eq(x, y) do
+    match (x, y) do
+    (TrieEmpty, TrieEmpty) -> true
+    (TrieLeaf(vs), TrieLeaf(ws)) -> lst_len(vs) == lst_len(ws)
+    (TrieBranch(cs), TrieBranch(ds)) -> shape_children_eq(cs, ds)
+    _ -> false
+    end
+  end
+
+  pfn shape_children_eq(cs, ds) do
+    match (cs, ds) do
+    (Nil, Nil) -> true
+    (Cons(c, crest), Cons(d, drest)) ->
+      if shape_node_eq(c, d) do shape_children_eq(crest, drest) else false end
+    _ -> false
+    end
+  end
+
   doc "Builds a persistent vector from a list. O(n)."
-  -- Assumed, not proved (an accumulator loop over push).  Witnessed in
-  -- test/stdlib/test_array.march.
+  -- Built in bulk rather than by n pushes (each push copied the up-to-32
+  -- element tail list: ~540 ns per element at n = 100k). The result is the
+  -- same trie push would build: a tail of the last 1..32 elements, full
+  -- 32-element leaves, and dense 32-way branches grouped bottom-up until one
+  -- root remains, 5 more shift bits per level -- one leaf is a one-child
+  -- branch at shift 5, exactly as push_leaf makes it. Witnessed against the
+  -- push-built vector (debug_same_shape) for every n in 0..2000 by
+  -- test/native/array_sort_by.march.
+  -- Assumed, not proved.  Witnessed in test/stdlib/test_array.march.
   @[assume]
   fn from_list(xs : List(a)) : {PVec(a) | pvec_length(_) == len(xs)} do
+    let n = lst_len(xs)
+    if n == 0 do empty()
+    else do
+      let tail_len = n - 32 * ((n - 1) / 32)
+      let (front, tail) = lst_split(xs, n - tail_len)
+      if n == tail_len do PVec(n, 0, TrieEmpty, tail)
+      else do
+        fn up(nodes, shift) do
+          let parents = group32(nodes, fn cs -> TrieBranch(cs))
+          match parents do
+          Cons(root, Nil) -> (root, shift + 5)
+          _ -> up(parents, shift + 5)
+          end
+        end
+        let (root, shift) = up(group32(front, fn vs -> TrieLeaf(vs)), 0)
+        PVec(n, shift, root, tail)
+      end
+      end
+    end
+    end
+  end
+
+  doc """
+  Test hook: builds the vector by pushing one element at a time, the
+  construction `from_list` replaced. Compare the two with
+  `debug_same_shape` (test/native/array_sort_by.march does).
+  """
+  fn debug_from_list_by_push(xs : List(a)) : PVec(a) do
     fn go(lst, acc) do
       match lst do
       Nil -> acc

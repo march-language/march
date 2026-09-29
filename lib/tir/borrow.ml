@@ -63,6 +63,12 @@ let extern_borrow_table : (string * bool list) list = [
      it; since specs/progress/2026-09-14-live-actor-freed-by-dropping-its-last-pid.md
      the running actor holds one, so releasing the program's pids is safe.
      `send`'s MESSAGE stays owned (the runtime enqueues it). *)
+  (* The list is read and a fresh one built; the closure is consumed (one
+     reference per call, ours released at the end), as native_int_arr_map. *)
+  ("list_stable_sort_by",  [true; false]);
+  ("list_sort_by_int_key", [true; false]);
+  ("march_list_stable_sort_by",  [true; false]);
+  ("march_list_sort_by_int_key", [true; false]);
   ("send",              [true; false]);
     (* the ref is read, incrc'd, and returned as a NEW owned reference *)
     ("actor_reply_retain", [true]);

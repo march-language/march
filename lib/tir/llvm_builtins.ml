@@ -375,6 +375,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_list_append(ptr %a, ptr %b)" };
   { march_name = "list_concat"; c_name = Some "march_list_concat"; ret_ty = Some (Tir.TCon ("List", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_list_concat(ptr %lists)" };
+  (* Stable sort of a List by a closure (Array.sort_by / RRB.Vec.sort_by) and by
+     an Int key extracted once per element (sort_by_key). runtime/march_runtime.c. *)
+  { march_name = "list_stable_sort_by"; c_name = Some "march_list_stable_sort_by"; ret_ty = Some (Tir.TCon ("List", [Tir.TVar "a"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_list_stable_sort_by(ptr %xs, ptr %le)" };
+  { march_name = "list_sort_by_int_key"; c_name = Some "march_list_sort_by_int_key"; ret_ty = Some (Tir.TCon ("List", [Tir.TVar "a"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_list_sort_by_int_key(ptr %xs, ptr %key)" };
   { march_name = "iolist_hash_fnv1a"; c_name = Some "march_iolist_hash_fnv1a"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_iolist_hash_fnv1a(ptr %iol)" };
   { march_name = "vault_new"; c_name = Some "march_vault_new"; ret_ty = Some (Tir.TPtr Tir.TUnit);
@@ -1491,6 +1497,8 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PComment "; List builtins";
   PDeclare "march_list_append";
   PDeclare "march_list_concat";
+  PDeclare "march_list_stable_sort_by";
+  PDeclare "march_list_sort_by_int_key";
   PComment "; IOList builtins";
   PDeclare "march_iolist_hash_fnv1a";
   PComment "; Vault (key-value store) builtins";

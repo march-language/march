@@ -4441,6 +4441,47 @@ let base_env : env =
           done;
           VFloat !s
         | _ -> eval_error "native_int_arr_sumsq_dev: expected (NativeIntArr, Float)"))
+  (* Stable sorts behind Array.sort_by / RRB.Vec.sort_by / sort_by_key. The
+     compiled builtins (runtime/march_runtime.c march_list_stable_sort_by /
+     march_list_sort_by_int_key) use a different stable algorithm; for a `<=`-style
+     comparator every stable sort gives the same result, which is the parity
+     the fixture test/native/array_sort_by.march checks. OCaml's stable_sort
+     takes the left element when the comparison is <= 0, so `le a b` maps to
+     -1 and its negation to 1: the same "take left iff le(left, right)" rule
+     as the C merge. *)
+  ; ("list_stable_sort_by", VBuiltin ("list_stable_sort_by", function
+        | [lst; le] ->
+          let rec to_ocaml = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [h; t]) -> h :: to_ocaml t
+            | v -> eval_error "list_stable_sort_by: expected a list, got %s" (value_to_string v)
+          in
+          let cmp a b =
+            match !apply_hook le [a; b] with
+            | VBool true -> -1
+            | VBool false -> 1
+            | v -> eval_error "list_stable_sort_by: comparator returned non-Bool: %s"
+                     (value_to_string v)
+          in
+          List.fold_right (fun x acc -> VCon ("Cons", [x; acc]))
+            (List.stable_sort cmp (to_ocaml lst)) (VCon ("Nil", []))
+        | _ -> eval_error "list_stable_sort_by: expected (List, fn)"))
+  ; ("list_sort_by_int_key", VBuiltin ("list_sort_by_int_key", function
+        | [lst; key] ->
+          let rec to_ocaml = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [h; t]) -> h :: to_ocaml t
+            | v -> eval_error "list_sort_by_int_key: expected a list, got %s" (value_to_string v)
+          in
+          let keyed = List.map (fun x ->
+              match !apply_hook key [x] with
+              | VInt k -> (k, x)
+              | v -> eval_error "list_sort_by_int_key: key returned non-Int: %s"
+                       (value_to_string v)) (to_ocaml lst) in
+          List.fold_right (fun (_, x) acc -> VCon ("Cons", [x; acc]))
+            (List.stable_sort (fun (a, _) (b, _) -> compare a b) keyed)
+            (VCon ("Nil", []))
+        | _ -> eval_error "list_sort_by_int_key: expected (List, fn)"))
   ; ("native_int_arr_map", VBuiltin ("native_int_arr_map", function
         | [VNativeIntArr a; f] ->
           let n = Array.length a in

@@ -1,0 +1,94 @@
+-- Array.sort_by / Array.sort_by_key / RRB.sort_by / RRB.sort_by_key: the
+-- stable sorts behind the runtime builtins list_stable_sort_by and
+-- list_sort_by_int_key. Run compiled AND interpreted against one golden, so
+-- the golden is also the parity check between the C sort and the
+-- interpreter's OCaml stable_sort (identical for a `<=`-style comparator).
+--
+-- Elements are (key, position) pairs with many duplicate keys, so every
+-- check is also a stability check: after sorting by key alone, the positions
+-- inside each run of equal keys must still be increasing. Each case prints
+-- the count of cases that (a) are ordered by key, (b) kept input order on
+-- ties, (c) agree with List.sort_by, plus a fingerprint of the first result.
+mod ArraySortBy do
+  needs IO.Console
+
+  pfn build(n : Int, f : Int -> Int) : List(Int) do
+    fn go(i : Int, acc : List(Int)) : List(Int) do
+      if i < 0 do acc else go(i - 1, Cons(f(i), acc)) end
+    end
+    go(n - 1, Nil)
+  end
+
+  pfn scramble(i : Int) : Int do
+    let x = (i * 2654435761 + 11) % 1000003
+    if x < 0 do 0 - x else x end
+  end
+
+  -- keys for pattern p at size n; positions are the list index
+  pfn keys(p : Int, n : Int) : List(Int) do
+    if p == 0 do build(n, fn i -> scramble(i) % 7)
+    else if p == 1 do build(n, fn i -> i / 3)
+    else if p == 2 do build(n, fn i -> (n - i) / 3)
+    else if p == 3 do build(n, fn _ -> 5)
+    else if p == 4 do build(n, fn i -> scramble(i) % 1000)
+    else build(n, fn i -> if i < n / 2 do i / 2 else (n - i) / 2 end)
+    end end end end end
+  end
+
+  pfn pairs(p : Int, n : Int) : List((Int, Int)) do
+    List.map(List.enumerate(keys(p, n)), fn t -> match t do (i, k) -> (k, i) end)
+  end
+
+  pfn key_of(t : (Int, Int)) : Int do match t do (k, _) -> k end end
+  pfn pos_of(t : (Int, Int)) : Int do match t do (_, q) -> q end end
+
+  pfn ordered_and_stable(xs : List((Int, Int))) : Bool do
+    match xs do
+      Nil -> true
+      Cons(_, Nil) -> true
+      Cons(a, Cons(b, rest)) ->
+        let ok = key_of(a) < key_of(b) || (key_of(a) == key_of(b) && pos_of(a) < pos_of(b))
+        if ok do ordered_and_stable(Cons(b, rest)) else false end
+    end
+  end
+
+  pfn fingerprint(xs : List((Int, Int))) : Int do
+    List.fold_left(xs, 7, fn (h, t) -> (h * 31 + pos_of(t) * 3 + key_of(t)) % 1000000007)
+  end
+
+  pfn by_key(a : (Int, Int), b : (Int, Int)) : Bool do key_of(a) <= key_of(b) end
+
+  pfn sizes() : List(Int) do [0, 1, 2, 3, 15, 16, 17, 33, 100, 1000, 5000] end
+
+  pfn cases() : List((Int, Int)) do
+    List.flat_map(sizes(), fn n -> List.map(List.range(0, 6), fn p -> (n, p)))
+  end
+
+  pfn check(name : String, sort : List((Int, Int)) -> List((Int, Int))) : Unit do
+    let res = List.map(cases(), fn c -> match c do (n, p) ->
+      let xs = pairs(p, n)
+      let got = sort(xs)
+      let reference = List.sort_by(xs, fn (a, b) -> by_key(a, b))
+      (ordered_and_stable(got), got == reference, fingerprint(got))
+    end)
+    let good = List.fold_left(res, 0, fn (acc, r) -> match r do (s, _, _) -> if s do acc + 1 else acc end end)
+    let same = List.fold_left(res, 0, fn (acc, r) -> match r do (_, e, _) -> if e do acc + 1 else acc end end)
+    let fp = List.fold_left(res, 0, fn (acc, r) -> match r do (_, _, f) -> (acc * 17 + f) % 1000000007 end)
+    println(name ++ ": stable+ordered " ++ int_to_string(good) ++ "/66, equals List.sort_by "
+      ++ int_to_string(same) ++ "/66, fingerprint " ++ int_to_string(fp))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    check("Array.sort_by", fn xs -> Array.to_list(Array.sort_by(Array.from_list(xs), fn (a, b) -> by_key(a, b))))
+    check("Array.sort_by_key", fn xs -> Array.to_list(Array.sort_by_key(Array.from_list(xs), fn t -> key_of(t))))
+    check("RRB.sort_by", fn xs -> RRB.to_list(RRB.sort_by(RRB.from_list(xs), fn (a, b) -> by_key(a, b))))
+    check("RRB.sort_by_key", fn xs -> RRB.to_list(RRB.sort_by_key(RRB.from_list(xs), fn t -> key_of(t))))
+    -- boxed and heap elements: floats and strings
+    let fl = Array.to_list(Array.sort_by(Array.from_list([2.5, -1.0, 0.0, 2.5, -3.25]), fn (a, b) -> a <= b))
+    println("floats: " ++ String.join(List.map(fl, fn x -> float_to_string(x)), " "))
+    let st = Array.to_list(Array.sort_by_key(Array.from_list(["pear", "fig", "apple", "kiwi", "plum"]), fn s -> String.byte_size(s)))
+    println("strings by length: " ++ String.join(st, " "))
+    let desc = Array.to_list(Array.sort_by(Array.from_list(["b", "c", "a", "c"]), fn (a, b) -> b <= a))
+    println("strings descending: " ++ String.join(desc, " "))
+  end
+end
