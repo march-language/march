@@ -60,10 +60,17 @@ recorded 4 dependencies to forge.caps.lock
 `forge.caps.lock` is a small, reviewable file:
 
 ```toml
+mode = "declared"
+
 [[package]]
 name = "liba"
 caps = ["IO.FileRead"]
 ```
+
+`mode` records which extraction produced the sets (`"inferred"` after
+`forge audit --inferred --record`). `forge add` and `forge outdated` compare in
+that mode, and `forge audit` warns if you check the file in the other one. A
+file written before the line existed has no `mode` and is treated as declared.
 
 From then on, `forge audit` compares the tree against that baseline. When
 no declaration has changed it is quiet:
@@ -85,6 +92,37 @@ Review the change, then accept it with `forge audit --record`.
 
 That is the whole workflow: review the change like any other diff, then
 `forge audit --record` to accept it and commit the updated baseline.
+
+### At `forge add` time
+
+Once `forge.caps.lock` exists, `forge add` runs the same comparison for every
+dependency the add brings in or changes (a new lock entry, or one whose
+source, version, commit or tree hash moved), before it keeps them. Only those
+dependencies are analyzed, so an add stays cheap even with `--inferred`
+baselines. A dependency asking for a capability it was not granted is refused:
+the delta is printed, `forge.toml` and `forge.lock` are restored exactly, and
+the command exits 1.
+
+```
+$ forge add fs --path ../fs
+...
+capability changes against forge.caps.lock:
+  + fs — new dependency, declares: IO.FileWrite
+error: fs asks for capabilities forge.caps.lock does not grant it; forge.toml and forge.lock were left as they were.
+Review the change above, then re-run with --accept-caps to add it and record the new set.
+```
+
+`forge add … --accept-caps` keeps the dependency and merges its new set into
+`forge.caps.lock` (other entries untouched), so the acceptance shows up in the
+diff. Without a `forge.caps.lock`, `forge add` only prints what the new
+dependency declares.
+
+`forge outdated` previews the same thing for an upgrade: for each outdated
+registry dependency it fetches the newer release (through the verified tarball
+cache) and prints `caps: asks for NEW capabilities: …` under its row when the
+release asks for more than its `forge.caps.lock` entry (or, with no baseline,
+the installed copy). Upgrading by editing the version in `forge.toml` and
+running `forge deps` is not gated; `forge audit` in CI catches it.
 
 ### In CI
 

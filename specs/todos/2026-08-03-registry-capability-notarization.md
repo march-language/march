@@ -50,6 +50,6 @@ notarization needs, in order:
   the audit's verdict line already reserves the slot.
 
 Once this lands, the highest-value follow-on is
-`specs/todos/2026-08-03-forge-deps-upgrade-cap-diff.md` — surfacing per-package cap
+`specs/progress/2026-08-03-forge-deps-upgrade-cap-diff.md` — surfacing per-package cap
 widening at dependency-upgrade time, which catches the xz/event-stream shape that the
 whole-binary gate structurally cannot.

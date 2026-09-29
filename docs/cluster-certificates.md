@@ -110,11 +110,13 @@ a shared-secret node and the other way round, with a message naming the
 variables to set, so move a cluster to certificates all at once rather than one
 node at a time.
 
-## 4. Renew before expiry
+## 4. Renew before expiry, without a restart
 
 A certificate is checked in every handshake and rechecked on every tick. When
-it expires, its peers disconnect the node. Issue a new certificate for the same
-key before that and restart the node with it:
+it expires, its peers disconnect the node. Before that, issue a new
+certificate and put it where the node reads it. The node replaces its
+certificate while it runs: there is no restart, and the node's links and the
+sessions on them stay up.
 
 ```bash
 forge cluster cert web-1 --node-key ./pki/web-1.key --days 30 \
@@ -122,6 +124,53 @@ forge cluster cert web-1 --node-key ./pki/web-1.key --days 30 \
 ```
 
 `--node-key` reuses the node's existing key, so only `web-1.cert` changes.
+Copy it over the file `MARCH_NODE_CERT` names on the node. The node re-reads
+that file (and `MARCH_NODE_KEY`'s, when the key is a file) every
+`MARCH_NODE_CERT_POLL_MS` milliseconds, 10 s by default, and takes the new
+certificate once it:
+
+- verifies under the operator key and has not expired,
+- names this node (`MARCH_NODE_NAME`) and the node's key,
+- has not been revoked.
+
+Otherwise the node keeps the certificate it has and reports why (below). This
+is the usual path for a Kubernetes secret volume, cert-manager, a Vault agent
+or a CI job copying files: they rewrite the file and signal no one, so the
+node watches the file rather than waiting for a signal.
+
+To change the key as well, leave out `--node-key`. `forge cluster cert` then
+makes a new key, and you replace both files. Write the key first: until the
+certificate that names it arrives, the node refuses the pair and keeps the old
+one.
+
+Code that manages certificates itself can call the same replacement directly:
+
+```march
+match ClusterNode.replace_cert(node, cert_text, "") do     -- "" keeps the key
+  Ok(c) -> println("now serving " ++ c.serial)
+  Err(e) -> println("certificate refused: " ++ e)
+end
+```
+
+The second argument is a new key in hex, for a certificate that names one.
+
+What happens on the wire. New handshakes present the new certificate at
+once. Links already up are not redialled, because a new connection would
+cancel every session on the old one. Instead the node sends each linked peer
+the new certificate over the existing, authenticated link, with a signature
+made by the certificate's own key to prove it holds that key. The peer checks
+it as it would in a handshake, including that it names the same node. From
+then on it holds that certificate for the link: the expiry recheck, revocation
+and `peer_cert` all use the new one, so the link outlives the old
+certificate's expiry. After that expiry nobody can join with the old
+certificate. A peer running a March from before live replacement ignores the
+update and drops the link when the old certificate expires. The node redials
+it at once under the new certificate, but sessions on that link are lost.
+`run_<Role>` direct connections read the environment's files at every
+connect, so they present the new certificate from their next connection.
+
+Revoke the old certificate's serial once the new one is in place if it must
+stop working before it expires.
 
 ## 5. Revoke
 
@@ -161,7 +210,11 @@ let _ = ClusterNode.on_security_event(node, fn ev ->
 ```
 
 reports each refused handshake with its reason (an expired, revoked or foreign
-certificate; a peer in the other mode) and each frame dropped for a bad MAC.
+certificate; a peer in the other mode), each frame dropped for a bad MAC, and
+each certificate replacement: `CertReplaced(node_id, serial)` for this node's
+own or a peer's, and `CertRefused(node_id, why)` when a new certificate did not
+check out (a half-written file, a certificate for a key that is not there yet,
+an expired or revoked one) and the old one was kept.
 `ClusterNode.frames_rejected(node)` counts the dropped frames. A connection is
 closed after three.
 

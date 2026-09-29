@@ -15,7 +15,7 @@ A plain program with the same actor and feeder drains to zero old-epoch pins (th
 HCR migrate_msg test asserts it), so the base epoch has no pin of its own. The six
 units are long-lived tasks, which by design never advance (II.4.3): candidates are
 ClusterNode's link reader tasks (see the review's unconfirmed item 1, now
-`2026-09-25-dd-review-link-reader-tasks-pin-epoch.md`), the topology placement loop,
+`specs/progress/2026-09-25-dd-review-link-reader-tasks-pin-epoch.md`), the topology placement loop,
 listener/acceptor tasks and the SWIM driver. The actor is probably `RegWatch`
 (nested receive) or a held `Endpoint`.
 
@@ -23,3 +23,9 @@ listener/acceptor tasks and the SWIM driver. The actor is probably `RegWatch`
 function or actor name, epoch), identify the six, and decide per unit: advance it
 (re-spawn at the current epoch), or document it as a permanent pin that only a hard
 drain deadline clears.
+
+**Update 2026-09-28.** ClusterNode's link readers, ticker and acceptor now move to the
+new epoch after a deploy (`specs/progress/2026-09-25-dd-review-link-reader-tasks-pin-epoch.md`):
+a reader at its next frame, the acceptor at its next inbound connection. So those
+candidates should drop out of the count, except an idle data connection's reader and an
+acceptor that has seen no connection since the deploy. Not re-measured.

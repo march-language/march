@@ -1,0 +1,70 @@
+-- Scenario "hcr_remote_msg_epoch", node-b, version 1 (node_b_v2.march is the
+-- hot patch). node-b receives remote messages for its `Recv.Sink` actor
+-- through a ClusterNode route, and the patch CHANGES Sink's message type
+-- (`Note(Int)` becomes `Note(Int, Int)`) along with the route's decoder
+-- (`Recv.deliver`). The route runs in the link's data-reader task, which was
+-- spawned when the link formed, before the deploy. See scenario.sh.
+mod RemoteEpochB do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+
+  mod Recv do
+    needs IO
+    needs IO.Console
+    needs IO.Mut
+    needs IO.Spawn
+
+    type SinkState = { n : Int }
+
+    actor Sink do
+      state { n : Int }
+      init  { n: 0 }
+      on Note(v : Int) do
+        println("node-b: version 1 sink got " ++ int_to_string(v))
+        { n: state.n + 1 }
+      end
+    end
+
+    -- The route's decoder: version 1 reads one byte, the value.
+    fn deliver(sink : Pid(SinkState), d : NodeSend.Delivery) : Result((), String) do
+      match d.payload do
+        Cons(v, _) ->
+          let _ = send(sink, Note(v))
+          Ok(())
+        Nil -> Err("empty payload")
+      end
+    end
+  end
+
+  pfn wait_file(path : String) : () do
+    if File.exists(path) do () else
+      sleep_ms(50)
+      wait_file(path)
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Nil, "epoch-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        let sink = spawn(Recv.Sink)
+        let sp = pid_to_int(sink)
+        let _ = ClusterNode.route(h, sp, fn d -> Recv.deliver(sink, d))
+        match ClusterNode.register(h, "sink", sink) do
+          Ok(_) -> ()
+          Err(_) -> panic("node-b: could not register the sink")
+        end
+        println("node-b: up")
+        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        ClusterNode.stop(h)
+    end
+  end
+end
