@@ -42,6 +42,10 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **`Actor.top_by_mailbox` / `Actor.over_mailbox` and `NodeCall` typecheck cleanly.** The
+  two mailbox helpers now return `List((Pid(a), Int))` (the parameterized `Pid`) and
+  `NodeCall` names `RemoteCall.NoConnection` explicitly instead of the ambiguous bare
+  constructor; seven hidden stdlib type errors are gone.
 - **`[ffi.rust]` crates now work under the interpreter.** `forge run`,
   `forge interactive` and interpreted `forge test` used to fail at the first
   Rust extern with "symbol not found for interpreter FFI", and printed a
