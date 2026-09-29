@@ -310,6 +310,10 @@ native_native_arr_sort_narrow: coverage audit (user + stdlib): 118 enforced, 0 i
 native_native_arr_sort_narrow: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_native_float_box_abi_leak_probe: coverage audit (user + stdlib): 118 enforced, 0 inert (warned), 0 unenforced
 native_native_float_box_abi_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_nested_actor_msg_from_parent: coverage audit (user + stdlib): 118 enforced, 0 inert (warned), 0 unenforced
+native_nested_actor_msg_from_parent: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_nested_actor_same_name: coverage audit (user + stdlib): 118 enforced, 0 inert (warned), 0 unenforced
+native_nested_actor_same_name: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_actor_spawn: coverage audit (user + stdlib): 118 enforced, 0 inert (warned), 0 unenforced
 native_nested_actor_spawn: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_cons_ctor_heap: coverage audit (user + stdlib): 118 enforced, 0 inert (warned), 0 unenforced
@@ -530,6 +534,8 @@ native_trmc_filter_alternating: coverage audit (user + stdlib): 118 enforced, 0 
 native_trmc_filter_alternating: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_trmc_shared_tail_reuse: coverage audit (user + stdlib): 118 enforced, 0 inert (warned), 0 unenforced
 native_trmc_shared_tail_reuse: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_try_call_err_message: coverage audit (user + stdlib): 118 enforced, 0 inert (warned), 0 unenforced
+native_try_call_err_message: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tuple_destructure_dce: coverage audit (user + stdlib): 118 enforced, 0 inert (warned), 0 unenforced
 native_tuple_destructure_dce: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tuple_destructure_rc: coverage audit (user + stdlib): 118 enforced, 0 inert (warned), 0 unenforced
