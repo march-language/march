@@ -581,8 +581,6 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_send(ptr %actor, ptr %msg)" };
   { march_name = "actor_cast"; c_name = Some "march_send"; ret_ty = Some (Tir.TCon ("Option", [Tir.TUnit]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_send(ptr %actor, ptr %msg)" };
-  { march_name = "send_linear"; c_name = Some "march_send_linear"; ret_ty = Some (Tir.TCon ("Option", [Tir.TUnit]));
-    in_is_builtin = false; declare_sig = Some "declare ptr  @march_send_linear(ptr %actor, ptr %msg)" };
   { march_name = "spawn"; c_name = Some "march_spawn"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_spawn(ptr %actor)" };
   { march_name = "spawn_supervised"; c_name = Some "march_spawn_supervised"; ret_ty = Some (Tir.TPtr Tir.TUnit);
@@ -1277,9 +1275,6 @@ let runtime_only_declares : (string * string) list = [
   ("llvm.stackrestore", "declare void @llvm.stackrestore(ptr %ptr)");
   ("march_repl_get", "declare i64  @march_repl_get(i64 %slot)");
   ("march_repl_set", "declare void @march_repl_set(i64 %slot, i64 %val)");
-  ("march_msg_copy", "declare ptr  @march_msg_copy(ptr %src_heap, ptr %dst_heap, ptr %value)");
-  ("march_msg_move", "declare ptr  @march_msg_move(ptr %src_heap, ptr %dst_heap, ptr %value)");
-  ("march_process_alloc", "declare ptr  @march_process_alloc(ptr %heap, i64 %sz)");
   ("march_run_scheduler", "declare void @march_run_scheduler()");
   ("march_task_spawn_thunk", "declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)");
   ("march_task_await", "declare ptr  @march_task_await(ptr %task)");
@@ -1610,10 +1605,6 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_actor_pid_indices";
   PDeclare "march_is_alive";
   PDeclare "march_send";
-  PDeclare "march_send_linear";
-  PDeclare "march_msg_copy";
-  PDeclare "march_msg_move";
-  PDeclare "march_process_alloc";
   PDeclare "march_spawn";
   PDeclare "march_spawn_supervised";
   PDeclare "march_actor_get_int";

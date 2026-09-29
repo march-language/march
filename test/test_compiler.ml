@@ -835,6 +835,71 @@ let test_desugar_trivial_fn () =
      | _ -> Alcotest.fail "expected single clause")
   | _ -> Alcotest.fail "expected single DFn"
 
+(* Desugar_actor_names: the actor names, with their module paths, in
+   declaration order. *)
+let actor_names_of (m : March_ast.Ast.module_) : string list =
+  let rec go path acc decls =
+    List.fold_left (fun acc d -> match d with
+        | March_ast.Ast.DActor (_, n, _, _) -> (path ^ n.txt) :: acc
+        | March_ast.Ast.DMod (mn, _, inner, _) -> go (path ^ mn.txt ^ ".") acc inner
+        | _ -> acc) acc decls in
+  List.rev (go "" [] m.March_ast.Ast.mod_decls)
+
+let actor_src = {|actor Box do
+      state { n : Int }
+      init { n: 0 }
+      on Poke(k : Int) do { n: k } end
+    end|}
+
+let test_desugar_actor_names_unique_untouched () =
+  (* A nested actor whose name is unique keeps its bare name: its glue and
+     the hot-reload manifest spell it that way. *)
+  let src = Printf.sprintf {|mod T do
+    %s
+    mod A do
+      actor Other do
+        state { n : Int }
+        init { n: 0 }
+        on Poke(k : Int) do { n: k } end
+      end
+    end
+  end|} actor_src in
+  Alcotest.(check (list string)) "names unchanged" ["Box"; "A.Other"]
+    (actor_names_of (parse_and_desugar src))
+
+let test_desugar_actor_names_collision_renamed () =
+  (* Same-named nested actors get their module path; the root one keeps its
+     name. *)
+  let src = Printf.sprintf {|mod T do
+    %s
+    mod A do
+      %s
+      mod C do
+        %s
+      end
+    end
+    mod B do
+      %s
+    end
+  end|} actor_src actor_src actor_src actor_src in
+  Alcotest.(check (list string)) "nested ones renamed"
+    ["Box"; "A.A__Box"; "A.C.A__C__Box"; "B.B__Box"]
+    (actor_names_of (parse_and_desugar src))
+
+let test_desugar_actor_names_same_module_rejected () =
+  (* Two actors of one name in ONE module: no reference could tell them
+     apart, so it is an error rather than a silent pick. *)
+  let src = Printf.sprintf {|mod T do
+    mod A do
+      %s
+      %s
+    end
+  end|} actor_src actor_src in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  Alcotest.(check bool) "duplicate actor in one module: error" true
+    (has_errors errors)
+
 (* ── Type checker tests ─────────────────────────────────────────────────── *)
 
 let test_tc_literal () =
@@ -4231,8 +4296,37 @@ let test_same_named_actors_spawned_one_still_rejected () =
     true (has_error_with ctx "granted `Cap(IO.Console)`");
   Alcotest.(check bool) "the escaping capability is named"
     true (has_error_with ctx "IO.FileWrite");
+  (* Two actors named Worker: desugar renames the nested ones by module path
+     (Desugar_actor_names), so the chain spells this one Safe__Worker. *)
   Alcotest.(check bool) "the chain names the actor that actually holds it"
-    true (has_error_with ctx "Safe.Worker_Go")
+    true (has_error_with ctx "Safe.Safe__Worker_Go")
+
+(* A nested actor's message constructors are reachable from the parent by
+   their QUALIFIED name, like a nested variant's (`Inner.A(1)`); before
+   2026-09-28 neither spelling resolved.  The bare name stays module-local on
+   purpose: exporting it would add a candidate to the parent's own bare `Set`
+   (see nested_actor_msg_from_parent.march, which pins both backends). *)
+let test_nested_actor_msg_ctor_qualified_from_parent () =
+  let src body = Printf.sprintf {|mod Outer do
+    needs IO.Spawn
+    mod Inner do
+      actor Box do
+        state { n : Int }
+        init { n: 0 }
+        on Set(k : Int) do { n: k } end
+      end
+    end
+    fn main(_s : Cap(IO.Spawn)) do
+      let p = spawn(Inner.Box)
+      %s
+    end
+  end|} body in
+  Alcotest.(check bool) "send(p, Inner.Set(1)) typechecks" false
+    (has_errors (typecheck (src "send(p, Inner.Set(1))")));
+  Alcotest.(check bool) "an Inner.Box.Msg annotation accepts Inner.Set" false
+    (has_errors (typecheck (src "let m : Inner.Box.Msg = Inner.Set(2)\n      send(p, m)")));
+  Alcotest.(check bool) "the bare Set is still not exported to the parent" true
+    (has_errors (typecheck (src "send(p, Set(1))")))
 
 (* A nested actor spawned by its BARE name from OUTSIDE its declaring module:
    the referring key ("main") has no module prefix, so prefix-first resolution
@@ -11093,16 +11187,10 @@ let test_fallback_does_not_fire_for_locals () =
    `None -> ()` branch exactly. There is no state in which the old code
    required something and the new code requires less.
 
-   Known and PRE-EXISTING, deliberately not asserted here: for the BARE
-   `import` form, declaration order decides this, not cyclicity. With `B`
-   declared AFTER `A`, Check 4 does not fire at all — on the base binary too.
-   The qualified `use B` + `B.f` form fires in BOTH orders, because a qualified
-   reference is an ordering edge and a `DUse` plus a bare call is not. That is
-   a property of the module sort, untouched by this change, and pinning it here
-   would pin a bug as correct. Filed separately, with the measured matrix and
-   the reproduction, in
-   specs/todos/2026-08-06-check4-skipped-when-importee-declared-later.md — do
-   not delete this paragraph without checking that file is still accurate. *)
+   Declaration order used to matter for the BARE `import` form: with `B`
+   declared AFTER `A`, Check 4 did not fire at all, because a `DUse` plus a
+   bare call gave the module sort no ordering edge. A `DUse` is an edge now
+   (2026-09-28); [test_check4_importee_declared_later] pins both orders. *)
 let test_cyclic_modules_still_enforce () =
   let impure_variant ~cyclic = Printf.sprintf {|mod Root do
   mod B do
@@ -11140,6 +11228,40 @@ end|} (if cyclic then "import A" else "")
     false (has_cap_needs_error (pure_variant ~cyclic:false));
   Alcotest.(check bool) "CYCLIC: pure reference costs nothing"
     false (has_cap_needs_error (pure_variant ~cyclic:true))
+
+(* A bare `import` of a sibling declared LATER than the importer.  Before
+   2026-09-28 the module sort had no edge for a `DUse`, so the importer was
+   checked first, the sibling's capabilities were unknown, and Check 4 never
+   fired (0 diagnostics) — while the same modules in the other order errored.
+   See specs/progress/2026-09-28-check4-importee-declared-later.md.
+
+   2x2 over (importee declared before / after) x (impure / pure reference):
+   both impure rows must ERROR (the REJECT case the bug dropped) and both pure
+   rows must stay clean (the demand-driven loosening survives the reorder), so
+   the verdict is the same in both orders. *)
+let test_check4_importee_declared_later () =
+  let beta = {|mod CapOrdProbeBeta do
+    needs IO.Console
+    fn capordprobebeta_pure(x : Int) : Int do x * 2 end
+    fn capordprobebeta_noisy(m : String) : Unit do print(m) end
+  end|} in
+  let alpha body = Printf.sprintf {|mod CapOrdProbeAlpha do
+    import CapOrdProbeBeta
+    %s
+  end|} body in
+  let impure = alpha "fn alpha_uses(m : String) : Unit do capordprobebeta_noisy(m) end" in
+  let pure = alpha "fn alpha_uses(x : Int) : Int do capordprobebeta_pure(x) end" in
+  let src ~importee_later a =
+    if importee_later then Printf.sprintf "mod CapOrdRoot do\n  %s\n  %s\nend" a beta
+    else Printf.sprintf "mod CapOrdRoot do\n  %s\n  %s\nend" beta a in
+  Alcotest.(check bool) "importee declared BEFORE, impure: error"
+    true (has_cap_needs_error (src ~importee_later:false impure));
+  Alcotest.(check bool) "importee declared AFTER, impure: error (was silently skipped)"
+    true (has_cap_needs_error (src ~importee_later:true impure));
+  Alcotest.(check bool) "importee declared BEFORE, pure: clean"
+    false (has_cap_needs_error (src ~importee_later:false pure));
+  Alcotest.(check bool) "importee declared AFTER, pure: clean"
+    false (has_cap_needs_error (src ~importee_later:true pure))
 
 (* ── Closing the [record_fn_caps] coverage gap (2026-08-06) ──────────────
    Until this fix [record_fn_caps] recorded an own(...) entry for [DFn]s,
@@ -11391,7 +11513,7 @@ let test_transitive_cap_via_default_argument () =
    reaches it only through the module-level [let].
 
    Both sides also emit "Module 'ProviderQ7' not found" — a separate,
-   pre-existing issue (specs/todos/2026-08-06-check4-skipped-when-importee-declared-later.md),
+   pre-existing issue (noted in specs/progress/2026-09-28-check4-importee-declared-later.md),
    identical on both sides.  [has_cap_needs_error] matches the Check-4 message
    text, so that unrelated diagnostic can neither manufacture a pass nor a
    failure. *)
@@ -17082,6 +17204,9 @@ let compiler_suites =
           Alcotest.test_case "pipe desugar"        `Quick test_desugar_pipe;
           Alcotest.test_case "multi-head desugar"  `Quick test_desugar_multihead;
           Alcotest.test_case "trivial fn no match" `Quick test_desugar_trivial_fn;
+          Alcotest.test_case "unique nested actor keeps its name" `Quick test_desugar_actor_names_unique_untouched;
+          Alcotest.test_case "same-named nested actors renamed" `Quick test_desugar_actor_names_collision_renamed;
+          Alcotest.test_case "same-named actors in one module rejected" `Quick test_desugar_actor_names_same_module_rejected;
         ] );
       ( "typecheck",
         [
@@ -17307,6 +17432,7 @@ let compiler_suites =
           Alcotest.test_case "same-named actors: only spawned one charged" `Quick test_same_named_actors_only_spawned_one_charged;
           Alcotest.test_case "same-named actors: spawned one still rejected" `Quick test_same_named_actors_spawned_one_still_rejected;
           Alcotest.test_case "nested actor bare spawn from entry: charged" `Quick test_nested_actor_bare_spawn_from_entry_is_charged;
+          Alcotest.test_case "nested actor message ctor, qualified, from parent" `Quick test_nested_actor_msg_ctor_qualified_from_parent;
           (* item 1380: Cap(IO.NetListen) body-scan enforcement *)
           Alcotest.test_case "tcp_listen body, no needs: warns NetListen"   `Quick test_netlisten_body_missing_needs_warns;
           Alcotest.test_case "tcp_listen body, needs NetListen: no warning" `Quick test_netlisten_body_with_needs_no_warning;
@@ -17691,6 +17817,7 @@ let compiler_suites =
           Alcotest.test_case "a pure module-level let costs the importer nothing" `Quick test_import_of_pure_module_let_costs_nothing;
           Alcotest.test_case "the fallback does not fire for locals/params"          `Quick test_fallback_does_not_fire_for_locals;
           Alcotest.test_case "cyclic modules still enforce"                          `Quick test_cyclic_modules_still_enforce;
+          Alcotest.test_case "Check 4 fires when the importee is declared later"   `Quick test_check4_importee_declared_later;
           Alcotest.test_case "a cap reached only via a module-level let propagates"  `Quick test_transitive_cap_via_module_let;
           Alcotest.test_case "a cap reached only via an interface default method"    `Quick test_transitive_cap_via_interface_default_method;
           Alcotest.test_case "an interface default does not capture a same-named fn" `Quick test_interface_default_does_not_capture_a_same_named_fn;

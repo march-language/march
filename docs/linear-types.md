@@ -213,8 +213,9 @@ onto this value?" before it can safely reuse or drop its memory; a `linear`
 value answers that question for free: it has a single owner by construction, which the
 compiled backend exploits as an **optimization**: the linearity flag on a TIR
 variable (`v_lin`) lets Perceus elide reference-count traffic where uniqueness
-is guaranteed, and a `send` of a linear message compiles to a zero-copy
-**ownership-transfer move** (`march_send_linear`) instead of a byte copy.
+is guaranteed. (A `send` of a linear message compiles to an ordinary
+`march_send`: the zero-copy ownership-transfer move belongs to the
+per-process arena runtime, which is not linked into compiled programs yet.)
 These are performance facts, not semantic ones: linearity is
 **compile-time-erased**, and neither backend re-checks it at runtime (see
 `core-march.md` §4.12; golden witness `g41_linear_annotations_erased`). See
