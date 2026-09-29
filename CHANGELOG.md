@@ -12,6 +12,15 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`forge add` checks a new dependency's capabilities before keeping it.** When
+  the project has a `forge.caps.lock` (from `forge audit --record`), a
+  dependency the add brings in or changes that asks for a capability it was not
+  granted is refused: the delta is shown and `forge.toml` and `forge.lock` are
+  left as they were. `--accept-caps` keeps it and records the new set. Only the
+  dependencies the add touched are analyzed. `forge outdated` now shows, under
+  each outdated registry dependency, whether the newer release asks for new
+  capabilities. `forge.caps.lock` records which mode (`declared`/`inferred`)
+  produced it.
 - **A cluster node's certificate can be replaced while it runs.** In
   certificate mode, a renewed certificate used to need a restart. Now the node
   watches the files `MARCH_NODE_CERT` and `MARCH_NODE_KEY` name
@@ -32,6 +41,11 @@ git log is authoritative for exact commits.
   would have failed with an undefined symbol. It now compiles to the ordinary
   `send`. Compiled programs also no longer declare the unused
   `march_msg_copy`, `march_msg_move` and `march_process_alloc`.
+- **Actors that message each other back and forth are up to 2.6x faster.** With
+  several scheduler threads, sending to an actor that was just going to sleep could
+  make the sender wait a millisecond or more before delivering. A two-actor
+  ping-pong of 1,000,000 messages took 3.07 s; it now takes 1.18 s. Actor programs
+  built with `--hot-reload` were affected less (1.45 s -> 1.22 s).
 - **`march --check` no longer passes a protocol expand it refuses, from its cache.**
   After a clean `--check` with `--protocol-baseline` and `--protocol-expand`, the same
   check without the baseline (which the compiler refuses) exited 0 from the cache
