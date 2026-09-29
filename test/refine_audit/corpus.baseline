@@ -532,6 +532,8 @@ native_topology_place: coverage audit (user + stdlib): 120 enforced, 0 inert (wa
 native_topology_place: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_trmc_shared_tail_reuse: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_trmc_shared_tail_reuse: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_try_call_err_message: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_try_call_err_message: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tuple_destructure_dce: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_tuple_destructure_dce: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_tuple_destructure_rc: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
