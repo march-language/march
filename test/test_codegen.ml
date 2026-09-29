@@ -1616,6 +1616,34 @@ let test_phase4_nonrecursive_caller_has_check () =
   Alcotest.(check bool) "apply_double: preemption check present" true
     (ir_contains ir "load volatile i64, ptr @march_preempt_request")
 
+(* A `send` whose message var is linear used to lower to
+   `@march_send_linear`, defined only by the unit-test-only arena runtime
+   (march_message.c), which the driver never links: a program reaching that
+   arm failed at link time.  No surface program is known to reach it (a
+   `linear let m` or a `linear m` parameter both lower to a non-linear atom
+   by emission), so the arm is exercised on hand-built TIR.  It now lowers
+   like any send (specs/progress/2026-09-28-send-linear-declared-but-never-linked.md). *)
+let test_llvm_linear_send_lowers_to_march_send () =
+  let open March_tir.Tir in
+  let unit_ptr = TPtr TUnit in
+  let p = { v_name = "p"; v_ty = unit_ptr; v_lin = Unr } in
+  let m = { v_name = "m"; v_ty = unit_ptr; v_lin = Lin } in
+  let send_var = { v_name = "send";
+                   v_ty = TFn ([unit_ptr; unit_ptr], TCon ("Option", [TUnit]));
+                   v_lin = Unr } in
+  let fd = { fn_name = "post"; fn_params = [p; m];
+             fn_ret_ty = TCon ("Option", [TUnit]);
+             fn_body = EApp (send_var, [AVar p; AVar m]);
+             fn_kind = FnNormal } in
+  let ir = March_tir.Llvm_emit.emit_module (mk_module [fd]) in
+  Alcotest.(check bool) "linear send calls @march_send" true
+    (ir_contains ir "call ptr @march_send(");
+  Alcotest.(check bool) "no @march_send_linear anywhere" false
+    (ir_contains ir "march_send_linear");
+  List.iter (fun sym ->
+      Alcotest.(check bool) (sym ^ " is not declared") false (ir_contains ir sym))
+    [ "@march_msg_copy"; "@march_msg_move"; "@march_process_alloc" ]
+
 let test_llvm_no_call_to_double_underscore () =
   let src = {|mod Test do
     fn and_op(a : Bool, b : Bool) : Bool do a && b end
@@ -13569,7 +13597,9 @@ declare ptr  @march_tco_defer_push(ptr %buf, ptr %release, ptr %v)
 declare void @march_tco_defer_drain(ptr %buf)
 declare void @march_print(ptr %s)
 declare void @march_panic(ptr %s)
+declare void @march_panic_user(ptr %s)
 declare ptr  @march_panic_ext(ptr %s)
+declare ptr  @march_unreachable_ext()
 declare ptr  @march_todo_ext(ptr %s)
 declare ptr  @march_try_finally(ptr %action, ptr %cleanup)
 declare ptr  @march_try_call(ptr %thunk)
@@ -13813,10 +13843,6 @@ declare i64  @march_actor_is_draining(ptr %actor)
 declare ptr  @march_actor_pid_indices()
 declare i64  @march_is_alive(ptr %actor)
 declare ptr  @march_send(ptr %actor, ptr %msg)
-declare ptr  @march_send_linear(ptr %actor, ptr %msg)
-declare ptr  @march_msg_copy(ptr %src_heap, ptr %dst_heap, ptr %value)
-declare ptr  @march_msg_move(ptr %src_heap, ptr %dst_heap, ptr %value)
-declare ptr  @march_process_alloc(ptr %heap, i64 %sz)
 declare ptr  @march_spawn(ptr %actor)
 declare ptr  @march_spawn_supervised(ptr %actor)
 declare i64  @march_actor_get_int(ptr %actor, i64 %index)
@@ -15938,6 +15964,8 @@ let codegen_suites =
         (* Regression: 831e315 + perceus caused @__ undefined symbol in &&/|| *)
         Alcotest.test_case "no @__ call for && / || (831e315)" `Quick
           test_llvm_no_call_to_double_underscore;
+        Alcotest.test_case "linear send lowers to @march_send" `Quick
+          test_llvm_linear_send_lowers_to_march_send;
       ]);
       ("string stdlib", [
         Alcotest.test_case "byte_size"           `Quick test_string_byte_size;
