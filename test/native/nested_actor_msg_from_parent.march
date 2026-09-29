@@ -1,0 +1,49 @@
+-- A nested actor's message constructors, sent from the PARENT module by their
+-- qualified name (`Inner.Set(1)`), as a nested variant's constructors
+-- (`Inner.A(1)`) already could be. Before 2026-09-28 the typechecker never
+-- exported them ("I don't know a constructor called `Inner.Set`"), so the
+-- parent could only send through a helper fn inside Inner. They are exported
+-- qualified only: the parent's own bare `Set` (type Cmd below) keeps meaning
+-- the parent's constructor.
+mod Outer do
+  needs IO.Console
+  needs IO.Spawn
+
+  type Cmd = Set(Int) | Stop
+
+  mod Inner do
+    type T = A(Int) | B
+    actor Box do
+      state { n : Int, label : String }
+      init  { n: 0, label: "" }
+      on Set(k : Int) do
+        { n: state.n + k, label: state.label }
+      end
+      on Tag(s : String, k : Int) do
+        { n: state.n * k, label: s }
+      end
+    end
+  end
+
+  fn describe(c : Cmd) : String do
+    match c do
+      Set(k) -> "Cmd.Set " ++ int_to_string(k)
+      Stop -> "Cmd.Stop"
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let _t = Inner.A(1)
+    let p = spawn(Inner.Box)
+    send(p, Inner.Set(1))
+    let m : Inner.Box.Msg = Inner.Set(2)
+    send(p, m)
+    send(p, Inner.Tag("tagged", 10))
+    run_until_idle()
+    match get_actor_field(p, "n") do
+      Some(n) -> println("n = " ++ int_to_string(n))
+      None -> println("n = <none>")
+    end
+    println(describe(Set(7)))
+  end
+end

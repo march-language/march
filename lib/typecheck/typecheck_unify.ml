@@ -597,15 +597,7 @@ let rec has_crash_branches (steps : Ast.protocol_step list) : bool =
     the derived impl becomes invisible and the type "does not implement Eq".
     A variant type is never itself a record, so suppressing the expansion for
     variant names only removes incorrect expansions. *)
-let name_is_variant env name =
-  let matches ci_type =
-    ci_type = name ||
-    (let n = String.length name and l = String.length ci_type in
-     l > n && ci_type.[l - n - 1] = '.' && String.sub ci_type (l - n) n = name)
-  in
-  StrMap.exists
-    (fun _ cis -> List.exists (fun (ci : ctor_info) -> matches ci.ci_type) cis)
-    env.ctors
+let name_is_variant env name = ctors_name_a_variant env.ctors name
 
 (* Names of records currently being structurally expanded on the current
    [surface_ty]/[expand_record] call path. A record field that mentions its

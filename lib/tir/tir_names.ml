@@ -419,7 +419,10 @@ let actor_spawn_suffix = "_spawn"
     ([spawn(Inner.Box)], a supervise field [c : Inner.Box]), so the qualifier
     must be dropped before a glue name is built from it, or the call names
     an [Inner.Box_spawn] that no definition provides (undefined symbol at
-    link time).  "Inner.Box" -> "Box"; "Box" -> "Box". *)
+    link time).  "Inner.Box" -> "Box"; "Box" -> "Box".  Two actors that
+    share a bare name never reach here under it: desugar renames the nested
+    ones first ([Desugar_actor_names]: [A.Box] -> [A.A__Box]), so the bare
+    glue name stays unique. *)
 let actor_decl_name (ref_name : string) : string =
   match String.rindex_opt ref_name '.' with
   | Some i -> String.sub ref_name (i + 1) (String.length ref_name - i - 1)
