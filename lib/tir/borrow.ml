@@ -290,6 +290,13 @@ let extern_borrow_table : (string * bool list) list = [
      defaulted to OWNED: every call leaked its Strings (and dispatch its
      whole field list).  logger_add_field and logger_add_context STORE both
      arguments and stay in [extern_owned_builtins]. ── *)
+  (* ── get_actor_field: march_get_actor_field (march_extras.c) only reads
+     the pid's shape and the name's bytes, and returns an immediate field or
+     None, never a heap value.  It was OWNED until 2026-09-28, so every call
+     leaked one reference to the probed actor record, which could then never
+     be freed (test/native/pid_to_int_leak_probe.march). ── *)
+  ("get_actor_field",           [true; true]);
+  ("march_get_actor_field",     [true; true]);
   ("logger_write",              [true; true; true; true]);
   ("logger_dispatch",           [true; true; true; true]);
   ("logger_register_appender",  [true; true]);
@@ -433,7 +440,7 @@ let extern_owned_builtins : string list = [
     "cap_impl"; "cap_dict"; "set_actor_caps"; "actor_caps"; "monitor";
     "register_resource";
     "actor_register"; "actor_unregister"; "actor_whereis";
-    "send_checked"; "revoke_cap"; "is_cap_valid"; "get_actor_field";
+    "send_checked"; "revoke_cap"; "is_cap_valid";
     "register_actor_on_stop";
 ]
 
@@ -508,6 +515,87 @@ let is_scalar_only_ty : Tir.ty -> bool = function
   | Tir.TCon (name, _) -> Hashtbl.mem _scalar_only name
   | _ -> false
 
+(* ── Per-field scalar resolution ──────────────────────────────────────────
+
+   [_scalar_only] answers "can ANY field of this type be a pointer"; a MIXED
+   type (`Node(Int, Tree)`) answers yes, so an `Int` field meeting `+` still
+   marked the whole parameter owned.  This table answers the per-FIELD
+   question instead: is the [i]th field of constructor [C] of the scrutinee's
+   type a scalar.  [br_vars] carry a placeholder type (see the
+   [field_escape_owns] comment), so the answer comes from the scrutinee's
+   [TCon (name, args)] plus the declaration, with the declaration's type
+   variables bound to [args] in first-appearance order -- the same rule
+   [Llvm_toplevel.build_ctor_info] uses to fill [type_params] for codegen.
+
+   Conservative wherever it cannot be sure: an unknown or non-[TCon]
+   scrutinee type, an unknown constructor, an arity mismatch, or an argument
+   count that does not match the parameters all answer "not scalar".  A type
+   name declared more than once (the same short name in two modules) is
+   scalar at a position only if EVERY declaration of it says so. *)
+type variant_decl = {
+  vd_params : string list;
+  vd_ctors  : (string * Tir.ty list) list;
+}
+
+let _variant_decls : (string, variant_decl list) Hashtbl.t = Hashtbl.create 64
+
+let type_params_in_order (ctors : (string * Tir.ty list) list) : string list =
+  let seen = Hashtbl.create 4 in
+  let params = ref [] in
+  let rec collect = function
+    | Tir.TVar n ->
+      if not (Hashtbl.mem seen n) then begin
+        Hashtbl.add seen n (); params := n :: !params
+      end
+    | Tir.TCon (_, args) -> List.iter collect args
+    | Tir.TFn (ps, r) -> List.iter collect ps; collect r
+    | Tir.TTuple ts -> List.iter collect ts
+    | Tir.TPtr t -> collect t
+    | _ -> ()
+  in
+  List.iter (fun (_, fields) -> List.iter collect fields) ctors;
+  List.rev !params
+
+let set_variant_decls (type_defs : Tir.type_def list) : unit =
+  Hashtbl.reset _variant_decls;
+  List.iter (function
+      | Tir.TDVariant (name, ctors) ->
+        let d = { vd_params = type_params_in_order ctors; vd_ctors = ctors } in
+        let prev = Option.value ~default:[] (Hashtbl.find_opt _variant_decls name) in
+        Hashtbl.replace _variant_decls name (d :: prev)
+      | _ -> ()) type_defs
+
+(** True iff field [idx] of constructor [ctor] (a branch of [n_fields]
+    binders) is a scalar under scrutinee type [scrut_ty] -- see the section
+    comment.  [ctor] may be bare or qualified with the type name. *)
+let ctor_field_is_scalar (scrut_ty : Tir.ty) (ctor : string) (n_fields : int)
+    (idx : int) : bool =
+  match scrut_ty with
+  | Tir.TCon (type_name, args) ->
+    let bare =
+      let pre = type_name ^ "." in
+      let lp = String.length pre in
+      if String.length ctor > lp && String.sub ctor 0 lp = pre
+      then String.sub ctor lp (String.length ctor - lp) else ctor
+    in
+    (match Hashtbl.find_opt _variant_decls type_name with
+     | None | Some [] -> false
+     | Some decls ->
+       List.for_all (fun d ->
+           match List.assoc_opt bare d.vd_ctors with
+           | Some fields when List.length fields = n_fields ->
+             (match List.nth_opt fields idx with
+              | Some (Tir.TVar p) ->
+                (* A type parameter: scalar only through a concrete argument. *)
+                List.length d.vd_params = List.length args
+                && (match List.assoc_opt p (List.combine d.vd_params args) with
+                    | Some t -> is_scalar_field_ty t
+                    | None -> false)
+              | Some t -> is_scalar_field_ty t
+              | None -> false)
+           | _ -> false) decls)
+  | _ -> false
+
 (** True iff atom [a] is a reference to the variable named [name]. *)
 let atom_is (name : string) : Tir.atom -> bool = function
   | Tir.AVar v -> String.equal v.Tir.v_name name
@@ -539,6 +627,12 @@ let rec has_matching_alloc (base_type : string) (e : Tir.expr) : bool =
   in
   match e with
   | Tir.EAlloc (Tir.TCon (name, _), _) -> matches_type name
+  (* TRMC's hole allocation is the same reconstruct shape (Perceus_fbip pairs
+     it with the scrutinee's drop as `reuse_hole`).  Missing it went unnoticed
+     while any extracted field meeting an owning use forced ownership anyway;
+     with that decided per field, `map`/`append` over an `Int` list would
+     otherwise be inferred borrowed and lose the in-place reuse. *)
+  | Tir.EAllocHole (_, Tir.TCon (name, _), _, _) -> matches_type name
   | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) ->
     has_matching_alloc base_type e1 || has_matching_alloc base_type e2
   | Tir.ECase (_, branches, default) ->
@@ -811,8 +905,15 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
           | _ -> true)
        | _ -> false) &&
       List.exists (fun br ->
-        List.exists (fun bv ->
-          escapes_through bv.Tir.v_name br.Tir.br_body
+        let n_fields = List.length br.Tir.br_vars in
+        let scrut_ty = match scrutinee with
+          | Tir.AVar v -> v.Tir.v_ty | _ -> Tir.TUnit in
+        list_any_idx (fun i bv ->
+          (* Per field: a binder whose field is provably a scalar cannot
+             alias a heap child, whatever the rest of the type holds.  See
+             [ctor_field_is_scalar]. *)
+          not (ctor_field_is_scalar scrut_ty br.Tir.br_tag n_fields i)
+          && escapes_through bv.Tir.v_name br.Tir.br_body
         ) br.Tir.br_vars
       ) branches
     in
@@ -889,6 +990,7 @@ let infer_module ?(k_table : Kind.table option) (m : Tir.tir_module) : borrow_ma
   (* Per-module: which variant types carry no heap field anywhere.  Consulted
      by [field_escape_owns] — see [_scalar_only]. *)
   set_scalar_only_types m.Tir.tm_types;
+  set_variant_decls m.Tir.tm_types;
   (* Initialise: borrow-eligible params start as borrowed; others are false. *)
   let init =
     List.fold_left (fun acc fn ->

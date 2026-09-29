@@ -108,6 +108,8 @@ int64_t march_int_pow(int64_t base, int64_t exp);
 /* Panic/todo primitive variants (return ptr so they satisfy polymorphic `a`). */
 void *march_panic_ext(void *s);
 void *march_todo_ext(void *s);
+void  march_panic_user(void *s);
+void *march_unreachable_ext(void);
 
 /* Call-stack frame table (used by compiled binaries for backtraces).
  * march_frame_t is stack-allocated at each March function's entry. */

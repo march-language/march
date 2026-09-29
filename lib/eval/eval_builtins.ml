@@ -3644,9 +3644,14 @@ let base_env : env =
           let args_strs = args_of_list lst in
           let args_arr  = Array.of_list (cmd :: args_strs) in
           (try
-            let (stdin_r,  stdin_w)  = Unix.pipe () in
-            let (stdout_r, stdout_w) = Unix.pipe () in
-            let (stderr_r, stderr_w) = Unix.pipe () in
+            (* close-on-exec: without it every child inherits every
+               other live child's pipe ends (its own stdin write end
+               included), so a child reading stdin never sees EOF and
+               wait_proc hangs. create_process dups the child's own three
+               onto 0/1/2, which clears the flag on those. *)
+            let (stdin_r,  stdin_w)  = Unix.pipe ~cloexec:true () in
+            let (stdout_r, stdout_w) = Unix.pipe ~cloexec:true () in
+            let (stderr_r, stderr_w) = Unix.pipe ~cloexec:true () in
             let pid = Unix.create_process cmd args_arr stdin_r stdout_w stderr_w in
             Unix.close stdin_r;
             Unix.close stdout_w;

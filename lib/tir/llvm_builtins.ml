@@ -102,12 +102,18 @@ let monitor_reason_crash_tag = 0x7f00_0003
 let builtins : builtin list = [
   { march_name = "print"; c_name = Some "march_print"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_print(ptr %s)" };
-  { march_name = "panic"; c_name = Some "march_panic"; ret_ty = Some Tir.TUnit;
-    in_is_builtin = false; declare_sig = Some "declare void @march_panic(ptr %s)" };
+  (* `panic(msg)` and the compiler's own assert / non-exhaustive panics.
+     march_panic_user records the "panic: " prefix __try_call puts on the Err
+     (as the interpreter reports it), then calls march_panic. *)
+  { march_name = "panic"; c_name = Some "march_panic_user"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = false; declare_sig = Some "declare void @march_panic_user(ptr %s)" };
   { march_name = "panic_"; c_name = Some "march_panic_ext"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_panic_ext(ptr %s)" };
-  { march_name = "unreachable_"; c_name = Some "march_panic_ext"; ret_ty = Some (Tir.TPtr Tir.TUnit);
-    in_is_builtin = true; declare_sig = Some "declare ptr  @march_panic_ext(ptr %s)" };
+  (* unreachable_ takes NO argument.  Until 2026-09-28 it shared
+     march_panic_ext(ptr %s), so `unreachable()` passed no string and
+     march_panic dereferenced garbage: SIGSEGV instead of a panic. *)
+  { march_name = "unreachable_"; c_name = Some "march_unreachable_ext"; ret_ty = Some (Tir.TPtr Tir.TUnit);
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_unreachable_ext()" };
   { march_name = "todo_"; c_name = Some "march_todo_ext"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_todo_ext(ptr %s)" };
   (* Structured cleanup: try_finally(action, cleanup) runs action(), then
@@ -581,8 +587,6 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_send(ptr %actor, ptr %msg)" };
   { march_name = "actor_cast"; c_name = Some "march_send"; ret_ty = Some (Tir.TCon ("Option", [Tir.TUnit]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_send(ptr %actor, ptr %msg)" };
-  { march_name = "send_linear"; c_name = Some "march_send_linear"; ret_ty = Some (Tir.TCon ("Option", [Tir.TUnit]));
-    in_is_builtin = false; declare_sig = Some "declare ptr  @march_send_linear(ptr %actor, ptr %msg)" };
   { march_name = "spawn"; c_name = Some "march_spawn"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_spawn(ptr %actor)" };
   { march_name = "spawn_supervised"; c_name = Some "march_spawn_supervised"; ret_ty = Some (Tir.TPtr Tir.TUnit);
@@ -1219,6 +1223,9 @@ type preamble_item =
     [mangle_extern] dispatch. These still need a preamble declare line but
     have no [builtin] row (there is no March source name to key one on). *)
 let runtime_only_declares : (string * string) list = [
+  (* Called directly by the case emitter's non-exhaustive fallthrough
+     (llvm_case.ml); the `panic` builtin row now names march_panic_user. *)
+  ("march_panic", "declare void @march_panic(ptr %s)");
   ("march_dispatch_enter", "declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)");
   ("march_dispatch_enter_gen", "declare ptr  @march_dispatch_enter_gen(i32 %name_id, i32 %caller_epoch, ptr %out_version)");
   ("march_dispatch_enter_unit", "declare ptr  @march_dispatch_enter_unit(i32 %name_id, ptr %out_version)");
@@ -1274,9 +1281,6 @@ let runtime_only_declares : (string * string) list = [
   ("llvm.stackrestore", "declare void @llvm.stackrestore(ptr %ptr)");
   ("march_repl_get", "declare i64  @march_repl_get(i64 %slot)");
   ("march_repl_set", "declare void @march_repl_set(i64 %slot, i64 %val)");
-  ("march_msg_copy", "declare ptr  @march_msg_copy(ptr %src_heap, ptr %dst_heap, ptr %value)");
-  ("march_msg_move", "declare ptr  @march_msg_move(ptr %src_heap, ptr %dst_heap, ptr %value)");
-  ("march_process_alloc", "declare ptr  @march_process_alloc(ptr %heap, i64 %sz)");
   ("march_run_scheduler", "declare void @march_run_scheduler()");
   ("march_task_spawn_thunk", "declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)");
   ("march_task_await", "declare ptr  @march_task_await(ptr %task)");
@@ -1360,7 +1364,9 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_tco_defer_drain";
   PDeclare "march_print";
   PDeclare "march_panic";
+  PDeclare "march_panic_user";
   PDeclare "march_panic_ext";
+  PDeclare "march_unreachable_ext";
   PDeclare "march_todo_ext";
   PDeclare "march_try_finally";
   PDeclare "march_try_call";
@@ -1607,10 +1613,6 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_actor_pid_indices";
   PDeclare "march_is_alive";
   PDeclare "march_send";
-  PDeclare "march_send_linear";
-  PDeclare "march_msg_copy";
-  PDeclare "march_msg_move";
-  PDeclare "march_process_alloc";
   PDeclare "march_spawn";
   PDeclare "march_spawn_supervised";
   PDeclare "march_actor_get_int";

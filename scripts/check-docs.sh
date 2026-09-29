@@ -344,10 +344,13 @@ inventory="specs/todos/2026-07-24-quarantined-tests-coverage-that-is-currently-d
 echo "== Check E: quarantine aliases vs $inventory =="
 e_problems=0
 if [ -f "$inventory" ]; then
-  defined=$(grep -hoE '\(alias +[A-Za-z0-9_]+_quarantined\)' test/dune forge/test/dune 2>/dev/null \
+  # `|| true`: no quarantined test at all is a valid state (it is the one
+  # since 2026-09-28), and grep's no-match exit would otherwise end the
+  # script under `set -euo pipefail` with no message.
+  defined=$( { grep -hoE '\(alias +[A-Za-z0-9_]+_quarantined\)' test/dune forge/test/dune 2>/dev/null || true; } \
               | sed -E 's/\(alias +//; s/\)//' | sort -u)
   # Live rows: `| `test/<alias>` | ...` with no ~~strike~~ on the alias cell.
-  listed=$(grep -E '^\| *`(test|forge/test)/[A-Za-z0-9_]+_quarantined`' "$inventory" \
+  listed=$( { grep -E '^\| *`(test|forge/test)/[A-Za-z0-9_]+_quarantined`' "$inventory" || true; } \
              | sed -E 's/^\| *`[a-z/]*\/([A-Za-z0-9_]+_quarantined)`.*/\1/' | sort -u)
   for a in $defined; do
     grep -qx "$a" <<<"$listed" \
@@ -362,7 +365,7 @@ if [ -f "$inventory" ]; then
     echo "  DEAD POINTER: $hit (specs/todos.md no longer exists; point at $inventory)"
     e_problems=$((e_problems + 1)); fail=1
   done < <(grep -n 'specs/todos\.md' test/dune forge/test/dune 2>/dev/null || true)
-  [ "$e_problems" -eq 0 ] && echo "  ok — $(echo "$defined" | grep -c . ) quarantine alias(es), inventory in sync"
+  [ "$e_problems" -eq 0 ] && echo "  ok — $(echo "$defined" | grep -c . || true) quarantine alias(es), inventory in sync"
 else
   echo "  note: $inventory not found — skipping"
 fi
