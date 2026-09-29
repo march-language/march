@@ -43,6 +43,21 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A source-tree `march` no longer builds its runtime from a partial copy of
+  `runtime/`.** If a build had copied only some runtime C files into
+  `_build/default/runtime` (the vault scaling benchmarks do), the compiler used
+  that directory anyway and left the missing files out of the runtime. The REPL
+  then couldn't load its cached stdlib and recompiled it (~25 s) on every
+  start. The compiler now uses a runtime directory only when it holds every
+  core file listed in its `sources.list`.
+
+- **`run_until_idle()` no longer returns while actors are still exchanging
+  messages.** Its idle check read processes one at a time, so a message
+  sent between two reads went unseen. About 1 run in 100 of a busy
+  two-actor ping-pong returned early (compiled, 14 scheduler threads). The
+  check now retries if any message was sent or process spawned while it ran.
+  `specs/lang/actors.md` states what `run_until_idle()` does and does not
+  wait for.
 - **`march --check` of a module with several `@[endpoints]` protocols is fast
   again.** Each protocol made every later one roughly twice as slow to typecheck:
   one module with six protocols took about 9 minutes. It now takes under a
