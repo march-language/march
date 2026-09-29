@@ -554,6 +554,12 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **`NativeArray.sort_*` is up to 7x faster on nearly-sorted input and 4-5x
+  faster on input made of two sorted runs.** An array that is sorted apart from
+  a few misplaced elements, or that rises and then falls, now takes a quick
+  special path: 1,000,000 nearly-sorted integers sort in 1.7 ms instead of
+  11.6 ms. Other inputs are unchanged. The special path may briefly allocate up
+  to half the array's size, and falls back to the normal sort if it cannot.
 - **The generated hosted event API's `cancel` takes the session: `cancel(s, parked)`.**
   The epoch hold a hosting actor takes for a session is now the transport's, taken at
   `register` and released at `close` for both hosting patterns (before, only the

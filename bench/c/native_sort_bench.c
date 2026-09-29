@@ -11,6 +11,12 @@
  *   ipn       ipnsort-style: full-run scan, pseudo-median-of-9, branchless Lomuto,
  *             equal-partition on repeated pivot, network+insertion small-sort, heapsort fallback
  *   radix     LSD radix, 8 passes of 8 bits, O(n) scratch (the other real contender for bare i64)
+ *   ipnrun    ipn behind general natural-run merging (measured, not adopted)
+ *   ipnpre    ipn behind the two-runs / nearly-sorted front end that the runtime
+ *             ships since 2026-09-28 (specs/progress/2026-09-28-native-sort-natural-run-merging.md)
+ *
+ * Modes: (none) the full table; `quick` fewer reps; `pre` ipnpre vs ipn on
+ * every pattern at six sizes, alternating; `f64` the float width.
  *
  * Every timed run is checked against qsort's output (memcmp), so a wrong sort
  * fails loudly instead of winning the benchmark.
@@ -282,6 +288,230 @@ static void sort_radix(i64 *v, size_t n) {
     free(a == (uint64_t *)v ? b : a);
 }
 
+/* ---------- natural-run merging (ipnrun) ----------
+ * The candidate for specs/todos/2026-09-25-native-sort-natural-run-merging.md.
+ * After ipn's full-run scan, split the array into its natural runs (ascending,
+ * or strictly descending and reversed in place). If the runs average at least
+ * RUN_MIN_AVG elements, merge adjacent runs bottom-up through an n-word
+ * scratch buffer, each merge trimmed first: the prefix of the left run that is
+ * <= the right run's head and the suffix of the right run that is >= the left
+ * run's tail are copied with memcpy, and only the overlap is merged
+ * (branchless). Otherwise, or if the scratch allocation fails, it is ipn.
+ * The run scan stops as soon as the run count proves the average too short. */
+static size_t RUN_MIN_AVG = 32;
+
+static size_t upper_bound_i64(const i64 *a, size_t n, i64 x) {   /* first a[i] > x */
+    size_t lo = 0, hi = n;
+    while (lo < hi) { size_t m = lo + (hi - lo) / 2; if (a[m] <= x) lo = m + 1; else hi = m; }
+    return lo;
+}
+static size_t lower_bound_i64(const i64 *a, size_t n, i64 x) {   /* first a[i] >= x */
+    size_t lo = 0, hi = n;
+    while (lo < hi) { size_t m = lo + (hi - lo) / 2; if (a[m] < x) lo = m + 1; else hi = m; }
+    return lo;
+}
+/* merge src[a..m) and src[m..b) into dst[a..b) */
+static void merge_trim(const i64 *src, i64 *dst, size_t a, size_t m, size_t b) {
+    size_t i = a + upper_bound_i64(src + a, m - a, src[m]);
+    size_t j = m + lower_bound_i64(src + m, b - m, src[m - 1]);
+    memcpy(dst + a, src + a, (i - a) * sizeof(i64));
+    size_t o = i, l = i, r = m;
+    while (l < m && r < j) {
+        bool take_r = src[r] < src[l];
+        dst[o++] = take_r ? src[r] : src[l];
+        r += take_r; l += !take_r;
+    }
+    memcpy(dst + o, src + l, (m - l) * sizeof(i64)); o += m - l;
+    memcpy(dst + o, src + r, (b - r) * sizeof(i64));
+}
+static void sort_ipnrun(i64 *v, size_t n) {
+    if (n <= IPN_SMALL) { sort_ipn(v, n); return; }
+    size_t max_runs = n / RUN_MIN_AVG;
+    if (max_runs < 2) { sort_ipn(v, n); return; }
+    size_t *starts = malloc((max_runs + 2) * sizeof(size_t));
+    if (!starts) { sort_ipn(v, n); return; }
+    size_t r = 0, i = 0;
+    bool ok = true;
+    while (i < n) {
+        if (r >= max_runs) { ok = false; break; }
+        starts[r++] = i;
+        size_t j = i + 1;
+        if (j < n && v[j] < v[i]) {
+            while (j < n && v[j] < v[j - 1]) j++;
+            for (size_t lo = i, hi = j - 1; lo < hi; lo++, hi--) swap64(&v[lo], &v[hi]);
+        } else {
+            while (j < n && !(v[j] < v[j - 1])) j++;
+        }
+        i = j;
+    }
+    if (!ok) {
+        /* the scan may have reversed some descending runs: harmless for ipn */
+        free(starts); sort_ipn(v, n); return;
+    }
+    if (r == 1) { free(starts); return; }
+    i64 *buf = malloc(n * sizeof(i64));
+    if (!buf) { free(starts); sort_ipn(v, n); return; }
+    starts[r] = n;
+    i64 *src = v, *dst = buf;
+    while (r > 1) {
+        size_t w = 0;
+        for (size_t k = 0; k < r; k += 2) {
+            size_t a = starts[k];
+            if (k + 1 < r) {
+                merge_trim(src, dst, a, starts[k + 1], starts[k + 2]);
+            } else {
+                memcpy(dst + a, src + a, (starts[k + 1] - a) * sizeof(i64));
+            }
+            starts[w++] = a;
+        }
+        starts[w] = n;
+        r = w;
+        i64 *t = src; src = dst; dst = t;
+    }
+    if (src != v) memcpy(v, src, n * sizeof(i64));
+    free(buf); free(starts);
+}
+
+/* ---------- presorted-input front end (ipnpre) ----------
+ * The shipped candidate for the natural-run todo. For n >= PRE_MIN_N, after
+ * ipn's full-run scan:
+ *   1. two runs: if the rest of the array after the first run is one more
+ *      run (ascending, or strictly descending and then reversed), merge the
+ *      two with merge_two_runs -- trimmed, scratch = the smaller trimmed run;
+ *   2. nearly sorted: otherwise, if the first 64 elements have at most 4
+ *      descents, try pre_outliers below;
+ *   3. otherwise, or on any allocation failure, ipn.
+ * ipnrun above (general natural-run merging) was measured first and lost on
+ * nearly-sorted and sawtooth input; see
+ * specs/progress/2026-09-28-native-sort-natural-run-merging.md. */
+static size_t PRE_MIN_N = 1024;
+
+/* Two runs: v[0..m) and v[m..n) are each sorted (ascending). Merge them in
+ * place with a scratch buffer the size of the smaller trimmed run: the prefix
+ * of the left run <= the right run's head and the suffix of the right run >=
+ * the left run's tail are already in place. false = allocation failed, v
+ * untouched. */
+static bool merge_two_runs(i64 *v, size_t m, size_t n) {
+    size_t i = upper_bound_i64(v, m, v[m]);
+    size_t j = m + lower_bound_i64(v + m, n - m, v[m - 1]);
+    size_t la = m - i, lb = j - m;
+    if (la == 0 || lb == 0) return true;
+    if (la <= lb) {
+        i64 *buf = malloc(la * sizeof(i64));
+        if (!buf) return false;
+        memcpy(buf, v + i, la * sizeof(i64));
+        size_t o = i, x = 0, y = m;
+        while (x < la && y < j) {
+            bool take_y = v[y] < buf[x];
+            v[o++] = take_y ? v[y] : buf[x];
+            y += take_y; x += !take_y;
+        }
+        memcpy(v + o, buf + x, (la - x) * sizeof(i64));
+        free(buf);
+    } else {
+        i64 *buf = malloc(lb * sizeof(i64));
+        if (!buf) return false;
+        memcpy(buf, v + m, lb * sizeof(i64));
+        size_t o = j, x = m, y = lb;          /* x: end of left part, y: end of buf */
+        while (x > i && y > 0) {
+            bool take_x = buf[y - 1] < v[x - 1];
+            v[--o] = take_x ? v[x - 1] : buf[y - 1];
+            x -= take_x; y -= !take_x;
+        }
+        memcpy(v + o - y, buf, y * sizeof(i64));
+        free(buf);
+    }
+    return true;
+}
+
+/* true: v is sorted. false: v is some permutation of the input, unsorted. */
+static bool pre_outliers(i64 *v, size_t n) {
+    size_t cap = n / 16;
+    if (cap < 16) return false;
+
+    i64 *out = malloc(cap * sizeof(i64));
+    if (!out) return false;
+    size_t m = 0, k = 0, i = 0;
+    for (; i < n; i++) {
+        i64 x = v[i];
+        /* Large values kept by mistake (their successor was itself out of
+         * place) would make every later element look low. When x is below
+         * the last kept element, find how many trailing kept elements (at
+         * most 8) are above x; if dropping them lets x -- and x's successor
+         * after it -- fit, evict them instead of x. */
+        size_t pop = 0;
+        if (m > 0 && x < v[m - 1] && (i + 1 >= n || !(v[i + 1] < x))) {
+            size_t j = m;
+            while (j > 0 && m - j < 8 && x < v[j - 1]) j--;
+            if (j == 0 || !(x < v[j - 1])) pop = m - j;
+        }
+        bool outlier = pop == 0
+            && ((m > 0 && x < v[m - 1])
+                || (i + 1 < n && v[i + 1] < x && (m == 0 || !(v[i + 1] < v[m - 1]))));
+        if (pop > 0 || outlier) {
+            if (k + pop + 1 > cap || (i >= 256 && (k + pop) * 16 > i)) goto abort;
+            if (pop > 0) {
+                memcpy(out + k, v + m - pop, pop * sizeof(i64));
+                k += pop; m -= pop;
+                v[m++] = x;
+            } else {
+                out[k++] = x;
+            }
+        } else {
+            v[m++] = x;
+        }
+    }
+    sort_ipn(out, k);
+    /* merge v[0..m) and out[0..k) into v[0..n) from the back */
+    {
+        size_t o = n, am = m, b = k;
+        while (b > 0) {
+            if (am > 0 && out[b - 1] < v[am - 1]) v[--o] = v[--am];
+            else v[--o] = out[--b];
+        }
+    }
+    free(out);
+    return true;
+abort:
+    /* v[0..m) kept, out[0..k) moved, v[i..n) untouched, and m + k == i:
+     * the moved elements go back into the k-slot gap v[m..i), which leaves
+     * a permutation of the input for ipn without touching the tail */
+    memcpy(v + m, out, k * sizeof(i64));
+    free(out);
+    return false;
+}
+
+static void sort_ipnpre(i64 *v, size_t n) {
+    if (n <= IPN_SMALL) { sort_ipn(v, n); return; }
+    size_t i = 1;
+    bool first_desc = v[1] < v[0];
+    if (first_desc) {
+        while (i < n && v[i] < v[i - 1]) i++;
+        if (i == n) { for (size_t a = 0, b = n - 1; a < b; a++, b--) swap64(&v[a], &v[b]); return; }
+    } else {
+        while (i < n && !(v[i] < v[i - 1])) i++;
+        if (i == n) return;
+    }
+    if (n >= PRE_MIN_N) {
+        /* two runs: the full-run scan above found where the first ends */
+        size_t j = i + 1;
+        bool second_desc = j < n && v[j] < v[i];
+        if (second_desc) while (j < n && v[j] < v[j - 1]) j++;
+        else             while (j < n && !(v[j] < v[j - 1])) j++;
+        if (j == n) {
+            if (first_desc)  for (size_t a = 0, b = i - 1; a < b; a++, b--) swap64(&v[a], &v[b]);
+            if (second_desc) for (size_t a = i, b = n - 1; a < b; a++, b--) swap64(&v[a], &v[b]);
+            if (merge_two_runs(v, i, n)) return;
+        } else {
+            /* nearly sorted: gate on at most 4 descents in the first 64 */
+            int desc = 0;
+            for (size_t k = 1; k < 64; k++) desc += v[k] < v[k - 1];
+            if (desc <= 4 && pre_outliers(v, n)) return;
+        }
+    }
+    ipn_rec(v, n, NULL, (int)(2 * log2_floor(n)));
+}
+
 /* ---------- patterns ---------- */
 typedef void (*gen_fn)(i64 *, size_t);
 static void gen_random(i64 *v, size_t n)   { for (size_t i = 0; i < n; i++) v[i] = (i64)rng(); }
@@ -305,6 +535,7 @@ static void gen_equal(i64 *v, size_t n)    { for (size_t i = 0; i < n; i++) v[i]
 typedef void (*sort_fn)(i64 *, size_t);
 static const struct { const char *name; sort_fn f; } SORTS[] = {
     {"qsort", sort_qsort}, {"intro", sort_intro}, {"ipn", sort_ipn}, {"radix", sort_radix},
+    {"ipnrun", sort_ipnrun}, {"ipnpre", sort_ipnpre},
 };
 static const struct { const char *name; gen_fn g; } PATTERNS[] = {
     {"random", gen_random}, {"sorted", gen_sorted}, {"reversed", gen_reversed},
@@ -335,9 +566,40 @@ static int verify_net8(void) {
     return bad;
 }
 
+/* ipnpre's front end sees shapes the eight patterns do not produce: two
+ * interleaved ascending halves, descending+descending, descending+ascending,
+ * one far outlier, and duplicate-heavy nearly-sorted input. */
+static int verify_pre(void) {
+    int bad = 0;
+    size_t sizes[] = {1024, 1025, 2000, 4097, 20000, 100000};
+    for (size_t si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
+        size_t n = sizes[si], h = n / 2;
+        i64 *v = malloc(n * sizeof(i64)), *ref = malloc(n * sizeof(i64));
+        for (int shape = 0; shape < 6; shape++) {
+            for (size_t i = 0; i < n; i++) {
+                switch (shape) {
+                case 0: v[i] = i < h ? (i64)(2 * i) : (i64)(2 * (i - h) + 1); break;
+                case 1: v[i] = i < h ? (i64)(h - i) : (i64)(n - i) * 3; break;
+                case 2: v[i] = i < h ? (i64)(h - i) * 2 : (i64)(i - h) * 2 + 1; break;
+                case 3: v[i] = (i64)i; break;
+                case 4: v[i] = (i64)(i / 7); break;
+                default: v[i] = i < h ? (i64)(i % 50) : (i64)i; break;
+                }
+            }
+            if (shape == 3) v[n / 3] = -5;
+            if (shape == 4) for (size_t k = 0; k < n / 64; k++) v[rng() % n] = (i64)(rng() % (n / 7 + 1));
+            memcpy(ref, v, n * sizeof(i64)); sort_qsort(ref, n);
+            sort_ipnpre(v, n);
+            if (memcmp(v, ref, n * sizeof(i64)) != 0) { printf("MISMATCH ipnpre shape=%d n=%zu\n", shape, n); bad++; }
+        }
+        free(v); free(ref);
+    }
+    return bad;
+}
+
 /* correctness sweep: every sort vs qsort, sizes 0..300 exhaustive-ish plus 100k */
 static int verify(void) {
-    int bad = verify_net8();
+    int bad = verify_net8() + verify_pre();
     size_t sizes[] = {0, 1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 255, 256, 1000, 100000};
     for (size_t si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
         size_t n = sizes[si];
@@ -670,7 +932,53 @@ static int main_f64(bool quick) {
     return 0;
 }
 
+/* `nsb pre`: ipn vs ipnpre only, alternating which runs first, on every
+ * pattern at n = 256, 1k, 10k, 100k, 1M, 5M. Small n is timed as a batch of
+ * independent arrays so one timing covers >= ~1M elements. Min of 21 (15 at
+ * 1M, 9 at 5M). Prints ipnpre/ipn. */
+static int main_pre(void) {
+    size_t sizes[] = {256, 1000, 10000, 100000, 1000000, 5000000};
+    int reps[]     = {21, 21, 21, 21, 15, 9};
+    printf("ipnpre/ipn (min of reps, alternating; < 1 = ipnpre faster)\n%-9s", "n");
+    for (size_t p = 0; p < NP; p++) printf("%10s", PATTERNS[p].name);
+    printf("\n");
+    for (size_t si = 0; si < 6; si++) {
+        size_t n = sizes[si];
+        size_t batch = n >= 1000000 ? 1 : 1000000 / n;
+        i64 *src = malloc(n * batch * sizeof(i64)), *w = malloc(n * batch * sizeof(i64)),
+            *ref = malloc(n * batch * sizeof(i64));
+        printf("%-9zu", n);
+        for (size_t p = 0; p < NP; p++) {
+            for (size_t b = 0; b < batch; b++) PATTERNS[p].g(src + b * n, n);
+            double best[2] = {1e18, 1e18};
+            for (int r = 0; r < reps[si]; r++) {
+                for (int k = 0; k < 2; k++) {
+                    int which = (r & 1) ? 1 - k : k;
+                    memcpy(w, src, n * batch * sizeof(i64));
+                    double t0 = now_ms();
+                    for (size_t b = 0; b < batch; b++) {
+                        if (which == 0) sort_ipn(w + b * n, n); else sort_ipnpre(w + b * n, n);
+                    }
+                    double t = now_ms() - t0;
+                    if (t < best[which]) best[which] = t;
+                    if (r == 0) {
+                        if (which == 0) memcpy(ref, w, n * batch * sizeof(i64));
+                        else if (memcmp(ref, w, n * batch * sizeof(i64)) != 0) { printf("MISMATCH pre n=%zu\n", n); return 1; }
+                    }
+                }
+            }
+            printf("%10.2f", best[1] / best[0]);
+        }
+        printf("\n");
+        free(src); free(w); free(ref);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (getenv("PRE_MIN_N")) PRE_MIN_N = (size_t)strtoull(getenv("PRE_MIN_N"), NULL, 10);
+    if (argc > 1 && strcmp(argv[1], "pre") == 0) return main_pre();
+    if (getenv("RUN_MIN_AVG")) RUN_MIN_AVG = (size_t)strtoull(getenv("RUN_MIN_AVG"), NULL, 10);
     if (argc > 1 && strcmp(argv[1], "f64") == 0)
         return main_f64(argc > 2 && strcmp(argv[2], "quick") == 0);
     int bad = verify();
@@ -688,7 +996,7 @@ int main(int argc, char **argv) {
         printf("n=%zu  (min of %d reps, ms)\n", n, reps[si]);
         printf("%-10s", "pattern");
         for (size_t s = 0; s < NS; s++) printf("%10s", SORTS[s].name);
-        printf("   ipn/qsort  ipn/radix\n");
+        printf("   ipn/qsort  ipn/radix  ipnrun/ipn  ipnpre/ipn\n");
         for (size_t p = 0; p < NP; p++) {
             PATTERNS[p].g(src, n);
             double best[NS];
@@ -704,7 +1012,7 @@ int main(int argc, char **argv) {
             }
             printf("%-10s", PATTERNS[p].name);
             for (size_t s = 0; s < NS; s++) printf("%10.3f", best[s]);
-            printf("   %8.2fx  %8.2fx\n", best[0] / best[2], best[3] / best[2]);
+            printf("   %8.2fx  %8.2fx  %8.2fx  %8.2fx\n", best[0] / best[2], best[3] / best[2], best[4] / best[2], best[5] / best[2]);
         }
         printf("\n");
         free(src); free(w);
