@@ -42,6 +42,13 @@ git log is authoritative for exact commits.
   function instead of continuing the loop, pushing a frame each time the input
   switched arms. Keeping every other element of a 1,000,000-element list died
   with SIGBUS in the stack guard page; all-kept and all-dropped inputs ran fine.
+- **A source-tree `march` no longer builds its runtime from a partial copy of
+  `runtime/`.** If a build had copied only some runtime C files into
+  `_build/default/runtime` (the vault scaling benchmarks do), the compiler used
+  that directory anyway and left the missing files out of the runtime. The REPL
+  then couldn't load its cached stdlib and recompiled it (~25 s) on every
+  start. The compiler now uses a runtime directory only when it holds every
+  core file listed in its `sources.list`.
 
 - **`run_until_idle()` no longer returns while actors are still exchanging
   messages.** Its idle check read processes one at a time, so a message

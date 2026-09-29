@@ -584,12 +584,17 @@ jobs:
           eval $(opam env)
           dune build bin/main.exe
 
-      # 5 -> 15 on 2026-09-28. Nothing hung or failed: main's step ran
-      # 195-251 s, and PR #663's run was killed at 309 s with no failing
-      # doctest. 15 leaves about 3x headroom over the slowest pass.
+      # This step used to take 3-5 min and hit its 5 min budget (PR #663).
+      # The cause was not the runner: @vault-scale above stages a PARTIAL
+      # _build/default/runtime, the driver built its runtime .so from it
+      # without march_nacl.c, and the REPL's cached stdlib prelude then
+      # failed to load and was recompiled in all seven sessions. With the
+      # driver fixed (bin/toolchain.ml, runtime_dir_complete) it takes under
+      # a minute, and the script fails if the prelude ever falls back to
+      # recompiling again.
       - name: Check stdlib `march>` doctests
         if: runner.os != 'macOS'
-        timeout-minutes: 15
+        timeout-minutes: 5
         run: |
           eval $(opam env)
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
