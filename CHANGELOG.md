@@ -642,6 +642,12 @@ git log is authoritative for exact commits.
   special path: 1,000,000 nearly-sorted integers sort in 1.7 ms instead of
   11.6 ms. Other inputs are unchanged. The special path may briefly allocate up
   to half the array's size, and falls back to the normal sort if it cannot.
+- **`NativeArray.sort_int`, `sort_float`, `sort_i32` and `sort_f32` sort random
+  data 17-26% faster.** The step that finishes off short runs of up to 32
+  elements now uses larger sorting networks and a merge (the layout Rust's
+  standard library uses) and is twice as fast on its own. Sorting 1,000,000
+  random integers went from 13.0 ms to 10.8 ms; already-ordered and
+  few-distinct-value inputs are unchanged.
 - **Functions that only read a data structure no longer take ownership of it
   because of a number inside it.** A function reading a `Node(Int, Tree, Tree)`
   or a `List(Int)` was treated as consuming the whole value as soon as it used one

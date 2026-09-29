@@ -8366,6 +8366,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/native_arr_sort_presorted.expected native_arr_sort_presorted_interp.out)))
+;; Every size of the sort's small-sort base case, n = 0..40, for the four
+;; comparison widths sharing NSORT_DEFINE_CORE (see the fixture's header).
+;; Compiled, depth-limit 0 and interpreted, against one golden.
+(rule
+ (targets native_arr_sort_small native_arr_sort_small.out
+          native_arr_sort_small_heap.out native_arr_sort_small_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_sort_small.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (with-stdout-to native_arr_sort_small_interp.out
+     (run %{exe:../bin/main.exe} native/native_arr_sort_small.march))
+   (run %{exe:../bin/main.exe} --compile -o native_arr_sort_small
+        native/native_arr_sort_small.march)
+   (with-stdout-to native_arr_sort_small.out
+        (system "./native_arr_sort_small"))
+   (with-stdout-to native_arr_sort_small_heap.out
+        (system "MARCH_TEST_NSORT_DEPTH_LIMIT=0 ./native_arr_sort_small")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort_small.expected native_arr_sort_small.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort_small.expected native_arr_sort_small_heap.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort_small.expected native_arr_sort_small_interp.out)))
 
 ; The same file covers NativeArray.sort_float (f64, IEEE 754 totalOrder:
 ; NaN / -0.0 / +-Inf placement). The binary runs TWICE against the same
