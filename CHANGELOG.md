@@ -35,6 +35,11 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **SIGTERM no longer cuts the sessions a node initiated.** `Topology`'s drain
+  counted only its offers' sessions, so a node that serves no role exited 0 at once
+  on SIGTERM, cutting sessions it had started with `initiate_R` (from a hook or a role
+  body) or `cluster_R`. The drain now waits for those sessions too, under the same
+  soft and hard deadlines.
 - **Logger appenders work in compiled programs.** Compiled,
   `Logger.add_appender` did nothing, `Logger.list_appenders()` was always
   empty, and every message went to the stderr fallback line. Appenders now
