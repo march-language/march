@@ -430,6 +430,12 @@ git log is authoritative for exact commits.
   silently skipped the check. It is now deferred until the whole module run and
   requires the importee's full declared set (fail-closed), so the same program
   is rejected in either declaration order.
+- **Tail-recursion-modulo-cons now covers a computed call argument and nested
+  helper functions.** `Cons(a, r(a + 1, b))` was compiled as a plain non-tail
+  recursion (stack overflow on long lists) although the same code with `a + 1`
+  bound on its own line was optimised; and a natural-style nested `fn go` was
+  reported as eligible but never rewritten. Both are now transformed, so a
+  1,000,000-element list built this way no longer overflows the stack.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
