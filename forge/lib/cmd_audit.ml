@@ -262,8 +262,14 @@ let cache_write path caps =
 
 exception Toolchain_unusable of string
 
-let collect ?(inferred = false) (proj : Project.project) : (collected, string) result =
+(** [only]: when given, compute the set of just these dependencies. The walk
+    still goes through every dependency (it is how a transitive one is
+    reached), but nothing outside [only] is parsed or run through
+    `march caps`. That is what bounds `forge add`'s gate to the dependencies
+    the add actually changed, instead of re-analyzing the whole graph. *)
+let collect ?(inferred = false) ?only (proj : Project.project) : (collected, string) result =
   let root = proj.Project.root in
+  let wanted name = match only with None -> true | Some l -> List.mem name l in
   (* Each dependency is analyzed in ITS OWN scope. Using the application's
      lib path pulls the app's sources onto MARCH_LIB_PATH, so the app's own
      type errors abort every dependency's analysis. *)
@@ -307,19 +313,22 @@ let collect ?(inferred = false) (proj : Project.project) : (collected, string) r
   in
   let tbl : (string, dep_caps) Hashtbl.t = Hashtbl.create 32 in
   let failed : (string, string) Hashtbl.t = Hashtbl.create 8 in
+  let seen : (string, unit) Hashtbl.t = Hashtbl.create 32 in
   let rec visit ~base ~name ~dep =
-    if not (Hashtbl.mem tbl name || Hashtbl.mem failed name) then begin
+    if not (Hashtbl.mem seen name) then begin
+      Hashtbl.replace seen name ();
       let dir = dep_dir ~base ~name ~dep in
       let installed = Sys.file_exists dir && Sys.is_directory dir in
-      let caps =
+      let caps () =
         if not installed then Ok []
         else if inferred then inferred_for dir
         else Ok (caps_of_dir dir)
       in
-      (match caps with
-       | Ok caps ->
-         Hashtbl.replace tbl name { dc_name = name; dc_caps = caps; dc_installed = installed }
-       | Error e -> Hashtbl.replace failed name e);
+      (if wanted name then
+         match caps () with
+         | Ok caps ->
+           Hashtbl.replace tbl name { dc_name = name; dc_caps = caps; dc_installed = installed }
+         | Error e -> Hashtbl.replace failed name e);
       match Project.load_from_dir dir with
       | Ok p -> List.iter (fun (cn, cd) -> visit ~base:dir ~name:cn ~dep:cd) p.Project.deps
       | Error _ -> ()
@@ -341,12 +350,48 @@ let collect ?(inferred = false) (proj : Project.project) : (collected, string) r
 
 let baseline_path root = Filename.concat root "forge.caps.lock"
 
-let write_baseline path (deps : dep_caps list) =
+(* Which extraction produced the baseline. The two modes compute different
+   sets for the same package (see [inferred_caps_of_dir]), so anything that
+   diffs against the file on its own initiative -- `forge add`'s gate,
+   `forge outdated`'s preview -- must use the mode it was recorded in, or
+   every dependency would look widened or narrowed. A file written before
+   this line existed has no mode and is read as declared, `forge audit`'s
+   default. The line sits above the first [[package]], where
+   [read_baseline] ignores it. *)
+let baseline_mode path : [ `Declared | `Inferred ] option =
+  if not (Sys.file_exists path) then None
+  else begin
+    let ic = open_in path in
+    let rec scan () =
+      match input_line ic with
+      | exception End_of_file -> None
+      | line ->
+        let line = String.trim line in
+        if line = "[[package]]" then None
+        else
+          match String.index_opt line '=' with
+          | Some i when String.trim (String.sub line 0 i) = "mode" ->
+            (match String.trim (String.sub line (i + 1) (String.length line - i - 1)) with
+             | "\"inferred\"" -> Some `Inferred
+             | "\"declared\"" -> Some `Declared
+             | _ -> scan ())
+          | _ -> scan ()
+    in
+    let r = scan () in
+    close_in ic;
+    r
+  end
+
+let baseline_inferred path = baseline_mode path = Some `Inferred
+
+let write_baseline ?(inferred = false) path (deps : dep_caps list) =
   let oc = open_out path in
   output_string oc
     "# Capability baseline — written by `forge audit --record`.\n\
      # Each entry is the set of `needs` declarations a dependency ships.\n\
      # `forge audit` fails when a dependency asks for more than is recorded here.\n\n";
+  output_string oc
+    (Printf.sprintf "mode = %S\n\n" (if inferred then "inferred" else "declared"));
   List.iter
     (fun d ->
       output_string oc "[[package]]\n";
@@ -560,7 +605,7 @@ let record ?(inferred = false) ?(allow_unanalyzable = false) (proj : Project.pro
           | None -> None)
         c.unanalyzable
     in
-    write_baseline path
+    write_baseline ~inferred path
       (List.sort (fun a b -> compare a.dc_name b.dc_name) (deps @ carried));
     print_unanalyzable ~allowed:true c.unanalyzable;
     Printf.printf "recorded %d dependenc%s to %s\n" (List.length deps)
@@ -613,6 +658,16 @@ let check_proj ?(inferred = false) ?(allow_unanalyzable = false) (proj : Project
     Ok (unanalyzable_verdict ())
   end
   else begin
+    (match baseline_mode path with
+     | Some m when (m = `Inferred) <> inferred ->
+       Printf.printf
+         "warning: %s was recorded %s; comparing it %s reports differences \
+          that are only the extraction mode. Run `forge audit%s`.\n\n"
+         (Filename.basename path)
+         (if m = `Inferred then "with --inferred" else "from `needs` declarations")
+         (if inferred then "with --inferred" else "without --inferred")
+         (if m = `Inferred then " --inferred" else "")
+     | _ -> ());
     (* Gate on the analyzable subset: an unanalyzable dependency's baseline
        entry is set aside rather than compared, so it is neither reported as
        removed nor as unchanged. It is listed below instead. *)
@@ -668,3 +723,157 @@ let run ?(record_mode = false) ?(inferred = false) ?(allow_unanalyzable = false)
       | Ok () -> Ok 0
       | Error m -> Error m
     else check_proj ~inferred ~allow_unanalyzable proj
+
+(* ------------------------------------------------------------------ *)
+(*  Gating a dependency change (`forge add`)                           *)
+(* ------------------------------------------------------------------ *)
+
+(** Lockfile entries that [after] adds or changes relative to [before]: a new
+    name, or the same name at a different source, version, commit or tree
+    hash. That is exactly the set of dependencies whose code a `forge add`
+    brought in or swapped, and the only ones its gate analyzes. *)
+let touched_entries ~(before : Resolver_lockfile.entry list)
+    ~(after : Resolver_lockfile.entry list) : string list =
+  let module LF = Resolver_lockfile in
+  List.filter_map
+    (fun (e : LF.entry) ->
+       match List.find_opt (fun (o : LF.entry) -> o.LF.name = e.LF.name) before with
+       | Some o
+         when o.LF.source = e.LF.source && o.LF.version = e.LF.version
+              && o.LF.commit = e.LF.commit && o.LF.hash = e.LF.hash ->
+         None
+       | _ -> Some e.LF.name)
+    after
+  |> sorted_uniq
+
+(** Merge [updates] into the baseline at [path], keeping every other entry and
+    the recorded mode. *)
+let update_baseline ~inferred path (updates : dep_caps list) =
+  let kept =
+    read_baseline path
+    |> List.filter (fun (n, _) -> not (List.exists (fun d -> d.dc_name = n) updates))
+    |> List.map (fun (n, caps) -> { dc_name = n; dc_caps = caps; dc_installed = true })
+  in
+  write_baseline ~inferred path
+    (List.sort (fun a b -> compare a.dc_name b.dc_name) (kept @ updates))
+
+(** The capability check `forge add` runs once the new dependency is resolved,
+    before it is kept: the xz/event-stream moment, when a dependency arrives
+    or changes.
+
+    [touched] is what the add changed ([touched_entries]). With no
+    forge.caps.lock the project has not adopted the audit, so this only
+    reports what the new code declares and never blocks. With one, each
+    touched dependency is analyzed in the mode the baseline was recorded in
+    and compared against its entry. Asking for a capability it did not have
+    (or, for a new dependency, asking for any), or being unanalyzable in
+    inferred mode, is refused unless [accept] -- `--accept-caps` -- in which
+    case the accepted sets are merged into forge.caps.lock, as a
+    `forge audit --record` would, but without touching any other entry.
+    [Error] means the caller must undo the add. *)
+let gate_dependency_change ~(accept : bool) ~(touched : string list)
+    (proj : Project.project) : (unit, string) result =
+  if touched = [] then Ok ()
+  else begin
+    let path = baseline_path proj.Project.root in
+    if not (Sys.file_exists path) then begin
+      (* Declared mode: a parse, no `march caps` run, so an add in a project
+         that never recorded a baseline costs nothing extra. *)
+      match collect ~only:touched proj with
+      | Error _ -> Ok ()
+      | Ok c ->
+        List.iter
+          (fun d ->
+             if d.dc_installed then
+               Printf.printf "capabilities: %s — %s\n" d.dc_name
+                 (if d.dc_caps = [] then "none declared" else String.concat ", " d.dc_caps))
+          c.deps;
+        print_endline
+          "(no forge.caps.lock: record one with `forge audit --record` to have \
+           `forge add` refuse a dependency that asks for new capabilities)";
+        Ok ()
+    end
+    else begin
+      let inferred = baseline_inferred path in
+      match collect ~inferred ~only:touched proj with
+      | Error e -> Error e
+      | Ok c ->
+        let baseline =
+          List.filter (fun (n, _) -> List.mem n touched) (read_baseline path)
+        in
+        let changes =
+          diff ~baseline ~current:c.deps
+          |> List.filter (function Removed _ -> false | _ -> true)
+        in
+        let escalations = List.filter is_escalation changes in
+        if escalations = [] && c.unanalyzable = [] then begin
+          Printf.printf "capabilities: no new authority requested (%s)\n"
+            (String.concat ", " touched);
+          Ok ()
+        end
+        else begin
+          print_endline "capability changes against forge.caps.lock:";
+          List.iter (fun ch -> print_endline (string_of_change ch)) changes;
+          print_unanalyzable ~allowed:accept c.unanalyzable;
+          if accept then begin
+            update_baseline ~inferred path c.deps;
+            Printf.printf "accepted with --accept-caps; %s updated for %s\n"
+              (Filename.basename path)
+              (String.concat ", " (List.map (fun d -> d.dc_name) c.deps));
+            Ok ()
+          end
+          else
+            Error
+              (Printf.sprintf
+                 "%s asks for capabilities forge.caps.lock does not grant it; \
+                  forge.toml and forge.lock were left as they were.\n\
+                  Review the change above, then re-run with --accept-caps to \
+                  add it and record the new set."
+                 (String.concat ", "
+                    (List.map
+                       (function
+                         | Added (n, _) | Widened (n, _) -> n
+                         | Narrowed (n, _) | Removed n -> n)
+                       escalations
+                     @ List.map fst c.unanalyzable)))
+        end
+    end
+  end
+
+(* ------------------------------------------------------------------ *)
+(*  Previewing an upgrade (`forge outdated`)                           *)
+(* ------------------------------------------------------------------ *)
+
+(** The capability set of a package tree that is not installed as a
+    dependency (a newer release extracted to a scratch directory), in the
+    given mode. Inferred mode analyzes it under its own forge.toml's lib
+    path; if its dependencies are not installed that is an [Error], never an
+    empty set. *)
+let caps_of_tree ~inferred dir : (string list, string) result =
+  if not inferred then Ok (caps_of_dir dir)
+  else
+    let env_prefix =
+      match Project.load_from_dir dir with
+      | Ok dp -> Cmd_build.lib_path_env dp
+      | Error _ -> ""
+    in
+    inferred_caps_of_dir ~env_prefix dir
+
+(** One line describing what upgrading from [before] to [after] would ask
+    for, or [None] when it asks for nothing new. *)
+let upgrade_caps_note ~(before : string list) ~(after : string list) : string option =
+  match List.filter (fun c -> not (List.mem c before)) after with
+  | [] -> None
+  | gained -> Some ("asks for NEW capabilities: " ^ String.concat ", " gained)
+
+(** The capability set [name] has now: its forge.caps.lock entry when one is
+    recorded (the reviewed set, which is what an upgrade must be compared
+    against), else what the installed copy computes to in [inferred] mode. *)
+let current_caps ~inferred (proj : Project.project) name : string list option =
+  let path = baseline_path proj.Project.root in
+  match List.assoc_opt name (read_baseline path) with
+  | Some caps -> Some caps
+  | None ->
+    (match collect ~inferred ~only:[ name ] proj with
+     | Ok { deps = [ d ]; _ } when d.dc_installed -> Some d.dc_caps
+     | _ -> None)
