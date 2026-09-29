@@ -35,6 +35,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **`run_until_idle()` no longer returns while actors are still exchanging
+  messages.** Its idle check read processes one at a time, so a message
+  sent between two reads went unseen. About 1 run in 100 of a busy
+  two-actor ping-pong returned early (compiled, 14 scheduler threads). The
+  check now retries if any message was sent or process spawned while it ran.
+  `specs/lang/actors.md` states what `run_until_idle()` does and does not
+  wait for.
 - **Actors that message each other back and forth are up to 2.6x faster.** With
   several scheduler threads, sending to an actor that was just going to sleep could
   make the sender wait a millisecond or more before delivering. A two-actor

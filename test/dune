@@ -7420,6 +7420,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/nested_actor_spawn.expected interp_nested_actor_spawn.out)))
 
+; ── run_until_idle() must not return mid ping-pong ──
+; Two actors bounce one message 200000 times; main calls run_until_idle()
+; and reads both counts.  Before 2026-09-28 wait_idle's proc-by-proc scan
+; could read every proc idle while a message was in flight, and returned
+; early (~1% of runs at 14 schedulers under load; see
+; specs/progress/2026-09-28-run-until-idle-returned-mid-ping-pong.md).  One
+; run here is a weak guard for a ~1% race, so it runs at 14 schedulers, where
+; the race showed.
+(rule
+ (targets native_run_until_idle_ping_pong native_run_until_idle_ping_pong.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/run_until_idle_ping_pong.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_run_until_idle_ping_pong
+        native/run_until_idle_ping_pong.march)
+   (with-stdout-to native_run_until_idle_ping_pong.out
+        (system "MARCH_NUM_SCHEDULERS=14 ./native_run_until_idle_ping_pong")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/run_until_idle_ping_pong.expected native_run_until_idle_ping_pong.out)))
+
 ; ── Credit-based flow control: budget refuses, CREDIT re-admits ──
 (rule
  (targets native_credit_backpressure_loopback native_credit_backpressure_loopback.out)

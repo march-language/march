@@ -837,6 +837,21 @@ fn main() do
 end
 ```
 
+**What it guarantees (compiled).** `run_until_idle()` returns only when every
+other process is quiescent at once:
+- none is runnable or running;
+- none holds a deliverable message;
+- none is parked on a timer wake that is still live;
+- no message was sent and no process was spawned while that was being checked.
+
+So a message chain between actors (a ping-pong, a pipeline) runs to its end
+before `run_until_idle()` returns. It does **not** wait for:
+- a message scheduled with `send_after` that has not yet been delivered;
+- work in other OS processes or on other nodes.
+
+(Until 2026-09-28 the check was not a consistent snapshot, and a busy
+ping-pong could return early about once in a hundred runs at 14 schedulers.)
+
 In long-running applications, the scheduler runs automatically; you do not call `run_until_idle()`. `run_until_idle()` drains the scheduler to a fixed point (every mailbox empty); its operational rule is in [`core-march.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march.md) §4.10.4, and the determinism property it enables (interleaving-free output, an exact byte match interpreted vs compiled) is §4.10.5.
 
 ---
