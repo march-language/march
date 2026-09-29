@@ -1063,6 +1063,38 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
        — the consumer's free leaves the record with a dangling field
        (observed: sitemap_items freeing entry dates that feed_items then
        read; flat_map freeing tags lists that a later filter re-read). *)
+    (* The owner must OUTLIVE a borrowed field.  Conditions 3 and 4 above
+       classify [let v = src.f] as borrowed because [src] is still in scope or
+       used again in [e2] -- but that later use may CONSUME [src] (hand it to
+       a call, or be its last use, after which it is released) while [v] is
+       still to be read.  [let x = r.a; let n = take(r); x ++ ...] then read a
+       string [take]'s drop of [r] had freed: a compiled-only use-after-free
+       (the interpreter has no RC), found as a scripted session peer printing
+       another string's bytes for a received order's field.
+       specs/progress/2026-09-28-borrowed-field-outlives-owner.md.
+
+       So when [src] is owned here (not live after this scope, not itself a
+       borrowed field) and [e2] uses it other than as a projection source,
+       [v] is not borrowed: it takes its own reference ([inc_rc] right after
+       the projection) and is released as an ordinary owned binding.  A [src]
+       that is only ever projected keeps the borrowed classification: nothing
+       in [e2] releases it before the binding's scope ends. *)
+    let dup_owned_field =
+      is_borrowed_field
+      && (match e1 with
+          | Tir.EField (Tir.AVar src, _) ->
+            (match src.Tir.v_ty with Tir.TPtr _ -> false | _ -> true)
+            && src.Tir.v_lin = Tir.Unr
+            && v.Tir.v_lin = Tir.Unr
+            && needs_rc env src.Tir.v_ty
+            && not (StringSet.mem src.Tir.v_name live_after)
+            && not (StringSet.mem src.Tir.v_name env.borrowed_field_vars)
+            && not (StringSet.mem src.Tir.v_name env.closure_fvs)
+            && not (String.equal src.Tir.v_name v.Tir.v_name)
+            && not (used_only_as_field_source src.Tir.v_name e2)
+          | _ -> false)
+    in
+    let is_borrowed_field = is_borrowed_field && not dup_owned_field in
     let env_for_e2 =
       { env with
         var_ctx = StringMap.add v.Tir.v_name v env.var_ctx;
@@ -1139,6 +1171,9 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
       else
         e2'
     in
+    (* [dup_owned_field]: the projection's own reference, taken before [e2]
+       can release the owner. *)
+    let e2'' = if dup_owned_field then Tir.ESeq (Tir.EIncRC (Tir.AVar v), e2'') else e2'' in
     let live_for_e1 = StringSet.remove v.Tir.v_name live_into_e2 in
     let (e1', live_before_e1) =
       match e1 with
