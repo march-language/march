@@ -182,6 +182,7 @@ let all_stdlib_decls =
     "cluster_node.march";
     "session_node.march";
     "topology.march";
+    "control.march";
     "node.march";
     "cluster_load.march";
     "work_dispatch.march";
@@ -591,6 +592,10 @@ let () =
         `Quick (run_stdlib_test "test_node_cert.march" "TestNodeCert");
       Alcotest.test_case "SessionAP + raw-send policy (dd step 11b)"
         `Quick (run_stdlib_test "test_session_ap.march" "TestSessionAp");
+    ]);
+    ("control", [
+      Alcotest.test_case "Control: release, executor, leader change (dd step 12a)"
+        `Quick (run_stdlib_test "test_control.march" "TestControl");
     ]);
     ("handshake", [
       Alcotest.test_case "Handshake module"

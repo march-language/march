@@ -368,6 +368,16 @@ git log is authoritative for exact commits.
 - **Compiled `dns_resolve` no longer leaks its host argument** (one String per
   call). **Compiled `uuid_v7_at` with a negative timestamp now errors** as the
   interpreter does, instead of returning a UUID with a garbage timestamp.
+- **Compiled code no longer reads freed memory through a record field after
+  handing the record to a function.** Reading a field into a local
+  (`let x = r.a`), then passing `r` to a function that takes ownership of it,
+  then using `x`, read a string the callee had already released: garbage
+  output, or another value's bytes. The interpreter was unaffected.
+- **A nested module's call to a sibling module now links when compiled.** Inside
+  `mod Outer do mod A ... end mod B do ... A.f(x) ... end end`, the call `A.f`
+  ran interpreted but a compiled program failed to link (`A.f` undefined),
+  whenever `Outer` was itself nested in the entry module, or was a library
+  (`MARCH_LIB_PATH`) or stdlib module.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**

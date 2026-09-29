@@ -1,0 +1,584 @@
+mod TestControl do
+
+  -- Distributed-deploys step 12a, the pure core of the control plane
+  -- (stdlib/control.march): the release document, the executor's pass, the
+  -- leader's memory and the Agent's apply, driven here against a simulated
+  -- cluster. The protocol side (Ctl, CtlFetch, scripted and chaos peers) is
+  -- test/session/control_peers.march, which needs sessions.
+
+  -- ── fixtures ─────────────────────────────────────────────────────────────
+
+  fn release_text() do
+    "release v1\n"
+    ++ "seq      42\n"
+    ++ "parent   none\n"
+    ++ "env      prod\n"
+    ++ "topology t42\n"
+    ++ "build    web     base:bw manifest:mw2\n"
+    ++ "build    render  base:br manifest:mr2\n"
+    ++ "step 1   pools:render  hosts:canary(1)  do:activate(render)  gate:healthy(60s)\n"
+    ++ "step 2   pools:render  hosts:rest       do:activate(render)  gate:healthy(30s)  batch:1\n"
+    ++ "step 3   pools:*       hosts:all        do:topology\n"
+    ++ "line 1   SEQ 42 id1 s1 ACTIVATE render mr2\n"
+    ++ "line 2   SEQ 42 id1 s1 ACTIVATE render mr2\n"
+    ++ "line 3   SEQ 42 id1 s2 TOPOLOGY t42\n"
+    ++ "drain    epoch<=41  soft:30000 hard:120000\n"
+    ++ "sig      -\n"
+  end
+
+  fn rel() do
+    match Control.parse(release_text()) do
+      Ok(r) -> r
+      Err(e) -> panic("fixture does not parse: " ++ e)
+    end
+  end
+
+  fn step_n(k : Int) : Control.CtlStep do
+    let r = rel()
+    match List.drop(r.steps, k - 1) do
+      Cons(s, _) -> s
+      Nil -> panic("no step " ++ int_to_string(k))
+    end
+  end
+
+  fn seed(b) do Bytes.from_list(List.map(List.range(0, 32), fn _ -> b)) end
+  fn op_sk() do NodeCert.keypair_from_seed(seed(7)) end
+
+  -- A simulated node: what it runs, whether it is healthy, whether its reload
+  -- server refuses what it is sent, and every step it applied (to catch a
+  -- step applied twice).
+  type SimNode = {
+    name : String, pools : List(String), versions : List(Control.CtlVersion), topology : String,
+    drained : Int, healthy : Bool, seq : Int, refuse : Bool, applied : List(Int)
+  }
+
+  fn node(name, pools, versions) : SimNode do
+    { name: name, pools: pools, versions: versions, topology: "t41", drained: 0, healthy: true,
+      seq: 41, refuse: false, applied: Nil }
+  end
+
+  fn old_versions(pools) do
+    List.map(pools, fn p -> { build: p, manifest: if p == "web" do "mw1" else "mr1" end })
+  end
+
+  fn cluster() : List(SimNode) do
+    [ node("r3", ["render"], old_versions(["render"])),
+      node("r1", ["render"], old_versions(["render"])),
+      node("r2", ["render"], old_versions(["render"])),
+      node("w1", ["web"], old_versions(["web"])) ]
+  end
+
+  fn members(ns : List(SimNode)) : List(Control.CtlMember) do
+    List.map(ns, fn n -> { node: n.name, pools: n.pools })
+  end
+
+  fn report(n : SimNode) : Control.AgentReport do
+    { node: n.name, seq: n.seq, versions: Control.versions_text(n.versions), topology: n.topology, drained: n.drained,
+      healthy: n.healthy, failed_seq: 0, failed_step: 0, failed_why: "" }
+  end
+
+  -- The node side of an order: what the reload server would do with the
+  -- order's signed lines.
+  fn apply_on(n : SimNode, o : Control.StepOrder) : SimNode do
+    let n2 = { n with applied: List.append(n.applied, [o.step]), seq: o.seq }
+    if o.action == "topology" do { n2 with topology: o.want }
+    else if o.action == "drain" do { n2 with drained: 41 }
+    else
+      let b = String.slice(o.action, 9, String.byte_size(o.action) - 10)
+      { n2 with versions: Cons({ build: b, manifest: o.want }, List.filter(n.versions, fn v -> v.build != b)) }
+    end end
+  end
+
+  fn find_node(ns : List(SimNode), name : String) : SimNode do
+    match List.find(ns, fn n -> n.name == name) do
+      Some(n) -> n
+      None -> panic("no node " ++ name)
+    end
+  end
+
+  fn update(ns : List(SimNode), n : SimNode) : List(SimNode) do
+    List.map(ns, fn m -> if m.name == n.name do n else m end)
+  end
+
+  fn report_all(l : Control.CtlLeader, ns : List(SimNode), now : Int) : Control.CtlLeader do
+    List.fold_left(ns, l, fn (acc, n) -> Control.leader_report(acc, report(n), now))
+  end
+
+  -- Carry out [os]: each node applies its order (or refuses it) and the
+  -- leader hears the result.
+  fn carry_out(l : Control.CtlLeader, ns : List(SimNode), os : List(Control.StepOrder), now : Int) : (Control.CtlLeader, List(SimNode)) do
+    List.fold_left(os, (l, ns), fn (acc, o) ->
+      let (l1, ns1) = acc
+      let n = find_node(ns1, o.node)
+      if n.refuse do
+        (Control.leader_result(l1, { seq: o.seq, step: o.step, node: o.node, ok: false, detail: "ERR bad_signature" }, now), ns1)
+      else
+        (Control.leader_result(l1, { seq: o.seq, step: o.step, node: o.node, ok: true, detail: "applied" }, now), update(ns1, apply_on(n, o)))
+      end)
+  end
+
+  -- One leader round at [now]: every node reports, the leader passes, and the
+  -- orders are carried out.
+  fn round(l : Control.CtlLeader, ns : List(SimNode), now : Int) : (Control.CtlLeader, List(SimNode), Option(Control.CtlDecision)) do
+    let l1 = report_all(l, ns, now)
+    let (l2, d) = Control.leader_pass(l1, members(ns), now)
+    match d do
+      Some(Control.RolloutApply(_, os)) ->
+        let (l3, ns2) = carry_out(l2, ns, os, now)
+        (l3, ns2, d)
+      _ -> (l2, ns, d)
+    end
+  end
+
+  -- Rounds 10 s apart until the release completes or halts, or [n] rounds.
+  fn drive(l : Control.CtlLeader, ns : List(SimNode), now : Int, n : Int) : (Control.CtlLeader, List(SimNode), Int, Option(Control.CtlDecision)) do
+    let (l2, ns2, d) = round(l, ns, now)
+    match d do
+      Some(Control.RolloutComplete) -> (l2, ns2, now, d)
+      Some(Control.RolloutHalted(_, _, _)) -> (l2, ns2, now, d)
+      _ -> if n <= 1 do (l2, ns2, now, d) else drive(l2, ns2, now + 10000, n - 1) end
+    end
+  end
+
+  fn fresh_leader() : Control.CtlLeader do
+    match Control.leader_release(Control.leader_new(), rel()) do
+      Ok(l) -> l
+      Err(e) -> panic(e)
+    end
+  end
+
+  fn applied(ns : List(SimNode), name : String) : List(Int) do
+    let n = find_node(ns, name)
+    n.applied
+  end
+
+  fn is_complete(d : Option(Control.CtlDecision)) : Bool do d == Some(Control.RolloutComplete) end
+
+  -- "step:why" of a Wait, else "".
+  fn wait_of(d : Option(Control.CtlDecision)) : String do
+    match d do
+      Some(Control.RolloutWait(s, why)) -> int_to_string(s) ++ ":" ++ why
+      _ -> ""
+    end
+  end
+
+  -- The step and nodes of an Apply, else (0, []).
+  fn apply_of(d : Option(Control.CtlDecision)) : (Int, List(String)) do
+    match d do
+      Some(Control.RolloutApply(s, os)) -> (s, List.map(os, fn o -> o.node))
+      _ -> (0, Nil)
+    end
+  end
+
+  -- Drive leader A until step 2 has taken r2 and has an order out to r3.
+  -- A is lost there; B starts from the release and the agents' reports.
+  fn until_step2(l : Control.CtlLeader, ns : List(SimNode), now : Int, n : Int) : (Control.CtlLeader, List(SimNode), Int) do
+    if n == 0 do panic("step 2 never started")
+    else
+      let (l2, ns2, d) = round(l, ns, now)
+      match d do
+        Some(Control.RolloutApply(2, _)) -> (l2, ns2, now)
+        _ -> until_step2(l2, ns2, now + 10000, n - 1)
+      end
+    end
+  end
+
+  fn ops_for(rep : Control.AgentReport, answer : String) : Control.AgentOps do
+    { report: fn -> rep, has: fn h -> h != "missing", request: fn _ -> answer }
+  end
+
+  -- ── the release document ─────────────────────────────────────────────────
+
+  describe "release parse and serialise" do
+    test "the design's example parses, whatever the spacing" do
+      let r = rel()
+      assert (r.seq == 42)
+      assert (r.parent == "none")
+      assert (r.env == "prod")
+      assert (r.topology == "t42")
+      assert (List.length(r.builds) == 2)
+      assert (List.length(r.steps) == 3)
+      assert (List.length(r.lines) == 3)
+      assert (r.signature == "")
+      match r.drain do
+        Some(d) -> assert (d.epoch == 41 && d.soft_ms == 30000 && d.hard_ms == 120000)
+        None -> assert false
+      end
+    end
+
+    test "steps: hosts, action, gate and batch" do
+      let r = rel()
+      match r.steps do
+        Cons(s1, Cons(s2, Cons(s3, Nil))) ->
+          assert (s1.hosts == Control.HostsCanary(1))
+          assert (s1.action == Control.DoActivate("render"))
+          assert (s1.gate == Control.GateHealthy(60000))
+          assert (s1.batch == 0)
+          assert (s2.hosts == Control.HostsRest)
+          assert (s2.gate == Control.GateHealthy(30000))
+          assert (s2.batch == 1)
+          assert (s3.pools == ["*"])
+          assert (s3.hosts == Control.HostsAll)
+          assert (s3.action == Control.DoTopology)
+          assert (s3.gate == Control.GateNone)
+        _ -> assert false
+      end
+    end
+
+    test "serialize is canonical and parses back to the same release" do
+      let r = rel()
+      let txt = Control.serialize(r)
+      assert (String.starts_with(txt, "release v1\nseq 42\nparent none\n"))
+      assert (String.contains(txt, "step 2 pools:render hosts:rest do:activate(render) gate:healthy(30s) batch:1\n"))
+      assert (String.ends_with(txt, "sig -\n"))
+      assert (Control.parse(txt) == Ok(r))
+      assert (Control.serialize(unwrap(Result.to_option(Control.parse(txt)))) == txt)
+    end
+
+    test "durations" do
+      assert (Control.parse_duration("250ms") == Ok(250))
+      assert (Control.parse_duration("60s") == Ok(60000))
+      assert (Control.parse_duration("2m") == Ok(120000))
+      assert (Control.parse_duration("1500") == Ok(1500))
+      assert (Result.is_err(Control.parse_duration("soon")))
+      assert (Control.show_duration(60000) == "60s")
+      assert (Control.show_duration(1500) == "1500ms")
+    end
+
+    test "malformed documents are refused with the line" do
+      assert (Control.parse("") == Err("empty release"))
+      assert (Control.parse("release v2\n") == Err("expected `release v1` first, got `release v2`"))
+      let bad_key = String.replace(release_text(), "env      prod", "envy prod")
+      assert (Control.parse(bad_key) == Err("line 4: unknown entry `envy`"))
+      let bad_hosts = String.replace(release_text(), "hosts:rest", "hosts:most")
+      assert (Control.parse(bad_hosts) == Err("line 9: hosts: expected canary(n), rest or all, got most"))
+      let after_sig = release_text() ++ "seq 43\n"
+      assert (Control.parse(after_sig) == Err("line 16: nothing may follow `sig`"))
+      let no_do = String.replace(release_text(), "do:topology", "")
+      assert (Control.parse(no_do) == Err("line 10: step 3: missing do:"))
+    end
+
+    test "check: numbering, builds, drain, lines, canary, gate" do
+      let r = rel()
+      let bump = fn (s : Control.CtlStep) -> { s with id: s.id + 1 }
+      assert (Control.check({ r with steps: List.map(r.steps, bump) }) == Err("step 2: steps must be numbered 1, 2, ... in order (expected 1)"))
+      assert (Control.check({ r with builds: Nil }) == Err("step 1: activates build `render`, which the release does not ship"))
+      assert (Control.check({ r with builds: List.append(r.builds, r.builds) }) == Err("build `web` is given twice"))
+      assert (Control.check({ r with lines: [{ step: 9, text: "X" }] }) == Err("line for step 9, which does not exist"))
+      assert (Control.check({ r with seq: 0 }) == Err("seq must be positive"))
+      let drains = String.replace(release_text(), "do:topology", "do:drain")
+      assert (Result.is_ok(Control.parse(drains)))
+      let no_drain = String.replace(drains, "drain    epoch<=41  soft:30000 hard:120000\n", "")
+      assert (Control.parse(no_drain) == Err("step 3: drains, but the release has no `drain` line"))
+      let canary0 = String.replace(release_text(), "canary(1)", "canary(0)")
+      assert (Control.parse(canary0) == Err("step 1: canary(n) needs n >= 1"))
+      let gate0 = String.replace(release_text(), "healthy(60s)", "healthy(0s)")
+      assert (Control.parse(gate0) == Err("step 1: healthy(window) needs a positive window"))
+    end
+  end
+
+  describe "release identity, signature, compare-and-set" do
+    test "sign and verify over the canonical text" do
+      let sk = op_sk()
+      let r = Control.sign(rel(), sk)
+      assert (Control.verify(r, NodeCert.public_key(sk)))
+      assert (not(Control.verify(rel(), NodeCert.public_key(sk))))
+      assert (not(Control.verify({ r with seq: 43 }, NodeCert.public_key(sk))))
+      assert (not(Control.verify(r, NodeCert.public_key(NodeCert.keypair_from_seed(seed(8))))))
+      -- a signed document re-laid-out still verifies: the signature is over the canonical form
+      let spaced = String.replace_all(Control.serialize(r), " ", "   ")
+      match Control.parse(spaced) do
+        Ok(r2) -> assert (Control.verify(r2, NodeCert.public_key(sk)))
+        Err(e) -> panic(e)
+      end
+    end
+
+    test "the digest is the sha256 of the signed text, and ignores the signature" do
+      let r = rel()
+      assert (String.byte_size(Control.digest(r)) == 64)
+      assert (Control.digest(r) == Control.digest(Control.sign(r, op_sk())))
+      assert (Control.digest(r) != Control.digest({ r with env: "staging" }))
+    end
+
+    test "accept: first, retry, next, stale, fork, parent mismatch" do
+      let r = rel()
+      let next = { r with seq: 43, parent: Control.digest(r) }
+      assert (Control.accept(None, r) == Ok(()))
+      assert (Control.accept(Some(r), r) == Ok(()))
+      assert (Control.accept(Some(r), next) == Ok(()))
+      assert (Control.accept(Some(next), r) == Err("stale: release 42 is older than the head 43"))
+      assert (Control.accept(Some(r), { r with env: "staging" }) == Err("fork: release 42 is already held with other content"))
+      assert (Control.accept(Some(r), { next with parent: "abc" }) == Err("parent mismatch: release 43 does not follow the head 42"))
+    end
+
+    test "a leader refuses an unordered release and clears a halt on a new one" do
+      let l = fresh_leader()
+      let r = rel()
+      assert (Result.is_err(Control.leader_release(l, { r with seq: 44, parent: "x" })))
+      let halted = { l with halted: Some(Control.RolloutHalted(1, "r1", "x")) }
+      match Control.leader_release(halted, { r with seq: 43, parent: Control.digest(r) }) do
+        Ok(l2) -> assert (l2.halted == None)
+        Err(e) -> panic(e)
+      end
+    end
+  end
+
+  -- ── host selection and gates ─────────────────────────────────────────────
+
+  describe "host selection" do
+    test "targets are the pool's members in node order; * is every member" do
+      let r = rel()
+      let ms = members(cluster())
+      match r.steps do
+        Cons(s1, Cons(_, Cons(s3, Nil))) ->
+          assert (Control.targets(s1, ms) == ["r1", "r2", "r3"])
+          assert (Control.targets(s3, ms) == ["r1", "r2", "r3", "w1"])
+        _ -> assert false
+      end
+    end
+
+    test "canary(n) takes the first n, rest the others, all everyone" do
+      let r = rel()
+      let ms = members(cluster())
+      match r.steps do
+        Cons(s1, Cons(s2, Cons(s3, Nil))) ->
+          let c = Control.select(s1, ms, Nil)
+          assert (c == ["r1"])
+          assert (Control.select(s2, ms, [(s1, c)]) == ["r2", "r3"])
+          assert (Control.select(s3, ms, [(s1, c), (s2, ["r2", "r3"])]) == ["r1", "r2", "r3", "w1"])
+          assert (Control.select({ s1 with hosts: Control.HostsCanary(9) }, ms, Nil) == ["r1", "r2", "r3"])
+          -- `rest` after a step with a different action takes every target
+          assert (Control.select({ s2 with action: Control.DoTopology }, ms, [(s1, c)]) == ["r1", "r2", "r3"])
+        _ -> assert false
+      end
+    end
+
+    test "a canary that left the membership is replaced by the next node" do
+      let r = rel()
+      let ms = List.filter(members(cluster()), fn m -> m.node != "r1")
+      assert (Control.select(head(r.steps), ms, Nil) == ["r2"])
+    end
+  end
+
+  describe "gates" do
+    test "healthy(60s) waits for 60s of the leader's clock, then the next step starts" do
+      let l = fresh_leader()
+      let (l1, ns1, d1) = round(l, cluster(), 0)
+      assert (d1 == Some(Control.RolloutApply(1, [Control.order(rel(), step_n(1), "r1")])))
+      let (l2, _, d2) = round(l1, ns1, 1000)
+      match d2 do
+        Some(Control.RolloutWait(1, why)) -> assert (why == "gate healthy(60s): r1 healthy for 0ms of 60000ms")
+        _ -> panic("expected a wait, got " ++ Control.show_decision(unwrap_or(d2, Control.RolloutComplete)))
+      end
+      let (_, _, d3) = round(l2, ns1, 1000 + 59999)
+      assert (String.starts_with(wait_of(d3), "1:"))
+      let (_, _, d4) = round(l2, ns1, 1000 + 60000)
+      assert (apply_of(d4) == (2, ["r2"]))
+    end
+
+    test "a state change restarts a node's window; unhealthy clears it" do
+      let rep = report(find_node(cluster(), "r1"))
+      let o1 = Control.observe(Nil, rep, 100)
+      let o2 = Control.observe(o1, rep, 900)
+      let h2 = head(o2)
+      assert (h2.healthy_since == Some(100))
+      let o3 = Control.observe(o2, { rep with topology: "t42" }, 1000)
+      let h3 = head(o3)
+      assert (h3.healthy_since == Some(1000))
+      let o4 = Control.observe(o3, { rep with healthy: false }, 1100)
+      let h4 = head(o4)
+      assert (h4.healthy_since == None)
+      assert (List.length(o4) == 1)
+    end
+  end
+
+  -- ── the executor over a simulated cluster ────────────────────────────────
+
+  describe "rollout" do
+    test "a full rollout: canary, rest one at a time, then topology everywhere" do
+      let (_, ns, _, d) = drive(fresh_leader(), cluster(), 0, 50)
+      assert (is_complete(d))
+      assert (applied(ns, "r1") == [1, 3])
+      assert (applied(ns, "r2") == [2, 3])
+      assert (applied(ns, "r3") == [2, 3])
+      assert (applied(ns, "w1") == [3])
+      assert (List.all(ns, fn n -> n.topology == "t42"))
+      assert (List.all(List.filter(ns, fn n -> n.name != "w1"), fn n -> List.member(n.versions, { build: "render", manifest: "mr2" })))
+    end
+
+    test "batch:1 keeps one order in flight; an order is not re-sent while in flight" do
+      let r = rel()
+      let s2 = head(tail(r.steps))
+      let obs = List.fold_left(cluster(), Nil, fn (acc, n) -> Control.observe(acc, report(n), 0))
+      let prior = [(head(r.steps), ["r1"])]
+      let _ = prior
+      -- r1 done, gate passed: step 2 orders r2 only, and nothing while r2 is in flight
+      let done_r1 = Control.observe(obs, report(apply_on(find_node(cluster(), "r1"), Control.order(r, head(r.steps), "r1"))), 0)
+      match Control.pass(r, members(cluster()), done_r1, Nil, 60000) do
+        Control.RolloutApply(2, os) -> assert (List.map(os, fn o -> o.node) == ["r2"])
+        d -> panic("expected step 2, got " ++ Control.show_decision(d))
+      end
+      assert (Control.pass(r, members(cluster()), done_r1, ["r2"], 60000) == Control.RolloutApply(2, Nil))
+      assert (s2.batch == 1)
+    end
+
+    test "a node that already reports a step's end state is never ordered" do
+      let r = rel()
+      let ns = List.map(cluster(), fn n -> if n.name == "r1" do apply_on(n, Control.order(r, head(r.steps), "r1")) else n end)
+      let (_, ns2, _, d) = drive(fresh_leader(), List.map(ns, fn n -> { n with applied: Nil }), 0, 50)
+      assert (is_complete(d))
+      assert (applied(ns2, "r1") == [3])
+    end
+
+    test "a node holding a newer release puts the leader behind" do
+      let r = rel()
+      let ns = List.map(cluster(), fn n -> if n.name == "w1" do { n with seq: 50 } else n end)
+      let obs = List.fold_left(ns, Nil, fn (acc, n) -> Control.observe(acc, report(n), 0))
+      assert (Control.pass(r, members(ns), obs, Nil, 0) == Control.RolloutBehind(50))
+    end
+  end
+
+  describe "leader change" do
+    test "a new leader resumes mid-rollout from observation alone; no step twice, none skipped" do
+      let (_, ns, now) = until_step2(fresh_leader(), cluster(), 0, 50)
+      assert (applied(ns, "r2") == [2])
+      assert (applied(ns, "r3") == Nil)
+      let (_, ns2, _, d) = drive(fresh_leader(), ns, now + 5000, 50)
+      assert (is_complete(d))
+      assert (applied(ns2, "r1") == [1, 3])
+      assert (applied(ns2, "r2") == [2, 3])
+      assert (applied(ns2, "r3") == [2, 3])
+      assert (applied(ns2, "w1") == [3])
+    end
+
+    test "an order the old leader sent and the node applied is not sent again" do
+      -- A orders r1 (step 1); r1 applies it; A dies before hearing the result.
+      let r = rel()
+      let l = report_all(fresh_leader(), cluster(), 0)
+      let (_, d) = Control.leader_pass(l, members(cluster()), 0)
+      let ns = match d do
+        Some(Control.RolloutApply(1, Cons(o, Nil))) -> update(cluster(), apply_on(find_node(cluster(), "r1"), o))
+        _ -> panic("expected the canary order")
+      end
+      -- B: r1 is at the end state, so B waits on the gate, it does not re-order
+      let (_, _, d2) = round(fresh_leader(), ns, 1000)
+      assert (String.starts_with(wait_of(d2), "1:"))
+      let (_, ns3, _, d3) = drive(fresh_leader(), ns, 1000, 50)
+      assert (is_complete(d3))
+      assert (applied(ns3, "r1") == [1, 3])
+      assert (List.length(r.steps) == 3)
+    end
+
+    test "an order lost with the old leader is sent once by the new one" do
+      let l = report_all(fresh_leader(), cluster(), 0)
+      let (_, _) = Control.leader_pass(l, members(cluster()), 0)
+      -- A died with its order undelivered: nothing changed on r1
+      let (_, ns, _, d) = drive(fresh_leader(), cluster(), 1000, 50)
+      assert (is_complete(d))
+      assert (applied(ns, "r1") == [1, 3])
+    end
+
+    test "a new leader restarts a gate window that was in progress" do
+      let (l1, ns1, _) = round(fresh_leader(), cluster(), 0)
+      -- A first sees r1 in its new state at 1000, and at 51000 is 50 s in
+      let (l2, _, _) = round(l1, ns1, 1000)
+      let (_, _, d_old) = round(l2, ns1, 51000)
+      assert (wait_of(d_old) == "1:gate healthy(60s): r1 healthy for 50000ms of 60000ms")
+      let (_, _, d_new) = round(fresh_leader(), ns1, 51000)
+      assert (wait_of(d_new) == "1:gate healthy(60s): r1 healthy for 0ms of 60000ms")
+    end
+  end
+
+  describe "halting" do
+    test "a canary that turns unhealthy halts the release at its gate; nothing else is touched" do
+      let (l1, ns1, _) = round(fresh_leader(), cluster(), 0)
+      let sick = update(ns1, { find_node(ns1, "r1") with healthy: false })
+      let (l2, ns2, d) = round(l1, sick, 10000)
+      assert (d == Some(Control.RolloutHalted(1, "r1", "gate healthy(60s) failed: r1 reports unhealthy")))
+      -- the halt sticks even once r1 recovers, and the executor never rolls back
+      let well = update(ns2, { find_node(ns2, "r1") with healthy: true })
+      let (_, ns3, _, d2) = drive(l2, well, 200000, 20)
+      assert (d2 == d)
+      assert (applied(ns3, "r1") == [1])
+      assert (applied(ns3, "r2") == Nil)
+      let r1 = find_node(ns3, "r1")
+      assert (List.member(r1.versions, { build: "render", manifest: "mr2" }))
+    end
+
+    test "a refused order halts the release" do
+      let ns = List.map(cluster(), fn n -> if n.name == "r1" do { n with refuse: true } else n end)
+      let (_, ns2, _, d) = drive(fresh_leader(), ns, 0, 20)
+      assert (d == Some(Control.RolloutHalted(1, "r1", "ERR bad_signature")))
+      assert (List.all(ns2, fn n -> n.applied == Nil))
+    end
+
+    test "a new leader re-derives an apply failure from the agent's own report" do
+      let r = rel()
+      let failed = Control.with_failure(report(find_node(cluster(), "r1")), { seq: 42, step: 1, why: "ERR bad_signature" })
+      let obs = Control.observe(Nil, failed, 0)
+      assert (Control.pass(r, members(cluster()), obs, Nil, 0) == Control.RolloutHalted(1, "r1", "ERR bad_signature"))
+      -- a failure from an older release does not count
+      let old = Control.observe(Nil, Control.with_failure(failed, { seq: 41, step: 1, why: "old" }), 0)
+      assert (apply_of(Some(Control.pass(r, members(cluster()), old, Nil, 0))) == (1, ["r1"]))
+    end
+  end
+
+  -- ── the Agent's apply ────────────────────────────────────────────────────
+
+  describe "agent_apply" do
+    test "an order the node already reports is answered without a request" do
+      let r = rel()
+      let o = Control.order(r, head(r.steps), "r1")
+      let rep = report(apply_on(find_node(cluster(), "r1"), o))
+      let ops = { report: fn -> rep, has: fn _ -> true, request: fn _ -> panic("no request expected") }
+      let res = Control.agent_apply(ops, o)
+      assert (res.ok && res.detail == "already applied")
+    end
+
+    test "missing artifacts, a refused line, and a line that changed nothing all fail" do
+      let r = rel()
+      let o = Control.order(r, head(r.steps), "r1")
+      assert (Control.order_artifacts(o) == ["br", "mr2"])
+      assert (Control.order_lines(o) == ["SEQ 42 id1 s1 ACTIVATE render mr2"])
+      let rep = report(find_node(cluster(), "r1"))
+      let m = Control.agent_apply(ops_for(rep, "OK"), { o with artifacts: "br missing" })
+      assert (not(m.ok) && m.detail == "missing artifacts: missing")
+      let refused = Control.agent_apply(ops_for(rep, "ERR stale_release"), o)
+      assert (not(refused.ok) && refused.detail == "ERR stale_release")
+      let noop = Control.agent_apply(ops_for(rep, "OK"), o)
+      assert (not(noop.ok) && String.starts_with(noop.detail, "the node accepted every line"))
+    end
+
+    test "a line that takes effect answers ok" do
+      let r = rel()
+      let o = Control.order(r, head(r.steps), "r1")
+      let v = Vault.new("test_control_agent_state")
+      Vault.set(v, "state", report(find_node(cluster(), "r1")))
+      let req = fn _ ->
+        let _ = Vault.set(v, "state", report(apply_on(find_node(cluster(), "r1"), o)))
+        "OK activated"
+      let ops = { report: fn -> unwrap(Vault.get(v, "state")), has: fn _ -> true, request: req }
+      let res = Control.agent_apply(ops, o)
+      assert (res.ok && res.detail == "applied")
+    end
+
+    test "orders carry hashes and the step's signed lines, not bytes" do
+      let r = rel()
+      let o = Control.order(r, head(tail(tail(r.steps))), "w1")
+      assert (o.action == "topology" && o.want == "t42" && Control.order_artifacts(o) == Nil)
+      assert (Control.order_lines(o) == ["SEQ 42 id1 s2 TOPOLOGY t42"])
+      assert (o.release == Control.digest(r))
+    end
+  end
+
+  describe "chunks" do
+    test "an artifact splits into fixed-size chunks and reassembles" do
+      let cs = Control.chunks("0123456789", 4)
+      assert (List.map(cs, fn c -> c.data) == ["0123", "4567", "89"])
+      assert (List.map(cs, fn c -> c.offset) == [0, 4, 8])
+      assert (List.map(cs, fn c -> c.last) == [false, false, true])
+      assert (Control.chunks("", 4) == [{ offset: 0, data: "", last: true }])
+      assert (Control.chunks("0123", 4) == [{ offset: 0, data: "0123", last: true }])
+    end
+  end
+end
