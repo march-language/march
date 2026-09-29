@@ -1,0 +1,29 @@
+-- A TRMC'd function with one modulo-cons arm and one PLAIN tail self-call
+-- (filter's shape).  Inside the $dps helper the tail arm called the ENTRY and
+-- stored its result, an entry -> $dps -> entry cycle that pushed a frame per
+-- alternation between the arms.  A predicate that is all-true or all-false
+-- never alternates, so both passed; keeping every other element of a
+-- 1,000,000-element list overflowed the green-thread stack (SIGBUS in the
+-- stack guard page).  Expected output is the interpreter's.
+mod TrmcFilterAlternating do
+  needs IO.Console
+
+  pfn keep_even(xs : List(Int)) : List(Int) do
+    match xs do
+      Nil -> Nil
+      Cons(h, t) -> if h % 2 == 0 do Cons(h, keep_even(t)) else keep_even(t) end
+    end
+  end
+
+  pfn sum(xs : List(Int)) : Int do List.fold_left(xs, 0, fn (a, b) -> a + b) end
+
+  fn main(_c : Cap(IO.Console)) do
+    let xs = List.range(0, 1000000)
+    let a = keep_even(xs)
+    println("user " ++ int_to_string(List.length(a)) ++ " " ++ int_to_string(sum(a)))
+    let b = List.filter(xs, fn x -> x % 3 != 0)
+    println("stdlib " ++ int_to_string(List.length(b)) ++ " " ++ int_to_string(sum(b)))
+    let c = List.filter_map(xs, fn x -> if x % 2 == 1 do Some(x * 2) else None end)
+    println("filter_map " ++ int_to_string(List.length(c)) ++ " " ++ int_to_string(sum(c)))
+  end
+end

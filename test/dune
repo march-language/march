@@ -3497,6 +3497,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff empty.expected session_node_check.out)))
 
+;; A TRMC'd function with a modulo-cons arm AND a plain tail self-call
+;; (filter's shape) cycled entry -> $dps -> entry, one frame per alternation
+;; between the arms. Pre-fix: SIGBUS (stack guard page) on a 1M-element list
+;; that keeps every other element. Expected output is the interpreter's.
+(rule
+ (targets native_trmc_filter_alternating native_trmc_filter_alternating.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/trmc_filter_alternating.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_trmc_filter_alternating
+        native/trmc_filter_alternating.march)
+   (with-stdout-to native_trmc_filter_alternating.out
+        (system "./native_trmc_filter_alternating")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/trmc_filter_alternating.expected native_trmc_filter_alternating.out)))
+
 ;; TRMC's reuse_hole on a SHARED scrutinee moved the cell's fields out with
 ;; no dup (the case arm's rb_shared path recognised only EReuse): the next
 ;; iteration reused a cell another holder still had. Pre-fix: RC underflow;
