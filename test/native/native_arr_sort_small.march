@@ -1,0 +1,70 @@
+-- The NativeArray sort's small-sort base case (n <= 32), every size.
+--
+-- nsort_small_W (runtime/march_runtime.c) became Rust's small_sort_network
+-- layout on 2026-09-28: one region below 18 elements, two halves merged
+-- branchlessly from both ends at and above it, with 13/9/8-element network
+-- presorts. native_arr_sort and native_arr_sort_narrow sample sizes
+-- {7, 8, 9, 31, 32, 33}, which reach the merge only at 31 and 32; this
+-- checks EVERY n in 0..40 (so every region split, odd and even, and the
+-- first sizes past the cutoff) for all four comparison widths that share
+-- the core -- sort_int, sort_float (i64 totalOrder keys), sort_i32 and
+-- sort_f32 (i32 keys) -- on five patterns, against List.sort_by. Prints how
+-- many of the 205 (size, pattern) cases each width got right.
+mod NativeArrSortSmall do
+  needs IO.Console
+
+  pfn build(n : Int, f : Int -> Int) : List(Int) do
+    fn go(i : Int, acc : List(Int)) : List(Int) do
+      if i < 0 do acc else go(i - 1, Cons(f(i), acc)) end
+    end
+    go(n - 1, Nil)
+  end
+
+  pfn scramble(i : Int) : Int do
+    let x = (i * 2654435761 + 12345) % 1000003
+    if x < 0 do 0 - x else x end
+  end
+
+  pfn pattern(p : Int, n : Int) : List(Int) do
+    if p == 0 do build(n, fn i -> scramble(i) - 500000)
+    else if p == 1 do build(n, fn i -> scramble(i) % 3)
+    else if p == 2 do build(n, fn i -> n - i)
+    else if p == 3 do build(n, fn i -> if i < n / 2 do i else n - i end)
+    else build(n, fn i -> if i % 7 == 0 do scramble(i) % 50 else i end)
+    end end end end
+  end
+
+  pfn cases() : List((Int, Int)) do
+    List.flat_map(List.range(0, 41), fn n -> List.map(List.range(0, 5), fn p -> (n, p)))
+  end
+
+  pfn asc(xs : List(Int)) : List(Int) do List.sort_by(xs, fn (a, b) -> a <= b) end
+  pfn ascf(xs : List(Float)) : List(Float) do List.sort_by(xs, fn (a, b) -> a <= b) end
+  pfn quarters(xs : List(Int)) : List(Float) do
+    List.map(xs, fn x -> int_to_float(x % 4096) *. 0.25)
+  end
+
+  pfn score(ok : Int -> Int -> Bool) : Int do
+    List.fold_left(cases(), 0, fn (acc, c) ->
+      match c do (n, p) -> if ok(n, p) do acc + 1 else acc end end)
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let int_ok = score(fn (n, p) ->
+      let xs = pattern(p, n)
+      NativeArray.to_list_int(NativeArray.sort_int(NativeArray.from_list_int(xs))) == asc(xs))
+    let float_ok = score(fn (n, p) ->
+      let xs = quarters(pattern(p, n))
+      NativeArray.to_list_float(NativeArray.sort_float(NativeArray.from_list_float(xs))) == ascf(xs))
+    let i32_ok = score(fn (n, p) ->
+      let xs = pattern(p, n)
+      NativeArray.to_list_i32(NativeArray.sort_i32(NativeArray.from_list_i32(xs))) == asc(xs))
+    let f32_ok = score(fn (n, p) ->
+      let xs = quarters(pattern(p, n))
+      NativeArray.to_list_f32(NativeArray.sort_f32(NativeArray.from_list_f32(xs))) == ascf(xs))
+    println("sort_int   " ++ int_to_string(int_ok) ++ "/205")
+    println("sort_float " ++ int_to_string(float_ok) ++ "/205")
+    println("sort_i32   " ++ int_to_string(i32_ok) ++ "/205")
+    println("sort_f32   " ++ int_to_string(f32_ok) ++ "/205")
+  end
+end
