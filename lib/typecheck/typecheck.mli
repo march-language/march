@@ -257,6 +257,7 @@ type env = {
   impls : (ty * Ast.span * string option) list StrMap.t;
   import_tracker : import_entry list ref;
   import_idx : import_index;
+  deferred_check4 : (string * string list * string * Ast.span) list ref;
   local_fns : unit StrMap.t;
   fn_arities : (int * Ast.span) StrMap.t;
   qual_fn_names : unit StrMap.t;
@@ -352,6 +353,7 @@ val fn_transitive_capability_closures_tbl :
   env -> (string, string list) Hashtbl.t
 val check_module_needs :
   env -> Ast.name -> cap_qname_prefix:string -> Ast.decl list -> unit
+val check_deferred_imports : env -> unit
 val fn_capability_closures : env -> (string * string list) list
 val declared_cap_scopes : env -> (string * string option) list
 val fn_own_capability_closures : env -> (string * string list) list
