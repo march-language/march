@@ -43,6 +43,22 @@ git log is authoritative for exact commits.
   for the import was silently skipped. An import now orders the importer
   after the sibling, unless the two modules import each other.
 
+- **Two actors with the same name in different modules are now two actors.**
+  An actor `Box` in `mod A` and another `Box` in `mod B` (or at the file's
+  root) shared one definition: the interpreter spawned the same actor for
+  both, and compiled code ran one dispatch function against both state
+  shapes (wrong state, a `no field` panic, or an internal compiler error).
+  The nested ones now get distinct internal names (`A__Box`, `B__Box`), so
+  `spawn(Box)` inside `A`, `spawn(A.Box)` from the parent and `Box.Msg` all
+  reach the right actor. Actors whose names are unique keep their names, so
+  hot-code-reload manifests are unchanged. Two actors of one name in the
+  same module are now an error.
+
+- **Actors that message each other back and forth are up to 2.6x faster.** With
+  several scheduler threads, sending to an actor that was just going to sleep could
+  make the sender wait a millisecond or more before delivering. A two-actor
+  ping-pong of 1,000,000 messages took 3.07 s; it now takes 1.18 s. Actor programs
+  built with `--hot-reload` were affected less (1.45 s -> 1.22 s).
 - **`march --check` no longer passes a protocol expand it refuses, from its cache.**
   After a clean `--check` with `--protocol-baseline` and `--protocol-expand`, the same
   check without the baseline (which the compiler refuses) exited 0 from the cache
@@ -76,7 +92,6 @@ git log is authoritative for exact commits.
   The node used to verify a pushed topology, then apply an unsigned copy forge wrote
   alongside it. A restarted node came back on its built-in placement rather than the one
   last pushed. `Topology` now reads the verified copy first, and applies it at start.
-
 - **A closed or refused session offer no longer leaks its actor and two
   Vault tables.** `SessionNode.close_offer` left the offer's `OfferActor`
   running for the life of the process, and an `offer_*` refused with

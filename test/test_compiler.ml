@@ -835,6 +835,71 @@ let test_desugar_trivial_fn () =
      | _ -> Alcotest.fail "expected single clause")
   | _ -> Alcotest.fail "expected single DFn"
 
+(* Desugar_actor_names: the actor names, with their module paths, in
+   declaration order. *)
+let actor_names_of (m : March_ast.Ast.module_) : string list =
+  let rec go path acc decls =
+    List.fold_left (fun acc d -> match d with
+        | March_ast.Ast.DActor (_, n, _, _) -> (path ^ n.txt) :: acc
+        | March_ast.Ast.DMod (mn, _, inner, _) -> go (path ^ mn.txt ^ ".") acc inner
+        | _ -> acc) acc decls in
+  List.rev (go "" [] m.March_ast.Ast.mod_decls)
+
+let actor_src = {|actor Box do
+      state { n : Int }
+      init { n: 0 }
+      on Poke(k : Int) do { n: k } end
+    end|}
+
+let test_desugar_actor_names_unique_untouched () =
+  (* A nested actor whose name is unique keeps its bare name: its glue and
+     the hot-reload manifest spell it that way. *)
+  let src = Printf.sprintf {|mod T do
+    %s
+    mod A do
+      actor Other do
+        state { n : Int }
+        init { n: 0 }
+        on Poke(k : Int) do { n: k } end
+      end
+    end
+  end|} actor_src in
+  Alcotest.(check (list string)) "names unchanged" ["Box"; "A.Other"]
+    (actor_names_of (parse_and_desugar src))
+
+let test_desugar_actor_names_collision_renamed () =
+  (* Same-named nested actors get their module path; the root one keeps its
+     name. *)
+  let src = Printf.sprintf {|mod T do
+    %s
+    mod A do
+      %s
+      mod C do
+        %s
+      end
+    end
+    mod B do
+      %s
+    end
+  end|} actor_src actor_src actor_src actor_src in
+  Alcotest.(check (list string)) "nested ones renamed"
+    ["Box"; "A.A__Box"; "A.C.A__C__Box"; "B.B__Box"]
+    (actor_names_of (parse_and_desugar src))
+
+let test_desugar_actor_names_same_module_rejected () =
+  (* Two actors of one name in ONE module: no reference could tell them
+     apart, so it is an error rather than a silent pick. *)
+  let src = Printf.sprintf {|mod T do
+    mod A do
+      %s
+      %s
+    end
+  end|} actor_src actor_src in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors (parse_module src));
+  Alcotest.(check bool) "duplicate actor in one module: error" true
+    (has_errors errors)
+
 (* ── Type checker tests ─────────────────────────────────────────────────── *)
 
 let test_tc_literal () =
@@ -4231,8 +4296,10 @@ let test_same_named_actors_spawned_one_still_rejected () =
     true (has_error_with ctx "granted `Cap(IO.Console)`");
   Alcotest.(check bool) "the escaping capability is named"
     true (has_error_with ctx "IO.FileWrite");
+  (* Two actors named Worker: desugar renames the nested ones by module path
+     (Desugar_actor_names), so the chain spells this one Safe__Worker. *)
   Alcotest.(check bool) "the chain names the actor that actually holds it"
-    true (has_error_with ctx "Safe.Worker_Go")
+    true (has_error_with ctx "Safe.Safe__Worker_Go")
 
 (* A nested actor spawned by its BARE name from OUTSIDE its declaring module:
    the referring key ("main") has no module prefix, so prefix-first resolution
@@ -17110,6 +17177,9 @@ let compiler_suites =
           Alcotest.test_case "pipe desugar"        `Quick test_desugar_pipe;
           Alcotest.test_case "multi-head desugar"  `Quick test_desugar_multihead;
           Alcotest.test_case "trivial fn no match" `Quick test_desugar_trivial_fn;
+          Alcotest.test_case "unique nested actor keeps its name" `Quick test_desugar_actor_names_unique_untouched;
+          Alcotest.test_case "same-named nested actors renamed" `Quick test_desugar_actor_names_collision_renamed;
+          Alcotest.test_case "same-named actors in one module rejected" `Quick test_desugar_actor_names_same_module_rejected;
         ] );
       ( "typecheck",
         [
