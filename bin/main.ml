@@ -1823,10 +1823,17 @@ let compile filename =
            - --no-cap-strict: the typecheck-side ceiling
              ([Typecheck.cap_strict_ceiling], set below from [cap_strict])
              only runs when it is on, so a program plain `--check` rejects
-             passes with the flag.  Same spelling as build_cas_key. *)
+             passes with the flag.  Same spelling as build_cas_key.
+           - --protocol-baseline / --protocol-expand: an expand is refused
+             without a baseline, or against one it is not one branch past;
+             a clean check with the right baseline satisfied the same check
+             without it (forge's test_topology_run found it, 2026-09-28). *)
         let flags =
           (if !stdlib_source then ["stdlib-source"] else [])
-          @ (if !cap_strict then ["capstrict"] else []) in
+          @ (if !cap_strict then ["capstrict"] else [])
+          @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])
+          @ List.map (fun (p, l) -> "pexpand:" ^ p ^ ":" ^ l)
+              (List.sort compare !March_desugar.Desugar_endpoints.expand_labels) in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:"check" ~flags in
         (match March_cas.Cas.lookup_artifact store ch with
          | Some _ -> exit 0

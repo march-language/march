@@ -1,7 +1,7 @@
 # Distributed deploys, build step 9: protocol evolution (items 1-6)
 
 **LANDED 2026-09-25; the step stays open** in
-[../todos/2026-09-22-dd-step09-protocol-evolution.md](../todos/2026-09-22-dd-step09-protocol-evolution.md):
+[2026-09-22-dd-step09-protocol-evolution.md](2026-09-22-dd-step09-protocol-evolution.md):
 the network acceptance test is written but pending on a hot-reload defect this work
 found (below). Parent: [../plans/2026-09-21-distributed-authority-and-deploys-plan.md](../plans/2026-09-21-distributed-authority-and-deploys-plan.md),
 6.4, 6.1, 4.2, II.5; D5, D21, D25. Built on #648 (D27 drains, the epoch holds), step 3
