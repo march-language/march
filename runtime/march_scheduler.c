@@ -1055,6 +1055,24 @@ static march_mbox_node *mbox_node_new(void *msg) {
     return node;
 }
 
+/* Bumped (seq_cst) AFTER every event that creates work some other proc must
+ * still do: a message landing in a mailbox (mbox_push_node, the batch
+ * requeue) and a proc being published (sched_spawn_common).
+ * march_sched_wait_idle reads it before and after its scan, because the scan
+ * is not a snapshot: it reads one proc at a time, so proc B can be read idle
+ * (empty mailbox) just before proc A -- still running -- sends to B and goes
+ * WAITING, and A is then read idle too.  Every proc looked idle, but a
+ * message was in flight, and run_until_idle() returned mid ping-pong
+ * (specs/progress/2026-09-28-run-until-idle-returned-mid-ping-pong.md).  An
+ * unchanged counter across the scan means no such event happened during it;
+ * the bump comes after the push, so a scan that starts after the bump sees
+ * the message itself. */
+static _Atomic uint64_t g_sched_activity = 0;
+
+static inline void sched_note_activity(void) {
+    atomic_fetch_add_explicit(&g_sched_activity, 1, memory_order_seq_cst);
+}
+
 static void mbox_push_node(march_proc *p, march_mbox_node *node,
                            int is_control) {
     march_mbox_node **head = is_control ? &p->control_mailbox : &p->mailbox;
@@ -1070,6 +1088,7 @@ static void mbox_push_node(march_proc *p, march_mbox_node *node,
     if (!is_control)
         atomic_fetch_add_explicit(&p->user_mbox_count, 1,
                                   memory_order_relaxed);
+    sched_note_activity();
 }
 
 /* Unlink [node] (whose predecessor is [prev], NULL for the head) from a
@@ -1700,6 +1719,7 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
 
     registry_add(p);
     atomic_fetch_add_explicit(&g_live_procs, 1, memory_order_relaxed);
+    sched_note_activity();   /* a scan already past p's slot would miss it */
     if (!is_daemon)
         atomic_fetch_add_explicit(&g_live_nondaemon, 1, memory_order_relaxed);
 
@@ -2500,6 +2520,8 @@ void march_sched_wait_idle(void) {
     for (;;) {
         /* Give every other runnable proc a turn before checking. */
         march_sched_yield();
+        uint64_t activity0 =
+            atomic_load_explicit(&g_sched_activity, memory_order_seq_cst);
         int busy = 0;
         pthread_mutex_lock(&g_registry_mu);
         march_registry *r = atomic_load_explicit(&g_registry, memory_order_relaxed);
@@ -2589,7 +2611,12 @@ void march_sched_wait_idle(void) {
             }
             pthread_mutex_unlock(&g_timer_mu);
             march_reclaim_exit();
-            if (!timers_pending) return;
+            /* Idle only if nothing created work while we scanned: see
+             * g_sched_activity. */
+            if (!timers_pending
+                && atomic_load_explicit(&g_sched_activity, memory_order_seq_cst)
+                   == activity0)
+                return;
         }
         /* Still busy after yielding: the procs we wait on are runnable only on
          * other (possibly CPU-starved) scheduler threads, or are PARKED/WAITING
@@ -3931,6 +3958,7 @@ void march_sched_requeue_user_front_epochs(void *const *msgs,
     atomic_fetch_add_explicit(&p->mbox_count, n, memory_order_relaxed);
     atomic_fetch_add_explicit(&p->user_mbox_count, n, memory_order_relaxed);
     mbox_lock_release(p);
+    sched_note_activity();
 }
 
 /* ── Preemption signal selection and chaining ─────────────────────────
