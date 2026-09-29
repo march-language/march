@@ -26,6 +26,11 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **`march --check` of a module with several `@[endpoints]` protocols is fast
+  again.** Each protocol made every later one roughly twice as slow to typecheck:
+  one module with six protocols took about 9 minutes. It now takes under a
+  second, and time grows roughly linearly with the number of protocols (16
+  protocols: 1.6 s). Diagnostics are unchanged.
 - **A remote message sent after a hot deploy now reaches an actor whose message type
   the deploy changed.** Each cluster link's reader task kept the code of the moment
   the link formed. So a message from a peer already on the new format was decoded by
