@@ -540,6 +540,13 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **Functions that only read a data structure no longer take ownership of it
+  because of a number inside it.** A function reading a `Node(Int, Tree, Tree)`
+  or a `List(Int)` was treated as consuming the whole value as soon as it used one
+  of the numbers, so every call on a shared value paid a reference-count update
+  per node. Summing a shared binary tree of depth 16 300 times now takes 0.11 s
+  instead of 0.30 s; reading a shared 10k-element list with `List.sum_int`,
+  `fold_left` and `nth` is 20% faster.
 - **The generated hosted event API's `cancel` takes the session: `cancel(s, parked)`.**
   The epoch hold a hosting actor takes for a session is now the transport's, taken at
   `register` and released at `close` for both hosting patterns (before, only the
