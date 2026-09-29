@@ -6,7 +6,12 @@
       forge add <name>                          (registry dep, placeholder)
 
     Textually appends to the [deps] (or [dev-deps]) section, preserving
-    existing comments and formatting.  Then runs `forge deps` to resolve. *)
+    existing comments and formatting.  Then runs `forge deps` to resolve, and
+    checks what the change asks for against forge.caps.lock
+    ([Cmd_audit.gate_dependency_change]): a dependency that arrives or changes
+    asking for capabilities the baseline does not grant is refused, and
+    forge.toml and forge.lock are put back byte-for-byte, unless
+    [accept_caps] (`--accept-caps`). *)
 
 (* ------------------------------------------------------------------ *)
 (*  Serialize a dep to an inline TOML table                           *)
@@ -67,7 +72,7 @@ let insert_dep_line text ~section ~name ~dep =
 (*  Main command                                                       *)
 (* ------------------------------------------------------------------ *)
 
-let run ~name ~git ~tag ~branch ~rev ~path ~dev ~dev_only ~test_dep ~force () =
+let run ?(accept_caps = false) ~name ~git ~tag ~branch ~rev ~path ~dev ~dev_only ~test_dep ~force () =
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
@@ -123,18 +128,49 @@ let run ~name ~git ~tag ~branch ~rev ~path ~dev ~dev_only ~test_dep ~force () =
       else begin
         (* Read the raw toml, insert the new dep line *)
         let toml_path = Filename.concat proj.Project.root "forge.toml" in
+        let lock_path = Filename.concat proj.Project.root "forge.lock" in
         let text = Project.read_file toml_path in
+        (* Kept so a refused capability change can be undone exactly. *)
+        let old_lock =
+          if Sys.file_exists lock_path then Some (Project.read_file lock_path) else None in
+        let lock_entries () =
+          match Resolver_lockfile.read lock_path with
+          | Ok (es, _) -> es
+          | Error _ -> []
+        in
+        let before = lock_entries () in
+        let write path contents =
+          let oc = open_out_bin path in
+          output_string oc contents;
+          close_out oc
+        in
         let text' = insert_dep_line text ~section ~name ~dep in
-        let oc = open_out toml_path in
-        output_string oc text';
-        close_out oc;
+        write toml_path text';
         Printf.printf "added %s to [%s]: %s\n%!" name section (dep_to_inline_toml dep);
         (* Run deps to install *)
         Printf.printf "resolving dependencies...\n%!";
         match Cmd_deps.run () with
         | Ok ()  ->
-          Printf.printf "done.\n%!";
-          Ok ()
+          (* The new dependency is in place but not yet kept: check what it
+             asks for first. The added name is always analyzed, even when
+             its lock entry is unchanged (re-adding with --force). *)
+          let touched =
+            Cmd_audit.touched_entries ~before ~after:(lock_entries ())
+            |> fun l -> if List.mem name l then l else List.sort compare (name :: l)
+          in
+          (match
+             Result.bind (Project.load ())
+               (Cmd_audit.gate_dependency_change ~accept:accept_caps ~touched)
+           with
+           | Ok () ->
+             Printf.printf "done.\n%!";
+             Ok ()
+           | Error msg ->
+             write toml_path text;
+             (match old_lock with
+              | Some l -> write lock_path l
+              | None -> (try Sys.remove lock_path with Sys_error _ -> ()));
+             Error msg)
         | Error msg ->
           Printf.eprintf "warning: dep resolution failed: %s\n%!" msg;
           Printf.printf "the entry was added to forge.toml — run `forge deps` to retry.\n%!";
