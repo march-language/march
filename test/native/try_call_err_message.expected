@@ -1,0 +1,7 @@
+Ok(true)
+Err(panic: boom 3)
+Ok(fine)
+Err(panic: boom 7)
+Err(todo: later)
+Err(unreachable: reached unreachable code)
+Ok(Err(panic: boom 9))
