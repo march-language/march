@@ -3991,6 +3991,91 @@ let test_borrow_int_param_not_in_map () =
   Alcotest.(check bool) "Int param 1 not borrowed" false
     (March_tir.Borrow.is_borrowed bm "add" 1)
 
+(* Field escapes are decided per FIELD (2026-09-28): an extracted field that
+   is provably a scalar cannot alias a heap child, so a mixed type's reader
+   whose only escaping fields are scalars stays borrowed.  Before, one Int
+   field meeting `+` marked the whole parameter owned
+   (specs/progress/2026-09-28-field-escape-owns-per-field.md). *)
+let test_borrow_mixed_type_scalar_field_escape_stays_borrowed () =
+  let bm = borrow_module {|mod Test do
+    type Tree = Leaf | Node(Int, Tree, Tree)
+    fn tsum(t : Tree) : Int do
+      match t do
+        Leaf -> 0
+        Node(v, l, r) -> v + tsum(l) + tsum(r)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "tsum's t is borrowed (only the Int field escapes)" true
+    (March_tir.Borrow.is_borrowed bm "tsum" 0)
+
+(* The control: a HEAP field escaping still owns the parameter. *)
+let test_borrow_mixed_type_heap_field_escape_owns () =
+  let bm = borrow_module {|mod Test do
+    type Tree = Leaf | Node(Int, Tree, Tree)
+    fn left(t : Tree) : Tree do
+      match t do
+        Leaf -> Leaf
+        Node(_, l, _) -> l
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "left's t is owned (a Tree field escapes)" false
+    (March_tir.Borrow.is_borrowed bm "left" 0)
+
+(* A type-parameter field is resolved through the scrutinee's type
+   arguments: `Cell(Int)`'s first field is an Int, `Cell(String)`'s is not. *)
+let test_borrow_type_param_field_resolved_through_args () =
+  let bm = borrow_module {|mod Test do
+    type Cell(a) = Cell(a, String)
+    fn get_int(c : Cell(Int)) : Int do
+      match c do Cell(x, _) -> x + 1 end
+    end
+    fn get_str(c : Cell(String)) : String do
+      match c do Cell(x, _) -> x end
+    end
+  end|} in
+  Alcotest.(check bool) "Cell(Int) reader is borrowed" true
+    (March_tir.Borrow.is_borrowed bm "get_int" 0);
+  Alcotest.(check bool) "Cell(String) field escape still owns" false
+    (March_tir.Borrow.is_borrowed bm "get_str" 0)
+
+(* TRMC's hole allocation is a reconstruct (FBIP reuse_hole) shape, so a
+   TRMC'd `append` over an Int list keeps its list OWNED even though its only
+   escaping extracted field is the Int head.  (`append`, not `map`: a
+   `Nil -> Nil` arm is itself an EAlloc of the type and would keep the list
+   owned on its own; `Nil -> ys` allocates nothing.)  Without EAllocHole in
+   [has_matching_alloc] the per-field rule made it borrowed and the in-place
+   cell reuse was lost. *)
+let test_borrow_trmc_hole_alloc_keeps_scrutinee_owned () =
+  let m = parse_and_desugar {|mod Test do
+    fn glue(xs : List(Int), ys : List(Int)) : List(Int) do
+      match xs do
+        Nil -> ys
+        Cons(h, t) -> Cons(h, glue(t, ys))
+      end
+    end
+  end|} in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Trmc.transform_module tir in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  Alcotest.(check bool) "glue$dps exists (TRMC fired)" true
+    (List.exists (fun fd ->
+         let n = fd.March_tir.Tir.fn_name in
+         String.equal n "glue$dps")
+       tir.March_tir.Tir.tm_fns);
+  let bm = March_tir.Borrow.infer_module tir in
+  Alcotest.(check bool) "glue's xs stays owned" false
+    (March_tir.Borrow.is_borrowed bm "glue" 0);
+  let dps = List.find (fun fd ->
+      let n = fd.March_tir.Tir.fn_name in
+      String.equal n "glue$dps")
+      tir.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "glue$dps's xs stays owned" false
+    (March_tir.Borrow.is_borrowed bm dps.March_tir.Tir.fn_name 0)
+
 let test_borrow_passed_to_borrowed_callee_stays_borrowed () =
   (* If a param is passed only to other functions that borrow it, it remains
      borrowed itself.  This tests the inter-procedural fixpoint. *)
@@ -5758,6 +5843,10 @@ let eval_suites =
           Alcotest.test_case "stored param is owned"                 `Quick test_borrow_stored_param_is_owned;
           Alcotest.test_case "Int param not borrowed (no RC needed)" `Quick test_borrow_int_param_not_in_map;
           Alcotest.test_case "passed to borrowed callee: stays borrowed"  `Quick test_borrow_passed_to_borrowed_callee_stays_borrowed;
+          Alcotest.test_case "mixed type: scalar field escape stays borrowed" `Quick test_borrow_mixed_type_scalar_field_escape_stays_borrowed;
+          Alcotest.test_case "mixed type: heap field escape owns"     `Quick test_borrow_mixed_type_heap_field_escape_owns;
+          Alcotest.test_case "type-param field resolved through args" `Quick test_borrow_type_param_field_resolved_through_args;
+          Alcotest.test_case "TRMC hole alloc keeps scrutinee owned"  `Quick test_borrow_trmc_hole_alloc_keeps_scrutinee_owned;
           Alcotest.test_case "passed to owned callee: becomes owned"      `Quick test_borrow_passed_to_owned_callee_becomes_owned;
           Alcotest.test_case "no IncRC at call site for borrowed arg"     `Quick test_borrow_no_incrc_at_call_site;
           Alcotest.test_case "no DecRC in callee for borrowed param"      `Quick test_borrow_no_decrc_in_callee;

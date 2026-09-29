@@ -8,22 +8,21 @@ fn $jp3$apply$0($clo : Ptr(Unit)) : '_ =
 ## head_opt
 fn head_opt(xs : List(Int)) : Option(Int) =
   case xs of
-  Cons($f1, $f2) -> dec_rc xs;
-dec_rc $f2;
-let $jp_clo4 : () -> '_ = alloc $Clo_$jp3$0($jp3$apply$0) in
+  Cons($f1, $f2) -> let $jp_clo4 : () -> '_ = alloc $Clo_$jp3$0($jp3$apply$0) in
 dec_rc $jp_clo4;
-let h : Int = $f1 in
+let h : Int = inc_rc $f1;
+$f1 in
 alloc Option.Some(h)
-  Nil() -> dec_rc xs;
-alloc Option.None(Int)()
-  _ -> dec_rc xs;
-panic("non-exhaustive pattern match")
+  Nil() -> alloc Option.None(Int)()
+  _ -> panic("non-exhaustive pattern match")
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
   let $t9 : Option(Int) = let $t8 : List(Int) = let $t7 : List(Int) = alloc List.Nil(Int)() in
 alloc List.Cons(3, $t7) in
-head_opt($t8) in
+let $rc_1 : Option(Int) = head_opt($t8) in
+dec_rc $t8;
+$rc_1 in
 case $t9 of
   Some($f10) -> let v : Int = $f10 in
 println(v)

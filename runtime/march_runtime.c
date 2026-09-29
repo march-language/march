@@ -1498,14 +1498,56 @@ static void do_actor_death(void *actor, march_death_reason reason,
  * March prelude's panic/todo/unreachable wrappers.  They call march_panic and
  * return NULL (unreachable, but needed to satisfy the polymorphic return type
  * the compiler assigns to expressions of type `a`). */
+/* Which diverging primitive raised the panic being caught, as the prefix the
+ * interpreter puts on its message ("panic: boom", "todo: later";
+ * eval_builtins.ml's panic_ / todo_).  march_panic's fail buffer holds the
+ * bare message -- the compiled test runner prints it that way -- so
+ * __try_call / __try_call_val prepend this when building their Err.  Set
+ * immediately before the longjmp by the SAME thread that runs the catching
+ * setjmp, like march_test_fail_buf itself; the catchers clear it on entry
+ * and restore the outer value on exit. */
+static const char *march_panic_prefix = NULL;
+
 void *march_panic_ext(void *s) {
+    march_panic_prefix = "panic: ";
     march_panic(s);
     return NULL;
 }
 
 void *march_todo_ext(void *s) {
+    march_panic_prefix = "todo: ";
     march_panic(s);
     return NULL;
+}
+
+/* The `panic` builtin (lib/tir/llvm_builtins.ml): user `panic(msg)` and the
+ * compiler's own assert / non-exhaustive panics. */
+void march_panic_user(void *s) {
+    march_panic_prefix = "panic: ";
+    march_panic(s);
+}
+
+/* unreachable_ takes no argument; the message is the interpreter's
+ * (eval_builtins.ml's unreachable_), with no further prefix. */
+void *march_unreachable_ext(void) {
+    march_panic_prefix = NULL;
+    march_panic(march_string_lit("unreachable: reached unreachable code", 37));
+    return NULL;
+}
+
+/* The Err message of a caught panic: the prefix march_panic_ext /
+ * march_todo_ext recorded, then the fail buffer (or [fallback] when empty). */
+static void *march_caught_panic_message(const char *fallback) {
+    const char *msg = march_test_fail_buf[0] ? march_test_fail_buf : fallback;
+    const char *pre = march_panic_prefix ? march_panic_prefix : "";
+    size_t pl = strlen(pre), ml = strlen(msg);
+    char *buf = (char *)malloc(pl + ml + 1);
+    if (!buf) { fputs("march: out of memory\n", stderr); exit(1); }
+    memcpy(buf, pre, pl);
+    memcpy(buf + pl, msg, ml + 1);
+    void *str = march_string_lit(buf, (int64_t)(pl + ml));
+    free(buf);
+    return str;
 }
 
 void march_panic(void *s) {
@@ -1841,8 +1883,10 @@ void *march_try_call(void *thunk) {
     memcpy(&saved_jmp, &march_test_jmp_buf, sizeof(jmp_buf));
     memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
 
+    const char *saved_prefix = march_panic_prefix;
     march_test_fail_buf[0] = '\0';
     march_test_in_test     = 1;
+    march_panic_prefix     = NULL;
 
     int64_t ok_result = 0;
     int     panicked  = 0;
@@ -1853,18 +1897,17 @@ void *march_try_call(void *thunk) {
         panicked = 1;
     }
 
-    /* Capture the panic message before restoring the outer fail buffer. */
+    /* Capture the panic message before restoring the outer fail buffer:
+     * "panic: <msg>" for panic(msg), as the interpreter reports it (until
+     * 2026-09-28 the compiled Err carried the bare message). */
     void *err_str = NULL;
-    if (panicked) {
-        const char *msg = march_test_fail_buf[0]
-            ? march_test_fail_buf : "property panicked";
-        err_str = march_string_lit(msg, (int64_t)strlen(msg));
-    }
+    if (panicked) err_str = march_caught_panic_message("property panicked");
 
     /* Restore the outer panic handler. */
     memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
     memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
     march_test_in_test = saved_in_test;
+    march_panic_prefix = saved_prefix;
 
     /* No march_decrc(thunk) here. Like the task_spawn trampoline (see its
      * comment), a CAPTURING thunk's own apply function now releases its one
@@ -1934,8 +1977,10 @@ void *march_try_call_val(void *thunk) {
     memcpy(&saved_jmp, &march_test_jmp_buf, sizeof(jmp_buf));
     memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
 
+    const char *saved_prefix = march_panic_prefix;
     march_test_fail_buf[0] = '\0';
     march_test_in_test     = 1;
+    march_panic_prefix     = NULL;
 
     int64_t ok_result = 0;
     int     panicked  = 0;
@@ -1947,15 +1992,12 @@ void *march_try_call_val(void *thunk) {
     }
 
     void *err_str = NULL;
-    if (panicked) {
-        const char *msg = march_test_fail_buf[0]
-            ? march_test_fail_buf : "call panicked";
-        err_str = march_string_lit(msg, (int64_t)strlen(msg));
-    }
+    if (panicked) err_str = march_caught_panic_message("call panicked");
 
     memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
     memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
     march_test_in_test = saved_in_test;
+    march_panic_prefix = saved_prefix;
 
     /* No march_decrc(thunk) — see the identical comment in __try_call above. */
 
