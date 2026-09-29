@@ -546,6 +546,26 @@ mod Topology do
     List.sort_by(Vault.keys(st.offers), fn (a, b) -> a < b)
   end
 
+  doc "Does [node] offer [role_name] right now? (For a `count = 1` role: is this node the one that serves it.)"
+  fn offering(node : Cap(ClusterNode.Live), role_name : String) : Bool do
+    List.member(offered(node), role_name)
+  end
+
+  doc """
+  The members that currently mark themselves eligible for the ranked role
+  [role_name] (a `place = { on = ..., count = n }` role), this node included
+  when it is: its candidates, whichever of them ranks first. The control plane
+  finds its standbys and its leader with it. A dead member is left out.
+  """
+  fn role_candidates(node : Cap(ClusterNode.Live), role_name : String) : List(Membership.Member) do
+    let ids = marked(role_name, ClusterNode.names(node))
+    List.filter(ClusterNode.all_members(node), fn m ->
+      List.member(ids, m.node_id) && (match m.status do
+        Membership.Dead -> false
+        _ -> true
+      end))
+  end
+
   doc "The actor answering invitations for [role_name]'s open offer on [node], if one is open."
   fn offer_worker(node : Cap(ClusterNode.Live), role_name : String) : Option(Pid(SessionNode.OfferCount)) do
     let st = state_of(node)
@@ -794,7 +814,31 @@ mod Topology do
     ++ "offers " ++ String.join(offered(node), ",") ++ "\n"
     ++ "draining " ++ int_to_string(List.length(Vault.keys(st.draining))) ++ "\n"
     ++ "running " ++ int_to_string(running(node)) ++ "\n"
+    ++ offer_lines(st) ++ drain_lines(st)
   end
+
+  -- One `offer <role> fp <fingerprint> sessions <n>` line per open offer: the
+  -- live sessions per protocol fingerprint (DD step 12a; the control plane's
+  -- Agent reports them, so a gate can wait on a fingerprint's sessions).
+  pfn offer_lines(st : TopoState) : String do
+    String.join(List.map(List.sort_by(Vault.all(st.offers), fn (a, b) -> Tuple.first(a) < Tuple.first(b)), fn kv ->
+      match kv do
+        (name, o) -> "offer " ++ name ++ " fp " ++ o.ap.fingerprint ++ " sessions " ++ int_to_string(active(o)) ++ "\n"
+      end), "")
+  end
+
+  -- One `drain <key> fp <fingerprint> sessions <n> since <ms>` line per closed
+  -- offer still draining: how many of its sessions are left, and when it closed.
+  pfn drain_lines(st : TopoState) : String do
+    String.join(List.map(List.sort_by(Vault.all(st.draining), fn (a, b) -> Tuple.first(a) < Tuple.first(b)), fn kv ->
+      match kv do
+        (key, o) -> "drain " ++ key ++ " fp " ++ o.ap.fingerprint ++ " sessions " ++ int_to_string(active(o))
+                    ++ " since " ++ int_to_string(Vault.get_or(st.meta, "t:" ++ key, 0)) ++ "\n"
+      end), "")
+  end
+
+  doc "This node's name as the membership and the control plane know it."
+  fn node_name(node : Cap(ClusterNode.Live)) : String do label(node) end
 
   -- Write the status to MARCH_TOPOLOGY_STATUS when it changed (atomically:
   -- a temporary file renamed over it, so a reader never sees half).
