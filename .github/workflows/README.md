@@ -59,6 +59,7 @@ test (macos, all)
 two-node (ubuntu)
 bench-gate (ubuntu)
 conformance (ubuntu, macos)
+tree-sitter (ubuntu)
 sanitize-gate (ubuntu)
 ocaml-build (ubuntu, macos) ─┬─ property-tests (per OS) × soundness | tir | rest ─┐
                              │                                                    └─ property-coverage
@@ -77,6 +78,7 @@ ocaml-build (ubuntu, macos) ─┬─ property-tests (per OS) × soundness | tir
 | `two-node` | The `node_discovery` soak (200 runs diffed against the golden, a torn-stdout guard) and every `test/two_node/<scenario>`: two real OS processes, a fault injected from outside, per-node goldens. | `scripts/two-node.sh <scenario>`. Two scenarios are known flaky on `main`; check `main`'s own runs before blaming your diff. A scenario that needs a helper exe (`test/hcr_deploy.exe` for the hot-deploy ones) declares it with `need_built`, and the job also builds it up front. |
 | `bench-gate` | Compiles every gated `bench/*.march` at `--opt 2`, runs it, checks the printed value. The only place benchmarks run in CI. | A benchmark stopped compiling or computes a different answer (not a timing check). |
 | `conformance (<os>)` | `@types-check` (static-semantics corpus) and `@grammar-check`, the two refinement coverage ratchets, `@vault-scale`, doc notebooks (`.scrollmd`) compile, stdlib `march>` doctests, formatting. | The step name says which. Ratchets fail when coverage drops, not just on errors. |
+| `tree-sitter` | `scripts/check-tree-sitter.sh --self-test`, then the script: `tree-sitter-march/src` regenerates byte-identical with the pinned CLI, `tree-sitter test` corpus passes, every `.scm` under `tree-sitter-march/queries/` and `zed-march/languages/march/` compiles, and every `.march` under `stdlib/ test/ examples/ bench/ specs/lang/` parses without ERROR except those in `tree-sitter-march/known-failures.txt`. | A syntax change the grammar does not cover (extend `grammar.js`, or list the file with a todo), a grammar edit without `tree-sitter generate`, a stale known-failures entry, or a query that no longer matches the grammar. |
 | `sanitize-gate` | AddressSanitizer over the golden corpus, a curated native list and the two-node sweep (`specs/lang/golden/sanitize.sh`). Guards RC/use-after-free bugs. Ubuntu only. | A memory-safety bug even if every test passed. A two-node scenario that exits 3 is reported as SKIP ("needs root" is the gate's label for every exit 3; `protocol_evolve` skips itself under ASan as timing-bound, see its scenario.sh). On a Mac, reproduce in a Linux Docker container: ASAN binaries can hang on macOS hosts running endpoint security software. |
 | `ocaml-build (<os>)` | Builds the compiler and oracle binaries once and uploads them for the jobs below. | A build break; everything downstream is skipped. |
 | `property-tests (<os>, <shard>)` | QCheck property groups from `test/test_properties.ml`, split into three shards, on both OSes (macOS matters: signal/segfault classification differs). | Shrunk counterexample is in the log. |

@@ -26,6 +26,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Editor highlighting (tree-sitter) now covers current March syntax.** The
+  tree-sitter grammar that Zed highlights from failed to parse most real files
+  (713 of 919 in the repo), so they rendered as one long error region. It now
+  parses every file the compiler accepts, including record literals, multi-line
+  match arms and lambdas, patterns, actors, protocols and declarations added
+  since March. Zed's highlight and outline queries, broken since August, compile
+  again. A CI job keeps the grammar in step with the compiler.
 - **A remote message sent after a hot deploy now reaches an actor whose message type
   the deploy changed.** Each cluster link's reader task kept the code of the moment
   the link formed. So a message from a peer already on the new format was decoded by

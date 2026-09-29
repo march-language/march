@@ -54,13 +54,13 @@
 (constructor_pattern name: (type_identifier) @constructor)
 
 ; Module names
-(module_def name: (type_identifier) @namespace)
+(module_def name: (module_path (type_identifier) @namespace))
 
 ; Actor / interface / impl / sig / protocol names
 (actor_def name: (type_identifier) @type)
 (interface_def name: (type_identifier) @type)
 (type_def name: (type_identifier) @type)
-(impl_def interface: (type_identifier) @type)
+(impl_def interface: (module_path (type_identifier) @type .))
 (sig_def name: (type_identifier) @type)
 (protocol_def name: (type_identifier) @type)
 

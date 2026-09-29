@@ -1,7 +1,7 @@
 # Tree-sitter grammar sync: re-measure, fix, and keep it from drifting again
 
 **Date:** 2026-09-23
-**Status:** design only; nothing here has landed.
+**Status:** Stages 0-4 landed 2026-09-28 (`specs/progress/2026-09-28-tree-sitter-grammar-sync.md`); D3, D5, D6 and Stage 5 are open in `specs/todos/2026-09-28-tree-sitter-followups.md`.
 **Closes (when built):** `specs/todos/2026-08-04-tree-sitter-grammar-drift.md` [P2].
 
 **Method:** every claim in §2 and §3 was checked on 2026-09-23 against

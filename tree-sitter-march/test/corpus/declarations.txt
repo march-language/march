@@ -131,14 +131,15 @@ mod Foo do type Point = { x : Float, y : Float } end
       (type_identifier))
     (type_def
       name: (type_identifier)
-      (record_type_field
-        name: (identifier)
-        type: (type_constructor
-          (type_constructor)))
-      (record_type_field
-        name: (identifier)
-        type: (type_constructor
-          (type_constructor))))))
+      (record_type
+        (record_type_field
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor)))
+        (record_type_field
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor)))))))
 
 ================================================================================
 Let declaration with type annotation
