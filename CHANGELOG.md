@@ -1658,6 +1658,13 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Choreography** reference (`docs/choreography.md`): the test-script example used a
+  constructor (`Expect_Msg_Prod_Cons_1`) that does not exist for the labelled `Stream`
+  protocol (now `Expect_Item`), and the offer example passed a `RunError` to `panic`. The
+  session-outcome table now lists `NoOffer`, `AlreadyOffered` and `Unauthorized`. Two stale
+  limits are gone (roles may share a cluster node; hot patches no longer carry their own
+  runtime). The page also gains a reading guide, the full `Stream` protocol and role B,
+  and a separate "Certificate mode" section; "Per-role grants" moves after the walkthrough.
 - **Cluster certificates** operator guide (`docs/cluster-certificates.md`):
   keys, issuing, configuring nodes, renewal, revocation, what the MAC does and
   does not protect. The clustering reference's "Authentication & Handshake"
