@@ -573,12 +573,30 @@ let add_cmd =
   let force =
     Arg.(value & flag & info ["force"] ~doc:"Overwrite if dependency already exists")
   in
-  let run n g t b r p d do_ td f =
-    handle (Cmd_add.run ~name:n ~git:g ~tag:t ~branch:b ~rev:r ~path:p
+  let accept_caps =
+    Arg.(value & flag & info ["accept-caps"]
+           ~doc:"Keep the dependency even though it asks for capabilities \
+                 forge.caps.lock does not grant it, and record its new set \
+                 there. Without this flag such an add is refused and \
+                 forge.toml and forge.lock are left unchanged.")
+  in
+  let run n g t b r p d do_ td f ac =
+    handle (Cmd_add.run ~accept_caps:ac ~name:n ~git:g ~tag:t ~branch:b ~rev:r ~path:p
               ~dev:d ~dev_only:do_ ~test_dep:td ~force:f ())
   in
-  Cmd.v (Cmd.info "add" ~doc:"Add a dependency to forge.toml")
-    Term.(const run $ name $ git $ tag $ branch $ rev $ path $ dev $ dev_only $ test_dep $ force)
+  Cmd.v (Cmd.info "add" ~doc:"Add a dependency to forge.toml"
+           ~man:[
+             `S Manpage.s_description;
+             `P "Adds the dependency to forge.toml and resolves it. When the \
+                 project has a capability baseline (forge.caps.lock, from \
+                 $(b,forge audit --record)), every dependency the add brings in \
+                 or changes is then compared against it, in the mode the \
+                 baseline was recorded in. One that asks for a capability it \
+                 was not granted is refused: the delta is printed, forge.toml \
+                 and forge.lock are restored, and the command exits non-zero. \
+                 Re-run with $(b,--accept-caps) to keep it.";
+           ])
+    Term.(const run $ name $ git $ tag $ branch $ rev $ path $ dev $ dev_only $ test_dep $ force $ accept_caps)
 
 (* ------------------------------------------------------------------ forge help *)
 

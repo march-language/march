@@ -29,12 +29,17 @@ closes its declared-set gap). `march caps` is the underlying extractor. Design c
   while listing the rest, so a project can start using the check incrementally
   rather than needing a fully clean tree on day one. Done 2026-09-24, see [../progress/2026-09-24-forge-audit-toolchain-cache-flag.md](../progress/2026-09-24-forge-audit-toolchain-cache-flag.md).
 
-- [ ] **Wire into `forge add` / `forge outdated`.** Today the check is
-  explicit (`forge audit`). The moment that matters most is when a
-  dependency is added or upgraded — surface the delta there, and require
-  acknowledgement before writing the lockfile. That is the xz/event-stream
-  moment. Needs the speed item first, or every `forge add` pays minutes. (The cache has landed;
-  a cold `forge add` still pays one `march caps` run for the new dependency.)
+- [x] **Wire into `forge add` / `forge outdated`.** Done 2026-09-28, see
+  [../progress/2026-09-28-forge-add-outdated-cap-gate.md](../progress/2026-09-28-forge-add-outdated-cap-gate.md).
+  `forge add` gates every dependency the add touched against forge.caps.lock
+  (refuse + restore forge.toml/forge.lock, or `--accept-caps`), analyzing only
+  those; `forge outdated` previews each upgrade's new capabilities.
+
+- [ ] **`forge deps` after a hand-edited version bump is not gated.** Changing
+  a version in forge.toml and running `forge deps` upgrades without the
+  `forge add` check (`forge audit` in CI still fails on it). Gating it means
+  deciding what an unacknowledged widening does to a `forge deps` that is also
+  the offline/restore path, and which flag acknowledges it there.
 
 - [ ] **Registry cross-check.** Once the registry stores capability sets
   (`specs/todos/2026-08-03-registry-capability-notarization.md`), compare the
