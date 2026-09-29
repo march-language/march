@@ -20,6 +20,8 @@
 --              the actor as `CtlFrame`; end of stream is `LinkClosed(id, gen)`
 --   ticker     `Tick` every tick_ms; the SWIM period, the redial backoff and
 --              the stale-dial expiry all run off it
+--   (the readers, the ticker and the acceptor move to a new code epoch
+--   after a hot deploy: see "moving to a new code epoch" below)
 --   CtlWriter  one per peer: EVERY write to a control socket goes through it
 --              (two writers on one socket interleave frames)
 --
@@ -77,11 +79,20 @@ mod ClusterNode do
   -- node certificate (`config_from_env` with MARCH_NODE_CERT, or a record
   -- update). `secret` is kept for code that reads it; the handshake uses
   -- `auth`.
+  --
+  -- `cert_files` (certificate mode): the files the node re-reads its
+  -- certificate and key from while it runs, replacing them live when they
+  -- change (see `replace_cert`); `config_from_env` sets it.
   type CnConfig = { name : String, listen_port : Int, advertise : String, seeds : List(String),
                     secret : String, creation : Int, swim : Swim.Config, period_ms : Int,
                     tick_ms : Int, redial_min_ms : Int, redial_max_ms : Int,
                     dial_timeout_ms : Int, handshake_timeout_ms : Int, auth : ClusterAuth.Auth,
-                    revocations : List(NodeCert.SignedRevocation) }
+                    revocations : List(NodeCert.SignedRevocation), cert_files : Option(CertFiles) }
+
+  -- Where a certificate-mode node re-reads its certificate while it runs:
+  -- [cert] the certificate file, [key] the key file ("" when the key was
+  -- given as a value: it is then kept), checked every [poll_ms].
+  type CertFiles = { cert : String, key : String, poll_ms : Int }
 
   doc """
   A configuration with the defaults: SWIM period 1 s, ack timeout 500 ms,
@@ -98,7 +109,7 @@ mod ClusterNode do
     { name: name, listen_port: listen_port, advertise: adv, seeds: seeds, secret: secret,
       creation: creation, swim: Swim.config(500, 3000, 2), period_ms: 1000, tick_ms: 100,
       redial_min_ms: 200, redial_max_ms: 5000, dial_timeout_ms: 2000, handshake_timeout_ms: 2000,
-      auth: ClusterAuth.Secret(secret), revocations: Nil }
+      auth: ClusterAuth.Secret(secret), revocations: Nil, cert_files: None }
   end
 
   pfn env_or(name : String, dflt : String) : String do
@@ -119,6 +130,20 @@ mod ClusterNode do
         Err(_) -> v
       end
     else v end end
+  end
+
+  -- MARCH_NODE_CERT (and MARCH_NODE_KEY) as files to watch, when the
+  -- certificate was given as a file; MARCH_NODE_CERT_POLL_MS, default 10 s.
+  pfn cert_files_from_env() : Option(CertFiles) do
+    let cp = env_or("MARCH_NODE_CERT", "")
+    if File.exists(cp) do
+      let kp = env_or("MARCH_NODE_KEY", "")
+      let poll = match String.to_int(env_or("MARCH_NODE_CERT_POLL_MS", "")) do
+        Ok(n) -> if n > 0 do n else 10000 end
+        Err(_) -> 10000
+      end
+      Some({ cert: cp, key: if File.exists(kp) do kp else "" end, poll_ms: poll })
+    else None end
   end
 
   doc """
@@ -214,7 +239,10 @@ mod ClusterNode do
   certificate mode. Without MARCH_NODE_CERT the node runs in shared-secret
   mode, as before (MARCH_NODE_KEY alone is an error, not a silent fallback).
   MARCH_CLUSTER_REVOCATIONS (certificate mode; tokens or a file of them)
-  seeds the node's revocation list.
+  seeds the node's revocation list. When MARCH_NODE_CERT names a file, the
+  node re-reads it (and MARCH_NODE_KEY's file) every
+  MARCH_NODE_CERT_POLL_MS (default 10000) and replaces its certificate live
+  when they change (`replace_cert`; `cert_files`).
   """
   fn config_from_env() : Result(CnConfig, String) do
     match System.env("MARCH_NODE_NAME") do
@@ -242,7 +270,8 @@ mod ClusterNode do
                 Ok(creds) ->
                   match revocations_from_text(env_file("MARCH_CLUSTER_REVOCATIONS"), creds.operator_pubkey) do
                     Err(e) -> Err("cluster_node: MARCH_CLUSTER_REVOCATIONS: " ++ e)
-                    Ok(revs) -> Ok({ cfg with auth: ClusterAuth.Certified(creds), revocations: revs })
+                    Ok(revs) -> Ok({ cfg with auth: ClusterAuth.Certified(creds), revocations: revs,
+                                            cert_files: cert_files_from_env() })
                   end
               end
             end
@@ -287,10 +316,10 @@ mod ClusterNode do
   The control-connection frame tags, all ClusterNode's own and exempt from
   raw-send denial: SWIM 0-3, REGISTRY_SYNC_REQ/RESP 5-6, MONITOR_REQ 7,
   MONITOR_FIRE 8, DELIVERY_FAILED 10, CREDIT 11, MONITOR_ACK 12,
-  MEMBER_GOSSIP 13, MEMBERS_SYNC 14, REVOCATIONS 15. (9 is ACTOR_MSG, the only
-  frame on a data connection, and the only one checked.)
+  MEMBER_GOSSIP 13, MEMBERS_SYNC 14, REVOCATIONS 15, CERT_UPDATE 16. (9 is
+  ACTOR_MSG, the only frame on a data connection, and the only one checked.)
   """
-  fn control_tags() : List(Int) do [0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15] end
+  fn control_tags() : List(Int) do [0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16] end
 
   doc """
   May a raw ACTOR_MSG cross a link between a node holding [own] and a peer
@@ -328,13 +357,25 @@ mod ClusterNode do
   --                                the peer's certificate lacks `raw_send`);
   --                                `what` is "outbound <type tag>", "outbound
   --                                queue" or "inbound <type tag>"
+  --   CertReplaced(node_id, serial) a certificate replaced while running
+  --                                (`replace_cert`, step 12b): this node's
+  --                                own (node_id is this node's), or a linked
+  --                                peer's, from its CERT_UPDATE
+  --   CertRefused(node_id, why)    a replacement refused, the certificate in
+  --                                use kept: this node's own (a changed
+  --                                certificate file that does not check out,
+  --                                or `replace_cert`'s Err), or a peer's
+  --                                CERT_UPDATE
   type SecurityEvent = HandshakeRejected(String, String) | FrameRejected(String, Int) | RawSendRefused(String, String)
+                     | CertReplaced(String, String) | CertRefused(String, String)
 
   fn security_text(ev : SecurityEvent) : String do
     match ev do
       HandshakeRejected(who, why) -> "handshake with " ++ who ++ " rejected: " ++ why
       FrameRejected(id, n) -> "frame from " ++ id ++ " failed its MAC (" ++ int_to_string(n) ++ " on that connection)"
       RawSendRefused(id, what) -> "raw send refused (" ++ what ++ "): no raw_send between this node and " ++ id
+      CertReplaced(id, serial) -> "certificate of " ++ id ++ " replaced (serial " ++ serial ++ ")"
+      CertRefused(id, why) -> "certificate replacement for " ++ id ++ " refused: " ++ why
     end
   end
 
@@ -383,7 +424,8 @@ mod ClusterNode do
     vis : Map(String, GlobalPid.Pid),    -- the visible binding of every name, as last reported
     certs : Map(String, NodeCert.Cert),  -- each certificate-mode peer's verified certificate
     revs : List(NodeCert.SignedRevocation), -- every operator-signed revocation known here
-    cert_dead : Map(String, String)      -- peers dropped for their certificate -> why
+    cert_dead : Map(String, String),     -- peers dropped for their certificate -> why
+    rotated : Bool                       -- this node's certificate was replaced since start
   }
 
   -- What a watcher of a name sees. `Lost` goes to watchers on the node that
@@ -412,7 +454,8 @@ mod ClusterNode do
       links: Map.empty(), halves: Map.empty(), gen: 0, dialing: Map.empty(), backoff: Map.empty(),
       pending: Nil, relays: Map.empty(), refused: Nil, seed_ids: Map.empty(), rejoining: Nil, stopped: false,
       reg: GlobalRegistry.empty(), regs: Map.empty(), vis: Map.empty(), certs: Map.empty(),
-      revs: List.filter(cfg.revocations, fn r -> Result.is_ok(check_revocation(cfg, r))), cert_dead: Map.empty() }
+      revs: List.filter(cfg.revocations, fn r -> Result.is_ok(check_revocation(cfg, r))), cert_dead: Map.empty(),
+      rotated: false }
   end
 
   -- ── revocation and expiry ──────────────────────────────────────────────
@@ -520,6 +563,115 @@ mod ClusterNode do
     match cert do
       Some(c) -> { st with certs: Map.insert(st.certs, id, c, Map.str_cmp) }
       None -> st
+    end
+  end
+
+  -- ── live certificate replacement (distributed-deploys step 12b) ─────────
+  -- Issuance stays offline (D39): the operator (or CI) issues the new
+  -- certificate, and the node takes it while it runs (`replace_cert`, or a
+  -- changed MARCH_NODE_CERT file). New handshakes present it at once. A link
+  -- already up is NOT re-dialled -- a replaced link cancels every session on
+  -- it -- but re-authenticated in place: the node sends each linked peer a
+  -- CERT_UPDATE control frame (tag 16) with the new certificate and a proof,
+  -- an ed25519 signature by the NEW certificate's key over (sender, receiver,
+  -- certificate). The frame rides the link's MAC, so only the peer that did
+  -- the link's handshake can send it; the proof shows that peer holds the
+  -- new key, so a certificate for a new key (a rotation after a key leak)
+  -- is as safe to take in place as a renewal of the same key. The receiver
+  -- checks it as a handshake would -- operator's signature, not expired, not
+  -- revoked, and naming the same node -- and then holds it for that link:
+  -- the per-tick expiry recheck, `peer_cert` and the raw-send and role
+  -- checks all read the new one, so the link outlives the old certificate.
+  -- A refused update changes nothing (the old certificate expires as it
+  -- would have). A link formed after a replacement is sent one too, in case
+  -- its handshake began before it. A peer that predates CERT_UPDATE ignores
+  -- the frame and drops the link when the old certificate expires; the
+  -- redial then handshakes under the new one (sessions on it are lost).
+
+  fn tag_cert_update() : Int do 16 end
+
+  doc "What a CERT_UPDATE's proof signs: the sender, the receiver and the certificate's wire bytes."
+  fn cert_update_message(signed : NodeCert.Signed, from_id : String, to_id : String) : Bytes do
+    Bytes.concat(Bytes.from_string("march-cert-update-v1 " ++ from_id ++ " " ++ to_id ++ " "),
+                 Bytes.from_list(NodeCert.to_bytes(signed)))
+  end
+
+  fn encode_cert_update(signed : NodeCert.Signed, proof : Bytes) : List(Int) do
+    Msgpack.encode(Msgpack.array([Msgpack.int(tag_cert_update()), Msgpack.bin(NodeCert.to_bytes(signed)),
+                                  Msgpack.bin(Bytes.to_list(proof))]))
+  end
+
+  fn decode_cert_update(frame : List(Int)) : Result((NodeCert.Signed, Bytes), String) do
+    match Msgpack.decode(frame) do
+      Ok(Msgpack.Array([Msgpack.Int(16), Msgpack.Bin(cb), Msgpack.Bin(pb)])) ->
+        match NodeCert.from_bytes(cb) do
+          Err(e) -> Err(e)
+          Ok(signed) -> Ok((signed, Bytes.from_list(pb)))
+        end
+      _ -> Err("malformed CERT_UPDATE frame")
+    end
+  end
+
+  doc "The CERT_UPDATE frame node [from_id] sends [to_id]: [signed], with a proof by its key [sk]."
+  fn sign_cert_update(signed : NodeCert.Signed, sk : Bytes, from_id : String, to_id : String) : List(Int) do
+    encode_cert_update(signed, ed25519_sign(sk, cert_update_message(signed, from_id, to_id)))
+  end
+
+  pfn cert_update_for(st : CnState, creds : NodeCert.Credentials, to_id : String) : List(Int) do
+    sign_cert_update(creds.signed, creds.secret_key, st.me, to_id)
+  end
+
+  doc """
+  This node's certificate is replaced by [signed], whose key is [sk] (both
+  already checked: `replace_cert`). Dials handshake with it from now on, and
+  every linked peer is sent a CERT_UPDATE. A shared-secret node is unchanged.
+  """
+  fn core_replace_cert(st : CnState, signed : NodeCert.Signed, sk : Bytes) : (CnState, List(CnEffect)) do
+    match st.cfg.auth do
+      ClusterAuth.Secret(_) -> (st, Nil)
+      ClusterAuth.Certified(cr) ->
+        let creds = { cr with signed: signed, secret_key: sk }
+        let st1 = { st with cfg: { st.cfg with auth: ClusterAuth.Certified(creds) }, rotated: true }
+        let out = (st1, List.map(linked_ids(st1), fn id -> Send(id, cert_update_for(st1, creds, id))))
+        out
+    end
+  end
+
+  doc """
+  A CERT_UPDATE from linked peer [from], at [now_s] (unix seconds): the
+  certificate must verify under the operator key, be unexpired and not
+  revoked, name the same node as the one [from] presented before, and come
+  with a proof by its own key for this sender and receiver. Ok with the new
+  state (holding it as [from]'s certificate) and the certificate, or Err with
+  why it was refused.
+  """
+  fn core_peer_cert_update(st : CnState, from : String, frame : List(Int), now_s : Int)
+      : Result((CnState, NodeCert.Cert), String) do
+    match (operator_key(st.cfg), Map.get(st.certs, from, Map.str_cmp)) do
+      (None, _) -> Err("this node runs in shared-secret mode")
+      (_, None) -> Err("no certificate on record for this peer")
+      (Some(op), Some(old)) ->
+        match decode_cert_update(frame) do
+          Err(e) -> Err(e)
+          Ok((signed, proof)) ->
+            match NodeCert.verify(signed, op, now_s) do
+              Err(e) -> Err(e)
+              Ok(c) ->
+                if NodeCert.is_revoked(c, core_revocations(st)) do Err("certificate revoked")
+                else if NodeCert.node_name(c.node) != NodeCert.node_name(old.node) do
+                  Err("the new certificate names " ++ c.node ++ ", not " ++ old.node)
+                else
+                  match NodeCert.key_from_hex(c.pubkey, 32) do
+                    Err(e) -> Err(e)
+                    Ok(pk) ->
+                      if ed25519_verify(pk, cert_update_message(signed, from, st.me), proof) do
+                        let out = Ok(({ st with certs: Map.insert(st.certs, from, c, Map.str_cmp) }, c))
+                        out
+                      else Err("the proof is not by the new certificate's key") end
+                  end
+                end end
+            end
+        end
     end
   end
 
@@ -808,7 +960,13 @@ mod ClusterNode do
       let sync = SwimDriver.encode_members_sync(List.append(core_members(st3), Cons(obs, Nil)))
       let regsync = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(st3.reg), GlobalRegistry.all_entries(st3.reg))
       let revsync = if List.is_empty(st3.revs) do Nil else Cons(Send(id, encode_revocations(st3.revs)), Nil) end
-      let out = (st3, List.append(drops, Cons(Install(l), Cons(Send(id, sync), Cons(Send(id, regsync), revsync)))))
+      -- After a replacement the handshake may have begun under the old
+      -- certificate: tell the peer the current one.
+      let certsync = match st3.cfg.auth do
+        ClusterAuth.Certified(cr) -> if st3.rotated do Cons(Send(id, cert_update_for(st3, cr, id)), Nil) else Nil end
+        ClusterAuth.Secret(_) -> Nil
+      end
+      let out = (st3, List.append(drops, Cons(Install(l), Cons(Send(id, sync), Cons(Send(id, regsync), List.append(revsync, certsync))))))
       out
     else
       (st2, drops)
@@ -1346,7 +1504,7 @@ mod ClusterNode do
                   failed : Vault(Int -> String -> Unit),
                   certs : Vault(NodeCert.Cert), sec : Vault(SecurityEvent -> Unit),
                   revs : Vault(NodeCert.Revocation), op_pub : Bytes,
-                  own : Option(NodeCert.Cert), registrants : Vault(String) }
+                  auth : Vault(ClusterAuth.Auth), strs : Vault(String), registrants : Vault(String) }
 
   -- Watches one registered process: its `Down` unregisters its names. `Down`
   -- is a raw mailbox message, so the watcher reads it with `receive` (the
@@ -1382,7 +1540,8 @@ mod ClusterNode do
                  failed: Vault.new("cluster_node_unset_failed"),
                  certs: Vault.new("cluster_node_unset_certs"),
                  sec: Vault.new("cluster_node_unset_sec"),
-                 revs: Vault.new("cluster_node_unset_revs"), op_pub: Bytes.empty(), own: None,
+                 revs: Vault.new("cluster_node_unset_revs"), op_pub: Bytes.empty(),
+                 auth: Vault.new("cluster_node_unset_auth"), strs: Vault.new("cluster_node_unset_strs"),
                  registrants: Vault.new("cluster_node_unset_registrants") },
             started: false }
     on Boot(st0 : CnState, h0 : CnHandle) do
@@ -1424,10 +1583,30 @@ mod ClusterNode do
     end
     on CtlFrame(from : String, gen : Int, tag : Int, frame : List(Int)) do
       if current_gen(state.st, from, gen) do
-        step_io(state.st, state.h, core_frame(state.st, from, tag, frame), state.started)
+        if tag == tag_cert_update() do
+          match core_peer_cert_update(state.st, from, frame, unix_time_ms() / 1000) do
+            Ok((st1, c)) ->
+              security(state.h, CertReplaced(from, c.serial))
+              step_io(st1, state.h, (st1, Nil), state.started)
+            Err(why) ->
+              security(state.h, CertRefused(from, why))
+              state
+          end
+        else
+          step_io(state.st, state.h, core_frame(state.st, from, tag, frame), state.started)
+        end
       else
         state
       end
+    end
+    -- This node's certificate, replaced (`h_replace_cert` has checked it and
+    -- set it for handshakes): dials use it now, and every peer is told.
+    on ReplaceCert(signed : NodeCert.Signed, sk : Bytes) do
+      let out = core_replace_cert(state.st, signed, sk)
+      match out do
+        (st1, _) -> Vault.set(state.h.auth, "a", st1.cfg.auth)
+      end
+      step_io(state.st, state.h, out, state.started)
     end
     on LinkClosed(id : String, gen : Int) do
       step_io(state.st, state.h, core_link_closed(state.st, id, gen), state.started)
@@ -1456,6 +1635,46 @@ mod ClusterNode do
     end
     on LocalDown(pid : Int) do
       step_io(state.st, state.h, core_local_down(state.st, pid), state.started)
+    end
+    -- A link reader, the ticker or the acceptor found its code epoch draining
+    -- and stopped (see "moving to a new code epoch"): it carries on in a task
+    -- spawned HERE, on this actor's epoch, which its marker has already
+    -- advanced. A reader is respawned even after stop: it must still see its
+    -- connection end and release it.
+    on MoveReader(kind : Int, l : CnLink, frame : List(Int), rest : List(Int)) do
+      let node = pid_of_int(state.h.pid)
+      let h = state.h
+      let creation = state.st.cfg.creation
+      let not_before = unix_time_ms() + move_interval_ms()
+      let _t = if kind == 0 do task_spawn(fn _ -> read_control(node, h, l, Some(frame), rest, not_before))
+               else task_spawn(fn _ -> read_data(node, h, creation, l, Some(frame), rest, not_before)) end
+      state
+    end
+    on MoveTicker() do
+      let node = pid_of_int(state.h.pid)
+      let h = state.h
+      let files = state.st.cfg.cert_files
+      let tick_ms = state.st.cfg.tick_ms
+      let not_before = unix_time_ms() + move_interval_ms()
+      let _t = task_spawn(fn _ -> tick_loop(node, h, files, tick_ms, not_before))
+      state
+    end
+    on MoveAcceptor() do
+      let h = state.h
+      let listen_fd = Vault.get_or(h.meta, "listen_fd", -1)
+      if Vault.get(h.meta, "stopped") != None do
+        -- Nobody is parked on the listen socket now: closing it is safe.
+        tcp_close(listen_fd)
+      else
+        let node = pid_of_int(h.pid)
+        let cfg = state.st.cfg
+        let me = NodeIdentity.make(cfg.name, "pk-" ++ cfg.name, cfg.creation)
+        let meta = h.meta
+        let not_before = unix_time_ms() + move_interval_ms()
+        let _t = task_spawn(fn _ -> accept_loop(node, h, cfg, me, listen_fd, meta, not_before))
+        ()
+      end
+      state
     end
     on Shutdown() do
       let h = state.h
@@ -1597,8 +1816,8 @@ mod ClusterNode do
           None -> ()
         end
         let node = pid_of_int(h.pid)
-        let _ = task_spawn(fn _ -> read_control(node, h, l))
-        discard(task_spawn(fn _ -> read_data(node, h, st.cfg.creation, l)))
+        let _ = task_spawn(fn _ -> read_control(node, h, l, None, Nil, 0))
+        discard(task_spawn(fn _ -> read_data(node, h, st.cfg.creation, l, None, Nil, 0)))
       Drop(l, why) ->
         -- The data reader reads the cause when its connection ends, and
         -- tells the routes; set before the sockets are shut.
@@ -1687,7 +1906,7 @@ mod ClusterNode do
         let msg = Socket.error_message(e)
         Err((msg, refused_msg(msg)))
       Ok(fd) ->
-        match NetKernel.handshake_auth(fd, me, cfg.auth, NetKernel.fresh_nonce(), role,
+        match NetKernel.handshake_auth(fd, me, h_auth(h, cfg.auth), NetKernel.fresh_nonce(), role,
                                        cfg.advertise, cfg.handshake_timeout_ms) do
           Err(e) ->
             tcp_close(fd)
@@ -1705,7 +1924,27 @@ mod ClusterNode do
   -- A raw frame between this node and [peer_id]: allowed? (Its own node,
   -- the loopback, always.)
   pfn h_raw_ok(h : CnHandle, peer_id : String) : Bool do
-    peer_id == h.node_id || raw_allowed(h.own, Vault.get(h.certs, peer_id))
+    peer_id == h.node_id || raw_allowed(h_own(h), Vault.get(h.certs, peer_id))
+  end
+
+  -- This node's credentials as of now ([dflt] before `start` has set them).
+  pfn h_auth(h : CnHandle, dflt : ClusterAuth.Auth) : ClusterAuth.Auth do
+    match Vault.get(h.auth, "a") do
+      Some(a) -> a
+      None -> dflt
+    end
+  end
+
+  -- This node's certificate as of now, or None in shared-secret mode.
+  pfn h_own(h : CnHandle) : Option(NodeCert.Cert) do
+    match Vault.get(h.auth, "a") do
+      Some(a) ->
+        match a do
+          ClusterAuth.Certified(cr) -> Some(cr.signed.cert)
+          ClusterAuth.Secret(_) -> None
+        end
+      None -> None
+    end
   end
 
   -- Count and report a refused raw send.
@@ -1769,46 +2008,58 @@ mod ClusterNode do
   --   10 DELIVERY_FAILED  to the failure handler
   --   11 CREDIT       to this link's data queue
   --   12 MONITOR_ACK  forget the pending fire
-  pfn read_control(node, h : CnHandle, l : CnLink) : Int do
-    let _ = PeerReader.serve(l.cfd, Nil, fn (tag, frame) -> do
-      if tag == 7 do
-        match DistLink.decode_req(frame) do
-          Ok((_claimed, watcher_ref, target_pid)) -> dist_monitor_register(target_pid, l.node_id, watcher_ref, -1)
-          Err(_) -> ()
-        end
-      else if tag == 8 do
-        on_fire(h, l, frame)
-      else if tag == 10 do
-        match NodeSend.decode_failed(frame) do
-          Ok((seq, reason)) ->
-            match Vault.get(h.failed, "f") do
-              Some(f) -> f(seq, reason)
-              None -> ()
-            end
-          Err(_) -> ()
-        end
-      else if tag == 11 do
-        match NodeQueue.decode_credit(frame) do
-          Ok(total) ->
-            match Vault.get(h.qs, "q" ++ int_to_string(l.cfd)) do
-              Some(w) -> NodeQueue.credit((pid_of_int(w), l.dfd), total)
-              None -> ()
-            end
-          Err(_) -> ()
-        end
-      else if tag == 12 do
-        match DistLink.decode_ack(frame) do
-          Ok((target_pid, watcher_ref)) -> dist_monitor_ack(target_pid, watcher_ref)
-          Err(_) -> ()
-        end
-      else
-        discard(send(node, CtlFrame(l.node_id, l.gen, tag, frame)))
-      end end end end end
-      Ok(true)
-    end)
-    send(node, LinkClosed(l.node_id, l.gen))
-    release_link(h, l, 3)
-    0
+  pfn read_control(node, h : CnHandle, l : CnLink, first : Option(List(Int)), buf : List(Int),
+                   not_before : Int) : Int do
+    let on_frame = fn (tag, frame) -> control_frame(node, h, l, tag, frame)
+    match first do
+      Some(f) -> on_frame(PeerReader.tag_of(f), f)
+      None -> ()
+    end
+    match read_link(l.cfd, buf, not_before, on_frame) do
+      Some((frame, rest)) ->
+        send(node, MoveReader(0, l, frame, rest))
+        0
+      None ->
+        send(node, LinkClosed(l.node_id, l.gen))
+        release_link(h, l, 3)
+        0
+    end
+  end
+
+  pfn control_frame(node, h : CnHandle, l : CnLink, tag : Int, frame : List(Int)) : () do
+    if tag == 7 do
+      match DistLink.decode_req(frame) do
+        Ok((_claimed, watcher_ref, target_pid)) -> dist_monitor_register(target_pid, l.node_id, watcher_ref, -1)
+        Err(_) -> ()
+      end
+    else if tag == 8 do
+      on_fire(h, l, frame)
+    else if tag == 10 do
+      match NodeSend.decode_failed(frame) do
+        Ok((seq, reason)) ->
+          match Vault.get(h.failed, "f") do
+            Some(f) -> f(seq, reason)
+            None -> ()
+          end
+        Err(_) -> ()
+      end
+    else if tag == 11 do
+      match NodeQueue.decode_credit(frame) do
+        Ok(total) ->
+          match Vault.get(h.qs, "q" ++ int_to_string(l.cfd)) do
+            Some(w) -> NodeQueue.credit((pid_of_int(w), l.dfd), total)
+            None -> ()
+          end
+        Err(_) -> ()
+      end
+    else if tag == 12 do
+      match DistLink.decode_ack(frame) do
+        Ok((target_pid, watcher_ref)) -> dist_monitor_ack(target_pid, watcher_ref)
+        Err(_) -> ()
+      end
+    else
+      discard(send(node, CtlFrame(l.node_id, l.gen, tag, frame)))
+    end end end end end
   end
 
   -- The data reader: every ACTOR_MSG goes to its route -- by destination
@@ -1822,41 +2073,104 @@ mod ClusterNode do
   -- delivery it made, so a route that forwards both to one mailbox sees the
   -- close after the last delivery (the ordering SessionNode's drain rule
   -- depends on).
-  pfn read_data(node, h : CnHandle, creation : Int, l : CnLink) : Int do
-    let _ = PeerReader.serve(l.dfd, Nil, fn (tag, frame) -> do
-      if tag == NodeSend.tag_actor_msg() do
-        match NodeSend.decode_msg(frame) do
-          Err(_) -> ()
-          Ok(d0) ->
-            -- The sender is the link's verified peer, never a claim in the frame.
-            let d = { d0 with from_node: l.node_id }
-            announce_consumed(h, l, List.length(frame) + 4)
-            -- The delivery's origin rides the mailbox node of whatever the
-            -- route sends (DD step-6 follow-up 1): an actor that later drops
-            -- the message (a hot deploy changed its message type) answers
-            -- DELIVERY_FAILED through `delivery_failed_watch`'s hook, on
-            -- this link's control writer. Set around the route only: the
-            -- route runs to completion in this task's turn.
-            delivery_origin_set(l.cw, d.seq)
-            let outcome = if d.to_creation != creation do
-              Err("stale creation " ++ int_to_string(d.to_creation) ++ ", node is at " ++ int_to_string(creation))
-            else deliver_local(h, d) end
-            delivery_origin_clear()
-            match outcome do
-              Ok(_) -> ()
-              Err(reason) -> discard(send(pid_of_int(l.cw), CtlWrite(NodeSend.encode_failed(d.seq, reason))))
-            end
-        end
-      else ()
-      end
-      Ok(true)
-    end)
+  pfn read_data(node, h : CnHandle, creation : Int, l : CnLink, first : Option(List(Int)), buf : List(Int),
+                not_before : Int) : Int do
+    let on_frame = fn (tag, frame) -> data_frame(h, creation, l, tag, frame)
+    match first do
+      Some(f) -> on_frame(PeerReader.tag_of(f), f)
+      None -> ()
+    end
+    match read_link(l.dfd, buf, not_before, on_frame) do
+      Some((frame, rest)) ->
+        send(node, MoveReader(1, l, frame, rest))
+        0
+      None ->
+        data_closed(h, l)
+        send(node, LinkClosed(l.node_id, l.gen))
+        release_link(h, l, 3)
+        0
+    end
+  end
+
+  pfn data_closed(h : CnHandle, l : CnLink) : () do
     let why = Vault.get_or(h.causes, "c" ++ int_to_string(l.cfd), "connection lost")
     Vault.drop(h.causes, "c" ++ int_to_string(l.cfd))
     discard(List.map(Vault.all(h.closes), fn kv -> match kv do (_k, f) -> f(l.node_id, why) end))
-    send(node, LinkClosed(l.node_id, l.gen))
-    release_link(h, l, 3)
-    0
+  end
+
+  pfn data_frame(h : CnHandle, creation : Int, l : CnLink, tag : Int, frame : List(Int)) : () do
+    if tag == NodeSend.tag_actor_msg() do
+      match NodeSend.decode_msg(frame) do
+        Err(_) -> ()
+        Ok(d0) ->
+          -- The sender is the link's verified peer, never a claim in the frame.
+          let d = { d0 with from_node: l.node_id }
+          announce_consumed(h, l, List.length(frame) + 4)
+          -- The delivery's origin rides the mailbox node of whatever the
+          -- route sends (DD step-6 follow-up 1): an actor that later drops
+          -- the message (a hot deploy changed its message type) answers
+          -- DELIVERY_FAILED through `delivery_failed_watch`'s hook, on
+          -- this link's control writer. Set around the route only: the
+          -- route runs to completion in this task's turn.
+          delivery_origin_set(l.cw, d.seq)
+          let outcome = if d.to_creation != creation do
+            Err("stale creation " ++ int_to_string(d.to_creation) ++ ", node is at " ++ int_to_string(creation))
+          else deliver_local(h, d) end
+          delivery_origin_clear()
+          match outcome do
+            Ok(_) -> ()
+            Err(reason) -> discard(send(pid_of_int(l.cw), CtlWrite(NodeSend.encode_failed(d.seq, reason))))
+          end
+      end
+    else ()
+    end
+  end
+
+  -- ── moving to a new code epoch ─────────────────────────────────────────
+  -- A task runs the code of the epoch it was spawned in and never advances
+  -- (plan II.4.3). The node's long-lived tasks -- each link's two readers,
+  -- the ticker, the acceptor -- would keep the epoch of the link's forming
+  -- (or of the node's start) for good: a reader would route every later
+  -- delivery through that epoch's code, and its `send`s stamp the message
+  -- with that epoch, so after a deploy that changes an actor's message type
+  -- a delivery from a sender already on the new format went through
+  -- migrate_msg or was dropped; and the old epoch stayed pinned. So each of
+  -- them, once it finds its epoch draining (`epoch_draining()`: true after a
+  -- deploy until nothing pins the old epoch), hands its work to a task the
+  -- node actor spawns (MoveReader/MoveTicker/MoveAcceptor): that actor has
+  -- passed its marker, so the task runs the new code. Topology's placement
+  -- loop moves the same way.
+  --
+  -- A reader checks after it reads a frame and BEFORE routing it, and hands
+  -- over that frame and the bytes it read past it: the new reader routes
+  -- the frame first, so order is kept and nothing is read twice (the MAC
+  -- state is the fd's, not the task's). A reader of a quiet connection moves
+  -- at its next frame (a control connection carries SWIM every period), the
+  -- acceptor at its next connection, the ticker within a tick.
+  --
+  -- A drain can also cover the CURRENT epoch (`SessionNode.drain_epochs`,
+  -- Topology's SIGTERM drain): a moved task is then still draining. It does
+  -- not move again before [not_before] (move_interval_ms() after it was
+  -- spawned), which bounds that to one move per task per interval, and still
+  -- lets a task moved just before a second deploy follow it.
+
+  pfn move_interval_ms() : Int do 1000 end
+
+  -- Read [fd]'s frames, handing each to [on_frame], until the connection
+  -- ends (None) or this task's epoch is draining at or after [not_before]:
+  -- then Some((frame, rest)), the frame just read (not yet handled) and the
+  -- bytes read past it.
+  pfn read_link(fd : Int, buf : List(Int), not_before : Int, on_frame : Int -> List(Int) -> ())
+      : Option((List(Int), List(Int))) do
+    match NetKernel.recv_frame(fd, buf) do
+      Err(_) -> None
+      Ok((frame, rest)) ->
+        if epoch_draining() && unix_time_ms() >= not_before do Some((frame, rest))
+        else
+          on_frame(PeerReader.tag_of(frame), frame)
+          read_link(fd, rest, not_before, on_frame)
+        end
+    end
   end
 
   -- The actor loop dropped a remote delivery it had already accepted (a hot
@@ -1991,7 +2305,7 @@ mod ClusterNode do
   end
 
   pfn handshake_in(node, h : CnHandle, cfg : CnConfig, me : NodeIdentity.Identity, fd : Int) : Int do
-    match NetKernel.handshake_auth(fd, me, cfg.auth, NetKernel.fresh_nonce(), Handshake.role_control(),
+    match NetKernel.handshake_auth(fd, me, h_auth(h, cfg.auth), NetKernel.fresh_nonce(), Handshake.role_control(),
                                    cfg.advertise, cfg.handshake_timeout_ms) do
       Err(e) ->
         tcp_close(fd)
@@ -2005,7 +2319,8 @@ mod ClusterNode do
     end
   end
 
-  pfn accept_loop(node, h : CnHandle, cfg : CnConfig, me : NodeIdentity.Identity, listen_fd : Int, meta : Vault(Int)) : Int do
+  pfn accept_loop(node, h : CnHandle, cfg : CnConfig, me : NodeIdentity.Identity, listen_fd : Int, meta : Vault(Int),
+                  not_before : Int) : Int do
     match tcp_accept(listen_fd) do
       Err(_) -> 0
       Ok(fd) ->
@@ -2015,18 +2330,67 @@ mod ClusterNode do
           0
         else
           let _ = task_spawn(fn _ -> handshake_in(node, h, cfg, me, fd))
-          accept_loop(node, h, cfg, me, listen_fd, meta)
+          if epoch_draining() && unix_time_ms() >= not_before do
+            -- Move to the new code epoch (see above); the listen socket stays open.
+            send(node, MoveAcceptor())
+            0
+          else accept_loop(node, h, cfg, me, listen_fd, meta, not_before) end
         end
     end
   end
 
-  pfn tick_loop(node, tick_ms : Int, meta : Vault(Int)) : Int do
+  pfn tick_loop(node, h : CnHandle, files : Option(CertFiles), tick_ms : Int, not_before : Int) : Int do
     sleep_ms(tick_ms)
-    if Vault.get(meta, "stopped") != None do
+    if Vault.get(h.meta, "stopped") != None do
       0
     else
       send(node, Tick(unix_time_ms()))
-      tick_loop(node, tick_ms, meta)
+      watch_cert_files(h, files)
+      if epoch_draining() && unix_time_ms() >= not_before do
+        -- Move to the new code epoch (see above).
+        send(node, MoveTicker())
+        0
+      else tick_loop(node, h, files, tick_ms, not_before) end
+    end
+  end
+
+  -- ── the certificate files ──────────────────────────────────────────────
+  -- How a replacement is triggered from outside (step 12b): the ticker
+  -- re-reads MARCH_NODE_CERT's file (and MARCH_NODE_KEY's) every
+  -- `cert_files.poll_ms` and, when either changed, replaces the certificate
+  -- through `replace_cert`. A file rather than a signal: SIGHUP is
+  -- Topology's reload and SIGUSR1 the scheduler's, and what renews
+  -- certificates in practice (a Kubernetes secret volume, cert-manager, a
+  -- Vault agent, a CI job copying files) rewrites the file and signals no
+  -- one. Each content is tried once: a refusal (a half-written file, or a
+  -- certificate for a new key whose key file is not there yet) is reported
+  -- as CertRefused and tried again when either file changes.
+
+  pfn read_trimmed(path : String) : String do
+    match File.read(path) do
+      Ok(t) -> String.trim(t)
+      Err(_) -> ""
+    end
+  end
+
+  pfn cert_files_text(f : CertFiles) : String do
+    read_trimmed(f.cert) ++ "\n" ++ (if String.is_empty(f.key) do "" else read_trimmed(f.key) end)
+  end
+
+  pfn watch_cert_files(h : CnHandle, files : Option(CertFiles)) : () do
+    match files do
+      None -> ()
+      Some(f) ->
+        let now = unix_time_ms()
+        if now < Vault.get_or(h.meta, "cert_poll_at", 0) do () else
+          Vault.set(h.meta, "cert_poll_at", now + f.poll_ms)
+          let seen = cert_files_text(f)
+          if Vault.get(h.strs, "cert_files") == Some(seen) do () else
+            Vault.set(h.strs, "cert_files", seen)
+            let key = if String.is_empty(f.key) do "" else read_trimmed(f.key) end
+            discard(h_replace_cert(h, read_trimmed(f.cert), key))
+          end
+        end
     end
   end
 
@@ -2085,6 +2449,7 @@ mod ClusterNode do
     raw_refused        : () -> Int,
     revoke             : String -> Result((), String),
     revocations        : () -> List(NodeCert.Revocation),
+    replace_cert       : String -> String -> Result(NodeCert.Cert, String),
     on_security_event  : (SecurityEvent -> Unit) -> Int,
     off_security_event : Int -> ()
   }
@@ -2147,6 +2512,7 @@ mod ClusterNode do
       raw_refused: fn _ -> unsupported("raw_refused"),
       revoke: fn _ -> unsupported("revoke"),
       revocations: fn _ -> unsupported("revocations"),
+      replace_cert: fn (_, _) -> unsupported("replace_cert"),
       on_security_event: fn _ -> unsupported("on_security_event"),
       off_security_event: fn _ -> unsupported("off_security_event") }
   end
@@ -2185,11 +2551,12 @@ mod ClusterNode do
       monitor_remote: fn (target, on_down) -> h_monitor_remote(h, target, on_down),
       demonitor_remote: fn (target, r) -> Vault.drop(h.downs, mkey(target.node_id, target.local_pid) ++ int_to_string(r)),
       peer_cert: fn id -> Vault.get(h.certs, id),
-      own_cert: fn _ -> h.own,
+      own_cert: fn _ -> h_own(h),
       frames_rejected: fn _ -> Vault.get_or(h.meta, "frames_rejected", 0),
       raw_refused: fn _ -> Vault.get_or(h.meta, "raw_refused", 0),
       revoke: fn token -> h_revoke(h, token),
       revocations: fn _ -> List.map(Vault.all(h.revs), fn kv -> match kv do (_k, r) -> r end),
+      replace_cert: fn (cert_text, key_hex) -> h_replace_cert(h, cert_text, key_hex),
       on_security_event: fn f -> h_on_security_event(h, f),
       off_security_event: fn id -> Vault.drop(h.sec, int_to_string(id)) }
   end
@@ -2210,6 +2577,15 @@ mod ClusterNode do
   pfn h_stop(h : CnHandle) : () do
     Vault.set(h.meta, "stopped", 1)
     send(node_pid(h), Shutdown())
+    -- The loopback link goes with the node: `queue_for(own id)` answers None
+    -- from here on, and its writer drops its sink (behind any frame already
+    -- queued, which `deliver_loopback` then refuses as stopped).
+    match loopback(h) do
+      Some(q) ->
+        Vault.drop(h.qs, "loop")
+        NodeQueue.close_fd(q)
+      None -> ()
+    end
     -- Wake the acceptor, parked in tcp_accept, with a connection of our
     -- own: it sees the stop flag and returns. (Closing the listen socket
     -- under a parked accept does not wake it on every platform.)
@@ -2380,6 +2756,8 @@ mod ClusterNode do
 
   -- An ACTOR_MSG this node sent itself: routed as the data reader routes one
   -- from a peer; a failure goes to the DELIVERY_FAILED handler directly.
+  -- Once the node is stopped nothing is routed: a frame queued before
+  -- `stop` is answered "node stopped".
   pfn deliver_loopback(h : CnHandle, frame : Bytes) : () do
     match NetFrame.decode(Bytes.to_list(frame)) do
       None -> ()
@@ -2391,9 +2769,10 @@ mod ClusterNode do
             -- A negative origin: the loopback, whose failures go to this
             -- node's own handler (see `delivery_failed_hook`).
             delivery_origin_set(0 - 1, d.seq)
-            let outcome = if d.to_creation != Vault.get_or(h.meta, "creation", 0) do
+            let outcome = if Vault.get(h.meta, "stopped") != None do Err("node stopped")
+            else if d.to_creation != Vault.get_or(h.meta, "creation", 0) do
               Err("stale creation " ++ int_to_string(d.to_creation) ++ ", node is at " ++ int_to_string(Vault.get_or(h.meta, "creation", 0)))
-            else deliver_local(h, d) end
+            else deliver_local(h, d) end end
             delivery_origin_clear()
             match outcome do
               Ok(_) -> ()
@@ -2467,6 +2846,63 @@ mod ClusterNode do
     end
   end
 
+  -- `replace_cert`: check the new certificate (and key) here, in the caller,
+  -- then make it this node's at once for handshakes and `own_cert`; the node
+  -- actor then takes it for dials and tells every linked peer (ReplaceCert).
+  -- Reported either way (CertReplaced / CertRefused).
+  pfn h_replace_cert(h : CnHandle, cert_text : String, key_hex : String) : Result(NodeCert.Cert, String) do
+    match replace_checked(h, cert_text, key_hex) do
+      Err(e) ->
+        security(h, CertRefused(h.node_id, e))
+        Err(e)
+      Ok((cr, signed, sk)) ->
+        Vault.set(h.auth, "a", ClusterAuth.Certified({ cr with signed: signed, secret_key: sk }))
+        send(node_pid(h), ReplaceCert(signed, sk))
+        security(h, CertReplaced(h.node_id, signed.cert.serial))
+        Ok(signed.cert)
+    end
+  end
+
+  -- The current credentials, and the new certificate and key once they
+  -- admit this node: the operator's signature, unexpired, naming this node
+  -- and the key, not revoked. [key_hex] "" keeps the current key.
+  pfn replace_checked(h : CnHandle, cert_text : String, key_hex : String)
+      : Result((NodeCert.Credentials, NodeCert.Signed, Bytes), String) do
+    let cur = match h_auth(h, ClusterAuth.Secret("")) do
+      ClusterAuth.Certified(cr) -> Some(cr)
+      ClusterAuth.Secret(_) -> None
+    end
+    match cur do
+      None -> Err("cluster_node: this node runs in shared-secret mode; replace_cert needs certificate mode")
+      Some(cr) ->
+        if Vault.get(h.meta, "stopped") != None do Err("cluster_node: the node is stopped")
+        else
+          let kh = String.trim(key_hex)
+          let new_key = not(String.is_empty(kh))
+          let sk_r = if new_key do NodeCert.key_from_hex(kh, 64) else Ok(cr.secret_key) end
+          match (sk_r, NodeCert.from_text(cert_text)) do
+            (Err(e), _) -> Err("cluster_node: the new key: " ++ e)
+            (_, Err(e)) -> Err("cluster_node: the new certificate: " ++ e)
+            (Ok(sk), Ok(signed)) ->
+              match NodeCert.verify(signed, h.op_pub, unix_time_ms() / 1000) do
+                Err(e) -> Err("cluster_node: the new certificate: " ++ e)
+                Ok(c) ->
+                  if NodeCert.node_name(c.node) != h.name do
+                    Err("cluster_node: the new certificate names " ++ c.node ++ ", but this node is " ++ h.name)
+                  else if c.pubkey != Bytes.to_hex(NodeCert.public_key(sk)) do
+                    Err("cluster_node: the new certificate does not name " ++ (if new_key do "the new key" else "this node's key" end))
+                  else if cr.revoked(c) do
+                    Err("cluster_node: the new certificate is revoked")
+                  else
+                    let out = Ok((cr, signed, sk))
+                    out
+                  end end end
+              end
+          end
+        end
+    end
+  end
+
   pfn on_bad_frame(h : CnHandle, fd : Int, n : Int) : () do
     match List.find(Vault.all(h.links), fn kv -> match kv do (_k, l) -> l.cfd == fd || l.dfd == fd end) do
       Some((id, _l)) ->
@@ -2535,10 +2971,8 @@ mod ClusterNode do
                     Some(k) -> k
                     None -> Bytes.empty()
                   end,
-                  own: match cfg.auth do
-                    ClusterAuth.Certified(cr) -> Some(cr.signed.cert)
-                    ClusterAuth.Secret(_) -> None
-                  end,
+                  auth: Vault.new("cluster_node_auth_" ++ tag),
+                  strs: Vault.new("cluster_node_strs_" ++ tag),
                   subs: Vault.new("cluster_node_subs_" ++ tag),
                   meta: Vault.new("cluster_node_meta_" ++ tag) }
         Vault.set(h.meta, "listen_fd", listen_fd)
@@ -2551,13 +2985,20 @@ mod ClusterNode do
         end
         -- The handshake's revocation check reads this node's live list.
         let cfg = with_live_revocations(cfg, h.revs)
+        -- This node's credentials as of now: every handshake reads them
+        -- here, so a replacement (`replace_cert`) applies to the next one.
+        Vault.set(h.auth, "a", cfg.auth)
+        match cfg.cert_files do
+          Some(f) -> Vault.set(h.strs, "cert_files", cert_files_text(f))
+          None -> ()
+        end
         let st0 = core_new(cfg, cfg.creation)
         mirror(st0, h)
         send(node, Boot(st0, h))
         let me = NodeIdentity.make(cfg.name, "pk-" ++ cfg.name, cfg.creation)
         let meta = h.meta
-        let _ = task_spawn(fn _ -> accept_loop(node, h, cfg, me, listen_fd, meta))
-        let _ = task_spawn(fn _ -> tick_loop(node, cfg.tick_ms, meta))
+        let _ = task_spawn(fn _ -> accept_loop(node, h, cfg, me, listen_fd, meta, 0))
+        let _ = task_spawn(fn _ -> tick_loop(node, h, cfg.cert_files, cfg.tick_ms, 0))
         -- Frames that fail their MAC on one of this node's links: counted
         -- and reported by peer (the hook is process-wide; other nodes'
         -- fds are not in our links).
@@ -2566,7 +3007,7 @@ mod ClusterNode do
     end
   end
 
-  doc "Stop the node: close every link and the listener, stop the ticker."
+  doc "Stop the node: close every link (the loopback too) and the listener, stop the ticker."
   fn stop(c : Cap(ClusterNode.Live)) : () do
     let d = ops(c)
     d.stop(())
@@ -2971,6 +3412,30 @@ mod ClusterNode do
   fn revocations(c : Cap(ClusterNode.Live)) : List(NodeCert.Revocation) do
     let d = ops(c)
     d.revocations(())
+  end
+
+  doc """
+  Replace this node's certificate while it runs (certificate mode;
+  distributed-deploys step 12b). [cert_text] is the new certificate in its
+  text form (`forge cluster cert`'s .cert file); [key_hex] is its node key
+  (hex, as in MARCH_NODE_KEY), or "" to keep the current key (a renewal made
+  with `forge cluster cert --node-key`). It must verify under the operator
+  key now, name this node and that key, and not be revoked; otherwise Err,
+  and the certificate in use is kept.
+
+  New handshakes present it at once. Links already up are not redialled:
+  each linked peer is sent the new certificate over the link, with a proof
+  that this node holds its key, checks it as a handshake would, and holds it
+  for that link from then on -- so the link, and every session on it, stays
+  up past the old certificate's expiry. A peer too old to know the update
+  drops the link when the old certificate expires, and the redial then
+  handshakes under the new one. Reported to `on_security_event` as
+  `CertReplaced` (or `CertRefused`). `config_from_env` nodes also do this
+  on their own when the MARCH_NODE_CERT file changes (see `CnConfig`).
+  """
+  fn replace_cert(c : Cap(ClusterNode.Live), cert_text : String, key_hex : String) : Result(NodeCert.Cert, String) do
+    let d = ops(c)
+    d.replace_cert(cert_text, key_hex)
   end
 
 end

@@ -11,6 +11,29 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+- **`forge add` checks a new dependency's capabilities before keeping it.** When
+  the project has a `forge.caps.lock` (from `forge audit --record`), a
+  dependency the add brings in or changes that asks for a capability it was not
+  granted is refused: the delta is shown and `forge.toml` and `forge.lock` are
+  left as they were. `--accept-caps` keeps it and records the new set. Only the
+  dependencies the add touched are analyzed. `forge outdated` now shows, under
+  each outdated registry dependency, whether the newer release asks for new
+  capabilities. `forge.caps.lock` records which mode (`declared`/`inferred`)
+  produced it.
+- **A cluster node's certificate can be replaced while it runs.** In
+  certificate mode, a renewed certificate used to need a restart. Now the node
+  watches the files `MARCH_NODE_CERT` and `MARCH_NODE_KEY` name
+  (`MARCH_NODE_CERT_POLL_MS`, default 10 s) and takes a new certificate when
+  one appears, or code can call `ClusterNode.replace_cert(node, cert_text,
+  key_hex)`. The new certificate must verify under the operator key, name the
+  node and its key, and not be revoked. Existing links are not reconnected:
+  each peer is sent the new certificate over the link with a proof that the
+  node holds its key, so sessions keep running past the old certificate's
+  expiry. A new key works the same way. `on_security_event` reports each
+  replacement as `CertReplaced` or `CertRefused` (two new `SecurityEvent`
+  constructors: a `match` that named every constructor needs a new arm).
+
 ### Fixed
 - **A source-tree `march` no longer builds its runtime from a partial copy of
   `runtime/`.** If a build had copied only some runtime C files into
@@ -20,6 +43,119 @@ git log is authoritative for exact commits.
   start. The compiler now uses a runtime directory only when it holds every
   core file listed in its `sources.list`.
 
+- **`run_until_idle()` no longer returns while actors are still exchanging
+  messages.** Its idle check read processes one at a time, so a message
+  sent between two reads went unseen. About 1 run in 100 of a busy
+  two-actor ping-pong returned early (compiled, 14 scheduler threads). The
+  check now retries if any message was sent or process spawned while it ran.
+  `specs/lang/actors.md` states what `run_until_idle()` does and does not
+  wait for.
+- **`march --check` of a module with several `@[endpoints]` protocols is fast
+  again.** Each protocol made every later one roughly twice as slow to typecheck:
+  one module with six protocols took about 9 minutes. It now takes under a
+  second, and time grows roughly linearly with the number of protocols (16
+  protocols: 1.6 s). Diagnostics are unchanged.
+- **A path-scoped `needs IO.FileRead("...")` now covers `csv_open`.** A
+  literal path passed to `csv_open` was never checked against the declared
+  scope, so `csv_open("/etc/passwd", ...)` compiled under
+  `needs IO.FileRead("/srv/data")`. It is now rejected like `file_read`.
+- **`Process.spawn_async` no longer hands a running process's slot to a new
+  one.** Compiled code kept live processes in a fixed table of 64 with no
+  lock. The 65th spawn silently closed the first process's pipes, so a
+  `LiveProcess` held that long read from and wrote to nothing or to another
+  child, and two threads spawning at once could take the same slot. The
+  table is now locked and grows as needed. A handle used after `wait_proc` no
+  longer reaches whichever process took its slot next. Interpreted,
+  `wait_proc` on a child that reads its stdin (such as `cat`) no longer
+  hangs.
+- **`get_actor_field` no longer keeps the actor it reads alive forever.**
+  In compiled code each call leaked one reference to the actor's record, so
+  an actor that was ever probed with `get_actor_field` was never freed.
+- **A caught panic reads the same compiled and interpreted, and compiled
+  `unreachable()` no longer crashes.** When a thunk passed to
+  `__try_call` / `__try_call_val` panicked (the call behind `Check`'s
+  property runner), compiled code returned `Err("boom")` where the
+  interpreter returned `Err("panic: boom")`. Compiled now matches, and
+  `todo(msg)` likewise reads `todo: msg`. Compiled `unreachable()` used to
+  segfault; it now panics with `unreachable: reached unreachable code`.
+- **On macOS, `IO.NetConnect` no longer lets a sandboxed program listen.** Under
+  `--cap-sandbox` and `forge cap run`, any network capability granted the whole
+  `network*` class, so a program holding only `IO.NetConnect` could still bind
+  and accept connections. The grant is now split: `IO.NetConnect` allows
+  outbound connections (DNS, TCP and TLS clients keep working), `IO.NetListen`
+  allows bind and inbound, `IO.Network` allows both. Linux already worked this
+  way.
+
+- **The parent module can send to a nested actor by qualified message name.**
+  `send(p, Inner.Set(1))` from the module enclosing `Inner` failed with
+  "I don't know a constructor called `Inner.Set`", although `Inner.A(1)` and
+  `spawn(Inner.Box)` worked. A nested actor's message constructors are now
+  reachable qualified, and so is an `Inner.Box.Msg` annotation. The bare
+  name stays local to the actor's module.
+
+- **A module that `import`s a sibling declared later in the file is now
+  checked against that sibling's capabilities.** Sibling modules were
+  checked in declaration order unless a qualified reference said otherwise,
+  so `import Sibling` followed by bare calls into a later `Sibling` ran
+  before `Sibling`'s capabilities were known, and the missing-`needs` error
+  for the import was silently skipped. An import now orders the importer
+  after the sibling, unless the two modules import each other.
+
+- **Sending a linear message can no longer fail to link.** The compiler
+  lowered a `send` whose message was linear to `march_send_linear`, which
+  only the unit-test runtime defines, so a program that reached that path
+  would have failed with an undefined symbol. It now compiles to the ordinary
+  `send`. Compiled programs also no longer declare the unused
+  `march_msg_copy`, `march_msg_move` and `march_process_alloc`.
+- **Two actors with the same name in different modules are now two actors.**
+  An actor `Box` in `mod A` and another `Box` in `mod B` (or at the file's
+  root) shared one definition: the interpreter spawned the same actor for
+  both, and compiled code ran one dispatch function against both state
+  shapes (wrong state, a `no field` panic, or an internal compiler error).
+  The nested ones now get distinct internal names (`A__Box`, `B__Box`), so
+  `spawn(Box)` inside `A`, `spawn(A.Box)` from the parent and `Box.Msg` all
+  reach the right actor. Actors whose names are unique keep their names, so
+  hot-code-reload manifests are unchanged. Two actors of one name in the
+  same module are now an error.
+
+- **Actors that message each other back and forth are up to 2.6x faster.** With
+  several scheduler threads, sending to an actor that was just going to sleep could
+  make the sender wait a millisecond or more before delivering. A two-actor
+  ping-pong of 1,000,000 messages took 3.07 s; it now takes 1.18 s. Actor programs
+  built with `--hot-reload` were affected less (1.45 s -> 1.22 s).
+- **`march --check` no longer passes a protocol expand it refuses, from its cache.**
+  After a clean `--check` with `--protocol-baseline` and `--protocol-expand`, the same
+  check without the baseline (which the compiler refuses) exited 0 from the cache
+  without checking anything. The baselines and the expand labels are now part of the
+  check's cache key.
+- **A remote message sent after a hot deploy now reaches an actor whose message type
+  the deploy changed.** Each cluster link's reader task kept the code of the moment
+  the link formed. So a message from a peer already on the new format was decoded by
+  the old route code, stamped as an old-format message, and then converted with
+  `migrate_msg` or dropped. A link reader now moves to the new code at the next frame
+  it reads, and so do the node's ticker and acceptor, so a cluster node no longer
+  keeps the old code pinned after a deploy.
+- **`ClusterNode.stop` now closes the node's link to itself.** After `stop`,
+  `queue_for` on the node's own id still returned a queue, a send to a local
+  process was still delivered, and every stopped node left its loopback handler
+  registered for the life of the process. A process that starts and stops nodes
+  (tests, embedding) leaked one per node and kept local sessions reachable after
+  stop. Now `queue_for(own id)` is `None`, a send to the node itself is refused,
+  and the handler is released.
+- **A recorded hot-deploy request can no longer be replayed against a node.** Signed
+  `ACTIVATE`, `TOPOLOGY` and `DRAIN` requests carried nothing that made them fresh, so
+  anyone who could reach a node's reload socket could send an old one again, rolling a
+  function back or re-pushing an old placement. forge now sends each signed request
+  inside a numbered release (`SEQ`). The node remembers the newest release it accepted,
+  across restarts. It refuses older releases, two different releases with the same
+  number, and, once it holds one, any unwrapped signed request. `MARCH_HCR_REQUIRE_RELEASE=1`
+  requires releases from the first request. Older servers keep getting unwrapped requests.
+  Every release accepted or refused, and every `DRAIN`, is now audited.
+
+- **The signed topology push is now the one a node applies, including after a restart.**
+  The node used to verify a pushed topology, then apply an unsigned copy forge wrote
+  alongside it. A restarted node came back on its built-in placement rather than the one
+  last pushed. `Topology` now reads the verified copy first, and applies it at start.
 - **A closed or refused session offer no longer leaks its actor and two
   Vault tables.** `SessionNode.close_offer` left the offer's `OfferActor`
   running for the life of the process, and an `offer_*` refused with
@@ -223,6 +359,17 @@ git log is authoritative for exact commits.
   interpreter does, instead of returning a UUID with a garbage timestamp.
 
 ### Added
+- **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
+  When one build both makes a choice that gained a branch and receives it, `forge deploy
+  --plan` now shows two deploys and why: the expand, built with `--protocol-expand
+  <P>:<label>` (the receivers run the new version; the chooser keeps offering under the
+  previous fingerprint and cannot choose the new branch), then the contract, the plain
+  build, on the next `forge deploy`. It compares against what the environment runs
+  (`.forge/deploy/<env>/protocols/`, in the compiler's baseline format), so every patch
+  and base image is also built with the compatibility table for the running version,
+  which it previously lacked. A change the compatibility rule does not allow, including
+  unlabelled messages a new branch renumbers, is reported as breaking, naming the
+  messages. This replaces the earlier split that held the chooser's functions back.
 - **The `ssh` reconciler backend** (build step 10b of the distributed-deploys
   plan). A topology overlay with `[backend] kind = "ssh"` makes `forge topology
   apply --env <env>` and `forge topology status --env <env>` work on the
@@ -489,6 +636,13 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **Functions that only read a data structure no longer take ownership of it
+  because of a number inside it.** A function reading a `Node(Int, Tree, Tree)`
+  or a `List(Int)` was treated as consuming the whole value as soon as it used one
+  of the numbers, so every call on a shared value paid a reference-count update
+  per node. Summing a shared binary tree of depth 16 300 times now takes 0.11 s
+  instead of 0.30 s; reading a shared 10k-element list with `List.sum_int`,
+  `fold_left` and `nth` is 20% faster.
 - **The generated hosted event API's `cancel` takes the session: `cancel(s, parked)`.**
   The epoch hold a hosting actor takes for a session is now the transport's, taken at
   `register` and released at `close` for both hosting patterns (before, only the

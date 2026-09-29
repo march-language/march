@@ -1,7 +1,7 @@
 # `[P2]` 11 internal type errors across the distributed/actor stdlib modules
 
 Filed 2026-09-22 from the stdlib internal-error sweep
-(`2026-09-22-stdlib-internal-type-errors.md`). Grouped because they are all in
+(`specs/progress/2026-09-22-stdlib-internal-type-errors.md`, the closed umbrella). Grouped because they are all in
 the same cluster of modules and several may share a cause.
 
 (`session.march`'s 9 `Cap(Session.Live)` "not declared in `needs`" errors were
