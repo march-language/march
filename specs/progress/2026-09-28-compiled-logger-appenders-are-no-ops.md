@@ -50,12 +50,40 @@ fixture's register/remove loop uses one.
 
 ## Atoms
 
-`logvalue_scalar_str` renders `LAtom` through `march_atom_to_string`,
-the program's generated hash-to-`:name` table. The runtime defines a weak
-default returning NULL, which renders as `null`. `emit_atom_show_table`
-(`lib/tir/llvm_toplevel.ml`) now also emits the table when the module calls
-`march_logger_dispatch` or `march_logger_get_context`. It does not scan for
-the declares, so programs that never log are unchanged.
+`logvalue_scalar_str` renders `LAtom` through the program's generated
+hash-to-`:name` table. `emit_atom_show_table` (`lib/tir/llvm_toplevel.ml`)
+now also emits the table when the module calls `march_logger_dispatch` or
+`march_logger_get_context`. It does not scan for the declares, so programs
+that never log are unchanged.
+
+**Registration, not a weak symbol (2026-09-29).** The first version gave the
+runtime a weak default `march_atom_to_string` returning NULL, for the strong
+generated one to override. That broke the classic REPL JIT on Linux only
+(CI run 36529641362, `test (ubuntu-24.04, rest)`, `repl_compiler_parity` case
+6: `show(:ok)` gave `null`, not `":ok"`). The runtime `.so` is dlopen'd
+`RTLD_GLOBAL` before any fragment. ELF lookup is flat, and at load time a
+weak definition binds exactly like a strong one, so each fragment's own
+`show(:ok)` call bound to the runtime's stub. Confirmed in the
+`march-ci-ubuntu` container: the test runtime `.so` built from the PR exports
+`W march_atom_to_string` and case 6 fails; on origin/main it has no such
+symbol and the test passes. macOS two-level namespaces bind a fragment's
+call to its own definition, which hid the bug.
+
+Now the runtime defines no `march_atom_to_string` at all. Each module emits:
+- its table as an internal function, `@march_atom_name_or_null`, which
+  returns NULL for a hash it never saw;
+- `@march_atom_to_string`, also internal, which calls the lookup and falls
+  back to `":<atom>"`, so nothing can interpose it;
+- on native targets, an `llvm.global_ctors` entry that calls
+  `march_set_atom_namer(lookup)`, and an `llvm.global_dtors` entry that calls
+  `march_unset_atom_namer(lookup)`.
+
+The runtime keeps a mutex-protected list of registered lookups, tries them
+newest first, and renders `null` if none of them knows the hash. Unregistering
+from the destructor matters because REPL fragments and hot patches are
+dlclose'd, and a stale pointer would call into unmapped code. A side benefit:
+with the old default linkage, a later RTLD_GLOBAL fragment could also bind to
+an earlier fragment's table, which lacked the later fragment's atoms.
 
 ## Verification
 

@@ -12509,12 +12509,62 @@ static void logger_float_str(double f, char *buf, size_t cap) {
     if (n + 1 < cap) { buf[n] = '.'; buf[n + 1] = '\0'; }
 }
 
-/* An atom's name.  Atoms compile to nameless FNV-1a hashes; the program
- * carries the hash -> ":name" table as a generated @march_atom_to_string
- * (llvm_toplevel.ml's emit_atom_show_table, which emits it for any program
- * that logs).  This weak default is what links when no table was emitted:
- * it answers NULL and the caller falls back to "null". */
-__attribute__((weak)) void *march_atom_to_string(int64_t h) { (void)h; return NULL; }
+/* An atom's name.  Atoms compile to nameless FNV-1a hashes; each compiled
+ * module carries its own hash -> ":name" table as a generated INTERNAL
+ * function (llvm_toplevel.ml's emit_atom_show_table, emitted for any module
+ * that shows an atom or logs) and registers it here from a module
+ * constructor, unregistering it from a destructor so a dlclose'd REPL
+ * fragment or hot patch never leaves a dangling entry.  A registered namer
+ * answers NULL for a hash its module never saw; the lookup tries every
+ * registered table, newest first, and renders "null" when none knows it.
+ *
+ * The runtime deliberately defines no march_atom_to_string symbol.  Until
+ * 2026-09-29 it had a weak default of that name, and on Linux (flat ELF
+ * lookup) a REPL JIT fragment dlopen'd after the runtime .so bound its own
+ * `show(:ok)` call to that stub, which answered NULL: the fragment printed
+ * "null".  The generated table is internal now, so nothing can interpose it. */
+typedef void *(*march_atom_namer_fn)(int64_t);
+typedef struct march_atom_namer_node {
+    march_atom_namer_fn fn;
+    struct march_atom_namer_node *next;
+} march_atom_namer_node;
+static march_atom_namer_node *march_atom_namers = NULL;
+static pthread_mutex_t march_atom_namers_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void march_set_atom_namer(void *fn) {
+    if (!fn) return;
+    march_atom_namer_node *n = malloc(sizeof *n);
+    if (!n) return;
+    n->fn = (march_atom_namer_fn)fn;
+    pthread_mutex_lock(&march_atom_namers_mu);
+    n->next = march_atom_namers;
+    march_atom_namers = n;
+    pthread_mutex_unlock(&march_atom_namers_mu);
+}
+
+void march_unset_atom_namer(void *fn) {
+    pthread_mutex_lock(&march_atom_namers_mu);
+    for (march_atom_namer_node **pp = &march_atom_namers; *pp; pp = &(*pp)->next) {
+        if ((void *)(*pp)->fn == fn) {
+            march_atom_namer_node *dead = *pp;
+            *pp = dead->next;
+            free(dead);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&march_atom_namers_mu);
+}
+
+/* ":name" for [h] as a fresh March String, or NULL if no registered table
+ * knows it. */
+static void *march_atom_name_lookup(int64_t h) {
+    void *name = NULL;
+    pthread_mutex_lock(&march_atom_namers_mu);
+    for (march_atom_namer_node *n = march_atom_namers; n && !name; n = n->next)
+        name = n->fn(h);
+    pthread_mutex_unlock(&march_atom_namers_mu);
+    return name;
+}
 
 /* The text of a non-String LogValue, as eval_runtime.ml's
  * log_value_to_string renders it.  An LAtom renders as ":name" through the
@@ -12526,7 +12576,7 @@ static void logvalue_scalar_str(void *lv, char *buf, size_t cap) {
     case 2: { double f; memcpy(&f, (char *)lv + 16, 8); logger_float_str(f, buf, cap); break; }
     case 3: snprintf(buf, cap, "%s", *(int64_t *)((char *)lv + 16) ? "true" : "false"); break;
     case 4: {
-        void *name = march_atom_to_string(*(int64_t *)((char *)lv + 16));
+        void *name = march_atom_name_lookup(*(int64_t *)((char *)lv + 16));
         if (!name) { snprintf(buf, cap, "null"); break; }
         char sso[MARCH_SSO_MAX + 1];
         int64_t n = march_str_len(name);
