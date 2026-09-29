@@ -704,7 +704,7 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_dns_resolve(ptr %host)" };
   { march_name = "process_spawn_sync"; c_name = Some "march_process_spawn_sync"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_process_spawn_sync(ptr %cmd, ptr %args)" };
-  { march_name = "process_spawn_lines"; c_name = Some "march_process_spawn_lines"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
+  { march_name = "process_spawn_lines"; c_name = Some "march_process_spawn_lines"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_process_spawn_lines(ptr %cmd, ptr %args)" };
   { march_name = "process_spawn_async"; c_name = Some "march_process_spawn_async"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("LiveProcess", []); Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_process_spawn_async(ptr %cmd, ptr %args)" };
