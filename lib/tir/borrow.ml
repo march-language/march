@@ -283,7 +283,9 @@ let extern_borrow_table : (string * bool list) list = [
      caller keeps ownership.  Before the rows they were on no list and
      defaulted to OWNED: every call leaked its Strings (and dispatch its
      whole field list).  logger_add_field and logger_add_context STORE both
-     arguments and stay in [extern_owned_builtins]. ── *)
+     arguments and stay in [extern_owned_builtins]; since 2026-09-28 so does
+     logger_register_appender (the runtime keeps the name and the callback
+     until the appender is replaced, removed or cleared). ── *)
   (* ── get_actor_field: march_get_actor_field (march_extras.c) only reads
      the pid's shape and the name's bytes, and returns an immediate field or
      None, never a heap value.  It was OWNED until 2026-09-28, so every call
@@ -293,12 +295,31 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_get_actor_field",     [true; true]);
   ("logger_write",              [true; true; true; true]);
   ("logger_dispatch",           [true; true; true; true]);
-  ("logger_register_appender",  [true; true]);
   ("logger_remove_appender",    [true]);
   ("logger_set_module_level",   [true; false]);
   ("logger_clear_module_level", [true]);
   ("logger_module_level",       [true]);
   ("http_fetch",                [true; true; true; true]);
+  (* ── Process: every march_process_* function only READS its heap arguments
+     (audited 2026-09-29).  env/set_env copy the Strings' bytes into stack
+     buffers; spawn_sync/spawn_lines/spawn_async walk the command and args
+     list into a malloc'd argv they free themselves; read_line, write,
+     kill_proc and wait_proc load the LiveProcess's pid and slot words and
+     never store or release the cell.  Until then the family sat in
+     [extern_owned_builtins]: each spawn leaked its args list, and each
+     handle use consumed a reference nothing released, so the LiveProcess
+     cell every spawn_async returns could never be freed.  The only producer
+     of a LiveProcess is spawn_async, which returns it fresh and owned.
+     specs/progress/2026-09-29-process-spawn-async-leaks-live-process.md ── *)
+  ("process_env",         [true]);
+  ("process_set_env",     [true; true]);
+  ("process_spawn_sync",  [true; true]);
+  ("process_spawn_lines", [true; true]);
+  ("process_spawn_async", [true; true]);
+  ("process_read_line",   [true]);
+  ("process_write",       [true; true]);
+  ("process_kill_proc",   [true]);
+  ("process_wait_proc",   [true]);
   (* ── Synthetic C names used directly in lower.ml wrappers ──────────────── *)
   ("march_compare_string", [true; true]);
   ("march_hash_string",    [true]);
@@ -381,6 +402,10 @@ let extern_owned_builtins : string list = [
     (* delivery_failed_watch stores its closure in the runtime's hook slot
        (march_delivery_failed_watch), releasing the one it replaces. *)
     "delivery_failed_watch";
+    (* logger_register_appender stores its name and callback in the runtime's
+       appender registry (march_logger_register_appender), releasing both
+       when the entry is replaced, removed or cleared. *)
+    "logger_register_appender";
     "panic_"; "unreachable_"; "todo_"; "print_stderr"; "char_to_int";
     "char_is_digit"; "char_is_alphanumeric"; "char_is_whitespace";
     "string_chars"; "string_from_chars"; "list_append"; "list_concat";
@@ -401,9 +426,6 @@ let extern_owned_builtins : string list = [
     "file_read_line"; "file_read_chunk"; "file_write"; "file_append";
     "file_delete"; "file_copy"; "file_rename"; "file_stat"; "dir_mkdir";
     "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list";
-    "process_env"; "process_set_env"; "process_spawn_sync";
-    "process_spawn_lines"; "process_spawn_async"; "process_read_line";
-    "process_write"; "process_kill_proc"; "process_wait_proc";
     "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_write";
     "typed_array_create"; "typed_array_from_list"; "typed_array_to_list";
     "typed_array_length"; "typed_array_get"; "typed_array_set";

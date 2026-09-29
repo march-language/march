@@ -98,10 +98,35 @@ let rename_scoped_vars (scopes : (string * string list) list) (fn : Tir.fn_def) 
       if prefix <> "" && names <> [] then rename_tir_vars prefix names fn else fn)
     fn scopes
 
+(** The fns of every submodule nested (at any depth) in [decls], spelled
+    RELATIVE to the module [decls] belong to: [A.f], [A.B.g].  A module's
+    scope in [rename_scoped_vars] carries these next to its own bare fn
+    names, so a nested module's qualified call to a SIBLING submodule
+    ([mod Outer do mod A ... end mod B do fn g() do A.f() end end end]) is
+    qualified with the enclosing prefix ([Outer.A.f]) exactly as a bare call
+    to a parent fn is.  Before, it stayed [A.f], which names no module, and
+    the compiled program failed to link (`@A.f` undefined); the typechecker
+    and the interpreter resolved it lexically.  The entry module's own
+    top level is unprefixed, so its children's [A.f] already matched; the
+    bug needed one more level of nesting, or any stdlib / MARCH_LIB_PATH
+    module (every `@[endpoints]` protocol inside one: its role modules call
+    their siblings [P_Msg] and [P_Run]).
+    specs/progress/2026-09-28-nested-module-sibling-call.md *)
+let rec nested_qualified_fn_names (decls : Ast.decl list) : string list =
+  List.concat_map (function
+      | Ast.DMod (sub, _, sub_decls, _) ->
+        let direct = List.filter_map (function
+            | Ast.DFn (def, _) -> Some def.fn_name.txt
+            | Ast.DLet (_, b, _) ->
+              (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
+            | _ -> None) sub_decls in
+        List.map (fun n -> sub.txt ^ "." ^ n) (direct @ nested_qualified_fn_names sub_decls)
+      | _ -> []) decls
+
 (** Every bare fn name bound by the enclosing levels of [scopes] (see
     [rename_scoped_vars]), for [Lower_state.with_enclosing_module_fns]. *)
 let scoped_names (scopes : (string * string list) list) : string list =
-  List.concat_map snd scopes
+  List.filter (fun n -> not (String.contains n '.')) (List.concat_map snd scopes)
 
 (** The span of a top-level declaration. *)
 let decl_span (d : Ast.decl) : Ast.span =
@@ -342,8 +367,10 @@ let rec lower_stdlib_mod_decls ?(enclosing = []) (env : Lower_state.env) prefix 
         (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
       | _ -> None) decls in
   (* [enclosing]: the lexically enclosing modules' levels, innermost-first —
-     see [rename_scoped_vars]. *)
-  let scopes = (prefix, direct_fn_names) :: enclosing in
+     see [rename_scoped_vars].  Each level also carries its submodules' fns
+     by relative name ([nested_qualified_fn_names]); [scoped_names] still
+     sees only bare names, since the qualified ones never name a local. *)
+  let scopes = (prefix, direct_fn_names @ nested_qualified_fn_names decls) :: enclosing in
   Lower_state.with_enclosing_module_fns (scoped_names enclosing) (fun () ->
   List.iter (fun d ->
       match d with

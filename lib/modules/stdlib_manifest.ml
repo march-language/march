@@ -192,7 +192,10 @@ let stdlib_file_list = [
   "session_node.march";
   (* the runtime side of a topology app (placement, drain, supervision, hook
      watchdog): after cluster_node and session_node, whose offers it opens. *)
-  "topology.march"
+  "topology.march";
+  (* the control plane's release format, executor and Ctl protocols (dd step
+     12a): after session_node, whose generated runners its protocols use. *)
+  "control.march"
 ]
 
 let js_only_stdlib_file_list = ["dom.march"; "canvas.march"; "audio.march"]

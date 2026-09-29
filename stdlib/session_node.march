@@ -2306,7 +2306,30 @@ mod SessionNode do
   """
   fn run_cluster(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
                  on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result(Session.Outcome, RunError) do
-    run_cluster_with(io, node, my_role, peers, session, on_close, body, fn _ -> false, no_holder_check)
+    counted(node, fn () -> run_cluster_with(io, node, my_role, peers, session, on_close, body, fn _ -> false, no_holder_check))
+  end
+
+  doc """
+  How many sessions [node] is running that no offer counts: those
+  `initiate`, `run_cluster` and `run_cluster_hosted` calls on this node
+  have started and not yet returned from (an offer's sessions are its
+  `OfferCount.active`). `Topology`'s SIGTERM drain waits for both.
+  """
+  fn initiated(node : Cap(ClusterNode.Live)) : Int do
+    Vault.get_or(initiated_table(node), "n", 0)
+  end
+
+  pfn initiated_table(node : Cap(ClusterNode.Live)) : Vault(Int) do
+    Vault.open("session_node_initiated_" ++ ClusterNode.node_id(node))
+  end
+
+  -- Run [f] (one session this node started) counted in `initiated`.
+  pfn counted(node : Cap(ClusterNode.Live), f : () -> a) : a do
+    let t = initiated_table(node)
+    let _ = Vault.incr(t, "n", 1)
+    let r = f()
+    let _ = Vault.incr(t, "n", 0 - 1)
+    r
   end
 
   -- `run_cluster`, abandoned while still finding its peers once [abandoned]
@@ -2331,8 +2354,9 @@ mod SessionNode do
                         on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
                         deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
                         cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result(Session.Outcome, RunError) do
-    run_cluster_hosted_with(io, node, my_role, peers, session, on_close, host, start, deliver, cancel, fn _ -> false,
-                            no_holder_check)
+    counted(node, fn () ->
+      run_cluster_hosted_with(io, node, my_role, peers, session, on_close, host, start, deliver, cancel, fn _ -> false,
+                              no_holder_check))
   end
 
   -- `run_cluster_hosted`, abandoned while still finding its peers once
@@ -3072,6 +3096,15 @@ mod SessionNode do
   fn initiate(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
               roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int,
               peers : List(Int), others : List(Int), on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
+      : Result(Session.Outcome, RunError) do
+    -- Counted from the invitations on: a session still forming when a
+    -- SIGTERM drain starts is waited for too (its offers refuse or it forms).
+    counted(node, fn () -> initiate_counted(io, node, proto, fingerprint, roles, compat, my_role, peers, others, on_close, body))
+  end
+
+  pfn initiate_counted(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+                       roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int,
+                       peers : List(Int), others : List(Int), on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
       : Result(Session.Outcome, RunError) do
     let n = ClusterNode.next_id(node, "ap_sessions")
     let sid = ClusterNode.node_id(node) ++ "." ++ int_to_string(ClusterNode.creation(node)) ++ "." ++ int_to_string(n)
