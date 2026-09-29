@@ -44,6 +44,13 @@ git log is authoritative for exact commits.
   output interpreted and compiled. Compiled `[ffi.rust]` builds also link on
   Linux now: the archive used to come before the program on the link line, and
   GNU ld then skipped it (`undefined reference`).
+- **A compiled filter-shaped recursive function no longer overflows the stack
+  when its branches alternate.** A function with one `Cons(x, self(..))` arm and
+  one plain `self(..)` arm (a hand-written `filter`) is turned into a loop by
+  tail-recursion-modulo-cons, but the plain arm re-entered the original
+  function instead of continuing the loop, pushing a frame each time the input
+  switched arms. Keeping every other element of a 1,000,000-element list died
+  with SIGBUS in the stack guard page; all-kept and all-dropped inputs ran fine.
 - **SIGTERM no longer cuts the sessions a node initiated.** `Topology`'s drain
   counted only its offers' sessions, so a node that serves no role exited 0 at once
   on SIGTERM, cutting sessions it had started with `initiate_R` (from a hook or a role
@@ -677,6 +684,20 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **`NativeArray.sort_*` is up to 7x faster on nearly-sorted input and 4-5x
+  faster on input made of two sorted runs.** An array that is sorted apart from
+  a few misplaced elements, or that rises and then falls, now takes a quick
+  special path: 1,000,000 nearly-sorted integers sort in 1.7 ms instead of
+  11.6 ms. Other inputs are unchanged. The special path may briefly allocate up
+  to half the array's size, and falls back to the normal sort if it cannot.
+- **`List.map`, `filter`, `filter_map`, `append`, `flat_map` and `range_step` walk
+  the list once instead of twice.** They were accumulator loops followed by a
+  `reverse`; they are now written in natural recursive style, which
+  tail-recursion-modulo-cons compiles to a single loop that fills each new cell
+  in place. Compiled `--opt 2`, 20k-element lists: `map` 0.53 s -> 0.24 s
+  (`bench/list_producers.march`), `append` 2.0x, `filter`/`filter_map` 1.3x,
+  `flat_map` 1.2x, `range_step` 1.4x. Results and signatures are unchanged, and a
+  1,000,000-element list still works compiled and interpreted.
 - **`NativeArray.sort_int`, `sort_float`, `sort_i32` and `sort_f32` sort random
   data 17-26% faster.** The step that finishes off short runs of up to 32
   elements now uses larger sorting networks and a merge (the layout Rust's
