@@ -30,10 +30,18 @@ literal check, and scoped WRITE grants in the self-imposed sandbox.
   pinned data globals both survive `-dead_strip`, and TIR distinguishes
   `ALit` from `AVar` at the call site.
 
-- [ ] **`csv_open` takes an atom, not a path.** It is declared
-  `IO.FileRead` but its first argument is `t_atom`, so it is absent from
-  `path_arg_builtins` and no scope check applies. Worth confirming whether it
-  resolves a path internally; if so it needs a scope check of its own shape.
+- [x] **`csv_open` was missing from `path_arg_builtins`** (DONE 2026-09-28).
+  This bullet originally said `csv_open` "takes an atom, not a path". That
+  was wrong. Its signature is `csv_open(path : String, delimiter : String,
+  mode : Atom)` (`typecheck_builtins.ml`), and the atom is the mode. It is
+  declared `IO.FileRead`, so argument 0 needs the same literal-path scope
+  check as `file_read`. Before the fix, `csv_open("/etc/passwd", ",",
+  :simple)` under `needs IO.FileRead("/srv/data")` compiled clean. Now it is
+  rejected ("... outside it"), and a path inside the scope is still accepted:
+  `test_csv_open_outside_scope_is_rejected` /
+  `test_csv_open_inside_scope_is_accepted` in `test/test_cap_scope.ml`.
+  `csv_next_row` / `csv_close` take the handle `csv_open` returns, so they
+  need no check of their own, the same argument as `file_read_line`.
 
 - [x] **Relative scopes and scopes on non-filesystem capabilities are now
   rejected** (DONE 2026-09-21, see

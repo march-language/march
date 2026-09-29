@@ -183,10 +183,14 @@ let test_conditional_grants_agree () =
       (has forge_clauses "(allow file-write*)");
     Alcotest.(check bool) "file-write* granted by the embedded profile" true
       (has embedded_clauses "(allow file-write*)");
-    Alcotest.(check bool) "network* NOT granted by forge" false
-      (has forge_clauses "(allow network*)");
-    Alcotest.(check bool) "network* NOT granted by the embedded profile" false
-      (has embedded_clauses "(allow network*)");
+    List.iter
+      (fun op ->
+         Alcotest.(check bool) (op ^ " NOT granted by forge") false
+           (has forge_clauses ("(allow " ^ op ^ ")"));
+         Alcotest.(check bool) (op ^ " NOT granted by the embedded profile")
+           false
+           (has embedded_clauses ("(allow " ^ op ^ ")")))
+      [ "network*"; "network-outbound"; "network-bind"; "network-inbound" ];
     (* process-exec: forge keeps it for its own launch of the target; the
        embedded profile must NOT grant it without IO.Process. *)
     Alcotest.(check bool) "process-exec kept by forge (it execs the target)" true
@@ -311,8 +315,82 @@ mod SbxImpl do
 end
 |}
 
+(* ── Network is split by direction in BOTH builders ────────────────────────
+   IO.NetConnect -> network-outbound only; IO.NetListen -> network-bind +
+   network-inbound only (specs/progress/2026-09-28-cap-sandbox-macos-
+   netlisten-split.md).  Each fixture's embedded clause set must equal
+   forge's for the same capabilities, and the direction pins are checked on
+   both sides so the two cannot agree on the wrong split. *)
+let net_connect_src =
+  {|
+mod SbxNetConnect do
+  needs IO.Console
+  needs IO.NetConnect
+  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect)) do
+    match tcp_connect("127.0.0.1", 1) do
+      Ok(_) -> println("ok")
+      Err(_) -> println("e")
+    end
+  end
+end
+|}
+
+let net_listen_src =
+  {|
+mod SbxNetListen do
+  needs IO.Console
+  needs IO.NetListen
+  fn main(_c : Cap(IO.Console), _l : Cap(IO.NetListen)) do
+    match tcp_listen(0) do
+      Ok(_) -> println("ok")
+      Err(_) -> println("e")
+    end
+  end
+end
+|}
+
+let check_net_split ~name ~caps ~src ~outbound ~listen =
+  if not is_macos then Alcotest.skip ()
+  else begin
+    let binary = "/tmp/sbx_drift_probe_binary" in
+    let forge_clauses =
+      List.filter
+        (fun c -> not (is_forge_binary_read ~binary c)
+                  && c <> "(allow process-exec)")
+        (clauses_of (March_forge.Cap_sandbox.profile_for ~caps ~binary))
+    in
+    let embedded_clauses = profile_of src in
+    Alcotest.(check (list string))
+      (name ^ ": embedded and forge clause sets agree")
+      forge_clauses embedded_clauses;
+    List.iter
+      (fun (side, cl) ->
+         let has c = List.mem c cl in
+         Alcotest.(check bool) (name ^ "/" ^ side ^ ": network-outbound")
+           outbound (has "(allow network-outbound)");
+         Alcotest.(check bool) (name ^ "/" ^ side ^ ": network-bind")
+           listen (has "(allow network-bind)");
+         Alcotest.(check bool) (name ^ "/" ^ side ^ ": network-inbound")
+           listen (has "(allow network-inbound)");
+         Alcotest.(check bool) (name ^ "/" ^ side ^ ": no network*")
+           false (has "(allow network*)"))
+      [ ("forge", forge_clauses); ("embedded", embedded_clauses) ]
+  end
+
+let test_netconnect_split () =
+  check_net_split ~name:"NetConnect" ~caps:[ "IO.Console"; "IO.NetConnect" ]
+    ~src:net_connect_src ~outbound:true ~listen:false
+
+let test_netlisten_split () =
+  check_net_split ~name:"NetListen" ~caps:[ "IO.Console"; "IO.NetListen" ]
+    ~src:net_listen_src ~outbound:false ~listen:true
+
 let tests =
-  [ Alcotest.test_case "sbpl baselines agree (embedded vs forge)" `Slow
+  [ Alcotest.test_case "sbpl NetConnect grants outbound only (both builders)" `Slow
+      test_netconnect_split;
+    Alcotest.test_case "sbpl NetListen grants bind+inbound only (both builders)" `Slow
+      test_netlisten_split;
+    Alcotest.test_case "sbpl baselines agree (embedded vs forge)" `Slow
       test_baselines_agree;
     Alcotest.test_case "sbpl conditional grants agree" `Slow
       test_conditional_grants_agree;

@@ -660,7 +660,15 @@ forge add fixtures --path ../fixtures --test
 
 # Overwrite an existing dependency entry
 forge add depot --git https://github.com/march-language/depot --tag v1.3.0 --force
+
+# Keep a dependency that asks for capabilities forge.caps.lock does not grant
+forge add fs_helpers --path ../fs_helpers --accept-caps
 ```
+
+With a capability baseline (`forge.caps.lock`, see
+[Capability Audit](capability-audit.md)), `forge add` refuses a dependency
+that brings in new authority and restores `forge.toml` and `forge.lock`,
+unless `--accept-caps` is given.
 
 Or edit `forge.toml` directly:
 
@@ -980,7 +988,12 @@ forge audit --record                             # record each dependency's capa
 forge audit                                      # exit 1 if a dependency gained authority
 forge audit --inferred                           # infer each set from the code (`march caps`), not `needs`
 forge audit --inferred --allow-unanalyzable      # gate on the deps that typecheck; list the rest
+forge add <name> ... --accept-caps               # keep a new dep that widens the baseline
 ```
+
+`forge add` and `forge outdated` use the baseline too: an add that brings in
+new authority is refused unless `--accept-caps`, and `forge outdated` shows
+what each available upgrade would newly ask for.
 
 `--inferred` needs a toolchain whose `march` supports `caps` (0.3.0 or later)
 and stops with the toolchain's path and version if it does not. It caches
