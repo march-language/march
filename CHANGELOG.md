@@ -43,6 +43,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Editor highlighting (tree-sitter) now covers current March syntax.** The
+  tree-sitter grammar that Zed highlights from failed to parse most real files
+  (713 of 919 in the repo), so they rendered as one long error region. It now
+  parses every file the compiler accepts, including record literals, multi-line
+  match arms and lambdas, patterns, actors, protocols and declarations added
+  since March. Zed's highlight and outline queries, broken since August, compile
+  again. A CI job keeps the grammar in step with the compiler.
 - **A source-tree `march` no longer builds its runtime from a partial copy of
   `runtime/`.** If a build had copied only some runtime C files into
   `_build/default/runtime` (the vault scaling benchmarks do), the compiler used
@@ -125,7 +132,6 @@ git log is authoritative for exact commits.
   reach the right actor. Actors whose names are unique keep their names, so
   hot-code-reload manifests are unchanged. Two actors of one name in the
   same module are now an error.
-
 - **Actors that message each other back and forth are up to 2.6x faster.** With
   several scheduler threads, sending to an actor that was just going to sleep could
   make the sender wait a millisecond or more before delivering. A two-actor
@@ -647,6 +653,12 @@ git log is authoritative for exact commits.
 - **`Array.from_list` (and `RRB.from_list`) is about 8x faster.** It now builds
   the vector in one pass instead of appending one element at a time: 100,000
   elements take 6.6 ms instead of 54 ms. The resulting vector is the same.
+- **`NativeArray.sort_int`, `sort_float`, `sort_i32` and `sort_f32` sort random
+  data 17-26% faster.** The step that finishes off short runs of up to 32
+  elements now uses larger sorting networks and a merge (the layout Rust's
+  standard library uses) and is twice as fast on its own. Sorting 1,000,000
+  random integers went from 13.0 ms to 10.8 ms; already-ordered and
+  few-distinct-value inputs are unchanged.
 - **Functions that only read a data structure no longer take ownership of it
   because of a number inside it.** A function reading a `Node(Int, Tree, Tree)`
   or a `List(Int)` was treated as consuming the whole value as soon as it used one
