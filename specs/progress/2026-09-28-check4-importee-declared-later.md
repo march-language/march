@@ -1,3 +1,55 @@
+# Check 4 fires when a bare-`import`ed sibling is declared later (fixed 2026-09-28, acyclic case)
+
+**Reproduced on origin/main (216f45fba)** with the program below. With
+`CapOrdProbeBeta` declared after the importer, `march --check` printed only the
+unrelated `Module ... not found` diagnostic and **0** Check-4 errors. With
+Beta declared first it printed 1.
+
+**Mechanism confirmed.** `dependency_order_dmod_run`
+(`lib/typecheck/typecheck_reorder.ml`) orders sibling modules by qualified
+references (`module_refs_in_decls`) and by bare type/constructor references
+(`unqualified_module_deps`). A `DUse` added no edge. The importer kept its
+declaration position, was checked first, and found no `module_caps` entry for
+the sibling, so `import_required_caps`'s `[] -> []` early exit returned nothing.
+
+**Fix: an import edge, added only where it closes no cycle.**
+`dependency_order_dmod_run` now adds an edge from each module to every sibling
+it `use`s or `import`s, as long as that edge is on no cycle of the full graph
+(reference edges, bare type/ctor edges and all import edges). Consequences:
+
+- A module that imports an EARLIER sibling is already visited after it, so
+  its order does not change.
+- Mutually importing modules keep exactly their previous order.
+  `test_cyclic_modules_still_enforce` pins the cyclic 2x2 and still passes.
+  A plain "add the DUse edge" (tried first) reversed that cycle and broke the
+  test's cyclic-impure row.
+- The only order that changes is an acyclic import of a LATER sibling, which
+  is exactly the configuration that was broken.
+
+This is a sort edge, not a change local to Check 4. A deferred Check 4 alone
+would find no import-tracker entry for the importer, because its bare names
+never resolved against the sibling. It would fall back to module-granular
+caps, which makes a pure reference error in one order and pass in the other.
+The edge makes both orders check the same way, including the demand-driven
+loosening.
+
+**Verification.** `test/test_compiler.ml`
+`test_check4_importee_declared_later` (group `cap-closure`) is a 2x2 over
+(importee declared before / after) x (impure / pure reference). Both impure
+rows error, and the after-order row is the REJECT case that was silently
+skipped. Both pure rows are clean, so the two orders give the same verdict.
+
+**Not fixed, filed separately.** When the importee is declared later AND the
+two modules import each other, the edge is withheld (it is on a cycle) and
+Check 4 is still skipped:
+`specs/todos/2026-09-28-check4-cyclic-import-importee-later.md`.
+The same-file `import Sibling` ``Module `X` not found`` diagnostic noted
+below is unchanged.
+
+---
+
+Original report:
+
 # Check 4 is skipped when a same-file sibling module is `import`ed before it is declared
 
 **Filed:** 2026-08-06, found while building the cyclic-module witness for
