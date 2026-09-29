@@ -35,6 +35,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Editor highlighting (tree-sitter) now covers current March syntax.** The
+  tree-sitter grammar that Zed highlights from failed to parse most real files
+  (713 of 919 in the repo), so they rendered as one long error region. It now
+  parses every file the compiler accepts, including record literals, multi-line
+  match arms and lambdas, patterns, actors, protocols and declarations added
+  since March. Zed's highlight and outline queries, broken since August, compile
+  again. A CI job keeps the grammar in step with the compiler.
 - **A source-tree `march` no longer builds its runtime from a partial copy of
   `runtime/`.** If a build had copied only some runtime C files into
   `_build/default/runtime` (the vault scaling benchmarks do), the compiler used
@@ -117,7 +124,6 @@ git log is authoritative for exact commits.
   reach the right actor. Actors whose names are unique keep their names, so
   hot-code-reload manifests are unchanged. Two actors of one name in the
   same module are now an error.
-
 - **Actors that message each other back and forth are up to 2.6x faster.** With
   several scheduler threads, sending to an actor that was just going to sleep could
   make the sender wait a millisecond or more before delivering. A two-actor
