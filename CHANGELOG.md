@@ -29,8 +29,8 @@ git log is authoritative for exact commits.
 - **SIGTERM no longer cuts the sessions a node initiated.** `Topology`'s drain
   counted only its offers' sessions, so a node that serves no role exited 0 at once
   on SIGTERM, cutting sessions it had started with `initiate_R` (from a hook or a role
-  body) or `cluster_R`. Those sessions now count toward the drain and the status
-  file's `running`, under the same soft and hard deadlines.
+  body) or `cluster_R`. The drain now waits for those sessions too, under the same
+  soft and hard deadlines.
 - **`march --check` no longer passes a protocol expand it refuses, from its cache.**
   After a clean `--check` with `--protocol-baseline` and `--protocol-expand`, the same
   check without the baseline (which the compiler refuses) exited 0 from the cache

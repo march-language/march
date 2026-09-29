@@ -563,16 +563,19 @@ mod Topology do
     end
   end
 
-  doc """
-  Sessions still running on [node]: those on its offers, open or draining,
-  and those it started itself (`SessionNode.initiated`: an `initiate_R` from
-  a hook or a role body, a hand-written `cluster_R`).
-  """
+  doc "Sessions still running on [node]'s offers, open or draining."
   fn running(node : Cap(ClusterNode.Live)) : Int do
     let st = state_of(node)
     let sum = fn (acc, kv) -> match kv do (_, o) -> acc + active(o) end
     List.fold_left(Vault.all(st.draining), List.fold_left(Vault.all(st.offers), 0, sum), sum)
-      + SessionNode.initiated(node)
+  end
+
+  -- What the SIGTERM drain waits for: the sessions on [node]'s offers and
+  -- those it started itself (`SessionNode.initiated`: an `initiate_R` from a
+  -- hook or a role body, a hand-written `cluster_R`). A session with both
+  -- ends on this node counts twice; the drain asks only whether any runs.
+  pfn unfinished(node : Cap(ClusterNode.Live)) : Int do
+    running(node) + SessionNode.initiated(node)
   end
 
   -- ── re-reading the topology (SIGHUP) ──────────────────────────────────
@@ -782,7 +785,7 @@ mod Topology do
   doc """
   What this node reports to the reconciler: its name, the digest it applied
   (sha256, or `compiled` before any reload), its offers, how many closed
-  offers are still draining, and the sessions it is running (`running`).
+  offers are still draining, and the sessions running on them all.
   """
   fn status_text(node : Cap(ClusterNode.Live)) : String do
     let st = state_of(node)
@@ -866,7 +869,7 @@ mod Topology do
   end
 
   pfn drain_wait(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int, t0 : Int, warned : Bool) : Int do
-    let n = running(node)
+    let n = unfinished(node)
     let spent = unix_time_ms() - t0
     if n == 0 do
       report("drained " ++ label(node))

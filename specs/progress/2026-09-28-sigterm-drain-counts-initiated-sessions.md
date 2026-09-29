@@ -24,10 +24,17 @@ were all ones it initiated and exited at once.
 so a session still forming counts), `run_cluster` and `run_cluster_hosted` raise on
 entry and lower on return; `SessionNode.initiated(node)` reads it. An offer's sessions
 go through the private `*_with` runners and stay counted by the offer alone, so
-nothing is counted twice. `Topology.running` adds `initiated`, which feeds both the
-SIGTERM drain wait (soft report, hard exit 1, unchanged) and the status file's
-`running` line. A body that panics skips the decrement; the drain then waits out its
-hard deadline, which bounds it.
+nothing is counted twice. The SIGTERM drain wait (soft report, hard exit 1,
+unchanged) now waits on `Topology.unfinished` = `running` + `initiated`.
+
+`Topology.running` itself, and so the status file's `running` line, stays the
+offers' count. A first version added `initiated` to `running`, and
+`two-node[hosted_protocol_change]` caught it in CI: that one-node scenario initiates
+3 sessions against its own offer and checks `running` is 3; it read 6, both ends of
+each session. For the drain only "is anything running" matters, so the double count
+of a both-ends-local session is harmless there (the soft/hard reports' session count
+can read high for such sessions). A body that panics skips the decrement; the drain
+then waits out its hard deadline, which bounds it.
 
 **Test.** `test/two_node/drain_initiated`: node-b serves no role, installs
 `drain_on_signal`, initiates one Echo session whose server answers after 2 s, and gets
