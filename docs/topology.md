@@ -377,7 +377,9 @@ applied, its offers and its running sessions to `.forge/run/<node>.status`
 process with no watcher would die of the SIGHUP.
 
 Outside forge, the same works by hand: write the digest to the file the node was started
-with (`MARCH_TOPOLOGY_FILE`) and send it SIGHUP.
+with (`MARCH_TOPOLOGY_FILE`) and send it SIGHUP. A node that has received a signed
+`TOPOLOGY` push reads that verified copy instead, and a restarted node comes back on it
+(see [Hot code reload]({{ site.baseurl }}/docs/hot-code-reload/#pushing-a-topology-the-topology-verb)).
 
 ## Deploying
 
@@ -468,11 +470,29 @@ Per pool, the mechanism is the strongest that applies:
 A choice that gains a branch is safe when every receiver of the choice runs the new
 version before its chooser does, so pools that receive it go first. When one build both
 chooses and receives it (a replicated monolith), no order works within one deploy: the
-plan splits it in two (D21). Deploy one activates everything except the chooser role's
-functions; `forge deploy` stops there, and running it again does deploy two. The finer
-rule, which (role, version) pairs may share a session over wire tags, comes with the
-protocol compatibility table. The plan also names the unlabelled messages a new branch
-would renumber.
+plan splits it in two (D21) and says so under "3. Order and splits":
+
+```
+  SPLIT (D21): build shared both makes and receives Echo's changed choice (`choose by Server`
+  gained `retry`), so no order within one deploy puts its receivers first: the change is two deploys
+    deploy one (expand) <- this deploy: every build compiled with --protocol-expand Echo:retry. The
+    receivers (Echo.Client) run the new version (fingerprint 1edebff1) and accept the previous one;
+    Echo.Server keeps offering and initiating under the previous fingerprint 181c4b72 and cannot
+    choose `retry`
+    deploy two (contract): the plain build, once every host runs deploy one. Echo.Server moves to
+    fingerprint 1edebff1 and may choose `retry`; `forge deploy` stops after deploy one: run it
+    again for deploy two
+```
+
+`forge deploy` stops after the expand; running it again for the same source is the
+contract. In the expand build the chooser's `choose_<label>` panics, so chooser code that
+must run in both builds asks first:
+`<P>_Msg.role_fingerprint(<P>_Msg.role_<Chooser>()) == <P>_Msg.fingerprint()` is false
+until the contract. Which changes are compatible is the compiler's rule, computed over
+wire tags against what the environment runs (`.forge/deploy/<env>/protocols/`, never the
+build-to-build `.forge/protocols/`). Anything else is breaking: every node offers both
+fingerprints while the deploy rolls through, and the plan says why, naming the unlabelled
+messages a new branch would renumber.
 
 `forge topology status --env prod` and `forge topology apply --env prod` work over ssh
 too: status reads each node's report, its reload server (code versions, pins, what its

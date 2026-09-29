@@ -1,0 +1,8 @@
+Server: got 1
+Client: got 10
+before stop: session done
+queue to self before stop: some
+queue to self after stop: none
+loopback sink released: true
+send to self after stop: refused
+initiate after stop: refused

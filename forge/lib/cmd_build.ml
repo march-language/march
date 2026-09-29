@@ -892,9 +892,13 @@ let protocol_flags ~root (sources : string list) : string =
     [<name><suffix>] so the builds of one topology do not overwrite each
     other; [topology_env] picks the overlay the gate digests. A project with a
     topology.toml is always compiled with [--topology .forge/topology.json]:
-    its [main] is generated from it (build step 3). *)
+    its [main] is generated from it (build step 3). [protocol_flags], when
+    given, replaces the build's own protocol flags ([protocol_flags] below:
+    the compiler's baselines in [.forge/protocols/]): [forge deploy] builds
+    against the environment's deploy baselines instead, and must not write
+    the compiler's. *)
 let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
-    ?(output_suffix = "") ?topology_env ?(extra_flags = "") () =
+    ?(output_suffix = "") ?topology_env ?(extra_flags = "") ?protocol_flags:protocol_flags_override () =
   let t0 = Unix.gettimeofday () in
   (* Normalize cross-target aliases to the compiler's canonical form and derive
      a per-target output subdir so a Linux build never clobbers the host binary. *)
@@ -1054,7 +1058,11 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
                | _ -> None)
             | _ -> None
           in
-          let protocol_flags = protocol_flags ~root:proj.Project.root (entry_path :: files) in
+          let protocol_flags =
+            match protocol_flags_override with
+            | Some f -> f
+            | None -> protocol_flags ~root:proj.Project.root (entry_path :: files)
+          in
           let (rc, ce, cw) = compile_entry ~lib_path_env ~ffi_flags:(ffi_flags ^ topology_flags ^ protocol_flags ^ extra_flags) ~output ~release ~dump_phases ?target
               ?hcr ~pin_main:proj.Project.pin_main entry_path in
           print_build_summary ~t0 ~errors:(te + ce) ~warnings:(tw + cw);

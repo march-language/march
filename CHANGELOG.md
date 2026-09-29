@@ -11,6 +11,29 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Added
+- **`forge add` checks a new dependency's capabilities before keeping it.** When
+  the project has a `forge.caps.lock` (from `forge audit --record`), a
+  dependency the add brings in or changes that asks for a capability it was not
+  granted is refused: the delta is shown and `forge.toml` and `forge.lock` are
+  left as they were. `--accept-caps` keeps it and records the new set. Only the
+  dependencies the add touched are analyzed. `forge outdated` now shows, under
+  each outdated registry dependency, whether the newer release asks for new
+  capabilities. `forge.caps.lock` records which mode (`declared`/`inferred`)
+  produced it.
+- **A cluster node's certificate can be replaced while it runs.** In
+  certificate mode, a renewed certificate used to need a restart. Now the node
+  watches the files `MARCH_NODE_CERT` and `MARCH_NODE_KEY` name
+  (`MARCH_NODE_CERT_POLL_MS`, default 10 s) and takes a new certificate when
+  one appears, or code can call `ClusterNode.replace_cert(node, cert_text,
+  key_hex)`. The new certificate must verify under the operator key, name the
+  node and its key, and not be revoked. Existing links are not reconnected:
+  each peer is sent the new certificate over the link with a proof that the
+  node holds its key, so sessions keep running past the old certificate's
+  expiry. A new key works the same way. `on_security_event` reports each
+  replacement as `CertReplaced` or `CertRefused` (two new `SecurityEvent`
+  constructors: a `match` that named every constructor needs a new arm).
+
 ### Fixed
 - **`Process.spawn_async` no longer hands a running process's slot to a new
   one.** Compiled code kept live processes in a fixed table of 64 with no
@@ -21,6 +44,45 @@ git log is authoritative for exact commits.
   longer reaches whichever process took its slot next. Interpreted,
   `wait_proc` on a child that reads its stdin (such as `cat`) no longer
   hangs.
+- **Actors that message each other back and forth are up to 2.6x faster.** With
+  several scheduler threads, sending to an actor that was just going to sleep could
+  make the sender wait a millisecond or more before delivering. A two-actor
+  ping-pong of 1,000,000 messages took 3.07 s; it now takes 1.18 s. Actor programs
+  built with `--hot-reload` were affected less (1.45 s -> 1.22 s).
+- **`march --check` no longer passes a protocol expand it refuses, from its cache.**
+  After a clean `--check` with `--protocol-baseline` and `--protocol-expand`, the same
+  check without the baseline (which the compiler refuses) exited 0 from the cache
+  without checking anything. The baselines and the expand labels are now part of the
+  check's cache key.
+- **A remote message sent after a hot deploy now reaches an actor whose message type
+  the deploy changed.** Each cluster link's reader task kept the code of the moment
+  the link formed. So a message from a peer already on the new format was decoded by
+  the old route code, stamped as an old-format message, and then converted with
+  `migrate_msg` or dropped. A link reader now moves to the new code at the next frame
+  it reads, and so do the node's ticker and acceptor, so a cluster node no longer
+  keeps the old code pinned after a deploy.
+- **`ClusterNode.stop` now closes the node's link to itself.** After `stop`,
+  `queue_for` on the node's own id still returned a queue, a send to a local
+  process was still delivered, and every stopped node left its loopback handler
+  registered for the life of the process. A process that starts and stops nodes
+  (tests, embedding) leaked one per node and kept local sessions reachable after
+  stop. Now `queue_for(own id)` is `None`, a send to the node itself is refused,
+  and the handler is released.
+- **A recorded hot-deploy request can no longer be replayed against a node.** Signed
+  `ACTIVATE`, `TOPOLOGY` and `DRAIN` requests carried nothing that made them fresh, so
+  anyone who could reach a node's reload socket could send an old one again, rolling a
+  function back or re-pushing an old placement. forge now sends each signed request
+  inside a numbered release (`SEQ`). The node remembers the newest release it accepted,
+  across restarts. It refuses older releases, two different releases with the same
+  number, and, once it holds one, any unwrapped signed request. `MARCH_HCR_REQUIRE_RELEASE=1`
+  requires releases from the first request. Older servers keep getting unwrapped requests.
+  Every release accepted or refused, and every `DRAIN`, is now audited.
+
+- **The signed topology push is now the one a node applies, including after a restart.**
+  The node used to verify a pushed topology, then apply an unsigned copy forge wrote
+  alongside it. A restarted node came back on its built-in placement rather than the one
+  last pushed. `Topology` now reads the verified copy first, and applies it at start.
+
 - **A closed or refused session offer no longer leaks its actor and two
   Vault tables.** `SessionNode.close_offer` left the offer's `OfferActor`
   running for the life of the process, and an `offer_*` refused with
@@ -30,6 +92,7 @@ git log is authoritative for exact commits.
   ends once no session runs under it (at once when none does), a refused
   offer's at once, and offers keep their state in two shared tables whose
   keys are dropped when the actor ends. Plain and hosted offers alike.
+
 - **A node healed after a network partition is now reported as rejoined.** If the
   heal's redial closed a duplicate connection at the same moment the link came
   back, the peer passed through Suspect, and its return was reported as `NodeUp`
@@ -223,6 +286,17 @@ git log is authoritative for exact commits.
   interpreter does, instead of returning a UUID with a garbage timestamp.
 
 ### Added
+- **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
+  When one build both makes a choice that gained a branch and receives it, `forge deploy
+  --plan` now shows two deploys and why: the expand, built with `--protocol-expand
+  <P>:<label>` (the receivers run the new version; the chooser keeps offering under the
+  previous fingerprint and cannot choose the new branch), then the contract, the plain
+  build, on the next `forge deploy`. It compares against what the environment runs
+  (`.forge/deploy/<env>/protocols/`, in the compiler's baseline format), so every patch
+  and base image is also built with the compatibility table for the running version,
+  which it previously lacked. A change the compatibility rule does not allow, including
+  unlabelled messages a new branch renumbers, is reported as breaking, naming the
+  messages. This replaces the earlier split that held the chooser's functions back.
 - **The `ssh` reconciler backend** (build step 10b of the distributed-deploys
   plan). A topology overlay with `[backend] kind = "ssh"` makes `forge topology
   apply --env <env>` and `forge topology status --env <env>` work on the
