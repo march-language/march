@@ -35,6 +35,10 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A path-scoped `needs IO.FileRead("...")` now covers `csv_open`.** A
+  literal path passed to `csv_open` was never checked against the declared
+  scope, so `csv_open("/etc/passwd", ...)` compiled under
+  `needs IO.FileRead("/srv/data")`. It is now rejected like `file_read`.
 - **`march --check` no longer passes a protocol expand it refuses, from its cache.**
   After a clean `--check` with `--protocol-baseline` and `--protocol-expand`, the same
   check without the baseline (which the compiler refuses) exited 0 from the cache
