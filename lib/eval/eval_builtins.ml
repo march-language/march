@@ -3827,7 +3827,7 @@ let base_env : env =
   (* ── Logger v2 appender registry + dispatch ─────────────────────────
      Appenders are March callbacks of type `LogEntry -> Unit`.  We
      store them as opaque `value`s and invoke them via apply_hook.
-     Multiple appenders fire in registration order. *)
+     Multiple appenders fire newest registration first. *)
   ; ("logger_register_appender", VBuiltin ("logger_register_appender", function
         | [VString name; cb] ->
           (* Replace any existing entry with the same name (idempotent). *)
@@ -3858,28 +3858,16 @@ let base_env : env =
      remains useful out of the box. *)
   ; ("logger_dispatch", VBuiltin ("logger_dispatch", function
         | [VString level_s; VString msg; VString source; fields_list] ->
-          (* Map the all-caps level string back to the March Level
-             constructor: "DEBUG" -> Debug, "INFO" -> Info, etc.
-             Anything unrecognised becomes Info to keep formatters
-             happy (level filtering already happened upstream). *)
-          let level_to_march s =
-            let ctor = match s with
-              | "DEBUG" -> "Debug"
-              | "INFO"  -> "Info"
-              | "WARN"  -> "Warn"
-              | "ERROR" -> "Error"
-              | _       -> "Info"
-            in
-            VCon (ctor, [])
-          in
+          (* What an appender callback receives: Logger.AppenderCall, the
+             entry with its level still the all-caps string.
+             stdlib/logger.march's add_appender wraps the user's callback in
+             `deliver`, which builds the LogEntry (the compiled runtime
+             passes the same value; it cannot build a Level itself). *)
           let now_ms = int_of_float (Unix.gettimeofday () *. 1000.0) in
           let entry =
-            VCon ("LogEntry",
-                  [level_to_march level_s;
-                   VString msg;
-                   VInt now_ms;
-                   VString source;
-                   fields_list])
+            VCon ("AppenderCall",
+                  [VString level_s; VString msg; VInt now_ms;
+                   VString source; fields_list])
           in
           if !logger_appenders = [] then begin
             (* v1 fallback: render fields as "k=v" pairs. *)

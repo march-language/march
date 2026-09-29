@@ -162,6 +162,12 @@ void   *march_logger_get_fields(void);
 void   *march_logger_pop_to_depth(int64_t depth);
 void   *march_logger_dispatch(void *level_str, void *msg, void *module_name, void *fields);
 void   *march_logger_register_appender(void *name, void *cb);
+/* Atom-name tables: each compiled module registers its generated (internal)
+ * hash -> ":name" function from a constructor and unregisters it from a
+ * destructor; the logger renders LAtom fields through them.  See
+ * emit_atom_show_table in lib/tir/llvm_toplevel.ml. */
+void    march_set_atom_namer(void *fn);
+void    march_unset_atom_namer(void *fn);
 void   *march_logger_remove_appender(void *name);
 void   *march_logger_clear_appenders(void);
 void   *march_logger_appender_names(void);
