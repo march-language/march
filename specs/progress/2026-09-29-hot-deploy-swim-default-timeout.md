@@ -68,7 +68,18 @@ SWIM at its default (`Swim.config(500, 3000, 2)`) in the `two-node` job, the
 only CI job that runs them without a sanitizer (ubuntu only; no macOS job runs
 two-node scenarios). Results, head of PR #692:
 
-CI_RESULTS_PLACEHOLDER
+| CI run (attempt) | commit | job | `protocol_evolve` | `hcr_new_code_session` |
+|---|---|---|---|---|
+| 36512671315 (1) | eb8dbfd39 | `two-node` 109228055470 | ok | ok |
+| 36535093512 (1) | 1facf8490 | `two-node` 109297571240 | ok | ok |
+| 36535093512 (3) | 1facf8490 | `two-node` 109568940081 | ok | ok |
+
+3/3 green on ubuntu at the default, both scenarios. Under ASan
+(`sanitize-gate`, 15 s via `HCR_SUSPECT_MS`), `hcr_new_code_session` was
+CLEAN in both attempts of run 36535093512 (jobs 109297571271 and
+109496048041); `protocol_evolve` skips itself there. Attempt 1 of that job went
+red on an untouched scenario, `cluster_stop_loopback` ("timed out waiting for
+node-a to exit"), which was CLEAN on the re-run.
 
 **The one failure was under AddressSanitizer, and it is not the deploy.** The
 first CI run's `sanitize-gate` (job 109228055256) failed `hcr_new_code_session`
