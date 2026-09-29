@@ -8458,6 +8458,38 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; forcing the in-place path unconditionally -- that line, and only that
 ; line, flipped to false.
 ;
+;; The sort's presorted-input front end (two runs; nearly sorted), which only
+;; runs for n >= 1024 and so is out of reach of native_arr_sort /
+;; native_arr_sort_narrow. Compiled, depth-limit 0 and interpreted.
+(rule
+ (targets native_arr_sort_presorted native_arr_sort_presorted.out
+          native_arr_sort_presorted_heap.out native_arr_sort_presorted_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_sort_presorted.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (with-stdout-to native_arr_sort_presorted_interp.out
+     (run %{exe:../bin/main.exe} native/native_arr_sort_presorted.march))
+   (run %{exe:../bin/main.exe} --compile -o native_arr_sort_presorted
+        native/native_arr_sort_presorted.march)
+   (with-stdout-to native_arr_sort_presorted.out
+        (system "./native_arr_sort_presorted"))
+   (with-stdout-to native_arr_sort_presorted_heap.out
+        (system "MARCH_TEST_NSORT_DEPTH_LIMIT=0 ./native_arr_sort_presorted")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort_presorted.expected native_arr_sort_presorted.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort_presorted.expected native_arr_sort_presorted_heap.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_sort_presorted.expected native_arr_sort_presorted_interp.out)))
 ;; Every size of the sort's small-sort base case, n = 0..40, for the four
 ;; comparison widths sharing NSORT_DEFINE_CORE (see the fixture's header).
 ;; Compiled, depth-limit 0 and interpreted, against one golden.
