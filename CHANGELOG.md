@@ -35,6 +35,12 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Logger appenders work in compiled programs.** Compiled,
+  `Logger.add_appender` did nothing, `Logger.list_appenders()` was always
+  empty, and every message went to the stderr fallback line. Appenders now
+  receive each `LogEntry` exactly as they do interpreted, newest
+  registration first. An atom field (`Logger.LAtom(:closed)`) now logs as
+  `:closed` rather than `null`.
 - **Compiled programs no longer leak memory on every subprocess call.** Each
   `Process.spawn_async` leaked its argument list and the `LiveProcess` handle
   it returned (the handle could never be freed once `read_line`, `write`,

@@ -3686,6 +3686,55 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (diff native/same_named_builtin_abi_parity.stderr.expected
                native_same_named_builtin_abi_parity_interp.err)))
 
+; Logger appenders: the compiled runtime kept no registry (register a no-op,
+; list_appenders always [], every line the stderr fallback) and printed an
+; LAtom field as `null` (specs/progress/2026-09-28-compiled-logger-appenders-are-no-ops.md).
+; Both backends, one stdout golden and one stderr golden.
+(rule
+ (targets native_logger_appenders_parity
+          native_logger_appenders_parity.out
+          native_logger_appenders_parity.err
+          native_logger_appenders_parity_interp.out
+          native_logger_appenders_parity_interp.err)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/logger_appenders_parity.march)
+       (source_tree ../stdlib))
+ (action
+  (setenv MARCH_RUNTIME_DIR ../runtime
+   (progn
+    (with-stdout-to native_logger_appenders_parity_interp.out
+     (with-stderr-to native_logger_appenders_parity_interp.err
+      (run %{exe:../bin/main.exe} native/logger_appenders_parity.march)))
+    (run %{exe:../bin/main.exe} --compile -o native_logger_appenders_parity
+         native/logger_appenders_parity.march)
+    (with-stdout-to native_logger_appenders_parity.out
+     (system "./native_logger_appenders_parity 2> native_logger_appenders_parity.err"))))))
+
+(rule
+ (alias runtest)
+ (deps native_logger_appenders_parity.out native/logger_appenders_parity.expected)
+ (action (diff native/logger_appenders_parity.expected native_logger_appenders_parity.out)))
+
+(rule
+ (alias runtest)
+ (deps native_logger_appenders_parity_interp.out native/logger_appenders_parity.expected)
+ (action (diff native/logger_appenders_parity.expected
+               native_logger_appenders_parity_interp.out)))
+
+(rule
+ (alias runtest)
+ (deps native_logger_appenders_parity.err native/logger_appenders_parity.stderr.expected)
+ (action (diff native/logger_appenders_parity.stderr.expected
+               native_logger_appenders_parity.err)))
+
+(rule
+ (alias runtest)
+ (deps native_logger_appenders_parity_interp.err
+       native/logger_appenders_parity.stderr.expected)
+ (action (diff native/logger_appenders_parity.stderr.expected
+               native_logger_appenders_parity_interp.err)))
+
 ; dns_resolve returned different lists interpreted and compiled (IPv4 with a
 ; duplicate per socket type vs IPv4+IPv6, deduplicated).  One contract now:
 ; IPv4 only, one entry per address (specs/progress/2026-09-25-dns-resolve-parity.md).

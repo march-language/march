@@ -190,7 +190,8 @@ let builtins : builtin list = [
      both the AOT and JIT/REPL finalizers).  Emitting a `declare` here as well
      as that `define` would be an LLVM redefinition, so
      declare_sig is None; the call site still mangles to @march_atom_to_string
-     via c_name and resolves to the in-module definition. *)
+     via c_name and resolves to the in-module definition, which has internal
+     linkage so no other module's copy (or runtime symbol) can interpose it. *)
   { march_name = "atom_to_string"; c_name = Some "march_atom_to_string"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = None };
   { march_name = "++"; c_name = Some "march_string_concat"; ret_ty = Some Tir.TString;
