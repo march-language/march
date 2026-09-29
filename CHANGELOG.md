@@ -43,6 +43,13 @@ git log is authoritative for exact commits.
   switched arms. Keeping every other element of a 1,000,000-element list died
   with SIGBUS in the stack guard page; all-kept and all-dropped inputs ran fine.
 
+- **`run_until_idle()` no longer returns while actors are still exchanging
+  messages.** Its idle check read processes one at a time, so a message
+  sent between two reads went unseen. About 1 run in 100 of a busy
+  two-actor ping-pong returned early (compiled, 14 scheduler threads). The
+  check now retries if any message was sent or process spawned while it ran.
+  `specs/lang/actors.md` states what `run_until_idle()` does and does not
+  wait for.
 - **`march --check` of a module with several `@[endpoints]` protocols is fast
   again.** Each protocol made every later one roughly twice as slow to typecheck:
   one module with six protocols took about 9 minutes. It now takes under a
