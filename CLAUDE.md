@@ -10,6 +10,10 @@ March is a statically-typed functional language (ML/Elixir hybrid) compiled with
 - When an item is finished, `git mv` its file from `specs/todos/` to `specs/progress/` (or delete it and add a new
   dated file in `specs/progress/`) in the same commit that lands the fix; don't leave a stale open file behind.
 - Don't hand-maintain a running "Current State" test count anywhere; run `scripts/run-tests.sh` for the live number.
+- **Tree-sitter grammar.** A PR that changes `lib/parser/parser.mly` or `lib/lexer/lexer.mll` either extends
+  `tree-sitter-march/grammar.js` or lists its new fixtures in `tree-sitter-march/known-failures.txt` (and a new
+  keyword in `tree-sitter-march/keyword-allowlist.txt`) with a `specs/todos/` entry, in the same PR.
+  `scripts/check-tree-sitter.sh` (CI job `tree-sitter`) enforces it.
 
 These directories are the canonical record of what exists. Do not let them go stale. One item, one file; this
 structure exists specifically so two PRs filing or closing different items never conflict with each other.
