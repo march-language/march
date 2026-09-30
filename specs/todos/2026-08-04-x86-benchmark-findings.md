@@ -246,5 +246,6 @@ So the honest state of simd-map:
 3. **Profile simd-map** to find what the remaining 2× vs OCaml actually is.
    Allocation and the per-element `memcpy` are the first suspects; measure
    rather than reason, per the two wrong turns recorded above.
-4. Optionally expose a `--target-cpu` passthrough — worth ~13% on simd-map here,
-   but it is a knob, not a fix.
+4. ~~Optionally expose a `--target-cpu` passthrough — worth ~13% on simd-map here,
+   but it is a knob, not a fix.~~ Done: `--target-cpu <cpu>`, see
+   `specs/progress/2026-09-29-target-cpu-flag.md`.

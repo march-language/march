@@ -410,6 +410,48 @@ let test_real_actor_struct_is_not_transformed () =
   Alcotest.(check bool) "a genuine actor struct is not transformed"
     true (Trmc.transform_fn type_defs fd = None)
 
+(* filter's shape: one arm is modulo-cons, the other a PLAIN tail self-call.
+   Inside the $dps helper that tail call must continue in the helper with the
+   SAME destination.  It used to call the entry and store the result, which is
+   an entry -> $dps -> entry cycle that pushes a frame per alternation between
+   the arms: a 1M-element List.filter keeping every other element overflowed
+   the green-thread stack while all-true and all-false inputs both passed. *)
+let test_tail_arm_stays_in_helper () =
+  let self = v "f" (Tir.TFn ([list_int], list_int)) in
+  let xs = v "xs" list_int and t = v "t" list_int
+  and h = v "h" Tir.TInt and r = v "r" list_int in
+  let keep = v "keep" Tir.TBool in
+  let body =
+    Tir.ECase (Tir.AVar keep,
+      [ { Tir.br_tag = "True"; br_vars = [];
+          br_body =
+            Tir.ELet (r, Tir.EApp (self, [Tir.AVar t]),
+              Tir.EAlloc (Tir.TCon ("List.Cons", []),
+                          [Tir.AVar h; Tir.AVar r])) } ],
+      Some (Tir.EApp (self, [Tir.AVar t])))
+  in
+  let fd = fn "f" [xs] body in
+  match Trmc.transform_fn [] fd with
+  | None -> Alcotest.fail "filter shape should be transformed"
+  | Some (_entry, helper) ->
+    let rec calls acc = function
+      | Tir.EApp (g, args) -> (g.Tir.v_name, args) :: acc
+      | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) -> calls (calls acc e1) e2
+      | Tir.ECase (_, brs, d) ->
+        let acc = List.fold_left (fun a (b : Tir.branch) -> calls a b.Tir.br_body) acc brs in
+        (match d with Some e -> calls acc e | None -> acc)
+      | _ -> acc
+    in
+    let cs = calls [] helper.Tir.fn_body in
+    Alcotest.(check bool) "helper never calls the entry" false
+      (List.exists (fun (n, _) -> String.equal n "f") cs);
+    Alcotest.(check bool) "tail arm passes $dst through to the helper" true
+      (List.exists (fun (n, args) ->
+         String.equal n "f$dps"
+         && (match List.rev args with
+             | Tir.AVar d :: _ -> String.equal d.Tir.v_name "$dst"
+             | _ -> false)) cs)
+
 (* REPL/JIT must apply the same transform as the compiled path, or a function
    behaves one way in the REPL and another when compiled.  repl_jit may re-lower
    a module the driver already transformed, so the transform has to be
@@ -585,6 +627,7 @@ let suites = [
     Alcotest.test_case "real actor struct refused"        `Quick test_real_actor_struct_is_not_transformed;
     Alcotest.test_case "transform is idempotent"         `Quick test_transform_is_idempotent_on_a_transformed_module;
     Alcotest.test_case "fresh names ignore run order"     `Quick test_fresh_names_are_independent_of_run_order;
+    Alcotest.test_case "tail arm stays in the helper"     `Quick test_tail_arm_stays_in_helper;
   ];
   "trmc-ir", [
     Alcotest.test_case "alloc-hole emits verifiable IR"  `Quick test_alloc_hole_emits_verifiable_ir;
