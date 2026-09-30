@@ -525,7 +525,10 @@ mod DataFrame do
     FloatBuilder(name, xs) -> FloatCol(name, native_float_arr_from_list(List.reverse(xs)))
     StrBuilder(name, xs)   -> StrCol(name, typed_array_from_list(List.reverse(xs)))
     BoolBuilder(name, xs)  -> BoolCol(name, typed_array_from_list(List.reverse(xs)))
-    NullBuilder(name, n)   -> StrCol(name, typed_array_create(n, ""))
+    -- A column of nothing but nulls has no value to infer a type from, but it
+    -- must still BE null: every row is masked, rather than a plain StrCol of
+    -- "" whose rows read back as real empty strings.
+    NullBuilder(name, n)   -> NullableStrCol(name, typed_array_create(n, ""), typed_array_create(n, true))
     end
   end
 

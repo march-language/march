@@ -54,10 +54,9 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
-- **`Actor.top_by_mailbox` / `Actor.over_mailbox` and `NodeCall` typecheck cleanly.** The
-  two mailbox helpers now return `List((Pid(a), Int))` (the parameterized `Pid`) and
-  `NodeCall` names `RemoteCall.NoConnection` explicitly instead of the ambiguous bare
-  constructor; seven hidden stdlib type errors are gone.
+- **A DataFrame column of nothing but nulls keeps its nulls.** CSV/JSON loading and
+  `summarize` used to turn an all-null column into a plain string column of `""`, so the
+  rows read back as empty strings; they now read back as `NullVal`.
 - **Linux `--cap-sandbox` now filters threads that already exist when the
   sandbox is installed.** The seccomp filter covered only the installing
   thread and its later children, so the hot-reload server thread (started
@@ -452,6 +451,10 @@ git log is authoritative for exact commits.
   bound on its own line was optimised; and a natural-style nested `fn go` was
   reported as eligible but never rewritten. Both are now transformed, so a
   1,000,000-element list built this way no longer overflows the stack.
+- **`Actor.top_by_mailbox` / `Actor.over_mailbox` and `NodeCall` typecheck cleanly.** The
+  two mailbox helpers now return `List((Pid(a), Int))` (the parameterized `Pid`) and
+  `NodeCall` names `RemoteCall.NoConnection` explicitly instead of the ambiguous bare
+  constructor; seven hidden stdlib type errors are gone.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
