@@ -92,6 +92,7 @@ let corpus = [
   "borrowed_scrutinee_field_read",   "borrowed_scrutinee_field_read.march";
   "nested_record_field_capture",     "nested_record_field_capture.march";
   "tuple_param_borrowed_destruct",   "tuple_param_borrowed_destruct.march";
+  "record_field_tail_projection",    "record_field_tail_projection.march";
   "tuple_destructure_moved_fields",  "tuple_destructure_moved_fields.march";
 ]
 

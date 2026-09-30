@@ -2416,6 +2416,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/niche_aggregate_payload_leak_probe.expected native_niche_aggregate_payload_leak_probe.out)))
 
+; ── A record field that is the RESULT of a scope owning the record was
+; released with the record (use-after-free once the record was the last
+; owner; two-node cluster_fd_release). Both backends diffed against ONE
+; .expected, the interpreter's.
+(rule
+ (targets native_record_field_tail_projection native_record_field_tail_projection.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/record_field_tail_projection.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_record_field_tail_projection
+        native/record_field_tail_projection.march)
+   (with-stdout-to native_record_field_tail_projection.out
+        (system "./native_record_field_tail_projection")))))
+
+(rule
+ (targets interp_record_field_tail_projection.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/record_field_tail_projection.march))
+ (action
+  (with-stdout-to interp_record_field_tail_projection.out
+    (run %{exe:../bin/main.exe} native/record_field_tail_projection.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_field_tail_projection.expected native_record_field_tail_projection.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_field_tail_projection.expected interp_record_field_tail_projection.out)))
+
 ; ── compare_int / compare_float / compare_string: link compiled, return
 ; -1/0/1 on both backends (the interpreter returned a Less/Equal/Greater ctor;
 ; the compiled program failed to link), and compare_string releases a fresh

@@ -436,6 +436,12 @@ git log is authoritative for exact commits.
   The compiler treated a tuple pattern's fields as borrowed although the match
   hands them over as owned; they now follow the same ownership as a constructor
   pattern's.
+- **A record field returned out of the scope that owns the record is no longer
+  freed with it (compiled).** `let a = match f() do Some(m) -> m.addr ... end`
+  handed the caller a String the record still owned, and it was freed when
+  the record was dropped: a use-after-free once the record held the last
+  reference (it crashed a cluster node on a peer reconnect). The field now
+  gets its own reference first.
 - **Tail-recursion-modulo-cons now covers a computed call argument and nested
   helper functions.** `Cons(a, r(a + 1, b))` was compiled as a plain non-tail
   recursion (stack overflow on long lists) although the same code with `a + 1`

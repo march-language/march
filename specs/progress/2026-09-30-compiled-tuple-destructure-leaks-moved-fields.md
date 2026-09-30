@@ -89,6 +89,49 @@ by the regenerated `test/snapshots/perceus/tuple_atom_string_arms.expected`.
   one stored in a constructor, one passed to an owning call, a nested
   pattern), then the caller's tuples printed intact. ASAN-clean with leak
   detection on, at both `--compile` and `--opt 2`, in the Linux container.
+
+## A pre-existing use-after-free this exposed (fixed in the same PR)
+
+CI's `two-node` job then failed `cluster_fd_release`: node-a aborted with
+`malloc(): unaligned tcache chunk detected`, and `sanitize-gate` reported a
+heap-use-after-free on a member address String. It freed in
+`Map.node_remove` (the `LinkClosed` handler) and was reused by
+`Membership.with_status`. Reproduced in the Linux container: branch 3 of 10
+runs failing, origin/main 10 of 10 passing.
+
+Bisecting per function (a container-only switch restoring the old
+"tuples are borrowed" rule for chosen functions) located it:
+restoring it only in `Msgpack.decode_one` made the scenario 10/10 again. But
+that function's new IR was correct at every site (ownership handover with
+`march_decrc_freed` and a shared-path incref). The difference was exactly
+the 12 `incrc_local`s that leaked a reference on every decoded value,
+member names and addresses included. The leak had been MASKING a genuine
+over-release elsewhere.
+
+The over-release: `ClusterNode.core_link_closed` does
+`let addr = match core_member(st1, id) do Some(m) -> m.addr ... end` and
+passes `addr` to `Map.remove` (owned key). Perceus's aggregate scope-end drop
+(`perceus_core.ml`, ELet case) releases the record `m` after the scope's
+result is computed, `let tmp = <e2> in dec_rc m; tmp`, on the premise that any
+field escaping `e2` was already dup'd by the borrowed-field logic. A field
+that IS the result, a tail-position `m.addr`, is an `EField`, and `EField`
+never dups an aggregate source. So the caller received a String `m` still
+owned. `test/native/record_field_tail_projection.march`, a 60-line
+program with the same shape (no msgpack, no actors), is a deterministic
+heap-use-after-free under ASAN on **origin/main** too, at `--compile` and
+`--opt 2`.
+
+Fix: `dup_tail_projections` wraps each tail-position projection of the
+dropped aggregate in an increment of the projected value before the release
+(snapshot `record_field_tail_projection`:
+`let $rc_2 = m.addr in inc_rc $rc_2; $rc_2` then `dec_rc m`). With it:
+the reproducer is ASAN-clean at both opt levels, and `cluster_fd_release`
+passes 20/20 in the container. The full `sanitize.sh` sweep with the fix was
+141 clean, 1 failed, 4 skipped. The one failure was `two-node/hosted_protocol_change`
+("unexpected message in state S_recv_Hello", a session-ordering panic with no
+ASAN report) while the machine was also running the full suite; rerun alone
+under ASAN it passed 5/5.
+
 - Benchmarks compiled `--opt 2`, 9 interleaved runs each, origin/main
   (771430bf3) vs branch, medians: `tree_transform` 0.761 s / 0.742 s,
   `list_ops` 0.089 s / 0.088 s, `binary_trees` 0.247 s / 0.247 s. The outputs

@@ -621,6 +621,37 @@ let find_inc_vars ?(include_borrowed_fields = true)
        let n = count - 1 + (if StringSet.mem name live_after then 1 else 0) in
        List.init n (fun _ -> v))
 
+(** Dup every TAIL-position projection of [name] in [e]: the value the scope
+    returns.  Used by the aggregate scope-end drop in [insert_rc_expr]'s ELet
+    case, which releases the aggregate AFTER its scope's result is computed
+    ([let tmp = e2 in dec_rc v; tmp]).  A field that escapes [e2] through a
+    binding or an argument has already been dup'd by the borrowed-field
+    logic, but a field that IS the result ([let m = .. in m.addr]) is an
+    [EField] in tail position, which borrows ([EField] never dups an aggregate
+    source): the release then freed a String the caller went on to own.
+    Seen as a use-after-free in two-node's cluster_fd_release
+    (ClusterNode.core_link_closed: [match core_member(..) do Some(m) ->
+    m.addr ..] passed to [Map.remove]), masked on main by a leak in
+    Msgpack.decode_one's tuple matches until
+    specs/progress/2026-09-30-compiled-tuple-destructure-leaks-moved-fields.md
+    removed it.  An unknown type is treated as heap-carrying; the dup of a
+    tagged scalar is a no-op at run time. *)
+let rec dup_tail_projections (env : env) (name : string) (e : Tir.expr) : Tir.expr =
+  match e with
+  | Tir.EField (Tir.AVar w, _) when String.equal w.Tir.v_name name ->
+    let ty = match tir_expr_ty e with Some t -> t | None -> Tir.TVar "_" in
+    if needs_rc env ty then begin
+      let t = fresh_rc_var ty in
+      Tir.ELet (t, e, Tir.ESeq (incrc_for env w (Tir.AVar t), Tir.EAtom (Tir.AVar t)))
+    end else e
+  | Tir.ELet (x, e1, body) -> Tir.ELet (x, e1, dup_tail_projections env name body)
+  | Tir.ESeq (a, body) -> Tir.ESeq (a, dup_tail_projections env name body)
+  | Tir.ECase (a, brs, d) ->
+    Tir.ECase (a,
+      List.map (fun br -> { br with Tir.br_body = dup_tail_projections env name br.Tir.br_body }) brs,
+      Option.map (dup_tail_projections env name) d)
+  | _ -> e
+
 (** Insert RC operations into an expression.
     Returns [(expr', live_before)] where expr' has RC ops inserted and
     live_before is the set of variables live before this expression. *)
@@ -1165,7 +1196,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
           | Some t -> t
           | None -> assert false (* guarded above *) in
         let tmp = fresh_rc_var body_ty in
-        Tir.ELet (tmp, e2',
+        Tir.ELet (tmp, dup_tail_projections env v.Tir.v_name e2',
                   Tir.ESeq (decrc_for env v (Tir.AVar v),
                             Tir.EAtom (Tir.AVar tmp)))
       else

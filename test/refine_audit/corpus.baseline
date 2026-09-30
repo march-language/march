@@ -396,6 +396,8 @@ native_record_erased_field_repr: coverage audit (user + stdlib): 120 enforced, 0
 native_record_erased_field_repr: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_record_field_erased_int: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_record_field_erased_int: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_record_field_tail_projection: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_record_field_tail_projection: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_record_get_let_bound_eq: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_record_get_let_bound_eq: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_record_pattern: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
