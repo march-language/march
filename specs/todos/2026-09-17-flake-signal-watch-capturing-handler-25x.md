@@ -14,3 +14,15 @@ the count. Which of these it was is unknown without the log.
 **What to do.** Capture the failing output next time (the ZIP, not `--log`). If it is a
 count shortfall, the fix is in the test (wait for each delivery's acknowledgement before
 the next `kill`); if it is a crash, it is a runtime bug in the drain.
+
+**Update 2026-09-30: the diagnostics half is already in place.** The test does not abort
+blind. Since #322 (`880dd5cb2`, 2026-08-21, before this file was filed) each iteration runs
+`<bin> 2>&1; echo EXIT:$?`, retries a failing iteration once, and on a second failure calls
+`Alcotest.failf` with the iteration number and BOTH attempts' full captured output, which
+includes the `EXIT:<n>` line (see the comment above
+`test_signal_watch_capturing_handler_repeated_delivery_compiled` in `test/test_codegen.ml`).
+The next sighting therefore prints what failed without any test change; grep the job log for
+`iteration %d failed twice`. If the exit code there is 137 it is host-level SIGKILL pressure
+(the only failure reproducible locally in 6000 runs, per
+`specs/progress/2026-08-21-signal-watch-capturing-handler-trmc-suite-flake.md`), not this
+test. The file stays open only until a sighting is diagnosed.
