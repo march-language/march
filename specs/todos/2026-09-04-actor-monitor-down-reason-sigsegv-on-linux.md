@@ -20,6 +20,28 @@ possibility first: run the loop with a deliberate `raise(SIGSEGV)` and confirm
 the line reaches the dune log. The binary was not kept, so `pc` could not be
 resolved.
 
+### Checked 2026-09-30: the rule's `$(...)` capture does NOT drop stderr
+
+The second possibility above is ruled out. A scratch dune project with the rule's exact
+shape (`bash -c` loop, `out=$(./crash); rc=$?`, failure report printed to stderr, `exit 1`)
+around a C program that installs a SIGSEGV handler writing a `march: fatal SIGSEGV ...`
+line to fd 2, then `raise(SIGSEGV)`, printed this in `dune build @runtest`:
+
+```
+march: fatal SIGSEGV si_code=1 addr=0x0 (simulated)
+crash: iteration 0: binary exited 139
+offending output:
+line one
+```
+
+`$(...)` only captures stdout; the child's stderr is inherited from the rule, and dune
+includes the rule's stderr in the failure log. So the rule needs no change, and the missing
+`march: fatal` line in the 2026-09-25 sighting points at the FIRST possibility: the crash
+bypasses the runtime's SIGSEGV handler (a fault inside the handler, or on a thread whose
+disposition was reset during teardown). The next sighting's missing line is therefore
+evidence about the crash, not about the log. Caveat: the test used a stand-in handler, not
+the runtime's `march: fatal` path; it proves the capture shape, not the runtime handler.
+
 ## Third investigation (2026-09-13): amd64 and ASAN, 60,000 runs, NOT reproduced; the next sighting will say where
 
 **The two untried axes are now tried.**
