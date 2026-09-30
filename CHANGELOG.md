@@ -54,6 +54,12 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Linux `--cap-sandbox` now filters threads that already exist when the
+  sandbox is installed.** The seccomp filter covered only the installing
+  thread and its later children, so the hot-reload server thread (started
+  before `main`) and any thread started by a C library constructor ran
+  unfiltered. The filter is now installed with `SECCOMP_FILTER_FLAG_TSYNC`, so
+  it covers the whole process, as the macOS sandbox already did.
 - **`[ffi.rust]` crates now work under the interpreter.** `forge run`,
   `forge interactive` and interpreted `forge test` used to fail at the first
   Rust extern with "symbol not found for interpreter FFI", and printed a

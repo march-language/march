@@ -2877,10 +2877,9 @@ void march_sandbox_install(void) {
     /* A NetConnect-only program (an HTTP client) needs socket() + connect();
      * without these two it could also accept connections.  bind() covers
      * AF_UNIX as well, which is correct: a Unix-domain listener is still a
-     * listener.  Threads created BEFORE this call (the hot-reload server,
-     * started in @main ahead of march_spawn_main) are not covered, since
-     * PR_SET_SECCOMP filters only the calling thread and its later
-     * children. */
+     * listener.  The filter is installed with SECCOMP_FILTER_FLAG_TSYNC
+     * (below), so this also covers threads that were already running at
+     * install time, the hot-reload server's included. */
     DENY_NR(__NR_bind);
     DENY_NR(__NR_listen);
 #endif
@@ -2943,16 +2942,46 @@ void march_sandbox_install(void) {
 
     struct sock_fprog prog = { .len = (unsigned short)n, .filter = f };
 
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
-        prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) {
+    /* Install for EVERY thread of the process, not just the caller.
+     * prctl(PR_SET_SECCOMP) filters only the calling thread and the threads
+     * it creates afterwards, and threads already exist here: @main starts
+     * the hot-reload server (march_reload_server_start, from the hr_setup
+     * block llvm_toplevel.ml emits ahead of march_spawn_main), and a linked
+     * C library's constructor can start its own.  Those ran unfiltered.
+     * SECCOMP_FILTER_FLAG_TSYNC attaches the filter to every thread
+     * atomically (and propagates no_new_privs to them), which is what the
+     * macOS backend already does: sandbox_init is process-wide.
+     *
+     * TSYNC was chosen over moving the install ahead of hr_setup because
+     * that would cover only threads created later by @main itself, never a
+     * constructor-started one, and would put the HCR boot (dispatch publish,
+     * replay_state) under the filter; @main's order stays as it was.
+     *
+     * The raw syscall rather than libc's seccomp() wrapper: glibc only grew
+     * one in 2.38 (musl has none).  A positive return is the TID of a
+     * thread that could not be synchronised (it already carries an
+     * unrelated filter); that is a failure too. */
+    long rc = -1;
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0)
+        rc = syscall(__NR_seccomp, SECCOMP_SET_MODE_FILTER,
+                     SECCOMP_FILTER_FLAG_TSYNC, &prog);
+    if (rc != 0) {
         /* Fail CLOSED.  Installation genuinely can fail — seccomp is
-         * unavailable under qemu user emulation, and a restrictive outer
-         * profile can reject the prctl — and running uncontained after the
-         * operator asked for containment is the worst outcome. */
-        fprintf(stderr,
-                "march: capability sandbox failed to install (%s); refusing to "
-                "run uncontained\n",
-                strerror(errno));
+         * unavailable under qemu user emulation, a pre-3.17 kernel has no
+         * seccomp(2), and a restrictive outer profile can reject the call —
+         * and running uncontained after the operator asked for containment
+         * is the worst outcome. */
+        if (rc > 0)
+            fprintf(stderr,
+                    "march: capability sandbox failed to install (thread %ld "
+                    "could not be synchronised); refusing to run "
+                    "uncontained\n",
+                    rc);
+        else
+            fprintf(stderr,
+                    "march: capability sandbox failed to install (%s); "
+                    "refusing to run uncontained\n",
+                    strerror(errno));
         exit(70);
     }
 }
