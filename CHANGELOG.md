@@ -54,6 +54,9 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A DataFrame column of nothing but nulls keeps its nulls.** CSV/JSON loading and
+  `summarize` used to turn an all-null column into a plain string column of `""`, so the
+  rows read back as empty strings; they now read back as `NullVal`.
 - **`[ffi.rust]` crates now work under the interpreter.** `forge run`,
   `forge interactive` and interpreted `forge test` used to fail at the first
   Rust extern with "symbol not found for interpreter FFI", and printed a

@@ -44,6 +44,29 @@ describe "from_rows" do
     end
   end
 
+  -- A column of nothing but nulls used to finalise as a plain StrCol of ""
+  -- (the null mask was dropped), so its rows read back as real empty strings.
+  test "from_rows_widen keeps an all-null column null" do
+    let rows = [
+      Row([("x", IntVal(1)), ("y", NullVal)]),
+      Row([("x", IntVal(2)), ("y", NullVal)])
+    ]
+    match DataFrame.from_rows_widen(rows) do
+    Err(_) -> assert false
+    Ok(df) -> do
+      assert (DataFrame.row_count(df) == 2)
+      match DataFrame.col_value_at_by_name(df, "y", 0) do
+      NullVal -> assert true
+      _       -> assert false
+      end
+      match DataFrame.col_value_at_by_name(df, "y", 1) do
+      NullVal -> assert true
+      _       -> assert false
+      end
+      end
+    end
+  end
+
   test "from_rows errors on type mismatch" do
     let rows = [
       Row([("x", IntVal(1))]),
