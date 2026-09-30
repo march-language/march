@@ -54,6 +54,12 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A program that calls `NodeQueue.start_local` itself now compiles under the
+  capability ceiling.** Stdlib `Socket` declared no `needs`, so the ceiling
+  rejected any such program with "module `Socket` uses `IO.NetConnect` but does
+  not declare `needs IO.NetConnect`", whatever the program granted. `Socket` now
+  declares `needs IO.NetConnect`. A program whose `main` is not granted
+  `IO.NetConnect` is still rejected.
 - **`[ffi.rust]` crates now work under the interpreter.** `forge run`,
   `forge interactive` and interpreted `forge test` used to fail at the first
   Rust extern with "symbol not found for interpreter FFI", and printed a

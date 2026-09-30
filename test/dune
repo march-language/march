@@ -2000,10 +2000,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; refuses to open an offer its certificate lacks, shared-secret mode checks
 ; nothing, and a squatter on a session's role name is refused. Compiled
 ; only: the interpreter does not run the offer actor while the initiator
-; polls for its answer. `--no-cap-strict` because a user-level
-; `NodeQueue.start_local` call (the fake's data queue) trips the
-; capability ceiling in stdlib `Socket`, which declares no `needs`
-; (pre-existing: specs/todos/2026-09-25-nodequeue-start-local-socket-ceiling.md).
+; polls for its answer. It compiles under the default capability ceiling:
+; the fake's data queue is a user-level `NodeQueue.start_local` call, which
+; used to fail the ceiling in stdlib `Socket` until `Socket` declared
+; `needs IO.NetConnect` (specs/progress/2026-09-30-nodequeue-start-local-socket-ceiling.md).
 (rule
  (targets cert_authz_bin cert_authz.out)
  (deps (file %{exe:../bin/main.exe})
@@ -2012,7 +2012,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file session/cert_authz.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile --no-cap-strict -o cert_authz_bin
+   (run %{exe:../bin/main.exe} --compile -o cert_authz_bin
         session/cert_authz.march)
    (with-stdout-to cert_authz.out (system "./cert_authz_bin")))))
 
