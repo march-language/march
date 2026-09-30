@@ -774,8 +774,16 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_typed_array_slice(ptr %arr, i64 %start, i64 %len)" };
   { march_name = "native_int_arr_make"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_make(i64 %len, i64 %def)" };
+  (* native_*_arr_length: `memory(none) speculatable` on purpose, though the
+     C body loads the header's length word (offset 16).  That word is written
+     exactly once, by native_arr_alloc, and the array is live for as long as any
+     SSA use of the pointer exists, so the call is a pure function of its
+     argument.  Without the attributes LLVM treats it as an opaque call and
+     cannot hoist it out of an index loop (the SIMD load/store bounds check
+     calls it per iteration: specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md).
+     Do NOT reuse these attributes for any accessor of MUTABLE state. *)
   { march_name = "native_int_arr_length"; c_name = None; ret_ty = Some Tir.TInt;
-    in_is_builtin = true; declare_sig = Some "declare i64    @native_int_arr_length(ptr %arr)" };
+    in_is_builtin = true; declare_sig = Some "declare i64    @native_int_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)" };
   { march_name = "native_int_arr_get"; c_name = None; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @native_int_arr_get(ptr %arr, i64 %i)" };
   { march_name = "native_int_arr_set"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
@@ -807,7 +815,7 @@ let builtins : builtin list = [
   { march_name = "native_float_arr_make"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_make(i64 %len, double %def)" };
   { march_name = "native_float_arr_length"; c_name = None; ret_ty = Some Tir.TInt;
-    in_is_builtin = true; declare_sig = Some "declare i64    @native_float_arr_length(ptr %arr)" };
+    in_is_builtin = true; declare_sig = Some "declare i64    @native_float_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)" };
   { march_name = "native_float_arr_get"; c_name = None; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @native_float_arr_get(ptr %arr, i64 %i)" };
   { march_name = "native_float_arr_set"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
@@ -838,7 +846,7 @@ let builtins : builtin list = [
   { march_name = "native_f32_arr_make"; c_name = None; ret_ty = Some (Tir.TCon ("NativeF32Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_f32_arr_make(i64 %len, double %def)" };
   { march_name = "native_f32_arr_length"; c_name = None; ret_ty = Some Tir.TInt;
-    in_is_builtin = true; declare_sig = Some "declare i64    @native_f32_arr_length(ptr %arr)" };
+    in_is_builtin = true; declare_sig = Some "declare i64    @native_f32_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)" };
   { march_name = "native_f32_arr_get"; c_name = None; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @native_f32_arr_get(ptr %arr, i64 %i)" };
   { march_name = "native_f32_arr_set"; c_name = None; ret_ty = Some (Tir.TCon ("NativeF32Arr", []));
@@ -860,7 +868,7 @@ let builtins : builtin list = [
   { march_name = "native_i32_arr_make"; c_name = None; ret_ty = Some (Tir.TCon ("NativeI32Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_i32_arr_make(i64 %len, i64 %def)" };
   { march_name = "native_i32_arr_length"; c_name = None; ret_ty = Some Tir.TInt;
-    in_is_builtin = true; declare_sig = Some "declare i64    @native_i32_arr_length(ptr %arr)" };
+    in_is_builtin = true; declare_sig = Some "declare i64    @native_i32_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)" };
   { march_name = "native_i32_arr_get"; c_name = None; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @native_i32_arr_get(ptr %arr, i64 %i)" };
   { march_name = "native_i32_arr_set"; c_name = None; ret_ty = Some (Tir.TCon ("NativeI32Arr", []));
@@ -882,7 +890,7 @@ let builtins : builtin list = [
   { march_name = "native_u8_arr_make"; c_name = None; ret_ty = Some (Tir.TCon ("NativeU8Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_u8_arr_make(i64 %len, i64 %def)" };
   { march_name = "native_u8_arr_length"; c_name = None; ret_ty = Some Tir.TInt;
-    in_is_builtin = true; declare_sig = Some "declare i64    @native_u8_arr_length(ptr %arr)" };
+    in_is_builtin = true; declare_sig = Some "declare i64    @native_u8_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)" };
   { march_name = "native_u8_arr_get"; c_name = None; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @native_u8_arr_get(ptr %arr, i64 %i)" };
   { march_name = "native_u8_arr_set"; c_name = None; ret_ty = Some (Tir.TCon ("NativeU8Arr", []));
