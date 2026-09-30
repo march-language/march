@@ -54,6 +54,16 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **An app actor may share a name with a standard-library actor.** An app
+  `actor Anchor`, `Writer`, `Endpoint`, `HostWatch`, `RegWatch`, `CtlWriter`,
+  `OfferActor`, `ApInbox` or `ClusterNodeActor` used to collide with the
+  stdlib's own actor of that name: `--compile` and `--emit-llvm` died with an
+  internal compiler error (`actor-message tag table has no row for
+  Anchor_Msg.Bump`) or charged the app the stdlib actor's capabilities, and the
+  interpreter could spawn the app's actor where the stdlib meant its own. The
+  stdlib's actors now get module-qualified internal names
+  (`Topology__Anchor`); app actors keep theirs, so spawn symbols and
+  hot-reload manifests are unchanged.
 - **A program that calls `NodeQueue.start_local` itself now compiles under the
   capability ceiling.** Stdlib `Socket` declared no `needs`, so the ceiling
   rejected any such program with "module `Socket` uses `IO.NetConnect` but does

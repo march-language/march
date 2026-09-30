@@ -7677,6 +7677,37 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/nested_actor_same_name.expected interp_nested_actor_same_name.out)))
 
+; ── App actors named like stdlib actors (Anchor, Writer, ClusterNodeActor) ──
+(rule
+ (targets native_user_actor_named_like_stdlib native_user_actor_named_like_stdlib.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/user_actor_named_like_stdlib.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_user_actor_named_like_stdlib
+        native/user_actor_named_like_stdlib.march)
+   (with-stdout-to native_user_actor_named_like_stdlib.out
+        (system "./native_user_actor_named_like_stdlib")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_actor_named_like_stdlib.expected native_user_actor_named_like_stdlib.out)))
+
+(rule
+ (targets interp_user_actor_named_like_stdlib.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/user_actor_named_like_stdlib.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_user_actor_named_like_stdlib.out
+   (run %{exe:../bin/main.exe} native/user_actor_named_like_stdlib.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_actor_named_like_stdlib.expected interp_user_actor_named_like_stdlib.out)))
+
 ; ── Credit-based flow control: budget refuses, CREDIT re-admits ──
 (rule
  (targets native_credit_backpressure_loopback native_credit_backpressure_loopback.out)
