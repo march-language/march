@@ -84,6 +84,30 @@ let test_non_boundary_caller_to_boundary_dispatches () =
   check "stdlib→stdlib stays direct" false
     (HR.needs_dispatch cfg ~caller_module:"List" ~callee_module:"Map")
 
+(* ── Actor provenance: stdlib actors are not slots (2026-09-30) ─────────── *)
+
+let with_provenance f =
+  HR.reset_actor_provenance ();
+  Fun.protect f ~finally:HR.reset_actor_provenance
+
+let test_stdlib_actor_dispatch_not_slot () =
+  with_provenance (fun () ->
+      HR.note_actor_fns ~stdlib:true [ "Writer_dispatch"; "Writer_Wait" ];
+      HR.note_actor_fns ~stdlib:false [ "Counter_dispatch" ];
+      check "stdlib dispatch: no slot" false (HR.is_slot_actor_dispatch "Writer_dispatch");
+      check "app dispatch: slot" true (HR.is_slot_actor_dispatch "Counter_dispatch");
+      check "unrecorded dispatch: slot" true (HR.is_slot_actor_dispatch "Other_dispatch");
+      check "a handler is never a dispatch slot" false (HR.is_slot_actor_dispatch "Writer_Wait");
+      check "handler provenance is recorded" true (HR.is_stdlib_actor_fn "Writer_Wait"))
+
+(* One bare name claimed by a stdlib actor AND a user actor keeps its slot:
+   a slot too many is visible, a slot too few pins the user's code. *)
+let test_user_claim_wins () =
+  with_provenance (fun () ->
+      HR.note_actor_fns ~stdlib:false [ "Writer_dispatch" ];
+      HR.note_actor_fns ~stdlib:true [ "Writer_dispatch" ];
+      check "user wins, whatever the order" true (HR.is_slot_actor_dispatch "Writer_dispatch"))
+
 let test_excluded_callee_is_direct () =
   let cfg = { (HR.default_config "MyApp") with HR.excludes = ["MyApp.Hot.Inner"] } in
   check "app→excluded stays direct" false
@@ -409,6 +433,10 @@ let () =
       Alcotest.test_case "boundary→stdlib is direct"         `Quick test_boundary_to_stdlib_is_direct;
       Alcotest.test_case "non-boundary caller→boundary dispatches" `Quick test_non_boundary_caller_to_boundary_dispatches;
       Alcotest.test_case "excluded callee is direct"         `Quick test_excluded_callee_is_direct;
+    ]);
+    ("actor_provenance", [
+      Alcotest.test_case "stdlib actor dispatch is not a slot" `Quick test_stdlib_actor_dispatch_not_slot;
+      Alcotest.test_case "a user claim on the name wins"       `Quick test_user_claim_wins;
     ]);
     ("llvm_emit", [
       Alcotest.test_case "hot_reload emits dispatch call"    `Quick test_hot_reload_emits_dispatch_call;

@@ -246,7 +246,7 @@
 (test
  (name test_deploy_plan)
  (modules test_deploy_plan)
- (libraries march_forge march_ast march_desugar march_errors alcotest str))
+ (libraries march_forge march_ast march_desugar march_errors alcotest str unix))
 
 ; test_deploy_e2e.ml: `forge host init`, `forge deploy` and `forge deploy
 ; --plan` end to end over real ssh against a Debian sshd container
