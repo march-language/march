@@ -54,6 +54,9 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A DataFrame column of nothing but nulls keeps its nulls.** CSV/JSON loading and
+  `summarize` used to turn an all-null column into a plain string column of `""`, so the
+  rows read back as empty strings; they now read back as `NullVal`.
 - **Linux `--cap-sandbox` now filters threads that already exist when the
   sandbox is installed.** The seccomp filter covered only the installing
   thread and its later children, so the hot-reload server thread (started
