@@ -10980,17 +10980,16 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_task.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_task.march)))
 
-; ── test_properties.march: wired separately, own alias ───────────────────
-; Passes (228/228), but its 76 Check.all property runs (100 samples each,
-; generating/round-tripping nested Msgpack/JSON values through the
-; tree-walking interpreter) are genuinely slow -- a full run took several
-; hours on a machine with ~8 other concurrent compiler sessions contending
-; for CPU, and its true (uncontended) runtime hasn't been measured cleanly.
-; Rather than guess and risk turning `dune runtest` into a multi-hour gate
-; for every PR, this stays on its own alias, run explicitly:
+; ── test_properties.march: wired separately, own alias, run NIGHTLY ──────
+; Passes (240/240): 76 Check.all property runs (100 samples each) generating
+; and round-tripping nested Msgpack/JSON values. Measured 2026-09-30 on the
+; arm64 dev Mac: 237.6 s wall at load average 6-12 (`march test`, the exact
+; command below). That is far past what belongs in `dune runtest` (every PR,
+; and the macOS `test (all)` job already runs close to its timeout), so it
+; stays on its own alias and `.github/workflows/nightly.yml`'s
+; `stdlib-properties` job runs it every night:
 ;   dune build --root . @test/stdlib-march-properties
-; A follow-up should benchmark it uncontended and, if it's actually fast,
-; fold it into the main runtest block above alongside the other 35 files.
+; specs/progress/2026-09-30-benchmark-wire-test-properties-march.md
 (rule
  (alias stdlib-march-properties)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_properties.march))

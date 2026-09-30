@@ -709,6 +709,10 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **`test/stdlib/test_properties.march` now runs in CI, nightly.** Its 240
+  property tests (about 4 minutes) were on a dune alias nothing ran. The
+  nightly workflow's new `stdlib-properties` job runs them; they stay out of
+  the per-PR `dune runtest`, which they would slow too much.
 - **`Array.from_list` (and `RRB.from_list`) is about 8x faster.** It now builds
   the vector in one pass instead of appending one element at a time: 100,000
   elements take 6.6 ms instead of 54 ms. The resulting vector is the same.
