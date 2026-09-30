@@ -267,6 +267,14 @@ type env = {
       [import_index] for why [record_use] must not scan [import_tracker]
       directly.  Shared (mutable) across all env copies derived from the
       same root, same as [import_tracker]. *)
+  deferred_check4 : (string * string list * string * Ast.span) list ref;
+  (** Check-4 imports whose target sibling had not been analysed when the
+      importer was checked (mutually importing modules: one is always first).
+      Each row is (importer name, importer's declared [needs], imported path
+      as written, import span).  [check_module_needs] queues them and
+      [Typecheck_caps.check_deferred_imports] resolves them against the final
+      [module_caps] once the whole module run is done.  Shared (mutable)
+      across all env copies, same as [import_tracker]. *)
   local_fns : unit StrMap.t;
   (** Function names DEFINED by the module currently being checked (set from
       the pass-1 / DMod forward-reference prebind).  A bulk import
@@ -686,6 +694,7 @@ let make_env errors type_map = {
   mod_needs = []; mod_need_scopes = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
   import_idx = make_import_index ();
+  deferred_check4 = ref [];
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
   qual_fn_names = StrMap.empty;

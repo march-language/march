@@ -8458,6 +8458,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; forcing the in-place path unconditionally -- that line, and only that
 ; line, flipped to false.
 ;
+;; Array.sort_by / sort_by_key and RRB.sort_by / sort_by_key (the stable
+;; list_stable_sort_by / list_sort_by_int_key builtins). One golden for the
+;; compiled and the interpreted run, so it is also the parity check between
+;; the C merge sort and the interpreter's OCaml stable_sort.
+(rule
+ (targets array_sort_by array_sort_by.out array_sort_by_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/array_sort_by.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (with-stdout-to array_sort_by_interp.out
+     (run %{exe:../bin/main.exe} native/array_sort_by.march))
+   (run %{exe:../bin/main.exe} --compile -o array_sort_by
+        native/array_sort_by.march)
+   (with-stdout-to array_sort_by.out (system "./array_sort_by")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/array_sort_by.expected array_sort_by.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/array_sort_by.expected array_sort_by_interp.out)))
 ;; The sort's presorted-input front end (two runs; nearly sorted), which only
 ;; runs for n >= 1024 and so is out of reach of native_arr_sort /
 ;; native_arr_sort_narrow. Compiled, depth-limit 0 and interpreted.

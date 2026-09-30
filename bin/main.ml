@@ -1004,6 +1004,18 @@ let parse_target s =
 (* CAS cache key                                                       *)
 (* ------------------------------------------------------------------ *)
 
+(** True on an arm64/aarch64 host (the [Native] target's architecture). *)
+let host_is_arm64 =
+  let v = lazy (
+    try
+      let ic = Unix.open_process_in "uname -m 2>/dev/null" in
+      let l = try input_line ic with End_of_file -> "" in
+      ignore (Unix.close_process_in ic);
+      let l = String.lowercase_ascii (String.trim l) in
+      l = "arm64" || l = "aarch64"
+    with _ -> false) in
+  fun () -> Lazy.force v
+
 (** The clang -O level actually used: [!opt_level] when explicitly set in
     range, 2 otherwise.  Shared by [build_cas_key] and the clang invocation so
     the cached-under level and the compiled-at level cannot drift apart. *)
@@ -1074,6 +1086,9 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
            non-sandboxed cached artifact must never satisfy it. *)
         @ (if !cap_sandbox then ["capsandbox"] else [])
         @ (if !cap_strict then ["capstrict"] else [])
+        (* --target-cpu changes the instructions clang emits (SIMD width),
+           so a baseline-ISA cached binary must never satisfy it. *)
+        @ (if !target_cpu <> "" then ["cpu:" ^ !target_cpu] else [])
         (* --stdlib-source changes the verdict: a file the stdlib-only
            builtin gate rejects passes under it, so a clean cached check
            must never satisfy the plain spelling (measured: it did, and the
@@ -3768,9 +3783,16 @@ let compile filename =
               | None    -> "clang"
             in
             let arch_cflags =
+              (* --target-cpu replaces the baseline ISA flag.  The spelling is
+                 per ARCH, not per host: clang rejects -march=<x86 cpu> on
+                 arm64 and vice versa, and Native means "this host". *)
+              let cpu = !target_cpu in
+              let x86 = if cpu <> "" then " -march=" ^ cpu else " -msse4.2" in
+              let arm = if cpu <> "" then " -mcpu=" ^ cpu else "" in
               match xtarget with
-              | March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; _ }) -> ""   (* NEON by default; SSE flags are x86-only *)
-              | March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; _ }) | March_tir.Llvm_emit.Native -> " -msse4.2"
+              | March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; _ }) -> arm   (* NEON by default; SSE flags are x86-only *)
+              | March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; _ }) -> x86
+              | March_tir.Llvm_emit.Native -> if host_is_arm64 () then arm else x86
               | March_tir.Llvm_emit.(Wasm64Wasi | Wasm32Wasi | Wasm32Unknown | Js) -> ""
             in
             (* Cross Linux link (P3): link TLS (OpenSSL 3) + gzip (zlib) against a
@@ -5060,6 +5082,8 @@ let () =
      "<a,b>  With --topology: the pools this build contains (default: every pool)");
     ("--topology-isolate-foreign", Arg.Set topology_isolate_foreign,
      " With --topology: reject an IO.Foreign role or hook in a pool that is not isolated");
+    ("--target-cpu", Arg.Set_string target_cpu,
+     "<cpu>  CPU for the C compiler: -march=<cpu> on x86_64 (e.g. native, x86-64-v3, skylake-avx512), -mcpu=<cpu> on arm64 (e.g. native, apple-m1). Default: -msse4.2 on x86_64, the target baseline on arm64. Part of the build-cache key");
     ("--cap-strict", Arg.Set cap_strict, " Treat `needs` as a hard ceiling (the DEFAULT since 2026-08-08; accepted for compatibility and to state the intent explicitly)");
     ("--stdlib-source", Arg.Set stdlib_source, " The entry file(s) are standard-library sources checked under a path outside the resolved stdlib root (e.g. `march --check --stdlib-source stdlib/actor.march` from the repo root): exempt them from the stdlib-only builtin gate. Never inferred from the file name");
     ("--no-cap-strict", Arg.Clear cap_strict, " Do not enforce `needs` as a ceiling: allow a module's emitted code to use capabilities it does not declare");

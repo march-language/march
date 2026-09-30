@@ -181,6 +181,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="AhoCorasick.html#fn-pattern_count"><span class="sb-kind" style="color:var(--fn)">F</span>pattern_count</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Array.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Array.html">Array</a></div><div class="sb-sub"><a class="sl" href="Array.html#type-TrieNode"><span class="sb-kind" style="color:var(--ty)">T</span>TrieNode</a>
 <a class="sl" href="Array.html#type-PVec"><span class="sb-kind" style="color:var(--ty)">T</span>PVec</a>
+<a class="sl" href="Array.html#fn-debug_from_list_by_push"><span class="sb-kind" style="color:var(--fn)">F</span>debug_from_list_by_push</a>
+<a class="sl" href="Array.html#fn-debug_same_shape"><span class="sb-kind" style="color:var(--fn)">F</span>debug_same_shape</a>
 <a class="sl" href="Array.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
 <a class="sl" href="Array.html#fn-fold_left"><span class="sb-kind" style="color:var(--fn)">F</span>fold_left</a>
 <a class="sl" href="Array.html#fn-from_list"><span class="sb-kind" style="color:var(--fn)">F</span>from_list</a>
@@ -191,6 +193,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Array.html#fn-pop"><span class="sb-kind" style="color:var(--fn)">F</span>pop</a>
 <a class="sl" href="Array.html#fn-push"><span class="sb-kind" style="color:var(--fn)">F</span>push</a>
 <a class="sl" href="Array.html#fn-set"><span class="sb-kind" style="color:var(--fn)">F</span>set</a>
+<a class="sl" href="Array.html#fn-sort_by"><span class="sb-kind" style="color:var(--fn)">F</span>sort_by</a>
+<a class="sl" href="Array.html#fn-sort_by_key"><span class="sb-kind" style="color:var(--fn)">F</span>sort_by_key</a>
 <a class="sl" href="Array.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Base64.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Base64.html">Base64</a></div><div class="sb-sub"><a class="sl" href="Base64.html#fn-decode"><span class="sb-kind" style="color:var(--fn)">F</span>decode</a>
 <a class="sl" href="Base64.html#fn-encode"><span class="sb-kind" style="color:var(--fn)">F</span>encode</a>
@@ -2117,6 +2121,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="RRB.html#fn-range"><span class="sb-kind" style="color:var(--fn)">F</span>range</a>
 <a class="sl" href="RRB.html#fn-singleton"><span class="sb-kind" style="color:var(--fn)">F</span>singleton</a>
 <a class="sl" href="RRB.html#fn-slice"><span class="sb-kind" style="color:var(--fn)">F</span>slice</a>
+<a class="sl" href="RRB.html#fn-sort_by"><span class="sb-kind" style="color:var(--fn)">F</span>sort_by</a>
+<a class="sl" href="RRB.html#fn-sort_by_key"><span class="sb-kind" style="color:var(--fn)">F</span>sort_by_key</a>
 <a class="sl" href="RRB.html#fn-tabulate"><span class="sb-kind" style="color:var(--fn)">F</span>tabulate</a>
 <a class="sl" href="RRB.html#fn-to_array"><span class="sb-kind" style="color:var(--fn)">F</span>to_array</a>
 <a class="sl" href="RRB.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a></div></div>
@@ -2889,6 +2895,10 @@ an empty slice.
 
     march&gt; RRB.fold(RRB.slice(RRB.range(0, 5), 1, 4), 0, fn (a, x) -&gt; a + x)
     6</code></pre></div></div>
+<div class="item" id="fn-sort_by"><div class="ih"><span class="badge bfn">fn</span><span class="name">sort_by</span><span class="sig">sort_by(v: <a href="#type-Vec">Vec</a>(a), le: a -&gt; a -&gt; Bool): <a href="#type-Vec">Vec</a>(a)</span><a class="anchor-link" href="#fn-sort_by" title="Link">#</a></div><div class="ib"><p>Sort by a comparator, stably; see <code>Array.sort_by</code>. O(n log n).</p><h3>Examples</h3><pre><code>    march&gt; RRB.to_list(RRB.sort_by(RRB.from_list([3, 1, 2]), fn (a, b) -&gt; a &lt;= b))
+    [1, 2, 3]</code></pre></div></div>
+<div class="item" id="fn-sort_by_key"><div class="ih"><span class="badge bfn">fn</span><span class="name">sort_by_key</span><span class="sig">sort_by_key(v: <a href="#type-Vec">Vec</a>(a), key: a -&gt; Int): <a href="#type-Vec">Vec</a>(a)</span><a class="anchor-link" href="#fn-sort_by_key" title="Link">#</a></div><div class="ib"><p>Sort by an <code>Int</code> key computed once per element, stably; see <code>Array.sort_by_key</code>. O(n log n).</p><h3>Examples</h3><pre><code>    march&gt; RRB.to_list(RRB.sort_by_key(RRB.from_list([30, 4, 200]), fn x -&gt; 0 - x))
+    [200, 30, 4]</code></pre></div></div>
 <div class="item" id="fn-tabulate"><div class="ih"><span class="badge bfn">fn</span><span class="name">tabulate</span><span class="sig">tabulate(n: Int, f: Int -&gt; a): <a href="#type-Vec">Vec</a>(a)</span><a class="anchor-link" href="#fn-tabulate" title="Link">#</a></div><div class="ib"><p>Build a <code>Vec</code> of length <code>n</code> by calling <code>f(i)</code> for each index i ∈ [0, n). O(n).</p><h3>Examples</h3><pre><code>    march&gt; RRB.to_list(RRB.tabulate(4, fn i -&gt; i * i))
     [0, 1, 4, 9]</code></pre></div></div>
 <div class="item" id="fn-to_array"><div class="ih"><span class="badge bfn">fn</span><span class="name">to_array</span><span class="sig">to_array(v: <a href="#type-Vec">Vec</a>(a)): Array.PVec(a)</span><a class="anchor-link" href="#fn-to_array" title="Link">#</a></div><div class="ib"><p>Return the underlying <code>Array</code> (an <code>Array.PVec(a)</code>). O(1).</p></div></div>

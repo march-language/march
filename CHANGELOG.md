@@ -19,6 +19,18 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`Array.sort_by`, `Array.sort_by_key`, `RRB.sort_by` and `RRB.sort_by_key`.**
+  Stable sorts for the persistent vectors: `sort_by` takes the same comparator
+  as `List.sort_by` (`fn (a, b) -> a <= b`), and `sort_by_key` takes a function
+  returning an `Int` key, which it calls once per element. Elements that compare
+  equal keep their order. Sorting 100,000 pairs takes about 50 ms with `sort_by`
+  and 23 ms with `sort_by_key`, against 250 ms for converting to a list, calling
+  `List.sort_by` and converting back. They work compiled, interpreted and on the
+  JavaScript target.
+- **`--target-cpu <cpu>` for compiled builds.** Passes `-march=<cpu>` (x86_64) or
+  `-mcpu=<cpu>` (arm64) to the C compiler, e.g. `--target-cpu native` to use the host's
+  full SIMD width. The default is unchanged (`-msse4.2` on x86_64) and the CPU is part of
+  the build-cache key, so a baseline binary never satisfies a `--target-cpu` build.
 - **`forge add` checks a new dependency's capabilities before keeping it.** When
   the project has a `forge.caps.lock` (from `forge audit --record`), a
   dependency the add brings in or changes that asks for a capability it was not
@@ -416,6 +428,12 @@ git log is authoritative for exact commits.
   ran interpreted but a compiled program failed to link (`A.f` undefined),
   whenever `Outer` was itself nested in the entry module, or was a library
   (`MARCH_LIB_PATH`) or stdlib module.
+- **Capability Check 4 now fires for mutually importing sibling modules when the
+  importee is declared later.** With `mod A` doing `import B` and `mod B` doing
+  `import A`, the module checked first found no capabilities for the other and
+  silently skipped the check. It is now deferred until the whole module run and
+  requires the importee's full declared set (fail-closed), so the same program
+  is rejected in either declaration order.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
@@ -695,6 +713,9 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **`Array.from_list` (and `RRB.from_list`) is about 8x faster.** It now builds
+  the vector in one pass instead of appending one element at a time: 100,000
+  elements take 6.6 ms instead of 54 ms. The resulting vector is the same.
 - **`NativeArray.sort_*` is up to 7x faster on nearly-sorted input and 4-5x
   faster on input made of two sorted runs.** An array that is sorted apart from
   a few misplaced elements, or that rises and then falls, now takes a quick
@@ -1662,6 +1683,13 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Choreography** reference (`docs/choreography.md`): the test-script example used a
+  constructor (`Expect_Msg_Prod_Cons_1`) that does not exist for the labelled `Stream`
+  protocol (now `Expect_Item`), and the offer example passed a `RunError` to `panic`. The
+  session-outcome table now lists `NoOffer`, `AlreadyOffered` and `Unauthorized`. Two stale
+  limits are gone (roles may share a cluster node; hot patches no longer carry their own
+  runtime). The page also gains a reading guide, the full `Stream` protocol and role B,
+  and a separate "Certificate mode" section; "Per-role grants" moves after the walkthrough.
 - **Cluster certificates** operator guide (`docs/cluster-certificates.md`):
   keys, issuing, configuring nodes, renewal, revocation, what the MAC does and
   does not protect. The clustering reference's "Authentication & Handshake"
