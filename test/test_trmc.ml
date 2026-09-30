@@ -135,6 +135,86 @@ let test_intervening_let_blocks_when_used () =
   check_verdict "hole read before the constructor is not TRMC-able"
     "non-trmc" (module_of [fn "f" [v "xs" list_int] body]) "f"
 
+(* Gap 1 (specs/progress/2026-09-30-trmc-computed-arg-and-nested-fn-gaps.md):
+   lowering nests a computed argument's [let] inside the call's binding,
+     let t = (let n = a + 1 in f(n)) in alloc Cons(h, t)
+   which hid the modulo-cons site.  Floated, it is the canonical shape. *)
+let computed_arg_body ~(cons_reads_n : bool) =
+  let self = v "f" (Tir.TFn ([Tir.TInt], list_int)) in
+  let t = v "t" list_int and n = v "n" Tir.TInt and h = v "h" Tir.TInt in
+  Tir.ELet (t,
+    Tir.ELet (n, Tir.EApp (v "+" (Tir.TFn ([Tir.TInt; Tir.TInt], Tir.TInt)),
+                           [Tir.AVar h; Tir.ALit (March_ast.Ast.LitInt 1)]),
+      Tir.EApp (self, [Tir.AVar n])),
+    Tir.EAlloc (Tir.TCon ("List.Cons", []),
+                [Tir.AVar (if cons_reads_n then n else h); Tir.AVar t]))
+
+let test_computed_arg_is_eligible () =
+  let m = module_of [fn "f" [v "h" Tir.TInt] (computed_arg_body ~cons_reads_n:false)] in
+  check_verdict "a computed call argument no longer hides the site" "eligible" m "f";
+  match Trmc.transform_fn [] (List.hd m.Tir.tm_fns) with
+  | None -> Alcotest.fail "computed-arg shape should be transformed"
+  | Some (_entry, helper) ->
+    Alcotest.(check string) "helper is emitted" "f$dps" helper.Tir.fn_name
+
+(* The float is only legal when the floated name is not free in the
+   continuation.  Here the constructor reads [n], so floating [n] out of [t]'s
+   RHS would capture it: the function must stay non-trmc. *)
+let test_float_respects_continuation_use () =
+  let m = module_of [fn "f" [v "h" Tir.TInt] (computed_arg_body ~cons_reads_n:true)] in
+  check_verdict "floating never captures a name the continuation reads"
+    "non-trmc" m "f"
+
+(* Gap 2: a self-named nested function is rewritten, not just reported. *)
+let nested_module () =
+  let self = v "go" (Tir.TFn ([Tir.TInt], list_int)) in
+  let t = v "t" list_int and h = v "h" Tir.TInt in
+  let go_body =
+    Tir.ELet (t, Tir.EApp (self, [Tir.AVar h]),
+      Tir.EAlloc (Tir.TCon ("List.Cons", []), [Tir.AVar h; Tir.AVar t]))
+  in
+  let go_fn = fn ~kind:Tir.FnLambda "go" [h] go_body in
+  let outer_body =
+    Tir.ELet (self, Tir.ELetRec ([go_fn], Tir.EAtom (Tir.AVar self)),
+      Tir.ECallPtr (Tir.AVar self, [Tir.ALit (March_ast.Ast.LitInt 0)]))
+  in
+  module_of [fn "outer" [] outer_body]
+
+let test_nested_fn_is_transformed () =
+  let m = Trmc.transform_module (nested_module ()) in
+  let outer = List.find (fun f -> String.equal f.Tir.fn_name "outer") m.Tir.tm_fns in
+  let rec letrec_names = function
+    | Tir.ELetRec (fns, b) ->
+      List.map (fun f -> f.Tir.fn_name) fns @ letrec_names b
+    | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) -> letrec_names e1 @ letrec_names e2
+    | _ -> []
+  in
+  let names = letrec_names outer.Tir.fn_body in
+  Alcotest.(check (list string)) "nested helper bound before its entry"
+    [ "go$dps"; "go" ] names;
+  (* The helper's own tail call stays inside the helper. *)
+  let helper =
+    let rec find = function
+      | Tir.ELetRec (fns, b) ->
+        (match List.find_opt (fun f -> String.equal f.Tir.fn_name "go$dps") fns with
+         | Some f -> Some f | None -> find b)
+      | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) ->
+        (match find e1 with Some f -> Some f | None -> find e2)
+      | _ -> None
+    in
+    find outer.Tir.fn_body
+  in
+  (match helper with
+   | None -> Alcotest.fail "no go$dps helper"
+   | Some f ->
+     Alcotest.(check bool) "helper keeps the lambda kind" true
+       (f.Tir.fn_kind = Tir.FnLambda));
+  (* Idempotent: re-running the pass on its own output adds nothing. *)
+  let again = Trmc.transform_module m in
+  let outer2 = List.find (fun f -> String.equal f.Tir.fn_name "outer") again.Tir.tm_fns in
+  Alcotest.(check (list string)) "second run adds no helper" names
+    (letrec_names outer2.Tir.fn_body)
+
 (* ── Phase 2: the EAllocHole / ESetField IR nodes ────────────────────────────
    Nothing constructs these yet (Phase 3 does), so they are exercised here from
    hand-built TIR.  Two things are gated:
@@ -622,6 +702,9 @@ let suites = [
     Alcotest.test_case "join-point tail call"           `Quick test_join_point_tail_call;
     Alcotest.test_case "normal nested fn is not a jp"   `Quick test_normal_nested_fn_is_not_a_join_point;
     Alcotest.test_case "intervening use blocks hole"    `Quick test_intervening_let_blocks_when_used;
+    Alcotest.test_case "computed argument is eligible"  `Quick test_computed_arg_is_eligible;
+    Alcotest.test_case "let-float respects continuation" `Quick test_float_respects_continuation_use;
+    Alcotest.test_case "nested fn is transformed"       `Quick test_nested_fn_is_transformed;
     Alcotest.test_case "actor msg type refused"          `Quick test_actor_msg_type_is_refused;
     Alcotest.test_case "user type named _Actor gets TRMC" `Quick test_user_type_named_actor_is_transformed;
     Alcotest.test_case "real actor struct refused"        `Quick test_real_actor_struct_is_not_transformed;

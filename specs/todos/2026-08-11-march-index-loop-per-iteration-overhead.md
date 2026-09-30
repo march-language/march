@@ -51,11 +51,10 @@ That is ~4 function calls and a volatile load per 4 elements of useful work.
 
 ## Candidate directions (unmeasured — do not assume any of these wins)
 
-1. **Hoist loop-invariant bounds-check length calls.** `native_f32_arr_length`
-   on a parameter never reassigned in the loop is trivially invariant; LLVM
-   cannot hoist it because it is an opaque call. Marking these runtime
-   accessors `readnone`/`speculatable` (or emitting the length once into the
-   TCO prologue) is probably the single cheapest win.
+1. ~~**Hoist loop-invariant bounds-check length calls.**~~ Done 2026-09-29: the
+   `native_*_arr_length` declares are `nounwind willreturn speculatable memory(none)`,
+   and at `--opt 2` the calls leave the loop (see
+   `specs/progress/2026-09-29-native-arr-length-hoisted.md`; `dot_simd` ~12% faster).
 2. **Elide `march_incrc_local` on borrowed params inside TCO loops.** The
    borrow inference (`lib/tir/borrow.ml`) already has the notion; the RC ops
    here look like they survive because the value is forwarded into the next
