@@ -451,6 +451,10 @@ git log is authoritative for exact commits.
   bound on its own line was optimised; and a natural-style nested `fn go` was
   reported as eligible but never rewritten. Both are now transformed, so a
   1,000,000-element list built this way no longer overflows the stack.
+- **`Actor.top_by_mailbox` / `Actor.over_mailbox` and `NodeCall` typecheck cleanly.** The
+  two mailbox helpers now return `List((Pid(a), Int))` (the parameterized `Pid`) and
+  `NodeCall` names `RemoteCall.NoConnection` explicitly instead of the ambiguous bare
+  constructor; seven hidden stdlib type errors are gone.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**

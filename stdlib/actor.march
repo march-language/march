@@ -218,7 +218,7 @@ mod Actor do
   order. Cost is one pass over every live actor plus a sort, so call it from a
   timer, not from a hot path.
   """
-  fn top_by_mailbox(c : Cap(Actor.Introspect), n : Int) : List((Pid, Int)) do
+  fn top_by_mailbox(c : Cap(Actor.Introspect), n : Int) : List((Pid(a), Int)) do
     let depths = List.map(list(c), fn p -> (p, mailbox_size(p)))
     let deeper = fn (a, b) ->
       match a do
@@ -238,7 +238,7 @@ mod Actor do
   Same snapshot caveats as `top_by_mailbox`. A threshold below zero returns
   every live actor.
   """
-  fn over_mailbox(c : Cap(Actor.Introspect), threshold : Int) : List((Pid, Int)) do
+  fn over_mailbox(c : Cap(Actor.Introspect), threshold : Int) : List((Pid(a), Int)) do
     let depths = List.map(list(c), fn p -> (p, mailbox_size(p)))
     List.filter(depths, fn pd -> match pd do (_, d) -> d > threshold end)
   end
