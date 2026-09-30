@@ -19,6 +19,10 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`--target-cpu <cpu>` for compiled builds.** Passes `-march=<cpu>` (x86_64) or
+  `-mcpu=<cpu>` (arm64) to the C compiler, e.g. `--target-cpu native` to use the host's
+  full SIMD width. The default is unchanged (`-msse4.2` on x86_64) and the CPU is part of
+  the build-cache key, so a baseline binary never satisfies a `--target-cpu` build.
 - **`forge add` checks a new dependency's capabilities before keeping it.** When
   the project has a `forge.caps.lock` (from `forge audit --record`), a
   dependency the add brings in or changes that asks for a capability it was not
