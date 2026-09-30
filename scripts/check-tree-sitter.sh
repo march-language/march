@@ -19,7 +19,11 @@
 #                 (except specs/lang/grammar/reject/) must parse with no ERROR or
 #                 MISSING node, unless listed in tree-sitter-march/known-failures.txt;
 #                 a listed file that now parses, or no longer exists, is also red,
-#                 so the list only shrinks.
+#                 so the list only shrinks;
+#   5. keywords   every keyword in lib/lexer/lexer.mll's keyword_table must appear
+#                 as a quoted literal in grammar.js or be listed in
+#                 tree-sitter-march/keyword-allowlist.txt (stale entries are red
+#                 too), so a new keyword cannot silently become an ERROR node.
 #
 #   --self-test   instead prove the ratchet measures the grammar it just built:
 #                 remove the match-arm `when` guard from a copy, rebuild, and
@@ -128,6 +132,31 @@ fi
 if [ -n "$stale" ]; then
   echo "$stale" | sed 's/^/  stale entry (parses now, or no longer exists): /'
   fail "delete these lines from tree-sitter-march/known-failures.txt"
+fi
+
+# 5. keyword coverage (design D5)
+awk '/^let keyword_table/{f=1} f&&/^    \]/{exit} f' "$ROOT/lib/lexer/lexer.mll" \
+  | grep -oE '^ *\("[a-z_]+",' | grep -oE '"[a-z_]+"' | tr -d '"' | LC_ALL=C sort -u > "$TMP/kw.txt"
+# An empty extraction would make the check pass vacuously if lexer.mll's layout
+# changed, so it is itself an error.
+if [ "$(wc -l < "$TMP/kw.txt" | tr -d ' ')" -lt 40 ]; then
+  fail "keyword extraction from lib/lexer/lexer.mll found $(wc -l < "$TMP/kw.txt" | tr -d ' ') keywords (layout changed? fix check-tree-sitter.sh step 5)"
+fi
+: > "$TMP/kw_missing.txt"
+while read -r kw; do
+  grep -qE "['\"]$kw['\"]" "$TSM/grammar.js" || echo "$kw" >> "$TMP/kw_missing.txt"
+done < "$TMP/kw.txt"
+LC_ALL=C sort -u -o "$TMP/kw_missing.txt" "$TMP/kw_missing.txt"
+grep -vE '^\s*(#|$)' "$TSM/keyword-allowlist.txt" | awk '{print $1}' | LC_ALL=C sort -u > "$TMP/kw_allow.txt"
+kw_new=$(comm -23 "$TMP/kw_missing.txt" "$TMP/kw_allow.txt")
+kw_stale=$(comm -13 "$TMP/kw_missing.txt" "$TMP/kw_allow.txt")
+if [ -n "$kw_new" ]; then
+  echo "$kw_new" | sed 's/^/  keyword with no grammar.js literal: /'
+  fail "add these lexer.mll keywords to grammar.js (or to tree-sitter-march/keyword-allowlist.txt)"
+fi
+if [ -n "$kw_stale" ]; then
+  echo "$kw_stale" | sed 's/^/  stale allowlist entry: /'
+  fail "delete these lines from tree-sitter-march/keyword-allowlist.txt (now in grammar.js, or no longer a keyword)"
 fi
 
 total=$(wc -l < "$TMP/paths.txt" | tr -d ' ')
