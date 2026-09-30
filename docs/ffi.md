@@ -247,17 +247,18 @@ variant/record args and returns. Project-specific C shims (from `[ffi] sources`
 in `forge.toml`) are compiled to a shared library on first use and loaded
 automatically; no `--compile` required.
 
-The interpreter has two gaps. The first is **closures/upcalls as arguments**:
-if a binding takes a function-typed parameter (`fn(Int) -> Int`), the
-interpreter reports a clear error and asks you to run with `--compile`. Compiled
-mode has no such limit.
+`[ffi.rust]` crates work under the interpreter too, with or without
+`[ffi] sources`. Cargo builds a static `.a`, which cannot be loaded directly, so
+the compiler links every static archive passed with `--ffi-link` whole into the
+interpreter's shim library (`-Wl,-force_load` on macOS, `--whole-archive` on
+Linux; an empty stub stands in when there are no C sources). The shim is cached
+by the archive's contents, so rebuilding the crate rebuilds the shim. The same
+holds for any prebuilt `lib<name>.a` you pass with `--ffi-link`.
 
-The second is **`[ffi.rust]`-only projects**. Cargo builds a static `.a`, which
-the interpreter cannot load, so a project whose only FFI is `[ffi.rust]` (no
-`[ffi] sources`) runs compiled-only: `forge run --compiled`, `forge build`, or
-`forge test` (the default, compiled). Interpreted runs (`forge run`,
-`forge interactive`, `forge test --coverage` or `MARCH_TEST_INTERPRETER=1`)
-print a warning saying so before the program starts.
+The interpreter has one gap: **closures/upcalls as arguments**. If a binding
+takes a function-typed parameter (`fn(Int) -> Int`), the interpreter reports a
+clear error and asks you to run with `--compile`. Compiled mode has no such
+limit.
 
 ## Native→March callbacks (upcalls)
 

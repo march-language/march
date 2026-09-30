@@ -21,8 +21,21 @@ network. This page walks through one complete example, from the protocol to thre
 processes talking over TCP.
 
 The network runner needs the compiled backend (`march --compile`). The interpreter cannot
-run socket code yet. The generated types and the same-process transports work on both
-backends; see [Session Types]({{ site.baseurl }}/docs/session-types/) for those.
+run socket code yet. The generated types and the in-process test transport work on both
+backends (see [Testing without a network](#testing-without-a-network)).
+
+**How to read this page.** The sections from here to
+[Telling the nodes where to find each other](#telling-the-nodes-where-to-find-each-other)
+are a walkthrough: write a protocol, see what it generates, write the roles, run them, and
+point the nodes at each other. The rest is reference, roughly in the order you will need it:
+
+- running roles over a `ClusterNode`, and serving many sessions from one node
+  ([access points](#access-points-many-sessions-and-starting-again));
+- what happens when a session ends, drains, or loses a role
+  ([How a session ends](#how-a-session-ends) through [When a role may crash](#when-a-role-may-crash));
+- keeping a role's state in an actor ([Hosting a role in an actor](#hosting-a-role-in-an-actor));
+- limiting what each role's code may do ([Per-role grants](#per-role-grants));
+- testing a role without a network, and changing a protocol that is already deployed.
 
 ## The example
 
@@ -39,8 +52,9 @@ end
 
 This is the whole protocol. Nothing else in the program says who talks to whom. The word
 before each step is the message's name; the functions the compiler generates are called
-after it. The same example runs in CI as `test/two_node/fan`, with each role in its own OS
-process.
+after it. The same conversation runs in CI as `test/two_node/fan`, with each role in its
+own OS process. That test writes the steps without labels, so its functions have the
+made-up names described below (`send_Msg_A_C_1` where this page has `send_Number`).
 
 ## Writing a protocol
 
@@ -55,18 +69,22 @@ number: A -> C : Int
 
 The label is what the generated functions are called after (`send_Number`, `recv_Number`).
 A step without one gets a name made up from its endpoints; see the table in the next
-section. Two steps may share a label when they carry the same type and no single role takes
-both of them.
+section. Labels are worth writing: they keep the names stable when the protocol changes
+(see [Changing a protocol](#changing-a-protocol)).
 
-A loop repeats its body until a branch says `stop`:
+A loop repeats its body until a branch says `stop`. This protocol, `Stream`, is the second
+example the rest of the page uses: Prod sends numbers until Cons says it is done.
 
 ```march
-loop do
-  item: Prod -> Cons : Int
-  choose by Cons:
-    more -> Cons -> Prod : Bool
-    done -> Cons -> Prod : Bool
-            stop
+@[endpoints]
+protocol Stream do
+  loop do
+    item: Prod -> Cons : Int
+    choose by Cons:
+      more -> Cons -> Prod : Bool
+      done -> Cons -> Prod : Bool
+              stop
+    end
   end
 end
 ```
@@ -122,9 +140,7 @@ module that runs roles on the network. For `Fan`:
 message type inside `P_Msg` is `P_Message`. Those names are yours to avoid: a type of your
 own called `P_Message` that also derives an interface the generated codec derives is
 rejected as an overlapping implementation. Two protocols in one module is fine: each one's
-message type is named after its own protocol, which is what keeps their `Json` codecs apart
-(before 2026-09-22 both were called `Msg`, and the first protocol's sends encoded through the
-second's codec).
+message type is named after its own protocol, which keeps their `Json` codecs apart.
 
 Roles are numbered in the order they first appear in the protocol. In `Fan` that is A = 1,
 C = 2, B = 3. You never need to write these numbers; use the generated functions.
@@ -171,17 +187,17 @@ pfn role_c(s : Cap(Session.Live), st : Fan_C.Entry) : Fan_C.Yield do
 end
 ```
 
-`Yield` is the type of a finished role. Only `close` (and, later, `cancelled`) produce one,
-so a callback cannot return without either finishing the conversation or handing it on.
+`Yield` is the type of a finished role. Only generated functions produce one: `close`, and
+the `cancelled` and `drained` of the failure handlers described later. So a callback
+cannot return without either finishing the conversation or handing it on.
 
 The state types are what make this safe. Each one is linear: you must use it exactly once.
 `recv_Number` accepts only the state C is in before hearing from A, and it hands the
 callback the only value that lets C take the next step. So the compiler rejects a program
 that sends before it has received, receives twice, sends a `String` where the protocol says
-`Int`, or stops halfway through. The return type `Yield` can only be produced by a generated
-step function, so a callback cannot quietly drop the conversation either.
+`Int`, or stops halfway through.
 
-And A:
+A and B:
 
 ```march
 pfn role_a(s : Cap(Session.Live), st : Fan_A.Entry) : Fan_A.Yield do
@@ -189,6 +205,10 @@ pfn role_a(s : Cap(Session.Live), st : Fan_A.Entry) : Fan_A.Yield do
   Fan_A.recv_Verdict(s, st1, fn (ok, st2) ->
     println("A: got " ++ bool_to_string(ok))
     Fan_A.close(s, st2))
+end
+
+pfn role_b(s : Cap(Session.Live), st : Fan_B.Entry) : Fan_B.Yield do
+  Fan_B.close(s, Fan_B.send_Second(s, st, 9))
 end
 ```
 
@@ -228,29 +248,39 @@ Each role becomes a program whose `main` calls its runner:
 fn main(c : Cap(IO)) do
   match Fan_Run.run_C(c, "node-c", "fan-secret", Fan_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
     Ok(_) -> println("C: closed")
-    Err(e) -> panic(SessionNode.run_error_message(e))
+    Err(e) -> panic(Fan_Run.error_message(e))
   end
 end
 ```
 
-The arguments are:
+A's and B's programs are the same with `run_A` and `run_B`, their own node names, and
+their own bodies. The arguments are:
 
 - `c`: the program's IO capability.
 - `"node-c"`: this node's name, used in the handshake.
 - `"fan-secret"`: a secret every node in the session shares. A node with a different secret
-  is refused. With `MARCH_NODE_CERT` set (and `MARCH_NODE_KEY`,
-  `MARCH_CLUSTER_OPERATOR_PUBKEY`, as for a cluster node) the node runs in
-  [certificate mode]({{ site.baseurl }}/docs/clustering/#authorization) instead and the
-  secret is unused. Each side then checks that the peer's certificate lets it play the
-  role it announces (`Proto.Role:offer` or `:initiate`), and refuses with
-  `Connect`/`Accept`: `role Audit.A is played by node-a: not authorized for Audit.A`.
-- `Fan_Run.addrs_from_env()`: where the roles are, read from the environment (next section).
+  is refused. (With certificates configured the secret is unused; see
+  [Certificate mode](#certificate-mode) below.)
+- `Fan_Run.addrs_from_env()`: where the roles are, read from the environment
+  ([next section](#telling-the-nodes-where-to-find-each-other)).
 - The body: a function from the session and C's first state to `Yield`. Its type comes from
   the protocol, so passing A's body to `run_C` does not compile.
 
 `run_C` connects to the other roles, runs the body, delivers messages until every role has
 closed, and disconnects. It returns `Ok` when the conversation finished, or an `Err` that
-says why it did not.
+says why it did not (see [How a session ends](#how-a-session-ends)).
+
+### Certificate mode
+
+With `MARCH_NODE_CERT` set (and `MARCH_NODE_KEY` and `MARCH_CLUSTER_OPERATOR_PUBKEY`, as for
+a cluster node) the node runs in
+[certificate mode]({{ site.baseurl }}/docs/clustering/#authorization) and the secret is
+unused. A certificate names the roles its node may play, as `Proto.Role:offer` and
+`Proto.Role:initiate`. Each side checks that the peer's certificate lets it play the role
+it announces, and refuses otherwise with `Connect` or `Accept`, for example
+`role Fan.A is played by node-a: not authorized for Fan.A`. The access points check the
+same certificates when a session forms; see
+[Who may take part](#access-points-many-sessions-and-starting-again).
 
 ### The entry points
 
@@ -265,108 +295,6 @@ says why it did not.
 | `cluster_hosted_<Role>(io, node, session, actor, start, deliver, cancel)` | a running `ClusterNode`, one session under a given id | an actor, with the same callbacks | `Result(Session.Outcome, RunError)` |
 
 `<P>_Run.error_message(e)` turns any `RunError` into a line that names the roles.
-
-## Per-role grants
-
-A protocol's grant lines (see [Writing a protocol](#writing-a-protocol)) become parameters
-of the role's body. For
-
-```march
-@[endpoints]
-protocol Checkout do
-  role Ledger needs IO.FileWrite, IO.NetConnect
-  ...
-end
-```
-
-the body `run_Ledger` and every other front takes is
-
-```march
-(Cap(Session.Live), Cap(IO.FileWrite), Cap(IO.NetConnect), Checkout_Ledger.Entry) -> Checkout_Ledger.Yield
-```
-
-one capability per path, in the order the line lists them, after the session and before
-the entry state. The runner narrows them from the `Cap(IO)` it was given and passes them,
-so a body is written as
-
-```march
-pfn ledger(s : Cap(Session.Live), fw : Cap(IO.FileWrite), nc : Cap(IO.NetConnect), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
-  ...
-end
-
-Checkout_Run.run_Ledger(c, "ledger-1", secret, addrs, fn (s, fw, nc, st) -> ledger(s, fw, nc, st))
-```
-
-and a body with a different parameter list does not compile against the runner. For a role
-hosted in an actor, the grant arrives through `start`: `start(s, fw, nc)`, or
-`start(sid, s, fw, nc)` for the many-session fronts. A role with no grant line keeps the
-plain `(s, st)` body.
-
-Because the grant is a value, the composition root is explicit from `main` to every role,
-and a test can hand a body any dictionary it likes in place of the runner's (the
-[Capabilities]({{ site.baseurl }}/docs/capabilities/) page, "Mocking an IO capability in
-tests"). It is also checked: what a body reaches must fit under its grant.
-
-### What the grant checks
-
-Two things stop a role from doing more than its line says. The first is the type: a
-granted body holds `Cap(IO.FileWrite)`, not `Cap(IO)`, and `Cap(IO.FileWrite)` does not
-unify with `Cap(IO)`, so it cannot hand its capability to anything that wants the wider
-one. The second is a walk, because a body that never touches its capability value can
-still call `file_write` through any helper. At every call of a runner front the compiler
-walks everything the callback reaches (helpers, functions passed as values, local closures
-it captures, actors it spawns; for a hosted role, `start`, `deliver`, `cancel` and the
-actor behind `host`) and requires every capability in that reach to sit under the role's
-grant, exactly as `main`'s grant bounds the program:
-
-```
-Role `Stream.Cons` is granted `Cap(IO.Console)` (`role Cons needs IO.Console`), but the
-body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body:
-body → cons → save). A role's grant bounds everything its code reaches, as `main`'s
-grant bounds the program.
-help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.
-```
-
-The root of the walk is the *value* that reaches the body parameter, not the expression
-at the call. A body bound with `let` in the calling function, a body passed in through a
-parameter (resolved at each call site), an alias such as `let sv = save`, a local closure
-the body calls, and a body returned by a function (charged that function's reach) are all
-walked; the chain names a local closure by its name (`body → sv → save`). When the value
-has no static origin, because it was read from a record field or a data structure or
-received in a message, the compiler cannot walk it. A closure received as a value is its
-creator's authority, so this is reported, not refused:
-
-```
-warning: cannot verify role grant for the body passed to `Stream_Run.run_Cons` at
-app.march:28: value not statically known (it is read from a data structure, a record
-field or a message, not bound in this function). ...
-help: pass a lambda or a named function here, or bind the body with `let` in this
-function, to have it checked.
-```
-
-A role's grant must also fit within `main`'s: the runner narrows the role's capabilities
-from what `main` holds, so `role Cons needs IO.FileWrite` under `fn main(c :
-Cap(IO.Console))` is an error at the grant line. And a grant names IO capabilities only:
-`role Cons needs Session.Live` (or `ClusterNode.Live`, or `LibC`) is one error at the
-grant line, because the runner narrows each path from `main`'s `Cap(IO)` and no narrowing
-produces a proof or foreign capability. The session capability is passed to every body
-already.
-
-The grant bounds the role's *code*, not its *authority*. A body handed a pid to an actor
-with wider capabilities can message it, and a closure it receives can do whatever its
-creator could; both are delegation, charged to whoever created the reference, and the
-walk does not refuse them. So the compiler can also show what a role can reach that way:
-
-```bash
-march --dump-role-authority app.march
-```
-
-prints, per runner call, the role's grant, what its code reaches, the functions it
-references as values, the local closures it captures (with the function that made them
-and the line), the pids it holds without having spawned them (`holds: h -> Keeper ->
-IO.FileWrite`) and the actors it spawns or hosts, each with the capabilities behind it. It
-is a report, not a check; it exists so that a narrow grant is never mistaken for narrow
-authority.
 
 ## Telling the nodes where to find each other
 
@@ -399,12 +327,14 @@ FAN_C_ADDR=10.0.0.2:7002 ./node_b
 The nodes can start in any order, but they all have to be up within 20 seconds of each
 other. A node that connects before its peer is listening retries for up to 20 seconds, and
 a listening node waits up to 20 seconds for the next role to connect. If one never does,
-setup fails instead of waiting for ever: `run_<Role>` returns `Err(Accept(why))`, whose text
-names the roles still missing, or `Err(Connect(role, why))`, and closes the connections it already made,
-so the roles it did reach fail too instead of waiting on it. Set
-`MARCH_SESSION_CONNECT_MS` to change the 20 seconds; 0 waits for ever. If a required variable is missing, the node stops at startup with a
-message that names the role, for example
-`session_node: role 2 needs an address for role(s) 1`, before it opens any socket.
+setup fails instead of waiting for ever: `run_<Role>` returns `Err(Accept(why))`, whose
+text names the roles still missing, or `Err(Connect(role, why))`, and closes the
+connections it already made, so the roles it did reach fail too instead of waiting on it.
+Set `MARCH_SESSION_CONNECT_MS` to change the 20 seconds; 0 waits for ever.
+
+If a required variable is missing, the node stops at startup with a message that names the
+role, for example `session_node: role 2 needs an address for role(s) 1`, before it opens
+any socket.
 `addrs_from_env()` itself does not fail on a missing variable: it leaves that role out, and
 the runner reports it.
 
@@ -429,7 +359,7 @@ string the roles agree on, fresh for each session:
 match Fan_Run.cluster_C(c, node, "fan-" ++ int_to_string(round), fn (s, st) -> role_c(s, st)) do
   Ok(_) -> println("C: closed")
   Err(SessionNode.Cancelled(role, cause)) -> println("C: cancelled: " ++ cause)
-  Err(e) -> println(SessionNode.run_error_message(e))
+  Err(e) -> println(Fan_Run.error_message(e))
 end
 ```
 
@@ -458,8 +388,10 @@ A node that plays a role for others **offers** it:
 
 ```march
 match Echo_Run.offer_Server(c, node, 64, fn (s, st) -> serve_one(s, st)) do
-  Ok(offer) -> ...        -- offering now; each session runs in its own task
-  Err(why)  -> panic(why) -- this role of this protocol is already offered on this node
+  Ok(offer) -> ...   -- offering now; each session runs in its own task
+  Err(e) -> panic(Echo_Run.error_message(e))
+    -- AlreadyOffered: this node already offers this role of this protocol version
+    -- Unauthorized: this node's certificate does not allow it to offer the role
 end
 ```
 
@@ -468,8 +400,8 @@ A node that wants a conversation **initiates** one:
 ```march
 match Echo_Run.initiate_Client(c, node, fn (s, st) -> ask(s, st)) do
   Ok(_) -> println("done")
-  Err(SessionNode.NoOffer(role, why)) -> println("nobody would take role " ++ int_to_string(role) ++ ": " ++ why)
-  Err(e) -> println(SessionNode.run_error_message(e))
+  Err(SessionNode.NoOffer(role, why)) -> println("nobody would take role " ++ Echo_Msg.role_name(role) ++ ": " ++ why)
+  Err(e) -> println(Echo_Run.error_message(e))
 end
 ```
 
@@ -480,27 +412,23 @@ initiate just as well.
 **How a session forms.** The initiator mints a fresh session id (its node, that node's
 incarnation, a counter: never reused, so a restarted or partitioned node can never be
 addressed by an old session), then invites one offer of each other role, trying an offer on
-its own node first. An offer refuses when it is full, when it is closing, when the initiator's
-certificate does not allow its role (certificate mode, below), or when it was
+its own node first. An offer refuses when it is full, when it is closing, when the
+initiator's certificate does not allow its role (certificate mode, below), or when it was
 built from a version of the protocol this one cannot form a session with: each protocol has
 a fingerprint, so two nodes built from incompatible versions refuse each other instead of
 exchanging messages the other cannot read (see [Changing a protocol](#changing-a-protocol)
-for the versions that can mix). On a refusal, or no answer, the initiator tries the next offer, all
-within the setup time (`MARCH_SESSION_CONNECT_MS`, 20 seconds). If a role cannot be
+for the versions that can mix). On a refusal, or no answer, the initiator tries the next
+offer, all within the setup time (`MARCH_SESSION_CONNECT_MS`, 20 seconds). If a role cannot be
 filled, `Err(NoOffer(role, why))` says what each offer said, and the offers that had
 already accepted are released.
 
 **What the fingerprint covers.** A protocol's fingerprint digests its roles, its steps,
-and, since 2026-09-21, what each payload type is MADE OF, not only its name: two nodes
-whose `Thing` is `{ x : Int }` on one and `{ x : String }` on the other no longer agree,
-so the skew is refused when the session is set up instead of surfacing mid-session as an
-undecodable message. A payload type declared in ANOTHER module is out of reach when the
-digest is computed and is recorded by name alone, so a change below such a type's name is
-still invisible to the check. The direct runner (`run_<Role>`) exchanges the fingerprint
-in its handshake too, not only the access points, and a peer built before that change --
-which sends no fingerprint -- is refused with a message saying so rather than joining
-unchecked. Every fingerprint changed when the digest widened: a node built before the
-change and one built after will refuse each other, which is the check working.
+and what each payload type is made of, not only its name: two nodes whose `Thing` is
+`{ x : Int }` on one and `{ x : String }` on the other do not agree, so the skew is refused
+when the session is set up instead of surfacing mid-session as an undecodable message. One
+gap: a payload type declared in *another* module is recorded by name alone, so a change
+inside such a type is invisible to the check. The direct runner (`run_<Role>`) exchanges
+the fingerprint in its handshake too, and refuses a peer that sends none.
 
 **Who may take part (certificate mode).** When the cluster runs in
 [certificate mode]({{ site.baseurl }}/docs/clustering/#authorization), each node's
@@ -527,9 +455,9 @@ it. Both sides check:
   offer". This is a courtesy check. The initiator's check is the one that holds against
   a node that skips it.
 
-A shared-secret cluster has no certificates and checks none of this, as before.
+A shared-secret cluster has no certificates and checks none of this.
 
-**Capacity** is the second argument to `offer_<Role>`: how many sessions it will run at
+**Capacity** is the `capacity` argument to `offer_<Role>`: how many sessions it will run at
 once. Past that it answers "full" and the initiator looks elsewhere.
 
 **Starting again after a failure.** A failed session is cancelled and discarded (see
@@ -541,8 +469,9 @@ any other.
 `SessionNode.close_offer(offer)` stops offering: new invitations are refused and the name
 is released, while sessions already running finish.
 
-The [cluster limits](#running-over-a-cluster-node) still apply: every role on a different
-node, and one offer per role and protocol version per node.
+A node holds at most one offer per role and protocol version; a second `offer_<Role>`
+returns `Err(AlreadyOffered(role))`. A node may offer one role and initiate another, and
+an initiator prefers an offer on its own node, whose frames go over the loopback link.
 
 ## Messages from different peers
 
@@ -564,7 +493,8 @@ for it is thrown away.
 
 ## How a session ends
 
-`run_<Role>` returns one of these:
+Every entry point returns one of these (`offer_<Role>` returns `Ok(offer)` instead of an
+outcome, and each session it runs ends in one of these):
 
 | Result | Meaning |
 |---|---|
@@ -575,9 +505,13 @@ for it is thrown away.
 | `Err(HostGone(ep))` | Only for a role hosted in an actor (below): the actor died. |
 | `Err(Left(why))` | This role left the session on purpose (below). |
 | `Err(Listen(port, why))`, `Err(Accept(why))`, `Err(Connect(role, why))` | Startup failed: the port was taken, a handshake was refused, a peer never came up. |
+| `Err(NoOffer(role, why))` | `initiate_<Role>` only: no offer of `role` accepted the invitation. `why` lists what each offer said. |
+| `Err(AlreadyOffered(role))` | `offer_<Role>` only: this node already offers that role of this protocol version. |
+| `Err(Unauthorized(role, why))` | `offer_<Role>` only: this node's certificate does not allow it to offer the role. |
 
-`SessionNode.run_error_message(e)` turns any of these into a readable line. The `Ok` value
-is a `Session.Outcome` (`Finished | Drained(Int)`); code that matches `Ok(_)` needs no change.
+`<P>_Run.error_message(e)` turns any of these into a readable line that names the roles;
+`SessionNode.run_error_message(e)` does the same with role numbers. The `Ok` value is a
+`Session.Outcome` (`Finished | Drained(Int)`), so most code matches `Ok(_)`.
 
 ## Draining a session
 
@@ -663,9 +597,8 @@ heartbeat: each connection is pinged every second, and a peer that sends nothing
 seconds is treated as failed. `MARCH_SESSION_HEARTBEAT_MS` and `MARCH_SESSION_TIMEOUT_MS`
 change the two numbers. The heartbeat runs from the moment two nodes connect, so a role can
 work for as long as it likes before its first send or receive. The heartbeat can mistake a
-very slow peer for a dead one. That
-cancels a session that could have finished, which costs a retry but never corrupts
-anything.
+very slow peer for a dead one. That cancels a session that could have finished, which costs
+a retry but never corrupts anything.
 
 ### Handling a failure
 
@@ -673,12 +606,14 @@ Every receive has a second form, ending in `_or`, that takes a cancel handler. O
 the same (`offer_more_done_or`):
 
 ```march
-Fan_C.recv_Second_or(s, st1,
-  fn (b, st2) ->
-    Fan_C.close(s, Fan_C.send_Verdict(s, st2, b > 0)),
-  fn (role, cause, cancel) ->
-    println("gave up on role " ++ int_to_string(role) ++ ": " ++ cause)
-    Fan_C.cancelled(s, cancel))
+pfn after_a(s : Cap(Session.Live), a : Int, st : Fan_C.S_recv_Second) : Fan_C.Yield do
+  Fan_C.recv_Second_or(s, st,
+    fn (b, st2) ->
+      Fan_C.close(s, Fan_C.send_Verdict(s, st2, a + b == 16)),
+    fn (role, cause, cancel) ->
+      println("gave up on role " ++ Fan_Msg.role_name(role) ++ ": " ++ cause)
+      Fan_C.cancelled(s, cancel))
+end
 ```
 
 The handler runs if this receive's sender fails with nothing queued. It gets the failed
@@ -689,11 +624,11 @@ without `_or` behaves the same way, with no handler.
 
 To leave a session on purpose, call the `leave_` function for the state you are in:
 `Fan_C.leave_recv_Number(s, st, "shutting down")` for C before it has heard from A. The
-other roles are told, and `run` returns `Err(Left(why))`.
+other roles are told, and `run_C` returns `Err(Left(why))`.
 
 The names, in one place:
 
-| | |
+| Function | What it is |
 |---|---|
 | `recv_<Msg>_or(s, st, on_msg, on_cancel)` | a receive with a cancel handler; `offer_<labels>_or` likewise |
 | `on_cancel : (Int, String, Cancelled_<Role>) -> Yield` | the failed role's number, the cause, and the token |
@@ -708,7 +643,9 @@ The names, in one place:
 A session cannot be resumed. To try again, call `run_<Role>` again on every node, which
 starts a new session with new connections. Deciding when to do that, and making sure every
 node does, is up to whatever runs the nodes, for example a supervisor around
-`run_<Role>`. The runner does not restart anything by itself.
+`run_<Role>`. The runner does not restart anything by itself. With
+[access points](#access-points-many-sessions-and-starting-again) there is nothing to
+coordinate: the offering side just offers again, and the next invitation finds it.
 
 ## When a role may crash
 
@@ -858,7 +795,7 @@ fn main(c : Cap(IO)) do
     ()
   match Stream_Run.host_Cons(c, "node-b", "stream-secret", Stream_Run.addrs_from_env(), pc, start, deliver) do
     Ok(_) -> println("Cons: closed")
-    Err(e) -> panic(SessionNode.run_error_message(e))
+    Err(e) -> panic(Stream_Run.error_message(e))
   end
 end
 ```
@@ -879,9 +816,10 @@ actor starts idle and cannot pick up the old conversation; start a new session i
 For the actor to hear that its role was cancelled, use `host_<Role>_or`, which takes a
 fourth function after `deliver`. It is called with the session, the failed role, the cause
 and the endpoint. Send those to the actor; its handler stores
-`Stream_Cons.cancel(s, state.parked)`, which gives back a closed value, and can update the rest
-of its state. Like a cancel handler, it cannot send in the failed session. This is the cost of keeping the session in the actor's state. The
-callback style does not have it, because there the session state lives in the runner.
+`Stream_Cons.cancel(s, state.parked)`, which gives back a closed value, and can update the
+rest of its state. Like a cancel handler, it cannot send in the failed session. This extra
+function is the cost of keeping the session in the actor's state. The callback style does
+not need it, because there the session state lives in the runner.
 
 Different nodes can make different choices. In `test/two_node/hosted`, Prod is a plain body
 on one node and Cons is an actor on the other.
@@ -976,6 +914,108 @@ so one actor can serve both.
 fourth; `test/two_node/cluster_ap_hosted_cancel` kills one of three clients half way
 through its session, and only that session is cancelled.
 
+## Per-role grants
+
+A protocol's grant lines (see [Writing a protocol](#writing-a-protocol)) become parameters
+of the role's body. For
+
+```march
+@[endpoints]
+protocol Checkout do
+  role Ledger needs IO.FileWrite, IO.NetConnect
+  ...
+end
+```
+
+the body `run_Ledger` and every other front takes is
+
+```march
+(Cap(Session.Live), Cap(IO.FileWrite), Cap(IO.NetConnect), Checkout_Ledger.Entry) -> Checkout_Ledger.Yield
+```
+
+one capability per path, in the order the line lists them, after the session and before
+the entry state. The runner narrows them from the `Cap(IO)` it was given and passes them,
+so a body is written as
+
+```march
+pfn ledger(s : Cap(Session.Live), fw : Cap(IO.FileWrite), nc : Cap(IO.NetConnect), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
+  ...
+end
+
+Checkout_Run.run_Ledger(c, "ledger-1", secret, addrs, fn (s, fw, nc, st) -> ledger(s, fw, nc, st))
+```
+
+and a body with a different parameter list does not compile against the runner. For a role
+hosted in an actor, the grant arrives through `start`: `start(s, fw, nc)`, or
+`start(sid, s, fw, nc)` for the many-session fronts. A role with no grant line keeps the
+plain `(s, st)` body.
+
+Because the grant is a value, the composition root is explicit from `main` to every role,
+and a test can hand a body any dictionary it likes in place of the runner's (the
+[Capabilities]({{ site.baseurl }}/docs/capabilities/) page, "Mocking an IO capability in
+tests"). It is also checked: what a body reaches must fit under its grant.
+
+### What the grant checks
+
+Two things stop a role from doing more than its line says. The first is the type: a
+granted body holds `Cap(IO.FileWrite)`, not `Cap(IO)`, and `Cap(IO.FileWrite)` does not
+unify with `Cap(IO)`, so it cannot hand its capability to anything that wants the wider
+one. The second is a walk, because a body that never touches its capability value can
+still call `file_write` through any helper. At every call of a runner front the compiler
+walks everything the callback reaches (helpers, functions passed as values, local closures
+it captures, actors it spawns; for a hosted role, `start`, `deliver`, `cancel` and the
+actor behind `host`) and requires every capability in that reach to sit under the role's
+grant, exactly as `main`'s grant bounds the program:
+
+```
+Role `Stream.Cons` is granted `Cap(IO.Console)` (`role Cons needs IO.Console`), but the
+body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body:
+body → cons → save). A role's grant bounds everything its code reaches, as `main`'s
+grant bounds the program.
+help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.
+```
+
+The root of the walk is the *value* that reaches the body parameter, not the expression
+at the call. A body bound with `let` in the calling function, a body passed in through a
+parameter (resolved at each call site), an alias such as `let sv = save`, a local closure
+the body calls, and a body returned by a function (charged that function's reach) are all
+walked; the chain names a local closure by its name (`body → sv → save`). When the value
+has no static origin, because it was read from a record field or a data structure or
+received in a message, the compiler cannot walk it. A closure received as a value is its
+creator's authority, so this is reported, not refused:
+
+```
+warning: cannot verify role grant for the body passed to `Stream_Run.run_Cons` at
+app.march:28: value not statically known (it is read from a data structure, a record
+field or a message, not bound in this function). ...
+help: pass a lambda or a named function here, or bind the body with `let` in this
+function, to have it checked.
+```
+
+A role's grant must also fit within `main`'s: the runner narrows the role's capabilities
+from what `main` holds, so `role Cons needs IO.FileWrite` under `fn main(c :
+Cap(IO.Console))` is an error at the grant line. And a grant names IO capabilities only:
+`role Cons needs Session.Live` (or `ClusterNode.Live`, or `LibC`) is one error at the
+grant line, because the runner narrows each path from `main`'s `Cap(IO)` and no narrowing
+produces a proof or foreign capability. The session capability is passed to every body
+already.
+
+The grant bounds the role's *code*, not its *authority*. A body handed a pid to an actor
+with wider capabilities can message it, and a closure it receives can do whatever its
+creator could; both are delegation, charged to whoever created the reference, and the
+walk does not refuse them. So the compiler can also show what a role can reach that way:
+
+```bash
+march --dump-role-authority app.march
+```
+
+prints, per runner call, the role's grant, what its code reaches, the functions it
+references as values, the local closures it captures (with the function that made them
+and the line), the pids it holds without having spawned them (`holds: h -> Keeper ->
+IO.FileWrite`) and the actors it spawns or hosts, each with the capabilities behind it. It
+is a report, not a check; it exists so that a narrow grant is never mistaken for narrow
+authority.
+
 ## Testing without a network
 
 The generated role modules do not know about sockets. They talk to whatever transport the
@@ -1024,7 +1064,7 @@ protocol is its own test oracle:
 let t = Session.in_process()
 let s = Session.attach(io, t.ops)
 let _ = Stream_Cons.script(s, Stream_Cons.register(s, 0), [
-  Stream_Cons.Expect_Msg_Prod_Cons_1(fn n -> assert(n == 1)),
+  Stream_Cons.Expect_Item(fn n -> assert(n == 1)),
   Stream_Cons.Choose_done(true)
 ])
 let _ = prod(s, Stream_Prod.register(s, 0), 1)
@@ -1114,14 +1154,14 @@ A new chooser and an old receiver never meet: the chooser's table has no row for
 receiver's older version.
 
 **Hosted access points across a change.** An actor hosting sessions holds each session's
-epoch, so it cannot move to a new protocol version while it hosts old sessions (plan 6.1).
+epoch, so it cannot move to a new protocol version while it hosts old sessions.
 `Topology.reoffer(node)` opens each open offer again with the code now running: a role whose
 fingerprint changed gets a new offer and, for an actor role, a fresh hosting actor. The old
 offer closes, its sessions finish on the old version, and its actor is stopped once they
-have. The placement loop runs this after a deploy, but see the limits below: today it
-reopens with the code the role's `open` function was built from.
+have. The placement loop runs this after a deploy. It only sees the new code if the role's
+body is on the hot-reload boundary; see [Limits](#limits).
 
-**A monolith needs two deploys (D21).** When one binary both makes and receives a changed
+**A monolith needs two deploys.** When one binary both makes and receives a changed
 choice, no rollout order exists inside one deploy. Build the first deploy with
 `--protocol-expand <P>:<label>`: the receivers take the new version, while the chooser
 keeps offering and initiating under the previous fingerprint, and its `choose_<label>`
@@ -1147,26 +1187,23 @@ node's (SWIM) and the heartbeat settings do not apply.
 
 ## Limits
 
-- The network runner is compiled-only for now.
+- The network runner is compiled-only for now; the in-process test transport runs on both
+  backends.
 - A session cannot be resumed after a failure, and nothing restarts it for you.
 - Every role that exchanges messages with another needs a direct connection to it. There is
   no relaying.
-- Over a cluster node (`cluster_<Role>`), a
-  connection lost for any reason cancels the sessions using it, even if the peer node
+- Over a cluster node (`cluster_<Role>` and the access points), a connection lost for any
+  reason cancels the sessions using it, even if the peer node
   reconnects at once. Frames in flight on the old connection may be gone, so the session
   cannot safely continue.
 - Messages are encoded as JSON, so every payload type needs a JSON codec. Built-in types
   have one; for your own types, add `derive Json for YourType`.
-- After a hot deploy, `Topology.reoffer` calls each role's `open` function, which the old
-  code built, and that runs the old code: the role is reopened under the old fingerprint
-  (a no-op). It reopens under the new one only when new code builds the role, until calls
-  from entry-module code and its closures go through the reload dispatch table (today a
-  call is dispatched only when both caller and callee are reloadable). A hosting actor
-  whose handler the
-  deploy replaces can re-offer from there.
-- A hot patch currently carries its own copy of the runtime, so a session started by
-  patched code can crash the process; the two-node test of a hot protocol change is
-  pending on that fix (`specs/todos/2026-09-25-hcr-patch-so-private-runtime-copy.md`).
+- After a hot deploy, `Topology.reoffer` reopens a role under its new fingerprint only if
+  the role's body is on the hot-reload boundary. Functions declared at the top level of
+  the entry file are not (the entry file's nested modules and actor handlers are), so a
+  role whose body is one of them is reopened with the old code, under the old
+  fingerprint. Put role bodies in a nested module, or re-offer from a hosting actor's
+  handler, which the deploy replaces.
 
 ## See also
 

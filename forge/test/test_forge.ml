@@ -2148,58 +2148,6 @@ let test_interp_command_file_with_no_args_still_emits_args_flag () =
   Alcotest.(check string) "bare --args is still emitted"
     "MARCH_LIB_PATH=/p/lib march '/p/lib/app.march' --args" cmd
 
-(* ------------------------------------------ [ffi.rust] under the interpreter *)
-
-(* A [[ffi.rust]]-only project cannot run interpreted: cargo produces a static
-   lib<name>.a that cannot be dlopen'ed, and with no [[ffi] sources] the
-   compiler builds no interpreter shim, so every Rust extern used to die at
-   its call site with the generic "symbol not found for interpreter FFI".
-   forge now says so once, up front.  These pin WHEN it says so, on a real
-   forge.toml parsed by [Project.load_from_dir]; no cargo build runs. *)
-
-let load_ffi_project toml =
-  let dir = Filename.temp_dir "forge_ffi_rust_diag_" "" in
-  write_file (Filename.concat dir "forge.toml") toml;
-  match Project.load_from_dir dir with
-  | Error msg -> Alcotest.failf "forge.toml did not load: %s" msg
-  | Ok proj -> proj
-
-let pkg_header = "[package]\nname = \"rusty\"\nversion = \"0.1.0\"\ntype = \"app\"\n"
-let rust_section = "\n[ffi.rust]\ncrate = \"native/rusty_ffi\"\nlib = \"rusty_ffi\"\n"
-let c_section = "\n[ffi]\nsources = [\"native/shim.c\"]\n"
-
-let test_rust_only_interpreted_gets_diagnostic () =
-  let proj = load_ffi_project (pkg_header ^ rust_section) in
-  match Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:true proj with
-  | None -> Alcotest.fail "expected the compile-only diagnostic for a [ffi.rust]-only project"
-  | Some msg ->
-    Alcotest.(check bool) "says it is compiled-only" true
-      (contains msg "only available in compiled mode");
-    Alcotest.(check bool) "names the crate" true (contains msg "native/rusty_ffi");
-    Alcotest.(check bool) "names the static archive" true (contains msg "librusty_ffi.a");
-    Alcotest.(check bool) "tells the user what to run instead" true
-      (contains msg "forge run --compiled");
-    Alcotest.(check bool) "is a warning, not an error" true
-      (String.length msg >= 8 && String.sub msg 0 8 = "warning:")
-
-let test_rust_only_compiled_no_diagnostic () =
-  let proj = load_ffi_project (pkg_header ^ rust_section) in
-  Alcotest.(check (option string)) "compiled builds link the archive fine" None
-    (Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:false proj)
-
-let test_rust_with_c_sources_no_diagnostic () =
-  let proj = load_ffi_project (pkg_header ^ c_section ^ rust_section) in
-  Alcotest.(check (option string)) "a C shim exists, so the interpreter path is live" None
-    (Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:true proj)
-
-let test_c_only_and_no_ffi_no_diagnostic () =
-  let c_only = load_ffi_project (pkg_header ^ c_section) in
-  Alcotest.(check (option string)) "C-only [ffi]" None
-    (Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:true c_only);
-  let bare = load_ffi_project pkg_header in
-  Alcotest.(check (option string)) "no [ffi] at all" None
-    (Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:true bare)
-
 let test_output_ext_by_target () =
   (* Pinned because the single-file compiled run names a temp output with this,
      and running a .mjs as if it were a native binary fails confusingly. *)
@@ -2325,6 +2273,132 @@ let with_dev_march_on_path (f : unit -> 'a) : 'a =
     either would otherwise pass the whole suite untouched. Marked [`Slow]:
     this pays a real clang compile, so it must not land in the quick
     suite ([scripts/run-tests.sh -q] skips [`Slow]). *)
+(* ------------------------------------------ [ffi.rust] under the interpreter *)
+
+(* A [[ffi.rust]]-only project runs interpreted, with the same output as
+   compiled.  cargo produces a static lib<name>.a, which cannot be dlopen'ed;
+   the compiler now force-loads every `--ffi-link <x>.a` into the
+   interpreter's FFI shim (an empty stub when there are no [[ffi] sources]),
+   where it used to build no shim at all and every Rust extern died with
+   "symbol not found for interpreter FFI".
+
+   The crate has no dependencies, so cargo never touches the network, and
+   one of its functions calls back into March runtime symbols
+   (march_make_int / march_get_int): those stay undefined when the shim is
+   linked and resolve at dlopen, which is the part a force-loaded archive
+   could get wrong.  Needs `cargo`; without one the case says so and skips. *)
+
+let rust_toolchain_available () = Sys.command "cargo --version >/dev/null 2>&1" = 0
+
+(* [with_c_source]: also declare an [ffi] C source that references none of
+   the crate's symbols -- the mixed project, where a C shim was always built
+   but the archive's members reached it only if the shim happened to call
+   them. *)
+let write_rust_ffi_project ?(with_c_source = false) dir =
+  let mk d = ignore (Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote d))) in
+  mk (Filename.concat dir "lib");
+  mk (Filename.concat dir "native/rusty_ffi/src");
+  if with_c_source then
+    write_file (Filename.concat dir "native/shim.c")
+      "#include <stdint.h>\nint64_t c_side_answer(void) { return 7; }\n";
+  write_file (Filename.concat dir "forge.toml")
+    ("[package]\nname = \"rusty\"\nversion = \"0.1.0\"\ntype = \"app\"\n\n"
+     ^ (if with_c_source then "[ffi]\nsources = [\"native/shim.c\"]\n\n" else "")
+     ^ "[ffi.rust]\ncrate = \"native/rusty_ffi\"\nlib = \"rusty_ffi\"\n");
+  write_file (Filename.concat dir "native/rusty_ffi/Cargo.toml")
+    "[package]\nname = \"rusty_ffi\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+     [lib]\nname = \"rusty_ffi\"\ncrate-type = [\"staticlib\"]\n";
+  write_file (Filename.concat dir "native/rusty_ffi/src/lib.rs")
+    "extern \"C\" {\n\
+    \    fn march_make_int(n: i64) -> i64;\n\
+    \    fn march_get_int(v: i64) -> i64;\n\
+     }\n\n\
+     #[no_mangle]\n\
+     pub extern \"C\" fn rusty_add(a: i64, b: i64) -> i64 { a + b }\n\n\
+     #[no_mangle]\n\
+     pub extern \"C\" fn rusty_tag_roundtrip(n: i64) -> i64 {\n\
+    \    unsafe { march_get_int(march_make_int(n)) }\n\
+     }\n";
+  write_file (Filename.concat dir "lib/rusty.march")
+    "mod Rusty do\n\
+    \  needs IO.Console\n\
+    \  needs IO.Foreign\n\n\
+    \  extern \"rusty_ffi\" : Cap(IO.Foreign) do\n\
+    \    fn rusty_add(a : Int, b : Int) : Int = \"rusty_add\"\n\
+    \    fn rusty_tag_roundtrip(n : Int) : Int = \"rusty_tag_roundtrip\"\n\
+    \  end\n\n\
+    \  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) do\n\
+    \    println(\"add=\" ++ int_to_string(rusty_add(40, 2)))\n\
+    \    println(\"roundtrip=\" ++ int_to_string(rusty_tag_roundtrip(-7)))\n\
+    \  end\n\
+     end\n"
+
+(* Run [f] with stdout (which Sys.command children inherit) sent to a file;
+   return its result and the program lines it printed. *)
+let run_capturing_program_lines f =
+  flush stdout;
+  let capture = Filename.temp_file "forge_rust_ffi_" ".out" in
+  let saved = Unix.dup Unix.stdout in
+  let fd = Unix.openfile capture [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600 in
+  Unix.dup2 fd Unix.stdout;
+  Unix.close fd;
+  let r = try Ok (f ()) with e -> Error e in
+  flush stdout;
+  Unix.dup2 saved Unix.stdout;
+  Unix.close saved;
+  let ic = open_in capture in
+  let out = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  (try Sys.remove capture with Sys_error _ -> ());
+  let program_lines =
+    String.split_on_char '\n' out
+    |> List.filter (fun l ->
+        List.exists (fun p -> String.length l >= String.length p
+                              && String.sub l 0 (String.length p) = p)
+          [ "add="; "roundtrip=" ])
+  in
+  match r with
+  | Ok v -> (v, program_lines, out)
+  | Error e -> raise e
+
+let rust_ffi_parity ~with_c_source () =
+  if not (rust_toolchain_available ()) then begin
+    prerr_endline
+      "SKIP [ffi.rust] interpreted/compiled parity: no Rust toolchain \
+       (`cargo` is not on PATH)";
+    Alcotest.skip ()
+  end;
+  with_dev_march_on_path (fun () ->
+      let dir = Filename.temp_dir "forge_ffi_rust_e2e_" "" in
+      write_rust_ffi_project ~with_c_source dir;
+      let old_cwd = Sys.getcwd () in
+      Fun.protect
+        ~finally:(fun () ->
+            Unix.chdir old_cwd;
+            ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir))))
+        (fun () ->
+           Unix.chdir dir;
+           let run compiled = Cmd_run.run ~compiled ~args:[] () in
+           let r_i, lines_i, out_i = run_capturing_program_lines (fun () -> run false) in
+           (match r_i with
+            | Ok () -> ()
+            | Error m -> Alcotest.failf "interpreted run failed: %s\n%s" m out_i);
+           let r_c, lines_c, out_c = run_capturing_program_lines (fun () -> run true) in
+           (match r_c with
+            | Ok () -> ()
+            | Error m -> Alcotest.failf "compiled run failed: %s\n%s" m out_c);
+           Alcotest.(check (list string)) "interpreted output"
+             [ "add=42"; "roundtrip=-7" ] lines_i;
+           Alcotest.(check (list string)) "compiled output is identical" lines_i lines_c;
+           Alcotest.(check bool) "no compile-only warning any more" false
+             (contains out_i "only available in compiled mode")))
+
+let test_rust_only_project_runs_interpreted_and_compiled () =
+  rust_ffi_parity ~with_c_source:false ()
+
+let test_rust_plus_c_project_runs_interpreted_and_compiled () =
+  rust_ffi_parity ~with_c_source:true ()
+
 let test_compiled_run_end_to_end () =
  with_dev_march_on_path (fun () ->
   (* Run from a directory with no forge.toml in scope, so resolve_entry takes
@@ -3031,14 +3105,10 @@ let () =
         test_repl_command_includes_ffi_flags_after_entry;
       Alcotest.test_case "bare REPL still gets the ffi flags" `Quick
         test_repl_command_bare_includes_ffi_flags;
-      Alcotest.test_case "[ffi.rust]-only interpreted run: compile-only diagnostic" `Quick
-        test_rust_only_interpreted_gets_diagnostic;
-      Alcotest.test_case "[ffi.rust]-only compiled run: no diagnostic" `Quick
-        test_rust_only_compiled_no_diagnostic;
-      Alcotest.test_case "[ffi.rust] plus [ffi] C sources: no diagnostic" `Quick
-        test_rust_with_c_sources_no_diagnostic;
-      Alcotest.test_case "C-only / no-FFI projects: no diagnostic" `Quick
-        test_c_only_and_no_ffi_no_diagnostic;
+      Alcotest.test_case "[ffi.rust]-only project: interpreted output = compiled" `Slow
+        test_rust_only_project_runs_interpreted_and_compiled;
+      Alcotest.test_case "[ffi.rust] + [ffi] C sources: interpreted output = compiled" `Slow
+        test_rust_plus_c_project_runs_interpreted_and_compiled;
       Alcotest.test_case "output extension follows the target" `Quick
         test_output_ext_by_target;
       Alcotest.test_case "compiled single-file run: real compile, real run" `Slow

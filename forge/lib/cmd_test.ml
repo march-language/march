@@ -166,8 +166,7 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
       (* Link the same FFI shims as the compiled path below (and `forge build`)
          so interpreter-mode tests that call into [[ffi]] code don't fail with
          "runtime not loaded" — see invoke_march_interp's doc comment. *)
-      (Cmd_build.warn_interpreted_rust_ffi proj;
-      match Cmd_build.ffi_flags_full proj with
+      (match Cmd_build.ffi_flags_full proj with
       | Error msg -> Error msg
       | Ok ffi_flags ->
         invoke_march_interp ~verbose ~filter ~coverage ~seed ~skip_properties ~ffi_flags ~lib_path_env test_files)
