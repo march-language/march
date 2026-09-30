@@ -64,6 +64,15 @@ git log is authoritative for exact commits.
   stdlib's actors now get module-qualified internal names
   (`Topology__Anchor`); app actors keep theirs, so spawn symbols and
   hot-reload manifests are unchanged.
+- **A DataFrame column of nothing but nulls keeps its nulls.** CSV/JSON loading and
+  `summarize` used to turn an all-null column into a plain string column of `""`, so the
+  rows read back as empty strings; they now read back as `NullVal`.
+- **Linux `--cap-sandbox` now filters threads that already exist when the
+  sandbox is installed.** The seccomp filter covered only the installing
+  thread and its later children, so the hot-reload server thread (started
+  before `main`) and any thread started by a C library constructor ran
+  unfiltered. The filter is now installed with `SECCOMP_FILTER_FLAG_TSYNC`, so
+  it covers the whole process, as the macOS sandbox already did.
 - **A program that calls `NodeQueue.start_local` itself now compiles under the
   capability ceiling.** Stdlib `Socket` declared no `needs`, so the ceiling
   rejected any such program with "module `Socket` uses `IO.NetConnect` but does
@@ -452,6 +461,10 @@ git log is authoritative for exact commits.
   bound on its own line was optimised; and a natural-style nested `fn go` was
   reported as eligible but never rewritten. Both are now transformed, so a
   1,000,000-element list built this way no longer overflows the stack.
+- **`Actor.top_by_mailbox` / `Actor.over_mailbox` and `NodeCall` typecheck cleanly.** The
+  two mailbox helpers now return `List((Pid(a), Int))` (the parameterized `Pid`) and
+  `NodeCall` names `RemoteCall.NoConnection` explicitly instead of the ambiguous bare
+  constructor; seven hidden stdlib type errors are gone.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
