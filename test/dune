@@ -3531,6 +3531,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff empty.expected session_node_check.out)))
 
+;; TRMC gaps: a computed call argument (`r(a + 1, b)`) hid the modulo-cons site,
+;; and a nested `fn go` was analysed but never transformed. Both were plain
+;; non-tail recursion. Pre-fix: SIGBUS (stack guard page) on the 1,000,000
+;; element lists. Expected output is the interpreter's.
+(rule
+ (targets native_trmc_computed_arg_nested native_trmc_computed_arg_nested.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/trmc_computed_arg_nested.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_trmc_computed_arg_nested
+        native/trmc_computed_arg_nested.march)
+   (with-stdout-to native_trmc_computed_arg_nested.out
+        (system "./native_trmc_computed_arg_nested")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/trmc_computed_arg_nested.expected native_trmc_computed_arg_nested.out)))
+
 ;; A TRMC'd function with a modulo-cons arm AND a plain tail self-call
 ;; (filter's shape) cycled entry -> $dps -> entry, one frame per alternation
 ;; between the arms. Pre-fix: SIGBUS (stack guard page) on a 1M-element list

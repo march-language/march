@@ -227,8 +227,64 @@ let sites_of (self : string) (body : Tir.expr) : site list =
   go ~in_tail:true body;
   List.rev !acc
 
+(* ── Let-floating ────────────────────────────────────────────────────────────
+
+   Lowering binds a call's COMPUTED argument inside the call's own binding:
+
+     let t = (let n = a + 1 in self(n, b)) in alloc Cons(a, t)
+
+   so the RHS of [t] is an [ELet], not an [EApp], and [sites_of] scans it as a
+   value computation ([Other]) — the function reads as non-TRMC although the
+   source-level shape is identical to the one with [n] bound on its own line.
+   Floating the inner binding out,
+
+     let n = a + 1 in let t = self(n, b) in alloc Cons(a, t)
+
+   is the shape the analysis and both rewrites already handle.  It is
+   evaluation-order preserving (the inner binding ran first anyway) and only
+   fires when the floated name is not free in the continuation, so it can
+   capture nothing.
+
+   Run BEFORE the analysis and before [returnify]/[seed_entry], which match the
+   same shape.  It is applied to a private copy: a function that is not then
+   transformed keeps its original body, so no untouched TIR changes. *)
+let float_lets ~(self : string) (e : Tir.expr) : Tir.expr =
+  let rec fl e =
+    let bind x rhs k =
+      let rec go rhs = match rhs with
+        | Tir.ELet (y, e1, e2)
+          when not (Perceus_liveness.name_free_in y.Tir.v_name k) ->
+          Tir.ELet (y, e1, go e2)
+        | _ -> Tir.ELet (x, rhs, k)
+      in
+      go rhs
+    in
+    match e with
+    (* Only a binding whose RHS holds a self-call is floated: any other nested
+       let is not what hides a modulo-cons site, and leaving it alone keeps the
+       TIR of every unrelated function byte-for-byte unchanged. *)
+    | Tir.ELet (x, (Tir.ELet _ as rhs), k) when calls_name self rhs ->
+      bind x (fl rhs) (fl k)
+    | Tir.ELet (x, rhs, k) -> Tir.ELet (x, fl rhs, fl k)
+    | Tir.ESeq (a, b) -> Tir.ESeq (fl a, fl b)
+    | Tir.ECase (a, branches, default) ->
+      Tir.ECase (a,
+        List.map (fun br -> { br with Tir.br_body = fl br.Tir.br_body }) branches,
+        Option.map fl default)
+    | Tir.ELetRec (fns, body) ->
+      (* Join points inherit the enclosing tail position, so their bodies are
+         walked; any other nested function is analysed under its own name. *)
+      Tir.ELetRec (
+        List.map (fun fd ->
+          if fd.Tir.fn_kind = Tir.FnJoinPoint
+          then { fd with Tir.fn_body = fl fd.Tir.fn_body } else fd) fns,
+        fl body)
+    | _ -> e
+  in
+  fl e
+
 let report_of_fn (fn_name : string) (body : Tir.expr) : fn_report =
-  let sites = sites_of fn_name body in
+  let sites = sites_of fn_name (float_lets ~self:fn_name body) in
   List.fold_left (fun r s ->
     match s with
     | Tail -> { r with r_tail = r.r_tail + 1 }
@@ -463,6 +519,7 @@ let crosses_actor_boundary (type_defs : Tir.type_def list) (ty : Tir.ty) : bool 
 let transform_fn ?(on_decline = fun (_ : string) -> ())
       (type_defs : Tir.type_def list)
       (fn : Tir.fn_def) : (Tir.fn_def * Tir.fn_def) option =
+  let fn = { fn with Tir.fn_body = float_lets ~self:fn.Tir.fn_name fn.Tir.fn_body } in
   let r = report_of_fn fn.Tir.fn_name fn.Tir.fn_body in
   let decline reason = on_decline reason; None in
   if crosses_actor_boundary type_defs fn.Tir.fn_ret_ty then
@@ -483,7 +540,7 @@ let transform_fn ?(on_decline = fun (_ : string) -> ())
         fn_ret_ty = Tir.TUnit;
         fn_body = returnify ~self:fn.Tir.fn_name ~dps ~dst ~hole
                     ~ret_ty:fn.Tir.fn_ret_ty fn.Tir.fn_body;
-        fn_kind = Tir.FnNormal }
+        fn_kind = fn.Tir.fn_kind }
     in
     let entry =
       { fn with Tir.fn_body = seed_entry ~self:fn.Tir.fn_name ~dps fn.Tir.fn_body }
@@ -492,6 +549,70 @@ let transform_fn ?(on_decline = fun (_ : string) -> ())
   | Eligible, sites -> decline (Printf.sprintf "multi-site(%d)" (List.length sites))
   | Mixed, _ -> decline "mixed"
   | _ -> None
+
+(** Rewrite NESTED functions.
+
+    A natural-style local helper lowers to
+    [ELet (go, ELetRec ([go_fn], EAtom go), rest)] (the lambda-creation shape,
+    [fn_kind = FnLambda], self-named).  For each one that [transform_fn] accepts
+    the helper is bound FIRST, in its own lambda binding, and the entry second:
+
+      let go$dps = letrec [go$dps] in go$dps in
+      let go     = letrec [go]     in go     in rest
+
+    Two bindings rather than one two-function [ELetRec] because the dependence
+    is one-directional — the entry calls the helper, the helper only calls
+    itself (a [$dps] body never calls the entry, see [returnify]) — and
+    [Defun] consumes exactly the single-function lambda shape.  The helper is a
+    closure over the same free variables as the entry, captured through the
+    ordinary let-bound-closure path.
+
+    Nested functions are rewritten innermost-first, so a helper nested in a
+    helper is handled before the function containing it is analysed. *)
+let rec transform_nested ~(on_decline : string -> string -> unit)
+    ~(on_xform : string -> string -> unit)
+    (type_defs : Tir.type_def list) (e : Tir.expr) : Tir.expr =
+  let recur = transform_nested ~on_decline ~on_xform type_defs in
+  match e with
+  | Tir.ELet (bv, Tir.ELetRec ([fd], Tir.EAtom (Tir.AVar r)), rest)
+    when fd.Tir.fn_kind = Tir.FnLambda
+      && String.equal bv.Tir.v_name fd.Tir.fn_name
+      && String.equal r.Tir.v_name bv.Tir.v_name ->
+    let fd = { fd with Tir.fn_body = recur fd.Tir.fn_body } in
+    let rest = recur rest in
+    (match transform_fn ~on_decline:(on_decline fd.Tir.fn_name) type_defs fd with
+     | Some (entry, helper) ->
+       on_xform fd.Tir.fn_name helper.Tir.fn_name;
+       let dps_var =
+         { Tir.v_name = helper.Tir.fn_name;
+           v_ty = Tir.TFn (List.map (fun (p : Tir.var) -> p.Tir.v_ty)
+                             helper.Tir.fn_params, Tir.TUnit);
+           v_lin = Tir.Unr }
+       in
+       Tir.ELet (dps_var,
+         Tir.ELetRec ([helper], Tir.EAtom (Tir.AVar dps_var)),
+         Tir.ELet (bv, Tir.ELetRec ([entry], Tir.EAtom (Tir.AVar bv)), rest))
+     | None -> Tir.ELet (bv, Tir.ELetRec ([fd], Tir.EAtom (Tir.AVar r)), rest))
+  | Tir.ELet (bv, rhs, k) -> Tir.ELet (bv, recur rhs, recur k)
+  | Tir.ESeq (a, b) -> Tir.ESeq (recur a, recur b)
+  | Tir.ECase (a, branches, default) ->
+    Tir.ECase (a,
+      List.map (fun br -> { br with Tir.br_body = recur br.Tir.br_body }) branches,
+      Option.map recur default)
+  | Tir.ELetRec (fns, body) ->
+    (* Any other letrec (a join point, an anonymous lambda, a multi-function
+       group) is not the self-named shape above.  Recurse into it, and say so
+       when the ANALYSIS would have called a lambda-kind member eligible: the
+       report must not claim coverage the transform does not have. *)
+    List.iter (fun fd ->
+      if fd.Tir.fn_kind = Tir.FnLambda then begin
+        let r = report_of_fn fd.Tir.fn_name fd.Tir.fn_body in
+        if verdict_of r = Eligible then on_decline fd.Tir.fn_name "nested-shape"
+      end) fns;
+    Tir.ELetRec (
+      List.map (fun fd -> { fd with Tir.fn_body = recur fd.Tir.fn_body }) fns,
+      recur body)
+  | _ -> e
 
 (** Apply TRMC across a module.  Unconditional: every pipeline that lowers
     runs it (compiled, REPL-JIT, LSP, contract check). *)
@@ -510,6 +631,18 @@ let transform_module (m : Tir.tir_module) : Tir.tir_module =
           fn.Tir.fn_name reason (string_of_verdict (verdict_of r))
           (List.length r.r_modcons) r.r_other
       end
+    in
+    let fn =
+      let on_decline_nested name reason =
+        if report then
+          Printf.eprintf "TRMCSKIP\t%s\t%s\tnested in %s\n%!" name reason fn.Tir.fn_name
+      in
+      let on_xform name dps =
+        if report then Printf.eprintf "TRMCXFORM\t%s -> %s\tnested in %s\n%!" name dps fn.Tir.fn_name
+      in
+      { fn with Tir.fn_body =
+          transform_nested ~on_decline:on_decline_nested ~on_xform
+            m.Tir.tm_types fn.Tir.fn_body }
     in
     match transform_fn ~on_decline m.Tir.tm_types fn with
     | Some (entry, helper) ->
