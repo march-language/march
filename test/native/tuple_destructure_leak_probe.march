@@ -1,0 +1,209 @@
+-- Leak guard + correctness golden for tuple patterns.
+--
+-- A tuple pattern's case arm receives each field as an OWNED reference (moved
+-- when the tuple cell is unique, dup'd when it is shared).  Perceus used to
+-- treat every tuple scrutinee's fields as BORROWED, so a pattern variable that
+-- escaped (moved into a constructor, returned, passed on) took a second
+-- reference that nothing released, and a field the arm never used was never
+-- dropped. Measured before the fix, --compile and --opt 2: 2 objects per call
+-- for the moved-fields shape below (delta 20 over 10 calls).
+-- specs/progress/2026-09-30-compiled-tuple-destructure-leaks-moved-fields.md
+--
+-- The legs cover the shapes around the fix, not just the reported one:
+-- fields moved on, fields dead, a partly-used tuple, a tuple that stays live
+-- after the match (shared), a nested tuple pattern, a tuple that is an
+-- element of a list the function only borrows, and a tuple PARAMETER that is
+-- borrowed and destructured on every iteration.
+--
+-- SIGNAL: live_allocs() deltas, printed as booleans against a bound well below
+-- one object per iteration, so the golden is deterministic. Each leg's result
+-- is printed too, so the optimizer cannot delete the loop and a wrong value
+-- (a use-after-free the leak fix could introduce) is visible.
+mod Main do
+  needs IO.Console
+
+  type Box = Box(String, String)
+
+  pfn keep(b : Box) : Box do b end
+  pfn box_len(b : Box) : Int do
+    match b do
+      Box(x, y) -> string_length(x) + string_length(y)
+    end
+  end
+
+  -- fields moved into a constructor (the reported shape)
+  pfn moved(t : (String, Int, String)) : Box do
+    match t do
+      (a, n, c) -> keep(Box(a, c))
+    end
+  end
+
+  -- a field that is never used, and one that is returned
+  pfn dead_field(t : (String, String)) : String do
+    match t do
+      (a, b) -> a
+    end
+  end
+
+  -- every field dead
+  pfn all_dead(t : (String, String)) : Int do
+    match t do
+      (a, b) -> 7
+    end
+  end
+
+  -- the tuple is still needed after the match, so its fields are shared
+  pfn live_after(t : (String, String)) : Int do
+    let n = match t do
+      (a, b) -> string_length(a)
+    end
+    match t do
+      (a, b) -> n + string_length(b)
+    end
+  end
+
+  -- nested tuple pattern
+  pfn nested(t : ((String, String), String)) : Box do
+    match t do
+      ((a, b), c) -> keep(Box(a, c))
+    end
+  end
+
+  -- elements of a list the function only borrows
+  @[no_warn_recursion]
+  pfn sum_list(ps : List((String, String))) : Int do
+    match ps do
+      Nil -> 0
+      Cons(p, rest) ->
+        let here = match p do
+          (a, b) -> string_length(a) + string_length(b)
+        end
+        here + sum_list(rest)
+    end
+  end
+
+  -- a BORROWED tuple parameter, destructured on every iteration of the
+  -- caller's loop: a field returned, one stored in a constructor, one passed
+  -- to an owning call, and a nested pattern.  The tuple and its fields belong
+  -- to the caller, so none of these may release them (a double drop here was
+  -- an RC underflow once; test_eval's "tuple param multi-destruct" pins the
+  -- TIR side).
+  pfn bp_first(pair : (String, String)) : String do
+    match pair do
+      (x, _) -> x
+    end
+  end
+  pfn bp_box(pair : (String, String)) : Box do
+    match pair do
+      (x, y) -> Box(y, x)
+    end
+  end
+  pfn bp_keep(s : String) : List(String) do Cons(s, Nil) end
+  pfn bp_owned_call(pair : (String, String)) : List(String) do
+    match pair do
+      (x, _) -> bp_keep(x)
+    end
+  end
+  pfn bp_nested(t : ((String, String), String)) : String do
+    match t do
+      ((a, _), c) -> a ++ c
+    end
+  end
+
+  pfn leg_borrowed(pair : (String, String), t : ((String, String), String),
+                   i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else
+      let a = string_length(bp_first(pair))
+      let b = box_len(bp_box(pair))
+      let c = List.length(bp_owned_call(pair))
+      let d = string_length(bp_nested(t))
+      leg_borrowed(pair, t, i + 1, n, acc + a + b + c + d)
+    end
+  end
+
+  pfn leg_moved(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else
+      let s = "x" ++ int_to_string(i)
+      let r = moved((s, i, "y" ++ int_to_string(i)))
+      leg_moved(i + 1, n, acc + box_len(r))
+    end
+  end
+
+  pfn leg_dead(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else
+      let r = dead_field(("p" ++ int_to_string(i), "q" ++ int_to_string(i)))
+      let d = all_dead(("p" ++ int_to_string(i), "q" ++ int_to_string(i)))
+      leg_dead(i + 1, n, acc + string_length(r) + d)
+    end
+  end
+
+  pfn leg_live(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else leg_live(i + 1, n, acc + live_after(("p" ++ int_to_string(i), "q" ++ int_to_string(i))))
+    end
+  end
+
+  pfn leg_nested(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else
+      let s = int_to_string(i)
+      let r = nested((("a" ++ s, "b" ++ s), "c" ++ s))
+      leg_nested(i + 1, n, acc + box_len(r))
+    end
+  end
+
+  pfn leg_list(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else
+      let s = int_to_string(i)
+      let ps = [("a" ++ s, "b" ++ s), ("c" ++ s, "d" ++ s)]
+      leg_list(i + 1, n, acc + sum_list(ps) + sum_list(ps))
+    end
+  end
+
+  pfn flat(label : String, before : Int, result : Int, n : Int) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ int_to_string(result) ++ ", flat: "
+            ++ bool_to_string(grew < n / 4))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 40
+    leg_moved(0, 3, 0)
+    let a = live_allocs()
+    let r_a = leg_moved(0, n, 0)
+    flat("moved fields", a, r_a, n)
+    leg_dead(0, 3, 0)
+    let b = live_allocs()
+    let r_b = leg_dead(0, n, 0)
+    flat("dead fields", b, r_b, n)
+    leg_live(0, 3, 0)
+    let c = live_allocs()
+    let r_c = leg_live(0, n, 0)
+    flat("tuple live after", c, r_c, n)
+    leg_nested(0, 3, 0)
+    let d = live_allocs()
+    let r_d = leg_nested(0, n, 0)
+    flat("nested pattern", d, r_d, n)
+    leg_list(0, 3, 0)
+    let e = live_allocs()
+    let r_e = leg_list(0, n, 0)
+    flat("borrowed list elements", e, r_e, n)
+    let pair = ("ab" ++ int_to_string(n), "cd" ++ int_to_string(n))
+    let t = (("ef" ++ int_to_string(n), "gh"), "ij" ++ int_to_string(n))
+    leg_borrowed(pair, t, 0, 3, 0)
+    let f = live_allocs()
+    let r_f = leg_borrowed(pair, t, 0, n, 0)
+    flat("borrowed tuple parameter", f, r_f, n)
+    -- the caller's tuples are intact after being lent out n + 3 times
+    match pair do
+      (p, q) -> println("pair after: " ++ p ++ q)
+    end
+    match t do
+      ((p, q), r) -> println("nested after: " ++ p ++ q ++ r)
+    end
+  end
+end

@@ -430,6 +430,12 @@ git log is authoritative for exact commits.
   silently skipped the check. It is now deferred until the whole module run and
   requires the importee's full declared set (fail-closed), so the same program
   is rejected in either declaration order.
+- **Destructuring a tuple and moving its fields on no longer leaks in compiled
+  programs.** `match t do (a, _, c) -> f(Box(a, c)) end` leaked the moved fields
+  (two objects per call), and a field the pattern never used was never freed.
+  The compiler treated a tuple pattern's fields as borrowed although the match
+  hands them over as owned; they now follow the same ownership as a constructor
+  pattern's.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**

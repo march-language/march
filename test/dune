@@ -2513,6 +2513,45 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/process_handle_leak_probe.expected native_process_handle_leak_probe.out)))
 
+; A tuple pattern's case arm gets each field as an OWNED reference, but Perceus
+; treated every tuple scrutinee's fields as borrowed: an escaping pattern
+; variable took a second reference nothing released and a dead field was never
+; dropped. Red before the fix: four legs read `flat: false`. Expected output
+; is the interpreter's (see the interp_ rule below).
+; specs/progress/2026-09-30-compiled-tuple-destructure-leaks-moved-fields.md
+(rule
+ (targets native_tuple_destructure_leak_probe native_tuple_destructure_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/tuple_destructure_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_tuple_destructure_leak_probe
+        native/tuple_destructure_leak_probe.march)
+   (with-stdout-to native_tuple_destructure_leak_probe.out
+        (system "./native_tuple_destructure_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/tuple_destructure_leak_probe.expected native_tuple_destructure_leak_probe.out)))
+
+; The same file interpreted: the printed leg results are the correctness
+; golden (the interpreter's live_allocs() never grows, so its `flat:` column
+; is all true), and the compiled run is diffed against the same .expected.
+(rule
+ (targets interp_tuple_destructure_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/tuple_destructure_leak_probe.march))
+ (action
+  (with-stdout-to interp_tuple_destructure_leak_probe.out
+    (run %{exe:../bin/main.exe} native/tuple_destructure_leak_probe.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/tuple_destructure_leak_probe.expected interp_tuple_destructure_leak_probe.out)))
+
 ; ── Regression: float_nan / float_infinity / float_neg_infinity /
 ; float_epsilon / float_is_nan / float_is_infinite / typed_array_slice
 ; typechecked and ran interpreted, but `--compile` failed at LINK time with

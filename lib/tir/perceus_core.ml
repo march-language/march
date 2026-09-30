@@ -1325,17 +1325,21 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
           StringSet.mem v.Tir.v_name live_after
           || (needs_rc env v.Tir.v_ty
               && name_free_in v.Tir.v_name br.Tir.br_body)
-          (* Tuples/records are [needs_rc = false]: Perceus never emits a
-             DecRC/free for the aggregate itself, so its extracted fields are
-             effectively borrowed from a value whose lifetime the match does
-             not control (e.g. a tuple element of a BORROWED list).  Treat the
-             aggregate as a borrowed scrutinee so escaping fields get an EIncRC
-             and dead fields are NOT decremented — decrementing a field of a
-             borrowed-derived tuple corrupts the structure the caller reuses
-             (Toml table_get's discarded value / returned element). *)
-          || (match v.Tir.v_ty with
-              | Tir.TTuple _ | Tir.TRecord _ -> true
-              | _ -> false)
+          (* Tuples and records used to be forced "borrowed" here
+             unconditionally, on the premise that they were [needs_rc = false]
+             and Perceus never freed them.  That premise is gone: an aggregate
+             owns its fields and is dropped like a variant ([needs_rc_of]), so
+             a tuple scrutinee that is dead after the arm IS freed by
+             [add_scrutinee_free_for], and [Llvm_case] hands each field to the
+             arm as an OWNED reference (moved when the cell was unique, dup'd
+             when it was shared).  Treating those fields as borrowed made every
+             pattern variable that escaped take a SECOND reference nothing
+             released, and skipped the drop of a dead field — a leak per moved
+             field per call (specs/progress/2026-09-30-compiled-tuple-
+             destructure-leaks-moved-fields.md).  A tuple that is NOT consumed
+             here (live after the case, or still used in the arm) is already
+             covered by the two disjuncts above, so a borrowed-derived tuple
+             (an element of a borrowed list) keeps its borrowed fields. *)
         | _ -> false
       in
       let la = if scrutinee_borrowed then
