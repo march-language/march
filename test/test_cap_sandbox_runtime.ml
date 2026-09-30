@@ -217,7 +217,7 @@ int64_t sbx_probe_exec_inplace(void) {
    skip) on a nonzero compile exit or a nonzero run exit -- a crashing or
    killed process means the filter didn't return EPERM the way it's supposed
    to, which is itself a real finding, not a thing to silently swallow. *)
-let compile_and_run (src : string) : string =
+let compile_and_run ?(shim = shim_src) (src : string) : string =
   require_compiler ();
   let march_src = Filename.temp_file "sbx_runtime" ".march" in
   let oc = open_out march_src in
@@ -225,7 +225,7 @@ let compile_and_run (src : string) : string =
   close_out oc;
   let shim_c = Filename.temp_file "sbx_runtime_shim" ".c" in
   let oc = open_out shim_c in
-  output_string oc shim_src;
+  output_string oc shim;
   close_out oc;
   let bin = Filename.temp_file "sbx_runtime" ".bin" in
   let log = Filename.temp_file "sbx_runtime" ".log" in
@@ -832,12 +832,100 @@ let test_macos_scope_is_symlink () =
           (Sys.file_exists (d ^ "/real/f.txt")))
   end
 
+(* ── A thread started BEFORE the install is filtered after it ──────────
+   march_sandbox_install runs in spawn_main_impl, but threads can already
+   exist by then: @main starts the hot-reload server first
+   (llvm_toplevel.ml's hr_setup), and a linked C library's constructor can
+   start its own.  On Linux the filter was installed with
+   prctl(PR_SET_SECCOMP), which covers only the calling thread and its later
+   children, so such a thread ran unfiltered; it is now installed with
+   SECCOMP_FILTER_FLAG_TSYNC.  On macOS sandbox_init has always been
+   process-wide; its case pins that the same probe is denied there too.
+
+   The shim's constructor runs before main, so before the install: it starts
+   a thread that blocks on a pipe.  After the install, March releases it and
+   it runs sbx_probe_bind (socket() then bind() to loopback).  EPERM (1) is
+   the filtered answer on both backends: Linux denies socket() when IO.Network
+   is withheld, Seatbelt denies the bind().
+   specs/progress/2026-09-30-cap-sandbox-linux-reload-thread-unfiltered.md *)
+let early_thread_shim_src =
+  shim_src
+  ^ {|
+#include <pthread.h>
+
+static int sbx_early_pipe[2] = { -1, -1 };
+static pthread_t sbx_early_tid;
+static int64_t sbx_early_started = 0;
+static int64_t sbx_early_result = -1;
+
+static void *sbx_early_thread(void *arg) {
+    (void)arg;
+    char c;
+    ssize_t n;
+    do { n = read(sbx_early_pipe[0], &c, 1); } while (n < 0 && errno == EINTR);
+    sbx_early_result = sbx_probe_bind();
+    return NULL;
+}
+
+__attribute__((constructor)) static void sbx_start_early_thread(void) {
+    if (pipe(sbx_early_pipe) != 0) return;
+    if (pthread_create(&sbx_early_tid, NULL, sbx_early_thread, NULL) == 0)
+        sbx_early_started = 1;
+}
+
+/* 1 iff the thread was created by the constructor, i.e. before main and so
+   before march_sandbox_install. */
+int64_t sbx_early_thread_started(void) { return sbx_early_started; }
+
+/* Release the pre-existing thread, wait for it, return its probe's errno. */
+int64_t sbx_early_thread_probe(void) {
+    if (!sbx_early_started) return -1;
+    char c = 'x';
+    ssize_t n;
+    do { n = write(sbx_early_pipe[1], &c, 1); } while (n < 0 && errno == EINTR);
+    pthread_join(sbx_early_tid, NULL);
+    return sbx_early_result;
+}
+|}
+
+let early_thread_src =
+  {|
+mod SbxEarlyThread do
+  needs IO.Console
+  needs IO.Foreign
+
+  extern "raw" : Cap(IO.Foreign) do
+    fn early_started() : Int = "sbx_early_thread_started"
+    fn early_probe() : Int = "sbx_early_thread_probe"
+    fn probe_bind() : Int = "sbx_probe_bind"
+  end
+
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
+    println("started=" ++ int_to_string(early_started()))
+    println("main=" ++ int_to_string(probe_bind()))
+    println("early=" ++ int_to_string(early_probe()))
+  end
+end
+|}
+
+let test_early_thread_filtered () =
+  if not (is_linux || is_macos) then Alcotest.skip ()
+  else begin
+    let out = compile_and_run ~shim:early_thread_shim_src early_thread_src in
+    check_field "started" 1 out;
+    (* The calling thread is filtered (unchanged behaviour)... *)
+    check_field "main" 1 out;
+    (* ...and so is the thread that already existed at install time. *)
+    check_field "early" 1 out
+  end
+
 let tests : unit Alcotest.test_case list =
   [ Alcotest.test_case "linux: NET withheld denies socket, EXEC/WRITE still allowed" `Slow test_linux_deny_net;
     Alcotest.test_case "linux: PROCESS withheld denies execve, NET/WRITE still allowed" `Slow test_linux_deny_exec;
     Alcotest.test_case "linux: FILEWRITE withheld denies write-open, NET/EXEC still allowed" `Slow test_linux_deny_write;
     Alcotest.test_case "linux: NETLISTEN withheld (NetConnect held) denies bind/listen, connect still works" `Slow test_linux_deny_listen;
     Alcotest.test_case "linux: NETLISTEN held allows bind/listen" `Slow test_linux_hold_listen;
+    Alcotest.test_case "linux+macos: a thread started before the install is filtered after it" `Slow test_early_thread_filtered;
     Alcotest.test_case "macos: NET withheld denies socket, FORK/WRITE still allowed" `Slow test_macos_deny_net;
     Alcotest.test_case "macos: PROCESS withheld denies fork AND exec, NET/WRITE still allowed" `Slow test_macos_deny_process;
     Alcotest.test_case "macos: PROCESS held allows fork and exec" `Slow test_macos_hold_process;
