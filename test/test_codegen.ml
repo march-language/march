@@ -9362,7 +9362,12 @@ let test_native_int_arr_ir () =
   Alcotest.(check bool) "length call returns i64" true
     (ir_contains ir "= call i64 @native_int_arr_length");
   Alcotest.(check bool) "from_list call returns ptr" true
-    (ir_contains ir "= call ptr @native_int_arr_from_list")
+    (ir_contains ir "= call ptr @native_int_arr_from_list");
+  (* The length accessor is declared pure + speculatable so LLVM can hoist it
+     out of index loops (the SIMD load bounds check calls it per iteration).
+     Dropping the attributes silently un-hoists it; no result changes. *)
+  Alcotest.(check bool) "length declare is memory(none) speculatable" true
+    (ir_contains ir "@native_int_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)")
 
 (** native_float_arr_* builtins must appear in the LLVM preamble and generate
     correct call instructions: double return for get/sum, ptr for make/set/map. *)
