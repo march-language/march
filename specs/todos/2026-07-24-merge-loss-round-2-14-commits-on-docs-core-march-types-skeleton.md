@@ -51,7 +51,7 @@ not a line count.
 
 ### Why the safety nets missed all of this
 
-- [ ] **The differential oracle cannot see these crashes.**
+- [x] ~~**The differential oracle cannot see these crashes.**
   `bench/iolist_template.march` is `SKIPPED`; `string_pipeline` and
   `deque_ops` are `INTERP_TIMEOUT`. The sweep only compares programs where
   the tree-walking interpreter produced ground truth inside its 10s budget,
@@ -59,7 +59,16 @@ not a line count.
   exercise RC, FBIP and TCO — a compiled SIGBUS, hang, or wrong answer is
   invisible. The sweep reported **0 divergences** on the same day three bench
   programs were broken compiled. Give these an expected-stdout anchor and
-  compare the compiled run against it directly, with no interpreter leg.
+  compare the compiled run against it directly, with no interpreter leg.~~
+  **Done (stale).** `test/test_bench_gate.ml` now pins `iolist_template`
+  (`2092654`), `string_pipeline` (`644449`), `deque_ops` (`20001000000`) and
+  `tree_transform` as `Exact` expected-stdout anchors (the block headed "the
+  three that were silently broken", ~lines 111-113): the gate compiles each
+  bench, runs it and compares stdout directly, with no interpreter leg, and a
+  `test_manifest_is_exhaustive` check fails if any `bench/*.march` is in
+  neither bucket. Recorded in
+  `specs/progress/2026-09-29-merge-loss-oracle-bullet-stale.md`.
+
 - [ ] **`march --compile` should write its intermediate `.ll` next to the
   OUTPUT, not next to the source.** Writing beside the source pollutes the
   tree and makes compiling from a read-only directory impossible. Found by
