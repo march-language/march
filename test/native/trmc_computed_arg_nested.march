@@ -1,0 +1,65 @@
+-- TRMC gaps (specs/progress/2026-09-30-trmc-computed-arg-and-nested-fn-gaps.md):
+--   1. a COMPUTED call argument (`r(a + 1, b)`) nested its `let` inside the call's
+--      binding, hiding the modulo-cons site, so the function stayed a plain
+--      non-tail recursion;
+--   2. a NESTED `fn go` was analysed but never transformed.
+-- Each shape runs over 1,000,000 elements, which overflows the green-thread stack
+-- without the transform.  The two-branch shapes ALTERNATE (an all-true or
+-- all-false predicate is not a control).  Expected output is the interpreter's.
+mod TrmcComputedArgNested do
+  needs IO.Console
+
+  -- 1. computed argument, one modulo-cons arm
+  @[no_warn_recursion]
+  pfn ascending(a : Int, b : Int) : List(Int) do
+    if a >= b do Nil else Cons(a, ascending(a + 1, b)) end
+  end
+
+  -- 1b. computed argument AND a plain tail self-call (alternating arms)
+  @[no_warn_recursion]
+  pfn evens(a : Int, b : Int) : List(Int) do
+    if a >= b do Nil
+    else if a % 2 == 0 do Cons(a, evens(a + 1, b)) else evens(a + 1, b) end end
+  end
+
+  -- 1c. two computed arguments and a computed cons field
+  @[no_warn_recursion]
+  pfn doubled(a : Int, b : Int) : List(Int) do
+    if a >= b do Nil else Cons(a * 2, doubled(a + 1, b)) end
+  end
+
+  -- 2. nested natural-style helper
+  @[no_warn_recursion]
+  pfn squares(n : Int) : List(Int) do
+    fn go(i : Int) : List(Int) do
+      if i >= n do Nil else Cons(i * i % 1000, go(i + 1)) end
+    end
+    go(0)
+  end
+
+  -- 2b. nested helper, alternating arms, captures `k` from the enclosing fn
+  @[no_warn_recursion]
+  pfn multiples(n : Int, k : Int) : List(Int) do
+    fn go(i : Int) : List(Int) do
+      if i >= n do Nil
+      else if i % k == 0 do Cons(i, go(i + 1)) else go(i + 1) end end
+    end
+    go(0)
+  end
+
+  pfn sum(xs : List(Int)) : Int do List.fold_left(xs, 0, fn (a, b) -> a + b) end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 1000000
+    let a = ascending(0, n)
+    println("ascending " ++ int_to_string(List.length(a)) ++ " " ++ int_to_string(sum(a)))
+    let b = evens(0, n)
+    println("evens " ++ int_to_string(List.length(b)) ++ " " ++ int_to_string(sum(b)))
+    let c = doubled(0, n)
+    println("doubled " ++ int_to_string(List.length(c)) ++ " " ++ int_to_string(sum(c)))
+    let d = squares(n)
+    println("squares " ++ int_to_string(List.length(d)) ++ " " ++ int_to_string(sum(d)))
+    let e = multiples(n, 3)
+    println("multiples " ++ int_to_string(List.length(e)) ++ " " ++ int_to_string(sum(e)))
+  end
+end

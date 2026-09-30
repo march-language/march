@@ -79,6 +79,7 @@ let corpus = [
   "scrutinee_borrowed_conservatism", "scrutinee_borrowed_conservatism.march";
   "mutual_tco",                      "mutual_tco.march";
   "trmc_modulo_cons",                "trmc_modulo_cons.march";
+  "trmc_computed_arg_nested",        "trmc_computed_arg_nested.march";
   "fbip_dead_binding_reuse",         "fbip_dead_binding_reuse.march";
   "record_update",                   "record_update.march";
   "self_tco_loop",                   "self_tco_loop.march";
