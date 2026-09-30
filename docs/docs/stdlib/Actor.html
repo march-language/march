@@ -2889,7 +2889,7 @@ every consumer handles a dead one.
 
 Ordered by spawn sequence, so the list is deterministic rather than ordered
 by heap address.</code></pre></div></div>
-<div class="item" id="fn-over_mailbox"><div class="ih"><span class="badge bfn">fn</span><span class="name">over_mailbox</span><span class="sig">over_mailbox(c : Cap(Actor.Introspect), threshold : Int) : List((<a href="GlobalPid.html#type-Pid">Pid</a>, Int))</span><a class="anchor-link" href="#fn-over_mailbox" title="Link">#</a></div><div class="ib"><p>Every actor whose mailbox is deeper than <code>threshold</code>, as <code>(pid, depth)</code> pairs in spawn order — the growing-mailbox alarm, polled. An empty result is the healthy case, so a monitor can be <code>if Actor.over_mailbox(c, 500) != Nil</code>.</p><pre><code>    List.each(Actor.over_mailbox(c, 500), fn hot -&gt;
+<div class="item" id="fn-over_mailbox"><div class="ih"><span class="badge bfn">fn</span><span class="name">over_mailbox</span><span class="sig">over_mailbox(c : Cap(Actor.Introspect), threshold : Int) : List((<a href="GlobalPid.html#type-Pid">Pid</a>(a), Int))</span><a class="anchor-link" href="#fn-over_mailbox" title="Link">#</a></div><div class="ib"><p>Every actor whose mailbox is deeper than <code>threshold</code>, as <code>(pid, depth)</code> pairs in spawn order — the growing-mailbox alarm, polled. An empty result is the healthy case, so a monitor can be <code>if Actor.over_mailbox(c, 500) != Nil</code>.</p><pre><code>    List.each(Actor.over_mailbox(c, 500), fn hot -&gt;
       match hot do (p, d) -&gt; log_slow_actor(p, d) end)
 
 Same snapshot caveats as `top_by_mailbox`. A threshold below zero returns
@@ -2926,7 +2926,7 @@ discards the queue as soon as the in-flight message returns.
 Stopping a supervisor stops its children first, in REVERSE declaration
 order, each with its own `shutdown` budget from the `supervise` block's
 child spec (`Worker w shutdown 5000`), defaulting to 5 seconds.</code></pre></div></div>
-<div class="item" id="fn-top_by_mailbox"><div class="ih"><span class="badge bfn">fn</span><span class="name">top_by_mailbox</span><span class="sig">top_by_mailbox(c : Cap(Actor.Introspect), n : Int) : List((<a href="GlobalPid.html#type-Pid">Pid</a>, Int))</span><a class="anchor-link" href="#fn-top_by_mailbox" title="Link">#</a></div><div class="ib"><p>The <code>n</code> deepest mailboxes right now, deepest first, as <code>(pid, depth)</code> pairs. This is the &quot;which actor is behind?&quot; question a monitoring loop actually asks; <code>Scheduler</code> counters only answer &quot;is the system behind?&quot;.</p><pre><code>    match Actor.top_by_mailbox(c, 1) do
+<div class="item" id="fn-top_by_mailbox"><div class="ih"><span class="badge bfn">fn</span><span class="name">top_by_mailbox</span><span class="sig">top_by_mailbox(c : Cap(Actor.Introspect), n : Int) : List((<a href="GlobalPid.html#type-Pid">Pid</a>(a), Int))</span><a class="anchor-link" href="#fn-top_by_mailbox" title="Link">#</a></div><div class="ib"><p>The <code>n</code> deepest mailboxes right now, deepest first, as <code>(pid, depth)</code> pairs. This is the &quot;which actor is behind?&quot; question a monitoring loop actually asks; <code>Scheduler</code> counters only answer &quot;is the system behind?&quot;.</p><pre><code>    match Actor.top_by_mailbox(c, 1) do
       Cons((hot, depth), _) -&gt; shed_from(hot, depth)
       Nil                   -&gt; ()
     end
