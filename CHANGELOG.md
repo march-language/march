@@ -57,6 +57,12 @@ git log is authoritative for exact commits.
 - **A DataFrame column of nothing but nulls keeps its nulls.** CSV/JSON loading and
   `summarize` used to turn an all-null column into a plain string column of `""`, so the
   rows read back as empty strings; they now read back as `NullVal`.
+- **A program that calls `NodeQueue.start_local` itself now compiles under the
+  capability ceiling.** Stdlib `Socket` declared no `needs`, so the ceiling
+  rejected any such program with "module `Socket` uses `IO.NetConnect` but does
+  not declare `needs IO.NetConnect`", whatever the program granted. `Socket` now
+  declares `needs IO.NetConnect`. A program whose `main` is not granted
+  `IO.NetConnect` is still rejected.
 - **`[ffi.rust]` crates now work under the interpreter.** `forge run`,
   `forge interactive` and interpreted `forge test` used to fail at the first
   Rust extern with "symbol not found for interpreter FFI", and printed a
@@ -433,6 +439,12 @@ git log is authoritative for exact commits.
   silently skipped the check. It is now deferred until the whole module run and
   requires the importee's full declared set (fail-closed), so the same program
   is rejected in either declaration order.
+- **Tail-recursion-modulo-cons now covers a computed call argument and nested
+  helper functions.** `Cons(a, r(a + 1, b))` was compiled as a plain non-tail
+  recursion (stack overflow on long lists) although the same code with `a + 1`
+  bound on its own line was optimised; and a natural-style nested `fn go` was
+  reported as eligible but never rewritten. Both are now transformed, so a
+  1,000,000-element list built this way no longer overflows the stack.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
@@ -715,6 +727,10 @@ git log is authoritative for exact commits.
 - **`Array.from_list` (and `RRB.from_list`) is about 8x faster.** It now builds
   the vector in one pass instead of appending one element at a time: 100,000
   elements take 6.6 ms instead of 54 ms. The resulting vector is the same.
+- **NativeArray index loops no longer re-read the array length every iteration.** The
+  `native_*_arr_length` accessors are declared pure and speculatable in the emitted IR, so
+  LLVM hoists them (and the SIMD load/store bounds check that calls them) out of loops.
+  `bench/simd_kernels.march`'s `dot_simd` is about 12% faster; results are unchanged.
 - **`NativeArray.sort_*` is up to 7x faster on nearly-sorted input and 4-5x
   faster on input made of two sorted runs.** An array that is sorted apart from
   a few misplaced elements, or that rises and then falls, now takes a quick
