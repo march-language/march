@@ -424,6 +424,12 @@ git log is authoritative for exact commits.
   ran interpreted but a compiled program failed to link (`A.f` undefined),
   whenever `Outer` was itself nested in the entry module, or was a library
   (`MARCH_LIB_PATH`) or stdlib module.
+- **Capability Check 4 now fires for mutually importing sibling modules when the
+  importee is declared later.** With `mod A` doing `import B` and `mod B` doing
+  `import A`, the module checked first found no capabilities for the other and
+  silently skipped the check. It is now deferred until the whole module run and
+  requires the importee's full declared set (fail-closed), so the same program
+  is rejected in either declaration order.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**

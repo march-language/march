@@ -11327,6 +11327,52 @@ let test_check4_importee_declared_later () =
   Alcotest.(check bool) "importee declared AFTER, pure: clean"
     false (has_cap_needs_error (src ~importee_later:true pure))
 
+(* Check 4 for MUTUALLY importing siblings, importee declared later
+   (specs/progress/2026-09-29-check4-cyclic-import-importee-later.md).  In a
+   cycle one module is always checked first, so the sort edge cannot save the
+   importee-later order; the check is deferred until the whole module run and
+   is FAIL-CLOSED (the importee's whole set: the importer's bare references
+   never resolved, so the demand-driven subset is unknowable).
+
+   Rows: (importee declared before / after) x (impure / pure reference) x
+   (importer covers the cap or not).  The impure-uncovered rows are the REJECT
+   case: the same program errors in BOTH declaration orders.  A covering
+   [needs] is accepted in both.  The pure-reference row documents the
+   fail-closed asymmetry: importee-first keeps the demand-driven loosening,
+   importee-later requires the whole set. *)
+let test_check4_cyclic_import_importee_later () =
+  let beta = {|mod CapOrdProbeBeta do
+    needs IO.Console
+    import CapOrdProbeAlpha
+    fn capordprobebeta_pure(x : Int) : Int do x * 2 end
+    fn capordprobebeta_noisy(m : String) : Unit do print(m) end
+  end|} in
+  let alpha ?(needs = "") body = Printf.sprintf {|mod CapOrdProbeAlpha do
+    %s
+    import CapOrdProbeBeta
+    fn alpha_pure(x : Int) : Int do x + 1 end
+    %s
+  end|} needs body in
+  let src ~importee_later a =
+    if importee_later then Printf.sprintf "mod CapOrdRoot do\n  %s\n  %s\n  fn main() : Int do 0 end\nend" a beta
+    else Printf.sprintf "mod CapOrdRoot do\n  %s\n  %s\n  fn main() : Int do 0 end\nend" beta a in
+  let impure = alpha "fn alpha_uses(m : String) : Unit do capordprobebeta_noisy(m) end" in
+  let pure = alpha "fn alpha_uses(x : Int) : Int do capordprobebeta_pure(x) end" in
+  let covered = alpha ~needs:"needs IO.Console"
+      "fn alpha_uses(m : String) : Unit do capordprobebeta_noisy(m) end" in
+  Alcotest.(check bool) "importee BEFORE, impure: error"
+    true (has_cap_needs_error (src ~importee_later:false impure));
+  Alcotest.(check bool) "importee AFTER, impure: error (was silently skipped)"
+    true (has_cap_needs_error (src ~importee_later:true impure));
+  Alcotest.(check bool) "importee BEFORE, covered by needs: clean"
+    false (has_cap_needs_error (src ~importee_later:false covered));
+  Alcotest.(check bool) "importee AFTER, covered by needs: clean"
+    false (has_cap_needs_error (src ~importee_later:true covered));
+  Alcotest.(check bool) "importee BEFORE, pure reference: clean (demand-driven)"
+    false (has_cap_needs_error (src ~importee_later:false pure));
+  Alcotest.(check bool) "importee AFTER, pure reference: error (fail-closed, whole set)"
+    true (has_cap_needs_error (src ~importee_later:true pure))
+
 (* ── Closing the [record_fn_caps] coverage gap (2026-08-06) ──────────────
    Until this fix [record_fn_caps] recorded an own(...) entry for [DFn]s,
    actor handlers and [DExtern]s only.  Module-level [DLet] bodies, interface
@@ -17883,6 +17929,7 @@ let compiler_suites =
           Alcotest.test_case "the fallback does not fire for locals/params"          `Quick test_fallback_does_not_fire_for_locals;
           Alcotest.test_case "cyclic modules still enforce"                          `Quick test_cyclic_modules_still_enforce;
           Alcotest.test_case "Check 4 fires when the importee is declared later"   `Quick test_check4_importee_declared_later;
+          Alcotest.test_case "Check 4 fires for cyclic imports, importee later"   `Quick test_check4_cyclic_import_importee_later;
           Alcotest.test_case "a cap reached only via a module-level let propagates"  `Quick test_transitive_cap_via_module_let;
           Alcotest.test_case "a cap reached only via an interface default method"    `Quick test_transitive_cap_via_interface_default_method;
           Alcotest.test_case "an interface default does not capture a same-named fn" `Quick test_interface_default_does_not_capture_a_same_named_fn;
