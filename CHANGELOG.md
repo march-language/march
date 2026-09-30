@@ -709,6 +709,11 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **A small scalar aggregate built in the arms of an `if`/`match` no longer
+  allocates.** When every arm builds the same unboxed type (for example
+  `if c do P2(a, 1) else P2(1, a) end`), the join now holds the struct directly
+  instead of boxing it in each arm and freeing it at the merge. A loop of 50
+  million such constructions went from 1.61 s to 0.07 s (`bench/branch_aggregate.march`).
 - **`Array.from_list` (and `RRB.from_list`) is about 8x faster.** It now builds
   the vector in one pass instead of appending one element at a time: 100,000
   elements take 6.6 ms instead of 54 ms. The resulting vector is the same.
