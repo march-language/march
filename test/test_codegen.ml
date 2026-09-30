@@ -13877,6 +13877,8 @@ declare ptr  @march_string_to_float(ptr %s)
 ; List builtins
 declare ptr  @march_list_append(ptr %a, ptr %b)
 declare ptr  @march_list_concat(ptr %lists)
+declare ptr  @march_list_stable_sort_by(ptr %xs, ptr %le)
+declare ptr  @march_list_sort_by_int_key(ptr %xs, ptr %key)
 ; IOList builtins
 declare ptr  @march_iolist_hash_fnv1a(ptr %iol)
 ; Vault (key-value store) builtins

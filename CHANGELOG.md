@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`Array.sort_by`, `Array.sort_by_key`, `RRB.sort_by` and `RRB.sort_by_key`.**
+  Stable sorts for the persistent vectors: `sort_by` takes the same comparator
+  as `List.sort_by` (`fn (a, b) -> a <= b`), and `sort_by_key` takes a function
+  returning an `Int` key, which it calls once per element. Elements that compare
+  equal keep their order. Sorting 100,000 pairs takes about 50 ms with `sort_by`
+  and 23 ms with `sort_by_key`, against 250 ms for converting to a list, calling
+  `List.sort_by` and converting back. They work compiled, interpreted and on the
+  JavaScript target.
 - **`--target-cpu <cpu>` for compiled builds.** Passes `-march=<cpu>` (x86_64) or
   `-mcpu=<cpu>` (arm64) to the C compiler, e.g. `--target-cpu native` to use the host's
   full SIMD width. The default is unchanged (`-msse4.2` on x86_64) and the CPU is part of
@@ -695,6 +703,9 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **`Array.from_list` (and `RRB.from_list`) is about 8x faster.** It now builds
+  the vector in one pass instead of appending one element at a time: 100,000
+  elements take 6.6 ms instead of 54 ms. The resulting vector is the same.
 - **`NativeArray.sort_*` is up to 7x faster on nearly-sorted input and 4-5x
   faster on input made of two sorted runs.** An array that is sorted apart from
   a few misplaced elements, or that rises and then falls, now takes a quick

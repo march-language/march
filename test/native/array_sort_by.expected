@@ -1,0 +1,7 @@
+Array.sort_by: stable+ordered 66/66, equals List.sort_by 66/66, fingerprint 586702907
+Array.sort_by_key: stable+ordered 66/66, equals List.sort_by 66/66, fingerprint 586702907
+RRB.sort_by: stable+ordered 66/66, equals List.sort_by 66/66, fingerprint 586702907
+RRB.sort_by_key: stable+ordered 66/66, equals List.sort_by 66/66, fingerprint 586702907
+floats: -3.25 -1. 0. 2.5 2.5
+strings by length: fig pear kiwi plum apple
+strings descending: c c b a
