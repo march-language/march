@@ -58,6 +58,12 @@ git log is authoritative for exact commits.
   two mailbox helpers now return `List((Pid(a), Int))` (the parameterized `Pid`) and
   `NodeCall` names `RemoteCall.NoConnection` explicitly instead of the ambiguous bare
   constructor; seven hidden stdlib type errors are gone.
+- **Linux `--cap-sandbox` now filters threads that already exist when the
+  sandbox is installed.** The seccomp filter covered only the installing
+  thread and its later children, so the hot-reload server thread (started
+  before `main`) and any thread started by a C library constructor ran
+  unfiltered. The filter is now installed with `SECCOMP_FILTER_FLAG_TSYNC`, so
+  it covers the whole process, as the macOS sandbox already did.
 - **A program that calls `NodeQueue.start_local` itself now compiles under the
   capability ceiling.** Stdlib `Socket` declared no `needs`, so the ceiling
   rejected any such program with "module `Socket` uses `IO.NetConnect` but does
