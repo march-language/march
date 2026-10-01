@@ -555,12 +555,25 @@ static void test_hard_deadline_kills(void) {
     send(a, MSG_HOLD);                         /* held for ever: never advances */
     sleep_ms(20);
     uint32_t old_e = march_epoch_current();
+    /* The soft/hard gap is the window the "left alone" check must land in.
+     * It was 20/80: on a loaded macOS runner the yield loop below came back
+     * >80 ms after the activation, the hard proc had already killed the
+     * actor, and the check failed although the runtime was right (CI run
+     * 36512671315).  Nothing observable marks "the soft deadline passed"
+     * for a held actor, so the gap is widened instead: the check still runs
+     * after the soft deadline, now ~1 s before the hard one. */
+    enum { SOFT_MS = 20, HARD_MS = 1000 };
+    long t_act = now_ms();
     CHECK(activate_ex(SLOT_HARD, (void *)v2_dispatch, migrate_v1_v2, 0, NULL,
-                      20, 80) > 0, "activation with soft 20 ms, hard 80 ms");
-    sleep_ms(40);
-    CHECK(march_is_alive(a), "after the soft deadline a held actor is left alone");
+                      SOFT_MS, HARD_MS) > 0, "activation with soft 20 ms, hard 1000 ms");
+    sleep_ms(2 * SOFT_MS);
+    long waited = now_ms() - t_act;
+    int alive = march_is_alive(a);
+    printf("     checked %ld ms after the activation (soft %d, hard %d)\n",
+           waited, SOFT_MS, HARD_MS);
+    CHECK(alive, "after the soft deadline a held actor is left alone");
     CHECK(march_hcr_epoch_draining(old_e), "the old epoch is draining");
-    long end = now_ms() + 3000;
+    long end = now_ms() + HARD_MS + 5000;
     while (march_is_alive(a) && now_ms() < end) march_sched_yield();
     march_hcr_counters c1; march_hcr_counters_get(&c1);
     CHECK(!march_is_alive(a), "the hard deadline killed it");

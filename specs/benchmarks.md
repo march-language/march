@@ -502,6 +502,24 @@ If FBIP regresses (TIR shows `alloc` instead of `reuse`), check:
 
 ---
 
+## bench/branch_aggregate.march — unboxed aggregate built in a branch (50M)
+
+**Command:** `let p = if i % 2 == 0 do P2(i, 1) else P2(1, i) end`, fields read, 50,000,000 times
+**Expected output:** `1249999975000000`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| Unboxed small aggregates | `P2(Int, Int)` is an inline LLVM struct, never a heap cell |
+| Case/if join slot | `Llvm_case.predicted_unboxed_join` types the join slot as the struct |
+
+**What to watch:** a `march_alloc` in `go`'s IR means the join slot fell back to
+`ptr` and every construction is being boxed and freed again. Measured 2026-09-30,
+`--opt 2`: 1.61 s with the box (origin/main 771430bf3), 0.070 s without it
+(specs/progress/2026-09-30-unbox-aware-case-join-slot.md). Run it after any
+change to `lib/tir/llvm_case.ml`'s merges or to `Kind`'s unboxing rules.
+
+---
+
 ## bench/list_ops.march — HOF pipeline (range 1M → map → filter → fold)
 
 **Command:** `irange(1, 1_000_000) |> imap(*2) |> ifilter(%3=0) |> ifold(+, 0)`

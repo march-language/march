@@ -42,7 +42,8 @@ end
     name: (module_path
       (type_identifier))
     (impl_def
-      interface: (type_identifier)
+      interface: (module_path
+        (type_identifier))
       type: (type_constructor
         (type_constructor))
       (function_def

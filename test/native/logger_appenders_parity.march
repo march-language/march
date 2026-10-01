@@ -1,0 +1,122 @@
+-- Logger appenders, compiled vs interpreted.  Before 2026-09-28 the compiled
+-- runtime kept no appender registry: Logger.add_appender was a no-op,
+-- list_appenders() was always [], every log line took the no-appender stderr
+-- fallback, and an LAtom field printed as `null` there (interpreted: `:name`).
+-- The dune rule runs this BOTH ways against one stdout and one stderr golden.
+mod Main do
+  needs IO.Console
+
+  pfn level_name(l : Logger.Level) : String do
+    match l do
+      Logger.Debug -> "debug"
+      Logger.Info -> "info"
+      Logger.Warn -> "warn"
+      Logger.Error -> "error"
+    end
+  end
+
+  pfn show_value(v : Logger.LogValue) : String do
+    match v do
+      Logger.LStr(s) -> s
+      Logger.LInt(n) -> int_to_string(n)
+      Logger.LFloat(f) -> float_to_string(f)
+      Logger.LBool(b) -> bool_to_string(b)
+      Logger.LAtom(a) -> show(a)
+      Logger.LNull -> "null"
+    end
+  end
+
+  pfn show_fields(fs : List(Logger.LogField), acc : String) : String do
+    match fs do
+      Nil -> acc
+      Cons(Logger.LogField(k, v), rest) ->
+        show_fields(rest, acc ++ " " ++ k ++ "=" ++ show_value(v))
+    end
+  end
+
+  pfn show_entry(tag : String, e : Logger.LogEntry) : String do
+    tag ++ ": " ++ level_name(Logger.entry_level(e)) ++ " " ++ Logger.entry_message(e)
+      ++ " src=" ++ Logger.entry_source(e)
+      ++ " ts>0=" ++ bool_to_string(Logger.entry_ts_ms(e) > 0)
+      ++ show_fields(Logger.entry_fields(e), "")
+  end
+
+  pfn names() : String do
+    List.fold_left(Logger.list_appenders(), "", fn (acc, n) -> acc ++ "[" ++ n ++ "]")
+  end
+
+  -- Logs through a registered appender that prints nothing: the leak loop.
+  pfn quiet_loop(i : Int, n : Int) : Unit do
+    if i >= n do ()
+    else
+      Logger.info("quiet " ++ int_to_string(i))
+      quiet_loop(i + 1, n)
+    end
+  end
+
+  -- Register then remove.  The appender captures nothing: the runtime
+  -- releases a removed callback with a shallow march_decrc, which frees the
+  -- closure cell but cannot release what a capturing closure captured (it
+  -- does not know the closure's layout) -- the same limitation every
+  -- closure the C runtime stores has (e.g. delivery_failed_watch).
+  pfn churn_loop(i : Int, n : Int) : Unit do
+    if i >= n do ()
+    else
+      Logger.add_appender(Logger.Appender("churn", fn e -> do
+        let _ = show_entry("churn", e)
+        ()
+      end))
+      Logger.remove_appender("churn")
+      churn_loop(i + 1, n)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    println("appenders at start: " ++ names())
+    -- A capturing appender: the registry must keep its closure (and what
+    -- it captured) alive after this binding goes out of scope.
+    let prefix = "A"
+    Logger.add_appender(Logger.Appender("a", fn e -> println(show_entry(prefix, e))))
+    println("after add a: " ++ names())
+    Logger.info("hello")
+    Logger.log_in("Db", Logger.Error, "boom", [Logger.LogField("code", Logger.i(500)),
+                                               Logger.LogField("kind", Logger.LAtom(:timeout))])
+
+    Logger.add_appender(Logger.Appender("b", fn e -> println(show_entry("B", e))))
+    println("after add b: " ++ names())
+    Logger.warn("to both")
+
+    -- Same name replaces (and moves to the front), as the interpreter does.
+    Logger.add_appender(Logger.Appender("a", fn e -> println(show_entry("A2", e))))
+    println("after re-add a: " ++ names())
+    Logger.warn("replaced")
+
+    Logger.remove_appender("b")
+    println("after remove b: " ++ names())
+    Logger.remove_appender("nope")
+    Logger.info("only a2")
+
+    Logger.clear_appenders()
+    println("after clear: " ++ names())
+    -- No appenders: the stderr fallback line, with an atom field.
+    Logger.log_in("Db", Logger.Warn, "fallback", [Logger.LogField("state", Logger.LAtom(:closed)),
+                                                  Logger.LogField("n", Logger.i(3))])
+
+    -- Ownership: register/remove and dispatch must not grow the heap.
+    churn_loop(0, 3)
+    let b1 = live_allocs()
+    churn_loop(0, 50)
+    println("register/remove leaked nothing: " ++ bool_to_string(live_allocs() - b1 == 0))
+    let q = "Q"
+    Logger.add_appender(Logger.Appender("quiet", fn e -> do
+      let _ = show_entry(q, e)
+      ()
+    end))
+    quiet_loop(0, 3)
+    let b2 = live_allocs()
+    quiet_loop(0, 50)
+    println("dispatch leaked nothing: " ++ bool_to_string(live_allocs() - b2 == 0))
+    Logger.clear_appenders()
+    println("done")
+  end
+end

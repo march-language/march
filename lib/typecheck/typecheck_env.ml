@@ -267,6 +267,14 @@ type env = {
       [import_index] for why [record_use] must not scan [import_tracker]
       directly.  Shared (mutable) across all env copies derived from the
       same root, same as [import_tracker]. *)
+  deferred_check4 : (string * string list * string * Ast.span) list ref;
+  (** Check-4 imports whose target sibling had not been analysed when the
+      importer was checked (mutually importing modules: one is always first).
+      Each row is (importer name, importer's declared [needs], imported path
+      as written, import span).  [check_module_needs] queues them and
+      [Typecheck_caps.check_deferred_imports] resolves them against the final
+      [module_caps] once the whole module run is done.  Shared (mutable)
+      across all env copies, same as [import_tracker]. *)
   local_fns : unit StrMap.t;
   (** Function names DEFINED by the module currently being checked (set from
       the pass-1 / DMod forward-reference prebind).  A bulk import
@@ -686,6 +694,7 @@ let make_env errors type_map = {
   mod_needs = []; mod_need_scopes = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
   import_idx = make_import_index ();
+  deferred_check4 = ref [];
   local_fns = StrMap.empty;
   fn_arities = StrMap.empty;
   qual_fn_names = StrMap.empty;
@@ -1236,6 +1245,112 @@ let add_ctor (key : string) (ci : ctor_info) (ctors : ctor_info list StrMap.t) =
      | first :: _ when same first -> ctors   (* already at the front *)
      | _ -> StrMap.add key (ci :: List.filter (fun c -> not (same c)) lst) ctors)
   else StrMap.add key (ci :: lst) ctors
+
+(* ── Parent-type index over [env.ctors] ────────────────────────────────
+   Two questions are asked of the WHOLE constructor table per match and per
+   type mention: "which bare-keyed constructors belong to type T"
+   ([Typecheck_exhaustive.ctors_for_type]) and "is N a variant type"
+   ([Typecheck_unify.name_is_variant], asked by [contains_linear] and record
+   expansion).  Each used to be a full scan.  The table grows with every
+   `@[endpoints]` protocol (a `<P>_Msg` type, role modules, their qualified
+   aliases), and so does the number of matches that ask, so `--check` of one
+   module with six protocols took ~8 minutes
+   (specs/progress/2026-09-28-endpoints-frontend-superlinear-in-protocol-count.md).
+
+   [env.ctors] is an immutable map, so its physical identity names its
+   contents: an index built for one map value is valid for exactly that value.
+   While declarations are still being registered the map changes between
+   queries, and building an index per change would cost more than the scan it
+   replaces, so a map is scanned directly until it has been asked about
+   [ctor_index_build_after] times, and indexed from then on. *)
+type ctor_type_index = {
+  cti_src : ctor_info list StrMap.t;
+  cti_bare_by_type : (string, (string * ctor_info) list) Hashtbl.t;
+      (** ci_type -> [(bare key, first ci of that type under it)], in
+          DESCENDING key order: the order [StrMap.fold] with a cons builds. *)
+  cti_variant_names : (string, unit) Hashtbl.t;
+      (** Every [ci_type] under any key, plus every suffix of it after a '.'. *)
+}
+
+let ctor_index_build_after = 3
+let ctor_index_cache : ctor_type_index list ref = ref []
+let ctor_index_cache_cap = 8
+let ctor_index_pending : (ctor_info list StrMap.t * int) ref =
+  ref (StrMap.empty, 0)
+
+let build_ctor_type_index (ctors : ctor_info list StrMap.t) : ctor_type_index =
+  let by_type = Hashtbl.create 1024 and names = Hashtbl.create 1024 in
+  StrMap.iter (fun k cis ->
+      List.iter (fun (ci : ctor_info) ->
+          let t = ci.ci_type in
+          Hashtbl.replace names t ();
+          String.iteri (fun i c ->
+              if c = '.' then
+                Hashtbl.replace names
+                  (String.sub t (i + 1) (String.length t - i - 1)) ()) t)
+        cis;
+      if not (String.contains k '.') then begin
+        (* One entry per distinct parent type under this key, carrying the
+           FIRST info of that type — what [List.find_opt] on [cis] returns. *)
+        let seen = ref [] in
+        List.iter (fun (ci : ctor_info) ->
+            if not (List.mem ci.ci_type !seen) then begin
+              seen := ci.ci_type :: !seen;
+              let prev =
+                Option.value ~default:[] (Hashtbl.find_opt by_type ci.ci_type) in
+              Hashtbl.replace by_type ci.ci_type ((k, ci) :: prev)
+            end) cis
+      end) ctors;
+  { cti_src = ctors; cti_bare_by_type = by_type; cti_variant_names = names }
+
+(** The index for [ctors], or [None] while [ctors] is still too new to be
+    worth indexing (the caller scans instead). *)
+let ctor_type_index (ctors : ctor_info list StrMap.t) : ctor_type_index option =
+  match List.find_opt (fun i -> i.cti_src == ctors) !ctor_index_cache with
+  | Some _ as hit -> hit
+  | None ->
+    let src, n = !ctor_index_pending in
+    let n = if src == ctors then n + 1 else 1 in
+    if n < ctor_index_build_after then begin
+      ctor_index_pending := (ctors, n); None
+    end else begin
+      ctor_index_pending := (StrMap.empty, 0);
+      let idx = build_ctor_type_index ctors in
+      ctor_index_cache :=
+        idx :: List.filteri (fun i _ -> i < ctor_index_cache_cap - 1) !ctor_index_cache;
+      Some idx
+    end
+
+(** Bare-keyed constructors whose parent type is exactly [type_name], each
+    with the first info of that type under its key, in descending key order. *)
+let bare_ctors_of_type (ctors : ctor_info list StrMap.t) (type_name : string)
+    : (string * ctor_info) list =
+  match ctor_type_index ctors with
+  | Some idx ->
+    Option.value ~default:[] (Hashtbl.find_opt idx.cti_bare_by_type type_name)
+  | None ->
+    StrMap.fold (fun k cis acc ->
+        if String.contains k '.' then acc
+        else
+          match List.find_opt (fun (ci : ctor_info) -> ci.ci_type = type_name) cis with
+          | Some ci -> (k, ci) :: acc
+          | None -> acc
+      ) ctors []
+
+(** True when some constructor's parent type is [name], or ends in
+    ["." ^ name]. *)
+let ctors_name_a_variant (ctors : ctor_info list StrMap.t) (name : string) : bool =
+  match ctor_type_index ctors with
+  | Some idx -> Hashtbl.mem idx.cti_variant_names name
+  | None ->
+    let matches ci_type =
+      ci_type = name ||
+      (let n = String.length name and l = String.length ci_type in
+       l > n && ci_type.[l - n - 1] = '.' && String.sub ci_type (l - n) n = name)
+    in
+    StrMap.exists
+      (fun _ cis -> List.exists (fun (ci : ctor_info) -> matches ci.ci_type) cis)
+      ctors
 
 (* ── Qualified module resolution ─────────────────────────────────────
    When a qualified name like "Map.get" isn't in the local env, we load

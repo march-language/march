@@ -3599,8 +3599,11 @@ let base_env : env =
            with Unix.Unix_error (err, _, _) ->
              VCon ("Err", [VString (Unix.error_message err)]))
         | _ -> eval_error "process_spawn_sync: expected (String, List(String))"))
-  (* Run a command and return its stdout as a Seq(String) of lines.
-     Returns Ok(Seq) on success or Err(msg) on OS error. *)
+  (* Run a command and return its whole stdout as one String.
+     Returns Ok(stdout) on success or Err(msg) on OS error.  Both backends
+     agree on this raw shape (the compiled runtime returns the same String);
+     [Process.run_stream] splits it into a Seq(String) in March, so the Seq
+     type lives in the stdlib and not in a builtin's payload. *)
   ; ("process_spawn_lines", VBuiltin ("process_spawn_lines", function
         | [VString cmd; lst] ->
           let rec args_of_list = function
@@ -3614,19 +3617,9 @@ let base_env : env =
           (try
              let (ic, oc) = Unix.open_process_args cmd args_arr in
              close_out_noerr oc;
-             let lines = ref [] in
-             (try while true do lines := input_line ic :: !lines done
-              with End_of_file -> ());
+             let out = In_channel.input_all ic in
              let _ = Unix.close_process (ic, oc) in
-             let ordered = List.rev !lines in
-             let fold_fn = VBuiltin ("process_stream_fold", fun args ->
-               match args with
-               | [acc; f] ->
-                 List.fold_left (fun a line ->
-                   !apply_hook f [a; VString line]) acc ordered
-               | _ -> eval_error "process_stream_fold: expected (acc, fn)")
-             in
-             VCon ("Ok", [VCon ("Seq", [fold_fn])])
+             VCon ("Ok", [VString out])
            with Unix.Unix_error (err, _, _) ->
              VCon ("Err", [VString (Unix.error_message err)]))
         | _ -> eval_error "process_spawn_lines: expected (String, List(String))"))
@@ -3644,9 +3637,14 @@ let base_env : env =
           let args_strs = args_of_list lst in
           let args_arr  = Array.of_list (cmd :: args_strs) in
           (try
-            let (stdin_r,  stdin_w)  = Unix.pipe () in
-            let (stdout_r, stdout_w) = Unix.pipe () in
-            let (stderr_r, stderr_w) = Unix.pipe () in
+            (* close-on-exec: without it every child inherits every
+               other live child's pipe ends (its own stdin write end
+               included), so a child reading stdin never sees EOF and
+               wait_proc hangs. create_process dups the child's own three
+               onto 0/1/2, which clears the flag on those. *)
+            let (stdin_r,  stdin_w)  = Unix.pipe ~cloexec:true () in
+            let (stdout_r, stdout_w) = Unix.pipe ~cloexec:true () in
+            let (stderr_r, stderr_w) = Unix.pipe ~cloexec:true () in
             let pid = Unix.create_process cmd args_arr stdin_r stdout_w stderr_w in
             Unix.close stdin_r;
             Unix.close stdout_w;
@@ -3822,7 +3820,7 @@ let base_env : env =
   (* ── Logger v2 appender registry + dispatch ─────────────────────────
      Appenders are March callbacks of type `LogEntry -> Unit`.  We
      store them as opaque `value`s and invoke them via apply_hook.
-     Multiple appenders fire in registration order. *)
+     Multiple appenders fire newest registration first. *)
   ; ("logger_register_appender", VBuiltin ("logger_register_appender", function
         | [VString name; cb] ->
           (* Replace any existing entry with the same name (idempotent). *)
@@ -3853,28 +3851,16 @@ let base_env : env =
      remains useful out of the box. *)
   ; ("logger_dispatch", VBuiltin ("logger_dispatch", function
         | [VString level_s; VString msg; VString source; fields_list] ->
-          (* Map the all-caps level string back to the March Level
-             constructor: "DEBUG" -> Debug, "INFO" -> Info, etc.
-             Anything unrecognised becomes Info to keep formatters
-             happy (level filtering already happened upstream). *)
-          let level_to_march s =
-            let ctor = match s with
-              | "DEBUG" -> "Debug"
-              | "INFO"  -> "Info"
-              | "WARN"  -> "Warn"
-              | "ERROR" -> "Error"
-              | _       -> "Info"
-            in
-            VCon (ctor, [])
-          in
+          (* What an appender callback receives: Logger.AppenderCall, the
+             entry with its level still the all-caps string.
+             stdlib/logger.march's add_appender wraps the user's callback in
+             `deliver`, which builds the LogEntry (the compiled runtime
+             passes the same value; it cannot build a Level itself). *)
           let now_ms = int_of_float (Unix.gettimeofday () *. 1000.0) in
           let entry =
-            VCon ("LogEntry",
-                  [level_to_march level_s;
-                   VString msg;
-                   VInt now_ms;
-                   VString source;
-                   fields_list])
+            VCon ("AppenderCall",
+                  [VString level_s; VString msg; VInt now_ms;
+                   VString source; fields_list])
           in
           if !logger_appenders = [] then begin
             (* v1 fallback: render fields as "k=v" pairs. *)
@@ -4441,6 +4427,47 @@ let base_env : env =
           done;
           VFloat !s
         | _ -> eval_error "native_int_arr_sumsq_dev: expected (NativeIntArr, Float)"))
+  (* Stable sorts behind Array.sort_by / RRB.Vec.sort_by / sort_by_key. The
+     compiled builtins (runtime/march_runtime.c march_list_stable_sort_by /
+     march_list_sort_by_int_key) use a different stable algorithm; for a `<=`-style
+     comparator every stable sort gives the same result, which is the parity
+     the fixture test/native/array_sort_by.march checks. OCaml's stable_sort
+     takes the left element when the comparison is <= 0, so `le a b` maps to
+     -1 and its negation to 1: the same "take left iff le(left, right)" rule
+     as the C merge. *)
+  ; ("list_stable_sort_by", VBuiltin ("list_stable_sort_by", function
+        | [lst; le] ->
+          let rec to_ocaml = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [h; t]) -> h :: to_ocaml t
+            | v -> eval_error "list_stable_sort_by: expected a list, got %s" (value_to_string v)
+          in
+          let cmp a b =
+            match !apply_hook le [a; b] with
+            | VBool true -> -1
+            | VBool false -> 1
+            | v -> eval_error "list_stable_sort_by: comparator returned non-Bool: %s"
+                     (value_to_string v)
+          in
+          List.fold_right (fun x acc -> VCon ("Cons", [x; acc]))
+            (List.stable_sort cmp (to_ocaml lst)) (VCon ("Nil", []))
+        | _ -> eval_error "list_stable_sort_by: expected (List, fn)"))
+  ; ("list_sort_by_int_key", VBuiltin ("list_sort_by_int_key", function
+        | [lst; key] ->
+          let rec to_ocaml = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [h; t]) -> h :: to_ocaml t
+            | v -> eval_error "list_sort_by_int_key: expected a list, got %s" (value_to_string v)
+          in
+          let keyed = List.map (fun x ->
+              match !apply_hook key [x] with
+              | VInt k -> (k, x)
+              | v -> eval_error "list_sort_by_int_key: key returned non-Int: %s"
+                       (value_to_string v)) (to_ocaml lst) in
+          List.fold_right (fun (_, x) acc -> VCon ("Cons", [x; acc]))
+            (List.stable_sort (fun (a, _) (b, _) -> compare a b) keyed)
+            (VCon ("Nil", []))
+        | _ -> eval_error "list_sort_by_int_key: expected (List, fn)"))
   ; ("native_int_arr_map", VBuiltin ("native_int_arr_map", function
         | [VNativeIntArr a; f] ->
           let n = Array.length a in

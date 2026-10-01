@@ -1,0 +1,130 @@
+-- Leak guard: the Process builtins only READ their heap arguments, so a
+-- spawn/read/write/wait cycle must leave live_allocs() where it found it.
+--
+-- Every march_process_* C function copies its Strings and args list into
+-- scratch buffers, and read_line / write / kill_proc / wait_proc only load
+-- the LiveProcess's pid and slot words. borrow.ml nonetheless listed the
+-- family in extern_owned_builtins, so each call handed over a reference that
+-- nothing released: spawn_async leaked its args list (the Cons cell and the
+-- String in it), and read_line consumed a reference to the LiveProcess that
+-- the caller had inc'd for it, so the cell spawn_async returns was never
+-- freed. Measured before the fix, --compile --opt 2: 4 objects per
+-- spawn/read/wait cycle, 3 per spawn/write/kill/wait cycle, 3 per `run`
+-- and 2 per set_env + env pair.
+-- specs/progress/2026-09-29-process-spawn-async-leaks-live-process.md
+--
+-- SIGNAL: live_allocs() deltas, printed as booleans against a bound well
+-- below one object per iteration, so the golden is deterministic. Each
+-- leg's result is printed so the optimizer cannot delete the loop.
+mod Main do
+  needs IO.Console
+  needs IO.Process
+  needs IO.Spawn
+
+  pfn echo_once(k : Int) : Bool do
+    match Process.spawn_async("echo", ["n" ++ int_to_string(k)]) do
+      Ok(p) ->
+        let line = Process.read_line(p)
+        let _ = Process.wait_proc(p)
+        match line do
+          Some(s) -> s == "n" ++ int_to_string(k)
+          None -> false
+        end
+      Err(_) -> false
+    end
+  end
+
+  pfn leg_read(i : Int, n : Int, ok : Int) : Int do
+    if i == n do ok
+    else leg_read(i + 1, n, if echo_once(i) do ok + 1 else ok end) end
+  end
+
+  pfn cat_once(k : Int) : Bool do
+    match Process.spawn_async("cat", []) do
+      Ok(p) ->
+        Process.write(p, "x" ++ int_to_string(k) ++ "\n")
+        Process.kill(p)
+        let _ = Process.wait_proc(p)
+        true
+      Err(_) -> false
+    end
+  end
+
+  pfn leg_write(i : Int, n : Int, ok : Int) : Int do
+    if i == n do ok
+    else leg_write(i + 1, n, if cat_once(i) do ok + 1 else ok end) end
+  end
+
+  pfn leg_run(i : Int, n : Int, ok : Int) : Int do
+    if i == n do ok
+    else
+      let hit = match Process.run("true", ["a" ++ int_to_string(i)]) do
+        Ok(_) -> 1
+        Err(_) -> 0
+      end
+      leg_run(i + 1, n, ok + hit)
+    end
+  end
+
+  -- process_spawn_lines: the raw builtin behind Process.run_stream hands back
+  -- the captured stdout String.  Each call used to leak the outer Ok, the
+  -- ProcessResult cell and the stderr String (3 objects), and returned an Ok
+  -- that aliased a String it did not own.  The builtin is called directly on
+  -- purpose: Process.run_stream also builds a Seq, and Seq itself leaks
+  -- (specs/todos/2026-09-30-seq-constructors-leak-their-closure.md), which
+  -- would mask this leg.
+  pfn leg_lines(i : Int, n : Int, ok : Int) : Int do
+    if i == n do ok
+    else
+      let hit = match process_spawn_lines("echo", ["l" ++ int_to_string(i)]) do
+        Ok(out) -> if out == "l" ++ int_to_string(i) ++ "\n" do 1 else 0 end
+        Err(_) -> 0
+      end
+      leg_lines(i + 1, n, ok + hit)
+    end
+  end
+
+  pfn leg_env(i : Int, n : Int, ok : Int) : Int do
+    if i == n do ok
+    else
+      let key = "MARCH_PROC_LEAK_PROBE_" ++ int_to_string(i % 4)
+      Process.set_env(key, "v" ++ int_to_string(i))
+      let hit = match Process.env(key) do
+        Some(_) -> 1
+        None -> 0
+      end
+      leg_env(i + 1, n, ok + hit)
+    end
+  end
+
+  pfn flat(label : String, before : Int, result : Int, n : Int) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ int_to_string(result) ++ ", flat: "
+            ++ bool_to_string(grew < n / 4))
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process), _s : Cap(IO.Spawn)) do
+    let n = 40
+    leg_read(0, 3, 0)
+    let a = live_allocs()
+    let r_a = leg_read(0, n, 0)
+    flat("spawn_async + read_line + wait_proc", a, r_a, n)
+    leg_write(0, 3, 0)
+    let b = live_allocs()
+    let r_b = leg_write(0, n, 0)
+    flat("spawn_async + write + kill + wait_proc", b, r_b, n)
+    leg_run(0, 3, 0)
+    let c = live_allocs()
+    let r_c = leg_run(0, n, 0)
+    flat("run", c, r_c, n)
+    leg_lines(0, 3, 0)
+    let e = live_allocs()
+    let r_e = leg_lines(0, n, 0)
+    flat("process_spawn_lines", e, r_e, n)
+    let m = 400
+    leg_env(0, 3, 0)
+    let d = live_allocs()
+    let r_d = leg_env(0, m, 0)
+    flat("set_env + env", d, r_d, m)
+  end
+end

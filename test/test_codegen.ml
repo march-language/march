@@ -482,6 +482,61 @@ let unboxed_branch_join_src = {|mod UBJoin do
   end
 end|}
 
+(* The fallback shape: one arm builds the aggregate, the other returns a
+   variable holding one.  [Llvm_case.predicted_unboxed_join] only trusts an
+   [EAlloc] tail, so this join keeps the `ptr` slot, boxes in both arms, and
+   [finish_ptr_merge] must still release the box. *)
+let unboxed_mixed_join_src = {|mod UBMixed do
+  needs IO.Console
+  type P2 = P2(Float, Float)
+  fn psum(p : P2) : Float do
+    match p do
+      P2(a, c) -> a +. c
+    end
+  end
+  pfn spin(i : Int, acc : Float) : Float do
+    if i == 0 do acc
+    else
+      let q = P2(3.0, 4.0)
+      let p = if i % 2 == 0 do P2(1.0, 2.0) else q end
+      spin(i - 1, acc +. psum(p))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(float_to_string(spin(10, 0.0)))
+  end
+end|}
+
+(* Three-arm match and a nested `else if` chain: every arm that reaches the
+   join is an [EAlloc] of the same unboxed type (the nested case included), so
+   both joins are struct-typed and nothing in the loop allocates. *)
+let unboxed_multi_join_src = {|mod UBMulti do
+  needs IO.Console
+  type P3 = P3(Int, Float, Bool)
+  fn pval(p : P3) : Int do
+    match p do
+      P3(a, _, c) -> if c do a else 0 - a end
+    end
+  end
+  pfn spin(i : Int, acc : Int) : Int do
+    if i == 0 do acc
+    else
+      let p = match i % 3 do
+        0 -> P3(i, 1.0, true)
+        1 -> P3(1, 2.0, false)
+        _ -> P3(2, 3.0, true)
+      end
+      let q = if i % 5 == 0 do P3(5, 0.5, true)
+              else if i % 5 == 1 do P3(6, 0.5, false)
+              else P3(7, 0.5, true) end end
+      spin(i - 1, acc + pval(p) + pval(q))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(int_to_string(spin(10, 0)))
+  end
+end|}
+
 (* The body of `define ... @name(`, up to the closing brace in column 0. *)
 let ir_define ir name =
   let re = Str.regexp (Printf.sprintf "define [^\n]*@%s(" (Str.quote name)) in
@@ -512,7 +567,7 @@ let unboxed_merge_loads fn_ir =
   go 0 []
 
 let test_unboxed_aggregate_branch_join_box_released () =
-  let ir = emit_tco_opt_ir unboxed_branch_join_src in
+  let ir = emit_tco_opt_ir unboxed_mixed_join_src in
   let fn_ir = ir_define ir "spin" in
   Alcotest.(check bool) "the loop function is present in the IR" true (fn_ir <> "");
   (* The join really does box — otherwise the release assertion below is
@@ -528,6 +583,31 @@ let test_unboxed_aggregate_branch_join_box_released () =
             nobody downstream owns it" v)
         true released)
     merges
+
+(* When every arm BUILDS the aggregate, the join slot is typed as the struct:
+   no arm boxes, so the per-construction march_alloc + free the merge used to
+   pay is gone (specs/progress/2026-09-30-unbox-aware-case-join-slot.md).
+   Pre-change this function emitted `alloca ptr` for the join and two
+   `march_alloc(i64 32)` boxes. *)
+let test_unboxed_aggregate_branch_join_slot_is_struct () =
+  let ir = emit_tco_opt_ir unboxed_branch_join_src in
+  let fn_ir = ir_define ir "spin" in
+  Alcotest.(check bool) "the loop function is present in the IR" true (fn_ir <> "");
+  Alcotest.(check bool) "the join slot is typed as the struct" true
+    (ir_contains fn_ir "= alloca %ub.P2");
+  Alcotest.(check int) "no arm boxes the aggregate" 0
+    (ir_count fn_ir "call ptr @march_alloc(");
+  Alcotest.(check (list (pair string bool))) "no merge unboxes a box" []
+    (unboxed_merge_loads fn_ir)
+
+let test_unboxed_aggregate_multi_arm_joins_are_struct () =
+  let ir = emit_tco_opt_ir unboxed_multi_join_src in
+  let fn_ir = ir_define ir "spin" in
+  Alcotest.(check bool) "the loop function is present in the IR" true (fn_ir <> "");
+  Alcotest.(check bool) "the joins are typed as the struct" true
+    (ir_count fn_ir "= alloca %ub.P3" >= 2);
+  Alcotest.(check int) "no arm of the 3-arm match or the else-if chain boxes" 0
+    (ir_count fn_ir "call ptr @march_alloc(")
 
 (* ── FnFused coverage: flag-vs-reality cross-check (Wave 3 Chunk 2 Task 1) ──
    fusion.ml's three synthesis sites (gen_map_fold / gen_filter_fold /
@@ -1615,6 +1695,34 @@ let test_phase4_nonrecursive_caller_has_check () =
   (* apply_double calls double (non-builtin) → non-leaf → check emitted. *)
   Alcotest.(check bool) "apply_double: preemption check present" true
     (ir_contains ir "load volatile i64, ptr @march_preempt_request")
+
+(* A `send` whose message var is linear used to lower to
+   `@march_send_linear`, defined only by the unit-test-only arena runtime
+   (march_message.c), which the driver never links: a program reaching that
+   arm failed at link time.  No surface program is known to reach it (a
+   `linear let m` or a `linear m` parameter both lower to a non-linear atom
+   by emission), so the arm is exercised on hand-built TIR.  It now lowers
+   like any send (specs/progress/2026-09-28-send-linear-declared-but-never-linked.md). *)
+let test_llvm_linear_send_lowers_to_march_send () =
+  let open March_tir.Tir in
+  let unit_ptr = TPtr TUnit in
+  let p = { v_name = "p"; v_ty = unit_ptr; v_lin = Unr } in
+  let m = { v_name = "m"; v_ty = unit_ptr; v_lin = Lin } in
+  let send_var = { v_name = "send";
+                   v_ty = TFn ([unit_ptr; unit_ptr], TCon ("Option", [TUnit]));
+                   v_lin = Unr } in
+  let fd = { fn_name = "post"; fn_params = [p; m];
+             fn_ret_ty = TCon ("Option", [TUnit]);
+             fn_body = EApp (send_var, [AVar p; AVar m]);
+             fn_kind = FnNormal } in
+  let ir = March_tir.Llvm_emit.emit_module (mk_module [fd]) in
+  Alcotest.(check bool) "linear send calls @march_send" true
+    (ir_contains ir "call ptr @march_send(");
+  Alcotest.(check bool) "no @march_send_linear anywhere" false
+    (ir_contains ir "march_send_linear");
+  List.iter (fun sym ->
+      Alcotest.(check bool) (sym ^ " is not declared") false (ir_contains ir sym))
+    [ "@march_msg_copy"; "@march_msg_move"; "@march_process_alloc" ]
 
 let test_llvm_no_call_to_double_underscore () =
   let src = {|mod Test do
@@ -9334,7 +9442,12 @@ let test_native_int_arr_ir () =
   Alcotest.(check bool) "length call returns i64" true
     (ir_contains ir "= call i64 @native_int_arr_length");
   Alcotest.(check bool) "from_list call returns ptr" true
-    (ir_contains ir "= call ptr @native_int_arr_from_list")
+    (ir_contains ir "= call ptr @native_int_arr_from_list");
+  (* The length accessor is declared pure + speculatable so LLVM can hoist it
+     out of index loops (the SIMD load bounds check calls it per iteration).
+     Dropping the attributes silently un-hoists it; no result changes. *)
+  Alcotest.(check bool) "length declare is memory(none) speculatable" true
+    (ir_contains ir "@native_int_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)")
 
 (** native_float_arr_* builtins must appear in the LLVM preamble and generate
     correct call instructions: double return for get/sum, ptr for make/set/map. *)
@@ -10464,6 +10577,147 @@ let test_nested_module_parent_call_entry_compiled () =
 (* The same two programs, INTERPRETED.  stderr is folded into the compared
    output so the pre-fix "stub later called before initialisation" death
    shows up in the diff instead of as a bare truncated stdout. *)
+(* ── A nested module's QUALIFIED call to a SIBLING submodule ─────────────
+   specs/progress/2026-09-28-nested-module-sibling-call.md.  Inside
+   `mod Outer do mod A ... end mod B do fn g() do A.f() end end end` the call
+   `A.f` typechecked and interpreted, but the lowering left it spelled `A.f`
+   (no module of that name exists) where the fn is `Outer.A.f`, so the
+   compiled program failed to LINK.  An entry-file module escaped it only at
+   its own top level (unprefixed); one more level of nesting, or any
+   MARCH_LIB_PATH / stdlib module, hit it -- as does an `@[endpoints]`
+   protocol declared inside one, whose role modules call their siblings
+   `P_Msg` / `P_Run` (found compiling dd step 12a's Ctl inside the stdlib).
+
+   Covers: a sibling call (B -> A), a call two levels down (Outer.h ->
+   B.C.k), a deeper module reaching an uncle (C -> A), and a module-level
+   `let` of a sibling. *)
+let nested_sibling_outer_src = {|mod Outer do
+  mod A do
+    fn f(x : Int) : Int do x + 1 end
+    let base = 100
+  end
+
+  mod B do
+    fn g(x : Int) : Int do A.f(x) * 2 end
+
+    mod C do
+      fn k(x : Int) : Int do A.f(x) + A.base end
+    end
+  end
+
+  fn h(x : Int) : Int do B.g(x) + B.C.k(0) end
+end
+|}
+
+(* h(3) = g(3) + k(0) = (3+1)*2 + (0+1+100) = 8 + 101 = 109;
+   B.g(10) = 22; B.C.k(5) = 106. *)
+let nested_sibling_main_body = {|    println(int_to_string(Outer.h(3)))
+    println(int_to_string(Outer.B.g(10)))
+    println(int_to_string(Outer.B.C.k(5)))
+|}
+
+let nested_sibling_expected = "109\n22\n106"
+
+let test_nested_module_sibling_call_lib_path_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_nested_sibling"
+    ("mod Main do\n\
+     \  needs IO.Console\n\
+     \  fn main(_c : Cap(IO.Console)) do\n"
+     ^ nested_sibling_main_body ^
+     "  end\n\
+      end\n")
+  in
+  let lib_dir = Filename.concat tmp "lib" in
+  Unix.mkdir lib_dir 0o755;
+  let oc = open_out (Filename.concat lib_dir "outer.march") in
+  output_string oc nested_sibling_outer_src;
+  close_out oc;
+  let bin = Filename.concat tmp "nested_sibling_bin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && MARCH_LIB_PATH=%s "
+                         (Filename.quote project_root) (Filename.quote lib_dir))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    Alcotest.(check string)
+      "a MARCH_LIB_PATH module's nested module links its qualified calls to sibling submodules"
+      nested_sibling_expected (read_cmd_output (Filename.quote bin))
+
+let test_nested_module_sibling_call_entry_compiled () =
+  let indent s =
+    String.concat "\n"
+      (List.map (fun l -> if l = "" then l else "  " ^ l)
+         (String.split_on_char '\n' s)) in
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_nested_sibling_entry"
+      ("mod Main do\n\
+       \  needs IO.Console\n"
+       ^ indent nested_sibling_outer_src ^
+       "\n  fn main(_c : Cap(IO.Console)) do\n"
+       ^ nested_sibling_main_body ^
+       "  end\n\
+        end\n") in
+  let bin = Filename.concat tmp "nested_sibling_entry_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    Alcotest.(check string)
+      "an entry-file module nested two levels links its qualified sibling calls"
+      nested_sibling_expected (read_cmd_output (Filename.quote bin))
+
+(* ── A borrowed field projection must not outlive its owner ──────────────
+   specs/progress/2026-09-28-borrowed-field-outlives-owner.md.  Perceus
+   classified [let x = r.a] as BORROWED from [r] because [r] was used again
+   later -- but that later use CONSUMED [r] ([copy(r)] takes ownership and
+   drops it) while [x] was still to be read.  Compiled, the concatenation
+   read freed strings: `7: :  / 5 / 5` instead of `7: alpha1 / beta2 / 5`
+   (the interpreter has no RC, so it always printed the right thing).  The
+   same program also runs 2000 times under the live-allocation counter, so a
+   fix that over-dups (a leak) fails too. *)
+let borrowed_field_owner_src = {|mod Main do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "rt" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  type R = { a : String, b : String, n : Int }
+  type R2 = { a : String, b : String }
+  pfn copy(r : R) : R2 do { a: r.a, b: r.b } end
+  pfn blen(r : R2) : Int do String.byte_size(r.b) end
+  pfn show(r : R) : String do
+    int_to_string(r.n) ++ ": " ++ r.a ++ " / " ++ r.b ++ " / " ++ int_to_string(blen(copy(r)))
+  end
+  pfn churn(n : Int, acc : Int) : Int do
+    if n == 0 do acc
+    else
+      let r = { a: "alpha" ++ int_to_string(n), b: "beta" ++ int_to_string(n), n: n }
+      churn(n - 1, acc + String.byte_size(show(r)))
+    end
+  end
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
+    println(show({ a: "alpha" ++ int_to_string(1), b: "beta" ++ int_to_string(2), n: 7 }))
+    let _ = churn(50, 0)
+    let base = live_allocs()
+    let t = churn(2000, 0)
+    println("leaked " ++ int_to_string(live_allocs() - base) ++ ", total " ++ int_to_string(t))
+  end
+end
+|}
+
+let test_borrowed_field_owner_consumed_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_borrowed_field_owner" borrowed_field_owner_src in
+  let bin = Filename.concat tmp "borrowed_field_owner_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    Alcotest.(check string)
+      "a field read after its record was handed to a consuming call is intact, and nothing leaks"
+      "7: alpha1 / beta2 / 5\nleaked 0, total 56679" (read_cmd_output (Filename.quote bin))
+
 let test_nested_module_parent_call_lib_path_interpreted () =
   let (project_root, main_exe, src, _tmp, lib_dir) =
     write_nested_parent_lib_path_project ~name:"march_nested_parent_interp" in
@@ -13569,7 +13823,9 @@ declare ptr  @march_tco_defer_push(ptr %buf, ptr %release, ptr %v)
 declare void @march_tco_defer_drain(ptr %buf)
 declare void @march_print(ptr %s)
 declare void @march_panic(ptr %s)
+declare void @march_panic_user(ptr %s)
 declare ptr  @march_panic_ext(ptr %s)
+declare ptr  @march_unreachable_ext()
 declare ptr  @march_todo_ext(ptr %s)
 declare ptr  @march_try_finally(ptr %action, ptr %cleanup)
 declare ptr  @march_try_call(ptr %thunk)
@@ -13706,6 +13962,8 @@ declare ptr  @march_string_to_float(ptr %s)
 ; List builtins
 declare ptr  @march_list_append(ptr %a, ptr %b)
 declare ptr  @march_list_concat(ptr %lists)
+declare ptr  @march_list_stable_sort_by(ptr %xs, ptr %le)
+declare ptr  @march_list_sort_by_int_key(ptr %xs, ptr %key)
 ; IOList builtins
 declare ptr  @march_iolist_hash_fnv1a(ptr %iol)
 ; Vault (key-value store) builtins
@@ -13813,10 +14071,6 @@ declare i64  @march_actor_is_draining(ptr %actor)
 declare ptr  @march_actor_pid_indices()
 declare i64  @march_is_alive(ptr %actor)
 declare ptr  @march_send(ptr %actor, ptr %msg)
-declare ptr  @march_send_linear(ptr %actor, ptr %msg)
-declare ptr  @march_msg_copy(ptr %src_heap, ptr %dst_heap, ptr %value)
-declare ptr  @march_msg_move(ptr %src_heap, ptr %dst_heap, ptr %value)
-declare ptr  @march_process_alloc(ptr %heap, i64 %sz)
 declare ptr  @march_spawn(ptr %actor)
 declare ptr  @march_spawn_supervised(ptr %actor)
 declare i64  @march_actor_get_int(ptr %actor, i64 %index)
@@ -13935,7 +14189,7 @@ declare ptr  @march_typed_array_fold(ptr %arr, ptr %acc, ptr %f)
 declare ptr  @march_typed_array_slice(ptr %arr, i64 %start, i64 %len)
 ; NativeIntArr builtins — flat i64 arrays for vectorizable loops
 declare ptr    @native_int_arr_make(i64 %len, i64 %def)
-declare i64    @native_int_arr_length(ptr %arr)
+declare i64    @native_int_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
 declare i64    @native_int_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_int_arr_set(ptr %arr, i64 %i, i64 %val)
 declare ptr    @native_int_arr_sort(ptr %arr)
@@ -13952,7 +14206,7 @@ declare ptr    @native_int_arr_to_list(ptr %arr)
 declare ptr    @native_int_arr_filter_mask(ptr %arr, ptr %mask)
 ; NativeFloatArr builtins — flat double arrays for vectorizable loops
 declare ptr    @native_float_arr_make(i64 %len, double %def)
-declare i64    @native_float_arr_length(ptr %arr)
+declare i64    @native_float_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
 declare double @native_float_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_float_arr_set(ptr %arr, i64 %i, double %val)
 declare double @native_float_arr_sum(ptr %arr)
@@ -13971,7 +14225,7 @@ declare ptr    @native_float_arr_alloc_raw(i64 %len)
 declare void   @native_arr_map2_check_len(i64 %len1, i64 %len2)
 ; Narrow native arrays (f32/i32/u8)
 declare ptr    @native_f32_arr_make(i64 %len, double %def)
-declare i64    @native_f32_arr_length(ptr %arr)
+declare i64    @native_f32_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
 declare double @native_f32_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_f32_arr_set(ptr %arr, i64 %i, double %v)
 declare double @native_f32_arr_sum(ptr %arr)
@@ -13982,7 +14236,7 @@ declare ptr    @native_f32_arr_fold(ptr %acc, ptr %arr, ptr %f)
 declare ptr    @native_f32_arr_from_list(ptr %lst)
 declare ptr    @native_f32_arr_to_list(ptr %arr)
 declare ptr    @native_i32_arr_make(i64 %len, i64 %def)
-declare i64    @native_i32_arr_length(ptr %arr)
+declare i64    @native_i32_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
 declare i64    @native_i32_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_i32_arr_set(ptr %arr, i64 %i, i64 %v)
 declare i64    @native_i32_arr_sum(ptr %arr)
@@ -13993,7 +14247,7 @@ declare ptr    @native_i32_arr_fold(ptr %acc, ptr %arr, ptr %f)
 declare ptr    @native_i32_arr_from_list(ptr %lst)
 declare ptr    @native_i32_arr_to_list(ptr %arr)
 declare ptr    @native_u8_arr_make(i64 %len, i64 %def)
-declare i64    @native_u8_arr_length(ptr %arr)
+declare i64    @native_u8_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
 declare i64    @native_u8_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_u8_arr_set(ptr %arr, i64 %i, i64 %v)
 declare i64    @native_u8_arr_sum(ptr %arr)
@@ -15492,6 +15746,10 @@ let codegen_suites =
             test_unboxed_aggregate_zero_live_allocs_compiled;
           Alcotest.test_case "branch-join box is released at the merge" `Quick
             test_unboxed_aggregate_branch_join_box_released;
+          Alcotest.test_case "branch-built join slot is typed as the struct" `Quick
+            test_unboxed_aggregate_branch_join_slot_is_struct;
+          Alcotest.test_case "3-arm match and else-if chain joins are struct-typed" `Quick
+            test_unboxed_aggregate_multi_arm_joins_are_struct;
           Alcotest.test_case "compiled branch-built aggregate loop does not leak" `Slow
             test_unboxed_aggregate_branch_join_no_leak_compiled;
           Alcotest.test_case "a type in an extern signature stays boxed" `Quick test_unboxed_aggregate_ffi_type_stays_boxed;
@@ -15938,6 +16196,8 @@ let codegen_suites =
         (* Regression: 831e315 + perceus caused @__ undefined symbol in &&/|| *)
         Alcotest.test_case "no @__ call for && / || (831e315)" `Quick
           test_llvm_no_call_to_double_underscore;
+        Alcotest.test_case "linear send lowers to @march_send" `Quick
+          test_llvm_linear_send_lowers_to_march_send;
       ]);
       ("string stdlib", [
         Alcotest.test_case "byte_size"           `Quick test_string_byte_size;
@@ -16151,6 +16411,16 @@ let codegen_suites =
             test_nested_module_parent_call_entry_interpreted;
           Alcotest.test_case "qualified parent pfn is not shadowed by an inner fn" `Quick
             test_nested_module_qualified_parent_pfn_not_shadowed;
+        ] );
+      ( "borrowed_field_owner_consumed", [
+          Alcotest.test_case "borrowed field outlives its consumed owner (compiled, no leak)" `Quick
+            test_borrowed_field_owner_consumed_compiled;
+        ] );
+      ( "nested_module_sibling_call", [
+          Alcotest.test_case "MARCH_LIB_PATH nested module calls a sibling submodule (compiled)" `Quick
+            test_nested_module_sibling_call_lib_path_compiled;
+          Alcotest.test_case "entry-file nested module calls a sibling submodule (compiled)" `Quick
+            test_nested_module_sibling_call_entry_compiled;
         ] );
       ( "float_lit_match_codegen", [
           Alcotest.test_case "compiled float-literal match arm (B4)" `Quick

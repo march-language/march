@@ -102,12 +102,18 @@ let monitor_reason_crash_tag = 0x7f00_0003
 let builtins : builtin list = [
   { march_name = "print"; c_name = Some "march_print"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_print(ptr %s)" };
-  { march_name = "panic"; c_name = Some "march_panic"; ret_ty = Some Tir.TUnit;
-    in_is_builtin = false; declare_sig = Some "declare void @march_panic(ptr %s)" };
+  (* `panic(msg)` and the compiler's own assert / non-exhaustive panics.
+     march_panic_user records the "panic: " prefix __try_call puts on the Err
+     (as the interpreter reports it), then calls march_panic. *)
+  { march_name = "panic"; c_name = Some "march_panic_user"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = false; declare_sig = Some "declare void @march_panic_user(ptr %s)" };
   { march_name = "panic_"; c_name = Some "march_panic_ext"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_panic_ext(ptr %s)" };
-  { march_name = "unreachable_"; c_name = Some "march_panic_ext"; ret_ty = Some (Tir.TPtr Tir.TUnit);
-    in_is_builtin = true; declare_sig = Some "declare ptr  @march_panic_ext(ptr %s)" };
+  (* unreachable_ takes NO argument.  Until 2026-09-28 it shared
+     march_panic_ext(ptr %s), so `unreachable()` passed no string and
+     march_panic dereferenced garbage: SIGSEGV instead of a panic. *)
+  { march_name = "unreachable_"; c_name = Some "march_unreachable_ext"; ret_ty = Some (Tir.TPtr Tir.TUnit);
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_unreachable_ext()" };
   { march_name = "todo_"; c_name = Some "march_todo_ext"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_todo_ext(ptr %s)" };
   (* Structured cleanup: try_finally(action, cleanup) runs action(), then
@@ -184,7 +190,8 @@ let builtins : builtin list = [
      both the AOT and JIT/REPL finalizers).  Emitting a `declare` here as well
      as that `define` would be an LLVM redefinition, so
      declare_sig is None; the call site still mangles to @march_atom_to_string
-     via c_name and resolves to the in-module definition. *)
+     via c_name and resolves to the in-module definition, which has internal
+     linkage so no other module's copy (or runtime symbol) can interpose it. *)
   { march_name = "atom_to_string"; c_name = Some "march_atom_to_string"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = None };
   { march_name = "++"; c_name = Some "march_string_concat"; ret_ty = Some Tir.TString;
@@ -375,6 +382,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_list_append(ptr %a, ptr %b)" };
   { march_name = "list_concat"; c_name = Some "march_list_concat"; ret_ty = Some (Tir.TCon ("List", [Tir.TVar "a"]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_list_concat(ptr %lists)" };
+  (* Stable sort of a List by a closure (Array.sort_by / RRB.Vec.sort_by) and by
+     an Int key extracted once per element (sort_by_key). runtime/march_runtime.c. *)
+  { march_name = "list_stable_sort_by"; c_name = Some "march_list_stable_sort_by"; ret_ty = Some (Tir.TCon ("List", [Tir.TVar "a"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_list_stable_sort_by(ptr %xs, ptr %le)" };
+  { march_name = "list_sort_by_int_key"; c_name = Some "march_list_sort_by_int_key"; ret_ty = Some (Tir.TCon ("List", [Tir.TVar "a"]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_list_sort_by_int_key(ptr %xs, ptr %key)" };
   { march_name = "iolist_hash_fnv1a"; c_name = Some "march_iolist_hash_fnv1a"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_iolist_hash_fnv1a(ptr %iol)" };
   { march_name = "vault_new"; c_name = Some "march_vault_new"; ret_ty = Some (Tir.TPtr Tir.TUnit);
@@ -575,8 +588,6 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_send(ptr %actor, ptr %msg)" };
   { march_name = "actor_cast"; c_name = Some "march_send"; ret_ty = Some (Tir.TCon ("Option", [Tir.TUnit]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_send(ptr %actor, ptr %msg)" };
-  { march_name = "send_linear"; c_name = Some "march_send_linear"; ret_ty = Some (Tir.TCon ("Option", [Tir.TUnit]));
-    in_is_builtin = false; declare_sig = Some "declare ptr  @march_send_linear(ptr %actor, ptr %msg)" };
   { march_name = "spawn"; c_name = Some "march_spawn"; ret_ty = Some (Tir.TPtr Tir.TUnit);
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_spawn(ptr %actor)" };
   { march_name = "spawn_supervised"; c_name = Some "march_spawn_supervised"; ret_ty = Some (Tir.TPtr Tir.TUnit);
@@ -693,7 +704,7 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_dns_resolve(ptr %host)" };
   { march_name = "process_spawn_sync"; c_name = Some "march_process_spawn_sync"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_process_spawn_sync(ptr %cmd, ptr %args)" };
-  { march_name = "process_spawn_lines"; c_name = Some "march_process_spawn_lines"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
+  { march_name = "process_spawn_lines"; c_name = Some "march_process_spawn_lines"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_process_spawn_lines(ptr %cmd, ptr %args)" };
   { march_name = "process_spawn_async"; c_name = Some "march_process_spawn_async"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("LiveProcess", []); Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_process_spawn_async(ptr %cmd, ptr %args)" };
@@ -763,8 +774,16 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_typed_array_slice(ptr %arr, i64 %start, i64 %len)" };
   { march_name = "native_int_arr_make"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_int_arr_make(i64 %len, i64 %def)" };
+  (* native_*_arr_length: `memory(none) speculatable` on purpose, though the
+     C body loads the header's length word (offset 16).  That word is written
+     exactly once, by native_arr_alloc, and the array is live for as long as any
+     SSA use of the pointer exists, so the call is a pure function of its
+     argument.  Without the attributes LLVM treats it as an opaque call and
+     cannot hoist it out of an index loop (the SIMD load/store bounds check
+     calls it per iteration: specs/todos/2026-08-11-march-index-loop-per-iteration-overhead.md).
+     Do NOT reuse these attributes for any accessor of MUTABLE state. *)
   { march_name = "native_int_arr_length"; c_name = None; ret_ty = Some Tir.TInt;
-    in_is_builtin = true; declare_sig = Some "declare i64    @native_int_arr_length(ptr %arr)" };
+    in_is_builtin = true; declare_sig = Some "declare i64    @native_int_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)" };
   { march_name = "native_int_arr_get"; c_name = None; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @native_int_arr_get(ptr %arr, i64 %i)" };
   { march_name = "native_int_arr_set"; c_name = None; ret_ty = Some (Tir.TCon ("NativeIntArr", []));
@@ -796,7 +815,7 @@ let builtins : builtin list = [
   { march_name = "native_float_arr_make"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_float_arr_make(i64 %len, double %def)" };
   { march_name = "native_float_arr_length"; c_name = None; ret_ty = Some Tir.TInt;
-    in_is_builtin = true; declare_sig = Some "declare i64    @native_float_arr_length(ptr %arr)" };
+    in_is_builtin = true; declare_sig = Some "declare i64    @native_float_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)" };
   { march_name = "native_float_arr_get"; c_name = None; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @native_float_arr_get(ptr %arr, i64 %i)" };
   { march_name = "native_float_arr_set"; c_name = None; ret_ty = Some (Tir.TCon ("NativeFloatArr", []));
@@ -827,7 +846,7 @@ let builtins : builtin list = [
   { march_name = "native_f32_arr_make"; c_name = None; ret_ty = Some (Tir.TCon ("NativeF32Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_f32_arr_make(i64 %len, double %def)" };
   { march_name = "native_f32_arr_length"; c_name = None; ret_ty = Some Tir.TInt;
-    in_is_builtin = true; declare_sig = Some "declare i64    @native_f32_arr_length(ptr %arr)" };
+    in_is_builtin = true; declare_sig = Some "declare i64    @native_f32_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)" };
   { march_name = "native_f32_arr_get"; c_name = None; ret_ty = Some Tir.TFloat;
     in_is_builtin = true; declare_sig = Some "declare double @native_f32_arr_get(ptr %arr, i64 %i)" };
   { march_name = "native_f32_arr_set"; c_name = None; ret_ty = Some (Tir.TCon ("NativeF32Arr", []));
@@ -849,7 +868,7 @@ let builtins : builtin list = [
   { march_name = "native_i32_arr_make"; c_name = None; ret_ty = Some (Tir.TCon ("NativeI32Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_i32_arr_make(i64 %len, i64 %def)" };
   { march_name = "native_i32_arr_length"; c_name = None; ret_ty = Some Tir.TInt;
-    in_is_builtin = true; declare_sig = Some "declare i64    @native_i32_arr_length(ptr %arr)" };
+    in_is_builtin = true; declare_sig = Some "declare i64    @native_i32_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)" };
   { march_name = "native_i32_arr_get"; c_name = None; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @native_i32_arr_get(ptr %arr, i64 %i)" };
   { march_name = "native_i32_arr_set"; c_name = None; ret_ty = Some (Tir.TCon ("NativeI32Arr", []));
@@ -871,7 +890,7 @@ let builtins : builtin list = [
   { march_name = "native_u8_arr_make"; c_name = None; ret_ty = Some (Tir.TCon ("NativeU8Arr", []));
     in_is_builtin = true; declare_sig = Some "declare ptr    @native_u8_arr_make(i64 %len, i64 %def)" };
   { march_name = "native_u8_arr_length"; c_name = None; ret_ty = Some Tir.TInt;
-    in_is_builtin = true; declare_sig = Some "declare i64    @native_u8_arr_length(ptr %arr)" };
+    in_is_builtin = true; declare_sig = Some "declare i64    @native_u8_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)" };
   { march_name = "native_u8_arr_get"; c_name = None; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @native_u8_arr_get(ptr %arr, i64 %i)" };
   { march_name = "native_u8_arr_set"; c_name = None; ret_ty = Some (Tir.TCon ("NativeU8Arr", []));
@@ -1213,6 +1232,9 @@ type preamble_item =
     [mangle_extern] dispatch. These still need a preamble declare line but
     have no [builtin] row (there is no March source name to key one on). *)
 let runtime_only_declares : (string * string) list = [
+  (* Called directly by the case emitter's non-exhaustive fallthrough
+     (llvm_case.ml); the `panic` builtin row now names march_panic_user. *)
+  ("march_panic", "declare void @march_panic(ptr %s)");
   ("march_dispatch_enter", "declare ptr  @march_dispatch_enter(i32 %name_id, ptr %out_version)");
   ("march_dispatch_enter_gen", "declare ptr  @march_dispatch_enter_gen(i32 %name_id, i32 %caller_epoch, ptr %out_version)");
   ("march_dispatch_enter_unit", "declare ptr  @march_dispatch_enter_unit(i32 %name_id, ptr %out_version)");
@@ -1268,9 +1290,6 @@ let runtime_only_declares : (string * string) list = [
   ("llvm.stackrestore", "declare void @llvm.stackrestore(ptr %ptr)");
   ("march_repl_get", "declare i64  @march_repl_get(i64 %slot)");
   ("march_repl_set", "declare void @march_repl_set(i64 %slot, i64 %val)");
-  ("march_msg_copy", "declare ptr  @march_msg_copy(ptr %src_heap, ptr %dst_heap, ptr %value)");
-  ("march_msg_move", "declare ptr  @march_msg_move(ptr %src_heap, ptr %dst_heap, ptr %value)");
-  ("march_process_alloc", "declare ptr  @march_process_alloc(ptr %heap, i64 %sz)");
   ("march_run_scheduler", "declare void @march_run_scheduler()");
   ("march_task_spawn_thunk", "declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)");
   ("march_task_await", "declare ptr  @march_task_await(ptr %task)");
@@ -1354,7 +1373,9 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_tco_defer_drain";
   PDeclare "march_print";
   PDeclare "march_panic";
+  PDeclare "march_panic_user";
   PDeclare "march_panic_ext";
+  PDeclare "march_unreachable_ext";
   PDeclare "march_todo_ext";
   PDeclare "march_try_finally";
   PDeclare "march_try_call";
@@ -1491,6 +1512,8 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PComment "; List builtins";
   PDeclare "march_list_append";
   PDeclare "march_list_concat";
+  PDeclare "march_list_stable_sort_by";
+  PDeclare "march_list_sort_by_int_key";
   PComment "; IOList builtins";
   PDeclare "march_iolist_hash_fnv1a";
   PComment "; Vault (key-value store) builtins";
@@ -1599,10 +1622,6 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_actor_pid_indices";
   PDeclare "march_is_alive";
   PDeclare "march_send";
-  PDeclare "march_send_linear";
-  PDeclare "march_msg_copy";
-  PDeclare "march_msg_move";
-  PDeclare "march_process_alloc";
   PDeclare "march_spawn";
   PDeclare "march_spawn_supervised";
   PDeclare "march_actor_get_int";

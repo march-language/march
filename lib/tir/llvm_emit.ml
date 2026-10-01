@@ -1599,24 +1599,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        emit ctx (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" r v);
        ("ptr", r))
 
-  (* ── Send with linear message: emit march_send_linear (zero-copy move) ─ *)
-  (* When the message argument is a linear value (v_lin = Lin), the compiler
-     can guarantee that no other reference to the message exists after the
-     send.  We emit march_send_linear (which will call march_msg_move) rather
-     than the default march_send (which copies for non-linear messages).
-     This is the Phase 5 linear-type optimization: zero-copy inter-process
-     message passing for linearly-typed messages. *)
-  | Tir.EApp (f, [actor_atom; msg_atom])
-    when Builtin_name.is Builtin_name.Send f.Tir.v_name
-      && (match msg_atom with
-          | Tir.AVar v -> v.Tir.v_lin = Tir.Lin
-          | _ -> false) ->
-    let (actor_ty, actor_v) = emit_atom ctx actor_atom in
-    let (msg_ty,   msg_v)   = emit_atom ctx msg_atom in
-    let r = fresh ctx "cr" in
-    emit ctx (Printf.sprintf "%s = call ptr @march_send_linear(%s %s, %s %s)"
-                r actor_ty actor_v msg_ty msg_v);
-    ("ptr", r)
+  (* A send whose message var is linear is emitted like any other send
+     (march_send).  It used to call march_send_linear, the zero-copy move of
+     the per-process arena runtime (march_message.c / march_heap.c), which
+     runtime/sources.list marks unit-test-only and the driver never links: a
+     program reaching that arm would have failed at link time.  Restore a
+     dedicated arm only together with linking that runtime
+     (specs/progress/2026-09-28-send-linear-declared-but-never-linked.md). *)
 
   (* ── Integer arithmetic builtins called via EApp ─────────────────── *)
   (* int_mod / int_div / int_mod_euclid / int_abs / int_pow /

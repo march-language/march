@@ -3,15 +3,17 @@
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
   let $t3 : Int = let $t2 : Option(Int) = alloc Option.Some(7) in
-unwrap_or_die($t2) in
+let $rc_1 : Int = unwrap_or_die($t2) in
+dec_rc $t2;
+$rc_1 in
 println($t3)
 
 ## unwrap_or_die
 fn unwrap_or_die(o : Option(Int)) : Int =
   case o of
-  Some($f1) -> let x : Int = $f1 in
+  Some($f1) -> let x : Int = inc_rc $f1;
+$f1 in
 x
   None() -> 0
-  _ -> dec_rc o;
-panic("non-exhaustive pattern match")
+  _ -> panic("non-exhaustive pattern match")
 

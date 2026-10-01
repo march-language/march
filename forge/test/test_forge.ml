@@ -1338,7 +1338,7 @@ let role_m ?(chains = []) name caps =
   { Cmd_deploy_hot.role_name = name; role_caps = caps; role_chains = chains }
 let manifest_roles roles =
   { Cmd_deploy_hot.version = 2; cas_hash = "cas"; target = None; hcr_abi = None;
-    module_prefix = None; functions = []; roles }
+    module_prefix = None; stdlib_hash = None; functions = []; roles }
 
 let test_role_gate_legacy_baseline_permissive () =
   let prior = manifest_roles [] in
@@ -1496,7 +1496,7 @@ let test_scoped_caps_new_function_compares_against_empty () =
      [], so ALL its caps show up as widening. *)
   let to_activate = [ fm ~name:"MyApp.brand_new" ~caps:["IO.Console"; "IO.FileWrite"] ] in
   let prior_manifest = { Cmd_deploy_hot.version = 2; cas_hash = "cas";
-                         target = None; hcr_abi = None; module_prefix = None;
+                         target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None;
                          functions = [] ; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
@@ -1509,7 +1509,7 @@ let test_scoped_caps_existing_function_adds_cap_widens () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] in
   let prior_manifest =
     { Cmd_deploy_hot.version = 2; cas_hash = "cas";
-      target = None; hcr_abi = None; module_prefix = None;
+      target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None;
       functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] ; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
@@ -1522,7 +1522,7 @@ let test_scoped_caps_existing_function_drops_cap_narrows () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] in
   let prior_manifest =
     { Cmd_deploy_hot.version = 2; cas_hash = "cas";
-      target = None; hcr_abi = None; module_prefix = None;
+      target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None;
       functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] ; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
@@ -1537,7 +1537,7 @@ let test_scoped_caps_existing_function_adds_subsumed_cap_no_widen () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Network"; "IO.NetConnect"] ] in
   let prior_manifest =
     { Cmd_deploy_hot.version = 2; cas_hash = "cas";
-      target = None; hcr_abi = None; module_prefix = None;
+      target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None;
       functions = [ fm ~name:"MyApp.f" ~caps:["IO.Network"] ] ; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
@@ -1760,6 +1760,29 @@ let test_topology_command_signed () =
           (March_ed25519.Ed25519.sign_str ("TOPOLOGY " ^ digest) sk) pk)
    | _ -> Alcotest.failf "unexpected TOPOLOGY line: %s" line)
 
+(* DD step 12-pre: a signed line wrapped in a release. *)
+let test_wrap_release () =
+  let (pk, sk) = March_ed25519.Ed25519.keygen () in
+  let id = "0123456789abcdef0123456789abcdef" in
+  let inner = "DRAIN c2lnbmF0dXJl epoch:3" in
+  let line = Cmd_deploy_hot.wrap_release ~seq:42 ~id ~sk inner in
+  (match String.split_on_char ' ' line with
+   | "SEQ" :: seq :: id' :: sig_b64 :: rest ->
+     Alcotest.(check string) "seq on the line" "42" seq;
+     Alcotest.(check string) "id on the line" id id';
+     Alcotest.(check string) "the inner line follows, untouched" inner (String.concat " " rest);
+     let signed = Printf.sprintf "SEQ 42 %s %s" id inner in
+     Alcotest.(check string) "signed over \"SEQ <seq> <id> <line>\""
+       (March_ed25519.Ed25519.sig_to_base64 (March_ed25519.Ed25519.sign_str signed sk)) sig_b64;
+     Alcotest.(check bool) "and it verifies under the deploy key" true
+       (March_ed25519.Ed25519.verify (Bytes.of_string signed)
+          (March_ed25519.Ed25519.sign_str signed sk) pk)
+   | _ -> Alcotest.failf "unexpected SEQ line: %s" line);
+  Alcotest.(check bool) "a stale release is explained" true
+    (Cmd_deploy_hot.describe_release_refusal "ERR stale_release head:9" <> None);
+  Alcotest.(check bool) "other answers are not" true
+    (Cmd_deploy_hot.describe_release_refusal "ERR cap_tamper" = None)
+
 (* DD build step 10: COMPACT, the patch-stack size forge status shows. *)
 let test_parse_compact () =
   (match Cmd_deploy_hot.parse_compact
@@ -1878,7 +1901,7 @@ let activate4_selected ~manifest ~no_cap_gate =
 
 let manifest_with_caps =
   { Cmd_deploy_hot.version = 2; cas_hash = String.make 64 'a';
-    target = None; hcr_abi = None; module_prefix = None;
+    target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None;
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
         fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true } ];
@@ -1886,7 +1909,7 @@ let manifest_with_caps =
 
 let legacy_manifest =
   { Cmd_deploy_hot.version = 2; cas_hash = String.make 64 'a';
-    target = None; hcr_abi = None; module_prefix = None;
+    target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None;
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
         fn_callers = []; fn_caps = []; fn_has_caps = false } ];
@@ -2125,58 +2148,6 @@ let test_interp_command_file_with_no_args_still_emits_args_flag () =
   Alcotest.(check string) "bare --args is still emitted"
     "MARCH_LIB_PATH=/p/lib march '/p/lib/app.march' --args" cmd
 
-(* ------------------------------------------ [ffi.rust] under the interpreter *)
-
-(* A [[ffi.rust]]-only project cannot run interpreted: cargo produces a static
-   lib<name>.a that cannot be dlopen'ed, and with no [[ffi] sources] the
-   compiler builds no interpreter shim, so every Rust extern used to die at
-   its call site with the generic "symbol not found for interpreter FFI".
-   forge now says so once, up front.  These pin WHEN it says so, on a real
-   forge.toml parsed by [Project.load_from_dir]; no cargo build runs. *)
-
-let load_ffi_project toml =
-  let dir = Filename.temp_dir "forge_ffi_rust_diag_" "" in
-  write_file (Filename.concat dir "forge.toml") toml;
-  match Project.load_from_dir dir with
-  | Error msg -> Alcotest.failf "forge.toml did not load: %s" msg
-  | Ok proj -> proj
-
-let pkg_header = "[package]\nname = \"rusty\"\nversion = \"0.1.0\"\ntype = \"app\"\n"
-let rust_section = "\n[ffi.rust]\ncrate = \"native/rusty_ffi\"\nlib = \"rusty_ffi\"\n"
-let c_section = "\n[ffi]\nsources = [\"native/shim.c\"]\n"
-
-let test_rust_only_interpreted_gets_diagnostic () =
-  let proj = load_ffi_project (pkg_header ^ rust_section) in
-  match Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:true proj with
-  | None -> Alcotest.fail "expected the compile-only diagnostic for a [ffi.rust]-only project"
-  | Some msg ->
-    Alcotest.(check bool) "says it is compiled-only" true
-      (contains msg "only available in compiled mode");
-    Alcotest.(check bool) "names the crate" true (contains msg "native/rusty_ffi");
-    Alcotest.(check bool) "names the static archive" true (contains msg "librusty_ffi.a");
-    Alcotest.(check bool) "tells the user what to run instead" true
-      (contains msg "forge run --compiled");
-    Alcotest.(check bool) "is a warning, not an error" true
-      (String.length msg >= 8 && String.sub msg 0 8 = "warning:")
-
-let test_rust_only_compiled_no_diagnostic () =
-  let proj = load_ffi_project (pkg_header ^ rust_section) in
-  Alcotest.(check (option string)) "compiled builds link the archive fine" None
-    (Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:false proj)
-
-let test_rust_with_c_sources_no_diagnostic () =
-  let proj = load_ffi_project (pkg_header ^ c_section ^ rust_section) in
-  Alcotest.(check (option string)) "a C shim exists, so the interpreter path is live" None
-    (Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:true proj)
-
-let test_c_only_and_no_ffi_no_diagnostic () =
-  let c_only = load_ffi_project (pkg_header ^ c_section) in
-  Alcotest.(check (option string)) "C-only [ffi]" None
-    (Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:true c_only);
-  let bare = load_ffi_project pkg_header in
-  Alcotest.(check (option string)) "no [ffi] at all" None
-    (Cmd_build.interpreted_rust_ffi_diagnostic ~interpreted:true bare)
-
 let test_output_ext_by_target () =
   (* Pinned because the single-file compiled run names a temp output with this,
      and running a .mjs as if it were a native binary fails confusingly. *)
@@ -2302,6 +2273,132 @@ let with_dev_march_on_path (f : unit -> 'a) : 'a =
     either would otherwise pass the whole suite untouched. Marked [`Slow]:
     this pays a real clang compile, so it must not land in the quick
     suite ([scripts/run-tests.sh -q] skips [`Slow]). *)
+(* ------------------------------------------ [ffi.rust] under the interpreter *)
+
+(* A [[ffi.rust]]-only project runs interpreted, with the same output as
+   compiled.  cargo produces a static lib<name>.a, which cannot be dlopen'ed;
+   the compiler now force-loads every `--ffi-link <x>.a` into the
+   interpreter's FFI shim (an empty stub when there are no [[ffi] sources]),
+   where it used to build no shim at all and every Rust extern died with
+   "symbol not found for interpreter FFI".
+
+   The crate has no dependencies, so cargo never touches the network, and
+   one of its functions calls back into March runtime symbols
+   (march_make_int / march_get_int): those stay undefined when the shim is
+   linked and resolve at dlopen, which is the part a force-loaded archive
+   could get wrong.  Needs `cargo`; without one the case says so and skips. *)
+
+let rust_toolchain_available () = Sys.command "cargo --version >/dev/null 2>&1" = 0
+
+(* [with_c_source]: also declare an [ffi] C source that references none of
+   the crate's symbols -- the mixed project, where a C shim was always built
+   but the archive's members reached it only if the shim happened to call
+   them. *)
+let write_rust_ffi_project ?(with_c_source = false) dir =
+  let mk d = ignore (Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote d))) in
+  mk (Filename.concat dir "lib");
+  mk (Filename.concat dir "native/rusty_ffi/src");
+  if with_c_source then
+    write_file (Filename.concat dir "native/shim.c")
+      "#include <stdint.h>\nint64_t c_side_answer(void) { return 7; }\n";
+  write_file (Filename.concat dir "forge.toml")
+    ("[package]\nname = \"rusty\"\nversion = \"0.1.0\"\ntype = \"app\"\n\n"
+     ^ (if with_c_source then "[ffi]\nsources = [\"native/shim.c\"]\n\n" else "")
+     ^ "[ffi.rust]\ncrate = \"native/rusty_ffi\"\nlib = \"rusty_ffi\"\n");
+  write_file (Filename.concat dir "native/rusty_ffi/Cargo.toml")
+    "[package]\nname = \"rusty_ffi\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+     [lib]\nname = \"rusty_ffi\"\ncrate-type = [\"staticlib\"]\n";
+  write_file (Filename.concat dir "native/rusty_ffi/src/lib.rs")
+    "extern \"C\" {\n\
+    \    fn march_make_int(n: i64) -> i64;\n\
+    \    fn march_get_int(v: i64) -> i64;\n\
+     }\n\n\
+     #[no_mangle]\n\
+     pub extern \"C\" fn rusty_add(a: i64, b: i64) -> i64 { a + b }\n\n\
+     #[no_mangle]\n\
+     pub extern \"C\" fn rusty_tag_roundtrip(n: i64) -> i64 {\n\
+    \    unsafe { march_get_int(march_make_int(n)) }\n\
+     }\n";
+  write_file (Filename.concat dir "lib/rusty.march")
+    "mod Rusty do\n\
+    \  needs IO.Console\n\
+    \  needs IO.Foreign\n\n\
+    \  extern \"rusty_ffi\" : Cap(IO.Foreign) do\n\
+    \    fn rusty_add(a : Int, b : Int) : Int = \"rusty_add\"\n\
+    \    fn rusty_tag_roundtrip(n : Int) : Int = \"rusty_tag_roundtrip\"\n\
+    \  end\n\n\
+    \  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) do\n\
+    \    println(\"add=\" ++ int_to_string(rusty_add(40, 2)))\n\
+    \    println(\"roundtrip=\" ++ int_to_string(rusty_tag_roundtrip(-7)))\n\
+    \  end\n\
+     end\n"
+
+(* Run [f] with stdout (which Sys.command children inherit) sent to a file;
+   return its result and the program lines it printed. *)
+let run_capturing_program_lines f =
+  flush stdout;
+  let capture = Filename.temp_file "forge_rust_ffi_" ".out" in
+  let saved = Unix.dup Unix.stdout in
+  let fd = Unix.openfile capture [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600 in
+  Unix.dup2 fd Unix.stdout;
+  Unix.close fd;
+  let r = try Ok (f ()) with e -> Error e in
+  flush stdout;
+  Unix.dup2 saved Unix.stdout;
+  Unix.close saved;
+  let ic = open_in capture in
+  let out = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  (try Sys.remove capture with Sys_error _ -> ());
+  let program_lines =
+    String.split_on_char '\n' out
+    |> List.filter (fun l ->
+        List.exists (fun p -> String.length l >= String.length p
+                              && String.sub l 0 (String.length p) = p)
+          [ "add="; "roundtrip=" ])
+  in
+  match r with
+  | Ok v -> (v, program_lines, out)
+  | Error e -> raise e
+
+let rust_ffi_parity ~with_c_source () =
+  if not (rust_toolchain_available ()) then begin
+    prerr_endline
+      "SKIP [ffi.rust] interpreted/compiled parity: no Rust toolchain \
+       (`cargo` is not on PATH)";
+    Alcotest.skip ()
+  end;
+  with_dev_march_on_path (fun () ->
+      let dir = Filename.temp_dir "forge_ffi_rust_e2e_" "" in
+      write_rust_ffi_project ~with_c_source dir;
+      let old_cwd = Sys.getcwd () in
+      Fun.protect
+        ~finally:(fun () ->
+            Unix.chdir old_cwd;
+            ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir))))
+        (fun () ->
+           Unix.chdir dir;
+           let run compiled = Cmd_run.run ~compiled ~args:[] () in
+           let r_i, lines_i, out_i = run_capturing_program_lines (fun () -> run false) in
+           (match r_i with
+            | Ok () -> ()
+            | Error m -> Alcotest.failf "interpreted run failed: %s\n%s" m out_i);
+           let r_c, lines_c, out_c = run_capturing_program_lines (fun () -> run true) in
+           (match r_c with
+            | Ok () -> ()
+            | Error m -> Alcotest.failf "compiled run failed: %s\n%s" m out_c);
+           Alcotest.(check (list string)) "interpreted output"
+             [ "add=42"; "roundtrip=-7" ] lines_i;
+           Alcotest.(check (list string)) "compiled output is identical" lines_i lines_c;
+           Alcotest.(check bool) "no compile-only warning any more" false
+             (contains out_i "only available in compiled mode")))
+
+let test_rust_only_project_runs_interpreted_and_compiled () =
+  rust_ffi_parity ~with_c_source:false ()
+
+let test_rust_plus_c_project_runs_interpreted_and_compiled () =
+  rust_ffi_parity ~with_c_source:true ()
+
 let test_compiled_run_end_to_end () =
  with_dev_march_on_path (fun () ->
   (* Run from a directory with no forge.toml in scope, so resolve_entry takes
@@ -2734,9 +2831,54 @@ let test_split_plan_project_monolith () =
   | Protocol_split.Split (a, _) -> Alcotest.(check (list string)) "one build, both halves" [ "app" ] a.d_builds
   | v -> Alcotest.failf "a project with no topology is a monolith:\n%s" (Protocol_split.render v)
 
+(* A breaking change to another protocol does not cancel the split of a
+   compatible one: the split is decided for the compatible change and the
+   breaking one rides along, named. *)
+let test_split_with_breaking_alongside () =
+  let builds = [ { Protocol_split.b_name = "app"; b_roles = [ "Order.Buyer"; "Order.Shop"; "Other.A"; "Other.B" ] } ] in
+  let other fp steps = { PE.v_proto = "Other"; v_fingerprint = fp; v_roles = [ "A"; "B" ]; v_steps = steps } in
+  let broken = { Protocol_split.old_ = other "o1" [ PE.WMsg ("A", "B", "X", "Int") ];
+                 new_ = other "o2" [ PE.WMsg ("A", "B", "X", "String") ] } in
+  match Protocol_split.plan [ order_change; broken ] builds with
+  | Protocol_split.Split (a, _) as v ->
+    Alcotest.(check (list string)) "expand only the compatible one" [ "--protocol-expand Order:later" ] a.d_flags;
+    Alcotest.(check int) "the breaking one named" 1 (List.length a.d_breaking);
+    Alcotest.(check bool) "rendered" true
+      (let r = Protocol_split.render v in
+       let k = String.length "breaking: Other:" in
+       let rec go i = i + k <= String.length r && (String.sub r i k = "breaking: Other:" || go (i + 1)) in go 0)
+  | v -> Alcotest.failf "expected a split, got:\n%s" (Protocol_split.render v)
+
+(* A deploy plans from the deploy baselines (what the environment runs)
+   against this build's emitted ones, never from .forge/protocols. *)
+let test_split_changes_of_dirs () =
+  let root = Filename.temp_dir "forge_split_dirs_" "" in
+  let write dir name b =
+    Project.mkdir_p dir;
+    let oc = open_out (Filename.concat dir name) in
+    output_string oc b; close_out oc
+  in
+  let deployed = Filename.concat root ".forge/deploy/prod/protocols" and now = Filename.concat root "now" in
+  write deployed "Order.json" (PE.baseline_to_string { PE.current = order_change.old_; previous = None });
+  (* an older forge's structure file: skipped, not an error *)
+  write deployed "Legacy.json" {|{"version":1,"protocol":"Legacy","steps":[]}|};
+  write now "Order.json" (PE.baseline_to_string { PE.current = order_change.new_; previous = Some order_change.old_ });
+  (* the compiler's own baselines say something else entirely: not read *)
+  write (Filename.concat root ".forge/protocols") "Order.json"
+    (PE.baseline_to_string { PE.current = order_change.new_; previous = Some order_change.new_ });
+  Alcotest.(check (list string)) "the deploy baselines that read" [ "Order" ]
+    (List.map fst (Protocol_split.versions_of_dir deployed));
+  match Protocol_split.changes_of_dirs ~deployed ~now with
+  | [ c ] ->
+    Alcotest.(check string) "old: what runs" "f1" c.old_.v_fingerprint;
+    Alcotest.(check string) "new: this build" "f2" c.new_.v_fingerprint
+  | l -> Alcotest.failf "expected one change, got %d" (List.length l)
+
 let () =
   Alcotest.run "forge" [
     "protocol split", [
+      Alcotest.test_case "a breaking change alongside does not cancel a split" `Quick test_split_with_breaking_alongside;
+      Alcotest.test_case "a deploy plans from its own baselines" `Quick test_split_changes_of_dirs;
       Alcotest.test_case "a project with no topology splits from .forge/protocols" `Quick test_split_plan_project_monolith;
       Alcotest.test_case "a monolith that chooses and receives splits into expand/contract" `Quick test_split_monolith;
       Alcotest.test_case "separate pools deploy once, receivers first" `Quick test_split_separate_pools;
@@ -2927,6 +3069,7 @@ let () =
       Alcotest.test_case "ACTIVATE5: signed shape carries the migrate bitmask" `Quick test_activate5_signed_shape;
       Alcotest.test_case "ACTIVATE6: role roots signed, closures unsigned" `Quick test_activate6_signed_shape_and_role_blocks;
       Alcotest.test_case "TOPOLOGY: signed line shape" `Quick test_topology_command_signed;
+      Alcotest.test_case "SEQ: a signed line wrapped in a release" `Quick test_wrap_release;
       Alcotest.test_case "COMPACT: parsed and described" `Quick test_parse_compact;
       Alcotest.test_case "WAIT: parsed and described" `Quick test_parse_wait;
       Alcotest.test_case "schemas: handlers, migrate_msg_from, message diff" `Quick test_schema_handlers_and_message_diff;
@@ -2962,14 +3105,10 @@ let () =
         test_repl_command_includes_ffi_flags_after_entry;
       Alcotest.test_case "bare REPL still gets the ffi flags" `Quick
         test_repl_command_bare_includes_ffi_flags;
-      Alcotest.test_case "[ffi.rust]-only interpreted run: compile-only diagnostic" `Quick
-        test_rust_only_interpreted_gets_diagnostic;
-      Alcotest.test_case "[ffi.rust]-only compiled run: no diagnostic" `Quick
-        test_rust_only_compiled_no_diagnostic;
-      Alcotest.test_case "[ffi.rust] plus [ffi] C sources: no diagnostic" `Quick
-        test_rust_with_c_sources_no_diagnostic;
-      Alcotest.test_case "C-only / no-FFI projects: no diagnostic" `Quick
-        test_c_only_and_no_ffi_no_diagnostic;
+      Alcotest.test_case "[ffi.rust]-only project: interpreted output = compiled" `Slow
+        test_rust_only_project_runs_interpreted_and_compiled;
+      Alcotest.test_case "[ffi.rust] + [ffi] C sources: interpreted output = compiled" `Slow
+        test_rust_plus_c_project_runs_interpreted_and_compiled;
       Alcotest.test_case "output extension follows the target" `Quick
         test_output_ext_by_target;
       Alcotest.test_case "compiled single-file run: real compile, real run" `Slow

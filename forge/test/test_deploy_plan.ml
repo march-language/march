@@ -27,7 +27,7 @@ let fm ?(sig_ = "s") ?(caps = []) name impl =
 let abi_arm = "march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8"
 
 let manifest ?(target = "linux/arm64") ?(abi = abi_arm) ?(roles = []) fns =
-  { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = Some target; hcr_abi = Some abi; module_prefix = Some "App";
+  { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = Some target; hcr_abi = Some abi; module_prefix = Some "App"; stdlib_hash = None;
     functions = fns; roles }
 
 (** The base program: two pools' hooks, a role body, an actor, a protocol. *)
@@ -74,11 +74,35 @@ let build ?(name = "shared") ?(pools = [ "back"; "front" ]) ?old ?(old_schemas =
   { P.b_name = name; b_pools = pools; b_old = old; b_new = nw; b_old_schemas = old_schemas; b_new_schemas = new_schemas;
     b_old_runtime = old_runtime; b_new_runtime = new_runtime; b_slots = slots }
 
-(** Protocols from March source, through the same parse forge uses. *)
-let protos_of_source src : P.proto list =
+(** A protocol's version from March source, the way the compiler records it
+    for `--emit-protocols` ([Desugar_endpoints.expand]): parsed, annotated,
+    the wire view and the fingerprint. *)
+module E = March_desugar.Desugar_endpoints
+
+let version_of_source ~proto src : E.version =
   match Topology.parse_source ~path:"p.march" src with
-  | Ok m -> let idx = Topology.empty_index () in Topology.index_module idx m; P.protos_of_index idx
   | Error e -> Alcotest.failf "fixture protocol does not parse: %s" e
+  | Ok m ->
+    let rec decls (ds : March_ast.Ast.decl list) =
+      List.concat_map (function March_ast.Ast.DMod (_, _, inner, _) as d -> d :: decls inner | d -> [ d ]) ds
+    in
+    let all = decls m.March_ast.Ast.mod_decls in
+    let steps =
+      match List.find_map (function
+          | March_ast.Ast.DProtocol (n, pd, _) when n.March_ast.Ast.txt = proto -> Some pd.March_ast.Ast.proto_steps
+          | _ -> None) all with
+      | Some s -> s
+      | None -> Alcotest.failf "no protocol %s in the fixture" proto
+    in
+    let errors = March_errors.Errors.create () in
+    let annotated =
+      match E.annotate errors ~proto ~span:March_ast.Ast.dummy_span steps with
+      | Some a -> a
+      | None -> Alcotest.failf "protocol %s does not annotate" proto
+    in
+    let types = E.ty_defs_of all in
+    { E.v_proto = proto; v_fingerprint = E.fingerprint_of ~proto ~types (E.roles_of annotated) annotated;
+      v_roles = E.roles_of annotated; v_steps = E.wire_of ~types annotated }
 
 let echo_v1 = {|mod App do
   protocol Echo do
@@ -88,7 +112,7 @@ let echo_v1 = {|mod App do
 end
 |}
 
-let proto_named name src = List.find (fun (p : P.proto) -> p.p_name = name) (protos_of_source src)
+let proto_named name src = version_of_source ~proto:name src
 
 let echo = proto_named "Echo" echo_v1
 
@@ -96,9 +120,9 @@ let derived_v1 = [ ("back", ([ "IO.Console" ], [])); ("front", ([ "IO.Console" ]
 
 let input ?(old_t = Some (topo ())) ?(new_t = topo ()) ?(protocols = [ ("Echo", Some echo, Some echo) ])
     ?(old_derived = Some derived_v1) ?(new_derived = Some derived_v1) ?(grant = []) ?(live = []) ?(compact = false)
-    ?compact_after builds =
+    ?compact_after ?(pending = []) builds =
   { P.i_env = Some "prod"; i_old_topology = old_t; i_new_topology = new_t; i_builds = builds;
-    i_protocols = protocols; i_old_derived = old_derived; i_new_derived = new_derived; i_grant_caps = grant;
+    i_protocols = protocols; i_pending = pending; i_old_derived = old_derived; i_new_derived = new_derived; i_grant_caps = grant;
     i_live = live; i_compact = compact; i_compact_after = compact_after }
 
 let mech (p : P.plan) pool =
@@ -159,6 +183,69 @@ let test_unslotted_changes () =
   let p = P.classify (input [ build ~old:(manifest base) (manifest (replace_fn "$lam2$apply" "k2" base)) ]) in
   check_mech "slots unknown" (mech p "back") (fun m -> m = P.Hot)
 
+(** A stdlib change is a restart (owner decision 2026-09-30: stdlib actors
+    are not hot-reload slots).  The manifests record the stdlib they were
+    compiled against ([# stdlib_hash]); here the only difference between the
+    running build and this one is the stdlib: two of its actor's functions
+    changed, nothing of the app did.  The stdlib's `Writer_dispatch` has no
+    slot, so no patch can deliver the change.  Before the check, with the
+    running nodes' slots unknown this planned a hot patch that activates
+    nothing; with them known, only the generic "no dispatch slot" reason. *)
+let test_stdlib_change_restart () =
+  let stdlib_fns = [ fm "Writer_dispatch" "w1"; fm "Writer_Wait" "ww1"; fm "NodeQueue.start" "ns1" ] in
+  let with_stdlib h fns = { (manifest fns) with Cmd_deploy_hot.stdlib_hash = h } in
+  let old = with_stdlib (Some "aaaaaaaaaaaa1111") (base_fns @ stdlib_fns) in
+  let nw_fns = base_fns @ replace_fn "Writer_Wait" "ww2" (replace_fn "Writer_dispatch" "w2" stdlib_fns) in
+  let nw = with_stdlib (Some "bbbbbbbbbbbb2222") nw_fns in
+  let app_slots = [ "Counter_dispatch"; "Back.serve"; "Back.helper"; "Back.start"; "Front.start" ] in
+  List.iter (fun (what, slots) ->
+      let p = P.classify (input [ build ?slots ~old nw ]) in
+      List.iter (fun pool -> check_mech (what ^ ": " ^ pool) (mech p pool) is_restart) [ "back"; "front" ];
+      expect what (P.render p)
+        [ "the standard library changed (stdlib aaaaaaaaaaaa -> bbbbbbbbbbbb)";
+          "a stdlib change ships with a toolchain change and deploys by restart" ])
+    [ ("slots unknown", None); ("slots known", Some app_slots) ];
+  (* the same stdlib: no stdlib reason; the app change is a hot patch *)
+  let same = with_stdlib (Some "aaaaaaaaaaaa1111") (replace_fn "Back.helper" "x2" base_fns @ stdlib_fns) in
+  let p = P.classify (input [ build ~slots:app_slots ~old same ]) in
+  check_mech "same stdlib" (mech p "back") (fun m -> m = P.Hot);
+  refuse "same stdlib" (P.render p) [ "the standard library changed" ];
+  (* a manifest from before the header: not detectable, not claimed *)
+  let legacy = { old with Cmd_deploy_hot.stdlib_hash = None } in
+  let p = P.classify (input [ build ~old:legacy nw ]) in
+  refuse "legacy baseline" (P.render p) [ "the standard library changed" ]
+
+(** `forge deploy hot` ([Cmd_deploy_hot.run], also the path of `forge test
+    --upgrade-from` and the two-node scenarios' hcr_deploy) refuses a stdlib
+    change before it connects, instead of finding nothing to activate and
+    reporting the server up to date.  The socket does not exist: a refusal
+    names the stdlib, anything that got past the check fails to connect. *)
+let test_deploy_hot_refuses_stdlib_change () =
+  let dir = Filename.temp_dir "deploy_hot_stdlib_" "" in
+  let write_manifest name h =
+    let path = Filename.concat dir name in
+    Out_channel.with_open_bin path (fun oc ->
+        Printf.fprintf oc "# march-hcr-manifest v2\n# cas_hash c1\n# module_prefix App\n%s\
+                           Counter_dispatch d1 s caps=\nWriter_dispatch w1 s caps=\n"
+          (match h with Some h -> "# stdlib_hash " ^ h ^ "\n" | None -> ""));
+    path
+  in
+  let parse path = match Cmd_deploy_hot.parse_manifest path with
+    | Ok m -> m | Error e -> Alcotest.failf "manifest: %s" e in
+  let old_path = write_manifest "old.hcr_manifest" (Some "aaaa") in
+  Alcotest.(check (option string)) "the header parses" (Some "aaaa") (parse old_path).Cmd_deploy_hot.stdlib_hash;
+  let run manifest =
+    Cmd_deploy_hot.run ~tunnel:false ~ssh_host:"local" ~remote_socket:(Filename.concat dir "no.sock")
+      ~signing_pubkey:"" ~sk:Bytes.empty ~manifest ~so_path:(Filename.concat dir "p.so")
+      ~old_manifest_path:old_path ()
+  in
+  (match run (parse (write_manifest "new.hcr_manifest" (Some "bbbb"))) with
+   | Error m -> expect "refusal" m [ "the standard library changed" ]
+   | Ok n -> Alcotest.failf "a stdlib change deployed hot (%d activated)" n);
+  (match run (parse (write_manifest "same.hcr_manifest" (Some "aaaa"))) with
+   | Error m -> refuse "same stdlib gets past the check" m [ "standard library" ]
+   | Ok _ -> Alcotest.fail "connected to a socket that does not exist")
+
 let test_signature_change_noted () =
   let nw = manifest (List.map (fun (f : Cmd_deploy_hot.fn_manifest) ->
       if f.fn_name = "Back.helper" then { f with fn_impl_hash = "x2"; fn_sig_hash = "s2" } else f) base_fns) in
@@ -206,23 +293,33 @@ let echo_v2_breaking = {|mod App do
 end
 |}
 
+let short8 (v : E.version) = String.sub v.v_fingerprint 0 8
+
 let test_protocol_drain () =
+  let v2 = proto_named "Echo" echo_v2_breaking in
   let nw = manifest (replace_fn "Echo_Msg.fingerprint" "fp2" (replace_fn "Echo_Server.recv_Ask" "r2" base_fns)) in
   let live = [ { P.l_node = "back-b1"; l_pool = "back"; l_up = true; l_running = 3; l_offers = [ "Echo.Server" ]; l_stack = None } ] in
-  let p = P.classify (input ~live ~protocols:[ ("Echo", Some echo, Some (proto_named "Echo" echo_v2_breaking)) ]
-                        [ build ~old:(manifest base_fns) nw ]) in
+  let p = P.classify (input ~live ~protocols:[ ("Echo", Some echo, Some v2) ] [ build ~old:(manifest base_fns) nw ]) in
   check_mech "back serves Echo" (mech p "back") (function P.Hot_drain [ "Echo" ] -> true | _ -> false);
   check_mech "front initiates Echo" (mech p "front") (function P.Hot_drain [ "Echo" ] -> true | _ -> false);
+  Alcotest.(check int) "no split" 0 (List.length p.splits);
   expect "render" (P.render p)
-    [ "protocol Echo: fingerprint fp1 -> fp2 (its steps changed (not one added choice branch))";
+    [ Printf.sprintf "protocol Echo: fingerprint %s -> %s (" (short8 echo) (short8 v2);
       "hot patch + protocol drain"; "4. Drains\n  pool back: offers close: Echo.Server; sessions live on the pool's nodes: 3";
-      "pool front: offers close: (none: it only initiates)"; "pool back: 3 live session(s) of Echo run to their end" ]
+      "pool front: offers close: (none: it only initiates)"; "pool back: 3 live session(s) of Echo run to their end";
+      (* breaking: both fingerprints are offered while it rolls through (6.4) *)
+      "protocol Echo: a breaking change"; "every node offers both fingerprints while the deploy rolls through" ]
 
-let test_fingerprint_moved_same_declaration () =
+(** An environment an older forge deployed has no deploy baseline in the
+    compiler's format: the fingerprint function's impl hash still tells a
+    change happened, not what kind. *)
+let test_fingerprint_moved_no_baseline () =
   let nw = manifest (replace_fn "Echo_Msg.fingerprint" "fp2" base_fns) in
-  let p = P.classify (input [ build ~old:(manifest base_fns) nw ]) in
-  check_mech "payload type changed" (mech p "back") (function P.Hot_drain _ -> true | _ -> false);
-  expect "render" (P.render p) [ "its wire fingerprint changed (a payload type changed)" ]
+  let p = P.classify (input ~protocols:[ ("Echo", None, Some echo) ] [ build ~old:(manifest base_fns) nw ]) in
+  check_mech "unknown change: drain" (mech p "back") (function P.Hot_drain _ -> true | _ -> false);
+  expect "render" (P.render p) [ "protocol Echo: fingerprint fp1 -> fp2"; "no deploy baseline to compare it against" ];
+  let p = P.classify (input ~protocols:[ ("Echo", None, Some echo) ] [ build ~old:(manifest base_fns) (manifest base_fns) ]) in
+  List.iter (fun pool -> check_mech pool (mech p pool) (fun m -> m = P.Nothing)) [ "back"; "front" ]
 
 let retry_v1 = {|mod App do
   protocol Echo do
@@ -247,6 +344,13 @@ let retry_v2 = {|mod App do
 end
 |}
 
+(* The deployed and the new build of the retry change: the expand patch
+   (Server's side pinned to the old fingerprint) and, after it, the contract. *)
+let retry_expand_fns =
+  replace_fn "Echo_Msg.fingerprint" "fp2"
+    (replace_fn "Back.serve" "b2" base_fns @ [ fm "Echo_Server.send_Retry" "s1"; fm "Echo_Client.recv_Retry" "q1" ])
+let retry_contract_fns = replace_fn "Echo_Server.send_Retry" "s2" retry_expand_fns
+
 let test_choice_added_monolith_split () =
   let old_p = proto_named "Echo" retry_v1 and new_p = proto_named "Echo" retry_v2 in
   (match P.classify_proto (Some old_p) (Some new_p) with
@@ -256,20 +360,57 @@ let test_choice_added_monolith_split () =
      Alcotest.(check string) "label" "retry" ca.ca_label
    | _ -> Alcotest.fail "one added branch must classify as Choice_added");
   (* back serves Server (the chooser), front initiates Client (the receiver);
-     both are in the shared build: the monolith split (D21). *)
-  let nw = manifest (replace_fn "Echo_Msg.fingerprint" "fp2"
-                       (replace_fn "Back.serve" "b2" base_fns @ [ fm "Echo_Server.send_Retry" "s1"; fm "Echo_Client.recv_Retry" "q1" ])) in
-  let p = P.classify (input ~protocols:[ ("Echo", Some old_p, Some new_p) ] [ build ~old:(manifest base_fns) nw ]) in
+     both are in the shared build: the monolith split (D21), deploy one. *)
+  let protocols = [ ("Echo", Some old_p, Some new_p) ] in
+  let p = P.classify (input ~protocols [ build ~old:(manifest base_fns) (manifest retry_expand_fns) ]) in
   (match p.splits with
    | [ sp ] ->
-     Alcotest.(check string) "build" "shared" sp.sp_build;
-     Alcotest.(check (list string)) "held back: the chooser's side" [ "Back.serve"; "Echo_Server.send_Retry" ]
-       (List.sort compare sp.sp_held)
+     Alcotest.(check (list string)) "builds" [ "shared" ] sp.sp_builds;
+     Alcotest.(check bool) "this is the expand" true (sp.sp_phase = `Expand);
+     Alcotest.(check string) "the chooser stays on" old_p.v_fingerprint sp.sp_old_fp
    | l -> Alcotest.failf "expected one split, got %d" (List.length l));
-  expect "render" (P.render p)
-    [ "the branch `retry` added to `choose by Server`"; "SPLIT (D21): build shared both chooses and receives Echo's new branch `retry`";
-      "deploy one: everything except Server's side of Echo"; "deploy two: Server's side";
-      "build step 9's compatibility table" ]
+  (match p.verdict with
+   | Protocol_split.Split (a, b) ->
+     Alcotest.(check (list string)) "expand flags" [ "--protocol-expand Echo:retry" ] a.d_flags;
+     Alcotest.(check (list string)) "contract flags" [] b.d_flags
+   | v -> Alcotest.failf "verdict:\n%s" (Protocol_split.render v));
+  Alcotest.(check (list string)) "the builds' flags" [ "--protocol-expand Echo:retry" ] (P.expand_flags p.splits);
+  let r = P.render p in
+  expect "render expand" r
+    [ "the branch `retry` added to `choose by Server`";
+      "SPLIT (D21): build shared both makes and receives Echo's changed choice (`choose by Server` gained `retry`)";
+      "deploy one (expand) <- this deploy: every build compiled with --protocol-expand Echo:retry";
+      "The receivers (Echo.Client) run the new version";
+      Printf.sprintf "Echo.Server keeps offering and initiating under the previous fingerprint %s" (short8 old_p);
+      "deploy two (contract): the plain build, once every host runs deploy one";
+      "run it again for deploy two";
+      "Echo: the expand of a D21 split: its receivers' offers reopen under the new fingerprint and drain the old; Echo.Server's stay";
+      (* the chooser's offer stays open under the old fingerprint *)
+      "pool back: offers close: (none: its offers stay under the previous fingerprint until the contract)" ];
+  refuse "no receivers-first ordering within one build" r [ "go before pools choosing it" ];
+  (* deploy two: the same version, its expand recorded as done *)
+  let pending = P.pending_after p.splits in
+  Alcotest.(check int) "one pending" 1 (List.length pending);
+  let back = P.pending_of_json (P.pending_json pending) in
+  Alcotest.(check bool) "pending round trip" true (back = Some pending);
+  let p2 = P.classify (input ~protocols ~pending
+                         [ build ~old:(manifest retry_expand_fns) (manifest retry_contract_fns) ]) in
+  (match p2.splits with
+   | [ sp ] -> Alcotest.(check bool) "this is the contract" true (sp.sp_phase = `Contract)
+   | l -> Alcotest.failf "expected one split, got %d" (List.length l));
+  Alcotest.(check (list string)) "the contract is the plain build" [] (P.expand_flags p2.splits);
+  Alcotest.(check (list string)) "nothing pending after it" [] (List.map (fun pe -> pe.P.pe_protocol) (P.pending_after p2.splits));
+  check_mech "the chooser's pool re-offers" (mech p2 "back") (function P.Hot_drain [ "Echo" ] -> true | _ -> false);
+  expect "render contract" (P.render p2)
+    [ "deploy one (expand), done"; "deploy two (contract) <- this deploy";
+      "Echo: the contract of a D21 split: Echo.Server's offers reopen under the new fingerprint";
+      Printf.sprintf "Echo.Server moves to fingerprint %s and may choose `retry`" (short8 new_p);
+      "pool back: offers close: Echo.Server" ];
+  (* a pending expand for another version is stale: plan the expand again *)
+  let stale = [ { (List.hd pending) with P.pe_fingerprint = "0123456789abcdef" } ] in
+  let p3 = P.classify (input ~protocols ~pending:stale [ build ~old:(manifest base_fns) (manifest retry_expand_fns) ]) in
+  Alcotest.(check (list string)) "expand again" [ "--protocol-expand Echo:retry" ] (P.expand_flags p3.splits);
+  expect "stale pending" (P.render p3) [ "note: Echo's pending contract (deploy two, for `retry` at fingerprint 01234567) no longer applies" ]
 
 let test_choice_added_order_across_builds () =
   (* front is isolated: its own build receives; back (shared) chooses. No
@@ -283,8 +424,13 @@ let test_choice_added_order_across_builds () =
                         [ build ~pools:[ "back" ] ~old:(manifest base_fns) shared_new;
                           build ~name:"front" ~pools:[ "front" ] ~old:(manifest base_fns) front_new ]) in
   Alcotest.(check int) "no split" 0 (List.length p.splits);
+  Alcotest.(check (list string)) "no expand flags" [] (P.expand_flags p.splits);
+  (match p.verdict with
+   | Protocol_split.One d -> Alcotest.(check (list string)) "receivers' build first" [ "front"; "shared" ] d.d_builds
+   | v -> Alcotest.failf "expected one deploy:\n%s" (Protocol_split.render v));
   Alcotest.(check (list string)) "receivers first" [ "front"; "back" ] (List.map (fun (pp : P.pool_plan) -> pp.pp_pool) p.pools);
-  expect "render" (P.render p) [ "3. Order and splits\n  1. pool front"; "pools receiving it (Echo.Client) go before pools choosing it" ]
+  expect "render" (P.render p) [ "3. Order and splits\n  1. pool front"; "pools receiving it (Echo.Client) go before pools choosing it" ];
+  refuse "render" (P.render p) [ "SPLIT (D21)" ]
 
 let unlabelled_v1 = {|mod App do
   protocol Echo do
@@ -310,27 +456,30 @@ let unlabelled_v2 = {|mod App do
 end
 |}
 
+(** A branch whose unlabelled message renumbers a later one is not rule one
+    (the wire tag moved): breaking, the moved tag named, a label suggested,
+    and no split. *)
 let test_renumbered_wire_tags () =
   let old_p = proto_named "Echo" unlabelled_v1 and new_p = proto_named "Echo" unlabelled_v2 in
-  match P.classify_proto (Some old_p) (Some new_p) with
-  | P.Choice_added ca ->
-    Alcotest.(check (list (pair string string))) "the later unlabelled message moves" [ ("Msg_Server_Client_1", "Msg_Server_Client_2") ]
-      ca.ca_renumbered;
-    let p = P.classify (input ~protocols:[ ("Echo", Some old_p, Some new_p) ]
-                          [ build ~old:(manifest base_fns) (manifest (replace_fn "Echo_Msg.fingerprint" "fp2" base_fns)) ]) in
-    expect "render" (P.render p) [ "renumbers unlabelled messages (Msg_Server_Client_1 -> Msg_Server_Client_2)"; "label those steps" ]
-  | _ -> Alcotest.fail "expected Choice_added"
+  (match P.classify_proto (Some old_p) (Some new_p) with
+   | P.Breaking why -> expect "why" why [ "Msg_Server_Client_1 is now Msg_Server_Client_2"; "Label them" ]
+   | _ -> Alcotest.fail "a renumbering branch is breaking");
+  let p = P.classify (input ~protocols:[ ("Echo", Some old_p, Some new_p) ]
+                        [ build ~old:(manifest base_fns) (manifest (replace_fn "Echo_Msg.fingerprint" "fp2" base_fns)) ]) in
+  Alcotest.(check int) "no split" 0 (List.length p.splits);
+  expect "render" (P.render p)
+    [ "5. What may be lost\n  protocol Echo: unlabelled messages change their wire tags (Msg_Server_Client_1 is now Msg_Server_Client_2)";
+      "no session forms between its old and new fingerprints"; "every node offers both fingerprints" ]
 
 let test_protocol_structure () =
-  let same = P.classify_proto (Some echo) (Some echo) in
-  Alcotest.(check bool) "same" true (same = P.Same);
+  Alcotest.(check bool) "same" true (P.classify_proto (Some echo) (Some echo) = P.Same);
   Alcotest.(check bool) "added" true (P.classify_proto None (Some echo) = P.Added);
   Alcotest.(check bool) "removed" true (P.classify_proto (Some echo) None = P.Removed);
   (match P.classify_proto (Some echo) (Some (proto_named "Echo" echo_v2_breaking)) with
    | P.Breaking _ -> () | _ -> Alcotest.fail "a payload change is breaking");
-  (* the JSON the baseline is kept in round-trips *)
-  let back = P.proto_of_json (P.proto_json (proto_named "Echo" retry_v2)) in
-  Alcotest.(check bool) "json round trip" true (back = Some (proto_named "Echo" retry_v2));
+  (* removing a branch is not rule one *)
+  (match P.classify_proto (Some (proto_named "Echo" retry_v2)) (Some (proto_named "Echo" retry_v1)) with
+   | P.Breaking _ -> () | _ -> Alcotest.fail "a removed branch is breaking");
   (* a branch added inside a loop *)
   let in_loop v = Printf.sprintf "mod App do\n  protocol L do\n    loop do\n      a: A -> B : Int\n      choose by B:\n        x -> B -> A : Int\n%s      end\n    end\n  end\nend\n" v in
   match P.classify_proto (Some (proto_named "L" (in_loop ""))) (Some (proto_named "L" (in_loop "        y -> B -> A : Int\n"))) with
@@ -413,20 +562,22 @@ let () =
         Alcotest.test_case "functions changed/added/removed: hot patch" `Quick test_hot_patch;
         Alcotest.test_case "a signature change is shown" `Quick test_signature_change_noted;
         Alcotest.test_case "changes the running base cannot swap restart" `Quick test_unslotted_changes;
+        Alcotest.test_case "a stdlib change restarts (stdlib actors are not slots)" `Quick test_stdlib_change_restart;
+        Alcotest.test_case "deploy hot refuses a stdlib change" `Quick test_deploy_hot_refuses_stdlib_change;
         Alcotest.test_case "state change: migrate_state, @compat, blocked" `Quick test_migration;
         Alcotest.test_case "message types: loss, migrate_msg, wrong old type" `Quick test_message_types;
         Alcotest.test_case "a breaking protocol change: hot patch + drain, live sessions" `Quick test_protocol_drain;
-        Alcotest.test_case "fingerprint moved under the same declaration" `Quick test_fingerprint_moved_same_declaration;
+        Alcotest.test_case "fingerprint moved with no deploy baseline" `Quick test_fingerprint_moved_no_baseline;
         Alcotest.test_case "a changed hook restarts its pool only" `Quick test_hook_changed_restart;
         Alcotest.test_case "placement: push; labels: restart" `Quick test_placement;
         Alcotest.test_case "C runtime, ABI and target changes restart" `Quick test_runtime_identity_restart;
         Alcotest.test_case "compaction: --compact and compact_after" `Quick test_compaction;
       ]);
     ("protocols", [
-        Alcotest.test_case "structure: same, added, removed, breaking, JSON, loops" `Quick test_protocol_structure;
-        Alcotest.test_case "an added branch in a monolith: the D21 split" `Quick test_choice_added_monolith_split;
+        Alcotest.test_case "versions: same, added, removed, breaking, loops" `Quick test_protocol_structure;
+        Alcotest.test_case "an added branch in a monolith: expand, then contract (D21)" `Quick test_choice_added_monolith_split;
         Alcotest.test_case "an added branch across builds: receivers first" `Quick test_choice_added_order_across_builds;
-        Alcotest.test_case "renumbered unlabelled messages" `Quick test_renumbered_wire_tags;
+        Alcotest.test_case "renumbered unlabelled messages: breaking, named" `Quick test_renumbered_wire_tags;
       ]);
     ("authority", [
         Alcotest.test_case "derived caps widening needs --grant-cap (D26)" `Quick test_derived_caps_widening;

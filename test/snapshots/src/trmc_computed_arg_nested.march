@@ -1,0 +1,25 @@
+-- TRMC shapes that used to be missed: a COMPUTED call argument (`a + 1`), whose
+-- `let` lowering nested inside the call's binding, and a NESTED `go` helper,
+-- which the analysis reported but the transform never rewrote.  Pins the
+-- post-lower shape and the post-TRMC destination-passing output for both.
+mod TrmcComputedArgNested do
+  needs IO.Console
+
+  @[no_warn_recursion]
+  fn ascending(a : Int, b : Int) : List(Int) do
+    if a >= b do Nil else Cons(a, ascending(a + 1, b)) end
+  end
+
+  @[no_warn_recursion]
+  fn squares(n : Int) : List(Int) do
+    fn go(i : Int) : List(Int) do
+      if i >= n do Nil else Cons(i * i, go(i + 1)) end
+    end
+    go(0)
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    println(List.sum_int(ascending(0, 5)))
+    println(List.sum_int(squares(5)))
+  end
+end

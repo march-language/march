@@ -164,15 +164,7 @@ let ctors_for_type ?(seen = []) (env : env) type_name =
      A single declaration (no cross-module clash) is left exactly as before, so
      this is behavior-preserving except on the collision it fixes; and it feeds
      only this exhaustiveness diagnostic, never codegen. *)
-  let matches =
-    StrMap.fold (fun k cis acc ->
-      if String.contains k '.' then acc
-      else
-        match List.find_opt (fun (ci : ctor_info) -> ci.ci_type = type_name) cis with
-        | Some ci -> (k, ci) :: acc
-        | None -> acc
-    ) env.ctors []
-  in
+  let matches = bare_ctors_of_type env.ctors type_name in
   let local_shadow =
     env.current_module <> ""
     && List.exists (fun (_, ci) -> ci.ci_module = env.current_module) matches

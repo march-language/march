@@ -775,6 +775,182 @@ mod TestClusterNode do
 
   end
 
+  -- ── live certificate replacement (distributed-deploys step 12b) ─────────
+
+  -- [name]'s certificate for key [v], signed by the operator, with [serial].
+  pfn signed_cert(name : String, v : Int, not_after : Int, serial : String) : NodeCert.Signed do
+    NodeCert.sign({ cert_of(name, v, not_after) with serial: serial }, op_sk())
+  end
+
+  -- node [me] in certificate mode (key 2), linked to [peer], whose
+  -- certificate as of the handshake is [pcert].
+  pfn certified_linked(me : String, peer : String, pcert : NodeCert.Cert) : (String, ClusterNode.CnState) do
+    let creds = { signed: signed_cert(me, 2, 2000000000, "serial-" ++ me), secret_key: node_sk(2),
+                  operator_pubkey: NodeCert.public_key(op_sk()), revoked: fn _ -> false }
+    let pid = ClusterNode.node_id_of(peer)
+    let st0 = ClusterNode.core_new({ cfg(me, Nil) with auth: ClusterAuth.Certified(creds) }, 1)
+    match ClusterNode.core_linked(ClusterNode.core_peer_cert(st0, pid, Some(pcert)), pid, peer, "127.0.0.1:7001", 1, 10, 11, pid, 99) do
+      (st1, _) ->
+        let out = (pid, st1)
+        out
+    end
+  end
+
+  pfn a_id() : String do ClusterNode.node_id_of("a") end
+
+  -- b's CERT_UPDATE to a: [signed], proved by key [v] for receiver [to].
+  pfn update_from_b(signed : NodeCert.Signed, v : Int, to : String) : List(Int) do
+    ClusterNode.sign_cert_update(signed, node_sk(v), ClusterNode.node_id_of("b"), to)
+  end
+
+  pfn serial_of(st : ClusterNode.CnState, id : String) : String do
+    match Map.get(st.certs, id, Map.str_cmp) do
+      Some(c) -> c.serial
+      None -> "none"
+    end
+  end
+
+  pfn refused(st : ClusterNode.CnState, b : String, frame : List(Int)) : String do
+    match ClusterNode.core_peer_cert_update(st, b, frame, 1000) do
+      Ok(_) -> "accepted"
+      Err(e) -> e
+    end
+  end
+
+  pfn own_serial(st : ClusterNode.CnState) : String do
+    match st.cfg.auth do
+      ClusterAuth.Certified(cr) -> cr.signed.cert.serial
+      ClusterAuth.Secret(_) -> "none"
+    end
+  end
+
+  pfn tag16(effs : List(ClusterNode.CnEffect), id : String) : List(List(Int)) do
+    List.filter(sends_to(effs, id), fn f -> PeerReader.tag_of(f) == 16)
+  end
+
+  describe "live certificate replacement" do
+
+    test "a peer's CERT_UPDATE replaces its certificate, and the link outlives the old one's expiry" do
+      -- b's certificate at the handshake expires at 1500 s; the update runs to 2000000000.
+      match certified_linked("a", "b", cert_of("b", 3, 1500)) do
+        (b, st) ->
+          match ClusterNode.core_peer_cert_update(st, b, update_from_b(signed_cert("b", 3, 2000000000, "serial-b2"), 3, a_id()), 1000) do
+            Err(e) -> assert (e == "accepted")
+            Ok((st2, c)) ->
+              assert (c.serial == "serial-b2")
+              assert (serial_of(st2, b) == "serial-b2")
+              match ClusterNode.core_tick(st2, 1600000) do
+                (st3, effs) ->
+                  assert (drops(effs) == Nil)
+                  match ClusterNode.core_tick(st3, 1700000) do
+                    (st4, effs2) ->
+                      -- no certificate drop (SWIM, with no acks in this pure
+                      -- test, may suspect b by now; that is not the claim)
+                      assert (drops(effs2) == Nil)
+                      assert (Map.get(st4.cert_dead, b, Map.str_cmp) == None)
+                      assert (not(List.member(List.append(event_texts(effs), event_texts(effs2)), "b dead: certificate expired")))
+                  end
+              end
+          end
+      end
+    end
+
+    test "without the update the same link is dropped at the old certificate's expiry" do
+      match certified_linked("a", "b", cert_of("b", 3, 1500)) do
+        (_b, st) ->
+          match ClusterNode.core_tick(st, 1600000) do
+            (_, effs) -> assert (drops(effs) != Nil)
+          end
+      end
+    end
+
+    test "a certificate for a NEW key is taken when the proof is by that key" do
+      match certified_linked("a", "b", cert_of("b", 3, 1500)) do
+        (b, st) ->
+          assert (refused(st, b, update_from_b(signed_cert("b", 9, 2000000000, "serial-b9"), 9, a_id())) == "accepted")
+          -- the old key cannot vouch for a certificate naming the new one
+          assert (refused(st, b, update_from_b(signed_cert("b", 9, 2000000000, "serial-b9"), 3, a_id()))
+                  == "the proof is not by the new certificate's key")
+      end
+    end
+
+    test "an update is refused, and the old certificate kept, unless it checks out as a handshake would" do
+      match certified_linked("a", "b", cert_of("b", 3, 1500)) do
+        (b, st) ->
+          -- a proof made for another receiver (replayed from b's link to c)
+          assert (refused(st, b, update_from_b(signed_cert("b", 3, 2000000000, "s2"), 3, ClusterNode.node_id_of("c")))
+                  == "the proof is not by the new certificate's key")
+          -- not the operator's
+          let forged = NodeCert.sign({ cert_of("b", 3, 2000000000) with serial: "s3" }, node_sk(5))
+          assert (refused(st, b, update_from_b(forged, 3, a_id())) == "certificate not signed by the cluster operator")
+          -- already expired
+          assert (refused(st, b, update_from_b(signed_cert("b", 3, 900, "s4"), 3, a_id())) == "certificate expired")
+          -- naming another node
+          assert (String.contains(refused(st, b, update_from_b(signed_cert("c", 3, 2000000000, "s5"), 3, a_id())), "names"))
+          -- revoked here
+          match ClusterNode.core_revoke(st, revocation("s6", op_sk())) do
+            (st2, _) -> assert (refused(st2, b, update_from_b(signed_cert("b", 3, 2000000000, "s6"), 3, a_id())) == "certificate revoked")
+          end
+          -- garbage
+          assert (refused(st, b, [1, 2, 3]) == "malformed CERT_UPDATE frame")
+          assert (serial_of(st, b) == "serial-b")
+      end
+    end
+
+    test "a peer with no certificate on record (shared-secret mode) takes no update" do
+      match linked_ab() do
+        (b, st, _) ->
+          assert (refused(st, b, update_from_b(signed_cert("b", 3, 2000000000, "s2"), 3, a_id())) == "this node runs in shared-secret mode")
+      end
+    end
+
+    test "replacing this node's certificate tells every linked peer, and the peer takes it" do
+      match certified_linked("a", "b", cert_of("b", 3, 2000000000)) do
+        (b, st) ->
+          match ClusterNode.core_replace_cert(st, signed_cert("a", 7, 2000000000, "serial-a7"), node_sk(7)) do
+            (st2, effs) ->
+              assert (own_serial(st2) == "serial-a7")
+              assert (List.length(tag16(effs, b)) == 1)
+              -- b's side: linked to a, holding the certificate a's handshake showed
+              match certified_linked("b", "a", cert_of("a", 2, 2000000000)) do
+                (a, st_b) ->
+                  let got = List.map(tag16(effs, b), fn f ->
+                    match ClusterNode.core_peer_cert_update(st_b, a, f, 1000) do
+                      Ok((_, c)) -> c.serial
+                      Err(e) -> e
+                    end)
+                  assert (got == ["serial-a7"])
+              end
+          end
+      end
+    end
+
+    test "a link formed after a replacement is sent the current certificate; one before any is not" do
+      match certified_linked("a", "b", cert_of("b", 3, 2000000000)) do
+        (_b, st) ->
+          let c = ClusterNode.node_id_of("c")
+          match ClusterNode.core_linked(st, c, "c", "127.0.0.1:7002", 1, 20, 21, c, 98) do
+            (_, effs) -> assert (tag16(effs, c) == Nil)
+          end
+          match ClusterNode.core_replace_cert(st, signed_cert("a", 2, 2000000000, "serial-a3"), node_sk(2)) do
+            (st2, _) ->
+              match ClusterNode.core_linked(st2, c, "c", "127.0.0.1:7002", 1, 20, 21, c, 98) do
+                (_, effs) -> assert (List.length(tag16(effs, c)) == 1)
+              end
+          end
+      end
+    end
+
+    test "a shared-secret node has no certificate to replace" do
+      match ClusterNode.core_replace_cert(ClusterNode.core_new(cfg("a", Nil), 1), signed_cert("a", 2, 2000000000, "s"), node_sk(2)) do
+        (st2, effs) ->
+          assert (effs == Nil)
+          assert (own_serial(st2) == "none")
+      end
+    end
+
+  end
+
   -- ── cross-node references (distributed-deploys step 11b) ────────────────
 
   pfn flagged(name : String, v : Int, flags : List(String)) : NodeCert.Cert do

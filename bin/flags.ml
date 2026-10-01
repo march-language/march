@@ -141,6 +141,9 @@ let hot_reload_prefix : string option ref = ref None
 let compile_so = ref false   (* --compile-so: emit a shared library patch (no @main) *)
 let signing_pubkey = ref ""  (* --signing-pubkey: base64 ed25519 public key (with --hot-reload) *)
 
+(* --target-cpu <cpu>: CPU passed to clang (-march= on x86, -mcpu= on arm64).
+   "" = the built-in baseline (-msse4.2 on x86, none on arm64). *)
+let target_cpu     = ref ""
 let opt_level      = ref (-1)   (* -1 = not set; 0..3 = explicit clang -ON *)
 let do_fmt         = ref false   (* --fmt: format source before compiling *)
 let target_str     = ref "native"  (* --target: native | wasm64-wasi | wasm32-wasi | wasm32-unknown-unknown *)

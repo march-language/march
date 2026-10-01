@@ -627,46 +627,6 @@ let ffi_flags_full ?(target_is_cross=false) (proj : Project.project) : (string, 
   | Ok rust_link_flags ->
     Ok (ffi_flags_of ~root:proj.Project.root proj ^ rust_link_flags)
 
-(** The diagnostic for running a [[ffi.rust]]-only project through the
-    interpreter, or [None] when there is nothing to say.
-
-    [cargo build --release] produces a STATIC [lib<name>.a], which can be
-    linked into a compiled binary but cannot be [dlopen]ed.  The compiler's
-    interpreter-FFI shim is built only from [[ffi] sources] (C files), so with
-    no C source there is no shim at all and every Rust extern would otherwise
-    die at its call site with the generic "symbol not found for interpreter
-    FFI" — indistinguishable from a genuinely missing symbol.
-
-    The check lives in forge rather than in the compiler because only forge
-    knows the archive came from [[ffi.rust]]: the compiler sees nothing but
-    an opaque [--ffi-link <path>].  It returns [None] when [interpreted] is
-    false (compiled builds link the archive fine) and when the project also
-    has [[ffi] sources] (a C shim exists, so the interpreter path is not
-    wholesale dead).  Pure, so forge/test/test_forge.ml pins the decision. *)
-let interpreted_rust_ffi_diagnostic ~interpreted (proj : Project.project)
-  : string option =
-  match proj.Project.ffi_rust with
-  | Some frc when interpreted && proj.Project.ffi_sources = [] ->
-    Some (Printf.sprintf
-      "warning: [ffi.rust] crate %S is only available in compiled mode.\n\
-      \  forge builds it as a static archive (lib%s.a), which the interpreter \
-       cannot load,\n\
-      \  so every extern it provides will fail with \"symbol not found for \
-       interpreter FFI\".\n\
-      \  Run it compiled instead: `forge run --compiled`, `forge build`, or \
-       `forge test`\n\
-      \  (without --coverage or MARCH_TEST_INTERPRETER=1).\n"
-      frc.Project.frc_path frc.Project.frc_lib)
-  | _ -> None
-
-(** Print [interpreted_rust_ffi_diagnostic] to stderr, once, before an
-    interpreted run.  Non-fatal: a program (or a test file) that never reaches
-    a Rust extern still runs fine under the interpreter. *)
-let warn_interpreted_rust_ffi (proj : Project.project) =
-  match interpreted_rust_ffi_diagnostic ~interpreted:true proj with
-  | Some msg -> prerr_string msg; flush stderr
-  | None -> ()
-
 (** Filename extension for a build's output, by target.  Shared by the project
     build and by the single-file [forge run FILE --compiled] path, which names
     a temp output the same way. *)
@@ -892,9 +852,13 @@ let protocol_flags ~root (sources : string list) : string =
     [<name><suffix>] so the builds of one topology do not overwrite each
     other; [topology_env] picks the overlay the gate digests. A project with a
     topology.toml is always compiled with [--topology .forge/topology.json]:
-    its [main] is generated from it (build step 3). *)
+    its [main] is generated from it (build step 3). [protocol_flags], when
+    given, replaces the build's own protocol flags ([protocol_flags] below:
+    the compiler's baselines in [.forge/protocols/]): [forge deploy] builds
+    against the environment's deploy baselines instead, and must not write
+    the compiler's. *)
 let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
-    ?(output_suffix = "") ?topology_env ?(extra_flags = "") () =
+    ?(output_suffix = "") ?topology_env ?(extra_flags = "") ?protocol_flags:protocol_flags_override () =
   let t0 = Unix.gettimeofday () in
   (* Normalize cross-target aliases to the compiler's canonical form and derive
      a per-target output subdir so a Linux build never clobbers the host binary. *)
@@ -1054,7 +1018,11 @@ let build ~release ?(dump_phases=false) ?(frozen=false) ?target ?topology_pools
                | _ -> None)
             | _ -> None
           in
-          let protocol_flags = protocol_flags ~root:proj.Project.root (entry_path :: files) in
+          let protocol_flags =
+            match protocol_flags_override with
+            | Some f -> f
+            | None -> protocol_flags ~root:proj.Project.root (entry_path :: files)
+          in
           let (rc, ce, cw) = compile_entry ~lib_path_env ~ffi_flags:(ffi_flags ^ topology_flags ^ protocol_flags ^ extra_flags) ~output ~release ~dump_phases ?target
               ?hcr ~pin_main:proj.Project.pin_main entry_path in
           print_build_summary ~t0 ~errors:(te + ce) ~warnings:(tw + cw);

@@ -122,6 +122,13 @@ mod Main do
     -- mints a fresh pid per send, pid_of_int takes a reference for it (since
     -- 2026-09-14), and `send` keeps it. So the count moves by the number of
     -- sends and by nothing the handlers do.
+    --
+    -- "multiply owned" printed true until 2026-09-28 only because the
+    -- `get_actor_field(Actor.pid_from_int(...))` call above leaked its pid
+    -- (get_actor_field was classed as consuming its Pid and never released
+    -- it). It borrows the Pid now, so the live actor holds just the runtime's
+    -- own reference here: false is the correct value, not a lost reference.
+    -- specs/progress/2026-09-28-get-actor-field-pid-and-result-ownership.md.
     let rc_before = actor_rc(victim)
     println("victim is multiply owned: " ++ bool_to_string(rc_before > 1))
     pump(intro, victim, 5)

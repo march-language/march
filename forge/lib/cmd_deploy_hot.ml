@@ -50,6 +50,9 @@ type manifest = {
   target : string option;
   hcr_abi : string option;
   module_prefix : string option;
+  stdlib_hash : string option;
+    (** [# stdlib_hash]: digest of the standard library source the artifact
+        was compiled against; None for a manifest written before 2026-09-30 *)
   functions : fn_manifest list;
   roles     : role_manifest list;  (** [] for a manifest written before step 10 *)
 }
@@ -84,6 +87,7 @@ let parse_manifest path : (manifest, string) result =
     let cas_hash = ref "" in
     let version = ref 1 in
     let target = ref None and hcr_abi = ref None and module_prefix = ref None in
+    let stdlib_hash = ref None in
     let fns = ref [] in
     let roles = ref [] in
     (try while true do
@@ -101,6 +105,8 @@ let parse_manifest path : (manifest, string) result =
            hcr_abi := Some (String.trim (String.sub line 9 (String.length line - 9)))
         else if String.length line > 15 && String.sub line 0 15 = "# module_prefix" then
            module_prefix := Some (String.trim (String.sub line 15 (String.length line - 15)))
+        else if String.length line > 13 && String.sub line 0 13 = "# stdlib_hash" then
+           stdlib_hash := Some (String.trim (String.sub line 13 (String.length line - 13)))
        end else if String.length line >= 5 && String.sub line 0 5 = "ROOT " then begin
          (* Legacy pre-2026-07-04 manifests may still carry a
             "ROOT cap_root=<hex>" line (whole-artifact union, now retired).
@@ -165,8 +171,34 @@ let parse_manifest path : (manifest, string) result =
     if !cas_hash = "" then Error (path ^ ": missing # cas_hash line")
     else Ok { version = !version; cas_hash = !cas_hash; target = !target;
               hcr_abi = !hcr_abi; module_prefix = !module_prefix;
+              stdlib_hash = !stdlib_hash;
               functions = List.rev !fns; roles = List.rev !roles }
   with Sys_error m -> Error m
+
+(** Did the standard library change between the running build ([prior]) and
+    this one?  [Some reason] when both manifests record a [# stdlib_hash] and
+    the two differ.
+
+    A stdlib actor has no dispatch slot (owner decision 2026-09-30,
+    [Hot_reload.is_slot_actor_dispatch] in the compiler), and no stdlib
+    function is on the boundary, so no hot patch can deliver a stdlib change:
+    a stdlib change comes with a toolchain or language change, which is a
+    restart deploy.  Without this check `forge deploy hot` found nothing to
+    activate (every changed function was unslotted) and reported the server
+    up to date, silently leaving the old stdlib running.  [Deploy_plan]
+    classifies the affected pools as a restart with this reason; [run]
+    refuses with it.  A manifest written before the header existed gives
+    None: that case is not detectable from the manifests. *)
+let stdlib_change ~(prior : manifest) ~(current : manifest) : string option =
+  match prior.stdlib_hash, current.stdlib_hash with
+  | Some o, Some n when o <> n ->
+    let short h = if String.length h > 12 then String.sub h 0 12 else h in
+    Some (Printf.sprintf
+            "the standard library changed (stdlib %s -> %s): stdlib code, its actors included, \
+             has no hot-reload slot, so a patch cannot deliver it; a stdlib change ships with a \
+             toolchain change and deploys by restart"
+            (short o) (short n))
+  | _ -> None
 
 (** True iff [manifest] is a genuine pre-Phase-5C legacy manifest — i.e. NO
     function line carries a `caps=` field at all. A current manifest always
@@ -545,9 +577,14 @@ let save_manifest_baseline ~new_manifest_path ~prev_manifest_path =
 
 (* ─── Socket I/O ─────────────────────────────────────────────────────────── *)
 
+(** What a server said about sequenced releases (DD step 12-pre): not asked
+    yet, a server that predates them, or the highest release it holds. *)
+type release_head = Head_unknown | Head_unsupported | Head of int
+
 type conn = {
   fd  : file_descr;
   buf : Buffer.t;
+  mutable release : release_head;
 }
 
 type hcr_info = { target : string; abi : string; prefix : string; key_hex : string }
@@ -565,7 +602,7 @@ let parse_hcr_info line : (hcr_info, string) result =
   | ["ERR"; "unknown_command"] -> Error "legacy server: target identity cannot be verified"
   | _ -> Error "invalid HCR_INFO response"
 
-let conn_of_fd fd = { fd; buf = Buffer.create 256 }
+let conn_of_fd fd = { fd; buf = Buffer.create 256; release = Head_unknown }
 
 let send_line conn s =
   let msg = s ^ "\n" in
@@ -592,6 +629,74 @@ let recv_line conn =
       loop ()
   in
   loop ()
+
+(* ─── Sequenced releases (DD step 12-pre) ─────────────────────────────────
+
+   A signed line alone can be replayed for ever, so every signed line forge
+   sends to a server that knows releases is wrapped as
+
+     SEQ <seq> <id> <sig64> <signed line>
+
+   signed over "SEQ <seq> <id> <signed line>" (runtime/march_reload.c,
+   "Sequenced releases").  One forge invocation is one release: [id] is
+   random, [seq] is fixed at first use as max(now in ms, the first server's
+   head + 1), so releases from one operator only grow and two operators'
+   concurrent releases differ in id (a server that already holds a release
+   with the same number refuses the other as a fork).  A server that holds a
+   newer release answers [ERR stale_release]: another deploy got there first,
+   or this machine's clock is behind; re-run. *)
+
+let release_id = lazy (
+  let st = Random.State.make_self_init () in
+  String.init 32 (fun _ -> "0123456789abcdef".[Random.State.int st 16]))
+
+let release_seq : int option ref = ref None
+
+(** The server's release head, asked once per connection. *)
+let release_head conn =
+  match conn.release with
+  | Head_unknown ->
+    let h =
+      try
+        send_line conn "RELEASE_HEAD";
+        match String.split_on_char ' ' (recv_line conn) with
+        | "HEAD" :: n :: _ -> (match int_of_string_opt n with Some n -> Head n | None -> Head_unsupported)
+        | _ -> Head_unsupported
+      with Failure _ -> Head_unsupported in
+    conn.release <- h;
+    h
+  | h -> h
+
+(** [wrap_release ~seq ~id ~sk line]: the SEQ wrapper, a pure function. *)
+let wrap_release ~seq ~id ~sk (line : string) : string =
+  let signed = Printf.sprintf "SEQ %d %s %s" seq id line in
+  let sig_b64 =
+    March_ed25519.Ed25519.sig_to_base64 (March_ed25519.Ed25519.sign_str signed sk) in
+  Printf.sprintf "SEQ %d %s %s %s" seq id sig_b64 line
+
+(** [line] as this invocation's release when the server knows releases,
+    unchanged for a server that predates them. *)
+let as_release conn ~sk (line : string) : string =
+  match release_head conn with
+  | Head_unknown | Head_unsupported -> line
+  | Head h ->
+    let seq = match !release_seq with
+      | Some s -> s
+      | None ->
+        let s = max (int_of_float (Unix.gettimeofday () *. 1000.)) (h + 1) in
+        release_seq := Some s; s in
+    wrap_release ~seq ~id:(Lazy.force release_id) ~sk line
+
+(** A refusal of a release, in words; [None] for any other answer. *)
+let describe_release_refusal (resp : string) : string option =
+  let starts p = String.length resp >= String.length p && String.sub resp 0 (String.length p) = p in
+  if starts "ERR stale_release" then
+    Some (resp ^ ": the node holds a newer release (another deploy got there first, or this machine's clock is behind); re-run")
+  else if starts "ERR release_fork" then
+    Some (resp ^ ": the node holds a different release with the same number (a concurrent deploy); re-run")
+  else if resp = "ERR release_required" then
+    Some (resp ^ ": the node only accepts sequenced releases; this forge sent an unwrapped line")
+  else None
 
 let query_hcr_info_connected conn : (hcr_info, string) result =
   try send_line conn "HCR_INFO"; parse_hcr_info (recv_line conn)
@@ -869,7 +974,7 @@ let topology_command ~sk ~(body : string) : string * string =
     [Error] with the server's answer. *)
 let push_topology_conn conn ~sk ~(body : string) : (string, string) result =
   let (cmd, digest) = topology_command ~sk ~body in
-  send_line conn cmd;
+  send_line conn (as_release conn ~sk cmd);
   match recv_line conn with
   | "READY" ->
     send_binary conn (Bytes.of_string body) 0 (String.length body);
@@ -959,6 +1064,22 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
     ?(old_manifest_path="") ?(provided_epoch=0) ?(grant_caps=([] : string list))
     ?(no_cap_gate=false) () =
   without_sigpipe @@ fun () ->
+  (* 0. A stdlib change cannot ship as a patch (no stdlib function or actor
+     has a dispatch slot): refuse before connecting, rather than find nothing
+     to activate and report the server up to date. *)
+  let stdlib_refusal =
+    if old_manifest_path <> "" && Sys.file_exists old_manifest_path then
+      match parse_manifest old_manifest_path with
+      | Ok prior -> stdlib_change ~prior ~current:manifest
+      | Error _ -> None
+    else None
+  in
+  match stdlib_refusal with
+  | Some why ->
+    Printf.eprintf "error: %s\n" why;
+    Printf.eprintf "error: deploy aborted, nothing was activated: deploy this build with a restart\n%!";
+    Error "the standard library changed: a hot deploy cannot deliver it, restart instead"
+  | None ->
   let local_socket =
     if tunnel then Printf.sprintf "/tmp/march_deploy_%d.sock" (Unix.getpid ()) else remote_socket in
 
@@ -1401,6 +1522,7 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
                   Printf.sprintf "%s %s %d epoch:%d cap_root:%s role_caps:%s caps:%s roles:%s callers:%s"
                     wire_head sig_b64 migrate_required epoch_n this_cap_root role_caps
                     caps_csv roles callers_csv in
+              let cmd = as_release conn ~sk cmd in
               let resp = send_waiting ~send_line ~recv_line conn cmd in
               if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin
                 Printf.printf "  activated: %s\n%!" fm.fn_name;
@@ -1439,7 +1561,8 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
                   fm.fn_name resp;
                 incr failed
               end else begin
-                Printf.eprintf "  FAILED %s: %s\n%!" fm.fn_name resp;
+                Printf.eprintf "  FAILED %s: %s\n%!" fm.fn_name
+                  (Option.value (describe_release_refusal resp) ~default:resp);
                 incr failed
               end
             end else begin
@@ -1456,6 +1579,7 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
               let sig_b64 = March_ed25519.Ed25519.sig_to_base64 sig_bytes in
               let cmd = Printf.sprintf "%s %s %d epoch:%d callers:%s"
                 wire_head sig_b64 migrate_required epoch_n callers_csv in
+              let cmd = as_release conn ~sk cmd in
               let resp = send_waiting ~send_line ~recv_line conn cmd in
               if String.length resp >= 2 && String.sub resp 0 2 = "OK" then begin
                 Printf.printf "  activated: %s\n%!" fm.fn_name;
@@ -1466,7 +1590,8 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
                   fm.fn_name;
                 incr failed
               end else begin
-                Printf.eprintf "  FAILED %s: %s\n%!" fm.fn_name resp;
+                Printf.eprintf "  FAILED %s: %s\n%!" fm.fn_name
+                  (Option.value (describe_release_refusal resp) ~default:resp);
                 incr failed
               end
             end

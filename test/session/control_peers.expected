@@ -1,0 +1,40 @@
+-- scripted Control against the real Agent
+script: hello from r1 at seq 41
+script: r1 step 1 ok: applied
+script: again, r1 step 1 ok: already applied
+script: r1 step 1 FAILED: ERR unknown_request
+script: report from r1 at seq 42
+r1: render@mr2 topology t41, 1 lines applied
+queued after: 0
+-- scripted Agent against the real Control
+script: ordered step 1 of release 42: activate(render) want mr2, 1 line(s)
+script: polled, leader holds 42
+script: polled again (gate), leader holds 42
+script: bye, session budget spent
+leader: step 1: waiting, gate healthy(5s): r1 healthy for 1000ms of 5000ms
+-- a rollout over Ctl sessions, the leader replaced mid-rollout
+leader replaced after round 1 (step 2: apply to []; lines applied r1 1, r2 0, r3 0, w1 0)
+after 4 rounds: complete
+r1: render@mr2 topology t42, 2 lines applied
+r2: render@mr2 topology t42, 2 lines applied
+r3: render@mr2 topology t42, 2 lines applied
+w1: web@mw1 topology t42, 1 lines applied
+closes: 32 of 32, cancels: 0, stalls: 0
+-- a refused order halts the rollout
+after 1 rounds: step 1: HALTED on r1: ERR bad_signature
+r1: render@mr1 topology t41, 0 lines applied
+r2: render@mr1 topology t41, 0 lines applied
+r3: render@mr1 topology t41, 0 lines applied
+w1: web@mw1 topology t41, 0 lines applied
+-- CtlFetch: the real roles, a known and an unknown hash
+fetched h1: 00112233445566778899aabbccddeeff00
+fetched nope: ""
+script: chunk at 0: 0011223344556677
+script: chunk at 16: 8899aabbccddeeff
+script: last chunk at 32: 00
+-- chaos: Control against the real Agent, 30 seeds
+closes: 60 of 60, cancels: 0, stalls: 0
+-- chaos: Agent against the real Control, 30 seeds
+closes: 60 of 60, cancels: 0, stalls: 0
+-- chaos: CtlFetch, each role against the real other, 30 seeds
+closes: 120 of 120, cancels: 0, stalls: 0, real agents finished: 30 of 30
