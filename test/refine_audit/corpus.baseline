@@ -578,6 +578,8 @@ native_unboxed_join_slot: coverage audit (user + stdlib): 120 enforced, 0 inert 
 native_unboxed_join_slot: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_unit_callback_zero_arg: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_unit_callback_zero_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_unit_to_string: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_unit_to_string: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_user_actor_named_like_stdlib: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_user_actor_named_like_stdlib: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_user_fn_named_like_builtin: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced

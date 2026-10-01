@@ -34,3 +34,7 @@ and routed `show` to the generic `to_string` builtin
 - The regression program printed `0` on every one of its seven legs under
   `main`'s compiler (`086a577e5`, built in a separate worktree) and `()` on every
   leg with the fix, matching the interpreter.
+- `dune build --root . @test/runtest` (every native golden plus the Alcotest
+  suites) and the TIR snapshots: no golden or snapshot changed; the only failures
+  are `hcr stdlib actors` cases 3 and 4, which fail identically on `main`'s own
+  build. `audit-baseline` gained the two lines for the new test (regenerated).
