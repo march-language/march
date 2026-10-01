@@ -87,7 +87,8 @@ ocaml-build (ubuntu, macos) ─┬─ property-tests (per OS) × soundness | tir
 | `cross-linux-oracle` | Cross-compiles the golden corpus to linux/amd64 with `zig cc` and checks output is byte-identical to the native build. | A cross-compilation or target-flag regression. |
 
 **What CI does not cover:** Linux arm64 (only built, by `build.yml`), Windows,
-and the tests quarantined out of `runtest` (run informationally by the nightly).
+the tests quarantined out of `runtest` (run informationally by the nightly), and
+`test/stdlib/test_properties.march` (run by the nightly, not per PR).
 
 ## `nightly.yml`
 
@@ -101,7 +102,10 @@ and the tests quarantined out of `runtest` (run informationally by the nightly).
    `*_quarantined` dune alias; all green is the cue to un-quarantine.
 3. `stdlib-docs-smoke` checks the external `march_doc` generator still builds
    with this compiler.
-4. `version` → `build` (via `build.yml`) → `publish` (GitHub prerelease +
+4. `stdlib-properties` runs `test/stdlib/test_properties.march` (the
+   `@test/stdlib-march-properties` alias, ~4 minutes, too slow for
+   `runtest`). A red run is a real regression; it does not gate `publish`.
+5. `version` → `build` (via `build.yml`) → `publish` (GitHub prerelease +
    `nightly-manifest.json`, moves the `nightly` tag) → `prune` (keeps the last 30).
 
 Every job checks out the commit `gate` picked.

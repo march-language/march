@@ -749,6 +749,10 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **`test/stdlib/test_properties.march` now runs in CI, nightly.** Its 240
+  property tests (about 4 minutes) were on a dune alias nothing ran. The
+  nightly workflow's new `stdlib-properties` job runs them; they stay out of
+  the per-PR `dune runtest`, which they would slow too much.
 - **The standard library's actors are no longer hot-reload slots.** Under
   `--hot-reload`, only your own actors' dispatch functions get a slot; the
   stdlib's (the cluster node that answers SWIM pings, session endpoints, the
