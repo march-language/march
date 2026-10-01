@@ -1,0 +1,32 @@
+-- A tuple pattern whose bound fields are MOVED into a constructor.  The case
+-- arm binds each field to a `$f` temporary (moved when the tuple is unique,
+-- incremented when shared) and then binds the pattern variable to it.  The
+-- pattern variable must take over that reference, not add a second one: the
+-- extra increment is never released, so each call leaked its moved fields.
+-- The constructor-pattern variant (`Raw(a, n, c)`) is the control.
+mod TupleDestructureMovedFields do
+  needs IO.Console
+
+  type Box = Box(String, String)
+  type Raw = Raw(String, Int, String)
+
+  pfn keep(b : Box) : Box do b end
+
+  pfn from_tuple(t : (String, Int, String)) : Box do
+    match t do
+      (a, n, c) -> keep(Box(a, c))
+    end
+  end
+
+  pfn from_ctor(r : Raw) : Box do
+    match r do
+      Raw(a, n, c) -> keep(Box(a, c))
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let _ = from_tuple(("a", 1, "b"))
+    let _ = from_ctor(Raw("a", 1, "b"))
+    println("done")
+  end
+end

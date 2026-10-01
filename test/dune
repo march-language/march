@@ -2416,6 +2416,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/niche_aggregate_payload_leak_probe.expected native_niche_aggregate_payload_leak_probe.out)))
 
+; ── A record field that is the RESULT of a scope owning the record was
+; released with the record (use-after-free once the record was the last
+; owner; two-node cluster_fd_release). Both backends diffed against ONE
+; .expected, the interpreter's.
+(rule
+ (targets native_record_field_tail_projection native_record_field_tail_projection.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/record_field_tail_projection.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_record_field_tail_projection
+        native/record_field_tail_projection.march)
+   (with-stdout-to native_record_field_tail_projection.out
+        (system "./native_record_field_tail_projection")))))
+
+(rule
+ (targets interp_record_field_tail_projection.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/record_field_tail_projection.march))
+ (action
+  (with-stdout-to interp_record_field_tail_projection.out
+    (run %{exe:../bin/main.exe} native/record_field_tail_projection.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_field_tail_projection.expected native_record_field_tail_projection.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_field_tail_projection.expected interp_record_field_tail_projection.out)))
+
 ; ── A join whose arms all BUILD one unboxed aggregate gets a struct-typed
 ; slot (no box, nothing to free): two-arm if, three-arm match, else-if chain,
 ; Option match (niche slot), and a mixed join that keeps the boxed slot and
@@ -2547,6 +2581,45 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/process_handle_leak_probe.expected native_process_handle_leak_probe.out)))
+
+; A tuple pattern's case arm gets each field as an OWNED reference, but Perceus
+; treated every tuple scrutinee's fields as borrowed: an escaping pattern
+; variable took a second reference nothing released and a dead field was never
+; dropped. Red before the fix: four legs read `flat: false`. Expected output
+; is the interpreter's (see the interp_ rule below).
+; specs/progress/2026-09-30-compiled-tuple-destructure-leaks-moved-fields.md
+(rule
+ (targets native_tuple_destructure_leak_probe native_tuple_destructure_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/tuple_destructure_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_tuple_destructure_leak_probe
+        native/tuple_destructure_leak_probe.march)
+   (with-stdout-to native_tuple_destructure_leak_probe.out
+        (system "./native_tuple_destructure_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/tuple_destructure_leak_probe.expected native_tuple_destructure_leak_probe.out)))
+
+; The same file interpreted: the printed leg results are the correctness
+; golden (the interpreter's live_allocs() never grows, so its `flat:` column
+; is all true), and the compiled run is diffed against the same .expected.
+(rule
+ (targets interp_tuple_destructure_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/tuple_destructure_leak_probe.march))
+ (action
+  (with-stdout-to interp_tuple_destructure_leak_probe.out
+    (run %{exe:../bin/main.exe} native/tuple_destructure_leak_probe.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/tuple_destructure_leak_probe.expected interp_tuple_destructure_leak_probe.out)))
 
 ; ── Regression: float_nan / float_infinity / float_neg_infinity /
 ; float_epsilon / float_is_nan / float_is_infinite / typed_array_slice

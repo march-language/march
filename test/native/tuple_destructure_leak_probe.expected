@@ -1,0 +1,8 @@
+moved fields = 220, flat: true
+dead fields = 390, flat: true
+tuple live after = 220, flat: true
+nested pattern = 220, flat: true
+borrowed list elements = 880, flat: true
+borrowed tuple parameter = 840, flat: true
+pair after: ab40cd40
+nested after: ef40ghij40

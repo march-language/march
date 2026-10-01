@@ -465,6 +465,18 @@ git log is authoritative for exact commits.
   silently skipped the check. It is now deferred until the whole module run and
   requires the importee's full declared set (fail-closed), so the same program
   is rejected in either declaration order.
+- **Destructuring a tuple and moving its fields on no longer leaks in compiled
+  programs.** `match t do (a, _, c) -> f(Box(a, c)) end` leaked the moved fields
+  (two objects per call), and a field the pattern never used was never freed.
+  The compiler treated a tuple pattern's fields as borrowed although the match
+  hands them over as owned; they now follow the same ownership as a constructor
+  pattern's.
+- **A record field returned out of the scope that owns the record is no longer
+  freed with it (compiled).** `let a = match f() do Some(m) -> m.addr ... end`
+  handed the caller a String the record still owned, and it was freed when
+  the record was dropped: a use-after-free once the record held the last
+  reference (it crashed a cluster node on a peer reconnect). The field now
+  gets its own reference first.
 - **`Process.run_stream` works in compiled programs and no longer leaks.** The
   compiled runtime returned the raw stdout String under the `Seq(String)` type
   (any `Seq` operation on it panicked) and leaked three objects per call. Both
