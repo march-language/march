@@ -5,6 +5,48 @@
 **Depends on:** `specs/plans/2026-09-30-nativearray-fold-inline-loop.md` for the
 generalized unboxed-clone helper (land that first; this spec reuses it).
 
+## As built (2026-10-01)
+
+Implemented in `lib/tir/hof_spec.ml`, wired into `lib/tir/contract_pipeline.ml`.
+Where it differs from the design below, on purpose:
+
+- **The clone keeps the closure parameter.** The design removed it from the
+  signature. Keeping it means the same closure value is still passed, so no
+  ownership changes at all; only `call_ptr f(...)` becomes the direct
+  `EApp(apply, f :: args)` form `Known_call` already produces. Perceus and the
+  rest of the pipeline handle that form as they always have.
+- **No stdlib rewrite was needed.** `List.map`, `filter` and `filter_map` are now
+  written in natural recursion (main changed them for TRMC), so their closure is
+  already a static argument. TRMC splits `map` into an entry and a `$dps` loop;
+  a worklist carries the known closure into each clone's body, so the loop is
+  specialized too. Functions whose callback reaches a local `go` helper
+  (`each`, `scan_left`, `zip_with`) are not covered.
+- **Opt does most of Part 1's work.** Once the call is direct, Opt's inliner
+  usually inlines the lambda body into the clone, so no call is left at all.
+  `redirect_unboxed` (the `$ufast$` clone) covers direct calls the inliner
+  leaves in place.
+- **Reachable functions only.** Every program lowers the whole stdlib.
+  Specializing every call site minted 939 clones for a small program and cost
+  about 8% compile time; restricting call-site rewriting to functions reachable
+  from the program's roots (`Dce.reachable_fns`, which fails open) brought it to
+  12 clones and +0.1%.
+- **Off under hot reload**, for JS, and with `MARCH_NO_HOF_SPEC=1` (also a CAS
+  key tag, so an A/B run never reuses the other variant's binary).
+- **Int and non-scalar lambdas are specialized too**, answering the open
+  question below: the pass is the same, and making the call direct costs
+  nothing.
+
+Measured (`bench/float_closure_calls.march`, M3 Max, best of 3 runs, same
+compiler with the pass on and off): Float `fold_left` 192.3 ms to 8.5 ms
+(22.6×), Float `map` 192.0 ms to 65.6 ms (2.9×), Int `fold_left` 11.4 ms to
+10.2 ms. The 2× target against the hand-written loop is **not** met: Float
+`fold_left` is 8.5 ms against 2.6 ms. The remaining cost is one closure
+refcount increment per iteration (a runtime call; it is balanced, not a leak)
+plus the scheduler yield check. The inline RC fast path
+(`specs/plans/2026-09-30-inline-rc-fast-path.md`) is the natural next step for
+it. `map` stays slower than `fold_left` because a `List(Float)` stores its
+elements boxed.
+
 ## Problem
 
 Every closure call uses one erased ABI: arguments and results are `ptr`, Ints

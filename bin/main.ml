@@ -1099,6 +1099,10 @@ let codegen_cas_tags () =
   (* MARCH_NO_INLINE_RC=1 turns off the inline refcount fast path, which changes
      the emitted code without changing the compiler binary. *)
   @ (if Lazy.force March_tir.Llvm_rc_inline.env_disabled then ["noinlinerc"] else [])
+  (* MARCH_NO_HOF_SPEC=1 turns off Hof_spec, which changes the emitted code
+     without changing the compiler binary: without this tag an A/B run reuses
+     whichever variant was cached first. *)
+  @ (if Lazy.force March_tir.Contract_pipeline.hof_spec_env_disabled then ["nohofspec"] else [])
 
 (** Parse --target string into Llvm_emit.target_config. *)
 let parse_target s =
