@@ -107,6 +107,14 @@ let builtin_type_defs : Tir.type_def list = [
   Tir.TDVariant ("List", [("Nil", []); ("Cons", [Tir.TVar "a"; Tir.TCon ("List", [Tir.TVar "a"])])]);
 ]
 
+(** Record whether the actor declared at [span] is the standard library's
+    (loader provenance, see [Hot_reload.is_stdlib_actor_fn]): a stdlib
+    actor's dispatch fn gets no hot-reload slot. *)
+let note_actor_provenance (span : Ast.span) (fns : Tir.fn_def list) : unit =
+  Hot_reload.note_actor_fns
+    ~stdlib:(March_typecheck.Typecheck_builtins.span_is_stdlib span)
+    (List.map (fun (fd : Tir.fn_def) -> fd.Tir.fn_name) fns)
+
 (** Declaration-site mailbox bounds, keyed by bare actor name (the spawn
     site names the actor bare too). Reset per module. *)
 let rec collect_actor_mailboxes decls =
@@ -238,6 +246,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   Hashtbl.reset _alias_candidates;
   Hashtbl.reset _alias_reported;
   Handler_owner.reset ();
+  Hot_reload.reset_actor_provenance ();
   Migrate_msg_pins.reset ();
   _lowered_modules := Hashtbl.create 8;
   (* Entry-file top-level fns named like a builtin that has its own C symbol
@@ -793,8 +802,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
            } in
            top_lets := (v, rhs) :: !top_lets
          | _ -> ())
-      | Ast.DActor (_, name, actor_def, _) ->
+      | Ast.DActor (_, name, actor_def, span) ->
         let (new_types, new_fns) = Lower_actor.lower_actor env ~hot_reload name.txt actor_def in
+        note_actor_provenance span new_fns;
         types := List.rev_append new_types !types;
         fns   := List.rev_append new_fns   !fns
       | Ast.DMod (mod_name, _, inner_decls, _) ->
@@ -945,7 +955,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 let short = ad.alias_name.Ast.txt in
                 if not (Hashtbl.mem !_module_aliases short) then
                   Hashtbl.replace !_module_aliases short full_path
-              | Ast.DActor (_, name, actor_def, _) ->
+              | Ast.DActor (_, name, actor_def, span) ->
                 (* Actors defined inside a module block need the same spawn/handler
                    glue as top-level actors.  The spawn symbol uses the actor's
                    short name (e.g. "Pool_spawn"), not the module-qualified name,
@@ -955,6 +965,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    the linker can resolve them (e.g. close_all → Pool.close_all). *)
                 let (new_types, new_fns) = Lower_actor.lower_actor mod_env ~hot_reload name.txt actor_def in
                 let renamed_fns = List.map (Lower_decls.rename_scoped_vars scopes) new_fns in
+                note_actor_provenance span renamed_fns;
                 (* The synthesized fn names above are BARE by contract (the
                    spawn symbol and the HCR manifest both assert the short
                    spelling), so the name cannot say which module declared the

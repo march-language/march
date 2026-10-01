@@ -493,10 +493,12 @@ let is_actor_msg_name (tcon_name : string) : bool =
   let nl = String.length tcon_name and sl = String.length sfx in
   nl > sl && String.sub tcon_name (nl - sl) sl = sfx
 
-(** True if [fn_name] ends in the actor-dispatch-fn suffix ("..._dispatch").
-    Mirrors the two byte-identical inline copies (llvm_emit.ml's [emit_fn]
-    visibility-prefix decision and [emit_module]'s
-    [is_actor_dispatch_fn]). *)
+(** True if [fn_name] ends in the actor-dispatch-fn suffix ("..._dispatch"):
+    ANY actor's dispatch fn, the stdlib's included.  Right for the runtime-call
+    ABI ([Llvm_emit.clo_wrap_borrowed]: the message loop hands over no
+    reference, whoever declared the actor).  WRONG for "does this actor have a
+    hot-reload slot": use [Hot_reload.is_slot_actor_dispatch], which leaves the
+    stdlib's actors off the boundary by loader provenance. *)
 let is_actor_dispatch_fn (fn_name : string) : bool =
   let sfx = actor_dispatch_suffix in
   let nl = String.length fn_name and sl = String.length sfx in

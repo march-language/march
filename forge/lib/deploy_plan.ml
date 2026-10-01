@@ -591,7 +591,7 @@ let classify (i : input) : plan =
           | Some x -> x
           | None -> ({ b_name = bname; b_pools = [ p.pool_name ]; b_old = None;
                        b_new = { Cmd_deploy_hot.version = 1; cas_hash = ""; target = None; hcr_abi = None;
-                                 module_prefix = None; functions = []; roles = [] };
+                                 module_prefix = None; stdlib_hash = None; functions = []; roles = [] };
                        b_old_schemas = []; b_new_schemas = []; b_old_runtime = None; b_new_runtime = None;
                        b_slots = None },
                      { changed = []; added = []; removed = []; sig_changed = [] }, [])
@@ -616,6 +616,11 @@ let classify (i : input) : plan =
           @ List.filter_map (fun (pool, hook) ->
               if pool = p.pool_name then Some (Printf.sprintf "hook %s changed (hooks run once, at start)" hook) else None) hooks
           @ List.filter_map (fun (bn, what) -> if bn = bname then Some (what ^ " (the base image changes)") else None) runtime
+          (* A stdlib change reaches no dispatch slot (stdlib actors are not
+             slots, 2026-09-30): it is a toolchain change, a restart. *)
+          @ (match b.b_old with
+              | Some o -> Option.to_list (Cmd_deploy_hot.stdlib_change ~prior:o ~current:b.b_new)
+              | None -> [])
           @ List.filter_map (fun (c : Reconcile.change) ->
               if c.kind = Reconcile.Needs_restart && List.mem p.pool_name (pools_of_subject c.subject)
               then Some (Printf.sprintf "%s: %s" c.subject c.detail) else None) placement

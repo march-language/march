@@ -3230,8 +3230,9 @@ let compile filename =
            INSIDE a lambda -- which is where every session body lives -- left
            the boundary function's hash untouched and `forge deploy hot`
            answered "no changes" for it.  Bare names (module "") are never
-           slots themselves (only `<Actor>_dispatch` is, and it is excluded
-           below), so the only way a change to one reaches a running program
+           slots themselves (only an app actor's `<Actor>_dispatch` is, and it
+           is excluded below; a stdlib actor has no slot and its glue is not
+           folded), so the only way a change to one reaches a running program
            is through the activation of the boundary function that calls it:
            fold their hashes in, transitively, stopping at other slots and at
            cycles.  Stdlib and other qualified callees stay unfolded (a leaf
@@ -3245,7 +3246,7 @@ let compile filename =
            List.iter (fun (fd : March_tir.Tir.fn_def) -> Hashtbl.replace fn_tbl fd.March_tir.Tir.fn_name fd) tir.March_tir.Tir.tm_fns;
            let all_names = Hashtbl.fold (fun n _ acc -> n :: acc) fn_tbl [] in
            let is_slot n =
-             March_tir.Tir_names.is_actor_dispatch_fn n
+             March_tir.Hot_reload.is_slot_actor_dispatch n
              || March_tir.Hot_reload.is_reloadable cfg (March_tir.Hot_reload.module_of_name n) in
            let is_entry n =
              String.equal n "main"
@@ -3270,7 +3271,10 @@ let compile filename =
              |> List.filter (fun c ->
                   not (List.mem c visiting)
                   && String.equal (March_tir.Hot_reload.module_of_name c) ""
-                  && not (is_slot c))
+                  && not (is_slot c)
+                  (* A stdlib actor's glue is bare-named too, but it is the
+                     stdlib's: unfolded like every other stdlib callee. *)
+                  && not (March_tir.Hot_reload.is_stdlib_actor_fn c))
              |> List.filter_map (fun c ->
                   match Hashtbl.find_opt fn_tbl c with
                   | Some cfd ->
@@ -3985,6 +3989,9 @@ let compile filename =
              # march-hcr-manifest v1
              # cas_hash <64-char blake3 hex>
              <fn_name> <impl_hash> <sig_hash> [callers:<a>,<b>] caps=<sorted-csv>
+           (v2 adds `# target`, `# hcr_abi`, `# module_prefix` and
+           `# stdlib_hash <digest of the stdlib source compiled against>`
+           header lines.)
            sig_hash may be empty if the function was not hashed.
            callers: lists other boundary functions that call this one (omitted
            when empty).  The deploy tool uses this to verify that all callers
@@ -4110,7 +4117,17 @@ let compile filename =
                 Printf.fprintf oc
                   "# march-hcr-manifest v2\n# cas_hash %s\n# target %s\n# hcr_abi %s\n# module_prefix %s\n"
                   ch abi.canonical_target (March_tir.Hcr_abi.abi_id abi)
-                  (Option.value ~default:"" !hot_reload_prefix)
+                  (Option.value ~default:"" !hot_reload_prefix);
+                (* The standard library this artifact was compiled against:
+                   the digest of its source ([stdlib_source_hash], the same
+                   one that keys the CAS).  A stdlib actor has no dispatch
+                   slot (Hot_reload.is_slot_actor_dispatch), so a patch can
+                   never deliver a stdlib change; forge compares this line
+                   with the running build's and asks for a restart instead
+                   of activating nothing (deploy --plan, deploy hot). *)
+                (match stdlib_source_hash () with
+                 | Some (_, h, _) -> Printf.fprintf oc "# stdlib_hash %s\n" h
+                 | None -> ())
               | Error _ ->
                 Printf.fprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch);
              Hashtbl.iter (fun name impl_h ->

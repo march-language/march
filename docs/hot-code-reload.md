@@ -113,6 +113,18 @@ If there are no changes since the last deploy, forge detects this from the conte
 No changes detected — server is already up to date.
 ```
 
+A change to the **standard library** is never a hot deploy. A stdlib change comes with
+a toolchain or language change, and no stdlib function or actor has a dispatch slot
+(see [Multi-host deploys](#multi-host-deploys)), so a patch could not deliver it. The
+`.hcr_manifest` records a digest of the stdlib each build was compiled against
+(`# stdlib_hash`); when it differs from the running build's, `forge deploy hot` refuses
+before it connects, and `forge deploy --plan` plans the pool as a restart:
+
+```
+error: the standard library changed (stdlib 3f2a91c07d4e -> 8b0c5e11a2f9): stdlib code, its actors included, has no hot-reload slot, so a patch cannot deliver it; a stdlib change ships with a toolchain change and deploys by restart
+error: deploy aborted, nothing was activated: deploy this build with a restart
+```
+
 ---
 
 ## Multi-host deploys
@@ -150,7 +162,12 @@ goes last. What was deployed is kept in `.forge/deploy/<env>/` and is what the n
 plan compares against.
 
 A hot patch can only replace **dispatch slots**: code under the module prefix, and
-actor handlers' dispatch functions. A change the running base cannot swap (a closure's
+your actors' dispatch functions. The standard library's own actors (the cluster node
+that answers SWIM pings, session endpoints, the node-queue writers, ...) have no slot:
+a deploy never activates, pauses or migrates them, and a stdlib change is a restart.
+Which actors are the stdlib's is decided by where the compiler loaded them from, not by
+name, so an actor of yours named like a stdlib one, or declared in a file named like a
+stdlib file, keeps its slot. A change the running base cannot swap (a closure's
 body, whose enclosing function did not change, or a function with no slot and no changed
 caller that has one) is planned as a restart, and the plan says which functions. In a
 topology app today the entry module's own functions have no slot under the entry

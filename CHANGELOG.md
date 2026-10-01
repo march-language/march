@@ -739,6 +739,20 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **The standard library's actors are no longer hot-reload slots.** Under
+  `--hot-reload`, only your own actors' dispatch functions get a slot; the
+  stdlib's (the cluster node that answers SWIM pings, session endpoints, the
+  node-queue writers, ...) do not, so a hot deploy never activates, pauses or
+  migrates them. A stdlib change comes with a toolchain change and deploys by
+  restart: the `.hcr_manifest` now records the stdlib it was built against
+  (`# stdlib_hash`), `forge deploy --plan` plans a pool whose stdlib changed as
+  a restart and says why, and `forge deploy hot` refuses such a build instead
+  of reporting the server up to date. Which actors are the stdlib's is decided
+  by where the compiler loaded them from, so an actor of yours named like a
+  stdlib actor, or in a file named like a stdlib file, keeps its slot. A
+  `--hot-reload` binary with no slot of its own (all its code in the entry
+  module) now still starts its reload server; before, it got one only
+  because the stdlib's actors had slots.
 - **`Array.from_list` (and `RRB.from_list`) is about 8x faster.** It now builds
   the vector in one pass instead of appending one element at a time: 100,000
   elements take 6.6 ms instead of 54 ms. The resulting vector is the same.

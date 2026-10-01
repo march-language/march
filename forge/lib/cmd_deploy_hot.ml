@@ -50,6 +50,9 @@ type manifest = {
   target : string option;
   hcr_abi : string option;
   module_prefix : string option;
+  stdlib_hash : string option;
+    (** [# stdlib_hash]: digest of the standard library source the artifact
+        was compiled against; None for a manifest written before 2026-09-30 *)
   functions : fn_manifest list;
   roles     : role_manifest list;  (** [] for a manifest written before step 10 *)
 }
@@ -84,6 +87,7 @@ let parse_manifest path : (manifest, string) result =
     let cas_hash = ref "" in
     let version = ref 1 in
     let target = ref None and hcr_abi = ref None and module_prefix = ref None in
+    let stdlib_hash = ref None in
     let fns = ref [] in
     let roles = ref [] in
     (try while true do
@@ -101,6 +105,8 @@ let parse_manifest path : (manifest, string) result =
            hcr_abi := Some (String.trim (String.sub line 9 (String.length line - 9)))
         else if String.length line > 15 && String.sub line 0 15 = "# module_prefix" then
            module_prefix := Some (String.trim (String.sub line 15 (String.length line - 15)))
+        else if String.length line > 13 && String.sub line 0 13 = "# stdlib_hash" then
+           stdlib_hash := Some (String.trim (String.sub line 13 (String.length line - 13)))
        end else if String.length line >= 5 && String.sub line 0 5 = "ROOT " then begin
          (* Legacy pre-2026-07-04 manifests may still carry a
             "ROOT cap_root=<hex>" line (whole-artifact union, now retired).
@@ -165,8 +171,34 @@ let parse_manifest path : (manifest, string) result =
     if !cas_hash = "" then Error (path ^ ": missing # cas_hash line")
     else Ok { version = !version; cas_hash = !cas_hash; target = !target;
               hcr_abi = !hcr_abi; module_prefix = !module_prefix;
+              stdlib_hash = !stdlib_hash;
               functions = List.rev !fns; roles = List.rev !roles }
   with Sys_error m -> Error m
+
+(** Did the standard library change between the running build ([prior]) and
+    this one?  [Some reason] when both manifests record a [# stdlib_hash] and
+    the two differ.
+
+    A stdlib actor has no dispatch slot (owner decision 2026-09-30,
+    [Hot_reload.is_slot_actor_dispatch] in the compiler), and no stdlib
+    function is on the boundary, so no hot patch can deliver a stdlib change:
+    a stdlib change comes with a toolchain or language change, which is a
+    restart deploy.  Without this check `forge deploy hot` found nothing to
+    activate (every changed function was unslotted) and reported the server
+    up to date, silently leaving the old stdlib running.  [Deploy_plan]
+    classifies the affected pools as a restart with this reason; [run]
+    refuses with it.  A manifest written before the header existed gives
+    None: that case is not detectable from the manifests. *)
+let stdlib_change ~(prior : manifest) ~(current : manifest) : string option =
+  match prior.stdlib_hash, current.stdlib_hash with
+  | Some o, Some n when o <> n ->
+    let short h = if String.length h > 12 then String.sub h 0 12 else h in
+    Some (Printf.sprintf
+            "the standard library changed (stdlib %s -> %s): stdlib code, its actors included, \
+             has no hot-reload slot, so a patch cannot deliver it; a stdlib change ships with a \
+             toolchain change and deploys by restart"
+            (short o) (short n))
+  | _ -> None
 
 (** True iff [manifest] is a genuine pre-Phase-5C legacy manifest — i.e. NO
     function line carries a `caps=` field at all. A current manifest always
@@ -1032,6 +1064,22 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
     ?(old_manifest_path="") ?(provided_epoch=0) ?(grant_caps=([] : string list))
     ?(no_cap_gate=false) () =
   without_sigpipe @@ fun () ->
+  (* 0. A stdlib change cannot ship as a patch (no stdlib function or actor
+     has a dispatch slot): refuse before connecting, rather than find nothing
+     to activate and report the server up to date. *)
+  let stdlib_refusal =
+    if old_manifest_path <> "" && Sys.file_exists old_manifest_path then
+      match parse_manifest old_manifest_path with
+      | Ok prior -> stdlib_change ~prior ~current:manifest
+      | Error _ -> None
+    else None
+  in
+  match stdlib_refusal with
+  | Some why ->
+    Printf.eprintf "error: %s\n" why;
+    Printf.eprintf "error: deploy aborted, nothing was activated: deploy this build with a restart\n%!";
+    Error "the standard library changed: a hot deploy cannot deliver it, restart instead"
+  | None ->
   let local_socket =
     if tunnel then Printf.sprintf "/tmp/march_deploy_%d.sock" (Unix.getpid ()) else remote_socket in
 
