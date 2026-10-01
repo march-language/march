@@ -62,6 +62,10 @@ git log is authoritative for exact commits.
   closure, missed closures stored through cell reuse, and left a dead
   join-point closure holding references in `match ... rest -> ...` fall-throughs.
   A capturing lambda handed to `Seq.map` still leaks one object per use.
+- **Compiled `to_string(())` prints `()`.** A compiled program printed `0` for
+  the unit value, in `to_string`, `show`, string interpolation and inside
+  containers (`Some(())` printed `Some(0)`). It now prints `()` as the
+  interpreter always did.
 - **Compiled actors no longer leak every message they receive.** A compiled
   actor never released a delivered message, its heap fields, or the state
   record a handler returned, so memory grew with every message for the life of
