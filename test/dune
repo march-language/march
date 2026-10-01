@@ -2559,6 +2559,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/builtin_borrow_leak_probe.expected native_builtin_borrow_leak_probe.out)))
 
+; ── Compiled `to_string(())` printed `0` (the interpreter prints `()`): the
+; unit value is typed as the empty tuple, so Mono keyed the Show lookup
+; "$Tuple0" and fell through to the generic runtime formatter. Both backends
+; run against ONE .expected. Red before the fix: every leg printed `0`.
+; specs/progress/2026-10-01-compiled-unit-to-string.md
+(rule
+ (targets native_unit_to_string native_unit_to_string.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/unit_to_string.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_unit_to_string
+        native/unit_to_string.march)
+   (with-stdout-to native_unit_to_string.out
+        (system "./native_unit_to_string")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/unit_to_string.expected native_unit_to_string.out)))
+
+(rule
+ (targets interp_unit_to_string.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/unit_to_string.march))
+ (action
+  (with-stdout-to interp_unit_to_string.out
+    (run %{exe:../bin/main.exe} native/unit_to_string.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/unit_to_string.expected interp_unit_to_string.out)))
+
 ; ── Leak guard: the Process builtins (spawn_async/read_line/write/kill_proc/
 ; wait_proc, run's spawn_sync, env/set_env) only READ their heap arguments but
 ; were classified OWNED in borrow.ml, so every spawn leaked its args list and

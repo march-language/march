@@ -54,6 +54,10 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Compiled `to_string(())` prints `()`.** A compiled program printed `0` for
+  the unit value, in `to_string`, `show`, string interpolation and inside
+  containers (`Some(())` printed `Some(0)`). It now prints `()` as the
+  interpreter always did.
 - **An app actor may share a name with a standard-library actor.** An app
   `actor Anchor`, `Writer`, `Endpoint`, `HostWatch`, `RegWatch`, `CtlWriter`,
   `OfferActor`, `ApInbox` or `ClusterNodeActor` used to collide with the
