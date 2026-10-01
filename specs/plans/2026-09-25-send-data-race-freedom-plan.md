@@ -1,6 +1,7 @@
 # Plan: data-race freedom for March's mutable types (items A, B and C)
 
-**Date:** 2026-09-25
+**Date:** 2026-09-25. **Revised:** 2026-10-01 (review against `main` at
+`9a140833`; every `file:line` below is as of that commit).
 **Todo:** `specs/todos/2026-09-25-send-marker-and-closure-capture-checks.md`
 **Scope:** items A, B and C of the data-race review:
 - **(A)** make sendability a structural, derivable property of types, usable as a bound;
@@ -57,18 +58,20 @@ against its runtime implementation:
 | `NativeIntArr`, `NativeFloatArr`, `NativeF32Arr`, `NativeI32Arr`, `NativeU8Arr` | flat numeric arrays | **copy-on-write.** `set` and `sort` for all five widths (`march_runtime.c:10701`, `11028`, `11278`, `11295`, `11657`, `11673`, and the `DEF_NARROW_INT_ARR` macro near `11599`) and the SIMD vector store (`lib/tir/llvm_emit_simd.ml:~527`) write in place only at `rc == 1` and copy otherwise. The interpreter always copies (`lib/eval/eval_builtins.ml:4387`). Documented as "Return a new array … O(n)" | `stdlib/dataframe.march`, benches, ~35 `test/native/` programs, `examples/dataframe_basic.march` | **sendable** (C1), after the ordering fix (C0) |
 | `TypedArray(a)` | DataFrame column storage | **always copies** (`march_typed_array_set`, `march_runtime.c:10365`) | `stdlib/dataframe.march` | sendable (already) |
 | `Bytes` | wraps an immutable `String` | none | many | sendable (already) |
-| `Vault` | process-global table | shared by design; every operation takes a runtime mutex (`march_runtime.c:~818`); atomic `put_new`/`incr`/`push_capped` exist | many | sendable, and safe to share |
+| `Vault` | process-global table | shared by design; every keyed operation takes its bucket's shard lock (`runtime/march_extras.c`: `march_vault_set` at 1213, `march_vault_get` at 1441, sharding described at 961); atomic `put_new`/`incr`/`push_capped` exist | many | sendable, and safe to share |
 | `CancelToken` | shared cancel flag | shared by design; `_Atomic int` with release store and acquire load (`runtime/march_scheduler.h:1076`, `march_scheduler.c:~4550`) | `Task` | sendable, and safe to share |
-| `LiveProcess` | a running child process | an OS resource: `read_line`, `write`, `kill` and `wait_proc` share one pipe pair; `wait_proc` closes it | none outside `stdlib/process.march` | **linear** (C3): a resource, not a memory race of March values |
+| `LiveProcess` | a running child process (a stdlib ADT, `process.march:19`, not an opaque builtin) | an OS resource. Since PR #680 (`specs/progress/2026-09-28-live-process-registry-unsynchronised.md`) the registry is locked, handles carry a generation so a stale one is refused, and `wait_proc` racing `read_line` is no longer a use-after-close | none outside `stdlib/process.march` | sendable; memory-safe to share. Linear would only stop two tasks interleaving reads of one pipe, a semantic nicety: **deferred** (C3) |
 | `Pid`, `Cap`, `ActorCap`, `Task`, `WorkPool`, `TimerRef` | handles to scheduler objects | the runtime owns the state | many | sendable (A's Phase 1 audit re-confirms) |
 | file descriptors | raw `Int` from `file_open` | an OS resource | `File`, `Seq` | out of reach of types; a typed handle is a separate project |
 
-Found on the way, and filed separately because it is a plain runtime bug:
-`march_process_spawn_async` takes a registry slot with an unguarded
-`live_proc_next++` and reuses slots modulo `LIVE_PROC_MAX`, closing the pipes of
-whatever process held the slot (`runtime/march_runtime.c:~9056`). Two tasks
-spawning processes race on it; see
-`specs/todos/2026-09-25-live-process-registry-unsynchronised.md`.
+Found on the way, filed separately, and since fixed: `march_process_spawn_async`
+took a registry slot with an unguarded `live_proc_next++` and reused slots
+modulo 64, closing the pipes of whatever process held the slot. PR #680 put
+the bookkeeping under `live_proc_mu` (`runtime/march_runtime.c:9237`) and
+generation-tagged the handles; PR `1e1d7980` then moved the `process_*`
+builtins to the borrow table because none of them stores an argument. See
+`specs/progress/2026-09-28-live-process-registry-unsynchronised.md` and
+`specs/progress/2026-09-29-process-spawn-async-leaks-live-process.md`.
 
 ## The holes (why any of this is needed)
 
@@ -91,6 +94,15 @@ place: the `ECon` arm, on an actor-message constructor's argument types
 These holes were found by reading the code, not by running it. Phase 0 turns
 each row into a checked-in fixture before any fix lands.
 
+Three more routes bypass closures and constructors altogether, so neither A/B
+nor the closure arguments below say anything about them. Phase 0 covers each:
+
+| # | Route | Status today | Under C2 |
+|---|---|---|---|
+| H6 | A module-level `let rb = RingBuf.make(8)` is a global every actor and thread shares | no check: the `DLet` arm (`typecheck.ml:5611`) has no linearity handling | still none unless C2 adds the rule: an `always_linear` type is rejected in a module-level `let`, because a global cannot be consumed exactly once |
+| H7 | `Vault.set(t, k, rb)` puts the buffer in a process-global table | allowed | should be rejected by the "generic functions must opt in" rule, but that rule is documented for stdlib March functions; confirm it applies to a builtin generic |
+| H8 | `Task.await` twice on a `Task(RingBuf)` (a task may legally create and return one) | n/a | `Task` is an opaque `TCon`; confirm the "container holding a linear value is linear" rule reaches it, or two awaits alias the buffer |
+
 How each hole closes under C alone:
 - **H1, H2, H5:** a closure cannot capture a linear `RingBuf`
   (`specs/lang/linear-types.md`, "Closures can't capture one"), and a captured
@@ -106,15 +118,15 @@ How each hole closes under C alone:
 | # | Phase | Effort | Depends on |
 |---|---|---|---|
 | 0 | Repro programs for H1–H5, confirmed against a built compiler | ½ day | — |
-| C0 | Acquire ordering on every sole-ownership check | ½–1 day | — |
+| C0 | Acquire ordering on every sole-ownership check; `march_free` runs resource destructors | ½–1 day | — |
 | C1 | Native arrays become sendable | 1 day | C0 |
-| C2 | `RingBuf` becomes `always_linear`, with a consume-and-return API | 2–3 days | 0 |
-| C3 | `LiveProcess` becomes `always_linear` | 1 day | — |
+| C2 | `RingBuf` becomes `always_linear`, with a consume-and-return API and an rc-neutral builtin contract | 2–3 days | 0 |
+| C3 | `LiveProcess` becomes `always_linear` | — | deferred; the runtime fix removed its safety case |
 | C4 | Retire the sendability fixtures' `RingBuf` witness; docs; changelog | ½–1 day | C1, C2 |
 | C5 | The rule for future mutable primitives, and A's Phase 1 as its guard | 1–1½ days | C4 |
 | — | A's Phase 2 and B's Phases 3–5 | about 6½ days | only if C5's rule is ever waived |
 
-About 7–9 days for C plus the guard. C0, C2 and C3 are independent of each other.
+About 6–8 days for C plus the guard. C0 and C2 are independent of each other.
 
 ## Part C: the right ownership model for each mutable type
 
@@ -122,8 +134,11 @@ About 7–9 days for C plus the guard. C0, C2 and C3 are independent of each oth
 
 Every in-place write in March depends on reading `rc == 1`: FBIP `reuse`,
 native-array `set`/`sort`, the SIMD store. Those reads are a plain C load (the
-native-array functions) or an LLVM `load atomic … monotonic`
-(`lib/tir/llvm_emit_alloc.ml:391`, `709`, `791`; `llvm_emit_simd.ml:548`).
+nine `->rc == 1` sites in `runtime/march_runtime.c`, all in the native-array
+region from `native_int_arr_set` at 11227 to the narrow-width sorts) or an LLVM
+`load atomic … monotonic` (`lib/tir/llvm_emit_alloc.ml:407`, `725`, `807`;
+`llvm_emit_simd.ml:548`; a fifth grep hit at `llvm_emit_simd.ml:499` is a
+comment).
 `march_decrc` is `acq_rel`, so another thread dropping its reference *releases*
 its earlier reads of the object. But a relaxed load on this side doesn't
 *acquire* them. Under the C11 model, a thread that sees `rc == 1` and then writes
@@ -146,6 +161,16 @@ arrays an advertised feature, so fix it first:
   compiled at `--opt 2` on arm64 before and after, per `specs/benchmarks.md`.
 - **Check:** `scripts/check-actor-rc-stores.sh` still passes (it polices
   stores, not loads, but both touch the same word).
+- **Also here: `march_free` must run a resource cell's destructor.** Perceus
+  frees a dead linear binding with `EFree`, which lowers to `march_free`
+  (`lib/tir/llvm_emit.ml:2340`), and `march_free` (`march_runtime.c:528`) is a
+  plain `free` that ignores `MARCH_RESOURCE_TAG`, unlike `march_decrc`
+  (`:399`), which runs the destructor at zero. No accepted program reaches
+  that path with a `RingBuf` today, because a must-consume value is never
+  dead, but the moment one can be (open question 4's `always_affine`, or any
+  later relaxation) the backing store and every element leak silently. One
+  tag check in `march_free`, and it protects every resource cell, not only
+  `RingBuf`.
 
 ### Phase C1: native arrays are values, so let them be sent
 
@@ -154,10 +179,14 @@ arrays an advertised feature, so fix it first:
    this plan's audit: `set` and `sort` at all five widths, and the SIMD store.
    Still to confirm: the inline `map`/`map2` reuse paths (the
    `test/native/native_arr_map_inline_reuse` family), `filter_mask`, the
-   width conversions and `bytes_to_u8_arr`. Anything not gated is a bug to fix
-   here: it is already an aliasing bug within one thread.
+   width conversions, `bytes_to_u8_arr`, and the sort fast paths that landed
+   after this plan was written (the top-level full-run scan, the equal
+   partition, the two-run merge and the `n <= 32` sorting-network base case,
+   `march_runtime.c:11281–11400`; PRs `ed3b4b7d` and `19df6cbb`). Anything
+   not gated is a bug to fix here: it is already an aliasing bug within one
+   thread.
 2. **Remove the five names from `non_sendable_types`**
-   (`typecheck_exhaustive.ml:822`).
+   (`typecheck_exhaustive.ml:814`).
 3. **Fixtures:** `reject/t164`, `t165`, `t169` and `t170` become `accept/`
    fixtures. `git mv` them, keeping their ids (the corpus shares one numbering
    pool), rename the files and rewrite the headers. Update
@@ -189,14 +218,25 @@ Linear is also exactly how the stdlib already handles its one other
 container with a single-owner discipline, `LinearMap`
 (`stdlib/linear_map.march`), and its actor-state idiom carries over unchanged.
 
-**Mechanism.** Add `"RingBuf"` to the initial `always_linear_types`
-(`typecheck_env.ml:694`), next to where the builtin type is registered.
-First confirm that the promotion rule (`core-march-types.md` §2.9.1) and the
-"same-named types don't inherit linearity" resolution (finding L4) work for a
-builtin `TCon` with no declaring module. If either doesn't, fall back to
-`always_linear opaque type RingBuf(a) = RingBufRep(RawRingBuf(a))` in
-`stdlib/ring_buf.march`, as `LinearMap` does, and check that the wrapper is
-unboxed (`Bytes` kept its wrapper for layout reasons, so read its header first).
+**Mechanism: seed the builtin name.** Add `"RingBuf"` to the initial
+`always_linear_types` (`typecheck_env.ml:703`). This works for a builtin
+`TCon` with no declaring module: `is_linear_ty` and `field_linearity`
+(`typecheck_unify.ml:1019`, `:1038`) ask `resolves_always_linear name env`
+(`typecheck_env.ml:1066`) on any bare `TCon`, and the finding-L4 shadow rule
+only fires when the current module declares its own `RingBuf`. `field_linearity`
+then promotes a `RingBuf` record field, and an `Option(RingBuf)` field via
+`holds_linear`, to linear with no annotation, which is what the actor-state
+idiom needs. No wrapper type: `always_linear opaque type RingBuf(a) =
+RingBufRep(…)` would put an unrestricted cell inside a linear wrapper and give
+the reference count two stories at once (the wrapper shallow-freed by `EFree`,
+the inner cell released by whoever destructured it).
+
+**Module-level `let` (H6).** Reject an `always_linear` type in a module-level
+`let`, in the `DLet` arm (`typecheck.ml:5611`). A global cannot be consumed
+exactly once, and today that arm has no linearity handling at all, so without
+the rule `let rb = RingBuf.make(8)` at module level stays a buffer every actor
+and thread shares. The same rule covers `Handle` and `LinearMap`, which have
+the same gap.
 
 **API**, modelled on `LinearMap`:
 
@@ -223,17 +263,66 @@ buffer that silently overwrites its oldest element can't hold values that
 must be consumed. Because elements are unrestricted, `drop` returns `Unit`,
 unlike `LinearMap.dispose`, which must hand back a non-empty map.
 
+**The reference-count contract: rc-neutral consume-and-return.** A live
+`RingBuf` cell has `rc == 1` from `make` until its terminator, and no
+Perceus-emitted RC operation ever touches it; every transfer is a call and a
+return through a builtin. It is `native_int_arr_set`'s contract ("owned and
+consumed … responsible for releasing it", `march_runtime.c:11227`), and each
+layer already does its part:
+
+| Layer | What it does | Where |
+|---|---|---|
+| Typechecker | `always_linear` makes every binding `Lin`; every use is a consuming use | `lower_types.ml:58` maps it to `Tir.Lin` |
+| Perceus | a `Lin` variable gets no inc at a non-last use and no dec at its last use; the only op is `EFree` on a *dead* binding, which the linearity check forbids for a must-consume type | `perceus_core.ml:1228` and the `v_lin = Tir.Unr` guards around it |
+| Pair returns | `let (v, rb2) = …` marks the pair and both components `Lin`: the fields move out with no RC ops and the shell is shallow-freed | `lower_expr.ml:316`; `chan_recv` and `LinearMap.put` rely on it; `test/native/linear_map.march` pins it inside actor state |
+| Actor state | the actor parameter is `Lin`, so `state.buf` loads don't inc, and `{ state with buf: … }` writes the field back in place through `EReuse` | `lower_actor.ml:94` |
+| Send | a linear send lowers to plain `march_send`, which enqueues the pointer; nothing on the send path copies | `llvm_emit.ml:1597`; PR #690 |
+| Release | `march_decrc` at zero runs the resource destructor, which decs the elements and frees the store | `march_runtime.c:399`, `march_ring_dtor` at 12674 |
+
+Per builtin:
+
+| Builtin | Buffer in | Returns | `rc` after |
+|---|---|---|---|
+| `make(cap)` | — | fresh cell | 1 |
+| `push(rb, x)`, `clear(rb)` | consumed | **the same cell**, `rc` untouched | 1 |
+| `pop(rb)` | consumed | fresh `(Option(a), cell)` pair; the element moves out of its slot, as today | 1 |
+| `get`, `peek_oldest`, `peek_newest` | consumed | pair; the element is `incrc`'d out, as today (the buffer keeps its own) | 1 |
+| `size`, `cap`, `is_empty`, `is_full`, `snapshot` | consumed | pair | 1 |
+| `to_list(rb)`, `drop(rb)` | consumed | list / unit, then `march_decrc(cell)` → destructor | 0 |
+
+Two alternatives, rejected: keep the buffer *borrowed* and `incrc` it on
+return, which leaves it at `rc == 2` after one `push` with nothing to bring it
+down, because Perceus never decs a `Lin` variable, so every buffer leaks; and a
+fresh cell per operation, as `march_chan_send` does, which allocates on every
+`push` and defeats the reason `RingBuf` exists. There is no non-consuming use
+of a linear value in the checker, so the reads cannot avoid the pair.
+
+For a `Lin` variable the borrow table changes no emitted code, so the table
+matters on the *unrestricted* paths: a user record's field projection
+(`{ r with buf: RingBuf.push(r.buf, x) }`, where Perceus dups a borrowed
+field before a consuming position and must therefore see `push` as
+consuming), and stdlib bodies. Those paths are why the table must match the
+C bodies, and why a user-record fixture is in Phase 0.
+
 **Builtins.** Change `ring_buf_push`/`ring_buf_clear` to return the buffer, and
-the read builtins to return a pair, in all four places:
-- `typecheck_builtins.ml:1626`;
-- the interpreter's `VRingBuf` arms (still mutating the OCaml record in place);
-- `runtime/march_runtime.c` (from ~11906);
-- `lib/tir/llvm_builtins.ml` (~885).
+the read builtins to return a pair, in all five places:
+- `lib/tir/borrow.ml:240–249`: all ten `ring_buf_*` entries leave
+  `extern_borrow_table`, so the buffer parameter is owned (the element
+  parameter of `push` already was);
+- `typecheck_builtins.ml:1641`;
+- the interpreter's `VRingBuf` arms (still mutating the OCaml record in
+  place; `drop` is a no-op there);
+- `runtime/march_runtime.c` (from 12644; `push` and `clear` gain a
+  `return cell;`, the readers build the 32-byte tuple the way
+  `march_chan_recv` does);
+- `lib/tir/llvm_builtins.ml` (from 946).
 
 The stdlib bodies then use each binding once and need no `@[trusted_linear]`.
-Check that returning a `(Int, RingBuf)` pair doesn't allocate when the caller
-destructures it immediately. If it does, add a small `bench/ring_buf.march`
-(push/pop loop), and compare against today before and after.
+The pair costs one 32-byte tuple per read in compiled code, which
+`LinearMap.size` already pays. Add a small `bench/ring_buf.march` (push/pop
+loop) and compare against today before and after; if it shows, the follow-up
+is an unboxed pair return (`kind.ml:521`'s `k_unboxed` covers inline-struct
+`TCon`s today, not tuples), which is separate work.
 
 **Actor state**, the documented use:
 
@@ -249,46 +338,46 @@ end
 
 **Sending.** Remove `"RingBuf"` from `non_sendable_types`. A linear value can
 be sent, and the send consumes it (`linear-types.md`, "Linear Types and
-Actors"; compiled as the zero-copy `march_send_linear`). Moving a buffer to
-another actor is now safe and, unlike today, allowed.
+Actors"). Since PR #690 a linear send lowers to the ordinary `march_send`,
+which hands the single reference to the mailbox without copying; the zero-copy
+`march_send_linear` belonged to the arena runtime that compiled programs never
+linked. Moving a buffer to another actor is now safe and, unlike today,
+allowed.
 
 **Tests and callers to update:**
 - rewrite `test/stdlib/test_ring_buf.march` (242 lines) and
   `test/native/ring_buf_ops.march` to the threaded API;
-- update `test/test_codegen.ml`'s golden `declare` list (~13875);
-- keep `ring_buf_push` in its purity list as impure (~3735);
-- keep `test_ring_buffer` (~3453): it tests the OCaml `ring` helper, not the
+- update `test/test_codegen.ml`'s golden `declare` list (14271);
+- keep `ring_buf_push` in its purity list as impure (3930);
+- keep `test_ring_buffer` (3648): it tests the OCaml `ring` helper, not the
   builtin;
 - add `reject/` fixtures for each hole under the new rule: capture in a
   `Task.async` lambda, use after `push` without rebinding, use after `send`,
-  and a generic `dup` of a buffer.
+  a generic `dup` of a buffer, a module-level `let` of one (H6), `Vault.set`
+  of one (H7), and a double `Task.await` of a `Task(RingBuf)` (H8);
+- add a compiled test with a `RingBuf` in a user record,
+  `{ r with buf: RingBuf.push(r.buf, x) }`, checked under
+  `MARCH_SANITIZE=1` with `live_allocs()` deltas, the way
+  `test/native/process_handle_leak_probe.march` does: this is the one path
+  where the borrow-table change is load-bearing.
 
-### Phase C3: `LiveProcess` becomes linear
+### Phase C3: `LiveProcess` becomes linear (deferred)
 
-`LiveProcess` is a resource whose operations interleave badly if shared. Two
-tasks `read_line` from one pipe, or one `wait_proc` closes the pipe while the
-other reads. It is the typestate `Handle` pattern (`stdlib/handle.march`) the
-stdlib already recommends:
-- declare the type `always_linear` in `stdlib/process.march`;
-- `read_line(p) : (Option(String), LiveProcess)`;
-- `write(p, s) : LiveProcess`;
-- `kill(p) : LiveProcess`;
-- `wait_proc(p) : ProcessResult` ends it.
+This phase was motivated by a memory-safety problem: two tasks sharing one
+`LiveProcess` could `read_line` while `wait_proc` closed the pipe. PR #680
+fixed that in the runtime (locked registry, generation-tagged handles so a
+stale handle is refused, busy-stream marking so a close waits for an in-flight
+read; `specs/progress/2026-09-28-live-process-registry-unsynchronised.md`).
+What a linear handle would still buy is semantic: two tasks reading the same
+pipe interleave lines. That is not a data race, and nothing outside
+`stdlib/process.march` holds a handle today.
 
-Nothing outside `stdlib/process.march` calls these (grep over `stdlib/`,
-`test/`, `examples/`, `forge/`, `lsp/`, `bench/`), so the API change is
-contained. The one other pin is `test/test_codegen.ml`'s golden `declare`
-list (~13758).
-
-The bodies must use `p` once each. There are two ways:
-- **Destructure and rebuild:** `LiveProcess(pid, id)` is an ordinary two-field
-  ADT, so destructure it once, pass the fields to the builtins, and rebuild
-  the handle in the result. That costs one small allocation per call.
-- **Change the builtins** to return the handle, as for `RingBuf`, which keeps
-  the golden list in step.
-
-Prefer the second. The
-registry race above is a separate runtime fix and doesn't wait on this.
+It is also now harder than it was: PR `1e1d7980` moved every `process_*`
+builtin to the borrow table (they only read their arguments), so "return the
+handle" would need the borrow-plus-`incrc` shape that C2 rejects. If the
+semantic case ever matters, do it as C2 was done: the four handle builtins
+leave the borrow table and return the handle rc-neutrally. Until then, nothing
+here.
 
 ### Phase C4: fixtures, docs, changelog
 
@@ -309,8 +398,8 @@ registry race above is a separate runtime fix and doesn't wait on this.
   - `memory-model.md`: C0's ordering rule;
   - `parallelism.md` (~240): native arrays are fine to share with parallel
     code.
-- **`CHANGELOG.md`:** `### Changed`: the `RingBuf` and `Process.*` live-process
-  APIs are breaking changes; native arrays may now be sent. `### Fixed`: C0.
+- **`CHANGELOG.md`:** `### Changed`: the `RingBuf` API is a breaking change;
+  native arrays may now be sent. `### Fixed`: C0.
 - **`.claude/skills/march-lang/SKILL.md`:** check its `RingBuf` examples.
 
 ### Phase C5: the rule for the next mutable primitive, and its guard
@@ -342,8 +431,8 @@ linear nor copy-on-write; until then it would guard an empty set.
 it has interior-mutable types that are safe to *share* but not to *move*, or the
 reverse. March has no such types: every non-`Send` type is a single-owner
 mutable buffer, and the one shared mutable structure (`Vault`) is a handle to a
-table that locks every operation in the runtime (`runtime/march_runtime.c`,
-the `pthread_mutex_t` block near line 818). So "may cross a thread" and "may be
+table whose every keyed operation takes its bucket's shard lock in the runtime
+(`runtime/march_extras.c:1213`, `:1441`). So "may cross a thread" and "may be
 used from two threads at once" are the same judgement here. If a future type
 separates them, add `Sync` then.
 
@@ -408,7 +497,15 @@ program moves into `specs/lang/types/reject/` (next free id; update
 as the phase that makes it fail. `accept/` fixtures for what must keep working
 can land in Phase 0 directly:
 
-- a `RingBuf` as actor initial state (`spawn(A, rb)` is a *move*; with C2, it is a consuming use);
+- a `RingBuf` as actor initial state (`spawn(A, rb)` is a *move*; with C2 it
+  should be the consuming use, because `check_spawn_args`
+  (`typecheck.ml:3889`) runs `check_expr` on each argument, but no fixture
+  passes a linear value through `spawn` today, so this one is the proof);
+- the three bypass routes from the holes table: a module-level `let` of a
+  `RingBuf` read by two functions (H6), `Vault.set` of one (H7), and a double
+  `Task.await` of a `Task(RingBuf)` (H8), each confirmed to type-check today;
+- a `RingBuf` in a user record, updated with `{ r with buf: … }` (the
+  borrow-table path in C2);
 - a native array sent in a message and captured by a task (C1);
 - `Parallel.pmap` over a pure lambda that captures an immutable `Map`;
 - a message carrying a closure that captures only immutable values;
@@ -661,15 +758,17 @@ promote to an error. Either way, record the numbers in the progress entry.
    a `Send` closure" at construction? Decide from Phase 5's numbers.
 2. **The `spawn`-argument move gap:** resolved; Phase C2 closes it with
    linearity.
-3. **`RingBuf`'s mechanism** (C2): the seeded builtin name or the opaque
-   wrapper. It depends on whether L4's "same-named types" resolution handles a
-   builtin `TCon`; answer it with a two-line fixture before starting C2.
+3. **`RingBuf`'s mechanism** (C2): resolved on review, the seeded builtin
+   name. `resolves_always_linear` is consulted on any bare `TCon`
+   (`typecheck_unify.ml:1019`, `:1038`), so no declaring module is needed and
+   the wrapper is dropped; see C2's "Mechanism".
 4. **Should a buffer be droppable without a call?** `always_linear` forces an
    explicit `drop`/`to_list`. An `always_affine` declaration would let a
    buffer of plain values be dropped silently, which is closer to how
    `RingBuf` is used today. That needs parser, typechecker and `march-lean`
    work. Decide after C2 lands, from how noisy `drop` turns out to be in the
-   rewritten tests.
+   rewritten tests. Whatever the answer, C0's `march_free` change must land
+   first: it is what makes a dead buffer safe to drop.
 5. **Should `Send` inference be visible in public signatures**, or only in
    diagnostics? The plan makes it visible (Phase 2, step 5), because an
    invisible bound on a public function is a breaking change nobody can see.

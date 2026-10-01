@@ -796,6 +796,16 @@ git log is authoritative for exact commits.
   already was compiled: `int_shr(-8, 1)` is `-4`. It used to be a logical shift
   in the interpreter, so `int_shr(-8, 1)` printed `4611686018427387900`.
   Non-negative inputs give the same result as before.
+- **Breaking: `Seq.batched`, `Flow.batch` and `Gen.frequency` now declare their
+  preconditions in the signature.** `Seq.batched(seq, n)` and `Flow.batch(stage, n)`
+  take `n : {Int | _ > 0}`, and `Gen.frequency(pairs)` takes
+  `pairs : {List((Int, Generator(a))) | len(_) > 0}`. Each already forwarded to a
+  contracted callee without restating the contract, so a zero batch size or an
+  empty list compiled and failed at run time; a literal violation is now a
+  compile error, and an unproven argument is a hint (an error under
+  `cap verified`). To migrate, run `march --check --refine-suggest <fn>` on the
+  caller, which prints the refinement to add to its parameter, or guard the call
+  with `if n > 0` / a `match` on the list.
 - **A small scalar aggregate built in the arms of an `if`/`match` no longer
   allocates.** When every arm builds the same unboxed type (for example
   `if c do P2(a, 1) else P2(1, a) end`), the join now holds the struct directly
