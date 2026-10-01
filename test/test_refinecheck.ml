@@ -17880,6 +17880,69 @@ let generic_set_measure_instance_suite =
           (ledger_counts3 (fixture ~pred:"member(99, tree_elts(_))")));
   ]
 
+(* seq/flow/gen wrapper contracts (2026-09-30): `Seq.batched`, `Flow.batch` and
+   `Gen.frequency` declare the precondition of the contracted callee they
+   forward to, so a violating literal is refuted and an unproven argument is
+   not silently forwarded.  Real compiler, real stdlib (see the audit-flag
+   helpers above). *)
+let wrapper_contracts_suite =
+  let run src =
+    let rc, out, err, path = run_march_capturing [ "--check" ] src in
+    (try Sys.remove path with Sys_error _ -> ());
+    (rc, out ^ err)
+  in
+  let accepts_src =
+    "mod WcOk do\n\
+    \  fn a() do Seq.to_list(Seq.batched(Seq.from_list([1,2,3]), 2)) end\n\
+    \  fn b() do Flow.collect(Flow.batch(Flow.from_list([1,2,3]), 2)) end\n\
+    \  fn c() do Gen.frequency([(1, Gen.int(0, 5))]) end\n\
+    \  fn main() do 0 end\n\
+     end\n"
+  in
+  let rejects_src =
+    "mod WcBad do\n\
+    \  fn a() do Seq.to_list(Seq.batched(Seq.from_list([1,2,3]), 0)) end\n\
+    \  fn b() do Flow.collect(Flow.batch(Flow.from_list([1,2,3]), 0)) end\n\
+    \  fn c() do Gen.frequency([]) end\n\
+    \  fn main() do 0 end\n\
+     end\n"
+  in
+  let propagates_src =
+    "mod WcProp do\n\
+    \  cap verified\n\
+    \  fn a(n : Int) do Seq.to_list(Seq.batched(Seq.from_list([1,2,3]), n)) end\n\
+    \  fn b(n : Int) do Flow.collect(Flow.batch(Flow.from_list([1,2,3]), n)) end\n\
+    \  fn c(ps : List((Int, Generator(Int)))) do Gen.frequency(ps) end\n\
+    \  fn main() do 0 end\n\
+     end\n"
+  in
+  let gated name f =
+    Alcotest.test_case name `Quick (fun () ->
+        if z3_available () then f () else Alcotest.skip ())
+  in
+  [ gated "literal-positive / non-empty arguments are accepted" (fun () ->
+        let rc, out = run accepts_src in
+        Alcotest.(check int) ("rc; output: " ^ out) 0 rc);
+    gated "a literal 0 / [] is refuted at each wrapper" (fun () ->
+        let rc, out = run rejects_src in
+        Alcotest.(check int) "rc" 1 rc;
+        List.iter
+          (fun needle ->
+            Alcotest.(check bool) ("mentions " ^ needle) true (contains out needle))
+          [ "of `Seq.batched` does not satisfy precondition `_ > 0`";
+            "of `Flow.batch` does not satisfy precondition `_ > 0`";
+            "of `Gen.frequency` does not satisfy precondition `len(_) > 0`" ]);
+    gated "an unproven argument is an error under cap verified"
+      (fun () ->
+        let rc, out = run propagates_src in
+        Alcotest.(check int) "rc" 1 rc;
+        List.iter
+          (fun needle ->
+            Alcotest.(check bool) ("mentions " ^ needle) true (contains out needle))
+          [ "cannot verify precondition `_ > 0` on `Seq.batched`";
+            "cannot verify precondition `_ > 0` on `Flow.batch`";
+            "cannot verify precondition `len(_) > 0` on `Gen.frequency`" ]) ]
+
 let () =
   Alcotest.run "march-refinecheck"
     [ ("refinecheck", suite);
@@ -18000,5 +18063,6 @@ let () =
       ("measure-definition", measure_definition_suite);
       ("caller-sorts", caller_sorts_suite);
       ("array-contract-followups", array_followups_suite);
+      ("wrapper-contracts", wrapper_contracts_suite);
       (* Must stay LAST: it measures every query the groups above sent. *)
       ("z3-well-formed", z3_wellformed_suite) ]
