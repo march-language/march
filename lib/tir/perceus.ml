@@ -540,7 +540,7 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
     (fn : Tir.fn_def) (body : Tir.expr) : Tir.expr =
   let candidates =
     List.filter (fun p ->
-        is_aggregate_ty p.Tir.v_ty
+        is_aggregate_ty env p.Tir.v_ty
         && p.Tir.v_lin = Tir.Unr
         && not (StringSet.mem p.Tir.v_name borrowed)
         && not (StringSet.mem p.Tir.v_name env.closure_fvs)
@@ -650,7 +650,7 @@ let insert_dead_apply_param_drops (env : env) (borrowed : StringSet.t)
     let user_params = match fn.Tir.fn_params with _ :: ps -> ps | [] -> [] in
     let free = Dce.free_vars body in
     List.fold_left (fun acc p ->
-        if (needs_rc env p.Tir.v_ty || is_aggregate_ty p.Tir.v_ty)
+        if (needs_rc env p.Tir.v_ty || is_aggregate_ty env p.Tir.v_ty)
            && not (StringSet.mem p.Tir.v_name borrowed)
            && not (StringSet.mem p.Tir.v_name env.closure_fvs)
            && not (StringSet.mem p.Tir.v_name free)

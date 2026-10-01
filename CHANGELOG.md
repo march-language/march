@@ -64,6 +64,23 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Compiled `to_string(())` prints `()`.** A compiled program printed `0` for
+  the unit value, in `to_string`, `show`, string interpolation and inside
+  containers (`Some(())` printed `Some(0)`). It now prints `()` as the
+  interpreter always did.
+- **Compiled actors no longer leak every message they receive.** A compiled
+  actor never released a delivered message, its heap fields, or the state
+  record a handler returned, so memory grew with every message for the life of
+  the program. A `send` written as a statement also leaked the `Some(())` it
+  returns. All three are released now; the interpreter was never affected.
+  `send` now returns one shared `Some(())` instead of allocating one per call,
+  so a send-heavy program is no slower for the extra frees (14% faster on
+  `bench/actors/fanin_flood.march` at 8 schedulers).
+- **A named record read only through its fields is freed (compiled).** A value
+  of a declared record type (`type Pair = { a : String, b : String }`) that was
+  built, read through `r.a`, and then dropped leaked its cell and every heap
+  value it held. It is now released at the end of its scope, as an anonymous
+  record already was.
 - **An app actor may share a name with a standard-library actor.** An app
   `actor Anchor`, `Writer`, `Endpoint`, `HostWatch`, `RegWatch`, `CtlWriter`,
   `OfferActor`, `ApInbox` or `ClusterNodeActor` used to collide with the

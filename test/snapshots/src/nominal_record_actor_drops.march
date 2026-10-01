@@ -1,0 +1,31 @@
+-- Nominal records and actor glue under Perceus: pins the scope-end `dec_rc` of a
+-- nominal record read only through its fields (two_reads), the dispatch fn's
+-- `dec_rc $msg`, the handler's drop of the state record it returned, and the
+-- release of a statement `send`'s result.
+-- specs/progress/2026-10-01-compiled-actor-and-nominal-record-leaks.md
+mod NominalRecordActorDrops do
+  needs IO.Console
+  needs IO.Spawn
+
+  type Pair = { a : String, b : String }
+
+  actor Bump do
+    state { n : Int }
+    init  { n: 0 }
+    on Hit(k : Int) do
+      { n: state.n + k }
+    end
+  end
+
+  fn two_reads(i : Int) : Int do
+    let r : Pair = { a: int_to_string(i), b: int_to_string(i + 1) }
+    string_length(r.a) + string_length(r.b)
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let p = spawn(Bump)
+    send(p, Hit(two_reads(1)))
+    run_until_idle()
+    println("ok")
+  end
+end
