@@ -25,11 +25,13 @@ What is still open is in [../todos/2026-09-28-dd-step12a-control-wiring.md](../t
 - **`[control]`** in topology.toml (`candidates = "<host label>"`, `port`), validated against
   host labels, in the digest only when present (other digests keep their bytes).
 - **The wiring** (`lib/desugar/control_wiring.march`, spliced into the entry module of an app
-  with `[control]`): `Ctl`/`CtlFetch` protocols and roles, the leader (`Ctl.Control`,
-  `count = 1` over the candidates, D40), the Agent on every node, the artifact server, the
-  control API listener (RELEASE, STATUS, LEADER, CAS_PUT/CHECK, the reload socket's
+  with `[control]`): the `Ctl` protocol and roles, the leader (`Ctl.Control`,
+  `count = 1` over the candidates, D40), the Agent on every node, the
+  control API listener (RELEASE, STATUS, LEADER, CAS_PUT/CHECK/GET, the reload socket's
   unsigned reads; standbys forward RELEASE and STATUS), release durability on every
   reachable candidate before answering, a new leader loading the newest release from disk.
+  An agent fetches an artifact it lacks from a candidate's control API (`CAS_GET`, raw
+  bytes) and stores it through its own reload server; `CtlFetch` is not used (below).
 - **forge**: `Control_release` (writes and signs a release in Control's text form; a hot
   step's signed lines are recorded by running `Cmd_deploy_hot.run` against a fake reload
   server, so every gate `forge deploy hot` makes is made before anything is sent) and
@@ -57,10 +59,34 @@ the standby finishes, nothing applied twice), `control_partition` (SIGSTOP/SIGCO
 for the partition; both sides converge), `control_cert` (a node whose certificate lacks
 `Ctl.Control:offer` never leads). forge test for `[control]` parse/digest/ufw.
 
+## Memory, and what was changed for it (2026-10-01)
+
+The first version grew every node past 2 GB within a minute of a rollout starting
+(the two-node CI job died of it). Measured with `live_allocs()` and RSS sampling, four
+causes, each fixed or routed around; the leaks themselves are filed:
+
+- A `Ctl` session formed every 200 ms (the agent re-initiated after each `Drained`
+  outcome, and after a deploy of the node every new session was draining). Sessions are
+  long-lived now; a drained one is restarted from an actor past the deploy's marker
+  (`CtlRespawner`). [../todos/2026-10-01-session-node-vault-tables-leak.md](../todos/2026-10-01-session-node-vault-tables-leak.md).
+- The leader's state, a record rewritten in a Vault on every poll, leaked all it pointed
+  to: it is kept encoded (a String) now, the release in its own entry. Same todo.
+- Reports carried `VERSIONS_DETAIL` (~14,000 lines) on every poll; now `NODE_STATE` and
+  `PINS` only, and a poll's report has no `detail` at all (the hello's is kept).
+- Artifacts moved over `CtlFetch` as JSON-over-`List(Int)` chunks: 1–2.5 GB per node for
+  a 2 MB patch. They go over the control API as raw bytes instead.
+  [../todos/2026-10-01-session-message-encoding-leak.md](../todos/2026-10-01-session-message-encoding-leak.md).
+
+After: the three nodes of `control_partition` stay under 150 MB for the whole scenario
+(were 2.5–5.5 GB). The chunk-size measurement the design asked for is answered by this:
+a session is the wrong channel for an artifact at any chunk size.
+
 ## Findings
 
-- Compiled-only: reading a record's fields after handing it to `Control.leader_release` gave
-  a stale signature; `ctl_release` reads what it needs first (not minimised; a repro is owed).
+- Two compiled-only misbehaviours around record updates from a found record's field
+  (a SIGSEGV in the leader's report merge; a stale signature read after
+  `leader_release`), both worked around:
+  [../todos/2026-10-01-compiled-record-with-projection-sigsegv.md](../todos/2026-10-01-compiled-record-with-projection-sigsegv.md).
 - The capability walk follows data from `Env.get` into a role body through a parameter; read
   config in a Vault instead.
 - A node learns a peer's address only if it met it: seed every node with every candidate.

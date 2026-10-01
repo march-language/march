@@ -439,6 +439,17 @@ mod TestControl do
   end
 
   describe "leader change" do
+    test "a report without detail keeps the detail last reported (a poll after the hello)" do
+      let n = head(cluster())
+      let hello = { report(n) with detail: "pins\nstatus" }
+      let l1 = Control.leader_report(fresh_leader(), hello, 0)
+      let l2 = Control.leader_report(l1, report(n), 1000)
+      assert (List.length(l2.obs) == 1)
+      assert (List.all(l2.obs, fn o -> o.report.detail == "pins\nstatus"))
+      let l3 = Control.leader_report(l2, { report(n) with detail: "newer" }, 2000)
+      assert (List.all(l3.obs, fn o -> o.report.detail == "newer"))
+    end
+
     test "a new leader resumes mid-rollout from observation alone; no step twice, none skipped" do
       let (_, ns, now) = until_step2(fresh_leader(), cluster(), 0, 50)
       assert (applied(ns, "r2") == [2])

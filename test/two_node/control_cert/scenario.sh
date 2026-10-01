@@ -1,6 +1,6 @@
 # Scenario "control_cert" (dd step 12a): leadership is gated by certificates.
 # Every node is in certificate mode. All certificates carry Ctl.Agent:initiate
-# (and CtlFetch.Agent:initiate), so every node can be an Agent; only node b's
+# so every node can be an Agent; only node b's
 # also carries Ctl.Control:offer. Node a is labelled "control" too, so placement
 # ranks it as a candidate, but its offer of Ctl.Control is refused
 # (SessionAP.authorize): with a alone, nothing leads. Once b joins, b leads, and
@@ -15,9 +15,9 @@ issue() {  # <node> <roles>
   "$forge" cluster cert "$1" --roles "$2" --days 1 --trust-domain test.local --pool main \
     --operator-key "$PKI/operator.key" --out "$PKI" >> "$work/pki.log" || fail "cert $1"
 }
-agent="Ctl.Agent:initiate,CtlFetch.Agent:initiate"
-issue a "$agent,CtlFetch.Server:offer"
-issue b "$agent,CtlFetch.Server:offer,Ctl.Control:offer"
+agent="Ctl.Agent:initiate"
+issue a "$agent"
+issue b "$agent,Ctl.Control:offer"
 issue c "$agent"
 ctl_prepare
 

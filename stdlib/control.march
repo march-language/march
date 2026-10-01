@@ -831,15 +831,22 @@ mod Control do
   An agent reported: record it; the node's order (if any) is no longer in
   flight. A failure this leader already knows of for the node is kept even if
   the report omits it, so a halt cannot be lost to a report sent before the
-  failure.
+  failure; so is the node's `detail` when the report has none (a poll's).
   """
   fn leader_report(l : CtlLeader, rep : AgentReport, now : Int) : CtlLeader do
-    let merged = match (report_failure(rep), obs_of(l.obs, rep.node)) do
+    let prior = obs_of(l.obs, rep.node)
+    let merged0 = match (report_failure(rep), prior) do
       (None, Some(o)) -> match report_failure(o.report) do
         Some(f) -> with_failure(rep, f)
         None -> rep
       end
       _ -> rep
+    end
+    -- A report without `detail` (a poll's; the hello carries it) keeps the
+    -- detail last reported.
+    let merged = match prior do
+      Some(o) -> if merged0.detail == "" && o.report.detail != "" do { merged0 with detail: o.report.detail } else merged0 end
+      None -> merged0
     end
     { l with obs: observe(l.obs, merged, now), inflight: List.filter(l.inflight, fn n -> n != rep.node) }
   end
@@ -976,18 +983,14 @@ mod Control do
     else None end
   end
 
-  -- A node's hot slots and counters, without the thousands of baseline slots:
-  -- VERSIONS_DETAIL lines whose signer is not `(none)` (something was activated), and the counters.
-  pfn hot_slot(l : String) : Bool do
-    if String.starts_with(l, "SLOT ") do
-      match List.head_opt(List.drop(words(l), 5)) do
-        Some(signer) -> signer != "(none)"
-        None -> false
-      end
-    else String.starts_with(l, "COUNTERS ") || String.starts_with(l, "RESTORED ") end
-  end
-
-  doc "What the node reports without the status file: the reload server's `NODE_STATE`, `VERSIONS_DETAIL` and `PINS`, and [failure] (the last step this agent failed, `seq step why`, or \"\")."
+  doc """
+  What the node reports without the status file: the reload server's `NODE_STATE` and
+  `PINS`, and [failure] (the last step this agent failed, `seq step why`, or \"\").
+  Not `VERSIONS_DETAIL`: one line per function (about 14,000 in a small app),
+  on every poll, cost a node gigabytes within a minute. The patch artifacts in
+  effect (`NODE_STATE`) are what the executor needs, and an operator reads the
+  per-function view through the control API (`VERSIONS_DETAIL` passes through).
+  """
   fn reload_report(name : String, pools : String, status : String, applied : Bool, failure : String) : AgentReport do
     let st = answer_lines(relay_line("NODE_STATE"))
     let head = state_line(st)
@@ -1016,9 +1019,7 @@ mod Control do
       None -> 0
     end
     let fwhy = String.join(List.drop(fparts, 2), " ")
-    let vd = List.filter(answer_lines(relay_line("VERSIONS_DETAIL")), fn l -> hot_slot(l))
-    let detail = "pins\n" ++ String.join(answer_lines(relay_line("PINS")), "\n")
-      ++ "\nhot\n" ++ String.join(vd, "\n") ++ "\nstatus\n" ++ status
+    let detail = "pins\n" ++ String.join(answer_lines(relay_line("PINS")), "\n") ++ "\nstatus\n" ++ status
     { node: name, seq: seq, versions: versions_text(List.filter_map(st, fn l -> artifact_of(l))),
       topology: if applied do topo else "-" end, drained: drained, healthy: head != "",
       failed_seq: fseq, failed_step: fstep, failed_why: fwhy, detail: detail, pools: pools }

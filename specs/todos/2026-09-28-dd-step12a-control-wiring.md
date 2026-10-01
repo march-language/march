@@ -20,11 +20,16 @@ merged, so it is unblocked.
   kind = "cluster"`, `make_plan` over the control API's STATUS instead of ssh, restart-class steps
   refused with a pointer to the process backend, D38).
 - The one `forge test --upgrade-from` fixture for a release through the control plane.
-- The CtlFetch chunk-size measurement (default 32768 hex chars, unmeasured: the machine was
-  under heavy load, and design 12a says never to measure then).
+- `CtlFetch` is not in the wiring: a session message costs far more than its bytes
+  ([2026-10-01-session-message-encoding-leak.md](2026-10-01-session-message-encoding-leak.md)),
+  so artifacts go over the control API as raw bytes (`CAS_GET`). A byte payload type for
+  sessions would let a chunked fetch over a session come back.
 - `forge cluster cert --control-agent/--control-candidate` conveniences (the roles are
-  Ctl.Agent:initiate, CtlFetch.Agent:initiate; candidates add Ctl.Control:offer, CtlFetch.Server:offer).
+  Ctl.Agent:initiate; candidates add Ctl.Control:offer).
 - The leader's audit log of accepted releases and ordered steps.
 - A provoked skipped-gate report (STATUS has `NOTE` lines for it; the partition scenario heals
   without the old leader racing ahead).
-- A minimal repro of the stale-record read in `ctl_release` (progress entry, Findings).
+- The two compiled-only record-update misbehaviours the wiring works around:
+  [2026-10-01-compiled-record-with-projection-sigsegv.md](2026-10-01-compiled-record-with-projection-sigsegv.md).
+- The session-runtime leaks the wiring routes around:
+  [2026-10-01-session-node-vault-tables-leak.md](2026-10-01-session-node-vault-tables-leak.md).
