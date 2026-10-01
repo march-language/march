@@ -59,9 +59,10 @@ That is ~4 function calls and a volatile load per 4 elements of useful work.
    borrow inference (`lib/tir/borrow.ml`) already has the notion; the RC ops
    here look like they survive because the value is forwarded into the next
    iteration's slot.
-3. **Emit body allocas in the entry block** when they are not genuinely
+3. ~~**Emit body allocas in the entry block** when they are not genuinely
    dynamic, so `mem2reg` can promote them and `stacksave`/`stackrestore` can
-   be dropped for loops with no dynamic alloca.
+   be dropped for loops with no dynamic alloca.~~ **Tried 2026-10-01: works as
+   IR, buys nothing measurable. Not shipped.** See "Direction 3 measured" below.
 4. **Preemption check throttling** — CAUTION: an in-TLS-counter throttle was
    already tried and measured **+65% WORSE** (see
    `project_fib_throttle_counter_rejected` in repo memory). Do not rebuild
