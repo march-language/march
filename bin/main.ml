@@ -945,9 +945,22 @@ let sanitize_clang_flag () =
    flags themselves are not otherwise in the key.  Bump this whenever the runtime
    clang/cc invocation flags change so no stale artifact can shadow the new ABI.
    v2 = runtime now built with -fno-strict-aliasing -fwrapv. *)
+(* Whether a native build links the vendored mimalloc as march_alloc's
+   allocator (runtime/march_alloc.h).  Off under any sanitizer (ASAN/TSAN
+   replace malloc and must see every allocation), for --compile-so patches
+   (they carry no runtime), and when MARCH_MALLOC=libc asks for plain libc
+   malloc (A/B and debugging).  Whether the vendored sources are actually
+   present is checked where the link line is built; this is the part the CAS
+   key needs. *)
+let mimalloc_requested () =
+  sanitize_mode () = None
+  && not !compile_so
+  && Sys.getenv_opt "MARCH_MALLOC" <> Some "libc"
+
 let codegen_cas_tags () =
   "rtcflags2"
-  :: (match sanitize_mode () with Some m -> ["sanitize=" ^ m] | None -> [])
+  :: (if mimalloc_requested () then ["mimalloc"] else [])
+  @ (match sanitize_mode () with Some m -> ["sanitize=" ^ m] | None -> [])
   (* No "trmc" tag: TRMC always runs (--trmc/--no-trmc were removed
      2026-09-22), so there is no non-TRMC artifact for a TRMC build to be
      confused with.  Dropping the tag changed every CAS key once. *)
@@ -3413,7 +3426,37 @@ let compile filename =
                shims below: only these are eligible for the precompiled-object
                cache (Stage A, see the runtime_objs binding further down) —
                user shims are per-project and must stay per-invocation. *)
+            (* Vendored mimalloc as march_alloc's allocator (see
+               runtime/march_alloc.h).  Needs the vendored sources AND the
+               shim header staged next to the runtime (a partially staged
+               _build/default/runtime silently falls back to libc), a native
+               target, and no sanitizer / --compile-so / MARCH_MALLOC=libc
+               ([mimalloc_requested]). *)
+            let mimalloc_dir = Filename.concat runtime_dir "third_party/mimalloc" in
+            let mimalloc_c = Filename.concat mimalloc_dir "src/static.c" in
+            let alloc_h = Filename.concat runtime_dir "march_alloc.h" in
+            let use_mimalloc =
+              mimalloc_requested ()
+              && (match parse_target !target_str with
+                  | March_tir.Llvm_emit.Native -> true | _ -> false)
+              && Sys.file_exists mimalloc_c && Sys.file_exists alloc_h
+              && Sys.file_exists (Filename.concat mimalloc_dir "include/mimalloc.h") in
+            (* -Dfree=march_free_any -Drealloc=march_realloc_any go into EVERY
+               translation unit (runtime, user FFI shims, mimalloc itself,
+               which never calls free()/realloc() by those names) so that every
+               free()/realloc() routes by provenance; see runtime/march_alloc.h
+               for why this is a -D and not a force-included header.
+               MI_DEBUG=0: mimalloc defaults to its debug build unless NDEBUG,
+               and the runtime's own asserts need NDEBUG unset. *)
+            let alloc_flags =
+              if use_mimalloc then
+                Printf.sprintf
+                  " -DMARCH_USE_MIMALLOC -DMI_DEBUG=0 -Dfree=march_free_any -Drealloc=march_realloc_any -I%s -I%s"
+                  (Filename.quote runtime_dir)
+                  (Filename.quote (Filename.concat mimalloc_dir "include"))
+              else "" in
             let runtime_extra_c =
+              (if use_mimalloc then " " ^ mimalloc_c else "") ^
               (if Sys.file_exists http_c then
                 let simd_c    = Filename.concat runtime_dir "march_http_parse_simd.c" in
                 let resp_c    = Filename.concat runtime_dir "march_http_response.c" in
@@ -3769,9 +3812,14 @@ let compile filename =
                  for free via .subsections_via_symbols.  Runtime_archive.ensure
                  folds cflags into its cache key, so stale non-sectioned
                  runtime objects are invalidated automatically. *)
-              if strip_flag <> "" && link_is_linux
-              then " -ffunction-sections -fdata-sections"
-              else "" in
+              (if strip_flag <> "" && link_is_linux
+               then " -ffunction-sections -fdata-sections"
+               else "")
+              (* Allocator flags ride along with the section flags: this
+                 binding is spliced into BOTH the cached-runtime-object cflags
+                 and the monolithic link command, which is exactly where the
+                 allocator selection has to be identical. *)
+              ^ alloc_flags in
             let signing_define =
               if !hot_reload_prefix <> None && not !compile_so && !signing_pubkey <> "" then
                 match b64_decode_pubkey !signing_pubkey with
