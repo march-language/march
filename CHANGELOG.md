@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **A read-only observe socket on every compiled program.** Set
+  `MARCH_OBSERVE_SOCKET=<path>` (or just `MARCH_HOT_RELOAD_SOCKET`, which puts it
+  at `<path>.observe`) and the program answers one-line requests with one line of
+  JSON. It serves `HELP` and `PING` today and is the base the coming
+  `forge observe`, `forge top` and `forge diagnose` build on. It is separate from
+  the hot-reload socket, so an observer can never block a deploy; the socket is
+  owner-only and holds at most eight clients at once.
 - **`Array.sort_by`, `Array.sort_by_key`, `RRB.sort_by` and `RRB.sort_by_key`.**
   Stable sorts for the persistent vectors: `sort_by` takes the same comparator
   as `List.sort_by` (`fn (a, b) -> a <= b`), and `sort_by_key` takes a function

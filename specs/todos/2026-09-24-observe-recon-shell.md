@@ -9,7 +9,7 @@ the plan's R4 and R8 deliver its stages B1 and C.
 Items, each its own PR; tick as they land and add a dated
 `specs/progress/YYYY-MM-DD-observe-rN-<slug>.md` per item:
 
-- [ ] R0 observe socket thread, JSON writer, test harness
+- [x] R0 observe socket thread, JSON writer, test harness ([progress](../progress/2026-10-01-observe-r0-socket.md))
 - [ ] R1 snapshot layer + observe verbs (no new counters)
 - [ ] R2 counters, scheduler idle time, crash ring (A/B per commit)
 - [ ] R3 `Recon` observe tier, `forge top`, `forge diagnose`, `forge status`

@@ -1,0 +1,14 @@
+-- The observe socket starts in an ordinary compiled binary (no --hot-reload)
+-- when MARCH_OBSERVE_SOCKET is set; the dune rule queries it with
+-- test/observe_client.c while this program sleeps.
+-- specs/plans/2026-09-28-observe-recon-shell-plan.md, R0.
+mod Main do
+  needs IO.Console
+  needs IO.Clock
+
+  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+    println("observe_ping: started")
+    sleep_ms(2000)
+    println("observe_ping: done")
+  end
+end
