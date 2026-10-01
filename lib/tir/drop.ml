@@ -771,9 +771,15 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env 
     | [last] -> last
     | op :: rest -> Tir.ESeq (op, chain rest)
   in
-  let rec push (freed : Tir.var) (e : Tir.expr) : Tir.expr =
+  (* [incs] is the run of [inc_rc x] statements IMMEDIATELY before the node
+     being visited (reset by anything else), as a list of variable names with
+     one entry per inc.  See the tail-call case below. *)
+  let rec push ?(incs : string list = []) (freed : Tir.var) (e : Tir.expr)
+    : Tir.expr =
     match e with
     | Tir.ELet (v, e1, e2) -> Tir.ELet (v, e1, push freed e2)
+    | Tir.ESeq ((Tir.EIncRC (Tir.AVar v) as e1), e2) ->
+      Tir.ESeq (e1, push ~incs:(v.Tir.v_name :: incs) freed e2)
     | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push freed e2)
     | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, push freed inner)
     | Tir.ECase (a, branches, default) ->
@@ -815,10 +821,38 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env 
            | None -> true)
         | _ -> false
       in
+      (* A capture the tail call passes on is released at the tail too, when
+         Perceus already took an owned reference for EVERY occurrence of it in
+         the call: the run of [inc_rc c] just before the tail (the borrowed ->
+         owned hand-off of the capture to the callee) holds the value alive
+         across the call, so dropping the environment's own reference here
+         cannot free anything the call still reads.  Without this the
+         environment's reference to a capture the tail forwards was never
+         released: [Seq.from_list]'s lambda `fn(acc, f) -> go(xs, acc, f)`
+         leaked `go` and the list on every use of the sequence.  Only a call
+         whose every capture occurrence is covered by an inc qualifies; a
+         capture that is also read in a borrowed position keeps the
+         conservative leak. *)
+      let call_atoms = match tail with
+        | Tir.ECallPtr (f, args) -> Some (f :: args)
+        | Tir.EApp (f, args) -> Some (Tir.AVar f :: args)
+        | _ -> None
+      in
+      let covered (v : Tir.var) =
+        match call_atoms with
+        | None -> false
+        | Some atoms ->
+          let n = v.Tir.v_name in
+          let count l =
+            List.length (List.filter (String.equal n) l) in
+          let occ = count (List.filter_map (function
+              | Tir.AVar a -> Some a.Tir.v_name | _ -> None) atoms) in
+          count incs >= occ
+      in
       if not (List.exists used !captures) then
         Tir.ESeq (guarded (fun _ -> true), tail)
       else if may_recurse then
-        Tir.ESeq (guarded (fun v -> not (used v)), tail)
+        Tir.ESeq (guarded (fun v -> not (used v) || covered v), tail)
       else begin match tail with
         | _ ->
           let r = { Tir.v_name = fresh env "cres"; v_ty = Tir.TVar "_";
@@ -892,7 +926,63 @@ let rewrite_dec env (atom : Tir.atom) (orig : Tir.expr) : Tir.expr =
      | None -> orig)
   | _ -> orig
 
+(** A closure environment built and dropped on the spot, never called:
+    [let c = inc_rc x; ...; alloc $Clo_f(apply, x, ...) in dec_rc c; rest]
+    with [c] dead in [rest].  Lowering allocates a match's fall-through
+    join-point closure at the head of every arm that may reach it, and an arm
+    that cannot reach it (inlined, or returning directly) is left holding the
+    allocation and a SHALLOW outer release of it.  The release frees the cell
+    but never the references Perceus took for it, so every capture it dup'd
+    leaked one count per execution of the arm — [Seq.from_string_lines]'s
+    trailing-empty strip leaked each string it kept.  The pair is dead: drop
+    the allocation, the release, and the dups that fed it. *)
+let dead_clo_pair (env : env) (e : Tir.expr) : Tir.expr option =
+  match e with
+  | Tir.ELet (c, rhs, Tir.ESeq (Tir.EDecRC (Tir.AVar c'), rest))
+    when String.equal c.Tir.v_name c'.Tir.v_name
+         && not (Perceus_liveness.name_free_in c.Tir.v_name rest) ->
+    let rec shape (x : Tir.expr) (dups : string list) =
+      match x with
+      | Tir.ESeq (Tir.EIncRC (Tir.AVar a), inner) ->
+        shape inner (a.Tir.v_name :: dups)
+      | Tir.EAlloc (Tir.TCon (n, _), _ :: caps)
+        when Tir_names.is_clo_struct n ->
+        let cap_vars = List.filter_map (function
+            | Tir.AVar v -> Some v | _ -> None) caps in
+        if List.for_all (fun d ->
+            List.exists (fun (v : Tir.var) -> String.equal v.Tir.v_name d)
+              cap_vars) dups
+        then Some (dups, cap_vars) else None
+      | _ -> None
+    in
+    (match shape rhs [] with
+     | None -> None
+     | Some (dups, cap_vars) ->
+       (* A capture with no dup was MOVED into the environment (its last use):
+          the environment owned that reference, so the dead environment's
+          owner must release it — and the shallow release of the cell never
+          did.  Only when the value is not read again; otherwise it was a
+          borrow and stays as it was. *)
+       let seen = Hashtbl.create 4 in
+       let released =
+         List.filter (fun (v : Tir.var) ->
+             if Hashtbl.mem seen v.Tir.v_name then false
+             else begin
+               Hashtbl.add seen v.Tir.v_name ();
+               Kind.needs_rc_of env.k_table v.Tir.v_ty
+               && v.Tir.v_lin = Tir.Unr
+               && not (List.mem v.Tir.v_name dups)
+               && not (Perceus_liveness.name_free_in v.Tir.v_name rest)
+             end) cap_vars
+       in
+       Some (List.fold_right (fun v acc ->
+           Tir.ESeq (Tir.EDecRC (Tir.AVar v), acc)) released rest))
+  | _ -> None
+
 let rec rewrite env (e : Tir.expr) : Tir.expr =
+  match dead_clo_pair env e with
+  | Some rest -> rewrite env rest
+  | None ->
   match e with
   | Tir.EDecRC a -> rewrite_dec env a e
   (* EAtomicDecRC is left alone: it marks a value that may be shared across

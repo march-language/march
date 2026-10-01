@@ -54,6 +54,14 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Compiled `Seq` constructors and combinators no longer leak.** Draining
+  `Seq.from_list`, `Seq.from_string_lines`, `Seq.map`, `Seq.filter` and
+  `Seq.concat` with `Seq.count` or `Seq.fold` leaked 3 to 5 heap objects per
+  use, so `Process.run_stream` leaked on every call. The compiler leaked a
+  closure's forwarded captures, reused a dying `Seq` cell as a capture-free
+  closure, missed closures stored through cell reuse, and left a dead
+  join-point closure holding references in `match ... rest -> ...` fall-throughs.
+  A capturing lambda handed to `Seq.map` still leaks one object per use.
 - **An app actor may share a name with a standard-library actor.** An app
   `actor Anchor`, `Writer`, `Endpoint`, `HostWatch`, `RegWatch`, `CtlWriter`,
   `OfferActor`, `ApInbox` or `ClusterNodeActor` used to collide with the
