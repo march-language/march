@@ -1,0 +1,34 @@
+-- A record field returned as the RESULT of a scope that owns the record.
+-- Perceus's aggregate scope-end drop releases [m] after the scope's result is
+-- computed, so the tail projection [m.addr] must be dup'd first (the
+-- `inc_rc $rc_N` before `dec_rc m` in `closed`); without it the caller got a
+-- String [m] still owned.  The runtime reproducer (with Map.remove as the
+-- owning consumer) is test/native/record_field_tail_projection.march.
+-- specs/progress/2026-09-30-compiled-tuple-destructure-leaks-moved-fields.md
+mod RecordFieldTailProjection do
+  needs IO.Console
+
+  type Mem = { node_id : String, addr : String }
+
+  pfn find(ms : List(Mem), id : String) : Option(Mem) do
+    match ms do
+      Nil -> None
+      Cons(m, rest) -> if m.node_id == id do Some(m) else find(rest, id) end
+    end
+  end
+
+  pfn keep(s : String) : List(String) do Cons(s, Nil) end
+
+  pfn closed(ms : List(Mem), id : String) : List(String) do
+    let addr = match find(ms, id) do
+      Some(m) -> m.addr
+      None -> ""
+    end
+    keep(addr)
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let ms = [{ node_id: "n" ++ int_to_string(0), addr: "a" ++ int_to_string(0) }]
+    println(int_to_string(List.length(closed(ms, "n0"))))
+  end
+end

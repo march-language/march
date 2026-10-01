@@ -1,0 +1,5 @@
+echo: 1 lines [hello]
+printf: 4 lines [a|b||c]
+no trailing newline: 2 lines [x|y]
+empty: 0 lines []
+sum: 6

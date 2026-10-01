@@ -11614,15 +11614,29 @@ let role_manifest_src ?(serve = false) ~uses_save () =
       Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
   end
 
+%s
   fn main(c : Cap(IO)) do
     %s
   end
 end
 |} (if uses_save then "save(n)" else "let _ = n")
+    (* The serving base needs one app slot for the end-to-end test's control
+       activation.  `cons` is an entry-module function (bare-named, off the
+       boundary), and since 2026-09-30 the stdlib's session actors are not
+       slots either, so without this actor the base publishes none. *)
+    (if serve then
+       "  actor Tick do\n\
+       \    state { n : Int }\n\
+       \    init { n: 0 }\n\
+       \    on Bump(k : Int) do { n: state.n + k } end\n\
+       \  end\n"
+     else "")
     (if serve then
        (* The base binary of the end-to-end test: it only has to stay up
           with its reload server; the role's root still exists statically. *)
-       "if List.length(Process.argv()) > 99 do\n\
+       "let t = spawn(Tick)\n\
+       \    send(t, Bump(1))\n\
+       \    if List.length(Process.argv()) > 99 do\n\
        \      let _ = Stream_Run.run_Cons(c, \"cons\", \"secret\", Stream_Run.addrs_from_env(),\n\
        \        fn (s, con, fw, st) -> cons(s, con, st))\n\
        \      ()\n\
