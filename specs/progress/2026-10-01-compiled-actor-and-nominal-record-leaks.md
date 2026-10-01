@@ -122,3 +122,9 @@ inside its base arm's half-IQR (0.7–1.7%).
   72 native tests that declare an actor or a record type and use no network: 69
   exit 0 with no ASAN, UBSan or RC-underflow report; 3 FFI fixtures do not link
   without their `--ffi-link` flags. Run before and after the shared `Some(())`.
+- After merging `main`'s tuple-destructure leak fix (#722, which changes the same
+  scope-end drop): both PRs' leak probes and every TIR snapshot pass; the full
+  `test/runtest` alias shows only the two pre-existing failures; and a wider ASAN
+  sweep (133 programs: also every native test with a tuple-pattern lambda) is
+  clean. Two of them exit 1 by design (an array-length panic test and a
+  hook-timeout test) with no sanitizer report.
