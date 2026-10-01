@@ -17932,12 +17932,16 @@ let wrapper_contracts_suite =
           [ "of `Seq.batched` does not satisfy precondition `_ > 0`";
             "of `Flow.batch` does not satisfy precondition `_ > 0`";
             "of `Gen.frequency` does not satisfy precondition `len(_) > 0`" ]);
-    gated "an unproven argument propagates the requirement under cap verified"
+    gated "an unproven argument is an error under cap verified"
       (fun () ->
         let rc, out = run propagates_src in
         Alcotest.(check int) "rc" 1 rc;
-        Alcotest.(check bool) "propagates" true
-          (contains out "propagates a requirement it doesn't declare")) ]
+        List.iter
+          (fun needle ->
+            Alcotest.(check bool) ("mentions " ^ needle) true (contains out needle))
+          [ "cannot verify precondition `_ > 0` on `Seq.batched`";
+            "cannot verify precondition `_ > 0` on `Flow.batch`";
+            "cannot verify precondition `len(_) > 0` on `Gen.frequency`" ]) ]
 
 let () =
   Alcotest.run "march-refinecheck"

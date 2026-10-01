@@ -1,30 +1,45 @@
-# `[P2]` Stdlib: wrappers forward to a contracted callee without declaring the contract
+# Stdlib wrapper contracts: `seq`, `flow`, `gen` declared; `aho_corasick` left alone
 
-Filed 2026-09-16, replacing `2026-09-16-refine-local-value-facts.md`, whose
-let-flow phases landed (see `specs/progress/2026-09-16-refine-let-if-disjunction.md`
-and `-refine-builtin-return-contracts.md`). The census that sized this is
-`specs/progress/2026-09-16-refine-skip-census.md`.
+Filed 2026-09-16 as `specs/todos/2026-09-16-refine-stdlib-wrapper-contracts.md`;
+**closed 2026-09-30.** The census that sized it is
+`specs/progress/2026-09-16-refine-skip-census.md`. The `Stats` row landed
+2026-09-22 (`specs/progress/2026-09-22-stats-wrapper-contracts.md`).
 
-**Status (2026-09-22):** the `Stats` row is done
-(`specs/progress/2026-09-22-stats-wrapper-contracts.md`; 6 skips → 0).
-`aho_corasick` is decided **no**. What remains open is the three
-`seq`/`flow`/`gen` sites.
+## Decision
 
-| Sites | Where | Shape | Status |
-|---|---|---|---|
-| 11 | `stdlib/aho_corasick.march` (`child_of`, `get_fail`, `get_outputs`, …) | `Array.get(nodes, state)` where `state` is an unannotated parameter of an internal helper. | **Decided: do not change.** The contract is relational (`_ < pvec_length(nodes)`); declaring it pushes obligations the helpers' callers cannot discharge. The skips stay, visibly. |
-| 3 | `stdlib/seq.march:388`, `stdlib/flow.march:113`, `stdlib/gen.march:390` | A `batch`/`choice_weighted` wrapper forwarding an unrefined `n` / list. | **Open.** Not part of the 2026-09-22 decision. |
+Repo owner, 2026-09-30: yes on all three remaining sites. `aho_corasick`
+(11 sites) stays unchanged: its contract is relational
+(`_ < pvec_length(nodes)`) and would push obligations onto helper callers that
+they cannot discharge; those skips stay, visibly.
 
-## Decision (repo owner, 2026-09-22)
+## What changed
 
-- **`Stats`: yes, for the whole surface** — done, see the progress file.
-- **`aho_corasick` (11 sites): decided separately — do NOT change it.** Its
-  contract is relational (`_ < pvec_length(nodes)`) and would push unprovable
-  obligations onto the helpers' callers.
-- **`seq`/`flow`/`gen` (3 sites): not part of the decision** — still open. Each
-  is a public-signature change of the same kind as `Stats` and needs its own
-  call.
+Breaking change to three public signatures, with `--refine-suggest` as the
+migration path (same shape as the `Stats` change):
 
-Start from `--refine-suggest <fn>`. Re-run the census with a **neutral entry
-file**, not `stdlib/list.march` (see the progress file for why that entry
-inflates `dataframe.march`).
+| Function | Now declares |
+|---|---|
+| `Seq.batched(seq, n)` | `n : {Int \| _ > 0}` (forwards to `Seq.batch`, already contracted) |
+| `Flow.batch(stage, n)` | `n : {Int \| _ > 0}` (forwards to `Seq.batch`) |
+| `Gen.frequency(pairs)` | `pairs : {List((Int, Generator(a))) \| len(_) > 0}` (forwards to `Random.choice_weighted`) |
+
+`Gen.frequency` maps `pairs` through `List.map` before calling
+`Random.choice_weighted`, and the checker does not know `List.map` preserves
+length, so the declared contract alone left the `choice_weighted` call
+skipped (`unconstrained-subject`). The function now matches on the mapped list
+(`Nil -> panic(...)`, an arm unreachable given the declared contract) so the
+non-empty fact is restated on the value actually passed, rather than weakening
+the signature.
+
+## Evidence
+
+Neutral entry, `--check --refine-report`: user + stdlib skips 46 -> **43**
+(the three wrapper sites are gone; `gen.march`'s two `List.nth` skips remain).
+Callers in `stdlib/`, `test/`, `bench/`, `docs/` pass literals or are
+unaffected (`test_seq.march` uses `Seq.batched(xs, 2)`).
+
+Tests: new `wrapper-contracts` group in `test/test_refinecheck.ml` (real
+compiler, real stdlib): literal-positive / non-empty arguments are accepted
+(rc 0); a literal `0` / `[]` is refuted at each of the three wrappers (rc 1,
+"does not satisfy precondition"); an unproven argument under `cap verified`
+errors with "cannot verify precondition ...".
