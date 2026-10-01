@@ -383,13 +383,19 @@ mod Gen do
   Weighted choice among `(weight, gen)` pairs.  Weights must be non-negative
   and at least one must be positive.
   """
-  fn frequency(pairs : List((Int, Generator(a)))) : Generator(a) do
+  fn frequency(pairs : {List((Int, Generator(a))) | len(_) > 0}) : Generator(a) do
     let float_pairs = List.map(pairs, fn p ->
       match p do (w, g) -> (g, int_to_float(w)) end)
-    Generator(fn (rng, size) ->
+    -- The checker does not know `List.map` preserves length, so restate the
+    -- non-empty fact on the mapped list itself; the `Nil` arm is unreachable
+    -- given `pairs`' declared `len(_) > 0`.
+    match float_pairs do
+    Nil -> panic("Gen.frequency: empty list")
+    _ -> Generator(fn (rng, size) ->
       let (picked, rng2) = Random.choice_weighted(rng, float_pairs)
       run(picked, rng2, size)
     )
+    end
   end
 
   -- ================================================================
