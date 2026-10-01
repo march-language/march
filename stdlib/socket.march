@@ -20,6 +20,7 @@
 --   Socket.error_message(e)                : String
 
 mod Socket do
+  needs IO.NetConnect
 
   type SocketError
     = ConnectionFailed(String)

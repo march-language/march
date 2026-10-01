@@ -143,6 +143,33 @@ jobs:
             echo "::notice::All quarantined tests passed — consider un-quarantining them (restore (alias runtest) in test/dune and strike the inventory row)."
           fi
 
+  # test/stdlib/test_properties.march: 76 Check.all property runs over nested
+  # Msgpack/JSON round-trips. ~4 minutes (237.6 s measured 2026-09-30 at load
+  # 6-12), too slow for `dune runtest` on every PR, so it lives on its own
+  # alias and runs here. Unlike `quarantined` above this is not expected to
+  # flake: a red run is a real stdlib regression. It does not gate `publish`.
+  # specs/progress/2026-09-30-benchmark-wire-test-properties-march.md
+  stdlib-properties:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
+      - name: Run test/stdlib/test_properties.march
+        timeout-minutes: 30
+        run: |
+          eval $(opam env)
+          dune shutdown 2>/dev/null || true
+          dune build --root . @test/stdlib-march-properties
+
   # Smoke-test the stdlib doc generator against the current compiler. The
   # external march_doc tool (auto-cloned by the script) is compiled by THIS
   # repo's compiler, so a language-rule change here can break it silently:

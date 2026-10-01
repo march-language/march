@@ -96,6 +96,10 @@ let gated : (string * string * compare_mode) list = [
   (* ── core compute / codegen ── *)
   "fib",              "102334155",    Exact;
   "list_ops",         "333333666666", Exact;
+  (* an unboxed P2(Int, Int) built in the arms of an `if`, 50M times: the
+     struct-typed case join slot (specs/progress/2026-09-30-unbox-aware-case-
+     join-slot.md). *)
+  "branch_aggregate", "1249999975000000", Exact;
   (* list_ops with its helpers in a nested module, for the hot-reload
      boundary-cost measurement (#587). Same program, same answer. *)
   "list_ops_nested",  "333333666666", Exact;
