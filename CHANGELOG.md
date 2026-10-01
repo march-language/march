@@ -29,6 +29,13 @@ git log is authoritative for exact commits.
   replaced and the release finishes without applying a step twice. Leadership needs
   `Ctl.Control:offer` in the node's certificate. Restart-class changes still go through
   the process backend. `forge deploy` itself does not select the cluster backend yet.
+- **Native builds allocate from a vendored mimalloc.** `march_alloc`, the allocator
+  behind every March value, now draws from a statically linked mimalloc instead of
+  libc `calloc`, with no new system dependency. Allocation-heavy programs get
+  faster: `binary_trees` 233 to 165 ms (-29%) and `list_ops` 76 to 62 ms (-18%),
+  with `tree_transform` about 3% faster. The cost is a larger resident set (7 MB to
+  14 MB on `binary_trees`). Set `MARCH_MALLOC=libc` when compiling to get the old
+  allocator; `MARCH_SANITIZE` builds, hot-reload patches and the REPL always use libc.
 - **`Array.sort_by`, `Array.sort_by_key`, `RRB.sort_by` and `RRB.sort_by_key`.**
   Stable sorts for the persistent vectors: `sort_by` takes the same comparator
   as `List.sort_by` (`fn (a, b) -> a <= b`), and `sort_by_key` takes a function
@@ -788,6 +795,16 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **Breaking: `Seq.batched`, `Flow.batch` and `Gen.frequency` now declare their
+  preconditions in the signature.** `Seq.batched(seq, n)` and `Flow.batch(stage, n)`
+  take `n : {Int | _ > 0}`, and `Gen.frequency(pairs)` takes
+  `pairs : {List((Int, Generator(a))) | len(_) > 0}`. Each already forwarded to a
+  contracted callee without restating the contract, so a zero batch size or an
+  empty list compiled and failed at run time; a literal violation is now a
+  compile error, and an unproven argument is a hint (an error under
+  `cap verified`). To migrate, run `march --check --refine-suggest <fn>` on the
+  caller, which prints the refinement to add to its parameter, or guard the call
+  with `if n > 0` / a `match` on the list.
 - **A small scalar aggregate built in the arms of an `if`/`match` no longer
   allocates.** When every arm builds the same unboxed type (for example
   `if c do P2(a, 1) else P2(1, a) end`), the join now holds the struct directly
