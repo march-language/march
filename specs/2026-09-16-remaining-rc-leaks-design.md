@@ -257,7 +257,7 @@ not retention.
 - `specs/todos/2026-09-03-field-escape-owns-is-per-type-not-per-field` and
   `specs/todos/2026-09-04-unbox-aware-case-join-slot` are PERFORMANCE items
   (an elidable RC pair, a boxed join slot). Neither leaks.
-- `specs/todos/2026-08-07-drop-guided-reuse-coverage` was measured as not worth
+- `specs/progress/2026-08-07-drop-guided-reuse-coverage` was measured as not worth
   building. Do not rebuild it.
 
 ## Suggested order

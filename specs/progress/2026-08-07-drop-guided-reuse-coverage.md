@@ -1,3 +1,5 @@
+**Closed 2026-09-30 as won't-do (owner): the 2026-08-07 measurement found only 27 real data-constructor sites. The 387 heap join-point closures belong to the Escape pass, not FBIP.**
+
 # Drop-guided reuse: only match scrutinees are reuse candidates
 
 **Filed:** 2026-08-07
