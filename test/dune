@@ -3077,6 +3077,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; interpreted and the compiled run is diffed against the SAME file, so this
 ; is a compiled-vs-interpreted parity check as well as a golden. See
 ; specs/progress/2026-09-24-sha256-builtin-hex-string.md.
+;; Process.run_stream: the typechecker and the interpreter said Ok(Seq(String)),
+;; the compiled runtime returned Ok(<raw stdout String>) under that type, so
+;; any Seq operation on it panicked. Both backends are diffed against ONE
+;; .expected, which is the interpreter's output.
+(rule
+ (targets native_process_run_stream native_process_run_stream.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/process_run_stream.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_process_run_stream
+        native/process_run_stream.march)
+   (with-stdout-to native_process_run_stream.out
+        (system "./native_process_run_stream")))))
+
+(rule
+ (targets interp_process_run_stream.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/process_run_stream.march))
+ (action
+  (with-stdout-to interp_process_run_stream.out
+    (run %{exe:../bin/main.exe} native/process_run_stream.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/process_run_stream.expected native_process_run_stream.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/process_run_stream.expected interp_process_run_stream.out)))
+
 (rule
  (targets native_sha256_hex_string native_sha256_hex_string.out)
  (deps (file %{exe:../bin/main.exe})

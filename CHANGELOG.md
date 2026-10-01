@@ -445,6 +445,11 @@ git log is authoritative for exact commits.
   silently skipped the check. It is now deferred until the whole module run and
   requires the importee's full declared set (fail-closed), so the same program
   is rejected in either declaration order.
+- **`Process.run_stream` works in compiled programs and no longer leaks.** The
+  compiled runtime returned the raw stdout String under the `Seq(String)` type
+  (any `Seq` operation on it panicked) and leaked three objects per call. Both
+  backends now build the `Seq` from the captured output the same way, and the
+  runtime releases what it allocated on the way.
 - **Tail-recursion-modulo-cons now covers a computed call argument and nested
   helper functions.** `Cons(a, r(a + 1, b))` was compiled as a plain non-tail
   recursion (stack overflow on long lists) although the same code with `a + 1`

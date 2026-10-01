@@ -9162,14 +9162,26 @@ void *march_process_spawn_sync(void *cmd_obj, void *args_list) {
     return mk_ok(pr);
 }
 
-/* process_spawn_lines(command, args) → Result(Seq(String), String) */
+/* process_spawn_lines(command, args) → Result(String, String)
+
+   Returns Ok(stdout) — the whole captured stdout as ONE String; Process.run_stream
+   splits it into a Seq(String) in March.  The interpreter returns the same
+   shape.  [march_process_spawn_sync] hands back a fresh Ok(ProcessResult(code,
+   stdout, stderr)) that this function owns.  march_decrc is SHALLOW (it frees
+   the cell and never walks the fields), so the intermediate objects are
+   released by hand: the stderr String, the ProcessResult cell and the outer Ok
+   cell.  The stdout String is not released; its one reference MOVES from the
+   ProcessResult into the Ok returned here.  Before this the three objects
+   leaked per call and the returned Ok aliased a String it did not own. */
 void *march_process_spawn_lines(void *cmd_obj, void *args_list) {
-    /* Run command and return Ok(stdout_string) — caller can split lines */
     void *result = march_process_spawn_sync(cmd_obj, args_list);
-    /* If Ok(ProcessResult), extract stdout and return Ok(stdout) */
     if (((march_hdr *)result)->tag == 0) {
         void *pr = MARCH_FIELD_PTR(result, 0);
         void *out_str = MARCH_FIELD_PTR(pr, 1);
+        void *err_str = MARCH_FIELD_PTR(pr, 2);
+        march_decrc(err_str);
+        march_decrc(pr);      /* shallow: out_str's reference is not touched */
+        march_decrc(result);  /* shallow: pr is already released above */
         return mk_ok(out_str);
     }
     return result; /* Err case: pass through */
