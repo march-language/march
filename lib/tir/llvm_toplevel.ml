@@ -233,6 +233,8 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
      from the server binary would otherwise win).
      Exported symbols that must stay default-visible:
        *_dispatch      — the reload server finds these with dlsym(ACTIVATE)
+                         (an app actor's only: a stdlib actor has no slot,
+                         see [Hot_reload.is_slot_actor_dispatch])
        *_migrate_state — the __migrate_* alias points to this function; a
                          hidden aliasee with a default-visibility alias is not
                          valid LLVM IR, so keep the migrate_state fn visible
@@ -256,7 +258,7 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
   let vis_prefix =
     let fname = fn.Tir.fn_name in
     if ctx.Llvm_ctx.compile_so
-       && not (Tir_names.is_actor_dispatch_fn fname)
+       && not (Hot_reload.is_slot_actor_dispatch fname)
        && not (Tir_names.is_migrate_fn_name fname)
        && Hot_reload.Name_table.id_of ctx.Llvm_ctx.hr_names fname = None
     then "hidden "
@@ -963,9 +965,13 @@ let emit_module ~emit_expr
      Actor dispatch functions (e.g. Counter_dispatch) have no module prefix in
      TIR because lower.ml strips the top-level file-module name from all
      declarations (only nested submodule functions retain their prefix).
-     We include any *_dispatch function unconditionally so that actor hot-reload
-     works when the --hot-reload boundary is the file-level module. *)
-  let is_actor_dispatch_fn = Tir_names.is_actor_dispatch_fn in
+     We include every APP actor's *_dispatch function so that actor hot-reload
+     works when the --hot-reload boundary is the file-level module.  A stdlib
+     actor's is never a slot (owner decision 2026-09-30): a stdlib change is a
+     toolchain change, deployed by restart, and a deploy must not pause or
+     migrate the actor answering SWIM pings.  Decided by loader provenance,
+     see [Hot_reload.is_slot_actor_dispatch]. *)
+  let is_actor_dispatch_fn = Hot_reload.is_slot_actor_dispatch in
   (* Program-entry functions must NEVER be reloadable slots.  The running green
      thread's root frame is the chosen entry (`main`/`ModName.main`, emitted as
      @march_main); swapping it while live corrupts the runtime allocator (OOM).
@@ -1025,7 +1031,13 @@ let emit_module ~emit_expr
     | None -> ""
     | Some _cfg ->
       let n = Hot_reload.Name_table.count hr_names in
-      if n = 0 then "" else begin
+      (* Emitted even with NO slots: a `--hot-reload` binary always runs its
+         reload server (HCR_INFO, VERSIONS, TOPOLOGY, and a deploy tool that
+         can connect and be told there is nothing to swap).  Since stdlib
+         actors stopped being slots (2026-09-30), an app whose code all lives
+         in the entry module has zero, and skipping this left it with no
+         reload server at all: `forge deploy hot` could not even connect. *)
+      begin
         let b = Buffer.create 256 in
         (* Dispatch slot IDs are 1-based: slot 0 is reserved as the "not set"
            sentinel in march_actor_meta.dispatch_name_id (0 = no HCR dispatch). *)

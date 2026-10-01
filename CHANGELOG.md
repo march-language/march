@@ -68,6 +68,16 @@ git log is authoritative for exact commits.
   with `int_shl: shift out of range` (as the interpreter does) instead of
   returning an undefined value. Compiled `int_pow` with a negative exponent
   panics with `int_pow: negative exponent` instead of returning `0`.
+- **An app actor may share a name with a standard-library actor.** An app
+  `actor Anchor`, `Writer`, `Endpoint`, `HostWatch`, `RegWatch`, `CtlWriter`,
+  `OfferActor`, `ApInbox` or `ClusterNodeActor` used to collide with the
+  stdlib's own actor of that name: `--compile` and `--emit-llvm` died with an
+  internal compiler error (`actor-message tag table has no row for
+  Anchor_Msg.Bump`) or charged the app the stdlib actor's capabilities, and the
+  interpreter could spawn the app's actor where the stdlib meant its own. The
+  stdlib's actors now get module-qualified internal names
+  (`Topology__Anchor`); app actors keep theirs, so spawn symbols and
+  hot-reload manifests are unchanged.
 - **A DataFrame column of nothing but nulls keeps its nulls.** CSV/JSON loading and
   `summarize` used to turn an all-null column into a plain string column of `""`, so the
   rows read back as empty strings; they now read back as `NullVal`.
@@ -459,6 +469,23 @@ git log is authoritative for exact commits.
   silently skipped the check. It is now deferred until the whole module run and
   requires the importee's full declared set (fail-closed), so the same program
   is rejected in either declaration order.
+- **Destructuring a tuple and moving its fields on no longer leaks in compiled
+  programs.** `match t do (a, _, c) -> f(Box(a, c)) end` leaked the moved fields
+  (two objects per call), and a field the pattern never used was never freed.
+  The compiler treated a tuple pattern's fields as borrowed although the match
+  hands them over as owned; they now follow the same ownership as a constructor
+  pattern's.
+- **A record field returned out of the scope that owns the record is no longer
+  freed with it (compiled).** `let a = match f() do Some(m) -> m.addr ... end`
+  handed the caller a String the record still owned, and it was freed when
+  the record was dropped: a use-after-free once the record held the last
+  reference (it crashed a cluster node on a peer reconnect). The field now
+  gets its own reference first.
+- **`Process.run_stream` works in compiled programs and no longer leaks.** The
+  compiled runtime returned the raw stdout String under the `Seq(String)` type
+  (any `Seq` operation on it panicked) and leaked three objects per call. Both
+  backends now build the `Seq` from the captured output the same way, and the
+  runtime releases what it allocated on the way.
 - **Tail-recursion-modulo-cons now covers a computed call argument and nested
   helper functions.** `Cons(a, r(a + 1, b))` was compiled as a plain non-tail
   recursion (stack overflow on long lists) although the same code with `a + 1`
@@ -752,6 +779,29 @@ git log is authoritative for exact commits.
   already was compiled: `int_shr(-8, 1)` is `-4`. It used to be a logical shift
   in the interpreter, so `int_shr(-8, 1)` printed `4611686018427387900`.
   Non-negative inputs give the same result as before.
+- **A small scalar aggregate built in the arms of an `if`/`match` no longer
+  allocates.** When every arm builds the same unboxed type (for example
+  `if c do P2(a, 1) else P2(1, a) end`), the join now holds the struct directly
+  instead of boxing it in each arm and freeing it at the merge. A loop of 50
+  million such constructions went from 1.61 s to 0.07 s (`bench/branch_aggregate.march`).
+- **`test/stdlib/test_properties.march` now runs in CI, nightly.** Its 240
+  property tests (about 4 minutes) were on a dune alias nothing ran. The
+  nightly workflow's new `stdlib-properties` job runs them; they stay out of
+  the per-PR `dune runtest`, which they would slow too much.
+- **The standard library's actors are no longer hot-reload slots.** Under
+  `--hot-reload`, only your own actors' dispatch functions get a slot; the
+  stdlib's (the cluster node that answers SWIM pings, session endpoints, the
+  node-queue writers, ...) do not, so a hot deploy never activates, pauses or
+  migrates them. A stdlib change comes with a toolchain change and deploys by
+  restart: the `.hcr_manifest` now records the stdlib it was built against
+  (`# stdlib_hash`), `forge deploy --plan` plans a pool whose stdlib changed as
+  a restart and says why, and `forge deploy hot` refuses such a build instead
+  of reporting the server up to date. Which actors are the stdlib's is decided
+  by where the compiler loaded them from, so an actor of yours named like a
+  stdlib actor, or in a file named like a stdlib file, keeps its slot. A
+  `--hot-reload` binary with no slot of its own (all its code in the entry
+  module) now still starts its reload server; before, it got one only
+  because the stdlib's actors had slots.
 - **`Array.from_list` (and `RRB.from_list`) is about 8x faster.** It now builds
   the vector in one pass instead of appending one element at a time: 100,000
   elements take 6.6 ms instead of 54 ms. The resulting vector is the same.

@@ -53,7 +53,45 @@ ubuntu container.
    latency across it; the question is whether the actor that answers pings
    can be starved by marker processing or a state migration on a 2-vCPU box.
    Even a correct deploy should never hold the scheduler that answers SWIM.
-3. Independently: whether a stdlib actor should be a hot-reload slot at all.
-   `is_actor_dispatch_fn` puts every `*_dispatch` on the boundary, stdlib
-   actors included (lib/tir/llvm_toplevel.ml, `hr_names`); only app actors
-   need to be.
+3. ~~Independently: whether a stdlib actor should be a hot-reload slot at all.~~
+   **Decided 2026-09-30 (the owner, "Todo list review"): no.** A stdlib change
+   comes with a toolchain or language change, which is a restart deploy, never
+   a hot patch; and it keeps a deploy from pausing or migrating the actor that
+   answers SWIM pings. Done in the same change:
+   - The boundary predicate is `Hot_reload.is_slot_actor_dispatch`
+     (lib/tir/hot_reload.ml): every `*_dispatch` except a stdlib actor's. The
+     reload name table (`hr_names`), the patch `.so`'s visibility exemptions
+     (lib/tir/llvm_toplevel.ml, lib/tir/llvm_tco.ml) and the slot-hash fold in
+     bin/main.ml all use it; the fold no longer descends into a stdlib actor's
+     glue either. (`Llvm_emit.clo_wrap_borrowed` keeps the suffix predicate on
+     purpose: the runtime-call ABI is the same for every actor.)
+   - "Stdlib" is loader provenance, never a name: lowering records each
+     actor's glue with whether the declaring `DActor`'s span is the stdlib's
+     (`Typecheck_builtins.span_is_stdlib`, the stdlib-only gate's predicate).
+     A user file named `node_queue.march` or a user actor named `Writer` keeps
+     its slot. (A user actor named like a stdlib actor does not compile today
+     at all: "actor-message tag table has no row for Writer_Msg.Bump", on main
+     too, filed separately.)
+   - On the upgrade fixture the compiled slot set drops from 12 (nine of them
+     stdlib actors: `ClusterNodeActor`, `Endpoint`, `Writer`, `CtlWriter`,
+     `RegWatch`, `HostWatch`, `Anchor`, `OfferActor`, `ApInbox`) to 3.
+   - So a stdlib change is not silently undeployed: the `.hcr_manifest`
+     records `# stdlib_hash` (the stdlib source digest); `forge deploy --plan`
+     plans the affected pools as a restart with the reason printed, and
+     `forge deploy hot` refuses before connecting (`Cmd_deploy_hot.stdlib_change`).
+     Before, with the stdlib actors unslotted, deploy hot would have found no
+     slotted change and reported the server up to date.
+   - A `--hot-reload` build with zero slots (all code in the entry module,
+     whose slots used to be the stdlib's session actors) now still starts its
+     reload server; the start had been emitted only alongside a non-empty slot
+     table.
+   - Tests: test/test_hcr_stdlib_actors.ml (run_compiler; in-process
+     provenance and look-alikes, the driver's slot set, and the v1/v2
+     manifest diff: a one-line app edit flags exactly `Counter_Bump` and
+     `Counter_dispatch`; a stdlib-only edit changes no slot and differs in
+     `stdlib_hash`), test/test_hot_reload.ml (`actor_provenance`),
+     forge/test/test_deploy_plan.ml (restart; deploy hot's refusal).
+
+   This removes the candidate cause above for good (no deploy touches
+   `ClusterNodeActor` any more), but points 1 and 2 stay open: nobody has
+   run the scenarios on the CI runner at the default suspect timeout.

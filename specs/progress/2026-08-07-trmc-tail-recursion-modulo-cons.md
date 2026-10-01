@@ -13,7 +13,7 @@ because the measurements that follow only make sense against the reasoning that
 produced them.
 
 Taken from Lorenzen & Leijen, *Reference Counting with Frame Limited Reuse*
-(ICFP'22) §2.4.1. See `specs/todos/2026-08-07-drop-guided-reuse-coverage.md` for
+(ICFP'22) §2.4.1. See `specs/progress/2026-08-07-drop-guided-reuse-coverage.md` for
 the sibling item from the same paper (measured, and declined).
 
 > "With TRMC, such function can make its tail call inside any tail-position

@@ -1,0 +1,41 @@
+-- Process.run_stream must return the SAME thing on both backends: an
+-- Ok(Seq(String)) of stdout lines.  The typechecker has always typed it
+-- Result(Seq(a), String) and the interpreter built a real Seq, but the
+-- compiled runtime returned Ok(<the raw stdout String>) under that type, so
+-- any Seq operation on it read a String's bytes as a closure.  Blank lines in
+-- the middle are kept and a trailing newline adds no empty element.
+-- Expected output is the interpreter's.
+mod ProcessRunStream do
+  needs IO.Console
+  needs IO.Process
+
+  pfn report(label : String, r) : () do
+    match r do
+      Ok(seq) ->
+        let lines = Seq.to_list(seq)
+        println(label ++ ": " ++ int_to_string(List.length(lines)) ++ " lines ["
+                ++ String.join(lines, "|") ++ "]")
+      Err(e) -> println(label ++ ": error")
+    end
+  end
+
+  pfn string_to_int_or_zero(s : String) : Int do
+    match String.to_int(s) do
+      Ok(n) -> n
+      Err(_) -> 0
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+    report("echo", Process.run_stream("echo", ["hello"]))
+    report("printf", Process.run_stream("printf", ["a\nb\n\nc\n"]))
+    report("no trailing newline", Process.run_stream("printf", ["x\ny"]))
+    report("empty", Process.run_stream("true", []))
+    match Process.run_stream("printf", ["1\n2\n3\n"]) do
+      Ok(seq) ->
+        let total = Seq.fold(seq, 0, fn (acc, line) -> acc + string_to_int_or_zero(line))
+        println("sum: " ++ int_to_string(total))
+      Err(_) -> println("sum: error")
+    end
+  end
+end

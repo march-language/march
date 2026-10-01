@@ -3602,8 +3602,11 @@ let base_env : env =
            with Unix.Unix_error (err, _, _) ->
              VCon ("Err", [VString (Unix.error_message err)]))
         | _ -> eval_error "process_spawn_sync: expected (String, List(String))"))
-  (* Run a command and return its stdout as a Seq(String) of lines.
-     Returns Ok(Seq) on success or Err(msg) on OS error. *)
+  (* Run a command and return its whole stdout as one String.
+     Returns Ok(stdout) on success or Err(msg) on OS error.  Both backends
+     agree on this raw shape (the compiled runtime returns the same String);
+     [Process.run_stream] splits it into a Seq(String) in March, so the Seq
+     type lives in the stdlib and not in a builtin's payload. *)
   ; ("process_spawn_lines", VBuiltin ("process_spawn_lines", function
         | [VString cmd; lst] ->
           let rec args_of_list = function
@@ -3617,19 +3620,9 @@ let base_env : env =
           (try
              let (ic, oc) = Unix.open_process_args cmd args_arr in
              close_out_noerr oc;
-             let lines = ref [] in
-             (try while true do lines := input_line ic :: !lines done
-              with End_of_file -> ());
+             let out = In_channel.input_all ic in
              let _ = Unix.close_process (ic, oc) in
-             let ordered = List.rev !lines in
-             let fold_fn = VBuiltin ("process_stream_fold", fun args ->
-               match args with
-               | [acc; f] ->
-                 List.fold_left (fun a line ->
-                   !apply_hook f [a; VString line]) acc ordered
-               | _ -> eval_error "process_stream_fold: expected (acc, fn)")
-             in
-             VCon ("Ok", [VCon ("Seq", [fold_fn])])
+             VCon ("Ok", [VString out])
            with Unix.Unix_error (err, _, _) ->
              VCon ("Err", [VString (Unix.error_message err)]))
         | _ -> eval_error "process_spawn_lines: expected (String, List(String))"))
