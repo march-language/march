@@ -1,0 +1,55 @@
+-- A record field returned as the RESULT of a scope that owns the record:
+--   let addr = match find(ms, id) do Some(m) -> m.addr  None -> "" end
+-- Perceus's aggregate scope-end drop released [m] after computing the scope's
+-- result, and the tail projection [m.addr] borrowed without a dup, so the
+-- caller received (and Map.remove, an owning callee, then released) a String
+-- that [m] still owned: a use-after-free once [m] was the last owner.  The
+-- shape of ClusterNode.core_link_closed; it crashed two-node's
+-- cluster_fd_release.  Expected output is the interpreter's.
+-- specs/progress/2026-09-30-compiled-tuple-destructure-leaks-moved-fields.md
+mod RecordFieldTailProjection do
+  needs IO.Console
+
+  type Mem = { node_id : String, addr : String, inc : Int }
+
+  pfn find(ms : List(Mem), id : String) : Option(Mem) do
+    match ms do
+      Nil -> None
+      Cons(m, rest) -> if m.node_id == id do Some(m) else find(rest, id) end
+    end
+  end
+
+  pfn closed(ms : List(Mem), bk : Map(String, (Int, Int)), id : String) : Map(String, (Int, Int)) do
+    let addr = match find(ms, id) do
+      Some(m) -> m.addr
+      None -> ""
+    end
+    Map.remove(bk, addr, Map.str_cmp)
+  end
+
+  pfn total(ms : List(Mem), acc : Int) : Int do
+    match ms do
+      Nil -> acc
+      Cons(m, rest) -> total(rest, acc + string_length(m.addr) + string_length(m.node_id))
+    end
+  end
+
+  pfn spin(ms : List(Mem), i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else
+      let id = "n" ++ int_to_string(i % 4)
+      let a = "addr-" ++ int_to_string(i % 4)
+      let bk = Map.insert(Map.empty(), a, (i, i), Map.str_cmp)
+      let bk2 = closed(ms, bk, id)
+      spin(ms, i + 1, n, acc + Map.size(bk2) + total(ms, 0))
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let ms = [ { node_id: "n" ++ int_to_string(0), addr: "addr-" ++ int_to_string(0), inc: 0 },
+               { node_id: "n" ++ int_to_string(1), addr: "addr-" ++ int_to_string(1), inc: 0 },
+               { node_id: "n" ++ int_to_string(2), addr: "addr-" ++ int_to_string(2), inc: 0 },
+               { node_id: "n" ++ int_to_string(3), addr: "addr-" ++ int_to_string(3), inc: 0 } ]
+    println(int_to_string(spin(ms, 0, 1000, 0)))
+  end
+end

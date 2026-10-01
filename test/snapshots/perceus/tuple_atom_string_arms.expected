@@ -47,20 +47,19 @@ fn describe(pair : (Int, Int)) : String =
   case pair of
   $Tuple2($f1, $f2) -> dec_rc pair;
 case $f1 of
-  0() -> let $jp_clo8 : () -> '_ = inc_rc $f1;
-inc_rc $f2;
+  0() -> let $jp_clo8 : () -> '_ = inc_rc $f2;
 alloc $Clo_$jp7$0($jp7$apply$0, $f1, $f2) in
 case $f2 of
-  0() -> let $jp_clo10 : () -> '_ = alloc $Clo_$jp9$2($jp9$apply$2, $jp_clo8) in
+  0() -> dec_rc $f2;
+let $jp_clo10 : () -> '_ = alloc $Clo_$jp9$2($jp9$apply$2, $jp_clo8) in
 dec_rc $jp_clo10;
 "origin"
-  _ -> call_ptr $jp_clo8()
+  _ -> dec_rc $f2;
+call_ptr $jp_clo8()
   _ -> let $jp_clo4 : () -> '_ = alloc $Clo_$jp3$3($jp3$apply$3) in
 dec_rc $jp_clo4;
-let y : Int = inc_rc $f2;
-$f2 in
-let x : Int = inc_rc $f1;
-$f1 in
+let y : Int = $f2 in
+let x : Int = $f1 in
 "point"
   _ -> dec_rc pair;
 panic("non-exhaustive pattern match")

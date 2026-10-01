@@ -839,6 +839,12 @@ let rec rewrite_calls
                | Tir.TFloat  -> Some "Float"
                | Tir.TBool   -> Some "Bool"
                | Tir.TUnit   -> Some "Unit"
+               (* The unit VALUE `()` is typed as the empty tuple, not TUnit,
+                  so `to_string(())` keyed "$Tuple0", found no impl, and fell
+                  through to the runtime's generic formatter, which reads
+                  unit's raw word and printed "0" (the interpreter prints
+                  "()").  Show$Unit.show (lower.ml) is the impl it wants. *)
+               | Tir.TTuple [] -> Some "Unit"
                | Tir.TTuple ts -> Some (Printf.sprintf "$Tuple%d" (List.length ts))
                | _ -> None
              in

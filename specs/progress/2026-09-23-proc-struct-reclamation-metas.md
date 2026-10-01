@@ -19,7 +19,7 @@ converted or argued bounded.
 freed after its grace period, `g_actor_tbl` holds live metas only (the send-path cliff is
 gone), and what a dead pid still needs is a 56 B tombstone. The one question PR 1 left
 open (the fan-in cost of the reclaim calls) moved to
-[[2026-09-23-reclaim-call-cost-on-fanin]]. A reference leak found on the way is
+[[2026-09-30-reclaim-call-cost-on-fanin-accepted]]. A reference leak found on the way is
 [[2026-09-23-pid-to-int-leaks-its-pid]].
 
 **The survey changed the item.** Three findings, each of which moves the design:
@@ -311,7 +311,7 @@ something the survey did not:
   On a scheduler thread it is already inside the implicit one. On any other thread it is
   a best-effort diagnostic on the way to `_exit`. There is a comment at the walk.
 
-**Open (moved to [[2026-09-23-reclaim-call-cost-on-fanin]] when this item closed): a fan-in throughput cost the design did not predict.** On
+**Open (moved to [[2026-09-30-reclaim-call-cost-on-fanin-accepted]] when this item closed): a fan-in throughput cost the design did not predict.** On
 `bench/actors/fanin_flood.march`, A/B against base on the same box (shuffled, load
 average 11–50):
 

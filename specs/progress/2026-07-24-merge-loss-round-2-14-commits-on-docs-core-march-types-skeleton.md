@@ -1,3 +1,5 @@
+**Closed 2026-09-30 (owner): no CI lost-commit check, since PR merge commits make it structurally unnecessary. The .ll bullet was settled by #653. The unprobed commits are closed as not worth probing: stale, and Perceus/FBIP/TCO have since been reworked and ASAN-tested. Unprobed SHAs, kept findable: f2b67001 f2729935 6f047e02 6dd1968c 4a58e992 03498340 c430e330 b267a436 b84ae429 fcfd78ba 3c8826a0 4ab998ea d5562dfc 1a547481 21f4fbb2 8f624a50 7868160e 65eefa53.**
+
 # Merge-loss round 2 — 14 commits on `docs/core-march-types-skeleton` never reached `main` (2026-07-24)
 
 

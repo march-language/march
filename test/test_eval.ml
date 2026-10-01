@@ -4657,12 +4657,21 @@ let test_perceus_list_length_then_nth_incrc () =
    Perceus's scrutinee_borrowed mechanism handles field escapes by emitting
    EIncRC for branch vars when the tuple is live after the case.
 
-   We verify the TIR-level invariant: after the fix, use_first must have
-   pair inferred as borrowed, so Perceus emits at least one EIncRC inside
-   the function (for the extracted String field's non-last-use via
-   scrutinee_borrowed).  If the bug reappears, pair:own means
-   scrutinee_borrowed=false and no EIncRC is emitted — the second call in
-   the loop then reads a freed String field. *)
+   Since 2026-09-30 the check is on OWNERSHIP, not on "at least one EIncRC".
+   [use_first] owns [pair] here (the caller passes a reference), and its arm
+   opens with [dec_rc pair], which is what makes Llvm_case hand each field to
+   its binder as an OWNED reference (moved when the tuple cell is unique, dup'd
+   when shared).  So the balanced shape is: the dead field [$f2] is dropped,
+   the used field [$f1] is MOVED into [x] (no increment) and released once,
+   after its last use.  The old assertion required an EIncRC, i.e. a SECOND
+   reference on [$f1]; together with the missing drop of [$f2] that leaked two
+   objects per call
+   (specs/progress/2026-09-30-compiled-tuple-destructure-leaks-moved-fields.md).
+   The post-Perceus body is pinned verbatim by the TIR snapshot
+   test/snapshots/perceus/tuple_param_borrowed_destruct.expected, and the
+   runtime property (no underflow, no leak, the caller's tuple intact after
+   being lent out on every iteration) by
+   test/native/tuple_destructure_leak_probe.march, ASAN-clean. *)
 let test_perceus_tuple_param_multi_destruct_no_rc_underflow () =
   let m = perceus_module {|mod Test do
   needs IO.Console
@@ -4687,20 +4696,43 @@ let test_perceus_tuple_param_multi_destruct_no_rc_underflow () =
     end
 
   end|} in
-  (* After the fix, use_first must have pair:borrow.  When pair is borrowed,
-     Perceus sets scrutinee_borrowed=true (pair is in live_after); this adds
-     the branch vars to live_after, causing EIncRC to be emitted for the
-     extracted String field at its non-last-use position inside the branch.
-     At least one EIncRC must appear in use_first's body.
-     If the bug reappears (pair:own), scrutinee_borrowed=false and no EIncRC
-     is emitted — the loop's second call then reads freed memory. *)
-  let use_first_fns = List.filter (fun fn ->
-    String.equal fn.March_tir.Tir.fn_name "use_first"
-  ) m.March_tir.Tir.tm_fns in
-  Alcotest.(check bool)
-    "use_first has EIncRC for tuple field (pair:borrow + scrutinee_borrowed)"
-    true
-    (List.exists (fun fn -> has_any_incrc fn.March_tir.Tir.fn_body) use_first_fns)
+  let open March_tir.Tir in
+  let use_first =
+    List.find (fun fn -> String.equal fn.fn_name "use_first") m.tm_fns in
+  let named n = function AVar v -> String.equal v.v_name n | _ -> false in
+  (* The tuple arm of the case on [pair]. *)
+  let rec find_arm = function
+    | ECase (AVar v, brs, _) when String.equal v.v_name "pair" ->
+      List.find_opt (fun b -> List.length b.br_vars = 2) brs
+    | ELet (_, a, b) | ESeq (a, b) ->
+      (match find_arm a with Some x -> Some x | None -> find_arm b)
+    | _ -> None
+  in
+  let arm = match find_arm use_first.fn_body with
+    | Some b -> b
+    | None -> Alcotest.fail "use_first has no tuple arm on pair"
+  in
+  let used_f, dead_f = match arm.br_vars with
+    | [f1; f2] -> f1.v_name, f2.v_name
+    | _ -> assert false
+  in
+  let rec count p = function
+    | e when p e -> 1
+    | ESeq (a, b) | ELet (_, a, b) -> count p a + count p b
+    | ECase (_, brs, d) ->
+      List.fold_left (fun n b -> n + count p b.br_body) 0 brs
+      + (match d with Some e -> count p e | None -> 0)
+    | ELetRec (fns, b) ->
+      List.fold_left (fun n f -> n + count p f.fn_body) 0 fns + count p b
+    | _ -> 0
+  in
+  Alcotest.(check bool) "the arm opens by consuming pair (fields handed over owned)" true
+    (match arm.br_body with ESeq (EDecRC a, _) -> named "pair" a | _ -> false);
+  Alcotest.(check int) "the dead field is dropped exactly once" 1
+    (count (function EDecRC a -> named dead_f a | _ -> false) arm.br_body);
+  Alcotest.(check int) "the used field is moved, not duplicated" 0
+    (count (function EIncRC a | EAtomicIncRC a -> named used_f a | _ -> false)
+       use_first.fn_body)
 
 (** Regression: accessing a String field of a locally-owned record (returned
     by a function call rather than passed as a borrowed parameter) caused
