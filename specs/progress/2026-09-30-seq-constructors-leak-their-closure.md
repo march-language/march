@@ -50,8 +50,12 @@ four separate defects, none of them in `stdlib/seq.march`'s shape.
    balanced, and the scrutinee the closure had been handed was never released
    (so the scrutinee's own drop was also suppressed). `let c = (inc_rc x;)*
    alloc $Clo_f(..) in dec_rc c; rest` with `c` dead in `rest` is now dropped
-   outright; a capture handed over without a dup is released, a dup'd one loses
-   its dup. Reproduced with no `Seq` involved (`strip` in the probe).
+   outright; a dup'd capture loses its dup, and a capture handed over without a
+   dup is released only when it is a local bound to the result of a call or an
+   allocation (an owned value). A first version released ANY moved-in capture,
+   which over-released a borrowed one: `two-node[cert_expired]` aborted with
+   `tcache_thread_shutdown(): unaligned tcache chunk detected` on Linux (6 of 6
+   runs; 0 of 6 on origin/main, 6 of 6 clean with this restriction). Reproduced with no `Seq` involved (`strip` in the probe).
 
 ## Evidence
 

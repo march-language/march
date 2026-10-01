@@ -203,6 +203,9 @@ type env = {
   names         : (string, string) Hashtbl.t;
   mutable fns   : Tir.fn_def list;
   mutable ctr   : int;
+  (* Locals of the function being rewritten that are bound to the RESULT of a
+     call or an allocation, i.e. owned outright.  Reset per function. *)
+  owned_locals  : (string, unit) Hashtbl.t;
 }
 
 let fresh env pfx = env.ctr <- env.ctr + 1; Printf.sprintf "$%s%d" pfx env.ctr
@@ -972,6 +975,7 @@ let dead_clo_pair (env : env) (e : Tir.expr) : Tir.expr option =
                Kind.needs_rc_of env.k_table v.Tir.v_ty
                && v.Tir.v_lin = Tir.Unr
                && not (List.mem v.Tir.v_name dups)
+               && Hashtbl.mem env.owned_locals v.Tir.v_name
                && not (Perceus_liveness.name_free_in v.Tir.v_name rest)
              end) cap_vars
        in
@@ -988,7 +992,16 @@ let rec rewrite env (e : Tir.expr) : Tir.expr =
   (* EAtomicDecRC is left alone: it marks a value that may be shared across
      actors, where the box's own release must stay a single atomic op and the
      children's ownership is not this site's to reason about. *)
-  | Tir.ELet (v, e1, e2) -> Tir.ELet (v, rewrite env e1, rewrite env e2)
+  | Tir.ELet (v, e1, e2) ->
+    (* Record the binding BEFORE rewriting the body (OCaml evaluates the
+       constructor arguments right to left). *)
+    (match e1 with
+     | Tir.EApp _ | Tir.ECallPtr _ | Tir.EAlloc _ ->
+       Hashtbl.replace env.owned_locals v.Tir.v_name ()
+     | _ -> ());
+    let e1' = rewrite env e1 in
+    let e2' = rewrite env e2 in
+    Tir.ELet (v, e1', e2')
   | Tir.ESeq (e1, e2) -> Tir.ESeq (rewrite env e1, rewrite env e2)
   | Tir.ELetRec (fns, body) ->
     Tir.ELetRec (List.map (fun f ->
@@ -1030,7 +1043,8 @@ let run ?(k_table : Kind.table option) (m : Tir.tir_module) : Tir.tir_module =
   let k_table = match k_table with Some t -> t | None -> Kind.of_module m in
   let collision_set = Collision_set.compute m.Tir.tm_types in
   let env = { type_defs = m.Tir.tm_types; collision_set; k_table;
-              names = Hashtbl.create 32; fns = []; ctr = 0 } in
+              names = Hashtbl.create 32; fns = []; ctr = 0;
+              owned_locals = Hashtbl.create 64 } in
   (* Apply functions whose environment owns what it captured — see
      [owning_apply_fns] for why this gate is load-bearing rather than an
      optimisation. *)
@@ -1048,6 +1062,7 @@ let run ?(k_table : Kind.table option) (m : Tir.tir_module) : Tir.tir_module =
         then rewrite_apply_clo_drop ~module_fns env f.Tir.fn_body
         else f.Tir.fn_body
       in
+      Hashtbl.reset env.owned_locals;
       { f with Tir.fn_body = rewrite env body }) m.Tir.tm_fns in
   (* Synthesized bodies are built already-rewritten (drop_fn_for is called
      directly when emitting each field op), so they are appended as-is. *)
