@@ -28,3 +28,21 @@ val emit_native_map2_inline_loop :
   arr2_atom:Tir.atom ->
   apply_name:string ->
   clo_reg:string -> string * string
+
+
+(** Decode a [__native_<w>_arr_fold_inline(_unboxed)] name into its width and
+    unboxed flag; [None] for anything else. *)
+val decode_nfold_inline_call : string -> (nmap_width * bool) option
+
+(** Emit the fold inline loop; returns the boundary type ([double] or [i64]) and
+    the final accumulator. *)
+val emit_native_fold_inline_loop :
+  emit_atom:(Llvm_ctx.ctx -> Tir.atom -> string * string) ->
+  Llvm_ctx.ctx ->
+  width:nmap_width ->
+  unboxed:bool ->
+  acc_atom:Tir.atom ->
+  arr_atom:Tir.atom ->
+  apply_name:string ->
+  clo_reg:string ->
+  string * string

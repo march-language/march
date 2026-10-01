@@ -430,4 +430,119 @@ let emit_native_map2_inline_loop
     emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" clo_reg);
   ("ptr", new_arr)
 
+(** Fold inline loop (2026-09-30, specs/plans/2026-09-30-nativearray-fold-inline-loop.md).
+    Decodes ["__native_<w>_arr_fold_inline"] / ["..._inline_unboxed"] into the
+    width and the unboxed flag. Separate from [decode_nmap_inline_call] so the
+    map/map2 arms' [(width, is_map2, unboxed)] guards are untouched: that
+    decoder returns [None] for a fold name, and this one for a map name. *)
+let decode_nfold_inline_call (name : string) : (nmap_width * bool) option =
+  let has_suffix suf s =
+    let ls = String.length suf and ln = String.length s in
+    ln >= ls && String.sub s (ln - ls) ls = suf
+  in
+  let strip_suffix suf s = String.sub s 0 (String.length s - String.length suf) in
+  if String.length name < 2 || String.sub name 0 2 <> "__" then None
+  else
+    let rest = String.sub name 2 (String.length name - 2) in
+    let (rest, unboxed) =
+      if has_suffix "_unboxed" rest then (strip_suffix "_unboxed" rest, true) else (rest, false)
+    in
+    if not (has_suffix "_fold_inline" rest) then None
+    else
+      match nmap_width_of_prefix (strip_suffix "_fold_inline" rest) with
+      | None -> None
+      | Some width -> Some (width, unboxed)
+
+(** Emits: length -> for-loop carrying the accumulator in a phi (load elem,
+    widen, DIRECT call to [apply_name] with (clo, acc, elem)) -> result.
+
+    [Native_map_inline.fold_callback_kind] only selects scalar accumulators of
+    the element's boundary type, so there is no accumulator RC at all:
+    - Float widths are always [unboxed]: the callee is the all-Float clone
+      taking and returning raw [double]s.
+    - Int widths call the ordinary apply fn through the tagged ptr ABI (the
+      same [coerce] round trip the Int map loop uses); LLVM cancels it after
+      inlining the callee.
+    The array is left alone, exactly as the runtime fold leaves it. The closure
+    follows the map loops' contract: [march_incrc] before each call balances the
+    callee's own [$clo] drop, and one [march_decrc] after the loop releases the
+    transferred reference; both are skipped for a non-capturing closure
+    ([clo_reg] = ["null"]). Returns the boundary type and the final
+    accumulator; the caller's let-binding coerces it to the destination var. *)
+let emit_native_fold_inline_loop
+    ~(emit_atom : Llvm_ctx.ctx -> Tir.atom -> string * string)
+    ctx ~(width : nmap_width) ~unboxed ~acc_atom ~arr_atom ~apply_name ~clo_reg
+    : string * string =
+  let is_float = width.nw_boundary_float in
+  if is_float && not unboxed then
+    failwith "emit_native_fold_inline_loop: a Float fold must use the unboxed callee";
+  let acc_ty = if is_float then "double" else "i64" in
+  let mem_ty = width.nw_mem_ty in
+  let elem_size = width.nw_elem_size in
+  let preheader = fresh_block ctx "nfold_pre" in
+  emit_term ctx (Printf.sprintf "br label %%%s" preheader);
+  emit_label ctx preheader;
+  let (acc_ty0, acc_v0) = emit_atom ctx acc_atom in
+  let acc_init = coerce ctx acc_ty0 acc_v0 acc_ty in
+  let (arr_ty0, arr_v0) = emit_atom ctx arr_atom in
+  let arr_v = coerce ctx arr_ty0 arr_v0 "ptr" in
+  let len = fresh ctx "nfold_len" in
+  emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s)" len width.nw_len_fn arr_v);
+  let cond_lbl = fresh_block ctx "nfold_cond" in
+  let body_lbl = fresh_block ctx "nfold_body" in
+  let exit_lbl = fresh_block ctx "nfold_exit" in
+  (* The body is a single block ([coerce]'s Int untag is a [select], never a
+     branch), so the phis can name their latch values and [body_lbl] up front,
+     the same way [emit_native_map2_inline_loop] does. [acc_next] is filled by
+     a no-op [select] copy at the end of the body. *)
+  let i = fresh ctx "nfold_i" in
+  let i_next = fresh ctx "nfold_inext" in
+  let acc = fresh ctx "nfold_acc" in
+  let acc_next = fresh ctx "nfold_accnext" in
+  emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
+
+  emit_label ctx cond_lbl;
+  emit ctx (Printf.sprintf "%s = phi i64 [ 0, %%%s ], [ %s, %%%s ]" i preheader i_next body_lbl);
+  emit ctx (Printf.sprintf "%s = phi %s [ %s, %%%s ], [ %s, %%%s ]"
+              acc acc_ty acc_init preheader acc_next body_lbl);
+  let cmp = fresh ctx "nfold_cmp" in
+  emit ctx (Printf.sprintf "%s = icmp slt i64 %s, %s" cmp i len);
+  emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cmp body_lbl exit_lbl);
+
+  emit_label ctx body_lbl;
+  let soff = fresh ctx "nfold_soff" in
+  emit ctx (Printf.sprintf "%s = mul i64 %s, %d" soff i elem_size);
+  let byte_off = fresh ctx "nfold_off" in
+  emit ctx (Printf.sprintf "%s = add i64 %s, 32" byte_off soff);
+  let sptr = fresh ctx "nfold_sptr" in
+  emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 %s" sptr arr_v byte_off);
+  let x = fresh ctx "nfold_x" in
+  emit ctx (Printf.sprintf "%s = load %s, ptr %s, align %d" x mem_ty sptr elem_size);
+  let x = nmap_widen ctx width x in
+  if clo_reg <> "null" then
+    emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" clo_reg);
+  let r_val =
+    if unboxed then begin
+      let r = fresh ctx "nfold_r" in
+      emit ctx (Printf.sprintf "%s = call double @%s(ptr %s, double %s, double %s)"
+                  r apply_name clo_reg acc x);
+      r
+    end else begin
+      let wire_acc = coerce ctx "i64" acc "ptr" in
+      let wire_x = coerce ctx "i64" x "ptr" in
+      let r = fresh ctx "nfold_r" in
+      emit ctx (Printf.sprintf "%s = call ptr @%s(ptr %s, ptr %s, ptr %s)"
+                  r apply_name clo_reg wire_acc wire_x);
+      coerce ctx "ptr" r "i64"
+    end
+  in
+  emit ctx (Printf.sprintf "%s = select i1 true, %s %s, %s %s" acc_next acc_ty r_val acc_ty r_val);
+  emit ctx (Printf.sprintf "%s = add i64 %s, 1" i_next i);
+  emit_term ctx (Printf.sprintf "br label %%%s" cond_lbl);
+
+  emit_label ctx exit_lbl;
+  if clo_reg <> "null" then
+    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" clo_reg);
+  (acc_ty, acc)
+
 (* ── Vault reads: niche → call-site Option encoding ───────────────────── *)

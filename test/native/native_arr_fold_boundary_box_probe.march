@@ -28,6 +28,16 @@
 -- accumulator it was handed (the `prev == result` guard), a zero-length fold
 -- never enters the loop and hands the caller's own initial accumulator back,
 -- and both must still report the right number.
+--
+-- Since 2026-09-30 a fold whose callback is a lambda literal with a scalar
+-- accumulator compiles to an inline loop (no boxes at all), so the legs that
+-- pass a lambda literal now guard THAT path. The `_rt` legs pass the same
+-- lambdas in as a parameter, which the inliner cannot see through, so they keep
+-- exercising the runtime fold and its two boundary boxes. There is no runtime
+-- twin of the identity leg: an identity lambda reaching the runtime fold through
+-- a parameter is a pre-existing use-after-free, filed as
+-- specs/todos/2026-09-30-native-float-arr-fold-unused-elem-double-free.md.
+-- specs/plans/2026-09-30-nativearray-fold-inline-loop.md
 mod Main do
   needs IO.Console
 
@@ -58,6 +68,19 @@ mod Main do
     if k <= 0 do acc else emptyfold(e, k - 1, acc +. NativeArray.fold_float(e, 2.0, fn (p, x) -> p +. x)) end
   end
 
+  -- Runtime-path twins: the callback arrives as a parameter.
+  pfn ffold_rt(a : NativeFloatArr, k : Int, acc : Float, f : Float -> Float -> Float) : Float do
+    if k <= 0 do acc else ffold_rt(a, k - 1, acc +. NativeArray.fold_float(a, 0.0, f), f) end
+  end
+
+  pfn f32fold_rt(a : NativeF32Arr, k : Int, acc : Float, f : Float -> Float -> Float) : Float do
+    if k <= 0 do acc else f32fold_rt(a, k - 1, acc +. NativeArray.fold_f32(a, 0.0, f), f) end
+  end
+
+  pfn emptyfold_rt(e : NativeFloatArr, k : Int, acc : Float, f : Float -> Float -> Float) : Float do
+    if k <= 0 do acc else emptyfold_rt(e, k - 1, acc +. NativeArray.fold_float(e, 2.0, f), f) end
+  end
+
   fn main(_c : Cap(IO.Console)) do
     let n = 20000
     let fa = NativeArray.make_float(4, 1.5)
@@ -75,5 +98,13 @@ mod Main do
     flat("identity closure", d, float_to_string(idfold(fa, n, 0.0)))
     let e = live_allocs()
     flat("zero-length fold", e, float_to_string(emptyfold(ea, n, 0.0)))
+
+    let add = fn (p, x) -> p +. x
+    let g = live_allocs()
+    flat("fold_float (runtime)", g, float_to_string(ffold_rt(fa, n, 0.0, add)))
+    let h = live_allocs()
+    flat("fold_f32 (runtime)", h, float_to_string(f32fold_rt(f3, n, 0.0, add)))
+    let j = live_allocs()
+    flat("zero-length fold (runtime)", j, float_to_string(emptyfold_rt(ea, n, 0.0, add)))
   end
 end
