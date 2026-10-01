@@ -1,0 +1,20 @@
+-- Compiled `to_string(())` printed `0`; the interpreter prints `()`.
+-- The unit value is typed as the empty tuple, so Mono keyed the Show lookup
+-- "$Tuple0", found no impl, and fell through to the runtime's generic
+-- formatter, which read unit's raw word as an Int. Every leg below printed `0`
+-- (or contained it) compiled before the fix.
+-- specs/progress/2026-10-01-compiled-unit-to-string.md
+mod Main do
+  needs IO.Console
+
+  fn main(_c : Cap(IO.Console)) do
+    println(to_string(()))
+    let u = ()
+    println(to_string(u))
+    println(show(()))
+    println(to_string((1, ())))
+    println(to_string([(), ()]))
+    println(to_string(Some(())))
+    println("unit: ${()}")
+  end
+end
