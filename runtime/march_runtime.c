@@ -2877,10 +2877,9 @@ void march_sandbox_install(void) {
     /* A NetConnect-only program (an HTTP client) needs socket() + connect();
      * without these two it could also accept connections.  bind() covers
      * AF_UNIX as well, which is correct: a Unix-domain listener is still a
-     * listener.  Threads created BEFORE this call (the hot-reload server,
-     * started in @main ahead of march_spawn_main) are not covered, since
-     * PR_SET_SECCOMP filters only the calling thread and its later
-     * children. */
+     * listener.  The filter is installed with SECCOMP_FILTER_FLAG_TSYNC
+     * (below), so this also covers threads that were already running at
+     * install time, the hot-reload server's included. */
     DENY_NR(__NR_bind);
     DENY_NR(__NR_listen);
 #endif
@@ -2943,16 +2942,46 @@ void march_sandbox_install(void) {
 
     struct sock_fprog prog = { .len = (unsigned short)n, .filter = f };
 
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
-        prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) {
+    /* Install for EVERY thread of the process, not just the caller.
+     * prctl(PR_SET_SECCOMP) filters only the calling thread and the threads
+     * it creates afterwards, and threads already exist here: @main starts
+     * the hot-reload server (march_reload_server_start, from the hr_setup
+     * block llvm_toplevel.ml emits ahead of march_spawn_main), and a linked
+     * C library's constructor can start its own.  Those ran unfiltered.
+     * SECCOMP_FILTER_FLAG_TSYNC attaches the filter to every thread
+     * atomically (and propagates no_new_privs to them), which is what the
+     * macOS backend already does: sandbox_init is process-wide.
+     *
+     * TSYNC was chosen over moving the install ahead of hr_setup because
+     * that would cover only threads created later by @main itself, never a
+     * constructor-started one, and would put the HCR boot (dispatch publish,
+     * replay_state) under the filter; @main's order stays as it was.
+     *
+     * The raw syscall rather than libc's seccomp() wrapper: glibc only grew
+     * one in 2.38 (musl has none).  A positive return is the TID of a
+     * thread that could not be synchronised (it already carries an
+     * unrelated filter); that is a failure too. */
+    long rc = -1;
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0)
+        rc = syscall(__NR_seccomp, SECCOMP_SET_MODE_FILTER,
+                     SECCOMP_FILTER_FLAG_TSYNC, &prog);
+    if (rc != 0) {
         /* Fail CLOSED.  Installation genuinely can fail — seccomp is
-         * unavailable under qemu user emulation, and a restrictive outer
-         * profile can reject the prctl — and running uncontained after the
-         * operator asked for containment is the worst outcome. */
-        fprintf(stderr,
-                "march: capability sandbox failed to install (%s); refusing to "
-                "run uncontained\n",
-                strerror(errno));
+         * unavailable under qemu user emulation, a pre-3.17 kernel has no
+         * seccomp(2), and a restrictive outer profile can reject the call —
+         * and running uncontained after the operator asked for containment
+         * is the worst outcome. */
+        if (rc > 0)
+            fprintf(stderr,
+                    "march: capability sandbox failed to install (thread %ld "
+                    "could not be synchronised); refusing to run "
+                    "uncontained\n",
+                    rc);
+        else
+            fprintf(stderr,
+                    "march: capability sandbox failed to install (%s); "
+                    "refusing to run uncontained\n",
+                    strerror(errno));
         exit(70);
     }
 }
@@ -9133,14 +9162,26 @@ void *march_process_spawn_sync(void *cmd_obj, void *args_list) {
     return mk_ok(pr);
 }
 
-/* process_spawn_lines(command, args) → Result(Seq(String), String) */
+/* process_spawn_lines(command, args) → Result(String, String)
+
+   Returns Ok(stdout) — the whole captured stdout as ONE String; Process.run_stream
+   splits it into a Seq(String) in March.  The interpreter returns the same
+   shape.  [march_process_spawn_sync] hands back a fresh Ok(ProcessResult(code,
+   stdout, stderr)) that this function owns.  march_decrc is SHALLOW (it frees
+   the cell and never walks the fields), so the intermediate objects are
+   released by hand: the stderr String, the ProcessResult cell and the outer Ok
+   cell.  The stdout String is not released; its one reference MOVES from the
+   ProcessResult into the Ok returned here.  Before this the three objects
+   leaked per call and the returned Ok aliased a String it did not own. */
 void *march_process_spawn_lines(void *cmd_obj, void *args_list) {
-    /* Run command and return Ok(stdout_string) — caller can split lines */
     void *result = march_process_spawn_sync(cmd_obj, args_list);
-    /* If Ok(ProcessResult), extract stdout and return Ok(stdout) */
     if (((march_hdr *)result)->tag == 0) {
         void *pr = MARCH_FIELD_PTR(result, 0);
         void *out_str = MARCH_FIELD_PTR(pr, 1);
+        void *err_str = MARCH_FIELD_PTR(pr, 2);
+        march_decrc(err_str);
+        march_decrc(pr);      /* shallow: out_str's reference is not touched */
+        march_decrc(result);  /* shallow: pr is already released above */
         return mk_ok(out_str);
     }
     return result; /* Err case: pass through */
@@ -10872,6 +10913,219 @@ static inline int64_t clo_call_int_int_int(void *clo, int64_t x, int64_t y) {
 static inline double clo_call_dbl_dbl_dbl(void *clo, double x, double y) {
     void *wire_ret = clo_apply_ptr2(clo, march_alloc_float(x), march_alloc_float(y));
     return march_unbox_float(wire_ret);
+}
+
+/* ── Stable sort of a List by a comparator: Array.sort_by, RRB.Vec.sort_by ──
+ *
+ * march_list_stable_sort_by(xs, le) and march_list_sort_by_int_key(xs, key) -- the
+ * builtins behind Array.sort_by / sort_by_key and RRB.Vec.sort_by /
+ * sort_by_key (specs/progress/2026-09-28-array-sort-by-stable.md).
+ *
+ * Contract, the same as List.sort_by's: le(a, b) true means a may come
+ * before b, and the sort is stable for a `<=`-style le (a total preorder):
+ * equal elements keep their input order. With a strict `<` the relative
+ * order of equal elements is unspecified, as it is for List.sort_by.
+ *
+ * The list is BORROWED (march_decrc frees a cell shallowly, so consuming a
+ * list here would mean walking it): the elements are read into a flat
+ * buffer, sorted, and a fresh list is built holding one new reference to
+ * each element. The closure is OWNED: one reference is taken per call (a
+ * call consumes the closure it is given) and ours is released at the end,
+ * as native_int_arr_map does. Elements are passed to the closure in their
+ * wire form, exactly as a List cell holds them (tagged Int/Bool, boxed
+ * Float, pointers), each with a reference of its own: a closure call owns
+ * its arguments (see ssort_le_closure).
+ *
+ * The algorithm is an adaptive stable merge sort, chosen because every
+ * comparison is a closure call, so comparisons dominate and merging is
+ * close to the minimum number of them: natural runs (ascending, or strictly
+ * descending and reversed -- reversing a strictly descending run is stable)
+ * are found first, runs shorter than a minimum are extended by binary
+ * insertion, then adjacent runs are merged bottom-up. Each merge first
+ * skips the prefix of the left run and the suffix of the right run that are
+ * already in place (binary search), then copies the SMALLER of the two
+ * remaining parts to a scratch buffer and merges from the end that makes
+ * the merge in place: an already sorted or reversed input costs n - 1
+ * comparisons and no merge. This is the run detection, extension and
+ * trimmed merge of driftsort / timsort; it omits driftsort's lazy
+ * "unsorted chunk + stable quicksort" path, which trades extra comparisons
+ * (cheap for Rust's inlined comparators, not for a closure call) for fewer
+ * moves.
+ *
+ * list_sort_by_int_key calls the key closure ONCE per element (not once per
+ * comparison), then sorts element indices by key with the same merge sort
+ * and an inline `<=` on the keys, so equal keys keep input order. */
+#define SSORT_DEFINE(NAME, E, LE)                                              \
+static int64_t NAME##_upper(E const *v, int64_t n, E x, void *ctx) {           \
+    int64_t lo = 0, hi = n;       /* first i with !LE(v[i], x) */              \
+    while (lo < hi) {                                                          \
+        int64_t mid = lo + (hi - lo) / 2;                                      \
+        if (LE(ctx, v[mid], x)) lo = mid + 1; else hi = mid;                   \
+    }                                                                          \
+    return lo;                                                                 \
+}                                                                              \
+static int64_t NAME##_first_ge(E const *v, int64_t n, E x, void *ctx) {        \
+    int64_t lo = 0, hi = n;       /* first i with LE(x, v[i]) */               \
+    while (lo < hi) {                                                          \
+        int64_t mid = lo + (hi - lo) / 2;                                      \
+        if (LE(ctx, x, v[mid])) hi = mid; else lo = mid + 1;                   \
+    }                                                                          \
+    return lo;                                                                 \
+}                                                                              \
+static void NAME##_insert(E *v, int64_t sorted, int64_t n, void *ctx) {        \
+    for (int64_t i = sorted; i < n; i++) {                                     \
+        E x = v[i];                                                            \
+        int64_t at = NAME##_upper(v, i, x, ctx);                               \
+        memmove(v + at + 1, v + at, (size_t)(i - at) * sizeof(E));             \
+        v[at] = x;                                                             \
+    }                                                                          \
+}                                                                              \
+/* merge v[a..m) and v[m..b), both sorted; buf holds >= (b - a) / 2 + 1 */     \
+static void NAME##_merge(E *v, int64_t a, int64_t m, int64_t b, E *buf,        \
+                         void *ctx) {                                          \
+    if (LE(ctx, v[m - 1], v[m])) return;          /* already in order */       \
+    int64_t i = a + NAME##_upper(v + a, m - a, v[m], ctx);                     \
+    int64_t j = m + NAME##_first_ge(v + m, b - m, v[m - 1], ctx);              \
+    int64_t la = m - i, lb = j - m;                                            \
+    if (la <= lb) {                                                            \
+        memcpy(buf, v + i, (size_t)la * sizeof(E));                            \
+        int64_t o = i, x = 0, y = m;                                           \
+        while (x < la && y < j) {                                              \
+            if (LE(ctx, buf[x], v[y])) v[o++] = buf[x++];                      \
+            else v[o++] = v[y++];                                              \
+        }                                                                      \
+        memcpy(v + o, buf + x, (size_t)(la - x) * sizeof(E));                  \
+    } else {                                                                   \
+        memcpy(buf, v + m, (size_t)lb * sizeof(E));                            \
+        int64_t o = j, x = m, y = lb;                                          \
+        while (x > i && y > 0) {                                               \
+            if (LE(ctx, v[x - 1], buf[y - 1])) v[--o] = buf[--y];              \
+            else v[--o] = v[--x];                                              \
+        }                                                                      \
+        memcpy(v + o - y, buf, (size_t)y * sizeof(E));                         \
+    }                                                                          \
+}                                                                              \
+static int NAME##_sort(E *v, int64_t n, void *ctx) {                           \
+    if (n < 2) return 1;                                                       \
+    const int64_t minrun = 16;                                                 \
+    int64_t cap = 64, r = 0;                                                   \
+    int64_t *st = (int64_t *)malloc((size_t)cap * sizeof(int64_t));            \
+    if (!st) return 0;                                                         \
+    for (int64_t i = 0; i < n;) {                                              \
+        int64_t j = i + 1;                                                     \
+        if (j < n && !LE(ctx, v[i], v[j])) {                                   \
+            while (j < n && !LE(ctx, v[j - 1], v[j])) j++;                     \
+            for (int64_t lo = i, hi = j - 1; lo < hi; lo++, hi--) {            \
+                E t = v[lo]; v[lo] = v[hi]; v[hi] = t;                         \
+            }                                                                  \
+        } else {                                                               \
+            while (j < n && LE(ctx, v[j - 1], v[j])) j++;                      \
+        }                                                                      \
+        if (j - i < minrun && j < n) {                                         \
+            int64_t e = i + minrun < n ? i + minrun : n;                       \
+            NAME##_insert(v + i, j - i, e - i, ctx);                           \
+            j = e;                                                             \
+        }                                                                      \
+        if (r + 2 > cap) {                                                     \
+            cap *= 2;                                                          \
+            int64_t *ns = (int64_t *)realloc(st, (size_t)cap * sizeof(int64_t)); \
+            if (!ns) { free(st); return 0; }                                   \
+            st = ns;                                                           \
+        }                                                                      \
+        st[r++] = i;                                                           \
+        i = j;                                                                 \
+    }                                                                          \
+    if (r > 1) {                                                               \
+        E *buf = (E *)malloc((size_t)(n / 2 + 1) * sizeof(E));                 \
+        if (!buf) { free(st); return 0; }                                      \
+        st[r] = n;                                                             \
+        while (r > 1) {                                                        \
+            int64_t w = 0;                                                     \
+            for (int64_t k = 0; k < r; k += 2) {                               \
+                if (k + 1 < r) NAME##_merge(v, st[k], st[k + 1], st[k + 2], buf, ctx); \
+                st[w++] = st[k];                                               \
+            }                                                                  \
+            st[w] = n; r = w;                                                  \
+        }                                                                      \
+        free(buf);                                                             \
+    }                                                                          \
+    free(st);                                                                  \
+    return 1;                                                                  \
+}
+
+/* Every closure call transfers a reference to the closure AND to each
+ * argument: an apply function's parameters are all owned (Borrow pins them;
+ * see Clo_flags), so a comparator that destructures a tuple releases it. The
+ * list cells still hold the elements, so each call gets fresh references. */
+static inline int ssort_le_closure(void *clo, void *a, void *b) {
+    march_incrc(clo);
+    march_incrc(a);
+    march_incrc(b);
+    return ((int64_t)(intptr_t)clo_apply_ptr2(clo, a, b) >> 1) != 0;
+}
+#define SSORT_LE_CLO(ctx, a, b) ssort_le_closure((ctx), (a), (b))
+#define SSORT_LE_KEY(ctx, a, b) (((const int64_t *)(ctx))[a] <= ((const int64_t *)(ctx))[b])
+SSORT_DEFINE(ssort_clo, void *, SSORT_LE_CLO)
+SSORT_DEFINE(ssort_key, int64_t, SSORT_LE_KEY)
+
+static int64_t ssort_list_len(void *lst) {
+    int64_t n = 0;
+    for (void *c = lst; *(int32_t *)((char *)c + 8) == 1; c = *(void **)((char *)c + 24)) n++;
+    return n;
+}
+
+static void ssort_oom(const char *who) {
+    fprintf(stderr, "march: %s: out of memory\n", who);
+    exit(1);
+}
+
+/* Build a fresh list of v[0..n) (one new reference per element). */
+static void *ssort_build_list(void **v, int64_t n) {
+    void *lst = make_nil();
+    for (int64_t i = n; i-- > 0;) {
+        march_incrc(v[i]);
+        lst = make_cons(v[i], lst);
+    }
+    return lst;
+}
+
+void *march_list_stable_sort_by(void *lst, void *le) {
+    int64_t n = ssort_list_len(lst);
+    void **v = (void **)malloc((size_t)(n > 0 ? n : 1) * sizeof(void *));
+    if (!v) ssort_oom("list_stable_sort_by");
+    int64_t i = 0;
+    for (void *c = lst; i < n; c = *(void **)((char *)c + 24)) v[i++] = *(void **)((char *)c + 16);
+    if (!ssort_clo_sort(v, n, le)) ssort_oom("list_stable_sort_by");
+    void *out = ssort_build_list(v, n);
+    free(v);
+    march_decrc(le);
+    return out;
+}
+
+void *march_list_sort_by_int_key(void *lst, void *key) {
+    int64_t n = ssort_list_len(lst);
+    size_t sz = (size_t)(n > 0 ? n : 1);
+    void **v = (void **)malloc(sz * sizeof(void *));
+    int64_t *keys = (int64_t *)malloc(sz * sizeof(int64_t));
+    int64_t *idx = (int64_t *)malloc(sz * sizeof(int64_t));
+    if (!v || !keys || !idx) ssort_oom("list_sort_by_int_key");
+    int64_t i = 0;
+    for (void *c = lst; i < n; c = *(void **)((char *)c + 24), i++) {
+        v[i] = *(void **)((char *)c + 16);
+        march_incrc(key);
+        march_incrc(v[i]);          /* the call owns its argument */
+        keys[i] = (int64_t)(intptr_t)clo_apply_ptr(key, v[i]) >> 1;
+        idx[i] = i;
+    }
+    if (!ssort_key_sort(idx, n, keys)) ssort_oom("list_sort_by_int_key");
+    void *out = make_nil();
+    for (int64_t k = n; k-- > 0;) {
+        march_incrc(v[idx[k]]);
+        out = make_cons(v[idx[k]], out);
+    }
+    free(v); free(keys); free(idx);
+    march_decrc(key);
+    return out;
 }
 
 /* Uninitialized allocation for llvm_emit's inline map loop (native_map_inline.ml):

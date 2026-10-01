@@ -2223,11 +2223,14 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
       let (lead, rest) = split [] m.mod_decls in
       { m with mod_decls = lead @ generated @ rest }
   in
-  (* Same-named nested actors get distinct names before anything keys an
-     actor by its bare name (Desugar_actor_names).  A file with no such
-     collision is returned unchanged. *)
+  (* Same-named nested actors, and every standard-library actor, get
+     distinct names before anything keys an actor by its bare name
+     (Desugar_actor_names).  A user file with no nested collision is
+     returned unchanged. *)
   let m = { m with mod_decls =
                      Desugar_actor_names.expand errors ~root:m.mod_name.txt
+                       ~stdlib:(!Desugar_actor_names.is_stdlib_file
+                                  m.mod_name.span.file)
                        m.mod_decls } in
   (* `@[remote]` actors get an `<Actor>_Remote` module right AFTER the actor
      (Desugar_remote): its dispatch names the actor's message constructors,

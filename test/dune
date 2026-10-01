@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_stdlib_only test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_compile_ll_race test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag)
+ (modules test_compiler test_stdlib_only test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_compile_ll_race test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint yojson alcotest str unix threads.posix))
 
 (library
@@ -2000,10 +2000,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; refuses to open an offer its certificate lacks, shared-secret mode checks
 ; nothing, and a squatter on a session's role name is refused. Compiled
 ; only: the interpreter does not run the offer actor while the initiator
-; polls for its answer. `--no-cap-strict` because a user-level
-; `NodeQueue.start_local` call (the fake's data queue) trips the
-; capability ceiling in stdlib `Socket`, which declares no `needs`
-; (pre-existing: specs/todos/2026-09-25-nodequeue-start-local-socket-ceiling.md).
+; polls for its answer. It compiles under the default capability ceiling:
+; the fake's data queue is a user-level `NodeQueue.start_local` call, which
+; used to fail the ceiling in stdlib `Socket` until `Socket` declared
+; `needs IO.NetConnect` (specs/progress/2026-09-30-nodequeue-start-local-socket-ceiling.md).
 (rule
  (targets cert_authz_bin cert_authz.out)
  (deps (file %{exe:../bin/main.exe})
@@ -2012,7 +2012,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file session/cert_authz.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile --no-cap-strict -o cert_authz_bin
+   (run %{exe:../bin/main.exe} --compile -o cert_authz_bin
         session/cert_authz.march)
    (with-stdout-to cert_authz.out (system "./cert_authz_bin")))))
 
@@ -2415,6 +2415,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/niche_aggregate_payload_leak_probe.expected native_niche_aggregate_payload_leak_probe.out)))
+
+; ── A join whose arms all BUILD one unboxed aggregate gets a struct-typed
+; slot (no box, nothing to free): two-arm if, three-arm match, else-if chain,
+; Option match (niche slot), and a mixed join that keeps the boxed slot and
+; must still release its box. Both backends are diffed against ONE .expected,
+; the interpreter's. specs/progress/2026-09-30-unbox-aware-case-join-slot.md
+(rule
+ (targets native_unboxed_join_slot native_unboxed_join_slot.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/unboxed_join_slot.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_unboxed_join_slot
+        native/unboxed_join_slot.march)
+   (with-stdout-to native_unboxed_join_slot.out
+        (system "./native_unboxed_join_slot")))))
+
+(rule
+ (targets interp_unboxed_join_slot.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/unboxed_join_slot.march))
+ (action
+  (with-stdout-to interp_unboxed_join_slot.out
+    (run %{exe:../bin/main.exe} native/unboxed_join_slot.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/unboxed_join_slot.expected native_unboxed_join_slot.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/unboxed_join_slot.expected interp_unboxed_join_slot.out)))
 
 ; ── compare_int / compare_float / compare_string: link compiled, return
 ; -1/0/1 on both backends (the interpreter returned a Less/Equal/Greater ctor;
@@ -3077,6 +3112,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; interpreted and the compiled run is diffed against the SAME file, so this
 ; is a compiled-vs-interpreted parity check as well as a golden. See
 ; specs/progress/2026-09-24-sha256-builtin-hex-string.md.
+;; Process.run_stream: the typechecker and the interpreter said Ok(Seq(String)),
+;; the compiled runtime returned Ok(<raw stdout String>) under that type, so
+;; any Seq operation on it panicked. Both backends are diffed against ONE
+;; .expected, which is the interpreter's output.
+(rule
+ (targets native_process_run_stream native_process_run_stream.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/process_run_stream.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_process_run_stream
+        native/process_run_stream.march)
+   (with-stdout-to native_process_run_stream.out
+        (system "./native_process_run_stream")))))
+
+(rule
+ (targets interp_process_run_stream.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/process_run_stream.march))
+ (action
+  (with-stdout-to interp_process_run_stream.out
+    (run %{exe:../bin/main.exe} native/process_run_stream.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/process_run_stream.expected native_process_run_stream.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/process_run_stream.expected interp_process_run_stream.out)))
+
 (rule
  (targets native_sha256_hex_string native_sha256_hex_string.out)
  (deps (file %{exe:../bin/main.exe})
@@ -3496,6 +3565,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff empty.expected session_node_check.out)))
+
+;; TRMC gaps: a computed call argument (`r(a + 1, b)`) hid the modulo-cons site,
+;; and a nested `fn go` was analysed but never transformed. Both were plain
+;; non-tail recursion. Pre-fix: SIGBUS (stack guard page) on the 1,000,000
+;; element lists. Expected output is the interpreter's.
+(rule
+ (targets native_trmc_computed_arg_nested native_trmc_computed_arg_nested.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/trmc_computed_arg_nested.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_trmc_computed_arg_nested
+        native/trmc_computed_arg_nested.march)
+   (with-stdout-to native_trmc_computed_arg_nested.out
+        (system "./native_trmc_computed_arg_nested")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/trmc_computed_arg_nested.expected native_trmc_computed_arg_nested.out)))
 
 ;; A TRMC'd function with a modulo-cons arm AND a plain tail self-call
 ;; (filter's shape) cycled entry -> $dps -> entry, one frame per alternation
@@ -7656,6 +7746,37 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/nested_actor_same_name.expected interp_nested_actor_same_name.out)))
 
+; ── App actors named like stdlib actors (Anchor, Writer, ClusterNodeActor) ──
+(rule
+ (targets native_user_actor_named_like_stdlib native_user_actor_named_like_stdlib.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/user_actor_named_like_stdlib.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_user_actor_named_like_stdlib
+        native/user_actor_named_like_stdlib.march)
+   (with-stdout-to native_user_actor_named_like_stdlib.out
+        (system "./native_user_actor_named_like_stdlib")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_actor_named_like_stdlib.expected native_user_actor_named_like_stdlib.out)))
+
+(rule
+ (targets interp_user_actor_named_like_stdlib.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/user_actor_named_like_stdlib.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_user_actor_named_like_stdlib.out
+   (run %{exe:../bin/main.exe} native/user_actor_named_like_stdlib.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_actor_named_like_stdlib.expected interp_user_actor_named_like_stdlib.out)))
+
 ; ── Credit-based flow control: budget refuses, CREDIT re-admits ──
 (rule
  (targets native_credit_backpressure_loopback native_credit_backpressure_loopback.out)
@@ -8458,6 +8579,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; forcing the in-place path unconditionally -- that line, and only that
 ; line, flipped to false.
 ;
+;; Array.sort_by / sort_by_key and RRB.sort_by / sort_by_key (the stable
+;; list_stable_sort_by / list_sort_by_int_key builtins). One golden for the
+;; compiled and the interpreted run, so it is also the parity check between
+;; the C merge sort and the interpreter's OCaml stable_sort.
+(rule
+ (targets array_sort_by array_sort_by.out array_sort_by_interp.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/array_sort_by.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (with-stdout-to array_sort_by_interp.out
+     (run %{exe:../bin/main.exe} native/array_sort_by.march))
+   (run %{exe:../bin/main.exe} --compile -o array_sort_by
+        native/array_sort_by.march)
+   (with-stdout-to array_sort_by.out (system "./array_sort_by")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/array_sort_by.expected array_sort_by.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/array_sort_by.expected array_sort_by_interp.out)))
 ;; The sort's presorted-input front end (two runs; nearly sorted), which only
 ;; runs for n >= 1024 and so is out of reach of native_arr_sort /
 ;; native_arr_sort_narrow. Compiled, depth-limit 0 and interpreted.
@@ -10955,17 +11101,16 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_task.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_task.march)))
 
-; ── test_properties.march: wired separately, own alias ───────────────────
-; Passes (228/228), but its 76 Check.all property runs (100 samples each,
-; generating/round-tripping nested Msgpack/JSON values through the
-; tree-walking interpreter) are genuinely slow -- a full run took several
-; hours on a machine with ~8 other concurrent compiler sessions contending
-; for CPU, and its true (uncontended) runtime hasn't been measured cleanly.
-; Rather than guess and risk turning `dune runtest` into a multi-hour gate
-; for every PR, this stays on its own alias, run explicitly:
+; ── test_properties.march: wired separately, own alias, run NIGHTLY ──────
+; Passes (240/240): 76 Check.all property runs (100 samples each) generating
+; and round-tripping nested Msgpack/JSON values. Measured 2026-09-30 on the
+; arm64 dev Mac: 237.6 s wall at load average 6-12 (`march test`, the exact
+; command below). That is far past what belongs in `dune runtest` (every PR,
+; and the macOS `test (all)` job already runs close to its timeout), so it
+; stays on its own alias and `.github/workflows/nightly.yml`'s
+; `stdlib-properties` job runs it every night:
 ;   dune build --root . @test/stdlib-march-properties
-; A follow-up should benchmark it uncontended and, if it's actually fast,
-; fold it into the main runtest block above alongside the other 35 files.
+; specs/progress/2026-09-30-benchmark-wire-test-properties-march.md
 (rule
  (alias stdlib-march-properties)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_properties.march))

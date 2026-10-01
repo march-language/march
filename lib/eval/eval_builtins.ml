@@ -3604,8 +3604,11 @@ let base_env : env =
            with Unix.Unix_error (err, _, _) ->
              VCon ("Err", [VString (Unix.error_message err)]))
         | _ -> eval_error "process_spawn_sync: expected (String, List(String))"))
-  (* Run a command and return its stdout as a Seq(String) of lines.
-     Returns Ok(Seq) on success or Err(msg) on OS error. *)
+  (* Run a command and return its whole stdout as one String.
+     Returns Ok(stdout) on success or Err(msg) on OS error.  Both backends
+     agree on this raw shape (the compiled runtime returns the same String);
+     [Process.run_stream] splits it into a Seq(String) in March, so the Seq
+     type lives in the stdlib and not in a builtin's payload. *)
   ; ("process_spawn_lines", VBuiltin ("process_spawn_lines", function
         | [VString cmd; lst] ->
           let rec args_of_list = function
@@ -3619,19 +3622,9 @@ let base_env : env =
           (try
              let (ic, oc) = Unix.open_process_args cmd args_arr in
              close_out_noerr oc;
-             let lines = ref [] in
-             (try while true do lines := input_line ic :: !lines done
-              with End_of_file -> ());
+             let out = In_channel.input_all ic in
              let _ = Unix.close_process (ic, oc) in
-             let ordered = List.rev !lines in
-             let fold_fn = VBuiltin ("process_stream_fold", fun args ->
-               match args with
-               | [acc; f] ->
-                 List.fold_left (fun a line ->
-                   !apply_hook f [a; VString line]) acc ordered
-               | _ -> eval_error "process_stream_fold: expected (acc, fn)")
-             in
-             VCon ("Ok", [VCon ("Seq", [fold_fn])])
+             VCon ("Ok", [VString out])
            with Unix.Unix_error (err, _, _) ->
              VCon ("Err", [VString (Unix.error_message err)]))
         | _ -> eval_error "process_spawn_lines: expected (String, List(String))"))
@@ -4439,6 +4432,47 @@ let base_env : env =
           done;
           VFloat !s
         | _ -> eval_error "native_int_arr_sumsq_dev: expected (NativeIntArr, Float)"))
+  (* Stable sorts behind Array.sort_by / RRB.Vec.sort_by / sort_by_key. The
+     compiled builtins (runtime/march_runtime.c march_list_stable_sort_by /
+     march_list_sort_by_int_key) use a different stable algorithm; for a `<=`-style
+     comparator every stable sort gives the same result, which is the parity
+     the fixture test/native/array_sort_by.march checks. OCaml's stable_sort
+     takes the left element when the comparison is <= 0, so `le a b` maps to
+     -1 and its negation to 1: the same "take left iff le(left, right)" rule
+     as the C merge. *)
+  ; ("list_stable_sort_by", VBuiltin ("list_stable_sort_by", function
+        | [lst; le] ->
+          let rec to_ocaml = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [h; t]) -> h :: to_ocaml t
+            | v -> eval_error "list_stable_sort_by: expected a list, got %s" (value_to_string v)
+          in
+          let cmp a b =
+            match !apply_hook le [a; b] with
+            | VBool true -> -1
+            | VBool false -> 1
+            | v -> eval_error "list_stable_sort_by: comparator returned non-Bool: %s"
+                     (value_to_string v)
+          in
+          List.fold_right (fun x acc -> VCon ("Cons", [x; acc]))
+            (List.stable_sort cmp (to_ocaml lst)) (VCon ("Nil", []))
+        | _ -> eval_error "list_stable_sort_by: expected (List, fn)"))
+  ; ("list_sort_by_int_key", VBuiltin ("list_sort_by_int_key", function
+        | [lst; key] ->
+          let rec to_ocaml = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [h; t]) -> h :: to_ocaml t
+            | v -> eval_error "list_sort_by_int_key: expected a list, got %s" (value_to_string v)
+          in
+          let keyed = List.map (fun x ->
+              match !apply_hook key [x] with
+              | VInt k -> (k, x)
+              | v -> eval_error "list_sort_by_int_key: key returned non-Int: %s"
+                       (value_to_string v)) (to_ocaml lst) in
+          List.fold_right (fun (_, x) acc -> VCon ("Cons", [x; acc]))
+            (List.stable_sort (fun (a, _) (b, _) -> compare a b) keyed)
+            (VCon ("Nil", []))
+        | _ -> eval_error "list_sort_by_int_key: expected (List, fn)"))
   ; ("native_int_arr_map", VBuiltin ("native_int_arr_map", function
         | [VNativeIntArr a; f] ->
           let n = Array.length a in

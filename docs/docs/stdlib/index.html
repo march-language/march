@@ -181,6 +181,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="AhoCorasick.html#fn-pattern_count"><span class="sb-kind" style="color:var(--fn)">F</span>pattern_count</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Array.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Array.html">Array</a></div><div class="sb-sub"><a class="sl" href="Array.html#type-TrieNode"><span class="sb-kind" style="color:var(--ty)">T</span>TrieNode</a>
 <a class="sl" href="Array.html#type-PVec"><span class="sb-kind" style="color:var(--ty)">T</span>PVec</a>
+<a class="sl" href="Array.html#fn-debug_from_list_by_push"><span class="sb-kind" style="color:var(--fn)">F</span>debug_from_list_by_push</a>
+<a class="sl" href="Array.html#fn-debug_same_shape"><span class="sb-kind" style="color:var(--fn)">F</span>debug_same_shape</a>
 <a class="sl" href="Array.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
 <a class="sl" href="Array.html#fn-fold_left"><span class="sb-kind" style="color:var(--fn)">F</span>fold_left</a>
 <a class="sl" href="Array.html#fn-from_list"><span class="sb-kind" style="color:var(--fn)">F</span>from_list</a>
@@ -191,6 +193,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Array.html#fn-pop"><span class="sb-kind" style="color:var(--fn)">F</span>pop</a>
 <a class="sl" href="Array.html#fn-push"><span class="sb-kind" style="color:var(--fn)">F</span>push</a>
 <a class="sl" href="Array.html#fn-set"><span class="sb-kind" style="color:var(--fn)">F</span>set</a>
+<a class="sl" href="Array.html#fn-sort_by"><span class="sb-kind" style="color:var(--fn)">F</span>sort_by</a>
+<a class="sl" href="Array.html#fn-sort_by_key"><span class="sb-kind" style="color:var(--fn)">F</span>sort_by_key</a>
 <a class="sl" href="Array.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Base64.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Base64.html">Base64</a></div><div class="sb-sub"><a class="sl" href="Base64.html#fn-decode"><span class="sb-kind" style="color:var(--fn)">F</span>decode</a>
 <a class="sl" href="Base64.html#fn-encode"><span class="sb-kind" style="color:var(--fn)">F</span>encode</a>
@@ -2117,6 +2121,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="RRB.html#fn-range"><span class="sb-kind" style="color:var(--fn)">F</span>range</a>
 <a class="sl" href="RRB.html#fn-singleton"><span class="sb-kind" style="color:var(--fn)">F</span>singleton</a>
 <a class="sl" href="RRB.html#fn-slice"><span class="sb-kind" style="color:var(--fn)">F</span>slice</a>
+<a class="sl" href="RRB.html#fn-sort_by"><span class="sb-kind" style="color:var(--fn)">F</span>sort_by</a>
+<a class="sl" href="RRB.html#fn-sort_by_key"><span class="sb-kind" style="color:var(--fn)">F</span>sort_by_key</a>
 <a class="sl" href="RRB.html#fn-tabulate"><span class="sb-kind" style="color:var(--fn)">F</span>tabulate</a>
 <a class="sl" href="RRB.html#fn-to_array"><span class="sb-kind" style="color:var(--fn)">F</span>to_array</a>
 <a class="sl" href="RRB.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a></div></div>
@@ -2842,7 +2848,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Yaml.html#fn-parse_exn"><span class="sb-kind" style="color:var(--fn)">F</span>parse_exn</a>
 <a class="sl" href="Yaml.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div></div></nav><main id="main"><h1>API Reference</h1><p style="color:var(--dim);margin-bottom:24px">128 modules</p><a href="Actor.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Actor</h3><p>Actor module: messaging helpers for the actor system.</p><div class="st"><span>17 functions</span><span>0 types</span></div></div></a>
 <a href="AhoCorasick.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>AhoCorasick</h3><p>AhoCorasick module: multi-pattern string search (pure March implementation).</p><div class="st"><span>6 functions</span><span>3 types</span></div></div></a>
-<a href="Array.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Array</h3><p>Array module: persistent vector backed by a 32-way trie.</p><div class="st"><span>11 functions</span><span>2 types</span></div></div></a>
+<a href="Array.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Array</h3><p>Array module: persistent vector backed by a 32-way trie.</p><div class="st"><span>15 functions</span><span>2 types</span></div></div></a>
 <a href="Base64.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Base64</h3><p>Base64 module: standard, URL-safe, and MIME Base64 encoding/decoding.</p><div class="st"><span>5 functions</span><span>0 types</span></div></div></a>
 <a href="BigInt.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>BigInt</h3><p>BigInt module: arbitrary-precision integers.</p><div class="st"><span>20 functions</span><span>1 types</span></div></div></a>
 <a href="Bytes.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Bytes</h3><p>Bytes module: raw byte manipulation.</p><div class="st"><span>18 functions</span><span>1 types</span></div></div></a>
@@ -2930,7 +2936,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="Process.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Process</h3><p>Process module: OS process interaction.</p><div class="st"><span>17 functions</span><span>2 types</span></div></div></a>
 <a href="PubSub.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>PubSub</h3><p>PubSub module: topic-based publish-subscribe backbone for Channels.</p><div class="st"><span>12 functions</span><span>1 types</span></div></div></a>
 <a href="Queue.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Queue</h3><p>Queue module: functional double-ended queue (deque) using two lists.</p><div class="st"><span>11 functions</span><span>1 types</span></div></div></a>
-<a href="RRB.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>RRB</h3><p>RRB.Vec — persistent sequence for bulk-parallel work.</p><div class="st"><span>19 functions</span><span>2 types</span></div></div></a>
+<a href="RRB.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>RRB</h3><p>RRB.Vec — persistent sequence for bulk-parallel work.</p><div class="st"><span>21 functions</span><span>2 types</span></div></div></a>
 <a href="Random.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Random</h3><p>Random module: purely-functional pseudorandom number generation.</p><div class="st"><span>13 functions</span><span>1 types</span></div></div></a>
 <a href="Range.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Range</h3><p>Range module: integer ranges as first-class values.</p><div class="st"><span>16 functions</span><span>0 types</span></div></div></a>
 <a href="Regex.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Regex</h3><p>Regex module: simple regular expression engine (pure March implementation).</p><div class="st"><span>12 functions</span><span>5 types</span></div></div></a>

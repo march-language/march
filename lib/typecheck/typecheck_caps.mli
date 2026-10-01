@@ -23,6 +23,11 @@ val is_migrate_fn_name : string -> bool
 val check_module_needs :
   env -> Ast.name -> cap_qname_prefix:string -> Ast.decl list -> unit
 
+(** Resolve Check-4 imports queued because the importee was not yet analysed
+    (mutually importing siblings); fail-closed on the importee's whole set.
+    Call once after the whole module run. *)
+val check_deferred_imports : env -> unit
+
 (** Single-purpose capability passes, each run once per [check_module]. *)
 
 val check_cap_narrow_sites : env -> unit

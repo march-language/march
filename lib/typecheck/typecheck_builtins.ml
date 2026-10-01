@@ -685,6 +685,12 @@ let builtin_bindings : (string * scheme) list =
     ("signal_raise_self", Mono (TArrow (t_int, t_unit)));
     ("not",            Mono (TArrow (t_bool,   t_bool)));
     (* List helpers: ∀a. ... *)
+    (* Stable sorts behind Array.sort_by / RRB.Vec.sort_by and sort_by_key
+       (runtime/march_runtime.c list_stable_sort_by / list_sort_by_int_key). *)
+    ("list_stable_sort_by", poly1 (fun a ->
+       TArrow (t_list a, TArrow (TArrow (a, TArrow (a, t_bool)), t_list a))));
+    ("list_sort_by_int_key", poly1 (fun a ->
+       TArrow (t_list a, TArrow (TArrow (a, t_int), t_list a))));
     ("head",   poly1 (fun a -> TArrow (t_list a, a)));
     ("tail",   poly1 (fun a -> TArrow (t_list a, t_list a)));
     ("is_nil", poly1 (fun a -> TArrow (t_list a, t_bool)));
@@ -1326,14 +1332,14 @@ let builtin_bindings : (string * scheme) list =
     ("process_pid",        Mono t_int);
     (* process_spawn_sync/lines/async always fail with a String reason (see
        eval.ml and runtime/march_runtime.c) — the error type is Mono, not a
-       polymorphic `e`.  process_spawn_lines keeps its Seq element type `a`
-       polymorphic since that's a generic Seq, unrelated to the error slot. *)
+       polymorphic `e`.  process_spawn_lines returns the RAW stdout String on
+       both backends; Process.run_stream splits it into a Seq(String). *)
     ("process_spawn_sync", Mono
         (TArrow (t_string, TArrow (t_list t_string,
           t_result (TCon ("ProcessResult", [])) t_string))));
-    ("process_spawn_lines", poly1 (fun a ->
-        TArrow (t_string, TArrow (t_list t_string,
-          t_result (TCon ("Seq", [a])) t_string))));
+    ("process_spawn_lines", Mono
+        (TArrow (t_string, TArrow (t_list t_string,
+          t_result t_string t_string))));
     (* Async (non-blocking) process spawn *)
     ("process_spawn_async", Mono
         (TArrow (t_string, TArrow (t_list t_string,

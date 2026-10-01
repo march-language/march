@@ -98,6 +98,52 @@ let finish_ptr_merge ctx ~arm_tys ~loaded =
     end else ("ptr", loaded)
   | _ -> ("ptr", loaded)
 
+(** The unboxed aggregate struct type every arm of a join provably returns, if
+    any.  Used to type a case's result slot as that struct instead of `ptr`, so
+    a small scalar aggregate built in the arms of an `if`/`match` never gets a
+    heap cell (boxed on the way into the slot, unboxed and freed again by
+    [finish_ptr_merge]).  Measured: 50M branch-built `P2(Int, Int)`s took
+    1.57s with the box against 0.10s without it
+    (specs/progress/2026-09-30-unbox-aware-case-join-slot.md).
+
+    The slot's [alloca] is emitted before any arm, so this is a PREDICTION
+    made from the TIR alone.  It is deliberately narrow: an arm counts only if
+    its tail, through [ELet]/[ESeq], is an [EAlloc] of a type [Kind.repr_of]
+    classifies [Unboxed] (exactly the test [Llvm_emit_alloc.emit_alloc_ctor]
+    makes before returning that struct), or a nested [ECase] whose own arms
+    all predict the same type (such a case returns the struct itself, from
+    this slot or from [finish_ptr_merge]).  Arms that cannot reach the merge
+    ([arm_diverges]) are ignored, as in [finish_ptr_merge]; at least one arm
+    must reach it.  Anything else (a call, a variable, a reuse, a generic
+    payload, a closure field) answers [None] and keeps the `ptr` slot.
+
+    Safety if the prediction were ever wrong: every store goes through
+    [Llvm_ctx.coerce] to the struct type, whose ptr->struct arm unboxes a
+    boxed cell of that same type, so a mismatch is still well-typed IR. *)
+let rec predicted_unboxed_join ctx (bodies : Tir.expr list) : string option =
+  let reaching = List.filter (fun b -> not (arm_diverges b)) bodies in
+  match List.map (predicted_unboxed_tail ctx) reaching with
+  | [] -> None
+  | Some t0 :: rest when List.for_all (fun t -> t = Some t0) rest -> Some t0
+  | _ -> None
+
+and predicted_unboxed_tail ctx (e : Tir.expr) : string option =
+  match e with
+  | Tir.EAlloc (Tir.TCon (ctor, _), _) ->
+    let type_name = match String.rindex_opt ctor '.' with
+      | Some i -> String.sub ctor 0 i
+      | None -> ctor
+    in
+    (match Kind.repr_of ctx.Llvm_ctx.k_table (Tir.TCon (type_name, [])) with
+     | Kind.Unboxed _ -> Some (Llvm_ctx.llvm_ty ctx (Tir.TCon (type_name, [])))
+     | _ -> None)
+  | Tir.ELet (_, _, b) | Tir.ESeq (_, b) -> predicted_unboxed_tail ctx b
+  | Tir.ECase (_, brs, d) ->
+    predicted_unboxed_join ctx
+      (List.map (fun (br : Tir.branch) -> br.Tir.br_body) brs
+       @ Option.to_list d)
+  | _ -> None
+
 let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
   let (scrut_ty, scrut_val) = emit_atom ctx scrut_atom in
   let scrut_tir_ty_init =
@@ -383,8 +429,17 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
       Hashtbl.reset ctx.Llvm_ctx.var_slot;
       Hashtbl.iter (Hashtbl.add ctx.Llvm_ctx.var_slot) snap
     in
+    (* [slot_ty_n]: `ptr`, or the unboxed struct every arm returns; see
+       [predicted_unboxed_join]. *)
+    let slot_ty_n =
+      match predicted_unboxed_join ctx
+              (List.map (fun (br : Tir.branch) -> br.Tir.br_body) branches
+               @ Option.to_list default_opt) with
+      | Some sty -> sty
+      | None -> "ptr"
+    in
     let result_slot_n = Llvm_ctx.fresh ctx "res_slot" in
-    Llvm_ctx.emit ctx (Printf.sprintf "%s = alloca ptr" result_slot_n);
+    Llvm_ctx.emit ctx (Printf.sprintf "%s = alloca %s" result_slot_n slot_ty_n);
     (* Same bookkeeping, and the same ownership argument, as [arm_result_tys]
        in the boxed path below — this merge simply never had it.  Measured on
        a 20,000-iteration `Option(Option(Float))` loop (the outer Option is
@@ -414,8 +469,8 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
        let body = strip_decrc_niche br.Tir.br_body in
        let (bty, bval) = emit_expr ctx body in
        record_niche_arm_ty body bty;
-       Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s"
-                   (Llvm_ctx.coerce ctx bty bval "ptr") result_slot_n);
+       Llvm_ctx.emit ctx (Printf.sprintf "store %s %s, ptr %s" slot_ty_n
+                   (Llvm_ctx.coerce ctx bty bval slot_ty_n) result_slot_n);
        Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl_n)
      | None ->
        (* Wildcard/default fallback for None *)
@@ -423,8 +478,8 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
         | Some d ->
           let (dty, dval) = emit_expr ctx d in
           record_niche_arm_ty d dty;
-          Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s"
-                      (Llvm_ctx.coerce ctx dty dval "ptr") result_slot_n);
+          Llvm_ctx.emit ctx (Printf.sprintf "store %s %s, ptr %s" slot_ty_n
+                      (Llvm_ctx.coerce ctx dty dval slot_ty_n) result_slot_n);
           Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl_n)
         | None -> Llvm_ctx.emit_term ctx "unreachable"));
     restore_var_slot_n snap_none;
@@ -524,26 +579,28 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
         | _ -> ());
        let (bty, bval) = emit_expr ctx body in
        record_niche_arm_ty body bty;
-       Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s"
-                   (Llvm_ctx.coerce ctx bty bval "ptr") result_slot_n);
+       Llvm_ctx.emit ctx (Printf.sprintf "store %s %s, ptr %s" slot_ty_n
+                   (Llvm_ctx.coerce ctx bty bval slot_ty_n) result_slot_n);
        Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl_n)
      | None ->
        (match default_opt with
         | Some d ->
           let (dty, dval) = emit_expr ctx d in
           record_niche_arm_ty d dty;
-          Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s"
-                      (Llvm_ctx.coerce ctx dty dval "ptr") result_slot_n);
+          Llvm_ctx.emit ctx (Printf.sprintf "store %s %s, ptr %s" slot_ty_n
+                      (Llvm_ctx.coerce ctx dty dval slot_ty_n) result_slot_n);
           Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl_n)
         | None -> Llvm_ctx.emit_term ctx "unreachable"));
     restore_var_slot_n snap_some;
     Llvm_ctx.emit_label ctx merge_lbl_n;
     let r_n = Llvm_ctx.fresh ctx "niche_r" in
-    Llvm_ctx.emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r_n result_slot_n);
-    (* Release the box this merge's own coerce-to-ptr calls allocated, if any —
+    Llvm_ctx.emit ctx (Printf.sprintf "%s = load %s, ptr %s" r_n slot_ty_n result_slot_n);
+    (* A struct-typed slot never held a box: nothing to release.  Otherwise
+       release the box this merge's own coerce-to-ptr calls allocated, if any —
        see [finish_ptr_merge].  Identical to the boxed path's merge below; see
        [niche_arm_tys] for the float measurement. *)
-    finish_ptr_merge ctx ~arm_tys:!niche_arm_tys ~loaded:r_n
+    if slot_ty_n <> "ptr" then (slot_ty_n, r_n)
+    else finish_ptr_merge ctx ~arm_tys:!niche_arm_tys ~loaded:r_n
   | _ ->
 
   (* Tags produced by PatLit patterns: lowercase "true"/"false" (Bool),
@@ -625,9 +682,18 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
   let default_lbl = Llvm_ctx.fresh_block ctx "case_default" in
   let branch_lbls = List.map (fun _ -> Llvm_ctx.fresh_block ctx "case_br") branches in
 
-  (* Alloca slot for result — always ptr; Llvm_ctx.coerce scalars via inttoptr *)
+  (* Alloca slot for the result: `ptr` (Llvm_ctx.coerce scalars via inttoptr),
+     or the unboxed aggregate struct every arm provably returns, in which case
+     no arm boxes and the merge frees nothing ([predicted_unboxed_join]). *)
+  let slot_ty =
+    match predicted_unboxed_join ctx
+            (List.map (fun (br : Tir.branch) -> br.Tir.br_body) branches
+             @ Option.to_list default_opt) with
+    | Some sty -> sty
+    | None -> "ptr"
+  in
   let result_slot = Llvm_ctx.fresh ctx "res_slot" in
-  Llvm_ctx.emit ctx (Printf.sprintf "%s = alloca ptr" result_slot);
+  Llvm_ctx.emit ctx (Printf.sprintf "%s = alloca %s" result_slot slot_ty);
 
   (* Track each arm's pre-coercion LLVM type.  When every arm that reaches
      [merge_lbl] is "double", the ptr stored in [result_slot] is a
@@ -1213,8 +1279,8 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     in
     let (br_ty, br_val) = emit_expr ctx body_to_emit in
     record_arm_ty body_to_emit br_ty;
-    let stored = Llvm_ctx.coerce ctx br_ty br_val "ptr" in
-    Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s" stored result_slot);
+    let stored = Llvm_ctx.coerce ctx br_ty br_val slot_ty in
+    Llvm_ctx.emit ctx (Printf.sprintf "store %s %s, ptr %s" slot_ty stored result_slot);
     Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
     restore_var_slot snap
   ) branches branch_lbls;
@@ -1263,15 +1329,17 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
    | Some d ->
      let (d_ty, d_val) = emit_expr ctx d in
      record_arm_ty d d_ty;
-     let stored = Llvm_ctx.coerce ctx d_ty d_val "ptr" in
-     Llvm_ctx.emit ctx (Printf.sprintf "store ptr %s, ptr %s" stored result_slot);
+     let stored = Llvm_ctx.coerce ctx d_ty d_val slot_ty in
+     Llvm_ctx.emit ctx (Printf.sprintf "store %s %s, ptr %s" slot_ty stored result_slot);
      Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl));
   restore_var_slot snap_default;
 
   Llvm_ctx.emit_label ctx merge_lbl;
   let r = Llvm_ctx.fresh ctx "case_r" in
-  Llvm_ctx.emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r result_slot);
-  (* Uniform arm type → the box is ours alone (see [arm_result_tys]'s doc
-     comment above); unbox and free it here instead of leaking it into the
-     caller as an opaque live ptr.  See [finish_ptr_merge]. *)
-  finish_ptr_merge ctx ~arm_tys:!arm_result_tys ~loaded:r
+  Llvm_ctx.emit ctx (Printf.sprintf "%s = load %s, ptr %s" r slot_ty result_slot);
+  (* A struct-typed slot never held a box.  Otherwise: uniform arm type → the
+     box is ours alone (see [arm_result_tys]'s doc comment above); unbox and
+     free it here instead of leaking it into the caller as an opaque live ptr.
+     See [finish_ptr_merge]. *)
+  if slot_ty <> "ptr" then (slot_ty, r)
+  else finish_ptr_merge ctx ~arm_tys:!arm_result_tys ~loaded:r

@@ -1437,6 +1437,13 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          imported module's whole set.  The per-cap [covered] loop, the
          diagnostic text and its span are unchanged — only the SET of required
          capabilities narrowed. *)
+      (* The importee has not been analysed yet (a mutually importing group:
+         one member is always checked first): its caps are not known now, so
+         queue the import for [check_deferred_imports] instead of silently
+         checking nothing. *)
+      if not (List.mem_assoc imported env.module_caps) then
+        env.deferred_check4 :=
+          (mod_name.txt, declared_needs, imported, sp) :: !(env.deferred_check4);
       (match (match import_required_caps ud sp imported with
               | [] -> None | caps -> Some caps) with
        | None -> ()
@@ -2311,3 +2318,37 @@ let fn_transitive_capability_closures (env : env) : (string * string list) list 
     (fn_transitive_capability_closures_tbl env) []
   |> List.sort (fun (a, _) (b, _) -> compare a b)
 
+
+(** Resolve the Check-4 imports [check_module_needs] queued because the
+    importee had not been analysed yet.  Run once, after the whole module run,
+    against the final [env.module_caps].
+
+    FAIL-CLOSED: the importee's WHOLE declared set is required, not the
+    demand-driven subset.  The importer was checked before the importee, so its
+    bare references to the importee never resolved and filed no
+    [ie_used_names]; the demand is unknowable without re-checking the importer
+    (which would double-report every diagnostic in it).  This is stricter than
+    the other declaration order for a pure-only reference, but only in a
+    mutually-importing group whose importee is checked second, and stricter is
+    the safe side of a capability floor.  The diagnostic text is Check 4's. *)
+let check_deferred_imports (env : env) : unit =
+  let cap s = MPCode ("Cap(" ^ s ^ ")") in
+  let pending = List.rev !(env.deferred_check4) in
+  env.deferred_check4 := [];
+  List.iter (fun (importer, declared_needs, imported, sp) ->
+    match List.assoc_opt imported env.module_caps with
+    | None | Some [] -> ()
+    | Some req_caps ->
+      List.iter (fun req_cap ->
+        if not (List.exists (fun need -> cap_subsumes need req_cap) declared_needs)
+        then
+          Err.error env.errors ~span:sp
+            (render_parts [
+              MPText "module "; MPCode importer; MPText " imports ";
+              MPCode imported; MPText " which requires "; cap req_cap;
+              MPText ", but "; MPCode req_cap; MPText " is not declared in ";
+              MPCode "needs"; MPText ".";
+              MPBreak; MPText "help: add "; MPCode ("needs " ^ req_cap);
+              MPText " to the module body." ])
+      ) req_caps
+  ) pending

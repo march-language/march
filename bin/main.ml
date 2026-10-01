@@ -1004,6 +1004,18 @@ let parse_target s =
 (* CAS cache key                                                       *)
 (* ------------------------------------------------------------------ *)
 
+(** True on an arm64/aarch64 host (the [Native] target's architecture). *)
+let host_is_arm64 =
+  let v = lazy (
+    try
+      let ic = Unix.open_process_in "uname -m 2>/dev/null" in
+      let l = try input_line ic with End_of_file -> "" in
+      ignore (Unix.close_process_in ic);
+      let l = String.lowercase_ascii (String.trim l) in
+      l = "arm64" || l = "aarch64"
+    with _ -> false) in
+  fun () -> Lazy.force v
+
 (** The clang -O level actually used: [!opt_level] when explicitly set in
     range, 2 otherwise.  Shared by [build_cas_key] and the clang invocation so
     the cached-under level and the compiled-at level cannot drift apart. *)
@@ -1074,6 +1086,9 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
            non-sandboxed cached artifact must never satisfy it. *)
         @ (if !cap_sandbox then ["capsandbox"] else [])
         @ (if !cap_strict then ["capstrict"] else [])
+        (* --target-cpu changes the instructions clang emits (SIMD width),
+           so a baseline-ISA cached binary must never satisfy it. *)
+        @ (if !target_cpu <> "" then ["cpu:" ^ !target_cpu] else [])
         (* --stdlib-source changes the verdict: a file the stdlib-only
            builtin gate rejects passes under it, so a clean cached check
            must never satisfy the plain spelling (measured: it did, and the
@@ -3215,8 +3230,9 @@ let compile filename =
            INSIDE a lambda -- which is where every session body lives -- left
            the boundary function's hash untouched and `forge deploy hot`
            answered "no changes" for it.  Bare names (module "") are never
-           slots themselves (only `<Actor>_dispatch` is, and it is excluded
-           below), so the only way a change to one reaches a running program
+           slots themselves (only an app actor's `<Actor>_dispatch` is, and it
+           is excluded below; a stdlib actor has no slot and its glue is not
+           folded), so the only way a change to one reaches a running program
            is through the activation of the boundary function that calls it:
            fold their hashes in, transitively, stopping at other slots and at
            cycles.  Stdlib and other qualified callees stay unfolded (a leaf
@@ -3230,7 +3246,7 @@ let compile filename =
            List.iter (fun (fd : March_tir.Tir.fn_def) -> Hashtbl.replace fn_tbl fd.March_tir.Tir.fn_name fd) tir.March_tir.Tir.tm_fns;
            let all_names = Hashtbl.fold (fun n _ acc -> n :: acc) fn_tbl [] in
            let is_slot n =
-             March_tir.Tir_names.is_actor_dispatch_fn n
+             March_tir.Hot_reload.is_slot_actor_dispatch n
              || March_tir.Hot_reload.is_reloadable cfg (March_tir.Hot_reload.module_of_name n) in
            let is_entry n =
              String.equal n "main"
@@ -3255,7 +3271,10 @@ let compile filename =
              |> List.filter (fun c ->
                   not (List.mem c visiting)
                   && String.equal (March_tir.Hot_reload.module_of_name c) ""
-                  && not (is_slot c))
+                  && not (is_slot c)
+                  (* A stdlib actor's glue is bare-named too, but it is the
+                     stdlib's: unfolded like every other stdlib callee. *)
+                  && not (March_tir.Hot_reload.is_stdlib_actor_fn c))
              |> List.filter_map (fun c ->
                   match Hashtbl.find_opt fn_tbl c with
                   | Some cfd ->
@@ -3768,9 +3787,16 @@ let compile filename =
               | None    -> "clang"
             in
             let arch_cflags =
+              (* --target-cpu replaces the baseline ISA flag.  The spelling is
+                 per ARCH, not per host: clang rejects -march=<x86 cpu> on
+                 arm64 and vice versa, and Native means "this host". *)
+              let cpu = !target_cpu in
+              let x86 = if cpu <> "" then " -march=" ^ cpu else " -msse4.2" in
+              let arm = if cpu <> "" then " -mcpu=" ^ cpu else "" in
               match xtarget with
-              | March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; _ }) -> ""   (* NEON by default; SSE flags are x86-only *)
-              | March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; _ }) | March_tir.Llvm_emit.Native -> " -msse4.2"
+              | March_tir.Llvm_emit.(LinuxGnu { arch = Arm64; _ }) -> arm   (* NEON by default; SSE flags are x86-only *)
+              | March_tir.Llvm_emit.(LinuxGnu { arch = X86_64; _ }) -> x86
+              | March_tir.Llvm_emit.Native -> if host_is_arm64 () then arm else x86
               | March_tir.Llvm_emit.(Wasm64Wasi | Wasm32Wasi | Wasm32Unknown | Js) -> ""
             in
             (* Cross Linux link (P3): link TLS (OpenSSL 3) + gzip (zlib) against a
@@ -3963,6 +3989,9 @@ let compile filename =
              # march-hcr-manifest v1
              # cas_hash <64-char blake3 hex>
              <fn_name> <impl_hash> <sig_hash> [callers:<a>,<b>] caps=<sorted-csv>
+           (v2 adds `# target`, `# hcr_abi`, `# module_prefix` and
+           `# stdlib_hash <digest of the stdlib source compiled against>`
+           header lines.)
            sig_hash may be empty if the function was not hashed.
            callers: lists other boundary functions that call this one (omitted
            when empty).  The deploy tool uses this to verify that all callers
@@ -4088,7 +4117,17 @@ let compile filename =
                 Printf.fprintf oc
                   "# march-hcr-manifest v2\n# cas_hash %s\n# target %s\n# hcr_abi %s\n# module_prefix %s\n"
                   ch abi.canonical_target (March_tir.Hcr_abi.abi_id abi)
-                  (Option.value ~default:"" !hot_reload_prefix)
+                  (Option.value ~default:"" !hot_reload_prefix);
+                (* The standard library this artifact was compiled against:
+                   the digest of its source ([stdlib_source_hash], the same
+                   one that keys the CAS).  A stdlib actor has no dispatch
+                   slot (Hot_reload.is_slot_actor_dispatch), so a patch can
+                   never deliver a stdlib change; forge compares this line
+                   with the running build's and asks for a restart instead
+                   of activating nothing (deploy --plan, deploy hot). *)
+                (match stdlib_source_hash () with
+                 | Some (_, h, _) -> Printf.fprintf oc "# stdlib_hash %s\n" h
+                 | None -> ())
               | Error _ ->
                 Printf.fprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch);
              Hashtbl.iter (fun name impl_h ->
@@ -5060,6 +5099,8 @@ let () =
      "<a,b>  With --topology: the pools this build contains (default: every pool)");
     ("--topology-isolate-foreign", Arg.Set topology_isolate_foreign,
      " With --topology: reject an IO.Foreign role or hook in a pool that is not isolated");
+    ("--target-cpu", Arg.Set_string target_cpu,
+     "<cpu>  CPU for the C compiler: -march=<cpu> on x86_64 (e.g. native, x86-64-v3, skylake-avx512), -mcpu=<cpu> on arm64 (e.g. native, apple-m1). Default: -msse4.2 on x86_64, the target baseline on arm64. Part of the build-cache key");
     ("--cap-strict", Arg.Set cap_strict, " Treat `needs` as a hard ceiling (the DEFAULT since 2026-08-08; accepted for compatibility and to state the intent explicitly)");
     ("--stdlib-source", Arg.Set stdlib_source, " The entry file(s) are standard-library sources checked under a path outside the resolved stdlib root (e.g. `march --check --stdlib-source stdlib/actor.march` from the repo root): exempt them from the stdlib-only builtin gate. Never inferred from the file name");
     ("--no-cap-strict", Arg.Clear cap_strict, " Do not enforce `needs` as a ceiling: allow a module's emitted code to use capabilities it does not declare");

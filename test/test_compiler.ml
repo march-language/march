@@ -886,6 +886,53 @@ let test_desugar_actor_names_collision_renamed () =
     ["Box"; "A.A__Box"; "A.C.A__C__Box"; "B.B__Box"]
     (actor_names_of (parse_and_desugar src))
 
+let test_desugar_actor_names_stdlib_qualified () =
+  (* A standard-library file's actors are ALL qualified with the file's
+     module path, root-level ones too, and so is every reference: the stdlib
+     is loaded whole, so an app actor named like one of them (`Anchor`,
+     `Writer`) otherwise shares its glue names and the compiler died with
+     "actor-message tag table has no row for Anchor_Msg.Bump". *)
+  let src = Printf.sprintf {|mod Topo do
+    %s
+    mod Inner do
+      %s
+      fn start() do spawn(Box) end
+    end
+    fn root() do spawn(Box) end
+    fn inner() do spawn(Inner.Box) end
+    fn poke(pid, k) do
+      let m : Box.Msg = Poke(k)
+      send(pid, m)
+    end
+  end|} actor_src actor_src in
+  let module AN = March_desugar.Desugar_actor_names in
+  let saved = !AN.is_stdlib_file in
+  AN.is_stdlib_file := (fun _ -> true);
+  let m = Fun.protect ~finally:(fun () -> AN.is_stdlib_file := saved)
+      (fun () -> parse_and_desugar src) in
+  Alcotest.(check (list string)) "every stdlib actor qualified"
+    ["Topo__Box"; "Inner.Topo__Inner__Box"] (actor_names_of m);
+  (* Every reference was rewritten: a stale bare `Box` would bind nothing. *)
+  let rec spawned acc (e : March_ast.Ast.expr) = match e with
+    | March_ast.Ast.ESpawn (ECon (n, _, _), _) | ESpawn (EVar n, _) -> n.txt :: acc
+    | EBlock (es, _) -> List.fold_left spawned acc es
+    | EMatch (s, brs, _) ->
+      List.fold_left (fun acc (b : March_ast.Ast.branch) -> spawned acc b.branch_body)
+        (spawned acc s) brs
+    | _ -> acc in
+  let rec go acc decls = List.fold_left (fun acc d -> match d with
+      | March_ast.Ast.DFn (fd, _) ->
+        List.fold_left (fun acc (c : March_ast.Ast.fn_clause) -> spawned acc c.fc_body)
+          acc fd.fn_clauses
+      | DMod (_, _, inner, _) -> go acc inner
+      | _ -> acc) acc decls in
+  Alcotest.(check (list string)) "spawn targets"
+    ["Inner.Topo__Inner__Box"; "Topo__Box"; "Topo__Inner__Box"]
+    (List.sort_uniq compare (go [] m.March_ast.Ast.mod_decls));
+  (* A user file (the default) keeps its root actor's bare name. *)
+  Alcotest.(check (list string)) "user file untouched"
+    ["Box"; "Inner.Inner__Box"] (actor_names_of (parse_and_desugar src))
+
 let test_desugar_actor_names_same_module_rejected () =
   (* Two actors of one name in ONE module: no reference could tell them
      apart, so it is an error rather than a silent pick. *)
@@ -11327,6 +11374,52 @@ let test_check4_importee_declared_later () =
   Alcotest.(check bool) "importee declared AFTER, pure: clean"
     false (has_cap_needs_error (src ~importee_later:true pure))
 
+(* Check 4 for MUTUALLY importing siblings, importee declared later
+   (specs/progress/2026-09-29-check4-cyclic-import-importee-later.md).  In a
+   cycle one module is always checked first, so the sort edge cannot save the
+   importee-later order; the check is deferred until the whole module run and
+   is FAIL-CLOSED (the importee's whole set: the importer's bare references
+   never resolved, so the demand-driven subset is unknowable).
+
+   Rows: (importee declared before / after) x (impure / pure reference) x
+   (importer covers the cap or not).  The impure-uncovered rows are the REJECT
+   case: the same program errors in BOTH declaration orders.  A covering
+   [needs] is accepted in both.  The pure-reference row documents the
+   fail-closed asymmetry: importee-first keeps the demand-driven loosening,
+   importee-later requires the whole set. *)
+let test_check4_cyclic_import_importee_later () =
+  let beta = {|mod CapOrdProbeBeta do
+    needs IO.Console
+    import CapOrdProbeAlpha
+    fn capordprobebeta_pure(x : Int) : Int do x * 2 end
+    fn capordprobebeta_noisy(m : String) : Unit do print(m) end
+  end|} in
+  let alpha ?(needs = "") body = Printf.sprintf {|mod CapOrdProbeAlpha do
+    %s
+    import CapOrdProbeBeta
+    fn alpha_pure(x : Int) : Int do x + 1 end
+    %s
+  end|} needs body in
+  let src ~importee_later a =
+    if importee_later then Printf.sprintf "mod CapOrdRoot do\n  %s\n  %s\n  fn main() : Int do 0 end\nend" a beta
+    else Printf.sprintf "mod CapOrdRoot do\n  %s\n  %s\n  fn main() : Int do 0 end\nend" beta a in
+  let impure = alpha "fn alpha_uses(m : String) : Unit do capordprobebeta_noisy(m) end" in
+  let pure = alpha "fn alpha_uses(x : Int) : Int do capordprobebeta_pure(x) end" in
+  let covered = alpha ~needs:"needs IO.Console"
+      "fn alpha_uses(m : String) : Unit do capordprobebeta_noisy(m) end" in
+  Alcotest.(check bool) "importee BEFORE, impure: error"
+    true (has_cap_needs_error (src ~importee_later:false impure));
+  Alcotest.(check bool) "importee AFTER, impure: error (was silently skipped)"
+    true (has_cap_needs_error (src ~importee_later:true impure));
+  Alcotest.(check bool) "importee BEFORE, covered by needs: clean"
+    false (has_cap_needs_error (src ~importee_later:false covered));
+  Alcotest.(check bool) "importee AFTER, covered by needs: clean"
+    false (has_cap_needs_error (src ~importee_later:true covered));
+  Alcotest.(check bool) "importee BEFORE, pure reference: clean (demand-driven)"
+    false (has_cap_needs_error (src ~importee_later:false pure));
+  Alcotest.(check bool) "importee AFTER, pure reference: error (fail-closed, whole set)"
+    true (has_cap_needs_error (src ~importee_later:true pure))
+
 (* ── Closing the [record_fn_caps] coverage gap (2026-08-06) ──────────────
    Until this fix [record_fn_caps] recorded an own(...) entry for [DFn]s,
    actor handlers and [DExtern]s only.  Module-level [DLet] bodies, interface
@@ -15165,9 +15258,7 @@ let assert_stdlib_file_typechecks_cleanly name =
    count comes down here, so the table cannot quietly describe a fixed tree. *)
 let stdlib_known_internal_errors = [
   (* file, errors -- see specs/progress/2026-09-22-stdlib-internal-type-errors.md *)
-  "actor.march", 2;
   "cluster_node.march", 1;
-  "node_call.march", 5;
   "session_node.march", 3;
 ]
 
@@ -17271,6 +17362,7 @@ let compiler_suites =
           Alcotest.test_case "unique nested actor keeps its name" `Quick test_desugar_actor_names_unique_untouched;
           Alcotest.test_case "same-named nested actors renamed" `Quick test_desugar_actor_names_collision_renamed;
           Alcotest.test_case "same-named actors in one module rejected" `Quick test_desugar_actor_names_same_module_rejected;
+          Alcotest.test_case "stdlib actors qualified" `Quick test_desugar_actor_names_stdlib_qualified;
         ] );
       ( "typecheck",
         [
@@ -17883,6 +17975,7 @@ let compiler_suites =
           Alcotest.test_case "the fallback does not fire for locals/params"          `Quick test_fallback_does_not_fire_for_locals;
           Alcotest.test_case "cyclic modules still enforce"                          `Quick test_cyclic_modules_still_enforce;
           Alcotest.test_case "Check 4 fires when the importee is declared later"   `Quick test_check4_importee_declared_later;
+          Alcotest.test_case "Check 4 fires for cyclic imports, importee later"   `Quick test_check4_cyclic_import_importee_later;
           Alcotest.test_case "a cap reached only via a module-level let propagates"  `Quick test_transitive_cap_via_module_let;
           Alcotest.test_case "a cap reached only via an interface default method"    `Quick test_transitive_cap_via_interface_default_method;
           Alcotest.test_case "an interface default does not capture a same-named fn" `Quick test_interface_default_does_not_capture_a_same_named_fn;

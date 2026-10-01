@@ -8918,6 +8918,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      never "EntryName.Lib.Sub.f". *)
   check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls
     ~cap_qname_prefix:"";
+  check_deferred_imports final_env;
   (* R1: hold the program's capability closure under main's grant. *)
   (* [check_main_grant] deliberately does not consult [deps]/[unknown] (see
      its own comment on the [unknown]-ignoring arm), and after stage C's

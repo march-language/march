@@ -25,9 +25,12 @@ mod Process do
     process_spawn_sync(command, args)
   end
 
-  doc "Run command and return its stdout as a Seq(String) of lines. Returns Ok(Seq) or Err(msg)."
+  doc "Run command and return its stdout as a Seq(String) of lines. Returns Ok(Seq) or Err(msg). The command runs to completion and its stdout is read in full before the Seq is returned; the Seq is not a live stream of the running process."
   fn run_stream(command, args) do
-    process_spawn_lines(command, args)
+    match process_spawn_lines(command, args) do
+      Ok(out) -> Ok(Seq.from_string_lines(out))
+      Err(e) -> Err(e)
+    end
   end
 
   -- ---- Environment ----

@@ -482,6 +482,61 @@ let unboxed_branch_join_src = {|mod UBJoin do
   end
 end|}
 
+(* The fallback shape: one arm builds the aggregate, the other returns a
+   variable holding one.  [Llvm_case.predicted_unboxed_join] only trusts an
+   [EAlloc] tail, so this join keeps the `ptr` slot, boxes in both arms, and
+   [finish_ptr_merge] must still release the box. *)
+let unboxed_mixed_join_src = {|mod UBMixed do
+  needs IO.Console
+  type P2 = P2(Float, Float)
+  fn psum(p : P2) : Float do
+    match p do
+      P2(a, c) -> a +. c
+    end
+  end
+  pfn spin(i : Int, acc : Float) : Float do
+    if i == 0 do acc
+    else
+      let q = P2(3.0, 4.0)
+      let p = if i % 2 == 0 do P2(1.0, 2.0) else q end
+      spin(i - 1, acc +. psum(p))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(float_to_string(spin(10, 0.0)))
+  end
+end|}
+
+(* Three-arm match and a nested `else if` chain: every arm that reaches the
+   join is an [EAlloc] of the same unboxed type (the nested case included), so
+   both joins are struct-typed and nothing in the loop allocates. *)
+let unboxed_multi_join_src = {|mod UBMulti do
+  needs IO.Console
+  type P3 = P3(Int, Float, Bool)
+  fn pval(p : P3) : Int do
+    match p do
+      P3(a, _, c) -> if c do a else 0 - a end
+    end
+  end
+  pfn spin(i : Int, acc : Int) : Int do
+    if i == 0 do acc
+    else
+      let p = match i % 3 do
+        0 -> P3(i, 1.0, true)
+        1 -> P3(1, 2.0, false)
+        _ -> P3(2, 3.0, true)
+      end
+      let q = if i % 5 == 0 do P3(5, 0.5, true)
+              else if i % 5 == 1 do P3(6, 0.5, false)
+              else P3(7, 0.5, true) end end
+      spin(i - 1, acc + pval(p) + pval(q))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(int_to_string(spin(10, 0)))
+  end
+end|}
+
 (* The body of `define ... @name(`, up to the closing brace in column 0. *)
 let ir_define ir name =
   let re = Str.regexp (Printf.sprintf "define [^\n]*@%s(" (Str.quote name)) in
@@ -512,7 +567,7 @@ let unboxed_merge_loads fn_ir =
   go 0 []
 
 let test_unboxed_aggregate_branch_join_box_released () =
-  let ir = emit_tco_opt_ir unboxed_branch_join_src in
+  let ir = emit_tco_opt_ir unboxed_mixed_join_src in
   let fn_ir = ir_define ir "spin" in
   Alcotest.(check bool) "the loop function is present in the IR" true (fn_ir <> "");
   (* The join really does box — otherwise the release assertion below is
@@ -528,6 +583,31 @@ let test_unboxed_aggregate_branch_join_box_released () =
             nobody downstream owns it" v)
         true released)
     merges
+
+(* When every arm BUILDS the aggregate, the join slot is typed as the struct:
+   no arm boxes, so the per-construction march_alloc + free the merge used to
+   pay is gone (specs/progress/2026-09-30-unbox-aware-case-join-slot.md).
+   Pre-change this function emitted `alloca ptr` for the join and two
+   `march_alloc(i64 32)` boxes. *)
+let test_unboxed_aggregate_branch_join_slot_is_struct () =
+  let ir = emit_tco_opt_ir unboxed_branch_join_src in
+  let fn_ir = ir_define ir "spin" in
+  Alcotest.(check bool) "the loop function is present in the IR" true (fn_ir <> "");
+  Alcotest.(check bool) "the join slot is typed as the struct" true
+    (ir_contains fn_ir "= alloca %ub.P2");
+  Alcotest.(check int) "no arm boxes the aggregate" 0
+    (ir_count fn_ir "call ptr @march_alloc(");
+  Alcotest.(check (list (pair string bool))) "no merge unboxes a box" []
+    (unboxed_merge_loads fn_ir)
+
+let test_unboxed_aggregate_multi_arm_joins_are_struct () =
+  let ir = emit_tco_opt_ir unboxed_multi_join_src in
+  let fn_ir = ir_define ir "spin" in
+  Alcotest.(check bool) "the loop function is present in the IR" true (fn_ir <> "");
+  Alcotest.(check bool) "the joins are typed as the struct" true
+    (ir_count fn_ir "= alloca %ub.P3" >= 2);
+  Alcotest.(check int) "no arm of the 3-arm match or the else-if chain boxes" 0
+    (ir_count fn_ir "call ptr @march_alloc(")
 
 (* ── FnFused coverage: flag-vs-reality cross-check (Wave 3 Chunk 2 Task 1) ──
    fusion.ml's three synthesis sites (gen_map_fold / gen_filter_fold /
@@ -9362,7 +9442,12 @@ let test_native_int_arr_ir () =
   Alcotest.(check bool) "length call returns i64" true
     (ir_contains ir "= call i64 @native_int_arr_length");
   Alcotest.(check bool) "from_list call returns ptr" true
-    (ir_contains ir "= call ptr @native_int_arr_from_list")
+    (ir_contains ir "= call ptr @native_int_arr_from_list");
+  (* The length accessor is declared pure + speculatable so LLVM can hoist it
+     out of index loops (the SIMD load bounds check calls it per iteration).
+     Dropping the attributes silently un-hoists it; no result changes. *)
+  Alcotest.(check bool) "length declare is memory(none) speculatable" true
+    (ir_contains ir "@native_int_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)")
 
 (** native_float_arr_* builtins must appear in the LLVM preamble and generate
     correct call instructions: double return for get/sum, ptr for make/set/map. *)
@@ -13877,6 +13962,8 @@ declare ptr  @march_string_to_float(ptr %s)
 ; List builtins
 declare ptr  @march_list_append(ptr %a, ptr %b)
 declare ptr  @march_list_concat(ptr %lists)
+declare ptr  @march_list_stable_sort_by(ptr %xs, ptr %le)
+declare ptr  @march_list_sort_by_int_key(ptr %xs, ptr %key)
 ; IOList builtins
 declare ptr  @march_iolist_hash_fnv1a(ptr %iol)
 ; Vault (key-value store) builtins
@@ -14102,7 +14189,7 @@ declare ptr  @march_typed_array_fold(ptr %arr, ptr %acc, ptr %f)
 declare ptr  @march_typed_array_slice(ptr %arr, i64 %start, i64 %len)
 ; NativeIntArr builtins — flat i64 arrays for vectorizable loops
 declare ptr    @native_int_arr_make(i64 %len, i64 %def)
-declare i64    @native_int_arr_length(ptr %arr)
+declare i64    @native_int_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
 declare i64    @native_int_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_int_arr_set(ptr %arr, i64 %i, i64 %val)
 declare ptr    @native_int_arr_sort(ptr %arr)
@@ -14119,7 +14206,7 @@ declare ptr    @native_int_arr_to_list(ptr %arr)
 declare ptr    @native_int_arr_filter_mask(ptr %arr, ptr %mask)
 ; NativeFloatArr builtins — flat double arrays for vectorizable loops
 declare ptr    @native_float_arr_make(i64 %len, double %def)
-declare i64    @native_float_arr_length(ptr %arr)
+declare i64    @native_float_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
 declare double @native_float_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_float_arr_set(ptr %arr, i64 %i, double %val)
 declare double @native_float_arr_sum(ptr %arr)
@@ -14138,7 +14225,7 @@ declare ptr    @native_float_arr_alloc_raw(i64 %len)
 declare void   @native_arr_map2_check_len(i64 %len1, i64 %len2)
 ; Narrow native arrays (f32/i32/u8)
 declare ptr    @native_f32_arr_make(i64 %len, double %def)
-declare i64    @native_f32_arr_length(ptr %arr)
+declare i64    @native_f32_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
 declare double @native_f32_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_f32_arr_set(ptr %arr, i64 %i, double %v)
 declare double @native_f32_arr_sum(ptr %arr)
@@ -14149,7 +14236,7 @@ declare ptr    @native_f32_arr_fold(ptr %acc, ptr %arr, ptr %f)
 declare ptr    @native_f32_arr_from_list(ptr %lst)
 declare ptr    @native_f32_arr_to_list(ptr %arr)
 declare ptr    @native_i32_arr_make(i64 %len, i64 %def)
-declare i64    @native_i32_arr_length(ptr %arr)
+declare i64    @native_i32_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
 declare i64    @native_i32_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_i32_arr_set(ptr %arr, i64 %i, i64 %v)
 declare i64    @native_i32_arr_sum(ptr %arr)
@@ -14160,7 +14247,7 @@ declare ptr    @native_i32_arr_fold(ptr %acc, ptr %arr, ptr %f)
 declare ptr    @native_i32_arr_from_list(ptr %lst)
 declare ptr    @native_i32_arr_to_list(ptr %arr)
 declare ptr    @native_u8_arr_make(i64 %len, i64 %def)
-declare i64    @native_u8_arr_length(ptr %arr)
+declare i64    @native_u8_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
 declare i64    @native_u8_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_u8_arr_set(ptr %arr, i64 %i, i64 %v)
 declare i64    @native_u8_arr_sum(ptr %arr)
@@ -15660,6 +15747,10 @@ let codegen_suites =
             test_unboxed_aggregate_zero_live_allocs_compiled;
           Alcotest.test_case "branch-join box is released at the merge" `Quick
             test_unboxed_aggregate_branch_join_box_released;
+          Alcotest.test_case "branch-built join slot is typed as the struct" `Quick
+            test_unboxed_aggregate_branch_join_slot_is_struct;
+          Alcotest.test_case "3-arm match and else-if chain joins are struct-typed" `Quick
+            test_unboxed_aggregate_multi_arm_joins_are_struct;
           Alcotest.test_case "compiled branch-built aggregate loop does not leak" `Slow
             test_unboxed_aggregate_branch_join_no_leak_compiled;
           Alcotest.test_case "a type in an extern signature stays boxed" `Quick test_unboxed_aggregate_ffi_type_stays_boxed;

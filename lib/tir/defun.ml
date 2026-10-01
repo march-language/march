@@ -65,7 +65,7 @@ let builtin_names : StringSet.t =
       "string_last_index_of";
       "string_to_float";
       (* List builtins *)
-      "list_append"; "list_concat";
+      "list_append"; "list_concat"; "list_stable_sort_by"; "list_sort_by_int_key";
       (* File/Dir builtins *)
       "file_exists"; "dir_exists";
       "file_open"; "file_close"; "file_read"; "file_read_line"; "file_read_chunk";
