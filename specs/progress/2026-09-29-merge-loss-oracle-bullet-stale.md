@@ -1,7 +1,7 @@
 # Merge-loss todo: "differential oracle cannot see these crashes" was already fixed
 
 Docs-only. The bullet in
-`specs/todos/2026-07-24-merge-loss-round-2-14-commits-on-docs-core-march-types-skeleton.md`
+`specs/progress/2026-07-24-merge-loss-round-2-14-commits-on-docs-core-march-types-skeleton.md`
 asked for an expected-stdout anchor for `iolist_template`, `string_pipeline` and `deque_ops`
 so a compiled crash is not invisible to an interpreter-leg differential sweep.
 `test/test_bench_gate.ml` already does this: lines 110-113 pin `tree_transform`,
