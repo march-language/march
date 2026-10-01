@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Native builds allocate from a vendored mimalloc.** `march_alloc`, the allocator
+  behind every March value, now draws from a statically linked mimalloc instead of
+  libc `calloc`, with no new system dependency. Allocation-heavy programs get
+  faster: `binary_trees` 233 to 165 ms (-29%) and `list_ops` 76 to 62 ms (-18%),
+  with `tree_transform` about 3% faster. The cost is a larger resident set (7 MB to
+  14 MB on `binary_trees`). Set `MARCH_MALLOC=libc` when compiling to get the old
+  allocator; `MARCH_SANITIZE` builds, hot-reload patches and the REPL always use libc.
 - **`Array.sort_by`, `Array.sort_by_key`, `RRB.sort_by` and `RRB.sort_by_key`.**
   Stable sorts for the persistent vectors: `sort_by` takes the same comparator
   as `List.sort_by` (`fn (a, b) -> a <= b`), and `sort_by_key` takes a function
