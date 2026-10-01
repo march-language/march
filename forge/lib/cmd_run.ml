@@ -17,10 +17,11 @@ let empty_context = { lib_path_env = ""; ffi_flags = ""; pin_main = false }
 
 (** Install the resolved toolchain if absent (so the PATH prefix
     [Cmd_build.lib_path_env] builds actually points at something), then collect
-    the project's search path and FFI shims.  [interpreted] runs also get the
-    [[ffi.rust]]-is-compile-only warning (see
-    [Cmd_build.interpreted_rust_ffi_diagnostic]) before anything else runs. *)
-let context_of_project ~interpreted proj =
+    the project's search path and FFI shims.  An [[ffi.rust]] crate arrives as
+    `--ffi-link <lib>.a` in both modes: compiled runs link it, and the
+    interpreter force-loads it into its FFI shim (bin/main.ml,
+    [setup_interpreter_ffi]). *)
+let context_of_project proj =
   match Toolchain.ensure_installed () with
   | Error e -> Error e
   | Ok () ->
@@ -28,7 +29,6 @@ let context_of_project ~interpreted proj =
             ~scope:(Cmd_build.build_scope ~release:false proj) proj with
     | Error e -> Error e
     | Ok () ->
-    if interpreted then Cmd_build.warn_interpreted_rust_ffi proj;
     match Cmd_build.ffi_flags_full proj with
     | Error msg -> Error msg
     | Ok ffi_flags ->
@@ -42,9 +42,8 @@ let context_of_project ~interpreted proj =
     import that project's own modules; with no project it runs bare, the same
     fallback [Cmd_test.run_files] uses for ad-hoc test files.
 
-    Without [file], the project's entry is used and a project is required.
-    [interpreted] (default false) only controls the [[ffi.rust]] warning. *)
-let resolve_entry ?(interpreted = false) ?file () =
+    Without [file], the project's entry is used and a project is required. *)
+let resolve_entry ?file () =
   match file with
   | Some f ->
     if not (Sys.file_exists f) then
@@ -54,14 +53,14 @@ let resolve_entry ?(interpreted = false) ?file () =
     else
       (match Project.load () with
        | Error _   -> Ok (f, empty_context)
-       | Ok proj   -> Result.map (fun ctx -> (f, ctx)) (context_of_project ~interpreted proj))
+       | Ok proj   -> Result.map (fun ctx -> (f, ctx)) (context_of_project proj))
   | None ->
     match Project.load () with
     | Error msg -> Error msg
     | Ok proj ->
       match Project.entry proj with
       | Error e -> Error e
-      | Ok entry -> Result.map (fun ctx -> (entry, ctx)) (context_of_project ~interpreted proj)
+      | Ok entry -> Result.map (fun ctx -> (entry, ctx)) (context_of_project proj)
 
 (** The shell command for an interpreted run.
 
@@ -175,7 +174,7 @@ let run ?(dump_phases = false) ?(compiled = false) ?target ?file ?(args = [])
      | Ok output -> exec_output ~target ~args output)
   | false, _ ->
     gated @@ fun () ->
-    (match resolve_entry ~interpreted:true ?file () with
+    (match resolve_entry ?file () with
      | Error msg -> Error msg
      | Ok (entry, ctx) ->
        let dump_flag = if dump_phases then " --dump-phases" else "" in

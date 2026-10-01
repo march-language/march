@@ -701,7 +701,7 @@ let emit_mutual_tco_group ~emit_expr ctx (group : Tir.fn_def list) =
     let wrap_vis =
       let fname = fn.Tir.fn_name in
       if ctx.Llvm_ctx.compile_so
-         && not (Tir_names.is_actor_dispatch_fn fname)
+         && not (Hot_reload.is_slot_actor_dispatch fname)
          && not (Tir_names.is_migrate_fn_name fname)
       then "hidden " else ""
     in

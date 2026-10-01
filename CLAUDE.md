@@ -10,6 +10,10 @@ March is a statically-typed functional language (ML/Elixir hybrid) compiled with
 - When an item is finished, `git mv` its file from `specs/todos/` to `specs/progress/` (or delete it and add a new
   dated file in `specs/progress/`) in the same commit that lands the fix; don't leave a stale open file behind.
 - Don't hand-maintain a running "Current State" test count anywhere; run `scripts/run-tests.sh` for the live number.
+- **Tree-sitter grammar.** A PR that changes `lib/parser/parser.mly` or `lib/lexer/lexer.mll` either extends
+  `tree-sitter-march/grammar.js` or lists its new fixtures in `tree-sitter-march/known-failures.txt` (and a new
+  keyword in `tree-sitter-march/keyword-allowlist.txt`) with a `specs/todos/` entry, in the same PR.
+  `scripts/check-tree-sitter.sh` (CI job `tree-sitter`) enforces it.
 
 These directories are the canonical record of what exists. Do not let them go stale. One item, one file; this
 structure exists specifically so two PRs filing or closing different items never conflict with each other.
@@ -47,6 +51,9 @@ behavior change lands, add a bullet under `## [Unreleased]` in the same commit (
 Skip purely internal refactors with no observable effect. When a release is tagged, rename
 `[Unreleased]` to the new version + date and start a fresh empty `[Unreleased]` above it;
 don't backfill history for versions that predate the file.
+Once a version is tagged and a later release supersedes it, move its section verbatim to
+`changelog/X.Y.Z.md` (heading kept, so `scripts/changelog-section.sh` still finds it) and
+add it to the "Past releases" list at the top of `CHANGELOG.md`.
 
 ## Build & test
 
@@ -257,7 +264,7 @@ lsp/lib/                    LSP analysis: analysis (+.mli) + analysis_{types,uti
                              code_actions_{ast,diag} (the two code-action engines)
 lsp/test/                   test_lsp (Alcotest registration only) + the test bodies in
                              test_lsp_{harness,analysis,actions,perf,features,refactor,html,depot}
-stdlib/                     127 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
+stdlib/                     128 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool (new, build, run, test, deps, search, publish subcommands)
 lsp/                        LSP server (diagnostics, hover, goto-def, completions, code actions)

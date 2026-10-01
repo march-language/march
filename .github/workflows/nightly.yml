@@ -115,9 +115,12 @@ jobs:
           # a `<name>_quarantined` alias; scripts/check-docs.sh Check E keeps
           # that set equal to the inventory in
           # specs/todos/2026-07-24-quarantined-tests-coverage-that-is-currently-dark-inventory-2026.md.
+          # `|| true`: with no quarantined test (the state since 2026-09-28)
+          # grep finds nothing, and under the step's `-eo pipefail` its exit
+          # status would end the step before the "(none quarantined)" summary.
           aliases=$(for f in test/dune forge/test/dune; do
-                      [ -f "$f" ] && grep -oE '\(alias +[A-Za-z0-9_]+_quarantined\)' "$f" \
-                        | sed -E "s|\(alias +([A-Za-z0-9_]+)\)|$(dirname "$f")/\1|"
+                      { [ -f "$f" ] && grep -oE '\(alias +[A-Za-z0-9_]+_quarantined\)' "$f" \
+                        | sed -E "s|\(alias +([A-Za-z0-9_]+)\)|$(dirname "$f")/\1|"; } || true
                     done | sort -u)
           echo "quarantine aliases: $(echo $aliases)"
           for a in $aliases; do
@@ -139,6 +142,33 @@ jobs:
           if [ -n "$aliases" ] && [ -z "$failed" ]; then
             echo "::notice::All quarantined tests passed — consider un-quarantining them (restore (alias runtest) in test/dune and strike the inventory row)."
           fi
+
+  # test/stdlib/test_properties.march: 76 Check.all property runs over nested
+  # Msgpack/JSON round-trips. ~4 minutes (237.6 s measured 2026-09-30 at load
+  # 6-12), too slow for `dune runtest` on every PR, so it lives on its own
+  # alias and runs here. Unlike `quarantined` above this is not expected to
+  # flake: a red run is a real stdlib regression. It does not gate `publish`.
+  # specs/progress/2026-09-30-benchmark-wire-test-properties-march.md
+  stdlib-properties:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Set up toolchain
+        timeout-minutes: 12
+        uses: ./.github/actions/march-setup
+
+      - name: Run test/stdlib/test_properties.march
+        timeout-minutes: 30
+        run: |
+          eval $(opam env)
+          dune shutdown 2>/dev/null || true
+          dune build --root . @test/stdlib-march-properties
 
   # Smoke-test the stdlib doc generator against the current compiler. The
   # external march_doc tool (auto-cloned by the script) is compiled by THIS

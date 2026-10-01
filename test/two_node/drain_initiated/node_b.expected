@@ -1,0 +1,3 @@
+Client: got 70
+topology: drained node-b
+topology: draining node-b (soft 10000 ms, hard 30000 ms)

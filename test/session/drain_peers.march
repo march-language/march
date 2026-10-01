@@ -20,9 +20,10 @@ mod DrainPeers do
   -- per protocol, draining a seed-chosen role after a seed-chosen number of
   -- steps) print only aggregates and, on any violation, a VIOLATION line the
   -- golden does not contain.  `loop atomic` is checked last: its head is not
-  -- a drain point.  Three more protocols run the same way in
-  -- drain_peers_multi.march (a second file: the frontend's cost grows
-  -- steeply with the number of `@[endpoints]` protocols in one module).
+  -- a drain point.  Pair, Relay3 and Fork run the same way after them.
+  -- (They lived in a second file, drain_peers_multi.march, while `--check`
+  -- of six `@[endpoints]` protocols in one module took ~9 minutes; see
+  -- specs/progress/2026-09-28-endpoints-frontend-superlinear-in-protocol-count.md.)
   needs IO
   needs IO.Console
   needs IO.Mut
@@ -63,6 +64,60 @@ mod DrainPeers do
       choose by Dst:
         more -> Dst -> Src : Bool
         done -> Dst -> Src : Bool
+                stop
+      end
+    end
+  end
+
+  -- Two sends in a row to B's loop head: when B drains on the first, the
+  -- second is already queued for it and must come back too (rule 2).
+  @[endpoints]
+  protocol Pair do
+    loop do
+      first: A -> B : Int
+      second: A -> B : Int
+      choose by B:
+        more -> B -> A : Bool
+        done -> B -> A : Bool
+                stop
+      end
+    end
+  end
+
+  -- A sends to B AFTER B may have drained (it waits on C in between), so
+  -- its message to a drained role comes back at `emit` (rule 3).  C's loop
+  -- head is a send; B's is a receive.
+  @[endpoints]
+  protocol Relay3 do
+    loop do
+      x: A -> B : Int
+      y: C -> A : Int
+      z: A -> B : Int
+      choose by B:
+        more -> B -> C : Bool
+                more_a: B -> A : Bool
+        done -> B -> C : Bool
+                done_a: B -> A : Bool
+                stop
+      end
+    end
+  end
+
+  -- C starts each iteration by sending to B (B's loop head) and then to A
+  -- (A's loop head).  When B drains on c1, A still takes c2 (C is not
+  -- draining) and THEN sends a1 to the drained B, which comes back at
+  -- `emit` (rule 3).  Roles: C = 1, B = 2, A = 3.
+  @[endpoints]
+  protocol Fork do
+    loop do
+      c1: C -> B : Int
+      c2: C -> A : Int
+      a1: A -> B : Int
+      choose by B:
+        more -> B -> C : Bool
+                more_a: B -> A : Bool
+        done -> B -> C : Bool
+                done_a: B -> A : Bool
                 stop
       end
     end
@@ -208,6 +263,62 @@ mod DrainPeers do
       else steady_dst(s, Steady_Dst.choose_more(s, st1, true), got + 1) end)
   end
 
+  pfn pair_seeds(c : Cap(IO), totals : Vault(Int), seed : Int) : () do
+    if seed == 60 do () else
+      let tally = Vault.new("drain_peers_pair_" ++ int_to_string(seed))
+      let t = counting(tally)
+      let s = Session.attach(c, t.ops)
+      let _ = Pair_B.chaos(s, Pair_B.register(s, 0), seed)
+      let _ = Pair_A.chaos(s, Pair_A.register(s, 0), seed + 300)
+      steps(t, (seed * 3 + 2) % 9)
+      let in_flight = t.queued(())
+      t.drain_role(1 + seed % 2)
+      t.drain(())
+      check(tally, t, 2, in_flight, "Pair", seed)
+      if count(tally, "drained") > 0 do bump(totals, "drained_sessions") else bump(totals, "finished_sessions") end
+      let _ = Vault.incr(totals, "returned", t.returned(()))
+      pair_seeds(c, totals, seed + 1)
+    end
+  end
+
+  pfn relay_seeds(c : Cap(IO), totals : Vault(Int), seed : Int) : () do
+    if seed == 60 do () else
+      let tally = Vault.new("drain_peers_relay_" ++ int_to_string(seed))
+      let t = counting(tally)
+      let s = Session.attach(c, t.ops)
+      let _ = Relay3_B.chaos(s, Relay3_B.register(s, 0), seed)
+      let _ = Relay3_C.chaos(s, Relay3_C.register(s, 0), seed + 400)
+      let _ = Relay3_A.chaos(s, Relay3_A.register(s, 0), seed + 500)
+      steps(t, (seed * 11 + 5) % 14)
+      let in_flight = t.queued(())
+      t.drain_role(1 + seed % 3)
+      t.drain(())
+      check(tally, t, 3, in_flight, "Relay3", seed)
+      if count(tally, "drained") > 0 do bump(totals, "drained_sessions") else bump(totals, "finished_sessions") end
+      let _ = Vault.incr(totals, "returned", t.returned(()))
+      relay_seeds(c, totals, seed + 1)
+    end
+  end
+
+  pfn fork_seeds(c : Cap(IO), totals : Vault(Int), seed : Int) : () do
+    if seed == 60 do () else
+      let tally = Vault.new("drain_peers_fork_" ++ int_to_string(seed))
+      let t = counting(tally)
+      let s = Session.attach(c, t.ops)
+      let _ = Fork_A.chaos(s, Fork_A.register(s, 0), seed)
+      let _ = Fork_B.chaos(s, Fork_B.register(s, 0), seed + 600)
+      let _ = Fork_C.chaos(s, Fork_C.register(s, 0), seed + 700)
+      steps(t, (seed * 13 + 1) % 12)
+      let in_flight = t.queued(())
+      t.drain_role(1 + seed % 3)
+      t.drain(())
+      check(tally, t, 3, in_flight, "Fork", seed)
+      if count(tally, "drained") > 0 do bump(totals, "drained_sessions") else bump(totals, "finished_sessions") end
+      let _ = Vault.incr(totals, "returned", t.returned(()))
+      fork_seeds(c, totals, seed + 1)
+    end
+  end
+
   fn main(c : Cap(IO)) do
     print_line("-- Stream: Cons drains at its loop boundary after two items")
     let t1 = tracing()
@@ -264,6 +375,23 @@ mod DrainPeers do
     t4.drain_role(2)
     t4.drain(())
     print_line(counts(t4))
+    print_line("-- chaos: Pair, two sends in a row to a loop head, 60 seeds")
+    let tot3 = Vault.new("drain_peers_totals_pair")
+    pair_seeds(c, tot3, 0)
+    print_line("drained " ++ int_to_string(count(tot3, "drained_sessions")) ++ ", finished first "
+      ++ int_to_string(count(tot3, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot3, "returned")))
+
+    print_line("-- chaos: Relay3, a send to a role after it drained, 60 seeds")
+    let tot4 = Vault.new("drain_peers_totals_relay")
+    relay_seeds(c, tot4, 0)
+    print_line("drained " ++ int_to_string(count(tot4, "drained_sessions")) ++ ", finished first "
+      ++ int_to_string(count(tot4, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot4, "returned")))
+
+    print_line("-- chaos: Fork, a send to a drained role, 60 seeds")
+    let tot5 = Vault.new("drain_peers_totals_fork")
+    fork_seeds(c, tot5, 0)
+    print_line("drained " ++ int_to_string(count(tot5, "drained_sessions")) ++ ", finished first "
+      ++ int_to_string(count(tot5, "finished_sessions")) ++ " of 60, returned " ++ int_to_string(count(tot5, "returned")))
     ()
   end
 end

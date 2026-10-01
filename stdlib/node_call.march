@@ -35,7 +35,7 @@ mod NodeCall do
     else
       let req = RemoteCall.request(fref, args, my_pid, deadline_ms, correlation)
       match NetKernel.send_frame(fd, RemoteCall.encode_request(req)) do
-        Err(_) -> Err(NoConnection)
+        Err(_) -> Err(RemoteCall.NoConnection)
         Ok(_) -> recv_reply(fd, correlation, Nil)
       end
     end end
@@ -47,7 +47,7 @@ mod NodeCall do
   pfn recv_reply(fd : Int, correlation : Int,
                  buf : List(Int)) : Result(List(Int), CallError) do
     match NetKernel.recv_frame(fd, buf) do
-      Err(_) -> Err(NoConnection)
+      Err(_) -> Err(RemoteCall.NoConnection)
       Ok(fr) ->
         let frame_bytes = match fr do (f, _) -> f end
         let rest = match fr do (_, r) -> r end

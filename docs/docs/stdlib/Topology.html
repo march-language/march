@@ -181,6 +181,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="AhoCorasick.html#fn-pattern_count"><span class="sb-kind" style="color:var(--fn)">F</span>pattern_count</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Array.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Array.html">Array</a></div><div class="sb-sub"><a class="sl" href="Array.html#type-TrieNode"><span class="sb-kind" style="color:var(--ty)">T</span>TrieNode</a>
 <a class="sl" href="Array.html#type-PVec"><span class="sb-kind" style="color:var(--ty)">T</span>PVec</a>
+<a class="sl" href="Array.html#fn-debug_from_list_by_push"><span class="sb-kind" style="color:var(--fn)">F</span>debug_from_list_by_push</a>
+<a class="sl" href="Array.html#fn-debug_same_shape"><span class="sb-kind" style="color:var(--fn)">F</span>debug_same_shape</a>
 <a class="sl" href="Array.html#fn-empty"><span class="sb-kind" style="color:var(--fn)">F</span>empty</a>
 <a class="sl" href="Array.html#fn-fold_left"><span class="sb-kind" style="color:var(--fn)">F</span>fold_left</a>
 <a class="sl" href="Array.html#fn-from_list"><span class="sb-kind" style="color:var(--fn)">F</span>from_list</a>
@@ -191,6 +193,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Array.html#fn-pop"><span class="sb-kind" style="color:var(--fn)">F</span>pop</a>
 <a class="sl" href="Array.html#fn-push"><span class="sb-kind" style="color:var(--fn)">F</span>push</a>
 <a class="sl" href="Array.html#fn-set"><span class="sb-kind" style="color:var(--fn)">F</span>set</a>
+<a class="sl" href="Array.html#fn-sort_by"><span class="sb-kind" style="color:var(--fn)">F</span>sort_by</a>
+<a class="sl" href="Array.html#fn-sort_by_key"><span class="sb-kind" style="color:var(--fn)">F</span>sort_by_key</a>
 <a class="sl" href="Array.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Base64.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Base64.html">Base64</a></div><div class="sb-sub"><a class="sl" href="Base64.html#fn-decode"><span class="sb-kind" style="color:var(--fn)">F</span>decode</a>
 <a class="sl" href="Base64.html#fn-encode"><span class="sb-kind" style="color:var(--fn)">F</span>encode</a>
@@ -409,6 +413,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterLoad.html#fn-spare_mem_mb"><span class="sb-kind" style="color:var(--fn)">F</span>spare_mem_mb</a>
 <a class="sl" href="ClusterLoad.html#fn-to_ints"><span class="sb-kind" style="color:var(--fn)">F</span>to_ints</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="ClusterNode.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="ClusterNode.html">ClusterNode</a></div><div class="sb-sub"><a class="sl" href="ClusterNode.html#type-CnConfig"><span class="sb-kind" style="color:var(--ty)">T</span>CnConfig</a>
+<a class="sl" href="ClusterNode.html#type-CertFiles"><span class="sb-kind" style="color:var(--ty)">T</span>CertFiles</a>
 <a class="sl" href="ClusterNode.html#type-NodeInfo"><span class="sb-kind" style="color:var(--ty)">T</span>NodeInfo</a>
 <a class="sl" href="ClusterNode.html#type-NodeEvent"><span class="sb-kind" style="color:var(--ty)">T</span>NodeEvent</a>
 <a class="sl" href="ClusterNode.html#type-SecurityEvent"><span class="sb-kind" style="color:var(--ty)">T</span>SecurityEvent</a>
@@ -427,6 +432,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#fn-auth_from_env"><span class="sb-kind" style="color:var(--fn)">F</span>auth_from_env</a>
 <a class="sl" href="ClusterNode.html#fn-authorize_peer"><span class="sb-kind" style="color:var(--fn)">F</span>authorize_peer</a>
 <a class="sl" href="ClusterNode.html#fn-await_members"><span class="sb-kind" style="color:var(--fn)">F</span>await_members</a>
+<a class="sl" href="ClusterNode.html#fn-cert_update_message"><span class="sb-kind" style="color:var(--fn)">F</span>cert_update_message</a>
 <a class="sl" href="ClusterNode.html#fn-certified"><span class="sb-kind" style="color:var(--fn)">F</span>certified</a>
 <a class="sl" href="ClusterNode.html#fn-check_revocation"><span class="sb-kind" style="color:var(--fn)">F</span>check_revocation</a>
 <a class="sl" href="ClusterNode.html#fn-config"><span class="sb-kind" style="color:var(--fn)">F</span>config</a>
@@ -444,8 +450,10 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#fn-core_members"><span class="sb-kind" style="color:var(--fn)">F</span>core_members</a>
 <a class="sl" href="ClusterNode.html#fn-core_new"><span class="sb-kind" style="color:var(--fn)">F</span>core_new</a>
 <a class="sl" href="ClusterNode.html#fn-core_peer_cert"><span class="sb-kind" style="color:var(--fn)">F</span>core_peer_cert</a>
+<a class="sl" href="ClusterNode.html#fn-core_peer_cert_update"><span class="sb-kind" style="color:var(--fn)">F</span>core_peer_cert_update</a>
 <a class="sl" href="ClusterNode.html#fn-core_register"><span class="sb-kind" style="color:var(--fn)">F</span>core_register</a>
 <a class="sl" href="ClusterNode.html#fn-core_registrant"><span class="sb-kind" style="color:var(--fn)">F</span>core_registrant</a>
+<a class="sl" href="ClusterNode.html#fn-core_replace_cert"><span class="sb-kind" style="color:var(--fn)">F</span>core_replace_cert</a>
 <a class="sl" href="ClusterNode.html#fn-core_revocations"><span class="sb-kind" style="color:var(--fn)">F</span>core_revocations</a>
 <a class="sl" href="ClusterNode.html#fn-core_revoke"><span class="sb-kind" style="color:var(--fn)">F</span>core_revoke</a>
 <a class="sl" href="ClusterNode.html#fn-core_seed_self"><span class="sb-kind" style="color:var(--fn)">F</span>core_seed_self</a>
@@ -453,8 +461,10 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#fn-core_unregister"><span class="sb-kind" style="color:var(--fn)">F</span>core_unregister</a>
 <a class="sl" href="ClusterNode.html#fn-creation"><span class="sb-kind" style="color:var(--fn)">F</span>creation</a>
 <a class="sl" href="ClusterNode.html#fn-credentials"><span class="sb-kind" style="color:var(--fn)">F</span>credentials</a>
+<a class="sl" href="ClusterNode.html#fn-decode_cert_update"><span class="sb-kind" style="color:var(--fn)">F</span>decode_cert_update</a>
 <a class="sl" href="ClusterNode.html#fn-decode_revocations"><span class="sb-kind" style="color:var(--fn)">F</span>decode_revocations</a>
 <a class="sl" href="ClusterNode.html#fn-demonitor_remote"><span class="sb-kind" style="color:var(--fn)">F</span>demonitor_remote</a>
+<a class="sl" href="ClusterNode.html#fn-encode_cert_update"><span class="sb-kind" style="color:var(--fn)">F</span>encode_cert_update</a>
 <a class="sl" href="ClusterNode.html#fn-encode_revocations"><span class="sb-kind" style="color:var(--fn)">F</span>encode_revocations</a>
 <a class="sl" href="ClusterNode.html#fn-event_text"><span class="sb-kind" style="color:var(--fn)">F</span>event_text</a>
 <a class="sl" href="ClusterNode.html#fn-frames_rejected"><span class="sb-kind" style="color:var(--fn)">F</span>frames_rejected</a>
@@ -487,6 +497,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
 <a class="sl" href="ClusterNode.html#fn-registrant"><span class="sb-kind" style="color:var(--fn)">F</span>registrant</a>
 <a class="sl" href="ClusterNode.html#fn-release_claim"><span class="sb-kind" style="color:var(--fn)">F</span>release_claim</a>
+<a class="sl" href="ClusterNode.html#fn-replace_cert"><span class="sb-kind" style="color:var(--fn)">F</span>replace_cert</a>
 <a class="sl" href="ClusterNode.html#fn-reserve"><span class="sb-kind" style="color:var(--fn)">F</span>reserve</a>
 <a class="sl" href="ClusterNode.html#fn-revocations"><span class="sb-kind" style="color:var(--fn)">F</span>revocations</a>
 <a class="sl" href="ClusterNode.html#fn-revocations_from_text"><span class="sb-kind" style="color:var(--fn)">F</span>revocations_from_text</a>
@@ -498,10 +509,12 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ClusterNode.html#fn-send_msg"><span class="sb-kind" style="color:var(--fn)">F</span>send_msg</a>
 <a class="sl" href="ClusterNode.html#fn-session_queue_for"><span class="sb-kind" style="color:var(--fn)">F</span>session_queue_for</a>
 <a class="sl" href="ClusterNode.html#fn-session_tags"><span class="sb-kind" style="color:var(--fn)">F</span>session_tags</a>
+<a class="sl" href="ClusterNode.html#fn-sign_cert_update"><span class="sb-kind" style="color:var(--fn)">F</span>sign_cert_update</a>
 <a class="sl" href="ClusterNode.html#fn-stale_bindings"><span class="sb-kind" style="color:var(--fn)">F</span>stale_bindings</a>
 <a class="sl" href="ClusterNode.html#fn-start"><span class="sb-kind" style="color:var(--fn)">F</span>start</a>
 <a class="sl" href="ClusterNode.html#fn-stop"><span class="sb-kind" style="color:var(--fn)">F</span>stop</a>
 <a class="sl" href="ClusterNode.html#fn-subscribe"><span class="sb-kind" style="color:var(--fn)">F</span>subscribe</a>
+<a class="sl" href="ClusterNode.html#fn-tag_cert_update"><span class="sb-kind" style="color:var(--fn)">F</span>tag_cert_update</a>
 <a class="sl" href="ClusterNode.html#fn-tag_revocations"><span class="sb-kind" style="color:var(--fn)">F</span>tag_revocations</a>
 <a class="sl" href="ClusterNode.html#fn-unregister"><span class="sb-kind" style="color:var(--fn)">F</span>unregister</a>
 <a class="sl" href="ClusterNode.html#fn-unroute"><span class="sb-kind" style="color:var(--fn)">F</span>unroute</a>
@@ -564,6 +577,61 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="ConsistentHash.html#fn-nodes"><span class="sb-kind" style="color:var(--fn)">F</span>nodes</a>
 <a class="sl" href="ConsistentHash.html#fn-remove"><span class="sb-kind" style="color:var(--fn)">F</span>remove</a>
 <a class="sl" href="ConsistentHash.html#fn-size"><span class="sb-kind" style="color:var(--fn)">F</span>size</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Control.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Control.html">Control</a></div><div class="sb-sub"><a class="sl" href="Control.html#type-CtlHosts"><span class="sb-kind" style="color:var(--ty)">T</span>CtlHosts</a>
+<a class="sl" href="Control.html#type-CtlAction"><span class="sb-kind" style="color:var(--ty)">T</span>CtlAction</a>
+<a class="sl" href="Control.html#type-CtlGate"><span class="sb-kind" style="color:var(--ty)">T</span>CtlGate</a>
+<a class="sl" href="Control.html#type-CtlStep"><span class="sb-kind" style="color:var(--ty)">T</span>CtlStep</a>
+<a class="sl" href="Control.html#type-CtlBuild"><span class="sb-kind" style="color:var(--ty)">T</span>CtlBuild</a>
+<a class="sl" href="Control.html#type-CtlDrain"><span class="sb-kind" style="color:var(--ty)">T</span>CtlDrain</a>
+<a class="sl" href="Control.html#type-CtlLine"><span class="sb-kind" style="color:var(--ty)">T</span>CtlLine</a>
+<a class="sl" href="Control.html#type-CtlRelease"><span class="sb-kind" style="color:var(--ty)">T</span>CtlRelease</a>
+<a class="sl" href="Control.html#type-CtlMember"><span class="sb-kind" style="color:var(--ty)">T</span>CtlMember</a>
+<a class="sl" href="Control.html#type-CtlVersion"><span class="sb-kind" style="color:var(--ty)">T</span>CtlVersion</a>
+<a class="sl" href="Control.html#type-CtlFailure"><span class="sb-kind" style="color:var(--ty)">T</span>CtlFailure</a>
+<a class="sl" href="Control.html#type-AgentReport"><span class="sb-kind" style="color:var(--ty)">T</span>AgentReport</a>
+<a class="sl" href="Control.html#type-StepOrder"><span class="sb-kind" style="color:var(--ty)">T</span>StepOrder</a>
+<a class="sl" href="Control.html#type-StepResult"><span class="sb-kind" style="color:var(--ty)">T</span>StepResult</a>
+<a class="sl" href="Control.html#type-CtlObs"><span class="sb-kind" style="color:var(--ty)">T</span>CtlObs</a>
+<a class="sl" href="Control.html#type-CtlDecision"><span class="sb-kind" style="color:var(--ty)">T</span>CtlDecision</a>
+<a class="sl" href="Control.html#type-CtlLeader"><span class="sb-kind" style="color:var(--ty)">T</span>CtlLeader</a>
+<a class="sl" href="Control.html#type-AgentOps"><span class="sb-kind" style="color:var(--ty)">T</span>AgentOps</a>
+<a class="sl" href="Control.html#type-CtlChunk"><span class="sb-kind" style="color:var(--ty)">T</span>CtlChunk</a>
+<a class="sl" href="Control.html#type-CtlNext"><span class="sb-kind" style="color:var(--ty)">T</span>CtlNext</a>
+<a class="sl" href="Control.html#type-ControlOps"><span class="sb-kind" style="color:var(--ty)">T</span>ControlOps</a>
+<a class="sl" href="Control.html#fn-accept"><span class="sb-kind" style="color:var(--fn)">F</span>accept</a>
+<a class="sl" href="Control.html#fn-agent_apply"><span class="sb-kind" style="color:var(--fn)">F</span>agent_apply</a>
+<a class="sl" href="Control.html#fn-check"><span class="sb-kind" style="color:var(--fn)">F</span>check</a>
+<a class="sl" href="Control.html#fn-chunks"><span class="sb-kind" style="color:var(--fn)">F</span>chunks</a>
+<a class="sl" href="Control.html#fn-digest"><span class="sb-kind" style="color:var(--fn)">F</span>digest</a>
+<a class="sl" href="Control.html#fn-leader_new"><span class="sb-kind" style="color:var(--fn)">F</span>leader_new</a>
+<a class="sl" href="Control.html#fn-leader_pass"><span class="sb-kind" style="color:var(--fn)">F</span>leader_pass</a>
+<a class="sl" href="Control.html#fn-leader_release"><span class="sb-kind" style="color:var(--fn)">F</span>leader_release</a>
+<a class="sl" href="Control.html#fn-leader_report"><span class="sb-kind" style="color:var(--fn)">F</span>leader_report</a>
+<a class="sl" href="Control.html#fn-leader_result"><span class="sb-kind" style="color:var(--fn)">F</span>leader_result</a>
+<a class="sl" href="Control.html#fn-missing"><span class="sb-kind" style="color:var(--fn)">F</span>missing</a>
+<a class="sl" href="Control.html#fn-no_parent"><span class="sb-kind" style="color:var(--fn)">F</span>no_parent</a>
+<a class="sl" href="Control.html#fn-observe"><span class="sb-kind" style="color:var(--fn)">F</span>observe</a>
+<a class="sl" href="Control.html#fn-order"><span class="sb-kind" style="color:var(--fn)">F</span>order</a>
+<a class="sl" href="Control.html#fn-order_artifacts"><span class="sb-kind" style="color:var(--fn)">F</span>order_artifacts</a>
+<a class="sl" href="Control.html#fn-order_lines"><span class="sb-kind" style="color:var(--fn)">F</span>order_lines</a>
+<a class="sl" href="Control.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a>
+<a class="sl" href="Control.html#fn-parse_duration"><span class="sb-kind" style="color:var(--fn)">F</span>parse_duration</a>
+<a class="sl" href="Control.html#fn-pass"><span class="sb-kind" style="color:var(--fn)">F</span>pass</a>
+<a class="sl" href="Control.html#fn-report_failure"><span class="sb-kind" style="color:var(--fn)">F</span>report_failure</a>
+<a class="sl" href="Control.html#fn-report_versions"><span class="sb-kind" style="color:var(--fn)">F</span>report_versions</a>
+<a class="sl" href="Control.html#fn-reports_state"><span class="sb-kind" style="color:var(--fn)">F</span>reports_state</a>
+<a class="sl" href="Control.html#fn-select"><span class="sb-kind" style="color:var(--fn)">F</span>select</a>
+<a class="sl" href="Control.html#fn-serialize"><span class="sb-kind" style="color:var(--fn)">F</span>serialize</a>
+<a class="sl" href="Control.html#fn-show_action"><span class="sb-kind" style="color:var(--fn)">F</span>show_action</a>
+<a class="sl" href="Control.html#fn-show_decision"><span class="sb-kind" style="color:var(--fn)">F</span>show_decision</a>
+<a class="sl" href="Control.html#fn-show_duration"><span class="sb-kind" style="color:var(--fn)">F</span>show_duration</a>
+<a class="sl" href="Control.html#fn-sign"><span class="sb-kind" style="color:var(--fn)">F</span>sign</a>
+<a class="sl" href="Control.html#fn-signed_text"><span class="sb-kind" style="color:var(--fn)">F</span>signed_text</a>
+<a class="sl" href="Control.html#fn-targets"><span class="sb-kind" style="color:var(--fn)">F</span>targets</a>
+<a class="sl" href="Control.html#fn-verify"><span class="sb-kind" style="color:var(--fn)">F</span>verify</a>
+<a class="sl" href="Control.html#fn-versions_text"><span class="sb-kind" style="color:var(--fn)">F</span>versions_text</a>
+<a class="sl" href="Control.html#fn-want"><span class="sb-kind" style="color:var(--fn)">F</span>want</a>
+<a class="sl" href="Control.html#fn-with_failure"><span class="sb-kind" style="color:var(--fn)">F</span>with_failure</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Crypto.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Crypto.html">Crypto</a></div><div class="sb-sub"><a class="sl" href="Crypto.html#fn-base64_decode"><span class="sb-kind" style="color:var(--fn)">F</span>base64_decode</a>
 <a class="sl" href="Crypto.html#fn-base64_encode"><span class="sb-kind" style="color:var(--fn)">F</span>base64_encode</a>
 <a class="sl" href="Crypto.html#fn-base64_url_decode"><span class="sb-kind" style="color:var(--fn)">F</span>base64_url_decode</a>
@@ -1455,6 +1523,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Logger.html#type-LogField"><span class="sb-kind" style="color:var(--ty)">T</span>LogField</a>
 <a class="sl" href="Logger.html#type-LogEntry"><span class="sb-kind" style="color:var(--ty)">T</span>LogEntry</a>
 <a class="sl" href="Logger.html#type-Appender"><span class="sb-kind" style="color:var(--ty)">T</span>Appender</a>
+<a class="sl" href="Logger.html#type-AppenderCall"><span class="sb-kind" style="color:var(--ty)">T</span>AppenderCall</a>
 <a class="sl" href="Logger.html#fn-a"><span class="sb-kind" style="color:var(--fn)">F</span>a</a>
 <a class="sl" href="Logger.html#fn-add_appender"><span class="sb-kind" style="color:var(--fn)">F</span>add_appender</a>
 <a class="sl" href="Logger.html#fn-appender_callback"><span class="sb-kind" style="color:var(--fn)">F</span>appender_callback</a>
@@ -2052,6 +2121,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="RRB.html#fn-range"><span class="sb-kind" style="color:var(--fn)">F</span>range</a>
 <a class="sl" href="RRB.html#fn-singleton"><span class="sb-kind" style="color:var(--fn)">F</span>singleton</a>
 <a class="sl" href="RRB.html#fn-slice"><span class="sb-kind" style="color:var(--fn)">F</span>slice</a>
+<a class="sl" href="RRB.html#fn-sort_by"><span class="sb-kind" style="color:var(--fn)">F</span>sort_by</a>
+<a class="sl" href="RRB.html#fn-sort_by_key"><span class="sb-kind" style="color:var(--fn)">F</span>sort_by_key</a>
 <a class="sl" href="RRB.html#fn-tabulate"><span class="sb-kind" style="color:var(--fn)">F</span>tabulate</a>
 <a class="sl" href="RRB.html#fn-to_array"><span class="sb-kind" style="color:var(--fn)">F</span>to_array</a>
 <a class="sl" href="RRB.html#fn-to_list"><span class="sb-kind" style="color:var(--fn)">F</span>to_list</a></div></div>
@@ -2226,6 +2297,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#fn-drain_epochs"><span class="sb-kind" style="color:var(--fn)">F</span>drain_epochs</a>
 <a class="sl" href="SessionNode.html#fn-finish"><span class="sb-kind" style="color:var(--fn)">F</span>finish</a>
 <a class="sl" href="SessionNode.html#fn-initiate"><span class="sb-kind" style="color:var(--fn)">F</span>initiate</a>
+<a class="sl" href="SessionNode.html#fn-initiated"><span class="sb-kind" style="color:var(--fn)">F</span>initiated</a>
 <a class="sl" href="SessionNode.html#fn-missing_addrs"><span class="sb-kind" style="color:var(--fn)">F</span>missing_addrs</a>
 <a class="sl" href="SessionNode.html#fn-name_fingerprint"><span class="sb-kind" style="color:var(--fn)">F</span>name_fingerprint</a>
 <a class="sl" href="SessionNode.html#fn-offer_hosted"><span class="sb-kind" style="color:var(--fn)">F</span>offer_hosted</a>
@@ -2806,7 +2878,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-rank"><div class="ih"><span class="badge bfn">fn</span><span class="name">rank</span><span class="sig">rank(role_name : String, ids : List(String)) : List(String)</span><a class="anchor-link" href="#fn-rank" title="Link">#</a></div><div class="ib"><p>[ids] ranked for [role_name], best first (highest score; ties by id).</p></div></div>
 <div class="item" id="fn-ranked"><div class="ih"><span class="badge bfn">fn</span><span class="name">ranked</span><span class="sig">ranked(p : <a href="#type-TopoPlacement">TopoPlacement</a>) : Bool</span><a class="anchor-link" href="#fn-ranked" title="Link">#</a></div><div class="ib"><p>Whether [p] ranks nodes (and so needs the eligible set).</p></div></div>
 <div class="item" id="fn-reconcile_now"><div class="ih"><span class="badge bfn">fn</span><span class="name">reconcile_now</span><span class="sig">reconcile_now(node : Cap(ClusterNode.Live)) : () do reconcile(node, state_of(node)) end</span><a class="anchor-link" href="#fn-reconcile_now" title="Link">#</a></div><div class="ib"><p>Re-evaluate [node]'s placement now, as the next tick would. For tests that drive membership through a fake dictionary and should not wait for a tick (run them with a long MARCH_PLACEMENT_TICK_MS).</p></div></div>
-<div class="item" id="fn-reload"><div class="ih"><span class="badge bfn">fn</span><span class="name">reload</span><span class="sig">reload(node : Cap(ClusterNode.Live)) : ()</span><a class="anchor-link" href="#fn-reload" title="Link">#</a></div><div class="ib"><p>Re-read the topology now, as SIGHUP does: MARCH_TOPOLOGY_FILE is parsed and the roles this build contains take their placement and capacity from it; the next evaluation (run at once) opens and drains offers to match. A file that cannot be read or parsed changes nothing and is reported.</p></div></div>
+<div class="item" id="fn-reload"><div class="ih"><span class="badge bfn">fn</span><span class="name">reload</span><span class="sig">reload(node : Cap(ClusterNode.Live)) : ()</span><a class="anchor-link" href="#fn-reload" title="Link">#</a></div><div class="ib"><p>Re-read the topology now, as SIGHUP does: the signature-checked copy the reload server keeps (MARCH_TOPOLOGY_VERIFIED_FILE) when there is one, else MARCH_TOPOLOGY_FILE, is parsed and the roles this build contains take their placement and capacity from it; the next evaluation (run at once) opens and drains offers to match. A file that cannot be read or parsed changes nothing and is reported.</p></div></div>
 <div class="item" id="fn-reoffer"><div class="ih"><span class="badge bfn">fn</span><span class="name">reoffer</span><span class="sig">reoffer(node : Cap(ClusterNode.Live)) : () do reoffer_with(node, state_of(node)) end</span><a class="anchor-link" href="#fn-reoffer" title="Link">#</a></div><div class="ib"><p>Re-open each of [node]'s open offers with the code now running (distributed-deploys build step 9): an offer whose protocol fingerprint changed is opened again under the new one (a hosted role with a fresh actor) and the old offer is closed; its sessions finish on the old version and a hosting actor exits once they have (6.1). An offer whose fingerprint did not change stays as it is (the new offer's name is already taken). The placement loop runs this itself after a deploy; call it directly only from a test.</p></div></div>
 <div class="item" id="fn-role"><div class="ih"><span class="badge bfn">fn</span><span class="name">role</span><span class="sig">role(name : String, place : <a href="#type-TopoPlacement">TopoPlacement</a>, open : () -&gt; Result(SessionNode.Offer, SessionNode.RunError)) : <a href="#type-TopoRole">TopoRole</a></span><a class="anchor-link" href="#fn-role" title="Link">#</a></div><div class="ib"><p>A role bound to a function (<code>body = &quot;M.f&quot;</code> in <code>[roles]</code>). [open] is the generated <code>&lt;P&gt;_Run.offer_&lt;R&gt;(io, node, capacity, fn (s, caps..., st) -&gt; M.f(env, s, caps..., st))</code>.</p></div></div>
 <div class="item" id="fn-running"><div class="ih"><span class="badge bfn">fn</span><span class="name">running</span><span class="sig">running(node : Cap(ClusterNode.Live)) : Int</span><a class="anchor-link" href="#fn-running" title="Link">#</a></div><div class="ib"><p>Sessions still running on [node]'s offers, open or draining.</p></div></div>

@@ -3,6 +3,13 @@ module.exports = grammar({
 
   externals: $ => [
     $.block_comment,
+    // A `(` that starts a line after a complete expression: a new statement
+    // or match arm, never a call (the compiler's LPAREN_STMT, which its token
+    // filter produces; see src/scanner.c).
+    $._stmt_lparen,
+    // Never used by a rule: valid only during error recovery, when the
+    // scanner must not produce _stmt_lparen.
+    $._error_sentinel,
   ],
 
   extras: $ => [
@@ -25,6 +32,25 @@ module.exports = grammar({
     [$.bare_constructor, $.constructor_expression],
     // `import A.B` vs `import A.{c, d}` — the choice needs the token after '.'
     [$.module_path],
+    // A match arm's body runs until the next arm's pattern; the token that
+    // starts that pattern can also continue the body (the compiler decides
+    // with its token filter's newline lookahead), so both parses are kept
+    // and the one that fails at the next `->` is dropped.
+    [$.block_body],
+    // `choose` branches: a branch's steps run until the next branch label.
+    [$.choose_branch],
+    // Lambda bodies: a call argument's lambda may hold statements (bounded
+    // by `,`/`)`), any other lambda is `let`s then one expression; which one
+    // applies is only known once the enclosing context closes.
+    [$.lambda_expression, $.call_arg_lambda],
+    [$.lambda_body, $.block_body],
+    [$.lambda_body],
+    [$._block_expr, $.lambda_body],
+    // `init (` : a parameter list, or a parenthesised init expression.
+    [$.actor_init, $.unit_expression],
+    [$.actor_init, $.parenthesized_expression],
+    [$.actor_init, $.tuple_expression],
+    [$.actor_init, $._lparen],
   ],
 
   reserved: {
@@ -35,18 +61,17 @@ module.exports = grammar({
       'when', 'linear', 'affine',
       'match',
       'if', 'else',
-      'send', 'spawn',
+      'spawn',
       'actor', 'interface', 'impl', 'sig', 'extern', 'protocol', 'use',
       'for', 'loop', 'doc',
-      'test', 'describe', 'assert', 'setup', 'setup_all',
+      'assert',
     ],
   },
 
   rules: {
-    source_file: $ => choice(
-      $.module_def,
-      repeat1($._declaration),
-    ),
+    // One module per file in the compiler; nested modules and bare
+    // declarations (fixtures, REPL snippets) come through _declaration.
+    source_file: $ => repeat1($._declaration),
 
     module_def: $ => seq(
       'mod', field('name', $.module_path),
@@ -54,6 +79,13 @@ module.exports = grammar({
     ),
 
     _declaration: $ => choice(
+      $.attribute,
+      $.module_def,
+      $.derive_declaration,
+      $.satisfy_declaration,
+      $.resource_declaration,
+      $.transitions_def,
+      $.app_def,
       $.doc_annotation,
       $.function_def,
       $.let_declaration,
@@ -75,9 +107,43 @@ module.exports = grammar({
       $.setup_all_decl,
     ),
 
+    // @[name], @[name(arg)], @name(arg), @invariant(expr)
+    attribute: $ => seq('@', choice(
+      seq('[', $.identifier, optional(seq('(', commaSep($._expr), ')')), ']'),
+      seq($.identifier, '(', commaSep($._expr), ')'),
+    )),
+
+    derive_declaration: $ => seq(
+      'derive', commaSep1($.type_identifier), 'for', field('type', $.type_identifier),
+    ),
+    satisfy_declaration: $ => seq(
+      'satisfy', commaSep1($.type_identifier), 'for', commaSep1($.type_identifier),
+    ),
+    resource_declaration: $ => seq('resource', field('name', $.type_identifier)),
+    transitions_def: $ => seq(
+      'transitions', field('handle', $.type_identifier), 'do',
+      repeat($.transition_arm),
+      'end',
+    ),
+    transition_arm: $ => seq(
+      field('resource', $.type_identifier), ':',
+      field('from', $.type_identifier), '->', field('to', $.type_identifier),
+      'via', field('function', $.identifier),
+    ),
+    app_def: $ => seq(
+      'app', field('name', $.type_identifier), 'do',
+      optional($.on_start_block),
+      optional($.on_stop_block),
+      $.block_body,
+      'end',
+    ),
+    on_start_block: $ => seq('on_start', 'do', $.block_body, 'end'),
+    on_stop_block: $ => seq('on_stop', 'do', $.block_body, 'end'),
+
     doc_annotation: $ => seq(
       'doc',
       field('content', choice($.triple_string, $.string)),
+      repeat($.attribute),
       field('decl', choice(
         $.function_def,
         $.let_declaration,
@@ -95,7 +161,8 @@ module.exports = grammar({
     function_def: $ => seq(
       // `pfn` is the private form; it never combines with `pub`.
       choice(seq(optional('pub'), 'fn'), 'pfn'),
-      field('name', $.identifier),
+      field('name', choice($.identifier, alias('send', $.identifier))),
+      optional(seq('[', commaSep1(seq($.identifier, ':', $._type)), ']')),
       '(', optional(commaSep($.fn_param)), ')',
       optional(seq(':', field('return_type', $._type))),
       optional($.when_guard),
@@ -107,10 +174,14 @@ module.exports = grammar({
       $._pattern,
     ),
 
-    named_param: $ => seq(
-      optional(choice('linear', 'affine')),
-      field('name', $.identifier),
-      ':', field('type', $._type),
+    named_param: $ => choice(
+      seq(
+        optional(choice('linear', 'affine')),
+        field('name', $.identifier),
+        ':', field('type', $._type),
+        optional(seq('\\\\', field('default', $._expr))),
+      ),
+      seq(field('name', $.identifier), '\\\\', field('default', $._expr)),
     ),
 
     when_guard: $ => seq('when', $._expr),
@@ -122,30 +193,69 @@ module.exports = grammar({
 
     _block_expr: $ => choice(
       $.let_declaration,
+      $.local_function,
       $._expr,
     ),
 
+    local_function: $ => seq(
+      'fn', field('name', $.identifier),
+      '(', optional(commaSep($.fn_param)), ')',
+      optional(seq(':', field('return_type', $._type))),
+      'do', field('body', $.block_body), 'end',
+    ),
+
     let_declaration: $ => seq(
-      'let', field('pattern', $._pattern), optional($.type_annotation), '=', field('value', $._expr),
+      optional(choice('linear', 'affine')),
+      'let', optional(choice('?', '*')), field('pattern', $._pattern), optional($.type_annotation), '=', field('value', $._expr),
     ),
 
     // Full pattern rules
     _pattern: $ => choice(
+      $.as_pattern,
+      $.or_pattern,
+      $._pattern_alt,
+    ),
+
+    as_pattern: $ => seq(
+      field('pattern', choice($.or_pattern, $._pattern_alt)),
+      'as', field('name', $.identifier),
+    ),
+
+    or_pattern: $ => prec.left(seq(
+      $._pattern_alt, repeat1(seq('|', $._pattern_alt)),
+    )),
+
+    _pattern_alt: $ => choice(
       $.wildcard_pattern,
       $.variable_pattern,
       $.constructor_pattern,
       $.atom_pattern,
       $.tuple_pattern,
+      $.paren_pattern,
+      $.list_pattern,
+      $.record_pattern,
       $.literal_pattern,
     ),
 
+    paren_pattern: $ => seq($._lparen, $._pattern, ')'),
+
+    list_pattern: $ => seq('[', optional(commaSep1($._pattern)), ']'),
+
+    record_pattern: $ => seq('{', commaSep1($.record_field_pattern), '}'),
+    record_field_pattern: $ => seq(
+      field('name', $.identifier),
+      optional(seq(':', field('pattern', $._pattern))),
+    ),
+
     wildcard_pattern: _ => '_',
+
+    qualified_constructor: $ => seq($.type_identifier, '.', $.type_identifier),
 
     // alias() — not a new regex — to avoid duplicate-terminal conflict with identifier
     variable_pattern: $ => alias($.identifier, $.variable_pattern),
 
     constructor_pattern: $ => seq(
-      field('name', $.type_identifier),
+      field('name', choice($.type_identifier, $.qualified_constructor)),
       optional(seq('(', commaSep1($._pattern), ')')),
     ),
 
@@ -155,7 +265,7 @@ module.exports = grammar({
     ),
 
     tuple_pattern: $ => seq(
-      '(', $._pattern, ',', commaSep1($._pattern), ')',
+      $._lparen, $._pattern, ',', commaSep1($._pattern), ')',
     ),
 
     literal_pattern: $ => choice(
@@ -180,6 +290,10 @@ module.exports = grammar({
     )),
 
     _type_atom: $ => choice(
+      $.unit_type,
+      $.parenthesized_type,
+      $.record_type,
+      $.type_nat,
       $.type_application,
       $.qualified_type,
       $.type_constructor,
@@ -198,6 +312,11 @@ module.exports = grammar({
       field('predicate', $._expr),
       '}',
     ),
+
+    unit_type: _ => seq('(', ')'),
+    parenthesized_type: $ => seq('(', $._type, ')'),
+    record_type: $ => seq('{', commaSep1($.record_type_field), '}'),
+    type_nat: $ => $.integer,
 
     type_application: $ => seq(
       field('name', choice($.type_identifier, $.qualified_type)),
@@ -222,14 +341,18 @@ module.exports = grammar({
       '(', $._type, ',', commaSep1($._type), ')',
     ),
 
-    type_def: $ => seq(
-      choice('type', 'ptype'),
+    type_def: $ => choice(
+      seq('tag', field('name', $.type_identifier)),
+      $._type_def,
+    ),
+    _type_def: $ => seq(
+      optional('always_linear'),
+      choice(seq(optional('opaque'), 'type'), 'ptype'),
       field('name', $.type_identifier),
       optional($.type_params),
       '=',
       choice(
         seq($.variant, repeat(seq('|', $.variant))),  // variant/sum type
-        seq('{', commaSep1($.record_type_field), '}'), // record type
         $._type,                                        // alias
       ),
     ),
@@ -251,11 +374,34 @@ module.exports = grammar({
       'actor', field('name', $.type_identifier), 'do',
       $.actor_state,
       $.actor_init,
-      repeat($.actor_handler),
+      optional($.mailbox_clause),
+      optional($.supervise_block),
+      repeat(choice($.actor_handler, $.on_stop_block)),
       'end',
     ),
     actor_state: $ => seq('state', '{', commaSep($.record_type_field), '}'),
-    actor_init: $ => seq('init', $._expr),
+    actor_init: $ => choice(
+      seq('init', '(', commaSep($.init_param), ')', $._expr),
+      seq('init', $._expr),
+    ),
+    init_param: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
+    mailbox_clause: $ => seq('mailbox', $.integer, $.identifier),
+    supervise_block: $ => seq(
+      'supervise', 'do',
+      'strategy', field('strategy', $.identifier),
+      'max_restarts', $.integer, 'within', $.integer,
+      optional(seq('backoff', repeat1(seq($.identifier, $.integer, optional('%'))))),
+      repeat($.supervise_child),
+      'end',
+    ),
+    supervise_child: $ => prec.right(seq(
+      field('actor', $.type_identifier), field('name', $.identifier),
+      optional(seq('(', commaSep($._expr), ')')),
+      repeat(choice(
+        seq('restart', $.identifier),
+        seq('shutdown', choice($.integer, $.identifier)),
+      )),
+    )),
     actor_handler: $ => seq(
       'on', field('name', $.type_identifier),
       '(', optional(commaSep($.fn_param)), ')',
@@ -266,20 +412,23 @@ module.exports = grammar({
       'interface',
       field('name', $.type_identifier),
       '(', field('param', $.type_variable), ')',
-      optional(seq(':', commaSep1($.superclass_constraint))),
+      optional(seq(choice(':', 'requires'), commaSep1($.superclass_constraint))),
       'do',
       repeat(choice($.method_sig, $.function_def)),
       'end',
     ),
     superclass_constraint: $ => seq(
-      $.type_identifier,
+      $.module_path,
       '(', commaSep1($._type), ')',
     ),
-    method_sig: $ => seq('fn', field('name', $.identifier), ':', field('type', $._type)),
+    method_sig: $ => seq(
+      'fn', field('name', $.identifier), ':', field('type', $._type),
+      optional(seq('do', field('default', $._expr), 'end')),
+    ),
 
     impl_def: $ => seq(
       'impl',
-      field('interface', $.type_identifier),
+      field('interface', $.module_path),
       '(',
       field('type', $._type),
       ')',
@@ -303,9 +452,15 @@ module.exports = grammar({
       'end',
     ),
     extern_fn: $ => seq(
+      repeat(field('modifier', $.identifier)),
       'fn', field('name', $.identifier),
-      '(', optional(commaSep($.fn_param)), ')',
+      '(', optional(commaSep($.ffi_param)), ')',
       ':', field('return_type', $._type),
+      optional(seq('=', field('symbol', $.string))),
+    ),
+    ffi_param: $ => seq(
+      optional(field('modifier', $.identifier)),
+      field('name', $.identifier), ':', field('type', $._type),
     ),
 
     protocol_def: $ => seq(
@@ -316,19 +471,39 @@ module.exports = grammar({
     protocol_step: $ => choice(
       $.protocol_message,
       $.protocol_loop,
+      $.protocol_choose,
+      $.protocol_role,
+      $.protocol_may,
+      $.protocol_stop,
     ),
-    protocol_message: $ => seq(
+    protocol_message: $ => prec.right(seq(
+      optional(seq(field('label', $.identifier), ':')),
       field('sender', $.type_identifier), '->',
       field('receiver', $.type_identifier), ':',
-      $.type_identifier,
-      optional(seq('(', commaSep1($._type), ')')),
-    ),
-    protocol_loop: $ => seq('loop', 'do', repeat($.protocol_step), 'end'),
-
-    use_declaration: $ => seq('use', $.type_identifier, '.', choice(
-      seq('{', commaSep1($.identifier), '}'),
-      '*',
+      field('type', $._type),
+      optional(seq('or', $.identifier, 'do', repeat($.protocol_step), 'end')),
     )),
+    protocol_loop: $ => seq('loop', optional($.identifier), 'do', repeat($.protocol_step), 'end'),
+    protocol_choose: $ => seq(
+      'choose', 'by', field('chooser', $.type_identifier), ':',
+      optional('|'), $.choose_branch, repeat(seq(optional('|'), $.choose_branch)),
+      'end',
+    ),
+    choose_branch: $ => seq(field('label', $.identifier), '->', repeat($.protocol_step)),
+    protocol_role: $ => seq('role', $.type_identifier, 'needs', commaSep1($.module_path)),
+    protocol_may: $ => seq('may', $.identifier, commaSep1($.type_identifier)),
+    protocol_stop: $ => $.identifier,
+
+    // use A, use A.B, use A.b, use A.*, use A.{f, g}
+    use_declaration: $ => seq(
+      'use', $.type_identifier,
+      repeat(seq('.', $.type_identifier)),
+      optional(seq('.', choice(
+        seq('{', commaSep($.identifier), '}'),
+        '*',
+        $.identifier,
+      ))),
+    ),
 
     // Elixir-style: import A, import A.B, import A.B.{C, d},
     // import A, only: [f, g], import A, except: [f, g]
@@ -353,12 +528,14 @@ module.exports = grammar({
     ),
 
     // needs IO.Network, IO.Clock
-    needs_declaration: $ => seq('needs', commaSep1($.module_path)),
+    needs_declaration: $ => seq('needs', commaSep1($.scoped_capability)),
+    scoped_capability: $ => seq($.module_path, optional(seq('(', $.string, ')'))),
 
     // `cap no_panic` and friends lex as a single keyword in the compiler, so
     // the space between the two words is not free-form whitespace here either.
     capability_declaration: $ => choice(
-      seq('proof', 'cap', field('name', $.type_identifier)),
+      seq('proof', 'cap', field('name', $.type_identifier),
+          optional(seq('with', field('dictionary', $.type_identifier)))),
       seq('cap', field('name', choice(
         'no_panic', 'pure', 'no_extern', 'deterministic', 'no_alloc', 'verified',
       ))),
@@ -407,12 +584,15 @@ module.exports = grammar({
       $.lambda_expression,
       $.if_expression,
       $.match_expression,
+      $.cond_expression,
       $.block_expression,
       $.record_expression,
       $.record_update,
       $.tuple_expression,
+      $.parenthesized_expression,
       $.unit_expression,
       $.list_expression,
+      $.list_comprehension,
       $.send_expression,
       $.spawn_expression,
       $.sigil_expression,
@@ -442,12 +622,12 @@ module.exports = grammar({
     )),
     additive_expression: $ => prec.left(5, seq(
       field('left', $._expr),
-      field('operator', choice('+', '-', '++')),
+      field('operator', choice('+', '-', '++', '+.', '-.')),
       field('right', $._expr),
     )),
     multiplicative_expression: $ => prec.left(6, seq(
       field('left', $._expr),
-      field('operator', choice('*', '/', '%')),
+      field('operator', choice('*', '/', '%', '*.', '/.')),
       field('right', $._expr),
     )),
     unary_expression: $ => prec.right(7, seq(
@@ -457,11 +637,11 @@ module.exports = grammar({
 
     call_expression: $ => prec(8, seq(
       field('function', $._expr),
-      '(', optional(commaSep($._expr)), ')',
+      '(', optional(commaSep($._call_arg)), ')',
     )),
     constructor_expression: $ => prec(8, seq(
       field('name', $.type_identifier),
-      '(', optional(commaSep($._expr)), ')',
+      '(', optional(commaSep($._call_arg)), ')',
     )),
     // Bare constructor (nullary) used as expression, e.g. Nil, None, True
     bare_constructor: $ => field('name', $.type_identifier),
@@ -472,14 +652,25 @@ module.exports = grammar({
       field('field', choice($.identifier, $.type_identifier)),
     )),
 
+    // `fn params -> body`.  In general the body is `let`s then one
+    // expression (the compiler's lambda_body); as a call argument it may be
+    // any statement sequence, since `,` or `)` bounds it (call_arg).
     lambda_expression: $ => seq(
-      'fn',
-      choice(
-        field('param', $.identifier),
-        seq('(', optional(commaSep($.fn_param)), ')'),
-      ),
-      '->',
-      field('body', $._expr),
+      'fn', optional($._lambda_params), '->',
+      field('body', alias($.lambda_body, $.block_body)),
+    ),
+    _lambda_params: $ => choice(
+      field('param', choice($.identifier, '_')),
+      seq('(', optional(commaSep($.fn_param)), ')'),
+    ),
+    lambda_body: $ => seq(repeat($.let_declaration), $._expr),
+    _call_arg: $ => choice(
+      $._expr,
+      alias($.call_arg_lambda, $.lambda_expression),
+    ),
+    call_arg_lambda: $ => seq(
+      'fn', optional($._lambda_params), '->',
+      field('body', $.block_body),
     ),
     if_expression: $ => seq(
       'if', field('condition', $._expr),
@@ -488,44 +679,69 @@ module.exports = grammar({
       'end',
     ),
     block_expression: $ => seq('do', $.block_body, 'end'),
-    unit_expression: _ => seq('(', ')'),
+    _lparen: $ => choice('(', $._stmt_lparen),
+    unit_expression: $ => seq($._lparen, ')'),
+    parenthesized_expression: $ => seq($._lparen, $._expr, ')'),
     tuple_expression: $ => seq(
-      '(', $._expr, ',', commaSep1($._expr), ')',
+      $._lparen, $._expr, ',', commaSep1($._expr), ')',
     ),
     list_expression: $ => seq('[', optional(commaSep($._expr)), ']'),
+    // [body for pat in source] / [body for pat in source, guard]
+    list_comprehension: $ => seq(
+      '[', field('body', $._expr),
+      'for', field('pattern', $._pattern), 'in', field('source', $._expr),
+      optional(seq(',', field('guard', $._expr))),
+      ']',
+    ),
     record_expression: $ => seq(
       '{', commaSep1($.record_field), '}',
     ),
     record_update: $ => seq(
       '{', field('base', $._expr), 'with', commaSep1($.record_field), '}',
     ),
-    record_field: $ => seq(field('name', $.identifier), '=', field('value', $._expr)),
+    record_field: $ => seq(field('name', $.identifier), ':', field('value', $._expr)),
 
     send_expression: $ => seq('send', '(', $._expr, ',', $._expr, ')'),
-    spawn_expression: $ => seq('spawn', '(', $._expr, ')'),
+    spawn_expression: $ => seq('spawn', '(', commaSep1($._expr), ')'),
     assert_expression: $ => seq('assert', field('value', $._expr)),
 
-    // Sigil expressions: ~H"...", ~H"""..."""
-    // Content is tokenized by the external scanner into HTML tags,
-    // interpolation expressions, and plain text for distinct highlighting.
+    // Sigil expressions: ~H"...", ~H"""...""", ~yaml"...".  The content is one
+    // string token; nothing tokenizes the HTML or interpolations inside it.
     sigil_expression: $ => seq(
       field('prefix', $.sigil_prefix),
       field('content', choice($.triple_string, $.string)),
     ),
-    sigil_prefix: _ => token(seq('~', /[A-Z]/)),
+    sigil_prefix: _ => token(seq('~', /[A-Za-z][A-Za-z0-9_]*/)),
 
 
     match_expression: $ => seq(
       'match', field('value', $._expr), 'do',
-      repeat1($.match_arm),
+      optional('|'),
+      $.match_arm,
+      repeat(seq(optional('|'), $.match_arm)),
       'end',
+    ),
+
+    // Cond form: `match do c1 -> e1 | _ -> e2 end`, no scrutinee; each arm's
+    // left side is a boolean expression (or `_`).
+    cond_expression: $ => seq(
+      'match', 'do',
+      optional('|'),
+      $.cond_arm,
+      repeat(seq(optional('|'), $.cond_arm)),
+      'end',
+    ),
+    cond_arm: $ => seq(
+      field('condition', $._expr),
+      '->',
+      field('body', $.block_body),
     ),
 
     match_arm: $ => seq(
       field('pattern', $._pattern),
       optional($.when_guard),
       '->',
-      field('body', $._expr),
+      field('body', $.block_body),
     ),
 
     // Literals
@@ -543,7 +759,7 @@ module.exports = grammar({
       '"',
       repeat(choice(
         /[^"\\]+/,
-        seq('\\', choice('n', 't', '\\', '"')),
+        seq('\\', /[^x]|x[0-9a-fA-F]{2}/),
       )),
       '"',
     )),

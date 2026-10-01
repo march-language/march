@@ -1,0 +1,76 @@
+-- The NativeArray sort's presorted-input front end (added 2026-09-28), for
+-- n >= 1024 only, which native_arr_sort / native_arr_sort_narrow (n <= 1000)
+-- never reach: nsort_merge2_W (the rest after the first run is one more
+-- run) and nsort_outliers_W (nearly sorted), including its eviction of
+-- misfit kept elements and its give-up path, which must leave a permutation
+-- that the quicksort then sorts. Shapes: organ pipe, two interleaved
+-- ascending halves, descending+descending, descending+ascending, nearly
+-- sorted with a few far swaps, nearly sorted with ADJACENT misfits (two big
+-- values in a row), one far outlier, sawtooth (gives up) and random (gated
+-- out). All four widths that share the core, against List.sort_by, at four
+-- sizes; prints how many of the 40 (size, shape) cases each width got right.
+mod NativeArrSortPresorted do
+  needs IO.Console
+
+  pfn build(n : Int, f : Int -> Int) : List(Int) do
+    fn go(i : Int, acc : List(Int)) : List(Int) do
+      if i < 0 do acc else go(i - 1, Cons(f(i), acc)) end
+    end
+    go(n - 1, Nil)
+  end
+
+  pfn scramble(i : Int) : Int do
+    let x = (i * 2654435761 + 7) % 1000003
+    if x < 0 do 0 - x else x end
+  end
+
+  pfn shape(s : Int, n : Int) : List(Int) do
+    let h = n / 2
+    if s == 0 do build(n, fn i -> if i < h do i else n - i end)
+    else if s == 1 do build(n, fn i -> if i < h do 2 * i else 2 * (i - h) + 1 end)
+    else if s == 2 do build(n, fn i -> if i < h do (h - i) * 3 else (n - i) * 2 end)
+    else if s == 3 do build(n, fn i -> if i < h do (h - i) * 2 else (i - h) * 2 + 1 end)
+    else if s == 4 do build(n, fn i -> if i % 97 == 13 do scramble(i) % n else i end)
+    else if s == 5 do build(n, fn i -> if i % 211 == 5 || i % 211 == 6 do n + scramble(i) % 50 else i end)
+    else if s == 6 do build(n, fn i -> if i == n / 3 do 0 - 5 else i end)
+    else if s == 7 do build(n, fn i -> i % 100)
+    else if s == 8 do build(n, fn i -> scramble(i))
+    else build(n, fn i -> if i % 50 == 0 do scramble(i) % 10 else i / 3 end)
+    end end end end end end end end end
+  end
+
+  pfn cases() : List((Int, Int)) do
+    List.flat_map([1024, 1500, 3000, 5000], fn n ->
+      List.map(List.range(0, 10), fn s -> (n, s)))
+  end
+
+  pfn asc(xs : List(Int)) : List(Int) do List.sort_by(xs, fn (a, b) -> a <= b) end
+  pfn ascf(xs : List(Float)) : List(Float) do List.sort_by(xs, fn (a, b) -> a <= b) end
+  pfn quarters(xs : List(Int)) : List(Float) do
+    List.map(xs, fn x -> int_to_float(x) *. 0.25)
+  end
+
+  pfn score(ok : Int -> Int -> Bool) : Int do
+    List.fold_left(cases(), 0, fn (acc, c) ->
+      match c do (n, s) -> if ok(n, s) do acc + 1 else acc end end)
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let int_ok = score(fn (n, s) ->
+      let xs = shape(s, n)
+      NativeArray.to_list_int(NativeArray.sort_int(NativeArray.from_list_int(xs))) == asc(xs))
+    let float_ok = score(fn (n, s) ->
+      let xs = quarters(shape(s, n))
+      NativeArray.to_list_float(NativeArray.sort_float(NativeArray.from_list_float(xs))) == ascf(xs))
+    let i32_ok = score(fn (n, s) ->
+      let xs = shape(s, n)
+      NativeArray.to_list_i32(NativeArray.sort_i32(NativeArray.from_list_i32(xs))) == asc(xs))
+    let f32_ok = score(fn (n, s) ->
+      let xs = quarters(shape(s, n))
+      NativeArray.to_list_f32(NativeArray.sort_f32(NativeArray.from_list_f32(xs))) == ascf(xs))
+    println("sort_int   " ++ int_to_string(int_ok) ++ "/40")
+    println("sort_float " ++ int_to_string(float_ok) ++ "/40")
+    println("sort_i32   " ++ int_to_string(i32_ok) ++ "/40")
+    println("sort_f32   " ++ int_to_string(f32_ok) ++ "/40")
+  end
+end

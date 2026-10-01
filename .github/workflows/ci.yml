@@ -16,6 +16,7 @@
 #                 (macos)               `dune runtest`, unsharded
 #   two-node      (ubuntu)              node_discovery soak + two-node scenarios
 #   conformance   (ubuntu, macos)       @types-check, @grammar-check, @vault-scale, docs, fmt
+#   tree-sitter   (ubuntu)              tree-sitter-march/ parses what the compiler accepts
 #   sanitize-gate (ubuntu)              ASAN gate: golden corpus + curated native + two-node
 #   ocaml-build   (ubuntu, macos) ─┬─ property-tests × 3 (per OS)
 #                  ubuntu leg only ─┼─ cross-linux-oracle
@@ -251,6 +252,32 @@ jobs:
         run: |
           eval $(opam env)
           dune build @bench_gate
+
+  # tree-sitter-march/ (the grammar Zed highlights from) against the March the
+  # compiler accepts: freshness of the generated parser, the corpus tests, the
+  # query files, and a list ratchet over every .march file in the repo
+  # (scripts/check-tree-sitter.sh; design in
+  # specs/2026-09-23-tree-sitter-grammar-sync-design.md). No opam or dune:
+  # the CLI, a C compiler and python3 are all it needs, and tree-sitter output
+  # does not depend on the OS, so one Linux leg is enough. The CLI is pinned
+  # because another version regenerates parser.c differently.
+  tree-sitter:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tree-sitter CLI 0.26.7
+        timeout-minutes: 5
+        run: npm install -g tree-sitter-cli@0.26.7
+
+      - name: Self-test (the check measures the grammar it builds)
+        timeout-minutes: 3
+        run: scripts/check-tree-sitter.sh --self-test
+
+      - name: Grammar freshness, corpus, queries, parse ratchet
+        timeout-minutes: 3
+        run: scripts/check-tree-sitter.sh
 
   conformance:
     strategy:
@@ -584,12 +611,17 @@ jobs:
           eval $(opam env)
           dune build bin/main.exe
 
-      # 5 -> 15 on 2026-09-28. Nothing hung or failed: main's step ran
-      # 195-251 s, and PR #663's run was killed at 309 s with no failing
-      # doctest. 15 leaves about 3x headroom over the slowest pass.
+      # This step used to take 3-5 min and hit its 5 min budget (PR #663).
+      # The cause was not the runner: @vault-scale above stages a PARTIAL
+      # _build/default/runtime, the driver built its runtime .so from it
+      # without march_nacl.c, and the REPL's cached stdlib prelude then
+      # failed to load and was recompiled in all seven sessions. With the
+      # driver fixed (bin/toolchain.ml, runtime_dir_complete) it takes under
+      # a minute, and the script fails if the prelude ever falls back to
+      # recompiling again.
       - name: Check stdlib `march>` doctests
         if: runner.os != 'macOS'
-        timeout-minutes: 15
+        timeout-minutes: 5
         run: |
           eval $(opam env)
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \

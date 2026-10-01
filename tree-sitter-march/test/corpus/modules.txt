@@ -138,16 +138,19 @@ end
     (module_path
       (type_identifier))
     (needs_declaration
-      (module_path
-        (type_identifier)
-        (type_identifier))
-      (module_path
-        (type_identifier)
-        (type_identifier)))
+      (scoped_capability
+        (module_path
+          (type_identifier)
+          (type_identifier)))
+      (scoped_capability
+        (module_path
+          (type_identifier)
+          (type_identifier))))
     (needs_declaration
-      (module_path
-        (type_identifier)
-        (type_identifier)))
+      (scoped_capability
+        (module_path
+          (type_identifier)
+          (type_identifier))))
     (capability_declaration)
     (capability_declaration)
     (capability_declaration)

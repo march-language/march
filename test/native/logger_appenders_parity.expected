@@ -1,0 +1,16 @@
+appenders at start: 
+after add a: [a]
+A: info hello src= ts>0=true
+A: error boom src=Db ts>0=true code=500 kind=:timeout
+after add b: [b][a]
+B: warn to both src= ts>0=true
+A: warn to both src= ts>0=true
+after re-add a: [a][b]
+A2: warn replaced src= ts>0=true
+B: warn replaced src= ts>0=true
+after remove b: [a]
+A2: info only a2 src= ts>0=true
+after clear: 
+register/remove leaked nothing: true
+dispatch leaked nothing: true
+done

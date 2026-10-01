@@ -6,8 +6,8 @@ authors = ["March Contributors"]
 description = "March language support for Zed"
 
 [grammars.march]
-repository = "file:///Users/80197052/code/march"
-rev = "281261a5f46c5bcbcfe12d0526b2b888e286777a"
+repository = "https://github.com/march-language/march"
+rev = "f13d38501ca2150fecbe12551bda45b01c58e5cb"
 path = "tree-sitter-march"
 
 [language_servers.march-lsp]

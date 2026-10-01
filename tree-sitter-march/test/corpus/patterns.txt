@@ -18,7 +18,8 @@ mod Foo do fn f(x) do match x do _ -> 1 end end end
           value: (identifier)
           (match_arm
             pattern: (wildcard_pattern)
-            body: (integer)))))))
+            body: (block_body
+              (integer))))))))
 
 ================================================================================
 Variable pattern
@@ -41,7 +42,8 @@ mod Foo do fn f(x) do match x do n -> n end end end
           (match_arm
             pattern: (variable_pattern
               (variable_pattern))
-            body: (identifier)))))))
+            body: (block_body
+              (identifier))))))))
 
 ================================================================================
 Constructor pattern with args
@@ -66,7 +68,8 @@ mod Foo do fn f(x) do match x do Some(n) -> n end end end
               name: (type_identifier)
               (variable_pattern
                 (variable_pattern)))
-            body: (identifier)))))))
+            body: (block_body
+              (identifier))))))))
 
 ================================================================================
 Tuple pattern
@@ -92,7 +95,8 @@ mod Foo do fn f(x) do match x do (a, b) -> a end end end
                 (variable_pattern))
               (variable_pattern
                 (variable_pattern)))
-            body: (identifier)))))))
+            body: (block_body
+              (identifier))))))))
 
 ================================================================================
 Negative literal pattern
@@ -115,7 +119,8 @@ mod Foo do fn f(x) do match x do -1 -> true end end end
           (match_arm
             pattern: (literal_pattern
               (integer))
-            body: (boolean)))))))
+            body: (block_body
+              (boolean))))))))
 
 ================================================================================
 Atom pattern bare
@@ -138,4 +143,5 @@ mod Foo do fn f(x) do match x do :ok -> true end end end
           (match_arm
             pattern: (atom_pattern
               (atom_literal))
-            body: (boolean)))))))
+            body: (block_body
+              (boolean))))))))

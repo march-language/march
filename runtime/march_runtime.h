@@ -108,6 +108,8 @@ int64_t march_int_pow(int64_t base, int64_t exp);
 /* Panic/todo primitive variants (return ptr so they satisfy polymorphic `a`). */
 void *march_panic_ext(void *s);
 void *march_todo_ext(void *s);
+void  march_panic_user(void *s);
+void *march_unreachable_ext(void);
 
 /* Call-stack frame table (used by compiled binaries for backtraces).
  * march_frame_t is stack-allocated at each March function's entry. */
@@ -160,6 +162,12 @@ void   *march_logger_get_fields(void);
 void   *march_logger_pop_to_depth(int64_t depth);
 void   *march_logger_dispatch(void *level_str, void *msg, void *module_name, void *fields);
 void   *march_logger_register_appender(void *name, void *cb);
+/* Atom-name tables: each compiled module registers its generated (internal)
+ * hash -> ":name" function from a constructor and unregisters it from a
+ * destructor; the logger renders LAtom fields through them.  See
+ * emit_atom_show_table in lib/tir/llvm_toplevel.ml. */
+void    march_set_atom_namer(void *fn);
+void    march_unset_atom_namer(void *fn);
 void   *march_logger_remove_appender(void *name);
 void   *march_logger_clear_appenders(void);
 void   *march_logger_appender_names(void);
@@ -906,6 +914,10 @@ void   *march_string_to_float(void *s);
 /* List builtins. */
 void *march_list_append(void *a, void *b);
 void *march_list_concat(void *lists);
+/* Stable sorts behind Array/RRB sort_by and sort_by_key: the list is borrowed,
+ * the closure consumed (one reference per call), a fresh list returned. */
+void *march_list_stable_sort_by(void *lst, void *le);
+void *march_list_sort_by_int_key(void *lst, void *key);
 
 /* File/Dir builtins. */
 int64_t march_file_exists(void *s);

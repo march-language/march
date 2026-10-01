@@ -233,6 +233,8 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
      from the server binary would otherwise win).
      Exported symbols that must stay default-visible:
        *_dispatch      — the reload server finds these with dlsym(ACTIVATE)
+                         (an app actor's only: a stdlib actor has no slot,
+                         see [Hot_reload.is_slot_actor_dispatch])
        *_migrate_state — the __migrate_* alias points to this function; a
                          hidden aliasee with a default-visibility alias is not
                          valid LLVM IR, so keep the migrate_state fn visible
@@ -256,7 +258,7 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
   let vis_prefix =
     let fname = fn.Tir.fn_name in
     if ctx.Llvm_ctx.compile_so
-       && not (Tir_names.is_actor_dispatch_fn fname)
+       && not (Hot_reload.is_slot_actor_dispatch fname)
        && not (Tir_names.is_migrate_fn_name fname)
        && Hot_reload.Name_table.id_of ctx.Llvm_ctx.hr_names fname = None
     then "hidden "
@@ -471,9 +473,11 @@ let buffer_contains (b : Buffer.t) (needle : string) : bool =
 
     Atoms compile to nameless FNV-1a i64 hashes (Llvm_ctx.atom_hash), so
     `Show$Atom.show` (registered in lower.ml, body = atom_to_string(x)) can't
-    reconstruct `:name` from the runtime value alone.  Rather than a C-side
-    registry populated at startup, we emit the whole mapping as one generated
-    function — a switch over every atom (hash, name) collected during body
+    reconstruct `:name` from the runtime value alone.  We emit the whole
+    mapping as one generated INTERNAL function per module (the C runtime only
+    learns of it through march_set_atom_namer, for Logger's LAtom rendering;
+    it defines no symbol of this name that could interpose the module's own
+    copy) — a switch over every atom (hash, name) collected during body
     emission (ctx.atom_names, filled by emit_atom + emit_case).  Returning
     `march_string_lit(":name")` mirrors `march_int_to_string` exactly, so RC
     bookkeeping in the caller is identical to the Int/Float/Bool Show impls.
@@ -490,13 +494,21 @@ let buffer_contains (b : Buffer.t) (needle : string) : bool =
     ground truth.  The `not already-defined` guard makes a second call on the
     same ctx a no-op (can't double-define the symbol or its globals). *)
 let emit_atom_show_table ctx =
-  let call_site = "call ptr @march_atom_to_string" in
+  let in_module s =
+    buffer_contains ctx.Llvm_ctx.buf s
+    || buffer_contains ctx.Llvm_ctx.extra_fns s
+  in
+  (* The C runtime renders an LAtom log field through this table too
+     (logvalue_scalar_str, march_runtime.c, via the registration emitted
+     below), so a program that logs gets it even when it never calls
+     atom_to_string. *)
   let referenced =
-    buffer_contains ctx.Llvm_ctx.buf call_site
-    || buffer_contains ctx.Llvm_ctx.extra_fns call_site
+    in_module "call ptr @march_atom_to_string"
+    || in_module "call ptr @march_logger_dispatch("
+    || in_module "call ptr @march_logger_get_context("
   in
   let already_defined =
-    buffer_contains ctx.Llvm_ctx.extra_fns "define ptr @march_atom_to_string"
+    buffer_contains ctx.Llvm_ctx.extra_fns "define internal ptr @march_atom_to_string"
   in
   if referenced && not already_defined then begin
     (* Pre-seed the atoms the RUNTIME itself produces (the capability plane's
@@ -525,7 +537,10 @@ let emit_atom_show_table ctx =
        whose name never appears in source, or a cross-fragment REPL atom). *)
     Buffer.add_string b
       "@.atomname_unknown = private unnamed_addr constant [8 x i8] c\":<atom>\\00\"\n";
-    Buffer.add_string b "define ptr @march_atom_to_string(i64 %h) {\nentry:\n";
+    (* The lookup proper: ":name" for a hash this module saw, NULL otherwise.
+       The runtime's logger calls it through the registration below, trying
+       every registered module's table in turn. *)
+    Buffer.add_string b "define internal ptr @march_atom_name_or_null(i64 %h) {\nentry:\n";
     Buffer.add_string b "  switch i64 %h, label %atom_unknown [\n";
     List.iteri (fun i (h, _) ->
         Printf.bprintf b "    i64 %Ld, label %%atom_%d\n" h i
@@ -539,11 +554,50 @@ let emit_atom_show_table ctx =
           \  ret ptr %%s%d\n"
           i i i (String.length s) i
       ) atoms;
+    Buffer.add_string b "atom_unknown:\n  ret ptr null\n}\n";
+    (* Show$Atom.show's backing: the lookup, or ":<atom>" for an unknown
+       hash.  INTERNAL linkage, so every module (the AOT program, each REPL
+       JIT fragment, each hot patch) calls its own copy.  With default
+       linkage a fragment dlopen'd RTLD_GLOBAL on Linux bound its call to the
+       first @march_atom_to_string the dynamic linker found (an earlier
+       fragment's, or the runtime's since-removed weak NULL stub) and showed
+       "null" for `show(:ok)`. *)
     Buffer.add_string b
-      "atom_unknown:\n\
-      \  %su = call ptr @march_string_lit(ptr @.atomname_unknown, i64 7)\n\
-      \  ret ptr %su\n";
-    Buffer.add_string b "}\n"
+      "define internal ptr @march_atom_to_string(i64 %h) {\n\
+       entry:\n\
+      \  %s = call ptr @march_atom_name_or_null(i64 %h)\n\
+      \  %known = icmp ne ptr %s, null\n\
+      \  br i1 %known, label %atom_known, label %atom_unknown\n\
+       atom_known:\n\
+      \  ret ptr %s\n\
+       atom_unknown:\n\
+      \  %u = call ptr @march_string_lit(ptr @.atomname_unknown, i64 7)\n\
+      \  ret ptr %u\n\
+       }\n";
+    (* Register the lookup with the native runtime so Logger can name LAtom
+       fields (march_set_atom_namer, march_runtime.c), and unregister it when
+       the module is unloaded (a REPL fragment or hot patch being
+       dlclose'd), so the runtime never keeps a pointer into unmapped code.
+       The WASM runtime has no logger and no such entry points; [shape_meta]
+       is this ctx's "native runtime present" switch. *)
+    if ctx.Llvm_ctx.shape_meta then
+      Buffer.add_string b
+        "declare void @march_set_atom_namer(ptr)\n\
+         declare void @march_unset_atom_namer(ptr)\n\
+         define internal void @march_atom_namer_register() {\n\
+         entry:\n\
+        \  call void @march_set_atom_namer(ptr @march_atom_name_or_null)\n\
+        \  ret void\n\
+         }\n\
+         define internal void @march_atom_namer_unregister() {\n\
+         entry:\n\
+        \  call void @march_unset_atom_namer(ptr @march_atom_name_or_null)\n\
+        \  ret void\n\
+         }\n\
+         @llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] \
+         [{ i32, ptr, ptr } { i32 65535, ptr @march_atom_namer_register, ptr null }]\n\
+         @llvm.global_dtors = appending global [1 x { i32, ptr, ptr }] \
+         [{ i32, ptr, ptr } { i32 65535, ptr @march_atom_namer_unregister, ptr null }]\n"
   end
 
 (* emit_mutual_tco_group moved to [Llvm_tco] (Wave 3 Task 6, chunk 2).
@@ -911,9 +965,13 @@ let emit_module ~emit_expr
      Actor dispatch functions (e.g. Counter_dispatch) have no module prefix in
      TIR because lower.ml strips the top-level file-module name from all
      declarations (only nested submodule functions retain their prefix).
-     We include any *_dispatch function unconditionally so that actor hot-reload
-     works when the --hot-reload boundary is the file-level module. *)
-  let is_actor_dispatch_fn = Tir_names.is_actor_dispatch_fn in
+     We include every APP actor's *_dispatch function so that actor hot-reload
+     works when the --hot-reload boundary is the file-level module.  A stdlib
+     actor's is never a slot (owner decision 2026-09-30): a stdlib change is a
+     toolchain change, deployed by restart, and a deploy must not pause or
+     migrate the actor answering SWIM pings.  Decided by loader provenance,
+     see [Hot_reload.is_slot_actor_dispatch]. *)
+  let is_actor_dispatch_fn = Hot_reload.is_slot_actor_dispatch in
   (* Program-entry functions must NEVER be reloadable slots.  The running green
      thread's root frame is the chosen entry (`main`/`ModName.main`, emitted as
      @march_main); swapping it while live corrupts the runtime allocator (OOM).
@@ -973,7 +1031,13 @@ let emit_module ~emit_expr
     | None -> ""
     | Some _cfg ->
       let n = Hot_reload.Name_table.count hr_names in
-      if n = 0 then "" else begin
+      (* Emitted even with NO slots: a `--hot-reload` binary always runs its
+         reload server (HCR_INFO, VERSIONS, TOPOLOGY, and a deploy tool that
+         can connect and be told there is nothing to swap).  Since stdlib
+         actors stopped being slots (2026-09-30), an app whose code all lives
+         in the entry module has zero, and skipping this left it with no
+         reload server at all: `forge deploy hot` could not even connect. *)
+      begin
         let b = Buffer.create 256 in
         (* Dispatch slot IDs are 1-based: slot 0 is reserved as the "not set"
            sentinel in march_actor_meta.dispatch_name_id (0 = no HCR dispatch). *)

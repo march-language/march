@@ -1,0 +1,108 @@
+-- A case/if join whose arms all BUILD the same unboxed small aggregate is
+-- typed as that struct (Llvm_case.predicted_unboxed_join): no arm boxes, the
+-- merge frees nothing.  The shapes around the prediction are covered, each
+-- with ALTERNATING arms so every arm really runs: a two-arm `if`, a three-arm
+-- `match`, a nested `else if` chain, a match on an Option (the niche path's
+-- slot), and a mixed join (one arm builds, the other returns a variable) that
+-- must keep the boxed `ptr` slot and still release its box.  Each leg prints
+-- its value and whether live_allocs stayed flat over the loop.
+-- Expected output is the interpreter's.
+-- specs/progress/2026-09-30-unbox-aware-case-join-slot.md
+mod UnboxedJoinSlot do
+  needs IO.Console
+
+  type P2 = P2(Int, Int)
+  type P3 = P3(Int, Float, Bool)
+
+  pfn p2sum(p : P2) : Int do
+    match p do
+      P2(a, b) -> a + b
+    end
+  end
+
+  pfn p3val(p : P3) : Int do
+    match p do
+      P3(a, f, c) -> if c do a + float_to_int(f) else a - float_to_int(f) end
+    end
+  end
+
+  pfn two_arm(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else
+      let p = if i % 2 == 0 do P2(i, 1) else P2(1, i * 2) end
+      two_arm(i + 1, n, acc + p2sum(p))
+    end
+  end
+
+  pfn three_arm(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else
+      let p = match i % 3 do
+        0 -> P3(i, 1.5, true)
+        1 -> P3(i, 2.5, false)
+        _ -> P3(3, 0.5, true)
+      end
+      three_arm(i + 1, n, acc + p3val(p))
+    end
+  end
+
+  pfn else_if(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else
+      let p = if i % 4 == 0 do P2(i, 0)
+              else if i % 4 == 1 do P2(0, 2)
+              else if i % 4 == 2 do P2(3, 3)
+              else P2(i, i) end end end
+      else_if(i + 1, n, acc + p2sum(p))
+    end
+  end
+
+  pfn from_opt(o : Option(Int)) : P2 do
+    match o do
+      Some(v) -> P2(v, 10)
+      None -> P2(0, 0)
+    end
+  end
+
+  pfn opt_leg(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else
+      let o = if i % 2 == 0 do Some(i) else None end
+      opt_leg(i + 1, n, acc + p2sum(from_opt(o)))
+    end
+  end
+
+  pfn mixed(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else
+      let q = P2(7, 8)
+      let p = if i % 2 == 0 do P2(i, 1) else q end
+      mixed(i + 1, n, acc + p2sum(p))
+    end
+  end
+
+  pfn report(label : String, before : Int, result : Int, n : Int) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ int_to_string(result) ++ ", flat: "
+            ++ bool_to_string(grew < n / 4))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 2000
+    two_arm(0, 3, 0)
+    let a = live_allocs()
+    report("two-arm if", a, two_arm(0, n, 0), n)
+    three_arm(0, 3, 0)
+    let b = live_allocs()
+    report("three-arm match", b, three_arm(0, n, 0), n)
+    else_if(0, 3, 0)
+    let c = live_allocs()
+    report("else-if chain", c, else_if(0, n, 0), n)
+    opt_leg(0, 3, 0)
+    let d = live_allocs()
+    report("option match", d, opt_leg(0, n, 0), n)
+    mixed(0, 3, 0)
+    let e = live_allocs()
+    report("mixed join", e, mixed(0, n, 0), n)
+  end
+end

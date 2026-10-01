@@ -1498,14 +1498,56 @@ static void do_actor_death(void *actor, march_death_reason reason,
  * March prelude's panic/todo/unreachable wrappers.  They call march_panic and
  * return NULL (unreachable, but needed to satisfy the polymorphic return type
  * the compiler assigns to expressions of type `a`). */
+/* Which diverging primitive raised the panic being caught, as the prefix the
+ * interpreter puts on its message ("panic: boom", "todo: later";
+ * eval_builtins.ml's panic_ / todo_).  march_panic's fail buffer holds the
+ * bare message -- the compiled test runner prints it that way -- so
+ * __try_call / __try_call_val prepend this when building their Err.  Set
+ * immediately before the longjmp by the SAME thread that runs the catching
+ * setjmp, like march_test_fail_buf itself; the catchers clear it on entry
+ * and restore the outer value on exit. */
+static const char *march_panic_prefix = NULL;
+
 void *march_panic_ext(void *s) {
+    march_panic_prefix = "panic: ";
     march_panic(s);
     return NULL;
 }
 
 void *march_todo_ext(void *s) {
+    march_panic_prefix = "todo: ";
     march_panic(s);
     return NULL;
+}
+
+/* The `panic` builtin (lib/tir/llvm_builtins.ml): user `panic(msg)` and the
+ * compiler's own assert / non-exhaustive panics. */
+void march_panic_user(void *s) {
+    march_panic_prefix = "panic: ";
+    march_panic(s);
+}
+
+/* unreachable_ takes no argument; the message is the interpreter's
+ * (eval_builtins.ml's unreachable_), with no further prefix. */
+void *march_unreachable_ext(void) {
+    march_panic_prefix = NULL;
+    march_panic(march_string_lit("unreachable: reached unreachable code", 37));
+    return NULL;
+}
+
+/* The Err message of a caught panic: the prefix march_panic_ext /
+ * march_todo_ext recorded, then the fail buffer (or [fallback] when empty). */
+static void *march_caught_panic_message(const char *fallback) {
+    const char *msg = march_test_fail_buf[0] ? march_test_fail_buf : fallback;
+    const char *pre = march_panic_prefix ? march_panic_prefix : "";
+    size_t pl = strlen(pre), ml = strlen(msg);
+    char *buf = (char *)malloc(pl + ml + 1);
+    if (!buf) { fputs("march: out of memory\n", stderr); exit(1); }
+    memcpy(buf, pre, pl);
+    memcpy(buf + pl, msg, ml + 1);
+    void *str = march_string_lit(buf, (int64_t)(pl + ml));
+    free(buf);
+    return str;
 }
 
 void march_panic(void *s) {
@@ -1841,8 +1883,10 @@ void *march_try_call(void *thunk) {
     memcpy(&saved_jmp, &march_test_jmp_buf, sizeof(jmp_buf));
     memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
 
+    const char *saved_prefix = march_panic_prefix;
     march_test_fail_buf[0] = '\0';
     march_test_in_test     = 1;
+    march_panic_prefix     = NULL;
 
     int64_t ok_result = 0;
     int     panicked  = 0;
@@ -1853,18 +1897,17 @@ void *march_try_call(void *thunk) {
         panicked = 1;
     }
 
-    /* Capture the panic message before restoring the outer fail buffer. */
+    /* Capture the panic message before restoring the outer fail buffer:
+     * "panic: <msg>" for panic(msg), as the interpreter reports it (until
+     * 2026-09-28 the compiled Err carried the bare message). */
     void *err_str = NULL;
-    if (panicked) {
-        const char *msg = march_test_fail_buf[0]
-            ? march_test_fail_buf : "property panicked";
-        err_str = march_string_lit(msg, (int64_t)strlen(msg));
-    }
+    if (panicked) err_str = march_caught_panic_message("property panicked");
 
     /* Restore the outer panic handler. */
     memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
     memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
     march_test_in_test = saved_in_test;
+    march_panic_prefix = saved_prefix;
 
     /* No march_decrc(thunk) here. Like the task_spawn trampoline (see its
      * comment), a CAPTURING thunk's own apply function now releases its one
@@ -1934,8 +1977,10 @@ void *march_try_call_val(void *thunk) {
     memcpy(&saved_jmp, &march_test_jmp_buf, sizeof(jmp_buf));
     memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
 
+    const char *saved_prefix = march_panic_prefix;
     march_test_fail_buf[0] = '\0';
     march_test_in_test     = 1;
+    march_panic_prefix     = NULL;
 
     int64_t ok_result = 0;
     int     panicked  = 0;
@@ -1947,15 +1992,12 @@ void *march_try_call_val(void *thunk) {
     }
 
     void *err_str = NULL;
-    if (panicked) {
-        const char *msg = march_test_fail_buf[0]
-            ? march_test_fail_buf : "call panicked";
-        err_str = march_string_lit(msg, (int64_t)strlen(msg));
-    }
+    if (panicked) err_str = march_caught_panic_message("call panicked");
 
     memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
     memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
     march_test_in_test = saved_in_test;
+    march_panic_prefix = saved_prefix;
 
     /* No march_decrc(thunk) — see the identical comment in __try_call above. */
 
@@ -2835,10 +2877,9 @@ void march_sandbox_install(void) {
     /* A NetConnect-only program (an HTTP client) needs socket() + connect();
      * without these two it could also accept connections.  bind() covers
      * AF_UNIX as well, which is correct: a Unix-domain listener is still a
-     * listener.  Threads created BEFORE this call (the hot-reload server,
-     * started in @main ahead of march_spawn_main) are not covered, since
-     * PR_SET_SECCOMP filters only the calling thread and its later
-     * children. */
+     * listener.  The filter is installed with SECCOMP_FILTER_FLAG_TSYNC
+     * (below), so this also covers threads that were already running at
+     * install time, the hot-reload server's included. */
     DENY_NR(__NR_bind);
     DENY_NR(__NR_listen);
 #endif
@@ -2901,16 +2942,46 @@ void march_sandbox_install(void) {
 
     struct sock_fprog prog = { .len = (unsigned short)n, .filter = f };
 
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
-        prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) {
+    /* Install for EVERY thread of the process, not just the caller.
+     * prctl(PR_SET_SECCOMP) filters only the calling thread and the threads
+     * it creates afterwards, and threads already exist here: @main starts
+     * the hot-reload server (march_reload_server_start, from the hr_setup
+     * block llvm_toplevel.ml emits ahead of march_spawn_main), and a linked
+     * C library's constructor can start its own.  Those ran unfiltered.
+     * SECCOMP_FILTER_FLAG_TSYNC attaches the filter to every thread
+     * atomically (and propagates no_new_privs to them), which is what the
+     * macOS backend already does: sandbox_init is process-wide.
+     *
+     * TSYNC was chosen over moving the install ahead of hr_setup because
+     * that would cover only threads created later by @main itself, never a
+     * constructor-started one, and would put the HCR boot (dispatch publish,
+     * replay_state) under the filter; @main's order stays as it was.
+     *
+     * The raw syscall rather than libc's seccomp() wrapper: glibc only grew
+     * one in 2.38 (musl has none).  A positive return is the TID of a
+     * thread that could not be synchronised (it already carries an
+     * unrelated filter); that is a failure too. */
+    long rc = -1;
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0)
+        rc = syscall(__NR_seccomp, SECCOMP_SET_MODE_FILTER,
+                     SECCOMP_FILTER_FLAG_TSYNC, &prog);
+    if (rc != 0) {
         /* Fail CLOSED.  Installation genuinely can fail — seccomp is
-         * unavailable under qemu user emulation, and a restrictive outer
-         * profile can reject the prctl — and running uncontained after the
-         * operator asked for containment is the worst outcome. */
-        fprintf(stderr,
-                "march: capability sandbox failed to install (%s); refusing to "
-                "run uncontained\n",
-                strerror(errno));
+         * unavailable under qemu user emulation, a pre-3.17 kernel has no
+         * seccomp(2), and a restrictive outer profile can reject the call —
+         * and running uncontained after the operator asked for containment
+         * is the worst outcome. */
+        if (rc > 0)
+            fprintf(stderr,
+                    "march: capability sandbox failed to install (thread %ld "
+                    "could not be synchronised); refusing to run "
+                    "uncontained\n",
+                    rc);
+        else
+            fprintf(stderr,
+                    "march: capability sandbox failed to install (%s); "
+                    "refusing to run uncontained\n",
+                    strerror(errno));
         exit(70);
     }
 }
@@ -9091,14 +9162,26 @@ void *march_process_spawn_sync(void *cmd_obj, void *args_list) {
     return mk_ok(pr);
 }
 
-/* process_spawn_lines(command, args) → Result(Seq(String), String) */
+/* process_spawn_lines(command, args) → Result(String, String)
+
+   Returns Ok(stdout) — the whole captured stdout as ONE String; Process.run_stream
+   splits it into a Seq(String) in March.  The interpreter returns the same
+   shape.  [march_process_spawn_sync] hands back a fresh Ok(ProcessResult(code,
+   stdout, stderr)) that this function owns.  march_decrc is SHALLOW (it frees
+   the cell and never walks the fields), so the intermediate objects are
+   released by hand: the stderr String, the ProcessResult cell and the outer Ok
+   cell.  The stdout String is not released; its one reference MOVES from the
+   ProcessResult into the Ok returned here.  Before this the three objects
+   leaked per call and the returned Ok aliased a String it did not own. */
 void *march_process_spawn_lines(void *cmd_obj, void *args_list) {
-    /* Run command and return Ok(stdout_string) — caller can split lines */
     void *result = march_process_spawn_sync(cmd_obj, args_list);
-    /* If Ok(ProcessResult), extract stdout and return Ok(stdout) */
     if (((march_hdr *)result)->tag == 0) {
         void *pr = MARCH_FIELD_PTR(result, 0);
         void *out_str = MARCH_FIELD_PTR(pr, 1);
+        void *err_str = MARCH_FIELD_PTR(pr, 2);
+        march_decrc(err_str);
+        march_decrc(pr);      /* shallow: out_str's reference is not touched */
+        march_decrc(result);  /* shallow: pr is already released above */
         return mk_ok(out_str);
     }
     return result; /* Err case: pass through */
@@ -9106,12 +9189,95 @@ void *march_process_spawn_lines(void *cmd_obj, void *args_list) {
 
 /* ── Async process management ───────────────────────────────────────── */
 
-/* Global fd-to-FILE* registry for live processes.
-   Each entry: slot → {pid, stdout FILE*, stdin FILE*}
-   Keyed by the stream_id stored in LiveProcess(pid, stream_id). */
-#define LIVE_PROC_MAX 64
-static struct { int used; pid_t pid; FILE *fp; FILE *write_fp; } live_proc_reg[LIVE_PROC_MAX];
-static int live_proc_next = 0;
+/* Registry of live child processes started by process_spawn_async.
+
+   A LiveProcess(pid, handle) names its slot by [handle] =
+   (generation << LIVE_PROC_SLOT_BITS) | slot.  Every allocation of a slot
+   bumps its generation, so a handle kept after wait_proc (or copied before
+   it) fails the generation check instead of addressing the slot's next
+   owner.
+
+   All slot bookkeeping is under [live_proc_mu]; the blocking I/O itself
+   (fgets, fwrite) runs outside it.  A reader or writer marks its stream
+   busy while it uses the FILE*, and wait_proc only closes a stream nobody
+   is using; a busy stream is closed by its user on the way out.  A slot
+   becomes free (reusable) only once both streams are closed, so no slot is
+   handed out while a previous owner can still touch its FILE*s.
+
+   Slots are heap-allocated and never freed or moved, so a pointer taken
+   under the lock stays valid after it is released; the pointer array
+   grows on demand (previously a fixed ring of 64 whose 65th spawn
+   silently closed slot 0's pipes). */
+#define LIVE_PROC_SLOT_BITS 20
+#define LIVE_PROC_SLOT_MASK ((1 << LIVE_PROC_SLOT_BITS) - 1)
+typedef struct {
+    int      used;       /* allocated to a process, not yet fully released */
+    int      closing;    /* wait_proc ran; close each stream when idle */
+    int      rbusy;      /* threads inside a read on [fp] */
+    int      wbusy;      /* threads inside a write on [write_fp] */
+    uint32_t gen;        /* bumped on every allocation */
+    pid_t    pid;
+    FILE    *fp;         /* child's stdout (we read) */
+    FILE    *write_fp;   /* child's stdin (we write) */
+} live_proc_slot;
+static pthread_mutex_t  live_proc_mu = PTHREAD_MUTEX_INITIALIZER;
+static live_proc_slot **live_proc_slots = NULL;
+static int              live_proc_len = 0;   /* slots allocated so far */
+static int              live_proc_cap = 0;   /* capacity of live_proc_slots */
+
+/* Close whichever streams of a closing slot nobody is using; free the slot
+   once both are closed.  Caller holds live_proc_mu. */
+static void live_proc_settle_locked(live_proc_slot *s) {
+    if (!s->closing) return;
+    if (s->rbusy == 0 && s->fp)       { fclose(s->fp);       s->fp = NULL; }
+    if (s->wbusy == 0 && s->write_fp) { fclose(s->write_fp); s->write_fp = NULL; }
+    if (!s->fp && !s->write_fp) { s->used = 0; s->closing = 0; }
+}
+
+/* The slot a handle names, if the handle is current.  Caller holds the lock. */
+static live_proc_slot *live_proc_lookup_locked(int64_t handle) {
+    if (handle < 0) return NULL;
+    int64_t idx = handle & LIVE_PROC_SLOT_MASK;
+    uint32_t gen = (uint32_t)(handle >> LIVE_PROC_SLOT_BITS);
+    if (idx >= live_proc_len) return NULL;
+    live_proc_slot *s = live_proc_slots[idx];
+    if (!s->used || s->closing || s->gen != gen) return NULL;
+    return s;
+}
+
+/* Take a free slot for [pid] and its streams.  Returns the handle, or -1
+   when the table cannot grow (the caller closes the streams). */
+static int64_t live_proc_register(pid_t pid, FILE *fp, FILE *write_fp) {
+    pthread_mutex_lock(&live_proc_mu);
+    int idx = -1;
+    for (int k = 0; k < live_proc_len; k++)
+        if (!live_proc_slots[k]->used) { idx = k; break; }
+    if (idx < 0) {
+        if (live_proc_len > LIVE_PROC_SLOT_MASK) {
+            pthread_mutex_unlock(&live_proc_mu);
+            return -1;
+        }
+        if (live_proc_len == live_proc_cap) {
+            int ncap = live_proc_cap ? live_proc_cap * 2 : 64;
+            live_proc_slot **ns = (live_proc_slot **)realloc(
+                live_proc_slots, (size_t)ncap * sizeof(*ns));
+            if (!ns) { pthread_mutex_unlock(&live_proc_mu); return -1; }
+            live_proc_slots = ns;
+            live_proc_cap = ncap;
+        }
+        live_proc_slot *s = (live_proc_slot *)calloc(1, sizeof(*s));
+        if (!s) { pthread_mutex_unlock(&live_proc_mu); return -1; }
+        idx = live_proc_len++;
+        live_proc_slots[idx] = s;
+    }
+    live_proc_slot *s = live_proc_slots[idx];
+    s->gen++;
+    s->used = 1; s->closing = 0; s->rbusy = 0; s->wbusy = 0;
+    s->pid = pid; s->fp = fp; s->write_fp = write_fp;
+    int64_t handle = ((int64_t)s->gen << LIVE_PROC_SLOT_BITS) | idx;
+    pthread_mutex_unlock(&live_proc_mu);
+    return handle;
+}
 
 /* process_spawn_async(command, args) → Result(LiveProcess(pid,id), String) */
 void *march_process_spawn_async(void *cmd_obj, void *args_list) {
@@ -9158,27 +9324,42 @@ void *march_process_spawn_async(void *cmd_obj, void *args_list) {
         close(stdin_pfd[1]); close(stdout_pfd[0]);
         return mk_err_cstr("fork failed");
     }
-    /* Register */
-    int id = live_proc_next++ % LIVE_PROC_MAX;
-    if (live_proc_reg[id].fp)       { fclose(live_proc_reg[id].fp);       live_proc_reg[id].fp = NULL; }
-    if (live_proc_reg[id].write_fp) { fclose(live_proc_reg[id].write_fp); live_proc_reg[id].write_fp = NULL; }
-    live_proc_reg[id].used     = 1;
-    live_proc_reg[id].pid      = pid;
-    live_proc_reg[id].fp       = fdopen(stdout_pfd[0], "r");
-    live_proc_reg[id].write_fp = fdopen(stdin_pfd[1],  "w");
-    /* Build LiveProcess(pid, id): tag=0, 2 int64 fields */
+    /* The parent's ends must not leak into later children: a child that
+       inherits another child's stdin write end keeps that child from ever
+       seeing EOF. */
+    fcntl(stdin_pfd[1],  F_SETFD, FD_CLOEXEC);
+    fcntl(stdout_pfd[0], F_SETFD, FD_CLOEXEC);
+    FILE *rfp = fdopen(stdout_pfd[0], "r");
+    FILE *wfp = fdopen(stdin_pfd[1],  "w");
+    int64_t handle = (rfp && wfp) ? live_proc_register(pid, rfp, wfp) : -1;
+    if (handle < 0) {
+        if (rfp) fclose(rfp); else close(stdout_pfd[0]);
+        if (wfp) fclose(wfp); else close(stdin_pfd[1]);
+        kill(pid, SIGTERM);
+        waitpid(pid, NULL, 0);
+        return mk_err_cstr("too many live processes");
+    }
+    /* Build LiveProcess(pid, handle): tag=0, 2 int64 fields */
     void *lp = march_alloc(16 + 16);
     MARCH_FIELD(lp, 0) = (int64_t)pid;
-    MARCH_FIELD(lp, 1) = (int64_t)id;
+    MARCH_FIELD(lp, 1) = handle;
     return mk_ok(lp);
 }
 
 /* process_read_line(lp) → Option(String) */
 void *march_process_read_line(void *lp_obj) {
-    int64_t id = MARCH_FIELD(lp_obj, 1);
-    if (id < 0 || id >= LIVE_PROC_MAX || !live_proc_reg[id].used || !live_proc_reg[id].fp)
-        return make_none();
-    char buf[4096]; char *line = fgets(buf, sizeof(buf), live_proc_reg[id].fp);
+    int64_t handle = MARCH_FIELD(lp_obj, 1);
+    pthread_mutex_lock(&live_proc_mu);
+    live_proc_slot *s = live_proc_lookup_locked(handle);
+    FILE *fp = s ? s->fp : NULL;
+    if (fp) s->rbusy++;
+    pthread_mutex_unlock(&live_proc_mu);
+    if (!fp) return make_none();
+    char buf[4096]; char *line = fgets(buf, sizeof(buf), fp);
+    pthread_mutex_lock(&live_proc_mu);
+    s->rbusy--;
+    live_proc_settle_locked(s);
+    pthread_mutex_unlock(&live_proc_mu);
     if (!line) return make_none();
     size_t len = strlen(line);
     if (len > 0 && line[len-1] == '\n') len--;  /* strip newline */
@@ -9187,12 +9368,20 @@ void *march_process_read_line(void *lp_obj) {
 
 /* process_write(lp, data) → () — write raw bytes to the process's stdin */
 int64_t march_process_write(void *lp_obj, void *data_obj) {
-    int64_t id = MARCH_FIELD(lp_obj, 1);
-    if (id < 0 || id >= LIVE_PROC_MAX || !live_proc_reg[id].used || !live_proc_reg[id].write_fp)
-        return 0;
-    march_string *s = (march_string *)data_obj;
-    fwrite(s->data, 1, (size_t)s->len, live_proc_reg[id].write_fp);
-    fflush(live_proc_reg[id].write_fp);
+    int64_t handle = MARCH_FIELD(lp_obj, 1);
+    pthread_mutex_lock(&live_proc_mu);
+    live_proc_slot *s = live_proc_lookup_locked(handle);
+    FILE *wfp = s ? s->write_fp : NULL;
+    if (wfp) s->wbusy++;
+    pthread_mutex_unlock(&live_proc_mu);
+    if (!wfp) return 0;
+    march_string *str = (march_string *)data_obj;
+    fwrite(str->data, 1, (size_t)str->len, wfp);
+    fflush(wfp);
+    pthread_mutex_lock(&live_proc_mu);
+    s->wbusy--;
+    live_proc_settle_locked(s);
+    pthread_mutex_unlock(&live_proc_mu);
     return 0;
 }
 
@@ -9203,15 +9392,19 @@ int64_t march_process_kill_proc(void *lp_obj) {
     return 0;
 }
 
-/* process_wait_proc(lp) → Int (exit code) */
+/* process_wait_proc(lp) → Int (exit code).  Closes the streams (a stream a
+   reader or writer is still inside is closed when it leaves) and releases
+   the slot; the handle is stale afterwards. */
 int64_t march_process_wait_proc(void *lp_obj) {
-    int64_t pid = MARCH_FIELD(lp_obj, 0);
-    int64_t id  = MARCH_FIELD(lp_obj, 1);
-    if (id >= 0 && id < LIVE_PROC_MAX && live_proc_reg[id].used) {
-        if (live_proc_reg[id].fp)       { fclose(live_proc_reg[id].fp);       live_proc_reg[id].fp = NULL; }
-        if (live_proc_reg[id].write_fp) { fclose(live_proc_reg[id].write_fp); live_proc_reg[id].write_fp = NULL; }
-        live_proc_reg[id].used = 0;
+    int64_t pid    = MARCH_FIELD(lp_obj, 0);
+    int64_t handle = MARCH_FIELD(lp_obj, 1);
+    pthread_mutex_lock(&live_proc_mu);
+    live_proc_slot *s = live_proc_lookup_locked(handle);
+    if (s) {
+        s->closing = 1;
+        live_proc_settle_locked(s);
     }
+    pthread_mutex_unlock(&live_proc_mu);
     int status = 0;
     waitpid((pid_t)pid, &status, 0);
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
@@ -10722,6 +10915,219 @@ static inline double clo_call_dbl_dbl_dbl(void *clo, double x, double y) {
     return march_unbox_float(wire_ret);
 }
 
+/* ── Stable sort of a List by a comparator: Array.sort_by, RRB.Vec.sort_by ──
+ *
+ * march_list_stable_sort_by(xs, le) and march_list_sort_by_int_key(xs, key) -- the
+ * builtins behind Array.sort_by / sort_by_key and RRB.Vec.sort_by /
+ * sort_by_key (specs/progress/2026-09-28-array-sort-by-stable.md).
+ *
+ * Contract, the same as List.sort_by's: le(a, b) true means a may come
+ * before b, and the sort is stable for a `<=`-style le (a total preorder):
+ * equal elements keep their input order. With a strict `<` the relative
+ * order of equal elements is unspecified, as it is for List.sort_by.
+ *
+ * The list is BORROWED (march_decrc frees a cell shallowly, so consuming a
+ * list here would mean walking it): the elements are read into a flat
+ * buffer, sorted, and a fresh list is built holding one new reference to
+ * each element. The closure is OWNED: one reference is taken per call (a
+ * call consumes the closure it is given) and ours is released at the end,
+ * as native_int_arr_map does. Elements are passed to the closure in their
+ * wire form, exactly as a List cell holds them (tagged Int/Bool, boxed
+ * Float, pointers), each with a reference of its own: a closure call owns
+ * its arguments (see ssort_le_closure).
+ *
+ * The algorithm is an adaptive stable merge sort, chosen because every
+ * comparison is a closure call, so comparisons dominate and merging is
+ * close to the minimum number of them: natural runs (ascending, or strictly
+ * descending and reversed -- reversing a strictly descending run is stable)
+ * are found first, runs shorter than a minimum are extended by binary
+ * insertion, then adjacent runs are merged bottom-up. Each merge first
+ * skips the prefix of the left run and the suffix of the right run that are
+ * already in place (binary search), then copies the SMALLER of the two
+ * remaining parts to a scratch buffer and merges from the end that makes
+ * the merge in place: an already sorted or reversed input costs n - 1
+ * comparisons and no merge. This is the run detection, extension and
+ * trimmed merge of driftsort / timsort; it omits driftsort's lazy
+ * "unsorted chunk + stable quicksort" path, which trades extra comparisons
+ * (cheap for Rust's inlined comparators, not for a closure call) for fewer
+ * moves.
+ *
+ * list_sort_by_int_key calls the key closure ONCE per element (not once per
+ * comparison), then sorts element indices by key with the same merge sort
+ * and an inline `<=` on the keys, so equal keys keep input order. */
+#define SSORT_DEFINE(NAME, E, LE)                                              \
+static int64_t NAME##_upper(E const *v, int64_t n, E x, void *ctx) {           \
+    int64_t lo = 0, hi = n;       /* first i with !LE(v[i], x) */              \
+    while (lo < hi) {                                                          \
+        int64_t mid = lo + (hi - lo) / 2;                                      \
+        if (LE(ctx, v[mid], x)) lo = mid + 1; else hi = mid;                   \
+    }                                                                          \
+    return lo;                                                                 \
+}                                                                              \
+static int64_t NAME##_first_ge(E const *v, int64_t n, E x, void *ctx) {        \
+    int64_t lo = 0, hi = n;       /* first i with LE(x, v[i]) */               \
+    while (lo < hi) {                                                          \
+        int64_t mid = lo + (hi - lo) / 2;                                      \
+        if (LE(ctx, x, v[mid])) hi = mid; else lo = mid + 1;                   \
+    }                                                                          \
+    return lo;                                                                 \
+}                                                                              \
+static void NAME##_insert(E *v, int64_t sorted, int64_t n, void *ctx) {        \
+    for (int64_t i = sorted; i < n; i++) {                                     \
+        E x = v[i];                                                            \
+        int64_t at = NAME##_upper(v, i, x, ctx);                               \
+        memmove(v + at + 1, v + at, (size_t)(i - at) * sizeof(E));             \
+        v[at] = x;                                                             \
+    }                                                                          \
+}                                                                              \
+/* merge v[a..m) and v[m..b), both sorted; buf holds >= (b - a) / 2 + 1 */     \
+static void NAME##_merge(E *v, int64_t a, int64_t m, int64_t b, E *buf,        \
+                         void *ctx) {                                          \
+    if (LE(ctx, v[m - 1], v[m])) return;          /* already in order */       \
+    int64_t i = a + NAME##_upper(v + a, m - a, v[m], ctx);                     \
+    int64_t j = m + NAME##_first_ge(v + m, b - m, v[m - 1], ctx);              \
+    int64_t la = m - i, lb = j - m;                                            \
+    if (la <= lb) {                                                            \
+        memcpy(buf, v + i, (size_t)la * sizeof(E));                            \
+        int64_t o = i, x = 0, y = m;                                           \
+        while (x < la && y < j) {                                              \
+            if (LE(ctx, buf[x], v[y])) v[o++] = buf[x++];                      \
+            else v[o++] = v[y++];                                              \
+        }                                                                      \
+        memcpy(v + o, buf + x, (size_t)(la - x) * sizeof(E));                  \
+    } else {                                                                   \
+        memcpy(buf, v + m, (size_t)lb * sizeof(E));                            \
+        int64_t o = j, x = m, y = lb;                                          \
+        while (x > i && y > 0) {                                               \
+            if (LE(ctx, v[x - 1], buf[y - 1])) v[--o] = buf[--y];              \
+            else v[--o] = v[--x];                                              \
+        }                                                                      \
+        memcpy(v + o - y, buf, (size_t)y * sizeof(E));                         \
+    }                                                                          \
+}                                                                              \
+static int NAME##_sort(E *v, int64_t n, void *ctx) {                           \
+    if (n < 2) return 1;                                                       \
+    const int64_t minrun = 16;                                                 \
+    int64_t cap = 64, r = 0;                                                   \
+    int64_t *st = (int64_t *)malloc((size_t)cap * sizeof(int64_t));            \
+    if (!st) return 0;                                                         \
+    for (int64_t i = 0; i < n;) {                                              \
+        int64_t j = i + 1;                                                     \
+        if (j < n && !LE(ctx, v[i], v[j])) {                                   \
+            while (j < n && !LE(ctx, v[j - 1], v[j])) j++;                     \
+            for (int64_t lo = i, hi = j - 1; lo < hi; lo++, hi--) {            \
+                E t = v[lo]; v[lo] = v[hi]; v[hi] = t;                         \
+            }                                                                  \
+        } else {                                                               \
+            while (j < n && LE(ctx, v[j - 1], v[j])) j++;                      \
+        }                                                                      \
+        if (j - i < minrun && j < n) {                                         \
+            int64_t e = i + minrun < n ? i + minrun : n;                       \
+            NAME##_insert(v + i, j - i, e - i, ctx);                           \
+            j = e;                                                             \
+        }                                                                      \
+        if (r + 2 > cap) {                                                     \
+            cap *= 2;                                                          \
+            int64_t *ns = (int64_t *)realloc(st, (size_t)cap * sizeof(int64_t)); \
+            if (!ns) { free(st); return 0; }                                   \
+            st = ns;                                                           \
+        }                                                                      \
+        st[r++] = i;                                                           \
+        i = j;                                                                 \
+    }                                                                          \
+    if (r > 1) {                                                               \
+        E *buf = (E *)malloc((size_t)(n / 2 + 1) * sizeof(E));                 \
+        if (!buf) { free(st); return 0; }                                      \
+        st[r] = n;                                                             \
+        while (r > 1) {                                                        \
+            int64_t w = 0;                                                     \
+            for (int64_t k = 0; k < r; k += 2) {                               \
+                if (k + 1 < r) NAME##_merge(v, st[k], st[k + 1], st[k + 2], buf, ctx); \
+                st[w++] = st[k];                                               \
+            }                                                                  \
+            st[w] = n; r = w;                                                  \
+        }                                                                      \
+        free(buf);                                                             \
+    }                                                                          \
+    free(st);                                                                  \
+    return 1;                                                                  \
+}
+
+/* Every closure call transfers a reference to the closure AND to each
+ * argument: an apply function's parameters are all owned (Borrow pins them;
+ * see Clo_flags), so a comparator that destructures a tuple releases it. The
+ * list cells still hold the elements, so each call gets fresh references. */
+static inline int ssort_le_closure(void *clo, void *a, void *b) {
+    march_incrc(clo);
+    march_incrc(a);
+    march_incrc(b);
+    return ((int64_t)(intptr_t)clo_apply_ptr2(clo, a, b) >> 1) != 0;
+}
+#define SSORT_LE_CLO(ctx, a, b) ssort_le_closure((ctx), (a), (b))
+#define SSORT_LE_KEY(ctx, a, b) (((const int64_t *)(ctx))[a] <= ((const int64_t *)(ctx))[b])
+SSORT_DEFINE(ssort_clo, void *, SSORT_LE_CLO)
+SSORT_DEFINE(ssort_key, int64_t, SSORT_LE_KEY)
+
+static int64_t ssort_list_len(void *lst) {
+    int64_t n = 0;
+    for (void *c = lst; *(int32_t *)((char *)c + 8) == 1; c = *(void **)((char *)c + 24)) n++;
+    return n;
+}
+
+static void ssort_oom(const char *who) {
+    fprintf(stderr, "march: %s: out of memory\n", who);
+    exit(1);
+}
+
+/* Build a fresh list of v[0..n) (one new reference per element). */
+static void *ssort_build_list(void **v, int64_t n) {
+    void *lst = make_nil();
+    for (int64_t i = n; i-- > 0;) {
+        march_incrc(v[i]);
+        lst = make_cons(v[i], lst);
+    }
+    return lst;
+}
+
+void *march_list_stable_sort_by(void *lst, void *le) {
+    int64_t n = ssort_list_len(lst);
+    void **v = (void **)malloc((size_t)(n > 0 ? n : 1) * sizeof(void *));
+    if (!v) ssort_oom("list_stable_sort_by");
+    int64_t i = 0;
+    for (void *c = lst; i < n; c = *(void **)((char *)c + 24)) v[i++] = *(void **)((char *)c + 16);
+    if (!ssort_clo_sort(v, n, le)) ssort_oom("list_stable_sort_by");
+    void *out = ssort_build_list(v, n);
+    free(v);
+    march_decrc(le);
+    return out;
+}
+
+void *march_list_sort_by_int_key(void *lst, void *key) {
+    int64_t n = ssort_list_len(lst);
+    size_t sz = (size_t)(n > 0 ? n : 1);
+    void **v = (void **)malloc(sz * sizeof(void *));
+    int64_t *keys = (int64_t *)malloc(sz * sizeof(int64_t));
+    int64_t *idx = (int64_t *)malloc(sz * sizeof(int64_t));
+    if (!v || !keys || !idx) ssort_oom("list_sort_by_int_key");
+    int64_t i = 0;
+    for (void *c = lst; i < n; c = *(void **)((char *)c + 24), i++) {
+        v[i] = *(void **)((char *)c + 16);
+        march_incrc(key);
+        march_incrc(v[i]);          /* the call owns its argument */
+        keys[i] = (int64_t)(intptr_t)clo_apply_ptr(key, v[i]) >> 1;
+        idx[i] = i;
+    }
+    if (!ssort_key_sort(idx, n, keys)) ssort_oom("list_sort_by_int_key");
+    void *out = make_nil();
+    for (int64_t k = n; k-- > 0;) {
+        march_incrc(v[idx[k]]);
+        out = make_cons(v[idx[k]], out);
+    }
+    free(v); free(keys); free(idx);
+    march_decrc(key);
+    return out;
+}
+
 /* Uninitialized allocation for llvm_emit's inline map loop (native_map_inline.ml):
  * every slot is written by the loop before any read, so leaving them
  * uninitialized (unlike native_int_arr_make/native_float_arr_make, which
@@ -10887,10 +11293,22 @@ int64_t native_int_arr_max(void *arr) {
  *   (Knuth 5.3.4). Verified by the 0-1 principle (256 cases) in
  *   bench/c/native_sort_bench.c.
  *
- * nsort_small_W — network each aligned block of 8, then one insertion pass.
- *   The insertion pass is near-linear afterwards because every element is
- *   already within its own block, which is the point of doing the network
- *   first.
+ * nsort_small_W — the n <= 32 base case, Rust's small_sort_network layout
+ *   (core::slice::sort::shared::smallsort): below 18 elements one region,
+ *   otherwise each half is a region; nsort_region_W presorts a region's first
+ *   13 / 9 / 8 elements with an optimal network (nsort_net13_W, 45
+ *   comparators; nsort_net9_W, 25; nsort_net8_W, 19 -- the last is not in
+ *   Rust, whose 8-element region is plain insertion and measured 5.9x slower
+ *   than net8 at n = 8) and extends it by insertion; the two halves are then
+ *   merged branchlessly from both ends at once into a 32-slot stack buffer
+ *   and copied back. Below 8 it is plain insertion. Replaced "net8 on every
+ *   aligned block, then one insertion pass" on 2026-09-28: 2.1x faster summed
+ *   over n = 2..32 on random input, and 0.74-0.80x of the old time for a
+ *   whole random sort at n = 1k / 100k / 5M, with no ordered pattern slower
+ *   (bench/c/native_sort_bench.c `small` and default modes; numbers in
+ *   specs/progress/2026-09-28-native-sort-rust-small-sort-network.md).
+ *   net9 and net13 are verified by the 0-1 principle (512 and 8192 inputs),
+ *   and the whole routine by every 0/1 input for n <= 22, in that harness.
  *
  * nsort_pivot_W — pseudo-median of 9 at stride n/8 for n >= 64, median of 3
  *   below.
@@ -10923,8 +11341,27 @@ int64_t native_int_arr_max(void *arr) {
  *
  * nsort_W — the entry. Top-level full-run scan first: a wholly sorted or
  *   wholly descending array is finished in one pass. Only at the top level,
- *   as ipnsort does; checking every segment costs more than it saves. The
- *   depth limit is 2*floor(log2 n), unless the MARCH_TEST_NSORT_DEPTH_LIMIT
+ *   as ipnsort does; checking every segment costs more than it saves. Then,
+ *   for n >= 1024, two presorted shapes the quicksort handles badly (added
+ *   2026-09-28, specs/progress/2026-09-28-native-sort-natural-run-merging.md):
+ *     - two runs (the rest after the first run is one more run, ascending or
+ *       strictly descending, e.g. organ-pipe input): nsort_merge2_W merges
+ *       them in place after trimming the prefix/suffix already in position,
+ *       with a malloc'd buffer the size of the smaller trimmed run (<= n/2);
+ *     - nearly sorted (at most 4 descents among the first 64 elements):
+ *       nsort_outliers_W streams the array once, keeping a sorted main
+ *       sequence compacted in place and moving the elements that break it --
+ *       evicting up to 8 kept elements when a later one shows they were the
+ *       misfits -- into a buffer of at most n/16; it gives up (returns 0) as
+ *       soon as the outlier rate passes 1/16 after 256 elements, putting the
+ *       moved elements back into the exactly-sized gap they left, so the
+ *       array is still a permutation of the input. On success the outliers
+ *       are sorted (by nsort_W) and merged back from the end in O(n).
+ *   Either step falls through to the quicksort if its allocation fails.
+ *   Measured in bench/c/native_sort_bench.c `pre` against the plain core:
+ *   nearly-sorted 0.14-0.20x, organ 0.19-0.32x from n = 10k to 5M, every
+ *   other pattern 0.97-1.02x at n = 256..5M. The depth limit is
+ *   2*floor(log2 n), unless the MARCH_TEST_NSORT_DEPTH_LIMIT
  *   hook (nsort_forced_limit) overrides it, which every width honours. */
 
 static inline uint64_t nsort_rng(uint64_t *s) {
@@ -10987,10 +11424,73 @@ static void nsort_insertion_##W(T *v, int64_t n) {                             \
     }                                                                          \
 }                                                                              \
                                                                                \
+static inline void nsort_net9_##W(T *v) {                                      \
+    NSORT_CSWAP_T(T, 0, 3); NSORT_CSWAP_T(T, 1, 7);                            \
+    NSORT_CSWAP_T(T, 2, 5); NSORT_CSWAP_T(T, 4, 8);                            \
+    NSORT_CSWAP_T(T, 0, 7); NSORT_CSWAP_T(T, 2, 4);                            \
+    NSORT_CSWAP_T(T, 3, 8); NSORT_CSWAP_T(T, 5, 6);                            \
+    NSORT_CSWAP_T(T, 0, 2); NSORT_CSWAP_T(T, 1, 3);                            \
+    NSORT_CSWAP_T(T, 4, 5); NSORT_CSWAP_T(T, 7, 8);                            \
+    NSORT_CSWAP_T(T, 1, 4); NSORT_CSWAP_T(T, 3, 6); NSORT_CSWAP_T(T, 5, 7);    \
+    NSORT_CSWAP_T(T, 0, 1); NSORT_CSWAP_T(T, 2, 4);                            \
+    NSORT_CSWAP_T(T, 3, 5); NSORT_CSWAP_T(T, 6, 8);                            \
+    NSORT_CSWAP_T(T, 2, 3); NSORT_CSWAP_T(T, 4, 5); NSORT_CSWAP_T(T, 6, 7);    \
+    NSORT_CSWAP_T(T, 1, 2); NSORT_CSWAP_T(T, 3, 4); NSORT_CSWAP_T(T, 5, 6);    \
+}                                                                              \
+                                                                               \
+static inline void nsort_net13_##W(T *v) {                                     \
+    NSORT_CSWAP_T(T, 0, 12); NSORT_CSWAP_T(T, 1, 10); NSORT_CSWAP_T(T, 2, 9);  \
+    NSORT_CSWAP_T(T, 3, 7);  NSORT_CSWAP_T(T, 5, 11); NSORT_CSWAP_T(T, 6, 8);  \
+    NSORT_CSWAP_T(T, 1, 6);  NSORT_CSWAP_T(T, 2, 3);  NSORT_CSWAP_T(T, 4, 11); \
+    NSORT_CSWAP_T(T, 7, 9);  NSORT_CSWAP_T(T, 8, 10);                          \
+    NSORT_CSWAP_T(T, 0, 4);  NSORT_CSWAP_T(T, 1, 2);  NSORT_CSWAP_T(T, 3, 6);  \
+    NSORT_CSWAP_T(T, 7, 8);  NSORT_CSWAP_T(T, 9, 10); NSORT_CSWAP_T(T, 11, 12);\
+    NSORT_CSWAP_T(T, 4, 6);  NSORT_CSWAP_T(T, 5, 9);  NSORT_CSWAP_T(T, 8, 11); \
+    NSORT_CSWAP_T(T, 10, 12);                                                  \
+    NSORT_CSWAP_T(T, 0, 5);  NSORT_CSWAP_T(T, 3, 8);  NSORT_CSWAP_T(T, 4, 7);  \
+    NSORT_CSWAP_T(T, 6, 11); NSORT_CSWAP_T(T, 9, 10);                          \
+    NSORT_CSWAP_T(T, 0, 1);  NSORT_CSWAP_T(T, 2, 5);  NSORT_CSWAP_T(T, 6, 9);  \
+    NSORT_CSWAP_T(T, 7, 8);  NSORT_CSWAP_T(T, 10, 11);                         \
+    NSORT_CSWAP_T(T, 1, 3);  NSORT_CSWAP_T(T, 2, 4);  NSORT_CSWAP_T(T, 5, 6);  \
+    NSORT_CSWAP_T(T, 9, 10);                                                   \
+    NSORT_CSWAP_T(T, 1, 2);  NSORT_CSWAP_T(T, 3, 4);  NSORT_CSWAP_T(T, 5, 7);  \
+    NSORT_CSWAP_T(T, 6, 8);                                                    \
+    NSORT_CSWAP_T(T, 2, 3);  NSORT_CSWAP_T(T, 4, 5);  NSORT_CSWAP_T(T, 6, 7);  \
+    NSORT_CSWAP_T(T, 8, 9);                                                    \
+    NSORT_CSWAP_T(T, 3, 4);  NSORT_CSWAP_T(T, 5, 6);                           \
+}                                                                              \
+                                                                               \
+static inline void nsort_region_##W(T *v, int64_t n) {                         \
+    int64_t pre = 1;                                                           \
+    if (n >= 13)     { nsort_net13_##W(v); pre = 13; }                         \
+    else if (n >= 9) { nsort_net9_##W(v);  pre = 9;  }                         \
+    else if (n >= 8) { nsort_net8_##W(v);  pre = 8;  }                         \
+    for (int64_t i = pre; i < n; i++) {                                        \
+        T x = v[i]; int64_t j = i;                                             \
+        while (j > 0 && v[j - 1] > x) { v[j] = v[j - 1]; j--; }                \
+        v[j] = x;                                                              \
+    }                                                                          \
+}                                                                              \
+                                                                               \
 static void nsort_small_##W(T *v, int64_t n) {                                 \
-    int64_t i = 0;                                                             \
-    for (; i + 8 <= n; i += 8) nsort_net8_##W(v + i);                          \
-    nsort_insertion_##W(v, n);                                                 \
+    if (n < 8) { nsort_insertion_##W(v, n); return; }                          \
+    if (n < 18) { nsort_region_##W(v, n); return; }                            \
+    int64_t half = n / 2;                                                      \
+    nsort_region_##W(v, half);                                                 \
+    nsort_region_##W(v + half, n - half);                                      \
+    T buf[32];                                                                 \
+    const T *l = v, *r = v + half, *lr = v + half - 1, *rr = v + n - 1;        \
+    T *out = buf, *out_rev = buf + n - 1;                                      \
+    for (int64_t i = 0; i < half; i++) {                                       \
+        int take_l = !(*r < *l);                                               \
+        *out++ = take_l ? *l : *r;                                             \
+        l += take_l; r += !take_l;                                             \
+        int take_lr = *rr < *lr;                                               \
+        *out_rev-- = take_lr ? *lr : *rr;                                      \
+        lr -= take_lr; rr -= !take_lr;                                         \
+    }                                                                          \
+    if (n & 1) *out = (l <= lr) ? *l : *r;                                     \
+    memcpy(v, buf, (size_t)n * sizeof(T));                                     \
 }                                                                              \
                                                                                \
 static void nsort_heap_##W(T *v, int64_t n) {                                  \
@@ -11099,12 +11599,110 @@ static void nsort_rec_##W(T *v, int64_t n, const T *ancestor,                  \
     }                                                                          \
 }                                                                              \
                                                                                \
+static void nsort_##W(T *v, int64_t n);                                        \
+                                                                               \
+static int64_t nsort_upper_##W(const T *v, int64_t n, T x) {                   \
+    int64_t lo = 0, hi = n;                                                    \
+    while (lo < hi) {                                                          \
+        int64_t mid = lo + (hi - lo) / 2;                                      \
+        if (!(x < v[mid])) lo = mid + 1; else hi = mid;                        \
+    }                                                                          \
+    return lo;                                                                 \
+}                                                                              \
+                                                                               \
+static int64_t nsort_lower_##W(const T *v, int64_t n, T x) {                   \
+    int64_t lo = 0, hi = n;                                                    \
+    while (lo < hi) {                                                          \
+        int64_t mid = lo + (hi - lo) / 2;                                      \
+        if (v[mid] < x) lo = mid + 1; else hi = mid;                           \
+    }                                                                          \
+    return lo;                                                                 \
+}                                                                              \
+                                                                               \
+static int nsort_merge2_##W(T *v, int64_t m, int64_t n) {                      \
+    int64_t i = nsort_upper_##W(v, m, v[m]);                                   \
+    int64_t j = m + nsort_lower_##W(v + m, n - m, v[m - 1]);                   \
+    int64_t la = m - i, lb = j - m;                                            \
+    if (la == 0 || lb == 0) return 1;                                          \
+    if (la <= lb) {                                                            \
+        T *buf = (T *)malloc((size_t)la * sizeof(T));                          \
+        if (!buf) return 0;                                                    \
+        memcpy(buf, v + i, (size_t)la * sizeof(T));                            \
+        int64_t o = i, x = 0, y = m;                                           \
+        while (x < la && y < j) {                                              \
+            int take_y = v[y] < buf[x];                                        \
+            v[o++] = take_y ? v[y] : buf[x];                                   \
+            y += take_y; x += !take_y;                                         \
+        }                                                                      \
+        memcpy(v + o, buf + x, (size_t)(la - x) * sizeof(T));                  \
+        free(buf);                                                             \
+    } else {                                                                   \
+        T *buf = (T *)malloc((size_t)lb * sizeof(T));                          \
+        if (!buf) return 0;                                                    \
+        memcpy(buf, v + m, (size_t)lb * sizeof(T));                            \
+        int64_t o = j, x = m, y = lb;                                          \
+        while (x > i && y > 0) {                                               \
+            int take_x = buf[y - 1] < v[x - 1];                                \
+            v[--o] = take_x ? v[x - 1] : buf[y - 1];                           \
+            x -= take_x; y -= !take_x;                                         \
+        }                                                                      \
+        memcpy(v + o - y, buf, (size_t)y * sizeof(T));                         \
+        free(buf);                                                             \
+    }                                                                          \
+    return 1;                                                                  \
+}                                                                              \
+                                                                               \
+static int nsort_outliers_##W(T *v, int64_t n) {                               \
+    int64_t cap = n / 16;                                                      \
+    if (cap < 16) return 0;                                                    \
+    T *out = (T *)malloc((size_t)cap * sizeof(T));                             \
+    if (!out) return 0;                                                        \
+    int64_t m = 0, k = 0, i = 0;                                               \
+    for (; i < n; i++) {                                                       \
+        T x = v[i];                                                            \
+        int64_t pop = 0;                                                       \
+        if (m > 0 && x < v[m - 1] && (i + 1 >= n || !(v[i + 1] < x))) {       \
+            int64_t j = m;                                                     \
+            while (j > 0 && m - j < 8 && x < v[j - 1]) j--;                    \
+            if (j == 0 || !(x < v[j - 1])) pop = m - j;                        \
+        }                                                                      \
+        int outlier = pop == 0                                                 \
+            && ((m > 0 && x < v[m - 1])                                        \
+                || (i + 1 < n && v[i + 1] < x                                  \
+                    && (m == 0 || !(v[i + 1] < v[m - 1]))));                   \
+        if (pop > 0 || outlier) {                                              \
+            if (k + pop + 1 > cap || (i >= 256 && (k + pop) * 16 > i)) {       \
+                memcpy(v + m, out, (size_t)k * sizeof(T));                     \
+                free(out);                                                     \
+                return 0;                                                      \
+            }                                                                  \
+            if (pop > 0) {                                                     \
+                memcpy(out + k, v + m - pop, (size_t)pop * sizeof(T));         \
+                k += pop; m -= pop;                                            \
+                v[m++] = x;                                                    \
+            } else {                                                           \
+                out[k++] = x;                                                  \
+            }                                                                  \
+        } else {                                                               \
+            v[m++] = x;                                                        \
+        }                                                                      \
+    }                                                                          \
+    nsort_##W(out, k);                                                         \
+    for (int64_t o = n, am = m, b = k; b > 0;) {                               \
+        if (am > 0 && out[b - 1] < v[am - 1]) v[--o] = v[--am];                \
+        else v[--o] = out[--b];                                                \
+    }                                                                          \
+    free(out);                                                                 \
+    return 1;                                                                  \
+}                                                                              \
+                                                                               \
 static void nsort_##W(T *v, int64_t n) {                                       \
     if (n < 2) return;                                                         \
     if (n <= 32) { nsort_small_##W(v, n); return; }                            \
                                                                                \
     int64_t i = 1;                                                             \
-    if (v[1] < v[0]) {                                                         \
+    int first_desc = v[1] < v[0];                                              \
+    if (first_desc) {                                                          \
         while (i < n && v[i] < v[i - 1]) i++;                                  \
         if (i == n) {                                                          \
             for (int64_t lo = 0, hi = n - 1; lo < hi; lo++, hi--)              \
@@ -11114,6 +11712,26 @@ static void nsort_##W(T *v, int64_t n) {                                       \
     } else {                                                                   \
         while (i < n && !(v[i] < v[i - 1])) i++;                               \
         if (i == n) return;                                                    \
+    }                                                                          \
+                                                                               \
+    if (n >= 1024) {                                                           \
+        int64_t j = i + 1;                                                     \
+        int second_desc = j < n && v[j] < v[i];                                \
+        if (second_desc) { while (j < n && v[j] < v[j - 1]) j++; }             \
+        else { while (j < n && !(v[j] < v[j - 1])) j++; }                      \
+        if (j == n) {                                                          \
+            if (first_desc)                                                    \
+                for (int64_t lo = 0, hi = i - 1; lo < hi; lo++, hi--)          \
+                    nsort_swap_##W(&v[lo], &v[hi]);                            \
+            if (second_desc)                                                   \
+                for (int64_t lo = i, hi = n - 1; lo < hi; lo++, hi--)          \
+                    nsort_swap_##W(&v[lo], &v[hi]);                            \
+            if (nsort_merge2_##W(v, i, n)) return;                             \
+        } else {                                                               \
+            int desc = 0;                                                      \
+            for (int64_t k = 1; k < 64; k++) desc += v[k] < v[k - 1];          \
+            if (desc <= 4 && nsort_outliers_##W(v, n)) return;                 \
+        }                                                                      \
     }                                                                          \
                                                                                \
     int limit = 0;                                                             \
@@ -12207,8 +12825,9 @@ void *march_uuid_v7(void) {
  * Unit-returning entries return NULL: the compiled Unit value is 0 (see
  * mk_ok_unit), and a fresh 16-byte cell here was never released by anyone.
  *
- * Ownership (lib/tir/borrow.ml): add_context / add_field STORE their
- * arguments (owned); every other heap argument is only read (borrowed). */
+ * Ownership (lib/tir/borrow.ml): add_context / add_field and
+ * register_appender STORE their arguments (owned); every other heap
+ * argument is only read (borrowed). */
 
 static int64_t march_logger_level_val = 1;   /* Debug=0, Info=1, Warn=2, Error=3; Info
                                                 by default, as the interpreter
@@ -12356,16 +12975,83 @@ static void logger_float_str(double f, char *buf, size_t cap) {
     if (n + 1 < cap) { buf[n] = '.'; buf[n + 1] = '\0'; }
 }
 
+/* An atom's name.  Atoms compile to nameless FNV-1a hashes; each compiled
+ * module carries its own hash -> ":name" table as a generated INTERNAL
+ * function (llvm_toplevel.ml's emit_atom_show_table, emitted for any module
+ * that shows an atom or logs) and registers it here from a module
+ * constructor, unregistering it from a destructor so a dlclose'd REPL
+ * fragment or hot patch never leaves a dangling entry.  A registered namer
+ * answers NULL for a hash its module never saw; the lookup tries every
+ * registered table, newest first, and renders "null" when none knows it.
+ *
+ * The runtime deliberately defines no march_atom_to_string symbol.  Until
+ * 2026-09-29 it had a weak default of that name, and on Linux (flat ELF
+ * lookup) a REPL JIT fragment dlopen'd after the runtime .so bound its own
+ * `show(:ok)` call to that stub, which answered NULL: the fragment printed
+ * "null".  The generated table is internal now, so nothing can interpose it. */
+typedef void *(*march_atom_namer_fn)(int64_t);
+typedef struct march_atom_namer_node {
+    march_atom_namer_fn fn;
+    struct march_atom_namer_node *next;
+} march_atom_namer_node;
+static march_atom_namer_node *march_atom_namers = NULL;
+static pthread_mutex_t march_atom_namers_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void march_set_atom_namer(void *fn) {
+    if (!fn) return;
+    march_atom_namer_node *n = malloc(sizeof *n);
+    if (!n) return;
+    n->fn = (march_atom_namer_fn)fn;
+    pthread_mutex_lock(&march_atom_namers_mu);
+    n->next = march_atom_namers;
+    march_atom_namers = n;
+    pthread_mutex_unlock(&march_atom_namers_mu);
+}
+
+void march_unset_atom_namer(void *fn) {
+    pthread_mutex_lock(&march_atom_namers_mu);
+    for (march_atom_namer_node **pp = &march_atom_namers; *pp; pp = &(*pp)->next) {
+        if ((void *)(*pp)->fn == fn) {
+            march_atom_namer_node *dead = *pp;
+            *pp = dead->next;
+            free(dead);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&march_atom_namers_mu);
+}
+
+/* ":name" for [h] as a fresh March String, or NULL if no registered table
+ * knows it. */
+static void *march_atom_name_lookup(int64_t h) {
+    void *name = NULL;
+    pthread_mutex_lock(&march_atom_namers_mu);
+    for (march_atom_namer_node *n = march_atom_namers; n && !name; n = n->next)
+        name = n->fn(h);
+    pthread_mutex_unlock(&march_atom_namers_mu);
+    return name;
+}
+
 /* The text of a non-String LogValue, as eval_runtime.ml's
- * log_value_to_string renders it.  An LAtom's name is not known to the
- * runtime (atoms are interned integers), so it renders as "null" -- a
- * remaining divergence, filed with the audit. */
+ * log_value_to_string renders it.  An LAtom renders as ":name" through the
+ * program's atom table (until 2026-09-28 it always rendered as "null"). */
 static void logvalue_scalar_str(void *lv, char *buf, size_t cap) {
     int32_t tag = IS_HEAP_PTR(lv) ? *(int32_t *)((char *)lv + 8) : -1;
     switch (tag) {
     case 1: snprintf(buf, cap, "%" PRId64, *(int64_t *)((char *)lv + 16)); break;
     case 2: { double f; memcpy(&f, (char *)lv + 16, 8); logger_float_str(f, buf, cap); break; }
     case 3: snprintf(buf, cap, "%s", *(int64_t *)((char *)lv + 16) ? "true" : "false"); break;
+    case 4: {
+        void *name = march_atom_name_lookup(*(int64_t *)((char *)lv + 16));
+        if (!name) { snprintf(buf, cap, "null"); break; }
+        char sso[MARCH_SSO_MAX + 1];
+        int64_t n = march_str_len(name);
+        if ((size_t)n >= cap) n = (int64_t)cap - 1;
+        memcpy(buf, march_str_data(name, sso), (size_t)n);
+        buf[n] = '\0';
+        march_decrc(name);
+        break;
+    }
     default: snprintf(buf, cap, "null"); break;
     }
 }
@@ -12486,39 +13172,180 @@ void *march_logger_get_context(void) {
     return out;
 }
 
+/* Appenders: (name, LogEntry -> Unit) callbacks, newest first, as the
+ * interpreter keeps them (eval_builtins.ml: register prepends and replaces
+ * any entry of the same name; logger_appender_names lists newest first;
+ * dispatch calls every appender in that order).
+ *
+ * Ownership (lib/tir/borrow.ml): logger_register_appender STORES both its
+ * arguments, so they arrive owned and the registry holds that reference
+ * until the entry is replaced, removed or cleared, when it releases both.
+ * remove_appender only reads its name (borrowed).  Releasing a closure can
+ * free what it captured, so every release happens after the mutex is
+ * dropped.
+ *
+ * Until 2026-09-28 the compiled runtime kept no registry at all: register
+ * was a no-op, list_appenders was always [], and dispatch always printed the
+ * no-appender fallback line. */
+typedef struct logger_appender {
+    void *name;                     /* March String, owned */
+    void *cb;                       /* March closure LogEntry -> Unit, owned */
+    struct logger_appender *next;
+} logger_appender;
+static logger_appender *logger_appenders = NULL;
+
+static int logger_str_eq(void *a, void *b) {
+    char sa[MARCH_SSO_MAX + 1], sb[MARCH_SSO_MAX + 1];
+    int64_t la = march_str_len(a), lb = march_str_len(b);
+    return la == lb && memcmp(march_str_data(a, sa), march_str_data(b, sb), (size_t)la) == 0;
+}
+
+/* Unlink every entry named [name]; the caller releases them unlocked. */
+static logger_appender *logger_appender_unlink_locked(void *name) {
+    logger_appender *removed = NULL;
+    logger_appender **pp = &logger_appenders;
+    while (*pp) {
+        logger_appender *e = *pp;
+        if (logger_str_eq(e->name, name)) {
+            *pp = e->next;
+            e->next = removed;
+            removed = e;
+        } else {
+            pp = &e->next;
+        }
+    }
+    return removed;
+}
+
+static void logger_appender_free_list(logger_appender *e) {
+    while (e) {
+        logger_appender *next = e->next;
+        march_decrc(e->name);
+        march_decrc(e->cb);
+        free(e);
+        e = next;
+    }
+}
+
+void *march_logger_register_appender(void *name, void *cb) {
+    logger_appender *e = malloc(sizeof *e);
+    e->name = name;
+    e->cb = cb;
+    pthread_mutex_lock(&march_logger_mutex);
+    logger_appender *old = logger_appender_unlink_locked(name);
+    e->next = logger_appenders;
+    logger_appenders = e;
+    pthread_mutex_unlock(&march_logger_mutex);
+    logger_appender_free_list(old);
+    return NULL;
+}
+
+void *march_logger_remove_appender(void *name) {
+    pthread_mutex_lock(&march_logger_mutex);
+    logger_appender *old = logger_appender_unlink_locked(name);
+    pthread_mutex_unlock(&march_logger_mutex);
+    logger_appender_free_list(old);
+    return NULL;
+}
+
+void *march_logger_clear_appenders(void) {
+    pthread_mutex_lock(&march_logger_mutex);
+    logger_appender *old = logger_appenders;
+    logger_appenders = NULL;
+    pthread_mutex_unlock(&march_logger_mutex);
+    logger_appender_free_list(old);
+    return NULL;
+}
+
+/* A FRESH List(String) of the names, newest first; the caller owns it. */
+void *march_logger_appender_names(void) {
+    pthread_mutex_lock(&march_logger_mutex);
+    int64_t n = 0;
+    for (logger_appender *e = logger_appenders; e; e = e->next) n++;
+    void **names = n > 0 ? malloc((size_t)n * sizeof(void *)) : NULL;
+    int64_t i = 0;
+    for (logger_appender *e = logger_appenders; e; e = e->next) {
+        march_incrc(e->name);
+        names[i++] = e->name;
+    }
+    pthread_mutex_unlock(&march_logger_mutex);
+    void *out = logger_nil();
+    while (i > 0) out = logger_cons(names[--i], out);
+    free(names);
+    return out;
+}
+
+/* What an appender callback receives: Logger.AppenderCall(level_string,
+ * msg, ts_ms, source, fields), a fresh cell holding its own reference to
+ * each heap argument (the caller's are borrowed).  The callback is
+ * stdlib/logger.march's `deliver` wrapper, which builds the LogEntry in
+ * March: the runtime cannot build a Logger.Level itself, because the
+ * compiler picks its constructor tags (they are not 0..3 when another type
+ * is also named Level).  AppenderCall is a single-constructor type with a
+ * name nothing else uses, so its tag is 0; like any constructor field its
+ * Int is stored raw. */
+static void *logger_appender_call(void *level_str, void *msg, int64_t ts_ms,
+                                  void *source, void *fields) {
+    void *cell = march_alloc(16 + 5 * 8);
+    void **fp = (void **)((char *)cell + 16);
+    march_incrc(level_str); fp[0] = level_str;
+    march_incrc(msg);       fp[1] = msg;
+    *(int64_t *)&fp[2] = ts_ms;
+    march_incrc(source);    fp[3] = source;
+    march_incrc(fields);    fp[4] = fields;
+    return cell;
+}
+
 /* logger_dispatch(level, msg, source, fields): borrows all four.  `fields`
  * is the COMPLETE field list: stdlib/logger.march's do_log / do_log_in
  * already append the context stack (logger_get_fields) to it, so the stack
  * is not printed again here -- until 2026-09-26 every context field was
- * printed twice compiled.  Appenders are not implemented by the compiled
- * runtime (see logger_register_appender below): this is the interpreter's
- * no-appender fallback format. */
+ * printed twice compiled.
+ *
+ * With appenders registered, each one is called with a fresh AppenderCall,
+ * newest registration first, and nothing is printed; with none, this is the
+ * interpreter's no-appender fallback line on stderr.  The mutex is NOT held
+ * across an appender call: an appender may log, register or remove. */
 void *march_logger_dispatch(void *level_str, void *msg, void *module_name, void *fields) {
-    (void)module_name;
     pthread_mutex_lock(&march_logger_mutex);
-    march_string *ls = (march_string *)level_str;
-    march_string *ms = (march_string *)msg;
-    fputc('[', stderr);
-    fwrite(ls->data, 1, (size_t)ls->len, stderr);
-    fputs("] ", stderr);
-    fwrite(ms->data, 1, (size_t)ms->len, stderr);
-    if (fields && *(int32_t *)((char *)fields + 8) != 0) {
-        fputs(" {", stderr);
-        logger_v2_print_fields(fields);
-        fputc('}', stderr);
+    int64_t n = 0;
+    for (logger_appender *e = logger_appenders; e; e = e->next) n++;
+    if (n == 0) {
+        march_string *ls = (march_string *)level_str;
+        march_string *ms = (march_string *)msg;
+        fputc('[', stderr);
+        fwrite(ls->data, 1, (size_t)ls->len, stderr);
+        fputs("] ", stderr);
+        fwrite(ms->data, 1, (size_t)ms->len, stderr);
+        if (fields && *(int32_t *)((char *)fields + 8) != 0) {
+            fputs(" {", stderr);
+            logger_v2_print_fields(fields);
+            fputc('}', stderr);
+        }
+        fputc('\n', stderr);
+        pthread_mutex_unlock(&march_logger_mutex);
+        return NULL;
     }
-    fputc('\n', stderr);
+    /* Snapshot: each callback gets its own reference, which its call
+     * consumes (the closure-call convention, march_runtime.h), so a
+     * concurrent remove/clear cannot free one mid-call. */
+    void **cbs = malloc((size_t)n * sizeof(void *));
+    int64_t i = 0;
+    for (logger_appender *e = logger_appenders; e; e = e->next) {
+        march_incrc(e->cb);
+        cbs[i++] = e->cb;
+    }
     pthread_mutex_unlock(&march_logger_mutex);
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    int64_t ts_ms = (int64_t)tv.tv_sec * 1000 + (int64_t)tv.tv_usec / 1000;
+    for (i = 0; i < n; i++) {
+        void *entry = logger_appender_call(level_str, msg, ts_ms, module_name, fields);
+        (void)call_closure_1(cbs[i], entry);   /* consumes cb ref and entry; Unit */
+    }
+    free(cbs);
     return NULL;
 }
-
-/* Appenders: the compiled runtime keeps no registry (the interpreter does);
- * these are no-ops that only READ their arguments, so both are borrowed.
- * Storing the callback would make it owned -- change borrow.ml with it. */
-void *march_logger_register_appender(void *name, void *cb) { (void)name; (void)cb; return NULL; }
-void *march_logger_remove_appender(void *name)              { (void)name; return NULL; }
-void *march_logger_clear_appenders(void)                    { return NULL; }
-void *march_logger_appender_names(void)                     { return logger_nil(); /* Nil list */ }
 
 /* Per-module level overrides.  Until 2026-09-26 set/clear were no-ops and
  * logger_module_level always answered the global level, so
