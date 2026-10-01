@@ -582,16 +582,21 @@ let send_line conn s =
   loop 0 (String.length msg)
 
 let recv_line conn =
+  (* A line is complete only once its newline has arrived: a read may end in
+     the middle of one (a long answer such as ABI_QUERY's), and handing back
+     the fragment loses the rest of the line and, at the end of a list, the
+     END that stops the reader. *)
   let rec loop () =
-    match Buffer.contents conn.buf |> String.split_on_char '\n' with
-    | line :: rest when String.length line > 0 ->
-      let rest_str = String.concat "\n" rest in
+    let s = Buffer.contents conn.buf in
+    match String.index_opt s '\n' with
+    | Some i ->
+      let rest = String.sub s (i + 1) (String.length s - i - 1) in
       Buffer.clear conn.buf;
-      Buffer.add_string conn.buf rest_str;
-      line
-    | _ ->
-      let tmp = Bytes.create 4096 in
-      let n = read conn.fd tmp 0 4096 in
+      Buffer.add_string conn.buf rest;
+      if i > 0 then String.sub s 0 i else loop ()
+    | None ->
+      let tmp = Bytes.create 65536 in
+      let n = read conn.fd tmp 0 65536 in
       if n = 0 then failwith "connection closed";
       Buffer.add_subbytes conn.buf tmp 0 n;
       loop ()

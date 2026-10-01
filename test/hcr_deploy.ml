@@ -8,6 +8,12 @@
       hcr_deploy keygen <dir>                 writes <dir>/pk (base64), <dir>/sk (hex)
       hcr_deploy deploy <socket> <dir> <so> [<old .schemas.json> <old .hcr_manifest>]
       hcr_deploy counters <socket> <key>...   prints key=value from PINS
+      hcr_deploy release <dir> <host:port,...> <build> <pool,...> <so> <old .hcr_manifest> [<old .schemas.json>]
+                                              a hot release through the control plane
+                                              (`forge deploy` on the cluster backend, over
+                                              Cluster_deploy): CANARY=<n> CANARY_MS RESTS_MS
+                                              TOPOLOGY=<digest file to push> FOLLOW_S
+      hcr_deploy status <host:port,...>       the leader's view of the newest release
 
     Exit 0 on success; a failed deploy prints why on stderr and exits 1. *)
 
@@ -51,6 +57,35 @@ let () =
            Printf.printf "%s=%s\n" k
              (match March_forge.Reconcile.pins_counter ri.pins k with Some n -> string_of_int n | None -> "?"))
          keys)
+  | "release" :: dir :: eps :: build :: pools :: so :: old_manifest :: rest ->
+    let pk = String.trim (read (Filename.concat dir "pk")) in
+    let sk = bytes_of_hex (read (Filename.concat dir "sk")) in
+    let geti k d = match Sys.getenv_opt k with Some v -> (try int_of_string v with _ -> d) | None -> d in
+    let endpoints = List.filter_map March_forge.Cluster_deploy.endpoint_of_string (String.split_on_char ',' eps) in
+    (match March_forge.Cmd_deploy_hot.parse_manifest (so ^ ".hcr_manifest") with
+     | Error m -> prerr_endline ("hcr_deploy: manifest: " ^ m); exit 1
+     | Ok manifest ->
+       let topology_body, push_topology =
+         match Sys.getenv_opt "TOPOLOGY" with
+         | Some f when f <> "" -> (read f, true)
+         | _ -> ("{}\n", false)
+       in
+       let sp = { March_forge.Cluster_deploy.env = "test"; endpoints; sk; pubkey = pk;
+                  hot = [ { March_forge.Cluster_deploy.hb_name = build; hb_pools = String.split_on_char ',' pools;
+                            hb_manifest = manifest; hb_so = so; hb_old_manifest = old_manifest;
+                            hb_old_schemas = (match rest with s :: _ -> s | [] -> "");
+                            hb_new_schemas = so ^ ".schemas.json" } ];
+                  topology_body; push_topology; canary = geti "CANARY" 0; canary_window_ms = geti "CANARY_MS" 2000;
+                  rest_window_ms = geti "REST_MS" 0; work_dir = Filename.concat (Filename.get_temp_dir_name ()) (Printf.sprintf "hcr_release_%d" (Unix.getpid ()));
+                  entry_path = ""; grant_caps = []; follow_s = float_of_int (geti "FOLLOW_S" 120) } in
+       (match March_forge.Cluster_deploy.run sp with
+        | Ok report -> print_string report
+        | Error m -> prerr_endline ("hcr_deploy: " ^ m); exit 1))
+  | [ "status"; eps ] ->
+    let endpoints = List.filter_map March_forge.Cluster_deploy.endpoint_of_string (String.split_on_char ',' eps) in
+    (match March_forge.Cluster_deploy.status endpoints with
+     | Ok s -> print_string (March_forge.Cluster_deploy.render_status s)
+     | Error m -> prerr_endline ("hcr_deploy: " ^ m); exit 1)
   | _ ->
     prerr_endline "usage: hcr_deploy keygen <dir> | deploy <socket> <dir> <so> [<old schemas> <old manifest>] | counters <socket> <key>...";
     exit 2
