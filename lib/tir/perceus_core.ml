@@ -694,6 +694,37 @@ let find_inc_vars ?(include_borrowed_fields = true)
        let n = count - 1 + (if StringSet.mem name live_after then 1 else 0) in
        List.init n (fun _ -> v))
 
+(** Dup every TAIL-position projection of [name] in [e]: the value the scope
+    returns.  Used by the aggregate scope-end drop in [insert_rc_expr]'s ELet
+    case, which releases the aggregate AFTER its scope's result is computed
+    ([let tmp = e2 in dec_rc v; tmp]).  A field that escapes [e2] through a
+    binding or an argument has already been dup'd by the borrowed-field
+    logic, but a field that IS the result ([let m = .. in m.addr]) is an
+    [EField] in tail position, which borrows ([EField] never dups an aggregate
+    source): the release then freed a String the caller went on to own.
+    Seen as a use-after-free in two-node's cluster_fd_release
+    (ClusterNode.core_link_closed: [match core_member(..) do Some(m) ->
+    m.addr ..] passed to [Map.remove]), masked on main by a leak in
+    Msgpack.decode_one's tuple matches until
+    specs/progress/2026-09-30-compiled-tuple-destructure-leaks-moved-fields.md
+    removed it.  An unknown type is treated as heap-carrying; the dup of a
+    tagged scalar is a no-op at run time. *)
+let rec dup_tail_projections (env : env) (name : string) (e : Tir.expr) : Tir.expr =
+  match e with
+  | Tir.EField (Tir.AVar w, _) when String.equal w.Tir.v_name name ->
+    let ty = match tir_expr_ty e with Some t -> t | None -> Tir.TVar "_" in
+    if needs_rc env ty then begin
+      let t = fresh_rc_var ty in
+      Tir.ELet (t, e, Tir.ESeq (incrc_for env w (Tir.AVar t), Tir.EAtom (Tir.AVar t)))
+    end else e
+  | Tir.ELet (x, e1, body) -> Tir.ELet (x, e1, dup_tail_projections env name body)
+  | Tir.ESeq (a, body) -> Tir.ESeq (a, dup_tail_projections env name body)
+  | Tir.ECase (a, brs, d) ->
+    Tir.ECase (a,
+      List.map (fun br -> { br with Tir.br_body = dup_tail_projections env name br.Tir.br_body }) brs,
+      Option.map (dup_tail_projections env name) d)
+  | _ -> e
+
 (** Insert RC operations into an expression.
     Returns [(expr', live_before)] where expr' has RC ops inserted and
     live_before is the set of variables live before this expression. *)
@@ -1241,7 +1272,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
           | Some t -> t
           | None -> assert false (* guarded above *) in
         let tmp = fresh_rc_var body_ty in
-        Tir.ELet (tmp, e2',
+        Tir.ELet (tmp, dup_tail_projections env v.Tir.v_name e2',
                   Tir.ESeq (decrc_for env v (Tir.AVar v),
                             Tir.EAtom (Tir.AVar tmp)))
       else
@@ -1401,17 +1432,21 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
           StringSet.mem v.Tir.v_name live_after
           || (needs_rc env v.Tir.v_ty
               && name_free_in v.Tir.v_name br.Tir.br_body)
-          (* Tuples/records are [needs_rc = false]: Perceus never emits a
-             DecRC/free for the aggregate itself, so its extracted fields are
-             effectively borrowed from a value whose lifetime the match does
-             not control (e.g. a tuple element of a BORROWED list).  Treat the
-             aggregate as a borrowed scrutinee so escaping fields get an EIncRC
-             and dead fields are NOT decremented — decrementing a field of a
-             borrowed-derived tuple corrupts the structure the caller reuses
-             (Toml table_get's discarded value / returned element). *)
-          || (match v.Tir.v_ty with
-              | Tir.TTuple _ | Tir.TRecord _ -> true
-              | _ -> false)
+          (* Tuples and records used to be forced "borrowed" here
+             unconditionally, on the premise that they were [needs_rc = false]
+             and Perceus never freed them.  That premise is gone: an aggregate
+             owns its fields and is dropped like a variant ([needs_rc_of]), so
+             a tuple scrutinee that is dead after the arm IS freed by
+             [add_scrutinee_free_for], and [Llvm_case] hands each field to the
+             arm as an OWNED reference (moved when the cell was unique, dup'd
+             when it was shared).  Treating those fields as borrowed made every
+             pattern variable that escaped take a SECOND reference nothing
+             released, and skipped the drop of a dead field — a leak per moved
+             field per call (specs/progress/2026-09-30-compiled-tuple-
+             destructure-leaks-moved-fields.md).  A tuple that is NOT consumed
+             here (live after the case, or still used in the arm) is already
+             covered by the two disjuncts above, so a borrowed-derived tuple
+             (an element of a borrowed list) keeps its borrowed fields. *)
         | _ -> false
       in
       let la = if scrutinee_borrowed then
