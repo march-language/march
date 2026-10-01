@@ -1336,7 +1336,27 @@ module Gen = struct
                     (hosts_of peer))
                 (peers_of ex p.pool_name)
             in
-            let rules = String.concat "\n" (public @ cluster) in
+            (* The control API (step 12a): a candidate takes the control port from
+               the other candidates (replication, forwarding). The operator's own
+               network is the operator's to open: forge deploy reaches any candidate. *)
+            let control =
+              match ex.topo.control with
+              | Some c when List.mem c.candidates h.labels ->
+                let others =
+                  List.concat_map (fun pl ->
+                      List.filter_map (fun (oh : host) ->
+                          if List.mem c.candidates oh.labels && host_name oh <> me
+                          then Some (Printf.sprintf "ufw allow from %s to any port %d proto tcp comment 'march control from %s'"
+                                       (host_name oh) c.control_port (host_name oh))
+                          else None)
+                        pl.hosts)
+                    ex.topo.pools
+                in
+                Printf.sprintf "# control API: open port %d to the operator's network too (forge deploy sends releases here)" c.control_port
+                :: others
+              | _ -> []
+            in
+            let rules = String.concat "\n" (public @ cluster @ control) in
             ( Printf.sprintf "ufw-%s.sh" me,
               render Topology_tmpl_ufw.content [
                 ("host", me); ("pool", p.pool_name);

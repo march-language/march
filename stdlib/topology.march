@@ -1012,6 +1012,17 @@ mod Topology do
   and MARCH_NODE_PORT to 7946.
   """
   fn config_from_env() : ClusterNode.CnConfig do
+    if Env.is_set("MARCH_NODE_CERT") do
+      -- Certificate mode (dd step 11): the node's certificate, key and the
+      -- operator's public key come from the environment, as `ClusterNode.config_from_env` reads them.
+      match ClusterNode.config_from_env() do
+        Ok(c) -> c
+        Err(e) -> start_failed(e)
+      end
+    else config_plain_from_env() end
+  end
+
+  pfn config_plain_from_env() : ClusterNode.CnConfig do
     let name = Env.get("MARCH_NODE_NAME", "local-1")
     let port = Env.get_int("MARCH_NODE_PORT", 7946)
     let seeds = labels_of(Env.get("MARCH_CLUSTER_NODES", ""))

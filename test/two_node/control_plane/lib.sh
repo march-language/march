@@ -59,6 +59,10 @@ ctl_start() {
     export MARCH_CONTROL_POLL_MS=200 MARCH_CONTROL_SESSION_POLLS=25
     export MARCH_SWIM_PROBE_MS=300 MARCH_SWIM_SUSPECT_MS=1500
     export HOME="$d/home"
+    # Certificate mode, when the scenario made a PKI (control_cert).
+    if [ -n "${PKI:-}" ]; then
+      export MARCH_NODE_CERT="$PKI/$n.cert" MARCH_NODE_KEY="$PKI/$n.key" MARCH_CLUSTER_OPERATOR_PUBKEY="$PKI/operator.pub"
+    fi
     exec "$work/node_$n"
   ) >> "$work/$n.out" 2>> "$work/$n.err" &
   eval "pid_$n=$!"
