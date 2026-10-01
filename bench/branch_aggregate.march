@@ -1,0 +1,33 @@
+-- Branch-built unboxed aggregate benchmark.
+-- A single-constructor type with 2..4 scalar fields is an inline LLVM struct
+-- (no heap cell) when built straight-line or returned from a call. Built in
+-- the arms of an `if`/`match`, it is boxed into the case's ptr-typed join
+-- slot and unboxed (and freed) again at the merge: one march_alloc + free
+-- per construction. This loop builds one per iteration in a two-arm `if`
+-- whose arms ALTERNATE, then reads both fields.
+-- See specs/progress/2026-09-30-unbox-aware-case-join-slot.md.
+--
+-- Usage: march --compile --opt 2 bench/branch_aggregate.march -o /tmp/branch_aggregate
+--        /tmp/branch_aggregate
+-- Checksum (n = 50_000_000): 1249999975000000
+
+mod BranchAggregate do
+  needs IO.Console
+
+  type P2 = P2(Int, Int)
+
+  pfn go(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else
+      let p = if i % 2 == 0 do P2(i, 1) else P2(1, i) end
+      match p do
+        P2(a, b) -> go(i + 1, n, acc + a * b)
+      end
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 50000000
+    println(int_to_string(go(0, n, 0)))
+  end
+end

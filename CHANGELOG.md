@@ -749,6 +749,11 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **A small scalar aggregate built in the arms of an `if`/`match` no longer
+  allocates.** When every arm builds the same unboxed type (for example
+  `if c do P2(a, 1) else P2(1, a) end`), the join now holds the struct directly
+  instead of boxing it in each arm and freeing it at the merge. A loop of 50
+  million such constructions went from 1.61 s to 0.07 s (`bench/branch_aggregate.march`).
 - **`test/stdlib/test_properties.march` now runs in CI, nightly.** Its 240
   property tests (about 4 minutes) were on a dune alias nothing ran. The
   nightly workflow's new `stdlib-properties` job runs them; they stay out of

@@ -2416,6 +2416,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/niche_aggregate_payload_leak_probe.expected native_niche_aggregate_payload_leak_probe.out)))
 
+; ── A join whose arms all BUILD one unboxed aggregate gets a struct-typed
+; slot (no box, nothing to free): two-arm if, three-arm match, else-if chain,
+; Option match (niche slot), and a mixed join that keeps the boxed slot and
+; must still release its box. Both backends are diffed against ONE .expected,
+; the interpreter's. specs/progress/2026-09-30-unbox-aware-case-join-slot.md
+(rule
+ (targets native_unboxed_join_slot native_unboxed_join_slot.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/unboxed_join_slot.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_unboxed_join_slot
+        native/unboxed_join_slot.march)
+   (with-stdout-to native_unboxed_join_slot.out
+        (system "./native_unboxed_join_slot")))))
+
+(rule
+ (targets interp_unboxed_join_slot.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/unboxed_join_slot.march))
+ (action
+  (with-stdout-to interp_unboxed_join_slot.out
+    (run %{exe:../bin/main.exe} native/unboxed_join_slot.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/unboxed_join_slot.expected native_unboxed_join_slot.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/unboxed_join_slot.expected interp_unboxed_join_slot.out)))
+
 ; ── compare_int / compare_float / compare_string: link compiled, return
 ; -1/0/1 on both backends (the interpreter returned a Less/Equal/Greater ctor;
 ; the compiled program failed to link), and compare_string releases a fresh
