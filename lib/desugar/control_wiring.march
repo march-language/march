@@ -1,0 +1,959 @@
+-- The control plane's wiring (distributed-deploys step 12a), as declarations
+-- for an entry module: the `Ctl` and `CtlFetch` protocols with their role
+-- bodies, the leader, the Agent, and the control API listener. It is not a
+-- module: `lib/desugar/desugar_control.ml` embeds this text and
+-- `bin/topology_gen.ml` splices it into the entry module of a topology app
+-- whose topology has a `[control]` section, next to the generated `main`.
+-- Nothing else loads it, so a program without a `[control]` section pays
+-- nothing for it.
+--
+-- Why it is spliced into the entry module and not written as a stdlib
+-- module: an `@[endpoints]` protocol typechecks only at an entry module's top
+-- level (specs/todos/2026-09-28-endpoints-protocol-in-nested-module.md), and
+-- in the eagerly loaded stdlib it would cost every program about 0.07 s warm.
+-- The pure core (release format, executor, `agent_apply`) is `Control`.
+--
+-- Names are prefixed `Ctl`/`ctl_` so they do not collide with the app's own.
+needs IO
+needs IO.Console
+needs IO.Mut
+needs IO.Clock
+needs IO.Spawn
+needs IO.NetConnect
+needs IO.NetListen
+needs IO.FileRead
+needs IO.FileWrite
+needs Session.Live
+needs ClusterNode.Live
+
+-- ── the wire records (format version 1) ────────────────────────────────────
+
+type CtlWireReport = {
+  wire : Int, node : String, seq : Int, versions : String, topology : String,
+  drained : Int, healthy : Bool, failed_seq : Int, failed_step : Int, failed_why : String,
+  detail : String, pools : String
+}
+derive Json for CtlWireReport
+type CtlWireOrder = {
+  wire : Int, seq : Int, release : String, step : Int, node : String, action : String,
+  want : String, artifacts : String, lines : String
+}
+derive Json for CtlWireOrder
+type CtlWireResult = { wire : Int, seq : Int, step : Int, node : String, ok : Bool, detail : String }
+derive Json for CtlWireResult
+type CtlWireChunk = { wire : Int, offset : Int, data : String, last : Bool }
+derive Json for CtlWireChunk
+
+pfn ctl_wire_report(r : Control.AgentReport) : CtlWireReport do
+  { wire: 1, node: r.node, seq: r.seq, versions: r.versions, topology: r.topology, drained: r.drained,
+    healthy: r.healthy, failed_seq: r.failed_seq, failed_step: r.failed_step, failed_why: r.failed_why,
+    detail: r.detail, pools: r.pools }
+end
+
+pfn ctl_report_of(w : CtlWireReport) : Control.AgentReport do
+  { node: w.node, seq: w.seq, versions: w.versions, topology: w.topology, drained: w.drained,
+    healthy: w.healthy, failed_seq: w.failed_seq, failed_step: w.failed_step, failed_why: w.failed_why,
+    detail: w.detail, pools: w.pools }
+end
+
+pfn ctl_wire_order(o : Control.StepOrder) : CtlWireOrder do
+  { wire: 1, seq: o.seq, release: o.release, step: o.step, node: o.node, action: o.action, want: o.want,
+    artifacts: o.artifacts, lines: o.lines }
+end
+
+pfn ctl_order_of(w : CtlWireOrder) : Control.StepOrder do
+  { seq: w.seq, release: w.release, step: w.step, node: w.node, action: w.action, want: w.want,
+    artifacts: w.artifacts, lines: w.lines }
+end
+
+pfn ctl_wire_result(r : Control.StepResult) : CtlWireResult do
+  { wire: 1, seq: r.seq, step: r.step, node: r.node, ok: r.ok, detail: r.detail }
+end
+
+pfn ctl_result_of(w : CtlWireResult) : Control.StepResult do
+  { seq: w.seq, step: w.step, node: w.node, ok: w.ok, detail: w.detail }
+end
+
+pfn ctl_wire_chunk(c : Control.CtlChunk) : CtlWireChunk do { wire: 1, offset: c.offset, data: c.data, last: c.last } end
+
+-- ── the protocols (design section 7) ────────────────────────────────────────
+
+-- The Agent initiates; Control is offered by the leader only, so the offer is
+-- how an agent finds the leader. Every step is labelled (D25): this is the
+-- protocol that must evolve across deploys of itself.
+@[endpoints]
+protocol Ctl do
+  role Agent needs IO.NetConnect, IO.FileRead, IO.Mut, IO.Clock
+  role Control needs IO.NetConnect, IO.FileRead, IO.FileWrite, IO.Mut, IO.Clock
+  hello: Agent -> Control : CtlWireReport
+  loop do
+    choose by Control:
+      apply -> Control -> Agent : CtlWireOrder
+               stepped: Agent -> Control : CtlWireResult
+      observe -> Control -> Agent : Int
+                 report: Agent -> Control : CtlWireReport
+      bye -> Control -> Agent : String
+             stop
+    end
+  end
+end
+
+-- A chunked artifact fetch: the Agent names a hash, a candidate streams it in
+-- fixed-size chunks; an unknown hash is one empty last chunk.
+@[endpoints]
+protocol CtlFetch do
+  role Agent needs IO.NetConnect, IO.Mut
+  role Server needs IO.NetConnect, IO.FileRead
+  want: Agent -> Server : String
+  loop do
+    choose by Server:
+      chunk -> Server -> Agent : CtlWireChunk
+      fin -> Server -> Agent : CtlWireChunk
+             stop
+    end
+  end
+end
+
+-- The Agent role of `Ctl`: say hello with a report, then answer every order
+-- ([apply]) and poll until the leader says bye.
+pfn ctl_agent_role(s : Cap(Session.Live), _nc : Cap(IO.NetConnect), _fr : Cap(IO.FileRead), _mu : Cap(IO.Mut), _ck : Cap(IO.Clock), st : Ctl_Agent.S_send_Hello, report : () -> Control.AgentReport, apply : Control.StepOrder -> Control.StepResult) : Ctl_Agent.Yield do
+  ctl_agent_loop_(s, Ctl_Agent.send_Hello(s, st, ctl_wire_report(report())), report, apply)
+end
+
+pfn ctl_agent_loop_(s : Cap(Session.Live), st : Ctl_Agent.S_offer_apply_observe_bye, report : () -> Control.AgentReport, apply : Control.StepOrder -> Control.StepResult) : Ctl_Agent.Yield do
+  Ctl_Agent.offer_apply_observe_bye(s, st,
+    fn (o, st1) -> ctl_agent_loop_(s, Ctl_Agent.send_Stepped(s, st1, ctl_wire_result(apply(ctl_order_of(o)))), report, apply),
+    fn (_head, st1) -> ctl_agent_loop_(s, Ctl_Agent.send_Report(s, st1, ctl_wire_report(report())), report, apply),
+    fn (_why, st1) -> Ctl_Agent.close(s, st1))
+end
+
+-- The Control role of `Ctl` for one agent's session, driven by [ops].
+pfn ctl_control_role(s : Cap(Session.Live), _nc : Cap(IO.NetConnect), _fr : Cap(IO.FileRead), _fw : Cap(IO.FileWrite), _mu : Cap(IO.Mut), _ck : Cap(IO.Clock), st : Ctl_Control.S_recv_Hello, ops : Control.ControlOps) : Ctl_Control.Yield do
+  Ctl_Control.recv_Hello(s, st, fn (rep, st1) ->
+    ops.report(ctl_report_of(rep))
+    ctl_control_loop_(s, st1, rep.node, ops))
+end
+
+pfn ctl_control_loop_(s : Cap(Session.Live), st : Ctl_Control.S_choose_apply_observe_bye, node : String, ops : Control.ControlOps) : Ctl_Control.Yield do
+  match ops.next(node) do
+    Control.NextOrder(o) ->
+      Ctl_Control.recv_Stepped(s, Ctl_Control.choose_apply(s, st, ctl_wire_order(o)), fn (res, st1) ->
+        ops.stepped(ctl_result_of(res))
+        ctl_control_loop_(s, st1, node, ops))
+    Control.NextPoll ->
+      Ctl_Control.recv_Report(s, Ctl_Control.choose_observe(s, st, ops.head()), fn (rep, st1) ->
+        ops.report(ctl_report_of(rep))
+        ctl_control_loop_(s, st1, node, ops))
+    Control.NextBye(why) -> Ctl_Control.close(s, Ctl_Control.choose_bye(s, st, why))
+  end
+end
+
+-- The Server role of `CtlFetch`: [lookup] a hash's bytes as hex (None:
+-- unknown, one empty last chunk), sent in chunks of [size] hex characters.
+pfn ctl_fetch_server_role(s : Cap(Session.Live), _nc : Cap(IO.NetConnect), st : CtlFetch_Server.S_recv_Want, lookup : String -> Option(String), size : Int) : CtlFetch_Server.Yield do
+  CtlFetch_Server.recv_Want(s, st, fn (h, st1) ->
+    match lookup(h) do
+      Some(hex) -> ctl_send_chunks(s, st1, List.map(Control.chunks(hex, size), fn c -> ctl_wire_chunk(c)))
+      None -> CtlFetch_Server.close(s, CtlFetch_Server.choose_fin(s, st1, { wire: 1, offset: 0, data: "", last: true }))
+    end)
+end
+
+pfn ctl_send_chunks(s : Cap(Session.Live), st : CtlFetch_Server.S_choose_chunk_fin, cs : List(CtlWireChunk)) : CtlFetch_Server.Yield do
+  match cs do
+    Cons(c, Nil) -> CtlFetch_Server.close(s, CtlFetch_Server.choose_fin(s, st, c))
+    Cons(c, rest) -> ctl_send_chunks(s, CtlFetch_Server.choose_chunk(s, st, c), rest)
+    Nil -> CtlFetch_Server.close(s, CtlFetch_Server.choose_fin(s, st, { wire: 1, offset: 0, data: "", last: true }))
+  end
+end
+
+-- The Agent role of `CtlFetch`: ask for [hash] and hand the reassembled hex
+-- ("" for an unknown hash) to [done].
+pfn ctl_fetch_agent_role(s : Cap(Session.Live), _nc : Cap(IO.NetConnect), _mu : Cap(IO.Mut), st : CtlFetch_Agent.S_send_Want, hash : String, done : String -> ()) : CtlFetch_Agent.Yield do
+  ctl_fetch_loop_(s, CtlFetch_Agent.send_Want(s, st, hash), Nil, done)
+end
+
+pfn ctl_fetch_loop_(s : Cap(Session.Live), st : CtlFetch_Agent.S_offer_chunk_fin, acc : List(String), done : String -> ()) : CtlFetch_Agent.Yield do
+  CtlFetch_Agent.offer_chunk_fin(s, st,
+    fn (c, st1) -> ctl_fetch_loop_(s, st1, Cons(c.data, acc), done),
+    fn (c, st1) -> ctl_fetch_done_(s, st1, Cons(c.data, acc), done))
+end
+
+pfn ctl_fetch_done_(s : Cap(Session.Live), st : CtlFetch_Agent.S_end, acc : List(String), done : String -> ()) : CtlFetch_Agent.Yield do
+  done(String.join(List.reverse(acc), ""))
+  CtlFetch_Agent.close(s, st)
+end
+
+-- ── configuration and small helpers ─────────────────────────────────────────
+
+-- The settings come from the environment, read once by `ctl_start` (which
+-- holds the node's root capability) into this table: a role body may not read
+-- the environment (`IO.Process`), only its grant.
+pfn ctl_cfg(key : String, default : String) : String do Vault.get_or(ctl_memory(), "cfg:" ++ key, default) end
+
+pfn ctl_cfg_int(key : String, default : Int) : Int do
+  match string_to_int(ctl_cfg(key, "")) do
+    Some(n) -> n
+    None -> default
+  end
+end
+
+-- Hex characters per CtlFetch chunk (specs/progress/2026-09-29-dd-step12a-control-wiring.md
+-- has the measurement it comes from).
+pfn ctl_chunk_size() : Int do ctl_cfg_int("chunk", 32768) end
+
+-- How often a leader polls an agent that has nothing to do, and how many
+-- exchanges one session lasts before the leader ends it (so an agent looks
+-- for the current leader again: the discovery model of design section 7).
+pfn ctl_poll_ms() : Int do ctl_cfg_int("poll_ms", 500) end
+pfn ctl_session_polls() : Int do ctl_cfg_int("session_polls", 40) end
+
+-- Where a candidate keeps the releases it holds.
+pfn ctl_dir() : String do ctl_cfg("dir", "/tmp/march-control") end
+
+pfn ctl_words(s : String) : List(String) do
+  List.filter(String.split(String.replace_all(s, ",", " "), " "), fn w -> w != "")
+end
+
+pfn ctl_field(line : String, key : String) : String do
+  match List.find(ctl_words(line), fn w -> String.starts_with(w, key ++ ":")) do
+    Some(w) -> String.slice(w, String.byte_size(key) + 1, String.byte_size(w) - String.byte_size(key) - 1)
+    None -> ""
+  end
+end
+
+pfn ctl_first(xs : List(String), f : String -> Option(String)) : Option(String) do
+  match xs do
+    Nil -> None
+    Cons(x, rest) ->
+      match f(x) do
+        Some(v) -> Some(v)
+        None -> ctl_first(rest, f)
+      end
+  end
+end
+
+pfn ctl_first_ep(xs : List((String, Int)), f : String -> Int -> Option(String)) : Option(String) do
+  match xs do
+    Nil -> None
+    Cons((h, p), rest) ->
+      match f(h, p) do
+        Some(v) -> Some(v)
+        None -> ctl_first_ep(rest, f)
+      end
+  end
+end
+
+pfn ctl_int(s : String) : Int do
+  match string_to_int(s) do
+    Some(n) -> n
+    None -> 0
+  end
+end
+
+pfn ctl_leaders() : Vault(Control.CtlLeader) do
+  match Vault.whereis("ctl_leader") do
+    Some(v) -> v
+    None -> Vault.new("ctl_leader")
+  end
+end
+
+pfn ctl_locks() : Vault(Int) do
+  match Vault.whereis("ctl_locks") do
+    Some(v) -> v
+    None -> Vault.new("ctl_locks")
+  end
+end
+
+pfn ctl_memory() : Vault(String) do
+  match Vault.whereis("ctl_agent_memory") do
+    Some(v) -> v
+    None -> Vault.new("ctl_agent_memory")
+  end
+end
+
+-- Tables are created once, before any session runs.
+pfn ctl_init() : () do
+  let _ = ctl_leaders()
+  let _ = ctl_locks()
+  let _ = ctl_memory()
+  let _ = ctl_wants()
+  ()
+end
+
+-- A short critical section over [name]: claimed with an atomic put-if-absent
+-- that expires, so a session that dies inside it cannot hold it forever.
+pfn ctl_lock(name : String, tries : Int) : Bool do
+  if Vault.put_new_ttl(ctl_locks(), name, 1, 60) do true
+  else if tries <= 0 do false
+  else
+    sleep_ms(10)
+    ctl_lock(name, tries - 1)
+  end end
+end
+
+pfn ctl_unlock(name : String) : () do Vault.drop(ctl_locks(), name) end
+
+-- ── the node's reload server, and the CAS beside it ─────────────────────────
+
+pfn ctl_node_state() : String do Control.state_line(Control.answer_lines(Control.relay_line("NODE_STATE"))) end
+
+pfn ctl_cas_root() : String do ctl_field(ctl_node_state(), "cas") end
+
+pfn ctl_artifact_path(h : String) : String do
+  ctl_cas_root() ++ "/artifacts/" ++ String.slice(h, 0, 2) ++ "/" ++ String.slice(h, 2, String.byte_size(h) - 2)
+end
+
+-- The operator's public key this node was built to trust (`HCR_INFO`'s `key:`).
+pfn ctl_pubkey() : Bytes do
+  let info = Control.relay_line("HCR_INFO")
+  match Bytes.from_hex(ctl_field(String.trim(info), "key")) do
+    Ok(b) -> b
+    Err(_) -> Bytes.empty()
+  end
+end
+
+-- An artifact as hex, from this node's CAS.
+pfn ctl_artifact_hex(h : String) : Option(String) do
+  if String.byte_size(h) != 64 do None
+  else match File.read(ctl_artifact_path(h)) do
+    Ok(data) -> Some(Bytes.to_hex(Bytes.from_string(data)))
+    Err(_) -> None
+  end end
+end
+
+-- ── the Agent (every node) ──────────────────────────────────────────────────
+
+pfn ctl_topology_applied(status : String) : Bool do
+  let path = ctl_cfg("verified_file", "")
+  if path == "" do false
+  else match File.read(path) do
+    Err(_) -> false
+    Ok(text) ->
+      match List.find(String.split(status, "\n"), fn l -> String.starts_with(l, "topology ")) do
+        Some(l) -> String.trim(String.slice(l, 9, String.byte_size(l) - 9)) == Crypto.sha256(text)
+        None -> false
+      end
+  end end
+end
+
+pfn ctl_status_of(node : Cap(ClusterNode.Live)) : (String, Bool) do
+  let text = Topology.status_text(node)
+  (text, ctl_topology_applied(text))
+end
+
+-- A signed line, relayed. A TOPOLOGY line's body is not in the release: it is
+-- an artifact under its digest, read from this node's CAS and sent after the
+-- line, as the reload socket expects. A COMMIT_BATCH (or an ACTIVATE) that
+-- answers WAIT is asked again, as forge does: the activation is queued
+-- server side until the epochs older than it have drained.
+pfn ctl_relay(line : String, tries : Int) : String do
+  let text = if String.contains(line, " TOPOLOGY ") do
+    match ctl_first(ctl_words(line), fn w -> if String.byte_size(w) == 64 do Some(w) else None end) do
+      Some(digest) ->
+        match File.read(ctl_artifact_path(digest)) do
+          Ok(body) -> line ++ "\n" ++ body
+          Err(_) -> line
+        end
+      None -> line
+    end
+  else line end
+  let resp = String.trim(String.replace_all(Control.relay_line(text), "READY\n", ""))
+  if String.starts_with(resp, "WAIT") && tries > 0 do
+    sleep_ms(500)
+    ctl_relay(line, tries - 1)
+  else resp end
+end
+
+pfn ctl_agent_ops(node : Cap(ClusterNode.Live)) : Control.AgentOps do
+  let ops = Control.real_ops(Topology.node_name(node), ctl_cfg("pools", ""), fn -> ctl_status_of(node), ctl_memory())
+  { ops with request: fn line -> ctl_relay(line, 240) }
+end
+
+-- Artifacts the Agent is waiting for: hash -> 1. An order that names an
+-- artifact the node lacks puts it here and waits; `ctl_prefetch_loop`, which
+-- holds the node's root capability (a role body may not), fetches it from a
+-- candidate over `CtlFetch` and stores it through the node's own reload
+-- server (`CAS_PUT`).
+pfn ctl_wants() : Vault(Int) do
+  match Vault.whereis("ctl_wants") do
+    Some(v) -> v
+    None -> Vault.new("ctl_wants")
+  end
+end
+
+pfn ctl_fetch_one(io : Cap(IO), node : Cap(ClusterNode.Live), hash : String) : Bool do
+  let got = Vault.new("ctl_fetch_" ++ hash ++ "_" ++ int_to_string(unix_time_ms()))
+  let r = CtlFetch_Run.initiate_Agent(io, node, fn (s, nc, mu, st) ->
+    ctl_fetch_agent_role(s, nc, mu, st, hash, fn hex -> Vault.set(got, "hex", hex)))
+  match r do
+    Err(_) -> false
+    Ok(_) ->
+      let hex = Vault.get_or(got, "hex", "")
+      if hex == "" do false
+      else match Bytes.from_hex(hex) do
+        Err(_) -> false
+        Ok(b) ->
+          let body = Bytes.to_string(b)
+          String.contains(Control.relay_line("CAS_PUT " ++ hash ++ " " ++ int_to_string(String.byte_size(body)) ++ "\n" ++ body), "OK ")
+      end end
+  end
+end
+
+pfn ctl_prefetch_loop(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do
+  List.each(Vault.keys(ctl_wants()), fn h ->
+    if String.starts_with(Control.relay_line("CAS_CHECK " ++ h), "PRESENT") do Vault.drop(ctl_wants(), h)
+    else if ctl_fetch_one(io, node, h) do Vault.drop(ctl_wants(), h) else () end end)
+  sleep_ms(200)
+  ctl_prefetch_loop(io, node)
+end
+
+pfn ctl_wait_for(ops : Control.AgentOps, o : Control.StepOrder, left_ms : Int) : Bool do
+  if Control.missing(ops, o) == Nil do true
+  else if left_ms <= 0 do false
+  else
+    sleep_ms(100)
+    ctl_wait_for(ops, o, left_ms - 100)
+  end end
+end
+
+-- Apply one order: ask for what the node lacks and wait for it (a minute, at
+-- most: past that `agent_apply` reports the missing artifacts and the release
+-- halts), then relay (`agent_apply`).
+pfn ctl_apply(ops : Control.AgentOps, o : Control.StepOrder) : Control.StepResult do
+  let need = Control.missing(ops, o)
+  if need != Nil do
+    List.each(need, fn h -> Vault.set(ctl_wants(), h, 1))
+    let _ = ctl_wait_for(ops, o, 60000)
+    ()
+  else () end
+  Control.agent_apply_recording(ops, ctl_memory(), o)
+end
+
+pfn ctl_agent_body(node : Cap(ClusterNode.Live), s : Cap(Session.Live), nc : Cap(IO.NetConnect), fr : Cap(IO.FileRead), mu : Cap(IO.Mut), ck : Cap(IO.Clock), st : Ctl_Agent.S_send_Hello) : Ctl_Agent.Yield do
+  let ops = ctl_agent_ops(node)
+  ctl_agent_role(s, nc, fr, mu, ck, st, fn -> ops.report(), fn o -> ctl_apply(ops, o))
+end
+
+-- Keep a `Ctl` session open with whoever offers `Control` now. A session ends
+-- when the leader says bye or its node goes; the next one finds the leader as
+-- it is then.
+pfn ctl_agent_loop(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do
+  match Ctl_Run.initiate_Agent(io, node, fn (s, nc, fr, mu, ck, st) -> ctl_agent_body(node, s, nc, fr, mu, ck, st)) do
+    Ok(_) -> sleep_ms(100)
+    Err(e) ->
+      -- Said once per distinct reason: the leader may simply not be up yet.
+      let why = SessionNode.run_error_message(e)
+      if Vault.get(ctl_memory(), "last_error") != Some(why) do
+        Vault.set(ctl_memory(), "last_error", why)
+        println("control: no session with a leader: " ++ why)
+      else () end
+      sleep_ms(500)
+  end
+  ctl_agent_loop(io, node)
+end
+
+-- ── the leader ──────────────────────────────────────────────────────────────
+
+pfn ctl_release_file(seq : Int) : String do
+  ctl_dir() ++ "/releases/" ++ String.pad_left(int_to_string(seq), 12, "0") ++ ".release"
+end
+
+-- Write a release durably: a temporary file renamed into place. [text] is
+-- its serialised form (taken before the release is handed to the leader).
+pfn ctl_store_release(seq : Int, text : String) : Bool do
+  let _ = Dir.mkdir_p(ctl_dir() ++ "/releases")
+  let path = ctl_release_file(seq)
+  let tmp = path ++ ".tmp"
+  match File.write(tmp, text) do
+    Err(_) -> false
+    Ok(_) ->
+      match File.rename(tmp, path) do
+        Ok(_) -> true
+        Err(_) -> false
+      end
+  end
+end
+
+pfn ctl_forget_release(seq : Int) : () do
+  let _ = File.delete(ctl_release_file(seq))
+  ()
+end
+
+-- The newest release this candidate holds on disk.
+pfn ctl_load_newest() : Option(Control.CtlRelease) do
+  match Dir.list(ctl_dir() ++ "/releases") do
+    Err(_) -> None
+    Ok(names) ->
+      let files = List.sort_by(List.filter(names, fn n -> String.ends_with(n, ".release")), fn (a, b) -> a > b)
+      match List.head_opt(files) do
+        None -> None
+        Some(f) ->
+          match File.read(ctl_dir() ++ "/releases/" ++ f) do
+            Err(_) -> None
+            Ok(text) ->
+              match Control.parse(text) do
+                Ok(r) -> Some(r)
+                Err(_) -> None
+              end
+          end
+      end
+  end
+end
+
+pfn ctl_head_seq(l : Control.CtlLeader) : Int do
+  match l.release do
+    Some(r) -> r.seq
+    None -> 0
+  end
+end
+
+-- A node that starts leading takes the newest release it holds on disk:
+-- every reachable candidate got a copy before forge was told "accepted".
+pfn ctl_ensure_loaded() : () do
+  let lv = ctl_leaders()
+  let cur = Vault.get_or(lv, "leader", Control.leader_new())
+  match ctl_load_newest() do
+    None -> if Vault.get(lv, "leader") == None do Vault.set(lv, "leader", cur) else () end
+    Some(r) ->
+      if r.seq > ctl_head_seq(cur) do
+        match Control.leader_release(Control.leader_new(), r) do
+          Ok(l) -> Vault.set(lv, "leader", l)
+          Err(_) -> Vault.set(lv, "leader", cur)
+        end
+      else if Vault.get(lv, "leader") == None do Vault.set(lv, "leader", cur) else () end end
+  end
+end
+
+pfn ctl_leader_state() : Control.CtlLeader do Vault.get_or(ctl_leaders(), "leader", Control.leader_new()) end
+
+pfn ctl_put_leader(l : Control.CtlLeader) : () do Vault.set(ctl_leaders(), "leader", l) end
+
+-- Every member alive, by name, as the cluster knows them.
+pfn ctl_alive_names(node : Cap(ClusterNode.Live)) : List(String) do
+  List.filter_map(ClusterNode.all_members(node), fn m ->
+    match m.status do
+      Membership.Dead -> None
+      _ -> Some(m.name)
+    end)
+end
+
+pfn ctl_members_of(l : Control.CtlLeader) : List(Control.CtlMember) do
+  List.map(l.obs, fn o -> { node: o.report.node, pools: ctl_words(o.report.pools) })
+end
+
+-- The leader passes only once every live member has reported: a node that has
+-- not said hello yet may belong to a step's pool, and the executor would
+-- otherwise call the step done without it.
+pfn ctl_ready(node : Cap(ClusterNode.Live), l : Control.CtlLeader) : Bool do
+  let seen = List.map(l.obs, fn o -> o.report.node)
+  List.all(ctl_alive_names(node), fn n -> List.member(seen, n))
+end
+
+pfn ctl_next_for(node : Cap(ClusterNode.Live), name : String) : Control.CtlNext do
+  let polls = Vault.incr(ctl_locks(), "polls:" ++ name, 1)
+  if polls > ctl_session_polls() do
+    Vault.drop(ctl_locks(), "polls:" ++ name)
+    Control.NextBye("session over; look for the leader again")
+  else
+    let got = ctl_lock("leader", 500)
+    let l = ctl_leader_state()
+    let verdict = if not(ctl_ready(node, l)) do (l, None) else Control.leader_pass(l, ctl_members_of(l), unix_time_ms()) end
+    let (l2, d) = verdict
+    let _ = if got do ctl_put_leader(l2) else () end
+    if got do ctl_unlock("leader") else () end
+    match d do
+      Some(Control.RolloutApply(_, os)) ->
+        match List.find(os, fn o -> o.node == name) do
+          Some(o) -> Control.NextOrder(o)
+          None ->
+            sleep_ms(ctl_poll_ms())
+            Control.NextPoll
+        end
+      _ ->
+        sleep_ms(ctl_poll_ms())
+        Control.NextPoll
+    end
+  end
+end
+
+pfn ctl_leader_ops(node : Cap(ClusterNode.Live)) : Control.ControlOps do
+  { report: fn rep ->
+      let got = ctl_lock("leader", 500)
+      if got do
+        ctl_put_leader(Control.leader_report(ctl_leader_state(), rep, unix_time_ms()))
+        ctl_unlock("leader")
+      else () end,
+    stepped: fn res ->
+      let got = ctl_lock("leader", 500)
+      if got do
+        ctl_put_leader(Control.leader_result(ctl_leader_state(), res, unix_time_ms()))
+        ctl_unlock("leader")
+      else () end,
+    next: fn name -> ctl_next_for(node, name),
+    head: fn -> ctl_head_seq(ctl_leader_state()) }
+end
+
+-- The body of the `Ctl.Control` role: one session per agent.
+pfn ctl_control_session(node : Cap(ClusterNode.Live), s : Cap(Session.Live), nc : Cap(IO.NetConnect), fr : Cap(IO.FileRead), fw : Cap(IO.FileWrite), mu : Cap(IO.Mut), ck : Cap(IO.Clock), st : Ctl_Control.S_recv_Hello) : Ctl_Control.Yield do
+  ctl_ensure_loaded()
+  ctl_control_role(s, nc, fr, fw, mu, ck, st, ctl_leader_ops(node))
+end
+
+-- The body of the `CtlFetch.Server` role, on every candidate.
+pfn ctl_fetch_session(s : Cap(Session.Live), nc : Cap(IO.NetConnect), _fr : Cap(IO.FileRead), st : CtlFetch_Server.S_recv_Want) : CtlFetch_Server.Yield do
+  ctl_fetch_server_role(s, nc, st, fn h -> ctl_artifact_hex(h), ctl_chunk_size())
+end
+
+-- ── the control API (design section 9) ──────────────────────────────────────
+--
+-- A TCP line protocol on every candidate: the reload socket's unsigned verbs,
+-- and `RELEASE <size>` (a release document follows), `STATUS`, `LEADER` and the
+-- candidates' own `RELEASE_COPY <size>`. A standby forwards `RELEASE` and
+-- `STATUS` to the leader, so forge can talk to any candidate.
+
+pfn ctl_read_line(fd : Int, acc : String, n : Int) : Option(String) do
+  if n > 65536 do None
+  else match tcp_recv_exact(fd, 1) do
+    Err(_) -> if acc == "" do None else Some(acc) end
+    Ok(b) ->
+      let c = Bytes.to_string(b)
+      if c == "\n" do Some(acc)
+      else if c == "\r" do ctl_read_line(fd, acc, n)
+      else ctl_read_line(fd, acc ++ c, n + 1) end end
+  end end
+end
+
+pfn ctl_reply(fd : Int, text : String) : () do
+  let _ = tcp_send_all(fd, text)
+  ()
+end
+
+pfn ctl_host_of(addr : String) : String do
+  let parts = String.split(addr, ":")
+  String.join(List.take(parts, List.length(parts) - 1), ":")
+end
+
+-- One request to a candidate's control API: send [text], read the first
+-- answer line.
+pfn ctl_call(host : String, port : Int, text : String) : Option(String) do
+  match tcp_connect_timeout(host, port, 2000) do
+    Err(_) -> None
+    Ok(fd) ->
+      let _ = tcp_set_recv_timeout(fd, 15000)
+      let out = match tcp_send_all(fd, text) do
+        Err(_) -> None
+        Ok(_) -> ctl_read_line(fd, "", 0)
+      end
+      tcp_close(fd)
+      out
+  end
+end
+
+-- The other candidates' control API addresses, as (host, port). Every
+-- candidate serves the topology's port on its own host; a cluster of several
+-- nodes on one machine (a test, `forge run --processes`) sets
+-- MARCH_CONTROL_PORT_OFFSET, and a node's port is then its cluster port plus
+-- the offset.
+pfn ctl_others(node : Cap(ClusterNode.Live), port : Int) : List((String, Int)) do
+  let me = ClusterNode.node_id(node)
+  let offset = ctl_cfg_int("port_offset", 0)
+  List.filter_map(Topology.role_candidates(node, "Ctl.Control"), fn m ->
+    if m.node_id == me || m.addr == "" do None
+    else
+      let parts = String.split(m.addr, ":")
+      let host = ctl_host_of(m.addr)
+      if offset == 0 do Some((host, port))
+      else match List.head_opt(List.reverse(parts)) do
+        Some(p) -> Some((host, ctl_int(p) + offset))
+        None -> None
+      end end
+    end)
+end
+
+pfn ctl_is_leader(node : Cap(ClusterNode.Live)) : Bool do Topology.offering(node, "Ctl.Control") end
+
+-- The signature check on a release: the operator's key this node trusts.
+pfn ctl_signed(r : Control.CtlRelease) : Bool do Control.verify(r, ctl_pubkey()) end
+
+-- Replicate a release, and the artifacts it ships, to every other reachable
+-- candidate; true when each reachable one stored the release.
+pfn ctl_replicate(node : Cap(ClusterNode.Live), port : Int, body : String, hashes : List(String)) : String do
+  let failures = List.filter_map(ctl_others(node, port), fn hp ->
+    let (host, cport) = hp
+    List.each(hashes, fn h -> ctl_push_artifact(host, cport, h))
+    match ctl_call(host, cport, "RELEASE_COPY " ++ int_to_string(String.byte_size(body)) ++ "\n" ++ body) do
+      Some(resp) -> if String.starts_with(resp, "OK") do None else Some(host ++ ":" ++ int_to_string(cport) ++ " answered " ++ resp) end
+      None -> None
+    end)
+  String.join(failures, "; ")
+end
+
+-- Give a candidate an artifact it lacks.
+pfn ctl_push_artifact(host : String, port : Int, h : String) : () do
+  match ctl_call(host, port, "CAS_CHECK " ++ h ++ "\n") do
+    Some(resp) ->
+      if String.starts_with(resp, "MISSING") do
+        match File.read(ctl_artifact_path(h)) do
+          Ok(data) ->
+            let _ = ctl_call_body(host, port, "CAS_PUT " ++ h ++ " " ++ int_to_string(String.byte_size(data)), data)
+            ()
+          Err(_) -> ()
+        end
+      else () end
+    None -> ()
+  end
+end
+
+-- A request with a body: the line, "READY" from the far end, then the body.
+pfn ctl_call_body(host : String, port : Int, line : String, body : String) : Option(String) do
+  ctl_call(host, port, line ++ "\n" ++ body)
+end
+
+-- The leader accepts a release: signature, the compare-and-set on `parent`
+-- (`Control.leader_release`), durable on this node and on every reachable
+-- candidate before the answer.
+pfn ctl_release(node : Cap(ClusterNode.Live), port : Int, text : String) : String do
+  match Control.parse(text) do
+    Err(e) -> "ERR bad_release " ++ e
+    Ok(r) ->
+      if not(ctl_signed(r)) do "ERR bad_signature"
+      else if not(ctl_lock("release", 1000)) do "ERR busy"
+      else
+        -- What is needed of the release after the leader takes it is read
+        -- out first.
+        let seq = r.seq
+        let digest = Control.digest(r)
+        let body = Control.serialize(r)
+        let hashes = Cons(r.topology, List.map(r.builds, fn b -> b.manifest))
+        ctl_ensure_loaded()
+        let l = ctl_leader_state()
+        let out = match Control.leader_release(l, r) do
+          Err(e) -> "ERR " ++ e
+          Ok(l2) ->
+            if not(ctl_store_release(seq, body)) do "ERR could_not_store"
+            else
+              let why = ctl_replicate(node, port, body, hashes)
+              if why != "" do
+                ctl_forget_release(seq)
+                "ERR could_not_replicate " ++ why
+              else
+                ctl_put_leader(l2)
+                "OK " ++ int_to_string(seq) ++ " " ++ digest
+              end
+            end
+        end
+        ctl_unlock("release")
+        out
+      end end
+  end
+end
+
+-- A copy from the leader: store it (the leader has already accepted it).
+pfn ctl_release_copy(text : String) : String do
+  match Control.parse(text) do
+    Err(e) -> "ERR bad_release " ++ e
+    Ok(r) ->
+      if not(ctl_signed(r)) do "ERR bad_signature"
+      else if ctl_store_release(r.seq, Control.serialize(r)) do "OK stored" else "ERR could_not_store" end end
+  end
+end
+
+pfn ctl_state_word(d : Option(Control.CtlDecision)) : String do
+  match d do
+    None -> "none"
+    Some(Control.RolloutComplete) -> "complete"
+    Some(Control.RolloutHalted(_, _, _)) -> "halted"
+    Some(Control.RolloutBehind(_)) -> "behind"
+    Some(_) -> "running"
+  end
+end
+
+pfn ctl_node_line(o : Control.CtlObs) : String do
+  let r = o.report
+  "NODE " ++ r.node ++ " seq:" ++ int_to_string(r.seq) ++ " healthy:" ++ (if r.healthy do "yes" else "no" end)
+    ++ " topology:" ++ r.topology ++ " drained:" ++ int_to_string(r.drained)
+    ++ " versions:" ++ (if r.versions == "" do "-" else String.replace_all(r.versions, " ", ",") end)
+    ++ " failed:" ++ (if r.failed_seq == 0 do "-" else int_to_string(r.failed_seq) ++ "/" ++ int_to_string(r.failed_step) ++ ":" ++ String.replace_all(r.failed_why, " ", "_") end) ++ "\n"
+end
+
+-- What forge follows: the head, the executor's verdict, each node's report.
+pfn ctl_status(node : Cap(ClusterNode.Live)) : String do
+  ctl_ensure_loaded()
+  let l = ctl_leader_state()
+  let d = if ctl_ready(node, l) do Tuple.second(Control.leader_pass(l, ctl_members_of(l), unix_time_ms())) else None end
+  let head = match l.release do
+    Some(r) -> int_to_string(r.seq) ++ " " ++ Control.digest(r)
+    None -> "0 -"
+  end
+  "STATUS head:" ++ head ++ " state:" ++ ctl_state_word(d) ++ " leader:" ++ Topology.node_name(node) ++ "\n"
+    ++ "DECISION " ++ (match d do
+      Some(x) -> Control.show_decision(x)
+      None -> if ctl_ready(node, l) do "no release" else "waiting for every node to report" end
+    end) ++ "\n"
+    ++ String.join(List.map(List.sort_by(l.obs, fn (a, b) -> a.report.node < b.report.node), fn o -> ctl_node_line(o)), "")
+    ++ "END\n"
+end
+
+-- Ask the other candidates until one is the leader; its answer is ours.
+pfn ctl_forward(node : Cap(ClusterNode.Live), port : Int, text : String) : String do
+  let rec_first = ctl_first_ep(ctl_others(node, port), fn (host, cport) ->
+    match ctl_call(host, cport, "FORWARDED " ++ text) do
+      Some(resp) -> if String.starts_with(resp, "ERR not_leader") do None else Some(resp) end
+      None -> None
+    end)
+  match rec_first do
+    Some(r) -> r
+    None -> "ERR no_leader"
+  end
+end
+
+-- Read the rest of a STATUS answer after its first line.
+pfn ctl_forward_status(node : Cap(ClusterNode.Live), port : Int) : String do
+  let rec_first = ctl_first_ep(ctl_others(node, port), fn (host, cport) ->
+    match ctl_call_lines(host, cport, "FORWARDED STATUS\n") do
+      Some(text) -> if String.starts_with(text, "ERR") do None else Some(text) end
+      None -> None
+    end)
+  match rec_first do
+    Some(t) -> t
+    None -> "ERR no_leader\n"
+  end
+end
+
+pfn ctl_call_lines(host : String, port : Int, text : String) : Option(String) do
+  match tcp_connect_timeout(host, port, 2000) do
+    Err(_) -> None
+    Ok(fd) ->
+      let _ = tcp_set_recv_timeout(fd, 15000)
+      let out = match tcp_send_all(fd, text) do
+        Err(_) -> None
+        Ok(_) -> Some(ctl_read_until_end(fd, ""))
+      end
+      tcp_close(fd)
+      out
+  end
+end
+
+pfn ctl_read_until_end(fd : Int, acc : String) : String do
+  match ctl_read_line(fd, "", 0) do
+    None -> acc
+    Some(l) -> if l == "END" do acc ++ "END\n" else ctl_read_until_end(fd, acc ++ l ++ "\n") end
+  end
+end
+
+-- Verbs the control API passes to this node's reload server unchanged: the
+-- unsigned reads. The signed verbs are not relayed here (a node takes its
+-- orders over `Ctl`, and verifies them itself).
+pfn ctl_passthrough(verb : String) : Bool do
+  List.member(["PING", "VERSIONS", "VERSIONS_DETAIL", "PINS", "RELEASE_HEAD", "NODE_STATE", "HCR_INFO", "GET_EPOCH"], verb)
+end
+
+-- One request on a connection; false when the connection is done.
+pfn ctl_api_request(node : Cap(ClusterNode.Live), port : Int, fd : Int) : Bool do
+  match ctl_read_line(fd, "", 0) do
+    None -> false
+    Some(line0) ->
+      let fwd = String.starts_with(line0, "FORWARDED ")
+      let line = if fwd do String.slice(line0, 10, String.byte_size(line0) - 10) else line0 end
+      let ws = ctl_words(line)
+      let verb = match List.head_opt(ws) do
+        Some(v) -> v
+        None -> ""
+      end
+      let arg = fn i -> match List.head_opt(List.drop(ws, i)) do
+        Some(x) -> ctl_int(x)
+        None -> 0
+      end
+      match verb do
+        "RELEASE" -> ctl_api_release(node, port, fd, fwd, arg(1), false)
+        "RELEASE_COPY" -> ctl_api_release(node, port, fd, fwd, arg(1), true)
+        "STATUS" ->
+          if ctl_is_leader(node) do ctl_reply(fd, ctl_status(node))
+          else if fwd do ctl_reply(fd, "ERR not_leader\n")
+          else ctl_reply(fd, ctl_forward_status(node, port)) end end
+          true
+        "LEADER" ->
+          ctl_reply(fd, (if ctl_is_leader(node) do "LEADER yes " else "LEADER no " end) ++ Topology.node_name(node) ++ "\n")
+          true
+        "CAS_PUT" ->
+          -- `CAS_PUT <hash> <size>`, READY, <size> bytes, the verdict: the reload socket's own exchange.
+          let size = arg(2)
+          if size <= 0 do
+            ctl_reply(fd, "ERR bad_size\n")
+            true
+          else
+            ctl_reply(fd, "READY\n")
+            match tcp_recv_exact(fd, size) do
+              Err(_) -> false
+              Ok(b) ->
+                let resp = Control.relay_line(line ++ "\n" ++ Bytes.to_string(b))
+                ctl_reply(fd, String.replace_all(resp, "READY\n", ""))
+                true
+            end
+          end
+        _ ->
+          if ctl_passthrough(verb) || verb == "CAS_CHECK" do ctl_reply(fd, Control.relay_line(line))
+          else ctl_reply(fd, "ERR unknown_command\n") end
+          true
+      end
+  end
+end
+
+-- `RELEASE <size>` and `RELEASE_COPY <size>`: the document follows the line.
+pfn ctl_api_release(node : Cap(ClusterNode.Live), port : Int, fd : Int, fwd : Bool, size : Int, copy : Bool) : Bool do
+  if size <= 0 || size > 1048576 do
+    ctl_reply(fd, "ERR bad_size\n")
+    true
+  else match tcp_recv_exact(fd, size) do
+    Err(_) -> false
+    Ok(b) ->
+      let body = Bytes.to_string(b)
+      if copy do ctl_reply(fd, ctl_release_copy(body) ++ "\n")
+      else if ctl_is_leader(node) do ctl_reply(fd, ctl_release(node, port, body) ++ "\n")
+      else if fwd do ctl_reply(fd, "ERR not_leader\n")
+      else ctl_reply(fd, ctl_forward(node, port, "RELEASE " ++ int_to_string(size) ++ "\n" ++ body) ++ "\n") end end end
+      true
+  end end
+end
+
+pfn ctl_api_conn(node : Cap(ClusterNode.Live), port : Int, fd : Int) : () do
+  if ctl_api_request(node, port, fd) do ctl_api_conn(node, port, fd) else tcp_close(fd) end
+end
+
+pfn ctl_api_accept(node : Cap(ClusterNode.Live), port : Int, lfd : Int) : Int do
+  match tcp_accept(lfd) do
+    Err(_) -> sleep_ms(200)
+    Ok(fd) ->
+      let _ = task_spawn(fn _ -> ctl_api_conn(node, port, fd))
+      ()
+  end
+  ctl_api_accept(node, port, lfd)
+end
+
+-- ── starting it all ─────────────────────────────────────────────────────────
+
+-- Called by the generated `main` after `Topology.place`: every node runs the
+-- Agent; a candidate (a node carrying [label]) also serves the control API.
+fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : Int) : () do
+  ctl_init()
+  let m = ctl_memory()
+  Vault.set(m, "cfg:dir", Env.get("MARCH_CONTROL_DIR", "/tmp/march-control"))
+  Vault.set(m, "cfg:chunk", Env.get("MARCH_CONTROL_CHUNK", "32768"))
+  Vault.set(m, "cfg:poll_ms", Env.get("MARCH_CONTROL_POLL_MS", "500"))
+  Vault.set(m, "cfg:session_polls", Env.get("MARCH_CONTROL_SESSION_POLLS", "40"))
+  Vault.set(m, "cfg:verified_file", Env.get("MARCH_TOPOLOGY_VERIFIED_FILE", ""))
+  Vault.set(m, "cfg:port_offset", Env.get("MARCH_CONTROL_PORT_OFFSET", "0"))
+  Vault.set(m, "cfg:pools", String.join(ctl_words(Env.get("MARCH_POOLS", "")), " "))
+  let _ = task_spawn(fn _ -> ctl_agent_loop(io, node))
+  let _ = task_spawn(fn _ -> ctl_prefetch_loop(io, node))
+  let offset = ctl_cfg_int("port_offset", 0)
+  let listen_port = if offset == 0 do port else ctl_int(Env.get("MARCH_NODE_PORT", "0")) + offset end
+  if List.member(Topology.node_labels(), label) do
+    match tcp_listen(listen_port) do
+      Ok(lfd) ->
+        let _ = task_spawn(fn _ -> ctl_api_accept(node, port, lfd))
+        println("control: API listening on port " ++ int_to_string(listen_port))
+      Err(e) -> println("control: cannot listen on port " ++ int_to_string(listen_port) ++ ": " ++ e)
+    end
+  else () end
+end

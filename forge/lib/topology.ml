@@ -184,11 +184,19 @@ type drain = { soft_ms : int option; hard_ms : int option }
 
 type backend = { kind : string option; port : int option }
 
+(** The in-cluster control plane (build step 12): [candidates] is the host
+    label of the nodes that may lead it, [port] the TCP port of their control
+    API. *)
+type control = { candidates : string; control_port : int }
+
+let default_control_port = 7947
+
 type t = {
   roles   : role list;
   pools   : pool list;
   drain   : drain option;
   backend : backend option;
+  control : control option;
   env     : string option;
   sources : string list;
 }
@@ -212,6 +220,7 @@ let known_pool_keys =
 let known_host_keys = [ "host"; "labels" ]
 let known_drain_keys = [ "soft_ms"; "hard_ms" ]
 let known_backend_keys = [ "kind"; "port" ]
+let known_control_keys = [ "candidates"; "port" ]
 
 let int_of_value = function
   | Toml.Str s -> int_of_string_opt (String.trim s)
@@ -236,10 +245,10 @@ let read (m : merged) : (t, diag list) result =
       in
       if name = "" then
         List.iter (fun (k, _, l) ->
-            err l (Printf.sprintf "unknown top-level key '%s' (keys go under [roles], [pool.<name>], [drain] or [backend])" k))
+            err l (Printf.sprintf "unknown top-level key '%s' (keys go under [roles], [pool.<name>], [drain], [backend] or [control])" k))
           ps
-      else if not (List.mem name [ "roles"; "drain"; "backend" ] || is_pool) then
-        err hl (Printf.sprintf "unknown section [%s] (expected [roles], [pool.<name>], [drain] or [backend])" name))
+      else if not (List.mem name [ "roles"; "drain"; "backend"; "control" ] || is_pool) then
+        err hl (Printf.sprintf "unknown section [%s] (expected [roles], [pool.<name>], [drain], [backend] or [control])" name))
     m.sections;
   (* [roles] *)
   let roles =
@@ -441,9 +450,38 @@ let read (m : merged) : (t, diag list) result =
       in
       Some { kind; port }
   in
+  (* [control] *)
+  let control =
+    match section "control" with
+    | None -> None
+    | Some (_, hl, ps) ->
+      check_unknown ~where:"[control]" known_control_keys ps;
+      let candidates =
+        match List.find_opt (fun (k, _, _) -> k = "candidates") ps with
+        | Some (_, Toml.Str s, _) when s <> "" -> Some s
+        | Some (_, _, l) -> err l "[control] `candidates` must be a host label (a non-empty string)"; None
+        | None -> err hl "[control] needs `candidates = \"<host label>\"`: the label of the nodes that may lead the control plane"; None
+      in
+      let port =
+        match List.find_opt (fun (k, _, _) -> k = "port") ps with
+        | None -> default_control_port
+        | Some (_, v, l) ->
+          (match int_of_value v with
+           | Some n when n >= 1 && n <= 65535 -> n
+           | _ -> err l "[control] `port` must be a port (1-65535)"; default_control_port)
+      in
+      (match candidates with
+       | Some c ->
+         (* A label no host carries can never elect a leader. *)
+         let carried = List.exists (fun (p : pool) -> List.exists (fun h -> List.mem c h.labels) p.hosts) pools in
+         if not carried && List.exists (fun (p : pool) -> p.hosts <> []) pools then
+           err hl (Printf.sprintf "[control] `candidates = \"%s\"`, but no host is labelled \"%s\": nothing could lead the control plane" c c);
+         Some { candidates = c; control_port = port }
+       | None -> None)
+  in
   let sources = m.sources in
   if !diags <> [] then Error (List.rev !diags)
-  else Ok { roles; pools; drain; backend; env = None; sources }
+  else Ok { roles; pools; drain; backend; control; env = None; sources }
 
 (* ── Files ─────────────────────────────────────────────────────────────── *)
 
@@ -981,6 +1019,11 @@ let digest_fields t : (string * Yojson.Safe.t) list =
     ("drain", json_opt (fun d -> `Assoc [ ("soft_ms", json_opt json_int d.soft_ms); ("hard_ms", json_opt json_int d.hard_ms) ]) t.drain);
     ("backend", json_opt (fun b -> `Assoc [ ("kind", json_opt json_str b.kind); ("port", json_opt json_int b.port) ]) t.backend);
   ]
+  (* Only when there is a [control] section: a digest without one keeps the
+     bytes (and so the hash) it always had. *)
+  @ (match t.control with
+     | Some c -> [ ("control", `Assoc [ ("candidates", `String c.candidates); ("port", `Int c.control_port) ]) ]
+     | None -> [])
 
 let digest_json t : Yojson.Safe.t = `Assoc (digest_fields t)
 
@@ -1063,7 +1106,14 @@ let read_digest path : (t, string) result =
         | `Assoc _ as b -> Some { kind = str_opt (U.member "kind" b); port = int_opt (U.member "port" b) }
         | _ -> None
       in
-      Ok { roles; pools; drain; backend; env = str_opt (U.member "env" json); sources = strs (U.member "sources" json) }
+      let control =
+        match U.member "control" json with
+        | `Assoc _ as c ->
+          Some { candidates = (match str_opt (U.member "candidates" c) with Some s -> s | None -> failwith (path ^ ": [control] has no candidates"));
+                 control_port = (match int_opt (U.member "port" c) with Some n -> n | None -> default_control_port) }
+        | _ -> None
+      in
+      Ok { roles; pools; drain; backend; control; env = str_opt (U.member "env" json); sources = strs (U.member "sources" json) }
     with
     | Failure m -> Error m
     | U.Type_error (m, _) -> Error (Printf.sprintf "%s: malformed topology digest: %s" path m)

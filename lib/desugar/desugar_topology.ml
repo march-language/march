@@ -79,7 +79,11 @@ type pool = {
   p_isolate : bool;
 }
 
-type t = { roles : role list; pools : pool list; soft_ms : int; hard_ms : int }
+(** The [[control]] section: the host label of the nodes that may lead the
+    control plane (build step 12) and the port of their control API. *)
+type control = { c_candidates : string; c_port : int }
+
+type t = { roles : role list; pools : pool list; soft_ms : int; hard_ms : int; control : control option }
 
 let default_capacity = 64
 let default_soft_ms = 30000
@@ -508,8 +512,23 @@ let main_source ?pools (f : facts) (t : t) : string =
       else add "    [\n%s\n    ]\n" (String.concat ",\n" entries);
       add "  else Nil end\n")
     pools;
-  add "  Topology.place(topology_node, List.concat([%s]))\n"
-    (String.concat ", " (List.mapi (fun i _ -> Printf.sprintf "topology_roles_%d" i) pools));
+  (* The control plane's two roles, placed like any other: the leader
+     (`count = 1` among the candidates, chosen by rendezvous hashing over SWIM,
+     D40) and the artifact server every candidate offers.  Their protocols and
+     bodies are Control_wiring's, spliced into the entry module. *)
+  let ctl_roles =
+    match t.control with
+    | None -> ""
+    | Some c ->
+      Printf.sprintf
+        ", [\n      Topology.offer_role(\"Ctl.Control\", Topology.count_on(%S, 1), 256, fn topology_cap -> Ctl_Run.offer_Control(topology_io, topology_node, topology_cap,\n        fn (topology_s, topology_x1, topology_x2, topology_x3, topology_x4, topology_x5, topology_st) -> ctl_control_session(topology_node, topology_s, topology_x1, topology_x2, topology_x3, topology_x4, topology_x5, topology_st))),\n      Topology.offer_role(\"CtlFetch.Server\", Topology.on_label(%S), 64, fn topology_cap -> CtlFetch_Run.offer_Server(topology_io, topology_node, topology_cap,\n        fn (topology_s, topology_x1, topology_x2, topology_st) -> ctl_fetch_session(topology_s, topology_x1, topology_x2, topology_st)))\n    ]"
+        c.c_candidates c.c_candidates
+  in
+  add "  Topology.place(topology_node, List.concat([%s%s]))\n"
+    (String.concat ", " (List.mapi (fun i _ -> Printf.sprintf "topology_roles_%d" i) pools)) ctl_roles;
+  (match t.control with
+   | Some c -> add "  ctl_start(topology_io, topology_node, %S, %d)\n" c.c_candidates c.c_port
+   | None -> ());
   add "  Topology.drain_on_signal(topology_node, %d, %d)\n" t.soft_ms t.hard_ms;
   add "  Topology.supervise_offers(topology_node)\n";
   add "end\n";

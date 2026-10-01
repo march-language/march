@@ -950,18 +950,21 @@ mod Control do
   doc "The reload server's answer to [line] (or lines: the request is a stream, a body verb's bytes follow the first newline)."
   fn relay_line(line : String) : String do reload_request(line) end
 
-  pfn state_field(line : String, key : String) : String do
+  doc "The value of `key:value` among the words of [line] (\"\" when absent)."
+  fn state_field(line : String, key : String) : String do
     match first_some(words(line), fn w -> field(w, key)) do
       Some(v) -> v
       None -> ""
     end
   end
 
-  pfn answer_lines(resp : String) : List(String) do
+  doc "The non-empty lines of a reload-server answer."
+  fn answer_lines(resp : String) : List(String) do
     List.filter(String.split(resp, "\n"), fn l -> l != "")
   end
 
-  pfn state_line(lines : List(String)) : String do
+  doc "The `STATE` line of a `NODE_STATE` answer (\"\" when absent)."
+  fn state_line(lines : List(String)) : String do
     match List.find(lines, fn l -> String.starts_with(l, "STATE ")) do
       Some(l) -> l
       None -> ""

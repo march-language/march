@@ -33,7 +33,8 @@ let of_digest (t : FT.t) : DT.t =
             p_isolate = p.isolate })
         t.pools;
     soft_ms = (match t.drain with Some { soft_ms = Some n; _ } -> n | _ -> DT.default_soft_ms);
-    hard_ms = (match t.drain with Some { hard_ms = Some n; _ } -> n | _ -> DT.default_hard_ms) }
+    hard_ms = (match t.drain with Some { hard_ms = Some n; _ } -> n | _ -> DT.default_hard_ms);
+    control = Option.map (fun (c : FT.control) -> { DT.c_candidates = c.candidates; c_port = c.control_port }) t.control }
 
 (** Parse [src] (declarations) as a module body and desugar it. *)
 let parse_decls ~(fname : string) (src : string) : Ast.decl list =
@@ -88,6 +89,13 @@ let prepare ~path ~(entry : Ast.module_) ~(imports : Ast.decl list) ~pools ~fore
           | m :: rest when m = entry_name -> (DT.insert_at rest ds ed, im)
           | _ -> (ed, DT.insert_at mpath ds im))
         (entry_decls, imports) helpers
+    in
+    (* The control plane's wiring (protocols, leader, Agent, API), only when
+       the topology has a [control] section. *)
+    let entry_decls =
+      match topo.DT.control with
+      | Some _ -> entry_decls @ parse_decls ~fname:"<control>" March_desugar.Control_wiring_src.text
+      | None -> entry_decls
     in
     let main = parse_decls ~fname:"<topology>" (DT.main_source ?pools facts topo) in
     if Sys.getenv_opt "MARCH_DUMP_TOPOLOGY_MAIN" = Some "1" then begin
