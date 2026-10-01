@@ -5,20 +5,16 @@ the grammar reached 0 failures (`specs/progress/2026-09-28-tree-sitter-grammar-s
 None of these is a missing construct; `scripts/check-tree-sitter.sh` now catches
 a new one.
 
-- [ ] **Keyword coverage check (design D5).** Not built. Today the `lexer.mll`
-  keywords with no literal in `grammar.js` are `dbg invariant one_for_one
-  one_for_all rest_for_one permanent transient temporary`; they parse as
-  identifiers, which is fine for highlighting, but a check would catch the next
-  new keyword before it becomes an ERROR.
-- [ ] **Who keeps it green (D6).** Add a line to CLAUDE.md "Keeping specs up to
-  date": a PR that changes `parser.mly`/`lexer.mll` either extends `grammar.js`
-  or lists its new fixtures in `tree-sitter-march/known-failures.txt` with a todo.
-- [ ] **`tree-sitter-march.wasm` (D3).** Still committed and hand-regenerated;
-  nothing in the repo loads it. Delete it, or build it in CI, depending on
-  whether anything outside the repo consumes it.
-- [ ] **Zed (Stage 5).** Bump `zed-march/extension.toml`'s grammar `rev` to a
-  commit with the new grammar, and replace the machine-local
-  `file:///Users/...` repository URL if Zed support is meant for anyone else.
+- [x] ~~**Keyword coverage check (design D5).**~~ Done: step 5 of
+  `scripts/check-tree-sitter.sh`, allowlist `tree-sitter-march/keyword-allowlist.txt`.
+  See `specs/progress/2026-09-30-tree-sitter-followups.md`.
+- [x] ~~**Who keeps it green (D6).**~~ Done: line added to CLAUDE.md "Keeping specs up to date".
+- [x] ~~**`tree-sitter-march.wasm` (D3).**~~ Deleted (owner decision): nothing in the repo
+  loads it and Zed builds the grammar from source. If a consumer ever needs a wasm, build it in
+  the `tree-sitter` CI job rather than committing it.
+- [x] ~~**Zed (Stage 5).**~~ Done: `zed-march/extension.toml` points at
+  `https://github.com/march-language/march` with `rev` `f13d38501` (the commit that brought the
+  grammar to 0 failures).
 - [ ] **Permissiveness.** The grammar accepts things the compiler rejects (every
   lambda body in call position, `let?` spelled as one token, attributes as free
   declarations). Harmless for highlighting; tighten only if a consumer needs

@@ -386,6 +386,8 @@ native_proc_reclaim_kill_respawn: coverage audit (user + stdlib): 120 enforced, 
 native_proc_reclaim_kill_respawn: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_process_handle_leak_probe: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_process_handle_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_process_run_stream: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_process_run_stream: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_qualified_ctor_pattern: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_qualified_ctor_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_qualified_type_name_render: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
@@ -544,6 +546,8 @@ native_topology_hook_timeout: coverage audit (user + stdlib): 120 enforced, 0 in
 native_topology_hook_timeout: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_topology_place: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_topology_place: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_trmc_computed_arg_nested: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_trmc_computed_arg_nested: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_trmc_filter_alternating: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_trmc_filter_alternating: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_trmc_shared_tail_reuse: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
@@ -568,6 +572,8 @@ native_unboxed_aggregate_boundaries: coverage audit (user + stdlib): 120 enforce
 native_unboxed_aggregate_boundaries: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_unit_callback_zero_arg: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_unit_callback_zero_arg: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_user_actor_named_like_stdlib: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
+native_user_actor_named_like_stdlib: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_user_fn_named_like_builtin: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced
 native_user_fn_named_like_builtin: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_user_fn_named_own: coverage audit (user + stdlib): 120 enforced, 0 inert (warned), 0 unenforced

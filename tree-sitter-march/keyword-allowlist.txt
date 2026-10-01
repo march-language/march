@@ -1,0 +1,14 @@
+# lexer.mll keywords with no literal in grammar.js (design D5).
+# scripts/check-tree-sitter.sh step 5: every keyword_table entry must appear in
+# grammar.js as a quoted literal, or be listed here.  A line here that now HAS a
+# literal (or is no longer a keyword) is red, so the list only shrinks.
+# These parse as plain identifiers today, which is fine for highlighting.
+dbg
+invariant
+offer
+one_for_all
+one_for_one
+permanent
+rest_for_one
+temporary
+transient

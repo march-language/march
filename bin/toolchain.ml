@@ -604,6 +604,11 @@ let load_stdlib ?(for_js=false) () =
     March_typecheck.Typecheck_builtins.stdlib_realpath :=
       (fun f -> try Some (Unix.realpath f) with _ -> None);
     March_typecheck.Typecheck_builtins.note_stdlib_root stdlib_dir;
+    (* The same provenance qualifies every stdlib actor's glue name
+       ([Desugar_actor_names]: [Anchor] -> [Topology__Anchor]), so an app
+       actor may share a stdlib actor's name. *)
+    March_desugar.Desugar_actor_names.is_stdlib_file :=
+      March_typecheck.Typecheck_builtins.file_is_stdlib;
     let home = (try Sys.getenv "HOME" with Not_found -> ".") in
     let cache_dir = Filename.concat home ".cache/march" in
     let short_hash = String.sub source_hash 0 16 in

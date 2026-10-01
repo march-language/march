@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_stdlib_only test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_compile_ll_race test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag)
+ (modules test_compiler test_stdlib_only test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_ctxesc test_prog_argv test_compile_ll_race test_alloc_contract test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_ctxesc march_modules march_resolver march_forge march_lint yojson alcotest str unix threads.posix))
 
 (library
@@ -2000,10 +2000,10 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; refuses to open an offer its certificate lacks, shared-secret mode checks
 ; nothing, and a squatter on a session's role name is refused. Compiled
 ; only: the interpreter does not run the offer actor while the initiator
-; polls for its answer. `--no-cap-strict` because a user-level
-; `NodeQueue.start_local` call (the fake's data queue) trips the
-; capability ceiling in stdlib `Socket`, which declares no `needs`
-; (pre-existing: specs/todos/2026-09-25-nodequeue-start-local-socket-ceiling.md).
+; polls for its answer. It compiles under the default capability ceiling:
+; the fake's data queue is a user-level `NodeQueue.start_local` call, which
+; used to fail the ceiling in stdlib `Socket` until `Socket` declared
+; `needs IO.NetConnect` (specs/progress/2026-09-30-nodequeue-start-local-socket-ceiling.md).
 (rule
  (targets cert_authz_bin cert_authz.out)
  (deps (file %{exe:../bin/main.exe})
@@ -2012,7 +2012,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file session/cert_authz.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile --no-cap-strict -o cert_authz_bin
+   (run %{exe:../bin/main.exe} --compile -o cert_authz_bin
         session/cert_authz.march)
    (with-stdout-to cert_authz.out (system "./cert_authz_bin")))))
 
@@ -3077,6 +3077,40 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; interpreted and the compiled run is diffed against the SAME file, so this
 ; is a compiled-vs-interpreted parity check as well as a golden. See
 ; specs/progress/2026-09-24-sha256-builtin-hex-string.md.
+;; Process.run_stream: the typechecker and the interpreter said Ok(Seq(String)),
+;; the compiled runtime returned Ok(<raw stdout String>) under that type, so
+;; any Seq operation on it panicked. Both backends are diffed against ONE
+;; .expected, which is the interpreter's output.
+(rule
+ (targets native_process_run_stream native_process_run_stream.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../runtime)
+       (file native/process_run_stream.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_process_run_stream
+        native/process_run_stream.march)
+   (with-stdout-to native_process_run_stream.out
+        (system "./native_process_run_stream")))))
+
+(rule
+ (targets interp_process_run_stream.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/process_run_stream.march))
+ (action
+  (with-stdout-to interp_process_run_stream.out
+    (run %{exe:../bin/main.exe} native/process_run_stream.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/process_run_stream.expected native_process_run_stream.out)))
+
+(rule
+ (alias runtest)
+ (action (diff native/process_run_stream.expected interp_process_run_stream.out)))
+
 (rule
  (targets native_sha256_hex_string native_sha256_hex_string.out)
  (deps (file %{exe:../bin/main.exe})
@@ -3496,6 +3530,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff empty.expected session_node_check.out)))
+
+;; TRMC gaps: a computed call argument (`r(a + 1, b)`) hid the modulo-cons site,
+;; and a nested `fn go` was analysed but never transformed. Both were plain
+;; non-tail recursion. Pre-fix: SIGBUS (stack guard page) on the 1,000,000
+;; element lists. Expected output is the interpreter's.
+(rule
+ (targets native_trmc_computed_arg_nested native_trmc_computed_arg_nested.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/trmc_computed_arg_nested.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_trmc_computed_arg_nested
+        native/trmc_computed_arg_nested.march)
+   (with-stdout-to native_trmc_computed_arg_nested.out
+        (system "./native_trmc_computed_arg_nested")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/trmc_computed_arg_nested.expected native_trmc_computed_arg_nested.out)))
 
 ;; A TRMC'd function with a modulo-cons arm AND a plain tail self-call
 ;; (filter's shape) cycled entry -> $dps -> entry, one frame per alternation
@@ -7655,6 +7710,37 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/nested_actor_same_name.expected interp_nested_actor_same_name.out)))
+
+; ── App actors named like stdlib actors (Anchor, Writer, ClusterNodeActor) ──
+(rule
+ (targets native_user_actor_named_like_stdlib native_user_actor_named_like_stdlib.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/user_actor_named_like_stdlib.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_user_actor_named_like_stdlib
+        native/user_actor_named_like_stdlib.march)
+   (with-stdout-to native_user_actor_named_like_stdlib.out
+        (system "./native_user_actor_named_like_stdlib")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_actor_named_like_stdlib.expected native_user_actor_named_like_stdlib.out)))
+
+(rule
+ (targets interp_user_actor_named_like_stdlib.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/user_actor_named_like_stdlib.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_user_actor_named_like_stdlib.out
+   (run %{exe:../bin/main.exe} native/user_actor_named_like_stdlib.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/user_actor_named_like_stdlib.expected interp_user_actor_named_like_stdlib.out)))
 
 ; ── Credit-based flow control: budget refuses, CREDIT re-admits ──
 (rule

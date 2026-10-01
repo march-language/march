@@ -54,6 +54,31 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **An app actor may share a name with a standard-library actor.** An app
+  `actor Anchor`, `Writer`, `Endpoint`, `HostWatch`, `RegWatch`, `CtlWriter`,
+  `OfferActor`, `ApInbox` or `ClusterNodeActor` used to collide with the
+  stdlib's own actor of that name: `--compile` and `--emit-llvm` died with an
+  internal compiler error (`actor-message tag table has no row for
+  Anchor_Msg.Bump`) or charged the app the stdlib actor's capabilities, and the
+  interpreter could spawn the app's actor where the stdlib meant its own. The
+  stdlib's actors now get module-qualified internal names
+  (`Topology__Anchor`); app actors keep theirs, so spawn symbols and
+  hot-reload manifests are unchanged.
+- **A DataFrame column of nothing but nulls keeps its nulls.** CSV/JSON loading and
+  `summarize` used to turn an all-null column into a plain string column of `""`, so the
+  rows read back as empty strings; they now read back as `NullVal`.
+- **Linux `--cap-sandbox` now filters threads that already exist when the
+  sandbox is installed.** The seccomp filter covered only the installing
+  thread and its later children, so the hot-reload server thread (started
+  before `main`) and any thread started by a C library constructor ran
+  unfiltered. The filter is now installed with `SECCOMP_FILTER_FLAG_TSYNC`, so
+  it covers the whole process, as the macOS sandbox already did.
+- **A program that calls `NodeQueue.start_local` itself now compiles under the
+  capability ceiling.** Stdlib `Socket` declared no `needs`, so the ceiling
+  rejected any such program with "module `Socket` uses `IO.NetConnect` but does
+  not declare `needs IO.NetConnect`", whatever the program granted. `Socket` now
+  declares `needs IO.NetConnect`. A program whose `main` is not granted
+  `IO.NetConnect` is still rejected.
 - **`[ffi.rust]` crates now work under the interpreter.** `forge run`,
   `forge interactive` and interpreted `forge test` used to fail at the first
   Rust extern with "symbol not found for interpreter FFI", and printed a
@@ -430,6 +455,21 @@ git log is authoritative for exact commits.
   silently skipped the check. It is now deferred until the whole module run and
   requires the importee's full declared set (fail-closed), so the same program
   is rejected in either declaration order.
+- **`Process.run_stream` works in compiled programs and no longer leaks.** The
+  compiled runtime returned the raw stdout String under the `Seq(String)` type
+  (any `Seq` operation on it panicked) and leaked three objects per call. Both
+  backends now build the `Seq` from the captured output the same way, and the
+  runtime releases what it allocated on the way.
+- **Tail-recursion-modulo-cons now covers a computed call argument and nested
+  helper functions.** `Cons(a, r(a + 1, b))` was compiled as a plain non-tail
+  recursion (stack overflow on long lists) although the same code with `a + 1`
+  bound on its own line was optimised; and a natural-style nested `fn go` was
+  reported as eligible but never rewritten. Both are now transformed, so a
+  1,000,000-element list built this way no longer overflows the stack.
+- **`Actor.top_by_mailbox` / `Actor.over_mailbox` and `NodeCall` typecheck cleanly.** The
+  two mailbox helpers now return `List((Pid(a), Int))` (the parameterized `Pid`) and
+  `NodeCall` names `RemoteCall.NoConnection` explicitly instead of the ambiguous bare
+  constructor; seven hidden stdlib type errors are gone.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
@@ -713,9 +753,27 @@ git log is authoritative for exact commits.
   property tests (about 4 minutes) were on a dune alias nothing ran. The
   nightly workflow's new `stdlib-properties` job runs them; they stay out of
   the per-PR `dune runtest`, which they would slow too much.
+- **The standard library's actors are no longer hot-reload slots.** Under
+  `--hot-reload`, only your own actors' dispatch functions get a slot; the
+  stdlib's (the cluster node that answers SWIM pings, session endpoints, the
+  node-queue writers, ...) do not, so a hot deploy never activates, pauses or
+  migrates them. A stdlib change comes with a toolchain change and deploys by
+  restart: the `.hcr_manifest` now records the stdlib it was built against
+  (`# stdlib_hash`), `forge deploy --plan` plans a pool whose stdlib changed as
+  a restart and says why, and `forge deploy hot` refuses such a build instead
+  of reporting the server up to date. Which actors are the stdlib's is decided
+  by where the compiler loaded them from, so an actor of yours named like a
+  stdlib actor, or in a file named like a stdlib file, keeps its slot. A
+  `--hot-reload` binary with no slot of its own (all its code in the entry
+  module) now still starts its reload server; before, it got one only
+  because the stdlib's actors had slots.
 - **`Array.from_list` (and `RRB.from_list`) is about 8x faster.** It now builds
   the vector in one pass instead of appending one element at a time: 100,000
   elements take 6.6 ms instead of 54 ms. The resulting vector is the same.
+- **NativeArray index loops no longer re-read the array length every iteration.** The
+  `native_*_arr_length` accessors are declared pure and speculatable in the emitted IR, so
+  LLVM hoists them (and the SIMD load/store bounds check that calls them) out of loops.
+  `bench/simd_kernels.march`'s `dot_simd` is about 12% faster; results are unchanged.
 - **`NativeArray.sort_*` is up to 7x faster on nearly-sorted input and 4-5x
   faster on input made of two sorted runs.** An array that is sorted apart from
   a few misplaced elements, or that rises and then falls, now takes a quick
