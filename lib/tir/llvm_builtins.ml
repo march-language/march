@@ -1281,6 +1281,8 @@ let runtime_only_declares : (string * string) list = [
   ("march_checked_ediv", "declare i64    @march_checked_ediv(i64 %a, i64 %b)");
   ("march_checked_div_op", "declare i64    @march_checked_div_op(i64 %a, i64 %b)");
   ("march_checked_mod_op", "declare i64    @march_checked_mod_op(i64 %a, i64 %b)");
+  ("march_checked_shl", "declare i64    @march_checked_shl(i64 %a, i64 %n)");
+  ("march_checked_shr", "declare i64    @march_checked_shr(i64 %a, i64 %n)");
   ("march_poly_eq", "declare i64  @march_poly_eq(ptr %a, ptr %b)");
   ("march_remote_init", "declare void @march_remote_init()");
   ("march_int_pow", "declare i64  @march_int_pow(i64 %base, i64 %exp)");
@@ -1425,6 +1427,9 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PComment "; Operator forms of / and % — bare \"division by zero\" / \"modulo by zero\" messages";
   PDeclare "march_checked_div_op";
   PDeclare "march_checked_mod_op";
+  PComment "; int_shl / int_shr with a non-literal count — panic outside [0, 62]";
+  PDeclare "march_checked_shl";
+  PDeclare "march_checked_shr";
   PDeclare "march_string_concat";
   PDeclare "march_string_eq";
   PDeclare "march_poly_eq";

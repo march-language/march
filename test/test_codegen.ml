@@ -12630,6 +12630,85 @@ let test_compiled_int_mod_euclid_parity () =
     ~expected:"[1, 2, 2, 1]"
     ()
 
+(** March Int is 63-bit and wraps modulo 2^63 on BOTH backends
+    (specs/lang/type-system.md, "Int width and overflow").  Pre-fix the
+    compiled backend did 64-bit i64 arithmetic in registers, so
+    `max + max` printed 9223372036854775806 compiled and -2 interpreted, and
+    the same value read back out of a List or a closure was 63-bit again
+    (the (n<<1)|1 tag drops bit 63).  int_max_value was 2^63-1 compiled,
+    int_shr was logical in the interpreter and arithmetic compiled, and
+    int_popcount counted 64 bits compiled.  Operands come out of a
+    NativeIntArr so neither OCaml-side constant folding nor LLVM can fold the
+    edges away; the interpreter's line is asserted literally, so a change in
+    either backend shows up here. *)
+let test_compiled_int_overflow_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_int_overflow"
+    ~src:"mod IntOverflowParity do\n\
+    \  needs IO.Console\n\
+    \  fn apply(f, x) do f(x) end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let arr = NativeArray.from_list_int([4611686018427387903, -4611686018427387903, -8, -1, 1, 3, 62])\n\
+    \    let mx = NativeArray.get_int(arr, 0)\n\
+    \    let mn = NativeArray.get_int(arr, 1) - 1\n\
+    \    let m8 = NativeArray.get_int(arr, 2)\n\
+    \    let m1 = NativeArray.get_int(arr, 3)\n\
+    \    let one = NativeArray.get_int(arr, 4)\n\
+    \    let three = NativeArray.get_int(arr, 5)\n\
+    \    let s62 = NativeArray.get_int(arr, 6)\n\
+    \    println([mx + mx, mx + one, mn - one, mx * three, 0 - mn, mn / m1, mn % m1])\n\
+    \    println([int_max_value(), int_min_value(), int_max_value() + one])\n\
+    \    println([int_div(mn, m1), int_abs(mn), int_pow(three, 40), int_pow(m1, 63)])\n\
+    \    println([int_shl(one, s62), int_shl(mx, one), int_shr(m8, one), int_shr(mn, s62), int_shr(m8, 2)])\n\
+    \    println([int_popcount(m1), int_popcount(mn), int_popcount(mx), int_not(mx), int_xor(mn, m1)])\n\
+    \    println(apply(fn y -> y + one, mx))\n\
+    \    println([mx + mx == m1 - one, mx + one < 0])\n\
+    \  end\n\
+     end\n"
+    ~expected:"[-2, -4611686018427387904, 4611686018427387903, 4611686018427387901, \
+               -4611686018427387904, -4611686018427387904, 0]\n\
+               [4611686018427387903, -4611686018427387904, -4611686018427387904]\n\
+               [-4611686018427387904, -4611686018427387904, 2934293422202152993, -1]\n\
+               [-4611686018427387904, -2, -4, -1, -2]\n\
+               [63, 1, 62, -4611686018427387904, 4611686018427387903]\n\
+               -4611686018427387904\n\
+               [true, true]"
+    ()
+
+(** A shift count outside [0, 62] (and a negative int_pow exponent) panics
+    on both backends with the interpreter's message.  Compiled, a non-literal
+    count goes through march_checked_shl; pre-fix it was a raw LLVM `shl`,
+    which is poison for a count >= 64, and int_pow returned 0 for a negative
+    exponent instead of panicking. *)
+let test_compiled_int_shift_range_panics () =
+  List.iter (fun (name, call, msg) ->
+    let src = Printf.sprintf
+      "mod ShiftRange do\n\
+      \  needs IO.Console\n\
+      \  fn main(_cap_console : Cap(IO.Console)) do\n\
+      \    let arr = NativeArray.from_list_int([63, -1])\n\
+      \    let n = NativeArray.get_int(arr, 0)\n\
+      \    let neg = NativeArray.get_int(arr, 1)\n\
+      \    println(%s)\n\
+      \  end\n\
+       end\n" call in
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+    let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1; echo EXIT:$?"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src_path)) in
+    Alcotest.(check bool) (name ^ ": interpreter panics with " ^ msg ^ " (got: " ^ interp_out ^ ")")
+      true (ir_contains interp_out msg && ir_contains interp_out "EXIT:1");
+    let bin = Filename.concat tmp (name ^ "bin") in
+    match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+            ~main_exe ~bin ~src:src_path () with
+    | None -> ()
+    | Some bin ->
+      let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+      Alcotest.(check bool) (name ^ ": compiled panics with " ^ msg ^ " (got: " ^ run_out ^ ")")
+        true (ir_contains run_out msg && ir_contains run_out "EXIT:1"))
+    [ ("march_shl_range", "int_shl(1, n)", "int_shl: shift out of range");
+      ("march_shr_range", "int_shr(1, neg)", "int_shr: shift out of range");
+      ("march_pow_negexp", "int_pow(2, neg)", "int_pow: negative exponent") ]
+
 (** Deque.pop_front decode parity (2026-07-24).  deque.march loaded LAZILY
     (it was missing from bin/main.ml's stdlib_file_list), so the caller's
     let-binders stayed unresolved '_ tvars and monomorphization could not
@@ -13795,6 +13874,9 @@ declare i64    @march_checked_ediv(i64 %a, i64 %b)
 ; Operator forms of / and % — bare "division by zero" / "modulo by zero" messages
 declare i64    @march_checked_div_op(i64 %a, i64 %b)
 declare i64    @march_checked_mod_op(i64 %a, i64 %b)
+; int_shl / int_shr with a non-literal count — panic outside [0, 62]
+declare i64    @march_checked_shl(i64 %a, i64 %n)
+declare i64    @march_checked_shr(i64 %a, i64 %n)
 declare ptr  @march_string_concat(ptr %a, ptr %b)
 declare i64  @march_string_eq(ptr %a, ptr %b)
 declare i64  @march_poly_eq(ptr %a, ptr %b)
@@ -16427,6 +16509,10 @@ let codegen_suites =
             test_compiled_int_div_euclid_parity;
           Alcotest.test_case "compiled int_mod_euclid parity (negative divisor)" `Quick
             test_compiled_int_mod_euclid_parity;
+          Alcotest.test_case "compiled Int is 63-bit and wraps (overflow edge parity)" `Quick
+            test_compiled_int_overflow_parity;
+          Alcotest.test_case "compiled int_shl/int_shr/int_pow range panics match interpreter" `Quick
+            test_compiled_int_shift_range_panics;
           Alcotest.test_case "compiled IOList deep-tree flatten parity (stack-safe)" `Slow
             test_compiled_iolist_deep_flatten_parity;
           Alcotest.test_case "compiled Deque.pop_front decode parity (eager stdlib load)" `Quick

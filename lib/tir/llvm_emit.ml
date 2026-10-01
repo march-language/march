@@ -1204,11 +1204,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Negate f.Tir.v_name ->
     let (ty, va) = emit_atom ctx a in
     let r = fresh ctx "ar" in
-    if ty = "double" then
-      emit ctx (Printf.sprintf "%s = fneg double %s" r va)
-    else
+    if ty = "double" then begin
+      emit ctx (Printf.sprintf "%s = fneg double %s" r va);
+      (ty, r)
+    end else begin
       emit ctx (Printf.sprintf "%s = sub i64 0, %s" r va);
-    (ty, r)
+      (* -(-2^62) leaves the 63-bit range; wrap it like the interpreter. *)
+      (ty, Llvm_ctx.emit_wrap_int63 ctx r)
+    end
 
   (* ── ~H sigil: html_auto_escape(v) ────────────────────────────────────
      The runtime `march_html_auto_escape` takes a single generic `ptr` and
@@ -1338,8 +1341,24 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "bw" in
-    emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_bitwise_op f.Tir.v_name) va vb);
-    ("i64", r)
+    let is_shift = f.Tir.v_name = "int_shl" || f.Tir.v_name = "int_shr" in
+    let const_in_range = match b with
+      | Tir.ALit (March_ast.Ast.LitInt n) -> n >= 0 && n < 63
+      | _ -> false
+    in
+    (* Shift counts outside [0, 62] panic on both backends ("int_shl: shift
+       out of range", as Eval_builtins raises); a raw LLVM shl/ashr by >= 64
+       is poison.  A literal in-range count (the common case: hamt/array
+       index math) stays an inline instruction; any other count goes through
+       the checked runtime helper. *)
+    (if is_shift && not const_in_range then
+       emit ctx (Printf.sprintf "%s = call i64 @march_checked_%s(i64 %s, i64 %s)"
+                   r (if f.Tir.v_name = "int_shl" then "shl" else "shr") va vb)
+     else
+       emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_bitwise_op f.Tir.v_name) va vb));
+    (* and/or/xor/ashr keep a 63-bit input in range; shl can leave it. *)
+    if f.Tir.v_name = "int_shl" then ("i64", Llvm_ctx.emit_wrap_int63 ctx r)
+    else ("i64", r)
 
   | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Int_not f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
@@ -1350,7 +1369,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Int_popcount f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "bw" in
-    emit ctx (Printf.sprintf "%s = call i64 @llvm.ctpop.i64(i64 %s)" r va);
+    (* Count the 63 bits of a March Int: bit 63 is only bit 62's sign
+       extension, so mask it off (the interpreter counts popcount(-1) = 63). *)
+    let m = fresh ctx "bw" in
+    emit ctx (Printf.sprintf "%s = and i64 %s, 9223372036854775807" m va);
+    emit ctx (Printf.sprintf "%s = call i64 @llvm.ctpop.i64(i64 %s)" r m);
     ("i64", r)
 
   (* ── {int,bool,float}_to_string: explicit coerce before the C call ──── *
@@ -1624,7 +1647,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | _                -> assert false
     in
     emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 %s)" r helper va vb);
-    ("i64", r)
+    (* Quotients leave the 63-bit Int range only for -2^62 / -1; remainders
+       never do.  See [Llvm_ctx.emit_wrap_int63]. *)
+    if Builtin_name.(is Int_div f.Tir.v_name || is Int_div_euclid f.Tir.v_name)
+    then ("i64", Llvm_ctx.emit_wrap_int63 ctx r)
+    else ("i64", r)
 
   | Tir.EApp (f, [a; b])
     when Builtin_name.is Builtin_name.Int_pow f.Tir.v_name ->
@@ -1632,22 +1659,27 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
     emit ctx (Printf.sprintf "%s = call i64 @march_int_pow(i64 %s, i64 %s)" r va vb);
-    ("i64", r)
+    (* march_int_pow wraps mod 2^64; reducing that mod 2^63 is the 63-bit
+       wrapped power the interpreter computes. *)
+    ("i64", Llvm_ctx.emit_wrap_int63 ctx r)
 
   | Tir.EApp (f, [a])
     when Builtin_name.is Builtin_name.Int_abs f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "ar" in
     emit ctx (Printf.sprintf "%s = call i64 @llvm.abs.i64(i64 %s, i1 false)" r va);
-    ("i64", r)
+    (* abs(-2^62) = 2^62 wraps back to -2^62, as OCaml's [abs min_int]. *)
+    ("i64", Llvm_ctx.emit_wrap_int63 ctx r)
 
+  (* March Int is 63-bit: [-2^62, 2^62 - 1], the interpreter's OCaml
+     max_int/min_int (specs/lang/type-system.md, "Int width and overflow"). *)
   | Tir.EApp (f, _)
     when Builtin_name.is Builtin_name.Int_max_value f.Tir.v_name ->
-    ("i64", "9223372036854775807")
+    ("i64", "4611686018427387903")
 
   | Tir.EApp (f, _)
     when Builtin_name.is Builtin_name.Int_min_value f.Tir.v_name ->
-    ("i64", "-9223372036854775808")
+    ("i64", "-4611686018427387904")
 
   (* ── Float constants and classification predicates ──────────────────
      float_nan / float_infinity / float_neg_infinity / float_epsilon are
