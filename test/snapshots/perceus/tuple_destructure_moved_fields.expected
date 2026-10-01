@@ -1,0 +1,92 @@
+-- types (8) --
+type Box = Box(String, String)
+type Raw = Raw(String, Int, String)
+closure $Clo_$jp5$0(Ptr(Unit))
+closure $Clo_$jp9$1(Ptr(Unit), () -> '_)
+closure $Clo_$jp7$2(Ptr(Unit), () -> '_)
+closure $Clo_$jp17$3(Ptr(Unit))
+closure $Clo_$jp21$4(Ptr(Unit), () -> '_)
+closure $Clo_$jp19$5(Ptr(Unit), () -> '_)
+-- fns (10) --
+## $jp17$apply$3
+fn $jp17$apply$3($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## $jp19$apply$5
+fn $jp19$apply$5($clo : Ptr(Unit)) : '_ =
+  let $jp_clo18 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+inc_rc $jp_clo18;
+call_ptr $jp_clo18()
+
+## $jp21$apply$4
+fn $jp21$apply$4($clo : Ptr(Unit)) : '_ =
+  let $jp_clo18 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+let $jp_clo20 : () -> '_ = inc_rc $jp_clo18;
+alloc $Clo_$jp19$5($jp19$apply$5, $jp_clo18) in
+call_ptr $jp_clo20()
+
+## $jp5$apply$0
+fn $jp5$apply$0($clo : Ptr(Unit)) : '_ =
+  panic("non-exhaustive pattern match")
+
+## $jp7$apply$2
+fn $jp7$apply$2($clo : Ptr(Unit)) : '_ =
+  let $jp_clo6 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+inc_rc $jp_clo6;
+call_ptr $jp_clo6()
+
+## $jp9$apply$1
+fn $jp9$apply$1($clo : Ptr(Unit)) : '_ =
+  let $jp_clo6 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+let $jp_clo8 : () -> '_ = inc_rc $jp_clo6;
+alloc $Clo_$jp7$2($jp7$apply$2, $jp_clo6) in
+call_ptr $jp_clo8()
+
+## from_ctor
+fn from_ctor(r : Raw) : Box =
+  case r of
+  Raw($f14, $f15, $f16) -> dec_rc r;
+let $jp_clo18 : () -> '_ = alloc $Clo_$jp17$3($jp17$apply$3) in
+let $jp_clo22 : () -> '_ = alloc $Clo_$jp21$4($jp21$apply$4, $jp_clo18) in
+dec_rc $jp_clo22;
+let c : String = $f16 in
+let n : Int = $f15 in
+let a : String = $f14 in
+let $t13 : Box = alloc Box.Box(a, c) in
+keep($t13)
+  _ -> dec_rc r;
+panic("non-exhaustive pattern match")
+
+## from_tuple
+fn from_tuple(t : (String, Int, String)) : Box =
+  case t of
+  $Tuple3($f2, $f3, $f4) -> dec_rc t;
+let $jp_clo6 : () -> '_ = alloc $Clo_$jp5$0($jp5$apply$0) in
+let $jp_clo10 : () -> '_ = alloc $Clo_$jp9$1($jp9$apply$1, $jp_clo6) in
+dec_rc $jp_clo10;
+let c : String = $f4 in
+let n : Int = $f3 in
+let a : String = $f2 in
+let $t1 : Box = alloc Box.Box(a, c) in
+keep($t1)
+  _ -> dec_rc t;
+panic("non-exhaustive pattern match")
+
+## keep
+fn keep(b : Box) : Box =
+  b
+
+## main
+fn main(_c : Cap(IO.Console)) : () =
+  let $p28 : Box = let $t25 : (String, Int, String) = ("a", 1, "b") in
+from_tuple($t25) in
+dec_rc $p28;
+let $p27 : Box = let $t26 : Raw = alloc Raw.Raw("a", 1, "b") in
+from_ctor($t26) in
+dec_rc $p27;
+println("done")
+
