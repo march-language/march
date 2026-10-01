@@ -27,7 +27,7 @@ let fm ?(sig_ = "s") ?(caps = []) name impl =
 let abi_arm = "march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8"
 
 let manifest ?(target = "linux/arm64") ?(abi = abi_arm) ?(roles = []) fns =
-  { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = Some target; hcr_abi = Some abi; module_prefix = Some "App";
+  { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = Some target; hcr_abi = Some abi; module_prefix = Some "App"; stdlib_hash = None;
     functions = fns; roles }
 
 (** The base program: two pools' hooks, a role body, an actor, a protocol. *)
@@ -182,6 +182,69 @@ let test_unslotted_changes () =
   (* no node reported its slots: no judgement *)
   let p = P.classify (input [ build ~old:(manifest base) (manifest (replace_fn "$lam2$apply" "k2" base)) ]) in
   check_mech "slots unknown" (mech p "back") (fun m -> m = P.Hot)
+
+(** A stdlib change is a restart (owner decision 2026-09-30: stdlib actors
+    are not hot-reload slots).  The manifests record the stdlib they were
+    compiled against ([# stdlib_hash]); here the only difference between the
+    running build and this one is the stdlib: two of its actor's functions
+    changed, nothing of the app did.  The stdlib's `Writer_dispatch` has no
+    slot, so no patch can deliver the change.  Before the check, with the
+    running nodes' slots unknown this planned a hot patch that activates
+    nothing; with them known, only the generic "no dispatch slot" reason. *)
+let test_stdlib_change_restart () =
+  let stdlib_fns = [ fm "Writer_dispatch" "w1"; fm "Writer_Wait" "ww1"; fm "NodeQueue.start" "ns1" ] in
+  let with_stdlib h fns = { (manifest fns) with Cmd_deploy_hot.stdlib_hash = h } in
+  let old = with_stdlib (Some "aaaaaaaaaaaa1111") (base_fns @ stdlib_fns) in
+  let nw_fns = base_fns @ replace_fn "Writer_Wait" "ww2" (replace_fn "Writer_dispatch" "w2" stdlib_fns) in
+  let nw = with_stdlib (Some "bbbbbbbbbbbb2222") nw_fns in
+  let app_slots = [ "Counter_dispatch"; "Back.serve"; "Back.helper"; "Back.start"; "Front.start" ] in
+  List.iter (fun (what, slots) ->
+      let p = P.classify (input [ build ?slots ~old nw ]) in
+      List.iter (fun pool -> check_mech (what ^ ": " ^ pool) (mech p pool) is_restart) [ "back"; "front" ];
+      expect what (P.render p)
+        [ "the standard library changed (stdlib aaaaaaaaaaaa -> bbbbbbbbbbbb)";
+          "a stdlib change ships with a toolchain change and deploys by restart" ])
+    [ ("slots unknown", None); ("slots known", Some app_slots) ];
+  (* the same stdlib: no stdlib reason; the app change is a hot patch *)
+  let same = with_stdlib (Some "aaaaaaaaaaaa1111") (replace_fn "Back.helper" "x2" base_fns @ stdlib_fns) in
+  let p = P.classify (input [ build ~slots:app_slots ~old same ]) in
+  check_mech "same stdlib" (mech p "back") (fun m -> m = P.Hot);
+  refuse "same stdlib" (P.render p) [ "the standard library changed" ];
+  (* a manifest from before the header: not detectable, not claimed *)
+  let legacy = { old with Cmd_deploy_hot.stdlib_hash = None } in
+  let p = P.classify (input [ build ~old:legacy nw ]) in
+  refuse "legacy baseline" (P.render p) [ "the standard library changed" ]
+
+(** `forge deploy hot` ([Cmd_deploy_hot.run], also the path of `forge test
+    --upgrade-from` and the two-node scenarios' hcr_deploy) refuses a stdlib
+    change before it connects, instead of finding nothing to activate and
+    reporting the server up to date.  The socket does not exist: a refusal
+    names the stdlib, anything that got past the check fails to connect. *)
+let test_deploy_hot_refuses_stdlib_change () =
+  let dir = Filename.temp_dir "deploy_hot_stdlib_" "" in
+  let write_manifest name h =
+    let path = Filename.concat dir name in
+    Out_channel.with_open_bin path (fun oc ->
+        Printf.fprintf oc "# march-hcr-manifest v2\n# cas_hash c1\n# module_prefix App\n%s\
+                           Counter_dispatch d1 s caps=\nWriter_dispatch w1 s caps=\n"
+          (match h with Some h -> "# stdlib_hash " ^ h ^ "\n" | None -> ""));
+    path
+  in
+  let parse path = match Cmd_deploy_hot.parse_manifest path with
+    | Ok m -> m | Error e -> Alcotest.failf "manifest: %s" e in
+  let old_path = write_manifest "old.hcr_manifest" (Some "aaaa") in
+  Alcotest.(check (option string)) "the header parses" (Some "aaaa") (parse old_path).Cmd_deploy_hot.stdlib_hash;
+  let run manifest =
+    Cmd_deploy_hot.run ~tunnel:false ~ssh_host:"local" ~remote_socket:(Filename.concat dir "no.sock")
+      ~signing_pubkey:"" ~sk:Bytes.empty ~manifest ~so_path:(Filename.concat dir "p.so")
+      ~old_manifest_path:old_path ()
+  in
+  (match run (parse (write_manifest "new.hcr_manifest" (Some "bbbb"))) with
+   | Error m -> expect "refusal" m [ "the standard library changed" ]
+   | Ok n -> Alcotest.failf "a stdlib change deployed hot (%d activated)" n);
+  (match run (parse (write_manifest "same.hcr_manifest" (Some "aaaa"))) with
+   | Error m -> refuse "same stdlib gets past the check" m [ "standard library" ]
+   | Ok _ -> Alcotest.fail "connected to a socket that does not exist")
 
 let test_signature_change_noted () =
   let nw = manifest (List.map (fun (f : Cmd_deploy_hot.fn_manifest) ->
@@ -499,6 +562,8 @@ let () =
         Alcotest.test_case "functions changed/added/removed: hot patch" `Quick test_hot_patch;
         Alcotest.test_case "a signature change is shown" `Quick test_signature_change_noted;
         Alcotest.test_case "changes the running base cannot swap restart" `Quick test_unslotted_changes;
+        Alcotest.test_case "a stdlib change restarts (stdlib actors are not slots)" `Quick test_stdlib_change_restart;
+        Alcotest.test_case "deploy hot refuses a stdlib change" `Quick test_deploy_hot_refuses_stdlib_change;
         Alcotest.test_case "state change: migrate_state, @compat, blocked" `Quick test_migration;
         Alcotest.test_case "message types: loss, migrate_msg, wrong old type" `Quick test_message_types;
         Alcotest.test_case "a breaking protocol change: hot patch + drain, live sessions" `Quick test_protocol_drain;

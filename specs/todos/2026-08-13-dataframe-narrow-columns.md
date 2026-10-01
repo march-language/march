@@ -2,8 +2,8 @@
 
 **Parked 2026-09-22 (repo owner decision): no workload needs this yet.** Leave it
 until someone hits the need; the 35-site migration and the scoping choice below are the
-cost to weigh then, and the all-null `StrCol` bug noted below is separate and could be
-fixed on its own. Re-open by removing this note and saying
+cost to weigh then, and the all-null `StrCol` bug noted below was separate and is now fixed
+(`specs/progress/2026-09-30-dataframe-all-null-column.md`). Re-open by removing this note and saying
 what hit it.
 
 Filed 2026-08-13, as part of the SIMD follow-ups sweep (Task 3 of
@@ -82,11 +82,10 @@ There is no `Value` variant carrying a narrower numeric type (only `IntVal`/
 could ever choose `F32Col`/`I32Col` on its own — inference would need either a
 new `Value` case, an explicit width hint from the caller, or a post-hoc
 downcast pass over a finished full-width column. And a column built entirely
-from nulls silently becomes `StrCol` today: `builder_to_column`'s
-`NullBuilder` arm (`stdlib/dataframe.march:528`) finalizes into
-`StrCol(name, typed_array_create(n, ""))` — an all-null numeric-looking column
-gets no numeric type at all under the current builder, and a narrow-width
-migration inherits that same ambiguity for any new numeric variant.
+from nulls used to silently become a plain `StrCol` (fixed 2026-09-30: it is now an
+all-masked `NullableStrCol`). It still gets no numeric type, since nothing in it says
+which one, so a narrow-width migration inherits that ambiguity for any new numeric
+variant.
 
 ## Two candidate scopings
 

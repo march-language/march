@@ -1,0 +1,68 @@
+-- App actors named like standard-library actors: `Anchor` (Topology),
+-- `Writer` (NodeQueue) and, nested, `ClusterNodeActor` (ClusterNode). Actor
+-- glue is named after the actor's bare name, and the stdlib is loaded whole,
+-- so before 2026-09-30 an app `Anchor` met the stdlib's under one name:
+-- `--compile` died with "actor-message tag table has no row for
+-- Anchor_Msg.Bump" (interpreted, it ran). Desugar_actor_names now qualifies
+-- every STDLIB actor (Topology__Anchor, NodeQueue__Writer, ...); app actors
+-- keep their bare names. NodeQueue.start_local spawns the stdlib's Writer in
+-- the same program, and its sink credits the app's Writer.
+mod App do
+  needs IO
+
+  actor Anchor do
+    state { n : Int }
+    init  { n: 0 }
+    on Bump() do { n: state.n + 1 } end
+  end
+
+  actor Writer do
+    state { written : Int }
+    init  { written: 0 }
+    on Scribble(k : Int) do { written: state.written + k } end
+  end
+
+  mod Net do
+    actor ClusterNodeActor do
+      state { beats : Int }
+      init  { beats: 10 }
+      on Beat(k : Int) do { beats: state.beats + k } end
+    end
+    fn beat(pid, k) do send(pid, Beat(k)) end
+  end
+
+  fn main(cap : Cap(IO)) do
+    let a = spawn(Anchor)
+    let w = spawn(Writer)
+    let c = spawn(Net.ClusterNodeActor)
+    send(a, Bump())
+    send(a, Bump())
+    send(w, Scribble(3))
+    send(w, Scribble(4))
+    Net.beat(c, 32)
+    -- The stdlib's Writer hands the frame to this sink in its own turn; the
+    -- sink credits the app's Writer, so its total (3 + 4 + 5) shows both ran.
+    let q = NodeQueue.start_local(fn b -> do
+      let _ = send(w, Scribble(Bytes.length(b)))
+      ()
+    end)
+    match NodeQueue.enqueue(q, 1, Bytes.from_string("hello"), NodeQueue.Unbounded) do
+      Ok(_) -> println("enqueued")
+      Err(_) -> println("enqueue refused")
+    end
+    run_until_idle()
+    match get_actor_field(a, "n") do
+      Some(n) -> println("Anchor n = " ++ int_to_string(n))
+      None    -> println("Anchor n = <none>")
+    end
+    match get_actor_field(w, "written") do
+      Some(k) -> println("Writer written = " ++ int_to_string(k))
+      None    -> println("Writer written = <none>")
+    end
+    match get_actor_field(c, "beats") do
+      Some(b) -> println("ClusterNodeActor beats = " ++ int_to_string(b))
+      None    -> println("ClusterNodeActor beats = <none>")
+    end
+    NodeQueue.close(q)
+  end
+end

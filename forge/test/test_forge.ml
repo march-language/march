@@ -1338,7 +1338,7 @@ let role_m ?(chains = []) name caps =
   { Cmd_deploy_hot.role_name = name; role_caps = caps; role_chains = chains }
 let manifest_roles roles =
   { Cmd_deploy_hot.version = 2; cas_hash = "cas"; target = None; hcr_abi = None;
-    module_prefix = None; functions = []; roles }
+    module_prefix = None; stdlib_hash = None; functions = []; roles }
 
 let test_role_gate_legacy_baseline_permissive () =
   let prior = manifest_roles [] in
@@ -1496,7 +1496,7 @@ let test_scoped_caps_new_function_compares_against_empty () =
      [], so ALL its caps show up as widening. *)
   let to_activate = [ fm ~name:"MyApp.brand_new" ~caps:["IO.Console"; "IO.FileWrite"] ] in
   let prior_manifest = { Cmd_deploy_hot.version = 2; cas_hash = "cas";
-                         target = None; hcr_abi = None; module_prefix = None;
+                         target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None;
                          functions = [] ; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
@@ -1509,7 +1509,7 @@ let test_scoped_caps_existing_function_adds_cap_widens () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] in
   let prior_manifest =
     { Cmd_deploy_hot.version = 2; cas_hash = "cas";
-      target = None; hcr_abi = None; module_prefix = None;
+      target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None;
       functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] ; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
@@ -1522,7 +1522,7 @@ let test_scoped_caps_existing_function_drops_cap_narrows () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Console"] ] in
   let prior_manifest =
     { Cmd_deploy_hot.version = 2; cas_hash = "cas";
-      target = None; hcr_abi = None; module_prefix = None;
+      target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None;
       functions = [ fm ~name:"MyApp.f" ~caps:["IO.Console"; "IO.FileWrite"] ] ; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
@@ -1537,7 +1537,7 @@ let test_scoped_caps_existing_function_adds_subsumed_cap_no_widen () =
   let to_activate = [ fm ~name:"MyApp.f" ~caps:["IO.Network"; "IO.NetConnect"] ] in
   let prior_manifest =
     { Cmd_deploy_hot.version = 2; cas_hash = "cas";
-      target = None; hcr_abi = None; module_prefix = None;
+      target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None;
       functions = [ fm ~name:"MyApp.f" ~caps:["IO.Network"] ] ; roles = [] } in
   let (prior_caps, new_caps) =
     Cmd_deploy_hot.compute_scoped_caps ~to_activate ~prior:(Some prior_manifest) in
@@ -1901,7 +1901,7 @@ let activate4_selected ~manifest ~no_cap_gate =
 
 let manifest_with_caps =
   { Cmd_deploy_hot.version = 2; cas_hash = String.make 64 'a';
-    target = None; hcr_abi = None; module_prefix = None;
+    target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None;
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
         fn_callers = []; fn_caps = ["IO.Console"]; fn_has_caps = true } ];
@@ -1909,7 +1909,7 @@ let manifest_with_caps =
 
 let legacy_manifest =
   { Cmd_deploy_hot.version = 2; cas_hash = String.make 64 'a';
-    target = None; hcr_abi = None; module_prefix = None;
+    target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None;
     functions = [
       { Cmd_deploy_hot.fn_name = "MyApp.f"; fn_impl_hash = "h"; fn_sig_hash = "s";
         fn_callers = []; fn_caps = []; fn_has_caps = false } ];

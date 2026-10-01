@@ -72,6 +72,11 @@ let load_stdlib () =
     March_typecheck.Typecheck_builtins.stdlib_realpath :=
       (fun f -> try Some (Unix.realpath f) with _ -> None);
     March_typecheck.Typecheck_builtins.note_stdlib_root stdlib_dir;
+    (* The same provenance qualifies every stdlib actor's glue name
+       ([Desugar_actor_names]: [Anchor] -> [Topology__Anchor]), so an app
+       actor may share a stdlib actor's name. *)
+    March_desugar.Desugar_actor_names.is_stdlib_file :=
+      March_typecheck.Typecheck_builtins.file_is_stdlib;
     (* Load prelude first (special treatment: its top-level mod wrapper is
        stripped so its decls land in the global scope).  Then load every
        other *.march file in the stdlib directory so the full standard

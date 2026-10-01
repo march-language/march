@@ -425,6 +425,71 @@ mod CeilDeepBad do
 end
 |}
 
+
+(* A USER-level `NodeQueue.start_local` call used to fail the ceiling with
+   "module `Socket` uses `IO.NetConnect` but does not declare `needs
+   IO.NetConnect`".  The ceiling checks every module's emitted code against
+   that module's OWN `needs`, and stdlib `Socket` declared none, so any program
+   whose emitted code kept NodeQueue's socket writes failed, whatever it
+   granted.  `Socket` now declares what it uses.
+   specs/progress/2026-09-30-nodequeue-start-local-socket-ceiling.md *)
+let test_user_nodequeue_start_local_compiles () =
+  accepts "user NodeQueue.start_local"
+    {|
+mod NqOk do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.Spawn
+  needs IO.NetConnect
+  fn main(_c : Cap(IO)) do
+    let _q = NodeQueue.start_local(fn _ -> ())
+    println("ok")
+  end
+end
+|}
+
+(* The same call under a NARROW grant: every capability NodeQueue reaches is
+   granted to [main] one by one, so nothing is covered by the `IO` root.  Red
+   before the fix with the same `Socket` message. *)
+let test_user_nodequeue_start_local_narrow_grant_compiles () =
+  accepts "user NodeQueue.start_local, narrow grant"
+    {|
+mod NqNarrow do
+  needs IO.Console
+  needs IO.Mut
+  needs IO.Spawn
+  needs IO.NetConnect
+  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut), _s : Cap(IO.Spawn), _n : Cap(IO.NetConnect)) do
+    let _q = NodeQueue.start_local(fn _ -> ())
+    println("ok")
+  end
+end
+|}
+
+(* ...and the fix must not have loosened anything: a program whose [main] is
+   NOT granted `IO.NetConnect` is still rejected for reaching it through
+   NodeQueue's socket writes, and the reason is the program's grant, not a
+   stdlib module's missing `needs`. *)
+let test_nodequeue_without_netconnect_grant_is_rejected () =
+  let src = {|
+mod NqNoNet do
+  needs IO.Console
+  needs IO.Mut
+  needs IO.Spawn
+  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut), _s : Cap(IO.Spawn)) do
+    let _q = NodeQueue.start_local(fn _ -> ())
+    println("ok")
+  end
+end
+|} in
+  rejects_at_typecheck "NodeQueue.start_local without an IO.NetConnect grant"
+    ~expect:"the program reaches `IO.NetConnect`" src;
+  let _, out = compile_strict src in
+  match Str.search_forward (Str.regexp_string "module `Socket`") out 0 with
+  | _ -> Alcotest.failf "the rejection blamed stdlib Socket:\n%s" out
+  | exception Not_found -> ()
+
 (* A program that uses NO capability at all must compile under --cap-strict.
    It did not: `own_caps_of_this_module` was handed the module AFTER the stdlib
    prepend, so the prelude's own top-level `println`/`debug` counted as
@@ -894,4 +959,10 @@ let tests =
         test_a_program_using_no_capability_compiles;
       Alcotest.test_case "undeclared console use still caught" `Slow
         test_console_use_without_needs_is_still_caught;
+      Alcotest.test_case "user NodeQueue.start_local compiles" `Slow
+        test_user_nodequeue_start_local_compiles;
+      Alcotest.test_case "user NodeQueue.start_local, narrow grant" `Slow
+        test_user_nodequeue_start_local_narrow_grant_compiles;
+      Alcotest.test_case "NodeQueue without IO.NetConnect grant rejected" `Slow
+        test_nodequeue_without_netconnect_grant_is_rejected;
     ]
