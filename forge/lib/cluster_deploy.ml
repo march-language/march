@@ -81,6 +81,7 @@ type status = {
   leader : string;
   decision : string;
   nodes : node_state list;
+  notes : string list;     (** NOTE lines: gates the leader did not see pass *)
 }
 
 let field_of words key =
@@ -102,11 +103,12 @@ let parse_status (lines : string list) : (status, string) result =
       | _ -> (0, "-")
     in
     let get k = Option.value ~default:"" (field_of w k) in
-    let decision = ref "" and nodes = ref [] in
+    let decision = ref "" and nodes = ref [] and notes = ref [] in
     List.iter (fun l ->
         let ws = words l in
         match ws with
         | "DECISION" :: _ -> decision := String.trim (String.sub l 8 (String.length l - 8))
+        | "NOTE" :: _ -> notes := String.trim (String.sub l 5 (String.length l - 5)) :: !notes
         | "NODE" :: name :: _ ->
           nodes := { n_name = name;
                      n_seq = Option.value ~default:0 (Option.bind (field_of ws "seq") int_of_string_opt);
@@ -117,7 +119,7 @@ let parse_status (lines : string list) : (status, string) result =
                      n_failed = Option.value ~default:"-" (field_of ws "failed") } :: !nodes
         | _ -> ())
       rest;
-    Ok { head_seq; head_digest; state = get "state"; leader = get "leader"; decision = !decision; nodes = List.rev !nodes }
+    Ok { head_seq; head_digest; state = get "state"; leader = get "leader"; decision = !decision; nodes = List.rev !nodes; notes = List.rev !notes }
   | l :: _ -> Error l
   | [] -> Error "no answer"
 
@@ -234,12 +236,15 @@ let build_release (sp : spec) ~(head : status) : (Control_release.t, string) res
             ~grant_caps:sp.grant_caps ()
         in
         let steps =
-          if sp.canary > 0 then
-            [ { id = next (); pools = hb.hb_pools; hosts = Canary sp.canary; action = Activate hb.hb_name;
+          if sp.canary > 0 then begin
+            (* Numbered in order: OCaml evaluates a list literal's elements right to left. *)
+            let first = next () in
+            let second = next () in
+            [ { id = first; pools = hb.hb_pools; hosts = Canary sp.canary; action = Activate hb.hb_name;
                 gate = Healthy sp.canary_window_ms; batch = 0 };
-              { id = next (); pools = hb.hb_pools; hosts = Rest; action = Activate hb.hb_name;
+              { id = second; pools = hb.hb_pools; hosts = Rest; action = Activate hb.hb_name;
                 gate = (if sp.rest_window_ms > 0 then Healthy sp.rest_window_ms else No_gate); batch = 0 } ]
-          else
+          end else
             [ { id = next (); pools = hb.hb_pools; hosts = All; action = Activate hb.hb_name;
                 gate = (if sp.rest_window_ms > 0 then Healthy sp.rest_window_ms else No_gate); batch = 0 } ]
         in
@@ -271,6 +276,7 @@ let render_status (s : status) : string =
     (if s.head_digest = "-" then "-" else String.sub s.head_digest 0 (min 12 (String.length s.head_digest)))
     s.leader s.state;
   Printf.bprintf b "  %s\n" s.decision;
+  List.iter (fun n -> Printf.bprintf b "  note: %s\n" n) s.notes;
   List.iter (fun n ->
       Printf.bprintf b "  %s: release %d, %s, versions %s, topology %s%s\n" n.n_name n.n_seq
         (if n.n_healthy then "healthy" else "UNHEALTHY") n.n_versions

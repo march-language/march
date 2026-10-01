@@ -776,6 +776,49 @@ pfn ctl_node_line(o : Control.CtlObs) : String do
     ++ " failed:" ++ (if r.failed_seq == 0 do "-" else int_to_string(r.failed_seq) ++ "/" ++ int_to_string(r.failed_step) ++ ":" ++ String.replace_all(r.failed_why, " ", "_") end) ++ "\n"
 end
 
+-- Gates skipped, as this leader sees it. Placement chooses a leader and
+-- nothing stops two leading at once across a partition (D40): each drives its
+-- side toward the newest release, so one can order a later step on a node
+-- while this leader is still inside an earlier step's gate. Releases stay
+-- correct (the nodes enforce sequence, and an order already applied is a
+-- no-op), but the canary window was not watched here, and STATUS says so.
+pfn ctl_decision_step(d : Option(Control.CtlDecision)) : Int do
+  match d do
+    Some(Control.RolloutApply(s, _)) -> s
+    Some(Control.RolloutWait(s, _)) -> s
+    _ -> 0
+  end
+end
+
+pfn ctl_done_nodes(stp : Control.CtlStep, r : Control.CtlRelease, l : Control.CtlLeader, sel : List(String)) : List(String) do
+  List.filter(sel, fn n ->
+    match List.find(l.obs, fn o -> o.report.node == n) do
+      Some(o) -> Control.reports_state(o.report, Control.show_action(stp.action), Control.want(r, stp))
+      None -> false
+    end)
+end
+
+pfn ctl_skip_notes_from(steps : List(Control.CtlStep), r : Control.CtlRelease, l : Control.CtlLeader, members : List(Control.CtlMember), prior : List((Control.CtlStep, List(String))), open_step : Int) : List(String) do
+  match steps do
+    Nil -> Nil
+    Cons(stp, rest) ->
+      let sel = Control.select(stp, members, prior)
+      let own = if stp.id > open_step do
+        List.map(ctl_done_nodes(stp, r, l, sel), fn n -> "NOTE step " ++ int_to_string(stp.id) ++ " already applied on " ++ n ++ " while step " ++ int_to_string(open_step) ++ " is still open here: its gate was not observed by this leader\n")
+      else Nil end
+      List.append(own, ctl_skip_notes_from(rest, r, l, members, List.append(prior, [(stp, sel)]), open_step))
+  end
+end
+
+pfn ctl_gate_notes(l : Control.CtlLeader, d : Option(Control.CtlDecision)) : String do
+  match l.release do
+    None -> ""
+    Some(r) ->
+      let open_step = ctl_decision_step(d)
+      if open_step == 0 do "" else String.join(ctl_skip_notes_from(r.steps, r, l, ctl_members_of(l), Nil, open_step), "") end
+  end
+end
+
 -- What forge follows: the head, the executor's verdict, each node's report.
 pfn ctl_status(node : Cap(ClusterNode.Live)) : String do
   ctl_ensure_loaded()
@@ -791,6 +834,7 @@ pfn ctl_status(node : Cap(ClusterNode.Live)) : String do
       None -> if ctl_ready(node, l) do "no release" else "waiting for every node to report" end
     end) ++ "\n"
     ++ String.join(List.map(List.sort_by(l.obs, fn (a, b) -> a.report.node < b.report.node), fn o -> ctl_node_line(o)), "")
+    ++ ctl_gate_notes(l, d)
     ++ "END\n"
 end
 
@@ -845,7 +889,7 @@ end
 -- unsigned reads. The signed verbs are not relayed here (a node takes its
 -- orders over `Ctl`, and verifies them itself).
 pfn ctl_passthrough(verb : String) : Bool do
-  List.member(["PING", "VERSIONS", "VERSIONS_DETAIL", "PINS", "RELEASE_HEAD", "NODE_STATE", "HCR_INFO", "GET_EPOCH"], verb)
+  List.member(["PING", "VERSIONS", "VERSIONS_DETAIL", "PINS", "RELEASE_HEAD", "NODE_STATE", "HCR_INFO", "GET_EPOCH", "COMPACT"], verb)
 end
 
 -- One request on a connection; false when the connection is done.

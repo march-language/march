@@ -14,6 +14,9 @@
                                               Cluster_deploy): CANARY=<n> CANARY_MS RESTS_MS
                                               TOPOLOGY=<digest file to push> FOLLOW_S
       hcr_deploy status <host:port,...>       the leader's view of the newest release
+      hcr_deploy api <host:port> <line>       one request to a control API, answer to stdout
+      hcr_deploy reload <socket> <line>       one request to a reload socket, answer to stdout
+                                              (lines up to END, or the first line)
 
     Exit 0 on success; a failed deploy prints why on stderr and exits 1. *)
 
@@ -81,6 +84,30 @@ let () =
        (match March_forge.Cluster_deploy.run sp with
         | Ok report -> print_string report
         | Error m -> prerr_endline ("hcr_deploy: " ^ m); exit 1))
+  | [ "api"; ep; line ] | [ "reload"; ep; line ] ->
+    let read_answer conn =
+      (* A list answer ends at END; anything else is one line. *)
+      let first = March_forge.Cmd_deploy_hot.recv_line conn in
+      print_endline first;
+      let listy = List.exists (fun p -> String.length first >= String.length p && String.sub first 0 (String.length p) = p)
+          [ "STATUS"; "SLOT"; "STATE"; "VERSION"; "EPOCH"; "COUNTERS"; "RESTORED"; "ARTIFACT" ] in
+      if listy then begin
+        let rec go () = let l = March_forge.Cmd_deploy_hot.recv_line conn in print_endline l; if l <> "END" then go () in
+        go ()
+      end
+    in
+    (try
+       let conn =
+         if Sys.argv.(1) = "api" then
+           (match Option.bind (March_forge.Cluster_deploy.endpoint_of_string ep) (fun e -> Result.to_option (March_forge.Cluster_deploy.connect e)) with
+            | Some c -> c
+            | None -> prerr_endline "hcr_deploy: cannot connect"; exit 1)
+         else March_forge.Cmd_deploy_hot.conn_of_fd (March_forge.Cmd_deploy_hot.connect_socket ep)
+       in
+       March_forge.Cmd_deploy_hot.send_line conn line;
+       read_answer conn
+     with Failure m -> prerr_endline ("hcr_deploy: " ^ m); exit 1
+        | Unix.Unix_error (e, _, _) -> prerr_endline ("hcr_deploy: " ^ Unix.error_message e); exit 1)
   | [ "status"; eps ] ->
     let endpoints = List.filter_map March_forge.Cluster_deploy.endpoint_of_string (String.split_on_char ',' eps) in
     (match March_forge.Cluster_deploy.status endpoints with
