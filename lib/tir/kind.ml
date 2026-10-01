@@ -32,7 +32,21 @@ type table = {
   (* LLVM struct type name ("%ub.Vec3") → March type name *)
   k_unboxed_by_llvm : (string, string) Hashtbl.t;
   k_memo            : (Tir.ty, kind) Hashtbl.t;
+  (* Names of the module's nominal record types ([TDRecord]), actor structs
+     excluded; see [is_record_type]. *)
+  k_records         : (string, (string * Tir.ty) list) Hashtbl.t;
 }
+
+(* An actor struct is the [TDRecord] whose first field is ["$d_dispatch"]
+   (structural, never a user type: see [is_actor_struct_type]). *)
+let record_names (type_defs : Tir.type_def list)
+  : (string, (string * Tir.ty) list) Hashtbl.t =
+  let h = Hashtbl.create 32 in
+  List.iter (function
+    | Tir.TDRecord (_, ("$d_dispatch", _) :: _) -> ()
+    | Tir.TDRecord (n, fields) -> Hashtbl.replace h n fields
+    | _ -> ()) type_defs;
+  h
 
 let type_defs t = t.k_type_defs
 let collision_set t = t.k_collision
@@ -91,11 +105,13 @@ let build ?(externs : Tir.extern_decl list = []) ?(unboxing = true)
         | _ -> ()) type_defs
   end;
   { k_type_defs = type_defs; k_collision = collision_set;
-    k_unboxed; k_unboxed_by_llvm; k_memo = Hashtbl.create 64 }
+    k_unboxed; k_unboxed_by_llvm; k_memo = Hashtbl.create 64;
+    k_records = record_names type_defs }
 
 let rebind ?collision_set (t : table) (type_defs : Tir.type_def list) : table =
   let k_collision = match collision_set with Some cs -> cs | None -> t.k_collision in
-  { t with k_type_defs = type_defs; k_collision; k_memo = Hashtbl.create 64 }
+  { t with k_type_defs = type_defs; k_collision; k_memo = Hashtbl.create 64;
+           k_records = record_names type_defs }
 
 let empty : table = build ~unboxing:false ~collision_set:(Hashtbl.create 0) []
 
@@ -126,6 +142,22 @@ let find_variant (t : table) (name : string)
   List.find_map (function
     | Tir.TDVariant (n, variants) when n = name -> Some variants
     | _ -> None) t.k_type_defs
+
+(** True iff [name] is a nominal record type of this module: a [TDRecord]
+    such as [type St = { n : Int }] or an actor's [Name_State], but never an
+    actor struct ([Name_Actor]), whose record the runtime owns.  A value of
+    such a type is an aggregate exactly like a structural [TRecord]: read only
+    through [EField], never destructured by an ECase, so it has no drop site
+    on its read path and needs Perceus's aggregate scope-end drop
+    ([Perceus_core.is_aggregate_ty]). *)
+let is_record_type (t : table) (name : string) : bool =
+  Hashtbl.mem t.k_records name
+
+(** The fields of nominal record [name] as declared, or [None] when [name] is
+    not one (see [is_record_type]).  The drop pass synthesizes a nominal
+    record's deep drop from these, exactly as it does for a [TRecord]. *)
+let record_fields (t : table) (name : string) : (string * Tir.ty) list option =
+  Hashtbl.find_opt t.k_records name
 
 (** True if [name] is a genuine actor struct — STRUCTURAL check, not a name
     heuristic.  [lower_actor.ml] always constructs an actor's state record as

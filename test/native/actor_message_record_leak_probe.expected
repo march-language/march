@@ -1,0 +1,6 @@
+send, handler returns state, flat: true
+send, handler builds a record, flat: true
+send as a statement, flat: true
+message with a String field, flat: true
+nominal record, one field read = 50015000, flat: true
+nominal record, two String fields = 77792, flat: true
