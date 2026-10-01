@@ -54,6 +54,15 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A let-bound lambda that ignores or returns a `Float` argument no longer
+  crashes compiled code.** A lambda bound with `let` and left generic, such as
+  `let keep = fn (acc, x) -> acc`, freed the `Float` it was given when it
+  ignored it, and the caller freed it again. That happened when the lambda was
+  passed to `NativeArray.fold_float`, `fold_f32` or `typed_array_fold`, or called
+  through a parameter typed `Float -> Float -> Float`. It showed up as
+  `RC underflow` on macOS and `malloc(): unaligned fastbin chunk detected` on
+  Linux. Such a lambda that returns its `Float` argument, or passes it on to
+  another closure, also no longer leaks it.
 - **A DataFrame column of nothing but nulls keeps its nulls.** CSV/JSON loading and
   `summarize` used to turn an all-null column into a plain string column of `""`, so the
   rows read back as empty strings; they now read back as `NullVal`.

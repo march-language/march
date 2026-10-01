@@ -253,9 +253,11 @@ let clo_wrap_define = Llvm_calls.clo_wrap_define
    same holds for an actor's `on_stop` fn, which the runtime calls the same
    way once, at a graceful death: releasing the actor there freed a record
    the stopper was still polling (found by libgmalloc on the first draft). *)
+let clo_wrap_runtime_owned (name : string) : bool =
+  Tir_names.is_actor_dispatch_fn name || Tir_names.is_actor_on_stop_fn name
+
 let clo_wrap_borrowed (name : string) (nparams : int) : bool list =
-  if Tir_names.is_actor_dispatch_fn name
-     || Tir_names.is_actor_on_stop_fn name then [] else
+  if clo_wrap_runtime_owned name then [] else
   match Clo_flags.borrowed_params name with
   | Some modes -> modes
   | None -> List.init nparams (fun i -> Borrow.is_borrowed Borrow.empty name i)
@@ -455,6 +457,7 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
          | `Define  ->
            clo_wrap_define ~drop_clo:ctx.repl
              ~borrowed:(clo_wrap_borrowed v.Tir.v_name (List.length param_tys))
+             ~own_float:(not (clo_wrap_runtime_owned v.Tir.v_name))
              wrap_name param_tys target_ret fn_name));
     (* Allocate closure: header(16) + fn_ptr(8) = 24 bytes *)
     if static_closure_ok ctx v.Tir.v_name then
@@ -587,6 +590,7 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
          | `Define  ->
            clo_wrap_define ~drop_clo:ctx.repl
              ~borrowed:(clo_wrap_borrowed v.Tir.v_name (List.length param_ltys))
+             ~own_float:(not (clo_wrap_runtime_owned v.Tir.v_name))
              wrap_name param_ltys target_ret fn_name));
     if static_closure_ok ctx v.Tir.v_name then
       ("ptr", Llvm_ctx.intern_static_closure ctx fn_name wrap_name)
@@ -644,6 +648,7 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
              | `Define  ->
                clo_wrap_define ~drop_clo:ctx.repl
                  ~borrowed:(clo_wrap_borrowed resolved (List.length param_tys))
+                 ~own_float:(not (clo_wrap_runtime_owned resolved))
                  wrap_name param_tys target_ret fn_name));
        if static_closure_ok ctx resolved then
          ("ptr", Llvm_ctx.intern_static_closure ctx fn_name wrap_name)

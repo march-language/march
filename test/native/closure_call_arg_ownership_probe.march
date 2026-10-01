@@ -16,7 +16,14 @@
 --   - a NAMED function used as a closure: its `$clo_wrap` trampoline releases
 --     the arguments the function borrows (Clo_flags);
 --   - a storing lambda and a Float argument: must stay balanced, not
---     double-free.
+--     double-free;
+--   - a let-generalized lambda (parameters still TVar after mono) handed
+--     Float arguments, ignoring one or returning one: the caller keeps its
+--     Float box, so the callee takes its own reference first
+--     (march_clo_param_own); a lambda passing an erased argument on to
+--     another closure releases the reference that closure did not spend
+--     (march_clo_float_arg). Each was a double free or a leak before
+--     2026-09-30.
 -- Each leg prints the value it computed, so a use-after-free that changes a
 -- result fails the golden, not just the flat check.
 mod Main do
@@ -48,6 +55,12 @@ mod Main do
   end
   pfn call_float(f : (Float) -> Float, n : Int, acc : Float) : Float do
     if n <= 0 do acc else call_float(f, n - 1, acc + f(int_to_float(n))) end
+  end
+  pfn call_float2(f : Float -> Float -> Float, n : Int, acc : Float) : Float do
+    if n <= 0 do acc else call_float2(f, n - 1, acc +. f(1.0, int_to_float(n))) end
+  end
+  pfn call_via(ap : (Float -> Float) -> Float -> Float, g : Float -> Float, n : Int, acc : Float) : Float do
+    if n <= 0 do acc else call_via(ap, g, n - 1, acc +. ap(g, int_to_float(n))) end
   end
   pfn call_rec(f : (Pt) -> Int, n : Int, acc : Int) : Int do
     if n <= 0 do acc else call_rec(f, n - 1, acc + f({ name: int_to_string(n), x: n })) end
@@ -123,5 +136,14 @@ mod Main do
     flat("fold lambda ignores the element", k, int_to_string(leg_fold_ignores(n, 0)))
     let l = live_allocs()
     flat("named function to List.map", l, int_to_string(leg_named_map(n, 0)))
+    let keep = fn (p, x) -> p
+    let last = fn (p, x) -> x
+    let fwd = fn (f, x) -> f(x)
+    let m = live_allocs()
+    flat("erased lambda ignores a Float", m, float_to_string(call_float2(keep, n, 0.0)))
+    let o = live_allocs()
+    flat("erased lambda returns a Float", o, float_to_string(call_float2(last, n, 0.0)))
+    let q = live_allocs()
+    flat("erased lambda forwards a Float", q, float_to_string(call_via(fwd, doubler, n, 0.0)))
   end
 end

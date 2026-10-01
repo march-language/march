@@ -28,6 +28,16 @@
 -- accumulator it was handed (the `prev == result` guard), a zero-length fold
 -- never enters the loop and hands the caller's own initial accumulator back,
 -- and both must still report the right number.
+--
+-- The `_rt` legs pass the callback in as a PARAMETER, built from a
+-- let-generalized lambda whose parameters are still erased (TVar) after mono.
+-- Until 2026-09-30 such an apply fn released the Float box the fold loop had
+-- lent it (its unused `x`, at entry), and the loop released it again: RC
+-- underflow on macOS, `malloc(): unaligned fastbin chunk detected` on glibc,
+-- heap-use-after-free under ASAN. The callee now takes its own reference to
+-- an erased Float argument (march_clo_param_own), so an identity callback hands
+-- back a reference of its own and the loop releases its accumulator anyway.
+-- specs/progress/2026-09-30-native-float-arr-fold-unused-elem-double-free.md
 mod Main do
   needs IO.Console
 
@@ -58,6 +68,15 @@ mod Main do
     if k <= 0 do acc else emptyfold(e, k - 1, acc +. NativeArray.fold_float(e, 2.0, fn (p, x) -> p +. x)) end
   end
 
+  -- Runtime-path twins: the callback arrives as a parameter.
+  pfn idfold_rt(a : NativeFloatArr, k : Int, acc : Float, f : Float -> Float -> Float) : Float do
+    if k <= 0 do acc else idfold_rt(a, k - 1, acc +. NativeArray.fold_float(a, 1.0, f), f) end
+  end
+
+  pfn idf32fold_rt(a : NativeF32Arr, k : Int, acc : Float, f : Float -> Float -> Float) : Float do
+    if k <= 0 do acc else idf32fold_rt(a, k - 1, acc +. NativeArray.fold_f32(a, 1.0, f), f) end
+  end
+
   fn main(_c : Cap(IO.Console)) do
     let n = 20000
     let fa = NativeArray.make_float(4, 1.5)
@@ -75,5 +94,14 @@ mod Main do
     flat("identity closure", d, float_to_string(idfold(fa, n, 0.0)))
     let e = live_allocs()
     flat("zero-length fold", e, float_to_string(emptyfold(ea, n, 0.0)))
+
+    let keep = fn (p, x) -> p
+    let last = fn (p, x) -> x
+    let g = live_allocs()
+    flat("identity closure (runtime)", g, float_to_string(idfold_rt(fa, n, 0.0, keep)))
+    let h = live_allocs()
+    flat("identity closure, f32 (runtime)", h, float_to_string(idf32fold_rt(f3, n, 0.0, keep)))
+    let j = live_allocs()
+    flat("element closure (runtime)", j, float_to_string(idfold_rt(fa, n, 0.0, last)))
   end
 end

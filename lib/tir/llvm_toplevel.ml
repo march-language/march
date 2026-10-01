@@ -357,8 +357,24 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
          (ashr iff odd) back to the raw i64 the body reads. *)
       let u = Llvm_ctx.coerce ctx "ptr" (Printf.sprintf "%%%s.arg" vn) "i64" in
       Llvm_ctx.emit ctx (Printf.sprintf "store i64 %s, ptr %%%s.addr" u slot)
-    end else
-      Llvm_ctx.emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty vn slot);
+    end else begin
+      (* An ERASED apply-fn param (still [TVar] after mono, e.g. a
+         let-generalized `fn (acc, x) -> acc`) may be handed a boxed Float,
+         which every closure caller keeps ([Clo_flags]: a closure call
+         consumes every heap argument EXCEPT a boxed Float). The body cannot
+         tell: [Borrow.infer_module] pins the param owned, so RC insertion
+         releases it at its last use, or at entry when unused. Take the
+         callee's own reference to a Float box here, so that release (or a
+         store, or handing it back as the result) spends a reference this
+         call owns. Any other value passes through untouched. Without it,
+         the callee's release freed a box its caller then released again
+         (specs/progress/2026-09-30-native-float-arr-fold-unused-elem-double-free.md). *)
+      if is_apply_wrapper && param_idx > 0 && ty = "ptr"
+         && (match v.Tir.v_ty with Tir.TVar _ -> true | _ -> false) then
+        Llvm_ctx.emit ctx
+          (Printf.sprintf "call void @march_clo_param_own(ptr %%%s.arg)" vn);
+      Llvm_ctx.emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty vn slot)
+    end;
     Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot ty;
     (v.Tir.v_name, slot, ty)
   ) fn.Tir.fn_params in
