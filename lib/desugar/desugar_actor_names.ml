@@ -33,7 +33,21 @@
     it fails to typecheck rather than binding to the wrong actor.
 
     Two actors with the same name in the SAME module are rejected here: no
-    reference could tell them apart. *)
+    reference could tell them apart.
+
+    A STANDARD-LIBRARY file's actors are all renamed, root-level ones
+    included, to the file's module name plus their path ([actor Anchor] in
+    stdlib/topology.march -> [Topology__Anchor]).  The collision is across
+    files there: the stdlib is loaded whole, so an app's own [actor Anchor]
+    (or [Writer], [Endpoint], ...) met the stdlib's under one bare name and
+    the compiler died building the message-tag table, or [--check] charged the
+    app the stdlib actor's capabilities
+    (specs/progress/2026-09-30-user-actor-named-like-stdlib-actor-ice.md).
+    Qualifying the stdlib side leaves every APP actor's spelling alone, which
+    is what [spawn(X)] -> [X_spawn] and the hot-reload manifest assert.
+    Whether a file is the stdlib's is loader provenance, installed by the
+    loaders through [is_stdlib_file] (the same predicate as the typechecker's
+    [Typecheck_builtins.file_is_stdlib]), never its name. *)
 
 open March_ast.Ast
 
@@ -66,7 +80,17 @@ type table = {
   declared : unit KMap.t;
 }
 
-let build errors (actors : (string list * name) list) : table =
+(** Is source file [f] one of the standard library's?  Installed by the
+    stdlib loaders (bin/toolchain.ml, the LSP) as
+    [Typecheck_builtins.file_is_stdlib]; desugar cannot depend on the
+    typechecker.  The default (nothing is the stdlib's) keeps a loader that
+    never registers a stdlib root on the old bare spelling, consistently. *)
+let is_stdlib_file : (string -> bool) ref = ref (fun _ -> false)
+
+(** [~qualify:(Some root)] renames EVERY actor to its [root]-prefixed path
+    (a stdlib file); [None] renames only nested actors whose bare name is
+    declared more than once. *)
+let build ?qualify errors (actors : (string list * name) list) : table =
   let declared = List.fold_left (fun m (p, (n : name)) ->
       if KMap.mem (p, n.txt) m then begin
         Err.error errors ~span:n.span
@@ -83,14 +107,18 @@ let build errors (actors : (string list * name) list) : table =
   let taken = Hashtbl.create 16 in
   KMap.iter (fun (_, n) () -> Hashtbl.replace taken n ()) declared;
   let renames = KMap.fold (fun (p, n) () acc ->
-      if p <> [] && count n > 1 then begin
+      let base = match qualify with
+        | Some root -> Some (String.concat "__" (root :: p @ [n]))
+        | None when p <> [] && count n > 1 -> Some (String.concat "__" (p @ [n]))
+        | None -> None in
+      match base with
+      | None -> acc
+      | Some base ->
         (* Never mint a name another actor already has. *)
-        let base = String.concat "__" (p @ [n]) in
         let rec fresh s = if Hashtbl.mem taken s then fresh (s ^ "_") else s in
         let s = fresh base in
         Hashtbl.replace taken s ();
-        KMap.add (p, n) s acc
-      end else acc) declared KMap.empty in
+        KMap.add (p, n) s acc) declared KMap.empty in
   { renames; declared }
 
 (** Resolve reference [r] (["Box"] or ["A.Box"]) written in module [cur] to
@@ -284,8 +312,11 @@ let rec rename_decls tbl ~root cur (decls : decl list) : decl list =
       | DSatisfy _ -> d
     ) decls
 
-(** Entry point: [root] is the file's own top-level module name. *)
-let expand errors ~(root : string) (decls : decl list) : decl list =
-  let tbl = build errors (collect decls) in
+(** Entry point: [root] is the file's own top-level module name; [~stdlib]
+    says the file is the standard library's (every actor gets qualified). *)
+let expand ?(stdlib = false) errors ~(root : string) (decls : decl list)
+  : decl list =
+  let qualify = if stdlib then Some root else None in
+  let tbl = build ?qualify errors (collect decls) in
   if KMap.is_empty tbl.renames then decls
   else rename_decls tbl ~root [] decls
