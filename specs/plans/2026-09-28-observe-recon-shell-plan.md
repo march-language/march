@@ -350,10 +350,8 @@ numbers from March code.
      grow without touching nine sites again. Marked impure.
    - Interpreter: `lib/eval/eval_builtins.ml` builds the same JSON from
      `actor_registry` (`eval_runtime.ml:262`).
-2. **Prerequisite:** fix
-   [`todos/2026-09-29-actor-top-by-mailbox-pid-type-confusion.md`](../todos/2026-09-29-actor-top-by-mailbox-pid-type-confusion.md)
-   first: `Actor.top_by_mailbox` returns a type-confused pid, and `Recon`
-   builds on it.
+2. `Actor.top_by_mailbox` returned a type-confused pid until PR #709
+   (2026-09-30); `Recon` builds on the fixed version.
    **`stdlib/recon.march`**, observe tier only, all taking
    `Cap(Actor.Introspect)`:
    `info(c, pid) : Option(ActorInfo)`, `proc_count(c, attr, n)`,

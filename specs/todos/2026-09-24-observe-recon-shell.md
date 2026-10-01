@@ -28,4 +28,4 @@ Related: [`2026-09-26-compiled-logger-appenders-are-no-ops.md`](2026-09-26-compi
 blocks any events bus, which this work does not include.
 
 Quick-win results (2026-09-29): [`progress/2026-09-29-observe-quick-wins-results.md`](../progress/2026-09-29-observe-quick-wins-results.md).
-All four passed; three pre-existing bugs filed from them (2026-09-29 todos).
+All four passed; they found three pre-existing bugs (one since fixed by #709, two filed as 2026-09-29 todos).

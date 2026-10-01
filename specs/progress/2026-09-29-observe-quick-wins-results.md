@@ -15,7 +15,7 @@ timings carry that caveat.
 | QW3 | 2–5 s band | A shell on today's hot deploy works: 2.9 s median round trip, 2.6 s of it compile; patches are 53–89 KB. |
 | QW4 | PASS | A foreign pthread walked 20 000 actors under 1 M spawn/kill churn: 200/200 replies, p99 4.6 ms; Linux ASAN clean on a reduced workload. |
 
-Three pre-existing bugs surfaced; each is filed as a todo (§Bugs found).
+Three pre-existing bugs surfaced (§Bugs found). One was fixed on `main` the next day; the other two are filed as todos.
 
 ## QW1 recon-lite: PASS
 
@@ -139,8 +139,9 @@ reload socket, then touched a trigger file the node polls. Load average 36–48.
    Their annotation `List((Pid, Int))` resolves the bare `Pid` to
    `GlobalPid.Pid = { node_id, local_pid, creation }` (`stdlib/global_pid.march:11`),
    not the builtin `Pid(a)`. Compiled code then reads an actor pointer as that
-   record (QW3 input 2). Filed:
-   [`todos/2026-09-29-actor-top-by-mailbox-pid-type-confusion.md`](../todos/2026-09-29-actor-top-by-mailbox-pid-type-confusion.md).
+   record (QW3 input 2). **Already fixed on `main`** by PR #709 (`c0ebe7c8d`,
+   2026-09-30), found independently by a stdlib type-error sweep; the annotation
+   is now `List((Pid(a), Int))`. No todo filed.
 2. **A discarded `send` result leaks 24 bytes per send (compiled).**
    `march_send` returns a heap `Some(())` (`march_alloc(16 + 8)`); a `send(...)`
    used as a statement never frees it. Reproduced on the unpatched runtime. Filed:
@@ -166,7 +167,7 @@ reload socket, then touched a trigger file the node polls. Load average 36–48.
 - Apparatus rule 3: n ≥ 200, repeat a failing run once before bisecting, the
   instruction-level argument is primary; this box resolves ~±1.5% at one scheduler.
 - C16: marked "confirmed by QW4".
-- R3: fixing bug 1 is a prerequisite for `Recon` (it wraps `top_by_mailbox`).
+- R3: notes that `top_by_mailbox`'s pid type was fixed by #709, which `Recon` relies on.
 - R5.1: replaced "measure first" with the measured numbers.
 - R5.7: adds "quote strings; render `()`" to the renderer's requirements.
 - R6.1: a fragment's entry takes only the narrowed caps from `$MARCH_SHELL_POLICY`
