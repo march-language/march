@@ -513,8 +513,11 @@ void *native_u8_arr_alloc_raw(int64_t len);
 /* An "immortal" refcount: a starting rc so far above any reachable reference
  * count that no sequence of decrements can drive the cell to zero, so it is
  * never freed and never mistaken for uniquely-owned.  Used for cells that
- * belong to the program image rather than to any March binding — currently
- * only compiled-in string literals (march_string_lit_static).  Chosen so
+ * belong to the program image rather than to any March binding: compiled-in
+ * string literals (march_string_lit_static) and the shared Some(()) that
+ * march_send returns.  Every decrement entry point (march_decrc,
+ * march_decrc_local and their *_freed siblings) returns early on such a cell,
+ * so it is never decremented at all.  Chosen so
  * that (a) the free-on-zero paths in march_decrc/march_decrc_local can never
  * be reached, (b) the `rc == 1` uniqueness test the FBIP reuse path emits
  * (llvm_emit.ml) is always false, so an immortal cell is never reused in

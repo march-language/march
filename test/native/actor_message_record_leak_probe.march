@@ -1,0 +1,137 @@
+-- Leak guard: compiled actors leaked every message they received, every
+-- state record a handler returned, and the Some(()) of every `send` written as
+-- a statement; and any NOMINAL record (`type Pair = { ... }`) that was only
+-- read through its fields leaked its cell and every heap value it owned.
+-- Interpreted, every leg was already flat.
+--
+-- Measured on main before the fix, --compile --opt 2, objects per iteration:
+--   - send, handler returns `state` unchanged ......... 1 (the message)
+--   - send, handler builds a new state record ........ 2 (message + record)
+--   - send written as a bare statement ............... 3 (+ its Some(()))
+--   - message with a String field .................... 2 (message + string)
+--   - nominal record read through one field .......... 1 (the record)
+--   - nominal record with two String fields, read ... 3 (record + strings)
+-- Causes, all fixed together
+-- (specs/progress/2026-10-01-compiled-actor-and-nominal-record-leaks.md):
+--   - borrow inference left `<Actor>_dispatch`'s `$msg` borrowed although the
+--     runtime's actor loop transfers its reference (lib/tir/borrow.ml);
+--   - Perceus's aggregate scope-end drop, the drop pass's deep drop and the
+--     EField no-dup rule all matched only STRUCTURAL records and tuples, never
+--     a TCon naming a record (perceus_core.ml, drop.ml, kind.ml);
+--   - the scope-end drop refused any scope whose value it could not type (an
+--     actor handler ends in a `:unit` literal, a helper in an `+`);
+--   - a statement's discarded call result was never released.
+--
+-- SIGNAL: live_allocs() deltas against a bound far below the iteration count,
+-- printed as booleans so the golden is deterministic.
+mod Main do
+  needs IO.Console
+  needs IO.Spawn
+
+  type Pair = { a : String, b : String }
+  type St = { n : Int }
+
+  actor Same do
+    state { n : Int }
+    init  { n: 0 }
+    on Poke(k : Int) do
+      state
+    end
+  end
+
+  actor Bump do
+    state { n : Int }
+    init  { n: 0 }
+    on Hit(k : Int) do
+      { n: state.n + k }
+    end
+  end
+
+  actor Words do
+    state { n : Int }
+    init  { n: 0 }
+    on Say(s : String) do
+      state
+    end
+  end
+
+  pfn leg_same(p, n : Int) : () do
+    if n <= 0 do () else
+      let _ = send(p, Poke(1))
+      leg_same(p, n - 1)
+    end
+  end
+
+  pfn leg_bump(p, n : Int) : () do
+    if n <= 0 do () else
+      let _ = send(p, Hit(1))
+      leg_bump(p, n - 1)
+    end
+  end
+
+  pfn leg_stmt(p, n : Int) : () do
+    if n <= 0 do () else
+      send(p, Poke(1))
+      leg_stmt(p, n - 1)
+    end
+  end
+
+  pfn leg_words(p, n : Int) : () do
+    if n <= 0 do () else
+      let _ = send(p, Say(int_to_string(n)))
+      leg_words(p, n - 1)
+    end
+  end
+
+  pfn one_read(k : Int) : Int do
+    let r : St = { n: k + 1 }
+    r.n
+  end
+
+  pfn two_reads(i : Int) : Int do
+    let r : Pair = { a: int_to_string(i), b: int_to_string(i + 1) }
+    string_length(r.a) + string_length(r.b)
+  end
+
+  pfn leg_one(i : Int, acc : Int) : Int do
+    if i <= 0 do acc else leg_one(i - 1, acc + one_read(i)) end
+  end
+
+  pfn leg_two(i : Int, acc : Int) : Int do
+    if i <= 0 do acc else leg_two(i - 1, acc + two_reads(i)) end
+  end
+
+  pfn report(label : String, grew : Int) : () do
+    println(label ++ ", flat: " ++ bool_to_string(grew < 100))
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let same = spawn(Same)
+    let bump = spawn(Bump)
+    let words = spawn(Words)
+    run_until_idle()
+    let a0 = live_allocs()
+    leg_same(same, 10000)
+    run_until_idle()
+    let a1 = live_allocs()
+    leg_bump(bump, 10000)
+    run_until_idle()
+    let a2 = live_allocs()
+    leg_stmt(same, 10000)
+    run_until_idle()
+    let a3 = live_allocs()
+    leg_words(words, 10000)
+    run_until_idle()
+    let a4 = live_allocs()
+    let x = leg_one(10000, 0)
+    let a5 = live_allocs()
+    let y = leg_two(10000, 0)
+    let a6 = live_allocs()
+    report("send, handler returns state", a1 - a0)
+    report("send, handler builds a record", a2 - a1)
+    report("send as a statement", a3 - a2)
+    report("message with a String field", a4 - a3)
+    report("nominal record, one field read = " ++ int_to_string(x), a5 - a4)
+    report("nominal record, two String fields = " ++ int_to_string(y), a6 - a5)
+  end
+end

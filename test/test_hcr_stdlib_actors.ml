@@ -167,7 +167,8 @@ let run_compiler ?(env = []) ~dir ~home args =
   if rc <> 0 then Alcotest.failf "compiler exited %d in %s:\n%s" rc dir text
 
 (* An app actor next to a stdlib actor (NodeQueue.start spawns the stdlib's
-   Writer). *)
+   Writer). Stdlib actors' glue is module-qualified since #726, so Writer's
+   dispatch is NodeQueue__Writer_dispatch. *)
 let app_src = {|mod HrApp do
   needs IO
 
@@ -195,7 +196,7 @@ let emit_llvm ~file src =
 let test_driver_stdlib_actor_no_slot () =
   if not (Sys.file_exists compiler_exe) then Alcotest.failf "compiler not found at %s" compiler_exe;
   let ir = emit_llvm ~file:"hr_app.march" app_src in
-  Alcotest.(check bool) "the stdlib's Writer is in the program" true (contains ~needle:"@Writer_dispatch(" ir);
+  Alcotest.(check bool) "the stdlib's Writer is in the program" true (contains ~needle:"@NodeQueue__Writer_dispatch(" ir);
   Alcotest.(check (list string)) "the only slot is the app actor's" [ "Counter_dispatch" ] (slot_names ir);
   (* a user entry file named like the stdlib file that declares Writer *)
   let ir = emit_llvm ~file:"node_queue.march" app_src in
@@ -251,7 +252,7 @@ let test_manifest_diff () =
                    "    on Credit(total : Int) do\n      grant(state, if total < 0 do 0 else total end)" text);
   let v3 = build ~env:[ ("MARCH_STDLIB", std) ] "v3" app_src in
   let ch = changed v1 v3 in
-  Alcotest.(check bool) "the stdlib actor's code changed" true (List.mem "Writer_Credit" ch);
+  Alcotest.(check bool) "the stdlib actor's code changed" true (List.mem "NodeQueue__Writer_Credit" ch);
   Alcotest.(check bool) "the app's slot did not" false (List.mem "Counter_dispatch" ch);
   Alcotest.(check bool) "the stdlib digests differ" true (v1.stdlib_hash <> v3.stdlib_hash);
   Alcotest.(check bool) "forge sees a stdlib change" true

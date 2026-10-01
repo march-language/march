@@ -1,0 +1,67 @@
+-- types (4) --
+record Pair { a : String, b : String }
+record Bump_State { n : Int }
+type Bump_Msg = Hit(Int)
+record Bump_Actor { $d_dispatch : Ptr(Unit), $e_alive : Bool, n : Int }
+-- fns (5) --
+## Bump_Hit
+fn Bump_Hit(linear $actor : Bump_Actor, k : Int) : Unit =
+  let $d_dispatch_v : Ptr(Unit) = $actor.$d_dispatch in
+let $e_alive_v : Bool = $actor.$e_alive in
+let $sf_n : Int = $actor.n in
+let state : Bump_State = { n = $sf_n } in
+let $result : Bump_State = let self : Pid(Bump_State) = $actor in
+let $t2 : Int = let $t1 : Int = state.n in
++($t1, k) in
+{ n = $t2 } in
+let $nf_n : Int = $result.n in
+inc_rc $d_dispatch_v;
+reuse $actor as Bump_Actor($d_dispatch_v, $e_alive_v, $nf_n);
+dec_rc $result;
+dec_rc state;
+:unit
+
+## Bump_dispatch
+fn Bump_dispatch(linear $actor : Bump_Actor, $msg : Bump_Msg) : Unit =
+  case $msg of
+  Hit($Hit_k) -> dec_rc $msg;
+Bump_Hit($actor, $Hit_k)
+  _ -> dec_rc $msg;
+:unit
+
+## Bump_spawn
+fn Bump_spawn() : Ptr(Unit) =
+  let $init_state : Bump_State = { n = 0 } in
+let $rc_1 : Ptr(Unit) = let $init_n : Int = $init_state.n in
+let $spawned : Ptr(Unit) = alloc Bump_Actor(Bump_dispatch, true, $init_n) in
+$spawned in
+dec_rc $init_state;
+$rc_1
+
+## main
+fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) : () =
+  let p : Pid({ n : Int }) = let $raw_actor : Ptr(Unit) = Bump_spawn() in
+spawn($raw_actor) in
+let $rc_3 : Option(Unit) = let $t11 : Bump_Msg = let $t10 : Int = two_reads(1) in
+alloc Bump_Msg.Hit($t10) in
+let $rc_4 : Option(Unit) = send(p, $t11) in
+dec_rc p;
+$rc_4 in
+dec_rc $rc_3;
+run_until_idle();
+println("ok")
+
+## two_reads
+fn two_reads(i : Int) : Int =
+  let r : Pair = let $t3 : String = int_to_string(i) in
+let $t5 : String = let $t4 : Int = +(i, 1) in
+int_to_string($t4) in
+{ a = $t3, b = $t5 } in
+let $rc_2 : Int = let $t7 : Int = let $t6 : String = r.a in
+string_length($t6) in
+let $t9 : Int = let $t8 : String = r.b in
+string_length($t8) in
++($t7, $t9) in
+dec_rc r;
+$rc_2
+
