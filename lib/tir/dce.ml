@@ -157,12 +157,61 @@ let reachable_fns ?(extra_root = fun _ -> false) ?(fail_open = true)
   done;
   !visited
 
+(* A record or tuple literal whose fields are all scalars: allocating it
+   touches nothing else, and releasing it releases nothing but its own cell. *)
+let scalar_aggregate_literal (rhs : Tir.expr) : bool =
+  let scalar_atom = function
+    | Tir.ALit _ -> true
+    | Tir.AVar w ->
+      (match w.Tir.v_ty with
+       | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit | Tir.TCon ("Atom", []) -> true
+       | _ -> false)
+    | _ -> false
+  in
+  match rhs with
+  | Tir.ERecord fields -> List.for_all (fun (_, a) -> scalar_atom a) fields
+  | Tir.ETuple atoms -> List.for_all scalar_atom atoms
+  | _ -> false
+
+(* [body] with every [ESeq (dec_rc v | free v, rest)] replaced by [rest]. *)
+let rec strip_own_release (name : string) (e : Tir.expr) : Tir.expr =
+  let is_own = function
+    | Tir.EDecRC (Tir.AVar w) | Tir.EAtomicDecRC (Tir.AVar w) | Tir.EFree (Tir.AVar w) ->
+      String.equal w.Tir.v_name name
+    | _ -> false
+  in
+  match e with
+  | Tir.ESeq (op, rest) when is_own op -> strip_own_release name rest
+  | Tir.ESeq (a, b) -> Tir.ESeq (strip_own_release name a, strip_own_release name b)
+  | Tir.ELet (x, rhs, body) ->
+    Tir.ELet (x, strip_own_release name rhs, strip_own_release name body)
+  | Tir.ECase (a, branches, default) ->
+    Tir.ECase (a,
+      List.map (fun b -> { b with Tir.br_body = strip_own_release name b.Tir.br_body }) branches,
+      Option.map (strip_own_release name) default)
+  | other -> other
+
 let rec dce_expr ~impure_fns ~changed : Tir.expr -> Tir.expr = function
   | Tir.ELet (v, rhs, body) ->
     let rhs'  = dce_expr ~impure_fns ~changed rhs in
     let body' = dce_expr ~impure_fns ~changed body in
     let used  = StringSet.mem v.Tir.v_name (free_vars body') in
-    if used then Tir.ELet (v, rhs', body')
+    (* A scalar-only record or tuple whose every field read has been folded
+       away ([Cprop] P13) is kept alive only by its own release, which Perceus
+       now places at scope end for nominal records too
+       (specs/progress/2026-10-01-compiled-actor-and-nominal-record-leaks.md).
+       An allocation whose only use is freeing itself is dead: drop the
+       binding together with those releases.  Restricted to scalar fields
+       because a heap field's release is a deep drop that must still run. *)
+    let only_self_released () =
+      scalar_aggregate_literal rhs'
+      && not (StringSet.mem v.Tir.v_name
+                (free_vars (strip_own_release v.Tir.v_name body')))
+    in
+    if used && only_self_released () then begin
+      changed := true; strip_own_release v.Tir.v_name body'
+    end
+    else if used then Tir.ELet (v, rhs', body')
     else if Purity.is_pure_ext impure_fns rhs' then begin
       changed := true; body'
     end else begin
