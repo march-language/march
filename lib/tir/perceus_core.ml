@@ -419,9 +419,38 @@ let wrap_incrcs (env : env) (incs : Tir.var list) (inner : Tir.expr) : Tir.expr 
     Both are read only through [EField] (tuple destructuring lowers to
     [EField] with [$fv]N names, not to an ECase), so both need the scope-end
     drop in [insert_rc_expr]'s ELet case. *)
-let is_aggregate_ty : Tir.ty -> bool = function
+let is_aggregate_ty (env : env) : Tir.ty -> bool = function
   | Tir.TTuple _ | Tir.TRecord _ -> true
+  (* A NOMINAL record ([type St = { n : Int }], an actor's [Name_State]) is
+     the same aggregate under a [TCon] name.  Matching only the structural
+     forms left every such value with no drop site at all: a record built,
+     read through its fields and then dropped leaked its cell and every heap
+     value it owned, and an actor handler that returned a new state leaked
+     one record per message
+     (specs/progress/2026-10-01-compiled-actor-and-nominal-record-leaks.md). *)
+  | Tir.TCon (n, _) -> Kind.is_record_type env.k_table n
   | _ -> false
+
+(** Result type of a primitive operator application whose callee variable
+    carries no [TFn] type ([+], [<], ...).  Arithmetic takes its operands' type
+    only when every operand is known to be [Int], or every one [Float];
+    comparisons and boolean connectives are [Bool].  Anything else is [None],
+    the same refusal [tir_expr_ty] makes for any unknown type. *)
+let builtin_op_result_ty (name : string) (args : Tir.atom list) : Tir.ty option =
+  let atom_ty = function
+    | Tir.AVar w -> Some w.Tir.v_ty
+    | Tir.ALit (March_ast.Ast.LitInt _) -> Some Tir.TInt
+    | Tir.ALit (March_ast.Ast.LitFloat _) -> Some Tir.TFloat
+    | _ -> None
+  in
+  let all_are ty = args <> [] && List.for_all (fun a -> atom_ty a = Some ty) args in
+  match name with
+  | "+" | "-" | "*" | "/" | "%" ->
+    if all_are Tir.TInt then Some Tir.TInt
+    else if all_are Tir.TFloat then Some Tir.TFloat
+    else None
+  | "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||" | "not" -> Some Tir.TBool
+  | _ -> None
 
 (** Best-effort type of a TIR expression's value.  [None] means "could not
     determine", and every caller must treat that as a refusal to transform
@@ -440,21 +469,7 @@ let rec tir_expr_ty (e : Tir.expr) : Tir.ty option =
   | Tir.EApp (f, args) ->
     (match f.Tir.v_ty with
      | Tir.TFn (_, r) -> Some r
-     | _ ->
-       (* An infix builtin carries no function type.  Its result is read off
-          its operands (arithmetic) or is a Bool (comparison). *)
-       (match f.Tir.v_name, args with
-        | ("+" | "-" | "*" | "/" | "%"), a :: _ ->
-          (match a with
-           | Tir.AVar w ->
-             (match w.Tir.v_ty with
-              | Tir.TInt | Tir.TFloat as t -> Some t
-              | _ -> None)
-           | Tir.ALit (March_ast.Ast.LitInt _) -> Some Tir.TInt
-           | Tir.ALit (March_ast.Ast.LitFloat _) -> Some Tir.TFloat
-           | _ -> None)
-        | ("==" | "!=" | "<" | ">" | "<=" | ">="), _ -> Some Tir.TBool
-        | _ -> None))
+     | _ -> builtin_op_result_ty f.Tir.v_name args)
   (* The arms of a case agree on their type, so any one that can be typed
      types the whole thing.  A scope whose value is a [match]/[if] (the usual
      way a function ends) was otherwise "type unknown", and the scope-end drop
@@ -502,6 +517,27 @@ let rec tir_expr_ty (e : Tir.expr) : Tir.ty option =
     then Some (Tir.TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) named))
     else None
   | Tir.EUpdate (Tir.AVar src, _) -> Some src.Tir.v_ty
+  | _ -> None
+
+(** [Some ty] when [e]'s value is the owned result of a call (an [EApp] at
+    the end of its [ELet]/[ESeq] chain) of a type that needs RC, so that
+    discarding [e] as a statement would leak it; [None] otherwise, including
+    whenever the type cannot be determined.  See [insert_rc_expr]'s [ESeq]
+    case. *)
+let discarded_call_result_ty (env : env) (e : Tir.expr) : Tir.ty option =
+  let rec tail = function
+    | Tir.ELet (_, _, body) | Tir.ESeq (_, body) -> tail body
+    | x -> x
+  in
+  match tail e with
+  | Tir.EApp _ ->
+    (match tir_expr_ty e with
+     (* Unit is sometimes typed as the empty tuple, which [needs_rc] counts as
+        an aggregate; a unit-returning statement ([println(s)]) has nothing to
+        release. *)
+     | Some (Tir.TTuple [] | Tir.TUnit) -> None
+     | Some ty when needs_rc env ty -> Some ty
+     | _ -> None)
   | _ -> None
 
 (** True when every occurrence of [name] in [e] is as the SOURCE of an
@@ -765,6 +801,9 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
         List.map (fun (br : Tir.branch) ->
             { br with Tir.br_body = go br.Tir.br_body }) brs,
         Option.map go d)
+    (* A literal reads nothing, so the release goes in front of it (the
+       actor handler's trailing `:unit`; a literal has no type to bind). *)
+    | Tir.EAtom (Tir.ALit _) as tail -> Tir.ESeq (decrc_for env v (Tir.AVar v), tail)
     | (Tir.EApp _ | Tir.ECallPtr _) as tail when call_is_safe tail ->
       Tir.ESeq (decrc_for env v (Tir.AVar v), tail)
     | tail ->
@@ -1285,7 +1324,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
             e2'
         else
           e2'
-      else if is_aggregate_ty v.Tir.v_ty
+      else if is_aggregate_ty env v.Tir.v_ty
               && v.Tir.v_lin = Tir.Unr
               && StringSet.mem v.Tir.v_name live_into_e2
               && not (StringSet.mem v.Tir.v_name live_after)
@@ -1723,9 +1762,20 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
     (Tir.ECase (a, branches', default'), lb)
 
   | Tir.ESeq (e1, e2) ->
-    let (e2', l2) = insert_rc_expr env e2 live_after in
-    let (e1', l1) = insert_rc_expr env e1 l2 in
-    (Tir.ESeq (e1', e2'), l1)
+    (match discarded_call_result_ty env e1 with
+     | Some ty ->
+       (* A statement [f(x)] whose call returns an owned heap value lowers to
+          [ESeq (f(x), rest)], which drops the value on the floor: nothing
+          ever released it.  A PURE call never showed this (the optimiser
+          deletes it), but an impure one does: every [send(p, m)] written as
+          a statement leaked the [Some(())] it returns.  Rebinding the value
+          to a fresh, unused [let] hands it to the dead-binding branch above,
+          the same release [let _ = send(p, m)] already got. *)
+       insert_rc_expr env (Tir.ELet (fresh_rc_var ty, e1, e2)) live_after
+     | None ->
+       let (e2', l2) = insert_rc_expr env e2 live_after in
+       let (e1', l1) = insert_rc_expr env e1 l2 in
+       (Tir.ESeq (e1', e2'), l1))
 
   | Tir.ETuple atoms ->
     let inc_vars = find_inc_vars env atoms live_after in
@@ -1776,8 +1826,9 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
        See specs/progress/2026-09-13-closure-environment-released.md. *)
     let a_is_aggregate = match a with
       | Tir.AVar v -> (match v.Tir.v_ty with
-                       | Tir.TTuple _ | Tir.TRecord _ | Tir.TPtr _ -> true
-                       | _ -> false)
+                       | Tir.TPtr _ -> true
+                       (* nominal records included: see [is_aggregate_ty] *)
+                       | t -> is_aggregate_ty env t)
       | _ -> false
     in
     let inc_vars =
