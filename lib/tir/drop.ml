@@ -331,11 +331,19 @@ let rec has_tvar = function
     tuples are keyed by the [$fvN] accessor that tuple destructuring lowers to.
     These are the aggregates that own their fields and are read exclusively
     through [EField] — see [build_aggregate_drop_fn]. *)
-let aggregate_fields (ty : Tir.ty) : (string * Tir.ty) list option =
+let aggregate_fields (k_table : Kind.table) (ty : Tir.ty)
+  : (string * Tir.ty) list option =
   match ty with
   | Tir.TRecord fs ->
     Some (List.sort (fun (a, _) (b, _) -> String.compare a b) fs)
   | Tir.TTuple ts -> Some (List.mapi (fun i t -> (Tir_names.fv_field i, t)) ts)
+  (* A nominal record ([type Pair = { a : String, b : String }], an actor's
+     [Name_State]) owns its fields exactly as a [TRecord] does.  Perceus now
+     drops such a value at scope end ([Perceus_core.is_aggregate_ty]); without
+     this arm that drop stayed shallow and orphaned every heap field. *)
+  | Tir.TCon (n, []) ->
+    Option.map (List.sort (fun (a, _) (b, _) -> String.compare a b))
+      (Kind.record_fields k_table n)
   | _ -> None
 
 (** True when a value of [ty] may NOT be a heap pointer at runtime: a niche
@@ -379,7 +387,7 @@ let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
   | Some "" -> None            (* memoized negative *)
   | Some fname -> Some fname
   | None ->
-    match aggregate_fields ty with
+    match aggregate_fields env.k_table ty with
     | Some fields ->
       (* Records and tuples: one implicit "constructor" over the fields, and no
          ECase to destructure it -- see [build_aggregate_drop_fn].  Without
