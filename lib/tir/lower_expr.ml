@@ -365,7 +365,12 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
            inner
        in
        let tname = fresh_name "p" in
-       let tv : Tir.var = { v_name = tname; v_ty = rhs_tuple_ty; v_lin = Tir.Lin } in
+       (* The tuple temp is an ordinary owned aggregate: only its field binders
+          are marked linear.  Marked [Lin] it was exempt from Perceus's
+          scope-end aggregate drop, so `let (a, b) = f(..)` leaked the pair
+          cell and every reference it held whenever the fields were used
+          (borrowed, dup'd at each consuming use) rather than moved. *)
+       let tv : Tir.var = { v_name = tname; v_ty = rhs_tuple_ty; v_lin = Tir.Unr } in
        let body_with_fields = bind_subpat (Tir.AVar tv) rhs_tuple_ty b.bind_pat body in
        Tir.ELet (tv, rhs, body_with_fields)
      | _ ->

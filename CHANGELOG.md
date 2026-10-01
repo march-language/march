@@ -54,6 +54,15 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A compiled `Array` that is built, updated and dropped no longer leaks its
+  trie.** `Array.from_list`, `push`, `set` and `pop` leaked about one object per
+  element once a vector held more than one 32-element leaf (a 1,100-element
+  `from_list` leaked 2,224 objects per build, 40,000 leaked 81,118). Four compiler
+  causes (a tuple bound by `let (a, b) = ..` was never released when its scope ended
+  in an `if`, `match` or arithmetic; nested local functions lost their frame tuples;
+  a nested pattern with a default arm leaked its join-point closure; an `Option` of
+  a tree in a tuple was released shallowly) are worked around in `stdlib/array.march`
+  or fixed in Perceus. Loops that destructure a tuple are still compiled to loops.
 - **Compiled `Seq` constructors and combinators no longer leak.** Draining
   `Seq.from_list`, `Seq.from_string_lines`, `Seq.map`, `Seq.filter` and
   `Seq.concat` with `Seq.count` or `Seq.fold` leaked 3 to 5 heap objects per

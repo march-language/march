@@ -147,11 +147,11 @@ fn closed(ms : List({ addr : String, node_id : String }), id : String) : List(St
   let addr : String = let $t10 : Option({ addr : String, node_id : String }) = find(ms, id) in
 case $t10 of
   Some($f11) -> let m : { addr : String, node_id : String } = $f11 in
-let $rc_1 : String = let $rc_2 : String = m.addr in
-inc_rc $rc_2;
-$rc_2 in
+let $rc_3 : String = let $rc_4 : String = m.addr in
+inc_rc $rc_4;
+$rc_4 in
 dec_rc m;
-$rc_1
+$rc_3
   None() -> ""
   _ -> dec_rc $t10;
 panic("non-exhaustive pattern match") in
@@ -302,20 +302,20 @@ alloc List.Cons(s, $t9)
 ## main
 fn main(_c : Cap(IO.Console)) : () =
   let ms : List({ addr : String, node_id : String }) = let $t16 : { addr : String, node_id : String } = let $t13 : String = let $t12 : String = int_to_string(0) in
-let $rc_5 : '_ = ++("n", $t12) in
+let $rc_7 : '_ = ++("n", $t12) in
 dec_rc $t12;
-$rc_5 in
+$rc_7 in
 let $t15 : String = let $t14 : String = int_to_string(0) in
-let $rc_4 : '_ = ++("a", $t14) in
+let $rc_6 : '_ = ++("a", $t14) in
 dec_rc $t14;
-$rc_4 in
+$rc_6 in
 { node_id = $t13, addr = $t15 } in
 let $t17 : List({ addr : String, node_id : String }) = alloc List.Nil({ addr : String, node_id : String })() in
 alloc List.Cons($t16, $t17) in
 let $t525 : String = let $t524 : Int = let $t523 : List(String) = closed(ms, "n0") in
 List.length$List_String($t523) in
 int_to_string($t524) in
-let $rc_3 : () = println($t525) in
+let $rc_5 : () = println($t525) in
 dec_rc $t525;
-$rc_3
+$rc_5
 

@@ -2582,6 +2582,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/process_handle_leak_probe.expected native_process_handle_leak_probe.out)))
 
+; ── Leak guard: an Array (PVec trie) built by from_list/push, updated by set,
+; shrunk by pop and then dropped leaked its whole trie.  Red before the fix:
+; every leg but `push 40` reads `flat: false`.
+; specs/progress/2026-09-28-array-built-then-dropped-leaks-trie.md
+(rule
+ (targets native_array_trie_drop_leak_probe native_array_trie_drop_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/array_trie_drop_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_array_trie_drop_leak_probe
+        native/array_trie_drop_leak_probe.march)
+   (with-stdout-to native_array_trie_drop_leak_probe.out
+        (system "./native_array_trie_drop_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/array_trie_drop_leak_probe.expected native_array_trie_drop_leak_probe.out)))
+
 ; ── Leak guard: Seq constructors and combinators leaked their closure
 ; environments (3-5 objects per Seq.from_list/from_string_lines/map/filter use).
 ; Red before the fix: every leg reads `flat: false`.
