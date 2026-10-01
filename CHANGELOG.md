@@ -63,6 +63,10 @@ git log is authoritative for exact commits.
   `RC underflow` on macOS and `malloc(): unaligned fastbin chunk detected` on
   Linux. Such a lambda that returns its `Float` argument, or passes it on to
   another closure, also no longer leaks it.
+- **Compiled `to_string(())` prints `()`.** A compiled program printed `0` for
+  the unit value, in `to_string`, `show`, string interpolation and inside
+  containers (`Some(())` printed `Some(0)`). It now prints `()` as the
+  interpreter always did.
 - **Compiled actors no longer leak every message they receive.** A compiled
   actor never released a delivered message, its heap fields, or the state
   record a handler returned, so memory grew with every message for the life of
