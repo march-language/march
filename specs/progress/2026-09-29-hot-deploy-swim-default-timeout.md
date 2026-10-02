@@ -95,3 +95,77 @@ ubuntu container.
    This removes the candidate cause above for good (no deploy touches
    `ClusterNodeActor` any more), but points 1 and 2 stay open: nobody has
    run the scenarios on the CI runner at the default suspect timeout.
+
+## Resolution (2026-09-29, PR #692)
+
+Items 1 and 2 are done here; item 3 was decided and done by #727 (above).
+#727's write-up reached the same conclusion as the measurement below: the
+ASan-only suspect timeouts are SWIM under ASan load, with or without a deploy.
+
+**Step 1: default suspect timeout on the CI runner.** Both scenarios now run
+SWIM at its default (`Swim.config(500, 3000, 2)`) in the `two-node` job, the
+only CI job that runs them without a sanitizer (ubuntu only; no macOS job runs
+two-node scenarios). Results, head of PR #692:
+
+| CI run (attempt) | commit | job | `protocol_evolve` | `hcr_new_code_session` |
+|---|---|---|---|---|
+| 36512671315 (1) | eb8dbfd39 | `two-node` 109228055470 | ok | ok |
+| 36535093512 (1) | 1facf8490 | `two-node` 109297571240 | ok | ok |
+| 36535093512 (3) | 1facf8490 | `two-node` 109568940081 | ok | ok |
+
+3/3 green on ubuntu at the default, both scenarios. Under ASan
+(`sanitize-gate`, 15 s via `HCR_SUSPECT_MS`), `hcr_new_code_session` was
+CLEAN in both attempts of run 36535093512 (jobs 109297571271 and
+109496048041); `protocol_evolve` skips itself there. Attempt 1 of that job went
+red on an untouched scenario, `cluster_stop_loopback` ("timed out waiting for
+node-a to exit"), which was CLEAN on the re-run.
+
+**The one failure was under AddressSanitizer, and it is not the deploy.** The
+first CI run's `sanitize-gate` (job 109228055256) failed `hcr_new_code_session`
+at the default: node-b lost 8 sessions, 5 refused, three of them "node node-a
+dead: suspect timeout". Step 2's measurement, in a 2-CPU (`--cpuset-cpus 0,1`)
+arm64 ubuntu container (`ci/Dockerfile.ubuntu` image), on a scratch copy with:
+a probe actor on each node logging any gap over 150 ms between its 20 ms
+self-beats; a `ClusterNode.subscribe` hook logging each SWIM verdict about the
+peer with wall-clock ms; a per-node `MARCH_AUDIT_LOG` (one timestamped line per
+activated function); and wall-clock stamps around each `hcr_deploy deploy`.
+
+- **Each deploy is short and activates only app code.** Six ASan deploys took
+  35-57 ms end to end (the client's upload through the activation reply), and
+  every audit log reads the same: node-b's deploy activates `Buy.version`,
+  node-a's `Host.version` and `Host.host_tick`. No stdlib actor
+  (`ClusterNodeActor_dispatch`, `Endpoint_dispatch`) was activated even before
+  #727 removed their slots, given #663's canonical lambda-hash fold.
+- **node-a's scheduler does not stall across its deploy.** The probe logged no
+  gap over 150 ms within seconds of either deploy in any run; the largest gaps
+  seen at all (164-480 ms) came late in the drive, on both nodes, in runs with
+  and without deploys.
+- **The same failure happens with no deploy at all.** With both deploys
+  skipped (a control mode of the scratch scenario), under ASan the two nodes
+  still suspect each other at nearly the same moment, about 9-10 s after
+  joining, then declare each other dead and lose sessions: 2, 3 and 0 lost in
+  three control runs, against 4, 4, 4 (and 12, 5 in an earlier batch) with
+  deploys. The first suspicion came 9.0-9.8 s after joining with deploys and
+  9.3-14.2 s without. Mutual, simultaneous suspicion with a responsive
+  scheduler on both nodes is SWIM under ASan's slowdown on 2 CPUs with a
+  session starting every 150 ms, not a node stalled by its deploy.
+- Without ASan in the same container, the instrumented scenario passed (so the
+  probes do not perturb it), and in the plain runs neither node suspected the
+  other until node-b had printed its summary and stopped.
+
+So `hcr_new_code_session` keeps the default everywhere except under
+`MARCH_SANITIZE`, where its scenario.sh sets `HCR_SUSPECT_MS=15000` and the
+node programs apply it. `protocol_evolve` skips itself under ASan, so it has no
+override at all. The old comment blaming "a deploy under AddressSanitizer"
+for a seconds-long stall was wrong: the deploy takes tens of milliseconds and
+the loss happens without one.
+
+A local ASan container is not an oracle for this scenario at 15 s: `main`'s
+own version (hardcoded 15 s) timed out twice (330 s each) waiting for node-b's
+summary on the 2-CPU arm64 box, the same as this PR's. `sanitize-gate` on the
+x86 runner, where `main` passes, is the judge.
+
+Seen in passing, unrelated: the first CI run's `test (macos-15, all)` failed one
+timing assertion in `test/test_hcr_migrate_order.c:561` ("after the soft
+deadline a held actor is left alone", a 20 ms soft / 80 ms hard drain
+deadline).

@@ -108,11 +108,12 @@ mod HcrSessionA do
   end
 
   fn main(c : Cap(IO)) do
-    -- A 15 s suspect timeout: a deploy under AddressSanitizer (the sanitize
-    -- gate runs every scenario with it) stalls the node for seconds while
-    -- the patch is verified and activated, and the default 3 s had node-b
-    -- declare node-a dead in the middle of it.
-    let cfg = { ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "hcr-secret", 1) with swim: Swim.config(500, 15000, 2) }
+    -- The default SWIM timeouts, except under AddressSanitizer: there
+    -- scenario.sh sets HCR_SUSPECT_MS to 15 s, because ASan load alone
+    -- (no deploy needed) makes the nodes suspect each other at 3 s.
+    let base = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "hcr-secret", 1)
+    let suspect_ms = Env.get_int("HCR_SUSPECT_MS", 0)
+    let cfg = if suspect_ms > 0 do { base with swim: Swim.config(500, suspect_ms, 2) } else base end
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
