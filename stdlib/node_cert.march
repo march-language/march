@@ -35,6 +35,7 @@ mod NodeCert do
 
   type Cert = { node : String, roles : List(String), flags : List(String), not_after : Int,
                 issuer : String, pubkey : String, serial : String }
+  derive Eq for Cert
 
   -- A certificate as received: the decoded fields, the exact body bytes the
   -- signature covers, and the signature.

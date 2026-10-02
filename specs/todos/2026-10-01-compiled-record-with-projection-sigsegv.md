@@ -43,3 +43,25 @@ call rather than a pattern match.
 **Acceptance:** a `test/native` fixture with shape 1 (a record-held closure, a `List.find`
 over a list of records, a `with` from the found record's field) runs compiled; shape 2's
 reads after the consuming call give the same values as before it.
+
+## 2026-10-02: not reproduced standalone
+
+A standalone program with shape 1 — a `report : Report -> Report` closure held in
+an `Ops` record, built in a function, called 4,000 times from a loop; inside it a
+`List.find` over `leader_state().obs` by `o.report.node == rep.node`, then
+`{ rep with detail: o.report.detail }` in the `Some` arm, then the result handed
+to a `leader_report` that conses it onto the list and projected back out — runs
+correctly compiled at `--opt 2`, every result identical to the interpreter and
+`live_allocs()` flat. An ASAN build (`MARCH_SANITIZE=address`) could not be used
+as a second witness: on this machine every sanitized binary, including a
+ten-line one, spins forever at startup (30 CPU-minutes at 1.3 MB RSS), so that
+is a separate problem with the sanitizer build and not evidence either way.
+
+Two of the ingredients the control plane had and this shrink did not: the
+closure is called from a generated session role body (an actor), and `rep`
+arrives as a decoded message. The class the todo guessed at — a borrowed field
+projection outliving its consumed owner — has since had one more instance fixed
+(a pattern field read after the scrutinee's deep release, see
+[../progress/2026-10-01-dead-join-point-closure-leaks-captures.md](../progress/2026-10-01-dead-join-point-closure-leaks-captures.md)),
+so the next attempt should first re-run the original `test/two_node/control_plane`
+shape with the workaround reverted on a compiler that has that fix.

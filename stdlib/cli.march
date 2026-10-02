@@ -16,6 +16,7 @@
 mod Cli do
 
   type FlagArity = BoolFlag | ValueFlag
+  derive Eq for FlagArity
 
   type FlagSpec = {
     long:     String,

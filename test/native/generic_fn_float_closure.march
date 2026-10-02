@@ -1,0 +1,27 @@
+-- A GENERIC named function passed where a `Float -> Float -> Float` closure is
+-- expected must forward its arguments as the function is DEFINED, not as the
+-- use site types them.  `ksnd` is emitted as `@ksnd(ptr, ptr)` (its params stay
+-- erased), but the `$clo_wrap` trampoline used to be built from the use-site
+-- type, so it unboxed both arguments and called `@ksnd(double, double)`: the
+-- callee read its pointer registers, which held whatever the caller left there,
+-- and `call2(ksnd, 3, 0.0)` printed 3. instead of 6. (compiled only; the
+-- interpreter is the oracle for the .expected).  `kfst` happened to print the
+-- right number, so both are checked.  See
+-- specs/progress/2026-09-30-generic-named-fn-as-float-closure-wrong-value.md.
+mod Main do
+  needs IO.Console
+
+  pfn ksnd(_p, x) do x end
+  pfn kfst(p, _x) do p end
+  pfn fadd(a : Float, b : Float) : Float do a +. b end
+
+  pfn call2(f : Float -> Float -> Float, n : Int, acc : Float) : Float do
+    if n <= 0 do acc else call2(f, n - 1, acc +. f(1.0, int_to_float(n))) end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    println(float_to_string(call2(ksnd, 3, 0.0)))
+    println(float_to_string(call2(kfst, 3, 0.0)))
+    println(float_to_string(call2(fadd, 3, 0.0)))
+  end
+end

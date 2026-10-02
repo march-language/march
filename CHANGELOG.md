@@ -77,6 +77,18 @@ git log is authoritative for exact commits.
   replacement as `CertReplaced` or `CertRefused` (two new `SecurityEvent`
   constructors: a `match` that named every constructor needs a new arm).
 
+### Changed
+- **Compiled `Int` arithmetic normalises to 63 bits lazily, not after every
+  operation.** `+ - *`, negation and `int_shl` leave their result in the full
+  64-bit register and the reduction modulo 2^63 happens where the value is
+  observed (a comparison, a call into the runtime, a store, printing, ...).
+  Every program prints what it printed before — the parity suite against the
+  interpreter is the gate — but the shift pair the previous scheme put between
+  `fib(n-1) + fib(n-2)` and `ret` is gone, so LLVM's accumulator
+  tail-recursion elimination fires again: `bench/fib.march` is ~17% faster
+  compiled (same-box A/B), and arithmetic that feeds a list cell or record field
+  no longer pays a shift pair on the way in.
+
 ### Fixed
 - Compiled: a dying tuple releases its boxed `Float` fields, and a dying
   `List(Float)` cell (any generic container slot holding a Float) releases the
@@ -86,6 +98,31 @@ git log is authoritative for exact commits.
 - Compiled: an aggregate whose field type still mentions a type variable (a
   tuple destructured inside a polymorphic local `fn`) is released instead of
   skipped; its lists are walked and freed.
+- Compiled: a generic named function passed where a `Float -> Float -> Float`
+  closure is expected returned the wrong value (its trampoline unboxed the
+  arguments per the use-site type instead of forwarding them as the function
+  is defined).
+- Compiled: a self tail call inside a nested-pattern match arm
+  (`Cons(a, Cons(b, rest)) -> … f(Cons(b, rest))`) is now a loop; it recursed
+  once per element and overflowed the green-thread stack at ~8,000 elements.
+  A match's fall-through join point with a single call site is put back in
+  place by the lowering instead of becoming a closure.
+- Compiled: a nested pattern with a default arm that uses the scrutinee no
+  longer leaks the matched value (the dead join-point closure's release is
+  deep), and Perceus no longer releases a scrutinee ahead of a pattern field
+  the arm still reads.
+- **`==` inside a `test`/`setup` body is checked where it is written.** The
+  `Eq`/`Ord`/`Num`/interface constraints a test or setup body raised stayed
+  pending until the next top-level `fn` or `let`, so a `fn` placed between two
+  `describe` blocks was blamed for every `==` in the tests above it ("`T` does
+  not implement interface `Eq`" at the fn's span), and with no later `fn` they
+  were never checked at all. They are now reported at the test itself. Tests
+  that compared a type with no `Eq` impl, which used to pass unchecked, are now
+  rejected; to keep them working, these stdlib types now `derive Eq`:
+  `Cli.FlagArity`, `Control.CtlHosts`/`CtlAction`/`CtlGate`/`StepOrder`/
+  `CtlDecision`, `File.FileKind`, `Membership.MemberStatus`/`Member`,
+  `NodeCert.Cert`, `NodeIdentity.Identity`, `RemoteCall.CallError`/`Verdict`/
+  `ReplyResult`/`CallReply`, `Swim.Action` and `VectorClock.ClockOrder`.
 - **Hot reload: the entry module's own top-level functions can be hot deployed.**
   The compiler names them without the entry module's prefix, so with
   `--hot-reload <EntryModule>` (what forge passes) a role body, hook or helper

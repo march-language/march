@@ -12,6 +12,7 @@ mod File do
   ptype FileError = NotFound(String) | Permission(String) | IsDirectory(String) | NotEmpty(String) | IoError(String)
 
   ptype FileKind = RegularFile | Directory | Symlink | OtherKind
+  derive Eq for FileKind
 
   -- FileStat uses a positional constructor
   -- Pattern match: FileStat(size, kind, modified, accessed)
