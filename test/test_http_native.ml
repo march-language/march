@@ -710,6 +710,7 @@ let run_pooled_e2e ~variant ~slug ~evloop () =
     if rss_before < 0 || rss_after < 0 then
       bail (Printf.sprintf "could not read server RSS (before=%d after=%d KiB)" rss_before rss_after);
     let growth_kib = rss_after - rss_before in
+    Printf.eprintf "[pooled e2e %s] server rss before=%d KiB after=%d KiB growth=%d KiB\n%!" variant rss_before rss_after growth_kib;
     if growth_kib > 8 * 1024 then
       bail (Printf.sprintf "server RSS grew %d KiB across 1600 pooled requests (before %d, after %d): a per-request leak of the pooled conn or its reply" growth_kib rss_before rss_after);
 
