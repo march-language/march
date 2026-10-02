@@ -78,6 +78,16 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Compiled `Int` arithmetic normalises to 63 bits lazily, not after every
+  operation.** `+ - *`, negation and `int_shl` leave their result in the full
+  64-bit register and the reduction modulo 2^63 happens where the value is
+  observed (a comparison, a call into the runtime, a store, printing, ...).
+  Every program prints what it printed before — the parity suite against the
+  interpreter is the gate — but the shift pair the previous scheme put between
+  `fib(n-1) + fib(n-2)` and `ret` is gone, so LLVM's accumulator
+  tail-recursion elimination fires again: `bench/fib.march` is ~17% faster
+  compiled (same-box A/B), and arithmetic that feeds a list cell or record field
+  no longer pays a shift pair on the way in.
 - **Heap objects are no longer zero-filled on allocation.** `march_alloc`, the
   allocator behind every constructor, closure, tuple and record in compiled
   code, is now a plain `malloc` (or `mi_malloc`) instead of a `calloc`. The
@@ -91,6 +101,25 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Hot reload: the entry module's own top-level functions can be hot deployed.**
+  The compiler names them without the entry module's prefix, so with
+  `--hot-reload <EntryModule>` (what forge passes) a role body, hook or helper
+  written at the top of the entry file had no dispatch slot: `forge deploy hot`
+  answered "no hot-deployable changes" and the old code kept running. They are now
+  slots, chosen by where the compiler loaded them from; `main` stays off the
+  boundary, and so does the control plane a `[control]` topology splices into the
+  entry module (it runs the deploy), including its `CtlRespawner` actor. A
+  function's call to itself stays a direct call, so a recursive function costs
+  nothing extra in a `--hot-reload` build (dispatching it made `fib` 4.8x slower).
+- **Hot reload: a one-line edit to a topology app no longer plans a restart.** A
+  function's hot-reload identity hashed the numbers the compiler gives lambdas,
+  join points and type variables, which any edit renumbers, so every function that
+  merely referred to one (the generated `main`, `Front.start`, ...) looked changed,
+  and an unslotted `main` changing made `forge deploy` restart the pool. An edit
+  inside a role body's closure was planned as a restart too, because the manifest
+  never said which function builds the closure. Now a handler edit flags that
+  handler and its actor's dispatch only, a closure edit flags the function that
+  builds it, and both deploy as hot patches.
 - **A let-bound lambda that ignores or returns a `Float` argument no longer
   crashes compiled code.** A lambda bound with `let` and left generic, such as
   `let keep = fn (acc, x) -> acc`, freed the `Float` it was given when it

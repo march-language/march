@@ -109,10 +109,13 @@ let builtin_type_defs : Tir.type_def list = [
 
 (** Record whether the actor declared at [span] is the standard library's
     (loader provenance, see [Hot_reload.is_stdlib_actor_fn]): a stdlib
-    actor's dispatch fn gets no hot-reload slot. *)
+    actor's dispatch fn gets no hot-reload slot.  The control plane's wiring,
+    spliced into a topology app's entry module, counts as the stdlib's
+    ([Hot_reload.control_wiring_file]). *)
 let note_actor_provenance (span : Ast.span) (fns : Tir.fn_def list) : unit =
   Hot_reload.note_actor_fns
-    ~stdlib:(March_typecheck.Typecheck_builtins.span_is_stdlib span)
+    ~stdlib:(March_typecheck.Typecheck_builtins.span_is_stdlib span
+             || String.equal span.Ast.file Hot_reload.control_wiring_file)
     (List.map (fun (fd : Tir.fn_def) -> fd.Tir.fn_name) fns)
 
 (** Declaration-site mailbox bounds, keyed by bare actor name (the spawn
@@ -247,6 +250,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   Hashtbl.reset _alias_reported;
   Handler_owner.reset ();
   Hot_reload.reset_actor_provenance ();
+  Hot_reload.reset_entry_file_fns ();
   Migrate_msg_pins.reset ();
   _lowered_modules := Hashtbl.create 8;
   (* Entry-file top-level fns named like a builtin that has its own C symbol
@@ -770,7 +774,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   List.iter (fun d ->
       Lower_state.with_decl_builtin_shadows (Lower_decls.decl_span d) (fun () ->
       match d with
-      | Ast.DFn (def, _) ->
+      | Ast.DFn (def, sp) ->
         (* Skip dispatcher DFns (original-named wrappers for default-arg functions).
            The mangled versions (foo$N) are the real implementations used by TIR.
            Dispatchers are only needed by the interpreter for VMultiarity dispatch. *)
@@ -783,6 +787,13 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             | None -> fn
           in
           note_migrate_msg ~prefix:"" def fn;
+          (* The entry file's own top-level fns, by provenance: they may be
+             hot-reload slots (see [Hot_reload.is_entry_file_slot]). *)
+          if String.equal sp.Ast.file !Lower_state._entry_file
+             && not (String.equal def.fn_name.txt "main")
+             && not (String.length def.fn_name.txt >= 2
+                     && String.sub def.fn_name.txt 0 2 = "__")
+          then Hot_reload.note_entry_file_fn fn.fn_name;
           fns := fn :: !fns
         end
       | Ast.DType (_, name, params, td, _)
