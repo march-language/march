@@ -10,7 +10,8 @@
  * ASAN).  Every one of them blocks all signals, so process-directed signals
  * land on other threads and SO_RCVTIMEO is not restarted away by SA_RESTART.
  *
- * R0 serves HELP and PING only; R1 adds the snapshot verbs to [verbs] below. */
+ * This file serves HELP and PING; other verbs are registered with
+ * march_observe_add_verbs (the R1 snapshot verbs: march_observe_snapshot.c). */
 #define _GNU_SOURCE
 #include "march_observe.h"
 
@@ -190,41 +191,57 @@ void march_jw_null(march_jw *w) {
  * truncated.  R1's ACTORS caps its row count well under this. */
 #define OBS_DATA_LIMIT ((size_t)16 << 20)
 
-/* A verb writes its data into [w] and returns NULL, or returns an error code
- * ("bad_args", ...) and writes nothing.  [args] is the rest of the line after
- * the verb and one space, possibly "". */
-typedef const char *(*obs_verb_fn)(march_jw *w, const char *args);
-
-typedef struct {
-    const char  *name;
-    const char  *tier;   /* "observe" | "debug" | "exec" (later stages) */
-    const char  *args;   /* human-readable argument synopsis */
-    const char  *help;
-    obs_verb_fn  fn;
-} obs_verb;
-
+/* The verb signature and record are public (march_observe.h) so other files
+ * can register verbs: the snapshot verbs live in march_observe_snapshot.c,
+ * which links against the rest of the runtime, while this file stays
+ * standalone (test_observe links it alone). */
 static const char *verb_help(march_jw *w, const char *args);
 static const char *verb_ping(march_jw *w, const char *args);
 
-static const obs_verb verbs[] = {
+static const march_observe_verb verbs[] = {
     { "HELP", "observe", "", "the verbs this node serves", verb_help },
     { "PING", "observe", "", "liveness: data is \"pong\"", verb_ping },
 };
 #define N_VERBS (sizeof verbs / sizeof verbs[0])
+
+/* Registered verbs.  Written only before the server starts (registration
+ * fails after), so connection threads read them without a lock: the accept
+ * thread is created after the last write, and pthread_create orders it. */
+#define MAX_EXTRA_VERBS 32
+static const march_observe_verb *g_extra[MAX_EXTRA_VERBS];
+static size_t g_n_extra;
+static _Atomic int g_serving;
+
+int march_observe_add_verbs(const march_observe_verb *v, size_t n) {
+    if (atomic_load(&g_serving) || g_n_extra + n > MAX_EXTRA_VERBS) return -1;
+    for (size_t i = 0; i < n; i++) g_extra[g_n_extra++] = &v[i];
+    return 0;
+}
+
+static const march_observe_verb *find_verb(const char *name) {
+    for (size_t i = 0; i < N_VERBS; i++)
+        if (strcmp(verbs[i].name, name) == 0) return &verbs[i];
+    for (size_t i = 0; i < g_n_extra; i++)
+        if (strcmp(g_extra[i]->name, name) == 0) return g_extra[i];
+    return NULL;
+}
+
+static void help_entry(march_jw *w, const march_observe_verb *v) {
+    march_jw_obj_begin(w);
+    march_jw_key(w, "name"); march_jw_str(w, v->name);
+    march_jw_key(w, "tier"); march_jw_str(w, v->tier);
+    march_jw_key(w, "args"); march_jw_str(w, v->args);
+    march_jw_key(w, "help"); march_jw_str(w, v->help);
+    march_jw_obj_end(w);
+}
 
 static const char *verb_help(march_jw *w, const char *args) {
     (void)args;
     march_jw_obj_begin(w);
     march_jw_key(w, "verbs");
     march_jw_arr_begin(w);
-    for (size_t i = 0; i < N_VERBS; i++) {
-        march_jw_obj_begin(w);
-        march_jw_key(w, "name"); march_jw_str(w, verbs[i].name);
-        march_jw_key(w, "tier"); march_jw_str(w, verbs[i].tier);
-        march_jw_key(w, "args"); march_jw_str(w, verbs[i].args);
-        march_jw_key(w, "help"); march_jw_str(w, verbs[i].help);
-        march_jw_obj_end(w);
-    }
+    for (size_t i = 0; i < N_VERBS; i++) help_entry(w, &verbs[i]);
+    for (size_t i = 0; i < g_n_extra; i++) help_entry(w, g_extra[i]);
     march_jw_arr_end(w);
     march_jw_obj_end(w);
     return NULL;
@@ -289,9 +306,7 @@ static void handle_line(char *line, march_jw *out) {
     int64_t t0 = mono_us();
     char *args = strchr(line, ' ');
     if (args) *args++ = '\0'; else args = line + strlen(line);
-    const obs_verb *v = NULL;
-    for (size_t i = 0; i < N_VERBS; i++)
-        if (strcmp(verbs[i].name, line) == 0) { v = &verbs[i]; break; }
+    const march_observe_verb *v = find_verb(line);
     if (!v) {
         build_envelope(out, "unknown_verb", NULL, mono_us() - t0);
         return;
@@ -391,6 +406,30 @@ static void *conn_thread(void *arg) {
     return NULL;
 }
 
+/* A detached thread with a small stack, or, if the system refuses that size,
+ * with the default one.  A hot-reload node on Linux once refused the 256 KiB
+ * accept thread with EINVAL (forge's deploy e2e, 2026-10-02: "observe socket
+ * thread: Invalid argument"); two reruns did not reproduce it and the cause
+ * is not pinned down.  glibc does answer EINVAL when a requested stack cannot
+ * hold the thread's static TLS, so a fixed small size is not safe in every
+ * program; falling back costs only address space. */
+static int spawn_detached(void *(*fn)(void *), void *arg) {
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_attr_setstacksize(&at, (size_t)256 << 10);
+    pthread_t t;
+    int rc = pthread_create(&t, &at, fn, arg);
+    if (rc == EINVAL) {
+        pthread_attr_destroy(&at);
+        pthread_attr_init(&at);
+        pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+        rc = pthread_create(&t, &at, fn, arg);
+    }
+    pthread_attr_destroy(&at);
+    return rc;
+}
+
 static void *accept_thread(void *arg) {
     int ls = (int)(intptr_t)arg;
     block_all_signals();
@@ -418,17 +457,11 @@ static void *accept_thread(void *arg) {
             atomic_fetch_sub_explicit(&g_active, 1, memory_order_release);
             continue;
         }
-        pthread_attr_t at;
-        pthread_attr_init(&at);
-        pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-        pthread_attr_setstacksize(&at, (size_t)256 << 10);
-        pthread_t t;
-        if (pthread_create(&t, &at, conn_thread, (void *)(intptr_t)fd) != 0) {
+        if (spawn_detached(conn_thread, (void *)(intptr_t)fd) != 0) {
             send_error(fd, "busy");
             close(fd);
             atomic_fetch_sub_explicit(&g_active, 1, memory_order_release);
         }
-        pthread_attr_destroy(&at);
     }
     return NULL;
 }
@@ -486,13 +519,8 @@ int march_observe_server_start(const char *path) {
         unlink(path);
         return -1;
     }
-    pthread_attr_t at;
-    pthread_attr_init(&at);
-    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-    pthread_attr_setstacksize(&at, (size_t)256 << 10);
-    pthread_t t;
-    int rc = pthread_create(&t, &at, accept_thread, (void *)(intptr_t)ls);
-    pthread_attr_destroy(&at);
+    atomic_store(&g_serving, 1);   /* registration closes before any reader */
+    int rc = spawn_detached(accept_thread, (void *)(intptr_t)ls);
     if (rc != 0) {
         fprintf(stderr, "march: observe socket thread: %s\n", strerror(rc));
         close(ls);

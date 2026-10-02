@@ -1,0 +1,29 @@
+ok: ACTORS mbox 1 names the actor with the burst
+ok: ACTORS total counts every live actor (3x(1+4) + 5)
+ok: TREE has 3 roots with 4 children each
+ok: TREE lists 5 unsupervised actors
+ok: TREE is not truncated
+ok: exactly one dead pid in the live range
+ok: ACTOR <dead child> reports kind Crash
+ok: ACTOR <dead child> carries no message field
+ok: NAMES lists hot and sup_one, sorted
+ok: ACTOR <supervisor> reports config and the one restart
+ok: the named supervisor is a TREE root
+ok: SCHED has one thread row per scheduler
+ok: MEM reports rss, live objects and the queued burst
+ok: EPOCHS reports the current epoch
+ok: SNAPSHOT carries all six sections
+ok: SNAPSHOT sections come from one walk
+ok: SNAPSHOT mem,names carries just those
+ok: ACTORS bogus -> bad_args
+ok: ACTORS 10001 -> bad_args
+ok: ACTORS mbox 5 extra -> bad_args
+ok: ACTORS 5 7 -> bad_args
+ok: ACTORS mbox pid -> bad_args
+ok: ACTOR -> bad_args
+ok: ACTOR -1 -> bad_args
+ok: ACTOR 99999999 -> not_found
+ok: TREE x -> bad_args
+ok: SNAPSHOT bogus -> bad_args
+ok: HELP lists every verb
+ok: no reply carries the crash message

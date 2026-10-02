@@ -93,6 +93,55 @@ let test_query_rejects_multiline () =
   | Ok _ -> Alcotest.fail "a two-line request must be refused"
   | Error e -> Alcotest.(check string) "refused" "observe: a request is a single line" e
 
+(* query_socket: an observe socket addressed by its own path, the
+   [forge observe --socket] path. *)
+let test_query_socket () =
+  let dir = tmp_dir () in
+  let path = Filename.concat dir "o.sock" in
+  let seen = Filename.concat dir "seen" in
+  let pid = fake_server path ~seen ~reply:(envelope ~data:"\"pong\"" ()) in
+  let r = Observe_client.query_socket path "PING" in
+  ignore (Unix.waitpid [] pid);
+  Alcotest.(check string) "the path is used as given (no .observe suffix)"
+    "PING" (In_channel.with_open_bin seen In_channel.input_all);
+  match r with
+  | Ok reply -> Alcotest.(check string) "data" "\"pong\"" (Yojson.Safe.to_string (Observe_client.data_of reply))
+  | Error e -> Alcotest.fail e
+
+let test_request_of () =
+  let r ?(sections = []) words = Cmd_observe.request_of ~words ~sections in
+  let ok = Alcotest.(result string string) in
+  Alcotest.check ok "default" (Ok "SNAPSHOT") (r []);
+  Alcotest.check ok "sections" (Ok "SNAPSHOT actors,mem") (r ~sections:["actors"; "mem"] []);
+  Alcotest.check ok "verb upper-cased, arguments kept" (Ok "ACTORS mbox 20") (r ["actors"; "mbox"; "20"]);
+  Alcotest.check ok "both refused" (Error "observe: give a request or --section, not both")
+    (r ~sections:["mem"] ["TREE"])
+
+let hr ?(ssh = "") envs =
+  { Project.hr_socket = "/run/app.sock"; hr_ssh_host = ssh; hr_public_key = None;
+    hr_envs = envs; hr_health_check_url = None; hr_strategy = "rolling";
+    hr_target = None; hr_module_prefix = None; hr_compact_after = None }
+
+let env name host =
+  { Project.hre_name = name; hre_ssh_host = host; hre_socket = "/run/" ^ name ^ ".sock";
+    hre_public_key = None }
+
+let test_hosts_of () =
+  let names r = match r with
+    | Ok hs -> List.map (fun h -> h.Hosts.name ^ "@" ^ h.Hosts.ssh) hs
+    | Error e -> [ "error: " ^ e ] in
+  let l = Alcotest.(list string) in
+  Alcotest.check l "flat config is the one host" [ "default@root@a" ]
+    (names (Cmd_observe.hosts_of (hr ~ssh:"root@a" []) ~env:""));
+  let two = hr [ env "web" "root@w"; env "jobs" "root@j" ] in
+  Alcotest.check l "every env by default" [ "web@root@w"; "jobs@root@j" ]
+    (names (Cmd_observe.hosts_of two ~env:""));
+  Alcotest.check l "--env picks one" [ "jobs@root@j" ] (names (Cmd_observe.hosts_of two ~env:"jobs"));
+  Alcotest.check l "unknown env" [ "error: observe: no [[hot-reload.env]] named db" ]
+    (names (Cmd_observe.hosts_of two ~env:"db"));
+  Alcotest.(check bool) "no host at all is an error" true
+    (match Cmd_observe.hosts_of (hr []) ~env:"" with Error _ -> true | Ok _ -> false)
+
 let () =
   Random.self_init ();
   Alcotest.run "observe_client" [
@@ -105,5 +154,10 @@ let () =
       Alcotest.test_case "an error envelope is an Error" `Quick test_query_error_reply;
       Alcotest.test_case "no socket" `Quick test_query_no_socket;
       Alcotest.test_case "multi-line request refused" `Quick test_query_rejects_multiline;
+      Alcotest.test_case "query_socket uses the path as given" `Quick test_query_socket;
+    ];
+    "forge observe", [
+      Alcotest.test_case "request line" `Quick test_request_of;
+      Alcotest.test_case "hosts from forge.toml" `Quick test_hosts_of;
     ];
   ]

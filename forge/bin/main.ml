@@ -18,7 +18,7 @@ let known_builtin_names =
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
     "licenses"; "tree"; "outdated"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "audit"; "ffi"; "fix"; "help";
-    "completions"; "deploy"; "hot-reload"; "topology"; "cluster"; "host" ]
+    "completions"; "deploy"; "hot-reload"; "topology"; "cluster"; "host"; "observe" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
    Archive tasks look like "bastion.new" — dotted namespaces not used by any
@@ -1380,6 +1380,40 @@ let deploy_cmd =
              [hot-reload] server or fleet")
     [deploy_hot_cmd]
 
+(* ---------------------------------------------------------- forge observe *)
+
+let observe_cmd =
+  let words =
+    Arg.(value & pos_all string [] & info [] ~docv:"REQUEST"
+           ~doc:"The request: a verb and its arguments (e.g. $(b,ACTORS mbox 20), $(b,ACTOR 42), \
+                 $(b,TREE), $(b,HELP)). Default: $(b,SNAPSHOT).")
+  in
+  let sections =
+    Arg.(value & opt_all string [] & info ["section"] ~docv:"S"
+           ~doc:"Ask for $(b,SNAPSHOT) of just this section (repeatable): actors, tree, names, \
+                 sched, mem, epochs.")
+  in
+  let json =
+    Arg.(value & flag & info ["json"]
+           ~doc:"Print each reply envelope as one line of JSON (default: indented).")
+  in
+  let socket =
+    Arg.(value & opt (some string) None & info ["socket"] ~docv:"PATH"
+           ~doc:"A local observe socket (the program's MARCH_OBSERVE_SOCKET) instead of the \
+                 forge.toml hosts.")
+  in
+  let env_name =
+    Arg.(value & opt string "" & info ["env"] ~docv:"NAME"
+           ~doc:"Only the [[hot-reload.env]] entries named NAME (default: every host in forge.toml).")
+  in
+  let run words sections json socket env =
+    handle (Cmd_observe.run ~socket ~env ~json ~words ~sections ())
+  in
+  Cmd.v (Cmd.info "observe"
+           ~doc:"Ask a running node what it is doing: its actors, supervision tree, names, \
+                 schedulers, memory and code epochs, from the node's read-only observe socket")
+    Term.(const run $ words $ sections $ json $ socket $ env_name)
+
 (* -------------------------------------------------------- forge hot-reload *)
 
 let hot_reload_keygen_cmd =
@@ -1794,7 +1828,7 @@ let () =
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
       licenses_cmd; tree_cmd; outdated_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
-      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; topology_cmd; cluster_cmd; host_cmd; completions_cmd; help_cmd ]
+      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; observe_cmd; topology_cmd; cluster_cmd; host_cmd; completions_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
