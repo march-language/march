@@ -78,6 +78,25 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Hot reload: the entry module's own top-level functions can be hot deployed.**
+  The compiler names them without the entry module's prefix, so with
+  `--hot-reload <EntryModule>` (what forge passes) a role body, hook or helper
+  written at the top of the entry file had no dispatch slot: `forge deploy hot`
+  answered "no hot-deployable changes" and the old code kept running. They are now
+  slots, chosen by where the compiler loaded them from; `main` stays off the
+  boundary, and so does the control plane a `[control]` topology splices into the
+  entry module (it runs the deploy), including its `CtlRespawner` actor. A
+  function's call to itself stays a direct call, so a recursive function costs
+  nothing extra in a `--hot-reload` build (dispatching it made `fib` 4.8x slower).
+- **Hot reload: a one-line edit to a topology app no longer plans a restart.** A
+  function's hot-reload identity hashed the numbers the compiler gives lambdas,
+  join points and type variables, which any edit renumbers, so every function that
+  merely referred to one (the generated `main`, `Front.start`, ...) looked changed,
+  and an unslotted `main` changing made `forge deploy` restart the pool. An edit
+  inside a role body's closure was planned as a restart too, because the manifest
+  never said which function builds the closure. Now a handler edit flags that
+  handler and its actor's dispatch only, a closure edit flags the function that
+  builds it, and both deploy as hot patches.
 - **A let-bound lambda that ignores or returns a `Float` argument no longer
   crashes compiled code.** A lambda bound with `let` and left generic, such as
   `let keep = fn (acc, x) -> acc`, freed the `Float` it was given when it

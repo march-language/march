@@ -57,13 +57,13 @@ let with_stdlib_files files f =
   Fun.protect f ~finally:(fun () -> TB.stdlib_source_files := saved)
 
 (** The in-process pipeline to IR, with `--hot-reload HrApp`. *)
-let hot_reload_ir (m : March_ast.Ast.module_) : string =
+let hot_reload_ir ?(cfg = HR.default_config "HrApp") (m : March_ast.Ast.module_) : string =
   let (_, type_map) = March_typecheck.Typecheck.check_module m in
   let tir = March_tir.Lower.lower_module ~type_map ~hot_reload:true m in
   let tir = March_tir.Mono.monomorphize tir in
   let tir = March_tir.Defun.defunctionalize tir in
   let tir = March_tir.Perceus.perceus tir in
-  March_tir.Llvm_emit.emit_module ~hot_reload:(Some (HR.default_config "HrApp")) tir
+  March_tir.Llvm_emit.emit_module ~hot_reload:(Some cfg) tir
 
 let actor_src ~mod_name ~actor = Printf.sprintf {|mod %s do
   actor %s do
@@ -136,6 +136,79 @@ end
       Alcotest.(check (list string)) "no slot at all" [] (slot_names ir);
       Alcotest.(check bool) "the reload server still starts" true
         (contains ~needle:"call void @march_reload_server_start(" ir))
+
+(* ── the entry file's own top-level fns (2026-10-01) ────────────────────── *)
+
+let entry_src = {|mod HrApp do
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Bump(k : Int) do { n: state.n + k } end
+  end
+
+  fn helper(x : Int) : Int do x + 1 end
+
+  pfn quiet(x : Int) : Int do x * 2 end
+
+  fn depth(n : Int) : Int do
+    if n <= 0 do 0 else 1 + depth(n - 1) end
+  end
+
+  fn main() do
+    let a = spawn(Counter)
+    send(a, Bump(helper(quiet(depth(3)))))
+  end
+end
+|}
+
+(** What bin/topology_gen.ml splices into a `[control]` app's entry module,
+    in miniature: declarations parsed under [HR.control_wiring_file]. *)
+let control_decls () =
+  (parse_as ~file:HR.control_wiring_file {|mod TopologyGenerated do
+  actor CtlR do
+    state { n : Int }
+    init { n: 0 }
+    on Tick(k : Int) do { n: state.n + k } end
+  end
+
+  pfn ctl_thing(x : Int) : Int do x + 3 end
+end
+|}).March_ast.Ast.mod_decls
+
+(** Lowering names the entry file's top-level fns bare (`helper`, not
+    `HrApp.helper`): with the prefix naming the entry module they are slots,
+    found by provenance, and a call to one from `main` dispatches. `main`
+    itself never is. Without [entry_top_level] (the prefix names some other
+    module) they are not. *)
+let test_entry_top_level_fns_are_slots () =
+  let m = parse_as ~file:"/virtual/app/hr_app.march" entry_src in
+  let on = { (HR.default_config "HrApp") with HR.entry_top_level = true } in
+  let ir = hot_reload_ir ~cfg:on m in
+  let slots = slot_names ir in
+  Alcotest.(check (list string)) "the slots" [ "Counter_dispatch"; "depth"; "helper"; "quiet" ] slots;
+  Alcotest.(check bool) "main calls helper through the dispatch table" true
+    (contains ~needle:"call ptr @march_dispatch_enter_unit(" ir);
+  (* `depth`'s non-tail self-call is direct (a running invocation finishes
+     on its own version, as a self-tail-call's loop always did), so the
+     only dispatching sites are main's calls: one per slot it calls. *)
+  let body_of name =
+    let start = Str.search_forward (Str.regexp_string ("define i64 @" ^ name ^ "(")) ir 0 in
+    String.sub ir start (Str.search_forward (Str.regexp "^}") ir start - start) in
+  Alcotest.(check bool) "depth calls itself directly" true (contains ~needle:"call i64 @depth(" (body_of "depth"));
+  Alcotest.(check bool) "depth does not dispatch" false
+    (contains ~needle:"@march_dispatch_enter_unit(" (body_of "depth"));
+  let off = hot_reload_ir (parse_as ~file:"/virtual/app/hr_app.march" entry_src) in
+  Alcotest.(check (list string)) "prefix not the entry module: actors only" [ "Counter_dispatch" ] (slot_names off)
+
+(** The control plane's wiring is spliced into the entry module but is
+    infrastructure: neither its functions nor its actors are slots. *)
+let test_control_wiring_not_slots () =
+  let m = parse_as ~file:"/virtual/app/hr_app.march" entry_src in
+  let m = { m with March_ast.Ast.mod_decls = m.March_ast.Ast.mod_decls @ control_decls () } in
+  let on = { (HR.default_config "HrApp") with HR.entry_top_level = true } in
+  let ir = hot_reload_ir ~cfg:on m in
+  Alcotest.(check bool) "the control actor is compiled" true (contains ~needle:"@CtlR_dispatch(" ir);
+  Alcotest.(check (list string)) "the app's slots only" [ "Counter_dispatch"; "depth"; "helper"; "quiet" ] (slot_names ir)
 
 (* ── driver: the real stdlib ───────────────────────────────────────────── *)
 
@@ -263,5 +336,7 @@ let tests =
      [ Alcotest.test_case "provenance, not the name, takes the slot" `Quick test_provenance_decides;
        Alcotest.test_case "a look-alike file and actor stay slots" `Quick test_look_alikes_stay_slots;
        Alcotest.test_case "zero slots: the reload server still starts" `Quick test_zero_slots_still_serve;
+       Alcotest.test_case "the entry file's top-level fns are slots, main is not" `Quick test_entry_top_level_fns_are_slots;
+       Alcotest.test_case "the spliced control plane gets no slot" `Quick test_control_wiring_not_slots;
        Alcotest.test_case "driver: a stdlib actor gets no slot" `Quick test_driver_stdlib_actor_no_slot;
        Alcotest.test_case "driver: manifest diff, app edit vs stdlib edit" `Slow test_manifest_diff ]) ]
