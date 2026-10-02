@@ -8366,7 +8366,10 @@ let test_int_tag_coerce_ir () =
     with Not_found -> false
   in
   (* Tag: shl i64 %*, 1 and or i64 %*, 1 should appear for i64→ptr boxing *)
-  Alcotest.(check bool) "tag: shl nsw i64 ... 1"  true (ir_has "shl nsw i64");
+  Alcotest.(check bool) "tag: shl i64 ... 1"  true (ir_has "shl i64");
+  (* A plain shl, never nsw: under lazy normalisation the tagged i64 may be
+     a bare arithmetic result ([Llvm_ctx.emit_tag_scalar]). *)
+  Alcotest.(check bool) "tag: never shl nsw"  false (ir_has "shl nsw i64");
   Alcotest.(check bool) "tag: or i64 ... 1"   true (ir_has "or i64");
   (* Untag: ashr i64 %*, 1 should appear for ptr→i64 unboxing *)
   Alcotest.(check bool) "untag: ashr i64"      true (ir_has "ashr i64");
@@ -8412,7 +8415,7 @@ let test_int_tag_wrapper_ir () =
      its scalar result so the ECallPtr dispatch can untag it on read. *)
   Alcotest.(check bool) "wrapper: define ptr return" true (ir_has "define ptr @inc_fn$clo_wrap");
   Alcotest.(check bool) "wrapper: i64 param"         true (ir_has "i64 %a0");
-  Alcotest.(check bool) "wrapper: tags scalar result (shl)" true (ir_has "shl nsw i64 %r, 1")
+  Alcotest.(check bool) "wrapper: tags scalar result (shl)" true (ir_has "shl i64 %r, 1")
 
 (** Regression: string_chars and string_from_chars must lower to C-runtime
     calls in the LLVM backend.  Before the fix, emit_atom fell through to the
@@ -12755,6 +12758,98 @@ let test_compiled_int_overflow_parity () =
                [true, true]"
     ()
 
+(** TRMC's EAllocHole on the FRESH-allocation path, after the allocator's free
+    lists have been filled with freed cons cells.  march_alloc is a plain
+    malloc (2026-10-02; it was a calloc), so a fresh hole cell's slot holds
+    the previous tenant's stale child pointer unless the emitter clears it --
+    the clearing store is pinned structurally by test_trmc's
+    "hole slot cleared at alloc" case; this is the end-to-end witness that
+    the fresh path (a SHARED scrutinee forces it: `shared` is held by main
+    across both copies, so the reuse token is never unique) builds the right
+    list after heap churn, with a drop (the shared scrutinee's decrc) landing
+    inside every hole's unfilled window.  Expected output is the
+    interpreter's. *)
+let test_compiled_trmc_hole_fresh_after_churn () =
+  assert_compiled_interp_parity
+    ~name:"march_trmc_hole_fresh"
+    ~src:"mod TrmcHoleFresh do\n\
+    \  needs IO.Console\n\
+    \  pfn churn(n : Int) : Int do\n\
+    \    let xs = List.map(List.range(0, n), fn i -> Cons(i, Cons(i + 1, Nil)))\n\
+    \    List.length(xs)\n\
+    \  end\n\
+    \  @[no_warn_recursion]\n\
+    \  pfn copy(xs : List(Int)) : List(Int) do\n\
+    \    match xs do\n\
+    \      Nil -> Nil\n\
+    \      Cons(h, t) -> Cons(h, copy(t))\n\
+    \    end\n\
+    \  end\n\
+    \  pfn sum(xs : List(Int)) : Int do List.fold_left(xs, 0, fn (a, b) -> a + b) end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let dropped = churn(40000)\n\
+    \    let shared = List.range(0, 20000)\n\
+    \    let a = copy(shared)\n\
+    \    let b = copy(shared)\n\
+    \    println([dropped, List.length(a), sum(a), List.length(b), sum(b), sum(shared)])\n\
+    \  end\n\
+     end\n"
+    ~expected:"[40000, 20000, 199990000, 20000, 199990000, 199990000]"
+    ()
+
+(** Lazy normalisation (2026-10-02, specs/progress/2026-10-02-lazy-int63-
+    normalisation.md): compiled `+ - *` / negate leave their i64 result BARE
+    and a user function returns it bare; the 63-bit reduction happens where
+    the value is observed.  Every observation point that is reached through
+    a bare value is exercised here with an operand that actually overflows,
+    so a missed point shows up as the raw 64-bit value: a caller's compare
+    and int-literal match on a bare call result, the checked division
+    helpers, a right shift, popcount, int_to_string, int_to_float, a
+    NativeArray store (C memory), a closure result crossing the C wire ABI
+    (NativeArray.map_int) and the C key sort (Array.sort_by_key, where raw
+    keys would sort the two elements the other way round), an erased slot
+    (a list cell), and the i64 case-join slot ([pick]). *)
+let test_compiled_int_overflow_lazy_norm_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_int_overflow_lazy"
+    ~src:"mod IntOverflowLazy do\n\
+    \  needs IO.Console\n\
+    \  fn big(x : Int) : Int do x + x end\n\
+    \  fn big2(x : Int) : Int do x + x + 2 end\n\
+    \  fn pick(b : Bool, x : Int) : Int do if b do x + x else x - x end end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let arr = NativeArray.from_list_int([4611686018427387903, 1, 2, 0])\n\
+    \    let mx = NativeArray.get_int(arr, 0)\n\
+    \    let one = NativeArray.get_int(arr, 1)\n\
+    \    let two = NativeArray.get_int(arr, 2)\n\
+    \    let b = big(mx)\n\
+    \    println([b, 0 - big(mx), b / two, b % two, int_shr(b, one), int_shl(b, one), int_popcount(big(mx))])\n\
+    \    println([b == -2, big(mx) < 0, big(mx) < big(mx) + one, int_to_float(big(mx)) == -2.0, pick(true, mx) == b])\n\
+    \    let w = match big2(mx) do\n\
+    \      0 -> \"wrapped\"\n\
+    \      _ -> \"raw\"\n\
+    \    end\n\
+    \    println(w)\n\
+    \    println(int_to_string(big(mx)))\n\
+    \    println([pick(true, mx) + one, pick(false, mx), big2(mx)])\n\
+    \    let arr2 = NativeArray.set_int(arr, 3, big(mx))\n\
+    \    println(NativeArray.get_int(arr2, 3))\n\
+    \    println(NativeArray.get_int(NativeArray.map_int(arr, fn x -> x + x), 0))\n\
+    \    println(Array.to_list(Array.sort_by_key(Array.from_list([mx, one]), fn x -> x + x)))\n\
+    \    println([big(mx)])\n\
+    \  end\n\
+     end\n"
+    ~expected:"[-2, 2, -1, 0, -1, -4, 62]\n\
+               [true, true, true, true, true]\n\
+               wrapped\n\
+               -2\n\
+               [-1, 0, 0]\n\
+               -2\n\
+               -2\n\
+               [4611686018427387903, 1]\n\
+               [-2]"
+    ()
+
 (** A shift count outside [0, 62] (and a negative int_pow exponent) panics
     on both backends with the interpreter's message.  Compiled, a non-literal
     count goes through march_checked_shl; pre-fix it was a raw LLVM `shl`,
@@ -16598,6 +16693,10 @@ let codegen_suites =
             test_compiled_int_mod_euclid_parity;
           Alcotest.test_case "compiled Int is 63-bit and wraps (overflow edge parity)" `Quick
             test_compiled_int_overflow_parity;
+          Alcotest.test_case "compiled Int lazy 63-bit normalisation: every observation point (overflow parity)" `Quick
+            test_compiled_int_overflow_lazy_norm_parity;
+          Alcotest.test_case "compiled TRMC hole fresh path after heap churn (march_alloc is malloc)" `Quick
+            test_compiled_trmc_hole_fresh_after_churn;
           Alcotest.test_case "compiled int_shl/int_shr/int_pow range panics match interpreter" `Quick
             test_compiled_int_shift_range_panics;
           Alcotest.test_case "compiled IOList deep-tree flatten parity (stack-safe)" `Slow

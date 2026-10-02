@@ -1355,29 +1355,59 @@ let deploy_term =
                  clearing their persisted patch stacks (also automatic when a node's stack is longer than \
                  forge.toml's [hot-reload] compact_after).")
   in
-  let run env plan grant_caps yes canary timeout compact =
-    match Project.load () with
-    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
-    | Ok proj ->
-      if plan then
-        match Cmd_deploy.plan_only ~proj ~env ~grant_caps ~compact () with
-        | Ok text -> print_string text
-        | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
-      else
-        let opts = { Cmd_deploy.default_opts with yes; grant_caps; canary; timeout_ms = timeout; compact } in
-        match Cmd_deploy.run ~proj ~env ~opts () with
-        | Ok msg -> print_endline msg
-        | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  let via =
+    Arg.(value & opt (enum [ ("auto", `Auto); ("cluster", `Cluster); ("ssh", `Ssh) ]) `Auto & info ["via"] ~docv:"BACKEND"
+           ~doc:"How to reach the nodes: $(b,cluster) sends one signed release to the in-cluster control plane and \
+                 follows it (restart-class steps still go over ssh); $(b,ssh) deploys host by host over ssh, the \
+                 break-glass path on a cluster that runs the control plane; $(b,auto) (the default) is $(b,cluster) \
+                 when the topology has a [control] section, else $(b,ssh). FORGE_CONTROL_ENDPOINTS=host:port,... \
+                 overrides where the control API is reached.")
   in
-  Term.(const run $ env_arg $ plan $ grant_cap $ yes $ canary $ timeout $ compact)
+  let status =
+    Arg.(value & flag & info ["status"]
+           ~doc:"Cluster backend: show the leader's view of the newest release (its state, the step it is on, each \
+                 node's report) and change nothing.")
+  in
+  let audit =
+    Arg.(value & opt ~vopt:(Some 0) (some int) None & info ["audit"] ~docv:"N"
+           ~doc:"Cluster backend: show the leader's audit log (every release offered, accepted or refused, every \
+                 step ordered and answered), the last N lines, or all of it; change nothing.")
+  in
+  let follow =
+    Arg.(value & opt float 1800. & info ["follow"] ~docv:"SECONDS"
+           ~doc:"Cluster backend: how long to follow a release before handing it back to the leader \
+                 (default: 1800; the release keeps going, and $(b,--status) shows it).")
+  in
+  let run env plan grant_caps yes canary timeout compact via status audit follow =
+    let fail m = Printf.eprintf "error: %s\n%!" m; exit 1 in
+    match Project.load () with
+    | Error m -> fail m
+    | Ok proj ->
+      if status then
+        (match Cmd_deploy.status_text ~proj ~env with Ok t -> print_string t | Error m -> fail m)
+      else match audit with
+        | Some n -> (match Cmd_deploy.audit_text ~proj ~env ~n with Ok t -> print_string t | Error m -> fail m)
+        | None ->
+          let opts = { Cmd_deploy.default_opts with yes; grant_caps; canary; timeout_ms = timeout; compact; follow_s = follow } in
+          if plan then
+            match Cmd_deploy.plan_only ~via ~opts ~proj ~env ~grant_caps ~compact () with
+            | Ok text -> print_string text
+            | Error m -> fail m
+          else
+            match Cmd_deploy.run ~via ~proj ~env ~opts () with
+            | Ok msg -> print_endline msg
+            | Error m -> fail m
+  in
+  Term.(const run $ env_arg $ plan $ grant_cap $ yes $ canary $ timeout $ compact $ via $ status $ audit $ follow)
 
 let deploy_cmd =
   Cmd.group ~default:deploy_term
     (Cmd.info "deploy"
-       ~doc:"Deploy a topology app to an environment's ssh hosts, choosing per pool between a hot \
+       ~doc:"Deploy a topology app to an environment, choosing per pool between a hot \
              patch, a hot patch with migration or a protocol drain, a restart, and a topology push \
-             ($(b,--plan) shows the choice); or, with $(b,hot), hot-deploy changed functions to a \
-             [hot-reload] server or fleet")
+             ($(b,--plan) shows the choice): over ssh, or as one signed release through the in-cluster \
+             control plane when the topology has a [control] section; or, with $(b,hot), hot-deploy \
+             changed functions to a [hot-reload] server or fleet")
     [deploy_hot_cmd]
 
 (* -------------------------------------------------------- forge hot-reload *)

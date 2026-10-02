@@ -11524,3 +11524,88 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff session/topology_placement.expected topology_placement.out)))
+
+; ── Aggregate drop: boxed Float / niche Option / erased fields (2026-10-02) ──
+; A dying tuple, List(Float) cell, Option-holding tuple, and a frame tuple
+; destructured in a polymorphic local fn must give back everything they own.
+; live_allocs() deltas printed as booleans; RED on the shallow drop (all four
+; legs "flat: false").
+(rule
+ (targets native_aggregate_drop_erased_fields native_aggregate_drop_erased_fields.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/aggregate_drop_erased_fields.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_aggregate_drop_erased_fields
+        native/aggregate_drop_erased_fields.march)
+   (with-stdout-to native_aggregate_drop_erased_fields.out
+        (system "./native_aggregate_drop_erased_fields")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/aggregate_drop_erased_fields.expected native_aggregate_drop_erased_fields.out)))
+; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
+; A generic named fn passed as a `Float -> Float -> Float` closure: the
+; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),
+; not unbox them per the use-site type.  The .expected is the interpreter's
+; output (6. / 3. / 9.); the compiled binary printed 3. for the first line.
+(rule
+ (targets native_generic_fn_float_closure native_generic_fn_float_closure.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/generic_fn_float_closure.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_generic_fn_float_closure
+        native/generic_fn_float_closure.march)
+   (with-stdout-to native_generic_fn_float_closure.out
+        (system "./native_generic_fn_float_closure")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/generic_fn_float_closure.expected native_generic_fn_float_closure.out)))
+
+; A self tail call inside a nested-pattern arm (`Cons(a, Cons(b, rest))`) must
+; loop: 200,000 elements overflow the 1 MiB green-thread stack (SIGBUS in the
+; guard page) when the single-site join point is left as a closure between the
+; function and its own tail call.
+(rule
+ (targets native_jp_self_tail_loop native_jp_self_tail_loop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/jp_self_tail_loop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_jp_self_tail_loop
+        native/jp_self_tail_loop.march)
+   (with-stdout-to native_jp_self_tail_loop.out
+        (system "./native_jp_self_tail_loop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/jp_self_tail_loop.expected native_jp_self_tail_loop.out)))
+
+; Leak guard for a nested pattern with a scrutinee-using default arm: the
+; inlined join point (Perceus must dup the fields the arm reads before the
+; scrutinee's deep release) and the kept multi-site join-point closure (its
+; dead release must be deep).  live_allocs() deltas printed as booleans.
+(rule
+ (targets native_jp_dead_closure_release native_jp_dead_closure_release.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/jp_dead_closure_release.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_jp_dead_closure_release
+        native/jp_dead_closure_release.march)
+   (with-stdout-to native_jp_dead_closure_release.out
+        (system "./native_jp_dead_closure_release")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/jp_dead_closure_release.expected native_jp_dead_closure_release.out)))

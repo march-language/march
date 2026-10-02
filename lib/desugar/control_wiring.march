@@ -727,25 +727,106 @@ pfn ctl_put_leader(l : Control.CtlLeader) : () do
   Vault.set(ctl_leaders(), "leader", ctl_encode_leader(l))
 end
 
--- Every member alive, by name, as the cluster knows them.
-pfn ctl_alive_names(node : Cap(ClusterNode.Live)) : List(String) do
-  List.filter_map(ClusterNode.all_members(node), fn m ->
-    match m.status do
-      Membership.Dead -> None
-      _ -> Some(m.name)
-    end)
+-- ── the leader's audit log (design section 9) ──────────────────────────────
+--
+-- `<dir>/audit.jsonl` on every candidate: each release offered to a leader
+-- (accepted, or refused and why), each order a leader sends, each answer, and
+-- each release's halt or completion (`Control.audit_*` writes the lines). The
+-- leader appends here and queues the line; `ctl_audit_copier` appends the
+-- queue on the other reachable candidates (`AUDIT_COPY`), so the file outlives
+-- a leader change. The control API's `AUDIT [n]` answers this candidate's file.
+
+pfn ctl_audit_file() : String do ctl_dir() ++ "/audit.jsonl" end
+
+pfn ctl_audit_append(text : String) : () do
+  let _ = Dir.mkdir_p(ctl_dir())
+  let _ = File.append(ctl_audit_file(), text)
+  ()
+end
+
+pfn ctl_audit(line : String) : () do
+  ctl_audit_append(line)
+  if ctl_lock("audit", 200) do
+    Vault.set(ctl_memory(), "audit_q", Vault.get_or(ctl_memory(), "audit_q", "") ++ line)
+    ctl_unlock("audit")
+  else () end
+end
+
+-- A candidate's copier: every second, the lines queued since are appended on
+-- every other reachable candidate. A candidate that does not answer misses
+-- them (as it misses a release copy).
+pfn ctl_audit_copier(node : Cap(ClusterNode.Live), port : Int) : () do
+  sleep_ms(1000)
+  let batch = if ctl_lock("audit", 200) do
+    let q = Vault.get_or(ctl_memory(), "audit_q", "")
+    if q != "" do Vault.set(ctl_memory(), "audit_q", "") else () end
+    ctl_unlock("audit")
+    q
+  else "" end
+  if batch != "" do
+    List.each(ctl_others(node, port), fn hp ->
+      let (host, cport) = hp
+      let _ = ctl_call(host, cport, "AUDIT_COPY " ++ int_to_string(String.byte_size(batch)) ++ "\n" ++ batch)
+      ())
+  else () end
+  ctl_audit_copier(node, port)
+end
+
+-- The last [n] lines of this candidate's audit log (all when [n] is 0), as
+-- the control API answers `AUDIT`.
+pfn ctl_audit_answer(n : Int) : String do
+  let lines = match File.read(ctl_audit_file()) do
+    Ok(t) -> List.filter(String.split(t, "\n"), fn x -> x != "")
+    Err(_) -> Nil
+  end
+  let total = List.length(lines)
+  let keep = if n > 0 && n < total do List.drop(lines, total - n) else lines end
+  "AUDIT " ++ int_to_string(List.length(keep)) ++ "\n" ++ String.join(List.map(keep, fn x -> x ++ "\n"), "") ++ "END\n"
 end
 
 pfn ctl_members_of(l : Control.CtlLeader) : List(Control.CtlMember) do
   List.map(l.obs, fn o -> { node: o.report.node, pools: ctl_words(o.report.pools) })
 end
 
--- The leader passes only once every live member has reported: a node that has
+-- The leader passes only once every live agent has reported: a node that has
 -- not said hello yet may belong to a step's pool, and the executor would
--- otherwise call the step done without it.
+-- otherwise call the step done without it. An agent marks itself
+-- (`ctl_mark_agent`) and is waited for until it reports. A member with no
+-- mark is waited for only for a grace period from when this leader first saw
+-- it (its mark may not have reached us yet); after that it is taken to run no
+-- agent (a client joined to the cluster, an upgrade test's traffic), which
+-- would otherwise hold every rollout forever.
 pfn ctl_ready(node : Cap(ClusterNode.Live), l : Control.CtlLeader) : Bool do
   let seen = List.map(l.obs, fn o -> o.report.node)
-  List.all(ctl_alive_names(node), fn n -> List.member(seen, n))
+  let agents = Topology.marked("Ctl.Agent", ClusterNode.names(node))
+  let now = unix_time_ms()
+  let grace = ctl_cfg_int("agent_grace_ms", 20000)
+  List.all(List.filter(ClusterNode.all_members(node), fn m ->
+    match m.status do
+      Membership.Dead -> false
+      _ -> not(List.member(seen, m.name))
+    end), fn m ->
+    if List.member(agents, m.node_id) do false
+    else
+      let key = "first_seen:" ++ m.name
+      let first = match string_to_int(Vault.get_or(ctl_memory(), key, "")) do
+        Some(t) -> t
+        None ->
+          Vault.set(ctl_memory(), key, int_to_string(now))
+          now
+      end
+      now - first >= grace
+    end)
+end
+
+-- Mark this node as running the Agent (the name `ctl_ready` looks for),
+-- bound to an actor that lives as long as the node.
+pfn ctl_mark_agent(node : Cap(ClusterNode.Live), pid : Pid(CtlRespawnerState)) : () do
+  let name = Topology.marker("Ctl.Agent", ClusterNode.node_id(node))
+  if ClusterNode.lookup(node, name) == None do
+    let _ = ClusterNode.register(node, name, pid)
+    ()
+  else () end
 end
 
 pfn ctl_next_for(node : Cap(ClusterNode.Live), name : String) : Control.CtlNext do
@@ -763,10 +844,13 @@ pfn ctl_next_for(node : Cap(ClusterNode.Live), name : String) : Control.CtlNext 
     let (l2, d) = verdict
     let _ = if got do ctl_put_leader(l2) else () end
     if got do ctl_unlock("leader") else () end
+    if got do ctl_audit_end(node, l2, d) else () end
     match d do
       Some(Control.RolloutApply(_, os)) ->
         match List.find(os, fn o -> o.node == name) do
-          Some(o) -> Control.NextOrder(o)
+          Some(o) ->
+            ctl_audit(Control.audit_order(unix_time_ms(), Topology.node_name(node), o))
+            Control.NextOrder(o)
           None ->
             sleep_ms(ctl_poll_ms())
             Control.NextPoll
@@ -778,6 +862,24 @@ pfn ctl_next_for(node : Cap(ClusterNode.Live), name : String) : Control.CtlNext 
   end end
 end
 
+-- A release's halt or completion, audited once per release (the verdict is
+-- re-derived on every pass).
+pfn ctl_audit_end(node : Cap(ClusterNode.Live), l : Control.CtlLeader, d : Option(Control.CtlDecision)) : () do
+  match (l.release, d) do
+    (Some(r), Some(dd)) ->
+      match Control.audit_decision(unix_time_ms(), Topology.node_name(node), r.seq, dd) do
+        Some(line) ->
+          let key = "audited_end:" ++ int_to_string(r.seq)
+          if Vault.get(ctl_memory(), key) == None do
+            Vault.set(ctl_memory(), key, "1")
+            ctl_audit(line)
+          else () end
+        None -> ()
+      end
+    _ -> ()
+  end
+end
+
 pfn ctl_leader_ops(node : Cap(ClusterNode.Live)) : Control.ControlOps do
   { report: fn rep ->
       let got = ctl_lock("leader", 500)
@@ -786,6 +888,7 @@ pfn ctl_leader_ops(node : Cap(ClusterNode.Live)) : Control.ControlOps do
         ctl_unlock("leader")
       else () end,
     stepped: fn res ->
+      let _ = ctl_audit(Control.audit_step(unix_time_ms(), Topology.node_name(node), res))
       let got = ctl_lock("leader", 500)
       if got do
         ctl_put_leader(Control.leader_result(ctl_leader_state(), res, unix_time_ms()))
@@ -804,9 +907,10 @@ end
 -- ── the control API (design section 9) ──────────────────────────────────────
 --
 -- A TCP line protocol on every candidate: the reload socket's unsigned verbs,
--- and `RELEASE <size>` (a release document follows), `STATUS`, `LEADER` and the
--- candidates' own `RELEASE_COPY <size>`. A standby forwards `RELEASE` and
--- `STATUS` to the leader, so forge can talk to any candidate.
+-- and `RELEASE <size>` (a release document follows), `STATUS`, `LEADER`,
+-- `AUDIT [n]` (this candidate's audit log) and the candidates' own
+-- `RELEASE_COPY <size>` and `AUDIT_COPY <size>`. A standby forwards `RELEASE`
+-- and `STATUS` to the leader, so forge can talk to any candidate.
 
 pfn ctl_read_line(fd : Int, acc : String, n : Int) : Option(String) do
   if n > 65536 do None
@@ -908,12 +1012,18 @@ end
 
 -- The leader accepts a release: signature, the compare-and-set on `parent`
 -- (`Control.leader_release`), durable on this node and on every reachable
--- candidate before the answer.
+-- candidate before the answer. Every release offered is audited, accepted or
+-- refused.
 pfn ctl_release(node : Cap(ClusterNode.Live), port : Int, text : String) : String do
+  let me = Topology.node_name(node)
   match Control.parse(text) do
-    Err(e) -> "ERR bad_release " ++ e
+    Err(e) ->
+      ctl_audit(Control.audit_release(unix_time_ms(), me, 0, "-", "err_parse", e))
+      "ERR bad_release " ++ e
     Ok(r) ->
-      if not(ctl_signed(r)) do "ERR bad_signature"
+      if not(ctl_signed(r)) do
+        ctl_audit(Control.audit_release(unix_time_ms(), me, r.seq, Control.digest(r), "err_sig", "bad signature"))
+        "ERR bad_signature"
       else if not(ctl_lock("release", 1000)) do "ERR busy"
       else
         -- What is needed of the release after the leader takes it is read
@@ -925,16 +1035,22 @@ pfn ctl_release(node : Cap(ClusterNode.Live), port : Int, text : String) : Strin
         ctl_ensure_loaded()
         let l = ctl_leader_state()
         let out = match Control.leader_release(l, r) do
-          Err(e) -> "ERR " ++ e
+          Err(e) ->
+            ctl_audit(Control.audit_release(unix_time_ms(), me, seq, digest, Control.audit_refusal(e), e))
+            "ERR " ++ e
           Ok(l2) ->
-            if not(ctl_store_release(seq, body)) do "ERR could_not_store"
+            if not(ctl_store_release(seq, body)) do
+              ctl_audit(Control.audit_release(unix_time_ms(), me, seq, digest, "err_store", "could not store the release"))
+              "ERR could_not_store"
             else
               let why = ctl_replicate(node, port, body, hashes)
               if why != "" do
                 ctl_forget_release(seq)
+                ctl_audit(Control.audit_release(unix_time_ms(), me, seq, digest, "err_replicate", why))
                 "ERR could_not_replicate " ++ why
               else
                 ctl_put_leader(l2)
+                ctl_audit(Control.audit_release(unix_time_ms(), me, seq, digest, "ok", ""))
                 "OK " ++ int_to_string(seq) ++ " " ++ digest
               end
             end
@@ -1126,6 +1242,22 @@ pfn ctl_api_request(node : Cap(ClusterNode.Live), port : Int, fd : Int) : Bool d
             Err(_) -> ctl_reply(fd, "ERR missing\n")
           end end
           true
+        "AUDIT" ->
+          ctl_reply(fd, ctl_audit_answer(arg(1)))
+          true
+        "AUDIT_COPY" ->
+          -- `AUDIT_COPY <size>`: lines a leader audited, to append here.
+          let size = arg(1)
+          if size <= 0 || size > 1048576 do
+            ctl_reply(fd, "ERR bad_size\n")
+            true
+          else match tcp_recv_exact(fd, size) do
+            Err(_) -> false
+            Ok(b) ->
+              ctl_audit_append(Bytes.to_string(b))
+              ctl_reply(fd, "OK\n")
+              true
+          end end
         "LEADER" ->
           ctl_reply(fd, (if ctl_is_leader(node) do "LEADER yes " else "LEADER no " end) ++ Topology.node_name(node) ++ "\n")
           true
@@ -1202,7 +1334,10 @@ fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : 
   -- it names a file (it may instead hold the certificate itself).
   let cert_env = Env.get("MARCH_NODE_CERT", "")
   Vault.set(m, "cfg:cert_file", if cert_env != "" && File.exists(cert_env) do cert_env else "" end)
-  Vault.set(ctl_respawners(), "r", spawn(CtlRespawner))
+  Vault.set(m, "cfg:agent_grace_ms", Env.get("MARCH_CONTROL_AGENT_GRACE_MS", "20000"))
+  let respawner = spawn(CtlRespawner)
+  Vault.set(ctl_respawners(), "r", respawner)
+  ctl_mark_agent(node, respawner)
   let _ = task_spawn(fn _ -> ctl_agent_loop(io, node, 250))
   let _ = task_spawn(fn _ -> ctl_prefetch_loop(io, node))
   let offset = ctl_cfg_int("port_offset", 0)
@@ -1211,6 +1346,7 @@ fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : 
     match tcp_listen(listen_port) do
       Ok(lfd) ->
         let _ = task_spawn(fn _ -> ctl_api_accept(node, port, lfd))
+        let _ = task_spawn(fn _ -> ctl_audit_copier(node, port))
         println("control: API listening on port " ++ int_to_string(listen_port))
       Err(e) -> println("control: cannot listen on port " ++ int_to_string(listen_port) ++ ": " ++ e)
     end

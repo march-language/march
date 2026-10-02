@@ -52,6 +52,8 @@ native_actor_stop_drains_mailbox: coverage audit (user + stdlib): 123 enforced, 
 native_actor_stop_drains_mailbox: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_stop_tree: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_actor_stop_tree: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_aggregate_drop_erased_fields: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_aggregate_drop_erased_fields: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_aggregate_param_field_alias: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_aggregate_param_field_alias: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_array_sort_by: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -184,6 +186,8 @@ native_foreign_actor_http: coverage audit (user + stdlib): 123 enforced, 0 inert
 native_foreign_actor_http: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_from_json_dispatch: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_from_json_dispatch: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_generic_fn_float_closure: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_generic_fn_float_closure: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_generic_fn_to_string_specialize: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_generic_fn_to_string_specialize: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_get_actor_field_direct: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -218,6 +222,10 @@ native_iface_method_collision: coverage audit (user + stdlib): 123 enforced, 0 i
 native_iface_method_collision: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_interpreter_only_builtins_lowered: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_interpreter_only_builtins_lowered: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_jp_dead_closure_release: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_jp_dead_closure_release: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_jp_self_tail_loop: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_jp_self_tail_loop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_canvas_available: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_js_canvas_available: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_closure_reuse_apply_slot: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced

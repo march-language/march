@@ -9,6 +9,15 @@ no root keys in the control plane, restarts through the process backend, certifi
 issuance offline, `count = 1` leader with no strict lease. 12-pre is done:
 [../progress/2026-09-28-dd-step12-pre-sequenced-releases.md](../progress/2026-09-28-dd-step12-pre-sequenced-releases.md).
 
+**Status (2026-10-01).** 12a's control plane is in the cluster and `forge deploy` uses it:
+with a `[control]` section, a hot deploy is one signed release sent to any candidate and
+followed to its end, with no ssh; restart-class steps still go over ssh (D38), and the leader
+keeps an audit log on the candidates
+([../progress/2026-10-01-dd-step12a-forge-cluster-backend.md](../progress/2026-10-01-dd-step12a-forge-cluster-backend.md)).
+What 12a still lacks is in [2026-09-28-dd-step12a-control-wiring.md](2026-09-28-dd-step12a-control-wiring.md);
+12b (certificates and revocations through releases, live rotation) and 12c (self-restart,
+an external lease) are not started here.
+
 **What.** An `@[endpoints]` protocol between `Control` and `Agent` roles; the `Agent`
 body wraps the reload-socket verbs; `reconcile.ml` gets a `cluster` backend; the
 control plane issues certificates (step 11) and holds a leader lease.

@@ -11,7 +11,7 @@
 #include <ctype.h>
 #include <stdatomic.h>
 #define MARCH_ALLOC_DEFINE_SHIMS   /* the one TU that defines march_free_any / march_realloc_any */
-#include "march_alloc.h"   /* march_obj_calloc; free()/realloc() routing when mimalloc is on */
+#include "march_alloc.h"   /* march_obj_malloc; free()/realloc() routing when mimalloc is on */
 
 /* Defined next to march_actor_broadcast_migrate; used by the actor receive
  * loop and march_actor_msg_dispose, both of which precede it in this file. */
@@ -432,8 +432,15 @@ static inline void march_run_resource_dtor(void *p) {
     }
 }
 
+/* NOT zeroing (march_obj_malloc, 2026-10-02 -- was calloc).  The header is
+ * written here; the payload is whatever the allocator's previous tenant left
+ * and is the CALLER's to write, every word, before the object is published,
+ * read, or RC-walked.  Every caller was audited for that
+ * (specs/progress/2026-10-02-march-alloc-malloc.md); the TRMC hole store in
+ * lib/tir/llvm_emit_alloc.ml and the task-spawn stores below are the ones
+ * that used to lean on the zeroing. */
 void *march_alloc(int64_t sz) {
-    void *p = march_obj_calloc((size_t)sz);
+    void *p = march_obj_malloc((size_t)sz);
     if (!p) {
         march_debug_report_oom("march_alloc", sz);
         fputs("march: out of memory\n", stderr); exit(1);
@@ -7030,6 +7037,10 @@ void *march_task_spawn_thunk(void *clo_ptr) {
      * + in-scheduler waiter — see task_wait_done). */
     int64_t *task = (int64_t *)march_alloc(48);
     if (task) ((march_hdr *)task)->tag = MARCH_TASK_TAG;  /* see march_run_resource_dtor */
+    /* march_alloc does not zero (2026-10-02): proc handle, result, done flag
+     * and waiter all start at 0 by these stores, which happen BEFORE the
+     * spawn publishes the object -- see the race note below. */
+    if (task) { task[2] = 0; task[3] = 0; task[4] = 0; task[5] = 0; }
     /* Extra RC hold for the trampoline's wa->task raw pointer.  The caller
      * owns RC=1; this bumps to RC=2 so a fire-and-forget drop (RC→1) doesn't
      * free the object before the trampoline writes the result. */
@@ -7045,9 +7056,9 @@ void *march_task_spawn_thunk(void *clo_ptr) {
      * therefore races the trampoline with no synchronization between them and
      * can clobber a completed result/done flag back to zero (confirmed by
      * ThreadSanitizer: march_runtime.c:1833 write vs this site).  There is
-     * nothing to write: march_alloc() zero-initialises the whole object (so
-     * result/done start at 0) and the trampoline records task[2] itself as its
-     * first action (see march_thunk_trampoline).  Leave the task untouched. */
+     * nothing left to write: the four words were zeroed above, before the
+     * spawn, and the trampoline records task[2] itself as its first action
+     * (see march_thunk_trampoline).  Leave the task untouched from here. */
     (void)march_sched_spawn(march_thunk_trampoline, wa);
     return (void *)task;
 }
@@ -7097,6 +7108,9 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
     march_ensure_sched_started();
     int64_t *task = (int64_t *)march_alloc(48);  /* see march_task_spawn_thunk layout */
     if (task) ((march_hdr *)task)->tag = MARCH_TASK_TAG;
+    /* Zero the four payload words before publishing -- march_alloc does not
+     * (see march_task_spawn_thunk). */
+    if (task) { task[2] = 0; task[3] = 0; task[4] = 0; task[5] = 0; }
     if (task) march_incrc(task);  /* trampoline's RC hold — see march_task_spawn_thunk */
     march_thunk_arg *wa = (march_thunk_arg *)malloc(sizeof(march_thunk_arg));
     if (!wa) { return (void *)task; }
@@ -7104,8 +7118,8 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
     wa->task = task;
     march_cancel_token *tok = (march_cancel_token *)tok_ptr;
     /* Publish the proc LAST — see march_task_spawn_thunk for why storing into
-     * the task object after the spawn races the trampoline.  march_alloc zeroed
-     * the object and the trampoline records task[2] itself. */
+     * the task object after the spawn races the trampoline.  The payload was
+     * zeroed above and the trampoline records task[2] itself. */
     (void)march_sched_spawn_with_cancel(march_thunk_trampoline, wa, tok);
     return (void *)task;
 }
@@ -10977,6 +10991,12 @@ static void *native_arr_alloc(int64_t len, int64_t elem_size, uint8_t kind) {
     }
     ((march_hdr *)arr)->tag = MARCH_NATIVE_ARR_TAG;
     *(int64_t *)((char *)arr + 16) = len;
+    /* Whole kind word: march_alloc does not zero, and only byte 24 carries
+     * the kind -- bytes 25..31 are header padding nothing may read as
+     * garbage.  The element body (NATIVE_ARR_HDR..) is the caller's to fill;
+     * every *_alloc_raw consumer (the inline nmap loops, the SIMD set copy
+     * path, Bytes->u8) writes all `len` elements. */
+    *(int64_t *)((char *)arr + 24) = 0;
     *(uint8_t *)((char *)arr + 24) = kind;
     return arr;
 }
@@ -12806,7 +12826,9 @@ void *ring_buf_make(int64_t cap) {
     ((march_hdr *)cell)->tag = MARCH_RESOURCE_TAG;
     *(void **)((char *)cell + 16) = r;
     *(void (**)(void *))((char *)cell + 24) = march_ring_dtor;
-    /* type_id@32 stays 0; ring cells never go through march_resource_get. */
+    /* type_id@32 = 0, stored explicitly (march_alloc does not zero); ring
+     * cells never go through march_resource_get. */
+    *(int64_t *)((char *)cell + 32) = 0;
     return cell;
 }
 

@@ -28,12 +28,15 @@ mod RemoteCall do
   -- `Forbidden` = certificate mode (step 11b), and this node's or the peer's
   -- certificate lacks `raw_send`: RemoteCall is a raw primitive.
   type CallError = DeadlineExceeded | NoConnection | RemoteExit(String) | TypeMismatch | VersionSkew | NoTarget | Forbidden
+  derive Eq for CallError
 
   -- The CAS admission decision for an inbound call against the local target.
   type Verdict = Accept | Reject(CallError)
+  derive Eq for Verdict
 
   -- A call result: the MessagePack-encoded return value, or a failure.
   type ReplyResult = Returned(List(Int)) | Failed(CallError)
+  derive Eq for ReplyResult
 
   -- A framed call. `args` is the MessagePack-encoded argument tuple; `reply_to`
   -- is the caller's global Pid; `deadline` is an absolute time (ms) after which
@@ -41,6 +44,7 @@ mod RemoteCall do
   type CallRequest = { fref : RemoteRef, args : List(Int), reply_to : Pid, deadline : Int, correlation : Int }
 
   type CallReply = { correlation : Int, result : ReplyResult }
+  derive Eq for CallReply
 
   -- ── Constructors ──────────────────────────────────────────────────────────
 
