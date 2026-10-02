@@ -1,0 +1,118 @@
+-- Leak guard: building a Seq and draining it must leave live_allocs() where it
+-- found it.  Measured before the fix, --compile --opt 2, per iteration:
+--   Seq.count(Seq.from_list(["a"]))              3 objects
+--   Seq.count(Seq.from_string_lines("a\n"))      5 objects
+--   Seq.count(Seq.map(Seq.from_list(..), f))     5 objects
+--   Seq.count(Seq.filter(Seq.from_list(..), p))  5 objects
+-- Three independent defects stacked up behind them:
+--   1. Drop.rewrite_apply_clo_drop left a capture that the apply fn's tail call
+--      forwards (`fn(acc, f) -> go(xs, acc, f)`) unreleased when the
+--      environment died: `go` and the list leaked.
+--   2. FBIP turned the consumed Seq cell into a capture-free closure
+--      (`Seq.count`'s `fn(n, _) -> n + 1`), un-making the immortal static
+--      closure: a real refcounted cell nothing releases.
+--   3. Borrow.closure_escapes did not see a closure stored by `reuse x as
+--      Seq(clo)`, so Seq.map/filter/concat closure types were declined by the
+--      owning-environment gate and their captures never released.
+-- from_string_lines additionally leaked through a dead join-point closure:
+-- a match fall-through (`rest -> Cons(h, rest)`) allocates its closure at the
+-- head of the Nil arm, which never calls it, and dropped it shallowly.
+-- specs/progress/2026-09-30-seq-constructors-leak-their-closure.md
+--
+-- SIGNAL: live_allocs() deltas, printed as booleans against a bound well below
+-- one object per iteration, so the golden is deterministic.  Each leg's result
+-- is printed so the optimizer cannot delete the loop.
+mod Main do
+  needs IO.Console
+
+  pfn leg_from_list(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else leg_from_list(i + 1, n, acc + Seq.count(Seq.from_list(["a"]))) end
+  end
+
+  pfn leg_lines(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else leg_lines(i + 1, n, acc + Seq.count(Seq.from_string_lines("a\nb\n"))) end
+  end
+
+  pfn leg_fold(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else leg_fold(i + 1, n,
+                  acc + Seq.fold(Seq.from_list([1, 2, 3]), 0, fn (a, x) -> a + x)) end
+  end
+
+  pfn leg_map(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else leg_map(i + 1, n,
+                 acc + Seq.count(Seq.map(Seq.from_list([1, 2, 3]), fn x -> x + 1))) end
+  end
+
+  pfn leg_filter(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else leg_filter(i + 1, n,
+                    acc + Seq.count(Seq.filter(Seq.from_list([1, 2, 3]), fn x -> x > 1))) end
+  end
+
+  pfn leg_concat(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else leg_concat(i + 1, n,
+                    acc + Seq.count(Seq.concat(Seq.from_list([1]), Seq.from_list([2])))) end
+  end
+
+  -- A user function with the same `rest ->` fall-through shape the stdlib's
+  -- from_string_lines uses, so the dead join-point closure is pinned without Seq.
+  pfn strip(xs : List(String)) : List(String) do
+    match xs do
+      Nil -> Nil
+      Cons(h, t) ->
+        match strip(t) do
+          Nil -> if h == "" do Nil else Cons(h, Nil) end
+          rest -> Cons(h, rest)
+        end
+    end
+  end
+
+  pfn leg_strip(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc
+    else leg_strip(i + 1, n,
+                   acc + List.length(strip(string_split("a\nb\n", "\n")))) end
+  end
+
+  pfn flat(label : String, before : Int, result : Int, n : Int) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ int_to_string(result) ++ ", flat: "
+            ++ bool_to_string(grew < n / 4))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 40
+    leg_from_list(0, 3, 0)
+    let a = live_allocs()
+    let r_a = leg_from_list(0, n, 0)
+    flat("Seq.from_list + count", a, r_a, n)
+    leg_lines(0, 3, 0)
+    let b = live_allocs()
+    let r_b = leg_lines(0, n, 0)
+    flat("Seq.from_string_lines + count", b, r_b, n)
+    leg_fold(0, 3, 0)
+    let c = live_allocs()
+    let r_c = leg_fold(0, n, 0)
+    flat("Seq.from_list + fold", c, r_c, n)
+    leg_map(0, 3, 0)
+    let d = live_allocs()
+    let r_d = leg_map(0, n, 0)
+    flat("Seq.map + count", d, r_d, n)
+    leg_filter(0, 3, 0)
+    let e = live_allocs()
+    let r_e = leg_filter(0, n, 0)
+    flat("Seq.filter + count", e, r_e, n)
+    leg_concat(0, 3, 0)
+    let f = live_allocs()
+    let r_f = leg_concat(0, n, 0)
+    flat("Seq.concat + count", f, r_f, n)
+    leg_strip(0, 3, 0)
+    let g = live_allocs()
+    let r_g = leg_strip(0, n, 0)
+    flat("match fall-through join point", g, r_g, n)
+  end
+end

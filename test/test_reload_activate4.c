@@ -210,6 +210,37 @@ static void check_audit(const char *fn, const char *caps_json,
     if (g_failed) fprintf(stderr, "    audit line: %s", line);
 }
 
+/* DD step 12a: march_reload_request (the stdlib-only reload_request builtin)
+ * runs the socket's own dispatch, so its answers match the socket's. */
+static void test_in_process_request(void) {
+    size_t n = 0;
+    char *r = march_reload_request("PING", 4, &n);
+    CHECK(r && strcmp(r, "PONG\n") == 0 && n == 5, "in-process PING answers like the socket");
+    free(r);
+    r = march_reload_request("NOPE\n", 5, &n);
+    CHECK(r && strcmp(r, "ERR unknown_command\n") == 0, "in-process unknown verb refused");
+    free(r);
+    int fd = connect_sock(SOCK_PATH);
+    send_line(fd, "RELEASE_HEAD\n");
+    char resp[256];
+    read_resp(fd, resp, sizeof(resp));
+    close(fd);
+    r = march_reload_request("RELEASE_HEAD", 12, &n);
+    CHECK(r && strncmp(r, resp, strlen(r) - 1) == 0 && strncmp(r, "HEAD ", 5) == 0,
+          "in-process RELEASE_HEAD equals the socket's");
+    free(r);
+    /* a body verb: TOPOLOGY reads its body from the request, after READY */
+    r = march_reload_request("TOPOLOGY 0000000000000000000000000000000000000000000000000000000000000000 aa 3\nabc", 82, &n);
+    CHECK(r && (strstr(r, "ERR bad_signature") || strstr(r, "ERR signing_not_configured")),
+          "in-process TOPOLOGY is signature-checked before its body is read");
+    free(r);
+    r = march_reload_request("NODE_STATE", 10, &n);
+    CHECK(r && strncmp(r, "STATE head:", 11) == 0 && strstr(r, " drained:") && strstr(r, "\nARTIFACT ")
+          && strcmp(r + strlen(r) - 4, "END\n") == 0,
+          "NODE_STATE reports the head, the topology, the drained epoch and the artifacts in effect");
+    free(r);
+}
+
 static void test_hcr_info(void) {
     int fd = connect_sock(SOCK_PATH);
     CHECK(fd >= 0, "HCR_INFO connects");
@@ -1236,6 +1267,7 @@ int main(int argc, char **argv) {
             if (strncmp(resp, want, sizeof(want) - 1) != 0) fprintf(stderr, "    got: %s\n", resp);
             close(fd);
         }
+        test_in_process_request();
         test_sequenced_releases();   /* last: it makes the server require releases */
     } else {
         /* $MARCH_DEPLOY_POLICY must already be set by the caller (dune rule)

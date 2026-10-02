@@ -1032,6 +1032,7 @@ let builtin_bindings : (string * scheme) list =
     ("epoch_drain", Mono (TArrow (t_int, TArrow (t_int, t_unit))));
     ("epoch_hold_next_spawn", Mono (TArrow (t_unit, t_unit)));
     ("epoch_holds", Mono (TArrow (t_unit, t_int)));
+    ("reload_request", Mono (TArrow (t_string, t_string)));
     ("delivery_origin_set", Mono (TArrow (t_int, TArrow (t_int, t_unit))));
     ("delivery_origin_clear", Mono (TArrow (t_unit, t_unit)));
     ("delivery_failed_watch",

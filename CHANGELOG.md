@@ -19,6 +19,23 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **An in-cluster control plane for hot deploys (distributed deploys, step 12a).** A
+  `[control] candidates = "<host label>"` section in `topology.toml` makes every node run
+  an Agent and the labelled nodes serve a control API; one of them leads (`count = 1`
+  placement). A release, built and signed by forge (it holds the only key), is stored on
+  every reachable candidate, then carried out step by step with canary gates; nodes
+  verify every signed line themselves, so a compromised control node can delay a deploy
+  but not forge one. No ssh is involved in a hot deploy. A leader killed mid-rollout is
+  replaced and the release finishes without applying a step twice. Leadership needs
+  `Ctl.Control:offer` in the node's certificate. Restart-class changes still go through
+  the process backend. `forge deploy` itself does not select the cluster backend yet.
+- **Native builds allocate from a vendored mimalloc.** `march_alloc`, the allocator
+  behind every March value, now draws from a statically linked mimalloc instead of
+  libc `calloc`, with no new system dependency. Allocation-heavy programs get
+  faster: `binary_trees` 233 to 165 ms (-29%) and `list_ops` 76 to 62 ms (-18%),
+  with `tree_transform` about 3% faster. The cost is a larger resident set (7 MB to
+  14 MB on `binary_trees`). Set `MARCH_MALLOC=libc` when compiling to get the old
+  allocator; `MARCH_SANITIZE` builds, hot-reload patches and the REPL always use libc.
 - **`Array.sort_by`, `Array.sort_by_key`, `RRB.sort_by` and `RRB.sort_by_key`.**
   Stable sorts for the persistent vectors: `sort_by` takes the same comparator
   as `List.sort_by` (`fn (a, b) -> a <= b`), and `sort_by_key` takes a function
@@ -68,6 +85,14 @@ git log is authoritative for exact commits.
   with `int_shl: shift out of range` (as the interpreter does) instead of
   returning an undefined value. Compiled `int_pow` with a negative exponent
   panics with `int_pow: negative exponent` instead of returning `0`.
+- **Compiled `Seq` constructors and combinators no longer leak.** Draining
+  `Seq.from_list`, `Seq.from_string_lines`, `Seq.map`, `Seq.filter` and
+  `Seq.concat` with `Seq.count` or `Seq.fold` leaked 3 to 5 heap objects per
+  use, so `Process.run_stream` leaked on every call. The compiler leaked a
+  closure's forwarded captures, reused a dying `Seq` cell as a capture-free
+  closure, missed closures stored through cell reuse, and left a dead
+  join-point closure holding references in `match ... rest -> ...` fall-throughs.
+  A capturing lambda handed to `Seq.map` still leaks one object per use.
 - **Compiled `to_string(())` prints `()`.** A compiled program printed `0` for
   the unit value, in `to_string`, `show`, string interpolation and inside
   containers (`Some(())` printed `Some(0)`). It now prints `()` as the

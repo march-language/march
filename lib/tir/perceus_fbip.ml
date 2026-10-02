@@ -53,6 +53,24 @@ let same_arity (t : Tir.ty) (nfields : int) : bool =
   | Tir.TCon (name, ts) -> is_fbip_encoded name && List.length ts = nfields
   | _ -> false
 
+(** A closure struct with a single argument (just its apply pointer) captures
+    nothing, and [llvm_emit] materialises it as ONE immortal global rather than
+    a heap cell (the exact [EAlloc (TCon "$Clo_...", [fn_ptr])] arm), whose RC
+    operations are no-ops.  Its apply function therefore never releases
+    [$clo] (Perceus splices no drop for a capture-free lambda), and every
+    caller's hand-off reference is absorbed by the immortal global.  Turning
+    such an alloc into an [EReuse] of the dying cell resurrects a REAL
+    refcounted cell that nothing balances: [Seq.count]'s `fn(n, ig) -> n + 1`
+    reused the dead [Seq] cell and leaked it once per call.  Never reuse into
+    it. *)
+let static_closure_alloc (ty : Tir.ty) (args : Tir.atom list) : bool =
+  match ty, args with
+  | Tir.TCon (name, _), [_] -> Tir_names.is_clo_struct name
+  | _ -> false
+
+let reusable_alloc (ty : Tir.ty) (args : Tir.atom list) : bool =
+  args <> [] && not (static_closure_alloc ty args)
+
 (** True iff [dec_v]'s name appears as an AVar in any of [args].
     Prevents the self-referential FBIP bug: if the reuse atom IS one of the
     constructor args (e.g. Some(result)->Ok(result) with niche-encoding, where
@@ -72,13 +90,13 @@ let rec try_fbip_sink (dec_v : Tir.var) (body : Tir.expr) : Tir.expr option =
      not one of the constructor args (which would create a self-referential
      object when dec_v's memory is reused to store dec_v itself). *)
   | Tir.EAlloc (ty, args)
-    when List.length args > 0
+    when reusable_alloc ty args
       && same_arity dec_v.Tir.v_ty (List.length args)
       && not (args_alias_reuse dec_v args) ->
     Some (Tir.EReuse (Tir.AVar dec_v, ty, args))
   (* EAlloc bound to a result variable *)
   | Tir.ELet (result, Tir.EAlloc (ty, args), rest)
-    when List.length args > 0
+    when reusable_alloc ty args
       && same_arity dec_v.Tir.v_ty (List.length args)
       && not (args_alias_reuse dec_v args) ->
     Some (Tir.ELet (result, Tir.EReuse (Tir.AVar dec_v, ty, args), rest))
@@ -131,7 +149,7 @@ let rec fbip_expr (e : Tir.expr) : Tir.expr =
      constructor args (which would create a self-referential object). *)
   | Tir.ELet (_dead_v, Tir.EDecRC (Tir.AVar dec_v),
               Tir.ELet (result, Tir.EAlloc (ty, args), rest))
-    when List.length args > 0
+    when reusable_alloc ty args
       && same_arity dec_v.Tir.v_ty (List.length args)
       && not (args_alias_reuse dec_v args) ->
     let rest' = fbip_expr rest in

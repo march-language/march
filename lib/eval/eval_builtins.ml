@@ -303,6 +303,11 @@ let base_env : env =
   ; ("epoch_draining", VBuiltin ("epoch_draining", function
         | [] | [VUnit] -> VBool false
         | _ -> eval_error "epoch_draining: expected unit"))
+  (* DD step 12a: the interpreter has no reload server; a topology app run
+     interpreted gets the same answer a compiled program without one does. *)
+  ; ("reload_request", VBuiltin ("reload_request", function
+        | [ VString _ ] -> VString "ERR no_reload_server\n"
+        | _ -> eval_error "reload_request: expected a string"))
   ; ("epoch_holds", VBuiltin ("epoch_holds", function
         | [] | [VUnit] -> VInt 0
         | _ -> eval_error "epoch_holds: expected unit"))
