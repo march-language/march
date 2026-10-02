@@ -2677,6 +2677,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/process_handle_leak_probe.expected native_process_handle_leak_probe.out)))
 
+; ── Leak guard: Seq constructors and combinators leaked their closure
+; environments (3-5 objects per Seq.from_list/from_string_lines/map/filter use).
+; Red before the fix: every leg reads `flat: false`.
+; specs/progress/2026-09-30-seq-constructors-leak-their-closure.md
+(rule
+ (targets native_seq_constructor_leak_probe native_seq_constructor_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/seq_constructor_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_seq_constructor_leak_probe
+        native/seq_constructor_leak_probe.march)
+   (with-stdout-to native_seq_constructor_leak_probe.out
+        (system "./native_seq_constructor_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/seq_constructor_leak_probe.expected native_seq_constructor_leak_probe.out)))
+
 ; A tuple pattern's case arm gets each field as an OWNED reference, but Perceus
 ; treated every tuple scrutinee's fields as borrowed: an escaping pattern
 ; variable took a second reference nothing released and a dead field was never

@@ -36,7 +36,7 @@ mod ControlPeers do
   -- interpreter's `from_json` picks a record type by its field names.
   type WireReport = {
     wire : Int, node : String, seq : Int, versions : String, topology : String,
-    drained : Int, healthy : Bool, failed_seq : Int, failed_step : Int, failed_why : String
+    drained : Int, healthy : Bool, failed_seq : Int, failed_step : Int, failed_why : String, detail : String, pools : String
   }
   derive Json for WireReport
   type WireOrder = {
@@ -51,12 +51,12 @@ mod ControlPeers do
 
   pfn wire_report(r : Control.AgentReport) : WireReport do
     { wire: 1, node: r.node, seq: r.seq, versions: r.versions, topology: r.topology, drained: r.drained,
-      healthy: r.healthy, failed_seq: r.failed_seq, failed_step: r.failed_step, failed_why: r.failed_why }
+      healthy: r.healthy, failed_seq: r.failed_seq, failed_step: r.failed_step, failed_why: r.failed_why, detail: r.detail, pools: r.pools }
   end
 
   pfn report_of(w : WireReport) : Control.AgentReport do
     { node: w.node, seq: w.seq, versions: w.versions, topology: w.topology, drained: w.drained,
-      healthy: w.healthy, failed_seq: w.failed_seq, failed_step: w.failed_step, failed_why: w.failed_why }
+      healthy: w.healthy, failed_seq: w.failed_seq, failed_step: w.failed_step, failed_why: w.failed_why, detail: w.detail, pools: w.pools }
   end
 
   pfn wire_order(o : Control.StepOrder) : WireOrder do
@@ -245,7 +245,7 @@ mod ControlPeers do
 
   pfn sim_report(n : SimNode) : Control.AgentReport do
     { node: n.name, seq: if n.requests > 0 do 42 else 41 end, versions: Control.versions_text(n.versions), topology: n.topology,
-      drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "" }
+      drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "" }
   end
 
   -- What the node's reload server does with one signed line.
@@ -449,7 +449,7 @@ mod ControlPeers do
   pfn mk_report(t : (String, Int, Bool)) : WireReport do
     let (nm, n, h) = t
     { wire: 1, node: nm, seq: n, versions: "render=" ++ nm, topology: nm, drained: n, healthy: h,
-      failed_seq: if h do 0 else n end, failed_step: 1, failed_why: nm }
+      failed_seq: if h do 0 else n end, failed_step: 1, failed_why: nm, detail: "", pools: "" }
   end
 
   pfn gen_report() : Gen.Generator(WireReport) do

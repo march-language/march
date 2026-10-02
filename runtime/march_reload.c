@@ -328,6 +328,10 @@ static void state_hex(const unsigned char *p, size_t n, char out[65]) {
 #endif
 }
 
+/* The highest epoch a signed DRAIN asked to drain (DD step 12a, NODE_STATE):
+ * what the control plane's executor reads to see a drain step done. */
+static long long g_drained_epoch;
+
 static char g_last_signed[RELOAD_LINE_MAX];   /* the last verified signed line */
 static char g_last_sig[256];                  /* and its signature */
 
@@ -480,6 +484,49 @@ static void mkdir_p(const char *path) {
     mkdir(tmp, 0755);
 }
 
+/* The I/O channel of one request dispatch (DD step 12a).  The socket loop
+ * reads and writes a real fd; `reload_request` (the stdlib-only builtin the
+ * control plane's Agent uses) runs the SAME dispatch over a request held in
+ * memory and captures the answer.  g_vio is non-NULL only while a builtin
+ * request is dispatching, always under g_req_lock, so the socket thread and
+ * the builtin never overlap and the file-static scratch buffers the verb
+ * handlers use stay single-user. */
+struct rl_vio {
+    const unsigned char *in; size_t in_len, in_pos;
+    char *out; size_t out_len, out_cap;
+};
+static struct rl_vio *g_vio;
+static pthread_mutex_t g_req_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static ssize_t rl_read(int fd, void *buf, size_t n) {
+    if (g_vio) {
+        size_t avail = g_vio->in_len - g_vio->in_pos;
+        if (avail == 0) return 0;
+        if (n > avail) n = avail;
+        memcpy(buf, g_vio->in + g_vio->in_pos, n);
+        g_vio->in_pos += n;
+        return (ssize_t)n;
+    }
+    return read(fd, buf, n);
+}
+
+static ssize_t rl_write(int fd, const void *buf, size_t n) {
+    if (g_vio) {
+        if (g_vio->out_len + n + 1 > g_vio->out_cap) {
+            size_t cap = g_vio->out_cap ? g_vio->out_cap : 256;
+            while (cap < g_vio->out_len + n + 1) cap *= 2;
+            char *o = (char *)realloc(g_vio->out, cap);
+            if (!o) return -1;
+            g_vio->out = o; g_vio->out_cap = cap;
+        }
+        memcpy(g_vio->out + g_vio->out_len, buf, n);
+        g_vio->out_len += n;
+        g_vio->out[g_vio->out_len] = '\0';
+        return (ssize_t)n;
+    }
+    return write(fd, buf, n);
+}
+
 /* Read a newline-terminated line into buf (NUL-terminated, newline stripped).
  * Returns bytes read (>=0), -1 on EOF/error, or -(max-1) if the line was
  * truncated (too long).  On truncation the stream is drained to the next '\n'
@@ -488,7 +535,7 @@ static int read_line(int fd, char *buf, int max) {
     int n = 0;
     while (1) {
         char c;
-        int r = (int)read(fd, &c, 1);
+        int r = (int)rl_read(fd, &c, 1);
         if (r <= 0) return r ? r : -1;
         if (c == '\n') break;
         if (c == '\r') continue;
@@ -503,14 +550,14 @@ static int read_line(int fd, char *buf, int max) {
 static int read_exact(int fd, unsigned char *buf, size_t nbytes) {
     size_t got = 0;
     while (got < nbytes) {
-        ssize_t r = read(fd, buf + got, nbytes - got);
+        ssize_t r = rl_read(fd, buf + got, nbytes - got);
         if (r <= 0) return -1;
         got += (size_t)r;
     }
     return 0;
 }
 
-static void wresp(int fd, const char *s) { write(fd, s, strlen(s)); }
+static void wresp(int fd, const char *s) { rl_write(fd, s, strlen(s)); }
 
 /* Write the result of snprintf safely: clamp to bufsz-1 to guard against
  * the snprintf+write overread (snprintf returns would-have-written, not
@@ -518,7 +565,7 @@ static void wresp(int fd, const char *s) { write(fd, s, strlen(s)); }
  * when the format string's inputs exceed bufsz). */
 static void write_safe(int fd, const char *buf, int snprintf_ret, size_t bufsz) {
     int n = snprintf_ret < (int)bufsz ? snprintf_ret : (int)bufsz - 1;
-    if (n > 0) write(fd, buf, (size_t)n);
+    if (n > 0) rl_write(fd, buf, (size_t)n);
 }
 
 /* ── Audit log ───────────────────────────────────────────────────────────── */
@@ -1675,977 +1722,1093 @@ out:
     return result;
 }
 
+/* Per-connection batch state (BEGIN_BATCH / COMMIT_BATCH / ROLLBACK_BATCH).
+ * Heap-allocated: 256 entries do not belong on a 512 KiB macOS thread stack. */
+#define MARCH_MAX_BATCH 256
+struct march_staged {
+    char     name[256];
+    char     impl_hash[128];
+    char     cas_hash[128];
+    char     callers[1024];
+    uint32_t epoch;
+    int      migrate_required;
+    char    *caps;       /* ACTIVATE4 only (heap, may be ""); NULL otherwise */
+    char    *cap_root;   /* ACTIVATE4 only (heap); NULL otherwise */
+    char    *roles;      /* ACTIVATE6 only (heap); NULL otherwise */
+    char    *signed_msg; /* the verified signed line (heap), persisted */
+    char    *sig_b64;    /* its signature (heap) */
+};
+struct rl_session {
+    struct march_staged staged[MARCH_MAX_BATCH];
+    int n_staged;
+    int in_batch;
+};
+
+static void session_discard_staged(struct rl_session *S) {
+    for (int k = 0; k < S->n_staged; k++) {
+        free(S->staged[k].caps); free(S->staged[k].cap_root); free(S->staged[k].roles);
+        free(S->staged[k].signed_msg); free(S->staged[k].sig_b64);
+    }
+    S->n_staged = 0;
+}
+
+/* Dispatch ONE request line (already read into `line`, RELOAD_LINE_MAX bytes,
+ * modified in place) and write the answer to `fd`.  Verbs with a body
+ * (CAS_PUT, TOPOLOGY) read it from the same channel.  This is the single
+ * dispatch: the socket loop and `march_reload_request` both call it. */
+static void handle_line(int fd, struct rl_session *S, char *line) {
+    struct march_staged *staged = S->staged;
+    {
+    /* ── SEQ: a signed line wrapped in a release (DD step 12-pre) ───── */
+    if (strncmp(line, "SEQ ", 4) == 0) {
+        if (unwrap_release(fd, line) != 0) return;
+    } else if (is_signed_verb(line) && (g_require_release || g_release_seq > 0)) {
+        wresp(fd, "ERR release_required\n");
+        return;
+    }
+
+    /* ── PING ─────────────────────────────────────────────────────── */
+    if (strcmp(line, "PING") == 0) {
+        wresp(fd, "PONG\n");
+
+    /* ── RELEASE_HEAD: the highest release this node accepted ─────── */
+    } else if (strcmp(line, "RELEASE_HEAD") == 0) {
+        char resp[128];
+        int n = snprintf(resp, sizeof(resp), "HEAD %llu %s%s\n", g_release_seq,
+                         g_release_id, g_require_release ? " required" : "");
+        write_safe(fd, resp, n, sizeof(resp));
+
+    /* ── NODE_STATE: what the control plane's Agent reports (DD step 12a) ──
+     *   STATE head:<seq> id:<id|-> topology:<blake3|-> drained:<epoch> base:<hex> cas:<root>
+     *   ARTIFACT <cas hash>       one per patch artifact still in effect: some
+     *                             function's newest activation came from it
+     *   END                                                                */
+    } else if (strcmp(line, "NODE_STATE") == 0) {
+        char resp[512];
+        int n = snprintf(resp, sizeof(resp), "STATE head:%llu id:%s topology:%s drained:%lld base:%s cas:%s\n",
+                         g_release_seq, g_release_id[0] ? g_release_id : "-",
+                         g_topology_digest, g_drained_epoch, g_base_digest, g_cas_root);
+        write_safe(fd, resp, n, sizeof(resp));
+        for (size_t i = g_stack_n; i-- > 0;) {
+            const hcr_stack_entry *e = &g_stack[i];
+            if (!e->name || !e->cas_hash) continue;
+            int shadowed = 0, dup = 0;
+            for (size_t j = i + 1; j < g_stack_n; j++)
+                if (g_stack[j].name && strcmp(g_stack[j].name, e->name) == 0) { shadowed = 1; break; }
+            if (shadowed) continue;
+            /* one line per artifact: skip when a newer live entry has it */
+            for (size_t j = i + 1; j < g_stack_n && !dup; j++) {
+                const hcr_stack_entry *o = &g_stack[j];
+                if (!o->name || !o->cas_hash || strcmp(o->cas_hash, e->cas_hash) != 0) continue;
+                int sh = 0;
+                for (size_t k = j + 1; k < g_stack_n; k++)
+                    if (g_stack[k].name && strcmp(g_stack[k].name, o->name) == 0) { sh = 1; break; }
+                if (!sh) dup = 1;
+            }
+            if (dup) continue;
+            char line2[200];
+            n = snprintf(line2, sizeof(line2), "ARTIFACT %.128s\n", e->cas_hash);
+            write_safe(fd, line2, n, sizeof(line2));
+        }
+        wresp(fd, "END\n");
+
+    /* ── HCR_INFO ─────────────────────────────────────────────────── */
+    } else if (strcmp(line, "HCR_INFO") == 0) {
+        hcr_info_response(fd);
+
+    /* ── ABI_QUERY ────────────────────────────────────────────────── */
+    } else if (strcmp(line, "ABI_QUERY") == 0) {
+        for (uint32_t i = 1; i < 65536; i++) {  /* 1-based; slot 0 = sentinel */
+            uint32_t cur = march_dispatch_current(i);
+            const char *h = march_dispatch_impl_hash(i, cur);
+            if (!h) break;
+            const char *name    = march_dispatch_id_to_name(i);
+            const char *sig     = march_dispatch_sig_hash(i, cur);
+            const char *callers = march_dispatch_callers(i);
+            char resp[1024];
+            int n;
+            if (callers && callers[0]) {
+                n = snprintf(resp, sizeof(resp), "SLOT %u %s %s %s callers:%s\n",
+                             i,
+                             name ? name : "(none)",
+                             h[0] ? h : "(none)",
+                             sig && sig[0] ? sig : "(none)",
+                             callers);
+            } else {
+                n = snprintf(resp, sizeof(resp), "SLOT %u %s %s %s\n",
+                             i,
+                             name ? name : "(none)",
+                             h[0] ? h : "(none)",
+                             sig && sig[0] ? sig : "(none)");
+            }
+            write_safe(fd, resp, n, sizeof(resp));
+        }
+        wresp(fd, "END\n");
+
+    /* ── VERSIONS ─────────────────────────────────────────────────── */
+    } else if (strcmp(line, "VERSIONS") == 0) {
+        for (uint32_t i = 1; i < 65536; i++) {  /* 1-based; slot 0 = sentinel */
+            const char *name = march_dispatch_id_to_name(i);
+            if (!name) break;
+            const char *base = march_dispatch_baseline_hash(i);
+            uint32_t cur = march_dispatch_current(i);
+            const char *hot  = march_dispatch_impl_hash(i, cur);
+            char resp[512];
+            int n = snprintf(resp, sizeof(resp), "VERSION %s baseline %s\n",
+                             name, base && base[0] ? base : "(none)");
+            write_safe(fd, resp, n, sizeof(resp));
+            /* Emit "hot" line only when impl_hash differs from baseline */
+            if (hot && hot[0] && base && base[0] && strcmp(hot, base) != 0) {
+                n = snprintf(resp, sizeof(resp), "VERSION %s hot %s\n", name, hot);
+                write_safe(fd, resp, n, sizeof(resp));
+            }
+        }
+        wresp(fd, "END\n");
+
+    /* ── VERSIONS_DETAIL ──────────────────────────────────────────── */
+    } else if (strcmp(line, "VERSIONS_DETAIL") == 0) {
+        for (uint32_t i = 1; i < 65536; i++) {  /* 1-based; slot 0 = sentinel */
+            const char *name = march_dispatch_id_to_name(i);
+            if (!name) break;
+            uint32_t cur = march_dispatch_current(i);
+            const char *h   = march_dispatch_impl_hash(i, cur);
+            long long   ts  = march_dispatch_activated_at(i);
+            const char *sig = march_dispatch_signer_hex(i);
+            uint32_t    ep  = march_dispatch_epoch(i, cur);
+            char resp[512];
+            int n = snprintf(resp, sizeof(resp),
+                             "SLOT %u %s %s %lld %s %u\n",
+                             i,
+                             name,
+                             h && h[0] ? h : "(none)",
+                             ts,
+                             sig && sig[0] ? sig : "(none)",
+                             ep);
+            write_safe(fd, resp, n, sizeof(resp));
+        }
+        {
+            /* Delivery-failure counters (II.4.7); parsers skip non-SLOT
+             * lines. */
+            march_hcr_counters c; march_hcr_counters_get(&c);
+            char resp[256];
+            int n = snprintf(resp, sizeof(resp),
+                             "COUNTERS deferred:%lld converted:%lld dropped:%lld killed:%lld\n",
+                             (long long)c.deferred, (long long)c.converted,
+                             (long long)c.dropped, (long long)c.killed);
+            write_safe(fd, resp, n, sizeof(resp));
+        }
+        {
+            /* Plan 6.5: what the last start restored from the host's
+             * persisted patch stack (parsers skip non-SLOT lines). */
+            char resp[320];
+            int n = snprintf(resp, sizeof(resp),
+                             "RESTORED entries:%d skipped:%d mode:%s stack:%zu manifest:%s topology:%s\n",
+                             g_restored_entries, g_restored_skipped, g_restored_mode,
+                             g_stack_n, g_manifest_digest, g_topology_digest);
+            write_safe(fd, resp, n, sizeof(resp));
+        }
+        wresp(fd, "END\n");
+
+    /* ── CAS_CHECK ────────────────────────────────────────────────── */
+    } else if (strncmp(line, "CAS_CHECK ", 10) == 0) {
+        const char *hash = line + 10;
+        if (!is_hex64(hash)) {
+            wresp(fd, "ERR bad_hash\n"); return;
+        }
+        char path[640]; cas_artifact_path(path, sizeof(path), hash);
+        wresp(fd, (access(path, F_OK) == 0) ? "PRESENT\n" : "MISSING\n");
+
+    /* ── CAS_PUT ──────────────────────────────────────────────────── */
+    } else if (strncmp(line, "CAS_PUT ", 8) == 0) {
+        char hash[65]; long long size_ll;
+        if (sscanf(line + 8, "%64s %lld", hash, &size_ll) != 2
+            || !is_hex64(hash)
+            || size_ll <= 0 || size_ll > CAS_MAX_ARTIFACT) {
+            wresp(fd, "ERR bad_format\n"); return;
+        }
+        size_t sz = (size_t)size_ll;
+        unsigned char *buf = (unsigned char *)malloc(sz);
+        if (!buf) { wresp(fd, "ERR oom\n"); return; }
+        wresp(fd, "READY\n");
+        if (read_exact(fd, buf, sz) != 0) {
+            /* Stream is desynced — close rather than trying to recover. */
+            free(buf); close(fd); return;
+        }
+        /* Write to CAS */
+        char path[640]; cas_artifact_path(path, sizeof(path), hash);
+        /* Ensure parent directory exists */
+        char dir[640]; snprintf(dir, sizeof(dir), "%s/artifacts/%.2s", g_cas_root, hash);
+        mkdir_p(dir);
+        /* Write atomically via tmp file */
+        char tmp[660]; snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+        FILE *f = fopen(tmp, "wb");
+        if (!f) { free(buf); wresp(fd, "ERR open_failed\n"); return; }
+        size_t written = fwrite(buf, 1, sz, f);
+        fclose(f); free(buf);
+        if (written != sz) { unlink(tmp); wresp(fd, "ERR write_failed\n"); return; }
+        if (rename(tmp, path) != 0) { unlink(tmp); wresp(fd, "ERR rename_failed\n"); return; }
+        char resp[128];
+        int n = snprintf(resp, sizeof(resp), "OK %s\n", hash);
+        write_safe(fd, resp, n, sizeof(resp));
+
+    /* ── ACTIVATE ─────────────────────────────────────────────────── */
+    } else if (strncmp(line, "ACTIVATE ", 9) == 0) {
+        char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
+        char migrate_required_str[8] = {0};
+        int parsed = sscanf(line + 9, "%255s %127s %127s %255s %7s",
+                            name, impl_hash, cas_hash, sig_b64,
+                            migrate_required_str);
+        if (parsed < 4) {
+            wresp(fd, "ERR bad_format\n"); return;
+        }
+        if (!is_hex64(cas_hash)) {
+            wresp(fd, "ERR bad_cas_hash\n"); return;
+        }
+        int migrate_required = (parsed >= 5 && migrate_required_str[0] == '1') ? 1 : 0;
+
+#if HAVE_SIGNING_KEY
+        /* Verify ed25519 signature before doing anything else. */
+        if (!g_pubkey_loaded) {
+            wresp(fd, "ERR signing_not_configured\n"); return;
+        }
+        /* Check for all-zero pubkey (signing not configured) */
+        int all_zero = 1;
+        for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
+        if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); return; }
+
+        /* Signed message is "<name> <impl_hash> <cas_hash>" */
+        char signed_msg[640];
+        int smlen = snprintf(signed_msg, sizeof(signed_msg), "%s %s %s",
+                             name, impl_hash, cas_hash);
+
+        /* Decode base64 signature */
+        unsigned char sigbytes[64];
+        int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
+        if (siglen != 64) { wresp(fd, "ERR bad_signature\n"); return; }
+
+        /* Build the signed message in tweetnacl format: sig || message */
+        unsigned char *sm = (unsigned char *)malloc((size_t)(smlen + 64));
+        if (!sm) { wresp(fd, "ERR oom\n"); return; }
+        memcpy(sm, sigbytes, 64);
+        memcpy(sm + 64, signed_msg, (size_t)smlen);
+
+        unsigned char *m_out = (unsigned char *)malloc((size_t)(smlen + 64));
+        unsigned long long m_out_len = 0;
+        int vrc = crypto_sign_open(m_out, &m_out_len, sm, (unsigned long long)(smlen + 64), g_pubkey);
+        free(sm); free(m_out);
+        if (vrc != 0) {
+            write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
+            wresp(fd, "ERR bad_signature\n"); return;
+        }
+        remember_signed(signed_msg, (size_t)smlen, sig_b64);
+#else
+        (void)sig_b64;
+        write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
+        wresp(fd, "ERR signing_not_configured\n"); return;
+#endif
+        {
+            uint32_t activate_epoch = 0;
+            const char *ep_ptr = strstr(line, " epoch:");
+            if (ep_ptr) activate_epoch = (uint32_t)atoi(ep_ptr + 7);
+            const char *callers_ptr = strstr(line, " callers:");
+            do_activate(fd, name, impl_hash, cas_hash, migrate_required,
+                        activate_epoch, callers_ptr ? callers_ptr + 9 : NULL, NULL);
+        }
+
+    /* ── ACTIVATE2 ─────────────────────────────────────────────────── */
+    /* Protocol v2: epoch and callers are included in the signed payload,
+     * preventing replay attacks that forge the epoch or caller list.
+     * Signed message: "ACTIVATE2 <name> <impl_hash> <cas_hash> epoch:<N> callers:<sorted-csv>" */
+    } else if (strncmp(line, "ACTIVATE2 ", 10) == 0) {
+        char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
+        char migrate_str[8] = {0};
+        if (sscanf(line + 10, "%255s %127s %127s %255s %7s",
+                   name, impl_hash, cas_hash, sig_b64, migrate_str) < 5) {
+            wresp(fd, "ERR bad_format\n"); return;
+        }
+        if (!is_hex64(cas_hash)) {
+            wresp(fd, "ERR bad_cas_hash\n"); return;
+        }
+        int migrate_required = (migrate_str[0] == '1') ? 1 : 0;
+
+        /* Parse mandatory epoch:<N>. */
+        uint32_t activate_epoch = 0;
+        {
+            const char *ep = strstr(line, " epoch:");
+            if (!ep) { wresp(fd, "ERR bad_format missing_epoch\n"); return; }
+            activate_epoch = (uint32_t)atoi(ep + 7);
+        }
+
+        /* Parse mandatory callers:<csv>, then sort for canonical form. */
+        char callers_sorted[1024] = {0};
+        {
+            const char *cp = strstr(line, " callers:");
+            if (!cp) { wresp(fd, "ERR bad_format missing_callers\n"); return; }
+            const char *csv = cp + 9;
+            char tmp[1024]; size_t tlen = 0;
+            while (csv[tlen] && csv[tlen] != '\n' && csv[tlen] != '\r'
+                   && tlen < sizeof(tmp) - 1)
+                tlen++;
+            memcpy(tmp, csv, tlen); tmp[tlen] = '\0';
+
+            if (tmp[0] != '\0') {
+                char *tokens[256]; int ntok = 0;
+                char *p = tmp;
+                while (*p && ntok < 255) {
+                    tokens[ntok++] = p;
+                    char *c = strchr(p, ',');
+                    if (!c) break;
+                    *c = '\0'; p = c + 1;
+                }
+                for (int i = 1; i < ntok; i++) {
+                    char *key = tokens[i]; int j = i - 1;
+                    while (j >= 0 && strcmp(tokens[j], key) > 0)
+                        { tokens[j+1] = tokens[j]; j--; }
+                    tokens[j+1] = key;
+                }
+                char *out = callers_sorted; size_t rem = sizeof(callers_sorted);
+                for (int i = 0; i < ntok && rem > 1; i++) {
+                    if (i > 0) { *out++ = ','; rem--; }
+                    size_t sl = strlen(tokens[i]);
+                    if (sl >= rem) sl = rem - 1;
+                    memcpy(out, tokens[i], sl); out += sl; rem -= sl;
+                }
+                *out = '\0';
+            }
+        }
+
+#if HAVE_SIGNING_KEY
+        if (!g_pubkey_loaded) {
+            wresp(fd, "ERR signing_not_configured\n"); return;
+        }
+        int all_zero = 1;
+        for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
+        if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); return; }
+
+        /* Reconstruct the canonical signed message from parsed values. */
+        char signed_msg[1024];
+        int smlen = snprintf(signed_msg, sizeof(signed_msg),
+                             "ACTIVATE2 %s %s %s epoch:%u callers:%s",
+                             name, impl_hash, cas_hash, activate_epoch, callers_sorted);
+
+        unsigned char sigbytes[64];
+        int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
+        if (siglen != 64) { wresp(fd, "ERR bad_signature\n"); return; }
+
+        unsigned char *sm = (unsigned char *)malloc((size_t)(smlen + 64));
+        if (!sm) { wresp(fd, "ERR oom\n"); return; }
+        memcpy(sm, sigbytes, 64);
+        memcpy(sm + 64, signed_msg, (size_t)smlen);
+        unsigned char *m_out = (unsigned char *)malloc((size_t)(smlen + 64));
+        unsigned long long m_out_len = 0;
+        int vrc = crypto_sign_open(m_out, &m_out_len, sm,
+                                   (unsigned long long)(smlen + 64), g_pubkey);
+        free(sm); free(m_out);
+        if (vrc != 0) {
+            write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
+            wresp(fd, "ERR bad_signature\n"); return;
+        }
+        remember_signed(signed_msg, (size_t)smlen, sig_b64);
+#else
+        (void)sig_b64;
+        write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
+        wresp(fd, "ERR signing_not_configured\n"); return;
+#endif
+        do_activate(fd, name, impl_hash, cas_hash, migrate_required,
+                    activate_epoch, callers_sorted, NULL);
+
+    /* ── ACTIVATE3 ─────────────────────────────────────────────────── */
+    /* Protocol v3: migrate_required is now included in the signed payload,
+     * preventing unsigned modification of the migration flag.
+     * Signed message: "ACTIVATE3 <name> <impl_hash> <cas_hash> <migrate> epoch:<N> callers:<sorted-csv>" */
+    } else if (strncmp(line, "ACTIVATE3 ", 10) == 0) {
+        char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
+        char migrate_str[8] = {0};
+        if (sscanf(line + 10, "%255s %127s %127s %255s %7s",
+                   name, impl_hash, cas_hash, sig_b64, migrate_str) < 5) {
+            wresp(fd, "ERR bad_format\n"); return;
+        }
+        if (!is_hex64(cas_hash)) {
+            wresp(fd, "ERR bad_cas_hash\n"); return;
+        }
+        int migrate_required = (migrate_str[0] == '1') ? 1 : 0;
+
+        /* Parse mandatory epoch:<N>. */
+        uint32_t activate_epoch = 0;
+        {
+            const char *ep = strstr(line, " epoch:");
+            if (!ep) { wresp(fd, "ERR bad_format missing_epoch\n"); return; }
+            activate_epoch = (uint32_t)atoi(ep + 7);
+        }
+
+        /* Parse mandatory callers:<csv>, then sort for canonical form. */
+        char callers_sorted[1024] = {0};
+        {
+            const char *cp = strstr(line, " callers:");
+            if (!cp) { wresp(fd, "ERR bad_format missing_callers\n"); return; }
+            const char *csv = cp + 9;
+            char tmp[1024]; size_t tlen = 0;
+            while (csv[tlen] && csv[tlen] != '\n' && csv[tlen] != '\r'
+                   && tlen < sizeof(tmp) - 1)
+                tlen++;
+            memcpy(tmp, csv, tlen); tmp[tlen] = '\0';
+
+            if (tmp[0] != '\0') {
+                char *tokens[256]; int ntok = 0;
+                char *p = tmp;
+                while (*p && ntok < 255) {
+                    tokens[ntok++] = p;
+                    char *c = strchr(p, ',');
+                    if (!c) break;
+                    *c = '\0'; p = c + 1;
+                }
+                for (int i = 1; i < ntok; i++) {
+                    char *key = tokens[i]; int j = i - 1;
+                    while (j >= 0 && strcmp(tokens[j], key) > 0)
+                        { tokens[j+1] = tokens[j]; j--; }
+                    tokens[j+1] = key;
+                }
+                char *out = callers_sorted; size_t rem = sizeof(callers_sorted);
+                for (int i = 0; i < ntok && rem > 1; i++) {
+                    if (i > 0) { *out++ = ','; rem--; }
+                    size_t sl = strlen(tokens[i]);
+                    if (sl >= rem) sl = rem - 1;
+                    memcpy(out, tokens[i], sl); out += sl; rem -= sl;
+                }
+                *out = '\0';
+            }
+        }
+
+#if HAVE_SIGNING_KEY
+        if (!g_pubkey_loaded) {
+            wresp(fd, "ERR signing_not_configured\n"); return;
+        }
+        int all_zero = 1;
+        for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
+        if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); return; }
+
+        /* Reconstruct the canonical signed message — now includes migrate_required. */
+        char signed_msg[2048];
+        int smlen = snprintf(signed_msg, sizeof(signed_msg),
+                             "ACTIVATE3 %s %s %s %d epoch:%u callers:%s",
+                             name, impl_hash, cas_hash, migrate_required,
+                             activate_epoch, callers_sorted);
+        if (smlen < 0 || smlen >= (int)sizeof(signed_msg)) {
+            wresp(fd, "ERR signed_msg_truncated\n"); return;
+        }
+
+        unsigned char sigbytes[64];
+        int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
+        if (siglen != 64) { wresp(fd, "ERR bad_signature\n"); return; }
+
+        unsigned char *sm = (unsigned char *)malloc((size_t)(smlen + 64));
+        if (!sm) { wresp(fd, "ERR oom\n"); return; }
+        memcpy(sm, sigbytes, 64);
+        memcpy(sm + 64, signed_msg, (size_t)smlen);
+        unsigned char *m_out = (unsigned char *)malloc((size_t)(smlen + 64));
+        unsigned long long m_out_len = 0;
+        int vrc = crypto_sign_open(m_out, &m_out_len, sm,
+                                   (unsigned long long)(smlen + 64), g_pubkey);
+        free(sm); free(m_out);
+        if (vrc != 0) {
+            write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
+            wresp(fd, "ERR bad_signature\n"); return;
+        }
+        remember_signed(signed_msg, (size_t)smlen, sig_b64);
+#else
+        (void)sig_b64;
+        write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
+        wresp(fd, "ERR signing_not_configured\n"); return;
+#endif
+        if (S->in_batch) {
+            /* Stage: verify sig and record for COMMIT_BATCH */
+            if (S->n_staged >= MARCH_MAX_BATCH) {
+                wresp(fd, "ERR batch_full\n"); return;
+            }
+            strncpy(staged[S->n_staged].name,      name,            255);
+            strncpy(staged[S->n_staged].impl_hash, impl_hash,       127);
+            strncpy(staged[S->n_staged].cas_hash,  cas_hash,        127);
+            strncpy(staged[S->n_staged].callers,   callers_sorted, 1023);
+            staged[S->n_staged].epoch           = activate_epoch;
+            staged[S->n_staged].migrate_required = migrate_required;
+            staged[S->n_staged].name[255]      = '\0';
+            staged[S->n_staged].impl_hash[127] = '\0';
+            staged[S->n_staged].cas_hash[127]  = '\0';
+            staged[S->n_staged].callers[1023]  = '\0';
+            staged[S->n_staged].caps     = NULL;   /* no cap data pre-ACTIVATE4 */
+            staged[S->n_staged].cap_root = NULL;
+            staged[S->n_staged].roles    = NULL;
+            staged[S->n_staged].signed_msg = strdup(g_last_signed);
+            staged[S->n_staged].sig_b64    = strdup(g_last_sig);
+            S->n_staged++;
+            char resp[256];
+            int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
+            write_safe(fd, resp, n, sizeof(resp));
+        } else {
+            do_activate(fd, name, impl_hash, cas_hash, migrate_required,
+                        activate_epoch, callers_sorted, NULL);
+        }
+
+    /* ── ACTIVATE4 ─────────────────────────────────────────────────── */
+    /* Protocol v4: adds cap_root/caps admission. cap_root is signed
+     * (tamper-evident); caps is NOT signed — its integrity comes solely
+     * from the server recomputing cap_root over it and matching the
+     * signed value (see compute_cap_root / THE CRUX in the task brief).
+     * Signed message: "ACTIVATE4 <name> <impl_hash> <cas_hash> <migrate>
+     *                  epoch:<N> cap_root:<hex> callers:<sorted-csv>" */
+    } else if (strncmp(line, "ACTIVATE4 ", 10) == 0
+               || strncmp(line, "ACTIVATE5 ", 10) == 0
+               || strncmp(line, "ACTIVATE6 ", 10) == 0) {
+        /* ACTIVATE5 differs only in <migrate> being a bitmask (see the
+         * file header) and in the verb inside the signed message;
+         * ACTIVATE6 adds the signed role_caps: and the unsigned roles:
+         * blocks (DD build step 10). */
+        const int v6 = line[8] == '6';
+        const int v5 = line[8] == '5' || v6;
+        const char *verb = v6 ? "ACTIVATE6" : v5 ? "ACTIVATE5" : "ACTIVATE4";
+        char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
+        char migrate_str[8] = {0};
+        if (sscanf(line + 10, "%255s %127s %127s %255s %7s",
+                   name, impl_hash, cas_hash, sig_b64, migrate_str) < 5) {
+            wresp(fd, "ERR bad_format\n"); return;
+        }
+        if (!is_hex64(cas_hash)) {
+            wresp(fd, "ERR bad_cas_hash\n"); return;
+        }
+        int migrate_required;
+        if (v5) {
+            if (migrate_str[0] < '0' || migrate_str[0] > '3' || migrate_str[1]) {
+                wresp(fd, "ERR bad_format bad_migrate\n"); return;
+            }
+            migrate_required = migrate_str[0] - '0';
+        } else {
+            migrate_required = (migrate_str[0] == '1') ? MIGRATE_STATE : 0;
+        }
+
+        /* Parse mandatory epoch:<N>. */
+        uint32_t activate_epoch = 0;
+        {
+            const char *ep = strstr(line, " epoch:");
+            if (!ep) { wresp(fd, "ERR bad_format missing_epoch\n"); return; }
+            activate_epoch = (uint32_t)atoi(ep + 7);
+        }
+
+        /* Parse mandatory cap_root:<hex64>. */
+        char cap_root[65] = {0};
+        {
+            const char *cr = strstr(line, " cap_root:");
+            if (!cr) { wresp(fd, "ERR bad_format missing_cap_root\n"); return; }
+            const char *hex = cr + 10;
+            size_t hlen = 0;
+            while (hex[hlen] && hex[hlen] != ' ' && hlen < sizeof(cap_root) - 1) hlen++;
+            memcpy(cap_root, hex, hlen); cap_root[hlen] = '\0';
+            if (!is_hex64(cap_root)) { wresp(fd, "ERR bad_format bad_cap_root\n"); return; }
+        }
+
+        /* Parse optional caps:<csv> — bounded scan to the NEXT " <key>:"
+         * boundary (i.e. up to " callers:"), NOT to end-of-line, since
+         * callers follows caps on the wire. An empty/absent caps:<csv>
+         * is a genuinely capless artifact (real cap_root = blake3("")) —
+         * the tamper check below always runs, empty or not. */
+        char caps_buf[1024] = {0};
+        {
+            const char *cp = strstr(line, " caps:");
+            if (cp) {
+                const char *csv = cp + 6;
+                const char *end = strstr(csv, " callers:");
+                /* ACTIVATE6: `roles:` sits between caps and callers. */
+                const char *rend = v6 ? strstr(csv, " roles:") : NULL;
+                if (rend && (!end || rend < end)) end = rend;
+                size_t clen = end ? (size_t)(end - csv) : strlen(csv);
+                /* Also stop at CR/LF in case callers: is absent (shouldn't
+                 * happen given the protocol, but bound defensively). */
+                size_t bound = 0;
+                while (bound < clen && csv[bound] != '\n' && csv[bound] != '\r') bound++;
+                if (bound > clen) bound = clen;
+                if (bound >= sizeof(caps_buf)) {
+                    /* Over-long caps field: distinct honest error, not a
+                     * silently-truncated value that would misleadingly
+                     * recompute to the wrong root and read as tampering. */
+                    wresp(fd, "ERR bad_format caps_too_long\n"); return;
+                }
+                memcpy(caps_buf, csv, bound);
+                caps_buf[bound] = '\0';
+            }
+        }
+
+        /* ACTIVATE6: the signed role roots and the unsigned closures.
+         * File-static: handle_client runs on the one server thread, one
+         * client at a time, and this frame already holds the batch
+         * array. */
+        char *role_roots = NULL, *roles_buf = NULL;
+        if (v6) {
+            static char s_role_roots[RELOAD_LINE_MAX], s_roles[RELOAD_LINE_MAX];
+            static const char *const rc_stops[] = { NULL };
+            static const char *const roles_stops[] = { " callers:", NULL };
+            role_roots = s_role_roots;
+            roles_buf  = s_roles;
+            int a = extract_field(line, " role_caps:", rc_stops, 1,
+                                  role_roots, RELOAD_LINE_MAX);
+            int b = extract_field(line, " roles:", roles_stops, 0,
+                                  roles_buf, RELOAD_LINE_MAX);
+            if (a != 1 || b != 1) {
+                wresp(fd, a != 1 ? "ERR bad_format missing_role_caps\n"
+                                 : "ERR bad_format missing_roles\n");
+                return;
+            }
+        }
+
+        /* Audit context for every log line from here on (see
+         * write_audit_log for when these values are verified). */
+        audit_caps_t ac4 = { caps_buf, cap_root, roles_buf };
+
+        /* Parse mandatory callers:<csv>, then sort for canonical form. */
+        char callers_sorted[1024] = {0};
+        {
+            const char *cp = strstr(line, " callers:");
+            if (!cp) { wresp(fd, "ERR bad_format missing_callers\n"); return; }
+            const char *csv = cp + 9;
+            char tmp[1024]; size_t tlen = 0;
+            while (csv[tlen] && csv[tlen] != '\n' && csv[tlen] != '\r'
+                   && tlen < sizeof(tmp) - 1)
+                tlen++;
+            memcpy(tmp, csv, tlen); tmp[tlen] = '\0';
+
+            if (tmp[0] != '\0') {
+                char *tokens[256]; int ntok = 0;
+                char *p = tmp;
+                while (*p && ntok < 255) {
+                    tokens[ntok++] = p;
+                    char *c = strchr(p, ',');
+                    if (!c) break;
+                    *c = '\0'; p = c + 1;
+                }
+                for (int i = 1; i < ntok; i++) {
+                    char *key = tokens[i]; int j = i - 1;
+                    while (j >= 0 && strcmp(tokens[j], key) > 0)
+                        { tokens[j+1] = tokens[j]; j--; }
+                    tokens[j+1] = key;
+                }
+                char *out = callers_sorted; size_t rem = sizeof(callers_sorted);
+                for (int i = 0; i < ntok && rem > 1; i++) {
+                    if (i > 0) { *out++ = ','; rem--; }
+                    size_t sl = strlen(tokens[i]);
+                    if (sl >= rem) sl = rem - 1;
+                    memcpy(out, tokens[i], sl); out += sl; rem -= sl;
+                }
+                *out = '\0';
+            }
+        }
+
+#if HAVE_SIGNING_KEY
+        if (!g_pubkey_loaded) {
+            wresp(fd, "ERR signing_not_configured\n"); return;
+        }
+        int all_zero = 1;
+        for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
+        if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); return; }
+
+        /* Reconstruct the canonical signed message — cap_root is signed,
+         * caps is NOT (see file-header note above). */
+        char signed_msg[RELOAD_LINE_MAX];
+        int smlen = v6
+            ? snprintf(signed_msg, sizeof(signed_msg),
+                       "%s %s %s %s %d epoch:%u cap_root:%s role_caps:%s callers:%s",
+                       verb, name, impl_hash, cas_hash, migrate_required,
+                       activate_epoch, cap_root, role_roots, callers_sorted)
+            : snprintf(signed_msg, sizeof(signed_msg),
+                       "%s %s %s %s %d epoch:%u cap_root:%s callers:%s",
+                       verb, name, impl_hash, cas_hash, migrate_required,
+                       activate_epoch, cap_root, callers_sorted);
+        if (smlen < 0 || smlen >= (int)sizeof(signed_msg)) {
+            wresp(fd, "ERR signed_msg_truncated\n"); return;
+        }
+
+        unsigned char sigbytes[64];
+        int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
+        if (siglen != 64) { wresp(fd, "ERR bad_signature\n"); return; }
+
+        unsigned char *sm = (unsigned char *)malloc((size_t)(smlen + 64));
+        if (!sm) { wresp(fd, "ERR oom\n"); return; }
+        memcpy(sm, sigbytes, 64);
+        memcpy(sm + 64, signed_msg, (size_t)smlen);
+        unsigned char *m_out = (unsigned char *)malloc((size_t)(smlen + 64));
+        unsigned long long m_out_len = 0;
+        int vrc = crypto_sign_open(m_out, &m_out_len, sm,
+                                   (unsigned long long)(smlen + 64), g_pubkey);
+        free(sm); free(m_out);
+        if (vrc != 0) {
+            write_audit_log(name, impl_hash, cas_hash, &ac4, "err_sig");
+            wresp(fd, "ERR bad_signature\n"); return;
+        }
+        remember_signed(signed_msg, (size_t)smlen, sig_b64);
+#else
+        (void)sig_b64;
+        write_audit_log(name, impl_hash, cas_hash, &ac4, "err_sig");
+        wresp(fd, "ERR signing_not_configured\n"); return;
+#endif
+
+        /* Cap admission gates — run AFTER sig-verify, BEFORE staging/
+         * do_activate, so both batched and immediate activations are
+         * gated identically.
+         *
+         * TAMPER CHECK IS UNCONDITIONAL — always recompute cap_root over
+         * the received (possibly-empty) caps set and compare against the
+         * signed cap_root, even when caps:<csv> is empty. A genuinely
+         * capless artifact's signed cap_root is blake3(""), a specific
+         * known value that an empty received set recomputes correctly,
+         * so it still admits. Skipping this check on empty caps would let
+         * a MITM strip the caps: field off a legitimately-signed ACTIVATE4
+         * for a real (non-empty-cap) artifact — the signature only covers
+         * cap_root/cas_hash, not caps — and have the server treat it as
+         * capless, bypassing policy entirely. */
+        {
+            char tamper_scratch[1024];
+            snprintf(tamper_scratch, sizeof(tamper_scratch), "%s", caps_buf);
+            char recomputed_root[65];
+            if (!compute_cap_root(tamper_scratch, recomputed_root)) {
+                wresp(fd, "ERR bad_format bad_caps\n"); return;
+            }
+            if (strcmp(recomputed_root, cap_root) != 0) {
+                write_audit_log(name, impl_hash, cas_hash, &ac4, "err_cap_tamper");
+                wresp(fd, "ERR cap_tamper\n"); return;
+            }
+        }
+
+        /* ACTIVATE6: every signed role root recomputes from the unsigned
+         * closures (unconditional, like the cap_root check above). */
+        if (v6) {
+            char rresp[256];
+            const char *bad = check_role_closures(role_roots, roles_buf, 0,
+                                                  rresp, sizeof(rresp));
+            if (bad) {
+                write_audit_log(name, impl_hash, cas_hash, &ac4, bad);
+                wresp(fd, rresp); return;
+            }
+        }
+
+        /* Policy check may remain gated on a non-empty received cap set:
+         * an empty set trivially satisfies any policy (nothing to
+         * violate), and the tamper check above already guarantees an
+         * empty caps_buf here really does correspond to a signed empty
+         * cap_root (blake3("")), not a stripped non-empty set. */
+        if (caps_buf[0] != '\0') {
+            char policy_scratch[1024];
+            snprintf(policy_scratch, sizeof(policy_scratch), "%s", caps_buf);
+            char *ptokens[MARCH_CAP_MAX_TOKENS]; int pntok = 0;
+            if (!split_cap_csv(policy_scratch, ptokens, &pntok)) {
+                wresp(fd, "ERR bad_format bad_caps\n"); return;
+            }
+            const char *violation = check_cap_policy(ptokens, pntok);
+            if (violation) {
+                write_audit_log(name, impl_hash, cas_hash, &ac4, "err_cap_policy");
+                char resp[256];
+                int n = snprintf(resp, sizeof(resp), "ERR cap_policy %s\n", violation);
+                write_safe(fd, resp, n, sizeof(resp));
+                return;
+            }
+        }
+
+        /* ACTIVATE6: the node's policy bounds every role's closure
+         * (plan section 5, "Admission"). */
+        if (v6) {
+            char rresp[512];
+            const char *bad = check_role_closures(role_roots, roles_buf, 1,
+                                                  rresp, sizeof(rresp));
+            if (bad) {
+                write_audit_log(name, impl_hash, cas_hash, &ac4, bad);
+                wresp(fd, rresp); return;
+            }
+        }
+
+        if (S->in_batch) {
+            if (S->n_staged >= MARCH_MAX_BATCH) {
+                wresp(fd, "ERR batch_full\n"); return;
+            }
+            strncpy(staged[S->n_staged].name,      name,            255);
+            strncpy(staged[S->n_staged].impl_hash, impl_hash,       127);
+            strncpy(staged[S->n_staged].cas_hash,  cas_hash,        127);
+            strncpy(staged[S->n_staged].callers,   callers_sorted, 1023);
+            staged[S->n_staged].epoch           = activate_epoch;
+            staged[S->n_staged].migrate_required = migrate_required;
+            staged[S->n_staged].name[255]      = '\0';
+            staged[S->n_staged].impl_hash[127] = '\0';
+            staged[S->n_staged].cas_hash[127]  = '\0';
+            staged[S->n_staged].callers[1023]  = '\0';
+            /* Heap-owned: the staged array lives on this thread's stack
+             * (256 entries); inline 1 KB caps buffers would overflow a
+             * 512 KB macOS secondary-thread stack.  Freed on commit,
+             * rollback and disconnect. */
+            staged[S->n_staged].caps     = strdup(caps_buf);
+            staged[S->n_staged].cap_root = strdup(cap_root);
+            staged[S->n_staged].roles    = roles_buf ? strdup(roles_buf) : NULL;
+            staged[S->n_staged].signed_msg = strdup(g_last_signed);
+            staged[S->n_staged].sig_b64    = strdup(g_last_sig);
+            S->n_staged++;
+            char resp[256];
+            int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
+            write_safe(fd, resp, n, sizeof(resp));
+        } else {
+            do_activate(fd, name, impl_hash, cas_hash, migrate_required,
+                        activate_epoch, callers_sorted, &ac4);
+        }
+
+    /* ── COMPACT (patch-stack size, DD step 10) ───────────────────── */
+    } else if (strcmp(line, "COMPACT") == 0) {
+        handle_compact(fd);
+
+    /* ── TOPOLOGY (signed reconciler action, DD step 10) ──────────── */
+    } else if (strncmp(line, "TOPOLOGY ", 9) == 0) {
+        handle_topology(fd, line + 9);
+
+    /* ── GET_EPOCH ────────────────────────────────────────────────── */
+    } else if (strcmp(line, "GET_EPOCH") == 0) {
+        uint32_t e = atomic_fetch_add_explicit(&g_next_epoch, 1,
+                                                memory_order_acq_rel);
+        persist_next_epoch(e + 1);
+        char resp[64];
+        int n = snprintf(resp, sizeof(resp), "EPOCH %u\n", e);
+        write_safe(fd, resp, n, sizeof(resp));
+
+    /* ── BEGIN_BATCH ──────────────────────────────────────────────── */
+    } else if (strcmp(line, "BEGIN_BATCH") == 0) {
+        if (S->in_batch) { wresp(fd, "ERR already_in_batch\n"); return; }
+        S->n_staged = 0; S->in_batch = 1;
+        wresp(fd, "OK\n");
+
+    /* ── COMMIT_BATCH ─────────────────────────────────────────────── */
+    } else if (strcmp(line, "COMMIT_BATCH") == 0) {
+        if (!S->in_batch) { wresp(fd, "ERR not_in_batch\n"); return; }
+        /* The whole batch is ONE deploy (one epoch, one marker per
+         * actor).  WAIT keeps it staged: send COMMIT_BATCH again. */
+        act_item *items = (act_item *)calloc((size_t)(S->n_staged ? S->n_staged : 1),
+                                             sizeof(*items));
+        audit_caps_t *acs = (audit_caps_t *)calloc((size_t)(S->n_staged ? S->n_staged : 1),
+                                                   sizeof(*acs));
+        if (!items || !acs) { free(items); free(acs); wresp(fd, "ERR oom\n"); return; }
+        for (int i = 0; i < S->n_staged; i++) {
+            acs[i].caps = staged[i].caps;
+            acs[i].cap_root = staged[i].cap_root;
+            acs[i].roles = staged[i].roles;
+            items[i].name      = staged[i].name;
+            items[i].impl_hash = staged[i].impl_hash;
+            items[i].cas_hash  = staged[i].cas_hash;
+            items[i].callers   = staged[i].callers[0] ? staged[i].callers : NULL;
+            items[i].epoch     = staged[i].epoch;
+            items[i].migrate   = staged[i].migrate_required;
+            items[i].ac        = staged[i].caps ? &acs[i] : NULL;
+            items[i].signed_msg = staged[i].signed_msg;
+            items[i].sig_b64    = staged[i].sig_b64;
+        }
+        char resp[512];
+        int r = S->n_staged ? activate_items(items, S->n_staged, resp, sizeof(resp)) : 0;
+        free(items); free(acs);
+        if (r == 1) {           /* WAIT: the batch stays staged */
+            wresp(fd, resp);
+            return;
+        }
+        int committed = r == 0 ? S->n_staged : 0;
+        for (int k = 0; k < S->n_staged; k++) {
+            free(staged[k].caps); free(staged[k].cap_root); free(staged[k].roles);
+    free(staged[k].signed_msg); free(staged[k].sig_b64);
+        }
+        S->in_batch = 0; S->n_staged = 0;
+        if (r == 0) {
+            int n = snprintf(resp, sizeof(resp), "OK %d\n", committed);
+            write_safe(fd, resp, n, sizeof(resp));
+        } else {
+            wresp(fd, "ERR commit_partial_failure\n");
+        }
+
+    /* ── PINS ─────────────────────────────────────────────────────── */
+    } else if (strcmp(line, "PINS") == 0) {
+        uint32_t eps[MARCH_EPOCH_PIN_SLOTS]; int64_t cnt[MARCH_EPOCH_PIN_SLOTS];
+        int k = march_epoch_pin_table(eps, cnt, MARCH_EPOCH_PIN_SLOTS);
+        uint32_t cur = march_epoch_current();
+        for (int i = 0; i < k; i++) {
+            char resp[160];
+            /* The current epoch's count includes its one role pin. */
+            int n = snprintf(resp, sizeof(resp), "EPOCH %u pins:%lld%s%s\n",
+                             eps[i],
+                             (long long)(eps[i] == cur ? cnt[i] - 1 : cnt[i]),
+                             eps[i] == cur ? " current" : "",
+                             march_hcr_epoch_draining(eps[i]) ? " draining" : "");
+            write_safe(fd, resp, n, sizeof(resp));
+        }
+        march_hcr_counters c; march_hcr_counters_get(&c);
+        char resp[512];
+        int n = snprintf(resp, sizeof(resp),
+                         "COUNTERS deferred:%lld converted:%lld dropped:%lld "
+                         "killed:%lld stopped:%lld advances:%lld early:%lld "
+                         "forced:%lld markers_live:%lld markers_lost:%lld\n",
+                         (long long)c.deferred, (long long)c.converted,
+                         (long long)c.dropped, (long long)c.killed,
+                         (long long)c.stopped, (long long)c.advances,
+                         (long long)c.early, (long long)c.forced,
+                         (long long)march_hcr_markers_live(),
+                         (long long)c.markers_lost);
+        write_safe(fd, resp, n, sizeof(resp));
+        wresp(fd, "END\n");
+
+    /* ── DRAIN ────────────────────────────────────────────────────── */
+    } else if (strncmp(line, "DRAIN ", 6) == 0) {
+        /* DRAIN <sig64> epoch:<E> [soft_ms:<n>] [hard_ms:<n>]
+         * Signed like ACTIVATE (the canonical message is
+         * "DRAIN epoch:<E> soft_ms:<n> hard_ms:<n>"): its hard deadline
+         * kills actors, and the socket is reachable by any process with
+         * the node's uid.  E must be BELOW the current epoch: every live
+         * unit is pinned at or below current, so a drain of current with
+         * a hard deadline would kill every actor in the process (review
+         * finding 2026-09-24-dd-review-drain-current-epoch-kills-every-actor). */
+        char sig_b64[128] = {0};
+        if (sscanf(line + 6, "%127s", sig_b64) != 1 || strncmp(sig_b64, "epoch:", 6) == 0) {
+            wresp(fd, "ERR bad_signature\n"); return;
+        }
+        const char *ep = strstr(line, "epoch:");
+        if (!ep) { wresp(fd, "ERR bad_format missing_epoch\n"); return; }
+        long long e = atoll(ep + 6), soft = 0, hard = 0;
+        const char *sp = strstr(line, "soft_ms:");
+        const char *hp = strstr(line, "hard_ms:");
+        if (sp) soft = atoll(sp + 8);
+        if (hp) hard = atoll(hp + 8);
+        if (e <= 0 || soft < 0 || hard < 0) {
+            wresp(fd, "ERR bad_format\n"); return;
+        }
+        if ((uint64_t)e >= march_epoch_current()) {
+            wresp(fd, "ERR bad_epoch\n"); return;
+        }
+#if HAVE_SIGNING_KEY
+        if (!g_pubkey_loaded) {
+            wresp(fd, "ERR signing_not_configured\n"); return;
+        }
+        {
+            int all_zero = 1;
+            for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
+            if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); return; }
+            char signed_msg[256];
+            int smlen = snprintf(signed_msg, sizeof(signed_msg),
+                                 "DRAIN epoch:%lld soft_ms:%lld hard_ms:%lld", e, soft, hard);
+            unsigned char sigbytes[64];
+            int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
+            if (siglen != 64) { wresp(fd, "ERR bad_signature\n"); return; }
+            unsigned char *sm = (unsigned char *)malloc((size_t)(smlen + 64));
+            unsigned char *m_out = (unsigned char *)malloc((size_t)(smlen + 64));
+            if (!sm || !m_out) { free(sm); free(m_out); wresp(fd, "ERR oom\n"); return; }
+            memcpy(sm, sigbytes, 64);
+            memcpy(sm + 64, signed_msg, (size_t)smlen);
+            unsigned long long m_out_len = 0;
+            int vrc = crypto_sign_open(m_out, &m_out_len, sm,
+                                       (unsigned long long)(smlen + 64), g_pubkey);
+            free(sm); free(m_out);
+            if (vrc != 0) {
+                g_audit_type = "drain";
+                write_audit_log("(drain)", signed_msg, "", NULL, "err_sig");
+                g_audit_type = NULL;
+                wresp(fd, "ERR bad_signature\n"); return;
+            }
+        }
+#else
+        wresp(fd, "ERR signing_not_configured\n"); return;
+#endif
+        march_hcr_drain((uint32_t)e, (int64_t)soft, (int64_t)hard);
+        if (e > g_drained_epoch) g_drained_epoch = e;
+        {
+            char what[128];
+            snprintf(what, sizeof(what), "epoch:%lld soft_ms:%lld hard_ms:%lld", e, soft, hard);
+            g_audit_type = "drain";
+            write_audit_log("(drain)", what, "", NULL, "ok");
+            g_audit_type = NULL;
+        }
+        wresp(fd, "OK\n");
+
+    /* ── ROLLBACK_BATCH ───────────────────────────────────────────── */
+    } else if (strcmp(line, "ROLLBACK_BATCH") == 0) {
+        for (int k = 0; k < S->n_staged; k++) {
+            free(staged[k].caps); free(staged[k].cap_root); free(staged[k].roles);
+    free(staged[k].signed_msg); free(staged[k].sig_b64);
+        }
+        S->in_batch = 0; S->n_staged = 0;
+        wresp(fd, "OK\n");
+
+    } else {
+        wresp(fd, "ERR unknown_command\n");
+    }
+    }
+}
+
 static void handle_client(int fd) {
     char line[RELOAD_LINE_MAX];
-
-    /* Per-session batch state (BEGIN_BATCH / COMMIT_BATCH / ROLLBACK_BATCH) */
-#define MARCH_MAX_BATCH 256
-    struct march_staged {
-        char     name[256];
-        char     impl_hash[128];
-        char     cas_hash[128];
-        char     callers[1024];
-        uint32_t epoch;
-        int      migrate_required;
-        char    *caps;       /* ACTIVATE4 only (heap, may be ""); NULL otherwise */
-        char    *cap_root;   /* ACTIVATE4 only (heap); NULL otherwise */
-        char    *roles;      /* ACTIVATE6 only (heap); NULL otherwise */
-        char    *signed_msg; /* the verified signed line (heap), persisted */
-        char    *sig_b64;    /* its signature (heap) */
-    } staged[MARCH_MAX_BATCH];
-    int n_staged  = 0;
-    int in_batch  = 0;
-
+    struct rl_session *S = (struct rl_session *)calloc(1, sizeof(*S));
+    if (!S) { close(fd); return; }
     while (1) {
         int r = read_line(fd, line, RELOAD_LINE_MAX);
         if (r <= 0) break;
-
-        /* ── SEQ: a signed line wrapped in a release (DD step 12-pre) ───── */
-        if (strncmp(line, "SEQ ", 4) == 0) {
-            if (unwrap_release(fd, line) != 0) continue;
-        } else if (is_signed_verb(line) && (g_require_release || g_release_seq > 0)) {
-            wresp(fd, "ERR release_required\n");
-            continue;
-        }
-
-        /* ── PING ─────────────────────────────────────────────────────── */
-        if (strcmp(line, "PING") == 0) {
-            wresp(fd, "PONG\n");
-
-        /* ── RELEASE_HEAD: the highest release this node accepted ─────── */
-        } else if (strcmp(line, "RELEASE_HEAD") == 0) {
-            char resp[128];
-            int n = snprintf(resp, sizeof(resp), "HEAD %llu %s%s\n", g_release_seq,
-                             g_release_id, g_require_release ? " required" : "");
-            write_safe(fd, resp, n, sizeof(resp));
-
-        /* ── HCR_INFO ─────────────────────────────────────────────────── */
-        } else if (strcmp(line, "HCR_INFO") == 0) {
-            hcr_info_response(fd);
-
-        /* ── ABI_QUERY ────────────────────────────────────────────────── */
-        } else if (strcmp(line, "ABI_QUERY") == 0) {
-            for (uint32_t i = 1; i < 65536; i++) {  /* 1-based; slot 0 = sentinel */
-                uint32_t cur = march_dispatch_current(i);
-                const char *h = march_dispatch_impl_hash(i, cur);
-                if (!h) break;
-                const char *name    = march_dispatch_id_to_name(i);
-                const char *sig     = march_dispatch_sig_hash(i, cur);
-                const char *callers = march_dispatch_callers(i);
-                char resp[1024];
-                int n;
-                if (callers && callers[0]) {
-                    n = snprintf(resp, sizeof(resp), "SLOT %u %s %s %s callers:%s\n",
-                                 i,
-                                 name ? name : "(none)",
-                                 h[0] ? h : "(none)",
-                                 sig && sig[0] ? sig : "(none)",
-                                 callers);
-                } else {
-                    n = snprintf(resp, sizeof(resp), "SLOT %u %s %s %s\n",
-                                 i,
-                                 name ? name : "(none)",
-                                 h[0] ? h : "(none)",
-                                 sig && sig[0] ? sig : "(none)");
-                }
-                write_safe(fd, resp, n, sizeof(resp));
-            }
-            wresp(fd, "END\n");
-
-        /* ── VERSIONS ─────────────────────────────────────────────────── */
-        } else if (strcmp(line, "VERSIONS") == 0) {
-            for (uint32_t i = 1; i < 65536; i++) {  /* 1-based; slot 0 = sentinel */
-                const char *name = march_dispatch_id_to_name(i);
-                if (!name) break;
-                const char *base = march_dispatch_baseline_hash(i);
-                uint32_t cur = march_dispatch_current(i);
-                const char *hot  = march_dispatch_impl_hash(i, cur);
-                char resp[512];
-                int n = snprintf(resp, sizeof(resp), "VERSION %s baseline %s\n",
-                                 name, base && base[0] ? base : "(none)");
-                write_safe(fd, resp, n, sizeof(resp));
-                /* Emit "hot" line only when impl_hash differs from baseline */
-                if (hot && hot[0] && base && base[0] && strcmp(hot, base) != 0) {
-                    n = snprintf(resp, sizeof(resp), "VERSION %s hot %s\n", name, hot);
-                    write_safe(fd, resp, n, sizeof(resp));
-                }
-            }
-            wresp(fd, "END\n");
-
-        /* ── VERSIONS_DETAIL ──────────────────────────────────────────── */
-        } else if (strcmp(line, "VERSIONS_DETAIL") == 0) {
-            for (uint32_t i = 1; i < 65536; i++) {  /* 1-based; slot 0 = sentinel */
-                const char *name = march_dispatch_id_to_name(i);
-                if (!name) break;
-                uint32_t cur = march_dispatch_current(i);
-                const char *h   = march_dispatch_impl_hash(i, cur);
-                long long   ts  = march_dispatch_activated_at(i);
-                const char *sig = march_dispatch_signer_hex(i);
-                uint32_t    ep  = march_dispatch_epoch(i, cur);
-                char resp[512];
-                int n = snprintf(resp, sizeof(resp),
-                                 "SLOT %u %s %s %lld %s %u\n",
-                                 i,
-                                 name,
-                                 h && h[0] ? h : "(none)",
-                                 ts,
-                                 sig && sig[0] ? sig : "(none)",
-                                 ep);
-                write_safe(fd, resp, n, sizeof(resp));
-            }
-            {
-                /* Delivery-failure counters (II.4.7); parsers skip non-SLOT
-                 * lines. */
-                march_hcr_counters c; march_hcr_counters_get(&c);
-                char resp[256];
-                int n = snprintf(resp, sizeof(resp),
-                                 "COUNTERS deferred:%lld converted:%lld dropped:%lld killed:%lld\n",
-                                 (long long)c.deferred, (long long)c.converted,
-                                 (long long)c.dropped, (long long)c.killed);
-                write_safe(fd, resp, n, sizeof(resp));
-            }
-            {
-                /* Plan 6.5: what the last start restored from the host's
-                 * persisted patch stack (parsers skip non-SLOT lines). */
-                char resp[320];
-                int n = snprintf(resp, sizeof(resp),
-                                 "RESTORED entries:%d skipped:%d mode:%s stack:%zu manifest:%s topology:%s\n",
-                                 g_restored_entries, g_restored_skipped, g_restored_mode,
-                                 g_stack_n, g_manifest_digest, g_topology_digest);
-                write_safe(fd, resp, n, sizeof(resp));
-            }
-            wresp(fd, "END\n");
-
-        /* ── CAS_CHECK ────────────────────────────────────────────────── */
-        } else if (strncmp(line, "CAS_CHECK ", 10) == 0) {
-            const char *hash = line + 10;
-            if (!is_hex64(hash)) {
-                wresp(fd, "ERR bad_hash\n"); continue;
-            }
-            char path[640]; cas_artifact_path(path, sizeof(path), hash);
-            wresp(fd, (access(path, F_OK) == 0) ? "PRESENT\n" : "MISSING\n");
-
-        /* ── CAS_PUT ──────────────────────────────────────────────────── */
-        } else if (strncmp(line, "CAS_PUT ", 8) == 0) {
-            char hash[65]; long long size_ll;
-            if (sscanf(line + 8, "%64s %lld", hash, &size_ll) != 2
-                || !is_hex64(hash)
-                || size_ll <= 0 || size_ll > CAS_MAX_ARTIFACT) {
-                wresp(fd, "ERR bad_format\n"); continue;
-            }
-            size_t sz = (size_t)size_ll;
-            unsigned char *buf = (unsigned char *)malloc(sz);
-            if (!buf) { wresp(fd, "ERR oom\n"); continue; }
-            wresp(fd, "READY\n");
-            if (read_exact(fd, buf, sz) != 0) {
-                /* Stream is desynced — close rather than trying to recover. */
-                free(buf); close(fd); return;
-            }
-            /* Write to CAS */
-            char path[640]; cas_artifact_path(path, sizeof(path), hash);
-            /* Ensure parent directory exists */
-            char dir[640]; snprintf(dir, sizeof(dir), "%s/artifacts/%.2s", g_cas_root, hash);
-            mkdir_p(dir);
-            /* Write atomically via tmp file */
-            char tmp[660]; snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-            FILE *f = fopen(tmp, "wb");
-            if (!f) { free(buf); wresp(fd, "ERR open_failed\n"); continue; }
-            size_t written = fwrite(buf, 1, sz, f);
-            fclose(f); free(buf);
-            if (written != sz) { unlink(tmp); wresp(fd, "ERR write_failed\n"); continue; }
-            if (rename(tmp, path) != 0) { unlink(tmp); wresp(fd, "ERR rename_failed\n"); continue; }
-            char resp[128];
-            int n = snprintf(resp, sizeof(resp), "OK %s\n", hash);
-            write_safe(fd, resp, n, sizeof(resp));
-
-        /* ── ACTIVATE ─────────────────────────────────────────────────── */
-        } else if (strncmp(line, "ACTIVATE ", 9) == 0) {
-            char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
-            char migrate_required_str[8] = {0};
-            int parsed = sscanf(line + 9, "%255s %127s %127s %255s %7s",
-                                name, impl_hash, cas_hash, sig_b64,
-                                migrate_required_str);
-            if (parsed < 4) {
-                wresp(fd, "ERR bad_format\n"); continue;
-            }
-            if (!is_hex64(cas_hash)) {
-                wresp(fd, "ERR bad_cas_hash\n"); continue;
-            }
-            int migrate_required = (parsed >= 5 && migrate_required_str[0] == '1') ? 1 : 0;
-
-#if HAVE_SIGNING_KEY
-            /* Verify ed25519 signature before doing anything else. */
-            if (!g_pubkey_loaded) {
-                wresp(fd, "ERR signing_not_configured\n"); continue;
-            }
-            /* Check for all-zero pubkey (signing not configured) */
-            int all_zero = 1;
-            for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
-            if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); continue; }
-
-            /* Signed message is "<name> <impl_hash> <cas_hash>" */
-            char signed_msg[640];
-            int smlen = snprintf(signed_msg, sizeof(signed_msg), "%s %s %s",
-                                 name, impl_hash, cas_hash);
-
-            /* Decode base64 signature */
-            unsigned char sigbytes[64];
-            int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
-            if (siglen != 64) { wresp(fd, "ERR bad_signature\n"); continue; }
-
-            /* Build the signed message in tweetnacl format: sig || message */
-            unsigned char *sm = (unsigned char *)malloc((size_t)(smlen + 64));
-            if (!sm) { wresp(fd, "ERR oom\n"); continue; }
-            memcpy(sm, sigbytes, 64);
-            memcpy(sm + 64, signed_msg, (size_t)smlen);
-
-            unsigned char *m_out = (unsigned char *)malloc((size_t)(smlen + 64));
-            unsigned long long m_out_len = 0;
-            int vrc = crypto_sign_open(m_out, &m_out_len, sm, (unsigned long long)(smlen + 64), g_pubkey);
-            free(sm); free(m_out);
-            if (vrc != 0) {
-                write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
-                wresp(fd, "ERR bad_signature\n"); continue;
-            }
-            remember_signed(signed_msg, (size_t)smlen, sig_b64);
-#else
-            (void)sig_b64;
-            write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
-            wresp(fd, "ERR signing_not_configured\n"); continue;
-#endif
-            {
-                uint32_t activate_epoch = 0;
-                const char *ep_ptr = strstr(line, " epoch:");
-                if (ep_ptr) activate_epoch = (uint32_t)atoi(ep_ptr + 7);
-                const char *callers_ptr = strstr(line, " callers:");
-                do_activate(fd, name, impl_hash, cas_hash, migrate_required,
-                            activate_epoch, callers_ptr ? callers_ptr + 9 : NULL, NULL);
-            }
-
-        /* ── ACTIVATE2 ─────────────────────────────────────────────────── */
-        /* Protocol v2: epoch and callers are included in the signed payload,
-         * preventing replay attacks that forge the epoch or caller list.
-         * Signed message: "ACTIVATE2 <name> <impl_hash> <cas_hash> epoch:<N> callers:<sorted-csv>" */
-        } else if (strncmp(line, "ACTIVATE2 ", 10) == 0) {
-            char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
-            char migrate_str[8] = {0};
-            if (sscanf(line + 10, "%255s %127s %127s %255s %7s",
-                       name, impl_hash, cas_hash, sig_b64, migrate_str) < 5) {
-                wresp(fd, "ERR bad_format\n"); continue;
-            }
-            if (!is_hex64(cas_hash)) {
-                wresp(fd, "ERR bad_cas_hash\n"); continue;
-            }
-            int migrate_required = (migrate_str[0] == '1') ? 1 : 0;
-
-            /* Parse mandatory epoch:<N>. */
-            uint32_t activate_epoch = 0;
-            {
-                const char *ep = strstr(line, " epoch:");
-                if (!ep) { wresp(fd, "ERR bad_format missing_epoch\n"); continue; }
-                activate_epoch = (uint32_t)atoi(ep + 7);
-            }
-
-            /* Parse mandatory callers:<csv>, then sort for canonical form. */
-            char callers_sorted[1024] = {0};
-            {
-                const char *cp = strstr(line, " callers:");
-                if (!cp) { wresp(fd, "ERR bad_format missing_callers\n"); continue; }
-                const char *csv = cp + 9;
-                char tmp[1024]; size_t tlen = 0;
-                while (csv[tlen] && csv[tlen] != '\n' && csv[tlen] != '\r'
-                       && tlen < sizeof(tmp) - 1)
-                    tlen++;
-                memcpy(tmp, csv, tlen); tmp[tlen] = '\0';
-
-                if (tmp[0] != '\0') {
-                    char *tokens[256]; int ntok = 0;
-                    char *p = tmp;
-                    while (*p && ntok < 255) {
-                        tokens[ntok++] = p;
-                        char *c = strchr(p, ',');
-                        if (!c) break;
-                        *c = '\0'; p = c + 1;
-                    }
-                    for (int i = 1; i < ntok; i++) {
-                        char *key = tokens[i]; int j = i - 1;
-                        while (j >= 0 && strcmp(tokens[j], key) > 0)
-                            { tokens[j+1] = tokens[j]; j--; }
-                        tokens[j+1] = key;
-                    }
-                    char *out = callers_sorted; size_t rem = sizeof(callers_sorted);
-                    for (int i = 0; i < ntok && rem > 1; i++) {
-                        if (i > 0) { *out++ = ','; rem--; }
-                        size_t sl = strlen(tokens[i]);
-                        if (sl >= rem) sl = rem - 1;
-                        memcpy(out, tokens[i], sl); out += sl; rem -= sl;
-                    }
-                    *out = '\0';
-                }
-            }
-
-#if HAVE_SIGNING_KEY
-            if (!g_pubkey_loaded) {
-                wresp(fd, "ERR signing_not_configured\n"); continue;
-            }
-            int all_zero = 1;
-            for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
-            if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); continue; }
-
-            /* Reconstruct the canonical signed message from parsed values. */
-            char signed_msg[1024];
-            int smlen = snprintf(signed_msg, sizeof(signed_msg),
-                                 "ACTIVATE2 %s %s %s epoch:%u callers:%s",
-                                 name, impl_hash, cas_hash, activate_epoch, callers_sorted);
-
-            unsigned char sigbytes[64];
-            int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
-            if (siglen != 64) { wresp(fd, "ERR bad_signature\n"); continue; }
-
-            unsigned char *sm = (unsigned char *)malloc((size_t)(smlen + 64));
-            if (!sm) { wresp(fd, "ERR oom\n"); continue; }
-            memcpy(sm, sigbytes, 64);
-            memcpy(sm + 64, signed_msg, (size_t)smlen);
-            unsigned char *m_out = (unsigned char *)malloc((size_t)(smlen + 64));
-            unsigned long long m_out_len = 0;
-            int vrc = crypto_sign_open(m_out, &m_out_len, sm,
-                                       (unsigned long long)(smlen + 64), g_pubkey);
-            free(sm); free(m_out);
-            if (vrc != 0) {
-                write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
-                wresp(fd, "ERR bad_signature\n"); continue;
-            }
-            remember_signed(signed_msg, (size_t)smlen, sig_b64);
-#else
-            (void)sig_b64;
-            write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
-            wresp(fd, "ERR signing_not_configured\n"); continue;
-#endif
-            do_activate(fd, name, impl_hash, cas_hash, migrate_required,
-                        activate_epoch, callers_sorted, NULL);
-
-        /* ── ACTIVATE3 ─────────────────────────────────────────────────── */
-        /* Protocol v3: migrate_required is now included in the signed payload,
-         * preventing unsigned modification of the migration flag.
-         * Signed message: "ACTIVATE3 <name> <impl_hash> <cas_hash> <migrate> epoch:<N> callers:<sorted-csv>" */
-        } else if (strncmp(line, "ACTIVATE3 ", 10) == 0) {
-            char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
-            char migrate_str[8] = {0};
-            if (sscanf(line + 10, "%255s %127s %127s %255s %7s",
-                       name, impl_hash, cas_hash, sig_b64, migrate_str) < 5) {
-                wresp(fd, "ERR bad_format\n"); continue;
-            }
-            if (!is_hex64(cas_hash)) {
-                wresp(fd, "ERR bad_cas_hash\n"); continue;
-            }
-            int migrate_required = (migrate_str[0] == '1') ? 1 : 0;
-
-            /* Parse mandatory epoch:<N>. */
-            uint32_t activate_epoch = 0;
-            {
-                const char *ep = strstr(line, " epoch:");
-                if (!ep) { wresp(fd, "ERR bad_format missing_epoch\n"); continue; }
-                activate_epoch = (uint32_t)atoi(ep + 7);
-            }
-
-            /* Parse mandatory callers:<csv>, then sort for canonical form. */
-            char callers_sorted[1024] = {0};
-            {
-                const char *cp = strstr(line, " callers:");
-                if (!cp) { wresp(fd, "ERR bad_format missing_callers\n"); continue; }
-                const char *csv = cp + 9;
-                char tmp[1024]; size_t tlen = 0;
-                while (csv[tlen] && csv[tlen] != '\n' && csv[tlen] != '\r'
-                       && tlen < sizeof(tmp) - 1)
-                    tlen++;
-                memcpy(tmp, csv, tlen); tmp[tlen] = '\0';
-
-                if (tmp[0] != '\0') {
-                    char *tokens[256]; int ntok = 0;
-                    char *p = tmp;
-                    while (*p && ntok < 255) {
-                        tokens[ntok++] = p;
-                        char *c = strchr(p, ',');
-                        if (!c) break;
-                        *c = '\0'; p = c + 1;
-                    }
-                    for (int i = 1; i < ntok; i++) {
-                        char *key = tokens[i]; int j = i - 1;
-                        while (j >= 0 && strcmp(tokens[j], key) > 0)
-                            { tokens[j+1] = tokens[j]; j--; }
-                        tokens[j+1] = key;
-                    }
-                    char *out = callers_sorted; size_t rem = sizeof(callers_sorted);
-                    for (int i = 0; i < ntok && rem > 1; i++) {
-                        if (i > 0) { *out++ = ','; rem--; }
-                        size_t sl = strlen(tokens[i]);
-                        if (sl >= rem) sl = rem - 1;
-                        memcpy(out, tokens[i], sl); out += sl; rem -= sl;
-                    }
-                    *out = '\0';
-                }
-            }
-
-#if HAVE_SIGNING_KEY
-            if (!g_pubkey_loaded) {
-                wresp(fd, "ERR signing_not_configured\n"); continue;
-            }
-            int all_zero = 1;
-            for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
-            if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); continue; }
-
-            /* Reconstruct the canonical signed message — now includes migrate_required. */
-            char signed_msg[2048];
-            int smlen = snprintf(signed_msg, sizeof(signed_msg),
-                                 "ACTIVATE3 %s %s %s %d epoch:%u callers:%s",
-                                 name, impl_hash, cas_hash, migrate_required,
-                                 activate_epoch, callers_sorted);
-            if (smlen < 0 || smlen >= (int)sizeof(signed_msg)) {
-                wresp(fd, "ERR signed_msg_truncated\n"); continue;
-            }
-
-            unsigned char sigbytes[64];
-            int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
-            if (siglen != 64) { wresp(fd, "ERR bad_signature\n"); continue; }
-
-            unsigned char *sm = (unsigned char *)malloc((size_t)(smlen + 64));
-            if (!sm) { wresp(fd, "ERR oom\n"); continue; }
-            memcpy(sm, sigbytes, 64);
-            memcpy(sm + 64, signed_msg, (size_t)smlen);
-            unsigned char *m_out = (unsigned char *)malloc((size_t)(smlen + 64));
-            unsigned long long m_out_len = 0;
-            int vrc = crypto_sign_open(m_out, &m_out_len, sm,
-                                       (unsigned long long)(smlen + 64), g_pubkey);
-            free(sm); free(m_out);
-            if (vrc != 0) {
-                write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
-                wresp(fd, "ERR bad_signature\n"); continue;
-            }
-            remember_signed(signed_msg, (size_t)smlen, sig_b64);
-#else
-            (void)sig_b64;
-            write_audit_log(name, impl_hash, cas_hash, NULL, "err_sig");
-            wresp(fd, "ERR signing_not_configured\n"); continue;
-#endif
-            if (in_batch) {
-                /* Stage: verify sig and record for COMMIT_BATCH */
-                if (n_staged >= MARCH_MAX_BATCH) {
-                    wresp(fd, "ERR batch_full\n"); continue;
-                }
-                strncpy(staged[n_staged].name,      name,            255);
-                strncpy(staged[n_staged].impl_hash, impl_hash,       127);
-                strncpy(staged[n_staged].cas_hash,  cas_hash,        127);
-                strncpy(staged[n_staged].callers,   callers_sorted, 1023);
-                staged[n_staged].epoch           = activate_epoch;
-                staged[n_staged].migrate_required = migrate_required;
-                staged[n_staged].name[255]      = '\0';
-                staged[n_staged].impl_hash[127] = '\0';
-                staged[n_staged].cas_hash[127]  = '\0';
-                staged[n_staged].callers[1023]  = '\0';
-                staged[n_staged].caps     = NULL;   /* no cap data pre-ACTIVATE4 */
-                staged[n_staged].cap_root = NULL;
-                staged[n_staged].roles    = NULL;
-                staged[n_staged].signed_msg = strdup(g_last_signed);
-                staged[n_staged].sig_b64    = strdup(g_last_sig);
-                n_staged++;
-                char resp[256];
-                int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
-                write_safe(fd, resp, n, sizeof(resp));
-            } else {
-                do_activate(fd, name, impl_hash, cas_hash, migrate_required,
-                            activate_epoch, callers_sorted, NULL);
-            }
-
-        /* ── ACTIVATE4 ─────────────────────────────────────────────────── */
-        /* Protocol v4: adds cap_root/caps admission. cap_root is signed
-         * (tamper-evident); caps is NOT signed — its integrity comes solely
-         * from the server recomputing cap_root over it and matching the
-         * signed value (see compute_cap_root / THE CRUX in the task brief).
-         * Signed message: "ACTIVATE4 <name> <impl_hash> <cas_hash> <migrate>
-         *                  epoch:<N> cap_root:<hex> callers:<sorted-csv>" */
-        } else if (strncmp(line, "ACTIVATE4 ", 10) == 0
-                   || strncmp(line, "ACTIVATE5 ", 10) == 0
-                   || strncmp(line, "ACTIVATE6 ", 10) == 0) {
-            /* ACTIVATE5 differs only in <migrate> being a bitmask (see the
-             * file header) and in the verb inside the signed message;
-             * ACTIVATE6 adds the signed role_caps: and the unsigned roles:
-             * blocks (DD build step 10). */
-            const int v6 = line[8] == '6';
-            const int v5 = line[8] == '5' || v6;
-            const char *verb = v6 ? "ACTIVATE6" : v5 ? "ACTIVATE5" : "ACTIVATE4";
-            char name[256], impl_hash[128], cas_hash[128], sig_b64[256];
-            char migrate_str[8] = {0};
-            if (sscanf(line + 10, "%255s %127s %127s %255s %7s",
-                       name, impl_hash, cas_hash, sig_b64, migrate_str) < 5) {
-                wresp(fd, "ERR bad_format\n"); continue;
-            }
-            if (!is_hex64(cas_hash)) {
-                wresp(fd, "ERR bad_cas_hash\n"); continue;
-            }
-            int migrate_required;
-            if (v5) {
-                if (migrate_str[0] < '0' || migrate_str[0] > '3' || migrate_str[1]) {
-                    wresp(fd, "ERR bad_format bad_migrate\n"); continue;
-                }
-                migrate_required = migrate_str[0] - '0';
-            } else {
-                migrate_required = (migrate_str[0] == '1') ? MIGRATE_STATE : 0;
-            }
-
-            /* Parse mandatory epoch:<N>. */
-            uint32_t activate_epoch = 0;
-            {
-                const char *ep = strstr(line, " epoch:");
-                if (!ep) { wresp(fd, "ERR bad_format missing_epoch\n"); continue; }
-                activate_epoch = (uint32_t)atoi(ep + 7);
-            }
-
-            /* Parse mandatory cap_root:<hex64>. */
-            char cap_root[65] = {0};
-            {
-                const char *cr = strstr(line, " cap_root:");
-                if (!cr) { wresp(fd, "ERR bad_format missing_cap_root\n"); continue; }
-                const char *hex = cr + 10;
-                size_t hlen = 0;
-                while (hex[hlen] && hex[hlen] != ' ' && hlen < sizeof(cap_root) - 1) hlen++;
-                memcpy(cap_root, hex, hlen); cap_root[hlen] = '\0';
-                if (!is_hex64(cap_root)) { wresp(fd, "ERR bad_format bad_cap_root\n"); continue; }
-            }
-
-            /* Parse optional caps:<csv> — bounded scan to the NEXT " <key>:"
-             * boundary (i.e. up to " callers:"), NOT to end-of-line, since
-             * callers follows caps on the wire. An empty/absent caps:<csv>
-             * is a genuinely capless artifact (real cap_root = blake3("")) —
-             * the tamper check below always runs, empty or not. */
-            char caps_buf[1024] = {0};
-            {
-                const char *cp = strstr(line, " caps:");
-                if (cp) {
-                    const char *csv = cp + 6;
-                    const char *end = strstr(csv, " callers:");
-                    /* ACTIVATE6: `roles:` sits between caps and callers. */
-                    const char *rend = v6 ? strstr(csv, " roles:") : NULL;
-                    if (rend && (!end || rend < end)) end = rend;
-                    size_t clen = end ? (size_t)(end - csv) : strlen(csv);
-                    /* Also stop at CR/LF in case callers: is absent (shouldn't
-                     * happen given the protocol, but bound defensively). */
-                    size_t bound = 0;
-                    while (bound < clen && csv[bound] != '\n' && csv[bound] != '\r') bound++;
-                    if (bound > clen) bound = clen;
-                    if (bound >= sizeof(caps_buf)) {
-                        /* Over-long caps field: distinct honest error, not a
-                         * silently-truncated value that would misleadingly
-                         * recompute to the wrong root and read as tampering. */
-                        wresp(fd, "ERR bad_format caps_too_long\n"); continue;
-                    }
-                    memcpy(caps_buf, csv, bound);
-                    caps_buf[bound] = '\0';
-                }
-            }
-
-            /* ACTIVATE6: the signed role roots and the unsigned closures.
-             * File-static: handle_client runs on the one server thread, one
-             * client at a time, and this frame already holds the batch
-             * array. */
-            char *role_roots = NULL, *roles_buf = NULL;
-            if (v6) {
-                static char s_role_roots[RELOAD_LINE_MAX], s_roles[RELOAD_LINE_MAX];
-                static const char *const rc_stops[] = { NULL };
-                static const char *const roles_stops[] = { " callers:", NULL };
-                role_roots = s_role_roots;
-                roles_buf  = s_roles;
-                int a = extract_field(line, " role_caps:", rc_stops, 1,
-                                      role_roots, RELOAD_LINE_MAX);
-                int b = extract_field(line, " roles:", roles_stops, 0,
-                                      roles_buf, RELOAD_LINE_MAX);
-                if (a != 1 || b != 1) {
-                    wresp(fd, a != 1 ? "ERR bad_format missing_role_caps\n"
-                                     : "ERR bad_format missing_roles\n");
-                    continue;
-                }
-            }
-
-            /* Audit context for every log line from here on (see
-             * write_audit_log for when these values are verified). */
-            audit_caps_t ac4 = { caps_buf, cap_root, roles_buf };
-
-            /* Parse mandatory callers:<csv>, then sort for canonical form. */
-            char callers_sorted[1024] = {0};
-            {
-                const char *cp = strstr(line, " callers:");
-                if (!cp) { wresp(fd, "ERR bad_format missing_callers\n"); continue; }
-                const char *csv = cp + 9;
-                char tmp[1024]; size_t tlen = 0;
-                while (csv[tlen] && csv[tlen] != '\n' && csv[tlen] != '\r'
-                       && tlen < sizeof(tmp) - 1)
-                    tlen++;
-                memcpy(tmp, csv, tlen); tmp[tlen] = '\0';
-
-                if (tmp[0] != '\0') {
-                    char *tokens[256]; int ntok = 0;
-                    char *p = tmp;
-                    while (*p && ntok < 255) {
-                        tokens[ntok++] = p;
-                        char *c = strchr(p, ',');
-                        if (!c) break;
-                        *c = '\0'; p = c + 1;
-                    }
-                    for (int i = 1; i < ntok; i++) {
-                        char *key = tokens[i]; int j = i - 1;
-                        while (j >= 0 && strcmp(tokens[j], key) > 0)
-                            { tokens[j+1] = tokens[j]; j--; }
-                        tokens[j+1] = key;
-                    }
-                    char *out = callers_sorted; size_t rem = sizeof(callers_sorted);
-                    for (int i = 0; i < ntok && rem > 1; i++) {
-                        if (i > 0) { *out++ = ','; rem--; }
-                        size_t sl = strlen(tokens[i]);
-                        if (sl >= rem) sl = rem - 1;
-                        memcpy(out, tokens[i], sl); out += sl; rem -= sl;
-                    }
-                    *out = '\0';
-                }
-            }
-
-#if HAVE_SIGNING_KEY
-            if (!g_pubkey_loaded) {
-                wresp(fd, "ERR signing_not_configured\n"); continue;
-            }
-            int all_zero = 1;
-            for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
-            if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); continue; }
-
-            /* Reconstruct the canonical signed message — cap_root is signed,
-             * caps is NOT (see file-header note above). */
-            char signed_msg[RELOAD_LINE_MAX];
-            int smlen = v6
-                ? snprintf(signed_msg, sizeof(signed_msg),
-                           "%s %s %s %s %d epoch:%u cap_root:%s role_caps:%s callers:%s",
-                           verb, name, impl_hash, cas_hash, migrate_required,
-                           activate_epoch, cap_root, role_roots, callers_sorted)
-                : snprintf(signed_msg, sizeof(signed_msg),
-                           "%s %s %s %s %d epoch:%u cap_root:%s callers:%s",
-                           verb, name, impl_hash, cas_hash, migrate_required,
-                           activate_epoch, cap_root, callers_sorted);
-            if (smlen < 0 || smlen >= (int)sizeof(signed_msg)) {
-                wresp(fd, "ERR signed_msg_truncated\n"); continue;
-            }
-
-            unsigned char sigbytes[64];
-            int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
-            if (siglen != 64) { wresp(fd, "ERR bad_signature\n"); continue; }
-
-            unsigned char *sm = (unsigned char *)malloc((size_t)(smlen + 64));
-            if (!sm) { wresp(fd, "ERR oom\n"); continue; }
-            memcpy(sm, sigbytes, 64);
-            memcpy(sm + 64, signed_msg, (size_t)smlen);
-            unsigned char *m_out = (unsigned char *)malloc((size_t)(smlen + 64));
-            unsigned long long m_out_len = 0;
-            int vrc = crypto_sign_open(m_out, &m_out_len, sm,
-                                       (unsigned long long)(smlen + 64), g_pubkey);
-            free(sm); free(m_out);
-            if (vrc != 0) {
-                write_audit_log(name, impl_hash, cas_hash, &ac4, "err_sig");
-                wresp(fd, "ERR bad_signature\n"); continue;
-            }
-            remember_signed(signed_msg, (size_t)smlen, sig_b64);
-#else
-            (void)sig_b64;
-            write_audit_log(name, impl_hash, cas_hash, &ac4, "err_sig");
-            wresp(fd, "ERR signing_not_configured\n"); continue;
-#endif
-
-            /* Cap admission gates — run AFTER sig-verify, BEFORE staging/
-             * do_activate, so both batched and immediate activations are
-             * gated identically.
-             *
-             * TAMPER CHECK IS UNCONDITIONAL — always recompute cap_root over
-             * the received (possibly-empty) caps set and compare against the
-             * signed cap_root, even when caps:<csv> is empty. A genuinely
-             * capless artifact's signed cap_root is blake3(""), a specific
-             * known value that an empty received set recomputes correctly,
-             * so it still admits. Skipping this check on empty caps would let
-             * a MITM strip the caps: field off a legitimately-signed ACTIVATE4
-             * for a real (non-empty-cap) artifact — the signature only covers
-             * cap_root/cas_hash, not caps — and have the server treat it as
-             * capless, bypassing policy entirely. */
-            {
-                char tamper_scratch[1024];
-                snprintf(tamper_scratch, sizeof(tamper_scratch), "%s", caps_buf);
-                char recomputed_root[65];
-                if (!compute_cap_root(tamper_scratch, recomputed_root)) {
-                    wresp(fd, "ERR bad_format bad_caps\n"); continue;
-                }
-                if (strcmp(recomputed_root, cap_root) != 0) {
-                    write_audit_log(name, impl_hash, cas_hash, &ac4, "err_cap_tamper");
-                    wresp(fd, "ERR cap_tamper\n"); continue;
-                }
-            }
-
-            /* ACTIVATE6: every signed role root recomputes from the unsigned
-             * closures (unconditional, like the cap_root check above). */
-            if (v6) {
-                char rresp[256];
-                const char *bad = check_role_closures(role_roots, roles_buf, 0,
-                                                      rresp, sizeof(rresp));
-                if (bad) {
-                    write_audit_log(name, impl_hash, cas_hash, &ac4, bad);
-                    wresp(fd, rresp); continue;
-                }
-            }
-
-            /* Policy check may remain gated on a non-empty received cap set:
-             * an empty set trivially satisfies any policy (nothing to
-             * violate), and the tamper check above already guarantees an
-             * empty caps_buf here really does correspond to a signed empty
-             * cap_root (blake3("")), not a stripped non-empty set. */
-            if (caps_buf[0] != '\0') {
-                char policy_scratch[1024];
-                snprintf(policy_scratch, sizeof(policy_scratch), "%s", caps_buf);
-                char *ptokens[MARCH_CAP_MAX_TOKENS]; int pntok = 0;
-                if (!split_cap_csv(policy_scratch, ptokens, &pntok)) {
-                    wresp(fd, "ERR bad_format bad_caps\n"); continue;
-                }
-                const char *violation = check_cap_policy(ptokens, pntok);
-                if (violation) {
-                    write_audit_log(name, impl_hash, cas_hash, &ac4, "err_cap_policy");
-                    char resp[256];
-                    int n = snprintf(resp, sizeof(resp), "ERR cap_policy %s\n", violation);
-                    write_safe(fd, resp, n, sizeof(resp));
-                    continue;
-                }
-            }
-
-            /* ACTIVATE6: the node's policy bounds every role's closure
-             * (plan section 5, "Admission"). */
-            if (v6) {
-                char rresp[512];
-                const char *bad = check_role_closures(role_roots, roles_buf, 1,
-                                                      rresp, sizeof(rresp));
-                if (bad) {
-                    write_audit_log(name, impl_hash, cas_hash, &ac4, bad);
-                    wresp(fd, rresp); continue;
-                }
-            }
-
-            if (in_batch) {
-                if (n_staged >= MARCH_MAX_BATCH) {
-                    wresp(fd, "ERR batch_full\n"); continue;
-                }
-                strncpy(staged[n_staged].name,      name,            255);
-                strncpy(staged[n_staged].impl_hash, impl_hash,       127);
-                strncpy(staged[n_staged].cas_hash,  cas_hash,        127);
-                strncpy(staged[n_staged].callers,   callers_sorted, 1023);
-                staged[n_staged].epoch           = activate_epoch;
-                staged[n_staged].migrate_required = migrate_required;
-                staged[n_staged].name[255]      = '\0';
-                staged[n_staged].impl_hash[127] = '\0';
-                staged[n_staged].cas_hash[127]  = '\0';
-                staged[n_staged].callers[1023]  = '\0';
-                /* Heap-owned: the staged array lives on this thread's stack
-                 * (256 entries); inline 1 KB caps buffers would overflow a
-                 * 512 KB macOS secondary-thread stack.  Freed on commit,
-                 * rollback and disconnect. */
-                staged[n_staged].caps     = strdup(caps_buf);
-                staged[n_staged].cap_root = strdup(cap_root);
-                staged[n_staged].roles    = roles_buf ? strdup(roles_buf) : NULL;
-                staged[n_staged].signed_msg = strdup(g_last_signed);
-                staged[n_staged].sig_b64    = strdup(g_last_sig);
-                n_staged++;
-                char resp[256];
-                int n = snprintf(resp, sizeof(resp), "OK %s\n", impl_hash);
-                write_safe(fd, resp, n, sizeof(resp));
-            } else {
-                do_activate(fd, name, impl_hash, cas_hash, migrate_required,
-                            activate_epoch, callers_sorted, &ac4);
-            }
-
-        /* ── COMPACT (patch-stack size, DD step 10) ───────────────────── */
-        } else if (strcmp(line, "COMPACT") == 0) {
-            handle_compact(fd);
-
-        /* ── TOPOLOGY (signed reconciler action, DD step 10) ──────────── */
-        } else if (strncmp(line, "TOPOLOGY ", 9) == 0) {
-            handle_topology(fd, line + 9);
-
-        /* ── GET_EPOCH ────────────────────────────────────────────────── */
-        } else if (strcmp(line, "GET_EPOCH") == 0) {
-            uint32_t e = atomic_fetch_add_explicit(&g_next_epoch, 1,
-                                                    memory_order_acq_rel);
-            persist_next_epoch(e + 1);
-            char resp[64];
-            int n = snprintf(resp, sizeof(resp), "EPOCH %u\n", e);
-            write_safe(fd, resp, n, sizeof(resp));
-
-        /* ── BEGIN_BATCH ──────────────────────────────────────────────── */
-        } else if (strcmp(line, "BEGIN_BATCH") == 0) {
-            if (in_batch) { wresp(fd, "ERR already_in_batch\n"); continue; }
-            n_staged = 0; in_batch = 1;
-            wresp(fd, "OK\n");
-
-        /* ── COMMIT_BATCH ─────────────────────────────────────────────── */
-        } else if (strcmp(line, "COMMIT_BATCH") == 0) {
-            if (!in_batch) { wresp(fd, "ERR not_in_batch\n"); continue; }
-            /* The whole batch is ONE deploy (one epoch, one marker per
-             * actor).  WAIT keeps it staged: send COMMIT_BATCH again. */
-            act_item *items = (act_item *)calloc((size_t)(n_staged ? n_staged : 1),
-                                                 sizeof(*items));
-            audit_caps_t *acs = (audit_caps_t *)calloc((size_t)(n_staged ? n_staged : 1),
-                                                       sizeof(*acs));
-            if (!items || !acs) { free(items); free(acs); wresp(fd, "ERR oom\n"); continue; }
-            for (int i = 0; i < n_staged; i++) {
-                acs[i].caps = staged[i].caps;
-                acs[i].cap_root = staged[i].cap_root;
-                acs[i].roles = staged[i].roles;
-                items[i].name      = staged[i].name;
-                items[i].impl_hash = staged[i].impl_hash;
-                items[i].cas_hash  = staged[i].cas_hash;
-                items[i].callers   = staged[i].callers[0] ? staged[i].callers : NULL;
-                items[i].epoch     = staged[i].epoch;
-                items[i].migrate   = staged[i].migrate_required;
-                items[i].ac        = staged[i].caps ? &acs[i] : NULL;
-                items[i].signed_msg = staged[i].signed_msg;
-                items[i].sig_b64    = staged[i].sig_b64;
-            }
-            char resp[512];
-            int r = n_staged ? activate_items(items, n_staged, resp, sizeof(resp)) : 0;
-            free(items); free(acs);
-            if (r == 1) {           /* WAIT: the batch stays staged */
-                wresp(fd, resp);
-                continue;
-            }
-            int committed = r == 0 ? n_staged : 0;
-            for (int k = 0; k < n_staged; k++) {
-                free(staged[k].caps); free(staged[k].cap_root); free(staged[k].roles);
-        free(staged[k].signed_msg); free(staged[k].sig_b64);
-            }
-            in_batch = 0; n_staged = 0;
-            if (r == 0) {
-                int n = snprintf(resp, sizeof(resp), "OK %d\n", committed);
-                write_safe(fd, resp, n, sizeof(resp));
-            } else {
-                wresp(fd, "ERR commit_partial_failure\n");
-            }
-
-        /* ── PINS ─────────────────────────────────────────────────────── */
-        } else if (strcmp(line, "PINS") == 0) {
-            uint32_t eps[MARCH_EPOCH_PIN_SLOTS]; int64_t cnt[MARCH_EPOCH_PIN_SLOTS];
-            int k = march_epoch_pin_table(eps, cnt, MARCH_EPOCH_PIN_SLOTS);
-            uint32_t cur = march_epoch_current();
-            for (int i = 0; i < k; i++) {
-                char resp[160];
-                /* The current epoch's count includes its one role pin. */
-                int n = snprintf(resp, sizeof(resp), "EPOCH %u pins:%lld%s%s\n",
-                                 eps[i],
-                                 (long long)(eps[i] == cur ? cnt[i] - 1 : cnt[i]),
-                                 eps[i] == cur ? " current" : "",
-                                 march_hcr_epoch_draining(eps[i]) ? " draining" : "");
-                write_safe(fd, resp, n, sizeof(resp));
-            }
-            march_hcr_counters c; march_hcr_counters_get(&c);
-            char resp[512];
-            int n = snprintf(resp, sizeof(resp),
-                             "COUNTERS deferred:%lld converted:%lld dropped:%lld "
-                             "killed:%lld stopped:%lld advances:%lld early:%lld "
-                             "forced:%lld markers_live:%lld markers_lost:%lld\n",
-                             (long long)c.deferred, (long long)c.converted,
-                             (long long)c.dropped, (long long)c.killed,
-                             (long long)c.stopped, (long long)c.advances,
-                             (long long)c.early, (long long)c.forced,
-                             (long long)march_hcr_markers_live(),
-                             (long long)c.markers_lost);
-            write_safe(fd, resp, n, sizeof(resp));
-            wresp(fd, "END\n");
-
-        /* ── DRAIN ────────────────────────────────────────────────────── */
-        } else if (strncmp(line, "DRAIN ", 6) == 0) {
-            /* DRAIN <sig64> epoch:<E> [soft_ms:<n>] [hard_ms:<n>]
-             * Signed like ACTIVATE (the canonical message is
-             * "DRAIN epoch:<E> soft_ms:<n> hard_ms:<n>"): its hard deadline
-             * kills actors, and the socket is reachable by any process with
-             * the node's uid.  E must be BELOW the current epoch: every live
-             * unit is pinned at or below current, so a drain of current with
-             * a hard deadline would kill every actor in the process (review
-             * finding 2026-09-24-dd-review-drain-current-epoch-kills-every-actor). */
-            char sig_b64[128] = {0};
-            if (sscanf(line + 6, "%127s", sig_b64) != 1 || strncmp(sig_b64, "epoch:", 6) == 0) {
-                wresp(fd, "ERR bad_signature\n"); continue;
-            }
-            const char *ep = strstr(line, "epoch:");
-            if (!ep) { wresp(fd, "ERR bad_format missing_epoch\n"); continue; }
-            long long e = atoll(ep + 6), soft = 0, hard = 0;
-            const char *sp = strstr(line, "soft_ms:");
-            const char *hp = strstr(line, "hard_ms:");
-            if (sp) soft = atoll(sp + 8);
-            if (hp) hard = atoll(hp + 8);
-            if (e <= 0 || soft < 0 || hard < 0) {
-                wresp(fd, "ERR bad_format\n"); continue;
-            }
-            if ((uint64_t)e >= march_epoch_current()) {
-                wresp(fd, "ERR bad_epoch\n"); continue;
-            }
-#if HAVE_SIGNING_KEY
-            if (!g_pubkey_loaded) {
-                wresp(fd, "ERR signing_not_configured\n"); continue;
-            }
-            {
-                int all_zero = 1;
-                for (int i = 0; i < 32; i++) if (g_pubkey[i]) { all_zero = 0; break; }
-                if (all_zero) { wresp(fd, "ERR signing_not_configured\n"); continue; }
-                char signed_msg[256];
-                int smlen = snprintf(signed_msg, sizeof(signed_msg),
-                                     "DRAIN epoch:%lld soft_ms:%lld hard_ms:%lld", e, soft, hard);
-                unsigned char sigbytes[64];
-                int siglen = b64_decode(sig_b64, strlen(sig_b64), sigbytes);
-                if (siglen != 64) { wresp(fd, "ERR bad_signature\n"); continue; }
-                unsigned char *sm = (unsigned char *)malloc((size_t)(smlen + 64));
-                unsigned char *m_out = (unsigned char *)malloc((size_t)(smlen + 64));
-                if (!sm || !m_out) { free(sm); free(m_out); wresp(fd, "ERR oom\n"); continue; }
-                memcpy(sm, sigbytes, 64);
-                memcpy(sm + 64, signed_msg, (size_t)smlen);
-                unsigned long long m_out_len = 0;
-                int vrc = crypto_sign_open(m_out, &m_out_len, sm,
-                                           (unsigned long long)(smlen + 64), g_pubkey);
-                free(sm); free(m_out);
-                if (vrc != 0) {
-                    g_audit_type = "drain";
-                    write_audit_log("(drain)", signed_msg, "", NULL, "err_sig");
-                    g_audit_type = NULL;
-                    wresp(fd, "ERR bad_signature\n"); continue;
-                }
-            }
-#else
-            wresp(fd, "ERR signing_not_configured\n"); continue;
-#endif
-            march_hcr_drain((uint32_t)e, (int64_t)soft, (int64_t)hard);
-            {
-                char what[128];
-                snprintf(what, sizeof(what), "epoch:%lld soft_ms:%lld hard_ms:%lld", e, soft, hard);
-                g_audit_type = "drain";
-                write_audit_log("(drain)", what, "", NULL, "ok");
-                g_audit_type = NULL;
-            }
-            wresp(fd, "OK\n");
-
-        /* ── ROLLBACK_BATCH ───────────────────────────────────────────── */
-        } else if (strcmp(line, "ROLLBACK_BATCH") == 0) {
-            for (int k = 0; k < n_staged; k++) {
-                free(staged[k].caps); free(staged[k].cap_root); free(staged[k].roles);
-        free(staged[k].signed_msg); free(staged[k].sig_b64);
-            }
-            in_batch = 0; n_staged = 0;
-            wresp(fd, "OK\n");
-
-        } else {
-            wresp(fd, "ERR unknown_command\n");
-        }
+        pthread_mutex_lock(&g_req_lock);
+        handle_line(fd, S, line);
+        pthread_mutex_unlock(&g_req_lock);
     }
     /* Discard any uncommitted staged activations (connection dropped mid-batch) */
-    for (int k = 0; k < n_staged; k++) {
-        free(staged[k].caps); free(staged[k].cap_root); free(staged[k].roles);
-        free(staged[k].signed_msg); free(staged[k].sig_b64);
-    }
+    session_discard_staged(S);
+    free(S);
     close(fd);
+}
+
+/* In-process request (the stdlib-only `reload_request` builtin).  `req` is a
+ * request line, optionally followed by "\n" and the bytes a body verb reads
+ * (TOPOLOGY, CAS_PUT).  Returns the response bytes, malloc'ed and
+ * NUL-terminated; a server that was never started answers
+ * "ERR no_reload_server\n".  A body verb's "READY\n" is part of the answer.
+ * All calls share one session (see below), so batches span calls. */
+char *march_reload_request(const char *req, size_t req_len, size_t *out_len) {
+    struct rl_vio vio; memset(&vio, 0, sizeof(vio));
+    if (g_socket_path[0] == '\0') {
+        vio.out = strdup("ERR no_reload_server\n");
+        *out_len = vio.out ? strlen(vio.out) : 0;
+        return vio.out;
+    }
+    const char *nl = memchr(req, '\n', req_len);
+    size_t line_len = nl ? (size_t)(nl - req) : req_len;
+    if (line_len >= RELOAD_LINE_MAX) {
+        vio.out = strdup("ERR bad_format line_too_long\n");
+        *out_len = strlen(vio.out);
+        return vio.out;
+    }
+    char *line = (char *)malloc(RELOAD_LINE_MAX);
+    if (!line) { vio.out = strdup("ERR oom\n"); *out_len = strlen(vio.out); return vio.out; }
+    memcpy(line, req, line_len); line[line_len] = '\0';
+    if (line_len && line[line_len - 1] == '\r') line[line_len - 1] = '\0';
+    vio.in = (const unsigned char *)(nl ? nl + 1 : req + req_len);
+    vio.in_len = nl ? req_len - line_len - 1 : 0;
+    pthread_mutex_lock(&g_req_lock);
+    /* One session for every in-process request, like one long-lived socket
+     * connection: BEGIN_BATCH / ACTIVATE… / COMMIT_BATCH may span calls.  The
+     * Agent sends ROLLBACK_BATCH before it relays a step, so a batch left
+     * half-staged by a failed step never leaks into the next. */
+    static struct rl_session *S;
+    if (!S) S = (struct rl_session *)calloc(1, sizeof(*S));
+    if (S) {
+        g_vio = &vio;
+        handle_line(-1, S, line);
+        g_vio = NULL;
+    } else {
+        vio.out = strdup("ERR oom\n"); vio.out_len = vio.out ? strlen(vio.out) : 0;
+    }
+    pthread_mutex_unlock(&g_req_lock);
+    free(line);
+    if (!vio.out) vio.out = strdup("");
+    *out_len = vio.out ? vio.out_len : 0;
+    return vio.out;
+}
+
+/* The `reload_request(line : String) : String` builtin (stdlib-only, gated to
+ * stdlib/control.march): march_string in, march_string out. */
+void *march_reload_request_string(void *s) {
+    march_string *in = (march_string *)s;
+    size_t n = 0;
+    char *out = march_reload_request(in->data, (size_t)in->len, &n);
+    void *r = march_string_lit(out ? out : "", (int64_t)n);
+    free(out);
+    return r;
 }
 
 static void *reload_server_thread(void *arg) {
@@ -2750,6 +2913,11 @@ void march_reload_server_start(const char *socket_path) {
 
 void march_hcr_on_topology(const char *path) {
     (void)path;
+}
+
+void *march_reload_request_string(void *s) {
+    (void)s;
+    return march_string_lit("ERR no_reload_server\n", 21);
 }
 
 #endif /* __linux__ || __APPLE__ */
