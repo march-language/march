@@ -108,7 +108,7 @@ mod Flow do
   end
 
   doc "Group items into lists of at most n elements."
-  fn batch(stage, n) do
+  fn batch(stage, n : {Int | _ > 0}) do
     match stage do
     Stage(seq) -> Stage(Seq.batch(seq, n))
     end

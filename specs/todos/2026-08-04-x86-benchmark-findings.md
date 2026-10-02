@@ -249,3 +249,36 @@ So the honest state of simd-map:
 4. ~~Optionally expose a `--target-cpu` passthrough — worth ~13% on simd-map here,
    but it is a knob, not a fix.~~ Done: `--target-cpu <cpu>`, see
    `specs/progress/2026-09-29-target-cpu-flag.md`.
+
+---
+
+## Status 2026-10-01: finding 2 step 1 (mimalloc) landed
+
+Step 1 of the owner's plan, "link mimalloc as `march_alloc`'s allocator", is done.
+`calloc`->`malloc` (step 2, the per-caller zero-init audit) is NOT done and remains open.
+Findings 1 and 3 are untouched.
+
+Design: `specs/progress/2026-10-01-mimalloc-march-alloc.md`. Vendored at
+`runtime/third_party/mimalloc` (v2.2.4, `static.c` only); `MARCH_MALLOC=libc` at compile
+time falls back to libc malloc; off under `MARCH_SANITIZE`, `--compile-so`, non-native
+targets, the JIT .so and WASM.
+
+Same-box A/B, `--compile --opt 2`, origin/main compiler vs this branch, alternating
+order, wall time of the whole process, Apple Silicon Mac, 1-min load average 10-14
+(shared box, far above the <5 target; the deltas below are large and consistent
+enough to read, small ones are not):
+
+| bench | main min / med | mimalloc min / med | n |
+|---|---|---|---|
+| binary_trees 15 | 233.0 / 234.9 ms | 165.4 / 171.1 ms (-29% / -27%) | 9 |
+| list_ops | 75.7 / 78.6 ms | 62.2 / 69.8 ms (-18% / -11%) | 9 |
+| tree_transform | 689.0 / 692.7 ms | 669.7 / 679.5 ms (-3% / -2%) | 7 |
+| fanin_flood, 8 sched | 99.8 / 122.4 ms | 85.9 / 99.4 ms | 15 |
+| par_fib | 208.4 / 228.1 ms | 213.6 / 223.4 ms (flat) | 7 |
+| actor_ping | 1168.7 / 1177.5 ms | 1151.8 / 1158.1 ms (flat) | 7 |
+
+Cost: peak RSS of binary_trees 15 rose from 7.1 MB to 13.6 MB (mimalloc's segment
+granularity).
+
+The residual vs OCaml on binary-trees is the memory model, as written above; mimalloc
+closes about a quarter of the March-side time, not the model-level gap.
