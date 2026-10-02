@@ -4,19 +4,11 @@ type Vec3 = Vec3(Float, Float, Float)
 ## dot
 fn dot(a : Vec3, b : Vec3) : Float =
   case a of
-  Vec3($f19, $f20, $f21) -> let $jp_clo23 : () -> '_ = letrec [$jp22] in
-$jp22 in
-let $jp_clo27 : () -> '_ = letrec [$jp26] in
-$jp26 in
-let az : Float = $f21 in
+  Vec3($f19, $f20, $f21) -> let az : Float = $f21 in
 let ay : Float = $f20 in
 let ax : Float = $f19 in
 case b of
-  Vec3($f8, $f9, $f10) -> let $jp_clo12 : () -> '_ = letrec [$jp11] in
-$jp11 in
-let $jp_clo16 : () -> '_ = letrec [$jp15] in
-$jp15 in
-let bz : Float = $f10 in
+  Vec3($f8, $f9, $f10) -> let bz : Float = $f10 in
 let b2 : Float = $f9 in
 let bx : Float = $f8 in
 let $t6 : Float = let $t4 : Float = *.(ax, bx) in

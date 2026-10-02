@@ -66,9 +66,85 @@ let test_keygen_cert_revoke () =
     | Ok tok -> Alcotest.(check bool) "token is base64 text" true (String.length tok > 0)
     | Error e -> Alcotest.fail e)
 
+(* ── step 12b: certificate items in a release ──────────────────────────── *)
+
+(* The same release text is pinned in test/stdlib/test_control.march
+   ("the item lines are forge's, byte for byte"): forge signs exactly what
+   Control.signed_text reads back. *)
+let pinned_items_text =
+  "release v1\nseq 7\nparent none\nenv prod\ntopology -\nstep 1 pools:* hosts:all do:certs gate:none\n\
+   cert node-a Q0VSVA==\nrevoke UkVWMQ==\nrevoke UkVWMg==\n"
+
+let items_release () =
+  let open Control_release in
+  ({ seq = 7; parent = no_parent; env = "prod"; topology = "-"; builds = [];
+     steps = [ { id = 1; pools = [ "*" ]; hosts = All; action = Certs; gate = No_gate; batch = 0 } ];
+     lines = []; drain = None; signature = "" },
+   { certs = [ ("node-a", "Q0VSVA==") ]; revokes = [ "UkVWMQ=="; "UkVWMg==" ] })
+
+let test_release_items () =
+  let r, items = items_release () in
+  Alcotest.(check string) "signed text" pinned_items_text (Control_release.signed_text_with items r);
+  Alcotest.(check string) "no items: the 12a text" (Control_release.signed_text r)
+    (Control_release.signed_text_with Control_release.no_items r);
+  let sk = Bytes.of_string node_sk in
+  let signed = Control_release.sign_with ~sk items r in
+  Alcotest.(check bool) "the signature covers the items" true
+    (March_ed25519.Ed25519.verify (Bytes.of_string pinned_items_text)
+       (Bytes.of_string (Result.get_ok (Cmd_cluster.of_hex signed.Control_release.signature)))
+       (Bytes.of_string (Cmd_cluster.pubkey_of node_sk)));
+  let other = Control_release.sign_with ~sk { items with Control_release.revokes = [] } r in
+  Alcotest.(check bool) "other items, another signature" true (other.Control_release.signature <> signed.Control_release.signature);
+  let doc = Control_release.serialize_with items signed in
+  Alcotest.(check bool) "the document ends with its sig line" true
+    (String.ends_with ~suffix:("sig " ^ signed.Control_release.signature ^ "\n") doc)
+
+let test_deliver_flags () =
+  with_tmpdir (fun d ->
+    let ok = Filename.concat d "operator.key" in
+    ignore (Cmd_cluster.run_keygen ~out_dir:d ~force:false ());
+    let delivered = ref [] in
+    let deliver cert = delivered := cert :: !delivered; Ok "delivered" in
+    (match Cmd_cluster.run_cert ~name:"node-a" ~roles:"" ~flags:"" ~days:1 ~seconds:None ~trust_domain:"t"
+             ~pool:"p" ~operator_key:ok ~node_key:None ~out_dir:d ~deliver () with
+     | Ok _ -> Alcotest.fail "--deliver without --node-key was accepted (it would need the node's new secret key)"
+     | Error e -> Alcotest.(check bool) "says why" true (String.length e > 0));
+    Alcotest.(check int) "nothing delivered" 0 (List.length !delivered);
+    ignore (Cmd_cluster.run_cert ~name:"node-a" ~roles:"" ~flags:"" ~days:1 ~seconds:None ~trust_domain:"t"
+              ~pool:"p" ~operator_key:ok ~node_key:None ~out_dir:d ());
+    let key = Filename.concat d "node-a.key" in
+    (match Cmd_cluster.run_cert ~name:"node-a" ~roles:"" ~flags:"" ~days:2 ~seconds:None ~trust_domain:"t"
+             ~pool:"p" ~operator_key:ok ~node_key:(Some key) ~out_dir:d ~deliver () with
+     | Ok m -> Alcotest.(check string) "the delivery's answer" "delivered" m
+     | Error e -> Alcotest.fail e);
+    Alcotest.(check (list string)) "the certificate written is the one delivered"
+      [ String.trim (Cmd_cluster.read_file (Filename.concat d "node-a.cert")) ] !delivered;
+    (match Cmd_cluster.run_revoke ~serial:"abc" ~node:"" ~trust_domain:"t" ~pool:"p" ~operator_key:ok
+             ~deliver:(fun tok -> Ok ("revoked " ^ tok)) () with
+     | Ok m -> Alcotest.(check bool) "the token is delivered" true (String.length m > 8 && String.sub m 0 8 = "revoked ")
+     | Error e -> Alcotest.fail e);
+    (* the deploy key, as hex or as forge's base64 *)
+    let hex = Filename.concat d "dk.hex" and b64 = Filename.concat d "dk.b64" in
+    Cmd_cluster.write_file hex (Cmd_cluster.to_hex node_sk ^ "\n");
+    Cmd_cluster.write_file b64 (Cmd_cluster.b64 node_sk ^ "\n");
+    List.iter (fun p ->
+        match Cmd_cluster.load_deploy_key (Some p) with
+        | Ok k -> Alcotest.(check string) p (Cmd_cluster.to_hex node_sk) (Cmd_cluster.to_hex (Bytes.to_string k))
+        | Error e -> Alcotest.fail e)
+      [ hex; b64 ];
+    (match Cmd_cluster.endpoints_of "127.0.0.1:7947,host:x" with
+     | Ok _ -> Alcotest.fail "a bad endpoint was accepted"
+     | Error _ -> ());
+    match Cmd_cluster.endpoints_of "127.0.0.1:7947, h2:8000" with
+    | Ok eps -> Alcotest.(check int) "two endpoints" 2 (List.length eps)
+    | Error e -> Alcotest.fail e)
+
 let () =
   Alcotest.run "forge cluster"
     [ ("certificates",
        [ Alcotest.test_case "pinned vector matches stdlib/node_cert.march" `Quick test_pinned_vector;
          Alcotest.test_case "msgpack smallest forms" `Quick test_msgpack_forms;
-         Alcotest.test_case "keygen / cert / revoke" `Quick test_keygen_cert_revoke ]) ]
+         Alcotest.test_case "keygen / cert / revoke" `Quick test_keygen_cert_revoke ]);
+      ("delivery (step 12b)",
+       [ Alcotest.test_case "certificate items in a release" `Quick test_release_items;
+         Alcotest.test_case "--deliver: the node key, what is delivered, the deploy key" `Quick test_deliver_flags ]) ]

@@ -61,20 +61,24 @@ type expr =
      [EAllocHole (ty, filled, hole)] allocates constructor [ty] leaving field
      [hole] UNINITIALIZED; [filled] carries the other fields in order, so the
      constructor's arity is [List.length filled + 1] and [hole] indexes the
-     full field list.  The hole reads as 0 until written: [march_alloc] is a
-     [calloc], and [IS_HEAP_PTR(0)] is false, so an RC op that reaches an
-     unfilled hole is a no-op rather than a wild pointer dereference.  That
-     property is what makes it safe for a cell to be dropped (or deep-dropped)
-     between allocation and hole-fill.
+     full field list.  The hole reads as 0 until written: the LLVM emitter
+     stores null into the slot on every allocation path ([march_alloc] is a
+     plain malloc since 2026-10-02 and does NOT zero, so this is an explicit
+     store, not an allocator property), and [IS_HEAP_PTR(0)] is false, so an
+     RC op that reaches an unfilled hole is a no-op rather than a wild pointer
+     dereference.  That property is what makes it safe for a cell to be
+     dropped (or deep-dropped) between allocation and hole-fill.
 
      The optional first component is a REUSE TOKEN, set by [Perceus_fbip] when
      a dropped cell of matching arity is available.  With a token the cell is
      reused in place when it is unique at runtime (rc = 1), falling back to a
-     fresh allocation when shared — the same discipline as [EReuse].  Reuse
-     must CLEAR the hole slot explicitly: unlike a fresh [calloc]'d cell, a
-     reused cell's slot still holds the old child pointer, and leaving it
-     there would let a drop in the window before the fill walk into a child
-     whose ownership has already moved to the match's branch variables.
+     fresh allocation when shared — the same discipline as [EReuse].  The
+     clearing store matters on both paths: a fresh cell's slot holds whatever
+     the allocator's previous tenant left (under mimalloc, typically a freed
+     cons cell's stale child pointer), and a reused cell's slot still holds
+     the old child pointer whose ownership has already moved to the match's
+     branch variables.  Leaving either there would let a drop in the window
+     before the fill walk into memory nobody owns.
 
      [ESetField (obj, i, v)] writes [v] into field [i] of [obj] in place and
      evaluates to unit.  Ownership MOVES into the object: no incref is emitted

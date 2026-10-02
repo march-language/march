@@ -1,0 +1,31 @@
+-- Control.serialize, called twice on one parsed release, compiled (dd step
+-- 12b). Its sig line was `(if r.signature == "" do "-" else r.signature end)`,
+-- and compiled that released the signature while the release still held it:
+-- the second call read freed memory (ASAN: heap-use-after-free in
+-- march_string_eq; without ASAN it printed `sig -`). The control plane's
+-- leader serialises the release it holds for every `do:certs` order.
+-- specs/todos/2026-10-01-compiled-record-with-projection-sigsegv.md
+mod ControlSerializeTwice do
+  needs IO
+  needs IO.Console
+
+  fn main(c : Cap(IO)) do
+    let sk = ed25519_seed_keypair(Bytes.from_list(List.map(List.range(0, 32), fn _ -> 3)))
+    let base = "release v1\nseq 7\nparent none\nenv e\ntopology t\nstep 1 pools:* hosts:all do:topology\nsig -\n"
+    match Control.parse(base) do
+      Err(e) -> println("parse: " ++ e)
+      Ok(r0) ->
+        let txt = Control.serialize(Control.sign(r0, sk))
+        match Control.parse(txt) do
+          Err(e) -> println("parse again: " ++ e)
+          Ok(r) ->
+            let a = Control.serialize(r)
+            let b = Control.serialize(r)
+            let d = Control.serialize(r)
+            println(if a == txt do "first: the signed document" else "first: DIFFERENT" end)
+            println(if b == txt && d == txt do "second and third: the same" else "second or third: DIFFERENT" end)
+            println(if Control.verify(r, Bytes.slice(sk, 32, 32)) do "still verifies" else "no longer verifies" end)
+        end
+    end
+  end
+end

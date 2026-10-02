@@ -1,4 +1,5 @@
 mod TestControl do
+  needs IO.Mut
 
   -- Distributed-deploys step 12a, the pure core of the control plane
   -- (stdlib/control.march): the release document, the executor's pass, the
@@ -49,12 +50,12 @@ mod TestControl do
   -- step applied twice).
   type SimNode = {
     name : String, pools : List(String), versions : List(Control.CtlVersion), topology : String,
-    drained : Int, healthy : Bool, seq : Int, refuse : Bool, applied : List(Int)
+    drained : Int, healthy : Bool, seq : Int, refuse : Bool, applied : List(Int), certs : String
   }
 
   fn node(name, pools, versions) : SimNode do
     { name: name, pools: pools, versions: versions, topology: "t41", drained: 0, healthy: true,
-      seq: 41, refuse: false, applied: Nil }
+      seq: 41, refuse: false, applied: Nil, certs: "" }
   end
 
   fn old_versions(pools) do
@@ -74,7 +75,7 @@ mod TestControl do
 
   fn report(n : SimNode) : Control.AgentReport do
     { node: n.name, seq: n.seq, versions: Control.versions_text(n.versions), topology: n.topology, drained: n.drained,
-      healthy: n.healthy, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "" }
+      healthy: n.healthy, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "", certs: n.certs }
   end
 
   -- The node side of an order: what the reload server would do with the
@@ -83,10 +84,11 @@ mod TestControl do
     let n2 = { n with applied: List.append(n.applied, [o.step]), seq: o.seq }
     if o.action == "topology" do { n2 with topology: o.want }
     else if o.action == "drain" do { n2 with drained: 41 }
+    else if o.action == "certs" do { n with applied: List.append(n.applied, [o.step]), certs: o.want }
     else
       let b = String.slice(o.action, 9, String.byte_size(o.action) - 10)
       { n2 with versions: Cons({ build: b, manifest: o.want }, List.filter(n.versions, fn v -> v.build != b)) }
-    end end
+    end end end
   end
 
   fn find_node(ns : List(SimNode), name : String) : SimNode do
@@ -185,6 +187,79 @@ mod TestControl do
 
   fn ops_for(rep : Control.AgentReport, answer : String) : Control.AgentOps do
     { report: fn -> rep, has: fn h -> h != "missing", request: fn _ -> answer }
+  end
+
+  -- ── certificate and revocation items (step 12b) ──────────────────────────
+
+  fn deploy_sk() do NodeCert.keypair_from_seed(seed(3)) end
+  fn rogue_sk() do NodeCert.keypair_from_seed(seed(9)) end
+  fn r1_key() do NodeCert.keypair_from_seed(seed(11)) end
+
+  fn uri(name : String) : String do NodeCert.node_uri("test.local", "render", name) end
+
+  -- A certificate for [name] under [key], signed by [op], as its text form.
+  fn cert_for(name : String, serial : String, op : Bytes) : String do
+    NodeCert.to_text(NodeCert.sign({ node: uri(name), roles: ["Ctl.Agent:initiate"], flags: Nil,
+      not_after: 4102444800, issuer: "spiffe://test.local/operator/x", pubkey: Bytes.to_hex(NodeCert.public_key(r1_key())),
+      serial: serial }, op))
+  end
+
+  fn revocation_of(name : String) : String do
+    NodeCert.revocation_to_text(NodeCert.sign_revocation({ node: uri(name), serial: "", issued_at: 1700000000 }, op_sk()))
+  end
+
+  fn rev_id(name : String) : String do
+    NodeCert.revocation_id({ node: uri(name), serial: "", issued_at: 1700000000 })
+  end
+
+  fn certs_step() : Control.CtlStep do
+    { id: 1, pools: ["*"], hosts: Control.HostsAll, action: Control.DoCerts, gate: Control.GateNone, batch: 0 }
+  end
+
+  -- A signed release carrying [certs] and [revokes], one `do:certs` step.
+  fn cert_release(seq : Int, certs : List(Control.CtlCert), revokes : List(String)) : Control.CtlRelease do
+    Control.sign({ seq: seq, parent: "none", env: "prod", topology: "-", builds: Nil, steps: [certs_step()], lines: Nil,
+      certs: certs, revokes: revokes, drain: None, signature: "" }, deploy_sk())
+  end
+
+  fn rotation() : Control.CtlRelease do
+    cert_release(43, [{ node: "r1", cert: cert_for("r1", "r1-new", op_sk()) }], [revocation_of("w1")])
+  end
+
+  -- A node's certificate state for `agent_apply_certs`: the serial it
+  -- presents and the revocations it knows, in [v]. `replace` checks the
+  -- operator's signature and the name, as `ClusterNode.replace_cert` does.
+  fn sim_cert_ops(v : Vault(String), name : String) : Control.CertOps do
+    { name: name, deploy_key: NodeCert.public_key(deploy_sk()),
+      serial: fn -> Vault.get_or(v, "serial", "r1-old"),
+      replace: fn text ->
+        match NodeCert.from_text(text) do
+          Err(e) -> Err(e)
+          Ok(sc) -> match NodeCert.verify(sc, NodeCert.public_key(op_sk()), 1700000000) do
+            Err(e) -> Err("cluster_node: the new certificate: " ++ e)
+            Ok(c) ->
+              Vault.set(v, "replaced", Vault.get_or(v, "replaced", "") ++ "1")
+              Vault.set(v, "serial", c.serial)
+              Ok(c.serial)
+          end
+        end,
+      revoke: fn t ->
+        match NodeCert.revocation_from_text(t) do
+          Err(e) -> Err(e)
+          Ok(sr) ->
+            Vault.set(v, "rev:" ++ NodeCert.revocation_id(sr.rev), "1")
+            Ok(())
+        end,
+      floor: fn -> Control.cert_floor(v) }
+  end
+
+  -- [n] reporting [r]'s `do:certs` step done.
+  fn certs_done(r : Control.CtlRelease, n : SimNode) : SimNode do
+    { n with certs: Control.want_for(r, certs_step(), n.name) }
+  end
+
+  fn certs_order(r : Control.CtlRelease, node : String) : Control.StepOrder do
+    Control.order(r, certs_step(), node)
   end
 
   -- ── the release document ─────────────────────────────────────────────────
@@ -373,7 +448,8 @@ mod TestControl do
       let (_, _, d3) = round(l2, ns1, 1000 + 59999)
       assert (String.starts_with(wait_of(d3), "1:"))
       let (_, _, d4) = round(l2, ns1, 1000 + 60000)
-      assert (apply_of(d4) == (2, ["r2"]))
+      let (s4, n4) = apply_of(d4)
+      assert (s4 == 2 && n4 == ["r2"])
     end
 
     test "a state change restarts a node's window; unhealthy clears it" do
@@ -530,7 +606,8 @@ mod TestControl do
       assert (Control.pass(r, members(cluster()), obs, Nil, 0) == Control.RolloutHalted(1, "r1", "ERR bad_signature"))
       -- a failure from an older release does not count
       let old = Control.observe(Nil, Control.with_failure(failed, { seq: 41, step: 1, why: "old" }), 0)
-      assert (apply_of(Some(Control.pass(r, members(cluster()), old, Nil, 0))) == (1, ["r1"]))
+      let (s1, n1) = apply_of(Some(Control.pass(r, members(cluster()), old, Nil, 0)))
+      assert (s1 == 1 && n1 == ["r1"])
     end
   end
 
@@ -582,6 +659,157 @@ mod TestControl do
     end
   end
 
+  describe "certificate items: the release" do
+    test "cert and revoke items parse, serialise canonically, and are covered by the signature" do
+      let r = rotation()
+      let txt = Control.serialize(r)
+      assert (String.contains(txt, "step 1 pools:* hosts:all do:certs gate:none\n"))
+      assert (String.contains(txt, "\ncert r1 " ++ cert_for("r1", "r1-new", op_sk()) ++ "\nrevoke " ++ revocation_of("w1") ++ "\nsig "))
+      assert (Control.parse(txt) == Ok(r))
+      assert (Control.verify(r, NodeCert.public_key(deploy_sk())))
+      -- an item swapped after signing breaks the release's signature
+      let swapped = { r with certs: [{ node: "r1", cert: cert_for("r1", "r1-other", op_sk()) }] }
+      assert (not(Control.verify(swapped, NodeCert.public_key(deploy_sk()))))
+    end
+
+    test "the item lines are forge's, byte for byte" do
+      -- pinned in forge/test/test_cluster.ml too (`pinned_items_text`)
+      let r = { seq: 7, parent: "none", env: "prod", topology: "-", builds: Nil, steps: [certs_step()], lines: Nil,
+                certs: [{ node: "node-a", cert: "Q0VSVA==" }], revokes: ["UkVWMQ==", "UkVWMg=="], drain: None, signature: "" }
+      assert (Control.signed_text(r) == "release v1\nseq 7\nparent none\nenv prod\ntopology -\nstep 1 pools:* hosts:all do:certs gate:none\ncert node-a Q0VSVA==\nrevoke UkVWMQ==\nrevoke UkVWMg==\n")
+    end
+
+    test "items are checked for shape only" do
+      let base = { rotation() with signature: "" }
+      let no_step = { base with steps: [{ certs_step() with action: Control.DoTopology }] }
+      assert (Control.check(no_step) == Err("the release carries certificate items but no `do:certs` step"))
+      let empty = { base with certs: Nil, revokes: Nil }
+      assert (Control.check(empty) == Err("step 1: delivers certificates, but the release carries no `cert` or `revoke` item"))
+      let junk = { base with certs: [{ node: "r1", cert: "bm90IGEgY2VydA==" }] }
+      assert (Control.check(junk) == Err("cert for r1: not a certificate"))
+      let bad_rev = { base with revokes: ["bm90IGEgY2VydA=="] }
+      assert (Control.check(bad_rev) == Err("revoke: not a revocation token"))
+      let twice = { base with certs: [{ node: "r1", cert: cert_for("r1", "a", op_sk()) }, { node: "r1", cert: cert_for("r1", "b", op_sk()) }] }
+      assert (Control.check(twice) == Err("cert: node r1 is given two certificates"))
+      -- whether a certificate is the operator's, or names the node it is for, is the node's check
+      let mismatched = { base with certs: [{ node: "r1", cert: cert_for("r2", "x", rogue_sk()) }] }
+      assert (Control.check(mismatched) == Ok(()))
+      assert (Result.is_err(Control.parse("release v1\nseq 1\nparent none\nenv e\ntopology t\nstep 1 pools:* hosts:all do:certs\ncert r1\nsig -\n")))
+    end
+  end
+
+  describe "certificate items: the executor" do
+    test "a do:certs step is done on a node once it reports its certificate and every revocation" do
+      let r = rotation()
+      assert (Control.want_for(r, certs_step(), "r1") == "cert:r1-new rev:" ++ rev_id("w1"))
+      assert (Control.want_for(r, certs_step(), "r2") == "rev:" ++ rev_id("w1"))
+      let o = certs_order(r, "r1")
+      assert (o.action == "certs" && o.lines == Control.serialize(r) && Control.order_artifacts(o) == Nil)
+      let l = match Control.leader_release(Control.leader_new(), r) do
+        Ok(x) -> x
+        Err(e) -> panic(e)
+      end
+      let (_, ns, _, d) = drive(l, cluster(), 0, 10)
+      assert (is_complete(d))
+      assert (applied(ns, "r1") == [1])
+      assert (Control.reports_state(report(find_node(ns, "r1")), "certs", "cert:r1-new"))
+      assert (not(Control.reports_state(report(find_node(cluster(), "r1")), "certs", "cert:r1-new")))
+    end
+
+    test "a node a certificate item names is waited for, member or not" do
+      let r = cert_release(47, [{ node: "r9", cert: cert_for("r9", "r9-new", op_sk()) }], Nil)
+      let ns = List.map(cluster(), fn n -> certs_done(r, n))
+      let obs = List.fold_left(ns, Nil, fn (acc, n) -> Control.observe(acc, report(n), 0))
+      -- r9 is in no pool the leader knows of: it is still ordered, and the step waits for it
+      let (s1, n1) = apply_of(Some(Control.pass(r, members(ns), obs, Nil, 0)))
+      assert (s1 == 1 && n1 == ["r9"])
+      let (s2, n2) = apply_of(Some(Control.pass(r, members(ns), obs, ["r9"], 0)))
+      assert (s2 == 1 && n2 == Nil)
+      let r9 = { node("r9", ["edge"], Nil) with certs: "cert:r9-new" }
+      let obs2 = Control.observe(obs, report(r9), 0)
+      assert (Control.pass(r, members(ns), obs2, Nil, 0) == Control.RolloutComplete)
+    end
+
+    test "the revoked node itself is not waited for" do
+      let r = rotation()
+      -- every node but w1 (the one the release revokes) reports the step done
+      let ns = List.map(cluster(), fn n -> if n.name == "w1" do n else certs_done(r, n) end)
+      let obs = List.fold_left(ns, Nil, fn (acc, n) -> Control.observe(acc, report(n), 0))
+      assert (Control.pass(r, members(ns), obs, Nil, 0) == Control.RolloutComplete)
+      -- a revocation by serial exempts the node that reports presenting it
+      let by_serial = NodeCert.revocation_to_text(NodeCert.sign_revocation({ node: "", serial: "r2-cur", issued_at: 1 }, op_sk()))
+      let r2 = cert_release(44, Nil, [by_serial])
+      let ns2 = List.map(cluster(), fn n -> if n.name == "r2" do { n with certs: "cert:r2-cur" } else certs_done(r2, n) end)
+      let obs2 = List.fold_left(ns2, Nil, fn (acc, n) -> Control.observe(acc, report(n), 0))
+      assert (Control.pass(r2, members(ns2), obs2, Nil, 0) == Control.RolloutComplete)
+      -- without the exemption r1, which reports nothing, holds the step
+      let ns3 = List.map(ns2, fn n -> if n.name == "r1" do { n with certs: "cert:r1-old" } else n end)
+      let obs3 = List.fold_left(ns3, Nil, fn (acc, n) -> Control.observe(acc, report(n), 0))
+      let (s3, n3) = apply_of(Some(Control.pass(r2, members(ns3), obs3, Nil, 0)))
+      assert (s3 == 1 && n3 == ["r1"])
+    end
+
+    test "certs_text is what a node reports" do
+      let c = { node: uri("r1"), roles: Nil, flags: Nil, not_after: 1, issuer: "", pubkey: "", serial: "abc" }
+      let rv = { node: uri("w1"), serial: "", issued_at: 1700000000 }
+      assert (Control.certs_text(Some(c), [rv]) == "cert:abc rev:" ++ rev_id("w1"))
+      assert (Control.certs_text(None, Nil) == "")
+      assert (String.byte_size(rev_id("w1")) == 16)
+    end
+  end
+
+  describe "certificate items: the Agent" do
+    test "a node takes its own certificate and every revocation, once" do
+      let v = Vault.new("test_control_certs_take")
+      let res = Control.agent_apply_certs_recording(sim_cert_ops(v, "r1"), v, certs_order(rotation(), "r1"))
+      assert (res.ok && res.detail == "certificate r1-new in use; 1 revocation(s) known")
+      assert (Vault.get(v, "serial") == Some("r1-new"))
+      assert (Vault.get(v, "rev:" ++ rev_id("w1")) == Some("1"))
+      assert (Control.cert_floor(v) == 43)
+      let again = Control.agent_apply_certs_recording(sim_cert_ops(v, "r1"), v, certs_order(rotation(), "r1"))
+      assert (again.ok && again.detail == "certificate r1-new already in use; 1 revocation(s) known")
+      assert (Vault.get(v, "replaced") == Some("1"))
+    end
+
+    test "another node's certificate item is not applied" do
+      let v = Vault.new("test_control_certs_other")
+      let res = Control.agent_apply_certs(sim_cert_ops(v, "r2"), certs_order(rotation(), "r2"))
+      assert (res.ok && res.detail == "1 revocation(s) known")
+      assert (Vault.get(v, "replaced") == None)
+    end
+
+    test "a certificate naming another node, or signed by another operator, is refused" do
+      let v = Vault.new("test_control_certs_refuse")
+      let named = cert_release(45, [{ node: "r1", cert: cert_for("r2", "r2-new", op_sk()) }], Nil)
+      let res = Control.agent_apply_certs_recording(sim_cert_ops(v, "r1"), v, certs_order(named, "r1"))
+      assert (not(res.ok) && res.detail == "the certificate for r1 names " ++ uri("r2") ++ ", not this node")
+      assert (Vault.get(v, "failure") == Some("45 1 " ++ res.detail))
+      let rogue = cert_release(46, [{ node: "r1", cert: cert_for("r1", "r1-rogue", rogue_sk()) }], Nil)
+      let res2 = Control.agent_apply_certs(sim_cert_ops(v, "r1"), certs_order(rogue, "r1"))
+      assert (not(res2.ok) && res2.detail == "cluster_node: the new certificate: certificate not signed by the cluster operator")
+      assert (Vault.get(v, "replaced") == None)
+      assert (Control.cert_floor(v) == 0)
+    end
+
+    test "the release must be the deploy key's, the one the order names, and not older than one taken" do
+      let v = Vault.new("test_control_certs_release")
+      let o = certs_order(rotation(), "r1")
+      let unsigned = { o with lines: Control.serialize({ rotation() with signature: "" }) }
+      let a = Control.agent_apply_certs(sim_cert_ops(v, "r1"), unsigned)
+      assert (a.detail == "the order's release is not signed by the deploy key")
+      let by_rogue = { o with lines: Control.serialize(Control.sign(rotation(), rogue_sk())) }
+      let b = Control.agent_apply_certs(sim_cert_ops(v, "r1"), by_rogue)
+      assert (b.detail == "the order's release is not signed by the deploy key")
+      let renamed = { o with release: "0000" }
+      let c = Control.agent_apply_certs(sim_cert_ops(v, "r1"), renamed)
+      assert (c.detail == "the order's release is not the release it names")
+      Vault.set(v, "cert_floor", "50")
+      let d = Control.agent_apply_certs(sim_cert_ops(v, "r1"), o)
+      assert (d.detail == "stale: release 43 is older than release 50, which this node has taken")
+      assert (Vault.get(v, "replaced") == None)
+    end
+  end
+
   describe "chunks" do
     test "an artifact splits into fixed-size chunks and reassembles" do
       let cs = Control.chunks("0123456789", 4)
@@ -590,6 +818,56 @@ mod TestControl do
       assert (List.map(cs, fn c -> c.last) == [false, false, true])
       assert (Control.chunks("", 4) == [{ offset: 0, data: "", last: true }])
       assert (Control.chunks("0123", 4) == [{ offset: 0, data: "0123", last: true }])
+    end
+  end
+
+  describe "audit" do
+    test "a release line is one JSON object with the node log's ts/type and the leader" do
+      let l = Control.audit_release(1700000000123, "a", 42, "d42", "ok", "")
+      assert (String.ends_with(l, "\n"))
+      match Json.parse(String.trim(l)) do
+        Ok(jv) ->
+          assert (Json.get(jv, "ts") == Some(Json.Number(1700000000123.0)))
+          assert (Json.get(jv, "type") == Some(Json.Str("release")))
+          assert (Json.get(jv, "leader") == Some(Json.Str("a")))
+          assert (Json.get(jv, "seq") == Some(Json.Number(42.0)))
+          assert (Json.get(jv, "result") == Some(Json.Str("ok")))
+        Err(e) -> panic("not JSON: " ++ e)
+      end
+    end
+
+    test "a refusal at compare-and-set is named by its kind" do
+      let r = rel()
+      let l1 = match Control.leader_release(Control.leader_new(), r) do
+        Ok(l) -> l
+        Err(e) -> panic(e)
+      end
+      let stale = { r with seq: 41 }
+      let other = { r with seq: 43, parent: "not-the-head" }
+      let fork = { r with env: "other" }
+      let why = fn x -> match Control.leader_release(l1, x) do
+        Ok(_) -> "accepted"
+        Err(e) -> Control.audit_refusal(e)
+      end
+      assert (why(stale) == "err_stale")
+      assert (why(other) == "err_parent")
+      assert (why(fork) == "err_fork")
+      assert (Control.audit_refusal("no steps") == "err_invalid")
+    end
+
+    test "orders, answers and the release's end each have a line; a reason with quotes stays JSON" do
+      let r = rel()
+      let o = Control.order(r, head(r.steps), "w1")
+      assert (String.contains(Control.audit_order(5, "a", o), "\"type\":\"order\""))
+      assert (String.contains(Control.audit_order(5, "a", o), "\"node\":\"w1\""))
+      let res = { seq: 42, step: 1, node: "w1", ok: false, detail: "ERR \"bad\" sig" }
+      match Json.parse(String.trim(Control.audit_step(6, "a", res))) do
+        Ok(jv) -> assert (Json.get(jv, "why") == Some(Json.Str("ERR \"bad\" sig")))
+        Err(e) -> panic("not JSON: " ++ e)
+      end
+      assert (Option.is_some(Control.audit_decision(7, "a", 42, Control.RolloutHalted(1, "w1", "gate"))))
+      assert (Option.is_some(Control.audit_decision(7, "a", 42, Control.RolloutComplete)))
+      assert (Control.audit_decision(7, "a", 42, Control.RolloutWait(1, "x")) == None)
     end
   end
 end

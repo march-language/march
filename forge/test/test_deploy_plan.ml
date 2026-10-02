@@ -587,6 +587,69 @@ let test_six_blocks () =
       find 0) headers in
   Alcotest.(check bool) "in order" true (List.sort compare positions = positions)
 
+(* ── the cluster backend (step 12a) ─────────────────────────────────── *)
+
+(** A plan's pools become segments in plan order: consecutive hot pools share
+    a release, a restart closes the release before it and runs over ssh, the
+    topology rides in the last release. *)
+let test_cluster_segments () =
+  let p = P.classify (input [ build ~old:(manifest base_fns) (manifest (replace_fn "Back.helper" "x2" base_fns)) ]) in
+  let pp name m push = { (mech p "back") with P.pp_pool = name; pp_mechanism = m; pp_push = push } in
+  let show segs =
+    String.concat " | " (List.map (function
+        | Cmd_deploy.Release { pools; topology } ->
+          "release[" ^ String.concat "," (List.map (fun (x : P.pool_plan) -> x.pp_pool) pools) ^ "]" ^ (if topology then "+topology" else "")
+        | Cmd_deploy.Process (x, _) -> "ssh:" ^ x.pp_pool) segs)
+  in
+  let seg pools = show (Cmd_deploy.segments { p with P.pools }) in
+  Alcotest.(check string) "hot, restart, hot, push"
+    "release[a] | ssh:b | release[c,d]+topology"
+    (seg [ pp "a" P.Hot false; pp "b" (P.Restart [ "why" ]) false; pp "c" (P.Hot_drain [ "Echo" ]) true;
+           pp "d" (P.Hot_migrate [ "Tally" ]) false ]);
+  Alcotest.(check string) "a restart last, then the topology on its own"
+    "ssh:a | release[]+topology" (seg [ pp "a" (P.Restart [ "why" ]) true ]);
+  Alcotest.(check string) "nothing to do" "" (seg [ pp "a" P.Nothing false; pp "b" (P.Blocked [ "x" ]) false ]);
+  Alcotest.(check string) "a placement push alone" "release[]+topology" (seg [ pp "a" P.Placement true ])
+
+let test_cluster_backend_choice () =
+  let with_control = { (topo ()) with Topology.control = Some { Topology.candidates = "ctl"; control_port = 7947 } } in
+  let pick via t = match Cmd_deploy.choose_backend ~via t with Ok `Cluster -> "cluster" | Ok `Ssh -> "ssh" | Error _ -> "error" in
+  Alcotest.(check (list string)) "auto follows [control]; ssh always; cluster needs [control]"
+    [ "cluster"; "ssh"; "ssh"; "cluster"; "error" ]
+    [ pick `Auto with_control; pick `Auto (topo ()); pick `Ssh with_control; pick `Cluster with_control; pick `Cluster (topo ()) ]
+
+let test_cluster_endpoints () =
+  let a = Cluster_deploy.address_of_ssh_target in
+  Alcotest.(check (list string)) "ssh targets to addresses" [ "10.0.0.5"; "10.0.0.5"; "web-1"; "::1" ]
+    [ a "deploy@10.0.0.5:22"; a "10.0.0.5"; a "root@web-1"; a "root@[::1]:22" ];
+  let t = topo () in
+  let t = { t with Topology.control = Some { Topology.candidates = "ctl"; control_port = 9000 }; pools = List.map (fun (p : Topology.pool) ->
+      { p with Topology.hosts = [ { Topology.host = "root@c1"; labels = [ "ctl" ] }; { Topology.host = "root@w1"; labels = [] } ] })
+      t.Topology.pools } in
+  (match Cluster_deploy.endpoints_of_topology t with
+   | Ok eps -> Alcotest.(check (list string)) "the labelled hosts, at the control port" [ "c1:9000" ]
+                 (List.map Cluster_deploy.show_endpoint eps)
+   | Error m -> Alcotest.fail m);
+  (match Cluster_deploy.endpoints_of_topology ~override:"127.0.0.1:1,127.0.0.1:2" t with
+   | Ok eps -> Alcotest.(check int) "the override wins" 2 (List.length eps)
+   | Error m -> Alcotest.fail m);
+  Alcotest.(check bool) "a bad override is an error" true
+    (Result.is_error (Cluster_deploy.endpoints_of_topology ~override:"nope" t))
+
+(** The recorder's baseline keeps only the nodes' slots (and the headers); a
+    manifest none of whose functions is a slot, or unknown slots, is kept whole. *)
+let test_restrict_manifest () =
+  let dir = Filename.temp_dir "restrict_" "" in
+  let path = Filename.concat dir "shared.hcr_manifest" in
+  Out_channel.with_open_bin path (fun oc ->
+      output_string oc "# march-hcr-manifest v2\n# cas_hash c\nServe.one i1 s1 caps=\nctl_status i2 s2 caps=\n$jp1$apply i3 s3 caps=\n");
+  let read p = In_channel.with_open_bin p In_channel.input_all in
+  let r = Cluster_deploy.restrict_manifest ~slots:[ "Serve.one"; "Other" ] ~dir path in
+  Alcotest.(check bool) "a new file" true (r <> path);
+  Alcotest.(check string) "headers and slots only" "# march-hcr-manifest v2\n# cas_hash c\nServe.one i1 s1 caps=\n" (read r);
+  Alcotest.(check string) "no slots known: unchanged" path (Cluster_deploy.restrict_manifest ~slots:[] ~dir path);
+  Alcotest.(check string) "no slot in it: unchanged" path (Cluster_deploy.restrict_manifest ~slots:[ "X" ] ~dir path)
+
 let () =
   Alcotest.run "deploy-plan" [
     ("mechanism", [
@@ -618,4 +681,10 @@ let () =
         Alcotest.test_case "a role closure widening blocks" `Quick test_role_closure_widening;
       ]);
     ("render", [ Alcotest.test_case "the six blocks of 6.8, in order" `Quick test_six_blocks ]);
+    ("cluster backend", [
+        Alcotest.test_case "segments: releases between restarts, the topology last" `Quick test_cluster_segments;
+        Alcotest.test_case "which backend: [control], --via" `Quick test_cluster_backend_choice;
+        Alcotest.test_case "control API endpoints" `Quick test_cluster_endpoints;
+        Alcotest.test_case "the recorder's baseline is the nodes' slots" `Quick test_restrict_manifest;
+      ]);
   ]

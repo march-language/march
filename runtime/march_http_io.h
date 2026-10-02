@@ -77,6 +77,13 @@ struct conn_state {
     char          scratch_snap[MARCH_RESPONSE_SCRATCH_SIZE];
     size_t        scratch_snap_len;
 
+    /* Handler results whose response bytes are still in flight (a deferred
+     * write keeps iovecs pointing into their body/header strings).  Released
+     * through the March-side drop (march_http_release_conn) when the write
+     * completes or the connection closes — never before. */
+    void         *pending_release[EVLOOP_PIPELINE_BATCH];
+    int           pending_release_n;
+
     /* ── Free-list link ─────────────────────────────────────────────── */
     conn_state_t *next_free;
 };

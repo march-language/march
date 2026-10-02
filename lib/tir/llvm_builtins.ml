@@ -639,7 +639,7 @@ let builtins : builtin list = [
   { march_name = "http_serialize_response"; c_name = Some "march_http_serialize_response"; ret_ty = Some Tir.TString;
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_http_serialize_response(i64 %status, ptr %headers, ptr %body)" };
   { march_name = "http_server_listen"; c_name = Some "march_http_server_listen"; ret_ty = Some Tir.TInt;
-    in_is_builtin = false; declare_sig = Some "declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)" };
+    in_is_builtin = false; declare_sig = Some "declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_timeout, ptr %pipeline, ptr %release)" };
   { march_name = "http_server_spawn_n"; c_name = Some "march_http_server_spawn_n"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_http_server_spawn_n(i64 %port, i64 %n, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)" };
   { march_name = "http_server_wait"; c_name = Some "march_http_server_wait"; ret_ty = Some Tir.TUnit;

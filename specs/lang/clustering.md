@@ -292,6 +292,14 @@ that certificate's key over the sender, the receiver and the certificate. The
 peer checks the certificate as a handshake would, with the same node name
 required, and keeps it for that link from then on.
 
+In a cluster running the control plane (a `[control]` section in its topology),
+a certificate and a revocation can also arrive as items of a release, from
+`forge cluster cert --deliver` and `forge cluster revoke --deliver`. The release
+is signed by the deploy key and the item by the operator key, and the node
+checks both before it calls `replace_cert` (for an item naming itself) or
+`revoke`. The control plane only carries them and issues nothing. See
+[Cluster Certificates]({{ site.baseurl }}/docs/cluster-certificates/).
+
 ### Per-frame MAC
 
 After the handshake every frame on the connection is sealed: it carries a

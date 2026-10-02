@@ -229,7 +229,23 @@ static void close_conn(int evfd, conn_state_t *c) {
     epoll_ctl(evfd, EPOLL_CTL_DEL, c->fd, NULL);
 #endif
     close(c->fd);
+    march_http_release_conns(c->pending_release, &c->pending_release_n);
     conn_state_free(c);
+}
+
+/* Hand a batch's results to the connection until its deferred write drains
+ * (handle_write) or it closes (close_conn/detach_conn).  At most one batch
+ * is ever in flight per connection — reads are not re-armed while writing —
+ * so the array never overflows; the fallback release only guards a
+ * programming error. */
+static void park_pending(conn_state_t *c, void **conns, int *n) {
+    for (int i = 0; i < *n; i++) {
+        if (c->pending_release_n < EVLOOP_PIPELINE_BATCH)
+            c->pending_release[c->pending_release_n++] = conns[i];
+        else
+            march_http_release_conn(conns[i]);
+    }
+    *n = 0;
 }
 
 /* ── Detach a connection from the event loop without closing the fd ───── */
@@ -246,6 +262,7 @@ static void detach_conn(int evfd, conn_state_t *c) {
     epoll_ctl(evfd, EPOLL_CTL_DEL, c->fd, NULL);
 #endif
     /* Do NOT close c->fd — the WebSocket thread takes ownership. */
+    march_http_release_conns(c->pending_release, &c->pending_release_n);
     conn_state_free(c);
 }
 
@@ -341,6 +358,12 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
 
         int batch_keep_alive = 1;
         int batch_ok         = 1;
+        /* Results whose iovecs are in batch_iov.  Released after the writev
+         * that drains them, or parked on the connection (pending_release)
+         * when the write is deferred — their body/header strings are what
+         * the deferred iovecs point at. */
+        void *done_conns[EVLOOP_PIPELINE_BATCH];
+        int   done_n = 0;
 
         for (int i = 0; i < n; i++) {
             int   keep_alive  = pre_keep_alives[i];
@@ -354,6 +377,7 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
                 if (batch_n > 0) { writev(c->fd, batch_iov, batch_n); }
                 march_http_send_response(c->fd, 500, make_nil(),
                     march_string_lit("Internal Server Error", 21));
+                march_http_release_conns(done_conns, &done_n);
                 close_conn(evfd, c);
                 batch_ok = 0;
                 break;
@@ -371,6 +395,11 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
 
                 void *ws_closure = *(void **)((char *)upgrade_val + 16);
                 void *ws_key     = find_ws_key_header(*(void **)(rc_p + 56));
+                /* The WS thread's call consumes one closure reference; the
+                 * result's `upgrade` field still owns another, released with
+                 * the result below (after the handshake, which reads ws_key
+                 * out of the result's request headers). */
+                march_incrc(ws_closure);
 
                 int ws_fd = c->fd;
                 /* Remove fd from event loop before spawning the thread. */
@@ -399,6 +428,8 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
                     close(ws_fd);
                 }
 
+                march_http_release_conns(done_conns, &done_n);
+                march_http_release_conn(result_conn);
                 batch_ok = 0;
                 break;
             }
@@ -412,6 +443,7 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
             if (batch_n + MARCH_RESPONSE_MAX_IOVEC > CONN_BATCH_IOV_MAX) {
                 writev(c->fd, batch_iov, batch_n);
                 batch_n            = 0;
+                march_http_release_conns(done_conns, &done_n);
                 bresp.scratch_used = 0;
             }
 
@@ -421,6 +453,7 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
             memcpy(batch_iov + batch_n, bresp.iov,
                    (size_t)bresp.iov_count * sizeof(struct iovec));
             batch_n += bresp.iov_count;
+            done_conns[done_n++] = result_conn;
 
             batch_keep_alive = keep_alive;
             if (!keep_alive) break;
@@ -433,12 +466,14 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
         ssize_t nsent = writev(c->fd, batch_iov, batch_n);
 
         if (nsent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            park_pending(c, done_conns, &done_n);
             evloop_defer_write(evfd, c, batch_iov, batch_n,
                                bresp.scratch_used, batch_keep_alive);
             return;
         }
 
         if (nsent < 0) {
+            march_http_release_conns(done_conns, &done_n);
             close_conn(evfd, c);
             return;
         }
@@ -461,12 +496,16 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
                         rem = 0;
                     }
                 }
+                park_pending(c, done_conns, &done_n);
                 evloop_defer_write(evfd, c,
                                    batch_iov + rem_pos, batch_n - rem_pos,
                                    bresp.scratch_used, batch_keep_alive);
                 return;
             }
         }
+        /* Every byte of the batch is out: the results' strings are no longer
+         * referenced by any iovec. */
+        march_http_release_conns(done_conns, &done_n);
 
         /* Full batch sent in one call (common case). */
         if (!batch_keep_alive) {
@@ -491,6 +530,9 @@ static void handle_write(int evfd, conn_state_t *c) {
         close_conn(evfd, c);
         return;
     }
+
+    /* The deferred write has drained: release the results it referenced. */
+    march_http_release_conns(c->pending_release, &c->pending_release_n);
 
     /* Response sent + keep-alive: reset for next request. */
     c->phase     = CONN_PHASE_READING;

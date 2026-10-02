@@ -36,6 +36,14 @@ let unboxing_env_disabled : bool Lazy.t =
       | Some ("1" | "true" | "yes") -> true
       | _ -> false)
 
+(** Escape hatch: [MARCH_NO_HOF_SPEC=1] turns off [Hof_spec] (higher-order
+    function specialization and unboxed known calls) for A/B runs and
+    bisection.  Read once per process. *)
+let hof_spec_env_disabled : bool Lazy.t =
+  lazy (match Sys.getenv_opt "MARCH_NO_HOF_SPEC" with
+      | Some ("1" | "true" | "yes") -> true
+      | _ -> false)
+
 let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     ?(after_fusion = fun _ -> ()) ?(before_perceus = fun ~k_table:_ _ -> ())
     ?(before_opt = fun _ -> ()) ?(extra_roots = [])
@@ -138,6 +146,16 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      and eligible for inlining in the subsequent Opt fixed-point loop.  See
      the [is_apply_fn] guard in [Perceus]'s EApp post_dec_vars for why the
      closure-apply ABI must not get a caller-side post-call EDecRC. *)
+  (* Hof_spec.specialize: clone a higher-order function whose closure parameter
+     is static, per known lambda, so the indirect calls inside it become the
+     direct [EApp(apply, clo :: args)] form Known_call produces.  Off for JS,
+     under hot reload (a clone bakes a lambda into another function's copy,
+     which the HCR identity machinery does not track) and with
+     MARCH_NO_HOF_SPEC=1. *)
+  let hof_spec_on =
+    opt && (not is_js) && hot_reload = None && not (Lazy.force hof_spec_env_disabled) in
+  let tir = if hof_spec_on then Hof_spec.specialize tir else tir in
+  snap "tir-hof-spec" tir;
   let tir = if opt then Known_call.run ~changed:(ref false) tir else tir in
   snap "tir-known-call" tir;
   (* Beta-ADT: reduce case-of-known-constructor before Perceus so that the
@@ -221,6 +239,11 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      only — Js_emit has no codegen arm for the synthetic call. *)
   let tir = if is_js then tir else Native_map_inline.run tir in
   snap "tir-native-map-inline" tir;
+  (* Hof_spec.redirect_unboxed: a direct call to a Float/Int-signature apply fn
+     goes to a clone emitted with native double/i64 parameters, so nothing is
+     boxed.  After Perceus on purpose: the clone copies an RC-annotated body. *)
+  let tir = if hof_spec_on then Hof_spec.redirect_unboxed tir else tir in
+  snap "tir-hof-unboxed" tir;
   (* When opt is disabled there are no per-pass snaps; still emit one overall. *)
   if not opt then snap "tir-opt" tir;
   stamp "opt";

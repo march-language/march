@@ -241,6 +241,12 @@ type ctx = {
      surrounding construction is not discarded.  Cleared by emit_expr around
      non-tail sub-expressions and restored afterwards. *)
   mutable tco_in_tail   : bool;
+  (* True while the expression being emitted is the function body's tail
+     (its value goes straight to `ret`): a tail-position atom is loaded
+     BARE, every other atom load normalises -- see [emit_wrap_int63].
+     Cleared around let RHSs / sequence prefixes like [tco_in_tail].  Only an
+     optimisation: a normalised value is always also a correct bare one. *)
+  mutable norm_ret_pos  : bool;
   (* Names of locals in the function being emitted whose binding RHS is a
      "dup" — [ESeq (EIncRC x, EAtom x)], the shape Perceus uses to
      materialise an owned local from a borrowed field (e.g. the `t` of a
@@ -394,6 +400,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   tco_loop_label = "";
   tco_param_info = [];
   tco_in_tail    = true;
+  norm_ret_pos   = false;
   tco_stack_save = "";
   tco_dup_bound  = [];
   tco_defer_slot = "";
@@ -622,37 +629,54 @@ let type_id_of_name (name : string) : int =
     inline code. Returns the final `ptr` register. *)
 let emit_tag_scalar ctx ~sh ~tag ~ptr (i64v : string) : string =
   let shifted = fresh ctx sh in
-  (* nsw is a deliberate optimization enabler, not decoration: it asserts the
-     shift cannot signed-overflow, which is exactly the existing tagging
-     convention (values must survive the (v<<1)|1 / ashr-1 round trip, i.e.
-     fit in 63 bits — the same assumption the trampoline and every erased
-     slot already make).  With nsw, InstCombine folds the whole
-     tag-then-conditionally-untag round trip away (ashr(or(shl nsw x,1),1)
-     -> x); without it, a sign-truncating sbfx survives on every scalar
-     round trip and, worse, blocks LLVM's accumulator TRE on recursive
-     functions whose result feeds the tag.  Measured: bench/fib.march
-     465 -> 385 ms.  Trade-off, documented deliberately: an Int outside
-     [-2^62, 2^62) passed through an erased slot was ALREADY silently
-     corrupted by the round trip; under nsw that same out-of-convention
-     value is poison instead of a deterministic wrong value. *)
-  emit ctx (Printf.sprintf "%s = shl nsw i64 %s, 1" shifted i64v);
+  (* A PLAIN shl, deliberately not `shl nsw`.  Under lazy normalisation (see
+     [emit_wrap_int63]) the i64 being tagged may be an UNNORMALISED
+     arithmetic result whose bit 63 disagrees with bit 62; `shl nsw` would
+     make exactly that value poison, and LLVM may then use the nsw fact to
+     delete a normalisation downstream.  The plain shift drops bit 63, so the
+     tagged word is always the canonical 63-bit pattern and the ashr-1 untag
+     reads back the normalised value — tagging is itself a normalisation.
+     Cost: a round trip through an erased slot is a sign-truncating sbfx
+     (ashr(shl x)) instead of nothing; that is the same instruction the
+     eager scheme paid after every `+`, now paid only at the boundary. *)
+  emit ctx (Printf.sprintf "%s = shl i64 %s, 1" shifted i64v);
   let tagged = fresh ctx tag in
   emit ctx (Printf.sprintf "%s = or i64 %s, 1" tagged shifted);
   let as_ptr = fresh ctx ptr in
   emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" as_ptr tagged);
   as_ptr
 
-(** Wrap a raw i64 arithmetic result to March's 63-bit [Int]: sign-extend
-    from bit 62 ([shl 1] then [ashr exact 1]), i.e. reduce modulo 2^63 into
+(** Normalise an i64 to March's 63-bit [Int]: sign-extend from bit 62
+    ([shl 1] then [ashr exact 1]), i.e. reduce modulo 2^63 into
     [-2^62, 2^62).  specs/lang/type-system.md ("Int width and overflow"):
     every March Int lies in that range, which is what the interpreter's OCaml
     [int], the lexer, constant folding, [march_string_to_int] and the tagged
-    [(n<<1)|1] representation in [emit_tag_scalar] already assume.  Emitted
-    after every Int operation that can leave the range (+ - * / negate, shl,
-    int_div, int_abs, int_pow, ...); and/or/xor/not/ashr/srem keep an
-    in-range input in range and need no wrap.  On a later tag InstCombine
-    folds [shl nsw (ashr exact (shl x 1) 1) 1] back to [shl x 1], so the
-    common arithmetic-then-box path pays nothing. *)
+    [(n<<1)|1] representation in [emit_tag_scalar] already assume.
+
+    LAZY NORMALISATION (2026-10-02).  A monomorphic Int in an i64 register
+    may be UNNORMALISED: its low 63 bits are the value, bit 63 is
+    unspecified.  `+ - * neg shl` (and `int_pow`, `int_div`, `int_abs`,
+    whose only out-of-range results are 2^62) are ring operations modulo
+    2^63, so they are emitted bare and their results are left as they come;
+    a user function RETURNS its i64 result bare as well, and may be PASSED
+    one.  Normalisation happens where a value is OBSERVED, and there is one
+    funnel for that: [Llvm_emit.emit_atom] normalises every i64 variable
+    load (TIR is ANF, so an icmp operand, a C-call argument, a store into
+    a NativeIntArr, a sitofp, ... all read their operand through it).  The
+    two other scalar observation points are tagging ([emit_tag_scalar]'s
+    plain shl drops bit 63 by construction) and the REPL slot store
+    ([Llvm_repl.emit_store_to_slot]).  Only a tail-position atom
+    ([Llvm_emit.norm_ret_pos]) is returned bare.
+
+    Why: the eager scheme (a wrap after every op) put a sign-truncating
+    sbfx between `fib(n-1) + fib(n-2)` and `ret`, which blocks LLVM's
+    accumulator tail-recursion elimination; with the add returned bare and
+    the compare operand normalised instead, LLVM folds the normalisation
+    into a shifted compare and TRE fires again (bench/fib.march
+    ~540 -> ~450 ms, specs/progress/2026-10-02-lazy-int63-normalisation.md).
+    LLVM removes a normalisation whose input it can prove already has two
+    sign bits (a literal, an untagged load, a prior normalisation), so the
+    redundant ones a variable's repeated uses emit are CSE'd or folded. *)
 let emit_wrap_int63 ctx (i64v : string) : string =
   let s = fresh ctx "w63s" in
   emit ctx (Printf.sprintf "%s = shl i64 %s, 1" s i64v);

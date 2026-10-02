@@ -11,7 +11,7 @@
 #include <ctype.h>
 #include <stdatomic.h>
 #define MARCH_ALLOC_DEFINE_SHIMS   /* the one TU that defines march_free_any / march_realloc_any */
-#include "march_alloc.h"   /* march_obj_calloc; free()/realloc() routing when mimalloc is on */
+#include "march_alloc.h"   /* march_obj_malloc; free()/realloc() routing when mimalloc is on */
 
 /* Defined next to march_actor_broadcast_migrate; used by the actor receive
  * loop and march_actor_msg_dispose, both of which precede it in this file. */
@@ -432,8 +432,15 @@ static inline void march_run_resource_dtor(void *p) {
     }
 }
 
+/* NOT zeroing (march_obj_malloc, 2026-10-02 -- was calloc).  The header is
+ * written here; the payload is whatever the allocator's previous tenant left
+ * and is the CALLER's to write, every word, before the object is published,
+ * read, or RC-walked.  Every caller was audited for that
+ * (specs/progress/2026-10-02-march-alloc-malloc.md); the TRMC hole store in
+ * lib/tir/llvm_emit_alloc.ml and the task-spawn stores below are the ones
+ * that used to lean on the zeroing. */
 void *march_alloc(int64_t sz) {
-    void *p = march_obj_calloc((size_t)sz);
+    void *p = march_obj_malloc((size_t)sz);
     if (!p) {
         march_debug_report_oom("march_alloc", sz);
         fputs("march: out of memory\n", stderr); exit(1);
@@ -3510,7 +3517,9 @@ static void meta_add_name(march_actor_meta *m, const char *name) {
     m->reg_names = (char **)realloc(m->reg_names,
                                      sizeof(char *) * (size_t)(m->reg_name_count + 1));
     if (!m->reg_names) { fputs("march: out of memory (registry)\n", stderr); exit(1); }
-    m->reg_names[m->reg_name_count++] = strdup(name);
+    m->reg_names[m->reg_name_count] = strdup(name);
+    /* Atomic: the observe walk reads the count without the lock. */
+    __atomic_store_n(&m->reg_name_count, m->reg_name_count + 1, __ATOMIC_RELAXED);
 }
 
 /* Remove [name] from [m]'s reverse index, if present (order not preserved). */
@@ -3519,7 +3528,7 @@ static void meta_remove_name(march_actor_meta *m, const char *name) {
         if (strcmp(m->reg_names[i], name) == 0) {
             free(m->reg_names[i]);
             m->reg_names[i] = m->reg_names[m->reg_name_count - 1];
-            m->reg_name_count--;
+            __atomic_store_n(&m->reg_name_count, m->reg_name_count - 1, __ATOMIC_RELAXED);
             return;
         }
     }
@@ -3688,7 +3697,7 @@ static void registry_retire_meta(march_actor_meta *m, void *actor) {
     }
     free(m->reg_names);   /* no-op if NULL */
     m->reg_names = NULL;
-    m->reg_name_count = 0;
+    __atomic_store_n(&m->reg_name_count, 0, __ATOMIC_RELAXED);
     pthread_mutex_unlock(&g_registry_mu);
 }
 
@@ -5119,8 +5128,8 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
     march_actor_meta *new_meta = find_meta(new_child);
     if (new_meta) {
         pthread_mutex_lock(&g_tbl_mu);
-        new_meta->sup_pe = sup_meta->pe;
-        new_meta->sup_child_index = child_idx;
+        __atomic_store_n(&new_meta->sup_child_index, child_idx, __ATOMIC_RELAXED);
+        __atomic_store_n(&new_meta->sup_pe, sup_meta->pe, __ATOMIC_RELEASE);
         atomic_store_explicit(&new_meta->pe->epoch, inherited_epoch,
                               memory_order_release);
         /* Capture-at-spawn (--test builds only ever set it): the replacement
@@ -5206,7 +5215,7 @@ static void march_one_for_all_restart(void *supervisor, march_actor_meta *sup_me
              * recursive notify. See stash_child_for_restart's comment. */
             stash_child_for_restart(live_children[i].m, sup_meta, i);
             pthread_mutex_lock(&g_tbl_mu);
-            live_children[i].m->sup_pe = NULL;
+            __atomic_store_n(&live_children[i].m->sup_pe, NULL, __ATOMIC_RELEASE);
             pthread_mutex_unlock(&g_tbl_mu);
         }
     }
@@ -5252,7 +5261,7 @@ static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_m
              * runs for this sibling. */
             stash_child_for_restart(live_children[i].m, sup_meta, i);
             pthread_mutex_lock(&g_tbl_mu);
-            live_children[i].m->sup_pe = NULL;
+            __atomic_store_n(&live_children[i].m->sup_pe, NULL, __ATOMIC_RELEASE);
             pthread_mutex_unlock(&g_tbl_mu);
         }
     }
@@ -6104,7 +6113,7 @@ static int64_t march_actor_stop_pinned(void *actor, march_actor_meta *meta,
              * against a supervisor that is itself on the way out. Same
              * technique the batch strategies use for their sweep kills. */
             pthread_mutex_lock(&g_tbl_mu);
-            child.m->sup_pe = NULL;
+            __atomic_store_n(&child.m->sup_pe, NULL, __ATOMIC_RELEASE);
             pthread_mutex_unlock(&g_tbl_mu);
             if (budget == 0) {
                 do_actor_death(child.actor, MARCH_DEATH_KILLED, NULL, 0);
@@ -6283,7 +6292,7 @@ static void *march_spawn_common(void *actor, int defer_activation) {
     pthread_mutex_lock(&g_tbl_mu);
     if (pe_pid(meta->pe) >= 0) {
         march_actor_meta *m = meta_new_locked(actor);
-        m->dispatch_name_id = meta->dispatch_name_id;
+        __atomic_store_n(&m->dispatch_name_id, meta->dispatch_name_id, __ATOMIC_RELAXED);
         m->call_tags        = meta->call_tags;
         meta = m;
     }
@@ -6367,7 +6376,7 @@ void march_actor_set_dispatch_id(void *actor, uint32_t name_id) {
      * exists; march_spawn will find the same entry and attach the green thread. */
     march_reclaim_enter();   /* meta: resolved and used inside */
     march_actor_meta *meta = find_or_create_meta(actor);
-    if (meta) meta->dispatch_name_id = name_id;
+    if (meta) __atomic_store_n(&meta->dispatch_name_id, name_id, __ATOMIC_RELAXED);
     march_reclaim_exit();
 }
 
@@ -7030,6 +7039,10 @@ void *march_task_spawn_thunk(void *clo_ptr) {
      * + in-scheduler waiter — see task_wait_done). */
     int64_t *task = (int64_t *)march_alloc(48);
     if (task) ((march_hdr *)task)->tag = MARCH_TASK_TAG;  /* see march_run_resource_dtor */
+    /* march_alloc does not zero (2026-10-02): proc handle, result, done flag
+     * and waiter all start at 0 by these stores, which happen BEFORE the
+     * spawn publishes the object -- see the race note below. */
+    if (task) { task[2] = 0; task[3] = 0; task[4] = 0; task[5] = 0; }
     /* Extra RC hold for the trampoline's wa->task raw pointer.  The caller
      * owns RC=1; this bumps to RC=2 so a fire-and-forget drop (RC→1) doesn't
      * free the object before the trampoline writes the result. */
@@ -7045,9 +7058,9 @@ void *march_task_spawn_thunk(void *clo_ptr) {
      * therefore races the trampoline with no synchronization between them and
      * can clobber a completed result/done flag back to zero (confirmed by
      * ThreadSanitizer: march_runtime.c:1833 write vs this site).  There is
-     * nothing to write: march_alloc() zero-initialises the whole object (so
-     * result/done start at 0) and the trampoline records task[2] itself as its
-     * first action (see march_thunk_trampoline).  Leave the task untouched. */
+     * nothing left to write: the four words were zeroed above, before the
+     * spawn, and the trampoline records task[2] itself as its first action
+     * (see march_thunk_trampoline).  Leave the task untouched from here. */
     (void)march_sched_spawn(march_thunk_trampoline, wa);
     return (void *)task;
 }
@@ -7097,6 +7110,9 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
     march_ensure_sched_started();
     int64_t *task = (int64_t *)march_alloc(48);  /* see march_task_spawn_thunk layout */
     if (task) ((march_hdr *)task)->tag = MARCH_TASK_TAG;
+    /* Zero the four payload words before publishing -- march_alloc does not
+     * (see march_task_spawn_thunk). */
+    if (task) { task[2] = 0; task[3] = 0; task[4] = 0; task[5] = 0; }
     if (task) march_incrc(task);  /* trampoline's RC hold — see march_task_spawn_thunk */
     march_thunk_arg *wa = (march_thunk_arg *)malloc(sizeof(march_thunk_arg));
     if (!wa) { return (void *)task; }
@@ -7104,8 +7120,8 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
     wa->task = task;
     march_cancel_token *tok = (march_cancel_token *)tok_ptr;
     /* Publish the proc LAST — see march_task_spawn_thunk for why storing into
-     * the task object after the spawn races the trampoline.  march_alloc zeroed
-     * the object and the trampoline records task[2] itself. */
+     * the task object after the spawn races the trampoline.  The payload was
+     * zeroed above and the trampoline records task[2] itself. */
     (void)march_sched_spawn_with_cancel(march_thunk_trampoline, wa, tok);
     return (void *)task;
 }
@@ -7180,7 +7196,9 @@ int64_t march_actor_get_int(void *actor, int64_t index) {
 void march_run_scheduler(void) {
     /* The observe socket (march_observe.h): started here, on the main OS
      * thread before any green thread exists, when MARCH_OBSERVE_SOCKET (or
-     * MARCH_HOT_RELOAD_SOCKET) is set.  Once only; a no-op otherwise. */
+     * MARCH_HOT_RELOAD_SOCKET) is set.  Once only; a no-op otherwise.  The
+     * snapshot verbs register first: registration closes when it starts. */
+    march_observe_snapshot_install();
     march_observe_maybe_start();
     if (atomic_load_explicit(&g_sched_bg_started, memory_order_acquire)) {
         /* Signal workers to stop accepting new work, then join. */
@@ -9786,8 +9804,9 @@ void march_actor_register_child(void *supervisor, void *child,
     /* The child was prepared by march_spawn_supervised, so no actor loop can
      * observe this metadata halfway through publication. */
     pthread_mutex_lock(&g_tbl_mu);
-    child_meta->sup_pe = sup_meta->pe;
-    child_meta->sup_child_index = sup_meta->sup_num_children;
+    __atomic_store_n(&child_meta->sup_child_index, sup_meta->sup_num_children,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&child_meta->sup_pe, sup_meta->pe, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&g_tbl_mu);
     int idx = sup_meta->sup_num_children;
     sup_meta->sup_children = realloc(sup_meta->sup_children,
@@ -9801,7 +9820,7 @@ void march_actor_register_child(void *supervisor, void *child,
     sup_meta->sup_children[idx].pending_names = NULL;
     sup_meta->sup_children[idx].pending_name_count = 0;
     sup_meta->sup_children[idx].pending_spawn_cap = NULL;
-    sup_meta->sup_num_children = idx + 1;
+    __atomic_store_n(&sup_meta->sup_num_children, idx + 1, __ATOMIC_RELAXED);
     activate_actor_green_thread(child_meta);
     march_reclaim_exit();
 }
@@ -10254,6 +10273,167 @@ void *march_actor_pid_indices(void) {
     }
     free(idx);
     return list;
+}
+
+/* ── Observe snapshot layer (R1 of the observe plan) ─────────────────────
+ * march_obs_actors: one copy-out row per live actor, for the observe socket's
+ * ACTORS/ACTOR/TREE/NAMES verbs (march_observe_snapshot.c), called on an
+ * observe connection thread.
+ *
+ * The walk is the march_actor_pid_indices walk: lock-free over the bucket
+ * chains, inside ONE critical section, so it never stalls a send.  What each
+ * field costs to read safely from a foreign thread:
+ *   - atomics (status, mailbox counts, code epoch, draining, the tombstone's
+ *     epoch): acquire/relaxed loads, as the preempt daemon reads procs;
+ *   - fields whose writers use __atomic stores so that this walk need not
+ *     lock (sup_pe, released after sup_child_index; sup_num_children,
+ *     dispatch_name_id, reg_name_count; the proc's owner_sched and
+ *     mbox_limit/policy): __atomic loads.  Their writers still hold the
+ *     locks they always held; only the stores became atomic, which on
+ *     arm64 and x86-64 is the same instruction;
+ *   - reg_names itself: under g_registry_mu (a strict leaf lock), copied
+ *     out, and only for an actor whose count says it holds a name.
+ * No per-meta lock for every actor: taking g_tbl_mu and g_registry_mu once
+ * per meta made a walk wait SECONDS behind 16 actors spawning and killing
+ * (measured 2026-10-02: 3.9 s worst reply, against 22 ms lock-free).
+ * A row is a snapshot: an actor spawned during the walk may show a field
+ * from just before its spawn glue finished.
+ * Never read: crash_message / terminal_message (C7: kind only), the actor
+ * record itself (m->actor is used as a key only, never dereferenced).
+ * Nothing here parks or sleeps inside the section. */
+static void obs_type_of(march_actor_meta *m, char *out, size_t cap) {
+    out[0] = '\0';
+    uint32_t id = __atomic_load_n(&m->dispatch_name_id, __ATOMIC_RELAXED);
+    if (id == 0) return;   /* not a --hot-reload build: no name table */
+    const char *name = march_dispatch_id_to_name(id);
+    if (!name) return;
+    size_t n = strlen(name);
+    /* Dispatch functions are named <Actor>_dispatch. */
+    static const char sfx[] = "_dispatch";
+    if (n > sizeof sfx - 1 && strcmp(name + n - (sizeof sfx - 1), sfx) == 0)
+        n -= sizeof sfx - 1;
+    if (n >= cap) n = cap - 1;
+    memcpy(out, name, n);
+    out[n] = '\0';
+}
+
+static void obs_row_fill(march_actor_meta *m, int64_t pidx, march_obs_actor *r) {
+    memset(r, 0, sizeof *r);
+    r->pid = pidx;
+    r->cap_epoch = atomic_load_explicit(&m->pe->epoch, memory_order_relaxed);
+    obs_type_of(m, r->type, sizeof r->type);
+    r->status = -1;
+    r->sched = -1;
+    march_proc *p = meta_gt(m);
+    if (p) {
+        r->status = (int)atomic_load_explicit(&p->status, memory_order_relaxed);
+        r->mbox = atomic_load_explicit(&p->mbox_count, memory_order_relaxed);
+        int64_t user = atomic_load_explicit(&p->user_mbox_count, memory_order_relaxed)
+                     - atomic_load_explicit(&p->mbox_markers, memory_order_relaxed);
+        r->user_mbox = user < 0 ? 0 : user;
+        r->mbox_limit = __atomic_load_n(&p->mbox_limit, __ATOMIC_RELAXED);
+        r->mbox_policy = (int)__atomic_load_n(&p->mbox_policy, __ATOMIC_RELAXED);
+        r->code_epoch = atomic_load_explicit(&p->code_epoch, memory_order_relaxed);
+        r->pinned = __atomic_load_n(&p->pinned, __ATOMIC_RELAXED);
+        struct march_scheduler *s = __atomic_load_n(&p->owner_sched, __ATOMIC_RELAXED);
+        if (s) r->sched = s->id;
+    }
+    r->draining = atomic_load_explicit(&m->draining, memory_order_relaxed);
+    r->num_children = __atomic_load_n(&m->sup_num_children, __ATOMIC_RELAXED);
+    r->parent = -1;
+    march_pid_entry *sup = __atomic_load_n(&m->sup_pe, __ATOMIC_ACQUIRE);
+    if (sup) {
+        r->parent = pe_pid(sup);
+        r->child_index = __atomic_load_n(&m->sup_child_index, __ATOMIC_RELAXED);
+    }
+    /* The lock only for an actor that holds a name: a per-meta lock taken
+     * for every actor starved this walk behind spawn/death traffic (seconds
+     * under 16 churners, against ~20 ms without). */
+    if (__atomic_load_n(&m->reg_name_count, __ATOMIC_RELAXED) == 0) return;
+    pthread_mutex_lock(&g_registry_mu);
+    if (m->reg_name_count > 0) {
+        r->names = (char **)calloc((size_t)m->reg_name_count, sizeof(char *));
+        if (r->names) {
+            for (int i = 0; i < m->reg_name_count; i++) {
+                char *c = strdup(m->reg_names[i]);
+                if (c) r->names[r->n_names++] = c;   /* compact past a failed copy */
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_registry_mu);
+}
+
+void march_obs_actors_free(march_obs_actor *rows, size_t n) {
+    if (!rows) return;
+    for (size_t i = 0; i < n; i++) {
+        for (int k = 0; k < rows[i].n_names; k++) free(rows[i].names[k]);
+        free(rows[i].names);
+    }
+    free(rows);
+}
+
+int march_obs_actors(march_obs_actor **out_rows, size_t *out_n) {
+    size_t cap = 256, n = 0;
+    march_obs_actor *rows = (march_obs_actor *)malloc(cap * sizeof *rows);
+    if (!rows) return -1;
+    int oom = 0;
+    march_reclaim_enter();
+    for (unsigned int b = 0; b < MARCH_SCHED_BUCKETS && !oom; b++) {
+        for (march_actor_meta *m = atomic_load_explicit(&g_actor_tbl[b],
+                                                        memory_order_acquire);
+             m; m = atomic_load_explicit(&m->tbl_next, memory_order_acquire)) {
+            int64_t pidx = pe_pid(m->pe);
+            if (!m->actor || pidx < 0) continue;   /* not spawned yet */
+            if (n == cap) {
+                march_obs_actor *grown =
+                    (march_obs_actor *)realloc(rows, 2 * cap * sizeof *rows);
+                if (!grown) { oom = 1; break; }
+                rows = grown;
+                cap *= 2;
+            }
+            obs_row_fill(m, pidx, &rows[n++]);
+        }
+    }
+    march_reclaim_exit();
+    if (oom) { march_obs_actors_free(rows, n); return -1; }
+    *out_rows = rows;
+    *out_n = n;
+    return 0;
+}
+
+int march_obs_actor_extra_get(int64_t pid, march_obs_actor_extra *out) {
+    memset(out, 0, sizeof *out);
+    march_reclaim_enter();
+    march_pid_entry *pe = pid_entry(pid);
+    if (!pe) { march_reclaim_exit(); return 0; }
+    out->known = 1;
+    out->cap_epoch = atomic_load_explicit(&pe->epoch, memory_order_relaxed);
+    if (atomic_load_explicit(&pe->terminal_set, memory_order_acquire)) {
+        out->terminal_set = 1;
+        out->terminal_reason = (int)pe->terminal_reason;   /* never the message */
+    }
+    march_actor_meta *m = atomic_load_explicit(&pe->live, memory_order_acquire);
+    if (m) {
+        out->alive = 1;
+        int64_t base = __atomic_load_n(&m->backoff_base_ms, __ATOMIC_RELAXED);
+        if (base > 0) {   /* march_register_supervisor ran (it clamps base > 0) */
+            out->supervisor = 1;
+            out->strategy = __atomic_load_n(&m->supervisor_strategy, __ATOMIC_RELAXED);
+            out->max_restarts = __atomic_load_n(&m->supervisor_max_restarts, __ATOMIC_RELAXED);
+            out->window_secs = __atomic_load_n(&m->supervisor_window_secs, __ATOMIC_RELAXED);
+            double now = (double)march_now_ms() / 1000.0;
+            pthread_mutex_lock(&g_supervise_mu);
+            int len = m->sup_restart_len;
+            out->n_restarts = len;
+            int k = 0;
+            for (int i = len - 1; i >= 0 && k < 16; i--, k++)
+                out->restart_age_ms[k] =
+                    (int64_t)((now - m->sup_restart_ts[i]) * 1000.0);
+            pthread_mutex_unlock(&g_supervise_mu);
+        }
+    }
+    march_reclaim_exit();
+    return 0;
 }
 
 /* Returns an OWNED reference, like every other value-producing builtin: the
@@ -10977,6 +11157,12 @@ static void *native_arr_alloc(int64_t len, int64_t elem_size, uint8_t kind) {
     }
     ((march_hdr *)arr)->tag = MARCH_NATIVE_ARR_TAG;
     *(int64_t *)((char *)arr + 16) = len;
+    /* Whole kind word: march_alloc does not zero, and only byte 24 carries
+     * the kind -- bytes 25..31 are header padding nothing may read as
+     * garbage.  The element body (NATIVE_ARR_HDR..) is the caller's to fill;
+     * every *_alloc_raw consumer (the inline nmap loops, the SIMD set copy
+     * path, Bytes->u8) writes all `len` elements. */
+    *(int64_t *)((char *)arr + 24) = 0;
     *(uint8_t *)((char *)arr + 24) = kind;
     return arr;
 }
@@ -12806,7 +12992,9 @@ void *ring_buf_make(int64_t cap) {
     ((march_hdr *)cell)->tag = MARCH_RESOURCE_TAG;
     *(void **)((char *)cell + 16) = r;
     *(void (**)(void *))((char *)cell + 24) = march_ring_dtor;
-    /* type_id@32 stays 0; ring cells never go through march_resource_get. */
+    /* type_id@32 = 0, stored explicitly (march_alloc does not zero); ring
+     * cells never go through march_resource_get. */
+    *(int64_t *)((char *)cell + 32) = 0;
     return cell;
 }
 

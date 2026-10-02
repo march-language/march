@@ -4968,6 +4968,73 @@ let test_generic_no_constraint_accepts () =
   end|} in
   Alcotest.(check bool) "unconstrained generic accepted" false (has_errors ctx)
 
+(* ── Test-body constraints are discharged at the test's own boundary ──────── *)
+
+(* A [test]/[setup] body's Eq/Ord/Num/interface constraints used to stay
+   pending until the next [DFn]/[DLet] discharged them: a fn placed between
+   two [describe] blocks was blamed for every `==` of the tests above it, and
+   with no later fn/let they were silently dropped. *)
+let eq_error_lines ctx =
+  List.filter_map (fun (d : March_errors.Errors.diagnostic) ->
+      if d.March_errors.Errors.severity = March_errors.Errors.Error
+      then Some d.March_errors.Errors.span.March_ast.Ast.start_line else None)
+    (March_errors.Errors.sorted ctx)
+
+let test_test_body_eq_reported_at_test_not_next_fn () =
+  let ctx = typecheck {|mod M do
+  type Hue = Rood | Bloo
+  describe "a" do
+    test "x" do
+      assert (Rood == Rood)
+    end
+  end
+  fn helper() do 1 end
+  describe "b" do
+    test "y" do
+      assert (helper() == 1)
+    end
+  end
+end|} in
+  Alcotest.(check int) "one Eq error" 1
+    (count_errors_matching ctx "`Hue` does not implement interface `Eq`.");
+  Alcotest.(check (list int)) "pinned to the test (line 4), not `helper` (line 8)"
+    [4] (eq_error_lines ctx)
+
+let test_test_body_eq_checked_without_later_fn () =
+  let ctx = typecheck {|mod M do
+  type Hue = Rood | Bloo
+  fn helper() do 1 end
+  setup do
+    assert (Bloo == Bloo)
+  end
+  describe "a" do
+    test "x" do
+      assert (Rood == Rood)
+    end
+  end
+end|} in
+  Alcotest.(check int) "both the setup and the test body are checked" 2
+    (count_errors_matching ctx "`Hue` does not implement interface `Eq`.")
+
+let test_test_body_eq_derived_accepts () =
+  let ctx = typecheck {|mod M do
+  type Hue = Rood | Bloo
+  derive Eq for Hue
+  describe "a" do
+    test "x" do
+      assert (Rood == Rood)
+    end
+  end
+  fn helper() do 1 end
+  describe "b" do
+    test "y" do
+      assert (helper() == 1 && Bloo != Rood)
+    end
+  end
+end|} in
+  Alcotest.(check bool) "derived Eq: fn between describes accepted" false
+    (has_errors ctx)
+
 let test_lexer_when () =
   let lexbuf = Lexing.from_string "when" in
   let tok = March_lexer.Lexer.token lexbuf in
@@ -18149,6 +18216,11 @@ let compiler_suites =
           Alcotest.test_case "finding 15: unsatisfied generic bound rejects"  `Quick test_generic_when_constraint_unsatisfied_rejects;
           Alcotest.test_case "finding 15: satisfied generic bound accepts"    `Quick test_generic_when_constraint_satisfied_accepts;
           Alcotest.test_case "finding 15: unconstrained generic accepts"      `Quick test_generic_no_constraint_accepts;
+        ] );
+      ( "test_body_constraints", [
+          Alcotest.test_case "Eq in a test is reported at the test, not the next fn" `Quick test_test_body_eq_reported_at_test_not_next_fn;
+          Alcotest.test_case "Eq in a test/setup is checked with no later fn"        `Quick test_test_body_eq_checked_without_later_fn;
+          Alcotest.test_case "derived Eq with a fn between describes accepts"         `Quick test_test_body_eq_derived_accepts;
         ] );
       ( "return_refine_guard", [
           Alcotest.test_case "if body: no crash"                            `Quick test_return_infer_if_body_no_crash;

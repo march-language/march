@@ -2849,17 +2849,23 @@ mod ClusterNode do
   -- `replace_cert`: check the new certificate (and key) here, in the caller,
   -- then make it this node's at once for handshakes and `own_cert`; the node
   -- actor then takes it for dials and tells every linked peer (ReplaceCert).
-  -- Reported either way (CertReplaced / CertRefused).
+  -- Reported either way (CertReplaced / CertRefused). The certificate and key
+  -- already in use are a no-op, reported as nothing: a certificate the
+  -- control plane delivered and wrote back to the watched file comes round
+  -- again that way (step 12b).
   pfn h_replace_cert(h : CnHandle, cert_text : String, key_hex : String) : Result(NodeCert.Cert, String) do
     match replace_checked(h, cert_text, key_hex) do
       Err(e) ->
         security(h, CertRefused(h.node_id, e))
         Err(e)
       Ok((cr, signed, sk)) ->
-        Vault.set(h.auth, "a", ClusterAuth.Certified({ cr with signed: signed, secret_key: sk }))
-        send(node_pid(h), ReplaceCert(signed, sk))
-        security(h, CertReplaced(h.node_id, signed.cert.serial))
-        Ok(signed.cert)
+        if signed.body == cr.signed.body && Bytes.to_hex(sk) == Bytes.to_hex(cr.secret_key) do Ok(signed.cert)
+        else
+          Vault.set(h.auth, "a", ClusterAuth.Certified({ cr with signed: signed, secret_key: sk }))
+          send(node_pid(h), ReplaceCert(signed, sk))
+          security(h, CertReplaced(h.node_id, signed.cert.serial))
+          Ok(signed.cert)
+        end
     end
   end
 
@@ -3421,7 +3427,8 @@ mod ClusterNode do
   (hex, as in MARCH_NODE_KEY), or "" to keep the current key (a renewal made
   with `forge cluster cert --node-key`). It must verify under the operator
   key now, name this node and that key, and not be revoked; otherwise Err,
-  and the certificate in use is kept.
+  and the certificate in use is kept. The certificate and key already in use
+  are Ok and change nothing (no update is sent, no event reported).
 
   New handshakes present it at once. Links already up are not redialled:
   each linked peer is sent the new certificate over the link, with a proof

@@ -21,7 +21,20 @@
     applying them. Every gate, capability check and migration decision
     [forge deploy hot] makes is therefore made here, before anything is sent.
     A topology step's line is the signed TOPOLOGY verb; its body travels as an
-    artifact under the topology's digest. *)
+    artifact under the topology's digest.
+
+    {1 Certificate and revocation items (step 12b)}
+
+    A release may also carry operator-signed node certificates
+    ([cert <node> <text>]) and revocations ([revoke <token>]), delivered by a
+    [do:certs] step: each node takes the certificate for itself through
+    [ClusterNode.replace_cert] and every revocation through
+    [ClusterNode.revoke]. Issuance stays offline with the operator (D39:
+    [forge cluster cert] signs them; the control plane holds no issuer key),
+    and the node checks both signatures, the deploy key's over the release
+    and the operator's over the item (D37). Items live beside the release
+    ([items]), not in [t], and [signed_text_with] places them where
+    [Control.signed_text] does: after the signed lines, before the drain. *)
 
 let ( let* ) = Result.bind
 
@@ -29,7 +42,7 @@ let ( let* ) = Result.bind
 
 type hosts = Canary of int | Rest | All
 
-type action = Activate of string | Topology | Drain
+type action = Activate of string | Topology | Drain | Certs
 
 type gate = No_gate | Healthy of int  (** the window, in ms *)
 
@@ -65,6 +78,7 @@ let show_action = function
   | Activate b -> Printf.sprintf "activate(%s)" b
   | Topology -> "topology"
   | Drain -> "drain"
+  | Certs -> "certs"
 
 let show_gate = function
   | No_gate -> "none"
@@ -77,31 +91,47 @@ let show_step s =
   in
   if s.batch > 0 then base ^ Printf.sprintf " batch:%d" s.batch else base
 
+(** A release's certificate items: (node, certificate text form) pairs and
+    revocation tokens (see the module comment). *)
+type items = { certs : (string * string) list; revokes : string list }
+
+let no_items = { certs = []; revokes = [] }
+
 (** The text the signature covers, byte for byte [Control.signed_text]. *)
-let signed_text (r : t) : string =
+let signed_text_with (items : items) (r : t) : string =
   let head =
     [ "release v1"; Printf.sprintf "seq %d" r.seq; "parent " ^ r.parent; "env " ^ r.env; "topology " ^ r.topology ]
   in
   let builds = List.map (fun b -> Printf.sprintf "build %s base:%s manifest:%s" b.name b.base b.manifest) r.builds in
   let steps = List.map show_step r.steps in
   let lines = List.map (fun (step, text) -> Printf.sprintf "line %d %s" step text) r.lines in
+  let certs = List.map (fun (node, text) -> Printf.sprintf "cert %s %s" node text) items.certs in
+  let revokes = List.map (fun tok -> "revoke " ^ tok) items.revokes in
   let drain =
     match r.drain with
     | Some d -> [ Printf.sprintf "drain epoch<=%d soft:%d hard:%d" d.epoch d.soft_ms d.hard_ms ]
     | None -> []
   in
-  String.concat "\n" (head @ builds @ steps @ lines @ drain) ^ "\n"
+  String.concat "\n" (head @ builds @ steps @ lines @ certs @ revokes @ drain) ^ "\n"
 
-let serialize (r : t) : string =
-  signed_text r ^ "sig " ^ (if r.signature = "" then "-" else r.signature) ^ "\n"
+let signed_text (r : t) : string = signed_text_with no_items r
+
+let serialize_with (items : items) (r : t) : string =
+  signed_text_with items r ^ "sig " ^ (if r.signature = "" then "-" else r.signature) ^ "\n"
+
+let serialize (r : t) : string = serialize_with no_items r
 
 (** The release's content address, [Control.digest]: sha256 (hex) of the signed text. *)
-let digest (r : t) : string = Digestif.SHA256.(to_hex (digest_string (signed_text r)))
+let digest_with (items : items) (r : t) : string = Digestif.SHA256.(to_hex (digest_string (signed_text_with items r)))
+
+let digest (r : t) : string = digest_with no_items r
 
 let hex_of_bytes b = String.concat "" (List.init (Bytes.length b) (fun i -> Printf.sprintf "%02x" (Char.code (Bytes.get b i))))
 
-let sign ~(sk : bytes) (r : t) : t =
-  { r with signature = hex_of_bytes (March_ed25519.Ed25519.sign_str (signed_text r) sk) }
+let sign_with ~(sk : bytes) (items : items) (r : t) : t =
+  { r with signature = hex_of_bytes (March_ed25519.Ed25519.sign_str (signed_text_with items r) sk) }
+
+let sign ~(sk : bytes) (r : t) : t = sign_with ~sk no_items r
 
 (* ── The signed lines of a hot step (the recorder) ─────────────────────── *)
 

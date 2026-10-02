@@ -1,0 +1,22 @@
+-- Actor type names in the observe socket's ACTORS rows come from the
+-- hot-reload dispatch table, so this leg is built with --hot-reload Main
+-- (R1 of specs/plans/2026-09-28-observe-recon-shell-plan.md).
+mod Main do
+  needs IO.Console
+  needs IO.Clock
+
+  actor Counter do
+    state { n : Int }
+    init  { n: 0 }
+    on Bump(k : Int) do
+      { n: state.n + k }
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+    let _a = spawn(Counter)
+    let _b = spawn(Counter)
+    println("ready")
+    sleep_ms(120000)
+  end
+end

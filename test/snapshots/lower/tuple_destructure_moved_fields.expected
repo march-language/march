@@ -5,11 +5,7 @@ type Raw = Raw(String, Int, String)
 ## from_ctor
 fn from_ctor(r : Raw) : Box =
   case r of
-  Raw($f14, $f15, $f16) -> let $jp_clo18 : () -> '_ = letrec [$jp17] in
-$jp17 in
-let $jp_clo22 : () -> '_ = letrec [$jp21] in
-$jp21 in
-let c : String = $f16 in
+  Raw($f14, $f15, $f16) -> let c : String = $f16 in
 let n : Int = $f15 in
 let a : String = $f14 in
 let $t13 : Box = alloc Box.Box(a, c) in
@@ -19,11 +15,7 @@ keep($t13)
 ## from_tuple
 fn from_tuple(t : (String, Int, String)) : Box =
   case t of
-  $Tuple3($f2, $f3, $f4) -> let $jp_clo6 : () -> '_ = letrec [$jp5] in
-$jp5 in
-let $jp_clo10 : () -> '_ = letrec [$jp9] in
-$jp9 in
-let c : String = $f4 in
+  $Tuple3($f2, $f3, $f4) -> let c : String = $f4 in
 let n : Int = $f3 in
 let a : String = $f2 in
 let $t1 : Box = alloc Box.Box(a, c) in

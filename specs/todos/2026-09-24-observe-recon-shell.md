@@ -10,7 +10,7 @@ Items, each its own PR; tick as they land and add a dated
 `specs/progress/YYYY-MM-DD-observe-rN-<slug>.md` per item:
 
 - [x] R0 observe socket thread, JSON writer, test harness ([progress](../progress/2026-10-01-observe-r0-socket.md))
-- [ ] R1 snapshot layer + observe verbs (no new counters)
+- [x] R1 snapshot layer + observe verbs (no new counters) ([progress](../progress/2026-10-02-observe-r1-snapshot-verbs.md); the cluster section split out to [its own todo](2026-10-02-observe-r1-cluster-section.md))
 - [ ] R2 counters, scheduler idle time, crash ring (A/B per commit)
 - [ ] R3 `Recon` observe tier, `forge top`, `forge diagnose`, `forge status`
 - [ ] R4 debug tier: `Actor.Debug`, `inspect_state`, signed `STATE`/`MESSAGES`, nonces

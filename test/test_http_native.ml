@@ -135,7 +135,21 @@ let pick_free_port () =
 
 (* ── The shared exercise, run once per server implementation ───────────── *)
 
-let run_http_e2e ~variant ~slug ~evloop () =
+type child_status = [ `Alive | `Exited of int | `Signaled of int | `Stopped of int ]
+type server_ctx = {
+  port            : int;
+  bail            : 'a. string -> 'a;
+  child_pid       : unit -> int option;
+  child_status    : unit -> child_status;
+  describe_status : child_status -> string;
+  connect_or_bail : string -> Unix.file_descr;
+  send            : Unix.file_descr -> string -> unit;
+  request_bytes   : meth:string -> path:string -> body:string -> keep_alive:bool -> string;
+  read_response   : Unix.file_descr -> string ref -> deadline:float -> int * string * string;
+  check_response  : string -> exp_status:int -> exp_body:string -> int * string * string -> unit;
+}
+
+let with_compiled_server ~variant ~slug ~evloop ~server_src (k : server_ctx -> unit) =
   (* Without this, writing to a socket whose peer has just crashed kills THIS
      process with SIGPIPE — the test would die instead of reporting the dead
      server, which is the whole point of the exercise.  Ignoring it turns the
@@ -447,7 +461,6 @@ let run_http_e2e ~variant ~slug ~evloop () =
          serving a moment ago, so it has since died or stopped accepting"
         !port label (Unix.error_message e))
   in
-  let req_timeout = 30.0 in
   let check_response label ~exp_status ~exp_body (status, body, _) =
     if status <> exp_status then
       bail (Printf.sprintf "%s: expected status %d, got %d (body was %S)"
@@ -463,6 +476,32 @@ let run_http_e2e ~variant ~slug ~evloop () =
          else ""))
   in
 
+  k { port = !port;
+      bail;
+      child_pid = (fun () -> !child);
+      child_status;
+      describe_status;
+      connect_or_bail;
+      send;
+      request_bytes;
+      read_response;
+      check_response })
+
+(* ── The original exercise: 65 requests, bodies, keep-alive, pipelining ── *)
+(* Resident set size of [pid] in KiB via ps(1); identical flag on macOS and
+   Linux. -1 if ps cannot answer (the assertion then fails loudly). *)
+let rss_kib pid =
+  let cmd = Printf.sprintf "ps -o rss= -p %d" pid in
+  let ic = Unix.open_process_in cmd in
+  let line = try input_line ic with End_of_file -> "" in
+  ignore (Unix.close_process_in ic);
+  match int_of_string_opt (String.trim line) with Some n -> n | None -> -1
+
+let run_http_e2e ~variant ~slug ~evloop () =
+  with_compiled_server ~variant ~slug ~evloop ~server_src (fun ctx ->
+    let { bail; connect_or_bail; send; request_bytes; read_response;
+          check_response; child_status; describe_status; child_pid; _ } = ctx in
+    let req_timeout = 30.0 in
   (* ── Phase A: ~45 requests, each on its own connection ───────────────── *)
   (* One request per server process is what let a crash-on-request-2 ship.
      Cycling three routes means a constant responder cannot pass either. *)
@@ -560,6 +599,51 @@ let run_http_e2e ~variant ~slug ~evloop () =
         ~exp_status:200 ~exp_body:payload (read_response fd pending ~deadline)))
     [ 32 * 1024; 64 * 1024; 65536 + 1; 256 * 1024; 1024 * 1024 ];
 
+  (* ── Phase E: no per-request leak ────────────────────────────────────── *)
+  (* The runtime read the handler's result Conn (status/headers/body) and
+     wrote the response, but never released it — neither server did — so
+     every request leaked the result record plus the strings and header
+     cells it owns (~0.46 KiB measured with MARCH_TRACE_GC; forgepm at 800
+     req/s grew 400 MB/min). 20,000 pipelined keep-alive requests make that
+     ~9 MB of growth; the bound below leaves room for allocator noise and
+     for the thread pool's per-connection buffers but not for the leak. *)
+  let pid = match child_pid () with Some p -> p | None -> bail "server pid unknown" in
+  let burst = 50 and rounds = 400 in
+  let pipelined_rounds n =
+    for _ = 1 to n do
+      let fd = connect_or_bail "leak-check connection" in
+      Fun.protect ~finally:(fun () -> try Unix.close fd with _ -> ()) (fun () ->
+        let b = Buffer.create 4096 in
+        for _ = 1 to burst do
+          Buffer.add_string b
+            (request_bytes ~meth:"GET" ~path:"/ping" ~body:"" ~keep_alive:true)
+        done;
+        send fd (Buffer.contents b);
+        let pending = ref "" in
+        let deadline = Unix.gettimeofday () +. req_timeout in
+        for _ = 1 to burst do
+          let (status, body, _) = read_response fd pending ~deadline in
+          if status <> 200 || body <> "pong" then
+            bail (Printf.sprintf "leak-check: expected 200 pong, got %d %S" status body)
+        done)
+    done
+  in
+  pipelined_rounds 20;                         (* warm-up: buffers, caches *)
+  let rss_before = rss_kib pid in
+  pipelined_rounds rounds;
+  let rss_after = rss_kib pid in
+  if rss_before < 0 || rss_after < 0 then
+    bail (Printf.sprintf "could not read server RSS (before=%d after=%d KiB)"
+            rss_before rss_after);
+  let growth_kib = rss_after - rss_before in
+  Printf.eprintf "[http e2e %s] server rss before=%d KiB after=%d KiB growth=%d KiB over %d requests\n%!"
+    variant rss_before rss_after growth_kib (burst * rounds);
+  if growth_kib > 2048 then
+    bail (Printf.sprintf
+      "server RSS grew %d KiB over %d requests (before %d, after %d): the \
+       handler's result Conn is not being released per request"
+      growth_kib (burst * rounds) rss_before rss_after);
+
   (* ── Phase D: still serving, and still ALIVE ─────────────────────────── *)
   let fd = connect_or_bail "final request" in
   Fun.protect ~finally:(fun () -> try Unix.close fd with _ -> ()) (fun () ->
@@ -578,7 +662,112 @@ let run_http_e2e ~variant ~slug ~evloop () =
      bail (Printf.sprintf
        "server process is NOT alive after serving the request sequence: it %s. \
         A server that dies after serving requests is a crash, never a skip."
-       (describe_status st))))
+       (describe_status st)))
+  )
+
+(* ── Pooled actor exercise ──────────────────────────────────────────────── *)
+(* A depot-shaped actor Pool driven from HTTP handler pthreads through
+   task_spawn(actor_call): the path forgepm's Repo would take with depot's
+   Pool. Four assertions a connect-per-query server cannot fake:
+     1. sequential correctness (body names a pooled conn + intact 64 KiB buf)
+     2. 32-way concurrent burst: every response 200, none hung
+     3. /stats out=0 afterwards: every checkout was checked back in
+     4. server RSS grew < 8 MiB across the burst (a per-request conn leak
+        would be 1600 x 64 KiB ~ 100 MiB)
+   plus the process is still alive. *)
+
+let pooled_server_src () =
+  let path =
+    Filename.concat (march_project_root ()) "test/native/pooled_actor_http.march" in
+  let ic = open_in_bin path in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic; s
+
+let conn_body_ok body =
+  (* conn=<1..64>:65536 — the fixture pools 64 conns (>= the 32-way burst) *)
+  match String.index_opt body ':' with
+  | None -> false
+  | Some i ->
+    String.length body > 5
+    && String.sub body 0 5 = "conn="
+    && (match int_of_string_opt (String.sub body 5 (i - 5)) with
+        | Some id -> id >= 1 && id <= 64
+        | None -> false)
+    && String.sub body i (String.length body - i) = ":65536"
+
+let run_pooled_e2e ~variant ~slug ~evloop () =
+  with_compiled_server ~variant ~slug ~evloop ~server_src:(pooled_server_src ())
+    (fun ctx ->
+    let { bail; connect_or_bail; send; request_bytes; read_response;
+          child_status; describe_status; child_pid; _ } = ctx in
+    let req_timeout = 30.0 in
+    let get path =
+      let fd = connect_or_bail ("GET " ^ path) in
+      Fun.protect ~finally:(fun () -> try Unix.close fd with _ -> ()) (fun () ->
+        let pending = ref "" in
+        let deadline = Unix.gettimeofday () +. req_timeout in
+        send fd (request_bytes ~meth:"GET" ~path ~body:"" ~keep_alive:false);
+        let (status, body, _) = read_response fd pending ~deadline in
+        (status, body))
+    in
+    let pid () = match child_pid () with Some p -> p | None -> bail "server pid unknown" in
+
+    (* 1. sequential *)
+    for i = 1 to 200 do
+      let (st, body) = get "/" in
+      if st <> 200 || not (conn_body_ok body) then
+        bail (Printf.sprintf "sequential request %d/200: expected 200 conn=<1..64>:65536, got %d %S" i st body)
+    done;
+    let rss_before = rss_kib (pid ()) in
+
+    (* 2. concurrent burst: 32 threads x 50 requests. Threads record their
+       first failure instead of calling bail (Alcotest.fail from a non-main
+       thread is not reliable). *)
+    let failures = Mutex.create () in
+    let first_failure = ref None in
+    let note_failure msg =
+      Mutex.lock failures;
+      (if !first_failure = None then first_failure := Some msg);
+      Mutex.unlock failures
+    in
+    let worker t () =
+      try
+        for i = 1 to 50 do
+          let (st, body) = get "/" in
+          if st <> 200 || not (conn_body_ok body) then
+            note_failure (Printf.sprintf "thread %d request %d/50: got %d %S" t i st body)
+        done
+      with e -> note_failure (Printf.sprintf "thread %d raised %s" t (Printexc.to_string e))
+    in
+    let threads = List.init 32 (fun t -> Thread.create (worker t) ()) in
+    List.iter Thread.join threads;
+    (match !first_failure with
+     | Some msg -> bail ("concurrent burst: " ^ msg)
+     | None -> ());
+
+    (* 3. no leaked checkouts. Checkin is an async send; allow it to land. *)
+    let rec stats_zero tries =
+      let (st, body) = get "/stats" in
+      if st = 200 && body = "out=0" then ()
+      else if tries = 0 then
+        bail (Printf.sprintf "/stats after burst: expected 200 out=0, got %d %S (checkouts never checked back in)" st body)
+      else (Unix.sleepf 0.1; stats_zero (tries - 1))
+    in
+    stats_zero 20;
+
+    (* 4. RSS flat *)
+    let rss_after = rss_kib (pid ()) in
+    if rss_before < 0 || rss_after < 0 then
+      bail (Printf.sprintf "could not read server RSS (before=%d after=%d KiB)" rss_before rss_after);
+    let growth_kib = rss_after - rss_before in
+    Printf.eprintf "[pooled e2e %s] server rss before=%d KiB after=%d KiB growth=%d KiB\n%!" variant rss_before rss_after growth_kib;
+    if growth_kib > 8 * 1024 then
+      bail (Printf.sprintf "server RSS grew %d KiB across 1600 pooled requests (before %d, after %d): a per-request leak of the pooled conn or its reply" growth_kib rss_before rss_after);
+
+    (* alive *)
+    (match child_status () with
+     | `Alive -> ()
+     | st -> bail (Printf.sprintf "server process is NOT alive after the pooled exercise: it %s" (describe_status st))))
 
 let suites =
   [ ("http server (compiled, end-to-end)",
@@ -592,5 +781,15 @@ let suites =
           keep-alive, pipelining, process alive (compiled --opt 2)" `Quick
          (run_http_e2e ~variant:"event loop (MARCH_HTTP_EVLOOP=1)"
             ~slug:"evloop" ~evloop:true);
+       Alcotest.test_case
+         "thread-pool server: depot-shaped actor Pool from handler pthreads, \
+          32-way burst, no leaked checkouts, flat RSS (compiled --opt 2)" `Quick
+         (run_pooled_e2e ~variant:"pooled actor, thread pool" ~slug:"pooledpool"
+            ~evloop:false);
+       Alcotest.test_case
+         "event-loop server: depot-shaped actor Pool from evloop pthreads, \
+          32-way burst, no leaked checkouts, flat RSS (compiled --opt 2)" `Quick
+         (run_pooled_e2e ~variant:"pooled actor, event loop" ~slug:"pooledevloop"
+            ~evloop:true);
      ]);
   ]

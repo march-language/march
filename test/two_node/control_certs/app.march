@@ -1,0 +1,29 @@
+-- The app of scenario "control_certs" (dd step 12b): the control-plane
+-- scenarios' app (test/two_node/control_plane/app.march), which says what
+-- the scenario checks for: every peer this node sees die and why, and every
+-- certificate replaced or refused on it (its own, or a peer's update).
+mod CtlApp do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+  needs IO.Spawn
+  needs IO.Mut
+  needs Session.Live
+  needs ClusterNode.Live
+
+  fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : () do
+    let me = Topology.node_name(node)
+    let _ = ClusterNode.subscribe(node, fn ev ->
+      match ev do
+        ClusterNode.NodeDead(i, why) -> println("app " ++ me ++ ": " ++ i.name ++ " dead: " ++ why)
+        _ -> ()
+      end)
+    let _ = ClusterNode.on_security_event(node, fn ev ->
+      match ev do
+        ClusterNode.CertReplaced(id, serial) -> println("app " ++ me ++ ": certificate replaced: " ++ id ++ " serial " ++ serial)
+        ClusterNode.CertRefused(id, why) -> println("app " ++ me ++ ": certificate refused: " ++ id ++ ": " ++ why)
+        _ -> ()
+      end)
+    println("app " ++ me ++ ": up")
+  end
+end
