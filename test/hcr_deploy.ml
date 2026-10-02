@@ -14,6 +14,11 @@
                                               Cluster_deploy): CANARY=<n> CANARY_MS RESTS_MS
                                               TOPOLOGY=<digest file to push> FOLLOW_S
       hcr_deploy status <host:port,...>       the leader's view of the newest release
+      hcr_deploy release-stale <host:port,...> <seq>
+                                              send a one-step release with <seq> and no parent,
+                                              signed with forge's deploy key ($HOME/.march):
+                                              the leader's compare-and-set refuses it once it
+                                              holds a newer one; prints the answer
       hcr_deploy api <host:port> <line>       one request to a control API, answer to stdout
       hcr_deploy reload <socket> <line>       one request to a reload socket, answer to stdout
                                               (lines up to END, or the first line)
@@ -90,7 +95,7 @@ let () =
       let first = March_forge.Cmd_deploy_hot.recv_line conn in
       print_endline first;
       let listy = List.exists (fun p -> String.length first >= String.length p && String.sub first 0 (String.length p) = p)
-          [ "STATUS"; "SLOT"; "STATE"; "VERSION"; "EPOCH"; "COUNTERS"; "RESTORED"; "ARTIFACT" ] in
+          [ "STATUS"; "AUDIT"; "SLOT"; "STATE"; "VERSION"; "EPOCH"; "COUNTERS"; "RESTORED"; "ARTIFACT" ] in
       if listy then begin
         let rec go () = let l = March_forge.Cmd_deploy_hot.recv_line conn in print_endline l; if l <> "END" then go () in
         go ()
@@ -108,6 +113,17 @@ let () =
        read_answer conn
      with Failure m -> prerr_endline ("hcr_deploy: " ^ m); exit 1
         | Unix.Unix_error (e, _, _) -> prerr_endline ("hcr_deploy: " ^ Unix.error_message e); exit 1)
+  | [ "release-stale"; eps; seq ] ->
+    let endpoints = List.filter_map March_forge.Cluster_deploy.endpoint_of_string (String.split_on_char ',' eps) in
+    (match March_forge.Cmd_hot_reload.read_sk_raw () with
+     | Error m -> prerr_endline ("hcr_deploy: " ^ m); exit 1
+     | Ok sk ->
+       let open March_forge.Control_release in
+       let r = sign ~sk { seq = int_of_string seq; parent = no_parent; env = "local"; topology = String.make 64 '0';
+                          builds = []; steps = [ { id = 1; pools = [ "*" ]; hosts = All; action = Topology; gate = No_gate; batch = 0 } ];
+                          lines = []; drain = None; signature = "" } in
+       (match March_forge.Cluster_deploy.send_release endpoints ~body:(serialize r) with
+        | Ok resp | Error resp -> print_endline resp))
   | [ "status"; eps ] ->
     let endpoints = List.filter_map March_forge.Cluster_deploy.endpoint_of_string (String.split_on_char ',' eps) in
     (match March_forge.Cluster_deploy.status endpoints with

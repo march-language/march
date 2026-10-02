@@ -53,8 +53,8 @@ let hermetic_env = lazy (
        fixtures leave a held endpoint behind, so shorter is only faster. *)
     ("MARCH_UPGRADE_DRAIN_S", "20") ])
 
-let environment () =
-  let env = Lazy.force hermetic_env in
+let environment ?(extra = []) () =
+  let env = extra @ Lazy.force hermetic_env in
   let keep kv = not (List.exists (fun (k, _) -> String.length kv > String.length k
                                                  && String.sub kv 0 (String.length k + 1) = k ^ "=") env) in
   Array.append (Array.of_list (List.map (fun (k, v) -> k ^ "=" ^ v) env))
@@ -64,24 +64,25 @@ let sh ~dir cmd =
   let rc = Sys.command (Printf.sprintf "cd %s && %s" (Filename.quote dir) cmd) in
   if rc <> 0 then Alcotest.failf "in %s: `%s` exited %d" dir cmd rc
 
-(** A git repository holding v1 as its one commit, with [version]'s files
-    copied over the working tree. *)
-let project version =
+(** A git repository holding v1 (with [base]'s files copied over it) as its
+    one commit, with [version]'s files copied over the working tree. *)
+let project ?base version =
   let fx = getenv_abs "UPGRADE_FIXTURES_DIR" in
   let dir = Filename.temp_dir "upgrade_app_" "" in
   (* dune stages the fixtures read-only and cp keeps the mode: the copy
      must be writable for the new version to be copied over it. *)
   sh ~dir (Printf.sprintf "cp -R %s/. . && chmod -R u+w . && rm -rf .forge .march" (Filename.quote (Filename.concat fx "v1")));
+  Option.iter (fun b -> sh ~dir (Printf.sprintf "cp -R %s/. . && chmod -R u+w ." (Filename.quote (Filename.concat fx b)))) base;
   sh ~dir "git init -q && git add -A && git -c user.email=forge-test@example.invalid -c user.name=forge-test commit -q -m v1";
   sh ~dir (Printf.sprintf "cp -R %s/. . && chmod -R u+w ." (Filename.quote (Filename.concat fx version)));
   dir
 
 (** Run `forge test --upgrade-from HEAD` in [dir]: its exit code and output. *)
-let run_upgrade dir =
+let run_upgrade ?extra dir =
   let out = Filename.concat dir "forge.out" in
   (* Resolved before the fork: dune passes the binaries as paths relative
      to its cwd, which the child's chdir would break. *)
-  let env = environment () in
+  let env = environment ?extra () in
   let forge = Filename.concat (List.hd (String.split_on_char ':' (List.assoc "PATH" (Lazy.force hermetic_env)))) "forge" in
   let pid =
     match Unix.fork () with
@@ -146,6 +147,34 @@ let test_live_upgrade_passes () =
       "upgrade from HEAD passed: 1 test(s), 1 process(es), nothing dropped" ];
   after_run dir
 
+(* `live`'s change, deployed through the in-cluster control plane (step
+   12a): the ref's topology has a [control] section (fixtures/upgrade/
+   control_v1), so forge sends one signed release to a candidate and follows
+   it, and touches no reload socket. The new code must reach both processes
+   and do what only new code does (spawn a task, read the old Vault, start a
+   session); the traffic node, a cluster member that runs no Agent, must not
+   hold the rollout. *)
+let test_control_plane_upgrade_passes () =
+  let dir = project ~base:"control_v1" "live" in
+  let extra = [ ("MARCH_PLACEMENT_SETTLE_MS", "1500"); ("MARCH_PLACEMENT_TICK_MS", "200");
+                ("MARCH_CONTROL_POLL_MS", "200"); ("MARCH_CONTROL_AGENT_GRACE_MS", "3000") ] in
+  let (rc, out) = run_upgrade ~extra dir in
+  if rc <> 0 then Alcotest.failf "expected the control-plane upgrade to pass, forge exited %d:\n%s" rc out;
+  List.iter (expect out)
+    [ "upgrade: deploying the working tree through the control plane (a release to 2 process(es))";
+      "activated: Serve.serve_one";
+      "accepted (OK ";
+      ": complete";
+      "upgrade traffic: a session across the upgrade ok";
+      "upgrade live: new code sees base=100, its own session answered 9";
+      "upgrade traffic: a session on new code that spawns a task, reads the old Vault and starts a session ok";
+      "app-1: converted 0, dropped 0, killed 0"; "app-2: converted 0, dropped 0, killed 0";
+      "upgrade from HEAD passed: 1 test(s), 2 process(es), nothing dropped" ];
+  (* The release reached each process through its Agent, once. *)
+  List.iter (fun n -> expect out (Printf.sprintf "%s: release " n)) [ "app-1"; "app-2" ];
+  if contains out "Connecting to app-" then Alcotest.failf "a process was deployed through its socket:\n%s" out;
+  after_run dir
+
 let test_dropping_upgrade_fails () =
   let dir = project "drops" in
   let (rc, out) = run_upgrade dir in
@@ -195,6 +224,7 @@ let () =
     ("forge test --upgrade-from", [
         Alcotest.test_case "a clean upgrade passes (sessions complete, nothing dropped)" `Slow test_clean_upgrade_passes;
         Alcotest.test_case "a patch that spawns a task, reads the old Vault and starts a session passes" `Slow test_live_upgrade_passes;
+        Alcotest.test_case "the same patch through the in-cluster control plane passes" `Slow test_control_plane_upgrade_passes;
         Alcotest.test_case "an upgrade that drops messages fails on the counters" `Slow test_dropping_upgrade_fails;
         Alcotest.test_case "an upgrade that removes a handler and converts it with migrate_msg passes" `Slow test_migrating_upgrade_passes;
         Alcotest.test_case "not a topology app: refused" `Quick test_refuses_without_a_topology;

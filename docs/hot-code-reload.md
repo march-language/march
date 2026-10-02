@@ -177,6 +177,74 @@ module_prefix` to the pool module that holds the code you want to patch.
 The `[[hot-reload.env]]` fleet table below and `forge deploy hot --env <name>` keep
 working for a project without a topology.
 
+### Through the in-cluster control plane
+
+A topology with a `[control]` section runs a control plane inside the cluster: the
+nodes carrying the label it names are candidates, one of them leads, and every node
+runs an agent that applies what the leader orders.
+
+```toml
+# topology.toml
+[control]
+candidates = "control"   # the host label of the nodes that may lead
+port = 7947              # their control API (the default)
+```
+
+For such an environment `forge deploy` needs no ssh for a hot change. It builds and
+classifies as above, then writes the hot pools and the topology push into one
+**release**, a document signed with your deploy key where forge runs (the control plane
+holds no keys), uploads the patches the release names to the candidates, sends the
+release to any of them, and follows the leader until the release completes or halts:
+
+```sh
+forge deploy --env prod --plan    # the plan, which steps need ssh, and the release it would sign
+forge deploy --env prod           # build, sign, upload, send, follow
+forge deploy --env prod --status  # the leader's view: the release, its step, each node's report
+forge deploy --env prod --audit 20  # the leader's audit log (the last 20 lines)
+```
+
+While it follows, forge prints each step (`step 1 of 2: ... hosts:canary(1) ...`) and the
+leader's decisions as they change. A halted release stops the deploy with the leader's
+reason (the step, the node, and why: a failed gate, or the node's own refusal); nothing is
+rolled back, because a rollback is a new release, which only you can sign. A release that
+outlives `--follow` (default 1800 s) keeps going on the leader; `--status` shows it.
+
+`--canary N` makes each hot build's first step `N` nodes, gated on their staying healthy
+for `--timeout` ms; the rest follow in the next step. Restart-class work (a runtime or hook
+change, compaction, the first deploy of a build) can't be done by a node to its own
+process: forge runs it over ssh as on the ssh path, in plan order, closing the release
+before it and starting another after it. `--plan` lists those steps under "NEEDS SSH".
+
+The control API is reached at each candidate host's address and the `[control]` port;
+`FORGE_CONTROL_ENDPOINTS=host:port,...` overrides that (a tunnel, a test). `--via ssh`
+deploys host by host over ssh instead, the break-glass path; a node then holds a release
+the leader did not order, and the leader reports itself behind until you send a newer
+one. `--via cluster` insists on the control plane. A build whose hosts span two targets
+is refused on the cluster backend (a release names one patch per build): use `--via ssh`.
+`FORGE_DEPLOY_NATIVE=1` builds a Linux host natively when it is this machine's own
+target, instead of cross-building it; for hosts that share this machine's glibc.
+
+**The leader's audit log.** Each candidate keeps `audit.jsonl` in its control directory
+(`MARCH_CONTROL_DIR`, default `/tmp/march-control`), one JSON object per line, like a
+node's audit log: `ts`, `type`, `leader` (the node that wrote it), and
+
+| `type` | written when | fields |
+|---|---|---|
+| `release` | a release is offered to the leader | `seq`, `release` (its digest), `result`: `ok`, or why it was refused: `err_stale`, `err_fork`, `err_parent` (the compare-and-set on `parent`), `err_invalid`, `err_sig`, `err_parse`, `err_store`, `err_replicate`; `why` |
+| `order` | the leader sends a step to a node | `seq`, `release`, `step`, `node`, `action`, `artifacts` |
+| `step` | a node answers an order | `seq`, `step`, `node`, `result` (`ok`/`err`), `why` |
+| `halt` / `complete` | the release ends | `seq`; a halt adds `step`, `node`, `why` |
+
+The leader appends each line and copies it, about once a second, to every other
+candidate it reaches, so the log outlives a change of leader. A candidate that was down
+misses what was copied meanwhile; `forge deploy --audit` asks every candidate and shows
+the union, in time order. The control API answers `AUDIT [n]` with one candidate's own
+file. Each node still writes its own audit log of what it applied (below).
+
+`forge test --upgrade-from` deploys through the control plane too when the topology has a
+`[control]` section, and `forge run --processes` gives each local process its own control
+directory (`.forge/run/<node>.control`) and its control API on its cluster port + 1000.
+
 ---
 
 ## Actor state migration

@@ -190,6 +190,22 @@ let hot_reload_flags ?pubkey (proj : Project.project) : (string, string) result 
   Ok (" --hot-reload " ^ Filename.quote prefix
       ^ (if pubkey = "" then "" else " --signing-pubkey " ^ Filename.quote pubkey))
 
+(** The control plane's settings for one process of a local cluster, when the
+    topology has a [[control]] section: its own directory for the releases
+    and the audit log, and its control API on its cluster port plus
+    [control_port_offset] (every process shares this machine, so the
+    topology's one control port cannot serve them all). *)
+let control_port_offset = 1000
+
+let control_dir ~root name = Filename.concat (Reconcile.run_dir ~root) (name ^ ".control")
+
+let control_env ~root (t : Topology.t) name =
+  match t.Topology.control with
+  | None -> []
+  | Some _ ->
+    [ ("MARCH_CONTROL_DIR", control_dir ~root name);
+      ("MARCH_CONTROL_PORT_OFFSET", string_of_int control_port_offset) ]
+
 (** What [start_processes] started: the procs, in start order, and the
     recorded run. *)
 type started = { procs : Procs.proc list; state : Reconcile.state; topology : Topology.t }
@@ -243,6 +259,7 @@ let start_processes ?env ?(hot_reload = false) ?pubkey ?(extra_env = []) ?log
           env
           @ [ ("MARCH_TOPOLOGY_FILE", digest); ("MARCH_TOPOLOGY_STATUS", status_path) ]
           @ (match socket with Some p -> [ ("MARCH_HOT_RELOAD_SOCKET", p) ] | None -> [])
+          @ control_env ~root t s.s_name
           @ extra_env
         in
         let port = int_of_string (List.assoc "MARCH_NODE_PORT" env) in

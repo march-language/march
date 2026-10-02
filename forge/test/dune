@@ -211,7 +211,9 @@
 ; (a handler removed with no migrate_msg, so the old feeder's messages are
 ; dropped and counted) must FAIL, `live` (the role body changes; the new
 ; body spawns a task, reads the old version's Vault and starts a session of
-; its own) must PASS with the new body's answer. Each case builds the old version and the
+; its own) must PASS with the new body's answer, and so must `live` deployed through
+; the in-cluster control plane (the ref's topology from `control_v1` has a [control]
+; section: one signed release, no reload socket). Each case builds the old version and the
 ; patch, runs the old version's process with a reload socket, drives real
 ; sessions across a real hot deploy. test_topology_run's hermetic shape; it
 ; also needs `git` on PATH (the fixture repositories and the ref's worktree).
