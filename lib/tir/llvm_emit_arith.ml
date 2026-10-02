@@ -80,7 +80,10 @@ let emit_int_arith ~emit_atom ctx (f : Tir.var) (a : Tir.atom) (b : Tir.atom)
        | "/" -> emit ctx (Printf.sprintf "%s = call i64 @march_checked_div_op(i64 %s, i64 %s)" r va' vb)
        | "%" -> emit ctx (Printf.sprintf "%s = call i64 @march_checked_mod_op(i64 %s, i64 %s)" r va' vb)
        | _   -> emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_arith_op f.Tir.v_name) va' vb));
-      ("i64", r)
+      (* March Int is 63-bit and wraps (see [Llvm_ctx.emit_wrap_int63]).
+         [%] never leaves the range; [/] does only for -2^62 / -1. *)
+      if f.Tir.v_name = "%" then ("i64", r)
+      else ("i64", emit_wrap_int63 ctx r)
     end
 
 (** Body of the `== != < <= > >=` arm: SIMD lanes, string equality and

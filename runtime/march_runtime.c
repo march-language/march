@@ -1427,15 +1427,23 @@ int64_t march_io_read_byte(void) {
 
 /* ── Integer math helpers ────────────────────────────────────────────────── */
 
+void march_panic(void *s);  /* defined below, under "Panic" */
+
+/* Wraps modulo 2^64 (unsigned arithmetic: signed overflow is UB in C); the
+ * compiled caller then reduces to March's 63-bit Int.  A negative exponent
+ * panics with the interpreter's message. */
 int64_t march_int_pow(int64_t base, int64_t exp) {
-    if (exp < 0) return 0;
-    int64_t result = 1;
+    if (exp < 0) {
+        march_panic(march_string_lit("int_pow: negative exponent", 26));
+        return 0;
+    }
+    uint64_t result = 1, b = (uint64_t)base;
     while (exp > 0) {
-        if (exp & 1) result *= base;
-        base *= base;
+        if (exp & 1) result *= b;
+        b *= b;
         exp >>= 1;
     }
-    return result;
+    return (int64_t)result;
 }
 
 /* ── March call stack (for backtraces) ───────────────────────────────────── */
@@ -1685,6 +1693,27 @@ int64_t march_checked_div_op(int64_t a, int64_t b) {
 int64_t march_checked_mod_op(int64_t a, int64_t b) {
     if (b == 0) { march_panic(march_string_lit("modulo by zero", 14)); return 0; }
     return a % b;
+}
+
+/* int_shl / int_shr with a count that is not a literal in [0, 62].  March Int
+ * is 63-bit (specs/lang/type-system.md, "Int width and overflow"), so a count
+ * outside [0, 62] panics with the interpreter's message instead of being a
+ * poison LLVM shift.  int_shl's result is wrapped to 63 bits by the caller;
+ * int_shr is arithmetic (sign-propagating) on both backends. */
+int64_t march_checked_shl(int64_t a, int64_t n) {
+    if (n < 0 || n >= 63) {
+        march_panic(march_string_lit("int_shl: shift out of range", 27));
+        return 0;
+    }
+    return (int64_t)((uint64_t)a << n);
+}
+
+int64_t march_checked_shr(int64_t a, int64_t n) {
+    if (n < 0 || n >= 63) {
+        march_panic(march_string_lit("int_shr: shift out of range", 27));
+        return 0;
+    }
+    return a >> n;
 }
 
 /* ── Test harness ────────────────────────────────────────────────────────── */

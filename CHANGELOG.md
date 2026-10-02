@@ -540,6 +540,20 @@ git log is authoritative for exact commits.
   two mailbox helpers now return `List((Pid(a), Int))` (the parameterized `Pid`) and
   `NodeCall` names `RemoteCall.NoConnection` explicitly instead of the ambiguous bare
   constructor; seven hidden stdlib type errors are gone.
+- **Compiled and interpreted programs now agree on `Int` overflow.** `Int` is
+  63-bit and wraps on overflow ([Int width and overflow](specs/lang/type-system.md#int-width-and-overflow)).
+  Compiled code used to do 64-bit arithmetic in registers, so
+  `int_max_value() + int_max_value()` (or the same sum on two values read from a
+  `NativeArray`) printed `9223372036854775806` compiled and `-2` interpreted. The
+  compiled value also changed once it was stored in a list, tuple or closure. Compiled
+  `+ - * /`, negation, `int_shl`, `int_div`, `int_abs` and `int_pow` now wrap
+  to 63 bits, and compiled `int_max_value()`/`int_min_value()` return
+  `4611686018427387903`/`-4611686018427387904` instead of the 64-bit limits.
+  Compiled `int_popcount(-1)` is 63, as interpreted.
+- **Compiled `int_shl`/`int_shr` with a shift count outside `[0, 62]` now panic**
+  with `int_shl: shift out of range` (as the interpreter does) instead of
+  returning an undefined value. Compiled `int_pow` with a negative exponent
+  panics with `int_pow: negative exponent` instead of returning `0`.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
@@ -1034,6 +1048,10 @@ git log is authoritative for exact commits.
   says so and suggests `fn pair -> match pair do (a, b) -> … end`. Genuinely
   curried callbacks such as `List.fold_left`'s `b -> a -> b` are unaffected,
   including when the accumulator is itself a tuple.
+- **Interpreted `int_shr` is now an arithmetic (sign-propagating) shift**, as it
+  already was compiled: `int_shr(-8, 1)` is `-4`. It used to be a logical shift
+  in the interpreter, so `int_shr(-8, 1)` printed `4611686018427387900`.
+  Non-negative inputs give the same result as before.
 
 ### Removed
 - **The `respond` builtin is gone.** It was an interpreter no-op stub
