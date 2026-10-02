@@ -819,6 +819,14 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **Compiled code no longer makes a function call for every reference-count
+  update.** The common case of each increment and decrement is now inlined into
+  the calling function, and the runtime is called only to free an object or while
+  `MARCH_TRACE_GC` is on. Closure-heavy code gets about 25% faster
+  (`bench/list_ops.march`), tree code 6–12%. Let bindings now also get stack
+  slots LLVM can keep in registers, so deep non-tail recursion uses less stack
+  than before. Behaviour, trace output and leak accounting are unchanged. It is
+  off for wasm and sanitizer builds, and `MARCH_NO_INLINE_RC=1` turns it off.
 - **`NativeArray.fold_*` with a lambda is up to 67× faster when compiled.** A fold
   whose callback is a lambda written at the call site, with an `Int` or `Float`
   accumulator matching the array's elements, now compiles to a loop in the calling
