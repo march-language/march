@@ -752,6 +752,12 @@ let emit_native_map2_inline_loop ctx ~width ~unboxed ~arr1_atom ~arr2_atom ~appl
   Llvm_emit_nmap.emit_native_map2_inline_loop ~emit_atom ctx ~width ~unboxed
     ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
 
+let decode_nfold_inline_call = Llvm_emit_nmap.decode_nfold_inline_call
+
+let emit_native_fold_inline_loop ctx ~width ~unboxed ~acc_atom ~arr_atom ~apply_name ~clo_reg =
+  Llvm_emit_nmap.emit_native_fold_inline_loop ~emit_atom ctx ~width ~unboxed
+    ~acc_atom ~arr_atom ~apply_name ~clo_reg
+
 (** [march_vault_get] / [march_vault_ns_get] return the NICHE encoding of
     [Option] UNCONDITIONALLY — [None] is a raw null, [Some v] is [v] itself (see
     [make_some]/[make_none] in runtime/march_extras.c).  The C side has no way to
@@ -2047,6 +2053,27 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
     let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in
     emit_native_map2_inline_loop ctx ~width ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
+
+  (* ── Native array fold inline loop (2026-09-30) ──────────────────────
+     [Native_map_inline] rewrites a fold whose callback is a fresh, single-use
+     lambda with a scalar accumulator to [__native_<w>_arr_fold_inline], with
+     the builtin's own (acc, arr, clo) order and the closure replaced by the
+     apply fn (non-capturing) or followed by it (capturing). See
+     [emit_native_fold_inline_loop] and
+     specs/plans/2026-09-30-nativearray-fold-inline-loop.md. *)
+  | Tir.EApp (f, [acc_atom; arr_atom; Tir.AVar apply_v])
+    when decode_nfold_inline_call f.Tir.v_name <> None ->
+    let (width, unboxed) = Option.get (decode_nfold_inline_call f.Tir.v_name) in
+    let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
+    emit_native_fold_inline_loop ctx ~width ~unboxed ~acc_atom ~arr_atom ~apply_name ~clo_reg:"null"
+
+  | Tir.EApp (f, [acc_atom; arr_atom; Tir.AVar apply_v; clo_atom])
+    when decode_nfold_inline_call f.Tir.v_name <> None ->
+    let (width, unboxed) = Option.get (decode_nfold_inline_call f.Tir.v_name) in
+    let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
+    let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
+    let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in
+    emit_native_fold_inline_loop ctx ~width ~unboxed ~acc_atom ~arr_atom ~apply_name ~clo_reg
 
   (* ── SIMD vector ops (Task 2) — inline register-resident lowering ────
      Every `simd_<t>_<op>` builtin, including `load`/`store` (bounds-checked

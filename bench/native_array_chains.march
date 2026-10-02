@@ -1,0 +1,208 @@
+-- NativeArray chain-fusion benchmark (Phase 0 gate of
+-- specs/plans/2026-09-28-nativearray-fusion-plan.md).
+--
+-- Each case runs an UNFUSED chain (what users write today, one intermediate
+-- array per link) and a HAND-FUSED equivalent (one call with the callback
+-- bodies substituted into a single lambda, which is exactly what the planned
+-- TIR rewrite would produce). The hand-fused time is the ceiling the
+-- automatic rewrite can reach.
+--
+-- Rounds are interleaved (every variant once per round) so load drift and the
+-- first-position warmup penalty spread across variants instead of landing on
+-- one. Each line is `TIME <case> <variant> <ms>`; take the per-variant minimum.
+--
+--   march --compile --opt 2 bench/native_array_chains.march -o /tmp/nac && /tmp/nac
+mod NativeArrayChains do
+  needs IO.Console
+
+needs IO.Clock
+
+pfn elapsed_ms(t0 : Float, t1 : Float) : Float do
+  (t1 -. t0) *. 1000.0
+end
+
+pfn make_int_list(n : Int) : List(Int) do
+  fn go(i : Int, acc : List(Int)) : List(Int) do
+    if i < 0 do acc
+    else go(i - 1, Cons(i % 1000, acc)) end
+  end
+  go(n - 1, Nil)
+end
+
+pfn make_float_list(n : Int) : List(Float) do
+  fn go(i : Int, acc : List(Float)) : List(Float) do
+    if i < 0 do acc
+    else go(i - 1, Cons(int_to_float(i % 100) /. 100.0, acc)) end
+  end
+  go(n - 1, Nil)
+end
+
+pfn report(case_name : String, variant : String, ms : Float) : Unit do
+  println("TIME " ++ case_name ++ " " ++ variant ++ " " ++ float_to_string(ms))
+end
+
+-- ── Int: 3-deep map chain, light body ──────────────────────────────────────
+
+pfn int_map3_unfused(a) : Int do
+  let r = NativeArray.map_int(NativeArray.map_int(NativeArray.map_int(a, fn x -> x * 2), fn x -> x + 3), fn x -> x * 5)
+  NativeArray.get_int(r, 7)
+end
+
+pfn int_map3_fused(a) : Int do
+  let r = NativeArray.map_int(a, fn x -> (x * 2 + 3) * 5)
+  NativeArray.get_int(r, 7)
+end
+
+-- ── Int: 3-deep map chain, heavier body ────────────────────────────────────
+
+pfn int_map3h_unfused(a) : Int do
+  let r1 = NativeArray.map_int(a, fn x -> x * x * 3 + x * 7 - 5)
+  let r2 = NativeArray.map_int(r1, fn x -> x * 11 - x * x)
+  let r3 = NativeArray.map_int(r2, fn x -> x * x + 13)
+  NativeArray.get_int(r3, 7)
+end
+
+pfn int_map3h_fused(a) : Int do
+  let r = NativeArray.map_int(a, fn x ->
+    let t1 = x * x * 3 + x * 7 - 5
+    let t2 = t1 * 11 - t1 * t1
+    t2 * t2 + 13)
+  NativeArray.get_int(r, 7)
+end
+
+-- ── Int: map feeding map2 ──────────────────────────────────────────────────
+
+pfn int_map_map2_unfused(a, b) : Int do
+  let r = NativeArray.map2_int(NativeArray.map_int(a, fn x -> x * 2), b, fn (x, y) -> x + y)
+  NativeArray.get_int(r, 7)
+end
+
+pfn int_map_map2_fused(a, b) : Int do
+  let r = NativeArray.map2_int(a, b, fn (x, y) -> x * 2 + y)
+  NativeArray.get_int(r, 7)
+end
+
+-- ── Int: map feeding fold ──────────────────────────────────────────────────
+
+pfn int_map_fold_unfused(a) : Int do
+  NativeArray.fold_int(NativeArray.map_int(a, fn x -> x * 2), 0, fn (s, x) -> s + x)
+end
+
+pfn int_map_fold_fused(a) : Int do
+  NativeArray.fold_int(a, 0, fn (s, x) -> s + x * 2)
+end
+
+-- ── Int: map feeding sum ───────────────────────────────────────────────────
+-- Today the only way to hand-fuse a sum is a fold, which is a runtime C loop
+-- with an opaque closure call per element. `fused_fold` measures that;
+-- the Phase 2 inline sum loop is what would beat it.
+
+pfn int_map_sum_unfused(a) : Int do
+  NativeArray.sum_int(NativeArray.map_int(a, fn x -> x * 2))
+end
+
+pfn int_map_sum_fused_fold(a) : Int do
+  NativeArray.fold_int(a, 0, fn (s, x) -> s + x * 2)
+end
+
+-- ── Float: 3-deep map chain ────────────────────────────────────────────────
+
+pfn flt_map3_unfused(a) : Float do
+  let r = NativeArray.map_float(NativeArray.map_float(NativeArray.map_float(a, fn x -> x *. 2.0), fn x -> x +. 3.0), fn x -> x *. 0.5)
+  NativeArray.get_float(r, 7)
+end
+
+pfn flt_map3_fused(a) : Float do
+  let r = NativeArray.map_float(a, fn x -> (x *. 2.0 +. 3.0) *. 0.5)
+  NativeArray.get_float(r, 7)
+end
+
+-- ── Float: map feeding map2 ────────────────────────────────────────────────
+
+pfn flt_map_map2_unfused(a, b) : Float do
+  let r = NativeArray.map2_float(NativeArray.map_float(a, fn x -> x *. 2.0), b, fn (x, y) -> x +. y)
+  NativeArray.get_float(r, 7)
+end
+
+pfn flt_map_map2_fused(a, b) : Float do
+  let r = NativeArray.map2_float(a, b, fn (x, y) -> x *. 2.0 +. y)
+  NativeArray.get_float(r, 7)
+end
+
+-- ── Float: map feeding fold ────────────────────────────────────────────────
+
+pfn flt_map_fold_unfused(a) : Float do
+  NativeArray.fold_float(NativeArray.map_float(a, fn x -> x *. 2.0), 0.0, fn (s, x) -> s +. x)
+end
+
+pfn flt_map_fold_fused(a) : Float do
+  NativeArray.fold_float(a, 0.0, fn (s, x) -> s +. x *. 2.0)
+end
+
+-- ── Float: map feeding sum ─────────────────────────────────────────────────
+
+pfn flt_map_sum_unfused(a) : Float do
+  NativeArray.sum_float(NativeArray.map_float(a, fn x -> x *. 2.0))
+end
+
+pfn flt_map_sum_fused_fold(a) : Float do
+  NativeArray.fold_float(a, 0.0, fn (s, x) -> s +. x *. 2.0)
+end
+
+-- ── Driver ─────────────────────────────────────────────────────────────────
+
+pfn time_int(case_name : String, variant : String, f : Unit -> Int) : Int do
+  let t0 = unix_time(())
+  let v = f(())
+  let t1 = unix_time(())
+  report(case_name, variant, elapsed_ms(t0, t1))
+  v
+end
+
+pfn time_flt(case_name : String, variant : String, f : Unit -> Float) : Float do
+  let t0 = unix_time(())
+  let v = f(())
+  let t1 = unix_time(())
+  report(case_name, variant, elapsed_ms(t0, t1))
+  v
+end
+
+pfn round(ia, ib, fa, fb) : Float do
+  let c1 = time_int("int_map3", "unfused", fn _ -> int_map3_unfused(ia))
+  let c2 = time_int("int_map3", "fused", fn _ -> int_map3_fused(ia))
+  let c3 = time_int("int_map3_heavy", "unfused", fn _ -> int_map3h_unfused(ia))
+  let c4 = time_int("int_map3_heavy", "fused", fn _ -> int_map3h_fused(ia))
+  let c5 = time_int("int_map_map2", "unfused", fn _ -> int_map_map2_unfused(ia, ib))
+  let c6 = time_int("int_map_map2", "fused", fn _ -> int_map_map2_fused(ia, ib))
+  let c7 = time_int("int_map_fold", "unfused", fn _ -> int_map_fold_unfused(ia))
+  let c8 = time_int("int_map_fold", "fused", fn _ -> int_map_fold_fused(ia))
+  let c9 = time_int("int_map_sum", "unfused", fn _ -> int_map_sum_unfused(ia))
+  let c10 = time_int("int_map_sum", "fused_fold", fn _ -> int_map_sum_fused_fold(ia))
+  let d1 = time_flt("flt_map3", "unfused", fn _ -> flt_map3_unfused(fa))
+  let d2 = time_flt("flt_map3", "fused", fn _ -> flt_map3_fused(fa))
+  let d3 = time_flt("flt_map_map2", "unfused", fn _ -> flt_map_map2_unfused(fa, fb))
+  let d4 = time_flt("flt_map_map2", "fused", fn _ -> flt_map_map2_fused(fa, fb))
+  let d5 = time_flt("flt_map_fold", "unfused", fn _ -> flt_map_fold_unfused(fa))
+  let d6 = time_flt("flt_map_fold", "fused", fn _ -> flt_map_fold_fused(fa))
+  let d7 = time_flt("flt_map_sum", "unfused", fn _ -> flt_map_sum_unfused(fa))
+  let d8 = time_flt("flt_map_sum", "fused_fold", fn _ -> flt_map_sum_fused_fold(fa))
+  let ints = c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8 + c9 + c10
+  int_to_float(ints) +. d1 +. d2 +. d3 +. d4 +. d5 +. d6 +. d7 +. d8
+end
+
+pfn rounds(k : Int, ia, ib, fa, fb, acc : Float) : Float do
+  if k <= 0 do acc
+  else rounds(k - 1, ia, ib, fa, fb, acc +. round(ia, ib, fa, fb)) end
+end
+
+fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
+  let n = 4000000
+  let ia = NativeArray.from_list_int(make_int_list(n))
+  let ib = NativeArray.from_list_int(make_int_list(n))
+  let fa = NativeArray.from_list_float(make_float_list(n))
+  let fb = NativeArray.from_list_float(make_float_list(n))
+  let check = rounds(9, ia, ib, fa, fb, 0.0)
+  println("CHECKSUM " ++ float_to_string(check))
+end
+
+end

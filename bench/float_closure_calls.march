@@ -1,0 +1,80 @@
+-- Float vs Int cost of calls through closures (evidence for
+-- specs/plans/2026-09-30-float-closure-unboxing.md).
+--
+-- The same fold and map run over a List(Int) and a List(Float), each through a
+-- lambda passed to a stdlib higher-order function, plus a hand-written loop with
+-- no closure call. The Float/Int gap through a closure is the cost of boxing
+-- Floats at the erased closure ABI; the hand-written pair shows the ceiling.
+--
+--   march --compile --opt 2 bench/float_closure_calls.march -o /tmp/fcc && /tmp/fcc
+mod FloatClosureCalls do
+  needs IO.Console
+
+needs IO.Clock
+
+pfn ms(t0 : Float, t1 : Float) : Float do (t1 -. t0) *. 1000.0 end
+
+pfn ints(n : Int) : List(Int) do
+  fn go(i : Int, acc : List(Int)) : List(Int) do
+    if i < 0 do acc else go(i - 1, Cons(i % 1000, acc)) end
+  end
+  go(n - 1, Nil)
+end
+
+pfn flts(n : Int) : List(Float) do
+  fn go(i : Int, acc : List(Float)) : List(Float) do
+    if i < 0 do acc else go(i - 1, Cons(int_to_float(i % 1000), acc)) end
+  end
+  go(n - 1, Nil)
+end
+
+-- Hand-written loops: no closure call at all (the unboxed ceiling).
+pfn int_sum_direct(xs : List(Int), acc : Int) : Int do
+  match xs do
+  Nil -> acc
+  Cons(h, t) -> int_sum_direct(t, acc + h * 2)
+  end
+end
+
+pfn flt_sum_direct(xs : List(Float), acc : Float) : Float do
+  match xs do
+  Nil -> acc
+  Cons(h, t) -> flt_sum_direct(t, acc +. h *. 2.0)
+  end
+end
+
+pfn round(xi : List(Int), xf : List(Float)) : Float do
+  let t0 = unix_time(())
+  let a = List.fold_left(xi, 0, fn (s, x) -> s + x * 2)
+  let t1 = unix_time(())
+  let b = List.fold_left(xf, 0.0, fn (s, x) -> s +. x *. 2.0)
+  let t2 = unix_time(())
+  let c = int_sum_direct(xi, 0)
+  let t3 = unix_time(())
+  let d = flt_sum_direct(xf, 0.0)
+  let t4 = unix_time(())
+  let mi = List.map(xi, fn x -> x * 2)
+  let t5 = unix_time(())
+  let mf = List.map(xf, fn x -> x *. 2.0)
+  let t6 = unix_time(())
+  println("TIME fold_closure int " ++ float_to_string(ms(t0, t1)))
+  println("TIME fold_closure float " ++ float_to_string(ms(t1, t2)))
+  println("TIME fold_direct int " ++ float_to_string(ms(t2, t3)))
+  println("TIME fold_direct float " ++ float_to_string(ms(t3, t4)))
+  println("TIME map_closure int " ++ float_to_string(ms(t4, t5)))
+  println("TIME map_closure float " ++ float_to_string(ms(t5, t6)))
+  int_to_float(a + c + List.length(mi)) +. b +. d +. int_to_float(List.length(mf))
+end
+
+pfn rounds(k : Int, xi : List(Int), xf : List(Float), acc : Float) : Float do
+  if k <= 0 do acc else rounds(k - 1, xi, xf, acc +. round(xi, xf)) end
+end
+
+fn main(_c : Cap(IO.Clock), _o : Cap(IO.Console)) : Unit do
+  let n = 2000000
+  let xi = ints(n)
+  let xf = flts(n)
+  println("CHECKSUM " ++ float_to_string(rounds(7, xi, xf, 0.0)))
+end
+
+end

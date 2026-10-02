@@ -1,0 +1,66 @@
+-- Regression: NativeArray.fold_* inline loop
+-- (specs/plans/2026-09-30-nativearray-fold-inline-loop.md).
+--
+-- Native_map_inline rewrites a fold whose callback is a fresh, single-use
+-- lambda with a SCALAR accumulator of the element's boundary type to a loop
+-- emitted in the caller: Float widths call an unboxed clone of the lambda
+-- (no box per element or per accumulator), Int widths call the ordinary
+-- apply fn directly. Everything else must keep the runtime fold, and every
+-- line below must print the same value compiled and interpreted.
+--
+-- Captured values are read from an array at run time so constant
+-- propagation can't turn a capturing lambda into a non-capturing one.
+mod Main do
+  needs IO.Console
+
+  pfn apply_twice(f : Int -> Int -> Int, a : Int, b : Int) : Int do
+    f(a, b) + f(b, a)
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) : () do
+    let ia = NativeArray.from_list_int(Cons(1, Cons(-2, Cons(3, Cons(40, Nil)))))
+    let fa = NativeArray.from_list_float(Cons(1.5, Cons(-2.25, Cons(3.0, Cons(0.125, Nil)))))
+    let empty_i = NativeArray.from_list_int(Nil)
+    let empty_f = NativeArray.from_list_float(Nil)
+
+    -- Int, non-capturing: 1*2 + -2*2 + 3*2 + 40*2 = 84
+    println(int_to_string(NativeArray.fold_int(ia, 0, fn (s, x) -> s + x * 2)))
+    -- Int, capturing (k = 3): order-sensitive combine, s*k + x
+    let k = NativeArray.get_int(ia, 2)
+    println(int_to_string(NativeArray.fold_int(ia, 1, fn (s, x) -> s * k + x)))
+    -- Int, empty array returns the accumulator
+    println(int_to_string(NativeArray.fold_int(empty_i, 77, fn (s, x) -> s + x)))
+    -- Int, large values (kept inside 62 bits: the interpreter's Int is 63-bit
+    -- and compiled Int is 64-bit, a pre-existing difference unrelated to folds)
+    let big = NativeArray.from_list_int(Cons(1152921504606846975, Cons(1152921504606846975, Nil)))
+    println(int_to_string(NativeArray.fold_int(big, 0, fn (s, x) -> s + x)))
+
+    -- Float, non-capturing (unboxed clone), strict left-to-right order
+    println(float_to_string(NativeArray.fold_float(fa, 0.0, fn (s, x) -> s +. x *. 2.0)))
+    -- Float, capturing (c = 3.0)
+    let c = NativeArray.get_float(fa, 2)
+    println(float_to_string(NativeArray.fold_float(fa, 1.0, fn (s, x) -> s *. c -. x)))
+    -- Float, empty array returns the accumulator
+    println(float_to_string(NativeArray.fold_float(empty_f, 2.5, fn (s, x) -> s +. x)))
+    -- Float, a -0.0 accumulator plus a -0.0 element stays -0.0
+    let negz = NativeArray.from_list_float(Cons(-0.0, Nil))
+    println(float_to_string(NativeArray.fold_float(negz, -0.0, fn (s, x) -> s +. x)))
+
+    -- Narrow widths
+    let f32a = NativeArray.from_list_f32(Cons(0.5, Cons(1.5, Cons(-4.0, Nil))))
+    println(float_to_string(NativeArray.fold_f32(f32a, 0.0, fn (s, x) -> s +. x)))
+    let i32a = NativeArray.from_list_i32(Cons(7, Cons(-8, Cons(9, Nil))))
+    println(int_to_string(NativeArray.fold_i32(i32a, 0, fn (s, x) -> s * 10 + x)))
+    let u8a = NativeArray.from_list_u8(Cons(250, Cons(3, Cons(255, Nil))))
+    println(int_to_string(NativeArray.fold_u8(u8a, 0, fn (s, x) -> s + x)))
+
+    -- Must stay on the runtime fold: String accumulator
+    println(NativeArray.fold_int(ia, "", fn (s, x) -> s ++ int_to_string(x) ++ ","))
+    -- Must stay on the runtime fold: Int accumulator over a Float array
+    println(int_to_string(NativeArray.fold_float(fa, 0, fn (n, x) -> if x > 0.0 do n + 1 else n end)))
+    -- Must stay on the runtime fold: the lambda is used twice
+    let add = fn (s, x) -> s + x
+    println(int_to_string(NativeArray.fold_int(ia, 0, add)))
+    println(int_to_string(apply_twice(add, 5, 6)))
+  end
+end
