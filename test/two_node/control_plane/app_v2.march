@@ -1,0 +1,21 @@
+-- The app of the control-plane scenarios (test/two_node/control_*): a topology
+-- app with no roles, one pool, and a function on the hot-reload boundary
+-- (`Ver.version`) for a release to change. Its topology digest is written by
+-- lib.sh, with a [control] section naming the label "control".
+mod CtlApp do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+  needs IO.Spawn
+  needs IO.Mut
+  needs Session.Live
+  needs ClusterNode.Live
+
+  mod Ver do
+    fn version() : Int do 2 end
+  end
+
+  fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : () do
+    println("app: version " ++ int_to_string(Ver.version()))
+  end
+end

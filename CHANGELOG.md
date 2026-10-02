@@ -19,6 +19,23 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **An in-cluster control plane for hot deploys (distributed deploys, step 12a).** A
+  `[control] candidates = "<host label>"` section in `topology.toml` makes every node run
+  an Agent and the labelled nodes serve a control API; one of them leads (`count = 1`
+  placement). A release, built and signed by forge (it holds the only key), is stored on
+  every reachable candidate, then carried out step by step with canary gates; nodes
+  verify every signed line themselves, so a compromised control node can delay a deploy
+  but not forge one. No ssh is involved in a hot deploy. A leader killed mid-rollout is
+  replaced and the release finishes without applying a step twice. Leadership needs
+  `Ctl.Control:offer` in the node's certificate. Restart-class changes still go through
+  the process backend. `forge deploy` itself does not select the cluster backend yet.
+- **Native builds allocate from a vendored mimalloc.** `march_alloc`, the allocator
+  behind every March value, now draws from a statically linked mimalloc instead of
+  libc `calloc`, with no new system dependency. Allocation-heavy programs get
+  faster: `binary_trees` 233 to 165 ms (-29%) and `list_ops` 76 to 62 ms (-18%),
+  with `tree_transform` about 3% faster. The cost is a larger resident set (7 MB to
+  14 MB on `binary_trees`). Set `MARCH_MALLOC=libc` when compiling to get the old
+  allocator; `MARCH_SANITIZE` builds, hot-reload patches and the REPL always use libc.
 - **`Array.sort_by`, `Array.sort_by_key`, `RRB.sort_by` and `RRB.sort_by_key`.**
   Stable sorts for the persistent vectors: `sort_by` takes the same comparator
   as `List.sort_by` (`fn (a, b) -> a <= b`), and `sort_by_key` takes a function
@@ -63,6 +80,14 @@ git log is authoritative for exact commits.
   `RC underflow` on macOS and `malloc(): unaligned fastbin chunk detected` on
   Linux. Such a lambda that returns its `Float` argument, or passes it on to
   another closure, also no longer leaks it.
+- **Compiled `Seq` constructors and combinators no longer leak.** Draining
+  `Seq.from_list`, `Seq.from_string_lines`, `Seq.map`, `Seq.filter` and
+  `Seq.concat` with `Seq.count` or `Seq.fold` leaked 3 to 5 heap objects per
+  use, so `Process.run_stream` leaked on every call. The compiler leaked a
+  closure's forwarded captures, reused a dying `Seq` cell as a capture-free
+  closure, missed closures stored through cell reuse, and left a dead
+  join-point closure holding references in `match ... rest -> ...` fall-throughs.
+  A capturing lambda handed to `Seq.map` still leaks one object per use.
 - **Compiled `to_string(())` prints `()`.** A compiled program printed `0` for
   the unit value, in `to_string`, `show`, string interpolation and inside
   containers (`Some(())` printed `Some(0)`). It now prints `()` as the
@@ -787,6 +812,16 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **Breaking: `Seq.batched`, `Flow.batch` and `Gen.frequency` now declare their
+  preconditions in the signature.** `Seq.batched(seq, n)` and `Flow.batch(stage, n)`
+  take `n : {Int | _ > 0}`, and `Gen.frequency(pairs)` takes
+  `pairs : {List((Int, Generator(a))) | len(_) > 0}`. Each already forwarded to a
+  contracted callee without restating the contract, so a zero batch size or an
+  empty list compiled and failed at run time; a literal violation is now a
+  compile error, and an unproven argument is a hint (an error under
+  `cap verified`). To migrate, run `march --check --refine-suggest <fn>` on the
+  caller, which prints the refinement to add to its parameter, or guard the call
+  with `if n > 0` / a `match` on the list.
 - **A small scalar aggregate built in the arms of an `if`/`match` no longer
   allocates.** When every arm builds the same unboxed type (for example
   `if c do P2(a, 1) else P2(1, a) end`), the join now holds the struct directly

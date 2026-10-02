@@ -2,4 +2,5 @@ spawn_async + read_line + wait_proc = 40, flat: true
 spawn_async + write + kill + wait_proc = 40, flat: true
 run = 40, flat: true
 process_spawn_lines = 40, flat: true
+Process.run_stream = 40, flat: true
 set_env + env = 400, flat: true

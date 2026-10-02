@@ -1,7 +1,7 @@
 # `Stats`: every non-empty requirement is declared in the signature
 
 **Landed 2026-09-22.** Closes the `Stats` row of
-`specs/todos/2026-09-16-refine-stdlib-wrapper-contracts.md` (the todo stays open
+`specs/progress/2026-09-30-refine-stdlib-wrapper-contracts.md` (the todo stayed open
 for the `seq`/`flow`/`gen` rows; `aho_corasick` is decided "no", recorded
 there). Sized by `specs/progress/2026-09-16-refine-skip-census.md`.
 
