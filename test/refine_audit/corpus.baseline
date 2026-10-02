@@ -112,6 +112,8 @@ native_config_typed_keys: coverage audit (user + stdlib): 123 enforced, 0 inert 
 native_config_typed_keys: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_control_channel_loopback: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_control_channel_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_control_serialize_twice: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_control_serialize_twice: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_credit_backpressure_loopback: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_credit_backpressure_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_csv_niche_row: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -180,8 +182,6 @@ native_float_generic_field_abi: coverage audit (user + stdlib): 123 enforced, 0 
 native_float_generic_field_abi: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_fn_arities_shadow_poisoning: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_fn_arities_shadow_poisoning: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
-native_foreign_actor_http: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
-native_foreign_actor_http: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_from_json_dispatch: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_from_json_dispatch: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_generic_fn_float_closure: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -210,8 +210,12 @@ native_hcr_e2e_server: coverage audit (user + stdlib): 123 enforced, 0 inert (wa
 native_hcr_e2e_server: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_hcr_smoke: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_hcr_smoke: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_hof_spec_closures: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_hof_spec_closures: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_html_safe_raw: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_html_safe_raw: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_http_text_leak_repro: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_http_text_leak_repro: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_if_branch_dead_value_probe: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_if_branch_dead_value_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_iface_collision_ambiguous_call: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -372,6 +376,10 @@ native_node_send_typed_loopback: coverage audit (user + stdlib): 123 enforced, 0
 native_node_send_typed_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_observe_ping: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_observe_ping: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_observe_snapshot: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_observe_snapshot: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_observe_types_hr: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_observe_types_hr: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_option_adt_eq: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_option_adt_eq: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_option_niche: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -392,6 +400,8 @@ native_pid_of_int_roundtrip: coverage audit (user + stdlib): 123 enforced, 0 ine
 native_pid_of_int_roundtrip: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_pid_to_int_leak_probe: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_pid_to_int_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_pooled_actor_http: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_pooled_actor_http: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_prelude_scope_user_shadow: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced

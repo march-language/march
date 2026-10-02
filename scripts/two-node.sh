@@ -14,16 +14,20 @@
 # node started twice appends), and scenario.sh, the fault script, sourced
 # with these helpers in scope:
 #
-#   start_node <a|b|c> [creation] compile-once, start node-<x> in the background.
+#   start_node <a|b|c> [creation] start node-<x> in the background. The first
+#                                 start_node compiles every node of the
+#                                 scenario (each once), so no node's compile
+#                                 runs inside another node's setup deadline;
+#                                 set every COMPILE_FLAGS_<x> before it.
 #                                 Every node gets MARCH_PORT_A / MARCH_PORT_B /
 #                                 MARCH_PORT_C, one listen port per node, so a
 #                                 scenario chooses who listens and who connects;
 #                                 node-b also gets MARCH_NODE_PORT (= MARCH_PORT_B)
 #                                 and MARCH_NODE_CREATION, node-a MARCH_PEER_PORT
 #                                 (= MARCH_PORT_B), the two-node spelling.
-#   compile <a|b|c>               compile the node now rather than in its first
-#                                 start_node, for a scenario whose timing must
-#                                 not include a compile (a setup deadline)
+#   compile <a|b|c>               compile the node now rather than in the first
+#                                 start_node, for a scenario that needs the
+#                                 binary (or the work dir's source copy) earlier
 #   kill_node <a|b|c>             SIGKILL it (a crash, distinct from a close)
 #   stop_node / cont_node <a|b|c> SIGSTOP / SIGCONT (a stall, distinct from a crash)
 #   drop_link [port...] / heal    drop every TCP packet to or from node-b's port
@@ -176,7 +180,17 @@ bind_failed() {
 }
 
 start_node() {
-  local n=$1 creation=${2:-1}
+  local n=$1 creation=${2:-1} m
+  # Compile EVERY node of the scenario before the first one runs, not each in
+  # its own start_node: once node-a is up, its setup deadline is running
+  # (MARCH_SESSION_CONNECT_MS, a heartbeat), and a node-b compiled only now
+  # eats that window wherever compiles are slow -- the first scenario on a
+  # cold CI runner took >15 s, node-a's accept timed out, and node-b then
+  # dialed a closed listener ("Connection refused"), which read as a session
+  # bug (cert_direct, 2026-10-02). Every COMPILE_FLAGS_<x> is set before a
+  # scenario's first start_node, and compile is once-only, so this changes
+  # no node's binary, only when it is built.
+  for m in a b c; do [ -f "$dir/node_$m.march" ] && compile "$m"; done
   compile "$n"
   if [ "$n" = b ]; then
     local tries=1

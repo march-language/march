@@ -2044,7 +2044,8 @@ static void sched_loop(march_scheduler *sched) {
             }
         }
         p->reductions   = MARCH_REDUCTION_BUDGET;
-        p->owner_sched  = sched;
+        /* Atomic store: read by the observe walk (march_obs_actors). */
+        __atomic_store_n(&p->owner_sched, sched, __ATOMIC_RELAXED);
         sched->current  = p;
         sched->stat_dispatches++;
 
@@ -2753,8 +2754,9 @@ void march_sched_set_mbox_limit(march_proc *p, int64_t limit,
                                 march_mbox_policy policy) {
     if (!p) return;
     mbox_lock_acquire(p);
-    p->mbox_limit  = limit > 0 ? limit : 0;
-    p->mbox_policy = (int32_t)policy;
+    /* Atomic stores: the observe walk reads both without mbox_lock. */
+    __atomic_store_n(&p->mbox_limit, limit > 0 ? limit : 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&p->mbox_policy, (int32_t)policy, __ATOMIC_RELAXED);
     mbox_lock_release(p);
 }
 

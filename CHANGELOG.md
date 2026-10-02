@@ -26,6 +26,16 @@ git log is authoritative for exact commits.
   `forge observe`, `forge top` and `forge diagnose` build on. It is separate from
   the hot-reload socket, so an observer can never block a deploy; the socket is
   owner-only and holds at most eight clients at once.
+- **`forge observe` and the observe socket's snapshot verbs.** A running program now
+  answers `ACTORS [mbox|status|epoch|pid] [n]` (every live actor with its mailbox
+  depth, status, scheduler, code epoch, supervisor and registered names), `ACTOR <pid>`
+  (one actor, its children and supervisor settings, or how a dead one died: the
+  kind only, never the panic text), `TREE` (the supervision tree plus the
+  unsupervised actors), `NAMES`, `SCHED`, `MEM`, `EPOCHS` and `SNAPSHOT` (several of
+  them from one consistent walk). `forge observe [REQUEST] [--section S] [--json]`
+  asks the forge.toml hosts over ssh, or a local socket with `--socket`. Reading
+  100 000 actors takes about 20 ms, and nothing is added to the scheduler's hot path.
+  Actor type names need a `--hot-reload` build.
 - **An in-cluster control plane for hot deploys (distributed deploys, step 12a).** A
   `[control] candidates = "<host label>"` section in `topology.toml` makes every node run
   an Agent and the labelled nodes serve a control API; one of them leads (`count = 1`
@@ -50,6 +60,15 @@ git log is authoritative for exact commits.
   when the topology has one, and `forge run --processes` gives each local process its own
   control directory and control port. See "Through the in-cluster control plane" in
   docs/hot-code-reload.md.
+- **Node certificates and revocations delivered by the control plane (distributed
+  deploys, step 12b).** `forge cluster cert <node> --node-key <key> --deliver <host:port>`
+  renews a running node's certificate through the control plane: no file to copy, no
+  restart. The node takes it live, its links and sessions stay up, and it saves the
+  certificate for its next start. `forge cluster revoke ... --deliver` reaches every node,
+  and each drops the revoked node's links. A node checks both the deploy key's signature
+  on the release and the operator's on the certificate or token, and refuses a certificate
+  naming another node. Issuance stays with the operator; the control plane holds no
+  operator key.
 - **Native builds allocate from a vendored mimalloc.** `march_alloc`, the allocator
   behind every March value, now draws from a statically linked mimalloc instead of
   libc `calloc`, with no new system dependency. Allocation-heavy programs get
@@ -121,6 +140,19 @@ git log is authoritative for exact commits.
   word of a hot-reload supervisor, so stopping the tree could stop an unrelated actor
   and a restart wrote past the actor, and `get_actor_field` found no state field of a
   hot-reload actor.
+- **Compiled HTTP servers no longer leak ~0.5 KiB per request.** Neither the
+  thread-pool nor the event-loop server released the `Conn` a handler returns
+  after writing the response, so every request leaked the result record and
+  its strings (a text-only handler grew 158 MB in 10 s at 31k req/s; forgepm
+  at 800 req/s grew 400 MB/min). `HttpServer.listen` now hands the runtime a
+  compiled `Conn -> Unit` release function, applied once the response bytes
+  are written (after deferred writes drain, or on close). `http_server_listen`
+  takes that function as a fifth argument.
+- **A borrowed aggregate dropped by a closure trampoline is released deeply.**
+  A top-level function with a borrowed parameter, passed as a closure value,
+  had that argument released by its `$clo_wrap` with a shallow `march_decrc`,
+  orphaning the aggregate's children; the trampoline now calls the type's
+  synthesized deep drop when one exists.
 - **A release through the control plane no longer orders functions the nodes cannot
   patch.** forge recorded a release's signed lines against the last deployed manifest,
   which lists every function, including the control plane's own wiring, which has no
@@ -955,6 +987,15 @@ git log is authoritative for exact commits.
   slots LLVM can keep in registers, so deep non-tail recursion uses less stack
   than before. Behaviour, trace output and leak accounting are unchanged. It is
   off for wasm and sanitizer builds, and `MARCH_NO_INLINE_RC=1` turns it off.
+- **Float lambdas passed to `List.fold_left`, `List.map` and similar are up to
+  25× faster when compiled.** A call that hands a lambda to a function which
+  passes it straight through its own recursion (`fold_left`, `map`, `filter`,
+  `filter_map`, `find`, `any`, `all`, and your own functions written the same
+  way) now gets a copy of that function in which the lambda is called directly,
+  and usually inlined, instead of through a closure that boxes every Float.
+  `List.fold_left` over 2M Floats takes about 4.5 ms instead of 113 ms, and
+  `List.map` about 55 ms instead of 132 ms. Results are unchanged. It is off
+  under `--hot-reload`, and `MARCH_NO_HOF_SPEC=1` turns it off.
 - **`NativeArray.fold_*` with a lambda is up to 67× faster when compiled.** A fold
   whose callback is a lambda written at the call site, with an `Int` or `Float`
   accumulator matching the array's elements, now compiles to a loop in the calling

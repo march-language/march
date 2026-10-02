@@ -18,7 +18,7 @@ let known_builtin_names =
     "install"; "uninstall"; "archives"; "update"; "verify";
     "toolchain"; "upgrade"; "watch"; "bench"; "version"; "release";
     "licenses"; "tree"; "outdated"; "why"; "search"; "notebook"; "doc"; "phases"; "cap"; "audit"; "ffi"; "fix"; "help";
-    "completions"; "deploy"; "hot-reload"; "topology"; "cluster"; "host" ]
+    "completions"; "deploy"; "hot-reload"; "topology"; "cluster"; "host"; "observe" ]
 
 (* --------------------------------------------------------- pre-dispatch ---
    Archive tasks look like "bastion.new" — dotted namespaces not used by any
@@ -1410,6 +1410,40 @@ let deploy_cmd =
              changed functions to a [hot-reload] server or fleet")
     [deploy_hot_cmd]
 
+(* ---------------------------------------------------------- forge observe *)
+
+let observe_cmd =
+  let words =
+    Arg.(value & pos_all string [] & info [] ~docv:"REQUEST"
+           ~doc:"The request: a verb and its arguments (e.g. $(b,ACTORS mbox 20), $(b,ACTOR 42), \
+                 $(b,TREE), $(b,HELP)). Default: $(b,SNAPSHOT).")
+  in
+  let sections =
+    Arg.(value & opt_all string [] & info ["section"] ~docv:"S"
+           ~doc:"Ask for $(b,SNAPSHOT) of just this section (repeatable): actors, tree, names, \
+                 sched, mem, epochs.")
+  in
+  let json =
+    Arg.(value & flag & info ["json"]
+           ~doc:"Print each reply envelope as one line of JSON (default: indented).")
+  in
+  let socket =
+    Arg.(value & opt (some string) None & info ["socket"] ~docv:"PATH"
+           ~doc:"A local observe socket (the program's MARCH_OBSERVE_SOCKET) instead of the \
+                 forge.toml hosts.")
+  in
+  let env_name =
+    Arg.(value & opt string "" & info ["env"] ~docv:"NAME"
+           ~doc:"Only the [[hot-reload.env]] entries named NAME (default: every host in forge.toml).")
+  in
+  let run words sections json socket env =
+    handle (Cmd_observe.run ~socket ~env ~json ~words ~sections ())
+  in
+  Cmd.v (Cmd.info "observe"
+           ~doc:"Ask a running node what it is doing: its actors, supervision tree, names, \
+                 schedulers, memory and code epochs, from the node's read-only observe socket")
+    Term.(const run $ words $ sections $ json $ socket $ env_name)
+
 (* -------------------------------------------------------- forge hot-reload *)
 
 let hot_reload_keygen_cmd =
@@ -1498,6 +1532,21 @@ let cluster_operator_key =
   Arg.(value & opt string "operator.key" & info ["operator-key"] ~docv:"PATH"
          ~doc:"The operator secret key file written by `forge cluster keygen` (default: ./operator.key)")
 
+(* --deliver (step 12b): hand what was signed to a running cluster's control
+   plane as a release item. *)
+let cluster_deliver =
+  let eps = Arg.(value & opt (some string) None & info ["deliver"] ~docv:"HOST:PORT,..."
+                   ~doc:"Also deliver it to the running cluster through its control plane: a release \
+                         carrying it, signed by the deploy key and sent to this control API (any control \
+                         candidate's), followed until every node has taken it") in
+  let key = Arg.(value & opt (some string) None & info ["deploy-key"] ~docv:"PATH"
+                   ~doc:"With --deliver: the deploy signing key (hex or base64; default: forge's own, \
+                         `forge hot-reload keygen`)") in
+  let env_ = Arg.(value & opt string "default" & info ["env"] ~docv:"ENV"
+                   ~doc:"With --deliver: the environment the release names (default: default)") in
+  Term.(const (fun e k v -> Option.map (fun e -> { Cmd_cluster.d_endpoints = e; d_deploy_key = k; d_env = v }) e)
+        $ eps $ key $ env_)
+
 let cluster_keygen_cmd =
   let out = Arg.(value & opt string "." & info ["out"] ~docv:"DIR" ~doc:"Directory to write operator.key/operator.pub into") in
   let force = Arg.(value & flag & info ["force"] ~doc:"Replace an existing operator.key") in
@@ -1518,21 +1567,25 @@ let cluster_cert_cmd =
   let node_key = Arg.(value & opt (some string) None & info ["node-key"] ~docv:"PATH"
                         ~doc:"Reuse this node secret key (renewal) instead of generating NODE.key") in
   let out = Arg.(value & opt string "." & info ["out"] ~docv:"DIR" ~doc:"Directory to write NODE.cert/NODE.key into") in
-  Cmd.v (Cmd.info "cert" ~doc:"Issue a node certificate signed by the operator key")
-    Term.(const (fun n r f d s td p ok nk o ->
+  Cmd.v (Cmd.info "cert" ~doc:"Issue a node certificate signed by the operator key (with --deliver, \
+                                also replace it live on the running node: --node-key is then required)")
+    Term.(const (fun n r f d s td p ok nk o dl ->
+      let deliver = Option.map (fun d cert -> Cmd_cluster.deliver_items d { Control_release.certs = [ (n, cert) ]; revokes = [] }) dl in
       handle_msg (Cmd_cluster.run_cert ~name:n ~roles:r ~flags:f ~days:d ~seconds:s ~trust_domain:td
-                    ~pool:p ~operator_key:ok ~node_key:nk ~out_dir:o ()))
+                    ~pool:p ~operator_key:ok ~node_key:nk ~out_dir:o ?deliver ()))
           $ name $ roles $ flags $ days $ seconds $ cluster_trust_domain $ cluster_pool
-          $ cluster_operator_key $ node_key $ out)
+          $ cluster_operator_key $ node_key $ out $ cluster_deliver)
 
 let cluster_revoke_cmd =
   let serial = Arg.(value & opt string "" & info ["serial"] ~docv:"SERIAL" ~doc:"Revoke the certificate with this serial") in
   let node = Arg.(value & opt string "" & info ["node"] ~docv:"NODE"
                     ~doc:"Revoke every certificate of this node (a name, or a spiffe:// URI)") in
-  Cmd.v (Cmd.info "revoke" ~doc:"Print a signed revocation token for ClusterNode.revoke / MARCH_CLUSTER_REVOCATIONS")
-    Term.(const (fun s n td p ok ->
-      handle_msg (Cmd_cluster.run_revoke ~serial:s ~node:n ~trust_domain:td ~pool:p ~operator_key:ok ()))
-          $ serial $ node $ cluster_trust_domain $ cluster_pool $ cluster_operator_key)
+  Cmd.v (Cmd.info "revoke" ~doc:"Print a signed revocation token for ClusterNode.revoke / MARCH_CLUSTER_REVOCATIONS \
+                                  (with --deliver, also revoke it on the running cluster)")
+    Term.(const (fun s n td p ok dl ->
+      let deliver = Option.map (fun d tok -> Cmd_cluster.deliver_items d { Control_release.certs = []; revokes = [ tok ] }) dl in
+      handle_msg (Cmd_cluster.run_revoke ~serial:s ~node:n ~trust_domain:td ~pool:p ~operator_key:ok ?deliver ()))
+          $ serial $ node $ cluster_trust_domain $ cluster_pool $ cluster_operator_key $ cluster_deliver)
 
 let cluster_cmd =
   Cmd.group (Cmd.info "cluster" ~doc:"Cluster certificates: operator keys, node certificates, revocations")
@@ -1824,7 +1877,7 @@ let () =
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       toolchain_cmd; upgrade_cmd; watch_cmd; bench_cmd; version_cmd; release_cmd;
       licenses_cmd; tree_cmd; outdated_cmd; why_cmd; search_cmd; notebook_cmd; doc_cmd; phases_cmd;
-      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; topology_cmd; cluster_cmd; host_cmd; completions_cmd; help_cmd ]
+      cap_cmd; audit_cmd; ffi_cmd; deploy_cmd; hot_reload_cmd; observe_cmd; topology_cmd; cluster_cmd; host_cmd; completions_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term

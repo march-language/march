@@ -2905,7 +2905,9 @@ let base_env : env =
      every other connection continues to make progress.  Mirrors the C
      runtime's g_http_shutdown pattern for shutdown handling. *)
   ; ("http_server_listen", VBuiltin ("http_server_listen", function
-      | [VInt port; VInt _max_conns; VInt _idle_timeout; pipeline_fn] ->
+      | [VInt port; VInt _max_conns; VInt _idle_timeout; pipeline_fn; _release_fn] ->
+        (* _release_fn: the compiled runtime's per-result drop; the interpreter
+           is garbage-collected, so it has nothing to release. *)
         let open Unix in
         let server_sock = socket PF_INET SOCK_STREAM 0 in
         setsockopt server_sock SO_REUSEADDR true;
@@ -2925,7 +2927,7 @@ let base_env : env =
            raise exn);
         (try close server_sock with _ -> ());
         VUnit
-      | _ -> eval_error "http_server_listen(port, max_conns, idle_timeout, pipeline)"))
+      | _ -> eval_error "http_server_listen(port, max_conns, idle_timeout, pipeline, release)"))
 
   (* ── HTTP server: fork-based N-request variant ───────────────────── *)
   (* http_server_spawn_n(port, n, max_conns, idle_timeout, pipeline_fn)
