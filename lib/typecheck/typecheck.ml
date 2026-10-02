@@ -6882,6 +6882,13 @@ let rec check_decl env (d : Ast.decl) : env =
     with_deferred_pending env (fun () -> with_no_caller env (fun () ->
       check_expr env tdef.test_body t_unit
         ~reason:(Some (RBuiltin (Printf.sprintf "test body of \"%s\" must produce Unit" tdef.test_name)))));
+    (* A test body is a declaration boundary like [DFn]/[DLet]: discharge
+       the Eq/Ord/Num/interface constraints its body raised HERE.  Left
+       pending, they leaked into the next [DFn]/[DLet]'s discharge and were
+       reported against that unrelated decl's span; with no later fn/let
+       they were silently dropped, so `==` on a non-[Eq] type went
+       unchecked in tests. *)
+    discharge_constraints env sp;
     Hashtbl.replace env.type_map sp t_unit;
     env
 
@@ -6896,6 +6903,7 @@ let rec check_decl env (d : Ast.decl) : env =
     let env = { env with root_cap_allowed = true } in
     with_deferred_pending env (fun () -> with_no_caller env (fun () ->
       check_expr env body t_unit ~reason:(Some (RBuiltin "setup body must produce Unit"))));
+    discharge_constraints env sp;  (* see [DTest] *)
     Hashtbl.replace env.type_map sp t_unit;
     env
 
@@ -6905,6 +6913,7 @@ let rec check_decl env (d : Ast.decl) : env =
     let env = { env with root_cap_allowed = true } in
     with_deferred_pending env (fun () -> with_no_caller env (fun () ->
       check_expr env body t_unit ~reason:(Some (RBuiltin "setup_all body must produce Unit"))));
+    discharge_constraints env sp;  (* see [DTest] *)
     Hashtbl.replace env.type_map sp t_unit;
     env
 

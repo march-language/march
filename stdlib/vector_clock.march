@@ -12,6 +12,7 @@ mod VectorClock do
 
   -- Causal ordering relationship between two vector clocks.
   type ClockOrder = Before | After | Concurrent | Equal
+  derive Eq for ClockOrder
 
   doc "An empty vector clock (all timestamps implicitly 0)."
   fn new() : VectorClock do

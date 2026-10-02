@@ -78,6 +78,18 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **`==` inside a `test`/`setup` body is checked where it is written.** The
+  `Eq`/`Ord`/`Num`/interface constraints a test or setup body raised stayed
+  pending until the next top-level `fn` or `let`, so a `fn` placed between two
+  `describe` blocks was blamed for every `==` in the tests above it ("`T` does
+  not implement interface `Eq`" at the fn's span), and with no later `fn` they
+  were never checked at all. They are now reported at the test itself. Tests
+  that compared a type with no `Eq` impl, which used to pass unchecked, are now
+  rejected; to keep them working, these stdlib types now `derive Eq`:
+  `Cli.FlagArity`, `Control.CtlHosts`/`CtlAction`/`CtlGate`/`StepOrder`/
+  `CtlDecision`, `File.FileKind`, `Membership.MemberStatus`/`Member`,
+  `NodeCert.Cert`, `NodeIdentity.Identity`, `RemoteCall.CallError`/`Verdict`/
+  `ReplyResult`/`CallReply`, `Swim.Action` and `VectorClock.ClockOrder`.
 - **A compiled `Array` that is built, updated and dropped no longer leaks its
   trie.** `Array.from_list`, `push`, `set` and `pop` leaked about one object per
   element once a vector held more than one 32-element leaf (a 1,100-element
