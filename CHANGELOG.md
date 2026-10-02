@@ -78,6 +78,15 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A let-bound lambda that ignores or returns a `Float` argument no longer
+  crashes compiled code.** A lambda bound with `let` and left generic, such as
+  `let keep = fn (acc, x) -> acc`, freed the `Float` it was given when it
+  ignored it, and the caller freed it again. That happened when the lambda was
+  passed to `NativeArray.fold_float`, `fold_f32` or `typed_array_fold`, or called
+  through a parameter typed `Float -> Float -> Float`. It showed up as
+  `RC underflow` on macOS and `malloc(): unaligned fastbin chunk detected` on
+  Linux. Such a lambda that returns its `Float` argument, or passes it on to
+  another closure, also no longer leaks it.
 - **A compiled `Array` that is built, updated and dropped no longer leaks its
   trie.** `Array.from_list`, `push`, `set` and `pop` leaked about one object per
   element once a vector held more than one 32-element leaf (a 1,100-element
@@ -833,6 +842,14 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **Compiled code no longer makes a function call for every reference-count
+  update.** The common case of each increment and decrement is now inlined into
+  the calling function, and the runtime is called only to free an object or while
+  `MARCH_TRACE_GC` is on. Closure-heavy code gets about 25% faster
+  (`bench/list_ops.march`), tree code 6–12%. Let bindings now also get stack
+  slots LLVM can keep in registers, so deep non-tail recursion uses less stack
+  than before. Behaviour, trace output and leak accounting are unchanged. It is
+  off for wasm and sanitizer builds, and `MARCH_NO_INLINE_RC=1` turns it off.
 - **`NativeArray.fold_*` with a lambda is up to 67× faster when compiled.** A fold
   whose callback is a lambda written at the call site, with an `Int` or `Float`
   accumulator matching the array's elements, now compiles to a loop in the calling

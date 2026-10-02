@@ -923,6 +923,17 @@ let sanitize_mode () =
   | Some "thread" -> Some "thread"
   | Some _ -> Some "address"
 
+(** Inline refcount fast path (lib/tir/llvm_rc_inline.ml): rewrite a finished
+    module's refcount calls to inline twins. Off for wasm (its runtime's
+    refcount entry points are no-ops), for sanitizer builds (they keep the
+    runtime's accesses visible), and with MARCH_NO_INLINE_RC=1. *)
+let maybe_inline_rc target ir =
+  if March_tir.Llvm_emit.is_wasm_target target
+  || sanitize_mode () <> None
+  || Lazy.force March_tir.Llvm_rc_inline.env_disabled
+  then ir
+  else March_tir.Llvm_rc_inline.rewrite ir
+
 let sanitize_clang_flag () =
   match sanitize_mode () with
   | Some "thread" -> " -fsanitize=thread -g"
@@ -987,6 +998,9 @@ let codegen_cas_tags () =
      artifact, so the "pass off" run printed the mocked output. *)
   @ (if Sys.getenv_opt "MARCH_CAP_PASSING" = Some "1" then ["cappass"] else [])
   @ (if cap_mocking () then ["capdisp"] else [])
+  (* MARCH_NO_INLINE_RC=1 turns off the inline refcount fast path, which changes
+     the emitted code without changing the compiler binary. *)
+  @ (if Lazy.force March_tir.Llvm_rc_inline.env_disabled then ["noinlinerc"] else [])
 
 (** Parse --target string into Llvm_emit.target_config. *)
 let parse_target s =
@@ -3323,6 +3337,7 @@ let compile filename =
              call clang, then cache the binary *)
           let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
+          let ir = maybe_inline_rc target ir in
           stamp "llvm-emit";
           (* clang reads the per-process temp, never the shared [ll_file]
              another concurrent compile of this source may be rewriting; see
@@ -4342,6 +4357,7 @@ let compile filename =
         in
         let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
+          let ir = maybe_inline_rc target ir in
         (* Same temp-then-rename as --compile, so a concurrent reader never
            sees a half-written file. *)
         write_ll_tmp ir;
