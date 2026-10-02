@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **A read-only observe socket on every compiled program.** Set
+  `MARCH_OBSERVE_SOCKET=<path>` (or just `MARCH_HOT_RELOAD_SOCKET`, which puts it
+  at `<path>.observe`) and the program answers one-line requests with one line of
+  JSON. It serves `HELP` and `PING` today and is the base the coming
+  `forge observe`, `forge top` and `forge diagnose` build on. It is separate from
+  the hot-reload socket, so an observer can never block a deploy; the socket is
+  owner-only and holds at most eight clients at once.
 - **An in-cluster control plane for hot deploys (distributed deploys, step 12a).** A
   `[control] candidates = "<host label>"` section in `topology.toml` makes every node run
   an Agent and the labelled nodes serve a control API; one of them leads (`count = 1`
