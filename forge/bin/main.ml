@@ -1498,6 +1498,21 @@ let cluster_operator_key =
   Arg.(value & opt string "operator.key" & info ["operator-key"] ~docv:"PATH"
          ~doc:"The operator secret key file written by `forge cluster keygen` (default: ./operator.key)")
 
+(* --deliver (step 12b): hand what was signed to a running cluster's control
+   plane as a release item. *)
+let cluster_deliver =
+  let eps = Arg.(value & opt (some string) None & info ["deliver"] ~docv:"HOST:PORT,..."
+                   ~doc:"Also deliver it to the running cluster through its control plane: a release \
+                         carrying it, signed by the deploy key and sent to this control API (any control \
+                         candidate's), followed until every node has taken it") in
+  let key = Arg.(value & opt (some string) None & info ["deploy-key"] ~docv:"PATH"
+                   ~doc:"With --deliver: the deploy signing key (hex or base64; default: forge's own, \
+                         `forge hot-reload keygen`)") in
+  let env_ = Arg.(value & opt string "default" & info ["env"] ~docv:"ENV"
+                   ~doc:"With --deliver: the environment the release names (default: default)") in
+  Term.(const (fun e k v -> Option.map (fun e -> { Cmd_cluster.d_endpoints = e; d_deploy_key = k; d_env = v }) e)
+        $ eps $ key $ env_)
+
 let cluster_keygen_cmd =
   let out = Arg.(value & opt string "." & info ["out"] ~docv:"DIR" ~doc:"Directory to write operator.key/operator.pub into") in
   let force = Arg.(value & flag & info ["force"] ~doc:"Replace an existing operator.key") in
@@ -1518,21 +1533,25 @@ let cluster_cert_cmd =
   let node_key = Arg.(value & opt (some string) None & info ["node-key"] ~docv:"PATH"
                         ~doc:"Reuse this node secret key (renewal) instead of generating NODE.key") in
   let out = Arg.(value & opt string "." & info ["out"] ~docv:"DIR" ~doc:"Directory to write NODE.cert/NODE.key into") in
-  Cmd.v (Cmd.info "cert" ~doc:"Issue a node certificate signed by the operator key")
-    Term.(const (fun n r f d s td p ok nk o ->
+  Cmd.v (Cmd.info "cert" ~doc:"Issue a node certificate signed by the operator key (with --deliver, \
+                                also replace it live on the running node: --node-key is then required)")
+    Term.(const (fun n r f d s td p ok nk o dl ->
+      let deliver = Option.map (fun d cert -> Cmd_cluster.deliver_items d { Control_release.certs = [ (n, cert) ]; revokes = [] }) dl in
       handle_msg (Cmd_cluster.run_cert ~name:n ~roles:r ~flags:f ~days:d ~seconds:s ~trust_domain:td
-                    ~pool:p ~operator_key:ok ~node_key:nk ~out_dir:o ()))
+                    ~pool:p ~operator_key:ok ~node_key:nk ~out_dir:o ?deliver ()))
           $ name $ roles $ flags $ days $ seconds $ cluster_trust_domain $ cluster_pool
-          $ cluster_operator_key $ node_key $ out)
+          $ cluster_operator_key $ node_key $ out $ cluster_deliver)
 
 let cluster_revoke_cmd =
   let serial = Arg.(value & opt string "" & info ["serial"] ~docv:"SERIAL" ~doc:"Revoke the certificate with this serial") in
   let node = Arg.(value & opt string "" & info ["node"] ~docv:"NODE"
                     ~doc:"Revoke every certificate of this node (a name, or a spiffe:// URI)") in
-  Cmd.v (Cmd.info "revoke" ~doc:"Print a signed revocation token for ClusterNode.revoke / MARCH_CLUSTER_REVOCATIONS")
-    Term.(const (fun s n td p ok ->
-      handle_msg (Cmd_cluster.run_revoke ~serial:s ~node:n ~trust_domain:td ~pool:p ~operator_key:ok ()))
-          $ serial $ node $ cluster_trust_domain $ cluster_pool $ cluster_operator_key)
+  Cmd.v (Cmd.info "revoke" ~doc:"Print a signed revocation token for ClusterNode.revoke / MARCH_CLUSTER_REVOCATIONS \
+                                  (with --deliver, also revoke it on the running cluster)")
+    Term.(const (fun s n td p ok dl ->
+      let deliver = Option.map (fun d tok -> Cmd_cluster.deliver_items d { Control_release.certs = []; revokes = [ tok ] }) dl in
+      handle_msg (Cmd_cluster.run_revoke ~serial:s ~node:n ~trust_domain:td ~pool:p ~operator_key:ok ?deliver ()))
+          $ serial $ node $ cluster_trust_domain $ cluster_pool $ cluster_operator_key $ cluster_deliver)
 
 let cluster_cmd =
   Cmd.group (Cmd.info "cluster" ~doc:"Cluster certificates: operator keys, node certificates, revocations")

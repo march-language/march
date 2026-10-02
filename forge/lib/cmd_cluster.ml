@@ -7,6 +7,16 @@
     [forge cluster revoke]  a signed revocation token to hand to a node
                             (ClusterNode.revoke or MARCH_CLUSTER_REVOCATIONS)
 
+    With [--deliver HOST:PORT,...], [cert] and [revoke] also hand what they
+    signed to a running cluster's control plane (distributed-deploys step
+    12b): a release carrying the certificate or revocation as an item,
+    signed by the deploy key and sent to the control API the way
+    [forge deploy] sends its releases ({!deliver}). Issuance stays here, with
+    the operator (D39); each node checks the release's signature and the
+    item's own operator signature before it takes the certificate
+    ([ClusterNode.replace_cert], live, keeping the node's key) or the
+    revocation ([ClusterNode.revoke], which gossips it on).
+
     The byte formats are stdlib/node_cert.march's and must stay byte-identical
     to it: a certificate body is the canonical MessagePack array
     ["march-node-cert-v1", node, [roles], [flags], not_after, issuer,
@@ -151,12 +161,15 @@ let cert_body ~node ~roles ~flags ~not_after ~issuer ~pubkey_hex ~serial =
 (** [forge cluster cert NODE]: a node keypair (NODE.key, unless [node_key]
     names an existing one to renew) and NODE.cert, signed by [operator_key]. *)
 let run_cert ~name ~roles ~flags ~days ~seconds ~trust_domain ~pool ~operator_key
-    ~node_key ~out_dir () : (string, string) result =
+    ~node_key ~out_dir ?(deliver : (string -> (string, string) result) option) () : (string, string) result =
   let roles = split_list roles and flags = split_list flags in
   let bad_role = List.find_map (fun r -> match check_role r with Error e -> Some e | Ok () -> None) roles in
   match bad_role with
   | Some e -> Error e
   | None when name = "" || String.contains name '/' -> Error "the node name must be non-empty and contain no '/'"
+  | None when Option.is_some deliver && node_key = None ->
+    Error "--deliver renews a running node's certificate for the key it already holds: pass --node-key <node>.key \
+           (the control plane never carries a secret key)"
   | None ->
     match load_secret_key operator_key with
     | Error e -> Error e
@@ -179,13 +192,19 @@ let run_cert ~name ~roles ~flags ~days ~seconds ~trust_domain ~pool ~operator_ke
         let key_path = Filename.concat out_dir (name ^ ".key") in
         write_file cert_path (b64 signed ^ "\n");
         if node_key = None then write_file ~perm:0o600 key_path (to_hex node_sk ^ "\n");
-        Ok (Printf.sprintf "wrote %s%s\nnode %s\nserial %s\nnot_after %d (unix seconds)"
-              cert_path (if node_key = None then " and " ^ key_path else "")
-              node serial not_after)
+        let wrote = Printf.sprintf "wrote %s%s\nnode %s\nserial %s\nnot_after %d (unix seconds)"
+            cert_path (if node_key = None then " and " ^ key_path else "")
+            node serial not_after in
+        match deliver with
+        | None -> Ok wrote
+        | Some f ->
+          print_endline wrote;
+          f (b64 signed)
 
 (** [forge cluster revoke]: a signed revocation of one certificate (by
     serial) or of every certificate of a node (by node). Printed, base64. *)
-let run_revoke ~serial ~node ~trust_domain ~pool ~operator_key () : (string, string) result =
+let run_revoke ~serial ~node ~trust_domain ~pool ~operator_key ?(deliver : (string -> (string, string) result) option) ()
+  : (string, string) result =
   let node_uri_s = match node with
     | "" -> ""
     | n when String.length n > 9 && String.sub n 0 9 = "spiffe://" -> n
@@ -197,4 +216,87 @@ let run_revoke ~serial ~node ~trust_domain ~pool ~operator_key () : (string, str
     | Ok op_sk ->
       let body = mp (Arr [ Str "march-revocation-v1"; Str node_uri_s; Str serial;
                            Int (int_of_float (Unix.time ())) ]) in
-      Ok (b64 (mp (Arr [ Bin body; Bin (sign op_sk body) ])))
+      let token = b64 (mp (Arr [ Bin body; Bin (sign op_sk body) ])) in
+      match deliver with
+      | None -> Ok token
+      | Some f -> print_endline token; f token
+
+(* ------------------------------------------------- delivery (step 12b) *)
+
+let ( let* ) = Result.bind
+
+(** The deploy signing key: [path] holding it as hex (128 digits) or base64,
+    else forge's own ([forge hot-reload keygen]). *)
+let load_deploy_key (path : string option) : (bytes, string) result =
+  match path with
+  | None -> Cmd_hot_reload.read_sk_raw ()
+  | Some p ->
+    match (try Ok (String.trim (read_file p)) with Sys_error e -> Error e) with
+    | Error e -> Error (Printf.sprintf "cannot read the deploy key %s: %s" p e)
+    | Ok text ->
+      match of_hex text with
+      | Ok sk when String.length sk = 64 -> Ok (Bytes.of_string sk)
+      | _ ->
+        match Cmd_hot_reload.b64_decode_raw text with
+        | Some b when Bytes.length b >= 64 -> Ok (Bytes.sub b 0 64)
+        | _ -> Error (Printf.sprintf "%s: expected a 64-byte ed25519 deploy key, as hex or base64" p)
+
+(** The release carrying [items] after [head]: one [do:certs] step over every
+    pool. Its [topology] is ["-"]: it changes no topology, and the executor
+    reads the field only for a topology step. *)
+let cert_release ~(sk : bytes) ~(env : string) ~(head : Cluster_deploy.status) (items : Control_release.items)
+  : Control_release.t =
+  let open Control_release in
+  let seq = next_seq ~now_ms:(int_of_float (Unix.gettimeofday () *. 1000.)) ~head:head.Cluster_deploy.head_seq in
+  sign_with ~sk items
+    { seq; parent = (if head.Cluster_deploy.head_digest = "-" then no_parent else head.Cluster_deploy.head_digest);
+      env; topology = "-"; builds = [];
+      steps = [ { id = 1; pools = [ "*" ]; hosts = All; action = Certs; gate = No_gate; batch = 0 } ];
+      lines = []; drain = None; signature = "" }
+
+(** Deliver [items] through the control plane at [endpoints]: the leader's
+    status, a release over its head, RELEASE, then follow it until every node
+    reports the certificates and revocations it carries (or it halts: a node
+    refused an item, and STATUS says which and why). Refused while the head
+    release is still rolling out, which the new one would supersede. Nothing
+    here checks a certificate against its target node: [run_cert] writes them
+    consistent, and the node checks every item itself. *)
+let deliver ~(endpoints : Cluster_deploy.endpoint list) ~(sk : bytes) ~(env : string) ?(follow_s = 120.)
+    (items : Control_release.items) : (string, string) result =
+  if endpoints = [] then Error "--deliver needs the control API of at least one control candidate (host:port,...)"
+  else
+    let* head = Cluster_deploy.status endpoints in
+    if head.Cluster_deploy.state = "running" || head.Cluster_deploy.state = "behind" then
+      Error (Printf.sprintf "release %d is still rolling out (%s); deliver once it completes or halts, \
+                             since a new release supersedes it" head.Cluster_deploy.head_seq head.Cluster_deploy.decision)
+    else begin
+      let known = List.map (fun n -> n.Cluster_deploy.n_name) head.Cluster_deploy.nodes in
+      List.iter (fun (node, _) ->
+          if not (List.mem node known) then
+            Printf.printf "warning: %s does not report to the control plane; this release will not reach it\n%!" node)
+        items.Control_release.certs;
+      let r = cert_release ~sk ~env ~head items in
+      let body = Control_release.serialize_with items r in
+      (match Sys.getenv_opt "FORGE_RELEASE_OUT" with
+       | Some f when f <> "" -> write_file f body
+       | _ -> ());
+      let* resp = Cluster_deploy.send_release endpoints ~body in
+      Printf.printf "release accepted: %s\n%!" resp;
+      Cluster_deploy.follow endpoints ~seq:r.Control_release.seq ~timeout_s:follow_s
+    end
+
+(** [--deliver] for [forge cluster cert] and [revoke]: the endpoints, the
+    deploy key, the environment. *)
+type delivery = { d_endpoints : string; d_deploy_key : string option; d_env : string }
+
+let endpoints_of (s : string) : (Cluster_deploy.endpoint list, string) result =
+  let ws = split_list s in
+  let eps = List.filter_map Cluster_deploy.endpoint_of_string ws in
+  if List.length eps <> List.length ws || eps = [] then
+    Error (Printf.sprintf "--deliver %S: expected host:port[,host:port...] (a control candidate's control API)" s)
+  else Ok eps
+
+let deliver_items (d : delivery) (items : Control_release.items) : (string, string) result =
+  let* endpoints = endpoints_of d.d_endpoints in
+  let* sk = load_deploy_key d.d_deploy_key in
+  deliver ~endpoints ~sk ~env:d.d_env items

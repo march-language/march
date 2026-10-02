@@ -172,6 +172,45 @@ connect, so they present the new certificate from their next connection.
 Revoke the old certificate's serial once the new one is in place if it must
 stop working before it expires.
 
+### Through the control plane
+
+A cluster that runs the control plane (a `[control]` section in its
+topology) can take the renewal from forge directly, with no file to copy:
+
+```bash
+forge cluster cert web-1 --node-key ./pki/web-1.key --days 30 \
+  --roles ... --operator-key ./pki/operator.key --out ./pki \
+  --deliver ctl-1.prod.example:7947
+```
+
+`--deliver` names the control API of any control candidate (several, comma
+separated, if you like). forge writes the certificate as usual, then sends a
+release carrying it, signed by the deploy key (`--deploy-key PATH`, default
+forge's own from `forge hot-reload keygen`), the way `forge deploy` sends its
+releases, and follows it until the node reports presenting the new
+certificate. The node checks two signatures before it takes anything: the
+deploy key's over the release and the operator key's over the certificate. A
+control-plane node therefore cannot forge either; it can only delay them.
+The node then replaces its certificate live, exactly as above, and writes it
+back over its `MARCH_NODE_CERT` file so a restart comes back on it.
+
+`--deliver` needs `--node-key`: a release never carries a secret key, so the
+node keeps the key it has. To change the key, use the files. Issuance stays
+with you, offline: the control plane holds no operator key and issues
+nothing.
+
+A node refuses a certificate item, and the release halts with its reason in
+`forge`'s output and the control API's `STATUS`, when the certificate:
+
+- names another node,
+- is signed by another operator key,
+- has expired or been revoked,
+- names a key the node does not hold, or
+- comes in a release older than one the node already took certificates from.
+
+forge also refuses to deliver while an earlier release is still rolling out,
+since a new release would supersede it.
+
 ## 5. Revoke
 
 To cut off one certificate (a node was compromised, or decommissioned early):
@@ -201,6 +240,19 @@ its peers when it links, or from `MARCH_CLUSTER_REVOCATIONS` (tokens separated
 by commas or whitespace, or a file of them), so add the token there too.
 `ClusterNode.revocations(node)` lists what a node knows. A token counts only
 if the operator key signed it, so one node cannot revoke another.
+
+With the control plane, `--deliver` does the handing out for you:
+
+```bash
+forge cluster revoke --node web-1 --trust-domain prod.example --pool web \
+  --operator-key ./pki/operator.key --deliver ctl-1.prod.example:7947
+```
+
+The release reaches every node, not just those linked to whoever saw the
+token first, and forge follows it until every node reports knowing the
+revocation. The revoked node itself is not waited for, since its peers cut
+it off. Each node checks the operator's signature on the token itself.
+Still add the token to `MARCH_CLUSTER_REVOCATIONS` for nodes started later.
 
 ## Watching for trouble
 

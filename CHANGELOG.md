@@ -50,6 +50,15 @@ git log is authoritative for exact commits.
   when the topology has one, and `forge run --processes` gives each local process its own
   control directory and control port. See "Through the in-cluster control plane" in
   docs/hot-code-reload.md.
+- **Node certificates and revocations delivered by the control plane (distributed
+  deploys, step 12b).** `forge cluster cert <node> --node-key <key> --deliver <host:port>`
+  renews a running node's certificate through the control plane: no file to copy, no
+  restart. The node takes it live, its links and sessions stay up, and it saves the
+  certificate for its next start. `forge cluster revoke ... --deliver` reaches every node,
+  and each drops the revoked node's links. A node checks both the deploy key's signature
+  on the release and the operator's on the certificate or token, and refuses a certificate
+  naming another node. Issuance stays with the operator; the control plane holds no
+  operator key.
 - **Native builds allocate from a vendored mimalloc.** `march_alloc`, the allocator
   behind every March value, now draws from a statically linked mimalloc instead of
   libc `calloc`, with no new system dependency. Allocation-heavy programs get

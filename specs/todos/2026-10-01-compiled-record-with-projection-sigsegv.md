@@ -65,3 +65,11 @@ projection outliving its consumed owner — has since had one more instance fixe
 [../progress/2026-10-01-dead-join-point-closure-leaks-captures.md](../progress/2026-10-01-dead-join-point-closure-leaks-captures.md)),
 so the next attempt should first re-run the original `test/two_node/control_plane`
 shape with the workaround reverted on a compiler that has that fix.
+
+**2026-10-02 (dd step 12b):** shape 2 pinned down. The over-release is in
+`Control.serialize` itself: `"sig " ++ (if r.signature == "" do "-" else r.signature end)`
+released `r.signature` while `r` still held it, and a later read of the release's
+signature was a heap-use-after-free (ASAN, CI sanitize-gate). `serialize` was rewritten
+so the field goes straight into `++`, and `test/native/control_serialize_twice` fails on
+the old form. The compiler bug (an `if` branch returning a borrowed field projection that
+a consuming builtin then takes) is still open.
