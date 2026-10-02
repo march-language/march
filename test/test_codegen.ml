@@ -9446,8 +9446,8 @@ let test_native_int_arr_ir () =
   (* The length accessor is declared pure + speculatable so LLVM can hoist it
      out of index loops (the SIMD load bounds check calls it per iteration).
      Dropping the attributes silently un-hoists it; no result changes. *)
-  Alcotest.(check bool) "length declare is memory(none) speculatable" true
-    (ir_contains ir "@native_int_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)")
+  Alcotest.(check bool) "length declare is readnone speculatable" true
+    (ir_contains ir "@native_int_arr_length(ptr %arr) nounwind willreturn speculatable readnone")
 
 (** native_float_arr_* builtins must appear in the LLVM preamble and generate
     correct call instructions: double return for get/sum, ptr for make/set/map. *)
@@ -14189,7 +14189,7 @@ declare ptr  @march_typed_array_fold(ptr %arr, ptr %acc, ptr %f)
 declare ptr  @march_typed_array_slice(ptr %arr, i64 %start, i64 %len)
 ; NativeIntArr builtins — flat i64 arrays for vectorizable loops
 declare ptr    @native_int_arr_make(i64 %len, i64 %def)
-declare i64    @native_int_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
+declare i64    @native_int_arr_length(ptr %arr) nounwind willreturn speculatable readnone
 declare i64    @native_int_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_int_arr_set(ptr %arr, i64 %i, i64 %val)
 declare ptr    @native_int_arr_sort(ptr %arr)
@@ -14206,7 +14206,7 @@ declare ptr    @native_int_arr_to_list(ptr %arr)
 declare ptr    @native_int_arr_filter_mask(ptr %arr, ptr %mask)
 ; NativeFloatArr builtins — flat double arrays for vectorizable loops
 declare ptr    @native_float_arr_make(i64 %len, double %def)
-declare i64    @native_float_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
+declare i64    @native_float_arr_length(ptr %arr) nounwind willreturn speculatable readnone
 declare double @native_float_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_float_arr_set(ptr %arr, i64 %i, double %val)
 declare double @native_float_arr_sum(ptr %arr)
@@ -14225,7 +14225,7 @@ declare ptr    @native_float_arr_alloc_raw(i64 %len)
 declare void   @native_arr_map2_check_len(i64 %len1, i64 %len2)
 ; Narrow native arrays (f32/i32/u8)
 declare ptr    @native_f32_arr_make(i64 %len, double %def)
-declare i64    @native_f32_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
+declare i64    @native_f32_arr_length(ptr %arr) nounwind willreturn speculatable readnone
 declare double @native_f32_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_f32_arr_set(ptr %arr, i64 %i, double %v)
 declare double @native_f32_arr_sum(ptr %arr)
@@ -14236,7 +14236,7 @@ declare ptr    @native_f32_arr_fold(ptr %acc, ptr %arr, ptr %f)
 declare ptr    @native_f32_arr_from_list(ptr %lst)
 declare ptr    @native_f32_arr_to_list(ptr %arr)
 declare ptr    @native_i32_arr_make(i64 %len, i64 %def)
-declare i64    @native_i32_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
+declare i64    @native_i32_arr_length(ptr %arr) nounwind willreturn speculatable readnone
 declare i64    @native_i32_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_i32_arr_set(ptr %arr, i64 %i, i64 %v)
 declare i64    @native_i32_arr_sum(ptr %arr)
@@ -14247,7 +14247,7 @@ declare ptr    @native_i32_arr_fold(ptr %acc, ptr %arr, ptr %f)
 declare ptr    @native_i32_arr_from_list(ptr %lst)
 declare ptr    @native_i32_arr_to_list(ptr %arr)
 declare ptr    @native_u8_arr_make(i64 %len, i64 %def)
-declare i64    @native_u8_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
+declare i64    @native_u8_arr_length(ptr %arr) nounwind willreturn speculatable readnone
 declare i64    @native_u8_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_u8_arr_set(ptr %arr, i64 %i, i64 %v)
 declare i64    @native_u8_arr_sum(ptr %arr)
