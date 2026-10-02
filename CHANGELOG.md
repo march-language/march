@@ -78,6 +78,14 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- Compiled: a dying tuple releases its boxed `Float` fields, and a dying
+  `List(Float)` cell (any generic container slot holding a Float) releases the
+  box in that slot; both leaked one object per Float before.
+- Compiled: a tuple or record holding a niche-encoded `Option` (`Some(tree)`)
+  releases the payload deeply when dropped; the subtree leaked before.
+- Compiled: an aggregate whose field type still mentions a type variable (a
+  tuple destructured inside a polymorphic local `fn`) is released instead of
+  skipped; its lists are walked and freed.
 - **A let-bound lambda that ignores or returns a `Float` argument no longer
   crashes compiled code.** A lambda bound with `let` and left generic, such as
   `let keep = fn (acc, x) -> acc`, freed the `Float` it was given when it

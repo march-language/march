@@ -314,16 +314,13 @@ let droppable_ctors (env : env) (ty : Tir.ty)
      | Kind.Newtype _ | Kind.Niche _ | Kind.Unboxed _ -> None)
   | _ -> None
 
-(* A field still carrying an unsubstituted TVar means the type-parameter
-   ordering convention did not line up (a shape this pass has no concrete
-   layout for).  Bail rather than synthesize a drop against a guess. *)
-let rec has_tvar = function
-  | Tir.TVar _ -> true
-  | Tir.TCon (_, args) -> List.exists has_tvar args
-  | Tir.TFn (ps, r) -> List.exists has_tvar ps || has_tvar r
-  | Tir.TTuple ts -> List.exists has_tvar ts
-  | Tir.TPtr t -> has_tvar t
-  | _ -> false
+(** The constructors of the variant named [name], resolved exactly or by
+    suffix (see [find_variant_by_suffix]). *)
+let variant_ctors (env : env) (name : string)
+  : (string * Tir.ty list) list option =
+  match Kind.find_variant env.k_table name with
+  | Some _ as found -> found
+  | None -> find_variant_by_suffix env name
 
 (** The (accessor, type) pairs of a record or tuple, in layout order, or
     [None] for any other type.  Records are keyed by field name and sorted, as
@@ -379,6 +376,58 @@ let may_be_non_heap (env : env) (ty : Tir.ty) : bool =
         | _ -> false))
   | _ -> false
 
+(** Slot indices of constructor [cname] of [ty] (field types [ftys], type
+    arguments substituted) that hold a BOXED Float: a field DECLARED as a type
+    parameter and instantiated at [Float].  The slot is uniform ([ptr]), so
+    the Float there is a [march_alloc_float] cell the constructor owns; a
+    field declared [Float] outright is a raw [double] in its slot and owns
+    nothing.  [Llvm_case] binds such a field as a COPY of the double (so the
+    binder aliases nothing) and releases the box only on its own
+    destructuring path; a synthesized drop goes through [march_decrc_freed]
+    instead and has to release the box itself, from the raw slot word. *)
+let boxed_float_slots (env : env) (ty : Tir.ty) (cname : string)
+    (ftys : Tir.ty list) : int list =
+  match ty with
+  | Tir.TCon (name, _) ->
+    (match variant_ctors env name with
+     | Some ctors ->
+       (match List.assoc_opt cname ctors with
+        | Some decl when List.length decl = List.length ftys ->
+          List.concat (List.mapi (fun i (d, f) ->
+              match d, f with
+              | Tir.TVar _, Tir.TFloat -> [i]
+              | _ -> []) (List.combine decl ftys))
+        | _ -> [])
+     | None -> [])
+  | _ -> []
+
+(** For a value of payload-sharing representation (niche: [Some(x)] IS [x],
+    [None] is the raw word 0; newtype: [W(x)] IS [x]), the payload it may be,
+    when that payload owns heap memory: the constructor to match for a niche
+    (the match is the null test), or just the payload type for a newtype.
+    [None] when the payload is a scalar, so a bare [EDecRC] (a no-op on a
+    non-heap word) is the whole release. *)
+let erased_payload (env : env) (ty : Tir.ty)
+  : [ `Niche of string * Tir.ty | `Newtype of Tir.ty ] option =
+  let repr = match ty with
+    | Tir.TCon (n, []) ->
+      (match Kind.niche_repr_of_concrete env.k_table n with
+       | Some r -> r
+       | None -> Kind.repr_of env.k_table ty)
+    | _ -> Kind.repr_of env.k_table ty
+  in
+  match ty, repr with
+  | _, Kind.Newtype p when Kind.needs_rc_of env.k_table p -> Some (`Newtype p)
+  | Tir.TCon (name, _), Kind.Niche { payload; _ }
+    when Kind.needs_rc_of env.k_table payload ->
+    (match variant_ctors env name with
+     | Some ctors ->
+       (match List.find_opt (fun (_, fs) -> List.length fs = 1) ctors with
+        | Some (cname, _) -> Some (`Niche (cname, payload))
+        | None -> None)
+     | None -> None)
+  | _ -> None
+
 (** The synthesized drop function for [ty], or [None] if a bare [EDecRC] on
     [ty] is already correct (no heap children to release). *)
 let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
@@ -397,8 +446,8 @@ let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
          { n : Int, s : String } rebuilt 200k times leaked ~200k strings on
          top of ~200k cells. *)
       let owns_heap_child =
-        List.exists (fun (_, fty) ->
-            (not (has_tvar fty)) && Kind.needs_rc_of env.k_table fty) fields
+        List.exists (fun (_, fty) -> Kind.needs_rc_of env.k_table fty) fields
+        || List.exists (fun (_, fty) -> tuple_boxed_float ty fty) fields
       in
       if not owns_heap_child then begin
         Hashtbl.replace env.names key ""; None
@@ -414,9 +463,9 @@ let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
     | None -> Hashtbl.replace env.names key ""; None
     | Some ctors ->
       let owns_heap_child =
-        List.exists (fun (_, ftys) ->
-            List.exists (fun fty -> (not (has_tvar fty)) && Kind.needs_rc_of env.k_table fty)
-              ftys)
+        List.exists (fun (cname, ftys) ->
+            List.exists (fun fty -> Kind.needs_rc_of env.k_table fty) ftys
+            || boxed_float_slots env ty cname ftys <> [])
           ctors
       in
       if not owns_heap_child then begin
@@ -455,27 +504,21 @@ and build_aggregate_drop_fn env fname ty (fields : (string * Tir.ty) list)
      released out from under the surviving reference. *)
   let x = { Tir.v_name = fresh env "dx"; v_ty = ty; v_lin = Tir.Unr } in
   let unit_expr = Tir.ETuple [] in
-  let droppable =
-    List.filter (fun (_, fty) ->
-        (not (has_tvar fty)) && Kind.needs_rc_of env.k_table fty) fields
-  in
+  (* One binder per field that owns something: a heap field by its accessor,
+     and a tuple's Float by its raw slot word (the accessor is the same
+     [$fvN]; the binder's [Ptr] type is what keeps the load from unboxing).
+     [drop_op] on a [Ptr(Unit)] binder is a bare [EDecRC]: the float box has
+     no children. *)
   let binders =
-    List.map (fun (accessor, fty) ->
-        (accessor, { Tir.v_name = fresh env "df"; v_ty = fty; v_lin = Tir.Unr }))
-      droppable
+    List.concat (List.mapi (fun i (accessor, fty) ->
+        if Kind.needs_rc_of env.k_table fty then
+          [ (accessor, { Tir.v_name = fresh env "df"; v_ty = fty; v_lin = Tir.Unr }) ]
+        else if tuple_boxed_float ty fty then
+          [ (Tir_names.fv_field i,
+             { Tir.v_name = fresh env "db"; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr }) ]
+        else []) fields)
   in
-  let ops =
-    List.map (fun (_, v) ->
-        if may_be_non_heap env v.Tir.v_ty then Tir.EDecRC (Tir.AVar v) else
-        match drop_fn_for env v.Tir.v_ty with
-        | Some callee ->
-          let f = { Tir.v_name = callee;
-                    v_ty = Tir.TFn ([v.Tir.v_ty], Tir.TUnit);
-                    v_lin = Tir.Unr } in
-          Tir.EApp (f, [Tir.AVar v])
-        | None -> Tir.EDecRC (Tir.AVar v))
-      binders
-  in
+  let ops = List.map (fun (_, v) -> drop_op env v) binders in
   let rec chain = function
     | [] -> unit_expr
     | [last] -> last
@@ -512,20 +555,21 @@ and build_drop_fn env fname ty ctors : Tir.fn_def =
           List.map (fun fty ->
               { Tir.v_name = fresh env "df"; v_ty = fty; v_lin = Tir.Unr }) ftys
         in
-        (* One drop op per field that actually needs releasing. *)
+        (* One drop op per field that actually needs releasing, plus one per
+           boxed Float slot ([boxed_float_slots]), read as the raw slot word
+           before the cell goes. *)
+        let boxes =
+          List.map (fun i ->
+              (i, { Tir.v_name = fresh env "db"; v_ty = Tir.TPtr Tir.TUnit;
+                    v_lin = Tir.Unr }))
+            (boxed_float_slots env ty cname ftys)
+        in
         let ops =
           List.filter_map (fun v ->
-              if has_tvar v.Tir.v_ty || not (Kind.needs_rc_of env.k_table v.Tir.v_ty) then None
-              else if may_be_non_heap env v.Tir.v_ty then
-                Some (Tir.EDecRC (Tir.AVar v))
-              else match drop_fn_for env v.Tir.v_ty with
-                | Some callee ->
-                  let f = { Tir.v_name = callee;
-                            v_ty = Tir.TFn ([v.Tir.v_ty], Tir.TUnit);
-                            v_lin = Tir.Unr } in
-                  Some (Tir.EApp (f, [Tir.AVar v]))
-                | None -> Some (Tir.EDecRC (Tir.AVar v)))
+              if not (Kind.needs_rc_of env.k_table v.Tir.v_ty) then None
+              else Some (drop_op env v))
             vars
+          @ List.map (fun (_, b) -> Tir.EDecRC (Tir.AVar b)) boxes
         in
         let body =
           match ops with
@@ -558,10 +602,13 @@ and build_drop_fn env fname ty ctors : Tir.fn_def =
             let decrc_freed =
               { Tir.v_name = "march_decrc_freed";
                 v_ty = Tir.TFn ([ty], Tir.TBool); v_lin = Tir.Unr } in
-            Tir.ELet (freed, Tir.EApp (decrc_freed, [Tir.AVar x]),
-              Tir.ECase (Tir.AVar freed,
-                [ { Tir.br_tag = "True"; br_vars = []; br_body = chain ops } ],
-                Some unit_expr))
+            List.fold_right (fun (i, b) acc ->
+                Tir.ELet (b, Tir.EField (Tir.AVar x, Tir_names.fv_field i), acc))
+              boxes
+              (Tir.ELet (freed, Tir.EApp (decrc_freed, [Tir.AVar x]),
+                Tir.ECase (Tir.AVar freed,
+                  [ { Tir.br_tag = "True"; br_vars = []; br_body = chain ops } ],
+                  Some unit_expr)))
         in
         { Tir.br_tag = cname; br_vars = vars; br_body = body })
       ctors
@@ -571,6 +618,62 @@ and build_drop_fn env fname ty ctors : Tir.fn_def =
     fn_ret_ty = Tir.TUnit;
     fn_body = Tir.ECase (Tir.AVar x, branches, None);
     fn_kind = Tir.FnNormal }
+
+(** The release of one owned child [v] of a dying cell.
+
+    - An erased ([TVar]) child: a bare [EDecRC].  The slot holds a uniform
+      value — tagged scalar, Float box or heap pointer — and [march_decrc] is
+      IS_HEAP_PTR-guarded, so this is a no-op on a scalar, frees a Float box,
+      and releases a heap child SHALLOWLY (its own children stay with whoever
+      else holds it, or leak: the conservative direction).  It used to be
+      skipped entirely, together with every field whose type merely MENTIONED
+      a type variable, so a tuple destructured inside a polymorphic local
+      closure released nothing it held (specs/progress/2026-10-01-polymorphic-
+      local-closure-aggregate-drop.md).  A type that mentions a variable but
+      has a layout of its own ([List('_)], [('_, Int)]) gets its own drop,
+      exactly as its concrete instances do: the spine is known even when the
+      elements are not.
+    - A payload-sharing child (niche [Option(T)], newtype [W(T)]): its heap
+      payload, released through the payload's own drop behind the null test
+      a niche needs ([erased_payload]).  A bare [EDecRC] here was shallow —
+      a dying tuple holding [Some(tree)] freed the tree's root cell and
+      leaked everything under it (specs/progress/2026-10-01-niche-option-
+      field-shallow-drop.md).  Any other may-be-non-heap value (unboxed
+      aggregate, scalar payload) keeps the bare [EDecRC].
+    - Otherwise the child's synthesized drop, or [EDecRC] when it has none. *)
+and drop_op (env : env) (v : Tir.var) : Tir.expr =
+  let unit_expr = Tir.ETuple [] in
+  match v.Tir.v_ty with
+  | Tir.TVar _ -> Tir.EDecRC (Tir.AVar v)
+  | ty when may_be_non_heap env ty ->
+    (match erased_payload env ty with
+     | Some (`Niche (cname, pty)) ->
+       let p = { Tir.v_name = fresh env "dp"; v_ty = pty; v_lin = Tir.Unr } in
+       Tir.ECase (Tir.AVar v,
+         [ { Tir.br_tag = cname; br_vars = [p]; br_body = drop_op env p } ],
+         Some unit_expr)
+     | Some (`Newtype pty) ->
+       let p = { Tir.v_name = fresh env "dp"; v_ty = pty; v_lin = Tir.Unr } in
+       Tir.ELet (p, Tir.EAtom (Tir.AVar v), drop_op env p)
+     | None -> Tir.EDecRC (Tir.AVar v))
+  | ty ->
+    (match drop_fn_for env ty with
+     | Some callee ->
+       let f = { Tir.v_name = callee;
+                 v_ty = Tir.TFn ([ty], Tir.TUnit);
+                 v_lin = Tir.Unr } in
+       Tir.EApp (f, [Tir.AVar v])
+     | None -> Tir.EDecRC (Tir.AVar v))
+
+(** A tuple stores a [Float] field BOXED — [ETuple] coerces every field to the
+    uniform [ptr] slot, boxing a double — whereas a record ([ERecord]) stores
+    a declared [Float] as a raw [double] ([Llvm_ctx.llvm_field_ty]).  So only
+    a tuple's Float is a cell the aggregate owns and its drop must release
+    (specs/progress/2026-10-01-aggregate-drop-skips-boxed-float-field.md). *)
+and tuple_boxed_float (ty : Tir.ty) (fty : Tir.ty) : bool =
+  match ty, fty with
+  | Tir.TTuple _, Tir.TFloat -> true
+  | _ -> false
 
 (* ── Closure environments ──────────────────────────────────────────────── *)
 
@@ -766,16 +869,7 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option) (env 
     end
   in
   let drop_ops_for (only : Tir.var -> bool) =
-    List.rev_map (fun (v : Tir.var) ->
-        if may_be_non_heap env v.Tir.v_ty then Tir.EDecRC (Tir.AVar v)
-        else match drop_fn_for env v.Tir.v_ty with
-          | Some callee ->
-            let f = { Tir.v_name = callee;
-                      v_ty = Tir.TFn ([v.Tir.v_ty], Tir.TUnit);
-                      v_lin = Tir.Unr } in
-            Tir.EApp (f, [Tir.AVar v])
-          | None -> Tir.EDecRC (Tir.AVar v))
-      (List.filter only !captures)
+    List.rev_map (drop_op env) (List.filter only !captures)
   in
   let rec chain = function
     | [] -> unit_expr
@@ -1029,13 +1123,31 @@ let rec rewrite env (e : Tir.expr) : Tir.expr =
         String.equal v.Tir.v_name n
       | _ -> false
     in
-    let rec rewrite_body body =
-      match body with
-      | Tir.ESeq (((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _) as op), rest) ->
-        let op' = if is_scrut_dec op then op else rewrite env op in
-        Tir.ESeq (op', rewrite_body rest)
-      | op when is_scrut_dec op -> op
-      | _ -> rewrite env body
+    (* [strip_scrut_decrc] finds the scrutinee's dec by walking the run of
+       BARE dec ops at the arm head; a rewritten release in front of it — a
+       [__drop$T] call that add_cross_decrcs' dec of an aggregate becomes, or
+       a closure environment's [dead_clo_release] — is not a bare dec, so the
+       walk stopped short and the scrutinee's dec was emitted PLAIN: the cell
+       was freed with its fields neither inherited nor dup'd, and the arm then
+       read them (bench/timsort.march's `Sort.enforce_invariants`, a
+       use-after-free SIGSEGV).  The ops in the run are independent releases,
+       so the scrutinee's dec is moved to the head and everything else,
+       rewritten, follows it. *)
+    let rewrite_body body =
+      let rec split acc body =
+        match body with
+        | Tir.ESeq (((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _) as op), rest) ->
+          split (op :: acc) rest
+        | _ -> (List.rev acc, body)
+      in
+      let (run, rest) = split [] body in
+      let rest' = match rest with
+        | op when is_scrut_dec op -> op
+        | _ -> rewrite env rest
+      in
+      let (scrut_ops, others) = List.partition is_scrut_dec run in
+      List.fold_right (fun op acc -> Tir.ESeq (op, acc))
+        (scrut_ops @ List.map (rewrite env) others) rest'
     in
     Tir.ECase (scrut,
       List.map (fun br -> { br with Tir.br_body = rewrite_body br.Tir.br_body }) brs,
