@@ -1,0 +1,17 @@
+ok: CRASHES lists the 3 crashes
+ok: restart numbers 3, 2, 1 (newest first)
+ok: every entry is kind crash under one supervisor
+ok: an entry carries no message field
+ok: the entries' supervisor is boss
+ok: boss's row counts its children's 3 crashes
+ok: TOP crashes ranks the crash-looping supervisor first
+ok: TOP msgs_in over a window ranks the self-sending actor first
+ok: TOP -> bad_args
+ok: TOP bogus 3 -> bad_args
+ok: TOP mbox -> bad_args
+ok: TOP mbox 3 500 -> bad_args
+ok: TOP msgs_in 3 10001 -> bad_args
+ok: CRASHES 0 -> bad_args
+ok: CRASHES 257 -> bad_args
+ok: SNAPSHOT has a crashes section
+ok: no reply carries the crash message

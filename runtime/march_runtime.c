@@ -1639,6 +1639,11 @@ static void *march_caught_panic_message(const char *fallback) {
     return str;
 }
 
+int64_t march_pid_index_of(void *actor);
+static void crash_ring_push(int64_t pid, const char *type, int kind,
+                            uint32_t code_epoch, int64_t supervisor, int restart,
+                            const char *message, size_t message_len);
+
 void march_panic(void *s) {
     march_string *ms = (march_string *)s;
     /* In test mode, capture the message and longjmp back to the test runner
@@ -1672,6 +1677,16 @@ void march_panic(void *s) {
         cur_proc->crash_message = copy;
         cur_proc->crash_message_len = len;
         longjmp(*cur_proc->crash_jmp, 1);
+    }
+    {
+        /* The crash ring sees an unsupervised panic too, for the crash
+         * dump that runs at exit (R7 of the observe plan). */
+        int64_t pid = (cur_proc && cur_proc->actor)
+            ? march_pid_index_of(cur_proc->actor) : -1;
+        crash_ring_push(pid, NULL, MARCH_CRASH_KIND_PANIC,
+                        cur_proc ? atomic_load_explicit(&cur_proc->code_epoch,
+                                                        memory_order_relaxed) : 0,
+                        -1, 0, ms->data, (size_t)ms->len);
     }
     fprintf(stderr, "panic: ");
     fwrite(ms->data, 1, (size_t)ms->len, stderr);
@@ -5871,8 +5886,63 @@ static void death_claim_locked(void *actor, march_actor_meta *meta,
  *
  * [actor] must be a record the caller holds (the caller's own, a counted
  * reference, or the dying actor's thread's live reference). */
+/* ── Crash ring (R2 of the observe plan) ───────────────────────────────
+ * Written under g_crash_mu, a leaf lock taken only on a crash (never on a
+ * hot path), read by the observe socket's CRASHES/TOP verbs. */
+static march_obs_crash g_crash_ring[MARCH_CRASH_RING];
+static uint64_t        g_crash_seq;   /* under g_crash_mu */
+static pthread_mutex_t g_crash_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void crash_ring_push(int64_t pid, const char *type, int kind,
+                            uint32_t code_epoch, int64_t supervisor, int restart,
+                            const char *message, size_t message_len) {
+    pthread_mutex_lock(&g_crash_mu);
+    march_obs_crash *e = &g_crash_ring[g_crash_seq % MARCH_CRASH_RING];
+    e->seq = ++g_crash_seq;
+    e->pid = pid;
+    snprintf(e->type, sizeof e->type, "%s", type ? type : "");
+    e->kind = kind;
+    e->code_epoch = code_epoch;
+    e->supervisor = supervisor;
+    e->restart = restart;
+    e->at_ms = march_unix_time_ms();
+    size_t n = message && message_len < MARCH_CRASH_MSG_MAX ? message_len
+             : message ? MARCH_CRASH_MSG_MAX : 0;
+    if (n) memcpy(e->message, message, n);
+    e->message[n] = '\0';
+    e->message_len = n;
+    pthread_mutex_unlock(&g_crash_mu);
+}
+
+int march_obs_crashes(march_obs_crash *out, int max, uint64_t *total) {
+    pthread_mutex_lock(&g_crash_mu);
+    uint64_t seq = g_crash_seq;
+    int n = 0;
+    for (uint64_t s = seq; s > 0 && n < max && seq - s < MARCH_CRASH_RING; s--)
+        out[n++] = g_crash_ring[(s - 1) % MARCH_CRASH_RING];
+    pthread_mutex_unlock(&g_crash_mu);
+    if (total) *total = seq;
+    return n;
+}
+
+static void obs_type_of(march_actor_meta *m, char *out, size_t cap);
+
+/* [crash_kind]: what a CRASH death's ring entry says (hcr_hard_kill's kills
+ * are MARCH_CRASH_KIND_DRAINING; a user panic("draining") is still a crash).
+ * A parameter, not a thread-local: this function runs cleanup closures,
+ * which can switch green threads. */
+static void do_actor_death_kind(void *actor, march_death_reason reason,
+                                const char *message, size_t message_len,
+                                int crash_kind);
+
 static void do_actor_death(void *actor, march_death_reason reason,
                            const char *message, size_t message_len) {
+    do_actor_death_kind(actor, reason, message, message_len, MARCH_CRASH_KIND_CRASH);
+}
+
+static void do_actor_death_kind(void *actor, march_death_reason reason,
+                                const char *message, size_t message_len,
+                                int crash_kind) {
     march_monitor_node *monitors = NULL;
     march_cleanup_node *cleanups = NULL;
 
@@ -5997,9 +6067,32 @@ static void do_actor_death(void *actor, march_death_reason reason,
         march_reclaim_exit();
     }
 
+    /* Crash ring: after the notify, so the slot's crash streak (the restart
+     * number) already counts this crash. */
+    int64_t ring_sup = -1;
+    int ring_restart = 0;
     if (sup.m) {
         march_supervisor_notify(sup, meta);
+        ring_sup = pe_pid(sup.m->pe);
+        int idx = meta->sup_child_index;
+        pthread_mutex_lock(&g_supervise_mu);
+        if (idx >= 0 && idx < sup.m->sup_num_children)
+            ring_restart = sup.m->sup_children[idx].crash_streak;
+        pthread_mutex_unlock(&g_supervise_mu);
         meta_unpin(sup);
+    }
+    if (reason == MARCH_DEATH_CRASH && meta) {
+        char type[MARCH_OBS_TYPE_MAX];
+        obs_type_of(meta, type, sizeof type);
+        march_reclaim_enter();
+        march_proc *gt = meta_gt(meta);
+        uint32_t ce = gt ? atomic_load_explicit(&gt->code_epoch, memory_order_relaxed) : 0;
+        march_reclaim_exit();
+        crash_ring_push(pe_pid_or_0(pe), type,
+                        crash_kind,
+                        ce, ring_sup, ring_restart,
+                        pe ? pe->terminal_message : message,
+                        pe ? pe->terminal_message_len : message_len);
     }
     /* The reference the claim handed us.  If the actor's green thread has
      * already exited (or never started), this is the last one and the meta
@@ -6574,8 +6667,8 @@ static void hcr_hard_kill(uint32_t upto) {
              * type restarts it (a KILLED transient child would stay dead),
              * and a monitor sees Crash("draining") -- SessionNode ends a
              * hosted session as drained on it. */
-            do_actor_death(m->actor, MARCH_DEATH_CRASH, "draining",
-                           sizeof("draining") - 1);
+            do_actor_death_kind(m->actor, MARCH_DEATH_CRASH, "draining",
+                                sizeof("draining") - 1, MARCH_CRASH_KIND_DRAINING);
         }
         march_decrc(m->actor);
         meta_put(m);   /* hcr_snapshot's pin */

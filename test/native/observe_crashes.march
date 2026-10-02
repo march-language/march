@@ -1,0 +1,84 @@
+-- The observe socket's crash ring and TOP (R2 of
+-- specs/plans/2026-09-28-observe-recon-shell-plan.md), checked by
+-- test/observe_snapshot_check.ml (mode "crashes"):
+--   * the supervisor "boss" has a child that panics three times; CRASHES lists
+--     three entries with restart numbers 1, 2, 3 and never the panic text;
+--   * "loop" sends itself a message forever, so TOP msgs_in ranks it first.
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+
+  actor Fragile do
+    state { n : Int }
+    init  { n: 0 }
+    on Boom() do
+      panic("observe-secret-crash-xyzzy")
+    end
+  end
+
+  actor Boss do
+    state { c : Int }
+    init  { c: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 10 within 60
+      Fragile c
+    end
+  end
+
+  actor Loop do
+    state { n : Int }
+    init  { n: 0 }
+    on Tick() do
+      let _ = send(self, Tick())
+      { n: state.n + 1 }
+    end
+  end
+
+  -- The supervisor's current child: its first child is spawned before it
+  -- (the lowest pid); each restart takes a fresh, highest pid.  Nothing else
+  -- runs yet.
+  fn current_child(intro, boss) do
+    let pids = Actor.list(intro)
+    match List.reverse(pids) do
+      Cons(p, _) ->
+        if to_string(p) == to_string(boss) do
+          match pids do
+            Cons(first, _) -> Some(first)
+            Nil -> None
+          end
+        else
+          Some(p)
+        end
+      Nil -> None
+    end
+  end
+
+  fn crash_child(intro, boss, k : Int) do
+    if k > 0 do
+      match current_child(intro, boss) do
+        Some(p) ->
+          let _ = send(p, Boom())
+          sleep_ms(200)
+          crash_child(intro, boss, k - 1)
+        None -> ()
+      end
+    else
+      ()
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
+    let boss = spawn(Boss)
+    let _r = Actor.register(boss, "boss")
+    crash_child(intro, boss, 3)
+    let lp = spawn(Loop)
+    let _r2 = Actor.register(lp, "loop")
+    let _ = send(lp, Tick())
+    sleep_ms(200)
+    println("ready")
+    sleep_ms(120000)
+  end
+end

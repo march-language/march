@@ -292,6 +292,45 @@ let sched sock ready_file =
   check "SCHED rejects a window over 5000 ms"
     (error (get sock "SCHED 5001") = Some "bad_args") ""
 
+(* R2 crash ring and TOP: test/native/observe_crashes.march. *)
+let crashes sock =
+  let c = data (get sock "CRASHES 10") in
+  let es = member "crashes" c |> to_list in
+  check "CRASHES lists the 3 crashes" (member "total" c |> to_int = 3 && List.length es = 3)
+    (Yojson.Safe.to_string c);
+  check "restart numbers 3, 2, 1 (newest first)"
+    (List.map (fun e -> member "restart" e |> to_int) es = [3; 2; 1]) (Yojson.Safe.to_string c);
+  check "every entry is kind crash under one supervisor"
+    (List.for_all (fun e -> member "kind" e = `String "crash") es
+     && List.length (List.sort_uniq compare (List.map (fun e -> member "supervisor" e) es)) = 1)
+    (Yojson.Safe.to_string c);
+  check "an entry carries no message field"
+    (List.for_all (fun e -> not (List.mem "message" (keys e))) es) "";
+  let boss = List.hd es |> member "supervisor" |> to_int in
+  let names = data (get sock "NAMES") |> member "names" |> to_list in
+  check "the entries' supervisor is boss"
+    (List.exists (fun e -> member "name" e = `String "boss" && member "pid" e |> to_int = boss) names) "";
+  let a = data (get sock (Printf.sprintf "ACTOR %d" boss)) |> member "actor" in
+  check "boss's row counts its children's 3 crashes"
+    (member "child_crashes" a |> to_int = 3 && member "crashes" a |> to_int = 0)
+    (Yojson.Safe.to_string a);
+  let top req = data (get sock req) |> member "top" |> to_list in
+  let first_name t = match t with r :: _ -> member "names" r | [] -> `Null in
+  check "TOP crashes ranks the crash-looping supervisor first"
+    (first_name (top "TOP crashes 1") = `List [ `String "boss" ]) "";
+  check "TOP msgs_in over a window ranks the self-sending actor first"
+    (first_name (top "TOP msgs_in 1 300") = `List [ `String "loop" ]) "";
+  List.iter (fun (req, want) ->
+      let got = error (get sock req) in
+      check (Printf.sprintf "%s -> %s" req want) (got = Some want)
+        (Option.value got ~default:"(data)"))
+    [ "TOP", "bad_args"; "TOP bogus 3", "bad_args"; "TOP mbox", "bad_args";
+      "TOP mbox 3 500", "bad_args"; "TOP msgs_in 3 10001", "bad_args";
+      "CRASHES 0", "bad_args"; "CRASHES 257", "bad_args" ];
+  let s = data (get sock "SNAPSHOT crashes") in
+  check "SNAPSHOT has a crashes section"
+    (member "crashes" s |> member "total" |> to_int = 3) ""
+
 let () =
   match Sys.argv with
   | [| _; mode; sock; ready |] ->
@@ -301,9 +340,10 @@ let () =
      | "types" -> types sock
      | "counters" -> counters sock
      | "sched" -> sched sock ready
-     | _ -> prerr_endline "mode: tree | types | counters | sched"; exit 2);
+     | "crashes" -> crashes sock
+     | _ -> prerr_endline "mode: tree | types | counters | sched | crashes"; exit 2);
     check "no reply carries the crash message" (!leaked = [])
       (String.concat "; " !leaked);
     (* The golden diff reports a failure; exit 0 so it is shown. *)
     ignore !failures
-  | _ -> prerr_endline "usage: observe_snapshot_check tree|types|counters|sched <socket> <ready-file>"; exit 2
+  | _ -> prerr_endline "usage: observe_snapshot_check tree|types|counters|sched|crashes <socket> <ready-file>"; exit 2
