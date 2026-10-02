@@ -154,6 +154,7 @@ type ctx = Llvm_ctx.ctx = {
   hr_config : Hot_reload.config option;
   hr_names  : Hot_reload.Name_table.t;
   mutable hr_cur_module : string;
+  mutable hr_cur_fn : string;
   var_llvm_ty : (string, string) Hashtbl.t;
   mutable tco_fn_name   : string option;
   mutable cur_emit_fn   : string;
@@ -344,7 +345,7 @@ let static_closure_ok ctx (march_name : string) : bool =
   && (match ctx.hr_config with
       | None     -> true
       | Some cfg ->
-        not (Hot_reload.is_reloadable cfg (Hot_reload.module_of_name march_name)))
+        not (Hot_reload.needs_dispatch_to cfg march_name))
 
 (** Emit code for [atom], returning (llvm_type, llvm_value). *)
 let emit_atom ctx (atom : Tir.atom) : string * string =

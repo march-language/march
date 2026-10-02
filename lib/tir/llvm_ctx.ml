@@ -202,6 +202,10 @@ type ctx = {
   hr_config : Hot_reload.config option;
   hr_names  : Hot_reload.Name_table.t;
   mutable hr_cur_module : string;
+  (* The module function whose body [Llvm_toplevel.emit_fn] is emitting, ""
+     anywhere else (wrappers, mutual-TCO groups, between functions): a call
+     to it is a self-call, which stays direct under hot reload. *)
+  mutable hr_cur_fn : string;
   (* Tracks the actual LLVM type stored in each alloca slot, keyed by slot name.
      Used to emit correct load types even when TIR var has unresolved TVar. *)
   var_llvm_ty : (string, string) Hashtbl.t;
@@ -379,6 +383,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   hr_config = hot_reload;
   hr_names;
   hr_cur_module = "";
+  hr_cur_fn = "";
   var_llvm_ty = Hashtbl.create 32;
   tco_fn_name    = None;
   cur_emit_fn    = "";

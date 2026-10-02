@@ -102,7 +102,7 @@ the rebuilt base had the same baseline hashes, removes it and restarts once more
    function has no slot and no changed slotted caller (`Deploy_plan.undeliverable`,
    over the manifest's `callers:`). The end-to-end test hot-patches a function under
    `[hot-reload] module_prefix = "Back"`. Compiler side filed:
-   [../todos/2026-09-25-hcr-topology-app-functions-no-dispatch-slots.md](../todos/2026-09-25-hcr-topology-app-functions-no-dispatch-slots.md).
+   [2026-10-01-hcr-topology-app-functions-no-dispatch-slots.md](2026-10-01-hcr-topology-app-functions-no-dispatch-slots.md) (fixed 2026-10-01).
 2. **`HCR_INFO` quotes the triple.** A real server answers
    `abi:march-hcr-v2;triple="aarch64-unknown-linux-gnu";ptr=8` (the runtime stringifies
    an already quoted `MARCH_HCR_TRIPLE`); the manifest writes it bare. forge compares
