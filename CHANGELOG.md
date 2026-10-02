@@ -90,6 +90,19 @@ git log is authoritative for exact commits.
   no longer pays a shift pair on the way in.
 
 ### Fixed
+- Compiled: a generic named function passed where a `Float -> Float -> Float`
+  closure is expected returned the wrong value (its trampoline unboxed the
+  arguments per the use-site type instead of forwarding them as the function
+  is defined).
+- Compiled: a self tail call inside a nested-pattern match arm
+  (`Cons(a, Cons(b, rest)) -> … f(Cons(b, rest))`) is now a loop; it recursed
+  once per element and overflowed the green-thread stack at ~8,000 elements.
+  A match's fall-through join point with a single call site is put back in
+  place by the lowering instead of becoming a closure.
+- Compiled: a nested pattern with a default arm that uses the scrutinee no
+  longer leaks the matched value (the dead join-point closure's release is
+  deep), and Perceus no longer releases a scrutinee ahead of a pattern field
+  the arm still reads.
 - **`==` inside a `test`/`setup` body is checked where it is written.** The
   `Eq`/`Ord`/`Num`/interface constraints a test or setup body raised stayed
   pending until the next top-level `fn` or `let`, so a `fn` placed between two

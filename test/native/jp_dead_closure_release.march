@@ -1,0 +1,58 @@
+-- Leak guard: a match whose nested pattern has a default arm that USES the
+-- scrutinee must release everything on every path, compiled.
+--
+-- `up` (one fall-through site) lowers its default arm through a join point
+-- that is now inlined in place; the scrutinee is then live in that leaf and
+-- dead in the other, where Perceus used to release it BEFORE dup'ing the field
+-- the leaf still reads (RC underflow abort).  `two` (three fall-through sites)
+-- keeps its join point as a closure that captures the scrutinee; on the path
+-- that never calls it the closure was released with a shallow dec_rc, so the
+-- captured list leaked (4,400 objects over 400 iterations), and a deep release
+-- there is only safe once the fields the arm reads hold their own reference.
+-- SIGNAL: live_allocs() deltas printed as booleans, so the golden is
+-- deterministic; each result is printed so the loop is not deleted.  See
+-- specs/progress/2026-10-01-dead-join-point-closure-leaks-captures.md.
+mod Main do
+  needs IO.Console
+
+  pfn up(parents : List(List(Int)), acc : Int) : Int do
+    match parents do
+      Cons(root, Nil) -> acc + List.length(root)
+      _ -> match parents do
+        Cons(p, rest) -> up(rest, acc + List.length(p))
+        Nil -> acc
+      end
+    end
+  end
+
+  pfn two(xs : List(List(Int)), acc : Int) : Int do
+    match xs do
+      Cons(a, Cons(b, Nil)) -> acc + List.length(a) + List.length(b)
+      _ -> acc + List.length(xs)
+    end
+  end
+
+  pfn mk(i : Int) : List(List(Int)) do [[i, i + 1], [i + 2], [i, i, i]] end
+
+  pfn go_up(i : Int, acc : Int) : Int do
+    if i == 0 do acc else go_up(i - 1, acc + up(mk(i), 0) + up([[i]], 0)) end
+  end
+
+  pfn go_two(i : Int, acc : Int) : Int do
+    if i == 0 do acc
+    else go_two(i - 1, acc + two(mk(i), 0) + two([[i]], 0) + two([[i], [i]], 0)) end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let _w1 = go_up(10, 0)
+    let b1 = live_allocs()
+    let r1 = go_up(400, 0)
+    let d1 = live_allocs() - b1
+    println("up = " ++ int_to_string(r1) ++ ", flat: " ++ bool_to_string(d1 < 4))
+    let _w2 = go_two(10, 0)
+    let b2 = live_allocs()
+    let r2 = go_two(400, 0)
+    let d2 = live_allocs() - b2
+    println("two = " ++ int_to_string(r2) ++ ", flat: " ++ bool_to_string(d2 < 4))
+  end
+end

@@ -391,8 +391,16 @@ let escape_module src =
   let tir = March_tir.Lower.lower_module ~type_map m in
   let tir = March_tir.Mono.monomorphize tir in
   let tir = March_tir.Defun.defunctionalize tir in
-  let tir = March_tir.Perceus.perceus tir in
-  March_tir.Escape.escape_analysis tir
+  (* The driver's per-type table and borrow map (Contract_pipeline), so the
+     fixtures are classified exactly as the compiler classifies them. *)
+  let k_table =
+    let collision_set = March_tir.Collision_set.compute tir.March_tir.Tir.tm_types in
+    March_tir.Kind.build ~externs:tir.March_tir.Tir.tm_externs ~collision_set
+      tir.March_tir.Tir.tm_types
+  in
+  let borrow_map = March_tir.Borrow.infer_module ~k_table tir in
+  let tir = March_tir.Perceus.perceus ~k_table ~borrow_map tir in
+  March_tir.Escape.escape_analysis ~k_table ~borrow_map tir
 
 (** True if [e] contains any EStackAlloc anywhere. *)
 let rec has_stack_alloc = function

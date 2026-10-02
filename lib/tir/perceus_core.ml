@@ -1534,7 +1534,46 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
              (an element of a borrowed list) keeps its borrowed fields. *)
         | _ -> false
       in
-      let la = if scrutinee_borrowed then
+      (* The arm OWNS the scrutinee (dead after the case) but its body still
+         mentions it, so no release is emitted at the arm head and the
+         scrutinee dies somewhere inside the body: a cross-branch release in
+         a nested arm, a move into a closure environment, a consuming call.
+         Every one of those is now a DEEP release (lib/tir/drop.ml), so a
+         field the pattern bound and the body still reads must not be left
+         as a raw borrow from the scrutinee — the old "keep every br_var
+         conservatively live" approximation did exactly that and, once the
+         match compiler's single-site join points were inlined in place
+         (lib/tir/lower_match.ml [bind_jp]), the nested-pattern shape
+
+           case parents of Cons($f1, $f2) ->
+             case $f2 of
+               Nil -> dec_rc parents; let root = $f1 in …   -- read after free
+               _   -> … parents …
+
+         read freed memory (RC underflow abort in test/native goldens; a
+         SIGSEGV when the scrutinee had moved into the fall-through
+         closure).  Instead each field the body USES takes its own reference
+         at the arm head ([scrutinee_field_dups] below) and is owned from
+         there on — released at its last use like any local, by the ordinary
+         rules — while a field the body never reads stays the scrutinee's,
+         released by whatever releases the scrutinee.  One inc/dec pair per
+         used field is the price; the approximation it replaces leaked every
+         such field outright. *)
+      let scrutinee_deferred = match a with
+        | Tir.AVar v ->
+          not (StringSet.mem v.Tir.v_name live_after)
+          && needs_rc env v.Tir.v_ty
+          && name_free_in v.Tir.v_name br.Tir.br_body
+        | _ -> false
+      in
+      let scrutinee_field_dups =
+        if scrutinee_deferred then
+          List.filter (fun (bv : Tir.var) ->
+              needs_rc env bv.Tir.v_ty
+              && name_free_in bv.Tir.v_name br.Tir.br_body) br.Tir.br_vars
+        else []
+      in
+      let la = if scrutinee_borrowed && not scrutinee_deferred then
         List.fold_left (fun s bv -> StringSet.add bv.Tir.v_name s)
           la br.Tir.br_vars
       else la
@@ -1617,7 +1656,8 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
              such so a nested case over one of them does not mistake that for a
              guarantee. *)
           cons_live =
-            if scrutinee_borrowed && not scrutinee_live_across_case then
+            if scrutinee_borrowed && not scrutinee_live_across_case
+               && not scrutinee_deferred then
               List.fold_left (fun s (v : Tir.var) -> StringSet.add v.Tir.v_name s)
                 env.cons_live br.Tir.br_vars
             else env.cons_live }
@@ -1638,11 +1678,18 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
            && not (StringSet.mem v.Tir.v_name live_before_br)
            && not (StringSet.mem v.Tir.v_name env.closure_fvs)
            && not (StringSet.mem v.Tir.v_name env.moved_vars)
-           && not (StringSet.mem v.Tir.v_name env.borrowed_field_vars) then
+           && not (StringSet.mem v.Tir.v_name env.borrowed_field_vars)
+           (* A field the body never reads is still the deferred
+              scrutinee's: it goes when the scrutinee goes. *)
+           && not scrutinee_deferred then
           Tir.ESeq (decrc_for env v (Tir.AVar v), body_acc)
         else
           body_acc
       ) br.Tir.br_vars body'
+      in
+      let body'' = List.fold_right (fun (v : Tir.var) body_acc ->
+          Tir.ESeq (incrc_for env v (Tir.AVar v), body_acc))
+          scrutinee_field_dups body''
       in
       (br, body'', live_before_br, bound)
     ) branches in

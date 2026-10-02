@@ -29,3 +29,17 @@ The trampoline is emitted in three places in `lib/tir/llvm_emit.ml` (search
 `clo_wrap_define`); each takes `param_tys` from `v.Tir.v_ty`, the call-site
 type. They should use the target definition's parameter types
 (`ctx.top_fn_param_tys`), or mono should specialize the function at the use.
+
+## Fixed 2026-10-02
+
+The three `$clo_wrap` sites in `lib/tir/llvm_emit.ml` now take the parameter and
+return types from the target's DEFINITION (`ctx.top_fn_param_tys` /
+`ctx.top_fn_ret_ty`) whenever it is registered, not only when the arity differs
+from the use site. The wrapper is keyed by the target (one per function), so
+only the definition's types can be right for every use site: an erased `ptr`
+parameter forwards the caller's boxed Float / tagged Int unchanged and the
+caller coerces the erased `ptr` result itself. The REPL site already did this.
+
+Regression: `test/native/generic_fn_float_closure.march` (`ksnd`, `kfst` and a
+concrete `fadd` through the same `Float -> Float -> Float` parameter; the
+.expected is the interpreter's output, RED as `3.` on the first line before).

@@ -1,0 +1,37 @@
+-- A self tail call inside a NESTED-pattern match arm must become a loop.
+-- `Cons(a, Cons(b, rest))` lowers the arm through a fall-through join point;
+-- when that join point had a single call site it was still a closure whose
+-- lifted apply fn sat between the function and its own tail call
+-- (`ordered -> $jp$apply -> ordered`), which Llvm_tco cannot loop, so the
+-- function recursed once per element and overflowed the 1 MiB green-thread
+-- stack at ~8,000 elements (first seen in test/native/array_sort_by.march).
+-- Lowering now puts a single-site join point back in place; 200,000 elements
+-- here would need ~25x the stack if it did not.  See
+-- specs/progress/2026-10-01-join-point-self-tail-call-not-looped.md.
+mod JpTail do
+  needs IO.Console
+
+  pfn key_of(t : (Int, Int)) : Int do match t do (k, _) -> k end end
+  pfn pos_of(t : (Int, Int)) : Int do match t do (_, q) -> q end end
+
+  pfn ordered(xs : List((Int, Int))) : Bool do
+    match xs do
+      Nil -> true
+      Cons(_, Nil) -> true
+      Cons(a, Cons(b, rest)) ->
+        let ok = key_of(a) < key_of(b) || (key_of(a) == key_of(b) && pos_of(a) < pos_of(b))
+        if ok do ordered(Cons(b, rest)) else false end
+    end
+  end
+
+  pfn build(i : Int, acc : List((Int, Int))) : List((Int, Int)) do
+    if i < 0 do acc else build(i - 1, Cons((i / 3, i), acc)) end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let xs = build(200000, Nil)
+    println(bool_to_string(ordered(xs)))
+    println(bool_to_string(ordered(Cons((9, 0), xs))))
+    println(bool_to_string(ordered([(1, 1), (1, 0)])))
+  end
+end
