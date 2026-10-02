@@ -42,14 +42,17 @@ mod Control do
 
   -- Which of a step's target nodes the step applies to.
   type CtlHosts = HostsCanary(Int) | HostsRest | HostsAll
+  derive Eq for CtlHosts
 
   -- What a step does to a node: activate a build's patch, apply the
   -- release's topology, or drain.
   type CtlAction = DoActivate(String) | DoTopology | DoDrain
+  derive Eq for CtlAction
 
   -- What must hold after a step before the next one starts. `Healthy(ms)`:
   -- every node the step selected reports healthy for `ms`.
   type CtlGate = GateNone | GateHealthy(Int)
+  derive Eq for CtlGate
 
   -- One rollout step. `pools` is the pools it targets (`["*"]` for every
   -- pool), `batch` how many of its nodes may have an order outstanding at
@@ -549,6 +552,7 @@ mod Control do
     seq : Int, release : String, step : Int, node : String, action : String,
     want : String, artifacts : String, lines : String
   }
+  derive Eq for StepOrder
 
   doc "The artifact hashes [o] needs."
   fn order_artifacts(o : StepOrder) : List(String) do words(o.artifacts) end
@@ -606,6 +610,7 @@ mod Control do
   --   Behind(seq)             a node holds a newer release than this one; the
   --                           leader must fetch it before executing anything.
   type CtlDecision = RolloutApply(Int, List(StepOrder)) | RolloutWait(Int, String) | RolloutHalted(Int, String, String) | RolloutComplete | RolloutBehind(Int)
+  derive Eq for CtlDecision
 
   pfn in_pools(m : CtlMember, pools : List(String)) : Bool do
     List.member(pools, "*") || List.any(m.pools, fn p -> List.member(pools, p))
@@ -1087,4 +1092,56 @@ mod Control do
   -- an order's result, `next(node)` says what to do next with that node's
   -- session, and `head()` is the newest release seq the leader holds.
   type ControlOps = { report : AgentReport -> (), stepped : StepResult -> (), next : String -> CtlNext, head : () -> Int }
+
+  -- ── the leader's audit log (design section 9) ─────────────────────────────
+  --
+  -- One JSON object per line, like a node's audit log (runtime/march_reload.c):
+  -- `ts` (ms), `type`, `leader` (the node that wrote it), then the fields of
+  -- that type. `release`: a release offered to the leader, with `result` "ok"
+  -- or why it was refused. `order`: a step ordered on a node. `step`: a node's
+  -- answer to an order. `halt` and `complete`: the release's end. The
+  -- candidates hold the file; these build its lines.
+
+  pfn audit_json(ts : Int, kind : String, leader : String, fields : List((String, Json.JsonValue))) : String do
+    Json.to_string(Json.Object(Cons(("ts", Json.Number(int_to_float(ts))), Cons(("type", Json.Str(kind)), Cons(("leader", Json.Str(leader)), fields))))) ++ "\n"
+  end
+
+  doc """
+  The `result` of a release the leader refused, from its reason: `err_stale`,
+  `err_fork`, `err_parent` (the compare-and-set on `parent`), or `err_invalid`
+  (the release does not check).
+  """
+  fn audit_refusal(why : String) : String do
+    if String.starts_with(why, "stale") do "err_stale"
+    else if String.starts_with(why, "fork") do "err_fork"
+    else if String.starts_with(why, "parent mismatch") do "err_parent"
+    else "err_invalid" end end end
+  end
+
+  doc "The audit line for a release offered to the leader: [result] is \"ok\" or an `err_...` word, [why] the reason (\"\" when accepted)."
+  fn audit_release(ts : Int, leader : String, seq : Int, digest : String, result : String, why : String) : String do
+    audit_json(ts, "release", leader, [("seq", Json.Number(int_to_float(seq))), ("release", Json.Str(digest)), ("result", Json.Str(result)), ("why", Json.Str(why))])
+  end
+
+  doc "The audit line for an order sent to a node."
+  fn audit_order(ts : Int, leader : String, o : StepOrder) : String do
+    audit_json(ts, "order", leader, [("seq", Json.Number(int_to_float(o.seq))), ("release", Json.Str(o.release)), ("step", Json.Number(int_to_float(o.step))),
+      ("node", Json.Str(o.node)), ("action", Json.Str(o.action)), ("artifacts", Json.Str(o.artifacts))])
+  end
+
+  doc "The audit line for a node's answer to an order."
+  fn audit_step(ts : Int, leader : String, res : StepResult) : String do
+    audit_json(ts, "step", leader, [("seq", Json.Number(int_to_float(res.seq))), ("step", Json.Number(int_to_float(res.step))), ("node", Json.Str(res.node)),
+      ("result", Json.Str(if res.ok do "ok" else "err" end)), ("why", Json.Str(res.detail))])
+  end
+
+  doc "The audit line for a release's end: a halt (with its step, node and reason) or completion; None for any other decision."
+  fn audit_decision(ts : Int, leader : String, seq : Int, d : CtlDecision) : Option(String) do
+    match d do
+      RolloutHalted(st, n, why) ->
+        Some(audit_json(ts, "halt", leader, [("seq", Json.Number(int_to_float(seq))), ("step", Json.Number(int_to_float(st))), ("node", Json.Str(n)), ("why", Json.Str(why))]))
+      RolloutComplete -> Some(audit_json(ts, "complete", leader, [("seq", Json.Number(int_to_float(seq)))]))
+      _ -> None
+    end
+  end
 end

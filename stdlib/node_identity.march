@@ -7,6 +7,7 @@
 mod NodeIdentity do
 
   type Identity = { name : String, node_id : String, incarnation : Int }
+  derive Eq for Identity
 
   -- Stable NodeId for a node: the hash of its public key.
   fn derive_id(pubkey : String) : String do

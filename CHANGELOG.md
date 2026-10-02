@@ -35,7 +35,21 @@ git log is authoritative for exact commits.
   but not forge one. No ssh is involved in a hot deploy. A leader killed mid-rollout is
   replaced and the release finishes without applying a step twice. Leadership needs
   `Ctl.Control:offer` in the node's certificate. Restart-class changes still go through
-  the process backend. `forge deploy` itself does not select the cluster backend yet.
+  the process backend.
+- **`forge deploy` goes through the control plane when the topology has a `[control]`
+  section.** It builds and classifies as before, writes the hot pools and the topology
+  push into one release signed with your deploy key, uploads the patches to the
+  candidates, sends the release and follows it step by step until it completes or halts,
+  printing the leader's reason when it halts. Nothing reaches a node by ssh for a hot
+  change; restart-class steps still run over ssh, in plan order, and `--plan` lists them
+  ("NEEDS SSH") and prints the release it would sign. `--via ssh` is the break-glass path,
+  `--status` shows the leader's view of the newest release, and `--audit [N]` shows the
+  leader's audit log: every release offered (accepted, or refused at the compare-and-set
+  and why), every step ordered and its answer, and each release's end, as JSON lines kept
+  on every candidate. `forge test --upgrade-from` deploys through the control plane too
+  when the topology has one, and `forge run --processes` gives each local process its own
+  control directory and control port. See "Through the in-cluster control plane" in
+  docs/hot-code-reload.md.
 - **Native builds allocate from a vendored mimalloc.** `march_alloc`, the allocator
   behind every March value, now draws from a statically linked mimalloc instead of
   libc `calloc`, with no new system dependency. Allocation-heavy programs get
@@ -77,7 +91,73 @@ git log is authoritative for exact commits.
   replacement as `CertReplaced` or `CertRefused` (two new `SecurityEvent`
   constructors: a `match` that named every constructor needs a new arm).
 
+### Changed
+- **Compiled `Int` arithmetic normalises to 63 bits lazily, not after every
+  operation.** `+ - *`, negation and `int_shl` leave their result in the full
+  64-bit register and the reduction modulo 2^63 happens where the value is
+  observed (a comparison, a call into the runtime, a store, printing, ...).
+  Every program prints what it printed before — the parity suite against the
+  interpreter is the gate — but the shift pair the previous scheme put between
+  `fib(n-1) + fib(n-2)` and `ret` is gone, so LLVM's accumulator
+  tail-recursion elimination fires again: `bench/fib.march` is ~17% faster
+  compiled (same-box A/B), and arithmetic that feeds a list cell or record field
+  no longer pays a shift pair on the way in.
+- **Heap objects are no longer zero-filled on allocation.** `march_alloc`, the
+  allocator behind every constructor, closure, tuple and record in compiled
+  code, is now a plain `malloc` (or `mi_malloc`) instead of a `calloc`. The
+  2026-08-04 x86/glibc ablation put the zeroing at about 11% of
+  `binary_trees`; on Apple Silicon it measures flat with either allocator, so
+  treat this as a contract simplification rather than a speed-up until it is
+  re-measured on x86. Every runtime and codegen allocation site was audited to
+  write all of its fields before the object can be read, and the four that
+  leaned on the zeroing (the TRMC hole slot, `Task.spawn`'s result words, a
+  native-array header word, a ring-buffer cell's type id) now store their zeros
+  explicitly. No source-level change.
+
 ### Fixed
+- **A release through the control plane no longer orders functions the nodes cannot
+  patch.** forge recorded a release's signed lines against the last deployed manifest,
+  which lists every function, including the control plane's own wiring, which has no
+  hot slot. A release that changed one of them ordered its activation and every node
+  refused the whole batch (`commit_partial_failure`). forge now asks the candidates which
+  slots the nodes have and activates only changed functions among them, as
+  `forge deploy hot` does against a real node. A cluster leader
+  also no longer waits forever for a cluster member that runs no agent (a client, an
+  upgrade test's traffic node): an unmarked member is waited for 20 s
+  (`MARCH_CONTROL_AGENT_GRACE_MS`).
+- Compiled: a dying tuple releases its boxed `Float` fields, and a dying
+  `List(Float)` cell (any generic container slot holding a Float) releases the
+  box in that slot; both leaked one object per Float before.
+- Compiled: a tuple or record holding a niche-encoded `Option` (`Some(tree)`)
+  releases the payload deeply when dropped; the subtree leaked before.
+- Compiled: an aggregate whose field type still mentions a type variable (a
+  tuple destructured inside a polymorphic local `fn`) is released instead of
+  skipped; its lists are walked and freed.
+- Compiled: a generic named function passed where a `Float -> Float -> Float`
+  closure is expected returned the wrong value (its trampoline unboxed the
+  arguments per the use-site type instead of forwarding them as the function
+  is defined).
+- Compiled: a self tail call inside a nested-pattern match arm
+  (`Cons(a, Cons(b, rest)) -> … f(Cons(b, rest))`) is now a loop; it recursed
+  once per element and overflowed the green-thread stack at ~8,000 elements.
+  A match's fall-through join point with a single call site is put back in
+  place by the lowering instead of becoming a closure.
+- Compiled: a nested pattern with a default arm that uses the scrutinee no
+  longer leaks the matched value (the dead join-point closure's release is
+  deep), and Perceus no longer releases a scrutinee ahead of a pattern field
+  the arm still reads.
+- **`==` inside a `test`/`setup` body is checked where it is written.** The
+  `Eq`/`Ord`/`Num`/interface constraints a test or setup body raised stayed
+  pending until the next top-level `fn` or `let`, so a `fn` placed between two
+  `describe` blocks was blamed for every `==` in the tests above it ("`T` does
+  not implement interface `Eq`" at the fn's span), and with no later `fn` they
+  were never checked at all. They are now reported at the test itself. Tests
+  that compared a type with no `Eq` impl, which used to pass unchecked, are now
+  rejected; to keep them working, these stdlib types now `derive Eq`:
+  `Cli.FlagArity`, `Control.CtlHosts`/`CtlAction`/`CtlGate`/`StepOrder`/
+  `CtlDecision`, `File.FileKind`, `Membership.MemberStatus`/`Member`,
+  `NodeCert.Cert`, `NodeIdentity.Identity`, `RemoteCall.CallError`/`Verdict`/
+  `ReplyResult`/`CallReply`, `Swim.Action` and `VectorClock.ClockOrder`.
 - **Hot reload: the entry module's own top-level functions can be hot deployed.**
   The compiler names them without the entry module's prefix, so with
   `--hot-reload <EntryModule>` (what forge passes) a role body, hook or helper

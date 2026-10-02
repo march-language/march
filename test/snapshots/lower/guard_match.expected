@@ -2,13 +2,15 @@
 -- fns (2) --
 ## classify
 fn classify(x : Int) : String =
-  let $jp_clo7 : () -> '_ = letrec [$jp6] in
-$jp6 in
-let n : Int = x in
+  let n : Int = x in
 let $guard8 : Bool = >(n, 0) in
 case $guard8 of
   true() -> "pos"
-  _ -> $jp_clo7()
+  _ -> let n$sh1 : Int = x in
+let $guard3 : Bool = <(n$sh1, 0) in
+case $guard3 of
+  true() -> "neg"
+  _ -> "zero"
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =

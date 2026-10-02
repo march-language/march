@@ -431,6 +431,121 @@ let hoist_fallback_jp ?(params : Tir.var list = []) (fb : Tir.expr) : Tir.var * 
   } in
   (clo_var, lambda_expr)
 
+(** Bind a hoisted join point ([hoist_fallback_jp]'s [clo_var] /
+    [lambda_expr]) around the decision tree [body] that calls it — or, when
+    the tree turns out to reach it at most ONCE, put the body back in place
+    and emit no closure at all.
+
+    The join point exists to share a fallback that the decision tree would
+    otherwise duplicate, but the tree is built AFTER the join point is
+    minted, so it is only known here how many fall-through sites there are.
+    A join point with a single site costs a closure allocation per
+    execution of the arm for nothing — and worse than nothing: the lifted
+    apply fn turns a SELF tail call inside the arm body into a mutual one
+    (`f -> $jp$apply -> f`), which [Llvm_tco] cannot loop, so
+
+      Cons(a, Cons(b, rest)) -> if ok do f(Cons(b, rest)) else false end
+
+    recursed once per element and overflowed the 1 MiB green-thread stack at
+    ~8,000 elements (test/native/array_sort_by.march).  A join point with NO
+    site (the inner matrix of a nested pattern hoists its fallback before it
+    knows every row matches) was a dead closure whose captures leaked once
+    Perceus dup'd them.
+
+    The body is substituted at the call site (binding the join point's
+    parameters to the call's arguments), which is only sound when no binder
+    on the path from the closure's binding to the call rebinds a name the
+    body uses: the tree's own binders are fresh (`$f…`), but a row's pattern
+    variables and guard are in scope at a guard-fail fall-through.  Such a
+    (rare) collision keeps the closure. *)
+let bind_jp (clo_var : Tir.var) (lambda_expr : Tir.expr) (body : Tir.expr)
+  : Tir.expr =
+  let keep () = Tir.ELet (clo_var, lambda_expr, body) in
+  match lambda_expr with
+  | Tir.ELetRec ([jp_fn], Tir.EAtom (Tir.AVar _)) ->
+    let cname = clo_var.Tir.v_name in
+    let is_clo (a : Tir.atom) = match a with
+      | Tir.AVar v -> String.equal v.Tir.v_name cname
+      | _ -> false in
+    (* Count the call sites, and whether the closure is used in any other
+       way (captured by a nested join point that survived, passed as a
+       value); a non-call use keeps the closure. *)
+    let calls = ref 0 and other = ref false in
+    let rec count (e : Tir.expr) =
+      match e with
+      | Tir.EApp (f, args) ->
+        if String.equal f.Tir.v_name cname then incr calls;
+        if List.exists is_clo args then other := true
+      | Tir.EAtom a | Tir.EField (a, _) | Tir.EFree a
+      | Tir.EIncRC a | Tir.EDecRC a | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a ->
+        if is_clo a then other := true
+      | Tir.ECallPtr (a, args) ->
+        if is_clo a || List.exists is_clo args then other := true
+      | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) -> count e1; count e2
+      | Tir.ELetRec (fns, e2) ->
+        List.iter (fun fd -> count fd.Tir.fn_body) fns; count e2
+      | Tir.ECase (a, brs, def) ->
+        if is_clo a then other := true;
+        List.iter (fun br -> count br.Tir.br_body) brs;
+        Option.iter count def
+      | Tir.ETuple atoms | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) ->
+        if List.exists is_clo atoms then other := true
+      | Tir.ERecord fs | Tir.EUpdate (_, fs) ->
+        if List.exists (fun (_, a) -> is_clo a) fs then other := true;
+        (match e with Tir.EUpdate (a, _) when is_clo a -> other := true | _ -> ())
+      | Tir.EReuse (a, _, atoms) | Tir.EAllocHole (Some a, _, atoms, _) ->
+        if is_clo a || List.exists is_clo atoms then other := true
+      | Tir.EAllocHole (None, _, atoms, _) ->
+        if List.exists is_clo atoms then other := true
+      | Tir.ESetField (o, _, v) ->
+        if is_clo o || is_clo v then other := true
+    in
+    count body;
+    if !other then keep ()
+    else if !calls = 0 then body
+    else if !calls > 1 then keep ()
+    else begin
+      (* One site: substitute the body there, provided nothing bound between
+         here and the site captures a name the body reads. *)
+      let fb = jp_fn.Tir.fn_body in
+      let params = jp_fn.Tir.fn_params in
+      let captured (bound : string list) =
+        List.exists (fun n ->
+            not (List.exists (fun (p : Tir.var) -> String.equal p.Tir.v_name n) params)
+            && Perceus_liveness.name_free_in n fb) bound in
+      let inlined = ref true in
+      let rec subst (bound : string list) (e : Tir.expr) : Tir.expr =
+        match e with
+        | Tir.EApp (f, args) when String.equal f.Tir.v_name cname ->
+          if captured bound then (inlined := false; e)
+          else
+            List.fold_right2 (fun (p : Tir.var) (a : Tir.atom) acc ->
+                match a with
+                | Tir.AVar v when String.equal v.Tir.v_name p.Tir.v_name -> acc
+                | _ -> Tir.ELet (p, Tir.EAtom a, acc))
+              params args fb
+        | Tir.ELet (v, e1, e2) ->
+          Tir.ELet (v, subst bound e1, subst (v.Tir.v_name :: bound) e2)
+        | Tir.ESeq (e1, e2) -> Tir.ESeq (subst bound e1, subst bound e2)
+        | Tir.ELetRec (fns, e2) ->
+          let bound' = List.map (fun fd -> fd.Tir.fn_name) fns @ bound in
+          Tir.ELetRec (List.map (fun fd ->
+              let pb = List.map (fun (p : Tir.var) -> p.Tir.v_name) fd.Tir.fn_params in
+              { fd with Tir.fn_body = subst (pb @ bound') fd.Tir.fn_body }) fns,
+            subst bound' e2)
+        | Tir.ECase (a, brs, def) ->
+          Tir.ECase (a,
+            List.map (fun br ->
+                let bb = List.map (fun (v : Tir.var) -> v.Tir.v_name) br.Tir.br_vars in
+                { br with Tir.br_body = subst (bb @ bound) br.Tir.br_body }) brs,
+            Option.map (subst bound) def)
+        | _ -> e
+      in
+      let body' = subst [] body in
+      if !inlined then body' else keep ()
+    end
+  | _ -> keep ()
+
 (** Public entry point: hoist a non-trivial [fallback] into a join point
     before invoking [compile_matrix_impl].
 
@@ -460,7 +575,7 @@ let rec compile_matrix
        a top-level name. *)
     let jp_call = Tir.EApp (clo_var, []) in
     let body    = compile_matrix_impl env scruts rows (Some jp_call) in
-    Tir.ELet (clo_var, lambda_expr, body)
+    bind_jp clo_var lambda_expr body
 
 and compile_matrix_impl
     (env      : Lower_state.env)
@@ -897,7 +1012,7 @@ let lower_match (env : Lower_state.env) (scrut : Tir.atom) (branches : Ast.branc
         end else ([br.branch_pat], body)) branches in
     let tree = compile_matrix env [scrut] rows None in
     List.fold_left (fun acc (clo_var, lambda_expr) ->
-      Tir.ELet (clo_var, lambda_expr, acc)) tree !wraps
+      bind_jp clo_var lambda_expr acc) tree !wraps
   end else begin
     (* Guards present: compile each branch individually with fallthrough
        to the remaining branches when the guard fails.
@@ -948,7 +1063,7 @@ let lower_match (env : Lower_state.env) (scrut : Tir.atom) (branches : Ast.branc
             let params = pat_binder_vars env br.branch_pat in
             let (clo_var, lambda_expr) = hoist_fallback_jp ~params body in
             (Tir.EApp (clo_var, List.map (fun v -> Tir.AVar v) params),
-             fun e -> Tir.ELet (clo_var, lambda_expr, e))
+             fun e -> bind_jp clo_var lambda_expr e)
           else (body, fun e -> e)
         in
         let guard_expr_opt = Option.map (lower_expr env) br.branch_guard in
@@ -963,7 +1078,7 @@ let lower_match (env : Lower_state.env) (scrut : Tir.atom) (branches : Ast.branc
           if needs_fallback then
             let (clo_var, lambda_expr) = hoist_fallback_jp rest_expr in
             (Some (Tir.EApp (clo_var, [])),
-             fun e -> Tir.ELet (clo_var, lambda_expr, e))
+             fun e -> bind_jp clo_var lambda_expr e)
           else
             (None, fun e -> e)
         in

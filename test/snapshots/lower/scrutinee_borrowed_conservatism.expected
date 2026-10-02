@@ -3,16 +3,12 @@
 ## first_or_recheck
 fn first_or_recheck(xs : List(String), flag : Bool) : String =
   case xs of
-  Cons($f7, $f8) -> let $jp_clo10 : () -> '_ = letrec [$jp9] in
-$jp9 in
-let t : List(String) = $f8 in
+  Cons($f7, $f8) -> let t : List(String) = $f8 in
 let h : String = $f7 in
 case flag of
   True() -> h
   _ -> case xs of
-  Cons($f1, $f2) -> let $jp_clo4 : () -> '_ = letrec [$jp3] in
-$jp3 in
-let h2 : String = $f1 in
+  Cons($f1, $f2) -> let h2 : String = $f1 in
 h2
   Nil() -> "none"
   _ -> panic("non-exhaustive pattern match")

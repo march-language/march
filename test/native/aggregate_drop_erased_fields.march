@@ -1,0 +1,106 @@
+-- Leak guard: a dying aggregate must release every child it owns, compiled,
+-- including the ones its synthesized drop (lib/tir/drop.ml) used to skip:
+--   1. a boxed Float field — a tuple's Float, and a generic container slot
+--      instantiated at Float (List(Float)) — one march_alloc_float per field;
+--   2. a niche-encoded Option field (`Some(tree)` IS the tree pointer): the
+--      bare dec_rc freed the root cell and leaked the whole subtree;
+--   3. a field whose type still mentions a type variable (a tuple destructured
+--      inside a polymorphic local fn): skipped outright, so a frame tuple's
+--      list leaked on every pop.
+-- SIGNAL: live_allocs() deltas printed as booleans, so the golden is
+-- deterministic; each result is printed so the loop is not deleted.  See
+-- specs/progress/2026-10-01-aggregate-drop-skips-boxed-float-field.md,
+-- specs/progress/2026-10-01-niche-option-field-shallow-drop.md and
+-- specs/progress/2026-10-01-polymorphic-local-closure-aggregate-drop.md.
+mod Main do
+  needs IO.Console
+
+  -- 1a. a tuple holding a Float, dropped after destructuring
+  fn ret_bf(b : Bool) : (Bool, Float) do (b, 2.5) end
+  pfn tuple_float(i : Int) : Int do
+    let (flag, f) = ret_bf(i > 0)
+    if flag do string_length(float_to_string(f)) else 0 end
+  end
+  pfn go_tuple(i : Int, acc : Int) : Int do
+    if i == 0 do acc else go_tuple(i - 1, acc + tuple_float(i)) end
+  end
+
+  -- 1b. List(Float) cons cells, borrowed by a fold and dropped by the owner
+  pfn build(k : Int, acc : List(Float)) : List(Float) do
+    if k == 0 do acc else build(k - 1, Cons(int_to_float(k), Cons(0.5, acc))) end
+  end
+  pfn go_list(i : Int, acc : Float) : Float do
+    if i == 0 do acc else
+      let xs = build(3, Nil)
+      go_list(i - 1, acc +. List.fold_left(xs, 0.0, fn (a, x) -> a +. x))
+    end
+  end
+
+  -- 2. a tuple holding Some(tree)
+  type Tree = Leaf | Node(Tree, Int, Tree)
+  pfn mk(d : Int) : Tree do
+    if d == 0 do Leaf else Node(mk(d - 1), d, mk(d - 1)) end
+  end
+  pfn size(t : Tree) : Int do
+    match t do
+      Leaf -> 0
+      Node(l, _, r) -> size(l) + 1 + size(r)
+    end
+  end
+  pfn opt_field(i : Int) : Int do
+    let (o, n) = (Some(mk(4)), i)
+    match o do
+      Some(t) -> size(t) + n
+      None -> n
+    end
+  end
+  pfn opt_unused(i : Int) : Int do
+    let p = (Some(mk(4)), i)
+    let (_, n) = p
+    n
+  end
+  pfn go_opt(i : Int, acc : Int) : Int do
+    if i == 0 do acc else go_opt(i - 1, acc + opt_field(i) + opt_unused(i)) end
+  end
+
+  -- 3. frame tuples destructured inside a polymorphic local fn
+  pfn outer(n : Int) : List(Int) do
+    fn ascend(nd, stk) do
+      match stk do
+      Nil -> nd
+      Cons(frame, rest) -> do
+        let (c, s) = frame
+        ascend(Cons(s, c), rest)
+      end
+      end
+    end
+    fn descend(k, path) do
+      if k == 0 do ascend(Nil, path)
+      else descend(k - 1, Cons(([k, k], k), path)) end
+    end
+    descend(n, Nil)
+  end
+  pfn go_poly(i : Int, acc : Int) : Int do
+    if i == 0 do acc else go_poly(i - 1, acc + List.length(outer(5))) end
+  end
+
+  pfn flat(label : String, before : Int, result : String) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ result ++ ", flat: " ++ bool_to_string(grew < 4))
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let _w1 = go_tuple(10, 0)
+    let b1 = live_allocs()
+    flat("tuple Float", b1, int_to_string(go_tuple(400, 0)))
+    let _w2 = go_list(10, 0.0)
+    let b2 = live_allocs()
+    flat("List(Float)", b2, float_to_string(go_list(400, 0.0)))
+    let _w3 = go_opt(10, 0)
+    let b3 = live_allocs()
+    flat("Option field", b3, int_to_string(go_opt(400, 0)))
+    let _w4 = go_poly(10, 0)
+    let b4 = live_allocs()
+    flat("polymorphic frames", b4, int_to_string(go_poly(400, 0)))
+  end
+end

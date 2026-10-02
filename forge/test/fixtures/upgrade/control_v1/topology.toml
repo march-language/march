@@ -1,0 +1,20 @@
+# fixtures/upgrade/v1's topology with the in-cluster control plane
+# (distributed-deploys step 12a): two processes, both control candidates, so
+# one leads and the other stands by. `forge test --upgrade-from` then deploys
+# through the control plane (one signed release) instead of each process's
+# reload socket (forge/test/test_upgrade_from.ml, the control case).
+
+[roles]
+"Echo.Server" = { body = "UpgradeApp.Serve.serve_one", capacity = 8 }
+
+[pool.app]
+start = "UpgradeApp.start"
+serves = ["Echo.Server"]
+hosts = [ { host = "n1", labels = ["control"] }, { host = "n2", labels = ["control"] } ]
+
+[control]
+candidates = "control"
+
+[drain]
+soft_ms = 2000
+hard_ms = 5000

@@ -3388,10 +3388,14 @@ let test_escape_match_field_promoted () =
   (* A value that is created and immediately pattern-matched — with only the
      extracted field returned, not the struct itself — does not escape.
      This is the "Conn through pipeline" pattern: the Conn is created, a field
-     is read from it, and the Conn itself is discarded (not returned). *)
+     is read from it, and the Conn itself is discarded (not returned).
+     The body field is a String so the ctor is a BOXED cell: a scalar-only
+     `Conn(Int, Int)` is an unboxed aggregate with no cell to promote, and
+     with that fixture this case passed (until 2026-10-02) only because the
+     match's dead fall-through join-point closure was being promoted. *)
   let m = escape_module {|mod Test do
-    type Conn = Conn(Int, Int)
-    fn get_status(s : Int, b : Int) : Int do
+    type Conn = Conn(Int, String)
+    fn get_status(s : Int, b : String) : Int do
       let conn = Conn(s, b)
       match conn do
         Conn(status, _body) -> status

@@ -264,17 +264,24 @@ let test_alloc_hole_emits_verifiable_ir () =
   | `Invalid out ->
     Alcotest.failf "EAllocHole/ESetField emitted invalid LLVM IR:\n%s" out
 
-(* The hole must be left UNWRITTEN by the allocation and written by the fill.
-   This is what distinguishes a real hole from "EAlloc with a null argument":
-   if EAllocHole ever started zero-filling the slot explicitly, the IR would
-   still verify and still run, but the node would have stopped being a hole and
+(* The hole must be CLEARED (stored null) by the allocation and given its value
+   by the fill, and by nothing else.  The clearing store is load-bearing:
+   march_alloc is a plain malloc (not a calloc, since 2026-10-02), so without
+   it a fresh cell's hole slot holds whatever the allocator's previous tenant
+   left there -- under mimalloc typically a freed cons cell's stale child
+   pointer -- and a drop in the window before the fill would walk into it.
+   IS_HEAP_PTR(null) is false, which is what makes that walk a no-op.
+
+   A hole is still distinct from "EAlloc with a null argument": the value store
+   is ESetField's, never EAllocHole's, so exactly one NON-null store reaches
+   the slot.  Two value stores would mean the allocation pre-filled it and
    Phase 3's ownership reasoning would be silently wrong.
 
    Field slots live at header + 8*i, so field 0 is offset 16 and field 1 —
    the hole in this fixture — is offset 24.  In the emitted IR a field store is
    two lines, a `getelementptr i8, ptr %X, i64 <off>` followed by a `store`, so
    the offsets are counted by pairing each gep with the line after it. *)
-let field_store_offsets (ir : string) : int list =
+let field_stores (ir : string) : (int * string) list =
   let lines = Array.of_list (String.split_on_char '\n' ir) in
   let gep_off line =
     (* "  %fp3 = getelementptr i8, ptr %hp1, i64 16" -> Some 16 *)
@@ -301,20 +308,34 @@ let field_store_offsets (ir : string) : int list =
   let acc = ref [] in
   Array.iteri (fun i line ->
     if is_gep line && i + 1 < Array.length lines && is_store lines.(i + 1) then
-      match gep_off line with Some off -> acc := off :: !acc | None -> ()
+      match gep_off line with
+      | Some off -> acc := (off, String.trim lines.(i + 1)) :: !acc
+      | None -> ()
   ) lines;
   List.rev !acc
 
-let test_hole_slot_is_written_once () =
+let is_null_store line =
+  let sub = "store ptr null," in
+  String.length line >= String.length sub
+  && String.sub line 0 (String.length sub) = sub
+
+let test_hole_slot_cleared_then_filled () =
   let ir = March_tir.Llvm_emit.emit_module (trmc_hole_module ()) in
-  let offsets = field_store_offsets ir in
-  let count off = List.length (List.filter (( = ) off) offsets) in
+  let stores = field_stores ir in
+  let at off = List.filter (fun (o, _) -> o = off) stores in
   (* Field 0 (offset 16) is stored by the allocation itself. *)
-  Alcotest.(check bool) "field 0 is stored at allocation" true (count 16 >= 1);
-  (* The hole (offset 24) is stored EXACTLY once — by ESetField, never by
-     EAllocHole.  Two stores would mean the allocation pre-filled it. *)
-  Alcotest.(check int) "the hole's slot is stored exactly once (the fill)"
-    1 (count 24)
+  Alcotest.(check bool) "field 0 is stored at allocation" true (List.length (at 16) >= 1);
+  (* The hole (offset 24) is stored EXACTLY twice: null by EAllocHole (the
+     clearing store march_alloc no longer does for us), then the value by
+     ESetField.  A missing null store is the malloc hazard; a second value
+     store means the allocation pre-filled it. *)
+  let hole = at 24 in
+  let nulls = List.filter (fun (_, l) -> is_null_store l) hole in
+  let values = List.filter (fun (_, l) -> not (is_null_store l)) hole in
+  Alcotest.(check int) "the hole's slot is cleared exactly once at allocation"
+    1 (List.length nulls);
+  Alcotest.(check int) "the hole's slot is given a value exactly once (the fill)"
+    1 (List.length values)
 
 (* ── Phase 2: the nodes must SURVIVE the pass pipeline ───────────────────────
    The two tests above go straight from hand-built TIR to [emit_module], which
@@ -714,7 +735,7 @@ let suites = [
   ];
   "trmc-ir", [
     Alcotest.test_case "alloc-hole emits verifiable IR"  `Quick test_alloc_hole_emits_verifiable_ir;
-    Alcotest.test_case "hole slot written once by fill"  `Quick test_hole_slot_is_written_once;
+    Alcotest.test_case "hole slot cleared at alloc, written once by fill"  `Quick test_hole_slot_cleared_then_filled;
   ];
   "trmc-pipeline", [
     Alcotest.test_case "nodes survive the pass pipeline"  `Quick test_nodes_survive_pass_pipeline;

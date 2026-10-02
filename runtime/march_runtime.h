@@ -297,7 +297,7 @@ void    march_timer_cancel(void *tok);
 
 /* Polymorphic containers store scalars via tagged integers: the low bit of the
  * pointer is set to 1 for immediate scalar values (integers, booleans, chars).
- * Heap pointers from march_alloc (backed by calloc) are always 8-byte aligned,
+ * Heap pointers from march_alloc (malloc/mi_malloc) are always 8-byte aligned,
  * so their low bit is always 0.  This uniform tagging scheme lets the runtime
  * discriminate between heap pointers and immediates without dereferencing.
  *

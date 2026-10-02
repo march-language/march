@@ -38,6 +38,7 @@ mod Swim do
       SendPing(String)                -- direct ping to a node
     | SendPingReq(String, String)     -- ask helper (1st) to ping target (2nd)
     | Gossip(Member)                  -- disseminate a member status update
+  derive Eq for Action
 
   fn config(ack_timeout_ms : Int, suspect_timeout_ms : Int, indirect_k : Int) : Config do
     { ack_timeout_ms: ack_timeout_ms, suspect_timeout_ms: suspect_timeout_ms, indirect_k: indirect_k }

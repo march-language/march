@@ -143,9 +143,12 @@ let local_target () =
     native build links against this machine's newer glibc, which an older
     host cannot load (CI: an Ubuntu 24.04 build on a Debian bookworm host
     never came up). Another target is built natively only when it is this
-    machine's own. *)
+    machine's own. FORGE_DEPLOY_NATIVE=1 builds a host of this machine's own
+    target natively after all: for hosts that are this machine, or share its
+    glibc (a local cluster, a test). *)
 let target_flag (target : string) : (string, string) result =
   match target with
+  | t when Sys.getenv_opt "FORGE_DEPLOY_NATIVE" = Some "1" && t = local_target () -> Ok ""
   | "linux/amd64" | "linux/arm64" -> Ok (" --target " ^ target)
   | t when t = local_target () -> Ok ""
   | t -> Error (Printf.sprintf "forge cannot build for %s from this machine (%s)" t (local_target ()))
@@ -371,8 +374,9 @@ let gather c ~grant_caps ~compact ~(artifacts : artifact list) ~(derived : Deplo
     i_grant_caps = grant_caps; i_live = live_of_status status; i_compact = compact; i_compact_after = compact_after }
 
 (** Check, decide the split, build, gather and classify: the plan, the
-    patches it is for, and the protocol flags every build of it takes. *)
-let make_plan c ~grant_caps ~compact
+    patches it is for, and the protocol flags every build of it takes.
+    [status] is what the nodes report; by default the backend's (ssh). *)
+let make_plan ?status c ~grant_caps ~compact
   : (Deploy_plan.plan * artifact list * Deploy_plan.derived option * string, string) result =
   let derived =
     match Topology_run.compiler_derived c.proj with
@@ -387,15 +391,9 @@ let make_plan c ~grant_caps ~compact
   in
   let pflags = protocol_build_flags c splits in
   let* artifacts = build_patches c ~pflags in
-  let status = c.backend.status () in
+  let status = match status with Some f -> f () | None -> c.backend.status () in
   let input = gather c ~grant_caps ~compact ~artifacts ~derived ~status ~protocols ~pending in
   Ok (Deploy_plan.classify input, artifacts, derived, pflags)
-
-(** [forge deploy --plan]: print the plan; change nothing. *)
-let plan_only ?transport ?service_ctl ?layout_prefix ~proj ~env ~grant_caps ~compact () : (string, string) result =
-  let* c = setup ?transport ?service_ctl ?layout_prefix ~proj ~env () in
-  let* (plan, _, _, _) = make_plan c ~grant_caps ~compact in
-  Ok (Deploy_plan.render plan)
 
 (* ── Carrying a plan out (item 4) ─────────────────────────────────────── *)
 
@@ -406,6 +404,7 @@ type opts = {
   canary     : int;                     (** hot pools: this many hosts first, then a PING window *)
   timeout_ms : int;                     (** the canary window *)
   up_timeout : float;                   (** seconds a restarted node has to answer PING *)
+  follow_s   : float;                   (** cluster backend: how long to follow a release *)
   confirm    : string -> bool;          (** asks the operator; [yes] skips it *)
 }
 
@@ -422,7 +421,7 @@ let ask_stdin prompt =
   end
 
 let default_opts = { yes = false; grant_caps = []; compact = false; canary = 0; timeout_ms = 30000; up_timeout = 60.;
-                     confirm = ask_stdin }
+                     follow_s = 1800.; confirm = ask_stdin }
 
 let pool_of c name = List.find (fun (p : Topology.pool) -> p.pool_name = name) c.t.pools
 
@@ -591,9 +590,39 @@ let record c ~(artifacts : artifact list) ~(restarted : string list) ~(derived :
   Reconcile.record_deployed_topology ~root:c.root c.env c.t;
   advance_baselines ~deployed:(protocols_dir c) ~now:(new_protocols_dir c) ~expanding
 
-(** [forge deploy --env <env>]: plan, confirm, carry out, record. *)
-let run ?transport ?service_ctl ?layout_prefix ~proj ~env ~(opts : opts) () : (string, string) result =
-  let* c = setup ?transport ?service_ctl ?layout_prefix ~proj ~env () in
+(** A restart-class pool, over the process backend (ssh): build the base
+    image, upload it, restart each node onto it (rolling, with the health
+    gate), and clear its patch stack when the plan compacts it. *)
+let restart_pool c ~(opts : opts) ~(plan : Deploy_plan.plan) ~pflags ~(artifacts : artifact list) ~derived
+    ~(restarted : string list ref) ~why (pp : Deploy_plan.pool_plan) : (unit, string) result =
+  let nodes = nodes_of_pool c pp.pp_pool in
+  Printf.printf "\n==> pool %s: restart (%s)\n%!" pp.pp_pool (String.concat "; " why);
+  let pools = (List.assoc pp.pp_build (List.map (fun (b, ps) -> (b, ps)) (Topology_run.builds_of c.t))) in
+  if nodes = [] then Printf.printf "  (pool %s has no hosts in this environment)\n%!" pp.pp_pool
+  else restarted := pp.pp_build :: !restarted;
+  let compacting = List.mem_assoc pp.pp_build plan.compact in
+  let* () =
+    on_nodes c ~opts ~canary:0 nodes (fun n ->
+        let target = Option.get n.sn_target in
+        let* binary = build_base c ~pflags ~build:pp.pp_build ~pools ~target in
+        let manifest = Option.map (fun a -> a.a_manifest)
+            (List.find_opt (fun a -> a.a_build = pp.pp_build && a.a_target = target) artifacts) in
+        let policy = Host_init.policy_text ~derived ?manifest (pool_of c n.sn_pool) in
+        restart_node c ?policy ~binary n)
+  in
+  if not compacting then Ok ()
+  else
+    List.fold_left (fun acc (n : Reconcile.ssh_node) ->
+        let* () = acc in
+        let before = Option.bind (List.find_opt (fun (l : Deploy_plan.live) -> l.l_node = n.sn.Hosts.name) plan.live)
+            (fun l -> l.l_stack) in
+        let* msg = clear_stack c ~before n in
+        Printf.printf "  %s\n%!" msg;
+        Ok ())
+      (Ok ()) nodes
+
+(** [forge deploy --env <env>] on the ssh backend: plan, confirm, carry out, record. *)
+let run_ssh c ~(opts : opts) : (string, string) result =
   Reconcile.with_lock ~root:c.root (fun () ->
       let* (plan, artifacts, derived, pflags) = make_plan c ~grant_caps:opts.grant_caps ~compact:opts.compact in
       print_string (Deploy_plan.render plan);
@@ -621,31 +650,7 @@ let run ?transport ?service_ctl ?layout_prefix ~proj ~env ~(opts : opts) () : (s
           let nodes = nodes_of_pool c pp.pp_pool in
           match pp.pp_mechanism with
           | Deploy_plan.Nothing | Placement | Blocked _ -> Ok ()
-          | Restart why ->
-            Printf.printf "\n==> pool %s: restart (%s)\n%!" pp.pp_pool (String.concat "; " why);
-            let pools = (List.assoc pp.pp_build (List.map (fun (b, ps) -> (b, ps)) (Topology_run.builds_of c.t))) in
-            if nodes = [] then Printf.printf "  (pool %s has no hosts in this environment)\n%!" pp.pp_pool
-            else restarted := pp.pp_build :: !restarted;
-            let compacting = List.mem_assoc pp.pp_build plan.compact in
-            let* () =
-              on_nodes c ~opts ~canary:0 nodes (fun n ->
-                  let target = Option.get n.sn_target in
-                  let* binary = build_base c ~pflags ~build:pp.pp_build ~pools ~target in
-                  let manifest = Option.map (fun a -> a.a_manifest)
-                      (List.find_opt (fun a -> a.a_build = pp.pp_build && a.a_target = target) artifacts) in
-                  let policy = Host_init.policy_text ~derived ?manifest (pool_of c n.sn_pool) in
-                  restart_node c ?policy ~binary n)
-            in
-            if not compacting then Ok ()
-            else
-              List.fold_left (fun acc (n : Reconcile.ssh_node) ->
-                  let* () = acc in
-                  let before = Option.bind (List.find_opt (fun (l : Deploy_plan.live) -> l.l_node = n.sn.Hosts.name) plan.live)
-                      (fun l -> l.l_stack) in
-                  let* msg = clear_stack c ~before n in
-                  Printf.printf "  %s\n%!" msg;
-                  Ok ())
-                (Ok ()) nodes
+          | Restart why -> restart_pool c ~opts ~plan ~pflags ~artifacts ~derived ~restarted ~why pp
           | Hot | Hot_migrate _ | Hot_drain _ ->
             Printf.printf "\n==> pool %s: %s\n%!" pp.pp_pool (Deploy_plan.mechanism_text pp.pp_mechanism);
             on_nodes c ~opts ~canary:opts.canary nodes (fun n ->
@@ -695,3 +700,266 @@ let run ?transport ?service_ctl ?layout_prefix ~proj ~env ~(opts : opts) () : (s
                 (String.concat ", " expanding) (env_flag c.env))
         else Ok "deploy complete"
       end)
+
+(* ── The cluster backend (distributed-deploys step 12a; design section 9) ── *)
+
+(** Which backend carries a deploy. [`Auto]: the cluster backend when the
+    environment's topology has a [[control]] section, else ssh. The topology
+    is what says how the environment runs: a node with the control plane
+    takes its hot changes as sequenced releases from the leader, so forge
+    sends it releases by default. [`Ssh] is the break-glass path (design 12,
+    open question): the ssh deploy still works on such a node, which then
+    holds a release the leader did not order (its next pass reports itself
+    behind until a newer release is sent). *)
+type via = [ `Auto | `Ssh | `Cluster ]
+
+let choose_backend ~(via : via) (t : Topology.t) : ([ `Ssh | `Cluster ], string) result =
+  match via, t.Topology.control with
+  | `Ssh, _ -> Ok `Ssh
+  | `Cluster, None -> Error "--via cluster needs the topology's [control] section (the control plane's candidates)"
+  | (`Auto | `Cluster), Some _ -> Ok `Cluster
+  | `Auto, None -> Ok `Ssh
+
+let control_endpoints (t : Topology.t) = Cluster_deploy.endpoints_of_topology ?override:(Sys.getenv_opt "FORGE_CONTROL_ENDPOINTS") t
+
+(** The nodes as the leader sees them, for the plan: a node is up when it
+    reports in STATUS. The leader does not relay a node's sessions, hot slots
+    or patch stack, so the plan's drain counts, its slot check and automatic
+    compaction (compact_after) work from what forge recorded; [--compact]
+    still forces a compaction. *)
+let cluster_node_status c (s : Cluster_deploy.status) : Reconcile.node_status list =
+  List.map (fun (n : Reconcile.ssh_node) ->
+      let seen = List.exists (fun (x : Cluster_deploy.node_state) -> x.n_name = n.sn.Hosts.name) s.nodes in
+      { Reconcile.node = { Reconcile.name = n.sn.Hosts.name; pool = n.sn_pool; pid = 0; port = n.sn_port; socket = None;
+                           labels = n.sn.Hosts.labels; status_path = ""; log = ""; host = n.sn.Hosts.ssh };
+        up = seen; report = None; reload = None })
+    c.nodes
+
+(** One part of a deploy on the cluster backend, in the plan's order: a
+    release (hot pools, and the topology at the end), or a restart-class pool
+    run over the process backend (D38). *)
+type segment =
+  | Release of { pools : Deploy_plan.pool_plan list; topology : bool }
+  | Process of Deploy_plan.pool_plan * string list
+
+let is_hot (m : Deploy_plan.mechanism) = match m with Deploy_plan.Hot | Hot_migrate _ | Hot_drain _ -> true | _ -> false
+
+(** The plan's pools as segments: consecutive hot pools share a release; a
+    restart closes the release before it (the order is the plan's: receivers
+    of a choice before its chooser); the topology goes last. *)
+let segments (plan : Deploy_plan.plan) : segment list =
+  let push = List.exists (fun (pp : Deploy_plan.pool_plan) -> pp.pp_push) plan.pools in
+  let rec go acc hot = function
+    | [] ->
+      List.rev (if hot <> [] || push then Release { pools = List.rev hot; topology = push } :: acc else acc)
+    | (pp : Deploy_plan.pool_plan) :: rest ->
+      (match pp.pp_mechanism with
+       | m when is_hot m -> go acc (pp :: hot) rest
+       | Deploy_plan.Restart why ->
+         let acc = if hot <> [] then Release { pools = List.rev hot; topology = false } :: acc else acc in
+         go (Process (pp, why) :: acc) [] rest
+       | _ -> go acc hot rest)
+  in
+  go [] [] plan.pools
+
+(** A release's scratch directory: short, because the recorder listens on a
+    Unix socket in it, and a socket path under a project's [.forge/] easily
+    passes the 104-byte [sun_path] limit (macOS). *)
+let release_scratch n =
+  let base = if Sys.file_exists "/tmp" then "/tmp" else Filename.get_temp_dir_name () in
+  Filename.concat base (Printf.sprintf "forge-release-%d-%d" (Unix.getpid ()) n)
+
+let remove_scratch n = ignore (Sys.command ("rm -rf " ^ Filename.quote (release_scratch n)))
+
+(** The release spec for a segment's hot pools: one build per build name,
+    its patch, and what forge last deployed of it (the recorder's baseline). *)
+let release_spec c ~(opts : opts) ~eps ~(artifacts : artifact list) ~n (pools : Deploy_plan.pool_plan list) ~topology
+  : (Cluster_deploy.spec, string) result =
+  let builds = List.sort_uniq String.compare (List.map (fun (pp : Deploy_plan.pool_plan) -> pp.pp_build) pools) in
+  let* hot =
+    List.fold_left (fun acc build ->
+        let* acc = acc in
+        match List.filter (fun a -> a.a_build = build) artifacts with
+        | [] -> Error (Printf.sprintf "no %s patch was built" build)
+        | _ :: _ :: _ ->
+          Error (Printf.sprintf "build %s runs on hosts of more than one target, and a release names one patch per \
+                                 build: deploy it with --via ssh" build)
+        | [ a ] ->
+          Ok (acc @ [ { Cluster_deploy.hb_name = build;
+                        hb_pools = List.filter_map (fun (pp : Deploy_plan.pool_plan) ->
+                            if pp.pp_build = build then Some pp.pp_pool else None) pools;
+                        hb_manifest = a.a_manifest; hb_so = a.a_so; hb_old_manifest = manifest_file c build;
+                        hb_old_schemas = schemas_file c build; hb_new_schemas = a.a_schemas } ]))
+      (Ok []) builds
+  in
+  Ok { Cluster_deploy.env = Reconcile.env_key c.env; endpoints = eps; sk = c.sk; pubkey = c.pubkey; hot;
+       topology_body = Topology.digest_text c.t; push_topology = topology; canary = opts.canary;
+       canary_window_ms = opts.timeout_ms; rest_window_ms = 0;
+       work_dir = release_scratch n;
+       entry_path = Result.value (Project.entry c.proj) ~default:""; grant_caps = opts.grant_caps; follow_s = opts.follow_s }
+
+(** How the deploy is carried out on the cluster backend, for the plan. *)
+let render_segments c (segs : segment list) : string =
+  let b = Buffer.create 256 in
+  Buffer.add_string b "\n6. Through the control plane\n";
+  List.iteri (fun i seg ->
+      match seg with
+      | Release { pools; topology } ->
+        Printf.bprintf b "  %d. a release (no ssh): %s%s\n" (i + 1)
+          (if pools = [] then "" else "hot patch of pool(s) " ^ String.concat ", " (List.map (fun (pp : Deploy_plan.pool_plan) -> pp.pp_pool) pools))
+          (if topology then (if pools = [] then "" else ", then ") ^ "the topology" else "")
+      | Process (pp, why) ->
+        Printf.bprintf b "  %d. NEEDS SSH (the process backend, D38): restart pool %s on %s (%s)\n" (i + 1) pp.pp_pool
+          (match nodes_of_pool c pp.pp_pool with
+           | [] -> "(no hosts)"
+           | ns -> String.concat ", " (List.map (fun (n : Reconcile.ssh_node) -> n.sn.Hosts.ssh) ns))
+          (String.concat "; " why))
+    segs;
+  if List.for_all (function Release _ -> true | Process _ -> false) segs then
+    Buffer.add_string b "  every step goes through the control plane; nothing needs ssh\n";
+  Buffer.contents b
+
+(** The plan and the cluster's view, for both [--plan] and a deploy. A
+    control plane that does not answer (nothing runs yet: the first deploy,
+    all restarts over ssh) is planned as no node running; a release then
+    waits for it to answer ([Cluster_deploy.prepare]). *)
+let cluster_plan c ~(opts : opts) =
+  let* eps = control_endpoints c.t in
+  let head =
+    match Cluster_deploy.status eps with
+    | Ok s -> s
+    | Error m ->
+      Printf.eprintf "note: %s; planning as if no node runs\n%!" m;
+      Cluster_deploy.no_status
+  in
+  let* (plan, artifacts, derived, pflags) =
+    make_plan ~status:(fun () -> cluster_node_status c head) c ~grant_caps:opts.grant_caps ~compact:opts.compact in
+  Ok (eps, head, plan, artifacts, derived, pflags)
+
+(** [forge deploy --plan] on the cluster backend: the plan, then each release
+    it would sign, in full (each saved under the work directory). A release's
+    seq and parent are taken again when it is sent (the clock, the leader's
+    head then), and its signature with them. *)
+let plan_cluster c ~(opts : opts) : (string, string) result =
+  let* (eps, head, plan, artifacts, _, _) = cluster_plan c ~opts in
+  let b = Buffer.create 4096 in
+  Buffer.add_string b (Deploy_plan.render plan);
+  let segs = segments plan in
+  Buffer.add_string b (render_segments c segs);
+  if head.Cluster_deploy.leader = "" then Buffer.add_string b "  control plane: no candidate answered\n"
+  else Printf.bprintf b "  control plane: leader %s, head release %d (%s)\n" head.leader head.head_seq head.state;
+  let* _ =
+    List.fold_left (fun acc seg ->
+        let* (head, n) = acc in
+        match seg with
+        | Process _ -> Ok (head, n)
+        | Release { pools; topology } ->
+          let* sp = release_spec c ~opts ~eps ~artifacts ~n pools ~topology in
+          let r = Cluster_deploy.build_release sp ~head in
+          remove_scratch n;
+          let* r = r in
+          let text = Control_release.serialize r in
+          let file = Filename.concat (work_dir c) (Printf.sprintf "release-%d.txt" n) in
+          Reconcile.mkdir_p (work_dir c);
+          Out_channel.with_open_bin file (fun oc -> output_string oc text);
+          Printf.bprintf b "\n7.%d The release it would sign (%s)\n%s" n file text;
+          Ok ({ head with Cluster_deploy.head_seq = r.Control_release.seq; head_digest = Control_release.digest r }, n + 1))
+      (Ok (head, 1)) segs
+  in
+  Ok (Buffer.contents b)
+
+(** [forge deploy --env <env>] on the cluster backend: plan, confirm, then
+    each segment in order (a release sent and followed to its end; a restart
+    over ssh), then record. A halted release stops the deploy with the
+    leader's reason; nothing is rolled back. *)
+let run_cluster c ~(opts : opts) : (string, string) result =
+  let* (eps, _, plan, artifacts, derived, pflags) = cluster_plan c ~opts in
+  print_string (Deploy_plan.render plan);
+  let segs = segments plan in
+  print_string (render_segments c segs);
+  if Deploy_plan.blocked plan then
+    Error "the deploy is blocked (see \"2. Mechanism and why\"); nothing was changed"
+  else if segs = [] then Ok "nothing to deploy"
+  else if not (opts.yes || opts.confirm (Printf.sprintf "\ndeploy to %s? [y/N] " (Reconcile.env_key c.env))) then
+    Error "not deployed"
+  else begin
+    let restarted = ref [] in
+    let total = List.length segs in
+    let rec run_segs i = function
+      | [] -> Ok ()
+      | seg :: rest ->
+        let r =
+          match seg with
+          | Process (pp, why) ->
+            Printf.printf "\n==> %d of %d: pool %s over ssh (restart-class steps go through the process backend)\n%!" i total pp.pp_pool;
+            restart_pool c ~opts ~plan ~pflags ~artifacts ~derived ~restarted ~why pp
+          | Release { pools; topology } ->
+            Printf.printf "\n==> %d of %d: a release through the control plane\n%!" i total;
+            let* sp = release_spec c ~opts ~eps ~artifacts ~n:i pools ~topology in
+            Fun.protect ~finally:(fun () -> remove_scratch i) (fun () ->
+                let* (_, release) = Cluster_deploy.prepare sp in
+                List.iter (fun st -> Printf.printf "  %s\n%!" (Control_release.show_step st)) release.Control_release.steps;
+                let* () = Cluster_deploy.upload_artifacts sp release in
+                let* report = Cluster_deploy.send_and_follow sp release in
+                print_string report;
+                Ok ())
+        in
+        match r with
+        | Ok () -> run_segs (i + 1) rest
+        | Error m ->
+          Error (Printf.sprintf "%s\n(%d of %d; %s)" m i total
+                   (if rest = [] then "this was the last part" else "the later parts were not started"))
+    in
+    let* () = run_segs 1 segs in
+    let expanding = List.filter_map (fun (sp : Deploy_plan.split) ->
+        if sp.sp_phase = `Expand then Some sp.sp_protocol else None) plan.splits in
+    record c ~artifacts ~restarted:!restarted ~derived ~expanding;
+    write_pending c (Deploy_plan.pending_after plan.splits);
+    if expanding <> [] then
+      Ok (Printf.sprintf "deploy one of two (the expand of %s) is done (D21). Every node runs it now; run \
+                          `forge deploy%s` again for deploy two (the contract)."
+            (String.concat ", " expanding) (env_flag c.env))
+    else Ok "deploy complete"
+  end
+
+(** [forge deploy --plan]: print the plan; change nothing. *)
+let plan_only ?transport ?service_ctl ?layout_prefix ?(via = `Auto) ?(opts = default_opts) ~proj ~env ~grant_caps ~compact ()
+  : (string, string) result =
+  let* c = setup ?transport ?service_ctl ?layout_prefix ~proj ~env () in
+  let opts = { opts with grant_caps; compact } in
+  let* backend = choose_backend ~via c.t in
+  match backend with
+  | `Cluster -> plan_cluster c ~opts
+  | `Ssh ->
+    let* (plan, _, _, _) = make_plan c ~grant_caps ~compact in
+    Ok (Deploy_plan.render plan)
+
+(** [forge deploy --env <env>]: plan, confirm, carry out, record. *)
+let run ?transport ?service_ctl ?layout_prefix ?(via = `Auto) ~proj ~env ~(opts : opts) () : (string, string) result =
+  let* c = setup ?transport ?service_ctl ?layout_prefix ~proj ~env () in
+  let* backend = choose_backend ~via c.t in
+  match backend with
+  | `Cluster -> run_cluster c ~opts
+  | `Ssh -> run_ssh c ~opts
+
+(** The control plane's endpoints for [env], without the ssh setup (no key,
+    no host records): what [--status] and [--audit] need. *)
+let endpoints_for ~(proj : Project.project) ~env : (Cluster_deploy.endpoint list, string) result =
+  let root = proj.Project.root in
+  if not (Topology.exists ~root) then Error "the control plane belongs to a topology app (topology.toml)"
+  else
+    let env = Reconcile.existing_overlay ~root env in
+    let* t = Reconcile.load_checked ~root env in
+    control_endpoints t
+
+(** [forge deploy --status]: the leader's view of the newest release. *)
+let status_text ~proj ~env : (string, string) result =
+  let* eps = endpoints_for ~proj ~env in
+  let* s = Cluster_deploy.status eps in
+  Ok (Cluster_deploy.render_status s)
+
+(** [forge deploy --audit]: the leader's audit log, from every candidate. *)
+let audit_text ~proj ~env ~n : (string, string) result =
+  let* eps = endpoints_for ~proj ~env in
+  let* lines = Cluster_deploy.audit ~n eps in
+  Ok (if lines = [] then "the audit log is empty\n" else String.concat "" (List.map (fun l -> l ^ "\n") lines))
