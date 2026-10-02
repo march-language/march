@@ -1,0 +1,55 @@
+-- Regression: higher-order-function specialization and unboxed known calls
+-- (lib/tir/hof_spec.ml, specs/plans/2026-09-30-float-closure-unboxing.md).
+--
+-- A call that hands a lambda literal to a function which passes that closure
+-- parameter unchanged to every self-call gets a per-lambda clone of the
+-- function in which the indirect call is a direct call; a Float/Int lambda is
+-- then called through a clone emitted with native (unboxed) parameters. Every
+-- line below must print the same value compiled and interpreted; the dune
+-- rule's IR check pins which functions were and were not specialized.
+--
+-- Captured values are read at run time so constant propagation cannot turn a
+-- capturing lambda into a non-capturing one.
+mod Main do
+  needs IO.Console
+
+  -- Static closure parameter: specialized.
+  pfn apply_n(n : Int, x : Float, f : Float -> Float) : Float do
+    if n <= 0 do x else apply_n(n - 1, f(x), f) end
+  end
+
+  -- NOT static: the recursive call passes a different function, so this must
+  -- never be specialized.
+  pfn alternate(n : Int, x : Float, f : Float -> Float, g : Float -> Float) : Float do
+    if n <= 0 do x else alternate(n - 1, f(x), g, f) end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let xs = Cons(1.5, Cons(-2.25, Cons(3.0, Cons(0.125, Nil))))
+    let ns = Cons(4, Cons(-5, Cons(6, Nil)))
+    let k = List.length(ns)
+    let c = int_to_float(k)
+
+    -- List.fold_left, Float, non-capturing and capturing
+    println(float_to_string(List.fold_left(xs, 0.0, fn (s, x) -> s +. x *. 2.0)))
+    println(float_to_string(List.fold_left(xs, 1.0, fn (s, x) -> s *. c -. x)))
+    -- List.fold_left, Int, capturing
+    println(int_to_string(List.fold_left(ns, 0, fn (s, x) -> s * k + x)))
+    -- List.map (TRMC splits it into an entry and a loop; both specialize)
+    println(float_to_string(List.fold_left(List.map(xs, fn x -> x *. c), 0.0, fn (s, x) -> s +. x)))
+    -- List.filter with a Float predicate
+    println(int_to_string(List.length(List.filter(xs, fn x -> x > 0.5))))
+    -- The same lambda value at two call sites
+    let dbl = fn x -> x *. 2.0
+    println(float_to_string(apply_n(3, 1.0, dbl)))
+    println(float_to_string(apply_n(4, 1.0, dbl)))
+    -- A user HOF with a capturing lambda
+    println(float_to_string(apply_n(5, 1.0, fn x -> x +. c)))
+    -- Not static: stays generic, still correct
+    println(float_to_string(alternate(5, 1.0, fn x -> x *. 2.0, fn x -> x +. c)))
+    -- An identity-like lambda that returns its accumulator
+    println(float_to_string(List.fold_left(xs, 7.5, fn (s, _x) -> s)))
+    -- Empty list
+    println(float_to_string(List.fold_left(Nil, 2.5, fn (s, x) -> s +. x)))
+  end
+end
