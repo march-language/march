@@ -870,13 +870,13 @@ git log is authoritative for exact commits.
   than before. Behaviour, trace output and leak accounting are unchanged. It is
   off for wasm and sanitizer builds, and `MARCH_NO_INLINE_RC=1` turns it off.
 - **Float lambdas passed to `List.fold_left`, `List.map` and similar are up to
-  22× faster when compiled.** A call that hands a lambda to a function which
+  25× faster when compiled.** A call that hands a lambda to a function which
   passes it straight through its own recursion (`fold_left`, `map`, `filter`,
   `filter_map`, `find`, `any`, `all`, and your own functions written the same
   way) now gets a copy of that function in which the lambda is called directly,
   and usually inlined, instead of through a closure that boxes every Float.
-  `List.fold_left` over 2M Floats takes about 9 ms instead of 190 ms, and
-  `List.map` about 66 ms instead of 190 ms. Results are unchanged. It is off
+  `List.fold_left` over 2M Floats takes about 4.5 ms instead of 113 ms, and
+  `List.map` about 55 ms instead of 132 ms. Results are unchanged. It is off
   under `--hot-reload`, and `MARCH_NO_HOF_SPEC=1` turns it off.
 - **`NativeArray.fold_*` with a lambda is up to 67× faster when compiled.** A fold
   whose callback is a lambda written at the call site, with an `Int` or `Float`

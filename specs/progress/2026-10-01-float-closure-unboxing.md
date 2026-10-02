@@ -49,15 +49,13 @@ CAS-key tag in `bin/main.ml`.
   corpus baseline gaining the new fixture's two lines; regenerated.
 - Benchmarks, same compiler with the pass on and off: `list_ops` 1.03×,
   `tree_transform` 0.98×, `binary_trees` 1.03×, all noise at load ~10.
-  `bench/float_closure_calls.march`: Float `fold_left` 22.6×, Float `map` 2.9×.
+  `bench/float_closure_calls.march`: Float `fold_left` 22.6×, Float `map` 2.9×
+  before the inline refcount fast path (#750); after rebasing onto it, Float
+  `fold_left` 25× (4.5 ms, within 1.4× of the hand-written loop) and `map` 2.4×.
 - Compile time (`--emit-llvm`, 4 programs × 3 rounds): +0.1%.
 
 ## Not done
 
-- The spec's "within 2× of the hand-written loop" target: Float `fold_left` is
-  8.5 ms against 2.6 ms. The rest is a per-iteration closure refcount increment
-  (a runtime call) and the yield check; see
-  `specs/plans/2026-09-30-inline-rc-fast-path.md`.
 - HOFs whose callback reaches a local helper (`each`, `scan_left`, `zip_with`)
   are not specialized.
 - Hot reload: the pass is simply off under `--hot-reload`.

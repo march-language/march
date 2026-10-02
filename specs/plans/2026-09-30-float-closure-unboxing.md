@@ -37,15 +37,13 @@ Where it differs from the design below, on purpose:
   nothing.
 
 Measured (`bench/float_closure_calls.march`, M3 Max, best of 3 runs, same
-compiler with the pass on and off): Float `fold_left` 192.3 ms to 8.5 ms
-(22.6×), Float `map` 192.0 ms to 65.6 ms (2.9×), Int `fold_left` 11.4 ms to
-10.2 ms. The 2× target against the hand-written loop is **not** met: Float
-`fold_left` is 8.5 ms against 2.6 ms. The remaining cost is one closure
-refcount increment per iteration (a runtime call; it is balanced, not a leak)
-plus the scheduler yield check. The inline RC fast path
-(`specs/plans/2026-09-30-inline-rc-fast-path.md`) is the natural next step for
-it. `map` stays slower than `fold_left` because a `List(Float)` stores its
-elements boxed.
+compiler with the pass on and off), on main after the inline refcount fast path
+(#750) landed: Float `fold_left` 112.7 ms to 4.5 ms (25×), Float `map` 132.3 ms
+to 54.9 ms (2.4×), Int `fold_left` 5.7 ms to 4.4 ms. The 2× target against the
+hand-written loop **is met**: Float `fold_left` is 4.5 ms against 3.3 ms (1.4×).
+Before #750 it was 8.5 ms against 2.6 ms (3.3×); the remaining cost then was one
+closure refcount call per iteration, which the fast path inlined. `map` stays
+slower than `fold_left` because a `List(Float)` stores its elements boxed.
 
 ## Problem
 

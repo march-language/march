@@ -356,7 +356,20 @@ Checksums match.
 
 The hand-written loops are unchanged (Float 2.6 ms, Int 2.4 ms). The specialized
 Float fold has no boxing and no call left; the remaining gap is one closure
-refcount increment per iteration plus the yield check. `map` stays slower
+refcount increment per iteration plus the yield check.
+
+**Run 3 (2026-10-02), rebased onto main with the inline refcount fast path
+(#750):** same method, best of 3.
+
+| case | off ms | on ms | speedup |
+|---|---:|---:|---:|
+| Float `List.fold_left` through a closure | 112.72 | 4.46 | 25.3× |
+| Float `List.map` through a closure | 132.27 | 54.85 | 2.4× |
+| Int `List.fold_left` through a closure | 5.72 | 4.40 | 1.3× |
+| hand-written Float fold (no closure) | 3.38 | 3.29 | — |
+
+The specialized Float fold is now within 1.4× of the hand-written loop: #750
+inlined the per-iteration closure refcount call that made up the gap. `map` stays slower
 because a `List(Float)` stores its elements boxed.
 
 ## bench/array_sort.march — NativeArray.sort_int vs List.sort_by
