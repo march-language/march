@@ -2375,11 +2375,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── TRMC hole allocation / hole fill ──────────────────────────────── *)
   (* [EAllocHole (ty, filled, hole)] is [EAlloc] with field [hole] left
-     UNWRITTEN.  [march_alloc] is a calloc, so the hole reads as 0 until
-     [ESetField] fills it, and IS_HEAP_PTR(0) is false — an RC op or deep-drop
-     that reaches an unfilled hole is a no-op rather than a wild dereference.
-     That is the property the whole TRMC scheme leans on for the window between
-     allocation and fill. *)
+     UNFILLED by a value.  [emit_alloc_hole] stores null into the slot on every
+     path ([march_alloc] is a plain malloc, not a calloc, so nothing else would
+     zero it), so the hole reads as 0 until [ESetField] fills it, and
+     IS_HEAP_PTR(0) is false — an RC op or deep-drop that reaches an unfilled
+     hole is a no-op rather than a wild dereference.  That is the property the
+     whole TRMC scheme leans on for the window between allocation and fill. *)
   | Tir.EAllocHole (tok, Tir.TCon (ctor, _), args, hole) ->
     Llvm_emit_alloc.emit_alloc_hole ~emit_atom ctx tok ctor args hole
 

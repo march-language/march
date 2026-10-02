@@ -12758,6 +12758,45 @@ let test_compiled_int_overflow_parity () =
                [true, true]"
     ()
 
+(** TRMC's EAllocHole on the FRESH-allocation path, after the allocator's free
+    lists have been filled with freed cons cells.  march_alloc is a plain
+    malloc (2026-10-02; it was a calloc), so a fresh hole cell's slot holds
+    the previous tenant's stale child pointer unless the emitter clears it --
+    the clearing store is pinned structurally by test_trmc's
+    "hole slot cleared at alloc" case; this is the end-to-end witness that
+    the fresh path (a SHARED scrutinee forces it: `shared` is held by main
+    across both copies, so the reuse token is never unique) builds the right
+    list after heap churn, with a drop (the shared scrutinee's decrc) landing
+    inside every hole's unfilled window.  Expected output is the
+    interpreter's. *)
+let test_compiled_trmc_hole_fresh_after_churn () =
+  assert_compiled_interp_parity
+    ~name:"march_trmc_hole_fresh"
+    ~src:"mod TrmcHoleFresh do\n\
+    \  needs IO.Console\n\
+    \  pfn churn(n : Int) : Int do\n\
+    \    let xs = List.map(List.range(0, n), fn i -> Cons(i, Cons(i + 1, Nil)))\n\
+    \    List.length(xs)\n\
+    \  end\n\
+    \  @[no_warn_recursion]\n\
+    \  pfn copy(xs : List(Int)) : List(Int) do\n\
+    \    match xs do\n\
+    \      Nil -> Nil\n\
+    \      Cons(h, t) -> Cons(h, copy(t))\n\
+    \    end\n\
+    \  end\n\
+    \  pfn sum(xs : List(Int)) : Int do List.fold_left(xs, 0, fn (a, b) -> a + b) end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let dropped = churn(40000)\n\
+    \    let shared = List.range(0, 20000)\n\
+    \    let a = copy(shared)\n\
+    \    let b = copy(shared)\n\
+    \    println([dropped, List.length(a), sum(a), List.length(b), sum(b), sum(shared)])\n\
+    \  end\n\
+     end\n"
+    ~expected:"[40000, 20000, 199990000, 20000, 199990000, 199990000]"
+    ()
+
 (** Lazy normalisation (2026-10-02, specs/progress/2026-10-02-lazy-int63-
     normalisation.md): compiled `+ - *` / negate leave their i64 result BARE
     and a user function returns it bare; the 63-bit reduction happens where
@@ -16656,6 +16695,8 @@ let codegen_suites =
             test_compiled_int_overflow_parity;
           Alcotest.test_case "compiled Int lazy 63-bit normalisation: every observation point (overflow parity)" `Quick
             test_compiled_int_overflow_lazy_norm_parity;
+          Alcotest.test_case "compiled TRMC hole fresh path after heap churn (march_alloc is malloc)" `Quick
+            test_compiled_trmc_hole_fresh_after_churn;
           Alcotest.test_case "compiled int_shl/int_shr/int_pow range panics match interpreter" `Quick
             test_compiled_int_shift_range_panics;
           Alcotest.test_case "compiled IOList deep-tree flatten parity (stack-safe)" `Slow

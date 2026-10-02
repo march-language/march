@@ -95,8 +95,10 @@ scheme these slots share:
     (((uintptr_t)(p) & 1u) == 0 && (uintptr_t)(p) >= 4096u && (intptr_t)(p) > 0)
 ```
 
-`march_alloc` (backed by `calloc`) always returns an address at least
-8-byte-aligned, so a real heap pointer's low bit is always `0`. An immediate
+`march_alloc` (a plain `malloc`/`mi_malloc`; it writes the 16-byte header
+and nothing else, so every payload field is the allocating code's to store)
+always returns an address at least 8-byte-aligned, so a real heap pointer's
+low bit is always `0`. An immediate
 scalar is tagged `(n << 1) | 1`, always odd. The two representations can
 never collide.
 
