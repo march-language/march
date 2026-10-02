@@ -418,7 +418,9 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
     ctx.Llvm_ctx.tco_in_tail    <- true;
     ctx.Llvm_ctx.tco_stack_save <- stack_save;
     ctx.Llvm_ctx.tco_dup_bound  <- Llvm_tco.dup_bound_vars fn.Tir.fn_body;
+    ctx.Llvm_ctx.norm_ret_pos   <- true;
     let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
+    ctx.Llvm_ctx.norm_ret_pos   <- false;
     (* Clear TCO state before emitting any other function. *)
     ctx.Llvm_ctx.tco_fn_name <- None;
     ctx.Llvm_ctx.tco_stack_save <- "";
@@ -437,7 +439,11 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
        non-TCO functions.  This fires once per call, counting every function
        invocation against the budget. *)
     if not is_leaf then Llvm_ctx.emit_reduction_check ctx;
+    (* The body's tail value goes straight to `ret`, which returns an Int
+       BARE under lazy normalisation ([Llvm_ctx.emit_wrap_int63]). *)
+    ctx.Llvm_ctx.norm_ret_pos <- true;
     let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
+    ctx.Llvm_ctx.norm_ret_pos <- false;
     if ret_ty = "void" then
       Llvm_ctx.emit_term ctx "ret void"
     else begin

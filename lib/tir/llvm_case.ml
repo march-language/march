@@ -117,6 +117,16 @@ let finish_ptr_merge ctx ~arm_tys ~loaded =
     must reach it.  Anything else (a call, a variable, a reuse, a generic
     payload, a closure field) answers [None] and keeps the `ptr` slot.
 
+    The same prediction types the slot `i64` when every reaching arm's tail
+    is syntactically an Int/Bool scalar: an Int/Bool literal, a variable of
+    that type, or an [EApp] of a builtin or top-level function returning
+    one.  That keeps a scalar join out of the tag/untag round trip -- which
+    matters beyond the saved instructions: under lazy normalisation
+    ([Llvm_ctx.emit_wrap_int63]) `fib(n-1) + fib(n-2)` must reach `ret`
+    bare for LLVM's accumulator TRE to fire, and a `ptr` slot would put a
+    sign-truncating shift pair in between.  A wrong i64 prediction is
+    still well-typed: the store coerces through the conditional untag.
+
     Safety if the prediction were ever wrong: every store goes through
     [Llvm_ctx.coerce] to the struct type, whose ptr->struct arm unboxes a
     boxed cell of that same type, so a mismatch is still well-typed IR. *)
@@ -142,7 +152,35 @@ and predicted_unboxed_tail ctx (e : Tir.expr) : string option =
     predicted_unboxed_join ctx
       (List.map (fun (br : Tir.branch) -> br.Tir.br_body) brs
        @ Option.to_list d)
+  | Tir.EAtom (Tir.ALit (March_ast.Ast.LitInt _ | March_ast.Ast.LitBool _)) ->
+    Some "i64"
+  | Tir.EAtom (Tir.AVar v) when scalar_i64_ty v.Tir.v_ty -> Some "i64"
+  (* The overloaded arithmetic operators carry no useful return type in
+     [v_ty] (they are Int-or-Float); the operand says which.  A comparison
+     or boolean connective is a Bool whatever its operands. *)
+  | Tir.EApp (f, a :: _)
+    when List.mem f.Tir.v_name ["+"; "-"; "*"; "/"; "%"] ->
+    (match a with
+     | Tir.ALit (March_ast.Ast.LitInt _) -> Some "i64"
+     | Tir.AVar v when v.Tir.v_ty = Tir.TInt -> Some "i64"
+     | _ -> None)
+  | Tir.EApp (f, _)
+    when List.mem f.Tir.v_name ["=="; "!="; "<"; "<="; ">"; ">="; "&&"; "||"] ->
+    Some "i64"
+  | Tir.EApp (f, _)
+    when (match f.Tir.v_ty with
+          | Tir.TFn (_, r) -> scalar_i64_ty r
+          | _ -> false)
+      && (Llvm_builtins.is_builtin_fn f.Tir.v_name
+          || Hashtbl.mem ctx.Llvm_ctx.top_fns f.Tir.v_name)
+      && not (Hashtbl.mem ctx.Llvm_ctx.var_slot
+                (Llvm_ctx.llvm_name f.Tir.v_name)) ->
+    Some "i64"
   | _ -> None
+
+(** A TIR type whose register representation is a bare i64 scalar. *)
+and scalar_i64_ty (t : Tir.ty) : bool =
+  match t with Tir.TInt | Tir.TBool -> true | _ -> false
 
 let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
   let (scrut_ty, scrut_val) = emit_atom ctx scrut_atom in
