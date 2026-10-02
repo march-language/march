@@ -95,7 +95,14 @@ static void march_debug_report_oom(const char *where, int64_t requested) {
 static FILE            *gc_trace_file  = NULL;
 static pthread_mutex_t  gc_trace_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* 0 = not yet checked, 1 = enabled, -1 = disabled */
-static int              gc_trace_state = 0;
+/* Exported (not static) so the compiler's inline refcount fast path
+ * (lib/tir/llvm_rc_inline.ml) can read it: 0 = not yet resolved, -1 = off,
+ * 1 = on. The fast path only runs when it is -1; anything else takes the
+ * out-of-line call, which resolves it and emits trace events. Resolved eagerly
+ * in spawn_main_impl so the first refcount op of a program is not the one that
+ * pays for it. */
+int march_gc_trace_state = 0;
+#define gc_trace_state march_gc_trace_state
 
 static void gc_trace_init_locked(void) {
     if (getenv("MARCH_TRACE_GC") == NULL) { gc_trace_state = -1; return; }
@@ -712,6 +719,39 @@ int64_t march_decrc_local_freed(void *p) {
         return 1;
     }
     return 0;
+}
+
+/* Last-reference tails for the compiler's inline refcount fast path
+ * (lib/tir/llvm_rc_inline.ml). The inline code has ALREADY decremented the
+ * count with an atomic sub and seen [prev] <= 1, so these must not decrement
+ * again: they run exactly what march_decrc / march_decrc_local run at that
+ * point. [prev] == 1 means the caller held the last reference and the object is
+ * solely owned; [prev] < 1 is an underflow. The fast path only runs with GC
+ * tracing resolved off, so no trace event is due here. */
+void march_rc_last_atomic(void *p, int64_t prev) {
+    if (prev == 1) {
+        int32_t tag = ((march_hdr *)p)->tag;
+        if (tag == MARCH_STRING_TAG && str_stats_on())
+            str_stats_free(((march_string *)p)->len);
+        march_run_resource_dtor(p);
+        MARCH_FREE_BUMP();
+        free(p);
+        return;
+    }
+    fprintf(stderr, "march: RC underflow (rc was %lld) at %p — aborting\n",
+            (long long)prev, p);
+    abort();
+}
+
+void march_rc_last_local(void *p, int64_t prev) {
+    if (prev == 1) {
+        march_run_resource_dtor(p);
+        MARCH_FREE_BUMP();
+        free(p);
+        return;
+    }
+    fprintf(stderr, "march: local RC underflow at %p — aborting\n", p);
+    abort();
 }
 
 /* ── IOList hash ─────────────────────────────────────────────────────── */
@@ -3072,6 +3112,9 @@ static void spawn_main_impl(void (*fn)(void), int force_pin) {
     /* Drop privileges before the scheduler starts and before any user code
      * runs.  No-op unless built with --cap-sandbox. */
     march_sandbox_install();
+    /* Resolve the GC trace state before user code runs: the inline refcount
+     * fast path takes its out-of-line branch until it is resolved. */
+    (void)gc_trace_on();
     int expected = 0;
     if (atomic_compare_exchange_strong_explicit(
             &g_sched_initialized, &expected, 1,
