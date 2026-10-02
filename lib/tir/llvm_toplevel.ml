@@ -182,7 +182,7 @@ let native_vec_param_idxs (fn : Tir.fn_def) : int list =
            if Llvm_ctx.vec_ty_of_tir v.Tir.v_ty <> None then Some i else None)
           fn.Tir.fn_params)
 
-let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
+let emit_fn_body ~emit_expr ctx (fn : Tir.fn_def) =
   Hashtbl.clear ctx.Llvm_ctx.local_names;
   Hashtbl.clear ctx.Llvm_ctx.var_slot;
   Hashtbl.clear ctx.Llvm_ctx.var_llvm_ty;
@@ -359,8 +359,24 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
          (ashr iff odd) back to the raw i64 the body reads. *)
       let u = Llvm_ctx.coerce ctx "ptr" (Printf.sprintf "%%%s.arg" vn) "i64" in
       Llvm_ctx.emit ctx (Printf.sprintf "store i64 %s, ptr %%%s.addr" u slot)
-    end else
-      Llvm_ctx.emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty vn slot);
+    end else begin
+      (* An ERASED apply-fn param (still [TVar] after mono, e.g. a
+         let-generalized `fn (acc, x) -> acc`) may be handed a boxed Float,
+         which every closure caller keeps ([Clo_flags]: a closure call
+         consumes every heap argument EXCEPT a boxed Float). The body cannot
+         tell: [Borrow.infer_module] pins the param owned, so RC insertion
+         releases it at its last use, or at entry when unused. Take the
+         callee's own reference to a Float box here, so that release (or a
+         store, or handing it back as the result) spends a reference this
+         call owns. Any other value passes through untouched. Without it,
+         the callee's release freed a box its caller then released again
+         (specs/progress/2026-09-30-native-float-arr-fold-unused-elem-double-free.md). *)
+      if is_apply_wrapper && param_idx > 0 && ty = "ptr"
+         && (match v.Tir.v_ty with Tir.TVar _ -> true | _ -> false) then
+        Llvm_ctx.emit ctx
+          (Printf.sprintf "call void @march_clo_param_own(ptr %%%s.arg)" vn);
+      Llvm_ctx.emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty vn slot)
+    end;
     Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot ty;
     (v.Tir.v_name, slot, ty)
   ) fn.Tir.fn_params in
@@ -434,6 +450,14 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
 
 (** Return the LLVM `declare` string for a function, for use as a forward
     declaration in subsequent JIT fragments that reference it without redefining it. *)
+
+(** Emit [fn]'s definition.  [hr_cur_fn] names it only while its own body is
+    emitted, for the hot-reload self-call rule in [Llvm_emit_call]. *)
+let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
+  ctx.Llvm_ctx.hr_cur_fn <- fn.Tir.fn_name;
+  Fun.protect ~finally:(fun () -> ctx.Llvm_ctx.hr_cur_fn <- "")
+    (fun () -> emit_fn_body ~emit_expr ctx fn)
+
 let fn_declare_str (fn : Tir.fn_def) : string =
   let fn_llvm_name = Llvm_builtins.mangle_extern fn.Tir.fn_name in
   (* No ctx here (JIT forward-declare helper); the REPL never unboxes, so the
@@ -971,20 +995,12 @@ let emit_module ~emit_expr
      toolchain change, deployed by restart, and a deploy must not pause or
      migrate the actor answering SWIM pings.  Decided by loader provenance,
      see [Hot_reload.is_slot_actor_dispatch]. *)
-  let is_actor_dispatch_fn = Hot_reload.is_slot_actor_dispatch in
-  (* Program-entry functions must NEVER be reloadable slots.  The running green
-     thread's root frame is the chosen entry (`main`/`ModName.main`, emitted as
-     @march_main); swapping it while live corrupts the runtime allocator (OOM).
-     But in the standard hot-reload layout the real entry is a shim
-     (HotEntry.main → App.main), so App.main — the app's own `main` that runs the
-     never-returning accept loop — is permanently on the call stack too.  Both
-     are named `main` (bare or `.main`-suffixed), so we exclude EVERY such
-     function from the boundary, not just the single compiler-chosen entry. *)
-  let is_entry_fn (n : string) =
-    String.equal n "main"
-    || (String.length n > 5
-        && String.equal (String.sub n (String.length n - 5) 5) ".main")
-  in
+  (* The entry file's own top-level fns are bare-named too, and are slots
+     when the prefix names the entry module (2026-10-01, see
+     [Hot_reload.is_entry_file_slot]).  Program entries (`main`, `<Mod>.main`)
+     never are: the running root frame must not be swapped
+     ([Hot_reload.is_program_entry]).  All of it is [Hot_reload.is_slot_fn],
+     the one predicate the driver's slot-hash fold uses too. *)
   let hr_names =
     match hot_reload with
     | None -> Hot_reload.Name_table.build []
@@ -992,10 +1008,7 @@ let emit_module ~emit_expr
       m.Tir.tm_fns
       |> List.filter_map (fun fn ->
            let n = fn.Tir.fn_name in
-           if is_entry_fn n then None
-           else if Hot_reload.is_reloadable cfg (Llvm_ctx.module_of_name n)
-              || is_actor_dispatch_fn n
-           then Some n else None)
+           if Hot_reload.is_slot_fn cfg n then Some n else None)
       |> Hot_reload.Name_table.build
   in
   let k_table = match k_table with Some t -> t | None -> Kind.of_module m in

@@ -24,8 +24,6 @@ leader's audit log, [../progress/2026-10-01-dd-step12a-forge-cluster-backend.md]
 - A build whose hosts span two targets is refused on the cluster backend: a release names one
   patch per build. Builds per target (`build web@linux/arm64 ...`, selected by the agent's
   `HCR_INFO` target) would lift it; it touches the release format.
-- The spliced wiring's functions change hash whenever the entry file's length does:
-  [2026-10-01-control-wiring-hashes-follow-entry-file.md](2026-10-01-control-wiring-hashes-follow-entry-file.md).
 - `CtlFetch` is not in the wiring: a session message costs far more than its bytes
   ([2026-10-01-session-message-encoding-leak.md](2026-10-01-session-message-encoding-leak.md)),
   so artifacts go over the control API as raw bytes (`CAS_GET`). A byte payload type for

@@ -56,7 +56,7 @@ job below, plus `doc-lint`, passed.
 ```
 test (ubuntu) × codegen | refinecheck | compiler | rest
 test (macos, all)
-two-node (ubuntu)
+two-node (ubuntu) × 1/2 | 2/2
 bench-gate (ubuntu)
 conformance (ubuntu, macos)
 tree-sitter (ubuntu)
@@ -75,7 +75,7 @@ ocaml-build (ubuntu, macos) ─┬─ property-tests (per OS) × soundness | tir
 | `test (ubuntu, refinecheck)` | `@test/runtest-test_refinecheck`: the z3-backed refinement checker corpus. | `scripts/run-tests.sh refinecheck` (needs z3 on PATH). |
 | `test (ubuntu, compiler)` | `@test/runtest-run_compiler`: frontend, typecheck, capabilities, CAS, CLI behaviour. | `scripts/run-tests.sh compiler`. |
 | `test (ubuntu, rest)` | `MARCH_CI_RUNTEST_SPLIT=1 dune runtest`: everything else under `dune runtest` (eval, stdlib, JIT, LSP, forge, the native golden rules, snapshots, C unit tests). The env var drops exactly the three suites above; see the comment over the test runners in `test/dune`. | `dune runtest --root .` locally (without the env var, which runs the other three as well). |
-| `two-node` | The `node_discovery` soak (200 runs diffed against the golden, a torn-stdout guard) and every `test/two_node/<scenario>`: two real OS processes, a fault injected from outside, per-node goldens. | `scripts/two-node.sh <scenario>`. Two scenarios are known flaky on `main`; check `main`'s own runs before blaming your diff. A scenario that needs a helper exe (`test/hcr_deploy.exe` for the hot-deploy ones) declares it with `need_built`, and the job also builds it up front. |
+| `two-node (K/2)` | Every `test/two_node/<scenario>`, split over two shards by `scripts/two-node.sh --list K/2` (round-robin over the sorted list): two real OS processes, a fault injected from outside, per-node goldens. Shard 1 also runs the `node_discovery` soak (200 runs diffed against the golden, a torn-stdout guard). | `scripts/two-node.sh <scenario>`; `scripts/two-node.sh --list K/2` shows which shard owns it. A shard timing out with every scenario `ok` means the list outgrew the shards: add one (see the job's comment), don't raise the timeout. Two scenarios are known flaky on `main`; check `main`'s own runs before blaming your diff. A scenario that needs a helper exe (`test/hcr_deploy.exe` for the hot-deploy ones) declares it with `need_built`, and the job also builds it up front. |
 | `bench-gate` | Compiles every gated `bench/*.march` at `--opt 2`, runs it, checks the printed value. The only place benchmarks run in CI. | A benchmark stopped compiling or computes a different answer (not a timing check). |
 | `conformance (<os>)` | `@types-check` (static-semantics corpus) and `@grammar-check`, the two refinement coverage ratchets, `@vault-scale`, doc notebooks (`.scrollmd`) compile, stdlib `march>` doctests, formatting. | The step name says which. Ratchets fail when coverage drops, not just on errors. |
 | `tree-sitter` | `scripts/check-tree-sitter.sh --self-test`, then the script: `tree-sitter-march/src` regenerates byte-identical with the pinned CLI, `tree-sitter test` corpus passes, every `.scm` under `tree-sitter-march/queries/` and `zed-march/languages/march/` compiles, and every `.march` under `stdlib/ test/ examples/ bench/ specs/lang/` parses without ERROR except those in `tree-sitter-march/known-failures.txt`. | A syntax change the grammar does not cover (extend `grammar.js`, or list the file with a todo), a grammar edit without `tree-sitter generate`, a stale known-failures entry, or a query that no longer matches the grammar. |

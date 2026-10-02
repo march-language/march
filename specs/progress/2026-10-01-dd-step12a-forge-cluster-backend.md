@@ -61,13 +61,16 @@ still open is in [../todos/2026-09-28-dd-step12a-control-wiring.md](../todos/202
 
 - **A release ordered activations no node can take.** `Control_release.record_hot` answers
   the recorder's ABI_QUERY with every function of the last deployed manifest. The control
-  wiring (spliced into the entry module, outside the hot-reload prefix) has no slots, and its
-  ~80 functions change hash whenever the entry file's length changes; the release ordered
-  them and every node refused the batch (`ERR commit_partial_failure`, `err_abi` in the node
-  audit log). `Cluster_deploy.build_release` now asks the candidates for VERSIONS_DETAIL and
-  gives the recorder the manifest restricted to real slots (`restrict_manifest`), which is
-  what `forge deploy hot` activates against a real node. The hash instability is filed:
-  [../todos/2026-10-01-control-wiring-hashes-follow-entry-file.md](../todos/2026-10-01-control-wiring-hashes-follow-entry-file.md).
+  wiring (spliced into the entry module) has no slots, and on this branch's base its ~80
+  functions all changed hash on any edit to the entry file (a function's identity hashed the
+  compiler's lambda and join-point numbers); the release ordered them and every node refused
+  the batch (`ERR commit_partial_failure`, `err_abi` in the node audit log).
+  `Cluster_deploy.build_release` now asks the candidates for VERSIONS_DETAIL and gives the
+  recorder the manifest restricted to real slots (`restrict_manifest`), which is what `forge
+  deploy hot` activates against a real node. The hash instability itself was fixed on main
+  meanwhile (canonical slot hashes, the wiring kept off the boundary): after merging it, the
+  fixture pair differs in its 5 real changes only. The restriction stays: a release must not
+  order a function no node has a slot for, whatever the manifest says.
 - **A cluster member that runs no Agent held every rollout.** `ctl_ready` waited for a report
   from every live member, so the upgrade test's traffic node (a cluster member, no Agent)
   kept the leader at "waiting for every node to report". An Agent now marks itself

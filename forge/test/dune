@@ -211,8 +211,10 @@
 ; (a handler removed with no migrate_msg, so the old feeder's messages are
 ; dropped and counted) must FAIL, `live` (the role body changes; the new
 ; body spawns a task, reads the old version's Vault and starts a session of
-; its own) must PASS with the new body's answer, and so must `live` deployed through
-; the in-cluster control plane (the ref's topology from `control_v1` has a [control]
+; its own) must PASS with the new body's answer, and so must `entry_live`
+; (the same change, over `entry_v1`, made to top-level functions of the entry
+; module, which lowering names bare), and so must `live` deployed through the
+; in-cluster control plane (the ref's topology from `control_v1` has a [control]
 ; section: one signed release, no reload socket). Each case builds the old version and the
 ; patch, runs the old version's process with a reload socket, drives real
 ; sessions across a real hot deploy. test_topology_run's hermetic shape; it
@@ -233,6 +235,29 @@
      (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
       (setenv UPGRADE_FIXTURES_DIR fixtures/upgrade
        (run %{exe:test_upgrade_from.exe}))))))))
+
+; test_hcr_manifest_diff.ml: a one-line edit to a topology app's function, or
+; to a top-level function of the entry module, flags exactly that function in
+; the hot-reload manifest (forge's own Deploy_plan.fn_diff over the v1 and v2
+; patches), and every changed function is deliverable by a changed slot.
+; Generated names (`$lam<n>`) renumber on any edit and must not flag their
+; referrers. Compiles six patches; hermetic like test_upgrade_from.
+(executable
+ (name test_hcr_manifest_diff)
+ (modules test_hcr_manifest_diff)
+ (libraries march_forge alcotest unix str))
+
+(rule
+ (alias runtest)
+ (deps (source_tree %{workspace_root}/runtime) (source_tree %{workspace_root}/stdlib)
+       (source_tree %{workspace_root}/examples/topology_app) (source_tree fixtures/upgrade))
+ (action
+  (setenv MARCH_TEST_BIN %{bin:march}
+   (setenv MARCH_TEST_RUNTIME_DIR %{workspace_root}/runtime
+    (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
+     (setenv TOPOLOGY_APP_DIR %{workspace_root}/examples/topology_app
+      (setenv UPGRADE_FIXTURES_DIR fixtures/upgrade
+       (run %{exe:test_hcr_manifest_diff.exe}))))))))
 
 ; test_host_init.ml: `forge host init` (distributed-deploys build step 10b).
 ; `local`: the host script against a scratch directory (in-process, no

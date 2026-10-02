@@ -8,7 +8,8 @@
 #                                     plane and prints the release it would sign
 #   forge deploy --env local --yes    builds, classifies, writes and signs the
 #                                     release, uploads the patch, sends it and
-#                                     follows it to "complete", with no ssh
+#                                     follows it to "complete", with no ssh, and
+#                                     records the new version as deployed
 #   forge deploy --env local --status the leader's view: every node holds it
 #   forge deploy --env local --audit  the release accepted and a step ordered
 #                                     on every node, from the candidates' logs
@@ -130,9 +131,10 @@ grep -q "step 2 of 2" "$work/deploy.out" || fail "no per-step progress: $(cat "$
 for n in a b c; do
   [ "$(ctl_node_deploys "$n")" = 1 ] || fail "node $n applied the release $(ctl_node_deploys "$n") times, not once"
 done
-# What forge recorded is the new version: a second deploy has nothing to do.
-(cd "$proj" && forge deploy --env local --yes) > "$work/deploy2.out" 2>&1 || { cat "$work/deploy2.out" >&2; fail "the second deploy failed"; }
-grep -q "nothing to deploy" "$work/deploy2.out" || fail "the second deploy was not a no-op: $(cat "$work/deploy2.out")"
+# What forge recorded is the new version (the next plan's baseline). Checked
+# on the file, not with a second deploy: every deploy rebuilds the patch.
+cmp -s "$dep/shared.hcr_manifest" "$work/v1/v1.so.hcr_manifest" && fail "forge did not record the deployed manifest"
+grep -q "^Ver.version " "$dep/shared.hcr_manifest" || fail "the recorded manifest is not a manifest: $(head -3 "$dep/shared.hcr_manifest")"
 
 (cd "$proj" && forge deploy --env local --status) > "$work/status.out" 2>&1 || { cat "$work/status.out" >&2; fail "--status failed"; }
 grep -q ": complete" "$work/status.out" || fail "--status does not show the release complete: $(cat "$work/status.out")"

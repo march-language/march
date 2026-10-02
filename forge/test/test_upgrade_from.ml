@@ -18,6 +18,11 @@
       answer: the body is called from the generated (non-reloadable) entry,
       and the patch runs green threads and sessions against the host
       process's runtime (2026-09-25, the patch-carries-its-own-runtime fix).
+    - entry_live (over entry_v1, v1 with the role body and its task
+      function at the TOP of the entry module): live's change, made to
+      functions lowering names bare (`serve_one`, `nested`). Until
+      2026-10-01 a bare name was never a dispatch slot, so nothing was
+      activated and the traffic got the old body's answer.
 
     Each case makes a git repository from v1 (the ref), copies the new
     version over its working tree, and runs the real forge. Hermetic like
@@ -64,17 +69,19 @@ let sh ~dir cmd =
   let rc = Sys.command (Printf.sprintf "cd %s && %s" (Filename.quote dir) cmd) in
   if rc <> 0 then Alcotest.failf "in %s: `%s` exited %d" dir cmd rc
 
-(** A git repository holding v1 (with [base]'s files copied over it) as its
-    one commit, with [version]'s files copied over the working tree. *)
-let project ?base version =
+(** A git repository holding [base] (fixture directories copied in order,
+    v1 by default) as its one commit, with [versions]' files copied over the
+    working tree in order. *)
+let project ?(base = [ "v1" ]) versions =
   let fx = getenv_abs "UPGRADE_FIXTURES_DIR" in
   let dir = Filename.temp_dir "upgrade_app_" "" in
   (* dune stages the fixtures read-only and cp keeps the mode: the copy
      must be writable for the new version to be copied over it. *)
-  sh ~dir (Printf.sprintf "cp -R %s/. . && chmod -R u+w . && rm -rf .forge .march" (Filename.quote (Filename.concat fx "v1")));
-  Option.iter (fun b -> sh ~dir (Printf.sprintf "cp -R %s/. . && chmod -R u+w ." (Filename.quote (Filename.concat fx b)))) base;
+  let overlay v = sh ~dir (Printf.sprintf "cp -R %s/. . && chmod -R u+w ." (Filename.quote (Filename.concat fx v))) in
+  List.iter overlay base;
+  sh ~dir "rm -rf .forge .march";
   sh ~dir "git init -q && git add -A && git -c user.email=forge-test@example.invalid -c user.name=forge-test commit -q -m v1";
-  sh ~dir (Printf.sprintf "cp -R %s/. . && chmod -R u+w ." (Filename.quote (Filename.concat fx version)));
+  List.iter overlay versions;
   dir
 
 (** Run `forge test --upgrade-from HEAD` in [dir]: its exit code and output. *)
@@ -115,7 +122,7 @@ let after_run dir =
     (read_file (Filename.concat dir ".forge/upgrade/.gitignore"))
 
 let test_clean_upgrade_passes () =
-  let dir = project "good" in
+  let dir = project [ "good" ] in
   let (rc, out) = run_upgrade dir in
   if rc <> 0 then Alcotest.failf "expected the clean upgrade to pass, forge exited %d:\n%s" rc out;
   List.iter (expect out)
@@ -129,7 +136,7 @@ let test_clean_upgrade_passes () =
   after_run dir
 
 let test_live_upgrade_passes () =
-  let dir = project "live" in
+  let dir = project [ "live" ] in
   let (rc, out) = run_upgrade dir in
   if rc <> 0 then Alcotest.failf "expected the live upgrade to pass, forge exited %d:\n%s" rc out;
   List.iter (expect out)
@@ -155,7 +162,7 @@ let test_live_upgrade_passes () =
    session); the traffic node, a cluster member that runs no Agent, must not
    hold the rollout. *)
 let test_control_plane_upgrade_passes () =
-  let dir = project ~base:"control_v1" "live" in
+  let dir = project ~base:[ "v1"; "control_v1" ] [ "live" ] in
   let extra = [ ("MARCH_PLACEMENT_SETTLE_MS", "1500"); ("MARCH_PLACEMENT_TICK_MS", "200");
                 ("MARCH_CONTROL_POLL_MS", "200"); ("MARCH_CONTROL_AGENT_GRACE_MS", "3000") ] in
   let (rc, out) = run_upgrade ~extra dir in
@@ -175,8 +182,29 @@ let test_control_plane_upgrade_passes () =
   if contains out "Connecting to app-" then Alcotest.failf "a process was deployed through its socket:\n%s" out;
   after_run dir
 
+(* The role body and its task function are top-level functions of the entry
+   module (bare TIR names). The base answers 1002 for an Ask of 1000; only
+   the new `serve_one` answers 1111, and only by running the new `nested` in
+   a task it spawns: both must have been activated on the running process. *)
+let test_entry_module_upgrade_passes () =
+  let dir = project ~base:[ "v1"; "entry_v1" ] [ "live"; "entry_live" ] in
+  let (rc, out) = run_upgrade dir in
+  if rc <> 0 then Alcotest.failf "expected the entry-module upgrade to pass, forge exited %d:\n%s" rc out;
+  List.iter (expect out)
+    [ "activated: serve_one"; "activated: nested";
+      "upgrade traffic: a session on the old code ok";
+      "upgrade traffic: a session across the upgrade ok";
+      "upgrade live: new code sees base=100, its own session answered 9";
+      "upgrade traffic: a session on new code that spawns a task, reads the old Vault and starts a session ok";
+      "upgrade from HEAD passed: 1 test(s), 1 process(es), nothing dropped" ];
+  (* Nothing of the base's but the two changed functions: the canonical
+     slot hashes keep a renumbered lambda from flagging its referrers. *)
+  List.iter (fun f -> if contains out ("activated: " ^ f) then Alcotest.failf "%s was activated:\n%s" f out)
+    [ "start"; "feed"; "Tally_dispatch" ];
+  after_run dir
+
 let test_dropping_upgrade_fails () =
-  let dir = project "drops" in
+  let dir = project [ "drops" ] in
   let (rc, out) = run_upgrade dir in
   Alcotest.(check int) "forge exits 1" 1 rc;
   List.iter (expect out)
@@ -195,7 +223,7 @@ let test_dropping_upgrade_fails () =
    Before the fix the compiled match panicked "non-exhaustive pattern match"
    and killed the process. *)
 let test_migrating_upgrade_passes () =
-  let dir = project "migrates" in
+  let dir = project [ "migrates" ] in
   let (rc, out) = run_upgrade dir in
   if rc <> 0 then Alcotest.failf "expected the migrating upgrade to pass, forge exited %d:\n%s" rc out;
   List.iter (expect out)
@@ -225,6 +253,7 @@ let () =
         Alcotest.test_case "a clean upgrade passes (sessions complete, nothing dropped)" `Slow test_clean_upgrade_passes;
         Alcotest.test_case "a patch that spawns a task, reads the old Vault and starts a session passes" `Slow test_live_upgrade_passes;
         Alcotest.test_case "the same patch through the in-cluster control plane passes" `Slow test_control_plane_upgrade_passes;
+        Alcotest.test_case "a patch to the entry module's own top-level functions is hot deployed" `Slow test_entry_module_upgrade_passes;
         Alcotest.test_case "an upgrade that drops messages fails on the counters" `Slow test_dropping_upgrade_fails;
         Alcotest.test_case "an upgrade that removes a handler and converts it with migrate_msg passes" `Slow test_migrating_upgrade_passes;
         Alcotest.test_case "not a topology app: refused" `Quick test_refuses_without_a_topology;

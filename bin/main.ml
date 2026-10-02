@@ -902,11 +902,109 @@ let print_refine_postconditions ~filename ~user_files desugared =
    not.  Filled after the entry file is parsed; carried as the config's
    `includes`. *)
 let hr_entry_nested : string list ref = ref []
+(* Whether the prefix names the entry module, which puts the entry file's own
+   top-level fns on the boundary too (March_tir.Hot_reload.is_entry_file_slot;
+   lowering records which bare names those are).  Set with [hr_entry_nested]. *)
+let hr_entry_top_level = ref false
 let hr_config () =
   Option.map (fun p ->
       let cfg = March_tir.Hot_reload.default_config p in
-      { cfg with March_tir.Hot_reload.includes = !hr_entry_nested })
+      { cfg with March_tir.Hot_reload.includes = !hr_entry_nested;
+                 entry_top_level = !hr_entry_top_level })
     !hot_reload_prefix
+
+(* Hot Code Reload: turn [hr_impl_hashes] (per-fn, non-transitive CAS hashes
+   of [tir] and [pre_opt]) into the reload identities the baseline publishes
+   and the .hcr_manifest lists.  Both the --compile and the --emit-llvm path
+   call this, so the hashes an .ll carries are the ones a build publishes.
+
+   1. Every fn's own hash is CANONICAL: the pretty-printed definition with
+      each compiler-counter name (`$lam39788$apply$4781`, `$jp17442`, `$t12`,
+      the inliner's `_i<n>`, an unsolved type variable `'_53109`) replaced by
+      its order of first appearance in that definition.  Those names come
+      from global counters, so a one-token edit anywhere renumbers every
+      later one, and hashing them flagged every function that merely
+      REFERENCES a lambda as changed (`Front.start`, `main`;
+      specs/progress/2026-10-01-hcr-topology-app-functions-no-dispatch-slots.md):
+      an unslotted `main` "changing" made `forge deploy` plan a restart for
+      any edit.  Numbering by first appearance (not collapsing every name to one
+      placeholder) keeps two distinct temporaries distinct, so swapping them
+      is still a change.  A renumbering is invisible; a real change (a
+      literal, a call, a type) is not.
+
+   2. A slot's identity folds in the bare-named helpers only it reaches
+      (2026-09-25).  Lowering lifts every lambda a function builds into a
+      separate bare-named function (`$lam<n>$apply$<k>`, join points), and
+      the own hash is deliberately non-transitive (a leaf change must not
+      flag the whole caller chain up to `main`), so a change INSIDE a lambda,
+      which is where every session body lives, left the slot's hash untouched
+      and `forge deploy hot` answered "no changes" for it.  An unslotted bare
+      fn reaches a running program only through the activation of a slot that
+      calls it, so fold their hashes in, transitively, stopping at other slots
+      and cycles.  A stdlib actor's glue is bare too but the stdlib's, and is
+      not folded.  Each root is folded with its own visited set, so the
+      result does not depend on the order roots are processed. *)
+let hr_slot_hashes ~(cfg : March_tir.Hot_reload.config)
+    ~(pre_opt : March_tir.Tir.tir_module) (tir : March_tir.Tir.tir_module)
+    (hr_impl_hashes : (string, string) Hashtbl.t) : unit =
+  let module HR = March_tir.Hot_reload in
+  let fn_tbl = Hashtbl.create 1024 in
+  List.iter (fun (fd : March_tir.Tir.fn_def) -> Hashtbl.replace fn_tbl fd.March_tir.Tir.fn_name fd) tir.March_tir.Tir.tm_fns;
+  let all_names = Hashtbl.fold (fun n _ acc -> n :: acc) fn_tbl [] in
+  let counter_re = Str.regexp "\\$\\([A-Za-z_]*\\)[0-9]+\\|_i[0-9]+\\|'_[0-9]+" in
+  let canon_text fd =
+    let seen = Hashtbl.create 16 in
+    Str.global_substitute counter_re (fun text ->
+        let tok = Str.matched_string text in
+        let k = match Hashtbl.find_opt seen tok with
+          | Some k -> k
+          | None -> let k = Hashtbl.length seen in Hashtbl.replace seen tok k; k in
+        let stem = String.sub tok 0
+            (let i = ref (String.length tok) in
+             while !i > 0 && tok.[!i - 1] >= '0' && tok.[!i - 1] <= '9' do decr i done;
+             !i) in
+        Printf.sprintf "%s#%d" stem k)
+      (March_tir.Pp.string_of_fn_def fd) in
+  let canon fd = March_cas.Blake3.hash_string (canon_text fd) in
+  let own = Hashtbl.create 1024 in
+  let own_of n fd =
+    match Hashtbl.find_opt own n with
+    | Some h -> h
+    | None -> let h = canon fd in Hashtbl.replace own n h; h in
+  let is_slot = HR.is_slot_fn cfg in
+  let rec fold_deps visiting fd =
+    March_cas.Scc.deps_of all_names fd
+    |> List.filter (fun c ->
+         not (List.mem c visiting)
+         && String.equal (HR.module_of_name c) ""
+         && not (is_slot c)
+         && not (HR.is_stdlib_actor_fn c))
+    |> List.filter_map (fun c ->
+         match Hashtbl.find_opt fn_tbl c with
+         | Some cfd ->
+           let sub = fold_deps (c :: visiting) cfd in
+           Some (March_cas.Blake3.hash_string (String.concat "" (own_of c cfd :: sub)))
+         | None -> None)
+    |> List.sort String.compare in
+  (* An fn the optimizer removed keeps a manifest line from its pre-opt
+     definition (bin/main.ml's pass 2 above): canonical too. *)
+  List.iter (fun (fd : March_tir.Tir.fn_def) ->
+      let n = fd.March_tir.Tir.fn_name in
+      if not (Hashtbl.mem fn_tbl n) && Hashtbl.mem hr_impl_hashes n then
+        Hashtbl.replace hr_impl_hashes n (canon fd))
+    pre_opt.March_tir.Tir.tm_fns;
+  List.iter (fun n ->
+      if Hashtbl.mem hr_impl_hashes n then begin
+        let fd = Hashtbl.find fn_tbl n in
+        let h = own_of n fd in
+        Hashtbl.replace hr_impl_hashes n
+          (if is_slot n then
+             match fold_deps [ n ] fd with
+             | [] -> h
+             | dh -> March_cas.Blake3.hash_string (String.concat "" (h :: dh))
+           else h)
+      end)
+    all_names
 (* CAS cache-key fragment — hot reload changes codegen, so it MUST key the cache. *)
 let hr_cas_tag () = match !hot_reload_prefix with Some p -> ["hr:" ^ p] | None -> []
 (* The sanitizer MARCH_SANITIZE selects, or [None] when it is unset.
@@ -922,6 +1020,17 @@ let sanitize_mode () =
   | None -> None
   | Some "thread" -> Some "thread"
   | Some _ -> Some "address"
+
+(** Inline refcount fast path (lib/tir/llvm_rc_inline.ml): rewrite a finished
+    module's refcount calls to inline twins. Off for wasm (its runtime's
+    refcount entry points are no-ops), for sanitizer builds (they keep the
+    runtime's accesses visible), and with MARCH_NO_INLINE_RC=1. *)
+let maybe_inline_rc target ir =
+  if March_tir.Llvm_emit.is_wasm_target target
+  || sanitize_mode () <> None
+  || Lazy.force March_tir.Llvm_rc_inline.env_disabled
+  then ir
+  else March_tir.Llvm_rc_inline.rewrite ir
 
 let sanitize_clang_flag () =
   match sanitize_mode () with
@@ -987,6 +1096,9 @@ let codegen_cas_tags () =
      artifact, so the "pass off" run printed the mocked output. *)
   @ (if Sys.getenv_opt "MARCH_CAP_PASSING" = Some "1" then ["cappass"] else [])
   @ (if cap_mocking () then ["capdisp"] else [])
+  (* MARCH_NO_INLINE_RC=1 turns off the inline refcount fast path, which changes
+     the emitted code without changing the compiler binary. *)
+  @ (if Lazy.force March_tir.Llvm_rc_inline.env_disabled then ["noinlinerc"] else [])
 
 (** Parse --target string into Llvm_emit.target_config. *)
 let parse_target s =
@@ -2050,7 +2162,8 @@ let compile filename =
              full :: nested full ds
            | _ -> [])
          decls in
-     hr_entry_nested := nested "" module_ast.March_ast.Ast.mod_decls
+     hr_entry_nested := nested "" module_ast.March_ast.Ast.mod_decls;
+     hr_entry_top_level := true
    | _ -> ());
   (* Resolve cross-file imports: find imported .march files, parse and inject *)
   let (resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
@@ -3235,76 +3348,9 @@ let compile filename =
             end
           ) pre_fns
         in
-        (* A boundary function's slot identity folds in the bare-named
-           helpers only it reaches (2026-09-25).  Lowering lifts every lambda
-           a function builds into a separate bare-named function
-           (`$lam<n>$apply$<k>`, `<name>$apply$<k>`, join points), and the
-           per-function hash above is deliberately non-transitive, so a change
-           INSIDE a lambda -- which is where every session body lives -- left
-           the boundary function's hash untouched and `forge deploy hot`
-           answered "no changes" for it.  Bare names (module "") are never
-           slots themselves (only an app actor's `<Actor>_dispatch` is, and it
-           is excluded below; a stdlib actor has no slot and its glue is not
-           folded), so the only way a change to one reaches a running program
-           is through the activation of the boundary function that calls it:
-           fold their hashes in, transitively, stopping at other slots and at
-           cycles.  Stdlib and other qualified callees stay unfolded (a leaf
-           change must not flag the whole caller chain, see above).  Each root
-           is folded with its own visited set, so the result does not depend
-           on the order roots are processed. *)
         (match hr_config () with
          | None -> ()
-         | Some cfg ->
-           let fn_tbl = Hashtbl.create 1024 in
-           List.iter (fun (fd : March_tir.Tir.fn_def) -> Hashtbl.replace fn_tbl fd.March_tir.Tir.fn_name fd) tir.March_tir.Tir.tm_fns;
-           let all_names = Hashtbl.fold (fun n _ acc -> n :: acc) fn_tbl [] in
-           let is_slot n =
-             March_tir.Hot_reload.is_slot_actor_dispatch n
-             || March_tir.Hot_reload.is_reloadable cfg (March_tir.Hot_reload.module_of_name n) in
-           let is_entry n =
-             String.equal n "main"
-             || (String.length n > 5 && String.equal (String.sub n (String.length n - 5) 5) ".main") in
-           (* A folded helper's hash must not see its NAME or the names of
-              the other lifted helpers it calls: those come from global
-              counters (`$lam39788$apply$4781`, `$jp17442`), so any edit
-              anywhere renumbers them, and hashing them flagged every stdlib
-              actor (ClusterNodeActor_dispatch, the SWIM driver, among them)
-              as changed on every deploy.  Hash the pretty-printed body with
-              each counter suffix after a `$`, and the inliner's `_i<n>`
-              renaming suffix, replaced by `#`: a renumbering is invisible, a
-              real change (a literal, a call, a type) is not. *)
-           let counter_re = Str.regexp "\\$\\([A-Za-z_]*\\)[0-9]+" in
-           let inline_re = Str.regexp "_i[0-9]+" in   (* the inliner's renaming suffix *)
-           let canon_text fd =
-             Str.global_replace inline_re "_i#"
-               (Str.global_replace counter_re "$\\1#" (March_tir.Pp.string_of_fn_def fd)) in
-           let canon fd = March_cas.Blake3.hash_string (canon_text fd) in
-           let rec fold_deps visiting fd =
-             March_cas.Scc.deps_of all_names fd
-             |> List.filter (fun c ->
-                  not (List.mem c visiting)
-                  && String.equal (March_tir.Hot_reload.module_of_name c) ""
-                  && not (is_slot c)
-                  (* A stdlib actor's glue is bare-named too, but it is the
-                     stdlib's: unfolded like every other stdlib callee. *)
-                  && not (March_tir.Hot_reload.is_stdlib_actor_fn c))
-             |> List.filter_map (fun c ->
-                  match Hashtbl.find_opt fn_tbl c with
-                  | Some cfd ->
-                    let sub = fold_deps (c :: visiting) cfd in
-                    Some (March_cas.Blake3.hash_string (String.concat "" (canon cfd :: sub)))
-                  | None -> None)
-             |> List.sort String.compare in
-           let roots = List.filter (fun n -> is_slot n && not (is_entry n)) all_names in
-           List.iter (fun n ->
-               match Hashtbl.find_opt fn_tbl n, Hashtbl.find_opt hr_impl_hashes n with
-               | Some fd, Some base ->
-                 (match fold_deps [ n ] fd with
-                  | [] -> ()
-                  | dh -> Hashtbl.replace hr_impl_hashes n
-                            (March_cas.Blake3.hash_string (String.concat "" (base :: dh))))
-               | _ -> ())
-             roots);
+         | Some cfg -> hr_slot_hashes ~cfg ~pre_opt:pre_opt_tir tir hr_impl_hashes);
         (* Post-TIR cache: same key construction as the source-level early
            check above (build_cas_key), keyed on the module's per-SCC impl
            hashes instead of the source digest. *)
@@ -3323,6 +3369,7 @@ let compile filename =
              call clang, then cache the binary *)
           let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
+          let ir = maybe_inline_rc target ir in
           stamp "llvm-emit";
           (* clang reads the per-process temp, never the shared [ll_file]
              another concurrent compile of this source may be rewriting; see
@@ -4146,7 +4193,26 @@ let compile filename =
               Option.iter (scan_atom caller) tok;
               List.iter (scan_atom caller) args
             | ESetField (o, _, v) -> scan_atom caller o; scan_atom caller v
-          and scan_atom _caller _a = ()
+          (* A closure's code is named as an atom (`alloc $Clo_..($lam9$apply$3,
+             ...)`), never called by name: record the fn that BUILDS it as
+             its caller too.  Without the edge forge's planner
+             (Deploy_plan.undeliverable) saw a changed lambda with no caller
+             and planned a restart for any edit inside a role body's
+             closure, although the slot that builds the closure changes with
+             it (its hash folds the lambda in) and its patch carries the new
+             lambda code.  Only for unslotted bare callees (lifted lambdas,
+             join points): a slot's `callers:` is signed into ACTIVATE and
+             capped, and a slot is reached by its own activation anyway. *)
+          and scan_atom caller a =
+            match a, hr_config () with
+            | March_tir.Tir.AVar v, Some cfg ->
+              let cn = v.March_tir.Tir.v_name in
+              if cn <> caller
+                 && Hashtbl.mem hr_impl_hashes cn
+                 && String.equal (March_tir.Hot_reload.module_of_name cn) ""
+                 && not (March_tir.Hot_reload.is_slot_fn cfg cn)
+              then add_caller ~callee:cn ~caller
+            | _ -> ()
           in
           (* Scan every boundary function's body in pre-opt TIR. *)
           List.iter (fun (fd : March_tir.Tir.fn_def) ->
@@ -4340,8 +4406,12 @@ let compile filename =
             end
           ) pre_fns
         in
+        (match hr_config () with
+         | None -> ()
+         | Some cfg -> hr_slot_hashes ~cfg ~pre_opt:pre_opt_tir tir hr_impl_hashes);
         let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~pmap_threshold:!pmap_threshold ~target ~hot_reload:(hr_config ()) ~impl_hashes:hr_impl_hashes ~remote_impl_hashes:rpc_impl_hashes ~remote_sig_hashes:remote_sig_hashes2 ~emit_main:(not !compile_so) ~cap_attrib ~cap_decls
             ~k_table:pipe.March_tir.Contract_pipeline.k_table tir in
+          let ir = maybe_inline_rc target ir in
         (* Same temp-then-rename as --compile, so a concurrent reader never
            sees a half-written file. *)
         write_ll_tmp ir;

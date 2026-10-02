@@ -320,9 +320,10 @@ let node_slots (eps : endpoint list) : string list =
     nodes, written under [dir]: what the recorder answers ABI_QUERY with, so a
     release activates what [forge deploy hot] would activate on a real node
     (a changed function with no slot is not reachable by a hot patch). Not
-    every function of a manifest is a slot: the control plane's own wiring,
-    spliced into the entry module, has none, and its every function changes
-    hash when the entry file's line count changes. The manifest as it is when
+    every function of a manifest is a slot (the control plane's own wiring,
+    spliced into the entry module, has none), and a release recorded against
+    one the nodes cannot take is refused by every node as a whole batch
+    ([commit_partial_failure]). The manifest as it is when
     the nodes' slots are unknown or none of them is in it (a build no
     candidate runs). *)
 let restrict_manifest ~(slots : string list) ~(dir : string) (old_manifest_path : string) : string =

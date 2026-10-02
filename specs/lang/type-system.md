@@ -28,12 +28,50 @@ March uses Hindley-Milner type inference with bidirectional checking at function
 
 | Type | Description | Literals |
 |------|-------------|---------|
-| `Int` | 64-bit signed integer | `42`, `-7`, `0` |
+| `Int` | 63-bit signed integer, wraps on overflow ([below](#int-width-and-overflow)) | `42`, `-7`, `0` |
 | `Float` | 64-bit IEEE 754 | `3.14`, `-0.5`, `1.0e10` |
 | `Bool` | Boolean | `true`, `false` |
 | `String` | UTF-8 string | `"hello"` |
 | `Char` | Unicode scalar value | (accessed via String operations) |
 | `()` | Unit (no value) | `()` |
+
+### Int width and overflow
+
+`Int` is a **63-bit two's-complement** integer: every `Int` value lies in
+**[-2^62, 2^62 - 1]**, i.e. `-4611686018427387904` to `4611686018427387903`
+(`int_min_value()` / `int_max_value()`). Both backends, the interpreter and
+the compiled (LLVM) code, give the same answer for every operation below.
+
+- **Overflow wraps.** `+`, `-`, `*`, unary `-`, `/`, `int_div`, `int_abs`,
+  `int_pow` and `int_shl` reduce their result modulo 2^63 back into the range.
+  Nothing traps on overflow: `int_max_value() + 1 == int_min_value()`,
+  `-int_min_value() == int_min_value()`, `int_abs(int_min_value()) ==
+  int_min_value()` and `int_min_value() / -1 == int_min_value()`.
+- **Bitwise operators see 63 bits.** `int_and`/`int_or`/`int_xor`/`int_not`
+  act on the 63-bit two's-complement pattern; `int_popcount(-1) == 63`.
+  `int_shr` is an *arithmetic* (sign-propagating) shift: `int_shr(-8, 1) ==
+  -4`. `int_shl` and `int_shr` panic (`int_shl: shift out of range`) for a
+  count outside `[0, 62]`.
+- **Division** truncates toward zero and panics on a zero divisor
+  (`division by zero` / `modulo by zero`); `int_pow` panics on a negative
+  exponent.
+- **Literals** must fit the range: a literal above `4611686018427387903` is
+  a compile error. A negative literal is the negation of a positive one, so
+  `int_min_value()` has no literal spelling; write `int_min_value()` or
+  `-4611686018427387903 - 1`.
+- **Parsing** with `string_to_int` returns `None` outside the range.
+
+Why 63 bits: a polymorphic slot (a `List(Int)` cell, a tuple or record field, a
+closure argument, an actor message) stores an `Int` as a tagged word,
+`(n << 1) | 1`, which has room for exactly 63 bits; the interpreter's OCaml
+`int` is 63-bit too. Compiled code keeps a monomorphic `Int` in a full 64-bit
+register (and in `NativeArray`'s unboxed `Int` storage) for speed, and
+re-normalises to 63 bits after every operation listed above, so a value
+reads back the same whether it travelled through a register or a list.
+Use `Float` (or a bignum library) for wider arithmetic.
+
+> The JavaScript backend (`--target js`) represents `Int` as a JS number and
+> does not follow these rules yet.
 
 ---
 
