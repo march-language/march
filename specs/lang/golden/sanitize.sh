@@ -235,9 +235,16 @@ sweep native 25 "${native_files[@]}"
 # A scenario that needs root it does not have (partition, iptables) exits 3;
 # that is reported as SKIP, not as a pass — the count at the end is what says
 # whether this gate ran.
+#
+# SANITIZE_TWO_NODE_SHARD=K/N sweeps only shard K of N (scripts/two-node.sh
+# --list K/N), for splitting this corpus across CI jobs; unset, all of it.
 two_node_sweep() {
-  local pass=0 fail=0 skip=0 s rc
-  for s in $("$root/scripts/two-node.sh" --list); do
+  local pass=0 fail=0 skip=0 s rc list
+  # Captured, not looped over inline: `for s in $(...)` ignores a failing
+  # --list and the sweep would quietly cover zero scenarios.
+  list=$("$root/scripts/two-node.sh" --list "${SANITIZE_TWO_NODE_SHARD:-1/1}") \
+    || { echo "ERROR: scripts/two-node.sh --list failed" >&2; exit 2; }
+  for s in $list; do
     MARCH_BIN="$bin" MARCH_SANITIZE=1 TWO_NODE_TIMEOUT="${TWO_NODE_ASAN_TIMEOUT:-240}" \
       "$root/scripts/two-node.sh" "$s" >"$work/two-node-$s.log" 2>&1; rc=$?
     if [ $rc -eq 3 ]; then
