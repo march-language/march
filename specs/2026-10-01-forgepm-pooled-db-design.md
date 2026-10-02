@@ -1,6 +1,6 @@
 # forgepm: a real DB pool from compiled HTTP handlers (sub-project A)
 
-**Status:** design approved 2026-10-01, not started.
+**Status:** Part 1 landed 2026-10-01; Part 2 in forgepm.
 **Driver:** deployed forgepm opens one Postgres connection per query (two
 `Connection.connect` sites in the web binary: `lib/forgepm/repo.march:35`,
 `lib/forgepm/packages/packages.march:316`), plus one more per request for the
