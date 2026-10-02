@@ -135,7 +135,21 @@ let pick_free_port () =
 
 (* ── The shared exercise, run once per server implementation ───────────── *)
 
-let run_http_e2e ~variant ~slug ~evloop () =
+type child_status = [ `Alive | `Exited of int | `Signaled of int | `Stopped of int ]
+type server_ctx = {
+  port            : int;
+  bail            : 'a. string -> 'a;
+  child_pid       : unit -> int option;
+  child_status    : unit -> child_status;
+  describe_status : child_status -> string;
+  connect_or_bail : string -> Unix.file_descr;
+  send            : Unix.file_descr -> string -> unit;
+  request_bytes   : meth:string -> path:string -> body:string -> keep_alive:bool -> string;
+  read_response   : Unix.file_descr -> string ref -> deadline:float -> int * string * string;
+  check_response  : string -> exp_status:int -> exp_body:string -> int * string * string -> unit;
+}
+
+let with_compiled_server ~variant ~slug ~evloop ~server_src (k : server_ctx -> unit) =
   (* Without this, writing to a socket whose peer has just crashed kills THIS
      process with SIGPIPE — the test would die instead of reporting the dead
      server, which is the whole point of the exercise.  Ignoring it turns the
@@ -447,7 +461,6 @@ let run_http_e2e ~variant ~slug ~evloop () =
          serving a moment ago, so it has since died or stopped accepting"
         !port label (Unix.error_message e))
   in
-  let req_timeout = 30.0 in
   let check_response label ~exp_status ~exp_body (status, body, _) =
     if status <> exp_status then
       bail (Printf.sprintf "%s: expected status %d, got %d (body was %S)"
@@ -463,6 +476,23 @@ let run_http_e2e ~variant ~slug ~evloop () =
          else ""))
   in
 
+  k { port = !port;
+      bail;
+      child_pid = (fun () -> !child);
+      child_status;
+      describe_status;
+      connect_or_bail;
+      send;
+      request_bytes;
+      read_response;
+      check_response })
+
+(* ── The original exercise: 65 requests, bodies, keep-alive, pipelining ── *)
+let run_http_e2e ~variant ~slug ~evloop () =
+  with_compiled_server ~variant ~slug ~evloop ~server_src (fun ctx ->
+    let { bail; connect_or_bail; send; request_bytes; read_response;
+          check_response; child_status; describe_status; _ } = ctx in
+    let req_timeout = 30.0 in
   (* ── Phase A: ~45 requests, each on its own connection ───────────────── *)
   (* One request per server process is what let a crash-on-request-2 ship.
      Cycling three routes means a constant responder cannot pass either. *)
@@ -578,7 +608,8 @@ let run_http_e2e ~variant ~slug ~evloop () =
      bail (Printf.sprintf
        "server process is NOT alive after serving the request sequence: it %s. \
         A server that dies after serving requests is a crash, never a skip."
-       (describe_status st))))
+       (describe_status st)))
+  )
 
 let suites =
   [ ("http server (compiled, end-to-end)",
