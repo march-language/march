@@ -2831,7 +2831,18 @@ void *march_get_actor_field(void *pid, void *name) {
     march_record_shape *s = rec_shape_of(pid);
     if (!s) return NULL;
     int32_t i = rec_find_field(s, ns->data, ns->len);
-    if (i < 0) return NULL;
+    if (i < 0) {
+        /* An actor compiled with --hot-reload keeps its state in a separate
+         * record the struct's $f_state field points at (lower_actor.ml);
+         * look the name up there. */
+        int32_t si = rec_find_field(s, "$f_state", 8);
+        if (si < 0 || s->kinds[si] == 'i') return NULL;
+        void *st = (void *)(intptr_t)rec_field_raw(pid, si);
+        if (!st || !(s = rec_shape_of(st))) return NULL;
+        i = rec_find_field(s, ns->data, ns->len);
+        if (i < 0) return NULL;
+        pid = st;
+    }
     /* Typed `Pid(a) -> String -> Option(Int)`: only an immediate ('i':
      * Int/Bool/Unit/Atom) field is returned.  A pointer or float field is
      * None: handing its raw bits back as a value was an unchecked cast (and

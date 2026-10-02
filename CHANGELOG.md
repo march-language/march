@@ -115,6 +115,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A supervisor now works in a program built with `--hot-reload`.** Any actor with a
+  `supervise` block failed to compile under `--hot-reload` (`use of undefined value
+  '@$sup_child_ptr_a'`). Behind that, the runtime read each child's pid from the wrong
+  word of a hot-reload supervisor, so stopping the tree could stop an unrelated actor
+  and a restart wrote past the actor, and `get_actor_field` found no state field of a
+  hot-reload actor.
 - **A release through the control plane no longer orders functions the nodes cannot
   patch.** forge recorded a release's signed lines against the last deployed manifest,
   which lists every function, including the control plane's own wiring, which has no

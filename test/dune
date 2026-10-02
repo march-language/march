@@ -6109,6 +6109,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_on_stop_tree.expected interp_actor_on_stop_tree.out)))
 
+; ── A supervisor compiled with --hot-reload ─────────────────────────────
+; Same program and golden as native_actor_on_stop_tree, built with
+; `--hot-reload Main`. It used to fail to compile at all (hot-reload spawn
+; glue skipped spawning the supervise-block children, so registration
+; referenced an unbound `$sup_child_ptr_a`); once it compiled, the runtime
+; read each child's pid at a[4 + idx] in the actor struct, which under
+; hot-reload is the $f_state pointer word (or past the struct), and
+; get_actor_field never looked inside the state record.
+(rule
+ (targets native_actor_on_stop_tree_hr native_actor_on_stop_tree_hr.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/actor_on_stop_tree.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --hot-reload Main
+        -o native_actor_on_stop_tree_hr native/actor_on_stop_tree.march)
+   (with-stdout-to native_actor_on_stop_tree_hr.out
+        (system "./native_actor_on_stop_tree_hr")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_on_stop_tree.expected native_actor_on_stop_tree_hr.out)))
+
 ; ── A file error's constructor can be matched, on both backends ──────────
 ; The file_*/dir_* builtins denote the canonical BARE `FileError`; a
 ; cross-module ctor used to register a QUALIFIED parent type, which could

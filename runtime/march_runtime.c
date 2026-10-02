@@ -2289,8 +2289,9 @@ typedef struct {
      * march_actor_register_child); nothing here ever frees it. */
     void *spawn_clo;
     int64_t word_idx;         /* position among this supervisor's alphabetically-sorted
-                                  state fields; this child's Int-encoded pid lives at
-                                  ((int64_t*)supervisor)[4 + word_idx] */
+                                  state fields, possibly tagged with
+                                  MARCH_SUP_SLOT_IN_STATE; this child's Int-encoded
+                                  pid lives at *sup_child_slot(supervisor, word_idx) */
     /* Task 16: exponential restart backoff. Zeroed at registration
      * (march_actor_register_child — sup_children grows via realloc, which
      * does NOT zero new memory, so these two fields are set explicitly
@@ -2323,6 +2324,21 @@ typedef struct {
     int     pending_name_count;
     void   *pending_spawn_cap;
 } march_sup_child;
+
+/* A supervisor compiled with --hot-reload keeps its state in a separate
+ * record whose pointer sits in the actor's first state word (a[4]), not
+ * inline, so its supervised fields are words of THAT record.  The compiler
+ * (lower_actor.ml, mk_reg_child_calls) flags such a slot by OR-ing this bit
+ * into the word_idx it passes to march_actor_register_child. */
+#define MARCH_SUP_SLOT_IN_STATE ((int64_t)1 << 32)
+
+static inline int64_t *sup_child_slot(void *supervisor, int64_t word_idx) {
+    if (word_idx & MARCH_SUP_SLOT_IN_STATE) {
+        int64_t *state = ((int64_t **)supervisor)[4];
+        return &state[2 + (word_idx & ~MARCH_SUP_SLOT_IN_STATE)];
+    }
+    return &((int64_t *)supervisor)[4 + word_idx];
+}
 
 /* march_actor_meta.drain_deadline_ms while a stop is claimed but not yet
  * armed. Distinct from every real deadline (which is a march_now_ms() value,
@@ -5075,7 +5091,7 @@ static march_death_reason march_meta_death_reason(march_actor_meta *meta) {
  * below is March code, so this can switch threads and wait. */
 static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, int child_idx) {
     march_sup_child *child = &sup_meta->sup_children[child_idx];
-    int64_t old_pid_index = ((int64_t *)supervisor)[4 + child->word_idx];
+    int64_t old_pid_index = *sup_child_slot(supervisor, child->word_idx);
     /* The dead incarnation's TOMBSTONE, not its meta (which is freed once its
      * death is processed): the epoch is all the replacement needs from it,
      * and the tombstone is never freed.  Only THIS supervisor's restarts
@@ -5137,7 +5153,7 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
         if (cap)
             atomic_store_explicit(&new_meta->spawn_cap, cap, memory_order_release);
         pthread_mutex_unlock(&g_tbl_mu);
-        ((int64_t *)supervisor)[4 + child->word_idx] =
+        *sup_child_slot(supervisor, child->word_idx) =
             pe_pid_or_0(new_meta->pe);
     }
 
@@ -5196,7 +5212,7 @@ static void march_one_for_all_restart(void *supervisor, march_actor_meta *sup_me
     if (n == 0) return;
     meta_pin live_children[n];
     for (int i = 0; i < n; i++) {
-        int64_t stored_pid_index = ((int64_t *)supervisor)[4 + sup_meta->sup_children[i].word_idx];
+        int64_t stored_pid_index = *sup_child_slot(supervisor, sup_meta->sup_children[i].word_idx);
         /* Pinned by pid: a live child's meta and a counted reference to its
          * record, so neither can be freed across the kills below.  The
          * originally-crashed child is already dead at this point (Task 4's
@@ -5250,7 +5266,7 @@ static void march_rest_for_one_restart(void *supervisor, march_actor_meta *sup_m
     meta_pin live_children[n];
     for (int i = 0; i < n; i++) live_children[i] = (meta_pin){ NULL, NULL };
     for (int i = child_idx + 1; i < n; i++) {
-        int64_t stored_pid_index = ((int64_t *)supervisor)[4 + sup_meta->sup_children[i].word_idx];
+        int64_t stored_pid_index = *sup_child_slot(supervisor, sup_meta->sup_children[i].word_idx);
         live_children[i] = meta_pin_pe(pid_entry(stored_pid_index));
         if (live_children[i].m) {
             /* See march_one_for_all_restart's identical comment — same
@@ -6097,7 +6113,7 @@ static int64_t march_actor_stop_pinned(void *actor, march_actor_meta *meta,
     if (meta->sup_num_children > 0) {
         for (int i = meta->sup_num_children - 1; i >= 0; i--) {
             int64_t stored_pid_index =
-                ((int64_t *)actor)[4 + meta->sup_children[i].word_idx];
+                *sup_child_slot(actor, meta->sup_children[i].word_idx);
             /* A live child, pinned (its meta and a counted reference to its
              * record) across the stop and the wait. */
             meta_pin child = meta_pin_pe(pid_entry(stored_pid_index));
