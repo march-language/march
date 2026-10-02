@@ -202,30 +202,58 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
       then
         match Hashtbl.find_opt ctx.top_fn_param_tys resolved_name with
         | Some param_tirs ->
-          List.mapi (fun i t -> (i, llvm_ty ctx t = "double")) param_tirs
+          (* An ERASED param ([TVar]) qualifies too: its apply fn's prologue
+             takes its own reference to an incoming Float box
+             ([march_clo_param_own], Llvm_toplevel.emit_fn), so whatever the
+             body does with the param spends that reference, not ours. *)
+          List.mapi (fun i t ->
+              (i, llvm_ty ctx t = "double"
+                  || (match t with Tir.TVar _ -> true | _ -> false)))
+            param_tirs
           |> List.filter (fun (_, is_dbl) -> is_dbl)
           |> List.map fst
         | None -> []
       else []
+    in
+    (* An ERASED argument (a [TVar] variable) handed to an apply fn may be a
+       Float box at run time.  Perceus handed the callee a reference to it,
+       but a closure callee never consumes a Float box ([Clo_flags]), so this
+       call site releases that reference after the call.  The Float test is
+       taken BEFORE the call: a non-Float argument is the callee's and may be
+       gone by the time the call returns.  [march_clo_float_arg] returns the
+       box, or null (a no-op release) for anything else. *)
+    let erased_float_args : string list ref = ref [] in
+    let note_erased_float_arg atom v =
+      match atom with
+      | Tir.AVar { Tir.v_ty = Tir.TVar _; _ } ->
+        let fa = fresh ctx "cfa" in
+        emit ctx (Printf.sprintf "%s = call ptr @march_clo_float_arg(ptr %s)" fa v);
+        erased_float_args := fa :: !erased_float_args
+      | _ -> ()
     in
     let float_temp_boxes : string list ref = ref [] in
     let release_float_temp_boxes () =
       List.iter
         (fun b ->
            emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" b))
-        !float_temp_boxes;
-      float_temp_boxes := []
+        (!float_temp_boxes @ !erased_float_args);
+      float_temp_boxes := [];
+      erased_float_args := []
     in
     let arg_strs =
       if is_apply_fn resolved_name then
-        List.mapi (fun i (ty, v) ->
+        List.mapi (fun i ((ty, v), atom) ->
           if ty = "i64" || ty = "double" || is_vec_ty ty then
             let v' = coerce ctx ty v "ptr" in
             record_temp_box i ~from_ty:ty ~to_ty:"ptr" v';
             if ty = "double" && List.mem i apply_float_param_idxs then
               float_temp_boxes := v' :: !float_temp_boxes;
             "ptr " ^ v'
-          else ty ^ " " ^ v) arg_pairs
+          else begin
+            if ty = "ptr" && resolved_name <> ctx.cur_emit_fn then
+              note_erased_float_arg atom v;
+            ty ^ " " ^ v
+          end) (List.combine arg_pairs args)
       else
         (* Coerce each argument's ACTUAL emitted representation to the
            callee's declared parameter type when known and arity matches.
@@ -375,8 +403,19 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
                (* Boundary→boundary call: route through the versioned dispatch
                   table so the callee can be hot-swapped at runtime. *)
                Hashtbl.mem ctx.top_fns resolved_name
-               && Hot_reload.needs_dispatch cfg ~caller_module:ctx.hr_cur_module
-                    ~callee_module:(module_of_name resolved_name)
+               && (Hot_reload.needs_dispatch cfg ~caller_module:ctx.hr_cur_module
+                     ~callee_module:(module_of_name resolved_name)
+                   (* an entry-file top-level fn: bare-named, so its module
+                      says nothing (Hot_reload.is_entry_file_slot) *)
+                   || Hot_reload.is_entry_file_slot cfg resolved_name)
+               (* A self-call stays direct: a running invocation finishes on
+                  the version it started on, as a self-TAIL-call (a loop,
+                  never a call) always did.  Dispatching it cost ~5 ns per
+                  call: a recursive `fib` in the entry module, a slot since
+                  2026-10-01, ran 4.8x slower under --hot-reload
+                  (specs/progress/2026-10-01-hcr-topology-app-functions-no-dispatch-slots.md).
+                  Mutual recursion through two slots still dispatches. *)
+               && not (String.equal resolved_name ctx.hr_cur_fn)
                && Hot_reload.Name_table.id_of ctx.hr_names resolved_name <> None)
     then begin
       let name_id =
@@ -496,8 +535,17 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
         && ret_ty = "ptr"
         && llvm_ret_ty ctx (fn_ret_tir f.Tir.v_ty) = "double"
       in
+      (* An apply fn whose return stayed erased ([TVar]) hands back an owned
+         reference too, and at a Float call site that reference is a box only
+         this call site holds (a flow-through of a Float argument is the
+         callee's own reference: [march_clo_param_own]). *)
+      let erased_float_return =
+        is_apply_fn resolved_name
+        && (match ret_tir with Tir.TVar _ -> true | _ -> false)
+        && llvm_ret_ty ctx (fn_ret_tir f.Tir.v_ty) = "double"
+      in
       if ((is_apply_fn resolved_name && llvm_ret_ty ctx ret_tir = "double")
-          || owned_boxed_scalar_return)
+          || owned_boxed_scalar_return || erased_float_return)
          && resolved_name <> ctx.cur_emit_fn (* self-tail-call exemption *)
       then begin
         let d = fresh ctx "crf" in
@@ -747,15 +795,15 @@ let emit_callptr_closure ~emit_atom ctx (fn_atom : Tir.atom)
        right after the call.  Sole-ownership argument: a callee whose param
        is genuinely `double` unboxes the pointer in its entry prologue and
        never reads it again; a callee whose param slot stayed generic `ptr`
-       treats it as an opaque value and, under the borrowed-param discipline,
-       either leaves it alone or IncRCs it before storing it — either way the
-       call site's reference is still the box's own.  The one legal way the
-       box can come back to us is as the call's RESULT (a borrowed
-       flow-through alias, `fn x -> x` at an erased param — the shape that
-       made a plain call-site release a measured use-after-free on
-       2026-08-20, see specs/progress on this fix), hence the pointer-
-       equality guard against the raw returned value below: an aliased box is
-       skipped here and released once by the return-path release instead.
+       ([TVar]) takes its OWN reference to a Float box in its prologue
+       ([march_clo_param_own]), so whatever it does with the param (drop it,
+       store it, hand it back as the result) spends that reference, and the
+       call site's is still the box's own.  The box coming back as the RESULT
+       (`fn x -> x` at an erased param) is therefore a second reference, not
+       an alias of ours: until 2026-09-30 it was, and a pointer-equality guard
+       skipped this release for it, while an unused erased param's entry drop
+       freed the box under the caller (use-after-free,
+       specs/progress/2026-09-30-native-float-arr-fold-unused-elem-double-free.md).
        An argument that was ALREADY `ptr` at rest is never recorded — no box
        was created, and the at-rest box belongs to whoever owns the value.
        Measured before: one leaked box per Float arg per indirect call,
@@ -782,6 +830,12 @@ let emit_callptr_closure ~emit_atom ctx (fn_atom : Tir.atom)
          | None -> false)
       | _ -> false
     in
+    (* An ERASED argument (a [TVar] variable) may be a Float box at run time:
+       Perceus handed the callee a reference to it, which a closure callee
+       never consumes, so it is released after the call like the boxes above.
+       [march_clo_float_arg] takes the Float test BEFORE the call (a non-Float
+       argument is the callee's, and may be freed by the time it returns) and
+       yields the box, or null for anything else (a no-op release). *)
     let float_arg_boxes : string list ref = ref [] in
     let orig_arg_strs = List.map2 (fun (decl_ty, pty) a ->
         let (actual_ty, v) = emit_atom ctx a in
@@ -789,45 +843,43 @@ let emit_callptr_closure ~emit_atom ctx (fn_atom : Tir.atom)
         if decl_ty = "double" && actual_ty = "double"
            && not is_potential_self_call then
           float_arg_boxes := v' :: !float_arg_boxes;
+        (match a with
+         | Tir.AVar { Tir.v_ty = Tir.TVar _; _ }
+           when actual_ty = "ptr" && not is_potential_self_call ->
+           let fa = fresh ctx "cfa" in
+           emit ctx (Printf.sprintf "%s = call ptr @march_clo_float_arg(ptr %s)" fa v');
+           float_arg_boxes := fa :: !float_arg_boxes
+         | _ -> ());
         pty ^ " " ^ v'
       ) (List.combine declared_param_llvm_tys orig_param_llvm_tys) args in
     let all_arg_strs = Printf.sprintf "ptr %s" clo_ptr :: orig_arg_strs in
-    let release_float_arg_boxes ~(alias_of : string option) : unit =
+    (* Released unconditionally, even when the callee hands the same box back
+       as its result: a callee whose param is erased took its own reference
+       to it ([march_clo_param_own]), so the result is a second reference and
+       the Float-result release below spends that one. *)
+    let release_float_arg_boxes () : unit =
       List.iter (fun b ->
-        match alias_of with
-        | None ->
-          emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" b)
-        | Some r ->
-          let eq  = fresh ctx "fbaq" in
-          emit ctx (Printf.sprintf "%s = icmp eq ptr %s, %s" eq b r);
-          let rel  = fresh_block ctx "fbrel" in
-          let cont = fresh_block ctx "fbcont" in
-          emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
-                           eq cont rel);
-          emit_label ctx rel;
-          emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" b);
-          emit_term ctx (Printf.sprintf "br label %%%s" cont);
-          emit_label ctx cont
-      ) !float_arg_boxes;
+          emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" b))
+        !float_arg_boxes;
       float_arg_boxes := []
     in
     if ret_ty = "void" then begin
       emit ctx (Printf.sprintf "call %s %s(%s)"
                   fn_ty_str fn_ptr (String.concat ", " all_arg_strs));
-      release_float_arg_boxes ~alias_of:None;
+      release_float_arg_boxes ();
       ("i64", "0")
     end else begin
       let r = fresh ctx "cr" in
       emit ctx (Printf.sprintf "%s = call %s %s(%s)"
                   r fn_ty_str fn_ptr (String.concat ", " all_arg_strs));
-      release_float_arg_boxes ~alias_of:(Some r);
+      release_float_arg_boxes ();
       (* Float RESULT: the value in the erased ptr slot is a march_float_box
          freshly allocated by the callee's return path — either its body's
          ("double","ptr") coerce or clo_wrap_define's double-return arm; a
          flow-through of an argument box re-boxes too whenever the callee's
          param is a real `double` (unbox at entry, re-box at return), and a
-         GENERIC flow-through alias was left un-released by the guard above
-         precisely so this release is its single one.  Unbox and release
+         GENERIC flow-through is the callee's own reference
+         ([march_clo_param_own]).  Unbox and release
          here, yielding the raw double; a consumer that needs the erased form
          re-boxes fresh (Float is immutable, the copy is unobservable).
          Before: one leaked box per Float-returning indirect call, unbounded

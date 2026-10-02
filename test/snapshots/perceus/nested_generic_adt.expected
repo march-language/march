@@ -1,16 +1,9 @@
--- types (1) --
-closure $Clo_$jp3$0(Ptr(Unit))
--- fns (3) --
-## $jp3$apply$0
-fn $jp3$apply$0($clo : Ptr(Unit)) : '_ =
-  panic("non-exhaustive pattern match")
-
+-- types (0) --
+-- fns (2) --
 ## head_opt
 fn head_opt(xs : List(Int)) : Option(Int) =
   case xs of
-  Cons($f1, $f2) -> let $jp_clo4 : () -> '_ = alloc $Clo_$jp3$0($jp3$apply$0) in
-dec_rc $jp_clo4;
-let h : Int = inc_rc $f1;
+  Cons($f1, $f2) -> let h : Int = inc_rc $f1;
 $f1 in
 alloc Option.Some(h)
   Nil() -> alloc Option.None(Int)()

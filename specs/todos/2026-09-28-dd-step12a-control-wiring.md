@@ -11,44 +11,28 @@ Everything below was held back while PR #671 (12-pre) was open, since it touches
 or `test/test_reload_activate4.c`, or needs a running cluster. #671 has since
 merged, so it is unblocked.
 
+**Landed:** see [../progress/2026-09-30-dd-step12a-control-wiring.md](../progress/2026-09-30-dd-step12a-control-wiring.md)
+and, for `forge deploy` on the cluster backend, the `forge test --upgrade-from` fixture and the
+leader's audit log, [../progress/2026-10-01-dd-step12a-forge-cluster-backend.md](../progress/2026-10-01-dd-step12a-forge-cluster-backend.md).
+
 **What remains.**
 
-- **A home for `Ctl` and `CtlFetch`.** They cannot live in `stdlib/control.march`
-  until [2026-09-28-endpoints-protocol-in-nested-module.md](2026-09-28-endpoints-protocol-in-nested-module.md)
-  is fixed; the generated topology `main` (an entry module) can declare them, copying
-  the declaration and role bodies from `test/session/control_peers.march`.
-- **`reload_request(line : String) : String`**, a stdlib-only builtin (G3-gated to
-  `stdlib/control.march`) that runs a request line through the reload socket's own
-  dispatch, refactored into a function both call. Then the real `AgentOps`:
-  `request` over it, `has` over `CAS_CHECK`, `report` from `Topology.write_status`
-  plus `VERSIONS_DETAIL`, `PINS` and `RELEASE_HEAD`.
-- **The Agent's CtlFetch step**: before `agent_apply`, fetch `Control.missing(...)`
-  over `CtlFetch` and `CAS_PUT` each artifact. The chunk size comes from the
-  measurement design section 2.5 asks for (JSON-over-`List(Int)` framing cost per
-  chunk); `Control.chunks` takes it as a parameter today.
-- **The leader**: a `[control]` topology section becoming a `Ctl.Control` role
-  binding with `place = { on = "control", count = 1 }`; `offer_hosted_Control` with
-  one actor holding the `CtlLeader` and implementing `ControlOps` for every agent's
-  session; the leader's clock; storing releases and artifacts and copying them to
-  every reachable candidate before answering forge; a new leader taking the highest
-  valid `seq` among candidates and agents (`RolloutBehind` tells it to look).
-- **Every node's Agent**: the generated `main` initiating `Ctl.Agent` whenever the
-  topology has a `[control]` section, and re-initiating when the session ends (the
-  leader changed, or its session budget ran out).
-- **The control API listener** (`RELEASE`, `STATUS`, `CAS_PUT`, `CAS_CHECK`) and
-  forge's `cluster` backend as its client; standbys forwarding `RELEASE`.
-- **Status per fingerprint and per offer** in `Topology.write_status`, which the
-  Agent's report needs for richer gates than `healthy`.
-- **Audit**: the leader appends every accepted release and every ordered step.
-- **Acceptance** (design section 10, 12a): a two-node scenario in `test/two_node/`
-  and one `forge test --upgrade-from` fixture — `forge deploy` with no ssh; killing
-  the leader mid-rollout; a partition during a rollout; an agent certificate without
-  `Ctl.Control:offer` never leading.
-
-**Open questions carried from the core.**
-
-- Whether the protocols should ever be in the eagerly loaded stdlib: in it they cost
-  every program about 0.07 s warm and 0.8 s cold (measured, see the progress entry).
-- The executor matches steps by `(seq, step)` and end state; design section 12 asks
-  whether per-step idempotency keys are needed beyond that. None were for the
-  tested cases.
+- The plan on the cluster backend sees less than over ssh: STATUS carries no node's live
+  sessions, hot slots or patch stack, so the drain counts, the "no dispatch slot" check and
+  automatic compaction (`compact_after`) work from forge's records (`--compact` still forces
+  one). A `NODE` line (or a `DETAIL <node>` verb) carrying them would close it.
+- A build whose hosts span two targets is refused on the cluster backend: a release names one
+  patch per build. Builds per target (`build web@linux/arm64 ...`, selected by the agent's
+  `HCR_INFO` target) would lift it; it touches the release format.
+- `CtlFetch` is not in the wiring: a session message costs far more than its bytes
+  ([2026-10-01-session-message-encoding-leak.md](2026-10-01-session-message-encoding-leak.md)),
+  so artifacts go over the control API as raw bytes (`CAS_GET`). A byte payload type for
+  sessions would let a chunked fetch over a session come back.
+- `forge cluster cert --control-agent/--control-candidate` conveniences (the roles are
+  Ctl.Agent:initiate; candidates add Ctl.Control:offer).
+- A provoked skipped-gate report (STATUS has `NOTE` lines for it; the partition scenario heals
+  without the old leader racing ahead).
+- The two compiled-only record-update misbehaviours the wiring works around:
+  [2026-10-01-compiled-record-with-projection-sigsegv.md](2026-10-01-compiled-record-with-projection-sigsegv.md).
+- The session-runtime leaks the wiring routes around:
+  [2026-10-01-session-node-vault-tables-leak.md](2026-10-01-session-node-vault-tables-leak.md).

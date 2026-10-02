@@ -555,6 +555,47 @@ let test_gen_ufw () = with_export (fun ex -> check_golden ~name:"ufw" (Topology.
 let test_gen_do_firewall () = with_export (fun ex -> check_golden ~name:"do-firewall" (Topology.Gen.do_firewall ex))
 let test_gen_compose () = with_export (fun ex -> check_golden ~name:"compose" (Topology.Gen.compose ~project:"shop" ex))
 
+(* [control] (build step 12a): parsed, validated against the hosts' labels,
+   carried in the digest only when present, and given a firewall rule. *)
+let test_control_section () =
+  let toml extra = base_toml ^ extra in
+  let overlay =
+    Str.global_replace (Str.regexp_string "hosts = [\"root@db-1\"]")
+      "hosts = [{ host = \"root@db-1\", labels = [\"control\"] }, { host = \"root@db-2\", labels = [\"control\"] }]" prod_toml in
+  (match Topology.of_strings [ ("topology.toml", toml "\n[control]\ncandidates = \"control\"\nport = 7950\n") ] with
+   | Ok t ->
+     Alcotest.(check bool) "parsed" true (t.control = Some { Topology.candidates = "control"; control_port = 7950 });
+     let text = Topology.digest_text t in
+     let tmp = Filename.temp_file "digest" ".json" in
+     write tmp text;
+     (match Topology.read_digest tmp with
+      | Ok t2 -> Alcotest.(check bool) "round trip" true (t2.control = t.control)
+      | Error m -> Alcotest.fail m)
+   | Error ds -> Alcotest.failf "[control] rejected: %s" (String.concat "; " (List.map Topology.render_diag ds)));
+  (match Topology.of_strings [ ("topology.toml", base_toml) ] with
+   | Ok t ->
+     Alcotest.(check bool) "absent" true (t.control = None);
+     Alcotest.(check bool) "no control key in the digest" false
+       (let s = Topology.digest_text t in
+        let n = String.length s and k = String.length "\"control\"" in
+        let rec go i = i + k <= n && (String.sub s i k = "\"control\"" || go (i + 1)) in go 0)
+   | Error _ -> Alcotest.fail "base topology rejected");
+  (match Topology.of_strings [ ("topology.toml", toml "\n[control]\n") ] with
+   | Error _ -> ()
+   | Ok _ -> Alcotest.fail "a [control] without candidates must be refused");
+  (match Topology.of_strings [ ("topology.toml", toml "\n[control]\ncandidates = \"control\"\n"); ("topology.prod.toml", overlay) ] with
+   | Ok t ->
+     (match Topology.export_of_json (Topology.export_json ~index:(index_of_shop ()) t) with
+      | Ok ex ->
+        let ufw = Topology.Gen.ufw ex in
+        let db1 = List.assoc "ufw-db-1.sh" ufw in
+        let has sub s = let n = String.length s and k = String.length sub in
+          let rec go i = i + k <= n && (String.sub s i k = sub || go (i + 1)) in go 0 in
+        Alcotest.(check bool) "control port from the other candidate" true
+          (has "ufw allow from db-2 to any port 7947 proto tcp comment 'march control from db-2'" db1)
+      | Error m -> Alcotest.fail m)
+   | Error ds -> Alcotest.failf "%s" (String.concat "; " (List.map Topology.render_diag ds)))
+
 let test_gen_builtin_names () =
   with_export (fun ex ->
       List.iter (fun t ->
@@ -621,6 +662,7 @@ let tests = [
     Alcotest.test_case "gen ufw golden" `Quick test_gen_ufw;
     Alcotest.test_case "gen do-firewall golden" `Quick test_gen_do_firewall;
     Alcotest.test_case "gen compose golden" `Quick test_gen_compose;
+    Alcotest.test_case "[control]: parse, digest, firewall" `Quick test_control_section;
     Alcotest.test_case "every built-in name resolves; unknown ones do not" `Quick test_gen_builtin_names;
     Alcotest.test_case "forge-topology-<target> plugin on PATH gets the export on stdin" `Quick test_gen_external_plugin;
   ];

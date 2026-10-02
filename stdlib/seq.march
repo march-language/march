@@ -384,7 +384,7 @@ mod Seq do
   for parity with the API name used by the spec/plan; `batch` remains
   the canonical name.
   """
-  fn batched(seq, n) do
+  fn batched(seq, n : {Int | _ > 0}) do
     batch(seq, n)
   end
 

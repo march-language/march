@@ -23,7 +23,7 @@ let boundary_config : Hot_reload.config option ref = ref None
 let is_reloadable_name name =
   match !boundary_config with
   | Some config ->
-      Hot_reload.is_reloadable config (Hot_reload.module_of_name name)
+      Hot_reload.needs_dispatch_to config name
   | None -> false
 
 (** Count TIR nodes (approximate size). *)

@@ -12,9 +12,10 @@
        target, uploads it, restarts the unit, waits for the reload socket
        (through the ssh tunnel) and pushes the signed topology.
     3. A second deploy of the same tree has nothing to do.
-    4. A changed role body: `--plan` says hot patch; the deploy activates
-       it through the tunnel on the running node; `forge topology status`
-       shows the patch and that the node runs what forge deployed.
+    4. An edit inside a role body's closure, then a changed helper: each
+       `--plan` says hot patch; each deploy activates it through the tunnel
+       on the running node; `forge topology status` shows the patches and
+       that the node runs what forge deployed.
     5. `forge deploy --compact`: the base image is rebuilt from the current
        version and the node restarted onto it; its persisted patch stack is
        empty afterwards (item 5).
@@ -152,11 +153,11 @@ let test_deploy_over_ssh () =
   let proj = Filename.concat dir "app" in
   if not (sh (Printf.sprintf "cp -R %s/. %s && chmod -R u+w %s && rm -rf %s/.forge %s/.march"
                 (Filename.quote (getenv_abs "TOPOLOGY_APP_DIR")) proj proj proj proj)) then Alcotest.fail "copy the app";
-  (* Hot-patchable code: today a topology app's own functions reach the
-     compiler's IR without the entry module's name (Back.x, not
-     TopologyApp.Back.x), so `--hot-reload TopologyApp` gives them no
-     dispatch slot; the pool's module is the prefix that covers them.
-     Back.scale is a plain function the role's closure calls. *)
+  (* Back.scale is a plain function the role's closure calls. No
+     `[hot-reload] module_prefix`: forge passes the entry module, and every
+     function written in the entry file is a dispatch slot (2026-10-01,
+     specs/progress/2026-10-01-hcr-topology-app-functions-no-dispatch-slots.md;
+     until then this test set the prefix to "Back"). *)
   let src = Filename.concat proj "src/topology_app.march" in
   let edit what by =
     let text = read_file src in
@@ -167,8 +168,15 @@ let test_deploy_over_ssh () =
   edit "      { factor: 10 }\n    end\n"
     "      { factor: 10 }\n    end\n\n    fn scale(n : Int, f : Int) : Int do\n      n * f\n    end\n";
   edit "n * env.factor" "scale(n, env.factor)";
-  write_file (Filename.concat proj "forge.toml")
-    (read_file (Filename.concat proj "forge.toml") ^ "\n[hot-reload]\nmodule_prefix = \"Back\"\n");
+  (* A role body's own caps include the session it is handed, and the node
+     policy holds only the pool's written caps (plus the runner's), so
+     without this the gate refuses a hot patch of Back.serve_one with
+     `ERR cap_policy Session.Live`: specs/todos/2026-10-01-role-body-hot-patch-needs-session-live-in-policy.md. *)
+  let topo = Filename.concat proj "topology.toml" in
+  let text = read_file topo in
+  let granted = Str.replace_first (Str.regexp_string {|caps   = ["IO.Console"]|}) {|caps   = ["IO.Console", "Session.Live"]|} text in
+  if granted = text then Alcotest.fail "fixture: the back pool's caps line moved";
+  write_file topo granted;
   write_file (Filename.concat proj "topology.prod.toml")
     "[pool.back]\nhosts = [{ host = \"root@web-1\", labels = [\"db\"] }]\n\n[backend]\nkind = \"ssh\"\n";
   let log = Filename.concat dir "forge.log" in
@@ -201,14 +209,30 @@ let test_deploy_over_ssh () =
       "back-web-1: running code matches what forge last deployed" ];
   (* 3: nothing changed. *)
   expect "second deploy" (ok "deploy --env prod --yes") [ "nothing to deploy" ];
-  (* 4a: an edit inside serve_one's closure: the closure is lifted
-     ($lam...), has no dispatch slot and no slotted caller that changes (a
-     closure is called through its value), and later generated names are
-     renumbered: the running base cannot swap it, so the plan restarts. *)
+  (* 4a: an edit inside serve_one's closure. The closure is lifted
+     ($lam...) and has no dispatch slot, but the manifest names Back.serve_one,
+     which builds it, as its caller, and serve_one's slot hash folds it in, so
+     the edit is a hot patch of serve_one. It also renumbers every later
+     generated name, which must not flag the functions that merely refer to
+     one (Front.*, the generated main): until 2026-10-01 this planned a
+     restart. *)
   edit "scale(n, env.factor)" "scale(n, env.factor) + 0";
-  expect "closure plan" (ok "deploy --env prod --plan")
-    [ "pool back (build shared, 1 host): restart"; "no dispatch slot in the running base build" ];
-  expect "closure deploy" (ok "deploy --env prod --yes") [ "==> pool back: restart"; "back-web-1: restarted"; "deploy complete" ];
+  let plan = ok "deploy --env prod --plan" in
+  expect "closure plan" plan [ "pool back (build shared, 1 host): hot patch" ];
+  (* `changed:` lists the lambda and the slot that builds it; nothing else
+     of the app's (generated names are numbers, not functions of the app). *)
+  let changed =
+    List.find_map (fun l ->
+        let l = String.trim l in
+        if String.length l > 9 && String.sub l 0 9 = "changed: " then
+          Some (String.split_on_char ',' (String.sub l 9 (String.length l - 9)) |> List.map String.trim
+                |> List.filter (fun n -> n <> "" && n.[0] <> '$'))
+        else None)
+      (String.split_on_char '\n' plan) in
+  Alcotest.(check (option (list string))) "closure plan: the changed functions" (Some [ "Back.serve_one" ]) changed;
+  if contains plan "no dispatch slot in the running base build" then Alcotest.failf "closure plan:\n%s" plan;
+  expect "closure deploy" (ok "deploy --env prod --yes")
+    [ "==> pool back: hot patch"; "activated: Back.serve_one"; "deploy complete" ];
   (* 4b: Back.scale is a slot, and `n * f` -> `n + f` makes no new
      generated names: a hot patch, activated on the running node through
      the ssh tunnel. *)
@@ -217,8 +241,9 @@ let test_deploy_over_ssh () =
   let out = ok "deploy --env prod --yes" in
   expect "hot deploy" out [ "==> pool back: hot patch"; "activated: Back.scale"; "Deploy complete"; "deploy complete" ];
   let status = ok "topology status --env prod" in
-  expect "status after the hot patch" status [ "1 hot-patched"; "back-web-1: running code matches what forge last deployed";
-                                               "patch stack: 1 persisted patch" ];
+  (* 4a and 4b: two hot patches *)
+  expect "status after the hot patches" status [ "2 hot-patched"; "back-web-1: running code matches what forge last deployed";
+                                                 "patch stack: 2 persisted patches" ];
   (* 5: compaction: the base image is rebuilt from the current version, the
      node restarted onto it, and its persisted patch stack cleared. *)
   expect "compaction plan" (ok "deploy --env prod --compact --plan")
@@ -226,7 +251,7 @@ let test_deploy_over_ssh () =
       "compaction: build shared: --compact; its hosts restart on a base image rebuilt from the current version" ];
   let out = ok "deploy --env prod --compact --yes" in
   expect "compaction" out [ "==> pool back: restart"; "back-web-1: restarted";
-                            "back-web-1: persisted patch stack cleared (was 1 entry)"; "deploy complete" ];
+                            "back-web-1: persisted patch stack cleared (was 2 entries)"; "deploy complete" ];
   let status = ok "topology status --env prod" in
   expect "status after compaction" status
     [ "0 hot-patched"; "patch stack: no hot patches persisted (the node runs its base build)";

@@ -8,6 +8,20 @@
       hcr_deploy keygen <dir>                 writes <dir>/pk (base64), <dir>/sk (hex)
       hcr_deploy deploy <socket> <dir> <so> [<old .schemas.json> <old .hcr_manifest>]
       hcr_deploy counters <socket> <key>...   prints key=value from PINS
+      hcr_deploy release <dir> <host:port,...> <build> <pool,...> <so> <old .hcr_manifest> [<old .schemas.json>]
+                                              a hot release through the control plane
+                                              (`forge deploy` on the cluster backend, over
+                                              Cluster_deploy): CANARY=<n> CANARY_MS RESTS_MS
+                                              TOPOLOGY=<digest file to push> FOLLOW_S
+      hcr_deploy status <host:port,...>       the leader's view of the newest release
+      hcr_deploy release-stale <host:port,...> <seq>
+                                              send a one-step release with <seq> and no parent,
+                                              signed with forge's deploy key ($HOME/.march):
+                                              the leader's compare-and-set refuses it once it
+                                              holds a newer one; prints the answer
+      hcr_deploy api <host:port> <line>       one request to a control API, answer to stdout
+      hcr_deploy reload <socket> <line>       one request to a reload socket, answer to stdout
+                                              (lines up to END, or the first line)
 
     Exit 0 on success; a failed deploy prints why on stderr and exits 1. *)
 
@@ -51,6 +65,70 @@ let () =
            Printf.printf "%s=%s\n" k
              (match March_forge.Reconcile.pins_counter ri.pins k with Some n -> string_of_int n | None -> "?"))
          keys)
+  | "release" :: dir :: eps :: build :: pools :: so :: old_manifest :: rest ->
+    let pk = String.trim (read (Filename.concat dir "pk")) in
+    let sk = bytes_of_hex (read (Filename.concat dir "sk")) in
+    let geti k d = match Sys.getenv_opt k with Some v -> (try int_of_string v with _ -> d) | None -> d in
+    let endpoints = List.filter_map March_forge.Cluster_deploy.endpoint_of_string (String.split_on_char ',' eps) in
+    (match March_forge.Cmd_deploy_hot.parse_manifest (so ^ ".hcr_manifest") with
+     | Error m -> prerr_endline ("hcr_deploy: manifest: " ^ m); exit 1
+     | Ok manifest ->
+       let topology_body, push_topology =
+         match Sys.getenv_opt "TOPOLOGY" with
+         | Some f when f <> "" -> (read f, true)
+         | _ -> ("{}\n", false)
+       in
+       let sp = { March_forge.Cluster_deploy.env = "test"; endpoints; sk; pubkey = pk;
+                  hot = [ { March_forge.Cluster_deploy.hb_name = build; hb_pools = String.split_on_char ',' pools;
+                            hb_manifest = manifest; hb_so = so; hb_old_manifest = old_manifest;
+                            hb_old_schemas = (match rest with s :: _ -> s | [] -> "");
+                            hb_new_schemas = so ^ ".schemas.json" } ];
+                  topology_body; push_topology; canary = geti "CANARY" 0; canary_window_ms = geti "CANARY_MS" 2000;
+                  rest_window_ms = geti "REST_MS" 0; work_dir = Filename.concat (Filename.get_temp_dir_name ()) (Printf.sprintf "hcr_release_%d" (Unix.getpid ()));
+                  entry_path = ""; grant_caps = []; follow_s = float_of_int (geti "FOLLOW_S" 120) } in
+       (match March_forge.Cluster_deploy.run sp with
+        | Ok report -> print_string report
+        | Error m -> prerr_endline ("hcr_deploy: " ^ m); exit 1))
+  | [ "api"; ep; line ] | [ "reload"; ep; line ] ->
+    let read_answer conn =
+      (* A list answer ends at END; anything else is one line. *)
+      let first = March_forge.Cmd_deploy_hot.recv_line conn in
+      print_endline first;
+      let listy = List.exists (fun p -> String.length first >= String.length p && String.sub first 0 (String.length p) = p)
+          [ "STATUS"; "AUDIT"; "SLOT"; "STATE"; "VERSION"; "EPOCH"; "COUNTERS"; "RESTORED"; "ARTIFACT" ] in
+      if listy then begin
+        let rec go () = let l = March_forge.Cmd_deploy_hot.recv_line conn in print_endline l; if l <> "END" then go () in
+        go ()
+      end
+    in
+    (try
+       let conn =
+         if Sys.argv.(1) = "api" then
+           (match Option.bind (March_forge.Cluster_deploy.endpoint_of_string ep) (fun e -> Result.to_option (March_forge.Cluster_deploy.connect e)) with
+            | Some c -> c
+            | None -> prerr_endline "hcr_deploy: cannot connect"; exit 1)
+         else March_forge.Cmd_deploy_hot.conn_of_fd (March_forge.Cmd_deploy_hot.connect_socket ep)
+       in
+       March_forge.Cmd_deploy_hot.send_line conn line;
+       read_answer conn
+     with Failure m -> prerr_endline ("hcr_deploy: " ^ m); exit 1
+        | Unix.Unix_error (e, _, _) -> prerr_endline ("hcr_deploy: " ^ Unix.error_message e); exit 1)
+  | [ "release-stale"; eps; seq ] ->
+    let endpoints = List.filter_map March_forge.Cluster_deploy.endpoint_of_string (String.split_on_char ',' eps) in
+    (match March_forge.Cmd_hot_reload.read_sk_raw () with
+     | Error m -> prerr_endline ("hcr_deploy: " ^ m); exit 1
+     | Ok sk ->
+       let open March_forge.Control_release in
+       let r = sign ~sk { seq = int_of_string seq; parent = no_parent; env = "local"; topology = String.make 64 '0';
+                          builds = []; steps = [ { id = 1; pools = [ "*" ]; hosts = All; action = Topology; gate = No_gate; batch = 0 } ];
+                          lines = []; drain = None; signature = "" } in
+       (match March_forge.Cluster_deploy.send_release endpoints ~body:(serialize r) with
+        | Ok resp | Error resp -> print_endline resp))
+  | [ "status"; eps ] ->
+    let endpoints = List.filter_map March_forge.Cluster_deploy.endpoint_of_string (String.split_on_char ',' eps) in
+    (match March_forge.Cluster_deploy.status endpoints with
+     | Ok s -> print_string (March_forge.Cluster_deploy.render_status s)
+     | Error m -> prerr_endline ("hcr_deploy: " ^ m); exit 1)
   | _ ->
     prerr_endline "usage: hcr_deploy keygen <dir> | deploy <socket> <dir> <so> [<old schemas> <old manifest>] | counters <socket> <key>...";
     exit 2

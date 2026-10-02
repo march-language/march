@@ -116,9 +116,10 @@ let emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs : string * string =
   Llvm_ctx.emit_label ctx ok_lbl;
   let okval = (match t_ok with
     | Tir.TInt | Tir.TBool | Tir.TUnit | Tir.TCon ("Atom", []) ->
-      (* tag a raw scalar into a march_value: (v << 1) | 1 *)
+      (* tag a raw scalar into a march_value: (v << 1) | 1 -- a plain shl,
+         see [Llvm_ctx.emit_tag_scalar] *)
       let sh = Llvm_ctx.fresh ctx "oksh" in
-      Llvm_ctx.emit ctx (Printf.sprintf "%s = shl nsw i64 %s, 1" sh payload);
+      Llvm_ctx.emit ctx (Printf.sprintf "%s = shl i64 %s, 1" sh payload);
       let tg = Llvm_ctx.fresh ctx "oktag" in
       Llvm_ctx.emit ctx (Printf.sprintf "%s = or i64 %s, 1" tg sh); tg
     | Tir.TFloat ->
@@ -367,8 +368,8 @@ let deep_drop_name ~(has_fn : string -> bool) (ty : Tir.ty) : string option =
   let name = Tir_names.drop_fn_prefix ^ Drop.mangle ty in
   if has_fn name then Some name else None
 
-let clo_wrap_define ?(drop_clo = false) ?(borrowed = []) ?(deep_drops = [])
-    wrap_name (param_ltys : string list) target_ret fn_name =
+let clo_wrap_define ?(drop_clo = false) ?(borrowed = []) ?(own_float = true)
+    ?(deep_drops = []) wrap_name (param_ltys : string list) target_ret fn_name =
   let arg_names = List.mapi (fun i _ -> Printf.sprintf "%%a%d" i) param_ltys in
   (* A closure call consumes its heap arguments ([Clo_flags]), but the target
      is an ordinary function that may BORROW one, so the trampoline releases
@@ -427,7 +428,19 @@ let clo_wrap_define ?(drop_clo = false) ?(borrowed = []) ?(deep_drops = [])
              %s = select i1 %s, i64 %s, i64 %s\n"
             i name a i c a s i u c s i);
           "i64 " ^ u
-        end else target_ty ^ " " ^ name)
+        end else begin
+          (* A `ptr` param may carry a Float box, which the caller keeps
+             ([Clo_flags]) while the target may consume it or the [releases]
+             below drop it: take this call's own reference first, exactly as
+             an erased apply-fn param does ([march_clo_param_own]); a no-op
+             for any other value.  [own_float] is false for an actor's
+             dispatch/on_stop trampoline, whose runtime caller hands over no
+             reference at all (see [Llvm_emit.clo_wrap_borrowed]). *)
+          if own_float && target_ty = "ptr" then
+            Buffer.add_string prologue
+              (Printf.sprintf "  call void @march_clo_param_own(ptr %s)\n" name);
+          target_ty ^ " " ^ name
+        end)
       param_ltys arg_names in
   let call_args = String.concat ", " call_arg_strs in
   let pro =
@@ -449,9 +462,12 @@ let clo_wrap_define ?(drop_clo = false) ?(borrowed = []) ?(deep_drops = [])
        ret ptr %%rp\n}\n\n"
       wrap_name decl_str pro fn_name call_args releases
   else
-    (* scalar (i64): tag as (n<<1)|1 so the dispatch's conditional untag recovers it *)
+    (* scalar (i64): tag as (n<<1)|1 so the dispatch's conditional untag
+       recovers it.  A plain shl: the callee returns its Int BARE (lazy
+       normalisation, [Llvm_ctx.emit_tag_scalar]), and the shift is what
+       drops its unspecified bit 63. *)
     Printf.sprintf
       "define ptr @%s(%s) alwaysinline {\nentry:\n%s  %%r = call %s @%s(%s)\n%s  \
-       %%rs = shl nsw i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  \
+       %%rs = shl i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  \
        %%rp = inttoptr i64 %%rt to ptr\n  ret ptr %%rp\n}\n\n"
       wrap_name decl_str pro target_ret fn_name call_args releases

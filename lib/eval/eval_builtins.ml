@@ -303,6 +303,11 @@ let base_env : env =
   ; ("epoch_draining", VBuiltin ("epoch_draining", function
         | [] | [VUnit] -> VBool false
         | _ -> eval_error "epoch_draining: expected unit"))
+  (* DD step 12a: the interpreter has no reload server; a topology app run
+     interpreted gets the same answer a compiled program without one does. *)
+  ; ("reload_request", VBuiltin ("reload_request", function
+        | [ VString _ ] -> VString "ERR no_reload_server\n"
+        | _ -> eval_error "reload_request: expected a string"))
   ; ("epoch_holds", VBuiltin ("epoch_holds", function
         | [] | [VUnit] -> VInt 0
         | _ -> eval_error "epoch_holds: expected unit"))
@@ -985,8 +990,11 @@ let base_env : env =
         | _ -> eval_error "int_shl: expected two ints"))
   ; ("int_shr", VBuiltin ("int_shr", function
         | [VInt a; VInt n] ->
+          (* Arithmetic (sign-propagating) shift, matching compiled ashr; a
+             logical shift's answer for a negative Int depends on the
+             63-bit word width, so it would never agree across backends. *)
           if n < 0 || n >= 63 then eval_error "int_shr: shift out of range"
-          else VInt (a lsr n)
+          else VInt (a asr n)
         | _ -> eval_error "int_shr: expected two ints"))
   ; ("int_popcount", VBuiltin ("int_popcount", function
         | [VInt n] ->

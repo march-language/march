@@ -297,7 +297,7 @@ void    march_timer_cancel(void *tok);
 
 /* Polymorphic containers store scalars via tagged integers: the low bit of the
  * pointer is set to 1 for immediate scalar values (integers, booleans, chars).
- * Heap pointers from march_alloc (backed by calloc) are always 8-byte aligned,
+ * Heap pointers from march_alloc (malloc/mi_malloc) are always 8-byte aligned,
  * so their low bit is always 0.  This uniform tagging scheme lets the runtime
  * discriminate between heap pointers and immediates without dereferencing.
  *
@@ -327,6 +327,13 @@ static inline void march_clo_arg_retain(void *arg) {
     if (IS_HEAP_PTR(arg) && ((march_hdr *)arg)->tag != MARCH_FLOAT_TAG)
         march_incrc(arg);
 }
+
+/* The callee half: an apply fn's prologue takes its own reference to a Float
+ * box arriving at an erased (TVar) parameter. Defined in march_runtime.c. */
+void march_clo_param_own(void *p);
+/* The caller half for an erased argument: the Float box to release after the
+ * call, or NULL. Defined in march_runtime.c. */
+void *march_clo_float_arg(void *p);
 
 /* Moved here from march_runtime.c: the inline-string encoding below is safe
  * only BECAUSE of this predicate's exact definition — an inline string sets the

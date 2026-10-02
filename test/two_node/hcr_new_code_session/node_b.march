@@ -148,8 +148,10 @@ mod HcrSessionB do
 
   fn main(c : Cap(IO)) do
     let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
-    -- 15 s suspect timeout: see node_a.march.
-    let cfg = { ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "hcr-secret", 1) with swim: Swim.config(500, 15000, 2) }
+    -- HCR_SUSPECT_MS: see node_a.march.
+    let base = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "hcr-secret", 1)
+    let suspect_ms = Env.get_int("HCR_SUSPECT_MS", 0)
+    let cfg = if suspect_ms > 0 do { base with swim: Swim.config(500, suspect_ms, 2) } else base end
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->

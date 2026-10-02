@@ -1682,8 +1682,8 @@ static void *make_no_upgrade(void) {
  *
  * The old heap-allocating version was not, as first reported, the cause of the
  * empty-200 outage: `halted` is tested by its LOW BIT (the emitted IR for
- * HttpServer.run_pipeline does `trunc i64 %x to i1`), and march_alloc is
- * calloc-backed so its pointers are always even — the pointer read as `false`
+ * HttpServer.run_pipeline does `trunc i64 %x to i1`), and march_alloc's
+ * pointers are always 16-byte aligned, so even — the pointer read as `false`
  * and the pipeline ran. Verified by restoring it: 20/20 requests correct.
  *
  * It is still wrong, and fixed rather than left alone, for two reasons: it
@@ -1711,7 +1711,7 @@ static void *make_conn(int64_t fd, int64_t method, void *path, void *path_info,
                         int64_t resp_status, void *resp_headers, void *resp_body,
                         void *halted, void *assigns, void *upgrade) {
     void *c = march_alloc(16 + 13 * 8);
-    /* tag = 0 (single constructor), already zeroed by march_alloc */
+    /* tag = 0 (single constructor), set by march_alloc's header init */
     char *base = (char *)c;
     *(int64_t *)(base + 16)  = fd;             /* field 0: fd */
     *(int64_t *)(base + 24)  = method;         /* field 1: method (atom i64) */

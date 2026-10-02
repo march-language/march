@@ -16,7 +16,11 @@
        runs, and [MARCH_UPGRADE_DEPLOYED], which forge creates once the new
        code is live. It exits 0 when its own checks pass.
     5. Deploy the working tree into every process through
-       [Cmd_deploy_hot.run] on its local socket (no tunnel).
+       [Cmd_deploy_hot.run] on its local socket (no tunnel). When the
+       topology has a [[control]] section, through the in-cluster control
+       plane instead, as [forge deploy] does on the cluster backend: one
+       signed release, sent to a candidate and followed until every process
+       has applied it ([deploy_through_control]).
     6. Wait for the tests to exit and for the drain: every actor has reached
        its marker ([PINS]' [markers_live] is 0; the soft deadline forces the
        unheld ones). An actor holding an epoch (a session endpoint whose
@@ -169,6 +173,47 @@ let pinned_old pins =
 let env_float name default =
   match Option.bind (Sys.getenv_opt name) float_of_string_opt with Some f -> f | None -> default
 
+(** The deploy through the in-cluster control plane, for a topology with a
+    [[control]] section (distributed-deploys step 12a): what [forge deploy]
+    does on the cluster backend. Wait for a leader that hears from every
+    process, then one signed release (the patch on every pool, all at once),
+    its artifact uploaded to the candidates, followed to [complete]. No
+    process is reached through its reload socket. *)
+let deploy_through_control ~(t : Topology.t) ~(nodes : Reconcile.node list) ~sk ~pubkey ~manifest ~new_so
+    ~old_manifest ~old_schemas ~new_schemas ~entry_path : (unit, string) result =
+  let candidates = match t.Topology.control with Some c -> c.Topology.candidates | None -> "" in
+  let endpoints =
+    List.filter_map (fun (n : Reconcile.node) ->
+        if List.mem candidates n.labels then
+          Some { Cluster_deploy.host = "127.0.0.1"; port = n.port + Topology_run.control_port_offset }
+        else None)
+      nodes
+  in
+  if endpoints = [] then Error (Printf.sprintf "no process carries the control candidates' label %S" candidates)
+  else
+    let reporting () =
+      match Cluster_deploy.status endpoints with
+      | Ok s -> List.for_all (fun (n : Reconcile.node) ->
+          List.exists (fun (x : Cluster_deploy.node_state) -> x.n_name = n.name) s.nodes) nodes
+      | Error _ -> false
+    in
+    if not (wait_until ~timeout:(env_float "MARCH_UPGRADE_CONTROL_S" 120.) reporting) then
+      Error "the control plane never had a leader hearing from every process"
+    else begin
+      say "deploying the working tree through the control plane (a release to %d process(es))" (List.length nodes);
+      let pools = List.sort_uniq String.compare (List.map (fun (n : Reconcile.node) -> n.pool) nodes) in
+      Cluster_deploy.run
+        { Cluster_deploy.env = "upgrade"; endpoints; sk; pubkey;
+          hot = [ { Cluster_deploy.hb_name = "shared"; hb_pools = pools; hb_manifest = manifest; hb_so = new_so;
+                    hb_old_manifest = old_manifest; hb_old_schemas = old_schemas; hb_new_schemas = new_schemas } ];
+          topology_body = Topology.digest_text t; push_topology = false; canary = 0; canary_window_ms = 0;
+          rest_window_ms = 0;
+          (* Short: the recorder's socket lives here (sun_path). *)
+          work_dir = Filename.concat "/tmp" (Printf.sprintf "forge-upgrade-%d" (Unix.getpid ()));
+          entry_path; grant_caps = []; follow_s = env_float "MARCH_UPGRADE_TEST_S" 180. }
+      |> Result.map print_string
+    end
+
 (** The whole test. [Ok summary] when the upgrade passed. *)
 let run ~ref_ () : (string, string) result =
   let* proj = Project.load () in
@@ -259,8 +304,14 @@ let run ~ref_ () : (string, string) result =
                  Error (Printf.sprintf "%s %s before the upgrade (log: %s)" (Procs.name p)
                           (Procs.string_of_status (Option.get (Procs.status p))) (Procs.log_path p))
                | None ->
-                 say "deploying the working tree into %d process(es)" (List.length nodes);
                  let deploys =
+                   if started.topology.Topology.control <> None then
+                     [ ("the control plane",
+                        deploy_through_control ~t:started.topology ~nodes ~sk ~pubkey:pk_b64 ~manifest ~new_so
+                          ~old_manifest ~old_schemas ~new_schemas
+                          ~entry_path:(Result.value ~default:"" (Project.entry proj))) ]
+                   else begin
+                   say "deploying the working tree into %d process(es)" (List.length nodes);
                    List.map (fun n ->
                        match n.Reconcile.socket with
                        | None -> (n.Reconcile.name, Error "no reload socket")
@@ -276,6 +327,7 @@ let run ~ref_ () : (string, string) result =
                          in
                          (n.Reconcile.name, Result.map ignore r))
                      nodes
+                   end
                  in
                  Out_channel.with_open_bin deployed (fun oc -> output_string oc "deployed\n");
                  let failed_deploys = List.filter_map (fun (n, r) -> match r with Error m -> Some (n ^ ": " ^ m) | Ok () -> None) deploys in

@@ -2,6 +2,7 @@
 #include "march_scheduler.h"
 #include "march_dispatch.h"
 #include "march_monitor_registry.h"
+#include "march_observe.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,8 @@
 #include <math.h>
 #include <ctype.h>
 #include <stdatomic.h>
+#define MARCH_ALLOC_DEFINE_SHIMS   /* the one TU that defines march_free_any / march_realloc_any */
+#include "march_alloc.h"   /* march_obj_malloc; free()/realloc() routing when mimalloc is on */
 
 /* Defined next to march_actor_broadcast_migrate; used by the actor receive
  * loop and march_actor_msg_dispose, both of which precede it in this file. */
@@ -92,7 +95,14 @@ static void march_debug_report_oom(const char *where, int64_t requested) {
 static FILE            *gc_trace_file  = NULL;
 static pthread_mutex_t  gc_trace_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* 0 = not yet checked, 1 = enabled, -1 = disabled */
-static int              gc_trace_state = 0;
+/* Exported (not static) so the compiler's inline refcount fast path
+ * (lib/tir/llvm_rc_inline.ml) can read it: 0 = not yet resolved, -1 = off,
+ * 1 = on. The fast path only runs when it is -1; anything else takes the
+ * out-of-line call, which resolves it and emits trace events. Resolved eagerly
+ * in spawn_main_impl so the first refcount op of a program is not the one that
+ * pays for it. */
+int march_gc_trace_state = 0;
+#define gc_trace_state march_gc_trace_state
 
 static void gc_trace_init_locked(void) {
     if (getenv("MARCH_TRACE_GC") == NULL) { gc_trace_state = -1; return; }
@@ -422,8 +432,15 @@ static inline void march_run_resource_dtor(void *p) {
     }
 }
 
+/* NOT zeroing (march_obj_malloc, 2026-10-02 -- was calloc).  The header is
+ * written here; the payload is whatever the allocator's previous tenant left
+ * and is the CALLER's to write, every word, before the object is published,
+ * read, or RC-walked.  Every caller was audited for that
+ * (specs/progress/2026-10-02-march-alloc-malloc.md); the TRMC hole store in
+ * lib/tir/llvm_emit_alloc.ml and the task-spawn stores below are the ones
+ * that used to lean on the zeroing. */
 void *march_alloc(int64_t sz) {
-    void *p = calloc(1, (size_t)sz);
+    void *p = march_obj_malloc((size_t)sz);
     if (!p) {
         march_debug_report_oom("march_alloc", sz);
         fputs("march: out of memory\n", stderr); exit(1);
@@ -586,6 +603,27 @@ void march_tco_defer_drain(void *buf) {
     free(b);
 }
 
+/* The callee half of the closure-call convention (march_clo_arg_retain in
+ * march_runtime.h is the caller half): every closure caller, compiled or C,
+ * KEEPS a boxed Float argument, while an apply fn owns its parameters. An
+ * apply fn whose parameter is still erased (TVar after mono) cannot tell a
+ * Float box from any other heap value statically, so its prologue
+ * (Llvm_toplevel.emit_fn) calls this to take its own reference to a Float box.
+ * Every other value is already the callee's and passes through. */
+void march_clo_param_own(void *p) {
+    if (IS_HEAP_PTR(p) && ((march_hdr *)p)->tag == MARCH_FLOAT_TAG)
+        march_incrc(p);
+}
+
+/* The matching caller half for an ERASED argument: compiled code passing a
+ * TVar value to a closure handed the callee a reference, which the callee
+ * never consumes when the value is a Float box. Called BEFORE the call (a
+ * non-Float argument is the callee's and may be freed during it); returns the
+ * box for the caller to release afterwards, or NULL (a no-op release). */
+void *march_clo_float_arg(void *p) {
+    return (IS_HEAP_PTR(p) && ((march_hdr *)p)->tag == MARCH_FLOAT_TAG) ? p : NULL;
+}
+
 /* Non-atomic reference counting — for values provably local to one thread.
  * These must NOT be called on values that may be concurrently accessed from
  * another actor.  The callers (Perceus-generated code) guarantee this.
@@ -688,6 +726,39 @@ int64_t march_decrc_local_freed(void *p) {
         return 1;
     }
     return 0;
+}
+
+/* Last-reference tails for the compiler's inline refcount fast path
+ * (lib/tir/llvm_rc_inline.ml). The inline code has ALREADY decremented the
+ * count with an atomic sub and seen [prev] <= 1, so these must not decrement
+ * again: they run exactly what march_decrc / march_decrc_local run at that
+ * point. [prev] == 1 means the caller held the last reference and the object is
+ * solely owned; [prev] < 1 is an underflow. The fast path only runs with GC
+ * tracing resolved off, so no trace event is due here. */
+void march_rc_last_atomic(void *p, int64_t prev) {
+    if (prev == 1) {
+        int32_t tag = ((march_hdr *)p)->tag;
+        if (tag == MARCH_STRING_TAG && str_stats_on())
+            str_stats_free(((march_string *)p)->len);
+        march_run_resource_dtor(p);
+        MARCH_FREE_BUMP();
+        free(p);
+        return;
+    }
+    fprintf(stderr, "march: RC underflow (rc was %lld) at %p — aborting\n",
+            (long long)prev, p);
+    abort();
+}
+
+void march_rc_last_local(void *p, int64_t prev) {
+    if (prev == 1) {
+        march_run_resource_dtor(p);
+        MARCH_FREE_BUMP();
+        free(p);
+        return;
+    }
+    fprintf(stderr, "march: local RC underflow at %p — aborting\n", p);
+    abort();
 }
 
 /* ── IOList hash ─────────────────────────────────────────────────────── */
@@ -1424,15 +1495,23 @@ int64_t march_io_read_byte(void) {
 
 /* ── Integer math helpers ────────────────────────────────────────────────── */
 
+void march_panic(void *s);  /* defined below, under "Panic" */
+
+/* Wraps modulo 2^64 (unsigned arithmetic: signed overflow is UB in C); the
+ * compiled caller then reduces to March's 63-bit Int.  A negative exponent
+ * panics with the interpreter's message. */
 int64_t march_int_pow(int64_t base, int64_t exp) {
-    if (exp < 0) return 0;
-    int64_t result = 1;
+    if (exp < 0) {
+        march_panic(march_string_lit("int_pow: negative exponent", 26));
+        return 0;
+    }
+    uint64_t result = 1, b = (uint64_t)base;
     while (exp > 0) {
-        if (exp & 1) result *= base;
-        base *= base;
+        if (exp & 1) result *= b;
+        b *= b;
         exp >>= 1;
     }
-    return result;
+    return (int64_t)result;
 }
 
 /* ── March call stack (for backtraces) ───────────────────────────────────── */
@@ -1682,6 +1761,27 @@ int64_t march_checked_div_op(int64_t a, int64_t b) {
 int64_t march_checked_mod_op(int64_t a, int64_t b) {
     if (b == 0) { march_panic(march_string_lit("modulo by zero", 14)); return 0; }
     return a % b;
+}
+
+/* int_shl / int_shr with a count that is not a literal in [0, 62].  March Int
+ * is 63-bit (specs/lang/type-system.md, "Int width and overflow"), so a count
+ * outside [0, 62] panics with the interpreter's message instead of being a
+ * poison LLVM shift.  int_shl's result is wrapped to 63 bits by the caller;
+ * int_shr is arithmetic (sign-propagating) on both backends. */
+int64_t march_checked_shl(int64_t a, int64_t n) {
+    if (n < 0 || n >= 63) {
+        march_panic(march_string_lit("int_shl: shift out of range", 27));
+        return 0;
+    }
+    return (int64_t)((uint64_t)a << n);
+}
+
+int64_t march_checked_shr(int64_t a, int64_t n) {
+    if (n < 0 || n >= 63) {
+        march_panic(march_string_lit("int_shr: shift out of range", 27));
+        return 0;
+    }
+    return a >> n;
 }
 
 /* ── Test harness ────────────────────────────────────────────────────────── */
@@ -3019,6 +3119,9 @@ static void spawn_main_impl(void (*fn)(void), int force_pin) {
     /* Drop privileges before the scheduler starts and before any user code
      * runs.  No-op unless built with --cap-sandbox. */
     march_sandbox_install();
+    /* Resolve the GC trace state before user code runs: the inline refcount
+     * fast path takes its out-of-line branch until it is resolved. */
+    (void)gc_trace_on();
     int expected = 0;
     if (atomic_compare_exchange_strong_explicit(
             &g_sched_initialized, &expected, 1,
@@ -6934,6 +7037,10 @@ void *march_task_spawn_thunk(void *clo_ptr) {
      * + in-scheduler waiter — see task_wait_done). */
     int64_t *task = (int64_t *)march_alloc(48);
     if (task) ((march_hdr *)task)->tag = MARCH_TASK_TAG;  /* see march_run_resource_dtor */
+    /* march_alloc does not zero (2026-10-02): proc handle, result, done flag
+     * and waiter all start at 0 by these stores, which happen BEFORE the
+     * spawn publishes the object -- see the race note below. */
+    if (task) { task[2] = 0; task[3] = 0; task[4] = 0; task[5] = 0; }
     /* Extra RC hold for the trampoline's wa->task raw pointer.  The caller
      * owns RC=1; this bumps to RC=2 so a fire-and-forget drop (RC→1) doesn't
      * free the object before the trampoline writes the result. */
@@ -6949,9 +7056,9 @@ void *march_task_spawn_thunk(void *clo_ptr) {
      * therefore races the trampoline with no synchronization between them and
      * can clobber a completed result/done flag back to zero (confirmed by
      * ThreadSanitizer: march_runtime.c:1833 write vs this site).  There is
-     * nothing to write: march_alloc() zero-initialises the whole object (so
-     * result/done start at 0) and the trampoline records task[2] itself as its
-     * first action (see march_thunk_trampoline).  Leave the task untouched. */
+     * nothing left to write: the four words were zeroed above, before the
+     * spawn, and the trampoline records task[2] itself as its first action
+     * (see march_thunk_trampoline).  Leave the task untouched from here. */
     (void)march_sched_spawn(march_thunk_trampoline, wa);
     return (void *)task;
 }
@@ -7001,6 +7108,9 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
     march_ensure_sched_started();
     int64_t *task = (int64_t *)march_alloc(48);  /* see march_task_spawn_thunk layout */
     if (task) ((march_hdr *)task)->tag = MARCH_TASK_TAG;
+    /* Zero the four payload words before publishing -- march_alloc does not
+     * (see march_task_spawn_thunk). */
+    if (task) { task[2] = 0; task[3] = 0; task[4] = 0; task[5] = 0; }
     if (task) march_incrc(task);  /* trampoline's RC hold — see march_task_spawn_thunk */
     march_thunk_arg *wa = (march_thunk_arg *)malloc(sizeof(march_thunk_arg));
     if (!wa) { return (void *)task; }
@@ -7008,8 +7118,8 @@ void *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr) {
     wa->task = task;
     march_cancel_token *tok = (march_cancel_token *)tok_ptr;
     /* Publish the proc LAST — see march_task_spawn_thunk for why storing into
-     * the task object after the spawn races the trampoline.  march_alloc zeroed
-     * the object and the trampoline records task[2] itself. */
+     * the task object after the spawn races the trampoline.  The payload was
+     * zeroed above and the trampoline records task[2] itself. */
     (void)march_sched_spawn_with_cancel(march_thunk_trampoline, wa, tok);
     return (void *)task;
 }
@@ -7082,6 +7192,10 @@ int64_t march_actor_get_int(void *actor, int64_t index) {
  * shutdown: the background thread drives all actors to completion, then the
  * join returns and the program exits normally. */
 void march_run_scheduler(void) {
+    /* The observe socket (march_observe.h): started here, on the main OS
+     * thread before any green thread exists, when MARCH_OBSERVE_SOCKET (or
+     * MARCH_HOT_RELOAD_SOCKET) is set.  Once only; a no-op otherwise. */
+    march_observe_maybe_start();
     if (atomic_load_explicit(&g_sched_bg_started, memory_order_acquire)) {
         /* Signal workers to stop accepting new work, then join. */
         march_sched_request_shutdown();
@@ -10783,8 +10897,8 @@ void *march_typed_array_filter(void *arr, void *mask) {
 }
 
 /* Release a fold's PREVIOUS accumulator when the closure did not. [prev] is
- * the accumulator just handed to the closure, [result] what it returned, [acc]
- * the fold's INITIAL accumulator.
+ * the accumulator just handed to the closure, [acc] the fold's INITIAL
+ * accumulator.
  *
  * A closure call consumes its heap arguments (march_clo_arg_retain in
  * march_runtime.h), so a non-Float [prev] is the callee's to release or to
@@ -10794,10 +10908,15 @@ void *march_typed_array_filter(void *arr, void *mask) {
  * [prev_is_float]) — reading [prev]'s tag afterwards is a use-after-free
  * (caught by ASAN on native_arr_fold_acc_leak_probe).
  *
- * A boxed Float is the exception: the apply fn unboxes it in its prologue and
- * never releases the box, and every Float coming out of an apply fn is a FRESH
- * box (re-boxed on return by march_alloc_float), so a Float [prev] that is not
- * [result] is still solely ours.
+ * A boxed Float is the exception: a closure callee never spends the caller's
+ * reference to it. An apply fn with a Float param unboxes it in its prologue
+ * and re-boxes any Float it returns; one whose param is erased (TVar) takes its
+ * own reference first (march_clo_param_own), so even handing [prev] straight
+ * back as [result] returns a second reference. A Float [prev] is therefore
+ * still ours after the call, and released whether or not it is [result]. Until
+ * 2026-09-30 this skipped prev == result, on the theory that the callee had
+ * handed our own reference back; an erased callee that ignored [prev] freed it
+ * instead (specs/progress/2026-09-30-native-float-arr-fold-unused-elem-double-free.md).
  *
  * [acc] used to be excluded here too, on the intuition that the fold's INITIAL
  * accumulator belongs to the caller. It does not: every one of these helpers
@@ -10811,8 +10930,7 @@ void *march_typed_array_filter(void *arr, void *mask) {
  * per-element one. Dropping the exclusion makes the helper honour the owned
  * convention it is declared under. A zero-length fold never enters the loop,
  * so [acc] is handed straight back as [result] and the caller releases it
- * once; the [prev == result] guard covers a closure that returns its
- * accumulator argument unchanged. See
+ * once. See
  * specs/todos/2026-09-16-native-float-arr-fold-leaks-two-boxes-per-call.md.
  *
  * Pinned by test/native/native_arr_fold_acc_leak_probe.march: the Float and
@@ -10822,9 +10940,8 @@ static inline int fold_acc_is_float(void *prev) {
     return IS_HEAP_PTR(prev) && ((march_hdr *)prev)->tag == MARCH_FLOAT_TAG;
 }
 
-static inline void fold_release_prev_acc(void *prev, int prev_is_float,
-                                         void *result) {
-    if (!prev_is_float || prev == result) return;
+static inline void fold_release_prev_acc(void *prev, int prev_is_float) {
+    if (!prev_is_float) return;
     march_decrc(prev);
 }
 
@@ -10848,7 +10965,7 @@ void *march_typed_array_fold(void *arr, void *acc, void *f) {
          * return a reference this loop owns. */
         march_clo_arg_retain(elem);
         result = call_closure_2(f, prev, elem);
-        fold_release_prev_acc(prev, prev_is_float, result);
+        fold_release_prev_acc(prev, prev_is_float);
     }
     march_decrc(f);
     return result;
@@ -10874,6 +10991,12 @@ static void *native_arr_alloc(int64_t len, int64_t elem_size, uint8_t kind) {
     }
     ((march_hdr *)arr)->tag = MARCH_NATIVE_ARR_TAG;
     *(int64_t *)((char *)arr + 16) = len;
+    /* Whole kind word: march_alloc does not zero, and only byte 24 carries
+     * the kind -- bytes 25..31 are header padding nothing may read as
+     * garbage.  The element body (NATIVE_ARR_HDR..) is the caller's to fill;
+     * every *_alloc_raw consumer (the inline nmap loops, the SIMD set copy
+     * path, Bytes->u8) writes all `len` elements. */
+    *(int64_t *)((char *)arr + 24) = 0;
     *(uint8_t *)((char *)arr + 24) = kind;
     return arr;
 }
@@ -11930,7 +12053,7 @@ void *native_int_arr_fold(void *acc, void *arr, void *f) {
         int prev_is_float = fold_acc_is_float(prev);
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
-        fold_release_prev_acc(prev, prev_is_float, result);
+        fold_release_prev_acc(prev, prev_is_float);
     }
     march_decrc(f);
     return result;
@@ -12137,14 +12260,14 @@ void *native_float_arr_map2(void *arr1, void *arr2, void *f) {
  * (acc, arr, f) argument order as native_int_arr_fold above.
  *
  * march_decrc(elem) after the call releases the FRESH per-element box we
- * just allocated. Confirmed safe (not a use-after-free) by inspecting
- * -emit-llvm for the compiled closure's apply fn: the erased-ptr calling
- * convention treats a Float argument as borrowed/read-only — the callee
- * only ever calls march_unbox_float(x.arg) to read the double value, never
- * stores x.arg itself. Even a closure that stores the element (e.g. cons it
- * into a List(Float)) allocates a FRESH march_alloc_float box from the
- * unboxed double for storage rather than aliasing our box — so our box has
- * no surviving alias once the call returns and is always safe to drop.
+ * just allocated. A closure callee never spends our reference to a Float box
+ * (march_clo_arg_retain in march_runtime.h): a Float-typed param is unboxed
+ * in the apply fn's prologue, and an ERASED one (a let-generalized
+ * `fn (p, x) -> p` passed in as a value) first takes its own reference
+ * (march_clo_param_own), which is what its unused-param drop, a store, or
+ * returning the element spends. Before that prologue existed, the erased
+ * callee's entry drop freed this box and the decrc below freed it again
+ * (specs/progress/2026-09-30-native-float-arr-fold-unused-elem-double-free.md).
  * Without this decrc, elem leaks: ~32B/element, unbounded in loop length
  * (confirmed via RSS measurement — see task-2-report.md). This decrc is
  * pinned by test/native/native_arr_fold_leak_probe.march; deleting it takes
@@ -12168,7 +12291,7 @@ void *native_float_arr_fold(void *acc, void *arr, void *f) {
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
         march_decrc(elem);
-        fold_release_prev_acc(prev, prev_is_float, result);
+        fold_release_prev_acc(prev, prev_is_float);
     }
     march_decrc(f);
     return result;
@@ -12301,7 +12424,7 @@ void *PREFIX##_fold(void *acc, void *arr, void *f) {                         \
         int prev_is_float = fold_acc_is_float(prev);                         \
         march_incrc(f);                                                      \
         result = call_closure_2(f, prev, elem);                              \
-        fold_release_prev_acc(prev, prev_is_float, result);             \
+        fold_release_prev_acc(prev, prev_is_float);                          \
     }                                                                        \
     march_decrc(f);                                                          \
     return result;                                                           \
@@ -12484,7 +12607,7 @@ void *native_f32_arr_fold(void *acc, void *arr, void *f) {
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
         march_decrc(elem);
-        fold_release_prev_acc(prev, prev_is_float, result);
+        fold_release_prev_acc(prev, prev_is_float);
     }
     march_decrc(f);
     return result;
@@ -12703,7 +12826,9 @@ void *ring_buf_make(int64_t cap) {
     ((march_hdr *)cell)->tag = MARCH_RESOURCE_TAG;
     *(void **)((char *)cell + 16) = r;
     *(void (**)(void *))((char *)cell + 24) = march_ring_dtor;
-    /* type_id@32 stays 0; ring cells never go through march_resource_get. */
+    /* type_id@32 = 0, stored explicitly (march_alloc does not zero); ring
+     * cells never go through march_resource_get. */
+    *(int64_t *)((char *)cell + 32) = 0;
     return cell;
 }
 

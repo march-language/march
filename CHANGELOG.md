@@ -19,6 +19,44 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **A read-only observe socket on every compiled program.** Set
+  `MARCH_OBSERVE_SOCKET=<path>` (or just `MARCH_HOT_RELOAD_SOCKET`, which puts it
+  at `<path>.observe`) and the program answers one-line requests with one line of
+  JSON. It serves `HELP` and `PING` today and is the base the coming
+  `forge observe`, `forge top` and `forge diagnose` build on. It is separate from
+  the hot-reload socket, so an observer can never block a deploy; the socket is
+  owner-only and holds at most eight clients at once.
+- **An in-cluster control plane for hot deploys (distributed deploys, step 12a).** A
+  `[control] candidates = "<host label>"` section in `topology.toml` makes every node run
+  an Agent and the labelled nodes serve a control API; one of them leads (`count = 1`
+  placement). A release, built and signed by forge (it holds the only key), is stored on
+  every reachable candidate, then carried out step by step with canary gates; nodes
+  verify every signed line themselves, so a compromised control node can delay a deploy
+  but not forge one. No ssh is involved in a hot deploy. A leader killed mid-rollout is
+  replaced and the release finishes without applying a step twice. Leadership needs
+  `Ctl.Control:offer` in the node's certificate. Restart-class changes still go through
+  the process backend.
+- **`forge deploy` goes through the control plane when the topology has a `[control]`
+  section.** It builds and classifies as before, writes the hot pools and the topology
+  push into one release signed with your deploy key, uploads the patches to the
+  candidates, sends the release and follows it step by step until it completes or halts,
+  printing the leader's reason when it halts. Nothing reaches a node by ssh for a hot
+  change; restart-class steps still run over ssh, in plan order, and `--plan` lists them
+  ("NEEDS SSH") and prints the release it would sign. `--via ssh` is the break-glass path,
+  `--status` shows the leader's view of the newest release, and `--audit [N]` shows the
+  leader's audit log: every release offered (accepted, or refused at the compare-and-set
+  and why), every step ordered and its answer, and each release's end, as JSON lines kept
+  on every candidate. `forge test --upgrade-from` deploys through the control plane too
+  when the topology has one, and `forge run --processes` gives each local process its own
+  control directory and control port. See "Through the in-cluster control plane" in
+  docs/hot-code-reload.md.
+- **Native builds allocate from a vendored mimalloc.** `march_alloc`, the allocator
+  behind every March value, now draws from a statically linked mimalloc instead of
+  libc `calloc`, with no new system dependency. Allocation-heavy programs get
+  faster: `binary_trees` 233 to 165 ms (-29%) and `list_ops` 76 to 62 ms (-18%),
+  with `tree_transform` about 3% faster. The cost is a larger resident set (7 MB to
+  14 MB on `binary_trees`). Set `MARCH_MALLOC=libc` when compiling to get the old
+  allocator; `MARCH_SANITIZE` builds, hot-reload patches and the REPL always use libc.
 - **`Array.sort_by`, `Array.sort_by_key`, `RRB.sort_by` and `RRB.sort_by_key`.**
   Stable sorts for the persistent vectors: `sort_by` takes the same comparator
   as `List.sort_by` (`fn (a, b) -> a <= b`), and `sort_by_key` takes a function
@@ -53,6 +91,29 @@ git log is authoritative for exact commits.
   replacement as `CertReplaced` or `CertRefused` (two new `SecurityEvent`
   constructors: a `match` that named every constructor needs a new arm).
 
+### Changed
+- **Compiled `Int` arithmetic normalises to 63 bits lazily, not after every
+  operation.** `+ - *`, negation and `int_shl` leave their result in the full
+  64-bit register and the reduction modulo 2^63 happens where the value is
+  observed (a comparison, a call into the runtime, a store, printing, ...).
+  Every program prints what it printed before — the parity suite against the
+  interpreter is the gate — but the shift pair the previous scheme put between
+  `fib(n-1) + fib(n-2)` and `ret` is gone, so LLVM's accumulator
+  tail-recursion elimination fires again: `bench/fib.march` is ~17% faster
+  compiled (same-box A/B), and arithmetic that feeds a list cell or record field
+  no longer pays a shift pair on the way in.
+- **Heap objects are no longer zero-filled on allocation.** `march_alloc`, the
+  allocator behind every constructor, closure, tuple and record in compiled
+  code, is now a plain `malloc` (or `mi_malloc`) instead of a `calloc`. The
+  2026-08-04 x86/glibc ablation put the zeroing at about 11% of
+  `binary_trees`; on Apple Silicon it measures flat with either allocator, so
+  treat this as a contract simplification rather than a speed-up until it is
+  re-measured on x86. Every runtime and codegen allocation site was audited to
+  write all of its fields before the object can be read, and the four that
+  leaned on the zeroing (the TRMC hole slot, `Task.spawn`'s result words, a
+  native-array header word, a ring-buffer cell's type id) now store their zeros
+  explicitly. No source-level change.
+
 ### Fixed
 - **Compiled HTTP servers no longer leak ~0.5 KiB per request.** Neither the
   thread-pool nor the event-loop server released the `Conn` a handler returns
@@ -62,18 +123,99 @@ git log is authoritative for exact commits.
   compiled `Conn -> Unit` release function, applied once the response bytes
   are written (after deferred writes drain, or on close). `http_server_listen`
   takes that function as a fifth argument.
-- **Dead join-point closures from `match` no longer leak their captures.** A
-  `match` with a non-trivial default and a nested pattern (for example a
-  router matching `(method, path_info)`) leaked ~1 KiB per evaluation: the
-  fall-through closure chain lower_match builds was dropped shallowly in the
-  arms that never fell through, pinning the match's live variables. The Drop
-  pass now releases a closure's captures when the closure is dropped unapplied
-  and reaches into captured closures whose struct is known.
 - **A borrowed aggregate dropped by a closure trampoline is released deeply.**
   A top-level function with a borrowed parameter, passed as a closure value,
   had that argument released by its `$clo_wrap` with a shallow `march_decrc`,
   orphaning the aggregate's children; the trampoline now calls the type's
   synthesized deep drop when one exists.
+- **A release through the control plane no longer orders functions the nodes cannot
+  patch.** forge recorded a release's signed lines against the last deployed manifest,
+  which lists every function, including the control plane's own wiring, which has no
+  hot slot. A release that changed one of them ordered its activation and every node
+  refused the whole batch (`commit_partial_failure`). forge now asks the candidates which
+  slots the nodes have and activates only changed functions among them, as
+  `forge deploy hot` does against a real node. A cluster leader
+  also no longer waits forever for a cluster member that runs no agent (a client, an
+  upgrade test's traffic node): an unmarked member is waited for 20 s
+  (`MARCH_CONTROL_AGENT_GRACE_MS`).
+- Compiled: a dying tuple releases its boxed `Float` fields, and a dying
+  `List(Float)` cell (any generic container slot holding a Float) releases the
+  box in that slot; both leaked one object per Float before.
+- Compiled: a tuple or record holding a niche-encoded `Option` (`Some(tree)`)
+  releases the payload deeply when dropped; the subtree leaked before.
+- Compiled: an aggregate whose field type still mentions a type variable (a
+  tuple destructured inside a polymorphic local `fn`) is released instead of
+  skipped; its lists are walked and freed.
+- Compiled: a generic named function passed where a `Float -> Float -> Float`
+  closure is expected returned the wrong value (its trampoline unboxed the
+  arguments per the use-site type instead of forwarding them as the function
+  is defined).
+- Compiled: a self tail call inside a nested-pattern match arm
+  (`Cons(a, Cons(b, rest)) -> … f(Cons(b, rest))`) is now a loop; it recursed
+  once per element and overflowed the green-thread stack at ~8,000 elements.
+  A match's fall-through join point with a single call site is put back in
+  place by the lowering instead of becoming a closure.
+- Compiled: a nested pattern with a default arm that uses the scrutinee no
+  longer leaks the matched value (the dead join-point closure's release is
+  deep), and Perceus no longer releases a scrutinee ahead of a pattern field
+  the arm still reads.
+- **`==` inside a `test`/`setup` body is checked where it is written.** The
+  `Eq`/`Ord`/`Num`/interface constraints a test or setup body raised stayed
+  pending until the next top-level `fn` or `let`, so a `fn` placed between two
+  `describe` blocks was blamed for every `==` in the tests above it ("`T` does
+  not implement interface `Eq`" at the fn's span), and with no later `fn` they
+  were never checked at all. They are now reported at the test itself. Tests
+  that compared a type with no `Eq` impl, which used to pass unchecked, are now
+  rejected; to keep them working, these stdlib types now `derive Eq`:
+  `Cli.FlagArity`, `Control.CtlHosts`/`CtlAction`/`CtlGate`/`StepOrder`/
+  `CtlDecision`, `File.FileKind`, `Membership.MemberStatus`/`Member`,
+  `NodeCert.Cert`, `NodeIdentity.Identity`, `RemoteCall.CallError`/`Verdict`/
+  `ReplyResult`/`CallReply`, `Swim.Action` and `VectorClock.ClockOrder`.
+- **Hot reload: the entry module's own top-level functions can be hot deployed.**
+  The compiler names them without the entry module's prefix, so with
+  `--hot-reload <EntryModule>` (what forge passes) a role body, hook or helper
+  written at the top of the entry file had no dispatch slot: `forge deploy hot`
+  answered "no hot-deployable changes" and the old code kept running. They are now
+  slots, chosen by where the compiler loaded them from; `main` stays off the
+  boundary, and so does the control plane a `[control]` topology splices into the
+  entry module (it runs the deploy), including its `CtlRespawner` actor. A
+  function's call to itself stays a direct call, so a recursive function costs
+  nothing extra in a `--hot-reload` build (dispatching it made `fib` 4.8x slower).
+- **Hot reload: a one-line edit to a topology app no longer plans a restart.** A
+  function's hot-reload identity hashed the numbers the compiler gives lambdas,
+  join points and type variables, which any edit renumbers, so every function that
+  merely referred to one (the generated `main`, `Front.start`, ...) looked changed,
+  and an unslotted `main` changing made `forge deploy` restart the pool. An edit
+  inside a role body's closure was planned as a restart too, because the manifest
+  never said which function builds the closure. Now a handler edit flags that
+  handler and its actor's dispatch only, a closure edit flags the function that
+  builds it, and both deploy as hot patches.
+- **A let-bound lambda that ignores or returns a `Float` argument no longer
+  crashes compiled code.** A lambda bound with `let` and left generic, such as
+  `let keep = fn (acc, x) -> acc`, freed the `Float` it was given when it
+  ignored it, and the caller freed it again. That happened when the lambda was
+  passed to `NativeArray.fold_float`, `fold_f32` or `typed_array_fold`, or called
+  through a parameter typed `Float -> Float -> Float`. It showed up as
+  `RC underflow` on macOS and `malloc(): unaligned fastbin chunk detected` on
+  Linux. Such a lambda that returns its `Float` argument, or passes it on to
+  another closure, also no longer leaks it.
+- **A compiled `Array` that is built, updated and dropped no longer leaks its
+  trie.** `Array.from_list`, `push`, `set` and `pop` leaked about one object per
+  element once a vector held more than one 32-element leaf (a 1,100-element
+  `from_list` leaked 2,224 objects per build, 40,000 leaked 81,118). Four compiler
+  causes (a tuple bound by `let (a, b) = ..` was never released when its scope ended
+  in an `if`, `match` or arithmetic; nested local functions lost their frame tuples;
+  a nested pattern with a default arm leaked its join-point closure; an `Option` of
+  a tree in a tuple was released shallowly) are worked around in `stdlib/array.march`
+  or fixed in Perceus. Loops that destructure a tuple are still compiled to loops.
+- **Compiled `Seq` constructors and combinators no longer leak.** Draining
+  `Seq.from_list`, `Seq.from_string_lines`, `Seq.map`, `Seq.filter` and
+  `Seq.concat` with `Seq.count` or `Seq.fold` leaked 3 to 5 heap objects per
+  use, so `Process.run_stream` leaked on every call. The compiler leaked a
+  closure's forwarded captures, reused a dying `Seq` cell as a capture-free
+  closure, missed closures stored through cell reuse, and left a dead
+  join-point closure holding references in `match ... rest -> ...` fall-throughs.
+  A capturing lambda handed to `Seq.map` still leaks one object per use.
 - **Compiled `to_string(())` prints `()`.** A compiled program printed `0` for
   the unit value, in `to_string`, `show`, string interpolation and inside
   containers (`Some(())` printed `Some(0)`). It now prints `()` as the
@@ -519,6 +661,20 @@ git log is authoritative for exact commits.
   two mailbox helpers now return `List((Pid(a), Int))` (the parameterized `Pid`) and
   `NodeCall` names `RemoteCall.NoConnection` explicitly instead of the ambiguous bare
   constructor; seven hidden stdlib type errors are gone.
+- **Compiled and interpreted programs now agree on `Int` overflow.** `Int` is
+  63-bit and wraps on overflow ([Int width and overflow](specs/lang/type-system.md#int-width-and-overflow)).
+  Compiled code used to do 64-bit arithmetic in registers, so
+  `int_max_value() + int_max_value()` (or the same sum on two values read from a
+  `NativeArray`) printed `9223372036854775806` compiled and `-2` interpreted. The
+  compiled value also changed once it was stored in a list, tuple or closure. Compiled
+  `+ - * /`, negation, `int_shl`, `int_div`, `int_abs` and `int_pow` now wrap
+  to 63 bits, and compiled `int_max_value()`/`int_min_value()` return
+  `4611686018427387903`/`-4611686018427387904` instead of the 64-bit limits.
+  Compiled `int_popcount(-1)` is 63, as interpreted.
+- **Compiled `int_shl`/`int_shr` with a shift count outside `[0, 62]` now panic**
+  with `int_shl: shift out of range` (as the interpreter does) instead of
+  returning an undefined value. Compiled `int_pow` with a negative exponent
+  panics with `int_pow: negative exponent` instead of returning `0`.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
@@ -798,6 +954,33 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **Compiled code no longer makes a function call for every reference-count
+  update.** The common case of each increment and decrement is now inlined into
+  the calling function, and the runtime is called only to free an object or while
+  `MARCH_TRACE_GC` is on. Closure-heavy code gets about 25% faster
+  (`bench/list_ops.march`), tree code 6–12%. Let bindings now also get stack
+  slots LLVM can keep in registers, so deep non-tail recursion uses less stack
+  than before. Behaviour, trace output and leak accounting are unchanged. It is
+  off for wasm and sanitizer builds, and `MARCH_NO_INLINE_RC=1` turns it off.
+- **`NativeArray.fold_*` with a lambda is up to 67× faster when compiled.** A fold
+  whose callback is a lambda written at the call site, with an `Int` or `Float`
+  accumulator matching the array's elements, now compiles to a loop in the calling
+  function instead of calling the runtime once per element. A Float fold no longer
+  allocates a box for every element and accumulator: 4M elements take about 3 ms
+  instead of 200 ms. Int folds vectorize and run about 21× faster. Results are
+  unchanged, Float addition keeps its left-to-right order, and other folds
+  (String or record accumulators, or a callback passed in as a variable) behave
+  exactly as before.
+- **Breaking: `Seq.batched`, `Flow.batch` and `Gen.frequency` now declare their
+  preconditions in the signature.** `Seq.batched(seq, n)` and `Flow.batch(stage, n)`
+  take `n : {Int | _ > 0}`, and `Gen.frequency(pairs)` takes
+  `pairs : {List((Int, Generator(a))) | len(_) > 0}`. Each already forwarded to a
+  contracted callee without restating the contract, so a zero batch size or an
+  empty list compiled and failed at run time; a literal violation is now a
+  compile error, and an unproven argument is a hint (an error under
+  `cap verified`). To migrate, run `march --check --refine-suggest <fn>` on the
+  caller, which prints the refinement to add to its parameter, or guard the call
+  with `if n > 0` / a `match` on the list.
 - **A small scalar aggregate built in the arms of an `if`/`match` no longer
   allocates.** When every arm builds the same unboxed type (for example
   `if c do P2(a, 1) else P2(1, a) end`), the join now holds the struct directly
@@ -994,6 +1177,10 @@ git log is authoritative for exact commits.
   says so and suggests `fn pair -> match pair do (a, b) -> … end`. Genuinely
   curried callbacks such as `List.fold_left`'s `b -> a -> b` are unaffected,
   including when the accumulator is itself a tuple.
+- **Interpreted `int_shr` is now an arithmetic (sign-propagating) shift**, as it
+  already was compiled: `int_shr(-8, 1)` is `-4`. It used to be a logical shift
+  in the interpreter, so `int_shr(-8, 1)` printed `4611686018427387900`.
+  Non-negative inputs give the same result as before.
 
 ### Removed
 - **The `respond` builtin is gone.** It was an interpreter no-op stub

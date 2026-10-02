@@ -1764,7 +1764,10 @@ let stdlib_only : (string * string) list ref =
          the DELIVERY_FAILED hook. *)
       ("delivery_origin_set", "remote delivery origins are stamped by `ClusterNode`");
       ("delivery_origin_clear", "remote delivery origins are stamped by `ClusterNode`");
-      ("delivery_failed_watch", "the DELIVERY_FAILED hook is installed by `ClusterNode`") ]
+      ("delivery_failed_watch", "the DELIVERY_FAILED hook is installed by `ClusterNode`");
+      (* DD step 12a: runs a request line through the node's own reload-socket
+         dispatch; only the control plane's Agent relays operator-signed lines. *)
+      ("reload_request", "use `Control.relay_line(line)` (the control plane's Agent)") ]
 
 
 (* [gated_shadowed] bookkeeping shared by every binding funnel: a rebinding

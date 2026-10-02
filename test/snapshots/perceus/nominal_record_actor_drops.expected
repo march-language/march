@@ -32,11 +32,11 @@ Bump_Hit($actor, $Hit_k)
 ## Bump_spawn
 fn Bump_spawn() : Ptr(Unit) =
   let $init_state : Bump_State = { n = 0 } in
-let $rc_1 : Ptr(Unit) = let $init_n : Int = $init_state.n in
+let $init_n : Int = $init_state.n in
 let $spawned : Ptr(Unit) = alloc Bump_Actor(Bump_dispatch, true, $init_n) in
-$spawned in
+let $rc_2 : Ptr(Unit) = $spawned in
 dec_rc $init_state;
-$rc_1
+$rc_2
 
 ## main
 fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) : () =
@@ -57,11 +57,10 @@ fn two_reads(i : Int) : Int =
 let $t5 : String = let $t4 : Int = +(i, 1) in
 int_to_string($t4) in
 { a = $t3, b = $t5 } in
-let $rc_2 : Int = let $t7 : Int = let $t6 : String = r.a in
+let $t7 : Int = let $t6 : String = r.a in
 string_length($t6) in
 let $t9 : Int = let $t8 : String = r.b in
 string_length($t8) in
-+($t7, $t9) in
 dec_rc r;
-$rc_2
++($t7, $t9)
 

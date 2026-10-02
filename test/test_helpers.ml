@@ -391,8 +391,16 @@ let escape_module src =
   let tir = March_tir.Lower.lower_module ~type_map m in
   let tir = March_tir.Mono.monomorphize tir in
   let tir = March_tir.Defun.defunctionalize tir in
-  let tir = March_tir.Perceus.perceus tir in
-  March_tir.Escape.escape_analysis tir
+  (* The driver's per-type table and borrow map (Contract_pipeline), so the
+     fixtures are classified exactly as the compiler classifies them. *)
+  let k_table =
+    let collision_set = March_tir.Collision_set.compute tir.March_tir.Tir.tm_types in
+    March_tir.Kind.build ~externs:tir.March_tir.Tir.tm_externs ~collision_set
+      tir.March_tir.Tir.tm_types
+  in
+  let borrow_map = March_tir.Borrow.infer_module ~k_table tir in
+  let tir = March_tir.Perceus.perceus ~k_table ~borrow_map tir in
+  March_tir.Escape.escape_analysis ~k_table ~borrow_map tir
 
 (** True if [e] contains any EStackAlloc anywhere. *)
 let rec has_stack_alloc = function
@@ -681,7 +689,7 @@ let setup_jit_runtime () =
       "march_gc.c"; "sha1.c"; "march_extras.c"; "march_ctx_escape.c";
       "base64.c"; "march_ffi.c";
       "march_dispatch.c"; "march_reload.c"; "march_remote_registry.c";
-      "march_monitor_registry.c"; "tweetnacl.c"; "march_nacl.c";
+      "march_monitor_registry.c"; "march_observe.c"; "tweetnacl.c"; "march_nacl.c";
     ] in
     let c_inputs = runtime_c :: extra_src_list in
     let h_inputs =

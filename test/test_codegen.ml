@@ -8366,7 +8366,10 @@ let test_int_tag_coerce_ir () =
     with Not_found -> false
   in
   (* Tag: shl i64 %*, 1 and or i64 %*, 1 should appear for i64→ptr boxing *)
-  Alcotest.(check bool) "tag: shl nsw i64 ... 1"  true (ir_has "shl nsw i64");
+  Alcotest.(check bool) "tag: shl i64 ... 1"  true (ir_has "shl i64");
+  (* A plain shl, never nsw: under lazy normalisation the tagged i64 may be
+     a bare arithmetic result ([Llvm_ctx.emit_tag_scalar]). *)
+  Alcotest.(check bool) "tag: never shl nsw"  false (ir_has "shl nsw i64");
   Alcotest.(check bool) "tag: or i64 ... 1"   true (ir_has "or i64");
   (* Untag: ashr i64 %*, 1 should appear for ptr→i64 unboxing *)
   Alcotest.(check bool) "untag: ashr i64"      true (ir_has "ashr i64");
@@ -8412,7 +8415,7 @@ let test_int_tag_wrapper_ir () =
      its scalar result so the ECallPtr dispatch can untag it on read. *)
   Alcotest.(check bool) "wrapper: define ptr return" true (ir_has "define ptr @inc_fn$clo_wrap");
   Alcotest.(check bool) "wrapper: i64 param"         true (ir_has "i64 %a0");
-  Alcotest.(check bool) "wrapper: tags scalar result (shl)" true (ir_has "shl nsw i64 %r, 1")
+  Alcotest.(check bool) "wrapper: tags scalar result (shl)" true (ir_has "shl i64 %r, 1")
 
 (** Regression: string_chars and string_from_chars must lower to C-runtime
     calls in the LLVM backend.  Before the fix, emit_atom fell through to the
@@ -9446,8 +9449,8 @@ let test_native_int_arr_ir () =
   (* The length accessor is declared pure + speculatable so LLVM can hoist it
      out of index loops (the SIMD load bounds check calls it per iteration).
      Dropping the attributes silently un-hoists it; no result changes. *)
-  Alcotest.(check bool) "length declare is memory(none) speculatable" true
-    (ir_contains ir "@native_int_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)")
+  Alcotest.(check bool) "length declare is readnone speculatable" true
+    (ir_contains ir "@native_int_arr_length(ptr %arr) nounwind willreturn speculatable readnone")
 
 (** native_float_arr_* builtins must appear in the LLVM preamble and generate
     correct call instructions: double return for get/sum, ptr for make/set/map. *)
@@ -12710,6 +12713,177 @@ let test_compiled_int_mod_euclid_parity () =
     ~expected:"[1, 2, 2, 1]"
     ()
 
+(** March Int is 63-bit and wraps modulo 2^63 on BOTH backends
+    (specs/lang/type-system.md, "Int width and overflow").  Pre-fix the
+    compiled backend did 64-bit i64 arithmetic in registers, so
+    `max + max` printed 9223372036854775806 compiled and -2 interpreted, and
+    the same value read back out of a List or a closure was 63-bit again
+    (the (n<<1)|1 tag drops bit 63).  int_max_value was 2^63-1 compiled,
+    int_shr was logical in the interpreter and arithmetic compiled, and
+    int_popcount counted 64 bits compiled.  Operands come out of a
+    NativeIntArr so neither OCaml-side constant folding nor LLVM can fold the
+    edges away; the interpreter's line is asserted literally, so a change in
+    either backend shows up here. *)
+let test_compiled_int_overflow_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_int_overflow"
+    ~src:"mod IntOverflowParity do\n\
+    \  needs IO.Console\n\
+    \  fn apply(f, x) do f(x) end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let arr = NativeArray.from_list_int([4611686018427387903, -4611686018427387903, -8, -1, 1, 3, 62])\n\
+    \    let mx = NativeArray.get_int(arr, 0)\n\
+    \    let mn = NativeArray.get_int(arr, 1) - 1\n\
+    \    let m8 = NativeArray.get_int(arr, 2)\n\
+    \    let m1 = NativeArray.get_int(arr, 3)\n\
+    \    let one = NativeArray.get_int(arr, 4)\n\
+    \    let three = NativeArray.get_int(arr, 5)\n\
+    \    let s62 = NativeArray.get_int(arr, 6)\n\
+    \    println([mx + mx, mx + one, mn - one, mx * three, 0 - mn, mn / m1, mn % m1])\n\
+    \    println([int_max_value(), int_min_value(), int_max_value() + one])\n\
+    \    println([int_div(mn, m1), int_abs(mn), int_pow(three, 40), int_pow(m1, 63)])\n\
+    \    println([int_shl(one, s62), int_shl(mx, one), int_shr(m8, one), int_shr(mn, s62), int_shr(m8, 2)])\n\
+    \    println([int_popcount(m1), int_popcount(mn), int_popcount(mx), int_not(mx), int_xor(mn, m1)])\n\
+    \    println(apply(fn y -> y + one, mx))\n\
+    \    println([mx + mx == m1 - one, mx + one < 0])\n\
+    \  end\n\
+     end\n"
+    ~expected:"[-2, -4611686018427387904, 4611686018427387903, 4611686018427387901, \
+               -4611686018427387904, -4611686018427387904, 0]\n\
+               [4611686018427387903, -4611686018427387904, -4611686018427387904]\n\
+               [-4611686018427387904, -4611686018427387904, 2934293422202152993, -1]\n\
+               [-4611686018427387904, -2, -4, -1, -2]\n\
+               [63, 1, 62, -4611686018427387904, 4611686018427387903]\n\
+               -4611686018427387904\n\
+               [true, true]"
+    ()
+
+(** TRMC's EAllocHole on the FRESH-allocation path, after the allocator's free
+    lists have been filled with freed cons cells.  march_alloc is a plain
+    malloc (2026-10-02; it was a calloc), so a fresh hole cell's slot holds
+    the previous tenant's stale child pointer unless the emitter clears it --
+    the clearing store is pinned structurally by test_trmc's
+    "hole slot cleared at alloc" case; this is the end-to-end witness that
+    the fresh path (a SHARED scrutinee forces it: `shared` is held by main
+    across both copies, so the reuse token is never unique) builds the right
+    list after heap churn, with a drop (the shared scrutinee's decrc) landing
+    inside every hole's unfilled window.  Expected output is the
+    interpreter's. *)
+let test_compiled_trmc_hole_fresh_after_churn () =
+  assert_compiled_interp_parity
+    ~name:"march_trmc_hole_fresh"
+    ~src:"mod TrmcHoleFresh do\n\
+    \  needs IO.Console\n\
+    \  pfn churn(n : Int) : Int do\n\
+    \    let xs = List.map(List.range(0, n), fn i -> Cons(i, Cons(i + 1, Nil)))\n\
+    \    List.length(xs)\n\
+    \  end\n\
+    \  @[no_warn_recursion]\n\
+    \  pfn copy(xs : List(Int)) : List(Int) do\n\
+    \    match xs do\n\
+    \      Nil -> Nil\n\
+    \      Cons(h, t) -> Cons(h, copy(t))\n\
+    \    end\n\
+    \  end\n\
+    \  pfn sum(xs : List(Int)) : Int do List.fold_left(xs, 0, fn (a, b) -> a + b) end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let dropped = churn(40000)\n\
+    \    let shared = List.range(0, 20000)\n\
+    \    let a = copy(shared)\n\
+    \    let b = copy(shared)\n\
+    \    println([dropped, List.length(a), sum(a), List.length(b), sum(b), sum(shared)])\n\
+    \  end\n\
+     end\n"
+    ~expected:"[40000, 20000, 199990000, 20000, 199990000, 199990000]"
+    ()
+
+(** Lazy normalisation (2026-10-02, specs/progress/2026-10-02-lazy-int63-
+    normalisation.md): compiled `+ - *` / negate leave their i64 result BARE
+    and a user function returns it bare; the 63-bit reduction happens where
+    the value is observed.  Every observation point that is reached through
+    a bare value is exercised here with an operand that actually overflows,
+    so a missed point shows up as the raw 64-bit value: a caller's compare
+    and int-literal match on a bare call result, the checked division
+    helpers, a right shift, popcount, int_to_string, int_to_float, a
+    NativeArray store (C memory), a closure result crossing the C wire ABI
+    (NativeArray.map_int) and the C key sort (Array.sort_by_key, where raw
+    keys would sort the two elements the other way round), an erased slot
+    (a list cell), and the i64 case-join slot ([pick]). *)
+let test_compiled_int_overflow_lazy_norm_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_int_overflow_lazy"
+    ~src:"mod IntOverflowLazy do\n\
+    \  needs IO.Console\n\
+    \  fn big(x : Int) : Int do x + x end\n\
+    \  fn big2(x : Int) : Int do x + x + 2 end\n\
+    \  fn pick(b : Bool, x : Int) : Int do if b do x + x else x - x end end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let arr = NativeArray.from_list_int([4611686018427387903, 1, 2, 0])\n\
+    \    let mx = NativeArray.get_int(arr, 0)\n\
+    \    let one = NativeArray.get_int(arr, 1)\n\
+    \    let two = NativeArray.get_int(arr, 2)\n\
+    \    let b = big(mx)\n\
+    \    println([b, 0 - big(mx), b / two, b % two, int_shr(b, one), int_shl(b, one), int_popcount(big(mx))])\n\
+    \    println([b == -2, big(mx) < 0, big(mx) < big(mx) + one, int_to_float(big(mx)) == -2.0, pick(true, mx) == b])\n\
+    \    let w = match big2(mx) do\n\
+    \      0 -> \"wrapped\"\n\
+    \      _ -> \"raw\"\n\
+    \    end\n\
+    \    println(w)\n\
+    \    println(int_to_string(big(mx)))\n\
+    \    println([pick(true, mx) + one, pick(false, mx), big2(mx)])\n\
+    \    let arr2 = NativeArray.set_int(arr, 3, big(mx))\n\
+    \    println(NativeArray.get_int(arr2, 3))\n\
+    \    println(NativeArray.get_int(NativeArray.map_int(arr, fn x -> x + x), 0))\n\
+    \    println(Array.to_list(Array.sort_by_key(Array.from_list([mx, one]), fn x -> x + x)))\n\
+    \    println([big(mx)])\n\
+    \  end\n\
+     end\n"
+    ~expected:"[-2, 2, -1, 0, -1, -4, 62]\n\
+               [true, true, true, true, true]\n\
+               wrapped\n\
+               -2\n\
+               [-1, 0, 0]\n\
+               -2\n\
+               -2\n\
+               [4611686018427387903, 1]\n\
+               [-2]"
+    ()
+
+(** A shift count outside [0, 62] (and a negative int_pow exponent) panics
+    on both backends with the interpreter's message.  Compiled, a non-literal
+    count goes through march_checked_shl; pre-fix it was a raw LLVM `shl`,
+    which is poison for a count >= 64, and int_pow returned 0 for a negative
+    exponent instead of panicking. *)
+let test_compiled_int_shift_range_panics () =
+  List.iter (fun (name, call, msg) ->
+    let src = Printf.sprintf
+      "mod ShiftRange do\n\
+      \  needs IO.Console\n\
+      \  fn main(_cap_console : Cap(IO.Console)) do\n\
+      \    let arr = NativeArray.from_list_int([63, -1])\n\
+      \    let n = NativeArray.get_int(arr, 0)\n\
+      \    let neg = NativeArray.get_int(arr, 1)\n\
+      \    println(%s)\n\
+      \  end\n\
+       end\n" call in
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+    let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1; echo EXIT:$?"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src_path)) in
+    Alcotest.(check bool) (name ^ ": interpreter panics with " ^ msg ^ " (got: " ^ interp_out ^ ")")
+      true (ir_contains interp_out msg && ir_contains interp_out "EXIT:1");
+    let bin = Filename.concat tmp (name ^ "bin") in
+    match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+            ~main_exe ~bin ~src:src_path () with
+    | None -> ()
+    | Some bin ->
+      let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+      Alcotest.(check bool) (name ^ ": compiled panics with " ^ msg ^ " (got: " ^ run_out ^ ")")
+        true (ir_contains run_out msg && ir_contains run_out "EXIT:1"))
+    [ ("march_shl_range", "int_shl(1, n)", "int_shl: shift out of range");
+      ("march_shr_range", "int_shr(1, neg)", "int_shr: shift out of range");
+      ("march_pow_negexp", "int_pow(2, neg)", "int_pow: negative exponent") ]
+
 (** Deque.pop_front decode parity (2026-07-24).  deque.march loaded LAZILY
     (it was missing from bin/main.ml's stdlib_file_list), so the caller's
     let-binders stayed unresolved '_ tvars and monomorphization could not
@@ -13818,6 +13992,8 @@ declare i64  @march_decrc_freed(ptr %p)
 declare void @march_incrc_local(ptr %p)
 declare void @march_decrc_local(ptr %p)
 declare i64  @march_decrc_local_freed(ptr %p)
+declare void @march_clo_param_own(ptr %p)
+declare ptr  @march_clo_float_arg(ptr %p)
 declare void @march_free(ptr %p)
 declare ptr  @march_tco_defer_push(ptr %buf, ptr %release, ptr %v)
 declare void @march_tco_defer_drain(ptr %buf)
@@ -13875,6 +14051,9 @@ declare i64    @march_checked_ediv(i64 %a, i64 %b)
 ; Operator forms of / and % — bare "division by zero" / "modulo by zero" messages
 declare i64    @march_checked_div_op(i64 %a, i64 %b)
 declare i64    @march_checked_mod_op(i64 %a, i64 %b)
+; int_shl / int_shr with a non-literal count — panic outside [0, 62]
+declare i64    @march_checked_shl(i64 %a, i64 %n)
+declare i64    @march_checked_shr(i64 %a, i64 %n)
 declare ptr  @march_string_concat(ptr %a, ptr %b)
 declare i64  @march_string_eq(ptr %a, ptr %b)
 declare i64  @march_poly_eq(ptr %a, ptr %b)
@@ -14189,7 +14368,7 @@ declare ptr  @march_typed_array_fold(ptr %arr, ptr %acc, ptr %f)
 declare ptr  @march_typed_array_slice(ptr %arr, i64 %start, i64 %len)
 ; NativeIntArr builtins — flat i64 arrays for vectorizable loops
 declare ptr    @native_int_arr_make(i64 %len, i64 %def)
-declare i64    @native_int_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
+declare i64    @native_int_arr_length(ptr %arr) nounwind willreturn speculatable readnone
 declare i64    @native_int_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_int_arr_set(ptr %arr, i64 %i, i64 %val)
 declare ptr    @native_int_arr_sort(ptr %arr)
@@ -14206,7 +14385,7 @@ declare ptr    @native_int_arr_to_list(ptr %arr)
 declare ptr    @native_int_arr_filter_mask(ptr %arr, ptr %mask)
 ; NativeFloatArr builtins — flat double arrays for vectorizable loops
 declare ptr    @native_float_arr_make(i64 %len, double %def)
-declare i64    @native_float_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
+declare i64    @native_float_arr_length(ptr %arr) nounwind willreturn speculatable readnone
 declare double @native_float_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_float_arr_set(ptr %arr, i64 %i, double %val)
 declare double @native_float_arr_sum(ptr %arr)
@@ -14225,7 +14404,7 @@ declare ptr    @native_float_arr_alloc_raw(i64 %len)
 declare void   @native_arr_map2_check_len(i64 %len1, i64 %len2)
 ; Narrow native arrays (f32/i32/u8)
 declare ptr    @native_f32_arr_make(i64 %len, double %def)
-declare i64    @native_f32_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
+declare i64    @native_f32_arr_length(ptr %arr) nounwind willreturn speculatable readnone
 declare double @native_f32_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_f32_arr_set(ptr %arr, i64 %i, double %v)
 declare double @native_f32_arr_sum(ptr %arr)
@@ -14236,7 +14415,7 @@ declare ptr    @native_f32_arr_fold(ptr %acc, ptr %arr, ptr %f)
 declare ptr    @native_f32_arr_from_list(ptr %lst)
 declare ptr    @native_f32_arr_to_list(ptr %arr)
 declare ptr    @native_i32_arr_make(i64 %len, i64 %def)
-declare i64    @native_i32_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
+declare i64    @native_i32_arr_length(ptr %arr) nounwind willreturn speculatable readnone
 declare i64    @native_i32_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_i32_arr_set(ptr %arr, i64 %i, i64 %v)
 declare i64    @native_i32_arr_sum(ptr %arr)
@@ -14247,7 +14426,7 @@ declare ptr    @native_i32_arr_fold(ptr %acc, ptr %arr, ptr %f)
 declare ptr    @native_i32_arr_from_list(ptr %lst)
 declare ptr    @native_i32_arr_to_list(ptr %arr)
 declare ptr    @native_u8_arr_make(i64 %len, i64 %def)
-declare i64    @native_u8_arr_length(ptr %arr) nounwind willreturn speculatable memory(none)
+declare i64    @native_u8_arr_length(ptr %arr) nounwind willreturn speculatable readnone
 declare i64    @native_u8_arr_get(ptr %arr, i64 %i)
 declare ptr    @native_u8_arr_set(ptr %arr, i64 %i, i64 %v)
 declare i64    @native_u8_arr_sum(ptr %arr)
@@ -14328,6 +14507,7 @@ declare i64  @march_epoch_draining()
 declare void @march_epoch_drain(i64 %soft, i64 %hard)
 declare void @march_sched_hold_next_spawn()
 declare i64  @march_epoch_holds_i64()
+declare ptr  @march_reload_request_string(ptr %s)
 declare void @march_sched_delivery_origin_set(i64 %conn, i64 %seq)
 declare void @march_sched_delivery_origin_clear()
 declare void @march_delivery_failed_watch(ptr %clo)
@@ -16511,6 +16691,14 @@ let codegen_suites =
             test_compiled_int_div_euclid_parity;
           Alcotest.test_case "compiled int_mod_euclid parity (negative divisor)" `Quick
             test_compiled_int_mod_euclid_parity;
+          Alcotest.test_case "compiled Int is 63-bit and wraps (overflow edge parity)" `Quick
+            test_compiled_int_overflow_parity;
+          Alcotest.test_case "compiled Int lazy 63-bit normalisation: every observation point (overflow parity)" `Quick
+            test_compiled_int_overflow_lazy_norm_parity;
+          Alcotest.test_case "compiled TRMC hole fresh path after heap churn (march_alloc is malloc)" `Quick
+            test_compiled_trmc_hole_fresh_after_churn;
+          Alcotest.test_case "compiled int_shl/int_shr/int_pow range panics match interpreter" `Quick
+            test_compiled_int_shift_range_panics;
           Alcotest.test_case "compiled IOList deep-tree flatten parity (stack-safe)" `Slow
             test_compiled_iolist_deep_flatten_parity;
           Alcotest.test_case "compiled Deque.pop_front decode parity (eager stdlib load)" `Quick

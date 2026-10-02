@@ -249,6 +249,99 @@ dune exec march -- --compile --opt 2 bench/<name>.march -o /tmp/<name>
 
 ---
 
+## Inline refcount fast path: list_ops, tree_transform, binary_trees
+
+`specs/plans/2026-09-30-inline-rc-fast-path.md`. The same compiler with the fast
+path on and with `MARCH_NO_INLINE_RC=1`, 9 interleaved rounds, Apple M3 Max
+(2026-10-01). Outputs identical.
+
+| bench | off median ms | on median ms | speedup |
+|---|---:|---:|---:|
+| `list_ops` | 62.8 | 50.4 | 1.25× |
+| `tree_transform` | 724.2 | 680.2 | 1.06× |
+| `binary_trees` | 172.3 | 154.1 | 1.12× |
+
+These are with entry-block alloca hoisting, which is part of the same rewrite;
+load varied between runs, so compare ratios, not absolute times.
+
+A first version that restored the count and called the original runtime function
+on every last reference measured `binary_trees` about 6% slower; the dedicated
+last-reference helpers are what turned it into a gain. Not yet measured on x86.
+
+## bench/native_array_chains.march — NativeArray chains, unfused vs hand-fused
+
+Phase 0 gate of `specs/plans/2026-09-28-nativearray-fusion-plan.md`. Each case
+times the chain users write today (one intermediate array per link) against a
+hand-fused equivalent (the callback bodies substituted into one lambda, which is
+what the planned TIR rewrite would emit). Rounds interleave every variant; take
+the per-variant minimum.
+
+**Command:** `march --compile --opt 2 bench/native_array_chains.march -o /tmp/nac && /tmp/nac`
+**Expected output:** `TIME <case> <variant> <ms>` lines, then `CHECKSUM 165274281374.`
+
+**Run 1 (2026-09-29):** Apple M3 Max, 36 GB, load ~3.5, 4M elements, 3 processes
+× 9 rounds = 27 samples per variant, minimum shown.
+
+| case | unfused ms | hand-fused ms | speedup |
+|---|---:|---:|---:|
+| Int map∘map∘map, light body | 6.34 | 1.37 | 4.6× |
+| Int map∘map∘map, heavier body | 7.73 | 2.94 | 2.6× |
+| Int map → map2 | 3.17 | 1.16 | 2.7× |
+| Float map∘map∘map | 5.66 | 0.83 | 6.8× |
+| Float map → map2 | 3.33 | 1.15 | 2.9× |
+| Int map → fold | 9.18 | 8.37 | 1.1× |
+| Float map → fold | 187.81 | 188.28 | none |
+| Int map → sum, fused as a fold | 3.04 | 8.50 | 2.8× **slower** |
+| Float map → sum, fused as a fold | 2.90 | 187.24 | 65× **slower** |
+
+Every map and map2 above is an inline loop (float ones use the unboxed
+`$mapfast$` clone), and every fold is the runtime's closure-call loop; checked
+in `--emit-llvm` output before timing. Folds dominate their cases: `fold_float`
+costs about 47 ns per element against about 0.2 ns for an inline map, because
+each element crosses the boxed closure ABI.
+
+**Run 2 (2026-09-30), after the fold inline loop**
+(`specs/plans/2026-09-30-nativearray-fold-inline-loop.md`): same box, load ~6,
+3 interleaved processes × 9 rounds per compiler, minimum shown. Base is an
+unmodified compiler built from the branch point. Checksums match.
+
+| case | base ms | fold inline ms | speedup |
+|---|---:|---:|---:|
+| Float map → fold, hand-fused | 201.22 | 2.99 | 67× |
+| Float map → fold, unfused | 202.70 | 3.77 | 54× |
+| Float map → sum, hand-fused as a fold | 201.12 | 2.92 | 69× |
+| Int map → fold, hand-fused | 9.03 | 0.43 | 21× |
+| Int map → fold, unfused | 9.81 | 1.17 | 8.4× |
+| Int map → sum, hand-fused as a fold | 9.00 | 0.43 | 21× |
+
+The map, map2 and sum cases contain no fold, and their IR is identical between
+the two compilers once register numbering is normalized; their run-to-run
+differences (0.88× to 1.05×) are noise. In the optimized assembly the Int fold
+loop is vectorized (NEON `add.2d`, 4 accumulators) and the Float fold loop is
+scalar `fadd` with no calls, as the strict Float order requires. The
+hand-fused sum is now faster than `sum(map(...))` for Int, and within 10% of it
+for Float.
+
+## bench/float_closure_calls.march — Float vs Int through closures
+
+Evidence for `specs/plans/2026-09-30-float-closure-unboxing.md`. The same fold and
+map over a 2M-element `List(Int)` and `List(Float)`, each through a lambda passed
+to `List.fold_left` / `List.map`, plus a hand-written loop with no closure call.
+
+**Command:** `march --compile --opt 2 bench/float_closure_calls.march -o /tmp/fcc && /tmp/fcc`
+**Expected output:** `TIME <case> <int|float> <ms>` lines, then `CHECKSUM 55972000000.`
+
+**Run 1 (2026-09-30):** Apple M3 Max, load ~3.6, best of 2 processes × 7 rounds.
+
+| case | Int ms | Float ms | Float / Int |
+|---|---:|---:|---:|
+| `List.fold_left` through a closure | 16.31 | 194.02 | 11.9× |
+| `List.map` through a closure | 58.15 | 244.72 | 4.2× |
+| hand-written fold, no closure | 9.03 | 11.10 | 1.2× |
+
+Floats cross the closure ABI heap-boxed, so the Float fold pays about 90 ns per
+element for allocation that the hand-written loop never does.
+
 ## bench/array_sort.march — NativeArray.sort_int vs List.sort_by
 
 The benchmark for the **shipped builtin**. Its sibling below

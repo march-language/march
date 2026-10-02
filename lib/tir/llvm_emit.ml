@@ -154,6 +154,7 @@ type ctx = Llvm_ctx.ctx = {
   hr_config : Hot_reload.config option;
   hr_names  : Hot_reload.Name_table.t;
   mutable hr_cur_module : string;
+  mutable hr_cur_fn : string;
   var_llvm_ty : (string, string) Hashtbl.t;
   mutable tco_fn_name   : string option;
   mutable cur_emit_fn   : string;
@@ -161,6 +162,7 @@ type ctx = Llvm_ctx.ctx = {
   mutable tco_param_info : (string * string * string) list;
   mutable tco_stack_save : string;
   mutable tco_in_tail   : bool;
+  mutable norm_ret_pos  : bool;
   mutable tco_dup_bound : string list;
   mutable tco_defer_slot : string;
   mutable mutual_tco_group      : string list;
@@ -253,9 +255,11 @@ let clo_wrap_define = Llvm_calls.clo_wrap_define
    same holds for an actor's `on_stop` fn, which the runtime calls the same
    way once, at a graceful death: releasing the actor there freed a record
    the stopper was still polling (found by libgmalloc on the first draft). *)
+let clo_wrap_runtime_owned (name : string) : bool =
+  Tir_names.is_actor_dispatch_fn name || Tir_names.is_actor_on_stop_fn name
+
 let clo_wrap_borrowed (name : string) (nparams : int) : bool list =
-  if Tir_names.is_actor_dispatch_fn name
-     || Tir_names.is_actor_on_stop_fn name then [] else
+  if clo_wrap_runtime_owned name then [] else
   match Clo_flags.borrowed_params name with
   | Some modes -> modes
   | None -> List.init nparams (fun i -> Borrow.is_borrowed Borrow.empty name i)
@@ -344,10 +348,10 @@ let static_closure_ok ctx (march_name : string) : bool =
   && (match ctx.hr_config with
       | None     -> true
       | Some cfg ->
-        not (Hot_reload.is_reloadable cfg (Hot_reload.module_of_name march_name)))
+        not (Hot_reload.needs_dispatch_to cfg march_name))
 
 (** Emit code for [atom], returning (llvm_type, llvm_value). *)
-let emit_atom ctx (atom : Tir.atom) : string * string =
+let emit_atom_raw ctx (atom : Tir.atom) : string * string =
   match atom with
   | Tir.ALit (March_ast.Ast.LitInt n)   -> ("i64",    string_of_int n)
   | Tir.ALit (March_ast.Ast.LitFloat f) ->
@@ -428,7 +432,19 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
          doing `let f = cmp(a)` then `f(b)` jumped through garbage (SIGSEGV,
          pc=0).  Every such caller calls the value with the definition's
          arity (a call at the other arity would already be a type error),
-         so the definition's signature is the one the closure must carry. *)
+         so the definition's signature is the one the closure must carry.
+
+         The same holds for the parameter TYPES, not only the arity
+         (2026-10-02): a generic `pfn ksnd(p, x) do x end` is emitted as
+         `@ksnd(ptr, ptr)` (its params stay erased), but passed where a
+         `Float -> Float -> Float` is expected the use-site type made the
+         trampoline unbox both arguments and call `@ksnd(double, double)`.
+         The callee read its pointer registers, which held whatever the
+         caller left there, so `call2(ksnd, 3, 0.0)` printed 3. instead of 6.
+         The wrapper is keyed by the TARGET (`<fn>$clo_wrap`, one per
+         function), so only the definition's types can be right for every
+         use site: a ptr param forwards the caller's boxed Float/tagged Int
+         unchanged and the caller coerces the erased ptr result itself. *)
       let def_sig =
         match Hashtbl.find_opt ctx.top_fn_param_tys v.Tir.v_name,
               Hashtbl.find_opt ctx.top_fn_ret_ty v.Tir.v_name with
@@ -436,10 +452,8 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
         | _ -> None
       in
       let (ps_tirs, nparams, ret_tir) = match v.Tir.v_ty, def_sig with
-        | Tir.TFn (ps, _), Some (dps, dret)
-          when List.length ps <> List.length dps ->
-          (dps, List.length dps, dret)
-        | Tir.TFn (ps, _), _ -> (ps, List.length ps, fn_ret_tir v.Tir.v_ty)
+        | _, Some (dps, dret) -> (dps, List.length dps, dret)
+        | Tir.TFn (ps, _), None -> (ps, List.length ps, fn_ret_tir v.Tir.v_ty)
         | _ ->
           let n = Option.value ~default:0 (Hashtbl.find_opt ctx.top_fn_nparams v.Tir.v_name) in
           (List.init n (fun _ -> Tir.TVar "_"), n, fn_ret_tir v.Tir.v_ty)
@@ -455,6 +469,7 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
          | `Define  ->
            clo_wrap_define ~drop_clo:ctx.repl
              ~borrowed:(clo_wrap_borrowed v.Tir.v_name (List.length param_tys))
+             ~own_float:(not (clo_wrap_runtime_owned v.Tir.v_name))
              ~deep_drops:(List.map
                             (Llvm_calls.deep_drop_name ~has_fn:(Hashtbl.mem ctx.top_fns))
                             ps_tirs)
@@ -596,6 +611,7 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
          | `Define  ->
            clo_wrap_define ~drop_clo:ctx.repl
              ~borrowed:(clo_wrap_borrowed v.Tir.v_name (List.length param_ltys))
+             ~own_float:(not (clo_wrap_runtime_owned v.Tir.v_name))
              ~deep_drops
              wrap_name param_ltys target_ret fn_name));
     if static_closure_ok ctx v.Tir.v_name then
@@ -645,15 +661,24 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
        (match Llvm_ctx.wrap_emit_kind ctx wrap_name with
         | `Skip -> ()
         | (`Define | `Declare) as wrap_kind ->
-          let ret_tir     = fn_ret_tir v.Tir.v_ty in
+          (* Prefer the definition's signature over the use-site type when
+             the resolved name is registered (see the top_fns arm above for
+             why: the trampoline must match the callee as DEFINED). *)
+          let (ps_tirs, ret_tir) =
+            match Hashtbl.find_opt ctx.top_fn_param_tys resolved,
+                  Hashtbl.find_opt ctx.top_fn_ret_ty resolved with
+            | Some dps, Some dret -> (dps, dret)
+            | _ -> (ps, fn_ret_tir v.Tir.v_ty)
+          in
           let target_ret  = llvm_ret_ty ctx ret_tir in
-          let param_tys   = List.map (llvm_ty ctx) ps in
+          let param_tys   = List.map (llvm_ty ctx) ps_tirs in
           Buffer.add_string ctx.extra_fns
             (match wrap_kind with
              | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
              | `Define  ->
                clo_wrap_define ~drop_clo:ctx.repl
                  ~borrowed:(clo_wrap_borrowed resolved (List.length param_tys))
+                 ~own_float:(not (clo_wrap_runtime_owned resolved))
                  ~deep_drops:(List.map
                                 (Llvm_calls.deep_drop_name ~has_fn:(Hashtbl.mem ctx.top_fns))
                                 ps)
@@ -698,6 +723,35 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     let tmp = fresh ctx "ld" in
     emit ctx (Printf.sprintf "%s = load %s, ptr %%%s.addr" tmp ty slot);
     (ty, tmp)
+
+(** Does an i64 read of [atom] need normalising before it is observed?
+    Under lazy normalisation (see [Llvm_ctx.emit_wrap_int63]) only a
+    VARIABLE can hold an unnormalised i64: it may have been bound to a bare
+    ring-op result, a bare call result, or a bare parameter.  A literal is
+    in range by the lexer; a Bool is 0/1; an Atom hash is minted with
+    bit 63 == bit 62 ([atom_hash]) precisely so it survives tag round
+    trips -- none of those can carry a stray bit 63, so they skip the
+    (otherwise harmless) shift pair. *)
+let atom_needs_norm (atom : Tir.atom) : bool =
+  match atom with
+  | Tir.AVar v ->
+    (match v.Tir.v_ty with
+     | Tir.TBool | Tir.TCon ("Atom", []) -> false
+     | _ -> true)
+  | Tir.ALit _ | Tir.ADefRef _ -> false
+
+(** The ONE observation funnel of lazy normalisation: every atom read that
+    yields an i64 comes back normalised to 63 bits, so a consumer (icmp,
+    a C call, a store the runtime reads, sitofp, ...) never sees a bare
+    ring-op result.  [emit_atom_raw] is the same read without the
+    normalisation, for the places a bare value is correct by construction:
+    the function's tail position ([norm_ret_pos], the value goes straight
+    to `ret` and the callee/caller contract is "bare"). *)
+let emit_atom ctx (atom : Tir.atom) : string * string =
+  let (ty, v) = emit_atom_raw ctx atom in
+  if ty = "i64" && atom_needs_norm atom
+  then (ty, Llvm_ctx.emit_wrap_int63 ctx v)
+  else (ty, v)
 
 (** Emit atom and coerce result to [ty]. Handles TVar→ptr mismatches. *)
 let emit_atom_as ctx ty a =
@@ -764,6 +818,12 @@ let emit_native_map_inline_loop ctx ~width ~unboxed ~arr_atom ~apply_name ~clo_r
 let emit_native_map2_inline_loop ctx ~width ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg =
   Llvm_emit_nmap.emit_native_map2_inline_loop ~emit_atom ctx ~width ~unboxed
     ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
+
+let decode_nfold_inline_call = Llvm_emit_nmap.decode_nfold_inline_call
+
+let emit_native_fold_inline_loop ctx ~width ~unboxed ~acc_atom ~arr_atom ~apply_name ~clo_reg =
+  Llvm_emit_nmap.emit_native_fold_inline_loop ~emit_atom ctx ~width ~unboxed
+    ~acc_atom ~arr_atom ~apply_name ~clo_reg
 
 (** [march_vault_get] / [march_vault_ns_get] return the NICHE encoding of
     [Option] UNCONDITIONALLY — [None] is a raw null, [Some v] is [v] itself (see
@@ -919,7 +979,8 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   match e with
 
   (* ── Atoms ─────────────────────────────────────────────────────────── *)
-  | Tir.EAtom atom -> emit_atom ctx atom
+  | Tir.EAtom atom ->
+    if ctx.norm_ret_pos then emit_atom_raw ctx atom else emit_atom ctx atom
 
   (* ── Free-variable load from closure struct ────────────────────────── *)
   (* ELet(v, EField(clo, "$fvN"), body): load field N from the closure ptr.
@@ -1011,9 +1072,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     (* The rhs is in non-tail position: a self-call here must be an ordinary
        call, not a TCO back-edge (else the let body would be dropped). *)
     let saved_tail = ctx.tco_in_tail in
+    let saved_ret = ctx.norm_ret_pos in
     ctx.tco_in_tail <- false;
+    ctx.norm_ret_pos <- false;
     let (rhs_ty, rhs_val) = emit_expr ctx rhs in
     ctx.tco_in_tail <- saved_tail;
+    ctx.norm_ret_pos <- saved_ret;
     if is_vec_ty rhs_ty then begin
       (* SIMD vector RHS: keep the slot register-resident (the vector LLVM
          type itself, 16-aligned) instead of routing through the default
@@ -1048,9 +1112,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.ESeq (e1, e2) ->
     (* e1 is evaluated for effect (non-tail); only e2 is in tail position. *)
     let saved_tail = ctx.tco_in_tail in
+    let saved_ret = ctx.norm_ret_pos in
     ctx.tco_in_tail <- false;
+    ctx.norm_ret_pos <- false;
     let result1 = emit_expr ctx e1 in
     ctx.tco_in_tail <- saved_tail;
+    ctx.norm_ret_pos <- saved_ret;
     if Llvm_tco.is_trivial_dec_chain e2 then begin
       (* e2 is purely RC bookkeeping (a single Dec/IncRC/Free/drop-fn call, OR
          a whole CHAIN of them, e.g. ESeq(dec_rc a, dec_rc b) — Perceus emits
@@ -1185,6 +1252,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Arithmetic builtins ───────────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_arith f.Tir.v_name ->
+    (* `+ - *` are ring operations modulo 2^63: a bare (unnormalised)
+       operand gives the same bare result, so they read their operands
+       through [emit_atom_raw].  This is not only the saved shift pair --
+       with `fib(n-1) + fib(n-2)` the add must consume the call results
+       DIRECTLY for LLVM's accumulator TRE to recognise it
+       ([Llvm_ctx.emit_wrap_int63]).  `/` and `%` go through the checked C
+       helpers and keep normalised operands. *)
+    let emit_atom =
+      if List.mem f.Tir.v_name ["+"; "-"; "*"] then emit_atom_raw else emit_atom in
     Llvm_emit_arith.emit_int_arith ~emit_atom ctx f a b
 
   | Tir.EApp (f, [a; b]) when is_int_cmp f.Tir.v_name ->
@@ -1215,13 +1291,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", r)
 
   | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Negate f.Tir.v_name ->
-    let (ty, va) = emit_atom ctx a in
+    (* Negation is a ring operation: a bare operand is fine (see the `+` arm). *)
+    let (ty, va) = emit_atom_raw ctx a in
     let r = fresh ctx "ar" in
-    if ty = "double" then
-      emit ctx (Printf.sprintf "%s = fneg double %s" r va)
-    else
+    if ty = "double" then begin
+      emit ctx (Printf.sprintf "%s = fneg double %s" r va);
+      (ty, r)
+    end else begin
       emit ctx (Printf.sprintf "%s = sub i64 0, %s" r va);
-    (ty, r)
+      (* -(-2^62) = 2^62 leaves the 63-bit range; left bare, it normalises
+         to -2^62 at its first observation (lazy normalisation,
+         [Llvm_ctx.emit_wrap_int63]). *)
+      (ty, r)
+    end
 
   (* ── ~H sigil: html_auto_escape(v) ────────────────────────────────────
      The runtime `march_html_auto_escape` takes a single generic `ptr` and
@@ -1351,7 +1433,24 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let va = emit_atom_as ctx "i64" a in
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "bw" in
-    emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_bitwise_op f.Tir.v_name) va vb);
+    let is_shift = f.Tir.v_name = "int_shl" || f.Tir.v_name = "int_shr" in
+    let const_in_range = match b with
+      | Tir.ALit (March_ast.Ast.LitInt n) -> n >= 0 && n < 63
+      | _ -> false
+    in
+    (* Shift counts outside [0, 62] panic on both backends ("int_shl: shift
+       out of range", as Eval_builtins raises); a raw LLVM shl/ashr by >= 64
+       is poison.  A literal in-range count (the common case: hamt/array
+       index math) stays an inline instruction; any other count goes through
+       the checked runtime helper. *)
+    (if is_shift && not const_in_range then
+       emit ctx (Printf.sprintf "%s = call i64 @march_checked_%s(i64 %s, i64 %s)"
+                   r (if f.Tir.v_name = "int_shl" then "shl" else "shr") va vb)
+     else
+       emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_bitwise_op f.Tir.v_name) va vb));
+    (* and/or/xor/ashr keep a 63-bit input in range; shl can leave it, and
+       its bare result is normalised at the first observation
+       ([Llvm_ctx.emit_wrap_int63]). *)
     ("i64", r)
 
   | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Int_not f.Tir.v_name ->
@@ -1363,7 +1462,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Int_popcount f.Tir.v_name ->
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "bw" in
-    emit ctx (Printf.sprintf "%s = call i64 @llvm.ctpop.i64(i64 %s)" r va);
+    (* Count the 63 bits of a March Int: bit 63 is only bit 62's sign
+       extension, so mask it off (the interpreter counts popcount(-1) = 63). *)
+    let m = fresh ctx "bw" in
+    emit ctx (Printf.sprintf "%s = and i64 %s, 9223372036854775807" m va);
+    emit ctx (Printf.sprintf "%s = call i64 @llvm.ctpop.i64(i64 %s)" r m);
     ("i64", r)
 
   (* ── {int,bool,float}_to_string: explicit coerce before the C call ──── *
@@ -1637,6 +1740,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | _                -> assert false
     in
     emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 %s)" r helper va vb);
+    (* Quotients leave the 63-bit Int range only for -2^62 / -1 (= 2^62,
+       which reads back as -2^62 at its first observation); remainders never
+       do.  See [Llvm_ctx.emit_wrap_int63]. *)
     ("i64", r)
 
   | Tir.EApp (f, [a; b])
@@ -1645,6 +1751,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
     emit ctx (Printf.sprintf "%s = call i64 @march_int_pow(i64 %s, i64 %s)" r va vb);
+    (* march_int_pow wraps mod 2^64; reduced mod 2^63 at its first
+       observation that is the 63-bit wrapped power the interpreter
+       computes ([Llvm_ctx.emit_wrap_int63]). *)
     ("i64", r)
 
   | Tir.EApp (f, [a])
@@ -1652,15 +1761,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "ar" in
     emit ctx (Printf.sprintf "%s = call i64 @llvm.abs.i64(i64 %s, i1 false)" r va);
+    (* abs(-2^62) = 2^62 reads back as -2^62 once normalised, as OCaml's
+       [abs min_int] ([Llvm_ctx.emit_wrap_int63]). *)
     ("i64", r)
 
+  (* March Int is 63-bit: [-2^62, 2^62 - 1], the interpreter's OCaml
+     max_int/min_int (specs/lang/type-system.md, "Int width and overflow"). *)
   | Tir.EApp (f, _)
     when Builtin_name.is Builtin_name.Int_max_value f.Tir.v_name ->
-    ("i64", "9223372036854775807")
+    ("i64", "4611686018427387903")
 
   | Tir.EApp (f, _)
     when Builtin_name.is Builtin_name.Int_min_value f.Tir.v_name ->
-    ("i64", "-9223372036854775808")
+    ("i64", "-4611686018427387904")
 
   (* ── Float constants and classification predicates ──────────────────
      float_nan / float_infinity / float_neg_infinity / float_epsilon are
@@ -2061,6 +2174,27 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in
     emit_native_map2_inline_loop ctx ~width ~unboxed ~arr1_atom ~arr2_atom ~apply_name ~clo_reg
 
+  (* ── Native array fold inline loop (2026-09-30) ──────────────────────
+     [Native_map_inline] rewrites a fold whose callback is a fresh, single-use
+     lambda with a scalar accumulator to [__native_<w>_arr_fold_inline], with
+     the builtin's own (acc, arr, clo) order and the closure replaced by the
+     apply fn (non-capturing) or followed by it (capturing). See
+     [emit_native_fold_inline_loop] and
+     specs/plans/2026-09-30-nativearray-fold-inline-loop.md. *)
+  | Tir.EApp (f, [acc_atom; arr_atom; Tir.AVar apply_v])
+    when decode_nfold_inline_call f.Tir.v_name <> None ->
+    let (width, unboxed) = Option.get (decode_nfold_inline_call f.Tir.v_name) in
+    let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
+    emit_native_fold_inline_loop ctx ~width ~unboxed ~acc_atom ~arr_atom ~apply_name ~clo_reg:"null"
+
+  | Tir.EApp (f, [acc_atom; arr_atom; Tir.AVar apply_v; clo_atom])
+    when decode_nfold_inline_call f.Tir.v_name <> None ->
+    let (width, unboxed) = Option.get (decode_nfold_inline_call f.Tir.v_name) in
+    let apply_name = llvm_name (mangle_extern apply_v.Tir.v_name) in
+    let (clo_ty0, clo_v0) = emit_atom ctx clo_atom in
+    let clo_reg = coerce ctx clo_ty0 clo_v0 "ptr" in
+    emit_native_fold_inline_loop ctx ~width ~unboxed ~acc_atom ~arr_atom ~apply_name ~clo_reg
+
   (* ── SIMD vector ops (Task 2) — inline register-resident lowering ────
      Every `simd_<t>_<op>` builtin, including `load`/`store` (bounds-checked
      GEP+load / FBIP-COW store — originally scoped to Task 3, pulled forward
@@ -2254,11 +2388,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── TRMC hole allocation / hole fill ──────────────────────────────── *)
   (* [EAllocHole (ty, filled, hole)] is [EAlloc] with field [hole] left
-     UNWRITTEN.  [march_alloc] is a calloc, so the hole reads as 0 until
-     [ESetField] fills it, and IS_HEAP_PTR(0) is false — an RC op or deep-drop
-     that reaches an unfilled hole is a no-op rather than a wild dereference.
-     That is the property the whole TRMC scheme leans on for the window between
-     allocation and fill. *)
+     UNFILLED by a value.  [emit_alloc_hole] stores null into the slot on every
+     path ([march_alloc] is a plain malloc, not a calloc, so nothing else would
+     zero it), so the hole reads as 0 until [ESetField] fills it, and
+     IS_HEAP_PTR(0) is false — an RC op or deep-drop that reaches an unfilled
+     hole is a no-op rather than a wild dereference.  That is the property the
+     whole TRMC scheme leans on for the window between allocation and fill. *)
   | Tir.EAllocHole (tok, Tir.TCon (ctor, _), args, hole) ->
     Llvm_emit_alloc.emit_alloc_hole ~emit_atom ctx tok ctor args hole
 

@@ -63,6 +63,23 @@ let target_map2_names =
   [ "native_int_arr_map2"; "native_float_arr_map2";
     "native_f32_arr_map2"; "native_i32_arr_map2"; "native_u8_arr_map2" ]
 
+(* Fold counterpart (2026-09-30, specs/plans/2026-09-30-nativearray-fold-inline-loop.md).
+   The builtin's argument order is (acc, arr, f) -- the stdlib wrapper
+   [fold_int(arr, acc, f)] swaps the first two -- so the closure is the LAST of
+   three arguments, exactly the map2 call shape, and the callback is binary
+   ([$clo], acc, elem), exactly the map2 callback shape. That is why the map2
+   substitution functions ([subst_call2], [subst_call_capturing2]) serve fold
+   unchanged: they match on the target name and the trailing closure atom only.
+
+   Unlike map/map2, fold is only inlined when the accumulator is a SCALAR of the
+   element's own boundary type (see [fold_callback_kind]): the runtime fold's
+   accumulator RC rule ([fold_release_prev_acc], runtime/march_runtime.c) is only
+   trivially satisfied when the accumulator is never a heap value. Every other
+   fold keeps the runtime path. *)
+let target_fold_names =
+  [ "native_int_arr_fold"; "native_float_arr_fold";
+    "native_f32_arr_fold"; "native_i32_arr_fold"; "native_u8_arr_fold" ]
+
 (* Narrow-widths task (2026-08): generalized from the old fixed if/else so
    f32/i32/u8 don't need their own arms -- the inline symbol is always
    derived from the builtin name by stripping the "_map"/"_map2" suffix and
@@ -80,6 +97,8 @@ let inline_name_of ~unboxed (name : string) : string =
   let unboxed_sfx = if unboxed then "_unboxed" else "" in
   if has_suffix "_map2" name then
     "__" ^ strip_suffix "_map2" name ^ "_map2_inline" ^ unboxed_sfx
+  else if has_suffix "_fold" name then
+    "__" ^ strip_suffix "_fold" name ^ "_fold_inline" ^ unboxed_sfx
   else if has_suffix "_map" name then
     "__" ^ strip_suffix "_map" name ^ "_map_inline" ^ unboxed_sfx
   else name
@@ -145,7 +164,8 @@ let try_unboxed_variant (apply_fns : (string, Tir.fn_def) Hashtbl.t)
     (extra_fns : Tir.fn_def list ref) (target_name : string) (apply_var : Tir.var)
     : Tir.var option =
   if target_name <> "native_float_arr_map" && target_name <> "native_float_arr_map2"
-  && target_name <> "native_f32_arr_map" && target_name <> "native_f32_arr_map2" then None
+  && target_name <> "native_f32_arr_map" && target_name <> "native_f32_arr_map2"
+  && target_name <> "native_float_arr_fold" && target_name <> "native_f32_arr_fold" then None
   else
     match Hashtbl.find_opt apply_fns apply_var.Tir.v_name with
     | Some fn when is_all_float_signature fn ->
@@ -153,6 +173,34 @@ let try_unboxed_variant (apply_fns : (string, Tir.fn_def) Hashtbl.t)
       if not (List.exists (fun f -> f.Tir.fn_name = unboxed_name) !extra_fns) then
         extra_fns := { fn with Tir.fn_name = unboxed_name } :: !extra_fns;
       Some { Tir.v_name = unboxed_name; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr }
+    | _ -> None
+
+(** Int-family counterpart of [is_all_float_signature]: every callback param
+    after [$clo], and the return, is concretely [Int]. *)
+let is_all_int_signature (fn : Tir.fn_def) : bool =
+  fn.Tir.fn_ret_ty = Tir.TInt
+  && (match fn.Tir.fn_params with
+      | _clo :: rest -> rest <> [] && List.for_all (fun (p : Tir.var) -> p.Tir.v_ty = Tir.TInt) rest
+      | [] -> false)
+
+(** Decide whether a fold over [target_name] with callback [apply_var] takes the
+    inline loop, and with which callee. [Some (unboxed, callee)] or [None] (keep
+    the runtime fold).
+    - Float widths: only via the unboxed clone, i.e. an all-Float
+      [(acc, elem) -> acc] callback. A boxed Float fold would need the runtime's
+      per-element box and accumulator-release dance; not worth reproducing.
+    - Int widths: an all-Int callback, called through the ordinary (tagged ptr)
+      apply fn exactly like the Int map loop; LLVM cancels the tag round trip
+      once it inlines the callee. *)
+let fold_callback_kind (apply_fns : (string, Tir.fn_def) Hashtbl.t)
+    (extra_fns : Tir.fn_def list ref) (target_name : string) (apply_var : Tir.var)
+    : (bool * Tir.var) option =
+  if target_name = "native_float_arr_fold" || target_name = "native_f32_arr_fold" then
+    Option.map (fun v -> (true, v))
+      (try_unboxed_variant apply_fns extra_fns target_name apply_var)
+  else
+    match Hashtbl.find_opt apply_fns apply_var.Tir.v_name with
+    | Some fn when is_all_int_signature fn -> Some (false, apply_var)
     | _ -> None
 
 (** Count AVar occurrences of [name] in [e]. Does not descend into a scope
@@ -358,6 +406,47 @@ let rec subst_call_capturing2 ~unboxed (target_name : string) (v_name : string)
   | Tir.ESeq (e1, e2) -> Tir.ESeq (go e1, go e2)
   | other -> other
 
+(* ── fold counterparts of [find_target_call2] / [find_target_call_var2] ──
+   Same trailing-closure 3-arg shape, matched against [target_fold_names]. *)
+
+let rec find_target_call_fold (v_name : string) (e : Tir.expr) : string option =
+  match e with
+  | Tir.EApp (f, [ _; _; Tir.AVar v3 ])
+    when v3.Tir.v_name = v_name && List.mem f.Tir.v_name target_fold_names ->
+    Some f.Tir.v_name
+  | Tir.ELet (_, e1, e2) ->
+    (match find_target_call_fold v_name e1 with Some _ as r -> r | None -> find_target_call_fold v_name e2)
+  | Tir.ELetRec (fns, body) ->
+    (match List.find_map (fun fn -> find_target_call_fold v_name fn.Tir.fn_body) fns with
+     | Some _ as r -> r
+     | None -> find_target_call_fold v_name body)
+  | Tir.ECase (_, brs, def) ->
+    (match List.find_map (fun (br : Tir.branch) -> find_target_call_fold v_name br.Tir.br_body) brs with
+     | Some _ as r -> r
+     | None -> (match def with Some e -> find_target_call_fold v_name e | None -> None))
+  | Tir.ESeq (e1, e2) ->
+    (match find_target_call_fold v_name e1 with Some _ as r -> r | None -> find_target_call_fold v_name e2)
+  | _ -> None
+
+let rec find_target_call_var_fold (v_name : string) (e : Tir.expr) : (string * Tir.var) option =
+  match e with
+  | Tir.EApp (f, [ _; _; Tir.AVar v3 ])
+    when v3.Tir.v_name = v_name && List.mem f.Tir.v_name target_fold_names ->
+    Some (f.Tir.v_name, v3)
+  | Tir.ELet (_, e1, e2) ->
+    (match find_target_call_var_fold v_name e1 with Some _ as r -> r | None -> find_target_call_var_fold v_name e2)
+  | Tir.ELetRec (fns, body) ->
+    (match List.find_map (fun fn -> find_target_call_var_fold v_name fn.Tir.fn_body) fns with
+     | Some _ as r -> r
+     | None -> find_target_call_var_fold v_name body)
+  | Tir.ECase (_, brs, def) ->
+    (match List.find_map (fun (br : Tir.branch) -> find_target_call_var_fold v_name br.Tir.br_body) brs with
+     | Some _ as r -> r
+     | None -> (match def with Some e -> find_target_call_var_fold v_name e | None -> None))
+  | Tir.ESeq (e1, e2) ->
+    (match find_target_call_var_fold v_name e1 with Some _ as r -> r | None -> find_target_call_var_fold v_name e2)
+  | _ -> None
+
 (* fn_name -> fn_def, restricted to apply wrappers (FnApply) taking either
    ($clo, one original param) -- map's unary callback -- or ($clo, two
    original params) -- map2's binary callback, e.g. `fn (a, b) -> a + b`.
@@ -448,7 +537,16 @@ let rec rewrite_expr (apply_fns : (string, Tir.fn_def) Hashtbl.t)
            let (unboxed, call_var) = unboxed_pair target_name in
            let substituted = subst_call2 ~unboxed target_name effective_name call_var inner' in
            List.fold_right (fun w acc -> Tir.ESeq (w, acc)) wrappers substituted
-         | None -> Tir.ELet (v, alloc_e, rest'))
+         | None ->
+           match find_target_call_fold effective_name inner' with
+           | Some target_name ->
+             (match fold_callback_kind apply_fns extra_fns target_name apply_var with
+              | Some (unboxed, call_var) ->
+                (* Same arg shape as map2: [acc; arr; clo] -> [acc; arr; apply]. *)
+                let substituted = subst_call2 ~unboxed target_name effective_name call_var inner' in
+                List.fold_right (fun w acc -> Tir.ESeq (w, acc)) wrappers substituted
+              | None -> Tir.ELet (v, alloc_e, rest'))
+           | None -> Tir.ELet (v, alloc_e, rest'))
   (* P10 Phase 2c — a CAPTURING closure (one or more free vars, so the
      EAlloc's arg list is [apply_fn_ptr; fv0; fv1; ...] rather than the
      singleton list above): the closure struct is a real, live value that
@@ -497,7 +595,15 @@ let rec rewrite_expr (apply_fns : (string, Tir.fn_def) Hashtbl.t)
          | Some (target_name, clo_var) ->
            let (unboxed, call_var) = unboxed_pair target_name in
            Tir.ELet (v, alloc_e, subst_call_capturing2 ~unboxed target_name effective_name call_var clo_var rest')
-         | None -> Tir.ELet (v, alloc_e, rest'))
+         | None ->
+           match find_target_call_var_fold effective_name rest' with
+           | Some (target_name, clo_var) ->
+             (match fold_callback_kind apply_fns extra_fns target_name apply_var with
+              | Some (unboxed, call_var) ->
+                Tir.ELet (v, alloc_e,
+                          subst_call_capturing2 ~unboxed target_name effective_name call_var clo_var rest')
+              | None -> Tir.ELet (v, alloc_e, rest'))
+           | None -> Tir.ELet (v, alloc_e, rest'))
   | Tir.ELet (v, e1, e2) -> Tir.ELet (v, rewrite_expr e1, rewrite_expr e2)
   | Tir.ELetRec (fns, body) ->
     Tir.ELetRec (List.map (fun fn -> { fn with Tir.fn_body = rewrite_expr fn.Tir.fn_body }) fns,

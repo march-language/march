@@ -14,7 +14,8 @@
 #   test          (ubuntu) × 4          `dune runtest`, sharded: codegen, refinecheck,
 #                                       compiler, rest (see the job's comment)
 #                 (macos)               `dune runtest`, unsharded
-#   two-node      (ubuntu)              node_discovery soak + two-node scenarios
+#   two-node      (ubuntu) × 2          two-node scenarios, sharded 1/2 + 2/2;
+#                                       shard 1 also runs the node_discovery soak
 #   conformance   (ubuntu, macos)       @types-check, @grammar-check, @vault-scale, docs, fmt
 #   tree-sitter   (ubuntu)              tree-sitter-march/ parses what the compiler accepts
 #   sanitize-gate (ubuntu)              ASAN gate: golden corpus + curated native + two-node
@@ -151,11 +152,28 @@ jobs:
   # Distributed-plane guards that used to run after `dune runtest` in the ubuntu
   # `test` leg, adding ~15 min to it serially. They need no test exe, only the
   # compiler and the staged runtime/stdlib, so they get their own runner.
+  #
+  # Two shards since 2026-10-02. The single job's scenarios step hit its 55 min
+  # on main (runs 36945831912, 36953454223) with every scenario reporting ok:
+  # nothing hung or slowed down (per-scenario times matched the green runs of
+  # 2026-09-30..10-01 to within a few seconds); the four control_* scenarios
+  # (135-200 s each, ~10.5 min together) took a step that already ran 39-50
+  # min to ~48 min on a fast runner and ~61 on a slow one (ubuntu runners
+  # come in two speeds, ~25% apart). A shard costs ~2 min of setup + build
+  # (opam is cached) on one more Linux runner; each shard's scenarios take
+  # ~24 min on a fast runner, ~31 on a slow one.
+  # `scripts/two-node.sh --list K/N` deals the list round-robin, which splits
+  # the heavy control_* / protocol_* / hcr_* families across both shards.
   two-node:
+    name: two-node (${{ matrix.shard }}/2)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     runs-on: ubuntu-24.04
-    # Must stay above the scenarios step's 55 plus setup (12), build (10) and
+    # Must stay above the scenarios step's 50 plus setup (12), build (10) and
     # the soak (5).
-    timeout-minutes: 85
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v4
 
@@ -184,6 +202,7 @@ jobs:
       # output diffed against the golden, the first tear or crash reported
       # verbatim. ~40s. See specs/todos/2026-09-14-distributed-plane-known-gaps.md.
       - name: Soak node_discovery (torn-stdout guard)
+        if: matrix.shard == 1
         timeout-minutes: 5
         run: |
           eval $(opam env)
@@ -203,20 +222,23 @@ jobs:
           echo "node_discovery: 200/200 runs matched the golden"
 
       # Two real OS processes, a fault applied from outside (SIGKILL + restart
-      # with a new creation), per-node goldens. ~5s per scenario. Each scenario
+      # with a new creation), per-node goldens. 10-200 s per scenario, almost
+      # all of it compiling the nodes. Each scenario
       # is test/two_node/<name>/; see specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
-      - name: Two-node scenarios
-        # 57 scenarios at 20-70 s each (~33 min on a 2026-09-25 runner, when
-        # dd step 11b's four cert_* scenarios crossed the old 35); 25 was hit
-        # on main itself on a slow runner day. On such a day one run got
-        # through only 36 of 52 scenarios in 25 min, which is ~40 min for 57;
-        # 55 covers that with margin. Splitting the scenario list across two
-        # jobs would pay a second toolchain setup + build every run; a longer
-        # step is cheaper.
-        timeout-minutes: 55
+      - name: Two-node scenarios (${{ matrix.shard }}/2)
+        # 71 scenarios as of 2026-10-02: ~31 min per shard on a slow runner
+        # (~61 unsharded), ~24 on a fast one. 50 leaves room for the list to
+        # grow. When a shard's green runs reach ~40 min, add a third shard (N
+        # in both the matrix and the --list below) rather than raising this.
+        timeout-minutes: 50
         run: |
           eval $(opam env)
-          for s in $(scripts/two-node.sh --list); do scripts/two-node.sh "$s" || exit 1; done
+          # The list is captured, not looped over inline: `for s in $(...)`
+          # ignores a failing --list and would run zero scenarios, green.
+          list=$(scripts/two-node.sh --list ${{ matrix.shard }}/2) || exit 1
+          [ -n "$list" ] || { echo "::error::shard ${{ matrix.shard }}/2 lists no scenarios"; exit 1; }
+          echo "shard ${{ matrix.shard }}/2: $(echo "$list" | wc -l) scenarios"
+          for s in $list; do scripts/two-node.sh "$s" || exit 1; done
 
   # Static-semantics + grammar corpora, doc notebooks and formatting: all
   # independent of `dune runtest` and of each other, and all short — grouped
@@ -649,8 +671,8 @@ jobs:
   # syscall interception hangs ASAN's shadow-memory setup.
   sanitize-gate:
     runs-on: ubuntu-24.04
-    # Step (65) + toolchain setup (12), rounded up.
-    timeout-minutes: 80
+    # Step (85) + toolchain setup (12), rounded up.
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
 
@@ -675,7 +697,15 @@ jobs:
         # test (macos-15, all) at ~60 min, so a shard buys no wall time and
         # adds a second setup + build to every run's Linux job-minutes. A
         # longer timeout costs nothing while the sweep passes.
-        timeout-minutes: 65
+        #
+        # 65 -> 85 on 2026-10-02. The four control_* two-node scenarios (each
+        # 135-200 s without ASan) took the step to 60 min on a slow runner
+        # (main run 36953454223; 45-52 min on fast ones), the same growth that
+        # timed the two-node job out. If a fast runner's sweep passes ~60
+        # min, shard the two-node corpus with `scripts/two-node.sh --list K/N`
+        # (SANITIZE_TWO_NODE_SHARD) instead of raising this again: by then it
+        # is past test (macos-15, all) and on the critical path.
+        timeout-minutes: 85
         run: |
           eval $(opam env)
           dune shutdown 2>/dev/null || true

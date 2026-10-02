@@ -50,28 +50,29 @@ dead, DCE removed the pure stack alloc, and the captured chain down to the
 request's `conn` was never released. Any `match` with a non-trivial default
 and a nested pattern paid this per evaluation.
 
-Fix in `drop.ml`: a let-bound closure variable is mapped to its struct
-(`clo_vars`, per function, from `EAlloc`/`EStackAlloc`/`EReuse` of a
-`TDClosure`), so a bare `dec_rc` on it is routed through a synthesized
-`__drop$<struct>` over the capture slots the environment OWNS. Ownership is
-decided per slot at the allocation sites (`closure_sites`, a module pre-scan;
-all let-bound sites must agree, any other allocation position disqualifies
-the struct): a slot is owned when Perceus inc'd the capture in the RHS prefix
-(a dup), or when the capture is a closure allocated earlier in the same
-function and dead after the let (a move — the join-point chain). Everything
-else is a borrowing capture of a non-escaping closure (`List.sort_by`'s
-`sort_loop` captures its `groups` parameter that way) and is left alone:
-claiming it double-freed (RC underflow), which is also why
-`owning_apply_fns`' apply-side gate exists. Each site also records which
-struct it stores in each slot (`clo_field_structs`), so an owned captured
-closure is dropped deeply in turn; a struct that (recursively) owns no heap
-data gets no drop function, so every match's capture-free panic-default chain
-stays a shallow dec that Escape still stack-promotes and DCE deletes
-(`unboxed_aggregates` keeps its zero `march_alloc`). Two regressions found
-and fixed on the way: a module-wide `clo_vars` matched an apply function's
-same-named capture local (`let cmp = $clo.$fv1`) or self alias (`let go =
-$clo`) to another function's struct, and the first ownership rule claimed
-borrowed captures.
+While this was being chased, `main` landed its own fix for the single-level
+case (`308d5cbc5`, `ecf99435e`: `drop.ml`'s `clo_caps`/`owned_locals`,
+`dead_clo_pair`/`dead_clo_release`, plus lowering that keeps a single-call-site
+join point inline). On the merged tree the router shape still leaked
+~1.0 KiB/req because the chain was not walked. Two additions to `main`'s
+mechanism close it: `dead_clo_release` recurses into a captured closure that
+is itself in `clo_caps` (the doc comment already promised "released by that
+closure's own deep drop"; a function-typed capture has no `__drop$` function,
+so it was a bare `dec_rc`), and `clo_alloc_caps` accepts the `EReuse` form
+Perceus's FBIP produces when the join point reuses the dead `Cons` cell it
+just matched (`reuse $f as $Clo_…`), which left that closure and everything
+below it unregistered.
+
+An earlier, independent mechanism for the same leak (per-function closure
+struct tracking with per-slot ownership) was dropped in favour of `main`'s;
+its two instructive failures are worth recording: a module-wide variable→struct
+map matched an apply function's same-named capture local (`let cmp = $clo.$fv1`)
+or self alias (`let go = $clo`) to another function's struct and deep-dropped
+the wrong layout, and "captured with no inc and dead after the let" is NOT
+proof of a move for a non-escaping closure — `List.sort_by`'s `sort_loop`
+captures its `groups` parameter that way and releasing it underflowed. Only a
+dup (`inc_rc` in the RHS prefix) or an owned local proves the environment's
+reference, which is what `owned_locals` encodes.
 
 ## Measurements (thread pool, 10 s, `wrk`/pipelined client)
 

@@ -1,0 +1,7 @@
+Seq.from_list + count = 40, flat: true
+Seq.from_string_lines + count = 80, flat: true
+Seq.from_list + fold = 240, flat: true
+Seq.map + count = 120, flat: true
+Seq.filter + count = 80, flat: true
+Seq.concat + count = 80, flat: true
+match fall-through join point = 80, flat: true
