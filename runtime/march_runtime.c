@@ -589,6 +589,27 @@ void march_tco_defer_drain(void *buf) {
     free(b);
 }
 
+/* The callee half of the closure-call convention (march_clo_arg_retain in
+ * march_runtime.h is the caller half): every closure caller, compiled or C,
+ * KEEPS a boxed Float argument, while an apply fn owns its parameters. An
+ * apply fn whose parameter is still erased (TVar after mono) cannot tell a
+ * Float box from any other heap value statically, so its prologue
+ * (Llvm_toplevel.emit_fn) calls this to take its own reference to a Float box.
+ * Every other value is already the callee's and passes through. */
+void march_clo_param_own(void *p) {
+    if (IS_HEAP_PTR(p) && ((march_hdr *)p)->tag == MARCH_FLOAT_TAG)
+        march_incrc(p);
+}
+
+/* The matching caller half for an ERASED argument: compiled code passing a
+ * TVar value to a closure handed the callee a reference, which the callee
+ * never consumes when the value is a Float box. Called BEFORE the call (a
+ * non-Float argument is the callee's and may be freed during it); returns the
+ * box for the caller to release afterwards, or NULL (a no-op release). */
+void *march_clo_float_arg(void *p) {
+    return (IS_HEAP_PTR(p) && ((march_hdr *)p)->tag == MARCH_FLOAT_TAG) ? p : NULL;
+}
+
 /* Non-atomic reference counting — for values provably local to one thread.
  * These must NOT be called on values that may be concurrently accessed from
  * another actor.  The callers (Perceus-generated code) guarantee this.
@@ -10819,8 +10840,8 @@ void *march_typed_array_filter(void *arr, void *mask) {
 }
 
 /* Release a fold's PREVIOUS accumulator when the closure did not. [prev] is
- * the accumulator just handed to the closure, [result] what it returned, [acc]
- * the fold's INITIAL accumulator.
+ * the accumulator just handed to the closure, [acc] the fold's INITIAL
+ * accumulator.
  *
  * A closure call consumes its heap arguments (march_clo_arg_retain in
  * march_runtime.h), so a non-Float [prev] is the callee's to release or to
@@ -10830,10 +10851,15 @@ void *march_typed_array_filter(void *arr, void *mask) {
  * [prev_is_float]) — reading [prev]'s tag afterwards is a use-after-free
  * (caught by ASAN on native_arr_fold_acc_leak_probe).
  *
- * A boxed Float is the exception: the apply fn unboxes it in its prologue and
- * never releases the box, and every Float coming out of an apply fn is a FRESH
- * box (re-boxed on return by march_alloc_float), so a Float [prev] that is not
- * [result] is still solely ours.
+ * A boxed Float is the exception: a closure callee never spends the caller's
+ * reference to it. An apply fn with a Float param unboxes it in its prologue
+ * and re-boxes any Float it returns; one whose param is erased (TVar) takes its
+ * own reference first (march_clo_param_own), so even handing [prev] straight
+ * back as [result] returns a second reference. A Float [prev] is therefore
+ * still ours after the call, and released whether or not it is [result]. Until
+ * 2026-09-30 this skipped prev == result, on the theory that the callee had
+ * handed our own reference back; an erased callee that ignored [prev] freed it
+ * instead (specs/progress/2026-09-30-native-float-arr-fold-unused-elem-double-free.md).
  *
  * [acc] used to be excluded here too, on the intuition that the fold's INITIAL
  * accumulator belongs to the caller. It does not: every one of these helpers
@@ -10847,8 +10873,7 @@ void *march_typed_array_filter(void *arr, void *mask) {
  * per-element one. Dropping the exclusion makes the helper honour the owned
  * convention it is declared under. A zero-length fold never enters the loop,
  * so [acc] is handed straight back as [result] and the caller releases it
- * once; the [prev == result] guard covers a closure that returns its
- * accumulator argument unchanged. See
+ * once. See
  * specs/todos/2026-09-16-native-float-arr-fold-leaks-two-boxes-per-call.md.
  *
  * Pinned by test/native/native_arr_fold_acc_leak_probe.march: the Float and
@@ -10858,9 +10883,8 @@ static inline int fold_acc_is_float(void *prev) {
     return IS_HEAP_PTR(prev) && ((march_hdr *)prev)->tag == MARCH_FLOAT_TAG;
 }
 
-static inline void fold_release_prev_acc(void *prev, int prev_is_float,
-                                         void *result) {
-    if (!prev_is_float || prev == result) return;
+static inline void fold_release_prev_acc(void *prev, int prev_is_float) {
+    if (!prev_is_float) return;
     march_decrc(prev);
 }
 
@@ -10884,7 +10908,7 @@ void *march_typed_array_fold(void *arr, void *acc, void *f) {
          * return a reference this loop owns. */
         march_clo_arg_retain(elem);
         result = call_closure_2(f, prev, elem);
-        fold_release_prev_acc(prev, prev_is_float, result);
+        fold_release_prev_acc(prev, prev_is_float);
     }
     march_decrc(f);
     return result;
@@ -11966,7 +11990,7 @@ void *native_int_arr_fold(void *acc, void *arr, void *f) {
         int prev_is_float = fold_acc_is_float(prev);
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
-        fold_release_prev_acc(prev, prev_is_float, result);
+        fold_release_prev_acc(prev, prev_is_float);
     }
     march_decrc(f);
     return result;
@@ -12173,14 +12197,14 @@ void *native_float_arr_map2(void *arr1, void *arr2, void *f) {
  * (acc, arr, f) argument order as native_int_arr_fold above.
  *
  * march_decrc(elem) after the call releases the FRESH per-element box we
- * just allocated. Confirmed safe (not a use-after-free) by inspecting
- * -emit-llvm for the compiled closure's apply fn: the erased-ptr calling
- * convention treats a Float argument as borrowed/read-only — the callee
- * only ever calls march_unbox_float(x.arg) to read the double value, never
- * stores x.arg itself. Even a closure that stores the element (e.g. cons it
- * into a List(Float)) allocates a FRESH march_alloc_float box from the
- * unboxed double for storage rather than aliasing our box — so our box has
- * no surviving alias once the call returns and is always safe to drop.
+ * just allocated. A closure callee never spends our reference to a Float box
+ * (march_clo_arg_retain in march_runtime.h): a Float-typed param is unboxed
+ * in the apply fn's prologue, and an ERASED one (a let-generalized
+ * `fn (p, x) -> p` passed in as a value) first takes its own reference
+ * (march_clo_param_own), which is what its unused-param drop, a store, or
+ * returning the element spends. Before that prologue existed, the erased
+ * callee's entry drop freed this box and the decrc below freed it again
+ * (specs/progress/2026-09-30-native-float-arr-fold-unused-elem-double-free.md).
  * Without this decrc, elem leaks: ~32B/element, unbounded in loop length
  * (confirmed via RSS measurement — see task-2-report.md). This decrc is
  * pinned by test/native/native_arr_fold_leak_probe.march; deleting it takes
@@ -12204,7 +12228,7 @@ void *native_float_arr_fold(void *acc, void *arr, void *f) {
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
         march_decrc(elem);
-        fold_release_prev_acc(prev, prev_is_float, result);
+        fold_release_prev_acc(prev, prev_is_float);
     }
     march_decrc(f);
     return result;
@@ -12337,7 +12361,7 @@ void *PREFIX##_fold(void *acc, void *arr, void *f) {                         \
         int prev_is_float = fold_acc_is_float(prev);                         \
         march_incrc(f);                                                      \
         result = call_closure_2(f, prev, elem);                              \
-        fold_release_prev_acc(prev, prev_is_float, result);             \
+        fold_release_prev_acc(prev, prev_is_float);                          \
     }                                                                        \
     march_decrc(f);                                                          \
     return result;                                                           \
@@ -12520,7 +12544,7 @@ void *native_f32_arr_fold(void *acc, void *arr, void *f) {
         march_incrc(f);
         result = call_closure_2(f, prev, elem);
         march_decrc(elem);
-        fold_release_prev_acc(prev, prev_is_float, result);
+        fold_release_prev_acc(prev, prev_is_float);
     }
     march_decrc(f);
     return result;
