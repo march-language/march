@@ -1,0 +1,15 @@
+mod MinHttp do
+  needs IO.Process
+  needs IO.NetListen
+  fn port_from_env() do
+    match process_env("MARCH_TEST_HTTP_PORT") do
+    Some(s) -> match string_to_int(s) do Some(n) -> n | None -> 0 end
+    None -> 0
+    end
+  end
+  fn main(_cap_netlisten : Cap(IO.NetListen), _cap_process : Cap(IO.Process)) do
+    HttpServer.new(port_from_env())
+    |> HttpServer.plug(fn conn -> conn |> HttpServer.text(200, "ok"))
+    |> HttpServer.listen()
+  end
+end
