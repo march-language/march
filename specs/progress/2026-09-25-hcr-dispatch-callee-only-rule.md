@@ -43,7 +43,7 @@ Two things had to change with it:
   parsing and carries them as the config's `includes` when the prefix names
   the entry module (`hr_entry_nested`). The entry module's own top-level
   functions stay off the boundary (they share `main`'s bare spelling); see
-  `specs/todos/2026-09-25-hcr-entry-module-top-level-fns-outside-boundary.md`.
+  `specs/progress/2026-10-01-hcr-entry-module-top-level-fns-outside-boundary.md` (fixed 2026-10-01).
 - The forge upgrade fixtures keep their role body in a nested module
   (`UpgradeApp.Serve.serve_one`), which is the shape a real app has.
 - The nested modules are taken from the PARSED entry module: desugaring adds

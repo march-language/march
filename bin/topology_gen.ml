@@ -94,7 +94,7 @@ let prepare ~path ~(entry : Ast.module_) ~(imports : Ast.decl list) ~pools ~fore
        the topology has a [control] section. *)
     let entry_decls =
       match topo.DT.control with
-      | Some _ -> entry_decls @ parse_decls ~fname:"<control>" March_desugar.Control_wiring_src.text
+      | Some _ -> entry_decls @ parse_decls ~fname:March_tir.Hot_reload.control_wiring_file March_desugar.Control_wiring_src.text
       | None -> entry_decls
     in
     let main = parse_decls ~fname:"<topology>" (DT.main_source ?pools facts topo) in

@@ -108,6 +108,34 @@ let test_user_claim_wins () =
       HR.note_actor_fns ~stdlib:true [ "Writer_dispatch" ];
       check "user wins, whatever the order" true (HR.is_slot_actor_dispatch "Writer_dispatch"))
 
+(* ── The entry file's own top-level fns (2026-10-01) ─────────────────────── *)
+
+let with_entry_fns names f =
+  HR.reset_entry_file_fns ();
+  List.iter HR.note_entry_file_fn names;
+  Fun.protect f ~finally:HR.reset_entry_file_fns
+
+let test_entry_file_fns_are_slots () =
+  with_entry_fns [ "serve_one"; "nested" ] (fun () ->
+      let off = HR.default_config "MyApp" in
+      let on = { off with HR.entry_top_level = true } in
+      check "recorded, flag on: slot" true (HR.is_slot_fn on "serve_one");
+      check "recorded, flag off: no slot" false (HR.is_slot_fn off "serve_one");
+      check "a bare name not recorded (a lambda, the prelude)" false (HR.is_slot_fn on "$lam3$apply$1");
+      check "a call to it dispatches" true (HR.needs_dispatch_to on "nested");
+      check "unless the flag is off" false (HR.needs_dispatch_to off "nested");
+      check "the entry module excluded: no slot" false
+        (HR.is_slot_fn { on with HR.excludes = [ "MyApp" ] } "serve_one");
+      check "a qualified app fn is a slot either way" true (HR.is_slot_fn off "MyApp.Serve.go"))
+
+let test_program_entry_never_a_slot () =
+  with_entry_fns [ "main" ] (fun () ->
+      let on = { (HR.default_config "MyApp") with HR.entry_top_level = true } in
+      check "main" false (HR.is_slot_fn on "main");
+      check "MyApp.main" false (HR.is_slot_fn on "MyApp.main");
+      check "a fn ending in main is not an entry" true (HR.is_slot_fn on "MyApp.domain");
+      check "is_program_entry main" true (HR.is_program_entry "HotEntry.main"))
+
 let test_excluded_callee_is_direct () =
   let cfg = { (HR.default_config "MyApp") with HR.excludes = ["MyApp.Hot.Inner"] } in
   check "app→excluded stays direct" false
@@ -437,6 +465,8 @@ let () =
     ("actor_provenance", [
       Alcotest.test_case "stdlib actor dispatch is not a slot" `Quick test_stdlib_actor_dispatch_not_slot;
       Alcotest.test_case "a user claim on the name wins"       `Quick test_user_claim_wins;
+      Alcotest.test_case "entry-file top-level fns are slots"  `Quick test_entry_file_fns_are_slots;
+      Alcotest.test_case "a program entry is never a slot"     `Quick test_program_entry_never_a_slot;
     ]);
     ("llvm_emit", [
       Alcotest.test_case "hot_reload emits dispatch call"    `Quick test_hot_reload_emits_dispatch_call;
