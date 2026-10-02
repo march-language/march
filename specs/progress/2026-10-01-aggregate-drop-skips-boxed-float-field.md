@@ -33,3 +33,28 @@ folding it with `List.fold_left`, and dropping it leaks 2 objects per iteration
 same with `MARCH_NO_INLINE_RC=1`, so it is not the inline refcount fast path; the
 interpreter is flat. That fixture's leak check therefore leaves its Float leg out; put it
 back when this is fixed.
+
+## Fixed 2026-10-02
+
+Where a Float lives decides whether there is a box to release, and `drop.ml`
+now reads it straight from the slot when there is:
+
+- A **tuple** stores every field in the uniform `ptr` slot, so its Float IS a
+  `march_alloc_float` box (`ETuple` coerces the double into one). The
+  aggregate drop binds that slot as a raw `Ptr(Unit)` (an `EField` with the
+  `$fvN` accessor on a `Ptr`-typed binder loads the word without unboxing) and
+  releases it on the freed path. A **record** (`ERecord`, nominal or
+  structural) stores a declared Float as a raw `double` and owns nothing.
+- A **constructor field declared as a type parameter** and instantiated at
+  Float (`List(Float)`'s element, `Option(Float)`'s payload) is a box too;
+  `boxed_float_slots` finds those by comparing the declared and substituted
+  field types, and the variant drop's arm reads the slot word before
+  `march_decrc_freed` and releases it in the freed branch. A field declared
+  `Float` outright is a raw double. `Llvm_case` binds such a field as a copy of
+  the double and only releases the box on its own `strip_scrut_decrc` path,
+  which the synthesized drops never take — that is why `__drop$List_Float`
+  freed the spine and left every element behind.
+
+Regression: `test/native/aggregate_drop_erased_fields.march` legs 1a/1b (tuple
+Float, `List(Float)` through a fold and through a destructuring sum). The Float
+leg of `test/native/rc_inline_fast_path.march` is back in its leak check.

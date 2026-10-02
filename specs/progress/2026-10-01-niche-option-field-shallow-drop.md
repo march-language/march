@@ -15,3 +15,18 @@ Fix: a niche-aware drop that tests the word for non-null/heap before calling the
 payload's `__drop`, e.g. via `march_decrc_local_freed` (which returns 0 for a non-heap
 word) or a new `is_heap` test. Witness: `let (o, n) = (Some(big_tree), 1)` dropped in a
 `live_allocs()` loop; it must reach delta 0.
+
+## Fixed 2026-10-02
+
+`drop.ml`'s child release (`drop_op`, now the one builder behind the aggregate
+drop, the variant drop and the apply-fn capture release) handles a
+payload-sharing field: a niche `Option(T)` child is matched —
+`case f of Some(p) -> <drop p> | _ -> ()` — which is exactly the null test the
+representation needs, and the payload goes through its own synthesized drop; a
+newtype child is re-bound at its payload type and dropped the same way. Only a
+scalar payload keeps the bare `dec_rc`. `erased_payload` resolves the
+constructor to match through `Kind.repr_of` / `niche_repr_of_concrete` and the
+variant's declaration, with the same suffix fallback as the variant drops.
+
+Regression: `test/native/aggregate_drop_erased_fields.march` leg 2 (a tuple
+holding `Some(tree)`, matched in one function and left unread in another).

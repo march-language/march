@@ -32,3 +32,21 @@ The stdlib no longer has any such closure (`trie_update_*`, `insert_*`, `pop_*` 
 top-level). Open: either monomorphise lifted local closures at their use site, or
 give an aggregate with a type-variable field a runtime-guarded generic release.
 Witness: the program above in a `live_allocs()` loop; it must reach delta 0.
+
+## Fixed 2026-10-02 (runtime-guarded release)
+
+The second option: `drop.ml` no longer refuses a field whose type mentions a
+type variable. A bare `'_` child gets a bare `dec_rc` — the slot holds a uniform
+value and `march_decrc` is IS_HEAP_PTR-guarded, so that is a no-op on a tagged
+scalar, frees a Float box, and releases a heap child shallowly (what its own
+children lose is the conservative direction, and was lost before anyway). A
+type that only mentions a variable but has a layout of its own (`List('_)`,
+`('_, Int)`) gets its own synthesized drop exactly like its concrete instances:
+the spine is known even when the elements are not. `has_tvar` is gone.
+
+In the todo's program the frame tuple is `(List('_), '_)`: the list's spine is
+walked and freed and its Int elements are scalars, so the leak goes to zero.
+Monomorphising lifted local closures at their use site would make the release
+deep in every case and remains a possible later step.
+
+Regression: `test/native/aggregate_drop_erased_fields.march` leg 3.

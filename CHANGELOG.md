@@ -90,6 +90,14 @@ git log is authoritative for exact commits.
   no longer pays a shift pair on the way in.
 
 ### Fixed
+- Compiled: a dying tuple releases its boxed `Float` fields, and a dying
+  `List(Float)` cell (any generic container slot holding a Float) releases the
+  box in that slot; both leaked one object per Float before.
+- Compiled: a tuple or record holding a niche-encoded `Option` (`Some(tree)`)
+  releases the payload deeply when dropped; the subtree leaked before.
+- Compiled: an aggregate whose field type still mentions a type variable (a
+  tuple destructured inside a polymorphic local `fn`) is released instead of
+  skipped; its lists are walked and freed.
 - Compiled: a generic named function passed where a `Float -> Float -> Float`
   closure is expected returned the wrong value (its trampoline unboxed the
   arguments per the use-site type instead of forwarding them as the function
