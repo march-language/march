@@ -1578,6 +1578,21 @@ typedef struct {
     int   client_fd;
 } conn_thread_arg_t;
 
+/* See march_http_internal.h: the compiled `Conn -> Unit` deep drop the
+ * stdlib hands to march_http_server_listen, applied to every handler result
+ * once its response bytes are out of the iovecs. */
+void *g_march_http_release_clo = NULL;
+
+void march_http_release_conn(void *conn) {
+    void *clo = g_march_http_release_clo;
+    if (!clo || !conn) return;
+    closure_fn_t fn = *(closure_fn_t *)((char *)clo + 16);
+    /* The compiled apply-fn consumes one $clo reference per call (same
+     * contract as the pipeline closure above). */
+    march_incrc_local(clo);
+    (void)fn(clo, conn);
+}
+
 /* FNV-1a 64-bit hash — must match the OCaml fnv1a_64 in llvm_emit.ml.
  * Used to intern atom names as stable i64 values for pattern matching. */
 static int64_t fnv1a_64_str(const char *s, size_t len) {
@@ -1933,8 +1948,12 @@ int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
             march_ws_handshake((int64_t)fd, ws_key);
             void *ws_sock = march_alloc(16 + 8);
             *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
+            /* The handler call consumes one closure reference; the result
+             * Conn's `upgrade` field still owns another, released below. */
+            march_incrc(ws_closure);
             call_closure1(ws_closure, ws_sock);
         }
+        march_http_release_conn(result_conn);
         return -1;  /* WebSocket took over — close HTTP loop */
     }
 
@@ -1944,8 +1963,12 @@ int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
     void   *resp_body    = *(void **)(rc + 88);
     if (resp_status == 0) resp_status = 200;
 
-    if (march_send_response_with_ka(fd, resp_status, resp_headers, resp_body,
-                              keep_alive) < 0)
+    int sent = march_send_response_with_ka(fd, resp_status, resp_headers,
+                                           resp_body, keep_alive);
+    /* The response is fully written (or failed): nothing references the
+     * result's strings any more. */
+    march_http_release_conn(result_conn);
+    if (sent < 0)
         return -1;
 
     return keep_alive ? 1 : 0;
@@ -2046,6 +2069,10 @@ static void *connection_thread(void *arg) {
             {
                 struct iovec  batch_iov[CONN_BATCH_IOV_MAX];
                 int           batch_n = 0;
+                /* Results whose iovecs are in batch_iov; released right
+                 * after the writev that drains them. */
+                void         *done_conns[PIPELINE_BATCH];
+                int           done_n  = 0;
                 const int     do_cork = (n > 1);
                 march_response_t bresp;
                 bresp.iov_count    = 0;
@@ -2073,6 +2100,7 @@ static void *connection_thread(void *arg) {
                             writev_all(fd, batch_iov, batch_n);
                             batch_n = 0;
                         }
+                        march_http_release_conns(done_conns, &done_n);
                         march_http_send_response(fd, 500, make_nil(),
                             march_string_lit("Internal Server Error", 21));
                         running = 0;
@@ -2118,8 +2146,15 @@ static void *connection_thread(void *arg) {
                             march_ws_handshake((int64_t)fd, ws_key);
                             void *ws_sock = march_alloc(16 + 8);
                             *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
+                            /* The call consumes one closure reference; the
+                             * result's `upgrade` still owns another. */
+                            march_incrc(ws_closure);
                             call_closure1(ws_closure, ws_sock);
                         }
+                        /* Earlier results of this batch were drained by the
+                         * writev_all above; this one is done with too. */
+                        march_http_release_conns(done_conns, &done_n);
+                        march_http_release_conn(result_conn);
                         running = 0;
                         break;
                     }
@@ -2141,6 +2176,7 @@ static void *connection_thread(void *arg) {
                     if (batch_n + bresp.iov_count > CONN_BATCH_IOV_MAX) {
                         writev_all(fd, batch_iov, batch_n);
                         batch_n            = 0;
+                        march_http_release_conns(done_conns, &done_n);
                         bresp.scratch_used = 0;
                         march_populate_response_ka(&bresp, resp_status,
                                                     resp_headers, resp_body,
@@ -2150,12 +2186,14 @@ static void *connection_thread(void *arg) {
                     memcpy(batch_iov + batch_n, bresp.iov,
                            (size_t)bresp.iov_count * sizeof(struct iovec));
                     batch_n += bresp.iov_count;
+                    done_conns[done_n++] = result_conn;
 
                     if (!keep_alive) { running = 0; break; }
                 }
 
                 /* Single writev() for the entire batch. */
                 if (batch_n > 0) writev_all(fd, batch_iov, batch_n);
+                march_http_release_conns(done_conns, &done_n);
 
                 /* Release TCP_NOPUSH / TCP_CORK → kernel flushes. */
 #if defined(__APPLE__) && defined(TCP_NOPUSH)
@@ -2466,9 +2504,13 @@ int march_http_evloop_enabled(void) {
 }
 
 void march_http_server_listen(int64_t port, int64_t max_conns,
-                               int64_t idle_timeout, void *pipeline) {
+                               int64_t idle_timeout, void *pipeline,
+                               void *release) {
     if (!pipeline) return;
     (void)idle_timeout;
+    /* The result releaser lives for the whole server run (see
+     * march_http_internal.h); the stdlib passes HttpServer.release_conn. */
+    g_march_http_release_clo = release;
 
     /* Ignore broken-pipe signals — send errors are handled explicitly. */
     signal(SIGPIPE, SIG_IGN);
@@ -2634,8 +2676,10 @@ int64_t march_http_server_spawn_n(int64_t port, int64_t n,
         g_spawn_n_target = n;
         atomic_store(&g_spawn_n_served, 0);
 
-        /* Run the blocking server — the parent will waitpid+SIGTERM when done. */
-        march_http_server_listen(port, max_conns, idle_timeout, pipeline);
+        /* Run the blocking server — the parent will waitpid+SIGTERM when done.
+         * No releaser: this test-only path has no March-side drop closure, so
+         * it keeps the pre-release behaviour (one leaked result per request). */
+        march_http_server_listen(port, max_conns, idle_timeout, pipeline, NULL);
         _exit(0);
     }
 

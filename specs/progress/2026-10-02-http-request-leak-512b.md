@@ -2,10 +2,15 @@
 
 Logged 2026-10-02 while running forgepm's pool acceptance (sub-project A,
 `specs/2026-10-01-forgepm-pooled-db-design.md`), where RSS grew linearly.
+**Fixed the same day**, together with a second ~1 KiB/request leak the fix
+uncovered: see `2026-10-02-http-result-conn-and-join-point-closure-leaks.md`.
+After the fix the repro below measures 0.006 KiB/req; the regression guard is
+`test/test_http_native.ml` Phase E (20,000 pipelined requests, < 2 MiB growth).
 
 ## Repro
 
-`test/native/http_text_leak_repro.march` (not wired into any test yet): a
+`test/native/http_text_leak_repro.march` (kept as the minimal repro; the
+e2e harness's own server is the wired test): a
 text-only handler, `HttpServer.new(port) |> plug(fn conn -> conn |>
 HttpServer.text(200, "ok")) |> listen()`. Compiled with `--opt 2` on main
 (2026-10-02), driven with `wrk -t4 -c32 -d10s` after a 2 s warm-up:

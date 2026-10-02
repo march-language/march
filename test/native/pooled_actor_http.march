@@ -105,7 +105,11 @@ mod PooledActorHttp do
       process_exit(2)
     else
       let pool = spawn(Pool)
-      let _ = send(pool, PoolInit(4))
+      -- 64 >= the harness's 32 concurrent clients: checkouts are serialized
+      -- by the actor and a burst's Checkin messages queue BEHIND its
+      -- Checkouts, so a pool smaller than the concurrency legitimately
+      -- answers 503 "no connection available" mid-burst (seen at 4).
+      let _ = send(pool, PoolInit(64))
       HttpServer.new(port)
       |> HttpServer.plug(fn conn -> router(pool, conn))
       |> HttpServer.listen()

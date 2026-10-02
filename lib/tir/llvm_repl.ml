@@ -450,6 +450,10 @@ let emit_repl_fn_with_closure_slot ~emit_expr ?(fast_math=false) ~(n : int)
        (Llvm_calls.clo_wrap_define ~drop_clo:ctx.Llvm_ctx.repl
           ~borrowed:(Option.value ~default:[]
                        (Clo_flags.borrowed_params fn.Tir.fn_name))
+          ~deep_drops:(List.map
+                         (fun v -> Llvm_calls.deep_drop_name
+                             ~has_fn:(Hashtbl.mem ctx.Llvm_ctx.top_fns) v.Tir.v_ty)
+                         fn.Tir.fn_params)
           wrap_name param_tys target_ret fn_llvm_name));
   (* Init function: allocate closure {header(16), fn_ptr} and store in the slot *)
   let init_name = Printf.sprintf "repl_%d_init" n in

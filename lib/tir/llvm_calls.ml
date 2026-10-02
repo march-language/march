@@ -359,20 +359,40 @@ let clo_wrap_declare wrap_name (param_ltys : string list) =
   Printf.sprintf "declare ptr @%s(%s)\n\n" wrap_name
     (String.concat ", " ("ptr" :: clo_wrap_param_tys param_ltys))
 
-let clo_wrap_define ?(drop_clo = false) ?(borrowed = []) wrap_name
-    (param_ltys : string list) target_ret fn_name =
+(* The synthesized deep-drop function ([Drop.run], `__drop$<mangled type>`)
+   for a parameter type, if this module defines one.  [has_fn] answers whether
+   a function of that name exists in the module being emitted; a REPL fragment
+   may not carry it, and then the shallow release below is all there is. *)
+let deep_drop_name ~(has_fn : string -> bool) (ty : Tir.ty) : string option =
+  let name = Tir_names.drop_fn_prefix ^ Drop.mangle ty in
+  if has_fn name then Some name else None
+
+let clo_wrap_define ?(drop_clo = false) ?(borrowed = []) ?(deep_drops = [])
+    wrap_name (param_ltys : string list) target_ret fn_name =
   let arg_names = List.mapi (fun i _ -> Printf.sprintf "%%a%d" i) param_ltys in
   (* A closure call consumes its heap arguments ([Clo_flags]), but the target
      is an ordinary function that may BORROW one, so the trampoline releases
      those after forwarding.  [borrowed] is the target's per-parameter modes
      ([Clo_flags.borrowed_params]); empty when unknown, which releases nothing.
      A Float or Int parameter is never released: it crosses unboxed/tagged, and
-     a Float box stays the caller's. *)
+     a Float box stays the caller's.
+
+     The release must be DEEP when the type has a synthesized drop
+     ([deep_drops], per parameter, from [deep_drop_name]): a bare march_decrc
+     frees one cell and orphans its children, and this trampoline is emitted
+     as raw IR after [Drop.run], so that pass can never rewrite it.  Measured
+     before this: HttpServer.listen's `release_conn : Conn -> Unit` (an
+     unused, hence borrowed, parameter) freed the 120-byte Conn record and
+     leaked its strings and header cells, ~0.5 KiB per HTTP request. *)
   let releases =
     List.concat (List.mapi (fun i (ty, name) ->
         match List.nth_opt borrowed i with
         | Some true when ty <> "double" && ty <> "i64" ->
-          [Printf.sprintf "  call void @march_decrc(ptr %s)\n" name]
+          (match List.nth_opt deep_drops i with
+           | Some (Some drop_fn) ->
+             [Printf.sprintf "  call void @%s(ptr %s)\n" drop_fn name]
+           | _ ->
+             [Printf.sprintf "  call void @march_decrc(ptr %s)\n" name])
         | _ -> [])
       (List.combine param_ltys arg_names))
     |> String.concat "" in

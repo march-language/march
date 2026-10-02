@@ -54,6 +54,26 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Compiled HTTP servers no longer leak ~0.5 KiB per request.** Neither the
+  thread-pool nor the event-loop server released the `Conn` a handler returns
+  after writing the response, so every request leaked the result record and
+  its strings (a text-only handler grew 158 MB in 10 s at 31k req/s; forgepm
+  at 800 req/s grew 400 MB/min). `HttpServer.listen` now hands the runtime a
+  compiled `Conn -> Unit` release function, applied once the response bytes
+  are written (after deferred writes drain, or on close). `http_server_listen`
+  takes that function as a fifth argument.
+- **Dead join-point closures from `match` no longer leak their captures.** A
+  `match` with a non-trivial default and a nested pattern (for example a
+  router matching `(method, path_info)`) leaked ~1 KiB per evaluation: the
+  fall-through closure chain lower_match builds was dropped shallowly in the
+  arms that never fell through, pinning the match's live variables. The Drop
+  pass now releases a closure's captures when the closure is dropped unapplied
+  and reaches into captured closures whose struct is known.
+- **A borrowed aggregate dropped by a closure trampoline is released deeply.**
+  A top-level function with a borrowed parameter, passed as a closure value,
+  had that argument released by its `$clo_wrap` with a shallow `march_decrc`,
+  orphaning the aggregate's children; the trampoline now calls the type's
+  synthesized deep drop when one exists.
 - **Compiled `to_string(())` prints `()`.** A compiled program printed `0` for
   the unit value, in `to_string`, `show`, string interpolation and inside
   containers (`Some(())` printed `Some(0)`). It now prints `()` as the

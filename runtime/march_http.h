@@ -217,7 +217,8 @@ void march_http_pool_stop(void);
  * Starts a MARCH_HTTP_POOL_DEFAULT_SIZE-worker pool internally and runs the
  * accept loop until SIGTERM/SIGINT.  Calls march_http_pool_stop before returning. */
 void march_http_server_listen(int64_t port, int64_t max_conns,
-                               int64_t idle_timeout, void *pipeline);
+                               int64_t idle_timeout, void *pipeline,
+                               void *release);
 
 /* Fork a child that runs the server until it has handled exactly n requests,
  * then exits.  Returns the child PID (as int64_t) to the parent. */
