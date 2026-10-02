@@ -46,13 +46,27 @@ let truncated (reply : Yojson.Safe.t) : bool =
   | `Assoc fields -> List.assoc_opt "truncated" fields = Some (`Bool true)
   | _ -> false
 
+let single_line request =
+  if String.contains request '\n' || String.contains request '\r' then
+    Error "observe: a request is a single line"
+  else Ok ()
+
+let exchange request conn =
+  Cmd_deploy_hot.send_line conn request;
+  parse_reply (Cmd_deploy_hot.recv_line conn)
+
 (** Send [request] (a verb and its arguments, one line) to [h]'s observe
     socket over [transport] and return the parsed reply. *)
 let query (transport : Remote.transport) (h : Hosts.host) (request : string)
   : (Yojson.Safe.t, string) result =
-  if String.contains request '\n' || String.contains request '\r' then
-    Error "observe: a request is a single line"
-  else
-    transport.Remote.with_socket { h with Hosts.socket = socket_of h } (fun conn ->
-        Cmd_deploy_hot.send_line conn request;
-        parse_reply (Cmd_deploy_hot.recv_line conn))
+  match single_line request with
+  | Error _ as e -> e
+  | Ok () ->
+    transport.Remote.with_socket { h with Hosts.socket = socket_of h } (exchange request)
+
+(** [query] against an observe socket on this machine, by its own path
+    (MARCH_OBSERVE_SOCKET), not derived from a reload socket. *)
+let query_socket (path : string) (request : string) : (Yojson.Safe.t, string) result =
+  match single_line request with
+  | Error _ as e -> e
+  | Ok () -> Remote.use_socket path (exchange request)

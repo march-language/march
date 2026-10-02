@@ -633,6 +633,18 @@ forge cap run --allow-only IO.Console ./untrusted          # run untrusted code 
 
 `forge topology check` validates a `topology.toml` (which function or actor serves each protocol role, which pools of nodes serve which roles, hosts per environment) against your sources with `file:line` errors, and runs automatically in `forge build`, `forge run` and `forge deploy hot`. `forge topology export --json` prints the digested topology with the pool connectivity graph; `forge topology gen systemd|ufw|do-firewall|compose` writes deployment files from it, and any `forge-topology-<target>` on `PATH` is a generator plugin. See the [Topology](topology.md) page.
 
+## forge observe: what a running node is doing
+
+A compiled program started with `MARCH_OBSERVE_SOCKET=<path>` (or with `MARCH_HOT_RELOAD_SOCKET`, which puts the observe socket at `<path>.observe`) answers read-only questions about itself on that socket. The socket is owner-only and separate from the hot-reload socket, so asking never blocks a deploy.
+
+```bash
+forge observe --socket /tmp/app.observe                  # SNAPSHOT: every section
+forge observe --socket /tmp/app.observe actors mbox 10   # the 10 deepest mailboxes
+forge observe --env web --section tree --json            # a forge.toml host, over ssh
+```
+
+The request is a verb and its arguments: `ACTORS [mbox|status|epoch|pid] [n]`, `ACTOR <pid>`, `TREE`, `NAMES`, `SCHED`, `MEM`, `EPOCHS`, `SNAPSHOT [sections]` or `HELP`. Without `--socket`, forge asks the `[hot-reload]` hosts in `forge.toml` (`--env NAME` picks entries by name). The reply is JSON: indented, or one line per host with `--json`. A dead actor's `ACTOR` reply says how it died (`Crash`, `Killed`, `Normal`) but never its panic message. Actor type names appear in builds compiled with `--hot-reload`.
+
 ## Dependency Management
 
 ### Adding Dependencies

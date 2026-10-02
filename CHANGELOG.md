@@ -26,6 +26,16 @@ git log is authoritative for exact commits.
   `forge observe`, `forge top` and `forge diagnose` build on. It is separate from
   the hot-reload socket, so an observer can never block a deploy; the socket is
   owner-only and holds at most eight clients at once.
+- **`forge observe` and the observe socket's snapshot verbs.** A running program now
+  answers `ACTORS [mbox|status|epoch|pid] [n]` (every live actor with its mailbox
+  depth, status, scheduler, code epoch, supervisor and registered names), `ACTOR <pid>`
+  (one actor, its children and supervisor settings, or how a dead one died: the
+  kind only, never the panic text), `TREE` (the supervision tree plus the
+  unsupervised actors), `NAMES`, `SCHED`, `MEM`, `EPOCHS` and `SNAPSHOT` (several of
+  them from one consistent walk). `forge observe [REQUEST] [--section S] [--json]`
+  asks the forge.toml hosts over ssh, or a local socket with `--socket`. Reading
+  100 000 actors takes about 20 ms, and nothing is added to the scheduler's hot path.
+  Actor type names need a `--hot-reload` build.
 - **An in-cluster control plane for hot deploys (distributed deploys, step 12a).** A
   `[control] candidates = "<host label>"` section in `topology.toml` makes every node run
   an Agent and the labelled nodes serve a control API; one of them leads (`count = 1`

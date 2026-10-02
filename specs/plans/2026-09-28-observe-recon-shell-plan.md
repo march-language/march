@@ -335,6 +335,12 @@ cumulative per-actor numbers. The crash ring is what `diagnose` reads first.
 
 ## R3. `Recon` observe tier, `forge top`, `forge diagnose`, `forge status` (1 week)
 
+**From R1 (2026-10-02).** Every actor verb copies the whole live table, even
+`ACTORS 10` (~20 ms per 100 000 actors, inside one reclamation section). Fine
+at R1's targets; before `forge top` polls it every second on a node with
+millions of actors, give the walk a bounded top-N mode (keep a size-n heap
+during the walk instead of copying every row).
+
 **Why.** Operators need the scriptable plane first; programs need the same
 numbers from March code.
 

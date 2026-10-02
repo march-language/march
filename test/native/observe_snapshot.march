@@ -1,0 +1,96 @@
+-- The observe socket's snapshot verbs (R1 of
+-- specs/plans/2026-09-28-observe-recon-shell-plan.md) over a known tree:
+-- 3 supervisors x 4 children, 5 bare actors (one of them stalled with a burst
+-- queued behind it), and one supervised child crashed (and restarted) with a
+-- panic message the observe tier must never show.
+--
+-- The program prints one "ready" line and then sleeps; test/observe_snapshot_check.ml
+-- reads that line, queries the socket, asserts, and kills this process.
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+
+  actor W do
+    state { n : Int }
+    init  { n: 0 }
+    on Work(k : Int) do
+      { n: state.n + k }
+    end
+    on Boom() do
+      panic("observe-secret-payload-xyzzy")
+    end
+  end
+
+  actor Hot do
+    state { n : Int }
+    init  { n: 0 }
+    -- Sleeps in its handler, so every later message stays queued.  (Not
+    -- an Actor.call: a caller holds the messages that arrive while it waits
+    -- outside its mailbox count, so the burst would not show.)
+    on Stall() do
+      sleep_ms(60000)
+      state
+    end
+    on Bump(k : Int) do
+      { n: state.n + k }
+    end
+  end
+
+  actor Sup do
+    state { a : Int, b : Int, c : Int, d : Int }
+    init  { a: 0, b: 0, c: 0, d: 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      W a
+      W b
+      W c
+      W d
+    end
+  end
+
+  fn bare(k : Int) do
+    if k > 0 do
+      let _w = spawn(W)
+      bare(k - 1)
+    else
+      ()
+    end
+  end
+
+  fn burst(hot, k : Int) do
+    if k > 0 do
+      send(hot, Bump(1))
+      burst(hot, k - 1)
+    else
+      ()
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
+    let s1 = spawn(Sup)
+    -- Crash one supervised child of s1 (children are spawned before their
+    -- supervisor, so the lowest pid is one); s1 restarts it under a new pid.
+    -- The checker finds the dead pid itself, as the gap in the pid range.
+    -- (Not get_actor_field(s1, "a"): that does not compile under
+    -- --hot-reload, which the type-name leg needs.)
+    match Actor.list(intro) do
+      Cons(first, _) -> send(first, Boom())
+      Nil -> None
+    end
+    let _s2 = spawn(Sup)
+    let _s3 = spawn(Sup)
+    let hot = spawn(Hot)
+    bare(4)
+    let _r1 = Actor.register(hot, "hot")
+    let _r2 = Actor.register(s1, "sup_one")
+    send(hot, Stall())
+    burst(hot, 500)
+    sleep_ms(300)
+    println("ready")
+    sleep_ms(120000)
+  end
+end
