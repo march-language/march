@@ -206,6 +206,10 @@ type env = {
   (* Locals of the function being rewritten that are bound to the RESULT of a
      call or an allocation, i.e. owned outright.  Reset per function. *)
   owned_locals  : (string, unit) Hashtbl.t;
+  (* Closure environments bound in the function being rewritten, by the
+     bound name, with the heap captures the allocation moved into them.
+     Reset per function; see [dead_clo_release]. *)
+  clo_caps      : (string, Tir.var list) Hashtbl.t;
 }
 
 let fresh env pfx = env.ctr <- env.ctr + 1; Printf.sprintf "$%s%d" pfx env.ctr
@@ -991,11 +995,69 @@ let dead_clo_pair (env : env) (e : Tir.expr) : Tir.expr option =
            Tir.ESeq (Tir.EDecRC (Tir.AVar v), acc)) released rest))
   | _ -> None
 
+(** The release of a closure environment whose allocation site this
+    function has seen ([env.clo_caps]), made deep: a bare [dec_rc c] on a
+    closure value frees the cell and nothing it captured.  [dead_clo_pair]
+    removes the one shape where the release is adjacent to the allocation;
+    a match's fall-through join point is released wherever the arm that
+    allocated it turns out not to call it — one arm of a later [case], the
+    closure being called in the other — and a join point that captures
+    another join point's closure is released by that closure's own deep
+    drop.  Same discipline as [build_aggregate_drop_fn]: release the cell,
+    and only when that freed it release what it owned.  Nothing is loaded
+    from the cell — the captures are the atoms the allocation stored, still
+    in scope and still valid here (the cell's reference to each is the one
+    being released). *)
+let dead_clo_release (env : env) (c : Tir.var) (caps : Tir.var list) : Tir.expr =
+  let unit_expr = Tir.ETuple [] in
+  let ops =
+    List.map (fun (v : Tir.var) ->
+        if may_be_non_heap env v.Tir.v_ty then Tir.EDecRC (Tir.AVar v) else
+        match drop_fn_for env v.Tir.v_ty with
+        | Some callee ->
+          let f = { Tir.v_name = callee;
+                    v_ty = Tir.TFn ([v.Tir.v_ty], Tir.TUnit);
+                    v_lin = Tir.Unr } in
+          Tir.EApp (f, [Tir.AVar v])
+        | None -> Tir.EDecRC (Tir.AVar v))
+      caps
+  in
+  let rec chain = function
+    | [] -> unit_expr
+    | [last] -> last
+    | op :: rest -> Tir.ESeq (op, chain rest)
+  in
+  let freed = { Tir.v_name = fresh env "cfree"; v_ty = Tir.TBool;
+                v_lin = Tir.Unr } in
+  let decrc_freed =
+    { Tir.v_name = "march_decrc_freed";
+      v_ty = Tir.TFn ([Tir.TPtr Tir.TUnit], Tir.TBool); v_lin = Tir.Unr } in
+  Tir.ELet (freed, Tir.EApp (decrc_freed, [Tir.AVar c]),
+    Tir.ECase (Tir.AVar freed,
+      [ { Tir.br_tag = "True"; br_vars = []; br_body = chain ops } ],
+      Some unit_expr))
+
+(** The heap captures a closure allocation stores, when [rhs] is one
+    (possibly behind the run of [inc_rc]s Perceus put in front of it). *)
+let rec clo_alloc_caps (env : env) (rhs : Tir.expr) : Tir.var list option =
+  match rhs with
+  | Tir.ESeq (Tir.EIncRC _, inner) -> clo_alloc_caps env inner
+  | Tir.EAlloc (Tir.TCon (n, _), _ :: caps) when Tir_names.is_clo_struct n ->
+    let seen = Hashtbl.create 4 in
+    Some (List.filter_map (function
+        | Tir.AVar v when Kind.needs_rc_of env.k_table v.Tir.v_ty
+                       && not (Hashtbl.mem seen v.Tir.v_name) ->
+          Hashtbl.add seen v.Tir.v_name (); Some v
+        | _ -> None) caps)
+  | _ -> None
+
 let rec rewrite env (e : Tir.expr) : Tir.expr =
   match dead_clo_pair env e with
   | Some rest -> rewrite env rest
   | None ->
   match e with
+  | Tir.EDecRC (Tir.AVar c) when Hashtbl.mem env.clo_caps c.Tir.v_name ->
+    dead_clo_release env c (Hashtbl.find env.clo_caps c.Tir.v_name)
   | Tir.EDecRC a -> rewrite_dec env a e
   (* EAtomicDecRC is left alone: it marks a value that may be shared across
      actors, where the box's own release must stay a single atomic op and the
@@ -1007,6 +1069,10 @@ let rec rewrite env (e : Tir.expr) : Tir.expr =
      | Tir.EApp _ | Tir.ECallPtr _ | Tir.EAlloc _ ->
        Hashtbl.replace env.owned_locals v.Tir.v_name ()
      | _ -> ());
+    (* A rebinding of the name shadows any closure environment it held. *)
+    (match clo_alloc_caps env e1 with
+     | Some (_ :: _ as caps) -> Hashtbl.replace env.clo_caps v.Tir.v_name caps
+     | _ -> Hashtbl.remove env.clo_caps v.Tir.v_name);
     let e1' = rewrite env e1 in
     let e2' = rewrite env e2 in
     Tir.ELet (v, e1', e2')
@@ -1053,7 +1119,8 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
   let collision_set = Collision_set.compute m.Tir.tm_types in
   let env = { type_defs = m.Tir.tm_types; collision_set; k_table;
               names = Hashtbl.create 32; fns = []; ctr = 0;
-              owned_locals = Hashtbl.create 64 } in
+              owned_locals = Hashtbl.create 64;
+              clo_caps = Hashtbl.create 16 } in
   (* Apply functions whose environment owns what it captured — see
      [owning_apply_fns] for why this gate is load-bearing rather than an
      optimisation. *)
@@ -1072,6 +1139,7 @@ let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
         else f.Tir.fn_body
       in
       Hashtbl.reset env.owned_locals;
+      Hashtbl.reset env.clo_caps;
       (* A parameter the borrow analysis did not mark borrowed is owned by the
          function: it is released in the function, not by the caller. *)
       (match borrow_map with

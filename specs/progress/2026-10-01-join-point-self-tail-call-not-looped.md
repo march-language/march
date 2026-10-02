@@ -33,3 +33,26 @@ Fix direction: inline a join point whose closure has a single call site back int
 its caller before TCO runs (it is only a closure because the match compiler shares
 an arm), or teach the TCO pass to loop through a join-point apply fn that tail
 calls its creator.
+
+## Fixed 2026-10-02
+
+`lower_match.ml` now binds every hoisted join point through `bind_jp`, which
+counts the fall-through sites in the decision tree it just built: a join point
+with ONE site has its body substituted back in place (binding the join point's
+parameters to the call's arguments), one with NO site (the inner matrix of a
+nested pattern hoists its fallback before it knows every row matches) is dropped,
+and only a join point with two or more sites, or one captured by a surviving
+nested join point, stays a closure. The substitution is refused when a binder on
+the path to the site rebinds a name the body reads (a guard-fail fall-through is
+under the row's pattern variables).
+
+With the body in place the tail call is a self call again and `Llvm_tco` loops
+it. The snapshots lost 28 closures' worth of IR and every erased `inc_rc` on a
+field that is now moved rather than captured.
+
+Putting the fallback in place exposed a Perceus ordering bug and a leak that the
+closure had masked; both are fixed in the same PR, see
+[2026-10-01-dead-join-point-closure-leaks-captures.md](2026-10-01-dead-join-point-closure-leaks-captures.md).
+
+Regression: `test/native/jp_self_tail_loop.march` (200,000 elements; SIGBUS in
+the stack guard page before).

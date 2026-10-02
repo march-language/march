@@ -78,6 +78,19 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- Compiled: a generic named function passed where a `Float -> Float -> Float`
+  closure is expected returned the wrong value (its trampoline unboxed the
+  arguments per the use-site type instead of forwarding them as the function
+  is defined).
+- Compiled: a self tail call inside a nested-pattern match arm
+  (`Cons(a, Cons(b, rest)) -> … f(Cons(b, rest))`) is now a loop; it recursed
+  once per element and overflowed the green-thread stack at ~8,000 elements.
+  A match's fall-through join point with a single call site is put back in
+  place by the lowering instead of becoming a closure.
+- Compiled: a nested pattern with a default arm that uses the scrutinee no
+  longer leaks the matched value (the dead join-point closure's release is
+  deep), and Perceus no longer releases a scrutinee ahead of a pattern field
+  the arm still reads.
 - **A let-bound lambda that ignores or returns a `Float` argument no longer
   crashes compiled code.** A lambda bound with `let` and left generic, such as
   `let keep = fn (acc, x) -> acc`, freed the `Float` it was given when it

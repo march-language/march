@@ -430,7 +430,19 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
          doing `let f = cmp(a)` then `f(b)` jumped through garbage (SIGSEGV,
          pc=0).  Every such caller calls the value with the definition's
          arity (a call at the other arity would already be a type error),
-         so the definition's signature is the one the closure must carry. *)
+         so the definition's signature is the one the closure must carry.
+
+         The same holds for the parameter TYPES, not only the arity
+         (2026-10-02): a generic `pfn ksnd(p, x) do x end` is emitted as
+         `@ksnd(ptr, ptr)` (its params stay erased), but passed where a
+         `Float -> Float -> Float` is expected the use-site type made the
+         trampoline unbox both arguments and call `@ksnd(double, double)`.
+         The callee read its pointer registers, which held whatever the
+         caller left there, so `call2(ksnd, 3, 0.0)` printed 3. instead of 6.
+         The wrapper is keyed by the TARGET (`<fn>$clo_wrap`, one per
+         function), so only the definition's types can be right for every
+         use site: a ptr param forwards the caller's boxed Float/tagged Int
+         unchanged and the caller coerces the erased ptr result itself. *)
       let def_sig =
         match Hashtbl.find_opt ctx.top_fn_param_tys v.Tir.v_name,
               Hashtbl.find_opt ctx.top_fn_ret_ty v.Tir.v_name with
@@ -438,10 +450,8 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
         | _ -> None
       in
       let (ps_tirs, nparams, ret_tir) = match v.Tir.v_ty, def_sig with
-        | Tir.TFn (ps, _), Some (dps, dret)
-          when List.length ps <> List.length dps ->
-          (dps, List.length dps, dret)
-        | Tir.TFn (ps, _), _ -> (ps, List.length ps, fn_ret_tir v.Tir.v_ty)
+        | _, Some (dps, dret) -> (dps, List.length dps, dret)
+        | Tir.TFn (ps, _), None -> (ps, List.length ps, fn_ret_tir v.Tir.v_ty)
         | _ ->
           let n = Option.value ~default:0 (Hashtbl.find_opt ctx.top_fn_nparams v.Tir.v_name) in
           (List.init n (fun _ -> Tir.TVar "_"), n, fn_ret_tir v.Tir.v_ty)
@@ -639,9 +649,17 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
        (match Llvm_ctx.wrap_emit_kind ctx wrap_name with
         | `Skip -> ()
         | (`Define | `Declare) as wrap_kind ->
-          let ret_tir     = fn_ret_tir v.Tir.v_ty in
+          (* Prefer the definition's signature over the use-site type when
+             the resolved name is registered (see the top_fns arm above for
+             why: the trampoline must match the callee as DEFINED). *)
+          let (ps_tirs, ret_tir) =
+            match Hashtbl.find_opt ctx.top_fn_param_tys resolved,
+                  Hashtbl.find_opt ctx.top_fn_ret_ty resolved with
+            | Some dps, Some dret -> (dps, dret)
+            | _ -> (ps, fn_ret_tir v.Tir.v_ty)
+          in
           let target_ret  = llvm_ret_ty ctx ret_tir in
-          let param_tys   = List.map (llvm_ty ctx) ps in
+          let param_tys   = List.map (llvm_ty ctx) ps_tirs in
           Buffer.add_string ctx.extra_fns
             (match wrap_kind with
              | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
