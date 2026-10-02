@@ -71,6 +71,8 @@ about 47 ns per element against about 0.2 ns for an inline map.
   element box; it reproduces on the branch point. Filed as
   `specs/todos/2026-09-30-native-float-arr-fold-unused-elem-double-free.md`. The
   identity `_rt` leg was left out of the boundary-box probe until it is fixed.
+  Fixed since, and the leg re-added:
+  `specs/progress/2026-09-30-native-float-arr-fold-unused-elem-double-free.md`.
 
 - The interpreter's `Int` is 63-bit and compiled `Int` is 64-bit: `2^62 - 1` added
 to itself prints `-2` interpreted and `9223372036854775806` compiled, with or

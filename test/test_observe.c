@@ -9,6 +9,7 @@
 #include "march_observe.h"
 
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -291,6 +292,13 @@ static void test_refuses_non_socket(const char *dir) {
 }
 
 int main(void) {
+    /* The clients below write with plain send(): when the server answers and
+     * closes first (a line over MARCH_OBSERVE_LINE_MAX, the busy ninth
+     * client), the rest of the write can hit a closed socket, and Linux then
+     * raises SIGPIPE. A CI run of this runner died partway through
+     * test_server with no FAIL line and no summary, which only a signal
+     * explains. An EPIPE is all the client needs to see. */
+    signal(SIGPIPE, SIG_IGN);
     char dir[] = "/tmp/obsXXXXXX";
     if (!mkdtemp(dir)) { perror("mkdtemp"); return 1; }
     char path[256];
