@@ -380,7 +380,7 @@
           ../runtime/march_deque.h
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
           ../runtime/march_remote_registry.c
           (glob_files ../runtime/*.h))
  (action  (run %{cc}
@@ -391,7 +391,7 @@
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
                ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
                ../runtime/march_remote_registry.c
                -lpthread -lz -lm)))
 (rule
@@ -417,7 +417,7 @@
           ../runtime/march_deque.h
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
           ../runtime/march_remote_registry.c
           (glob_files ../runtime/*.h))
  (action  (run %{cc}
@@ -428,7 +428,7 @@
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
                ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
                ../runtime/march_remote_registry.c
                -lpthread -lz -lm)))
 (rule
@@ -469,7 +469,7 @@
           ../runtime/march_deque.h
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
           ../runtime/march_remote_registry.c)
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
@@ -479,7 +479,7 @@
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
                ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
                ../runtime/march_remote_registry.c
                -lpthread -lz -lm)))
 
@@ -503,7 +503,7 @@
           ../runtime/march_deque.h
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
          
           ../runtime/march_remote_registry.c)
  (action  (run %{cc}
@@ -514,7 +514,7 @@
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
                ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
               
                ../runtime/march_remote_registry.c
                -lpthread -lz -lm)))
@@ -545,7 +545,7 @@
           ../runtime/march_deque.h
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
           ../runtime/march_remote_registry.c
           ; Every header these .c files include must be a declared dep: dune's
           ; CI sandbox copies ONLY declared deps into the build dir, so an
@@ -561,7 +561,7 @@
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
                ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
                ../runtime/march_remote_registry.c
                -lpthread -lz -lm)))
 
@@ -614,7 +614,7 @@
           ../runtime/march_deque.h
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
           ../runtime/march_remote_registry.c
           ; Every header these .c files include must be a declared dep: dune's
           ; CI sandbox copies ONLY declared deps into the build dir, so an
@@ -630,7 +630,7 @@
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
                ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
                ../runtime/march_remote_registry.c
                -lpthread -lz -lm)))
 
@@ -659,7 +659,7 @@
           ../runtime/march_deque.h
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
           ../runtime/march_remote_registry.c
           (glob_files ../runtime/*.h))
  (action  (run %{cc}
@@ -670,7 +670,7 @@
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
                ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
                ../runtime/march_remote_registry.c
                -lpthread -lz -lm)))
 
@@ -700,7 +700,7 @@
           ../runtime/march_deque.h
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
           ../runtime/march_remote_registry.c
           ; Every header these .c files include must be a declared dep: dune's
           ; CI sandbox copies ONLY declared deps into the build dir, so an
@@ -716,7 +716,7 @@
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
                ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
                ../runtime/march_remote_registry.c
                -lpthread -lz -lm)))
 
@@ -741,7 +741,7 @@
           ../runtime/march_deque.h
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
           ../runtime/march_remote_registry.c
           ; Every header these .c files include must be a declared dep: dune's
           ; CI sandbox copies ONLY declared deps into the build dir, so an
@@ -757,7 +757,7 @@
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
                ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
-               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c
                ../runtime/march_remote_registry.c
                -lpthread -lz -lm)))
 
@@ -867,7 +867,7 @@
           ../runtime/march_message.c ../runtime/march_message.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
-          ../runtime/march_monitor_registry.c ../runtime/march_monitor_registry.h
+          ../runtime/march_monitor_registry.c ../runtime/march_observe.c ../runtime/march_monitor_registry.h
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
           ../runtime/march_remote_registry.c
@@ -892,7 +892,7 @@
       ../runtime/tweetnacl.c ../runtime/march_runtime.c \
       ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_message.c \
       ../runtime/march_heap.c ../runtime/march_gc.c \
-      ../runtime/march_monitor_registry.c \
+      ../runtime/march_monitor_registry.c ../runtime/march_observe.c \
       ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c \
       ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c \
       ../runtime/march_remote_registry.c -lpthread -lm -lz")))
@@ -984,7 +984,7 @@
           ../runtime/march_message.c
           ../runtime/march_heap.c
           ../runtime/march_gc.c
-          ../runtime/march_monitor_registry.c
+          ../runtime/march_monitor_registry.c ../runtime/march_observe.c
           ../runtime/march_monitor_registry.h
           ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
           ../runtime/base64.c ../runtime/sha1.c
@@ -1001,7 +1001,7 @@
                ../runtime/march_message.c
                ../runtime/march_heap.c
                ../runtime/march_gc.c
-               ../runtime/march_monitor_registry.c
+               ../runtime/march_monitor_registry.c ../runtime/march_observe.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
                ../runtime/base64.c ../runtime/sha1.c
                ../runtime/march_remote_registry.c
@@ -2615,6 +2615,45 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/actor_message_record_leak_probe.expected native_actor_message_record_leak_probe.out)))
 
+; ── The observe socket (runtime/march_observe.c), R0 of
+; specs/plans/2026-09-28-observe-recon-shell-plan.md. test_observe drives the
+; server in-process (verbs, envelope, JSON writer, the 8-connection cap, the
+; idle timeout, refusing to replace a non-socket file); observe_ping proves the
+; socket starts in an ordinary compiled program (no --hot-reload) from
+; march_run_scheduler. Red without the march_run_scheduler hook: both
+; observe_ping lines read "no socket".
+(rule
+ (targets test_observe_runner)
+ (deps    test_observe.c ../runtime/march_observe.c ../runtime/march_observe.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets} test_observe.c ../runtime/march_observe.c -lpthread -lm)))
+(rule
+ (alias   runtest)
+ (deps    (file test_observe_runner))
+ (action  (run ./test_observe_runner)))
+
+(rule
+ (targets observe_client)
+ (deps    observe_client.c)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -o %{targets} observe_client.c)))
+
+(rule
+ (targets native_observe_ping native_observe_ping.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_client)
+       (file native/observe_ping.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_observe_ping native/observe_ping.march)
+   (with-stdout-to native_observe_ping.out
+    (system "rm -f obs_ping.sock; MARCH_OBSERVE_SOCKET=obs_ping.sock ./native_observe_ping > native_observe_ping.prog 2>&1 & prog=$!; ./observe_client obs_ping.sock PING '\"data\":\"pong\"'; ./observe_client obs_ping.sock HELP '\"name\":\"PING\"'; wait $prog; cat native_observe_ping.prog; rm -f native_observe_ping.prog")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_ping.expected native_observe_ping.out)))
+
 ; ── Leak guard: the Process builtins (spawn_async/read_line/write/kill_proc/
 ; wait_proc, run's spawn_sync, env/set_env) only READ their heap arguments but
 ; were classified OWNED in borrow.ml, so every spawn leaked its args list and
@@ -2637,6 +2676,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/process_handle_leak_probe.expected native_process_handle_leak_probe.out)))
+
+; ── Leak guard: an Array (PVec trie) built by from_list/push, updated by set,
+; shrunk by pop and then dropped leaked its whole trie.  Red before the fix:
+; every leg but `push 40` reads `flat: false`.
+; specs/progress/2026-09-28-array-built-then-dropped-leaks-trie.md
+(rule
+ (targets native_array_trie_drop_leak_probe native_array_trie_drop_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/array_trie_drop_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_array_trie_drop_leak_probe
+        native/array_trie_drop_leak_probe.march)
+   (with-stdout-to native_array_trie_drop_leak_probe.out
+        (system "./native_array_trie_drop_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/array_trie_drop_leak_probe.expected native_array_trie_drop_leak_probe.out)))
 
 ; ── Leak guard: Seq constructors and combinators leaked their closure
 ; environments (3-5 objects per Seq.from_list/from_string_lines/map/filter use).

@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **A read-only observe socket on every compiled program.** Set
+  `MARCH_OBSERVE_SOCKET=<path>` (or just `MARCH_HOT_RELOAD_SOCKET`, which puts it
+  at `<path>.observe`) and the program answers one-line requests with one line of
+  JSON. It serves `HELP` and `PING` today and is the base the coming
+  `forge observe`, `forge top` and `forge diagnose` build on. It is separate from
+  the hot-reload socket, so an observer can never block a deploy; the socket is
+  owner-only and holds at most eight clients at once.
 - **An in-cluster control plane for hot deploys (distributed deploys, step 12a).** A
   `[control] candidates = "<host label>"` section in `topology.toml` makes every node run
   an Agent and the labelled nodes serve a control API; one of them leads (`count = 1`
@@ -71,20 +78,15 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
-- **Compiled and interpreted programs now agree on `Int` overflow.** `Int` is
-  63-bit and wraps on overflow ([Int width and overflow](specs/lang/type-system.md#int-width-and-overflow)).
-  Compiled code used to do 64-bit arithmetic in registers, so
-  `int_max_value() + int_max_value()` (or the same sum on two values read from a
-  `NativeArray`) printed `9223372036854775806` compiled and `-2` interpreted. The
-  compiled value also changed once it was stored in a list, tuple or closure. Compiled
-  `+ - * /`, negation, `int_shl`, `int_div`, `int_abs` and `int_pow` now wrap
-  to 63 bits, and compiled `int_max_value()`/`int_min_value()` return
-  `4611686018427387903`/`-4611686018427387904` instead of the 64-bit limits.
-  Compiled `int_popcount(-1)` is 63, as interpreted.
-- **Compiled `int_shl`/`int_shr` with a shift count outside `[0, 62]` now panic**
-  with `int_shl: shift out of range` (as the interpreter does) instead of
-  returning an undefined value. Compiled `int_pow` with a negative exponent
-  panics with `int_pow: negative exponent` instead of returning `0`.
+- **A compiled `Array` that is built, updated and dropped no longer leaks its
+  trie.** `Array.from_list`, `push`, `set` and `pop` leaked about one object per
+  element once a vector held more than one 32-element leaf (a 1,100-element
+  `from_list` leaked 2,224 objects per build, 40,000 leaked 81,118). Four compiler
+  causes (a tuple bound by `let (a, b) = ..` was never released when its scope ended
+  in an `if`, `match` or arithmetic; nested local functions lost their frame tuples;
+  a nested pattern with a default arm leaked its join-point closure; an `Option` of
+  a tree in a tuple was released shallowly) are worked around in `stdlib/array.march`
+  or fixed in Perceus. Loops that destructure a tuple are still compiled to loops.
 - **Compiled `Seq` constructors and combinators no longer leak.** Draining
   `Seq.from_list`, `Seq.from_string_lines`, `Seq.map`, `Seq.filter` and
   `Seq.concat` with `Seq.count` or `Seq.fold` leaked 3 to 5 heap objects per
@@ -538,6 +540,20 @@ git log is authoritative for exact commits.
   two mailbox helpers now return `List((Pid(a), Int))` (the parameterized `Pid`) and
   `NodeCall` names `RemoteCall.NoConnection` explicitly instead of the ambiguous bare
   constructor; seven hidden stdlib type errors are gone.
+- **Compiled and interpreted programs now agree on `Int` overflow.** `Int` is
+  63-bit and wraps on overflow ([Int width and overflow](specs/lang/type-system.md#int-width-and-overflow)).
+  Compiled code used to do 64-bit arithmetic in registers, so
+  `int_max_value() + int_max_value()` (or the same sum on two values read from a
+  `NativeArray`) printed `9223372036854775806` compiled and `-2` interpreted. The
+  compiled value also changed once it was stored in a list, tuple or closure. Compiled
+  `+ - * /`, negation, `int_shl`, `int_div`, `int_abs` and `int_pow` now wrap
+  to 63 bits, and compiled `int_max_value()`/`int_min_value()` return
+  `4611686018427387903`/`-4611686018427387904` instead of the 64-bit limits.
+  Compiled `int_popcount(-1)` is 63, as interpreted.
+- **Compiled `int_shl`/`int_shr` with a shift count outside `[0, 62]` now panic**
+  with `int_shl: shift out of range` (as the interpreter does) instead of
+  returning an undefined value. Compiled `int_pow` with a negative exponent
+  panics with `int_pow: negative exponent` instead of returning `0`.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
@@ -817,10 +833,6 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
-- **Interpreted `int_shr` is now an arithmetic (sign-propagating) shift**, as it
-  already was compiled: `int_shr(-8, 1)` is `-4`. It used to be a logical shift
-  in the interpreter, so `int_shr(-8, 1)` printed `4611686018427387900`.
-  Non-negative inputs give the same result as before.
 - **Breaking: `Seq.batched`, `Flow.batch` and `Gen.frequency` now declare their
   preconditions in the signature.** `Seq.batched(seq, n)` and `Flow.batch(stage, n)`
   take `n : {Int | _ > 0}`, and `Gen.frequency(pairs)` takes
@@ -1027,6 +1039,10 @@ git log is authoritative for exact commits.
   says so and suggests `fn pair -> match pair do (a, b) -> … end`. Genuinely
   curried callbacks such as `List.fold_left`'s `b -> a -> b` are unaffected,
   including when the accumulator is itself a tuple.
+- **Interpreted `int_shr` is now an arithmetic (sign-propagating) shift**, as it
+  already was compiled: `int_shr(-8, 1)` is `-4`. It used to be a logical shift
+  in the interpreter, so `int_shr(-8, 1)` printed `4611686018427387900`.
+  Non-negative inputs give the same result as before.
 
 ### Removed
 - **The `respond` builtin is gone.** It was an interpreter no-op stub

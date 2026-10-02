@@ -2,6 +2,7 @@
 #include "march_scheduler.h"
 #include "march_dispatch.h"
 #include "march_monitor_registry.h"
+#include "march_observe.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7113,6 +7114,10 @@ int64_t march_actor_get_int(void *actor, int64_t index) {
  * shutdown: the background thread drives all actors to completion, then the
  * join returns and the program exits normally. */
 void march_run_scheduler(void) {
+    /* The observe socket (march_observe.h): started here, on the main OS
+     * thread before any green thread exists, when MARCH_OBSERVE_SOCKET (or
+     * MARCH_HOT_RELOAD_SOCKET) is set.  Once only; a no-op otherwise. */
+    march_observe_maybe_start();
     if (atomic_load_explicit(&g_sched_bg_started, memory_order_acquire)) {
         /* Signal workers to stop accepting new work, then join. */
         march_sched_request_shutdown();

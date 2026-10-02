@@ -162,7 +162,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   stamp "perceus";
   (* Deep-drop synthesis (lib/tir/drop.ml).  Skipped for the JS target, whose
      runtime is GC'd and ignores RC ops entirely. *)
-  let tir = if is_js then tir else Drop.run ~k_table:k0 tir in
+  let tir = if is_js then tir else Drop.run ~k_table:k0 ~borrow_map tir in
   snap "tir-drop" tir;
   stamp "drop";
   let tir = Escape.escape_analysis ~k_table:k0 ~borrow_map tir in
