@@ -54,6 +54,18 @@ CAS-key tag in `bin/main.ml`.
   `fold_left` 25× (4.5 ms, within 1.4× of the hand-written loop) and `map` 2.4×.
 - Compile time (`--emit-llvm`, 4 programs × 3 rounds): +0.1%.
 
+## Only concrete lambdas are specialized
+
+Main added `test/native/closure_call_arg_ownership_probe.march` after this branch was
+first written. Its "erased lambda" legs pass let-generalized lambdas
+(`fn (p, x) -> p`, parameters still `TVar`) to a static-argument HOF; specializing
+made those calls direct and leaked one Float box per call. A direct call to such a
+lambda leaks on main too, without this pass, so it is filed separately
+(`specs/todos/2026-10-02-known-call-generic-lambda-float-leak.md`).
+`Hof_spec.concrete_apply` now specializes only on lambdas whose parameters and
+return are concrete; generic ones keep the indirect call, whose protocol is
+balanced. The benchmark lambdas are concrete, so the speedups are unchanged.
+
 ## Not done
 
 - HOFs whose callback reaches a local helper (`each`, `scan_left`, `zip_with`)

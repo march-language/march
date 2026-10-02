@@ -142,9 +142,37 @@ type spec_state = {
   mutable pending : (string * string * string) list;
 }
 
+let rec has_tvar (t : Tir.ty) : bool =
+  match t with
+  | Tir.TVar _ -> true
+  | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TString | Tir.TUnit -> false
+  | Tir.TTuple ts | Tir.TCon (_, ts) -> List.exists has_tvar ts
+  | Tir.TRecord fs -> List.exists (fun (_, t) -> has_tvar t) fs
+  | Tir.TFn (ps, r) -> List.exists has_tvar ps || has_tvar r
+  | Tir.TPtr t -> has_tvar t
+
+(** Specialize only on a lambda whose signature is concrete. A let-generalized
+    lambda (`let keep = fn (p, x) -> p`, parameters still [TVar] after Mono)
+    takes erased Float arguments under an ownership protocol that only the
+    indirect-call path implements (the callee takes its own reference to a
+    caller-kept box, [march_clo_param_own] / [march_clo_float_arg]); making
+    the call direct leaked one box per call
+    (test/native/closure_call_arg_ownership_probe.march's "erased lambda"
+    legs). The [$clo] parameter is an opaque pointer and is not checked. *)
+let concrete_apply (st : spec_state) (apply : string) : bool =
+  match Hashtbl.find_opt st.fns apply with
+  | Some fd ->
+    (match fd.Tir.fn_params with
+     | _clo :: rest ->
+       not (has_tvar fd.Tir.fn_ret_ty)
+       && not (List.exists (fun (p : Tir.var) -> has_tvar p.Tir.v_ty) rest)
+     | [] -> false)
+  | None -> false
+
 (** The clone of [g] for closure index [i] bound to apply fn [apply], minting it
     on first use; [None] once [g]'s clone budget is spent. *)
 let clone_for (st : spec_state) (g : Tir.fn_def) (i : int) (apply : string) : string option =
+  if not (concrete_apply st apply) then None else
   match Hashtbl.find_opt st.clones (g.Tir.fn_name, i, apply) with
   | Some n -> Some n
   | None ->
