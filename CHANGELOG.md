@@ -77,6 +77,19 @@ git log is authoritative for exact commits.
   replacement as `CertReplaced` or `CertRefused` (two new `SecurityEvent`
   constructors: a `match` that named every constructor needs a new arm).
 
+### Changed
+- **Heap objects are no longer zero-filled on allocation.** `march_alloc`, the
+  allocator behind every constructor, closure, tuple and record in compiled
+  code, is now a plain `malloc` (or `mi_malloc`) instead of a `calloc`. The
+  2026-08-04 x86/glibc ablation put the zeroing at about 11% of
+  `binary_trees`; on Apple Silicon it measures flat with either allocator, so
+  treat this as a contract simplification rather than a speed-up until it is
+  re-measured on x86. Every runtime and codegen allocation site was audited to
+  write all of its fields before the object can be read, and the four that
+  leaned on the zeroing (the TRMC hole slot, `Task.spawn`'s result words, a
+  native-array header word, a ring-buffer cell's type id) now store their zeros
+  explicitly. No source-level change.
+
 ### Fixed
 - **A let-bound lambda that ignores or returns a `Float` argument no longer
   crashes compiled code.** A lambda bound with `let` and left generic, such as

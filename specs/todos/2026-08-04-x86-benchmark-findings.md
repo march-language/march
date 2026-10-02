@@ -282,3 +282,20 @@ granularity).
 
 The residual vs OCaml on binary-trees is the memory model, as written above; mimalloc
 closes about a quarter of the March-side time, not the model-level gap.
+
+## Status 2026-10-02: finding 2 step 2 (drop the zeroing) landed
+
+`march_alloc` is a `malloc`/`mi_malloc` now, not a `calloc`; the per-caller audit,
+the four sites that leaned on the zeroing (TRMC's hole slot, the two task-spawn
+entry points, `native_arr_alloc`'s kind word, `ring_buf_make`'s type-id word) and
+the tests are in `specs/progress/2026-10-02-march-alloc-malloc.md`.
+
+Measured on the Apple Silicon dev box (same-box A/B vs origin/main, 10 interleaved
+runs): binary_trees 15 is FLAT, 123.6 -> 124.2 ms median under mimalloc and
+219 -> 217 ms under `MARCH_MALLOC=libc`; list_ops, tree_transform, par_fib and
+actor_ping flat too. The 11% above was x86 glibc pre-mimalloc; it has not been
+re-measured on the x86 host since, and should be before it is quoted.
+
+Still open: finding 2 step 3 (the per-actor bump/free-list arena, upper bound ~33%
+on the pre-mimalloc numbers), finding 1 (leaf-function preemption-check elision is
+the only cheap cut left) and finding 3 (profile simd-map's remaining 2x vs OCaml).

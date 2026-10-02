@@ -59,9 +59,9 @@ The runtime uses **atomic reference counting** for thread-safe heap management. 
 > **Update (March 20, 2026, Track C):** RC operations are now fully atomic with proper memory ordering. `march_incrc` has been upgraded from `memory_order_relaxed` to proper atomic semantics, fixing the ABA race condition (H2 in correctness audit). All RC changes have passed ThreadSanitizer validation.
 
 #### `march_alloc(int64_t sz)`: Lines 12-20
-- **Purpose**: Allocate `sz` bytes on the heap (zeroed)
-- **Returns**: Pointer to allocated block with `rc = 1`, `tag = 0`
-- **Behavior**: Calls `calloc()`, initializes header, exits with error message on failure
+- **Purpose**: Allocate `sz` bytes on the heap (header initialised; the payload is NOT zeroed since 2026-10-02 and is the caller's to write in full)
+- **Returns**: Pointer to allocated block with `rc = 1`, `tag = 0`, `pad = 0`
+- **Behavior**: Calls `malloc()` (`mi_malloc()` under mimalloc), initializes the header, exits with error message on failure
 - **Thread-safe**: Yes (RC initialized atomically)
 
 ```c

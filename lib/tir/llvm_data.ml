@@ -83,8 +83,10 @@ let emit_load_field ctx obj_val i ty_str =
 
 (* ── Alloc helpers ───────────────────────────────────────────────────── *)
 
-(* A fresh cell comes from march_alloc (calloc), so the pad word is already
-   0 and only a nonzero type id needs a store. *)
+(* march_alloc writes the whole 16-byte header itself (rc=1, tag=0, pad=0;
+   the PAYLOAD is not zeroed -- it is a plain malloc), so the pad word is
+   already 0 here and only a nonzero type id needs a store.  Every field
+   slot must then be stored by the caller of this helper. *)
 let emit_heap_alloc ctx tag_int n_fields type_id =
   let ptr = Llvm_ctx.fresh ctx "hp" in
   Llvm_ctx.emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 %d)" ptr (Llvm_ctx.alloc_size n_fields));
