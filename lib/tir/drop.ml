@@ -1102,10 +1102,20 @@ let dead_clo_pair (env : env) (e : Tir.expr) : Tir.expr option =
     from the cell — the captures are the atoms the allocation stored, still
     in scope and still valid here (the cell's reference to each is the one
     being released). *)
-let dead_clo_release (env : env) (c : Tir.var) (caps : Tir.var list) : Tir.expr =
+let rec dead_clo_release (env : env) (c : Tir.var) (caps : Tir.var list) : Tir.expr =
   let unit_expr = Tir.ETuple [] in
   let ops =
     List.map (fun (v : Tir.var) ->
+        (* A captured closure whose allocation this function saw: release it
+           the same way, so a join-point CHAIN (each fall-through closure
+           capturing the enclosing one, down to the match's live variables)
+           is walked instead of stopping at the first cell.  Its type is a
+           function type, which [drop_fn_for] has no drop for, so without
+           this arm the release below stayed shallow and the whole chain —
+           an HTTP router's request Conn, ~1 KiB per request — leaked. *)
+        match Hashtbl.find_opt env.clo_caps v.Tir.v_name with
+        | Some inner_caps -> dead_clo_release env v inner_caps
+        | None ->
         if may_be_non_heap env v.Tir.v_ty then Tir.EDecRC (Tir.AVar v) else
         match drop_fn_for env v.Tir.v_ty with
         | Some callee ->
@@ -1136,7 +1146,12 @@ let dead_clo_release (env : env) (c : Tir.var) (caps : Tir.var list) : Tir.expr 
 let rec clo_alloc_caps (env : env) (rhs : Tir.expr) : Tir.var list option =
   match rhs with
   | Tir.ESeq (Tir.EIncRC _, inner) -> clo_alloc_caps env inner
-  | Tir.EAlloc (Tir.TCon (n, _), _ :: caps) when Tir_names.is_clo_struct n ->
+  (* Perceus's FBIP turns the allocation into a reuse of a dead cell
+     ([reuse $f as $Clo_…]) when a same-size scrutinee dies right there — a
+     nested-pattern join point reusing the matched Cons cell is the common
+     case.  Same closure, same captures. *)
+  | Tir.EAlloc (Tir.TCon (n, _), _ :: caps)
+  | Tir.EReuse (_, Tir.TCon (n, _), _ :: caps) when Tir_names.is_clo_struct n ->
     let seen = Hashtbl.create 4 in
     Some (List.filter_map (function
         | Tir.AVar v when Kind.needs_rc_of env.k_table v.Tir.v_ty

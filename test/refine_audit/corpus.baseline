@@ -180,8 +180,6 @@ native_float_generic_field_abi: coverage audit (user + stdlib): 123 enforced, 0 
 native_float_generic_field_abi: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_fn_arities_shadow_poisoning: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_fn_arities_shadow_poisoning: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
-native_foreign_actor_http: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
-native_foreign_actor_http: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_from_json_dispatch: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_from_json_dispatch: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_generic_fn_float_closure: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -214,6 +212,8 @@ native_hof_spec_closures: coverage audit (user + stdlib): 123 enforced, 0 inert 
 native_hof_spec_closures: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_html_safe_raw: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_html_safe_raw: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_http_text_leak_repro: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_http_text_leak_repro: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_if_branch_dead_value_probe: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_if_branch_dead_value_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_iface_collision_ambiguous_call: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -394,6 +394,8 @@ native_pid_of_int_roundtrip: coverage audit (user + stdlib): 123 enforced, 0 ine
 native_pid_of_int_roundtrip: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_pid_to_int_leak_probe: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_pid_to_int_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_pooled_actor_http: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_pooled_actor_http: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_preempt_starvation: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_prelude_scope_user_shadow: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced

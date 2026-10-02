@@ -15,6 +15,26 @@
 /* Closure function pointer: fn(closure, arg) → result. */
 typedef void *(*closure_fn_t)(void *clo, void *arg);
 
+/* ── Releasing handler results ────────────────────────────────────────
+ * The pipeline returns a Conn the runtime only reads (status, headers, body)
+ * before writing the response; it never owned a way to free it: march_decrc
+ * is shallow (free one cell, orphan the children), and `assigns`/`upgrade`
+ * can hold arbitrary March values no C walk can shape.  So HttpServer.listen
+ * hands the runtime a compiled `Conn -> Unit` closure whose body is the
+ * synthesized deep drop (lib/tir/drop.ml), and every server path calls it on
+ * each result once the response bytes are out of the iovecs — after a
+ * completed writev, or when a deferred write drains/the connection closes.
+ * Before this, every request leaked the result record and its strings
+ * (~0.5 KiB; forgepm at 800 req/s grew 400 MB/min).  NULL = no releaser
+ * (the http_server_spawn_n test path), which restores the old leak rather
+ * than crashing. */
+extern void *g_march_http_release_clo;
+void march_http_release_conn(void *conn);
+static inline void march_http_release_conns(void **conns, int *n) {
+    for (int i = 0; i < *n; i++) march_http_release_conn(conns[i]);
+    *n = 0;
+}
+
 /* Build an empty March List (Nil tag=0).  Used for empty headers lists. */
 static inline void *make_nil(void) { return march_alloc(16); }
 

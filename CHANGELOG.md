@@ -115,6 +115,19 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiled HTTP servers no longer leak ~0.5 KiB per request.** Neither the
+  thread-pool nor the event-loop server released the `Conn` a handler returns
+  after writing the response, so every request leaked the result record and
+  its strings (a text-only handler grew 158 MB in 10 s at 31k req/s; forgepm
+  at 800 req/s grew 400 MB/min). `HttpServer.listen` now hands the runtime a
+  compiled `Conn -> Unit` release function, applied once the response bytes
+  are written (after deferred writes drain, or on close). `http_server_listen`
+  takes that function as a fifth argument.
+- **A borrowed aggregate dropped by a closure trampoline is released deeply.**
+  A top-level function with a borrowed parameter, passed as a closure value,
+  had that argument released by its `$clo_wrap` with a shallow `march_decrc`,
+  orphaning the aggregate's children; the trampoline now calls the type's
+  synthesized deep drop when one exists.
 - **A release through the control plane no longer orders functions the nodes cannot
   patch.** forge recorded a release's signed lines against the last deployed manifest,
   which lists every function, including the control plane's own wiring, which has no
