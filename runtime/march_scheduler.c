@@ -1147,6 +1147,15 @@ static void *mbox_pop_user(march_proc *p) {
                                              prev, node, 0));
 }
 
+/* A receive's pop of a user message: counted in msgs_in.  (mbox_pop_user
+ * itself is also the DROP_OLD eviction, run by a sender; that is not a
+ * delivery and must not write the receiver's counter.) */
+static void *mbox_recv_user(march_proc *p) {
+    if (mbox_user_visible(p, NULL)) march_proc_bump(p->msgs_in);
+    return mbox_pop_user(p);
+}
+
+/* Receivers only. */
 static void *mbox_pop_any(march_proc *p) {
     march_mbox_node *uh = mbox_user_visible(p, NULL);
     if (p->control_mailbox
@@ -1154,7 +1163,7 @@ static void *mbox_pop_any(march_proc *p) {
                 || p->control_mailbox->enqueue_seq < uh->enqueue_seq))
         return mbox_pop_queue(p, &p->control_mailbox,
                               &p->control_mbox_tail, 1);
-    return mbox_pop_user(p);
+    return mbox_recv_user(p);
 }
 
 /* Pop for a receive: user-only or any plane.  When seq_out is non-NULL and a
@@ -1165,7 +1174,7 @@ static void *mbox_pop_for_recv(march_proc *p, int user_only, uint64_t *seq_out) 
         march_mbox_node *uh = mbox_user_visible(p, NULL);
         if (uh) *seq_out = uh->enqueue_seq;
     }
-    return user_only ? mbox_pop_user(p) : mbox_pop_any(p);
+    return user_only ? mbox_recv_user(p) : mbox_pop_any(p);
 }
 
 /* A receive has something to pop (see mbox_user_visible). */
@@ -1990,6 +1999,7 @@ static void sched_loop(march_scheduler *sched) {
             march_reclaim_offline();
             nanosleep(&idle_sleep, NULL);
             march_reclaim_online();
+            sched->now_ms = march_now_ms();
             continue;
         }
 
@@ -2048,6 +2058,10 @@ static void sched_loop(march_scheduler *sched) {
         __atomic_store_n(&p->owner_sched, sched, __ATOMIC_RELAXED);
         sched->current  = p;
         sched->stat_dispatches++;
+        /* Observe counters (march_proc): this scheduler owns p now. */
+        if ((sched->stat_dispatches & 1023) == 1) sched->now_ms = march_now_ms();
+        march_proc_bump(p->slices);
+        atomic_store_explicit(&p->last_run_ms, sched->now_ms, memory_order_relaxed);
 
         dbg_mark_dispatched(p, sched->id);
         /* A dispatched proc must have a context: NULL means it was reaped,
@@ -2663,6 +2677,23 @@ march_proc *march_sched_current(void) {
     return tl_sched ? tl_sched->current : NULL;
 }
 
+/* noinline: tl_sched must be read here, after the send's possible park, and
+ * never hoisted into a caller across a green-thread switch (a migrated
+ * thread would read the old scheduler's TLS). */
+__attribute__((noinline))
+void march_sched_count_send(void) {
+    march_scheduler *s = tl_sched;
+    march_proc *p = s ? s->current : NULL;
+    if (p) march_proc_bump(p->msgs_out);
+}
+
+__attribute__((noinline))
+void march_sched_set_held(int64_t n) {
+    march_scheduler *s = tl_sched;
+    march_proc *p = s ? s->current : NULL;
+    if (p) atomic_store_explicit(&p->held, n, memory_order_relaxed);
+}
+
 /* Returns 1 if the calling OS thread is currently running inside the scheduler
  * loop (tl_sched is set), 0 otherwise.  Used by march_ensure_sched_started to
  * avoid launching a redundant background thread. */
@@ -3181,6 +3212,7 @@ void *march_sched_recv_actor_ex(uint32_t *epoch_out, int *marker_out,
         if (p->mailbox != NULL) {
             march_mbox_node *node = mbox_unlink(p, &p->mailbox, &p->mbox_tail,
                                                 NULL, p->mailbox, 0);
+            if (!node->marker) march_proc_bump(p->msgs_in);
             mbox_wake_send_waiters_if_low(p);
             atomic_store_explicit(&p->mbox_wait_mode, 0, memory_order_relaxed);
             mbox_lock_release(p);
@@ -3959,6 +3991,11 @@ void march_sched_requeue_user_front_epochs(void *const *msgs,
     p->mailbox = first;
     atomic_fetch_add_explicit(&p->mbox_count, n, memory_order_relaxed);
     atomic_fetch_add_explicit(&p->user_mbox_count, n, memory_order_relaxed);
+    /* They were counted in msgs_in when the wait popped them; they will be
+     * counted again when their handler receives them.  Count once. */
+    atomic_store_explicit(&p->msgs_in,
+        atomic_load_explicit(&p->msgs_in, memory_order_relaxed) - (uint64_t)n,
+        memory_order_relaxed);
     mbox_lock_release(p);
     sched_note_activity();
 }

@@ -2722,6 +2722,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/observe_types_hr.expected native_observe_types_hr.out)))
 
+; R2 counters: a ping-pong pair's exact msgs_in/msgs_out, and an actor blocked
+; in an Actor.call whose incoming messages are held off its mailbox (reported
+; as "held").
+(rule
+ (targets native_observe_counters native_observe_counters.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_snapshot_check.exe)
+       (file native/observe_counters.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_observe_counters native/observe_counters.march)
+   (with-stdout-to native_observe_counters.out
+    (system "rm -f obs_ctr.sock obs_ctr.prog; MARCH_OBSERVE_SOCKET=obs_ctr.sock ./native_observe_counters > obs_ctr.prog 2>&1 & prog=$!; ./observe_snapshot_check.exe counters obs_ctr.sock obs_ctr.prog; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -f obs_ctr.prog obs_ctr.sock; true")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_counters.expected native_observe_counters.out)))
+
 ; ── Leak guard: the Process builtins (spawn_async/read_line/write/kill_proc/
 ; wait_proc, run's spawn_sync, env/set_env) only READ their heap arguments but
 ; were classified OWNED in borrow.ml, so every spawn leaked its args list and

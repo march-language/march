@@ -7274,6 +7274,9 @@ void *march_send(void *actor, void *msg) {
     march_proc *gt = meta ? meta_gt(meta) : NULL;
     int send_rc = gt ? march_sched_send(gt, msg) : MARCH_SEND_DEAD;
     march_reclaim_exit();
+    /* After the send (a BLOCK-policy send may have parked and resumed on
+     * another scheduler): count it on the sender's proc as it is now. */
+    if (send_rc == MARCH_SEND_OK) march_sched_count_send();
     if (send_rc == MARCH_SEND_DEAD) {
         /* Actor died in the window between the checks above and the send;
          * march_sched_send did not enqueue or dispose the message (dead
@@ -7483,11 +7486,13 @@ static void call_held_push(call_held *h, void *msg, uint64_t seq) {
     h->msgs[h->n] = msg;
     h->seqs[h->n] = seq;
     h->n++;
+    march_sched_set_held(h->n);   /* observe: waiting work the mailbox no longer shows */
 }
 
 /* Put the held messages back and return ret (every exit of the wait). */
 static void *call_held_restore(call_held *h, void *ret) {
     march_sched_requeue_user_front(h->msgs, h->seqs, h->n);
+    if (h->n) march_sched_set_held(0);
     free(h->msgs);
     free(h->seqs);
     return ret;
@@ -7573,6 +7578,7 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
      * find_or_create_meta — same reasoning as march_send: a NULL meta here
      * means the pid was never spawned or has died.  A target that dies
      * between the test and the send is a dead send, as it always was. */
+    int counted = 0;
     march_reclaim_enter();
     march_actor_meta *meta = find_meta(actor);
     march_proc *gt = meta ? meta_gt(meta) : NULL;
@@ -7594,9 +7600,10 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
         if (ct && msg_tag >= 0 && (int64_t)msg_tag < ct->n)
             msg_tag = ct->tags[msg_tag];
         MARCH_SET_TAG(call_msg, msg_tag);
-        march_sched_send(gt, call_msg);
+        if (march_sched_send(gt, call_msg) == MARCH_SEND_OK) counted = 1;
     }
     march_reclaim_exit();
+    if (counted) march_sched_count_send();   /* the call's request */
     if (!gt || !caller) {
         march_decrc(call_msg);   /* march_decrc does not recurse */
         march_decrc(reply_ref);
@@ -7744,8 +7751,9 @@ void march_actor_reply(void *ref_ptr, void *result) {
      * send, exactly as sending to its dead proc was. */
     march_reclaim_enter();
     march_proc *caller = march_sched_find(caller_pid);
-    if (caller) march_sched_send(caller, env);
+    int counted = caller && march_sched_send(caller, env) == MARCH_SEND_OK;
     march_reclaim_exit();
+    if (counted) march_sched_count_send();   /* the reply */
 }
 
 /* ── Float builtins ──────────────────────────────────────────────────── */
@@ -10337,6 +10345,11 @@ static void obs_row_fill(march_actor_meta *m, int64_t pidx, march_obs_actor *r) 
         r->pinned = __atomic_load_n(&p->pinned, __ATOMIC_RELAXED);
         struct march_scheduler *s = __atomic_load_n(&p->owner_sched, __ATOMIC_RELAXED);
         if (s) r->sched = s->id;
+        r->slices = atomic_load_explicit(&p->slices, memory_order_relaxed);
+        r->msgs_in = atomic_load_explicit(&p->msgs_in, memory_order_relaxed);
+        r->msgs_out = atomic_load_explicit(&p->msgs_out, memory_order_relaxed);
+        r->last_run_ms = atomic_load_explicit(&p->last_run_ms, memory_order_relaxed);
+        r->held = atomic_load_explicit(&p->held, memory_order_relaxed);
     }
     r->draining = atomic_load_explicit(&m->draining, memory_order_relaxed);
     r->num_children = __atomic_load_n(&m->sup_num_children, __ATOMIC_RELAXED);

@@ -480,7 +480,42 @@ typedef struct march_proc {
     _Atomic int                 dbg_queued;
     _Atomic int                 dbg_running_on;
 #endif
+    /* Observe counters (R2 of specs/plans/2026-09-28-observe-recon-shell-plan.md),
+     * last so no existing field moves.  Each has ONE writer, so it is bumped
+     * with a relaxed load and store (march_proc_bump), never an atomic
+     * read-modify-write; _Atomic because the observe walk reads them from
+     * another thread.
+     *   slices      — times a scheduler dispatched this proc (owner scheduler)
+     *   last_run_ms — the dispatching scheduler's coarse clock at the latest
+     *                 dispatch (march_now_ms, refreshed every 1024 dispatches
+     *                 and on the idle path, never a clock read per dispatch)
+     *   msgs_in     — user messages this proc received (the receiver)
+     *   msgs_out    — messages this proc sent that were enqueued (the sender)
+     *   held        — user messages an Actor.call on this proc has taken off
+     *                 the mailbox and will put back (not in mbox_count while
+     *                 held; the proc itself writes it) */
+    _Atomic uint64_t            slices;
+    _Atomic int64_t             last_run_ms;
+    _Atomic uint64_t            msgs_in;
+    _Atomic uint64_t            msgs_out;
+    _Atomic int64_t             held;
 } march_proc;
+
+/* Bump a single-writer counter: relaxed load + store, the same instructions
+ * as a plain increment (no lock prefix, no ldadd). */
+#define march_proc_bump(field) \
+    atomic_store_explicit(&(field), \
+        atomic_load_explicit(&(field), memory_order_relaxed) + 1, \
+        memory_order_relaxed)
+
+/* Count one message sent by the calling green thread (a no-op outside one).
+ * Called by march_send after a successful enqueue: the caller reads its own
+ * proc AFTER any park in the send, never across it. */
+void march_sched_count_send(void);
+
+/* Record how many messages the calling green thread's Actor.call is holding
+ * off its mailbox (0 when it puts them back). */
+void march_sched_set_held(int64_t n);
 
 /* ── Scheduler (per OS-thread) ───────────────────────────────────────── */
 typedef struct march_scheduler {
@@ -505,6 +540,10 @@ typedef struct march_scheduler {
     int             entered;      /* sched_loop was reached                      */
     int64_t         stat_dispatches;  /* green-thread dispatches                 */
     int64_t         stat_idle_polls;  /* loop turns that found nothing to run    */
+    /* Coarse clock for march_proc.last_run_ms (march_now_ms units): refreshed
+     * on the idle path and every 1024 dispatches, so a dispatch never reads
+     * the clock.  Owner thread only. */
+    int64_t         now_ms;
     _Atomic int     preempt_tick; /* Set by the preemption daemon just before it
                                    * signals this thread; consumed by the
                                    * handler.  How the handler tells OUR tick

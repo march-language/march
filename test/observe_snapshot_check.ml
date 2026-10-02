@@ -214,6 +214,51 @@ let types sock =
     (List.exists (fun s -> member "name" s = `String "Counter_dispatch") e)
     (Yojson.Safe.to_string (`List e))
 
+(* R2 counters: test/native/observe_counters.march. *)
+let counters sock =
+  let by_name () =
+    data (get sock "ACTORS pid 10000") |> member "actors" |> to_list
+    |> List.filter_map (fun r ->
+        match member "names" r |> to_list with
+        | [ `String n ] -> Some (n, r)
+        | _ -> None)
+  in
+  let int k r = member k r |> to_int in
+  let deadline = Unix.gettimeofday () +. 20. in
+  let rec wait () =
+    let rows = by_name () in
+    let ok =
+      match List.assoc_opt "pong" rows, List.assoc_opt "caller" rows with
+      | Some p, Some c -> int "msgs_in" p = 200 && int "held" c = 150
+      | _ -> false
+    in
+    if ok then rows
+    else if Unix.gettimeofday () > deadline then (print_endline "FAIL: never settled"; rows)
+    else (Unix.sleepf 0.1; wait ())
+  in
+  let rows = wait () in
+  let row n = List.assoc n rows in
+  let show r = Yojson.Safe.to_string r in
+  let pong = row "pong" and ping = row "ping" and caller = row "caller" in
+  check "pong received 200 and sent 200"
+    (int "msgs_in" pong = 200 && int "msgs_out" pong = 200) (show pong);
+  check "ping sent 200 and received 201 (the kick)"
+    (int "msgs_in" ping = 201 && int "msgs_out" ping = 200) (show ping);
+  check "each side of the pair was dispatched"
+    (int "slices" pong >= 1 && int "slices" ping >= 1) "";
+  check "idle_ms is reported once an actor has run"
+    (match member "idle_ms" pong with `Int n -> n >= 0 | _ -> false) (show pong);
+  check "a caller blocked in Actor.call shows the 150 it holds, none queued"
+    (int "held" caller = 150 && int "mbox" caller = 0) (show caller);
+  check "the call's request counts as a send" (int "msgs_out" caller = 1) (show caller);
+  let top = data (get sock "ACTORS mbox 1") |> member "actors" |> to_list in
+  check "ACTORS mbox ranks the held work first"
+    (match top with [ r ] -> member "names" r = `List [ `String "caller" ] | _ -> false)
+    (show (`List top));
+  let m = data (get sock "MEM") in
+  check "MEM counts held messages as queued"
+    (member "queued_messages" m |> to_int >= 150) (show m)
+
 let () =
   match Sys.argv with
   | [| _; mode; sock; ready |] ->
@@ -221,9 +266,10 @@ let () =
     (match mode with
      | "tree" -> tree sock
      | "types" -> types sock
-     | _ -> prerr_endline "mode: tree | types"; exit 2);
+     | "counters" -> counters sock
+     | _ -> prerr_endline "mode: tree | types | counters"; exit 2);
     check "no reply carries the crash message" (!leaked = [])
       (String.concat "; " !leaked);
     (* The golden diff reports a failure; exit 0 so it is shown. *)
     ignore !failures
-  | _ -> prerr_endline "usage: observe_snapshot_check tree|types <socket> <ready-file>"; exit 2
+  | _ -> prerr_endline "usage: observe_snapshot_check tree|types|counters <socket> <ready-file>"; exit 2

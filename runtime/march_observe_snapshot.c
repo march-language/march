@@ -98,6 +98,7 @@ static void write_row(march_jw *w, const march_obs_actor *r) {
     march_jw_key(w, "status");      march_jw_str(w, status_name(r->status));
     march_jw_key(w, "mbox");        march_jw_i64(w, r->mbox);
     march_jw_key(w, "user_mbox");   march_jw_i64(w, r->user_mbox);
+    march_jw_key(w, "held");        march_jw_i64(w, r->held);
     march_jw_key(w, "mbox_limit");  march_jw_i64(w, r->mbox_limit);
     march_jw_key(w, "mbox_policy"); march_jw_str(w, policy_name(r->mbox_policy));
     march_jw_key(w, "code_epoch");  march_jw_u64(w, r->code_epoch);
@@ -109,6 +110,13 @@ static void write_row(march_jw *w, const march_obs_actor *r) {
     march_jw_key(w, "parent");
     if (r->parent >= 0) march_jw_i64(w, r->parent); else march_jw_null(w);
     march_jw_key(w, "children");    march_jw_i64(w, r->num_children);
+    march_jw_key(w, "slices");      march_jw_u64(w, r->slices);
+    march_jw_key(w, "msgs_in");     march_jw_u64(w, r->msgs_in);
+    march_jw_key(w, "msgs_out");    march_jw_u64(w, r->msgs_out);
+    /* How long ago it last ran (march_now_ms is monotonic, not wall time). */
+    march_jw_key(w, "idle_ms");
+    if (r->last_run_ms > 0) march_jw_i64(w, march_now_ms() - r->last_run_ms);
+    else march_jw_null(w);
     march_jw_obj_end(w);
 }
 
@@ -154,9 +162,13 @@ enum { SORT_MBOX, SORT_STATUS, SORT_EPOCH, SORT_PID };
 static int cmp_pid(const march_obs_actor *a, const march_obs_actor *b) {
     return a->pid < b->pid ? -1 : a->pid > b->pid;
 }
+/* Waiting work: queued plus held by an Actor.call (an actor stuck in a call
+ * with work piling up is the one an operator is looking for). */
+static int64_t waiting(const march_obs_actor *r) { return r->mbox + r->held; }
+
 static int cmp_mbox(const void *x, const void *y) {
     const march_obs_actor *a = x, *b = y;
-    if (a->mbox != b->mbox) return a->mbox > b->mbox ? -1 : 1;   /* deepest first */
+    if (waiting(a) != waiting(b)) return waiting(a) > waiting(b) ? -1 : 1;   /* deepest first */
     return cmp_pid(a, b);
 }
 /* Running, runnable, then waiting: busiest first. */
@@ -529,7 +541,7 @@ static int64_t rss_now_bytes(void) {
 
 static void write_mem(march_jw *w, const march_obs_actor *rows, size_t n) {
     int64_t queued = 0;
-    for (size_t i = 0; i < n; i++) queued += rows[i].mbox;
+    for (size_t i = 0; i < n; i++) queued += waiting(&rows[i]);
     int64_t rss = rss_now_bytes();
     march_jw_obj_begin(w);
     march_jw_key(w, "rss_bytes");

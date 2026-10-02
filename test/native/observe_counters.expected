@@ -1,0 +1,9 @@
+ok: pong received 200 and sent 200
+ok: ping sent 200 and received 201 (the kick)
+ok: each side of the pair was dispatched
+ok: idle_ms is reported once an actor has run
+ok: a caller blocked in Actor.call shows the 150 it holds, none queued
+ok: the call's request counts as a send
+ok: ACTORS mbox ranks the held work first
+ok: MEM counts held messages as queued
+ok: no reply carries the crash message

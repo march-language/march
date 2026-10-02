@@ -136,6 +136,12 @@ typedef struct march_obs_actor {
     int      num_children;    /* > 0: this actor is a supervisor */
     char   **names;           /* registered names (owned) */
     int      n_names;
+    /* R2 counters (march_proc): cumulative since spawn. */
+    uint64_t slices;          /* times dispatched */
+    uint64_t msgs_in;         /* user messages received */
+    uint64_t msgs_out;        /* messages sent and enqueued */
+    int64_t  last_run_ms;     /* march_now_ms (monotonic) at the last dispatch, 0 = never */
+    int64_t  held;            /* messages an Actor.call is holding off the mailbox */
 } march_obs_actor;
 
 /* Snapshot every live actor.  On success *rows is a malloc'd array of *n
