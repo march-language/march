@@ -16,3 +16,18 @@ control plane issues certificates (step 11) and holds a leader lease.
 **Acceptance.** With the control plane running, `forge deploy` needs no ssh: it talks
 to the leader, which reconciles every node; killing the leader moves the lease and a
 deploy in progress completes or reports.
+
+**12b (certificate distribution and live rotation): done.** Live replacement:
+[../progress/2026-09-28-dd-step12b-live-cert-replacement.md](../progress/2026-09-28-dd-step12b-live-cert-replacement.md).
+Certificates and revocations as release items (`forge cluster cert|revoke --deliver`):
+[../progress/2026-10-01-dd-step12b-cert-delivery.md](../progress/2026-10-01-dd-step12b-cert-delivery.md).
+Left from it, none blocking:
+
+- The Agent's replay floor for certificate releases (`Control.cert_floor`) lives in memory;
+  after a restart only the reload server's release head bounds it. Persisting it needs the
+  `Ctl.Agent` role to write a file (or a reload-server verb that records it).
+- `STATUS` keeps showing a node's failure from an earlier, halted release after a later
+  release succeeds on that node (`Control.leader_report` keeps a known failure when a report
+  omits it). It does not halt anything; it reads as if it did.
+- The deferred issuer design of section 10 (a control-plane issuer certificate, short-lived
+  node certificates, join tokens) stays deferred (D39).

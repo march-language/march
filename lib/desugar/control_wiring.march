@@ -31,7 +31,7 @@ needs ClusterNode.Live
 type CtlWireReport = {
   wire : Int, node : String, seq : Int, versions : String, topology : String,
   drained : Int, healthy : Bool, failed_seq : Int, failed_step : Int, failed_why : String,
-  detail : String, pools : String
+  detail : String, pools : String, certs : String
 }
 derive Json for CtlWireReport
 type CtlWireOrder = {
@@ -44,20 +44,20 @@ derive Json for CtlWireResult
 pfn ctl_wire_report(r : Control.AgentReport) : CtlWireReport do
   { wire: 1, node: r.node, seq: r.seq, versions: r.versions, topology: r.topology, drained: r.drained,
     healthy: r.healthy, failed_seq: r.failed_seq, failed_step: r.failed_step, failed_why: r.failed_why,
-    detail: r.detail, pools: r.pools }
+    detail: r.detail, pools: r.pools, certs: r.certs }
 end
 
 -- A poll's report, without `detail` (see `ctl_agent_loop_`).
 pfn ctl_wire_brief(r : Control.AgentReport) : CtlWireReport do
   { wire: 1, node: r.node, seq: r.seq, versions: r.versions, topology: r.topology, drained: r.drained,
     healthy: r.healthy, failed_seq: r.failed_seq, failed_step: r.failed_step, failed_why: r.failed_why,
-    detail: "", pools: r.pools }
+    detail: "", pools: r.pools, certs: r.certs }
 end
 
 pfn ctl_report_of(w : CtlWireReport) : Control.AgentReport do
   { node: w.node, seq: w.seq, versions: w.versions, topology: w.topology, drained: w.drained,
     healthy: w.healthy, failed_seq: w.failed_seq, failed_step: w.failed_step, failed_why: w.failed_why,
-    detail: w.detail, pools: w.pools }
+    detail: w.detail, pools: w.pools, certs: w.certs }
 end
 
 pfn ctl_wire_order(o : Control.StepOrder) : CtlWireOrder do
@@ -314,9 +314,70 @@ pfn ctl_relay(line : String, tries : Int) : String do
   else resp end
 end
 
+pfn ctl_certs_of(node : Cap(ClusterNode.Live)) : String do
+  Control.certs_text(ClusterNode.own_cert(node), ClusterNode.revocations(node))
+end
+
 pfn ctl_agent_ops(node : Cap(ClusterNode.Live)) : Control.AgentOps do
-  let ops = Control.real_ops(Topology.node_name(node), ctl_cfg("pools", ""), fn -> ctl_status_of(node), ctl_memory())
+  let ops = Control.real_ops(Topology.node_name(node), ctl_cfg("pools", ""), fn -> ctl_status_of(node), fn -> ctl_certs_of(node), ctl_memory())
   { ops with request: fn line -> ctl_relay(line, 240) }
+end
+
+-- ── certificates and revocations (step 12b) ─────────────────────────────────
+--
+-- A `do:certs` order goes to `Control.agent_apply_certs` over this node's
+-- `ClusterNode`: the certificate through `replace_cert` (keeping the node's
+-- key: the control plane never carries a secret key), a revocation through
+-- `revoke`, which gossips it on. A certificate taken is also written back to
+-- the MARCH_NODE_CERT file (when the node was started from one), so a restart
+-- comes back on it; the write happens in `ctl_prefetch_loop`, which holds the
+-- node's root capability (a role body may not write files).
+
+pfn ctl_own_serial(node : Cap(ClusterNode.Live)) : String do
+  match ClusterNode.own_cert(node) do
+    Some(c) -> c.serial
+    None -> ""
+  end
+end
+
+pfn ctl_cert_ops(node : Cap(ClusterNode.Live)) : Control.CertOps do
+  { name: Topology.node_name(node), deploy_key: ctl_pubkey(), serial: fn -> ctl_own_serial(node),
+    replace: fn text ->
+      match ClusterNode.replace_cert(node, text, "") do
+        Ok(c) ->
+          Vault.set(ctl_memory(), "cert_persist", text)
+          Ok(c.serial)
+        Err(e) -> Err(e)
+      end,
+    revoke: fn t -> ClusterNode.revoke(node, t),
+    floor: fn ->
+      let head = ctl_int(ctl_field(ctl_node_state(), "head"))
+      let taken = Control.cert_floor(ctl_memory())
+      if head > taken do head else taken end }
+end
+
+-- Write a certificate this node took from a release to its MARCH_NODE_CERT
+-- file (a temporary file renamed into place). The node's own file watch then
+-- reads the same certificate back, which `replace_cert` takes as a no-op.
+pfn ctl_persist_cert(io : Cap(IO)) : () do
+  match Vault.get(ctl_memory(), "cert_persist") do
+    None -> ()
+    Some(text) ->
+      Vault.drop(ctl_memory(), "cert_persist")
+      let path = ctl_cfg("cert_file", "")
+      if path == "" do ()
+      else
+        let tmp = path ++ ".delivered.tmp"
+        match File.write(tmp, text ++ "\n") do
+          Err(e) -> println("control: could not save the delivered certificate to " ++ path ++ ": " ++ e)
+          Ok(_) ->
+            match File.rename(tmp, path) do
+              Ok(_) -> ()
+              Err(e) -> println("control: could not save the delivered certificate to " ++ path ++ ": " ++ e)
+            end
+        end
+      end
+  end
 end
 
 -- Artifacts the Agent is waiting for: hash -> 1. An order that names an
@@ -407,6 +468,7 @@ end
 
 pfn ctl_prefetch_loop(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do
   List.each(Vault.keys(ctl_wants()), fn h -> ctl_prefetch_one(io, node, h))
+  ctl_persist_cert(io)
   sleep_ms(200)
   ctl_prefetch_loop(io, node)
 end
@@ -422,8 +484,14 @@ end
 
 -- Apply one order: ask for what the node lacks and wait for it (a minute, at
 -- most: past that `agent_apply` reports the missing artifacts and the release
--- halts), then relay (`agent_apply`).
-pfn ctl_apply(ops : Control.AgentOps, o : Control.StepOrder) : Control.StepResult do
+-- halts), then relay (`agent_apply`). A `do:certs` order is the node's own
+-- business, not its reload server's (`Control.agent_apply_certs`).
+pfn ctl_apply(node : Cap(ClusterNode.Live), ops : Control.AgentOps, o : Control.StepOrder) : Control.StepResult do
+  if o.action == "certs" do Control.agent_apply_certs_recording(ctl_cert_ops(node), ctl_memory(), o)
+  else ctl_apply_relayed(ops, o) end
+end
+
+pfn ctl_apply_relayed(ops : Control.AgentOps, o : Control.StepOrder) : Control.StepResult do
   let need = Control.missing(ops, o)
   if need != Nil do
     List.each(need, fn h -> if Vault.get(ctl_wants(), h) == None do Vault.set(ctl_wants(), h, 0) else () end)
@@ -435,7 +503,7 @@ end
 
 pfn ctl_agent_body(node : Cap(ClusterNode.Live), s : Cap(Session.Live), nc : Cap(IO.NetConnect), fr : Cap(IO.FileRead), mu : Cap(IO.Mut), ck : Cap(IO.Clock), st : Ctl_Agent.S_send_Hello) : Ctl_Agent.Yield do
   let ops = ctl_agent_ops(node)
-  ctl_agent_role(s, nc, fr, mu, ck, st, fn -> ops.report(), fn o -> ctl_apply(ops, o))
+  ctl_agent_role(s, nc, fr, mu, ck, st, fn -> ops.report(), fn o -> ctl_apply(node, ops, o))
 end
 
 -- Keep a `Ctl` session open with whoever offers `Control` now. A session ends
@@ -698,7 +766,7 @@ pfn ctl_next_for(node : Cap(ClusterNode.Live), name : String) : Control.CtlNext 
     match d do
       Some(Control.RolloutApply(_, os)) ->
         match List.find(os, fn o -> o.node == name) do
-          Some(o) -> Control.NextOrder(o)
+          Some(o) -> Control.NextOrder(ctl_signed_order(o))
           None ->
             sleep_ms(ctl_poll_ms())
             Control.NextPoll
@@ -707,6 +775,20 @@ pfn ctl_next_for(node : Cap(ClusterNode.Live), name : String) : Control.CtlNext 
         sleep_ms(ctl_poll_ms())
         Control.NextPoll
     end
+  end end
+end
+
+-- A `do:certs` order carries its whole signed release, which the node
+-- verifies (`Control.agent_apply_certs`). It is taken from the durable copy
+-- this candidate stored (the exact document forge signed), not re-serialised
+-- from the release the leader holds: compiled, that record reads back with an
+-- empty signature after `Control.leader_release` takes it
+-- (specs/todos/2026-10-01-compiled-record-with-projection-sigsegv.md, shape 2).
+pfn ctl_signed_order(o : Control.StepOrder) : Control.StepOrder do
+  if o.action != "certs" do o
+  else match File.read(ctl_release_file(o.seq)) do
+    Ok(text) -> Control.with_lines(o, text)
+    Err(_) -> o
   end end
 end
 
@@ -902,6 +984,7 @@ pfn ctl_node_line(o : Control.CtlObs) : String do
   "NODE " ++ r.node ++ " seq:" ++ int_to_string(r.seq) ++ " healthy:" ++ (if r.healthy do "yes" else "no" end)
     ++ " topology:" ++ r.topology ++ " drained:" ++ int_to_string(r.drained)
     ++ " versions:" ++ (if r.versions == "" do "-" else String.replace_all(r.versions, " ", ",") end)
+    ++ " cert:" ++ (if Control.report_serial(r) == "" do "-" else Control.report_serial(r) end)
     ++ " failed:" ++ (if r.failed_seq == 0 do "-" else int_to_string(r.failed_seq) ++ "/" ++ int_to_string(r.failed_step) ++ ":" ++ String.replace_all(r.failed_why, " ", "_") end) ++ "\n"
 end
 
@@ -922,7 +1005,7 @@ end
 pfn ctl_done_nodes(stp : Control.CtlStep, r : Control.CtlRelease, l : Control.CtlLeader, sel : List(String)) : List(String) do
   List.filter(sel, fn n ->
     match List.find(l.obs, fn o -> o.report.node == n) do
-      Some(o) -> Control.reports_state(o.report, Control.show_action(stp.action), Control.want(r, stp))
+      Some(o) -> Control.reports_state(o.report, Control.show_action(stp.action), Control.want_for(r, stp, n))
       None -> false
     end)
 end
@@ -1129,6 +1212,10 @@ fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : 
   Vault.set(m, "cfg:port", int_to_string(port))
   Vault.set(m, "cfg:port_offset", Env.get("MARCH_CONTROL_PORT_OFFSET", "0"))
   Vault.set(m, "cfg:pools", String.join(ctl_words(Env.get("MARCH_POOLS", "")), " "))
+  -- Where a certificate taken from a release is saved: MARCH_NODE_CERT, when
+  -- it names a file (it may instead hold the certificate itself).
+  let cert_env = Env.get("MARCH_NODE_CERT", "")
+  Vault.set(m, "cfg:cert_file", if cert_env != "" && File.exists(cert_env) do cert_env else "" end)
   Vault.set(ctl_respawners(), "r", spawn(CtlRespawner))
   let _ = task_spawn(fn _ -> ctl_agent_loop(io, node, 250))
   let _ = task_spawn(fn _ -> ctl_prefetch_loop(io, node))

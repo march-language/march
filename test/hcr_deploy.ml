@@ -13,6 +13,12 @@
                                               (`forge deploy` on the cluster backend, over
                                               Cluster_deploy): CANARY=<n> CANARY_MS RESTS_MS
                                               TOPOLOGY=<digest file to push> FOLLOW_S
+      hcr_deploy certs <dir> <host:port,...> <item>...
+                                              a release of certificate items (step 12b) through
+                                              the control plane, as `forge cluster cert/revoke
+                                              --deliver` sends it, but with the items as given:
+                                              cert:<node>:<cert file> or revoke:<token file>,
+                                              unchecked (to send what forge would refuse to write)
       hcr_deploy status <host:port,...>       the leader's view of the newest release
       hcr_deploy api <host:port> <line>       one request to a control API, answer to stdout
       hcr_deploy reload <socket> <line>       one request to a reload socket, answer to stdout
@@ -108,6 +114,22 @@ let () =
        read_answer conn
      with Failure m -> prerr_endline ("hcr_deploy: " ^ m); exit 1
         | Unix.Unix_error (e, _, _) -> prerr_endline ("hcr_deploy: " ^ Unix.error_message e); exit 1)
+  | "certs" :: dir :: eps :: items ->
+    let sk = bytes_of_hex (read (Filename.concat dir "sk")) in
+    let endpoints = List.filter_map March_forge.Cluster_deploy.endpoint_of_string (String.split_on_char ',' eps) in
+    let certs, revokes =
+      List.fold_left (fun (cs, rs) it ->
+          match String.split_on_char ':' it with
+          | [ "cert"; node; file ] -> (cs @ [ (node, String.trim (read file)) ], rs)
+          | [ "revoke"; file ] -> (cs, rs @ [ String.trim (read file) ])
+          | _ -> prerr_endline ("hcr_deploy: bad item " ^ it); exit 2)
+        ([], []) items
+    in
+    let follow_s = match Sys.getenv_opt "FOLLOW_S" with Some v -> (try float_of_string v with _ -> 120.) | None -> 120. in
+    (match March_forge.Cmd_cluster.deliver ~endpoints ~sk ~env:"test" ~follow_s
+             { March_forge.Control_release.certs; revokes } with
+     | Ok report -> print_string report
+     | Error m -> prerr_endline ("hcr_deploy: " ^ m); exit 1)
   | [ "status"; eps ] ->
     let endpoints = List.filter_map March_forge.Cluster_deploy.endpoint_of_string (String.split_on_char ',' eps) in
     (match March_forge.Cluster_deploy.status endpoints with

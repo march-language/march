@@ -56,7 +56,7 @@ mod ControlPeers do
 
   pfn report_of(w : WireReport) : Control.AgentReport do
     { node: w.node, seq: w.seq, versions: w.versions, topology: w.topology, drained: w.drained,
-      healthy: w.healthy, failed_seq: w.failed_seq, failed_step: w.failed_step, failed_why: w.failed_why, detail: w.detail, pools: w.pools }
+      healthy: w.healthy, failed_seq: w.failed_seq, failed_step: w.failed_step, failed_why: w.failed_why, detail: w.detail, pools: w.pools, certs: "" }
   end
 
   pfn wire_order(o : Control.StepOrder) : WireOrder do
@@ -245,7 +245,7 @@ mod ControlPeers do
 
   pfn sim_report(n : SimNode) : Control.AgentReport do
     { node: n.name, seq: if n.requests > 0 do 42 else 41 end, versions: Control.versions_text(n.versions), topology: n.topology,
-      drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "" }
+      drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "", certs: "" }
   end
 
   -- What the node's reload server does with one signed line.

@@ -277,4 +277,15 @@ mod NodeCert do
     List.any(rs, fn r -> revokes(r, c))
   end
 
+  doc """
+  A short identity for a revocation: the first 16 hex digits of the sha256 of
+  its canonical body. Two copies of one revocation (from a release, from a
+  peer's gossip, from MARCH_CLUSTER_REVOCATIONS) have the same id, so a
+  node's report of the revocations it knows can be matched against a
+  release's (`Control`, step 12b).
+  """
+  fn revocation_id(r : Revocation) : String do
+    String.slice(sha256(Bytes.from_list(encode_revocation(r))), 0, 16)
+  end
+
 end
