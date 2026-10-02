@@ -19,6 +19,16 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **An in-cluster control plane for hot deploys (distributed deploys, step 12a).** A
+  `[control] candidates = "<host label>"` section in `topology.toml` makes every node run
+  an Agent and the labelled nodes serve a control API; one of them leads (`count = 1`
+  placement). A release, built and signed by forge (it holds the only key), is stored on
+  every reachable candidate, then carried out step by step with canary gates; nodes
+  verify every signed line themselves, so a compromised control node can delay a deploy
+  but not forge one. No ssh is involved in a hot deploy. A leader killed mid-rollout is
+  replaced and the release finishes without applying a step twice. Leadership needs
+  `Ctl.Control:offer` in the node's certificate. Restart-class changes still go through
+  the process backend. `forge deploy` itself does not select the cluster backend yet.
 - **Native builds allocate from a vendored mimalloc.** `march_alloc`, the allocator
   behind every March value, now draws from a statically linked mimalloc instead of
   libc `calloc`, with no new system dependency. Allocation-heavy programs get

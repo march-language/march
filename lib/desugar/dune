@@ -1,3 +1,16 @@
 (library
  (name march_desugar)
  (libraries march_ast march_errors march_caps march_ctxesc yojson))
+
+; The control plane's wiring (build step 12a): a March source fragment that
+; bin/topology_gen.ml splices into the entry module of a topology app with a
+; [control] section. Embedded as a string so the compiler needs no data file.
+(rule
+ (targets control_wiring_src.ml)
+ (deps control_wiring.march)
+ (action
+  (with-stdout-to control_wiring_src.ml
+   (progn
+    (echo "let text = {march_wiring|")
+    (cat control_wiring.march)
+    (echo "|march_wiring}\n")))))

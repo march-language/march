@@ -500,10 +500,17 @@ mod Control do
   -- What an Agent reports (design section 6): the newest release `seq` the
   -- node holds, the builds it runs (`versions_text`), its topology digest,
   -- the highest epoch it has drained, whether it is healthy, and its last
-  -- failed step (`failed_seq` 0: none).
+  -- failed step (`failed_seq` 0: none). `detail` is the node's raw facts as
+  -- text (its pins, its hot slots, its status file: offers, live sessions per
+  -- protocol fingerprint, drain progress), for `forge` to show; the executor
+  -- never reads it. `pools` is the pools the node runs, space-separated (the
+  -- leader's membership: the executor needs node -> pools). A version whose build is `*` is an artifact the node runs
+  -- that it cannot name a build for (the reload server knows patch artifacts,
+  -- not the release's build names); `reports_state` accepts it for any build.
   type AgentReport = {
     node : String, seq : Int, versions : String, topology : String,
-    drained : Int, healthy : Bool, failed_seq : Int, failed_step : Int, failed_why : String
+    drained : Int, healthy : Bool, failed_seq : Int, failed_step : Int, failed_why : String,
+    detail : String, pools : String
   }
 
   pfn version_text(v : CtlVersion) : String do v.build ++ "=" ++ v.manifest end
@@ -653,7 +660,7 @@ mod Control do
   doc "Does [rep] show the end state [w] of an order with action [action] (`show_action` form)?"
   fn reports_state(rep : AgentReport, action : String, w : String) : Bool do
     match call_arg(action, "activate") do
-      Some(b) -> List.any(report_versions(rep), fn v -> v.build == b && v.manifest == w)
+      Some(b) -> List.any(report_versions(rep), fn v -> (v.build == b || v.build == "*") && v.manifest == w)
       None ->
         if action == "topology" do rep.topology == w
         else if action == "drain" do
@@ -676,9 +683,12 @@ mod Control do
   fn order(r : CtlRelease, step : CtlStep, node : String) : StepOrder do
     let artifacts = match step.action do
       DoActivate(b) -> match find_build(r, b) do
-        Some(bd) -> [bd.base, bd.manifest]
+        Some(bd) -> [bd.manifest]
         None -> Nil
       end
+      -- The topology's body is an artifact under its digest: a node applies
+      -- it from its own CAS (the signed TOPOLOGY line's body is not in the release).
+      DoTopology -> [r.topology]
       _ -> Nil
     end
     let lines = List.map(List.filter(r.lines, fn l -> l.step == step.id), fn l -> l.text)
@@ -821,15 +831,22 @@ mod Control do
   An agent reported: record it; the node's order (if any) is no longer in
   flight. A failure this leader already knows of for the node is kept even if
   the report omits it, so a halt cannot be lost to a report sent before the
-  failure.
+  failure; so is the node's `detail` when the report has none (a poll's).
   """
   fn leader_report(l : CtlLeader, rep : AgentReport, now : Int) : CtlLeader do
-    let merged = match (report_failure(rep), obs_of(l.obs, rep.node)) do
+    let prior = obs_of(l.obs, rep.node)
+    let merged0 = match (report_failure(rep), prior) do
       (None, Some(o)) -> match report_failure(o.report) do
         Some(f) -> with_failure(rep, f)
         None -> rep
       end
       _ -> rep
+    end
+    -- A report without `detail` (a poll's; the hello carries it) keeps the
+    -- detail last reported.
+    let merged = match prior do
+      Some(o) -> if merged0.detail == "" && o.report.detail != "" do { merged0 with detail: o.report.detail } else merged0 end
+      None -> merged0
     end
     { l with obs: observe(l.obs, merged, now), inflight: List.filter(l.inflight, fn n -> n != rep.node) }
   end
@@ -928,6 +945,112 @@ mod Control do
           else result_of(o, false, "the node accepted every line but does not report " ++ o.action ++ " at " ++ o.want) end
       end end
     end
+  end
+
+  -- ── the real Agent (design section 6) ────────────────────────────────────
+  --
+  -- `AgentOps` over the node's own reload server, through the stdlib-only
+  -- `reload_request` builtin: the same C dispatch the socket runs, so the
+  -- signature checks, the release sequence and the audit are the socket's.
+  -- The Agent adds no authority: it relays operator-signed lines.
+
+  doc "The reload server's answer to [line] (or lines: the request is a stream, a body verb's bytes follow the first newline)."
+  fn relay_line(line : String) : String do reload_request(line) end
+
+  doc "The value of `key:value` among the words of [line] (\"\" when absent)."
+  fn state_field(line : String, key : String) : String do
+    match first_some(words(line), fn w -> field(w, key)) do
+      Some(v) -> v
+      None -> ""
+    end
+  end
+
+  doc "The non-empty lines of a reload-server answer."
+  fn answer_lines(resp : String) : List(String) do
+    List.filter(String.split(resp, "\n"), fn l -> l != "")
+  end
+
+  doc "The `STATE` line of a `NODE_STATE` answer (\"\" when absent)."
+  fn state_line(lines : List(String)) : String do
+    match List.find(lines, fn l -> String.starts_with(l, "STATE ")) do
+      Some(l) -> l
+      None -> ""
+    end
+  end
+
+  pfn artifact_of(l : String) : Option(CtlVersion) do
+    if String.starts_with(l, "ARTIFACT ") do Some({ build: "*", manifest: String.trim(String.slice(l, 9, String.byte_size(l) - 9)) })
+    else None end
+  end
+
+  doc """
+  What the node reports without the status file: the reload server's `NODE_STATE` and
+  `PINS`, and [failure] (the last step this agent failed, `seq step why`, or \"\").
+  Not `VERSIONS_DETAIL`: one line per function (about 14,000 in a small app),
+  on every poll, cost a node gigabytes within a minute. The patch artifacts in
+  effect (`NODE_STATE`) are what the executor needs, and an operator reads the
+  per-function view through the control API (`VERSIONS_DETAIL` passes through).
+  """
+  fn reload_report(name : String, pools : String, status : String, applied : Bool, failure : String) : AgentReport do
+    let st = answer_lines(relay_line("NODE_STATE"))
+    let head = state_line(st)
+    let seq = match string_to_int(state_field(head, "head")) do
+      Some(n) -> n
+      None -> 0
+    end
+    let drained = match string_to_int(state_field(head, "drained")) do
+      Some(n) -> n
+      None -> 0
+    end
+    let topo = state_field(head, "topology")
+    let fparts = String.split(failure, " ")
+    let fseq = match List.head_opt(fparts) do
+      Some(x) -> match string_to_int(x) do
+        Some(n) -> n
+        None -> 0
+      end
+      None -> 0
+    end
+    let fstep = match List.head_opt(List.drop(fparts, 1)) do
+      Some(x) -> match string_to_int(x) do
+        Some(n) -> n
+        None -> 0
+      end
+      None -> 0
+    end
+    let fwhy = String.join(List.drop(fparts, 2), " ")
+    let detail = "pins\n" ++ String.join(answer_lines(relay_line("PINS")), "\n") ++ "\nstatus\n" ++ status
+    { node: name, seq: seq, versions: versions_text(List.filter_map(st, fn l -> artifact_of(l))),
+      topology: if applied do topo else "-" end, drained: drained, healthy: head != "",
+      failed_seq: fseq, failed_step: fstep, failed_why: fwhy, detail: detail, pools: pools }
+  end
+
+  doc """
+  The Agent's ops over this node's reload server. [status] is called for each report: the
+  topology status text (`Topology.status_text`), and whether the verified topology
+  is the one the node applied. [memory] keeps the last failed step (see
+  `agent_apply_recording`). `has` is the artifact's presence in the CAS
+  (a `base:` in the release is informational: the base image is not an artifact).
+  """
+  fn real_ops(name : String, pools : String, status : () -> (String, Bool), memory : Vault(String)) : AgentOps do
+    { report: fn ->
+        let (text, applied) = status()
+        reload_report(name, pools, text, applied, Vault.get_or(memory, "failure", "")),
+      has: fn h -> String.starts_with(relay_line("CAS_CHECK " ++ h), "PRESENT"),
+      request: fn line -> String.trim(relay_line(line)) }
+  end
+
+  doc """
+  `agent_apply`, remembering a failure in [memory] so the node's next report carries it
+  (a new leader re-derives the halt from it) and forgetting it once a later order succeeds.
+  A batch left half-staged by an earlier failed step is rolled back first.
+  """
+  fn agent_apply_recording(ops : AgentOps, memory : Vault(String), o : StepOrder) : StepResult do
+    let _ = ops.request("ROLLBACK_BATCH")
+    let res = agent_apply(ops, o)
+    if res.ok do Vault.drop(memory, "failure")
+    else Vault.set(memory, "failure", int_to_string(res.seq) ++ " " ++ int_to_string(res.step) ++ " " ++ res.detail) end
+    res
   end
 
   -- ── what the protocols carry (design section 7) ──────────────────────────

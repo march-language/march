@@ -117,6 +117,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_string_to_int",      [true]);
   ("march_string_to_float",    [true]);
   ("march_string_to_lowercase",[true]);
+  ("march_reload_request_string",[true]);
   ("march_string_to_uppercase",[true]);
   ("march_string_trim",        [true]);
   ("march_string_trim_start",  [true]);
@@ -198,6 +199,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("char_to_uppercase",    [true]);
   ("char_to_lowercase",    [true]);
   ("string_to_lowercase",  [true]);
+  ("reload_request",       [true]);
   ("string_to_uppercase",  [true]);
   ("string_trim",          [true]);
   ("string_trim_start",    [true]);

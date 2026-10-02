@@ -74,7 +74,7 @@ mod TestControl do
 
   fn report(n : SimNode) : Control.AgentReport do
     { node: n.name, seq: n.seq, versions: Control.versions_text(n.versions), topology: n.topology, drained: n.drained,
-      healthy: n.healthy, failed_seq: 0, failed_step: 0, failed_why: "" }
+      healthy: n.healthy, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "" }
   end
 
   -- The node side of an order: what the reload server would do with the
@@ -439,6 +439,17 @@ mod TestControl do
   end
 
   describe "leader change" do
+    test "a report without detail keeps the detail last reported (a poll after the hello)" do
+      let n = head(cluster())
+      let hello = { report(n) with detail: "pins\nstatus" }
+      let l1 = Control.leader_report(fresh_leader(), hello, 0)
+      let l2 = Control.leader_report(l1, report(n), 1000)
+      assert (List.length(l2.obs) == 1)
+      assert (List.all(l2.obs, fn o -> o.report.detail == "pins\nstatus"))
+      let l3 = Control.leader_report(l2, { report(n) with detail: "newer" }, 2000)
+      assert (List.all(l3.obs, fn o -> o.report.detail == "newer"))
+    end
+
     test "a new leader resumes mid-rollout from observation alone; no step twice, none skipped" do
       let (_, ns, now) = until_step2(fresh_leader(), cluster(), 0, 50)
       assert (applied(ns, "r2") == [2])
@@ -538,7 +549,7 @@ mod TestControl do
     test "missing artifacts, a refused line, and a line that changed nothing all fail" do
       let r = rel()
       let o = Control.order(r, head(r.steps), "r1")
-      assert (Control.order_artifacts(o) == ["br", "mr2"])
+      assert (Control.order_artifacts(o) == ["mr2"])
       assert (Control.order_lines(o) == ["SEQ 42 id1 s1 ACTIVATE render mr2"])
       let rep = report(find_node(cluster(), "r1"))
       let m = Control.agent_apply(ops_for(rep, "OK"), { o with artifacts: "br missing" })
@@ -565,7 +576,7 @@ mod TestControl do
     test "orders carry hashes and the step's signed lines, not bytes" do
       let r = rel()
       let o = Control.order(r, head(tail(tail(r.steps))), "w1")
-      assert (o.action == "topology" && o.want == "t42" && Control.order_artifacts(o) == Nil)
+      assert (o.action == "topology" && o.want == "t42" && Control.order_artifacts(o) == ["t42"])
       assert (Control.order_lines(o) == ["SEQ 42 id1 s2 TOPOLOGY t42"])
       assert (o.release == Control.digest(r))
     end
