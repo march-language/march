@@ -1095,13 +1095,31 @@ let rec rewrite env (e : Tir.expr) : Tir.expr =
         String.equal v.Tir.v_name n
       | _ -> false
     in
-    let rec rewrite_body body =
-      match body with
-      | Tir.ESeq (((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _) as op), rest) ->
-        let op' = if is_scrut_dec op then op else rewrite env op in
-        Tir.ESeq (op', rewrite_body rest)
-      | op when is_scrut_dec op -> op
-      | _ -> rewrite env body
+    (* [strip_scrut_decrc] finds the scrutinee's dec by walking the run of
+       BARE dec ops at the arm head; a rewritten release in front of it — a
+       [__drop$T] call that add_cross_decrcs' dec of an aggregate becomes, or
+       a closure environment's [dead_clo_release] — is not a bare dec, so the
+       walk stopped short and the scrutinee's dec was emitted PLAIN: the cell
+       was freed with its fields neither inherited nor dup'd, and the arm then
+       read them (bench/timsort.march's `Sort.enforce_invariants`, a
+       use-after-free SIGSEGV).  The ops in the run are independent releases,
+       so the scrutinee's dec is moved to the head and everything else,
+       rewritten, follows it. *)
+    let rewrite_body body =
+      let rec split acc body =
+        match body with
+        | Tir.ESeq (((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _) as op), rest) ->
+          split (op :: acc) rest
+        | _ -> (List.rev acc, body)
+      in
+      let (run, rest) = split [] body in
+      let rest' = match rest with
+        | op when is_scrut_dec op -> op
+        | _ -> rewrite env rest
+      in
+      let (scrut_ops, others) = List.partition is_scrut_dec run in
+      List.fold_right (fun op acc -> Tir.ESeq (op, acc))
+        (scrut_ops @ List.map (rewrite env) others) rest'
     in
     Tir.ECase (scrut,
       List.map (fun br -> { br with Tir.br_body = rewrite_body br.Tir.br_body }) brs,
