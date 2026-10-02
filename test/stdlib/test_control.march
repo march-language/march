@@ -373,7 +373,8 @@ mod TestControl do
       let (_, _, d3) = round(l2, ns1, 1000 + 59999)
       assert (String.starts_with(wait_of(d3), "1:"))
       let (_, _, d4) = round(l2, ns1, 1000 + 60000)
-      assert (apply_of(d4) == (2, ["r2"]))
+      let (s4, n4) = apply_of(d4)
+      assert (s4 == 2 && n4 == ["r2"])
     end
 
     test "a state change restarts a node's window; unhealthy clears it" do
@@ -530,7 +531,8 @@ mod TestControl do
       assert (Control.pass(r, members(cluster()), obs, Nil, 0) == Control.RolloutHalted(1, "r1", "ERR bad_signature"))
       -- a failure from an older release does not count
       let old = Control.observe(Nil, Control.with_failure(failed, { seq: 41, step: 1, why: "old" }), 0)
-      assert (apply_of(Some(Control.pass(r, members(cluster()), old, Nil, 0))) == (1, ["r1"]))
+      let (s1, n1) = apply_of(Some(Control.pass(r, members(cluster()), old, Nil, 0)))
+      assert (s1 == 1 && n1 == ["r1"])
     end
   end
 

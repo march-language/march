@@ -10,9 +10,7 @@ println($t14)
 ## psum
 fn psum(p : P2) : Float =
   case p of
-  P2($f1, $f2) -> let $jp_clo4 : () -> '_ = letrec [$jp3] in
-$jp3 in
-let b : Float = $f2 in
+  P2($f1, $f2) -> let b : Float = $f2 in
 let a : Float = $f1 in
 +.(a, b)
   _ -> panic("non-exhaustive pattern match")

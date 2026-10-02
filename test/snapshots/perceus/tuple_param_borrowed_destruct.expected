@@ -1,89 +1,12 @@
--- types (20) --
+-- types (7) --
 type Bytes.Bytes = Bytes(String)
-closure $Clo_$jp54$0(Ptr(Unit))
-closure $Clo_$jp63$1(Ptr(Unit))
-closure $Clo_$jp90$2(Ptr(Unit))
-closure $Clo_$jp93$3(Ptr(Unit), () -> '_)
-closure $Clo_go$4(Ptr(Unit), Int)
+closure $Clo_go$0(Ptr(Unit), Int)
+closure $Clo_go$1(Ptr(Unit))
+closure $Clo_go$2(Ptr(Unit))
+closure $Clo_go$3(Ptr(Unit))
+closure $Clo_go$4(Ptr(Unit))
 closure $Clo_go$5(Ptr(Unit))
-closure $Clo_$jp725$6(Ptr(Unit))
-closure $Clo_go$7(Ptr(Unit))
-closure $Clo_$jp732$8(Ptr(Unit))
-closure $Clo_go$9(Ptr(Unit))
-closure $Clo_$jp739$10(Ptr(Unit))
-closure $Clo_$jp745$11(Ptr(Unit))
-closure $Clo_go$12(Ptr(Unit))
-closure $Clo_$jp752$13(Ptr(Unit))
-closure $Clo_$jp758$14(Ptr(Unit))
-closure $Clo_$jp3$15(Ptr(Unit))
-closure $Clo_$jp834$16(Ptr(Unit), Int, Int, (String, String))
-closure $Clo_go$17(Ptr(Unit))
-closure $Clo_$jp348$18(Ptr(Unit))
--- fns (98) --
-## $jp3$apply$15
-fn $jp3$apply$15($clo : Ptr(Unit)) : '_ =
-  panic("non-exhaustive pattern match")
-
-## $jp348$apply$18
-fn $jp348$apply$18($clo : Ptr(Unit)) : '_ =
-  panic("non-exhaustive pattern match")
-
-## $jp54$apply$0
-fn $jp54$apply$0($clo : Ptr(Unit)) : '_ =
-  panic("non-exhaustive pattern match")
-
-## $jp63$apply$1
-fn $jp63$apply$1($clo : Ptr(Unit)) : '_ =
-  panic("non-exhaustive pattern match")
-
-## $jp725$apply$6
-fn $jp725$apply$6($clo : Ptr(Unit)) : '_ =
-  panic("non-exhaustive pattern match")
-
-## $jp732$apply$8
-fn $jp732$apply$8($clo : Ptr(Unit)) : '_ =
-  panic("non-exhaustive pattern match")
-
-## $jp739$apply$10
-fn $jp739$apply$10($clo : Ptr(Unit)) : '_ =
-  panic("non-exhaustive pattern match")
-
-## $jp745$apply$11
-fn $jp745$apply$11($clo : Ptr(Unit)) : '_ =
-  panic("non-exhaustive pattern match")
-
-## $jp752$apply$13
-fn $jp752$apply$13($clo : Ptr(Unit)) : '_ =
-  panic("non-exhaustive pattern match")
-
-## $jp758$apply$14
-fn $jp758$apply$14($clo : Ptr(Unit)) : '_ =
-  panic("non-exhaustive pattern match")
-
-## $jp834$apply$16
-fn $jp834$apply$16($clo : Ptr(Unit)) : '_ =
-  let acc : Int = $clo.$fv1 in
-let n : Int = $clo.$fv2 in
-let pair : (String, String) = $clo.$fv3 in
-dec_rc $clo;
-let k : Int = inc_rc pair;
-use_first(pair) in
-let $t832 : Int = -(n, 1) in
-let $t833 : Int = +(acc, k) in
-inc_rc pair;
-process_pairs(pair, $t832, $t833)
-
-## $jp90$apply$2
-fn $jp90$apply$2($clo : Ptr(Unit)) : '_ =
-  panic("non-exhaustive pattern match")
-
-## $jp93$apply$3
-fn $jp93$apply$3($clo : Ptr(Unit)) : '_ =
-  let $jp_clo91 : () -> '_ = $clo.$fv1 in
-dec_rc $clo;
-inc_rc $jp_clo91;
-call_ptr $jp_clo91()
-
+-- fns (85) --
 ## Bytes.b64_alphabet
 fn Bytes.b64_alphabet() : '_ =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -151,11 +74,8 @@ case $t85 of
   $Tuple2($f87, $f88) -> dec_rc $t85;
 case $f87 of
   Bytes($f89) -> dec_rc $f87;
-let $jp_clo91 : () -> '_ = alloc $Clo_$jp90$2($jp90$apply$2) in
 case $f88 of
   Bytes($f92) -> dec_rc $f88;
-let $jp_clo94 : () -> '_ = alloc $Clo_$jp93$3($jp93$apply$3, $jp_clo91) in
-dec_rc $jp_clo94;
 let y : '_ = $f92 in
 let x : '_ = $f89 in
 let $t86 : '_ = let $rc_1 : '_ = string_concat(x, y) in
@@ -165,7 +85,7 @@ $rc_1 in
 alloc Bytes($t86)
   _ -> dec_rc $f89;
 dec_rc $f88;
-call_ptr $jp_clo91()
+panic("non-exhaustive pattern match")
   _ -> dec_rc $f88;
 dec_rc $f87;
 panic("non-exhaustive pattern match")
@@ -520,8 +440,6 @@ fn Bytes.from_list_go(xs : '_, acc : '_) : '_ =
 let $t58 : '_ = alloc Nil() in
 Bytes.rev(acc, $t58)
   Cons($f61, $f62) -> dec_rc xs;
-let $jp_clo64 : () -> '_ = alloc $Clo_$jp63$1($jp63$apply$1) in
-dec_rc $jp_clo64;
 let rest : '_ = $f62 in
 let n : '_ = $f61 in
 let $t60 : '_ = let $t59 : '_ = byte_to_char(n) in
@@ -614,8 +532,6 @@ fn Bytes.rev(xs : '_, acc : '_) : '_ =
   Nil() -> dec_rc xs;
 acc
   Cons($f52, $f53) -> dec_rc xs;
-let $jp_clo55 : () -> '_ = alloc $Clo_$jp54$0($jp54$apply$0) in
-dec_rc $jp_clo55;
 let t : '_ = $f53 in
 let h : '_ = $f52 in
 let $t51 : '_ = alloc Cons(h, acc) in
@@ -701,14 +617,12 @@ fn Bytes.to_u8_arr(b : '_) : '_ =
 
 ## List.maximum_int
 fn List.maximum_int(xs : List(Int)) : Int =
-  let go : (List(Int), Int) -> Int = alloc $Clo_go$12(go$apply$12) in
+  let go : (List(Int), Int) -> Int = alloc $Clo_go$4(go$apply$4) in
 case xs of
   Nil() -> dec_rc go;
 dec_rc xs;
 panic("List.maximum_int: empty list")
   Cons($f756, $f757) -> dec_rc xs;
-let $jp_clo759 : () -> '_ = alloc $Clo_$jp758$14($jp758$apply$14) in
-dec_rc $jp_clo759;
 let t : '_ = $f757 in
 let h : '_ = $f756 in
 call_ptr go(t, h)
@@ -718,14 +632,12 @@ panic("non-exhaustive pattern match")
 
 ## List.minimum_int
 fn List.minimum_int(xs : List(Int)) : Int =
-  let go : (List(Int), Int) -> Int = alloc $Clo_go$9(go$apply$9) in
+  let go : (List(Int), Int) -> Int = alloc $Clo_go$3(go$apply$3) in
 case xs of
   Nil() -> dec_rc go;
 dec_rc xs;
 panic("List.minimum_int: empty list")
   Cons($f743, $f744) -> dec_rc xs;
-let $jp_clo746 : () -> '_ = alloc $Clo_$jp745$11($jp745$apply$11) in
-dec_rc $jp_clo746;
 let t : '_ = $f744 in
 let h : '_ = $f743 in
 call_ptr go(t, h)
@@ -735,12 +647,12 @@ panic("non-exhaustive pattern match")
 
 ## List.product_int
 fn List.product_int(xs : List(Int)) : Int =
-  let go : (List(Int), Int) -> Int = alloc $Clo_go$7(go$apply$7) in
+  let go : (List(Int), Int) -> Int = alloc $Clo_go$2(go$apply$2) in
 call_ptr go(xs, 1)
 
 ## List.range
 fn List.range(start : Int, stop : Int) : List(Int) =
-  let go : (Int, List(Int)) -> List(Int) = alloc $Clo_go$4(go$apply$4, start) in
+  let go : (Int, List(Int)) -> List(Int) = alloc $Clo_go$0(go$apply$0, start) in
 let $t283 : '_ = -(stop, 1) in
 let $t284 : '_ = alloc Nil() in
 call_ptr go($t283, $t284)
@@ -786,13 +698,13 @@ List.range_step_go$dps(next, stop, step, $trmc1)
 
 ## List.reverse$List_Int
 fn List.reverse$List_Int(xs : List(Int)) : List(Int) =
-  let go : (List(Int), List(Int)) -> List(Int) = alloc $Clo_go$17(go$apply$17) in
+  let go : (List(Int), List(Int)) -> List(Int) = alloc $Clo_go$5(go$apply$5) in
 let $t352 : '_ = alloc Nil() in
 call_ptr go(xs, $t352)
 
 ## List.sum_int
 fn List.sum_int(xs : List(Int)) : Int =
-  let go : (List(Int), Int) -> Int = alloc $Clo_go$5(go$apply$5) in
+  let go : (List(Int), Int) -> Int = alloc $Clo_go$1(go$apply$1) in
 call_ptr go(xs, 0)
 
 ## String.byte_size
@@ -1122,50 +1034,8 @@ fn String.trim_end(s : '_) : '_ =
 fn String.trim_start(s : '_) : '_ =
   string_trim_start(s)
 
-## go$apply$12
-fn go$apply$12($clo : Ptr(Unit), lst : List(Int), m : Int) : Int =
-  let go : (List(Int), Int) -> Int = $clo in
-case lst of
-  Nil() -> dec_rc go;
-dec_rc lst;
-m
-  Cons($f750, $f751) -> dec_rc lst;
-let $jp_clo753 : () -> '_ = alloc $Clo_$jp752$13($jp752$apply$13) in
-dec_rc $jp_clo753;
-let r : '_ = $f751 in
-let x : '_ = $f750 in
-let $t749 : '_ = >(x, m) in
-case $t749 of
-  True() -> dec_rc $t749;
-call_ptr go(r, x)
-  _ -> dec_rc x;
-dec_rc $t749;
-call_ptr go(r, m)
-  _ -> dec_rc go;
-dec_rc lst;
-panic("non-exhaustive pattern match")
-
-## go$apply$17
-fn go$apply$17($clo : Ptr(Unit), lst : List(Int), acc : List(Int)) : List(Int) =
-  let go : (List(Int), List(Int)) -> List(Int) = $clo in
-case lst of
-  Nil() -> dec_rc go;
-dec_rc lst;
-acc
-  Cons($f346, $f347) -> dec_rc lst;
-let $jp_clo349 : () -> '_ = alloc $Clo_$jp348$18($jp348$apply$18) in
-dec_rc $jp_clo349;
-let t : '_ = $f347 in
-let h : '_ = $f346 in
-let $t345 : '_ = alloc Cons(h, acc) in
-call_ptr go(t, $t345)
-  _ -> dec_rc go;
-dec_rc acc;
-dec_rc lst;
-panic("non-exhaustive pattern match")
-
-## go$apply$4
-fn go$apply$4($clo : Ptr(Unit), i : Int, acc : List(Int)) : List(Int) =
+## go$apply$0
+fn go$apply$0($clo : Ptr(Unit), i : Int, acc : List(Int)) : List(Int) =
   let go : (Int, List(Int)) -> List(Int) = inc_rc $clo;
 $clo in
 let start : Int = $clo.$fv1 in
@@ -1181,16 +1051,14 @@ let $t281 : '_ = inc_rc i;
 let $t282 : '_ = alloc Cons(i, acc) in
 call_ptr go($t281, $t282)
 
-## go$apply$5
-fn go$apply$5($clo : Ptr(Unit), lst : List(Int), acc : Int) : Int =
+## go$apply$1
+fn go$apply$1($clo : Ptr(Unit), lst : List(Int), acc : Int) : Int =
   let go : (List(Int), Int) -> Int = $clo in
 case lst of
   Nil() -> dec_rc go;
 dec_rc lst;
 acc
   Cons($f723, $f724) -> dec_rc lst;
-let $jp_clo726 : () -> '_ = alloc $Clo_$jp725$6($jp725$apply$6) in
-dec_rc $jp_clo726;
 let t : '_ = $f724 in
 let x : '_ = $f723 in
 let $t722 : '_ = +(acc, x) in
@@ -1199,16 +1067,14 @@ call_ptr go(t, $t722)
 dec_rc lst;
 panic("non-exhaustive pattern match")
 
-## go$apply$7
-fn go$apply$7($clo : Ptr(Unit), lst : List(Int), acc : Int) : Int =
+## go$apply$2
+fn go$apply$2($clo : Ptr(Unit), lst : List(Int), acc : Int) : Int =
   let go : (List(Int), Int) -> Int = $clo in
 case lst of
   Nil() -> dec_rc go;
 dec_rc lst;
 acc
   Cons($f730, $f731) -> dec_rc lst;
-let $jp_clo733 : () -> '_ = alloc $Clo_$jp732$8($jp732$apply$8) in
-dec_rc $jp_clo733;
 let t : '_ = $f731 in
 let x : '_ = $f730 in
 let $t729 : '_ = *(acc, x) in
@@ -1217,16 +1083,14 @@ call_ptr go(t, $t729)
 dec_rc lst;
 panic("non-exhaustive pattern match")
 
-## go$apply$9
-fn go$apply$9($clo : Ptr(Unit), lst : List(Int), m : Int) : Int =
+## go$apply$3
+fn go$apply$3($clo : Ptr(Unit), lst : List(Int), m : Int) : Int =
   let go : (List(Int), Int) -> Int = $clo in
 case lst of
   Nil() -> dec_rc go;
 dec_rc lst;
 m
   Cons($f737, $f738) -> dec_rc lst;
-let $jp_clo740 : () -> '_ = alloc $Clo_$jp739$10($jp739$apply$10) in
-dec_rc $jp_clo740;
 let r : '_ = $f738 in
 let x : '_ = $f737 in
 let $t736 : '_ = <(x, m) in
@@ -1237,6 +1101,44 @@ call_ptr go(r, x)
 dec_rc $t736;
 call_ptr go(r, m)
   _ -> dec_rc go;
+dec_rc lst;
+panic("non-exhaustive pattern match")
+
+## go$apply$4
+fn go$apply$4($clo : Ptr(Unit), lst : List(Int), m : Int) : Int =
+  let go : (List(Int), Int) -> Int = $clo in
+case lst of
+  Nil() -> dec_rc go;
+dec_rc lst;
+m
+  Cons($f750, $f751) -> dec_rc lst;
+let r : '_ = $f751 in
+let x : '_ = $f750 in
+let $t749 : '_ = >(x, m) in
+case $t749 of
+  True() -> dec_rc $t749;
+call_ptr go(r, x)
+  _ -> dec_rc x;
+dec_rc $t749;
+call_ptr go(r, m)
+  _ -> dec_rc go;
+dec_rc lst;
+panic("non-exhaustive pattern match")
+
+## go$apply$5
+fn go$apply$5($clo : Ptr(Unit), lst : List(Int), acc : List(Int)) : List(Int) =
+  let go : (List(Int), List(Int)) -> List(Int) = $clo in
+case lst of
+  Nil() -> dec_rc go;
+dec_rc lst;
+acc
+  Cons($f346, $f347) -> dec_rc lst;
+let t : '_ = $f347 in
+let h : '_ = $f346 in
+let $t345 : '_ = alloc Cons(h, acc) in
+call_ptr go(t, $t345)
+  _ -> dec_rc go;
+dec_rc acc;
 dec_rc lst;
 panic("non-exhaustive pattern match")
 
@@ -1252,8 +1154,7 @@ $rc_22
 ## process_pairs
 fn process_pairs(pair : (String, String), n : Int, acc : Int) : Int =
   case n of
-  0() -> let $jp_clo835 : () -> '_ = alloc $Clo_$jp834$16($jp834$apply$16, acc, n, pair) in
-dec_rc $jp_clo835;
+  0() -> dec_rc pair;
 acc
   _ -> let k : Int = inc_rc pair;
 use_first(pair) in
@@ -1266,8 +1167,6 @@ fn use_first(pair : (String, String)) : Int =
   let a : String = case pair of
   $Tuple2($f1, $f2) -> dec_rc pair;
 dec_rc $f2;
-let $jp_clo4 : () -> '_ = alloc $Clo_$jp3$15($jp3$apply$15) in
-dec_rc $jp_clo4;
 let x : String = $f1 in
 x
   _ -> dec_rc pair;

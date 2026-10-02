@@ -24,9 +24,11 @@
 mod Membership do
 
   type MemberStatus = Alive | Suspect | Dead
+  derive Eq for MemberStatus
 
   type Member = { node_id : String, status : MemberStatus, incarnation : Int,
                   creation : Int, name : String, addr : String }
+  derive Eq for Member
 
   type Members = Members(Map(String, Member))
 

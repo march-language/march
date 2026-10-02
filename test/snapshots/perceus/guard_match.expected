@@ -1,32 +1,16 @@
--- types (2) --
-closure $Clo_$jp6$0(Ptr(Unit), Int)
-closure $Clo_$jp1$1(Ptr(Unit))
--- fns (4) --
-## $jp1$apply$1
-fn $jp1$apply$1($clo : Ptr(Unit)) : '_ =
-  "zero"
-
-## $jp6$apply$0
-fn $jp6$apply$0($clo : Ptr(Unit)) : '_ =
-  let x : Int = $clo.$fv1 in
-dec_rc $clo;
-let $jp_clo2 : () -> '_ = alloc $Clo_$jp1$1($jp1$apply$1) in
-let n : Int = x in
-let $guard3 : Bool = <(n, 0) in
-case $guard3 of
-  true() -> dec_rc $jp_clo2;
-"neg"
-  _ -> call_ptr $jp_clo2()
-
+-- types (0) --
+-- fns (2) --
 ## classify
 fn classify(x : Int) : String =
-  let $jp_clo7 : () -> '_ = alloc $Clo_$jp6$0($jp6$apply$0, x) in
-let n : Int = x in
+  let n : Int = x in
 let $guard8 : Bool = >(n, 0) in
 case $guard8 of
-  true() -> dec_rc $jp_clo7;
-"pos"
-  _ -> call_ptr $jp_clo7()
+  true() -> "pos"
+  _ -> let n$sh1 : Int = x in
+let $guard3 : Bool = <(n$sh1, 0) in
+case $guard3 of
+  true() -> "neg"
+  _ -> "zero"
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =

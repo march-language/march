@@ -158,7 +158,12 @@ let emit_store_to_slot ?(prev_slots : repl_slot_info list = []) ctx
     Printf.bprintf ctx.Llvm_ctx.buf "  call void @march_decrc(ptr %s)\n" old_pt
   end;
   let bits = match tir_ty with
-    | Tir.TInt | Tir.TBool | Tir.TUnit -> result
+    | Tir.TInt ->
+      (* The fragment's Int result is a bare register value (lazy
+         normalisation, [Llvm_ctx.emit_wrap_int63]); the slot is read by
+         the C side (printing, later fragments), so normalise it here. *)
+      Llvm_ctx.emit_wrap_int63 ctx result
+    | Tir.TBool | Tir.TUnit -> result
     | Tir.TFloat ->
       let bt = Llvm_ctx.fresh ctx "fb" in
       Printf.bprintf ctx.Llvm_ctx.buf "  %s = bitcast double %s to i64\n" bt result;
@@ -286,6 +291,15 @@ let emit_repl_expr ~emit_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   emit_prev_slot_bridges ctx prev_slots;
   let (actual_ty, result) = emit_expr ctx body in
   let result' = Llvm_ctx.coerce ctx actual_ty result ret_llty in
+  (* An Int result is a BARE register value under lazy normalisation
+     ([Llvm_ctx.emit_wrap_int63]); the host prints what this fragment
+     returns, so normalise it here (the slot store below does the same for
+     its own copy). *)
+  let result' =
+    if ret_ty = Tir.TInt && ret_llty = "i64"
+    then Llvm_ctx.emit_wrap_int63 ctx result'
+    else result'
+  in
   (* Store result to the persistent "v" slot so later fragments can read it. *)
   (match store_as_slot with
    | None -> ()

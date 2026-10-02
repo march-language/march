@@ -65,8 +65,10 @@ Why 63 bits: a polymorphic slot (a `List(Int)` cell, a tuple or record field, a
 closure argument, an actor message) stores an `Int` as a tagged word,
 `(n << 1) | 1`, which has room for exactly 63 bits; the interpreter's OCaml
 `int` is 63-bit too. Compiled code keeps a monomorphic `Int` in a full 64-bit
-register (and in `NativeArray`'s unboxed `Int` storage) for speed, and
-re-normalises to 63 bits after every operation listed above, so a value
+register (and in `NativeArray`'s unboxed `Int` storage) for speed; the
+operations listed above leave their result in the full register and the
+reduction to 63 bits happens where the value is *observed* (a comparison, a
+call into the runtime, a store into a list or array, printing), so a value
 reads back the same whether it travelled through a register or a list.
 Use `Float` (or a bignum library) for wider arithmetic.
 

@@ -42,14 +42,17 @@ mod Control do
 
   -- Which of a step's target nodes the step applies to.
   type CtlHosts = HostsCanary(Int) | HostsRest | HostsAll
+  derive Eq for CtlHosts
 
   -- What a step does to a node: activate a build's patch, apply the
   -- release's topology, or drain.
   type CtlAction = DoActivate(String) | DoTopology | DoDrain
+  derive Eq for CtlAction
 
   -- What must hold after a step before the next one starts. `Healthy(ms)`:
   -- every node the step selected reports healthy for `ms`.
   type CtlGate = GateNone | GateHealthy(Int)
+  derive Eq for CtlGate
 
   -- One rollout step. `pools` is the pools it targets (`["*"]` for every
   -- pool), `batch` how many of its nodes may have an order outstanding at
@@ -549,6 +552,7 @@ mod Control do
     seq : Int, release : String, step : Int, node : String, action : String,
     want : String, artifacts : String, lines : String
   }
+  derive Eq for StepOrder
 
   doc "The artifact hashes [o] needs."
   fn order_artifacts(o : StepOrder) : List(String) do words(o.artifacts) end
@@ -606,6 +610,7 @@ mod Control do
   --   Behind(seq)             a node holds a newer release than this one; the
   --                           leader must fetch it before executing anything.
   type CtlDecision = RolloutApply(Int, List(StepOrder)) | RolloutWait(Int, String) | RolloutHalted(Int, String, String) | RolloutComplete | RolloutBehind(Int)
+  derive Eq for CtlDecision
 
   pfn in_pools(m : CtlMember, pools : List(String)) : Bool do
     List.member(pools, "*") || List.any(m.pools, fn p -> List.member(pools, p))
