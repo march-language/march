@@ -35,7 +35,21 @@ git log is authoritative for exact commits.
   but not forge one. No ssh is involved in a hot deploy. A leader killed mid-rollout is
   replaced and the release finishes without applying a step twice. Leadership needs
   `Ctl.Control:offer` in the node's certificate. Restart-class changes still go through
-  the process backend. `forge deploy` itself does not select the cluster backend yet.
+  the process backend.
+- **`forge deploy` goes through the control plane when the topology has a `[control]`
+  section.** It builds and classifies as before, writes the hot pools and the topology
+  push into one release signed with your deploy key, uploads the patches to the
+  candidates, sends the release and follows it step by step until it completes or halts,
+  printing the leader's reason when it halts. Nothing reaches a node by ssh for a hot
+  change; restart-class steps still run over ssh, in plan order, and `--plan` lists them
+  ("NEEDS SSH") and prints the release it would sign. `--via ssh` is the break-glass path,
+  `--status` shows the leader's view of the newest release, and `--audit [N]` shows the
+  leader's audit log: every release offered (accepted, or refused at the compare-and-set
+  and why), every step ordered and its answer, and each release's end, as JSON lines kept
+  on every candidate. `forge test --upgrade-from` deploys through the control plane too
+  when the topology has one, and `forge run --processes` gives each local process its own
+  control directory and control port. See "Through the in-cluster control plane" in
+  docs/hot-code-reload.md.
 - **Native builds allocate from a vendored mimalloc.** `march_alloc`, the allocator
   behind every March value, now draws from a statically linked mimalloc instead of
   libc `calloc`, with no new system dependency. Allocation-heavy programs get
@@ -90,6 +104,16 @@ git log is authoritative for exact commits.
   no longer pays a shift pair on the way in.
 
 ### Fixed
+- **A release through the control plane no longer orders functions the nodes cannot
+  patch.** forge recorded a release's signed lines against the last deployed manifest,
+  which lists every function, including the control plane's own wiring, which has no
+  hot slot. A release that changed one of them ordered its activation and every node
+  refused the whole batch (`commit_partial_failure`). forge now asks the candidates which
+  slots the nodes have and activates only changed functions among them, as
+  `forge deploy hot` does against a real node. A cluster leader
+  also no longer waits forever for a cluster member that runs no agent (a client, an
+  upgrade test's traffic node): an unmarked member is waited for 20 s
+  (`MARCH_CONTROL_AGENT_GRACE_MS`).
 - Compiled: a dying tuple releases its boxed `Float` fields, and a dying
   `List(Float)` cell (any generic container slot holding a Float) releases the
   box in that slot; both leaked one object per Float before.

@@ -594,4 +594,54 @@ mod TestControl do
       assert (Control.chunks("0123", 4) == [{ offset: 0, data: "0123", last: true }])
     end
   end
+
+  describe "audit" do
+    test "a release line is one JSON object with the node log's ts/type and the leader" do
+      let l = Control.audit_release(1700000000123, "a", 42, "d42", "ok", "")
+      assert (String.ends_with(l, "\n"))
+      match Json.parse(String.trim(l)) do
+        Ok(jv) ->
+          assert (Json.get(jv, "ts") == Some(Json.Number(1700000000123.0)))
+          assert (Json.get(jv, "type") == Some(Json.Str("release")))
+          assert (Json.get(jv, "leader") == Some(Json.Str("a")))
+          assert (Json.get(jv, "seq") == Some(Json.Number(42.0)))
+          assert (Json.get(jv, "result") == Some(Json.Str("ok")))
+        Err(e) -> panic("not JSON: " ++ e)
+      end
+    end
+
+    test "a refusal at compare-and-set is named by its kind" do
+      let r = rel()
+      let l1 = match Control.leader_release(Control.leader_new(), r) do
+        Ok(l) -> l
+        Err(e) -> panic(e)
+      end
+      let stale = { r with seq: 41 }
+      let other = { r with seq: 43, parent: "not-the-head" }
+      let fork = { r with env: "other" }
+      let why = fn x -> match Control.leader_release(l1, x) do
+        Ok(_) -> "accepted"
+        Err(e) -> Control.audit_refusal(e)
+      end
+      assert (why(stale) == "err_stale")
+      assert (why(other) == "err_parent")
+      assert (why(fork) == "err_fork")
+      assert (Control.audit_refusal("no steps") == "err_invalid")
+    end
+
+    test "orders, answers and the release's end each have a line; a reason with quotes stays JSON" do
+      let r = rel()
+      let o = Control.order(r, head(r.steps), "w1")
+      assert (String.contains(Control.audit_order(5, "a", o), "\"type\":\"order\""))
+      assert (String.contains(Control.audit_order(5, "a", o), "\"node\":\"w1\""))
+      let res = { seq: 42, step: 1, node: "w1", ok: false, detail: "ERR \"bad\" sig" }
+      match Json.parse(String.trim(Control.audit_step(6, "a", res))) do
+        Ok(jv) -> assert (Json.get(jv, "why") == Some(Json.Str("ERR \"bad\" sig")))
+        Err(e) -> panic("not JSON: " ++ e)
+      end
+      assert (Option.is_some(Control.audit_decision(7, "a", 42, Control.RolloutHalted(1, "w1", "gate"))))
+      assert (Option.is_some(Control.audit_decision(7, "a", 42, Control.RolloutComplete)))
+      assert (Control.audit_decision(7, "a", 42, Control.RolloutWait(1, "x")) == None)
+    end
+  end
 end
