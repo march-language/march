@@ -342,6 +342,36 @@ to `List.fold_left` / `List.map`, plus a hand-written loop with no closure call.
 Floats cross the closure ABI heap-boxed, so the Float fold pays about 90 ns per
 element for allocation that the hand-written loop never does.
 
+**Run 2 (2026-10-01), after higher-order-function specialization**
+(`specs/plans/2026-09-30-float-closure-unboxing.md`): same box, load ~8, the same
+compiler with the pass on and off (`MARCH_NO_HOF_SPEC=1`), best of 3 runs.
+Checksums match.
+
+| case | off ms | on ms | speedup |
+|---|---:|---:|---:|
+| Float `List.fold_left` through a closure | 192.29 | 8.52 | 22.6× |
+| Float `List.map` through a closure | 191.95 | 65.56 | 2.9× |
+| Int `List.fold_left` through a closure | 11.38 | 10.24 | 1.1× |
+| Int `List.map` through a closure | 39.74 | 38.81 | noise |
+
+The hand-written loops are unchanged (Float 2.6 ms, Int 2.4 ms). The specialized
+Float fold has no boxing and no call left; the remaining gap is one closure
+refcount increment per iteration plus the yield check.
+
+**Run 3 (2026-10-02), rebased onto main with the inline refcount fast path
+(#750):** same method, best of 3.
+
+| case | off ms | on ms | speedup |
+|---|---:|---:|---:|
+| Float `List.fold_left` through a closure | 112.72 | 4.46 | 25.3× |
+| Float `List.map` through a closure | 132.27 | 54.85 | 2.4× |
+| Int `List.fold_left` through a closure | 5.72 | 4.40 | 1.3× |
+| hand-written Float fold (no closure) | 3.38 | 3.29 | — |
+
+The specialized Float fold is now within 1.4× of the hand-written loop: #750
+inlined the per-iteration closure refcount call that made up the gap. `map` stays slower
+because a `List(Float)` stores its elements boxed.
+
 ## bench/array_sort.march — NativeArray.sort_int vs List.sort_by
 
 The benchmark for the **shipped builtin**. Its sibling below
