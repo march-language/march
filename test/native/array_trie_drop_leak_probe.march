@@ -1,0 +1,141 @@
+-- Leak guard: an Array (persistent PVec trie) built by from_list / push, updated
+-- with set, shrunk with pop, and then DROPPED must give back every node.
+-- Before the fix the whole trie leaked, per build:
+--   from_list: ~1 object per element once the vector held more than one leaf
+--              (33 elements: 72 objects, 1,100: 2,224, 40,000: 81,118);
+--   push:      0 up to one trie level, then ~1 per element (1,089 pushes:
+--              1,229 objects) because the insert path's frame tuples leaked;
+--   set / pop at depth >= 2: the same frame leak.
+-- Four independent defects (see
+-- specs/progress/2026-09-28-array-built-then-dropped-leaks-trie.md):
+--   1. a forwarded capture was never released (seq-constructors fix),
+--   2. nested polymorphic closures `ascend`/`descend` leaked their frame tuples
+--      (stdlib/array.march now has them as top-level functions),
+--   3. `let (a, b) = f(..)` whose scope ends in an `if`/`match` or an infix
+--      builtin never released the tuple (Perceus could not type the scope),
+--   4. a nested pattern with a default arm (`Cons(r, Nil) -> .. | _ -> ..`)
+--      leaked the matched value through its dead join-point closure.
+--
+-- Sizes cover: tail only (5), one leaf (40), one trie level above the root's
+-- first (1,100 = shift 10) and a second one (40,000 = shift 15).
+-- SIGNAL: live_allocs() deltas printed as booleans, so the golden is
+-- deterministic; each leg's result is printed so the loop is not deleted.
+mod Main do
+  needs IO.Console
+
+  pfn range_list(i : Int, n : Int, acc : List(Int)) : List(Int) do
+    if i == n do acc else range_list(i + 1, n, Cons(i, acc)) end
+  end
+
+  pfn from_list_legs(i : Int, k : Int, xs : List(Int), acc : Int) : Int do
+    if i == k do acc
+    else from_list_legs(i + 1, k, xs, acc + Array.length(Array.from_list(xs))) end
+  end
+
+  pfn push_n(j : Int, n : Int, v) do
+    if j == n do v else push_n(j + 1, n, Array.push(v, j)) end
+  end
+
+  pfn push_legs(i : Int, k : Int, n : Int, acc : Int) : Int do
+    if i == k do acc
+    else push_legs(i + 1, k, n, acc + Array.length(push_n(0, n, Array.empty()))) end
+  end
+
+  pfn set_n(j : Int, n : Int, v) do
+    if j >= n do v
+    else set_n(j + 37, n, Array.set(v, j, 0 - j)) end
+  end
+
+  pfn set_legs(i : Int, k : Int, xs : List(Int), n : Int, acc : Int) : Int do
+    if i == k do acc
+    else
+      let v = set_n(0, n, Array.from_list(xs))
+      set_legs(i + 1, k, xs, n, acc + Array.get(v, 74))
+    end
+  end
+
+  pfn pop_n(j : Int, v) do
+    if j == 0 do v
+    else
+      let (smaller, _) = Array.pop(v)
+      pop_n(j - 1, smaller)
+    end
+  end
+
+  pfn pop_legs(i : Int, k : Int, xs : List(Int), cut : Int, acc : Int) : Int do
+    if i == k do acc
+    else pop_legs(i + 1, k, xs, cut, acc + Array.length(pop_n(cut, Array.from_list(xs)))) end
+  end
+
+  -- Heap elements: every String must be released with its leaf, and a sort
+  -- builds a second Array from the first.
+  pfn string_list(i : Int, n : Int, acc : List(String)) : List(String) do
+    if i == n do acc else string_list(i + 1, n, Cons("s" ++ int_to_string(i), acc)) end
+  end
+
+  pfn string_legs(i : Int, k : Int, xs : List(String), cut : Int, acc : Int) : Int do
+    if i == k do acc
+    else
+      let v = Array.from_list(xs)
+      let (smaller, last) = Array.pop(Array.push(v, "x"))
+      string_legs(i + 1, k, xs, cut, acc + Array.length(smaller) + string_length(last))
+    end
+  end
+
+  pfn sort_legs(i : Int, k : Int, xs : List(Int), acc : Int) : Int do
+    if i == k do acc
+    else sort_legs(i + 1, k, xs, acc + Array.length(Array.sort_by_key(Array.from_list(xs), fn x -> 0 - x))) end
+  end
+
+  pfn flat(label : String, before : Int, result : Int, builds : Int) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ int_to_string(result) ++ ", flat: "
+            ++ bool_to_string(grew < builds))
+  end
+
+  pfn from_list_leg(label : String, n : Int, builds : Int) : () do
+    let xs = range_list(0, n, Nil)
+    from_list_legs(0, 2, xs, 0)
+    let before = live_allocs()
+    let r = from_list_legs(0, builds, xs, 0)
+    flat(label, before, r, builds)
+    println("  (list kept alive: " ++ int_to_string(List.length(xs)) ++ ")")
+  end
+
+  pfn push_leg(label : String, n : Int, builds : Int) : () do
+    push_legs(0, 2, n, 0)
+    let before = live_allocs()
+    let r = push_legs(0, builds, n, 0)
+    flat(label, before, r, builds)
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    from_list_leg("from_list 5 (tail only)", 5, 10)
+    from_list_leg("from_list 40 (one leaf)", 40, 10)
+    from_list_leg("from_list 1100 (two levels)", 1100, 6)
+    from_list_leg("from_list 40000 (three levels)", 40000, 3)
+    push_leg("push 40", 40, 10)
+    push_leg("push 1100 (grows past one level)", 1100, 6)
+    push_leg("push 33000 (grows past two)", 33000, 2)
+    let big = range_list(0, 1100, Nil)
+    set_legs(0, 2, big, 1100, 0)
+    let s0 = live_allocs()
+    let r_s = set_legs(0, 6, big, 1100, 0)
+    flat("set at depth 2", s0, r_s, 6)
+    pop_legs(0, 2, big, 70, 0)
+    let p0 = live_allocs()
+    let r_p = pop_legs(0, 6, big, 70, 0)
+    flat("pop at depth 2", p0, r_p, 6)
+    let strs = string_list(0, 1100, Nil)
+    string_legs(0, 2, strs, 1, 0)
+    let t0 = live_allocs()
+    let r_t = string_legs(0, 6, strs, 1, 0)
+    flat("push + pop of String elements", t0, r_t, 6)
+    sort_legs(0, 2, big, 0)
+    let o0 = live_allocs()
+    let r_o = sort_legs(0, 6, big, 0)
+    flat("sort_by_key builds a second Array", o0, r_o, 6)
+    println("  (lists kept alive: " ++ int_to_string(List.length(big)) ++ ", "
+            ++ int_to_string(List.length(strs)) ++ ")")
+  end
+end

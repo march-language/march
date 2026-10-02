@@ -1,0 +1,16 @@
+from_list 5 (tail only) = 50, flat: true
+  (list kept alive: 5)
+from_list 40 (one leaf) = 400, flat: true
+  (list kept alive: 40)
+from_list 1100 (two levels) = 6600, flat: true
+  (list kept alive: 1100)
+from_list 40000 (three levels) = 120000, flat: true
+  (list kept alive: 40000)
+push 40 = 400, flat: true
+push 1100 (grows past one level) = 6600, flat: true
+push 33000 (grows past two) = 66000, flat: true
+set at depth 2 = -444, flat: true
+pop at depth 2 = 6180, flat: true
+push + pop of String elements = 6606, flat: true
+sort_by_key builds a second Array = 6600, flat: true
+  (lists kept alive: 1100, 1100)

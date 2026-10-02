@@ -102,22 +102,34 @@ mod Array do
     go(lst, Nil)
   end
 
-  pfn lst_init(lst) do
-    fn go(xs, acc) do
-      match xs do
+  -- lst_init / lst_last avoid the nested pattern `Cons(h, Nil) -> .. |
+  -- Cons(_, t) -> ..`: its default arm made the compiler allocate a join-point
+  -- closure at the head of the first arm and drop it unused, shallowly, which
+  -- leaked what it had captured on every Array.pop.  Matching the tail in a
+  -- second, flat `match` has no default arm to share.
+  pfn lst_init_go(xs, acc) do
+    match xs do
+    Nil -> lst_rev(acc)
+    Cons(h, t) ->
+      match t do
       Nil -> lst_rev(acc)
-      Cons(_, Nil) -> lst_rev(acc)
-      Cons(h, t) -> go(t, Cons(h, acc))
+      Cons(_, _) -> lst_init_go(t, Cons(h, acc))
       end
     end
-    go(lst, Nil)
+  end
+
+  pfn lst_init(lst) do
+    lst_init_go(lst, Nil)
   end
 
   pfn lst_last(lst) do
     match lst do
     Nil -> panic("Array.pop: empty")
-    Cons(h, Nil) -> h
-    Cons(_, t) -> lst_last(t)
+    Cons(h, t) ->
+      match t do
+      Nil -> h
+      Cons(_, _) -> lst_last(t)
+      end
     end
   end
 
@@ -160,29 +172,38 @@ mod Array do
     end
   end
 
+  -- The path-copying walk is two TOP-LEVEL functions on purpose.  Written as
+  -- nested `fn`s they are lifted closures that stay polymorphic in the element
+  -- type, so the frame tuple `(children, slot)` they destructure has a type
+  -- with an unresolved variable in it, which gets no deep drop: every frame
+  -- leaked, and with it the only reference to the subtree it came from (an
+  -- `Array.push` that deepened the trie leaked ALL of it).  As private
+  -- top-level functions they are monomorphised per element type.
+  pfn trie_update_up(nd, stk) do
+    match stk do
+    Nil -> nd
+    Cons(frame, rest) -> do
+      let (children, slot) = frame
+      trie_update_up(TrieBranch(lst_replace_nth(children, slot, nd)), rest)
+    end
+    end
+  end
+
+  pfn trie_update_down(n, s, path, idx, val) do
+    match n do
+    TrieEmpty -> panic("Array.set: missing node")
+    TrieLeaf(values) ->
+      trie_update_up(TrieLeaf(lst_set(values, int_and(idx, 31), val)), path)
+    TrieBranch(children) -> do
+      let slot = trie_slot(idx, s)
+      let child = lst_nth(children, slot)
+      trie_update_down(child, s - 5, Cons((children, slot), path), idx, val)
+    end
+    end
+  end
+
   pfn trie_update(node, idx, val, shift) do
-    fn ascend(nd, stk) do
-      match stk do
-      Nil -> nd
-      Cons(frame, rest) -> do
-        let (children, slot) = frame
-        ascend(TrieBranch(lst_replace_nth(children, slot, nd)), rest)
-      end
-      end
-    end
-    fn descend(n, s, path) do
-      match n do
-      TrieEmpty -> panic("Array.set: missing node")
-      TrieLeaf(values) ->
-        ascend(TrieLeaf(lst_set(values, int_and(idx, 31), val)), path)
-      TrieBranch(children) -> do
-        let slot = trie_slot(idx, s)
-        let child = lst_nth(children, slot)
-        descend(child, s - 5, Cons((children, slot), path))
-      end
-      end
-    end
-    descend(node, shift, Nil)
+    trie_update_down(node, shift, Nil, idx, val)
   end
 
   -- Create a fresh path from 'shift' levels down to a leaf containing 'values'.
@@ -199,6 +220,43 @@ mod Array do
     int_shl(1, shift)
   end
 
+  -- Walk down to the insertion point and rebuild the path back up.  Top-level
+  -- (not nested in push_leaf) for the reason given at trie_update_up.
+  pfn insert_up(nd, stk) do
+    match stk do
+    Nil -> nd
+    Cons(frame, rest) -> do
+      let (children, slot_i) = frame
+      insert_up(TrieBranch(lst_replace_nth(children, slot_i, nd)), rest)
+    end
+    end
+  end
+
+  pfn insert_down(nd, s, path, leaf_idx, leaf_values) do
+    match nd do
+    TrieBranch(children) -> do
+      let slot = trie_slot(leaf_idx, s - 5)
+      let n = lst_len(children)
+      if slot == n do
+        insert_up(TrieBranch(lst_snoc(children, new_path(leaf_values, s - 5))), path)
+      else
+        -- `lst_nth(children, n - 1)` cannot panic: a TrieBranch is dense
+        -- and never empty by construction, so `n >= 1` here and `n - 1`
+        -- is always in range. `Array.push` is therefore TOTAL from a
+        -- caller's view, which is why it is deliberately absent from
+        -- `cap no_panic`'s ban list (`panic_surface_stdlib`) even though
+        -- it reaches a panicking private helper — banning it would reject
+        -- correct code. Only `get`/`set`/`pop` panic on a real
+        -- precondition. See specs/progress/2026-08-05-array-pop-not-on-
+        -- no-panic-ban-list.md.
+        insert_down(lst_nth(children, n - 1), s - 5, Cons((children, n - 1), path),
+                    leaf_idx, leaf_values)
+      end
+    end
+    _ -> insert_up(new_path(leaf_values, s - 5), path)
+    end
+  end
+
   -- Push a full 32-element leaf into the trie.
   -- Returns (new_root, new_shift).
   -- trie_leaf_count = how many 32-element leaves the trie already contains.
@@ -213,87 +271,56 @@ mod Array do
     else do
       -- Navigate to the insertion point.
       -- The new leaf should be at leaf index = trie_leaf_count.
-      fn insert(node, leaf_idx, s) do
-        fn ascend(nd, stk) do
-          match stk do
-          Nil -> nd
-          Cons(frame, rest) -> do
-            let (children, slot_i) = frame
-            ascend(TrieBranch(lst_replace_nth(children, slot_i, nd)), rest)
-          end
-          end
-        end
-        fn descend(nd, s, path) do
-          match nd do
-          TrieBranch(children) -> do
-            let slot = trie_slot(leaf_idx, s - 5)
-            let n = lst_len(children)
-            if slot == n do
-              ascend(TrieBranch(lst_snoc(children, new_path(leaf_values, s - 5))), path)
-            else
-              -- `lst_nth(children, n - 1)` cannot panic: a TrieBranch is dense
-              -- and never empty by construction, so `n >= 1` here and `n - 1`
-              -- is always in range. `Array.push` is therefore TOTAL from a
-              -- caller's view, which is why it is deliberately absent from
-              -- `cap no_panic`'s ban list (`panic_surface_stdlib`) even though
-              -- it reaches a panicking private helper — banning it would reject
-              -- correct code. Only `get`/`set`/`pop` panic on a real
-              -- precondition. See specs/progress/2026-08-05-array-pop-not-on-
-              -- no-panic-ban-list.md.
-              descend(lst_nth(children, n - 1), s - 5, Cons((children, n - 1), path))
-            end
-          end
-          _ -> ascend(new_path(leaf_values, s - 5), path)
-          end
-        end
-        descend(node, s, Nil)
-      end
-      (insert(root, trie_leaf_count, shift), shift)
+      (insert_down(root, shift, Nil, trie_leaf_count, leaf_values), shift)
     end end end
   end
 
   -- Extract the last 32-element leaf from the trie.
-  -- Returns (new_root_opt, leaf_values).
-  -- new_root_opt = None when the trie becomes empty.
+  -- Returns (new_root, leaf_values); new_root is TrieEmpty when the trie
+  -- becomes empty.  The "absent" case is the TrieEmpty sentinel, NOT an
+  -- `Option(TrieNode)`: an Option of a boxed type is niche-encoded (Some(x) is
+  -- x itself, None is null), and a niche-typed tuple field gets only a shallow
+  -- release when the tuple dies, which leaked the whole trie of every pop that
+  -- crossed a leaf.
+  pfn is_empty_node(node) do
+    match node do
+    TrieEmpty -> true
+    _ -> false
+    end
+  end
+
+  pfn pop_up(result, leaf_vals, stk) do
+    match stk do
+    Nil -> (result, leaf_vals)
+    Cons(frame, rest) -> do
+      let (children, idx) = frame
+      if is_empty_node(result) do
+        let new_children = lst_init(children)
+        if lst_len(new_children) == 0 do pop_up(TrieEmpty, leaf_vals, rest)
+        else pop_up(TrieBranch(new_children), leaf_vals, rest) end
+      else
+        pop_up(TrieBranch(lst_replace_nth(children, idx, result)), leaf_vals, rest)
+      end
+    end
+    end
+  end
+
+  pfn pop_down(nd, li, s, path) do
+    match nd do
+    TrieLeaf(values) -> pop_up(TrieEmpty, values, path)
+    TrieBranch(children) -> do
+      let n = lst_len(children)
+      let child = lst_nth(children, n - 1)
+      pop_down(child, li, s - 5, Cons((children, n - 1), path))
+    end
+    TrieEmpty -> pop_up(TrieEmpty, Nil, path)
+    end
+  end
+
   pfn pop_leaf(root, trie_leaf_count, shift) do
     -- The leaf we're removing is at index (trie_leaf_count - 1).
     let last_leaf_idx = trie_leaf_count - 1
-    fn extract(node, leaf_idx, s) do
-      fn ascend(result_opt, leaf_vals, stk) do
-        match stk do
-        Nil -> (result_opt, leaf_vals)
-        Cons(frame, rest) -> do
-          let (children, idx) = frame
-          match result_opt do
-          None -> do
-            let new_children = lst_init(children)
-            match new_children do
-            Nil -> ascend(None, leaf_vals, rest)
-            _   -> ascend(Some(TrieBranch(new_children)), leaf_vals, rest)
-            end
-          end
-          Some(new_child) -> do
-            let new_children = lst_replace_nth(children, idx, new_child)
-            ascend(Some(TrieBranch(new_children)), leaf_vals, rest)
-          end
-          end
-        end
-        end
-      end
-      fn descend(nd, li, s, path) do
-        match nd do
-        TrieLeaf(values) -> ascend(None, values, path)
-        TrieBranch(children) -> do
-          let n = lst_len(children)
-          let child = lst_nth(children, n - 1)
-          descend(child, li, s - 5, Cons((children, n - 1), path))
-        end
-        TrieEmpty -> ascend(None, Nil, path)
-        end
-      end
-      descend(node, leaf_idx, s, Nil)
-    end
-    extract(root, last_leaf_idx, shift)
+    pop_down(root, last_leaf_idx, shift, Nil)
   end
 
   -- ── Fold ─────────────────────────────────────────────────────────────────
@@ -424,6 +451,29 @@ mod Array do
     end
   end
 
+  -- Collapse one trie level when the root has a single child.  A helper with
+  -- a plain `if` rather than the nested pattern `TrieBranch(Cons(c, Nil)) ->
+  -- .. | _ -> ..`, whose default arm made the compiler allocate a join-point
+  -- closure that was dropped unused, leaking the new root on every pop.
+  pfn collapse_root(new_root, shift) do
+    if shift > 5 && has_single_child(new_root) do (only_child(new_root), shift - 5)
+    else (new_root, shift) end
+  end
+
+  pfn has_single_child(node) do
+    match node do
+    TrieBranch(children) -> lst_len(children) == 1
+    _ -> false
+    end
+  end
+
+  pfn only_child(node) do
+    match node do
+    TrieBranch(children) -> lst_nth(children, 0)
+    _ -> TrieEmpty
+    end
+  end
+
   doc """
   Removes the last element. Returns (new_vector, last_element).
   Panics if the vector is empty.
@@ -445,21 +495,13 @@ mod Array do
         else do
           let leaf_count = int_div(trie_elems, 32)
           let pop_result = pop_leaf(root, leaf_count, shift)
-          let (root_opt, new_tail) = pop_result
-          match root_opt do
-          None -> do
+          let (new_root, new_tail) = pop_result
+          if is_empty_node(new_root) do
             let pv = PVec(n - 1, 0, TrieEmpty, new_tail)
             (pv, last_elem)
-          end
-          Some(new_root) -> do
+          else do
             -- Collapse one level if the new root has only one child.
-            let (final_root, final_shift) =
-              match new_root do
-              TrieBranch(Cons(only_child, Nil)) ->
-                if shift > 5 do (only_child, shift - 5)
-                else (new_root, shift) end
-              _ -> (new_root, shift)
-              end
+            let (final_root, final_shift) = collapse_root(new_root, shift)
             let pv2 = PVec(n - 1, final_shift, final_root, new_tail)
             (pv2, last_elem)
           end
@@ -630,10 +672,17 @@ mod Array do
       else do
         fn up(nodes, shift) do
           let parents = group32(nodes, fn cs -> TrieBranch(cs))
-          match parents do
-          Cons(root, Nil) -> (root, shift + 5)
-          _ -> up(parents, shift + 5)
-          end
+          -- Not `Cons(root, Nil) -> ... | _ -> up(parents, ...)`: a nested
+          -- pattern with a default arm makes the compiler allocate a
+          -- join-point closure for the default at the head of the matching
+          -- arm and drop it, unused, shallowly -- leaking `parents` (every
+          -- node of the level just built) on each call.
+          if lst_len(parents) == 1 do
+            match parents do
+            Cons(root, _) -> (root, shift + 5)
+            Nil -> (TrieEmpty, shift + 5)
+            end
+          else up(parents, shift + 5) end
         end
         let (root, shift) = up(group32(front, fn vs -> TrieLeaf(vs)), 0)
         PVec(n, shift, root, tail)

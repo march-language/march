@@ -1047,7 +1047,8 @@ let rec rewrite env (e : Tir.expr) : Tir.expr =
     Runs AFTER Perceus (it rewrites the [EDecRC]s Perceus inserts) and BEFORE
     Escape (so a value flowing into a drop call is seen as escaping and is not
     stack-allocated behind the drop's back). *)
-let run ?(k_table : Kind.table option) (m : Tir.tir_module) : Tir.tir_module =
+let run ?(k_table : Kind.table option) ?(borrow_map : Borrow.borrow_map option)
+    (m : Tir.tir_module) : Tir.tir_module =
   let k_table = match k_table with Some t -> t | None -> Kind.of_module m in
   let collision_set = Collision_set.compute m.Tir.tm_types in
   let env = { type_defs = m.Tir.tm_types; collision_set; k_table;
@@ -1071,6 +1072,16 @@ let run ?(k_table : Kind.table option) (m : Tir.tir_module) : Tir.tir_module =
         else f.Tir.fn_body
       in
       Hashtbl.reset env.owned_locals;
+      (* A parameter the borrow analysis did not mark borrowed is owned by the
+         function: it is released in the function, not by the caller. *)
+      (match borrow_map with
+       | Some bm ->
+         List.iteri (fun i (p : Tir.var) ->
+             if not (Borrow.is_borrowed bm f.Tir.fn_name i)
+                && not (String.equal p.Tir.v_name Tir_names.clo_param_name) then
+               Hashtbl.replace env.owned_locals p.Tir.v_name ())
+           f.Tir.fn_params
+       | None -> ());
       { f with Tir.fn_body = rewrite env body }) m.Tir.tm_fns in
   (* Synthesized bodies are built already-rewritten (drop_fn_for is called
      directly when emitting each field op), so they are appended as-is. *)
