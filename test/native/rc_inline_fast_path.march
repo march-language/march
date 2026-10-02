@@ -72,17 +72,16 @@ mod Main do
   end
 
   fn main(_c : Cap(IO.Console)) : () do
-    -- The leak check covers every leg except `floats`: a List(Float) cons cell
-    -- leaks its boxed Float when dropped, compiled, with or without this fast
-    -- path (specs/todos/2026-10-01-aggregate-drop-skips-boxed-float-field.md).
+    -- The leak check covers every leg, `floats` included: a List(Float) cons
+    -- cell used to leak its boxed Float when dropped, compiled, with or
+    -- without this fast path, until the synthesized drop released the box
+    -- (specs/progress/2026-10-01-aggregate-drop-skips-boxed-float-field.md).
     let a = live_allocs()
     println(int_to_string(share(2000, 0)))
     println(int_to_string(closures(2000, 0)))
-    let b = live_allocs()
     println(float_to_string(floats(2000, 0.0)))
-    let c = live_allocs()
     println(int_to_string(literals(2000, 0)))
-    let grew = (b - a) + (live_allocs() - c)
+    let grew = live_allocs() - a
     println("flat: " ++ bool_to_string(grew < 100))
   end
 end

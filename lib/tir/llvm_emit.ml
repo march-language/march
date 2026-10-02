@@ -432,7 +432,19 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
          doing `let f = cmp(a)` then `f(b)` jumped through garbage (SIGSEGV,
          pc=0).  Every such caller calls the value with the definition's
          arity (a call at the other arity would already be a type error),
-         so the definition's signature is the one the closure must carry. *)
+         so the definition's signature is the one the closure must carry.
+
+         The same holds for the parameter TYPES, not only the arity
+         (2026-10-02): a generic `pfn ksnd(p, x) do x end` is emitted as
+         `@ksnd(ptr, ptr)` (its params stay erased), but passed where a
+         `Float -> Float -> Float` is expected the use-site type made the
+         trampoline unbox both arguments and call `@ksnd(double, double)`.
+         The callee read its pointer registers, which held whatever the
+         caller left there, so `call2(ksnd, 3, 0.0)` printed 3. instead of 6.
+         The wrapper is keyed by the TARGET (`<fn>$clo_wrap`, one per
+         function), so only the definition's types can be right for every
+         use site: a ptr param forwards the caller's boxed Float/tagged Int
+         unchanged and the caller coerces the erased ptr result itself. *)
       let def_sig =
         match Hashtbl.find_opt ctx.top_fn_param_tys v.Tir.v_name,
               Hashtbl.find_opt ctx.top_fn_ret_ty v.Tir.v_name with
@@ -440,10 +452,8 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
         | _ -> None
       in
       let (ps_tirs, nparams, ret_tir) = match v.Tir.v_ty, def_sig with
-        | Tir.TFn (ps, _), Some (dps, dret)
-          when List.length ps <> List.length dps ->
-          (dps, List.length dps, dret)
-        | Tir.TFn (ps, _), _ -> (ps, List.length ps, fn_ret_tir v.Tir.v_ty)
+        | _, Some (dps, dret) -> (dps, List.length dps, dret)
+        | Tir.TFn (ps, _), None -> (ps, List.length ps, fn_ret_tir v.Tir.v_ty)
         | _ ->
           let n = Option.value ~default:0 (Hashtbl.find_opt ctx.top_fn_nparams v.Tir.v_name) in
           (List.init n (fun _ -> Tir.TVar "_"), n, fn_ret_tir v.Tir.v_ty)
@@ -460,6 +470,9 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
            clo_wrap_define ~drop_clo:ctx.repl
              ~borrowed:(clo_wrap_borrowed v.Tir.v_name (List.length param_tys))
              ~own_float:(not (clo_wrap_runtime_owned v.Tir.v_name))
+             ~deep_drops:(List.map
+                            (Llvm_calls.deep_drop_name ~has_fn:(Hashtbl.mem ctx.top_fns))
+                            ps_tirs)
              wrap_name param_tys target_ret fn_name));
     (* Allocate closure: header(16) + fn_ptr(8) = 24 bytes *)
     if static_closure_ok ctx v.Tir.v_name then
@@ -586,6 +599,12 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
         | Some t -> llvm_ret_ty ctx t
         | None -> llvm_ret_ty ctx (fn_ret_tir v.Tir.v_ty)
       in
+      let deep_drops =
+        match v.Tir.v_ty with
+        | Tir.TFn (ps, _) ->
+          List.map (Llvm_calls.deep_drop_name ~has_fn:(Hashtbl.mem ctx.top_fns)) ps
+        | _ -> []
+      in
       Buffer.add_string ctx.extra_fns
         (match wrap_kind with
          | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_ltys
@@ -593,6 +612,7 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
            clo_wrap_define ~drop_clo:ctx.repl
              ~borrowed:(clo_wrap_borrowed v.Tir.v_name (List.length param_ltys))
              ~own_float:(not (clo_wrap_runtime_owned v.Tir.v_name))
+             ~deep_drops
              wrap_name param_ltys target_ret fn_name));
     if static_closure_ok ctx v.Tir.v_name then
       ("ptr", Llvm_ctx.intern_static_closure ctx fn_name wrap_name)
@@ -641,9 +661,17 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
        (match Llvm_ctx.wrap_emit_kind ctx wrap_name with
         | `Skip -> ()
         | (`Define | `Declare) as wrap_kind ->
-          let ret_tir     = fn_ret_tir v.Tir.v_ty in
+          (* Prefer the definition's signature over the use-site type when
+             the resolved name is registered (see the top_fns arm above for
+             why: the trampoline must match the callee as DEFINED). *)
+          let (ps_tirs, ret_tir) =
+            match Hashtbl.find_opt ctx.top_fn_param_tys resolved,
+                  Hashtbl.find_opt ctx.top_fn_ret_ty resolved with
+            | Some dps, Some dret -> (dps, dret)
+            | _ -> (ps, fn_ret_tir v.Tir.v_ty)
+          in
           let target_ret  = llvm_ret_ty ctx ret_tir in
-          let param_tys   = List.map (llvm_ty ctx) ps in
+          let param_tys   = List.map (llvm_ty ctx) ps_tirs in
           Buffer.add_string ctx.extra_fns
             (match wrap_kind with
              | `Declare -> Llvm_calls.clo_wrap_declare wrap_name param_tys
@@ -651,6 +679,9 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
                clo_wrap_define ~drop_clo:ctx.repl
                  ~borrowed:(clo_wrap_borrowed resolved (List.length param_tys))
                  ~own_float:(not (clo_wrap_runtime_owned resolved))
+                 ~deep_drops:(List.map
+                                (Llvm_calls.deep_drop_name ~has_fn:(Hashtbl.mem ctx.top_fns))
+                                ps)
                  wrap_name param_tys target_ret fn_name));
        if static_closure_ok ctx resolved then
          ("ptr", Llvm_ctx.intern_static_closure ctx fn_name wrap_name)
@@ -2357,11 +2388,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── TRMC hole allocation / hole fill ──────────────────────────────── *)
   (* [EAllocHole (ty, filled, hole)] is [EAlloc] with field [hole] left
-     UNWRITTEN.  [march_alloc] is a calloc, so the hole reads as 0 until
-     [ESetField] fills it, and IS_HEAP_PTR(0) is false — an RC op or deep-drop
-     that reaches an unfilled hole is a no-op rather than a wild dereference.
-     That is the property the whole TRMC scheme leans on for the window between
-     allocation and fill. *)
+     UNFILLED by a value.  [emit_alloc_hole] stores null into the slot on every
+     path ([march_alloc] is a plain malloc, not a calloc, so nothing else would
+     zero it), so the hole reads as 0 until [ESetField] fills it, and
+     IS_HEAP_PTR(0) is false — an RC op or deep-drop that reaches an unfilled
+     hole is a no-op rather than a wild dereference.  That is the property the
+     whole TRMC scheme leans on for the window between allocation and fill. *)
   | Tir.EAllocHole (tok, Tir.TCon (ctor, _), args, hole) ->
     Llvm_emit_alloc.emit_alloc_hole ~emit_atom ctx tok ctor args hole
 

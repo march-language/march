@@ -393,10 +393,22 @@ let emit_alloc_hole ~emit_atom ctx (tok : Tir.atom option)
       List.iter (fun (i, field_ty, v) -> emit_store_field ctx p i field_ty v)
         slot_vals
     in
+    (* The hole slot must read as 0 until ESetField fills it, on EVERY path.
+       march_alloc is a plain malloc (no zeroing, since 2026-10-02): a fresh
+       cell's hole slot holds whatever the allocator's previous tenant left
+       there -- under mimalloc typically the stale child pointer of a freed
+       cons cell.  A reused cell's slot holds the old child pointer whose
+       ownership has already moved to the match's branch variables.  Either
+       way, a drop or deep-drop in the window before the fill would walk into
+       memory nobody owns; IS_HEAP_PTR(0) is false, so a null slot makes that
+       walk a no-op.  This store is the whole TRMC safety argument, not an
+       optimisation -- see the EAllocHole comment in tir.ml. *)
+    let clear_hole p = emit_store_field ctx p hole "ptr" "null" in
     (match tok with
      | None ->
        let ptr = emit_heap_alloc ctx entry.ce_tag arity entry.ce_type_id in
        store_slots ptr;
+       clear_hole ptr;
        ("ptr", ptr)
      | Some reuse_atom ->
        (* Same discipline as EReuse: take the cell over when it is unique at
@@ -415,17 +427,13 @@ let emit_alloc_hole ~emit_atom ctx (tok : Tir.atom option)
        emit_label ctx reuse_lbl;
        emit_store_tag ctx rv entry.ce_tag entry.ce_type_id;
        store_slots rv;
-       (* A fresh cell comes from calloc and is already zero.  A REUSED cell is
-          not: its hole slot still holds the old child pointer, whose ownership
-          has already moved to the match's branch variables.  Leaving it there
-          would let any drop in the window before the fill walk into a child
-          someone else now owns — so clear it explicitly. *)
-       emit_store_field ctx rv hole "ptr" "null";
+       clear_hole rv;
        emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
        emit_label ctx fresh_lbl;
        emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
        let hp = emit_heap_alloc ctx entry.ce_tag arity entry.ce_type_id in
        store_slots hp;
+       clear_hole hp;
        emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
        emit_label ctx merge_lbl;
        let result = fresh ctx "rhole_r" in

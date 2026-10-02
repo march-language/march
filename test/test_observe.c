@@ -72,7 +72,7 @@ static const char *js_number(const char *p) {
 }
 
 static const char *js_value(const char *p, int depth) {
-    if (depth > 64) return NULL;
+    if (depth > 200) return NULL;
     p = js_ws(p);
     if (*p == '{') {
         p = js_ws(p + 1);
@@ -212,6 +212,56 @@ static int wait_active(int want, int ms) {
 
 /* ── Server ────────────────────────────────────────────────────────────── */
 
+/* Registered verbs (march_observe_add_verbs): ECHO returns its arguments,
+ * FAILS returns an error code. */
+static const char *verb_echo(march_jw *w, const char *args) {
+    march_jw_str(w, args);
+    return NULL;
+}
+static const char *verb_fails(march_jw *w, const char *args) {
+    (void)w; (void)args;
+    return "bad_args";
+}
+static const march_observe_verb test_verbs[] = {
+    { "ECHO", "observe", "<text>", "echo the arguments", verb_echo },
+    { "FAILS", "debug", "", "always bad_args", verb_fails },
+};
+
+static void test_registered(const char *path) {
+    char *r = query(path, "ECHO hello world");
+    CHECK(r && strstr(r, "\"data\":\"hello world\""), "ECHO gets the rest of the line: %s", r ? r : "");
+    free(r);
+    r = query(path, "ECHO");
+    CHECK(r && strstr(r, "\"data\":\"\""), "ECHO with no arguments gets \"\": %s", r ? r : "");
+    free(r);
+    r = query(path, "FAILS");
+    CHECK(r && strstr(r, "\"error\":\"bad_args\"") && !strstr(r, "\"data\""),
+          "a verb's error code is the reply's error: %s", r ? r : "");
+    free(r);
+    r = query(path, "HELP");
+    CHECK(r && strstr(r, "{\"name\":\"ECHO\",\"tier\":\"observe\",\"args\":\"<text>\""),
+          "HELP lists a registered verb: %s", r ? r : "");
+    CHECK(r && strstr(r, "{\"name\":\"FAILS\",\"tier\":\"debug\""), "HELP shows its tier");
+    free(r);
+    CHECK(march_observe_add_verbs(test_verbs, 1) == -1,
+          "registration is refused once the server runs");
+}
+
+/* Nesting: TREE needs 3 + 2 x 64 levels; past MARCH_JW_MAX_DEPTH the writer
+ * reports truncation instead of writing past its stack. */
+static void test_deep(void) {
+    march_jw w;
+    march_jw_init(&w, 1 << 20);
+    for (int i = 0; i < 131; i++) march_jw_arr_begin(&w);
+    for (int i = 0; i < 131; i++) march_jw_arr_end(&w);
+    CHECK(march_jw_ok(&w) && is_json(march_jw_text(&w)), "131 nested levels (a 64-deep TREE) write");
+    march_jw_free(&w);
+    march_jw_init(&w, 1 << 20);
+    for (int i = 0; i < MARCH_JW_MAX_DEPTH + 1; i++) march_jw_arr_begin(&w);
+    CHECK(!march_jw_ok(&w), "nesting past MARCH_JW_MAX_DEPTH is refused");
+    march_jw_free(&w);
+}
+
 static void test_server(const char *path) {
     char *r;
 
@@ -306,12 +356,15 @@ int main(void) {
     setenv("MARCH_OBSERVE_IDLE_MS", "300", 1);
 
     test_writer();
+    test_deep();
     test_refuses_non_socket(dir);
+    CHECK(march_observe_add_verbs(test_verbs, 2) == 0, "verbs register before the server starts");
     if (march_observe_server_start(path) != 0) { fprintf(stderr, "server failed to start\n"); return 1; }
     struct stat st;
     CHECK(stat(path, &st) == 0 && (st.st_mode & 0777) == 0600, "socket is owner-only (mode %o)",
           (unsigned)(st.st_mode & 0777));
     test_server(path);
+    test_registered(path);
 
     unlink(path);
     rmdir(dir);

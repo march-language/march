@@ -1,7 +1,14 @@
 /* march_alloc.h -- the allocator behind march_alloc().
  *
- * Default build (MARCH_USE_MIMALLOC undefined): march_obj_calloc is plain
- * calloc and nothing else changes.  This is what the C unit-test harnesses,
+ * march_obj_malloc does NOT zero.  march_alloc writes the 16-byte header
+ * itself and every caller writes every payload word before the object can be
+ * read or RC-walked (audited 2026-10-02,
+ * specs/progress/2026-10-02-march-alloc-malloc.md: calloc's zeroing was ~11%
+ * of binary_trees).  A new caller that wants zeroed payload must store the
+ * zeros itself; there is deliberately no zeroing entry point to reach for.
+ *
+ * Default build (MARCH_USE_MIMALLOC undefined): march_obj_malloc is plain
+ * malloc and nothing else changes.  This is what the C unit-test harnesses,
  * the REPL/JIT runtime .so and every `--sanitize` build get.
  *
  * mimalloc build (-DMARCH_USE_MIMALLOC, set by the compile driver): March
@@ -37,7 +44,7 @@
 
 #include "third_party/mimalloc/include/mimalloc.h"
 
-static inline void *march_obj_calloc(size_t n) { return mi_calloc(1, n); }
+static inline void *march_obj_malloc(size_t n) { return mi_malloc(n); }
 
 /* Declared by <stdlib.h> through the -D macros above; defined once, in
  * march_runtime.c (MARCH_ALLOC_DEFINE_SHIMS). */
@@ -68,7 +75,7 @@ void *march_realloc_any(void *p, size_t n) {
 #else
 
 #include <stdlib.h>
-static inline void *march_obj_calloc(size_t n) { return calloc(1, n); }
+static inline void *march_obj_malloc(size_t n) { return malloc(n); }
 
 #endif /* MARCH_USE_MIMALLOC */
 

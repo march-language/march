@@ -1214,8 +1214,11 @@ let builtin_bindings : (string * scheme) list =
     ("http_fetch_available",    Mono t_bool);
     ("http_fetch",              Mono (TArrow (t_string, TArrow (t_string,
         TArrow (t_string, TArrow (t_string, t_result t_string t_string))))));
-    (* http_server_listen(port, max_conns, idle_timeout, pipeline_fn) *)
-    ("http_server_listen",      poly1 (fun a -> TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (TArrow (a, a), t_unit))))));
+    (* http_server_listen(port, max_conns, idle_timeout, pipeline_fn, release_fn)
+       release_fn : Conn -> Unit is called by the C runtime on every handler
+       result once its response bytes are written; its compiled body is the
+       shape-aware drop (lib/tir/drop.ml) the runtime cannot do itself. *)
+    ("http_server_listen",      poly1 (fun a -> TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (TArrow (a, a), TArrow (TArrow (a, t_unit), t_unit)))))));
     (* http_server_spawn_n(port, n, max_conns, idle_timeout, pipeline_fn) -> Int (pid) *)
     ("http_server_spawn_n",     poly1 (fun a -> TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (TArrow (a, a), t_int)))))));
     ("http_server_wait",        Mono (TArrow (t_int, t_unit)));

@@ -45,8 +45,9 @@ mod Control do
   derive Eq for CtlHosts
 
   -- What a step does to a node: activate a build's patch, apply the
-  -- release's topology, or drain.
-  type CtlAction = DoActivate(String) | DoTopology | DoDrain
+  -- release's topology, drain, or take the release's certificate and
+  -- revocation items (step 12b).
+  type CtlAction = DoActivate(String) | DoTopology | DoDrain | DoCerts
   derive Eq for CtlAction
 
   -- What must hold after a step before the next one starts. `Healthy(ms)`:
@@ -72,11 +73,19 @@ mod Control do
   -- it; the control plane only carries it.
   type CtlLine = { step : Int, text : String }
 
+  -- A certificate item (step 12b): an operator-signed node certificate, in
+  -- `NodeCert`'s text form, for the node named [node]. The release is signed
+  -- by the deploy key and the certificate by the operator key, and the node
+  -- checks both (D37: a compromised leader can forge neither). The control
+  -- plane issues nothing (D39): `forge cluster cert --deliver` writes these.
+  type CtlCert = { node : String, cert : String }
+
   -- A release (design section 4). `signature` is the operator's ed25519
   -- signature, hex, over `signed_text`; the document writes it as `sig`.
   type CtlRelease = {
     seq : Int, parent : String, env : String, topology : String,
     builds : List(CtlBuild), steps : List(CtlStep), lines : List(CtlLine),
+    certs : List(CtlCert), revokes : List(String),
     drain : Option(CtlDrain), signature : String
   }
 
@@ -136,10 +145,11 @@ mod Control do
   pfn parse_action(v : String) : Result(CtlAction, String) do
     if v == "topology" do Ok(DoTopology)
     else if v == "drain" do Ok(DoDrain)
+    else if v == "certs" do Ok(DoCerts)
     else match call_arg(v, "activate") do
       Some(b) -> if b == "" do Err("do: activate() names no build") else Ok(DoActivate(b)) end
-      None -> Err("do: expected activate(build), topology or drain, got " ++ v)
-    end end end
+      None -> Err("do: expected activate(build), topology, drain or certs, got " ++ v)
+    end end end end
   end
 
   pfn parse_gate(v : String) : Result(CtlGate, String) do
@@ -233,7 +243,8 @@ mod Control do
   end
 
   pfn empty_release() : CtlRelease do
-    { seq: 0, parent: "", env: "", topology: "", builds: Nil, steps: Nil, lines: Nil, drain: None, signature: "" }
+    { seq: 0, parent: "", env: "", topology: "", builds: Nil, steps: Nil, lines: Nil, certs: Nil, revokes: Nil,
+      drain: None, signature: "" }
   end
 
   pfn parse_entry(r : CtlRelease, ws : List(String)) : Result(CtlRelease, String) do
@@ -246,6 +257,10 @@ mod Control do
       Cons("build", rest) -> Result.map(parse_build(rest), fn b -> { r with builds: List.append(r.builds, [b]) })
       Cons("step", Cons(n, rest)) -> Result.map(parse_step(n, rest), fn s -> { r with steps: List.append(r.steps, [s]) })
       Cons("line", rest) -> Result.map(parse_signed_line(rest), fn l -> { r with lines: List.append(r.lines, [l]) })
+      Cons("cert", Cons(n, Cons(text, Nil))) -> Ok({ r with certs: List.append(r.certs, [{ node: n, cert: text }]) })
+      Cons("cert", _) -> Err("cert: expected <node> <certificate text>")
+      Cons("revoke", Cons(text, Nil)) -> Ok({ r with revokes: List.append(r.revokes, [text]) })
+      Cons("revoke", _) -> Err("revoke: expected <revocation token>")
       Cons("drain", rest) ->
         match r.drain do
           Some(_) -> Err("drain: given twice")
@@ -325,6 +340,9 @@ mod Control do
         None -> Err(where ++ "drains, but the release has no `drain` line")
       end
       DoTopology -> Ok(())
+      DoCerts ->
+        if r.certs == Nil && r.revokes == Nil do Err(where ++ "delivers certificates, but the release carries no `cert` or `revoke` item")
+        else Ok(()) end
     end
   end
 
@@ -352,11 +370,47 @@ mod Control do
     end
   end
 
+  pfn dup_cert(cs : List(CtlCert)) : Option(String) do
+    match cs do
+      Nil -> None
+      Cons(c, rest) -> if List.any(rest, fn o -> o.node == c.node) do Some(c.node) else dup_cert(rest) end
+    end
+  end
+
+  -- The release's certificate and revocation items, structurally: each
+  -- decodes, one certificate per node, and a `do:certs` step to deliver them.
+  -- Nothing here is verified (the leader holds no operator key, D37): whether
+  -- a certificate is the operator's, unexpired and names the node it is for
+  -- is the node's check (`agent_apply_certs`).
+  pfn check_items(r : CtlRelease) : Result((), String) do
+    let delivers = List.any(r.steps, fn s -> match s.action do
+      DoCerts -> true
+      _ -> false
+    end)
+    match List.find(r.certs, fn c -> Result.is_err(NodeCert.from_text(c.cert))) do
+      Some(c) -> Err("cert for " ++ c.node ++ ": not a certificate")
+      None ->
+        match List.find(r.revokes, fn t -> Result.is_err(NodeCert.revocation_from_text(t))) do
+          Some(_) -> Err("revoke: not a revocation token")
+          None ->
+            match dup_cert(r.certs) do
+              Some(n) -> Err("cert: node " ++ n ++ " is given two certificates")
+              None ->
+                if (r.certs != Nil || r.revokes != Nil) && not(delivers) do
+                  Err("the release carries certificate items but no `do:certs` step")
+                else Ok(()) end
+            end
+        end
+    end
+  end
+
   doc """
   Is the release well formed? A positive `seq`, a `parent`, `env` and
   `topology`, distinct builds, steps numbered 1..n in order, every
-  `activate(b)` naming a shipped build, a `drain` line for a drain step, and
-  every signed `line` naming a step that exists.
+  `activate(b)` naming a shipped build, a `drain` line for a drain step,
+  every signed `line` naming a step that exists, and certificate and
+  revocation items that decode, one certificate per node, with a `do:certs`
+  step to deliver them.
   """
   fn check(r : CtlRelease) : Result((), String) do
     if r.seq <= 0 do Err("seq must be positive")
@@ -373,7 +427,7 @@ mod Control do
           Ok(_) ->
             match List.find(r.lines, fn l -> l.step < 1 || l.step > n) do
               Some(l) -> Err("line for step " ++ int_to_string(l.step) ++ ", which does not exist")
-              None -> Ok(())
+              None -> check_items(r)
             end
         end
     end end end end end end
@@ -395,6 +449,7 @@ mod Control do
       DoActivate(b) -> "activate(" ++ b ++ ")"
       DoTopology -> "topology"
       DoDrain -> "drain"
+      DoCerts -> "certs"
     end
   end
 
@@ -428,16 +483,24 @@ mod Control do
     let builds = List.map(r.builds, fn b -> "build " ++ b.name ++ " base:" ++ b.base ++ " manifest:" ++ b.manifest)
     let steps = List.map(r.steps, fn s -> show_step(s))
     let lines = List.map(r.lines, fn l -> "line " ++ int_to_string(l.step) ++ " " ++ l.text)
+    let certs = List.map(r.certs, fn c -> "cert " ++ c.node ++ " " ++ c.cert)
+    let revokes = List.map(r.revokes, fn t -> "revoke " ++ t)
     let drain = match r.drain do
       Some(d) -> ["drain epoch<=" ++ int_to_string(d.epoch) ++ " soft:" ++ int_to_string(d.soft_ms) ++ " hard:" ++ int_to_string(d.hard_ms)]
       None -> Nil
     end
-    String.join(List.concat([head_lines, builds, steps, lines, drain]), "\n") ++ "\n"
+    String.join(List.concat([head_lines, builds, steps, lines, certs, revokes, drain]), "\n") ++ "\n"
   end
 
   doc "The release document: `signed_text`, then its `sig` line (`sig -` when unsigned). `parse(serialize(r)) == Ok(r)` for a well-formed `r`."
   fn serialize(r : CtlRelease) : String do
-    signed_text(r) ++ "sig " ++ (if r.signature == "" do "-" else r.signature end) ++ "\n"
+    -- The signature is concatenated where it is read, never returned from an
+    -- `if`: compiled, `(if r.signature == "" do "-" else r.signature end)`
+    -- released the field while `r` still held it, so the next read of the
+    -- release's signature found freed memory (ASAN: heap-use-after-free;
+    -- without ASAN an empty `sig`). specs/todos/2026-10-01-compiled-record-with-projection-sigsegv.md
+    let sig_line = if String.is_empty(r.signature) do "sig -\n" else "sig " ++ r.signature ++ "\n" end
+    signed_text(r) ++ sig_line
   end
 
   doc "The release's content address: sha256 (hex) of `signed_text`. A child names it as its `parent`."
@@ -510,10 +573,13 @@ mod Control do
   -- leader's membership: the executor needs node -> pools). A version whose build is `*` is an artifact the node runs
   -- that it cannot name a build for (the reload server knows patch artifacts,
   -- not the release's build names); `reports_state` accepts it for any build.
+  -- `certs` is the node's certificate state (`certs_text`): the serial of the
+  -- certificate it presents and the id of every revocation it knows, what a
+  -- `do:certs` step is done by (step 12b).
   type AgentReport = {
     node : String, seq : Int, versions : String, topology : String,
     drained : Int, healthy : Bool, failed_seq : Int, failed_step : Int, failed_why : String,
-    detail : String, pools : String
+    detail : String, pools : String, certs : String
   }
 
   pfn version_text(v : CtlVersion) : String do v.build ++ "=" ++ v.manifest end
@@ -530,6 +596,27 @@ mod Control do
         Some((b, m)) -> Some({ build: b, manifest: m })
         None -> None
       end)
+  end
+
+  doc """
+  A node's certificate state as it reports it (`AgentReport.certs`):
+  `cert:<serial>` for the certificate it presents (absent on a shared-secret
+  node), then `rev:<id>` for every revocation it knows (`NodeCert.revocation_id`).
+  """
+  fn certs_text(own : Option(NodeCert.Cert), revs : List(NodeCert.Revocation)) : String do
+    let mine = match own do
+      Some(c) -> ["cert:" ++ c.serial]
+      None -> Nil
+    end
+    String.join(List.append(mine, List.map(revs, fn r -> "rev:" ++ NodeCert.revocation_id(r))), " ")
+  end
+
+  doc "The serial of the certificate [rep]'s node presents (\"\" when it reports none)."
+  fn report_serial(rep : AgentReport) : String do
+    match first_some(words(rep.certs), fn w -> field(w, "cert")) do
+      Some(s) -> s
+      None -> ""
+    end
   end
 
   doc "The last step [rep]'s node failed, if any."
@@ -659,6 +746,44 @@ mod Control do
         Some(d) -> int_to_string(d.epoch)
         None -> ""
       end
+      -- Per node: see `want_for`.
+      DoCerts -> ""
+    end
+  end
+
+  pfn cert_item_for(r : CtlRelease, node : String) : Option(CtlCert) do
+    List.find(r.certs, fn c -> c.node == node)
+  end
+
+  pfn item_serial(c : CtlCert) : String do
+    match NodeCert.from_text(c.cert) do
+      Ok(sc) -> sc.cert.serial
+      Err(_) -> ""
+    end
+  end
+
+  pfn revocations_of(r : CtlRelease) : List(NodeCert.Revocation) do
+    List.filter_map(r.revokes, fn t -> match NodeCert.revocation_from_text(t) do
+      Ok(sr) -> Some(sr.rev)
+      Err(_) -> None
+    end)
+  end
+
+  doc """
+  The end state [node] reports once [step] of [r] is done on it: `want`, except
+  for a `do:certs` step, whose end state is per node: `cert:<serial>` when the
+  release carries a certificate for [node], and `rev:<id>` for each of its
+  revocations (the words of `certs_text` the node must report).
+  """
+  fn want_for(r : CtlRelease, step : CtlStep, node : String) : String do
+    match step.action do
+      DoCerts ->
+        let mine = match cert_item_for(r, node) do
+          Some(c) -> ["cert:" ++ item_serial(c)]
+          None -> Nil
+        end
+        String.join(List.append(mine, List.map(revocations_of(r), fn v -> "rev:" ++ NodeCert.revocation_id(v))), " ")
+      _ -> want(r, step)
     end
   end
 
@@ -673,14 +798,36 @@ mod Control do
             Some(e) -> rep.drained >= e
             None -> false
           end
-        else false end end
+        else if action == "certs" do
+          let have = words(rep.certs)
+          List.all(words(w), fn x -> List.member(have, x))
+        else false end end end
     end
   end
 
+  -- Does one of [r]'s revocations revoke [node] itself: every certificate
+  -- of its name, or the one it reports presenting? Such a node is cut off
+  -- by the very step that delivers the revocation (its peers drop its
+  -- links), so it may never report the step done: the step does not wait
+  -- for it.
+  pfn revoked_by(r : CtlRelease, obs : List(CtlObs), node : String) : Bool do
+    let serial = match obs_of(obs, node) do
+      Some(o) -> report_serial(o.report)
+      None -> ""
+    end
+    List.any(revocations_of(r), fn v ->
+      if String.is_empty(v.serial) do NodeCert.node_name(v.node) == node
+      else v.serial == serial end)
+  end
+
   pfn done_on(r : CtlRelease, step : CtlStep, obs : List(CtlObs), node : String) : Bool do
-    match obs_of(obs, node) do
-      Some(o) -> reports_state(o.report, show_action(step.action), want(r, step))
+    let reported = match obs_of(obs, node) do
+      Some(o) -> reports_state(o.report, show_action(step.action), want_for(r, step, node))
       None -> false
+    end
+    match step.action do
+      DoCerts -> reported || revoked_by(r, obs, node)
+      _ -> reported
     end
   end
 
@@ -696,9 +843,15 @@ mod Control do
       DoTopology -> [r.topology]
       _ -> Nil
     end
-    let lines = List.map(List.filter(r.lines, fn l -> l.step == step.id), fn l -> l.text)
+    -- A `do:certs` order carries the whole signed release instead of request
+    -- lines: the node checks the deploy key's signature over it itself, so a
+    -- leader cannot hand it an item the release does not carry (D37).
+    let lines = match step.action do
+      DoCerts -> serialize(r)
+      _ -> String.join(List.map(List.filter(r.lines, fn l -> l.step == step.id), fn l -> l.text), "\n")
+    end
     { seq: r.seq, release: digest(r), step: step.id, node: node, action: show_action(step.action),
-      want: want(r, step), artifacts: String.join(artifacts, " "), lines: String.join(lines, "\n") }
+      want: want_for(r, step, node), artifacts: String.join(artifacts, " "), lines: lines }
   end
 
   pfn first_some(xs : List(String), f : String -> Option(String)) : Option(String) do
@@ -770,7 +923,7 @@ mod Control do
     match steps do
       Nil -> RolloutComplete
       Cons(step, rest) ->
-        let sel = select(step, members, prior)
+        let sel = with_item_nodes(r, step, select(step, members, prior))
         match first_some(sel, fn n -> Option.map(failed_step(r, step, obs, n), fn why -> n ++ "\n" ++ why)) do
           Some(nw) ->
             match String.split_first(nw, "\n") do
@@ -787,6 +940,18 @@ mod Control do
               end
             end
         end
+    end
+  end
+
+  -- A `do:certs` step also targets every node a certificate item names,
+  -- member or not: a release that renews a node's certificate is not done
+  -- until that node reports presenting it. (A node the leader has not heard
+  -- from, or no longer hears from, holds the release until it reports; it
+  -- would otherwise be called done without it.)
+  pfn with_item_nodes(r : CtlRelease, step : CtlStep, sel : List(String)) : List(String) do
+    match step.action do
+      DoCerts -> List.append(sel, List.filter(List.map(r.certs, fn c -> c.node), fn n -> not(List.member(sel, n))))
+      _ -> sel
     end
   end
 
@@ -996,7 +1161,7 @@ mod Control do
   effect (`NODE_STATE`) are what the executor needs, and an operator reads the
   per-function view through the control API (`VERSIONS_DETAIL` passes through).
   """
-  fn reload_report(name : String, pools : String, status : String, applied : Bool, failure : String) : AgentReport do
+  fn reload_report(name : String, pools : String, status : String, applied : Bool, failure : String, certs : String) : AgentReport do
     let st = answer_lines(relay_line("NODE_STATE"))
     let head = state_line(st)
     let seq = match string_to_int(state_field(head, "head")) do
@@ -1027,20 +1192,21 @@ mod Control do
     let detail = "pins\n" ++ String.join(answer_lines(relay_line("PINS")), "\n") ++ "\nstatus\n" ++ status
     { node: name, seq: seq, versions: versions_text(List.filter_map(st, fn l -> artifact_of(l))),
       topology: if applied do topo else "-" end, drained: drained, healthy: head != "",
-      failed_seq: fseq, failed_step: fstep, failed_why: fwhy, detail: detail, pools: pools }
+      failed_seq: fseq, failed_step: fstep, failed_why: fwhy, detail: detail, pools: pools, certs: certs }
   end
 
   doc """
   The Agent's ops over this node's reload server. [status] is called for each report: the
   topology status text (`Topology.status_text`), and whether the verified topology
   is the one the node applied. [memory] keeps the last failed step (see
-  `agent_apply_recording`). `has` is the artifact's presence in the CAS
+  `agent_apply_recording`). [certs] is the node's certificate state
+  (`certs_text`). `has` is the artifact's presence in the CAS
   (a `base:` in the release is informational: the base image is not an artifact).
   """
-  fn real_ops(name : String, pools : String, status : () -> (String, Bool), memory : Vault(String)) : AgentOps do
+  fn real_ops(name : String, pools : String, status : () -> (String, Bool), certs : () -> String, memory : Vault(String)) : AgentOps do
     { report: fn ->
         let (text, applied) = status()
-        reload_report(name, pools, text, applied, Vault.get_or(memory, "failure", "")),
+        reload_report(name, pools, text, applied, Vault.get_or(memory, "failure", ""), certs()),
       has: fn h -> String.starts_with(relay_line("CAS_CHECK " ++ h), "PRESENT"),
       request: fn line -> String.trim(relay_line(line)) }
   end
@@ -1052,10 +1218,131 @@ mod Control do
   """
   fn agent_apply_recording(ops : AgentOps, memory : Vault(String), o : StepOrder) : StepResult do
     let _ = ops.request("ROLLBACK_BATCH")
-    let res = agent_apply(ops, o)
+    remember(memory, agent_apply(ops, o))
+  end
+
+  -- Record [res] in [memory]: a failure until a later order succeeds.
+  pfn remember(memory : Vault(String), res : StepResult) : StepResult do
     if res.ok do Vault.drop(memory, "failure")
     else Vault.set(memory, "failure", int_to_string(res.seq) ++ " " ++ int_to_string(res.step) ++ " " ++ res.detail) end
     res
+  end
+
+  -- ── certificates and revocations (step 12b) ──────────────────────────────
+  --
+  -- A `do:certs` order carries its whole release (`order`). The node checks
+  -- both signatures itself, so a compromised leader can forge neither (D37):
+  -- the deploy key's over the release (`deploy_key`, the key the node's
+  -- reload server trusts), and the operator key's over each certificate and
+  -- revocation (`replace` and `revoke`, which are `ClusterNode.replace_cert`
+  -- and `ClusterNode.revoke`). Issuance stays with the operator (D39).
+
+  -- How an Agent reaches its node's certificate state. [name] is this node's
+  -- name, [deploy_key] the deploy public key releases verify under,
+  -- [serial] the serial of the certificate it presents now ("" when none),
+  -- [replace] takes a certificate's text form (`ClusterNode.replace_cert`,
+  -- keeping the node's key) and [revoke] a revocation token
+  -- (`ClusterNode.revoke`, which gossips it on). [floor] is the newest
+  -- release seq this node has taken anything from: an older release is
+  -- refused, so a replayed release cannot put back a certificate a later one
+  -- replaced.
+  type CertOps = {
+    name : String, deploy_key : Bytes, serial : () -> String,
+    replace : String -> Result(String, String), revoke : String -> Result((), String), floor : () -> Int
+  }
+
+  -- The release a `do:certs` order carries, once it is the one the order
+  -- names and the deploy key signed it.
+  pfn order_release(c : CertOps, o : StepOrder) : Result(CtlRelease, String) do
+    match parse(o.lines) do
+      Err(e) -> Err("the order's release does not parse: " ++ e)
+      Ok(r) ->
+        if not(verify(r, c.deploy_key)) do Err("the order's release is not signed by the deploy key")
+        else if digest(r) != o.release || r.seq != o.seq do Err("the order's release is not the release it names")
+        else if r.seq < c.floor() do Err("stale: release " ++ int_to_string(r.seq) ++ " is older than release " ++ int_to_string(c.floor()) ++ ", which this node has taken")
+        else Ok(r) end end end
+    end
+  end
+
+  -- This node's certificate item, applied: refused unless it names this
+  -- node (as the item's target and in the certificate itself); a no-op when
+  -- the node already presents it. The operator's signature, the expiry, the
+  -- key and revocation are `replace`'s checks (`ClusterNode.replace_cert`).
+  pfn apply_cert(c : CertOps, item : CtlCert) : Result(String, String) do
+    match NodeCert.from_text(item.cert) do
+      Err(e) -> Err("the certificate for " ++ c.name ++ ": " ++ e)
+      Ok(sc) ->
+        let named = NodeCert.node_name(sc.cert.node)
+        if named != c.name do Err("the certificate for " ++ c.name ++ " names " ++ sc.cert.node ++ ", not this node")
+        else if sc.cert.serial == c.serial() do Ok("certificate " ++ sc.cert.serial ++ " already in use")
+        else match c.replace(item.cert) do
+          Ok(serial) -> Ok("certificate " ++ serial ++ " in use")
+          Err(e) -> Err(e)
+        end end end
+    end
+  end
+
+  pfn apply_revokes(c : CertOps, ts : List(String), n : Int) : Result(Int, String) do
+    match ts do
+      Nil -> Ok(n)
+      Cons(t, rest) ->
+        match c.revoke(t) do
+          Ok(_) -> apply_revokes(c, rest, n + 1)
+          Err(e) -> Err(e)
+        end
+    end
+  end
+
+  doc """
+  Apply a `do:certs` order on this node (step 12b): check the release it
+  carries (the deploy key's signature, that it is the release the order names,
+  not older than one this node took from), then take the certificate item for
+  THIS node, if there is one (`apply_cert`; items for other nodes are not
+  this node's to apply), then every revocation (`ClusterNode.revoke` keeps a
+  known one once, so a revocation already gossiped here is a no-op). Idempotent:
+  a certificate already in use and a revocation already known change nothing.
+  Any refusal answers not-ok with the reason, which halts the release.
+  """
+  fn agent_apply_certs(c : CertOps, o : StepOrder) : StepResult do
+    match order_release(c, o) do
+      Err(e) -> result_of(o, false, e)
+      Ok(r) ->
+        let mine = match cert_item_for(r, c.name) do
+          Some(item) -> apply_cert(c, item)
+          None -> Ok("")
+        end
+        match mine do
+          Err(e) -> result_of(o, false, e)
+          Ok(said) ->
+            match apply_revokes(c, r.revokes, 0) do
+              Err(e) -> result_of(o, false, e)
+              Ok(n) ->
+                let revs = if n == 0 do "" else int_to_string(n) ++ " revocation(s) known" end
+                let parts = List.filter([said, revs], fn x -> x != "")
+                result_of(o, true, if parts == Nil do "nothing for this node" else String.join(parts, "; ") end)
+            end
+        end
+    end
+  end
+
+  doc """
+  `agent_apply_certs`, remembering a failure in [memory] like
+  `agent_apply_recording`, and the release's seq once it succeeds: the floor
+  below which this node refuses certificate releases (`CertOps.floor` should
+  read it back with `cert_floor`).
+  """
+  fn agent_apply_certs_recording(c : CertOps, memory : Vault(String), o : StepOrder) : StepResult do
+    let res = remember(memory, agent_apply_certs(c, o))
+    if res.ok && o.seq > cert_floor(memory) do Vault.set(memory, "cert_floor", int_to_string(o.seq)) else () end
+    res
+  end
+
+  doc "The newest release seq this agent has taken certificates or revocations from (0: none), as `agent_apply_certs_recording` keeps it."
+  fn cert_floor(memory : Vault(String)) : Int do
+    match string_to_int(Vault.get_or(memory, "cert_floor", "0")) do
+      Some(n) -> n
+      None -> 0
+    end
   end
 
   -- ── what the protocols carry (design section 7) ──────────────────────────
@@ -1092,4 +1379,56 @@ mod Control do
   -- an order's result, `next(node)` says what to do next with that node's
   -- session, and `head()` is the newest release seq the leader holds.
   type ControlOps = { report : AgentReport -> (), stepped : StepResult -> (), next : String -> CtlNext, head : () -> Int }
+
+  -- ── the leader's audit log (design section 9) ─────────────────────────────
+  --
+  -- One JSON object per line, like a node's audit log (runtime/march_reload.c):
+  -- `ts` (ms), `type`, `leader` (the node that wrote it), then the fields of
+  -- that type. `release`: a release offered to the leader, with `result` "ok"
+  -- or why it was refused. `order`: a step ordered on a node. `step`: a node's
+  -- answer to an order. `halt` and `complete`: the release's end. The
+  -- candidates hold the file; these build its lines.
+
+  pfn audit_json(ts : Int, kind : String, leader : String, fields : List((String, Json.JsonValue))) : String do
+    Json.to_string(Json.Object(Cons(("ts", Json.Number(int_to_float(ts))), Cons(("type", Json.Str(kind)), Cons(("leader", Json.Str(leader)), fields))))) ++ "\n"
+  end
+
+  doc """
+  The `result` of a release the leader refused, from its reason: `err_stale`,
+  `err_fork`, `err_parent` (the compare-and-set on `parent`), or `err_invalid`
+  (the release does not check).
+  """
+  fn audit_refusal(why : String) : String do
+    if String.starts_with(why, "stale") do "err_stale"
+    else if String.starts_with(why, "fork") do "err_fork"
+    else if String.starts_with(why, "parent mismatch") do "err_parent"
+    else "err_invalid" end end end
+  end
+
+  doc "The audit line for a release offered to the leader: [result] is \"ok\" or an `err_...` word, [why] the reason (\"\" when accepted)."
+  fn audit_release(ts : Int, leader : String, seq : Int, digest : String, result : String, why : String) : String do
+    audit_json(ts, "release", leader, [("seq", Json.Number(int_to_float(seq))), ("release", Json.Str(digest)), ("result", Json.Str(result)), ("why", Json.Str(why))])
+  end
+
+  doc "The audit line for an order sent to a node."
+  fn audit_order(ts : Int, leader : String, o : StepOrder) : String do
+    audit_json(ts, "order", leader, [("seq", Json.Number(int_to_float(o.seq))), ("release", Json.Str(o.release)), ("step", Json.Number(int_to_float(o.step))),
+      ("node", Json.Str(o.node)), ("action", Json.Str(o.action)), ("artifacts", Json.Str(o.artifacts))])
+  end
+
+  doc "The audit line for a node's answer to an order."
+  fn audit_step(ts : Int, leader : String, res : StepResult) : String do
+    audit_json(ts, "step", leader, [("seq", Json.Number(int_to_float(res.seq))), ("step", Json.Number(int_to_float(res.step))), ("node", Json.Str(res.node)),
+      ("result", Json.Str(if res.ok do "ok" else "err" end)), ("why", Json.Str(res.detail))])
+  end
+
+  doc "The audit line for a release's end: a halt (with its step, node and reason) or completion; None for any other decision."
+  fn audit_decision(ts : Int, leader : String, seq : Int, d : CtlDecision) : Option(String) do
+    match d do
+      RolloutHalted(st, n, why) ->
+        Some(audit_json(ts, "halt", leader, [("seq", Json.Number(int_to_float(seq))), ("step", Json.Number(int_to_float(st))), ("node", Json.Str(n)), ("why", Json.Str(why))]))
+      RolloutComplete -> Some(audit_json(ts, "complete", leader, [("seq", Json.Number(int_to_float(seq)))]))
+      _ -> None
+    end
+  end
 end
