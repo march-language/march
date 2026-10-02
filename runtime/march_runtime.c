@@ -10,6 +10,8 @@
 #include <math.h>
 #include <ctype.h>
 #include <stdatomic.h>
+#define MARCH_ALLOC_DEFINE_SHIMS   /* the one TU that defines march_free_any / march_realloc_any */
+#include "march_alloc.h"   /* march_obj_calloc; free()/realloc() routing when mimalloc is on */
 
 /* Defined next to march_actor_broadcast_migrate; used by the actor receive
  * loop and march_actor_msg_dispose, both of which precede it in this file. */
@@ -424,7 +426,7 @@ static inline void march_run_resource_dtor(void *p) {
 }
 
 void *march_alloc(int64_t sz) {
-    void *p = calloc(1, (size_t)sz);
+    void *p = march_obj_calloc((size_t)sz);
     if (!p) {
         march_debug_report_oom("march_alloc", sz);
         fputs("march: out of memory\n", stderr); exit(1);
