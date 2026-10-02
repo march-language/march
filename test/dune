@@ -10099,6 +10099,50 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r nclones boxcalls ngeneral nchecks < native_arr_map2_inline_llvm_check.out; \
     test \"$nclones\" -eq 2 -a \"$boxcalls\" -eq 0 -a \"$ngeneral\" -eq 1 -a \"$nchecks\" -ge 1 || { echo \"expected 2 unboxed \\$mapfast\\$ clones (zero boxing calls), 1 general non-inlined native_int_arr_map2 call (reused-closure fallback), >=1 length-check call (found clones=$nclones boxcalls=$boxcalls general=$ngeneral checks=$nchecks)\" >&2; exit 1; }")))
 
+;  NativeArray.fold_* inline loop (specs/plans/2026-09-30-nativearray-fold-inline-loop.md).
+; Correctness: every line matches the interpreter (the .expected file IS the
+; interpreter's output). Shape: exactly 11 inline fold loops in main, the 3
+; ineligible folds (String accumulator, Int accumulator over a Float array,
+; a reused lambda) still call the runtime, and the unboxed clones contain no
+; boxing calls.
+(rule
+ (targets native_arr_fold_inline native_arr_fold_inline.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_fold_inline.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_arr_fold_inline
+        native/native_arr_fold_inline.march)
+   (with-stdout-to native_arr_fold_inline.out
+        (system "./native_arr_fold_inline")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/native_arr_fold_inline.expected native_arr_fold_inline.out)))
+
+(rule
+ (targets native_arr_fold_inline_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/native_arr_fold_inline.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/native_arr_fold_inline.march)
+   (with-stdout-to native_arr_fold_inline_llvm_check.out
+    (run bash -c
+     "awk '/^define/ && /@march_main\\(/ {p=1} p {print} p && /^}/ {exit}' native/native_arr_fold_inline.ll > main_fold.ll; echo \"$(grep -c '^nfold_pre' main_fold.ll) $(grep -c 'call ptr @native_[a-z0-9]*_arr_fold(' main_fold.ll) $(awk '/^define double @.*\\$mapfast\\$/{flag=1} flag{print} /^}/{flag=0}' native/native_arr_fold_inline.ll | (grep -c 'march_alloc_float\\|march_unbox_float' || true))\"")))))
+
+(rule
+ (alias runtest)
+ (deps native_arr_fold_inline_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r nloops nruntime boxcalls < native_arr_fold_inline_llvm_check.out; \
+    test \"$nloops\" -eq 11 -a \"$nruntime\" -eq 3 -a \"$boxcalls\" -eq 0 || { echo \"expected 11 inline fold loops, 3 runtime folds, 0 boxing calls in unboxed clones (found loops=$nloops runtime=$nruntime boxcalls=$boxcalls)\" >&2; exit 1; }")))
+
 ; Separate fixture: the map2 inline loop's own length-mismatch check
 ; (native_arr_map2_check_len) must panic identically to the non-inlined
 ; native_int_arr_map2/native_float_arr_map2 functions' check, since the

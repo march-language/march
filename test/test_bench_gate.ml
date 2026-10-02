@@ -170,6 +170,12 @@ let gated : (string * string * compare_mode) list = [
   "simd_map",            "", IgnoreTiming;
   "simd_map2",           "", IgnoreTiming;
   "simd_sum",            "", IgnoreTiming;
+  (* NativeArray chains, unfused vs hand-fused, and the fold inline loop
+     (specs/plans/2026-09-30-nativearray-fold-inline-loop.md); Float vs Int
+     through closures (specs/plans/2026-09-30-float-closure-unboxing.md). Both
+     print `TIME <case> <variant> <ms>` lines and one CHECKSUM. *)
+  "native_array_chains", "", IgnoreTiming;
+  "float_closure_calls", "", IgnoreTiming;
   "steady_state_ring",   "", IgnoreTiming;
   "string_parallel_scan", "", IgnoreTiming;
   (* vector_math prints one FRACTIONAL float and no timing at all. It is here
@@ -235,6 +241,13 @@ let timing_value_anchors : (string * string list) list = [
   "simd_map",        ["RESULT 9950000."];
   "simd_map2",       ["RESULT 9950000."];
   "simd_sum",        ["RESULT 2475000."];
+  (* Captured 2026-10-01 from compiled runs. native_array_chains' checksum
+     includes reassociated Float sums whose last digits may differ by vector
+     width across architectures, so it is anchored on its leading digits only,
+     for the reason given at vector_math. float_closure_calls sums integers
+     held in Floats, which is exact, but is anchored the same way. *)
+  "native_array_chains", ["CHECKSUM 1652742813"];
+  "float_closure_calls", ["CHECKSUM 5597200000"];
   (* OPS/WORK are the configuration echoed back, CHECKSUM is the work actually
      done. MIN_NS happened to match across two runs and is still a measurement:
      not an anchor. *)

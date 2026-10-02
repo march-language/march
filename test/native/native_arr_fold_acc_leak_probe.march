@@ -2,6 +2,13 @@
 -- (march_typed_array_fold / native_float_arr_fold / native_f32_arr_fold in
 -- runtime/march_runtime.c).
 --
+-- Since 2026-09-30 the f64/f32 legs below use lambda literals with a scalar
+-- Float accumulator, so they compile to the inline fold loop (no boxes at all)
+-- rather than the runtime helpers this header describes. The runtime Float
+-- accumulator release is still guarded, by the `_rt` legs of
+-- native_arr_fold_boundary_box_probe.march, which pass the callback as a
+-- parameter. The String/typed-array legs are unaffected (not scalar).
+--
 -- Sibling of native_arr_fold_leak_probe.march, which guards the per-ELEMENT
 -- box. That probe deliberately uses an INT accumulator so it measures the
 -- element box in isolation; this one is the other half and deliberately uses

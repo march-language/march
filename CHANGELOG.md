@@ -828,6 +828,15 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **`NativeArray.fold_*` with a lambda is up to 67× faster when compiled.** A fold
+  whose callback is a lambda written at the call site, with an `Int` or `Float`
+  accumulator matching the array's elements, now compiles to a loop in the calling
+  function instead of calling the runtime once per element. A Float fold no longer
+  allocates a box for every element and accumulator: 4M elements take about 3 ms
+  instead of 200 ms. Int folds vectorize and run about 21× faster. Results are
+  unchanged, Float addition keeps its left-to-right order, and other folds
+  (String or record accumulators, or a callback passed in as a variable) behave
+  exactly as before.
 - **Breaking: `Seq.batched`, `Flow.batch` and `Gen.frequency` now declare their
   preconditions in the signature.** `Seq.batched(seq, n)` and `Flow.batch(stage, n)`
   take `n : {Int | _ > 0}`, and `Gen.frequency(pairs)` takes
