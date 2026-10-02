@@ -43,3 +43,11 @@ call rather than a pattern match.
 **Acceptance:** a `test/native` fixture with shape 1 (a record-held closure, a `List.find`
 over a list of records, a `with` from the found record's field) runs compiled; shape 2's
 reads after the consuming call give the same values as before it.
+
+**2026-10-02 (dd step 12b):** shape 2 pinned down. The over-release is in
+`Control.serialize` itself: `"sig " ++ (if r.signature == "" do "-" else r.signature end)`
+released `r.signature` while `r` still held it, and a later read of the release's
+signature was a heap-use-after-free (ASAN, CI sanitize-gate). `serialize` was rewritten
+so the field goes straight into `++`, and `test/native/control_serialize_twice` fails on
+the old form. The compiler bug (an `if` branch returning a borrowed field projection that
+a consuming builtin then takes) is still open.

@@ -112,11 +112,22 @@ the control plane it rides on is [2026-09-30-dd-step12a-control-wiring.md](2026-
 
 ## Findings
 
-- The leader's held release reads back with an empty `sig` in compiled code: shape 2 of
+- **A use-after-free in `Control.serialize`, now fixed.** Compiled, its sig line,
+  `(if r.signature == "" do "-" else r.signature end)`, released the signature while the
+  release still held it. The leader's `ctl_release` serialises a release before taking
+  it, so the release it then held had a freed signature. Nothing read it in 12a. A
+  `do:certs` order serialises the held release, and:
+  - without ASAN the order arrived with an empty `sig` (the node refused it as unsigned);
+  - CI's sanitize-gate reported `heap-use-after-free` in `march_string_eq` from
+    `Control.serialize` under `Control.order`.
+
+  This is shape 2 of
   [../todos/2026-10-01-compiled-record-with-projection-sigsegv.md](../todos/2026-10-01-compiled-record-with-projection-sigsegv.md)
-  again, now on a path that needs the signature. Worked around: a `do:certs` order gets
-  the durable copy the candidate stored (`ctl_signed_order`), the exact document forge
-  signed.
+  (an `if` returning a borrowed field into a consuming `++`). The compiler side is still
+  open there. `serialize` now concatenates the signature where it reads it.
+  `test/native/control_serialize_twice` serialises one release three times compiled. It
+  fails with the old `serialize` ("second or third: DIFFERENT", "no longer verifies") and
+  passes with the new one.
 - The leader keeps a node's last failure in its report after a later release succeeds on
   that node (`leader_report` keeps a known failure when a report omits it), so `STATUS`
   still shows `FAILED` from a halted release. It does not halt the newer release, because
