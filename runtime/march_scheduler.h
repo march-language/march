@@ -568,7 +568,7 @@ typedef struct march_scheduler {
      * captured once via __tsan_get_current_fiber() at the top of sched_loop. */
     void           *tsan_fiber;
 #endif
-} march_scheduler;
+} __attribute__((aligned(64))) march_scheduler;  /* own cache lines: no false sharing between neighbours */
 
 /* ── Public API ───────────────────────────────────────────────────────── */
 
