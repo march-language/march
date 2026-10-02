@@ -703,6 +703,8 @@ let emit_mutual_tco_group ~emit_expr ctx (group : Tir.fn_def list) =
       if ctx.Llvm_ctx.compile_so
          && not (Hot_reload.is_slot_actor_dispatch fname)
          && not (Tir_names.is_migrate_fn_name fname)
+         (* a slot must stay dlsym-able, as in Llvm_toplevel's [vis_prefix] *)
+         && Hot_reload.Name_table.id_of ctx.Llvm_ctx.hr_names fname = None
       then "hidden " else ""
     in
     Buffer.add_string ctx.Llvm_ctx.buf

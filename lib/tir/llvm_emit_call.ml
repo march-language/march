@@ -403,8 +403,19 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
                (* Boundary→boundary call: route through the versioned dispatch
                   table so the callee can be hot-swapped at runtime. *)
                Hashtbl.mem ctx.top_fns resolved_name
-               && Hot_reload.needs_dispatch cfg ~caller_module:ctx.hr_cur_module
-                    ~callee_module:(module_of_name resolved_name)
+               && (Hot_reload.needs_dispatch cfg ~caller_module:ctx.hr_cur_module
+                     ~callee_module:(module_of_name resolved_name)
+                   (* an entry-file top-level fn: bare-named, so its module
+                      says nothing (Hot_reload.is_entry_file_slot) *)
+                   || Hot_reload.is_entry_file_slot cfg resolved_name)
+               (* A self-call stays direct: a running invocation finishes on
+                  the version it started on, as a self-TAIL-call (a loop,
+                  never a call) always did.  Dispatching it cost ~5 ns per
+                  call: a recursive `fib` in the entry module, a slot since
+                  2026-10-01, ran 4.8x slower under --hot-reload
+                  (specs/progress/2026-10-01-hcr-topology-app-functions-no-dispatch-slots.md).
+                  Mutual recursion through two slots still dispatches. *)
+               && not (String.equal resolved_name ctx.hr_cur_fn)
                && Hot_reload.Name_table.id_of ctx.hr_names resolved_name <> None)
     then begin
       let name_id =

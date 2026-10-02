@@ -5,6 +5,9 @@
 #
 #   scripts/two-node.sh <scenario>          # test/two_node/<scenario>/
 #   scripts/two-node.sh --list
+#   scripts/two-node.sh --list K/N           # shard K of N (1-based): every
+#                                            # scenario whose index in the
+#                                            # sorted list is K-1 mod N
 #
 # A scenario directory holds node_a.march / node_b.march (and node_c.march for
 # a three-node scenario), node_<x>.expected (each node's stdout, sorted; a
@@ -52,7 +55,23 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 MARCH=${MARCH_BIN:-$root/_build/default/bin/main.exe}
 TIMEOUT=${TWO_NODE_TIMEOUT:-60}
 
-if [ "${1:-}" = "--list" ]; then ls "$root/test/two_node"; exit 0; fi
+# --list K/N deals the sorted list round-robin rather than cutting it into
+# contiguous runs: scenarios that share a prefix also share a cost (the four
+# control_* are 135-200 s each, the drain_* ~25-50 s), so a contiguous cut
+# would put every heavy family in one shard. CI's two-node job runs two shards.
+if [ "${1:-}" = "--list" ]; then
+  shard=${2:-1/1}
+  if [[ $shard =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] \
+     && [ "${BASH_REMATCH[1]}" -le "${BASH_REMATCH[2]}" ]; then
+    k=${BASH_REMATCH[1]}; n=${BASH_REMATCH[2]}
+  else
+    echo "two-node: --list takes K/N with 1 <= K <= N, got: $shard" >&2; exit 2
+  fi
+  # LC_ALL=C: every shard must see the same order, or one scenario runs
+  # twice and another never.
+  LC_ALL=C ls "$root/test/two_node" | awk -v k="$k" -v n="$n" '(NR - 1) % n == k - 1'
+  exit 0
+fi
 scenario=${1:?usage: scripts/two-node.sh <scenario> | --list}
 dir=$root/test/two_node/$scenario
 [ -f "$dir/scenario.sh" ] || { echo "two-node: no such scenario: $scenario" >&2; exit 2; }

@@ -161,18 +161,37 @@ unit, and waits for the node's reload server before the next host; the signed to
 goes last. What was deployed is kept in `.forge/deploy/<env>/` and is what the next
 plan compares against.
 
-A hot patch can only replace **dispatch slots**: code under the module prefix, and
-your actors' dispatch functions. The standard library's own actors (the cluster node
-that answers SWIM pings, session endpoints, the node-queue writers, ...) have no slot:
-a deploy never activates, pauses or migrates them, and a stdlib change is a restart.
-Which actors are the stdlib's is decided by where the compiler loaded them from, not by
-name, so an actor of yours named like a stdlib one, or declared in a file named like a
-stdlib file, keeps its slot. A change the running base cannot swap (a closure's
-body, whose enclosing function did not change, or a function with no slot and no changed
-caller that has one) is planned as a restart, and the plan says which functions. In a
-topology app today the entry module's own functions have no slot under the entry
-module's prefix (the compiler names them without it), so set `[hot-reload]
-module_prefix` to the pool module that holds the code you want to patch.
+A hot patch can only replace **dispatch slots**. With the entry module as the prefix
+(what forge passes), these are every function you write in the entry file: its
+top-level functions, the functions of its nested modules (`Back.serve_one`), and your
+actors' dispatch functions; plus anything under an explicit `[hot-reload]
+module_prefix`. A closure travels with the function that builds it: an edit inside a
+role body's `fn (n, st) -> ...` is a hot patch of the role body, and the closures it
+builds from then on run the new code. A polymorphic function's specializations have
+no slot of their own and travel with their callers the same way. A function's call
+to itself stays a direct call, so a recursion already running finishes on the
+version it started on, as a loop does. Never on the
+boundary:
+
+- `main` and every `<Mod>.main`: the running program's root frame cannot be swapped.
+  A topology app's generated `main` is one; its hooks (`Back.start`) are slots, but a
+  changed hook is a restart, because a hook runs once, at start.
+- Code the compiler generates for you: the endpoint modules of a protocol
+  (`Echo_Server`, `Echo_Run`, ...), which a session must finish on, and the control
+  plane spliced into an app with a `[control]` section (its protocols, leader, Agent
+  and control API), which is what runs a deploy and must not be swapped by one.
+- The standard library, including its own actors (the cluster node that answers SWIM
+  pings, session endpoints, the node-queue writers, ...): a deploy never activates,
+  pauses or migrates them, and a stdlib change is a restart. Which actors and
+  functions are the stdlib's, or the entry file's, is decided by where the compiler
+  loaded them from, not by name, so an actor of yours named like a stdlib one, or
+  declared in a file named like a stdlib file, keeps its slot.
+
+A change the running base cannot swap (a function with no slot and no changed caller
+that has one) is planned as a restart, and the plan says which functions. A one-line
+edit flags only the function it is in: the names the compiler numbers (`$lam12`,
+`$jp7`) are renumbered by any edit, but a function's hot-reload identity does not see
+those numbers, so the functions that merely refer to one are not "changed".
 
 The `[[hot-reload.env]]` fleet table below and `forge deploy hot --env <name>` keep
 working for a project without a topology.
