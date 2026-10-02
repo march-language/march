@@ -124,7 +124,7 @@ never again silently reintroduce itself as more stdlib modules are added.
 
 ## Provenance
 
-Split out of `specs/todos/2026-07-24-merge-loss-round-2-14-commits-on-docs-core-march-types-skeleton.md`,
+Split out of `specs/progress/2026-07-24-merge-loss-round-2-14-commits-on-docs-core-march-types-skeleton.md`,
 which first named this class bug (found while auditing a lost-commit branch)
 but never independently reproduced or scoped it. This file supersedes that
 bullet.

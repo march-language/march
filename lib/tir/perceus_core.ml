@@ -419,9 +419,38 @@ let wrap_incrcs (env : env) (incs : Tir.var list) (inner : Tir.expr) : Tir.expr 
     Both are read only through [EField] (tuple destructuring lowers to
     [EField] with [$fv]N names, not to an ECase), so both need the scope-end
     drop in [insert_rc_expr]'s ELet case. *)
-let is_aggregate_ty : Tir.ty -> bool = function
+let is_aggregate_ty (env : env) : Tir.ty -> bool = function
   | Tir.TTuple _ | Tir.TRecord _ -> true
+  (* A NOMINAL record ([type St = { n : Int }], an actor's [Name_State]) is
+     the same aggregate under a [TCon] name.  Matching only the structural
+     forms left every such value with no drop site at all: a record built,
+     read through its fields and then dropped leaked its cell and every heap
+     value it owned, and an actor handler that returned a new state leaked
+     one record per message
+     (specs/progress/2026-10-01-compiled-actor-and-nominal-record-leaks.md). *)
+  | Tir.TCon (n, _) -> Kind.is_record_type env.k_table n
   | _ -> false
+
+(** Result type of a primitive operator application whose callee variable
+    carries no [TFn] type ([+], [<], ...).  Arithmetic takes its operands' type
+    only when every operand is known to be [Int], or every one [Float];
+    comparisons and boolean connectives are [Bool].  Anything else is [None],
+    the same refusal [tir_expr_ty] makes for any unknown type. *)
+let builtin_op_result_ty (name : string) (args : Tir.atom list) : Tir.ty option =
+  let atom_ty = function
+    | Tir.AVar w -> Some w.Tir.v_ty
+    | Tir.ALit (March_ast.Ast.LitInt _) -> Some Tir.TInt
+    | Tir.ALit (March_ast.Ast.LitFloat _) -> Some Tir.TFloat
+    | _ -> None
+  in
+  let all_are ty = args <> [] && List.for_all (fun a -> atom_ty a = Some ty) args in
+  match name with
+  | "+" | "-" | "*" | "/" | "%" ->
+    if all_are Tir.TInt then Some Tir.TInt
+    else if all_are Tir.TFloat then Some Tir.TFloat
+    else None
+  | "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||" | "not" -> Some Tir.TBool
+  | _ -> None
 
 (** Best-effort type of a TIR expression's value.  [None] means "could not
     determine", and every caller must treat that as a refusal to transform
@@ -437,8 +466,10 @@ let rec tir_expr_ty (e : Tir.expr) : Tir.ty option =
   | Tir.EAtom (Tir.ALit (March_ast.Ast.LitFloat _)) -> Some Tir.TFloat
   | Tir.EAtom (Tir.ALit (March_ast.Ast.LitString _)) -> Some Tir.TString
   | Tir.ELet (_, _, body) | Tir.ESeq (_, body) -> tir_expr_ty body
-  | Tir.EApp (f, _) ->
-    (match f.Tir.v_ty with Tir.TFn (_, r) -> Some r | _ -> None)
+  | Tir.EApp (f, args) ->
+    (match f.Tir.v_ty with
+     | Tir.TFn (_, r) -> Some r
+     | _ -> builtin_op_result_ty f.Tir.v_name args)
   | Tir.EField (Tir.AVar src, f) ->
     (match src.Tir.v_ty with
      | Tir.TRecord fs -> List.assoc_opt f fs
@@ -456,6 +487,48 @@ let rec tir_expr_ty (e : Tir.expr) : Tir.ty option =
     then Some (Tir.TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) named))
     else None
   | Tir.EUpdate (Tir.AVar src, _) -> Some src.Tir.v_ty
+  | _ -> None
+
+(** True when the value of [e] is a literal at the end of its [ELet]/[ESeq]
+    chain: an actor handler's [...; :unit], a function whose body ends in a
+    constant.  Such a scope needs no typed temporary for the aggregate
+    scope-end drop: the drop can go immediately before the literal
+    ([drop_before_tail_literal]), which reads no variable and holds no
+    reference, so dropping before it is the same as dropping after it.  This
+    is what lets the drop reach a scope whose value [tir_expr_ty] cannot type
+    (an atom literal, whose [TUnit] reading would lower to [void]). *)
+let rec tail_is_literal (e : Tir.expr) : bool =
+  match e with
+  | Tir.EAtom (Tir.ALit _) -> true
+  | Tir.ELet (_, _, body) | Tir.ESeq (_, body) -> tail_is_literal body
+  | _ -> false
+
+let rec drop_before_tail_literal (drop : Tir.expr) (e : Tir.expr) : Tir.expr =
+  match e with
+  | Tir.EAtom (Tir.ALit _) -> Tir.ESeq (drop, e)
+  | Tir.ELet (x, e1, body) -> Tir.ELet (x, e1, drop_before_tail_literal drop body)
+  | Tir.ESeq (e1, body) -> Tir.ESeq (e1, drop_before_tail_literal drop body)
+  | _ -> e  (* unreachable when [tail_is_literal e] *)
+
+(** [Some ty] when [e]'s value is the owned result of a call (an [EApp] at
+    the end of its [ELet]/[ESeq] chain) of a type that needs RC, so that
+    discarding [e] as a statement would leak it; [None] otherwise, including
+    whenever the type cannot be determined.  See [insert_rc_expr]'s [ESeq]
+    case. *)
+let discarded_call_result_ty (env : env) (e : Tir.expr) : Tir.ty option =
+  let rec tail = function
+    | Tir.ELet (_, _, body) | Tir.ESeq (_, body) -> tail body
+    | x -> x
+  in
+  match tail e with
+  | Tir.EApp _ ->
+    (match tir_expr_ty e with
+     (* Unit is sometimes typed as the empty tuple, which [needs_rc] counts as
+        an aggregate; a unit-returning statement ([println(s)]) has nothing to
+        release. *)
+     | Some (Tir.TTuple [] | Tir.TUnit) -> None
+     | Some ty when needs_rc env ty -> Some ty
+     | _ -> None)
   | _ -> None
 
 (** True when every occurrence of [name] in [e] is as the SOURCE of an
@@ -620,6 +693,37 @@ let find_inc_vars ?(include_borrowed_fields = true)
        let count = Hashtbl.find counts name in
        let n = count - 1 + (if StringSet.mem name live_after then 1 else 0) in
        List.init n (fun _ -> v))
+
+(** Dup every TAIL-position projection of [name] in [e]: the value the scope
+    returns.  Used by the aggregate scope-end drop in [insert_rc_expr]'s ELet
+    case, which releases the aggregate AFTER its scope's result is computed
+    ([let tmp = e2 in dec_rc v; tmp]).  A field that escapes [e2] through a
+    binding or an argument has already been dup'd by the borrowed-field
+    logic, but a field that IS the result ([let m = .. in m.addr]) is an
+    [EField] in tail position, which borrows ([EField] never dups an aggregate
+    source): the release then freed a String the caller went on to own.
+    Seen as a use-after-free in two-node's cluster_fd_release
+    (ClusterNode.core_link_closed: [match core_member(..) do Some(m) ->
+    m.addr ..] passed to [Map.remove]), masked on main by a leak in
+    Msgpack.decode_one's tuple matches until
+    specs/progress/2026-09-30-compiled-tuple-destructure-leaks-moved-fields.md
+    removed it.  An unknown type is treated as heap-carrying; the dup of a
+    tagged scalar is a no-op at run time. *)
+let rec dup_tail_projections (env : env) (name : string) (e : Tir.expr) : Tir.expr =
+  match e with
+  | Tir.EField (Tir.AVar w, _) when String.equal w.Tir.v_name name ->
+    let ty = match tir_expr_ty e with Some t -> t | None -> Tir.TVar "_" in
+    if needs_rc env ty then begin
+      let t = fresh_rc_var ty in
+      Tir.ELet (t, e, Tir.ESeq (incrc_for env w (Tir.AVar t), Tir.EAtom (Tir.AVar t)))
+    end else e
+  | Tir.ELet (x, e1, body) -> Tir.ELet (x, e1, dup_tail_projections env name body)
+  | Tir.ESeq (a, body) -> Tir.ESeq (a, dup_tail_projections env name body)
+  | Tir.ECase (a, brs, d) ->
+    Tir.ECase (a,
+      List.map (fun br -> { br with Tir.br_body = dup_tail_projections env name br.Tir.br_body }) brs,
+      Option.map (dup_tail_projections env name) d)
+  | _ -> e
 
 (** Insert RC operations into an expression.
     Returns [(expr', live_before)] where expr' has RC ops inserted and
@@ -1128,7 +1232,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
             e2'
         else
           e2'
-      else if is_aggregate_ty v.Tir.v_ty
+      else if is_aggregate_ty env v.Tir.v_ty
               && v.Tir.v_lin = Tir.Unr
               && StringSet.mem v.Tir.v_name live_into_e2
               && not (StringSet.mem v.Tir.v_name live_after)
@@ -1138,7 +1242,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
               && not (tail_value_is_var v.Tir.v_name e2')
               && not (releases_var v.Tir.v_name e2')
               && used_only_as_field_source v.Tir.v_name e2'
-              && tir_expr_ty e2' <> None then
+              && (tir_expr_ty e2' <> None || tail_is_literal e2') then
         (* Scope-end drop for an owned aggregate (Wave: aggregate RC).
            Records and tuples are read exclusively through [EField]; unlike a
            variant, which is destructured by an ECase and freed there by
@@ -1161,11 +1265,14 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
            ownership to the caller and this dec would be a double-free.
            [moved_vars] excludes the aggregate being stored into another
            structure on any path. *)
+        if tail_is_literal e2' then
+          drop_before_tail_literal (decrc_for env v (Tir.AVar v)) e2'
+        else
         let body_ty = match tir_expr_ty e2' with
           | Some t -> t
           | None -> assert false (* guarded above *) in
         let tmp = fresh_rc_var body_ty in
-        Tir.ELet (tmp, e2',
+        Tir.ELet (tmp, dup_tail_projections env v.Tir.v_name e2',
                   Tir.ESeq (decrc_for env v (Tir.AVar v),
                             Tir.EAtom (Tir.AVar tmp)))
       else
@@ -1325,17 +1432,21 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
           StringSet.mem v.Tir.v_name live_after
           || (needs_rc env v.Tir.v_ty
               && name_free_in v.Tir.v_name br.Tir.br_body)
-          (* Tuples/records are [needs_rc = false]: Perceus never emits a
-             DecRC/free for the aggregate itself, so its extracted fields are
-             effectively borrowed from a value whose lifetime the match does
-             not control (e.g. a tuple element of a BORROWED list).  Treat the
-             aggregate as a borrowed scrutinee so escaping fields get an EIncRC
-             and dead fields are NOT decremented — decrementing a field of a
-             borrowed-derived tuple corrupts the structure the caller reuses
-             (Toml table_get's discarded value / returned element). *)
-          || (match v.Tir.v_ty with
-              | Tir.TTuple _ | Tir.TRecord _ -> true
-              | _ -> false)
+          (* Tuples and records used to be forced "borrowed" here
+             unconditionally, on the premise that they were [needs_rc = false]
+             and Perceus never freed them.  That premise is gone: an aggregate
+             owns its fields and is dropped like a variant ([needs_rc_of]), so
+             a tuple scrutinee that is dead after the arm IS freed by
+             [add_scrutinee_free_for], and [Llvm_case] hands each field to the
+             arm as an OWNED reference (moved when the cell was unique, dup'd
+             when it was shared).  Treating those fields as borrowed made every
+             pattern variable that escaped take a SECOND reference nothing
+             released, and skipped the drop of a dead field — a leak per moved
+             field per call (specs/progress/2026-09-30-compiled-tuple-
+             destructure-leaks-moved-fields.md).  A tuple that is NOT consumed
+             here (live after the case, or still used in the arm) is already
+             covered by the two disjuncts above, so a borrowed-derived tuple
+             (an element of a borrowed list) keeps its borrowed fields. *)
         | _ -> false
       in
       let la = if scrutinee_borrowed then
@@ -1566,9 +1677,20 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
     (Tir.ECase (a, branches', default'), lb)
 
   | Tir.ESeq (e1, e2) ->
-    let (e2', l2) = insert_rc_expr env e2 live_after in
-    let (e1', l1) = insert_rc_expr env e1 l2 in
-    (Tir.ESeq (e1', e2'), l1)
+    (match discarded_call_result_ty env e1 with
+     | Some ty ->
+       (* A statement [f(x)] whose call returns an owned heap value lowers to
+          [ESeq (f(x), rest)], which drops the value on the floor: nothing
+          ever released it.  A PURE call never showed this (the optimiser
+          deletes it), but an impure one does: every [send(p, m)] written as
+          a statement leaked the [Some(())] it returns.  Rebinding the value
+          to a fresh, unused [let] hands it to the dead-binding branch above,
+          the same release [let _ = send(p, m)] already got. *)
+       insert_rc_expr env (Tir.ELet (fresh_rc_var ty, e1, e2)) live_after
+     | None ->
+       let (e2', l2) = insert_rc_expr env e2 live_after in
+       let (e1', l1) = insert_rc_expr env e1 l2 in
+       (Tir.ESeq (e1', e2'), l1))
 
   | Tir.ETuple atoms ->
     let inc_vars = find_inc_vars env atoms live_after in
@@ -1619,8 +1741,9 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
        See specs/progress/2026-09-13-closure-environment-released.md. *)
     let a_is_aggregate = match a with
       | Tir.AVar v -> (match v.Tir.v_ty with
-                       | Tir.TTuple _ | Tir.TRecord _ | Tir.TPtr _ -> true
-                       | _ -> false)
+                       | Tir.TPtr _ -> true
+                       (* nominal records included: see [is_aggregate_ty] *)
+                       | t -> is_aggregate_ty env t)
       | _ -> false
     in
     let inc_vars =

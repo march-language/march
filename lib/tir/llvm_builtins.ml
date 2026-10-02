@@ -1075,6 +1075,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_epoch_release()" };
   { march_name = "epoch_draining"; c_name = Some "march_epoch_draining"; ret_ty = Some Tir.TBool;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_epoch_draining()" };
+  { march_name = "reload_request"; c_name = Some "march_reload_request_string"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_reload_request_string(ptr %s)" };
   { march_name = "epoch_holds"; c_name = Some "march_epoch_holds_i64"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_epoch_holds_i64()" };
   { march_name = "epoch_hold_next_spawn"; c_name = Some "march_sched_hold_next_spawn"; ret_ty = Some Tir.TUnit;
@@ -1880,6 +1882,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_epoch_drain";
   PDeclare "march_sched_hold_next_spawn";
   PDeclare "march_epoch_holds_i64";
+  PDeclare "march_reload_request_string";
   PDeclare "march_sched_delivery_origin_set";
   PDeclare "march_sched_delivery_origin_clear";
   PDeclare "march_delivery_failed_watch";

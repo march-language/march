@@ -117,6 +117,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_string_to_int",      [true]);
   ("march_string_to_float",    [true]);
   ("march_string_to_lowercase",[true]);
+  ("march_reload_request_string",[true]);
   ("march_string_to_uppercase",[true]);
   ("march_string_trim",        [true]);
   ("march_string_trim_start",  [true]);
@@ -198,6 +199,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("char_to_uppercase",    [true]);
   ("char_to_lowercase",    [true]);
   ("string_to_lowercase",  [true]);
+  ("reload_request",       [true]);
   ("string_to_uppercase",  [true]);
   ("string_trim",          [true]);
   ("string_trim_start",    [true]);
@@ -1052,6 +1054,23 @@ let infer_module ?(k_table : Kind.table option) (m : Tir.tir_module) : borrow_ma
            [Perceus.insert_dead_apply_param_drops].  See [Clo_flags] for the
            whole convention. *)
         if Tir_names.is_apply_fn fn.Tir.fn_name then false
+        (* An actor's dispatch fn ([Name_dispatch($actor, $msg)]) is called
+           only by the C runtime's actor loop ([actor_green_thread]), which
+           TRANSFERS its reference to the message: it frees a message itself
+           only when the actor is already dead, never after a dispatch. Left
+           to the fixpoint, $msg stays borrowed (the body only scrutinises it
+           and extracts fields), so nobody released it and every message a
+           compiled actor received leaked, shell and heap fields alike
+           (specs/progress/2026-10-01-compiled-actor-and-nominal-record-leaks.md). Pinned
+           owned here, in [init], for the same reason as the apply-fn pin:
+           callers must consult the final answer during iteration. $actor
+           (param 0) stays borrowed: the runtime keeps the actor record. The
+           [$msg] name check keeps a user fn that merely ends in "_dispatch"
+           out of the pin; user code cannot spell a [$]-prefixed name. *)
+        else if i = 1
+             && Tir_names.is_actor_dispatch_fn fn.Tir.fn_name
+             && String.equal (List.nth fn.Tir.fn_params i).Tir.v_name "$msg"
+        then false
         else Kind.borrowable_of k_table (List.nth fn.Tir.fn_params i).Tir.v_ty
       ) in
       StringMap.add fn.Tir.fn_name modes acc

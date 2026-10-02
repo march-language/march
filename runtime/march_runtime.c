@@ -9,6 +9,8 @@
 #include <math.h>
 #include <ctype.h>
 #include <stdatomic.h>
+#define MARCH_ALLOC_DEFINE_SHIMS   /* the one TU that defines march_free_any / march_realloc_any */
+#include "march_alloc.h"   /* march_obj_calloc; free()/realloc() routing when mimalloc is on */
 
 /* Defined next to march_actor_broadcast_migrate; used by the actor receive
  * loop and march_actor_msg_dispose, both of which precede it in this file. */
@@ -423,7 +425,7 @@ static inline void march_run_resource_dtor(void *p) {
 }
 
 void *march_alloc(int64_t sz) {
-    void *p = calloc(1, (size_t)sz);
+    void *p = march_obj_calloc((size_t)sz);
     if (!p) {
         march_debug_report_oom("march_alloc", sz);
         fputs("march: out of memory\n", stderr); exit(1);
@@ -469,6 +471,12 @@ void march_incrc(void *p) {
 
 void march_decrc(void *p) {
     if (!IS_HEAP_PTR(p)) return;
+    /* An immortal cell (rc >= MARCH_RC_IMMORTAL: a static, program-image
+     * object such as send's shared Some(())) is never released, so it is never
+     * decremented either: decrementing would make every holder contend on the
+     * one cache line and walk the count toward zero.  One plain load of a line
+     * the decrement touches anyway. */
+    if (((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return;
     /* acq_rel: release our writes before decrement; acquire before free so
      * we see all other threads' writes to the object. */
     int32_t tag  = ((march_hdr *)p)->tag;
@@ -494,6 +502,8 @@ void march_decrc(void *p) {
 
 int64_t march_decrc_freed(void *p) {
     if (!IS_HEAP_PTR(p)) return 1;
+    /* Immortal: not freed, so the caller must not release its children. */
+    if (((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return 0;
     int32_t tag  = ((march_hdr *)p)->tag;
     int64_t prev = atomic_fetch_sub_explicit(
         (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
@@ -616,6 +626,7 @@ void march_incrc_local(void *p) {
 
 void march_decrc_local(void *p) {
     if (!IS_HEAP_PTR(p)) return;
+    if (((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return;  /* see march_decrc */
     /* Matching atomic path for the scheduler context (see march_incrc_local). */
     if (march_sched_in_scheduler() || march_tls_concurrent_rc) {
         march_decrc(p);
@@ -661,6 +672,7 @@ void march_decrc_local(void *p) {
  * tagged-scalar value. */
 int64_t march_decrc_local_freed(void *p) {
     if (!IS_HEAP_PTR(p)) return 0;
+    if (((march_hdr *)p)->rc >= MARCH_RC_IMMORTAL) return 0;  /* see march_decrc */
     if (march_sched_in_scheduler() || march_tls_concurrent_rc)
         return march_decrc_freed(p);
     march_hdr *h = (march_hdr *)p;
@@ -7161,13 +7173,17 @@ void *march_send(void *actor, void *msg) {
      * so we must NOT decrc it again here. Shedding is observable via
      * Scheduler.dropped_messages(), not via this return value. */
 
-    /* Return Some(()). */
-    void *some = march_alloc(16 + 8);
-    int32_t *hdr = (int32_t *)((char *)some + 8);
-    hdr[0] = 1;
-    int64_t *fld = (int64_t *)((char *)some + 16);
-    fld[0] = 0;
-    return some;
+    /* Return Some(()): ONE shared, immortal cell rather than a fresh
+     * allocation per send.  The result is almost always discarded, and since a
+     * discarded `send` result is now released (it used to leak, see
+     * specs/progress/2026-10-01-compiled-actor-and-nominal-record-leaks.md),
+     * a fresh cell cost an allocation AND a free on every send: +16% on
+     * bench/actors/fanin_flood.  Immortal (march_decrc skips it), never reused
+     * in place (FBIP's rc == 1 test is false), and it carries no heap child.
+     * Layout: header {rc, tag = 1 (Some), pad = 0}, one Unit field (0). */
+    static int64_t g_send_some_cell[3] __attribute__((aligned(16))) = {
+        MARCH_RC_IMMORTAL, 1, 0 };
+    return g_send_some_cell;
 }
 
 /* ── send_after / cancel_timer (specs/progress/2026-08-12-language-level-

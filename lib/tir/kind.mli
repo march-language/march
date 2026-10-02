@@ -97,6 +97,14 @@ val llvm_ty_of : table -> Tir.ty -> string
 
 val find_variant : table -> string -> (string * Tir.ty list) list option
 val is_actor_struct_type : table -> string -> bool
+
+(** True iff [name] is a nominal record type ([TDRecord]) of this module,
+    actor structs excluded.  Perceus drops such a value at scope end exactly
+    like a structural record; see [Perceus_core.is_aggregate_ty]. *)
+val is_record_type : table -> string -> bool
+
+(** Declared fields of a nominal record type, [None] for anything else. *)
+val record_fields : table -> string -> (string * Tir.ty) list option
 val is_niche_shaped : table -> string -> bool
 val niche_repr_of_concrete : table -> string -> repr option
 

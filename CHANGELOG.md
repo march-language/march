@@ -19,6 +19,23 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **An in-cluster control plane for hot deploys (distributed deploys, step 12a).** A
+  `[control] candidates = "<host label>"` section in `topology.toml` makes every node run
+  an Agent and the labelled nodes serve a control API; one of them leads (`count = 1`
+  placement). A release, built and signed by forge (it holds the only key), is stored on
+  every reachable candidate, then carried out step by step with canary gates; nodes
+  verify every signed line themselves, so a compromised control node can delay a deploy
+  but not forge one. No ssh is involved in a hot deploy. A leader killed mid-rollout is
+  replaced and the release finishes without applying a step twice. Leadership needs
+  `Ctl.Control:offer` in the node's certificate. Restart-class changes still go through
+  the process backend. `forge deploy` itself does not select the cluster backend yet.
+- **Native builds allocate from a vendored mimalloc.** `march_alloc`, the allocator
+  behind every March value, now draws from a statically linked mimalloc instead of
+  libc `calloc`, with no new system dependency. Allocation-heavy programs get
+  faster: `binary_trees` 233 to 165 ms (-29%) and `list_ops` 76 to 62 ms (-18%),
+  with `tree_transform` about 3% faster. The cost is a larger resident set (7 MB to
+  14 MB on `binary_trees`). Set `MARCH_MALLOC=libc` when compiling to get the old
+  allocator; `MARCH_SANITIZE` builds, hot-reload patches and the REPL always use libc.
 - **`Array.sort_by`, `Array.sort_by_key`, `RRB.sort_by` and `RRB.sort_by_key`.**
   Stable sorts for the persistent vectors: `sort_by` takes the same comparator
   as `List.sort_by` (`fn (a, b) -> a <= b`), and `sort_by_key` takes a function
@@ -54,6 +71,23 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Compiled `to_string(())` prints `()`.** A compiled program printed `0` for
+  the unit value, in `to_string`, `show`, string interpolation and inside
+  containers (`Some(())` printed `Some(0)`). It now prints `()` as the
+  interpreter always did.
+- **Compiled actors no longer leak every message they receive.** A compiled
+  actor never released a delivered message, its heap fields, or the state
+  record a handler returned, so memory grew with every message for the life of
+  the program. A `send` written as a statement also leaked the `Some(())` it
+  returns. All three are released now; the interpreter was never affected.
+  `send` now returns one shared `Some(())` instead of allocating one per call,
+  so a send-heavy program is no slower for the extra frees (14% faster on
+  `bench/actors/fanin_flood.march` at 8 schedulers).
+- **A named record read only through its fields is freed (compiled).** A value
+  of a declared record type (`type Pair = { a : String, b : String }`) that was
+  built, read through `r.a`, and then dropped leaked its cell and every heap
+  value it held. It is now released at the end of its scope, as an anonymous
+  record already was.
 - **An app actor may share a name with a standard-library actor.** An app
   `actor Anchor`, `Writer`, `Endpoint`, `HostWatch`, `RegWatch`, `CtlWriter`,
   `OfferActor`, `ApInbox` or `ClusterNodeActor` used to collide with the
@@ -455,6 +489,18 @@ git log is authoritative for exact commits.
   silently skipped the check. It is now deferred until the whole module run and
   requires the importee's full declared set (fail-closed), so the same program
   is rejected in either declaration order.
+- **Destructuring a tuple and moving its fields on no longer leaks in compiled
+  programs.** `match t do (a, _, c) -> f(Box(a, c)) end` leaked the moved fields
+  (two objects per call), and a field the pattern never used was never freed.
+  The compiler treated a tuple pattern's fields as borrowed although the match
+  hands them over as owned; they now follow the same ownership as a constructor
+  pattern's.
+- **A record field returned out of the scope that owns the record is no longer
+  freed with it (compiled).** `let a = match f() do Some(m) -> m.addr ... end`
+  handed the caller a String the record still owned, and it was freed when
+  the record was dropped: a use-after-free once the record held the last
+  reference (it crashed a cluster node on a peer reconnect). The field now
+  gets its own reference first.
 - **`Process.run_stream` works in compiled programs and no longer leaks.** The
   compiled runtime returned the raw stdout String under the `Seq(String)` type
   (any `Seq` operation on it panicked) and leaked three objects per call. Both
@@ -749,6 +795,16 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **Breaking: `Seq.batched`, `Flow.batch` and `Gen.frequency` now declare their
+  preconditions in the signature.** `Seq.batched(seq, n)` and `Flow.batch(stage, n)`
+  take `n : {Int | _ > 0}`, and `Gen.frequency(pairs)` takes
+  `pairs : {List((Int, Generator(a))) | len(_) > 0}`. Each already forwarded to a
+  contracted callee without restating the contract, so a zero batch size or an
+  empty list compiled and failed at run time; a literal violation is now a
+  compile error, and an unproven argument is a hint (an error under
+  `cap verified`). To migrate, run `march --check --refine-suggest <fn>` on the
+  caller, which prints the refinement to add to its parameter, or guard the call
+  with `if n > 0` / a `match` on the list.
 - **A small scalar aggregate built in the arms of an `if`/`match` no longer
   allocates.** When every arm builds the same unboxed type (for example
   `if c do P2(a, 1) else P2(1, a) end`), the join now holds the struct directly

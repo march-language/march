@@ -27,6 +27,17 @@ void march_reload_server_start(const char *socket_path);
  * march_reload_server_start); it must not block. */
 void march_hcr_on_topology(const char *path);
 
+/* Run one request line through the reload server's own dispatch and return
+ * the answer (malloc'ed, NUL-terminated, length in *out_len).  `req` is the
+ * line, optionally followed by "\n" and the body bytes a body verb (TOPOLOGY,
+ * CAS_PUT) reads.  The socket loop calls the same per-line function; this is
+ * not a second implementation.  With no server started the answer is
+ * "ERR no_reload_server". */
+char *march_reload_request(const char *req, size_t req_len, size_t *out_len);
+
+/* The March-level `reload_request(line : String) : String` builtin. */
+void *march_reload_request_string(void *s);
+
 /* Validate a dlopen'd patch's embedded target/ABI/prefix markers. */
 int march_hcr_patch_identity_ok(void *handle, char *reason, size_t reason_len);
 

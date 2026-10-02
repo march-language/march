@@ -1,0 +1,28 @@
+-- A tuple PARAMETER destructured in a callee that a loop calls repeatedly with
+-- the same tuple.  Once an RC underflow (test_eval "tuple param multi-destruct
+-- no RC underflow"): the arm released the tuple AND its field with no matching
+-- increment.  Pinned here so the release/increment balance in use_first is a
+-- readable diff.  See
+-- specs/progress/2026-09-30-compiled-tuple-destructure-leaks-moved-fields.md.
+mod TupleParamBorrowedDestruct do
+  needs IO.Console
+
+  pfn use_first(pair : (String, String)) : Int do
+    let a = match pair do (x, _) -> x end
+    String.byte_size(a)
+  end
+
+  pfn process_pairs(pair : (String, String), n : Int, acc : Int) : Int do
+    match n do
+    0 -> acc
+    _ ->
+      let k = use_first(pair)
+      process_pairs(pair, n - 1, acc + k)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let pair = ("hello", "world")
+    println(int_to_string(process_pairs(pair, 3, 0)))
+  end
+end
