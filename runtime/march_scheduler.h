@@ -508,11 +508,6 @@ typedef struct march_proc {
         atomic_load_explicit(&(field), memory_order_relaxed) + 1, \
         memory_order_relaxed)
 
-/* Count one message sent by the calling green thread (a no-op outside one).
- * Called by march_send after a successful enqueue: the caller reads its own
- * proc AFTER any park in the send, never across it. */
-void march_sched_count_send(void);
-
 /* Record how many messages the calling green thread's Actor.call is holding
  * off its mailbox (0 when it puts them back). */
 void march_sched_set_held(int64_t n);
@@ -544,6 +539,13 @@ typedef struct march_scheduler {
      * on the idle path and every 1024 dispatches, so a dispatch never reads
      * the clock.  Owner thread only. */
     int64_t         now_ms;
+    /* Idle time (R2, C12 of the observe plan): nanoseconds this scheduler
+     * spent asleep on the idle path, and the monotonic time its loop
+     * started.  Utilisation = 1 - Δidle_ns / Δwall.  Only the idle path is
+     * timed (two clock reads around the 1 ms sleep it already takes), so a
+     * busy scheduler pays nothing.  Owner writes, the observe thread reads. */
+    _Atomic uint64_t idle_ns;
+    _Atomic uint64_t started_ns;
     _Atomic int     preempt_tick; /* Set by the preemption daemon just before it
                                    * signals this thread; consumed by the
                                    * handler.  How the handler tells OUR tick
@@ -775,6 +777,12 @@ int64_t      march_sched_stat(int64_t which);
 #define MARCH_THREAD_STAT_DISPATCHES  2   /* green-thread dispatches           */
 #define MARCH_THREAD_STAT_IDLE_POLLS  3   /* loop turns with nothing to run    */
 int64_t      march_sched_thread_stat(int sched_id, int which);
+
+/* Monotonic nanoseconds (CLOCK_MONOTONIC), and a scheduler's idle_ns /
+ * started_ns (0 for an index outside the current count). */
+uint64_t     march_mono_ns(void);
+uint64_t     march_sched_idle_ns(int sched_id);
+uint64_t     march_sched_started_ns(int sched_id);
 
 /* Sentinel returned by march_sched_recv when the process was woken without a
  * message (killed or spurious wakeup).  This is the address of a static C

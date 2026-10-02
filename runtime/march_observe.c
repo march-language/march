@@ -171,6 +171,11 @@ void march_jw_f64(march_jw *w, double v) {
     if (!isfinite(v)) { march_jw_null(w); return; }
     char b[40];
     int n = snprintf(b, sizeof b, "%.17g", v);
+    /* Always a JSON float: an integral value keeps a ".0", so a typed
+     * client never sees a float field arrive as an integer. */
+    if (n > 0 && n < (int)sizeof b - 2 && !strpbrk(b, ".eEn")) {
+        b[n++] = '.'; b[n++] = '0'; b[n] = '\0';
+    }
     jw_sep(w);
     jw_raw(w, b, (size_t)n);
 }

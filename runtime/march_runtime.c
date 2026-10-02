@@ -7274,9 +7274,6 @@ void *march_send(void *actor, void *msg) {
     march_proc *gt = meta ? meta_gt(meta) : NULL;
     int send_rc = gt ? march_sched_send(gt, msg) : MARCH_SEND_DEAD;
     march_reclaim_exit();
-    /* After the send (a BLOCK-policy send may have parked and resumed on
-     * another scheduler): count it on the sender's proc as it is now. */
-    if (send_rc == MARCH_SEND_OK) march_sched_count_send();
     if (send_rc == MARCH_SEND_DEAD) {
         /* Actor died in the window between the checks above and the send;
          * march_sched_send did not enqueue or dispose the message (dead
@@ -7578,7 +7575,6 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
      * find_or_create_meta — same reasoning as march_send: a NULL meta here
      * means the pid was never spawned or has died.  A target that dies
      * between the test and the send is a dead send, as it always was. */
-    int counted = 0;
     march_reclaim_enter();
     march_actor_meta *meta = find_meta(actor);
     march_proc *gt = meta ? meta_gt(meta) : NULL;
@@ -7600,10 +7596,9 @@ void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
         if (ct && msg_tag >= 0 && (int64_t)msg_tag < ct->n)
             msg_tag = ct->tags[msg_tag];
         MARCH_SET_TAG(call_msg, msg_tag);
-        if (march_sched_send(gt, call_msg) == MARCH_SEND_OK) counted = 1;
+        march_sched_send(gt, call_msg);
     }
     march_reclaim_exit();
-    if (counted) march_sched_count_send();   /* the call's request */
     if (!gt || !caller) {
         march_decrc(call_msg);   /* march_decrc does not recurse */
         march_decrc(reply_ref);
@@ -7751,9 +7746,8 @@ void march_actor_reply(void *ref_ptr, void *result) {
      * send, exactly as sending to its dead proc was. */
     march_reclaim_enter();
     march_proc *caller = march_sched_find(caller_pid);
-    int counted = caller && march_sched_send(caller, env) == MARCH_SEND_OK;
+    if (caller) march_sched_send(caller, env);
     march_reclaim_exit();
-    if (counted) march_sched_count_send();   /* the reply */
 }
 
 /* ── Float builtins ──────────────────────────────────────────────────── */

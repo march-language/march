@@ -403,6 +403,22 @@ int64_t march_sched_stat(int64_t which) {
     }
 }
 
+uint64_t march_mono_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+uint64_t march_sched_idle_ns(int sched_id) {
+    if (sched_id < 0 || sched_id >= g_num_scheds) return 0;
+    return atomic_load_explicit(&g_scheds[sched_id].idle_ns, memory_order_relaxed);
+}
+
+uint64_t march_sched_started_ns(int sched_id) {
+    if (sched_id < 0 || sched_id >= g_num_scheds) return 0;
+    return atomic_load_explicit(&g_scheds[sched_id].started_ns, memory_order_relaxed);
+}
+
 int64_t march_sched_thread_stat(int sched_id, int which) {
     if (sched_id < 0 || sched_id >= g_num_scheds) return -1;
     const march_scheduler *s = &g_scheds[sched_id];
@@ -1884,6 +1900,7 @@ static void sched_loop(march_scheduler *sched) {
      * with a quiescent state announced at the top of every iteration below. */
     march_reclaim_sched_attach();
     sched->entered = 1;
+    atomic_store_explicit(&sched->started_ns, march_mono_ns(), memory_order_relaxed);
     atomic_store_explicit(&sched->running, 1, memory_order_release);
     unsigned int steal_seed = (unsigned int)sched->id;
     /* When the previous task cooperatively yielded (PROC_RUNNABLE after running),
@@ -1996,10 +2013,16 @@ static void sched_loop(march_scheduler *sched) {
             struct timespec idle_sleep = { 0, 1000000 }; /* 1ms */
             /* Offline while asleep, so an idle scheduler never holds back a
              * grace period; online (store + fence) before touching anything. */
+            uint64_t idle_t0 = march_mono_ns();
             march_reclaim_offline();
             nanosleep(&idle_sleep, NULL);
             march_reclaim_online();
-            sched->now_ms = march_now_ms();
+            uint64_t idle_t1 = march_mono_ns();
+            atomic_store_explicit(&sched->idle_ns,
+                atomic_load_explicit(&sched->idle_ns, memory_order_relaxed)
+                    + (idle_t1 - idle_t0),
+                memory_order_relaxed);
+            sched->now_ms = (int64_t)(idle_t1 / 1000000);   /* = march_now_ms() */
             continue;
         }
 
@@ -2677,15 +2700,6 @@ march_proc *march_sched_current(void) {
     return tl_sched ? tl_sched->current : NULL;
 }
 
-/* noinline: tl_sched must be read here, after the send's possible park, and
- * never hoisted into a caller across a green-thread switch (a migrated
- * thread would read the old scheduler's TLS). */
-__attribute__((noinline))
-void march_sched_count_send(void) {
-    march_scheduler *s = tl_sched;
-    march_proc *p = s ? s->current : NULL;
-    if (p) march_proc_bump(p->msgs_out);
-}
 
 __attribute__((noinline))
 void march_sched_set_held(int64_t n) {
@@ -2978,6 +2992,10 @@ int march_sched_send(march_proc *target, void *msg) {
     /* The identity a BLOCK wait re-resolves by: the wait suspends the
      * caller's critical section, so `target` may be freed across it. */
     const int64_t target_pid = target ? target->pid : -1;
+    /* The sending proc, for its msgs_out counter: read ONCE, here, before any
+     * BLOCK park.  The proc pointer stays valid across the park (it is the
+     * caller's own); only tl_sched may change.  NULL off a green thread. */
+    march_proc *const sender = tl_sched ? tl_sched->current : NULL;
     for (;;) {
         if (!target || atomic_load_explicit(&target->status, memory_order_acquire) == PROC_DEAD) {
             free(node);
@@ -3121,6 +3139,7 @@ int march_sched_send(march_proc *target, void *msg) {
         if (evicted_old) {
             march_mbox_dispose(evicted_old);
         }
+        if (sender) march_proc_bump(sender->msgs_out);
         return MARCH_SEND_OK;
     }
 }

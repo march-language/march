@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -477,24 +478,67 @@ static const char *verb_names(march_jw *w, const char *args) {
 
 /* ── SCHED ────────────────────────────────────────────────────────────── */
 
-static void write_sched(march_jw *w) {
+#define SCHED_WINDOW_DEFAULT_MS 200
+#define SCHED_WINDOW_MAX_MS     5000
+
+static double clamp01(double x) { return x < 0 ? 0 : x > 1 ? 1 : x; }
+
+/* [window_ms] > 0: sample every scheduler's idle time, sleep, sample again,
+ * and report utilisation over the window (the sleep is on this observe
+ * thread, outside any critical section).  0: lifetime figures only (what
+ * SNAPSHOT uses, so it never sleeps). */
+static void write_sched(march_jw *w, int64_t window_ms) {
     int ns = march_sched_num_schedulers();
+    if (ns > 256) ns = 256;
+    uint64_t idle0[256], t0 = march_mono_ns();
+    for (int i = 0; i < ns; i++) idle0[i] = march_sched_idle_ns(i);
+    if (window_ms > 0) {
+        struct timespec ts = { (time_t)(window_ms / 1000), (long)(window_ms % 1000) * 1000000L };
+        while (nanosleep(&ts, &ts) != 0) {}
+    }
+    uint64_t t1 = march_mono_ns();
+    double busy_sum = 0, life_sum = 0;
+    int life_n = 0;
     march_jw_obj_begin(w);
     march_jw_key(w, "schedulers"); march_jw_i64(w, ns);
+    march_jw_key(w, "window_ms");
+    if (window_ms > 0) march_jw_i64(w, window_ms); else march_jw_null(w);
     march_jw_key(w, "threads");
     march_jw_arr_begin(w);
-    /* Per-thread counters are plain fields owned by their scheduler thread:
-     * a racy snapshot by design until R2 makes them atomics. */
+    /* dispatches/idle_polls are plain fields owned by their scheduler
+     * thread: a racy read, as before. */
     for (int i = 0; i < ns; i++) {
+        uint64_t idle1 = march_sched_idle_ns(i), started = march_sched_started_ns(i);
         march_jw_obj_begin(w);
         march_jw_key(w, "id");         march_jw_i64(w, i);
         march_jw_key(w, "started");    march_jw_bool(w, march_sched_thread_stat(i, MARCH_THREAD_STAT_STARTED) > 0);
         march_jw_key(w, "entered");    march_jw_bool(w, march_sched_thread_stat(i, MARCH_THREAD_STAT_ENTERED) > 0);
         march_jw_key(w, "dispatches"); march_jw_i64(w, march_sched_thread_stat(i, MARCH_THREAD_STAT_DISPATCHES));
         march_jw_key(w, "idle_polls"); march_jw_i64(w, march_sched_thread_stat(i, MARCH_THREAD_STAT_IDLE_POLLS));
+        march_jw_key(w, "idle_ms");    march_jw_u64(w, idle1 / 1000000);
+        march_jw_key(w, "utilisation");
+        if (window_ms > 0 && t1 > t0) {
+            double u = clamp01(1.0 - (double)(idle1 - idle0[i]) / (double)(t1 - t0));
+            busy_sum += u;
+            march_jw_f64(w, u);
+        } else {
+            march_jw_null(w);
+        }
+        march_jw_key(w, "lifetime_utilisation");
+        if (started > 0 && t1 > started) {
+            double u = clamp01(1.0 - (double)idle1 / (double)(t1 - started));
+            life_sum += u; life_n++;
+            march_jw_f64(w, u);
+        } else {
+            march_jw_null(w);
+        }
         march_jw_obj_end(w);
     }
     march_jw_arr_end(w);
+    march_jw_key(w, "utilisation");
+    if (window_ms > 0 && ns > 0) march_jw_f64(w, busy_sum / ns); else march_jw_null(w);
+    march_jw_key(w, "lifetime_utilisation");
+    if (life_n > 0) march_jw_f64(w, life_sum / life_n); else march_jw_null(w);
     march_jw_key(w, "live_procs");         march_jw_i64(w, march_sched_stat(0));
     march_jw_key(w, "procs_spawned");      march_jw_i64(w, march_sched_stat(1));
     march_jw_key(w, "runq");               march_jw_i64(w, march_sched_stat(2));
@@ -511,8 +555,14 @@ static void write_sched(march_jw *w) {
 }
 
 static const char *verb_sched(march_jw *w, const char *args) {
-    if (!only_spaces(args)) return "bad_args";
-    write_sched(w);
+    int64_t window = SCHED_WINDOW_DEFAULT_MS;
+    char word[32];
+    const char *p = args;
+    if (next_word(&p, word, sizeof word)) {
+        if (!parse_i64(word, &window) || window > SCHED_WINDOW_MAX_MS) return "bad_args";
+    }
+    if (!only_spaces(p)) return "bad_args";
+    write_sched(w, window);
     return NULL;
 }
 
@@ -680,7 +730,7 @@ static const char *verb_snapshot(march_jw *w, const char *args) {
         write_actors(w, rows, n, SORT_MBOX, ACTORS_DEFAULT_N);
     }
     if (mask & SEC_TREE)   { march_jw_key(w, "tree");   write_tree(w, rows, n); }
-    if (mask & SEC_SCHED)  { march_jw_key(w, "sched");  write_sched(w); }
+    if (mask & SEC_SCHED)  { march_jw_key(w, "sched");  write_sched(w, 0); }
     if (mask & SEC_EPOCHS) { march_jw_key(w, "epochs"); write_epochs(w); }
     march_jw_obj_end(w);
     march_obs_actors_free(rows, n);
@@ -698,7 +748,8 @@ static const march_observe_verb snapshot_verbs[] = {
       "one actor: row, children, supervisor config, death kind", verb_actor },
     { "TREE", "observe", "", "the supervision tree and the unsupervised actors", verb_tree },
     { "NAMES", "observe", "", "registered names and their pids", verb_names },
-    { "SCHED", "observe", "", "scheduler threads and global scheduler counters", verb_sched },
+    { "SCHED", "observe", "[window_ms]",
+      "scheduler threads, utilisation over window_ms (default 200, 0 = lifetime only), counters", verb_sched },
     { "MEM", "observe", "", "RSS, peak RSS, live heap objects, queued messages", verb_mem },
     { "EPOCHS", "observe", "", "hot-reload epochs, pins, slots and counters", verb_epochs },
 };

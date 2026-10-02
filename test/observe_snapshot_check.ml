@@ -259,6 +259,39 @@ let counters sock =
   check "MEM counts held messages as queued"
     (member "queued_messages" m |> to_int >= 150) (show m)
 
+(* R2 utilisation: test/native/observe_sched.march at 4 schedulers.  The
+   idle query runs right after "ready" (1.5 s of idle follow); the busy one
+   after the program prints "busy" (4 s of 4 spinners follow). *)
+let sched sock ready_file =
+  let util req =
+    let d = data (get sock req) in
+    (member "utilisation" d |> to_number, d)
+  in
+  let (idle, d) = util "SCHED 300" in
+  check "SCHED reports 4 schedulers" (member "schedulers" d |> to_int = 4) "";
+  check "an idle node is under 5% busy" (idle < 0.05)
+    (Printf.sprintf "%.3f" idle);
+  let deadline = Unix.gettimeofday () +. 20. in
+  let rec wait_busy () =
+    let s = try In_channel.with_open_bin ready_file In_channel.input_all with Sys_error _ -> "" in
+    let has_busy = List.mem "busy" (String.split_on_char '\n' s) in
+    if has_busy then ()
+    else if Unix.gettimeofday () > deadline then print_endline "FAIL: never busy"
+    else (Unix.sleepf 0.05; wait_busy ())
+  in
+  wait_busy ();
+  Unix.sleepf 0.3;
+  let (busy, d) = util "SCHED 1000" in
+  check "4 spinners on 4 schedulers are over 90% busy" (busy > 0.90)
+    (Printf.sprintf "%.3f %s" busy (Yojson.Safe.to_string (member "threads" d)));
+  let s = data (get sock "SNAPSHOT sched") |> member "sched" in
+  check "SNAPSHOT's sched section is lifetime-only (no window)"
+    (member "window_ms" s = `Null && member "utilisation" s = `Null
+     && (match member "lifetime_utilisation" s with `Float _ -> true | _ -> false))
+    (Yojson.Safe.to_string s);
+  check "SCHED rejects a window over 5000 ms"
+    (error (get sock "SCHED 5001") = Some "bad_args") ""
+
 let () =
   match Sys.argv with
   | [| _; mode; sock; ready |] ->
@@ -267,9 +300,10 @@ let () =
      | "tree" -> tree sock
      | "types" -> types sock
      | "counters" -> counters sock
-     | _ -> prerr_endline "mode: tree | types | counters"; exit 2);
+     | "sched" -> sched sock ready
+     | _ -> prerr_endline "mode: tree | types | counters | sched"; exit 2);
     check "no reply carries the crash message" (!leaked = [])
       (String.concat "; " !leaked);
     (* The golden diff reports a failure; exit 0 so it is shown. *)
     ignore !failures
-  | _ -> prerr_endline "usage: observe_snapshot_check tree|types|counters <socket> <ready-file>"; exit 2
+  | _ -> prerr_endline "usage: observe_snapshot_check tree|types|counters|sched <socket> <ready-file>"; exit 2
