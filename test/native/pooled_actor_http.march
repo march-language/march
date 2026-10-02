@@ -1,0 +1,114 @@
+-- test/native/pooled_actor_http.march
+--
+-- A depot-shaped connection pool (depot/lib/wire/pool.march) driven from
+-- compiled HTTP handlers. Handlers run on raw pthreads (thread pool) or
+-- event-loop pthreads, never on a scheduler green thread; checkout goes
+-- through task_spawn(actor_call) exactly as depot's Pool.checkout does, which
+-- is the foreign-thread bridge path. The reply is a HEAP payload (a record
+-- holding a 64 KiB Bytes) because an Int reply is an immediate whose decrc
+-- is a no-op and hid the Perceus niche-reuse corruption depot hit in July.
+-- Driven by test/test_http_native.ml (run_pooled_e2e); no .expected file.
+mod PooledActorHttp do
+  needs IO.Process
+  needs IO.NetListen
+  needs IO.Spawn
+
+  type PoolConn = { id : Int, buf : Bytes }
+
+  pfn mk_conn(i) do
+    { id: i, buf: Bytes.from_string(String.repeat("x", 65536)) }
+  end
+
+  pfn mk_conns(i, n, acc) do
+    if i > n do acc else mk_conns(i + 1, n, Cons(mk_conn(i), acc)) end
+  end
+
+  -- actor_get_int indexes state fields ALPHABETICALLY: 0 = idle, 1 = out.
+  actor Pool do
+    state { out : Int, idle : List(PoolConn) }
+    init { out: 0, idle: Nil }
+
+    on PoolInit(n : Int) do
+      { state with idle: mk_conns(1, n, Nil) }
+    end
+
+    -- actor_call target. reply_to is injected by the runtime as field[0].
+    on Checkout(reply_to) do
+      let result = match state.idle do
+        Cons(c, rest) -> { conn: Some(c), new_state: { state with idle: rest, out: state.out + 1 } }
+        Nil           -> { conn: None, new_state: state }
+        end
+      -- Bind before returning: a handler whose final expression is a field
+      -- projection loses the state update compiled (depot's note).
+      let new_state = result.new_state
+      let _ = actor_reply(reply_to, result.conn)
+      new_state
+    end
+
+    on Checkin(c : PoolConn) do
+      { state with idle: Cons(c, state.idle), out: state.out - 1 }
+    end
+  end
+
+  -- Mirrors depot Pool.checkout: actor_call on a fresh green thread, the
+  -- caller (an HTTP pthread) only touches task_spawn/task_await.
+  pfn checkout(pool) do
+    let t = task_spawn(fn _ ->
+      match actor_call(pool, Checkout(0), 5000) do
+      Err(e) -> Err("pool actor: " ++ e)
+      Ok(maybe) ->
+        match maybe do
+        None    -> Err("no connection available")
+        Some(c) -> Ok(c)
+        end
+      end)
+    task_await_unwrap(t)
+  end
+
+  pfn with_conn(pool, f) do
+    match checkout(pool) do
+    Err(e) -> Err(e)
+    Ok(c)  ->
+      let r = f(c)
+      let _ = send(pool, Checkin(c))
+      Ok(r)
+    end
+  end
+
+  pfn router(pool, conn) do
+    match (HttpServer.method(conn), HttpServer.path_info(conn)) do
+    (:get, Nil) ->
+      match with_conn(pool, fn c -> "conn=" ++ int_to_string(c.id) ++ ":" ++ int_to_string(Bytes.length(c.buf))) do
+      Ok(body) -> conn |> HttpServer.text(200, body)
+      Err(e)   -> conn |> HttpServer.text(503, e)
+      end
+    (:get, Cons("stats", Nil)) ->
+      conn |> HttpServer.text(200, "out=" ++ int_to_string(actor_get_int(pool, 1)))
+    _ -> conn |> HttpServer.text(404, "Not Found")
+    end
+  end
+
+  pfn port_from_env() do
+    match process_env("MARCH_TEST_HTTP_PORT") do
+    Some(s) ->
+      match string_to_int(s) do
+      Some(n) -> n
+      None -> 0
+      end
+    None -> 0
+    end
+  end
+
+  fn main(_cap_netlisten : Cap(IO.NetListen), _cap_process : Cap(IO.Process), _cap_spawn : Cap(IO.Spawn)) do
+    let port = port_from_env()
+    if port == 0 do
+      process_exit(2)
+    else
+      let pool = spawn(Pool)
+      let _ = send(pool, PoolInit(4))
+      HttpServer.new(port)
+      |> HttpServer.plug(fn conn -> router(pool, conn))
+      |> HttpServer.listen()
+    end
+  end
+end
