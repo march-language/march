@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **A read-only observe socket on every compiled program.** Set
+  `MARCH_OBSERVE_SOCKET=<path>` (or just `MARCH_HOT_RELOAD_SOCKET`, which puts it
+  at `<path>.observe`) and the program answers one-line requests with one line of
+  JSON. It serves `HELP` and `PING` today and is the base the coming
+  `forge observe`, `forge top` and `forge diagnose` build on. It is separate from
+  the hot-reload socket, so an observer can never block a deploy; the socket is
+  owner-only and holds at most eight clients at once.
 - **An in-cluster control plane for hot deploys (distributed deploys, step 12a).** A
   `[control] candidates = "<host label>"` section in `topology.toml` makes every node run
   an Agent and the labelled nodes serve a control API; one of them leads (`count = 1`
@@ -80,6 +87,15 @@ git log is authoritative for exact commits.
   `RC underflow` on macOS and `malloc(): unaligned fastbin chunk detected` on
   Linux. Such a lambda that returns its `Float` argument, or passes it on to
   another closure, also no longer leaks it.
+- **A compiled `Array` that is built, updated and dropped no longer leaks its
+  trie.** `Array.from_list`, `push`, `set` and `pop` leaked about one object per
+  element once a vector held more than one 32-element leaf (a 1,100-element
+  `from_list` leaked 2,224 objects per build, 40,000 leaked 81,118). Four compiler
+  causes (a tuple bound by `let (a, b) = ..` was never released when its scope ended
+  in an `if`, `match` or arithmetic; nested local functions lost their frame tuples;
+  a nested pattern with a default arm leaked its join-point closure; an `Option` of
+  a tree in a tuple was released shallowly) are worked around in `stdlib/array.march`
+  or fixed in Perceus. Loops that destructure a tuple are still compiled to loops.
 - **Compiled `Seq` constructors and combinators no longer leak.** Draining
   `Seq.from_list`, `Seq.from_string_lines`, `Seq.map`, `Seq.filter` and
   `Seq.concat` with `Seq.count` or `Seq.fold` leaked 3 to 5 heap objects per

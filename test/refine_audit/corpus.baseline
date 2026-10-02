@@ -56,6 +56,8 @@ native_aggregate_param_field_alias: coverage audit (user + stdlib): 123 enforced
 native_aggregate_param_field_alias: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_array_sort_by: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_array_sort_by: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_array_trie_drop_leak_probe: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_array_trie_drop_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_as_pattern: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_as_pattern: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_atom_ctor_field: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -358,6 +360,8 @@ native_node_send_loopback: coverage audit (user + stdlib): 123 enforced, 0 inert
 native_node_send_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_node_send_typed_loopback: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_node_send_typed_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_observe_ping: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_observe_ping: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_option_adt_eq: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_option_adt_eq: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_option_niche: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced

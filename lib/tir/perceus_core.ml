@@ -470,6 +470,25 @@ let rec tir_expr_ty (e : Tir.expr) : Tir.ty option =
     (match f.Tir.v_ty with
      | Tir.TFn (_, r) -> Some r
      | _ -> builtin_op_result_ty f.Tir.v_name args)
+  (* The arms of a case agree on their type, so any one that can be typed
+     types the whole thing.  A scope whose value is a [match]/[if] (the usual
+     way a function ends) was otherwise "type unknown", and the scope-end drop
+     of every tuple destructured in it was refused: `let (front, tail) = split(..)`
+     followed by an `if` leaked the pair and what it owned. *)
+  | Tir.ECase (_, brs, def) ->
+    let first_typed =
+      List.find_map (fun (br : Tir.branch) ->
+          match tir_expr_ty br.Tir.br_body with
+          | Some (Tir.TVar _) | None -> None
+          | some -> some) brs
+    in
+    (match first_typed with
+     | Some _ as r -> r
+     | None ->
+       (match def with
+        | Some d ->
+          (match tir_expr_ty d with Some (Tir.TVar _) | None -> None | r -> r)
+        | None -> None))
   | Tir.EField (Tir.AVar src, f) ->
     (match src.Tir.v_ty with
      | Tir.TRecord fs -> List.assoc_opt f fs
@@ -477,6 +496,17 @@ let rec tir_expr_ty (e : Tir.expr) : Tir.ty option =
        List.nth_opt ts (Tir_names.fv_field_index f)
      | _ -> None)
   | Tir.EAlloc (ty, _) | Tir.EStackAlloc (ty, _) -> Some ty
+  (* A tuple literal is typed by its elements.  Every atom must be typed, or
+     the whole is unknown. *)
+  | Tir.ETuple atoms ->
+    let tys = List.filter_map (function
+        | Tir.AVar w -> Some w.Tir.v_ty
+        | Tir.ALit (March_ast.Ast.LitInt _) -> Some Tir.TInt
+        | Tir.ALit (March_ast.Ast.LitBool _) -> Some Tir.TBool
+        | Tir.ALit (March_ast.Ast.LitFloat _) -> Some Tir.TFloat
+        | Tir.ALit (March_ast.Ast.LitString _) -> Some Tir.TString
+        | _ -> None) atoms in
+    if List.length tys = List.length atoms then Some (Tir.TTuple tys) else None
   | Tir.ERecord fs ->
     (* TRecord is sorted by field name; preserve that invariant. *)
     let named = List.filter_map (fun (n, a) ->
@@ -488,27 +518,6 @@ let rec tir_expr_ty (e : Tir.expr) : Tir.ty option =
     else None
   | Tir.EUpdate (Tir.AVar src, _) -> Some src.Tir.v_ty
   | _ -> None
-
-(** True when the value of [e] is a literal at the end of its [ELet]/[ESeq]
-    chain: an actor handler's [...; :unit], a function whose body ends in a
-    constant.  Such a scope needs no typed temporary for the aggregate
-    scope-end drop: the drop can go immediately before the literal
-    ([drop_before_tail_literal]), which reads no variable and holds no
-    reference, so dropping before it is the same as dropping after it.  This
-    is what lets the drop reach a scope whose value [tir_expr_ty] cannot type
-    (an atom literal, whose [TUnit] reading would lower to [void]). *)
-let rec tail_is_literal (e : Tir.expr) : bool =
-  match e with
-  | Tir.EAtom (Tir.ALit _) -> true
-  | Tir.ELet (_, _, body) | Tir.ESeq (_, body) -> tail_is_literal body
-  | _ -> false
-
-let rec drop_before_tail_literal (drop : Tir.expr) (e : Tir.expr) : Tir.expr =
-  match e with
-  | Tir.EAtom (Tir.ALit _) -> Tir.ESeq (drop, e)
-  | Tir.ELet (x, e1, body) -> Tir.ELet (x, e1, drop_before_tail_literal drop body)
-  | Tir.ESeq (e1, body) -> Tir.ESeq (e1, drop_before_tail_literal drop body)
-  | _ -> e  (* unreachable when [tail_is_literal e] *)
 
 (** [Some ty] when [e]'s value is the owned result of a call (an [EApp] at
     the end of its [ELet]/[ESeq] chain) of a type that needs RC, so that
@@ -724,6 +733,89 @@ let rec dup_tail_projections (env : env) (name : string) (e : Tir.expr) : Tir.ex
       List.map (fun br -> { br with Tir.br_body = dup_tail_projections env name br.Tir.br_body }) brs,
       Option.map (dup_tail_projections env name) d)
   | _ -> e
+
+(** Release the owned aggregate [v] at every TAIL of its scope [e], or [None]
+    when some tail cannot be handled.
+
+    A tail that is a CALL keeps being a call: the release goes in FRONT of it
+    ([dec_rc v; f(..)]), so a tail-recursive loop that destructures a tuple on
+    each iteration is still a loop.  Wrapping it ([let tmp = f(..) in dec_rc v;
+    tmp]) pushes the call out of tail position and a loop over millions of
+    items overflows the stack.  Releasing first is sound when nothing the call
+    still reads is owned only by [v]: a field passed at an OWNED position was
+    dup'd by the borrowed-field logic, and a field passed at a BORROWED
+    parameter position of a known callee has no such dup and is read for the
+    whole call, so that case stays a post-call release.  Any other tail is
+    bound first ([let tmp = tail in dec_rc v; tmp]), which needs its type. *)
+let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option =
+  let name = v.Tir.v_name in
+  (* [v] and its pure aliases, then the variables projected out of them. *)
+  let owners = Hashtbl.create 4 in
+  Hashtbl.replace owners name ();
+  let projected = Hashtbl.create 8 in
+  let rec scan (x : Tir.expr) : unit =
+    match x with
+    | Tir.ELet (w, Tir.EAtom (Tir.AVar src), body) when Hashtbl.mem owners src.Tir.v_name ->
+      Hashtbl.replace owners w.Tir.v_name (); scan body
+    | Tir.ELet (w, Tir.EField (Tir.AVar src, _), body) when Hashtbl.mem owners src.Tir.v_name ->
+      Hashtbl.replace projected w.Tir.v_name (); scan body
+    | Tir.ELet (_, e1, body) -> scan e1; scan body
+    | Tir.ESeq (a, body) -> scan a; scan body
+    | Tir.ELetRec (_, body) -> scan body
+    | Tir.ECase (_, brs, d) ->
+      List.iter (fun (br : Tir.branch) -> scan br.Tir.br_body) brs;
+      Option.iter scan d
+    | _ -> ()
+  in
+  scan e;
+  let reads_borrowed_projection (callee : string) (args : Tir.atom list) =
+    List.exists (fun (i, a) ->
+        match a with
+        | Tir.AVar w ->
+          Hashtbl.mem projected w.Tir.v_name
+          && needs_rc env w.Tir.v_ty
+          && Borrow.is_borrowed env.borrow_map callee i
+        | _ -> false)
+      (List.mapi (fun i a -> (i, a)) args)
+  in
+  let call_is_safe (tail : Tir.expr) : bool =
+    match tail with
+    | Tir.EApp (f, args) ->
+      not (String.equal f.Tir.v_name name)
+      && not (reads_borrowed_projection f.Tir.v_name args)
+    | Tir.ECallPtr (Tir.AVar f, args) ->
+      (* Indirect calls consume their arguments, except an extern, whose
+         parameter ownership comes from the borrow map. *)
+      not (StringSet.mem f.Tir.v_name env.extern_names)
+      || not (reads_borrowed_projection f.Tir.v_name args)
+    | Tir.ECallPtr _ -> false
+    | _ -> false
+  in
+  let ok = ref true in
+  let rec go (x : Tir.expr) : Tir.expr =
+    match x with
+    | Tir.ELet (w, e1, body) -> Tir.ELet (w, e1, go body)
+    | Tir.ESeq (a, body) -> Tir.ESeq (a, go body)
+    | Tir.ECase (a, brs, d) ->
+      Tir.ECase (a,
+        List.map (fun (br : Tir.branch) ->
+            { br with Tir.br_body = go br.Tir.br_body }) brs,
+        Option.map go d)
+    (* A literal reads nothing, so the release goes in front of it (the
+       actor handler's trailing `:unit`; a literal has no type to bind). *)
+    | Tir.EAtom (Tir.ALit _) as tail -> Tir.ESeq (decrc_for env v (Tir.AVar v), tail)
+    | (Tir.EApp _ | Tir.ECallPtr _) as tail when call_is_safe tail ->
+      Tir.ESeq (decrc_for env v (Tir.AVar v), tail)
+    | tail ->
+      (match tir_expr_ty tail with
+       | Some ty ->
+         let tmp = fresh_rc_var ty in
+         Tir.ELet (tmp, dup_tail_projections env name tail,
+                   Tir.ESeq (decrc_for env v (Tir.AVar v), Tir.EAtom (Tir.AVar tmp)))
+       | None -> ok := false; tail)
+  in
+  let r = go e in
+  if !ok then Some r else None
 
 (** Insert RC operations into an expression.
     Returns [(expr', live_before)] where expr' has RC ops inserted and
@@ -1242,7 +1334,7 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
               && not (tail_value_is_var v.Tir.v_name e2')
               && not (releases_var v.Tir.v_name e2')
               && used_only_as_field_source v.Tir.v_name e2'
-              && (tir_expr_ty e2' <> None || tail_is_literal e2') then
+              && drop_agg_at_tails env v e2' <> None then
         (* Scope-end drop for an owned aggregate (Wave: aggregate RC).
            Records and tuples are read exclusively through [EField]; unlike a
            variant, which is destructured by an ECase and freed there by
@@ -1265,16 +1357,9 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
            ownership to the caller and this dec would be a double-free.
            [moved_vars] excludes the aggregate being stored into another
            structure on any path. *)
-        if tail_is_literal e2' then
-          drop_before_tail_literal (decrc_for env v (Tir.AVar v)) e2'
-        else
-        let body_ty = match tir_expr_ty e2' with
-          | Some t -> t
-          | None -> assert false (* guarded above *) in
-        let tmp = fresh_rc_var body_ty in
-        Tir.ELet (tmp, dup_tail_projections env v.Tir.v_name e2',
-                  Tir.ESeq (decrc_for env v (Tir.AVar v),
-                            Tir.EAtom (Tir.AVar tmp)))
+        (match drop_agg_at_tails env v e2' with
+         | Some dropped -> dropped
+         | None -> e2')
       else
         e2'
     in
