@@ -532,10 +532,29 @@ let insert_apply_fn_clo_drop ~(repl : bool) (body : Tir.expr) : Tir.expr =
     function's return type by definition of tail position, so no inference is
     needed.
 
-    Guards mirror the ELet scope-end drop.  [used_only_as_field_source] is what
-    keeps this from double-freeing: at any consuming position ownership has
-    already transferred, and [releases_var] stands the drop down when the body
-    already decs the parameter on some path. *)
+    Guards mirror the ELet scope-end drop, but are applied PER PATH.
+    [used_only_as_field_source] is what keeps this from double-freeing: at any
+    consuming position ownership has already transferred.  [releases_var]
+    stands the drop down where the body already decs the parameter.  Both
+    used to be asked of the WHOLE body, so a parameter consumed or released
+    on ONE arm was never dropped on the arms that merely read it:
+
+      fn take(st) = match st.items do
+                    Cons(x, rest) -> { conn: Some(x), new_state: { st with items: rest } }
+                    Nil           -> { conn: None, new_state: st }   -- moves st
+                    end
+
+    leaked [st] on every [Cons] path.  That is the shape of depot's
+    [Pool.handle_checkout], so every pooled checkout leaked the actor's state
+    record and a list cell -- the last steady leak in an idle conduit worker.
+    The same whole-body test leaked a read-only parameter whenever Perceus's
+    cross-branch pass had already released it on some other arm.
+
+    Now the walk to each tail tracks which candidates the path has already
+    consumed or released (in a binding's RHS, a statement, a closure capture,
+    or as a case scrutinee), and only the rest are dropped before that tail.
+    Anything ambiguous along the path counts as consumed: leak, never
+    double-free. *)
 let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
     (fn : Tir.fn_def) (body : Tir.expr) : Tir.expr =
   let candidates =
@@ -544,17 +563,27 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
         && p.Tir.v_lin = Tir.Unr
         && not (StringSet.mem p.Tir.v_name borrowed)
         && not (StringSet.mem p.Tir.v_name env.closure_fvs)
-        && not (StringSet.mem p.Tir.v_name env.moved_vars)
-        && not (releases_var p.Tir.v_name body)
-        && used_only_as_field_source p.Tir.v_name body)
+        && not (StringSet.mem p.Tir.v_name env.moved_vars))
       fn.Tir.fn_params
   in
   match candidates with
   | [] -> body
   | _ ->
-    let drop_ops tail_expr =
+    (* Candidates [e] consumes or releases: no longer this path's to drop. *)
+    let taken_by (e : Tir.expr) (taken : StringSet.t) : StringSet.t =
+      List.fold_left (fun acc p ->
+          let n = p.Tir.v_name in
+          if StringSet.mem n acc then acc
+          else if releases_var n e || not (used_only_as_field_source n e)
+          then StringSet.add n acc
+          else acc)
+        taken candidates
+    in
+    let drop_ops taken tail_expr =
       List.fold_left
-        (fun acc p -> Tir.ESeq (decrc_for env p (Tir.AVar p), acc))
+        (fun acc p ->
+           if StringSet.mem p.Tir.v_name taken then acc
+           else Tir.ESeq (decrc_for env p (Tir.AVar p), acc))
         tail_expr candidates
     in
     (* [aliases] holds the heap values on the current path that still point
@@ -594,22 +623,29 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
       || StringSet.exists
            (fun a -> Perceus_liveness.name_free_in a e) aliases
     in
-    let rec push aliases (e : Tir.expr) : Tir.expr =
+    let rec push taken aliases (e : Tir.expr) : Tir.expr =
       match e with
       | Tir.ELet (v, e1, e2) ->
         let aliases =
           if needs_rc env v.Tir.v_ty && rhs_aliases aliases e1
           then StringSet.add v.Tir.v_name aliases
           else StringSet.remove v.Tir.v_name aliases in
-        Tir.ELet (v, e1, push aliases e2)
+        Tir.ELet (v, e1, push (taken_by e1 taken) aliases e2)
       | Tir.ESeq ((Tir.EIncRC (Tir.AVar w) | Tir.EAtomicIncRC (Tir.AVar w)
                    as e1), e2) ->
-        Tir.ESeq (e1, push (StringSet.remove w.Tir.v_name aliases) e2)
-      | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push aliases e2)
+        Tir.ESeq (e1, push taken (StringSet.remove w.Tir.v_name aliases) e2)
+      | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push (taken_by e1 taken) aliases e2)
       | Tir.ECase (a, branches, default) ->
         let scrut_aliased = match a with
           | Tir.AVar w -> is_candidate_or_alias aliases w
           | _ -> false in
+        (* Matching ON a candidate hands it to the case's scrutinee drop. *)
+        let taken = match a with
+          | Tir.AVar w
+            when List.exists
+                   (fun p -> String.equal p.Tir.v_name w.Tir.v_name) candidates ->
+            StringSet.add w.Tir.v_name taken
+          | _ -> taken in
         let branch_aliases br =
           List.fold_left (fun acc bv ->
               if scrut_aliased && needs_rc env bv.Tir.v_ty
@@ -618,16 +654,29 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
             aliases br.Tir.br_vars in
         Tir.ECase (a,
           List.map (fun br ->
-              { br with Tir.br_body = push (branch_aliases br) br.Tir.br_body })
+              { br with Tir.br_body =
+                          push taken (branch_aliases br) br.Tir.br_body })
             branches,
-          Option.map (push aliases) default)
-      | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, push aliases inner)
-      | tail when uses_candidate aliases tail ->
-        let tmp = fresh_rc_var fn.Tir.fn_ret_ty in
-        Tir.ELet (tmp, tail, drop_ops (Tir.EAtom (Tir.AVar tmp)))
-      | tail -> drop_ops tail
+          Option.map (push taken aliases) default)
+      | Tir.ELetRec (fns, inner) ->
+        (* A local function that mentions a candidate captures it. *)
+        let taken =
+          List.fold_left (fun acc p ->
+              if List.exists (fun fd ->
+                  Perceus_liveness.name_free_in p.Tir.v_name fd.Tir.fn_body) fns
+              then StringSet.add p.Tir.v_name acc else acc)
+            taken candidates in
+        Tir.ELetRec (fns, push taken aliases inner)
+      | tail ->
+        let taken = taken_by tail taken in
+        if List.for_all (fun p -> StringSet.mem p.Tir.v_name taken) candidates
+        then tail
+        else if uses_candidate aliases tail then begin
+          let tmp = fresh_rc_var fn.Tir.fn_ret_ty in
+          Tir.ELet (tmp, tail, drop_ops taken (Tir.EAtom (Tir.AVar tmp)))
+        end else drop_ops taken tail
     in
-    push StringSet.empty body
+    push StringSet.empty StringSet.empty body
 
 (** Release the user parameters of an apply fn that its body never mentions.
 

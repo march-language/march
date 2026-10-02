@@ -457,6 +457,12 @@ let actor_state_field = "$f_state"
     the handler body. *)
 let actor_param = "$actor"
 
+(** Under [--hot-reload] an actor's state lives in a separate record and each
+    handler loads it as this variable ([let $f_state_v = $actor.$f_state]),
+    then loads the state fields out of it.  Producer: [Lower_actor].
+    Consumer: [Perceus_core.is_actor_move_source]. *)
+let actor_state_ptr_var = "$f_state_v"
+
 (** Name the handler body sees its own pid under ([self]). Bound by
     [Lower_actor] to an alias of [actor_param]. *)
 let actor_self_binder = "self"

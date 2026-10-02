@@ -1210,6 +1210,14 @@ void *march_vault_whereis(void *name_val) {
 
 /* ── march_vault_set ──────────────────────────────────────────────────── */
 
+/* The Unit-returning vault builtins (set, set_ttl, push_capped, drop, update,
+ * ns_drop) return NULL, the non-heap unit word mk_ok_unit uses too.  They used
+ * to march_alloc(16) a cell per call that nothing ever released (the result is
+ * typed Unit, so no drop path touches it): conduit's leader loop leaked two per
+ * tick.  And none of them releases a caller's argument -- keys are copied into
+ * C strings, stored values get their own march_incrc -- so they are BORROWED
+ * builtins (lib/tir/borrow.ml), all but vault_update's closure, which the
+ * apply call consumes. */
 void *march_vault_set(void *handle, void *key_val, void *value) {
     vault_data *vd = vault_get_data(handle);
     char *key = vault_key_cstr(key_val);
@@ -1227,7 +1235,7 @@ void *march_vault_set(void *handle, void *key_val, void *value) {
             (void)now;
             vault_wr_unlock(&vault_shard_for(vd, h)->lock);
             free(key);
-            return march_alloc(16); /* Unit */
+            return NULL; /* Unit */
         }
         n = n->next;
     }
@@ -1241,7 +1249,7 @@ void *march_vault_set(void *handle, void *key_val, void *value) {
     vd->buckets[h] = nn;
     vault_shard_for(vd, h)->count++;
     vault_wr_unlock(&vault_shard_for(vd, h)->lock);
-    return march_alloc(16); /* Unit */
+    return NULL; /* Unit */
 }
 
 /* ── march_vault_set_ttl ─────────────────────────────────────────────── */
@@ -1261,7 +1269,7 @@ void *march_vault_set_ttl(void *handle, void *key_val, void *value, int64_t ttl_
             n->expires_ms = expires;
             vault_wr_unlock(&vault_shard_for(vd, h)->lock);
             free(key);
-            return march_alloc(16);
+            return NULL;
         }
         n = n->next;
     }
@@ -1274,7 +1282,7 @@ void *march_vault_set_ttl(void *handle, void *key_val, void *value, int64_t ttl_
     vd->buckets[h] = nn;
     vault_shard_for(vd, h)->count++;
     vault_wr_unlock(&vault_shard_for(vd, h)->lock);
-    return march_alloc(16);
+    return NULL;
 }
 
 /* ── march_vault_put_new ──────────────────────────────────────────────── */
@@ -1433,7 +1441,7 @@ void *march_vault_push_capped(void *handle, void *key_val, void *value, int64_t 
         vault_shard_for(vd, h)->count++;
         vault_wr_unlock(&vault_shard_for(vd, h)->lock);
     }
-    return march_alloc(16); /* Unit */
+    return NULL; /* Unit */
 }
 
 /* ── march_vault_get ──────────────────────────────────────────────────── */
@@ -1484,7 +1492,7 @@ void *march_vault_drop(void *handle, void *key_val) {
     }
     vault_wr_unlock(&vault_shard_for(vd, h)->lock);
     free(key);
-    return march_alloc(16);
+    return NULL;
 }
 
 /* ── march_vault_update ───────────────────────────────────────────────── */
@@ -1543,7 +1551,7 @@ void *march_vault_update(void *handle, void *key_val, void *f) {
         march_decrc(new_val);
         if (cur_is_float) march_decrc(cur);
     }
-    return march_alloc(16); /* Unit */
+    return NULL; /* Unit */
 }
 
 /* ── march_vault_size ─────────────────────────────────────────────────── */
@@ -1661,7 +1669,7 @@ void *march_vault_ns_drop(void *ns_val, void *key_val) {
     }
     pthread_mutex_unlock(&vault_registry_mutex);
     free(name);
-    if (!found) return march_alloc(16); /* Unit */
+    if (!found) return NULL; /* Unit */
     void *result = march_vault_drop(found, key_val);
     march_decrc(found);
     return result;

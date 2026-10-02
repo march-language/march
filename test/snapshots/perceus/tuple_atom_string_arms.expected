@@ -6,8 +6,8 @@ fn describe(pair : (Int, Int)) : String =
   $Tuple2($f1, $f2) -> dec_rc pair;
 case $f1 of
   0() -> case $f2 of
-  0() -> dec_rc $f1;
-dec_rc $f2;
+  0() -> dec_rc $f2;
+dec_rc $f1;
 "origin"
   _ -> let y : Int = $f2 in
 let x : Int = $f1 in

@@ -196,7 +196,7 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
     let dispatch_var = actor_var "$d_dispatch_v" (Tir.TPtr Tir.TUnit) in
     let alive_var    = actor_var "$e_alive_v" Tir.TBool in
     (* In hot_reload mode, a separate state ptr var ($f_state_v) holds the state record *)
-    let state_ptr_var = actor_var "$f_state_v" (Tir.TCon (state_type_name, [])) in
+    let state_ptr_var = actor_var Tir_names.actor_state_ptr_var (Tir.TCon (state_type_name, [])) in
 
     (* Build the innermost expression: ESeq(EReuse(...), unit) *)
     let reuse_expr =
