@@ -148,7 +148,9 @@ plus five auxiliary string/comment sub-lexers).
 - **Literals.**
   - `INT`, `digit+` (`lexer.mll:106–119`); parsed with `int_of_string_opt`
     and raises a positioned `ParseError` (not an uncaught exception) if the
-    literal exceeds a 63-bit OCaml `int` (`lexer.mll:110–119`).
+    literal exceeds a 63-bit OCaml `int` (`lexer.mll:110–119`), which is
+    also March's runtime `Int` range on every backend (see
+    [type-system.md, "Int width and overflow"](type-system.md#int-width-and-overflow)).
   - `FLOAT`, `digit+ '.' digit+` (`lexer.mll:105`); note this requires at
     least one digit on both sides of `.`, matched *before* the bare `INT`
     rule so `1.5` lexes as one `FLOAT` token, not `INT DOT INT`.

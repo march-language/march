@@ -1256,6 +1256,8 @@ let runtime_only_declares : (string * string) list = [
   ("march_incrc_local", "declare void @march_incrc_local(ptr %p)");
   ("march_decrc_local", "declare void @march_decrc_local(ptr %p)");
   ("march_decrc_local_freed", "declare i64  @march_decrc_local_freed(ptr %p)");
+  ("march_clo_param_own", "declare void @march_clo_param_own(ptr %p)");
+  ("march_clo_float_arg", "declare ptr  @march_clo_float_arg(ptr %p)");
   ("march_free", "declare void @march_free(ptr %p)");
   ("march_tco_defer_push", "declare ptr  @march_tco_defer_push(ptr %buf, ptr %release, ptr %v)");
   ("march_tco_defer_drain", "declare void @march_tco_defer_drain(ptr %buf)");
@@ -1283,6 +1285,8 @@ let runtime_only_declares : (string * string) list = [
   ("march_checked_ediv", "declare i64    @march_checked_ediv(i64 %a, i64 %b)");
   ("march_checked_div_op", "declare i64    @march_checked_div_op(i64 %a, i64 %b)");
   ("march_checked_mod_op", "declare i64    @march_checked_mod_op(i64 %a, i64 %b)");
+  ("march_checked_shl", "declare i64    @march_checked_shl(i64 %a, i64 %n)");
+  ("march_checked_shr", "declare i64    @march_checked_shr(i64 %a, i64 %n)");
   ("march_poly_eq", "declare i64  @march_poly_eq(ptr %a, ptr %b)");
   ("march_remote_init", "declare void @march_remote_init()");
   ("march_int_pow", "declare i64  @march_int_pow(i64 %base, i64 %exp)");
@@ -1370,6 +1374,8 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_incrc_local";
   PDeclare "march_decrc_local";
   PDeclare "march_decrc_local_freed";
+  PDeclare "march_clo_param_own";
+  PDeclare "march_clo_float_arg";
   PDeclare "march_free";
   PDeclare "march_tco_defer_push";
   PDeclare "march_tco_defer_drain";
@@ -1427,6 +1433,9 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PComment "; Operator forms of / and % — bare \"division by zero\" / \"modulo by zero\" messages";
   PDeclare "march_checked_div_op";
   PDeclare "march_checked_mod_op";
+  PComment "; int_shl / int_shr with a non-literal count — panic outside [0, 62]";
+  PDeclare "march_checked_shl";
+  PDeclare "march_checked_shr";
   PDeclare "march_string_concat";
   PDeclare "march_string_eq";
   PDeclare "march_poly_eq";

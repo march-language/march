@@ -6,3 +6,6 @@ zero-length fold = 40000., flat: true
 fold_float (runtime) = 120000., flat: true
 fold_f32 (runtime) = 120000., flat: true
 zero-length fold (runtime) = 40000., flat: true
+identity closure (runtime) = 20000., flat: true
+identity closure, f32 (runtime) = 20000., flat: true
+element closure (runtime) = 30000., flat: true

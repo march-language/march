@@ -9,3 +9,6 @@ to_string of List(String) = 57789, flat: true
 List.filter predicate = 4991, flat: true
 fold lambda ignores the element = 12502500, flat: true
 named function to List.map = 28893, flat: true
+erased lambda ignores a Float = 5000., flat: true
+erased lambda returns a Float = 12502500., flat: true
+erased lambda forwards a Float = 25005000., flat: true

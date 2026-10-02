@@ -25,19 +25,26 @@
 --
 -- The last three legs are the DOUBLE-FREE direction, which is what an
 -- over-eager release of either box looks like: an identity closure returns the
--- accumulator it was handed (the `prev == result` guard), a zero-length fold
+-- accumulator it was handed, a zero-length fold
 -- never enters the loop and hands the caller's own initial accumulator back,
 -- and both must still report the right number.
 --
 -- Since 2026-09-30 a fold whose callback is a lambda literal with a scalar
 -- accumulator compiles to an inline loop (no boxes at all), so the legs that
--- pass a lambda literal now guard THAT path. The `_rt` legs pass the same
--- lambdas in as a parameter, which the inliner cannot see through, so they keep
--- exercising the runtime fold and its two boundary boxes. There is no runtime
--- twin of the identity leg: an identity lambda reaching the runtime fold through
--- a parameter is a pre-existing use-after-free, filed as
--- specs/todos/2026-09-30-native-float-arr-fold-unused-elem-double-free.md.
+-- pass a lambda literal now guard THAT path. The `_rt` legs pass the
+-- callback in as a parameter, which the inliner cannot see through, so they
+-- keep exercising the runtime fold and its two boundary boxes.
 -- specs/plans/2026-09-30-nativearray-fold-inline-loop.md
+--
+-- The identity and element `_rt` legs build their callback from a
+-- let-generalized lambda whose parameters are still erased (TVar) after mono.
+-- Until 2026-09-30 such an apply fn released the Float box the fold loop had
+-- lent it (its unused `x`, at entry), and the loop released it again: RC
+-- underflow on macOS, `malloc(): unaligned fastbin chunk detected` on glibc,
+-- heap-use-after-free under ASAN. The callee now takes its own reference to
+-- an erased Float argument (march_clo_param_own), so an identity callback hands
+-- back a reference of its own and the loop releases its accumulator anyway.
+-- specs/progress/2026-09-30-native-float-arr-fold-unused-elem-double-free.md
 mod Main do
   needs IO.Console
 
@@ -81,6 +88,14 @@ mod Main do
     if k <= 0 do acc else emptyfold_rt(e, k - 1, acc +. NativeArray.fold_float(e, 2.0, f), f) end
   end
 
+  pfn idfold_rt(a : NativeFloatArr, k : Int, acc : Float, f : Float -> Float -> Float) : Float do
+    if k <= 0 do acc else idfold_rt(a, k - 1, acc +. NativeArray.fold_float(a, 1.0, f), f) end
+  end
+
+  pfn idf32fold_rt(a : NativeF32Arr, k : Int, acc : Float, f : Float -> Float -> Float) : Float do
+    if k <= 0 do acc else idf32fold_rt(a, k - 1, acc +. NativeArray.fold_f32(a, 1.0, f), f) end
+  end
+
   fn main(_c : Cap(IO.Console)) do
     let n = 20000
     let fa = NativeArray.make_float(4, 1.5)
@@ -106,5 +121,14 @@ mod Main do
     flat("fold_f32 (runtime)", h, float_to_string(f32fold_rt(f3, n, 0.0, add)))
     let j = live_allocs()
     flat("zero-length fold (runtime)", j, float_to_string(emptyfold_rt(ea, n, 0.0, add)))
+
+    let keep = fn (p, x) -> p
+    let last = fn (p, x) -> x
+    let g2 = live_allocs()
+    flat("identity closure (runtime)", g2, float_to_string(idfold_rt(fa, n, 0.0, keep)))
+    let h2 = live_allocs()
+    flat("identity closure, f32 (runtime)", h2, float_to_string(idf32fold_rt(f3, n, 0.0, keep)))
+    let j2 = live_allocs()
+    flat("element closure (runtime)", j2, float_to_string(idfold_rt(fa, n, 0.0, last)))
   end
 end
