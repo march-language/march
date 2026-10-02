@@ -116,9 +116,10 @@ let emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs : string * string =
   Llvm_ctx.emit_label ctx ok_lbl;
   let okval = (match t_ok with
     | Tir.TInt | Tir.TBool | Tir.TUnit | Tir.TCon ("Atom", []) ->
-      (* tag a raw scalar into a march_value: (v << 1) | 1 *)
+      (* tag a raw scalar into a march_value: (v << 1) | 1 -- a plain shl,
+         see [Llvm_ctx.emit_tag_scalar] *)
       let sh = Llvm_ctx.fresh ctx "oksh" in
-      Llvm_ctx.emit ctx (Printf.sprintf "%s = shl nsw i64 %s, 1" sh payload);
+      Llvm_ctx.emit ctx (Printf.sprintf "%s = shl i64 %s, 1" sh payload);
       let tg = Llvm_ctx.fresh ctx "oktag" in
       Llvm_ctx.emit ctx (Printf.sprintf "%s = or i64 %s, 1" tg sh); tg
     | Tir.TFloat ->
@@ -441,9 +442,12 @@ let clo_wrap_define ?(drop_clo = false) ?(borrowed = []) ?(own_float = true) wra
        ret ptr %%rp\n}\n\n"
       wrap_name decl_str pro fn_name call_args releases
   else
-    (* scalar (i64): tag as (n<<1)|1 so the dispatch's conditional untag recovers it *)
+    (* scalar (i64): tag as (n<<1)|1 so the dispatch's conditional untag
+       recovers it.  A plain shl: the callee returns its Int BARE (lazy
+       normalisation, [Llvm_ctx.emit_tag_scalar]), and the shift is what
+       drops its unspecified bit 63. *)
     Printf.sprintf
       "define ptr @%s(%s) alwaysinline {\nentry:\n%s  %%r = call %s @%s(%s)\n%s  \
-       %%rs = shl nsw i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  \
+       %%rs = shl i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  \
        %%rp = inttoptr i64 %%rt to ptr\n  ret ptr %%rp\n}\n\n"
       wrap_name decl_str pro target_ret fn_name call_args releases

@@ -119,6 +119,28 @@ let test_orc_fn_after_let_lambda () =
       "val sq = <fn>";
       "= 144" ]
 
+(* Lazy Int normalisation (specs/progress/2026-10-02-lazy-int63-
+   normalisation.md): a fragment's Int result is a BARE register value and
+   is normalised in [Llvm_repl.emit_store_to_slot] before the C side prints
+   it or a later fragment reads it.  Both overflow sums would print as the
+   raw 64-bit value (9223372036854775806 / -9223372036854775808) if that
+   normalisation went missing. *)
+let test_orc_lazy_int_normalisation () =
+  check_session "orc lazy int normalisation"
+    [ "let mx = 4611686018427387903";
+      "mx + mx";
+      "let y = mx + mx + 2";
+      "y";
+      "fn big(x) do x + x end";
+      "big(mx) == -2";
+      ":quit" ]
+    [ "val mx = 4611686018427387903";
+      "= -2";
+      "val y = 0";
+      "= 0";
+      "val big = <fn>";
+      "= true" ]
+
 (* The narrower control from the todo — two consecutive `fn` definitions.
    The todo believed this was healthy; it in fact crashed too, and it is the
    tightest form of the duplicate-symbol collision, so pin it directly. *)
@@ -993,6 +1015,8 @@ let () =
         test_prelude_so_loads_cross_process;
       Alcotest.test_case "orc_two_consecutive_fns" `Slow
         test_orc_two_consecutive_fns;
+      Alcotest.test_case "orc_lazy_int_normalisation" `Slow
+        test_orc_lazy_int_normalisation;
       Alcotest.test_case "orc_fn_after_let_lambda" `Slow
         test_orc_fn_after_let_lambda;
       Alcotest.test_case "clang_fn_calls_prior_fn" `Slow

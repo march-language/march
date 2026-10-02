@@ -77,6 +77,18 @@ git log is authoritative for exact commits.
   replacement as `CertReplaced` or `CertRefused` (two new `SecurityEvent`
   constructors: a `match` that named every constructor needs a new arm).
 
+### Changed
+- **Compiled `Int` arithmetic normalises to 63 bits lazily, not after every
+  operation.** `+ - *`, negation and `int_shl` leave their result in the full
+  64-bit register and the reduction modulo 2^63 happens where the value is
+  observed (a comparison, a call into the runtime, a store, printing, ...).
+  Every program prints what it printed before — the parity suite against the
+  interpreter is the gate — but the shift pair the previous scheme put between
+  `fib(n-1) + fib(n-2)` and `ret` is gone, so LLVM's accumulator
+  tail-recursion elimination fires again: `bench/fib.march` is ~17% faster
+  compiled (same-box A/B), and arithmetic that feeds a list cell or record field
+  no longer pays a shift pair on the way in.
+
 ### Fixed
 - **Hot reload: the entry module's own top-level functions can be hot deployed.**
   The compiler names them without the entry module's prefix, so with
