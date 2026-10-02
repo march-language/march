@@ -3,6 +3,59 @@
 **Date:** 2026-09-30
 **Todo:** `specs/todos/2026-09-30-inline-rc-fast-path.md`
 
+## As built (2026-10-01)
+
+Implemented in `lib/tir/llvm_rc_inline.ml`, applied by `maybe_inline_rc` in
+`bin/main.ml` at both `emit_module` call sites (`--compile` and `--emit-llvm`).
+Where it differs from the design below:
+
+- **One rewrite of the finished module text, not a rename point.** The six
+  refcount calls are printed by 13 emitter files; rewriting `@march_incrc(` and
+  friends in the module text (declarations and definitions excepted) catches all
+  of them, including future ones, and touches none. `test_codegen` calls the
+  library `emit_module` directly and still sees the original calls.
+- **Six twins, one per runtime entry point**, each mirroring its original
+  exactly, including the details the design glossed over: the decrement forms
+  skip immortal objects (`rc >= MARCH_RC_IMMORTAL`), and a non-heap value returns
+  1 from `march_decrc_freed` but 0 from `march_decrc_local_freed`.
+- **Last reference: `march_rc_last_atomic` / `march_rc_last_local`.** These run
+  the original's free or underflow tail without decrementing again. A first
+  version restored the count and called the original instead; that cost an extra
+  atomic and a second decrement on every free and made `binary_trees` about 6%
+  slower, so the helper the design proposed was the right call after all.
+- **Trace state** is exported as `march_gc_trace_state` and resolved in
+  `spawn_main_impl`. A program that never runs `spawn_main` (`--compile-so`)
+  simply takes the out-of-line branch until something resolves it.
+- **Entry-block alloca hoisting, in the same rewrite.** The emitter gives every
+  let binding a stack slot where it is bound, inside case-arm and loop blocks,
+  and LLVM only promotes slots in the entry block. Inlining the twins split
+  blocks, so fewer of those dynamic slots got cleaned up, and frames grew:
+  `test/native/array_sort_by.march`'s `ordered_and_stable`, which recurses
+  through a join-point closure instead of looping, went from 208 to 256 bytes per
+  level and overflowed its 1 MiB green-thread stack at 4,500 elements instead of
+  about 6,000. Hoisting the fixed-size scalar and pointer slots to the entry block
+  takes the same recursion to 160 bytes per level, so it now survives 6,000. A
+  release-only decrement was tried first and changed nothing.
+- **Hoisting only applies to functions whose slots are all scalars or
+  pointers.** Hoisting the scalar slots of `test/native/simd_mutual_tco.march`'s
+  mutual-TCO dispatcher, which also allocates `<4 x float>` slots inside its
+  loop, made it crash (SIGSEGV at address 0x10). No slot is type-punned, and each
+  class of slot hoisted alone was fine; the mechanism is not understood yet, so a
+  function with any vector or aggregate slot keeps its layout exactly.
+- **`march_gc_trace_state` is a plain external global.** Marking it `dso_local`
+  (tried to reduce register pressure; it did not) broke every `--compile-so` and
+  hot-reload patch build: a shared object resolves the symbol from the host.
+- **Off** for wasm targets, sanitizer builds, and `MARCH_NO_INLINE_RC=1` (also a
+  CAS-key tag). The switch turns off the hoisting too, so off is exactly the old
+  code generation. The REPL JIT does not go through `emit_module`'s driver path and
+  is unchanged.
+
+Measured on Apple M3 Max, same compiler on and off, interleaved, 9 rounds,
+median, with hoisting: `list_ops` 1.25×, `tree_transform` 1.06×, `binary_trees`
+1.12×.
+**Not yet measured on x86 Linux**, where the spec asked for a run before merge:
+an atomic RMW (`lock xadd`) costs more there than on arm64.
+
 ## Problem
 
 Every refcount operation in compiled code is an out-of-line call into the

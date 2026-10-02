@@ -638,6 +638,24 @@ let emit_tag_scalar ctx ~sh ~tag ~ptr (i64v : string) : string =
   emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" as_ptr tagged);
   as_ptr
 
+(** Wrap a raw i64 arithmetic result to March's 63-bit [Int]: sign-extend
+    from bit 62 ([shl 1] then [ashr exact 1]), i.e. reduce modulo 2^63 into
+    [-2^62, 2^62).  specs/lang/type-system.md ("Int width and overflow"):
+    every March Int lies in that range, which is what the interpreter's OCaml
+    [int], the lexer, constant folding, [march_string_to_int] and the tagged
+    [(n<<1)|1] representation in [emit_tag_scalar] already assume.  Emitted
+    after every Int operation that can leave the range (+ - * / negate, shl,
+    int_div, int_abs, int_pow, ...); and/or/xor/not/ashr/srem keep an
+    in-range input in range and need no wrap.  On a later tag InstCombine
+    folds [shl nsw (ashr exact (shl x 1) 1) 1] back to [shl x 1], so the
+    common arithmetic-then-box path pays nothing. *)
+let emit_wrap_int63 ctx (i64v : string) : string =
+  let s = fresh ctx "w63s" in
+  emit ctx (Printf.sprintf "%s = shl i64 %s, 1" s i64v);
+  let r = fresh ctx "w63" in
+  emit ctx (Printf.sprintf "%s = ashr exact i64 %s, 1" r s);
+  r
+
 (** Emit a CONDITIONAL untag of an i64 value that may be either a tagged
     scalar ([(n << 1) | 1], always odd) or a heap pointer flowing through a
     scalar-typed view (always even — e.g. dynamically-typed record/alist

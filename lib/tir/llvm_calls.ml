@@ -359,7 +359,7 @@ let clo_wrap_declare wrap_name (param_ltys : string list) =
   Printf.sprintf "declare ptr @%s(%s)\n\n" wrap_name
     (String.concat ", " ("ptr" :: clo_wrap_param_tys param_ltys))
 
-let clo_wrap_define ?(drop_clo = false) ?(borrowed = []) wrap_name
+let clo_wrap_define ?(drop_clo = false) ?(borrowed = []) ?(own_float = true) wrap_name
     (param_ltys : string list) target_ret fn_name =
   let arg_names = List.mapi (fun i _ -> Printf.sprintf "%%a%d" i) param_ltys in
   (* A closure call consumes its heap arguments ([Clo_flags]), but the target
@@ -407,7 +407,19 @@ let clo_wrap_define ?(drop_clo = false) ?(borrowed = []) wrap_name
              %s = select i1 %s, i64 %s, i64 %s\n"
             i name a i c a s i u c s i);
           "i64 " ^ u
-        end else target_ty ^ " " ^ name)
+        end else begin
+          (* A `ptr` param may carry a Float box, which the caller keeps
+             ([Clo_flags]) while the target may consume it or the [releases]
+             below drop it: take this call's own reference first, exactly as
+             an erased apply-fn param does ([march_clo_param_own]); a no-op
+             for any other value.  [own_float] is false for an actor's
+             dispatch/on_stop trampoline, whose runtime caller hands over no
+             reference at all (see [Llvm_emit.clo_wrap_borrowed]). *)
+          if own_float && target_ty = "ptr" then
+            Buffer.add_string prologue
+              (Printf.sprintf "  call void @march_clo_param_own(ptr %s)\n" name);
+          target_ty ^ " " ^ name
+        end)
       param_ltys arg_names in
   let call_args = String.concat ", " call_arg_strs in
   let pro =

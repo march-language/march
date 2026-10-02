@@ -25,3 +25,11 @@ the allocation, and the float inside is never freed).
 An `EField` of a Float field loads the UNBOXED double, so the drop cannot simply `dec_rc`
 the projected variable; it needs the raw box pointer. Witness: the program above must
 reach delta 0.
+
+**Also reproduces with `List(Float)` cons cells** (found 2026-10-01 while writing
+`test/native/rc_inline_fast_path.march`): building `Cons(int_to_float(k), Cons(0.5, Nil))`,
+folding it with `List.fold_left`, and dropping it leaks 2 objects per iteration
+(`live_allocs()` delta 4000 over 2000 iterations, `--opt 2`), one per Float element. The
+same with `MARCH_NO_INLINE_RC=1`, so it is not the inline refcount fast path; the
+interpreter is flat. That fixture's leak check therefore leaves its Float leg out; put it
+back when this is fixed.
