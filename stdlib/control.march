@@ -491,7 +491,13 @@ mod Control do
 
   doc "The release document: `signed_text`, then its `sig` line (`sig -` when unsigned). `parse(serialize(r)) == Ok(r)` for a well-formed `r`."
   fn serialize(r : CtlRelease) : String do
-    signed_text(r) ++ "sig " ++ (if r.signature == "" do "-" else r.signature end) ++ "\n"
+    -- The signature is concatenated where it is read, never returned from an
+    -- `if`: compiled, `(if r.signature == "" do "-" else r.signature end)`
+    -- released the field while `r` still held it, so the next read of the
+    -- release's signature found freed memory (ASAN: heap-use-after-free;
+    -- without ASAN an empty `sig`). specs/todos/2026-10-01-compiled-record-with-projection-sigsegv.md
+    let sig_line = if String.is_empty(r.signature) do "sig -\n" else "sig " ++ r.signature ++ "\n" end
+    signed_text(r) ++ sig_line
   end
 
   doc "The release's content address: sha256 (hex) of `signed_text`. A child names it as its `parent`."
@@ -630,12 +636,6 @@ mod Control do
     seq : Int, release : String, step : Int, node : String, action : String,
     want : String, artifacts : String, lines : String
   }
-
-  doc "[o] carrying [lines] instead of its own (the wiring's durable copy of a `do:certs` order's release)."
-  fn with_lines(o : StepOrder, lines : String) : StepOrder do
-    { seq: o.seq, release: o.release, step: o.step, node: o.node, action: o.action, want: o.want,
-      artifacts: o.artifacts, lines: lines }
-  end
 
   doc "The artifact hashes [o] needs."
   fn order_artifacts(o : StepOrder) : List(String) do words(o.artifacts) end

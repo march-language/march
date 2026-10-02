@@ -766,7 +766,7 @@ pfn ctl_next_for(node : Cap(ClusterNode.Live), name : String) : Control.CtlNext 
     match d do
       Some(Control.RolloutApply(_, os)) ->
         match List.find(os, fn o -> o.node == name) do
-          Some(o) -> Control.NextOrder(ctl_signed_order(o))
+          Some(o) -> Control.NextOrder(o)
           None ->
             sleep_ms(ctl_poll_ms())
             Control.NextPoll
@@ -775,20 +775,6 @@ pfn ctl_next_for(node : Cap(ClusterNode.Live), name : String) : Control.CtlNext 
         sleep_ms(ctl_poll_ms())
         Control.NextPoll
     end
-  end end
-end
-
--- A `do:certs` order carries its whole signed release, which the node
--- verifies (`Control.agent_apply_certs`). It is taken from the durable copy
--- this candidate stored (the exact document forge signed), not re-serialised
--- from the release the leader holds: compiled, that record reads back with an
--- empty signature after `Control.leader_release` takes it
--- (specs/todos/2026-10-01-compiled-record-with-projection-sigsegv.md, shape 2).
-pfn ctl_signed_order(o : Control.StepOrder) : Control.StepOrder do
-  if o.action != "certs" do o
-  else match File.read(ctl_release_file(o.seq)) do
-    Ok(text) -> Control.with_lines(o, text)
-    Err(_) -> o
   end end
 end
 
