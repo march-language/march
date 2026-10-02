@@ -78,6 +78,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A recursive call inside a match arm with a nested pattern no longer grows the
+  stack.** In a function like `match xs do Cons(a, Cons(b, rest)) -> f(Cons(b,
+  rest)) ... end`, the compiler moved the arm into a helper closure, so the call in
+  tail position was really a call from that helper back to `f` and recursed once
+  per element: a list of about 8,000 elements overflowed the stack. The helper is
+  now inlined back when it is used once, so the call is a loop and works on lists
+  of any length.
 - **Hot reload: the entry module's own top-level functions can be hot deployed.**
   The compiler names them without the entry module's prefix, so with
   `--hot-reload <EntryModule>` (what forge passes) a role body, hook or helper

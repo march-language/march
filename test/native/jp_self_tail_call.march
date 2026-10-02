@@ -1,0 +1,72 @@
+-- Regression: a self tail call inside a match arm that the match compiler
+-- hoists into a join point (lib/tir/jp_inline.ml,
+-- specs/todos/2026-10-01-join-point-self-tail-call-not-looped.md).
+--
+-- A nested pattern like `Cons(a, Cons(b, rest))` is compiled with a fallback
+-- join point, so the arm's recursive call used to be a creator -> $jp$apply ->
+-- creator cycle that recursed once per element and overflowed the 1 MiB
+-- green-thread stack at about 8,000 elements. Jp_inline puts a join point that
+-- is allocated and called once back at its call site, making the call a real
+-- self tail call. Every line must print the same value compiled and
+-- interpreted, at sizes far past the old overflow.
+mod Main do
+  needs IO.Console
+
+  pfn key_of(t : (Int, Int)) : Int do match t do (k, _) -> k end end
+  pfn pos_of(t : (Int, Int)) : Int do match t do (_, q) -> q end end
+
+  -- The original shape (test/native/array_sort_by.march's ordered_and_stable).
+  pfn ordered(xs : List((Int, Int))) : Bool do
+    match xs do
+      Nil -> true
+      Cons(_, Nil) -> true
+      Cons(a, Cons(b, rest)) ->
+        let ok = key_of(a) < key_of(b) || (key_of(a) == key_of(b) && pos_of(a) < pos_of(b))
+        if ok do ordered(Cons(b, rest)) else false end
+    end
+  end
+
+  -- Nested pattern with an accumulator: counts adjacent equal pairs.
+  pfn pairs_equal(xs : List(Int), acc : Int) : Int do
+    match xs do
+      Cons(a, Cons(b, rest)) ->
+        let acc2 = if a == b do acc + 1 else acc end
+        pairs_equal(Cons(b, rest), acc2)
+      _ -> acc
+    end
+  end
+
+  -- A join point whose result is used in a NON-tail position must still be
+  -- correct after inlining.
+  pfn head_pair_sum(xs : List(Int)) : Int do
+    1000 + (match xs do
+      Cons(a, Cons(b, _)) -> a + b
+      _ -> 0
+    end)
+  end
+
+  -- Captures from the enclosing function, and a guard.
+  pfn count_above(xs : List(Int), limit : Int, acc : Int) : Int do
+    match xs do
+      Cons(a, Cons(b, rest)) when a + b > limit -> count_above(Cons(b, rest), limit, acc + 1)
+      Cons(_, rest) -> count_above(rest, limit, acc)
+      Nil -> acc
+    end
+  end
+
+  pfn tuples(n : Int) : List((Int, Int)) do
+    List.map(List.range(0, n), fn i -> (i / 3, i))
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let big = 1000000
+    println(bool_to_string(ordered(tuples(big))))
+    println(bool_to_string(ordered(Cons((5, 0), Cons((4, 1), Nil)))))
+    println(bool_to_string(ordered(Nil)))
+    println(int_to_string(pairs_equal(List.map(List.range(0, big), fn i -> i / 2), 0)))
+    println(int_to_string(head_pair_sum(Cons(3, Cons(4, Cons(5, Nil))))))
+    println(int_to_string(head_pair_sum(Cons(3, Nil))))
+    println(int_to_string(count_above(List.range(0, big), 1000, 0)))
+    println(int_to_string(count_above(Nil, 0, 0)))
+  end
+end

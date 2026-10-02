@@ -216,6 +216,8 @@ native_iface_method_collision: coverage audit (user + stdlib): 123 enforced, 0 i
 native_iface_method_collision: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_interpreter_only_builtins_lowered: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_interpreter_only_builtins_lowered: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_jp_self_tail_call: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_jp_self_tail_call: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_canvas_available: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_js_canvas_available: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_js_closure_reuse_apply_slot: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced

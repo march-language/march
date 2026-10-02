@@ -140,6 +140,14 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
      closure-apply ABI must not get a caller-side post-call EDecRC. *)
   let tir = if opt then Known_call.run ~changed:(ref false) tir else tir in
   snap "tir-known-call" tir;
+  (* Jp_inline: a join point allocated and called once in its creator is put
+     back at the call site, so a self tail call written inside a hoisted match
+     arm becomes a real self tail call (which Llvm_tco loops) instead of a
+     creator -> $jp$apply -> creator cycle that recursed once per element.
+     Needs Known_call's direct call; before Perceus so ownership is computed on
+     the inlined code. *)
+  let tir = if opt then Jp_inline.run tir else tir in
+  snap "tir-jp-inline" tir;
   (* Beta-ADT: reduce case-of-known-constructor before Perceus so that the
      EAlloc is DCE'd before RC insertion. *)
   let tir = if opt then Beta_adt.run ~changed:(ref false) tir else tir in
