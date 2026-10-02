@@ -90,6 +90,18 @@ git log is authoritative for exact commits.
   no longer pays a shift pair on the way in.
 
 ### Fixed
+- **`==` inside a `test`/`setup` body is checked where it is written.** The
+  `Eq`/`Ord`/`Num`/interface constraints a test or setup body raised stayed
+  pending until the next top-level `fn` or `let`, so a `fn` placed between two
+  `describe` blocks was blamed for every `==` in the tests above it ("`T` does
+  not implement interface `Eq`" at the fn's span), and with no later `fn` they
+  were never checked at all. They are now reported at the test itself. Tests
+  that compared a type with no `Eq` impl, which used to pass unchecked, are now
+  rejected; to keep them working, these stdlib types now `derive Eq`:
+  `Cli.FlagArity`, `Control.CtlHosts`/`CtlAction`/`CtlGate`/`StepOrder`/
+  `CtlDecision`, `File.FileKind`, `Membership.MemberStatus`/`Member`,
+  `NodeCert.Cert`, `NodeIdentity.Identity`, `RemoteCall.CallError`/`Verdict`/
+  `ReplyResult`/`CallReply`, `Swim.Action` and `VectorClock.ClockOrder`.
 - **Hot reload: the entry module's own top-level functions can be hot deployed.**
   The compiler names them without the entry module's prefix, so with
   `--hot-reload <EntryModule>` (what forge passes) a role body, hook or helper
