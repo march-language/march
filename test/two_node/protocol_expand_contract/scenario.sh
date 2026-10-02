@@ -15,11 +15,17 @@
 #      break a single deploy (a new Shop re-offering under the new
 #      fingerprint and choosing `later` towards node-b's old Buyers). The
 #      expand keeps Shop's fingerprint (`role_fingerprint`) at version 1's, so
-#      the host re-offers nothing: the offer version 1 opened keeps serving
-#      its sessions on the code it was opened with (6.1), and nothing on
-#      node-a chooses `later`. Then the expand to node-b, whose version-2
-#      Buyers form sessions with that version-1 Shop (the compatibility
-#      table: Buyer accepts the previous fingerprint).
+#      the host re-offers nothing: the offer version 1 opened stays open on
+#      version 1's fingerprint, and nothing on node-a chooses `later`. A
+#      session pins the epoch it FORMS in (plan 6.1), so one formed before
+#      the deploy finishes on version 1's code and one formed after it runs
+#      the expand's (Shop phase 2), on that same offer. Then the expand to
+#      node-b, whose version-2 Buyers form sessions with that offer (the
+#      compatibility table: Buyer accepts the previous fingerprint): "v2
+#      Buyer with an expand Shop". Until 2026-10-02 this read "v2 Buyer with
+#      a v1 Shop": the entry module's functions had no dispatch slots, so
+#      the old offer's handler called version 1's `shop` directly for ever,
+#      whatever epoch its session formed in.
 #   2. the contract to node-a, then node-b: the Shop re-offers under the new
 #      fingerprint and chooses `later`; every Buyer already handles it.
 #
@@ -30,7 +36,8 @@
 # (2026-09-28): the contract build deployed where the expand goes (one plain
 # deploy, chooser first) had node-a re-offer under the new fingerprint while
 # node-b still ran version 1, and formation refused 27 sessions ("protocol
-# differs") until node-b caught up; no v2 Buyer ever met a v1 Shop. The reload
+# differs") until node-b caught up; no v2 Buyer ever met a Shop on version
+# 1's fingerprint. The reload
 # servers' counters must show nothing dropped, killed or lost.
 #
 # Not under AddressSanitizer, for protocol_evolve's reason (timing-bound

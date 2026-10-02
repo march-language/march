@@ -138,7 +138,7 @@ let test_runner_caps () =
     | Ok t -> List.hd t.Topology.pools
     | Error _ -> Alcotest.fail "fixture" in
   let role name chains = { Cmd_deploy_hot.role_name = name; role_caps = List.map fst chains; role_chains = chains } in
-  let m = { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None;
+  let m = { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None; slots = None;
             functions = [];
             roles = [ role "Echo.Server" [ ("IO.Clock", [ "body"; "Topology.hook" ]);
                                            ("IO.Console", [ "body"; "Back.serve_one" ]);

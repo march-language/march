@@ -206,6 +206,9 @@ type ctx = {
      anywhere else (wrappers, mutual-TCO groups, between functions): a call
      to it is a self-call, which stays direct under hot reload. *)
   mutable hr_cur_fn : string;
+  (* A patch .so's slot-ID cells, name -> private i32 global (see
+     [hr_slot_id]).  Empty outside a hot-reload --compile-so. *)
+  hr_so_slots : (string, string) Hashtbl.t;
   (* Tracks the actual LLVM type stored in each alloca slot, keyed by slot name.
      Used to emit correct load types even when TIR var has unresolved TVar. *)
   var_llvm_ty : (string, string) Hashtbl.t;
@@ -384,6 +387,7 @@ let make_ctx ?(fast_math=false) ?(pmap_threshold=1024) ?(repl=false)
   hr_names;
   hr_cur_module = "";
   hr_cur_fn = "";
+  hr_so_slots = Hashtbl.create 16;
   var_llvm_ty = Hashtbl.create 32;
   tco_fn_name    = None;
   cur_emit_fn    = "";
@@ -1119,4 +1123,35 @@ let emit_reduction_check ctx =
   emit ctx "call void @march_yield_from_compiled()";
   emit_term ctx (Printf.sprintf "br label %%%s" cont_blk);
   emit_label ctx cont_blk
+  end
+
+(** The LLVM i32 operand naming [name]'s hot-reload dispatch slot, emitted
+    into the current block.  [id0] is its 0-based id in [ctx.hr_names].
+
+    In the program binary that is the constant [id0 + 1]: the binary's own
+    table is the one it sized and published.  A patch .so must not use its
+    own table's ids: they are dense in sorted-name order over the PATCH's
+    slot set, so a slot added or removed by the new version shifts every id
+    after it, and a call by constant lands in another function's slot of the
+    running table (2026-10-02: version 2 of protocol_expand_contract added
+    `may_choose_later`, and the patched `shop`'s call to `shop_phase` entered
+    `start_driver`'s slot; both nodes died on SIGSEGV).  So a patch loads the
+    id from a private cell [__march_init] fills by NAME against the running
+    table ([march_dispatch_name_to_id]).  A name the running binary has no
+    slot for (a function new in this version) stays 0, a slot never
+    published: the call takes the direct path to the .so's own definition. *)
+let hr_slot_id ctx (name : string) (id0 : int) : string =
+  if not ctx.compile_so then string_of_int (id0 + 1)
+  else begin
+    let cell =
+      match Hashtbl.find_opt ctx.hr_so_slots name with
+      | Some g -> g
+      | None ->
+        let g = Printf.sprintf "@.hr_slot%d" (Hashtbl.length ctx.hr_so_slots) in
+        Hashtbl.replace ctx.hr_so_slots name g;
+        g
+    in
+    let r = fresh ctx "hrid" in
+    emit ctx (Printf.sprintf "%s = load i32, ptr %s" r cell);
+    r
   end

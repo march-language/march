@@ -78,6 +78,14 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **Hot reload: a patch that adds a function no longer crashes the running node.**
+  A patch `.so` called hot-swappable functions by its own build's slot numbers,
+  which shift when the new version adds or removes one. Since the entry
+  module's functions became hot-swappable, this sent calls to the wrong
+  function (SIGSEGV on both nodes of the `protocol_expand_contract` deploy). A
+  patch now looks its slots up by name when it is loaded. Also, a later deploy
+  that changes such a newly added function now redeploys its callers to carry
+  it, rather than leaving them on the old copy.
 - **Hot reload: the entry module's own top-level functions can be hot deployed.**
   The compiler names them without the entry module's prefix, so with
   `--hot-reload <EntryModule>` (what forge passes) a role body, hook or helper

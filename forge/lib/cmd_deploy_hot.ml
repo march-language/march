@@ -53,6 +53,9 @@ type manifest = {
   stdlib_hash : string option;
     (** [# stdlib_hash]: digest of the standard library source the artifact
         was compiled against; None for a manifest written before 2026-09-30 *)
+  slots : string list option;
+    (** [# slots]: the artifact's own dispatch slots; None for a manifest
+        written before 2026-10-02 (see [unslotted_carriers]) *)
   functions : fn_manifest list;
   roles     : role_manifest list;  (** [] for a manifest written before step 10 *)
 }
@@ -88,6 +91,7 @@ let parse_manifest path : (manifest, string) result =
     let version = ref 1 in
     let target = ref None and hcr_abi = ref None and module_prefix = ref None in
     let stdlib_hash = ref None in
+    let slots = ref None in
     let fns = ref [] in
     let roles = ref [] in
     (try while true do
@@ -107,6 +111,10 @@ let parse_manifest path : (manifest, string) result =
            module_prefix := Some (String.trim (String.sub line 15 (String.length line - 15)))
         else if String.length line > 13 && String.sub line 0 13 = "# stdlib_hash" then
            stdlib_hash := Some (String.trim (String.sub line 13 (String.length line - 13)))
+        else if String.length line >= 7 && String.sub line 0 7 = "# slots" then begin
+           let v = String.trim (String.sub line 7 (String.length line - 7)) in
+           slots := Some (if v = "" then [] else String.split_on_char ',' v)
+         end
        end else if String.length line >= 5 && String.sub line 0 5 = "ROOT " then begin
          (* Legacy pre-2026-07-04 manifests may still carry a
             "ROOT cap_root=<hex>" line (whole-artifact union, now retired).
@@ -171,7 +179,7 @@ let parse_manifest path : (manifest, string) result =
     if !cas_hash = "" then Error (path ^ ": missing # cas_hash line")
     else Ok { version = !version; cas_hash = !cas_hash; target = !target;
               hcr_abi = !hcr_abi; module_prefix = !module_prefix;
-              stdlib_hash = !stdlib_hash;
+              stdlib_hash = !stdlib_hash; slots = !slots;
               functions = List.rev !fns; roles = List.rev !roles }
   with Sys_error m -> Error m
 
@@ -199,6 +207,58 @@ let stdlib_change ~(prior : manifest) ~(current : manifest) : string option =
              toolchain change and deploys by restart"
             (short o) (short n))
   | _ -> None
+
+(** The running build's slots that must be redeployed to carry a change it
+    has no slot for: [(carrier, via)] pairs, sorted, [via] the changed
+    function each carrier reaches.
+
+    A slot's impl_hash folds in its unslotted callees but stops at a slot
+    callee: the callee is swapped on its own.  A slot of THIS build that the
+    running one has no slot for ([registered] false: a function new since
+    its last restart) cannot be: a patch's call to it falls back to the
+    patch's own copy (Llvm_ctx.hr_slot_id in the compiler), so its code
+    reaches the running program only inside a new version of a caller.  And
+    no caller's hash says it changed (2026-10-02: protocol_expand_contract's
+    contract build changed `may_choose_later`, new in the expand, and
+    activated `shop` but not its caller `shop_phase`, which kept the
+    expand's copy: the Shop chose `later` while reporting the expand's
+    phase).  So a changed one names its callers (the manifest's [callers:],
+    up through unregistered ones) that the running build does have a slot
+    for, to activate with the rest.  Changed means its impl_hash differs
+    from [prior]'s, the manifest of what runs; without [prior] (or for a
+    function [prior] lacks) it counts as changed, the safe side.  A manifest
+    without [# slots] (written before 2026-10-02) gives []. *)
+let unslotted_carriers ~(registered : string -> bool) ~(prior : manifest option)
+    (m : manifest) : (string * string) list =
+  let callers = Hashtbl.create 4096 and hash = Hashtbl.create 4096 in
+  List.iter (fun f -> Hashtbl.replace callers f.fn_name f.fn_callers;
+              Hashtbl.replace hash f.fn_name f.fn_impl_hash) m.functions;
+  let prior_hash = Hashtbl.create 4096 in
+  Option.iter (fun p ->
+      List.iter (fun f -> Hashtbl.replace prior_hash f.fn_name f.fn_impl_hash) p.functions)
+    prior;
+  let changed n =
+    match Hashtbl.find_opt prior_hash n with
+    | Some h -> Hashtbl.find_opt hash n <> Some h
+    | None -> true
+  in
+  let carriers_of f =
+    let seen = Hashtbl.create 16 and out = ref [] in
+    let rec up = function
+      | [] -> ()
+      | n :: rest when Hashtbl.mem seen n -> up rest
+      | n :: rest ->
+        Hashtbl.replace seen n ();
+        if registered n then (out := n :: !out; up rest)
+        else up (Option.value ~default:[] (Hashtbl.find_opt callers n) @ rest)
+    in
+    up (Option.value ~default:[] (Hashtbl.find_opt callers f));
+    List.map (fun c -> (c, f)) !out
+  in
+  Option.value ~default:[] m.slots
+  |> List.filter (fun f -> Hashtbl.mem hash f && not (registered f) && changed f)
+  |> List.concat_map carriers_of
+  |> List.sort_uniq compare
 
 (** True iff [manifest] is a genuine pre-Phase-5C legacy manifest — i.e. NO
     function line carries a `caps=` field at all. A current manifest always
@@ -1158,11 +1218,31 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
           (List.length not_registered);
         List.iter (fun fm -> Printf.printf "  %s\n" fm.fn_name) not_registered
       end;
-      let to_activate = List.filter (fun fm ->
+      let changed_slots = List.filter (fun fm ->
         match Hashtbl.find_opt slot_map fm.fn_name with
         | None -> false  (* new function — needs restart, not a hot deploy *)
         | Some slot -> slot.slot_impl_hash <> fm.fn_impl_hash
       ) manifest.functions in
+      (* Callers that carry a changed function the server has no slot for
+         (see [unslotted_carriers]), activated though their own hash is the
+         running one. *)
+      let carriers =
+        let prior =
+          if old_manifest_path <> "" && Sys.file_exists old_manifest_path then
+            Result.to_option (parse_manifest old_manifest_path)
+          else None
+        in
+        unslotted_carriers ~registered:(Hashtbl.mem slot_map) ~prior manifest
+        |> List.filter (fun (c, _) ->
+             not (List.exists (fun fm -> fm.fn_name = c) changed_slots))
+      in
+      List.iter (fun (c, via) ->
+          Printf.printf "NOTE: redeploying %s: it carries %s, which has no slot in the running build\n" c via)
+        carriers;
+      let to_activate = List.filter (fun fm ->
+          List.memq fm changed_slots || List.mem_assoc fm.fn_name carriers)
+          manifest.functions
+      in
 
       if to_activate = [] then begin
         if not_registered <> [] then

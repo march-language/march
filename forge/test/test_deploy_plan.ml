@@ -27,7 +27,7 @@ let fm ?(sig_ = "s") ?(caps = []) name impl =
 let abi_arm = "march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8"
 
 let manifest ?(target = "linux/arm64") ?(abi = abi_arm) ?(roles = []) fns =
-  { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = Some target; hcr_abi = Some abi; module_prefix = Some "App"; stdlib_hash = None;
+  { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = Some target; hcr_abi = Some abi; module_prefix = Some "App"; stdlib_hash = None; slots = None;
     functions = fns; roles }
 
 (** The base program: two pools' hooks, a role body, an actor, a protocol. *)
@@ -165,6 +165,39 @@ let test_hot_patch () =
 (** Only dispatch slots can be swapped: a changed function with no slot
     must be reached through a changed slotted caller (the manifest's
     [callers:]), else the pool restarts. *)
+(* A slot of the new build the running one lacks (new since its last
+   restart) changes: no caller's hash says so (a slot's hash stops at a slot
+   callee), so its running-slot callers carry it (2026-10-02,
+   protocol_expand_contract: the contract changed `may_choose_later`, new in
+   the expand, and `shop_phase`, its caller, kept the expand's copy). *)
+let test_unslotted_carriers () =
+  let with_callers cs f = { f with Cmd_deploy_hot.fn_callers = cs } in
+  let v2 mcl =
+    { (manifest [ fm "shop" "s1" |> with_callers [ "$lam1$apply" ];
+                  fm "$lam1$apply" "l1" |> with_callers [ "shop" ];
+                  fm "shop_phase" "p1" |> with_callers [ "$lam1$apply"; "host_tick" ];
+                  fm "host_tick" "h1";
+                  fm "may_choose_later" mcl |> with_callers [ "$lam1$apply"; "shop_phase" ] ])
+      with Cmd_deploy_hot.slots = Some [ "host_tick"; "may_choose_later"; "shop"; "shop_phase" ] } in
+  let registered n = List.mem n [ "host_tick"; "shop"; "shop_phase" ] in
+  let carriers ?prior m = Cmd_deploy_hot.unslotted_carriers ~registered ~prior m in
+  let pairs = Alcotest.(list (pair string string)) in
+  Alcotest.check pairs "changed since what runs: every running caller carries it"
+    [ ("shop", "may_choose_later"); ("shop_phase", "may_choose_later") ]
+    (carriers ~prior:(v2 "m1") (v2 "m2"));
+  Alcotest.check pairs "unchanged: nothing to carry" [] (carriers ~prior:(v2 "m1") (v2 "m1"));
+  Alcotest.check pairs "no prior manifest: counted as changed"
+    [ ("shop", "may_choose_later"); ("shop_phase", "may_choose_later") ] (carriers (v2 "m1"));
+  Alcotest.check pairs "a manifest without # slots: nothing" []
+    (carriers ~prior:(v2 "m1") { (v2 "m2") with Cmd_deploy_hot.slots = None });
+  (* The planner agrees: a changed new slot is deliverable once a running
+     slot calls it, changed or not; before `# slots` it was a restart. *)
+  Alcotest.(check (list string)) "deliverable through its carriers" []
+    (Deploy_plan.undeliverable ~slots:[ "host_tick"; "shop"; "shop_phase" ] ~changed:[ "may_choose_later" ] (v2 "m2"));
+  Alcotest.(check (list string)) "without # slots: undeliverable, a restart" [ "may_choose_later" ]
+    (Deploy_plan.undeliverable ~slots:[ "host_tick"; "shop"; "shop_phase" ] ~changed:[ "may_choose_later" ]
+       { (v2 "m2") with Cmd_deploy_hot.slots = None })
+
 let test_unslotted_changes () =
   let callers name cs fns = List.map (fun (f : Cmd_deploy_hot.fn_manifest) ->
       if f.fn_name = name then { f with fn_callers = cs } else f) fns in
@@ -562,6 +595,7 @@ let () =
         Alcotest.test_case "functions changed/added/removed: hot patch" `Quick test_hot_patch;
         Alcotest.test_case "a signature change is shown" `Quick test_signature_change_noted;
         Alcotest.test_case "changes the running base cannot swap restart" `Quick test_unslotted_changes;
+        Alcotest.test_case "a changed slot the running base lacks: its callers carry it" `Quick test_unslotted_carriers;
         Alcotest.test_case "a stdlib change restarts (stdlib actors are not slots)" `Quick test_stdlib_change_restart;
         Alcotest.test_case "deploy hot refuses a stdlib change" `Quick test_deploy_hot_refuses_stdlib_change;
         Alcotest.test_case "state change: migrate_state, @compat, blocked" `Quick test_migration;

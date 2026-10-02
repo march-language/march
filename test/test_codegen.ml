@@ -13886,6 +13886,7 @@ declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, ptr 
 declare i32  @march_dispatch_publish_epoch(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind, i32 %epoch)
 declare void @march_dispatch_init(i32 %n_slots)
 declare void @march_dispatch_register_name(i32, ptr)
+declare i32  @march_dispatch_name_to_id(ptr, ptr)
 declare void @march_reload_server_start(ptr)
 declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)
 declare void @march_actor_set_call_tags(ptr %actor, ptr %tags, i64 %n)

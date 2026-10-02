@@ -272,9 +272,11 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
          let dispatch_fn = actor_base ^ Tir_names.actor_dispatch_suffix in
          match Hot_reload.Name_table.id_of ctx.hr_names dispatch_fn with
          | Some id0 ->
-           let slot_id = id0 + 1 in  (* 1-based; 0 = "not set" sentinel *)
+           (* 1-based; 0 = "not set" sentinel.  By name in a patch .so
+              (Llvm_ctx.hr_slot_id): an actor new in the patch gets 0. *)
+           let slot_id = Llvm_ctx.hr_slot_id ctx dispatch_fn id0 in
            emit ctx (Printf.sprintf
-             "call void @march_actor_set_dispatch_id(ptr %s, i32 %d)" ptr slot_id)
+             "call void @march_actor_set_dispatch_id(ptr %s, i32 %s)" ptr slot_id)
          | None -> ()
        end;
        (* Actor.call tag-table registration. F19 (build_ctor_info) gives

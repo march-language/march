@@ -155,6 +155,7 @@ type ctx = Llvm_ctx.ctx = {
   hr_names  : Hot_reload.Name_table.t;
   mutable hr_cur_module : string;
   mutable hr_cur_fn : string;
+  hr_so_slots : (string, string) Hashtbl.t;
   var_llvm_ty : (string, string) Hashtbl.t;
   mutable tco_fn_name   : string option;
   mutable cur_emit_fn   : string;

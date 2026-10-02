@@ -294,20 +294,26 @@ let fn_diff (o : Cmd_deploy_hot.manifest option) (n : Cmd_deploy_hot.manifest) :
     program only through a new version of a slotted caller, which carries
     it inside the patch. A lifted closure is called through its closure
     value, not by name, so a change inside a lambda whose enclosing function
-    did not change is not deliverable either. *)
+    did not change is not deliverable either.  A slot of the NEW build that
+    the running one lacks is reached by any running slot above it: the
+    executor redeploys that caller to carry it
+    ([Cmd_deploy_hot.unslotted_carriers]), changed or not. *)
 let undeliverable ~(slots : string list) ~(changed : string list) (m : Cmd_deploy_hot.manifest) : string list =
   let slot = Hashtbl.create 64 and chg = Hashtbl.create 64 and callers = Hashtbl.create 4096 in
   List.iter (fun n -> Hashtbl.replace slot n ()) slots;
   List.iter (fun n -> Hashtbl.replace chg n ()) changed;
   List.iter (fun (f : Cmd_deploy_hot.fn_manifest) -> Hashtbl.replace callers f.fn_name f.fn_callers) m.functions;
+  let new_slot = Hashtbl.create 16 in
+  List.iter (fun n -> Hashtbl.replace new_slot n ()) (Option.value ~default:[] m.slots);
   let deliverable f =
+    let carried = Hashtbl.mem new_slot f in
     let seen = Hashtbl.create 16 in
     let rec up = function
       | [] -> false
       | n :: rest when Hashtbl.mem seen n -> up rest
       | n :: rest ->
         Hashtbl.replace seen n ();
-        if Hashtbl.mem slot n then Hashtbl.mem chg n || up rest
+        if Hashtbl.mem slot n then carried || Hashtbl.mem chg n || up rest
         else up (Option.value ~default:[] (Hashtbl.find_opt callers n) @ rest)
     in
     up (Option.value ~default:[] (Hashtbl.find_opt callers f))
@@ -591,7 +597,8 @@ let classify (i : input) : plan =
           | Some x -> x
           | None -> ({ b_name = bname; b_pools = [ p.pool_name ]; b_old = None;
                        b_new = { Cmd_deploy_hot.version = 1; cas_hash = ""; target = None; hcr_abi = None;
-                                 module_prefix = None; stdlib_hash = None; functions = []; roles = [] };
+                                 module_prefix = None; stdlib_hash = None; slots = None;
+                                 functions = []; roles = [] };
                        b_old_schemas = []; b_new_schemas = []; b_old_runtime = None; b_new_runtime = None;
                        b_slots = None },
                      { changed = []; added = []; removed = []; sig_changed = [] }, [])
