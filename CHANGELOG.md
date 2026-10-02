@@ -87,6 +87,15 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Fixed
+- **A let-bound lambda that ignores or returns a `Float` argument no longer
+  crashes compiled code.** A lambda bound with `let` and left generic, such as
+  `let keep = fn (acc, x) -> acc`, freed the `Float` it was given when it
+  ignored it, and the caller freed it again. That happened when the lambda was
+  passed to `NativeArray.fold_float`, `fold_f32` or `typed_array_fold`, or called
+  through a parameter typed `Float -> Float -> Float`. It showed up as
+  `RC underflow` on macOS and `malloc(): unaligned fastbin chunk detected` on
+  Linux. Such a lambda that returns its `Float` argument, or passes it on to
+  another closure, also no longer leaks it.
 - **A compiled `Array` that is built, updated and dropped no longer leaks its
   trie.** `Array.from_list`, `push`, `set` and `pop` leaked about one object per
   element once a vector held more than one 32-element leaf (a 1,100-element
@@ -549,6 +558,20 @@ git log is authoritative for exact commits.
   two mailbox helpers now return `List((Pid(a), Int))` (the parameterized `Pid`) and
   `NodeCall` names `RemoteCall.NoConnection` explicitly instead of the ambiguous bare
   constructor; seven hidden stdlib type errors are gone.
+- **Compiled and interpreted programs now agree on `Int` overflow.** `Int` is
+  63-bit and wraps on overflow ([Int width and overflow](specs/lang/type-system.md#int-width-and-overflow)).
+  Compiled code used to do 64-bit arithmetic in registers, so
+  `int_max_value() + int_max_value()` (or the same sum on two values read from a
+  `NativeArray`) printed `9223372036854775806` compiled and `-2` interpreted. The
+  compiled value also changed once it was stored in a list, tuple or closure. Compiled
+  `+ - * /`, negation, `int_shl`, `int_div`, `int_abs` and `int_pow` now wrap
+  to 63 bits, and compiled `int_max_value()`/`int_min_value()` return
+  `4611686018427387903`/`-4611686018427387904` instead of the 64-bit limits.
+  Compiled `int_popcount(-1)` is 63, as interpreted.
+- **Compiled `int_shl`/`int_shr` with a shift count outside `[0, 62]` now panic**
+  with `int_shl: shift out of range` (as the interpreter does) instead of
+  returning an undefined value. Compiled `int_pow` with a negative exponent
+  panics with `int_pow: negative exponent` instead of returning `0`.
 
 ### Added
 - **`forge deploy` splits a monolith's protocol change into expand and contract (D21).**
@@ -828,6 +851,14 @@ git log is authoritative for exact commits.
   (`lsp/docs/editors.md`).
 
 ### Changed
+- **Compiled code no longer makes a function call for every reference-count
+  update.** The common case of each increment and decrement is now inlined into
+  the calling function, and the runtime is called only to free an object or while
+  `MARCH_TRACE_GC` is on. Closure-heavy code gets about 25% faster
+  (`bench/list_ops.march`), tree code 6–12%. Let bindings now also get stack
+  slots LLVM can keep in registers, so deep non-tail recursion uses less stack
+  than before. Behaviour, trace output and leak accounting are unchanged. It is
+  off for wasm and sanitizer builds, and `MARCH_NO_INLINE_RC=1` turns it off.
 - **`NativeArray.fold_*` with a lambda is up to 67× faster when compiled.** A fold
   whose callback is a lambda written at the call site, with an `Int` or `Float`
   accumulator matching the array's elements, now compiles to a loop in the calling
@@ -1043,6 +1074,10 @@ git log is authoritative for exact commits.
   says so and suggests `fn pair -> match pair do (a, b) -> … end`. Genuinely
   curried callbacks such as `List.fold_left`'s `b -> a -> b` are unaffected,
   including when the accumulator is itself a tuple.
+- **Interpreted `int_shr` is now an arithmetic (sign-propagating) shift**, as it
+  already was compiled: `int_shr(-8, 1)` is `-4`. It used to be a logical shift
+  in the interpreter, so `int_shr(-8, 1)` printed `4611686018427387900`.
+  Non-negative inputs give the same result as before.
 
 ### Removed
 - **The `respond` builtin is gone.** It was an interpreter no-op stub

@@ -328,6 +328,13 @@ static inline void march_clo_arg_retain(void *arg) {
         march_incrc(arg);
 }
 
+/* The callee half: an apply fn's prologue takes its own reference to a Float
+ * box arriving at an erased (TVar) parameter. Defined in march_runtime.c. */
+void march_clo_param_own(void *p);
+/* The caller half for an erased argument: the Float box to release after the
+ * call, or NULL. Defined in march_runtime.c. */
+void *march_clo_float_arg(void *p);
+
 /* Moved here from march_runtime.c: the inline-string encoding below is safe
  * only BECAUSE of this predicate's exact definition — an inline string sets the
  * sign bit and so fails guard 3 — and march_sso_selftest asserts exactly that.

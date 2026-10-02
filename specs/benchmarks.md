@@ -249,6 +249,25 @@ dune exec march -- --compile --opt 2 bench/<name>.march -o /tmp/<name>
 
 ---
 
+## Inline refcount fast path: list_ops, tree_transform, binary_trees
+
+`specs/plans/2026-09-30-inline-rc-fast-path.md`. The same compiler with the fast
+path on and with `MARCH_NO_INLINE_RC=1`, 9 interleaved rounds, Apple M3 Max
+(2026-10-01). Outputs identical.
+
+| bench | off median ms | on median ms | speedup |
+|---|---:|---:|---:|
+| `list_ops` | 62.8 | 50.4 | 1.25× |
+| `tree_transform` | 724.2 | 680.2 | 1.06× |
+| `binary_trees` | 172.3 | 154.1 | 1.12× |
+
+These are with entry-block alloca hoisting, which is part of the same rewrite;
+load varied between runs, so compare ratios, not absolute times.
+
+A first version that restored the count and called the original runtime function
+on every last reference measured `binary_trees` about 6% slower; the dedicated
+last-reference helpers are what turned it into a gain. Not yet measured on x86.
+
 ## bench/native_array_chains.march — NativeArray chains, unfused vs hand-fused
 
 Phase 0 gate of `specs/plans/2026-09-28-nativearray-fusion-plan.md`. Each case
