@@ -712,6 +712,14 @@ let rec closure_escapes (clo : string) (e : Tir.expr) : bool =
   | Tir.EAtom a -> atom_is clo a                              (* returned *)
   | Tir.EAlloc (_, args) | Tir.EStackAlloc (_, args) | Tir.ETuple args ->
     List.exists (atom_is clo) args                           (* stored in a structure *)
+  (* An FBIP-reused cell stores its arguments exactly as a fresh one does.
+     [Drop.owning_apply_fns] runs AFTER Perceus inserted [EReuse], so without
+     this arm a closure stored by `reuse x as Seq(clo)` read as non-escaping,
+     the closure type was declined, and its captures leaked on every call
+     ([Seq.map]/[filter]/[concat] built through a reused [Seq] cell).  The
+     pre-FBIP callers ([owned_in]) never see an [EReuse]. *)
+  | Tir.EReuse (_, _, args) | Tir.EAllocHole (_, _, args, _) ->
+    List.exists (atom_is clo) args
   | Tir.ERecord fields -> List.exists (fun (_, a) -> atom_is clo a) fields
   | Tir.EUpdate (_, fields) -> List.exists (fun (_, a) -> atom_is clo a) fields
   | Tir.ECallPtr (fn_a, args) ->

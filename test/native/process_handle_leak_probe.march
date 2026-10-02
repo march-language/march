@@ -69,10 +69,9 @@ mod Main do
   -- process_spawn_lines: the raw builtin behind Process.run_stream hands back
   -- the captured stdout String.  Each call used to leak the outer Ok, the
   -- ProcessResult cell and the stderr String (3 objects), and returned an Ok
-  -- that aliased a String it did not own.  The builtin is called directly on
-  -- purpose: Process.run_stream also builds a Seq, and Seq itself leaks
-  -- (specs/todos/2026-09-30-seq-constructors-leak-their-closure.md), which
-  -- would mask this leg.
+  -- that aliased a String it did not own.  The builtin is called directly so
+  -- this leg isolates the builtin from the Seq built on top of it; the next
+  -- leg (leg_stream) runs the real Process.run_stream.
   pfn leg_lines(i : Int, n : Int, ok : Int) : Int do
     if i == n do ok
     else
@@ -81,6 +80,20 @@ mod Main do
         Err(_) -> 0
       end
       leg_lines(i + 1, n, ok + hit)
+    end
+  end
+
+  -- Process.run_stream = process_spawn_lines + Seq.from_string_lines.  The Seq
+  -- built over the captured output used to leak its closure environment
+  -- (specs/progress/2026-09-30-seq-constructors-leak-their-closure.md).
+  pfn leg_stream(i : Int, n : Int, ok : Int) : Int do
+    if i == n do ok
+    else
+      let hit = match Process.run_stream("echo", ["s" ++ int_to_string(i)]) do
+        Ok(seq) -> Seq.count(seq)
+        Err(_) -> 0
+      end
+      leg_stream(i + 1, n, ok + hit)
     end
   end
 
@@ -121,6 +134,10 @@ mod Main do
     let e = live_allocs()
     let r_e = leg_lines(0, n, 0)
     flat("process_spawn_lines", e, r_e, n)
+    leg_stream(0, 3, 0)
+    let f = live_allocs()
+    let r_f = leg_stream(0, n, 0)
+    flat("Process.run_stream", f, r_f, n)
     let m = 400
     leg_env(0, 3, 0)
     let d = live_allocs()
