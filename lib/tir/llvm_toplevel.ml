@@ -182,7 +182,7 @@ let native_vec_param_idxs (fn : Tir.fn_def) : int list =
            if Llvm_ctx.vec_ty_of_tir v.Tir.v_ty <> None then Some i else None)
           fn.Tir.fn_params)
 
-let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
+let emit_fn_body ~emit_expr ctx (fn : Tir.fn_def) =
   Hashtbl.clear ctx.Llvm_ctx.local_names;
   Hashtbl.clear ctx.Llvm_ctx.var_slot;
   Hashtbl.clear ctx.Llvm_ctx.var_llvm_ty;
@@ -418,7 +418,9 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
     ctx.Llvm_ctx.tco_in_tail    <- true;
     ctx.Llvm_ctx.tco_stack_save <- stack_save;
     ctx.Llvm_ctx.tco_dup_bound  <- Llvm_tco.dup_bound_vars fn.Tir.fn_body;
+    ctx.Llvm_ctx.norm_ret_pos   <- true;
     let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
+    ctx.Llvm_ctx.norm_ret_pos   <- false;
     (* Clear TCO state before emitting any other function. *)
     ctx.Llvm_ctx.tco_fn_name <- None;
     ctx.Llvm_ctx.tco_stack_save <- "";
@@ -437,7 +439,11 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
        non-TCO functions.  This fires once per call, counting every function
        invocation against the budget. *)
     if not is_leaf then Llvm_ctx.emit_reduction_check ctx;
+    (* The body's tail value goes straight to `ret`, which returns an Int
+       BARE under lazy normalisation ([Llvm_ctx.emit_wrap_int63]). *)
+    ctx.Llvm_ctx.norm_ret_pos <- true;
     let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
+    ctx.Llvm_ctx.norm_ret_pos <- false;
     if ret_ty = "void" then
       Llvm_ctx.emit_term ctx "ret void"
     else begin
@@ -450,6 +456,14 @@ let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
 
 (** Return the LLVM `declare` string for a function, for use as a forward
     declaration in subsequent JIT fragments that reference it without redefining it. *)
+
+(** Emit [fn]'s definition.  [hr_cur_fn] names it only while its own body is
+    emitted, for the hot-reload self-call rule in [Llvm_emit_call]. *)
+let emit_fn ~emit_expr ctx (fn : Tir.fn_def) =
+  ctx.Llvm_ctx.hr_cur_fn <- fn.Tir.fn_name;
+  Fun.protect ~finally:(fun () -> ctx.Llvm_ctx.hr_cur_fn <- "")
+    (fun () -> emit_fn_body ~emit_expr ctx fn)
+
 let fn_declare_str (fn : Tir.fn_def) : string =
   let fn_llvm_name = Llvm_builtins.mangle_extern fn.Tir.fn_name in
   (* No ctx here (JIT forward-declare helper); the REPL never unboxes, so the
@@ -987,20 +1001,12 @@ let emit_module ~emit_expr
      toolchain change, deployed by restart, and a deploy must not pause or
      migrate the actor answering SWIM pings.  Decided by loader provenance,
      see [Hot_reload.is_slot_actor_dispatch]. *)
-  let is_actor_dispatch_fn = Hot_reload.is_slot_actor_dispatch in
-  (* Program-entry functions must NEVER be reloadable slots.  The running green
-     thread's root frame is the chosen entry (`main`/`ModName.main`, emitted as
-     @march_main); swapping it while live corrupts the runtime allocator (OOM).
-     But in the standard hot-reload layout the real entry is a shim
-     (HotEntry.main → App.main), so App.main — the app's own `main` that runs the
-     never-returning accept loop — is permanently on the call stack too.  Both
-     are named `main` (bare or `.main`-suffixed), so we exclude EVERY such
-     function from the boundary, not just the single compiler-chosen entry. *)
-  let is_entry_fn (n : string) =
-    String.equal n "main"
-    || (String.length n > 5
-        && String.equal (String.sub n (String.length n - 5) 5) ".main")
-  in
+  (* The entry file's own top-level fns are bare-named too, and are slots
+     when the prefix names the entry module (2026-10-01, see
+     [Hot_reload.is_entry_file_slot]).  Program entries (`main`, `<Mod>.main`)
+     never are: the running root frame must not be swapped
+     ([Hot_reload.is_program_entry]).  All of it is [Hot_reload.is_slot_fn],
+     the one predicate the driver's slot-hash fold uses too. *)
   let hr_names =
     match hot_reload with
     | None -> Hot_reload.Name_table.build []
@@ -1008,10 +1014,7 @@ let emit_module ~emit_expr
       m.Tir.tm_fns
       |> List.filter_map (fun fn ->
            let n = fn.Tir.fn_name in
-           if is_entry_fn n then None
-           else if Hot_reload.is_reloadable cfg (Llvm_ctx.module_of_name n)
-              || is_actor_dispatch_fn n
-           then Some n else None)
+           if Hot_reload.is_slot_fn cfg n then Some n else None)
       |> Hot_reload.Name_table.build
   in
   let k_table = match k_table with Some t -> t | None -> Kind.of_module m in

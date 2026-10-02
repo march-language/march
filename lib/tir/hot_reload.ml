@@ -9,6 +9,10 @@ type config = {
   app_prefix : string;        (** module prefix of the app's own code, e.g. "MyApp" *)
   includes   : string list;   (** extra module prefixes to force-include *)
   excludes   : string list;   (** module prefixes to force-exclude (win over includes) *)
+  entry_top_level : bool;
+  (** The entry file's own top-level functions are on the boundary: the
+      prefix names the entry module, whose name lowering strips (see
+      [is_entry_file_slot]).  Set by the driver, like [includes]. *)
 }
 
 (** The owning module of a (possibly qualified) top-level name: everything
@@ -23,7 +27,7 @@ let module_of_name (n : string) : string =
     start with an uppercase letter); an empty prefix means "no app code is
     reloadable", which is internally consistent but rarely intended. *)
 let default_config (app_prefix : string) : config =
-  { app_prefix; includes = []; excludes = [] }
+  { app_prefix; includes = []; excludes = []; entry_top_level = false }
 
 (** Is [m] equal to, or a descendant module of, prefix [p]?
     "MyApp" is under "MyApp"; "MyApp.Router" is under "MyApp";
@@ -53,22 +57,33 @@ let is_reloadable (cfg : config) (m : string) : bool =
     boundary→boundary edges crossed the table, per the first reading of
     specs/hot-code-reload.md Part 2), which pinned every call from
     non-reloadable code into the boundary to the baseline for ever: the
-    generated topology `main` and the entry module (never reloadable, see
-    [is_entry_fn] in llvm_toplevel.ml), the closures they build, and any
+    generated topology `main` (never reloadable, see [is_program_entry]
+    below), the closures it builds, and any
     stdlib code that calls back into the app (Topology.reoffer reopening a
     role with its OLD body after a deploy) all direct-called old code and
     never saw a patch.  Nothing stops a non-reloadable caller from
     dispatching: the table is process-global and a boundary call resolves
     against the running proc's code epoch (march_dispatch_enter_unit), so the
     call gets the code its task was spawned under.  Calls to stdlib/excluded
-    modules, and into the runtime, stay direct.  (Intra-SCC calls also stay
-    direct; that is an SCC-level decision made by the caller of this
-    predicate, not a module-level one.)  [caller_module] is kept in the
-    signature so a call site still names both ends of the edge. *)
+    modules, and into the runtime, stay direct.  (A self-call stays direct
+    too, decided by the call site in llvm_emit_call.ml, not here: until
+    2026-10-01 this comment said intra-SCC calls did, but nothing
+    implemented it; mutual recursion between two slots dispatches.)
+    [caller_module] is kept in the signature so a call site still names both
+    ends of the edge. *)
 let needs_dispatch (cfg : config) ~(caller_module : string)
     ~(callee_module : string) : bool =
   ignore caller_module;
   is_reloadable cfg callee_module
+
+(** The file name the driver parses the control plane's wiring under
+    (bin/topology_gen.ml): protocols, leader, Agent and control API spliced
+    into a topology app's entry module when it has a [control] section.  Its
+    actors (CtlRespawner) are infrastructure like the stdlib's: the control
+    plane is what drives a deploy, and a deploy must not swap or migrate the
+    thing doing the deploy; a change to it ships with the toolchain, which
+    is a restart.  [Lower] records them with the stdlib's. *)
+let control_wiring_file = "<control>"
 
 (* ── Stdlib actors are not slots (owner decision, 2026-09-30) ──────────────
 
@@ -125,6 +140,70 @@ let is_stdlib_actor_fn (n : string) : bool =
     hash fold in bin/main.ml all go through it, so they cannot disagree. *)
 let is_slot_actor_dispatch (n : string) : bool =
   Tir_names.is_actor_dispatch_fn n && not (is_stdlib_actor_fn n)
+
+(* ── The entry file's top-level functions (2026-10-01) ─────────────────────
+
+   Lowering strips the entry module's name from every declaration of the
+   entry file, so `fn serve_one` at the top of `mod UpgradeApp` is the TIR fn
+   `serve_one`, module "", and [is_reloadable] never matches it: until
+   2026-10-01 a role body, hook or helper written there could never be hot
+   deployed, and `forge deploy hot` said "no changes" for it.  A bare name
+   alone cannot say where a function came from (the prelude, lifted lambdas
+   and join points, actor glue and the generated topology code are all bare
+   too), so lowering records the entry file's own top-level fns here, by
+   LOADER PROVENANCE like [note_actor_fns]: a [DFn] at the top of the module
+   lowering was handed whose span lies in the entry file.  Excluded there:
+   `main` (see [is_program_entry]) and the compiler's `__`-named fns.  Code
+   spliced into the entry module by the driver (the generated topology
+   `main`, the control plane's wiring) is parsed from `<topology>` and
+   `<control>`, not the entry file, so it is never recorded: the control
+   plane is the thing that runs a deploy, and a deploy must not swap it
+   (the same reasoning that keeps stdlib actors off, above).
+
+   A polymorphic entry fn's specializations (`foo$Int`) are not recorded:
+   they are bare non-slots, folded into their slotted callers' hashes and
+   delivered inside those callers' patches, like lifted lambdas.
+
+   Process-global, reset at the top of [Lower.lower_module]. *)
+let entry_file_fns : (string, unit) Hashtbl.t = Hashtbl.create 64
+
+let reset_entry_file_fns () = Hashtbl.reset entry_file_fns
+
+let note_entry_file_fn (n : string) : unit = Hashtbl.replace entry_file_fns n ()
+
+(** A program entry point, never a slot: the running green thread's root
+    frame is `main`/`<Mod>.main` (emitted as @march_main), and in the
+    hot-reload layout the app's own `main` (HotEntry.main -> App.main) is
+    permanently on the stack too; swapping either while live corrupts the
+    allocator.  Every fn named `main`, bare or `.main`-suffixed. *)
+let is_program_entry (n : string) : bool =
+  String.equal n "main"
+  || (String.length n > 5
+      && String.equal (String.sub n (String.length n - 5) 5) ".main")
+
+(** Is [n] one of the entry file's own top-level functions, on the boundary
+    because [cfg]'s prefix names the entry module? *)
+let is_entry_file_slot (cfg : config) (n : string) : bool =
+  cfg.entry_top_level
+  && Hashtbl.mem entry_file_fns n
+  && not (under_any cfg.excludes cfg.app_prefix)
+
+(** Does a call to the module function [n] route through the dispatch
+    table?  [needs_dispatch] by its module, or one of the entry file's own
+    top-level fns (bare-named, so its module says nothing). *)
+let needs_dispatch_to (cfg : config) (n : string) : bool =
+  is_reloadable cfg (module_of_name n) || is_entry_file_slot cfg n
+
+(** THE slot predicate: does module function [n] get a hot-reload dispatch
+    slot?  App code (under the prefix or an include), the entry file's own
+    top-level fns, and every non-stdlib actor's `<Actor>_dispatch`; never a
+    program entry.  The reload name table ([Llvm_toplevel.emit_module]'s
+    [hr_names]) and the driver's slot-hash fold both go through it. *)
+let is_slot_fn (cfg : config) (n : string) : bool =
+  not (is_program_entry n)
+  && (is_reloadable cfg (module_of_name n)
+      || is_slot_actor_dispatch n
+      || is_entry_file_slot cfg n)
 
 (* ── NAME_ID interning ─────────────────────────────────────────────────────
 
