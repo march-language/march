@@ -98,7 +98,8 @@
  ; those trees can be stale relative to the working copy, so an edit to
  ; runtime/*.c or stdlib/*.march is simply absent from what the test exercises
  ; — which shows up as a fake failure, or worse, a vacuous pass.
- (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
+ (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib)
+       (file native/pooled_actor_http.march))
  (action (run %{test} -e)))
 
 ; ── TIR golden-snapshot tests (Wave 2 Task 4 / W2.2) ──────────────────────
