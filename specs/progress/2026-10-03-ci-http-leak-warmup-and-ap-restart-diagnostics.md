@@ -44,3 +44,13 @@ panic. The next CI failure names the cause; this does not fix it.
 fixed 20 ms, and asserted the task had already ticked. A loaded macOS runner
 had not scheduled it yet. It now waits for the first tick (`wait_until`, 5 s
 deadline), as the file's other waits do. 94/94 checks, three local runs.
+
+## `test (ubuntu-24.04, rest)`: native golden `supervisor_deflected_crash_absorbed`
+
+#767's second run failed here: the trace showed child 0 claiming the batch restart and
+child 1 deflected (the golden has it the other way round), then "lo/hi restarted: false".
+The test sends `Go` to a Killer actor and kills `hi` from main straight after, assuming
+main's kill claims the restart marker first and the Killer's lands inside its 300 ms stall.
+A free worker ran the Killer's kill first, so the stalled restart ran on the Killer's thread
+and main's `kill` returned before it finished. The Killer now waits 100 ms before its kill
+(main's claim comes first; 200 ms of the stall remain). Golden matched 5/5 locally.
