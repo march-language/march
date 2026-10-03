@@ -134,6 +134,22 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A hot patch of a topology role body is no longer refused by the node's
+  capability policy.** A role body holds the session it is handed, so its own
+  caps include `Session.Live`, and a node running the policy `forge host init`
+  writes refused every such patch with `ERR cap_policy Session.Live` unless you
+  wrote `Session.Live` into the pool's `caps`. The node's admission gate now
+  polices IO capabilities only: a proof capability (`Session.Live`,
+  `ClusterNode.Live`, your own `proof cap`) carries no IO authority and is not
+  checked against `MARCH_DEPLOY_POLICY`; an IO capability outside the policy is
+  refused as before. And in a topology with a `[control]` section, every hot patch
+  was refused with `ERR role_cap_policy Ctl.Agent ...`, because the policy
+  bounded the control plane's own roles: the generated policy now ends with a
+  `serves` line, and the gate bounds only the closures of the roles the node's
+  pool serves. Re-run `forge host init` (or deploy a restart) to rewrite an
+  existing policy; one without a `serves` line still bounds every role. Both
+  `forge deploy hot` and releases through the control plane go through the same
+  gate.
 - **Compiled HTTP servers no longer leak ~0.5 KiB per request.** Neither the
   thread-pool nor the event-loop server released the `Conn` a handler returns
   after writing the response, so every request leaked the result record and

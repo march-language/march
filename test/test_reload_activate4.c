@@ -610,15 +610,22 @@ static void test_epoch_model_wait_pins_drain(void) {
  * Build+send one ACTIVATE6.  [role_caps] is the SIGNED block ("R=hex;...");
  * [roles] the unsigned one ("R=csv;...").  [cas] may be NULL (a fake hash:
  * admission then falls through to CAS-miss). */
-static void do_activate6(int fd, const char *name, const char *cas,
-                         const char *role_caps, const char *roles,
-                         char *resp, int resp_max) {
+/* ACTIVATE6 for [name] whose own caps are own[0..nown) (sorted) and whose
+ * signed role roots / unsigned role closures are [role_caps] / [roles]. */
+static void do_activate6_caps(int fd, const char *name, const char *cas,
+                              const char **own, int nown,
+                              const char *role_caps, const char *roles,
+                              char *resp, int resp_max) {
     char impl_hash[65], cas_hash[65];
     memset(impl_hash, '7', 64); impl_hash[64] = '\0';
     if (cas) snprintf(cas_hash, sizeof(cas_hash), "%s", cas);
     else { memset(cas_hash, '8', 64); cas_hash[64] = '\0'; }
     char root[65];
-    expected_cap_root(NULL, 0, root);
+    expected_cap_root(own, nown, root);
+    char own_csv[1024]; size_t ol = 0;
+    own_csv[0] = '\0';
+    for (int i = 0; i < nown; i++)
+        ol += (size_t)snprintf(own_csv + ol, sizeof(own_csv) - ol, "%s%s", i ? "," : "", own[i]);
     char signed_msg[4096];
     snprintf(signed_msg, sizeof(signed_msg),
              "ACTIVATE6 %s %s %s %d epoch:%u cap_root:%s role_caps:%s callers:%s",
@@ -627,10 +634,16 @@ static void do_activate6(int fd, const char *name, const char *cas,
     sign_b64(signed_msg, sig_b64);
     char line[8192];
     snprintf(line, sizeof(line),
-             "ACTIVATE6 %s %s %s %s %d epoch:%u cap_root:%s role_caps:%s caps: roles:%s callers:",
-             name, impl_hash, cas_hash, sig_b64, 0, 0u, root, role_caps, roles);
+             "ACTIVATE6 %s %s %s %s %d epoch:%u cap_root:%s role_caps:%s caps:%s roles:%s callers:",
+             name, impl_hash, cas_hash, sig_b64, 0, 0u, root, role_caps, own_csv, roles);
     send_line(fd, line);
     read_resp(fd, resp, resp_max);
+}
+
+static void do_activate6(int fd, const char *name, const char *cas,
+                         const char *role_caps, const char *roles,
+                         char *resp, int resp_max) {
+    do_activate6_caps(fd, name, cas, NULL, 0, role_caps, roles, resp, resp_max);
 }
 
 /* "Stream.Cons=<root(caps)>" for one role. */
@@ -760,6 +773,161 @@ static void test_activate6_role_policy(void) {
         CHECK(strstr(line, "\"result\":\"err_role_cap_policy\"") != NULL,
               "ACTIVATE6: the refusal is audited");
     }
+    close(fd);
+}
+
+/* Policy mode: the policy speaks only about IO capabilities.  A proof cap
+ * (Session.Live, ClusterNode.Live, Actor.Introspect, a user's Db.Migrated)
+ * carries no IO authority of its own and only its declaring module can mint
+ * it, so the gate does not police it: a role body's own caps include the
+ * session it is handed (caps=IO.Console,Session.Live), and a node policy
+ * generated from the pool's IO caps admits it.  An IO cap outside the
+ * policy is refused exactly as before, beside a proof cap or not, in the
+ * function's own caps and in a role closure. */
+static void test_policy_ignores_proof_caps(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "connected to reload server (proof caps)");
+    if (fd < 0) return;
+    char resp[512], root[65];
+
+    /* ACTIVATE4: a role body's own caps. */
+    {
+        const char *caps[] = { "IO.Console", "Session.Live" };
+        expected_cap_root(caps, 2, root);
+        do_activate4(fd, "test_fn_within_policy", "IO.Console,Session.Live", root, "", resp, sizeof(resp));
+        CHECK(strncmp(resp, "ERR missing_artifact", 20) == 0,
+              "proof cap beside an IO cap within policy => admitted past cap gates");
+        if (strncmp(resp, "ERR missing_artifact", 20) != 0) fprintf(stderr, "    got: %s\n", resp);
+    }
+    /* A proof cap does not launder an IO cap the policy lacks. */
+    {
+        const char *caps[] = { "IO.Process", "Session.Live" };
+        expected_cap_root(caps, 2, root);
+        do_activate4(fd, "test_fn_exceeds_policy", "IO.Process,Session.Live", root, "", resp, sizeof(resp));
+        CHECK(strcmp(resp, "ERR cap_policy IO.Process") == 0,
+              "proof cap beside an IO cap outside policy => ERR cap_policy IO.Process");
+        if (strcmp(resp, "ERR cap_policy IO.Process") != 0) fprintf(stderr, "    got: %s\n", resp);
+    }
+    /* An unknown IO-rooted path is still IO: refused, not mistaken for a proof cap. */
+    {
+        const char *caps[] = { "IO.Bogus" };
+        expected_cap_root(caps, 1, root);
+        do_activate4(fd, "test_fn_exceeds_policy", "IO.Bogus", root, "", resp, sizeof(resp));
+        CHECK(strcmp(resp, "ERR cap_policy IO.Bogus") == 0,
+              "an IO-rooted path outside policy => ERR cap_policy IO.Bogus");
+        if (strcmp(resp, "ERR cap_policy IO.Bogus") != 0) fprintf(stderr, "    got: %s\n", resp);
+    }
+    /* The bare IO root itself: refused under a narrower policy. */
+    {
+        const char *caps[] = { "IO" };
+        expected_cap_root(caps, 1, root);
+        do_activate4(fd, "test_fn_exceeds_policy", "IO", root, "", resp, sizeof(resp));
+        CHECK(strcmp(resp, "ERR cap_policy IO") == 0, "the IO root outside policy => ERR cap_policy IO");
+        if (strcmp(resp, "ERR cap_policy IO") != 0) fprintf(stderr, "    got: %s\n", resp);
+    }
+
+    /* ACTIVATE6: a role body, own caps and closure both holding proof caps. */
+    {
+        const char *own[] = { "IO.Console", "Session.Live" };
+        const char *closure[] = { "ClusterNode.Live", "IO.Console", "Session.Live" };
+        char rc[256];
+        role_root_entry("Echo.Server", closure, 3, rc, sizeof(rc));
+        do_activate6_caps(fd, "test_fn_role", NULL, own, 2, rc,
+                          "Echo.Server=ClusterNode.Live,IO.Console,Session.Live", resp, sizeof(resp));
+        CHECK(strncmp(resp, "ERR missing_artifact", 20) == 0,
+              "ACTIVATE6: a role body holding Session.Live within an IO policy is admitted");
+        if (strncmp(resp, "ERR missing_artifact", 20) != 0) fprintf(stderr, "    got: %s\n", resp);
+    }
+    /* The same role body whose closure widened to IO.FileWrite: refused. */
+    {
+        const char *own[] = { "IO.Console", "Session.Live" };
+        const char *closure[] = { "IO.Console", "IO.FileWrite", "Session.Live" };
+        char rc[256];
+        role_root_entry("Echo.Server", closure, 3, rc, sizeof(rc));
+        do_activate6_caps(fd, "test_fn_role", NULL, own, 2, rc,
+                          "Echo.Server=IO.Console,IO.FileWrite,Session.Live", resp, sizeof(resp));
+        CHECK(strcmp(resp, "ERR role_cap_policy Echo.Server IO.FileWrite") == 0,
+              "ACTIVATE6: a role closure widened beyond policy beside Session.Live is ERR role_cap_policy");
+        if (strcmp(resp, "ERR role_cap_policy Echo.Server IO.FileWrite") != 0) fprintf(stderr, "    got: %s\n", resp);
+    }
+    close(fd);
+
+    /* The control plane's path: the Agent relays a release's ACTIVATE lines
+     * through march_reload_request (the reload_request builtin), the same
+     * dispatch and the same gate as the socket. */
+    {
+        char impl_hash[65], cas_hash[65], signed_msg[1024], sig_b64[128], line[2048];
+        memset(impl_hash, '1', 64); impl_hash[64] = '\0';
+        memset(cas_hash,  '2', 64); cas_hash[64]  = '\0';
+        const char *variants[2][2] = {
+            { "IO.Console,Session.Live", "ERR missing_artifact" },
+            { "IO.Process,Session.Live", "ERR cap_policy IO.Process" },
+        };
+        const char *caps_ok[] = { "IO.Console", "Session.Live" };
+        const char *caps_bad[] = { "IO.Process", "Session.Live" };
+        for (int v = 0; v < 2; v++) {
+            expected_cap_root(v == 0 ? caps_ok : caps_bad, 2, root);
+            const char *name = v == 0 ? "test_fn_within_policy" : "test_fn_exceeds_policy";
+            uint32_t epoch = g_epoch++;
+            snprintf(signed_msg, sizeof(signed_msg), "ACTIVATE4 %s %s %s 0 epoch:%u cap_root:%s callers:",
+                     name, impl_hash, cas_hash, epoch, root);
+            sign_b64(signed_msg, sig_b64);
+            int len = snprintf(line, sizeof(line),
+                               "ACTIVATE4 %s %s %s %s 0 epoch:%u cap_root:%s caps:%s callers:",
+                               name, impl_hash, cas_hash, sig_b64, epoch, root, variants[v][0]);
+            size_t n = 0;
+            char *r = march_reload_request(line, (size_t)len, &n);
+            int ok = r && strncmp(r, variants[v][1], strlen(variants[v][1])) == 0;
+            CHECK(ok, v == 0 ? "in-process (Agent relay): Session.Live within an IO policy is admitted"
+                             : "in-process (Agent relay): an IO cap outside policy is still ERR cap_policy");
+            if (!ok) fprintf(stderr, "    got: %s", r ? r : "(null)\n");
+            free(r);
+        }
+    }
+}
+
+/* A role the node does not serve: the control plane's Agent (generated into
+ * every node's main), whose closure reaches IO.FileRead, which this pool's
+ * policy (IO.Console, IO.NetConnect) does not allow.  [scoped]: the policy
+ * names the roles the node serves (`serves Echo.Server Stream.Cons`, as
+ * `forge host init` writes it), so Ctl.Agent is not this policy's to bound
+ * and the patch is admitted; a served role is still bounded.  Unscoped (a
+ * hand-written policy with no `serves` line): every role is bounded, as
+ * before. */
+static void test_policy_served_roles(int scoped) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "connected to reload server (served roles)");
+    if (fd < 0) return;
+    char resp[512];
+    const char *agent[] = { "IO.Clock", "IO.FileRead", "IO.Mut", "IO.NetConnect" };
+    const char *echo[] = { "IO.Console", "IO.FileWrite" };
+    char ra[256], re[256], both[600];
+    role_root_entry("Ctl.Agent", agent, 4, ra, sizeof(ra));
+    role_root_entry("Echo.Server", echo, 2, re, sizeof(re));
+    snprintf(both, sizeof(both), "%s;%s", ra, re);
+
+    do_activate6(fd, "test_fn_role", NULL, ra, "Ctl.Agent=IO.Clock,IO.FileRead,IO.Mut,IO.NetConnect",
+                 resp, sizeof(resp));
+    if (scoped) {
+        CHECK(strncmp(resp, "ERR missing_artifact", 20) == 0,
+              "scoped policy: a role the node does not serve (Ctl.Agent) is not bounded by it");
+    } else {
+        CHECK(strcmp(resp, "ERR role_cap_policy Ctl.Agent IO.Clock") == 0,
+              "unscoped policy: every role closure is bounded (Ctl.Agent refused)");
+    }
+    if (strncmp(resp, scoped ? "ERR missing_artifact" : "ERR role_cap_policy Ctl.Agent", scoped ? 20 : 29) != 0)
+        fprintf(stderr, "    got: %s\n", resp);
+
+    /* Beside it, a served role widened beyond the policy: refused either way. */
+    do_activate6(fd, "test_fn_role", NULL, both,
+                 "Ctl.Agent=IO.Clock,IO.FileRead,IO.Mut,IO.NetConnect;Echo.Server=IO.Console,IO.FileWrite",
+                 resp, sizeof(resp));
+    const char *want = scoped ? "ERR role_cap_policy Echo.Server IO.FileWrite"
+                              : "ERR role_cap_policy Ctl.Agent IO.Clock";
+    CHECK(strcmp(resp, want) == 0,
+          scoped ? "scoped policy: a served role widened beyond it is still ERR role_cap_policy"
+                 : "unscoped policy: the first role outside it is ERR role_cap_policy");
+    if (strcmp(resp, want) != 0) fprintf(stderr, "    got: %s\n", resp);
     close(fd);
 }
 
@@ -1183,7 +1351,7 @@ static void test_restart_durability(void) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <keys_file> [policy]\n", argv[0]);
+        fprintf(stderr, "usage: %s <keys_file> [policy|policy-all|restore]\n", argv[0]);
         return 2;
     }
     if (!load_secret_key(argv[1])) {
@@ -1240,7 +1408,11 @@ int main(int argc, char **argv) {
     march_reload_server_start(sock_path);
     test_hcr_info();
 
-    int policy_mode = (argc >= 3 && strcmp(argv[2], "policy") == 0);
+    /* policy: test_reload_policy.txt, which names the roles the node serves
+     * (`serves`, as forge host init writes it); policy-all: the same caps
+     * with no `serves` line (every role bounded). */
+    int policy_all = (argc >= 3 && strcmp(argv[2], "policy-all") == 0);
+    int policy_mode = policy_all || (argc >= 3 && strcmp(argv[2], "policy") == 0);
 
     if (!policy_mode) {
         test_tamper_check_matching_root_admits();
@@ -1308,15 +1480,18 @@ int main(int argc, char **argv) {
             }
         }
         test_activate6_role_policy();
+        test_policy_ignores_proof_caps();
+        test_policy_served_roles(!policy_all);
     }
 
     unlink(sock_path);
     unlink(g_audit_path);
     if (g_failed == 0) {
-        printf("test_reload_activate4%s: all checks passed\n", policy_mode ? "_policy" : "");
+        printf("test_reload_activate4%s: all checks passed\n",
+               policy_all ? "_policy_all" : policy_mode ? "_policy" : "");
         return 0;
     }
     fprintf(stderr, "test_reload_activate4%s: %d check(s) failed\n",
-            policy_mode ? "_policy" : "", g_failed);
+            policy_all ? "_policy_all" : policy_mode ? "_policy" : "", g_failed);
     return 1;
 }

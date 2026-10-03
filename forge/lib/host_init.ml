@@ -221,12 +221,25 @@ let runner_caps (m : Cmd_deploy_hot.manifest) (p : Topology.pool) : string list 
   |> List.sort_uniq String.compare
 
 (** The policy file's text for a pool: its caps ([pool_policy]) plus, when
-    the manifest being installed is known, its runner's ([runner_caps]).
-    None: no policy (the pool's caps are unknown). *)
+    the manifest being installed is known, its runner's ([runner_caps]),
+    then a [serves] line naming the roles the pool serves (bare when it
+    serves none). None: no policy (the pool's caps are unknown).
+
+    The node's gate bounds every patched function's own caps by the cap
+    lines, and only the closures of the roles [serves] names: a role this
+    pool does not serve is another pool's (a shared build carries every
+    pool's roles) or the control plane's ([Ctl.Agent], [Ctl.Control],
+    generated into every node's [main] and charged to it, as the runner's
+    own caps are: plan section 2), and this pool's caps are no bound on it.
+    Granting those closures here instead would widen what any patch on the
+    node may do. The gate polices IO caps only; a proof cap ([Session.Live],
+    which every role body holds) is never a policy line (runtime/march_reload.c,
+    [check_cap_policy]). *)
 let policy_text ~derived ?manifest (p : Topology.pool) : string option =
   Option.map (fun caps ->
       let runner = match manifest with Some m -> runner_caps m p | None -> [] in
-      String.concat "" (List.map (fun c -> c ^ "\n") (List.sort_uniq String.compare (caps @ runner))))
+      String.concat "" (List.map (fun c -> c ^ "\n") (List.sort_uniq String.compare (caps @ runner)))
+      ^ String.concat " " ("serves" :: List.sort_uniq String.compare p.serves) ^ "\n")
     (pool_policy ~derived p)
 
 (** Everything [forge host init] wants on each host. Pure apart from the
