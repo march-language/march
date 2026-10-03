@@ -260,7 +260,7 @@ let counters sock =
     (member "queued_messages" m |> to_int >= 150) (show m)
 
 (* R2 utilisation: test/native/observe_sched.march at 4 schedulers.  The
-   idle query runs right after "ready" (1.5 s of idle follow); the busy one
+   idle query runs right after "ready" (3 s of idle follow); the busy one
    after the program prints "busy" (4 s of 4 spinners follow). *)
 let sched sock ready_file =
   let util req =
@@ -284,6 +284,18 @@ let sched sock ready_file =
   let (busy, d) = util "SCHED 1000" in
   check "4 spinners on 4 schedulers are over 90% busy" (busy > 0.90)
     (Printf.sprintf "%.3f %s" busy (Yojson.Safe.to_string (member "threads" d)));
+  (* last_run_ms comes from a clock the preemption daemon ticks every 1 ms:
+     an actor that is running right now must not look idle.  (It once came
+     from a per-scheduler clock refreshed every 1024 dispatches, which left
+     the busiest actors reading seconds idle.) *)
+  (* Five samples: the stale clock read anywhere from 0 to ~700 ms. *)
+  let samples = List.init 5 (fun _ ->
+      Unix.sleepf 0.1;
+      data (get sock "ACTORS status 4") |> member "actors" |> to_list
+      |> List.map (fun r -> match member "idle_ms" r with `Int n -> n | _ -> max_int)) in
+  check "running actors read under 50 ms idle (5 samples)"
+    (List.for_all (fun xs -> List.length xs = 4 && List.for_all (fun n -> n < 50) xs) samples)
+    (String.concat " " (List.map (fun xs -> String.concat "," (List.map string_of_int xs)) samples));
   let s = data (get sock "SNAPSHOT sched") |> member "sched" in
   check "SNAPSHOT's sched section is lifetime-only (no window)"
     (member "window_ms" s = `Null && member "utilisation" s = `Null

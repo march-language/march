@@ -79,7 +79,7 @@ mod Main do
       match current_child(intro, boss) do
         Some(p) ->
           let _ = send(p, Boom())
-          sleep_ms(200)
+          sleep_ms(500)
           crash_child(intro, boss, k - 1)
         None -> ()
       end
