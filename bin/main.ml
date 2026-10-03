@@ -4090,9 +4090,9 @@ let compile filename =
              # march-hcr-manifest v1
              # cas_hash <64-char blake3 hex>
              <fn_name> <impl_hash> <sig_hash> [callers:<a>,<b>] caps=<sorted-csv>
-           (v2 adds `# target`, `# hcr_abi`, `# module_prefix` and
+           (v2 adds `# target`, `# hcr_abi`, `# module_prefix`,
            `# stdlib_hash <digest of the stdlib source compiled against>`
-           header lines.)
+           and `# slots <a>,<b>` (the patch's dispatch slots) header lines.)
            sig_hash may be empty if the function was not hashed.
            callers: lists other boundary functions that call this one (omitted
            when empty).  The deploy tool uses this to verify that all callers
@@ -4247,7 +4247,23 @@ let compile filename =
                    of activating nothing (deploy --plan, deploy hot). *)
                 (match stdlib_source_hash () with
                  | Some (_, h, _) -> Printf.fprintf oc "# stdlib_hash %s\n" h
-                 | None -> ())
+                 | None -> ());
+                (* The patch's own dispatch slots ([Hot_reload.is_slot_fn]).
+                   A slot's impl_hash stops at a slot callee, so when the
+                   running build has no slot for one (a function new since
+                   its last restart: a patch calls its own copy of it),
+                   that callee's change is in no caller's hash; the deploy
+                   redeploys its callers to carry it
+                   (Cmd_deploy_hot.unslotted_carriers). *)
+                (match hr_config () with
+                 | Some cfg ->
+                   let slots =
+                     Hashtbl.fold (fun n _ acc ->
+                         if March_tir.Hot_reload.is_slot_fn cfg n then n :: acc else acc)
+                       hr_impl_hashes []
+                     |> List.sort String.compare in
+                   Printf.fprintf oc "# slots %s\n" (String.concat "," slots)
+                 | None -> ());
               | Error _ ->
                 Printf.fprintf oc "# march-hcr-manifest v1\n# cas_hash %s\n" ch);
              Hashtbl.iter (fun name impl_h ->

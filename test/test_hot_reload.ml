@@ -302,6 +302,42 @@ let test_compile_so_with_hot_reload_epoch () =
   check "leave still emitted" true
     (contains ir "call void @march_dispatch_leave")
 
+(* A patch .so names a slot by NAME, never by its own table's id: its ids are
+   dense over the PATCH's slot set, so a slot a new version adds shifts every
+   id after it against the running table (2026-10-02, protocol_expand_contract:
+   v2's new `may_choose_later` put the patched `shop`'s call to `shop_phase`
+   into `start_driver`'s slot, and both nodes died on SIGSEGV).  Here the
+   patch adds `MyApp.Aa`, so `MyApp.B` is id 3 in the patch's table but id 2
+   in the base binary of two_boundary_module: no constant id may appear at a
+   .so call site. *)
+let test_compile_so_resolves_slots_by_name () =
+  let m = two_boundary_module () in
+  let aa : Tir.fn_def =
+    { fn_name = "MyApp.Aa"; fn_params = []; fn_ret_ty = Tir.TInt;
+      fn_body = Tir.EApp ({ Tir.v_name = "MyApp.B";
+                            v_ty = Tir.TFn ([], Tir.TInt); v_lin = Tir.Unr }, []);
+      fn_kind = Tir.FnNormal } in
+  let ir = LE.emit_module ~emit_main:false
+             ~hot_reload:(Some (HR.default_config "MyApp"))
+             { m with Tir.tm_fns = aa :: m.Tir.tm_fns } in
+  check "no constant slot id at a .so call site" false
+    (contains ir "call ptr @march_dispatch_enter_unit(i32 2,"
+     || contains ir "call ptr @march_dispatch_enter_unit(i32 3,");
+  check "the call site loads its slot id from a cell" true
+    (contains ir "= load i32, ptr @.hr_slot0");
+  check "the cell starts at 0 (never published: the direct path)" true
+    (contains ir "@.hr_slot0 = private global i32 0");
+  check "__march_init resolves the cell by name" true
+    (contains ir "c\"MyApp.B\\00\"" && contains ir "call i32 @march_dispatch_name_to_id(ptr @.hr_slotname0, ptr @.hr_slot0)");
+  check "leave uses the same resolved id" false
+    (contains ir "call void @march_dispatch_leave(i32 2,");
+  (* The base binary keeps constant ids: its own table is the running one. *)
+  let base = LE.emit_module ~hot_reload:(Some (HR.default_config "MyApp"))
+               { m with Tir.tm_fns = aa :: m.Tir.tm_fns } in
+  check "the base binary still calls by constant id" true
+    (contains base "call ptr @march_dispatch_enter_unit(i32 3,");
+  check "the base binary has no slot cells" false (contains base "@.hr_slot0")
+
 (* ── Protocol v2: ACTIVATE2 signed message format ───────────────────────── *)
 
 let test_activate2_signed_message_format () =
@@ -475,6 +511,7 @@ let () =
       Alcotest.test_case "no startup registration off"       `Quick test_no_startup_registration_without_flag;
       Alcotest.test_case "compile_so+hot_reload emits epoch" `Quick test_compile_so_with_hot_reload_epoch;
       Alcotest.test_case "compile_so without hot_reload: no epoch" `Quick test_compile_so_without_hot_reload_no_epoch;
+      Alcotest.test_case "compile_so resolves slot ids by name" `Quick test_compile_so_resolves_slots_by_name;
     ]);
     ("protocol_v2", [
       Alcotest.test_case "ACTIVATE2 signed message canonical form" `Quick test_activate2_signed_message_format;
