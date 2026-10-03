@@ -4,10 +4,17 @@ What [../progress/2026-09-22-dd-step10-ssh-backend-and-plan.md](../progress/2026
 left open, each small:
 
 - **Node policy vs function caps.** `MARCH_DEPLOY_POLICY` bounds each patched
-  function's own caps as well as role closures. The policy now adds the runner's caps
-  (`Host_init.runner_caps`), but a patch that changes a stdlib function outside both
-  (e.g. the cluster's networking) is still refused. Add the runtime's own caps, or
-  have the gate apply the policy to role closures only.
+  function's own IO caps as well as the closures of the roles the node serves. The
+  policy now adds the runner's caps (`Host_init.runner_caps`), and since 2026-10-02
+  the gate ignores proof caps (`Session.Live` in every role body's own caps) and the
+  closures of roles the pool does not serve, such as the control plane's `Ctl.*`
+  (a `serves` line in the generated policy:
+  [../progress/2026-10-01-role-body-hot-patch-needs-session-live-in-policy.md](../progress/2026-10-01-role-body-hot-patch-needs-session-live-in-policy.md)).
+  Still open: a patch that changes a stdlib function outside the pool's caps and the
+  runner's (e.g. the cluster's networking) is refused. A stdlib change cannot ship as
+  a patch at all today (forge refuses it on `stdlib_hash`), so this bites only once
+  it can: add the runtime's own caps then, or have the gate apply the policy to role
+  closures only.
 - **Topology hook.** Fill `march_hcr_on_topology` (runtime) so a signed `TOPOLOGY`
   push is applied by the node; the ssh backend then stops writing the digest file and
   sending SIGHUP itself.

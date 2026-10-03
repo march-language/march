@@ -27,9 +27,11 @@
  *     cap_root and is rejected. (Legacy-shaped/no-cap-root artifacts arrive
  *     over ACTIVATE3, distinguished by the verb, not by empty caps here.) If
  *     $MARCH_DEPLOY_POLICY names a file of permitted cap paths, every received
- *     cap must be subsumed by some policy entry (ERR cap_policy <cap>); the
- *     policy gate is a no-op when the received cap set is empty (trivially
- *     satisfied — there is nothing to violate).
+ *     IO-rooted cap must be subsumed by some policy entry (ERR cap_policy
+ *     <cap>); a cap outside the IO lattice (a proof cap such as Session.Live)
+ *     is not policed (check_cap_policy says why).  The policy gate is a
+ *     no-op when the received cap set is empty (trivially satisfied — there
+ *     is nothing to violate).
  *   ACTIVATE5 <name> <impl_hash> <cas_hash> <sig64> <migrate> epoch:<N> cap_root:<hex>
  *             caps:<sorted-csv> callers:<sorted-csv>
  *                                                   → OK | WAIT … | ERR <reason>  (v5)
@@ -53,7 +55,8 @@
  *     `roles:` or a role `roles:` names that `role_caps:` does not with
  *     ERR role_cap_tamper.  $MARCH_DEPLOY_POLICY then applies to every
  *     role closure (ERR role_cap_policy <role> <cap>), after the
- *     function's own caps (ERR cap_policy <cap>).  A role closure is
+ *     function's own caps (ERR cap_policy <cap>); to every role the node
+ *     serves when the policy has a `serves` line (load_deploy_policy).  A role closure is
  *     everything the role's code reaches, so a patch that only calls an
  *     existing, more powerful helper is caught here where the own-caps
  *     gate misses it.  A new verb, not a field appended to ACTIVATE5: an
@@ -1437,11 +1440,24 @@ static void replay_state(const char *socket_path) {
 
 /* Loaded lazily from $MARCH_DEPLOY_POLICY (newline-delimited cap-path file).
  * Absent env var or unreadable file => g_policy_loaded stays 0 => permissive
- * (skip the policy check entirely). Loaded at most once per process. */
+ * (skip the policy check entirely). Loaded at most once per process.
+ *
+ * A line `serves [<Proto.Role> ...]` (the policy `forge host init` writes)
+ * names the roles this node's pools serve: the policy then bounds only those
+ * roles' closures (check_role_closures).  A role the node does not serve is
+ * another pool's (a shared build carries every pool's roles) or the control
+ * plane's (`Ctl.*`, generated into every node's main and charged to it, as
+ * the runner's own caps are: plan section 2); this pool's policy is not the
+ * bound on it.  A policy with no `serves` line bounds every role, as before.
+ * An older server reads the line as a cap path no capability equals. */
+#define MARCH_POLICY_MAX_SERVED 64
 static char g_policy_caps[MARCH_POLICY_MAX_CAPS][MARCH_POLICY_LINE_MAX];
 static int  g_policy_n_caps   = 0;
 static int  g_policy_loaded   = 0;   /* 1 once load_deploy_policy() has run */
 static int  g_policy_present  = 0;   /* 1 iff a policy file was successfully read */
+static int  g_policy_scoped   = 0;   /* 1 iff the policy had a `serves` line */
+static char g_policy_served[MARCH_POLICY_MAX_SERVED][MARCH_POLICY_LINE_MAX];
+static int  g_policy_n_served = 0;
 
 static void load_deploy_policy(void) {
     if (g_policy_loaded) return;
@@ -1450,11 +1466,21 @@ static void load_deploy_policy(void) {
     if (!path || !path[0]) return;
     FILE *f = fopen(path, "r");
     if (!f) return;
-    char line[MARCH_POLICY_LINE_MAX + 32];
-    while (g_policy_n_caps < MARCH_POLICY_MAX_CAPS && fgets(line, sizeof(line), f)) {
+    char line[4096];
+    while (fgets(line, sizeof(line), f)) {
         size_t len = strlen(line);
         while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
         if (len == 0) continue;  /* skip blank lines */
+        if (strncmp(line, "serves", 6) == 0 && (line[6] == '\0' || line[6] == ' ')) {
+            g_policy_scoped = 1;
+            char *save = NULL;
+            for (char *r = strtok_r(line + 6, " ", &save); r; r = strtok_r(NULL, " ", &save)) {
+                if (g_policy_n_served >= MARCH_POLICY_MAX_SERVED) break;
+                snprintf(g_policy_served[g_policy_n_served++], MARCH_POLICY_LINE_MAX, "%s", r);
+            }
+            continue;
+        }
+        if (g_policy_n_caps >= MARCH_POLICY_MAX_CAPS) continue;
         if (len >= MARCH_POLICY_LINE_MAX) len = MARCH_POLICY_LINE_MAX - 1;  /* bound, truncate */
         memcpy(g_policy_caps[g_policy_n_caps], line, len);
         g_policy_caps[g_policy_n_caps][len] = '\0';
@@ -1462,6 +1488,16 @@ static void load_deploy_policy(void) {
     }
     fclose(f);
     g_policy_present = 1;
+}
+
+/* Does the node's policy bound [role]'s closure?  Every role, unless the
+ * policy names the roles the node serves (`serves`). */
+static int policy_bounds_role(const char *role) {
+    load_deploy_policy();
+    if (!g_policy_scoped) return 1;
+    for (int i = 0; i < g_policy_n_served; i++)
+        if (strcmp(g_policy_served[i], role) == 0) return 1;
+    return 0;
 }
 
 /* Parse a bounded CSV of cap tokens from `csv` (already NUL-terminated and
@@ -1545,14 +1581,34 @@ static int compute_cap_root(char *caps_csv, char out_hex[65]) {
     return 1;
 }
 
-/* Policy check: every cap in tokens[0..n) must be march_cap_subsumes'd by
- * some policy entry. Returns NULL if all pass, or the (borrowed) offending
- * cap string on the first violation. No-op (always passes) if no policy is
- * loaded. */
+/* "IO" or "IO.<...>": a path of the IO lattice (known or not). */
+static int cap_is_io_rooted(const char *cap) {
+    return strcmp(cap, "IO") == 0 || strncmp(cap, "IO.", 3) == 0;
+}
+
+/* Policy check: every IO-rooted cap in tokens[0..n) must be
+ * march_cap_subsumes'd by some policy entry. Returns NULL if all pass, or
+ * the (borrowed) offending cap string on the first violation. No-op (always
+ * passes) if no policy is loaded.
+ *
+ * A node policy speaks about IO authority only, and a cap outside the IO
+ * lattice is not policed (specs/progress/2026-10-01-role-body-hot-patch-
+ * needs-session-live-in-policy.md).  Such a cap is a proof cap
+ * (Session.Live, ClusterNode.Live, Actor.Introspect, a user's Db.Migrated)
+ * or an FFI root: it carries no IO authority of its own (calling foreign
+ * code is charged IO.Foreign, which stays policed).  The type system
+ * already decides who holds one (only its declaring module mints it, from
+ * a Cap(IO) charged to the minter), and whatever IO its dictionary performs
+ * is charged to the code that minted it, the runner, under D1.  The
+ * compiler's own grant checks (main's, and every role's, D34) skip non-IO
+ * caps for the same reason, and a pool's `caps` are IO caps (D22), so a
+ * policy generated from them could never name a proof cap.  An IO cap
+ * outside the policy is refused whatever proof caps stand beside it. */
 static const char *check_cap_policy(char *tokens[], int n) {
     load_deploy_policy();
     if (!g_policy_present) return NULL;  /* no policy => permissive */
     for (int i = 0; i < n; i++) {
+        if (!cap_is_io_rooted(tokens[i])) continue;
         int allowed = 0;
         for (int j = 0; j < g_policy_n_caps; j++) {
             if (march_cap_subsumes(g_policy_caps[j], tokens[i])) { allowed = 1; break; }
@@ -1697,8 +1753,9 @@ static const char *check_role_closures(const char *role_roots, const char *roles
     }
     goto out;
 policy:
-    /* The node's policy bounds every role closure. */
+    /* The node's policy bounds the closure of every role it serves. */
     for (int i = 0; i < nr; i++) {
+        if (!policy_bounds_role(rn[i])) continue;
         const char *csv = "";
         for (int j = 0; j < nc; j++) if (strcmp(rn[i], cn[j]) == 0) { csv = cv[j]; break; }
         if (!csv[0]) continue;
