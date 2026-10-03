@@ -628,7 +628,14 @@ let run_http_e2e ~variant ~slug ~evloop () =
         done)
     done
   in
-  pipelined_rounds 20;                         (* warm-up: buffers, caches *)
+  (* Warm-up: buffers, caches, and on Linux glibc's heap, which settles in
+     one step of ~2-3.5 MB somewhere in the first few thousand requests.
+     After 20 rounds (1,000 requests) that step sometimes landed inside the
+     measured window: CI's event-loop leg failed at 3024-3580 KiB, while the
+     same server in ci/Dockerfile.ubuntu grew 2340, then 252, 148 and 84 KiB
+     over windows of 20k-160k requests (a plateau, not a leak; the leak this
+     guards against is ~9 MB per window and grows with it). *)
+  pipelined_rounds 200;
   let rss_before = rss_kib pid in
   pipelined_rounds rounds;
   let rss_after = rss_kib pid in
