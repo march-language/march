@@ -37,9 +37,11 @@ mod RoleApp do
     needs ClusterNode.Live
     needs IO.FileWrite
 
-    -- Reached by nothing: a back-pool function a patch can widen (version
-    -- 4 makes it write a file) without the compiler's role grant check
-    -- seeing it, so only the node's policy stands in the way.
+    -- Reached by no role (only by front's exit path, which never runs on a
+    -- back node): a function a patch can widen (version 4 makes it write a
+    -- file) without the compiler's role grant check seeing it, so only the
+    -- node's policy stands in the way. Reached at all, so the base build
+    -- has a dispatch slot for it.
     fn audit(_path : String) : Int do 0 end -- AUDIT
 
     type Env = { factor : Int }
@@ -98,7 +100,7 @@ mod RoleApp do
       let stop = Env.get("ROLE_APP_STOP", "")
       if stop != "" && File.exists(stop) do
         println("front: done")
-        0
+        Back.audit(stop) * 0
       else
         let next = match echo(io, node, 4) do
           Some(v) ->
