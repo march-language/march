@@ -1,0 +1,6 @@
+ok: SCHED reports 4 schedulers
+ok: an idle node is under 5% busy
+ok: 4 spinners on 4 schedulers are over 90% busy
+ok: SNAPSHOT's sched section is lifetime-only (no window)
+ok: SCHED rejects a window over 5000 ms
+ok: no reply carries the crash message
