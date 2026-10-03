@@ -542,7 +542,7 @@ let test_ping_closed_peer () =
 let test_drift () =
   let fm name h = { Cmd_deploy_hot.fn_name = name; fn_impl_hash = h; fn_sig_hash = ""; fn_callers = [];
                     fn_caps = []; fn_has_caps = true } in
-  let desired = { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None;
+  let desired = { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = None; hcr_abi = None; module_prefix = None; stdlib_hash = None; slots = None;
                   functions = [ fm "App.f" "abc123"; fm "App.g" "zzz"; fm "App.new" "n" ]; roles = [] } in
   let slot name h = { Cmd_deploy_hot.ds_id = 0; ds_name = name; ds_impl_hash = h; ds_activated_at = 0L;
                       ds_signer = ""; ds_epoch = 0 } in
@@ -621,7 +621,7 @@ let test_ssh_apply () =
 
 let v2 ?(target = "linux/arm64") ?(abi = "march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8") ?(prefix = "App") () =
   { Cmd_deploy_hot.version = 2; cas_hash = "c"; target = Some target; hcr_abi = Some abi;
-    module_prefix = Some prefix; stdlib_hash = None; functions = []; roles = [] }
+    module_prefix = Some prefix; stdlib_hash = None; slots = None; functions = []; roles = [] }
 
 let info = { Cmd_deploy_hot.target = "linux/arm64"; abi = "march-hcr-v2;triple=aarch64-unknown-linux-gnu;ptr=8";
              prefix = "App"; key_hex = "00" }

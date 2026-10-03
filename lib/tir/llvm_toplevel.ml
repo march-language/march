@@ -1546,10 +1546,28 @@ let emit_module ~emit_expr
        (* Phase 9: exported init function so the reload server can stamp the epoch.
           Only emitted when --hot-reload is active; a plain --compile-so build
           without --hot-reload must not export a spurious epoch entry point. *)
+       (* It also resolves the patch's slot-ID cells by name against the
+          running table (Llvm_ctx.hr_slot_id): the reload server calls it
+          after dlopen, before activating anything in the .so. *)
+       let cells =
+         Hashtbl.fold (fun n g acc -> (n, g) :: acc) ctx.Llvm_ctx.hr_so_slots []
+         |> List.sort compare
+       in
+       let resolve = Buffer.create 256 in
+       List.iteri (fun i (n, g) ->
+         Printf.bprintf out "%s = private global i32 0\n" g;
+         Printf.bprintf out
+           "@.hr_slotname%d = private unnamed_addr constant [%d x i8] c\"%s\\00\"\n"
+           i (String.length n + 1) (Llvm_ctx.llvm_escape_string n);
+         (* name_to_id leaves the cell alone (0) when the name is unknown. *)
+         Printf.bprintf resolve
+           "  call i32 @march_dispatch_name_to_id(ptr @.hr_slotname%d, ptr %s)\n" i g)
+         cells;
        Buffer.add_string out
-         "\ndefine void @__march_init(i32 %epoch) {\nentry:\n\
-          \  store i32 %epoch, ptr @__march_hcr_epoch\n\
-          \  ret void\n}\n"
+         ("\ndefine void @__march_init(i32 %epoch) {\nentry:\n\
+          \  store i32 %epoch, ptr @__march_hcr_epoch\n"
+          ^ Buffer.contents resolve
+          ^ "  ret void\n}\n")
      end else
      if m.Tir.tm_tests <> [] then begin
        (* --test mode: emit a @main that calls the test harness.
