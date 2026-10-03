@@ -65,12 +65,50 @@ Linux arm64 container (`march-amdr-repro`), same compiler, runtime swapped;
 | R2.3 crash ring | R2.2b | +0.84% | +0.76% | | -1.16% (1, n=60, faster), +1.44% (8) |
 | R2.4 spawned_by | R2.3 | +0.79% (n=100) | | | -0.08% (1, n=200), -2.23% (8) |
 
+**Cumulative, R2 against main (2026-10-03, quiet box, A/A -0.04% with
+half-IQR 1.06%):** `fanin_flood` at one scheduler is **+1.68% to +2.11%** over
+five runs (main vs the merged branch, before and after the review fixes,
+with the socket off and on); at eight schedulers it is inside the noise
+(-0.66% to +1.25%). Every commit passed against its predecessor; the sum
+does not pass the 1% one-scheduler gate. What was tried:
+- Bisecting by removing one counter at a time (n = 200 each): `msgs_in`
+  -0.17%, `msgs_out` +0.28%, the dispatch pair (`slices`, `last_run_ms`)
+  -1.13%. Moving the dispatch pair beside `reductions` (the cache line the
+  dispatch already writes) left the total at +1.83%.
+- Keeping the dispatch pair only while the observe socket runs: +2.11% with
+  the socket off, +1.68% on. So the dispatch pair is not the whole cost, and
+  the gating was reverted.
+The remaining ~1% is spread over commits that do not touch the message path
+(R2.3 +0.84%, R2.4 +0.79% against their predecessors), which reads as code
+size and placement in `march_runtime.c`; separating 0.5% effects would need
+n of about 400 per variant. Recorded as an open result, not a pass.
+
 **R2.1 failed its gate and was reworked, not tuned:** `msgs_out` was a
 non-inlined call into the scheduler to read TLS on every `march_send`. But
 `march_sched_send` already reads the sending proc for the epoch stamp, so it
 now reads it once and bumps on success; `march_send` is back to main's code.
 That rework was measured together with R2.2 (idle time touches only the idle
 path), which is recorded as such.
+
+## Review fixes (2026-10-03)
+
+An independent review found no memory-safety, deadlock or single-writer
+defect, and these, all fixed:
+- **`idle_ms` was stale on a busy scheduler.** The coarse clock was refreshed
+  every 1024 dispatches, so running actors read up to ~0.7 s idle (measured).
+  The preemption daemon now publishes a 1 ms coarse clock (`g_coarse_ms`, its
+  own cache line) that the dispatch reads; the per-scheduler clock is only
+  the fallback when no daemon runs. Test: four running spinners must read
+  under 50 ms in five samples (red without the publish: values to 312 ms).
+- **`TREE` allocated memory proportional to the largest pid** (pids are never
+  reused): membership is now a binary search over the live pids.
+- A scheduler that had not started counted as fully busy in `SCHED`'s
+  window average.
+- A windowed `TOP` holds its connection thread for the window: the cap is now
+  5 s (was 10) and at most two run at once (`busy` otherwise), so they cannot
+  take all eight connections.
+- Test margins: the sched fixture idles 3 s (was 1.5), the crash fixture
+  waits 500 ms between crashes (was 200; restarts back off with jitter).
 
 ## Tests
 
@@ -96,7 +134,11 @@ path), which is recorded as such.
 ASAN (Linux, Docker): the churn stress (16 churners spawning, registering and
 killing actors, socket polled with every verb including `TOP msgs_in` windows,
 `SCHED 20`, `CRASHES`) is clean 3/3, ~270 polls each, 0 bad replies. Corpus
-sweep: _see below_.
+sweep (rule 4), rerun 2026-10-03 on the merged branch: 82 actor fixtures, each
+with the socket polled every 10 ms through every verb including `CRASHES`, `TOP`
+windows and `SCHED 20`; 81 exit 0 with no AddressSanitizer report.
+`sched_stress` aborts on ASAN shadow-memory exhaustion, identically with no
+socket (control run), as in R1.
 
 ## Deviations from the plan
 
