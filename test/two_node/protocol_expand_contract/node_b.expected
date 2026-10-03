@@ -7,4 +7,4 @@ node-b: sessions refused at formation: 0
 node-b: v1 Buyer with a contract Shop: NOT seen
 node-b: v1 Buyer with a v1 Shop: seen
 node-b: v2 Buyer with a contract Shop: seen
-node-b: v2 Buyer with a v1 Shop: seen
+node-b: v2 Buyer with an expand Shop: seen

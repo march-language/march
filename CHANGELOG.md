@@ -150,6 +150,20 @@ git log is authoritative for exact commits.
   existing policy; one without a `serves` line still bounds every role. Both
   `forge deploy hot` and releases through the control plane go through the same
   gate.
+- **A supervisor now works in a program built with `--hot-reload`.** Any actor with a
+  `supervise` block failed to compile under `--hot-reload` (`use of undefined value
+  '@$sup_child_ptr_a'`). Behind that, the runtime read each child's pid from the wrong
+  word of a hot-reload supervisor, so stopping the tree could stop an unrelated actor
+  and a restart wrote past the actor, and `get_actor_field` found no state field of a
+  hot-reload actor.
+- **Hot reload: a patch that adds a function no longer crashes the running node.**
+  A patch `.so` called hot-swappable functions by its own build's slot numbers,
+  which shift when the new version adds or removes one. Since the entry
+  module's functions became hot-swappable, this sent calls to the wrong
+  function (SIGSEGV on both nodes of the `protocol_expand_contract` deploy). A
+  patch now looks its slots up by name when it is loaded. Also, a later deploy
+  that changes such a newly added function now redeploys its callers to carry
+  it, rather than leaving them on the old copy.
 - **Compiled HTTP servers no longer leak ~0.5 KiB per request.** Neither the
   thread-pool nor the event-loop server released the `Conn` a handler returns
   after writing the response, so every request leaked the result record and

@@ -272,9 +272,11 @@ let emit_alloc_ctor ~emit_atom ctx (ctor : string)
          let dispatch_fn = actor_base ^ Tir_names.actor_dispatch_suffix in
          match Hot_reload.Name_table.id_of ctx.hr_names dispatch_fn with
          | Some id0 ->
-           let slot_id = id0 + 1 in  (* 1-based; 0 = "not set" sentinel *)
+           (* 1-based; 0 = "not set" sentinel.  By name in a patch .so
+              (Llvm_ctx.hr_slot_id): an actor new in the patch gets 0. *)
+           let slot_id = Llvm_ctx.hr_slot_id ctx dispatch_fn id0 in
            emit ctx (Printf.sprintf
-             "call void @march_actor_set_dispatch_id(ptr %s, i32 %d)" ptr slot_id)
+             "call void @march_actor_set_dispatch_id(ptr %s, i32 %s)" ptr slot_id)
          | None -> ()
        end;
        (* Actor.call tag-table registration. F19 (build_ctor_info) gives
@@ -762,6 +764,17 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
     let result = fresh ctx "fbip_r" in
     emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
                 result rv reuse_lbl hp fresh_lbl);
+    (* A --hot-reload actor's state lives in its own <Name>_State record,
+       rebuilt by this arm on every handler run; emit_store_tag (reuse) and
+       emit_heap_alloc (fresh) both leave a pad word with no shape id, so
+       get_actor_field (which follows $f_state into this record, see
+       march_get_actor_field) would answer None after the first message.
+       Restamp the record's shape, as the uniform TRecord reuse arm does. *)
+    if ctx.hr_config <> None && Tir_names.is_actor_state_name reuse_type_name then begin
+      match get_record_fields ctx (Tir.TCon (reuse_type_name, [])) with
+      | [] -> ()
+      | fields -> emit_set_shape ctx result fields
+    end;
     ("ptr", result)
     end)
 
