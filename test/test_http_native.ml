@@ -90,6 +90,7 @@ let server_src = {|mod HttpNativeE2e do
     match (HttpServer.method(conn), HttpServer.path_info(conn)) do
     (:get, Nil) -> conn |> HttpServer.text(200, "Hello from compiled March!")
     (:get, Cons("ping", Nil)) -> conn |> HttpServer.text(200, "pong")
+    (:get, Cons("live", Nil)) -> conn |> HttpServer.text(200, int_to_string(live_allocs()))
     (:post, Cons("echo", Nil)) -> conn |> HttpServer.text(200, HttpServer.req_body(conn))
     _ -> conn |> HttpServer.text(404, "Not Found")
     end
@@ -604,11 +605,27 @@ let run_http_e2e ~variant ~slug ~evloop () =
      wrote the response, but never released it — neither server did — so
      every request leaked the result record plus the strings and header
      cells it owns (~0.46 KiB measured with MARCH_TRACE_GC; forgepm at 800
-     req/s grew 400 MB/min). 20,000 pipelined keep-alive requests make that
-     ~9 MB of growth; the bound below leaves room for allocator noise and
-     for the thread pool's per-connection buffers but not for the leak. *)
+     req/s grew 400 MB/min).
+
+     The PRIMARY check is the runtime's exact live-object gauge
+     (march_live_allocs: +1 per heap alloc, -1 per free-on-rc-zero), read
+     through the server's own GET /live route between windows.  It does not
+     move with allocator behaviour, machine load or core count, so it can be
+     a near-zero bound: a leak of even one object per request moves it by
+     20,000.
+
+     The SECONDARY check is RSS, kept for leaks the gauge cannot see (a raw
+     C malloc per request in the HTTP runtime), and it is a SLOPE, not a
+     single before/after delta.  A single delta was flaky (see
+     specs/progress/2026-10-03-http-evloop-rss-flake.md): in about 1 run in
+     10 the event-loop server's post-warm-up RSS reading comes in ~2.3 MiB
+     LOW and the first window "grows" back to the usual plateau (measured
+     64-420 KiB in 18/20 runs, 2248/2336/2504 KiB in the rest, while the
+     gauge stayed at +0 and every later window grew 0 KiB).  That step
+     happens once; a leak grows every window.  So RSS fails only when EVERY
+     window grows past the bound. *)
   let pid = match child_pid () with Some p -> p | None -> bail "server pid unknown" in
-  let burst = 50 and rounds = 400 in
+  let burst = 50 and window_rounds = 100 and windows = 4 in
   let pipelined_rounds n =
     for _ = 1 to n do
       let fd = connect_or_bail "leak-check connection" in
@@ -628,21 +645,61 @@ let run_http_e2e ~variant ~slug ~evloop () =
         done)
     done
   in
+  (* The gauge, read through GET /live on a fresh connection.  The value
+     includes the /live request's own in-flight objects, identical on every
+     read; read twice and keep the second so a first-use allocation (seen as
+     a +2 between the first and second read) is not counted as growth. *)
+  let live_once () =
+    let fd = connect_or_bail "live-objects probe" in
+    Fun.protect ~finally:(fun () -> try Unix.close fd with _ -> ()) (fun () ->
+      let pending = ref "" in
+      let deadline = Unix.gettimeofday () +. req_timeout in
+      send fd (request_bytes ~meth:"GET" ~path:"/live" ~body:"" ~keep_alive:false);
+      let (status, body, _) = read_response fd pending ~deadline in
+      match status, int_of_string_opt (String.trim body) with
+      | 200, Some n -> n
+      | _ -> bail (Printf.sprintf "live-objects probe: expected 200 <int>, got %d %S"
+                     status body))
+  in
+  let live () = ignore (live_once ()); live_once () in
+  let rss () =
+    match rss_kib pid with
+    | n when n >= 0 -> n
+    | _ -> bail "could not read server RSS"
+  in
   pipelined_rounds 20;                         (* warm-up: buffers, caches *)
-  let rss_before = rss_kib pid in
-  pipelined_rounds rounds;
-  let rss_after = rss_kib pid in
-  if rss_before < 0 || rss_after < 0 then
-    bail (Printf.sprintf "could not read server RSS (before=%d after=%d KiB)"
-            rss_before rss_after);
-  let growth_kib = rss_after - rss_before in
-  Printf.eprintf "[http e2e %s] server rss before=%d KiB after=%d KiB growth=%d KiB over %d requests\n%!"
-    variant rss_before rss_after growth_kib (burst * rounds);
-  if growth_kib > 2048 then
+  let live_before = live () in
+  let rss_marks = ref [ rss () ] in
+  for _ = 1 to windows do
+    pipelined_rounds window_rounds;
+    rss_marks := rss () :: !rss_marks
+  done;
+  let live_after = live () in
+  let rss_marks = List.rev !rss_marks in
+  let requests = burst * window_rounds * windows in
+  let rec deltas = function a :: (b :: _ as t) -> (b - a) :: deltas t | _ -> [] in
+  let window_growth = deltas rss_marks in
+  let live_growth = live_after - live_before in
+  Printf.eprintf "[http e2e %s] live objects before=%d after=%d (%+d) over %d requests; \
+                  rss marks KiB [%s], per-window growth [%s]\n%!"
+    variant live_before live_after live_growth requests
+    (String.concat "; " (List.map string_of_int rss_marks))
+    (String.concat "; " (List.map string_of_int window_growth));
+  (* Slack for objects still held by a connection the server has not yet
+     seen close when /live is answered; a one-object-per-request leak is
+     40x this. *)
+  if live_growth > 500 then
     bail (Printf.sprintf
-      "server RSS grew %d KiB over %d requests (before %d, after %d): the \
-       handler's result Conn is not being released per request"
-      growth_kib (burst * rounds) rss_before rss_after);
+      "live March objects grew by %d over %d requests (before %d, after %d): \
+       a per-request object leak; the handler's result Conn is not being \
+       released per request" live_growth requests live_before live_after);
+  (* 256 KiB per 5,000-request window is ~52 bytes per request.  Steady
+     state after warm-up measured 0-8 KiB per window on both servers. *)
+  if List.for_all (fun g -> g > 256) window_growth then
+    bail (Printf.sprintf
+      "server RSS grew in every window over %d requests (KiB per 5000-request \
+       window: %s): a per-request native-memory leak in the HTTP runtime"
+      requests (String.concat ", " (List.map string_of_int window_growth)));
 
   (* ── Phase D: still serving, and still ALIVE ─────────────────────────── *)
   let fd = connect_or_bail "final request" in
