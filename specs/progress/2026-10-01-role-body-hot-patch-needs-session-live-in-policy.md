@@ -91,8 +91,8 @@ through `march_reload_request`, the socket's own dispatch, so one gate serves
   Version 2 of the role body `Back.serve_one` goes over the reload socket
   (what `forge deploy hot` sends), version 3 as a release through the control
   plane; front observes each answer change, and both versions add a Vault
-  mark the base build's code set. Version 4 widens an unreached back-pool
-  function to `IO.FileWrite` under the operator's `--grant-cap`: the node
+  mark the base build's code set. Version 4 widens a back-pool
+  function no role reaches to `IO.FileWrite` (its own cap) under the operator's `--grant-cap`: the node
   refuses it (`ERR cap_policy IO.FileWrite`), the batch rolls back, and front
   never sees its answer. Before rule 1, version 2 was refused with
   `ERR cap_policy Session.Live`; before rule 2, with `ERR role_cap_policy
