@@ -374,8 +374,14 @@ native_node_send_loopback: coverage audit (user + stdlib): 123 enforced, 0 inert
 native_node_send_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_node_send_typed_loopback: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_node_send_typed_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_observe_counters: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_observe_counters: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_observe_crashes: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_observe_crashes: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_observe_ping: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_observe_ping: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_observe_sched: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_observe_sched: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_observe_snapshot: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_observe_snapshot: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_observe_types_hr: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
