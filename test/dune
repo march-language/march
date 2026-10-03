@@ -11726,3 +11726,65 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/jp_dead_closure_release.expected native_jp_dead_closure_release.out)))
+; ── Idle conduit worker leak guard ────────────────────────────────────────
+; Every leg leaked on main 8f2f6608 (each prints `flat: false` there); once
+; the actor-state leg was fixed, the depot-Pool-shaped take/give crashed with
+; a use-after-free until the scrutinee release was kept at the head of the arm.
+; Built twice: actors use a different state layout under --hot-reload, which is
+; how production binaries are built.
+(rule
+ (targets native_idle_worker_leak_probe native_idle_worker_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/idle_worker_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_idle_worker_leak_probe
+        native/idle_worker_leak_probe.march)
+   (with-stdout-to native_idle_worker_leak_probe.out
+        (system "./native_idle_worker_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/idle_worker_leak_probe.expected native_idle_worker_leak_probe.out)))
+
+(rule
+ (targets native_idle_worker_leak_probe_hr native_idle_worker_leak_probe_hr.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/idle_worker_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 --hot-reload Main
+        -o native_idle_worker_leak_probe_hr
+        native/idle_worker_leak_probe.march)
+   (with-stdout-to native_idle_worker_leak_probe_hr.out
+        (system "./native_idle_worker_leak_probe_hr")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/idle_worker_leak_probe.expected native_idle_worker_leak_probe_hr.out)))
+
+; ── Owned aggregate released in front of a tail call that borrows into it ──
+; drop_agg_at_tails tracked only DIRECT projections of the aggregate, so
+; `match m.to do Cons(a, _) -> check(a.address, "..")` released [m] (and the
+; list holding [a]) before [check] read [a.address]: garbage or a crash.
+; Broke forgepm's Mail.Email tests on 64091d1e3.
+(rule
+ (targets native_branch_alias_tail_drop native_branch_alias_tail_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/branch_alias_tail_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_branch_alias_tail_drop
+        native/branch_alias_tail_drop.march)
+   (with-stdout-to native_branch_alias_tail_drop.out
+        (system "./native_branch_alias_tail_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/branch_alias_tail_drop.expected native_branch_alias_tail_drop.out)))
