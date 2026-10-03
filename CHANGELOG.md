@@ -134,6 +134,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A supervisor now works in a program built with `--hot-reload`.** Any actor with a
+  `supervise` block failed to compile under `--hot-reload` (`use of undefined value
+  '@$sup_child_ptr_a'`). Behind that, the runtime read each child's pid from the wrong
+  word of a hot-reload supervisor, so stopping the tree could stop an unrelated actor
+  and a restart wrote past the actor, and `get_actor_field` found no state field of a
+  hot-reload actor.
 - **Hot reload: a patch that adds a function no longer crashes the running node.**
   A patch `.so` called hot-swappable functions by its own build's slot numbers,
   which shift when the new version adds or removes one. Since the entry

@@ -764,6 +764,17 @@ let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
     let result = fresh ctx "fbip_r" in
     emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
                 result rv reuse_lbl hp fresh_lbl);
+    (* A --hot-reload actor's state lives in its own <Name>_State record,
+       rebuilt by this arm on every handler run; emit_store_tag (reuse) and
+       emit_heap_alloc (fresh) both leave a pad word with no shape id, so
+       get_actor_field (which follows $f_state into this record, see
+       march_get_actor_field) would answer None after the first message.
+       Restamp the record's shape, as the uniform TRecord reuse arm does. *)
+    if ctx.hr_config <> None && Tir_names.is_actor_state_name reuse_type_name then begin
+      match get_record_fields ctx (Tir.TCon (reuse_type_name, [])) with
+      | [] -> ()
+      | fields -> emit_set_shape ctx result fields
+    end;
     ("ptr", result)
     end)
 
