@@ -36,6 +36,15 @@ git log is authoritative for exact commits.
   asks the forge.toml hosts over ssh, or a local socket with `--socket`. Reading
   100 000 actors takes about 20 ms, and nothing is added to the scheduler's hot path.
   Actor type names need a `--hot-reload` build.
+- **Observe counters, scheduler utilisation and a crash ring.** Every actor row
+  now carries how often it ran, messages received and sent, how long since it
+  last ran, and the messages an `Actor.call` is holding while it waits (an
+  actor stuck in a call no longer looks idle). `SCHED [window_ms]` reports
+  each scheduler's utilisation, `CRASHES [n]` the last crashes (kind, actor,
+  supervisor, restart number; never the panic text), and `TOP <attr> <n>
+  [window_ms]` the actors highest on mailbox depth, crashes, or messages and
+  dispatches over a window. `TREE` nests actors under the actor that spawned
+  them. The counters add nothing measurable to the message path.
 - **An in-cluster control plane for hot deploys (distributed deploys, step 12a).** A
   `[control] candidates = "<host label>"` section in `topology.toml` makes every node run
   an Agent and the labelled nodes serve a control API; one of them leads (`count = 1`
