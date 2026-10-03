@@ -418,9 +418,11 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
                && not (String.equal resolved_name ctx.hr_cur_fn)
                && Hot_reload.Name_table.id_of ctx.hr_names resolved_name <> None)
     then begin
+      (* 1-based; 0 = sentinel.  A patch .so resolves it by name at load
+         (Llvm_ctx.hr_slot_id). *)
       let name_id =
         match Hot_reload.Name_table.id_of ctx.hr_names resolved_name with
-        | Some i -> i + 1 | None -> 0 in  (* 1-based; 0 = sentinel *)
+        | Some i -> Llvm_ctx.hr_slot_id ctx resolved_name i | None -> "0" in
       let vslot = fresh ctx "hrver" in
       emit ctx (Printf.sprintf "%s = alloca i32" vslot);
       let fp = fresh ctx "hrfp" in
@@ -431,7 +433,7 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
          per-.so @__march_hcr_epoch cell is still defined and still written
          by __march_init, but nothing reads it any more. *)
       emit ctx (Printf.sprintf
-        "%s = call ptr @march_dispatch_enter_unit(i32 %d, ptr %s)" fp name_id vslot);
+        "%s = call ptr @march_dispatch_enter_unit(i32 %s, ptr %s)" fp name_id vslot);
       (* Startup-warmup guard.  march_dispatch_enter returns NULL when the target
          slot has not been published yet (or the publish is not yet visible to
          this thread) — e.g. an HTTP worker thread serving a request during the
@@ -476,7 +478,7 @@ let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
       let v = fresh ctx "hrv" in
       emit ctx (Printf.sprintf "%s = load i32, ptr %s" v vslot);
       emit ctx (Printf.sprintf
-        "call void @march_dispatch_leave(i32 %d, i32 %s)" name_id v);
+        "call void @march_dispatch_leave(i32 %s, i32 %s)" name_id v);
       emit ctx (Printf.sprintf "br label %%%s" blk_cont);
       (* Continuation — merge the two call results. *)
       emit_label ctx blk_cont;
