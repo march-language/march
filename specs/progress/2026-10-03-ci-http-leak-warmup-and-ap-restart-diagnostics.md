@@ -37,3 +37,10 @@ Now each failed attempt prints its `Echo_Run.error_message` on stderr (the
 harness shows a node's stderr only when the scenario fails), and the waits are
 20 s and 30 s, inside the harness's 60 s, so a stall ends in node-a's own
 panic. The next CI failure names the cause; this does not fix it.
+
+## `test (macos-15, all)`: `test_hcr_migrate_order` "the old task is running"
+
+#767's own first run failed here (line 620): the test spawned a task, slept a
+fixed 20 ms, and asserted the task had already ticked. A loaded macOS runner
+had not scheduled it yet. It now waits for the first tick (`wait_until`, 5 s
+deadline), as the file's other waits do. 94/94 checks, three local runs.
