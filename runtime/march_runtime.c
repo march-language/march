@@ -2594,6 +2594,10 @@ typedef struct march_actor_meta {
      * table scan. Zeroed by calloc at meta creation. */
     char                       **reg_names;
     int                          reg_name_count;
+    /* The pid index of the actor whose green thread spawned this one, or -1
+     * (main, a task, a foreign thread).  Set once in march_spawn_common,
+     * never updated; read by the observe walk (observe plan R2.6). */
+    int64_t                      spawned_by;
 } march_actor_meta;
 
 static void activate_actor_green_thread(march_actor_meta *meta);
@@ -3414,6 +3418,7 @@ static march_actor_meta *meta_new_locked(void *actor) {
     atomic_init(&pe->live, m);
     m->actor = actor;
     m->pe = pe;
+    m->spawned_by = -1;                /* until march_spawn_common sets it */
     atomic_init(&m->green_thread, NULL);
     atomic_init(&m->refs, 1);          /* the table's */
     m->linked = 1;
@@ -6382,6 +6387,12 @@ static void *march_spawn_common(void *actor, int defer_activation) {
      * gets a fresh meta, and the old one stays linked, as before the metas
      * PR.  dispatch_name_id and call_tags are carried over because
      * compiled code sets them on the record before spawning it. */
+    /* Who spawned it (observe TREE): the calling green thread's actor.
+     * Looked up before taking g_tbl_mu (find_meta is lock-free) and stored
+     * before the pid is published below, so a walk that sees the pid sees it. */
+    march_proc *spawner = march_sched_current();
+    march_actor_meta *by = (spawner && spawner->actor) ? find_meta(spawner->actor) : NULL;
+    int64_t spawned_by = by ? pe_pid(by->pe) : -1;
     pthread_mutex_lock(&g_tbl_mu);
     if (pe_pid(meta->pe) >= 0) {
         march_actor_meta *m = meta_new_locked(actor);
@@ -6389,6 +6400,7 @@ static void *march_spawn_common(void *actor, int defer_activation) {
         m->call_tags        = meta->call_tags;
         meta = m;
     }
+    __atomic_store_n(&meta->spawned_by, spawned_by, __ATOMIC_RELAXED);
     atomic_store_explicit(&meta->pe->pid_index,
                           atomic_fetch_add_explicit(&g_next_pid_index, 1,
                                                     memory_order_relaxed),
@@ -10439,6 +10451,7 @@ static void obs_row_fill(march_actor_meta *m, int64_t pidx, march_obs_actor *r) 
         r->held = atomic_load_explicit(&p->held, memory_order_relaxed);
     }
     r->draining = atomic_load_explicit(&m->draining, memory_order_relaxed);
+    r->spawned_by = __atomic_load_n(&m->spawned_by, __ATOMIC_RELAXED);
     r->num_children = __atomic_load_n(&m->sup_num_children, __ATOMIC_RELAXED);
     r->parent = -1;
     march_pid_entry *sup = __atomic_load_n(&m->sup_pe, __ATOMIC_ACQUIRE);

@@ -3,7 +3,8 @@
 -- test/observe_snapshot_check.ml (mode "crashes"):
 --   * the supervisor "boss" has a child that panics three times; CRASHES lists
 --     three entries with restart numbers 1, 2, 3 and never the panic text;
---   * "loop" sends itself a message forever, so TOP msgs_in ranks it first.
+--   * "loop" sends itself a message forever, so TOP msgs_in ranks it first;
+--   * "maker" spawns two actors itself, so TREE nests them under it.
 mod Main do
   needs IO
   needs IO.Console
@@ -33,6 +34,24 @@ mod Main do
     on Tick() do
       let _ = send(self, Tick())
       { n: state.n + 1 }
+    end
+  end
+
+  actor Twig do
+    state { n : Int }
+    init  { n: 0 }
+    on Poke() do
+      { n: state.n + 1 }
+    end
+  end
+
+  actor Maker do
+    state { made : Int }
+    init  { made: 0 }
+    on Make() do
+      let _a = spawn(Twig)
+      let _b = spawn(Twig)
+      { made: 2 }
     end
   end
 
@@ -77,6 +96,9 @@ mod Main do
     let lp = spawn(Loop)
     let _r2 = Actor.register(lp, "loop")
     let _ = send(lp, Tick())
+    let mk = spawn(Maker)
+    let _r3 = Actor.register(mk, "maker")
+    let _ = send(mk, Make())
     sleep_ms(200)
     println("ready")
     sleep_ms(120000)

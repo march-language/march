@@ -14,4 +14,7 @@ ok: TOP msgs_in 3 10001 -> bad_args
 ok: CRASHES 0 -> bad_args
 ok: CRASHES 257 -> bad_args
 ok: SNAPSHOT has a crashes section
+ok: ACTOR maker lists the two actors it spawned
+ok: TREE nests them under maker, linked as spawned
+ok: loop (spawned by main) stays unsupervised
 ok: no reply carries the crash message

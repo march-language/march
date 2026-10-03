@@ -175,9 +175,9 @@ let tree sock =
     (member "current" e |> to_int >= 1 && member "counters" e <> `Null)
     (Yojson.Safe.to_string e);
   let s = data (get sock "SNAPSHOT") in
-  check "SNAPSHOT carries all six sections"
+  check "SNAPSHOT carries all seven sections"
     (List.sort compare (keys s)
-     = ["actors"; "epochs"; "mem"; "names"; "sched"; "tree"])
+     = ["actors"; "crashes"; "epochs"; "mem"; "names"; "sched"; "tree"])
     (String.concat "," (keys s));
   check "SNAPSHOT sections come from one walk"
     (member "actors" s |> member "total" |> to_int
@@ -200,7 +200,7 @@ let tree sock =
           |> List.map (fun v -> member "name" v |> to_string) in
   check "HELP lists every verb"
     (h = ["HELP"; "PING"; "SNAPSHOT"; "ACTORS"; "ACTOR"; "TREE"; "NAMES";
-          "SCHED"; "MEM"; "EPOCHS"])
+          "SCHED"; "MEM"; "EPOCHS"; "CRASHES"; "TOP"])
     (String.concat "," h)
 
 let types sock =
@@ -329,7 +329,25 @@ let crashes sock =
       "CRASHES 0", "bad_args"; "CRASHES 257", "bad_args" ];
   let s = data (get sock "SNAPSHOT crashes") in
   check "SNAPSHOT has a crashes section"
-    (member "crashes" s |> member "total" |> to_int = 3) ""
+    (member "crashes" s |> member "total" |> to_int = 3) "";
+  (* spawned_by: maker spawned two leaves. *)
+  let maker = List.find (fun e -> member "name" e = `String "maker") names |> member "pid" |> to_int in
+  let m = data (get sock (Printf.sprintf "ACTOR %d" maker)) in
+  check "ACTOR maker lists the two actors it spawned"
+    (List.length (member "spawned" m |> to_list) = 2) (Yojson.Safe.to_string m);
+  let t = data (get sock "TREE") in
+  let roots = member "roots" t |> to_list in
+  let node = List.find_opt (fun r -> member "pid" r |> to_int = maker) roots in
+  check "TREE nests them under maker, linked as spawned"
+    (match node with
+     | Some r ->
+       let kids = member "children" r |> to_list in
+       List.length kids = 2 && List.for_all (fun k -> member "link" k = `String "spawned") kids
+     | None -> false)
+    (Yojson.Safe.to_string t);
+  check "loop (spawned by main) stays unsupervised"
+    (List.exists (fun p -> p = `Int (List.find (fun e -> member "name" e = `String "loop") names |> member "pid" |> to_int))
+       (member "unsupervised" t |> to_list)) ""
 
 let () =
   match Sys.argv with

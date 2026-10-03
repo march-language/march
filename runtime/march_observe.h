@@ -143,6 +143,8 @@ typedef struct march_obs_actor {
     int64_t  last_run_ms;     /* march_now_ms (monotonic) at the last dispatch, 0 = never */
     int64_t  held;            /* messages an Actor.call is holding off the mailbox */
     int      crashes;         /* crash-ring entries for this pid in the last hour */
+    int64_t  spawned_by;      /* pid of the actor that spawned it, -1 if none */
+    int64_t  tparent;         /* TREE's parent: supervisor, else spawner (verbs only) */
     int      child_crashes;   /* ... for its supervised children (a restarted child
                                  has a new pid, so its crashes count here)
                                  (both filled by the verbs, not the walk) */

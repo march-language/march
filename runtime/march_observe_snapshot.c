@@ -115,6 +115,8 @@ static void write_row(march_jw *w, const march_obs_actor *r) {
     march_jw_key(w, "parent");
     if (r->parent >= 0) march_jw_i64(w, r->parent); else march_jw_null(w);
     march_jw_key(w, "children");    march_jw_i64(w, r->num_children);
+    march_jw_key(w, "spawned_by");
+    if (r->spawned_by >= 0) march_jw_i64(w, r->spawned_by); else march_jw_null(w);
     march_jw_key(w, "slices");      march_jw_u64(w, r->slices);
     march_jw_key(w, "msgs_in");     march_jw_u64(w, r->msgs_in);
     march_jw_key(w, "msgs_out");    march_jw_u64(w, r->msgs_out);
@@ -297,6 +299,13 @@ static const char *verb_actor(march_jw *w, const char *args) {
         }
     }
     march_jw_arr_end(w);
+    /* Unsupervised actors it spawned. */
+    march_jw_key(w, "spawned");
+    march_jw_arr_begin(w);
+    if (self)
+        for (size_t i = 0; i < n; i++)
+            if (rows[i].parent < 0 && rows[i].spawned_by == pid) march_jw_i64(w, rows[i].pid);
+    march_jw_arr_end(w);
     march_jw_key(w, "supervisor");
     if (self && ex.supervisor) {
         march_jw_obj_begin(w);
@@ -336,19 +345,21 @@ typedef struct {
     int              truncated;
 } tree_ctx;
 
+/* TREE orders by its parent (tparent: the supervisor, else the spawner),
+ * then supervise-block slot, then pid. */
 static int cmp_parent_slot(const void *x, const void *y) {
     const march_obs_actor *a = x, *b = y;
-    if (a->parent != b->parent) return a->parent < b->parent ? -1 : 1;
+    if (a->tparent != b->tparent) return a->tparent < b->tparent ? -1 : 1;
     if (a->child_index != b->child_index) return a->child_index < b->child_index ? -1 : 1;
     return cmp_pid(a, b);
 }
 
-/* First row whose parent is [pid] in rows sorted by cmp_parent_slot. */
+/* First row whose tparent is [pid] in rows sorted by cmp_parent_slot. */
 static size_t first_child(const march_obs_actor *rows, size_t n, int64_t pid) {
     size_t lo = 0, hi = n;
     while (lo < hi) {
         size_t mid = lo + (hi - lo) / 2;
-        if (rows[mid].parent < pid) lo = mid + 1; else hi = mid;
+        if (rows[mid].tparent < pid) lo = mid + 1; else hi = mid;
     }
     return lo;
 }
@@ -360,11 +371,16 @@ static void tree_node(march_jw *w, tree_ctx *t, const march_obs_actor *r, int de
     march_jw_key(w, "type");   write_type(w, r);
     march_jw_key(w, "names");  write_names(w, r);
     march_jw_key(w, "status"); march_jw_str(w, status_name(r->status));
-    march_jw_key(w, "mbox");   march_jw_i64(w, r->mbox);
+    march_jw_key(w, "mbox");   march_jw_i64(w, waiting(r));
+    /* How it hangs under its parent: a supervise-block child, or an actor
+     * its parent spawned (and does not supervise).  null for a root. */
+    march_jw_key(w, "link");
+    if (depth == 0) march_jw_null(w);
+    else march_jw_str(w, r->parent >= 0 ? "supervised" : "spawned");
     march_jw_key(w, "children");
     march_jw_arr_begin(w);
     for (size_t i = first_child(t->rows, t->n, r->pid);
-         i < t->n && t->rows[i].parent == r->pid; i++) {
+         i < t->n && t->rows[i].tparent == r->pid; i++) {
         if (depth + 1 >= TREE_MAX_DEPTH || t->emitted >= TREE_MAX_NODES) {
             t->truncated = 1;
             break;
@@ -375,51 +391,52 @@ static void tree_node(march_jw *w, tree_ctx *t, const march_obs_actor *r, int de
     march_jw_obj_end(w);
 }
 
-static int pid_present(const march_obs_actor *rows, size_t n, int64_t pid) {
-    /* rows sorted by parent: scan (TREE is not a hot path; n is bounded). */
-    for (size_t i = 0; i < n; i++) if (rows[i].pid == pid) return 1;
-    return 0;
-}
-
 static void write_tree(march_jw *w, march_obs_actor *rows, size_t n) {
-    qsort(rows, n, sizeof *rows, cmp_parent_slot);
     tree_ctx t = { rows, n, 0, 0 };
-    /* Mark which pids have children present, and which rows are orphans
-     * (their supervisor is mid-restart or gone: listed at top level). */
     int64_t max_pid = -1;
     for (size_t i = 0; i < n; i++) if (rows[i].pid > max_pid) max_pid = rows[i].pid;
     unsigned char *present = (unsigned char *)calloc((size_t)(max_pid + 2), 1);
     unsigned char *has_kids = (unsigned char *)calloc((size_t)(max_pid + 2), 1);
-    if (present && has_kids) {
-        for (size_t i = 0; i < n; i++) present[rows[i].pid] = 1;
-        for (size_t i = 0; i < n; i++)
-            if (rows[i].parent >= 0 && rows[i].parent <= max_pid)
-                has_kids[rows[i].parent] = 1;
+    if (!present || !has_kids) {
+        free(present); free(has_kids);
+        march_jw_null(w);   /* out of memory: no tree rather than a wrong one */
+        return;
     }
-    #define PRESENT(p)  (present ? ((p) >= 0 && (p) <= max_pid && present[p]) : pid_present(rows, n, p))
-    #define HAS_KIDS(r) (has_kids ? has_kids[(r)->pid] : ((r)->num_children > 0))
+    for (size_t i = 0; i < n; i++) present[rows[i].pid] = 1;
+    #define PRESENT(p) ((p) >= 0 && (p) <= max_pid && present[p])
+    /* The tree parent: the supervisor (even when it is not in this snapshot:
+     * then the child is an orphan root), else the spawner when it is live,
+     * else none. */
+    for (size_t i = 0; i < n; i++) {
+        march_obs_actor *r = &rows[i];
+        r->tparent = r->parent >= 0 ? r->parent
+                   : PRESENT(r->spawned_by) ? r->spawned_by : -1;
+        if (PRESENT(r->tparent)) has_kids[r->tparent] = 1;
+    }
+    qsort(rows, n, sizeof *rows, cmp_parent_slot);
 
     march_jw_obj_begin(w);
     march_jw_key(w, "total"); march_jw_u64(w, n);
-    /* Roots: unsupervised actors that supervise something present, and
+    /* Roots: actors with no tree parent that have tree children, and
      * children whose supervisor is not in this snapshot (orphans). */
     march_jw_key(w, "roots");
     march_jw_arr_begin(w);
     for (size_t i = 0; i < n; i++) {
         const march_obs_actor *r = &rows[i];
-        int root = (r->parent < 0 && HAS_KIDS(r)) || (r->parent >= 0 && !PRESENT(r->parent));
+        int root = (r->tparent < 0 && has_kids[r->pid])
+                || (r->tparent >= 0 && !PRESENT(r->tparent));
         if (!root) continue;
         if (t.emitted >= TREE_MAX_NODES) { t.truncated = 1; break; }
         tree_node(w, &t, r, 0);
     }
     march_jw_arr_end(w);
-    /* The synthetic root: bare-spawned actors, neither supervised nor
-     * supervising. */
+    /* The synthetic root: actors with no tree parent and no tree children
+     * (spawned by main, a task, or an actor that has since died). */
     march_jw_key(w, "unsupervised");
     march_jw_arr_begin(w);
     for (size_t i = 0; i < n; i++) {
         const march_obs_actor *r = &rows[i];
-        if (r->parent >= 0 || HAS_KIDS(r)) continue;
+        if (r->tparent >= 0 || has_kids[r->pid]) continue;
         if (t.emitted >= TREE_MAX_NODES) { t.truncated = 1; break; }
         t.emitted++;
         march_jw_i64(w, r->pid);
@@ -428,7 +445,6 @@ static void write_tree(march_jw *w, march_obs_actor *rows, size_t n) {
     march_jw_key(w, "truncated"); march_jw_bool(w, t.truncated);
     march_jw_obj_end(w);
     #undef PRESENT
-    #undef HAS_KIDS
     free(present);
     free(has_kids);
 }
