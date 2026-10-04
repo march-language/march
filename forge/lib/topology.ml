@@ -1265,14 +1265,6 @@ module Gen = struct
     | Some { hard_ms = Some ms; _ } -> (ms + 999) / 1000
     | _ -> 120
 
-  let peers_of (ex : export) pool =
-    List.filter_map (fun e ->
-        if e.e_from = pool then Some e.e_to
-        else if e.e_to = pool then Some e.e_from
-        else None)
-      ex.edges
-    |> List.sort_uniq String.compare
-
   let binary_name ~project (p : pool) =
     if p.isolate then project ^ "-" ^ p.pool_name else project
 
@@ -1312,15 +1304,26 @@ module Gen = struct
             p ))
       ex.topo.pools
 
+  (** Every cluster member's host, once, with the first pool it is listed in.
+      The cluster port is open between all of them, not only between the
+      pools the connectivity graph joins: SWIM probes and gossips with every
+      member and every node is given every other node as a seed, so a pool
+      cut off from another would see it as unreachable and [count = n]
+      placement (D19) would rank on a wrong membership. Segregation between
+      pools is by certificate (roles, raw sends and cross-node references are
+      checked per frame, steps 11a/11b), not by firewall. *)
+  let cluster_hosts (ex : export) : (string * string) list =
+    List.fold_left (fun acc p ->
+        List.fold_left (fun acc h ->
+            let n = host_name h in
+            if List.mem_assoc n acc then acc else acc @ [ (n, p.pool_name) ])
+          acc p.hosts)
+      [] ex.topo.pools
+
   (** One shell script per host: its pool's public ports from anywhere, the
-      cluster port from every host of every pool it talks to (itself
-      included when its pool talks to itself and spans several hosts). *)
+      cluster port from every other cluster member ([cluster_hosts]). *)
   let ufw (ex : export) : (string * string) list =
-    let hosts_of pool =
-      match List.find_opt (fun p -> p.pool_name = pool) ex.topo.pools with
-      | Some p -> p.hosts
-      | None -> []
-    in
+    let members = cluster_hosts ex in
     List.concat_map (fun p ->
         List.map (fun h ->
             let me = host_name h in
@@ -1328,13 +1331,10 @@ module Gen = struct
               List.map (fun port -> Printf.sprintf "ufw allow %d/tcp comment 'march %s public'" port p.pool_name) p.public
             in
             let cluster =
-              List.concat_map (fun peer ->
-                  List.filter_map (fun ph ->
-                      let pn = host_name ph in
-                      if pn = me then None
-                      else Some (Printf.sprintf "ufw allow from %s to any port %d proto tcp comment 'march cluster from %s'" pn ex.port peer))
-                    (hosts_of peer))
-                (peers_of ex p.pool_name)
+              List.filter_map (fun (pn, pool) ->
+                  if pn = me then None
+                  else Some (Printf.sprintf "ufw allow from %s to any port %d proto tcp comment 'march cluster from %s'" pn ex.port pool))
+                members
             in
             (* The control API (step 12a): a candidate takes the control port from
                the other candidates (replication, forwarding). The operator's own
@@ -1365,7 +1365,8 @@ module Gen = struct
           p.hosts)
       ex.topo.pools
 
-  (** One DigitalOcean firewall per pool, keyed by droplet tag `march-<pool>`. *)
+  (** One DigitalOcean firewall per pool, keyed by droplet tag `march-<pool>`:
+      its public ports from anywhere, the cluster port from every pool. *)
   let do_firewall (ex : export) : (string * string) list =
     let rule_json port sources =
       `Assoc [ ("protocol", `String "tcp"); ("ports", `String (string_of_int port)); ("sources", `Assoc sources) ]
@@ -1375,10 +1376,10 @@ module Gen = struct
           let public =
             List.map (fun port -> rule_json port [ ("addresses", `List [ `String "0.0.0.0/0"; `String "::/0" ]) ]) p.public
           in
-          let peers = peers_of ex p.pool_name in
+          (* The cluster port from every pool's tag, its own included (see
+             [cluster_hosts]): a droplet added to a tag later is covered too. *)
           let cluster =
-            if peers = [] then []
-            else [ rule_json ex.port [ ("tags", `List (List.map (fun peer -> `String ("march-" ^ peer)) peers)) ] ]
+            [ rule_json ex.port [ ("tags", `List (List.map (fun q -> `String ("march-" ^ q.pool_name)) ex.topo.pools)) ] ]
           in
           `Assoc [
             ("name", `String ("march-" ^ p.pool_name));

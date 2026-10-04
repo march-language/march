@@ -155,6 +155,13 @@ git log is authoritative for exact commits.
   ill-typed wiring compiled into code that read records with the wrong layout
   (both leader candidates died with SIGSEGV). They are now reported. The two
   that were live on the certificate-save error path are fixed.
+- **Topology firewalls no longer split the cluster membership.** `forge topology gen
+  ufw` / `do-firewall` and `forge host init` opened the cluster port into a pool only
+  from the pools it exchanges protocol messages with, but SWIM probes every member, so
+  two pools that shared no protocol saw each other as unreachable (and `count = n`
+  placement ranked on that wrong membership). The cluster port is now open between all
+  cluster members; pools are kept apart by node certificate, as before. Public ports and
+  the control-port rule are unchanged.
 - **A supervisor now works in a program built with `--hot-reload`.** Any actor with a
   `supervise` block failed to compile under `--hot-reload` (`use of undefined value
   '@$sup_child_ptr_a'`). Behind that, the runtime read each child's pid from the wrong
