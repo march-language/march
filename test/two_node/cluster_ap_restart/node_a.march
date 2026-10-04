@@ -24,10 +24,15 @@ mod ClusterApRestartA do
       Echo_Client.close(s, st2))
   end
 
+  -- A failed attempt says why on stderr, which the harness prints only when
+  -- the scenario fails: CI saw session 2 never form after node-b's restart
+  -- (2026-10-02, 2026-10-03; never locally), and node-a said nothing.
   pfn session(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int) : Bool do
     match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, n)) do
       Ok(_) -> true
-      Err(_) -> false
+      Err(e) ->
+        IO.warn("node-a: session " ++ int_to_string(n) ++ " attempt failed: " ++ Echo_Run.error_message(e))
+        false
     end
   end
 
@@ -71,8 +76,10 @@ mod ClusterApRestartA do
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: nobody joined") end
         if session_retry(c, h, 1, 60000) do println("Client: session 1 done") else panic("node-a: first session never formed") end
         let first = offer_creation(h)
-        if wait_new_offer(h, first, 120000) do () else panic("node-a: the restarted offer never appeared") end
-        if session_retry(c, h, 2, 120000) do println("Client: session 2 done after the restart") else panic("node-a: no session after the restart") end
+        -- Both waits fit inside the harness's 60 s for node-a to exit, so a
+        -- stall ends in node-a's own message, not a bare harness timeout.
+        if wait_new_offer(h, first, 20000) do () else panic("node-a: the restarted offer never appeared") end
+        if session_retry(c, h, 2, 30000) do println("Client: session 2 done after the restart") else panic("node-a: no session after the restart") end
         ClusterNode.stop(h)
     end
   end

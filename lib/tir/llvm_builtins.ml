@@ -1248,6 +1248,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_dispatch_publish_epoch", "declare i32  @march_dispatch_publish_epoch(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind, i32 %epoch)");
   ("march_dispatch_init", "declare void @march_dispatch_init(i32 %n_slots)");
   ("march_dispatch_register_name", "declare void @march_dispatch_register_name(i32, ptr)");
+  ("march_dispatch_name_to_id", "declare i32  @march_dispatch_name_to_id(ptr, ptr)");
   ("march_reload_server_start", "declare void @march_reload_server_start(ptr)");
   ("march_actor_set_dispatch_id", "declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)");
   ("march_actor_set_call_tags", "declare void @march_actor_set_call_tags(ptr %actor, ptr %tags, i64 %n)");
@@ -1366,6 +1367,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_dispatch_publish_epoch";
   PDeclare "march_dispatch_init";
   PDeclare "march_dispatch_register_name";
+  PDeclare "march_dispatch_name_to_id";
   PDeclare "march_reload_server_start";
   PDeclare "march_actor_set_dispatch_id";
   PDeclare "march_actor_set_call_tags";

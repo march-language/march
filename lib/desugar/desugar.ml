@@ -2207,10 +2207,22 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
      checked before the generated module is declared would see its state
      types as ordinary -- reuse and abandon silently accepted.  Measured, not
      guessed: the same hand-written nested module placed after `main` loses
-     the reuse check. *)
-  let m =
-    match Desugar_endpoints.expand errors m.mod_decls with
-    | [] -> m
+     the reuse check.
+
+     A protocol in a NESTED module expands inside that module, next to it, the
+     same way (2026-10-03): its generated modules are siblings of the
+     protocol's other declarations, reached relatively from that module and by
+     qualified name (`Outer.P_Msg`) from outside.  Before this only the file's
+     top level was expanded, so a protocol in `mod Outer` generated nothing
+     and every use of `P_A` was "Unknown module". *)
+  let rec expand_endpoints (decls : decl list) : decl list =
+    let decls =
+      List.map (function
+          | DMod (nm, vis, ds, sp) -> DMod (nm, vis, expand_endpoints ds, sp)
+          | d -> d) decls
+    in
+    match Desugar_endpoints.expand errors decls with
+    | [] -> decls
     | generated ->
       let is_directive = function
         | DNeeds _ | DUse _ | DAlias _ | DOpts _ -> true
@@ -2220,9 +2232,10 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
         | d :: rest when is_directive d -> split (d :: acc) rest
         | rest -> (List.rev acc, rest)
       in
-      let (lead, rest) = split [] m.mod_decls in
-      { m with mod_decls = lead @ generated @ rest }
+      let (lead, rest) = split [] decls in
+      lead @ generated @ rest
   in
+  let m = { m with mod_decls = expand_endpoints m.mod_decls } in
   (* Same-named nested actors, and every standard-library actor, get
      distinct names before anything keys an actor by its bare name
      (Desugar_actor_names).  A user file with no nested collision is

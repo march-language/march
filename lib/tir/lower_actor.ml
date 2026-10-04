@@ -440,36 +440,55 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
           | Ast.TyCon (n, []) -> (n.txt, sf)
           | _ -> failwith ("supervise field " ^ fname ^ ": child type must be a bare actor name"))
   in
+  let bind_init_fields (body : Tir.expr) : Tir.expr =
+    List.fold_right (fun (fname, ifv) acc ->
+        match supervised_child fname with
+        | None -> Tir.ELet (ifv, Tir.EField (Tir.AVar init_var, fname), acc)
+        | Some (child_actor_name, sf) ->
+          let arg_binds = child_init_arg_vars sf in
+          let arg_vars = List.map fst arg_binds in
+          let child_spawn_var = child_spawn_fn_var child_actor_name arg_vars in
+          (* A supervise-block child must not enter its actor loop before
+             register_supervisor_child publishes the supervisor pointer.
+             The deferred runtime spawn assigns its Pid now (needed in the
+             supervisor state), and registration activates it later. *)
+          let march_spawn_var : Tir.var = {
+            v_name = "spawn_supervised";
+            v_ty = Tir.TPtr Tir.TUnit;
+            v_lin = Tir.Unr;
+          } in
+          let pid_index_of_var : Tir.var = { v_name = "pid_index_of"; v_ty = Tir.TInt; v_lin = Tir.Unr } in
+          let raw_var = actor_var ("$sup_child_raw_" ^ fname) (Tir.TPtr Tir.TUnit) in
+          let child_ptr_var = actor_var ("$sup_child_ptr_" ^ fname) (Tir.TPtr Tir.TUnit) in
+          List.fold_right (fun (v, rhs) inner -> Tir.ELet (v, rhs, inner)) arg_binds
+            (Tir.ELet (raw_var,
+               Tir.EApp (child_spawn_var, List.map (fun v -> Tir.AVar v) arg_vars),
+               Tir.ELet (child_ptr_var, Tir.EApp (march_spawn_var, [Tir.AVar raw_var]),
+                 Tir.ELet (ifv, Tir.EApp (pid_index_of_var, [Tir.AVar child_ptr_var]),
+                   acc))))
+      ) init_field_vars body
+  in
   let spawn_with_fields =
-    if hot_reload then
-      spawn_inner
-    else
-      List.fold_right (fun (fname, ifv) acc ->
-          match supervised_child fname with
-          | None -> Tir.ELet (ifv, Tir.EField (Tir.AVar init_var, fname), acc)
-          | Some (child_actor_name, sf) ->
-            let arg_binds = child_init_arg_vars sf in
-            let arg_vars = List.map fst arg_binds in
-            let child_spawn_var = child_spawn_fn_var child_actor_name arg_vars in
-            (* A supervise-block child must not enter its actor loop before
-               register_supervisor_child publishes the supervisor pointer.
-               The deferred runtime spawn assigns its Pid now (needed in the
-               supervisor state), and registration activates it later. *)
-            let march_spawn_var : Tir.var = {
-              v_name = "spawn_supervised";
-              v_ty = Tir.TPtr Tir.TUnit;
-              v_lin = Tir.Unr;
-            } in
-            let pid_index_of_var : Tir.var = { v_name = "pid_index_of"; v_ty = Tir.TInt; v_lin = Tir.Unr } in
-            let raw_var = actor_var ("$sup_child_raw_" ^ fname) (Tir.TPtr Tir.TUnit) in
-            let child_ptr_var = actor_var ("$sup_child_ptr_" ^ fname) (Tir.TPtr Tir.TUnit) in
-            List.fold_right (fun (v, rhs) inner -> Tir.ELet (v, rhs, inner)) arg_binds
-              (Tir.ELet (raw_var,
-                 Tir.EApp (child_spawn_var, List.map (fun v -> Tir.AVar v) arg_vars),
-                 Tir.ELet (child_ptr_var, Tir.EApp (march_spawn_var, [Tir.AVar raw_var]),
-                   Tir.ELet (ifv, Tir.EApp (pid_index_of_var, [Tir.AVar child_ptr_var]),
-                     acc))))
-        ) init_field_vars spawn_inner
+    if not hot_reload then bind_init_fields spawn_inner
+    else match actor.actor_supervise with
+      | None -> spawn_inner
+      | Some _ ->
+        (* Hot-reload keeps the state in its own record, handed to EAlloc
+           whole as $init_state.  A supervisor still has to spawn its
+           children here (wrap_sup registers them via $sup_child_ptr_<f>),
+           and its supervised fields must hold the children's pids, not the
+           `init` placeholders, so unpack $init_state exactly as the
+           non-hot-reload path does and rebuild the state record from the
+           $init_<f> vars before allocating. *)
+        let sup_state_var = actor_var "$init_state_sup" state_ty in
+        let sup_alloc_args =
+          [Tir.AVar dispatch_fn_ptr_var; Tir.ALit (Ast.LitBool true); Tir.AVar sup_state_var] in
+        bind_init_fields
+          (Tir.ELet (sup_state_var,
+             Tir.ERecord (List.map (fun (fname, ifv) -> (fname, Tir.AVar ifv)) init_field_vars),
+             Tir.ELet (actor_result_var,
+               Tir.EAlloc (Tir.TCon (actor_type_name, []), sup_alloc_args),
+               Tir.EAtom (Tir.AVar actor_result_var))))
   in
   (* ── 5b. Supervision registration ───────────────────────────────── *)
   (* If this actor declares a supervise block, call march_register_supervisor
@@ -543,7 +562,11 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
               Tir.ELet ({ v_name = "$reg_child_" ^ fname; v_ty = Tir.TUnit; v_lin = Tir.Unr },
                 Tir.EApp (reg_child_var, [
                   sup_atom; Tir.AVar child_ptr_var; respawn;
-                  Tir.ALit (Ast.LitInt (field_word_idx fname));
+                  (* Under --hot-reload the field is a word of the separate
+                     state record, not the actor struct: tag the index with
+                     the runtime's MARCH_SUP_SLOT_IN_STATE bit (1 lsl 32). *)
+                  Tir.ALit (Ast.LitInt (field_word_idx fname
+                                        lor (if hot_reload then 1 lsl 32 else 0)));
                   Tir.ALit (Ast.LitInt (restart_type_int sf.Ast.sf_restart));
                   (* -1 infinity, 0 brutal, else the millisecond budget; read by
                      march_actor_stop when it tears the tree down. *)

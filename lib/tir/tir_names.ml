@@ -475,6 +475,16 @@ let is_actor_struct_name (tcon_name : string) : bool =
   let nl = String.length tcon_name and sl = String.length sfx in
   nl > sl && String.sub tcon_name (nl - sl) sl = sfx
 
+(** True if [tcon_name] ends in the hot-reload actor-state-record suffix
+    ("..._State").  Only a stamping heuristic, consulted only under
+    --hot-reload: a user record that happens to end in "_State" matches
+    too, which costs one shape stamp and is otherwise harmless (its shape
+    is stamped from its own fields). *)
+let is_actor_state_name (tcon_name : string) : bool =
+  let sfx = actor_state_suffix in
+  let nl = String.length tcon_name and sl = String.length sfx in
+  nl > sl && String.sub tcon_name (nl - sl) sl = sfx
+
 (** True if [tcon_name] ends in the actor-message-variant suffix ("..._Msg")
     — used at TCon-name granularity to identify a [<Actor>_Msg] variant type.
 

@@ -555,7 +555,8 @@ let discarded_call_result_ty (env : env) (e : Tir.expr) : Tir.ty option =
     means for the rest of the pass, this predicate states the requirement
     directly and conservatively: anything that is not an EField source
     disqualifies the drop. *)
-let rec used_only_as_field_source (name : string) (e : Tir.expr) : bool =
+let rec used_only_as_field_source ?(releases_ok = false) (name : string) (e : Tir.expr) : bool =
+  let recur = used_only_as_field_source ~releases_ok in
   let atom_hits = function
     | Tir.AVar w -> String.equal w.Tir.v_name name
     | _ -> false
@@ -582,6 +583,9 @@ let rec used_only_as_field_source (name : string) (e : Tir.expr) : bool =
   | Tir.EAllocHole (tok, _, filled, _) ->
     atoms_ok (match tok with Some a -> a :: filled | None -> filled)
   | Tir.ESetField (a, _, b) -> atoms_ok [a; b]
+  (* [~releases_ok]: a release of [name] is not a use.  Only for a caller
+     that tracks releases itself, per path ([insert_owned_aggregate_param_drops]). *)
+  | Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _ when releases_ok -> true
   | Tir.EIncRC a | Tir.EDecRC a | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a
   | Tir.EFree a -> not (atom_hits a)
   (* A pure ALIAS binding [let v = p] moves ownership to [v] rather than
@@ -593,22 +597,26 @@ let rec used_only_as_field_source (name : string) (e : Tir.expr) : bool =
      once, which is what the alias made it. *)
   | Tir.ELet (v, Tir.EAtom (Tir.AVar w), e2)
     when String.equal w.Tir.v_name name ->
-    used_only_as_field_source v.Tir.v_name e2
+    (* Through an alias, a release is a use again: [~releases_ok]'s caller
+       tracks releases of [name] only, and the alias's own scope-end drop
+       ([let $p = pair in .. dec_rc $p], a destructured tuple parameter)
+       would be a second release of the one cell. *)
+    used_only_as_field_source ~releases_ok:false v.Tir.v_name e2
   | Tir.ELet (_, e1, e2) ->
-    used_only_as_field_source name e1 && used_only_as_field_source name e2
+    recur name e1 && recur name e2
   | Tir.ESeq (e1, e2) ->
-    used_only_as_field_source name e1 && used_only_as_field_source name e2
+    recur name e1 && recur name e2
   | Tir.ECase (a, branches, default) ->
     (* A case SCRUTINEE is consumed (add_scrutinee_free_for may free it). *)
     not (atom_hits a)
-    && List.for_all (fun br -> used_only_as_field_source name br.Tir.br_body)
+    && List.for_all (fun br -> recur name br.Tir.br_body)
          branches
     && (match default with
-        | Some d -> used_only_as_field_source name d
+        | Some d -> recur name d
         | None -> true)
   | Tir.ELetRec (fns, body) ->
-    List.for_all (fun fn -> used_only_as_field_source name fn.Tir.fn_body) fns
-    && used_only_as_field_source name body
+    List.for_all (fun fn -> recur name fn.Tir.fn_body) fns
+    && recur name body
 
 (** True when [e] already contains a release of [name] on some path.  The
     aggregate scope-end drop must stand down in that case: [post_dec_vars]

@@ -369,11 +369,11 @@ pfn ctl_persist_cert(io : Cap(IO)) : () do
       else
         let tmp = path ++ ".delivered.tmp"
         match File.write(tmp, text ++ "\n") do
-          Err(e) -> println("control: could not save the delivered certificate to " ++ path ++ ": " ++ e)
+          Err(e) -> println("control: could not save the delivered certificate to " ++ path ++ ": " ++ to_string(e))
           Ok(_) ->
             match File.rename(tmp, path) do
               Ok(_) -> ()
-              Err(e) -> println("control: could not save the delivered certificate to " ++ path ++ ": " ++ e)
+              Err(e) -> println("control: could not save the delivered certificate to " ++ path ++ ": " ++ to_string(e))
             end
         end
       end

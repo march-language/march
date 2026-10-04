@@ -52,6 +52,13 @@ mod SupervisorDeflectedCrashAbsorbed do
     init  { done: 0 }
 
     on Go(target) do
+      -- Wait out main's head start: main's kill(hi) must claim the batch
+      -- marker first, and this kill land inside its 300 ms stall
+      -- (MARCH_SUP_TEST_STALL_MS). Without the wait a free worker ran this
+      -- kill first on CI (2026-10-03): `lo` claimed the marker, `hi` was the
+      -- deflected one, and main's kill returned before the restart that its
+      -- stall now held on THIS thread finished -- "lo restarted: false".
+      sleep_ms(100)
       kill(target)
       { done: 1 }
     end

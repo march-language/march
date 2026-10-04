@@ -243,6 +243,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   let env = { type_map; current_module_aliases = Hashtbl.create 16;
               mod_prefix = ""; collision_set } in
   _iface_methods := Hashtbl.create 16;
+  Hashtbl.reset Mono.stdlib_impl_syms;
   _use_aliases := Hashtbl.create 16;
   _module_aliases := Hashtbl.create 16;
   _module_alias_snapshots := Hashtbl.create 16;
@@ -496,7 +497,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
      Recursively processes DMod contents so that impls declared inside
      imported modules (which are wrapped in DMod by resolve_imports) are
      also registered. *)
-  let rec collect_iface_impls ~lower_bodies ?(lower_generic = false)
+  let rec collect_iface_impls ~lower_bodies ?(lower_generic = false) ?(in_stdlib = false)
       ?(mod_prefix = "") decls =
     (* Collect direct function/let names at this module level so that
        rename_tir_vars can qualify references inside impl method bodies.
@@ -521,7 +522,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
               if not (Hashtbl.mem !_iface_methods m.md_name.txt) then
                 Hashtbl.replace !_iface_methods m.md_name.txt []
             ) idef.iface_methods
-        | Ast.DImpl (idef, _) ->
+        | Ast.DImpl (idef, impl_sp) ->
           let type_name = match idef.impl_ty with
             | Ast.TyCon ({ txt = name; _ }, _) -> name
             (* Tuples dispatch by ARITY ("$Tuple2", "$Tuple3", …) so a distinct
@@ -664,6 +665,13 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                   else fn in
                   fns := { fn with fn_name = mangled } :: !fns
                 end;
+                (* Provenance for mono's return-position fallback
+                   ([Mono.stdlib_impl_syms]).  By the enclosing module as well
+                   as the impl's own span: a derived `Json` impl carries a
+                   dummy span, but every stdlib module's name carries its
+                   file. *)
+                if in_stdlib || March_typecheck.Typecheck_builtins.span_is_stdlib impl_sp then
+                  Hashtbl.replace Mono.stdlib_impl_syms mangled ();
                 let existing = match Hashtbl.find_opt !_iface_methods mname.txt with
                   | Some l -> l | None -> [] in
                 Hashtbl.replace !_iface_methods mname.txt
@@ -683,6 +691,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
           Lower_state.hiding_builtin_shadows (Lower_decls.direct_def_names inner_decls)
             (fun () ->
                collect_iface_impls ~lower_bodies ~lower_generic
+                 ~in_stdlib:(in_stdlib
+                             || March_typecheck.Typecheck_builtins.span_is_stdlib sub_name.span)
                  ~mod_prefix:(mod_prefix ^ sub_name.txt ^ ".")
                  inner_decls)
         | _ -> ()
@@ -691,7 +701,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   (* Stdlib context: only register dispatch table entries, don't lower bodies
      (they're already in the precompiled .so) *)
   if stdlib_context <> [] then
-    collect_iface_impls ~lower_bodies:false ~lower_generic:true stdlib_context;
+    collect_iface_impls ~lower_bodies:false ~lower_generic:true ~in_stdlib:true stdlib_context;
   (* One top-level decl at a time, so each is lowered in its own file's
      builtin-shadow scope (the entry file's impls see the entry's fns named
      like builtins; the stdlib's do not).  Equivalent to one call over the

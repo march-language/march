@@ -36,6 +36,15 @@ git log is authoritative for exact commits.
   asks the forge.toml hosts over ssh, or a local socket with `--socket`. Reading
   100 000 actors takes about 20 ms, and nothing is added to the scheduler's hot path.
   Actor type names need a `--hot-reload` build.
+- **Observe counters, scheduler utilisation and a crash ring.** Every actor row
+  now carries how often it ran, messages received and sent, how long since it
+  last ran, and the messages an `Actor.call` is holding while it waits (an
+  actor stuck in a call no longer looks idle). `SCHED [window_ms]` reports
+  each scheduler's utilisation, `CRASHES [n]` the last crashes (kind, actor,
+  supervisor, restart number; never the panic text), and `TOP <attr> <n>
+  [window_ms]` the actors highest on mailbox depth, crashes, or messages and
+  dispatches over a window. `TREE` nests actors under the actor that spawned
+  them. The counters add nothing measurable to the message path.
 - **An in-cluster control plane for hot deploys (distributed deploys, step 12a).** A
   `[control] candidates = "<host label>"` section in `topology.toml` makes every node run
   an Agent and the labelled nodes serve a control API; one of them leads (`count = 1`
@@ -134,6 +143,63 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A branch that returns a record's field no longer frees it (compiled).** In
+  `"sig " ++ (if r.signature == "" do "-" else r.signature end)`, compiled code
+  handed out `r.signature` without taking a reference, so the next read of the
+  field found freed memory (`sig -` on the second call, a use-after-free under
+  ASAN). This was `Control.serialize`'s bug. The same shape, and the plain
+  `if r.f == "" do "-" else r.f end`, also leaked the record on every call that
+  took the second branch.
+- **The control plane's leader no longer crashes when its wiring has a type error.**
+  Type errors in the generated control-plane wiring were silently dropped, so
+  ill-typed wiring compiled into code that read records with the wrong layout
+  (both leader candidates died with SIGSEGV). They are now reported. The two
+  that were live on the certificate-save error path are fixed.
+- **An `@[endpoints]` protocol now works in any module.** A protocol declared in a
+  nested module, in a library module found through `MARCH_LIB_PATH`, or in a
+  standard-library module failed with "Unknown module `P_A`"; only one at the entry
+  file's top level worked. The generated modules are now addressable by their
+  qualified name (`Net.Fan_C.register(s, 0)`) from anywhere. Underneath, a qualified
+  type written relative to an enclosing module (`A.T` inside `mod Outer` naming its
+  sibling `Outer.A`) now resolves, and a protocol in the standard library no longer
+  makes a program's own bare `from_json` call ambiguous when compiled.
+- **A hot patch of a topology role body is no longer refused by the node's
+  capability policy.** A role body holds the session it is handed, so its own
+  caps include `Session.Live`, and a node running the policy `forge host init`
+  writes refused every such patch with `ERR cap_policy Session.Live` unless you
+  wrote `Session.Live` into the pool's `caps`. The node's admission gate now
+  polices IO capabilities only: a proof capability (`Session.Live`,
+  `ClusterNode.Live`, your own `proof cap`) carries no IO authority and is not
+  checked against `MARCH_DEPLOY_POLICY`; an IO capability outside the policy is
+  refused as before. And in a topology with a `[control]` section, every hot patch
+  was refused with `ERR role_cap_policy Ctl.Agent ...`, because the policy
+  bounded the control plane's own roles: the generated policy now ends with a
+  `serves` line, and the gate bounds only the closures of the roles the node's
+  pool serves. Re-run `forge host init` (or deploy a restart) to rewrite an
+  existing policy; one without a `serves` line still bounds every role. Both
+  `forge deploy hot` and releases through the control plane go through the same
+  gate.
+- **Topology firewalls no longer split the cluster membership.** `forge topology gen
+  ufw` / `do-firewall` and `forge host init` opened the cluster port into a pool only
+  from the pools it exchanges protocol messages with, but SWIM probes every member, so
+  two pools that shared no protocol saw each other as unreachable (and `count = n`
+  placement ranked on that wrong membership). The cluster port is now open between all
+  cluster members; pools are kept apart by node certificate, as before. Public ports and
+  the control-port rule are unchanged.
+- **A supervisor now works in a program built with `--hot-reload`.** Any actor with a
+  `supervise` block failed to compile under `--hot-reload` (`use of undefined value
+  '@$sup_child_ptr_a'`). Behind that, the runtime read each child's pid from the wrong
+  word of a hot-reload supervisor, so stopping the tree could stop an unrelated actor
+  and a restart wrote past the actor, and `get_actor_field` found no state field of a
+  hot-reload actor.
+- **Hot reload: a patch that adds a function no longer crashes the running node.**
+  A patch `.so` called hot-swappable functions by its own build's slot numbers,
+  which shift when the new version adds or removes one. Since the entry
+  module's functions became hot-swappable, this sent calls to the wrong
+  function (SIGSEGV on both nodes of the `protocol_expand_contract` deploy). A
+  patch now looks its slots up by name when it is loaded. Also, a later deploy
+  that changes such a newly added function now redeploys its callers to carry
+  it, rather than leaving them on the old copy.
 - **Compiled HTTP servers no longer leak ~0.5 KiB per request.** Neither the
   thread-pool nor the event-loop server released the `Conn` a handler returns
   after writing the response, so every request leaked the result record and

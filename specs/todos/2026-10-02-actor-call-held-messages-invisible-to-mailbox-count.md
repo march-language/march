@@ -15,7 +15,16 @@ That is exactly the actor an operator is looking for (stuck in a slow call with
 work piling up), and R3's planned `forge diagnose` mailbox-growth check would
 miss it.
 
-Fix shape: keep a count of held messages on the proc (written by the caller's
+**Update (observe R2, 2026-10-02):** the observe socket side is done. The proc
+now carries `held` (set by `call_held_push`, cleared by `call_held_restore`);
+`ACTORS`/`ACTOR` rows report it, `ACTORS mbox` and `TOP mbox` rank by queued +
+held, and `MEM` counts it (`test/native/observe_counters.march`). What is
+left is the March-level API: `mailbox_size(pid)`, `Actor.top_by_mailbox` and
+`Actor.over_mailbox` still read `mbox_count` alone. Whether `mailbox_size`
+should include held messages is a semantic choice (it is also what fixtures
+spin on while waiting for a message to land), so it is left open here.
+
+Original fix shape: keep a count of held messages on the proc (written by the caller's
 own thread, so a relaxed atomic store), add it to `mbox_count` reads that mean
 "work queued for this actor", and expose `held` separately in the observe row.
 Test: the R1 fixture's `Hot` actor stalled in an `Actor.call` instead of

@@ -584,6 +584,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Control.html#type-CtlBuild"><span class="sb-kind" style="color:var(--ty)">T</span>CtlBuild</a>
 <a class="sl" href="Control.html#type-CtlDrain"><span class="sb-kind" style="color:var(--ty)">T</span>CtlDrain</a>
 <a class="sl" href="Control.html#type-CtlLine"><span class="sb-kind" style="color:var(--ty)">T</span>CtlLine</a>
+<a class="sl" href="Control.html#type-CtlCert"><span class="sb-kind" style="color:var(--ty)">T</span>CtlCert</a>
 <a class="sl" href="Control.html#type-CtlRelease"><span class="sb-kind" style="color:var(--ty)">T</span>CtlRelease</a>
 <a class="sl" href="Control.html#type-CtlMember"><span class="sb-kind" style="color:var(--ty)">T</span>CtlMember</a>
 <a class="sl" href="Control.html#type-CtlVersion"><span class="sb-kind" style="color:var(--ty)">T</span>CtlVersion</a>
@@ -595,11 +596,14 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Control.html#type-CtlDecision"><span class="sb-kind" style="color:var(--ty)">T</span>CtlDecision</a>
 <a class="sl" href="Control.html#type-CtlLeader"><span class="sb-kind" style="color:var(--ty)">T</span>CtlLeader</a>
 <a class="sl" href="Control.html#type-AgentOps"><span class="sb-kind" style="color:var(--ty)">T</span>AgentOps</a>
+<a class="sl" href="Control.html#type-CertOps"><span class="sb-kind" style="color:var(--ty)">T</span>CertOps</a>
 <a class="sl" href="Control.html#type-CtlChunk"><span class="sb-kind" style="color:var(--ty)">T</span>CtlChunk</a>
 <a class="sl" href="Control.html#type-CtlNext"><span class="sb-kind" style="color:var(--ty)">T</span>CtlNext</a>
 <a class="sl" href="Control.html#type-ControlOps"><span class="sb-kind" style="color:var(--ty)">T</span>ControlOps</a>
 <a class="sl" href="Control.html#fn-accept"><span class="sb-kind" style="color:var(--fn)">F</span>accept</a>
 <a class="sl" href="Control.html#fn-agent_apply"><span class="sb-kind" style="color:var(--fn)">F</span>agent_apply</a>
+<a class="sl" href="Control.html#fn-agent_apply_certs"><span class="sb-kind" style="color:var(--fn)">F</span>agent_apply_certs</a>
+<a class="sl" href="Control.html#fn-agent_apply_certs_recording"><span class="sb-kind" style="color:var(--fn)">F</span>agent_apply_certs_recording</a>
 <a class="sl" href="Control.html#fn-agent_apply_recording"><span class="sb-kind" style="color:var(--fn)">F</span>agent_apply_recording</a>
 <a class="sl" href="Control.html#fn-answer_lines"><span class="sb-kind" style="color:var(--fn)">F</span>answer_lines</a>
 <a class="sl" href="Control.html#fn-audit_decision"><span class="sb-kind" style="color:var(--fn)">F</span>audit_decision</a>
@@ -607,6 +611,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Control.html#fn-audit_refusal"><span class="sb-kind" style="color:var(--fn)">F</span>audit_refusal</a>
 <a class="sl" href="Control.html#fn-audit_release"><span class="sb-kind" style="color:var(--fn)">F</span>audit_release</a>
 <a class="sl" href="Control.html#fn-audit_step"><span class="sb-kind" style="color:var(--fn)">F</span>audit_step</a>
+<a class="sl" href="Control.html#fn-cert_floor"><span class="sb-kind" style="color:var(--fn)">F</span>cert_floor</a>
+<a class="sl" href="Control.html#fn-certs_text"><span class="sb-kind" style="color:var(--fn)">F</span>certs_text</a>
 <a class="sl" href="Control.html#fn-check"><span class="sb-kind" style="color:var(--fn)">F</span>check</a>
 <a class="sl" href="Control.html#fn-chunks"><span class="sb-kind" style="color:var(--fn)">F</span>chunks</a>
 <a class="sl" href="Control.html#fn-digest"><span class="sb-kind" style="color:var(--fn)">F</span>digest</a>
@@ -628,6 +634,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Control.html#fn-relay_line"><span class="sb-kind" style="color:var(--fn)">F</span>relay_line</a>
 <a class="sl" href="Control.html#fn-reload_report"><span class="sb-kind" style="color:var(--fn)">F</span>reload_report</a>
 <a class="sl" href="Control.html#fn-report_failure"><span class="sb-kind" style="color:var(--fn)">F</span>report_failure</a>
+<a class="sl" href="Control.html#fn-report_serial"><span class="sb-kind" style="color:var(--fn)">F</span>report_serial</a>
 <a class="sl" href="Control.html#fn-report_versions"><span class="sb-kind" style="color:var(--fn)">F</span>report_versions</a>
 <a class="sl" href="Control.html#fn-reports_state"><span class="sb-kind" style="color:var(--fn)">F</span>reports_state</a>
 <a class="sl" href="Control.html#fn-select"><span class="sb-kind" style="color:var(--fn)">F</span>select</a>
@@ -643,6 +650,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Control.html#fn-verify"><span class="sb-kind" style="color:var(--fn)">F</span>verify</a>
 <a class="sl" href="Control.html#fn-versions_text"><span class="sb-kind" style="color:var(--fn)">F</span>versions_text</a>
 <a class="sl" href="Control.html#fn-want"><span class="sb-kind" style="color:var(--fn)">F</span>want</a>
+<a class="sl" href="Control.html#fn-want_for"><span class="sb-kind" style="color:var(--fn)">F</span>want_for</a>
 <a class="sl" href="Control.html#fn-with_failure"><span class="sb-kind" style="color:var(--fn)">F</span>with_failure</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Crypto.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Crypto.html">Crypto</a></div><div class="sb-sub"><a class="sl" href="Crypto.html#fn-base64_decode"><span class="sb-kind" style="color:var(--fn)">F</span>base64_decode</a>
 <a class="sl" href="Crypto.html#fn-base64_encode"><span class="sb-kind" style="color:var(--fn)">F</span>base64_encode</a>
@@ -1838,6 +1846,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NodeCert.html#fn-public_key"><span class="sb-kind" style="color:var(--fn)">F</span>public_key</a>
 <a class="sl" href="NodeCert.html#fn-revocation_from_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_from_bytes</a>
 <a class="sl" href="NodeCert.html#fn-revocation_from_text"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_from_text</a>
+<a class="sl" href="NodeCert.html#fn-revocation_id"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_id</a>
 <a class="sl" href="NodeCert.html#fn-revocation_to_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_to_bytes</a>
 <a class="sl" href="NodeCert.html#fn-revocation_to_text"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_to_text</a>
 <a class="sl" href="NodeCert.html#fn-revocation_version"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_version</a>
@@ -2885,6 +2894,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <div class="item" id="fn-public_key"><div class="ih"><span class="badge bfn">fn</span><span class="name">public_key</span><span class="sig">public_key(sk : <a href="Bytes.html#type-Bytes">Bytes</a>) : <a href="Bytes.html#type-Bytes">Bytes</a> do Bytes.slice(sk, 32, 32) end</span><a class="anchor-link" href="#fn-public_key" title="Link">#</a></div><div class="ib"><p>The 32-byte public key inside a 64-byte secret key.</p></div></div>
 <div class="item" id="fn-revocation_from_bytes"><div class="ih"><span class="badge bfn">fn</span><span class="name">revocation_from_bytes</span><span class="sig">revocation_from_bytes(bytes : List(Int)) : Result(<a href="#type-SignedRevocation">SignedRevocation</a>, String)</span><a class="anchor-link" href="#fn-revocation_from_bytes" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-revocation_from_text"><div class="ih"><span class="badge bfn">fn</span><span class="name">revocation_from_text</span><span class="sig">revocation_from_text(t : String) : Result(<a href="#type-SignedRevocation">SignedRevocation</a>, String)</span><a class="anchor-link" href="#fn-revocation_from_text" title="Link">#</a></div><div class="ib"></div></div>
+<div class="item" id="fn-revocation_id"><div class="ih"><span class="badge bfn">fn</span><span class="name">revocation_id</span><span class="sig">revocation_id(r : <a href="#type-Revocation">Revocation</a>) : String</span><a class="anchor-link" href="#fn-revocation_id" title="Link">#</a></div><div class="ib"><p>A short identity for a revocation: the first 16 hex digits of the sha256 of its canonical body. Two copies of one revocation (from a release, from a peer's gossip, from MARCH_CLUSTER_REVOCATIONS) have the same id, so a node's report of the revocations it knows can be matched against a release's (<code>Control</code>, step 12b).</p></div></div>
 <div class="item" id="fn-revocation_to_bytes"><div class="ih"><span class="badge bfn">fn</span><span class="name">revocation_to_bytes</span><span class="sig">revocation_to_bytes(s : <a href="#type-SignedRevocation">SignedRevocation</a>) : List(Int)</span><a class="anchor-link" href="#fn-revocation_to_bytes" title="Link">#</a></div><div class="ib"></div></div>
 <div class="item" id="fn-revocation_to_text"><div class="ih"><span class="badge bfn">fn</span><span class="name">revocation_to_text</span><span class="sig">revocation_to_text(s : <a href="#type-SignedRevocation">SignedRevocation</a>) : String</span><a class="anchor-link" href="#fn-revocation_to_text" title="Link">#</a></div><div class="ib"><p>The text form of a signed revocation (base64): what <code>forge cluster revoke</code> prints.</p></div></div>
 <div class="item" id="fn-revocation_version"><div class="ih"><span class="badge bfn">fn</span><span class="name">revocation_version</span><span class="sig">revocation_version() : String do &quot;march-revocation-v1&quot; end</span><a class="anchor-link" href="#fn-revocation_version" title="Link">#</a></div><div class="ib"></div></div>
