@@ -168,15 +168,11 @@ let test_deploy_over_ssh () =
   edit "      { factor: 10 }\n    end\n"
     "      { factor: 10 }\n    end\n\n    fn scale(n : Int, f : Int) : Int do\n      n * f\n    end\n";
   edit "n * env.factor" "scale(n, env.factor)";
-  (* A role body's own caps include the session it is handed, and the node
-     policy holds only the pool's written caps (plus the runner's), so
-     without this the gate refuses a hot patch of Back.serve_one with
-     `ERR cap_policy Session.Live`: specs/todos/2026-10-01-role-body-hot-patch-needs-session-live-in-policy.md. *)
-  let topo = Filename.concat proj "topology.toml" in
-  let text = read_file topo in
-  let granted = Str.replace_first (Str.regexp_string {|caps   = ["IO.Console"]|}) {|caps   = ["IO.Console", "Session.Live"]|} text in
-  if granted = text then Alcotest.fail "fixture: the back pool's caps line moved";
-  write_file topo granted;
+  (* The back pool keeps its written caps (IO.Console): a role body's own
+     caps include the session it is handed (Back.serve_one:
+     caps=IO.Console,Session.Live), a proof cap the node's policy does not
+     police, so the hot patches below need no grant
+     (specs/progress/2026-10-01-role-body-hot-patch-needs-session-live-in-policy.md). *)
   write_file (Filename.concat proj "topology.prod.toml")
     "[pool.back]\nhosts = [{ host = \"root@web-1\", labels = [\"db\"] }]\n\n[backend]\nkind = \"ssh\"\n";
   let log = Filename.concat dir "forge.log" in
