@@ -1,11 +1,36 @@
-# Incremental Compilation via the CAS — Plan
+# Compiler Observability and Incremental Compilation — Plan
 
 **Date:** 2026-10-04
-**Status:** Proposed (not yet measured; see Phase 0). Reviewed once against the source; see §16.
+**Status:** Proposed (not yet measured; see B0). Reviewed once against the source; see §17.
 
 ---
 
-## 1. Problem
+## 0. Why one plan
+
+Incremental compilation caches machine code keyed on what the compiler *believes* that code
+depends on. Every such belief is an invariant, and the project's bug history says invariants
+between passes are exactly what break: of ~1 200 `specs/progress/` entries, the largest classes
+are RC/Perceus leaks and double frees (~45), JIT parity (24), codegen repr/niche/TCO (~30),
+typecheck (13), stale caches (~13) and silent wrong values (~10). The September 2026 leak fixes all
+read the same way: two passes disagreed about ownership, a hand-written delta test caught it, and
+someone read IR to root-cause it.
+
+A per-unit object cache multiplies the cost of that class: a stale object is a silent miscompile
+that reproduces only with a particular edit history. So this plan is in two parts:
+
+- **Part A — Observability foundations.** A TIR verifier, source provenance that survives to the
+  binary, RC event tracing, pass bisection and reduction, a determinism oracle, and per-pass
+  metrics. Each pays for itself on today's bugs. Together they are the preconditions for trusting
+  a cache.
+- **Part B — Incremental compilation.** The CAS work, re-based so that every phase names the
+  foundation it consumes and the guard that catches it being wrong.
+
+Part A items are independent of each other and can start now. Part B's critical path is
+B0 ∥ B1 ∥ B3a → B2 → B3b → B4 → B5; the arrows from A into B are in §3.
+
+---
+
+## 1. Problem (incremental compilation)
 
 The CAS speeds up a compile only when nothing changed. Three caches exist today:
 
@@ -15,627 +40,532 @@ The CAS speeds up a compile only when nothing changed. Three caches exist today:
 | Post-TIR | `bin/main.ml` (~3310–3395) | concatenation of every SCC's Merkle `impl_hash` from `Pipeline.hash_module`, through `build_cas_key` | `llvm-emit` + clang only |
 | Runtime objects | `lib/cas/runtime_archive.ml` | runtime `*.{c,h}` digest + compiler identity + `cc --version` + exact cflags | recompiling the ~20-file C runtime |
 
-Any real edit (one character in one function body) misses both whole-program keys and pays the
-full pipeline: parse → desugar → resolve → stdlib-load → typecheck → lower → mono/fusion/defun/
-Perceus/drop/escape/opt → LLVM emission of the **whole** program → one clang invocation over one
-`.ll`. "Whole program" includes every monomorphised stdlib specialisation; the `--compile-so`
-manifest for `examples/topology_app` lists ~13 000 functions.
+Any real edit misses both whole-program keys and pays the full pipeline: parse → desugar →
+resolve → stdlib-load → typecheck → lower → mono/fusion/defun/Perceus/drop/escape/opt → LLVM
+emission of the **whole** program (every monomorphised stdlib specialisation; `examples/topology_app`'s
+`--compile-so` manifest lists ~13 000 functions) → one clang invocation over one `.ll`.
 
-`Pipeline.compile_scc` (`lib/cas/pipeline.ml`) is a tested per-SCC cache that nothing in the
-driver calls. Its doc comment names the blocker: codegen emits one LLVM module and links one
-binary, so there is no per-SCC artifact to store or serve. This plan does **not** revive
-`compile_scc`: its key is the transitive Merkle hash, which §6 explains is the wrong key for
-object files.
+`Pipeline.compile_scc` (`lib/cas/pipeline.ml`) is a tested per-SCC cache nothing calls. Its doc
+comment names the blocker: codegen emits one LLVM module and links one binary. This plan does
+**not** revive it; its key is the transitive Merkle hash, which §10 explains is wrong for objects.
 
-### Terms used below
+### Terms
+- **Symbol**: the LLVM function name a TIR `fn_def` is emitted under.
+- **`impl_hash`**: `Hash.hash_fn_def`'s hash of signature + body, alpha-normalised locals,
+  callees referenced **by name**.
+- **Merkle `impl_hash`**: `Pipeline.hash_module`'s fold with callees' Merkle hashes and the
+  type-layout closure. Computed on `pipe.Contract_pipeline.final`, i.e. **post-optimisation**
+  TIR (`bin/main.ml:3313`).
+- **Unit**: a set of `fn_def`s emitted into one `.ll` / compiled to one `.o` (B3).
+- **Provenance table**: the side table A2 introduces, `fn_name → origin` (TIR has no spans).
 
-- **Symbol**: the LLVM function name a TIR `fn_def` is emitted under (`fn_name` after mono/defun).
-- **`impl_hash`**: `Hash.hash_fn_def`'s hash of signature + body, alpha-normalised locals
-  (`Serialize`), callees referenced **by name**.
-- **Merkle `impl_hash`**: `Pipeline.hash_module`'s fold of a definition's `impl_hash` with its
-  callees' Merkle hashes and its transitive type-layout closure. Keys the post-TIR cache.
-  Computed on `pipe.Contract_pipeline.final`, i.e. **post-optimisation** TIR
-  (`bin/main.ml:3313`, after `Opt.run` / `Native_map_inline` / `Hof_spec` in
-  `contract_pipeline.ml:222–246`).
-- **Unit**: a set of `fn_def`s emitted into one `.ll` / compiled to one `.o` (Phase 3).
+## 2. Goals and non-goals
 
-## 2. Goal and non-goals
+**Goals.**
+1. A compiler bug that is an inter-pass invariant violation is reported at the pass that violated
+   it, naming the function, not three stages later as a wrong value or a leak delta.
+2. A compiled crash, leak or divergence names the March source line and the passes that produced
+   the code, without reading IR.
+3. After editing one function, the native `--compile` path re-emits and re-compiles roughly the
+   unit containing it, then links. A cached object is never used when a clean build would have
+   produced different machine code for it.
 
-**Goal.** After editing one function, the native `--compile` path re-emits and re-compiles
-approximately the unit containing that function, then links. A cached object is never used when a
-clean build would have produced different machine code for it.
+**Non-goals.**
+- WASM, JS, cross-compiled and `--compile-so`/`--hot-reload` builds keep the monolithic path
+  (same reasons as `Runtime_archive`'s eligibility check, `bin/main.ml` ~4039–4046). HCR
+  sidecars are therefore out of scope.
+- Windows (nothing supports it today).
+- Incremental *type checking* of user modules (B6 sketches it; separate plan).
+- A TIR interpreter as a second oracle backend: considered and deferred, see §8.
 
-**Non-goals for this plan.**
-- WASM, JS, cross-compiled (`--target`) and `--compile-so` / `--hot-reload` builds keep today's
-  monolithic path, for the same reasons `Runtime_archive`'s eligibility check excludes them
-  (`bin/main.ml` ~4039–4046): per-invocation `-D`s and sysroots change how objects compile.
-  Consequently the `.hcr_manifest` / `.schemas.json` sidecars (`cas.ml` ~325) are out of scope.
-- Windows. Nothing in `bin/` or `lib/cas/` supports it today; this plan doesn't add it.
-- Incremental *type checking* of user modules. Phase 6 sketches it; it needs its own plan.
-- The REPL/JIT fragment emitters (`Llvm_repl`). They already emit per-fragment modules and are
-  not on the `--compile` path, though Phase 1's naming change touches them (§5.2).
+## 3. Dependency map
 
-## 3. Phase overview
-
-| Phase | Deliverable | Depends on | Can ship alone? |
-|---|---|---|---|
-| 0 | `scripts/compile-time-bench.sh` + measured baseline | — | yes |
-| 1 | Deterministic symbols and hashes; determinism oracle in CI | — | yes (fixes an open P2 todo and spurious HCR diffs) |
-| 2 | `Pipeline.unit_keys`: non-cascading per-function object keys | 1 | yes (library + tests only) |
-| 3a | `Llvm_emit` refactored into shared + per-unit emission, `--codegen-units=1` byte-identical | — | yes (default `=1`) |
-| 3b | `--codegen-units=N>1` working (linkage, partition) | 1, 3a | yes (opt-in flag) |
-| 4 | Object store, parallel clang, link; `--incremental` opt-in | 2, 3b | yes (opt-in) |
-| 5 | ThinLTO for `--opt 2/3`; incremental becomes default | 4 | gated on benchmarks |
-| 6 | Front-end incrementality (separate plan) | 0 numbers | — |
-| 7 | Independent quick wins | — | each alone |
-
-Phases 0, 1, 3a and 7 can all start immediately and in parallel. 3a is the longest pole and
-doesn't depend on Phase 1; only 3b does. Phases 1–2 run **regardless** of the Phase 0 gate,
-because Phase 1 is also the fix for the open HCR P2 todo.
-
----
-
-## 4. Phase 0 — Measure before building
-
-Nothing in this plan has been timed yet; the ordering below rests on reading the code.
-`--timings` already exists: `stamp` calls in `bin/main.ml` (`parse`, `desugar`,
-`resolve-imports`, `stdlib-load`, `typecheck`, `lower`, `llvm-emit`, `clang`) **and** the finer
-ones inside `Contract_pipeline.run` (`mono`, `fusion`, `defun`, `perceus`, `drop`, `escape`,
-`opt`; `contract_pipeline.ml:88–249`). The work is a harness, not instrumentation.
-
-### Deliverables
-- `scripts/compile-time-bench.sh [--opt N] [--corpus small|bench|topology|all]`:
-  - runs under a **private `HOME`** (same rule as the oracles: `~/.cache/march` carries
-    worktree-specific spans), so cold/warm is under the script's control;
-  - corpus: one tiny program (`test/snapshots/src/` pick), `bench/tree_transform.march`,
-    `examples/topology_app` (via `MARCH_LIB_PATH`);
-  - scenarios per program, each run 3× taking the median:
-    1. cold (empty `HOME`, empty `.march/cas`);
-    2. warm, no change (expects a source-level hit);
-    3. warm, comment-only edit (expects a post-TIR hit: same TIR, different source digest);
-    4. warm, leaf function body edit;
-    5. warm, signature edit on a function with many callers;
-    6. warm, record field added to a widely used type.
-  - prints a table: scenario × stage, in seconds, grouped into three buckets: **front end**
-    (`parse`…`typecheck`), **whole-program TIR** (`lower`…`opt`), **back end**
-    (`llvm-emit` + `clang`). Phase 6 attacks the first two buckets differently, so they are
-    reported separately.
-- `specs/benchmarks.md` gains a "compile time" row pointing at the script.
-- Results committed once as `specs/plans/incremental-codegen-cas-baseline.md` (a dated
-  snapshot, not a hand-maintained running count).
-
-### Gate
-If, for scenarios 4–6 at `--opt 2`, the **back end** bucket is less than half of wall time,
-re-order: do Phase 6 before Phases 3b–5. Phases 1, 2 and 3a proceed either way.
-
-### Effort
-~1 day.
-
----
-
-## 5. Phase 1 — Make symbols and hashes deterministic
-
-A finer-grained cache is only as sound as its keys. Two known sources of drift exist, and the
-second is wider than one counter.
-
-### 5.1 Cold vs. warm stdlib cache changes specialisations
-`specs/todos/2026-10-01-cold-stdlib-cache-changes-specializations.md`: the same source compiled
-with a cold then a warm `~/.cache/march` emits different TIR (one more unspecialised function and
-one more `$lam` on the cold path). The todo already localises it to the `stdlib_tcenv_cli_*.bin`
-round-trip and gives a repro; its acceptance text (byte-identical `--emit-llvm` cold vs. warm) is
-the Phase 1 acceptance for this item. Reuse it rather than restating.
-
-### 5.2 Counter-derived symbols — every counter that reaches a name
-The driver's own HCR hashing comment (`bin/main.ml:947–951`) lists the problem: symbols like
-`$lam39788$apply$4781` carry **two** global counters, and `$jp17442`, `$t12`, `_i<n>`, `'_<n>`
-appear inside bodies. Every generator whose output can reach a symbol or a `TCon` name must become
-structural. Inventory (verified):
-
-| Name shape | Generator | Counter | Scope |
-|---|---|---|---|
-| `$lam<n>` | `Lower_expr` (`lower_expr.ml:900`, `fresh_name "lam"`) | `Lower_state._lower_counter` (`lower_state.ml:37–41`), reset once per `lower_module` | the lambda's own `fn_name`; prefix of the apply fn |
-| `<lam>$apply$<n>`, `$Clo_<lam>$<n>` | `Defun` via `Tir_names.apply_fn_name`/`clo_struct_name` (`defun.ml:518–519, 585, 590`) | `Defun.lambda_counter` (`defun.ml:418–419`), never reset across calls | symbol + TCon |
-| `$jp<n>` | `Join_points` (`join_points.ml:140`) | module-level, never reset | local labels today; check it never reaches a symbol |
-| `$fused_<p>_<n>` | `Fusion` (`fusion.ml:35–38`, `gensym_ctr`) | module-level, never reset | symbol |
-| `<g>$hspec$<n>` | `Hof_spec` (`hof_spec.ml:184`) | per-run `st.counter` | symbol |
-| `$V__<n>` | `Mono.mangle_ty` (`mono.ml:167, 1129`, e.g. `Map.key_hash$V__4370`) | typecheck fresh-var ids | symbol |
-| `$t<n>`, `_i<n>` | lower / inliner temps | lowering counter | locals only; `Serialize` alpha-normalises these, so hash-stable; not symbols |
-
-`Trmc` (`trmc.ml:391–395`) already resets its counter per module; that is still order-dependent,
-so the fix everywhere is **structural naming**, not resetting.
-
-Why this can't be fixed inside the hash alone: `Serialize` could normalise the numbers away so
-hashes stay stable, but a cached `.o` **binds to callees by symbol**. If an object compiled when a
-helper was `$lam39788$apply$4781` is reused in a build where it is `$lam39790$apply$4782`, the
-link fails with an undefined symbol (loud) or, where another function took the old name, binds to
-the **wrong function** (silent). The symbol itself must be stable.
-
-**Design: host-scoped ordinals, minted at lowering.**
-- `Lower_expr` names a lambda `<host>$lam<i>` where `host` is the enclosing top-level
-  `fn_name` and `i` is the lambda's index in a deterministic traversal of `host`'s body. Nested
-  lambdas: `<host>$lam<i>$lam<j>`. The name is now unique by construction.
-- `Defun` keeps the **lambda's own name** as the apply prefix (`<lam>$apply$0`,
-  `$Clo_<lam>$0`), so `lam_uid` degenerates to a constant and can be removed. Keeping the
-  lambda's name as the prefix matters: `Tir_names.apply_fn_base` (`tir_names.ml:151–170`,
-  splits at the FIRST `$apply$`) must keep returning the lambda's source-level self-binding
-  name, because `llvm_emit_call.ml:830–833` compares it against the callee variable to keep a
-  self-tail-call free of Float temp-box releases (a measured 20k-depth stack overflow otherwise).
-  A scheme that put the *host* in the prefix would silently break that.
-- `Fusion` names fused helpers after the two fused callees plus their call-site ordinal within
-  the host; `Hof_spec` names specialisations after `g` plus the specialised argument's symbol;
-  `Mono` derives `$V_` suffixes from the type structure (or canonical position in the
-  specialisation's type-argument list), not from fresh-var ids.
-- The REPL/JIT persists and restores `Defun.lambda_counter` in the `.names` file
-  (`lib/jit/repl_jit.ml:1657–1767`, `lambda_counter=N` sentinel) and `test/test_snapshots.ml`
-  resets it (`49–55, 187, 197`). With structural names a fragment needs only a per-fragment host
-  name (`$repl<n>`) as the `<host>` prefix; remove the counter persistence together with the
-  `Lower_state.reset_counter` interplay (`lower_state.ml:30–36`).
-
-**Consumers to update** (grep for `$apply$`, `$Clo_`, `lam_uid`, `apply_fn_base`,
-`$lam`): `drop.ml:709–722` (reconstructs `apply` name from `$Clo_` name: int after LAST `$` —
-still valid with ordinal `0`), `borrow.ml:679, 1064`, `perceus.ml:702, 772`,
-`perceus_core.ml:886`, `known_call.ml:41, 176`, `alloc_contract.ml:412, 461`,
-`hof_spec.ml:287`, `llvm_emit_call.ml:194, 244, 364, 545, 830`, `llvm_toplevel.ml:200, 222`,
-`native_map_inline.ml:108`, `llvm_emit_alloc.ml:46`, `js_emit.ml:6`, `llvm_emit.ml:2364–2374`
-(comment saying the host is not recoverable from the name; after this change it is),
-`test/test_codegen.ml:130–144, 5700–5785, 15066–15243`, `test/snapshots/`.
-
-Also update `hr_slot_hashes`'s `counter_re` canonicaliser (`bin/main.ml:982`): with
-structural names it becomes a no-op and can be retired, which is itself a check that nothing
-counter-shaped is left.
-
-### 5.3 Determinism oracle
-New `scripts/determinism-oracle.sh` and a CI job:
-- compile `test/snapshots/src/*.march`, `bench/*.march`, `examples/topology_app` twice with
-  `--emit-llvm`, under **two different private `HOME`s**, cold then warm, from two different
-  cwds;
-- compare the set of `(symbol, impl_hash, sig_hash)` triples via a new `--dump-impl-hashes`
-  driver flag (one line per fn), and compare the `.ll` text. Expected diffs: none in the IR
-  except the embedded source path (normalise it). The CAS *store location* differs by cwd
-  (`Cas.create ~project_root:(Sys.getcwd ())`); that's not an IR diff and isn't compared;
-- **prove it red first**: reintroduce one global counter (or add a lambda to a stdlib module
-  in one of the two runs) and check the diff is reported. Record that run in the PR
-  description. CLAUDE.md's oracle rule exists because two of three existing oracles shipped
-  broken.
-
-### Acceptance
-- The P2 todo's repro produces identical manifests (13376 = 13376) and identical `--emit-llvm`.
-- Determinism oracle green on CI, with a recorded red run.
-- `scripts/ir-oracle.sh check` against a pre-change baseline shows **only** symbol renames;
-  any other diff is a bug.
-- Full test suite; `run_snapshots` regenerated and diffed (renames only).
-- `forge deploy hot` manifest diff on `examples/topology_app` between a cold and a warm build
-  lists zero spurious functions.
-
-### Effort
-~1 week. Six generators, many consumers, plus the REPL persistence removal.
-
----
-
-## 6. Phase 2 — A per-function object key that doesn't cascade
-
-### Why `hash_module`'s key can't be reused
-`hash_module` folds each callee's **full** Merkle hash into its caller's. That's exactly right
-for the whole-binary key (any transitive change must miss) and must stay. For object files it
-makes almost every edit a near-total miss: a leaf body change propagates up to `main`. The HCR
-slot-identity code already hit this and uses the non-transitive `Hash.hash_fn_def` instead
-(comment at `bin/main.ml` ~3320).
-
-### What a function's machine code actually depends on
-1. **Its own post-optimisation TIR body**, with real symbol names. `hash_module` runs on
-   post-opt TIR, so anything the *TIR-level* optimiser inlined is already in this body.
-   (LLVM-level cross-function inlining is separate; see Phase 5.)
-2. For each **callee**, its symbol and its **ABI**, which is more than `sig_hash` covers.
-   `Serialize.write_fn_sig` (`serialize.ml:371–375`) is name + param types + return type only.
-   Call sites also consult `native_vec_params` (whether a param gets a native `<N x T>` TCO
-   slot: derived from the callee's **body** by `native_vec_param_idxs`, and **disabled for
-   mutual-TCO members**, `llvm_toplevel.ml:1183–1189`), `zero_arg_fns` (param count, covered),
-   `is_apply_fn` (name-derived, covered), and `top_fn_param_tys` coercions (types, covered).
-   Define
-   `abi_hash fd = BLAKE3(sig_hash ++ native_vec_param_idxs fd ++ in_mutual_tco_group fd)`
-   and key callers on `(symbol, abi_hash)`.
-3. **Type layouts** it references, transitively: `type_closure_hashes` already computes this.
-4. **Program-wide emitter inputs** — see `globals_digest` below.
-5. **Toolchain**: `Cas.compiler_identity`, `Runtime_archive.cc_identity`, the exact cflags
-   (same list `Runtime_archive` already keys on).
-
-### Design
 ```
-Pipeline.unit_keys :
-  tir_module -> globals_digest:string -> partition:(fn_def -> unit_id)
-  -> (unit_id * string (* unit key *) * fn_def list) list
+A1 TIR verifier ─────────────┬──► B2 unit keys (verifier runs before hashing)
+                             ├──► B3a emitter refactor (verifier on every pass under test)
+                             └──► B4 verify mode (TIR-level check on cache hits)
+A2 provenance table ─────────┬──► B1 structural names (host of a lambda = provenance)
+                             ├──► B3b partition by source module
+                             └──► B4 .meta sidecars, build manifest in the binary
+A3 RC tracing ───────────────┬──► B4/B5 differential test triage
+                             └──► today's leak hunts
+A4 bisection + reducer ──────┬──► B4 edit-sequence differential test (minimal repros)
+                             └──► today's oracle divergences
+A5 determinism oracle ───────┬──► B1 acceptance
+                             └──► B2 (tm_fns order question, §10)
+A6 metrics + idempotence ────┬──► B0 bench harness (same stamps)
+                             └──► B3a byte-identity (counts as a second signal)
 ```
-- `fn_key fd = BLAKE3(impl_hash fd ++ sorted [callee symbol ++ callee abi_hash] ++
-  sorted type-closure hashes)`.
-- `unit_key = BLAKE3(sorted member fn_keys ++ globals_digest ++ "unit-format-v1")`.
-  (No `Serialize` version bump is needed; the literal tag versions the key. Note
-  `Serialize`'s "format version 2" exists only in its doc comment, not in the bytes.)
-- **`globals_digest`**, computed once per build in the driver, **starts coarse**: every unit's
-  key includes all of it, so a change to any program-wide input misses every unit. That is safe
-  and still the main win, since function bodies change far more often than these. It is the
-  BLAKE3 of:
-  - every `emit_module` argument (`llvm_toplevel.ml:976–985`): `fast_math`, `pmap_threshold`,
-    `target`, `hot_reload`, `impl_hashes`, `remote_impl_hashes`, `remote_sig_hashes`,
-    `emit_main`, `cap_attrib`, `cap_decls`, `k_table`;
-  - `Serialize.serialize_type_def` of **all** `tm_types`, in order (feeds `type_defs`,
-    `collision_set` — which changes constructor **tags** for same-short-name types and so
-    affects every match/alloc — `poly_ctors`, `type_params`, `field_map`, `ctor_info`, and the
-    constructor descriptor, see below). Yes: adding any type misses every unit under the coarse
-    digest. Accepted for v1;
-  - `tm_externs` (→ `extern_map`, `blocking_externs`, `raises_externs`), `tm_tests`,
-    `tm_exports`, `tm_io_fns`, `tm_name`;
-  - the **order of `tm_fns` names**: `unqualified_fns` is first-registration-wins
-    (`llvm_toplevel.ml:1136–1160`) and `main` is last-wins (`1377–1385`). This order dependence
-    is itself a determinism hazard; Phase 1's oracle will show whether it is stable. If not,
-    sort at registration;
-  - `build_cas_key`'s flag list **verbatim** (opt level, `pmt`, `dbg`, `sanitize=`, `cpu:`,
-    `capstrip`/`capsandbox`/`capstrict`, `spk:`, `pbase:`, `pexpand:`, …), plus
-    **`MARCH_NO_INLINE_RC`**, which gates the post-emission `maybe_inline_rc` text rewrite
-    (`bin/main.ml:1054–1059`, `llvm_rc_inline.ml:51–54`) and is **not** in `codegen_cas_tags`
-    today — a latent whole-binary-cache bug; file a todo and fix it independently (§11.4);
-  - module-level emitter state outside `ctx`: `Llvm_toplevel.pin_main` (already a CAS tag),
-    `Llvm_builtins.called_syms` (program-wide union driving cap markers,
-    `llvm_toplevel.ml:1695–1720`; lives in the shared unit, see §7).
-- The per-unit dedup tables (`emitted_eq_fns`, `emitted_dispatch_fns`, `emitted_wraps`,
-  `unknown_decls`, `str_ctr`, `ctor_desc_ids`, `rec_shape_globals`, `call_tag_globals`) are
-  genuinely per-unit after the split and fall out of the unit's own bodies; they are not in the
-  digest.
-- **Constructor descriptors are already per-unit.** `Llvm_ctor_desc.assign_ids`
-  (`llvm_ctor_desc.ml:80–96`) assigns ids over `ctx.type_defs` in *declaration* order, all at
-  once, and emits a `private` descriptor string that the runtime interns by content
-  (`march_ctor_table_ensure`). Each unit emitting its own descriptor is correct and already
-  supported ("once per compilation unit", its doc comment). Its content depends on all
-  `type_defs` + tags, which the coarse digest covers.
 
-### Tests (`test/test_cas.ml`, extended)
-- Edit a leaf's body → only the leaf's `fn_key` changes.
-- Edit a leaf's param type → leaf's and each direct caller's `fn_key` change; callers-of-callers
-  unchanged.
-- Make a leaf eligible for a native vector TCO slot → its `abi_hash` and its callers' keys change.
-- Edit a record layout → every transitive user changes; non-users unchanged.
-- Change `fast_math` → every `unit_key` changes (coarse globals).
-- Mutual-recursion group: editing one member changes the whole group's keys.
-
-### Effort
-~3–4 days.
+Everything in A ships alone and is useful alone. Nothing in B after B0 should land before the A
+item it consumes.
 
 ---
 
-## 7. Phase 3 — Split LLVM emission into units
+# Part A — Observability foundations
 
-### Current structure
-`Llvm_emit.emit_module` → `Llvm_toplevel.emit_module ~emit_expr` (`llvm_toplevel.ml:976`)
-builds one `Llvm_ctx.ctx` with one `buf`, one `preamble` and one `extra_fns`, runs a pre-pass
-over all functions (fills `top_fns`, `top_fn_*`, `native_vec_params`, `unqualified_fns`,
-mutual-TCO groups via `Llvm_tco.find_mutual_tco_groups ctx m.tm_fns`, `llvm_tco.ml:409`), emits
-every function into `buf`, then finalises program-wide pieces and concatenates. User functions
-are emitted with default (external) linkage (`hidden` only under `compile_so`,
-`llvm_toplevel.ml:258–268`), so cross-unit calls need **no linkage change**.
+## 4. A1 — TIR verifier
 
-### What must live together or be made link-safe (verified)
-- **SCCs** and **mutual-TCO groups**: atomic; the group's tag slot and loop label are emitted
-  together, and group membership is an ABI input (§6). The shared pre-pass computes the groups
-  once and publishes membership to every unit; units never recompute them.
-- **On-demand helpers with external linkage** — these would be *duplicate-symbol link errors*
-  if two units both needed one:
-  - `$clo_wrap` trampolines: `define ptr @%s(…) alwaysinline` (`llvm_calls.ml:465–483`),
-    deduped per module via `emitted_wraps` into `extra_fns`;
-  - structural equality `define i64 @__eq$…` (`llvm_eq.ml:126, 186, 345, 546`, `emitted_eq_fns`);
-  - interface dispatch `define … @__march_ifdispatch$…` (`llvm_dispatch.ml:60`,
-    `emitted_dispatch_fns`).
-  Under `N>1` every helper in `extra_fns` is emitted **`linkonce_odr`** (identical bodies by
-  construction, so the linker keeps one). Under `N=1` linkage stays as today for byte-identity.
-- **`internal` helpers** (`Llvm_rc_inline`'s `define internal … alwaysinline` twins, string
-  literal cells `@.str<n>`/`@.strcell<n>` which are `private`): duplicated per unit; fine.
-- **Aliases** `__migrate_<Actor>` / `__migrate_msg_<Actor>` (`llvm_toplevel.ml:1222–1280`): an
-  LLVM alias cannot target a declaration, so they are emitted in the aliasee's unit.
-- **Atom show-table.** `atom_names` is filled during emission (`llvm_emit.ml:371`,
-  `llvm_case.ml:945`) and `@march_atom_to_string` / `@march_atom_name_or_null` are emitted
-  **`internal`** at finalisation (`llvm_toplevel.ml:573, 596`). Under units, `Show$Atom.show`
-  would bind to its own unit's partial table and render `:<atom>` for any literal from another
-  unit. The runtime namer list (`runtime/march_runtime.c` ~13426–13440) serves only the logger.
-  Design: the **shared unit** scans all `fn_def`s for atom literals (TIR `LitAtom` + case tags)
-  up front and defines `@march_atom_to_string` with **external** linkage; units `declare` it.
-  The `buffer_contains ctx.extra_fns "define internal ptr @march_atom_to_string"` check
-  (`llvm_toplevel.ml:541`) goes away with it.
-- **`@.rpc_impl_<i>`** (indexed by position in `tm_fns`, `llvm_toplevel.ml:1355–1373`) and
-  `@.hr_hash<slot>`: program-wide, shared unit.
+**Problem.** No well-formedness checker exists for TIR; `grep invariant lib/tir/` finds comments.
+Passes trust each other. The tuple-destructure leak
+(`specs/progress/2026-09-30-compiled-tuple-destructure-leaks-moved-fields.md`) was Perceus
+treating a scrutinee as borrowed while codegen made the binders own the fields; nothing between
+them could say so.
 
-### Design
-Two emission entry points sharing `emit_expr`:
+**Design.** `lib/tir/tir_verify.ml`, `Tir_verify.check : stage:string -> tir_module -> error list`,
+called by `Contract_pipeline.run` after every pass when `--verify-tir` is set or
+`MARCH_VERIFY_TIR=1`, and **always** in the test drivers (`run_codegen`, `run_snapshots`,
+`test_oracle`). An error names the stage, the function, the construct and the invariant. Checks,
+in bug-yield order, each its own PR:
+
+1. **Scoping and references.** Every `AVar` is bound in scope; every `EApp` callee is in `tm_fns`
+   or `tm_externs`; `ADefRef` hashes resolve; no two `fn_def`s share a name.
+2. **Type consistency.** `EApp` argument types unify with the callee's `fn_params`; `ECase`
+   branches bind the constructor's arity; `EField` names exist in the record type; after mono, no
+   `TVar` reaches a position where codegen must pick a concrete repr (the
+   `Array.from_list$..$Float` wrong-value bug, `llvm_ctx.ml` `top_fn_param_tys` comment).
+3. **Ownership discipline (post-Perceus).** A linear check over TIR: every owned variable is
+   consumed exactly once on every path (`EDecRC`/`EFree`/moved into an alloc or call that
+   consumes); no use after consumption; `EReuse`/`EAllocHole` tokens consumed exactly once;
+   borrowed parameters (`Borrow`'s map) never dropped; scrutinee treatment matches what
+   `llvm_case.ml`'s `strip_scrut_decrc` arm will assume. This check would have caught the
+   September leaks at the Perceus stage.
+4. **Repr invariants (pre-codegen).** `k_table` niche/unboxed decisions are consistent with every
+   `EAlloc`/`ECase` on that type; `collision_set` tags agree across all uses.
+5. **Pass contracts.** Post-defun: no lambda-bearing `ELetRec`. Post-mono: no polymorphic
+   `fn_def`. Post-join-points: every `$jp` defined once. Post-escape: `EStackAlloc` values do not
+   escape (reuse `Escape`'s own analysis in checking mode).
+
+**Prove it red.** Each check lands with a test that feeds it a hand-broken TIR (e.g. the
+pre-fix Perceus output from the tuple leak, reconstructed) and asserts the error.
+
+**Cost.** O(program) per pass; under `--verify-tir` only. Expect ~1 500 lines across the five.
+
+**Effort.** 1–2 sessions per check; ownership (3) is the largest.
+
+## 5. A2 — Source provenance that survives to the binary
+
+**Problem.** TIR `fn_def` has **no span field** (`tir.ml`); the LLVM emitters produce zero
+`!dbg`/`DILocation` metadata. A compiled crash, an ASan report or a `perf` profile names
+`Foo.bar$Int$String+0x4c`; mapping it back is manual. `js_emit.ml` already carries an `fn_lines`
+side table for exactly this reason.
+
+**Design: a provenance side table, not a TIR field** (so TIR snapshots don't churn, the same
+reasoning as the `fn_kind` printer caveat in `tir.ml`).
+
+```
+Provenance.t : (string, origin) Hashtbl.t      (* fn_name → origin *)
+origin = {
+  src_span : span option;        (* from lowering, for user and stdlib fns *)
+  host     : string option;      (* enclosing top-level fn for $lam/apply/jp/fused helpers *)
+  derived  : derivation list;    (* Mono of (generic, tyargs) | Fusion of (f, g) |
+                                    HofSpec of (g, arg) | Defun of lam | Inlined_from fn | ... *)
+  passes   : string list;        (* passes that rewrote this fn's body *)
+}
+```
+- `Lower` seeds `src_span`; every pass that creates or renames a function records a
+  `derivation` and its own name under `passes`. The table travels in `Contract_pipeline`'s
+  state alongside `k_table`.
+- **Consumers:**
+  - **`DILocation` under `-g`**: `Llvm_toplevel.emit_fn` emits `!dbg` on the `define` from
+    `src_span` (or the host's span for synthetic fns), and per-instruction `!dbg` only where TIR
+    gives a position (initially: function granularity, which is already enough for ASan and
+    `perf` to name March functions and lines). Gated on the existing `dbg` CAS tag.
+  - **`!march.provenance` named metadata** on every function: the `derived` chain as a string.
+    `--emit-llvm` output then explains where every `$fused_*`/`$hspec`/`$lam` came from.
+  - **`--explain-fn NAME`**: prints the origin and, with `--dump-phases`, the body at each pass.
+  - **Build manifest section** (`.march_build`, read the way `forge cap inspect` reads sections):
+    compiler identity, `build_cas_key` flags, source hash, and (after B4) unit ids and keys. Every
+    bug report becomes self-describing, and B4's verify mode can confirm a binary was built from
+    the cache entries it claims.
+- **Keeping spans attached.** Mono, fusion, defun and inlining create functions without spans
+  today; each records `host`/`derived` instead, so a synthetic function always has a span to
+  borrow from. The determinism oracle (A5) also diffs the provenance table, which catches a pass
+  that forgets to record.
+
+**Effort.** Table + lowering seed + `DILocation`: 2 sessions. Manifest section: 1 session.
+Recording in each pass: small, folded into B1's pass-by-pass work.
+
+## 6. A3 — RC event tracing and a checked debug runtime
+
+**Problem.** `march_live_allocs` / `str_alloc_count` / `obj_alloc_count` (`march_runtime.c`
+~138–233) say *that* and *how many*; not *which object* or *who held the last reference*.
+
+**Design.**
+- `MARCH_RC_TRACE=1` at **compile** time selects a runtime build (through `Runtime_archive`,
+  which keys on cflags, so it's a separate cached object set) where `march_incrc`/`march_decrc`/
+  `march_alloc` take a **site id**. The emitter passes one under this mode only: a dense id into
+  a table of `(fn symbol, ordinal within fn)` emitted into the shared unit. The runtime keeps a
+  per-object ring of `(event, site, thread)` and, at exit (or on `SIGUSR1`), prints every live
+  object with its type tag, allocation site and full RC history, and every object whose count
+  went negative. Release builds are byte-identical to today (no mode, no extra arguments).
+- **Checked runtime asserts**, on in `MARCH_SANITIZE` and trace builds: `march_decrc` on a count
+  of 0 aborts with the object's history; `march_free` on a live object likewise; `EAllocHole`
+  fills check the slot is still null.
+- Test integration: the existing "delta: N" tests gain `MARCH_RC_TRACE` on failure and attach the
+  live-object dump to the alcotest failure message, so the first run of a failing leak test says
+  which objects.
+
+**Effort.** Runtime side 1 session; emitter side (site ids) 1 session; test integration ½.
+
+## 7. A4 — Pass bisection and program reduction
+
+**Problem.** The differential oracle (`test/test_oracle.ml`, ~1 090 generated programs,
+interpreter vs compiled) reports "X vs Y" with the whole program; no shrinker exists; which pass
+is wrong is a manual bisect.
+
+**Design.**
+- **`march --bisect-pass FILE`**: re-runs the compile disabling one optional pass at a time, in
+  pipeline order, comparing compiled output against the interpreter (or against a `--expect`
+  file), and reports the first pass whose removal fixes the output. The switches mostly exist
+  (`MARCH_NO_HOF_SPEC`, `MARCH_NO_UNBOX`, `MARCH_NO_TRMC`, `MARCH_NO_INLINE_RC`); add the missing
+  ones (fusion, join points, single-use inline, escape, native-map inline) under the same naming
+  so the set is enumerable from one list in `Contract_pipeline`. Then run A1's verifier at the
+  reported pass boundary for the invariant.
+- **`march --reduce FILE --oracle CMD`**: delta-debugging on the **AST** (drop a top-level
+  declaration; replace an expression with a literal of its inferred type; inline a `let`; drop a
+  match arm whose constructor is unused) while `CMD` still fails. Reuses the parser, desugarer
+  and typechecker to keep candidates well-typed; stdlib PBT already has integrated shrinking and
+  the heuristics transfer. Output: a minimal `.march` that still exhibits the divergence.
+- `test_oracle` calls both on failure and attaches the minimal program and blamed pass to the
+  failure.
+
+**Effort.** Bisect: 1 session. Reducer: 2–3 sessions.
+
+## 8. Deferred: a TIR interpreter
+
+A TIR interpreter would split the oracle in two (AST-eval vs TIR-eval isolates lowering through
+Perceus; TIR-eval vs compiled isolates codegen) and is the most precise localiser for silent wrong
+values. It is also a third backend to keep in parity; the JIT parity burden is already 24 progress
+entries. Decision: **defer** until A1 + A4 have run for a quarter. If pass bisection plus the
+verifier leave a class of divergences still un-localised, revisit with that evidence.
+
+## 9. A5 — Determinism oracle, and A6 — metrics and idempotence
+
+**A5.** `scripts/determinism-oracle.sh` + CI job: compile `test/snapshots/src/*.march`,
+`bench/*.march`, `examples/topology_app` twice with `--emit-llvm` under two private `HOME`s, cold
+then warm, from two cwds; compare `(symbol, impl_hash, sig_hash)` triples via a new
+`--dump-impl-hashes` flag, the provenance table (A2), and the `.ll` text with the source path
+normalised. Store location differs by cwd (`Cas.create ~project_root:(Sys.getcwd ())`) and is
+not compared. **Prove it red first** (add a lambda to a stdlib module in one run). Non-determinism
+is itself a bug and masks others; B1 needs this green.
+
+**A6.** Per-pass counts in `--timings` output (functions, allocs, `EIncRC`/`EDecRC`, reuse
+tokens, join points) so a fix that adds 400 incrcs elsewhere is a number in the log, not a perf
+regression weeks later; pin a handful in the snapshot corpus. An **idempotence test**: run `Opt`
+and `Perceus` twice over the snapshot corpus and assert the second run is a no-op, since
+non-idempotent passes are a classic source of order-dependent bugs. Both ~½ session.
+
+---
+
+# Part B — Incremental compilation
+
+## 10. B0 — Measure before building
+
+`--timings` exists (`stamp` in `bin/main.ml` and the finer `mono`/`fusion`/`defun`/`perceus`/
+`drop`/`escape`/`opt` stamps in `contract_pipeline.ml:88–249`); A6 adds counts to the same lines.
+
+- `scripts/compile-time-bench.sh [--opt N] [--corpus small|bench|topology|all]`, under a private
+  `HOME`; corpus: a `test/snapshots/src/` pick, `bench/tree_transform.march`,
+  `examples/topology_app`; scenarios, 3× median: cold; warm no change; comment-only edit; leaf
+  body edit; signature edit with many callers; record field added to a common type.
+- Three reported buckets: **front end** (`parse`…`typecheck`), **whole-program TIR**
+  (`lower`…`opt`), **back end** (`llvm-emit` + `clang`).
+- Results committed once as `specs/plans/incremental-codegen-cas-baseline.md`; a "compile time"
+  row in `specs/benchmarks.md`.
+
+**Gate.** If for the edit scenarios at `--opt 2` the back end is under half of wall time,
+re-order: B6 before B3b–B5. B1, B2, B3a and all of Part A proceed either way.
+
+## 11. B1 — Deterministic symbols (every counter that reaches a name)
+
+The driver's HCR hashing comment (`bin/main.ml:947–951`) lists the problem: symbols like
+`$lam39788$apply$4781` carry two global counters. Inventory (verified):
+
+| Name shape | Generator | Counter |
+|---|---|---|
+| `$lam<n>` | `Lower_expr` (`lower_expr.ml:900`) | `Lower_state._lower_counter`, reset per `lower_module` |
+| `<lam>$apply$<n>`, `$Clo_<lam>$<n>` | `Defun` via `Tir_names` (`defun.ml:518–519, 585, 590`) | `Defun.lambda_counter`, never reset |
+| `$fused_<p>_<n>` | `Fusion` (`fusion.ml:35–38`) | module-level, never reset |
+| `<g>$hspec$<n>` | `Hof_spec` (`hof_spec.ml:184`) | per-run `st.counter` |
+| `$V__<n>` | `Mono.mangle_ty` (`mono.ml:167, 1129`) | typecheck fresh-var ids |
+| `$jp<n>` | `Join_points` (`join_points.ml:140`) | module-level; check it never reaches a symbol |
+| `$t<n>`, `_i<n>` | lowering/inliner temps | locals only; alpha-normalised by `Serialize`; not symbols |
+
+Why the hash can't absorb this: a cached `.o` binds to callees **by symbol**; a renumbered helper
+is an undefined symbol (loud) or the wrong function (silent).
+
+**Design: host-scoped ordinals, minted at lowering, recorded in the provenance table (A2).**
+- `Lower_expr` names a lambda `<host>$lam<i>` (`i` = index in a deterministic traversal of the
+  host's body; nested → `<host>$lam<i>$lam<j>`) and records `host` in provenance.
+- `Defun` keeps the **lambda's own name** as the apply prefix (`<lam>$apply$0`, `$Clo_<lam>$0`);
+  `lam_uid` degenerates and is removed. The prefix must stay the lambda's self-binding name:
+  `Tir_names.apply_fn_base` (`tir_names.ml:151–170`) feeds `llvm_emit_call.ml:830–833`'s
+  self-tail-call recognition (a measured 20k-depth stack overflow otherwise).
+- `Fusion`: name from the fused callees plus call-site ordinal in the host. `Hof_spec`: from `g`
+  plus the specialised argument's symbol. `Mono`: `$V_` suffix from canonical position in the
+  specialisation's type-argument list. Each records a `derived` entry.
+- REPL/JIT: counter persistence in `lib/jit/repl_jit.ml:1657–1767` (`lambda_counter=N`
+  sentinel) and `test/test_snapshots.ml:49–55, 187, 197` go away; a fragment's host is
+  `$repl<n>`; remove the `Lower_state.reset_counter` interplay (`lower_state.ml:30–36`).
+- **Consumers** (grep `$apply$`, `$Clo_`, `lam_uid`, `apply_fn_base`, `$lam`): `drop.ml:709–722`,
+  `borrow.ml:679, 1064`, `perceus.ml:702, 772`, `perceus_core.ml:886`, `known_call.ml:41, 176`,
+  `alloc_contract.ml:412, 461`, `hof_spec.ml:287`, `llvm_emit_call.ml:194, 244, 364, 545, 830`,
+  `llvm_toplevel.ml:200, 222`, `native_map_inline.ml:108`, `llvm_emit_alloc.ml:46`,
+  `js_emit.ml:6`, `llvm_emit.ml:2364–2374`, `test/test_codegen.ml:130–144, 5700–5785,
+  15066–15243`, `test/snapshots/`. Retire `hr_slot_hashes`'s `counter_re` (`bin/main.ml:982`):
+  it becoming a no-op is the check that nothing counter-shaped is left.
+- Also fix `specs/todos/2026-10-01-cold-stdlib-cache-changes-specializations.md` (cold vs warm
+  `stdlib_tcenv_cli_*.bin` emits different TIR); its repro and byte-identical `--emit-llvm`
+  acceptance are reused here.
+
+**Acceptance.** A5 green with a recorded red run; `ir-oracle` shows only renames; snapshots
+regenerated (renames only); the P2 repro gives identical manifests; `forge deploy hot` lists zero
+spurious functions between cold and warm builds.
+
+**Effort.** ~1 week.
+
+## 12. B2 — A per-function object key that doesn't cascade
+
+`hash_module` folds each callee's **full** Merkle hash into its caller's: right for the
+whole-binary key, wrong for objects (a leaf edit misses everything up to `main`; the HCR code
+already works around this at `bin/main.ml` ~3320).
+
+**A function's `.o` depends on:**
+1. its post-opt TIR body with real symbols (TIR-level inlining is already in it);
+2. each callee's symbol and **ABI**: `Serialize.write_fn_sig` (`serialize.ml:371–375`) is
+   name + param types + return type only, but call sites also read `native_vec_params`
+   (from the callee's **body**, `native_vec_param_idxs`, and **off for mutual-TCO members**,
+   `llvm_toplevel.ml:1183–1189`). Define
+   `abi_hash fd = BLAKE3(sig_hash ++ native_vec_param_idxs fd ++ in_mutual_tco_group fd)`;
+3. the transitive type-layout closure (`type_closure_hashes`);
+4. program-wide emitter inputs — `globals_digest` below;
+5. toolchain: `Cas.compiler_identity`, `Runtime_archive.cc_identity`, exact cflags.
+
+```
+Pipeline.unit_keys : tir_module -> globals_digest:string -> partition:(fn_def -> unit_id)
+                     -> (unit_id * string * fn_def list) list
+fn_key fd  = BLAKE3(impl_hash fd ++ sorted [callee symbol ++ callee abi_hash] ++ sorted type-closure hashes)
+unit_key   = BLAKE3(sorted member fn_keys ++ globals_digest ++ "unit-format-v1")
+```
+**`globals_digest`, coarse in v1** (any change misses every unit; accepted): every `emit_module`
+argument (`fast_math`, `pmap_threshold`, `target`, `hot_reload`, `impl_hashes`,
+`remote_impl_hashes`, `remote_sig_hashes`, `emit_main`, `cap_attrib`, `cap_decls`, `k_table`);
+`Serialize.serialize_type_def` of **all** `tm_types` in order (feeds `type_defs`,
+`collision_set` — which changes constructor tags — `poly_ctors`, `type_params`, `field_map`,
+`ctor_info`, descriptors); `tm_externs`, `tm_tests`, `tm_exports`, `tm_io_fns`, `tm_name`; the
+**order of `tm_fns` names** (`unqualified_fns` first-wins at `llvm_toplevel.ml:1136–1160`,
+`main` last-wins at `1377–1385` — A5 shows whether this order is stable; if not, sort at
+registration); `build_cas_key`'s flag list verbatim plus **`MARCH_NO_INLINE_RC`** (gates
+`maybe_inline_rc`, `bin/main.ml:1054–1059`; not in `codegen_cas_tags` today, §15.4);
+`Llvm_toplevel.pin_main`; `Llvm_builtins.called_syms`.
+
+Per-unit dedup tables (`emitted_eq_fns`, `emitted_dispatch_fns`, `emitted_wraps`,
+`unknown_decls`, `str_ctr`, `ctor_desc_ids`, `rec_shape_globals`, `call_tag_globals`) are
+per-unit after the split and not in the digest. Constructor descriptors are declaration-ordered
+and already per-unit (`llvm_ctor_desc.ml:80–96`, runtime interns by content).
+
+**A1 runs before hashing.** `unit_keys` refuses (hard error under `--incremental`) if the
+verifier reports anything on the post-opt TIR: a key over ill-formed TIR is a key over a bug.
+
+**Tests** (`test/test_cas.ml`): leaf body edit → only leaf's `fn_key`; leaf param-type edit →
+leaf + direct callers; native-vec eligibility change → `abi_hash` + callers; record layout edit →
+transitive users only; `fast_math` → every `unit_key`; mutual-recursion group edits move together.
+
+**Effort.** ~3–4 days.
+
+## 13. B3 — Split LLVM emission into units
+
+### B3a — refactor, `--codegen-units=1` byte-identical (no dependency on B1)
+`Llvm_emit.emit_module` → `Llvm_toplevel.emit_module ~emit_expr` (`llvm_toplevel.ml:976`) builds
+one ctx (`buf`, `preamble`, `extra_fns`), runs a pre-pass (`top_fns`, `top_fn_*`,
+`native_vec_params`, `unqualified_fns`, mutual-TCO groups via `Llvm_tco.find_mutual_tco_groups`,
+`llvm_tco.ml:409`), emits every function, finalises program-wide pieces. Split into:
+
 ```
 Llvm_toplevel.emit_shared : prepass -> tir_module -> string
 Llvm_toplevel.emit_unit   : prepass -> unit_id -> fn_def list -> string
 ```
-- **Pre-pass** (`top_fns`, `top_fn_ret_ty`, `top_fn_nparams`, `top_fn_param_tys`,
-  `native_vec_params`, `zero_arg_fns`, `unqualified_fns`, `field_map`, `ctor_info`,
-  `collision_set`, mutual-TCO groups, atom literal scan, `called_syms` union) runs **once**
-  over the whole module and is shared read-only by every unit's ctx. No emission happens in it.
-- **Shared unit**: type/struct declarations, record-shape globals, the atom show-table and its
-  register/unregister, the HCR epoch cell + dispatch publish, cap declarations and markers
-  (from the `called_syms` union), `@.rpc_impl_*`, module init, `main`.
-- **Per-unit ctx**: fresh `buf`, `preamble`, `extra_fns`, `ctr`, `blk`, `str_ctr`, dedup
-  tables, its own ctor descriptor. Every external symbol a unit references gets a `declare`
-  generated from the pre-pass tables (callees, shared-unit globals, runtime functions).
-- **`--codegen-units=N`** (default **1**): `N=1` emits a `.ll` byte-identical to today's. For
-  `N>1`, partition:
-  1. SCCs and mutual-TCO groups are atomic.
-  2. By **source module** of the base function; mono specialisations `Foo.bar$Int$String` go
-     with `Foo`; apply fns and `$lam` fns go with their host (recoverable from the name after
-     Phase 1 — this is why 3b depends on Phase 1). Each stdlib module is its own unit, so a user
-     edit never re-emits the stdlib.
-  3. A module with more than ~400 functions is split into `BLAKE3(base_name) mod k` buckets,
-     which are stable under unrelated edits by construction.
-  4. Unit ids are strings (`"stdlib/list"`, `"user/Main#2"`), stable across builds.
-- **`.ll` publication.** `write_ll_tmp`/`publish_ll` run on **every** compile, not only under
-  `--emit-llvm` (`bin/main.ml:3221–3238`), and ~20 `test/dune` rules grep `native/*.ll`. Under
-  `N>1`, `<basename>.ll` is the **concatenation** of the shared unit and all units in unit-id
-  order (so existing greps keep working), and `<basename>.<unit>.ll` files are published
-  alongside. Under `N=1` nothing changes.
+- **Pre-pass** runs once over the whole module (no emission): the tables above plus
+  `collision_set`, the atom-literal scan, the `called_syms` union, provenance lookups.
+- **Shared unit**: type/struct declarations, record-shape globals, the atom show-table
+  (external linkage — see below), HCR epoch + dispatch publish, cap declarations and markers,
+  `@.rpc_impl_*` (indexed by `tm_fns` position, `llvm_toplevel.ml:1355–1373`), `@.hr_hash*`,
+  module init, `main`, the `.march_build` manifest (A2), and under `MARCH_RC_TRACE` the site
+  table (A3).
+- **Per-unit ctx**: fresh `buf`, `preamble`, `extra_fns`, counters, dedup tables, own ctor
+  descriptor; `declare`s for every external reference generated from the pre-pass.
+- **Guard**: `scripts/ir-oracle.sh` zero-diff at `N=1` (prove red first); full suite; A6 counts
+  unchanged.
 
-### Regression guard
-- **3a** (`N=1`): `scripts/ir-oracle.sh baseline` before, `check` after: **zero diffs**. Prove
-  the oracle red first. Full suite.
-- **3b** (`N=8`): full suite; a new per-unit `llvm-as` validity step over every unit `.ll` for
-  the `test/native` corpus (today only one rule has a local `check_ir`, `test/dune:5023` — there
-  is no general IR-validity gate, so this adds one); link every `bench/*.march` and every
-  `test/native` fixture at `N=8` specifically to catch duplicate/undefined symbols from the
-  helper families above; compare program output `N=1` vs `N=8` at `--opt 0`.
+### B3b — `N>1` (depends on B1 for host recovery, A2 for module partition)
+What must stay together or be made link-safe (verified):
+- **SCCs and mutual-TCO groups** are atomic; group membership comes from the shared pre-pass.
+- **On-demand helpers with external linkage** — duplicate-symbol link errors otherwise:
+  `$clo_wrap` trampolines (`llvm_calls.ml:465–483`, `emitted_wraps`), structural equality
+  `__eq$…` (`llvm_eq.ml:126, 186, 345, 546`), interface dispatch `__march_ifdispatch$…`
+  (`llvm_dispatch.ml:60`). Under `N>1` every helper in `extra_fns` is **`linkonce_odr`**;
+  under `N=1` unchanged.
+- **`internal` helpers** (`Llvm_rc_inline` twins, `@.str*`/`@.strcell*`): duplicated per unit.
+- **Aliases** `__migrate_<Actor>`/`__migrate_msg_<Actor>` (`llvm_toplevel.ml:1222–1280`) in the
+  aliasee's unit.
+- **Atom show-table**: `atom_names` fills during emission (`llvm_emit.ml:371`,
+  `llvm_case.ml:945`) and `@march_atom_to_string`/`@march_atom_name_or_null` are **`internal`**
+  (`llvm_toplevel.ml:573, 596`); split naively, `show(:x)` silently renders `:<atom>` across
+  units. The shared unit scans all `fn_def`s for atom literals and defines the table externally;
+  units `declare` it. The `buffer_contains … "define internal ptr @march_atom_to_string"` check
+  (`:541`) goes.
+- **Partition**: by **source module** of the base function from the provenance table (mono
+  specialisations with their generic's module; `$lam`/apply/fused helpers with their host); a
+  module over ~400 fns splits into `BLAKE3(base_name) mod k` buckets; unit ids are stable strings.
+- **`.ll` publication**: `write_ll_tmp`/`publish_ll` run on **every** compile (`bin/main.ml:3221–3238`)
+  and ~20 `test/dune` rules grep `native/*.ll`. Under `N>1`, `<basename>.ll` is the concatenation
+  (shared first, then units in id order) and `<basename>.<unit>.ll` are published alongside.
+- **Guard**: per-unit `llvm-as` over the `test/native` corpus (there is no general IR-validity
+  gate today; `test/dune:5023` has one local `check_ir`); link every `bench/*.march` and
+  `test/native` fixture at `N=8` (the duplicate/undefined-symbol catcher); program output `N=1`
+  vs `N=8` at `--opt 0`; full suite.
 
-### Effort
-3a ~1–2 weeks (`llvm_toplevel.ml` is 1 809 lines and the boundary cuts through its finaliser);
-3b ~1 week.
+**Effort.** B3a 1–2 weeks (`llvm_toplevel.ml` is 1 809 lines; the boundary cuts the finaliser);
+B3b ~1 week.
 
----
+## 14. B4 — Object store, parallel compile, link
 
-## 8. Phase 4 — Object store, parallel compile, link
+- **Store**: `<project>/.march/cas/objects-v1/<aa>/<rest>.o` + `.meta` (unit id, member
+  symbols, provenance summary, cflags), write-through to `~/.march/cas/objects-v1/`; temp +
+  `Unix.rename` as `Cas.copy_file_exec` already does (`cas.ml:283–297`). Key = B2 `unit_key` with
+  the toolchain facet as `Runtime_archive.ensure` folds it.
+- **Flow**: `unit_keys` → lookup per unit → emit + `clang -c` the misses in parallel
+  (`Unix.create_process`, `-j ncpu`, `MARCH_JOBS`) → link runtime objects, shared, units,
+  user FFI, `ffi_link` (order as today; `-Wl,--gc-sections` + `-ffunction-sections` apply to
+  unit cflags) → store under both whole-binary keys as today.
+- **Eligibility**: `Runtime_archive`'s predicate and `--incremental`/`MARCH_INCREMENTAL=1`;
+  `MARCH_NO_RUNTIME_CACHE=1` also disables the object store. `MARCH_ECHO_CC` prints per-unit
+  commands. `MARCH_DEBUG_UNITS=1` prints id, key, hit/miss, members.
+- **Verify mode** `MARCH_INCREMENTAL_VERIFY=1`: on every hit, recompile and byte-compare the
+  `.o` (clang is deterministic for identical input; keep `-grecord-command-line` off), **and**
+  run A1 on the TIR the key was computed from. One CI job runs the native `test/dune` rules this
+  way. The `.march_build` manifest (A2) lets a failing binary be checked against the entries it
+  was linked from.
+- **Edit-sequence differential test** (`test/test_incremental.ml`, Slow): ~50 generated programs
+  plus `bench/`; seeded random sequences of 10 edits (rename a local, change a literal, add/remove
+  a lambda, change a param type and fix callers, add a record field, add/remove a function, add
+  an atom literal in one module and `show` it in another); after each edit compare incremental vs
+  clean monolithic output and exit code. On failure, A4's reducer minimises the program and
+  bisects the pass, and A3's trace dumps live objects if the divergence is a leak delta.
+- **Forge**: `forge build` passes `--incremental` (it picks `--opt 0/2`,
+  `forge/lib/cmd_build.ml:144`); `forge watch` is the first consumer; `forge clean --cas`
+  (`cmd_clean.ml:16–21`) already removes the store; add `forge clean --objects` and
+  `forge cache gc [--max-size 2G]` (LRU by atime, both stores; `march cache gc` for non-forge
+  users), with a default bound applied after a build.
 
-### Store
-- `<project>/.march/cas/objects-v1/<aa>/<rest>.o` plus a `.meta` sidecar (unit id, member
-  symbols, cflags) for `gc` and debugging. Also write-through to `~/.march/cas/objects-v1/`
-  so worktrees share.
-- Writes: temp file in the destination directory + `Unix.rename`, the pattern
-  `Cas.copy_file_exec` already uses (`cas.ml:283–297`). (`Runtime_archive`'s comment claiming
-  `store_artifact` "writes its pointer file directly" is stale; §11.3.)
-- Key = Phase 2 `unit_key` with the toolchain facet folded in exactly as
-  `Runtime_archive.ensure` does.
+**Acceptance.** Leaf-edit scenario at `--opt 0` ≥ 3× faster than B0 baseline; comment-edit
+scenario unchanged (post-TIR hit); verify-mode job green; differential test green.
 
-### Driver flow (native, eligible builds only)
-```
-tir ─► Pipeline.unit_keys ─► for each unit: lookup objects-v1/<key>.o
-                                 hit  → reuse
-                                 miss → emit_unit → clang -c   (parallel, -j ncpu)
-     shared unit: emitted and cached under its own key like any unit
-     link: cc <runtime .o from Runtime_archive> <shared.o> <unit .o …> <user FFI> <ffi_link> -o out
-     store out under both whole-binary keys (source-level + post-TIR) as today
-```
-- Parallelism: `Unix.create_process` per miss, bounded by `-j` (default `ncpu`, `MARCH_JOBS`
-  override). clang `-O2` on a 1/16th-size unit is where the cold-cache wall-clock win comes from.
-- **Link order and dead-strip.** Unit objects go where the single `.ll` went: after runtime
-  objects, before `ffi_link` (GNU ld resolves archives only against already-undefined symbols,
-  the `--ffi-link` note at the link command). `-Wl,--gc-sections` + `-ffunction-sections`
-  (`strip_flag`/`section_cflags`, `bin/main.ml` ~3871–3900) apply to unit cflags too, so
-  capability-by-absence stripping still works per function.
-- **Eligibility**: `Runtime_archive`'s predicate (Native, not `compile_so`, no evloop/signing
-  defines, no `hot_reload_prefix`) **and** `--incremental` / `MARCH_INCREMENTAL=1`.
-  `MARCH_NO_RUNTIME_CACHE=1` also disables the object store (one switch for A/B checks).
-  Everything else: `N=1`, monolithic, unchanged.
-- `MARCH_ECHO_CC` prints every per-unit `clang -c` command and the link command.
-- `forge build` passes `--incremental` through (it already picks `--opt 0/2`,
-  `forge/lib/cmd_build.ml:144`); `forge watch` is the first consumer. `forge clean --cas`
-  (`cmd_clean.ml:16–21`) deletes `.march/cas` wholesale and so already covers `objects-v1/`;
-  add `forge clean --objects` for just the object store.
+**Effort.** ~1 week.
 
-### Operations
-- `forge cache gc [--max-size 2G]` (and `march cache gc` for non-forge users): LRU by atime over
-  `objects-v1/` in both stores. Default bound applied opportunistically after a build.
-- `MARCH_INCREMENTAL_VERIFY=1`: on every hit, also recompile the unit and byte-compare the
-  `.o`. clang output is deterministic for identical input and flags (check
-  `-grecord-command-line` is off under `-g`). One CI job runs the native `test/dune` rules in
-  this mode.
-- `MARCH_DEBUG_UNITS=1` prints each unit's id, key, hit/miss and member count
-  (`MARCH_DEBUG_CASFLAGS` style).
+## 15. B5 — Optimised builds and default-on; B6; B7 quick wins
 
-### Acceptance
-- `compile-time-bench.sh` scenario 4 (leaf edit) at `--opt 0` ≥ 3× faster than the Phase 0
-  baseline; scenario 3 (comment edit) unchanged (still a post-TIR hit).
-- Verify-mode CI job green over the native test corpus.
-- Edit-sequence differential test (§12) green.
+**B5.** Units as ThinLTO bitcode (`-flto=thin -c`), link with `-flto=thin
+-Wl,--thinlto-cache-dir=<store>/thinlto` (lld; `-Wl,-cache_path_lto,<dir>` on ld64; the `zig cc`
+driver bundles lld). Detect at link time; fall back to plain objects at `--opt 0/1` and monolithic
+at `--opt 2/3`. **Gate**: `bench/tree_transform`, `bench/list_ops`, `bench/binary_trees`,
+`bench/fib` compiled at `--opt 2`, 5× median, monolithic vs incremental+ThinLTO; no regression
+over 3%, or `--opt 2/3` stays monolithic. Then `--incremental` default on for eligible native
+builds, `--no-incremental` to opt out, `--codegen-units=1` kept for bisecting.
 
-### Effort
-~1 week.
+**B6 — front end (separate plan).** After B5 a warm edit still pays the front-end and
+whole-program TIR buckets. Sketch: per-user-module cache of (AST, typecheck env delta) keyed on
+source + import **interface** hashes; a per-specialisation mono cache keyed on
+(generic `impl_hash`, type args); per-SCC Perceus caching as B2's keys one stage earlier. A stale
+typecheck result is a soundness hole, so it gets its own plan and oracle (`types-oracle.sh`).
 
----
-
-## 9. Phase 5 — Optimised builds and making it the default
-
-Splitting into units removes LLVM's cross-unit inlining, which matters at `--opt 2/3`. The TIR
-optimiser does the March-specific inlining, but LLVM still inlines small helpers across functions
-in the monolithic module.
-
-### Design
-- Emit units as bitcode with `-flto=thin -c`, link with `-flto=thin
-  -Wl,--thinlto-cache-dir=<store>/thinlto` (lld; `-Wl,-cache_path_lto,<dir>` on ld64). The CAS
-  caches the per-unit front half; LLVM's ThinLTO cache keys the per-module backend on the import
-  summary, so an unchanged unit whose imports didn't change is a backend hit too.
-- Requires `lld` or Apple ld64 ≥ Xcode 10; the `zig cc` driver (`bin/main.ml` ~3912) bundles
-  lld. Detect at link time; if unavailable, plain objects at `--opt 0/1` and monolithic at
-  `--opt 2/3`, said once in `MARCH_DEBUG_UNITS` output.
-- `Runtime_archive` objects stay native `.o`.
-
-### Gate
-Run the compiled benchmarks in `specs/benchmarks.md` (at least `bench/tree_transform`,
-`bench/list_ops`, `bench/binary_trees`, `bench/fib`) monolithic vs. incremental+ThinLTO at
-`--opt 2`, 5 runs each, median. **No benchmark regresses by more than 3%.** If the gate fails,
-try import thresholds first; otherwise `--opt 2/3` stays monolithic and `--incremental` remains
-a dev-build feature.
-
-Once the gate passes: `--incremental` default on for eligible native builds; `--no-incremental`
-to opt out; `--codegen-units=1` still available for bisecting.
-
-### Effort
-~3–5 days plus benchmark time.
+**B7 — independent quick wins**, each its own todo → progress entry:
+1. Replay stored diagnostics on a cache hit; removes the `contains_substring cache_input
+   "no_alloc"` bailout (`bin/main.ml` ~2037) and the `--refine-report` class (`ci.yml` ~412/496).
+2. Key the source-level cache on the resolver's actual load set, not every `.march` in the
+   directory.
+3. Write-through to the global store; fix `Runtime_archive`'s stale comment about
+   `store_artifact` (`runtime_archive.ml:52–55`).
+4. Add `MARCH_NO_INLINE_RC` to `codegen_cas_tags` — a live whole-binary-cache bug today.
 
 ---
 
-## 10. Phase 6 — Front-end incrementality (separate plan)
+## 16. Correctness strategy, risks, open questions
 
-After Phases 3–5, a warm edit still pays the **front end** and **whole-program TIR** buckets.
-Already cached: the stdlib AST (`stdlib_ast_*.bin`) and tcenv (`stdlib_tcenv_cli_*.bin`). Not
-cached: user modules, and every whole-program TIR pass.
-
-Sketch, to be planned once Phase 0 numbers show how much is left:
-- per-user-module cache of (parsed + desugared AST, typecheck env delta), keyed on the module's
-  source plus the **interface** hashes (exported signatures and type defs) of its imports;
-- mono/defun are demand-driven from `main`; a per-specialisation cache keyed on
-  (generic fn `impl_hash`, type args) could serve `fn_def`s without re-running mono;
-- Perceus/borrow/fusion are per-SCC in principle; caching them is Phase 2's keys one stage
-  earlier.
-
-A stale typecheck result is a soundness hole, not just a miscompile, so it gets its own plan and
-oracle (`types-oracle.sh` is the starting point).
-
----
-
-## 11. Phase 7 — Independent quick wins
-
-Each lands alone, any time, with its own `specs/todos/` → `specs/progress/` entry.
-
-1. **Replay diagnostics on a cache hit.** Store the compile's stderr diagnostics next to the
-   artifact (`<key>.diag`) and print them on a hit. This removes the
-   `contains_substring cache_input "no_alloc"` bailout (`bin/main.ml` ~2037), which disables the
-   early cache for any program that *mentions* `no_alloc`, and covers every other warning-only
-   output the same way (`ci.yml` ~412/496 describe the `--refine-report` instance). Key
-   semantics unchanged: a hit is still "same inputs, same verdict".
-2. **Key on the files actually loaded.** The source-level key hashes every `.march` file under
-   the entry's directory and each lib dir, imported or not. Key on the resolver's actual load
-   set instead (the `resolve-imports` stage knows it), keeping the sibling-module safety the
-   comment there describes. Cost today: editing an unrelated example in the same directory
-   misses.
-3. **Write-through to the global store** and fix the stale `Runtime_archive` comment about
-   `store_artifact` (`runtime_archive.ml:52–55`; `copy_file_exec` has done temp+rename since).
-4. **Add `MARCH_NO_INLINE_RC` to `codegen_cas_tags`.** Today a binary built with the inline-RC
-   rewrite can satisfy a build with it disabled (and vice versa). Independent of this plan.
-
----
-
-## 12. Correctness strategy
-
-A stale object is a **silent miscompile**, so correctness gets more machinery than speed:
-
-| Guard | Phase | What it catches |
+| Guard | Lands in | Catches |
 |---|---|---|
-| Determinism oracle (two HOMEs, cold/warm, two cwds) | 1 | unstable symbols/hashes |
-| `ir-oracle` zero-diff at `--codegen-units=1` | 3a | emitter refactor changing output |
-| Per-unit `llvm-as` + `N=8` link of bench + `test/native` | 3b | missing `declare`s, duplicate helper symbols, alias placement |
-| `MARCH_INCREMENTAL_VERIFY=1` CI job | 4 | a key that under-approximates a dependency |
-| Edit-sequence differential test | 4 | everything above, end to end |
-| Benchmark gate ≤ 3% | 5 | perf regression from unit splitting |
+| TIR verifier on every pass in tests | A1 | inter-pass invariant violations at the violating pass |
+| Determinism oracle (two HOMEs, cold/warm, two cwds, provenance diff) | A5 | unstable symbols/hashes; passes that forget provenance |
+| Idempotence test for `Opt`/`Perceus` | A6 | order-dependent passes |
+| `ir-oracle` zero-diff at `N=1` | B3a | emitter refactor changing output |
+| Per-unit `llvm-as` + `N=8` link of bench + `test/native` | B3b | missing `declare`s, duplicate helpers, alias placement |
+| `MARCH_INCREMENTAL_VERIFY=1` (byte-compare + A1) in CI | B4 | a key that under-approximates a dependency |
+| Edit-sequence differential test, with A3/A4 on failure | B4 | everything above, end to end, with a minimal repro |
+| Benchmark gate ≤ 3% | B5 | perf loss from splitting |
 
-**Edit-sequence differential test** (`test/test_incremental.ml`, Slow): ~50 programs from the
-differential oracle's generator plus `bench/`; apply a seeded random sequence of 10 edits (rename a
-local, change a literal, add/remove a lambda, change a param type and fix callers, add a record
-field, add/remove a function, add an atom literal in one module and `show` it in another); after
-each edit compare the incremental build's output and exit code against a clean monolithic build.
-
----
-
-## 13. Risks
+**Risks.**
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| A program-wide emitter input missing from `globals_digest` → stale object | medium | coarse digest first (§6 list is from a field-by-field audit of `Llvm_ctx.ctx` and `emit_module`); verify mode in CI; narrow only with a test per narrowing |
-| A counter-derived name Phase 1 missed | medium | determinism oracle; retiring `counter_re` as a check; link failures are loud; the silent case needs the differential test |
-| Phase 3a refactor changes codegen | high (large diff) | `N=1` byte-identity via `ir-oracle`; land behind default `N=1` |
-| Duplicate-symbol link errors from on-demand helpers | high without the `linkonce_odr` rule | §7 rule + `N=8` link guard |
-| `-O2` perf loss from splitting | medium | ThinLTO; hard 3% gate; else dev-builds-only |
-| `tm_fns`-order dependence (`unqualified_fns`, `main`) proves unstable | low | sort at registration; oracle detects it |
-| Object store growth | certain | `cache gc` + default bound |
-| Phase 0 shows the front end dominates | possible | gate re-orders 3b–5; Phases 1–3a still pay off |
+| Program-wide emitter input missing from `globals_digest` → stale object | medium | coarse digest from a field-by-field audit; verify mode; narrow only with a test per narrowing |
+| A counter-derived name B1 missed | medium | A5; `counter_re` retirement; link errors loud; differential test for the silent case |
+| B3a refactor changes codegen | high (large diff) | `N=1` byte-identity; lands behind default `N=1`; A6 counts as second signal |
+| Duplicate-symbol link errors from on-demand helpers | high without `linkonce_odr` | §13 rule + `N=8` link guard |
+| Verifier false positives block `--incremental` | medium early | verifier ships in tests first (A1), so its false positives are fixed before B2 depends on it |
+| Provenance table drifts from TIR (a pass renames without recording) | medium | A5 diffs the table; B3b partition fails loudly on a missing host |
+| `-O2` perf loss | medium | ThinLTO; 3% gate; else dev-builds only |
+| `tm_fns` order unstable | low | sort at registration; A5 detects |
+| B0 shows the front end dominates | possible | gate reorders B3b–B5; Part A and B1–B3a still pay off |
 
----
+**Open questions.**
+1. Concrete structural-naming schemes for `Fusion`/`Hof_spec`/`Mono` helpers and a collision
+   argument for each (two fusions of the same callees in one host → ordinal; two `hspec`s of `g`
+   on the same argument symbol → should be one function; dedupe).
+2. Is `tm_fns` order already deterministic given deterministic input? A5 answers.
+3. ThinLTO availability on every CI image and macOS developer setup.
+4. `.ll` publication under `N>1`: concatenate (assumed) or update the ~20 `test/dune` rules.
+5. A1's ownership check: can it reuse `Perceus_liveness` directly, or does checking need its own
+   dataflow to avoid sharing the bug it is checking for? Lean to independent.
+6. A2 `DILocation` granularity: function-level first; is per-instruction worth the span plumbing
+   through mono/defun/fusion, or does `--explain-fn` cover the need?
 
-## 14. Open questions
+## 17. Review record
 
-1. Phase 1 naming for `Fusion`/`Hof_spec`/`Mono` helpers: the sketch in §5.2 needs a concrete
-   scheme per generator and a check that none can collide (two fusions of the same callees in
-   one host → ordinal disambiguates; two `hspec`s of `g` on the same argument symbol → should be
-   the same function anyway, dedupe).
-2. Does the `tm_fns`-order dependence in `unqualified_fns` / last-`main`-wins need fixing before
-   Phase 2, or is `tm_fns` order already deterministic given deterministic input? Phase 1's
-   oracle answers this.
-3. Is ThinLTO available on every CI image and macOS developer setup? If not, Phase 5 needs a
-   detection matrix.
-4. Should `.ll` publication under `N>1` concatenate (keeps existing greps working) or publish
-   only per-unit files and update the ~20 `test/dune` rules? Plan assumes concatenate.
+### First draft (CAS-only), reviewed 2026-10-04 against the source
+Four blockers, eleven should-fixes; all folded in.
+- **Blockers:** the draft stabilised one counter (`lam_uid`) when six generators reach symbols
+  (now §11's table); its naming scheme would have broken self-tail-call recognition
+  (`apply_fn_base` must keep the lambda's self-binding name); three helper families have
+  external linkage (`$clo_wrap`, `__eq$`, `__march_ifdispatch$`) and would have produced
+  duplicate-symbol link errors (`linkonce_odr` rule); the atom show-table is `internal` and would
+  have silently degraded across units (shared, external definition).
+- **Should-fixes:** `globals_digest` missed `type_defs`, `collision_set`, `unqualified_fns`
+  order, `tm_externs`/`tm_tests`/`tm_exports`/`tm_io_fns`, `pin_main`, `called_syms`,
+  `MARCH_NO_INLINE_RC` (the last also a standalone cache bug, B7.4); `ctor_desc_ids` is
+  declaration-ordered and already per-unit (draft's shared-unit treatment removed);
+  `sig_hash` is narrower than assumed (→ `abi_hash`); `Cas.store_artifact` already does
+  temp+rename (draft's "make atomic" item replaced by fixing the stale comment); B0 now uses the
+  finer `Contract_pipeline` stamps; `.ll` publication happens on every compile and tests grep it;
+  REPL counter persistence is in `lib/jit/repl_jit.ml`; forge integration is more than a
+  pass-through; Windows out of scope; B3a doesn't depend on B1.
+- **Confirmed:** `hash_module` on post-opt TIR; default linkage for user fns; `lam_uid` a
+  cross-call global; `apply_fn_base` splits first / `drop.ml` last; `Runtime_archive`'s
+  predicate and concurrency; `Llvm_rc_inline` twins `internal alwaysinline`; runtime atom namer
+  accepts multiple registrations.
 
-(Closed by review: constructor descriptor ids are declaration-ordered and per-unit already, so
-they need no shared-unit treatment.)
-
----
-
-## 15. Order and tracking
-
-Phase 0 ∥ 1 ∥ 3a ∥ 7 → 2 → 3b → 4 → 5. Phase 6 waits on Phase 0's numbers. File one
-`specs/todos/` entry per phase when its work starts and `git mv` it to `specs/progress/` in the
-PR that lands it. Add a `CHANGELOG.md` entry under `### Added` when `--incremental` becomes
-user-visible (Phase 4) and under `### Changed` when it becomes the default (Phase 5).
-
----
-
-## 16. Review
-
-An independent read of the first draft against the source (2026-10-04) found four blockers,
-eleven should-fixes and some nits. All are folded into the text above; this section records what
-changed and what the review confirmed, so a later reader knows which claims were checked.
-
-### Blockers found and fixed
-1. **The first draft fixed only one of several counters.** It proposed stabilising
-   `Defun.lambda_counter`, but the lambda's own name `$lam<n>` comes from
-   `Lower_state._lower_counter`, and `Fusion`, `Hof_spec` and `Mono` have counters of their own
-   that reach symbols. §5.2 now inventories every generator (table) and makes the fix structural
-   at lowering (`<host>$lam<i>`), with the others following the same pattern.
-2. **The proposed "per-parent" apply-fn prefix would have broken self-tail-call recognition.**
-   `apply_fn_base` must keep returning the lambda's self-binding name for
-   `llvm_emit_call.ml:830–833`. The scheme now keeps the lambda's name as the prefix and makes
-   the lambda's *own* name structural instead.
-3. **Three families of on-demand helpers have external linkage** (`$clo_wrap`, `__eq$…`,
-   `__march_ifdispatch$…`); the draft said only `internal` helpers needed duplication, which
-   would have produced duplicate-symbol link errors under `N>1`. §7 adds the `linkonce_odr`
-   rule, the alias-placement rule, and an `N=8` link guard aimed at exactly this.
-4. **The atom show-table is `internal`**, so the draft's "scan up front" was right but
-   incomplete: the table must be defined once, externally, in the shared unit, or `show(:x)`
-   silently degrades across units. §7 now says so and the differential test gets a cross-unit
-   atom edit.
-
-### Should-fixes applied
-- `globals_digest` was missing most of what is actually program-wide (`type_defs`,
-  `collision_set`, `unqualified_fns` order, `tm_externs`/`tm_tests`/`tm_exports`/`tm_io_fns`,
-  `pin_main`, `called_syms`, `MARCH_NO_INLINE_RC`). §6 now lists them from a field-by-field
-  audit, and the `MARCH_NO_INLINE_RC` gap became a standalone todo (§11.4).
-- `ctor_desc_ids` is declaration-ordered and already per-unit, not encounter-ordered; the
-  draft's "move descriptors to the shared unit" was unnecessary and is removed (open question
-  closed).
-- `sig_hash` is narrower than assumed (name + param types + return type), so the key gets an
-  explicit `abi_hash` covering `native_vec_params` and mutual-TCO membership.
-- `Cas.store_artifact` already does temp+rename (`copy_file_exec`); the draft's Phase 7.4
-  "make it atomic" was wrong and is replaced by fixing the stale comment that misled it.
-- Phase 0 now uses the existing finer `Contract_pipeline` stamps and reports three buckets.
-- `.ll` publication happens on every compile and tests grep it; §7 defines what `N>1` publishes.
-- REPL counter persistence is in `lib/jit/repl_jit.ml`, not `lib/repl/`; corrected.
-- Forge integration is more than a pass-through (`forge clean --cas`, `forge watch` as first
-  consumer); §8 covers it. Windows is explicitly out of scope.
-- Phase 3a does not depend on Phase 1; the ordering now runs them in parallel, and Phases 1–2
-  are unconditional on the Phase 0 gate.
-
-### Confirmed correct
-`hash_module` runs on post-opt TIR (`pipe.final`); user functions have default linkage;
-`lam_uid` is a cross-call global counter; `apply_fn_base` splits at the first marker and `drop.ml`
-at the last `$`; `Runtime_archive`'s eligibility predicate and concurrency pattern are as
-described; `Llvm_rc_inline` twins are `internal alwaysinline`; the runtime atom namer accepts
-multiple registrations.
+### Second draft (Part A added), 2026-10-04
+Added after a survey of existing instrumentation (`--dump-phases`, `MARCH_DUMP_TXT`,
+`MARCH_REPR_AUDIT`, `MARCH_ALIAS_AUDIT`, `MARCH_SANITIZE`, alloc counters, differential oracle,
+snapshots, three oracles, parser fuzz, stdlib PBT) and of bug classes in `specs/progress/`. Facts
+checked for Part A: TIR `fn_def` carries **no span** and the LLVM emitters emit **no**
+`DILocation` (hence the side-table design, precedent `js_emit.ml`'s `fn_lines`); no TIR
+well-formedness checker exists; `test_oracle.ml` has no reducer; pass switches that exist are
+`MARCH_NO_{HOF_SPEC,INLINE_RC,TRMC,UNBOX,RUNTIME_CACHE}`. Part A has **not** yet had an
+independent review; the same treatment as the first draft is owed before A1's ownership check
+is relied on by B2.
 
 ### Still unverified
-Everything about *time* (no build was possible in the reviewing environment; Phase 0 exists for
-this), ThinLTO availability on the CI images (§14.3), and whether `tm_fns` order is already
-deterministic (§14.2).
+Everything about *time* (no build was possible in the authoring environment; B0 exists for
+this); ThinLTO on CI images; `tm_fns` order stability; whether A1's ownership check can be made
+independent of `Perceus_liveness` cheaply.
