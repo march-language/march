@@ -143,6 +143,16 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Topology now reports two roles that share one endpoint on a node.** Two roles
+  placed on one node that serve the same protocol role through the same offer
+  function want the same endpoint name, so the second could never be offered;
+  Topology retried it every placement tick without a word, and the role was
+  simply missing from `Topology.offered`. The conflict is now reported once
+  (naming the role holding the name), written to the node status file as a
+  `conflict <role> held-by <role>` line, and retried with backoff (or as soon as
+  the node's offers change) rather than every tick; the role is offered, with a
+  report, once the holder's offer closes. A refusal just after an offer on the
+  node closed (its name is still being released) is still retried quietly.
 - **A branch that returns a record's field no longer frees it (compiled).** In
   `"sig " ++ (if r.signature == "" do "-" else r.signature end)`, compiled code
   handed out `r.signature` without taking a reference, so the next read of the
