@@ -37,6 +37,11 @@ exception Repr_disagreement of string
     naming contract [tir_names.ml] and the codegen tests depend on.  [ty_subst]
     stays a manifest type alias because six exported functions name it. *)
 
+(** Interface-impl symbols declared in the standard library; filled by
+    lowering, consulted by the return-position single-impl fallback (a
+    user's lone `derive Json` is not made ambiguous by the stdlib's). *)
+val stdlib_impl_syms : (string, unit) Hashtbl.t
+
 val resolve_impl_by_type : (string * string) list -> string -> string option
 val has_tvar : Tir.ty -> bool
 type ty_subst = (string * Tir.ty) list

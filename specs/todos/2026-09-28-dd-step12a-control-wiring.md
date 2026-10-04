@@ -36,3 +36,45 @@ leader's audit log, [../progress/2026-10-01-dd-step12a-forge-cluster-backend.md]
   [2026-10-01-compiled-record-with-projection-sigsegv.md](2026-10-01-compiled-record-with-projection-sigsegv.md).
 - The session-runtime leaks the wiring routes around:
   [2026-10-01-session-node-vault-tables-leak.md](2026-10-01-session-node-vault-tables-leak.md).
+
+## Moving `Ctl` and `CtlFetch` into `stdlib/control.march` (unblocked 2026-10-03)
+
+A protocol in a stdlib module now works, including for a program whose entry module is
+named like a stdlib module (`mod Test`), and a stdlib protocol no longer makes a user's
+bare `from_json` ambiguous:
+[../progress/2026-10-03-endpoints-protocol-in-nested-module.md](../progress/2026-10-03-endpoints-protocol-in-nested-module.md).
+The move was tried on a copy of the stdlib (not landed, since
+`lib/desugar/control_wiring.march` was being edited in parallel): `control_peers` printed
+its golden on both backends, and the `mod Test` native fixtures, `from_json_dispatch`,
+`derive_json_dispatch_codegen` and `interpreter_only_dsl` passed. To do it:
+
+1. Move `control_peers.march`'s protocol section (the `Wire*` records with their
+   `derive Json`, the converters, `Ctl`, `CtlFetch`, and the role bodies `agent_role`
+   ... `fetch_done`) into `Control`, dropping the `Control.` qualifiers. Rename the
+   converters: `result_of` already exists in `Control` (the experiment used a `ctl_`
+   prefix). Make the role bodies the wiring calls public (`fn`).
+2. In `control_peers.march`, qualify what moved: `Control.Ctl_Agent`,
+   `Control.CtlFetch_Server`, `Control.WireReport`, `Control.agent_role(...)`.
+3. In `lib/desugar/control_wiring.march`, stop splicing the protocols into the entry
+   module and call `Control.Ctl_Run.*` / `Control.agent_role` instead; drop the
+   "typechecks only at an entry module's top level" comment.
+4. Re-bless nothing: the goldens should not change.
+
+**Cost.** Every program pays for an eagerly loaded protocol. Measured 2026-10-03 on
+`examples/hello.march` (14 cores, load 6.5-7, median of 7), stock stdlib vs one with
+both protocols, the `Wire*` records and the role bodies in `Control`: warm run 0.618 s
+-> 0.692 s (+0.074 s, +12%), cold run (empty `~/.cache/march`) 1.399 s -> 1.598 s
+(+0.20 s, +14%), warm `--check` 0.451 s -> 0.502 s (+0.051 s). The warm cost is still
+#677's +0.07 s; cold is down from +0.8 s (the frontend fix of 2026-09-28). That is too
+much to put on every program for code only topology apps use. Proposal: load
+`control.march` lazily, on a reference to `Control` (or only when the driver builds a
+topology app, `--topology`), with a FULL body typecheck rather than the
+`Module_registry.ensure_loaded` export-shape path, whose generic-representation
+miscompile is why the manifest is exhaustive
+(`lib/modules/stdlib_manifest.ml`). An opt-in group in the manifest that the driver
+adds when the entry program or its topology names `Control` would do it.
+
+**Name clash.** After the move, `Ctl_Message`, `CtlFetch_Message` and the `Wire*`
+records are short names in every program; a user protocol named `Ctl` would stop
+compiling ([2026-10-03-derive-json-same-short-name-two-modules.md](2026-10-03-derive-json-same-short-name-two-modules.md)).
+Fix that first, or give the moved names a `Control`-specific prefix.
