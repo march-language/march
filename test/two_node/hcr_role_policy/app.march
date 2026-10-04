@@ -1,0 +1,129 @@
+-- The app of scenario "hcr_role_policy": a topology app (no `main`; it is
+-- generated from the topology the scenario writes) with two pools. `back`
+-- serves Echo.Server, bound to the function Back.serve_one, whose own caps
+-- hold the session it is handed (caps=...,Session.Live in the manifest);
+-- `front` asks it for 4 every 150 ms and prints each new answer, until the
+-- stop file exists.
+--
+-- The scenario makes each version by rewriting the lines marked `-- ANSWER`
+-- and `-- AUDIT` (scenario.sh). Version 1 answers n * 10. Every version
+-- reads the mark a Vault holds, which version 1's code set in the base
+-- build, and the patched versions add it to their answer, so a patch whose
+-- code ran against a vault registry of its own would answer without it.
+mod RoleApp do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    role Server needs IO.Console, IO.Mut
+    ask: Client -> Server : Int
+    answer: Server -> Client : Int
+  end
+
+  -- ── the back pool ────────────────────────────────────────────────────
+
+  mod Back do
+    needs IO.Console
+    needs IO.Mut
+    needs Session.Live
+    needs ClusterNode.Live
+    needs IO.FileWrite
+
+    -- Reached by no role (only by front's exit path, which never runs on a
+    -- back node): a function a patch can widen (version 4 makes it write a
+    -- file) without the compiler's role grant check seeing it, so only the
+    -- node's policy stands in the way. Reached at all, so the base build
+    -- has a dispatch slot for it.
+    fn audit(_path : String) : Int do 0 end -- AUDIT
+
+    type Env = { factor : Int }
+
+    fn start(_con : Cap(IO.Console), _node : Cap(ClusterNode.Live)) : Env do
+      println("back: hook ran")
+      { factor: 10 }
+    end
+
+    -- The table version 1 writes the mark into (in the base build).
+    fn marks() : Vault(Int) do
+      match Vault.whereis("role_app_marks") do
+        Some(t) -> t
+        None -> Vault.new("role_app_marks")
+      end
+    end
+
+    fn mark() : Int do
+      let t = marks()
+      match Vault.get(t, "mark") do
+        Some(m) -> m
+        None ->
+          Vault.set(t, "mark", 7)
+          0
+      end
+    end
+
+    fn serve_one(env : Env, s : Cap(Session.Live), _con : Cap(IO.Console), _mut : Cap(IO.Mut), st : Echo_Server.Entry) : Echo_Server.Yield do
+      Echo_Server.recv_Ask(s, st, fn (n, st1) ->
+        let m = mark()
+        let a = n * env.factor + m * 0 -- ANSWER
+        Echo_Server.close(s, Echo_Server.send_Answer(s, st1, a)))
+    end
+  end
+
+  -- ── the front pool ───────────────────────────────────────────────────
+
+  mod Front do
+    needs IO
+    needs IO.Console
+    needs IO.Clock
+    needs IO.Spawn
+    needs Session.Live
+    needs ClusterNode.Live
+
+    type Env = { started : Bool }
+
+    fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Env do
+      let _ = task_spawn(fn _ -> run(io, node, 0))
+      { started: true }
+    end
+
+    -- Ask, print an answer that differs from the last one printed, and go
+    -- again, until $ROLE_APP_STOP exists.
+    fn run(io : Cap(IO), node : Cap(ClusterNode.Live), last : Int) : Int do
+      let stop = Env.get("ROLE_APP_STOP", "")
+      if stop != "" && File.exists(stop) do
+        println("front: done")
+        Back.audit(stop) * 0
+      else
+        let next = match echo(io, node, 4) do
+          Some(v) ->
+            if v != last do
+              println("front: answer " ++ int_to_string(v))
+              v
+            else last end
+          None -> last
+        end
+        sleep_ms(150)
+        run(io, node, next)
+      end
+    end
+
+    fn echo(io : Cap(IO), node : Cap(ClusterNode.Live), n : Int) : Option(Int) do
+      let got = Vault.new("front_echo")
+      match Echo_Run.initiate_Client(io, node, fn (s, st) ->
+          Echo_Client.recv_Answer(s, Echo_Client.send_Ask(s, st, n), fn (m, st2) ->
+            Vault.set(got, "v", m)
+            Echo_Client.close(s, st2))) do
+        Ok(_) -> Vault.get(got, "v")
+        Err(_) -> None
+      end
+    end
+  end
+end

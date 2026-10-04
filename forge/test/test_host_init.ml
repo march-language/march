@@ -92,8 +92,9 @@ let test_local_idempotent () =
   Alcotest.(check int) "a 32-byte secret" 64 (String.length secret);
   Alcotest.(check string) "env file" ("MARCH_CLUSTER_SECRET=" ^ secret ^ "\n") (read_file (Host_layout.env_file layout "a"));
   Alcotest.(check int) "env file mode" 0o640 ((Unix.stat (Host_layout.env_file layout "a")).Unix.st_perm);
-  Alcotest.(check string) "policy a: the written caps" "IO.Console\n" (read_file (Host_layout.policy_file layout "a"));
-  Alcotest.(check string) "policy b: caps = [] allows nothing" "" (read_file (Host_layout.policy_file layout "b"));
+  Alcotest.(check string) "policy a: the written caps, and the roles a serves" "IO.Console\nserves Echo.Server\n"
+    (read_file (Host_layout.policy_file layout "a"));
+  Alcotest.(check string) "policy b: caps = [] allows nothing" "serves Echo.Server\n" (read_file (Host_layout.policy_file layout "b"));
   expect "firewall a" (read_file (Host_layout.firewall_file layout "a"))
     [ "ufw allow 22/tcp"; "ufw allow 8080/tcp"; "ufw allow from web-2 to any port 7946" ];
   Alcotest.(check bool) "deploy.pub" true (String.length (read_file (Host_layout.deploy_pub layout)) > 40);
@@ -131,7 +132,9 @@ let test_local_idempotent () =
 
 (** The node policy is the pool's caps plus what its role closures reach
     only through the stdlib runner (Topology.hook), never a cap the user's
-    own code reaches. *)
+    own code reaches, then the roles the pool serves: not Other.Role (the
+    gate leaves another pool's role, or the control plane's, unbounded by
+    this policy rather than widening it), and never a proof cap. *)
 let test_runner_caps () =
   let pool = match Topology.of_strings [ ("topology.toml",
       "[roles]\n\"Echo.Server\" = { body = \"App.serve\" }\n[pool.a]\nserves = [\"Echo.Server\"]\ncaps = [\"IO.Console\"]\n") ] with
@@ -146,10 +149,16 @@ let test_runner_caps () =
                                            ("IO.Spawn", [ "body"; "Topology.hook"; "Topology.watchdog" ]) ];
                       role "Other.Role" [ ("IO.Process", [ "body"; "Topology.hook" ]) ] ] } in
   Alcotest.(check (list string)) "runner caps" [ "IO.Clock"; "IO.Spawn" ] (Host_init.runner_caps m pool);
-  Alcotest.(check (option string)) "policy text" (Some "IO.Clock\nIO.Console\nIO.Spawn\n")
+  Alcotest.(check (option string)) "policy text" (Some "IO.Clock\nIO.Console\nIO.Spawn\nserves Echo.Server\n")
     (Host_init.policy_text ~derived:None ~manifest:m pool);
-  Alcotest.(check (option string)) "no manifest: the written caps" (Some "IO.Console\n")
-    (Host_init.policy_text ~derived:None pool)
+  Alcotest.(check (option string)) "no manifest: the written caps" (Some "IO.Console\nserves Echo.Server\n")
+    (Host_init.policy_text ~derived:None pool);
+  (* A pool that serves nothing still says so: every role is another's. *)
+  let front = match Topology.of_strings [ ("topology.toml", "[pool.f]\ncaps = [\"IO.Console\"]\n") ] with
+    | Ok t -> List.hd t.Topology.pools
+    | Error _ -> Alcotest.fail "fixture" in
+  Alcotest.(check (option string)) "serves nothing" (Some "IO.Console\nserves\n")
+    (Host_init.policy_text ~derived:None ~manifest:m front)
 
 let test_refuses_non_ssh () =
   with_home @@ fun () ->
@@ -235,7 +244,7 @@ let test_container_idempotent () =
   Alcotest.(check string) "env file owner and mode" "root:march 640" (exec "stat -c '%U:%G %a' /etc/march/app/a.env");
   expect "unit in the container" (exec "cat /etc/systemd/system/march-a.service")
     [ "Environment=MARCH_NODE_NAME=a-web-1"; "Environment=MARCH_DEPLOY_POLICY=/etc/march/app/a.policy"; "User=march" ];
-  Alcotest.(check string) "policy" "IO.Console" (exec "cat /etc/march/app/a.policy");
+  Alcotest.(check string) "policy" "IO.Console\nserves Echo.Server" (exec "cat /etc/march/app/a.policy");
   let arch = exec "uname -m" in
   (match Reconcile.read_host_records ~root:proj.Project.root (Some "prod") with
    | Ok [ r ] ->

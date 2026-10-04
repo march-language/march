@@ -549,13 +549,29 @@ IO.NetConnect.TLS
 
 A node with this policy will never *admit a hot patch* that declares file-write, process-spawn, or foreign-FFI authority, regardless of signature.
 
+**The policy speaks about IO capabilities only.** The gate checks every capability under the `IO` lattice (`IO`, `IO.Console`, …, including an unknown `IO.` path) and does not police one outside it: a proof capability such as `Session.Live`, `ClusterNode.Live`, `Actor.Introspect` or your own `Db.Migrated`, or an FFI root. Those carry no IO authority of their own. The type system already decides who can hold one (only the declaring module mints it, from a `Cap(IO)` that is charged to the minter), and whatever IO a proof capability's dictionary performs is charged to the code that minted it: a session's transport belongs to the runner, not to the role body it is handed to. Calling foreign code is charged `IO.Foreign`, which the policy does police. This is the rule the compiler's own grant checks follow (a role's `needs` and `main`'s grant skip non-IO caps), and a pool's `caps` in a topology are IO caps, so the policy `forge host init` generates from them never names a proof capability. In practice it means a role body, whose own caps always include the session it is handed (`caps=IO.Console,Session.Live`), hot patches under that policy; a patch that also reaches an IO capability the policy lacks is still refused, proof capabilities beside it or not.
+
 > **An empty policy *file* is the opposite of permissive.** Only an **unset** (or
 > pointing-at-nothing) `MARCH_DEPLOY_POLICY` means "no policy is loaded" ⇒ permissive,
 > which is the default for backward compatibility. The moment the server can open a
 > policy file at all (even a completely empty, zero-byte one), it treats that as "a
 > policy is active, and it permits zero capabilities," so it will then reject *every*
-> function that declares any capability at all. If you want permissive, unset the
+> function that declares any IO capability at all. If you want permissive, unset the
 > variable entirely; don't point it at an empty file.
+
+A line `serves <Proto.Role> ...` names the roles this node serves, and scopes the [per-role closure](#per-role-closures-activate6) check to them. The policy `forge host init` writes for a pool is the pool's `caps` (or its derived ones), the caps the topology runner charges to its roles, and that line:
+
+```
+# /etc/march/<project>/back.policy, generated
+IO.Clock
+IO.Console
+IO.Mut
+IO.Process
+IO.Spawn
+serves Echo.Server
+```
+
+A role the node does not serve is another pool's (a shared build carries every pool's roles) or the control plane's (`Ctl.Agent` and `Ctl.Control`, generated into every node's `main` when the topology has a `[control]` section, and charged to it like the runner). This pool's policy is not the bound on those, and granting their closures here instead would widen what any patch on the node may do. A bare `serves` says the node serves no role. A policy with no `serves` line bounds every role's closure, so a hand-written policy behaves as it always did; a function's own capabilities are checked against the capability lines either way.
 
 The policy is loaded once at startup; change it by restarting the server.
 
@@ -583,7 +599,7 @@ error: hot deploy would widen role Stream.Cons's capability closure
 
 A role new to the baseline widens by its whole closure. A baseline written before per-role closures (no `ROLE` lines) makes this gate permissive for one deploy, with a note.
 
-On the wire, a manifest with `ROLE` lines is deployed with the `ACTIVATE6` message: `ACTIVATE5`'s fields plus `role_caps:<Proto.Role>=<digest>;...` inside the signed line (one digest per role, sorted by role, the `cap_root` recipe over its closure) and an unsigned `roles:<Proto.Role>=<caps>;...` block. The server recomputes every digest from the block and refuses a mismatch, a signed role the block leaves out, or a role it adds unsigned (`ERR role_cap_tamper`), then checks every closure against `MARCH_DEPLOY_POLICY` (`ERR role_cap_policy Stream.Cons IO.FileWrite`). A granted widening therefore still stops at a node whose policy forbids it. It is a new message rather than an extra field because an older server rebuilds the signed line without the role digests, so a signature check there would fail for a confusing reason. A build with no role grants keeps sending `ACTIVATE4`/`ACTIVATE5`; a server that predates `ACTIVATE6` refuses a manifest with roles (upgrade it, or use `--no-cap-gate`).
+On the wire, a manifest with `ROLE` lines is deployed with the `ACTIVATE6` message: `ACTIVATE5`'s fields plus `role_caps:<Proto.Role>=<digest>;...` inside the signed line (one digest per role, sorted by role, the `cap_root` recipe over its closure) and an unsigned `roles:<Proto.Role>=<caps>;...` block. The server recomputes every digest from the block and refuses a mismatch, a signed role the block leaves out, or a role it adds unsigned (`ERR role_cap_tamper`), then checks the IO capabilities of every closure against `MARCH_DEPLOY_POLICY` (`ERR role_cap_policy Stream.Cons IO.FileWrite`), or of every role the policy's `serves` line names. A granted widening therefore still stops at a node whose policy forbids it. It is a new message rather than an extra field because an older server rebuilds the signed line without the role digests, so a signature check there would fail for a confusing reason. A build with no role grants keeps sending `ACTIVATE4`/`ACTIVATE5`; a server that predates `ACTIVATE6` refuses a manifest with roles (upgrade it, or use `--no-cap-gate`).
 
 ### `--grant-cap`
 
