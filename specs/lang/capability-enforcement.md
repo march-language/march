@@ -133,7 +133,7 @@ The receiving node, for each activated function:
 
 1. **Recomputes the capability set**: normalizes the function's declared caps and hashes them with BLAKE3, reproducing the digest that was signed during the deploy.
 2. **Tamper-checks**: compares its computed digest to the signed value; a mismatch (`ERR cap_tamper`) aborts before dlopen. The tamper check is **unconditional** even when the function declares no capabilities: a truly cap-free function has the fixed digest `blake3("")`, so a stripped capability field on a signed message is detected rather than silently admitted.
-3. **Applies the deployment policy**: if `MARCH_DEPLOY_POLICY` is set (a file path), the node verifies that every capability the activated function declares is subsumed by a capability listed in the policy; a capability outside policy (`ERR cap_policy <cap>`) aborts.
+3. **Applies the deployment policy**: if `MARCH_DEPLOY_POLICY` is set (a file path), the node verifies that every IO capability the activated function declares is subsumed by a capability listed in the policy; a capability outside policy (`ERR cap_policy <cap>`) aborts. A capability outside the `IO` lattice is not checked: a proof capability (`Session.Live`, `ClusterNode.Live`, `Actor.Introspect`, your own `proof cap`) carries no IO authority, only its declaring module can mint it, and the IO its dictionary performs is charged to the code that minted it (a session's, to the runner). This is why a role body, whose own caps always include the session it is handed, hot patches under a policy of IO caps. Calling foreign code is charged `IO.Foreign`, which is checked.
 
 ### Per-role closures
 
@@ -141,7 +141,7 @@ A changed function's own capabilities miss one case: a patch that only *calls* a
 
 - **The manifest.** `--compile-so` writes one `ROLE <Proto.Role> caps=<closure>` line per granted role, IO capabilities only, normalized and sorted, with each capability's reach chain (`via=IO.FileWrite:body>cons>save`).
 - **The client gate.** `forge deploy hot` compares each role's closure with the saved baseline. A role whose closure widened stops the deploy unless `--grant-cap` covers the new capabilities, and the error names the role and the chain.
-- **The node gate.** A manifest with `ROLE` lines is deployed with the `ACTIVATE6` message, which signs one digest per role. The node recomputes each digest from the closure it received (`ERR role_cap_tamper` on a mismatch, on a signed role the message leaves out, or on a role it adds unsigned) and requires every role closure to fit `MARCH_DEPLOY_POLICY` (`ERR role_cap_policy <role> <cap>`), after the function's own caps.
+- **The node gate.** A manifest with `ROLE` lines is deployed with the `ACTIVATE6` message, which signs one digest per role. The node recomputes each digest from the closure it received (`ERR role_cap_tamper` on a mismatch, on a signed role the message leaves out, or on a role it adds unsigned) and requires every role closure to fit `MARCH_DEPLOY_POLICY` (`ERR role_cap_policy <role> <cap>`), after the function's own caps. When the policy has a `serves` line (below), only the closures of the roles it names are checked.
 
 So a node whose policy is generated from a pool's `caps` refuses a patch whose role code would reach beyond them, even when the patch passed a `--grant-cap` on the client. A build with no role grants deploys as before, and an older server that does not know `ACTIVATE6` refuses a manifest with roles rather than skipping the check.
 
@@ -163,7 +163,9 @@ IO.NetConnect.TLS
 IO.Clock
 ```
 
-An empty policy file or absent `MARCH_DEPLOY_POLICY` means permissive: all activations are admitted. This is the default for backward compatibility. A policy constrains what *hot-patched* functions may do; it does not retroactively constrain the trusted base binary the operator already deployed.
+An absent `MARCH_DEPLOY_POLICY` means permissive: all activations are admitted. This is the default for backward compatibility. A policy file that exists but lists no capability admits only functions that declare no IO capability. A policy constrains what *hot-patched* functions may do; it does not retroactively constrain the trusted base binary the operator already deployed.
+
+A line `serves <Proto.Role> ...` (bare `serves` for none) names the roles the node serves, and the per-role check then covers only their closures. `forge host init` writes one for each pool, after the pool's `caps` and the caps the topology runner charges to its roles. A role the node does not serve is another pool's, or the control plane's (`Ctl.Agent`, `Ctl.Control`, generated into every node's `main`), and is not this policy's to bound; a policy with no `serves` line bounds every role.
 
 ### Threat model and scope
 

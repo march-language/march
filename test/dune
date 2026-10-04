@@ -919,6 +919,14 @@
  (action (setenv MARCH_DEPLOY_POLICY test_reload_policy.txt
           (run ./test_reload_activate4_runner reload_keys.txt policy))))
 
+; The same caps with no `serves` line: a hand-written policy bounds every
+; role closure, including roles the node does not serve.
+(rule
+ (alias runtest)
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy_all.txt) (file hcr_stub.so))
+ (action (setenv MARCH_DEPLOY_POLICY test_reload_policy_all.txt
+          (run ./test_reload_activate4_runner reload_keys.txt policy-all))))
+
 ; Restart durability (plan 6.5, DD build step 10): activate, exit, restart,
 ; and the persisted patch stack is replayed (signatures re-verified); a
 ; corrupt entry is skipped with an audit line; MARCH_HCR_NO_REPLAY and a
