@@ -1,0 +1,31 @@
+-- types (1) --
+record Rel { seq : Int, signature : String }
+-- fns (3) --
+## main
+fn main(_c : Cap(IO.Console)) : () =
+  let $t9 : String = let $t8 : { seq : Int, signature : String } = let $t7 : String = let $t6 : String = int_to_string(1) in
+++("s", $t6) in
+{ seq = 1, signature = $t7 } in
+ser($t8) in
+println($t9);
+let $t11 : String = let $t10 : { seq : Int, signature : String } = { seq = 2, signature = "" } in
+sig_of($t10) in
+println($t11)
+
+## ser
+fn ser(r : { seq : Int, signature : String }) : String =
+  let $t3 : String = let $t2 : Bool = let $t1 : String = r.signature in
+==($t1, "") in
+case $t2 of
+  True() -> "-"
+  _ -> r.signature in
+++("sig ", $t3)
+
+## sig_of
+fn sig_of(r : { seq : Int, signature : String }) : String =
+  let $t5 : Bool = let $t4 : String = r.signature in
+==($t4, "") in
+case $t5 of
+  True() -> "-"
+  _ -> r.signature
+

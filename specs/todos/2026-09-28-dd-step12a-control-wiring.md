@@ -32,7 +32,11 @@ leader's audit log, [../progress/2026-10-01-dd-step12a-forge-cluster-backend.md]
   Ctl.Agent:initiate; candidates add Ctl.Control:offer).
 - A provoked skipped-gate report (STATUS has `NOTE` lines for it; the partition scenario heals
   without the old leader racing ahead).
-- The two compiled-only record-update misbehaviours the wiring works around:
-  [2026-10-01-compiled-record-with-projection-sigsegv.md](2026-10-01-compiled-record-with-projection-sigsegv.md).
+- The two compiled-only record-update misbehaviours the wiring works around are fixed
+  ([../progress/2026-10-01-compiled-record-with-projection-sigsegv.md](../progress/2026-10-01-compiled-record-with-projection-sigsegv.md)),
+  so both workarounds can be removed. Shape 1 was a type error the driver dropped: putting
+  the report merge back in the `report` closure needs `fn (rep : Control.AgentReport) ->`,
+  or it is now a compile error. Keeping the merge in `Control.leader_report` is also fine.
+  Shape 2 (`Control.serialize`'s `if` over `r.signature`) compiles correctly now.
 - The session-runtime leaks the wiring routes around:
   [2026-10-01-session-node-vault-tables-leak.md](2026-10-01-session-node-vault-tables-leak.md).

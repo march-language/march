@@ -220,7 +220,8 @@ let rec dup_field_results (k_table : Kind.table) (e : Tir.expr) : Tir.expr =
           Tir.ELet (tmp, e, Tir.EAtom (Tir.AVar tmp))
         | _ -> e)
      | _ -> e)
-  | Tir.ELet (v, e1, e2) -> Tir.ELet (v, e1, dup_field_results k_table e2)
+  | Tir.ELet (v, e1, e2) ->
+    Tir.ELet (v, dup_field_values k_table e1, dup_field_results k_table e2)
   | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, dup_field_results k_table e2)
   | Tir.ECase (a, brs, dflt) ->
     Tir.ECase (a,
@@ -231,6 +232,24 @@ let rec dup_field_results (k_table : Kind.table) (e : Tir.expr) : Tir.expr =
       List.map (fun fd -> { fd with Tir.fn_body = dup_field_results k_table fd.Tir.fn_body }) fns,
       dup_field_results k_table body)
   | other -> other
+
+(* A let's bound value.  A bare [src.f] there is the ELet rule's own
+   borrowed-field case and stays as it is, but the arms of a case on the
+   value's tail are result positions whose projection escapes into the
+   binding just as a function result escapes to the caller: [let t = if c do "-" else
+   r.f end] made [t] an owned String aliasing [r.f] with no dup, so [t]'s
+   drop freed the field [r] still held (Control.serialize's sig line, dd step
+   12b; specs/progress/2026-10-01-compiled-record-with-projection-sigsegv.md). *)
+and dup_field_values (k_table : Kind.table) (e : Tir.expr) : Tir.expr =
+  match e with
+  | Tir.ECase _ -> dup_field_results k_table e
+  (* A projection chain ([st.a.b] is [let t = st.a in t.b]) ends in a bare
+     projection too, and the ELet rule already borrows it as a chain; only a
+     case found along the value's tail is normalised. *)
+  | Tir.ELet (v, e1, e2) ->
+    Tir.ELet (v, dup_field_values k_table e1, dup_field_values k_table e2)
+  | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, dup_field_values k_table e2)
+  | _ -> e
 
 (** Emit the callee-side ownership drop of [$clo] for an apply function whose
     closure parameter is ALREADY owned per the borrow map.
@@ -545,17 +564,29 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
         && not (StringSet.mem p.Tir.v_name borrowed)
         && not (StringSet.mem p.Tir.v_name env.closure_fvs)
         && not (StringSet.mem p.Tir.v_name env.moved_vars)
-        && not (releases_var p.Tir.v_name body)
-        && used_only_as_field_source p.Tir.v_name body)
+        && used_only_as_field_source ~releases_ok:true p.Tir.v_name body)
       fn.Tir.fn_params
   in
   match candidates with
   | [] -> body
   | _ ->
-    let drop_ops tail_expr =
+    let drop_ops live tail_expr =
       List.fold_left
         (fun acc p -> Tir.ESeq (decrc_for env p (Tir.AVar p), acc))
-        tail_expr candidates
+        tail_expr live
+    in
+    (* [live]: the candidates not yet released on the current path.  A
+       release already on the path (the ECase cross-branch drop of a
+       parameter dead in one arm, a post-call dec) takes that candidate out
+       for the rest of the path only.  The guard used to be a whole-body
+       [releases_var], so a release in ONE arm stood the drop down in every
+       arm: [if r.f == "" do "-" else r.f end] released [r] in the first arm
+       and leaked it in the second, once per call.  A release found inside a
+       non-tail subexpression ([e1] of a let or seq, possibly under a case)
+       still counts for the whole rest of the path: conservative, a leak on
+       the paths that did not take it, never a double release. *)
+    let not_released_in e live =
+      List.filter (fun p -> not (releases_var p.Tir.v_name e)) live
     in
     (* [aliases] holds the heap values on the current path that still point
        INTO a candidate without owning a reference of their own: a borrowed
@@ -588,24 +619,39 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
       | Tir.ESeq (_, e2) -> rhs_aliases aliases e2
       | _ -> false
     in
-    let uses_candidate aliases e =
+    let uses_candidate live aliases e =
       List.exists
-        (fun p -> Perceus_liveness.name_free_in p.Tir.v_name e) candidates
+        (fun p -> Perceus_liveness.name_free_in p.Tir.v_name e) live
       || StringSet.exists
            (fun a -> Perceus_liveness.name_free_in a e) aliases
     in
-    let rec push aliases (e : Tir.expr) : Tir.expr =
+    (* [ty]: the type of [e]'s value, for rebinding a tail that still reads a
+       candidate: the function's return type, or a let's bound type when the
+       drops go into its right-hand side. *)
+    let rec push ty live aliases (e : Tir.expr) : Tir.expr =
+      let push_same = push ty in
       match e with
       | Tir.ELet (v, e1, e2) ->
-        let aliases =
+        let aliases' =
           if needs_rc env v.Tir.v_ty && rhs_aliases aliases e1
           then StringSet.add v.Tir.v_name aliases
           else StringSet.remove v.Tir.v_name aliases in
-        Tir.ELet (v, e1, push aliases e2)
+        let live_e2 = not_released_in e1 live in
+        if List.length live_e2 < List.length live
+           && not (uses_candidate live aliases' e2) then
+          (* [e1] releases a candidate on some path and nothing after it
+             mentions any candidate: drop inside [e1], whose paths each know
+             what they released.  Carrying the "released somewhere in e1"
+             verdict past it instead stood the drop down on every path: [let
+             t = if r.f == "" do "-" else r.f end in "sig " ++ t] dropped [r]
+             in the first arm and leaked it in the second. *)
+          Tir.ELet (v, push v.Tir.v_ty live aliases e1, e2)
+        else
+          Tir.ELet (v, e1, push_same live_e2 aliases' e2)
       | Tir.ESeq ((Tir.EIncRC (Tir.AVar w) | Tir.EAtomicIncRC (Tir.AVar w)
                    as e1), e2) ->
-        Tir.ESeq (e1, push (StringSet.remove w.Tir.v_name aliases) e2)
-      | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push aliases e2)
+        Tir.ESeq (e1, push_same live (StringSet.remove w.Tir.v_name aliases) e2)
+      | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push_same (not_released_in e1 live) aliases e2)
       | Tir.ECase (a, branches, default) ->
         let scrut_aliased = match a with
           | Tir.AVar w -> is_candidate_or_alias aliases w
@@ -618,16 +664,24 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
             aliases br.Tir.br_vars in
         Tir.ECase (a,
           List.map (fun br ->
-              { br with Tir.br_body = push (branch_aliases br) br.Tir.br_body })
+              { br with Tir.br_body = push_same live (branch_aliases br) br.Tir.br_body })
             branches,
-          Option.map (push aliases) default)
-      | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, push aliases inner)
-      | tail when uses_candidate aliases tail ->
-        let tmp = fresh_rc_var fn.Tir.fn_ret_ty in
-        Tir.ELet (tmp, tail, drop_ops (Tir.EAtom (Tir.AVar tmp)))
-      | tail -> drop_ops tail
+          Option.map (push_same live aliases) default)
+      | Tir.ELetRec (fns, inner) ->
+        let live =
+          List.filter (fun p ->
+              not (List.exists (fun f -> releases_var p.Tir.v_name f.Tir.fn_body) fns))
+            live in
+        Tir.ELetRec (fns, push_same live aliases inner)
+      | tail ->
+        (match not_released_in tail live with
+         | [] -> tail
+         | live when uses_candidate live aliases tail ->
+           let tmp = fresh_rc_var ty in
+           Tir.ELet (tmp, tail, drop_ops live (Tir.EAtom (Tir.AVar tmp)))
+         | live -> drop_ops live tail)
     in
-    push StringSet.empty body
+    push fn.Tir.fn_ret_ty candidates StringSet.empty body
 
 (** Release the user parameters of an apply fn that its body never mentions.
 

@@ -122,7 +122,7 @@ the control plane it rides on is [2026-09-30-dd-step12a-control-wiring.md](2026-
     `Control.serialize` under `Control.order`.
 
   This is shape 2 of
-  [../todos/2026-10-01-compiled-record-with-projection-sigsegv.md](../todos/2026-10-01-compiled-record-with-projection-sigsegv.md)
+  [2026-10-01-compiled-record-with-projection-sigsegv.md](2026-10-01-compiled-record-with-projection-sigsegv.md)
   (an `if` returning a borrowed field into a consuming `++`). The compiler side is still
   open there. `serialize` now concatenates the signature where it reads it.
   `test/native/control_serialize_twice` serialises one release three times compiled. It
