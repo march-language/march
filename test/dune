@@ -1931,8 +1931,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; over Ctl sessions against four simulated nodes with the leader replaced
 ; mid-rollout (every node takes each of its steps once); a refused order
 ; halting it; and chaos peers for both protocols, 30 seeds each. The
-; fixture also holds the protocols' declarations (they cannot live in the
-; stdlib yet: specs/todos/2026-09-28-endpoints-protocol-in-nested-module.md).
+; fixture also holds the protocols' declarations (until they move into the
+; stdlib: specs/todos/2026-09-28-dd-step12a-control-wiring.md).
 ; Both backends, one golden.
 (rule
  (targets control_peers_bin control_peers.out control_peers_interp.out)

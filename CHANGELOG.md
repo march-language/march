@@ -143,6 +143,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **An `@[endpoints]` protocol now works in any module.** A protocol declared in a
+  nested module, in a library module found through `MARCH_LIB_PATH`, or in a
+  standard-library module failed with "Unknown module `P_A`"; only one at the entry
+  file's top level worked. The generated modules are now addressable by their
+  qualified name (`Net.Fan_C.register(s, 0)`) from anywhere. Underneath, a qualified
+  type written relative to an enclosing module (`A.T` inside `mod Outer` naming its
+  sibling `Outer.A`) now resolves, and a protocol in the standard library no longer
+  makes a program's own bare `from_json` call ambiguous when compiled.
 - **A hot patch of a topology role body is no longer refused by the node's
   capability policy.** A role body holds the session it is handed, so its own
   caps include `Session.Live`, and a node running the policy `forge host init`

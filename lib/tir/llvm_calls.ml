@@ -176,6 +176,10 @@ let dispatch_arg_type_name (args : Tir.atom list) : string option =
     (match v.Tir.v_ty with
      | Tir.TCon (n, _) -> Some n
      | _ -> None)
+  | Tir.ALit (March_ast.Ast.LitInt _) :: _ -> Some "Int"
+  | Tir.ALit (March_ast.Ast.LitFloat _) :: _ -> Some "Float"
+  | Tir.ALit (March_ast.Ast.LitString _) :: _ -> Some "String"
+  | Tir.ALit (March_ast.Ast.LitBool _) :: _ -> Some "Bool"
   | _ -> None
 
 let fail_if_unresolved_iface_method ?(args : Tir.atom list = [])
@@ -211,6 +215,15 @@ let fail_if_unresolved_iface_method ?(args : Tir.atom list = [])
            | Some i -> find (String.sub name (i + 1) (String.length name - i - 1)))
       in
       find bare_name
+  in
+  (* The standard library's own impls (an eagerly loaded `@[endpoints]`
+     protocol's codecs, [Mono.stdlib_impl_syms]) are not what a user's call
+     was after: a diagnostic about the user's call lists the program's own
+     candidates, and the stdlib's only when there are no others. *)
+  let candidates =
+    match List.filter (fun c -> not (Hashtbl.mem Mono.stdlib_impl_syms c)) candidates with
+    | [] -> if bare_name = "to_json" then [] else candidates
+    | own -> own
   in
   (* `to_json` with NO JsonTo impl anywhere in the program: no candidate list,
      so the branch below never ran and the bare builtin reached the linker as
@@ -248,7 +261,7 @@ let fail_if_unresolved_iface_method ?(args : Tir.atom list = [])
     in
     raise (Ambiguous_iface_call (Printf.sprintf
       "no `JsonTo` implementation for %s, which the call to `to_json` needs \
-       (no type in this program derives `Json`).\n%s"
+       (no type outside the standard library derives `Json`).\n%s"
       what fix))
   end;
   if candidates <> [] then begin
