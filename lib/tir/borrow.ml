@@ -183,6 +183,45 @@ let extern_borrow_table : (string * bool list) list = [
   ("++",                   [true; true]);
   ("string_concat3",       [true; true; true]);
   ("string_byte_length",   [true]);
+  (* march_string_chars builds a fresh list of fresh one-char strings and
+     march_string_from_chars copies each element's bytes into a fresh string;
+     neither stores nor frees its argument.  Both sat in
+     [extern_owned_builtins] unaudited, so every call leaked its argument:
+     the whole input list (cells + strings) for string_from_chars, which
+     Bytes.from_list runs on every call — ~430 B per 3-byte Bytes.from_list,
+     the bulk of an idle conduit worker's ~5 MB/min growth via depot's
+     Postgres wire encoder/decoder. *)
+  ("string_chars",         [true]);
+  ("string_from_chars",    [true]);
+  (* march_tcp_send_all (march_http.c) writes the String's bytes to the
+     socket and returns; it never stores or releases it.  Its builtin row is
+     [in_is_builtin = false], which exempts it from
+     test_builtin_borrow_classification, so it silently defaulted to OWNED
+     and every send leaked its payload String — one per Postgres message
+     depot sends (five per parameterized query). *)
+  ("tcp_send_all",         [false; true]);
+  (* ── Vault (march_extras.c), audited 2026-10-01: every one copies its
+     table/name/key into C (vault_key_cstr) and takes its OWN reference to a
+     stored value (march_incrc), never storing or releasing the caller's.
+     Classified owned (unaudited) they leaked each call's key -- conduit's
+     `Vault.get(tbl, "paused:" ++ queue)` per poll -- and a reference to each
+     stored value.  vault_update's closure stays owned: march_vault_update
+     hands it to the closure's apply fn, which consumes it. ── *)
+  ("vault_new",            [true]);
+  ("vault_whereis",        [true]);
+  ("vault_set",            [true; true; true]);
+  ("vault_set_ttl",        [true; true; true; false]);
+  ("vault_put_new",        [true; true; true; false]);
+  ("vault_incr",           [true; true; false]);
+  ("vault_push_capped",    [true; true; true; false]);
+  ("vault_get",            [true; true]);
+  ("vault_drop",           [true; true]);
+  ("vault_update",         [true; true; false]);
+  ("vault_size",           [true]);
+  ("vault_keys",           [true]);
+  ("vault_ns_set",         [true; true; true]);
+  ("vault_ns_get",         [true; true]);
+  ("vault_ns_drop",        [true; true]);
   ("string_byte_at",       [true; false]);
   ("string_grapheme_count",[true]);
   ("string_is_empty",      [true]);
@@ -416,11 +455,8 @@ let extern_owned_builtins : string list = [
     "logger_register_appender";
     "panic_"; "unreachable_"; "todo_"; "print_stderr"; "char_to_int";
     "char_is_digit"; "char_is_alphanumeric"; "char_is_whitespace";
-    "string_chars"; "string_from_chars"; "list_append"; "list_concat";
-    "iolist_hash_fnv1a"; "vault_new"; "vault_whereis"; "vault_set";
-    "vault_set_ttl"; "vault_put_new"; "vault_incr"; "vault_push_capped";
-    "vault_get"; "vault_drop"; "vault_update"; "vault_size"; "vault_keys";
-    "vault_ns_set"; "vault_ns_get"; "vault_ns_drop"; "md5"; "sha256";
+    "list_append"; "list_concat";
+    "iolist_hash_fnv1a"; "md5"; "sha256";
     "stdlib_sha256"; "sha512"; "stdlib_sha512"; "hmac_sha256";
     "stdlib_hmac_sha256"; "hmac_sha256_bytes"; "pbkdf2_sha256";
     "ed25519_seed_keypair"; "ed25519_sign"; "ed25519_verify"; "x25519";
