@@ -93,6 +93,7 @@ let corpus = [
   "nested_record_field_capture",     "nested_record_field_capture.march";
   "tuple_param_borrowed_destruct",   "tuple_param_borrowed_destruct.march";
   "record_field_tail_projection",    "record_field_tail_projection.march";
+  "record_branch_field_result",      "record_branch_field_result.march";
   "tuple_destructure_moved_fields",  "tuple_destructure_moved_fields.march";
   "nominal_record_actor_drops",      "nominal_record_actor_drops.march";
 ]

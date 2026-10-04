@@ -7,6 +7,12 @@
 
       hcr_deploy keygen <dir>                 writes <dir>/pk (base64), <dir>/sk (hex)
       hcr_deploy deploy <socket> <dir> <so> [<old .schemas.json> <old .hcr_manifest>]
+                                              GRANT_CAPS=<cap,...>: the operator's
+                                              `--grant-cap`s (authorize a widening)
+      hcr_deploy policy <project root> <pool> <.hcr_manifest>
+                                              the node policy `forge host init` writes
+                                              for <pool> (Host_init.policy_text): its
+                                              caps plus its runner's, one per line
       hcr_deploy counters <socket> <key>...   prints key=value from PINS
       hcr_deploy release <dir> <host:port,...> <build> <pool,...> <so> <old .hcr_manifest> [<old .schemas.json>]
                                               a hot release through the control plane
@@ -55,14 +61,30 @@ let () =
      | Ok manifest ->
        let r =
          try
+           let grant_caps =
+             match Sys.getenv_opt "GRANT_CAPS" with
+             | Some g -> List.filter (fun c -> c <> "") (String.split_on_char ',' g)
+             | None -> []
+           in
            March_forge.Cmd_deploy_hot.run ~tunnel:false ~ssh_host:"local" ~remote_socket:socket
              ~signing_pubkey:pk ~sk ~manifest ~so_path:so ~old_schemas_path:old_schemas
-             ~new_schemas_path:(so ^ ".schemas.json") ~old_manifest_path:old_manifest ()
+             ~new_schemas_path:(so ^ ".schemas.json") ~old_manifest_path:old_manifest ~grant_caps ()
          with Failure m -> Error m | Unix.Unix_error (e, _, _) -> Error (Unix.error_message e)
        in
        (match r with
         | Ok _ -> ()
         | Error m -> prerr_endline ("hcr_deploy: " ^ m); exit 1))
+  | [ "policy"; root; pool; manifest_path ] ->
+    let fail m = prerr_endline ("hcr_deploy: " ^ m); exit 1 in
+    (match March_forge.Reconcile.load_checked ~root None, March_forge.Cmd_deploy_hot.parse_manifest manifest_path with
+     | Error m, _ | _, Error m -> fail m
+     | Ok t, Ok manifest ->
+       (match List.find_opt (fun (p : March_forge.Topology.pool) -> p.pool_name = pool) t.pools with
+        | None -> fail ("no pool " ^ pool)
+        | Some p ->
+          (match March_forge.Host_init.policy_text ~derived:None ~manifest p with
+           | Some text -> print_string text
+           | None -> fail ("pool " ^ pool ^ " has no written caps: no policy"))))
   | "counters" :: socket :: keys ->
     (match March_forge.Reconcile.query_reload socket with
      | Error m -> prerr_endline ("hcr_deploy: " ^ m); exit 1

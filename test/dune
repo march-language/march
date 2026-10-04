@@ -919,6 +919,14 @@
  (action (setenv MARCH_DEPLOY_POLICY test_reload_policy.txt
           (run ./test_reload_activate4_runner reload_keys.txt policy))))
 
+; The same caps with no `serves` line: a hand-written policy bounds every
+; role closure, including roles the node does not serve.
+(rule
+ (alias runtest)
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy_all.txt) (file hcr_stub.so))
+ (action (setenv MARCH_DEPLOY_POLICY test_reload_policy_all.txt
+          (run ./test_reload_activate4_runner reload_keys.txt policy-all))))
+
 ; Restart durability (plan 6.5, DD build step 10): activate, exit, restart,
 ; and the persisted patch stack is replayed (signatures re-verified); a
 ; corrupt entry is skipped with an audit line; MARCH_HCR_NO_REPLAY and a
@@ -1697,6 +1705,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/aggregate_param_field_alias.expected native_aggregate_param_field_alias.out)))
 
+; A branch whose value is an owned record's field, compiled: as a let's bound
+; value its arm handed the field out without a reference (use-after-free), and
+; one arm's release of the record stood its drop down in the other (a leak).
+(rule
+ (targets native_record_branch_field_result native_record_branch_field_result.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/record_branch_field_result.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_record_branch_field_result
+        native/record_branch_field_result.march)
+   (with-stdout-to native_record_branch_field_result.out
+        (system "./native_record_branch_field_result")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_branch_field_result.expected native_record_branch_field_result.out)))
+
 ; ── n-ary string concat, compiled ─────────────────────────────────────────
 ; Control.serialize twice on one release, compiled: the second call used to
 ; read the signature the first had released (dd step 12b; see the fixture).
@@ -1923,8 +1951,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; over Ctl sessions against four simulated nodes with the leader replaced
 ; mid-rollout (every node takes each of its steps once); a refused order
 ; halting it; and chaos peers for both protocols, 30 seeds each. The
-; fixture also holds the protocols' declarations (they cannot live in the
-; stdlib yet: specs/todos/2026-09-28-endpoints-protocol-in-nested-module.md).
+; fixture also holds the protocols' declarations (until they move into the
+; stdlib: specs/todos/2026-09-28-dd-step12a-control-wiring.md).
 ; Both backends, one golden.
 (rule
  (targets control_peers_bin control_peers.out control_peers_interp.out)
@@ -2721,6 +2749,65 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/observe_types_hr.expected native_observe_types_hr.out)))
+
+; R2 counters: a ping-pong pair's exact msgs_in/msgs_out, and an actor blocked
+; in an Actor.call whose incoming messages are held off its mailbox (reported
+; as "held").
+(rule
+ (targets native_observe_counters native_observe_counters.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_snapshot_check.exe)
+       (file native/observe_counters.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_observe_counters native/observe_counters.march)
+   (with-stdout-to native_observe_counters.out
+    (system "rm -f obs_ctr.sock obs_ctr.prog; MARCH_OBSERVE_SOCKET=obs_ctr.sock ./native_observe_counters > obs_ctr.prog 2>&1 & prog=$!; ./observe_snapshot_check.exe counters obs_ctr.sock obs_ctr.prog; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -f obs_ctr.prog obs_ctr.sock; true")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_counters.expected native_observe_counters.out)))
+
+; R2 scheduler utilisation: idle under 5%, four spinners on four schedulers
+; over 90%.
+(rule
+ (targets native_observe_sched native_observe_sched.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_snapshot_check.exe)
+       (file native/observe_sched.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_observe_sched native/observe_sched.march)
+   (with-stdout-to native_observe_sched.out
+    (system "rm -f obs_sched.sock obs_sched.prog; MARCH_NUM_SCHEDULERS=4 MARCH_OBSERVE_SOCKET=obs_sched.sock ./native_observe_sched > obs_sched.prog 2>&1 & prog=$!; ./observe_snapshot_check.exe sched obs_sched.sock obs_sched.prog; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -f obs_sched.prog obs_sched.sock; true")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_sched.expected native_observe_sched.out)))
+
+; R2 crash ring and TOP: a supervised child panicking three times (CRASHES,
+; restart numbers, no message text, the supervisor's child_crashes) and a
+; self-sending actor ranked first by TOP msgs_in over a window.
+(rule
+ (targets native_observe_crashes native_observe_crashes.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_snapshot_check.exe)
+       (file native/observe_crashes.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_observe_crashes native/observe_crashes.march)
+   (with-stdout-to native_observe_crashes.out
+    (system "rm -f obs_cr.sock obs_cr.prog; MARCH_OBSERVE_SOCKET=obs_cr.sock ./native_observe_crashes > obs_cr.prog 2>&1 & prog=$!; ./observe_snapshot_check.exe crashes obs_cr.sock obs_cr.prog; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -f obs_cr.prog obs_cr.sock; true")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_crashes.expected native_observe_crashes.out)))
 
 ; ── Leak guard: the Process builtins (spawn_async/read_line/write/kill_proc/
 ; wait_proc, run's spawn_sync, env/set_env) only READ their heap arguments but
@@ -6176,6 +6263,31 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/actor_on_stop_tree.expected interp_actor_on_stop_tree.out)))
+
+; ── A supervisor compiled with --hot-reload ─────────────────────────────
+; Same program and golden as native_actor_on_stop_tree, built with
+; `--hot-reload Main`. It used to fail to compile at all (hot-reload spawn
+; glue skipped spawning the supervise-block children, so registration
+; referenced an unbound `$sup_child_ptr_a`); once it compiled, the runtime
+; read each child's pid at a[4 + idx] in the actor struct, which under
+; hot-reload is the $f_state pointer word (or past the struct), and
+; get_actor_field never looked inside the state record.
+(rule
+ (targets native_actor_on_stop_tree_hr native_actor_on_stop_tree_hr.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/actor_on_stop_tree.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --hot-reload Main
+        -o native_actor_on_stop_tree_hr native/actor_on_stop_tree.march)
+   (with-stdout-to native_actor_on_stop_tree_hr.out
+        (system "./native_actor_on_stop_tree_hr")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_on_stop_tree.expected native_actor_on_stop_tree_hr.out)))
 
 ; ── A file error's constructor can be matched, on both backends ──────────
 ; The file_*/dir_* builtins denote the canonical BARE `FileError`; a

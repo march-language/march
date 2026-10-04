@@ -4,7 +4,7 @@
 -- the second call read freed memory (ASAN: heap-use-after-free in
 -- march_string_eq; without ASAN it printed `sig -`). The control plane's
 -- leader serialises the release it holds for every `do:certs` order.
--- specs/todos/2026-10-01-compiled-record-with-projection-sigsegv.md
+-- specs/progress/2026-10-01-compiled-record-with-projection-sigsegv.md
 mod ControlSerializeTwice do
   needs IO
   needs IO.Console

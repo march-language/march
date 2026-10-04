@@ -1,0 +1,25 @@
+-- A branch whose value is a field of an owned record parameter.  In [ser] the
+-- `if` is a let's bound value: its second arm must dup `r.signature`
+-- (`inc_rc $rc_N`) before the concatenation's drop of the temporary, and in
+-- both functions the arm that does not release [r] must drop it after the
+-- dup (the first arm releases [r] itself, which used to stand the drop down
+-- in every arm).  Runtime reproducer: test/native/record_branch_field_result.march.
+-- specs/progress/2026-10-01-compiled-record-with-projection-sigsegv.md
+mod RecordBranchFieldResult do
+  needs IO.Console
+
+  type Rel = { seq : Int, signature : String }
+
+  pfn ser(r : Rel) : String do
+    "sig " ++ (if r.signature == "" do "-" else r.signature end)
+  end
+
+  pfn sig_of(r : Rel) : String do
+    if r.signature == "" do "-" else r.signature end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    println(ser({ seq: 1, signature: "s" ++ int_to_string(1) }))
+    println(sig_of({ seq: 2, signature: "" }))
+  end
+end

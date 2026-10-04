@@ -1,0 +1,72 @@
+-- A branch whose value is a field of an owned record, compiled.
+--   1. `"sig " ++ (if r.signature == "" do "-" else r.signature end)`: the
+--      `if` is a let's bound value, and its second arm handed out
+--      `r.signature` with no reference of its own; the concatenation's drop
+--      of the temporary then released the string the record still held.  The
+--      next call read freed memory: `sig -` instead of the signature (dd step
+--      12b, Control.serialize; ASAN heap-use-after-free in march_string_eq).
+--   2. The same `if` as the function's value: values were right, but the
+--      record parameter, released in the first arm, was released in neither
+--      arm, because one arm's release stood the parameter's drop down on
+--      every path.  Both shapes leaked the record once per call.
+-- SIGNAL: the values, and live_allocs() deltas printed as booleans.
+-- specs/progress/2026-10-01-compiled-record-with-projection-sigsegv.md
+mod Main do
+  needs IO.Console
+
+  type Rel = { seq : Int, signature : String, body : String }
+
+  pfn ser(r : Rel) : String do
+    "sig " ++ (if r.signature == "" do "-" else r.signature end)
+  end
+
+  pfn sig_of(r : Rel) : String do
+    if r.signature == "" do "-" else r.signature end
+  end
+
+  pfn mk(n : Int) : Rel do
+    { seq: n, signature: (if n % 2 == 0 do "" else "s" ++ int_to_string(n) end), body: "b" ++ int_to_string(n) }
+  end
+
+  pfn churn_ser(n : Int, acc : Int) : Int do
+    if n == 0 do acc
+    else
+      let r = mk(n)
+      let k = String.byte_size(r.signature)
+      let a = ser(r)
+      let b = ser(r)
+      churn_ser(n - 1, acc + String.byte_size(a) + String.byte_size(b) + k)
+    end
+  end
+
+  pfn churn_sig(n : Int, acc : Int) : Int do
+    if n == 0 do acc
+    else
+      let r = mk(n)
+      let k = String.byte_size(r.signature)
+      let a = sig_of(r)
+      let b = sig_of(r)
+      churn_sig(n - 1, acc + String.byte_size(a) + String.byte_size(b) + k)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let r = mk(7)
+    let a = ser(r)
+    let b = ser(r)
+    let c = ser(r)
+    println(a ++ " | " ++ b ++ " | " ++ c ++ " | " ++ r.signature)
+    let e = mk(8)
+    println(ser(e) ++ " | " ++ ser(e) ++ " | " ++ sig_of(e))
+    println(sig_of(r) ++ " | " ++ sig_of(r) ++ " | " ++ r.body)
+    let _ = churn_ser(50, 0)
+    let _ = churn_sig(50, 0)
+    let b1 = live_allocs()
+    let t1 = churn_ser(2000, 0)
+    let b2 = live_allocs()
+    let t2 = churn_sig(2000, 0)
+    let b3 = live_allocs()
+    println("let-bound branch = " ++ int_to_string(t1) ++ ", flat: " ++ (if b2 - b1 == 0 do "true" else "false" end))
+    println("tail branch = " ++ int_to_string(t2) ++ ", flat: " ++ (if b3 - b2 == 0 do "true" else "false" end))
+  end
+end

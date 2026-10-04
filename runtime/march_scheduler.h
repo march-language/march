@@ -240,6 +240,11 @@ typedef struct march_proc {
     _Atomic march_proc_status  status;       /* Process lifecycle state (atomic)      */
     march_proc_priority        priority;
     int64_t                    reductions;   /* Remaining reduction budget this quantum */
+    /* Observe counters written at EVERY dispatch (see the counter block at the
+     * end of this struct): here, beside `reductions`, which the dispatch also
+     * writes, so they share its cache line rather than touch a cold one. */
+    _Atomic uint64_t           slices;
+    _Atomic int64_t            last_run_ms;
     void                      *stack_mmap_base; /* Base of full mmap reservation (permanent guard page here) */
     void                      *stack_base;      /* Current bottom of usable stack region (grows downward) */
     size_t                     stack_alloc;     /* Total mmap size: MARCH_STACK_MAX + one guard page */
@@ -480,7 +485,37 @@ typedef struct march_proc {
     _Atomic int                 dbg_queued;
     _Atomic int                 dbg_running_on;
 #endif
+    /* Observe counters (R2 of specs/plans/2026-09-28-observe-recon-shell-plan.md),
+     * last so no existing field moves, except slices and last_run_ms, which
+     * sit beside `reductions` (above), on the line dispatch already writes.  Each has ONE writer, so it is bumped
+     * with a relaxed load and store (march_proc_bump), never an atomic
+     * read-modify-write; _Atomic because the observe walk reads them from
+     * another thread.
+     *   slices      — times a scheduler dispatched this proc (owner scheduler)
+     *   last_run_ms — a coarse clock at the latest dispatch (march_now_ms
+     *                 units): the preemption daemon's tick (1 ms), else the
+     *                 scheduler's own, refreshed every 1024 dispatches and on
+     *                 the idle path; never a clock read per dispatch
+     *   msgs_in     — user messages this proc received (the receiver)
+     *   msgs_out    — messages this proc sent that were enqueued (the sender)
+     *   held        — user messages an Actor.call on this proc has taken off
+     *                 the mailbox and will put back (not in mbox_count while
+     *                 held; the proc itself writes it) */
+    _Atomic uint64_t            msgs_in;
+    _Atomic uint64_t            msgs_out;
+    _Atomic int64_t             held;
 } march_proc;
+
+/* Bump a single-writer counter: relaxed load + store, the same instructions
+ * as a plain increment (no lock prefix, no ldadd). */
+#define march_proc_bump(field) \
+    atomic_store_explicit(&(field), \
+        atomic_load_explicit(&(field), memory_order_relaxed) + 1, \
+        memory_order_relaxed)
+
+/* Record how many messages the calling green thread's Actor.call is holding
+ * off its mailbox (0 when it puts them back). */
+void march_sched_set_held(int64_t n);
 
 /* ── Scheduler (per OS-thread) ───────────────────────────────────────── */
 typedef struct march_scheduler {
@@ -505,6 +540,17 @@ typedef struct march_scheduler {
     int             entered;      /* sched_loop was reached                      */
     int64_t         stat_dispatches;  /* green-thread dispatches                 */
     int64_t         stat_idle_polls;  /* loop turns that found nothing to run    */
+    /* Coarse clock for march_proc.last_run_ms (march_now_ms units): refreshed
+     * on the idle path and every 1024 dispatches, so a dispatch never reads
+     * the clock.  Owner thread only. */
+    int64_t         now_ms;
+    /* Idle time (R2, C12 of the observe plan): nanoseconds this scheduler
+     * spent asleep on the idle path, and the monotonic time its loop
+     * started.  Utilisation = 1 - Δidle_ns / Δwall.  Only the idle path is
+     * timed (two clock reads around the 1 ms sleep it already takes), so a
+     * busy scheduler pays nothing.  Owner writes, the observe thread reads. */
+    _Atomic uint64_t idle_ns;
+    _Atomic uint64_t started_ns;
     _Atomic int     preempt_tick; /* Set by the preemption daemon just before it
                                    * signals this thread; consumed by the
                                    * handler.  How the handler tells OUR tick
@@ -527,7 +573,7 @@ typedef struct march_scheduler {
      * captured once via __tsan_get_current_fiber() at the top of sched_loop. */
     void           *tsan_fiber;
 #endif
-} march_scheduler;
+} __attribute__((aligned(64))) march_scheduler;  /* own cache lines: no false sharing between neighbours */
 
 /* ── Public API ───────────────────────────────────────────────────────── */
 
@@ -736,6 +782,12 @@ int64_t      march_sched_stat(int64_t which);
 #define MARCH_THREAD_STAT_DISPATCHES  2   /* green-thread dispatches           */
 #define MARCH_THREAD_STAT_IDLE_POLLS  3   /* loop turns with nothing to run    */
 int64_t      march_sched_thread_stat(int sched_id, int which);
+
+/* Monotonic nanoseconds (CLOCK_MONOTONIC), and a scheduler's idle_ns /
+ * started_ns (0 for an index outside the current count). */
+uint64_t     march_mono_ns(void);
+uint64_t     march_sched_idle_ns(int sched_id);
+uint64_t     march_sched_started_ns(int sched_id);
 
 /* Sentinel returned by march_sched_recv when the process was woken without a
  * message (killed or spurious wakeup).  This is the address of a static C

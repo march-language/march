@@ -175,9 +175,9 @@ let tree sock =
     (member "current" e |> to_int >= 1 && member "counters" e <> `Null)
     (Yojson.Safe.to_string e);
   let s = data (get sock "SNAPSHOT") in
-  check "SNAPSHOT carries all six sections"
+  check "SNAPSHOT carries all seven sections"
     (List.sort compare (keys s)
-     = ["actors"; "epochs"; "mem"; "names"; "sched"; "tree"])
+     = ["actors"; "crashes"; "epochs"; "mem"; "names"; "sched"; "tree"])
     (String.concat "," (keys s));
   check "SNAPSHOT sections come from one walk"
     (member "actors" s |> member "total" |> to_int
@@ -200,7 +200,7 @@ let tree sock =
           |> List.map (fun v -> member "name" v |> to_string) in
   check "HELP lists every verb"
     (h = ["HELP"; "PING"; "SNAPSHOT"; "ACTORS"; "ACTOR"; "TREE"; "NAMES";
-          "SCHED"; "MEM"; "EPOCHS"])
+          "SCHED"; "MEM"; "EPOCHS"; "CRASHES"; "TOP"])
     (String.concat "," h)
 
 let types sock =
@@ -214,6 +214,153 @@ let types sock =
     (List.exists (fun s -> member "name" s = `String "Counter_dispatch") e)
     (Yojson.Safe.to_string (`List e))
 
+(* R2 counters: test/native/observe_counters.march. *)
+let counters sock =
+  let by_name () =
+    data (get sock "ACTORS pid 10000") |> member "actors" |> to_list
+    |> List.filter_map (fun r ->
+        match member "names" r |> to_list with
+        | [ `String n ] -> Some (n, r)
+        | _ -> None)
+  in
+  let int k r = member k r |> to_int in
+  let deadline = Unix.gettimeofday () +. 20. in
+  let rec wait () =
+    let rows = by_name () in
+    let ok =
+      match List.assoc_opt "pong" rows, List.assoc_opt "caller" rows with
+      | Some p, Some c -> int "msgs_in" p = 200 && int "held" c = 150
+      | _ -> false
+    in
+    if ok then rows
+    else if Unix.gettimeofday () > deadline then (print_endline "FAIL: never settled"; rows)
+    else (Unix.sleepf 0.1; wait ())
+  in
+  let rows = wait () in
+  let row n = List.assoc n rows in
+  let show r = Yojson.Safe.to_string r in
+  let pong = row "pong" and ping = row "ping" and caller = row "caller" in
+  check "pong received 200 and sent 200"
+    (int "msgs_in" pong = 200 && int "msgs_out" pong = 200) (show pong);
+  check "ping sent 200 and received 201 (the kick)"
+    (int "msgs_in" ping = 201 && int "msgs_out" ping = 200) (show ping);
+  check "each side of the pair was dispatched"
+    (int "slices" pong >= 1 && int "slices" ping >= 1) "";
+  check "idle_ms is reported once an actor has run"
+    (match member "idle_ms" pong with `Int n -> n >= 0 | _ -> false) (show pong);
+  check "a caller blocked in Actor.call shows the 150 it holds, none queued"
+    (int "held" caller = 150 && int "mbox" caller = 0) (show caller);
+  check "the call's request counts as a send" (int "msgs_out" caller = 1) (show caller);
+  let top = data (get sock "ACTORS mbox 1") |> member "actors" |> to_list in
+  check "ACTORS mbox ranks the held work first"
+    (match top with [ r ] -> member "names" r = `List [ `String "caller" ] | _ -> false)
+    (show (`List top));
+  let m = data (get sock "MEM") in
+  check "MEM counts held messages as queued"
+    (member "queued_messages" m |> to_int >= 150) (show m)
+
+(* R2 utilisation: test/native/observe_sched.march at 4 schedulers.  The
+   idle query runs right after "ready" (3 s of idle follow); the busy one
+   after the program prints "busy" (4 s of 4 spinners follow). *)
+let sched sock ready_file =
+  let util req =
+    let d = data (get sock req) in
+    (member "utilisation" d |> to_number, d)
+  in
+  let (idle, d) = util "SCHED 300" in
+  check "SCHED reports 4 schedulers" (member "schedulers" d |> to_int = 4) "";
+  check "an idle node is under 5% busy" (idle < 0.05)
+    (Printf.sprintf "%.3f" idle);
+  let deadline = Unix.gettimeofday () +. 20. in
+  let rec wait_busy () =
+    let s = try In_channel.with_open_bin ready_file In_channel.input_all with Sys_error _ -> "" in
+    let has_busy = List.mem "busy" (String.split_on_char '\n' s) in
+    if has_busy then ()
+    else if Unix.gettimeofday () > deadline then print_endline "FAIL: never busy"
+    else (Unix.sleepf 0.05; wait_busy ())
+  in
+  wait_busy ();
+  Unix.sleepf 0.3;
+  let (busy, d) = util "SCHED 1000" in
+  check "4 spinners on 4 schedulers are over 90% busy" (busy > 0.90)
+    (Printf.sprintf "%.3f %s" busy (Yojson.Safe.to_string (member "threads" d)));
+  (* last_run_ms comes from a clock the preemption daemon ticks every 1 ms:
+     an actor that is running right now must not look idle.  (It once came
+     from a per-scheduler clock refreshed every 1024 dispatches, which left
+     the busiest actors reading seconds idle.) *)
+  (* Five samples: the stale clock read anywhere from 0 to ~700 ms. *)
+  let samples = List.init 5 (fun _ ->
+      Unix.sleepf 0.1;
+      data (get sock "ACTORS status 4") |> member "actors" |> to_list
+      |> List.map (fun r -> match member "idle_ms" r with `Int n -> n | _ -> max_int)) in
+  check "running actors read under 50 ms idle (5 samples)"
+    (List.for_all (fun xs -> List.length xs = 4 && List.for_all (fun n -> n < 50) xs) samples)
+    (String.concat " " (List.map (fun xs -> String.concat "," (List.map string_of_int xs)) samples));
+  let s = data (get sock "SNAPSHOT sched") |> member "sched" in
+  check "SNAPSHOT's sched section is lifetime-only (no window)"
+    (member "window_ms" s = `Null && member "utilisation" s = `Null
+     && (match member "lifetime_utilisation" s with `Float _ -> true | _ -> false))
+    (Yojson.Safe.to_string s);
+  check "SCHED rejects a window over 5000 ms"
+    (error (get sock "SCHED 5001") = Some "bad_args") ""
+
+(* R2 crash ring and TOP: test/native/observe_crashes.march. *)
+let crashes sock =
+  let c = data (get sock "CRASHES 10") in
+  let es = member "crashes" c |> to_list in
+  check "CRASHES lists the 3 crashes" (member "total" c |> to_int = 3 && List.length es = 3)
+    (Yojson.Safe.to_string c);
+  check "restart numbers 3, 2, 1 (newest first)"
+    (List.map (fun e -> member "restart" e |> to_int) es = [3; 2; 1]) (Yojson.Safe.to_string c);
+  check "every entry is kind crash under one supervisor"
+    (List.for_all (fun e -> member "kind" e = `String "crash") es
+     && List.length (List.sort_uniq compare (List.map (fun e -> member "supervisor" e) es)) = 1)
+    (Yojson.Safe.to_string c);
+  check "an entry carries no message field"
+    (List.for_all (fun e -> not (List.mem "message" (keys e))) es) "";
+  let boss = List.hd es |> member "supervisor" |> to_int in
+  let names = data (get sock "NAMES") |> member "names" |> to_list in
+  check "the entries' supervisor is boss"
+    (List.exists (fun e -> member "name" e = `String "boss" && member "pid" e |> to_int = boss) names) "";
+  let a = data (get sock (Printf.sprintf "ACTOR %d" boss)) |> member "actor" in
+  check "boss's row counts its children's 3 crashes"
+    (member "child_crashes" a |> to_int = 3 && member "crashes" a |> to_int = 0)
+    (Yojson.Safe.to_string a);
+  let top req = data (get sock req) |> member "top" |> to_list in
+  let first_name t = match t with r :: _ -> member "names" r | [] -> `Null in
+  check "TOP crashes ranks the crash-looping supervisor first"
+    (first_name (top "TOP crashes 1") = `List [ `String "boss" ]) "";
+  check "TOP msgs_in over a window ranks the self-sending actor first"
+    (first_name (top "TOP msgs_in 1 300") = `List [ `String "loop" ]) "";
+  List.iter (fun (req, want) ->
+      let got = error (get sock req) in
+      check (Printf.sprintf "%s -> %s" req want) (got = Some want)
+        (Option.value got ~default:"(data)"))
+    [ "TOP", "bad_args"; "TOP bogus 3", "bad_args"; "TOP mbox", "bad_args";
+      "TOP mbox 3 500", "bad_args"; "TOP msgs_in 3 10001", "bad_args";
+      "CRASHES 0", "bad_args"; "CRASHES 257", "bad_args" ];
+  let s = data (get sock "SNAPSHOT crashes") in
+  check "SNAPSHOT has a crashes section"
+    (member "crashes" s |> member "total" |> to_int = 3) "";
+  (* spawned_by: maker spawned two leaves. *)
+  let maker = List.find (fun e -> member "name" e = `String "maker") names |> member "pid" |> to_int in
+  let m = data (get sock (Printf.sprintf "ACTOR %d" maker)) in
+  check "ACTOR maker lists the two actors it spawned"
+    (List.length (member "spawned" m |> to_list) = 2) (Yojson.Safe.to_string m);
+  let t = data (get sock "TREE") in
+  let roots = member "roots" t |> to_list in
+  let node = List.find_opt (fun r -> member "pid" r |> to_int = maker) roots in
+  check "TREE nests them under maker, linked as spawned"
+    (match node with
+     | Some r ->
+       let kids = member "children" r |> to_list in
+       List.length kids = 2 && List.for_all (fun k -> member "link" k = `String "spawned") kids
+     | None -> false)
+    (Yojson.Safe.to_string t);
+  check "loop (spawned by main) stays unsupervised"
+    (List.exists (fun p -> p = `Int (List.find (fun e -> member "name" e = `String "loop") names |> member "pid" |> to_int))
+       (member "unsupervised" t |> to_list)) ""
+
 let () =
   match Sys.argv with
   | [| _; mode; sock; ready |] ->
@@ -221,9 +368,12 @@ let () =
     (match mode with
      | "tree" -> tree sock
      | "types" -> types sock
-     | _ -> prerr_endline "mode: tree | types"; exit 2);
+     | "counters" -> counters sock
+     | "sched" -> sched sock ready
+     | "crashes" -> crashes sock
+     | _ -> prerr_endline "mode: tree | types | counters | sched | crashes"; exit 2);
     check "no reply carries the crash message" (!leaked = [])
       (String.concat "; " !leaked);
     (* The golden diff reports a failure; exit 0 so it is shown. *)
     ignore !failures
-  | _ -> prerr_endline "usage: observe_snapshot_check tree|types <socket> <ready-file>"; exit 2
+  | _ -> prerr_endline "usage: observe_snapshot_check tree|types|counters|sched|crashes <socket> <ready-file>"; exit 2

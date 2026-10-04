@@ -1,0 +1,45 @@
+-- Scheduler utilisation over the observe socket (R2 of
+-- specs/plans/2026-09-28-observe-recon-shell-plan.md), run with
+-- MARCH_NUM_SCHEDULERS=4 and checked by test/observe_snapshot_check.ml (mode
+-- "sched"): idle for 3 s after "ready" (utilisation < 5%), then four
+-- CPU-bound actors spin for 4 s after "busy" (utilisation > 90%).
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+
+  actor Spinner do
+    state { n : Int }
+    init  { n: 0 }
+    -- Burn CPU until the wall clock passes [until_ms].
+    on Spin(until_ms : Int) do
+      { n: spin(until_ms, 0) }
+    end
+  end
+
+  fn spin(until_ms : Int, k : Int) : Int do
+    if k % 4096 == 0 && unix_time_ms() >= until_ms do
+      k
+    else
+      spin(until_ms, k + 1)
+    end
+  end
+
+  fn start(k : Int, until_ms : Int) do
+    if k > 0 do
+      let s = spawn(Spinner)
+      let _ = send(s, Spin(until_ms))
+      start(k - 1, until_ms)
+    else
+      ()
+    end
+  end
+
+  fn main(_io : Cap(IO)) do
+    println("ready")
+    sleep_ms(3000)
+    start(4, unix_time_ms() + 4000)
+    println("busy")
+    sleep_ms(120000)
+  end
+end

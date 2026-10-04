@@ -1,0 +1,5 @@
+sig s7 | sig s7 | sig s7 | s7
+sig - | sig - | -
+s7 | s7 | b7
+let-bound branch = 31335, flat: true
+tail branch = 15335, flat: true

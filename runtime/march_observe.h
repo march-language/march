@@ -136,6 +136,18 @@ typedef struct march_obs_actor {
     int      num_children;    /* > 0: this actor is a supervisor */
     char   **names;           /* registered names (owned) */
     int      n_names;
+    /* R2 counters (march_proc): cumulative since spawn. */
+    uint64_t slices;          /* times dispatched */
+    uint64_t msgs_in;         /* user messages received */
+    uint64_t msgs_out;        /* messages sent and enqueued */
+    int64_t  last_run_ms;     /* march_now_ms (monotonic) at the last dispatch, 0 = never */
+    int64_t  held;            /* messages an Actor.call is holding off the mailbox */
+    int      crashes;         /* crash-ring entries for this pid in the last hour */
+    int64_t  spawned_by;      /* pid of the actor that spawned it, -1 if none */
+    int64_t  tparent;         /* TREE's parent: supervisor, else spawner (verbs only) */
+    int      child_crashes;   /* ... for its supervised children (a restarted child
+                                 has a new pid, so its crashes count here)
+                                 (both filled by the verbs, not the walk) */
 } march_obs_actor;
 
 /* Snapshot every live actor.  On success *rows is a malloc'd array of *n
@@ -161,6 +173,32 @@ typedef struct march_obs_actor_extra {
 
 /* Fill [out] for [pid].  Returns 0 (out->known says whether the pid exists). */
 int march_obs_actor_extra_get(int64_t pid, march_obs_actor_extra *out);
+
+/* ── Crash ring (R2) ──────────────────────────────────────────────────────
+ * The last MARCH_CRASH_RING crashes, newest first.  The message is kept for
+ * the debug tier (R4); observe-tier verbs never print it (C7). */
+#define MARCH_CRASH_RING     256
+#define MARCH_CRASH_MSG_MAX  512
+enum { MARCH_CRASH_KIND_CRASH = 0,      /* a supervised child panicked */
+       MARCH_CRASH_KIND_DRAINING = 1,   /* killed at a hot-reload drain's hard deadline */
+       MARCH_CRASH_KIND_PANIC = 2 };    /* an unsupervised panic: the process exits */
+
+typedef struct march_obs_crash {
+    uint64_t seq;            /* 1, 2, ... over the process lifetime */
+    int64_t  pid;            /* -1: not an actor (main, a task) */
+    char     type[MARCH_OBS_TYPE_MAX];
+    int      kind;
+    uint32_t code_epoch;
+    int64_t  supervisor;     /* supervisor pid, -1 when unsupervised */
+    int      restart;        /* the child slot's crash streak after this crash (1, 2, ...); 0 = none */
+    int64_t  at_ms;          /* wall clock, ms since the epoch */
+    size_t   message_len;    /* bytes kept (truncated at MARCH_CRASH_MSG_MAX) */
+    char     message[MARCH_CRASH_MSG_MAX + 1];
+} march_obs_crash;
+
+/* Copy up to [max] entries, newest first, into [out]; returns how many.
+ * [*total] (if non-NULL) gets the number of crashes ever recorded. */
+int march_obs_crashes(march_obs_crash *out, int max, uint64_t *total);
 
 /* Most connections served at once; a further client gets "error":"busy". */
 #define MARCH_OBSERVE_MAX_CONNS 8

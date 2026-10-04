@@ -10669,6 +10669,279 @@ let test_nested_module_sibling_call_entry_compiled () =
       "an entry-file module nested two levels links its qualified sibling calls"
       nested_sibling_expected (read_cmd_output (Filename.quote bin))
 
+(* ── An `@[endpoints]` protocol outside the entry module's top level ────────
+   specs/progress/2026-10-03-endpoints-protocol-in-nested-module.md.  A
+   protocol declared in a NESTED module, a MARCH_LIB_PATH module or a stdlib
+   module did not typecheck: the desugarer expanded only the file's top level
+   (so the nested protocol generated nothing), and a qualified TYPE written
+   relative to an enclosing module (`P_A.Entry` inside `mod Outer`, which the
+   generated modules write everywhere) resolved only from the entry module's
+   own top level -- "Unknown module `P_A`".  A stdlib protocol also put the
+   stdlib's first Json impls in every program, so a user's lone `derive Json`
+   with an unpinned `from_json` became an ambiguous call, compiled.
+
+   One protocol body ([endpoints_placement_body]) is declared at each place;
+   [endpoints_placement_user] drives it from ANOTHER module by qualified name:
+   the real roles, a scripted and a chaos peer of each role, the Msg module,
+   and (typechecked and linked, never run) the runner. *)
+let endpoints_placement_body = {|type PqNote = { pq : Int, text : String }
+derive Json for PqNote
+
+@[endpoints]
+protocol Pq do
+  hi: A -> B : Int
+  back: B -> A : PqNote
+end
+
+fn role_a(s : Cap(Session.Live), st : Pq_A.Entry, k : Int) : Pq_A.Yield do
+  Pq_A.recv_Back(s, Pq_A.send_Hi(s, st, k), fn (note, st1) ->
+    print_line("A got " ++ note.text ++ " " ++ int_to_string(note.pq))
+    Pq_A.close(s, st1))
+end
+
+fn role_b(s : Cap(Session.Live), st : Pq_B.Entry) : Pq_B.Yield do
+  Pq_B.recv_Hi(s, st, fn (k, st1) ->
+    print_line("B got " ++ int_to_string(k))
+    Pq_B.close(s, Pq_B.send_Back(s, st1, { pq: k * 2, text: "pong" })))
+end
+
+-- From inside the declaring module: relative names.
+fn run_inside(c : Cap(IO)) : () do
+  let t = Session.in_process()
+  let s = Session.attach(c, t.ops)
+  let _ = role_b(s, Pq_B.register(s, 0))
+  let _ = Pq_A.script(s, Pq_A.register(s, 0), [Pq_A.Send_Hi(5), Pq_A.Expect_Back(fn note -> print_line("script A got " ++ note.text))])
+  t.drain(())
+end
+
+-- Never called: the runner must typecheck (and link) from here.
+fn serve_b(c : Cap(IO)) : String do
+  match Pq_Run.run_B(c, "node-b", "secret", Pq_Run.addrs_from_env(), fn (s, st) -> role_b(s, st)) do
+    Ok(_) -> "closed"
+    Err(e) -> SessionNode.run_error_message(e)
+  end
+end|}
+
+(* [P.] is replaced by the declaring module's path from the caller. *)
+let endpoints_placement_user = {|fn use_from_outside(c : Cap(IO)) : () do
+  P.run_inside(c)
+  let t = Session.in_process()
+  let s = Session.attach(c, t.ops)
+  let _ = P.Pq_B.script(s, P.Pq_B.register(s, 0), [P.Pq_B.Expect_Hi(fn n -> print_line("script B got " ++ int_to_string(n))), P.Pq_B.Send_Back({ pq: 7, text: "scripted" })])
+  let _ = P.role_a(s, P.Pq_A.register(s, 0), 3)
+  t.drain(())
+  let t2 = Session.in_process()
+  let s2 = Session.attach(c, t2.ops)
+  let _ = P.Pq_B.chaos(s2, P.Pq_B.register(s2, 0), 11, Gen.map(Gen.int(0, 9), fn n -> { pq: n, text: "chaos" }))
+  let _ = P.Pq_A.chaos(s2, P.Pq_A.register(s2, 0), 12)
+  t2.drain(())
+  print_line("chaos left " ++ int_to_string(t2.queued(())))
+  print_line("roles " ++ int_to_string(List.length(P.Pq_Msg.role_names())))
+  print_line("fingerprint " ++ (if String.byte_size(P.Pq_Msg.fingerprint()) > 0 do "set" else "empty" end))
+end|}
+
+let endpoints_placement_expected =
+  "B got 5\nscript A got pong\nscript B got 3\nA got scripted 7\nchaos left 0\nroles 2\nfingerprint set"
+
+let endpoints_placement_needs =
+  "needs IO\nneeds IO.Console\nneeds IO.Mut\nneeds IO.NetConnect\nneeds IO.NetListen\nneeds IO.Spawn\nneeds Session.Live"
+
+let endpoints_indent n s =
+  let pad = String.make n ' ' in
+  String.concat "\n"
+    (List.map (fun l -> if l = "" then l else pad ^ l) (String.split_on_char '\n' s))
+
+let endpoints_placement_user_for path =
+  Str.global_replace (Str.regexp_string "P.") (path ^ ".") endpoints_placement_user
+
+(* The todo's shape: the protocol two levels down (Deep.Outer), driven from a
+   sibling module (Deep.Caller) by `Outer.Pq_B`, and from inside by `Pq_B`. *)
+let endpoints_nested_src =
+  "mod Deep do\n" ^ endpoints_indent 2 endpoints_placement_needs ^ "\n\
+  \  mod Outer do\n" ^ endpoints_indent 4 endpoints_placement_needs ^ "\n"
+  ^ endpoints_indent 4 endpoints_placement_body ^ "\n\
+  \  end\n\
+  \  mod Caller do\n" ^ endpoints_indent 4 endpoints_placement_needs ^ "\n"
+  ^ endpoints_indent 4 (endpoints_placement_user_for "Outer") ^ "\n\
+  \  end\n\
+  \  fn main(c : Cap(IO)) do Caller.use_from_outside(c) end\n\
+   end\n"
+
+(* The protocol in a MARCH_LIB_PATH module, driven from the app. *)
+let write_endpoints_lib_project ~name =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name
+    ("mod App do\n" ^ endpoints_indent 2 endpoints_placement_needs ^ "\n"
+     ^ endpoints_indent 2 (endpoints_placement_user_for "PqLib") ^ "\n\
+     \  fn main(c : Cap(IO)) do use_from_outside(c) end\n\
+      end\n") in
+  let lib_dir = Filename.concat tmp "lib" in
+  Unix.mkdir lib_dir 0o755;
+  let oc = open_out (Filename.concat lib_dir "pq_lib.march") in
+  output_string oc
+    ("mod PqLib do\n" ^ endpoints_indent 2 endpoints_placement_needs ^ "\n"
+     ^ endpoints_indent 2 endpoints_placement_body ^ "\nend\n");
+  close_out oc;
+  (project_root, main_exe, src, tmp, lib_dir)
+
+(* A user's own `derive Json` decoded by a bare `from_json` whose result
+   type nothing pins: resolved to the program's only impl.  With the stdlib
+   protocol's codecs (its `Pq_Msg` and `PqNote`) also in the program this was
+   "ambiguous interface-method call to `from_json`", compiled. *)
+let endpoints_from_json_user = {|type Mine = { mine : Int, label : String }
+derive Json for Mine
+
+fn decode_mine() : () do
+  match Json.parse(Json.to_string(to_json({ mine: 3, label: "mine" }))) do
+    Ok(j) ->
+      match from_json(j) do
+        Ok(v) -> print_line("decoded " ++ v.label)
+        Err(_) -> print_line("decode failed")
+      end
+    Err(_) -> print_line("parse failed")
+  end
+end|}
+
+(* A copy of the stdlib whose `Control` module (stdlib/control.march, where
+   dd step 12a's Ctl protocols are to move) declares the protocol, and an
+   entry module named `Test`: a program whose entry module shadows a stdlib
+   module's name takes the combined from-scratch typecheck, where `Control`
+   is a nested module -- the case that broke when Ctl first lived there. *)
+let write_endpoints_stdlib_project ~name ~main_body extra =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name
+    ("mod Test do\n" ^ endpoints_indent 2 endpoints_placement_needs ^ "\n"
+     ^ endpoints_indent 2 extra ^ "\n\
+     \  fn main(c : Cap(IO)) do\n" ^ main_body ^ "  end\n\
+      end\n") in
+  let stdlib_dir = Filename.concat tmp "stdlib" in
+  let rc = Sys.command (Printf.sprintf "cp -R %s %s"
+                          (Filename.quote (Filename.concat project_root "stdlib"))
+                          (Filename.quote stdlib_dir)) in
+  if rc <> 0 then Alcotest.failf "copying the stdlib to %s failed (rc=%d)" stdlib_dir rc;
+  let control = Filename.concat stdlib_dir "control.march" in
+  let s = String.trim (read_file_contents control) in
+  let n = String.length s in
+  if n < 3 || String.sub s (n - 3) 3 <> "end" then
+    Alcotest.failf "%s does not end with the module's `end`" control;
+  let oc = open_out control in
+  output_string oc (String.sub s 0 (n - 3) ^ endpoints_indent 2 endpoints_placement_body ^ "\nend\n");
+  close_out oc;
+  (* A private HOME: the parsed-stdlib cache is keyed by the stdlib's content,
+     so this copy would otherwise leave a blob in the user's ~/.cache/march. *)
+  let env = Printf.sprintf "cd %s && HOME=%s MARCH_STDLIB=%s "
+      (Filename.quote project_root) (Filename.quote tmp) (Filename.quote stdlib_dir) in
+  (env, main_exe, src, tmp)
+
+let endpoints_run_interpreted ~env ~main_exe ~src =
+  read_cmd_output (Printf.sprintf "%s%s %s 2>&1" env (Filename.quote main_exe) (Filename.quote src))
+
+let endpoints_run_compiled ~env ~main_exe ~src ~bin =
+  match compile_march_or_skip ~cmd_prefix:env ~main_exe ~bin ~src () with
+  | None -> None
+  | Some bin -> Some (read_cmd_output (Filename.quote bin ^ " 2>&1"))
+
+(* The interpreter prints the root-capability hint on stderr, folded into the
+   output so a typecheck error shows in the diff; keep only program output. *)
+let endpoints_program_lines out =
+  String.split_on_char '\n' out
+  |> List.filter (fun l ->
+      List.exists (fun p -> String.length l >= String.length p && String.sub l 0 (String.length p) = p)
+        [ "B got"; "A got"; "script"; "chaos"; "roles"; "fingerprint"; "decoded"; "decode"; "parse" ]
+      || (try ignore (Str.search_forward (Str.regexp_string "ERROR") l 0); true with Not_found -> false)
+      || (try ignore (Str.search_forward (Str.regexp_string "Unknown") l 0); true with Not_found -> false))
+  |> String.concat "\n"
+
+let test_endpoints_nested_interpreted () =
+  let (project_root, main_exe, src, _tmp) =
+    write_march_source ~name:"march_endpoints_nested_interp" endpoints_nested_src in
+  Alcotest.(check string) "interpreted: a protocol in a nested module, used relatively and qualified"
+    endpoints_placement_expected
+    (endpoints_program_lines
+       (endpoints_run_interpreted ~env:(Printf.sprintf "cd %s && " (Filename.quote project_root)) ~main_exe ~src))
+
+let test_endpoints_nested_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_endpoints_nested" endpoints_nested_src in
+  match endpoints_run_compiled ~env:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~src ~bin:(Filename.concat tmp "endpoints_nested_bin") with
+  | None -> ()
+  | Some out ->
+    Alcotest.(check string) "compiled: a protocol in a nested module, used relatively and qualified"
+      endpoints_placement_expected out
+
+let lib_env project_root lib_dir =
+  Printf.sprintf "cd %s && MARCH_LIB_PATH=%s " (Filename.quote project_root) (Filename.quote lib_dir)
+
+let test_endpoints_lib_interpreted () =
+  let (project_root, main_exe, src, _tmp, lib_dir) =
+    write_endpoints_lib_project ~name:"march_endpoints_lib_interp" in
+  Alcotest.(check string) "interpreted: a MARCH_LIB_PATH module's protocol, used from the app"
+    endpoints_placement_expected
+    (endpoints_program_lines (endpoints_run_interpreted ~env:(lib_env project_root lib_dir) ~main_exe ~src))
+
+let test_endpoints_lib_compiled () =
+  let (project_root, main_exe, src, tmp, lib_dir) =
+    write_endpoints_lib_project ~name:"march_endpoints_lib" in
+  match endpoints_run_compiled ~env:(lib_env project_root lib_dir) ~main_exe ~src
+          ~bin:(Filename.concat tmp "endpoints_lib_bin") with
+  | None -> ()
+  | Some out ->
+    Alcotest.(check string) "compiled: a MARCH_LIB_PATH module's protocol, used from the app"
+      endpoints_placement_expected out
+
+let endpoints_stdlib_project name =
+  write_endpoints_stdlib_project ~name
+    ~main_body:"    use_from_outside(c)\n"
+    (endpoints_placement_user_for "Control")
+
+let test_endpoints_stdlib_interpreted () =
+  let (env, main_exe, src, _tmp) = endpoints_stdlib_project "march_endpoints_std_interp" in
+  Alcotest.(check string) "interpreted: a stdlib module's protocol, from an entry module named `Test`"
+    endpoints_placement_expected
+    (endpoints_program_lines (endpoints_run_interpreted ~env ~main_exe ~src))
+
+let test_endpoints_stdlib_compiled () =
+  let (env, main_exe, src, tmp) = endpoints_stdlib_project "march_endpoints_std" in
+  match endpoints_run_compiled ~env ~main_exe ~src ~bin:(Filename.concat tmp "endpoints_std_bin") with
+  | None -> ()
+  | Some out ->
+    Alcotest.(check string) "compiled: a stdlib module's protocol, from an entry module named `Test`"
+      endpoints_placement_expected out
+
+(* No `use_from_outside` here: only the user's own codec and the stdlib
+   protocol's, so the one call left unpinned is the user's `from_json`. *)
+let endpoints_from_json_project name =
+  write_endpoints_stdlib_project ~name
+    ~main_body:"    decode_mine()\n" endpoints_from_json_user
+
+let test_endpoints_stdlib_from_json_interpreted () =
+  let (env, main_exe, src, _tmp) = endpoints_from_json_project "march_endpoints_fj_interp" in
+  Alcotest.(check string) "interpreted: a user's bare from_json beside a stdlib protocol's codecs"
+    "decoded mine" (endpoints_program_lines (endpoints_run_interpreted ~env ~main_exe ~src))
+
+let test_endpoints_stdlib_from_json_compiled () =
+  let (env, main_exe, src, tmp) = endpoints_from_json_project "march_endpoints_fj" in
+  match endpoints_run_compiled ~env ~main_exe ~src ~bin:(Filename.concat tmp "endpoints_fj_bin") with
+  | None -> ()
+  | Some out ->
+    Alcotest.(check string) "compiled: a user's bare from_json beside a stdlib protocol's codecs"
+      "decoded mine" out
+
+(* The other half of the same rule: `to_json(3)` with no codec of the
+   program's own is the "no `JsonTo` implementation" diagnostic, not an
+   "ambiguous call" listing the stdlib protocol's codecs. *)
+let test_endpoints_stdlib_to_json_without_codec () =
+  let (env, main_exe, src, tmp) =
+    write_endpoints_stdlib_project ~name:"march_endpoints_tj"
+      ~main_body:"    let _r = to_json(3)\n    print_line(\"unreachable compiled\")\n" "" in
+  match compile_march_raw ~cmd_prefix:env ~main_exe ~bin:(Filename.concat tmp "endpoints_tj_bin") ~src () with
+  | `Skipped -> ()
+  | `Ok _ -> Alcotest.fail "to_json(3) with no codec must be rejected, not linked"
+  | `Failed (_, output, _) ->
+    Alcotest.(check bool) "names the missing JsonTo impl and the type" true
+      (ir_contains output "no `JsonTo` implementation for type `Int`");
+    Alcotest.(check bool) "does not list the stdlib protocol's codecs" false
+      (ir_contains output "Pq_Message")
+
 (* ── A borrowed field projection must not outlive its owner ──────────────
    specs/progress/2026-09-28-borrowed-field-outlives-owner.md.  Perceus
    classified [let x = r.a] as BORROWED from [r] because [r] was used again
@@ -13981,6 +14254,7 @@ declare i32  @march_dispatch_publish(i32 %name_id, ptr %fn, ptr %impl_hash, ptr 
 declare i32  @march_dispatch_publish_epoch(i32 %name_id, ptr %fn, ptr %impl_hash, ptr %sig_hash, i8 %kind, i32 %epoch)
 declare void @march_dispatch_init(i32 %n_slots)
 declare void @march_dispatch_register_name(i32, ptr)
+declare i32  @march_dispatch_name_to_id(ptr, ptr)
 declare void @march_reload_server_start(ptr)
 declare void @march_actor_set_dispatch_id(ptr %actor, i32 %name_id)
 declare void @march_actor_set_call_tags(ptr %actor, ptr %tags, i64 %n)
@@ -16601,6 +16875,26 @@ let codegen_suites =
             test_nested_module_sibling_call_lib_path_compiled;
           Alcotest.test_case "entry-file nested module calls a sibling submodule (compiled)" `Quick
             test_nested_module_sibling_call_entry_compiled;
+        ] );
+      ( "endpoints_protocol_placement", [
+          Alcotest.test_case "protocol in a nested module (interpreted)" `Quick
+            test_endpoints_nested_interpreted;
+          Alcotest.test_case "protocol in a nested module (compiled)" `Quick
+            test_endpoints_nested_compiled;
+          Alcotest.test_case "protocol in a MARCH_LIB_PATH module (interpreted)" `Quick
+            test_endpoints_lib_interpreted;
+          Alcotest.test_case "protocol in a MARCH_LIB_PATH module (compiled)" `Quick
+            test_endpoints_lib_compiled;
+          Alcotest.test_case "stdlib protocol, entry module named Test (interpreted)" `Quick
+            test_endpoints_stdlib_interpreted;
+          Alcotest.test_case "stdlib protocol, entry module named Test (compiled)" `Quick
+            test_endpoints_stdlib_compiled;
+          Alcotest.test_case "bare from_json beside a stdlib protocol (interpreted)" `Quick
+            test_endpoints_stdlib_from_json_interpreted;
+          Alcotest.test_case "bare from_json beside a stdlib protocol (compiled)" `Quick
+            test_endpoints_stdlib_from_json_compiled;
+          Alcotest.test_case "to_json without a codec beside a stdlib protocol (compiled)" `Quick
+            test_endpoints_stdlib_to_json_without_codec;
         ] );
       ( "float_lit_match_codegen", [
           Alcotest.test_case "compiled float-literal match arm (B4)" `Quick

@@ -643,7 +643,7 @@ forge observe --socket /tmp/app.observe actors mbox 10   # the 10 deepest mailbo
 forge observe --env web --section tree --json            # a forge.toml host, over ssh
 ```
 
-The request is a verb and its arguments: `ACTORS [mbox|status|epoch|pid] [n]`, `ACTOR <pid>`, `TREE`, `NAMES`, `SCHED`, `MEM`, `EPOCHS`, `SNAPSHOT [sections]` or `HELP`. Without `--socket`, forge asks the `[hot-reload]` hosts in `forge.toml` (`--env NAME` picks entries by name). The reply is JSON: indented, or one line per host with `--json`. A dead actor's `ACTOR` reply says how it died (`Crash`, `Killed`, `Normal`) but never its panic message. Actor type names appear in builds compiled with `--hot-reload`.
+The request is a verb and its arguments: `ACTORS [mbox|status|epoch|pid] [n]`, `ACTOR <pid>`, `TREE`, `NAMES`, `SCHED [window_ms]`, `MEM`, `EPOCHS`, `CRASHES [n]`, `TOP mbox|crashes|slices|msgs_in|msgs_out <n> [window_ms]`, `SNAPSHOT [sections]` or `HELP`. Actor rows carry cumulative counters (`slices`, `msgs_in`, `msgs_out`), `idle_ms` since the actor last ran, and `held`: messages an `Actor.call` has taken off the mailbox while it waits. `SCHED` measures each scheduler's utilisation over the window; `TOP` ranks the counters by their change over it. Without `--socket`, forge asks the `[hot-reload]` hosts in `forge.toml` (`--env NAME` picks entries by name). The reply is JSON: indented, or one line per host with `--json`. A dead actor's `ACTOR` reply says how it died (`Crash`, `Killed`, `Normal`), and `CRASHES` lists recent crashes with their supervisor and restart number, but neither ever shows a panic message. Actor type names appear in builds compiled with `--hot-reload`.
 
 ## Dependency Management
 

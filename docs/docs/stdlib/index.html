@@ -584,6 +584,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Control.html#type-CtlBuild"><span class="sb-kind" style="color:var(--ty)">T</span>CtlBuild</a>
 <a class="sl" href="Control.html#type-CtlDrain"><span class="sb-kind" style="color:var(--ty)">T</span>CtlDrain</a>
 <a class="sl" href="Control.html#type-CtlLine"><span class="sb-kind" style="color:var(--ty)">T</span>CtlLine</a>
+<a class="sl" href="Control.html#type-CtlCert"><span class="sb-kind" style="color:var(--ty)">T</span>CtlCert</a>
 <a class="sl" href="Control.html#type-CtlRelease"><span class="sb-kind" style="color:var(--ty)">T</span>CtlRelease</a>
 <a class="sl" href="Control.html#type-CtlMember"><span class="sb-kind" style="color:var(--ty)">T</span>CtlMember</a>
 <a class="sl" href="Control.html#type-CtlVersion"><span class="sb-kind" style="color:var(--ty)">T</span>CtlVersion</a>
@@ -595,11 +596,14 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Control.html#type-CtlDecision"><span class="sb-kind" style="color:var(--ty)">T</span>CtlDecision</a>
 <a class="sl" href="Control.html#type-CtlLeader"><span class="sb-kind" style="color:var(--ty)">T</span>CtlLeader</a>
 <a class="sl" href="Control.html#type-AgentOps"><span class="sb-kind" style="color:var(--ty)">T</span>AgentOps</a>
+<a class="sl" href="Control.html#type-CertOps"><span class="sb-kind" style="color:var(--ty)">T</span>CertOps</a>
 <a class="sl" href="Control.html#type-CtlChunk"><span class="sb-kind" style="color:var(--ty)">T</span>CtlChunk</a>
 <a class="sl" href="Control.html#type-CtlNext"><span class="sb-kind" style="color:var(--ty)">T</span>CtlNext</a>
 <a class="sl" href="Control.html#type-ControlOps"><span class="sb-kind" style="color:var(--ty)">T</span>ControlOps</a>
 <a class="sl" href="Control.html#fn-accept"><span class="sb-kind" style="color:var(--fn)">F</span>accept</a>
 <a class="sl" href="Control.html#fn-agent_apply"><span class="sb-kind" style="color:var(--fn)">F</span>agent_apply</a>
+<a class="sl" href="Control.html#fn-agent_apply_certs"><span class="sb-kind" style="color:var(--fn)">F</span>agent_apply_certs</a>
+<a class="sl" href="Control.html#fn-agent_apply_certs_recording"><span class="sb-kind" style="color:var(--fn)">F</span>agent_apply_certs_recording</a>
 <a class="sl" href="Control.html#fn-agent_apply_recording"><span class="sb-kind" style="color:var(--fn)">F</span>agent_apply_recording</a>
 <a class="sl" href="Control.html#fn-answer_lines"><span class="sb-kind" style="color:var(--fn)">F</span>answer_lines</a>
 <a class="sl" href="Control.html#fn-audit_decision"><span class="sb-kind" style="color:var(--fn)">F</span>audit_decision</a>
@@ -607,6 +611,8 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Control.html#fn-audit_refusal"><span class="sb-kind" style="color:var(--fn)">F</span>audit_refusal</a>
 <a class="sl" href="Control.html#fn-audit_release"><span class="sb-kind" style="color:var(--fn)">F</span>audit_release</a>
 <a class="sl" href="Control.html#fn-audit_step"><span class="sb-kind" style="color:var(--fn)">F</span>audit_step</a>
+<a class="sl" href="Control.html#fn-cert_floor"><span class="sb-kind" style="color:var(--fn)">F</span>cert_floor</a>
+<a class="sl" href="Control.html#fn-certs_text"><span class="sb-kind" style="color:var(--fn)">F</span>certs_text</a>
 <a class="sl" href="Control.html#fn-check"><span class="sb-kind" style="color:var(--fn)">F</span>check</a>
 <a class="sl" href="Control.html#fn-chunks"><span class="sb-kind" style="color:var(--fn)">F</span>chunks</a>
 <a class="sl" href="Control.html#fn-digest"><span class="sb-kind" style="color:var(--fn)">F</span>digest</a>
@@ -628,6 +634,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Control.html#fn-relay_line"><span class="sb-kind" style="color:var(--fn)">F</span>relay_line</a>
 <a class="sl" href="Control.html#fn-reload_report"><span class="sb-kind" style="color:var(--fn)">F</span>reload_report</a>
 <a class="sl" href="Control.html#fn-report_failure"><span class="sb-kind" style="color:var(--fn)">F</span>report_failure</a>
+<a class="sl" href="Control.html#fn-report_serial"><span class="sb-kind" style="color:var(--fn)">F</span>report_serial</a>
 <a class="sl" href="Control.html#fn-report_versions"><span class="sb-kind" style="color:var(--fn)">F</span>report_versions</a>
 <a class="sl" href="Control.html#fn-reports_state"><span class="sb-kind" style="color:var(--fn)">F</span>reports_state</a>
 <a class="sl" href="Control.html#fn-select"><span class="sb-kind" style="color:var(--fn)">F</span>select</a>
@@ -643,6 +650,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Control.html#fn-verify"><span class="sb-kind" style="color:var(--fn)">F</span>verify</a>
 <a class="sl" href="Control.html#fn-versions_text"><span class="sb-kind" style="color:var(--fn)">F</span>versions_text</a>
 <a class="sl" href="Control.html#fn-want"><span class="sb-kind" style="color:var(--fn)">F</span>want</a>
+<a class="sl" href="Control.html#fn-want_for"><span class="sb-kind" style="color:var(--fn)">F</span>want_for</a>
 <a class="sl" href="Control.html#fn-with_failure"><span class="sb-kind" style="color:var(--fn)">F</span>with_failure</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Crypto.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Crypto.html">Crypto</a></div><div class="sb-sub"><a class="sl" href="Crypto.html#fn-base64_decode"><span class="sb-kind" style="color:var(--fn)">F</span>base64_decode</a>
 <a class="sl" href="Crypto.html#fn-base64_encode"><span class="sb-kind" style="color:var(--fn)">F</span>base64_encode</a>
@@ -1838,6 +1846,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="NodeCert.html#fn-public_key"><span class="sb-kind" style="color:var(--fn)">F</span>public_key</a>
 <a class="sl" href="NodeCert.html#fn-revocation_from_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_from_bytes</a>
 <a class="sl" href="NodeCert.html#fn-revocation_from_text"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_from_text</a>
+<a class="sl" href="NodeCert.html#fn-revocation_id"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_id</a>
 <a class="sl" href="NodeCert.html#fn-revocation_to_bytes"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_to_bytes</a>
 <a class="sl" href="NodeCert.html#fn-revocation_to_text"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_to_text</a>
 <a class="sl" href="NodeCert.html#fn-revocation_version"><span class="sb-kind" style="color:var(--fn)">F</span>revocation_version</a>
@@ -2882,7 +2891,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="Compress.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Compress</h3><p>Compress module: gzip, deflate, zstd, and brotli compression.</p><div class="st"><span>2 functions</span><span>5 types</span></div></div></a>
 <a href="Config.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Config</h3><p>Config module: layered application configuration with typed keys.</p><div class="st"><span>36 functions</span><span>4 types</span></div></div></a>
 <a href="ConsistentHash.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>ConsistentHash</h3><p>ConsistentHash: consistent hashing ring for distributed load balancing.</p><div class="st"><span>8 functions</span><span>1 types</span></div></div></a>
-<a href="Control.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Control</h3><p>Control: the pure core of the in-cluster control plane (distributed-deploys</p><div class="st"><span>46 functions</span><span>21 types</span></div></div></a>
+<a href="Control.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Control</h3><p>Control: the pure core of the in-cluster control plane (distributed-deploys</p><div class="st"><span>52 functions</span><span>23 types</span></div></div></a>
 <a href="Crypto.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Crypto</h3><p>Crypto module: general-purpose cryptographic primitives.</p><div class="st"><span>12 functions</span><span>0 types</span></div></div></a>
 <a href="Csv.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Csv</h3><p>Csv module: streaming CSV parser.</p><div class="st"><span>5 functions</span><span>2 types</span></div></div></a>
 <a href="DataFrame.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>DataFrame</h3><p>DataFrame module: columnar, lazy-evaluated tabular data.</p><div class="st"><span>132 functions</span><span>16 types</span></div></div></a>
@@ -2933,7 +2942,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="NetKernel.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NetKernel</h3><p>NetKernel: the socket-level transport for distributed OTP (P1).</p><div class="st"><span>31 functions</span><span>2 types</span></div></div></a>
 <a href="Node.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Node</h3><p>Node: the typed remote send (distributed actors, last piece of 1/4).</p><div class="st"><span>14 functions</span><span>0 types</span></div></div></a>
 <a href="NodeCall.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeCall</h3><p>NodeCall: caller-side Node.call and server-side RPC dispatch loop (P3 L4).</p><div class="st"><span>3 functions</span><span>0 types</span></div></div></a>
-<a href="NodeCert.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeCert</h3><p>NodeCert: a cluster node's certificate (distributed-deploys build step 11a).</p><div class="st"><span>30 functions</span><span>5 types</span></div></div></a>
+<a href="NodeCert.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeCert</h3><p>NodeCert: a cluster node's certificate (distributed-deploys build step 11a).</p><div class="st"><span>31 functions</span><span>5 types</span></div></div></a>
 <a href="NodeIdentity.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeIdentity</h3><p>NodeIdentity: a cluster node's identity, exchanged in the net-kernel handshake.</p><div class="st"><span>5 functions</span><span>1 types</span></div></div></a>
 <a href="NodeQueue.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeQueue</h3><p>NodeQueue: the per-peer outbound queue with credit-based flow control</p><div class="st"><span>14 functions</span><span>4 types</span></div></div></a>
 <a href="NodeRpc.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>NodeRpc</h3><p>NodeRpc: the receive-side RPC dispatcher + caller-side reply logic (P1 L4).</p><div class="st"><span>8 functions</span><span>2 types</span></div></div></a>

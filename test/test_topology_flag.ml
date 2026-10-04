@@ -102,7 +102,7 @@ end
 |}
 
 let digest ?(version = 1) ?(body = {|"App.Back.serve_one"|}) ?(actor = "null")
-    ?(back_start = {|"App.Back.start"|}) ?(caps = "null") ?(isolate = "false") () =
+    ?(back_start = {|"App.Back.start"|}) ?(caps = "null") ?(isolate = "false") ?(control = "") () =
   Printf.sprintf {|{
   "version": %d,
   "env": null,
@@ -120,9 +120,9 @@ let digest ?(version = 1) ?(body = {|"App.Back.serve_one"|}) ?(actor = "null")
       "main": null, "replicas": null, "hosts": [] }
   ],
   "drain": { "soft_ms": 1000, "hard_ms": 2000 },
-  "backend": null
+  "backend": null%s
 }
-|} version body actor back_start caps isolate
+|} version body actor back_start caps isolate control
 
 (** Run `march <mode> --topology <digest> app.march` in a scratch dir;
     returns (exit code, stdout, stderr). *)
@@ -312,6 +312,25 @@ let test_unknown_pool_flag () =
   expect_error (run ~flags:"--topology-pools nope" ~src:ok_src ~digest_text:(digest ()) ())
     "--topology-pools: no pool \"nope\" in the topology"
 
+(* A [control] section splices the control plane's wiring
+   (lib/desugar/control_wiring.march) into the entry module under the file
+   tag "<control>".  The driver dropped every diagnostic with that tag (as it
+   does the stdlib's), so an ill-typed wiring compiled: a lambda parameter the
+   checker typed as the one-field record [{ detail : String }] read and updated
+   a 12-field report with that layout and the leader died with SIGSEGV, and
+   two `"..." ++ e` with [e : FileError] sat on the certificate-save error
+   path.  Errors there are shown now, so the wiring must typecheck: this is
+   the cheap guard (the two-node control_* scenarios compile it too, slowly).
+   specs/progress/2026-10-01-compiled-record-with-projection-sigsegv.md *)
+let test_control_wiring_typechecks () =
+  let (rc, _, err) =
+    run ~src:ok_src
+      ~digest_text:(digest ~control:{|,
+  "control": { "candidates": "control", "port": 7947 }|} ()) () in
+  if contains err "<control>" then
+    Alcotest.failf "a diagnostic in the control plane's wiring:\n%s" err;
+  expect_ok (rc, "", err)
+
 let tests = [
   Alcotest.test_case "a function role: main is generated and typechecks" `Quick test_function_role_generates_main;
   Alcotest.test_case "an actor role: main is generated and typechecks" `Quick test_actor_role_generates_main;
@@ -330,4 +349,5 @@ let tests = [
   Alcotest.test_case "a hook that reaches beyond the written caps" `Quick test_reach_beyond_written_caps;
   Alcotest.test_case "IO.Foreign in a non-isolated pool, when opted in" `Quick test_foreign_needs_isolation;
   Alcotest.test_case "--topology-pools names a pool that exists" `Quick test_unknown_pool_flag;
+  Alcotest.test_case "the control plane's generated wiring typechecks" `Quick test_control_wiring_typechecks;
 ]

@@ -74,7 +74,7 @@ after the lowering fix below, and then broke every program whose entry module
 shadows a stdlib module's name (`mod Test`: ten `test/native` fixtures): such a
 program takes the combined from-scratch typecheck, where `Control` is nested, and an
 `@[endpoints]` protocol does not typecheck below an entry module's top level
-([../todos/2026-09-28-endpoints-protocol-in-nested-module.md](../todos/2026-09-28-endpoints-protocol-in-nested-module.md)).
+([2026-10-03-endpoints-protocol-in-nested-module.md](2026-10-03-endpoints-protocol-in-nested-module.md)).
 Eager loading also charged every program for them (below). So their canonical
 declaration and role bodies live at the top of `test/session/control_peers.march`'s
 entry module, over `Control`'s types and functions, until that todo is fixed or the
