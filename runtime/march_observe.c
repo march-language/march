@@ -323,6 +323,22 @@ static void handle_line(char *line, march_jw *out) {
     march_jw_free(&data);
 }
 
+/* The same reply a socket client gets, for an in-process caller (the
+ * observe_query builtin, march_observe_snapshot.c).  [line] need not be
+ * NUL-terminated; a line over MARCH_OBSERVE_LINE_MAX is refused. */
+void march_observe_handle(const char *line, size_t n, march_jw *out) {
+    char buf[MARCH_OBSERVE_LINE_MAX + 1];
+    if (n > MARCH_OBSERVE_LINE_MAX) {
+        build_envelope(out, "line_too_long", NULL, 0);
+        return;
+    }
+    memcpy(buf, line, n);
+    buf[n] = '\0';
+    /* Trailing CR/LF from a caller that kept them. */
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = '\0';
+    handle_line(buf, out);
+}
+
 /* ── Connections ──────────────────────────────────────────────────────── */
 
 static _Atomic int g_active;

@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`Recon`: a program's view of itself.** The new stdlib module answers, from
+  March code, the questions `forge observe` asks a node: `Recon.info` (one
+  actor's mailbox, counters, supervisor and names), `actors`, `proc_count`
+  and `proc_window` (the actors highest on mailbox depth, crashes or message
+  rate), `tree`, `node_stats`, `crashes` (kind, actor and restart number,
+  never the panic text), `epochs` and `scheduler_usage`. Every function takes
+  a `Cap(Actor.Introspect)`, and they work interpreted as well as compiled.
 - **A read-only observe socket on every compiled program.** Set
   `MARCH_OBSERVE_SOCKET=<path>` (or just `MARCH_HOT_RELOAD_SOCKET`, which puts it
   at `<path>.observe`) and the program answers one-line requests with one line of
