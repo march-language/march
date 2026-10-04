@@ -26,8 +26,8 @@
       the pool's written [caps], else the compiler's derived ones (the
       export's); none when neither is known (the gate is then permissive,
       and forge says so);
-    - the firewall: the pool's [ufw] rules from the connectivity graph
-      ([Topology.Gen.ufw]), applied when [ufw] is installed (ssh stays
+    - the firewall: the host's [ufw] rules ([Topology.Gen.ufw]: its pool's
+      public ports, the cluster port from every cluster member), applied when [ufw] is installed (ssh stays
       open), else written and reported; the [do-firewall] JSON is written
       locally ([.forge/hosts/<env>/do-firewalls.json]) for [doctl];
     - the digest ([topology.json]) the node starts with.
@@ -384,7 +384,7 @@ let script ~(layout : Host_layout.t) ~service_ctl ~(opts : opts) (hp : host_plan
   line "if [ -n \"$UNIT_CHANGED$RESTART_NEEDED\" ]; then echo 'note the unit or its credentials changed: \
         the next `forge deploy` restarts it'; fi";
   (match hp.hp_firewall with
-   | None -> line "echo 'note no firewall rules for this host (it is in no pool the connectivity graph names)'"
+   | None -> line "echo 'note no firewall rules for this host (the topology export failed or lists no such host)'"
    | Some fw ->
      if opts.firewall && not relocated then begin
        line "if command -v ufw >/dev/null 2>&1; then";

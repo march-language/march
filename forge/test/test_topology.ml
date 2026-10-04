@@ -596,6 +596,66 @@ let test_control_section () =
       | Error m -> Alcotest.fail m)
    | Error ds -> Alcotest.failf "%s" (String.concat "; " (List.map Topology.render_diag ds)))
 
+(* Two pools that share no protocol (no connectivity edge between them, and
+   none inside either) still open the cluster port to each other: SWIM probes
+   every member and every node seeds every other, so a firewall cut along the
+   connectivity graph would split the membership (the 2026-09-25 todo). The
+   rules are asserted here; applying them for real needs root (ufw), so the
+   live membership check is not run in the suite. *)
+let test_cluster_port_between_all_members () =
+  let toml = {|[pool.a]
+start = "App.A.start"
+
+[pool.b]
+start = "App.B.start"
+public = [8080]
+|} in
+  let overlay = {|[backend]
+kind = "ssh"
+
+[pool.a]
+hosts = ["root@a-1", "root@a-2"]
+
+[pool.b]
+hosts = ["root@b-1"]
+|} in
+  match Topology.of_strings [ ("topology.toml", toml); ("topology.prod.toml", overlay) ] with
+  | Error ds -> Alcotest.failf "%s" (String.concat "; " (List.map Topology.render_diag ds))
+  | Ok t ->
+    let ex = { Topology.topo = t; edges = []; port = 7946 } in
+    let has sub s = let n = String.length s and k = String.length sub in
+      let rec go i = i + k <= n && (String.sub s i k = sub || go (i + 1)) in go 0 in
+    let ufw = Topology.Gen.ufw ex in
+    let hosts = [ ("a-1", "a"); ("a-2", "a"); ("b-1", "b") ] in
+    Alcotest.(check (list string)) "one script per host"
+      [ "ufw-a-1.sh"; "ufw-a-2.sh"; "ufw-b-1.sh" ] (List.sort compare (List.map fst ufw));
+    List.iter (fun (me, _) ->
+        let script = List.assoc (Printf.sprintf "ufw-%s.sh" me) ufw in
+        List.iter (fun (other, pool) ->
+            let rule = Printf.sprintf "ufw allow from %s to any port 7946 proto tcp comment 'march cluster from %s'" other pool in
+            Alcotest.(check bool) (Printf.sprintf "%s: cluster port from %s" me other) (other <> me) (has rule script))
+          hosts)
+      hosts;
+    (* Only the cluster port is opened between pools; b's public port is
+       b's own, from anywhere, and a gets no other port from b. *)
+    Alcotest.(check bool) "b public" true (has "ufw allow 8080/tcp comment 'march b public'" (List.assoc "ufw-b-1.sh" ufw));
+    Alcotest.(check bool) "a has no public port" false (has "8080" (List.assoc "ufw-a-1.sh" ufw));
+    (match Topology.Gen.do_firewall ex with
+     | [ (_, json) ] ->
+       let fws = Yojson.Safe.Util.to_list (Yojson.Safe.from_string json) in
+       Alcotest.(check int) "two firewalls" 2 (List.length fws);
+       List.iter (fun fw ->
+           let open Yojson.Safe.Util in
+           let cluster =
+             List.filter (fun r -> member "ports" r = `String "7946") (to_list (member "inbound_rules" fw)) in
+           match cluster with
+           | [ r ] ->
+             Alcotest.(check (list string)) "cluster port from every pool" [ "march-a"; "march-b" ]
+               (List.map to_string (to_list (member "tags" (member "sources" r))))
+           | _ -> Alcotest.failf "%s: expected one cluster rule" (to_string (member "name" fw)))
+         fws
+     | _ -> Alcotest.fail "one do-firewalls.json")
+
 let test_gen_builtin_names () =
   with_export (fun ex ->
       List.iter (fun t ->
@@ -663,6 +723,7 @@ let tests = [
     Alcotest.test_case "gen do-firewall golden" `Quick test_gen_do_firewall;
     Alcotest.test_case "gen compose golden" `Quick test_gen_compose;
     Alcotest.test_case "[control]: parse, digest, firewall" `Quick test_control_section;
+    Alcotest.test_case "cluster port open between pools sharing no protocol" `Quick test_cluster_port_between_all_members;
     Alcotest.test_case "every built-in name resolves; unknown ones do not" `Quick test_gen_builtin_names;
     Alcotest.test_case "forge-topology-<target> plugin on PATH gets the export on stdin" `Quick test_gen_external_plugin;
   ];

@@ -12,7 +12,7 @@ ok: the named supervisor is a TREE root
 ok: SCHED has one thread row per scheduler
 ok: MEM reports rss, live objects and the queued burst
 ok: EPOCHS reports the current epoch
-ok: SNAPSHOT carries all six sections
+ok: SNAPSHOT carries all seven sections
 ok: SNAPSHOT sections come from one walk
 ok: SNAPSHOT mem,names carries just those
 ok: ACTORS bogus -> bad_args

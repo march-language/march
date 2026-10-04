@@ -2730,6 +2730,65 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/observe_types_hr.expected native_observe_types_hr.out)))
 
+; R2 counters: a ping-pong pair's exact msgs_in/msgs_out, and an actor blocked
+; in an Actor.call whose incoming messages are held off its mailbox (reported
+; as "held").
+(rule
+ (targets native_observe_counters native_observe_counters.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_snapshot_check.exe)
+       (file native/observe_counters.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_observe_counters native/observe_counters.march)
+   (with-stdout-to native_observe_counters.out
+    (system "rm -f obs_ctr.sock obs_ctr.prog; MARCH_OBSERVE_SOCKET=obs_ctr.sock ./native_observe_counters > obs_ctr.prog 2>&1 & prog=$!; ./observe_snapshot_check.exe counters obs_ctr.sock obs_ctr.prog; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -f obs_ctr.prog obs_ctr.sock; true")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_counters.expected native_observe_counters.out)))
+
+; R2 scheduler utilisation: idle under 5%, four spinners on four schedulers
+; over 90%.
+(rule
+ (targets native_observe_sched native_observe_sched.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_snapshot_check.exe)
+       (file native/observe_sched.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_observe_sched native/observe_sched.march)
+   (with-stdout-to native_observe_sched.out
+    (system "rm -f obs_sched.sock obs_sched.prog; MARCH_NUM_SCHEDULERS=4 MARCH_OBSERVE_SOCKET=obs_sched.sock ./native_observe_sched > obs_sched.prog 2>&1 & prog=$!; ./observe_snapshot_check.exe sched obs_sched.sock obs_sched.prog; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -f obs_sched.prog obs_sched.sock; true")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_sched.expected native_observe_sched.out)))
+
+; R2 crash ring and TOP: a supervised child panicking three times (CRASHES,
+; restart numbers, no message text, the supervisor's child_crashes) and a
+; self-sending actor ranked first by TOP msgs_in over a window.
+(rule
+ (targets native_observe_crashes native_observe_crashes.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file observe_snapshot_check.exe)
+       (file native/observe_crashes.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_observe_crashes native/observe_crashes.march)
+   (with-stdout-to native_observe_crashes.out
+    (system "rm -f obs_cr.sock obs_cr.prog; MARCH_OBSERVE_SOCKET=obs_cr.sock ./native_observe_crashes > obs_cr.prog 2>&1 & prog=$!; ./observe_snapshot_check.exe crashes obs_cr.sock obs_cr.prog; kill $prog 2>/dev/null; wait $prog 2>/dev/null; rm -f obs_cr.prog obs_cr.sock; true")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/observe_crashes.expected native_observe_crashes.out)))
+
 ; ── Leak guard: the Process builtins (spawn_async/read_line/write/kill_proc/
 ; wait_proc, run's spawn_sync, env/set_env) only READ their heap arguments but
 ; were classified OWNED in borrow.ml, so every spawn leaked its args list and

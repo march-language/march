@@ -36,6 +36,15 @@ git log is authoritative for exact commits.
   asks the forge.toml hosts over ssh, or a local socket with `--socket`. Reading
   100 000 actors takes about 20 ms, and nothing is added to the scheduler's hot path.
   Actor type names need a `--hot-reload` build.
+- **Observe counters, scheduler utilisation and a crash ring.** Every actor row
+  now carries how often it ran, messages received and sent, how long since it
+  last ran, and the messages an `Actor.call` is holding while it waits (an
+  actor stuck in a call no longer looks idle). `SCHED [window_ms]` reports
+  each scheduler's utilisation, `CRASHES [n]` the last crashes (kind, actor,
+  supervisor, restart number; never the panic text), and `TOP <attr> <n>
+  [window_ms]` the actors highest on mailbox depth, crashes, or messages and
+  dispatches over a window. `TREE` nests actors under the actor that spawned
+  them. The counters add nothing measurable to the message path.
 - **An in-cluster control plane for hot deploys (distributed deploys, step 12a).** A
   `[control] candidates = "<host label>"` section in `topology.toml` makes every node run
   an Agent and the labelled nodes serve a control API; one of them leads (`count = 1`
@@ -150,6 +159,13 @@ git log is authoritative for exact commits.
   existing policy; one without a `serves` line still bounds every role. Both
   `forge deploy hot` and releases through the control plane go through the same
   gate.
+- **Topology firewalls no longer split the cluster membership.** `forge topology gen
+  ufw` / `do-firewall` and `forge host init` opened the cluster port into a pool only
+  from the pools it exchanges protocol messages with, but SWIM probes every member, so
+  two pools that shared no protocol saw each other as unreachable (and `count = n`
+  placement ranked on that wrong membership). The cluster port is now open between all
+  cluster members; pools are kept apart by node certificate, as before. Public ports and
+  the control-port rule are unchanged.
 - **A supervisor now works in a program built with `--hot-reload`.** Any actor with a
   `supervise` block failed to compile under `--hot-reload` (`use of undefined value
   '@$sup_child_ptr_a'`). Behind that, the runtime read each child's pid from the wrong

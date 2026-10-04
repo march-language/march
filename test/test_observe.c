@@ -249,6 +249,18 @@ static void test_registered(const char *path) {
 
 /* Nesting: TREE needs 3 + 2 x 64 levels; past MARCH_JW_MAX_DEPTH the writer
  * reports truncation instead of writing past its stack. */
+/* An integral double is still written as a float. */
+static void test_f64_float(void) {
+    march_jw w;
+    march_jw_init(&w, 1024);
+    march_jw_arr_begin(&w);
+    march_jw_f64(&w, 1.0); march_jw_f64(&w, 0.0); march_jw_f64(&w, -3.0); march_jw_f64(&w, 0.25);
+    march_jw_arr_end(&w);
+    CHECK(strcmp(march_jw_text(&w), "[1.0,0.0,-3.0,0.25]") == 0,
+          "integral doubles keep a .0: %s", march_jw_text(&w));
+    march_jw_free(&w);
+}
+
 static void test_deep(void) {
     march_jw w;
     march_jw_init(&w, 1 << 20);
@@ -357,6 +369,7 @@ int main(void) {
 
     test_writer();
     test_deep();
+    test_f64_float();
     test_refuses_non_socket(dir);
     CHECK(march_observe_add_verbs(test_verbs, 2) == 0, "verbs register before the server starts");
     if (march_observe_server_start(path) != 0) { fprintf(stderr, "server failed to start\n"); return 1; }

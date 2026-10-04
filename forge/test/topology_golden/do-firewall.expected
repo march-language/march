@@ -12,7 +12,9 @@
       {
         "protocol": "tcp",
         "ports": "7946",
-        "sources": { "tags": [ "march-ledger" ] }
+        "sources": {
+          "tags": [ "march-edge", "march-ledger", "march-imaging" ]
+        }
       }
     ],
     "outbound_rules": [
@@ -35,7 +37,9 @@
       {
         "protocol": "tcp",
         "ports": "7946",
-        "sources": { "tags": [ "march-edge" ] }
+        "sources": {
+          "tags": [ "march-edge", "march-ledger", "march-imaging" ]
+        }
       }
     ],
     "outbound_rules": [
@@ -54,7 +58,15 @@
   {
     "name": "march-imaging",
     "tags": [ "march-imaging" ],
-    "inbound_rules": [],
+    "inbound_rules": [
+      {
+        "protocol": "tcp",
+        "ports": "7946",
+        "sources": {
+          "tags": [ "march-edge", "march-ledger", "march-imaging" ]
+        }
+      }
+    ],
     "outbound_rules": [
       {
         "protocol": "tcp",
