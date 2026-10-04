@@ -125,6 +125,13 @@
  * for more schedulers than the build defaults to.  The trailing +1 slot is
  * historical slack. */
 static march_scheduler  g_scheds[MARCH_MAX_SCHEDULERS + 1];
+
+/* A coarse monotonic clock (march_now_ms units) published by the preemption
+ * daemon every tick (MARCH_QUANTUM_US), for march_proc.last_run_ms: a
+ * dispatch reads it with one relaxed load instead of calling the clock.  On
+ * its own cache line (one writer, read by every scheduler).  0 while no
+ * daemon runs; dispatch then falls back to the scheduler's own now_ms. */
+static _Atomic int64_t g_coarse_ms __attribute__((aligned(64)));
 static int              g_num_scheds = 0;
 static _Atomic int64_t  g_next_pid   = 0;
 static _Atomic int      g_all_done       = 0;
@@ -2082,9 +2089,13 @@ static void sched_loop(march_scheduler *sched) {
         sched->current  = p;
         sched->stat_dispatches++;
         /* Observe counters (march_proc): this scheduler owns p now. */
-        if ((sched->stat_dispatches & 1023) == 1) sched->now_ms = march_now_ms();
+        int64_t run_ms = atomic_load_explicit(&g_coarse_ms, memory_order_relaxed);
+        if (run_ms == 0) {   /* no preemption daemon: the scheduler's own clock */
+            if ((sched->stat_dispatches & 1023) == 1) sched->now_ms = march_now_ms();
+            run_ms = sched->now_ms;
+        }
         march_proc_bump(p->slices);
-        atomic_store_explicit(&p->last_run_ms, sched->now_ms, memory_order_relaxed);
+        atomic_store_explicit(&p->last_run_ms, run_ms, memory_order_relaxed);
 
         dbg_mark_dispatched(p, sched->id);
         /* A dispatched proc must have a context: NULL means it was reaped,
@@ -4535,6 +4546,7 @@ static void *preempt_daemon(void *arg) {
 
     while (atomic_load_explicit(&g_preempt_active, memory_order_acquire)) {
         nanosleep(&ts, NULL);   /* sleeps until MARCH_QUANTUM_US has elapsed */
+        atomic_store_explicit(&g_coarse_ms, march_now_ms(), memory_order_relaxed);
 
         if (!atomic_load_explicit(&g_preempt_active, memory_order_acquire))
             break;

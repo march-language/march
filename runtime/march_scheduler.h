@@ -240,6 +240,11 @@ typedef struct march_proc {
     _Atomic march_proc_status  status;       /* Process lifecycle state (atomic)      */
     march_proc_priority        priority;
     int64_t                    reductions;   /* Remaining reduction budget this quantum */
+    /* Observe counters written at EVERY dispatch (see the counter block at the
+     * end of this struct): here, beside `reductions`, which the dispatch also
+     * writes, so they share its cache line rather than touch a cold one. */
+    _Atomic uint64_t           slices;
+    _Atomic int64_t            last_run_ms;
     void                      *stack_mmap_base; /* Base of full mmap reservation (permanent guard page here) */
     void                      *stack_base;      /* Current bottom of usable stack region (grows downward) */
     size_t                     stack_alloc;     /* Total mmap size: MARCH_STACK_MAX + one guard page */
@@ -481,21 +486,21 @@ typedef struct march_proc {
     _Atomic int                 dbg_running_on;
 #endif
     /* Observe counters (R2 of specs/plans/2026-09-28-observe-recon-shell-plan.md),
-     * last so no existing field moves.  Each has ONE writer, so it is bumped
+     * last so no existing field moves, except slices and last_run_ms, which
+     * sit beside `reductions` (above), on the line dispatch already writes.  Each has ONE writer, so it is bumped
      * with a relaxed load and store (march_proc_bump), never an atomic
      * read-modify-write; _Atomic because the observe walk reads them from
      * another thread.
      *   slices      — times a scheduler dispatched this proc (owner scheduler)
-     *   last_run_ms — the dispatching scheduler's coarse clock at the latest
-     *                 dispatch (march_now_ms, refreshed every 1024 dispatches
-     *                 and on the idle path, never a clock read per dispatch)
+     *   last_run_ms — a coarse clock at the latest dispatch (march_now_ms
+     *                 units): the preemption daemon's tick (1 ms), else the
+     *                 scheduler's own, refreshed every 1024 dispatches and on
+     *                 the idle path; never a clock read per dispatch
      *   msgs_in     — user messages this proc received (the receiver)
      *   msgs_out    — messages this proc sent that were enqueued (the sender)
      *   held        — user messages an Actor.call on this proc has taken off
      *                 the mailbox and will put back (not in mbox_count while
      *                 held; the proc itself writes it) */
-    _Atomic uint64_t            slices;
-    _Atomic int64_t             last_run_ms;
     _Atomic uint64_t            msgs_in;
     _Atomic uint64_t            msgs_out;
     _Atomic int64_t             held;

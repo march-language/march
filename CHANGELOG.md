@@ -155,6 +155,30 @@ git log is authoritative for exact commits.
   ill-typed wiring compiled into code that read records with the wrong layout
   (both leader candidates died with SIGSEGV). They are now reported. The two
   that were live on the certificate-save error path are fixed.
+- **An `@[endpoints]` protocol now works in any module.** A protocol declared in a
+  nested module, in a library module found through `MARCH_LIB_PATH`, or in a
+  standard-library module failed with "Unknown module `P_A`"; only one at the entry
+  file's top level worked. The generated modules are now addressable by their
+  qualified name (`Net.Fan_C.register(s, 0)`) from anywhere. Underneath, a qualified
+  type written relative to an enclosing module (`A.T` inside `mod Outer` naming its
+  sibling `Outer.A`) now resolves, and a protocol in the standard library no longer
+  makes a program's own bare `from_json` call ambiguous when compiled.
+- **A hot patch of a topology role body is no longer refused by the node's
+  capability policy.** A role body holds the session it is handed, so its own
+  caps include `Session.Live`, and a node running the policy `forge host init`
+  writes refused every such patch with `ERR cap_policy Session.Live` unless you
+  wrote `Session.Live` into the pool's `caps`. The node's admission gate now
+  polices IO capabilities only: a proof capability (`Session.Live`,
+  `ClusterNode.Live`, your own `proof cap`) carries no IO authority and is not
+  checked against `MARCH_DEPLOY_POLICY`; an IO capability outside the policy is
+  refused as before. And in a topology with a `[control]` section, every hot patch
+  was refused with `ERR role_cap_policy Ctl.Agent ...`, because the policy
+  bounded the control plane's own roles: the generated policy now ends with a
+  `serves` line, and the gate bounds only the closures of the roles the node's
+  pool serves. Re-run `forge host init` (or deploy a restart) to rewrite an
+  existing policy; one without a `serves` line still bounds every role. Both
+  `forge deploy hot` and releases through the control plane go through the same
+  gate.
 - **Topology firewalls no longer split the cluster membership.** `forge topology gen
   ufw` / `do-firewall` and `forge host init` opened the cluster port into a pool only
   from the pools it exchanges protocol messages with, but SWIM probes every member, so

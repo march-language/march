@@ -919,6 +919,14 @@
  (action (setenv MARCH_DEPLOY_POLICY test_reload_policy.txt
           (run ./test_reload_activate4_runner reload_keys.txt policy))))
 
+; The same caps with no `serves` line: a hand-written policy bounds every
+; role closure, including roles the node does not serve.
+(rule
+ (alias runtest)
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy_all.txt) (file hcr_stub.so))
+ (action (setenv MARCH_DEPLOY_POLICY test_reload_policy_all.txt
+          (run ./test_reload_activate4_runner reload_keys.txt policy-all))))
+
 ; Restart durability (plan 6.5, DD build step 10): activate, exit, restart,
 ; and the persisted patch stack is replayed (signatures re-verified); a
 ; corrupt entry is skipped with an audit line; MARCH_HCR_NO_REPLAY and a
@@ -1943,8 +1951,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; over Ctl sessions against four simulated nodes with the leader replaced
 ; mid-rollout (every node takes each of its steps once); a refused order
 ; halting it; and chaos peers for both protocols, 30 seeds each. The
-; fixture also holds the protocols' declarations (they cannot live in the
-; stdlib yet: specs/todos/2026-09-28-endpoints-protocol-in-nested-module.md).
+; fixture also holds the protocols' declarations (until they move into the
+; stdlib: specs/todos/2026-09-28-dd-step12a-control-wiring.md).
 ; Both backends, one golden.
 (rule
  (targets control_peers_bin control_peers.out control_peers_interp.out)

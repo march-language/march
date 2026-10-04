@@ -25,6 +25,8 @@
 #include "march_dispatch.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +47,7 @@ _Static_assert(3 + 2 * TREE_MAX_DEPTH + 2 <= MARCH_JW_MAX_DEPTH,
                "the JSON writer must nest deeper than the deepest TREE");
 
 static void fill_crash_counts(march_obs_actor *rows, size_t n);
+static int cmp_i64(const void *x, const void *y);
 static const char *verb_crashes(march_jw *w, const char *args);
 
 /* ── Field renderers ──────────────────────────────────────────────────── */
@@ -391,19 +394,30 @@ static void tree_node(march_jw *w, tree_ctx *t, const march_obs_actor *r, int de
     march_jw_obj_end(w);
 }
 
+/* Index of [pid] in the sorted pids[0..n), or -1. */
+static ptrdiff_t pid_index(const int64_t *pids, size_t n, int64_t pid) {
+    if (pid < 0) return -1;
+    size_t lo = 0, hi = n;
+    while (lo < hi) { size_t mid = (lo + hi) / 2; if (pids[mid] < pid) lo = mid + 1; else hi = mid; }
+    return lo < n && pids[lo] == pid ? (ptrdiff_t)lo : -1;
+}
+
 static void write_tree(march_jw *w, march_obs_actor *rows, size_t n) {
     tree_ctx t = { rows, n, 0, 0 };
-    int64_t max_pid = -1;
-    for (size_t i = 0; i < n; i++) if (rows[i].pid > max_pid) max_pid = rows[i].pid;
-    unsigned char *present = (unsigned char *)calloc((size_t)(max_pid + 2), 1);
-    unsigned char *has_kids = (unsigned char *)calloc((size_t)(max_pid + 2), 1);
-    if (!present || !has_kids) {
-        free(present); free(has_kids);
+    /* Membership by binary search over the live pids: memory follows the
+     * number of actors, not the largest pid (pids are never reused, so on a
+     * long-lived node an array indexed by pid grows without bound). */
+    int64_t *pids = (int64_t *)malloc((n ? n : 1) * sizeof *pids);
+    unsigned char *has_kids = (unsigned char *)calloc(n ? n : 1, 1);
+    if (!pids || !has_kids) {
+        free(pids); free(has_kids);
         march_jw_null(w);   /* out of memory: no tree rather than a wrong one */
         return;
     }
-    for (size_t i = 0; i < n; i++) present[rows[i].pid] = 1;
-    #define PRESENT(p) ((p) >= 0 && (p) <= max_pid && present[p])
+    for (size_t i = 0; i < n; i++) pids[i] = rows[i].pid;
+    qsort(pids, n, sizeof *pids, cmp_i64);
+    #define PRESENT(p) (pid_index(pids, n, (p)) >= 0)
+    #define HAS_KIDS(p) (pid_index(pids, n, (p)) >= 0 && has_kids[pid_index(pids, n, (p))])
     /* The tree parent: the supervisor (even when it is not in this snapshot:
      * then the child is an orphan root), else the spawner when it is live,
      * else none. */
@@ -411,7 +425,8 @@ static void write_tree(march_jw *w, march_obs_actor *rows, size_t n) {
         march_obs_actor *r = &rows[i];
         r->tparent = r->parent >= 0 ? r->parent
                    : PRESENT(r->spawned_by) ? r->spawned_by : -1;
-        if (PRESENT(r->tparent)) has_kids[r->tparent] = 1;
+        ptrdiff_t k = pid_index(pids, n, r->tparent);
+        if (k >= 0) has_kids[k] = 1;
     }
     qsort(rows, n, sizeof *rows, cmp_parent_slot);
 
@@ -423,7 +438,7 @@ static void write_tree(march_jw *w, march_obs_actor *rows, size_t n) {
     march_jw_arr_begin(w);
     for (size_t i = 0; i < n; i++) {
         const march_obs_actor *r = &rows[i];
-        int root = (r->tparent < 0 && has_kids[r->pid])
+        int root = (r->tparent < 0 && HAS_KIDS(r->pid))
                 || (r->tparent >= 0 && !PRESENT(r->tparent));
         if (!root) continue;
         if (t.emitted >= TREE_MAX_NODES) { t.truncated = 1; break; }
@@ -436,7 +451,7 @@ static void write_tree(march_jw *w, march_obs_actor *rows, size_t n) {
     march_jw_arr_begin(w);
     for (size_t i = 0; i < n; i++) {
         const march_obs_actor *r = &rows[i];
-        if (r->tparent >= 0 || has_kids[r->pid]) continue;
+        if (r->tparent >= 0 || HAS_KIDS(r->pid)) continue;
         if (t.emitted >= TREE_MAX_NODES) { t.truncated = 1; break; }
         t.emitted++;
         march_jw_i64(w, r->pid);
@@ -445,7 +460,8 @@ static void write_tree(march_jw *w, march_obs_actor *rows, size_t n) {
     march_jw_key(w, "truncated"); march_jw_bool(w, t.truncated);
     march_jw_obj_end(w);
     #undef PRESENT
-    free(present);
+    #undef HAS_KIDS
+    free(pids);
     free(has_kids);
 }
 
@@ -522,7 +538,7 @@ static void write_sched(march_jw *w, int64_t window_ms) {
     }
     uint64_t t1 = march_mono_ns();
     double busy_sum = 0, life_sum = 0;
-    int life_n = 0;
+    int life_n = 0, busy_n = 0;   /* schedulers whose loop has started */
     march_jw_obj_begin(w);
     march_jw_key(w, "schedulers"); march_jw_i64(w, ns);
     march_jw_key(w, "window_ms");
@@ -541,9 +557,9 @@ static void write_sched(march_jw *w, int64_t window_ms) {
         march_jw_key(w, "idle_polls"); march_jw_i64(w, march_sched_thread_stat(i, MARCH_THREAD_STAT_IDLE_POLLS));
         march_jw_key(w, "idle_ms");    march_jw_u64(w, idle1 / 1000000);
         march_jw_key(w, "utilisation");
-        if (window_ms > 0 && t1 > t0) {
+        if (window_ms > 0 && t1 > t0 && started > 0) {
             double u = clamp01(1.0 - (double)(idle1 - idle0[i]) / (double)(t1 - t0));
-            busy_sum += u;
+            busy_sum += u; busy_n++;
             march_jw_f64(w, u);
         } else {
             march_jw_null(w);
@@ -560,7 +576,7 @@ static void write_sched(march_jw *w, int64_t window_ms) {
     }
     march_jw_arr_end(w);
     march_jw_key(w, "utilisation");
-    if (window_ms > 0 && ns > 0) march_jw_f64(w, busy_sum / ns); else march_jw_null(w);
+    if (window_ms > 0 && busy_n > 0) march_jw_f64(w, busy_sum / busy_n); else march_jw_null(w);
     march_jw_key(w, "lifetime_utilisation");
     if (life_n > 0) march_jw_f64(w, life_sum / life_n); else march_jw_null(w);
     march_jw_key(w, "live_procs");         march_jw_i64(w, march_sched_stat(0));
@@ -864,7 +880,7 @@ enum { TOP_MBOX, TOP_CRASHES, TOP_SLICES, TOP_MSGS_IN, TOP_MSGS_OUT };
 static const char *top_attrs[] = { "mbox", "crashes", "slices", "msgs_in", "msgs_out" };
 #define N_TOP_ATTRS 5
 #define TOP_WINDOW_DEFAULT_MS 1000
-#define TOP_WINDOW_MAX_MS     10000
+#define TOP_WINDOW_MAX_MS     5000
 
 typedef struct { int64_t value; size_t row; } top_entry;
 
@@ -877,6 +893,10 @@ static int cmp_top(const void *x, const void *y) {
 static uint64_t counter_of(const march_obs_actor *r, int attr) {
     return attr == TOP_SLICES ? r->slices : attr == TOP_MSGS_IN ? r->msgs_in : r->msgs_out;
 }
+
+static int windowed_enter(void);
+static void windowed_exit(void);
+static const char *top_body(march_jw *w, int attr, int64_t want, int windowed, int64_t window);
 
 static const char *verb_top(march_jw *w, const char *args) {
     char word[32];
@@ -895,6 +915,29 @@ static const char *verb_top(march_jw *w, const char *args) {
     }
     if (!only_spaces(p)) return "bad_args";
 
+    /* A windowed TOP holds its connection thread for the window; at most two
+     * at once, so they cannot take every connection (eight) from the other
+     * verbs. */
+    if (windowed && !windowed_enter()) return "busy";
+    const char *rc = top_body(w, attr, want, windowed, window);
+    if (windowed) windowed_exit();
+    return rc;
+}
+
+static _Atomic int g_windowed_now;
+#define MAX_WINDOWED 2
+
+static int windowed_enter(void) {
+    if (atomic_fetch_add(&g_windowed_now, 1) >= MAX_WINDOWED) {
+        atomic_fetch_sub(&g_windowed_now, 1);
+        return 0;
+    }
+    return 1;
+}
+
+static void windowed_exit(void) { atomic_fetch_sub(&g_windowed_now, 1); }
+
+static const char *top_body(march_jw *w, int attr, int64_t want, int windowed, int64_t window) {
     march_obs_actor *before = NULL; size_t nb = 0;
     if (windowed) {
         if (march_obs_actors(&before, &nb) != 0) return "out_of_memory";

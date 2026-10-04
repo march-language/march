@@ -615,7 +615,9 @@ static void test_hard_deadline_cancels_tasks(void) {
     send(a, MSG_HOLD);
     /* The old task: pinned to the epoch current NOW. */
     void *old_task = march_task_spawn_thunk(&g_busy_thunk);
-    sleep_ms(20);
+    /* Until it has run at all, not a fixed 20 ms: a loaded macOS runner
+     * had not scheduled it yet (CI 2026-10-03, "the old task is running"). */
+    wait_until(&g_task_ticks, 1, 5000);
     long ticks0 = atomic_load(&g_task_ticks);
     CHECK(ticks0 > 0, "the old task is running");
     CHECK(activate_ex(SLOT_TASKS, (void *)v2_dispatch, migrate_v1_v2, 0, NULL,
