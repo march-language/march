@@ -65,23 +65,31 @@ Linux arm64 container (`march-amdr-repro`), same compiler, runtime swapped;
 | R2.3 crash ring | R2.2b | +0.84% | +0.76% | | -1.16% (1, n=60, faster), +1.44% (8) |
 | R2.4 spawned_by | R2.3 | +0.79% (n=100) | | | -0.08% (1, n=200), -2.23% (8) |
 
-**Cumulative, R2 against main (2026-10-03, quiet box, A/A -0.04% with
-half-IQR 1.06%):** `fanin_flood` at one scheduler is **+1.68% to +2.11%** over
-five runs (main vs the merged branch, before and after the review fixes,
-with the socket off and on); at eight schedulers it is inside the noise
-(-0.66% to +1.25%). Every commit passed against its predecessor; the sum
-does not pass the 1% one-scheduler gate. What was tried:
-- Bisecting by removing one counter at a time (n = 200 each): `msgs_in`
-  -0.17%, `msgs_out` +0.28%, the dispatch pair (`slices`, `last_run_ms`)
-  -1.13%. Moving the dispatch pair beside `reductions` (the cache line the
-  dispatch already writes) left the total at +1.83%.
-- Keeping the dispatch pair only while the observe socket runs: +2.11% with
-  the socket off, +1.68% on. So the dispatch pair is not the whole cost, and
-  the gating was reverted.
-The remaining ~1% is spread over commits that do not touch the message path
-(R2.3 +0.84%, R2.4 +0.79% against their predecessors), which reads as code
-size and placement in `march_runtime.c`; separating 0.5% effects would need
-n of about 400 per variant. Recorded as an open result, not a pass.
+**Cumulative (2026-10-03).** Paired two-binary runs first read R2 against
+main at +1.7% to +2.1% at one scheduler. A better-controlled run replaced them:
+every version at once, in a fresh random order each round (no fixed
+predecessor), 300 rounds, with an A/A copy of the base and bootstrap 95%
+intervals on the median difference (`fanin_flood`, one scheduler, Linux):
+
+| Arm | Against the pre-R2 base (302cd96) |
+|---|---|
+| A/A (copy of the base) | -0.04% [-0.27, +0.19] |
+| R2.1 + R2.2 | +0.23% [+0.01, +0.48] |
+| + R2.2b padding | +0.35% [+0.12, +0.62] |
+| + R2.3 crash ring | +0.86% [+0.64, +1.11] |
+| + R2.4 spawned_by (R2 as written) | +0.92% [+0.73, +1.16] |
+| main after #766 (R2 + 7 other commits) | +1.23% [+1.00, +1.48] |
+| + review fixes | +1.54% [+1.33, +1.87] |
+
+So R2 costs about 0.9% at one scheduler, inside the 1% gate, and the review
+fixes about 0.3% more (their interval overlaps main's). The strict A/B
+alternation read high. The R2.3 step (+0.5%) does not touch the message
+path (`fanin_flood` spawns one actor and kills none), so it is code
+placement in `march_runtime.c`, not work. A first bisect by removing one
+counter at a time (paired runs, so read with the same caution) put the
+dispatch pair (`slices`, `last_run_ms`) at about 1%; moving it beside
+`reductions`, or keeping it only while the socket runs, did not change the
+total, and the gating was not kept.
 
 **R2.1 failed its gate and was reworked, not tuned:** `msgs_out` was a
 non-inlined call into the scheduler to read TLS on every `march_send`. But
