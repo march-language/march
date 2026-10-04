@@ -1,7 +1,7 @@
 -- Scheduler utilisation over the observe socket (R2 of
 -- specs/plans/2026-09-28-observe-recon-shell-plan.md), run with
 -- MARCH_NUM_SCHEDULERS=4 and checked by test/observe_snapshot_check.ml (mode
--- "sched"): idle for 1.5 s after "ready" (utilisation < 5%), then four
+-- "sched"): idle for 3 s after "ready" (utilisation < 5%), then four
 -- CPU-bound actors spin for 4 s after "busy" (utilisation > 90%).
 mod Main do
   needs IO
@@ -37,7 +37,7 @@ mod Main do
 
   fn main(_io : Cap(IO)) do
     println("ready")
-    sleep_ms(1500)
+    sleep_ms(3000)
     start(4, unix_time_ms() + 4000)
     println("busy")
     sleep_ms(120000)
