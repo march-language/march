@@ -24,9 +24,11 @@
 #include "march_scheduler.h"
 #include "march_dispatch.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -41,6 +43,9 @@
  * a node object and its children array per level. */
 _Static_assert(3 + 2 * TREE_MAX_DEPTH + 2 <= MARCH_JW_MAX_DEPTH,
                "the JSON writer must nest deeper than the deepest TREE");
+
+static void fill_crash_counts(march_obs_actor *rows, size_t n);
+static const char *verb_crashes(march_jw *w, const char *args);
 
 /* ── Field renderers ──────────────────────────────────────────────────── */
 
@@ -98,6 +103,7 @@ static void write_row(march_jw *w, const march_obs_actor *r) {
     march_jw_key(w, "status");      march_jw_str(w, status_name(r->status));
     march_jw_key(w, "mbox");        march_jw_i64(w, r->mbox);
     march_jw_key(w, "user_mbox");   march_jw_i64(w, r->user_mbox);
+    march_jw_key(w, "held");        march_jw_i64(w, r->held);
     march_jw_key(w, "mbox_limit");  march_jw_i64(w, r->mbox_limit);
     march_jw_key(w, "mbox_policy"); march_jw_str(w, policy_name(r->mbox_policy));
     march_jw_key(w, "code_epoch");  march_jw_u64(w, r->code_epoch);
@@ -109,6 +115,17 @@ static void write_row(march_jw *w, const march_obs_actor *r) {
     march_jw_key(w, "parent");
     if (r->parent >= 0) march_jw_i64(w, r->parent); else march_jw_null(w);
     march_jw_key(w, "children");    march_jw_i64(w, r->num_children);
+    march_jw_key(w, "spawned_by");
+    if (r->spawned_by >= 0) march_jw_i64(w, r->spawned_by); else march_jw_null(w);
+    march_jw_key(w, "slices");      march_jw_u64(w, r->slices);
+    march_jw_key(w, "msgs_in");     march_jw_u64(w, r->msgs_in);
+    march_jw_key(w, "msgs_out");    march_jw_u64(w, r->msgs_out);
+    march_jw_key(w, "crashes");     march_jw_i64(w, r->crashes);
+    march_jw_key(w, "child_crashes"); march_jw_i64(w, r->child_crashes);
+    /* How long ago it last ran (march_now_ms is monotonic, not wall time). */
+    march_jw_key(w, "idle_ms");
+    if (r->last_run_ms > 0) march_jw_i64(w, march_now_ms() - r->last_run_ms);
+    else march_jw_null(w);
     march_jw_obj_end(w);
 }
 
@@ -154,9 +171,13 @@ enum { SORT_MBOX, SORT_STATUS, SORT_EPOCH, SORT_PID };
 static int cmp_pid(const march_obs_actor *a, const march_obs_actor *b) {
     return a->pid < b->pid ? -1 : a->pid > b->pid;
 }
+/* Waiting work: queued plus held by an Actor.call (an actor stuck in a call
+ * with work piling up is the one an operator is looking for). */
+static int64_t waiting(const march_obs_actor *r) { return r->mbox + r->held; }
+
 static int cmp_mbox(const void *x, const void *y) {
     const march_obs_actor *a = x, *b = y;
-    if (a->mbox != b->mbox) return a->mbox > b->mbox ? -1 : 1;   /* deepest first */
+    if (waiting(a) != waiting(b)) return waiting(a) > waiting(b) ? -1 : 1;   /* deepest first */
     return cmp_pid(a, b);
 }
 /* Running, runnable, then waiting: busiest first. */
@@ -223,6 +244,7 @@ static const char *verb_actors(march_jw *w, const char *args) {
     if (!only_spaces(p)) return "bad_args";   /* a third word, or an over-long one */
     march_obs_actor *rows; size_t n;
     if (march_obs_actors(&rows, &n) != 0) return "out_of_memory";
+    fill_crash_counts(rows, n);
     write_actors(w, rows, n, sort, limit);
     march_obs_actors_free(rows, n);
     return NULL;
@@ -249,6 +271,7 @@ static const char *verb_actor(march_jw *w, const char *args) {
     if (!ex.known) return "not_found";
     march_obs_actor *rows = NULL; size_t n = 0;
     if (march_obs_actors(&rows, &n) != 0) return "out_of_memory";
+    fill_crash_counts(rows, n);
     const march_obs_actor *self = NULL;
     for (size_t i = 0; i < n; i++) if (rows[i].pid == pid) { self = &rows[i]; break; }
 
@@ -275,6 +298,13 @@ static const char *verb_actor(march_jw *w, const char *args) {
             free(kids);
         }
     }
+    march_jw_arr_end(w);
+    /* Unsupervised actors it spawned. */
+    march_jw_key(w, "spawned");
+    march_jw_arr_begin(w);
+    if (self)
+        for (size_t i = 0; i < n; i++)
+            if (rows[i].parent < 0 && rows[i].spawned_by == pid) march_jw_i64(w, rows[i].pid);
     march_jw_arr_end(w);
     march_jw_key(w, "supervisor");
     if (self && ex.supervisor) {
@@ -315,19 +345,21 @@ typedef struct {
     int              truncated;
 } tree_ctx;
 
+/* TREE orders by its parent (tparent: the supervisor, else the spawner),
+ * then supervise-block slot, then pid. */
 static int cmp_parent_slot(const void *x, const void *y) {
     const march_obs_actor *a = x, *b = y;
-    if (a->parent != b->parent) return a->parent < b->parent ? -1 : 1;
+    if (a->tparent != b->tparent) return a->tparent < b->tparent ? -1 : 1;
     if (a->child_index != b->child_index) return a->child_index < b->child_index ? -1 : 1;
     return cmp_pid(a, b);
 }
 
-/* First row whose parent is [pid] in rows sorted by cmp_parent_slot. */
+/* First row whose tparent is [pid] in rows sorted by cmp_parent_slot. */
 static size_t first_child(const march_obs_actor *rows, size_t n, int64_t pid) {
     size_t lo = 0, hi = n;
     while (lo < hi) {
         size_t mid = lo + (hi - lo) / 2;
-        if (rows[mid].parent < pid) lo = mid + 1; else hi = mid;
+        if (rows[mid].tparent < pid) lo = mid + 1; else hi = mid;
     }
     return lo;
 }
@@ -339,11 +371,16 @@ static void tree_node(march_jw *w, tree_ctx *t, const march_obs_actor *r, int de
     march_jw_key(w, "type");   write_type(w, r);
     march_jw_key(w, "names");  write_names(w, r);
     march_jw_key(w, "status"); march_jw_str(w, status_name(r->status));
-    march_jw_key(w, "mbox");   march_jw_i64(w, r->mbox);
+    march_jw_key(w, "mbox");   march_jw_i64(w, waiting(r));
+    /* How it hangs under its parent: a supervise-block child, or an actor
+     * its parent spawned (and does not supervise).  null for a root. */
+    march_jw_key(w, "link");
+    if (depth == 0) march_jw_null(w);
+    else march_jw_str(w, r->parent >= 0 ? "supervised" : "spawned");
     march_jw_key(w, "children");
     march_jw_arr_begin(w);
     for (size_t i = first_child(t->rows, t->n, r->pid);
-         i < t->n && t->rows[i].parent == r->pid; i++) {
+         i < t->n && t->rows[i].tparent == r->pid; i++) {
         if (depth + 1 >= TREE_MAX_DEPTH || t->emitted >= TREE_MAX_NODES) {
             t->truncated = 1;
             break;
@@ -354,51 +391,52 @@ static void tree_node(march_jw *w, tree_ctx *t, const march_obs_actor *r, int de
     march_jw_obj_end(w);
 }
 
-static int pid_present(const march_obs_actor *rows, size_t n, int64_t pid) {
-    /* rows sorted by parent: scan (TREE is not a hot path; n is bounded). */
-    for (size_t i = 0; i < n; i++) if (rows[i].pid == pid) return 1;
-    return 0;
-}
-
 static void write_tree(march_jw *w, march_obs_actor *rows, size_t n) {
-    qsort(rows, n, sizeof *rows, cmp_parent_slot);
     tree_ctx t = { rows, n, 0, 0 };
-    /* Mark which pids have children present, and which rows are orphans
-     * (their supervisor is mid-restart or gone: listed at top level). */
     int64_t max_pid = -1;
     for (size_t i = 0; i < n; i++) if (rows[i].pid > max_pid) max_pid = rows[i].pid;
     unsigned char *present = (unsigned char *)calloc((size_t)(max_pid + 2), 1);
     unsigned char *has_kids = (unsigned char *)calloc((size_t)(max_pid + 2), 1);
-    if (present && has_kids) {
-        for (size_t i = 0; i < n; i++) present[rows[i].pid] = 1;
-        for (size_t i = 0; i < n; i++)
-            if (rows[i].parent >= 0 && rows[i].parent <= max_pid)
-                has_kids[rows[i].parent] = 1;
+    if (!present || !has_kids) {
+        free(present); free(has_kids);
+        march_jw_null(w);   /* out of memory: no tree rather than a wrong one */
+        return;
     }
-    #define PRESENT(p)  (present ? ((p) >= 0 && (p) <= max_pid && present[p]) : pid_present(rows, n, p))
-    #define HAS_KIDS(r) (has_kids ? has_kids[(r)->pid] : ((r)->num_children > 0))
+    for (size_t i = 0; i < n; i++) present[rows[i].pid] = 1;
+    #define PRESENT(p) ((p) >= 0 && (p) <= max_pid && present[p])
+    /* The tree parent: the supervisor (even when it is not in this snapshot:
+     * then the child is an orphan root), else the spawner when it is live,
+     * else none. */
+    for (size_t i = 0; i < n; i++) {
+        march_obs_actor *r = &rows[i];
+        r->tparent = r->parent >= 0 ? r->parent
+                   : PRESENT(r->spawned_by) ? r->spawned_by : -1;
+        if (PRESENT(r->tparent)) has_kids[r->tparent] = 1;
+    }
+    qsort(rows, n, sizeof *rows, cmp_parent_slot);
 
     march_jw_obj_begin(w);
     march_jw_key(w, "total"); march_jw_u64(w, n);
-    /* Roots: unsupervised actors that supervise something present, and
+    /* Roots: actors with no tree parent that have tree children, and
      * children whose supervisor is not in this snapshot (orphans). */
     march_jw_key(w, "roots");
     march_jw_arr_begin(w);
     for (size_t i = 0; i < n; i++) {
         const march_obs_actor *r = &rows[i];
-        int root = (r->parent < 0 && HAS_KIDS(r)) || (r->parent >= 0 && !PRESENT(r->parent));
+        int root = (r->tparent < 0 && has_kids[r->pid])
+                || (r->tparent >= 0 && !PRESENT(r->tparent));
         if (!root) continue;
         if (t.emitted >= TREE_MAX_NODES) { t.truncated = 1; break; }
         tree_node(w, &t, r, 0);
     }
     march_jw_arr_end(w);
-    /* The synthetic root: bare-spawned actors, neither supervised nor
-     * supervising. */
+    /* The synthetic root: actors with no tree parent and no tree children
+     * (spawned by main, a task, or an actor that has since died). */
     march_jw_key(w, "unsupervised");
     march_jw_arr_begin(w);
     for (size_t i = 0; i < n; i++) {
         const march_obs_actor *r = &rows[i];
-        if (r->parent >= 0 || HAS_KIDS(r)) continue;
+        if (r->tparent >= 0 || has_kids[r->pid]) continue;
         if (t.emitted >= TREE_MAX_NODES) { t.truncated = 1; break; }
         t.emitted++;
         march_jw_i64(w, r->pid);
@@ -407,7 +445,6 @@ static void write_tree(march_jw *w, march_obs_actor *rows, size_t n) {
     march_jw_key(w, "truncated"); march_jw_bool(w, t.truncated);
     march_jw_obj_end(w);
     #undef PRESENT
-    #undef HAS_KIDS
     free(present);
     free(has_kids);
 }
@@ -465,24 +502,67 @@ static const char *verb_names(march_jw *w, const char *args) {
 
 /* ── SCHED ────────────────────────────────────────────────────────────── */
 
-static void write_sched(march_jw *w) {
+#define SCHED_WINDOW_DEFAULT_MS 200
+#define SCHED_WINDOW_MAX_MS     5000
+
+static double clamp01(double x) { return x < 0 ? 0 : x > 1 ? 1 : x; }
+
+/* [window_ms] > 0: sample every scheduler's idle time, sleep, sample again,
+ * and report utilisation over the window (the sleep is on this observe
+ * thread, outside any critical section).  0: lifetime figures only (what
+ * SNAPSHOT uses, so it never sleeps). */
+static void write_sched(march_jw *w, int64_t window_ms) {
     int ns = march_sched_num_schedulers();
+    if (ns > 256) ns = 256;
+    uint64_t idle0[256], t0 = march_mono_ns();
+    for (int i = 0; i < ns; i++) idle0[i] = march_sched_idle_ns(i);
+    if (window_ms > 0) {
+        struct timespec ts = { (time_t)(window_ms / 1000), (long)(window_ms % 1000) * 1000000L };
+        while (nanosleep(&ts, &ts) != 0) {}
+    }
+    uint64_t t1 = march_mono_ns();
+    double busy_sum = 0, life_sum = 0;
+    int life_n = 0;
     march_jw_obj_begin(w);
     march_jw_key(w, "schedulers"); march_jw_i64(w, ns);
+    march_jw_key(w, "window_ms");
+    if (window_ms > 0) march_jw_i64(w, window_ms); else march_jw_null(w);
     march_jw_key(w, "threads");
     march_jw_arr_begin(w);
-    /* Per-thread counters are plain fields owned by their scheduler thread:
-     * a racy snapshot by design until R2 makes them atomics. */
+    /* dispatches/idle_polls are plain fields owned by their scheduler
+     * thread: a racy read, as before. */
     for (int i = 0; i < ns; i++) {
+        uint64_t idle1 = march_sched_idle_ns(i), started = march_sched_started_ns(i);
         march_jw_obj_begin(w);
         march_jw_key(w, "id");         march_jw_i64(w, i);
         march_jw_key(w, "started");    march_jw_bool(w, march_sched_thread_stat(i, MARCH_THREAD_STAT_STARTED) > 0);
         march_jw_key(w, "entered");    march_jw_bool(w, march_sched_thread_stat(i, MARCH_THREAD_STAT_ENTERED) > 0);
         march_jw_key(w, "dispatches"); march_jw_i64(w, march_sched_thread_stat(i, MARCH_THREAD_STAT_DISPATCHES));
         march_jw_key(w, "idle_polls"); march_jw_i64(w, march_sched_thread_stat(i, MARCH_THREAD_STAT_IDLE_POLLS));
+        march_jw_key(w, "idle_ms");    march_jw_u64(w, idle1 / 1000000);
+        march_jw_key(w, "utilisation");
+        if (window_ms > 0 && t1 > t0) {
+            double u = clamp01(1.0 - (double)(idle1 - idle0[i]) / (double)(t1 - t0));
+            busy_sum += u;
+            march_jw_f64(w, u);
+        } else {
+            march_jw_null(w);
+        }
+        march_jw_key(w, "lifetime_utilisation");
+        if (started > 0 && t1 > started) {
+            double u = clamp01(1.0 - (double)idle1 / (double)(t1 - started));
+            life_sum += u; life_n++;
+            march_jw_f64(w, u);
+        } else {
+            march_jw_null(w);
+        }
         march_jw_obj_end(w);
     }
     march_jw_arr_end(w);
+    march_jw_key(w, "utilisation");
+    if (window_ms > 0 && ns > 0) march_jw_f64(w, busy_sum / ns); else march_jw_null(w);
+    march_jw_key(w, "lifetime_utilisation");
+    if (life_n > 0) march_jw_f64(w, life_sum / life_n); else march_jw_null(w);
     march_jw_key(w, "live_procs");         march_jw_i64(w, march_sched_stat(0));
     march_jw_key(w, "procs_spawned");      march_jw_i64(w, march_sched_stat(1));
     march_jw_key(w, "runq");               march_jw_i64(w, march_sched_stat(2));
@@ -499,8 +579,14 @@ static void write_sched(march_jw *w) {
 }
 
 static const char *verb_sched(march_jw *w, const char *args) {
-    if (!only_spaces(args)) return "bad_args";
-    write_sched(w);
+    int64_t window = SCHED_WINDOW_DEFAULT_MS;
+    char word[32];
+    const char *p = args;
+    if (next_word(&p, word, sizeof word)) {
+        if (!parse_i64(word, &window) || window > SCHED_WINDOW_MAX_MS) return "bad_args";
+    }
+    if (!only_spaces(p)) return "bad_args";
+    write_sched(w, window);
     return NULL;
 }
 
@@ -529,7 +615,7 @@ static int64_t rss_now_bytes(void) {
 
 static void write_mem(march_jw *w, const march_obs_actor *rows, size_t n) {
     int64_t queued = 0;
-    for (size_t i = 0; i < n; i++) queued += rows[i].mbox;
+    for (size_t i = 0; i < n; i++) queued += waiting(&rows[i]);
     int64_t rss = rss_now_bytes();
     march_jw_obj_begin(w);
     march_jw_key(w, "rss_bytes");
@@ -621,10 +707,11 @@ static const char *verb_epochs(march_jw *w, const char *args) {
 /* ── SNAPSHOT [sections] ──────────────────────────────────────────────── */
 
 enum { SEC_ACTORS = 1, SEC_TREE = 2, SEC_NAMES = 4, SEC_SCHED = 8,
-       SEC_MEM = 16, SEC_EPOCHS = 32, SEC_ALL = 63 };
+       SEC_MEM = 16, SEC_EPOCHS = 32, SEC_CRASHES = 64, SEC_ALL = 127 };
 static const struct { const char *name; int bit; } sections[] = {
     { "actors", SEC_ACTORS }, { "tree", SEC_TREE }, { "names", SEC_NAMES },
     { "sched", SEC_SCHED }, { "mem", SEC_MEM }, { "epochs", SEC_EPOCHS },
+    { "crashes", SEC_CRASHES },
 };
 #define N_SECTIONS (sizeof sections / sizeof sections[0])
 
@@ -657,6 +744,7 @@ static const char *verb_snapshot(march_jw *w, const char *args) {
     int need_rows = mask & (SEC_ACTORS | SEC_TREE | SEC_NAMES | SEC_MEM);
     /* ONE walk for every actor section, so they agree with each other. */
     if (need_rows && march_obs_actors(&rows, &n) != 0) return "out_of_memory";
+    if (need_rows) fill_crash_counts(rows, n);
     march_jw_obj_begin(w);
     if (mask & SEC_NAMES) {   /* before the sorts below reorder rows (harmless) */
         march_jw_key(w, "names");
@@ -668,9 +756,199 @@ static const char *verb_snapshot(march_jw *w, const char *args) {
         write_actors(w, rows, n, SORT_MBOX, ACTORS_DEFAULT_N);
     }
     if (mask & SEC_TREE)   { march_jw_key(w, "tree");   write_tree(w, rows, n); }
-    if (mask & SEC_SCHED)  { march_jw_key(w, "sched");  write_sched(w); }
+    if (mask & SEC_SCHED)  { march_jw_key(w, "sched");  write_sched(w, 0); }
     if (mask & SEC_EPOCHS) { march_jw_key(w, "epochs"); write_epochs(w); }
+    if (mask & SEC_CRASHES) {
+        march_jw_key(w, "crashes");
+        if (verb_crashes(w, "") != NULL) march_jw_null(w);
+    }
     march_jw_obj_end(w);
+    march_obs_actors_free(rows, n);
+    return NULL;
+}
+
+/* ── Crash ring: CRASHES, and per-row crash counts ───────────────────── */
+
+static const char *crash_kind_name(int k) {
+    switch (k) {
+    case MARCH_CRASH_KIND_DRAINING: return "draining";
+    case MARCH_CRASH_KIND_PANIC:    return "panic";
+    default:                        return "crash";
+    }
+}
+
+static int cmp_i64(const void *x, const void *y) {
+    int64_t a = *(const int64_t *)x, b = *(const int64_t *)y;
+    return a < b ? -1 : a > b;
+}
+
+#define CRASH_COUNT_WINDOW_MS (3600 * 1000)
+
+/* How many of the sorted pids[0..k) equal [pid]. */
+static int count_pid(const int64_t *pids, int k, int64_t pid) {
+    size_t lo = 0, hi = (size_t)k;   /* first pids[j] >= pid */
+    while (lo < hi) { size_t mid = (lo + hi) / 2; if (pids[mid] < pid) lo = mid + 1; else hi = mid; }
+    int c = 0;
+    while (lo < (size_t)k && pids[lo] == pid) { c++; lo++; }
+    return c;
+}
+
+/* rows[i].crashes / child_crashes: ring entries in the last hour whose pid,
+ * or whose supervisor, is that row's pid. */
+static void fill_crash_counts(march_obs_actor *rows, size_t n) {
+    static march_obs_crash ring[MARCH_CRASH_RING];   /* only touched under g_ring_mu */
+    static pthread_mutex_t g_ring_mu = PTHREAD_MUTEX_INITIALIZER;
+    int64_t pids[MARCH_CRASH_RING], sups[MARCH_CRASH_RING];
+    int k = 0, ks = 0;
+    pthread_mutex_lock(&g_ring_mu);
+    int m = march_obs_crashes(ring, MARCH_CRASH_RING, NULL);
+    int64_t since = march_unix_time_ms() - CRASH_COUNT_WINDOW_MS;
+    for (int i = 0; i < m; i++) {
+        if (ring[i].at_ms < since) continue;
+        if (ring[i].pid >= 0) pids[k++] = ring[i].pid;
+        if (ring[i].supervisor >= 0) sups[ks++] = ring[i].supervisor;
+    }
+    pthread_mutex_unlock(&g_ring_mu);
+    qsort(pids, (size_t)k, sizeof pids[0], cmp_i64);
+    qsort(sups, (size_t)ks, sizeof sups[0], cmp_i64);
+    for (size_t i = 0; i < n; i++) {
+        rows[i].crashes = k ? count_pid(pids, k, rows[i].pid) : 0;
+        rows[i].child_crashes = ks ? count_pid(sups, ks, rows[i].pid) : 0;
+    }
+}
+
+#define CRASHES_DEFAULT_N 20
+
+static const char *verb_crashes(march_jw *w, const char *args) {
+    int64_t want = CRASHES_DEFAULT_N;
+    char word[32];
+    const char *p = args;
+    if (next_word(&p, word, sizeof word)
+            && (!parse_i64(word, &want) || want < 1 || want > MARCH_CRASH_RING))
+        return "bad_args";
+    if (!only_spaces(p)) return "bad_args";
+    march_obs_crash *ring = (march_obs_crash *)malloc(sizeof *ring * (size_t)want);
+    if (!ring) return "out_of_memory";
+    uint64_t total = 0;
+    int m = march_obs_crashes(ring, (int)want, &total);
+    march_jw_obj_begin(w);
+    march_jw_key(w, "total"); march_jw_u64(w, total);
+    march_jw_key(w, "crashes");
+    march_jw_arr_begin(w);
+    for (int i = 0; i < m; i++) {
+        const march_obs_crash *c = &ring[i];
+        march_jw_obj_begin(w);
+        march_jw_key(w, "seq");  march_jw_u64(w, c->seq);
+        march_jw_key(w, "kind"); march_jw_str(w, crash_kind_name(c->kind));
+        march_jw_key(w, "pid");
+        if (c->pid >= 0) march_jw_i64(w, c->pid); else march_jw_null(w);
+        march_jw_key(w, "type");
+        if (c->type[0]) march_jw_str(w, c->type); else march_jw_null(w);
+        march_jw_key(w, "code_epoch"); march_jw_u64(w, c->code_epoch);
+        march_jw_key(w, "supervisor");
+        if (c->supervisor >= 0) march_jw_i64(w, c->supervisor); else march_jw_null(w);
+        march_jw_key(w, "restart"); march_jw_i64(w, c->restart);
+        march_jw_key(w, "at_ms");   march_jw_i64(w, c->at_ms);
+        /* No message: observe tier (C7).  The debug tier (R4) shows it. */
+        march_jw_obj_end(w);
+    }
+    march_jw_arr_end(w);
+    march_jw_obj_end(w);
+    free(ring);
+    return NULL;
+}
+
+/* ── TOP <attr> <n> [window_ms] ───────────────────────────────────────── */
+
+enum { TOP_MBOX, TOP_CRASHES, TOP_SLICES, TOP_MSGS_IN, TOP_MSGS_OUT };
+static const char *top_attrs[] = { "mbox", "crashes", "slices", "msgs_in", "msgs_out" };
+#define N_TOP_ATTRS 5
+#define TOP_WINDOW_DEFAULT_MS 1000
+#define TOP_WINDOW_MAX_MS     10000
+
+typedef struct { int64_t value; size_t row; } top_entry;
+
+static int cmp_top(const void *x, const void *y) {
+    const top_entry *a = x, *b = y;
+    if (a->value != b->value) return a->value > b->value ? -1 : 1;
+    return a->row < b->row ? -1 : a->row > b->row;
+}
+
+static uint64_t counter_of(const march_obs_actor *r, int attr) {
+    return attr == TOP_SLICES ? r->slices : attr == TOP_MSGS_IN ? r->msgs_in : r->msgs_out;
+}
+
+static const char *verb_top(march_jw *w, const char *args) {
+    char word[32];
+    const char *p = args;
+    int attr = -1;
+    int64_t want, window = TOP_WINDOW_DEFAULT_MS;
+    if (!next_word(&p, word, sizeof word)) return "bad_args";
+    for (int i = 0; i < N_TOP_ATTRS; i++) if (strcmp(word, top_attrs[i]) == 0) attr = i;
+    if (attr < 0) return "bad_args";
+    if (!next_word(&p, word, sizeof word) || !parse_i64(word, &want)
+            || want < 1 || want > ACTORS_MAX_N) return "bad_args";
+    int windowed = attr >= TOP_SLICES;
+    if (next_word(&p, word, sizeof word)) {
+        if (!windowed || !parse_i64(word, &window) || window < 1 || window > TOP_WINDOW_MAX_MS)
+            return "bad_args";
+    }
+    if (!only_spaces(p)) return "bad_args";
+
+    march_obs_actor *before = NULL; size_t nb = 0;
+    if (windowed) {
+        if (march_obs_actors(&before, &nb) != 0) return "out_of_memory";
+        qsort(before, nb, sizeof *before, cmp_pid_q);
+        struct timespec ts = { (time_t)(window / 1000), (long)(window % 1000) * 1000000L };
+        while (nanosleep(&ts, &ts) != 0) {}
+    }
+    march_obs_actor *rows; size_t n;
+    if (march_obs_actors(&rows, &n) != 0) { march_obs_actors_free(before, nb); return "out_of_memory"; }
+    if (attr == TOP_CRASHES) fill_crash_counts(rows, n);
+    top_entry *e = (top_entry *)malloc((n ? n : 1) * sizeof *e);
+    if (!e) { march_obs_actors_free(before, nb); march_obs_actors_free(rows, n); return "out_of_memory"; }
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        int64_t v;
+        if (attr == TOP_MBOX) v = waiting(&rows[i]);
+        /* A crash-looping slot's crashes land on its supervisor's row (each
+         * restart is a new pid), so rank by both. */
+        else if (attr == TOP_CRASHES) v = rows[i].crashes + rows[i].child_crashes;
+        else {
+            /* Delta over the window; an actor born during it counts from 0. */
+            uint64_t prev = 0;
+            size_t lo = 0, hi = nb;
+            while (lo < hi) { size_t mid = (lo + hi) / 2; if (before[mid].pid < rows[i].pid) lo = mid + 1; else hi = mid; }
+            if (lo < nb && before[lo].pid == rows[i].pid) prev = counter_of(&before[lo], attr);
+            uint64_t now = counter_of(&rows[i], attr);
+            v = now >= prev ? (int64_t)(now - prev) : 0;
+        }
+        e[k++] = (top_entry){ v, i };
+    }
+    qsort(e, k, sizeof *e, cmp_top);
+    size_t shown = (size_t)want < k ? (size_t)want : k;
+    march_jw_obj_begin(w);
+    march_jw_key(w, "attr"); march_jw_str(w, top_attrs[attr]);
+    march_jw_key(w, "window_ms");
+    if (windowed) march_jw_i64(w, window); else march_jw_null(w);
+    march_jw_key(w, "total"); march_jw_u64(w, n);
+    march_jw_key(w, "top");
+    march_jw_arr_begin(w);
+    for (size_t i = 0; i < shown; i++) {
+        const march_obs_actor *r = &rows[e[i].row];
+        march_jw_obj_begin(w);
+        march_jw_key(w, "pid");    march_jw_i64(w, r->pid);
+        march_jw_key(w, "value");  march_jw_i64(w, e[i].value);
+        march_jw_key(w, "type");   write_type(w, r);
+        march_jw_key(w, "names");  write_names(w, r);
+        march_jw_key(w, "status"); march_jw_str(w, status_name(r->status));
+        march_jw_key(w, "mbox");   march_jw_i64(w, waiting(r));
+        march_jw_obj_end(w);
+    }
+    march_jw_arr_end(w);
+    march_jw_obj_end(w);
+    free(e);
+    march_obs_actors_free(before, nb);
     march_obs_actors_free(rows, n);
     return NULL;
 }
@@ -678,7 +956,7 @@ static const char *verb_snapshot(march_jw *w, const char *args) {
 /* ── Registration ─────────────────────────────────────────────────────── */
 
 static const march_observe_verb snapshot_verbs[] = {
-    { "SNAPSHOT", "observe", "[actors,tree,names,sched,mem,epochs]",
+    { "SNAPSHOT", "observe", "[actors,tree,names,sched,mem,epochs,crashes]",
       "several sections from one actor walk (default: all)", verb_snapshot },
     { "ACTORS", "observe", "[mbox|status|epoch|pid] [n]",
       "live actors, sorted, at most n (default 100, max 10000)", verb_actors },
@@ -686,9 +964,16 @@ static const march_observe_verb snapshot_verbs[] = {
       "one actor: row, children, supervisor config, death kind", verb_actor },
     { "TREE", "observe", "", "the supervision tree and the unsupervised actors", verb_tree },
     { "NAMES", "observe", "", "registered names and their pids", verb_names },
-    { "SCHED", "observe", "", "scheduler threads and global scheduler counters", verb_sched },
+    { "SCHED", "observe", "[window_ms]",
+      "scheduler threads, utilisation over window_ms (default 200, 0 = lifetime only), counters", verb_sched },
     { "MEM", "observe", "", "RSS, peak RSS, live heap objects, queued messages", verb_mem },
     { "EPOCHS", "observe", "", "hot-reload epochs, pins, slots and counters", verb_epochs },
+    { "CRASHES", "observe", "[n]",
+      "the last n crashes, newest first (default 20, max 256): kind, pid, type, supervisor, restart; no message",
+      verb_crashes },
+    { "TOP", "observe", "mbox|crashes|slices|msgs_in|msgs_out <n> [window_ms]",
+      "the n actors highest on an attribute; slices/msgs_* rank the change over window_ms (default 1000)",
+      verb_top },
 };
 
 void march_observe_snapshot_install(void) {

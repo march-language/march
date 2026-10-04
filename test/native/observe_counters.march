@@ -1,0 +1,95 @@
+-- The observe socket's per-actor counters (R2 of
+-- specs/plans/2026-09-28-observe-recon-shell-plan.md), checked by
+-- test/observe_snapshot_check.ml (mode "counters"):
+--   * a ping-pong pair: after 200 round trips "pong" has received and sent
+--     exactly 200, and "ping" sent 200 and received 201 (the kick);
+--   * "caller" is blocked in an Actor.call nobody answers while 150 messages
+--     arrive: they are held off its mailbox, and observe reports them as held.
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+
+  type AskReq = AskReq
+
+  actor Echo do
+    state { n : Int }
+    init  { n: 0 }
+    on Serve(from, k : Int) do
+      let _ = send(from, Back(k))
+      { n: state.n + 1 }
+    end
+  end
+
+  actor PingA do
+    state { peer : Option(Pid(EchoState)) }
+    init  { peer: None }
+    on Kick(p : Pid(EchoState), k : Int) do
+      let _ = send(p, Serve(self, k))
+      { peer: Some(p) }
+    end
+    on Back(k : Int) do
+      if k > 1 do
+        match state.peer do
+          Some(p) ->
+            let _ = send(p, Serve(self, k - 1))
+            state
+          None -> state
+        end
+      else
+        state
+      end
+    end
+  end
+
+  type EchoState = { n : Int }
+
+  actor Sink do
+    state { n : Int }
+    init  { n: 0 }
+    -- Never replies.
+    on Ask(_reply_to) do
+      state
+    end
+  end
+
+  actor Caller do
+    state { n : Int }
+    init  { n: 0 }
+    on Stall(sink) do
+      match Actor.call(sink, AskReq, 60000) do
+        Ok(_) -> state
+        Err(_) -> state
+      end
+    end
+    on Bump(k : Int) do
+      { n: state.n + k }
+    end
+  end
+
+  fn burst(c, k : Int) do
+    if k > 0 do
+      let _ = send(c, Bump(1))
+      burst(c, k - 1)
+    else
+      ()
+    end
+  end
+
+  fn main(_io : Cap(IO)) do
+    let pong = spawn(Echo)
+    let ping = spawn(PingA)
+    let _r1 = Actor.register(pong, "pong")
+    let _r2 = Actor.register(ping, "ping")
+    let _ = send(ping, Kick(pong, 200))
+    let sink = spawn(Sink)
+    let caller = spawn(Caller)
+    let _r3 = Actor.register(caller, "caller")
+    let _ = send(caller, Stall(sink))
+    sleep_ms(50)
+    burst(caller, 150)
+    sleep_ms(300)
+    println("ready")
+    sleep_ms(120000)
+  end
+end
