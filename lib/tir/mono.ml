@@ -105,6 +105,21 @@ let check_repr_disagreement ~(orig_name : string) ~(orig_fn : Tir.fn_def)
        end
      | _ -> ())
 
+(** The interface-impl symbols (`JsonFrom$T.from_json`) whose `impl` (or the
+    `derive` that generated it) is declared in the standard library.  Filled
+    by [Lower.lower_module]'s impl collection, read by
+    [return_position_single_impl] below.
+
+    A return-position method (`from_json`) called where the result type is
+    not pinned resolves to the program's ONLY impl.  An eagerly loaded stdlib
+    module with an impl -- every `@[endpoints]` protocol's `<P>_Msg` has a
+    `Json` codec, and so does any payload type it declares -- would make a
+    user's lone `derive Json` ambiguous in every program, though no user
+    call means the stdlib's type.  Not counting stdlib impls there keeps the
+    rule what it was when the stdlib declared none
+    (specs/progress/2026-10-03-endpoints-protocol-in-nested-module.md). *)
+let stdlib_impl_syms : (string, unit) Hashtbl.t = Hashtbl.create 16
+
 let resolve_impl_by_type (impls : (string * string) list) (type_name : string) : string option =
   if type_name = "$single_impl$" then
     (match impls with [(_, m)] -> Some m | _ -> None)
@@ -718,7 +733,8 @@ let rec rewrite_calls
      first argument — the argument has the same fixed type in every impl
      (e.g. from_json : JsonValue -> Result(T, DecodeError)), so
      [resolve_impl_by_type] on the first-arg type name can never match.
-     When exactly ONE distinct impl symbol is registered AND its own first
+     When exactly ONE distinct impl symbol is registered (not counting the
+     stdlib's, when the program has one of its own: [stdlib_impl_syms]) AND its own first
      parameter type equals the call's first-argument type (proving the
      argument is not the dispatch position — the call typechecked against
      this very signature), the call is unambiguous: resolve to that impl.
@@ -733,6 +749,11 @@ let rec rewrite_calls
     let uniq_syms =
       List.fold_left (fun acc (_, m) ->
           if List.mem m acc then acc else m :: acc) [] impls in
+    let uniq_syms =
+      match List.filter (fun m -> not (Hashtbl.mem stdlib_impl_syms m)) uniq_syms with
+      | [_] as own when List.length uniq_syms > 1 -> own
+      | _ -> uniq_syms
+    in
     match uniq_syms with
     | [m] ->
       (match Hashtbl.find_opt fn_table m with

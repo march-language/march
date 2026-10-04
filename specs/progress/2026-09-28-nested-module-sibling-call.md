@@ -48,5 +48,5 @@ set for `with_enclosing_module_fns`) filters the dotted names back out.
 and an entry-file module nested two levels, each covering a sibling call, a call two
 levels down, a deeper module reaching an uncle, and a sibling's module-level `let`.
 A protocol declared inside a nested module additionally needs a typechecker fix
-([../todos/2026-09-28-endpoints-protocol-in-nested-module.md](../todos/2026-09-28-endpoints-protocol-in-nested-module.md));
+([2026-10-03-endpoints-protocol-in-nested-module.md](2026-10-03-endpoints-protocol-in-nested-module.md));
 this fix is the lowering half of it.

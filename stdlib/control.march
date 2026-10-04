@@ -31,8 +31,9 @@
 --     `StepOrder`, `StepResult`, `CtlChunk`, and the `ControlOps` dictionary a
 --     leader's `Ctl` session is driven by. The `Ctl` and `CtlFetch`
 --     declarations themselves live in test/session/control_peers.march for
---     now: an `@[endpoints]` protocol only typechecks at an entry module's
---     top level (specs/todos/2026-09-28-endpoints-protocol-in-nested-module.md).
+--     now. A protocol may live in a stdlib module since 2026-10-03
+--     (specs/progress/2026-10-03-endpoints-protocol-in-nested-module.md); the
+--     move is specs/todos/2026-09-28-dd-step12a-control-wiring.md.
 --
 -- The leader itself is `count = 1` placement over SWIM with no strict lease
 -- (D40): two leaders during a partition each drive their side toward the
@@ -1347,12 +1348,13 @@ mod Control do
 
   -- ── what the protocols carry (design section 7) ──────────────────────────
   --
-  -- The `Ctl` and `CtlFetch` protocols themselves are not declared here: an
-  -- `@[endpoints]` protocol typechecks only at an entry module's top level
-  -- today (specs/todos/2026-09-28-endpoints-protocol-in-nested-module.md), so
+  -- The `Ctl` and `CtlFetch` protocols themselves are not declared here yet:
   -- their canonical declaration and role bodies live in
-  -- test/session/control_peers.march until the wiring puts them in the
-  -- generated topology `main`. Everything the roles need is here.
+  -- test/session/control_peers.march, and the wiring splices them into the
+  -- generated topology `main`. A stdlib protocol works since 2026-10-03
+  -- (specs/progress/2026-10-03-endpoints-protocol-in-nested-module.md); the
+  -- move is specs/todos/2026-09-28-dd-step12a-control-wiring.md. Everything
+  -- the roles need is here.
 
   -- A chunk of an artifact: its offset, the bytes as hex, and whether it is
   -- the last.

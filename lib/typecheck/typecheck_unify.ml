@@ -638,12 +638,46 @@ let actor_msg_alias env (name : string) : string option =
         env.ctors
     then Some target else None
 
+(** The key a QUALIFIED type name [name] (`A.T`) is registered under when it
+    is written relative to an enclosing module, or [None] when [name] resolves
+    as written (or is bare, or names nothing under any enclosing module).
+
+    Pass 1 seeds a submodule's public types under its path from the ENTRY
+    module's top level (`Outer.A.T`), and a nested module's export step adds
+    only the BARE `T`; so `A.T` written inside `Outer` (or inside a sibling of
+    `A`) found nothing, though the same reference one level up -- where the
+    path IS `A` -- worked.  A name resolves the way a lexical reference does:
+    innermost enclosing module first.  [env.cap_qual_prefix] is that module's
+    path (`Outer.B` inside `mod B` of `mod Outer`).  Every `@[endpoints]`
+    protocol in a nested, library or stdlib module hits this: its generated
+    modules name each other's types (`P_Msg.Msg`, `P_A.Entry`) relatively
+    (specs/progress/2026-10-03-endpoints-protocol-in-nested-module.md). *)
+let lexical_qualified_type env (name : string) : string option =
+  (* Types and aliases only: [env.records] can hold a qualified key that
+     names no type -- a nested module re-exports every bare record key in its
+     scope that matches one of its public names, so a role module's `Entry`
+     alias exports the stdlib's unrelated `Entry` record as `P_A.Entry`. *)
+  let known k = StrMap.mem k env.types || StrMap.mem k env.ty_aliases in
+  if env.cap_qual_prefix = "" || not (String.contains name '.') || known name then None
+  else
+    let rec go prefix =
+      let k = prefix ^ "." ^ name in
+      if known k then Some k
+      else match String.rindex_opt prefix '.' with
+        | Some i -> go (String.sub prefix 0 i)
+        | None -> None
+    in
+    go env.cap_qual_prefix
+
 (** Convert a surface [Ast.ty] to an internal [ty].
     [tvars] accumulates a mapping from type-variable *names* to fresh
     unification-variable ids (so that two mentions of [a] in the same
     annotation get the same variable). *)
 let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
   match s with
+  | Ast.TyCon (name, args) when lexical_qualified_type env name.Ast.txt <> None ->
+    let q = Option.get (lexical_qualified_type env name.Ast.txt) in
+    surface_ty env ~tvars (Ast.TyCon ({ name with Ast.txt = q }, args))
   | Ast.TyCon (name, args) ->
     (* Skip when [caller = ""]: either no fn has been entered yet, or (since
        Fix round 1) a callerless surface_ty call site — interface method

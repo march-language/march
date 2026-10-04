@@ -143,6 +143,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **An `@[endpoints]` protocol now works in any module.** A protocol declared in a
+  nested module, in a library module found through `MARCH_LIB_PATH`, or in a
+  standard-library module failed with "Unknown module `P_A`"; only one at the entry
+  file's top level worked. The generated modules are now addressable by their
+  qualified name (`Net.Fan_C.register(s, 0)`) from anywhere. Underneath, a qualified
+  type written relative to an enclosing module (`A.T` inside `mod Outer` naming its
+  sibling `Outer.A`) now resolves, and a protocol in the standard library no longer
+  makes a program's own bare `from_json` call ambiguous when compiled.
 - **A supervisor now works in a program built with `--hot-reload`.** Any actor with a
   `supervise` block failed to compile under `--hot-reload` (`use of undefined value
   '@$sup_child_ptr_a'`). Behind that, the runtime read each child's pid from the wrong

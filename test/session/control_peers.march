@@ -80,11 +80,10 @@ mod ControlPeers do
   pfn wire_chunk(c : Control.CtlChunk) : WireChunk do { wire: 1, offset: c.offset, data: c.data, last: c.last } end
   --
   -- The canonical declaration of Ctl and CtlFetch, and their role bodies, until
-  -- the wiring puts them in the generated topology `main`: an `@[endpoints]`
-  -- protocol typechecks only at an entry module's top level today, so it
-  -- cannot live in stdlib/control.march
-  -- (specs/todos/2026-09-28-endpoints-protocol-in-nested-module.md). Every
-  -- type and function the roles use is Control's.
+  -- they move into stdlib/control.march (possible since 2026-10-03:
+  -- specs/progress/2026-10-03-endpoints-protocol-in-nested-module.md; steps in
+  -- specs/todos/2026-09-28-dd-step12a-control-wiring.md). Every type and
+  -- function the roles use is Control's.
 
   -- The Agent initiates; Control is offered by the leader only, so the offer
   -- is how an agent finds the leader. Every step is labelled (D25): this is
