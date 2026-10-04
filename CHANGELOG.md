@@ -19,6 +19,10 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`--dump-phases`/`MARCH_DUMP_TXT` now include a `tir-trmc` stage.** The
+  TIR is snapshotted right after `Trmc.transform_module`, before the first
+  existing checkpoint (`tir-mono`), so the tail-recursion-modulo-cons rewrite
+  can be read on its own instead of only through the mono stage that follows it.
 - **A read-only observe socket on every compiled program.** Set
   `MARCH_OBSERVE_SOCKET=<path>` (or just `MARCH_HOT_RELOAD_SOCKET`, which puts it
   at `<path>.observe`) and the program answers one-line requests with one line of
