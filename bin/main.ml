@@ -1129,6 +1129,10 @@ let codegen_cas_tags () =
      without changing the compiler binary: without this tag an A/B run reuses
      whichever variant was cached first. *)
   @ (if Lazy.force March_tir.Contract_pipeline.hof_spec_env_disabled then ["nohofspec"] else [])
+  (* MARCH_NO_UNBOX=1 classifies every type Boxed, which changes the emitted
+     code without changing the compiler binary: without this tag an A/B run
+     reuses whichever variant was cached first. *)
+  @ (if Lazy.force March_tir.Contract_pipeline.unboxing_env_disabled then ["nounbox"] else [])
 
 (** Parse --target string into Llvm_emit.target_config. *)
 let parse_target s =

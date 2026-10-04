@@ -143,6 +143,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`MARCH_NO_UNBOX=1` is now part of the compilation cache key.** It classifies
+  every type Boxed and so changes the emitted code, but was not in the CAS key,
+  so an A/B run reused whichever variant was cached first. It now adds a
+  `nounbox` tag, as `MARCH_NO_INLINE_RC` and `MARCH_NO_HOF_SPEC` already did.
 - **A branch that returns a record's field no longer frees it (compiled).** In
   `"sig " ++ (if r.signature == "" do "-" else r.signature end)`, compiled code
   handed out `r.signature` without taking a reference, so the next read of the
