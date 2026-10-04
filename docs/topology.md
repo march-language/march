@@ -73,7 +73,7 @@ inside `mod Shop`).
 | | `replicas` | For backends that schedule instead of taking a host list. |
 | `[drain]` | `soft_ms`, `hard_ms` | Stop taking new work, then kill. `hard_ms` must be at least `soft_ms`. |
 | `[backend]` | `kind` | `"ssh"` (a host list per pool) or another process orchestrator. |
-| | `port` | The cluster port the firewall generators open between pools (default 7946). |
+| | `port` | The cluster port the firewall generators open between all cluster members (default 7946). |
 
 **Unknown keys are errors**, with the file and line:
 
@@ -214,7 +214,7 @@ directory with `--out DIR`:
 | Target | Output |
 |---|---|
 | `systemd` | One `march-<pool>.service` per pool, run as `User=march`: `MARCH_POOLS`, `MARCH_TOPOLOGY_FILE`, the status file, the reload socket and `HOME`, an `EnvironmentFile` for secrets, `TimeoutStopSec` from `[drain] hard_ms`. `forge host init` writes one per host with that host's own settings too. |
-| `ufw` | One `ufw-<host>.sh` per host: ssh, its pool's public ports from anywhere, the cluster port only from the hosts of the pools it talks to. |
+| `ufw` | One `ufw-<host>.sh` per host: ssh, its pool's public ports from anywhere, the cluster port from every other host in the topology. |
 | `do-firewall` | `do-firewalls.json`: one DigitalOcean firewall per pool, keyed by droplet tag `march-<pool>`, with the same rules. |
 | `compose` | `docker-compose.yml`: one service per pool, `replicas` from the host count, `ports` from `public`. |
 
@@ -227,6 +227,17 @@ forge topology gen systemd --env prod --out deploy/systemd
 forge topology gen ufw --env prod
 forge topology gen k8s        # runs forge-topology-k8s if it is on PATH
 ```
+
+**The cluster port is open between every pair of members**, not only between pools that
+exchange protocol messages. SWIM membership probes and gossips with every member, and
+every node is given every other node as a seed, so a firewall cut along the connectivity
+graph would make two pools that share no protocol see each other as unreachable, and
+`count = n` placement would rank on a wrong membership. Pools are kept apart by
+certificate instead: each node's certificate names its roles, and roles, raw sends and
+cross-node references are checked on every frame (see [Cluster
+certificates]({{ site.baseurl }}/docs/cluster-certificates/)). Every other port stays
+closed between pools: a pool's `public` ports are open to anyone, and the control port
+(`[control]`) only between candidates.
 
 ## Running a topology app
 
