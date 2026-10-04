@@ -24,6 +24,10 @@ that reproduces only with a particular edit history. So this plan is in two part
   a cache.
 - **Part B — Incremental compilation.** The CAS work, re-based so that every phase names the
   foundation it consumes and the guard that catches it being wrong.
+- **Queryability** cuts across both: a query *interface* over compiler facts (A7) is the
+  debugging front door for everything in A, and a coarse query *layer* with recorded
+  dependencies (§8b) is what B6 should be built on. §8b records why a full query-based
+  rewrite is not.
 
 Part A items are independent of each other and can start now. Part B's critical path is
 B0 ∥ B1 ∥ B3a → B2 → B3b → B4 → B5; the arrows from A into B are in §3.
@@ -95,6 +99,10 @@ A5 determinism oracle ───────┬──► B1 acceptance
                              └──► B2 (tm_fns order question, §10)
 A6 metrics + idempotence ────┬──► B0 bench harness (same stamps)
                              └──► B3a byte-identity (counts as a second signal)
+A7 query interface ──────────┬──► B4 `why-miss` over .meta sidecars
+                             └──► today's "which input changed?" cache hunts
+Memo layer (§8b) ────────────┬──► B6 (its design: per-module typecheck/lower queries)
+                             └──► B2 globals_digest → recorded deps, over time
 ```
 
 Everything in A ships alone and is useful alone. Nothing in B after B0 should land before the A
@@ -239,6 +247,123 @@ Perceus; TIR-eval vs compiled isolates codegen) and is the most precise localise
 values. It is also a third backend to keep in parity; the JIT parity burden is already 24 progress
 entries. Decision: **defer** until A1 + A4 have run for a quarter. If pass bisection plus the
 verifier leave a class of divergences still un-localised, revisit with that evidence.
+
+## 8a. A7 — A query interface over compiler facts
+
+**What exists.** `lsp/lib/query.ml` is a transport-agnostic facade over `Analysis`, and
+`lsp/lib/query_cli.ml` exposes it as `march-lsp query hover|type|symbols|definition|references|
+diagnostics|completions|inlay|format FILE [--line --col]` → JSON, tested in
+`lsp/test/test_query_cli.ml`. `forge search` (name/type search, `--callers`) covers declarations.
+Both stop at the **front end**: nothing answers a question about TIR, a pass decision, a symbol's
+origin, or a cache key. Those are exactly the questions a compiler-bug hunt asks, and today the
+answers are `--dump-phases` JSON, `MARCH_DUMP_TXT` and reading IR.
+
+**Design.** Extend the same facade downward rather than invent a second one. A `march query`
+subcommand (in `bin/`, sharing `Query_cli`'s JSON conventions so the LSP can proxy it) over the
+artefacts the pipeline already produces or Part A adds:
+
+| Query | Answers | Source |
+|---|---|---|
+| `fn NAME [--at PASS]` | TIR body at a pass; final symbol | `--dump-phases` data, `Pp` |
+| `origin NAME` | span, host, derivation chain, passes that rewrote it | provenance table (A2) |
+| `why-symbol NAME` | why this symbol exists: which generic + tyargs, which fusion, which lambda | provenance `derived` |
+| `callers NAME` / `callees NAME` | post-opt call graph edges | `Scc.deps_of` |
+| `owners NAME` | per-variable ownership/borrow verdicts in a fn | `Borrow` map + A1 ownership check |
+| `repr TYPE` | niche/unboxed/boxed decision and the reason | `k_table` / `Kind` |
+| `key FILE` / `key --unit ID` | whole-binary and (after B2) unit keys, and **every input** that fed them | `build_cas_key`, `unit_keys`, `globals_digest` inputs |
+| `why-miss FILE` | which key input changed since the last build of this file | `.meta` sidecars (B4) diffed against current inputs |
+| `verify [--stage S]` | A1 findings | `Tir_verify` |
+| `bisect FILE` / `reduce FILE --oracle CMD` | A4, under the same umbrella | A4 |
+
+Implementation: each query is a function over a `Pipeline_state` record (AST, typed env, TIR per
+pass, provenance, `k_table`, keys) that `Contract_pipeline.run` already threads most of; the
+subcommand runs the pipeline to the needed stage, then answers. JSON output, `--text` for humans.
+`why-miss` is the one that pays for itself first: the ~13 stale/missed-cache entries in
+`specs/progress/` were all "which input changed?" questions answered by hand with
+`MARCH_DEBUG_CASFLAGS`.
+
+**Effort.** Facade + `fn`/`origin`/`callers`/`key`: 1–2 sessions once A2 exists. Each further
+query ½ session; `why-miss` depends on B4's sidecars.
+
+## 8b. Feasibility: a query-*based* compiler architecture
+
+The other sense of "queryable": Salsa/rustc-style demand-driven memoisation, where every
+compiler fact is a pure function of its inputs, dependencies are recorded as they are read, and
+re-running after an edit recomputes only what transitively depends on changed inputs. It is how
+serious incremental front ends are built, and it would make B6 principled rather than ad hoc.
+Assessment against this codebase:
+
+**What's against a full rewrite.**
+- `lib/typecheck/typecheck.ml` is 9 346 lines of whole-module bidirectional inference with
+  module-level mutable state (`deferred_pending`, `wildcard_sink`, `last_with_env_final`,
+  `Typecheck_env.ctor_index_cache`, linearity tracked via aliased `bool ref`s). A query system
+  requires every query to be a pure function of recorded inputs; this checker's state would all
+  have to move into the query context first.
+- Lowering keeps ~20 module-level tables in `lower_state.ml` (`_use_aliases`,
+  `_protocol_roles`, `_actor_mailboxes`, `_builtin_shadows`, `_fns_ref`, …); defun, mono, fusion
+  have global counters (B1 removes those) and tables (`Mono.repr_table`,
+  `Mono.stdlib_impl_syms`).
+- Mono, defun, Perceus, escape and opt are **whole-program** by design: demand-driven from
+  `main`, with specialisation sets and representation decisions (`k_table`, `collision_set`) that
+  depend on the whole set of types and call sites. A per-declaration query over them is not a
+  refactor; it's a different algorithm.
+- The project's bug history is dominated by inter-pass invariant breaks. A rewrite of the pass
+  structure before A1 exists would be done blind.
+
+**What's for it, and already there.**
+- `Typecheck_reorder` computes per-declaration dependency order (SCCs of `DFn` runs, module
+  dependency order for `DMod`). That is precisely the dependency graph a query system needs; it
+  just isn't recorded or reused.
+- `check_module_with_env_full` (the REPL JIT path) and `lsp/lib/typecheck_cache.ml` already
+  implement "memoise the invariant prefix, re-check only the user layer", keyed by
+  `Cas.compiler_identity` plus content hashes. That is a two-level query system with the levels
+  fixed at (stdlib+deps, user file).
+- The CAS, `Runtime_archive`, `stdlib_ast_*`/`stdlib_tcenv_*` caches and the B2 `unit_keys`
+  design are all the same shape: a content-hash key over recorded inputs. The project already
+  thinks in "fact = f(inputs), memoised by hash"; what it lacks is a shared mechanism and
+  dependency *recording* instead of hand-listed keys.
+
+**Verdict: feasible at coarse granularity, infeasible (and not worth it) at fine granularity.**
+Recommend a **query layer, not a query architecture**:
+
+1. **A memo primitive**, `lib/cas/memo.ml`: `Memo.query : name:string -> key:string ->
+   (unit -> 'a) -> 'a` with on-disk (CAS) and in-process tiers, which **records** which other
+   queries a computation read (a dynamic dependency trace, the way Salsa does) and persists
+   `(name, key, dep keys, result hash)`. Correctness no longer rests on a hand-maintained key
+   list like `build_cas_key`'s: a query's key is its declared inputs, and its validity is "all
+   recorded deps still have the same result hash".
+2. **Coarse query nodes**, in order of least invasive:
+   - `parse_desugar(file)` — pure already;
+   - `typecheck_module(module, import_interfaces)` — the existing env-layering path, generalised
+     from two levels to per-module, keyed on the module's source plus the **interface hashes**
+     (exported signatures + types) of its imports. `Typecheck_reorder`'s module order gives the
+     evaluation order; the module-level refs in `Typecheck` get reset per query (they already are
+     per `check_module` call) and audited by A5 for leakage between queries;
+   - `lower_module(module, typed_env)` — after moving `lower_state.ml`'s tables into an explicit
+     state record (a refactor B1 touches anyway);
+   - `whole_program(tir_modules)` — mono through opt stays **one** query node, keyed on all
+     lowered modules; it's whole-program and stays so;
+   - `unit_object(unit_key)` — B4;
+   - `link(objects)`.
+3. **The query interface (A7) reads the same memo tables**, so `why-miss` is literally "which
+   recorded dep's result hash changed", for free, and `key --unit ID` prints the recorded inputs
+   rather than a reconstructed list.
+
+This gives B6 its design (the first three nodes) and replaces B2's hand-listed `globals_digest`
+with recorded dependencies over time, while leaving the whole-program middle untouched. What it
+deliberately does **not** attempt: per-function typecheck queries, incremental mono, or
+restructuring Perceus. If the `whole_program` node turns out to dominate (B0 will say), the next
+step is per-specialisation mono caching inside it, not finer typecheck queries.
+
+**Risks specific to this.** Dynamic dependency recording is only sound if every input is read
+through the query API; a pass that reads a global `ref` or an env var directly is an unrecorded
+dependency and a stale result. The `MARCH_NO_INLINE_RC` cache bug (B7.4) is exactly this failure
+in miniature. Mitigation: `Memo` runs with a "strict" mode in tests that fails on any
+`Sys.getenv` or module-level-ref read outside a registered input (wrap the handful of accessors),
+and A5 compares memoised vs fresh results across the corpus.
+
+**Effort.** `Memo` primitive + `parse_desugar` + `typecheck_module`: 1–2 weeks, as B6's first
+milestone. It does not block any of B1–B5.
 
 ## 9. A5 — Determinism oracle, and A6 — metrics and idempotence
 
@@ -475,10 +600,13 @@ over 3%, or `--opt 2/3` stays monolithic. Then `--incremental` default on for el
 builds, `--no-incremental` to opt out, `--codegen-units=1` kept for bisecting.
 
 **B6 — front end (separate plan).** After B5 a warm edit still pays the front-end and
-whole-program TIR buckets. Sketch: per-user-module cache of (AST, typecheck env delta) keyed on
-source + import **interface** hashes; a per-specialisation mono cache keyed on
-(generic `impl_hash`, type args); per-SCC Perceus caching as B2's keys one stage earlier. A stale
-typecheck result is a soundness hole, so it gets its own plan and oracle (`types-oracle.sh`).
+whole-program TIR buckets. Its design is §8b: the `Memo` primitive with recorded dependencies,
+then `parse_desugar` → `typecheck_module` (per module, keyed on source + import **interface**
+hashes, generalising the existing `check_module_with_env_full` / `typecheck_cache.ml` path) →
+`lower_module` as query nodes, with mono-through-opt staying one whole-program node. Only if B0
+shows that node dominating: a per-specialisation mono cache keyed on (generic `impl_hash`, type
+args). A stale typecheck result is a soundness hole, so it gets its own plan and oracle
+(`types-oracle.sh`, plus `Memo`'s strict mode).
 
 **B7 — independent quick wins**, each its own todo → progress entry:
 1. Replay stored diagnostics on a cache hit; removes the `contains_substring cache_input
@@ -564,6 +692,16 @@ well-formedness checker exists; `test_oracle.ml` has no reducer; pass switches t
 `MARCH_NO_{HOF_SPEC,INLINE_RC,TRMC,UNBOX,RUNTIME_CACHE}`. Part A has **not** yet had an
 independent review; the same treatment as the first draft is owed before A1's ownership check
 is relied on by B2.
+
+### Third draft (queryability), 2026-10-04
+Added A7 and §8b after checking: a front-end query facade already exists (`lsp/lib/query.ml`,
+`query_cli.ml`, nine query kinds, JSON; `lsp/test/test_query_cli.ml`); `Typecheck` is 9 346
+lines with module-level mutable state (`deferred_pending`, `wildcard_sink`,
+`last_with_env_final`, `Typecheck_env.ctor_index_cache`); `lower_state.ml` holds ~20 module-level
+tables; `Typecheck_reorder` already computes per-declaration and per-module dependency order;
+`check_module_with_env_full` and `lsp/lib/typecheck_cache.ml` already implement a two-level
+memoised typecheck keyed on `Cas.compiler_identity`. Verdict recorded in §8b: coarse query
+layer yes, fine-grained query architecture no.
 
 ### Still unverified
 Everything about *time* (no build was possible in the authoring environment; B0 exists for
