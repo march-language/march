@@ -14,6 +14,21 @@ open Flags
     specs/progress/2026-09-13-generated-code-diagnostics-dropped-at-the-cli.md. *)
 let synthetic_file = "<none>"
 
+(** The file tag of the control plane's wiring ([Hot_reload.control_wiring_file],
+    "<control>"), which [Topology_gen] splices into a topology app with a
+    [control] section.  Its diagnostics were dropped with the stdlib's, so a
+    type error in the wiring compiled: the leader's report merge read a field
+    of a lambda parameter the checker had typed as the one-field record
+    [{ detail : String }] (an error it reported and the driver threw away);
+    compiled, the field reads and the `with` update used that one-field layout
+    on the real 12-field report and both leader candidates died with SIGSEGV
+    (specs/progress/2026-10-01-compiled-record-with-projection-sigsegv.md).
+    Its ERRORS are shown now ([user_diag]); a warning or hint there asks for an
+    edit the app's author cannot make.  The rest of the generated topology code
+    ("<topology>") stays filtered: its role-grant checks see the runtime's own
+    reach (a body through [Topology.hook]) and are not the author's to fix. *)
+let is_control_wiring_file f = f = March_tir.Hot_reload.control_wiring_file
+
 (** Whether a diagnostic at file [f] belongs to the user's program: the entry
     file, a module loaded as user code (source dir / MARCH_LIB_PATH), a
     string-parsed fixture's spelling, or generated code (above).
@@ -36,8 +51,10 @@ let user_diag_file ~filename ~user_files f =
     are kept: they are the generator's bugs and the user's problem. *)
 let user_diag ~filename ~user_files (d : March_errors.Errors.diagnostic) =
   let f = d.span.March_ast.Ast.file in
-  user_diag_file ~filename ~user_files f
-  && not (f = synthetic_file && d.severity = March_errors.Errors.Hint)
+  if is_control_wiring_file f then d.severity = March_errors.Errors.Error
+  else
+    user_diag_file ~filename ~user_files f
+    && not (f = synthetic_file && d.severity = March_errors.Errors.Hint)
 
 (** Render a diagnostic against the file its span points into — an
     imported-module error must not be shown with the entry file's lines.  A
@@ -51,6 +68,15 @@ let render_user_diag ~src ~filename ~read_file (d : March_errors.Errors.diagnost
                        @ [ "in code generated for this file by a `derive`, `@[endpoints]` or `@[remote]` \
                             declaration; the excerpt cannot be shown" ] } in
     March_errors.Errors.render_diagnostic ~src:"" ~filename d
+  else if is_control_wiring_file f then
+    (* No file to read (falling through would show the ENTRY file's lines);
+       [Topology_gen.parse_decls] parses the text under a one-line header. *)
+    let d = { d with March_errors.Errors.notes =
+                       d.March_errors.Errors.notes
+                       @ [ "in the control plane's generated wiring (lib/desugar/control_wiring.march): \
+                            a compiler bug" ] } in
+    March_errors.Errors.render_diagnostic
+      ~src:("mod TopologyGenerated do\n" ^ March_desugar.Control_wiring_src.text) ~filename:f d
   else
     let (d_src, d_file) =
       if f = filename || f = "" || f = "<unknown>" then (src, filename)

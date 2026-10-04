@@ -86,7 +86,7 @@ a session is the wrong channel for an artifact at any chunk size.
 - Two compiled-only misbehaviours around record updates from a found record's field
   (a SIGSEGV in the leader's report merge; a stale signature read after
   `leader_release`), both worked around:
-  [../todos/2026-10-01-compiled-record-with-projection-sigsegv.md](../todos/2026-10-01-compiled-record-with-projection-sigsegv.md).
+  [2026-10-01-compiled-record-with-projection-sigsegv.md](2026-10-01-compiled-record-with-projection-sigsegv.md).
 - The capability walk follows data from `Env.get` into a role body through a parameter; read
   config in a Vault instead.
 - A node learns a peer's address only if it met it: seed every node with every candidate.

@@ -1705,6 +1705,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/aggregate_param_field_alias.expected native_aggregate_param_field_alias.out)))
 
+; A branch whose value is an owned record's field, compiled: as a let's bound
+; value its arm handed the field out without a reference (use-after-free), and
+; one arm's release of the record stood its drop down in the other (a leak).
+(rule
+ (targets native_record_branch_field_result native_record_branch_field_result.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/record_branch_field_result.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_record_branch_field_result
+        native/record_branch_field_result.march)
+   (with-stdout-to native_record_branch_field_result.out
+        (system "./native_record_branch_field_result")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_branch_field_result.expected native_record_branch_field_result.out)))
+
 ; ── n-ary string concat, compiled ─────────────────────────────────────────
 ; Control.serialize twice on one release, compiled: the second call used to
 ; read the signature the first had released (dd step 12b; see the fixture).

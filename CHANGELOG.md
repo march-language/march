@@ -143,6 +143,18 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A branch that returns a record's field no longer frees it (compiled).** In
+  `"sig " ++ (if r.signature == "" do "-" else r.signature end)`, compiled code
+  handed out `r.signature` without taking a reference, so the next read of the
+  field found freed memory (`sig -` on the second call, a use-after-free under
+  ASAN). This was `Control.serialize`'s bug. The same shape, and the plain
+  `if r.f == "" do "-" else r.f end`, also leaked the record on every call that
+  took the second branch.
+- **The control plane's leader no longer crashes when its wiring has a type error.**
+  Type errors in the generated control-plane wiring were silently dropped, so
+  ill-typed wiring compiled into code that read records with the wrong layout
+  (both leader candidates died with SIGSEGV). They are now reported. The two
+  that were live on the certificate-save error path are fixed.
 - **An `@[endpoints]` protocol now works in any module.** A protocol declared in a
   nested module, in a library module found through `MARCH_LIB_PATH`, or in a
   standard-library module failed with "Unknown module `P_A`"; only one at the entry

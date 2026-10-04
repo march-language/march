@@ -495,11 +495,11 @@ mod Control do
 
   doc "The release document: `signed_text`, then its `sig` line (`sig -` when unsigned). `parse(serialize(r)) == Ok(r)` for a well-formed `r`."
   fn serialize(r : CtlRelease) : String do
-    -- The signature is concatenated where it is read, never returned from an
-    -- `if`: compiled, `(if r.signature == "" do "-" else r.signature end)`
-    -- released the field while `r` still held it, so the next read of the
+    -- Compiled, `(if r.signature == "" do "-" else r.signature end)` used to
+    -- release the field while `r` still held it, so the next read of the
     -- release's signature found freed memory (ASAN: heap-use-after-free;
-    -- without ASAN an empty `sig`). specs/todos/2026-10-01-compiled-record-with-projection-sigsegv.md
+    -- without ASAN an empty `sig`). Fixed in Perceus; this form is kept.
+    -- specs/progress/2026-10-01-compiled-record-with-projection-sigsegv.md
     let sig_line = if String.is_empty(r.signature) do "sig -\n" else "sig " ++ r.signature ++ "\n" end
     signed_text(r) ++ sig_line
   end
