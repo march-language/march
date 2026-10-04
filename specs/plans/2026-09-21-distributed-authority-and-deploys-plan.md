@@ -290,8 +290,12 @@ roles are never in the shared binary.
 
 **Public ports and firewalls:** `public` declares a pool's internet-facing ports. Together
 with the connectivity graph, this gives each host's complete network policy: public ports
-from anywhere, the cluster port only from the pools it talks to. Generators write it as
+from anywhere, the cluster port from every cluster member. Generators write it as
 Kubernetes NetworkPolicy, cloud firewall rules (e.g. DigitalOcean), or `ufw` rules.
+(Revised 2026-10-03: the cluster port was first opened only between the pools the
+connectivity graph joins, but SWIM probes every member and every node seeds every other,
+so that split the membership. The segregation of section 3 is by certificate, not by
+firewall.)
 
 ### 4.1 Entry points: `main` is generated, you write hooks (D15–D17)
 
@@ -1371,7 +1375,7 @@ running sessions finish. Hysteresis is one timestamp per member in the handle's 
 subcommands, forge/lib/cli_ext.ml:43), and feeds it the export JSON on stdin. Built-ins
 ship as embedded templates (the dune rule idiom in forge/lib/dune:8-46): `systemd` (one
 unit per pool, `Environment=` from the overlay), `ufw` and `do-firewall` (rules from the
-connectivity graph and `public`), `compose` (one service per pool, for laptops). `k8s`
+host list and `public`), `compose` (one service per pool, for laptops). `k8s`
 comes with its backend (step 10 onwards).
 
 **The reconciler.** A new `forge/lib/reconcile.ml` with one interface,
