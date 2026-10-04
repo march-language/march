@@ -645,6 +645,17 @@ forge observe --env web --section tree --json            # a forge.toml host, ov
 
 The request is a verb and its arguments: `ACTORS [mbox|status|epoch|pid] [n]`, `ACTOR <pid>`, `TREE`, `NAMES`, `SCHED [window_ms]`, `MEM`, `EPOCHS`, `CRASHES [n]`, `TOP mbox|crashes|slices|msgs_in|msgs_out <n> [window_ms]`, `SNAPSHOT [sections]` or `HELP`. Actor rows carry cumulative counters (`slices`, `msgs_in`, `msgs_out`), `idle_ms` since the actor last ran, and `held`: messages an `Actor.call` has taken off the mailbox while it waits. `SCHED` measures each scheduler's utilisation over the window; `TOP` ranks the counters by their change over it. Without `--socket`, forge asks the `[hot-reload]` hosts in `forge.toml` (`--env NAME` picks entries by name). The reply is JSON: indented, or one line per host with `--json`. A dead actor's `ACTOR` reply says how it died (`Crash`, `Killed`, `Normal`), and `CRASHES` lists recent crashes with their supervisor and restart number, but neither ever shows a panic message. Actor type names appear in builds compiled with `--hot-reload`.
 
+```bash
+forge top --socket /tmp/app.observe                     # busiest mailboxes, redrawn every second
+forge top --env web --sort msgs_in --window 2000        # message rate over 2 s
+forge diagnose --env web --window 1000                  # known trouble; exit 0/1/2/3
+forge status                                            # every node at a glance
+```
+
+`forge top` redraws the busiest actors in place (`--once` prints one frame for scripts); `--sort` takes `mbox`, `crashes`, `slices`, `msgs_in` or `msgs_out`, the last three ranking the change over `--window`. `forge diagnose` takes two snapshots a window apart and reports findings: growing mailboxes, actors dropping at their limit, saturated or imbalanced schedulers, crash loops, a heap climbing with no new actors, and stuck or old hot-reload epochs. It prints a `march.diagnose/1` JSON envelope whose `coverage` names what it could not check, and exits `0` (nothing found), `1` (warnings), `2` (critical) or `3` (unreachable); `--dump FILE` saves the two snapshots. `forge status` prints, for each node of the topology (or each `[hot-reload]` host), the topology report followed by actors, queued messages, memory, scheduler load, crashes in the last hour and the deepest mailbox.
+
+From inside a program, the `Recon` module asks the same questions (`Recon.info`, `Recon.proc_count`, `Recon.tree`, ...) and `Diagnose.run(c, window_ms)` runs the same findings on the program itself; both take a `Cap(Actor.Introspect)`.
+
 ## Dependency Management
 
 ### Adding Dependencies

@@ -94,6 +94,7 @@ let stdlib_file_list = [
   "json.march";
   "json_stream.march";
   "recon.march";
+  "diagnose.march";
   "regex.march";
   "datetime.march";
   "queue.march";

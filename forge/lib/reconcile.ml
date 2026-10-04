@@ -990,7 +990,13 @@ let deployed_manifest_file ~root env build = Filename.concat (deploy_dir ~root e
     there ([drift]): after a restart the node restored its persisted patch
     stack (6.5), and this is where a stack that is not the desired version
     shows. *)
-let status_text ?transport ?service_ctl ?layout_prefix ?env ~root () : (string, string) result =
+(* [status_nodes]: the same, with the per-node statuses it was rendered from
+   (for [forge status], which appends each node's observe summary). *)
+let rec status_text ?transport ?service_ctl ?layout_prefix ?env ~root () : (string, string) result =
+  Result.map snd (status_nodes ?transport ?service_ctl ?layout_prefix ?env ~root ())
+
+and status_nodes ?transport ?service_ctl ?layout_prefix ?env ~root ()
+  : (node_status list * string, string) result =
   let env = existing_overlay ~root env in
   match load_checked ~root env with
   | Ok t when is_ssh t ->
@@ -1016,7 +1022,8 @@ let status_text ?transport ?service_ctl ?layout_prefix ?env ~root () : (string, 
                   (match env with Some e -> " --env " ^ e | None -> "")))
         | _ -> ())
       ss;
-    Ok (Buffer.contents buf)
+    Ok (ss, Buffer.contents buf)
   | _ ->
     let* (b, _) = local_backend ~root in
-    Ok (render_status (b.status ()))
+    let ss = b.status () in
+    Ok (ss, render_status ss)

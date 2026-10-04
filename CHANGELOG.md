@@ -19,6 +19,16 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`forge top`, `forge diagnose` and `forge status`.** `forge top` watches a
+  node's busiest actors (by mailbox depth, crashes, or message and dispatch
+  rate) refreshed in place. `forge diagnose` checks a node over a window for
+  growing mailboxes, actors dropping at their limit, saturated or imbalanced
+  schedulers, crash loops, a heap climbing with no new actors and stuck
+  hot-reload epochs, and exits 0, 1, 2 or 3 (nothing, warnings, critical,
+  unreachable). `forge status` adds each node's actors, queued messages,
+  memory, load, recent crashes and deepest mailbox to the topology report.
+  The same findings are in the stdlib as `Diagnose`, so a program can check
+  itself, and remote sends now count in an actor's sent messages.
 - **`Recon`: a program's view of itself.** The new stdlib module answers, from
   March code, the questions `forge observe` asks a node: `Recon.info` (one
   actor's mailbox, counters, supervisor and names), `actors`, `proc_count`

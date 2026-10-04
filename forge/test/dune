@@ -8,12 +8,12 @@
  (names test_forge test_resolver test_solver test_cas_package test_patch
         test_api_surface test_properties test_regression test_cap_binary test_cap_inspect
         test_audit test_audit_inferred test_add_cap_gate test_cap_package test_dep_dir test_dep_cache_versions test_cluster
-        test_observe_client)
+        test_observe_client test_diagnose test_observe_cli)
  (modules test_forge test_resolver test_solver test_cas_package test_patch
           test_api_surface test_properties test_regression test_cap_binary test_cap_inspect
           test_audit test_audit_inferred test_add_cap_gate test_cap_package test_dep_dir test_dep_cache_versions test_cluster
-          test_observe_client)
- (deps ../../bin/main.exe)
+          test_observe_client test_diagnose test_observe_cli)
+ (deps ../../bin/main.exe (source_tree fixtures/diagnose))
  (libraries march_forge march_search march_caps str alcotest unix qcheck-core qcheck-alcotest march_cas
             march_ed25519))
 
