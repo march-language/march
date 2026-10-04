@@ -41,3 +41,8 @@ green on main).
   540-1300 KiB in every window -> FAIL.
 
 Both perturbations reverted.
+
+**Merged with e71b1d069** (landed on main in parallel: warm-up raised from
+1,000 to 10,000 requests for the same flake). Both are kept: the longer
+warm-up keeps the reported RSS marks flat, and the gauge plus per-window rule
+stay correct even if the step lands after it.

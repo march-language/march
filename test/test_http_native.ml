@@ -667,7 +667,13 @@ let run_http_e2e ~variant ~slug ~evloop () =
     | n when n >= 0 -> n
     | _ -> bail "could not read server RSS"
   in
-  pipelined_rounds 20;                         (* warm-up: buffers, caches *)
+  (* Warm-up: buffers, caches, and on Linux the allocator's heap, which
+     settles in one step of ~2-3.5 MB somewhere in the first few thousand
+     requests (CI's event-loop leg failed at 3024-3580 KiB when 1,000
+     requests left that step inside the measured window).  The per-window
+     RSS rule above tolerates the step wherever it lands; warming past it
+     keeps the reported marks flat. *)
+  pipelined_rounds 200;
   let live_before = live () in
   let rss_marks = ref [ rss () ] in
   for _ = 1 to windows do
