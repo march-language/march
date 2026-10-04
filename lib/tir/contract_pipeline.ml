@@ -44,6 +44,14 @@ let hof_spec_env_disabled : bool Lazy.t =
       | Some ("1" | "true" | "yes") -> true
       | _ -> false)
 
+(** Escape hatch: [MARCH_NO_NATIVEARR_FUSION=1] turns off the NativeArray
+    map/map2 chain fusion ([Fusion.run_nativearr]) for A/B runs and
+    bisection.  Read once per process; part of the CAS key (bin/main.ml). *)
+let nativearr_fusion_env_disabled : bool Lazy.t =
+  lazy (match Sys.getenv_opt "MARCH_NO_NATIVEARR_FUSION" with
+      | Some ("1" | "true" | "yes") -> true
+      | _ -> false)
+
 let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     ?(after_fusion = fun _ -> ()) ?(before_perceus = fun ~k_table:_ _ -> ())
     ?(before_opt = fun _ -> ()) ?(extra_roots = [])
@@ -123,6 +131,11 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     else { tir with Tir.tm_exports = tir.Tir.tm_exports @ stubs }
   in
   let tir = if opt then Fusion.run ~changed:(ref false) tir else tir in
+  (* NativeArray map/map2 chain fusion (body substitution).  Native/wasm only:
+     JS has no NativeArray codegen, so there is nothing to win there. *)
+  let tir =
+    if opt && (not is_js) && not (Lazy.force nativearr_fusion_env_disabled)
+    then Fusion.run_nativearr tir else tir in
   snap "tir-fusion" tir;
   stamp "fusion";
   after_fusion tir;
