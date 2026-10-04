@@ -1,0 +1,89 @@
+-- Repro (security review, dd step 12b / PR #676): a CERT_UPDATE frame is
+-- bound to (sender, receiver, certificate) but not to the link it was sent
+-- on. Frames are MAC'd, not encrypted, so the frame is observable. Someone
+-- holding b's OLD (leaked) key handshakes as b with b's old certificate,
+-- replays b's earlier CERT_UPDATE on the new link, and a now holds b's NEW
+-- certificate for the attacker's link. When the operator's revocation of
+-- the old certificate arrives, a's per-tick recheck looks at the new
+-- certificate only, and the attacker's link survives the revocation.
+-- Pure ClusterNode core (no sockets), as in test/stdlib/test_cluster_node.march.
+mod CertUpdateReplay do
+  needs IO
+  needs IO.Console
+
+  pfn seed32(v : Int) : Bytes do Bytes.from_list(List.map(List.range(0, 32), fn _ -> v)) end
+  pfn op_sk() : Bytes do NodeCert.keypair_from_seed(seed32(1)) end
+  pfn node_sk(v : Int) : Bytes do NodeCert.keypair_from_seed(seed32(v)) end
+
+  pfn cert_of(name : String, v : Int, serial : String) : NodeCert.Cert do
+    { node: NodeCert.node_uri("t", "p", name), roles: Nil, flags: Nil, not_after: 2000000000,
+      issuer: "spiffe://t/operator/x", pubkey: Bytes.to_hex(NodeCert.public_key(node_sk(v))), serial: serial }
+  end
+
+  -- node a (key 2) in certificate mode.
+  pfn node_a() : ClusterNode.CnState do
+    let creds = { signed: NodeCert.sign(cert_of("a", 2, "serial-a"), op_sk()), secret_key: node_sk(2),
+                  operator_pubkey: NodeCert.public_key(op_sk()), revoked: fn _ -> false }
+    ClusterNode.core_new({ ClusterNode.config("a", 7000, "", Nil, "s", 1) with auth: ClusterAuth.Certified(creds) }, 1)
+  end
+
+  -- A verified handshake from "b" presenting [c] (generation [gen]).
+  pfn link_b(st : ClusterNode.CnState, c : NodeCert.Cert, gen : Int) : ClusterNode.CnState do
+    let b = ClusterNode.node_id_of("b")
+    match ClusterNode.core_linked(ClusterNode.core_peer_cert(st, b, Some(c)), b, "b", "127.0.0.1:7001", 1, gen, gen + 1, b, 99) do
+      (st1, _) -> st1
+    end
+  end
+
+  pfn held(st : ClusterNode.CnState) : String do
+    match Map.get(st.certs, ClusterNode.node_id_of("b"), Map.str_cmp) do
+      Some(c) -> c.serial
+      None -> "none"
+    end
+  end
+
+  pfn drop_count(effs : List(ClusterNode.CnEffect)) : Int do
+    List.length(List.filter(effs, fn e -> match e do ClusterNode.Drop(_, _) -> true | _ -> false end))
+  end
+
+  -- a learns the revocation of b's OLD certificate, then ticks twice.
+  pfn revoke_old_and_tick(st : ClusterNode.CnState) : Int do
+    let rev = NodeCert.sign_revocation({ node: "", serial: "serial-b-old", issued_at: 1 }, op_sk())
+    match ClusterNode.core_revoke(st, rev) do
+      (st1, _) ->
+        match ClusterNode.core_tick(st1, 2000) do
+          (st2, e1) ->
+            match ClusterNode.core_tick(st2, 3000) do
+              (_, e2) -> drop_count(e1) + drop_count(e2)
+            end
+        end
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let b = ClusterNode.node_id_of("b")
+    let old_b = cert_of("b", 3, "serial-b-old")     -- key 3: leaked
+    let new_b = NodeCert.sign(cert_of("b", 4, "serial-b-new"), op_sk())  -- key 4: rotation
+    -- 1. The real b, linked to a, rotates its key; it sends a this frame
+    --    (MAC'd, not encrypted: anyone on the path can record it).
+    let frame = ClusterNode.sign_cert_update(new_b, node_sk(4), b, ClusterNode.node_id_of("a"))
+    let st_honest = link_b(node_a(), old_b, 10)
+    match ClusterNode.core_peer_cert_update(st_honest, b, frame, 1000) do
+      Ok((_, c)) -> println("honest update on link 1: accepted, a holds " ++ c.serial)
+      Err(e) -> println("honest update on link 1: " ++ e)
+    end
+    -- 2. Later (link 1 gone; a restarted, or the revocation not yet here),
+    --    the holder of the leaked key 3 handshakes as b with the old cert.
+    let st_att = link_b(node_a(), old_b, 20)
+    println("attacker link 2 up, a holds " ++ held(st_att))
+    -- Control: without the replay, the old cert's revocation drops link 2.
+    println("control, no replay: drops after revocation = " ++ int_to_string(revoke_old_and_tick(st_att)))
+    -- 3. The attacker replays the recorded frame on link 2.
+    match ClusterNode.core_peer_cert_update(st_att, b, frame, 1000) do
+      Err(e) -> println("replay refused: " ++ e)
+      Ok((st2, c)) ->
+        println("replayed update on link 2: accepted, a holds " ++ c.serial)
+        println("after replay: drops after revocation = " ++ int_to_string(revoke_old_and_tick(st2)))
+    end
+  end
+end

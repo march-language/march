@@ -1,0 +1,105 @@
+-- Repro (security review, dd step 12b): a signed cert-only release that a
+-- node has already superseded is applied AGAIN after the node restarts,
+-- reinstalling the older certificate (broader roles, earlier serial) through
+-- the REAL ClusterNode.replace_cert. The Agent's anti-replay floor is
+-- max(reload-server head, cert_floor in an in-process Vault); a cert-only
+-- release carries no signed `line`, so it never advances the reload head,
+-- and the Vault is gone after a restart.
+mod CertDowngrade do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs ClusterNode.Live
+
+  pfn seed(v : Int) : Bytes do Bytes.from_list(List.map(List.range(0, 32), fn _ -> v)) end
+  pfn op_sk() : Bytes do NodeCert.keypair_from_seed(seed(1)) end
+  pfn deploy_sk() : Bytes do NodeCert.keypair_from_seed(seed(3)) end
+  pfn b_key() : Bytes do NodeCert.keypair_from_seed(seed(11)) end
+  pfn uri(n : String) : String do NodeCert.node_uri("test.local", "main", n) end
+
+  -- forge cluster cert b --node-key b.key: same key, new serial each time.
+  pfn cert(serial : String, roles : List(String), flags : List(String), not_after : Int) : NodeCert.Signed do
+    NodeCert.sign({ node: uri("b"), roles: roles, flags: flags, not_after: not_after,
+      issuer: "spiffe://test.local/operator/x", pubkey: Bytes.to_hex(NodeCert.public_key(b_key())),
+      serial: serial }, op_sk())
+  end
+
+  pfn certs_step() : Control.CtlStep do
+    { id: 1, pools: ["*"], hosts: Control.HostsAll, action: Control.DoCerts, gate: Control.GateNone, batch: 0 }
+  end
+
+  -- What forge's cert_release writes: one do:certs step, no lines.
+  pfn release(seq : Int, text : String) : Control.CtlRelease do
+    Control.sign({ seq: seq, parent: "none", env: "prod", topology: "-", builds: Nil, steps: [certs_step()], lines: Nil,
+      certs: [{ node: "b", cert: text }], revokes: Nil, drain: None, signature: "" }, deploy_sk())
+  end
+
+  -- What a compromised leader sends: the stored, genuinely signed release.
+  pfn order(r : Control.CtlRelease) : Control.StepOrder do Control.order(r, certs_step(), "b") end
+
+  -- ctl_cert_ops (lib/desugar/control_wiring.march:343), with the reload
+  -- server's head as [reload_head] (cert-only releases never advance it).
+  pfn ops(node : Cap(ClusterNode.Live), mem : Vault(String), reload_head : Int) : Control.CertOps do
+    { name: "b", deploy_key: NodeCert.public_key(deploy_sk()),
+      serial: fn -> match ClusterNode.own_cert(node) do
+        Some(c) -> c.serial
+        None -> ""
+      end,
+      replace: fn text -> match ClusterNode.replace_cert(node, text, "") do
+        Ok(c) -> Ok(c.serial)
+        Err(e) -> Err(e)
+      end,
+      revoke: fn t -> ClusterNode.revoke(node, t),
+      floor: fn ->
+        let taken = Control.cert_floor(mem)
+        if reload_head > taken do reload_head else taken end }
+  end
+
+  pfn show_cert(node : Cap(ClusterNode.Live), what : String) : () do
+    match ClusterNode.own_cert(node) do
+      Some(c) -> println(what ++ ": serial=" ++ c.serial ++ " roles=" ++ String.join(c.roles, ",")
+                         ++ " flags=" ++ String.join(c.flags, ","))
+      None -> println(what ++ ": no cert")
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let broad = cert("serial-X-broad", ["Ctl.Agent:initiate", "Ctl.Control:offer"], ["raw_send"], 4102444800)
+    let narrow = cert("serial-Y-narrow", ["Ctl.Agent:initiate"], Nil, 4102444800)
+    let start_cert = cert("serial-0", ["Ctl.Agent:initiate"], Nil, 4102444800)
+    let creds = { signed: start_cert, secret_key: b_key(), operator_pubkey: NodeCert.public_key(op_sk()),
+                  revoked: fn _ -> false }
+    let cfg = { ClusterNode.config("b", 47391, "", Nil, "", 1) with auth: ClusterAuth.Certified(creds) }
+    println("starting node b")
+    match ClusterNode.start(io, cfg) do
+      Err(e) -> println("start failed: " ++ e)
+      Ok(node) ->
+        println("started")
+        let r1 = release(1700000000001, NodeCert.to_text(broad))
+        let r2 = release(1700000000002, NodeCert.to_text(narrow))
+        let reload_head = 1600000000000
+        let mem = Vault.new("dd12_repro_mem_before")
+        let a = Control.agent_apply_certs_recording(ops(node, mem, reload_head), mem, order(r1))
+        println("release 1: ok=" ++ to_string(a.ok) ++ " " ++ a.detail)
+        let b = Control.agent_apply_certs_recording(ops(node, mem, reload_head), mem, order(r2))
+        println("release 2 (operator narrows b): ok=" ++ to_string(b.ok) ++ " " ++ b.detail)
+        show_cert(node, "after release 2")
+        let c = Control.agent_apply_certs_recording(ops(node, mem, reload_head), mem, order(r1))
+        println("replay of release 1, same process: ok=" ++ to_string(c.ok) ++ " " ++ c.detail)
+        -- The node restarts: the Agent's memory Vault is new; the reload
+        -- server's persisted head is unchanged (no signed line was relayed).
+        let mem2 = Vault.new("dd12_repro_mem_after_restart")
+        let o2 = ops(node, mem2, reload_head)
+        println("floor after restart: " ++ int_to_string(o2.floor()))
+        let d = Control.agent_apply_certs_recording(o2, mem2, order(r1))
+        println("replay of release 1 after restart: ok=" ++ to_string(d.ok) ++ " " ++ d.detail)
+        show_cert(node, "after replay")
+        ClusterNode.stop(node)
+        System.exit(0)
+    end
+  end
+end
