@@ -65,3 +65,55 @@ carry a signed `SEQ` marker line so `g_release_seq` advances); and/or in
 for the same node+key unless the operator opts in; and/or derive the floor from
 the installed cert. (Hand-revoking the old serial blocks it, but the docs frame
 that as optional.)
+
+## Resolution (2026-10-04)
+
+Fixed with two independent guards. Either one alone refuses the review's attack.
+
+1. **The node orders certificates by issue time** (`NodeCert.supersedes` /
+   `order_problem`, checked in `ClusterNode.replace_checked` and in
+   `core_peer_cert_update`). `forge cluster cert` writes serials as
+   `<issued unix ms>-<32 random hex>`. A running node refuses a replacement
+   issued before the certificate it holds. It also refuses one with no issue
+   time (a pre-fix random serial) when the held certificate has one. This
+   survives restarts with no new state, because the node starts on the
+   certificate it last took (`ctl_persist_cert` writes it back to
+   `MARCH_NODE_CERT`).
+   - *Why the serial and not a new field or `not_after`:* the v1 body is a fixed
+     8-element MessagePack array that every node decodes exactly, so a ninth
+     field would make pre-fix nodes refuse new certificates mid-upgrade. The
+     serial is a free-form signed string, so this changes no format in either
+     direction. `not_after` monotonicity would forbid a legitimate re-issue
+     that lives shorter. Ordering by issue time allows it (the native test's
+     "release 3"). A deliberate rollback is a fresh issue with the old roles,
+     or a restart on the old file (the order is only checked on a live
+     replace).
+2. **The Agent's cert-release floor is persisted** in
+   `$MARCH_CONTROL_DIR/cert-floor-<node>` (`lib/desugar/control_wiring.march`:
+   `ctl_load_cert_floor` at `ctl_start`, `ctl_persist_cert_floor` in
+   `ctl_prefetch_loop`, temp+rename). It is written before the certificate
+   file, so a crash between the two never leaves the certificate ahead of its
+   floor. This covers what (1) cannot: a node whose certificate is not a file
+   (a delivered certificate would not survive the restart, so the node comes
+   back on an older one), and legacy unordered certificates. Revocation
+   releases advance the floor too, so a replay of the release that delivered
+   a since-revoked certificate is refused.
+   - *Why not advance the reload server's head instead:* that needs a new
+     signed line type in `runtime/march_reload.c` and in forge's release
+     writer. A parallel session owns `march_reload.c` (the artifact P1). A
+     floor file of the Agent's own gives the same restart guarantee with no
+     change to the release format.
+
+Tests (each shown red against `origin/main`'s sources, by file copy, then
+green):
+- `test/native/cert_downgrade_after_restart.march` (dune `runtest`): the
+  review's compiled repro with forge-style serials. Main prints
+  `replay of release 1 after restart: ok=true ... serial-X-broad`. Now it is
+  refused, a shorter re-issue is taken, and a legacy serial is refused.
+- `test/two_node/control_certs_restart`: X then Y delivered to c, c restarts
+  (logs its loaded floor), X re-delivered halts on c ("was issued before"), and
+  a normal rotation after the restart completes. On main it fails at the floor
+  file. With those checks removed it fails with "c took back its superseded
+  certificate X after a restart: release accepted".
+- `test/stdlib/test_node_cert.march` "issue order"; `test_cluster_node.march`
+  "a CERT_UPDATE carrying a certificate issued before the one held is refused".

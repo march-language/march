@@ -356,6 +356,55 @@ pfn ctl_cert_ops(node : Cap(ClusterNode.Live)) : Control.CertOps do
       if head > taken do head else taken end }
 end
 
+-- The cert-release floor (`Control.cert_floor`: the newest release this
+-- node took certificates or revocations from) is kept on disk too, in
+-- <MARCH_CONTROL_DIR>/cert-floor-<node> (security review, dd step 12b): a
+-- cert-only release carries no signed line, so it never moves the reload
+-- server's persisted head, and a floor kept only in memory was gone after a
+-- restart, when a compromised leader could replay an older, genuinely signed
+-- cert release and put back a certificate a later one had replaced.
+-- `ctl_start` reads it back before the Agent runs. It is written before the
+-- certificate file (`ctl_prefetch_loop`), so a crash between the two leaves
+-- the floor at the release, which the node may take again (seq == floor),
+-- never the certificate ahead of its floor. Certificates issued by forge
+-- also carry their issue order (`NodeCert.supersedes`), which the node
+-- checks against the certificate it starts on.
+pfn ctl_cert_floor_file() : String do ctl_cfg("cert_floor_file", "") end
+
+pfn ctl_load_cert_floor(_io : Cap(IO)) : () do
+  let path = ctl_cert_floor_file()
+  match File.read(path) do
+    Err(_) -> ()
+    Ok(text) ->
+      match string_to_int(String.trim(text)) do
+        None -> println("control: ignoring an unreadable certificate floor in " ++ path)
+        Some(n) ->
+          Vault.set(ctl_memory(), "cert_floor", int_to_string(n))
+          Vault.set(ctl_memory(), "cert_floor_saved", int_to_string(n))
+          println("control: certificate releases older than " ++ int_to_string(n) ++ " are refused")
+      end
+  end
+end
+
+pfn ctl_persist_cert_floor(io : Cap(IO)) : () do
+  let floor = Control.cert_floor(ctl_memory())
+  let saved = ctl_int(Vault.get_or(ctl_memory(), "cert_floor_saved", "0"))
+  let path = ctl_cert_floor_file()
+  if floor <= saved || path == "" do ()
+  else
+    let _ = Dir.mkdir_p(ctl_dir())
+    let tmp = path ++ ".tmp"
+    match File.write(tmp, int_to_string(floor) ++ "\n") do
+      Err(e) -> println("control: could not save the certificate floor to " ++ path ++ ": " ++ to_string(e))
+      Ok(_) ->
+        match File.rename(tmp, path) do
+          Ok(_) -> Vault.set(ctl_memory(), "cert_floor_saved", int_to_string(floor))
+          Err(e) -> println("control: could not save the certificate floor to " ++ path ++ ": " ++ to_string(e))
+        end
+    end
+  end
+end
+
 -- Write a certificate this node took from a release to its MARCH_NODE_CERT
 -- file (a temporary file renamed into place). The node's own file watch then
 -- reads the same certificate back, which `replace_cert` takes as a no-op.
@@ -468,6 +517,7 @@ end
 
 pfn ctl_prefetch_loop(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do
   List.each(Vault.keys(ctl_wants()), fn h -> ctl_prefetch_one(io, node, h))
+  ctl_persist_cert_floor(io)
   ctl_persist_cert(io)
   sleep_ms(200)
   ctl_prefetch_loop(io, node)
@@ -1335,6 +1385,8 @@ fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : 
   let cert_env = Env.get("MARCH_NODE_CERT", "")
   Vault.set(m, "cfg:cert_file", if cert_env != "" && File.exists(cert_env) do cert_env else "" end)
   Vault.set(m, "cfg:agent_grace_ms", Env.get("MARCH_CONTROL_AGENT_GRACE_MS", "20000"))
+  Vault.set(m, "cfg:cert_floor_file", ctl_dir() ++ "/cert-floor-" ++ Topology.node_name(node))
+  ctl_load_cert_floor(io)
   let respawner = spawn(CtlRespawner)
   Vault.set(ctl_respawners(), "r", respawner)
   ctl_mark_agent(node, respawner)
