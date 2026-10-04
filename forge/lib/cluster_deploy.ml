@@ -249,13 +249,16 @@ let send_release (eps : endpoint list) ~(body : string) : (string, string) resul
   in
   go [] eps
 
-(** Upload [path] as artifact [hash] to every endpoint that lacks it. *)
+(** Upload [path] as artifact [hash] to every endpoint that lacks it, or
+    holds other bytes under it: both verbs carry the bytes' digest, the one
+    the release's ACTIVATE7 lines sign. *)
 let upload (eps : endpoint list) ~(hash : string) ~(path : string) : (unit, string) result =
+  let digest = Cmd_deploy_hot.artifact_digest path in
   List.fold_left (fun acc e ->
       let* () = acc in
       match with_conn e (fun c ->
-          if Cmd_deploy_hot.cas_check c hash then Ok ()
-          else (Cmd_deploy_hot.cas_put c hash path; Ok ())) with
+          if Cmd_deploy_hot.cas_check ~digest c hash then Ok ()
+          else (Cmd_deploy_hot.cas_put ~digest c hash path; Ok ())) with
       | Ok () -> Ok ()
       | Error m ->
         (* A candidate that is down is skipped: the artifact reaches the

@@ -900,7 +900,7 @@
 
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so) (file hcr_evil.so))
  (action (run ./test_reload_activate4_runner reload_keys.txt)))
 
 ; The stub patch the reload test's epoch-model case uploads and activates.
@@ -913,9 +913,20 @@
              -DMARCH_HCR_TARGET=\\\"native\\\" -DMARCH_HCR_PREFIX=\\\"Test\\\" \
              -o hcr_stub.so hcr_stub_so.c ../runtime/march_hcr_identity.c")))
 
+; The attacker's bytes of the dd12 review's CAS-substitution repro: the same
+; exports and identity markers as hcr_stub.so, other code (hcr_stub_so.c).
+(rule
+ (targets hcr_evil.so)
+ (deps    hcr_stub_so.c ../runtime/march_hcr_identity.c ../runtime/march_hcr_identity.h)
+ (action  (run bash -c
+            "%{cc} -shared -fPIC -DHCR_STUB_EVIL \
+             -DMARCH_HCR_TRIPLE=arm64-apple-macosx26.0.0 \
+             -DMARCH_HCR_TARGET=\\\"native\\\" -DMARCH_HCR_PREFIX=\\\"Test\\\" \
+             -o hcr_evil.so hcr_stub_so.c ../runtime/march_hcr_identity.c")))
+
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy.txt) (file hcr_stub.so))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy.txt) (file hcr_stub.so) (file hcr_evil.so))
  (action (setenv MARCH_DEPLOY_POLICY test_reload_policy.txt
           (run ./test_reload_activate4_runner reload_keys.txt policy))))
 
@@ -923,7 +934,7 @@
 ; role closure, including roles the node does not serve.
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy_all.txt) (file hcr_stub.so))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file test_reload_policy_all.txt) (file hcr_stub.so) (file hcr_evil.so))
  (action (setenv MARCH_DEPLOY_POLICY test_reload_policy_all.txt
           (run ./test_reload_activate4_runner reload_keys.txt policy-all))))
 
@@ -933,7 +944,7 @@
 ; different base build do not replay.  Each server lifetime is a forked child.
 (rule
  (alias runtest)
- (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so))
+ (deps  (file test_reload_activate4_runner) (file reload_keys.txt) (file hcr_stub.so) (file hcr_evil.so))
  (action (run ./test_reload_activate4_runner reload_keys.txt restore)))
 
 ; ── HCR capability-lattice anti-drift check ───────────────────────────────

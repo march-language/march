@@ -178,6 +178,8 @@ static void expected_cap_root(const char **sorted_caps, int n, char out_hex[65])
 
 static const char *SOCK_PATH;
 static uint32_t g_epoch = 1;
+static const char HOT_IMPL_HEX[] =
+    "6666666666666666666666666666666666666666666666666666666666666666";
 
 /* ── Audit log: main() points $MARCH_AUDIT_LOG at a per-run temp file (it
  *   used to land in the real ~/.local/share/march/audit.jsonl).  The server
@@ -1114,6 +1116,214 @@ static void test_sequenced_releases(void) {
     close(fd);
 }
 
+/* ── Signed artifact digests (review 2026-10-04, dd12 P1) ─────────────────
+ * The review's CAS-substitution repro (specs/reviews/dd12/): the operator
+ * signs an activation of ITS bytes (hcr_stub.so); whoever can write the CAS
+ * (CAS_PUT is unauthenticated) stages other bytes (hcr_evil.so, the same
+ * exports and identity markers, and a constructor that drops a marker file)
+ * under the signed cas_hash.  Before ACTIVATE7 the node loaded them and ran
+ * the attacker's code; now the bytes must hash to the signed so_blake3, and
+ * a refused artifact is never mapped (the marker never appears). */
+static const char ART_CAS[] =
+    "7777777777777777777777777777777777777777777777777777777777777777";
+static char g_marker[160];
+
+static void file_digest(const char *path, char out[65]) {
+    static unsigned char buf[1 << 20];
+    FILE *f = fopen(path, "rb");
+    size_t n = f ? fread(buf, 1, sizeof(buf), f) : 0;
+    if (f) fclose(f);
+    march_blake3_hex(buf, n, out);
+}
+
+/* CAS_PUT [file] under [cas], with " so_blake3:<so>" when [so]; the verdict. */
+static void put_file(int fd, const char *cas, const char *file, const char *so,
+                     char *resp, int max) {
+    static unsigned char buf[1 << 20];
+    FILE *f = fopen(file, "rb");
+    size_t n = f ? fread(buf, 1, sizeof(buf), f) : 0;
+    if (f) fclose(f);
+    char line[256];
+    snprintf(line, sizeof(line), "CAS_PUT %s %zu%s%s", cas, n, so ? " so_blake3:" : "", so ? so : "");
+    send_line(fd, line);
+    read_resp(fd, resp, max);
+    if (strcmp(resp, "READY") != 0) return;
+    if (write(fd, buf, n) != (ssize_t)n) { snprintf(resp, max, "short write"); return; }
+    read_resp(fd, resp, max);
+}
+
+static void cas_check(int fd, const char *cas, const char *so, char *resp, int max) {
+    char line[256];
+    snprintf(line, sizeof(line), "CAS_CHECK %s%s%s", cas, so ? " so_blake3:" : "", so ? so : "");
+    send_line(fd, line);
+    read_resp(fd, resp, max);
+}
+
+/* The ACTIVATE7 line for [name] over artifact [cas] whose bytes the operator
+ * signed as [signed_so]; [wire_so] is the digest the line carries (an
+ * attacker may change it, but not the signature). */
+static void activate7_line(const char *name, const char *cas, const char *signed_so,
+                           const char *wire_so, char *line, size_t max) {
+    char root[65];
+    expected_cap_root(NULL, 0, root);
+    char msg[2048], sig[128];
+    snprintf(msg, sizeof(msg),
+             "ACTIVATE7 %s %s %s 0 epoch:0 so_blake3:%s cap_root:%s callers:",
+             name, HOT_IMPL_HEX, cas, signed_so, root);
+    sign_b64(msg, sig);
+    snprintf(line, max,
+             "ACTIVATE7 %s %s %s %s 0 epoch:0 so_blake3:%s cap_root:%s caps: callers:",
+             name, HOT_IMPL_HEX, cas, sig, wire_so, root);
+}
+
+static int marker_exists(void) {
+    struct stat st;
+    return stat(g_marker, &st) == 0;
+}
+
+/* The live version of [name]: what it returns, or 0 while the baseline
+ * (the test's placeholder pointer, not code) is live. */
+static int64_t call_current(const char *name) {
+    uint32_t id, ver;
+    if (!march_dispatch_name_to_id(name, &id)) return -1;
+    void *p = march_dispatch_enter(id, &ver);
+    int64_t r = -2;
+    if (p == (void *)0x1010) r = 0;
+    else if (p) { int64_t (*fn)(void); memcpy(&fn, &p, sizeof(fn)); r = fn(); }
+    march_dispatch_leave(id, ver);
+    return r;
+}
+
+static void test_artifact_digest(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "connected to reload server (artifact digest)");
+    if (fd < 0) return;
+    char good[65], evil[65], resp[512], line[4096];
+    file_digest("hcr_stub.so", good);
+    file_digest("hcr_evil.so", evil);
+    CHECK(strcmp(good, evil) != 0, "digest: the two artifacts differ");
+    unlink(g_marker);
+
+    /* 1. The CAS is not a trust boundary: the attacker's bytes go in. */
+    put_file(fd, ART_CAS, "hcr_evil.so", NULL, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "digest: an undigested CAS_PUT stores any bytes");
+    cas_check(fd, ART_CAS, NULL, resp, sizeof(resp));
+    CHECK(strcmp(resp, "PRESENT") == 0, "digest: CAS_CHECK by key alone says PRESENT");
+    cas_check(fd, ART_CAS, good, resp, sizeof(resp));
+    CHECK(strcmp(resp, "MISSING") == 0,
+          "digest: CAS_CHECK with the signed digest says MISSING (forge re-uploads)");
+
+    /* 2. The operator's genuinely signed line over those bytes is refused,
+     *    and none of the attacker's code ever ran. */
+    activate7_line("test_fn_digest", ART_CAS, good, good, line, sizeof(line));
+    send_line(fd, line);
+    read_resp(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR artifact_digest") == 0,
+          "digest: a signed ACTIVATE7 over substituted bytes is refused");
+    if (strcmp(resp, "ERR artifact_digest") != 0) fprintf(stderr, "    got: %s\n", resp);
+    CHECK(!marker_exists(), "digest: the substituted artifact's constructor never ran");
+    CHECK(call_current("test_fn_digest") == 0, "digest: the baseline is still live");
+    {
+        char a[4096]; last_audit_line(a, sizeof(a));
+        CHECK(strstr(a, "\"fn\":\"test_fn_digest\"") && strstr(a, "\"result\":\"err_artifact_digest\""),
+              "digest: the refusal is audited");
+    }
+
+    /* 3. The same through a batch. */
+    send_line(fd, "BEGIN_BATCH"); read_resp(fd, resp, sizeof(resp));
+    send_line(fd, line); read_resp(fd, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "digest: ACTIVATE7 stages in a batch");
+    send_line(fd, "COMMIT_BATCH"); read_resp(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR commit_partial_failure") == 0,
+          "digest: COMMIT_BATCH over substituted bytes activates nothing");
+    CHECK(!marker_exists(), "digest: and maps none of them");
+
+    /* 4. so_blake3 is inside the signature: rewriting it to the attacker's
+     *    digest breaks the signature. */
+    activate7_line("test_fn_digest", ART_CAS, good, evil, line, sizeof(line));
+    send_line(fd, line);
+    read_resp(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR bad_signature") == 0, "digest: so_blake3 is signed");
+    {
+        char bad[4096];
+        activate7_line("test_fn_digest", ART_CAS, good, good, line, sizeof(line));
+        char *so = strstr(line, " so_blake3:");
+        snprintf(bad, sizeof(bad), "%.*s%s", (int)(so - line), line, so + 11 + 64);
+        send_line(fd, bad);
+        read_resp(fd, resp, sizeof(resp));
+        CHECK(strcmp(resp, "ERR bad_format missing_so_blake3") == 0,
+              "digest: ACTIVATE7 without so_blake3 is malformed");
+    }
+
+    /* 5. A digested CAS_PUT refuses bytes that are not the named ones. */
+    put_file(fd, ART_CAS, "hcr_stub.so", evil, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR digest_mismatch") == 0, "digest: CAS_PUT refuses bytes off their digest");
+    cas_check(fd, ART_CAS, evil, resp, sizeof(resp));
+    CHECK(strcmp(resp, "PRESENT") == 0, "digest: and the refused upload stored nothing");
+
+    /* 6. The operator's bytes, uploaded with their digest, activate. */
+    put_file(fd, ART_CAS, "hcr_stub.so", good, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "digest: CAS_PUT of the signed bytes with their digest");
+    cas_check(fd, ART_CAS, good, resp, sizeof(resp));
+    CHECK(strcmp(resp, "PRESENT") == 0, "digest: CAS_CHECK with the digest says PRESENT");
+    activate7_line("test_fn_digest", ART_CAS, good, good, line, sizeof(line));
+    send_line(fd, line);
+    read_resp(fd, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "digest: ACTIVATE7 over the signed bytes activates");
+    CHECK(call_current("test_fn_digest") == 42, "digest: the operator's function is live");
+    CHECK(!marker_exists(), "digest: no attacker code ran at any point");
+    {
+        /* What was mapped is the private verified copy, not the CAS file. */
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "test -f \"$(ls -d %s/.march/cas/hcr_state/*/loaded)/%s.so\"",
+                 getenv("HOME"), good);
+        CHECK(system(cmd) == 0, "digest: the activation loaded the verified private copy");
+    }
+
+    /* 7. After the activation, replacing the CAS file does not change the
+     *    live code, and a re-activation over the new bytes is refused. */
+    put_file(fd, ART_CAS, "hcr_evil.so", NULL, resp, sizeof(resp));
+    activate7_line("test_fn_digest", ART_CAS, good, good, line, sizeof(line));
+    send_line(fd, line);
+    read_resp(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR artifact_digest") == 0, "digest: substituted after the fact, still refused");
+    CHECK(call_current("test_fn_digest") == 42 && !marker_exists(),
+          "digest: and the live function is still the operator's");
+    put_file(fd, ART_CAS, "hcr_stub.so", good, resp, sizeof(resp));
+    close(fd);
+}
+
+/* Once the node holds a release (run after test_sequenced_releases: head 7,
+ * REL_B), a line from before ACTIVATE7 -- no digest of the bytes -- is
+ * refused even when it is wrapped in the current release; ACTIVATE7 is not. */
+static void test_unbound_activate_after_release(void) {
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "connected to reload server (unbound after release)");
+    if (fd < 0) return;
+    char resp[512], inner[4096], line[8192], good[65];
+    char root[65], msg[2048], sig[128];
+    expected_cap_root(NULL, 0, root);
+    snprintf(msg, sizeof(msg), "ACTIVATE5 test_fn_digest %s %s 0 epoch:0 cap_root:%s callers:",
+             HOT_IMPL_HEX, ART_CAS, root);
+    sign_b64(msg, sig);
+    snprintf(inner, sizeof(inner), "ACTIVATE5 test_fn_digest %s %s %s 0 epoch:0 cap_root:%s caps: callers:",
+             HOT_IMPL_HEX, ART_CAS, sig, root);
+    seq_wrap(7, 7, REL_B, inner, line, sizeof(line));
+    send_line(fd, line);
+    read_resp(fd, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR artifact_digest_required") == 0,
+          "release: a wrapped ACTIVATE5 (no signed digest) is refused once a release is held");
+    if (strcmp(resp, "ERR artifact_digest_required") != 0) fprintf(stderr, "    got: %s\n", resp);
+    CHECK(audit_has("activate", "err_artifact_digest_required"), "release: the refusal is audited");
+    file_digest("hcr_stub.so", good);
+    activate7_line("test_fn_digest", ART_CAS, good, good, inner, sizeof(inner));
+    seq_wrap(7, 7, REL_B, inner, line, sizeof(line));
+    send_line(fd, line);
+    read_resp(fd, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "release: a wrapped ACTIVATE7 is accepted");
+    close(fd);
+}
+
 /* ── Restart durability (plan 6.5, DD build step 10) ─────────────────────
  * Each phase is its own process (fork), i.e. its own server lifetime, over
  * one HOME (the CAS root and the persisted state) and one socket path. */
@@ -1305,6 +1515,86 @@ static void ph_release_after_restart(void) {
     close(fd);
 }
 
+/* ── Artifact digests across restarts (review 2026-10-04, dd12 P1) ────────
+ * The release head (3, REL_A) is held from phase 10 on. */
+
+/* What an older runtime left behind: a persisted ACTIVATE5 entry (no signed
+ * digest of the bytes) for this binary, its artifact (the stub) in the CAS. */
+static int write_old_format_state(void) {
+    char key[65], base[65], dir[512], path[600];
+    march_blake3_hex((const unsigned char *)SOCK_PATH, strlen(SOCK_PATH), key);
+    static const char slots[] = "test_fn_epoch baseline\n";
+    march_blake3_hex((const unsigned char *)slots, strlen(slots), base);
+    snprintf(dir, sizeof(dir), "%s/.march/cas/hcr_state/%.16s", g_restore_home, key);
+    snprintf(path, sizeof(path), "%s/state", dir);
+    char root[65], msg[1024], sig[128];
+    expected_cap_root(NULL, 0, root);
+    snprintf(msg, sizeof(msg), "ACTIVATE5 test_fn_epoch %s %s 0 epoch:0 cap_root:%s callers:",
+             HOT_IMPL, STUB_CAS, root);
+    sign_b64(msg, sig);
+    FILE *f = fopen(path, "w");
+    if (!f) return 0;
+    fprintf(f, "# march-hcr-state v1\nbase %s\ntopology - -\nmanifest %s\nseq 1\nentry 1 2 - %s %s\n",
+            base, base, sig, msg);
+    return fclose(f) == 0;
+}
+
+static void ph_old_entry_not_replayed(void) {
+    restore_boot("baseline");
+    phase_restored(0, "replayed", 1);
+}
+
+/* An ACTIVATE7 deploy, in the held release. */
+static void ph_digest_activate(void) {
+    restore_boot("baseline");
+    int fd = connect_sock(SOCK_PATH);
+    CHECK(fd >= 0, "digest phase: connected");
+    if (fd < 0) return;
+    char resp[512], good[65], inner[4096], line[8192];
+    file_digest("hcr_stub.so", good);
+    put_file(fd, ART_CAS, "hcr_stub.so", good, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "digest phase: the signed bytes uploaded");
+    activate7_line("test_fn_epoch", ART_CAS, good, good, inner, sizeof(inner));
+    seq_wrap(4, 4, REL_A, inner, line, sizeof(line));
+    send_line(fd, line);
+    read_resp(fd, resp, sizeof(resp));
+    CHECK(strncmp(resp, "OK ", 3) == 0, "digest phase: a wrapped ACTIVATE7 activates");
+    if (strncmp(resp, "OK ", 3) != 0) fprintf(stderr, "    got: %s\n", resp);
+    CHECK(call_current("test_fn_epoch") == 42, "digest phase: the operator's code is live");
+    close(fd);
+}
+
+static void ph_digest_replayed(void) {
+    restore_boot("baseline");
+    phase_restored(1, "replayed", 0);
+    CHECK(call_current("test_fn_epoch") == 42, "digest restart: the replayed code is the operator's");
+}
+
+static void ph_digest_substituted(void) {
+    restore_boot("baseline");
+    phase_restored(0, "replayed", 1);
+    CHECK(call_current("test_fn_epoch") == 0, "substituted restart: the node is on its base build");
+}
+
+/* Replace the artifact's bytes in the CAS, as CAS_PUT would. */
+static int substitute_artifact(void) {
+    char cmd[640];
+    snprintf(cmd, sizeof(cmd), "cp hcr_evil.so %s/.march/cas/artifacts/%.2s/%.62s",
+             g_restore_home, ART_CAS, ART_CAS + 2);
+    return system(cmd) == 0;
+}
+
+static int restore_audit_has(const char *result) {
+    char r[96], line[4096];
+    snprintf(r, sizeof(r), "\"result\":\"%s\"", result);
+    int found = 0;
+    FILE *f = fopen(g_audit_path, "r");
+    while (f && fgets(line, sizeof(line), f))
+        if (strstr(line, "\"type\":\"restore\"") && strstr(line, r)) found = 1;
+    if (f) fclose(f);
+    return found;
+}
+
 /* Flip one character of the first entry's signature in the state file. */
 static int corrupt_state_signature(void) {
     char cmd[512];
@@ -1347,6 +1637,19 @@ static void test_restart_durability(void) {
     CHECK(run_phase(ph_release_push) == 0, "phase 10: a release, with the topology hook signalling");
     CHECK(run_phase(ph_release_after_restart) == 0,
           "phase 11: after a restart onto another build the head still refuses replays");
+    /* Review 2026-10-04 (dd12 P1): the bytes, across restarts. */
+    CHECK(write_old_format_state(), "phase 12: an older runtime's ACTIVATE5 entry is on disk");
+    CHECK(run_phase(ph_old_entry_not_replayed) == 0,
+          "phase 12: with a release held, an entry with no signed digest is not replayed");
+    CHECK(restore_audit_has("err_restore_no_digest"), "phase 12: and the skip is audited");
+    CHECK(run_phase(ph_digest_activate) == 0, "phase 13: an ACTIVATE7 deploy in the release");
+    CHECK(run_phase(ph_digest_replayed) == 0, "phase 14: a restart replays it, bytes re-verified");
+    unlink(g_marker);
+    CHECK(substitute_artifact(), "phase 15: the artifact's bytes replaced in the CAS");
+    CHECK(run_phase(ph_digest_substituted) == 0,
+          "phase 15: a restart does not replay substituted bytes");
+    CHECK(restore_audit_has("err_restore_digest"), "phase 15: and the skip is audited");
+    CHECK(!marker_exists(), "phase 15: the substituted artifact's code never ran");
 }
 
 int main(int argc, char **argv) {
@@ -1367,6 +1670,9 @@ int main(int argc, char **argv) {
     char sock_path[64];
     snprintf(sock_path, sizeof(sock_path), "/tmp/march_reload_test_%d.sock", (int)getpid());
     SOCK_PATH = sock_path;
+    snprintf(g_marker, sizeof(g_marker), "/tmp/march_reload_evil_%d.marker", (int)getpid());
+    unlink(g_marker);
+    setenv("MARCH_TEST_EVIL_MARKER", g_marker, 1);
 
     /* A private CAS (march_reload_server_start roots it at $HOME/.march/cas):
      * the epoch-model case uploads a real artifact. */
@@ -1380,6 +1686,7 @@ int main(int argc, char **argv) {
         g_restore_home = home;
         test_restart_durability();
         unlink(g_audit_path);
+        unlink(g_marker);
         if (g_failed == 0) {
             printf("test_reload_activate4_restore: all checks passed\n");
             return 0;
@@ -1404,9 +1711,23 @@ int main(int argc, char **argv) {
     march_dispatch_register_name(9, "test_fn_batch");
     march_dispatch_register_name(10, "test_fn_epoch");
     march_dispatch_register_name(11, "test_fn_role");
+    march_dispatch_register_name(12, "test_fn_digest");
     march_dispatch_publish(10, (void *)0x1010, "baseline", NULL, MARCH_NATIVE);
+    march_dispatch_publish(12, (void *)0x1010, "baseline", NULL, MARCH_NATIVE);
+    /* Review 2026-10-04 (dd12 P3): the socket is owner-only whatever the
+     * umask the node inherited.  Started under umask 0, it would otherwise
+     * be 0777: any local user could connect. */
+    mode_t old_umask = umask(0);
     march_reload_server_start(sock_path);
-    test_hcr_info();
+    test_hcr_info();   /* connects: the server is listening */
+    umask(old_umask);
+    {
+        struct stat st;
+        CHECK(stat(sock_path, &st) == 0 && (st.st_mode & 0777) == 0600,
+              "the reload socket is 0600 even under umask 0");
+        if (stat(sock_path, &st) == 0 && (st.st_mode & 0777) != 0600)
+            fprintf(stderr, "    mode: %o\n", (unsigned)(st.st_mode & 0777));
+    }
 
     /* policy: test_reload_policy.txt, which names the roles the node serves
      * (`serves`, as forge host init writes it); policy-all: the same caps
@@ -1439,8 +1760,10 @@ int main(int argc, char **argv) {
             if (strncmp(resp, want, sizeof(want) - 1) != 0) fprintf(stderr, "    got: %s\n", resp);
             close(fd);
         }
+        test_artifact_digest();
         test_in_process_request();
-        test_sequenced_releases();   /* last: it makes the server require releases */
+        test_sequenced_releases();   /* it makes the server require releases */
+        test_unbound_activate_after_release();
     } else {
         /* $MARCH_DEPLOY_POLICY must already be set by the caller (dune rule)
          * before this process started, since the server loads it lazily on
@@ -1482,10 +1805,14 @@ int main(int argc, char **argv) {
         test_activate6_role_policy();
         test_policy_ignores_proof_caps();
         test_policy_served_roles(!policy_all);
+        /* Capless, so within every policy: the policy gate never stands in
+         * for the bytes check. */
+        test_artifact_digest();
     }
 
     unlink(sock_path);
     unlink(g_audit_path);
+    unlink(g_marker);
     if (g_failed == 0) {
         printf("test_reload_activate4%s: all checks passed\n",
                policy_all ? "_policy_all" : policy_mode ? "_policy" : "");

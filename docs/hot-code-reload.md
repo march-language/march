@@ -599,7 +599,7 @@ error: hot deploy would widen role Stream.Cons's capability closure
 
 A role new to the baseline widens by its whole closure. A baseline written before per-role closures (no `ROLE` lines) makes this gate permissive for one deploy, with a note.
 
-On the wire, a manifest with `ROLE` lines is deployed with the `ACTIVATE6` message: `ACTIVATE5`'s fields plus `role_caps:<Proto.Role>=<digest>;...` inside the signed line (one digest per role, sorted by role, the `cap_root` recipe over its closure) and an unsigned `roles:<Proto.Role>=<caps>;...` block. The server recomputes every digest from the block and refuses a mismatch, a signed role the block leaves out, or a role it adds unsigned (`ERR role_cap_tamper`), then checks the IO capabilities of every closure against `MARCH_DEPLOY_POLICY` (`ERR role_cap_policy Stream.Cons IO.FileWrite`), or of every role the policy's `serves` line names. A granted widening therefore still stops at a node whose policy forbids it. It is a new message rather than an extra field because an older server rebuilds the signed line without the role digests, so a signature check there would fail for a confusing reason. A build with no role grants keeps sending `ACTIVATE4`/`ACTIVATE5`; a server that predates `ACTIVATE6` refuses a manifest with roles (upgrade it, or use `--no-cap-gate`).
+On the wire, a manifest with `ROLE` lines is deployed with the `ACTIVATE6` message: `ACTIVATE5`'s fields plus `role_caps:<Proto.Role>=<digest>;...` inside the signed line (one digest per role, sorted by role, the `cap_root` recipe over its closure) and an unsigned `roles:<Proto.Role>=<caps>;...` block. The server recomputes every digest from the block and refuses a mismatch, a signed role the block leaves out, or a role it adds unsigned (`ERR role_cap_tamper`), then checks the IO capabilities of every closure against `MARCH_DEPLOY_POLICY` (`ERR role_cap_policy Stream.Cons IO.FileWrite`), or of every role the policy's `serves` line names. A granted widening therefore still stops at a node whose policy forbids it. It is a new message rather than an extra field because an older server rebuilds the signed line without the role digests, so a signature check there would fail for a confusing reason. Today forge sends both shapes as `ACTIVATE7`, which adds a signed digest of the patch's bytes (see [Artifact integrity](#artifact-integrity-the-signature-covers-the-bytes)); a server that predates it refuses the deploy (upgrade it).
 
 ### `--grant-cap`
 
@@ -643,7 +643,7 @@ A policy constrains what *hot-patched* functions may do; it does not retroactive
 
 ### Backward compatibility
 
-Every gate is opt-in and additive. A pre-capability artifact (no capability fields in its manifest) deploys with permissive admission and a one-line note. A manifest without `ROLE` lines deploys over `ACTIVATE4`/`ACTIVATE5` exactly as before. A node with no `MARCH_DEPLOY_POLICY` allows everything, exactly as before. Deploying capability-aware code to a server that predates node admission fails fast with an actionable message rather than silently downgrading; re-run with `--no-cap-gate` if you intentionally want the legacy path.
+Every gate is opt-in and additive. A pre-capability artifact (no capability fields in its manifest) deploys with permissive admission and a one-line note. A manifest without `ROLE` lines is admitted exactly as before (forge sends it as `ACTIVATE7`, which only adds the bytes' digest). A node with no `MARCH_DEPLOY_POLICY` allows everything, exactly as before. Deploying capability-aware code to a server that predates node admission fails fast with an actionable message rather than silently downgrading; re-run with `--no-cap-gate` if you intentionally want the legacy path.
 
 ---
 
@@ -661,6 +661,7 @@ At start, before `march_reload_server_start` returns, the server replays it:
 
 - Each entry's **signature is verified again** from the stored signed line with the key baked into the binary.
 - An entry that fails (bad signature, artifact gone from the CAS, a function this binary does not have, a malformed line) is **skipped with an audit line** (`"type":"restore"`, `"result":"err_restore_sig"` and so on), never a crash.
+- An `ACTIVATE7` entry's artifact must **still hash to its signed digest** (`err_restore_digest` otherwise), and is loaded through the same verified copy as a live deploy, so bytes replaced in the CAS while the node was down are not replayed. An entry written before `ACTIVATE7` has no signed digest to check its bytes against: it is replayed only where such a line would still be accepted live (no release held, no `MARCH_HCR_REQUIRE_RELEASE`), and skipped otherwise (`err_restore_no_digest`); that function comes back on the base build until the next deploy.
 - Each function's newest valid entry is republished, deploy by deploy in the original order, so epochs keep their order. Superseded and broken entries are dropped from the rewritten file.
 - A **different build** on the same socket (its baseline digest differs) does not replay the stack: patches of one build are not patches of another. The file is set aside as `state.base-changed`.
 - `MARCH_HCR_NO_REPLAY=1` starts from the base binary and sets the stack aside as `state.no-replay`: the escape hatch for a patch that breaks the boot.
@@ -715,6 +716,25 @@ signed over `SEQ <seq> <id> <signed line>` with the deploy key. The inner line k
 Once a node holds a release, or when it was started with `MARCH_HCR_REQUIRE_RELEASE=1`, a signed line that is not wrapped is refused with `ERR release_required`, so a line recorded before the node saw its first release cannot be replayed either. `RELEASE_HEAD` answers `HEAD <seq> <id>` (`HEAD 0 -` before any release, with ` required` appended under `MARCH_HCR_REQUIRE_RELEASE`); forge asks it once per connection and sends unwrapped lines only to a server that does not know the request. Every release a node accepts or refuses is audited (`type` `release`).
 
 forge reports a refusal in words: a stale release means another deploy reached the node first, or this machine's clock is behind; a fork means two deploys ran at once. Re-run the deploy either way.
+
+## Artifact integrity: the signature covers the bytes
+
+A patch reaches a node in two parts: its bytes go into the node's artifact store (the CAS, `~/.march/cas/artifacts/`, under the compiler's compilation hash), and a signed `ACTIVATE` line names them. The CAS is **not** a trust boundary. Anyone who can reach the reload socket, or the control API of a candidate, can write it with `CAS_PUT`, and the compilation hash is a hash of the build's inputs, not of the bytes stored under it. Until `ACTIVATE7` nothing signed the bytes, so whoever could write a node's CAS chose what an operator's signed line loaded, constructors included (review `specs/progress/2026-10-04-dd12-review-cas-artifact-unverified.md`).
+
+`ACTIVATE7` carries the BLAKE3 of the `.so` file's bytes, `so_blake3:<hex>`, **inside** the signed line (between `epoch:` and `cap_root:`); otherwise it is `ACTIVATE5`, or `ACTIVATE6` with the role blocks. Before it maps anything, the node reads the artifact once, hashes exactly the bytes it read, and copies them to a directory of its own (`<state dir>/loaded/<so_blake3>.so`, mode `0700`, written by no request). It loads that copy only if the bytes are the signed ones, so a file replaced between the check and the load changes nothing. Bytes that do not match are refused with `ERR artifact_digest`, audited as `err_artifact_digest`, and none of their code runs.
+
+The CAS verbs take the digest as well, so forge spots a bad copy before it activates anything:
+
+| Request | Answer |
+|---|---|
+| `CAS_CHECK <hash> so_blake3:<hex>` | `PRESENT` only if the stored bytes hash to `<hex>`, so forge uploads a stale or substituted artifact again |
+| `CAS_PUT <hash> <size> so_blake3:<hex>` | `ERR digest_mismatch` (nothing stored) for bytes that do not hash to `<hex>` |
+
+Both still accept the old form without the digest. Someone who can write the CAS can still replace an artifact after forge uploads it; the deploy then fails with `ERR artifact_digest`, and forge says so. That is a delay, not a forgery: no unsigned code runs (design D37).
+
+Older lines (`ACTIVATE` through `ACTIVATE6`) sign no digest of the bytes. A node that holds a release, or runs with `MARCH_HCR_REQUIRE_RELEASE=1`, refuses them with `ERR artifact_digest_required`, wrapped in a release or not, and does not replay such entries from its patch stack (see [Restart durability](#restart-durability)). Before its first release a node still accepts them, as before. forge sends `ACTIVATE7` for every capability-aware deploy. `--no-cap-gate` still sends the legacy `ACTIVATE3`, so it only works against a node that accepts unbound lines.
+
+The reload socket itself is owner-only (`0600`, set before it accepts connections, whatever the umask the node inherited), and a peer whose uid is not the node's (or root's) is disconnected.
 
 ---
 
