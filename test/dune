@@ -12036,3 +12036,73 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/branch_alias_tail_drop.expected native_branch_alias_tail_drop.out)))
+
+; ── Actor.inspect_state (observe R4a) ────────────────────────────────────
+; specs/progress/2026-10-04-observe-r4a-inspect-state.md. The state fixture
+; runs compiled, compiled with --hot-reload (the renderer's code-epoch check
+; must pass when nothing reloaded), and interpreted, against one .expected.
+; The BLOCK-limit case is compiled-only: the interpreter has no blocking send.
+
+(rule
+ (targets native_actor_inspect_state native_actor_inspect_state.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_inspect_state.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_inspect_state
+        native/actor_inspect_state.march)
+   (with-stdout-to native_actor_inspect_state.out
+        (system "./native_actor_inspect_state")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_inspect_state.expected native_actor_inspect_state.out)))
+
+(rule
+ (targets native_actor_inspect_state_hcr native_actor_inspect_state_hcr.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_inspect_state.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --hot-reload Main -o native_actor_inspect_state_hcr
+        native/actor_inspect_state.march)
+   (with-stdout-to native_actor_inspect_state_hcr.out
+        (system "./native_actor_inspect_state_hcr")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_inspect_state.expected native_actor_inspect_state_hcr.out)))
+
+(rule
+ (targets interp_actor_inspect_state.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_inspect_state.march))
+ (action
+  (with-stdout-to interp_actor_inspect_state.out
+    (run %{exe:../bin/main.exe} native/actor_inspect_state.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_inspect_state.expected interp_actor_inspect_state.out)))
+
+(rule
+ (targets native_actor_inspect_block native_actor_inspect_block.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_inspect_block.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_inspect_block
+        native/actor_inspect_block.march)
+   (with-stdout-to native_actor_inspect_block.out
+        (system "./native_actor_inspect_block")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_inspect_block.expected native_actor_inspect_block.out)))
