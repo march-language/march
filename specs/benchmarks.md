@@ -1506,7 +1506,10 @@ scripts/compile-time-bench.sh --opt 0 --corpus small
 Rows go to `bench/results/<date>-compile-time-<arch>.tsv`; medians print on stdout. Edit
 scenarios apply a *different* edit on every run so each is a fresh cache miss. Signature and
 layout edits run only on the probe (it carries `-- BENCH:*` markers so the edited program still
-compiles); the table prints `n/a` where no safe recipe exists.
+compiles); `tree_transform` and `topology_app` get a leaf edit through a known literal, and the
+table prints `n/a` where no safe recipe exists. `topology_app` is staged as a whole forge project
+and compiled the way `forge run` compiles it (`--topology .forge/topology.json`, the digest
+`forge topology check` writes), so `forge/bin/main.exe` must be built too.
 
 Reading it: the plan's §3 gate asks whether, for the edit scenarios at `--opt 2`, the back-end
 bucket is more than ~60% of wall time and the `topology` total is over ~10 s. Below that, the
