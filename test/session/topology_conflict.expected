@@ -1,0 +1,13 @@
+topology: Echo.Replica: cannot be offered on node-n0: its endpoint name is held by role Echo.Primary (two roles serving the same protocol role share one endpoint per node: place them on different nodes or give each its own protocol); retrying when this node's offers change, with backoff
+placed: offers [Echo.Primary]
+  status: offers Echo.Primary
+  status: conflict Echo.Replica held-by Echo.Primary
+after 5 more evaluations: offers [Echo.Primary]
+Echo.Replica tried every evaluation: no
+  status: offers Echo.Primary
+  status: conflict Echo.Replica held-by Echo.Primary
+topology: Echo.Primary: no longer placed on node-n0; draining its offer
+Echo.Primary moved away, its name not yet released: offers []
+topology: Echo.Replica: its endpoint is free again; offered on node-n0
+name released: offers [Echo.Replica]
+  status: offers Echo.Replica

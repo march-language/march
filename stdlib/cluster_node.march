@@ -2529,7 +2529,8 @@ mod ClusterNode do
     revocations        : () -> List(NodeCert.Revocation),
     replace_cert       : String -> String -> Result(NodeCert.Cert, String),
     on_security_event  : (SecurityEvent -> Unit) -> Int,
-    off_security_event : Int -> ()
+    off_security_event : Int -> (),
+    handshake          : Int -> String -> Int -> Result(NetKernel.Authed, String)
   }
 
   proof cap Live with ClusterOps
@@ -2592,7 +2593,8 @@ mod ClusterNode do
       revocations: fn _ -> unsupported("revocations"),
       replace_cert: fn (_, _) -> unsupported("replace_cert"),
       on_security_event: fn _ -> unsupported("on_security_event"),
-      off_security_event: fn _ -> unsupported("off_security_event") }
+      off_security_event: fn _ -> unsupported("off_security_event"),
+      handshake: fn (_, _, _) -> Err("ClusterNode: handshake is not supported by this capability") }
   end
 
   -- The real dictionary: every operation over the node's backing record.
@@ -2636,7 +2638,18 @@ mod ClusterNode do
       revocations: fn _ -> List.map(Vault.all(h.revs), fn kv -> match kv do (_k, r) -> r end),
       replace_cert: fn (cert_text, key_hex) -> h_replace_cert(h, cert_text, key_hex),
       on_security_event: fn f -> h_on_security_event(h, f),
-      off_security_event: fn id -> Vault.drop(h.sec, int_to_string(id)) }
+      off_security_event: fn id -> Vault.drop(h.sec, int_to_string(id)),
+      handshake: fn (fd, role, timeout_ms) -> h_handshake(h, fd, role, timeout_ms) }
+  end
+
+  -- The cluster link's handshake on a connection that is not a link (the
+  -- control API's candidate-to-candidate verbs): this node's identity and
+  -- credentials as of now, so a replaced certificate and new revocations
+  -- apply, exactly as on a link.
+  pfn h_handshake(h : CnHandle, fd : Int, role : String, timeout_ms : Int) : Result(NetKernel.Authed, String) do
+    let me = NodeIdentity.make(h.name, "pk-" ++ h.name, Vault.get_or(h.meta, "creation", 0))
+    NetKernel.handshake_auth(fd, me, h_auth(h, ClusterAuth.Secret("")), NetKernel.fresh_nonce(), role,
+                             h.advertise, timeout_ms)
   end
 
   pfn no_cluster() do
@@ -3432,6 +3445,21 @@ mod ClusterNode do
   applies only then; a shared-secret node checks nothing, as before step 11b.
   """
   fn certified(c : Cap(ClusterNode.Live)) : Bool do own_cert(c) != None end
+
+  doc """
+  Run the cluster link's authenticated handshake (`NetKernel.handshake_auth`)
+  on [fd], a connection that is not a cluster link, with this node's identity
+  and credentials as of now: the peer must hold the cluster secret
+  (shared-secret mode), or an operator-signed, unexpired, unrevoked
+  certificate whose key it proves (certificate mode; the result's `cert`).
+  [role] names the connection in the hello. Both ends call it. Used by the
+  control API's candidate-to-candidate verbs (`AUDIT_COPY`, `RELEASE_COPY`);
+  call `NetKernel.forget(fd)` when done, before the fd is closed.
+  """
+  fn handshake(c : Cap(ClusterNode.Live), fd : Int, role : String, timeout_ms : Int) : Result(NetKernel.Authed, String) do
+    let d = ops(c)
+    d.handshake(fd, role, timeout_ms)
+  end
 
   doc """
   May a node that presented [cert] play role [role] of protocol [proto] in

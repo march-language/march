@@ -13,9 +13,9 @@ fn Bytes.b64_alphabet() : '_ =
 
 ## Bytes.b64_char
 fn Bytes.b64_char(n : '_) : '_ =
-  let $rc_6 : '_ = string_slice(Bytes.b64_alphabet, n, 1) in
+  let $rc_8 : '_ = string_slice(Bytes.b64_alphabet, n, 1) in
 dec_rc Bytes.b64_alphabet;
-$rc_6
+$rc_8
 
 ## Bytes.b64_val
 fn Bytes.b64_val(code : '_) : '_ =
@@ -42,13 +42,13 @@ case $t201 of
   _ -> dec_rc $t201;
 let $t202 : '_ = ==(code, 43) in
 case $t202 of
-  True() -> dec_rc code;
-dec_rc $t202;
+  True() -> dec_rc $t202;
+dec_rc code;
 62
   _ -> dec_rc $t202;
-let $t203 : '_ = let $rc_14 : '_ = ==(code, 47) in
+let $t203 : '_ = let $rc_16 : '_ = ==(code, 47) in
 dec_rc code;
-$rc_14 in
+$rc_16 in
 case $t203 of
   True() -> dec_rc $t203;
 63
@@ -62,10 +62,10 @@ fn Bytes.byte_to_hex_str(n : '_) : '_ =
 Bytes.hex_digit($t100) in
 let $t103 : '_ = let $t102 : '_ = %(n, 16) in
 Bytes.hex_digit($t102) in
-let $rc_2 : '_ = ++($t101, $t103) in
+let $rc_3 : '_ = ++($t101, $t103) in
 dec_rc $t101;
 dec_rc $t103;
-$rc_2
+$rc_3
 
 ## Bytes.concat
 fn Bytes.concat(b1 : '_, b2 : '_) : '_ =
@@ -78,16 +78,16 @@ case $f88 of
   Bytes($f92) -> dec_rc $f88;
 let y : '_ = $f92 in
 let x : '_ = $f89 in
-let $t86 : '_ = let $rc_1 : '_ = string_concat(x, y) in
+let $t86 : '_ = let $rc_2 : '_ = string_concat(x, y) in
 dec_rc x;
 dec_rc y;
-$rc_1 in
+$rc_2 in
 alloc Bytes($t86)
-  _ -> dec_rc $f89;
-dec_rc $f88;
-panic("non-exhaustive pattern match")
   _ -> dec_rc $f88;
-dec_rc $f87;
+dec_rc $f89;
+panic("non-exhaustive pattern match")
+  _ -> dec_rc $f87;
+dec_rc $f88;
 panic("non-exhaustive pattern match")
   _ -> dec_rc $t85;
 panic("non-exhaustive pattern match")
@@ -97,28 +97,30 @@ fn Bytes.decode_base64(s : '_) : '_ =
   let n : '_ = string_byte_length(s) in
 let $t266 : '_ = let $t265 : '_ = inc_rc n;
 %(n, 4) in
-let $rc_16 : '_ = !=($t265, 0) in
+let $rc_21 : '_ = !=($t265, 0) in
 dec_rc $t265;
-$rc_16 in
+$rc_21 in
 case $t266 of
-  True() -> dec_rc n;
-dec_rc $t266;
+  True() -> dec_rc $t266;
+dec_rc n;
 alloc Err("invalid base64: length must be a multiple of 4")
   _ -> dec_rc $t266;
 let $t267 : '_ = alloc Nil() in
-let $rc_15 : '_ = Bytes.decode_base64_go(s, 0, n, $t267) in
+let $rc_20 : '_ = Bytes.decode_base64_go(s, 0, n, $t267) in
 dec_rc n;
-$rc_15
+$rc_20
 
 ## Bytes.decode_base64_go
 fn Bytes.decode_base64_go(s : '_, i : '_, n : '_, acc : '_) : '_ =
   let $t204 : '_ = >=(i, n) in
 case $t204 of
-  True() -> dec_rc i;
-dec_rc $t204;
+  True() -> dec_rc $t204;
+dec_rc i;
 let $t208 : '_ = let $t207 : '_ = let $t206 : '_ = let $t205 : '_ = alloc Nil() in
 Bytes.rev(acc, $t205) in
-string_from_chars($t206) in
+let $rc_17 : '_ = string_from_chars($t206) in
+dec_rc $t206;
+$rc_17 in
 alloc Bytes($t207) in
 alloc Ok($t208)
   _ -> dec_rc $t204;
@@ -139,23 +141,23 @@ let $t214 : '_ = let $t212 : '_ = <(v0, 0) in
 let $t213 : '_ = <(v1, 0) in
 ||($t212, $t213) in
 case $t214 of
-  True() -> dec_rc v1;
+  True() -> dec_rc $t214;
+dec_rc v1;
 dec_rc v0;
 dec_rc i;
 dec_rc c3;
 dec_rc c2;
 dec_rc acc;
-dec_rc $t214;
 alloc Err("invalid base64 character")
   _ -> dec_rc $t214;
 let $t217 : '_ = let $t215 : '_ = ==(c2, 61) in
 let $t216 : '_ = ==(c3, 61) in
 &&($t215, $t216) in
 case $t217 of
-  True() -> dec_rc i;
+  True() -> dec_rc $t217;
+dec_rc i;
 dec_rc c3;
 dec_rc c2;
-dec_rc $t217;
 let $t227 : '_ = let $t226 : '_ = let $t225 : '_ = let $t223 : '_ = let $t222 : '_ = let $t221 : '_ = let $t220 : '_ = let $t218 : '_ = *(v0, 4) in
 let $t219 : '_ = /(v1, 16) in
 +($t218, $t219) in
@@ -164,23 +166,25 @@ byte_to_char($t221) in
 alloc Cons($t222, acc) in
 let $t224 : '_ = alloc Nil() in
 Bytes.rev($t223, $t224) in
-string_from_chars($t225) in
+let $rc_18 : '_ = string_from_chars($t225) in
+dec_rc $t225;
+$rc_18 in
 alloc Bytes($t226) in
 alloc Ok($t227)
   _ -> dec_rc $t217;
 let $t228 : '_ = ==(c3, 61) in
 case $t228 of
-  True() -> dec_rc i;
+  True() -> dec_rc $t228;
+dec_rc i;
 dec_rc c3;
-dec_rc $t228;
 let v2 : '_ = Bytes.b64_val(c2) in
 let $t229 : '_ = <(v2, 0) in
 case $t229 of
-  True() -> dec_rc v2;
+  True() -> dec_rc $t229;
+dec_rc v2;
 dec_rc v1;
 dec_rc v0;
 dec_rc acc;
-dec_rc $t229;
 alloc Err("invalid base64 character")
   _ -> dec_rc $t229;
 let byte0 : '_ = let $t232 : '_ = let $t230 : '_ = *(v0, 4) in
@@ -199,7 +203,9 @@ alloc Cons($t238, acc) in
 alloc Cons($t237, $t239) in
 let $t241 : '_ = alloc Nil() in
 Bytes.rev($t240, $t241) in
-string_from_chars($t242) in
+let $rc_19 : '_ = string_from_chars($t242) in
+dec_rc $t242;
+$rc_19 in
 alloc Bytes($t243) in
 alloc Ok($t244)
   _ -> dec_rc $t228;
@@ -209,13 +215,13 @@ let $t247 : '_ = let $t245 : '_ = <(v2, 0) in
 let $t246 : '_ = <(v3, 0) in
 ||($t245, $t246) in
 case $t247 of
-  True() -> dec_rc v3;
+  True() -> dec_rc $t247;
+dec_rc v3;
 dec_rc v2;
 dec_rc v1;
 dec_rc v0;
 dec_rc i;
 dec_rc acc;
-dec_rc $t247;
 alloc Err("invalid base64 character")
   _ -> dec_rc $t247;
 let byte0 : '_ = let $t250 : '_ = let $t248 : '_ = *(v0, 4) in
@@ -257,18 +263,18 @@ fn Bytes.encode_base64(b : '_) : '_ =
   Bytes($f192) -> let s : '_ = $f192 in
 let $t190 : '_ = string_byte_length(s) in
 let $t191 : '_ = alloc Nil() in
-let $rc_13 : '_ = Bytes.encode_base64_go(s, 0, $t190, $t191) in
+let $rc_15 : '_ = Bytes.encode_base64_go(s, 0, $t190, $t191) in
 dec_rc $t190;
-$rc_13
+$rc_15
   _ -> panic("non-exhaustive pattern match")
 
 ## Bytes.encode_base64_go
 fn Bytes.encode_base64_go(s : '_, i : '_, n : '_, acc : '_) : '_ =
   let $t143 : '_ = let $t142 : '_ = inc_rc i;
 +(i, 3) in
-let $rc_12 : '_ = <=($t142, n) in
+let $rc_14 : '_ = <=($t142, n) in
 dec_rc $t142;
-$rc_12 in
+$rc_14 in
 case $t143 of
   True() -> dec_rc $t143;
 let b0 : '_ = inc_rc i;
@@ -305,9 +311,9 @@ Bytes.encode_base64_go(s, $t156, n, $t160)
   _ -> dec_rc $t143;
 let $t162 : '_ = let $t161 : '_ = inc_rc i;
 +(i, 2) in
-let $rc_11 : '_ = ==($t161, n) in
+let $rc_13 : '_ = ==($t161, n) in
 dec_rc $t161;
-$rc_11 in
+$rc_13 in
 case $t162 of
   True() -> dec_rc $t162;
 let b0 : '_ = inc_rc i;
@@ -332,15 +338,15 @@ alloc Cons(c2, $t172) in
 alloc Cons("=", $t173) in
 let $t175 : '_ = alloc Nil() in
 Bytes.rev($t174, $t175) in
-let $rc_7 : '_ = Bytes.join_strings($t176) in
+let $rc_9 : '_ = Bytes.join_strings($t176) in
 dec_rc $t176;
-$rc_7
+$rc_9
   _ -> dec_rc $t162;
 let $t178 : '_ = let $t177 : '_ = inc_rc i;
 +(i, 1) in
-let $rc_10 : '_ = ==($t177, n) in
+let $rc_12 : '_ = ==($t177, n) in
 dec_rc $t177;
-$rc_10 in
+$rc_12 in
 case $t178 of
   True() -> dec_rc $t178;
 let b0 : '_ = string_byte_at(s, i) in
@@ -356,16 +362,16 @@ alloc Cons("=", $t183) in
 alloc Cons("=", $t184) in
 let $t186 : '_ = alloc Nil() in
 Bytes.rev($t185, $t186) in
-let $rc_8 : '_ = Bytes.join_strings($t187) in
+let $rc_10 : '_ = Bytes.join_strings($t187) in
 dec_rc $t187;
-$rc_8
-  _ -> dec_rc i;
-dec_rc $t178;
+$rc_10
+  _ -> dec_rc $t178;
+dec_rc i;
 let $t189 : '_ = let $t188 : '_ = alloc Nil() in
 Bytes.rev(acc, $t188) in
-let $rc_9 : '_ = Bytes.join_strings($t189) in
+let $rc_11 : '_ = Bytes.join_strings($t189) in
 dec_rc $t189;
-$rc_9
+$rc_11
 
 ## Bytes.encode_utf8
 fn Bytes.encode_utf8(s : '_) : '_ =
@@ -376,28 +382,30 @@ fn Bytes.from_hex(s : '_) : '_ =
   let n : '_ = string_byte_length(s) in
 let $t140 : '_ = let $t139 : '_ = inc_rc n;
 %(n, 2) in
-let $rc_5 : '_ = !=($t139, 0) in
+let $rc_7 : '_ = !=($t139, 0) in
 dec_rc $t139;
-$rc_5 in
+$rc_7 in
 case $t140 of
-  True() -> dec_rc n;
-dec_rc $t140;
+  True() -> dec_rc $t140;
+dec_rc n;
 alloc Err("hex string must have even length")
   _ -> dec_rc $t140;
 let $t141 : '_ = alloc Nil() in
-let $rc_4 : '_ = Bytes.from_hex_go(s, 0, n, $t141) in
+let $rc_6 : '_ = Bytes.from_hex_go(s, 0, n, $t141) in
 dec_rc n;
-$rc_4
+$rc_6
 
 ## Bytes.from_hex_go
 fn Bytes.from_hex_go(s : '_, i : '_, n : '_, acc : '_) : '_ =
   let $t123 : '_ = >=(i, n) in
 case $t123 of
-  True() -> dec_rc i;
-dec_rc $t123;
+  True() -> dec_rc $t123;
+dec_rc i;
 let $t127 : '_ = let $t126 : '_ = let $t125 : '_ = let $t124 : '_ = alloc Nil() in
 Bytes.rev(acc, $t124) in
-string_from_chars($t125) in
+let $rc_5 : '_ = string_from_chars($t125) in
+dec_rc $t125;
+$rc_5 in
 alloc Bytes($t126) in
 alloc Ok($t127)
   _ -> dec_rc $t123;
@@ -412,11 +420,11 @@ let $t133 : '_ = let $t131 : '_ = <(hi, 0) in
 let $t132 : '_ = <(lo, 0) in
 ||($t131, $t132) in
 case $t133 of
-  True() -> dec_rc lo;
+  True() -> dec_rc $t133;
+dec_rc lo;
 dec_rc i;
 dec_rc hi;
 dec_rc acc;
-dec_rc $t133;
 alloc Err("invalid hex character")
   _ -> dec_rc $t133;
 let $t134 : '_ = +(i, 2) in
@@ -430,7 +438,9 @@ Bytes.from_hex_go(s, $t134, n, $t138)
 fn Bytes.from_list(xs : '_) : '_ =
   let $t69 : '_ = let $t68 : '_ = let $t67 : '_ = alloc Nil() in
 Bytes.from_list_go(xs, $t67) in
-string_from_chars($t68) in
+let $rc_1 : '_ = string_from_chars($t68) in
+dec_rc $t68;
+$rc_1 in
 alloc Bytes($t69)
 
 ## Bytes.from_list_go
@@ -445,8 +455,8 @@ let n : '_ = $f61 in
 let $t60 : '_ = let $t59 : '_ = byte_to_char(n) in
 alloc Cons($t59, acc) in
 Bytes.from_list_go(rest, $t60)
-  _ -> dec_rc acc;
-dec_rc xs;
+  _ -> dec_rc xs;
+dec_rc acc;
 panic("non-exhaustive pattern match")
 
 ## Bytes.from_string
@@ -464,8 +474,8 @@ fn Bytes.get(b : '_, i : '_) : '_ =
 let v : '_ = string_byte_at(s, i) in
 let $t81 : '_ = <(v, 0) in
 case $t81 of
-  True() -> dec_rc v;
-dec_rc $t81;
+  True() -> dec_rc $t81;
+dec_rc v;
 panic("Bytes.get: index out of bounds")
   _ -> dec_rc $t81;
 v
@@ -504,8 +514,8 @@ let $t121 : '_ = <=(code, 102) in
 case $t122 of
   True() -> dec_rc $t122;
 -(code, 87)
-  _ -> dec_rc code;
-dec_rc $t122;
+  _ -> dec_rc $t122;
+dec_rc code;
 negate(1)
 
 ## Bytes.is_empty
@@ -536,8 +546,8 @@ let t : '_ = $f53 in
 let h : '_ = $f52 in
 let $t51 : '_ = alloc Cons(h, acc) in
 Bytes.rev(t, $t51)
-  _ -> dec_rc acc;
-dec_rc xs;
+  _ -> dec_rc xs;
+dec_rc acc;
 panic("non-exhaustive pattern match")
 
 ## Bytes.slice
@@ -558,17 +568,17 @@ let $t112 : '_ = let $t110 : '_ = let $t109 : '_ = string_byte_length(s) in
 -($t109, 1) in
 let $t111 : '_ = alloc Nil() in
 Bytes.to_hex_go(s, $t110, $t111) in
-let $rc_3 : '_ = Bytes.join_strings($t112) in
+let $rc_4 : '_ = Bytes.join_strings($t112) in
 dec_rc $t112;
-$rc_3
+$rc_4
   _ -> panic("non-exhaustive pattern match")
 
 ## Bytes.to_hex_go
 fn Bytes.to_hex_go(s : '_, i : '_, acc : '_) : '_ =
   let $t104 : '_ = <(i, 0) in
 case $t104 of
-  True() -> dec_rc i;
-dec_rc $t104;
+  True() -> dec_rc $t104;
+dec_rc i;
 acc
   _ -> dec_rc $t104;
 let $t105 : '_ = inc_rc i;
@@ -592,8 +602,8 @@ Bytes.to_list_go(s, $t75, $t76)
 fn Bytes.to_list_go(s : '_, i : '_, acc : '_) : '_ =
   let $t70 : '_ = <(i, 0) in
 case $t70 of
-  True() -> dec_rc i;
-dec_rc $t70;
+  True() -> dec_rc $t70;
+dec_rc i;
 acc
   _ -> dec_rc $t70;
 let $t71 : '_ = inc_rc i;
@@ -619,30 +629,30 @@ fn Bytes.to_u8_arr(b : '_) : '_ =
 fn List.maximum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = alloc $Clo_go$4(go$apply$4) in
 case xs of
-  Nil() -> dec_rc go;
-dec_rc xs;
+  Nil() -> dec_rc xs;
+dec_rc go;
 panic("List.maximum_int: empty list")
   Cons($f756, $f757) -> dec_rc xs;
 let t : '_ = $f757 in
 let h : '_ = $f756 in
 call_ptr go(t, h)
-  _ -> dec_rc go;
-dec_rc xs;
+  _ -> dec_rc xs;
+dec_rc go;
 panic("non-exhaustive pattern match")
 
 ## List.minimum_int
 fn List.minimum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = alloc $Clo_go$3(go$apply$3) in
 case xs of
-  Nil() -> dec_rc go;
-dec_rc xs;
+  Nil() -> dec_rc xs;
+dec_rc go;
 panic("List.minimum_int: empty list")
   Cons($f743, $f744) -> dec_rc xs;
 let t : '_ = $f744 in
 let h : '_ = $f743 in
 call_ptr go(t, h)
-  _ -> dec_rc go;
-dec_rc xs;
+  _ -> dec_rc xs;
+dec_rc go;
 panic("non-exhaustive pattern match")
 
 ## List.product_int
@@ -742,9 +752,9 @@ let $t783 : '_ = <(byte, 224) in
 case $t783 of
   True() -> dec_rc $t783;
 let $t785 : '_ = let $t784 : '_ = +(i, 1) in
-let $rc_17 : '_ = <($t784, n) in
+let $rc_22 : '_ = <($t784, n) in
 dec_rc $t784;
-$rc_17 in
+$rc_22 in
 case $t785 of
   True() -> dec_rc $t785;
 let b2 : '_ = let $t786 : '_ = +(i, 1) in
@@ -765,9 +775,9 @@ let $t795 : '_ = <(byte, 240) in
 case $t795 of
   True() -> dec_rc $t795;
 let $t797 : '_ = let $t796 : '_ = +(i, 2) in
-let $rc_18 : '_ = <($t796, n) in
+let $rc_23 : '_ = <($t796, n) in
 dec_rc $t796;
-$rc_18 in
+$rc_23 in
 case $t797 of
   True() -> dec_rc $t797;
 let b2 : '_ = let $t798 : '_ = +(i, 1) in
@@ -790,9 +800,9 @@ let $t810 : '_ = alloc Cons(byte, acc) in
 String.decode_go(b, n, $t809, $t810)
   _ -> dec_rc $t795;
 let $t812 : '_ = let $t811 : '_ = +(i, 3) in
-let $rc_19 : '_ = <($t811, n) in
+let $rc_24 : '_ = <($t811, n) in
 dec_rc $t811;
-$rc_19 in
+$rc_24 in
 case $t812 of
   True() -> dec_rc $t812;
 let b2 : '_ = let $t813 : '_ = +(i, 1) in
@@ -984,9 +994,9 @@ fn String.to_codepoints(s : String) : List(Int) =
   let b : '_ = Bytes.from_string(s) in
 let $t830 : '_ = Bytes.length(b) in
 let $t831 : '_ = alloc Nil() in
-let $rc_20 : '_ = String.decode_go(b, $t830, 0, $t831) in
+let $rc_25 : '_ = String.decode_go(b, $t830, 0, $t831) in
 dec_rc b;
-$rc_20
+$rc_25
 
 ## String.to_float
 fn String.to_float(s : '_) : '_ =
@@ -1042,8 +1052,8 @@ let start : Int = $clo.$fv1 in
 dec_rc $clo;
 let $t280 : '_ = <(i, start) in
 case $t280 of
-  True() -> dec_rc go;
-dec_rc $t280;
+  True() -> dec_rc $t280;
+dec_rc go;
 acc
   _ -> dec_rc $t280;
 let $t281 : '_ = inc_rc i;
@@ -1055,40 +1065,40 @@ call_ptr go($t281, $t282)
 fn go$apply$1($clo : Ptr(Unit), lst : List(Int), acc : Int) : Int =
   let go : (List(Int), Int) -> Int = $clo in
 case lst of
-  Nil() -> dec_rc go;
-dec_rc lst;
+  Nil() -> dec_rc lst;
+dec_rc go;
 acc
   Cons($f723, $f724) -> dec_rc lst;
 let t : '_ = $f724 in
 let x : '_ = $f723 in
 let $t722 : '_ = +(acc, x) in
 call_ptr go(t, $t722)
-  _ -> dec_rc go;
-dec_rc lst;
+  _ -> dec_rc lst;
+dec_rc go;
 panic("non-exhaustive pattern match")
 
 ## go$apply$2
 fn go$apply$2($clo : Ptr(Unit), lst : List(Int), acc : Int) : Int =
   let go : (List(Int), Int) -> Int = $clo in
 case lst of
-  Nil() -> dec_rc go;
-dec_rc lst;
+  Nil() -> dec_rc lst;
+dec_rc go;
 acc
   Cons($f730, $f731) -> dec_rc lst;
 let t : '_ = $f731 in
 let x : '_ = $f730 in
 let $t729 : '_ = *(acc, x) in
 call_ptr go(t, $t729)
-  _ -> dec_rc go;
-dec_rc lst;
+  _ -> dec_rc lst;
+dec_rc go;
 panic("non-exhaustive pattern match")
 
 ## go$apply$3
 fn go$apply$3($clo : Ptr(Unit), lst : List(Int), m : Int) : Int =
   let go : (List(Int), Int) -> Int = $clo in
 case lst of
-  Nil() -> dec_rc go;
-dec_rc lst;
+  Nil() -> dec_rc lst;
+dec_rc go;
 m
   Cons($f737, $f738) -> dec_rc lst;
 let r : '_ = $f738 in
@@ -1097,19 +1107,19 @@ let $t736 : '_ = <(x, m) in
 case $t736 of
   True() -> dec_rc $t736;
 call_ptr go(r, x)
-  _ -> dec_rc x;
-dec_rc $t736;
+  _ -> dec_rc $t736;
+dec_rc x;
 call_ptr go(r, m)
-  _ -> dec_rc go;
-dec_rc lst;
+  _ -> dec_rc lst;
+dec_rc go;
 panic("non-exhaustive pattern match")
 
 ## go$apply$4
 fn go$apply$4($clo : Ptr(Unit), lst : List(Int), m : Int) : Int =
   let go : (List(Int), Int) -> Int = $clo in
 case lst of
-  Nil() -> dec_rc go;
-dec_rc lst;
+  Nil() -> dec_rc lst;
+dec_rc go;
 m
   Cons($f750, $f751) -> dec_rc lst;
 let r : '_ = $f751 in
@@ -1118,28 +1128,28 @@ let $t749 : '_ = >(x, m) in
 case $t749 of
   True() -> dec_rc $t749;
 call_ptr go(r, x)
-  _ -> dec_rc x;
-dec_rc $t749;
+  _ -> dec_rc $t749;
+dec_rc x;
 call_ptr go(r, m)
-  _ -> dec_rc go;
-dec_rc lst;
+  _ -> dec_rc lst;
+dec_rc go;
 panic("non-exhaustive pattern match")
 
 ## go$apply$5
 fn go$apply$5($clo : Ptr(Unit), lst : List(Int), acc : List(Int)) : List(Int) =
   let go : (List(Int), List(Int)) -> List(Int) = $clo in
 case lst of
-  Nil() -> dec_rc go;
-dec_rc lst;
+  Nil() -> dec_rc lst;
+dec_rc go;
 acc
   Cons($f346, $f347) -> dec_rc lst;
 let t : '_ = $f347 in
 let h : '_ = $f346 in
 let $t345 : '_ = alloc Cons(h, acc) in
 call_ptr go(t, $t345)
-  _ -> dec_rc go;
+  _ -> dec_rc lst;
+dec_rc go;
 dec_rc acc;
-dec_rc lst;
 panic("non-exhaustive pattern match")
 
 ## main
@@ -1147,9 +1157,9 @@ fn main(_cap_console : Cap(IO.Console)) : () =
   let pair : (String, String) = ("hello", "world") in
 let $t837 : String = let $t836 : Int = process_pairs(pair, 3, 0) in
 int_to_string($t836) in
-let $rc_22 : () = println($t837) in
+let $rc_27 : () = println($t837) in
 dec_rc $t837;
-$rc_22
+$rc_27
 
 ## process_pairs
 fn process_pairs(pair : (String, String), n : Int, acc : Int) : Int =
@@ -1171,7 +1181,7 @@ let x : String = $f1 in
 x
   _ -> dec_rc pair;
 panic("non-exhaustive pattern match") in
-let $rc_21 : Int = String.byte_size(a) in
+let $rc_26 : Int = String.byte_size(a) in
 dec_rc a;
-$rc_21
+$rc_26
 

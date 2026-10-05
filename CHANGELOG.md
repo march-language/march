@@ -19,6 +19,17 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`Recon`: a program's view of itself.** The new stdlib module answers, from
+  March code, the questions `forge observe` asks a node: `Recon.info` (one
+  actor's mailbox, counters, supervisor and names), `actors`, `proc_count`
+  and `proc_window` (the actors highest on mailbox depth, crashes or message
+  rate), `tree`, `node_stats`, `crashes` (kind, actor and restart number,
+  never the panic text), `epochs` and `scheduler_usage`. Every function takes
+  a `Cap(Actor.Introspect)`, and they work interpreted as well as compiled.
+- **`--dump-phases`/`MARCH_DUMP_TXT` now include a `tir-trmc` stage.** The
+  TIR is snapshotted right after `Trmc.transform_module`, before the first
+  existing checkpoint (`tir-mono`), so the tail-recursion-modulo-cons rewrite
+  can be read on its own instead of only through the mono stage that follows it.
 - **A read-only observe socket on every compiled program.** Set
   `MARCH_OBSERVE_SOCKET=<path>` (or just `MARCH_HOT_RELOAD_SOCKET`, which puts it
   at `<path>.observe`) and the program answers one-line requests with one line of
@@ -159,6 +170,32 @@ git log is authoritative for exact commits.
   before this change refuses the new update (and is refused by it), then
   redials under the new certificate when the old one expires, as a peer from
   before live replacement does.
+- **Topology now reports two roles that share one endpoint on a node.** Two roles
+  placed on one node that serve the same protocol role through the same offer
+  function want the same endpoint name, so the second could never be offered;
+  Topology retried it every placement tick without a word, and the role was
+  simply missing from `Topology.offered`. The conflict is now reported once
+  (naming the role holding the name), written to the node status file as a
+  `conflict <role> held-by <role>` line, and retried with backoff (or as soon as
+  the node's offers change) rather than every tick; the role is offered, with a
+  report, once the holder's offer closes. A refusal just after an offer on the
+  node closed (its name is still being released) is still retried quietly.
+- **Security: the control plane's TCP API no longer takes writes from anyone who can
+  reach it.** Any peer could append forged lines to a candidate's audit log
+  (`AUDIT_COPY`) and fill its disk with artifacts under made-up hashes (`CAS_PUT`, 64 MiB
+  a call, never removed). Now the candidates' own copies (`AUDIT_COPY`, `RELEASE_COPY`)
+  need the cluster's handshake (the cluster secret, or a certificate carrying
+  `Ctl.Control:offer`); `CAS_PUT` takes only a hash that a release signed by your deploy
+  key, `STAGE`d on the same connection, names; uploads no stored release adopts are
+  capped (`MARCH_CONTROL_CAS_PENDING_MAX_BYTES`) and removed after a grace period; the
+  audit log rotates past `MARCH_CONTROL_AUDIT_MAX_BYTES`; and a candidate serves at most
+  `MARCH_CONTROL_MAX_CONNS` connections, closing idle ones. Reads stay open. forge
+  stages its uploads itself. Candidates must be upgraded together: an older one's copies
+  are refused. See "Who may write to the control API" in the hot-reload guide.
+- **`MARCH_NO_UNBOX=1` is now part of the compilation cache key.** It classifies
+  every type Boxed and so changes the emitted code, but was not in the CAS key,
+  so an A/B run reused whichever variant was cached first. It now adds a
+  `nounbox` tag, as `MARCH_NO_INLINE_RC` and `MARCH_NO_HOF_SPEC` already did.
 - **A branch that returns a record's field no longer frees it (compiled).** In
   `"sig " ++ (if r.signature == "" do "-" else r.signature end)`, compiled code
   handed out `r.signature` without taking a reference, so the next read of the

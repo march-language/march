@@ -996,6 +996,19 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
           Some (v, List.fold_left (fun inner o -> Tir.ESeq (o, inner)) rest acc)
         else
           go (op :: acc) rest
+      (* [Drop] runs after Perceus and rewrites those prepended decs of
+         OTHER variables into deep-drop calls ([dec_rc cfg] becomes
+         [__drop$PoolConfig(cfg)]); it never rewrites the scrutinee's own dec
+         (Drop.rewrite's [is_scrut_dec]).  Skip them like the bare decs they
+         were, or the scrutinee's dec behind one compiles as a plain release
+         with no shared-path dups -- finding C1 again: depot's
+         Pool.handle_checkout `Cons(conn, rest)` arm, behind a dead [cfg]'s
+         drop, moved [conn] and [rest] out of the still-shared idle list, and
+         releasing the old pool state then freed the connection being handed
+         to the caller. *)
+      | Tir.ESeq ((Tir.EApp (f, [ Tir.AVar _ ]) as op), rest)
+        when Tir_names.is_drop_fn f.Tir.v_name ->
+        go (op :: acc) rest
       | _ -> None
     in
     go [] body

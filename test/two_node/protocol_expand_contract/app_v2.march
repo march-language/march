@@ -2,7 +2,7 @@
 -- node_a.march, where `choose by Shop` gains `later`. The scenario builds it
 -- twice: the EXPAND (--protocol-expand Order:later: Shop stays on version
 -- 1's fingerprint and its `choose_later` refuses to run) and the CONTRACT
--- (the plain build). The Shop asks which it is (`role_fingerprint`), so the
+-- (the plain build). The Shop asks which it is (`may_choose_later`), so the
 -- same source is right in both. See scenario.sh.
 mod ProtocolSplit do
   needs IO
@@ -30,19 +30,14 @@ mod ProtocolSplit do
 
   fn version() : Int do 2 end
 
-  -- What the Shop tells its Buyer it is: 2 in the expand, 3 in the contract.
   -- The Shop may choose `later` once it offers under this version's own
-  -- fingerprint (`role_fingerprint(Shop) == fingerprint()`): never in the
-  -- expand build, which pins it to version 1's. That test is written out in
-  -- `shop` rather than named: this version must add NO top-level fn. The
-  -- entry module's fns are hot-reload slots, numbered by sorted name, and the
-  -- scenario hot deploys by hand (no baseline manifest, so nothing flags a new
-  -- slot): a new fn shifts every later slot's id, and the patch's calls then
-  -- land on the wrong function (see
-  -- specs/progress/2026-10-02-two-node-protocol-expand-contract-slot-ids.md).
-  fn shop_phase() : Int do
-    if Order_Msg.role_fingerprint(Order_Msg.role_Shop()) == Order_Msg.fingerprint() do 3 else 2 end
+  -- fingerprint: never in the expand build, which pins it to version 1's.
+  fn may_choose_later() : Bool do
+    Order_Msg.role_fingerprint(Order_Msg.role_Shop()) == Order_Msg.fingerprint()
   end
+
+  -- What the Shop tells its Buyer it is: 2 in the expand, 3 in the contract.
+  fn shop_phase() : Int do if may_choose_later() do 3 else 2 end end
 
   -- ── the Shop (node-a): the chooser ────────────────────────────────────
 
@@ -50,7 +45,7 @@ mod ProtocolSplit do
     Order_Shop.recv_Item(s, st, fn (n, st1) ->
       sleep_ms(100)
       if n >= 4 do Order_Shop.close(s, Order_Shop.choose_done(s, st1, shop_phase()))
-      else if n == 2 && Order_Msg.role_fingerprint(Order_Msg.role_Shop()) == Order_Msg.fingerprint() do shop(s, Order_Shop.choose_later(s, st1, shop_phase()))
+      else if n == 2 && may_choose_later() do shop(s, Order_Shop.choose_later(s, st1, shop_phase()))
       else shop(s, Order_Shop.choose_more(s, st1, shop_phase())) end end)
   end
 

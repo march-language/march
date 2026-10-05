@@ -1,0 +1,43 @@
+-- Use-after-free guard: an owned aggregate must not be released in front of a
+-- tail call that BORROWS a value pointing into it through a pattern variable.
+--   match e.to do Cons(a, _) -> check(a.address, ..) end
+-- drop_agg_at_tails tracked only direct projections of the aggregate, so [e]
+-- (and the recipient list) was freed before [check] read [a.address].
+mod Main do
+  needs IO.Console
+
+  type Mail = { from : { name : String, address : String },
+                to : List({ name : String, address : String }),
+                subject : String }
+
+  pfn clean(s : String) : String do String.replace_all(s, "\n", "") end
+
+  pfn addr(a) do { name: clean(a.name), address: clean(a.address) } end
+
+  fn new() : Mail do { from: { name: "", address: "" }, to: [], subject: "" } end
+  fn to(m : Mail, a : { name : String, address : String }) : Mail do { m with to: List.append(m.to, [addr(a)]) } end
+  fn subject(m : Mail, s : String) : Mail do { m with subject: clean(s) } end
+
+  -- Recursive so the optimiser cannot inline it away: the bug needs a real
+  -- tail CALL that borrows the projection.
+  pfn check(got : String, want : String) : () do
+    if String.byte_size(want) > 1000 do check(got, String.slice(want, 1, 1000))
+    else println(if got == want do "ok" else "FAIL got [" ++ got ++ "]" end)
+    end
+  end
+
+  pfn first_to(_i : Int) : () do
+    let m = new()
+      |> to({ name: "", address: "u@x.com" })
+      |> subject("hi")
+    match m.to do
+      Cons(a, _) -> check(a.address, "u@x.com")
+      Nil        -> println("FAIL no recipient")
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    first_to(1)
+    first_to(2)
+  end
+end

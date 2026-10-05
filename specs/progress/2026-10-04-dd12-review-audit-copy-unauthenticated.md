@@ -1,5 +1,7 @@
 # [P2] DD step 12: AUDIT_COPY lets any unauthenticated peer forge audit-log entries
 
+**Status:** Fixed 2026-10-04: `AUDIT_COPY` (and `RELEASE_COPY`) now require the cluster handshake.
+
 **Review:** `specs/progress/2026-10-04-dd12-security-review.md`.
 
 ## What breaks
@@ -45,7 +47,7 @@ network) is exactly a peer that can reach the port.
     == audit log on disk (attacker-forged line) ==
     {"ts":0,"type":"release","leader":"ATTACKER","seq":999999,"result":"ok","why":"FORGED BY UNAUTH PEER"}
 
-## Suggested fix (not applied)
+## Suggested fix (as filed)
 
 Accept `AUDIT_COPY` only from an authenticated peer: require the
 `MARCH_CLUSTER_SECRET` (as cluster frames do) or a leader signature on the copied
@@ -53,3 +55,14 @@ block, and/or restrict the verb to connections from known candidate addresses.
 Audit entries should be integrity-protected end to end, not appendable by anyone
 who can open the port. See also the resource-exhaustion todo (same verb, no total
 size cap).
+
+## Fix
+
+`AUDIT_COPY` and `RELEASE_COPY` are candidate-only verbs: the server answers `AUTH`, both
+ends run the cluster link's handshake on the API connection (`ClusterNode.handshake`), the
+peer must hold the cluster secret or a certificate carrying `Ctl.Control:offer`, and a
+sealed digest frame binds the body to the handshake. An unauthenticated peer gets `ERR
+unauthenticated` and the candidate prints `control: refused an unauthenticated write`. The
+audit log is also rotated past `MARCH_CONTROL_AUDIT_MAX_BYTES`. The full design, the
+alternatives rejected and the tests are in the companion entry,
+`2026-10-04-dd12-review-control-api-resource-exhaustion.md`.
