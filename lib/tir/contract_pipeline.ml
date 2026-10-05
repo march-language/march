@@ -257,6 +257,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   let retaining = Alloc_contract.retaining_fns ~k_table ~decls tir in
   let contract_diags =
     Alloc_contract.check ~decls ~allocating ~retaining ~opt tir in
+  stamp "alloc-contract";
   { pre_opt; final = tir; vectorize_diags; contract_diags; allocating; retaining; k_table }
 
 (** The allocation contracts, judged without emitting anything: what `march

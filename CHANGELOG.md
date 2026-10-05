@@ -141,6 +141,15 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Faster `--compile` once whole-program optimisation is done.** Two lookups
+  that scanned every definition in the program (stdlib included) for each name
+  reference, one in the CAS dependency hashing and one in the allocation-contract
+  checks, now use a hash table or compute the name once. On
+  `examples/topology_app` at `--opt 2` that took ~7 s of CPU off every compile
+  that gets past optimisation: a comment-only edit (a cached-binary hit) went
+  from 11.2 s to 4.3 s and a one-function edit from 26.0 s to 18.4 s. Cache
+  keys are unchanged, so existing caches stay valid. `--timings` now reports
+  the two phases as `alloc-contract` and `cas-hash`.
 - **Compiled `Int` arithmetic normalises to 63 bits lazily, not after every
   operation.** `+ - *`, negation and `int_shl` leave their result in the full
   64-bit register and the reduction modulo 2^63 happens where the value is
