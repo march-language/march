@@ -1749,6 +1749,7 @@ let stdlib_only : (string * string) list ref =
       ("actor_pid_indices", "use `Actor.list(cap)` (see `Actor.introspect`)");
       ("observe_query", "use the `Recon` module (see `Actor.introspect`)");
       ("observe_count_send", "remote sends are counted by `Node.send` itself");
+      ("actor_inspect", "use `Actor.inspect_state(d, pid, timeout_ms)` (see `Actor.debug`)");
       ("actor_whereis", "use `Actor.whereis(cap, name)` (see `Actor.introspect`)");
       ("actor_registered", "use `Actor.registered(cap)` (see `Actor.introspect`)");
       (* DD step 6 (plan II.4.4): an epoch hold keeps its proc on an old code
