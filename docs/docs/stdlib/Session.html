@@ -2328,6 +2328,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#type-RunError"><span class="sb-kind" style="color:var(--ty)">T</span>RunError</a>
 <a class="sl" href="SessionNode.html#type-OfferCount"><span class="sb-kind" style="color:var(--ty)">T</span>OfferCount</a>
 <a class="sl" href="SessionNode.html#type-Offer"><span class="sb-kind" style="color:var(--ty)">T</span>Offer</a>
+<a class="sl" href="SessionNode.html#type-ApWait"><span class="sb-kind" style="color:var(--ty)">T</span>ApWait</a>
 <a class="sl" href="SessionNode.html#type-ApMix"><span class="sb-kind" style="color:var(--ty)">T</span>ApMix</a>
 <a class="sl" href="SessionNode.html#fn-accept_from"><span class="sb-kind" style="color:var(--fn)">F</span>accept_from</a>
 <a class="sl" href="SessionNode.html#fn-accepts"><span class="sb-kind" style="color:var(--fn)">F</span>accepts</a>
@@ -2819,6 +2820,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Uri.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Vault.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Vault.html">Vault</a></div><div class="sb-sub"><a class="sl" href="Vault.html#fn-all"><span class="sb-kind" style="color:var(--fn)">F</span>all</a>
 <a class="sl" href="Vault.html#fn-clear"><span class="sb-kind" style="color:var(--fn)">F</span>clear</a>
+<a class="sl" href="Vault.html#fn-close"><span class="sb-kind" style="color:var(--fn)">F</span>close</a>
 <a class="sl" href="Vault.html#fn-delete"><span class="sb-kind" style="color:var(--fn)">F</span>delete</a>
 <a class="sl" href="Vault.html#fn-drop"><span class="sb-kind" style="color:var(--fn)">F</span>drop</a>
 <a class="sl" href="Vault.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
@@ -2826,6 +2828,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Vault.html#fn-has"><span class="sb-kind" style="color:var(--fn)">F</span>has</a>
 <a class="sl" href="Vault.html#fn-incr"><span class="sb-kind" style="color:var(--fn)">F</span>incr</a>
 <a class="sl" href="Vault.html#fn-keys"><span class="sb-kind" style="color:var(--fn)">F</span>keys</a>
+<a class="sl" href="Vault.html#fn-live_tables"><span class="sb-kind" style="color:var(--fn)">F</span>live_tables</a>
 <a class="sl" href="Vault.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
 <a class="sl" href="Vault.html#fn-ns_drop"><span class="sb-kind" style="color:var(--fn)">F</span>ns_drop</a>
 <a class="sl" href="Vault.html#fn-ns_get"><span class="sb-kind" style="color:var(--fn)">F</span>ns_get</a>
@@ -2923,7 +2926,10 @@ from the actor's own turn, so its host routes deliveries instead of
 draining: `take(())` returns the next delivery an endpoint is waiting for,
 as `Some((to, from, msg))`, with that endpoint's continuation forgotten, or
 `None` when nothing queued can be taken. `take` runs no failure handling;
-`drain` does.</code></pre></div></div>
+`drain` does.
+
+`close(())` retires the transport once its session is over; its tables
+stay registered for the life of the process otherwise.</code></pre></div></div>
 <div class="item" id="fn-in_process_with"><div class="ih"><span class="badge bfn">fn</span><span class="name">in_process_with</span><span class="sig">in_process_with(trace : String -&gt; ()) : <a href="#type-InProcess">InProcess</a></span><a class="anchor-link" href="#fn-in_process_with" title="Link">#</a></div><div class="ib"><p><code>in_process()</code>, reporting what the transport itself does to [trace], one line per event: <code>close &lt;ep&gt;</code>, <code>cancel &lt;ep&gt;: &lt;cause&gt;</code>, <code>crash &lt;role&gt;: &lt;cause&gt;</code>, <code>crash branch &lt;ep&gt;: role &lt;role&gt;: &lt;cause&gt;</code>, <code>dropped &lt;from&gt; -&gt; &lt;to&gt;</code>, and <code>stalled: &lt;n&gt; queued</code> when a <code>drain</code> stops with deliveries no endpoint is waiting for. A test asserts on the failure paths through it.</p></div></div>
 <div class="item" id="fn-leave"><div class="ih"><span class="badge bfn">fn</span><span class="name">leave</span><span class="sig">leave(c : Cap(Session.Live), ep : Int, why : String) : ()</span><a class="anchor-link" href="#fn-leave" title="Link">#</a></div><div class="ib"><p>Leave the session from endpoint <code>ep</code> on purpose, with a reason the peers are told.</p></div></div>
 <div class="item" id="fn-on_cancel"><div class="ih"><span class="badge bfn">fn</span><span class="name">on_cancel</span><span class="sig">on_cancel(c : Cap(Session.Live), ep : Int, handler : Int -&gt; String -&gt; Int -&gt; Int) : Int</span><a class="anchor-link" href="#fn-on_cancel" title="Link">#</a></div><div class="ib"><p>Install <code>handler</code> as the cancel handler for the continuation that the next <code>suspend</code> on <code>ep</code> installs, and return <code>ep</code>. It runs as <code>handler(role, cause, ep)</code> if the role that continuation waits on can send nothing more and nothing from it is queued. The generated <code>recv_…_or</code> and <code>offer_…_or</code> call this.</p></div></div>
