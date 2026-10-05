@@ -1207,6 +1207,10 @@ static void vault_data_free(void *p) {
     atomic_fetch_sub_explicit(&vault_live_tables, 1, memory_order_relaxed);
 }
 
+/* The handle's in-flight stripes start here; see vault_enter. */
+#define VAULT_INFLIGHT_OFF 64
+#define VAULT_HANDLE_SIZE  (VAULT_INFLIGHT_OFF + 64 * VAULT_RD_STRIPES)
+
 /* Create a new vault_data wrapped in a March heap handle. */
 static void *vault_new_handle(void) {
     vault_data *vd = aligned_alloc(_Alignof(vault_data), sizeof(vault_data));
@@ -1218,18 +1222,19 @@ static void *vault_new_handle(void) {
     for (int i = 0; i < VAULT_WR_SHARDS; i++)
         pthread_mutex_init(&vd->shards[i].lock.wmutex, NULL);
     atomic_fetch_add_explicit(&vault_live_tables, 1, memory_order_relaxed);
-    /* A resource cell, as RingBuf's (march_runtime.c), plus a word:
-     *   [rc@0][tag=MARCH_RESOURCE_TAG@8][pad@12][vd@16][dtor@24][type_id@32][inflight@40]
+    /* A resource cell, as RingBuf's (march_runtime.c), plus striped
+     * in-flight counters:
+     *   [rc@0][tag=MARCH_RESOURCE_TAG@8][pad@12][vd@16][dtor@24][type_id@32]
+     *   [unused@40..64][inflight stripe i @ 64 + 64*i, i < VAULT_RD_STRIPES]
      * so an unclosed table is freed with its last handle (a closed one at
      * the close; see vault_enter).  Every Vault builtin
      * BORROWS the handle (lib/tir/borrow.ml), so its count is the program's
      * references plus the registry's one while the name is registered. */
-    void *handle = march_alloc(48);
+    void *handle = march_alloc(VAULT_HANDLE_SIZE);
+    memset((char *)handle + 16, 0, VAULT_HANDLE_SIZE - 16);
     ((march_hdr *)handle)->tag = MARCH_RESOURCE_TAG;
     *(void **)((char *)handle + 16) = vd;
     *(void (**)(void *))((char *)handle + 24) = vault_data_free;
-    *(int64_t *)((char *)handle + 32) = 0;
-    *(int64_t *)((char *)handle + 40) = 0; /* in-flight operations */
     return handle;
 }
 
@@ -1238,26 +1243,38 @@ int64_t march_vault_live_tables(void) {
     return atomic_load_explicit(&vault_live_tables, memory_order_relaxed);
 }
 
-/* The handle's table slot (+16) and in-flight count (+40).  Every public
- * operation brackets its use of the table with vault_enter / vault_leave, so
- * march_vault_close can free a table under a live handle: it swaps the slot
- * to VAULT_CLOSED, then waits out the operations already inside.  Both sides
- * are seq_cst (an entering op increments, then loads the slot; close swaps
- * the slot, then loads the count), so an op either sees VAULT_CLOSED or is
- * counted.  The count lives on the HANDLE, which the caller keeps alive for
- * the whole call, never on the table being freed. */
+/* The handle's table slot (+16) and in-flight counts (one per stripe, from
+ * +64).  Every public operation brackets its use of the table with
+ * vault_enter / vault_leave, so march_vault_close can free a table under a
+ * live handle: it swaps the slot to VAULT_CLOSED, then waits out the
+ * operations already inside.  Both sides are seq_cst (an entering op
+ * increments, then loads the slot; close swaps the slot, then loads every
+ * count), so an op either sees VAULT_CLOSED or is counted.  The counts live
+ * on the HANDLE, which the caller keeps alive for the whole call, never on
+ * the table being freed.
+ *
+ * STRIPED, as the shard read locks are (vault_rwlock_t): one counter per
+ * VAULT_RD_STRIPES stripe, each on its own cache line, chosen by
+ * vault_stripe_of_self.  A single shared counter put an RMW on ONE cache
+ * line into every Vault operation, which undid the striped read lock:
+ * four threads reading distinct keys went from ~2x a solo run to ~6x
+ * (test/test_vault_distinct_keys_scale.c).  vault_leave takes the stripe
+ * vault_enter returned (INVARIANT 1 above), so the decrement lands where the
+ * increment did even if the caller migrated. */
 static inline _Atomic(vault_data *) *vault_slot(void *handle) {
     return (_Atomic(vault_data *) *)((char *)handle + 16);
 }
-static inline _Atomic int64_t *vault_inflight(void *handle) {
-    return (_Atomic int64_t *)((char *)handle + 40);
+static inline _Atomic int64_t *vault_inflight(void *handle, unsigned i) {
+    return (_Atomic int64_t *)((char *)handle + VAULT_INFLIGHT_OFF + 64 * i);
 }
-static inline vault_data *vault_enter(void *handle) {
-    atomic_fetch_add_explicit(vault_inflight(handle), 1, memory_order_seq_cst);
+static inline vault_data *vault_enter(void *handle, unsigned *stripe) {
+    unsigned i = vault_stripe_of_self();
+    *stripe = i;
+    atomic_fetch_add_explicit(vault_inflight(handle, i), 1, memory_order_seq_cst);
     return atomic_load_explicit(vault_slot(handle), memory_order_seq_cst);
 }
-static inline void vault_leave(void *handle) {
-    atomic_fetch_sub_explicit(vault_inflight(handle), 1, memory_order_release);
+static inline void vault_leave(void *handle, unsigned stripe) {
+    atomic_fetch_sub_explicit(vault_inflight(handle, stripe), 1, memory_order_release);
 }
 
 /* Find a live entry in vd for the given C string key. */
@@ -1838,90 +1855,90 @@ static void * vault_keys_in(vault_data *vd) {
 /* ── Public Vault entry points: the in-flight bracket ───────────────── */
 
 void * march_vault_set(void *handle, void *key_val, void *value) {
-    vault_data *vd = vault_enter(handle);
-    if (vd == VAULT_CLOSED) { vault_leave(handle); return NULL; }
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return NULL; }
     void * r = vault_set_in(vd, key_val, value);
-    vault_leave(handle);
+    vault_leave(handle, st);
     return r;
 }
 
 void * march_vault_set_ttl(void *handle, void *key_val, void *value, int64_t ttl_secs) {
-    vault_data *vd = vault_enter(handle);
-    if (vd == VAULT_CLOSED) { vault_leave(handle); return NULL; }
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return NULL; }
     void * r = vault_set_ttl_in(vd, key_val, value, ttl_secs);
-    vault_leave(handle);
+    vault_leave(handle, st);
     return r;
 }
 
 int64_t march_vault_put_new(void *handle, void *key_val, void *value, int64_t ttl_secs) {
-    vault_data *vd = vault_enter(handle);
-    if (vd == VAULT_CLOSED) { vault_leave(handle); return 0; }
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return 0; }
     int64_t r = vault_put_new_in(vd, key_val, value, ttl_secs);
-    vault_leave(handle);
+    vault_leave(handle, st);
     return r;
 }
 
 int64_t march_vault_incr(void *handle, void *key_val, int64_t delta) {
-    vault_data *vd = vault_enter(handle);
-    if (vd == VAULT_CLOSED) { vault_leave(handle); return delta; }
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return delta; }
     int64_t r = vault_incr_in(vd, key_val, delta);
-    vault_leave(handle);
+    vault_leave(handle, st);
     return r;
 }
 
 void * march_vault_push_capped(void *handle, void *key_val, void *value, int64_t max_n) {
-    vault_data *vd = vault_enter(handle);
-    if (vd == VAULT_CLOSED) { vault_leave(handle); return NULL; }
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return NULL; }
     void * r = vault_push_capped_in(vd, key_val, value, max_n);
-    vault_leave(handle);
+    vault_leave(handle, st);
     return r;
 }
 
 void * march_vault_get(void *handle, void *key_val) {
-    vault_data *vd = vault_enter(handle);
-    if (vd == VAULT_CLOSED) { vault_leave(handle); return make_none(); }
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return make_none(); }
     void * r = vault_get_in(vd, key_val);
-    vault_leave(handle);
+    vault_leave(handle, st);
     return r;
 }
 
 void * march_vault_drop(void *handle, void *key_val) {
-    vault_data *vd = vault_enter(handle);
-    if (vd == VAULT_CLOSED) { vault_leave(handle); return NULL; }
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return NULL; }
     void * r = vault_drop_in(vd, key_val);
-    vault_leave(handle);
+    vault_leave(handle, st);
     return r;
 }
 
 void * march_vault_reap(void *handle, void *key_val) {
-    vault_data *vd = vault_enter(handle);
-    if (vd == VAULT_CLOSED) { vault_leave(handle); return march_alloc(16); /* Nil */ }
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return march_alloc(16); /* Nil */ }
     void * r = vault_reap_in(vd, key_val);
-    vault_leave(handle);
+    vault_leave(handle, st);
     return r;
 }
 
 int64_t march_vault_size(void *handle) {
-    vault_data *vd = vault_enter(handle);
-    if (vd == VAULT_CLOSED) { vault_leave(handle); return 0; }
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return 0; }
     int64_t r = vault_size_in(vd);
-    vault_leave(handle);
+    vault_leave(handle, st);
     return r;
 }
 
 void * march_vault_keys(void *handle) {
-    vault_data *vd = vault_enter(handle);
-    if (vd == VAULT_CLOSED) { vault_leave(handle); return march_alloc(16); /* Nil */ }
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return march_alloc(16); /* Nil */ }
     void * r = vault_keys_in(vd);
-    vault_leave(handle);
+    vault_leave(handle, st);
     return r;
 }
 
 void *march_vault_close(void *handle) {
-    vault_data *vd = vault_enter(handle);
-    if (vd == VAULT_CLOSED) { vault_leave(handle); return march_alloc(16); /* Nil */ }
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return march_alloc(16); /* Nil */ }
     void *list = vault_close_in(vd, handle);
-    vault_leave(handle);
+    vault_leave(handle, st);
     /* Free the table now, not with its last handle: a handle can outlive its
      * owner (a session's Party is still held by closures nobody can release
      * yet -- specs/todos/2026-10-04-dropped-closure-leaks-its-captures.md),
@@ -1932,8 +1949,9 @@ void *march_vault_close(void *handle) {
     vault_data *old = atomic_exchange_explicit(vault_slot(handle), VAULT_CLOSED,
                                                memory_order_seq_cst);
     if (old != VAULT_CLOSED) {
-        while (atomic_load_explicit(vault_inflight(handle), memory_order_seq_cst) != 0)
-            sched_yield();
+        for (unsigned i = 0; i < VAULT_RD_STRIPES; i++)
+            while (atomic_load_explicit(vault_inflight(handle, i), memory_order_seq_cst) != 0)
+                sched_yield();
         vault_data_free(old);
     }
     return list;

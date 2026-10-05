@@ -36,7 +36,13 @@ the handle is pointed at a closed sentinel and the table freed after the
 operations already inside it drain. Every public Vault entry point brackets its
 use of the table with an in-flight count on the HANDLE (`vault_enter` /
 `vault_leave`, seq_cst on both sides), so a task that outlives its owner finds
-an empty table that keeps nothing, never freed memory. An unclosed table is
+an empty table that keeps nothing, never freed memory. The count is STRIPED
+like the shard read locks (one counter per `VAULT_RD_STRIPES` stripe, each on
+its own cache line, the handle grown to 1088 bytes): a first cut with one
+shared counter put an RMW on one cache line into every read, and four threads
+reading distinct keys went from ~2x a solo run to ~6x
+(`test/test_vault_distinct_keys_scale.c`, red in the macOS conformance job);
+striped, it is back at main's ~2x. An unclosed table is
 freed with its last handle (the handle is a resource cell now). `Vault.live_tables()`
 (builtin `vault_live_tables`) counts tables held; the interpreter implements
 all three (its GC owns the values, so its reap is always empty).
