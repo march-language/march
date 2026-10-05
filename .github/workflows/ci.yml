@@ -171,9 +171,9 @@ jobs:
       matrix:
         shard: [1, 2]
     runs-on: ubuntu-24.04
-    # Must stay above the scenarios step's 50 plus setup (12), build (10) and
-    # the soak (5).
-    timeout-minutes: 80
+    # Must stay above the scenarios step's 50 plus setup (12), build (10),
+    # the soak (5) and the precompile (25).
+    timeout-minutes: 105
     steps:
       - uses: actions/checkout@v4
 
@@ -221,9 +221,27 @@ jobs:
           done
           echo "node_discovery: 200/200 runs matched the golden"
 
+      # Compiling is most of a scenario's time, and the loop below is serial.
+      # This compiles every node of the shard 4 at a time first (one per
+      # runner vCPU); each scenario then copies its binaries instead
+      # (TWO_NODE_PREBUILT). It is done before any scenario starts, so no
+      # deadline ever races a compile. The control_* scenarios and any node
+      # with COMPILE_FLAGS_<x> (keys generated at run time) are not
+      # prebuilt; they still compile in their scenario. A node that fails
+      # here is not an error: its scenario compiles it again and reports it.
+      - name: Precompile two-node nodes (${{ matrix.shard }}/2)
+        timeout-minutes: 25
+        run: |
+          eval $(opam env)
+          list=$(scripts/two-node.sh --list ${{ matrix.shard }}/2) || exit 1
+          pre="$RUNNER_TEMP/two-node-prebuilt"
+          # shellcheck disable=SC2086 # one word per scenario
+          TWO_NODE_JOBS=4 scripts/two-node.sh --precompile "$pre" $list
+          echo "TWO_NODE_PREBUILT=$pre" >> "$GITHUB_ENV"
+
       # Two real OS processes, a fault applied from outside (SIGKILL + restart
       # with a new creation), per-node goldens. 10-200 s per scenario, almost
-      # all of it compiling the nodes. Each scenario
+      # all of it compiling the nodes (now mostly done by the step above). Each scenario
       # is test/two_node/<name>/; see specs/progress/2026-09-14-two-node-failure-semantics-harness.md.
       - name: Two-node scenarios (${{ matrix.shard }}/2)
         # 71 scenarios as of 2026-10-02: ~31 min per shard on a slow runner
