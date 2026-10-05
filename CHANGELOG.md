@@ -193,6 +193,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A restarted cluster node's offers are visible again.** After a rolling restart, a node
+  that registered its access points anew could have them erased on every node: its peers
+  still held the bindings from its previous run under a newer clock, and retiring those
+  stale bindings removed the live ones too. Initiators were then refused with "no access
+  point is registered" until every node was restarted at once.
+
 - **Dropping a value of a stdlib type that shares its short name with another (`Value`,
   `State`, `Level`, `Event`, `Error`, `Mode`) now frees what it holds.** Such a value was freed
   shallowly, so its contents leaked: a decoded `Msgpack.Bin` lost its whole byte list. Every

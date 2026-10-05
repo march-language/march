@@ -584,6 +584,48 @@ mod TestClusterNode do
       end
     end
 
+    -- The lab's "no access point is registered" after a rolling restart
+    -- (specs/progress/2026-10-05-lab-restarted-node-offers-invisible.md): the
+    -- restarted node registers again from an empty replica, so its clock is
+    -- older than the one its peers hold for its previous life. The merge keeps
+    -- the old binding, and retiring it as stale used to tombstone the name the
+    -- node had just registered again: hidden on every node, for good.
+    test "a restart re-registers a name it holds again rather than retiring it" do
+      let me_id = ClusterNode.node_id_of("a")
+      let older = VectorClock.increment(VectorClock.increment(VectorClock.increment(VectorClock.new(), me_id), me_id), me_id)
+      let old = GlobalRegistry.register_at(GlobalRegistry.empty(), "ap", me_id, 1, 9, older)
+      let frame = NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(old), GlobalRegistry.all_entries(old))
+      let st = ClusterNode.core_new(ClusterNode.config("a", 7000, "", Nil, "s", 2), 1)
+      let b = ClusterNode.node_id_of("b")
+      match ClusterNode.core_linked(st, b, "b", "127.0.0.1:7001", 1, 10, 11, b, 99) do
+        (st1, _) ->
+          match ClusterNode.core_register(st1, "ap", 42, 0) do
+            (st2, _) ->
+              match ClusterNode.core_frame(st2, b, 6, frame) do
+                (st3, effs) ->
+                  assert (lookup_node(st3, "ap") == me_id)
+                  assert (lookup_pid(st3, "ap") == 42)
+                  match GlobalRegistry.entry(st3.reg, "ap") do
+                    Some(e) -> assert (e.present && e.creation == 2)
+                    None -> assert false
+                  end
+                  assert (List.length(sends_to(effs, b)) >= 1)
+                  -- and the peer, merging what we push, sees the new binding
+                  let pb = ClusterNode.core_new(ClusterNode.config("b", 7001, "", Nil, "s", 1), 1)
+                  match ClusterNode.core_linked(pb, me_id, "a", "127.0.0.1:7000", 2, 10, 11, me_id, 99) do
+                    (pb1, _) ->
+                      match ClusterNode.core_frame(pb1, me_id, 6, frame) do
+                        (pb2, _) ->
+                          match ClusterNode.core_frame(pb2, me_id, 6, reg_frame(st3)) do
+                            (pb3, _) -> assert (lookup_pid(pb3, "ap") == 42)
+                          end
+                      end
+                  end
+              end
+          end
+      end
+    end
+
     test "unregister leaves another holder's binding alone" do
       match linked_ab() do
         (b, st, _) ->
