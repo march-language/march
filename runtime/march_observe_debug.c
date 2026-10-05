@@ -106,9 +106,12 @@ static const char *admit(const char *verb, const char *args, const char *allowed
     const char *rest = sp ? sp + 1 : "";
     while (*rest == ' ') rest++;
 
+    /* strtok_r, not strtok: up to MARCH_OBSERVE_MAX_CONNS connection threads
+     * parse requests at once. */
     char buf[MARCH_OBSERVE_LINE_MAX + 1];
     snprintf(buf, sizeof buf, "%s", rest);
-    for (char *tok = strtok(buf, " "); tok; tok = strtok(NULL, " ")) {
+    char *save = NULL;
+    for (char *tok = strtok_r(buf, " ", &save); tok; tok = strtok_r(NULL, " ", &save)) {
         char *colon = strchr(tok, ':');
         if (!colon) return "bad_args";
         *colon = '\0';

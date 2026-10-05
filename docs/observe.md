@@ -426,7 +426,9 @@ field that holds functions. When the actor cannot answer, `state` is `null` and
 `error` says why:
 
 - `dead`: the pid is not running.
-- `timeout`: the actor did not answer within `timeout_ms` (at most 10000).
+- `timeout`: the actor did not answer within `timeout_ms` (the node allows at
+  most 10000; `forge observe --timeout-ms` at most 8000, since forge waits 10 s
+  for any reply).
   An actor is asked between messages, so one stuck in a long handler or a
   nested `receive` cannot answer.
 - `render failed: …`: a field's `Show` panicked. The actor keeps running.

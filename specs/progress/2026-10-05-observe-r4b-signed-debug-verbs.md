@@ -105,6 +105,16 @@
   built with a `forge hot-reload keygen` key, and a different key's
   `bad_signature` explanation.
 
+## Review fixes
+
+- `admit()` tokenised arguments with `strtok`, which is not thread-safe, on
+  connection threads that run concurrently. Two simultaneous requests could
+  parse each other's pid or count after the signature check. Now
+  `strtok_r`.
+- forge's `--timeout-ms` is capped at 8000. forge reads replies with a 10 s
+  socket timeout, so a request at the node's 10000 ms maximum would end in a
+  socket error instead of the node's `timeout` answer.
+
 ## Deviations from the plan
 
 1. **`MESSAGES` is not here.** Rendering a stuck actor's queue safely needs a

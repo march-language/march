@@ -1454,7 +1454,8 @@ let observe_cmd =
   in
   let timeout_ms =
     Arg.(value & opt int 1000 & info ["timeout-ms"] ~docv:"MS"
-           ~doc:"With $(b,--state): how long the actor has to answer (default 1000, max 10000).")
+           ~doc:"With $(b,--state): how long the actor has to answer (default 1000, max 8000; \
+                 forge waits at most 10 s for the reply).")
   in
   let run words sections json socket env state crashes_full n timeout_ms =
     let debug = match state, crashes_full with

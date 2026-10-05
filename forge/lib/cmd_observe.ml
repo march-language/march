@@ -39,9 +39,19 @@ let print_reply ~json (reply : Yojson.Safe.t) =
     key, so it is built here rather than taken from the positional words. *)
 type debug = No_debug | State of { pid : int; timeout_ms : int } | Crashes_full of int option
 
+(** The longest [--state --timeout-ms] forge allows: the client reads the
+    reply with a 10 s socket timeout ([Remote.connect_with_timeout]), so a
+    node waiting its own maximum of 10 s would answer just after forge gave
+    up, and the user would see a socket error instead of ["timeout"]. *)
+let max_state_timeout_ms = 8000
+
 let debug_request (d : debug) : (string option, string) result =
   match d with
   | No_debug -> Ok None
+  | State { timeout_ms; _ } when timeout_ms < 0 || timeout_ms > max_state_timeout_ms ->
+    Error (Printf.sprintf
+             "observe: --timeout-ms must be between 0 and %d (forge waits at most 10 s for a reply)"
+             max_state_timeout_ms)
   | State _ | Crashes_full _ ->
     match Cmd_hot_reload.read_sk_raw () with
     | Error m -> Error ("observe: " ^ m)
