@@ -141,6 +141,13 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **A call to an unknown function is now a compile error, not a link error.**
+  When native code generation met a direct call to a name that is neither a
+  function in the program, an extern, nor a runtime builtin, it used to emit a
+  forward `declare` and leave the failure to the linker (or link the call to an
+  unrelated C symbol of the same name). It now stops with
+  ``error: `foo` (called from `bar`) is not a function in scope and not a
+  runtime builtin`` and exits 1.
 - **Compiled `Int` arithmetic normalises to 63 bits lazily, not after every
   operation.** `+ - *`, negation and `int_shl` leave their result in the full
   64-bit register and the reduction modulo 2^63 happens where the value is
