@@ -53,3 +53,18 @@ two parties.
 
 `LAB_AUTH=certs scripts/lab/run.sh deploy`: the scenario's "every started session ends"
 check fails.
+
+## Not reproduced on one machine (2026-10-05)
+
+`test/two_node/cert_order` runs the lab's `Order` protocol, its certificate layout
+(`forge host init`'s: roles only, no raw_send; both work roles on each work node) and
+its hosting (Stock offered on node-b and node-c, Ledger hosted in an actor on node-c
+only), three rounds of four concurrent sessions. It fails unless some session put Stock
+on node-b, away from the Ledger: 6 of 12 did, and all 12 finished. Simpler variants
+(three-role ring, offered or hosted third role, sequential or concurrent) passed too.
+So certificate mode plus the cross-node offer-to-offer edge is not enough by itself.
+Still unexercised: separate hosts under load (the lab's load average was 5-13), the
+`[control]` wiring, and long runs (the shared-secret stall came after ~90 sessions).
+That points at a timing race on the delivery path rather than a certificate check.
+The lab runs before the colliding-type drop fix leaked ~1 object per message byte;
+re-run the lab soak with this branch before digging further.

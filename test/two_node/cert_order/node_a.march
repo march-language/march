@@ -1,0 +1,102 @@
+-- Scenario "cert_order": node-a initiates role A, six sessions in a row; see
+-- scenario.sh.
+mod CertOrderA do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  -- The multi-host lab's protocol (examples/lab_app), less the role grants.
+  @[endpoints]
+  protocol Order do
+    loop do
+      want: Shop -> Stock : Int
+      choose by Stock:
+        have -> Stock -> Shop : String
+                book: Stock -> Ledger : Int
+                booked: Ledger -> Shop : String
+        out  -> Stock -> Shop : String
+                skip: Stock -> Ledger : Int
+                stop
+      end
+    end
+  end
+
+  -- Certificate mode, from the files scenario.sh made with `forge cluster`.
+  pfn config(me : String, port_var : String, seeds : String) : ClusterNode.CnConfig do
+    let pki = Env.require("PKI")
+    Process.set_env("MARCH_NODE_NAME", me)
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int(port_var)))
+    Process.set_env("MARCH_CLUSTER_NODES", seeds)
+    Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me ++ ".cert")
+    Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me ++ ".key")
+    Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
+    match ClusterNode.config_from_env() do
+      Ok(x) -> x
+      Err(e) -> panic(e)
+    end
+  end
+
+  pfn shop(s : Cap(Session.Live), st : Order_Shop.Entry, n : Int) : Order_Shop.Yield do
+    let st1 = Order_Shop.send_Want(s, st, n)
+    Order_Shop.offer_have_out(s, st1,
+      fn (_v, st2) -> Order_Shop.recv_Booked(s, st2, fn (_b, st3) -> shop(s, st3, n + 1)),
+      fn (_v, st2) -> Order_Shop.close(s, st2))
+  end
+
+  -- Until both offers are visible a session is refused; retry those.
+  pfn attempt(c : Cap(IO), h : Cap(ClusterNode.Live), left : Int) : () do
+    match Order_Run.initiate_Shop(c, h, fn (s, st) -> shop(s, st, 1)) do
+      Ok(_) -> ()
+      Err(e) ->
+        if left <= 0 do panic("node-a: " ++ Order_Run.error_message(e)) else
+          sleep_ms(500)
+          attempt(c, h, left - 500)
+        end
+    end
+  end
+
+  -- Three rounds of four sessions at once; each round must end within 60 s.
+  pfn round(c : Cap(IO), h : Cap(ClusterNode.Live), done : Vault(Int), r : Int) : () do
+    if r > 3 do () else
+      let _ = List.map(List.range(0, 4), fn _ ->
+        task_spawn(fn _ -> do
+          attempt(c, h, 30000)
+          let _ = Vault.incr(done, "n", 1)
+          0
+        end))
+      if wait_done(done, r * 4, 60000) do () else
+        panic("node-a: round " ++ int_to_string(r) ++ " stalled, "
+              ++ int_to_string(Vault.get_or(done, "n", 0)) ++ " sessions done in all")
+      end
+      println("Client: round " ++ int_to_string(r) ++ " done")
+      round(c, h, done, r + 1)
+    end
+  end
+
+  pfn wait_done(done : Vault(Int), want : Int, left : Int) : Bool do
+    if Vault.get_or(done, "n", 0) >= want do true
+    else if left <= 0 do false else
+      sleep_ms(50)
+      wait_done(done, want, left - 50)
+    end end
+  end
+
+  fn main(c : Cap(IO)) do
+    match ClusterNode.start(c, config("node-a", "MARCH_PORT_A", "")) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-a: up")
+        if ClusterNode.await_members(h, 2, 120000) do () else panic("node-a: the offers never joined") end
+        round(c, h, Vault.new("cert_order_done"), 1)
+        ClusterNode.stop(h)
+    end
+  end
+end
