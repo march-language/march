@@ -2662,6 +2662,39 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/unit_to_string.expected interp_unit_to_string.out)))
+
+; Recon (stdlib/recon.march, R3 of the observe plan) on both backends: the
+; same program compiled and interpreted must print the same lines. Exercises
+; the observe_query builtin's two implementations (runtime/
+; march_observe_snapshot.c, lib/eval/eval_observe.ml) through every Recon
+; function.
+(rule
+ (targets native_recon_basic native_recon_basic.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/recon_basic.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_recon_basic native/recon_basic.march)
+   (with-stdout-to native_recon_basic.out (system "./native_recon_basic")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/recon_basic.expected native_recon_basic.out)))
+
+(rule
+ (targets interp_recon_basic.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/recon_basic.march))
+ (action
+  (with-stdout-to interp_recon_basic.out
+    (run %{exe:../bin/main.exe} native/recon_basic.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/recon_basic.expected interp_recon_basic.out)))
 ; ── Leak guard: compiled actors leaked every received message, every state
 ; record a handler returned and the Some(()) of a statement `send`; a nominal
 ; record read only through its fields leaked with every heap field. Red before
@@ -11749,6 +11782,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff session/topology_placement.expected topology_placement.out)))
+
+; ── Topology: two roles sharing one endpoint name on a node. The second's
+; ── AlreadyOffered is reported once and in the status text, retried with
+; ── backoff (not silently every tick), and offered once the holder closes.
+(rule
+ (targets topology_conflict_bin topology_conflict.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib) (source_tree ../runtime)
+       (file session/topology_conflict.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o topology_conflict_bin session/topology_conflict.march)
+   (with-stdout-to topology_conflict.out
+    (system "MARCH_PLACEMENT_TICK_MS=600000 MARCH_PLACEMENT_SETTLE_MS=600000 ./topology_conflict_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/topology_conflict.expected topology_conflict.out)))
 
 ; ── Aggregate drop: boxed Float / niche Option / erased fields (2026-10-02) ──
 ; A dying tuple, List(Float) cell, Option-holding tuple, and a frame tuple

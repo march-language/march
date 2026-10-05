@@ -1,6 +1,7 @@
 # A supervisor compiles and runs under `--hot-reload`
 
-Landed 2026-10-02. Found on origin/main 88397fbdb: any program with an actor
+Landed 2026-10-02 (#764, merged 2026-10-03 as 7971248fd; it closes the P1 todo
+`2026-10-02-supervise-block-fails-to-compile-with-hot-reload.md`, removed 2026-10-04). Found on origin/main 88397fbdb: any program with an actor
 that declares a `supervise do ... end` block failed to compile with
 `--hot-reload <Prefix>`:
 

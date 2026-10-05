@@ -366,6 +366,8 @@ let extern_borrow_table : (string * bool list) list = [
      of a LiveProcess is spawn_async, which returns it fresh and owned.
      specs/progress/2026-09-29-process-spawn-async-leaks-live-process.md ── *)
   ("process_env",         [true]);
+  (* observe_query only reads its request line (runtime/march_observe_snapshot.c). *)
+  ("observe_query",       [true]);
   ("process_set_env",     [true; true]);
   ("process_spawn_sync",  [true; true]);
   ("process_spawn_lines", [true; true]);

@@ -22,6 +22,11 @@ left open, each small:
   two machines are not excluded (a lease comes with step 12).
 - **CAS after compaction.** Old patch artifacts stay in the host's CAS; `COMPACT`
   reports their bytes. Remove artifacts no persisted entry names.
+  (Partly done 2026-10-04: a control-plane candidate removes artifacts its control API
+  stored that no stored release adopted and no `<cas>/hcr_state/*/state` names,
+  `ctl_cas_gc` in `lib/desugar/control_wiring.march`; see
+  `specs/progress/2026-10-04-dd12-review-control-api-resource-exhaustion.md`. Still open:
+  artifacts an adopted release or the reload socket stored, after compaction.)
 - **Several pools per host** (distinct units, sockets and cluster ports).
 - **"What may be lost"**: `loop atomic` sessions (once D27 lands), unsupervised actors a
   hard deadline would kill (needs supervision facts in an artifact), sessions per

@@ -1,0 +1,12 @@
+info: names=worker msgs_in=3 parent=true slices_ok=true
+info of an unknown pid: true
+actors: 4
+proc_count msgs_in: top is worker=true value=3
+proc_count of an unknown attr: 0
+tree: 1 root, 2 children
+crashes: kind=crash pid=true supervised=true
+node_stats: actors=4 crashes=1 schedulers_ok=true rss_ok=true
+epochs: current_ok=true
+scheduler_usage in [0,1]: true
+proc_window: deltas non-negative=true
+names: worker
