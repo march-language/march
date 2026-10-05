@@ -2328,6 +2328,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#type-RunError"><span class="sb-kind" style="color:var(--ty)">T</span>RunError</a>
 <a class="sl" href="SessionNode.html#type-OfferCount"><span class="sb-kind" style="color:var(--ty)">T</span>OfferCount</a>
 <a class="sl" href="SessionNode.html#type-Offer"><span class="sb-kind" style="color:var(--ty)">T</span>Offer</a>
+<a class="sl" href="SessionNode.html#type-ApWait"><span class="sb-kind" style="color:var(--ty)">T</span>ApWait</a>
 <a class="sl" href="SessionNode.html#type-ApMix"><span class="sb-kind" style="color:var(--ty)">T</span>ApMix</a>
 <a class="sl" href="SessionNode.html#fn-accept_from"><span class="sb-kind" style="color:var(--fn)">F</span>accept_from</a>
 <a class="sl" href="SessionNode.html#fn-accepts"><span class="sb-kind" style="color:var(--fn)">F</span>accepts</a>
@@ -2819,6 +2820,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Uri.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Vault.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Vault.html">Vault</a></div><div class="sb-sub"><a class="sl" href="Vault.html#fn-all"><span class="sb-kind" style="color:var(--fn)">F</span>all</a>
 <a class="sl" href="Vault.html#fn-clear"><span class="sb-kind" style="color:var(--fn)">F</span>clear</a>
+<a class="sl" href="Vault.html#fn-close"><span class="sb-kind" style="color:var(--fn)">F</span>close</a>
 <a class="sl" href="Vault.html#fn-delete"><span class="sb-kind" style="color:var(--fn)">F</span>delete</a>
 <a class="sl" href="Vault.html#fn-drop"><span class="sb-kind" style="color:var(--fn)">F</span>drop</a>
 <a class="sl" href="Vault.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
@@ -2826,6 +2828,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Vault.html#fn-has"><span class="sb-kind" style="color:var(--fn)">F</span>has</a>
 <a class="sl" href="Vault.html#fn-incr"><span class="sb-kind" style="color:var(--fn)">F</span>incr</a>
 <a class="sl" href="Vault.html#fn-keys"><span class="sb-kind" style="color:var(--fn)">F</span>keys</a>
+<a class="sl" href="Vault.html#fn-live_tables"><span class="sb-kind" style="color:var(--fn)">F</span>live_tables</a>
 <a class="sl" href="Vault.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
 <a class="sl" href="Vault.html#fn-ns_drop"><span class="sb-kind" style="color:var(--fn)">F</span>ns_drop</a>
 <a class="sl" href="Vault.html#fn-ns_get"><span class="sb-kind" style="color:var(--fn)">F</span>ns_get</a>
@@ -2995,7 +2998,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="Seq.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Seq</h3><p>Seq module: lazy fold-based sequences (church-encoded).</p><div class="st"><span>27 functions</span><span>2 types</span></div></div></a>
 <a href="Session.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Session</h3><div class="st"><span>18 functions</span><span>4 types</span></div></div></a>
 <a href="SessionAP.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>SessionAP</h3><p>SessionAP: who may form a session at an access point (distributed-deploys</p><div class="st"><span>6 functions</span><span>0 types</span></div></div></a>
-<a href="SessionNode.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>SessionNode</h3><p>SessionNode: the `Session.Ops` network transport. A protocol's</p><div class="st"><span>30 functions</span><span>10 types</span></div></div></a>
+<a href="SessionNode.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>SessionNode</h3><p>SessionNode: the `Session.Ops` network transport. A protocol's</p><div class="st"><span>30 functions</span><span>11 types</span></div></div></a>
 <a href="Set.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Set</h3><p>Set module: persistent hash-array-mapped-trie set.</p><div class="st"><span>15 functions</span><span>2 types</span></div></div></a>
 <a href="Sigil.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Sigil</h3><p>Sigil module: handlers for sigil expressions (~R, ~J, etc.)</p><div class="st"><span>4 functions</span><span>0 types</span></div></div></a>
 <a href="Signal.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Signal</h3><p>Signal module: register deferred handlers for OS signals.</p><div class="st"><span>3 functions</span><span>1 types</span></div></div></a>
@@ -3016,7 +3019,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a href="Tuple.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Tuple</h3><p>Tuple module: utilities for 2-tuples (pairs).</p><div class="st"><span>12 functions</span><span>0 types</span></div></div></a>
 <a href="UUID.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>UUID</h3><p>UUID module: RFC 4122 UUID generation and manipulation.</p><div class="st"><span>10 functions</span><span>1 types</span></div></div></a>
 <a href="Uri.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Uri</h3><p>URI module: URL/URI parsing, encoding, and query-string manipulation.</p><div class="st"><span>14 functions</span><span>1 types</span></div></div></a>
-<a href="Vault.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Vault</h3><p>Vault module: ETS-like in-memory key-value store.</p><div class="st"><span>23 functions</span><span>0 types</span></div></div></a>
+<a href="Vault.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>Vault</h3><p>Vault module: ETS-like in-memory key-value store.</p><div class="st"><span>25 functions</span><span>0 types</span></div></div></a>
 <a href="VectorClock.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>VectorClock</h3><p>VectorClock: causal ordering for distributed actors.</p><div class="st"><span>10 functions</span><span>2 types</span></div></div></a>
 <a href="WebSocket.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>WebSocket</h3><p>WebSocket module: types and API for WebSocket connections.</p><div class="st"><span>5 functions</span><span>3 types</span></div></div></a>
 <a href="WorkDispatch.html" style="display:block;color:inherit;text-decoration:none"><div class="mc"><h3>WorkDispatch</h3><p>WorkDispatch: capacity-aware RPC routing (P4 L6).</p><div class="st"><span>4 functions</span><span>0 types</span></div></div></a>

@@ -210,6 +210,15 @@ git log is authoritative for exact commits.
   lexer rejects or a string that never closes; they now print the error with
   its source line and exit 1, like any other syntax error. A file on
   `MARCH_LIB_PATH` with such an error no longer aborts the whole compile.
+- **A session no longer fails to form when its access point is replaced mid-invitation.**
+  When a hosting actor re-offered a role (for example after a hot deploy moved it
+  to a new protocol version) and closed the old offer, an initiator that had
+  just invited the old offer waited out the whole setup time (20 s) and then
+  failed with `NoOffer(.., "<node> did not answer")`: the invitation reached a
+  node whose offer had already dropped its route, so no one answered it.
+  `SessionNode.initiate` now notices the offer's name was unregistered, withdraws
+  the invitation, and looks again for the replacement offer, as it already did
+  for an offer that refused with "closing".
 - **Vault writes release what they replace, and session tables are freed.**
   Overwriting or dropping a Vault entry released only the old value's own cell,
   never its fields or list spine, so `Vault.set` of a record in a loop grew
