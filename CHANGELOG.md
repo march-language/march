@@ -19,6 +19,11 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **SWIM timings from the environment.** `ClusterNode.config` takes its SWIM
+  probe period, ack timeout and suspect timeout defaults (1 s, 500 ms, 3 s) from
+  `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and `MARCH_SWIM_SUSPECT_MS` when
+  set, so a slow or loaded host can stop taking healthy peers for dead without
+  a rebuild. A record update of the config still wins.
 - **`forge top`, `forge diagnose` and `forge status`.** `forge top` watches a
   node's busiest actors (by mailbox depth, crashes, or message and dispatch
   rate) refreshed in place. `forge diagnose` checks a node over a window for

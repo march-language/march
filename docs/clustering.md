@@ -109,7 +109,10 @@ What `start` gives you:
   makes a peer *suspect* and triggers a reconnect; a refused reconnect (nothing listening)
   or SWIM's timeout makes it *dead*. A dead peer is reconnected on a backoff and rejoins when
   it proves it is alive. A peer that restarted is a new *creation*: the old one is reported
-  dead and the new one as rejoined.
+  dead and the new one as rejoined. SWIM probes every 1 s, waits 500 ms for an ack and
+  3 s for a suspect to refute; `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS` and
+  `MARCH_SWIM_SUSPECT_MS` move those defaults of `ClusterNode.config` for a slow host
+  (a record update of the config still wins).
 - **Names.** `register(node, name, pid)`, `unregister`, `lookup`, and `watch(node, name, f)`,
   which reports `Bound`, `Unbound` and `Lost`. A registration is pushed to every peer at
   once and repaired by periodic anti-entropy. `lookup` hides a binding whose holder is dead,

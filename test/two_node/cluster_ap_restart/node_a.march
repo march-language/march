@@ -74,12 +74,17 @@ mod ClusterApRestartA do
       Ok(h) ->
         println("node-a: up")
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: nobody joined") end
-        if session_retry(c, h, 1, 60000) do println("Client: session 1 done") else panic("node-a: first session never formed") end
+        -- TWO_NODE_TIME_SCALE (scripts/two-node.sh) is 1, or 3 under ASan,
+        -- where node-b's restart, its join, and SWIM's verdict on the old
+        -- incarnation (stretched there too) all take longer.
+        let k = Env.get_int("TWO_NODE_TIME_SCALE", 1)
+        if session_retry(c, h, 1, 60000 * k) do println("Client: session 1 done") else panic("node-a: first session never formed") end
         let first = offer_creation(h)
-        -- Both waits fit inside the harness's 60 s for node-a to exit, so a
-        -- stall ends in node-a's own message, not a bare harness timeout.
-        if wait_new_offer(h, first, 20000) do () else panic("node-a: the restarted offer never appeared") end
-        if session_retry(c, h, 2, 30000) do println("Client: session 2 done after the restart") else panic("node-a: no session after the restart") end
+        -- Both waits fit inside the harness's TWO_NODE_TIMEOUT for node-a to
+        -- exit (60 s, 240 s under ASan), so a stall ends in node-a's own
+        -- message, not a bare harness timeout.
+        if wait_new_offer(h, first, 20000 * k) do () else panic("node-a: the restarted offer never appeared") end
+        if session_retry(c, h, 2, 30000 * k) do println("Client: session 2 done after the restart") else panic("node-a: no session after the restart") end
         ClusterNode.stop(h)
     end
   end

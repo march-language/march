@@ -101,15 +101,27 @@ mod ClusterNode do
   means `127.0.0.1:<listen_port>`. The SWIM timings trade detection speed
   for false suspicions on a loaded host (a 300 ms ack timeout suspected
   healthy peers on a busy CI runner); override `swim` / `period_ms` with a
-  record update to tune them.
+  record update to tune them. The environment can move the three SWIM
+  defaults without a rebuild: `MARCH_SWIM_PERIOD_MS`, `MARCH_SWIM_ACK_MS`
+  and `MARCH_SWIM_SUSPECT_MS` (each a positive integer; anything else keeps
+  the default). A record update still wins over them.
   """
   fn config(name : String, listen_port : Int, advertise : String, seeds : List(String),
             secret : String, creation : Int) : CnConfig do
     let adv = if String.is_empty(advertise) do "127.0.0.1:" ++ int_to_string(listen_port) else advertise end
+    let swim = Swim.config(env_ms("MARCH_SWIM_ACK_MS", 500), env_ms("MARCH_SWIM_SUSPECT_MS", 3000), 2)
     { name: name, listen_port: listen_port, advertise: adv, seeds: seeds, secret: secret,
-      creation: creation, swim: Swim.config(500, 3000, 2), period_ms: 1000, tick_ms: 100,
+      creation: creation, swim: swim, period_ms: env_ms("MARCH_SWIM_PERIOD_MS", 1000), tick_ms: 100,
       redial_min_ms: 200, redial_max_ms: 5000, dial_timeout_ms: 2000, handshake_timeout_ms: 2000,
       auth: ClusterAuth.Secret(secret), revocations: Nil, cert_files: None }
+  end
+
+  -- A positive duration from the environment, or [dflt].
+  pfn env_ms(name : String, dflt : Int) : Int do
+    match String.to_int(env_or(name, "")) do
+      Ok(n) -> if n > 0 do n else dflt end
+      Err(_) -> dflt
+    end
   end
 
   pfn env_or(name : String, dflt : String) : String do
