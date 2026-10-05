@@ -827,8 +827,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                let lexbuf = Lexing.from_string src in
                (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
                        with
-                       | March_errors.Errors.ParseError (msg, hint, _) ->
-                         let rendered = March_errors.Errors.render_parse_error ~src ?hint ~msg lexbuf in
+                       | March_errors.Errors.ParseError (msg, hint, pos) ->
+                         let rendered = March_errors.Errors.render_parse_error_at ~src ?hint ~msg pos in
                          Printf.eprintf "%s\n%!" rendered;
                          None
                        | March_parser.Parser.Error ->
@@ -1167,7 +1167,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
      | March_lexer.Lexer.Lexer_error msg ->
        Buffer.clear buf; first_line := true;
        Printf.eprintf "lexer error: %s\n%!" msg
-     | March_errors.Errors.ParseError (msg, hint, _) ->
+     | March_errors.Errors.ParseError (msg, hint, pos) ->
        (* Desugar-time diagnostics (e.g. B6 pipe-into-match) raise ParseError
           outside the parser's own try/with, so they land here rather than
           at the parse-error handler above.  Render the same way the batch
@@ -1175,8 +1175,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
           "internal error: ...". *)
        Buffer.clear buf; first_line := true;
        let rendered =
-         March_errors.Errors.render_parse_error ~src:!last_src ?hint ~msg
-           (Lexing.from_string !last_src) in
+         March_errors.Errors.render_parse_error_at ~src:!last_src ?hint ~msg pos in
        Printf.eprintf "%s\n%!" rendered
      | exn ->
        Buffer.clear buf; first_line := true;
@@ -1423,8 +1422,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
     let lexbuf = Lexing.from_string src in
     (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
             with
-            | March_errors.Errors.ParseError (msg, hint, _) ->
-              let rendered = March_errors.Errors.render_parse_error ~src ?hint ~msg lexbuf in
+            | March_errors.Errors.ParseError (msg, hint, pos) ->
+              let rendered = March_errors.Errors.render_parse_error_at ~src ?hint ~msg pos in
               List.iter (add_line Notty.A.(fg red)) (String.split_on_char '\n' rendered);
               None
             | March_parser.Parser.Error ->

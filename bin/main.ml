@@ -1309,10 +1309,9 @@ let fmt_file filename =
   let formatted =
     try March_format.Format.format_source ~filename src
     with
-    | March_errors.Errors.ParseError (msg, hint, _) ->
+    | March_errors.Errors.ParseError (msg, hint, pos) ->
       Printf.eprintf "%s\n"
-        (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg
-           (Lexing.from_string src));
+        (March_errors.Errors.render_parse_error_at ~src ~filename ?hint ~msg pos);
       exit 1
     | March_parser.Parser.Error ->
       let lexbuf = Lexing.from_string src in
@@ -1423,9 +1422,9 @@ let run_test_cmd args =
     let module_ast =
       try March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
       with
-      | March_errors.Errors.ParseError (msg, hint, _) ->
+      | March_errors.Errors.ParseError (msg, hint, pos) ->
         Printf.eprintf "\n%s\n"
-          (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg lexbuf);
+          (March_errors.Errors.render_parse_error_at ~src ~filename ?hint ~msg pos);
         exit 1
       | March_parser.Parser.Error ->
         Printf.eprintf "\n%s\n"
@@ -2137,11 +2136,11 @@ let compile filename =
   let module_ast =
     try March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
     with
-    | March_errors.Errors.ParseError (msg, hint, _) ->
+    | March_errors.Errors.ParseError (msg, hint, pos) ->
       Printf.eprintf "%s\n"
-        (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg lexbuf);
+        (March_errors.Errors.render_parse_error_at ~src ~filename ?hint ~msg pos);
       emit_core_ast_parse_failure
-        (March_errors.Errors.parse_error_diagnostic ~filename ?hint ~msg lexbuf);
+        (March_errors.Errors.parse_error_diagnostic_at ~filename ?hint ~src ~msg pos);
       exit 1
     | March_parser.Parser.Error ->
       Printf.eprintf "%s\n"
@@ -4702,9 +4701,9 @@ let run_check_cmd ?(emit_caps = false) files =
     let module_ast =
       try March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
       with
-      | March_errors.Errors.ParseError (msg, hint, _) ->
+      | March_errors.Errors.ParseError (msg, hint, pos) ->
         Printf.eprintf "%s\n"
-          (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg lexbuf);
+          (March_errors.Errors.render_parse_error_at ~src ~filename ?hint ~msg pos);
         exit 1
       | March_parser.Parser.Error ->
         Printf.eprintf "%s\n"

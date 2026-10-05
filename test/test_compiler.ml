@@ -13962,9 +13962,8 @@ let render_parse_err src =
   (try ignore (March_parser.Parser.module_
     (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf); ""
   with
-  | March_errors.Errors.ParseError (msg, hint, _) ->
-    let lb2 = Lexing.from_string src in
-    March_errors.Errors.render_parse_error ~src ?hint ~msg lb2
+  | March_errors.Errors.ParseError (msg, hint, pos) ->
+    March_errors.Errors.render_parse_error_at ~src ?hint ~msg pos
   | March_parser.Parser.Error ->
     let lb2 = Lexing.from_string src in
     March_errors.Errors.render_parse_error ~src ~msg:"Parse error:" lb2
@@ -14073,6 +14072,62 @@ let test_toplevel_mod_plus_sibling_fn_error () =
     "top-level mod + sibling fn: message mentions only one top-level mod" true
     (_contains_substr output "only one top-level" ||
      _contains_substr output "one top-level `mod`")
+
+(* ── Parse-error caret positions ─────────────────────────────────────────
+   The grammar's `error` productions each choose the position their message
+   is about (`$startpos($N)`).  The CLI used to drop it and render at menhir's
+   lookahead token instead -- the token AFTER the mistake -- and nothing
+   noticed, because every parse-error test asserted message substrings only.
+   These pin line AND column of the span the diagnostic is rendered at. *)
+
+let parse_error_diag src : March_errors.Errors.diagnostic option =
+  let lexbuf = Lexing.from_string src in
+  try
+    ignore (March_parser.Parser.module_
+      (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf);
+    None
+  with
+  | March_errors.Errors.ParseError (msg, hint, pos) ->
+    Some (March_errors.Errors.parse_error_diagnostic_at ?hint ~src ~msg pos)
+  | March_parser.Parser.Error ->
+    Some (March_errors.Errors.parse_error_diagnostic ~msg:"I got stuck here:" lexbuf)
+
+let check_parse_error_caret ~src ~msg_part ~line ~col ~end_col =
+  match parse_error_diag src with
+  | None -> Alcotest.fail "expected a parse error"
+  | Some d ->
+    let sp = d.March_errors.Errors.span in
+    Alcotest.(check bool) ("message mentions " ^ msg_part) true
+      (_contains_substr d.March_errors.Errors.message msg_part);
+    Alcotest.(check (triple int int int)) "caret (line, col, end_col)"
+      (line, col, end_col)
+      (sp.March_ast.Ast.start_line, sp.March_ast.Ast.start_col,
+       sp.March_ast.Ast.end_col);
+    (* ...and the rendered caret line really sits under that column. *)
+    let rendered = March_errors.Errors.render_diagnostic ~src d in
+    let gutter = String.length (Printf.sprintf "%d | " line) in
+    let want = String.make (gutter + col) ' ' ^ String.make (end_col - col) '^' in
+    Alcotest.(check bool) "rendered caret under the chosen token" true
+      (List.mem want (String.split_on_char '\n' rendered))
+
+let test_parse_caret_then () =
+  (* `IF expr THEN expr error` chooses $startpos($3), the `then`.  The
+     lookahead when the production fires is `end` (col 18): the old caret. *)
+  check_parse_error_caret
+    ~src:"mod T do\n  fn f(x) do\n    if x then 1 end\n  end\nend"
+    ~msg_part:"I don't recognize `then` here" ~line:3 ~col:9 ~end_col:13
+
+let test_parse_caret_else_if_missing_end () =
+  (* `IF .. DO .. ELSE .. error`: one `end` closes the inner `if`, the outer
+     one is still open when `)` arrives. *)
+  check_parse_error_caret
+    ~src:"mod T do\n  fn f(a, b) do\n    g(if a do 1 else if b do 2 else 3 end)\n  end\nend"
+    ~msg_part:"I was expecting `end` to close the if expression" ~line:3 ~col:41 ~end_col:42
+
+let test_parse_caret_mod_missing_do () =
+  check_parse_error_caret
+    ~src:"mod T\n  fn f() do 1 end\nend"
+    ~msg_part:"I was expecting `do` to start the module body" ~line:2 ~col:2 ~end_col:4
 
 (* A nested multi-line match used directly as a match-arm body (no do/end
    wrapper) must parse.  This locks in the contextual-NL token-filter behavior
@@ -18182,6 +18237,9 @@ let compiler_suites =
           Alcotest.test_case "#6 non-redundant match: no warning"           `Quick test_non_redundant_no_warning;
           Alcotest.test_case "#8 qualified error has notes not inline"      `Quick test_qualified_error_uses_notes;
           Alcotest.test_case "#7 parse error uses -- ERROR header"          `Quick test_parse_error_has_error_header;
+          Alcotest.test_case "parse caret: `then` points at `then`"          `Quick test_parse_caret_then;
+          Alcotest.test_case "parse caret: else-if chain missing `end`"      `Quick test_parse_caret_else_if_missing_end;
+          Alcotest.test_case "parse caret: mod missing `do`"                 `Quick test_parse_caret_mod_missing_do;
           Alcotest.test_case "#7 if-then note mentions do/end"              `Quick test_parse_error_then_note_do_end;
           Alcotest.test_case "fix: if-then error names then as problem"     `Quick test_parse_error_then_says_then_not_else;
           Alcotest.test_case "fix: if-then primary message not about else"  `Quick test_parse_error_then_primary_message;

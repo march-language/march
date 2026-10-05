@@ -164,6 +164,11 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Parse errors on the command line now point at the token the message is
+  about, not the token after it.** `if x then 1 end` used to put the caret
+  under `end` (or under the next line) while the message talked about `then`;
+  `march`, `march fmt`, `march test` and the REPL now underline `then`, the
+  position the editor integration already showed.
 - **A compiled program that calls `Process.set_env` at the top of `main` no
   longer crashes, now and then, at startup.** On Linux the runtime read
   the environment from the main thread while `main` was already running on a

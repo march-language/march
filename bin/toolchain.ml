@@ -532,9 +532,9 @@ let load_stdlib_file path =
         type), and a listed-but-unparseable one is strictly worse. So render the
         real parse error, at the real position in the real file, through the
         same banner renderer user files get, and exit. *)
-     | March_errors.Errors.ParseError (msg, hint, _) ->
+     | March_errors.Errors.ParseError (msg, hint, pos) ->
        Printf.eprintf "%s\n%!"
-         (March_errors.Errors.render_parse_error ~src ~filename:path ?hint ~msg lexbuf);
+         (March_errors.Errors.render_parse_error_at ~src ~filename:path ?hint ~msg pos);
        Printf.eprintf
          "This is a stdlib source file, so this is a compiler-installation \
           problem rather than something wrong with your program.\n%!";

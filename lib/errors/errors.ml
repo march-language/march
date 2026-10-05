@@ -289,6 +289,59 @@ let parse_error_diagnostic ?(filename = "") ?hint ~msg lexbuf =
 let render_parse_error ~src ?(filename = "") ?hint ~msg lexbuf =
   render_diagnostic ~src ~filename (parse_error_diagnostic ~filename ?hint ~msg lexbuf)
 
+(** Width of the token starting at ([line], [col]) in [src], for sizing a
+    caret under a position that carries no lexeme: an identifier/keyword/number
+    run, else one character.  [line] is 1-based, [col] 0-based (the
+    [Lexing.position] convention).  Located by line/column rather than
+    [pos_cnum], because some [ParseError] positions are rebuilt from spans and
+    carry no absolute offset. *)
+let token_len_at ~src ~line ~col =
+  let n = String.length src in
+  let rec line_start l i =
+    if l <= 1 then Some i
+    else match String.index_from_opt src i '\n' with
+      | Some j -> line_start (l - 1) (j + 1)
+      | None -> None
+  in
+  match line_start line 0 with
+  | None -> 1
+  | Some bol ->
+    let i = bol + col in
+    let is_word c =
+      (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+      || (c >= '0' && c <= '9') || c = '_' in
+    if i < 0 || i >= n || not (is_word src.[i]) then 1
+    else begin
+      let j = ref i in
+      while !j < n && is_word src.[!j] do incr j done;
+      !j - i
+    end
+
+(** Diagnostic for a [ParseError (msg, hint, pos)]: the span starts at [pos],
+    the position the grammar's error production chose.  Use this, not the
+    lexbuf form above, whenever the exception carries a position: the lexbuf
+    only knows menhir's lookahead token, which is the token AFTER the one the
+    message is about.  [src], when given, sizes the caret to the token at
+    [pos]; [len] overrides it. *)
+let parse_error_diagnostic_at ?(filename = "") ?hint ?src ?len ~msg
+    (pos : Lexing.position) =
+  let line = pos.Lexing.pos_lnum in
+  let col  = pos.Lexing.pos_cnum - pos.Lexing.pos_bol in
+  let len  = match len, src with
+    | Some l, _ -> max 1 l
+    | None, Some src -> token_len_at ~src ~line ~col
+    | None, None -> 1 in
+  let file = if filename <> "" then filename else pos.Lexing.pos_fname in
+  let span = { March_ast.Ast.file;
+               start_line = line; start_col = col;
+               end_line = line; end_col = col + len } in
+  let notes = match hint with None -> [] | Some h -> [h] in
+  { severity = Error; span; message = msg; labels = []; notes; code = None; fix = None }
+
+let render_parse_error_at ~src ?(filename = "") ?hint ~msg pos =
+  render_diagnostic ~src ~filename
+    (parse_error_diagnostic_at ~filename ?hint ~src ~msg pos)
+
 (* ── JSON output (--check-json) ───────────────────────────────────────── *)
 
 let json_string s =
