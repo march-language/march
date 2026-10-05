@@ -18,6 +18,10 @@ native_actor_init_params: coverage audit (user + stdlib): 123 enforced, 0 inert 
 native_actor_init_params: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_init_params_schema: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_actor_init_params_schema: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_inspect_block: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_actor_inspect_block: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_actor_inspect_state: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_actor_inspect_state: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_mailbox_alarm: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_actor_mailbox_alarm: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_message_record_leak_probe: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -346,6 +350,8 @@ native_native_arr_sort_small: coverage audit (user + stdlib): 123 enforced, 0 in
 native_native_arr_sort_small: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_native_float_box_abi_leak_probe: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_native_float_box_abi_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_nativearr_map_fusion: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_nativearr_map_fusion: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_actor_msg_from_parent: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_nested_actor_msg_from_parent: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_nested_actor_same_name: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced

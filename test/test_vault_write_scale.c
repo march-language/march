@@ -51,11 +51,31 @@
  * Unit return allocation, both of which take the allocator's own locks.
  * Reducing those is a separate piece of work; this item was about the lock.
  *
- * The assertion stays loose (it fails only if the result is WORSE than plain
- * serialisation) because the printed ratio is the deliverable and a tight
- * bound on a parallel-scaling number is exactly what made the reader test
- * flake for four rounds.  A regression back to one lock per table fails it:
- * that measured 11.8x-13.1x against a bound of T * 1.5 = 6.0x. */
+ * WHAT IS ASSERTED (2026-10-04): a STRUCTURAL property, not wall time.  The
+ * old assertion failed only when the parallel median exceeded 1.5x plain
+ * serialisation (T * 1.5 * solo), and it still flaked: on ubuntu-24.04's
+ * 4-vCPU hosted runners the CORRECT sharded runtime measures 2.6x-5.5x
+ * (median ~3.5x over 80 CI runs) against a 4.0x serialisation line, so the
+ * hosted hardware barely scales this workload at all and a loaded runner
+ * pushed one run to 6.2x.  Worse, under heavy host load a single global lock
+ * and the sharded runtime are indistinguishable by wall time -- when threads
+ * do not overlap on CPU there is nothing for a lock to serialise.  No
+ * wall-time bound separates the two reliably on that hardware.
+ *
+ * What the test exists to catch is "distinct keys serialise on one lock".
+ * That is a property of WHICH locks a write takes, and it can be counted:
+ * vault_lock_probe.h is force-included into this runner's runtime build and
+ * routes every pthread_mutex_lock through vault_probe_mutex_lock below, which
+ * tallies acquisitions per mutex address for each thread's probed writes.
+ * The run FAILS if one mutex is acquired on at least half of EVERY thread's
+ * writes (a table-wide or global lock is 100%; the 16 bucket shards give each
+ * mutex about 1/16 of a thread's 64 keys), or if the probe saw fewer
+ * acquisitions than writes (the write path stopped taking a pthread mutex, so
+ * the probe can no longer see its lock: update the probe, don't pass
+ * silently).  Key hashing is deterministic, so the verdict is too, whatever
+ * the host's load or core count.  The timing ratio is still measured and
+ * printed -- it is the number the partitioning work was judged by -- but it
+ * no longer decides pass/fail. */
 #include <assert.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -71,15 +91,67 @@ extern void *march_alloc(int64_t);
 extern void *march_string_lit(const char *utf8, int64_t len);
 
 #define WRITES 200000
+#define PROBE_WRITES 20000 /* per thread; the probed run only counts locks */
 #define KEYS_PER_THREAD 64
 #define MAX_THREADS 4
 #define NSAMPLES 5
+#define PROBE_SLOTS 64 /* distinct mutexes one thread can tally */
 
-static int g_nthreads; /* T = min(MAX_THREADS, ncores), set in main() */
+static int g_nthreads; /* timing T = min(MAX_THREADS, ncores), set in main() */
 
 static void *g_table;
 static void *g_keys[MAX_THREADS][KEYS_PER_THREAD];
 static void *g_vals[MAX_THREADS];
+
+/* ── The lock probe (see vault_lock_probe.h) ─────────────────────────────── */
+
+/* This file is compiled with vault_lock_probe.h force-included too, so
+ * <pthread.h> above declared the probe, not the real function: drop the
+ * macro and declare the real one by hand. */
+#undef pthread_mutex_lock
+extern int pthread_mutex_lock(pthread_mutex_t *m);
+
+typedef struct {
+    pthread_mutex_t *addr[PROBE_SLOTS];
+    int64_t          count[PROBE_SLOTS];
+    int              nslots;
+    int64_t          overflow; /* acquisitions of mutexes past PROBE_SLOTS */
+} probe_tally;
+
+static probe_tally g_tally[MAX_THREADS];
+/* Set only by a probed writer thread, so runtime-internal locking anywhere
+ * else (the main thread's setup, other threads) is never counted. */
+static _Thread_local probe_tally *tl_tally;
+
+int vault_probe_mutex_lock(pthread_mutex_t *m) {
+    probe_tally *t = tl_tally;
+    if (t) {
+        int i = 0;
+        while (i < t->nslots && t->addr[i] != m) i++;
+        if (i < t->nslots) t->count[i]++;
+        else if (i < PROBE_SLOTS) { t->addr[i] = m; t->count[i] = 1; t->nslots++; }
+        else t->overflow++;
+    }
+    return pthread_mutex_lock(m);
+}
+
+static void *probed_writer(void *arg) {
+    int idx = *(int *)arg;
+    void *val = g_vals[idx];
+    tl_tally = &g_tally[idx];
+    for (int i = 0; i < PROBE_WRITES; i++)
+        (void)march_vault_set(g_table, g_keys[idx][i % KEYS_PER_THREAD], val);
+    tl_tally = NULL;
+    return NULL;
+}
+
+static int64_t tally_of(const probe_tally *t, pthread_mutex_t *m) {
+    for (int i = 0; i < t->nslots; i++)
+        if (t->addr[i] == m) return t->count[i];
+    return 0;
+}
+
+/* ── Timing (printed, not asserted) ──────────────────────────────────────── */
 
 static int64_t now_ms(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -126,29 +198,12 @@ static void print_samples(const char *label, int64_t *samples, int n) {
     fprintf(stderr, "\n");
 }
 
-int main(void) {
-    long ncores = sysconf(_SC_NPROCESSORS_ONLN);
+static void report_timing(long ncores) {
     if (ncores < 2) {
-        printf("test_vault_write_scale: skipped (ncores=%ld < 2 — a "
-               "parallel-scaling measurement is meaningless on one core)\n",
-               ncores);
-        return 0;
+        fprintf(stderr, "timing: skipped (ncores=%ld < 2 — a parallel-scaling "
+                        "number is meaningless on one core)\n", ncores);
+        return;
     }
-    g_nthreads = (int)(ncores < MAX_THREADS ? ncores : MAX_THREADS);
-
-    g_table = march_vault_new(march_string_lit("bench-write", 11));
-    char buf[32];
-    for (int i = 0; i < g_nthreads; i++) {
-        int vlen = snprintf(buf, sizeof buf, "v%d", i);
-        g_vals[i] = march_string_lit(buf, (int64_t)vlen);
-        for (int k = 0; k < KEYS_PER_THREAD; k++) {
-            int len = snprintf(buf, sizeof buf, "w%d-%d", i, k);
-            g_keys[i][k] = march_string_lit(buf, (int64_t)len);
-            march_vault_set(g_table, g_keys[i][k], g_vals[i]);
-        }
-        idxs[i] = i;
-    }
-
     int64_t solo_samples[NSAMPLES], par_samples[NSAMPLES];
     for (int i = 0; i < NSAMPLES; i++) solo_samples[i] = run_solo();
     for (int i = 0; i < NSAMPLES; i++) par_samples[i] = run_parallel_threads();
@@ -165,27 +220,82 @@ int main(void) {
     fprintf(stderr,
             "ncores=%ld T=%d writes/thread=%d keys/thread=%d solo_median=%lldms "
             "parallel_median=%lldms ratio=%.2f (1.0 = perfect scaling, "
-            "%.1f = full serialisation)\n",
+            "%.1f = full serialisation; informational, not asserted)\n",
             ncores, g_nthreads, WRITES, KEYS_PER_THREAD, (long long)solo_med,
             (long long)par_med,
             solo_med > 0 ? (double)par_med / (double)solo_med : 0.0,
             (double)g_nthreads);
+}
 
-    if (solo_med < 5) {
-        printf("test_vault_write_scale: skipped (too fast to time)\n");
-        return 0;
+int main(void) {
+    long ncores = sysconf(_SC_NPROCESSORS_ONLN);
+    g_nthreads = (int)(ncores < MAX_THREADS ? (ncores < 1 ? 1 : ncores) : MAX_THREADS);
+
+    g_table = march_vault_new(march_string_lit("bench-write", 11));
+    char buf[32];
+    for (int i = 0; i < MAX_THREADS; i++) {
+        int vlen = snprintf(buf, sizeof buf, "v%d", i);
+        g_vals[i] = march_string_lit(buf, (int64_t)vlen);
+        for (int k = 0; k < KEYS_PER_THREAD; k++) {
+            int len = snprintf(buf, sizeof buf, "w%d-%d", i, k);
+            g_keys[i][k] = march_string_lit(buf, (int64_t)len);
+            march_vault_set(g_table, g_keys[i][k], g_vals[i]);
+        }
+        idxs[i] = i;
     }
-    /* Loose by design: only a result WORSE than plain serialisation fails.
-       The number above is the deliverable. */
-    double bound = (double)solo_med * (double)g_nthreads * 1.5;
-    if ((double)par_med >= bound) {
-        fprintf(stderr,
-                "FAIL: %d threads writing distinct keys took %lldms vs %lldms "
-                "solo — worse than serialisation (bound %.0fms)\n",
-                g_nthreads, (long long)par_med, (long long)solo_med, bound);
-        return 1;
+
+    report_timing(ncores);
+
+    /* The structural check always runs MAX_THREADS writers: it counts locks,
+     * so it needs neither spare cores nor a quiet host. */
+    pthread_t th[MAX_THREADS];
+    for (int i = 0; i < MAX_THREADS; i++) pthread_create(&th[i], NULL, probed_writer, &idxs[i]);
+    for (int i = 0; i < MAX_THREADS; i++) pthread_join(th[i], NULL);
+
+    int fail = 0;
+    for (int i = 0; i < MAX_THREADS; i++) {
+        int64_t total = g_tally[i].overflow;
+        for (int s = 0; s < g_tally[i].nslots; s++) total += g_tally[i].count[s];
+        if (total < PROBE_WRITES) {
+            fprintf(stderr,
+                    "FAIL: thread %d made %d writes but the probe saw only %lld "
+                    "pthread_mutex_lock calls — the write path no longer takes "
+                    "a pthread mutex, so this test cannot see its lock; update "
+                    "test/vault_lock_probe.h\n",
+                    i, PROBE_WRITES, (long long)total);
+            fail = 1;
+        }
     }
-    printf("test_vault_write_scale: ok (ratio %.2f over %d threads)\n",
-           solo_med > 0 ? (double)par_med / (double)solo_med : 0.0, g_nthreads);
+
+    /* For every mutex thread 0 took: its smallest share of any one thread's
+     * writes.  A lock shared by all distinct-key writes scores ~1.0. */
+    double worst = 0.0;
+    int nmutex = g_tally[0].nslots;
+    for (int s = 0; s < g_tally[0].nslots; s++) {
+        pthread_mutex_t *m = g_tally[0].addr[s];
+        double min_share = 1e9;
+        for (int i = 0; i < MAX_THREADS; i++) {
+            double share = (double)tally_of(&g_tally[i], m) / (double)PROBE_WRITES;
+            if (share < min_share) min_share = share;
+        }
+        if (min_share > worst) worst = min_share;
+        if (min_share >= 0.5) {
+            fprintf(stderr,
+                    "FAIL: one mutex (%p) is acquired on >= %.0f%% of EVERY "
+                    "thread's writes, though each of the %d threads writes "
+                    "only its own %d keys — distinct-key writes serialise on "
+                    "it\n",
+                    (void *)m, min_share * 100.0, MAX_THREADS, KEYS_PER_THREAD);
+            fail = 1;
+        }
+    }
+    fprintf(stderr,
+            "lock probe: %d threads x %d writes, thread 0 took %d distinct "
+            "mutexes; the most-shared one covers %.1f%% of every thread's "
+            "writes (fails at 50%%)\n",
+            MAX_THREADS, PROBE_WRITES, nmutex, worst * 100.0);
+    if (fail) return 1;
+    printf("test_vault_write_scale: ok (no lock shared by every thread's "
+           "distinct-key writes; most-shared %.1f%%)\n", worst * 100.0);
     return 0;
 }

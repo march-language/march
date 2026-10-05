@@ -1,0 +1,125 @@
+-- Regression: NativeArray map / map2 chain fusion (phase B of
+-- specs/plans/2026-09-28-nativearray-fusion-plan.md).
+--
+-- Fusion.run_nativearr collapses map∘map, map2∘map (either input) and
+-- map∘map2 chains of lambda literals into ONE call whose callback is the
+-- substituted composition of the bodies, which Native_map_inline then turns
+-- into one inline loop. Every line below must print the same value compiled
+-- and interpreted (the .expected file IS the interpreter's output); the
+-- IR-shape rule in test/dune pins how many inline loops / runtime map calls
+-- main has, so a chain that silently stops fusing (or a negative case that
+-- starts fusing) goes red.
+--
+-- Captured values are read from an array at run time so constant
+-- propagation can't turn a capturing lambda into a non-capturing one.
+mod Main do
+  needs IO.Console
+
+  pfn show_ints_acc(xs : List(Int), acc : String) : String do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> show_ints_acc(t, acc ++ int_to_string(h) ++ " ")
+    end
+  end
+
+  pfn show_ints(xs : List(Int)) : String do
+    show_ints_acc(xs, "")
+  end
+
+  pfn show_floats_acc(xs : List(Float), acc : String) : String do
+    match xs do
+      Nil -> acc
+      Cons(h, t) -> show_floats_acc(t, acc ++ float_to_string(h) ++ " ")
+    end
+  end
+
+  pfn show_floats(xs : List(Float)) : String do
+    show_floats_acc(xs, "")
+  end
+
+  -- NOT fused: the first callback is a parameter, not a lambda literal.
+  pfn param_chain(a, f : Int -> Int) do
+    NativeArray.map_int(NativeArray.map_int(a, f), fn x -> x + 1)
+  end
+
+  -- NOT fused: the first callback prints (impure body). The order of the
+  -- "f"/"g" lines is what an incorrect fusion would change.
+  pfn impure_chain(a) do
+    NativeArray.map_int(NativeArray.map_int(a, fn x ->
+      let u = println("f " ++ int_to_string(x))
+      x * 2), fn y ->
+      let u = println("g " ++ int_to_string(y))
+      y + 1)
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) : () do
+    let ia = NativeArray.from_list_int(Cons(1, Cons(-2, Cons(3, Cons(40, Nil)))))
+    let ib = NativeArray.from_list_int(Cons(10, Cons(20, Cons(-30, Cons(5, Nil)))))
+    let fa = NativeArray.from_list_float(Cons(1.5, Cons(-2.25, Cons(3.0, Cons(0.125, Nil)))))
+    let fb = NativeArray.from_list_float(Cons(0.5, Cons(4.0, Cons(-1.0, Cons(8.0, Nil)))))
+    let k = NativeArray.get_int(ia, 2)
+    let c = NativeArray.get_float(fa, 2)
+
+    -- ── Int ──────────────────────────────────────────────────────────────
+    -- 1. map∘map, non-capturing
+    println(show_ints(NativeArray.to_list_int(NativeArray.map_int(NativeArray.map_int(ia, fn x -> x * 2), fn y -> y + 1))))
+    -- 2. map∘map, capturing (k = 3) in both bodies
+    println(show_ints(NativeArray.to_list_int(NativeArray.map_int(NativeArray.map_int(ia, fn x -> x * k), fn y -> y - k))))
+    -- 3. map2(map(a, f), b, g)
+    println(show_ints(NativeArray.to_list_int(NativeArray.map2_int(NativeArray.map_int(ia, fn x -> x * 3), ib, fn (x, y) -> x - y))))
+    -- 4. map2(a, map(b, f), g), capturing
+    println(show_ints(NativeArray.to_list_int(NativeArray.map2_int(ia, NativeArray.map_int(ib, fn x -> x + k), fn (x, y) -> x * 100 + y))))
+    -- 5. map(map2(a, b, f), g)
+    println(show_ints(NativeArray.to_list_int(NativeArray.map_int(NativeArray.map2_int(ia, ib, fn (x, y) -> x - y), fn z -> z * z))))
+    -- 6. map2(map(a, f), map(b, h), g): both inputs fuse
+    println(show_ints(NativeArray.to_list_int(NativeArray.map2_int(NativeArray.map_int(ia, fn x -> x + 1), NativeArray.map_int(ib, fn x -> x * 2), fn (x, y) -> x * 1000 + y))))
+    -- 7. 3-deep chain through named intermediates and a named lambda
+    let dbl = fn x -> x * 2
+    let r1 = NativeArray.map_int(ia, dbl)
+    let r2 = NativeArray.map_int(r1, fn x -> x + 3)
+    let r3 = NativeArray.map_int(r2, fn x -> x * 5 - k)
+    println(show_ints(NativeArray.to_list_int(r3)))
+    -- 8. 10-deep chain: the depth cap (8) leaves exactly two calls
+    let d10 = NativeArray.map_int(NativeArray.map_int(NativeArray.map_int(NativeArray.map_int(NativeArray.map_int(NativeArray.map_int(NativeArray.map_int(NativeArray.map_int(NativeArray.map_int(NativeArray.map_int(ia, fn x -> x + 1), fn x -> x * 2), fn x -> x - 3), fn x -> x + 4), fn x -> x * 5), fn x -> x - 6), fn x -> x + 7), fn x -> x * 8), fn x -> x - 9), fn x -> x + 10)
+    println(show_ints(NativeArray.to_list_int(d10)))
+
+    -- ── Float ────────────────────────────────────────────────────────────
+    println(show_floats(NativeArray.to_list_float(NativeArray.map_float(NativeArray.map_float(fa, fn x -> x *. 2.0), fn y -> y +. 0.5))))
+    println(show_floats(NativeArray.to_list_float(NativeArray.map_float(NativeArray.map_float(fa, fn x -> x *. c), fn y -> y -. c))))
+    println(show_floats(NativeArray.to_list_float(NativeArray.map2_float(NativeArray.map_float(fa, fn x -> x *. 3.0), fb, fn (x, y) -> x -. y))))
+    println(show_floats(NativeArray.to_list_float(NativeArray.map2_float(fa, NativeArray.map_float(fb, fn x -> x +. c), fn (x, y) -> x *. y))))
+    println(show_floats(NativeArray.to_list_float(NativeArray.map_float(NativeArray.map2_float(fa, fb, fn (x, y) -> x -. y), fn z -> z *. z))))
+    println(show_floats(NativeArray.to_list_float(NativeArray.map_float(NativeArray.map_float(NativeArray.map_float(fa, fn x -> x *. 2.0), fn x -> x +. 3.0), fn x -> x *. 0.5))))
+
+    -- ── Narrow widths, map∘map ───────────────────────────────────────────
+    -- u8: the intermediate wraps mod 256 (1+200=201, 250+200=450->194,
+    -- 100+200=300->44), and the second body is non-linear, so a fused body
+    -- that forgot the wrap would print 1 for the last element instead of 0
+    let ua = NativeArray.from_list_u8(Cons(1, Cons(250, Cons(100, Nil))))
+    println(show_ints(NativeArray.to_list_u8(NativeArray.map_u8(NativeArray.map_u8(ua, fn x -> x + 200), fn y -> if y > 128 do 1 else 0 end))))
+    -- u8 map2 consumer, the wrapped intermediate is its first input
+    println(show_ints(NativeArray.to_list_u8(NativeArray.map2_u8(NativeArray.map_u8(ua, fn x -> x * 3), ua, fn (x, y) -> if x > 200 do y else x end))))
+    -- i32: the intermediate wraps mod 2^32, sign-extended (7e9 -> negative)
+    let i3 = NativeArray.from_list_i32(Cons(3, Cons(-5, Cons(70000, Nil))))
+    println(show_ints(NativeArray.to_list_i32(NativeArray.map_i32(NativeArray.map_i32(i3, fn x -> x * 100000), fn y -> if y > 0 do y + 1 else 0 - 1 end))))
+    -- f32: NOT fused (no scalar binary32 rounding builtin), still correct
+    let f3 = NativeArray.from_list_f32(Cons(0.1, Cons(1.5, Cons(-4.0, Nil))))
+    println(show_floats(NativeArray.to_list_f32(NativeArray.map_f32(NativeArray.map_f32(f3, fn x -> x *. 0.1), fn y -> y *. 3.0))))
+
+    -- ── Must NOT fuse, must stay correct ────────────────────────────────
+    -- intermediate used twice
+    let t = NativeArray.map_int(ia, fn x -> x + 5)
+    let u = NativeArray.map_int(t, fn x -> x * 3)
+    println(show_ints(NativeArray.to_list_int(u)) ++ "| " ++ int_to_string(NativeArray.sum_int(t)))
+    -- an observable effect between producer and consumer
+    let p1 = NativeArray.map_int(ib, fn x -> x - 1)
+    println("between")
+    println(show_ints(NativeArray.to_list_int(NativeArray.map_int(p1, fn x -> x * 2))))
+    -- a body that can panic (division): Purity keeps it in place
+    println(show_ints(NativeArray.to_list_int(NativeArray.map_int(NativeArray.map_int(ia, fn x -> x / 2), fn y -> y + 1))))
+    -- callback passed as a parameter
+    println(show_ints(NativeArray.to_list_int(param_chain(ia, fn x -> x * 7))))
+    -- impure callback bodies
+    println(show_ints(NativeArray.to_list_int(impure_chain(ia))))
+  end
+end
