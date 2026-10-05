@@ -73,7 +73,7 @@ TIMEOUT=${TWO_NODE_TIMEOUT:-60}
 # --list K/N deals the sorted list round-robin rather than cutting it into
 # contiguous runs: scenarios that share a prefix also share a cost (the four
 # control_* are 135-200 s each, the drain_* ~25-50 s), so a contiguous cut
-# would put every heavy family in one shard. CI's two-node job runs two shards.
+# would put every heavy family in one shard. CI's two-node job runs three shards.
 if [ "${1:-}" = "--list" ]; then
   shard=${2:-1/1}
   if [[ $shard =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] \
