@@ -1,0 +1,55 @@
+corpus	scenario	run	opt	status	total_ms	front_ms	tir_ms	back_ms	cpu_ms
+small	cold	1	2	miss	8714	1265	1101	6206	7410
+small	cold	2	2	miss	8813	1308	1114	6298	7520
+small	cold	3	2	miss	8671	1271	1119	6182	7430
+small	warm	1	2	src-hit	83				30
+small	warm	2	2	src-hit	88				30
+small	warm	3	2	src-hit	89				30
+small	comment	1	2	tir-hit	1929	378	1136		1870
+small	comment	2	2	tir-hit	1965	388	1158		1890
+small	comment	3	2	tir-hit	1939	383	1145		1870
+small	leaf	1	2	miss	2181	388	1154	542	2060
+small	leaf	2	2	miss	2206	378	1157	571	2060
+small	leaf	3	2	miss	2169	379	1147	542	2050
+small	sig	1	2	miss	2176	384	1143	548	2060
+small	sig	2	2	miss	2166	383	1140	547	2050
+small	sig	3	2	miss	2174	377	1177	526	2060
+small	field	1	2	miss	2156	375	1141	544	2060
+small	field	2	2	miss	2167	377	1137	558	2040
+small	field	3	2	miss	2156	377	1136	552	2060
+bench	cold	1	2	miss	8816	1232	1114	6373	7430
+bench	cold	2	2	miss	8864	1266	1115	6380	7430
+bench	cold	3	2	miss	8695	1238	1110	6252	7380
+bench	warm	1	2	src-hit	86				30
+bench	warm	2	2	src-hit	90				30
+bench	warm	3	2	src-hit	92				30
+bench	comment	1	2	tir-hit	1980	386	1167		1900
+bench	comment	2	2	tir-hit	1941	378	1139		1880
+bench	comment	3	2	tir-hit	1946	381	1144		1880
+bench	leaf	1	2	miss	2127	378	1137	518	2030
+bench	leaf	2	2	miss	2120	373	1141	513	2030
+bench	leaf	3	2	miss	2161	379	1155	526	2050
+bench	sig	1	2	n/a					
+bench	sig	2	2	n/a					
+bench	sig	3	2	n/a					
+bench	field	1	2	n/a					
+bench	field	2	2	n/a					
+bench	field	3	2	n/a					
+topology	cold	1	2	miss	25387	1340	1734	22171	23830
+topology	cold	2	2	miss	25232	1352	1709	22028	23740
+topology	cold	3	2	miss	25222	1368	1723	21991	23750
+topology	warm	1	2	src-hit	91				30
+topology	warm	2	2	src-hit	91				30
+topology	warm	3	2	src-hit	93				30
+topology	comment	1	2	tir-hit	8043	531	1737		7950
+topology	comment	2	2	tir-hit	8033	515	1736		7939
+topology	comment	3	2	tir-hit	8057	521	1756		7970
+topology	leaf	1	2	miss	18846	506	1736	16458	18640
+topology	leaf	2	2	miss	18759	513	1750	16350	18480
+topology	leaf	3	2	miss	18641	517	1721	16245	18370
+topology	sig	1	2	n/a					
+topology	sig	2	2	n/a					
+topology	sig	3	2	n/a					
+topology	field	1	2	n/a					
+topology	field	2	2	n/a					
+topology	field	3	2	n/a					
