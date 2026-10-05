@@ -588,3 +588,19 @@ let actor_body_handlers (a : actor_def) : actor_handler list =
   match a.actor_on_stop with
   | None -> a.actor_handlers
   | Some h -> a.actor_handlers @ [h]
+
+(** [Actor.inspect_state] (observe plan R4): a state field whose declared
+    type has no printable value (it mentions a function, a type variable or
+    a session channel) renders as this text on both backends instead of
+    through [to_string], which has no [Show] to pick for it. *)
+let rec inspect_unprintable_ty (t : ty) : bool =
+  match t with
+  | TyArrow _ | TyVar _ | TyChan _ -> true
+  | TyCon (_, args) | TyTuple args -> List.exists inspect_unprintable_ty args
+  | TyRecord fs -> List.exists (fun (_, t) -> inspect_unprintable_ty t) fs
+  | TyLinear (_, t) | TyRefine (t, _, _) -> inspect_unprintable_ty t
+  | TyNat _ | TyNatOp _ -> false
+
+(** The text such a field renders as; [None] means it prints normally. *)
+let inspect_field_placeholder (t : ty) : string option =
+  if inspect_unprintable_ty t then Some "<opaque>" else None

@@ -1,0 +1,36 @@
+-- Actor.inspect_state of an actor whose BLOCK mailbox is at its limit
+-- (R4 of the observe plan): the request bypasses the limit, so the inspector
+-- is not parked behind the backlog's senders and gets its answer once the
+-- stalled handler returns. Compiled only: the interpreter refuses the BLOCK
+-- policy (it cannot park a sender).
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+
+  actor Staller do
+    state { n : Int }
+    init  { n: 0 }
+    on Stall() do
+      sleep_ms(300)
+      state
+    end
+    on Tick() do
+      { n: state.n + 1 }
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let d = Actor.debug(io)
+    let st = spawn(Staller)
+    Actor.set_queue_limit(st, 1, 3)
+    let _ = send(st, Stall())
+    sleep_ms(50)
+    let _ = send(st, Tick())
+    -- The mailbox is at its BLOCK limit: an ordinary send would park here.
+    match Actor.inspect_state(d, st, 3000) do
+      Ok(s) -> println("block full: answered " ++ s)
+      Err(_) -> println("block full: error")
+    end
+  end
+end

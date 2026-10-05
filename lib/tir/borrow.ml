@@ -455,6 +455,9 @@ let extern_owned_builtins : string list = [
        appender registry (march_logger_register_appender), releasing both
        when the entry is replaced, removed or cleared. *)
     "logger_register_appender";
+    (* actor_inspect_store keeps its String in the proc's inspect_out slot
+       until the actor loop sends it as the reply (observe plan R4). *)
+    "actor_inspect_store";
     "panic_"; "unreachable_"; "todo_"; "print_stderr"; "char_to_int";
     "char_is_digit"; "char_is_alphanumeric"; "char_is_whitespace";
     "list_append"; "list_concat";
@@ -504,6 +507,10 @@ let extern_owned_builtins : string list = [
     "actor_register"; "actor_unregister"; "actor_whereis";
     "send_checked"; "revoke_cap"; "is_cap_valid";
     "register_actor_on_stop";
+    (* Observe plan R4: registration reads two static closures; the inspect
+       request reads the pid (march_actor_inspect never consumes it).
+       actor_inspect_store is in [extern_owned_builtins]: it keeps its String. *)
+    "register_actor_inspect"; "actor_inspect";
 ]
 
 (** True iff parameter [idx] of C extern / TIR builtin [fn_name] is borrowed

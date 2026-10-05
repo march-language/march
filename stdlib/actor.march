@@ -61,6 +61,59 @@ mod Actor do
   -- covered: unforgeability is a process property first.
   proof cap Introspect
 
+  -- Debug authority: the right to see what an actor holds, its state (and,
+  -- over the observe socket, its queued messages), which can be anything the
+  -- program keeps: tokens, personal data. A stronger gate than Introspect,
+  -- which only reveals counts and names; minted the same way, from Cap(IO).
+  proof cap Debug
+
+  doc """
+  Mint the debug capability from the root capability: mint it once in
+  `main` and forward it only to code that may read actor state.
+
+      fn main(io : Cap(IO)) do
+        let d = Actor.debug(io)
+        match Actor.inspect_state(d, pid, 1000) do ... end
+      end
+  """
+  fn debug(io : Cap(IO)) : Cap(Actor.Debug) do
+    mint_cap(io)
+  end
+
+  -- Why Actor.inspect_state could not answer:
+  --   InspectTimeout: the actor did not get to the request in time (a long
+  --     handler, a backlog ahead of it, or it was inside a nested receive);
+  --   InspectDead: the pid is not alive;
+  --   InspectSelf: an actor asked about itself (it would wait on itself);
+  --   InspectFailed: the actor could not render its state (the reason).
+  type InspectError = InspectTimeout | InspectDead | InspectSelf | InspectFailed(String)
+
+  doc """
+  The actor's current state, rendered as text (the same rendering
+  `to_string` gives a record). The request queues behind every message
+  already sent to the actor and is answered between two handlers on the
+  actor's own thread, so the state is never seen half-updated; a full or
+  bounded mailbox does not drop it. An actor inside a nested `receive()`
+  answers `InspectTimeout` at once, and its `receive()` still gets its real
+  message. Within `timeout_ms` or `Err(InspectTimeout)`.
+
+      match Actor.inspect_state(d, pid, 1000) do
+        Ok(text) -> println(text)
+        Err(Actor.InspectTimeout) -> println("busy")
+        Err(e) -> println("cannot inspect")
+      end
+  """
+  fn inspect_state(_d : Cap(Actor.Debug), pid, timeout_ms : Int) : Result(String, InspectError) do
+    match actor_inspect(pid, timeout_ms) do
+      Ok(text) -> Ok(text)
+      Err(why) ->
+        if why == "timeout" || why == "busy" do Err(InspectTimeout)
+        else if why == "dead" do Err(InspectDead)
+        else if why == "self" do Err(InspectSelf)
+        else Err(InspectFailed(why)) end end end
+    end
+  end
+
   doc """
   Mint the introspection capability from the root capability. The only way to
   obtain a `Cap(Actor.Introspect)`: mint it once in `main` and forward it to

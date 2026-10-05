@@ -1,0 +1,8 @@
+state: { count: 3, tags: [a, b], best: Some(3), shape: Box(2, 3), note: q"uote, hooks: <opaque> }
+drop_new full: answered
+self: InspectSelf
+panicking render: InspectFailed
+vault still alive, n=1
+nested receive: InspectTimeout
+waiter received: real
+dead: InspectDead
