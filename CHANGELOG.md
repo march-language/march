@@ -174,6 +174,12 @@ git log is authoritative for exact commits.
 - **A record field read on a value the compiler typed as a scalar now stops
   with an internal error naming it,** instead of writing LLVM IR that clang
   rejects (`'%w63…' defined with type 'i64' but expected 'ptr'`).
+- **A compiled program that calls `Process.set_env` at the top of `main` no
+  longer crashes, now and then, at startup.** On Linux the runtime read
+  the environment from the main thread while `main` was already running on a
+  worker, and `setenv` freed the array it was reading, so the program died with
+  `fatal SIGSEGV ... sched=-1` in `getenv`. The runtime now reads those settings
+  before `main` can start.
 - **Security: a signed hot deploy now runs only the bytes the operator signed.**
   A signed `ACTIVATE` named its artifact by the compiler's compilation hash, and
   nothing checked the bytes stored under it, so anyone who could write a node's
