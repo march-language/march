@@ -3195,6 +3195,14 @@ static void spawn_main_impl(void (*fn)(void), int force_pin) {
        it: a program compiled --pin-main needs the main thread to run at all
        (Cocoa/GLFW), so honouring MARCH_PIN_MAIN=0 there would break it in a
        way the user cannot diagnose from the message they would not get. */
+    /* The observe socket reads its environment (getenv) when it starts.
+     * Start it here, before `main` is runnable: march_run_scheduler starts it
+     * too, but when a scheduler is already running in the background
+     * (march_ensure_sched_started) `main` is executing by then, and its
+     * Process.set_env (setenv frees the old environ) racing that getenv on
+     * this thread is a SIGSEGV in getenv.  Both calls are once-only. */
+    march_observe_snapshot_install();
+    march_observe_maybe_start();
     /* `main` is the one unit that follows the current code version instead
      * of pinning an epoch (march_proc.code_epoch): it runs for the process
      * lifetime and never reaches a marker, so a pinned main would keep its
@@ -7315,9 +7323,11 @@ int64_t march_actor_get_int(void *actor, int64_t index) {
  * shutdown: the background thread drives all actors to completion, then the
  * join returns and the program exits normally. */
 void march_run_scheduler(void) {
-    /* The observe socket (march_observe.h): started here, on the main OS
-     * thread before any green thread exists, when MARCH_OBSERVE_SOCKET (or
-     * MARCH_HOT_RELOAD_SOCKET) is set.  Once only; a no-op otherwise.  The
+    /* The observe socket (march_observe.h): started on the main OS thread
+     * when MARCH_OBSERVE_SOCKET (or MARCH_HOT_RELOAD_SOCKET) is set.  Once
+     * only; a no-op otherwise.  A compiled program already started it in
+     * spawn_main_impl, before `main` could run (see the comment there); this
+     * call covers hosts that run the scheduler without march_spawn_main.  The
      * snapshot verbs register first: registration closes when it starts. */
     march_observe_snapshot_install();
     march_observe_maybe_start();

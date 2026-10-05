@@ -173,6 +173,12 @@ git log is authoritative for exact commits.
   `SessionNode.initiate` now notices the offer's name was unregistered, withdraws
   the invitation, and looks again for the replacement offer, as it already did
   for an offer that refused with "closing".
+- **A compiled program that calls `Process.set_env` at the top of `main` no
+  longer crashes, now and then, at startup.** On Linux the runtime read
+  the environment from the main thread while `main` was already running on a
+  worker, and `setenv` freed the array it was reading, so the program died with
+  `fatal SIGSEGV ... sched=-1` in `getenv`. The runtime now reads those settings
+  before `main` can start.
 - **Security: a signed hot deploy now runs only the bytes the operator signed.**
   A signed `ACTIVATE` named its artifact by the compiler's compilation hash, and
   nothing checked the bytes stored under it, so anyone who could write a node's
