@@ -2328,6 +2328,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="SessionNode.html#type-RunError"><span class="sb-kind" style="color:var(--ty)">T</span>RunError</a>
 <a class="sl" href="SessionNode.html#type-OfferCount"><span class="sb-kind" style="color:var(--ty)">T</span>OfferCount</a>
 <a class="sl" href="SessionNode.html#type-Offer"><span class="sb-kind" style="color:var(--ty)">T</span>Offer</a>
+<a class="sl" href="SessionNode.html#type-ApWait"><span class="sb-kind" style="color:var(--ty)">T</span>ApWait</a>
 <a class="sl" href="SessionNode.html#type-ApMix"><span class="sb-kind" style="color:var(--ty)">T</span>ApMix</a>
 <a class="sl" href="SessionNode.html#fn-accept_from"><span class="sb-kind" style="color:var(--fn)">F</span>accept_from</a>
 <a class="sl" href="SessionNode.html#fn-accepts"><span class="sb-kind" style="color:var(--fn)">F</span>accepts</a>
@@ -2819,6 +2820,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Uri.html#fn-to_string"><span class="sb-kind" style="color:var(--fn)">F</span>to_string</a></div></div>
 <div class="sb-group"><div class="sb-group-hdr" data-href="Vault.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Vault.html">Vault</a></div><div class="sb-sub"><a class="sl" href="Vault.html#fn-all"><span class="sb-kind" style="color:var(--fn)">F</span>all</a>
 <a class="sl" href="Vault.html#fn-clear"><span class="sb-kind" style="color:var(--fn)">F</span>clear</a>
+<a class="sl" href="Vault.html#fn-close"><span class="sb-kind" style="color:var(--fn)">F</span>close</a>
 <a class="sl" href="Vault.html#fn-delete"><span class="sb-kind" style="color:var(--fn)">F</span>delete</a>
 <a class="sl" href="Vault.html#fn-drop"><span class="sb-kind" style="color:var(--fn)">F</span>drop</a>
 <a class="sl" href="Vault.html#fn-get"><span class="sb-kind" style="color:var(--fn)">F</span>get</a>
@@ -2826,6 +2828,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 <a class="sl" href="Vault.html#fn-has"><span class="sb-kind" style="color:var(--fn)">F</span>has</a>
 <a class="sl" href="Vault.html#fn-incr"><span class="sb-kind" style="color:var(--fn)">F</span>incr</a>
 <a class="sl" href="Vault.html#fn-keys"><span class="sb-kind" style="color:var(--fn)">F</span>keys</a>
+<a class="sl" href="Vault.html#fn-live_tables"><span class="sb-kind" style="color:var(--fn)">F</span>live_tables</a>
 <a class="sl" href="Vault.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
 <a class="sl" href="Vault.html#fn-ns_drop"><span class="sb-kind" style="color:var(--fn)">F</span>ns_drop</a>
 <a class="sl" href="Vault.html#fn-ns_get"><span class="sb-kind" style="color:var(--fn)">F</span>ns_get</a>
@@ -2898,6 +2901,16 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 * `ns_set`/`ns_get`/`ns_drop` take a namespace STRING instead of a
   handle, so there is no handle to carry `v`.  Prefer the handle API.</code></pre><p>Writing the type out (<code>fn table() : Vault(v)</code>) is the explicit opt back into an element-erased table. (<code>Config</code> no longer needs it: its tables are <code>Vault(Config.Value)</code>, a tagged sum read back through typed keys.)</p><p>Basic operations: Vault.new(name)                      — create a named table Vault.set(table, key, value)         — insert or overwrite Vault.set_ttl(table, key, value, s)  — insert with TTL in seconds Vault.get(table, key)                — returns Some(value) or None Vault.drop(table, key)               — remove a key (no-op if absent) Vault.update(table, key, fn)         — apply fn to existing value Vault.size(table)                    — number of live entries</p><p>TTL semantics: expiry is checked lazily on get/update/size.  There is no background sweeper thread; expired entries are evicted on access.</p></div><h2>Functions</h2><div class="item" id="fn-all"><div class="ih"><span class="badge bfn">fn</span><span class="name">all</span><span class="sig">all(table)</span><a class="anchor-link" href="#fn-all" title="Link">#</a></div><div class="ib"><p>Return all key-value pairs in the table as a list of (String, a) tuples.</p></div></div>
 <div class="item" id="fn-clear"><div class="ih"><span class="badge bfn">fn</span><span class="name">clear</span><span class="sig">clear(table)</span><a class="anchor-link" href="#fn-clear" title="Link">#</a></div><div class="ib"><p>Remove all entries from the table, leaving it empty.</p></div></div>
+<div class="item" id="fn-close"><div class="ih"><span class="badge bfn">fn</span><span class="name">close</span><span class="sig">close(table) : Unit</span><a class="anchor-link" href="#fn-close" title="Link">#</a></div><div class="ib"><p>Retire a table: unregister its name (so <code>whereis</code> and <code>open</code> no longer find it, and a later <code>new</code> of the same name makes a fresh table) and release everything it holds.  The table's memory is freed once the last handle to it is gone.</p><pre><code>For a table with one owner -- per-session or per-request state -- close it
+when the owner is done: a table that is never closed stays registered,
+with its contents, for the life of the process.  A handle used after the
+close still works, on an empty, unregistered table, so a task that
+outlives its owner by a little reads `None` rather than crashing.
+
+    let t = Vault.new(&quot;request_&quot; ++ id)
+    Vault.set(t, &quot;user&quot;, u)
+    ...
+    Vault.close(t)</code></pre></div></div>
 <div class="item" id="fn-delete"><div class="ih"><span class="badge bfn">fn</span><span class="name">delete</span><span class="sig">delete(table, key)</span><a class="anchor-link" href="#fn-delete" title="Link">#</a></div><div class="ib"><p>Remove a key from the table. Alias for <code>drop</code>.  No-op if the key does not exist.</p></div></div>
 <div class="item" id="fn-drop"><div class="ih"><span class="badge bfn">fn</span><span class="name">drop</span><span class="sig">drop(table, key)</span><a class="anchor-link" href="#fn-drop" title="Link">#</a></div><div class="ib"><p>Remove a key from the table.  No-op if the key does not exist.</p></div></div>
 <div class="item" id="fn-get"><div class="ih"><span class="badge bfn">fn</span><span class="name">get</span><span class="sig">get(table, key)</span><a class="anchor-link" href="#fn-get" title="Link">#</a></div><div class="ib"><p>Look up a key.  Returns Some(value) if present and not expired, None otherwise.</p></div></div>
@@ -2912,6 +2925,7 @@ ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
 Cost: O(n) where n is the number of entries in the table. Collected shard by
 shard, so — like `size` — the list is not a single instant's snapshot of the
 whole table, and the key order is unspecified.</code></pre></div></div>
+<div class="item" id="fn-live_tables"><div class="ih"><span class="badge bfn">fn</span><span class="name">live_tables</span><span class="sig">live_tables() : Int</span><a class="anchor-link" href="#fn-live_tables" title="Link">#</a></div><div class="ib"><p>The number of Vault tables this process holds: created and not yet freed. A leak gauge: a long-running program whose count keeps rising is making tables it never <code>close</code>s.  Always counts what the runtime holds, so a closed table still counts until its last handle is dropped.</p></div></div>
 <div class="item" id="fn-new"><div class="ih"><span class="badge bfn">fn</span><span class="name">new</span><span class="sig">new(name) : Vault(v)</span><a class="anchor-link" href="#fn-new" title="Link">#</a></div><div class="ib"><p>Create a new named vault table.  Returns a <code>Vault(v)</code> handle, where <code>v</code> is the type of the values the table holds.</p><pre><code>    let counters = Vault.new(&quot;counters&quot;)
     Vault.set(counters, &quot;hits&quot;, 1)
     Vault.get(counters, &quot;hits&quot;)   -- Some(1) : Option(Int)
