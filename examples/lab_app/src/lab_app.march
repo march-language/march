@@ -1,0 +1,338 @@
+-- The multi-host lab's app (scripts/lab/, docs/lab.md): a three-role
+-- choreography served by two pools, with no hand-written `main`.
+--
+--   Shop   initiated by the `ingress` pool's hook, over and over
+--   Stock  a function, offered on every node of the `work` pool
+--   Ledger an actor (it keeps a running total), offered on ONE node of the
+--          `work` pool carrying the label "books" (`count = 1`)
+--
+-- One session: Shop asks Stock for item 1, 2, 3. For each item Stock chooses
+-- `have` (it tells Shop its reply, tells Ledger to book it, and Ledger tells
+-- Shop the new total) or, at the last item, `out` (both are told, and the
+-- session ends). The `ingress` hook counts every session's outcome and writes
+-- the counters to a stats file the lab reads.
+mod LabApp do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.Clock
+  needs IO.Spawn
+  needs IO.FileRead
+  needs IO.FileWrite
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Order do
+    role Stock needs IO.Mut
+    role Ledger needs IO.Console
+    loop do
+      want: Shop -> Stock : Int
+      choose by Stock:
+        have -> Stock -> Shop : String
+                book: Stock -> Ledger : Int
+                booked: Ledger -> Shop : String
+        out  -> Stock -> Shop : String
+                skip: Stock -> Ledger : Int
+                stop
+      end
+    end
+  end
+
+  -- ── shared by both pools ─────────────────────────────────────────────
+
+  mod Probe do
+    needs IO.FileWrite
+    needs IO.Clock
+    needs IO.Spawn
+
+    -- Every node writes `$HOME/lab-probe` every 5 s: its live heap objects
+    -- and when it counted them (the lab's soak samples it).
+    fn start(home : String) : () do
+      let _ = task_spawn(fn _ -> probe_loop(home))
+      ()
+    end
+
+    pfn probe_loop(home : String) : Int do
+      let line = "live " ++ int_to_string(live_allocs()) ++ "\nat " ++ int_to_string(unix_time_ms()) ++ "\n"
+      let _ = File.write(home ++ "/lab-probe.tmp", line)
+      let _ = File.rename(home ++ "/lab-probe.tmp", home ++ "/lab-probe")
+      sleep_ms(5000)
+      probe_loop(home)
+    end
+  end
+
+  -- ── the work pool: Stock (every node) and Ledger (one "books" node) ──
+
+  mod Work do
+    needs IO
+    needs IO.Console
+    needs IO.Mut
+    needs Session.Live
+    needs ClusterNode.Live
+
+    type Env = { node : String }
+
+    fn start(io : Cap(IO), _node : Cap(ClusterNode.Live)) : Env do
+      Probe.start(Env.get("HOME", "/tmp"))
+      { node: Env.get("MARCH_NODE_NAME", "work") }
+    end
+
+    pfn tally() : Vault(Int) do
+      match Vault.whereis("lab_stock") do
+        Some(t) -> t
+        None -> Vault.new("lab_stock")
+      end
+    end
+
+    -- What Stock tells Shop: `<node>|<tag>|<served>|<price>`. The hot_role
+    -- scenario rewrites the tag in place and hot-deploys it; `served` is a
+    -- counter kept in this node's Vault, so it keeps counting across the
+    -- deploy only if the new code shares the old code's runtime.
+    fn reply(env : Env, n : Int) : String do
+      let served = Vault.incr(tally(), "served", 1)
+      env.node ++ "|stock-v1|" ++ int_to_string(served) ++ "|" ++ int_to_string(n * 10)
+    end
+
+    -- Order.Stock, bound to a function: the pool's environment, the session,
+    -- the role's grant (`role Stock needs IO.Mut`), the entry state.
+    fn stock(env : Env, s : Cap(Session.Live), m : Cap(IO.Mut), st : Order_Stock.Entry) : Order_Stock.Yield do
+      Order_Stock.recv_Want(s, st, fn (n, st1) ->
+        if n < 3 do
+          let st2 = Order_Stock.choose_have(s, st1, reply(env, n))
+          stock(env, s, m, Order_Stock.send_Book(s, st2, n))
+        else
+          let st2 = Order_Stock.choose_out(s, st1, reply(env, n))
+          Order_Stock.close(s, Order_Stock.send_Skip(s, st2, n))
+        end)
+    end
+
+    -- Order.Ledger, bound to an actor: one per offer, spawned with the pool's
+    -- environment; it keeps the running total across sessions, so a Ledger
+    -- that moves to another node starts again from 0.
+    actor LedgerActor do
+      state { total : Int, node : String, sessions : LinearMap(String, Order_Ledger.Parked_Ledger) }
+      init(env : Env) { total: 0, node: env.node, sessions: LinearMap.empty_string() }
+      on Start(sid : String, s : Cap(Session.Live), _con : Cap(IO.Console)) do
+        if state.total == 0 do println("ledger: first session on " ++ state.node) else () end
+        let parked = Order_Ledger.await_have_out(s, Order_Ledger.register(s, 0))
+        match LinearMap.put(state.sessions, sid, parked) do
+          (None, m) -> { state with sessions: m }
+          (Some(old), m) ->
+            Order_Ledger.take_closed(Order_Ledger.cancel(s, old))
+            { state with sessions: m }
+        end
+      end
+      on Deliver(sid : String, s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
+        match LinearMap.take_slot(state.sessions, sid) do
+          (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
+          (Some(parked), slot) ->
+            match Order_Ledger.resume(parked, from, msg, ep) do
+              Got_Book(n, st) ->
+                let t = state.total + n
+                let st2 = Order_Ledger.send_Booked(s, st, state.node ++ "|" ++ int_to_string(t))
+                { state with total: t, sessions: LinearMap.fill(slot, Order_Ledger.await_have_out(s, st2)) }
+              Got_Skip(_n, st) ->
+                Order_Ledger.take_closed(Order_Ledger.finish(s, st))
+                { state with sessions: LinearMap.vacate(slot) }
+            end
+        end
+      end
+      on Cancel(sid : String, s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
+        match LinearMap.take(state.sessions, sid) do
+          (None, m) -> { state with sessions: m }
+          (Some(parked), m) ->
+            Order_Ledger.take_closed(Order_Ledger.cancel(s, parked))
+            { state with sessions: m }
+        end
+      end
+    end
+  end
+
+  -- ── the ingress pool: initiates Shop sessions and counts them ─────────
+
+  mod Ingress do
+    needs IO
+    needs IO.Mut
+    needs IO.Clock
+    needs IO.Spawn
+    needs IO.FileRead
+    needs IO.FileWrite
+    needs Session.Live
+    needs ClusterNode.Live
+
+    type Env = { stats : String }
+
+    -- The hook returns at once: the driver runs in a task, and each session
+    -- in a task the Driver actor spawns, so a session started after a hot
+    -- deploy runs the new code (a task inherits its spawner's epoch, and the
+    -- actor moves to the new epoch at its next message).
+    fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Env do
+      let home = Env.get("HOME", "/tmp")
+      let stats = home ++ "/lab-stats"
+      Probe.start(home)
+      let d = start_driver()
+      let _ = task_spawn(fn _ -> drive(d, io, node, home ++ "/lab-traffic"))
+      let _ = task_spawn(fn _ -> report(stats))
+      { stats: stats }
+    end
+
+    pfn tally() : Vault(Int) do
+      match Vault.whereis("lab_ingress") do
+        Some(t) -> t
+        None -> Vault.new("lab_ingress")
+      end
+    end
+
+    pfn last() : Vault(String) do
+      match Vault.whereis("lab_ingress_last") do
+        Some(t) -> t
+        None -> Vault.new("lab_ingress_last")
+      end
+    end
+
+    pfn count(key : String) : () do
+      let _ = Vault.incr(tally(), key, 1)
+      ()
+    end
+
+    -- A Stock reply `<node>|<tag>|<served>|<price>`: counted per tag and node,
+    -- and the highest `served` seen per node kept (the lab checks it never
+    -- goes back).
+    pfn saw_stock(branch : String, v : String) : () do
+      match String.split(v, "|") do
+        Cons(node, Cons(tag, Cons(served, _))) ->
+          count(branch ++ ":" ++ tag ++ "@" ++ node)
+          let n = match string_to_int(served) do
+            Some(k) -> k
+            None -> 0
+          end
+          let key = "served@" ++ node
+          let t = tally()
+          let top = Vault.get_or(t, key, 0)
+          if n > top do Vault.set(t, key, n) else () end
+          -- Replies of concurrent sessions arrive a little out of order; a
+          -- counter that fell under half its high mark started again.
+          if top > 20 && n * 2 < top do count("served_went_back") else () end
+        _ -> count("bad_reply")
+      end
+    end
+
+    pfn saw_ledger(v : String) : () do
+      match String.split(v, "|") do
+        Cons(node, _) ->
+          count("booked@" ++ node)
+          Vault.set(last(), "ledger", node)
+        _ -> count("bad_reply")
+      end
+    end
+
+    fn shop(s : Cap(Session.Live), st : Order_Shop.Entry, n : Int) : Order_Shop.Yield do
+      let st1 = Order_Shop.send_Want(s, st, n)
+      Order_Shop.offer_have_out(s, st1,
+        fn (v, st2) ->
+          saw_stock("have", v)
+          Order_Shop.recv_Booked(s, st2, fn (b, st3) ->
+            saw_ledger(b)
+            shop(s, st3, n + 1)),
+        fn (v, st2) ->
+          saw_stock("out", v)
+          Order_Shop.close(s, st2))
+    end
+
+    -- One session, its outcome counted: finished, drained (a hot deploy
+    -- ended it at a loop boundary), refused (no offer would take a role), or
+    -- failed (anything else: a lost session).
+    fn session(io : Cap(IO), node : Cap(ClusterNode.Live)) : () do
+      count("started")
+      match Order_Run.initiate_Shop(io, node, fn (s, st) -> shop(s, st, 1)) do
+        Ok(Session.Finished) -> count("finished")
+        Ok(Session.Drained(_)) -> count("drained")
+        Err(SessionNode.NoOffer(_, why)) ->
+          count("refused")
+          Vault.set(last(), "refused", why)
+        Err(e) ->
+          count("failed")
+          Vault.set(last(), "failed", Order_Run.error_message(e))
+      end
+    end
+
+    type DriverState = { started : Int }
+
+    actor Driver do
+      state { started : Int }
+      init  { started: 0 }
+      on Go(io : Cap(IO), node : Cap(ClusterNode.Live)) do
+        let _ = task_spawn(fn _ -> do
+          session(io, node)
+          0
+        end)
+        { started: state.started + 1 }
+      end
+    end
+
+    fn start_driver() : Pid(DriverState) do spawn(Driver) end
+
+    fn go(d : Pid(DriverState), io : Cap(IO), node : Cap(ClusterNode.Live)) : () do
+      let _ = send(d, Go(io, node))
+      ()
+    end
+
+    -- How fast to start sessions: `$HOME/lab-traffic` holds `<every ms>
+    -- <most in flight>` (`0` pauses), re-read before each one; without it,
+    -- one a second, at most 4 at once. A session not started because 4 are
+    -- still running is counted as `skipped`.
+    pfn traffic(path : String) : (Int, Int) do
+      match File.read(path) do
+        Ok(text) ->
+          match String.split(String.trim(text), " ") do
+            Cons(e, Cons(k, _)) -> (int_or(e, 1000), int_or(k, 4))
+            Cons(e, Nil) -> (int_or(e, 1000), 4)
+            Nil -> (1000, 4)
+          end
+        Err(_) -> (1000, 4)
+      end
+    end
+
+    pfn int_or(s : String, d : Int) : Int do
+      match string_to_int(s) do
+        Some(n) -> n
+        None -> d
+      end
+    end
+
+    pfn in_flight() : Int do
+      let t = tally()
+      Vault.get_or(t, "started", 0) - Vault.get_or(t, "finished", 0) - Vault.get_or(t, "drained", 0)
+        - Vault.get_or(t, "refused", 0) - Vault.get_or(t, "failed", 0)
+    end
+
+    pfn drive(d : Pid(DriverState), io : Cap(IO), node : Cap(ClusterNode.Live), path : String) : Int do
+      match traffic(path) do
+        (every, limit) ->
+          if every <= 0 do sleep_ms(500)
+          else
+            if in_flight() < limit do go(d, io, node) else count("skipped") end
+            sleep_ms(every)
+          end
+      end
+      drive(d, io, node, path)
+    end
+
+    -- The stats file, rewritten every second: `key value` lines, the
+    -- counters in key order, then the last reasons.
+    pfn report(path : String) : Int do
+      let t = tally()
+      let l = last()
+      let lines = List.map(List.sort_by(Vault.keys(t), fn (a, b) -> a < b), fn k -> k ++ " " ++ int_to_string(Vault.get_or(t, k, 0)))
+      let reasons = List.map(List.sort_by(Vault.keys(l), fn (a, b) -> a < b), fn k -> "last_" ++ k ++ " " ++ Vault.get_or(l, k, ""))
+      let body = "at " ++ int_to_string(unix_time_ms()) ++ "\n" ++ String.join(List.append(lines, reasons), "\n") ++ "\n"
+      let _ = File.write(path ++ ".tmp", body)
+      let _ = File.rename(path ++ ".tmp", path)
+      sleep_ms(1000)
+      report(path)
+    end
+  end
+end
