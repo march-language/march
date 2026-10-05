@@ -154,6 +154,18 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Security: the control plane's TCP API no longer takes writes from anyone who can
+  reach it.** Any peer could append forged lines to a candidate's audit log
+  (`AUDIT_COPY`) and fill its disk with artifacts under made-up hashes (`CAS_PUT`, 64 MiB
+  a call, never removed). Now the candidates' own copies (`AUDIT_COPY`, `RELEASE_COPY`)
+  need the cluster's handshake (the cluster secret, or a certificate carrying
+  `Ctl.Control:offer`); `CAS_PUT` takes only a hash that a release signed by your deploy
+  key, `STAGE`d on the same connection, names; uploads no stored release adopts are
+  capped (`MARCH_CONTROL_CAS_PENDING_MAX_BYTES`) and removed after a grace period; the
+  audit log rotates past `MARCH_CONTROL_AUDIT_MAX_BYTES`; and a candidate serves at most
+  `MARCH_CONTROL_MAX_CONNS` connections, closing idle ones. Reads stay open. forge
+  stages its uploads itself. Candidates must be upgraded together: an older one's copies
+  are refused. See "Who may write to the control API" in the hot-reload guide.
 - **`MARCH_NO_UNBOX=1` is now part of the compilation cache key.** It classifies
   every type Boxed and so changes the emitted code, but was not in the CAS key,
   so an A/B run reused whichever variant was cached first. It now adds a

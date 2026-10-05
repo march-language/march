@@ -733,15 +733,44 @@ end
 -- (accepted, or refused and why), each order a leader sends, each answer, and
 -- each release's halt or completion (`Control.audit_*` writes the lines). The
 -- leader appends here and queues the line; `ctl_audit_copier` appends the
--- queue on the other reachable candidates (`AUDIT_COPY`), so the file outlives
--- a leader change. The control API's `AUDIT [n]` answers this candidate's file.
+-- queue on the other reachable candidates (`AUDIT_COPY`, which only an
+-- authenticated candidate may send), so the file outlives a leader change.
+-- The control API's `AUDIT [n]` answers this candidate's file.
+--
+-- The file is bounded: once appending would take it past
+-- MARCH_CONTROL_AUDIT_MAX_BYTES (default 16 MiB) it is renamed to
+-- `audit.jsonl.1` (replacing the one before) and a new one is started, so a
+-- candidate keeps at most twice that.
 
 pfn ctl_audit_file() : String do ctl_dir() ++ "/audit.jsonl" end
 
+-- The audit file's size as this process has written it: read once, then
+-- counted. [ctl_audit_append] holds the "audit_file" lock around it.
+pfn ctl_audit_size() : Int do
+  match Vault.get(ctl_locks(), "audit_bytes") do
+    Some(n) -> n
+    None ->
+      let n = match File.read(ctl_audit_file()) do
+        Ok(t) -> String.byte_size(t)
+        Err(_) -> 0
+      end
+      Vault.set(ctl_locks(), "audit_bytes", n)
+      n
+  end
+end
+
 pfn ctl_audit_append(text : String) : () do
   let _ = Dir.mkdir_p(ctl_dir())
+  let locked = ctl_lock("audit_file", 1000)
+  let len = String.byte_size(text)
+  let have = ctl_audit_size()
+  let base = if have > 0 && have + len > ctl_cfg_int("audit_max", 16777216) do
+    let _ = File.rename(ctl_audit_file(), ctl_audit_file() ++ ".1")
+    0
+  else have end
   let _ = File.append(ctl_audit_file(), text)
-  ()
+  Vault.set(ctl_locks(), "audit_bytes", base + len)
+  if locked do ctl_unlock("audit_file") else () end
 end
 
 pfn ctl_audit(line : String) : () do
@@ -766,19 +795,20 @@ pfn ctl_audit_copier(node : Cap(ClusterNode.Live), port : Int) : () do
   if batch != "" do
     List.each(ctl_others(node, port), fn hp ->
       let (host, cport) = hp
-      let _ = ctl_call(host, cport, "AUDIT_COPY " ++ int_to_string(String.byte_size(batch)) ++ "\n" ++ batch)
+      let _ = ctl_call_auth(node, host, cport, "AUDIT_COPY " ++ int_to_string(String.byte_size(batch)), batch)
       ())
   else () end
   ctl_audit_copier(node, port)
 end
 
 -- The last [n] lines of this candidate's audit log (all when [n] is 0), as
--- the control API answers `AUDIT`.
+-- the control API answers `AUDIT`: the rotated file's, then the current one's.
 pfn ctl_audit_answer(n : Int) : String do
-  let lines = match File.read(ctl_audit_file()) do
+  let read = fn path -> match File.read(path) do
     Ok(t) -> List.filter(String.split(t, "\n"), fn x -> x != "")
     Err(_) -> Nil
   end
+  let lines = List.append(read(ctl_audit_file() ++ ".1"), read(ctl_audit_file()))
   let total = List.length(lines)
   let keep = if n > 0 && n < total do List.drop(lines, total - n) else lines end
   "AUDIT " ++ int_to_string(List.length(keep)) ++ "\n" ++ String.join(List.map(keep, fn x -> x ++ "\n"), "") ++ "END\n"
@@ -908,9 +938,33 @@ end
 --
 -- A TCP line protocol on every candidate: the reload socket's unsigned verbs,
 -- and `RELEASE <size>` (a release document follows), `STATUS`, `LEADER`,
--- `AUDIT [n]` (this candidate's audit log) and the candidates' own
--- `RELEASE_COPY <size>` and `AUDIT_COPY <size>`. A standby forwards `RELEASE`
--- and `STATUS` to the leader, so forge can talk to any candidate.
+-- `AUDIT [n]` (this candidate's audit log), `STAGE <size>` and `CAS_PUT`
+-- (artifact uploads), and the candidates' own `RELEASE_COPY <size>` and
+-- `AUDIT_COPY <size>`. A standby forwards `RELEASE` and `STATUS` to the
+-- leader, so forge can talk to any candidate.
+--
+-- Who may write (security review of step 12, 2026-10-04; the control plane
+-- still holds no root key, D37):
+-- - `RELEASE`: anyone; the leader stores only a release the operator's deploy
+--   key signed. A forwarded one is the same signed document, so `FORWARDED`
+--   needs nothing more (it only stops a second forward).
+-- - `CAS_PUT`: only a hash that a release `STAGE`d earlier on the SAME
+--   connection names, the release signed by the deploy key and not older
+--   than this candidate's head. Bytes nobody signed for cannot be stored.
+-- - `RELEASE_COPY`, `AUDIT_COPY`: only another candidate, proven by the
+--   cluster link's own handshake (`ClusterNode.handshake`: the cluster secret,
+--   or a certificate carrying `Ctl.Control:offer`), and the body bound to that
+--   handshake by a sealed digest frame.
+-- - Reads (`STATUS`, `LEADER`, `AUDIT`, `CAS_GET`, `CAS_CHECK`, the relayed
+--   reload-socket reads) stay open: reads are not confidential (D4), and the
+--   port belongs on the operator's network.
+-- Bounds: a request line is at most 64 KiB, a release or audit body 1 MiB, an
+-- artifact 64 MiB (the CAS's own limit); uploads not yet named by a stored
+-- release are capped in total (MARCH_CONTROL_CAS_PENDING_MAX_BYTES, default
+-- 1 GiB) and removed when no release adopts them within a grace period
+-- (`ctl_cas_gc`); at most MARCH_CONTROL_MAX_CONNS connections (default 64) are
+-- served at once, each closed after MARCH_CONTROL_IDLE_MS (default 30 s) of
+-- silence.
 
 pfn ctl_read_line(fd : Int, acc : String, n : Int) : Option(String) do
   if n > 65536 do None
@@ -977,37 +1031,72 @@ pfn ctl_is_leader(node : Cap(ClusterNode.Live)) : Bool do Topology.offering(node
 pfn ctl_signed(r : Control.CtlRelease) : Bool do Control.verify(r, ctl_pubkey()) end
 
 -- Replicate a release, and the artifacts it ships, to every other reachable
--- candidate; true when each reachable one stored the release.
+-- candidate; "" when each reachable one stored the release, else why not.
+-- Artifacts go up on a connection that first stages the signed release (a
+-- candidate stores only what a staged release names); the release copy is a
+-- candidate-only verb, sent over the cluster handshake (`ctl_call_auth`).
 pfn ctl_replicate(node : Cap(ClusterNode.Live), port : Int, body : String, hashes : List(String)) : String do
   let failures = List.filter_map(ctl_others(node, port), fn hp ->
     let (host, cport) = hp
-    List.each(hashes, fn h -> ctl_push_artifact(host, cport, h))
-    match ctl_call(host, cport, "RELEASE_COPY " ++ int_to_string(String.byte_size(body)) ++ "\n" ++ body) do
+    ctl_push_artifacts(host, cport, body, hashes)
+    match ctl_call_auth(node, host, cport, "RELEASE_COPY " ++ int_to_string(String.byte_size(body)), body) do
       Some(resp) -> if String.starts_with(resp, "OK") do None else Some(host ++ ":" ++ int_to_string(cport) ++ " answered " ++ resp) end
       None -> None
     end)
   String.join(failures, "; ")
 end
 
--- Give a candidate an artifact it lacks.
-pfn ctl_push_artifact(host : String, port : Int, h : String) : () do
-  match ctl_call(host, port, "CAS_CHECK " ++ h ++ "\n") do
+-- A connection to a candidate's control API.
+pfn ctl_open(host : String, port : Int) : Option(Int) do
+  match tcp_connect_timeout(host, port, 2000) do
+    Err(_) -> None
+    Ok(fd) ->
+      let _ = tcp_set_recv_timeout(fd, 15000)
+      Some(fd)
+  end
+end
+
+-- Send [text] on an open connection and read the answer's first line.
+pfn ctl_ask(fd : Int, text : String) : Option(String) do
+  match tcp_send_all(fd, text) do
+    Err(_) -> None
+    Ok(_) -> ctl_read_line(fd, "", 0)
+  end
+end
+
+-- Give a candidate the artifacts of release [body] it lacks: `STAGE` the
+-- release, then `CAS_PUT` each missing one on the same connection.
+pfn ctl_push_artifacts(host : String, port : Int, body : String, hashes : List(String)) : () do
+  match ctl_open(host, port) do
+    None -> ()
+    Some(fd) ->
+      match ctl_ask(fd, "STAGE " ++ int_to_string(String.byte_size(body)) ++ "\n" ++ body) do
+        Some(l) -> if String.starts_with(l, "OK") do List.each(hashes, fn h -> ctl_push_one(fd, h)) else () end
+        None -> ()
+      end
+      tcp_close(fd)
+  end
+end
+
+pfn ctl_push_one(fd : Int, h : String) : () do
+  match ctl_ask(fd, "CAS_CHECK " ++ h ++ "\n") do
     Some(resp) ->
       if String.starts_with(resp, "MISSING") do
         match File.read(ctl_artifact_path(h)) do
           Ok(data) ->
-            let _ = ctl_call_body(host, port, "CAS_PUT " ++ h ++ " " ++ int_to_string(String.byte_size(data)), data)
-            ()
+            match ctl_ask(fd, "CAS_PUT " ++ h ++ " " ++ int_to_string(String.byte_size(data)) ++ "\n") do
+              Some(r) ->
+                if r == "READY" do
+                  let _ = ctl_ask(fd, data)
+                  ()
+                else () end
+              None -> ()
+            end
           Err(_) -> ()
         end
       else () end
     None -> ()
   end
-end
-
--- A request with a body: the line, "READY" from the far end, then the body.
-pfn ctl_call_body(host : String, port : Int, line : String, body : String) : Option(String) do
-  ctl_call(host, port, line ++ "\n" ++ body)
 end
 
 -- The leader accepts a release: signature, the compare-and-set on `parent`
@@ -1031,7 +1120,7 @@ pfn ctl_release(node : Cap(ClusterNode.Live), port : Int, text : String) : Strin
         let seq = r.seq
         let digest = Control.digest(r)
         let body = Control.serialize(r)
-        let hashes = Cons(r.topology, List.map(r.builds, fn b -> b.manifest))
+        let hashes = ctl_release_hashes(r)
         ctl_ensure_loaded()
         let l = ctl_leader_state()
         let out = match Control.leader_release(l, r) do
@@ -1050,6 +1139,7 @@ pfn ctl_release(node : Cap(ClusterNode.Live), port : Int, text : String) : Strin
                 "ERR could_not_replicate " ++ why
               else
                 ctl_put_leader(l2)
+                ctl_adopt(hashes)
                 ctl_audit(Control.audit_release(unix_time_ms(), me, seq, digest, "ok", ""))
                 "OK " ++ int_to_string(seq) ++ " " ++ digest
               end
@@ -1061,13 +1151,17 @@ pfn ctl_release(node : Cap(ClusterNode.Live), port : Int, text : String) : Strin
   end
 end
 
--- A copy from the leader: store it (the leader has already accepted it).
+-- A copy from the leader (an authenticated candidate): store it (the leader
+-- has already accepted it).
 pfn ctl_release_copy(text : String) : String do
   match Control.parse(text) do
     Err(e) -> "ERR bad_release " ++ e
     Ok(r) ->
       if not(ctl_signed(r)) do "ERR bad_signature"
-      else if ctl_store_release(r.seq, Control.serialize(r)) do "OK stored" else "ERR could_not_store" end end
+      else if ctl_store_release(r.seq, Control.serialize(r)) do
+        ctl_adopt(ctl_release_hashes(r))
+        "OK stored"
+      else "ERR could_not_store" end end
   end
 end
 
@@ -1206,10 +1300,319 @@ pfn ctl_passthrough(verb : String) : Bool do
   List.member(["PING", "VERSIONS", "VERSIONS_DETAIL", "PINS", "RELEASE_HEAD", "NODE_STATE", "HCR_INFO", "GET_EPOCH", "COMPACT"], verb)
 end
 
--- One request on a connection; false when the connection is done.
-pfn ctl_api_request(node : Cap(ClusterNode.Live), port : Int, fd : Int) : Bool do
+-- ── who may write: authenticated candidates, staged uploads ─────────────────
+
+pfn ctl_body_max() : Int do 1048576 end
+
+-- The CAS's own artifact limit (`CAS_MAX_ARTIFACT` in runtime/march_reload.c).
+pfn ctl_artifact_max() : Int do 67108864 end
+
+pfn ctl_is_hex64(h : String) : Bool do
+  String.byte_size(h) == 64 && (match Bytes.from_hex(h) do
+    Ok(b) -> Bytes.to_hex(b) == h
+    Err(_) -> false
+  end)
+end
+
+-- The artifacts a release names: its topology and each build's patch.
+pfn ctl_release_hashes(r : Control.CtlRelease) : List(String) do
+  Cons(r.topology, List.map(r.builds, fn b -> b.manifest))
+end
+
+-- The server's half of a candidate-only verb: the cluster handshake on [fd],
+-- then the peer must be a candidate: any holder of the cluster secret
+-- (shared-secret mode: every member holds it, as on the cluster links), or a
+-- certificate carrying `Ctl.Control:offer` (certificate mode). The connection
+-- must be sealed, so the digest frame that binds the body is authentic.
+pfn ctl_api_auth(node : Cap(ClusterNode.Live), fd : Int) : Result((), String) do
+  match ClusterNode.handshake(node, fd, "ctl-api", 5000) do
+    Err(e) -> Err(e)
+    Ok(a) ->
+      if not(a.mac) do Err("the connection is not sealed")
+      else match a.cert do
+        Some(c) -> SessionAP.authorize(Some(c), "Ctl", "Control", "offer")
+        None -> if ClusterNode.certified(node) do Err("presented no certificate") else Ok(()) end
+      end end
+  end
+end
+
+-- After the handshake: a sealed frame holding the body's sha256, then the
+-- [size] bytes of the body, which must hash to it.
+pfn ctl_recv_bound(fd : Int, size : Int) : Result(String, String) do
+  match NetKernel.recv_frame_exact(fd) do
+    Err(e) -> Err(e)
+    Ok(d) ->
+      match tcp_recv_exact(fd, size) do
+        Err(e) -> Err(e)
+        Ok(b) ->
+          let body = Bytes.to_string(b)
+          if Crypto.sha256(body) == NetKernel.bytes_to_str(d) do Ok(body) else Err("the body does not match its digest") end
+      end
+  end
+end
+
+-- `<VERB> <size>`, `AUTH`, the handshake, the bound body: [f] gets the body
+-- and answers. Some(()) to keep serving the connection, None to close it.
+pfn ctl_api_authed(node : Cap(ClusterNode.Live), fd : Int, size : Int, f : String -> String) : Option(()) do
+  if size <= 0 || size > ctl_body_max() do
+    ctl_reply(fd, "ERR bad_size\n")
+    Some(())
+  else
+    ctl_reply(fd, "AUTH\n")
+    let out = match ctl_api_auth(node, fd) do
+      Err(e) ->
+        println("control: refused an unauthenticated write: " ++ e)
+        ctl_reply(fd, "ERR unauthenticated\n")
+        None
+      Ok(_) ->
+        match ctl_recv_bound(fd, size) do
+          Err(e) ->
+            ctl_reply(fd, "ERR bad_body " ++ e ++ "\n")
+            None
+          Ok(body) ->
+            ctl_reply(fd, f(body) ++ "\n")
+            Some(())
+        end
+    end
+    NetKernel.forget(fd)
+    out
+  end
+end
+
+-- The client's half: [line] (no newline), then on `AUTH` the handshake, the
+-- digest frame and [body]; the answer's first line. None when the candidate
+-- cannot be reached.
+pfn ctl_call_auth(node : Cap(ClusterNode.Live), host : String, port : Int, line : String, body : String) : Option(String) do
+  match ctl_open(host, port) do
+    None -> None
+    Some(fd) ->
+      let out = match ctl_ask(fd, line ++ "\n") do
+        None -> None
+        Some(first) ->
+          if first != "AUTH" do Some(first)
+          else match ClusterNode.handshake(node, fd, "ctl-api", 5000) do
+            Err(e) -> Some("ERR unauthenticated " ++ e)
+            Ok(_) ->
+              match NetKernel.send_frame(fd, NetKernel.str_to_bytes(Crypto.sha256(body))) do
+                Err(e) -> Some("ERR " ++ e)
+                Ok(_) -> ctl_ask(fd, body)
+              end
+          end end
+      end
+      NetKernel.forget(fd)
+      tcp_close(fd)
+      out
+  end
+end
+
+-- `STAGE`: a release the deploy key signed, not older than this candidate's
+-- head (the leader's, or the newest on disk); its artifacts may then be put
+-- on this connection.
+pfn ctl_stage(text : String) : Result(List(String), String) do
+  match Control.parse(text) do
+    Err(e) -> Err("bad_release " ++ e)
+    Ok(r) ->
+      if not(ctl_signed(r)) do Err("bad_signature")
+      else
+        let disk = match ctl_load_newest() do
+          Some(n) -> n.seq
+          None -> 0
+        end
+        let head = if disk > ctl_head_seq(ctl_leader_state()) do disk else ctl_head_seq(ctl_leader_state()) end
+        if r.seq < head do Err("stale_release head:" ++ int_to_string(head))
+        else Ok(ctl_release_hashes(r)) end
+      end
+  end
+end
+
+-- ── uploads no release has adopted yet: capped, and collected ───────────────
+--
+-- Every artifact the control API stores that this node lacked is recorded
+-- here (hash -> "<size> <time ms>", and in `<dir>/cas_pending`) until a stored
+-- release names it (`ctl_adopt`). The total is capped; `ctl_cas_gc` removes an
+-- entry older than the grace period that no stored release and no service's
+-- persisted patch stack (`<cas>/hcr_state/*/state`) names, and its artifact.
+-- Only artifacts this API stored are ever removed. (Artifacts an adopted
+-- release named stay; removing those after compaction is the step-10b
+-- follow-up "CAS after compaction".)
+
+pfn ctl_pending() : Vault(String) do
+  match Vault.whereis("ctl_cas_pending") do
+    Some(v) -> v
+    None ->
+      let v = Vault.new("ctl_cas_pending")
+      match File.read(ctl_dir() ++ "/cas_pending") do
+        Ok(t) ->
+          List.each(String.split(t, "\n"), fn l ->
+            match ctl_words(l) do
+              Cons(h, Cons(size, Cons(ts, Nil))) -> if ctl_is_hex64(h) do Vault.set(v, h, size ++ " " ++ ts) else () end
+              _ -> ()
+            end)
+        Err(_) -> ()
+      end
+      v
+  end
+end
+
+pfn ctl_pending_save() : () do
+  let _ = Dir.mkdir_p(ctl_dir())
+  let text = String.join(List.map(Vault.all(ctl_pending()), fn kv -> match kv do (h, v) -> h ++ " " ++ v ++ "\n" end), "")
+  let path = ctl_dir() ++ "/cas_pending"
+  match File.write(path ++ ".tmp", text) do
+    Ok(_) ->
+      let _ = File.rename(path ++ ".tmp", path)
+      ()
+    Err(_) -> ()
+  end
+end
+
+pfn ctl_pending_size(v : String) : Int do
+  match ctl_words(v) do
+    Cons(n, _) -> ctl_int(n)
+    Nil -> 0
+  end
+end
+
+pfn ctl_pending_bytes() : Int do
+  List.fold_left(Vault.all(ctl_pending()), 0, fn (acc, kv) -> match kv do (_h, v) -> acc + ctl_pending_size(v) end)
+end
+
+-- Room for [size] more pending bytes? Claims it when there is: the caller
+-- records the artifact (`ctl_pending_add`) or gives the claim back.
+pfn ctl_pending_claim(size : Int) : Bool do
+  if not(ctl_lock("pending", 1000)) do false
+  else
+    let ok = ctl_pending_bytes() + Vault.get_or(ctl_locks(), "pending_claims", 0) + size <= ctl_cfg_int("cas_pending_max", 1073741824)
+    if ok do Vault.set(ctl_locks(), "pending_claims", Vault.get_or(ctl_locks(), "pending_claims", 0) + size) else () end
+    ctl_unlock("pending")
+    ok
+  end
+end
+
+pfn ctl_pending_settle(h : String, size : Int, stored : Bool) : () do
+  let locked = ctl_lock("pending", 1000)
+  Vault.set(ctl_locks(), "pending_claims", Vault.get_or(ctl_locks(), "pending_claims", 0) - size)
+  if stored do
+    Vault.set(ctl_pending(), h, int_to_string(size) ++ " " ++ int_to_string(unix_time_ms()))
+    ctl_pending_save()
+  else () end
+  if locked do ctl_unlock("pending") else () end
+end
+
+-- A stored release names [hashes]: they are no longer pending.
+pfn ctl_adopt(hashes : List(String)) : () do
+  let p = ctl_pending()
+  if List.any(hashes, fn h -> Vault.get(p, h) != None) do
+    let locked = ctl_lock("pending", 1000)
+    List.each(hashes, fn h -> Vault.drop(p, h))
+    ctl_pending_save()
+    if locked do ctl_unlock("pending") else () end
+  else () end
+end
+
+-- Every hash a stored release names.
+pfn ctl_stored_hashes() : List(String) do
+  let dir = ctl_dir() ++ "/releases"
+  match Dir.list(dir) do
+    Err(_) -> Nil
+    Ok(names) ->
+      List.flat_map(List.filter(names, fn n -> String.ends_with(n, ".release")), fn f ->
+        match File.read(dir ++ "/" ++ f) do
+          Err(_) -> Nil
+          Ok(text) ->
+            match Control.parse(text) do
+              Ok(r) -> ctl_release_hashes(r)
+              Err(_) -> Nil
+            end
+        end)
+  end
+end
+
+-- The persisted patch stacks of every service sharing this CAS.
+pfn ctl_stack_text() : String do
+  let dir = ctl_cas_root() ++ "/hcr_state"
+  match Dir.list(dir) do
+    Err(_) -> ""
+    Ok(names) ->
+      String.join(List.map(names, fn n ->
+        match File.read(dir ++ "/" ++ n ++ "/state") do
+          Ok(t) -> t
+          Err(_) -> ""
+        end), "\n")
+  end
+end
+
+pfn ctl_cas_gc() : Int do
+  sleep_ms(ctl_cfg_int("gc_ms", 60000))
+  let p = ctl_pending()
+  if Vault.all(p) != Nil do
+    let refs = ctl_stored_hashes()
+    ctl_adopt(refs)
+    let stack = ctl_stack_text()
+    let now = unix_time_ms()
+    let grace = ctl_cfg_int("cas_grace_ms", 600000)
+    let old = List.filter(Vault.all(p), fn kv ->
+      match kv do
+        (h, v) ->
+          let ts = match ctl_words(v) do
+            Cons(_, Cons(t, _)) -> ctl_int(t)
+            _ -> 0
+          end
+          now - ts > grace && not(String.contains(stack, h))
+      end)
+    if old != Nil do
+      let locked = ctl_lock("pending", 1000)
+      List.each(old, fn kv ->
+        match kv do
+          (h, _) ->
+            let _ = File.delete(ctl_artifact_path(h))
+            Vault.drop(p, h)
+            println("control: removed artifact " ++ String.slice(h, 0, 12) ++ ": no release named it")
+        end)
+      ctl_pending_save()
+      if locked do ctl_unlock("pending") else () end
+    else () end
+  else () end
+  ctl_cas_gc()
+end
+
+-- `CAS_PUT <hash> <size>` on a connection that staged [staged].
+pfn ctl_api_cas_put(fd : Int, line : String, h : String, size : Int, staged : List(String)) : Option(List(String)) do
+  if size <= 0 || size > ctl_artifact_max() do
+    ctl_reply(fd, "ERR bad_size\n")
+    Some(staged)
+  else if not(ctl_is_hex64(h)) do
+    ctl_reply(fd, "ERR bad_hash\n")
+    Some(staged)
+  else if not(List.member(staged, h)) do
+    ctl_reply(fd, "ERR not_staged\n")
+    Some(staged)
+  else
+    let fresh = not(String.starts_with(Control.relay_line("CAS_CHECK " ++ h), "PRESENT"))
+    if fresh && not(ctl_pending_claim(size)) do
+      ctl_reply(fd, "ERR cas_quota\n")
+      Some(staged)
+    else
+      ctl_reply(fd, "READY\n")
+      match tcp_recv_exact(fd, size) do
+        Err(_) ->
+          if fresh do ctl_pending_settle(h, size, false) else () end
+          None
+        Ok(b) ->
+          let resp = Control.relay_line(line ++ "\n" ++ Bytes.to_string(b))
+          if fresh do ctl_pending_settle(h, size, String.contains(resp, "OK")) else () end
+          ctl_reply(fd, String.replace_all(resp, "READY\n", ""))
+          Some(staged)
+      end
+    end
+  end end end
+end
+
+-- One request on a connection, which has staged [staged]: the hashes it may
+-- put. None when the connection is done.
+pfn ctl_api_request(node : Cap(ClusterNode.Live), port : Int, fd : Int, staged : List(String)) : Option(List(String)) do
   match ctl_read_line(fd, "", 0) do
-    None -> false
+    None -> None
     Some(line0) ->
       let fwd = String.starts_with(line0, "FORWARDED ")
       let line = if fwd do String.slice(line0, 10, String.byte_size(line0) - 10) else line0 end
@@ -1218,100 +1621,108 @@ pfn ctl_api_request(node : Cap(ClusterNode.Live), port : Int, fd : Int) : Bool d
         Some(v) -> v
         None -> ""
       end
-      let arg = fn i -> match List.head_opt(List.drop(ws, i)) do
-        Some(x) -> ctl_int(x)
-        None -> 0
+      let word = fn i -> match List.head_opt(List.drop(ws, i)) do
+        Some(x) -> x
+        None -> ""
       end
+      let arg = fn i -> ctl_int(word(i))
+      let keep = fn ok -> if ok do Some(staged) else None end
       match verb do
-        "RELEASE" -> ctl_api_release(node, port, fd, fwd, arg(1), false)
-        "RELEASE_COPY" -> ctl_api_release(node, port, fd, fwd, arg(1), true)
+        "RELEASE" -> keep(ctl_api_release(node, port, fd, fwd, arg(1)))
+        "RELEASE_COPY" -> Option.map(ctl_api_authed(node, fd, arg(1), fn body -> ctl_release_copy(body)), fn _ -> staged)
+        "AUDIT_COPY" ->
+          -- Lines a leader audited, to append here.
+          Option.map(ctl_api_authed(node, fd, arg(1), fn body ->
+            ctl_audit_append(body)
+            "OK"), fn _ -> staged)
+        "STAGE" ->
+          let size = arg(1)
+          if size <= 0 || size > ctl_body_max() do
+            ctl_reply(fd, "ERR bad_size\n")
+            Some(staged)
+          else match tcp_recv_exact(fd, size) do
+            Err(_) -> None
+            Ok(b) ->
+              match ctl_stage(Bytes.to_string(b)) do
+                Err(e) ->
+                  ctl_reply(fd, "ERR " ++ e ++ "\n")
+                  Some(staged)
+                Ok(hs) ->
+                  ctl_reply(fd, "OK staged " ++ int_to_string(List.length(hs)) ++ "\n")
+                  Some(List.take(List.append(hs, staged), 256))
+              end
+          end end
+        "CAS_PUT" -> ctl_api_cas_put(fd, line, word(1), arg(2), staged)
         "STATUS" ->
           if ctl_is_leader(node) do ctl_reply(fd, ctl_status(node))
           else if fwd do ctl_reply(fd, "ERR not_leader\n")
           else ctl_reply(fd, ctl_forward_status(node, port)) end end
-          true
+          Some(staged)
         "CAS_GET" ->
           -- An artifact's bytes from this node's CAS: `DATA <size>` then the bytes.
-          let h = match List.head_opt(List.drop(ws, 1)) do
-            Some(x) -> x
-            None -> ""
-          end
-          if String.byte_size(h) != 64 do ctl_reply(fd, "ERR bad_hash\n")
+          let h = word(1)
+          if not(ctl_is_hex64(h)) do ctl_reply(fd, "ERR bad_hash\n")
           else match File.read(ctl_artifact_path(h)) do
             Ok(data) -> ctl_reply(fd, "DATA " ++ int_to_string(String.byte_size(data)) ++ "\n" ++ data)
             Err(_) -> ctl_reply(fd, "ERR missing\n")
           end end
-          true
+          Some(staged)
         "AUDIT" ->
           ctl_reply(fd, ctl_audit_answer(arg(1)))
-          true
-        "AUDIT_COPY" ->
-          -- `AUDIT_COPY <size>`: lines a leader audited, to append here.
-          let size = arg(1)
-          if size <= 0 || size > 1048576 do
-            ctl_reply(fd, "ERR bad_size\n")
-            true
-          else match tcp_recv_exact(fd, size) do
-            Err(_) -> false
-            Ok(b) ->
-              ctl_audit_append(Bytes.to_string(b))
-              ctl_reply(fd, "OK\n")
-              true
-          end end
+          Some(staged)
         "LEADER" ->
           ctl_reply(fd, (if ctl_is_leader(node) do "LEADER yes " else "LEADER no " end) ++ Topology.node_name(node) ++ "\n")
-          true
-        "CAS_PUT" ->
-          -- `CAS_PUT <hash> <size>`, READY, <size> bytes, the verdict: the reload socket's own exchange.
-          let size = arg(2)
-          if size <= 0 do
-            ctl_reply(fd, "ERR bad_size\n")
-            true
-          else
-            ctl_reply(fd, "READY\n")
-            match tcp_recv_exact(fd, size) do
-              Err(_) -> false
-              Ok(b) ->
-                let resp = Control.relay_line(line ++ "\n" ++ Bytes.to_string(b))
-                ctl_reply(fd, String.replace_all(resp, "READY\n", ""))
-                true
-            end
-          end
+          Some(staged)
         _ ->
           if ctl_passthrough(verb) || verb == "CAS_CHECK" do ctl_reply(fd, Control.relay_line(line))
           else ctl_reply(fd, "ERR unknown_command\n") end
-          true
+          Some(staged)
       end
   end
 end
 
--- `RELEASE <size>` and `RELEASE_COPY <size>`: the document follows the line.
-pfn ctl_api_release(node : Cap(ClusterNode.Live), port : Int, fd : Int, fwd : Bool, size : Int, copy : Bool) : Bool do
-  if size <= 0 || size > 1048576 do
+-- `RELEASE <size>`: the document follows the line.
+pfn ctl_api_release(node : Cap(ClusterNode.Live), port : Int, fd : Int, fwd : Bool, size : Int) : Bool do
+  if size <= 0 || size > ctl_body_max() do
     ctl_reply(fd, "ERR bad_size\n")
     true
   else match tcp_recv_exact(fd, size) do
     Err(_) -> false
     Ok(b) ->
       let body = Bytes.to_string(b)
-      if copy do ctl_reply(fd, ctl_release_copy(body) ++ "\n")
-      else if ctl_is_leader(node) do ctl_reply(fd, ctl_release(node, port, body) ++ "\n")
+      if ctl_is_leader(node) do ctl_reply(fd, ctl_release(node, port, body) ++ "\n")
       else if fwd do ctl_reply(fd, "ERR not_leader\n")
-      else ctl_reply(fd, ctl_forward(node, port, "RELEASE " ++ int_to_string(size) ++ "\n" ++ body) ++ "\n") end end end
+      else ctl_reply(fd, ctl_forward(node, port, "RELEASE " ++ int_to_string(size) ++ "\n" ++ body) ++ "\n") end end
       true
   end end
 end
 
-pfn ctl_api_conn(node : Cap(ClusterNode.Live), port : Int, fd : Int) : () do
-  if ctl_api_request(node, port, fd) do ctl_api_conn(node, port, fd) else tcp_close(fd) end
+pfn ctl_api_conn(node : Cap(ClusterNode.Live), port : Int, fd : Int, staged : List(String)) : () do
+  match ctl_api_request(node, port, fd, staged) do
+    Some(st) -> ctl_api_conn(node, port, fd, st)
+    None ->
+      tcp_close(fd)
+      let _ = Vault.incr(ctl_locks(), "api_conns", -1)
+      ()
+  end
 end
 
+-- At most MARCH_CONTROL_MAX_CONNS connections at once (a further one is
+-- answered `ERR busy` and closed), each closed after MARCH_CONTROL_IDLE_MS
+-- without a byte.
 pfn ctl_api_accept(node : Cap(ClusterNode.Live), port : Int, lfd : Int) : Int do
   match tcp_accept(lfd) do
     Err(_) -> sleep_ms(200)
     Ok(fd) ->
-      let _ = task_spawn(fn _ -> ctl_api_conn(node, port, fd))
-      ()
+      if Vault.incr(ctl_locks(), "api_conns", 1) > ctl_cfg_int("max_conns", 64) do
+        let _ = Vault.incr(ctl_locks(), "api_conns", -1)
+        ctl_reply(fd, "ERR busy\n")
+        tcp_close(fd)
+      else
+        let _ = tcp_set_recv_timeout(fd, ctl_cfg_int("idle_ms", 30000))
+        let _ = task_spawn(fn _ -> ctl_api_conn(node, port, fd, Nil))
+        ()
+      end
   end
   ctl_api_accept(node, port, lfd)
 end
@@ -1335,6 +1746,15 @@ fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : 
   let cert_env = Env.get("MARCH_NODE_CERT", "")
   Vault.set(m, "cfg:cert_file", if cert_env != "" && File.exists(cert_env) do cert_env else "" end)
   Vault.set(m, "cfg:agent_grace_ms", Env.get("MARCH_CONTROL_AGENT_GRACE_MS", "20000"))
+  -- The control API's bounds (see "the control API" above).
+  Vault.set(m, "cfg:max_conns", Env.get("MARCH_CONTROL_MAX_CONNS", "64"))
+  Vault.set(m, "cfg:idle_ms", Env.get("MARCH_CONTROL_IDLE_MS", "30000"))
+  Vault.set(m, "cfg:cas_pending_max", Env.get("MARCH_CONTROL_CAS_PENDING_MAX_BYTES", "1073741824"))
+  Vault.set(m, "cfg:cas_grace_ms", Env.get("MARCH_CONTROL_CAS_GRACE_MS", "600000"))
+  Vault.set(m, "cfg:gc_ms", Env.get("MARCH_CONTROL_GC_MS", "60000"))
+  Vault.set(m, "cfg:audit_max", Env.get("MARCH_CONTROL_AUDIT_MAX_BYTES", "16777216"))
+  -- The pending-upload table, read from MARCH_CONTROL_DIR now that it is set.
+  let _ = ctl_pending()
   let respawner = spawn(CtlRespawner)
   Vault.set(ctl_respawners(), "r", respawner)
   ctl_mark_agent(node, respawner)
@@ -1347,6 +1767,7 @@ fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : 
       Ok(lfd) ->
         let _ = task_spawn(fn _ -> ctl_api_accept(node, port, lfd))
         let _ = task_spawn(fn _ -> ctl_audit_copier(node, port))
+        let _ = task_spawn(fn _ -> ctl_cas_gc())
         println("control: API listening on port " ++ int_to_string(listen_port))
       Err(e) -> println("control: cannot listen on port " ++ int_to_string(listen_port) ++ ": " ++ e)
     end
