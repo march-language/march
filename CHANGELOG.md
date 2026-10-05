@@ -19,6 +19,17 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`Actor.inspect_state`: read a running actor's state.** The `sys:get_state`
+  equivalent. `Actor.inspect_state(Actor.debug(io), pid, timeout_ms)` returns
+  the actor's state fields as `{ count: 3, tags: [a, b], best: Some(3) }`,
+  each field printed by its own `Show` (a field holding functions prints
+  `<opaque>`), in declaration order, the same on the compiled and
+  interpreted backends. The request skips the actor's mailbox
+  limit, so a full mailbox still answers. It fails cleanly
+  (`InspectTimeout`, `InspectDead`, `InspectSelf`, `InspectFailed(why)`) when
+  the actor is busy inside a nested `receive`, gone, the caller itself, or a
+  field's `Show` panics; the actor keeps running in every case. It needs the
+  new `Cap(Actor.Debug)`, minted from `Cap(IO)` by `Actor.debug`.
 - **`forge top`, `forge diagnose` and `forge status`.** `forge top` watches a
   node's busiest actors (by mailbox depth, crashes, or message and dispatch
   rate) refreshed in place. `forge diagnose` checks a node over a window for

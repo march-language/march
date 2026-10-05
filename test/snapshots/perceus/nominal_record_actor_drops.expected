@@ -3,7 +3,7 @@ record Pair { a : String, b : String }
 record Bump_State { n : Int }
 type Bump_Msg = Hit(Int)
 record Bump_Actor { $d_dispatch : Ptr(Unit), $e_alive : Bool, n : Int }
--- fns (5) --
+-- fns (6) --
 ## Bump_Hit
 fn Bump_Hit(linear $actor : Bump_Actor, k : Int) : Unit =
   let $d_dispatch_v : Ptr(Unit) = $actor.$d_dispatch in
@@ -28,25 +28,48 @@ Bump_Hit($actor, $Hit_k)
   _ -> dec_rc $msg;
 :unit
 
+## Bump_inspect
+fn Bump_inspect(linear $actor : Bump_Actor) : Unit =
+  let $d_dispatch_v : Ptr(Unit) = $actor.$d_dispatch in
+let $e_alive_v : Bool = $actor.$e_alive in
+let $sf_n : Int = $actor.n in
+let state : Bump_State = { n = $sf_n } in
+let $result : Bump_State = let $insp1 : Int = state.n in
+let $insp2 : String = to_string($insp1) in
+let $insp3 : String = let $rc_2 : String = string_concat("{ n: ", $insp2) in
+dec_rc $insp2;
+$rc_2 in
+let $insp4 : String = let $rc_1 : String = string_concat($insp3, " }") in
+dec_rc $insp3;
+$rc_1 in
+actor_inspect_store($insp4);
+state in
+let $nf_n : Int = $result.n in
+reuse $actor as Bump_Actor($d_dispatch_v, $e_alive_v, $nf_n);
+dec_rc $result;
+:unit
+
 ## Bump_spawn
 fn Bump_spawn() : Ptr(Unit) =
   let $init_state : Bump_State = { n = 0 } in
 let $init_n : Int = $init_state.n in
-let $spawned : Ptr(Unit) = alloc Bump_Actor(Bump_dispatch, true, $init_n) in
-let $rc_2 : Ptr(Unit) = $spawned in
+let $spawned : Ptr(Unit) = inc_rc Bump_dispatch;
+alloc Bump_Actor(Bump_dispatch, true, $init_n) in
+let $reg_inspect : Unit = register_actor_inspect(Bump_dispatch, Bump_inspect) in
+let $rc_4 : Ptr(Unit) = $spawned in
 dec_rc $init_state;
-$rc_2
+$rc_4
 
 ## main
 fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) : () =
   let p : Pid({ n : Int }) = let $raw_actor : Ptr(Unit) = Bump_spawn() in
 spawn($raw_actor) in
-let $rc_3 : Option(Unit) = let $t11 : Bump_Msg = let $t10 : Int = two_reads(1) in
+let $rc_5 : Option(Unit) = let $t11 : Bump_Msg = let $t10 : Int = two_reads(1) in
 alloc Bump_Msg.Hit($t10) in
-let $rc_4 : Option(Unit) = send(p, $t11) in
+let $rc_6 : Option(Unit) = send(p, $t11) in
 dec_rc p;
-$rc_4 in
-dec_rc $rc_3;
+$rc_6 in
+dec_rc $rc_5;
 run_until_idle();
 println("ok")
 

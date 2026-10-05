@@ -2643,6 +2643,42 @@ let run_scheduler () =
            below if the handler blocks and the message goes back). *)
         inst.ai_slices <- inst.ai_slices + 1;
         inst.ai_msgs_in <- inst.ai_msgs_in + 1;
+        (* Observe plan R4: an inspect request, answered here between
+           handlers, never dispatched (and not counted as a message). *)
+        (match msg with
+         | VCon ("$sys_inspect", [VInt ref_id]) ->
+           inst.ai_slices <- inst.ai_slices - 1;
+           inst.ai_msgs_in <- inst.ai_msgs_in - 1;
+           (* "{ f1: to_string(v1), ... }" in declaration order: the text
+              the compiled Name_inspect builds (lib/tir/lower_actor.ml). *)
+           let render () =
+             let fields = match inst.ai_state with VRecord kvs -> kvs | _ -> [] in
+             let decl = List.map (fun (f : March_ast.Ast.field) ->
+                 (f.fld_name.txt, March_ast.Ast.inspect_field_placeholder f.fld_ty))
+                 inst.ai_def.actor_state in
+             match decl with
+             | [] -> "{}"
+             | _ ->
+               "{ " ^ String.concat ", " (List.map (fun (n, placeholder) ->
+                   n ^ ": " ^ (match placeholder, List.assoc_opt n fields with
+                       | Some text, _ -> text
+                       | None, Some v -> show_dispatch v
+                       | None, None -> "?")) decl) ^ " }"
+           in
+           (* A render that panics (a field type's own Show) answers Err;
+              the actor carries on, as compiled (actor_answer_inspect). *)
+           let answer =
+             match render () with
+             | text -> VCon ("Ok", [VString text])
+             | exception (Stack_overflow | Out_of_memory as e) -> raise e
+             | exception e ->
+               clear_march_stack ();
+               VCon ("Err", [VString ("render failed: " ^ Printexc.to_string e)])
+           in
+           Hashtbl.replace pending_replies ref_id answer;
+           Hashtbl.replace pending_reply_times ref_id (Unix.gettimeofday () *. 1000.);
+           changed := true
+         | _ ->
         let (msg_tag, msg_args) = match msg with
           | VCon (tag, args) -> (tag, args)
           | VAtom tag        -> (tag, [])
@@ -2723,7 +2759,7 @@ let run_scheduler () =
                   clear_march_stack ();
                   crash_actor pid (Printexc.to_string exn));
                current_pid := prev_pid
-             end)
+             end))
     ) pids
   done
 
