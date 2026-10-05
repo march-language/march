@@ -1,0 +1,199 @@
+-- Leak guard: the steady per-call leaks behind an idle conduit worker's
+-- linear RSS growth (~5 MB/min in production; forgepm's background-job
+-- process, which only polls Postgres through depot's actor Pool).
+--
+-- Every leg below leaked on main 8f2f6608 (objects per call, --opt 2):
+--   bytes_length ....... 2  Bytes cell freed shallowly: drop.ml re-classified
+--                           the library type by its QUALIFIED name (Newtype)
+--                           while codegen builds it Boxed by its short name
+--   bytes_concat ....... 1  a dead match-fallback closure's capture (fixed on
+--                           main by the join-point capture release)
+--   from_chars ......... 3  string_from_chars never released its list
+--   opt_bytes .......... 1  a niche Option(Bytes) dropped its cell shallowly
+--   let_tuple .......... 2  `let (a, b) = e` never released the tuple
+--   tail_tuple ......... 2  ..nor when the scope ended in a tuple literal
+--   match_tail ......... 7  a record read only to choose an arm was never
+--                           released (the scope's value is a `match`)
+--                           (these three also fixed independently on main)
+--   mixed_param ........ 4  an owned parameter moved on one arm leaked on the
+--                           arms that only read it
+--   record_update ...... 2  `{ s with f: v }` kept a reference to the old f
+--   vault_get .......... 1  Vault calls were indirect, so the key leaked
+--   actor_take_give .... 2  each message leaked a reference per heap state
+--                           field (state loads are MOVES out of the actor)
+-- and once the last one was fixed, `actor_checkout` (depot Pool's shape: a
+-- dead Option field released in front of the scrutinee's destructuring
+-- release) crashed with a use-after-free -- the release ordering fix in
+-- perceus_core.ml's add_cross_decrcs.
+--
+-- Also compiled with --hot-reload (the second rule in test/dune): actors take
+-- a different state layout there, and production builds use it.
+--
+-- SIGNAL: live_allocs() deltas against a bound far below the iteration count,
+-- printed as booleans so the golden is deterministic.
+mod Main do
+  needs IO.Console
+  needs IO.Spawn
+  needs IO.Mut
+
+  type Cfg = { host : String, max : Int }
+  type St = { cfg : Option(Cfg), items : List(String), n : Int }
+  type Res = { got : Option(String), new_state : St }
+  type W = { rows : List(String), cols : List(String), tag : String }
+
+  actor Box do
+    state { cfg : Option(Cfg), items : List(String), n : Int }
+    init  { cfg: None, items: Nil, n: 0 }
+
+    on Init(c : Cfg) do
+      { state with cfg: Some(c) }
+    end
+
+    on Take(reply_to) do
+      let result = take(state)
+      let new_state = result.new_state
+      let _ = actor_reply(reply_to, result.got)
+      new_state
+    end
+
+    on Give(s : String) do
+      { state with items: Cons(s, state.items), n: state.n + 1 }
+    end
+
+    on Count(reply_to) do
+      let _ = actor_reply(reply_to, state.n)
+      state
+    end
+  end
+
+  -- depot's Pool.handle_checkout: the config is matched first and is DEAD on
+  -- the Cons arm, so its release sits in front of the list's destructuring.
+  fn take(st : St) : Res do
+    match st.cfg do
+      None -> { got: None, new_state: st }
+      Some(c) ->
+        match st.items do
+          Cons(x, rest) -> { got: Some(x), new_state: { st with items: rest, n: st.n - 1 } }
+          Nil -> { got: None, new_state: { st with n: c.max } }
+        end
+    end
+  end
+
+  pfn pair(i : Int) do (int_to_string(i), i) end
+
+  pfn ret_tuple(i : Int) do
+    let (s, n) = pair(i)
+    ({ host: s, max: n }, n + 1)
+  end
+
+  pfn opt_bytes(i : Int) : Option(Bytes) do
+    if i < 0 do None else Some(Bytes.from_string(int_to_string(i))) end
+  end
+
+  pfn mk_w(i : Int) : Result(W, String) do
+    if i < 0 do Err("x")
+    else Ok({ rows: (if i % 2 == 0 do Nil else [int_to_string(i)] end),
+              cols: [int_to_string(i), "b"], tag: int_to_string(i) })
+    end
+  end
+
+  pfn match_tail(i : Int) : Int do
+    match mk_w(i) do
+      Err(_)  -> 0
+      Ok(res) ->
+        match res.rows do
+          Nil         -> 0
+          Cons(_, _)  -> 1
+        end
+    end
+  end
+
+  pfn mixed_param(i : Int) : Int do
+    let r = take({ cfg: Some({ host: "h", max: 2 }), items: [int_to_string(i)], n: 1 })
+    r.new_state.n
+  end
+
+  pfn record_update(i : Int) : Int do
+    let st = { cfg: None, items: [int_to_string(i)], n: 0 }
+    let st2 = { st with items: Nil }
+    st2.n
+  end
+
+  pfn vtbl() do
+    match Vault.whereis("idle_worker_leak_probe") do
+      Some(t) -> t
+      None    -> Vault.new("idle_worker_leak_probe")
+    end
+  end
+
+  pfn vault_get(i : Int) : Int do
+    match Vault.get(vtbl(), "k:" ++ int_to_string(i % 4)) do
+      Some(true) -> 1
+      _          -> 0
+    end
+  end
+
+  pfn actor_take_give(b) : Int do
+    match actor_call(b, Take(0), 5000) do
+      Ok(Some(s)) ->
+        let _ = send(b, Give(s))
+        1
+      _ -> 0
+    end
+  end
+
+  pfn count(b) : Int do
+    match actor_call(b, Count(0), 5000) do
+      Ok(n)  -> n
+      Err(_) -> -1
+    end
+  end
+
+  pfn step(leg : String, b, i : Int) : Int do
+    match leg do
+      "bytes_length"    -> Bytes.length(Bytes.from_string(int_to_string(i)))
+      "bytes_concat"    -> Bytes.length(Bytes.concat(Bytes.from_string("ab"), Bytes.from_string(int_to_string(i))))
+      "from_chars"      -> String.byte_size(string_from_chars([int_to_string(i), "x"]))
+      "opt_bytes"       -> match opt_bytes(i) do _ -> 1 end
+      "let_tuple"       ->
+        let (s, n) = pair(i)
+        String.byte_size(s) + n
+      "tail_tuple"      -> match ret_tuple(i) do (c, j) -> c.max + j end
+      "match_tail"      -> match_tail(i)
+      "mixed_param"     -> mixed_param(i)
+      "record_update"   -> record_update(i)
+      "vault_get"       -> vault_get(i)
+      "actor_take_give" -> actor_take_give(b)
+      _ -> 0
+    end
+  end
+
+  pfn rep(leg : String, b, i : Int, n : Int) : () do
+    if i >= n do () else
+      let _ = step(leg, b, i)
+      rep(leg, b, i + 1, n)
+    end
+  end
+
+  pfn measure(leg : String, b) : () do
+    let _ = rep(leg, b, 0, 100)
+    let _ = count(b)
+    let before = live_allocs()
+    let _ = rep(leg, b, 0, 2000)
+    let _ = count(b)
+    let d = live_allocs() - before
+    println(leg ++ " flat: " ++ (if d < 100 do "true" else "false" end))
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _m : Cap(IO.Mut)) : () do
+    let b = spawn(Box)
+    let _ = send(b, Init({ host: "db", max: 4 }))
+    let _ = send(b, Give(int_to_string(42)))
+    List.each(["bytes_length", "bytes_concat", "from_chars", "opt_bytes",
+               "let_tuple", "tail_tuple", "match_tail", "mixed_param",
+               "record_update", "vault_get", "actor_take_give"],
+              fn leg -> measure(leg, b))
+    -- The state survived 2,100 take/give round trips intact.
+    println("count: " ++ int_to_string(count(b)))
+  end
+end

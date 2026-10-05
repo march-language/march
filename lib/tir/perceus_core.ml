@@ -761,17 +761,35 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
   let owners = Hashtbl.create 4 in
   Hashtbl.replace owners name ();
   let projected = Hashtbl.create 8 in
+  (* A value still pointing INTO [v] without its own reference: a field
+     projection of [v] or of such a value, an alias of one, or a pattern
+     variable bound by matching one.  Only direct projections of [v] used to
+     count, so in
+       match e.to do Cons(a, _) -> check(a.address, ..) end
+     [a] and [a.address] were missed, [e] was released in front of the call,
+     and [check] read a freed String (forgepm's Mail.Email tests). *)
+  let points_into (src : Tir.var) =
+    Hashtbl.mem owners src.Tir.v_name || Hashtbl.mem projected src.Tir.v_name in
   let rec scan (x : Tir.expr) : unit =
     match x with
     | Tir.ELet (w, Tir.EAtom (Tir.AVar src), body) when Hashtbl.mem owners src.Tir.v_name ->
       Hashtbl.replace owners w.Tir.v_name (); scan body
-    | Tir.ELet (w, Tir.EField (Tir.AVar src, _), body) when Hashtbl.mem owners src.Tir.v_name ->
+    | Tir.ELet (w, Tir.EAtom (Tir.AVar src), body) when Hashtbl.mem projected src.Tir.v_name ->
+      Hashtbl.replace projected w.Tir.v_name (); scan body
+    | Tir.ELet (w, Tir.EField (Tir.AVar src, _), body) when points_into src ->
       Hashtbl.replace projected w.Tir.v_name (); scan body
     | Tir.ELet (_, e1, body) -> scan e1; scan body
     | Tir.ESeq (a, body) -> scan a; scan body
     | Tir.ELetRec (_, body) -> scan body
-    | Tir.ECase (_, brs, d) ->
-      List.iter (fun (br : Tir.branch) -> scan br.Tir.br_body) brs;
+    | Tir.ECase (a, brs, d) ->
+      let scrut_points_into = match a with
+        | Tir.AVar w -> points_into w
+        | _ -> false in
+      List.iter (fun (br : Tir.branch) ->
+          if scrut_points_into then
+            List.iter (fun (bv : Tir.var) ->
+                Hashtbl.replace projected bv.Tir.v_name ()) br.Tir.br_vars;
+          scan br.Tir.br_body) brs;
       Option.iter scan d
     | _ -> ()
   in
@@ -824,6 +842,31 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
   in
   let r = go e in
   if !ok then Some r else None
+
+(** True for the source of an actor handler's state load: the handler's
+    linear [$actor] struct, or (under [--hot-reload]) the separate state
+    record [$f_state_v] loaded out of it.
+
+    [Lower_actor] lowers every handler as
+
+      let $sf_f = $actor.f in ..                 -- load each state field
+      let state = { f = $sf_f, .. } in           -- hand them to the body
+      let $result = <body> in
+      reuse $actor as Name_Actor(.., $result.f, ..)   -- write the new state back
+
+    so the loads MOVE each field out of the struct, and the [EReuse] write-back
+    overwrites the slot without releasing what was there.  Classified as a
+    borrowed projection (the record-field rule below), each heap field was
+    dup'd into [state] instead, and that extra reference was never released:
+    every message to a compiled actor leaked one reference per heap state
+    field -- the cell holding the old value, for good.  depot's Pool actor
+    leaked its idle list's cons cell (and the connection in it) on every
+    checkout, a steady leak in an idle conduit worker.  An owned binding takes
+    the field over instead: [state] consumes it once, the write-back stores the
+    new value, nothing is left over. *)
+let is_actor_move_source (src : Tir.var) : bool =
+  (String.equal src.Tir.v_name Tir_names.actor_param && src.Tir.v_lin = Tir.Lin)
+  || String.equal src.Tir.v_name Tir_names.actor_state_ptr_var
 
 (** Insert RC operations into an expression.
     Returns [(expr', live_before)] where expr' has RC ops inserted and
@@ -1184,6 +1227,10 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
     in
     let is_borrowed_field =
       match e1 with
+      | Tir.EField (Tir.AVar src, _) when is_actor_move_source src ->
+        (* A handler's state load MOVES the field out of the actor struct (see
+           [is_actor_move_source]); the binding owns it. *)
+        false
       | _ when needs_rc env v.Tir.v_ty
                && (match e1 with
                    | Tir.EField _ | Tir.EAtom _ -> false  (* handled below *)
@@ -1795,12 +1842,34 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
             | Some n -> StringSet.remove n s
             | None -> s)
       in
-      StringSet.fold (fun name body_acc ->
-        match StringMap.find_opt name env.var_ctx with
-        | Some v when v.Tir.v_lin = Tir.Unr && needs_rc env v.Tir.v_ty ->
-          Tir.ESeq (decrc_for env v (Tir.AVar v), body_acc)
-        | _ -> body_acc
-      ) dead_here body
+      let prepend body =
+        StringSet.fold (fun name body_acc ->
+          match StringMap.find_opt name env.var_ctx with
+          | Some v when v.Tir.v_lin = Tir.Unr && needs_rc env v.Tir.v_ty ->
+            Tir.ESeq (decrc_for env v (Tir.AVar v), body_acc)
+          | _ -> body_acc
+        ) dead_here body
+      in
+      (* Keep the scrutinee's destructuring release ([add_scrutinee_free_for])
+         at the HEAD of the arm, with these releases after it.  Codegen
+         recognises it only at the head of a run of releases
+         ([Llvm_case.strip_scrut_decrc]); behind anything else it compiles as a
+         plain release with no shared-path dups of the extracted fields.  A
+         bare [dec_rc] in front was tolerated, but [Drop] later turns these
+         into [__drop$T(..)] calls and the optimiser may inline those, so in
+         front of the scrutinee's release they hid it: depot's
+         Pool.handle_checkout moved [conn]/[rest] out of a still-shared idle
+         list behind a dead [cfg]'s drop, and the connection was freed while
+         being handed to the caller.  The order is otherwise immaterial: the
+         releases are of distinct, dead values. *)
+      match body with
+      | Tir.ESeq ((Tir.EDecRC (Tir.AVar sv) | Tir.EAtomicDecRC (Tir.AVar sv)
+                   as scrut_dec), rest)
+        when (match scrutinee_name with
+              | Some n -> String.equal sv.Tir.v_name n
+              | None -> false) ->
+        Tir.ESeq (scrut_dec, prepend rest)
+      | _ -> prepend body
     in
     let branches' = List.map (fun (br, body', live_before_br, bound) ->
       let br_arity = List.length br.Tir.br_vars in

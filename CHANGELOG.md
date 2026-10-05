@@ -26,6 +26,10 @@ git log is authoritative for exact commits.
   rate), `tree`, `node_stats`, `crashes` (kind, actor and restart number,
   never the panic text), `epochs` and `scheduler_usage`. Every function takes
   a `Cap(Actor.Introspect)`, and they work interpreted as well as compiled.
+- **`--dump-phases`/`MARCH_DUMP_TXT` now include a `tir-trmc` stage.** The
+  TIR is snapshotted right after `Trmc.transform_module`, before the first
+  existing checkpoint (`tir-mono`), so the tail-recursion-modulo-cons rewrite
+  can be read on its own instead of only through the mono stage that follows it.
 - **A read-only observe socket on every compiled program.** Set
   `MARCH_OBSERVE_SOCKET=<path>` (or just `MARCH_HOT_RELOAD_SOCKET`, which puts it
   at `<path>.observe`) and the program answers one-line requests with one line of
@@ -150,6 +154,10 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **`MARCH_NO_UNBOX=1` is now part of the compilation cache key.** It classifies
+  every type Boxed and so changes the emitted code, but was not in the CAS key,
+  so an A/B run reused whichever variant was cached first. It now adds a
+  `nounbox` tag, as `MARCH_NO_INLINE_RC` and `MARCH_NO_HOF_SPEC` already did.
 - **A branch that returns a record's field no longer frees it (compiled).** In
   `"sig " ++ (if r.signature == "" do "-" else r.signature end)`, compiled code
   handed out `r.signature` without taking a reference, so the next read of the

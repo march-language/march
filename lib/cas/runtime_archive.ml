@@ -48,10 +48,10 @@
     cache self-healing: an entry missing one [.o] — a pruning script, a
     partial cache restore — gets exactly that object rebuilt, where a
     whole-directory rename would fail [ENOTEMPTY] against the incomplete
-    directory and silently fall back on every future build forever.  (Note
-    that [Cas.store_artifact] does NOT do this — it writes its pointer file
-    directly — which is a latent gap there, tolerable today only because
-    whole-binary entries are keyed per-source and so rarely contended.) *)
+    directory and silently fall back on every future build forever.  (The
+    whole-binary store, [Cas.store_artifact], uses the same temp+rename
+    pattern through [Cas.copy_file_exec], which writes a per-pid temp file
+    beside the destination and [Sys.rename]s it into place.) *)
 
 let read_file path =
   try

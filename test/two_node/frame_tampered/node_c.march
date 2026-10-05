@@ -54,7 +54,18 @@ mod FrameTamperedC do
         Err(_) -> serve(listen_fd, conn, stop)
         Ok(fd) ->
           match Socket.connect("127.0.0.1", Env.require_int("MARCH_PORT_B")) do
-            Err(e) -> panic("node-c: upstream: " ++ Socket.error_message(e))
+            -- At teardown node-b can stop before node-a, whose cluster node
+            -- then redials through this proxy into a closed port. That refusal
+            -- is the peer going away, not a fixture failure: close the
+            -- downstream side (node-a sees the link drop and backs off) and
+            -- keep serving until the stop file. conn is not advanced, so
+            -- tamper_conn still counts only proxied connections. The note goes
+            -- to stderr so the sorted stdout golden does not depend on the
+            -- teardown order.
+            Err(e) ->
+              print_stderr("node-c: upstream: " ++ Socket.error_message(e) ++ "\n")
+              Socket.close(fd)
+              serve(listen_fd, conn, stop)
             Ok(up) ->
               let _ = task_spawn(fn _ -> pump(fd, up, conn, true, 0))
               let _ = task_spawn(fn _ -> pump(up, fd, conn, false, 0))

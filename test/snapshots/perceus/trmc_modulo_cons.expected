@@ -9,30 +9,30 @@ closure $Clo_go$4(Ptr(Unit))
 fn List.maximum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = alloc $Clo_go$4(go$apply$4) in
 case xs of
-  Nil() -> dec_rc go;
-dec_rc xs;
+  Nil() -> dec_rc xs;
+dec_rc go;
 panic("List.maximum_int: empty list")
   Cons($f490, $f491) -> dec_rc xs;
 let t : '_ = $f491 in
 let h : '_ = $f490 in
 call_ptr go(t, h)
-  _ -> dec_rc go;
-dec_rc xs;
+  _ -> dec_rc xs;
+dec_rc go;
 panic("non-exhaustive pattern match")
 
 ## List.minimum_int
 fn List.minimum_int(xs : List(Int)) : Int =
   let go : (List(Int), Int) -> Int = alloc $Clo_go$3(go$apply$3) in
 case xs of
-  Nil() -> dec_rc go;
-dec_rc xs;
+  Nil() -> dec_rc xs;
+dec_rc go;
 panic("List.minimum_int: empty list")
   Cons($f477, $f478) -> dec_rc xs;
 let t : '_ = $f478 in
 let h : '_ = $f477 in
 call_ptr go(t, h)
-  _ -> dec_rc go;
-dec_rc xs;
+  _ -> dec_rc xs;
+dec_rc go;
 panic("non-exhaustive pattern match")
 
 ## List.product_int
@@ -129,8 +129,8 @@ let start : Int = $clo.$fv1 in
 dec_rc $clo;
 let $t14 : '_ = <(i, start) in
 case $t14 of
-  True() -> dec_rc go;
-dec_rc $t14;
+  True() -> dec_rc $t14;
+dec_rc go;
 acc
   _ -> dec_rc $t14;
 let $t15 : '_ = inc_rc i;
@@ -142,40 +142,40 @@ call_ptr go($t15, $t16)
 fn go$apply$1($clo : Ptr(Unit), lst : List(Int), acc : Int) : Int =
   let go : (List(Int), Int) -> Int = $clo in
 case lst of
-  Nil() -> dec_rc go;
-dec_rc lst;
+  Nil() -> dec_rc lst;
+dec_rc go;
 acc
   Cons($f457, $f458) -> dec_rc lst;
 let t : '_ = $f458 in
 let x : '_ = $f457 in
 let $t456 : '_ = +(acc, x) in
 call_ptr go(t, $t456)
-  _ -> dec_rc go;
-dec_rc lst;
+  _ -> dec_rc lst;
+dec_rc go;
 panic("non-exhaustive pattern match")
 
 ## go$apply$2
 fn go$apply$2($clo : Ptr(Unit), lst : List(Int), acc : Int) : Int =
   let go : (List(Int), Int) -> Int = $clo in
 case lst of
-  Nil() -> dec_rc go;
-dec_rc lst;
+  Nil() -> dec_rc lst;
+dec_rc go;
 acc
   Cons($f464, $f465) -> dec_rc lst;
 let t : '_ = $f465 in
 let x : '_ = $f464 in
 let $t463 : '_ = *(acc, x) in
 call_ptr go(t, $t463)
-  _ -> dec_rc go;
-dec_rc lst;
+  _ -> dec_rc lst;
+dec_rc go;
 panic("non-exhaustive pattern match")
 
 ## go$apply$3
 fn go$apply$3($clo : Ptr(Unit), lst : List(Int), m : Int) : Int =
   let go : (List(Int), Int) -> Int = $clo in
 case lst of
-  Nil() -> dec_rc go;
-dec_rc lst;
+  Nil() -> dec_rc lst;
+dec_rc go;
 m
   Cons($f471, $f472) -> dec_rc lst;
 let r : '_ = $f472 in
@@ -184,19 +184,19 @@ let $t470 : '_ = <(x, m) in
 case $t470 of
   True() -> dec_rc $t470;
 call_ptr go(r, x)
-  _ -> dec_rc x;
-dec_rc $t470;
+  _ -> dec_rc $t470;
+dec_rc x;
 call_ptr go(r, m)
-  _ -> dec_rc go;
-dec_rc lst;
+  _ -> dec_rc lst;
+dec_rc go;
 panic("non-exhaustive pattern match")
 
 ## go$apply$4
 fn go$apply$4($clo : Ptr(Unit), lst : List(Int), m : Int) : Int =
   let go : (List(Int), Int) -> Int = $clo in
 case lst of
-  Nil() -> dec_rc go;
-dec_rc lst;
+  Nil() -> dec_rc lst;
+dec_rc go;
 m
   Cons($f484, $f485) -> dec_rc lst;
 let r : '_ = $f485 in
@@ -205,11 +205,11 @@ let $t483 : '_ = >(x, m) in
 case $t483 of
   True() -> dec_rc $t483;
 call_ptr go(r, x)
-  _ -> dec_rc x;
-dec_rc $t483;
+  _ -> dec_rc $t483;
+dec_rc x;
 call_ptr go(r, m)
-  _ -> dec_rc go;
-dec_rc lst;
+  _ -> dec_rc lst;
+dec_rc go;
 panic("non-exhaustive pattern match")
 
 ## main
