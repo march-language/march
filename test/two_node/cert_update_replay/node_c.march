@@ -124,6 +124,25 @@ mod CertUpdateReplayC do
     end
   end
 
+  pfn replay_loop(cfd : Int, frame : List(Int), stop : String) : Int do
+    if File.exists(stop) do 0 else
+      match NetKernel.send_frame(cfd, frame) do
+        Ok(_) ->
+          if Vault.incr(recorded_n(), "sent", 1) == 1 do println("node-c: replayed it on its own link as node-b") else () end
+        Err(_) -> ()
+      end
+      sleep_ms(200)
+      replay_loop(cfd, frame, stop)
+    end
+  end
+
+  pfn recorded_n() : Vault(Int) do
+    match Vault.whereis("replay_sent") do
+      Some(v) -> v
+      None -> Vault.new("replay_sent")
+    end
+  end
+
   fn main(_c : Cap(IO)) do
     let old = Env.require("OLD_PKI")
     let signed = match NodeCert.from_text(read(old ++ "/node-b.cert")) do
@@ -151,14 +170,10 @@ mod CertUpdateReplayC do
         end
         let cfd = connect_as_b(auth, Handshake.role_control())
         let _dfd = connect_as_b(auth, Handshake.role_data())
-        -- Wait for node-a to have paired the two connections into a link
-        -- (scenario.sh touches REPLAY_FILE once node-a says so). A fixed
-        -- one-second sleep here was not always enough under ASan in CI.
-        wait_file(Env.require("REPLAY_FILE"))
-        match NetKernel.send_frame(cfd, frame) do
-          Ok(_) -> println("node-c: replayed it on its own link as node-b")
-          Err(e) -> println("node-c: replay failed: " ++ e)
-        end
+        -- Replay the frame every 200 ms until the end: node-a may not have
+        -- paired the two connections into a link yet when the first one
+        -- lands (under ASan it is slow), and each replay is the same attack.
+        let _ = task_spawn(fn _ -> replay_loop(cfd, frame, Env.require("CLUSTER_STOP_FILE")))
         wait_file(Env.require("CLUSTER_STOP_FILE"))
         println("node-c: done")
     end

@@ -38,23 +38,6 @@ mod CertUpdateReplayA do
     end
   end
 
-  -- node-c's link as node-b is up: node-b at creation 2 (the real node-b
-  -- runs at creation 1) and a link to it. scenario.sh lets node-c replay
-  -- only after this line, so the replay always lands on an installed link
-  -- (a fixed sleep in node-c did not, under ASan on a slow CI runner).
-  pfn wait_relinked(h : Cap(ClusterNode.Live), flags : Vault(Int), stop : String) : () do
-    if File.exists(stop) do () else
-      let b = ClusterNode.node_id_of(other())
-      let up = List.any(ClusterNode.members(h), fn m -> m.node_id == b && m.creation == 2)
-      if up && ClusterNode.link_count(h) >= 1 do
-        once(flags, "relinked", "linked to " ++ other() ++ " again (creation 2)")
-      else
-        sleep_ms(50)
-        wait_relinked(h, flags, stop)
-      end
-    end
-  end
-
   fn main(c : Cap(IO)) do
     let pki = Env.require("PKI")
     Process.set_env("MARCH_NODE_NAME", me())
@@ -63,10 +46,16 @@ mod CertUpdateReplayA do
     Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
     Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
     Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
-    let cfg = match ClusterNode.config_from_env() do
+    let cfg0 = match ClusterNode.config_from_env() do
       Ok(x) -> x
       Err(e) -> panic(e)
     end
+    -- node-c never answers a SWIM probe, so with the default 3 s suspect
+    -- timeout node-a drops node-c's link soon after it forms (under ASan,
+    -- before a replay lands). A long one keeps the link up for the test;
+    -- node-b's own departure is seen from its link closing, not from SWIM.
+    let swim = { cfg0.swim with suspect_timeout_ms: 600000 }
+    let cfg = { cfg0 with swim: swim }
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
@@ -90,7 +79,6 @@ mod CertUpdateReplayA do
         println(me() ++ ": up")
         let stop = Env.require("CLUSTER_STOP_FILE")
         wait_linked(h, flags, stop)
-        wait_relinked(h, flags, stop)
         wait_file(stop)
         ClusterNode.stop(h)
         println(me() ++ ": done")
