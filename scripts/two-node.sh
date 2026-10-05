@@ -105,27 +105,35 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/two-node-$scenario.XXXXXX")
 # this is the one place instead.
 #
 # Under MARCH_SANITIZE, run_node multiplies each deadline below by TIME_SCALE
-# (TWO_NODE_ASAN_SCALE, default 3): the value the scenario exported, or the
+# (TWO_NODE_ASAN_SCALE, default 5): the value the scenario exported, or the
 # stdlib's default when it exported none. Only deadlines that DECLARE A
 # FAILURE are scaled (a peer dead, a setup abandoned, a conflict real), never
 # a poll interval or a "wait at least this long" delay, which would only make
 # a slow run slower. Without MARCH_SANITIZE, TIME_SCALE is 1 and run_node is
 # a bare exec: the normal two-node job runs exactly as before.
 #
-#   MARCH_SWIM_PERIOD_MS / _ACK_MS / _SUSPECT_MS   ClusterNode.config (SWIM)
-#   MARCH_SESSION_CONNECT_MS / _TIMEOUT_MS          session setup / heartbeat
-#   MARCH_PLACEMENT_CONFLICT_GRACE_MS               Topology: a held endpoint
-#   MARCH_HOOK_TIMEOUT_MS                           Topology: a placement hook
-#   MARCH_CONTROL_AGENT_GRACE_MS                    control: an agent's mark
+#   MARCH_SWIM_SUSPECT_MS                    ClusterNode.config (SWIM)
+#   MARCH_SESSION_CONNECT_MS / _TIMEOUT_MS   session setup / heartbeat
+#   MARCH_PLACEMENT_CONFLICT_GRACE_MS        Topology: a held endpoint
+#   MARCH_HOOK_TIMEOUT_MS                    Topology: a placement hook
+#   MARCH_CONTROL_AGENT_GRACE_MS             control: an agent's mark
+#
+# Why 5, and why only SWIM's suspect timeout and not its probe period or ack
+# timeout: measured 2026-10-05 on hcr_new_code_session (2 CPUs, 2 busy loops,
+# ASan). A suspect is cleared by its own refutation, gossiped on the next
+# probes, so a longer period slows the very thing the timeout waits for.
+# Scaling all three by 3 (period 3 s, suspect 9 s) or 4 (4 s, 12 s) still
+# declared node-a dead (3 of 3, 1 of 1); the period kept at 1 s with a 15 s
+# suspect passed 3 of 3. 5 x 3 s is that 15 s.
 #
 # Each default here must be the stdlib's (stdlib/cluster_node.march,
 # session_node.march, topology.march, lib/desugar/control_wiring.march).
 # TWO_NODE_TIME_SCALE is exported for a node program's own deadlines.
-if [ -n "${MARCH_SANITIZE:-}" ]; then TIME_SCALE=${TWO_NODE_ASAN_SCALE:-3}; else TIME_SCALE=1; fi
+if [ -n "${MARCH_SANITIZE:-}" ]; then TIME_SCALE=${TWO_NODE_ASAN_SCALE:-5}; else TIME_SCALE=1; fi
 [[ $TIME_SCALE =~ ^[1-9][0-9]*$ ]] \
   || { echo "two-node: TWO_NODE_ASAN_SCALE must be a positive integer, got: $TIME_SCALE" >&2; exit 2; }
 export TWO_NODE_TIME_SCALE=$TIME_SCALE
-scaled_deadlines="MARCH_SWIM_PERIOD_MS=1000 MARCH_SWIM_ACK_MS=500 MARCH_SWIM_SUSPECT_MS=3000
+scaled_deadlines="MARCH_SWIM_SUSPECT_MS=3000
   MARCH_SESSION_CONNECT_MS=20000 MARCH_SESSION_TIMEOUT_MS=10000
   MARCH_PLACEMENT_CONFLICT_GRACE_MS=5000 MARCH_HOOK_TIMEOUT_MS=10000
   MARCH_CONTROL_AGENT_GRACE_MS=20000"

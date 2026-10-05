@@ -37,10 +37,10 @@ read them.
   to a positive integer. A record update of the config still wins. Unset, the
   config is exactly what it was.
 - `scripts/two-node.sh`: under `MARCH_SANITIZE`, `TIME_SCALE` is
-  `TWO_NODE_ASAN_SCALE` (default 3), else 1. Every node is launched through
+  `TWO_NODE_ASAN_SCALE` (default 5), else 1. Every node is launched through
   `run_node`, which (only when `TIME_SCALE` > 1) multiplies each deadline that
   DECLARES A FAILURE by it: the scenario's value, or the stdlib default when
-  the scenario set none. The list: `MARCH_SWIM_PERIOD_MS/_ACK_MS/_SUSPECT_MS`,
+  the scenario set none. The list: `MARCH_SWIM_SUSPECT_MS`,
   `MARCH_SESSION_CONNECT_MS`, `MARCH_SESSION_TIMEOUT_MS`,
   `MARCH_PLACEMENT_CONFLICT_GRACE_MS`, `MARCH_HOOK_TIMEOUT_MS`,
   `MARCH_CONTROL_AGENT_GRACE_MS`. Poll intervals and "wait at least" delays
@@ -48,9 +48,15 @@ read them.
   control API idle close, which `control_api_auth` measures) are left alone:
   scaling them only slows a slow run further. With `TIME_SCALE` 1, `run_node`
   is a bare `exec`, so the normal two-node job is unchanged.
+- SWIM's probe period and ack timeout are NOT scaled, only its suspect
+  timeout. A suspect is cleared by its own refutation, which travels on the
+  next probes' gossip, so a longer period slows exactly what the suspect
+  timeout is waiting for. Measured below: all three scaled by 3 or by 4 still
+  declared node-a dead; the 1 s period with a 15 s suspect timeout (5 x 3 s,
+  hence the default 5) did not.
 - `TWO_NODE_TIME_SCALE` is exported for a node's own deadlines
   (`cluster_ap_restart`'s waits use it), and `ctl_until` (control_plane/lib.sh)
-  stretches its poll limit by it.
+  stretches its poll limit by it, as does `ctl_release`'s default `FOLLOW_S`.
 - `TIME_SCALE_EXEMPT` lets a scenario keep a deadline unscaled where the
   deadline IS the test: `slow_start` (A's 4 s start must outlast the 2 s
   heartbeat timeout).
