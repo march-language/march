@@ -54,6 +54,11 @@
                                               CAS_PUT <file>'s bytes under <hash> through a
                                               control API (with so_blake3:<blake3> when given),
                                               as anyone who reaches the port can; prints the verdict
+                                              (the API now answers ERR not_staged unless a
+                                              release staged on the connection names <hash>)
+      hcr_deploy reload-put <socket> <hash> <file> [<blake3>]
+                                              the same CAS_PUT through a reload socket (as a
+                                              local user who can open it)
       hcr_deploy digest <file>                the blake3 of <file> (what ACTIVATE7 signs)
 
     Exit 0 on success; a failed deploy prints why on stderr and exits 1. *)
@@ -312,12 +317,18 @@ let () =
        read_answer conn
      with Failure m -> prerr_endline ("hcr_deploy: " ^ m); exit 1
         | Unix.Unix_error (e, _, _) -> prerr_endline ("hcr_deploy: " ^ Unix.error_message e); exit 1)
-  | "api-put" :: ep :: hash :: file :: rest ->
+  | ("api-put" | "reload-put") as verb :: ep :: hash :: file :: rest ->
     let body = read file in
     let so = match rest with [ d ] -> " so_blake3:" ^ d | _ -> "" in
     (try
-       match Option.bind (March_forge.Cluster_deploy.endpoint_of_string ep)
-               (fun e -> Result.to_option (March_forge.Cluster_deploy.connect e)) with
+       let conn =
+         if verb = "reload-put" then
+           Some (March_forge.Cmd_deploy_hot.conn_of_fd (March_forge.Cmd_deploy_hot.connect_socket ep))
+         else
+           Option.bind (March_forge.Cluster_deploy.endpoint_of_string ep)
+             (fun e -> Result.to_option (March_forge.Cluster_deploy.connect e))
+       in
+       match conn with
        | None -> prerr_endline "hcr_deploy: cannot connect"; exit 1
        | Some conn ->
          March_forge.Cmd_deploy_hot.send_line conn

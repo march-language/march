@@ -1,9 +1,11 @@
 # Scenario "control_artifact_digest" (review 2026-10-04, dd12 P1: a signed
 # activation loaded unverified artifact bytes). A release (v1 -> v2) goes
 # through the control plane as forge sends it, so every node holds v2's
-# operator-signed ACTIVATE7 line in its persisted patch stack. Then, through a
-# candidate's control API (unauthenticated: anyone who reaches the port can
-# send CAS_PUT), the attacker replaces v2's bytes in that node's CAS with
+# operator-signed ACTIVATE7 line in its persisted patch stack. Then, through
+# the node's reload socket (the control API's CAS_PUT now takes only hashes a
+# release staged on the same connection names -- ERR not_staged -- so the
+# writer left is a local user who can open the socket), the attacker replaces
+# v2's bytes in that node's CAS with
 # another patch of the same build -- identity markers and all -- whose
 # `Ver.version` is 666, and the node restarts. The signed line still
 # verifies; the bytes do not hash to its signed so_blake3, so the node does
@@ -37,12 +39,16 @@ r=$("$HCR" api "$api" "CAS_CHECK $art so_blake3:$good")
 [ "$r" = PRESENT ] || fail "node a does not hold the signed bytes of $art: $r"
 
 # A CAS_PUT that names the signed digest refuses other bytes.
-r=$("$HCR" api-put "$api" "$art" "$work/p3/v3.so" "$good")
+r=$("$HCR" reload-put "$(ctl_sock a)" "$art" "$work/p3/v3.so" "$good")
 [ "$r" = "ERR digest_mismatch" ] || fail "a digested CAS_PUT of other bytes was not refused: $r"
 
-# Without a digest the API stores whatever it is sent (its authentication is
-# a separate fix): the attacker's bytes are now node a's copy of v2.
+# The control API no longer takes an unstaged upload at all.
 r=$("$HCR" api-put "$api" "$art" "$work/p3/v3.so")
+[ "$r" = "ERR not_staged" ] || fail "the control API took an unstaged CAS_PUT: $r"
+
+# Without a digest the reload socket stores whatever it is sent: the
+# attacker's bytes are now node a's copy of v2.
+r=$("$HCR" reload-put "$(ctl_sock a)" "$art" "$work/p3/v3.so")
 case "$r" in OK*) ;; *) fail "the substitution did not reach the CAS: $r" ;; esac
 r=$("$HCR" api "$api" "CAS_CHECK $art so_blake3:$good")
 [ "$r" = MISSING ] || fail "CAS_CHECK with the signed digest did not see the substitution: $r"
