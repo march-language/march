@@ -15,7 +15,6 @@ let $t2 : Int = let $t1 : Int = state.n in
 +($t1, k) in
 { n = $t2 } in
 let $nf_n : Int = $result.n in
-inc_rc $d_dispatch_v;
 reuse $actor as Bump_Actor($d_dispatch_v, $e_alive_v, $nf_n);
 dec_rc $result;
 dec_rc state;

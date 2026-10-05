@@ -551,10 +551,29 @@ let insert_apply_fn_clo_drop ~(repl : bool) (body : Tir.expr) : Tir.expr =
     function's return type by definition of tail position, so no inference is
     needed.
 
-    Guards mirror the ELet scope-end drop.  [used_only_as_field_source] is what
-    keeps this from double-freeing: at any consuming position ownership has
-    already transferred, and [releases_var] stands the drop down when the body
-    already decs the parameter on some path. *)
+    Guards mirror the ELet scope-end drop, but are applied PER PATH.
+    [used_only_as_field_source] is what keeps this from double-freeing: at any
+    consuming position ownership has already transferred.  [releases_var]
+    stands the drop down where the body already decs the parameter.  Both
+    used to be asked of the WHOLE body, so a parameter consumed or released
+    on ONE arm was never dropped on the arms that merely read it:
+
+      fn take(st) = match st.items do
+                    Cons(x, rest) -> { conn: Some(x), new_state: { st with items: rest } }
+                    Nil           -> { conn: None, new_state: st }   -- moves st
+                    end
+
+    leaked [st] on every [Cons] path.  That is the shape of depot's
+    [Pool.handle_checkout], so every pooled checkout leaked the actor's state
+    record and a list cell -- the last steady leak in an idle conduit worker.
+    The same whole-body test leaked a read-only parameter whenever Perceus's
+    cross-branch pass had already released it on some other arm.
+
+    Now the walk to each tail tracks which candidates the path has already
+    consumed or released (in a binding's RHS, a statement, a closure capture,
+    or as a case scrutinee), and only the rest are dropped before that tail.
+    Anything ambiguous along the path counts as consumed: leak, never
+    double-free. *)
 let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
     (fn : Tir.fn_def) (body : Tir.expr) : Tir.expr =
   let candidates =
@@ -563,8 +582,7 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
         && p.Tir.v_lin = Tir.Unr
         && not (StringSet.mem p.Tir.v_name borrowed)
         && not (StringSet.mem p.Tir.v_name env.closure_fvs)
-        && not (StringSet.mem p.Tir.v_name env.moved_vars)
-        && used_only_as_field_source ~releases_ok:true p.Tir.v_name body)
+        && not (StringSet.mem p.Tir.v_name env.moved_vars))
       fn.Tir.fn_params
   in
   match candidates with
@@ -575,18 +593,24 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
         (fun acc p -> Tir.ESeq (decrc_for env p (Tir.AVar p), acc))
         tail_expr live
     in
-    (* [live]: the candidates not yet released on the current path.  A
-       release already on the path (the ECase cross-branch drop of a
-       parameter dead in one arm, a post-call dec) takes that candidate out
-       for the rest of the path only.  The guard used to be a whole-body
-       [releases_var], so a release in ONE arm stood the drop down in every
-       arm: [if r.f == "" do "-" else r.f end] released [r] in the first arm
-       and leaked it in the second, once per call.  A release found inside a
+    (* [live]: the candidates the current path has not yet consumed or
+       released.  A consuming use ([used_only_as_field_source] fails: a call
+       argument, a constructor field, the tail value) or a release already on
+       the path (the ECase cross-branch drop of a parameter dead in one arm, a
+       post-call dec) takes that candidate out for the rest of the path only.
+       Both guards used to be asked of the whole body, so a consume or release
+       in ONE arm stood the drop down in every arm: [if r.f == "" do "-" else
+       r.f end] released [r] in the first arm and leaked it in the second, and
+       depot's [Pool.handle_checkout] moved its state on the [Nil] path and
+       leaked it on every [Cons] checkout.  A consume or release found inside a
        non-tail subexpression ([e1] of a let or seq, possibly under a case)
        still counts for the whole rest of the path: conservative, a leak on
        the paths that did not take it, never a double release. *)
-    let not_released_in e live =
-      List.filter (fun p -> not (releases_var p.Tir.v_name e)) live
+    let not_taken_in e live =
+      List.filter (fun p ->
+          not (releases_var p.Tir.v_name e
+               || not (used_only_as_field_source ~releases_ok:true p.Tir.v_name e)))
+        live
     in
     (* [aliases] holds the heap values on the current path that still point
        INTO a candidate without owning a reference of their own: a borrowed
@@ -636,12 +660,12 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
           if needs_rc env v.Tir.v_ty && rhs_aliases aliases e1
           then StringSet.add v.Tir.v_name aliases
           else StringSet.remove v.Tir.v_name aliases in
-        let live_e2 = not_released_in e1 live in
+        let live_e2 = not_taken_in e1 live in
         if List.length live_e2 < List.length live
            && not (uses_candidate live aliases' e2) then
-          (* [e1] releases a candidate on some path and nothing after it
-             mentions any candidate: drop inside [e1], whose paths each know
-             what they released.  Carrying the "released somewhere in e1"
+          (* [e1] consumes or releases a candidate on some path and nothing
+             after it mentions any candidate: drop inside [e1], whose paths
+             each know what they took.  Carrying the "taken somewhere in e1"
              verdict past it instead stood the drop down on every path: [let
              t = if r.f == "" do "-" else r.f end in "sig " ++ t] dropped [r]
              in the first arm and leaked it in the second. *)
@@ -651,11 +675,16 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
       | Tir.ESeq ((Tir.EIncRC (Tir.AVar w) | Tir.EAtomicIncRC (Tir.AVar w)
                    as e1), e2) ->
         Tir.ESeq (e1, push_same live (StringSet.remove w.Tir.v_name aliases) e2)
-      | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push_same (not_released_in e1 live) aliases e2)
+      | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push_same (not_taken_in e1 live) aliases e2)
       | Tir.ECase (a, branches, default) ->
         let scrut_aliased = match a with
           | Tir.AVar w -> is_candidate_or_alias aliases w
           | _ -> false in
+        (* Matching ON a candidate hands it to the case's scrutinee drop. *)
+        let live = match a with
+          | Tir.AVar w ->
+            List.filter (fun p -> not (String.equal p.Tir.v_name w.Tir.v_name)) live
+          | _ -> live in
         let branch_aliases br =
           List.fold_left (fun acc bv ->
               if scrut_aliased && needs_rc env bv.Tir.v_ty
@@ -668,13 +697,15 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
             branches,
           Option.map (push_same live aliases) default)
       | Tir.ELetRec (fns, inner) ->
+        (* A local function that mentions a candidate captures it. *)
         let live =
           List.filter (fun p ->
-              not (List.exists (fun f -> releases_var p.Tir.v_name f.Tir.fn_body) fns))
+              not (List.exists (fun f ->
+                  Perceus_liveness.name_free_in p.Tir.v_name f.Tir.fn_body) fns))
             live in
         Tir.ELetRec (fns, push_same live aliases inner)
       | tail ->
-        (match not_released_in tail live with
+        (match not_taken_in tail live with
          | [] -> tail
          | live when uses_candidate live aliases tail ->
            let tmp = fresh_rc_var ty in

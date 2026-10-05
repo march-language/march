@@ -105,6 +105,10 @@ typedef struct march_observe_verb {
  * when the table is full or the server is already running. */
 int march_observe_add_verbs(const march_observe_verb *v, size_t n);
 
+/* Answer one request line in-process: [out] (initialised by the caller)
+ * gets the same envelope a socket client would. */
+void march_observe_handle(const char *line, size_t n, march_jw *out);
+
 /* Register the R1 snapshot verbs (march_observe_snapshot.c).  Idempotent. */
 void march_observe_snapshot_install(void);
 

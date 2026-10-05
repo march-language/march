@@ -1,0 +1,109 @@
+-- Recon on both backends (R3 of specs/plans/2026-09-28-observe-recon-shell-plan.md):
+-- the same program, compiled and interpreted, prints the same lines
+-- (test/dune diffs both against recon_basic.expected). Only facts that hold
+-- on both are printed: the interpreter has no memory gauges, one scheduler
+-- and eager delivery, so values that differ by design are tested as
+-- properties ("in range", "is None or positive"), not printed.
+mod Main do
+  needs IO
+  needs IO.Console
+
+  actor W do
+    state { n : Int }
+    init  { n: 0 }
+    on Work(k : Int) do
+      { n: state.n + k }
+    end
+    on Boom() do
+      panic("recon-secret-crash")
+    end
+  end
+
+  actor Sup do
+    state { a : Int, b : Int }
+    init  { a: 0, b: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      W a
+      W b
+    end
+  end
+
+  fn names_of(c, pid : Int) : String do
+    match Recon.info(c, pid) do
+      Some(a) -> String.join(a.names, ",")
+      None -> "(none)"
+    end
+  end
+
+  fn first_child(t) : Int do
+    match t do
+      Cons(Recon.SupNode(_, _, _, Cons(Recon.SupNode(k, _, _, _), _)), _) -> k
+      _ -> 0 - 1
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let c = Actor.introspect(io)
+    let w = spawn(W)
+    let _s = spawn(Sup)
+    let _r = Actor.register(w, "worker")
+    let _ = send(w, Work(1))
+    let _ = send(w, Work(2))
+    let _ = send(w, Work(3))
+    run_until_idle()
+
+    -- info
+    let wp = pid_to_int(w)
+    match Recon.info(c, wp) do
+      Some(a) ->
+        println("info: names=" ++ String.join(a.names, ",") ++ " msgs_in=" ++ int_to_string(a.msgs_in)
+                ++ " parent=" ++ bool_to_string(Option.is_none(a.parent))
+                ++ " slices_ok=" ++ bool_to_string(a.slices >= 1))
+      None -> println("info: none")
+    end
+    println("info of an unknown pid: " ++ bool_to_string(Option.is_none(Recon.info(c, 99999))))
+
+    -- actors and proc_count
+    println("actors: " ++ int_to_string(List.length(Recon.actors(c))))
+    match Recon.proc_count(c, "msgs_in", 1) do
+      Cons((p, v), _) -> println("proc_count msgs_in: top is worker=" ++ bool_to_string(p == wp) ++ " value=" ++ int_to_string(v))
+      Nil -> println("proc_count msgs_in: empty")
+    end
+    println("proc_count of an unknown attr: " ++ int_to_string(List.length(Recon.proc_count(c, "bogus", 3))))
+
+    -- tree: one root (the supervisor) with its two children
+    let t = Recon.tree(c)
+    match t do
+      Cons(Recon.SupNode(_, _, _, kids), Nil) -> println("tree: 1 root, " ++ int_to_string(List.length(kids)) ++ " children")
+      _ -> println("tree: unexpected shape")
+    end
+
+    -- crash a supervised child; crashes() reports it without the message
+    let child = first_child(t)
+    let _ = send(Actor.pid_from_int(c, child), Boom())
+    run_until_idle()
+    match Recon.crashes(c, 10) do
+      Cons(cr, _) ->
+        println("crashes: kind=" ++ cr.kind ++ " pid=" ++ bool_to_string(cr.pid == Some(child))
+                ++ " supervised=" ++ bool_to_string(Option.is_some(cr.supervisor)))
+      Nil -> println("crashes: none")
+    end
+
+    -- node_stats and epochs
+    let ns = Recon.node_stats(c)
+    println("node_stats: actors=" ++ int_to_string(ns.actors) ++ " crashes=" ++ int_to_string(ns.crashes_total)
+            ++ " schedulers_ok=" ++ bool_to_string(ns.schedulers >= 1)
+            ++ " rss_ok=" ++ bool_to_string(match ns.rss_bytes do Some(b) -> b > 0
+                                             None -> true end))
+    println("epochs: current_ok=" ++ bool_to_string((Recon.epochs(c)).current >= 1))
+
+    -- windows sleep this green thread; usage is a fraction per scheduler
+    let usage = Recon.scheduler_usage(c, 50)
+    println("scheduler_usage in [0,1]: " ++ bool_to_string(List.all(usage, fn p -> match p do (_, u) -> u >= 0.0 && u <= 1.0 end)))
+    let win = Recon.proc_window(c, "msgs_in", 2, 20)
+    println("proc_window: deltas non-negative=" ++ bool_to_string(List.all(win, fn p -> match p do (_, d) -> d >= 0 end)))
+    println("names: " ++ names_of(c, wp))
+  end
+end

@@ -289,7 +289,16 @@ let emit_update ~emit_atom ctx (base_atom : Tir.atom)
 
        Fields whose slot is not a pointer (Int/Float/Bool/Unit) carry no
        reference, so they are copied as before. *)
+    (* Slots the update overwrites are NOT copied.  Copying them took a
+       reference to the base's OLD value that the overwrite below then
+       discarded, so it was never released: every `{ st with items: rest }`
+       leaked the replaced value -- in depot's Pool actor, the idle list's
+       cons cell (and the connection it held) on every checkout. *)
+    let updated_idx =
+      List.map (fun (fname, _) -> fst (field_index_for ctx base_ty fname)) updates
+    in
     List.iteri (fun i (_, fty) ->
+      if List.mem i updated_idx then () else
       (* Slot-to-slot copy: read and write at the SLOT type, never the value
          type, so an unboxed aggregate's box is copied as the pointer it is. *)
       let sty = Llvm_ctx.llvm_field_ty ctx fty in

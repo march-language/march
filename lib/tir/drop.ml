@@ -247,8 +247,19 @@ let find_variant_by_suffix (env : env) (name : string)
         | Some (Kind.Niche _) -> true
         | _ -> false in
       if niche then None
-      else (match Kind.repr_of env.k_table
-                    (Tir.TCon (qualified, [])) with
+      (* Classify by the SHORT name, never the qualified one.  The short name
+         is what codegen classifies by: [emit_alloc_ctor] takes the type name
+         from the "Type.Ctor" key, so a library single-field type such as
+         [Bytes] ("Bytes.Bytes" -> "Bytes") misses the qualified table entry
+         and is built Boxed -- a 24-byte cell holding its String, the same
+         layout the C runtime builds ([compress_bytes_from_raw]) -- and
+         [Llvm_case] destructures it Boxed by the same short name.  Asking
+         about the qualified name instead answered [Newtype], declined the
+         drop, and every dying Bytes was freed shallowly, orphaning its
+         String: ~48 B per Bytes.length(Bytes.from_string(s)), and the
+         steady leak of every Postgres message depot's wire layer
+         encodes/decodes. *)
+      else (match Kind.repr_of env.k_table (Tir.TCon (name, [])) with
             | Kind.Boxed -> Some variants
             | _ -> None)
     | _ -> None
@@ -462,6 +473,23 @@ let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
         env.fns <- fn :: env.fns;
         Some fname
       end
+    | None ->
+    match (if may_be_non_heap env ty then erased_payload env ty else None) with
+    | Some _ ->
+      (* A niche or newtype value released DIRECTLY ([dec_rc o] on an
+         [Option(Bytes)]), not as a field: [drop_op]'s payload-sharing arm is
+         reached only from a parent's drop, so this bare release stayed
+         shallow and orphaned the payload's children -- the String inside every
+         dropped [Option(Bytes)], e.g. each NULL-able cell of a Postgres DataRow
+         depot decodes.  Wrap [drop_op]'s null-tested payload release in a
+         function so [rewrite_dec] can route the release through it. *)
+      let fname = Tir_names.drop_fn_prefix ^ key in
+      Hashtbl.replace env.names key fname;
+      let x = { Tir.v_name = fresh env "dx"; v_ty = ty; v_lin = Tir.Unr } in
+      let body = drop_op env x in
+      env.fns <- { Tir.fn_name = fname; fn_params = [x]; fn_ret_ty = Tir.TUnit;
+                   fn_body = body; fn_kind = Tir.FnNormal } :: env.fns;
+      Some fname
     | None ->
     match droppable_ctors env ty with
     | None -> Hashtbl.replace env.names key ""; None

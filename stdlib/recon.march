@@ -1,0 +1,304 @@
+-- Recon: a running program's view of itself, from March code.
+--
+-- The same numbers the observe socket serves (`forge observe`, `forge top`),
+-- read in-process through the `observe_query` builtin, which answers one
+-- request line with the socket's JSON envelope. Observe tier: every function
+-- takes a `Cap(Actor.Introspect)` (mint it with `Actor.introspect(io)` in
+-- `main`) and none returns a crash message, only how an actor died.
+--
+-- Backends. Compiled, the answers come from the runtime's actor table and
+-- counters. Interpreted, from the interpreter's actor table: mailboxes are
+-- usually empty (delivery is eager), there is one scheduler, and no memory
+-- gauges, so those fields read 0 or None.
+--
+-- Windows. `proc_window` and `scheduler_usage` take two samples `window_ms`
+-- apart and sleep THIS green thread in between (the runtime's own windowed
+-- verbs would sleep a scheduler's OS thread, so in-process callers get them
+-- refused).
+--
+-- R3 of specs/plans/2026-09-28-observe-recon-shell-plan.md.
+mod Recon do
+  needs Actor.Introspect
+
+  -- One live actor, as `info` and the other actor views report it.
+  type ActorInfo = {
+    pid : Int,
+    type_name : String,
+    names : List(String),
+    status : String,
+    mbox : Int,
+    held : Int,
+    parent : Option(Int),
+    children : Int,
+    slices : Int,
+    msgs_in : Int,
+    msgs_out : Int,
+    crashes : Int,
+    child_crashes : Int
+  }
+
+  -- A supervision-tree node: pid, actor type, registered names, children.
+  type SupNode = SupNode(Int, String, List(String), List(SupNode))
+
+  -- Whole-node figures from one snapshot. Memory gauges are None where the backend has none.
+  type NodeStats = {
+    actors : Int,
+    queued : Int,
+    rss_bytes : Option(Int),
+    live_objects : Option(Int),
+    schedulers : Int,
+    crashes_total : Int
+  }
+
+  -- One crash, without its message: kind is crash, draining or panic.
+  type CrashReport = {
+    seq : Int,
+    kind : String,
+    pid : Option(Int),
+    type_name : String,
+    supervisor : Option(Int),
+    restart : Int,
+    at_ms : Int
+  }
+
+  -- Hot-reload epochs: the current one and (epoch, pins) for every pinned epoch.
+  type EpochReport = { current : Int, pins : List((Int, Int)) }
+
+  -- ── Decoding the envelope ─────────────────────────────────────────────
+
+  -- The data of a reply, or the error code it carries.
+  pfn ask(line : String) : Result(Json.JsonValue, String) do
+    match Json.parse(observe_query(line)) do
+      Ok(env) ->
+        match Json.get(env, "data") do
+          Some(d) -> Ok(d)
+          None ->
+            match Json.get(env, "error") do
+              Some(Json.Str(code)) -> Err(code)
+              _ -> Err("malformed_reply")
+            end
+        end
+      Err(_) -> Err("malformed_reply")
+    end
+  end
+
+  pfn int_of(j : Json.JsonValue, key : String) : Int do
+    match Json.get(j, key) do
+      Some(Json.Number(f)) -> float_to_int(f)
+      _ -> 0
+    end
+  end
+
+  pfn opt_int(j : Json.JsonValue, key : String) : Option(Int) do
+    match Json.get(j, key) do
+      Some(Json.Number(f)) -> Some(float_to_int(f))
+      _ -> None
+    end
+  end
+
+  pfn str_of(j : Json.JsonValue, key : String) : String do
+    match Json.get(j, key) do
+      Some(Json.Str(s)) -> s
+      _ -> ""
+    end
+  end
+
+  pfn list_of(j : Json.JsonValue, key : String) : List(Json.JsonValue) do
+    match Json.get(j, key) do
+      Some(Json.Array(xs)) -> xs
+      _ -> Nil
+    end
+  end
+
+  pfn strings(xs : List(Json.JsonValue)) : List(String) do
+    List.filter_map(xs, fn x ->
+      match x do
+        Json.Str(s) -> Some(s)
+        _ -> None
+      end)
+  end
+
+  pfn actor_info(r : Json.JsonValue) : ActorInfo do
+    {
+      pid: int_of(r, "pid"),
+      type_name: str_of(r, "type"),
+      names: strings(list_of(r, "names")),
+      status: str_of(r, "status"),
+      mbox: int_of(r, "mbox"),
+      held: int_of(r, "held"),
+      parent: opt_int(r, "parent"),
+      children: int_of(r, "children"),
+      slices: int_of(r, "slices"),
+      msgs_in: int_of(r, "msgs_in"),
+      msgs_out: int_of(r, "msgs_out"),
+      crashes: int_of(r, "crashes"),
+      child_crashes: int_of(r, "child_crashes")
+    }
+  end
+
+  -- ── Actors ────────────────────────────────────────────────────────────
+
+  doc """
+  The live actor with pid index `pid` (what `pid_to_int` returns), or None
+  when it is dead or was never spawned.
+
+      match Recon.info(c, 3) do
+        Some(a) -> println(a.type_name ++ " " ++ int_to_string(a.mbox))
+        None -> println("gone")
+      end
+  """
+  fn info(_c : Cap(Actor.Introspect), pid : Int) : Option(ActorInfo) do
+    match ask("ACTOR " ++ int_to_string(pid)) do
+      Ok(d) ->
+        match Json.get(d, "actor") do
+          Some(Json.Object(_) as r) -> Some(actor_info(r))
+          _ -> None
+        end
+      Err(_) -> None
+    end
+  end
+
+  doc "Every live actor, deepest mailbox first."
+  fn actors(_c : Cap(Actor.Introspect)) : List(ActorInfo) do
+    match ask("ACTORS mbox 10000") do
+      Ok(d) -> List.map(list_of(d, "actors"), actor_info)
+      Err(_) -> Nil
+    end
+  end
+
+  -- A window of 0 asks for the cumulative counter (no sleep), which is what
+  -- an in-process caller can have; "mbox" and "crashes" take no window.
+  pfn counter_window(attr : String) : String do
+    if attr == "slices" || attr == "msgs_in" || attr == "msgs_out" do " 0" else "" end
+  end
+
+  doc """
+  The `n` live actors highest on `attr`, as (pid, value), highest first.
+  `attr` is one of "mbox" (queued plus held), "crashes" (its own and its
+  children's crashes in the last hour), "slices", "msgs_in" or "msgs_out"
+  (cumulative since spawn; see `proc_window` for a rate). An unknown `attr`
+  gives Nil.
+  """
+  fn proc_count(_c : Cap(Actor.Introspect), attr : String, n : Int) : List((Int, Int)) do
+    match ask("TOP " ++ attr ++ " " ++ int_to_string(n) ++ counter_window(attr)) do
+      Ok(d) -> List.map(list_of(d, "top"), fn r -> (int_of(r, "pid"), int_of(r, "value")))
+      Err(_) -> Nil
+    end
+  end
+
+  pfn counter(a : ActorInfo, attr : String) : Int do
+    if attr == "slices" do a.slices
+    else if attr == "msgs_in" do a.msgs_in
+    else if attr == "msgs_out" do a.msgs_out
+    else a.mbox + a.held end end end
+  end
+
+  pfn lookup(xs : List((Int, Int)), pid : Int) : Int do
+    match xs do
+      Nil -> 0
+      Cons((p, v), rest) -> if p == pid do v else lookup(rest, pid) end
+    end
+  end
+
+  doc """
+  Like `proc_count` for "slices", "msgs_in" or "msgs_out", but ranked by how
+  much each rose over the next `window_ms`: two samples, with this green
+  thread asleep between them. An actor born during the window counts from 0.
+  """
+  fn proc_window(c : Cap(Actor.Introspect), attr : String, n : Int, window_ms : Int) : List((Int, Int)) do
+    let before = List.map(actors(c), fn a -> (a.pid, counter(a, attr)))
+    sleep_ms(window_ms)
+    let deltas = List.map(actors(c), fn a -> (a.pid, counter(a, attr) - lookup(before, a.pid)))
+    List.take(List.sort_by(deltas, fn (x, y) -> Tuple.second(x) > Tuple.second(y)), n)
+  end
+
+  -- ── Tree, node, crashes, epochs ───────────────────────────────────────
+
+  pfn sup_node(j : Json.JsonValue) : SupNode do
+    SupNode(int_of(j, "pid"), str_of(j, "type"), strings(list_of(j, "names")),
+            List.map(list_of(j, "children"), sup_node))
+  end
+
+  doc """
+  The supervision tree: one node per root (an actor with no supervisor that
+  supervises or spawned something live), children nested. Actors in neither
+  role are left out; `actors` lists everything.
+  """
+  fn tree(_c : Cap(Actor.Introspect)) : List(SupNode) do
+    match ask("TREE") do
+      Ok(d) -> List.map(list_of(d, "roots"), sup_node)
+      Err(_) -> Nil
+    end
+  end
+
+  doc "Actors, queued messages, memory and crash totals from one snapshot."
+  fn node_stats(_c : Cap(Actor.Introspect)) : NodeStats do
+    match ask("SNAPSHOT mem,sched,crashes") do
+      Ok(d) ->
+        let mem = unwrap_or(Json.get(d, "mem"), Json.Null)
+        let sched = unwrap_or(Json.get(d, "sched"), Json.Null)
+        let crashes = unwrap_or(Json.get(d, "crashes"), Json.Null)
+        {
+          actors: int_of(mem, "actors"),
+          queued: int_of(mem, "queued_messages"),
+          rss_bytes: opt_int(mem, "rss_bytes"),
+          live_objects: opt_int(mem, "live_objects"),
+          schedulers: int_of(sched, "schedulers"),
+          crashes_total: int_of(crashes, "total")
+        }
+      Err(_) ->
+        { actors: 0, queued: 0, rss_bytes: None, live_objects: None,
+          schedulers: 0, crashes_total: 0 }
+    end
+  end
+
+  doc "The last `n` crashes (at most 256), newest first, without their messages."
+  fn crashes(_c : Cap(Actor.Introspect), n : Int) : List(CrashReport) do
+    match ask("CRASHES " ++ int_to_string(n)) do
+      Ok(d) ->
+        List.map(list_of(d, "crashes"), fn e ->
+          { seq: int_of(e, "seq"), kind: str_of(e, "kind"), pid: opt_int(e, "pid"),
+            type_name: str_of(e, "type"), supervisor: opt_int(e, "supervisor"),
+            restart: int_of(e, "restart"), at_ms: int_of(e, "at_ms") })
+      Err(_) -> Nil
+    end
+  end
+
+  doc "The current hot-reload epoch and the pins held at each epoch."
+  fn epochs(_c : Cap(Actor.Introspect)) : EpochReport do
+    match ask("EPOCHS") do
+      Ok(d) ->
+        { current: int_of(d, "current"),
+          pins: List.map(list_of(d, "pins"), fn p -> (int_of(p, "epoch"), int_of(p, "pins"))) }
+      Err(_) -> { current: 0, pins: Nil }
+    end
+  end
+
+  pfn idle_ms(d : Json.JsonValue) : List((Int, Int)) do
+    List.map(list_of(d, "threads"), fn t -> (int_of(t, "id"), int_of(t, "idle_ms")))
+  end
+
+  doc """
+  Each scheduler's utilisation over the next `window_ms`, as (scheduler id,
+  fraction busy in 0.0 to 1.0): two samples of its idle time, with this green
+  thread asleep between them. Nil under the interpreter (no scheduler threads).
+  """
+  fn scheduler_usage(_c : Cap(Actor.Introspect), window_ms : Int) : List((Int, Float)) do
+    match ask("SCHED 0") do
+      Ok(d0) ->
+        let before = idle_ms(d0)
+        sleep_ms(window_ms)
+        match ask("SCHED 0") do
+          Ok(d1) ->
+            List.map(idle_ms(d1), fn t ->
+              match t do
+                (id, idle) ->
+                  let busy = 1.0 -. int_to_float(idle - lookup(before, id)) /. int_to_float(window_ms)
+                  (id, if busy < 0.0 do 0.0 else if busy > 1.0 do 1.0 else busy end end)
+              end)
+          Err(_) -> Nil
+        end
+      Err(_) -> Nil
+    end
+  end
+end

@@ -78,6 +78,9 @@ type actor_inst = {
   mutable ai_linear_values : (value * value) list;
   mutable ai_mbox_limit : int;
   mutable ai_mbox_policy : int;
+  mutable ai_slices   : int;
+  mutable ai_msgs_in  : int;
+  mutable ai_msgs_out : int;
 }
 
 val actor_defs_tbl : (string, March_ast.Ast.actor_def * env ref) Hashtbl.t

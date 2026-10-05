@@ -670,7 +670,8 @@ let restore_actors (snap : actor_state_snapshot) : unit =
                      ai_resources = [];
                      ai_linear_values = [];
                      ai_mbox_limit = 0;
-                     ai_mbox_policy = 0 } in
+                     ai_mbox_policy = 0;
+                 ai_slices = 0; ai_msgs_in = 0; ai_msgs_out = 0 } in
         Hashtbl.add actor_registry pid inst
     ) snap.ass_instances;
   next_pid := snap.ass_next_pid
@@ -2206,7 +2207,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
                  ai_restart_count = []; ai_epoch = 0;
                  ai_resources = [];
                  ai_linear_values = [];
-                 ai_mbox_limit = 0; ai_mbox_policy = 0 } in
+                 ai_mbox_limit = 0; ai_mbox_policy = 0;
+                 ai_slices = 0; ai_msgs_in = 0; ai_msgs_out = 0 } in
                Hashtbl.add actor_registry child_pid child_inst;
                (sf.sf_name.txt, child_pid)
            ) sup_cfg.sc_fields in
@@ -2240,7 +2242,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
                     ai_supervisor = None; ai_restart_count = [];
                     ai_epoch = 0; ai_resources = [];
                     ai_linear_values = [];
-                    ai_mbox_limit = 0; ai_mbox_policy = 0 } in
+                    ai_mbox_limit = 0; ai_mbox_policy = 0;
+                 ai_slices = 0; ai_msgs_in = 0; ai_msgs_out = 0 } in
        Hashtbl.add actor_registry pid inst;
        (* `mailbox N policy` on the declaration: the same binding
           Actor.set_queue_limit makes, applied at every spawn of this actor.
@@ -2636,6 +2639,10 @@ let run_scheduler () =
       | Some _ when Hashtbl.mem busy_actors pid -> ()
       | Some inst ->
         let msg = Queue.pop inst.ai_mailbox in
+        (* Observe counters: one handler run, one message received (undone
+           below if the handler blocks and the message goes back). *)
+        inst.ai_slices <- inst.ai_slices + 1;
+        inst.ai_msgs_in <- inst.ai_msgs_in + 1;
         let (msg_tag, msg_args) = match msg with
           | VCon (tag, args) -> (tag, args)
           | VAtom tag        -> (tag, [])
@@ -2703,6 +2710,8 @@ let run_scheduler () =
                      that need multiple messages should use a recursive pattern
                      where each receive() is the first operation in its own
                      handler body. *)
+                  inst.ai_slices <- inst.ai_slices - 1;
+                  inst.ai_msgs_in <- inst.ai_msgs_in - 1;
                   let front_q = Queue.create () in
                   Queue.push msg front_q;
                   Queue.transfer inst.ai_mailbox front_q;
@@ -3278,7 +3287,8 @@ let spawn_from_spec (spec : value) : unit =
                 ai_draining = false; ai_self_stop = None;
                 ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
                 ai_resources = []; ai_linear_values = [];
-                ai_mbox_limit = 0; ai_mbox_policy = 0 } in
+                ai_mbox_limit = 0; ai_mbox_policy = 0;
+                 ai_slices = 0; ai_msgs_in = 0; ai_msgs_out = 0 } in
               Hashtbl.add actor_registry pid inst;
               app_spawn_order := !app_spawn_order @ [pid];
               (* Register named children in the process registry *)
