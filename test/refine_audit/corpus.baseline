@@ -130,6 +130,10 @@ native_default_args_nested: coverage audit (user + stdlib): 123 enforced, 0 iner
 native_default_args_nested: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_default_method_args: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_default_method_args: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_diagnose_fixtures: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_diagnose_fixtures: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_diagnose_runaway: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_diagnose_runaway: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_dist_monitor_loopback: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_dist_monitor_loopback: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_dns_resolve_parity: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -700,6 +704,8 @@ stdlib_decimal: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 
 stdlib_decimal: coverage audit (user code): 1 enforced, 0 inert (warned), 0 unenforced
 stdlib_deque: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 stdlib_deque: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_diagnose: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+stdlib_diagnose: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_dir: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 stdlib_dir: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_dist_link: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
