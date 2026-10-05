@@ -67,12 +67,37 @@ let mk_fn_def name params body : fn_def =
    never map "<none>" spans onto a document) keep treating derived code as
    synthetic. *)
 
+(* The key is (salt, ordinal): [ordinal] counts the nodes of ONE generated
+   decl from 1, and [salt] is a hash of that decl ([respan_derived_decl] sets
+   both).  It used to be a process-wide counter, which was unique only within
+   one process: the stdlib's desugared AST is cached on disk
+   (the stdlib_ast blobs in ~/.cache/march), carrying the counter values of the process
+   that wrote it, so a later compile of a DIFFERENT program minted the same
+   spans for its own derived nodes and the type map handed one the other's
+   type.  The multi-host lab saw it as `Eq$Action.eq(a : Result((Int,
+   List(Event)), DecodeError), ...)` after a protocol edit: every derived Eq
+   "changed signature", and a hot patch became a restart
+   (specs/progress/2026-10-05-derive-span-cache-collision.md).
+   Hashing the decl makes the key the same in every process, and different
+   for every distinct generated decl (two identical decls may share keys:
+   their nodes have the same types).  The salt goes in the columns, so
+   [start_line] stays a positive ordinal and the file stays "<none>". *)
 let _synthetic_span_counter = ref 0
+let _synthetic_span_salt = ref 0
 
 let fresh_synthetic_span () : span =
   incr _synthetic_span_counter;
-  { file = "<none>"; start_line = !_synthetic_span_counter; start_col = 0;
-    end_line = !_synthetic_span_counter; end_col = 0 }
+  { file = "<none>"; start_line = !_synthetic_span_counter;
+    start_col = !_synthetic_span_salt land 0x3FFFFFFF;
+    end_line = !_synthetic_span_counter;
+    end_col = (!_synthetic_span_salt lsr 30) land 0x3FFFFFFF }
+
+(* A 60-bit hash of the generated decl (its derive-site span included), from
+   two independent structural hashes. *)
+let decl_salt (d : decl) : int =
+  let h1 = Hashtbl.hash_param 4096 4096 d in
+  let h2 = Hashtbl.seeded_hash_param 4096 4096 0x5eed d in
+  (h1 land 0x3FFFFFFF) lor ((h2 land 0x3FFFFFFF) lsl 30)
 
 let respan_name (n : name) : name = { n with span = fresh_synthetic_span () }
 
@@ -179,6 +204,8 @@ let respan_fn_def (fd : fn_def) : fn_def =
     (Json); any other decl kind passes through unchanged, which merely keeps
     today's shared-dummy-span behavior for it. *)
 let respan_derived_decl (d : decl) : decl =
+  _synthetic_span_salt := decl_salt d;
+  _synthetic_span_counter := 0;
   match d with
   | DImpl (idef, sp) ->
     DImpl ({ impl_iface       = respan_name idef.impl_iface;

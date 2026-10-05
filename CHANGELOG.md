@@ -193,6 +193,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Derived implementations (`derive Eq`, `Ord`, `Json`, ...) are no longer typechecked with
+  another program's types.** Their generated code got placeholder source positions from a
+  counter that restarted in every compiler process, and the stdlib's cached, already
+  desugared code carried the positions of the process that wrote the cache. A later build
+  of a different program could reuse the same positions and lower a derived function with
+  unrelated types. It surfaced as `forge deploy` reporting every derived `Eq` changed
+  after an unrelated protocol edit.
+
 - **A restarted cluster node's offers are visible again.** After a rolling restart, a node
   that registered its access points anew could have them erased on every node: its peers
   still held the bindings from its previous run under a newer clock, and retiring those
