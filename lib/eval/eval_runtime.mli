@@ -39,6 +39,7 @@ val vault_next_id : int ref
 val vault_row_live : vault_row -> bool
 val vault_decode_key : string -> value
 val vault_key_of_value : value -> string
+val vault_closed : (int, unit) Hashtbl.t
 val vault_lookup : int -> vault_table
 val vault_shard_for : string -> vault_shard array -> vault_shard
 

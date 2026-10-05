@@ -130,6 +130,8 @@ let cap_table : (string * string) list = [
   ("vault_ns_get",          "IO.Mut");
   ("vault_ns_drop",         "IO.Mut");
   ("vault_whereis",         "IO.Mut");
+  ("vault_reap",            "IO.Mut");
+  ("vault_close",           "IO.Mut");
   (* IO.NetConnect.TLS *)
   ("tls_client_ctx",        "IO.NetConnect.TLS");
   ("tls_server_ctx",        "IO.NetConnect.TLS");
