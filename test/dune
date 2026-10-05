@@ -2607,6 +2607,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/builtin_borrow_leak_probe.expected native_builtin_borrow_leak_probe.out)))
 
+; ── A Vault write released only the displaced value's own cell, never its
+; children; a closed table must be freed. live_allocs() deltas per operation,
+; booleans in the golden. Red on main: every displaced-value leg.
+; specs/progress/2026-10-01-session-node-vault-tables-leak.md
+(rule
+ (targets native_vault_churn_leak_probe native_vault_churn_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/vault_churn_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_vault_churn_leak_probe
+        native/vault_churn_leak_probe.march)
+   (with-stdout-to native_vault_churn_leak_probe.out
+        (system "./native_vault_churn_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/vault_churn_leak_probe.expected native_vault_churn_leak_probe.out)))
+
 ; ── Compiled `to_string(())` printed `0` (the interpreter prints `()`): the
 ; unit value is typed as the empty tuple, so Mono keyed the Show lookup
 ; "$Tuple0" and fell through to the generic runtime formatter. Both backends

@@ -1,0 +1,71 @@
+-- Two-node harness, scenario "session_churn": node-b runs role B of every
+-- session, answering n * 2, except that it LEAVES every third cluster
+-- session instead (A's run ends Cancelled, B's Left): the cancellation path
+-- must free its tables too. See node_a.march.
+mod SessionChurnB do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  pfn role_b(s : Cap(Session.Live), st : Echo_B.S_recv_Msg_A_B_1, leave : Bool) : Echo_B.Yield do
+    Echo_B.recv_Msg_A_B_1(s, st, fn (n, st1) ->
+      if leave do Echo_B.leave_send_Msg_B_A_1(s, st1, "churn")
+      else Echo_B.close(s, Echo_B.send_Msg_B_A_1(s, st1, n * 2)) end)
+  end
+
+  pfn cluster_runs(c : Cap(IO), h : Cap(ClusterNode.Live), i : Int, stop : Int, ok : Int, bad : Int) : (Int, Int) do
+    if i >= stop do (ok, bad) else
+      match Echo_Run.cluster_B(c, h, "churn" ++ int_to_string(i), fn (s, st) -> role_b(s, st, i % 3 == 2)) do
+        Ok(_) -> cluster_runs(c, h, i + 1, stop, ok + 1, bad)
+        Err(_) -> cluster_runs(c, h, i + 1, stop, ok, bad + 1)
+      end
+    end
+  end
+
+  pfn direct_runs(c : Cap(IO), i : Int, stop : Int, ok : Int) : Int do
+    if i >= stop do ok else
+      match Echo_Run.run_B(c, "node-b", "churn-secret", Echo_Run.addrs_from_env(), fn (s, st) -> role_b(s, st, false)) do
+        Ok(_) -> direct_runs(c, i + 1, stop, ok + 1)
+        Err(e) ->
+          IO.warn("B: direct session " ++ int_to_string(i) ++ ": " ++ Echo_Run.error_message(e))
+          direct_runs(c, i + 1, stop, ok)
+      end
+    end
+  end
+
+  fn main(c : Cap(IO)) do
+    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
+    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "churn-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-b: up")
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
+        let _ = cluster_runs(c, h, 0, 6, 0, 0)
+        let t0 = Vault.live_tables()
+        match cluster_runs(c, h, 6, 66, 0, 0) do
+          (ok, bad) -> println("B: cluster sessions finished " ++ int_to_string(ok) ++ ", left " ++ int_to_string(bad))
+        end
+        let t = Vault.live_tables() - t0
+        println("B: cluster: tables flat " ++ (if t <= 2 do "true" else "false (" ++ int_to_string(t) ++ " over)" end))
+        let _ = direct_runs(c, 0, 3, 0)
+        let t1 = Vault.live_tables()
+        println("B: direct sessions finished " ++ int_to_string(direct_runs(c, 3, 23, 0)))
+        let u = Vault.live_tables() - t1
+        println("B: direct: tables flat " ++ (if u <= 2 do "true" else "false (" ++ int_to_string(u) ++ " over)" end))
+        ClusterNode.stop(h)
+    end
+  end
+end

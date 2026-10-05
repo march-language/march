@@ -222,6 +222,13 @@ let extern_borrow_table : (string * bool list) list = [
   ("vault_ns_set",         [true; true; true]);
   ("vault_ns_get",         [true; true]);
   ("vault_ns_drop",        [true; true]);
+  (* A write no longer releases what it displaces (march_decrc frees one
+     cell, never its children): it buries it, and vault_reap hands it back to
+     the typed wrapper (stdlib/vault.march) to drop at its static type;
+     vault_close does the same for a retired table's contents.  Both only
+     read the table and key.  specs/progress/2026-10-01-session-node-vault-tables-leak.md *)
+  ("vault_reap",           [true; true]);
+  ("vault_close",          [true]);
   ("string_byte_at",       [true; false]);
   ("string_grapheme_count",[true]);
   ("string_is_empty",      [true]);
@@ -425,7 +432,7 @@ let is_simd_builtin (fn_name : string) : bool =
 
 (** Builtins with a heap ([ptr]) parameter that are deliberately OWNED: each
     either consumes its argument (it stores or frees it -- e.g. [send]'s
-    message, [vault_set]'s value) or has not been audited yet and keeps the
+    message) or has not been audited yet and keeps the
     pre-2026-09-13 default.
 
     Every [in_is_builtin] row of [Llvm_builtins.builtins] with a [ptr]
