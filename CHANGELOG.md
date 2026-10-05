@@ -19,6 +19,13 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`Recon`: a program's view of itself.** The new stdlib module answers, from
+  March code, the questions `forge observe` asks a node: `Recon.info` (one
+  actor's mailbox, counters, supervisor and names), `actors`, `proc_count`
+  and `proc_window` (the actors highest on mailbox depth, crashes or message
+  rate), `tree`, `node_stats`, `crashes` (kind, actor and restart number,
+  never the panic text), `epochs` and `scheduler_usage`. Every function takes
+  a `Cap(Actor.Introspect)`, and they work interpreted as well as compiled.
 - **`--dump-phases`/`MARCH_DUMP_TXT` now include a `tir-trmc` stage.** The
   TIR is snapshotted right after `Trmc.transform_module`, before the first
   existing checkpoint (`tir-mono`), so the tail-recursion-modulo-cons rewrite

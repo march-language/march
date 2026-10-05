@@ -93,6 +93,7 @@ let stdlib_file_list = [
   "flow.march";
   "json.march";
   "json_stream.march";
+  "recon.march";
   "regex.march";
   "datetime.march";
   "queue.march";

@@ -339,6 +339,11 @@ let base_env : env =
            | Some inst -> VInt (Queue.length inst.ai_mailbox)
            | None      -> VInt 0)
         | _ -> eval_error "mailbox_size: expected pid"))
+  (* The observe socket's reply to one request line, built from the
+     interpreter's actor table (lib/eval/eval_observe.ml). Stdlib-only: Recon. *)
+  ; ("observe_query", VBuiltin ("observe_query", function
+        | [VString line] -> VString (Eval_observe.query line)
+        | _ -> eval_error "observe_query: expected String"))
   ; ("sched_stat", VBuiltin ("sched_stat", function
         (* No C scheduler in the interpreter; report what's meaningful:
            0 = live actors, 1 = total actors ever spawned, 4 = messages

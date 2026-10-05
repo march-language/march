@@ -518,6 +518,12 @@ static const char *verb_names(march_jw *w, const char *args) {
 
 /* ── SCHED ────────────────────────────────────────────────────────────── */
 
+/* 1 while a verb runs for an in-process caller (observe_query, on a green
+ * thread): a windowed SCHED or TOP would put that scheduler's OS thread to
+ * sleep, so they are refused there (Recon samples twice and sleeps the green
+ * thread instead).  No verb switches green threads, so the flag cannot leak. */
+static _Thread_local int tl_in_process;
+
 #define SCHED_WINDOW_DEFAULT_MS 200
 #define SCHED_WINDOW_MAX_MS     5000
 
@@ -595,11 +601,12 @@ static void write_sched(march_jw *w, int64_t window_ms) {
 }
 
 static const char *verb_sched(march_jw *w, const char *args) {
-    int64_t window = SCHED_WINDOW_DEFAULT_MS;
+    int64_t window = tl_in_process ? 0 : SCHED_WINDOW_DEFAULT_MS;
     char word[32];
     const char *p = args;
     if (next_word(&p, word, sizeof word)) {
         if (!parse_i64(word, &window) || window > SCHED_WINDOW_MAX_MS) return "bad_args";
+        if (window > 0 && tl_in_process) return "windowed_in_process";
     }
     if (!only_spaces(p)) return "bad_args";
     write_sched(w, window);
@@ -910,14 +917,18 @@ static const char *verb_top(march_jw *w, const char *args) {
             || want < 1 || want > ACTORS_MAX_N) return "bad_args";
     int windowed = attr >= TOP_SLICES;
     if (next_word(&p, word, sizeof word)) {
-        if (!windowed || !parse_i64(word, &window) || window < 1 || window > TOP_WINDOW_MAX_MS)
+        if (!windowed || !parse_i64(word, &window) || window > TOP_WINDOW_MAX_MS)
             return "bad_args";
+        /* An explicit 0: the cumulative counter, no window (what Recon's
+         * proc_count asks for in-process, where a window is refused). */
+        if (window == 0) windowed = 0;
     }
     if (!only_spaces(p)) return "bad_args";
 
     /* A windowed TOP holds its connection thread for the window; at most two
      * at once, so they cannot take every connection (eight) from the other
      * verbs. */
+    if (windowed && tl_in_process) return "windowed_in_process";
     if (windowed && !windowed_enter()) return "busy";
     const char *rc = top_body(w, attr, want, windowed, window);
     if (windowed) windowed_exit();
@@ -996,6 +1007,23 @@ static const char *top_body(march_jw *w, int attr, int64_t want, int windowed, i
     return NULL;
 }
 
+/* ── observe_query: the same envelope, in-process ─────────────────────── */
+
+/* observe_query : String -> String (stdlib-only; Recon is its caller). */
+void *march_observe_query(void *line) {
+    march_string *s = (march_string *)line;
+    march_jw out;
+    march_jw_init(&out, ((size_t)16 << 20) + 4096);
+    tl_in_process = 1;
+    march_observe_handle(s->data, (size_t)s->len, &out);
+    tl_in_process = 0;
+    void *r = march_jw_ok(&out)
+        ? march_string_lit(march_jw_text(&out), (int64_t)out.len)
+        : march_string_lit("{\"proto\":\"march.observe/1\",\"error\":\"out_of_memory\"}", 51);
+    march_jw_free(&out);
+    return r;
+}
+
 /* ── Registration ─────────────────────────────────────────────────────── */
 
 static const march_observe_verb snapshot_verbs[] = {
@@ -1015,7 +1043,7 @@ static const march_observe_verb snapshot_verbs[] = {
       "the last n crashes, newest first (default 20, max 256): kind, pid, type, supervisor, restart; no message",
       verb_crashes },
     { "TOP", "observe", "mbox|crashes|slices|msgs_in|msgs_out <n> [window_ms]",
-      "the n actors highest on an attribute; slices/msgs_* rank the change over window_ms (default 1000)",
+      "the n actors highest on an attribute; slices/msgs_* rank the change over window_ms (default 1000; 0 = cumulative)",
       verb_top },
 };
 
