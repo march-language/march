@@ -1,0 +1,50 @@
+-- Leak guard: dropping a value whose type's SHORT name several modules declare.
+-- The stdlib has three `Value`s (Msgpack, Config, DataFrame). Types keep their
+-- bare short name at every use site, so the drop pass
+-- found no constructors for any of them and freed each dying cell shallowly:
+-- a dropped Msgpack.Bin orphaned its whole byte list, ~1 object per byte of
+-- every cluster message decoded (specs/progress/2026-10-05-colliding-type-shallow-drop.md).
+-- SIGNAL: "no growth" (live_allocs() delta <= 0) printed as a boolean, so the
+-- golden is deterministic; each result is used so the loop is not deleted. A
+-- delta of -1 is a cell from the previous leg released late, not a leak.
+mod Main do
+  needs IO.Console
+
+  pfn bytes_list(n : Int, acc : List(Int)) : List(Int) do
+    if n <= 0 do acc else bytes_list(n - 1, Cons(int_and(n, 255), acc)) end
+  end
+
+  pfn times(n : Int, f : () -> Int) : Int do
+    if n <= 0 do 0 else f() + times(n - 1, f) end
+  end
+
+  pfn flat(name : String, f : () -> Int) : () do
+    let _ = times(3, f)
+    let a0 = live_allocs()
+    let _ = times(100, f)
+    let d = live_allocs() - a0
+    println(name ++ ", no growth: " ++ bool_to_string(d <= 0))
+  end
+
+  pfn mp_tag(v : Msgpack.Value) : Int do
+    match v do
+      Msgpack.Bin(_) -> 1
+      Msgpack.Array(_) -> 2
+      _ -> 0
+    end
+  end
+
+  pfn ok1(r : Result(Msgpack.Value, String)) : Int do
+    match r do
+      Ok(_) -> 1
+      Err(_) -> 0
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let frame = Msgpack.encode(Msgpack.array(Cons(Msgpack.int(9), Cons(Msgpack.bin(bytes_list(500, Nil)), Nil))))
+    flat("Msgpack.Bin dropped", fn () -> mp_tag(Msgpack.bin(bytes_list(500, Nil))))
+    flat("Msgpack.Array dropped", fn () -> mp_tag(Msgpack.array(List.map(bytes_list(50, Nil), fn i -> Msgpack.str(int_to_string(i))))))
+    flat("Msgpack.decode of a frame dropped", fn () -> ok1(Msgpack.decode(frame)))
+  end
+end

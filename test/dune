@@ -11948,6 +11948,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/aggregate_drop_erased_fields.expected native_aggregate_drop_erased_fields.out)))
+
+; ── Colliding short type names: a deep drop for each (2026-10-05) ───────────
+; Msgpack.Value, Config.Value and DataFrame.Value share the short name `Value`,
+; which every use site carries; the drop pass found no constructors and freed
+; each dying cell shallowly (~1 object per byte of every decoded cluster
+; message). RED without the fix: all three legs "no growth: false".
+(rule
+ (targets native_colliding_type_drop native_colliding_type_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/colliding_type_drop.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_colliding_type_drop
+        native/colliding_type_drop.march)
+   (with-stdout-to native_colliding_type_drop.out
+        (system "./native_colliding_type_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/colliding_type_drop.expected native_colliding_type_drop.out)))
 ; ── Part A codegen/RC regressions (2026-10-02) ───────────────────────────────
 ; A generic named fn passed as a `Float -> Float -> Float` closure: the
 ; $clo_wrap trampoline must forward the args as the fn is DEFINED (erased ptr),

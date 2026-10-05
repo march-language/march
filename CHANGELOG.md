@@ -193,6 +193,13 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Dropping a value of a stdlib type that shares its short name with another (`Value`,
+  `State`, `Level`, `Event`, `Error`, `Mode`) now frees what it holds.** Such a value was freed
+  shallowly, so its contents leaked: a decoded `Msgpack.Bin` lost its whole byte list. Every
+  cluster message is decoded that way, so a node leaked roughly one object per byte of
+  every message it received. In the multi-host lab, nodes grew by hundreds of thousands
+  of objects per session and were killed for running out of memory within minutes.
+
 - **A protocol branch named `none`, `some`, `ok`, `err`, `nil` or `cons` no longer breaks the
   build.** Such a label gives the protocol's message type a constructor of the same name,
   and the code `@[endpoints]`, `derive` and the control plane's `[control]` wiring generate
