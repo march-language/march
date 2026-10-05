@@ -73,7 +73,7 @@ This writes `pki/web-1.key` (the node's secret key, mode 0600) and
 
 ```
 node spiffe://prod.example/pool/web/node/web-1
-serial 9944755218842a7914166be67a8bc8da
+serial 1759598414123-9944755218842a7914166be67a8bc8da
 not_after 1792849214 (unix seconds)
 ```
 
@@ -84,6 +84,12 @@ not_after 1792849214 (unix seconds)
 - `--days` defaults to 90. `--seconds` sets a short life (tests, or very
   short-lived certificates reissued by automation).
 - Keep the serial: a revocation of this one certificate names it.
+- The serial starts with the time the certificate was issued, in unix
+  milliseconds. Nodes use it to order a node's certificates: a node never
+  replaces its certificate with one issued *before* it (see section 4). A
+  certificate from a forge older than this has a plain random serial and no
+  issue time. Nodes still accept it, but it cannot replace a certificate that
+  has one.
 
 ## 3. Configure the nodes
 
@@ -131,7 +137,18 @@ certificate once it:
 
 - verifies under the operator key and has not expired,
 - names this node (`MARCH_NODE_NAME`) and the node's key,
-- has not been revoked.
+- has not been revoked,
+- was not issued before the certificate the node holds (the issue time in
+  its serial, section 2).
+
+The last rule means an old certificate cannot be put back, whether by a
+stale file or a replayed release. It holds across restarts too, because the
+node starts on the certificate it last took. It orders by issue time, not by
+expiry, so a newer certificate that lives *shorter*, or carries fewer roles,
+still replaces an older one. To go back to an older certificate's roles on
+purpose, issue a new certificate with those roles. To force a particular
+certificate regardless, restart the node on it: the order is only checked
+when a running node replaces its certificate.
 
 Otherwise the node keeps the certificate it has and reports why (below). This
 is the usual path for a Kubernetes secret volume, cert-manager, a Vault agent
@@ -158,13 +175,19 @@ What happens on the wire. New handshakes present the new certificate at
 once. Links already up are not redialled, because a new connection would
 cancel every session on the old one. Instead the node sends each linked peer
 the new certificate over the existing, authenticated link, with a signature
-made by the certificate's own key to prove it holds that key. The peer checks
-it as it would in a handshake, including that it names the same node. From
+made by the certificate's own key to prove it holds that key. The signature
+also covers that link's handshake transcript and a counter for the link, so
+the update is good on that one link, once. Someone who records it off the wire
+cannot replay it on a link of their own, for example one made with a leaked
+old key, to keep that link alive past the old certificate's revocation. The
+peer checks the update as it would a handshake: it must name the same node and
+must not be issued before the certificate it replaces. From
 then on it holds that certificate for the link: the expiry recheck, revocation
 and `peer_cert` all use the new one, so the link outlives the old
 certificate's expiry. After that expiry nobody can join with the old
-certificate. A peer running a March from before live replacement ignores the
-update and drops the link when the old certificate expires. The node redials
+certificate. A peer running a March from before live replacement, or from
+before updates were bound to their link, refuses the update and drops the
+link when the old certificate expires. The node redials
 it at once under the new certificate, but sessions on that link are lost.
 `run_<Role>` direct connections read the environment's files at every
 connect, so they present the new certificate from their next connection.
@@ -205,8 +228,22 @@ A node refuses a certificate item, and the release halts with its reason in
 - names another node,
 - is signed by another operator key,
 - has expired or been revoked,
-- names a key the node does not hold, or
-- comes in a release older than one the node already took certificates from.
+- names a key the node does not hold,
+- was issued before the certificate the node holds (section 3), or
+- comes in a release older than one the node already took certificates or
+  revocations from.
+
+The node keeps that last bound, its *certificate floor*, on disk at
+`$MARCH_CONTROL_DIR/cert-floor-<node>` (written to a temporary file and
+renamed), and reads it back when it restarts. A cert-only release does not
+advance the reload server's release head, so without the floor file a
+restarted node would take an older, genuinely signed release again. Point
+`MARCH_CONTROL_DIR` at a directory that persists and that only the node's user
+can write. The default, `/tmp/march-control`, is cleared at reboot. In that
+case the issue-time rule above still refuses an older certificate, as long as
+the node's certificate is a file (the delivered certificate is written back to
+it). A revocation release advances the floor too, so a replay of the release
+that delivered a since-revoked certificate is refused.
 
 forge also refuses to deliver while an earlier release is still rolling out,
 since a new release would supersede it.

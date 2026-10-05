@@ -131,4 +131,36 @@ mod TestNodeCert do
     end
   end
 
+  -- security review, dd step 12b: certificates are ordered by the issue time
+  -- their serial carries, so a node refuses a superseded one.
+  fn issued(serial) do { cert() with serial: serial } end
+
+  describe "issue order" do
+    test "an ordered serial carries its issue time; others carry none" do
+      assert (NodeCert.ordered_serial(1700000000123, "ab12") == "1700000000123-ab12")
+      assert (NodeCert.issued_ms(issued("1700000000123-ab12")) == Some(1700000000123))
+      assert (NodeCert.issued_ms(cert()) == None)
+      assert (NodeCert.issued_ms(issued("serial-b-old")) == None)
+      assert (NodeCert.issued_ms(issued("-ab12")) == None)
+      assert (NodeCert.issued_ms(issued("12a4-ab12")) == None)
+    end
+
+    test "a later certificate supersedes, even one that lives shorter; an earlier one does not" do
+      let held = issued("1700000000500-aa")
+      assert (NodeCert.supersedes({ issued("1700000000600-bb") with not_after: 1900000000 }, held))
+      assert (NodeCert.supersedes(held, held))
+      assert (not(NodeCert.supersedes(issued("1700000000400-cc"), held)))
+      assert (String.contains(Option.unwrap_or(NodeCert.order_problem(issued("1700000000400-cc"), held), ""), "was issued before"))
+      assert (NodeCert.order_problem(issued("1700000000600-bb"), held) == None)
+    end
+
+    test "a certificate without an issue time cannot replace one with; with none held there is no order" do
+      let held = issued("1700000000500-aa")
+      assert (not(NodeCert.supersedes(cert(), held)))
+      assert (String.contains(Option.unwrap_or(NodeCert.order_problem(cert(), held), ""), "carries no issue time"))
+      assert (NodeCert.supersedes(issued("1700000000400-cc"), cert()))
+      assert (NodeCert.supersedes(issued("other"), cert()))
+    end
+  end
+
 end

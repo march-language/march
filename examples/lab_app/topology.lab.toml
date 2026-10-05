@@ -1,0 +1,14 @@
+# The lab's environment (scripts/lab/up.sh): four Debian containers on a
+# private Docker network, each one a host reached over ssh.
+[backend]
+kind = "ssh"
+
+[pool.ingress]
+hosts = ["root@lab-1"]
+
+[pool.work]
+hosts = [
+  { host = "root@lab-2", labels = ["control"] },
+  { host = "root@lab-3", labels = ["control", "books"] },
+  { host = "root@lab-4", labels = ["control", "books"] },
+]

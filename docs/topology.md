@@ -528,6 +528,11 @@ compact_after = N` in `forge.toml` does it when a node's stack grows past `N`.
 ssh is plain `ssh` from `PATH` (your `~/.ssh/config` applies); `FORGE_SSH_CONFIG=<file>`
 adds `-F <file>`. Scripts run as root, or through `sudo -n`.
 
+The [multi-host lab]({{ site.baseurl }}/docs/lab/) (`scripts/lab/run.sh`) does all of
+this against four local containers, with a three-role choreography app
+([examples/lab_app](https://github.com/march-language/march/tree/main/examples/lab_app)),
+and checks hot deploys through the control plane, restarts and failover.
+
 ## Testing an upgrade
 
 ```bash

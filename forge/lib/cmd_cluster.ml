@@ -184,7 +184,10 @@ let run_cert ~name ~roles ~flags ~days ~seconds ~trust_domain ~pool ~operator_ke
         let not_after = int_of_float (Unix.time ()) + lifetime in
         let node = node_uri ~trust_domain ~pool name in
         let issuer = issuer_uri ~trust_domain (pubkey_of op_sk) in
-        let serial = to_hex (random_bytes 16) in
+        (* "<issued, unix ms>-<random hex>": the issue time orders a node's
+           certificates (NodeCert.supersedes), so a node refuses one issued
+           before the certificate it holds, a replayed superseded one. *)
+        let serial = Printf.sprintf "%d-%s" (int_of_float (Unix.gettimeofday () *. 1000.)) (to_hex (random_bytes 16)) in
         let body = cert_body ~node ~roles ~flags ~not_after ~issuer
             ~pubkey_hex:(to_hex (pubkey_of node_sk)) ~serial in
         let signed = mp (Arr [ Bin body; Bin (sign op_sk body) ]) in

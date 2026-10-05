@@ -4188,6 +4188,32 @@ let base_env : env =
         ) keys (VCon ("Nil", []))
       | _ -> eval_error "vault_keys: expected VaultTable"))
 
+  (* vault_reap / vault_close: the compiled runtime hands values a write
+     displaced back to the typed caller to drop (it cannot release them
+     deeply itself). Here the OCaml GC owns every value, so there is never
+     anything to hand back. vault_close still retires the table: its name
+     is unregistered and its data dropped. *)
+  ; ("vault_reap", VBuiltin ("vault_reap", function
+      | [VVaultHandle _; _key] -> VCon ("Nil", [])
+      | _ -> eval_error "vault_reap: expected (VaultTable, key)"))
+
+  ; ("vault_close", VBuiltin ("vault_close", function
+      | [VVaultHandle id] ->
+        (match Hashtbl.find_opt vault_registry id with
+         | Some tbl ->
+           (match Hashtbl.find_opt vault_name_registry tbl.vt_name with
+            | Some id' when id' = id -> Hashtbl.remove vault_name_registry tbl.vt_name
+            | _ -> ());
+           Hashtbl.remove vault_registry id;
+           Hashtbl.replace vault_closed id ()
+         | None -> ());
+        VCon ("Nil", [])
+      | _ -> eval_error "vault_close: expected VaultTable"))
+
+  ; ("vault_live_tables", VBuiltin ("vault_live_tables", function
+      | [] | [VUnit] -> VInt (Hashtbl.length vault_registry)
+      | _ -> eval_error "vault_live_tables: takes no arguments"))
+
   (* String-namespace vault helpers: accept a String namespace name and
      auto-create/find the vault by that name.  Useful for the pattern:
        ptype MyStore = { ns : String }
