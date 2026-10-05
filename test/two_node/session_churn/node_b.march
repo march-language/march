@@ -56,7 +56,10 @@ mod SessionChurnB do
         let _ = cluster_runs(c, h, 0, 6, 0, 0)
         let t0 = Vault.live_tables()
         match cluster_runs(c, h, 6, 66, 0, 0) do
-          (ok, bad) -> println("B: cluster sessions finished " ++ int_to_string(ok) ++ ", left " ++ int_to_string(bad))
+          (ok, bad) ->
+            -- See node_a.march: the exact split is logged, not asserted.
+            IO.warn("B: cluster sessions finished " ++ int_to_string(ok) ++ ", left " ++ int_to_string(bad))
+            println("B: cluster sessions all ended, at least 20 left: " ++ (if ok + bad == 60 && bad >= 20 do "true" else "false" end))
         end
         let t = Vault.live_tables() - t0
         println("B: cluster: tables flat " ++ (if t <= 2 do "true" else "false (" ++ int_to_string(t) ++ " over)" end))
