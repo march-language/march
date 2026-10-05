@@ -7974,8 +7974,9 @@ void march_actor_inspect_store(void *s) {
 /* Reply to an inspect request with [result] (an owned Result(String,
  * String)), consuming the request. */
 static void inspect_reply(void *request, void *result) {
+    /* march_decrc is shallow: freeing the request hands its one reference
+     * to the reply-ref over to march_actor_reply, which retires it. */
     void *reply_ref = (void *)(uintptr_t)MARCH_FIELD(request, 0);
-    march_incrc(reply_ref);            /* march_actor_reply consumes one */
     march_decrc(request);
     march_actor_reply(reply_ref, result);
 }
@@ -8058,20 +8059,20 @@ void *march_actor_inspect(void *actor, int64_t timeout_ms) {
     int rc = gt ? march_sched_send_unlimited(gt, request) : MARCH_SEND_DEAD;
     march_reclaim_exit();
     if (rc == MARCH_SEND_DEAD) {
-        march_decrc(request);          /* not enqueued: ours; frees the reply-ref with it */
+        march_decrc(request);          /* not enqueued: ours (a shallow free) */
+        march_decrc(reply_ref);
         return mk_err_cstr("dead");
     }
     if (rc != MARCH_SEND_OK) return mk_err_cstr("dropped");   /* disposed by the send */
     void *r = actor_call_wait(corr, timeout_ms);
     /* actor_call_wait: Ok(answer) where answer is the answerer's Result, or
      * Err(no reply). */
-    if (((march_hdr *)r)->tag == 0) {
-        void *answer = (void *)(uintptr_t)MARCH_FIELD(r, 0);
-        march_incrc(answer);
-        march_decrc(r);
-        return answer;
-    }
+    /* r's one field is ours either way; march_decrc(r) frees only r. */
+    void *inner = (void *)(uintptr_t)MARCH_FIELD(r, 0);
+    int ok = ((march_hdr *)r)->tag == 0;
     march_decrc(r);
+    if (ok) return inner;
+    march_decrc(inner);
     return mk_err_cstr("timeout");
 }
 

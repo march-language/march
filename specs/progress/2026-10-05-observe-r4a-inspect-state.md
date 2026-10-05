@@ -63,6 +63,29 @@ Red controls: removing the nested-receive guard wedges the actor (the later
 lines never print); a limited push in place of `march_sched_send_unlimited`
 turns "drop_new full: answered" into an error.
 
+## Cost and memory
+
+Shuffled round-robin, n=200 per arm, in the Linux container (arm64), against
+`origin/main` a047aa7f8 with an A/A arm (a second copy of the base binary):
+
+| Bench | Schedulers | A/A | This change |
+|---|---|---|---|
+| `bench/actors/spawn_churn.march` | 1 | -0.27% | +0.27% |
+| `bench/actors/fanin_flood.march` | 1 | +0.17% | -0.27% |
+| `bench/actors/spawn_churn.march` | 8 | +0.71% | +1.33% |
+| `bench/actors/fanin_flood.march` | 8 | +0.70% | +0.22% |
+
+All within the A/A spread. The per-message cost is one tag compare in the
+actor loop; the per-spawn cost is one probe of the renderer table.
+
+ASAN/LeakSanitizer (Linux) on both fixtures: no errors. The first run found
+three leaks in the round trip, all from `march_decrc` being shallow (an extra
+reference on the reply-ref, an extra reference on the answer, and the timeout
+path's Err contents); fixed. What remains: `march_ctor_table_ensure`'s table
+(the same 7744 bytes on main for any program that prints an ADT) and the
+temporary record a panicking render leaves behind (documented at the trap in
+`actor_answer_inspect`).
+
 ## Deviations from the plan
 
 1. **String, not a structured value.** The state comes back as text; a typed
