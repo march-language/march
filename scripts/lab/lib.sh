@@ -178,6 +178,11 @@ lab_served_by() {
   { if [ -n "${2:-}" ]; then cat "$2"; else lab_stats; fi; } \
     | awk -v n="@$1" 'index($1, "have:") == 1 && substr($1, length($1) - length(n) + 1) == n { s += $2 } END { print s + 0 }'
 }
+# Sessions started and not ended, from one read of the stats file (two reads
+# can straddle a rewrite).
+lab_unended() {
+  lab_stats | awk '$1 == "started" { s = $2 } $1 == "finished" || $1 == "drained" || $1 == "refused" || $1 == "failed" { e += $2 } END { print s - e }'
+}
 lab_ended() { echo $(( $(lab_stat finished) + $(lab_stat drained) + $(lab_stat refused) + $(lab_stat failed) )); }
 
 # lab_traffic_flows [n]: n more sessions finish (default 10) within 120 s.
@@ -221,7 +226,15 @@ lab_fresh_cluster() {
     elif [ "$kb" -gt $(( ${LAB_RESET_MB:-500} * 1024 )) ]; then why="$why $h's node uses $((kb / 1024)) MB;"
     fi
   done
-  [ -n "$why" ] || return 0
+  if [ -z "$why" ]; then
+    # Up and small enough; but does it work? (A scenario before may have left
+    # restarted nodes behind, whose offers nobody sees.)
+    lab_traffic 1000 16
+    local want=$(( $(lab_stat finished) + 3 )) end=$((SECONDS + 45))
+    until lab_stat_ge finished "$want" || [ $SECONDS -ge $end ]; do sleep 1; done
+    lab_stat_ge finished "$want" && return 0
+    why=" no session finished in 45 s;"
+  fi
   lab_note "deploying the lab again first:$why"
   ( LAB_SCENARIO=$LAB_SCENARIO-redeploy; source "$here/scenarios/deploy.sh" ) || fail "the fresh deploy failed"
 }

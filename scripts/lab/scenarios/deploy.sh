@@ -86,10 +86,10 @@ lab_until 30 "a Ledger total from $ledger" lab_stat_ge "booked@$(lab_node "$ledg
 # reported, not asserted, since every later scenario starts from this one.
 # With LAB_AUTH=certs they nearly all hang and the checks above fail first.
 lab_traffic 0
-ended_all() { test "$(lab_stat started)" = "$(lab_ended)"; }
+ended_all() { [ "$(lab_unended)" = 0 ]; }
 end=$((SECONDS + 60))
 until ended_all || [ $SECONDS -ge $end ]; do sleep 1; done
-ended_all || lab_note "FINDING: $(( $(lab_stat started) - $(lab_ended) )) of $(lab_stat started) sessions never ended (specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md)"
+n=$(lab_unended); [ "$n" = 0 ] || lab_note "FINDING: $n of $(lab_stat started) sessions never ended (specs/todos/2026-10-05-lab-cert-mode-offer-to-offer-session-hangs.md)"
 lab_traffic 1000 16
 
 lab_forge_ok topology status --env lab
