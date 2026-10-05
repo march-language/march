@@ -11762,6 +11762,23 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/topology_placement.expected topology_placement.out)))
 
+; ── Topology: two roles sharing one endpoint name on a node. The second's
+; ── AlreadyOffered is reported once and in the status text, retried with
+; ── backoff (not silently every tick), and offered once the holder closes.
+(rule
+ (targets topology_conflict_bin topology_conflict.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib) (source_tree ../runtime)
+       (file session/topology_conflict.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o topology_conflict_bin session/topology_conflict.march)
+   (with-stdout-to topology_conflict.out
+    (system "MARCH_PLACEMENT_TICK_MS=600000 MARCH_PLACEMENT_SETTLE_MS=600000 ./topology_conflict_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/topology_conflict.expected topology_conflict.out)))
+
 ; ── Aggregate drop: boxed Float / niche Option / erased fields (2026-10-02) ──
 ; A dying tuple, List(Float) cell, Option-holding tuple, and a frame tuple
 ; destructured in a polymorphic local fn must give back everything they own.

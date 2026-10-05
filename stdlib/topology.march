@@ -411,7 +411,7 @@ mod Topology do
     let want = wants(r.place, r.name, ClusterNode.node_id(node), labels, others)
     match Vault.get(st.offers, r.name) do
       None ->
-        if want do open_role(st, r) else () end
+        if want do open_role(node, st, now, r) else clear_conflict(st, r.name) end
       Some(o) ->
         if not(want) do
           report(r.name ++ ": no longer placed on " ++ label(node) ++ "; draining its offer")
@@ -438,21 +438,95 @@ mod Topology do
     else () end end
   end
 
-  pfn open_role(st : TopoState, r : TopoRole) : () do
-    match (r.open)(r.capacity) do
-      Ok(o) ->
-        Vault.drop(st.meta, "e:" ++ r.name)
-        Vault.set(st.offers, r.name, o)
-      -- The previous offer's name is released asynchronously: try again on
-      -- the next tick without reporting it.
-      Err(SessionNode.AlreadyOffered(_)) -> ()
-      Err(e) ->
-        -- Report a failure once, not every tick.
-        if Vault.get(st.meta, "e:" ++ r.name) == None do
-          Vault.set(st.meta, "e:" ++ r.name, 1)
-          report(r.name ++ ": could not offer: " ++ SessionNode.run_error_message(e))
-        else () end
+  -- An open refused with `AlreadyOffered` means the offer's endpoint name
+  -- (SessionNode names it by protocol, role, fingerprint and node, NOT by
+  -- the Topology role) is held on this node. That is one of two things:
+  --
+  -- * TRANSIENT: an offer on this node was closed moments ago (placement
+  --   moved its role, its capacity changed, supervision or a deploy retired
+  --   it) and the node actor has not released its name yet; the name is free
+  --   within a turn or two. Within `conflict_grace_ms` of the node's last
+  --   retirement (`rt`, set by `retire`) the refusal is retried every tick
+  --   without a word, as it always was. This covers a role reopening after
+  --   its own offer closed, and a role whose conflicting holder just closed.
+  -- * A CONFLICT: anything else, above all two roles placed on this node
+  --   that serve the same protocol role through the same offer function --
+  --   they want ONE endpoint name, so the second can never be offered while
+  --   the first is. It is reported once, recorded in the status file
+  --   (`conflict <role> held-by <roles>`), and retried only when this node's
+  --   set of open offers changes, an offer closes (the holder may be gone),
+  --   or after a backoff that doubles from 1 s to 60 s -- never silently
+  --   every tick.
+  pfn conflict_grace_ms() : Int do Env.get_int("MARCH_PLACEMENT_CONFLICT_GRACE_MS", 5000) end
+
+  -- This node's open offers, as a string that changes whenever one opens or
+  -- closes (a reopened role gets a fresh offer id).
+  pfn offers_signature(st : TopoState) : String do
+    String.join(List.sort_by(List.map(Vault.all(st.offers), fn kv ->
+      match kv do (name, o) -> name ++ "=" ++ o.ap.id end), fn (a, b) -> a < b), ",")
+  end
+
+  pfn clear_conflict(st : TopoState, role_name : String) : () do
+    Vault.drop(st.strs, "x:" ++ role_name)
+    Vault.drop(st.strs, "xs:" ++ role_name)
+    Vault.drop(st.meta, "xn:" ++ role_name)
+    Vault.drop(st.meta, "xb:" ++ role_name)
+  end
+
+  pfn open_role(node : Cap(ClusterNode.Live), st : TopoState, now : Int, r : TopoRole) : () do
+    let conflicted = Vault.get(st.strs, "x:" ++ r.name) != None
+    let recent = match Vault.get(st.meta, "rt") do
+      Some(t) -> now - t < conflict_grace_ms()
+      None -> false
     end
+    -- A known conflict waits for the offers to change or the backoff to pass.
+    let due = not(conflicted) || recent
+              || Vault.get(st.strs, "xs:" ++ r.name) != Some(offers_signature(st))
+              || now >= Vault.get_or(st.meta, "xn:" ++ r.name, 0)
+    if not(due) do () else
+      match (r.open)(r.capacity) do
+        Ok(o) ->
+          Vault.drop(st.meta, "e:" ++ r.name)
+          Vault.set(st.offers, r.name, o)
+          if conflicted do
+            report(r.name ++ ": its endpoint is free again; offered on " ++ label(node))
+            clear_conflict(st, r.name)
+          else () end
+        Err(SessionNode.AlreadyOffered(idx)) ->
+          if recent do () else on_conflict(node, st, now, r.name, idx, conflicted) end
+        Err(e) ->
+          -- Report a failure once, not every tick.
+          if Vault.get(st.meta, "e:" ++ r.name) == None do
+            Vault.set(st.meta, "e:" ++ r.name, 1)
+            report(r.name ++ ": could not offer: " ++ SessionNode.run_error_message(e))
+          else () end
+      end
+    end
+  end
+
+  -- Record (and, the first time, report) that [role_name]'s endpoint is held
+  -- by another offer on this node, and schedule the next try.
+  pfn on_conflict(node : Cap(ClusterNode.Live), st : TopoState, now : Int, role_name : String, idx : Int, known : Bool) : () do
+    -- The likely holders: this node's other open offers of a role with the
+    -- same index (the refusal names only the index, not the protocol).
+    let holders = List.sort_by(List.filter_map(Vault.all(st.offers), fn kv ->
+      match kv do
+        (name, o) -> if name != role_name && o.ap.my_role == idx do Some(name) else None end
+      end), fn (a, b) -> a < b)
+    let held_by = if List.is_empty(holders) do "unknown" else String.join(holders, ",") end
+    let doubled = Vault.get_or(st.meta, "xb:" ++ role_name, 1000) * 2
+    let backoff = if not(known) do 1000 else if doubled > 60000 do 60000 else doubled end end
+    Vault.set(st.meta, "xb:" ++ role_name, backoff)
+    Vault.set(st.meta, "xn:" ++ role_name, now + backoff)
+    Vault.set(st.strs, "xs:" ++ role_name, offers_signature(st))
+    Vault.set(st.strs, "x:" ++ role_name, held_by)
+    if not(known) do
+      let who = if List.is_empty(holders) do "another offer on this node"
+                else "role " ++ String.join(holders, ", ") end
+      report(role_name ++ ": cannot be offered on " ++ label(node) ++ ": its endpoint name is held by " ++ who
+             ++ " (two roles serving the same protocol role share one endpoint per node: place them on"
+             ++ " different nodes or give each its own protocol); retrying when this node's offers change, with backoff")
+    else () end
   end
 
   doc """
@@ -499,7 +573,11 @@ mod Topology do
     Vault.drop(st.offers, role_name)
     let key = role_name ++ "#" ++ int_to_string(next_id())
     Vault.set(st.draining, key, o)
-    Vault.set(st.meta, "t:" ++ key, unix_time_ms())
+    let now = unix_time_ms()
+    Vault.set(st.meta, "t:" ++ key, now)
+    -- Its name is released asynchronously: an `AlreadyOffered` shortly after
+    -- is this offer's name, not a conflict (`open_role`).
+    Vault.set(st.meta, "rt", now)
   end
 
   -- An offer closed while the node keeps running (placement or a reload
@@ -805,7 +883,9 @@ mod Topology do
   doc """
   What this node reports to the reconciler: its name, the digest it applied
   (sha256, or `compiled` before any reload), its offers, how many closed
-  offers are still draining, and the sessions running on them all.
+  offers are still draining, the sessions running on them all, and a
+  `conflict` line per placed role that cannot be offered because another
+  offer on this node holds its endpoint name.
   """
   fn status_text(node : Cap(ClusterNode.Live)) : String do
     let st = state_of(node)
@@ -814,7 +894,20 @@ mod Topology do
     ++ "offers " ++ String.join(offered(node), ",") ++ "\n"
     ++ "draining " ++ int_to_string(List.length(Vault.keys(st.draining))) ++ "\n"
     ++ "running " ++ int_to_string(running(node)) ++ "\n"
-    ++ offer_lines(st) ++ drain_lines(st)
+    ++ offer_lines(st) ++ drain_lines(st) ++ conflict_lines(st)
+  end
+
+  -- One `conflict <role> held-by <roles|unknown>` line per role placed here
+  -- that cannot be offered because another offer on this node holds its
+  -- endpoint name (`open_role`).
+  pfn conflict_lines(st : TopoState) : String do
+    let roles : List(TopoRole) = Vault.get_or(st.roles, "roles", Nil)
+    let names = List.sort_by(List.map(roles, fn r -> r.name), fn (a, b) -> a < b)
+    String.join(List.filter_map(names, fn n ->
+      match Vault.get(st.strs, "x:" ++ n) do
+        Some(h) -> Some("conflict " ++ n ++ " held-by " ++ h ++ "\n")
+        None -> None
+      end), "")
   end
 
   -- One `offer <role> fp <fingerprint> sessions <n>` line per open offer: the
