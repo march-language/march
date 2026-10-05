@@ -1,0 +1,4 @@
+node-c: done
+node-c: recorded node-b's certificate update
+node-c: replayed it on its own link as node-b
+node-c: up

@@ -1,0 +1,5 @@
+node-a: done
+node-a: linked to node-b
+node-a: node-b's certificate replaced (1)
+node-a: refused node-b's certificate update: the proof is not by the new certificate's key for this link
+node-a: up

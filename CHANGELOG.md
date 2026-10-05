@@ -193,6 +193,22 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Security: a node can no longer be rolled back to an older certificate, and a
+  recorded certificate update cannot be replayed (step-12 security review).**
+  A node now refuses a replacement certificate issued before the one it holds.
+  `forge cluster cert` serials now start with the issue time in unix
+  milliseconds (`<ms>-<random>`); the signed certificate format is unchanged.
+  The control plane's Agent also keeps its certificate-release floor on disk
+  (`$MARCH_CONTROL_DIR/cert-floor-<node>`). Before, a restart lost the floor, and
+  a compromised leader could replay an older, genuinely signed cert release to
+  restore removed roles or flags. A `CERT_UPDATE` (live certificate
+  replacement on a link) is now signed over that link's handshake transcript
+  and a per-link counter. Before, an update recorded off the wire could be
+  replayed on a link made with a leaked old key, and that link then survived
+  the old certificate's revocation. The frame format changed: a peer from
+  before this change refuses the new update (and is refused by it), then
+  redials under the new certificate when the old one expires, as a peer from
+  before live replacement does.
 - **A session no longer fails to form when its access point is replaced mid-invitation.**
   When a hosting actor re-offered a role (for example after a hot deploy moved it
   to a new protocol version) and closed the old offer, an initiator that had
