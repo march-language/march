@@ -74,6 +74,17 @@ read them.
 - `control_artifact_digest` "ERR not_staged": main breakage, fixed by #790.
 - `protocol_evolve` / `protocol_expand_contract`: still skipped under ASan
   (`specs/todos/2026-09-25-protocol-evolve-under-asan.md`).
+- `hosted_protocol_change` "unexpected message in state S_recv_Hello": a
+  delivery to the wrong session or host after `reoffer`, no deadline involved;
+  `specs/todos/2026-10-05-hosted-protocol-change-unexpected-hello-under-asan.md`.
+- `control_certs` (run 37319131130): the revocation release halted with a's
+  refusal of the EARLIER rogue certificate, i.e. a's step result for the new
+  release carried the old failure. Probably a control-plane race that ASan's
+  timing exposes; not diagnosed here. The scaled agent grace and `ctl_until`
+  limits may make it rarer, but that is not shown.
+- `hcr_role_policy` (2026-10-05): `hcr_deploy` read "Connection reset by peer"
+  from node-a's reload socket after the upload; nothing in the log names a
+  deadline. Not reproduced (1 run on main under stress, 461 s, passed).
 
 ## Reproduction
 
@@ -83,4 +94,21 @@ In `ci/Dockerfile.two-node` (linux/arm64, ubuntu 24.04), capped at 2 CPUs
 `TWO_NODE_ASAN_SCALE=1` is the control: this tree with no scaling, i.e. main
 without `hcr_new_code_session`'s own patch.
 
-(results being filled in)
+2 CPUs + 2 busy loops, 3 runs each:
+
+| scenario | main (own `HCR_SUSPECT_MS=15000` patch) | control: no scaling | scale 3, SWIM period/ack/suspect all scaled | scale 4, same | scale 5, suspect only (this PR) |
+|---|---|---|---|---|---|
+| hcr_new_code_session | 3/3 pass | 0/3 (sessions lost: "connection lost") | 0/3 ("node-a dead: suspect timeout") | 0/1 | 3/3 pass |
+| topology_move | | 3/3 | 3/3 | | 3/3 |
+| cluster_ap_restart | | 3/3 | 3/3 | | 3/3 |
+
+On main at 4 CPUs + 8 busy loops, `topology_move`, `cluster_ap_restart` and
+`hosted_protocol_change` passed 3/3 and `hcr_role_policy` 1/1 (461 s);
+`control_certs` was not reached. Their CI failures are a low rate per
+scenario (about one scenario per sweep of 77), so the before/after evidence for
+them is the CI log plus the deadline the failing message names, not a local
+reproduction. `control_certs`' failure on 2026-10-05 (run 37319131130: a
+revocation release halting on a's earlier rogue-certificate refusal) names no
+deadline and is not claimed as fixed here.
+
+At 4 CPUs, no stress, scale 5, one run each: SWEEP_PLACEHOLDER
