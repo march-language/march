@@ -87,8 +87,8 @@ The ~24 KB tables do not.
   nodes get a 15 s SWIM suspect timeout, as hcr_new_code_session's do: at the
   default 3 s, 1 run in 4 in the ubuntu container had node-a declare node-b
   dead mid-run ("suspect timeout"), failing one session on both sides. A
-  session that fails other than by B leaving prints why, so a golden diff
-  carries the reason.
+  session that fails other than by B leaving logs why on stderr; the exact
+  finished/cancelled split is logged rather than golden.
 - Peak RSS of that scenario's node-a: 125 MB, main 156 MB. Not flat: a cluster
   session still leaves ~40,000 live objects behind on main and here (the
   message encodings of

@@ -31,8 +31,8 @@ mod SessionChurnB do
         Ok(_) -> cluster_runs(c, h, i + 1, stop, ok + 1, bad)
         Err(e) ->
           -- Only every third session is meant to fail (B leaves it): say why
-          -- any other did, on stdout, so a golden diff carries the reason.
-          if i % 3 != 2 do println("B: cluster session " ++ int_to_string(i) ++ " failed: " ++ Echo_Run.error_message(e)) else () end
+          -- any other did (stderr, beside the logged split).
+          if i % 3 != 2 do IO.warn("B: cluster session " ++ int_to_string(i) ++ " failed: " ++ Echo_Run.error_message(e)) else () end
           cluster_runs(c, h, i + 1, stop, ok, bad + 1)
       end
     end
