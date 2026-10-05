@@ -19,6 +19,17 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`Actor.inspect_state`: read a running actor's state.** The `sys:get_state`
+  equivalent. `Actor.inspect_state(Actor.debug(io), pid, timeout_ms)` returns
+  the actor's state fields as `{ count: 3, tags: [a, b], best: Some(3) }`,
+  each field printed by its own `Show` (a field holding functions prints
+  `<opaque>`), in declaration order, the same on the compiled and
+  interpreted backends. The request skips the actor's mailbox
+  limit, so a full mailbox still answers. It fails cleanly
+  (`InspectTimeout`, `InspectDead`, `InspectSelf`, `InspectFailed(why)`) when
+  the actor is busy inside a nested `receive`, gone, the caller itself, or a
+  field's `Show` panics; the actor keeps running in every case. It needs the
+  new `Cap(Actor.Debug)`, minted from `Cap(IO)` by `Actor.debug`.
 - **`forge top`, `forge diagnose` and `forge status`.** `forge top` watches a
   node's busiest actors (by mailbox depth, crashes, or message and dispatch
   rate) refreshed in place. `forge diagnose` checks a node over a window for
@@ -148,6 +159,16 @@ git log is authoritative for exact commits.
   unrelated C symbol of the same name). It now stops with
   ``error: `foo` (called from `bar`) is not a function in scope and not a
   runtime builtin`` and exits 1.
+- **Chained `NativeArray` maps compile to one loop.** With the optimizer on,
+  `map_*(map_*(a, f), g)`, a `map2_*` with a mapped input on either side, and a
+  `map_*` of a `map2_*` are rewritten into a single call whose callback is the
+  two lambda bodies composed, so no intermediate array is allocated or walked
+  (4M elements: Int 3-deep map chain 5.2 → 1.0 ms, Float 4.8 → 0.6 ms, map
+  feeding map2 3.0 → 0.8 ms). It applies when every callback is a lambda
+  written at the call, its body has no effects (and no division, which can
+  trap), the intermediate is used only once, and nothing observable runs
+  between the two calls; int, float, i32 and u8 arrays, not f32. Results are
+  unchanged. `MARCH_NO_NATIVEARR_FUSION=1` turns it off.
 - **Compiled `Int` arithmetic normalises to 63 bits lazily, not after every
   operation.** `+ - *`, negation and `int_shl` leave their result in the full
   64-bit register and the reduction modulo 2^63 happens where the value is
@@ -171,6 +192,12 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A compiled program that calls `Process.set_env` at the top of `main` no
+  longer crashes, now and then, at startup.** On Linux the runtime read
+  the environment from the main thread while `main` was already running on a
+  worker, and `setenv` freed the array it was reading, so the program died with
+  `fatal SIGSEGV ... sched=-1` in `getenv`. The runtime now reads those settings
+  before `main` can start.
 - **Security: a signed hot deploy now runs only the bytes the operator signed.**
   A signed `ACTIVATE` named its artifact by the compiler's compilation hash, and
   nothing checked the bytes stored under it, so anyone who could write a node's

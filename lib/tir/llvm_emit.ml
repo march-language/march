@@ -258,6 +258,7 @@ let clo_wrap_define = Llvm_calls.clo_wrap_define
    the stopper was still polling (found by libgmalloc on the first draft). *)
 let clo_wrap_runtime_owned (name : string) : bool =
   Tir_names.is_actor_dispatch_fn name || Tir_names.is_actor_on_stop_fn name
+  || Tir_names.is_actor_inspect_fn name
 
 let clo_wrap_borrowed (name : string) (nparams : int) : bool list =
   if clo_wrap_runtime_owned name then [] else

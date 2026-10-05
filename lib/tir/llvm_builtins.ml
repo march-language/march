@@ -98,6 +98,9 @@ let monitor_down_tag = 0x7f00_0000
 let monitor_reason_normal_tag = 0x7f00_0001
 let monitor_reason_killed_tag = 0x7f00_0002
 let monitor_reason_crash_tag = 0x7f00_0003
+(* MARCH_SYS_INSPECT_TAG: an Actor.inspect_state request, intercepted by the
+   runtime's actor loop (never a user constructor). *)
+let sys_inspect_tag = 0x7f00_0004 [@@warning "-32"]  (* documents the C tag; nothing here emits it *)
 
 let builtins : builtin list = [
   { march_name = "print"; c_name = Some "march_print"; ret_ty = Some Tir.TUnit;
@@ -1126,6 +1129,15 @@ let builtins : builtin list = [
      `on_stop` block (dispatch closure, on_stop closure). *)
   { march_name = "register_actor_on_stop"; c_name = Some "march_register_actor_on_stop"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_register_actor_on_stop(ptr %dispatch, ptr %on_stop)" };
+  (* Observe plan R4: the state renderer every actor type registers at spawn,
+     the String it stores, and the stdlib-only request Actor.inspect_state
+     makes. *)
+  { march_name = "register_actor_inspect"; c_name = Some "march_register_actor_inspect"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_register_actor_inspect(ptr %dispatch, ptr %inspect)" };
+  { march_name = "actor_inspect_store"; c_name = Some "march_actor_inspect_store"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_actor_inspect_store(ptr %s)" };
+  { march_name = "actor_inspect"; c_name = Some "march_actor_inspect"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_actor_inspect(ptr %actor, i64 %timeout_ms)" };
   { march_name = "pid_index_of"; c_name = Some "march_pid_index_of"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_pid_index_of(ptr %actor)" };
   (* The surface name for the same C symbol (pid_index_of is the lowering's
@@ -1916,6 +1928,9 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_register_supervisor";
   PDeclare "march_actor_register_child";
   PDeclare "march_register_actor_on_stop";
+  PDeclare "march_register_actor_inspect";
+  PDeclare "march_actor_inspect_store";
+  PDeclare "march_actor_inspect";
   PDeclare "march_pid_index_of";
   PDeclare "march_value_to_string";
   PComment "; Session-typed channel builtins (binary)";

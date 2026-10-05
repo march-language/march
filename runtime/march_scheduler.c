@@ -2416,6 +2416,18 @@ void march_sched_request_stop(march_proc *p) {
 void march_sched_run(void) {
     atomic_store_explicit(&g_all_done, 0, memory_order_relaxed);
 
+    /* Resolve the preemption signal (a getenv) NOW, while this is the only
+     * thread that can run March code.  march_sched_preempt_start used to be
+     * the first to ask, and it runs AFTER the workers below are created: a
+     * worker can steal `main` and run it while this thread is still in
+     * preempt_start, and `main`'s Process.set_env (setenv, which reallocs
+     * and frees environ) racing that getenv crashed it on a freed environ
+     * entry -- "fatal SIGSEGV ... addr=0x4.. sched=-1", pc in getenv, in the
+     * two-node cert_* scenarios whose nodes set their env at the top of
+     * main.  Cached after the first call, so every later caller (daemon,
+     * workers, stop) reads an atomic, never the environment. */
+    (void)march_preempt_signal();
+
     /* Single-scheduler fast path: no worker threads needed.
      *
      * The preemption daemon IS still needed.  This path used to return without
@@ -3163,6 +3175,36 @@ int march_sched_send(march_proc *target, void *msg) {
         if (sender) march_proc_bump(sender->msgs_out);
         return MARCH_SEND_OK;
     }
+}
+
+/* Push [msg] onto [target]'s USER queue without consulting its mailbox
+ * limit: the Actor.inspect_state request (observe plan R4).  FIFO with user
+ * messages, so it is answered from a state no earlier than every message
+ * sent before it; but a DROP_NEW mailbox must not drop it, and a BLOCK one
+ * must not park the inspector.  (A later DROP_OLD send can still evict it,
+ * like any queued message; the inspector then times out.)  Not counted in
+ * the sender's msgs_out: it is not a message the program sent. */
+int march_sched_send_unlimited(march_proc *target, void *msg) {
+    march_mbox_node *node = mbox_node_new(msg);
+    if (!target
+            || atomic_load_explicit(&target->status,
+                                    memory_order_acquire) == PROC_DEAD) {
+        free(node);
+        return MARCH_SEND_DEAD;
+    }
+    mbox_lock_acquire(target);
+    if (atomic_load_explicit(&target->status,
+                             memory_order_acquire) == PROC_DEAD) {
+        mbox_lock_release(target);
+        free(node);
+        return MARCH_SEND_DEAD;
+    }
+    mbox_push_node(target, node, 0);
+    march_proc_status st = atomic_load_explicit(&target->status,
+                                                memory_order_acquire);
+    mbox_lock_release(target);
+    if (st == PROC_WAITING || st == PROC_PARKED) march_sched_wake(target);
+    return MARCH_SEND_OK;
 }
 
 int march_sched_send_control(march_proc *target, void *msg) {

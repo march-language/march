@@ -743,3 +743,427 @@ let run_struct ~(changed : bool ref) (m : Tir.tir_module) : Tir.tir_module =
   { m with Tir.tm_fns = List.map (fun fd ->
     { fd with Tir.fn_body = fuse_struct_expr ~changed fd.Tir.fn_body }
   ) m.Tir.tm_fns }
+
+(* ══ NativeArray map / map2 chain fusion (phase B) ═══════════════════════════
+
+   specs/plans/2026-09-28-nativearray-fusion-plan.md, "Design: fusion by body
+   substitution".  Separate from the list patterns above, and stricter: every
+   callback must be a lambda LITERAL bound in the same let chain as the call,
+   and its BODY must be pure ([Purity.is_pure_ext] against the module's
+   transitively-impure functions), not just the producer/consumer names.
+
+     map(map(a, f), g)       → map(a, fn x -> let t = f_body[x] in g_body[t])
+     map2(map(a, f), b, g)   → map2(a, b, fn (x, y) -> let t = f_body[x] in g_body[t, y])
+     map2(a, map(b, f), g)   → map2(a, b, fn (x, y) -> let t = f_body[y] in g_body[x, t])
+     map(map2(a, b, f), g)   → map2(a, b, fn (x, y) -> let t = f_body[x, y] in g_body[t])
+
+   Applied to a fixed point per chain, so longer chains collapse; a composed
+   callback stands for at most [na_max_depth] original links.  The composed
+   callback is a fresh single-use [ELetRec([fd], EAtom fv)] lambda bound
+   right before the call, which is exactly the shape [Native_map_inline]
+   turns into an inline loop after Defun/Opt.
+
+   Runs right after the list patterns ([Contract_pipeline.run], opt only,
+   native/wasm only, [MARCH_NO_NATIVEARR_FUSION=1] turns it off).  At that
+   point NativeArray calls are still the stdlib wrappers ([NativeArray.map_int]
+   …), which are recognised by name AND by their body being exactly the
+   builtin call, so a user function that merely shares the name never
+   matches.
+
+   How a chain is analysed: the enclosing expression is flattened into a
+   straight list of let / sequence items (nested let RHSs are floated out
+   when no binder they introduce is mentioned by the continuation), so the
+   producer binding, both callback bindings and the consumer all sit in one
+   scope sequence.  The flattened form is only kept when something fused;
+   otherwise the original expression is returned untouched, so a program
+   without an eligible chain gets byte-identical TIR.
+
+   Eligibility (all required; anything else is left alone):
+   - the intermediate array is used exactly once, as an input of the consumer;
+   - producer and consumer are wrappers of the same width, and the composed
+     call has arity 1 or 2 (map2∘map2 would need a map3).  u8/i32 compose
+     with the intermediate store's wrap made explicit ([na_narrow]); f32 is
+     never fused, since nothing can round a scalar to binary32;
+   - both callbacks are FnLambda literals in the chain, non-recursive, of the
+     wrapper's arity, with pure bodies.  [Purity] counts `/` and `%` as
+     impure (they trap on zero), so a dividing callback is left alone;
+   - every item between the producer and the consumer is pure (closure
+     creation counts as pure), so fusion never moves the producer's work —
+     or its panics — across an observable effect;
+   - nothing bound between a callback's (or the producer's) binding and the
+     consumer reuses a name that callback body (or the producer's inputs)
+     mentions, so substituted free variables keep their meaning;
+   - the composed depth stays within [na_max_depth]. *)
+
+module NaSet = Inline.SSet
+
+let na_ctr = ref 0
+let na_fresh prefix =
+  incr na_ctr;
+  Printf.sprintf "$nafuse_%s%d" prefix !na_ctr
+
+(** Most original map links one composed callback may stand for. *)
+let na_max_depth = 8
+
+type na_wrapper = { w_width : string; w_arity : int (* callback arity *) }
+
+let na_widths = [ "int"; "float"; "f32"; "i32"; "u8" ]
+
+(** Wrapper fn name → width/arity, for every module fn named
+    [NativeArray.map_<w>]/[NativeArray.map2_<w>] (modulo a mono suffix) whose
+    body is exactly [native_<w>_arr_map(2)(params…)]. *)
+let na_wrapper_table (m : Tir.tir_module) : (string, na_wrapper) Hashtbl.t =
+  let t = Hashtbl.create 16 in
+  List.iter (fun (fd : Tir.fn_def) ->
+      let base = base_name fd.Tir.fn_name in
+      List.iter (fun w ->
+          List.iter (fun (arity, op) ->
+              if base = Printf.sprintf "NativeArray.%s_%s" op w then
+                let builtin = Printf.sprintf "native_%s_arr_%s" w op in
+                match fd.Tir.fn_body with
+                | Tir.EApp (b, args)
+                  when b.Tir.v_name = builtin
+                    && List.length fd.Tir.fn_params = arity + 1
+                    && List.length args = arity + 1
+                    && List.for_all2 (fun (p : Tir.var) a ->
+                        match a with
+                        | Tir.AVar v -> v.Tir.v_name = p.Tir.v_name
+                        | _ -> false) fd.Tir.fn_params args ->
+                  Hashtbl.replace t fd.Tir.fn_name { w_width = w; w_arity = arity }
+                | _ -> ())
+            [ (1, "map"); (2, "map2") ])
+        na_widths)
+    m.Tir.tm_fns;
+  t
+
+type na_item =
+  | NBind of Tir.var * Tir.expr
+  | NSeq of Tir.expr
+
+let na_unflatten (items : na_item list) (term : Tir.expr) : Tir.expr =
+  List.fold_right (fun it acc ->
+      match it with
+      | NBind (v, rhs) -> Tir.ELet (v, rhs, acc)
+      | NSeq e -> Tir.ESeq (e, acc))
+    items term
+
+(** Flatten a let/seq spine into items + a terminal expression, floating a
+    let RHS's own leading items out in front of the binding when none of the
+    names they bind occurs in the continuation (or is the binding itself). *)
+let rec na_flatten (e : Tir.expr) : na_item list * Tir.expr =
+  match e with
+  | Tir.ELet (v, rhs, body) ->
+    let (bbs, bterm) = na_flatten body in
+    let (rbs, rterm) = na_flatten rhs in
+    if rbs = [] then (NBind (v, rhs) :: bbs, bterm)
+    else begin
+      let names = Inline.add_expr_names NaSet.empty body in
+      let floatable = List.for_all (function
+          | NBind (x, _) ->
+            x.Tir.v_name <> v.Tir.v_name && not (NaSet.mem x.Tir.v_name names)
+          | NSeq _ -> true) rbs in
+      if floatable then (rbs @ (NBind (v, rterm) :: bbs), bterm)
+      else (NBind (v, rhs) :: bbs, bterm)
+    end
+  | Tir.ESeq (e1, e2) ->
+    let (bs, t) = na_flatten e2 in
+    (NSeq e1 :: bs, t)
+  | other -> ([], other)
+
+(** A lambda literal binding: [let v = letrec [fd] in fd]. *)
+let na_lambda_of_rhs : Tir.expr -> Tir.fn_def option = function
+  | Tir.ELetRec ([ fd ], Tir.EAtom (Tir.AVar lv))
+    when lv.Tir.v_name = fd.Tir.fn_name && fd.Tir.fn_kind = Tir.FnLambda ->
+    Some fd
+  | _ -> None
+
+let na_last_and_init (l : 'a list) : ('a list * 'a) option =
+  match List.rev l with
+  | last :: rinit -> Some (List.rev rinit, last)
+  | [] -> None
+
+let na_take n l = List.filteri (fun i _ -> i < n) l
+let na_drop n l = List.filteri (fun i _ -> i >= n) l
+
+type na_ctx = {
+  wrappers : (string, na_wrapper) Hashtbl.t;
+  impure   : StringSet.t Lazy.t;
+  depth    : (string, int) Hashtbl.t;   (* composed lambda name → links *)
+}
+
+let na_depth ctx (fd : Tir.fn_def) =
+  match Hashtbl.find_opt ctx.depth fd.Tir.fn_name with Some d -> d | None -> 1
+
+let na_dummy = Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool false))
+
+(** The intermediate array of a narrow integer width stores the producer's
+    result wrapped (u8: mod 256, zero-extended; i32: mod 2^32, sign-extended)
+    and the consumer reads that wrapped value back, so the composed body has
+    to apply the same wrap between the two bodies — exactly
+    [Eval_simd.u8_wrap]/[i32_wrap] and the runtime's C casts.  f32 would need
+    a scalar binary32 rounding, which March has no builtin for, so f32 chains
+    are never fused (see [na_fusible_width]). *)
+let na_narrow (width : string) (body : Tir.expr) : Tir.expr =
+  let int_op name a b =
+    Tir.EApp (mk_var name (Tir.TFn ([ Tir.TInt; Tir.TInt ], Tir.TInt)), [ a; b ]) in
+  let lit n = Tir.ALit (March_ast.Ast.LitInt n) in
+  let fresh () = mk_var (na_fresh "w") Tir.TInt in
+  match width with
+  | "u8" ->
+    let r = fresh () in
+    Tir.ELet (r, body, int_op "int_and" (Tir.AVar r) (lit 0xff))
+  | "i32" ->
+    let r = fresh () and lo = fresh () and fl = fresh () in
+    Tir.ELet (r, body,
+      Tir.ELet (lo, int_op "int_and" (Tir.AVar r) (lit 0xffffffff),
+        Tir.ELet (fl, int_op "int_xor" (Tir.AVar lo) (lit 0x80000000),
+          int_op "-" (Tir.AVar fl) (lit 0x80000000))))
+  | _ -> body
+
+let na_fusible_width w = w <> "f32"
+
+(** Try ONE fusion in the chain [items]/[term].  Returns the rewritten chain,
+    or [None] when no consumer in it is eligible. *)
+let na_try_one (ctx : na_ctx) (items : na_item array) (term : Tir.expr)
+    : (na_item list * Tir.expr) option =
+  let n = Array.length items in
+  let binder i = match items.(i) with NBind (x, _) -> Some x.Tir.v_name | NSeq _ -> None in
+  (* last index < [before] binding [name] *)
+  let find_binding name before =
+    let rec go i = if i < 0 then None
+      else if binder i = Some name then Some i else go (i - 1) in
+    go (before - 1)
+  in
+  let binders_between lo hi =      (* binder names at indices lo < i < hi *)
+    let s = ref NaSet.empty in
+    for i = lo + 1 to hi - 1 do
+      match binder i with Some x -> s := NaSet.add x !s | None -> ()
+    done; !s
+  in
+  let rest_after i =
+    na_unflatten (Array.to_list (Array.sub items (i + 1) (n - i - 1))) term in
+  let item_pure i = match items.(i) with
+    | NBind (_, rhs) when na_lambda_of_rhs rhs <> None -> true
+    | NBind (_, rhs) | NSeq rhs -> Purity.is_pure_ext (Lazy.force ctx.impure) rhs
+  in
+  let all_pure_between lo hi =
+    let ok = ref true in
+    for k = lo + 1 to hi - 1 do if !ok && not (item_pure k) then ok := false done;
+    !ok
+  in
+  let lambda_at name before arity =
+    match find_binding name before with
+    | Some i ->
+      (match items.(i) with
+       | NBind (_, rhs) ->
+         (match na_lambda_of_rhs rhs with
+          | Some fd
+            when List.length fd.Tir.fn_params = arity
+              && use_count fd.Tir.fn_name fd.Tir.fn_body = 0
+              && Purity.is_pure_ext (Lazy.force ctx.impure) fd.Tir.fn_body ->
+            Some (i, fd)
+          | _ -> None)
+       | NSeq _ -> None)
+    | None -> None
+  in
+  let consumer_at j =
+    let e = if j = n then term
+      else match items.(j) with NBind (_, rhs) -> rhs | NSeq _ -> na_dummy in
+    match e with
+    | Tir.EApp (g, gargs) ->
+      (match Hashtbl.find_opt ctx.wrappers g.Tir.v_name with
+       | Some wg when List.length gargs = wg.w_arity + 1 -> Some (g, wg, gargs)
+       | _ -> None)
+    | _ -> None
+  in
+  let names_of fd = Inline.add_expr_names NaSet.empty (Tir.ELetRec ([ fd ], na_dummy)) in
+  let disjoint a b = NaSet.is_empty (NaSet.inter a b) in
+  (* Build the fused chain once every check passed. *)
+  let rewrite ~j ~p ~it ~g ~wg ~gin ~gv ~f ~wf ~fin ~fv ~fdf ~fdg =
+    let m = wf.w_arity in
+    let new_inputs = na_take p gin @ fin @ na_drop (p + 1) gin in
+    let (fps, fbody) = Inline.alpha_rename fdf.Tir.fn_params fdf.Tir.fn_body in
+    let (gps, gbody) = Inline.alpha_rename fdg.Tir.fn_params fdg.Tir.fn_body in
+    let tys vs = List.map (fun (v : Tir.var) -> v.Tir.v_ty) vs in
+    let param_tys =
+      tys (na_take p fdg.Tir.fn_params) @ tys fdf.Tir.fn_params
+      @ tys (na_drop (p + 1) fdg.Tir.fn_params) in
+    let params = List.map (fun ty -> mk_var (na_fresh "x") ty) param_tys in
+    let atoms = List.map (fun v -> Tir.AVar v) params in
+    let f_args = na_take m (na_drop p atoms) in
+    let g_other_params = na_take p gps @ na_drop (p + 1) gps in
+    let g_other_args = na_take p atoms @ na_drop (p + m) atoms in
+    let body =
+      Inline.subst_args fps f_args
+        (Tir.ELet (List.nth gps p, na_narrow wf.w_width fbody,
+                   Inline.subst_args g_other_params g_other_args gbody)) in
+    let ret_ty = fdg.Tir.fn_ret_ty in
+    let cb_ty = Tir.TFn (param_tys, ret_ty) in
+    let lam_name = na_fresh "lam" in
+    let cfd = { Tir.fn_name = lam_name; fn_params = params;
+                fn_ret_ty = ret_ty; fn_body = body; fn_kind = Tir.FnLambda } in
+    Hashtbl.replace ctx.depth lam_name (na_depth ctx fdf + na_depth ctx fdg);
+    let h = mk_var (na_fresh "cb") cb_ty in
+    let cb_item =
+      NBind (h, Tir.ELetRec ([ cfd ], Tir.EAtom (Tir.AVar (mk_var lam_name cb_ty)))) in
+    (* map∘map2 becomes a map2: call the producer's wrapper (same width). *)
+    let call_var = if wg.w_arity - 1 + m = wg.w_arity then g else f in
+    let call = Tir.EApp (call_var, new_inputs @ [ Tir.AVar h ]) in
+    let acc = ref [] in
+    for k = 0 to n - 1 do
+      if k = it then ()
+      else if k = j then begin
+        acc := cb_item :: !acc;
+        (match items.(k) with
+         | NBind (v, _) -> acc := NBind (v, call) :: !acc
+         | NSeq _ -> assert false)
+      end
+      else acc := items.(k) :: !acc
+    done;
+    let new_term = if j = n then call else term in
+    let new_items = List.rev (if j = n then cb_item :: !acc else !acc) in
+    (* Drop a callback binding nothing references any more. *)
+    let rec prune kept = function
+      | [] -> List.rev kept
+      | (NBind (v, rhs) as item) :: rest ->
+        let dead =
+          (v.Tir.v_name = fv.Tir.v_name || v.Tir.v_name = gv.Tir.v_name)
+          && na_lambda_of_rhs rhs <> None
+          && use_count v.Tir.v_name (na_unflatten rest new_term) = 0 in
+        prune (if dead then kept else item :: kept) rest
+      | item :: rest -> prune (item :: kept) rest
+    in
+    (prune [] new_items, new_term)
+  in
+  let try_at j (g, wg, gargs) p =
+    match na_last_and_init gargs with
+    | Some (gin, Tir.AVar gv) ->
+      (match List.nth gin p with
+       | Tir.AVar t ->
+         (match find_binding t.Tir.v_name j with
+          | Some it ->
+            (match items.(it) with
+             | NBind (_, Tir.EApp (f, fargs)) ->
+               (match Hashtbl.find_opt ctx.wrappers f.Tir.v_name, na_last_and_init fargs with
+                | Some wf, Some (fin, Tir.AVar fv)
+                  when wf.w_width = wg.w_width
+                    && na_fusible_width wf.w_width
+                    && List.length fargs = wf.w_arity + 1
+                    && wg.w_arity - 1 + wf.w_arity <= 2
+                    && use_count t.Tir.v_name (rest_after it) = 1
+                    && all_pure_between it j ->
+                  (match lambda_at fv.Tir.v_name it wf.w_arity,
+                         lambda_at gv.Tir.v_name j wg.w_arity with
+                   | Some (i_f, fdf), Some (i_g, fdg)
+                     when na_depth ctx fdf + na_depth ctx fdg <= na_max_depth
+                       && disjoint (binders_between i_f j) (names_of fdf)
+                       && disjoint (binders_between i_g j) (names_of fdg)
+                       && disjoint (binders_between it j)
+                         (List.fold_left Inline.add_atom_name NaSet.empty fin) ->
+                     Some (rewrite ~j ~p ~it ~g ~wg ~gin ~gv ~f ~wf ~fin ~fv ~fdf ~fdg)
+                   | _ -> None)
+                | _ -> None)
+             | _ -> None)
+          | None -> None)
+       | _ -> None)
+    | _ -> None
+  in
+  let rec scan j =
+    if j > n then None
+    else
+      match consumer_at j with
+      | None -> scan (j + 1)
+      | Some ((_, wg, _) as c) ->
+        let rec over_p p =
+          if p >= wg.w_arity then None
+          else match try_at j c p with
+            | Some r -> Some r
+            | None -> over_p (p + 1)
+        in
+        (match over_p 0 with Some r -> Some r | None -> scan (j + 1))
+  in
+  scan 0
+
+(** Fuse every eligible link of the chain rooted at [e]; [e] is returned
+    unchanged (physically) when nothing fused. *)
+let rec na_fuse_chain (ctx : na_ctx) (e : Tir.expr) : Tir.expr =
+  let (items, term) = na_flatten e in
+  let rec loop items term fused budget =
+    if budget = 0 then (items, term, fused)
+    else match na_try_one ctx (Array.of_list items) term with
+      | Some (items', term') -> loop items' term' true (budget - 1)
+      | None -> (items, term, fused)
+  in
+  let (items', term', fused) = loop items term false 256 in
+  if fused then na_renest items' term' else e
+
+(** Rebuild a flattened chain, moving every lambda binding whose only use is
+    the very next item back INTO that item's RHS ([let v = let h = lam in
+    map(a, h)]) — the lowering's own shape.  [Native_map_inline] only sees a
+    closure through the alias let that inlining the wrapper leaves behind
+    when the closure is bound in the same RHS as the call, so a lambda left
+    floated in front of the binding would silently lose the inline loop. *)
+and na_renest (items : na_item list) (term : Tir.expr) : Tir.expr =
+  let rec go = function
+    | [] -> ([], term)
+    | NBind (h, lam) :: rest when na_lambda_of_rhs lam <> None ->
+      let (rest', term') = go rest in
+      let total = use_count h.Tir.v_name (na_unflatten rest' term') in
+      (match rest' with
+       | NBind (v, rhs) :: tl when total = 1 && use_count h.Tir.v_name rhs = 1 ->
+         (NBind (v, Tir.ELet (h, lam, rhs)) :: tl, term')
+       | [] when total = 1 -> ([], Tir.ELet (h, lam, term'))
+       | _ -> (NBind (h, lam) :: rest', term'))
+    | it :: rest ->
+      let (rest', term') = go rest in
+      (it :: rest', term')
+  in
+  let (items', term') = go items in
+  na_unflatten items' term'
+
+(** Rewrite chains bottom-up: nested chains (lambda bodies, case arms, the
+    head of a sequence) first, then the chain [e] itself. *)
+let rec na_rw (ctx : na_ctx) (e : Tir.expr) : Tir.expr =
+  na_fuse_chain ctx (na_descend ctx e)
+
+and na_descend ctx (e : Tir.expr) : Tir.expr =
+  match e with
+  | Tir.ELet (v, rhs, body) -> Tir.ELet (v, na_descend ctx rhs, na_descend ctx body)
+  | Tir.ESeq (e1, e2) -> Tir.ESeq (na_rw ctx e1, na_descend ctx e2)
+  | Tir.ELetRec (fns, body) ->
+    Tir.ELetRec (List.map (fun fd -> { fd with Tir.fn_body = na_rw ctx fd.Tir.fn_body }) fns,
+                 na_rw ctx body)
+  | Tir.ECase (a, brs, def) ->
+    Tir.ECase (a,
+               List.map (fun b -> { b with Tir.br_body = na_rw ctx b.Tir.br_body }) brs,
+               Option.map (na_rw ctx) def)
+  | other -> other
+
+(** Calls to a wrapper in [e] (prefilter: a chain needs at least two). *)
+let rec na_wrapper_calls wrappers (e : Tir.expr) : int =
+  let go = na_wrapper_calls wrappers in
+  match e with
+  | Tir.EApp (f, _) -> if Hashtbl.mem wrappers f.Tir.v_name then 1 else 0
+  | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> go a + go b
+  | Tir.ELetRec (fns, body) ->
+    List.fold_left (fun s fd -> s + go fd.Tir.fn_body) (go body) fns
+  | Tir.ECase (_, brs, def) ->
+    List.fold_left (fun s b -> s + go b.Tir.br_body)
+      (Option.fold ~none:0 ~some:go def) brs
+  | _ -> 0
+
+(** Module-level NativeArray map/map2 fusion.  Resets its own fresh-name
+    counter, so the output depends only on the input module. *)
+let run_nativearr (m : Tir.tir_module) : Tir.tir_module =
+  na_ctr := 0;
+  let wrappers = na_wrapper_table m in
+  if Hashtbl.length wrappers = 0 then m
+  else begin
+    let ctx = { wrappers; impure = lazy (Purity.impure_fns_of_module m);
+                depth = Hashtbl.create 8 } in
+    { m with Tir.tm_fns = List.map (fun (fd : Tir.fn_def) ->
+          if Hashtbl.mem wrappers fd.Tir.fn_name
+          || na_wrapper_calls wrappers fd.Tir.fn_body < 2 then fd
+          else { fd with Tir.fn_body = na_rw ctx fd.Tir.fn_body })
+          m.Tir.tm_fns }
+  end
