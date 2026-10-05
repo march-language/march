@@ -247,7 +247,7 @@ mod Config do
 
   pfn table_put(tbl : Vault(Value), k : Key(v), value : v) : Unit do
     match k do
-      Key(p, Codec(_, enc, _)) -> vault_set(tbl, p, enc(value))
+      Key(p, Codec(_, enc, _)) -> Vault.set(tbl, p, enc(value))
     end
   end
 

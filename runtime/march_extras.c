@@ -1004,12 +1004,60 @@ typedef struct {
      * Write-only bookkeeping today -- [march_vault_size] recounts live
      * entries instead, since this counter cannot know what has expired. */
     _Alignas(64) int64_t count;
+    /* The GRAVEYARD: values this shard's entries stopped holding (an
+     * overwrite, a drop, an expired claim, a replaced bounded list), kept
+     * here, still holding the table's reference, until a typed caller
+     * collects them with [march_vault_reap].  The C runtime cannot release
+     * them itself: [march_decrc] frees ONE cell and never its children (a
+     * record's fields, a list's spine), because only the compiler knows a
+     * value's layout.  Releasing a displaced record here leaked everything
+     * it pointed to -- 100k overwrites of a record holding 50 strings took
+     * 576 MB (specs/progress/2026-10-01-session-node-vault-tables-leak.md).
+     * The stdlib wrappers (stdlib/vault.march) reap after every write, so
+     * the typed drop Perceus emits for a List(v) releases each value deeply.
+     * Written under [lock]'s write side; [ndead] is also read without the
+     * lock as a hint, so reaping an empty graveyard takes no lock. */
+    void          **dead;
+    int64_t         dead_cap;
+    _Atomic int64_t ndead;
 } vault_shard;
 
 typedef struct {
     vault_shard  shards[VAULT_WR_SHARDS];
     vault_node  *buckets[VAULT_BUCKETS];
 } vault_data;
+
+/* Bury [v] in [sh]'s graveyard: the table's reference moves there instead of
+ * being released (see [vault_shard.dead]).  Caller holds [sh]'s write lock.
+ * Immediates (tagged Int/Bool/Unit, a niche None) own nothing and are
+ * dropped on the floor.  A LEAF cell -- a String, a boxed Float, a boxed
+ * SIMD vector -- has no children, so [march_decrc] releases it completely
+ * and it is released here.  That is not only cheaper: a Vault(Float) holds
+ * boxes, but a compiled List(Float) holds raw doubles in its cells, so a
+ * box handed back in a reaped List(Float) would be read as a double and
+ * never released. */
+static void vault_bury(vault_shard *sh, void *v) {
+    if (!IS_HEAP_PTR(v)) return;
+    int32_t tag = ((march_hdr *)v)->tag;
+    if (tag == MARCH_STRING_TAG || tag == MARCH_FLOAT_TAG || tag == MARCH_SIMD_TAG) {
+        march_decrc(v);
+        return;
+    }
+    int64_t n = atomic_load_explicit(&sh->ndead, memory_order_relaxed);
+    if (n == sh->dead_cap) {
+        int64_t cap = sh->dead_cap ? sh->dead_cap * 2 : 8;
+        void **d = realloc(sh->dead, (size_t)cap * sizeof(void *));
+        if (!d) abort();
+        sh->dead = d;
+        sh->dead_cap = cap;
+    }
+    sh->dead[n] = v;
+    atomic_store_explicit(&sh->ndead, n + 1, memory_order_relaxed);
+}
+
+/* Live vault_data blocks: tables created and not yet freed by their handle's
+ * destructor.  A leak gauge for tests (march_vault_live_tables). */
+static _Atomic int64_t vault_live_tables = 0;
 
 /* The shard owning [bucket] (a [vault_hash] result). */
 static inline vault_shard *vault_shard_for(vault_data *vd, uint32_t bucket) {
@@ -1124,6 +1172,45 @@ static char *vault_key_cstr(void *key) {
     return NULL; /* unreachable — vault_panic does not return */
 }
 
+/* Free a table: from march_vault_close (after the in-flight drain), or as
+ * the handle's destructor once its last reference is gone (the registry's
+ * included -- a registered table is only freed by a close).  No thread can
+ * reach [vd] any more.  Whatever is still in it raced the close's emptying,
+ * or belongs to a table that was never closed: released with [march_decrc],
+ * which frees each value's own cell but not its children -- the shallow
+ * release the graveyard exists to avoid, accepted here because a typed
+ * caller can no longer collect them. */
+static char vault_closed_mark;
+#define VAULT_CLOSED ((vault_data *)&vault_closed_mark)
+
+static void vault_data_free(void *p) {
+    vault_data *vd = (vault_data *)p;
+    if (!vd || vd == VAULT_CLOSED) return;
+    for (int i = 0; i < VAULT_BUCKETS; i++) {
+        vault_node *n = vd->buckets[i];
+        while (n) {
+            vault_node *next = n->next;
+            march_decrc(n->value);
+            free(n->key);
+            free(n);
+            n = next;
+        }
+    }
+    for (int i = 0; i < VAULT_WR_SHARDS; i++) {
+        vault_shard *sh = &vd->shards[i];
+        int64_t nd = atomic_load_explicit(&sh->ndead, memory_order_relaxed);
+        for (int64_t j = 0; j < nd; j++) march_decrc(sh->dead[j]);
+        free(sh->dead);
+        pthread_mutex_destroy(&sh->lock.wmutex);
+    }
+    free(vd);
+    atomic_fetch_sub_explicit(&vault_live_tables, 1, memory_order_relaxed);
+}
+
+/* The handle's in-flight stripes start here; see vault_enter. */
+#define VAULT_INFLIGHT_OFF 64
+#define VAULT_HANDLE_SIZE  (VAULT_INFLIGHT_OFF + 64 * VAULT_RD_STRIPES)
+
 /* Create a new vault_data wrapped in a March heap handle. */
 static void *vault_new_handle(void) {
     vault_data *vd = aligned_alloc(_Alignof(vault_data), sizeof(vault_data));
@@ -1134,14 +1221,60 @@ static void *vault_new_handle(void) {
      * equivalent to PTHREAD_MUTEX_INITIALIZER). */
     for (int i = 0; i < VAULT_WR_SHARDS; i++)
         pthread_mutex_init(&vd->shards[i].lock.wmutex, NULL);
-    /* Wrap in a March heap object: [rc=1][tag=0][pad=0][ptr_to_vd] */
-    void *handle = march_alloc(16 + 8);
+    atomic_fetch_add_explicit(&vault_live_tables, 1, memory_order_relaxed);
+    /* A resource cell, as RingBuf's (march_runtime.c), plus striped
+     * in-flight counters:
+     *   [rc@0][tag=MARCH_RESOURCE_TAG@8][pad@12][vd@16][dtor@24][type_id@32]
+     *   [unused@40..64][inflight stripe i @ 64 + 64*i, i < VAULT_RD_STRIPES]
+     * so an unclosed table is freed with its last handle (a closed one at
+     * the close; see vault_enter).  Every Vault builtin
+     * BORROWS the handle (lib/tir/borrow.ml), so its count is the program's
+     * references plus the registry's one while the name is registered. */
+    void *handle = march_alloc(VAULT_HANDLE_SIZE);
+    memset((char *)handle + 16, 0, VAULT_HANDLE_SIZE - 16);
+    ((march_hdr *)handle)->tag = MARCH_RESOURCE_TAG;
     *(void **)((char *)handle + 16) = vd;
+    *(void (**)(void *))((char *)handle + 24) = vault_data_free;
     return handle;
 }
 
-static vault_data *vault_get_data(void *handle) {
-    return *(vault_data **)((char *)handle + 16);
+/* Tables created and not yet freed (test leak gauge). */
+int64_t march_vault_live_tables(void) {
+    return atomic_load_explicit(&vault_live_tables, memory_order_relaxed);
+}
+
+/* The handle's table slot (+16) and in-flight counts (one per stripe, from
+ * +64).  Every public operation brackets its use of the table with
+ * vault_enter / vault_leave, so march_vault_close can free a table under a
+ * live handle: it swaps the slot to VAULT_CLOSED, then waits out the
+ * operations already inside.  Both sides are seq_cst (an entering op
+ * increments, then loads the slot; close swaps the slot, then loads every
+ * count), so an op either sees VAULT_CLOSED or is counted.  The counts live
+ * on the HANDLE, which the caller keeps alive for the whole call, never on
+ * the table being freed.
+ *
+ * STRIPED, as the shard read locks are (vault_rwlock_t): one counter per
+ * VAULT_RD_STRIPES stripe, each on its own cache line, chosen by
+ * vault_stripe_of_self.  A single shared counter put an RMW on ONE cache
+ * line into every Vault operation, which undid the striped read lock:
+ * four threads reading distinct keys went from ~2x a solo run to ~6x
+ * (test/test_vault_distinct_keys_scale.c).  vault_leave takes the stripe
+ * vault_enter returned (INVARIANT 1 above), so the decrement lands where the
+ * increment did even if the caller migrated. */
+static inline _Atomic(vault_data *) *vault_slot(void *handle) {
+    return (_Atomic(vault_data *) *)((char *)handle + 16);
+}
+static inline _Atomic int64_t *vault_inflight(void *handle, unsigned i) {
+    return (_Atomic int64_t *)((char *)handle + VAULT_INFLIGHT_OFF + 64 * i);
+}
+static inline vault_data *vault_enter(void *handle, unsigned *stripe) {
+    unsigned i = vault_stripe_of_self();
+    *stripe = i;
+    atomic_fetch_add_explicit(vault_inflight(handle, i), 1, memory_order_seq_cst);
+    return atomic_load_explicit(vault_slot(handle), memory_order_seq_cst);
+}
+static inline void vault_leave(void *handle, unsigned stripe) {
+    atomic_fetch_sub_explicit(vault_inflight(handle, stripe), 1, memory_order_release);
 }
 
 /* Find a live entry in vd for the given C string key. */
@@ -1218,8 +1351,7 @@ void *march_vault_whereis(void *name_val) {
  * C strings, stored values get their own march_incrc -- so they are BORROWED
  * builtins (lib/tir/borrow.ml), all but vault_update's closure, which the
  * apply call consumes. */
-void *march_vault_set(void *handle, void *key_val, void *value) {
-    vault_data *vd = vault_get_data(handle);
+static void * vault_set_in(vault_data *vd, void *key_val, void *value) {
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     int64_t now = vault_now_ms();
@@ -1228,7 +1360,7 @@ void *march_vault_set(void *handle, void *key_val, void *value) {
     while (n) {
         if (strcmp(n->key, key) == 0) {
             /* Overwrite */
-            march_decrc(n->value);
+            vault_bury(vault_shard_for(vd, h), n->value);
             march_incrc(value);
             n->value      = value;
             n->expires_ms = 0;
@@ -1254,8 +1386,7 @@ void *march_vault_set(void *handle, void *key_val, void *value) {
 
 /* ── march_vault_set_ttl ─────────────────────────────────────────────── */
 
-void *march_vault_set_ttl(void *handle, void *key_val, void *value, int64_t ttl_secs) {
-    vault_data *vd = vault_get_data(handle);
+static void * vault_set_ttl_in(vault_data *vd, void *key_val, void *value, int64_t ttl_secs) {
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     int64_t expires = vault_now_ms() + ttl_secs * 1000LL;
@@ -1263,7 +1394,7 @@ void *march_vault_set_ttl(void *handle, void *key_val, void *value, int64_t ttl_
     vault_node *n = vd->buckets[h];
     while (n) {
         if (strcmp(n->key, key) == 0) {
-            march_decrc(n->value);
+            vault_bury(vault_shard_for(vd, h), n->value);
             march_incrc(value);
             n->value      = value;
             n->expires_ms = expires;
@@ -1290,8 +1421,7 @@ void *march_vault_set_ttl(void *handle, void *key_val, void *value, int64_t ttl_
  * live entry already existed for `key`. ttl_secs <= 0 means no expiry. The
  * check-and-insert happens under one lock, so concurrent callers racing on the
  * same key cannot both win. Returned as i64 (March Bool ABI). */
-int64_t march_vault_put_new(void *handle, void *key_val, void *value, int64_t ttl_secs) {
-    vault_data *vd = vault_get_data(handle);
+static int64_t vault_put_new_in(vault_data *vd, void *key_val, void *value, int64_t ttl_secs) {
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     int64_t now = vault_now_ms();
@@ -1307,7 +1437,7 @@ int64_t march_vault_put_new(void *handle, void *key_val, void *value, int64_t tt
                 return 0;
             }
             /* expired entry — claim it in place */
-            march_decrc(n->value);
+            vault_bury(vault_shard_for(vd, h), n->value);
             march_incrc(value);
             n->value      = value;
             n->expires_ms = expires;
@@ -1336,8 +1466,7 @@ int64_t march_vault_put_new(void *handle, void *key_val, void *value, int64_t tt
  * immediate, low-bit tagged ((n<<1)|1), so no refcounting is needed for the
  * stored int; a previously-stored heap value is released if overwritten. Any
  * existing TTL is preserved. Returned as i64 (March Int ABI). */
-int64_t march_vault_incr(void *handle, void *key_val, int64_t delta) {
-    vault_data *vd = vault_get_data(handle);
+static int64_t vault_incr_in(vault_data *vd, void *key_val, int64_t delta) {
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     int64_t now = vault_now_ms();
@@ -1348,7 +1477,7 @@ int64_t march_vault_incr(void *handle, void *key_val, int64_t delta) {
             int live   = (n->expires_ms == 0 || now <= n->expires_ms);
             int is_int = (((int64_t)n->value) & 1) != 0;
             int64_t cur = (live && is_int) ? (((int64_t)n->value) >> 1) : 0;
-            if (live && !is_int) march_decrc(n->value); /* replacing a heap value */
+            if (!is_int) vault_bury(vault_shard_for(vd, h), n->value); /* replacing a heap value (live or stale) */
             int64_t nv = cur + delta;
             n->value = (void *)(((uint64_t)nv << 1) | 1u);
             if (!live) n->expires_ms = 0;
@@ -1377,8 +1506,7 @@ int64_t march_vault_incr(void *handle, void *key_val, int64_t delta) {
  * A missing/expired/non-list entry starts from the empty list; max_n <= 0 keeps
  * everything. March list layout: Nil = [hdr], Cons = [hdr][head@16][tail@24],
  * tag@8 (0 = Nil, 1 = Cons). Returns Unit. */
-void *march_vault_push_capped(void *handle, void *key_val, void *value, int64_t max_n) {
-    vault_data *vd = vault_get_data(handle);
+static void * vault_push_capped_in(vault_data *vd, void *key_val, void *value, int64_t max_n) {
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     int64_t now = vault_now_ms();
@@ -1423,10 +1551,11 @@ void *march_vault_push_capped(void *handle, void *key_val, void *value, int64_t 
     free(arr);
 
     if (match) {
-        /* Release the old value (the live list, or a stale expired one). Its
-         * teardown decrc's each old head once: kept heads net zero (we incrc'd
-         * them above), dropped heads are freed. */
-        march_decrc(match->value);
+        /* Bury the old value (the live list, or a stale expired one) for
+         * march_vault_reap: its typed drop releases the old spine and each
+         * old head once -- kept heads net zero (we incrc'd them above),
+         * dropped heads are freed, deeply. */
+        vault_bury(vault_shard_for(vd, h), match->value);
         match->value = list;
         if (!live) match->expires_ms = 0;
         vault_wr_unlock(&vault_shard_for(vd, h)->lock);
@@ -1446,8 +1575,7 @@ void *march_vault_push_capped(void *handle, void *key_val, void *value, int64_t 
 
 /* ── march_vault_get ──────────────────────────────────────────────────── */
 
-void *march_vault_get(void *handle, void *key_val) {
-    vault_data *vd = vault_get_data(handle);
+static void * vault_get_in(vault_data *vd, void *key_val) {
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     int64_t now = vault_now_ms();
@@ -1472,8 +1600,7 @@ void *march_vault_get(void *handle, void *key_val) {
 
 /* ── march_vault_drop ─────────────────────────────────────────────────── */
 
-void *march_vault_drop(void *handle, void *key_val) {
-    vault_data *vd = vault_get_data(handle);
+static void * vault_drop_in(vault_data *vd, void *key_val) {
     char *key = vault_key_cstr(key_val);
     uint32_t h = vault_hash(key);
     vault_wr_lock(&vault_shard_for(vd, h)->lock);
@@ -1482,7 +1609,7 @@ void *march_vault_drop(void *handle, void *key_val) {
         if (strcmp((*pp)->key, key) == 0) {
             vault_node *dead = *pp;
             *pp = dead->next;
-            march_decrc(dead->value);
+            vault_bury(vault_shard_for(vd, h), dead->value);
             free(dead->key);
             free(dead);
             vault_shard_for(vd, h)->count--;
@@ -1554,10 +1681,125 @@ void *march_vault_update(void *handle, void *key_val, void *f) {
     return NULL; /* Unit */
 }
 
+/* ── march_vault_reap / march_vault_close ─────────────────────────────── */
+
+/* Cons [vals[0..n)] onto [tail], each element's reference moving into the
+ * list.  C-built cells, as march_vault_keys's: Nil = [hdr tag 0],
+ * Cons = [hdr tag 1][head@16][tail@24]. */
+static void *vault_list_of(void **vals, int64_t n, void *tail) {
+    for (int64_t i = n - 1; i >= 0; i--) {
+        void *cons = march_alloc(16 + 16);
+        *(int32_t *)((char *)cons + 8) = 1; /* Cons */
+        *(void **)((char *)cons + 16)  = vals[i];
+        *(void **)((char *)cons + 24)  = tail;
+        tail = cons;
+    }
+    return tail;
+}
+
+/* Detach [sh]'s graveyard.  Caller holds [sh]'s write lock; the caller owns
+ * the returned array (and each reference in it) and frees it. */
+static void **vault_take_dead(vault_shard *sh, int64_t *n_out) {
+    void **d = sh->dead;
+    *n_out = atomic_load_explicit(&sh->ndead, memory_order_relaxed);
+    sh->dead = NULL;
+    sh->dead_cap = 0;
+    atomic_store_explicit(&sh->ndead, 0, memory_order_relaxed);
+    return d;
+}
+
+/* The values [key]'s shard has stopped holding (see [vault_shard.dead]), as
+ * a List(v) the caller owns: Vault's typed wrappers drop it, which releases
+ * each value with the drop its static type calls for.  The shard is the
+ * one a write to [key] just buried into, so a set/drop followed by a reap of
+ * the same key collects its own displaced value (and any other writer's to
+ * that shard).  An empty graveyard costs one relaxed load and no lock. */
+static void * vault_reap_in(vault_data *vd, void *key_val) {
+    char *key = vault_key_cstr(key_val);
+    uint32_t h = vault_hash(key);
+    free(key);
+    vault_shard *sh = vault_shard_for(vd, h);
+    if (atomic_load_explicit(&sh->ndead, memory_order_relaxed) == 0)
+        return march_alloc(16); /* Nil */
+    int64_t n;
+    vault_wr_lock(&sh->lock);
+    void **d = vault_take_dead(sh, &n);
+    vault_wr_unlock(&sh->lock);
+    void *list = vault_list_of(d, n, march_alloc(16));
+    free(d);
+    return list;
+}
+
+/* Retire a table: unregister its name (if it has one), so `Vault.whereis`
+ * no longer finds it and the registry's reference is released, and empty
+ * it, returning every value it held -- live, expired, and buried -- as a
+ * List(v) the caller owns (and drops, typed).  march_vault_close then frees
+ * the table itself; the handle stays valid and from then on behaves as an
+ * empty table that keeps nothing (VAULT_CLOSED).
+ *
+ * For a table that belongs to one owner (a session's state): close it when
+ * the owner is done, or every table ever made stays registered for the life
+ * of the process (specs/progress/2026-10-01-session-node-vault-tables-leak.md). */
+static void *vault_close_in(vault_data *vd, void *handle) {
+    /* Unregister.  The caller holds a reference, so dropping the
+     * registry's cannot free the handle under us. */
+    pthread_mutex_lock(&vault_registry_mutex);
+    vault_reg_entry **pp = &vault_registry;
+    vault_reg_entry *gone = NULL;
+    while (*pp) {
+        if ((*pp)->handle == handle) {
+            vault_reg_entry *e = *pp;
+            *pp = e->next;
+            e->next = gone;
+            gone = e;
+        } else {
+            pp = &(*pp)->next;
+        }
+    }
+    pthread_mutex_unlock(&vault_registry_mutex);
+    while (gone) {
+        vault_reg_entry *next = gone->next;
+        march_decrc(gone->handle);
+        free(gone->name);
+        free(gone);
+        gone = next;
+    }
+    /* Empty it, one shard at a time. */
+    void *list = march_alloc(16); /* Nil */
+    for (unsigned si = 0; si < VAULT_WR_SHARDS; si++) {
+        vault_shard *sh = &vd->shards[si];
+        vault_node *taken = NULL;
+        int64_t n;
+        vault_wr_lock(&sh->lock);
+        for (unsigned i = si; i < VAULT_BUCKETS; i += VAULT_WR_SHARDS) {
+            vault_node *b = vd->buckets[i];
+            vd->buckets[i] = NULL;
+            while (b) {
+                vault_node *next = b->next;
+                b->next = taken;
+                taken = b;
+                b = next;
+            }
+        }
+        sh->count = 0;
+        void **d = vault_take_dead(sh, &n);
+        vault_wr_unlock(&sh->lock);
+        list = vault_list_of(d, n, list);
+        free(d);
+        while (taken) {
+            vault_node *next = taken->next;
+            if (IS_HEAP_PTR(taken->value)) list = vault_list_of(&taken->value, 1, list);
+            free(taken->key);
+            free(taken);
+            taken = next;
+        }
+    }
+    return list;
+}
+
 /* ── march_vault_size ─────────────────────────────────────────────────── */
 
-int64_t march_vault_size(void *handle) {
-    vault_data *vd = vault_get_data(handle);
+static int64_t vault_size_in(vault_data *vd) {
     int64_t now = vault_now_ms();
     /* Count live entries, one shard at a time: a shard's buckets are those
        whose index carries its number in the low bits. Not a whole-table
@@ -1579,8 +1821,7 @@ int64_t march_vault_size(void *handle) {
 
 /* ── march_vault_keys ─────────────────────────────────────────────────── */
 
-void *march_vault_keys(void *handle) {
-    vault_data *vd = vault_get_data(handle);
+static void * vault_keys_in(vault_data *vd) {
     int64_t now = vault_now_ms();
     /* Build a March List of key strings, one shard at a time (same
        non-snapshot caveat as [march_vault_size]). The bucket walk stays
@@ -1607,6 +1848,111 @@ void *march_vault_keys(void *handle) {
         }
       }
       vault_rd_unlock(&vd->shards[sh].lock, stripe);
+    }
+    return list;
+}
+
+/* ── Public Vault entry points: the in-flight bracket ───────────────── */
+
+void * march_vault_set(void *handle, void *key_val, void *value) {
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return NULL; }
+    void * r = vault_set_in(vd, key_val, value);
+    vault_leave(handle, st);
+    return r;
+}
+
+void * march_vault_set_ttl(void *handle, void *key_val, void *value, int64_t ttl_secs) {
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return NULL; }
+    void * r = vault_set_ttl_in(vd, key_val, value, ttl_secs);
+    vault_leave(handle, st);
+    return r;
+}
+
+int64_t march_vault_put_new(void *handle, void *key_val, void *value, int64_t ttl_secs) {
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return 0; }
+    int64_t r = vault_put_new_in(vd, key_val, value, ttl_secs);
+    vault_leave(handle, st);
+    return r;
+}
+
+int64_t march_vault_incr(void *handle, void *key_val, int64_t delta) {
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return delta; }
+    int64_t r = vault_incr_in(vd, key_val, delta);
+    vault_leave(handle, st);
+    return r;
+}
+
+void * march_vault_push_capped(void *handle, void *key_val, void *value, int64_t max_n) {
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return NULL; }
+    void * r = vault_push_capped_in(vd, key_val, value, max_n);
+    vault_leave(handle, st);
+    return r;
+}
+
+void * march_vault_get(void *handle, void *key_val) {
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return make_none(); }
+    void * r = vault_get_in(vd, key_val);
+    vault_leave(handle, st);
+    return r;
+}
+
+void * march_vault_drop(void *handle, void *key_val) {
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return NULL; }
+    void * r = vault_drop_in(vd, key_val);
+    vault_leave(handle, st);
+    return r;
+}
+
+void * march_vault_reap(void *handle, void *key_val) {
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return march_alloc(16); /* Nil */ }
+    void * r = vault_reap_in(vd, key_val);
+    vault_leave(handle, st);
+    return r;
+}
+
+int64_t march_vault_size(void *handle) {
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return 0; }
+    int64_t r = vault_size_in(vd);
+    vault_leave(handle, st);
+    return r;
+}
+
+void * march_vault_keys(void *handle) {
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return march_alloc(16); /* Nil */ }
+    void * r = vault_keys_in(vd);
+    vault_leave(handle, st);
+    return r;
+}
+
+void *march_vault_close(void *handle) {
+    unsigned st; vault_data *vd = vault_enter(handle, &st);
+    if (vd == VAULT_CLOSED) { vault_leave(handle, st); return march_alloc(16); /* Nil */ }
+    void *list = vault_close_in(vd, handle);
+    vault_leave(handle, st);
+    /* Free the table now, not with its last handle: a handle can outlive its
+     * owner (a session's Party is still held by closures nobody can release
+     * yet -- specs/todos/2026-10-04-dropped-closure-leaks-its-captures.md),
+     * and the table is ~24 KB of shard locks.  The handle is pointed at the
+     * closed sentinel first; an operation that had already entered holds the
+     * handle's in-flight count, so this waits for those (each is a short C
+     * critical section that never parks) before freeing. */
+    vault_data *old = atomic_exchange_explicit(vault_slot(handle), VAULT_CLOSED,
+                                               memory_order_seq_cst);
+    if (old != VAULT_CLOSED) {
+        for (unsigned i = 0; i < VAULT_RD_STRIPES; i++)
+            while (atomic_load_explicit(vault_inflight(handle, i), memory_order_seq_cst) != 0)
+                sched_yield();
+        vault_data_free(old);
     }
     return list;
 }

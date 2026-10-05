@@ -14432,6 +14432,8 @@ declare ptr  @march_vault_drop(ptr %table, ptr %key)
 declare ptr  @march_vault_update(ptr %table, ptr %key, ptr %f)
 declare i64  @march_vault_size(ptr %table)
 declare ptr  @march_vault_keys(ptr %table)
+declare ptr  @march_vault_reap(ptr %table, ptr %key)
+declare ptr  @march_vault_close(ptr %table)
 declare ptr  @march_vault_ns_set(ptr %ns, ptr %key, ptr %value)
 declare ptr  @march_vault_ns_get(ptr %ns, ptr %key)
 declare ptr  @march_vault_ns_drop(ptr %ns, ptr %key)
@@ -14737,6 +14739,7 @@ declare double @march_unix_time()
 declare i64    @march_unix_time_ms()
 declare i64  @march_peak_rss_bytes()
 declare i64  @march_live_allocs()
+declare i64  @march_vault_live_tables()
 declare ptr  @march_tcp_connect(ptr %host, i64 %port)
 declare ptr  @march_tcp_connect_timeout(ptr %host, i64 %port, i64 %timeout_ms)
 ; HTTP client builtins
@@ -14797,6 +14800,9 @@ declare ptr  @march_get_actor_field(ptr %pid, ptr %name)
 declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs, i64 %backoff_base_ms, i64 %backoff_cap_ms, i64 %backoff_jitter_pct)
 declare void @march_actor_register_child(ptr %sup, ptr %child, ptr %spawn_fn, i64 %word_idx, i64 %restart_type, i64 %shutdown_ms)
 declare void @march_register_actor_on_stop(ptr %dispatch, ptr %on_stop)
+declare void @march_register_actor_inspect(ptr %dispatch, ptr %inspect)
+declare void @march_actor_inspect_store(ptr %s)
+declare ptr  @march_actor_inspect(ptr %actor, i64 %timeout_ms)
 declare i64  @march_pid_index_of(ptr %actor)
 declare ptr  @march_value_to_string(ptr %v)
 ; Session-typed channel builtins (binary)
@@ -14905,7 +14911,7 @@ let test_builtin_group_total () =
   in
   Alcotest.(check int) "arith" 22 (count March_tir.Llvm_emit.Bg_arith);
   Alcotest.(check int) "task" 24 (count March_tir.Llvm_emit.Bg_task);
-  Alcotest.(check int) "record" 17 (count March_tir.Llvm_emit.Bg_record)
+  Alcotest.(check int) "record" 18 (count March_tir.Llvm_emit.Bg_record)
 
 let test_builtin_name_roundtrip () =
   List.iter
@@ -14918,7 +14924,7 @@ let test_builtin_name_roundtrip () =
         Alcotest.failf "builtin %S round-tripped to a different constructor" s
       | None -> Alcotest.failf "builtin %S has no of_string entry" s)
     March_tir.Builtin_name.all;
-  Alcotest.(check int) "constructor count" 64
+  Alcotest.(check int) "constructor count" 65
     (List.length March_tir.Builtin_name.all);
   (* Distinct names: two constructors mapping to one string would make the
      Hashtbl silently drop one direction of the round trip. *)

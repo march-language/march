@@ -216,6 +216,8 @@ let named_builtin_allocates : Builtin_name.t -> bool = function
   | Builtin_name.Vault_ns_drop | Builtin_name.Vault_ns_get | Builtin_name.Vault_ns_set
   | Builtin_name.Vault_push_capped | Builtin_name.Vault_put_new | Builtin_name.Vault_set
   | Builtin_name.Vault_set_ttl | Builtin_name.Vault_update
+  (* Builds the List(v) it hands back. *)
+  | Builtin_name.Vault_reap
   (* Allocates exactly one result string, whatever its arity. *)
   | Builtin_name.String_concat_n -> true
 
@@ -614,6 +616,8 @@ let named_builtin_retains : Builtin_name.t -> bool = function
   | Builtin_name.Task_cancel | Builtin_name.Task_cancel_by_id
   | Builtin_name.Task_yield
   | Builtin_name.Vault_drop | Builtin_name.Vault_ns_drop
+  (* Hands back values the table already let go of; keeps nothing passed in. *)
+  | Builtin_name.Vault_reap
   (* Borrows every part and copies the bytes out; keeps no reference. *)
   | Builtin_name.String_concat_n -> false
 

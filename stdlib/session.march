@@ -333,7 +333,8 @@ mod Session do
     drained     : Int -> Bool,
     sent        : () -> Int,
     consumed    : () -> Int,
-    returned    : () -> Int
+    returned    : () -> Int,
+    close       : () -> ()
   }
 
   type InProcessState = {
@@ -700,6 +701,9 @@ mod Session do
   as `Some((to, from, msg))`, with that endpoint's continuation forgotten, or
   `None` when nothing queued can be taken. `take` runs no failure handling;
   `drain` does.
+
+  `close(())` retires the transport once its session is over; its tables
+  stay registered for the life of the process otherwise.
   """
   fn in_process() : InProcess do
     in_process_with(fn _ -> ())
@@ -746,7 +750,26 @@ mod Session do
       drained: fn role -> ip_is_drained(st, role),
       sent: fn _ -> Vault.get_or(st.meta, "sent", 0),
       consumed: fn _ -> Vault.get_or(st.meta, "consumed", 0),
-      returned: fn _ -> Vault.get_or(st.meta, "returned", 0)
+      returned: fn _ -> Vault.get_or(st.meta, "returned", 0),
+      close: fn _ -> ip_close(st)
     }
+  end
+
+  -- Retire the transport's twelve tables (`close`). Without it they stay
+  -- registered, contents and all, for the life of the process
+  -- (specs/progress/2026-10-01-session-node-vault-tables-leak.md).
+  pfn ip_close(st : InProcessState) : () do
+    Vault.close(st.handlers)
+    Vault.close(st.waiting)
+    Vault.close(st.cancel_hs)
+    Vault.close(st.crash_hs)
+    Vault.close(st.drain_hs)
+    Vault.close(st.boundary)
+    Vault.close(st.draining)
+    Vault.close(st.undeliv)
+    Vault.close(st.gone)
+    Vault.close(st.meta)
+    Vault.close(st.roles)
+    Vault.close(st.queue)
   end
 end

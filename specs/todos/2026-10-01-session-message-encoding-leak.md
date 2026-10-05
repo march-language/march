@@ -15,7 +15,7 @@ come back.
   over a real cluster session, went from ~100 MB to 1–2.5 GB each within ten seconds of
   the release being ordered, and never came back down.
 - A `Ctl` session polled every 200 ms with a 900-byte report: +1.5 MB/s per node, all of
-  it retained (see [2026-10-01-session-node-vault-tables-leak.md](2026-10-01-session-node-vault-tables-leak.md)
+  it retained (see [2026-10-01-session-node-vault-tables-leak.md](../progress/2026-10-01-session-node-vault-tables-leak.md)
   for the per-session part).
 
 ## What the control plane does instead
