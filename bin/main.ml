@@ -2101,7 +2101,8 @@ let compile filename =
           ("verdict", March_dump.Dump.json_string "reject");
           ("diagnostics",
            March_dump.Dump.json_list
-             (List.map March_errors.Errors.render_diagnostic_json diags));
+             (List.map (March_errors.Errors.render_diagnostic_json ~related:false)
+                diags));
           ("module", "null");
           ("schemes", "[]");
           ("instantiations", "[]");
@@ -2119,6 +2120,14 @@ let compile filename =
         Printf.eprintf "%s\n"
           (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
       emit_core_ast_parse_failure diags;
+      (* --check-json: the same NDJSON stream type errors use, so tooling
+         sees a syntax error as a diagnostic rather than as "no output".
+         Unlike the post-typecheck --check-json exit below this stays exit 1,
+         as a parse failure always has. *)
+      if !check_json then
+        List.iter (fun d ->
+          print_string (March_errors.Errors.render_diagnostic_json d ^ "\n"))
+          diags;
       exit 1
   in
   stamp "parse";

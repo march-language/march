@@ -105,3 +105,19 @@ called it; no production changed.
 `--emit-core-ast`'s parse-failure document now carries
 `"code":"parse_error"` (was `null`); the `t70_letq_type_annotation` golden is
 regenerated (in commit 1 for the span, here for the code).
+
+## 3. Parse errors reach `--check-json`; labels and notes in the NDJSON
+
+`march --check-json` printed nothing for a file that did not parse: the parse
+path wrote text to stderr and exited before the NDJSON branch. It now also
+writes the parse diagnostics to stdout as NDJSON (stderr text and exit 1
+unchanged).
+
+`Errors.render_diagnostic_json` gains `"labels":[{file, start_line,
+start_col, end_line, end_col, message}]` and `"notes":[...]` after `fix`.
+`--emit-core-ast` passes `~related:false` and is byte-identical: that document
+is versioned (`format_version`) and read by the external Lean re-checker, so
+extending it is a separate decision. `forge fix`
+(`forge/lib/cmd_fix.ml:parse_fix_line`) reads fields by name through Yojson
+and skips any line whose `fix` is null, so the extra fields and the new
+parse-error lines are both ignored by it.

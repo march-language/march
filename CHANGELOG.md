@@ -141,6 +141,12 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Parse errors are now emitted by `--check-json`.** A file that does not
+  parse used to produce an empty NDJSON stream (the error went to stderr
+  only); it now produces one line per syntax error, with `code` set to
+  `parse_error`, `syntax_error` or `lex_error`. Every `--check-json` line also
+  gains `labels` (the secondary source spans, each with its message) and
+  `notes`. Existing fields are unchanged and `forge fix` ignores the new ones.
 - **Compiled `Int` arithmetic normalises to 63 bits lazily, not after every
   operation.** `+ - *`, negation and `int_shl` leave their result in the full
   64-bit register and the reduction modulo 2^63 happens where the value is

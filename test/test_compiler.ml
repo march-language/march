@@ -14137,6 +14137,29 @@ let test_parse_diag_codes () =
     Alcotest.(check int) "hint is the one note" 1 (List.length d.notes)
   | _ -> Alcotest.fail "expected exactly one diagnostic"
 
+(* `--check-json` lines carry the secondary spans and the notes; a consumer
+   that wants the old shape (`--emit-core-ast`) asks for [~related:false]. *)
+let test_diagnostic_json_labels_notes () =
+  let sp l c = { March_ast.Ast.file = "f.march"; start_line = l; start_col = c;
+                 end_line = l; end_col = c + 3 } in
+  let d : March_errors.Errors.diagnostic =
+    { severity = March_errors.Errors.Error; span = sp 3 4; message = "boom";
+      labels = [ { lbl_span = sp 1 2; lbl_message = "declared \"here\"" } ];
+      notes = [ "try\nthis" ]; code = Some "x"; fix = None } in
+  let j = March_errors.Errors.render_diagnostic_json d in
+  Alcotest.(check bool) "labels array" true
+    (_contains_substr j
+       {|"labels":[{"file":"f.march","start_line":1,"start_col":2,"end_line":1,"end_col":5,"message":"declared \"here\""}]|});
+  Alcotest.(check bool) "notes array" true
+    (_contains_substr j {|"notes":["try\nthis"]|});
+  Alcotest.(check bool) "fix still precedes them" true
+    (_contains_substr j {|"fix":null,"labels":|});
+  let old = March_errors.Errors.render_diagnostic_json ~related:false d in
+  Alcotest.(check bool) "~related:false is the old shape" true
+    (not (_contains_substr old "labels") && not (_contains_substr old "notes")
+     && String.length old > 0 && old.[String.length old - 1] = '}'
+     && _contains_substr old {|"fix":null}|})
+
 (* A nested multi-line match used directly as a match-arm body (no do/end
    wrapper) must parse.  This locks in the contextual-NL token-filter behavior
    so it can never silently regress. *)
@@ -18246,6 +18269,7 @@ let compiler_suites =
           Alcotest.test_case "parse caret: else-if chain missing `end`"      `Quick test_parse_caret_else_if_missing_end;
           Alcotest.test_case "parse caret: mod missing `do`"                 `Quick test_parse_caret_mod_missing_do;
           Alcotest.test_case "Parse: one coded diagnostic per failure kind"  `Quick test_parse_diag_codes;
+          Alcotest.test_case "--check-json: labels and notes"                `Quick test_diagnostic_json_labels_notes;
           Alcotest.test_case "#7 if-then note mentions do/end"              `Quick test_parse_error_then_note_do_end;
           Alcotest.test_case "fix: if-then error names then as problem"     `Quick test_parse_error_then_says_then_not_else;
           Alcotest.test_case "fix: if-then primary message not about else"  `Quick test_parse_error_then_primary_message;

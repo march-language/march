@@ -358,7 +358,11 @@ let json_string s =
   Buffer.add_char b '"';
   Buffer.contents b
 
-let render_diagnostic_json (d : diagnostic) : string =
+(** One NDJSON object per diagnostic.  [related] (default true) adds the
+    [labels] (secondary spans, each with its message) and [notes] arrays;
+    [--emit-core-ast] passes [~related:false] to keep its versioned document
+    byte-stable. *)
+let render_diagnostic_json ?(related = true) (d : diagnostic) : string =
   let sev = match d.severity with Error -> "error" | Warning -> "warning" | Hint -> "hint" in
   let sp  = d.span in
   let file    = json_string sp.March_ast.Ast.file in
@@ -378,9 +382,25 @@ let render_diagnostic_json (d : diagnostic) : string =
         rs.March_ast.Ast.end_line   rs.March_ast.Ast.end_col
         (json_string text)
   in
+  let related_json =
+    if not related then ""
+    else
+      let label (l : label) =
+        let ls = l.lbl_span in
+        Printf.sprintf
+          {|{"file":%s,"start_line":%d,"start_col":%d,"end_line":%d,"end_col":%d,"message":%s}|}
+          (json_string ls.March_ast.Ast.file)
+          ls.March_ast.Ast.start_line ls.March_ast.Ast.start_col
+          ls.March_ast.Ast.end_line   ls.March_ast.Ast.end_col
+          (json_string l.lbl_message)
+      in
+      Printf.sprintf {|,"labels":[%s],"notes":[%s]|}
+        (String.concat "," (List.map label d.labels))
+        (String.concat "," (List.map json_string d.notes))
+  in
   Printf.sprintf
-    {|{"severity":%s,"file":%s,"start_line":%d,"start_col":%d,"end_line":%d,"end_col":%d,"message":%s,"code":%s,"fix":%s}|}
+    {|{"severity":%s,"file":%s,"start_line":%d,"start_col":%d,"end_line":%d,"end_col":%d,"message":%s,"code":%s,"fix":%s%s}|}
     (json_string sev) file
     sp.March_ast.Ast.start_line sp.March_ast.Ast.start_col
     sp.March_ast.Ast.end_line   sp.March_ast.Ast.end_col
-    msg code fix_json
+    msg code fix_json related_json
