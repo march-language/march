@@ -134,7 +134,7 @@ needs certificates, with a shared secret) is reported `SKIP`.
 Every node grows by about 1 MB a second on its own today, and more with each session, and
 the hosts are capped at `LAB_HOST_MEMORY`. So each scenario after `deploy` starts by
 deploying the lab again from nothing when any node is no longer running or uses more than
-`LAB_RESET_MB` (default 500), and says so in the notes. (Restarting the nodes instead does
+`LAB_RESET_MB` (default 500), or sessions have stopped finishing, and says so in the notes. (Restarting the nodes instead does
 not work today: see the findings.) Traffic is one session every two seconds outside
 `deploy`, and `restart_persist` pauses it while forge builds its patch. `run.sh` also notes every OOM kill the Docker VM logged during a
 scenario.
