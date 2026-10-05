@@ -27,16 +27,20 @@ mod CompileTimeProbe do
     x + 1 -- BENCH:LEAF
   end
 
-  fn sig_target(x : Int) : Int do
-    x * 2
+  -- Recursive on purpose: a non-recursive sig_target is inlined into every
+  -- caller and dropped by opt, so renaming it leaves the post-opt TIR (the
+  -- post-TIR CAS key) unchanged and the "sig" scenario becomes a tir-hit
+  -- instead of the miss it is meant to measure.  Computes 2 * x for x >= 0.
+  fn sig_target(x : Int, acc : Int) : Int do
+    if x <= 0 do acc else sig_target(x - 1, acc + 2) end
   end
 
   fn use_a(xs : List(Int)) : Int do
-    List.sum_int(List.map(xs, fn x -> sig_target(leaf(x))))
+    List.sum_int(List.map(xs, fn x -> sig_target(leaf(x), 0)))
   end
 
   fn use_b(xs : List(Int)) : Int do
-    List.fold_left(xs, 0, fn (acc, x) -> acc + sig_target(x))
+    List.fold_left(xs, 0, fn (acc, x) -> acc + sig_target(x, 0))
   end
 
   fn main(_cap_console : Cap(IO.Console)) do
