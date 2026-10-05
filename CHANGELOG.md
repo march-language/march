@@ -193,6 +193,14 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **A pushed topology no longer takes away the control plane's leader.** Re-reading a
+  topology (a signed push from `forge deploy` or `forge topology apply`, SIGHUP, or a restart)
+  closed the control plane's own `Ctl.Control` role on every node, because the topology file
+  cannot name it, so a cluster with `[control]` had no leader after its first deploy and
+  every later cluster deploy, `forge cluster cert --deliver` and `revoke --deliver` had
+  nothing to talk to. Roles the build places itself are now pinned, and a re-read leaves
+  them alone.
+
 - **Vault writes release what they replace, and session tables are freed.**
   Overwriting or dropping a Vault entry released only the old value's own cell,
   never its fields or list spine, so `Vault.set` of a record in a loop grew

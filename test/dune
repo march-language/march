@@ -11911,6 +11911,22 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff session/topology_conflict.expected topology_conflict.out)))
 
+; ── A pushed topology leaves pinned roles alone (lab finding, 2026-10-05) ──
+; Ctl.Control is placed by the generated main and a digest cannot name it;
+; apply_desired used to place it nowhere on every re-read (no leader).
+(rule
+ (targets topology_pinned_bin topology_pinned.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib) (source_tree ../runtime)
+       (file session/topology_pinned.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o topology_pinned_bin session/topology_pinned.march)
+   (with-stdout-to topology_pinned.out (system "./topology_pinned_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff session/topology_pinned.expected topology_pinned.out)))
+
 ; ── Aggregate drop: boxed Float / niche Option / erased fields (2026-10-02) ──
 ; A dying tuple, List(Float) cell, Option-holding tuple, and a frame tuple
 ; destructured in a polymorphic local fn must give back everything they own.

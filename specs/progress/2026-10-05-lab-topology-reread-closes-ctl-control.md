@@ -1,5 +1,17 @@
 # `[P1]` A pushed topology closes `Ctl.Control` on every node: the control plane has no leader after the first deploy
 
+**FIXED 2026-10-05.** A `TopoRole` now has a `pinned` flag; `Topology.pinned(r)` sets it, the
+generated `main` pins `Ctl.Control` (lib/desugar/desugar_topology.ml), and `apply_desired`
+leaves a pinned role at the placement the build gave it. An unpinned role the digest drops
+is still placed nowhere: inferring "not named by the digest, so keep it" would also keep
+offering a user role someone removed from the topology on purpose.
+
+Tests: `test/session/topology_pinned.march` (apply_desired directly; red with the pin check
+disabled: `Ctl.Control: not served here`), and `test/two_node/control_plane` now SIGHUPs every
+node after its release, waits until each has re-read the topology, and requires that no
+candidate logged `Ctl.Control ... not served here` and a leader still answers (red without
+the fix with this todo's exact log line).
+
 Found 2026-10-05 by the multi-host lab (`scripts/lab/run.sh deploy`, docs/lab.md), load
 average 5.
 

@@ -1,0 +1,42 @@
+-- A pushed topology must not move a role the build places itself. The
+-- generated `main` of an app with `[control]` adds `Ctl.Control`
+-- (`count_on(<label>, 1)`), which a topology digest cannot name. Before the
+-- fix, `apply_desired` placed every built role the digest does not list
+-- `PlaceNowhere`, so every re-read of the topology (a signed push, SIGHUP, a
+-- restart onto a verified copy) closed `Ctl.Control` on every node, and the
+-- cluster had no control-plane leader after its first deploy
+-- (specs/progress/2026-10-05-lab-topology-reread-closes-ctl-control.md).
+-- `Topology.pinned` marks such a role; an unpinned role the digest drops
+-- still stops being offered here.
+--
+-- `apply_desired` is pure: the roles' `open` functions are never called.
+mod TopologyPinned do
+  needs IO
+  needs IO.Console
+
+  pfn never(_cap : Int) : Result(SessionNode.Offer, SessionNode.RunError) do
+    Err(SessionNode.Left("never opened"))
+  end
+
+  pfn show(roles : List(Topology.TopoRole)) : () do
+    List.each(roles, fn r ->
+      println(r.name ++ ": " ++ Topology.placement_text(r.place) ++ ", capacity " ++ int_to_string(r.capacity)))
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let base = [
+      Topology.offer_role("Shop.Front", Topology.everywhere(), 16, never),
+      Topology.offer_role("Shop.Ledger", Topology.count(1), 8, never),
+      Topology.pinned(Topology.offer_role("Ctl.Control", Topology.count_on("control", 1), 256, never))
+    ]
+    -- The digest names the user's roles only; it moves Front to a label,
+    -- resizes it, and no longer serves Ledger here.
+    let desired = [
+      { d_name: "Shop.Front", d_place: Topology.on_label("edge"), d_capacity: 32 }
+    ]
+    println("before:")
+    show(base)
+    println("after a pushed topology:")
+    show(Topology.apply_desired(base, desired))
+  end
+end
