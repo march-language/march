@@ -1,0 +1,263 @@
+-- Leak guard: a Vault write must release what it displaces, deeply, and a
+-- closed table must be freed.
+-- (specs/progress/2026-10-01-session-node-vault-tables-leak.md)
+--
+-- Three runtime-boundary leaks, each measured on main before the fix with
+-- --compile --opt 2 (per iteration of the legs below):
+--   - a displaced value lost its CHILDREN: march_vault_set released the old
+--     value with march_decrc, which frees one cell and never a record's
+--     fields or a list's spine (104 objects per overwrite of the record
+--     below; 100,000 overwrites of a 50-string record took 576 MB). A write
+--     now BURIES what it displaces and Vault's wrapper reaps it back as a
+--     List(v) that Perceus drops at its static type;
+--   - every Vault call lowered to an indirect call (the builtins were missing
+--     from Defun.builtin_names), whose convention consumes each argument, while
+--     the C side released none: each call leaked its key and a stored value
+--     kept a reference too many;
+--   - each Unit-returning Vault builtin returned a fresh heap cell nobody freed.
+-- And a table, once made, was never freed: `Vault.close` now unregisters and
+-- empties it, and the table goes with its last handle (`Vault.live_tables`).
+--
+-- The `intact` lines read a value back after its churn: an over-release (the
+-- failure mode of an RC fix at a runtime boundary) shows up there as garbage
+-- or a crash, not as a smaller number.
+--
+-- SIGNAL: live_allocs() deltas against a bound far below the iteration count,
+-- printed as booleans so the golden is deterministic.
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+
+  type Rec = { name : String, items : List(String), n : Int }
+  type Shape = Circle(Float) | Label(String, List(String))
+
+  pfn mk(i : Int) : Rec do
+    { name: "r" ++ int_to_string(i),
+      items: List.map(List.range(0, 50), fn j -> "s" ++ int_to_string(j + i)),
+      n: i }
+  end
+
+  pfn first(xs : List(String)) : String do
+    match xs do
+      Cons(x, _) -> x
+      Nil -> "?"
+    end
+  end
+
+  pfn flat(label : String, d : Int, iters : Int) : () do
+    println(label ++ ": flat " ++ (if d < iters / 10 do "true" else "false (" ++ int_to_string(d) ++ " over)" end))
+  end
+
+  pfn sets(t : Vault(Rec), i : Int, stop : Int) : () do
+    if i >= stop do () else
+      Vault.set(t, "k", mk(i))
+      sets(t, i + 1, stop)
+    end
+  end
+
+  pfn keyed(t : Vault(Int), i : Int, stop : Int) : () do
+    if i >= stop do () else
+      Vault.set(t, "key" ++ int_to_string(i % 10), i)
+      let _ = Vault.get(t, "key" ++ int_to_string(i % 7))
+      keyed(t, i + 1, stop)
+    end
+  end
+
+  pfn floats(t : Vault(Float), i : Int, stop : Int) : () do
+    if i >= stop do () else
+      Vault.set(t, "f", int_to_float(i) *. 1.5)
+      floats(t, i + 1, stop)
+    end
+  end
+
+  pfn shapes(t : Vault(Shape), i : Int, stop : Int) : () do
+    if i >= stop do () else
+      let s = if i % 2 == 0 do Circle(int_to_float(i)) else Label("l" ++ int_to_string(i), Cons("x" ++ int_to_string(i), Nil)) end
+      Vault.set(t, "s", s)
+      shapes(t, i + 1, stop)
+    end
+  end
+
+  pfn tuples(t : Vault((String, List(String))), i : Int, stop : Int) : () do
+    if i >= stop do () else
+      Vault.set(t, "p", ("t" ++ int_to_string(i), Cons("y" ++ int_to_string(i), Nil)))
+      tuples(t, i + 1, stop)
+    end
+  end
+
+  -- An Int key is stored stringified from its tagged form; the reap after
+  -- the write must hash it the same way, or it reaps another shard.
+  pfn int_keyed(t : Vault(Rec), i : Int, stop : Int) : () do
+    if i >= stop do () else
+      Vault.set(t, i % 4, mk(i))
+      int_keyed(t, i + 1, stop)
+    end
+  end
+
+  pfn ttls(t : Vault(Rec), i : Int, stop : Int) : () do
+    if i >= stop do () else
+      Vault.set_ttl(t, "k", mk(i), 3600)
+      ttls(t, i + 1, stop)
+    end
+  end
+
+  pfn drops(t : Vault(Rec), i : Int, stop : Int) : () do
+    if i >= stop do () else
+      Vault.set(t, "d" ++ int_to_string(i), mk(i))
+      Vault.delete(t, "d" ++ int_to_string(i))
+      drops(t, i + 1, stop)
+    end
+  end
+
+  pfn updates(t : Vault(Rec), i : Int, stop : Int) : () do
+    if i >= stop do () else
+      Vault.update(t, "u", fn r -> { name: r.name, items: Cons("u" ++ int_to_string(i), List.drop(r.items, 1)), n: r.n + 1 })
+      updates(t, i + 1, stop)
+    end
+  end
+
+  pfn pushes(t : Vault(List(String)), i : Int, stop : Int) : () do
+    if i >= stop do () else
+      Vault.push_capped(t, "q", "m" ++ int_to_string(i), 5)
+      pushes(t, i + 1, stop)
+    end
+  end
+
+  pfn claims(t : Vault(Rec), i : Int, stop : Int) : () do
+    if i >= stop do () else
+      let _ = Vault.put_new(t, "c", mk(i))
+      let _ = Vault.put_new(t, "c", mk(i + 1))
+      Vault.delete(t, "c")
+      claims(t, i + 1, stop)
+    end
+  end
+
+  pfn ns(i : Int, stop : Int) : () do
+    if i >= stop do () else
+      Vault.ns_set("vault_churn_ns", "n", mk(i))
+      let _ : Option(Rec) = Vault.ns_get("vault_churn_ns", "n")
+      ns(i + 1, stop)
+    end
+  end
+
+  pfn clears(t : Vault(Rec), i : Int, stop : Int) : () do
+    if i >= stop do () else
+      Vault.set(t, "a", mk(i))
+      Vault.set(t, "b", mk(i + 1))
+      Vault.clear(t)
+      clears(t, i + 1, stop)
+    end
+  end
+
+  -- A per-owner table, as a session makes them: named, filled, closed.
+  pfn tables(i : Int, stop : Int, found : Int) : Int do
+    if i >= stop do found else
+      let name = "vault_churn_table_" ++ int_to_string(i)
+      let t : Vault(Rec) = Vault.new(name)
+      Vault.set(t, "a", mk(i))
+      Vault.set(t, "b", mk(i + 1))
+      Vault.close(t)
+      -- A handle used after the close (a task outliving its session): an
+      -- empty table that keeps nothing.
+      Vault.set(t, "late", mk(i))
+      let kept = if Vault.get(t, "late") != None || Vault.size(t) != 0 do 1 else 0 end
+      let left : Option(Vault(Rec)) = Vault.whereis(name)
+      tables(i + 1, stop, found + kept + (if left != None do 1 else 0 end))
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let n = 2000
+
+    let t : Vault(Rec) = Vault.new("vault_churn_rec")
+    sets(t, 0, 10)
+    let a = live_allocs()
+    sets(t, 0, n)
+    flat("Vault.set record", live_allocs() - a, n)
+    match Vault.get(t, "k") do
+      Some(r) -> println("intact: " ++ r.name ++ " " ++ int_to_string(List.length(r.items)) ++ " " ++ first(List.drop(r.items, 49)))
+      None -> println("intact: missing")
+    end
+
+    let k : Vault(Int) = Vault.new("vault_churn_keys")
+    keyed(k, 0, 10)
+    let b = live_allocs()
+    keyed(k, 0, n)
+    flat("built keys", live_allocs() - b, n)
+
+    let f : Vault(Float) = Vault.new("vault_churn_float")
+    floats(f, 0, 10)
+    let c = live_allocs()
+    floats(f, 0, n)
+    flat("Vault.set Float", live_allocs() - c, n)
+    println("intact: " ++ float_to_string(Vault.get_or(f, "f", 0.0)))
+
+    let s : Vault(Shape) = Vault.new("vault_churn_shape")
+    shapes(s, 0, 10)
+    let d = live_allocs()
+    shapes(s, 0, n)
+    flat("Vault.set ADT", live_allocs() - d, n)
+
+    let tp : Vault((String, List(String))) = Vault.new("vault_churn_tuple")
+    tuples(tp, 0, 10)
+    let d2 = live_allocs()
+    tuples(tp, 0, n)
+    flat("Vault.set tuple", live_allocs() - d2, n)
+
+    let ik : Vault(Rec) = Vault.new("vault_churn_intkey")
+    int_keyed(ik, 0, 10)
+    let d3 = live_allocs()
+    int_keyed(ik, 0, n)
+    flat("Int key", live_allocs() - d3, n)
+
+    ttls(t, 0, 10)
+    let e = live_allocs()
+    ttls(t, 0, n)
+    flat("Vault.set_ttl", live_allocs() - e, n)
+
+    drops(t, 0, 10)
+    let g = live_allocs()
+    drops(t, 0, n)
+    flat("Vault.delete", live_allocs() - g, n)
+
+    Vault.set(t, "u", mk(7))
+    updates(t, 0, 10)
+    let h = live_allocs()
+    updates(t, 0, n)
+    flat("Vault.update", live_allocs() - h, n)
+    match Vault.get(t, "u") do
+      Some(r) -> println("intact: " ++ int_to_string(r.n) ++ " " ++ first(r.items) ++ " " ++ int_to_string(List.length(r.items)))
+      None -> println("intact: missing")
+    end
+
+    let q : Vault(List(String)) = Vault.new("vault_churn_queue")
+    pushes(q, 0, 10)
+    let j = live_allocs()
+    pushes(q, 0, n)
+    flat("Vault.push_capped", live_allocs() - j, n)
+    println("intact: " ++ String.join(Vault.get_or(q, "q", Nil), ","))
+
+    claims(t, 0, 10)
+    let l = live_allocs()
+    claims(t, 0, n)
+    flat("Vault.put_new", live_allocs() - l, n)
+
+    ns(0, 10)
+    let m = live_allocs()
+    ns(0, n)
+    flat("Vault.ns_set", live_allocs() - m, n)
+
+    clears(t, 0, 10)
+    let o = live_allocs()
+    clears(t, 0, n)
+    flat("Vault.clear", live_allocs() - o, n)
+
+    let _ = tables(0, 10, 0)
+    let p = live_allocs()
+    let tabs = Vault.live_tables()
+    let found = tables(0, n, 0)
+    flat("Vault.close", live_allocs() - p, n)
+    println("tables left: " ++ int_to_string(Vault.live_tables() - tabs) ++ ", closed names or late writes found: " ++ int_to_string(found))
+  end
+end

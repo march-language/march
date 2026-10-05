@@ -972,7 +972,7 @@ mod SessionNode do
     epoch_hold_next_spawn()
     let ep = spawn(Endpoint)
     let tag = node_id ++ "." ++ int_to_string(my_role) ++ "." ++ int_to_string(pid_to_int(ep))
-    { my_role: my_role, node_id: node_id,
+    let p = { my_role: my_role, node_id: node_id,
       handlers: Vault.new("session_node_handlers_" ++ tag),
       waiting: Vault.new("session_node_waiting_" ++ tag),
       pending: Vault.new("session_node_pending_" ++ tag),
@@ -987,6 +987,36 @@ mod SessionNode do
       heard: Vault.new("session_node_heard_" ++ tag),
       drain_hs: Vault.new("session_node_drain_" ++ tag),
       ep: ep, links: Nil, on_close: on_close }
+    -- Present until the party's tables are closed (`close_party`): a task
+    -- that outlives the session (a heartbeat) stops on its absence.
+    Vault.set(p.meta, "open", 1)
+    p
+  end
+
+  -- The session is over and its outcome read: retire the party's thirteen
+  -- tables. Until 2026-10-02 nothing did, and every session left them
+  -- registered, contents and all, for the life of the process -- about
+  -- 300 KB a session; a node forming one every 200 ms grew 1.5 MB/s
+  -- (specs/progress/2026-10-01-session-node-vault-tables-leak.md). Every
+  -- runner exit passes here, after `end_party`, once nothing it waits for
+  -- reads them. A task still holding the party afterwards (a heartbeat
+  -- between two ticks, a reader the shutdown has not woken yet) finds them
+  -- empty: no "open", no "done"; the heartbeat stops on the first, and the
+  -- tables themselves are freed with the last handle.
+  pfn close_party(p : Party) : () do
+    Vault.close(p.handlers)
+    Vault.close(p.waiting)
+    Vault.close(p.pending)
+    Vault.close(p.meta)
+    Vault.close(p.forward)
+    Vault.close(p.why)
+    Vault.close(p.gone)
+    Vault.close(p.cancel_hs)
+    Vault.close(p.crash_hs)
+    Vault.close(p.forward_cancel)
+    Vault.close(p.forward_crash)
+    Vault.close(p.heard)
+    Vault.close(p.drain_hs)
   end
 
   pfn with_link(p : Party, l : Link) : Party do
@@ -1371,7 +1401,7 @@ mod SessionNode do
 
   pfn heartbeat(p : Party, l : Link, interval : Int, limit : Int) : Int do
     sleep_ms(interval)
-    if Vault.get(p.meta, "link_done" ++ rkey(l.role)) != None do 0
+    if Vault.get(p.meta, "link_done" ++ rkey(l.role)) != None || Vault.get(p.meta, "open") == None do 0
     else
       -- A drained party is done but still serving: its peers read its
       -- connection until its Bye, which waits for their own end (D27).
@@ -1531,8 +1561,15 @@ mod SessionNode do
     kill(p.ep)
   end
 
-  doc "Tear every connection down: close data, Bye on control, await the control reader, close control, and end the party's Endpoint actor. (A cluster-mode party owns no connection: only the actor ends.)"
+  doc "Tear every connection down: close data, Bye on control, await the control reader, close control, and end the party's Endpoint actor (a cluster-mode party owns no connection: only the actor ends). Then retire the party's tables: call it once `serve` / `serve_outcome` has returned."
   fn finish(p : Party) : Unit do
+    finish_links(p)
+    close_party(p)
+  end
+
+  -- `finish` without retiring the tables, for the runner, which reads the
+  -- outcome out of them afterwards and retires them itself.
+  pfn finish_links(p : Party) : () do
     end_party(p)
     let _ = if is_cluster(p) do Nil else List.map(p.links, fn l -> do
       -- Its reader has ended, which stopped its heartbeat; a party that
@@ -1978,6 +2015,7 @@ mod SessionNode do
       Err(e) ->
         if listen_fd >= 0 do tcp_close(listen_fd) else () end
         end_party(p0)
+        close_party(p0)
         Err(e)
       Ok(p2) -> serve_party(p2, io, my_role, peers, listen_fd, drive)
     end
@@ -1989,19 +2027,12 @@ mod SessionNode do
     let s = Session.attach(io, ops(p))
     drive(p, s)
     let _ = serve_outcome(p)
-    finish(p)
+    finish_links(p)
     if listen_fd >= 0 do tcp_close(listen_fd) else () end
     stop_host_watch(p)
-    let role = Vault.get_or(p.meta, "cancel_role", 0)
-    let cause = Vault.get_or(p.why, "cancel_cause", "")
-    match Vault.get(p.meta, "kind") do
-      None -> Ok(outcome_of(p))
-      Some(kind) ->
-        if kind == kind_protocol() do Err(Protocol(role, cause))
-        else if kind == kind_host_gone() do Err(HostGone(Vault.get_or(p.meta, "ep", my_role)))
-        else if kind == kind_left() do Err(RunError.Left(cause))
-        else Err(Cancelled(role, cause)) end end end
-    end
+    let r = run_result(p, my_role)
+    close_party(p)
+    r
   end
 
   -- ── the cluster runner ──────────────────────────────────────────────────
@@ -2262,6 +2293,13 @@ mod SessionNode do
     end
   end
 
+  -- A cluster party's end: its tables and its route's slot. Runs once the
+  -- route is gone, so no frame reaches the slot after.
+  pfn close_cluster_party(p : Party, slot : Vault(Party)) : () do
+    Vault.close(slot)
+    close_party(p)
+  end
+
   pfn serve_cluster_outcome(p : Party) : () do
     let _ = send(p.ep, Expect(List.length(p.links)))
     let _ = await_outcome(p)
@@ -2387,6 +2425,7 @@ mod SessionNode do
       Err(_) ->
         ClusterNode.unroute(node, route_key)
         end_party(p0)
+        close_cluster_party(p0, slot)
         Err(Listen(my_role, "session " ++ session ++ ": role " ++ int_to_string(my_role) ++ " is already registered"))
       Ok(_) ->
         match find_peers(node, session, peers, 30000, abandoned) do
@@ -2394,6 +2433,7 @@ mod SessionNode do
             ClusterNode.unroute(node, route_key)
             ClusterNode.unregister(node, me)
             end_party(p0)
+            close_cluster_party(p0, slot)
             if missing == 0 do Err(RunError.Connect(0, "session " ++ session ++ ": withdrawn by its initiator"))
             else Err(RunError.Connect(missing, "session " ++ session ++ ": no endpoint registered for role " ++ int_to_string(missing))) end
           Ok(found0) ->
@@ -2413,6 +2453,7 @@ mod SessionNode do
                 ClusterNode.unroute(node, route_key)
                 ClusterNode.unregister(node, me)
                 end_party(p0)
+                close_cluster_party(p0, slot)
                 Err(RunError.Connect(missing, "session " ++ session ++ ": " ++ why))
               Ok(links) ->
                 let p = List.fold_left(links, p0, fn (acc, l) -> with_link(acc, l))
@@ -2442,7 +2483,9 @@ mod SessionNode do
                 ClusterNode.unroute(node, route_key)
                 ClusterNode.unregister(node, me)
                 end_party(p)
-                run_result(p, my_role)
+                let r = run_result(p, my_role)
+                close_cluster_party(p, slot)
+                r
             end
         end
     end
@@ -3121,6 +3164,10 @@ mod SessionNode do
     -- The inbox has answered its one purpose; left alive it was one actor
     -- leaked per initiated session.
     kill(inbox)
+    -- So have the answers' tables, which nothing reaches once the route is
+    -- gone; never closed, they were two more per initiated session.
+    Vault.close(answers)
+    Vault.close(budget)
     match filled do
       Err((role, why, accepted)) ->
         withdraw_all(node, sid, accepted)

@@ -1,0 +1,29 @@
+# Two pools over one three-role choreography (`Order` in src/lab_app.march).
+#
+#   ingress  initiates Shop sessions from its hook and counts their outcomes
+#   work     offers Stock on every node, and Ledger on ONE node labelled "books"
+#
+# Hosts and labels are per environment: topology.lab.toml is the lab's
+# (scripts/lab/), four containers lab-1..lab-4.
+
+[roles]
+"Order.Stock"  = { body = "LabApp.Work.stock", capacity = 32 }
+"Order.Ledger" = { actor = "LabApp.Work.LedgerActor", capacity = 64, place = { on = "books", count = 1 } }
+
+[pool.ingress]
+start = "LabApp.Ingress.start"
+# serves nothing: its hook initiates Shop. `caps` and `initiates` derived.
+
+[pool.work]
+start  = "LabApp.Work.start"
+serves = ["Order.Stock", "Order.Ledger"]
+
+# The in-cluster control plane: its leader runs on one of the hosts labelled
+# "control", and `forge deploy` sends hot changes to it as signed releases
+# instead of reaching each node over ssh.
+[control]
+candidates = "control"
+
+[drain]
+soft_ms = 3000
+hard_ms = 8000

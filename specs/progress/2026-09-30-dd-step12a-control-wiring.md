@@ -68,7 +68,7 @@ causes, each fixed or routed around; the leaks themselves are filed:
 - A `Ctl` session formed every 200 ms (the agent re-initiated after each `Drained`
   outcome, and after a deploy of the node every new session was draining). Sessions are
   long-lived now; a drained one is restarted from an actor past the deploy's marker
-  (`CtlRespawner`). [../todos/2026-10-01-session-node-vault-tables-leak.md](../todos/2026-10-01-session-node-vault-tables-leak.md).
+  (`CtlRespawner`). [../progress/2026-10-01-session-node-vault-tables-leak.md](2026-10-01-session-node-vault-tables-leak.md).
 - The leader's state, a record rewritten in a Vault on every poll, leaked all it pointed
   to: it is kept encoded (a String) now, the release in its own entry. Same todo.
 - Reports carried `VERSIONS_DETAIL` (~14,000 lines) on every poll; now `NODE_STATE` and
