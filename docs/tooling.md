@@ -635,15 +635,16 @@ forge cap run --allow-only IO.Console ./untrusted          # run untrusted code 
 
 ## forge observe: what a running node is doing
 
-A compiled program started with `MARCH_OBSERVE_SOCKET=<path>` (or with `MARCH_HOT_RELOAD_SOCKET`, which puts the observe socket at `<path>.observe`) answers read-only questions about itself on that socket. The socket is owner-only and separate from the hot-reload socket, so asking never blocks a deploy.
+A compiled program started with `MARCH_OBSERVE_SOCKET=<path>` (or with `MARCH_HOT_RELOAD_SOCKET`, which puts the observe socket at `<path>.observe`) answers read-only questions about itself on that owner-only socket: its actors and mailboxes, supervision tree, names, schedulers, memory, crashes and hot-reload epochs. It never shows message contents or panic text.
 
 ```bash
-forge observe --socket /tmp/app.observe                  # SNAPSHOT: every section
-forge observe --socket /tmp/app.observe actors mbox 10   # the 10 deepest mailboxes
-forge observe --env web --section tree --json            # a forge.toml host, over ssh
+forge observe --socket /tmp/app.observe actors mbox 10   # one request, the JSON reply
+forge top --env web --sort msgs_in                      # the busiest actors, redrawn in place
+forge diagnose --env web                                # known trouble; exit 0/1/2/3
+forge status                                            # every node at a glance
 ```
 
-The request is a verb and its arguments: `ACTORS [mbox|status|epoch|pid] [n]`, `ACTOR <pid>`, `TREE`, `NAMES`, `SCHED [window_ms]`, `MEM`, `EPOCHS`, `CRASHES [n]`, `TOP mbox|crashes|slices|msgs_in|msgs_out <n> [window_ms]`, `SNAPSHOT [sections]` or `HELP`. Actor rows carry cumulative counters (`slices`, `msgs_in`, `msgs_out`), `idle_ms` since the actor last ran, and `held`: messages an `Actor.call` has taken off the mailbox while it waits. `SCHED` measures each scheduler's utilisation over the window; `TOP` ranks the counters by their change over it. Without `--socket`, forge asks the `[hot-reload]` hosts in `forge.toml` (`--env NAME` picks entries by name). The reply is JSON: indented, or one line per host with `--json`. A dead actor's `ACTOR` reply says how it died (`Crash`, `Killed`, `Normal`), and `CRASHES` lists recent crashes with their supervisor and restart number, but neither ever shows a panic message. Actor type names appear in builds compiled with `--hot-reload`.
+From inside a program, the `Recon` and `Diagnose` stdlib modules ask the same questions. [Observing a running node](observe.md) is the operator's guide: every verb and field, the forge commands' flags and exit codes, what each `forge diagnose` finding means and what to do about it, and a worked incident.
 
 ## Dependency Management
 

@@ -176,13 +176,14 @@ let serve_recorder ~listener ~(old : Cmd_deploy_hot.manifest) ~(manifest : Cmd_d
            old.functions;
          reply "END"
        | [ "GET_EPOCH" ] -> reply "EPOCH 1"
-       | [ "CAS_CHECK"; _ ] -> reply "PRESENT"
+       | "CAS_CHECK" :: _ -> reply "PRESENT"   (* the hash, and the bytes' digest *)
        | [ "BEGIN_BATCH" ] -> staged := 0; output_string out "BEGIN_BATCH\n"; flush out; reply "OK"
        | [ "COMMIT_BATCH" ] ->
          output_string out "COMMIT_BATCH\n"; flush out;
          reply (Printf.sprintf "OK %d" !staged)
        | [ "ROLLBACK_BATCH" ] -> output_string out "ROLLBACK_BATCH\n"; flush out; reply "OK"
-       | "SEQ" :: _ | "ACTIVATE3" :: _ | "ACTIVATE4" :: _ | "ACTIVATE5" :: _ | "ACTIVATE6" :: _ ->
+       | "SEQ" :: _ | "ACTIVATE3" :: _ | "ACTIVATE4" :: _ | "ACTIVATE5" :: _ | "ACTIVATE6" :: _
+       | "ACTIVATE7" :: _ ->
          incr staged;
          output_string out (line ^ "\n"); flush out;
          reply "OK recorded"

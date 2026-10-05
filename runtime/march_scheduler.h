@@ -517,6 +517,9 @@ typedef struct march_proc {
  * off its mailbox (0 when it puts them back). */
 void march_sched_set_held(int64_t n);
 
+/* Count one remote send (Node.send) on the calling green thread's proc. */
+void march_observe_count_send(void);
+
 /* ── Scheduler (per OS-thread) ───────────────────────────────────────── */
 typedef struct march_scheduler {
     march_deque     local_queue;  /* Work-stealing deque of RUNNABLE processes   */

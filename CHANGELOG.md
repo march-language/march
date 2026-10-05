@@ -19,6 +19,16 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`forge top`, `forge diagnose` and `forge status`.** `forge top` watches a
+  node's busiest actors (by mailbox depth, crashes, or message and dispatch
+  rate) refreshed in place. `forge diagnose` checks a node over a window for
+  growing mailboxes, actors dropping at their limit, saturated or imbalanced
+  schedulers, crash loops, a heap climbing with no new actors and stuck
+  hot-reload epochs, and exits 0, 1, 2 or 3 (nothing, warnings, critical,
+  unreachable). `forge status` adds each node's actors, queued messages,
+  memory, load, recent crashes and deepest mailbox to the topology report.
+  The same findings are in the stdlib as `Diagnose`, so a program can check
+  itself, and remote sends now count in an actor's sent messages.
 - **`Recon`: a program's view of itself.** The new stdlib module answers, from
   March code, the questions `forge observe` asks a node: `Recon.info` (one
   actor's mailbox, counters, supervisor and names), `actors`, `proc_count`
@@ -164,6 +174,24 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Security: a signed hot deploy now runs only the bytes the operator signed.**
+  A signed `ACTIVATE` named its artifact by the compiler's compilation hash, and
+  nothing checked the bytes stored under it, so anyone who could write a node's
+  artifact store (`CAS_PUT` over the reload socket or the unauthenticated control
+  API) could make an operator's genuine deploy, or a restart's replay, load their
+  own code. forge now sends `ACTIVATE7`, which signs the BLAKE3 of the patch's bytes.
+  The node checks it on a private copy before loading anything; other bytes get
+  `ERR artifact_digest` and none of their code runs. `CAS_CHECK` and `CAS_PUT` take
+  the digest too, so forge uploads a substituted artifact again and the node refuses
+  a corrupt upload. Once a node holds a release (or under
+  `MARCH_HCR_REQUIRE_RELEASE=1`) it refuses the older verbs, which sign no digest
+  (`ERR artifact_digest_required`), and does not replay them after a restart: such
+  a function comes back on the base build until the next deploy. Deploying to a
+  server that predates `ACTIVATE7` now fails with "upgrade the server binary".
+- **Security: the hot-reload socket is owner-only whatever the umask.** It was
+  created with the inherited umask's mode, so a node started under `umask 000`
+  let any local user connect. It is now `0600`, and a peer running as another
+  user (other than root) is disconnected.
 - **Topology now reports two roles that share one endpoint on a node.** Two roles
   placed on one node that serve the same protocol role through the same offer
   function want the same endpoint name, so the second could never be offered;
@@ -2123,6 +2151,14 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Observing a running node** (`docs/observe.md`), an operator's guide to the
+  observe socket and `forge observe`/`top`/`status`/`diagnose`: turning the
+  socket on and what it costs, the protocol and error codes, every verb with a
+  real reply and what each actor-row field means, the forge commands' flags and
+  exit codes, each `forge diagnose` finding with its exact threshold and what to
+  do next, `Recon` and `Diagnose` from March code, a worked "a node is slow"
+  incident, and the interpreter's differences. The section in `docs/tooling.md`
+  is now a short summary linking to it.
 - **Choreography** reference (`docs/choreography.md`): the test-script example used a
   constructor (`Expect_Msg_Prod_Cons_1`) that does not exist for the labelled `Stream`
   protocol (now `Expect_Item`), and the offer example passed a `RunError` to `panic`. The

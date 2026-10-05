@@ -2712,6 +2712,16 @@ march_proc *march_sched_current(void) {
 }
 
 
+/* observe_count_send (stdlib-only): a remote send (Node.send) leaves the
+ * process, so march_sched_send never sees it; the stdlib counts it here on
+ * the sending proc.  noinline for the same TLS reason as below. */
+__attribute__((noinline))
+void march_observe_count_send(void) {
+    march_scheduler *s = tl_sched;
+    march_proc *p = s ? s->current : NULL;
+    if (p) march_proc_bump(p->msgs_out);
+}
+
 __attribute__((noinline))
 void march_sched_set_held(int64_t n) {
     march_scheduler *s = tl_sched;

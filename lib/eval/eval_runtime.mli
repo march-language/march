@@ -138,6 +138,9 @@ val finish_self_stop : int -> unit
 val drain_hook : (unit -> unit) ref
 val mailbox_accepts : actor_inst -> bool
 val mailbox_enqueue : actor_inst -> value -> unit
+
+(** Count one message sent by the current actor (observe msgs_out). *)
+val count_send : unit -> unit
 val dropped_messages_count : int ref
 val monitor_actor : watcher_pid:int -> target_pid:int -> int
 val demonitor_actor : int -> unit
