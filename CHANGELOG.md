@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **A multi-host lab, and `examples/lab_app`.** `scripts/lab/run.sh` starts four
+  Debian containers on a private Docker network, deploys `examples/lab_app` (a
+  three-role choreography with a loop, a choice, an actor-hosted role placed
+  `count = 1`, role grants and a `[control]` section) to them with the real `forge`
+  over ssh, and checks hot deploys, restarts on persisted patches and failover, with
+  sessions flowing throughout. It runs on demand, not in CI; see the Multi-host Lab
+  docs page. Its first runs filed nine bugs under `specs/todos/2026-10-0[45]-lab-*`,
+  among them a pushed topology closing the control plane's leader role on every node.
 - **`Actor.inspect_state`: read a running actor's state.** The `sys:get_state`
   equivalent. `Actor.inspect_state(Actor.debug(io), pid, timeout_ms)` returns
   the actor's state fields as `{ count: 3, tags: [a, b], best: Some(3) }`,
@@ -189,6 +197,15 @@ git log is authoritative for exact commits.
   compile after a cold cache used the live stdlib type environment, whose type variables the program
   could link, so it produced different IR (an extra specialised clone, shifted lambda ids) and a
   different compilation-cache key than every later compile of the same source.
+- **A session no longer fails to form when its access point is replaced mid-invitation.**
+  When a hosting actor re-offered a role (for example after a hot deploy moved it
+  to a new protocol version) and closed the old offer, an initiator that had
+  just invited the old offer waited out the whole setup time (20 s) and then
+  failed with `NoOffer(.., "<node> did not answer")`: the invitation reached a
+  node whose offer had already dropped its route, so no one answered it.
+  `SessionNode.initiate` now notices the offer's name was unregistered, withdraws
+  the invitation, and looks again for the replacement offer, as it already did
+  for an offer that refused with "closing".
 - **Vault writes release what they replace, and session tables are freed.**
   Overwriting or dropping a Vault entry released only the old value's own cell,
   never its fields or list spine, so `Vault.set` of a record in a loop grew
