@@ -17,7 +17,7 @@ forge="${FORGE_BIN:-$root/_build/default/forge/bin/main.exe}"
 [ -x "$forge" ] || fail "forge not built: $forge (dune build forge/bin/main.exe)"
 export PKI="$work/pki"
 mkdir -p "$PKI" "$work/old" "$work/new"
-export CLUSTER_STOP_FILE="$work/stop" ROTATE_FILE="$work/rotate" B_STOP_FILE="$work/b_stop" GO_FILE="$work/go"
+export CLUSTER_STOP_FILE="$work/stop" ROTATE_FILE="$work/rotate" B_STOP_FILE="$work/b_stop" GO_FILE="$work/go" REPLAY_FILE="$work/replay"
 export OLD_PKI="$work/old" NEW_PKI="$work/new"
 cert() { "$forge" cluster cert "$@" --trust-domain test.local --pool web >> "$work/pki.log" || fail "forge cluster cert $*"; }
 
@@ -46,6 +46,12 @@ touch "$B_STOP_FILE"
 wait_exit b
 
 touch "$GO_FILE"
+# node-c replays only once node-a has installed its link as node-b. It used
+# to replay after a fixed one-second sleep, and once under ASan in CI node-a
+# never answered that replay. node-a's stderr logs every member and security
+# event, so a timeout here shows what node-a saw.
+wait_line a "node-a: linked to node-b again (creation 2)"
+touch "$REPLAY_FILE"
 wait_line c "node-c: replayed it on its own link as node-b"
 wait_line a "node-a: refused node-b's certificate update"
 sleep 1

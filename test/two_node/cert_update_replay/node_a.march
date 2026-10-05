@@ -38,6 +38,23 @@ mod CertUpdateReplayA do
     end
   end
 
+  -- node-c's link as node-b is up: node-b at creation 2 (the real node-b
+  -- runs at creation 1) and a link to it. scenario.sh lets node-c replay
+  -- only after this line, so the replay always lands on an installed link
+  -- (a fixed sleep in node-c did not, under ASan on a slow CI runner).
+  pfn wait_relinked(h : Cap(ClusterNode.Live), flags : Vault(Int), stop : String) : () do
+    if File.exists(stop) do () else
+      let b = ClusterNode.node_id_of(other())
+      let up = List.any(ClusterNode.members(h), fn m -> m.node_id == b && m.creation == 2)
+      if up && ClusterNode.link_count(h) >= 1 do
+        once(flags, "relinked", "linked to " ++ other() ++ " again (creation 2)")
+      else
+        sleep_ms(50)
+        wait_relinked(h, flags, stop)
+      end
+    end
+  end
+
   fn main(c : Cap(IO)) do
     let pki = Env.require("PKI")
     Process.set_env("MARCH_NODE_NAME", me())
@@ -55,7 +72,11 @@ mod CertUpdateReplayA do
       Ok(h) ->
         let flags = Vault.new("replay_flags")
         let b = ClusterNode.node_id_of(other())
+        -- Every security and member event, on stderr: what the harness
+        -- prints when a wait times out.
+        let _ = ClusterNode.subscribe(h, fn e -> IO.warn(me() ++ " event: " ++ to_string(e)))
         let _ = ClusterNode.on_security_event(h, fn ev ->
+          let _ = IO.warn(me() ++ " security: " ++ ClusterNode.security_text(ev))
           match ev do
             ClusterNode.CertReplaced(id, _) ->
               if id == b do
@@ -69,6 +90,7 @@ mod CertUpdateReplayA do
         println(me() ++ ": up")
         let stop = Env.require("CLUSTER_STOP_FILE")
         wait_linked(h, flags, stop)
+        wait_relinked(h, flags, stop)
         wait_file(stop)
         ClusterNode.stop(h)
         println(me() ++ ": done")
