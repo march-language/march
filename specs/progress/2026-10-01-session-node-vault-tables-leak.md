@@ -83,7 +83,12 @@ The ~24 KB tables do not.
   end. With `close_party` stubbed out: 780 tables over (13 a session) on each
   node for the cluster run and 260 for the standalone one; with closing but
   freeing only with the last handle (an intermediate version), the same, which
-  is how the closure leak above was found.
+  is how the closure leak above was found. Under ASan (the sanitize gate) its
+  nodes get a 15 s SWIM suspect timeout, as hcr_new_code_session's do: at the
+  default 3 s, 1 run in 4 in the ubuntu container had node-a declare node-b
+  dead mid-run ("suspect timeout"), failing one session on both sides. A
+  session that fails other than by B leaving prints why, so a golden diff
+  carries the reason.
 - Peak RSS of that scenario's node-a: 125 MB, main 156 MB. Not flat: a cluster
   session still leaves ~40,000 live objects behind on main and here (the
   message encodings of

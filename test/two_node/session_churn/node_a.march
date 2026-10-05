@@ -30,7 +30,11 @@ mod SessionChurnA do
     if i >= stop do (ok, bad) else
       match Echo_Run.cluster_A(c, h, "churn" ++ int_to_string(i), fn (s, st) -> role_a(s, st, i)) do
         Ok(_) -> cluster_runs(c, h, i + 1, stop, ok + 1, bad)
-        Err(_) -> cluster_runs(c, h, i + 1, stop, ok, bad + 1)
+        Err(e) ->
+          -- Only every third session is meant to fail (B leaves it): say why
+          -- any other did, on stdout, so a golden diff carries the reason.
+          if i % 3 != 2 do println("A: cluster session " ++ int_to_string(i) ++ " failed: " ++ Echo_Run.error_message(e)) else () end
+          cluster_runs(c, h, i + 1, stop, ok, bad + 1)
       end
     end
   end
@@ -52,7 +56,11 @@ mod SessionChurnA do
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "churn-secret", 1)
+    -- The default SWIM timeouts, except under AddressSanitizer, where
+    -- scenario.sh sets CHURN_SUSPECT_MS: see there.
+    let base = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "churn-secret", 1)
+    let suspect_ms = Env.get_int("CHURN_SUSPECT_MS", 0)
+    let cfg = if suspect_ms > 0 do { base with swim: Swim.config(500, suspect_ms, 2) } else base end
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
