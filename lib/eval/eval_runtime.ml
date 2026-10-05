@@ -253,6 +253,12 @@ type actor_inst = {
      treated as unbounded here — see stdlib/actor.march's doc string). *)
   mutable ai_mbox_limit  : int;
   mutable ai_mbox_policy : int;
+  (* Observe counters (R2 of the observe plan), the compiled runtime's
+     march_proc slices / msgs_in / msgs_out: handler runs, messages the
+     scheduler handed it, messages it sent that were enqueued. *)
+  mutable ai_slices   : int;
+  mutable ai_msgs_in  : int;
+  mutable ai_msgs_out : int;
 }
 
 (** Actor definitions registered by [DActor] — reset per module eval. *)
@@ -780,7 +786,8 @@ let spawn_child_actor ?(crashed_pid : int option = None) ?(init_args : value lis
       ai_restart_count = []; ai_epoch = inherited_epoch;
       ai_resources = [];
       ai_linear_values = [];
-      ai_mbox_limit = 0; ai_mbox_policy = 0 } in
+      ai_mbox_limit = 0; ai_mbox_policy = 0;
+                 ai_slices = 0; ai_msgs_in = 0; ai_msgs_out = 0 } in
     Hashtbl.add actor_registry child_pid child_inst;
     (* Re-register in process registry if the crashed actor had a name *)
     (match crashed_pid with
@@ -1357,8 +1364,7 @@ let mailbox_accepts (inst : actor_inst) : bool =
     - policy 2 (drop_old): evict the oldest queued message to make room.
     - unrecognized policy: falls back to unbounded (defensive default). *)
 
-let mailbox_enqueue (inst : actor_inst) (msg : value) : unit =
-  if inst.ai_draining then () else
+let mailbox_enqueue_raw (inst : actor_inst) (msg : value) : unit =
   let limit = inst.ai_mbox_limit in
   if limit <= 0 then
     Queue.push msg inst.ai_mailbox
@@ -1380,6 +1386,24 @@ let mailbox_enqueue (inst : actor_inst) (msg : value) : unit =
       end;
       Queue.push msg inst.ai_mailbox (* drop_old: evict oldest, then enqueue *)
     | _ -> Queue.push msg inst.ai_mailbox
+
+let count_send () =
+  match !current_pid with
+  | Some p -> (match Hashtbl.find_opt actor_registry p with
+               | Some sender -> sender.ai_msgs_out <- sender.ai_msgs_out + 1
+               | None -> ())
+  | None -> ()
+
+let mailbox_enqueue (inst : actor_inst) (msg : value) : unit =
+  if inst.ai_draining then () else
+  let before = Queue.length inst.ai_mailbox in
+  mailbox_enqueue_raw inst msg;
+  (* Enqueued (not dropped): count it on the sender (observe msgs_out).
+     A drop_old enqueue keeps the length but still enqueued this one. *)
+  if Queue.length inst.ai_mailbox > before
+     || (inst.ai_mbox_policy = 2 && inst.ai_mbox_limit > 0) then count_send ()
+
+
 
 (** Register a monitor: watcher_pid observes target_pid. Returns monitor_ref. *)
 let monitor_actor ~watcher_pid ~target_pid : int =

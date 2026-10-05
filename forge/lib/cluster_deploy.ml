@@ -28,7 +28,20 @@
     A candidate that is not the leader forwards [RELEASE] and [STATUS], so any
     candidate will do. [AUDIT] is answered by the candidate asked: the leader
     copies each line to every candidate it reaches, and [audit] asks them all. Artifacts go to every candidate ([CAS_PUT], the reload
-    socket's own exchange), so whichever one an agent fetches from has them. *)
+    socket's own exchange), so whichever one an agent fetches from has them.
+
+    {v
+    STAGE <size>          a signed release follows; OK staged <n>, or ERR <why>
+                          (bad signature, older than the candidate's head)
+    CAS_PUT <hash> <size> only a hash a release staged on the SAME connection
+                          names (ERR not_staged), at most 64 MiB, within the
+                          candidate's quota of uploads no stored release names
+                          yet (ERR cas_quota); unadopted ones are collected
+    v}
+
+    The candidates' own verbs ([RELEASE_COPY], [AUDIT_COPY]) need the cluster
+    handshake, which forge cannot do; forge only reads, stages, uploads and
+    sends signed releases. *)
 
 let ( let* ) = Result.bind
 
@@ -249,14 +262,26 @@ let send_release (eps : endpoint list) ~(body : string) : (string, string) resul
   in
   go [] eps
 
+(** Stage [release] (its serialised, signed text) on [c]: a candidate takes an
+    artifact only on a connection that first staged a signed release naming
+    it, not older than the candidate's head. *)
+let stage c ~(release : string) : (unit, string) result =
+  Cmd_deploy_hot.send_line c (Printf.sprintf "STAGE %d" (String.length release));
+  Cmd_deploy_hot.send_binary c (Bytes.of_string release) 0 (String.length release);
+  let resp = Cmd_deploy_hot.recv_line c in
+  if String.length resp >= 2 && String.sub resp 0 2 = "OK" then Ok ()
+  else Error (Printf.sprintf "STAGE: %s" resp)
+
 (** Upload [path] as artifact [hash] to every endpoint that lacks it, or
-    holds other bytes under it: both verbs carry the bytes' digest, the one
-    the release's ACTIVATE7 lines sign. *)
-let upload (eps : endpoint list) ~(hash : string) ~(path : string) : (unit, string) result =
+    holds other bytes under it, on a connection that stages [release] (which
+    names [hash]) first: both verbs carry the bytes' digest, the one the
+    release's ACTIVATE7 lines sign. *)
+let upload (eps : endpoint list) ~(release : string) ~(hash : string) ~(path : string) : (unit, string) result =
   let digest = Cmd_deploy_hot.artifact_digest path in
   List.fold_left (fun acc e ->
       let* () = acc in
       match with_conn e (fun c ->
+          let* () = stage c ~release in
           if Cmd_deploy_hot.cas_check ~digest c hash then Ok ()
           else (Cmd_deploy_hot.cas_put ~digest c hash path; Ok ())) with
       | Ok () -> Ok ()
@@ -479,6 +504,8 @@ let prepare (sp : spec) : (status * Control_release.t, string) result =
 (** Upload every artifact [release] names to every candidate that lacks it:
     a release must never name what a candidate cannot serve. *)
 let upload_artifacts (sp : spec) (release : Control_release.t) : (unit, string) result =
+  let body = Control_release.serialize release in
+  let upload = upload ~release:body in
   let* () =
     List.fold_left (fun acc hb ->
         let* () = acc in

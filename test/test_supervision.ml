@@ -44,6 +44,7 @@ let mk_actor_inst name alive st = March_eval.Eval.{
   ai_linear_values = [];    (* Phase 6b *)
   ai_mbox_limit    = 0;     (* Task 9: unbounded by default *)
   ai_mbox_policy   = 0;
+ai_slices = 0; ai_msgs_in = 0; ai_msgs_out = 0
 }
 
 let add_fresh_actor pid name =

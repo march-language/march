@@ -125,5 +125,15 @@ wait_line a "app a: c dead: certificate revoked"
 wait_line b "app b: c dead: certificate revoked"
 grep -q "app a: b dead\|app c: b dead" "$work/a.out" "$work/c.out" && fail "b died"
 
+# The candidates' own copies went over the certificate handshake (both carry
+# Ctl.Control:offer): the standby holds the releases and the leader's audit
+# lines, and neither refused the other (security review of step 12).
+leader=$(ctl_leader); standby=$([ "$leader" = a ] && echo b || echo a)
+ls "$work/nodes/$standby/control/releases/"*.release > /dev/null 2>&1 \
+  || fail "the standby $standby holds no release copy (RELEASE_COPY over the certificate handshake)"
+copied() { "$HCR" api "$(ctl_api_ep "$standby")" "AUDIT 0" | grep -q '"type":"'; }
+ctl_until 20 "the leader's audit lines on the standby (AUDIT_COPY over the certificate handshake)" copied
+grep -h "refused an unauthenticated write" "$work/a.out" "$work/b.out" && fail "a candidate refused the other's write"
+
 ctl_no_ssh
 ctl_done

@@ -1,5 +1,7 @@
 `[P2]` A hot patch whose slot name table differs from the running binary's is accepted and mis-dispatches
 
+**RESOLVED 2026-10-02 by #765** (merged as c462e105a; [2026-10-02-hcr-patch-slot-ids-by-name.md](2026-10-02-hcr-patch-slot-ids-by-name.md)), better than this todo's acceptance asked: rather than refusing a patch whose ids differ, a patch no longer carries ids at all. Its call sites load each slot id from a per-name cell that `__march_init` fills from the running binary's table (`march_dispatch_name_to_id`) after dlopen, so a v2 that adds a top-level fn dispatches correctly. #763 (merged later, test-only) had removed the new top-level fn from the `protocol_expand_contract` scenario to dodge the crash; the fn is back (2026-10-04), so the scenario again proves the case end to end.
+
 Found 2026-10-02 (see specs/progress/2026-10-02-two-node-protocol-expand-contract-slot-ids.md).
 
 Slot ids are the sorted position of each slot's name (`Hot_reload.Name_table`).

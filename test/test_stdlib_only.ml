@@ -346,7 +346,7 @@ let test_driver_rejects_user_json_march () =
 let test_shipped_table () =
   let gated = List.map fst !TB.stdlib_only in
   Alcotest.(check (list string)) "the four forging builtins, the epoch holds and the drain flag are gated"
-    [ "pid_of_int"; "actor_pid_indices"; "actor_whereis"; "actor_registered";
+    [ "pid_of_int"; "actor_pid_indices"; "observe_query"; "actor_whereis"; "actor_registered";
       "epoch_hold"; "epoch_release"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn"; "epoch_holds";
       "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch"; "reload_request" ]
     gated;
@@ -503,6 +503,7 @@ end|} call) ]
 let calls =
   [ ("pid_of_int", "pid_of_int(0)");
     ("actor_pid_indices", "actor_pid_indices()");
+    ("observe_query", "observe_query(\"PING\")");
     ("actor_whereis", "actor_whereis(\"x\")");
     ("actor_registered", "actor_registered()");
     ("epoch_hold", "epoch_hold()");

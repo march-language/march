@@ -306,6 +306,15 @@ end
 These are the three messages a hosted access point's actor takes
 (`offer_hosted_<Role>`, see the Choreography chapter).
 
+A node offers each protocol role (at one protocol version) once: the offer's endpoint
+is named by protocol, role, version and node, not by the topology role. Two roles placed
+on one node that serve the same protocol role through the same `offer_<Role>` share that
+endpoint, so only the first is offered. The node reports the other once
+(`topology: <role>: cannot be offered on <node>: its endpoint name is held by role ...`),
+lists it in its status file as `conflict <role> held-by <role>`, and retries it with
+backoff; it is offered, with a report, once the holder's offer closes. Give each role
+its own protocol, or place them on different nodes.
+
 ### `forge run`
 
 ```bash

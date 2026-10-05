@@ -258,7 +258,33 @@ The leader appends each line and copies it, about once a second, to every other
 candidate it reaches, so the log outlives a change of leader. A candidate that was down
 misses what was copied meanwhile; `forge deploy --audit` asks every candidate and shows
 the union, in time order. The control API answers `AUDIT [n]` with one candidate's own
-file. Each node still writes its own audit log of what it applied (below).
+file. Past `MARCH_CONTROL_AUDIT_MAX_BYTES` (default 16 MiB) the file is renamed to
+`audit.jsonl.1`, replacing the one before, so a candidate keeps at most twice that;
+`AUDIT` reads both. Each node still writes its own audit log of what it applied (below).
+
+**Who may write to the control API.** Reads (`STATUS`, `LEADER`, `AUDIT`, `CAS_CHECK`,
+`CAS_GET`, a node's relayed version queries) are open: they are not confidential, and the
+port belongs on the operator's network, like the cluster port. Writes are not:
+
+- `RELEASE` takes only a release your deploy key signed (a standby forwards it to the
+  leader as is, and the leader checks the signature).
+- `CAS_PUT` takes an artifact only on a connection that first `STAGE`d a signed release
+  naming it, no older than the candidate's newest; forge does this for you. An artifact is
+  at most 64 MiB. Uploads that no stored release names yet are capped in total
+  (`MARCH_CONTROL_CAS_PENDING_MAX_BYTES`, default 1 GiB; over it, `ERR cas_quota`), and one
+  that no release adopts within `MARCH_CONTROL_CAS_GRACE_MS` (default 10 minutes) is
+  removed, unless a persisted patch stack names it.
+- The candidates' own copies (`RELEASE_COPY`, `AUDIT_COPY`) need the cluster's handshake,
+  the same proof a cluster link takes: the cluster secret, or in certificate mode a
+  certificate carrying `Ctl.Control:offer`. Anyone else is refused (`ERR
+  unauthenticated`), and the candidate prints `control: refused an unauthenticated write`.
+
+A candidate serves at most `MARCH_CONTROL_MAX_CONNS` connections at once (default 64; a
+further one is answered `ERR busy`) and closes one that sends nothing for
+`MARCH_CONTROL_IDLE_MS` (default 30 s). A release or audit body over 1 MiB is refused
+before it is read. Candidates must run the same control-plane code: an older candidate
+does not speak the handshake, so its copies to a newer one, and the newer one's to it,
+are refused until both are upgraded.
 
 `forge test --upgrade-from` deploys through the control plane too when the topology has a
 `[control]` section, and `forge run --processes` gives each local process its own control

@@ -94,7 +94,7 @@ let builtin_names : StringSet.t =
       "cap_narrow"; "root_cap"; "mint_cap"; "cap_impl"; "cap_dict";
       "set_actor_caps"; "actor_caps";
       (* Monitor/supervision builtins *)
-      "demonitor"; "monitor"; "dist_monitor_register"; "actor_terminal_reason"; "dist_monitor_pending"; "dist_monitor_ack"; "dist_monitor_forget_node"; "mailbox_size"; "sched_stat"; "actor_set_mailbox_limit";
+      "demonitor"; "monitor"; "dist_monitor_register"; "actor_terminal_reason"; "dist_monitor_pending"; "dist_monitor_ack"; "dist_monitor_forget_node"; "mailbox_size"; "sched_stat"; "observe_query"; "actor_set_mailbox_limit";
       "run_until_idle"; "register_resource"; "get_cap";
       (* Named registry (Task 4) *)
       "actor_register"; "actor_unregister"; "actor_whereis"; "actor_registered";
@@ -300,7 +300,19 @@ let builtin_names : StringSet.t =
       (* Multi-party session type builtins *)
       "mpst_new"; "mpst_send"; "mpst_recv"; "mpst_close";
       (* Distributed OTP L4 — function-by-identity remote registry *)
-      "remote_ref_hashes"; "remote_register_stub"; "remote_count" ]
+      "remote_ref_hashes"; "remote_register_stub"; "remote_count";
+      (* Vault.  Missing here, every call was lowered as a call_ptr through a
+         closure value; codegen redirects that back to the vault arms
+         (Llvm_emit's ECallPtr builtin arm), but Perceus and borrow inference
+         still saw an indirect call and treated every argument as consumed,
+         so [Borrow.extern_borrow_table]'s entries never applied: each
+         Vault.get leaked its key (conduit's per-poll "paused:" ++ queue) and
+         each Vault.set a reference to its value.  Impure by family
+         ([Purity.impure_prefixes]), so DCE/CSE keep every call. *)
+      "vault_new"; "vault_whereis"; "vault_set"; "vault_set_ttl"; "vault_get";
+      "vault_drop"; "vault_update"; "vault_put_new"; "vault_incr";
+      "vault_push_capped"; "vault_size"; "vault_keys"; "vault_ns_set";
+      "vault_ns_get"; "vault_ns_drop" ]
 
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 

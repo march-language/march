@@ -129,8 +129,14 @@ static void *make_err(const char *msg) {
 }
 
 /* Build a March Unit value (just a header, tag=0, no fields). */
+/* The unit value () is not a heap object: compiled code passes it as a
+ * non-heap word, and mk_ok_unit (march_runtime.c) stores 0 for Ok(()) too.
+ * This used to march_alloc(16) a cell, which nothing ever released — the
+ * compiler types the Ok payload as Unit, so no drop path touches it — leaking
+ * one object per tcp_send_all / tcp_set_recv_timeout call: one per Postgres
+ * message depot sends, a steady leak in an idle conduit worker. */
 static void *make_unit(void) {
-    return march_alloc(16);
+    return NULL;
 }
 
 /* Build a March List Cons node: tag=1, field0=head, field1=tail. */

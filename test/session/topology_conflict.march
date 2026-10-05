@@ -1,0 +1,133 @@
+-- Two Topology roles on one node that serve the SAME protocol role through
+-- the same offer function want one endpoint name (SessionNode names an offer
+-- by protocol + role + fingerprint + node, not by the Topology role), so the
+-- second is refused with `AlreadyOffered`. Before the fix Topology retried
+-- that every tick without a word: the role was missing from `offered`
+-- forever with no diagnostic (specs/progress/2026-09-25-topology-silent-already-offered-retry.md).
+-- Now the conflict is reported once, written to the status text as a
+-- `conflict` line, retried with backoff rather than every tick, and offered
+-- as soon as the holder's offer closes -- including while the holder's name
+-- is still being released (the fake defers `unregister` to `flush`, as the
+-- node actor releases a name in its own turn: the transient case).
+--
+-- Over a FAKE cluster dictionary (`ClusterNode.attach`), as
+-- topology_placement does; no sockets, no timing. Echo.Primary is count(1)
+-- and moves away when a peer that ranks above this node comes alive.
+-- Compiled only: `place` runs a background task.
+mod TopologyConflict do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.Spawn
+  needs IO.Clock
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Process
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    ask: Client -> Server : Int
+    answer: Server -> Client : Int
+  end
+
+  pfn serve_one(s : Cap(Session.Live), st : Echo_Server.Entry) : Echo_Server.Yield do
+    Echo_Server.recv_Ask(s, st, fn (n, st1) -> Echo_Server.close(s, Echo_Server.send_Answer(s, st1, n)))
+  end
+
+  type Fake = { members : Vault(Membership.Member), names : Vault(GlobalPid.Pid),
+                pending : Vault(Int), meta : Vault(Int) }
+
+  pfn member(id : String, status : Membership.MemberStatus) : Membership.Member do
+    { node_id: id, status: status, incarnation: 0, creation: 1, name: "node-" ++ id, addr: "" }
+  end
+
+  pfn fake_ops(fk : Fake) : ClusterNode.ClusterOps do
+    { ClusterNode.ops_stub("n0") with
+      all_members: fn _ -> List.map(Vault.all(fk.members), fn kv -> match kv do (_k, m) -> m end),
+      members: fn _ -> Nil,
+      subscribe: fn _ -> Vault.incr(fk.meta, "sub", 1),
+      names: fn _ -> Vault.keys(fk.names),
+      lookup: fn nm -> Vault.get(fk.names, nm),
+      -- A held name is refused, as the real registry does.
+      register: fn (nm, pid) -> do
+        match Vault.get(fk.names, nm) do
+          Some(holder) -> Err(ClusterNode.Taken(holder))
+          None ->
+            Vault.set(fk.names, nm, GlobalPid.make("n0", pid, 1))
+            Ok(())
+        end
+      end,
+      -- Released later, in `flush` (the node actor's own turn).
+      unregister: fn nm -> Vault.set(fk.pending, nm, 1),
+      route: fn (pid, _) -> "p" ++ int_to_string(pid),
+      route_session: fn (pid, _) -> "s" ++ int_to_string(pid),
+      unroute: fn _ -> (),
+      creation: fn _ -> 1 }
+  end
+
+  pfn flush(fk : Fake) : () do
+    List.each(Vault.keys(fk.pending), fn nm -> do
+      Vault.drop(fk.names, nm)
+      Vault.drop(fk.pending, nm)
+    end)
+  end
+
+  pfn show_offers(c : Cap(ClusterNode.Live), what : String) : () do
+    println(what ++ ": offers [" ++ String.join(Topology.offered(c), ", ") ++ "]")
+  end
+
+  pfn status(c : Cap(ClusterNode.Live)) : () do
+    List.each(String.split(Topology.status_text(c), "\n"), fn l ->
+      if String.starts_with(l, "offers ") || String.starts_with(l, "conflict ") do println("  status: " ++ l) else () end)
+  end
+
+  -- A peer that ranks above n0 for [role].
+  pfn peer_above(role : String, ids : List(String)) : String do
+    match ids do
+      Nil -> "none"
+      Cons(id, rest) ->
+        match Topology.rank(role, ["n0", id]) do
+          Cons(first, _) -> if first == id do id else peer_above(role, rest) end
+          Nil -> peer_above(role, rest)
+        end
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let fk = { members: Vault.new("tc_members"), names: Vault.new("tc_names"),
+               pending: Vault.new("tc_pending"), meta: Vault.new("tc_meta") }
+    let peer = peer_above("Echo.Primary", ["n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8"])
+    Vault.set(fk.members, "n0", member("n0", Membership.Alive))
+    Vault.set(fk.members, peer, member(peer, Membership.Dead))
+    Vault.set(fk.names, Topology.marker("Echo.Primary", peer), GlobalPid.make(peer, 1, 1))
+    let c = ClusterNode.attach(io, fake_ops(fk))
+    let tries : Vault(Int) = Vault.new("tc_tries")
+    Topology.place(c, [
+      Topology.role("Echo.Primary", Topology.count(1),
+                    fn () -> Echo_Run.offer_Server(io, c, 4, fn (s, st) -> serve_one(s, st))),
+      Topology.role("Echo.Replica", Topology.everywhere(),
+                    fn () -> do
+                      let _ = Vault.incr(tries, "n", 1)
+                      Echo_Run.offer_Server(io, c, 4, fn (s, st) -> serve_one(s, st))
+                    end) ])
+    show_offers(c, "placed")
+    status(c)
+    -- Five more evaluations: the conflict is not re-reported, and not retried
+    -- every evaluation (it was, silently, before the fix: 6 tries).
+    List.each([1, 2, 3, 4, 5], fn _ -> Topology.reconcile_now(c))
+    show_offers(c, "after 5 more evaluations")
+    println("Echo.Replica tried every evaluation: " ++ (if Vault.get_or(tries, "n", 0) >= 6 do "yes" else "no" end))
+    status(c)
+    -- The holder moves away: the peer ranked above n0 comes alive.
+    Vault.set(fk.members, peer, member(peer, Membership.Alive))
+    Topology.reconcile_now(c)
+    show_offers(c, "Echo.Primary moved away, its name not yet released")
+    flush(fk)
+    Topology.reconcile_now(c)
+    show_offers(c, "name released")
+    status(c)
+    process_exit(0)
+  end
+end
