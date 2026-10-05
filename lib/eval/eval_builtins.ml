@@ -341,6 +341,9 @@ let base_env : env =
         | _ -> eval_error "mailbox_size: expected pid"))
   (* The observe socket's reply to one request line, built from the
      interpreter's actor table (lib/eval/eval_observe.ml). Stdlib-only: Recon. *)
+  ; ("observe_count_send", VBuiltin ("observe_count_send", function
+        | [] | [VUnit] -> Eval_runtime.count_send (); VUnit
+        | _ -> eval_error "observe_count_send: expected unit"))
   ; ("observe_query", VBuiltin ("observe_query", function
         | [VString line] -> VString (Eval_observe.query line)
         | _ -> eval_error "observe_query: expected String"))

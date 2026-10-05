@@ -18,6 +18,7 @@
 -- A local actor's GlobalPid index is `pid_to_int(pid)`, the builtin this
 -- fixture was originally the case for (it parsed `to_string(pid)`).
 mod NodeSendLoopback do
+  needs IO
   needs IO.Console
   needs IO.NetListen
   needs IO.Spawn
@@ -135,7 +136,7 @@ mod NodeSendLoopback do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
+  fn main(io : Cap(IO), _cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
     let listen_fd = match tcp_listen(0) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)
@@ -181,6 +182,13 @@ mod NodeSendLoopback do
     match get_actor_field(pong_pid, "got") do
       Some(n) -> println("node-a: pongs delivered to the actor: " ++ int_to_string(n))
       None -> println("node-a: pong actor gone")
+    end
+    -- The reply went out with NodeSend.cast, a remote send that never reaches
+    -- the local mailbox path: it is counted on the sender's msgs_out anyway
+    -- (observe plan R3, `observe_count_send`).
+    match Recon.info(Actor.introspect(io), pid_to_int(ping_pid)) do
+      Some(a) -> println("node-b: ping actor's sends counted: " ++ int_to_string(a.msgs_out))
+      None -> println("node-b: ping actor gone")
     end
   end
 end

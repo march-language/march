@@ -346,14 +346,14 @@ let test_driver_rejects_user_json_march () =
 let test_shipped_table () =
   let gated = List.map fst !TB.stdlib_only in
   Alcotest.(check (list string)) "the four forging builtins, the epoch holds and the drain flag are gated"
-    [ "pid_of_int"; "actor_pid_indices"; "observe_query"; "actor_whereis"; "actor_registered";
+    [ "pid_of_int"; "actor_pid_indices"; "observe_query"; "observe_count_send"; "actor_whereis"; "actor_registered";
       "epoch_hold"; "epoch_release"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn"; "epoch_holds";
       "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch"; "reload_request" ]
     gated;
   List.iter (fun (name, hint) ->
       Alcotest.(check bool) (name ^ " suggestion names Actor.introspect") true
         (contains ~needle:"`Actor.introspect`" hint))
-    (List.filter (fun (name, _) -> name <> "epoch_hold" && name <> "epoch_release" && name <> "epoch_draining" && name <> "epoch_drain" && name <> "epoch_hold_next_spawn" && name <> "epoch_holds" && name <> "reload_request"
+    (List.filter (fun (name, _) -> name <> "observe_count_send" && name <> "epoch_hold" && name <> "epoch_release" && name <> "epoch_draining" && name <> "epoch_drain" && name <> "epoch_hold_next_spawn" && name <> "epoch_holds" && name <> "reload_request"
                              && name <> "delivery_origin_set" && name <> "delivery_origin_clear"
                              && name <> "delivery_failed_watch")
        !TB.stdlib_only);
@@ -504,6 +504,7 @@ let calls =
   [ ("pid_of_int", "pid_of_int(0)");
     ("actor_pid_indices", "actor_pid_indices()");
     ("observe_query", "observe_query(\"PING\")");
+    ("observe_count_send", "observe_count_send(())");
     ("actor_whereis", "actor_whereis(\"x\")");
     ("actor_registered", "actor_registered()");
     ("epoch_hold", "epoch_hold()");

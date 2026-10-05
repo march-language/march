@@ -1,0 +1,398 @@
+{
+ "before": {
+  "proto": "march.observe/1",
+  "node": "fixture",
+  "at_ms": 1790000000000,
+  "took_us": 10,
+  "truncated": false,
+  "data": {
+   "actors": {
+    "total": 5,
+    "shown": 5,
+    "sort": "mbox",
+    "actors": [
+     {
+      "pid": 1,
+      "type": "W",
+      "names": [
+       "web"
+      ],
+      "status": "waiting",
+      "mbox": 0,
+      "user_mbox": 0,
+      "held": 0,
+      "mbox_limit": 0,
+      "mbox_policy": "unbounded",
+      "code_epoch": 1,
+      "cap_epoch": 0,
+      "sched": 0,
+      "pinned": false,
+      "draining": false,
+      "parent": null,
+      "children": 0,
+      "spawned_by": null,
+      "slices": 10,
+      "msgs_in": 10,
+      "msgs_out": 10,
+      "crashes": 0,
+      "child_crashes": 0,
+      "idle_ms": 5
+     },
+     {
+      "pid": 2,
+      "type": "W",
+      "names": [],
+      "status": "waiting",
+      "mbox": 0,
+      "user_mbox": 0,
+      "held": 0,
+      "mbox_limit": 0,
+      "mbox_policy": "unbounded",
+      "code_epoch": 1,
+      "cap_epoch": 0,
+      "sched": 0,
+      "pinned": false,
+      "draining": false,
+      "parent": null,
+      "children": 0,
+      "spawned_by": null,
+      "slices": 10,
+      "msgs_in": 10,
+      "msgs_out": 10,
+      "crashes": 0,
+      "child_crashes": 0,
+      "idle_ms": 5
+     },
+     {
+      "pid": 3,
+      "type": "Sup",
+      "names": [],
+      "status": "waiting",
+      "mbox": 0,
+      "user_mbox": 0,
+      "held": 0,
+      "mbox_limit": 0,
+      "mbox_policy": "unbounded",
+      "code_epoch": 1,
+      "cap_epoch": 0,
+      "sched": 0,
+      "pinned": false,
+      "draining": false,
+      "parent": null,
+      "children": 2,
+      "spawned_by": null,
+      "slices": 10,
+      "msgs_in": 10,
+      "msgs_out": 10,
+      "crashes": 0,
+      "child_crashes": 0,
+      "idle_ms": 5
+     },
+     {
+      "pid": 4,
+      "type": "W",
+      "names": [],
+      "status": "waiting",
+      "mbox": 0,
+      "user_mbox": 0,
+      "held": 0,
+      "mbox_limit": 0,
+      "mbox_policy": "unbounded",
+      "code_epoch": 1,
+      "cap_epoch": 0,
+      "sched": 0,
+      "pinned": false,
+      "draining": false,
+      "parent": 3,
+      "children": 0,
+      "spawned_by": null,
+      "slices": 10,
+      "msgs_in": 10,
+      "msgs_out": 10,
+      "crashes": 0,
+      "child_crashes": 0,
+      "idle_ms": 5
+     },
+     {
+      "pid": 5,
+      "type": "W",
+      "names": [],
+      "status": "waiting",
+      "mbox": 0,
+      "user_mbox": 0,
+      "held": 0,
+      "mbox_limit": 0,
+      "mbox_policy": "unbounded",
+      "code_epoch": 1,
+      "cap_epoch": 0,
+      "sched": 0,
+      "pinned": false,
+      "draining": false,
+      "parent": 3,
+      "children": 0,
+      "spawned_by": null,
+      "slices": 10,
+      "msgs_in": 10,
+      "msgs_out": 10,
+      "crashes": 0,
+      "child_crashes": 0,
+      "idle_ms": 5
+     }
+    ]
+   },
+   "mem": {
+    "rss_bytes": 50000000,
+    "peak_rss_bytes": 60000000,
+    "live_objects": 100000,
+    "stacks_recycled": 0,
+    "queued_messages": 0,
+    "actors": 5
+   },
+   "sched": {
+    "schedulers": 2,
+    "window_ms": null,
+    "threads": [
+     {
+      "id": 0,
+      "idle_ms": 10000
+     },
+     {
+      "id": 1,
+      "idle_ms": 10000
+     }
+    ],
+    "runq": 0,
+    "msgs_dropped": 0
+   },
+   "epochs": {
+    "current": 3,
+    "pins": [
+     {
+      "epoch": 3,
+      "pins": 5,
+      "current": true,
+      "draining": false
+     }
+    ],
+    "slots": [],
+    "counters": {}
+   },
+   "crashes": {
+    "total": 0,
+    "crashes": []
+   },
+   "names": {
+    "names": [
+     {
+      "name": "web",
+      "pid": 1
+     }
+    ]
+   },
+   "tree": {
+    "total": 5,
+    "roots": [],
+    "unsupervised": [],
+    "truncated": false
+   }
+  }
+ },
+ "after": {
+  "proto": "march.observe/1",
+  "node": "fixture",
+  "at_ms": 1790000001000,
+  "took_us": 10,
+  "truncated": false,
+  "data": {
+   "actors": {
+    "total": 5,
+    "shown": 5,
+    "sort": "mbox",
+    "actors": [
+     {
+      "pid": 1,
+      "type": "W",
+      "names": [
+       "web"
+      ],
+      "status": "waiting",
+      "mbox": 0,
+      "user_mbox": 0,
+      "held": 0,
+      "mbox_limit": 0,
+      "mbox_policy": "unbounded",
+      "code_epoch": 1,
+      "cap_epoch": 0,
+      "sched": 0,
+      "pinned": false,
+      "draining": false,
+      "parent": null,
+      "children": 0,
+      "spawned_by": null,
+      "slices": 10,
+      "msgs_in": 10,
+      "msgs_out": 10,
+      "crashes": 0,
+      "child_crashes": 0,
+      "idle_ms": 5
+     },
+     {
+      "pid": 2,
+      "type": "W",
+      "names": [],
+      "status": "waiting",
+      "mbox": 0,
+      "user_mbox": 0,
+      "held": 0,
+      "mbox_limit": 0,
+      "mbox_policy": "unbounded",
+      "code_epoch": 1,
+      "cap_epoch": 0,
+      "sched": 0,
+      "pinned": false,
+      "draining": false,
+      "parent": null,
+      "children": 0,
+      "spawned_by": null,
+      "slices": 10,
+      "msgs_in": 10,
+      "msgs_out": 10,
+      "crashes": 0,
+      "child_crashes": 0,
+      "idle_ms": 5
+     },
+     {
+      "pid": 3,
+      "type": "Sup",
+      "names": [],
+      "status": "waiting",
+      "mbox": 0,
+      "user_mbox": 0,
+      "held": 0,
+      "mbox_limit": 0,
+      "mbox_policy": "unbounded",
+      "code_epoch": 1,
+      "cap_epoch": 0,
+      "sched": 0,
+      "pinned": false,
+      "draining": false,
+      "parent": null,
+      "children": 2,
+      "spawned_by": null,
+      "slices": 10,
+      "msgs_in": 10,
+      "msgs_out": 10,
+      "crashes": 0,
+      "child_crashes": 0,
+      "idle_ms": 5
+     },
+     {
+      "pid": 4,
+      "type": "W",
+      "names": [],
+      "status": "waiting",
+      "mbox": 0,
+      "user_mbox": 0,
+      "held": 0,
+      "mbox_limit": 0,
+      "mbox_policy": "unbounded",
+      "code_epoch": 1,
+      "cap_epoch": 0,
+      "sched": 0,
+      "pinned": false,
+      "draining": false,
+      "parent": 3,
+      "children": 0,
+      "spawned_by": null,
+      "slices": 10,
+      "msgs_in": 10,
+      "msgs_out": 10,
+      "crashes": 0,
+      "child_crashes": 0,
+      "idle_ms": 5
+     },
+     {
+      "pid": 5,
+      "type": "W",
+      "names": [],
+      "status": "waiting",
+      "mbox": 0,
+      "user_mbox": 0,
+      "held": 0,
+      "mbox_limit": 0,
+      "mbox_policy": "unbounded",
+      "code_epoch": 1,
+      "cap_epoch": 0,
+      "sched": 0,
+      "pinned": false,
+      "draining": false,
+      "parent": 3,
+      "children": 0,
+      "spawned_by": null,
+      "slices": 10,
+      "msgs_in": 10,
+      "msgs_out": 10,
+      "crashes": 0,
+      "child_crashes": 0,
+      "idle_ms": 5
+     }
+    ]
+   },
+   "mem": {
+    "rss_bytes": 50000000,
+    "peak_rss_bytes": 60000000,
+    "live_objects": 100000,
+    "stacks_recycled": 0,
+    "queued_messages": 0,
+    "actors": 5
+   },
+   "sched": {
+    "schedulers": 2,
+    "window_ms": null,
+    "threads": [
+     {
+      "id": 0,
+      "idle_ms": 10100
+     },
+     {
+      "id": 1,
+      "idle_ms": 10950
+     }
+    ],
+    "runq": 0,
+    "msgs_dropped": 0
+   },
+   "epochs": {
+    "current": 3,
+    "pins": [
+     {
+      "epoch": 3,
+      "pins": 5,
+      "current": true,
+      "draining": false
+     }
+    ],
+    "slots": [],
+    "counters": {}
+   },
+   "crashes": {
+    "total": 0,
+    "crashes": []
+   },
+   "names": {
+    "names": [
+     {
+      "name": "web",
+      "pid": 1
+     }
+    ]
+   },
+   "tree": {
+    "total": 5,
+    "roots": [],
+    "unsupervised": [],
+    "truncated": false
+   }
+  }
+ }
+}

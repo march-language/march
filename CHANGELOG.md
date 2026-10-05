@@ -19,6 +19,16 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **`forge top`, `forge diagnose` and `forge status`.** `forge top` watches a
+  node's busiest actors (by mailbox depth, crashes, or message and dispatch
+  rate) refreshed in place. `forge diagnose` checks a node over a window for
+  growing mailboxes, actors dropping at their limit, saturated or imbalanced
+  schedulers, crash loops, a heap climbing with no new actors and stuck
+  hot-reload epochs, and exits 0, 1, 2 or 3 (nothing, warnings, critical,
+  unreachable). `forge status` adds each node's actors, queued messages,
+  memory, load, recent crashes and deepest mailbox to the topology report.
+  The same findings are in the stdlib as `Diagnose`, so a program can check
+  itself, and remote sends now count in an actor's sent messages.
 - **`Recon`: a program's view of itself.** The new stdlib module answers, from
   March code, the questions `forge observe` asks a node: `Recon.info` (one
   actor's mailbox, counters, supervisor and names), `actors`, `proc_count`
@@ -2131,6 +2141,14 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Observing a running node** (`docs/observe.md`), an operator's guide to the
+  observe socket and `forge observe`/`top`/`status`/`diagnose`: turning the
+  socket on and what it costs, the protocol and error codes, every verb with a
+  real reply and what each actor-row field means, the forge commands' flags and
+  exit codes, each `forge diagnose` finding with its exact threshold and what to
+  do next, `Recon` and `Diagnose` from March code, a worked "a node is slow"
+  incident, and the interpreter's differences. The section in `docs/tooling.md`
+  is now a short summary linking to it.
 - **Choreography** reference (`docs/choreography.md`): the test-script example used a
   constructor (`Expect_Msg_Prod_Cons_1`) that does not exist for the labelled `Stream`
   protocol (now `Expect_Item`), and the offer example passed a `RunError` to `panic`. The
