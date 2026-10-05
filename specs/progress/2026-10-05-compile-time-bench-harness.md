@@ -16,24 +16,35 @@ run of an edit scenario applies a *different* edit so each is a fresh cache miss
 the previous run's artifact.
 
 Signature and layout edits must leave the program compilable, so they run only on the probe, which
-carries `-- BENCH:*` marker lines the script's sed recipes match. `tree_transform` gets a body edit
-through a known literal; `topology_app` gets cold/warm/comment. Unavailable scenarios print `n/a`.
+carries `-- BENCH:*` marker lines the script's sed recipes match. `tree_transform` and `topology_app` get a
+body edit through a known literal. Unavailable scenarios print `n/a`.
 
 Cold means a fresh `$HOME` **and** a fresh project directory, so it includes the stdlib AST/tcenv
 caches, the C-runtime object cache and the CAS: what a new clone pays.
 
 ## Status
 
-**Written but not yet run.** The authoring environment had no `dune`/`opam`, so neither the script
-nor the probe program has been executed; the probe's syntax was modelled line by line on
-`test/snapshots/src/record_update.march`, `closure_hof.march` and `stdlib/list.march`'s
-signatures, but it has not been compiled. First run on a machine with a toolchain:
+**Run for the first time on 2026-10-04/05** (Apple M3 Max, toolchain at `a047aa7f` + this branch).
+The baseline is `specs/plans/incremental-codegen-cas-baseline.md`; the per-run rows are under
+`bench/results/`. The first run needed four fixes (the probe in one commit, the script in another):
 
-```
-dune build --root . bin/main.exe
-scripts/compile-time-bench.sh --corpus small --runs 1   # smoke: probe compiles, recipes apply
-scripts/compile-time-bench.sh                            # the real thing, ~10–20 min
-```
+- **The probe compiled first try, but `sig` was a post-TIR hit.** The TIR hash includes function
+  names, yet renaming `sig_target` changed nothing because its `x * 2` body was inlined into both
+  callers and the function dropped by `opt`. It is now tail-recursive, so it survives `opt` and a
+  rename changes the callers. All edited variants verified by hand to miss and print the right value.
+- **`topology_app` has no `main`.** `forge run` generates it from `topology.toml` through the digest
+  `forge topology check` writes; the script now stages the whole project, writes the digest once and
+  passes `--topology .forge/topology.json`. Compiling the bare entry emitted invalid LLVM IR (filed
+  separately). It also gained a leaf edit, since the plan's gate is stated on topology's leaf edit.
+- **The first compile in a fresh `$HOME` gets a different post-TIR key** than every later compile of
+  the same source (a compiler determinism bug, filed separately), so priming in a fresh `$HOME` made
+  topology's comment edit a miss. An untimed warm-up compile now runs first.
+- **The machine was heavily loaded** (load average 100–270 on 14 cores from other sessions), so a
+  `cpu_ms` column (user+sys including clang) was added; at that load one compile took 945 s wall for
+  0.9 s of CPU.
 
-Commit the first full table once as `specs/plans/incremental-codegen-cas-baseline.md` (a dated
-snapshot, not a running count). The plan's §3 gate reads off that table.
+**Result (§3 criterion 1): borderline, and the reason is a quick fix.** A topology leaf edit at
+`--opt 2` takes 18.8 s, 88% in the harness's back bucket. But ~5.7 s of that is
+`lib/cas/scc.ml`'s O(references × definitions) `List.mem` scan, which runs before the post-TIR
+cache lookup. LLVM emission plus clang alone is ~10.2 s, ~55%. Fix the scan, then re-run B0.
+The baseline file has the reading in full.
