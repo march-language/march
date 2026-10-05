@@ -2152,6 +2152,14 @@ git log is authoritative for exact commits.
   is linear.
 
 ### Documentation
+- **Observing a running node** (`docs/observe.md`), an operator's guide to the
+  observe socket and `forge observe`/`top`/`status`/`diagnose`: turning the
+  socket on and what it costs, the protocol and error codes, every verb with a
+  real reply and what each actor-row field means, the forge commands' flags and
+  exit codes, each `forge diagnose` finding with its exact threshold and what to
+  do next, `Recon` and `Diagnose` from March code, a worked "a node is slow"
+  incident, and the interpreter's differences. The section in `docs/tooling.md`
+  is now a short summary linking to it.
 - **Choreography** reference (`docs/choreography.md`): the test-script example used a
   constructor (`Expect_Msg_Prod_Cons_1`) that does not exist for the labelled `Stream`
   protocol (now `Expect_Item`), and the offer example passed a `RunError` to `panic`. The
