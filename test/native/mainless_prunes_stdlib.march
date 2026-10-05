@@ -1,0 +1,9 @@
+-- A module with no `main`, no tests and no exports (a topology app's shape
+-- before forge generates its `main`).  Codegen must root the functions this
+-- file declares, not fail open and emit the whole ~8,000-function stdlib.
+-- Pinned by the mainless_prunes_stdlib rules in test/dune.
+mod MainlessPrunesStdlib do
+  fn helper(x : Int) : Int do x + 1 end
+
+  fn shout(s : String) : String do String.to_uppercase(s) ++ "!" end
+end

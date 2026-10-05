@@ -164,6 +164,16 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Compiling a file with no `main` no longer emits the whole standard
+  library.** A module with no `main`, tests or exports (a library file, or a
+  topology app compiled without its `--topology` digest) kept all ~8,000
+  stdlib functions, so a one-line file took minutes in `llvm-emit` and `clang`
+  and wrote 45 MB of IR. It now compiles the functions the file declares and
+  what they reach: a topology app's IR went from 47 MB to 8 MB. Shared-object,
+  hot-reload, JS and WASM-island builds are unchanged.
+- **A record field read on a value the compiler typed as a scalar now stops
+  with an internal error naming it,** instead of writing LLVM IR that clang
+  rejects (`'%w63…' defined with type 'i64' but expected 'ptr'`).
 - **Security: a signed hot deploy now runs only the bytes the operator signed.**
   A signed `ACTIVATE` named its artifact by the compiler's compilation hash, and
   nothing checked the bytes stored under it, so anyone who could write a node's
