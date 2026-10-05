@@ -10503,6 +10503,51 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r nloops nruntime boxcalls < native_arr_fold_inline_llvm_check.out; \
     test \"$nloops\" -eq 11 -a \"$nruntime\" -eq 3 -a \"$boxcalls\" -eq 0 || { echo \"expected 11 inline fold loops, 3 runtime folds, 0 boxing calls in unboxed clones (found loops=$nloops runtime=$nruntime boxcalls=$boxcalls)\" >&2; exit 1; }")))
 
+;  NativeArray map / map2 chain fusion (phase B of
+; specs/plans/2026-09-28-nativearray-fusion-plan.md, Fusion.run_nativearr).
+; Correctness: every line matches the interpreter (the .expected file IS the
+; interpreter's output), including the negative cases that must not fuse.
+; Shape: main (with the two negative helper fns inlined into it) has exactly
+; 21 inline map loops, 8 inline map2 loops and 1 runtime map call after
+; fusion; with MARCH_NO_NATIVEARR_FUSION=1 the same program has 47 / 8 / 2.
+(rule
+ (targets nativearr_map_fusion nativearr_map_fusion.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nativearr_map_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o nativearr_map_fusion
+        native/nativearr_map_fusion.march)
+   (with-stdout-to nativearr_map_fusion.out
+        (system "./nativearr_map_fusion")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nativearr_map_fusion.expected nativearr_map_fusion.out)))
+
+(rule
+ (targets nativearr_map_fusion_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nativearr_map_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/nativearr_map_fusion.march)
+   (with-stdout-to nativearr_map_fusion_llvm_check.out
+    (run bash -c
+     "awk '/^define/ && /@march_main\\(/ {p=1} p {print} p && /^}/ {exit}' native/nativearr_map_fusion.ll > main_nafuse.ll; echo \"$(grep -c '^nmap_pre[0-9]*:' main_nafuse.ll) $(grep -c '^nmap2_pre[0-9]*:' main_nafuse.ll) $(grep -c 'call ptr @native_[a-z0-9]*_arr_map2*(' main_nafuse.ll)\"")))))
+
+(rule
+ (alias runtest)
+ (deps nativearr_map_fusion_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r nmap nmap2 nruntime < nativearr_map_fusion_llvm_check.out; \
+    test \"$nmap\" -eq 21 -a \"$nmap2\" -eq 8 -a \"$nruntime\" -eq 1 || { echo \"expected 21 inline map loops, 8 inline map2 loops, 1 runtime map call in main (found map=$nmap map2=$nmap2 runtime=$nruntime)\" >&2; exit 1; }")))
+
 ; Separate fixture: the map2 inline loop's own length-mismatch check
 ; (native_arr_map2_check_len) must panic identically to the non-inlined
 ; native_int_arr_map2/native_float_arr_map2 functions' check, since the

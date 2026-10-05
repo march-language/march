@@ -141,6 +141,16 @@ git log is authoritative for exact commits.
   constructors: a `match` that named every constructor needs a new arm).
 
 ### Changed
+- **Chained `NativeArray` maps compile to one loop.** With the optimizer on,
+  `map_*(map_*(a, f), g)`, a `map2_*` with a mapped input on either side, and a
+  `map_*` of a `map2_*` are rewritten into a single call whose callback is the
+  two lambda bodies composed, so no intermediate array is allocated or walked
+  (4M elements: Int 3-deep map chain 5.2 → 1.0 ms, Float 4.8 → 0.6 ms, map
+  feeding map2 3.0 → 0.8 ms). It applies when every callback is a lambda
+  written at the call, its body has no effects (and no division, which can
+  trap), the intermediate is used only once, and nothing observable runs
+  between the two calls; int, float, i32 and u8 arrays, not f32. Results are
+  unchanged. `MARCH_NO_NATIVEARR_FUSION=1` turns it off.
 - **Compiled `Int` arithmetic normalises to 63 bits lazily, not after every
   operation.** `+ - *`, negation and `int_shl` leave their result in the full
   64-bit register and the reduction modulo 2^63 happens where the value is
