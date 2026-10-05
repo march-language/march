@@ -434,6 +434,8 @@ native_rc_inline_fast_path: coverage audit (user + stdlib): 123 enforced, 0 iner
 native_rc_inline_fast_path: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_receive_in_handler_at_exit: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_receive_in_handler_at_exit: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_recon_basic: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+native_recon_basic: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_record_branch_field_result: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 native_record_branch_field_result: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_record_erased_field_repr: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
@@ -824,6 +826,8 @@ stdlib_random: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0
 stdlib_random: coverage audit (user code): 5 enforced, 0 inert (warned), 0 unenforced
 stdlib_range: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 stdlib_range: coverage audit (user code): 1 enforced, 0 inert (warned), 0 unenforced
+stdlib_recon: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
+stdlib_recon: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_regex: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced
 stdlib_regex: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_remote_call: coverage audit (user + stdlib): 123 enforced, 0 inert (warned), 0 unenforced

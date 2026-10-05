@@ -2,6 +2,13 @@
 
 **Closed:** 2026-10-02
 
+**Superseded 2026-10-04.** This was the test-only workaround (#763): v2 stopped adding a
+top-level fn. The compiler fix, #765 (merged first, as c462e105a; see
+[2026-10-02-hcr-patch-slot-ids-by-name.md](2026-10-02-hcr-patch-slot-ids-by-name.md)), makes
+a patch resolve slot ids by name, so a v2 that adds a fn is correct. Merging #763 after it
+removed the scenario's only end-to-end coverage of that case. v2's `may_choose_later` is
+restored, exactly #765's version of `app_v2.march`, so the scenario again proves it.
+
 ## Symptom
 
 `two-node[protocol_expand_contract]: the contract deploy to node-a failed`, both

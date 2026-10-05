@@ -73,6 +73,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
         | _ -> None) decls
   in
   let tir = Trmc.transform_module tir in
+  snap "tir-trmc" tir;
   (* For WASM island targets, mark render/update/init as exported.
      Set exports BEFORE monomorphization so the functions get mono'd. *)
   let tir =
