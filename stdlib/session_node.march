@@ -2863,6 +2863,8 @@ mod SessionNode do
   -- every pair), else an unknown one taken to be newer (each such offer
   -- checks the initiator's fingerprint itself, which covers every pair with
   -- it, since acceptance is per newer role against the older fingerprint).
+  type ApWait = Answered(String) | OfferGone | NoAnswer
+
   type ApMix = { fp : String, rows : List((Int, List(String))), me : Int,
                  other : String, older : Bool, filled : List((Int, String)) }
 
@@ -2946,18 +2948,39 @@ mod SessionNode do
     (List.append(group(same), List.append(group(vouched), group(unknown))), String.join(reasons, "; "))
   end
 
-  -- Wait up to [left] ms for [nid]'s answer: Some(verdict), or None.
-  -- [budget] holds the setup time left, shared by every invitation.
-  pfn await_answer(answers : Vault(String), nid : String, budget : Vault(Int)) : Option(String) do
-    match Vault.get(answers, nid) do
-      Some(v) -> Some(v)
+  -- Wait for [nid]'s answer: Answered(verdict); OfferGone once [name] no
+  -- longer binds [g] here (the offer closed, so an invitation that reached
+  -- its node after `close_offer` dropped its route is answered by no one:
+  -- its DELIVERY_FAILED is not tied to this wait); NoAnswer once the setup
+  -- time runs out. [budget] holds the setup time left, shared by every
+  -- invitation.
+  pfn await_answer(node : Cap(ClusterNode.Live), answers : Vault(String), g : GlobalPid.Pid, name : String,
+                   budget : Vault(Int)) : ApWait do
+    match Vault.get(answers, g.node_id) do
+      Some(v) -> Answered(v)
       None ->
-        if Vault.get_or(budget, "left", 0) <= 0 do None else
+        if still_bound(node, name, g) == false do OfferGone
+        else if Vault.get_or(budget, "left", 0) <= 0 do NoAnswer else
           sleep_ms(20)
           let _ = Vault.incr(budget, "left", -20)
-          await_answer(answers, nid, budget)
-        end
+          await_answer(node, answers, g, name, budget)
+        end end
     end
+  end
+
+  pfn offer_closed() : String do "closed its offer before answering" end
+
+  pfn still_bound(node : Cap(ClusterNode.Live), name : String, g : GlobalPid.Pid) : Bool do
+    match ClusterNode.lookup(node, name) do
+      Some(p) -> p.node_id == g.node_id && p.local_pid == g.local_pid && p.creation == g.creation
+      None -> false
+    end
+  end
+
+  -- An offer's registry name, rebuilt from its prefix, the fingerprint the
+  -- name carried ("" in the older form) and its node (`ap_name`).
+  pfn offer_name(prefix : String, ofp : String, node_id : String) : String do
+    if ofp == "" do prefix ++ node_id else prefix ++ ofp ++ "/" ++ node_id end
   end
 
   -- A node's name for messages: its member name, else (certificate mode)
@@ -2992,7 +3015,7 @@ mod SessionNode do
   -- the release is now deferred to the loop's exit
   -- (specs/progress/2026-09-26-mutual-tco-forwarded-arg.md) -- so the shape
   -- is only a matter of style now.
-  pfn invite_role(node : Cap(ClusterNode.Live), sid : String, fp : String, reply : GlobalPid.Pid, irole : Int,
+  pfn invite_role(node : Cap(ClusterNode.Live), prefix : String, sid : String, fp : String, reply : GlobalPid.Pid, irole : Int,
                   answers : Vault(String), budget : Vault(Int), cands : List((GlobalPid.Pid, String, List(String))), why : String)
       : Result((GlobalPid.Pid, String), String) do
     match cands do
@@ -3004,18 +3027,22 @@ mod SessionNode do
           let outcome = match ClusterNode.send_msg(node, g, "SessionAP.Invite", encode_invite(sid, fp, reply, irole, vouch), NodeQueue.Unbounded) do
             Err(_) -> Some(node_label(node, g.node_id) ++ " is unreachable")
             Ok(_) ->
-              match await_answer(answers, g.node_id, budget) do
-                Some(v) ->
+              match await_answer(node, answers, g, offer_name(prefix, ofp, g.node_id), budget) do
+                Answered(v) ->
                   if v == "" do None
                   else Some(node_label(node, g.node_id) ++ " refused: " ++ v) end
-                None ->
+                OfferGone ->
+                  -- Withdrawn in case it accepted just before it closed.
+                  let _ = ClusterNode.send_msg(node, g, "SessionAP.Withdraw", encode_sid(sid), NodeQueue.Unbounded)
+                  Some(node_label(node, g.node_id) ++ " " ++ offer_closed())
+                NoAnswer ->
                   let _ = ClusterNode.send_msg(node, g, "SessionAP.Withdraw", encode_sid(sid), NodeQueue.Unbounded)
                   Some(node_label(node, g.node_id) ++ " did not answer")
               end
           end
           match outcome do
             None -> Ok((g, ofp))
-            Some(reason) -> invite_role(node, sid, fp, reply, irole, answers, budget, rest, and_why(why, reason))
+            Some(reason) -> invite_role(node, prefix, sid, fp, reply, irole, answers, budget, rest, and_why(why, reason))
           end
         end
     end
@@ -3042,14 +3069,16 @@ mod SessionNode do
       Nil -> Ok(accepted)
       Cons(r, rest) ->
         let (cands, skipped) = candidates(node, proto, names, r, used, n, m)
-        match invite_role(node, sid, m.fp, reply, m.me, answers, budget, cands, skipped) do
+        match invite_role(node, ap_prefix(proto, r), sid, m.fp, reply, m.me, answers, budget, cands, skipped) do
           Err(why) ->
             -- "closing" is an offer being replaced (`close_offer` right after
             -- a re-offer, e.g. a hosting actor moving a role to a new protocol
             -- version): its replacement's registration may not have reached
             -- this node yet, so look again after a moment, within the setup
             -- time, rather than report the role unfilled.
-            if String.contains(why, "refused: closing") && Vault.get_or(budget, "left", 0) > 100 do
+            -- So is an offer that closed before it answered (OfferGone).
+            let replaced = String.contains(why, "refused: closing") || String.contains(why, offer_closed())
+            if replaced && Vault.get_or(budget, "left", 0) > 100 do
               sleep_ms(100)
               let _ = Vault.incr(budget, "left", 0 - 100)
               fill_roles(node, proto, names, sid, m, reply, answers, budget, roles, n, used, accepted)
