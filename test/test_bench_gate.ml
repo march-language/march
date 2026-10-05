@@ -210,6 +210,7 @@ let excluded : (string * string) list = [
   "http_get_close",     "network client: connects to an external HTTP server";
   "http_get_keepalive", "network client: connects to an external HTTP server";
   "island_perf_server", "server: binds a fixed port and serves until killed";
+  "compile_time_probe", "compile-time probe for scripts/compile-time-bench.sh, not a runtime benchmark: the script edits it per run";
 ]
 
 (* The timing-bearing benches have no pinned literal (their output is long and
