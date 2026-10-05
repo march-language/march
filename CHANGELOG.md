@@ -193,6 +193,17 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Vault writes release what they replace, and session tables are freed.**
+  Overwriting or dropping a Vault entry released only the old value's own cell,
+  never its fields or list spine, so `Vault.set` of a record in a loop grew
+  without bound (100,000 overwrites of a 50-string record: 576 MB). Writes now
+  hand the displaced value back to the typed wrapper, which drops it at its
+  type; a Vault(Float) write no longer leaks a box either. New `Vault.close(t)`
+  unregisters, empties and frees a table (a handle used afterwards sees an empty
+  table), and `Vault.live_tables()` counts the tables a process holds. Every
+  `SessionNode` session closes its 13 tables when it ends, by any path, and
+  `Session.in_process()` gained `close`; before, each session kept about 300 KB
+  of tables for the life of the process.
 - **A compiled program that calls `Process.set_env` at the top of `main` no
   longer crashes, now and then, at startup.** On Linux the runtime read
   the environment from the main thread while `main` was already running on a
