@@ -1739,6 +1739,39 @@ let test_activate6_signed_shape_and_role_blocks () =
        cap_root_hex role_caps)
     signed
 
+(* Review 2026-10-04 (dd12 P1): ACTIVATE7 signs the blake3 of the .so's
+   bytes between epoch and cap_root; with ROLE blocks it is ACTIVATE6's shape
+   plus that digest.  The wire carries the same so_blake3: field. *)
+let test_activate7_signs_the_artifact_digest () =
+  let so = String.make 64 'd' in
+  let (signed, wire_head) =
+    Cmd_deploy_hot.build_activate7_lines ~name:"Main.f" ~impl:"implhash" ~cas:"cashash" ~so
+      ~migrate:2 ~epoch:4 ~cap_root:cap_root_hex ~callers_csv:"Main.a" ()
+  in
+  Alcotest.(check string) "wire_head" "ACTIVATE7 Main.f implhash cashash" wire_head;
+  Alcotest.(check string) "so_blake3 signed, between epoch and cap_root"
+    (Printf.sprintf "ACTIVATE7 Main.f implhash cashash 2 epoch:4 so_blake3:%s cap_root:%s callers:Main.a"
+       so cap_root_hex)
+    signed;
+  let (signed_r, _) =
+    Cmd_deploy_hot.build_activate7_lines ~name:"Main.f" ~impl:"implhash" ~cas:"cashash" ~so
+      ~migrate:0 ~epoch:4 ~cap_root:cap_root_hex ~role_caps:"R=x" ~callers_csv:"" ()
+  in
+  Alcotest.(check string) "role_caps signed after cap_root"
+    (Printf.sprintf "ACTIVATE7 Main.f implhash cashash 0 epoch:4 so_blake3:%s cap_root:%s role_caps:R=x callers:"
+       so cap_root_hex)
+    signed_r;
+  Alcotest.(check string) "wire line"
+    (Printf.sprintf "ACTIVATE7 Main.f implhash cashash SIG 0 epoch:4 so_blake3:%s cap_root:%s role_caps:R=x caps:IO.Console roles:R=IO.Console callers:"
+       so cap_root_hex)
+    (Cmd_deploy_hot.activate7_command ~wire_head ~sig_b64:"SIG" ~so ~migrate:0 ~epoch:4
+       ~cap_root:cap_root_hex ~caps_csv:"IO.Console" ~roles:("R=x", "R=IO.Console") ~callers_csv:"" ());
+  let tmp = Filename.temp_file "artifact" ".so" in
+  Out_channel.with_open_bin tmp (fun oc -> output_string oc "the bytes");
+  Alcotest.(check string) "artifact_digest is the blake3 of the file's bytes"
+    (March_cas.Blake3.hash_string "the bytes") (Cmd_deploy_hot.artifact_digest tmp);
+  Sys.remove tmp
+
 (* DD build step 10: the signed TOPOLOGY line. *)
 let test_topology_command_signed () =
   let (pk, sk) = March_ed25519.Ed25519.keygen () in
@@ -3068,6 +3101,7 @@ let () =
       Alcotest.test_case "ACTIVATE3: signed/wire shape unchanged" `Quick test_activate3_signed_shape_unchanged;
       Alcotest.test_case "ACTIVATE5: signed shape carries the migrate bitmask" `Quick test_activate5_signed_shape;
       Alcotest.test_case "ACTIVATE6: role roots signed, closures unsigned" `Quick test_activate6_signed_shape_and_role_blocks;
+      Alcotest.test_case "ACTIVATE7: the artifact's bytes digest is signed" `Quick test_activate7_signs_the_artifact_digest;
       Alcotest.test_case "TOPOLOGY: signed line shape" `Quick test_topology_command_signed;
       Alcotest.test_case "SEQ: a signed line wrapped in a release" `Quick test_wrap_release;
       Alcotest.test_case "COMPACT: parsed and described" `Quick test_parse_compact;

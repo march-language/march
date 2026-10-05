@@ -97,3 +97,78 @@ that key is a content hash, mirroring `handle_topology`'s `digest_mismatch`;
 hashing at `CAS_PUT` also prevents the `dlopen`-constructor-before-identity
 execution. Authenticate the control-API write verbs regardless (see the
 companion resource-exhaustion and AUDIT_COPY todos).
+
+## Resolution (2026-10-04, fixed)
+
+**Choice: sign the bytes in a new verb, keep the CAS key.** The other option,
+making the CAS key the blake3 of the bytes, would let `CAS_PUT` verify every
+upload. But the CAS key is the compilation hash everywhere else: the control
+plane names artifacts by it (release steps, `NODE_STATE ARTIFACT`, `CAS_GET`
+prefetch in `stdlib/control.march` and `control_wiring.march`), and forge's
+cache-hit skip uses it. Changing what the key means would also change what an
+already signed field means without changing the verb. So the fix follows the
+ACTIVATE3-6 precedent:
+
+- **`ACTIVATE7`** (`runtime/march_reload.c`) is ACTIVATE5, or ACTIVATE6 when
+  `role_caps:` is present, plus `so_blake3:<blake3 of the .so bytes>` inside the
+  signed message (between `epoch:` and `cap_root:`). An older server answers
+  `ERR unknown_command` and never loads unverified bytes for it.
+- **Verified load, no TOCTOU** (`load_verified`). The node reads the CAS file
+  once into memory and hashes those bytes. Only on a match does it write them to
+  `<state_dir>/loaded/<so_blake3>.so` (dir 0700, written by no verb; temp +
+  rename) and `dlopen` that copy. A copy already there is reused if it still
+  hashes right, so one artifact is one image. A mismatch is `ERR artifact_digest`
+  (audit `err_artifact_digest`) before any byte is mapped, so a substituted
+  `.so`'s constructor never runs. The same path serves single activations,
+  `COMMIT_BATCH` and replay.
+- **Replay**: a v7 entry whose CAS bytes no longer hash to its signed digest is
+  skipped (`err_restore_digest`) and the function stays on the base build.
+- **CAS verbs**: `CAS_CHECK <hash> so_blake3:<hex>` answers PRESENT only for those
+  bytes, so forge re-uploads a pre-seeded or stale artifact; that defeats durable
+  pre-seeding, since forge used to skip the upload on PRESENT. `CAS_PUT <hash>
+  <size> so_blake3:<hex>` refuses other bytes (`ERR digest_mismatch`, nothing
+  stored). Both still accept the old form, so the control plane's prefetch relay
+  and older clients work unchanged. Upload verification protects against
+  corruption; the security boundary is the signed digest at load. A CAS writer
+  can still replace bytes after forge's upload and so delay a deploy (`ERR
+  artifact_digest`), which D37 allows ("delay or withhold, not forge").
+  Authenticating the control API's write verbs is a separate todo, in another
+  session.
+- **forge** (`cmd_deploy_hot.ml`) computes `artifact_digest so_path` once, sends
+  it on CAS_CHECK/CAS_PUT, and signs it in `build_activate7_lines` for every
+  capability-aware deploy, inside the SEQ release wrapper as before.
+  `Cluster_deploy.upload` sends the digest. `Control_release`'s recorder accepts
+  the digested CAS_CHECK and records ACTIVATE7.
+
+**Old-format lines** (ACTIVATE through ACTIVATE6 sign no digest): refused with
+`ERR artifact_digest_required` once the node holds a release or under
+`MARCH_HCR_REQUIRE_RELEASE=1`, wrapped or not. This is the same sticky rule as
+`release_required`. Before a node's first release they are accepted as before.
+`--no-cap-gate` still sends ACTIVATE3, so it only works against such a node.
+
+**Persisted old-format entries: a fresh deploy is required.** They cannot be
+re-verified against the bytes, because no signed digest of those bytes ever
+existed. They are replayed only where a live unbound line would be accepted, and
+skipped (`err_restore_no_digest`) on a node holding a release or requiring one.
+The function comes back on its base build until the next (v7) deploy.
+
+**Tests.** `test/test_reload_activate4.c` (default, policy, policy-all) runs the
+review's repro. `hcr_evil.so` (same exports and identity markers, returns 1337,
+and its constructor drops a marker file) is stored under the cas_hash of a
+signed ACTIVATE7 for `hcr_stub.so`. The activation is refused singly and in a
+batch, the marker never appears, and the baseline stays live. The test also
+covers: the signature binds so_blake3; the digested CAS_PUT/CAS_CHECK; a good
+activation loads the private copy; a later substitution is still refused; and,
+after a release, a wrapped ACTIVATE5 gets `ERR artifact_digest_required`.
+Restore mode phases 12-15 cover an old-format entry not replayed under a
+release, a v7 entry replayed, and a v7 entry whose CAS bytes were replaced not
+replayed. `test/two_node/control_artifact_digest` covers the same through the
+unauthenticated control API on a real compiled 3-node cluster: release v1 to v2,
+then `CAS_PUT` a v666 patch of the same build over v2's artifact on a
+candidate, then restart it. Result: `RESTORED entries:0 skipped:1`,
+`err_restore_digest`, and the node is back on version 1, never 666.
+
+**Proved red.** With the activation and replay checks disabled, all four C
+modes fail: the attacker's constructor ran and 1337 was live, or the restart
+replayed the substituted bytes. The scenario fails with `RESTORED entries:1`.
+Disabling the sticky rule fails the release and phase-12 checks.

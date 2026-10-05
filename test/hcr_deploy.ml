@@ -50,6 +50,11 @@
       hcr_deploy api <host:port> <line>       one request to a control API, answer to stdout
       hcr_deploy reload <socket> <line>       one request to a reload socket, answer to stdout
                                               (lines up to END, or the first line)
+      hcr_deploy api-put <host:port> <hash> <file> [<blake3>]
+                                              CAS_PUT <file>'s bytes under <hash> through a
+                                              control API (with so_blake3:<blake3> when given),
+                                              as anyone who reaches the port can; prints the verdict
+      hcr_deploy digest <file>                the blake3 of <file> (what ACTIVATE7 signs)
 
     Exit 0 on success; a failed deploy prints why on stderr and exits 1. *)
 
@@ -307,6 +312,25 @@ let () =
        read_answer conn
      with Failure m -> prerr_endline ("hcr_deploy: " ^ m); exit 1
         | Unix.Unix_error (e, _, _) -> prerr_endline ("hcr_deploy: " ^ Unix.error_message e); exit 1)
+  | "api-put" :: ep :: hash :: file :: rest ->
+    let body = read file in
+    let so = match rest with [ d ] -> " so_blake3:" ^ d | _ -> "" in
+    (try
+       match Option.bind (March_forge.Cluster_deploy.endpoint_of_string ep)
+               (fun e -> Result.to_option (March_forge.Cluster_deploy.connect e)) with
+       | None -> prerr_endline "hcr_deploy: cannot connect"; exit 1
+       | Some conn ->
+         March_forge.Cmd_deploy_hot.send_line conn
+           (Printf.sprintf "CAS_PUT %s %d%s" hash (String.length body) so);
+         let ready = March_forge.Cmd_deploy_hot.recv_line conn in
+         if ready <> "READY" then print_endline ready
+         else begin
+           March_forge.Cmd_deploy_hot.send_binary conn (Bytes.of_string body) 0 (String.length body);
+           print_endline (March_forge.Cmd_deploy_hot.recv_line conn)
+         end
+     with Failure m -> prerr_endline ("hcr_deploy: " ^ m); exit 1
+        | Unix.Unix_error (e, _, _) -> prerr_endline ("hcr_deploy: " ^ Unix.error_message e); exit 1)
+  | [ "digest"; file ] -> print_endline (March_forge.Cmd_deploy_hot.artifact_digest file)
   | "certs" :: dir :: eps :: items ->
     let sk = bytes_of_hex (read (Filename.concat dir "sk")) in
     let endpoints = List.filter_map March_forge.Cluster_deploy.endpoint_of_string (String.split_on_char ',' eps) in

@@ -154,6 +154,24 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- **Security: a signed hot deploy now runs only the bytes the operator signed.**
+  A signed `ACTIVATE` named its artifact by the compiler's compilation hash, and
+  nothing checked the bytes stored under it, so anyone who could write a node's
+  artifact store (`CAS_PUT` over the reload socket or the unauthenticated control
+  API) could make an operator's genuine deploy, or a restart's replay, load their
+  own code. forge now sends `ACTIVATE7`, which signs the BLAKE3 of the patch's bytes.
+  The node checks it on a private copy before loading anything; other bytes get
+  `ERR artifact_digest` and none of their code runs. `CAS_CHECK` and `CAS_PUT` take
+  the digest too, so forge uploads a substituted artifact again and the node refuses
+  a corrupt upload. Once a node holds a release (or under
+  `MARCH_HCR_REQUIRE_RELEASE=1`) it refuses the older verbs, which sign no digest
+  (`ERR artifact_digest_required`), and does not replay them after a restart: such
+  a function comes back on the base build until the next deploy. Deploying to a
+  server that predates `ACTIVATE7` now fails with "upgrade the server binary".
+- **Security: the hot-reload socket is owner-only whatever the umask.** It was
+  created with the inherited umask's mode, so a node started under `umask 000`
+  let any local user connect. It is now `0600`, and a peer running as another
+  user (other than root) is disconnected.
 - **Topology now reports two roles that share one endpoint on a node.** Two roles
   placed on one node that serve the same protocol role through the same offer
   function want the same endpoint name, so the second could never be offered;

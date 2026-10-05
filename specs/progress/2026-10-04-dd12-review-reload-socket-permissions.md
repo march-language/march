@@ -37,3 +37,13 @@ reviewer's shell umask was 022.
 bracket the `bind` with `umask(0077)`, so the socket is owner-only regardless of
 the inherited umask. A `SO_PEERCRED`/`LOCAL_PEERCRED` uid check on accept would be
 belt-and-braces.
+
+## Resolution (2026-10-04, fixed)
+
+`reload_server_thread` now `chmod`s the socket to `0600` between `bind` and
+`listen`. Nothing can connect before `listen`, so no connection is ever accepted
+under the inherited mode, and a failed `chmod` closes the server instead of
+serving. As belt-and-braces, `accept` drops a peer whose uid is neither the
+process's nor root's (`getpeereid` on macOS, `SO_PEERCRED` on Linux).
+`test/test_reload_activate4.c` starts the server under `umask(0)` and asserts
+mode `0600`. With the `chmod` disabled it fails with `mode: 777`.
