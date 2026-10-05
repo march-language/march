@@ -160,13 +160,14 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
      sweeps the same shared dir on start, but a user who only ever runs the
      CLI would otherwise never clear them. *)
   March_repl.Repl.sweep_stale_cache_tmps cache_dir;
-  let load_from_cache () =
-    try
-      if Sys.file_exists cache_path then begin
-        let ic = open_in_bin cache_path in
-        let (cached_env : March_typecheck.Typecheck.env) = Marshal.from_channel ic in
+  (* [next ()] yields the next Marshal-encoded piece, in file order.  The file
+     reader and the cold path's in-memory round trip below both go through
+     this one decoder, so the two cannot drift apart. *)
+  let decode_pieces (rd : < next : 'a. unit -> 'a >) =
+        let next () = rd#next () in
+        let (cached_env : March_typecheck.Typecheck.env) = next () in
         let (cached_tm : (March_ast.Ast.span * March_typecheck.Typecheck.ty) list) =
-          Marshal.from_channel ic in
+          next () in
         (* Restore the two PROCESS-GLOBAL side-tables a from-scratch stdlib
            check would have advanced/populated as a side effect, and that a
            cache hit otherwise skips entirely:
@@ -204,18 +205,25 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
                reproduced in the golden corpus. Restored defensively for
                the same reason the round-1 fix insisted on byte-identical
                diagnostics rather than "close enough". *)
-        let (cached_counter : int) = Marshal.from_channel ic in
+        let (cached_counter : int) = next () in
         let (cached_record_names : (string * string option) list) =
-          Marshal.from_channel ic in
-        close_in ic;
+          next () in
         List.iter (fun (k, v) -> Hashtbl.replace type_map k v) cached_tm;
         if cached_counter > !March_typecheck.Typecheck._counter then
           March_typecheck.Typecheck._counter := cached_counter;
         List.iter (fun (k, v) -> Hashtbl.replace March_typecheck.Typecheck._record_names k v)
           cached_record_names;
-        Some { cached_env with
-               March_typecheck.Typecheck.errors = March_errors.Errors.create ();
-               type_map }
+        { cached_env with
+          March_typecheck.Typecheck.errors = March_errors.Errors.create ();
+          type_map }
+  in
+  let load_from_cache () =
+    try
+      if Sys.file_exists cache_path then begin
+        let ic = open_in_bin cache_path in
+        let env = Fun.protect ~finally:(fun () -> close_in_noerr ic)
+            (fun () -> decode_pieces (object method next : 'a. unit -> 'a = fun () -> Marshal.from_channel ic end)) in
+        Some env
       end else None
     with _ -> None
   in
@@ -232,6 +240,24 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
     let errors = March_errors.Errors.create () in
     let (_errs, _tm, final_env) =
       March_typecheck.Typecheck.check_module_core ~errors synthetic in
+    (* Encode the four pieces ONCE, up front.  The cold path hands the typechecker
+       the DECODED copy of these exact bytes, never [final_env] itself: a live
+       env and its type_map share mutable tvar cells, so the user module's
+       pass 2 could link a stdlib fn's generic [Pid('a)] annotation to one
+       concrete type and lowering would then emit a different TIR (an extra
+       mono clone, shifted lambda uids, a different post-TIR CAS key) than the
+       warm path, whose Marshal round trip severs that sharing.  Cold and warm
+       must see the same state. *)
+    let pieces =
+      let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
+        final_env.March_typecheck.Typecheck.type_map [] in
+      let record_names_list =
+        Hashtbl.fold (fun k v acc -> (k, v) :: acc)
+          March_typecheck.Typecheck._record_names [] in
+      [ Marshal.to_string (March_repl.Repl.marshalable_tc_env final_env) [];
+        Marshal.to_string tm_list [];
+        Marshal.to_string !March_typecheck.Typecheck._counter [];
+        Marshal.to_string record_names_list [] ] in
     (try
       mkdir_p cache_dir;
       let tmp = Printf.sprintf "%s.%d.tmp" cache_path (Unix.getpid ()) in
@@ -246,20 +272,12 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
           (try close_out oc with _ -> ());
           if Sys.file_exists tmp then (try Sys.remove tmp with _ -> ()))
         (fun () ->
-          Marshal.to_channel oc (March_repl.Repl.marshalable_tc_env final_env) [];
-          let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
-            final_env.March_typecheck.Typecheck.type_map [] in
-          Marshal.to_channel oc tm_list [];
+          List.iter (output_string oc) pieces;
           (* Snapshot the two process-global side-tables RIGHT NOW — the
              point where a from-scratch run would hand off from "stdlib
              checked" to "start checking the user's own file" — so a later
              cache hit can restore them to this exact point. See the long
              comment on [load_from_cache] above for why both matter. *)
-          Marshal.to_channel oc !March_typecheck.Typecheck._counter [];
-          let record_names_list =
-            Hashtbl.fold (fun k v acc -> (k, v) :: acc)
-              March_typecheck.Typecheck._record_names [] in
-          Marshal.to_channel oc record_names_list [];
           close_out oc;
           Sys.rename tmp cache_path)
     with e ->
@@ -267,9 +285,13 @@ let get_stdlib_tc_env ~for_js (stdlib_decls : March_ast.Ast.decl list) =
         "[warn] could not save the stdlib typecheck cache (%s); stdlib will be \
          re-typechecked on every invocation\n%!"
         (Printexc.to_string e));
-    { final_env with
-      March_typecheck.Typecheck.errors = March_errors.Errors.create ();
-      type_map = final_env.March_typecheck.Typecheck.type_map }
+    let rest = ref pieces in
+    decode_pieces (object
+      method next : 'a. unit -> 'a = fun () ->
+        match !rest with
+        | p :: tl -> rest := tl; Marshal.from_string p 0
+        | [] -> assert false
+    end)
 
 (* Substring test used by the MARCH_DUMP_TXT stage filter (see snap_tir). *)
 let contains_substring (hay : string) (needle : string) =
@@ -1265,8 +1287,8 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
             (List.sort compare !March_desugar.Desugar_endpoints.expand_labels)) in
   let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
   (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" <> None then
-     Printf.eprintf "MARCH_CASFLAGS: target=%s flags=[%s] ch=%s\n%!"
-       target_label (String.concat "," cas_flags) ch);
+     Printf.eprintf "MARCH_CASFLAGS: target=%s flags=[%s] src=%s ch=%s\n%!"
+       target_label (String.concat "," cas_flags) src_hash ch);
   (cas_flags, ch)
 
 (* ------------------------------------------------------------------ *)
@@ -3319,6 +3341,20 @@ let compile filename =
         let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
         let h_sccs = March_cas.Pipeline.hash_module tir in
         let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
+        (if Sys.getenv_opt "MARCH_DEBUG_CASFLAGS" = Some "2" then
+           List.iter (fun sc ->
+             let nm = match sc with
+               | March_cas.Pipeline.HSingle { hs_hdef } ->
+                 (match hs_hdef.March_cas.Cas.hd_def with
+                  | March_cas.Cas.FnDef fd -> fd.March_tir.Tir.fn_name
+                  | March_cas.Cas.TypeDef _ -> "<type>")
+               | March_cas.Pipeline.HGroup { hg_hdefs; _ } ->
+                 "{" ^ String.concat "," (List.map (fun (hd : March_cas.Cas.hashed_def) ->
+                   match hd.March_cas.Cas.hd_def with
+                   | March_cas.Cas.FnDef fd -> fd.March_tir.Tir.fn_name
+                   | March_cas.Cas.TypeDef _ -> "<type>") hg_hdefs) ^ "}" in
+             Printf.eprintf "MARCH_SCC: %s %s\n" (March_cas.Pipeline.scc_impl_hash sc) nm)
+             h_sccs);
         (* Hot Code Reload: per-function impl_hash map (qualified fn name →
            64-char hex Merkle root) so the baseline dispatch-table publish can
            carry real hashes instead of null. Built from the same CAS hashing
