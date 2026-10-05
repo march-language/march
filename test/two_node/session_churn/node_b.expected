@@ -1,0 +1,5 @@
+B: cluster sessions all ended, at least 20 left: true
+B: cluster: tables flat true
+B: direct sessions finished 20
+B: direct: tables flat true
+node-b: up

@@ -132,6 +132,8 @@ let table : (string * string) list = [
   ("march_vault_ns_get",           "IO.Mut");
   ("march_vault_ns_drop",          "IO.Mut");
   ("march_vault_whereis",          "IO.Mut");
+  ("march_vault_reap",             "IO.Mut");
+  ("march_vault_close",            "IO.Mut");
   (* IO.NetConnect.TLS *)
   ("march_tls_client_ctx",         "IO.NetConnect.TLS");
   ("march_tls_server_ctx",         "IO.NetConnect.TLS");

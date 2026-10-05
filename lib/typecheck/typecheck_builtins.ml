@@ -333,6 +333,8 @@ let builtin_cap_table : (string * string) list = [
   ("vault_ns_get",          "IO.Mut");
   ("vault_ns_drop",         "IO.Mut");
   ("vault_whereis",         "IO.Mut");
+  ("vault_reap",            "IO.Mut");
+  ("vault_close",           "IO.Mut");
   (* IO.NetConnect.TLS — encrypted transport; tls_close/tls_ctx_free are cleanup, no cap *)
   ("tls_client_ctx",        "IO.NetConnect.TLS");
   ("tls_server_ctx",        "IO.NetConnect.TLS");
@@ -752,6 +754,13 @@ let builtin_bindings : (string * scheme) list =
     ("vault_ns_set",       poly2 (fun k v -> TArrow (t_string, TArrow (k, TArrow (v, t_unit)))));
     ("vault_ns_get",       poly2 (fun k v -> TArrow (t_string, TArrow (k, t_option v))));
     ("vault_ns_drop",      poly1 (fun k -> TArrow (t_string, TArrow (k, t_unit))));
+    (* [vault_reap] hands back the values [k]'s shard stopped holding, and
+       [vault_close] every value a retired table held, as a [List(v)] the
+       caller owns: the C runtime cannot release a type-erased value deeply,
+       so Vault's wrappers drop these at their static type
+       (specs/progress/2026-10-01-session-node-vault-tables-leak.md). *)
+    ("vault_reap",         poly2 (fun k v -> TArrow (t_vault v, TArrow (k, t_list v))));
+    ("vault_close",        poly1 (fun v -> TArrow (t_vault v, t_list v)));
     (* Generic to_json/from_json: fully polymorphic — runtime dispatches via impl_tbl.
        ∀a b. a -> b  — this avoids shadowing when multiple types derive Json. *)
     ("to_json",   poly2 (fun a b -> TArrow (a, b)));
@@ -823,6 +832,9 @@ let builtin_bindings : (string * scheme) list =
        no allocator or OS accounting in the path), which is why the RSS leak
        probes now assert on it instead. *)
     ("live_allocs",     Mono (TArrow (t_unit,  t_int)));
+    (* vault_live_tables: Vault tables created and not yet freed. A leak
+       gauge like live_allocs, and ambient for the same reason. *)
+    ("vault_live_tables", Mono (TArrow (t_unit, t_int)));
     ("uuid_v7",         Mono (TArrow (t_unit,  t_string)));
     (* uuid_v4 is NOT a stale spelling of uuid_v7: both are live, distinct
        generators (march_uuid_v4 / the interpreter's /dev/urandom body), and
