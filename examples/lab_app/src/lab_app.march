@@ -127,7 +127,11 @@ mod LabApp do
       end
       on Deliver(sid : String, s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
         match LinearMap.take_slot(state.sessions, sid) do
-          (None, slot) -> { state with sessions: LinearMap.vacate(slot) }
+          (None, slot) ->
+            -- Not a session this actor hosts (one cancelled with a message in
+            -- flight): the message is dropped. Said, since it should be rare.
+            println("ledger: dropped a message for session " ++ sid ++ ", which is not hosted here")
+            { state with sessions: LinearMap.vacate(slot) }
           (Some(parked), slot) ->
             match Order_Ledger.resume(parked, from, msg, ep) do
               Got_Book(n, st) ->
@@ -140,10 +144,11 @@ mod LabApp do
             end
         end
       end
-      on Cancel(sid : String, s : Cap(Session.Live), _role : Int, _cause : String, _ep : Int) do
+      on Cancel(sid : String, s : Cap(Session.Live), _role : Int, cause : String, _ep : Int) do
         match LinearMap.take(state.sessions, sid) do
           (None, m) -> { state with sessions: m }
           (Some(parked), m) ->
+            println("ledger: session " ++ sid ++ " cancelled: " ++ cause)
             Order_Ledger.take_closed(Order_Ledger.cancel(s, parked))
             { state with sessions: m }
         end

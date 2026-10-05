@@ -7,7 +7,7 @@
 #   LAB_PORT_BASE  host ports: lab-N's sshd on 127.0.0.1:BASE+N, its control
 #                  API on 127.0.0.1:BASE+100+N (default 22200)
 #   LAB_IMAGE      the host image (default march-lab-host:1)
-#   LAB_HOST_MEMORY  each host's memory limit (default 1536m)
+#   LAB_HOST_MEMORY  each host's memory limit (default 2g)
 #   LAB_NO_BUILD   1: use the compiler and forge already in _build
 #   LAB_KEEP       1: run.sh leaves the containers up when it ends
 
@@ -15,7 +15,7 @@ lab_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 LAB_DIR=${LAB_DIR:-/tmp/march-lab-$(basename "$lab_root")}
 LAB_PORT_BASE=${LAB_PORT_BASE:-22200}
 LAB_IMAGE=${LAB_IMAGE:-march-lab-host:1}
-LAB_HOST_MEMORY=${LAB_HOST_MEMORY:-1536m}
+LAB_HOST_MEMORY=${LAB_HOST_MEMORY:-2g}
 LAB_NET=${LAB_NET:-march-lab}
 LAB_HOSTS="lab-1 lab-2 lab-3 lab-4"
 LAB_PROJECT=lab_app
@@ -35,6 +35,8 @@ lab_die() {
 }
 # A failed assertion inside a scenario: exit 1 with the reason.
 fail() { printf 'lab: FAIL: %s\n' "$*" >&2; exit 1; }
+# A scenario that cannot run in this lab's configuration: exit 4, reported SKIP.
+lab_skip() { printf 'lab: SKIP: %s\n' "$*" >&2; exit 4; }
 
 lab_port_ssh() { echo $((LAB_PORT_BASE + ${1#lab-})); }
 lab_port_ctl() { echo $((LAB_PORT_BASE + 100 + ${1#lab-})); }
@@ -109,11 +111,10 @@ lab_exec() { local h=$1; shift; docker exec "$h" sh -c "$*"; }
 
 # lab_forge <args...>: forge in the lab's project, output kept in
 # $LAB_DIR/logs/forge-<n>.log and in $LAB_OUT; returns forge's status.
-lab_forge_n=0
 lab_forge() {
-  lab_forge_n=$((lab_forge_n + 1))
+  local n; n=$(( $(cat "$LAB_DIR/forge-n" 2> /dev/null || echo 0) + 1 )); echo $n > "$LAB_DIR/forge-n"
   local log
-  log="$LAB_DIR/logs/forge-$(printf %03d $lab_forge_n)-${LAB_SCENARIO:-x}.log"
+  log="$LAB_DIR/logs/forge-$(printf %03d $n)-${LAB_SCENARIO:-x}.log"
   echo "\$ forge $*" > "$log"
   (cd "$LAB_DIR/app" && forge "$@") >> "$log" 2>&1
   local rc=$?
@@ -172,12 +173,17 @@ lab_status() { lab_exec "$1" "cat $LAB_STATE/run/$(lab_pool "$1").status 2>/dev/
 lab_stats() { lab_exec lab-1 "cat $LAB_STATS 2>/dev/null"; }
 lab_stat() { lab_stats | awk -v k="$1" '$1 == k { print $2; f = 1 } END { if (!f) print 0 }'; }
 lab_stat_sum() { lab_stats | awk -v p="$1" 'index($1, p) == 1 && $2 ~ /^[0-9]+$/ { s += $2 } END { print s + 0 }'; }
+# Stock replies (`have`, any tag) from node <node>: lab_served_by <node> [file]
+lab_served_by() {
+  { if [ -n "${2:-}" ]; then cat "$2"; else lab_stats; fi; } \
+    | awk -v n="@$1" 'index($1, "have:") == 1 && substr($1, length($1) - length(n) + 1) == n { s += $2 } END { print s + 0 }'
+}
 lab_ended() { echo $(( $(lab_stat finished) + $(lab_stat drained) + $(lab_stat refused) + $(lab_stat failed) )); }
 
-# lab_traffic_flows [n]: n more sessions finish (default 10) within 60 s.
+# lab_traffic_flows [n]: n more sessions finish (default 10) within 120 s.
 lab_traffic_flows() {
   local want=$(( $(lab_stat finished) + ${1:-10} ))
-  lab_until 60 "$want sessions finished" lab_stat_ge finished "$want"
+  lab_until 120 "$want sessions finished" lab_stat_ge finished "$want"
 }
 lab_stat_ge() { [ "$(lab_stat "$1")" -ge "$2" ]; }
 
@@ -191,15 +197,48 @@ lab_traffic() {
 # A node's process: resident memory (KB) and live heap objects (the probe
 # file its hook writes every 5 s).
 lab_rss_kb() {
-  lab_exec "$1" "p=\$(pgrep -f /opt/march/$LAB_PROJECT/ | head -1); [ -n \"\$p\" ] && ps -o rss= -p \$p" | tr -d ' '
+  lab_exec "$1" "p=\$(pgrep -x $LAB_PROJECT | head -1); [ -n \"\$p\" ] && ps -o rss= -p \$p" | tr -d ' '
 }
 lab_live() { lab_exec "$1" "sed -n 's/^live //p' $LAB_STATE/lab-probe 2>/dev/null"; }
 
-# Which work host offers Order.Ledger now (its status file has the offer).
+# lab_fresh_cluster: when any node is not running or uses more than
+# LAB_RESET_MB (default 500) of memory, deploy the lab again from nothing
+# (the `deploy` scenario, inline), and say so in the notes.
+#
+# A workaround for three findings: every node grows by ~1 MB/s on its own
+# (specs/todos/2026-10-05-lab-leaderless-agents-leak.md) and more with every
+# session, so a node reaches the LAB_HOST_MEMORY cap within minutes;
+# restarting nodes together can cost each ~1 GB at once
+# (2026-10-05-lab-simultaneous-restart-memory-burst.md); and nodes restarted
+# one at a time came back with offers no initiator could see
+# (2026-10-05-lab-restarted-node-offers-invisible.md). Fresh hosts are the
+# one start that works.
+lab_fresh_cluster() {
+  local h kb why=
+  for h in $LAB_HOSTS; do
+    kb=$(lab_rss_kb "$h")
+    if [ -z "$kb" ]; then why="$why $h's node is not running ($(lab_oom_kills) OOM kills in the Docker VM's log);"
+    elif [ "$kb" -gt $(( ${LAB_RESET_MB:-500} * 1024 )) ]; then why="$why $h's node uses $((kb / 1024)) MB;"
+    fi
+  done
+  [ -n "$why" ] || return 0
+  lab_note "deploying the lab again first:$why"
+  ( LAB_SCENARIO=$LAB_SCENARIO-redeploy; source "$here/scenarios/deploy.sh" ) || fail "the fresh deploy failed"
+}
+
+
+# OOM kills the Docker VM's kernel has logged (all containers, all time).
+lab_oom_kills() {
+  docker run --rm --privileged "$LAB_IMAGE" dmesg 2> /dev/null | grep -c 'Memory cgroup out of memory: Killed process'
+}
+
+# Which work host offers Order.Ledger now (its status file has the offer;
+# the file of a node that is not running is stale and does not count).
 lab_ledger_hosts() {
   local h
   for h in lab-2 lab-3 lab-4; do
     lab_running "$h" || continue
+    [ -n "$(lab_rss_kb "$h")" ] || continue
     lab_status "$h" | grep -q '^offer Order.Ledger ' && echo "$h"
   done
 }
@@ -221,6 +260,46 @@ lab_delta() {   # lab_delta <name> <key>: how much <key> grew since the snapshot
   before=$(awk -v k="$2" '$1 == k { print $2; f = 1 } END { if (!f) print 0 }' "$LAB_DIR/snap-$1")
   echo $(( $(lab_stat "$2") - before ))
 }
+
+# The Stock reply's tag in the lab's project (`stock-v<N>`, src/lab_app.march
+# `Work.reply`), and a hot deploy of the next one. `cluster` (the default):
+# through the control plane, `forge deploy` on the cluster backend with a
+# stand-in `ssh` first on PATH that records any attempt and fails it
+# (nothing may need ssh); a leader must answer first, or forge would plan
+# restarts. `ssh`: `forge deploy --via ssh`, through each node's reload
+# socket. Sets LAB_OLD_TAG and LAB_NEW_TAG.
+lab_tag() { grep -o '"|stock-v[0-9]*|"' "$LAB_DIR/app/src/lab_app.march" | head -1 | tr -d '"|'; }
+lab_hot_deploy_next_tag() {
+  if [ "${1:-cluster}" = ssh ]; then
+    LAB_OLD_TAG=$(lab_tag)
+    LAB_NEW_TAG=stock-v$(( ${LAB_OLD_TAG#stock-v} + 1 ))
+    sed -i.bak "s/|$LAB_OLD_TAG|/|$LAB_NEW_TAG|/" "$LAB_DIR/app/src/lab_app.march" && rm -f "$LAB_DIR/app/src/lab_app.march.bak"
+    [ "$(lab_tag)" = "$LAB_NEW_TAG" ] || fail "the tag edit did not take"
+    lab_forge_ok deploy --env lab --plan --via ssh
+    lab_expect "hot plan" "$LAB_OUT" "changed: Work.reply" "hot patch"
+    lab_forge_ok deploy --env lab --yes --via ssh
+    lab_expect "hot deploy" "$LAB_OUT" "activated: Work.reply" "deploy complete"
+    return
+  fi
+  lab_until 60 "a control-plane leader" lab_leader
+  LAB_OLD_TAG=$(lab_tag)
+  [ -n "$LAB_OLD_TAG" ] || fail "no stock-v<N> tag in the lab's source"
+  LAB_NEW_TAG=stock-v$(( ${LAB_OLD_TAG#stock-v} + 1 ))
+  sed -i.bak "s/|$LAB_OLD_TAG|/|$LAB_NEW_TAG|/" "$LAB_DIR/app/src/lab_app.march" && rm -f "$LAB_DIR/app/src/lab_app.march.bak"
+  [ "$(lab_tag)" = "$LAB_NEW_TAG" ] || fail "the tag edit did not take"
+  mkdir -p "$LAB_DIR/fakessh"
+  printf '#!/bin/sh\necho "ssh $*" >> "%s/ssh-attempts"\nexit 255\n' "$LAB_DIR" > "$LAB_DIR/fakessh/ssh"
+  chmod +x "$LAB_DIR/fakessh/ssh"
+  rm -f "$LAB_DIR/ssh-attempts"
+  PATH="$LAB_DIR/fakessh:$PATH" lab_forge_ok deploy --env lab --plan
+  lab_expect "hot plan" "$LAB_OUT" "changed: Work.reply" "hot patch" "Through the control plane" "nothing needs ssh"
+  PATH="$LAB_DIR/fakessh:$PATH" lab_forge_ok deploy --env lab --yes
+  lab_expect "hot deploy" "$LAB_OUT" "accepted" "deploy complete"
+  [ ! -s "$LAB_DIR/ssh-attempts" ] || fail "the hot deploy reached for ssh: $(cat "$LAB_DIR/ssh-attempts")"
+}
+
+# lab_load: the 1-minute load average of this machine (integer part).
+lab_load() { uptime | sed 's/.*load averages*: *//' | awk -F'[ ,]+' '{ print int($1) }'; }
 
 # What a scenario reports on success: a line kept in $LAB_DIR/results.
 lab_note() { lab_say "$*"; echo "$LAB_SCENARIO: $*" >> "$LAB_DIR/notes"; }

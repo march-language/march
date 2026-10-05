@@ -9,7 +9,7 @@
 # On the network the hosts reach each other by name (lab-2:7946). This
 # machine reaches lab-N's sshd at 127.0.0.1:$LAB_PORT_BASE+N and a control
 # candidate's API at 127.0.0.1:$LAB_PORT_BASE+100+N, nothing else. Each host
-# has a memory limit (LAB_HOST_MEMORY, default 1536m), so a node that grows
+# has a memory limit (LAB_HOST_MEMORY, default 2g), so a node that grows
 # without bound is killed inside the lab instead of by the Docker VM's OOM
 # killer, which may pick another project's container.
 set -u

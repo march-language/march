@@ -42,4 +42,7 @@ answering not-ok, or answer ok-pending and let the level-triggered executor see 
 next report. Add a control scenario whose release has a topology step and a slow runner
 (a long `MARCH_PLACEMENT_TICK_MS`) to pin it.
 
-The lab's `deploy` scenario notes it and deploys again when it happens.
+Seen again 2026-10-05 at load 5 (so not only under load): the first deploy's topology
+release halted the same way, on work-lab-2. The lab's first deploy now goes `--via ssh`
+(see [2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md](2026-10-05-lab-forge-cluster-deploy-retry-and-leader-change.md)
+for why retrying did not work either).

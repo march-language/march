@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **A multi-host lab, and `examples/lab_app`.** `scripts/lab/run.sh` starts four
+  Debian containers on a private Docker network, deploys `examples/lab_app` (a
+  three-role choreography with a loop, a choice, an actor-hosted role placed
+  `count = 1`, role grants and a `[control]` section) to them with the real `forge`
+  over ssh, and checks hot deploys, restarts on persisted patches and failover, with
+  sessions flowing throughout. It runs on demand, not in CI; see the Multi-host Lab
+  docs page. Its first runs filed nine bugs under `specs/todos/2026-10-0[45]-lab-*`,
+  among them a pushed topology closing the control plane's leader role on every node.
 - **`forge top`, `forge diagnose` and `forge status`.** `forge top` watches a
   node's busiest actors (by mailbox depth, crashes, or message and dispatch
   rate) refreshed in place. `forge diagnose` checks a node over a window for
