@@ -1,0 +1,318 @@
+# Shared by scripts/lab/*.sh: settings, prerequisites, the hermetic forge
+# environment and helpers. Sourced, never run. See docs/lab.md.
+#
+# Settings (environment):
+#   LAB_DIR        the lab's state on this machine: the project copy, keys,
+#                  ssh config, private HOME, logs (default /tmp/march-lab-<checkout>)
+#   LAB_PORT_BASE  host ports: lab-N's sshd on 127.0.0.1:BASE+N, its control
+#                  API on 127.0.0.1:BASE+100+N (default 22200)
+#   LAB_IMAGE      the host image (default march-lab-host:1)
+#   LAB_HOST_MEMORY  each host's memory limit (default 2g)
+#   LAB_NO_BUILD   1: use the compiler and forge already in _build
+#   LAB_KEEP       1: run.sh leaves the containers up when it ends
+
+lab_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+LAB_DIR=${LAB_DIR:-/tmp/march-lab-$(basename "$lab_root")}
+LAB_PORT_BASE=${LAB_PORT_BASE:-22200}
+LAB_IMAGE=${LAB_IMAGE:-march-lab-host:1}
+LAB_HOST_MEMORY=${LAB_HOST_MEMORY:-2g}
+LAB_NET=${LAB_NET:-march-lab}
+LAB_HOSTS="lab-1 lab-2 lab-3 lab-4"
+LAB_PROJECT=lab_app
+LAB_STATE=/var/lib/march/$LAB_PROJECT        # the service's HOME on a host
+LAB_STATS=$LAB_STATE/lab-stats               # the ingress counters (lab-1)
+LAB_MARCH=$lab_root/_build/default/bin/main.exe
+LAB_FORGE=$lab_root/_build/default/forge/bin/main.exe
+LAB_HCR=$lab_root/_build/default/test/hcr_deploy.exe
+
+lab_say() { printf 'lab: %s\n' "$*" >&2; }
+# A missing prerequisite: exit 2, loudly. Never a pass.
+lab_die() {
+  printf '\n%s\nlab: PREREQUISITE MISSING: %s\nlab: nothing was tested.\n%s\n' \
+    "************************************************************************" "$*" \
+    "************************************************************************" >&2
+  exit 2
+}
+# A failed assertion inside a scenario: exit 1 with the reason.
+fail() { printf 'lab: FAIL: %s\n' "$*" >&2; exit 1; }
+# A scenario that cannot run in this lab's configuration: exit 4, reported SKIP.
+lab_skip() { printf 'lab: SKIP: %s\n' "$*" >&2; exit 4; }
+
+lab_port_ssh() { echo $((LAB_PORT_BASE + ${1#lab-})); }
+lab_port_ctl() { echo $((LAB_PORT_BASE + 100 + ${1#lab-})); }
+lab_node() { case $1 in lab-1) echo "ingress-lab-1" ;; *) echo "work-$1" ;; esac; }
+lab_pool() { case $1 in lab-1) echo ingress ;; *) echo work ;; esac; }
+
+# Docker, its daemon, the cross toolchain (zig + the target's sysroot),
+# ssh. Sets LAB_TARGET, LAB_SYSROOT_VAR, LAB_SYSROOT.
+lab_prereqs() {
+  command -v docker > /dev/null 2>&1 || lab_die "docker is not installed"
+  docker info > /dev/null 2>&1 || lab_die "docker's daemon is not reachable (start Docker)"
+  command -v ssh > /dev/null 2>&1 || lab_die "ssh is not installed"
+  command -v ssh-keygen > /dev/null 2>&1 || lab_die "ssh-keygen is not installed"
+  command -v zig > /dev/null 2>&1 || lab_die "zig (forge's cross C compiler) is not installed"
+  local arch deb
+  arch=$(docker info --format '{{.Architecture}}')
+  case $arch in
+    x86_64 | amd64) LAB_TARGET=linux/amd64; deb=amd64 ;;
+    aarch64 | arm64) LAB_TARGET=linux/arm64; deb=arm64 ;;
+    *) lab_die "docker runs an architecture the lab does not know: $arch" ;;
+  esac
+  LAB_SYSROOT_VAR=MARCH_CROSS_SYSROOT_$(echo "$deb" | tr a-z A-Z)
+  LAB_SYSROOT=${!LAB_SYSROOT_VAR:-$HOME/.cache/march/cross-sysroot/linux-$deb}
+  [ -f "$LAB_SYSROOT/lib/libssl.so.3" ] \
+    || lab_die "no $LAB_TARGET cross sysroot at $LAB_SYSROOT (run scripts/fetch-cross-sysroot.sh $deb)"
+}
+
+# The compiler, forge and the hcr_deploy client, built from this checkout
+# (`--root .`: a worktree nested in another checkout must not build that
+# one). The runtime and stdlib are read from the source tree
+# (MARCH_RUNTIME_DIR, MARCH_STDLIB), never a stale _build copy.
+lab_build() {
+  if [ "${LAB_NO_BUILD:-}" != 1 ]; then
+    lab_say "building the compiler and forge"
+    (cd "$lab_root" && dune build --root . bin/main.exe forge/bin/main.exe test/hcr_deploy.exe) \
+      > "$LAB_DIR/logs/build.log" 2>&1 || { cat "$LAB_DIR/logs/build.log" >&2; fail "the build failed"; }
+  fi
+  for b in "$LAB_MARCH" "$LAB_FORGE" "$LAB_HCR"; do
+    [ -x "$b" ] || lab_die "$b is not built (unset LAB_NO_BUILD)"
+  done
+}
+
+# The hermetic environment every forge run gets: a private HOME (march's
+# caches, forge's deploy and operator keys), wrappers for march and forge
+# (the compiler finds its stdlib next to its own executable, which a
+# symlink's directory is not), the lab's ssh config, the sysroot.
+lab_env() {
+  mkdir -p "$LAB_DIR/bin" "$LAB_DIR/home" "$LAB_DIR/mhome" "$LAB_DIR/logs"
+  printf '#!/bin/sh\nexec "%s" "$@"\n' "$LAB_MARCH" > "$LAB_DIR/bin/march"
+  printf '#!/bin/sh\nexec "%s" "$@"\n' "$LAB_FORGE" > "$LAB_DIR/bin/forge"
+  chmod +x "$LAB_DIR/bin/march" "$LAB_DIR/bin/forge"
+  export PATH="$LAB_DIR/bin:$PATH" HOME="$LAB_DIR/home" MARCH_HOME="$LAB_DIR/mhome"
+  export MARCH_RUNTIME_DIR="$lab_root/runtime" MARCH_STDLIB="$lab_root/stdlib"
+  export FORGE_SSH_CONFIG="$LAB_DIR/ssh_config"
+  export "$LAB_SYSROOT_VAR=$LAB_SYSROOT"
+  local eps="" h
+  for h in lab-2 lab-3 lab-4; do eps="$eps,127.0.0.1:$(lab_port_ctl "$h")"; done
+  export FORGE_CONTROL_ENDPOINTS="${eps#,}"
+}
+
+lab_ssh_config() {
+  local h
+  : > "$LAB_DIR/ssh_config"
+  for h in $LAB_HOSTS; do
+    printf 'Host %s\n  HostName 127.0.0.1\n  Port %s\n  User root\n  IdentityFile %s\n  IdentitiesOnly yes\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  LogLevel ERROR\n  ConnectTimeout 5\n' \
+      "$h" "$(lab_port_ssh "$h")" "$LAB_DIR/id_ed25519" >> "$LAB_DIR/ssh_config"
+  done
+}
+
+lab_ssh() { local h=$1; shift; ssh -F "$LAB_DIR/ssh_config" "$h" "$@"; }
+lab_exec() { local h=$1; shift; docker exec "$h" sh -c "$*"; }
+
+# lab_forge <args...>: forge in the lab's project, output kept in
+# $LAB_DIR/logs/forge-<n>.log and in $LAB_OUT; returns forge's status.
+lab_forge() {
+  local n; n=$(( $(cat "$LAB_DIR/forge-n" 2> /dev/null || echo 0) + 1 )); echo $n > "$LAB_DIR/forge-n"
+  local log
+  log="$LAB_DIR/logs/forge-$(printf %03d $n)-${LAB_SCENARIO:-x}.log"
+  echo "\$ forge $*" > "$log"
+  (cd "$LAB_DIR/app" && forge "$@") >> "$log" 2>&1
+  local rc=$?
+  echo "(exit $rc)" >> "$log"
+  LAB_OUT=$(cat "$log")
+  lab_say "forge $* (exit $rc; $log)"
+  return $rc
+}
+
+# lab_forge_ok <args...>: forge, and a failure fails the scenario with what
+# forge and the nodes said.
+lab_forge_ok() {
+  lab_forge "$@" && return 0
+  echo "$LAB_OUT" >&2
+  lab_node_logs 30 >&2
+  fail "forge $* failed"
+}
+
+lab_expect() {   # lab_expect <what> <text> <substring>...
+  local what=$1 text=$2; shift 2
+  local s
+  for s in "$@"; do
+    case $text in *"$s"*) ;; *) echo "$text" >&2; fail "$what: expected '$s'" ;; esac
+  done
+}
+
+# lab_until <seconds> <description> <command...>: poll every 0.5 s.
+lab_until() {
+  local limit=$1 what=$2; shift 2
+  local end=$((SECONDS + limit))
+  until "$@" > /dev/null 2>&1; do
+    [ $SECONDS -ge $end ] && fail "timed out after ${limit}s waiting for: $what"
+    sleep 0.5
+  done
+}
+
+lab_running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2> /dev/null)" = true ]; }
+
+lab_node_log() {   # lab_node_log <host> [lines]
+  lab_exec "$1" "tail -n ${2:-40} /var/log/march-$(lab_pool "$1").service.log 2>/dev/null"
+}
+lab_node_logs() {
+  local h
+  for h in $LAB_HOSTS; do
+    lab_running "$h" || { echo "--- $h: not running"; continue; }
+    echo "--- $h ($(lab_node "$h")), last ${1:-20} lines"
+    lab_node_log "$h" "${1:-20}"
+  done
+}
+
+# The node's status file (offers, sessions, the topology digest it applied).
+lab_status() { lab_exec "$1" "cat $LAB_STATE/run/$(lab_pool "$1").status 2>/dev/null"; }
+
+# The ingress counters: lab_stats prints the file; lab_stat <key> one value
+# (0 when absent); lab_stat_sum <prefix> the sum of the keys starting so.
+lab_stats() { lab_exec lab-1 "cat $LAB_STATS 2>/dev/null"; }
+lab_stat() { lab_stats | awk -v k="$1" '$1 == k { print $2; f = 1 } END { if (!f) print 0 }'; }
+lab_stat_sum() { lab_stats | awk -v p="$1" 'index($1, p) == 1 && $2 ~ /^[0-9]+$/ { s += $2 } END { print s + 0 }'; }
+# Stock replies (`have`, any tag) from node <node>: lab_served_by <node> [file]
+lab_served_by() {
+  { if [ -n "${2:-}" ]; then cat "$2"; else lab_stats; fi; } \
+    | awk -v n="@$1" 'index($1, "have:") == 1 && substr($1, length($1) - length(n) + 1) == n { s += $2 } END { print s + 0 }'
+}
+# Sessions started and not ended, from one read of the stats file (two reads
+# can straddle a rewrite).
+lab_unended() {
+  lab_stats | awk '$1 == "started" { s = $2 } $1 == "finished" || $1 == "drained" || $1 == "refused" || $1 == "failed" { e += $2 } END { print s - e }'
+}
+lab_ended() { echo $(( $(lab_stat finished) + $(lab_stat drained) + $(lab_stat refused) + $(lab_stat failed) )); }
+
+# lab_traffic_flows [n]: n more sessions finish (default 10) within 120 s.
+lab_traffic_flows() {
+  local want=$(( $(lab_stat finished) + ${1:-10} ))
+  lab_until 120 "$want sessions finished" lab_stat_ge finished "$want"
+}
+lab_stat_ge() { [ "$(lab_stat "$1")" -ge "$2" ]; }
+
+# lab_traffic <every ms> [most in flight]: how fast lab-1's hook starts
+# sessions (`0` pauses). It re-reads the file before each session.
+lab_traffic() {
+  local f=$LAB_STATE/lab-traffic
+  lab_exec lab-1 "echo '$1 ${2:-4}' > $f.tmp && chmod 644 $f.tmp && mv $f.tmp $f"
+}
+
+# A node's process: resident memory (KB) and live heap objects (the probe
+# file its hook writes every 5 s).
+lab_rss_kb() {
+  lab_exec "$1" "p=\$(pgrep -x $LAB_PROJECT | head -1); [ -n \"\$p\" ] && ps -o rss= -p \$p" | tr -d ' '
+}
+lab_live() { lab_exec "$1" "sed -n 's/^live //p' $LAB_STATE/lab-probe 2>/dev/null"; }
+
+# lab_fresh_cluster: when any node is not running or uses more than
+# LAB_RESET_MB (default 500) of memory, deploy the lab again from nothing
+# (the `deploy` scenario, inline), and say so in the notes.
+#
+# A workaround for three findings: every node grows by ~1 MB/s on its own
+# (specs/todos/2026-10-05-lab-leaderless-agents-leak.md) and more with every
+# session, so a node reaches the LAB_HOST_MEMORY cap within minutes;
+# restarting nodes together can cost each ~1 GB at once
+# (2026-10-05-lab-simultaneous-restart-memory-burst.md); and nodes restarted
+# one at a time came back with offers no initiator could see
+# (2026-10-05-lab-restarted-node-offers-invisible.md). Fresh hosts are the
+# one start that works.
+lab_fresh_cluster() {
+  local h kb why=
+  for h in $LAB_HOSTS; do
+    kb=$(lab_rss_kb "$h")
+    if [ -z "$kb" ]; then why="$why $h's node is not running ($(lab_oom_kills) OOM kills in the Docker VM's log);"
+    elif [ "$kb" -gt $(( ${LAB_RESET_MB:-500} * 1024 )) ]; then why="$why $h's node uses $((kb / 1024)) MB;"
+    fi
+  done
+  if [ -z "$why" ]; then
+    # Up and small enough; but does it work? (A scenario before may have left
+    # restarted nodes behind, whose offers nobody sees.)
+    lab_traffic 1000 16
+    local want=$(( $(lab_stat finished) + 3 )) end=$((SECONDS + 45))
+    until lab_stat_ge finished "$want" || [ $SECONDS -ge $end ]; do sleep 1; done
+    lab_stat_ge finished "$want" && return 0
+    why=" no session finished in 45 s;"
+  fi
+  lab_note "deploying the lab again first:$why"
+  ( LAB_SCENARIO=$LAB_SCENARIO-redeploy; source "$here/scenarios/deploy.sh" ) || fail "the fresh deploy failed"
+}
+
+
+# OOM kills the Docker VM's kernel has logged (all containers, all time).
+lab_oom_kills() {
+  docker run --rm --privileged "$LAB_IMAGE" dmesg 2> /dev/null | grep -c 'Memory cgroup out of memory: Killed process'
+}
+
+# Which work host offers Order.Ledger now (its status file has the offer;
+# the file of a node that is not running is stale and does not count).
+lab_ledger_hosts() {
+  local h
+  for h in lab-2 lab-3 lab-4; do
+    lab_running "$h" || continue
+    [ -n "$(lab_rss_kb "$h")" ] || continue
+    lab_status "$h" | grep -q '^offer Order.Ledger ' && echo "$h"
+  done
+}
+
+# The control-plane leader's host, asked of each candidate's control API.
+lab_leader() {
+  local h
+  for h in lab-2 lab-3 lab-4; do
+    lab_running "$h" || continue
+    if "$LAB_HCR" api "127.0.0.1:$(lab_port_ctl "$h")" LEADER 2> /dev/null | grep -q '^LEADER yes'; then echo "$h"; return 0; fi
+  done
+  return 1
+}
+
+# lab_snapshot <name>: the counters now, kept for a later lab_delta.
+lab_snapshot() { lab_stats > "$LAB_DIR/snap-$1"; }
+lab_delta() {   # lab_delta <name> <key>: how much <key> grew since the snapshot
+  local before
+  before=$(awk -v k="$2" '$1 == k { print $2; f = 1 } END { if (!f) print 0 }' "$LAB_DIR/snap-$1")
+  echo $(( $(lab_stat "$2") - before ))
+}
+
+# The Stock reply's tag in the lab's project (`stock-v<N>`, src/lab_app.march
+# `Work.reply`), and a hot deploy of the next one. `cluster` (the default):
+# through the control plane, `forge deploy` on the cluster backend with a
+# stand-in `ssh` first on PATH that records any attempt and fails it
+# (nothing may need ssh); a leader must answer first, or forge would plan
+# restarts. `ssh`: `forge deploy --via ssh`, through each node's reload
+# socket. Sets LAB_OLD_TAG and LAB_NEW_TAG.
+lab_tag() { grep -o '"|stock-v[0-9]*|"' "$LAB_DIR/app/src/lab_app.march" | head -1 | tr -d '"|'; }
+lab_hot_deploy_next_tag() {
+  if [ "${1:-cluster}" = ssh ]; then
+    LAB_OLD_TAG=$(lab_tag)
+    LAB_NEW_TAG=stock-v$(( ${LAB_OLD_TAG#stock-v} + 1 ))
+    sed -i.bak "s/|$LAB_OLD_TAG|/|$LAB_NEW_TAG|/" "$LAB_DIR/app/src/lab_app.march" && rm -f "$LAB_DIR/app/src/lab_app.march.bak"
+    [ "$(lab_tag)" = "$LAB_NEW_TAG" ] || fail "the tag edit did not take"
+    lab_forge_ok deploy --env lab --plan --via ssh
+    lab_expect "hot plan" "$LAB_OUT" "changed: Work.reply" "hot patch"
+    lab_forge_ok deploy --env lab --yes --via ssh
+    lab_expect "hot deploy" "$LAB_OUT" "activated: Work.reply" "deploy complete"
+    return
+  fi
+  lab_until 60 "a control-plane leader" lab_leader
+  LAB_OLD_TAG=$(lab_tag)
+  [ -n "$LAB_OLD_TAG" ] || fail "no stock-v<N> tag in the lab's source"
+  LAB_NEW_TAG=stock-v$(( ${LAB_OLD_TAG#stock-v} + 1 ))
+  sed -i.bak "s/|$LAB_OLD_TAG|/|$LAB_NEW_TAG|/" "$LAB_DIR/app/src/lab_app.march" && rm -f "$LAB_DIR/app/src/lab_app.march.bak"
+  [ "$(lab_tag)" = "$LAB_NEW_TAG" ] || fail "the tag edit did not take"
+  mkdir -p "$LAB_DIR/fakessh"
+  printf '#!/bin/sh\necho "ssh $*" >> "%s/ssh-attempts"\nexit 255\n' "$LAB_DIR" > "$LAB_DIR/fakessh/ssh"
+  chmod +x "$LAB_DIR/fakessh/ssh"
+  rm -f "$LAB_DIR/ssh-attempts"
+  PATH="$LAB_DIR/fakessh:$PATH" lab_forge_ok deploy --env lab --plan
+  lab_expect "hot plan" "$LAB_OUT" "changed: Work.reply" "hot patch" "Through the control plane" "nothing needs ssh"
+  PATH="$LAB_DIR/fakessh:$PATH" lab_forge_ok deploy --env lab --yes
+  lab_expect "hot deploy" "$LAB_OUT" "accepted" "deploy complete"
+  [ ! -s "$LAB_DIR/ssh-attempts" ] || fail "the hot deploy reached for ssh: $(cat "$LAB_DIR/ssh-attempts")"
+}
+
+# lab_load: the 1-minute load average of this machine (integer part).
+lab_load() { uptime | sed 's/.*load averages*: *//' | awk -F'[ ,]+' '{ print int($1) }'; }
+
+# What a scenario reports on success: a line kept in $LAB_DIR/results.
+lab_note() { lab_say "$*"; echo "$LAB_SCENARIO: $*" >> "$LAB_DIR/notes"; }

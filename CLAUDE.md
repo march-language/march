@@ -147,6 +147,8 @@ After implementing or completing a feature, `git mv` its file from `specs/todos/
 
 After changing a feature, run the benchmark(s) that exercise it to catch regressions; see `specs/benchmarks.md` for the mapping. Quick reference: Perceus/FBIP changes → `bench/tree_transform.march`; closure/HOF changes → `bench/list_ops.march`; allocation/GC changes → `bench/binary_trees.march`. **Always run benchmarks compiled** (`march --compile --opt 2 bench/<name>.march -o /tmp/<name> && /tmp/<name>`); interpreted (`dune exec march --`) can take hours on `fib`-shaped benchmarks.
 
+Suspected miscompile: `scripts/triage.sh FILE [--fn NAME] [--deep]` runs interp-vs-compiled, the optional-pass switches, per-stage TIR dumps and an ASAN rebuild, one screen (`--help`).
+
 ### TIR golden-snapshot tests
 
 `test/run_snapshots.exe` pins the pretty-printed TIR (`lib/tir/pp.ml`) for a small

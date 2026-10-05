@@ -1056,8 +1056,33 @@ The interpreted backend reports the subset that's meaningful without the C sched
 [Introspection is a capability](#introspection-is-a-capability)): both are snapshots (an actor can die or drain between the walk and
 your reaction) and cost one pass over every live actor, so poll them from a timer, not a
 hot path. There is no push-style alarm that fires when a queue crosses a threshold, and no
-per-actor state inspection or tracing; see
-`specs/todos/2026-08-12-per-actor-introspection-and-alarms.md`.
+tracing; see `specs/todos/2026-08-12-per-actor-introspection-and-alarms.md`.
+
+### Reading an actor's state: `Actor.inspect_state`
+
+`Actor.inspect_state(d, pid, timeout_ms)` asks a running actor for its state, like
+Erlang's `sys:get_state`. `d` is a `Cap(Actor.Debug)`, minted from `Cap(IO)` by
+`Actor.debug(io)`; it is a separate cap from `Actor.Introspect` because it reads the
+actor's data, not just its counters.
+
+```march
+let d = Actor.debug(io)
+match Actor.inspect_state(d, counter, 100) do
+  Ok(s) -> println(s)            -- { count: 3, tags: [a, b], best: Some(3) }
+  Err(InspectTimeout) -> println("busy")
+  Err(InspectDead) -> println("gone")
+  Err(InspectSelf) -> println("asked itself")
+  Err(InspectFailed(why)) -> println(why)
+end
+```
+
+The text lists the state fields in declaration order, each printed by its own `Show`,
+and is the same on both backends. A field whose type holds functions (or a type variable
+or session channel) has no `Show` and prints as `<opaque>`. The request is answered between messages, skips the
+mailbox limit (a full mailbox still answers), and does not count as a message in the
+actor's counters. It fails without disturbing the actor: `InspectTimeout` when the actor
+does not answer in time or is inside a nested `receive`, `InspectDead`, `InspectSelf`
+(an actor cannot wait on itself), and `InspectFailed` when a field's `Show` panics.
 
 ---
 
@@ -1085,6 +1110,7 @@ to diverge or crash compiled (see the compiled-actor status note at the top of t
 | `is_cap_valid(cap)` | `→ Bool` | both | Boolean form of the epoch/revocation/liveness check |
 | `Actor.pid_from_int(c, n)` | `→ Pid` | both | Convert Int to Pid; `c : Cap(Actor.Introspect)` from `Actor.introspect(io)` (an unknown index resolves to a safe already-dead sentinel; the raw `pid_of_int` builtin is stdlib-internal) |
 | `pid_to_int(pid)` | `→ Int` | both | The inverse: a Pid's spawn index, the `N` in its `Pid(N)` display (what `GlobalPid.make` takes for a local actor) |
+| `Actor.inspect_state(d, pid, timeout_ms)` | `→ Result(String, InspectError)` | both | The actor's state as text; `d : Cap(Actor.Debug)` from `Actor.debug(io)`; see [Reading an actor's state](#reading-an-actors-state-actorinspect_state) |
 | `get_actor_field(pid, name)` | `→ Option(a)` | both | Read an actor's state field via the runtime shape registry |
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |
 | `task_await(t)` | `→ Result(a, String)` | both | Await a task (use `Task.await` instead) |

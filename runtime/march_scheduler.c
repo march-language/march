@@ -3177,6 +3177,36 @@ int march_sched_send(march_proc *target, void *msg) {
     }
 }
 
+/* Push [msg] onto [target]'s USER queue without consulting its mailbox
+ * limit: the Actor.inspect_state request (observe plan R4).  FIFO with user
+ * messages, so it is answered from a state no earlier than every message
+ * sent before it; but a DROP_NEW mailbox must not drop it, and a BLOCK one
+ * must not park the inspector.  (A later DROP_OLD send can still evict it,
+ * like any queued message; the inspector then times out.)  Not counted in
+ * the sender's msgs_out: it is not a message the program sent. */
+int march_sched_send_unlimited(march_proc *target, void *msg) {
+    march_mbox_node *node = mbox_node_new(msg);
+    if (!target
+            || atomic_load_explicit(&target->status,
+                                    memory_order_acquire) == PROC_DEAD) {
+        free(node);
+        return MARCH_SEND_DEAD;
+    }
+    mbox_lock_acquire(target);
+    if (atomic_load_explicit(&target->status,
+                             memory_order_acquire) == PROC_DEAD) {
+        mbox_lock_release(target);
+        free(node);
+        return MARCH_SEND_DEAD;
+    }
+    mbox_push_node(target, node, 0);
+    march_proc_status st = atomic_load_explicit(&target->status,
+                                                memory_order_acquire);
+    mbox_lock_release(target);
+    if (st == PROC_WAITING || st == PROC_PARKED) march_sched_wake(target);
+    return MARCH_SEND_OK;
+}
+
 int march_sched_send_control(march_proc *target, void *msg) {
     march_mbox_node *node = mbox_node_new(msg);
     if (!target

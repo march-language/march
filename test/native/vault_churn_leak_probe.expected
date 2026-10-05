@@ -1,0 +1,19 @@
+Vault.set record: flat true
+intact: r1999 50 s2048
+built keys: flat true
+Vault.set Float: flat true
+intact: 2998.5
+Vault.set ADT: flat true
+Vault.set tuple: flat true
+Int key: flat true
+Vault.set_ttl: flat true
+Vault.delete: flat true
+Vault.update: flat true
+intact: 2017 u1999 50
+Vault.push_capped: flat true
+intact: m1995,m1996,m1997,m1998,m1999
+Vault.put_new: flat true
+Vault.ns_set: flat true
+Vault.clear: flat true
+Vault.close: flat true
+tables left: 0, closed names or late writes found: 0

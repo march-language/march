@@ -605,6 +605,9 @@ void *march_vault_drop(void *t, void *k) { (void)t; (void)k; __builtin_trap(); }
 void *march_vault_update(void *t, void *k, void *f) { (void)t;(void)k;(void)f; __builtin_trap(); }
 int64_t march_vault_size(void *t) { (void)t; __builtin_trap(); }
 void *march_vault_keys(void *t) { (void)t; __builtin_trap(); }
+void *march_vault_reap(void *t, void *k) { (void)t; (void)k; __builtin_trap(); }
+void *march_vault_close(void *t) { (void)t; __builtin_trap(); }
+int64_t march_vault_live_tables(void) { __builtin_trap(); }
 
 /* ── LLVM intrinsic ─────────────────────────────────────────────────── */
 

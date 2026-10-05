@@ -68,7 +68,7 @@ second. Fold and sum fusion come third, gated on the fold loop.
 | New phase | Was | Content | Depends on |
 |---|---|---|---|
 | A | Phase 2, first half | Fold inline loop + unboxed Float clone; detailed spec: `specs/plans/2026-09-30-nativearray-fold-inline-loop.md`. **Done 2026-09-30** (`specs/progress/2026-09-30-nativearray-fold-inline-loop.md`): Float fold 67×, Int fold 21× | nothing |
-| B | Phase 1 | map / map2 composition | nothing |
+| B | Phase 1 | map / map2 composition. **Done 2026-10-04** (`specs/progress/2026-10-04-nativearray-map-fusion.md`): unfused chains reach the hand-fused times; f32 and dividing callbacks are not fused | nothing |
 | C | Phase 2, second half | map → fold and map → sum fusion onto the inline loop | A, B |
 | D | Phase 3 | wider patterns, `@[vectorize]` messages | B |
 | E | Phase 4 | hardening, landing | all |

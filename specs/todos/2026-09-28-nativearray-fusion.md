@@ -20,3 +20,13 @@ Phase 0 ran 2026-09-29 (`bench/native_array_chains.march`, results in
 costs ~47 ns/element through the boxed closure ABI, so the fold inline loop now
 comes first as a standalone change, and `sum(map)` must never be rewritten into
 a `fold_*` call (measured 2.8–65× slower).
+
+Phase A (fold inline loop) landed 2026-09-30
+(`specs/progress/2026-09-30-nativearray-fold-inline-loop.md`). Phase B (map / map2
+composition, `Fusion.run_nativearr`) landed 2026-10-04
+(`specs/progress/2026-10-04-nativearray-map-fusion.md`): written-unfused map3 and
+map→map2 chains now run at the hand-fused speed. Still open: phase C (map → fold
+and map → sum fusion onto the inline loops, never into a `fold_*` call), phase D
+(width conversions, f32 chains, which need a scalar binary32 rounding, dividing
+callbacks, which `Purity` rejects today, and `@[vectorize]` messages naming the
+link that blocked fusion), and phase E (ASAN sweep, ir-oracle, LSP parity).

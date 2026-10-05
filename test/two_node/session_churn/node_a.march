@@ -1,0 +1,91 @@
+-- Two-node harness, scenario "session_churn": node-a runs role A of every
+-- session. Sequential sessions, a warm-up first, then the Vault table count
+-- (`Vault.live_tables`) and the live object count are compared across the
+-- measured run. A table whose last handle is gone is freed, so a count that
+-- is back where it started means every session's tables were closed AND
+-- released. See scenario.sh.
+mod SessionChurnA do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+  needs IO.Clock
+  needs Session.Live
+  needs ClusterNode.Live
+
+  @[endpoints]
+  protocol Echo do
+    A -> B : Int
+    B -> A : Int
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Echo_A.S_send_Msg_A_B_1, n : Int) : Echo_A.Yield do
+    Echo_A.recv_Msg_B_A_1(s, Echo_A.send_Msg_A_B_1(s, st, n), fn (_m, st1) -> Echo_A.close(s, st1))
+  end
+
+  -- (finished, failed) over sessions [i, stop).
+  pfn cluster_runs(c : Cap(IO), h : Cap(ClusterNode.Live), i : Int, stop : Int, ok : Int, bad : Int) : (Int, Int) do
+    if i >= stop do (ok, bad) else
+      match Echo_Run.cluster_A(c, h, "churn" ++ int_to_string(i), fn (s, st) -> role_a(s, st, i)) do
+        Ok(_) -> cluster_runs(c, h, i + 1, stop, ok + 1, bad)
+        Err(e) ->
+          -- Only every third session is meant to fail (B leaves it): say why
+          -- any other did (stderr, beside the logged split).
+          if i % 3 != 2 do IO.warn("A: cluster session " ++ int_to_string(i) ++ " failed: " ++ Echo_Run.error_message(e)) else () end
+          cluster_runs(c, h, i + 1, stop, ok, bad + 1)
+      end
+    end
+  end
+
+  pfn direct_runs(c : Cap(IO), i : Int, stop : Int, ok : Int) : Int do
+    if i >= stop do ok else
+      match Echo_Run.run_A(c, "node-a", "churn-secret", Echo_Run.addrs_from_env(), fn (s, st) -> role_a(s, st, i)) do
+        Ok(_) -> direct_runs(c, i + 1, stop, ok + 1)
+        Err(e) ->
+          IO.warn("A: direct session " ++ int_to_string(i) ++ ": " ++ Echo_Run.error_message(e))
+          direct_runs(c, i + 1, stop, ok)
+      end
+    end
+  end
+
+  pfn report(what : String, tables : Int, objects : Int, n : Int) : () do
+    IO.warn("A: " ++ what ++ ": tables " ++ int_to_string(tables) ++ ", objects " ++ int_to_string(objects))
+    println("A: " ++ what ++ ": tables flat " ++ (if tables <= 2 do "true" else "false (" ++ int_to_string(tables) ++ " over)" end))
+  end
+
+  fn main(c : Cap(IO)) do
+    -- The default SWIM timeouts, except under AddressSanitizer, where
+    -- scenario.sh sets CHURN_SUSPECT_MS: see there.
+    let base = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "churn-secret", 1)
+    let suspect_ms = Env.get_int("CHURN_SUSPECT_MS", 0)
+    let cfg = if suspect_ms > 0 do { base with swim: Swim.config(500, suspect_ms, 2) } else base end
+    match ClusterNode.start(c, cfg) do
+      Err(e) -> panic(e)
+      Ok(h) ->
+        println("node-a: up")
+        if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: never joined") end
+        let n = 60
+        let _ = cluster_runs(c, h, 0, 6, 0, 0)
+        let t0 = Vault.live_tables()
+        let a0 = live_allocs()
+        match cluster_runs(c, h, 6, 6 + n, 0, 0) do
+          (ok, bad) ->
+            -- B leaves 20 of the 60; under a slow (sanitizer) build an
+            -- occasional clean session also ends cancelled, so the exact
+            -- split is logged, not asserted. The tables check is the point.
+            IO.warn("A: cluster sessions finished " ++ int_to_string(ok) ++ ", cancelled " ++ int_to_string(bad))
+            println("A: cluster sessions all ended, at least 20 cancelled: " ++ (if ok + bad == n && bad >= 20 do "true" else "false" end))
+        end
+        report("cluster", Vault.live_tables() - t0, live_allocs() - a0, n)
+        let m = 20
+        let _ = direct_runs(c, 0, 3, 0)
+        let t1 = Vault.live_tables()
+        let a1 = live_allocs()
+        println("A: direct sessions finished " ++ int_to_string(direct_runs(c, 3, 3 + m, 0)))
+        report("direct", Vault.live_tables() - t1, live_allocs() - a1, m)
+        ClusterNode.stop(h)
+    end
+  end
+end
