@@ -3,9 +3,9 @@
 **Date:** 2026-10-05
 **Status:** Proposed. Facts in §2 and the designs in Part D/T were source-checked by one
 independent review (five blockers, all folded in; §20). No build was available while writing.
-**Companion:** `specs/plans/incremental-codegen-cas-plan.md`, **PR #786**, not yet on `main`.
-Where this plan needs a TIR verifier, provenance, pass bisection or a reducer it points at that
-plan's A1, A2 and A4 instead of restating them. Merge #786 first, or read it from its branch.
+**Companion:** `specs/plans/incremental-codegen-cas-plan.md` (the "observability plan", merged
+via PR #786). Where this plan needs a TIR verifier, provenance, pass bisection or a reducer it
+points at that plan's A1, A2 and A4 instead of restating them.
 
 ---
 
