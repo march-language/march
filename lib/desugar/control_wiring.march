@@ -156,9 +156,10 @@ end
 -- exchanges one session lasts before the leader ends it. A leader that stops
 -- leading ends its sessions at once (`ctl_next_for`), which is how an agent
 -- finds the new one (the discovery model of design section 7); the budget is
--- only a backstop, and long: every session costs each side its session
--- tables, which the session runtime does not free yet
--- (specs/todos/2026-10-01-session-node-vault-tables-leak.md).
+-- only a backstop, and long: a session still leaves objects behind when it
+-- ends, the closures its tables held keeping what they captured
+-- (specs/todos/2026-10-04-dropped-closure-leaks-its-captures.md). Its tables
+-- themselves are freed since 2026-10-04.
 pfn ctl_poll_ms() : Int do ctl_cfg_int("poll_ms", 500) end
 pfn ctl_session_polls() : Int do ctl_cfg_int("session_polls", 1200) end
 
@@ -205,11 +206,7 @@ pfn ctl_int(s : String) : Int do
   end
 end
 
--- The leader's state, kept ENCODED (`ctl_encode_leader`): a Vault releases a
--- value it overwrites only one level deep, so a record rewritten on every
--- poll leaked all it pointed to (gigabytes within a minute); a String has no
--- children.
-pfn ctl_leaders() : Vault(String) do
+pfn ctl_leaders() : Vault(Control.CtlLeader) do
   match Vault.whereis("ctl_leader") do
     Some(v) -> v
     None -> Vault.new("ctl_leader")
@@ -560,7 +557,7 @@ end
 -- when the leader says bye or its node goes; the next one finds the leader as
 -- it is then.
 -- [backoff]: how long to wait after a failed attempt; it doubles up to 5 s
--- (an attempt costs session tables too) and starts over after a session.
+-- and starts over after a session.
 --
 -- A task runs the code of the epoch it was spawned in, so after a deploy of
 -- this node every session it starts belongs to an epoch that is draining and
@@ -684,98 +681,9 @@ pfn ctl_ensure_loaded() : () do
   end
 end
 
-pfn ctl_encode_obs(o : Control.CtlObs) : String do
-  let since = match o.healthy_since do
-    Some(t) -> int_to_string(t)
-    None -> "-"
-  end
-  "obs " ++ since ++ " " ++ Json.to_string(to_json(ctl_wire_report(o.report))) ++ "\n"
-end
+pfn ctl_leader_state() : Control.CtlLeader do Vault.get_or(ctl_leaders(), "leader", Control.leader_new()) end
 
--- The dynamic part only; the release is kept as a value of its own
--- (`ctl_releases`), written only when it changes: re-parsing it on every poll
--- cost about 10 KB a parse.
-pfn ctl_encode_leader(l : Control.CtlLeader) : String do
-  let halted = match l.halted do
-    Some(Control.RolloutHalted(st, n, why)) -> int_to_string(st) ++ "\t" ++ n ++ "\t" ++ String.replace_all(why, "\n", " ")
-    _ -> "-"
-  end
-  "inflight " ++ String.join(l.inflight, ",") ++ "\n" ++ "halted " ++ halted ++ "\n"
-    ++ String.join(List.map(l.obs, fn o -> ctl_encode_obs(o)), "")
-end
-
-pfn ctl_report_from(js : String) : Option(Control.AgentReport) do
-  match Json.parse(js) do
-    Ok(jv) ->
-      match from_json(jv) do
-        Ok(w) -> Some(ctl_report_of(w))
-        Err(_) -> None
-      end
-    Err(_) -> None
-  end
-end
-
-pfn ctl_decode_obs(line : String) : Option(Control.CtlObs) do
-  match String.split_first(String.slice(line, 4, String.byte_size(line) - 4), " ") do
-    Some((since, js)) ->
-      match ctl_report_from(js) do
-        Some(rep) -> Some({ report: rep, healthy_since: if since == "-" do None else Some(ctl_int(since)) end })
-        None -> None
-      end
-    None -> None
-  end
-end
-
-pfn ctl_decode_halted(v : String) : Option(Control.CtlDecision) do
-  if v == "-" do None
-  else
-    let parts = String.split(v, "\t")
-    match parts do
-      Cons(st, Cons(n, rest)) -> Some(Control.RolloutHalted(ctl_int(st), n, String.join(rest, "\t")))
-      _ -> None
-    end
-  end
-end
-
-pfn ctl_decode_leader(text : String, release : Option(Control.CtlRelease)) : Control.CtlLeader do
-  let lines = String.split(text, "\n")
-  let inflight = match List.find(lines, fn x -> String.starts_with(x, "inflight ")) do
-    Some(x) -> ctl_words(String.slice(x, 9, String.byte_size(x) - 9))
-    None -> Nil
-  end
-  let halted = match List.find(lines, fn x -> String.starts_with(x, "halted ")) do
-    Some(x) -> ctl_decode_halted(String.slice(x, 7, String.byte_size(x) - 7))
-    None -> None
-  end
-  let obs = List.filter_map(List.filter(lines, fn x -> String.starts_with(x, "obs ")), fn x -> ctl_decode_obs(x))
-  { release: release, obs: obs, inflight: inflight, halted: halted }
-end
-
-pfn ctl_releases() : Vault(Control.CtlRelease) do
-  match Vault.whereis("ctl_release") do
-    Some(v) -> v
-    None -> Vault.new("ctl_release")
-  end
-end
-
-pfn ctl_leader_state() : Control.CtlLeader do
-  match Vault.get(ctl_leaders(), "leader") do
-    Some(t) -> ctl_decode_leader(t, Vault.get(ctl_releases(), "r"))
-    None -> Control.leader_new()
-  end
-end
-
-pfn ctl_put_leader(l : Control.CtlLeader) : () do
-  let held = match Vault.get(ctl_releases(), "r") do
-    Some(r) -> r.seq
-    None -> 0
-  end
-  match l.release do
-    Some(r) -> if r.seq != held do Vault.set(ctl_releases(), "r", r) else () end
-    None -> ()
-  end
-  Vault.set(ctl_leaders(), "leader", ctl_encode_leader(l))
-end
+pfn ctl_put_leader(l : Control.CtlLeader) : () do Vault.set(ctl_leaders(), "leader", l) end
 
 -- ── the leader's audit log (design section 9) ──────────────────────────────
 --

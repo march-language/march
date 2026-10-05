@@ -645,13 +645,16 @@
 ; todo it serves (specs/todos/2026-08-12-vault-toward-ets-semantics.md) says
 ; not to partition the per-table write mutex without a workload that
 ; measurably serialises on it, so this exists to produce that number: T
-; threads each rewriting their OWN key, ratio against a solo run. Its
-; assertion is loose on purpose (it fails only if the result is worse than
-; plain serialisation) -- the printed ratio is the deliverable, and a
-; scaling assertion belongs here only once the lock is actually partitioned.
+; threads each rewriting their OWN key, ratio against a solo run. The ratio
+; is printed, not asserted: what fails the run is a lock count, not a time.
+; vault_lock_probe.h is force-included (-include) into every source below so
+; each pthread_mutex_lock call is tallied per mutex, and the run fails if one
+; mutex covers at least half of every thread's distinct-key writes (the
+; header of test_vault_write_scale.c has the why: wall time could not tell a
+; global lock from the shards on a loaded 4-vCPU runner).
 (rule
  (targets test_vault_write_scale_runner)
- (deps    test_vault_write_scale.c
+ (deps    test_vault_write_scale.c vault_lock_probe.h
           ../runtime/march_runtime.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
@@ -665,6 +668,7 @@
           (glob_files ../runtime/*.h))
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -include vault_lock_probe.h
                -o %{targets}
                test_vault_write_scale.c ../runtime/march_runtime.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
@@ -2617,6 +2621,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/builtin_borrow_leak_probe.expected native_builtin_borrow_leak_probe.out)))
+
+; ── A Vault write released only the displaced value's own cell, never its
+; children; a closed table must be freed. live_allocs() deltas per operation,
+; booleans in the golden. Red on main: every displaced-value leg.
+; specs/progress/2026-10-01-session-node-vault-tables-leak.md
+(rule
+ (targets native_vault_churn_leak_probe native_vault_churn_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/vault_churn_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_vault_churn_leak_probe
+        native/vault_churn_leak_probe.march)
+   (with-stdout-to native_vault_churn_leak_probe.out
+        (system "./native_vault_churn_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/vault_churn_leak_probe.expected native_vault_churn_leak_probe.out)))
 
 ; ── Compiled `to_string(())` printed `0` (the interpreter prints `()`): the
 ; unit value is typed as the empty tuple, so Mono keyed the Show lookup
@@ -10526,6 +10551,51 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
    "read -r nloops nruntime boxcalls < native_arr_fold_inline_llvm_check.out; \
     test \"$nloops\" -eq 11 -a \"$nruntime\" -eq 3 -a \"$boxcalls\" -eq 0 || { echo \"expected 11 inline fold loops, 3 runtime folds, 0 boxing calls in unboxed clones (found loops=$nloops runtime=$nruntime boxcalls=$boxcalls)\" >&2; exit 1; }")))
 
+;  NativeArray map / map2 chain fusion (phase B of
+; specs/plans/2026-09-28-nativearray-fusion-plan.md, Fusion.run_nativearr).
+; Correctness: every line matches the interpreter (the .expected file IS the
+; interpreter's output), including the negative cases that must not fuse.
+; Shape: main (with the two negative helper fns inlined into it) has exactly
+; 21 inline map loops, 8 inline map2 loops and 1 runtime map call after
+; fusion; with MARCH_NO_NATIVEARR_FUSION=1 the same program has 47 / 8 / 2.
+(rule
+ (targets nativearr_map_fusion nativearr_map_fusion.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nativearr_map_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o nativearr_map_fusion
+        native/nativearr_map_fusion.march)
+   (with-stdout-to nativearr_map_fusion.out
+        (system "./nativearr_map_fusion")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/nativearr_map_fusion.expected nativearr_map_fusion.out)))
+
+(rule
+ (targets nativearr_map_fusion_llvm_check.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/nativearr_map_fusion.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --emit-llvm native/nativearr_map_fusion.march)
+   (with-stdout-to nativearr_map_fusion_llvm_check.out
+    (run bash -c
+     "awk '/^define/ && /@march_main\\(/ {p=1} p {print} p && /^}/ {exit}' native/nativearr_map_fusion.ll > main_nafuse.ll; echo \"$(grep -c '^nmap_pre[0-9]*:' main_nafuse.ll) $(grep -c '^nmap2_pre[0-9]*:' main_nafuse.ll) $(grep -c 'call ptr @native_[a-z0-9]*_arr_map2*(' main_nafuse.ll)\"")))))
+
+(rule
+ (alias runtest)
+ (deps nativearr_map_fusion_llvm_check.out)
+ (action
+  (run bash -c
+   "read -r nmap nmap2 nruntime < nativearr_map_fusion_llvm_check.out; \
+    test \"$nmap\" -eq 21 -a \"$nmap2\" -eq 8 -a \"$nruntime\" -eq 1 || { echo \"expected 21 inline map loops, 8 inline map2 loops, 1 runtime map call in main (found map=$nmap map2=$nmap2 runtime=$nruntime)\" >&2; exit 1; }")))
+
 ; Separate fixture: the map2 inline loop's own length-mismatch check
 ; (native_arr_map2_check_len) must panic identically to the non-inlined
 ; native_int_arr_map2/native_float_arr_map2 functions' check, since the
@@ -12010,3 +12080,73 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/branch_alias_tail_drop.expected native_branch_alias_tail_drop.out)))
+
+; ── Actor.inspect_state (observe R4a) ────────────────────────────────────
+; specs/progress/2026-10-04-observe-r4a-inspect-state.md. The state fixture
+; runs compiled, compiled with --hot-reload (the renderer's code-epoch check
+; must pass when nothing reloaded), and interpreted, against one .expected.
+; The BLOCK-limit case is compiled-only: the interpreter has no blocking send.
+
+(rule
+ (targets native_actor_inspect_state native_actor_inspect_state.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_inspect_state.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_inspect_state
+        native/actor_inspect_state.march)
+   (with-stdout-to native_actor_inspect_state.out
+        (system "./native_actor_inspect_state")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_inspect_state.expected native_actor_inspect_state.out)))
+
+(rule
+ (targets native_actor_inspect_state_hcr native_actor_inspect_state_hcr.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_inspect_state.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --hot-reload Main -o native_actor_inspect_state_hcr
+        native/actor_inspect_state.march)
+   (with-stdout-to native_actor_inspect_state_hcr.out
+        (system "./native_actor_inspect_state_hcr")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_inspect_state.expected native_actor_inspect_state_hcr.out)))
+
+(rule
+ (targets interp_actor_inspect_state.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/actor_inspect_state.march))
+ (action
+  (with-stdout-to interp_actor_inspect_state.out
+    (run %{exe:../bin/main.exe} native/actor_inspect_state.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_inspect_state.expected interp_actor_inspect_state.out)))
+
+(rule
+ (targets native_actor_inspect_block native_actor_inspect_block.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_inspect_block.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_inspect_block
+        native/actor_inspect_block.march)
+   (with-stdout-to native_actor_inspect_block.out
+        (system "./native_actor_inspect_block")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_inspect_block.expected native_actor_inspect_block.out)))
