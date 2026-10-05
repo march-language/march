@@ -19,6 +19,14 @@ git log is authoritative for exact commits.
 ## [Unreleased]
 
 ### Added
+- **Signed debug requests on the observe socket.** `forge observe --state PID`
+  returns a running actor's state (what `Actor.inspect_state` returns inside
+  the program), and `forge observe --crashes-full` returns recent crashes with
+  their panic messages. A node answers only if it was built with
+  `--hot-reload --signing-pubkey`, the request is signed by that deploy key,
+  and its `$MARCH_DEBUG_POLICY` file lists the verb (no file: nothing is
+  allowed). Each request carries a nonce and a 30 s expiry, so a captured
+  request cannot be replayed, and every attempt is written to the audit log.
 - **`Actor.inspect_state`: read a running actor's state.** The `sys:get_state`
   equivalent. `Actor.inspect_state(Actor.debug(io), pid, timeout_ms)` returns
   the actor's state fields as `{ count: 3, tags: [a, b], best: Some(3) }`,
@@ -185,6 +193,8 @@ git log is authoritative for exact commits.
   explicitly. No source-level change.
 
 ### Fixed
+- `forge top -n` and `forge observe -n` also accept `--count`; `--n` was
+  documented but never parsed.
 - **A compiled program that calls `Process.set_env` at the top of `main` no
   longer crashes, now and then, at startup.** On Linux the runtime read
   the environment from the main thread while `main` was already running on a

@@ -204,6 +204,20 @@ typedef struct march_obs_crash {
  * [*total] (if non-NULL) gets the number of crashes ever recorded. */
 int march_obs_crashes(march_obs_crash *out, int max, uint64_t *total);
 
+/* ── Debug tier (R4) ─────────────────────────────────────────────────────
+ * Actor.inspect_state for a thread that is not a green thread (the observe
+ * socket's STATE verb): sends the reserved inspect request to actor [pid]
+ * and waits up to [timeout_ms] on a condition variable.  Returns 1 with the
+ * rendered state in *out, or 0 with the reason in *out ("dead", "timeout",
+ * "busy", "render failed: ...", ...).  *out is malloc'd either way (NULL
+ * only on allocation failure); the caller frees it.  Defined in
+ * march_runtime.c. */
+int march_actor_inspect_external(int64_t pid, int64_t timeout_ms, char **out);
+
+/* Register the signed debug verbs (march_observe_debug.c); called by
+ * march_observe_snapshot_install. */
+void march_observe_debug_install(void);
+
 /* Most connections served at once; a further client gets "error":"busy". */
 #define MARCH_OBSERVE_MAX_CONNS 8
 /* Longest request line accepted, including arguments. */

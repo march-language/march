@@ -145,6 +145,8 @@ Error codes:
 | `CRASHES` | `[n]` | the last `n` crashes, without messages |
 | `TOP` | `<attr> <n> [window_ms]` | the `n` actors highest on one attribute |
 | `SNAPSHOT` | `[sections]` | several of the above from one actor walk |
+| `STATE` | `<sig> nonce:… not_after_ms:… pid:<p> [timeout_ms:<t>]` | debug tier: one actor's state ([below](#the-debug-tier-signed-requests)) |
+| `CRASHES_FULL` | `<sig> nonce:… not_after_ms:… [n:<n>]` | debug tier: `CRASHES` with each crash's message |
 
 The example replies below are real output from
 `test/native/observe_snapshot.march` (3 supervisors of 4 children each, 5 bare
@@ -373,6 +375,66 @@ is `CRASHES 20`. This is what `forge diagnose` and `forge status` read.
 
 ---
 
+## The debug tier: signed requests
+
+The verbs above show counts, never data. Two more show data: `STATE` (an
+actor's state) and `CRASHES_FULL` (crashes with their panic messages). A node
+answers them only when all of these hold:
+
+1. **It was built with a deploy key**: `march --compile --hot-reload <Mod>
+   --signing-pubkey <base64>`, the same key `forge deploy hot` signs patches
+   with. Any other build answers `signing_not_configured`.
+2. **The request is signed by that key.** The signature covers the whole line
+   except the signature itself, so changing the pid or the expiry after signing
+   gives `bad_signature`.
+3. **It is fresh.** Each request carries a random `nonce` (16-64 hex digits) and
+   a `not_after_ms` wall-clock expiry at most 60 s ahead. A node refuses an
+   expired request (`expired`), one that expires too far ahead
+   (`not_after_too_far`), and a nonce it has already seen (`replay`). It
+   remembers the last 256 unexpired nonces. If all 256 are still unexpired it
+   refuses new requests (`nonce_ring_full`) rather than forget one.
+4. **The node's policy allows the verb.** `$MARCH_DEBUG_POLICY` names a file
+   that lists the allowed verbs one per line (`#` starts a comment). With no
+   file, nothing is allowed (`policy`). The file is read on every request, so
+   editing it takes effect at once.
+
+The checks run in that order: an unsigned client learns nothing about the
+policy. Every attempt, allowed or not, appends a line to the audit log the
+reload server writes (`$MARCH_AUDIT_LOG`, default
+`~/.local/share/march/audit.jsonl`):
+
+```json
+{"ts":1791223456789,"type":"debug","verb":"STATE","pid":42,"nonce":"9f3c…","signer":"<pubkey hex>","result":"ok"}
+```
+
+`forge observe` builds and signs these requests for you:
+
+```bash
+forge observe --socket /run/myapp/observe.sock --state 42          # STATE, 1 s to answer
+forge observe --env prod --state 42 --timeout-ms 5000
+forge observe --env prod --crashes-full --count 50
+```
+
+It signs with `~/.march/ed25519_secret.key` and makes each request valid for
+30 s, so a node whose clock differs by more than 30 s refuses it. forge then
+says which way the clock is off.
+
+A `STATE` reply's `data` is `{"pid":42,"state":"{ n: 5, tags: [x] }","error":null}`.
+`state` is exactly what `Actor.inspect_state` returns inside the program: the
+state fields in declaration order, each printed by its `Show`, `<opaque>` for a
+field that holds functions. When the actor cannot answer, `state` is `null` and
+`error` says why:
+
+- `dead`: the pid is not running.
+- `timeout`: the actor did not answer within `timeout_ms` (at most 10000).
+  An actor is asked between messages, so one stuck in a long handler or a
+  nested `receive` cannot answer.
+- `render failed: …`: a field's `Show` panicked. The actor keeps running.
+- `the actor's code changed by a hot reload …`: the renderer predates a reload
+  that may have changed the state's layout.
+
+The request skips the actor's mailbox limit, so a full mailbox still answers.
+
 ## The forge commands
 
 All four take a target the same way:
@@ -386,6 +448,7 @@ All four take a target the same way:
 
 ```
 forge observe [REQUEST...] [--section S]... [--json] [--socket PATH] [--env NAME]
+forge observe --state PID [--timeout-ms MS] | --crashes-full [-n N]   [--socket PATH] [--env NAME]
 ```
 
 Sends one request and prints the reply envelope (indented, or one line per host
@@ -892,8 +955,9 @@ Under the interpreter there is no socket and no `forge` access; `Recon` and
 - **The cluster section.** `SNAPSHOT` has no view of peers, so `diagnose`
   reports `cluster.suspect` as unavailable
   (`specs/todos/2026-10-02-observe-r1-cluster-section.md`).
-- **The debug tier (R4).** Actor state, mailbox contents (`STATE`, `MESSAGES`)
-  and crash messages, behind a separate `Actor.Debug` capability.
+- **Mailbox contents (`MESSAGES`).** The rest of the debug tier: the queued
+  messages of an actor, most useful exactly when it is stuck and cannot render
+  them itself (`specs/todos/2026-10-05-observe-messages-verb.md`).
 - **A remote shell (R5-R6).** `forge rpc` / `forge shell`, evaluating code on a
   node over signed requests.
 - **A TUI (R7).** An interactive `forge observe` with `WATCH` and crash dumps;

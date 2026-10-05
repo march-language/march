@@ -35,16 +35,46 @@ let hosts_of (hr : Project.hot_reload_config) ~(env : string) : (Hosts.host list
 let print_reply ~json (reply : Yojson.Safe.t) =
   print_endline (if json then Yojson.Safe.to_string reply else Yojson.Safe.pretty_to_string reply)
 
+(** A debug request ([--state], [--crashes-full]): signed with the deploy
+    key, so it is built here rather than taken from the positional words. *)
+type debug = No_debug | State of { pid : int; timeout_ms : int } | Crashes_full of int option
+
+let debug_request (d : debug) : (string option, string) result =
+  match d with
+  | No_debug -> Ok None
+  | State _ | Crashes_full _ ->
+    match Cmd_hot_reload.read_sk_raw () with
+    | Error m -> Error ("observe: " ^ m)
+    | Ok sk ->
+      let now_ms = int_of_float (Unix.gettimeofday () *. 1000.) in
+      let nonce = Observe_client.fresh_nonce () in
+      let verb, fields = match d with
+        | State { pid; timeout_ms } ->
+          "STATE", [ Printf.sprintf "pid:%d" pid; Printf.sprintf "timeout_ms:%d" timeout_ms ]
+        | Crashes_full n ->
+          "CRASHES_FULL", (match n with Some n -> [ Printf.sprintf "n:%d" n ] | None -> [])
+        | No_debug -> assert false in
+      Ok (Some (Observe_client.signed_request ~sk ~nonce ~now_ms verb fields))
+
 (** Run one request; every target's reply is printed (one line each with
     [~json]).  The result is an error if any target failed. *)
-let run ~(socket : string option) ~(env : string) ~(json : bool)
+let run ?(debug = No_debug) ~(socket : string option) ~(env : string) ~(json : bool)
     ~(words : string list) ~(sections : string list) () : (unit, string) result =
-  match request_of ~words ~sections with
+  let request =
+    match debug_request debug with
+    | Error _ as e -> e
+    | Ok (Some _) when words <> [] || sections <> [] ->
+      Error "observe: give --state or --crashes-full alone, without a request or --section"
+    | Ok (Some r) -> Ok r
+    | Ok None -> request_of ~words ~sections in
+  let explain = if debug = No_debug then Fun.id else Observe_client.explain_debug_error in
+  match request with
   | Error _ as e -> e
   | Ok request ->
     match socket with
     | Some path ->
       Result.map (print_reply ~json) (Observe_client.query_socket path request)
+      |> Result.map_error explain
     | None ->
       match Project.load () with
       | Error m -> Error m
@@ -58,7 +88,7 @@ let run ~(socket : string option) ~(env : string) ~(json : bool)
             let failures = List.filter_map (fun h ->
                 match Observe_client.query Remote.ssh h request with
                 | Ok reply -> print_reply ~json reply; None
-                | Error m -> Some (h.Hosts.name ^ ": " ^ m)) hosts
+                | Error m -> Some (h.Hosts.name ^ ": " ^ explain m)) hosts
             in
             if failures = [] then Ok () else Error (String.concat "; " failures)
 
