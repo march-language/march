@@ -169,6 +169,12 @@ git log is authoritative for exact commits.
   under `end` (or under the next line) while the message talked about `then`;
   `march`, `march fmt`, `march test` and the REPL now underline `then`, the
   position the editor integration already showed.
+- **A stray character or an unterminated string is now an ordinary error.**
+  `march`, `march test` and `march fmt` used to die with `Fatal error:
+  exception Lexer_error(...)` and an OCaml backtrace on a character the
+  lexer rejects or a string that never closes; they now print the error with
+  its source line and exit 1, like any other syntax error. A file on
+  `MARCH_LIB_PATH` with such an error no longer aborts the whole compile.
 - **A compiled program that calls `Process.set_env` at the top of `main` no
   longer crashes, now and then, at startup.** On Linux the runtime read
   the environment from the main thread while `main` was already running on a

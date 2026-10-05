@@ -403,8 +403,7 @@ let parse_file path =
     lexbuf.Lexing.lex_curr_p <-
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
     (try
-       let m = March_parser.Parser.module_
-           (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+       let m = March_parser.Parse.module_of_lexbuf lexbuf in
        let m = March_desugar.Desugar.desugar_module m in
        let basename = Filename.basename path in
        if basename = "prelude.march" then
@@ -576,8 +575,7 @@ let flatten_arrow (ty : Ast.ty) : Ast.ty list * Ast.ty =
 
 let parse_ty_query_string (s : string) : Ast.ty =
   let lexbuf = Lexing.from_string s in
-  March_parser.Parser.ty_eof
-    (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+  March_parser.Parse.ty_of_lexbuf lexbuf
 
 (** Parse a type query, canonicalizing every part through one shared
     variable-renaming table so `a` denotes the same variable everywhere in the

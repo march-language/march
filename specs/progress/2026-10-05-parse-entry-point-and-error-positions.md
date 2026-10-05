@@ -36,3 +36,72 @@ Guard: `test/test_compiler.ml` "parse caret: ..." pins line, column and end
 column, plus the rendered caret line, for the `then`, `else if`-missing-`end`
 and `mod`-missing-`do` productions. Before this only message substrings were
 asserted, which is why the bug survived.
+
+## 2. One parse entry point: `March_parser.Parse`
+
+`Token_filter.make Lexer.token` was instantiated inline at about 120 sites
+(about 45 outside `test/`), with about a dozen hand-written
+`Parser.Error`/`ParseError`/`Lexer_error` handlers that disagreed on the
+"stuck" message, on whether a lexer error was caught at all, and (above) on
+where the caret went.
+
+`lib/parser/parse.ml` (+ `.mli`) is now the only place the filter is built and
+the only place those exceptions become diagnostics:
+
+- `Parse.module_ / repl_input / repl_sequence / expr : ?filename -> ?stuck ->
+  string -> (_, Errors.diagnostic list) result`. One diagnostic per failure,
+  coded `parse_error` (a grammar `error` production, span from the exception's
+  position, hint as a note), `syntax_error` (menhir's `Parser.Error`, span at
+  the lookahead, message `?stuck`, default "I got stuck here:") or `lex_error`
+  (`Lexer_error`, one caret where the lexer stopped). D3 of the plan refines
+  the codes.
+- `Parse.*_of_lexbuf`: the same pipeline over a caller-owned lexbuf, raising.
+  For callers that treat every failure alike (`with _ -> None`,
+  `Printexc.to_string exn`) and for tests that assert on the raw exception;
+  using them kept those ~100 sites a one-line, behaviour-identical change.
+- `Parse.tokens ()`: the filtered token stream, for the token-filter tests.
+
+Sites that *report* a syntax error use the result forms: `bin/main.ml`
+(compile, multi-file compile, `march test`, doctests, `march fmt` via the new
+`Format.format_source_result`), `bin/toolchain.ml` (stdlib loader),
+`lib/repl/repl.ml` (`parse_repl_input`), `lsp/lib/analysis.ml`,
+`lib/lint/lint.ml`, `lib/resolver/resolver.ml`, `js/march_browser*.ml`.
+Message text is unchanged everywhere (each site passes its old "stuck" wording
+as `?stuck`); `scripts/types-oracle.sh` against a commit-1 baseline shows
+Tier 2 (rendered text) identical.
+
+**Build layout.** `march_lexer` depends on `march_parser` (the lexer needs the
+token type), so `Parse` could not call `March_lexer.Lexer`. The lexer is now
+compiled *inside* `march_parser` from the unchanged source
+`lib/lexer/lexer.mll` (a `sed` in `lib/parser/dune` rewrites its one
+`open March_parser.Parser` to `open Parser`), and `lib/lexer/lexer.ml` is
+`include March_parser.Lexer`, so `March_lexer.Lexer.token` and
+`March_lexer.Lexer.Lexer_error` are the same values as before for every
+existing caller.
+
+**`Parse_errors` deleted.** `error_raise` collected *and* raised, so a parse
+that returned an AST always had an empty buffer; the "declaration-level parse
+errors collected during recovery" loops in `bin/main.ml` never ran on their
+own file. (They could run on the *wrong* one: a discovered library file that
+failed to parse, and was skipped, left its error in the global buffer for the
+next `take_parse_errors`.) `parser.mly`'s prologue lost the two lines that
+called it; no production changed.
+
+**Behaviour that did change, all of it previously a crash:**
+- A lexer error (`@`, an unterminated string) on the command line was
+  `Fatal error: exception Lexer_error(...)` with an OCaml backtrace, exit 2.
+  It is now a rendered diagnostic, exit 1. Same for `march test`, `march fmt`
+  and the browser playground.
+- A lexer error in a file discovered on `MARCH_LIB_PATH` aborted the compile
+  with that exception; it is now reported like any other unparsable
+  discovered file (`[lib] file:line: parse error: ...`, or the strict
+  `--test` error).
+- `march fmt`'s "Parse error (cannot format)" caret sat at line 1, column 0
+  (it rendered against a fresh lexbuf); it now sits at the offending token.
+- The REPL keeps its `lexer error: <msg>` line (its read loop resets the
+  input buffer in that handler), so `parse_repl_input` re-raises for
+  `lex_error`.
+
+`--emit-core-ast`'s parse-failure document now carries
+`"code":"parse_error"` (was `null`); the `t70_letq_type_annotation` golden is
+regenerated (in commit 1 for the span, here for the code).

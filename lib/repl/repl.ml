@@ -46,6 +46,20 @@ let report_no_alloc_unchecked ctx (d : March_ast.Ast.decl) =
   | Some h -> March_errors.Errors.report ctx h
   | None -> ()
 
+(** Parse one line of REPL input.  A syntax error is rendered and handed to
+    [report] (stderr in the plain REPL, the output pane in the TUI) and the
+    result is [None].  A lexer error is re-raised as [Lexer_error] instead:
+    the read loop's own handler prints it and resets the input buffer. *)
+let parse_repl_input ~report src =
+  match March_parser.Parse.repl_input src with
+  | Ok input -> Some input
+  | Error diags ->
+    List.iter (fun (d : March_errors.Errors.diagnostic) ->
+      if d.code = Some March_parser.Parse.code_lex_error then
+        raise (March_lexer.Lexer.Lexer_error d.message)
+      else report (March_errors.Errors.render_diagnostic ~src d)) diags;
+    None
+
 let history_path () =
   match Sys.getenv_opt "MARCH_HISTORY_FILE" with
   | Some p -> p
@@ -444,7 +458,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
     | Some file_src ->
       let lexbuf = Lexing.from_string file_src in
       (match (try
-        let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+        let m = March_parser.Parse.module_of_lexbuf lexbuf in
         Some (March_desugar.Desugar.desugar_module m)
       with exn ->
         Printf.eprintf "parse error in %s: %s\n%!" path (Printexc.to_string exn); None) with
@@ -627,7 +641,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                 | Some h ->
                   let expr_src = String.trim (String.sub s 6 (String.length s - 6)) in
                   let lexbuf = Lexing.from_string expr_src in
-                  (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+                  (match (try Some (March_parser.Parse.repl_input_of_lexbuf lexbuf)
                           with _ -> None) with
                    | Some (March_ast.Ast.ReplExpr e) ->
                      let e' = March_desugar.Desugar.desugar_expr e in
@@ -755,7 +769,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                  Printf.eprintf "usage: :type <expr>\n%!"
                else begin
                  let lexbuf = Lexing.from_string expr_src in
-                 (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+                 (match (try Some (March_parser.Parse.repl_input_of_lexbuf lexbuf)
                          with _ -> None) with
                  | Some (March_ast.Ast.ReplExpr e) ->
                    let e' = March_desugar.Desugar.desugar_expr e in
@@ -786,7 +800,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                  Printf.eprintf "usage: :inspect <expr>\n%!"
                else begin
                  let lexbuf = Lexing.from_string expr_src in
-                 (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+                 (match (try Some (March_parser.Parse.repl_input_of_lexbuf lexbuf)
                          with _ -> None) with
                  | Some (March_ast.Ast.ReplExpr e) ->
                    let e' = March_desugar.Desugar.desugar_expr e in
@@ -824,17 +838,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                end
              | src when String.trim src = "" -> ()
              | src ->
-               let lexbuf = Lexing.from_string src in
-               (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
-                       with
-                       | March_errors.Errors.ParseError (msg, hint, pos) ->
-                         let rendered = March_errors.Errors.render_parse_error_at ~src ?hint ~msg pos in
-                         Printf.eprintf "%s\n%!" rendered;
-                         None
-                       | March_parser.Parser.Error ->
-                         let rendered = March_errors.Errors.render_parse_error ~src ~msg:"I got stuck here:" lexbuf in
-                         Printf.eprintf "%s\n%!" rendered;
-                         None) with
+               (match parse_repl_input src
+                        ~report:(fun rendered -> Printf.eprintf "%s\n%!" rendered) with
                | None | Some March_ast.Ast.ReplEOF -> ()
                | Some (March_ast.Ast.ReplDecl d) ->
                  let d' = March_desugar.Desugar.desugar_decl d in
@@ -1332,7 +1337,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
     | Some file_src ->
       let lexbuf = Lexing.from_string file_src in
       (match (try
-        let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+        let m = March_parser.Parse.module_of_lexbuf lexbuf in
         Some (March_desugar.Desugar.desugar_module m)
       with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
       | None -> None
@@ -1419,17 +1424,10 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
   in
 
   let process_src src =
-    let lexbuf = Lexing.from_string src in
-    (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
-            with
-            | March_errors.Errors.ParseError (msg, hint, pos) ->
-              let rendered = March_errors.Errors.render_parse_error_at ~src ?hint ~msg pos in
-              List.iter (add_line Notty.A.(fg red)) (String.split_on_char '\n' rendered);
-              None
-            | March_parser.Parser.Error ->
-              let rendered = March_errors.Errors.render_parse_error ~src ~msg:"I got stuck here:" lexbuf in
-              List.iter (add_line Notty.A.(fg red)) (String.split_on_char '\n' rendered);
-              None) with
+    (match parse_repl_input src
+             ~report:(fun rendered ->
+               List.iter (add_line Notty.A.(fg red))
+                 (String.split_on_char '\n' rendered)) with
     | None | Some March_ast.Ast.ReplEOF -> ()
     | Some (March_ast.Ast.ReplDecl d) ->
       let d' = March_desugar.Desugar.desugar_decl d in
@@ -1829,7 +1827,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
         | s when is_debug && String.length s > 7 && String.sub s 0 7 = ":watch " ->
           let expr_src = String.trim (String.sub s 7 (String.length s - 7)) in
           let lexbuf = Lexing.from_string expr_src in
-          (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+          (match (try Some (March_parser.Parse.repl_input_of_lexbuf lexbuf)
                   with _ -> None) with
            | Some (March_ast.Ast.ReplExpr e) ->
              let e' = March_desugar.Desugar.desugar_expr e in
@@ -1918,7 +1916,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
            | Some h ->
              let expr_src = String.trim (String.sub s 6 (String.length s - 6)) in
              let lexbuf = Lexing.from_string expr_src in
-             (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+             (match (try Some (March_parser.Parse.repl_input_of_lexbuf lexbuf)
                      with _ -> None) with
               | Some (March_ast.Ast.ReplExpr e) ->
                 let e' = March_desugar.Desugar.desugar_expr e in
@@ -2042,7 +2040,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
             add_line Notty.A.(fg red) "usage: :type <expr>"
           else begin
             let lexbuf = Lexing.from_string expr_src in
-            (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+            (match (try Some (March_parser.Parse.repl_input_of_lexbuf lexbuf)
                     with _ -> None) with
             | Some (March_ast.Ast.ReplExpr e) ->
               let e' = March_desugar.Desugar.desugar_expr e in
@@ -2081,7 +2079,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              | Some file_src ->
                let lexbuf = Lexing.from_string file_src in
                (match (try
-                 let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+                 let m = March_parser.Parse.module_of_lexbuf lexbuf in
                  Some (March_desugar.Desugar.desugar_module m)
                with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
                | None -> ()
@@ -2129,7 +2127,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
             add_line Notty.A.(fg red) "usage: :inspect <expr>"
           else begin
             let lexbuf = Lexing.from_string expr_src in
-            (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+            (match (try Some (March_parser.Parse.repl_input_of_lexbuf lexbuf)
                     with _ -> None) with
             | Some (March_ast.Ast.ReplExpr e) ->
               let e' = March_desugar.Desugar.desugar_expr e in
