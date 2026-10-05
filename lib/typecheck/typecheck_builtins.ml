@@ -982,6 +982,11 @@ let builtin_bindings : (string * scheme) list =
     ("monitor",      poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (TCon ("Pid", [b]), t_int))));
     ("demonitor",    Mono (TArrow (t_int, t_unit)));
     ("mailbox_size", poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_int)));
+    (* Observe plan R4: ask an actor for its rendered state (stdlib-only;
+       Actor.inspect_state is the API).  Err is "self", "dead", "timeout",
+       "busy" or the answerer's reason. *)
+    ("actor_inspect", poly1 (fun a ->
+         TArrow (TCon ("Pid", [a]), TArrow (t_int, TCon ("Result", [t_string; t_string])))));
     (* Task 6: scheduler observability — raw stat read by index. *)
     ("sched_stat",   Mono (TArrow (t_int, t_int)));
     (* The observe socket's reply to one request line, answered in-process

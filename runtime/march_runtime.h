@@ -286,12 +286,17 @@ void    march_timer_cancel(void *tok);
 #define MARCH_DOWN_NORMAL_TAG         0x7F000001
 #define MARCH_DOWN_KILLED_TAG         0x7F000002
 #define MARCH_DOWN_CRASH_TAG          0x7F000003
-#define MARCH_RESERVED_CTOR_TAG_LIMIT 0x7F000004
+/* An inspect request (Actor.inspect_state; R4 of the observe plan, stage B1
+ * of the per-actor introspection design): field 0 is a reply-ref built as
+ * march_actor_call builds one.  Intercepted by the actor loop between
+ * handlers; never reaches a dispatch. */
+#define MARCH_SYS_INSPECT_TAG         0x7F000004
+#define MARCH_RESERVED_CTOR_TAG_LIMIT 0x7F000005
 
 #if MARCH_ORDINARY_CTOR_TAG_LIMIT > MARCH_ACTOR_MSG_TAG_BASE || \
     MARCH_ACTOR_MSG_TAG_LIMIT > MARCH_COLLISION_TAG_BASE || \
     MARCH_COLLISION_TAG_LIMIT > MARCH_DOWN_TAG || \
-    MARCH_DOWN_CRASH_TAG >= MARCH_RESERVED_CTOR_TAG_LIMIT
+    MARCH_SYS_INSPECT_TAG >= MARCH_RESERVED_CTOR_TAG_LIMIT
 #error "March constructor tag ranges overlap the reserved monitor ABI"
 #endif
 

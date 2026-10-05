@@ -527,6 +527,17 @@ let is_actor_dispatch_fn (fn_name : string) : bool =
     see [Llvm_emit.clo_wrap_borrowed]. *)
 let actor_on_stop_suffix = "_on_stop"
 
+(** Suffix for an actor's generated state renderer ("Name" -> "Name_inspect",
+    observe plan R4): lowered like `on_stop`, called by the runtime's actor
+    loop through the same kind of trampoline, so it too must release nothing
+    in [Llvm_emit.clo_wrap_borrowed]. *)
+let actor_inspect_suffix = "_inspect"
+
+let is_actor_inspect_fn (fn_name : string) : bool =
+  let sfx = actor_inspect_suffix in
+  let nl = String.length fn_name and sl = String.length sfx in
+  nl > sl && String.sub fn_name (nl - sl) sl = sfx
+
 (** Is [fn_name] an actor's `on_stop` callback fn? Suffix check, with the same
     looseness as [is_actor_dispatch_fn]: a user fn that happens to end in the
     suffix only loses its trampoline's release (a leak, never a crash). *)

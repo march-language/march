@@ -480,7 +480,19 @@ let base_env : env =
            | Some pid ->
              (match Hashtbl.find_opt actor_registry pid with
               | Some inst when not (Queue.is_empty inst.ai_mailbox) ->
-                Queue.pop inst.ai_mailbox
+                (* An inspect request reaching a receive INSIDE a handler is
+                   answered "busy" (the compiled march_actor_recv's rule): the
+                   handler is mid-way, and user code never sees the request. *)
+                let rec next () =
+                  if Queue.is_empty inst.ai_mailbox then raise BlockedOnReceive
+                  else match Queue.pop inst.ai_mailbox with
+                    | VCon ("$sys_inspect", [VInt ref_id]) ->
+                      Hashtbl.replace pending_replies ref_id (VCon ("Err", [VString "busy"]));
+                      Hashtbl.replace pending_reply_times ref_id (Unix.gettimeofday () *. 1000.);
+                      next ()
+                    | m -> m
+                in
+                next ()
               | Some _ ->
                 raise BlockedOnReceive
               | None -> eval_error "receive: actor %d not found" pid)
@@ -4265,6 +4277,28 @@ let base_env : env =
           tag-routing.  With the documented `type GetReq = GetReq` single-ctor
           sentinel this is index 0 = the actor's FIRST handler.
      Returns Ok(result) or Err(reason). *)
+  (* Observe plan R4: Actor.inspect_state. A "$sys_inspect" request queued
+     like any message (but past the mailbox limit), answered by the
+     scheduler when it reaches it (eval.ml), so the order relative to the
+     backlog is the compiled backend's. *)
+  ; ("actor_inspect", VBuiltin ("actor_inspect", function
+        | [VPid pid; VInt _timeout_ms] ->
+          if !current_pid = Some pid then VCon ("Err", [VString "self"])
+          else
+            (match Hashtbl.find_opt actor_registry pid with
+             | Some inst when inst.ai_alive ->
+               let ref_id = !next_call_ref in
+               next_call_ref := ref_id + 1;
+               Queue.push (VCon ("$sys_inspect", [VInt ref_id])) inst.ai_mailbox;
+               !run_scheduler_hook ();
+               (match Hashtbl.find_opt pending_replies ref_id with
+                | Some result ->
+                  Hashtbl.remove pending_replies ref_id;
+                  Hashtbl.remove pending_reply_times ref_id;
+                  result
+                | None -> VCon ("Err", [VString "timeout"]))
+             | _ -> VCon ("Err", [VString "dead"]))
+        | _ -> eval_error "actor_inspect: expected (Pid, Int)"))
   ; ("actor_call", VBuiltin ("actor_call", function
         | [VPid pid; msg; VInt timeout_ms] ->
           let call_started_ms = Unix.gettimeofday () *. 1000. in

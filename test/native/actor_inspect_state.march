@@ -1,0 +1,135 @@
+-- Actor.inspect_state (R4 of specs/plans/2026-09-28-observe-recon-shell-plan.md;
+-- stage B1 of specs/2026-09-23-per-actor-introspection-design.md), run
+-- compiled AND interpreted against one golden: the rendering (declaration
+-- order, each field by its own to_string, <opaque> for a function-typed
+-- field), FIFO behind earlier sends, a full
+-- DROP_NEW mailbox, self, a render that panics (the actor survives), a
+-- nested receive() (answered at once; the real message still arrives), dead.
+mod Main do
+  needs IO
+  needs IO.Console
+  needs IO.Clock
+
+  type Shape = Circle(Int) | Box(Int, Int)
+
+  -- A field type whose rendering panics.
+  type Hidden = Hidden(Int)
+  impl Show(Hidden) do
+    fn show(_s) do panic("cannot show a secret") end
+  end
+
+  actor Counter do
+    -- hooks has no Show (it holds functions): it prints as <opaque>.
+    state { count : Int, tags : List(String), best : Option(Int), shape : Shape, note : String,
+            hooks : List(Int -> Int) }
+    init  { count: 0, tags: ["a", "b"], best: None, shape: Box(2, 3), note: "q\"uote",
+            hooks: [fn x -> x + 1] }
+    on Inc(k : Int) do
+      { state with count: state.count + k, best: Some(state.count + k) }
+    end
+    on Who(d) do
+      match Actor.inspect_state(d, self, 100) do
+        Err(Actor.InspectSelf) -> println("self: InspectSelf")
+        _ -> println("self: unexpected")
+      end
+      state
+    end
+  end
+
+  actor Vault do
+    state { s : Hidden, n : Int }
+    init  { s: Hidden(7), n: 0 }
+    on Bump() do
+      { state with n: state.n + 1 }
+    end
+    on Report() do
+      println("vault still alive, n=" ++ int_to_string(state.n))
+      state
+    end
+  end
+
+  -- Waits in a nested receive() inside its handler.
+  actor Waiter do
+    state { got : String }
+    init  { got: "" }
+    on Wait() do
+      match receive() do
+        Note(t) -> { got: t }
+      end
+    end
+    on Show() do
+      println("waiter received: " ++ state.got)
+      state
+    end
+  end
+
+  type Msg = Note(String)
+
+  -- Sleeps in its first handler, so later messages stay queued.
+  actor Staller do
+    state { n : Int }
+    init  { n: 0 }
+    on Stall() do
+      sleep_ms(300)
+      state
+    end
+    on Tick() do
+      { n: state.n + 1 }
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let d = Actor.debug(io)
+    -- rendering, and FIFO: the request queues behind the three Incs
+    let c = spawn(Counter)
+    let _ = send(c, Inc(1))
+    let _ = send(c, Inc(1))
+    let _ = send(c, Inc(1))
+    match Actor.inspect_state(d, c, 2000) do
+      Ok(s) -> println("state: " ++ s)
+      Err(_) -> println("state: error")
+    end
+    -- a DROP_NEW mailbox at its limit (the actor is stalled in a handler,
+    -- one message queued behind it): the request is answered, not dropped
+    let st = spawn(Staller)
+    Actor.set_queue_limit(st, 1, 1)
+    let _ = send(st, Stall())
+    sleep_ms(50)
+    let _ = send(st, Tick())
+    match Actor.inspect_state(d, st, 3000) do
+      Ok(_) -> println("drop_new full: answered")
+      Err(_) -> println("drop_new full: error")
+    end
+    -- self and dead
+    let _ = send(c, Who(d))
+    run_until_idle()
+    -- a render that panics: InspectFailed, and the actor lives on
+    let v = spawn(Vault)
+    match Actor.inspect_state(d, v, 2000) do
+      Err(Actor.InspectFailed(_)) -> println("panicking render: InspectFailed")
+      Ok(s) -> println("panicking render: Ok " ++ s)
+      Err(_) -> println("panicking render: other error")
+    end
+    let _ = send(v, Bump())
+    let _ = send(v, Report())
+    run_until_idle()
+    -- an actor inside a nested receive() answers at once (InspectTimeout),
+    -- and its receive() still gets the real message that follows
+    let w = spawn(Waiter)
+    let _ = send(w, Wait())
+    run_until_idle()
+    match Actor.inspect_state(d, w, 2000) do
+      Err(Actor.InspectTimeout) -> println("nested receive: InspectTimeout")
+      Ok(s) -> println("nested receive: Ok " ++ s)
+      Err(_) -> println("nested receive: other error")
+    end
+    let _ = send(w, Note("real"))
+    let _ = send(w, Show())
+    run_until_idle()
+    kill(c)
+    match Actor.inspect_state(d, c, 100) do
+      Err(Actor.InspectDead) -> println("dead: InspectDead")
+      _ -> println("dead: unexpected")
+    end
+  end
+end
