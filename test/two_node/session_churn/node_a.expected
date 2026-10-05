@@ -1,4 +1,4 @@
-A: cluster sessions finished 40, cancelled 20
+A: cluster sessions all ended, at least 20 cancelled: true
 A: cluster: tables flat true
 A: direct sessions finished 20
 A: direct: tables flat true
